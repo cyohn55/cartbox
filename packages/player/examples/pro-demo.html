@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cartbox — Pro console + side-by-side compatibility</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; background: #100e1a; color: #eae6ff; font-family: ui-monospace, SFMono-Regular, monospace; }
+    main { max-width: 900px; margin: 0 auto; padding: 28px 20px 60px; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    .sub { color: #a89fce; font-size: 13px; margin: 0 0 24px; }
+    .panel { margin: 26px 0; }
+    .label { display: flex; align-items: baseline; gap: 10px; margin: 0 0 8px; }
+    .label b { font-size: 15px; }
+    .label span { color: #8f86b8; font-size: 12px; }
+    .pro #proStage { width: 100%; aspect-ratio: 640 / 360; }
+    .classic #classicStage { width: 320px; max-width: 100%; aspect-ratio: 240 / 136; }
+    .stage { background: #06050c; border: 1px solid #362f52; border-radius: 10px; overflow: hidden; }
+    .row { display: flex; gap: 8px; margin: 12px 0; }
+    button { font: inherit; padding: 7px 13px; border-radius: 8px; border: 1px solid #4a4270; background: #241f38; color: #eae6ff; cursor: pointer; }
+    button:hover { background: #2f2949; }
+    #log { color: #a89fce; font-size: 12px; white-space: pre-wrap; min-height: 1.2em; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Cartbox — Pro console, running in the browser</h1>
+    <p class="sub">Both consoles run through the same model-aware player: each cart loads its own WASM
+      engine (the side-by-side compatibility architecture). Audio needs a click first.</p>
+    <p id="log">Loading…</p>
+
+    <section class="panel pro">
+      <p class="label"><b>Pro</b> <span>640 × 360 · 256 colors · 8 sound channels · /engine/pro/engine.js</span></p>
+      <div id="proStage" class="stage"></div>
+    </section>
+
+    <section class="panel classic">
+      <p class="label"><b>Classic</b> <span>240 × 136 · 16 colors · 4 channels · the same player, its own engine</span></p>
+      <div id="classicStage" class="stage"></div>
+    </section>
+
+    <div class="row">
+      <button id="play">▶ Play both</button>
+      <button id="pause">⏸ Pause both</button>
+    </div>
+  </main>
+
+  <script type="module">
+    const log = (m) => (document.getElementById("log").textContent = m);
+    const { mount } = await import("../dist/index.js");
+
+    const pro = mount(document.getElementById("proStage"), {
+      cartUrl: "../../engine/examples/pro-demo.tic",
+      modelId: "pro",
+      engineUrl: "../../engine/dist/pro/engine.js",
+      scale: "fit",
+      autostart: true,
+      onError: (e) => log("Pro error: " + e.message),
+    });
+
+    const classic = mount(document.getElementById("classicStage"), {
+      cartUrl: "./demo-game.tic",
+      modelId: "classic",
+      engineUrl: "../../engine/dist/tic80.js",
+      scale: "fit",
+      autostart: true,
+      onReady: () => log("Ready — Pro (640×360) and Classic (240×136) both running. Click Play for audio."),
+      onError: (e) => log("Classic error: " + e.message),
+    });
+
+    document.getElementById("play").onclick = () => { pro.resume(); classic.resume(); };
+    document.getElementById("pause").onclick = () => { pro.pause(); classic.pause(); };
+  </script>
+</body>
+</html>

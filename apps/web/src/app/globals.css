@@ -1,0 +1,137 @@
+/*
+ * Cartbox design system — one visual language for marketplace, social, and the
+ * editor. Direction: a quiet indigo "workbench" so the pixel content is the
+ * hero, one amber signature accent used with restraint, and a two-role type
+ * system (humanist sans for UI, monospace only for machine data: coordinates,
+ * hex, indices). Tokens first; a few shared primitives below.
+ */
+
+:root {
+  /* Indigo workbench surfaces, darkest to lightest. */
+  --bg: #0d0b16;
+  --surface: #15121f;
+  --surface-raised: #1d1830;
+  --well: #241d38;
+  --border: #2f2846;
+  --border-strong: #453a63;
+
+  /* Text, high to low emphasis. */
+  --text: #ece9f8;
+  --muted: #9990bb;
+  --faint: #6b638c;
+
+  /* Amber signature — cartridge label / power LED. Spent sparingly. */
+  --accent: #f6b74a;
+  --accent-strong: #ffca66;
+  --accent-ink: #1c1305;
+
+  /* Reserved states. Magenta = live/running; green = success. */
+  --live: #ff5d8f;
+  --good: #57d18d;
+
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-data: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 16px;
+
+  --shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 8px 24px rgba(0, 0, 0, 0.35);
+  --ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 0 0 0.4em;
+}
+
+a {
+  color: var(--text);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--accent-strong);
+}
+
+/* Monospace utility: only for machine data (coords, hex, counts). */
+.data {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+/* --- Shared primitives ---------------------------------------------------- */
+
+.cbx-panel {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.cbx-btn {
+  font: inherit;
+  font-weight: 550;
+  color: var(--text);
+  background: var(--well);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 7px 13px;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease, transform 0.05s ease;
+}
+
+.cbx-btn:hover {
+  border-color: var(--accent);
+}
+
+.cbx-btn:active {
+  transform: translateY(1px);
+}
+
+.cbx-btn-accent {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: transparent;
+  font-weight: 650;
+}
+
+.cbx-btn-accent:hover {
+  background: var(--accent-strong);
+  border-color: transparent;
+}
+
+:where(button, a, input, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  border-radius: var(--radius-sm);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+  }
+}

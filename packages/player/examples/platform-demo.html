@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cartbox — platform demo (score + achievements)</title>
+  <style>
+    body { margin: 0; background: #14121f; color: #eae6ff; font-family: ui-monospace, monospace; }
+    main { max-width: 560px; margin: 0 auto; padding: 24px; }
+    h1 { font-size: 20px; }
+    #stage { width: 100%; aspect-ratio: 240 / 136; background: #0c0a14; border: 1px solid #362f52; border-radius: 10px; }
+    .row { display: flex; gap: 8px; margin: 12px 0; align-items: center; flex-wrap: wrap; }
+    button { font-family: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid #362f52; background: #241f38; color: #eae6ff; cursor: pointer; }
+    .hud { display: flex; gap: 20px; align-items: center; margin: 10px 0; }
+    .score { font-size: 28px; color: #35e0c8; }
+    .score small { font-size: 13px; color: #a89fce; }
+    #trophies { list-style: none; padding: 0; margin: 8px 0; }
+    #trophies li { color: #ffd23f; }
+    .hint { color: #a89fce; font-size: 13px; }
+    #toast { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); background: #ffd23f; color: #1a1526; padding: 10px 16px; border-radius: 999px; font-weight: 700; opacity: 0; transition: opacity .2s; }
+    #toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <div id="toast">🏆 Achievement unlocked!</div>
+  <main>
+    <h1>Cartbox — platform demo</h1>
+    <p class="hint">This drives the <em>real</em> engine + player + cartbox SDK: your input → the cart → the
+      mailbox → the platform event handler → this HUD. No backend involved.</p>
+
+    <div id="stage"></div>
+    <div class="row">
+      <button id="play">▶ Play</button>
+      <button id="pause">⏸ Pause</button>
+      <span class="hint">Click Play, then <strong>hold the → arrow</strong> to score.</span>
+    </div>
+
+    <div class="hud">
+      <div class="score" id="score">0<small> pts</small></div>
+      <div>
+        <div class="hint">Trophies</div>
+        <ul id="trophies"><li class="hint" id="none">— none yet (reach 30) —</li></ul>
+      </div>
+    </div>
+    <p class="hint" id="status">Loading…</p>
+  </main>
+
+  <script type="module">
+    const { mount } = await import("../dist/index.js");
+
+    const scoreEl = document.getElementById("score");
+    const trophiesEl = document.getElementById("trophies");
+    const toast = document.getElementById("toast");
+    const seen = new Set();
+
+    function showToast(text) {
+      toast.textContent = "🏆 " + text;
+      toast.classList.add("show");
+      setTimeout(() => toast.classList.remove("show"), 1600);
+    }
+
+    const handle = mount(document.getElementById("stage"), {
+      cartUrl: "./demo-game.tic",
+      engineUrl: "../../engine/dist/tic80.js",
+      controls: "keyboard",
+      scale: "fit",
+      onReady: () => (document.getElementById("status").textContent = "Ready — press Play."),
+      onError: (e) => (document.getElementById("status").textContent = "Error: " + e.message),
+      onEvent: (event) => {
+        if (event.kind === "score") {
+          scoreEl.innerHTML = event.value + "<small> pts</small>";
+        } else if (event.kind === "achievement" && !seen.has(event.id)) {
+          seen.add(event.id);
+          document.getElementById("none")?.remove();
+          const li = document.createElement("li");
+          li.textContent = "🏆 thirty_club — reached 30";
+          trophiesEl.appendChild(li);
+          showToast("thirty_club unlocked!");
+        }
+      },
+    });
+
+    document.getElementById("play").onclick = () => handle.resume();
+    document.getElementById("pause").onclick = () => handle.pause();
+  </script>
+</body>
+</html>

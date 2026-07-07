@@ -1,0 +1,31 @@
+{
+  "name": "cartbox",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Fantasy console + cartridge marketplace built on TIC-80 (MIT).",
+  "license": "MIT",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace apps/web",
+    "engine:build:wasm": "bash packages/engine/scripts/build-wasm.sh",
+    "engine:build:pro": "bash packages/engine/scripts/build-pro-wasm.sh",
+    "engine:build:native": "bash packages/engine/scripts/build-native.sh",
+    "verify:engine": "node packages/engine/examples/verify-engine.mjs",
+    "verify:pro": "node packages/engine/examples/verify-pro-engine.mjs",
+    "verify:pro:colors": "node packages/engine/examples/verify-pro-colors.mjs",
+    "verify:pro:sprites": "node packages/engine/examples/verify-pro-sprites.mjs",
+    "verify:pro:audio": "node packages/engine/examples/verify-pro-audio.mjs",
+    "serve:demo": "node packages/player/examples/serve.mjs",
+    "bootstrap": "bash scripts/bootstrap-local.sh",
+    "desktop:dev": "npm run tauri:dev --workspace apps/desktop",
+    "lint": "eslint . --ext .ts,.tsx",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,57 @@
+I w<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>@cartbox/player — smoke test</title>
+  <style>
+    body { margin: 0; background: #14121f; color: #eae6ff; font-family: ui-monospace, monospace; }
+    main { max-width: 720px; margin: 0 auto; padding: 24px; }
+    #stage { width: 100%; aspect-ratio: 240 / 136; background: #0c0a14; border: 1px solid #362f52; border-radius: 10px; }
+    .row { display: flex; gap: 8px; margin: 14px 0; }
+    button { font-family: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid #362f52; background: #241f38; color: #eae6ff; cursor: pointer; }
+    #log { color: #a89fce; font-size: 13px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Player smoke test</h1>
+    <p id="log">Loading…</p>
+    <div id="stage"></div>
+    <div class="row">
+      <button id="play">▶ Play</button>
+      <button id="pause">⏸ Pause</button>
+      <button id="destroy">⏹ Destroy</button>
+    </div>
+    <p style="color:#a89fce;font-size:13px">
+      Set <code>ENGINE_URL</code> to your <code>packages/engine/dist/tic80.js</code> build and
+      <code>CART_URL</code> to any <code>.tic</code> file, then serve this folder over http (WASM needs http, not file://).
+    </p>
+  </main>
+
+  <script type="module">
+    // Point these at your local build once Phase 1's WASM build has run.
+    const ENGINE_URL = "../../engine/dist/tic80.js";
+    const CART_URL = "./sample.tic";
+
+    const log = (msg) => (document.getElementById("log").textContent = msg);
+
+    // Import the built player. Run `npm run build --workspace packages/player` first,
+    // or change this to "../src/index.ts" when serving through a dev bundler.
+    const { mount } = await import("../dist/index.js");
+
+    const handle = mount(document.getElementById("stage"), {
+      cartUrl: CART_URL,
+      engineUrl: ENGINE_URL,
+      controls: "auto",
+      scale: "fit",
+      onReady: () => log("Ready. Press Play (audio needs a user gesture)."),
+      onError: (err) => log("Error: " + err.message),
+    });
+
+    document.getElementById("play").onclick = () => handle.resume();
+    document.getElementById("pause").onclick = () => handle.pause();
+    document.getElementById("destroy").onclick = () => { handle.destroy(); log("Destroyed."); };
+  </script>
+</body>
+</html>

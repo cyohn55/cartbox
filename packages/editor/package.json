@@ -1,0 +1,13 @@
+{
+  "name": "@cartbox/editor",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Custom Cartbox editor: cart data model + engine boundary the WASM shim implements.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "license": "MIT"
+}

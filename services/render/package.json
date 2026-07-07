@@ -1,0 +1,24 @@
+{
+  "name": "@cartbox/render",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "watch": "node dist/index.js --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.600.0",
+    "@cartbox/player": "*",
+    "@supabase/supabase-js": "^2.45.0",
+    "pngjs": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/pngjs": "^6.0.0",
+    "typescript": "^5.4.0"
+  }
+}

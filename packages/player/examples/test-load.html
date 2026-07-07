@@ -1,0 +1,19 @@
+<!doctype html><html><head><meta charset="utf-8"><title>load test</title></head><body>
+<div id="stage" style="width:640px;aspect-ratio:640/360"></div>
+<pre id="log"></pre>
+<script type="module">
+const log=(m)=>{document.getElementById("log").textContent+=m+"\n";console.log(m);};
+const { mount } = await import("../dist/index.js");
+const q = new URLSearchParams(location.search);
+const lighting = q.get("lighting")==="1" ? { autoDetect:true } : undefined;
+const opts = {
+  cartUrl: "http://127.0.0.1:9000/cartbox-carts/carts/00000000-0000-4000-8000-000000000010.tic",
+  engineUrl: "../../engine/dist/pro/engine.js",
+  modelId: "pro", controls:"auto", scale:"fit", lighting,
+  onReady: ()=>log("READY"),
+  onError: (e)=>log("ERROR: "+(e && (e.stack||e.message||String(e)))),
+};
+log("mounting (lighting="+(lighting?"on":"off")+")");
+if (q.get("strict")==="1") { const h=mount(document.getElementById("stage"),opts); h.destroy(); log("destroyed first mount (strict sim)"); }
+mount(document.getElementById("stage"), opts);
+</script></body></html>

@@ -1,0 +1,1144 @@
+/* Editor workbench layout. Uses the design tokens from globals.css. */
+
+.workbench {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  grid-template-rows: 52px 1fr;
+  background: var(--bg);
+}
+
+/* --- Top bar: identity, editor tabs, cart actions ------------------------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.wordmark {
+  font-weight: 750;
+  letter-spacing: -0.02em;
+}
+
+.cartName {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.cartName::before {
+  content: "/";
+  margin-right: 8px;
+  color: var(--faint);
+}
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  margin-left: 8px;
+}
+
+.tab {
+  position: relative;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 550;
+  color: var(--faint);
+  background: none;
+  border: 0;
+  padding: 6px 12px;
+  cursor: not-allowed;
+}
+
+.tabActive {
+  color: var(--text);
+  cursor: default;
+}
+
+/* Amber "power line" under the live editor tab — the one accent up top. */
+.tabActive::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: -1px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 2px;
+}
+
+.engineBadge {
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: var(--well);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 9px;
+}
+
+.engineBadge[data-mode="wasm"] {
+  color: var(--good);
+}
+
+.bankStepper {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bankLabel {
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+
+.bankArrow {
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--well);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 2px 7px;
+  cursor: pointer;
+}
+
+.bankArrow:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.bankArrow:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.bankValue {
+  min-width: 1.2em;
+  text-align: center;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+/* --- Playtest overlay ----------------------------------------------------- */
+
+.runOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(8, 7, 14, 0.82);
+  backdrop-filter: blur(6px);
+}
+
+.runCard {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.runBar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.runTitle {
+  font-weight: 650;
+}
+
+.runBarActions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+
+.runDot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--live);
+  box-shadow: 0 0 0 0 rgba(255, 93, 143, 0.6);
+  animation: runPulse 1.6s ease-out infinite;
+}
+
+@keyframes runPulse {
+  70% {
+    box-shadow: 0 0 0 7px rgba(255, 93, 143, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 93, 143, 0);
+  }
+}
+
+.runStage {
+  width: min(82vw, 760px);
+  aspect-ratio: 240 / 136;
+  background-color: #0c0a14;
+  background-image: repeating-conic-gradient(var(--surface) 0% 25%, transparent 0% 50%);
+  background-size: 20px 20px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.runHint {
+  margin: 0;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .runDot {
+    animation: none;
+  }
+}
+
+/* --- Body: tool rail | stage | inspector --------------------------------- */
+
+.body {
+  display: grid;
+  grid-template-columns: 168px 1fr 300px;
+  min-height: 0;
+}
+
+.rail {
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  overflow-y: auto;
+}
+
+.groupLabel {
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--faint);
+  margin-bottom: 8px;
+}
+
+.toolGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.toolBtn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--muted);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.toolBtn:hover {
+  color: var(--text);
+  background: var(--surface-raised);
+}
+
+.toolBtnActive,
+.toolBtnActive:hover {
+  color: var(--text);
+  background: var(--well);
+  border-color: var(--border-strong);
+}
+
+.toolGlyph {
+  width: 18px;
+  text-align: center;
+  font-size: 16px;
+}
+
+.segmented {
+  display: flex;
+  padding: 3px;
+  gap: 3px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.segment {
+  flex: 1;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  padding: 6px 0;
+  cursor: pointer;
+}
+
+.segmentActive {
+  color: var(--accent-ink);
+  background: var(--accent);
+  font-weight: 650;
+}
+
+/* --- Stage: the pixel canvas is the hero, on a checkerboard mat ----------- */
+
+.stage {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 24px;
+  background-color: var(--bg);
+  background-image:
+    repeating-conic-gradient(var(--surface) 0% 25%, transparent 0% 50%);
+  background-size: 24px 24px;
+  background-position: center;
+}
+
+.canvasPanel {
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  line-height: 0;
+}
+
+.pixelCanvas {
+  display: block;
+  image-rendering: pixelated;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.hud {
+  display: flex;
+  gap: 18px;
+  padding: 8px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.hudItem {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.hudLabel {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+
+.hudValue {
+  color: var(--text);
+}
+
+.hudChip {
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+/* --- Inspector: tile navigator + palette --------------------------------- */
+
+.inspector {
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  overflow-y: auto;
+}
+
+.panelHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.panelTitle {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.panelMeta {
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.tileGrid {
+  display: grid;
+  grid-template-columns: repeat(16, 1fr);
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.tileCell {
+  position: relative;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 0;
+  background: var(--surface-raised);
+  cursor: pointer;
+  line-height: 0;
+}
+
+.tileCell canvas {
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+.tileCellActive {
+  z-index: 1;
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+/* Other tiles that make up a multi-tile sprite block: lighter than the base. */
+.tileCellBlock {
+  z-index: 1;
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+.paletteGrid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 6px;
+}
+
+.swatch {
+  position: relative;
+  aspect-ratio: 1;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
+  padding: 0;
+  cursor: pointer;
+}
+
+.swatchActive {
+  box-shadow: var(--ring);
+}
+
+.paletteInfo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.paletteSwatchLarge {
+  width: 26px;
+  height: 26px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+/* --- Map stage: a scrollable tile grid, screens marked out ---------------- */
+
+.mapStage {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: var(--bg);
+}
+
+.mapViewport {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.mapContent {
+  position: relative;
+  line-height: 0;
+}
+
+.mapCanvas {
+  display: block;
+  image-rendering: pixelated;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.hoverBox {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border: 2px solid var(--accent);
+  box-sizing: border-box;
+  pointer-events: none;
+  border-radius: 2px;
+}
+
+/* --- Code stage: a gutter + a highlighted textarea overlay ---------------- */
+
+.codeStage {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: var(--bg);
+}
+
+.codePane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+/* Shared text metrics: the gutter, the highlight layer, and the textarea must
+   agree exactly or the caret drifts off the glyphs. */
+.codeMetrics {
+  font-family: var(--font-data);
+  font-size: 13px;
+  line-height: 20px;
+  letter-spacing: 0;
+  tab-size: 2;
+}
+
+.gutter {
+  flex: 0 0 auto;
+  padding: 14px 12px 14px 16px;
+  text-align: right;
+  color: var(--faint);
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+  user-select: none;
+  white-space: pre;
+}
+
+.codeScroll {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.codeLayer {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 14px 16px;
+  border: 0;
+  white-space: pre;
+  overflow: auto;
+}
+
+.highlight {
+  color: var(--text);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.codeInput {
+  color: transparent;
+  background: transparent;
+  caret-color: var(--accent);
+  resize: none;
+  outline: none;
+  z-index: 1;
+}
+
+.codeInput::selection {
+  background: rgba(246, 183, 74, 0.25);
+}
+
+.tokKeyword {
+  color: #ff87b2;
+}
+
+.tokApi {
+  color: var(--accent);
+}
+
+.tokString {
+  color: #8fe38f;
+}
+
+.tokComment {
+  color: var(--faint);
+  font-style: italic;
+}
+
+.tokNumber {
+  color: #73eff7;
+}
+
+.langSelect {
+  width: 100%;
+  font: inherit;
+  color: var(--text);
+  background: var(--well);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.legend {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.legendRow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.legendDot {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+}
+
+/* --- SFX editor ----------------------------------------------------------- */
+
+.sfxStage {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 24px;
+  background: var(--bg);
+}
+
+.sfxCanvas {
+  display: block;
+  cursor: crosshair;
+  touch-action: none;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.stageBlock {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.stageCaption {
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+
+.waveGrid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+}
+
+.waveBtn {
+  aspect-ratio: 1;
+  font-size: 13px;
+  color: var(--muted);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.waveBtn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.waveBtnActive,
+.waveBtnActive:hover {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: transparent;
+  font-weight: 650;
+}
+
+.sampleGrid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 3px;
+}
+
+.sampleCell {
+  aspect-ratio: 1;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.sampleCell:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.sampleCellSilent {
+  color: var(--faint);
+  background: var(--surface);
+}
+
+.sampleCellActive,
+.sampleCellActive:hover {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: transparent;
+  font-weight: 650;
+}
+
+/* --- Music tracker -------------------------------------------------------- */
+
+.musicStage {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+  background: var(--bg);
+}
+
+.musicGrid {
+  flex: 1;
+  min-height: 0;
+  width: min(480px, 100%);
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.musicRow {
+  display: grid;
+  grid-template-columns: 3ch 1fr 3ch 4ch;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 3px 14px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.musicRowFx {
+  color: var(--accent);
+  text-align: right;
+}
+
+.musicRow:hover {
+  background: var(--surface-raised);
+}
+
+.musicRowBeat {
+  background: rgba(255, 255, 255, 0.022);
+}
+
+.musicRowCursor,
+.musicRowCursor:hover {
+  background: rgba(246, 183, 74, 0.16);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.musicRowNum {
+  color: var(--faint);
+}
+
+.musicNoteOn {
+  color: var(--text);
+}
+
+.musicNoteStop {
+  color: var(--live);
+}
+
+.musicNoteEmpty {
+  color: var(--faint);
+}
+
+.musicRowSfx {
+  color: var(--muted);
+  text-align: right;
+}
+
+.piano {
+  display: flex;
+  gap: 3px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.pianoKey {
+  min-width: 34px;
+  padding: 10px 8px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.pianoKey:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.pianoKeySharp {
+  background: var(--bg);
+  color: var(--muted);
+}
+
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stepperValue {
+  flex: 1;
+  text-align: center;
+  font-size: 15px;
+  color: var(--text);
+}
+
+.patternGrid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 3px;
+}
+
+/* --- Song arrangement matrix --------------------------------------------- */
+
+.arrangeGrid {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  width: min(360px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 6px;
+}
+
+.arrangeRow {
+  display: grid;
+  grid-template-columns: 3ch repeat(4, 1fr);
+  gap: 4px;
+  align-items: center;
+}
+
+.arrangeHead {
+  color: var(--faint);
+  font-size: 11px;
+  text-align: center;
+  padding: 4px 0;
+  position: sticky;
+  top: 0;
+}
+
+.arrangeCell {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 0;
+  text-align: center;
+  cursor: pointer;
+}
+
+.arrangeCell:hover {
+  border-color: var(--accent);
+}
+
+.arrangeCellSel,
+.arrangeCellSel:hover {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: transparent;
+  font-weight: 650;
+}
+
+.songHelp {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* --- Lit preview ---------------------------------------------------------- */
+
+.litPreview {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+}
+
+.litBadge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  font-size: 10px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(13, 11, 22, 0.72);
+  color: var(--muted);
+}
+
+.litBadge[data-mode="gpu"] {
+  color: var(--good);
+}
+
+.rendererToggle {
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--well);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.rendererToggle:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+@media (max-width: 900px) {
+  .body {
+    grid-template-columns: 1fr;
+    grid-auto-rows: min-content;
+    overflow-y: auto;
+  }
+
+  .rail,
+  .inspector {
+    border: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .mapViewport {
+    height: 60vh;
+  }
+
+  .codePane {
+    height: 60vh;
+  }
+}
+
+/* Small helper line above pickers that support drag selection. */
+.pickerHint {
+  font-size: 11px;
+  color: var(--faint);
+  margin: -4px 0 8px;
+}
+
+/* Status row under the pixel canvas while a magic-wand selection is active. */
+.selectionBar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.selectionHint {
+  color: var(--faint);
+  flex: 1;
+}
+
+/* FX tab: preview stage on the left, the effect stack on the right. */
+.fxBody {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  min-height: 0;
+}
+
+.fxCanvas {
+  display: block;
+  width: min(100%, 720px);
+  height: auto;
+  image-rendering: pixelated;
+}
+
+.fxSelect {
+  background: var(--surface-raised);
+  color: inherit;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  padding: 2px 6px;
+}
+
+.fxNote {
+  max-width: 720px;
+  font-size: 12px;
+  color: var(--faint);
+  line-height: 1.5;
+  text-align: center;
+}
+
+.fxPanel {
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  padding: 18px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+.fxEffect {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fxEffect[data-enabled="true"] {
+  border-color: var(--border-strong);
+  background: var(--surface-raised);
+}
+
+.fxEffectHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.fxEffectName {
+  font-size: 13px;
+  font-weight: 650;
+  flex: 1;
+}
+
+.fxEffectDescription {
+  font-size: 11px;
+  color: var(--faint);
+  line-height: 1.4;
+}
+
+.fxParam {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.fxParamLabel {
+  width: 76px;
+  color: var(--muted);
+}
+
+.fxParam input[type="range"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.fxParamValue {
+  width: 34px;
+  text-align: right;
+  color: var(--faint);
+}
+
+@media (max-width: 1100px) {
+  .fxBody {
+    grid-template-columns: 1fr;
+    grid-auto-rows: min-content;
+    overflow-y: auto;
+  }
+
+  .fxPanel {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+}

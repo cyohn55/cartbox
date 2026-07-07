@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+tsconfig.tsbuildinfo
+
+# Static-export scratch dir (build-static.mjs parks server-only code here)
+.static-export-excluded/
+
+# Environment files hold secrets (Supabase service keys, R2/Stripe creds).
+# Only checked-in examples are allowed.
+.env
+.env.*
+!.env.example
+
+# OS / editor noise
+.DS_Store
+*.log
+
+# Engine build trees and scratch copies (rebuilt by packages/engine/scripts)
+packages/engine/build-wasm/
+packages/engine/build-wasm-pro/
+packages/engine/build-native/
+packages/engine/dist.bak/
+
+# Supabase CLI scratch
+supabase/.temp/
+
+# The TIC-80 core fork is a nested git checkout (own history, huge vendor
+# tree). The web app consumes its prebuilt WASM from apps/web/public/engine,
+# so the fork stays local until it gets its own repository.
+packages/engine/tic80/

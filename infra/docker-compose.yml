@@ -1,0 +1,65 @@
+# Local development infrastructure for Cartbox.
+#
+#   db     — Postgres, pre-loaded with the auth shim + our schema
+#   minio  — S3-compatible object store standing in for Cloudflare R2
+#   minio-setup — one-shot: creates the bucket and makes it public-read
+#
+# This covers the database and object storage. For full Supabase auth locally,
+# run the Supabase CLI (`supabase start`) alongside this and point SUPABASE_URL
+# at it — see infra/README.md. Use this compose when you only need DB + storage
+# (e.g. running the render worker or exercising SQL).
+#
+#   docker compose -f infra/docker-compose.yml up -d
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: cartbox
+    ports:
+      - "54322:5432"
+    volumes:
+      # Init scripts run in alphabetical order: auth shim first, then the schema.
+      - ./init/00-auth-compat.sql:/docker-entrypoint-initdb.d/00-auth-compat.sql:ro
+      - ../apps/web/db/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cartbox"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: cartbox
+      MINIO_ROOT_PASSWORD: cartbox-secret
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # web console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio-setup:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 cartbox cartbox-secret; do sleep 1; done;
+      mc mb --ignore-existing local/cartbox-carts;
+      mc anonymous set download local/cartbox-carts;
+      echo 'Bucket cartbox-carts ready.';
+      "
+
+volumes:
+  db-data:
+  minio-data:
