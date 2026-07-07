@@ -3,6 +3,10 @@
 A polished fantasy console + cartridge marketplace built on [TIC-80](https://github.com/nesbox/TIC-80) (MIT).
 Play tiny games free in the browser; buy the desktop app to make them; sell your carts with creator revenue-share.
 
+**▶ Live static demo:** https://cyohn55.github.io/cartbox/ — play the demo carts and use the full
+editor in your browser (work saves to localStorage). Accounts, publishing, and the community
+server need the full stack and are disabled in the demo; see `apps/web/scripts/build-static.mjs`.
+
 > **Attribution:** This project builds on TIC-80 by Vadim Grigoruk (nesbox) and contributors, MIT-licensed.
 > The TIC-80 copyright and license text are retained in `packages/engine/` and surfaced in the app's About screen.
 
