@@ -34,10 +34,12 @@ import { BrowseScreen } from "./BrowseScreen";
 import { LibraryScreen } from "./LibraryScreen";
 import { ProfileScreen } from "./ProfileScreen";
 import { SettingsScreen } from "./SettingsScreen";
+import { CreateScreen } from "./CreateScreen";
 
 const TAB_LABELS: Record<ConsoleTab, { icon: string; label: string }> = {
   feed: { icon: "▶", label: "FEED" },
   browse: { icon: "◆", label: "BROWSE" },
+  create: { icon: "✎", label: "CREATE" },
   library: { icon: "▤", label: "LIBRARY" },
   profile: { icon: "●", label: "PROFILE" },
 };
@@ -133,6 +135,7 @@ export function ConsoleOS() {
         <div className="os-screen-body">
           {state.tab === "feed" && <HomeFeed guest={!signedIn} onPlayCart={playCart} />}
           {state.tab === "browse" && <BrowseScreen onPlayCart={playCart} />}
+          {state.tab === "create" && <CreateScreen />}
           {state.tab === "library" && <LibraryScreen guest={!signedIn} onPlayCart={playCart} />}
           {state.tab === "profile" && <ProfileScreen guest={!signedIn} />}
         </div>

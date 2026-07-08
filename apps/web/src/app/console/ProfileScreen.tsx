@@ -13,7 +13,9 @@ import { mount, parseReplay, type ModelId, type PlayerHandle } from "@cartbox/pl
 import { authHeaders } from "@/lib/supabase-browser";
 import { isStaticExport } from "@/lib/staticSite";
 import { FEATURED_CLIP_LIMIT, resolveFeaturedClips } from "@/lib/consoleProfile";
-import { AvatarPreview } from "@/app/profile/[handle]/AvatarPreview";
+import { normalizeVoxelAvatar, type VoxelAvatarSpec } from "@/lib/voxelAvatar";
+import { VoxelAvatarView } from "./VoxelAvatarView";
+import { AvatarCreatorScreen, loadLocalVoxelAvatar } from "./AvatarCreatorScreen";
 
 interface FeaturedClip {
   replayId: string;
@@ -33,7 +35,7 @@ interface Unlock {
 }
 
 interface MePayload {
-  profile: { handle: string | null; displayName: string | null; avatar: unknown };
+  profile: { handle: string | null; displayName: string | null; avatar: unknown; voxelAvatar: unknown };
   clips: FeaturedClip[];
   recentClips: FeaturedClip[];
   featuredClipIds: string[];
@@ -188,6 +190,14 @@ export function ProfileScreen({ guest }: { guest: boolean }) {
   const [failed, setFailed] = useState(false);
   const [watchingClip, setWatchingClip] = useState<FeaturedClip | null>(null);
   const [pickingClips, setPickingClips] = useState(false);
+  // Avatar resolves client-side: profile spec for members, this browser's
+  // saved spec for guests and the static demo.
+  const [voxelAvatar, setVoxelAvatar] = useState<VoxelAvatarSpec | null>(null);
+  const [editingAvatar, setEditingAvatar] = useState(false);
+
+  useEffect(() => {
+    setVoxelAvatar(loadLocalVoxelAvatar());
+  }, []);
 
   useEffect(() => {
     if (isStaticExport || guest) {
@@ -203,6 +213,9 @@ export function ProfileScreen({ guest }: { guest: boolean }) {
         const body = (await response.json()) as MePayload;
         if (!cancelled) {
           setMe(body);
+          if (body.profile.voxelAvatar) {
+            setVoxelAvatar(normalizeVoxelAvatar(body.profile.voxelAvatar));
+          }
         }
       } catch {
         if (!cancelled) {
@@ -216,13 +229,32 @@ export function ProfileScreen({ guest }: { guest: boolean }) {
   }, [guest]);
 
   if (guest || isStaticExport) {
+    if (editingAvatar && voxelAvatar) {
+      return (
+        <AvatarCreatorScreen
+          initial={voxelAvatar}
+          signedIn={false}
+          onSaved={(spec) => {
+            setVoxelAvatar(spec);
+            setEditingAvatar(false);
+          }}
+          onCancel={() => setEditingAvatar(false)}
+        />
+      );
+    }
     return (
       <div className="os-page" data-console-nav data-testid="profile-screen">
         <h2>PROFILE</h2>
+        <div style={{ display: "grid", justifyItems: "center", gap: 8 }}>
+          {voxelAvatar && <VoxelAvatarView spec={voxelAvatar} size={150} />}
+          <button type="button" className="os-btn" onClick={() => setEditingAvatar(true)}>
+            ⚒ EDIT AVATAR
+          </button>
+        </div>
         <div className="os-empty">
           {isStaticExport
-            ? "Profiles live on the community server, which this demo build doesn't include."
-            : "Sign in to build your player card: avatar, featured clips, and trophies."}
+            ? "Your avatar saves to this browser. Trophies and clips live on the community server, which this demo build doesn't include."
+            : "Your avatar saves to this browser — sign in to publish it with your player card, featured clips, and trophies."}
         </div>
       </div>
     );
@@ -248,13 +280,35 @@ export function ProfileScreen({ guest }: { guest: boolean }) {
 
   const totalPoints = me.unlocks.reduce((sum, unlock) => sum + unlock.points, 0);
 
+  if (editingAvatar && voxelAvatar) {
+    return (
+      <AvatarCreatorScreen
+        initial={voxelAvatar}
+        signedIn
+        onSaved={(spec) => {
+          setVoxelAvatar(spec);
+          setEditingAvatar(false);
+        }}
+        onCancel={() => setEditingAvatar(false)}
+      />
+    );
+  }
+
   return (
     <div className="os-page" data-console-nav data-testid="profile-screen">
       <div className="os-profile-head">
-        <AvatarPreview avatar={me.profile.avatar} size={56} />
+        {voxelAvatar && <VoxelAvatarView spec={voxelAvatar} size={96} />}
         <div>
           <div className="os-profile-name">{me.profile.displayName ?? me.profile.handle ?? "Player"}</div>
           {me.profile.handle && <div className="os-profile-handle">@{me.profile.handle}</div>}
+          <button
+            type="button"
+            className="os-auth-switch"
+            style={{ fontSize: 10, letterSpacing: "0.14em" }}
+            onClick={() => setEditingAvatar(true)}
+          >
+            ⚒ EDIT AVATAR
+          </button>
         </div>
       </div>
 

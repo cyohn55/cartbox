@@ -157,7 +157,14 @@ function Shell({ bus, children }: { bus: ConsoleInputBus; children: ReactNode })
   const handednessSwapped = !(showDpad && showJoystick) && settings.swapControls;
 
   return (
-    <div className="hh-root" data-theme={settings.theme} data-buttons={settings.buttons} style={colorStyle}>
+    <div
+      className="hh-root"
+      data-theme={settings.theme}
+      data-buttons={settings.buttons}
+      style={colorStyle}
+      // Long-press anywhere must never open a context menu / iOS callout.
+      onContextMenu={(event) => event.preventDefault()}
+    >
       <div className="hh-shell">
         <div className="hh-screen-bezel">
           <div className="hh-bezel-top">

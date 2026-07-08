@@ -62,7 +62,7 @@ export async function GET(request: Request): Promise<NextResponse> {
   const [profileResult, ownedResult, purchasedResult, clipsResult, unlocksResult] = await Promise.all([
     db
       .from("profiles")
-      .select("handle, display_name, avatar_json, featured_clips")
+      .select("handle, display_name, avatar_json, voxel_avatar, featured_clips")
       .eq("id", userId)
       .maybeSingle(),
     db.from("carts").select(cartColumns).eq("owner_id", userId).order("created_at", { ascending: false }),
@@ -147,6 +147,7 @@ export async function GET(request: Request): Promise<NextResponse> {
       handle: profileResult.data?.handle ?? null,
       displayName: profileResult.data?.display_name ?? null,
       avatar: profileResult.data?.avatar_json ?? null,
+      voxelAvatar: profileResult.data?.voxel_avatar ?? null,
     },
     library: [...libraryById.values()],
     clips,

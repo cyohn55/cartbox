@@ -9,6 +9,7 @@ create table if not exists profiles (
   display_name      text,
   bio               text not null default '',
   avatar_json       jsonb,                       -- Mii-style avatar part choices (Platform P1)
+  voxel_avatar      jsonb,                       -- console voxel-character spec (see migration 0006)
   stripe_account_id text,                       -- Stripe Connect account (Phase 3)
   tier              text not null default 'free' check (tier in ('free', 'creator')),
   featured_clips    uuid[] not null default '{}', -- ordered replay ids the player showcases (see migration 0005)

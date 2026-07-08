@@ -13,7 +13,7 @@
 export type ConsoleStage = "boot" | "title" | "auth" | "shell";
 
 /** Homescreen tabs, in tab-bar order. */
-export const CONSOLE_TABS = ["feed", "browse", "library", "profile"] as const;
+export const CONSOLE_TABS = ["feed", "browse", "create", "library", "profile"] as const;
 export type ConsoleTab = (typeof CONSOLE_TABS)[number];
 
 /** Everything the full-screen player needs to boot a cartridge. */

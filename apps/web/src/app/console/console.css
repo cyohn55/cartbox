@@ -51,6 +51,23 @@
   touch-action: manipulation;
 }
 
+/* iOS: long-press/tap must never raise the text-selection or copy/lookup
+   callout anywhere on the device — it's a handheld, not a document. The
+   `*` is deliberate: Safari applies callout/selection per-element, so the
+   root alone doesn't cover children. Text entry gets selection back. */
+.hh-root,
+.hh-root * {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.hh-root input,
+.hh-root textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 /* --- Shell themes ---------------------------------------------------------- */
 
 /* Retro handheld: warm cream body, maroon buttons, olive-grey controls. */
@@ -1210,6 +1227,62 @@ select.os-input {
   transform: translateY(1px);
   color: var(--hh-control-ink-active);
   box-shadow: 0 1px 0 rgba(0, 0, 0, 0.5);
+}
+
+/* Character creator: part steppers + palette swatches. */
+.os-part-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 0;
+  border-bottom: 1px solid #15121f;
+}
+
+.os-part-label {
+  width: 64px;
+  flex-shrink: 0;
+  font: 700 9px var(--font-data);
+  letter-spacing: 0.16em;
+  color: #9990bb;
+}
+
+.os-part-step {
+  appearance: none;
+  border: 1px solid #2f2846;
+  border-radius: 8px;
+  background: #15121f;
+  color: #ece9f8;
+  font-size: 12px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.os-part-value {
+  flex: 1;
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.os-swatch-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.os-swatch {
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+
+.os-swatch[data-active="true"] {
+  border-color: #ece9f8;
+  box-shadow: 0 0 0 2px #f6b74a;
 }
 
 /* Custom color pickers in settings. */
