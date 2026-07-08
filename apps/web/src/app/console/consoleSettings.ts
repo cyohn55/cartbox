@@ -31,11 +31,25 @@ export type ButtonStyleId = (typeof BUTTON_STYLES)[number]["id"];
 /** "monthly" defers to the rotation; anything else pins a registry id. */
 export type MiniGameChoice = "monthly" | string;
 
+/** Per-face-button custom colors (hex), used when the player goes custom. */
+export interface FaceButtonColors {
+  x: string;
+  y: string;
+  a: string;
+  b: string;
+}
+
 export interface ConsoleSettings {
   theme: ConsoleThemeId;
   controls: ControlLayoutId;
   buttons: ButtonStyleId;
   miniGame: MiniGameChoice;
+  /** Swap the D-pad and joystick positions (handedness for single layouts). */
+  swapControls: boolean;
+  /** Custom colors override the preset; null = use the preset/theme. */
+  faceColors: FaceButtonColors | null;
+  dpadColor: string | null;
+  joystickColor: string | null;
 }
 
 export const DEFAULT_CONSOLE_SETTINGS: ConsoleSettings = {
@@ -43,10 +57,33 @@ export const DEFAULT_CONSOLE_SETTINGS: ConsoleSettings = {
   controls: "dpad",
   buttons: "snes",
   miniGame: "monthly",
+  swapControls: false,
+  faceColors: null,
+  dpadColor: null,
+  joystickColor: null,
 };
 
 function oneOf<T extends { id: string }>(list: readonly T[], value: unknown, fallback: T["id"]): T["id"] {
   return list.some((item) => item.id === value) ? (value as T["id"]) : fallback;
+}
+
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+
+/** A valid 6-digit hex color, or null. */
+export function normalizeHexColor(value: unknown): string | null {
+  return typeof value === "string" && HEX_COLOR.test(value) ? value.toLowerCase() : null;
+}
+
+function normalizeFaceColors(value: unknown): FaceButtonColors | null {
+  const raw = (value ?? null) as Record<string, unknown> | null;
+  if (!raw) {
+    return null;
+  }
+  const x = normalizeHexColor(raw.x);
+  const y = normalizeHexColor(raw.y);
+  const a = normalizeHexColor(raw.a);
+  const b = normalizeHexColor(raw.b);
+  return x && y && a && b ? { x, y, a, b } : null;
 }
 
 /** Normalizes anything (parsed JSON, stale schema, garbage) into settings. */
@@ -57,7 +94,48 @@ export function normalizeConsoleSettings(input: unknown): ConsoleSettings {
     controls: oneOf(CONTROL_LAYOUTS, raw.controls, DEFAULT_CONSOLE_SETTINGS.controls),
     buttons: oneOf(BUTTON_STYLES, raw.buttons, DEFAULT_CONSOLE_SETTINGS.buttons),
     miniGame: typeof raw.miniGame === "string" && raw.miniGame.length > 0 ? raw.miniGame : "monthly",
+    swapControls: raw.swapControls === true,
+    faceColors: normalizeFaceColors(raw.faceColors),
+    dpadColor: normalizeHexColor(raw.dpadColor),
+    joystickColor: normalizeHexColor(raw.joystickColor),
   };
+}
+
+/**
+ * Darkens a hex color by a 0..1 factor — used to derive each control's
+ * shadow/gradient stop from the single color the player picked.
+ */
+export function darkenHexColor(hex: string, factor: number): string {
+  const channels = [hex.slice(1, 3), hex.slice(3, 5), hex.slice(5, 7)].map((pair) => {
+    const scaled = Math.round(parseInt(pair, 16) * (1 - factor));
+    return Math.max(0, Math.min(255, scaled)).toString(16).padStart(2, "0");
+  });
+  return `#${channels.join("")}`;
+}
+
+/**
+ * Inline CSS-variable overrides for the player's custom colors. Only set
+ * variables for controls they actually customized, so presets/themes keep
+ * styling the rest.
+ */
+export function customColorStyle(settings: ConsoleSettings): Record<string, string> {
+  const style: Record<string, string> = {};
+  if (settings.faceColors) {
+    for (const key of ["x", "y", "a", "b"] as const) {
+      const color = settings.faceColors[key];
+      style[`--hh-face-${key}-hi`] = color;
+      style[`--hh-face-${key}-lo`] = darkenHexColor(color, 0.35);
+    }
+  }
+  if (settings.dpadColor) {
+    style["--hh-dpad-a"] = settings.dpadColor;
+    style["--hh-dpad-b"] = darkenHexColor(settings.dpadColor, 0.35);
+  }
+  if (settings.joystickColor) {
+    style["--hh-joy-a"] = settings.joystickColor;
+    style["--hh-joy-b"] = darkenHexColor(settings.joystickColor, 0.35);
+  }
+  return style;
 }
 
 const STORAGE_KEY = "cartbox.console.settings";

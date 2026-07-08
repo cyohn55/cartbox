@@ -21,6 +21,10 @@ export type ConsoleControl =
   | "b"
   | "x"
   | "y"
+  | "l1"
+  | "l2"
+  | "r1"
+  | "r2"
   | "start"
   | "select";
 
@@ -38,8 +42,9 @@ export type KeyEventDispatcher = (type: "keydown" | "keyup", code: string) => vo
 
 /**
  * Shell control → `KeyboardEvent.code` used by the engine's default bindings
- * (see @cartbox/player DEFAULT_KEY_BINDINGS). Start/Select are system controls
- * with no gamepad bit, so they never forward to a game.
+ * (see @cartbox/player DEFAULT_KEY_BINDINGS). Start/Select and the shoulder
+ * buttons are system controls — the TIC-80 gamepad has no bits for them, so
+ * they never forward to a game (the OS uses shoulders for tab/page moves).
  */
 export const CONTROL_KEY_CODES: Readonly<Record<ConsoleControl, string | null>> = {
   up: "ArrowUp",
@@ -50,6 +55,10 @@ export const CONTROL_KEY_CODES: Readonly<Record<ConsoleControl, string | null>> 
   b: "KeyX",
   x: "KeyA",
   y: "KeyS",
+  l1: null,
+  l2: null,
+  r1: null,
+  r2: null,
   start: null,
   select: null,
 };

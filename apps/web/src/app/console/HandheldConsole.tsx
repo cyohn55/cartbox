@@ -12,7 +12,7 @@
  * the controls to that game; SELECT hands them back.
  */
 
-import { useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react";
+import { useMemo, useRef, useState, type CSSProperties, type PointerEvent, type ReactNode } from "react";
 
 import "./console.css";
 import {
@@ -22,6 +22,7 @@ import {
 } from "./consoleInput";
 import { ConsoleInputContext, useConsoleInput } from "./ConsoleInputContext";
 import { ConsoleSettingsProvider, useConsoleSettings } from "./ConsoleSettingsContext";
+import { customColorStyle } from "./consoleSettings";
 import { KonamiDetector } from "./consoleNavigation";
 import { resolveMiniGame } from "./minigames/registry";
 import { Joystick } from "./Joystick";
@@ -86,6 +87,7 @@ function Shell({ bus, children }: { bus: ConsoleInputBus; children: ReactNode })
   const [miniGameLive, setMiniGameLive] = useState(false);
 
   const miniGame = useMemo(() => resolveMiniGame(settings.miniGame, new Date()), [settings.miniGame]);
+  const colorStyle = useMemo(() => customColorStyle(settings) as CSSProperties, [settings]);
   const showDpad = settings.controls === "dpad" || settings.controls === "both";
   const showJoystick = settings.controls === "joystick" || settings.controls === "both";
   // The dock idles (attract mode) on the arcade shell; the Konami code
@@ -98,8 +100,64 @@ function Shell({ bus, children }: { bus: ConsoleInputBus; children: ReactNode })
     }
   });
 
+  const dpad = (compact = false) => (
+    <div
+      className={compact ? "hh-dpad hh-dpad-compact" : "hh-dpad"}
+      role="group"
+      aria-label="Directional pad"
+    >
+      <ShellButton bus={bus} control="up" className="hh-dpad-btn hh-dpad-up" label="Up">
+        ▲
+      </ShellButton>
+      <ShellButton bus={bus} control="left" className="hh-dpad-btn hh-dpad-left" label="Left">
+        ◀
+      </ShellButton>
+      <div className="hh-dpad-btn hh-dpad-center" aria-hidden />
+      <ShellButton bus={bus} control="right" className="hh-dpad-btn hh-dpad-right" label="Right">
+        ▶
+      </ShellButton>
+      <ShellButton bus={bus} control="down" className="hh-dpad-btn hh-dpad-down" label="Down">
+        ▼
+      </ShellButton>
+    </div>
+  );
+
+  const faceButtons = (
+    <div className="hh-face" role="group" aria-label="Action buttons">
+      <ShellButton bus={bus} control="x" className="hh-face-btn hh-face-x" label="X button">
+        X
+      </ShellButton>
+      <ShellButton bus={bus} control="y" className="hh-face-btn hh-face-y" label="Y button">
+        Y
+      </ShellButton>
+      <ShellButton bus={bus} control="a" className="hh-face-btn hh-face-a" label="A button">
+        A
+      </ShellButton>
+      <ShellButton bus={bus} control="b" className="hh-face-btn hh-face-b" label="B button">
+        B
+      </ShellButton>
+    </div>
+  );
+
+  // Which directional control anchors a side cluster:
+  //  - "Both": one on the side, the other compact in the system row; the swap
+  //    setting exchanges them.
+  //  - Single control: the swap setting flips handedness (directional right,
+  //    face buttons left).
+  const mainDirectional =
+    showDpad && showJoystick
+      ? settings.swapControls
+        ? <Joystick bus={bus} />
+        : dpad()
+      : showDpad
+        ? dpad()
+        : <Joystick bus={bus} />;
+  const systemDirectional =
+    showDpad && showJoystick ? (settings.swapControls ? dpad(true) : <Joystick bus={bus} />) : null;
+  const handednessSwapped = !(showDpad && showJoystick) && settings.swapControls;
+
   return (
-    <div className="hh-root" data-theme={settings.theme} data-buttons={settings.buttons}>
+    <div className="hh-root" data-theme={settings.theme} data-buttons={settings.buttons} style={colorStyle}>
       <div className="hh-shell">
         <div className="hh-screen-bezel">
           <div className="hh-bezel-top">
@@ -130,49 +188,34 @@ function Shell({ bus, children }: { bus: ConsoleInputBus; children: ReactNode })
         )}
 
         <div className="hh-left">
-          {showDpad ? (
-            <div className="hh-dpad" role="group" aria-label="Directional pad">
-              <ShellButton bus={bus} control="up" className="hh-dpad-btn hh-dpad-up" label="Up">
-                ▲
-              </ShellButton>
-              <ShellButton bus={bus} control="left" className="hh-dpad-btn hh-dpad-left" label="Left">
-                ◀
-              </ShellButton>
-              <div className="hh-dpad-btn hh-dpad-center" aria-hidden />
-              <ShellButton bus={bus} control="right" className="hh-dpad-btn hh-dpad-right" label="Right">
-                ▶
-              </ShellButton>
-              <ShellButton bus={bus} control="down" className="hh-dpad-btn hh-dpad-down" label="Down">
-                ▼
-              </ShellButton>
-            </div>
-          ) : (
-            <Joystick bus={bus} />
-          )}
+          <div className="hh-shoulders">
+            <ShellButton bus={bus} control="l1" className="hh-shoulder" label="L1">
+              L1
+            </ShellButton>
+            <ShellButton bus={bus} control="l2" className="hh-shoulder" label="L2">
+              L2
+            </ShellButton>
+          </div>
+          {handednessSwapped ? faceButtons : mainDirectional}
         </div>
 
         <div className="hh-right">
-          <div className="hh-face" role="group" aria-label="Action buttons">
-            <ShellButton bus={bus} control="x" className="hh-face-btn hh-face-x" label="X button">
-              X
+          <div className="hh-shoulders">
+            <ShellButton bus={bus} control="r2" className="hh-shoulder" label="R2">
+              R2
             </ShellButton>
-            <ShellButton bus={bus} control="y" className="hh-face-btn hh-face-y" label="Y button">
-              Y
-            </ShellButton>
-            <ShellButton bus={bus} control="a" className="hh-face-btn hh-face-a" label="A button">
-              A
-            </ShellButton>
-            <ShellButton bus={bus} control="b" className="hh-face-btn hh-face-b" label="B button">
-              B
+            <ShellButton bus={bus} control="r1" className="hh-shoulder" label="R1">
+              R1
             </ShellButton>
           </div>
+          {handednessSwapped ? mainDirectional : faceButtons}
         </div>
 
         <div className="hh-system">
           <ShellButton bus={bus} control="select" className="hh-pill" label="Select">
             SELECT
           </ShellButton>
-          {showJoystick && showDpad && <Joystick bus={bus} />}
+          {systemDirectional}
           <ShellButton bus={bus} control="start" className="hh-pill" label="Start">
             START
           </ShellButton>

@@ -13,8 +13,14 @@ import {
   CONSOLE_THEMES,
   CONTROL_LAYOUTS,
   type ConsoleSettings,
+  type FaceButtonColors,
 } from "./consoleSettings";
 import { MINI_GAMES, miniGameForMonth } from "./minigames/registry";
+
+/** Starting palette when the player first opens the custom pickers. */
+const CUSTOM_FACE_DEFAULTS: FaceButtonColors = { x: "#8f86c6", y: "#6fdfa8", a: "#ffca66", b: "#ff8fae" };
+const CUSTOM_DPAD_DEFAULT = "#322a4e";
+const CUSTOM_JOYSTICK_DEFAULT = "#322a4e";
 
 function OptionRow<T extends string>({
   label,
@@ -78,6 +84,17 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         value={settings.controls}
         onPick={(controls) => update({ controls })}
       />
+      <div className="os-option-row">
+        <button
+          type="button"
+          className="os-kind-option"
+          data-active={settings.swapControls}
+          aria-pressed={settings.swapControls}
+          onClick={() => update({ swapControls: !settings.swapControls })}
+        >
+          {settings.swapControls ? "⇄ SWAPPED" : "⇄ SWAP D-PAD / JOYSTICK"}
+        </button>
+      </div>
 
       <OptionRow
         label="BUTTON COLORS"
@@ -85,6 +102,58 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         value={settings.buttons}
         onPick={(buttons) => update({ buttons })}
       />
+
+      <div className="os-section-title">CUSTOM COLORS</div>
+      <div className="os-color-row">
+        {(["x", "y", "a", "b"] as const).map((key) => (
+          <label key={key} className="os-color-field">
+            <input
+              type="color"
+              className="os-color"
+              aria-label={`${key.toUpperCase()} button color`}
+              value={settings.faceColors?.[key] ?? CUSTOM_FACE_DEFAULTS[key]}
+              onChange={(event) =>
+                update({
+                  faceColors: {
+                    ...(settings.faceColors ?? CUSTOM_FACE_DEFAULTS),
+                    [key]: event.target.value,
+                  },
+                })
+              }
+            />
+            {key.toUpperCase()}
+          </label>
+        ))}
+        <label className="os-color-field">
+          <input
+            type="color"
+            className="os-color"
+            aria-label="D-pad color"
+            value={settings.dpadColor ?? CUSTOM_DPAD_DEFAULT}
+            onChange={(event) => update({ dpadColor: event.target.value })}
+          />
+          D-PAD
+        </label>
+        <label className="os-color-field">
+          <input
+            type="color"
+            className="os-color"
+            aria-label="Joystick color"
+            value={settings.joystickColor ?? CUSTOM_JOYSTICK_DEFAULT}
+            onChange={(event) => update({ joystickColor: event.target.value })}
+          />
+          STICK
+        </label>
+      </div>
+      <div className="os-option-row">
+        <button
+          type="button"
+          className="os-kind-option"
+          onClick={() => update({ faceColors: null, dpadColor: null, joystickColor: null })}
+        >
+          RESET CUSTOM COLORS
+        </button>
+      </div>
 
       <OptionRow
         label="MINI-GAME (ARCADE SHELL)"

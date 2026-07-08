@@ -98,8 +98,13 @@ export function ConsoleOS() {
       return;
     }
     // An in-feed game or the mini-game owns the buttons while active.
-    if (event.control === "select" && bus.owner === "ui") {
+    if (bus.owner !== "ui") {
+      return;
+    }
+    if (event.control === "select" || event.control === "r1") {
       dispatch({ type: "NEXT_TAB" });
+    } else if (event.control === "l1") {
+      dispatch({ type: "PREVIOUS_TAB" });
     }
   });
 

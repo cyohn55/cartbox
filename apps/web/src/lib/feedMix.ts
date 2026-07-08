@@ -29,6 +29,8 @@ export interface FeedCartInfo {
   /** Present only when the cart is playable right in the feed (free carts). */
   cartUrl: string | null;
   engineUrl: string | null;
+  /** A recent replay of this cart, looped as the card's gameplay preview. */
+  preview?: FeedClipInfo | null;
 }
 
 /** Replay-clip context: the serialized input stream that re-drives the cart. */

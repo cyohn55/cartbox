@@ -82,7 +82,7 @@ function CanvasMiniGameView({ bus, game, active }: { bus: ConsoleInputBus; game:
       const live = activeRef.current;
       session.step(live ? inputRef.current : IDLE_INPUT, !live);
       context.clearRect(0, 0, canvas.width, canvas.height);
-      context.globalAlpha = live ? 1 : 0.45; // attract mode stays subtle
+      context.globalAlpha = live ? 1 : 0.85; // attract dims only slightly
       session.draw(context, canvas.width, canvas.height);
       context.globalAlpha = 1;
       raf = requestAnimationFrame(loop);

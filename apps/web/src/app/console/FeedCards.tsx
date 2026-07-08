@@ -11,7 +11,7 @@
 import { useEffect, useRef, useState } from "react";
 import { mount, parseReplay, type ModelId, type PlayerHandle } from "@cartbox/player";
 
-import type { FeedItem } from "@/lib/feedMix";
+import type { FeedCartInfo, FeedClipInfo, FeedItem } from "@/lib/feedMix";
 import { useConsoleInput, useConsoleInputBus } from "./ConsoleInputContext";
 import { cursorHasFocus } from "./useConsoleCursor";
 import type { PlayingCart } from "./consoleOs";
@@ -55,9 +55,83 @@ function Author({ item }: { item: FeedItem }) {
 }
 
 /**
- * A cartridge playable inline. Idle: thumbnail + description. Tapping ▶ mounts
- * the engine into the card and hands the shell buttons to the game; SELECT (or
- * scrolling away) ejects it and returns the buttons to the feed.
+ * Loops a recorded replay of the cart as its gameplay preview: play the clip,
+ * then restart. Purely decorative — no input attaches.
+ */
+function LoopingPreview({ cart, clip }: { cart: FeedCartInfo; clip: FeedClipInfo }) {
+  const stageRef = useRef<HTMLDivElement>(null);
+  const [cycle, setCycle] = useState(0);
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage || !cart.cartUrl) {
+      return;
+    }
+    let handle: PlayerHandle | undefined;
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const response = await fetch(clip.replayUrl, { signal: controller.signal });
+        const replay = parseReplay(await response.text());
+        handle = mount(stage, {
+          cartUrl: cart.cartUrl!,
+          engineUrl: cart.engineUrl ?? undefined,
+          modelId: cart.modelId as ModelId,
+          replay,
+          autostart: true,
+          scale: "fit",
+        });
+      } catch {
+        /* previews are best-effort; the scrim + copy still describe the cart */
+      }
+    })();
+    // Restart shortly after the clip runs out so the loop shows gameplay,
+    // not the idle state the run ended in.
+    const seconds = Math.min(20, Math.max(5, clip.frameCount / 60 + 2));
+    const timer = setTimeout(() => setCycle((count) => count + 1), seconds * 1000);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+      handle?.destroy();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cycle, cart.cartUrl, cart.engineUrl, cart.modelId, clip.replayUrl, clip.frameCount]);
+
+  return <div className="os-card-stage" ref={stageRef} data-testid="cart-preview-loop" />;
+}
+
+/**
+ * Fallback preview when no replay or thumbnail exists: run the cart itself,
+ * silently, with no input attached — its title screen/demo animates.
+ */
+function AttractPreview({ cart }: { cart: FeedCartInfo }) {
+  const stageRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage || !cart.cartUrl || !cart.engineUrl) {
+      return;
+    }
+    let handle: PlayerHandle | null = null;
+    handle = mount(stage, {
+      cartUrl: cart.cartUrl,
+      engineUrl: cart.engineUrl,
+      modelId: cart.modelId as ModelId,
+      controls: "keyboard", // owner is "ui": shell buttons don't forward here
+      scale: "fit",
+      onReady: () => void handle?.resume(),
+    });
+    return () => handle?.destroy();
+  }, [cart.cartUrl, cart.engineUrl, cart.modelId]);
+
+  return <div className="os-card-stage" ref={stageRef} data-testid="cart-preview-attract" />;
+}
+
+/**
+ * A cartridge playable inline. Idle it previews its gameplay (looping replay
+ * → thumbnail → the cart running in attract). ▶ (or the A button) hands the
+ * shell buttons to the game right in the card; SELECT or scrolling away
+ * ejects it.
  */
 function CartCard({ item, active }: CardProps) {
   const stageRef = useRef<HTMLDivElement>(null);
@@ -66,6 +140,7 @@ function CartCard({ item, active }: CardProps) {
   const [playing, setPlaying] = useState(false);
   const [failed, setFailed] = useState(false);
   const cart = item.cart!;
+  const playable = cart.cartUrl !== null && cart.engineUrl !== null;
 
   // Scrolling away ejects the inline game.
   useEffect(() => {
@@ -125,28 +200,44 @@ function CartCard({ item, active }: CardProps) {
     }
   });
 
-  const playable = cart.cartUrl !== null;
+  // The card's background: the live game while playing, otherwise the best
+  // available preview (looping replay → thumbnail → attract run → glyph).
+  let stageContent: React.ReactNode;
+  if (playing) {
+    stageContent = <div className="os-card-stage" ref={stageRef} data-testid="cart-live-stage" />;
+  } else if (active && playable && cart.preview) {
+    stageContent = <LoopingPreview cart={cart} clip={cart.preview} />;
+  } else if (cart.thumbUrl) {
+    stageContent = (
+      <div className="os-card-stage">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={cart.thumbUrl} alt={cart.title} />
+      </div>
+    );
+  } else if (active && playable) {
+    stageContent = <AttractPreview cart={cart} />;
+  } else {
+    stageContent = (
+      <div className="os-card-stage">
+        <span style={{ fontSize: 40 }}>▦</span>
+      </div>
+    );
+  }
 
   return (
     <article className="os-card" data-testid="feed-card-cart">
-      <div className="os-card-stage" ref={stageRef}>
-        {!playing &&
-          (cart.thumbUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={cart.thumbUrl} alt={cart.title} />
-          ) : (
-            <span style={{ fontSize: 40 }}>▦</span>
-          ))}
-      </div>
-      <div className="os-card-scrim" />
-      <Badge kind="cart" />
-      <h3>{cart.title}</h3>
+      {stageContent}
+      {/* No scrim while the game runs — the player deserves the whole frame. */}
+      {!playing && <div className="os-card-scrim" />}
+      {!playing && <Badge kind="cart" />}
+      {!playing && <h3>{cart.title}</h3>}
       {!playing && <p className="os-card-body">{item.body}</p>}
-      <Author item={item} />
+      {!playing && <Author item={item} />}
       {playable ? (
         <button
           type="button"
           className="os-btn"
+          data-testid="play-in-feed"
           onClick={() => {
             setFailed(false);
             setPlaying(!playing);

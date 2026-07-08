@@ -66,15 +66,16 @@ export function HomeFeed({ guest, onPlayCart }: HomeFeedProps) {
 
   useEffect(() => loadFeed(), [loadFeed]);
 
-  // D-pad up/down page between cards while the UI owns the buttons.
+  // D-pad up/down (and the R2/L2 shoulders) page between cards while the UI
+  // owns the buttons.
   useConsoleInput((event) => {
     const scroller = scrollerRef.current;
     if (!scroller || event.phase !== "press" || bus.owner !== "ui") {
       return;
     }
-    if (event.control === "down") {
+    if (event.control === "down" || event.control === "r2") {
       scroller.scrollBy({ top: scroller.clientHeight, behavior: "smooth" });
-    } else if (event.control === "up") {
+    } else if (event.control === "up" || event.control === "l2") {
       scroller.scrollBy({ top: -scroller.clientHeight, behavior: "smooth" });
     }
   });

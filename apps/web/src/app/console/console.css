@@ -26,6 +26,10 @@
   --hh-control-b: #241d38;
   --hh-control-ink: #9990bb;
   --hh-control-ink-active: #ece9f8;
+  --hh-dpad-a: var(--hh-control-a);
+  --hh-dpad-b: var(--hh-control-b);
+  --hh-joy-a: var(--hh-control-a);
+  --hh-joy-b: var(--hh-control-b);
   /* Face buttons — the data-buttons blocks override these. */
   --hh-face-ink: #14101f;
   --hh-face-x-hi: #8f86c6;
@@ -129,6 +133,19 @@
 
 /* --- Face-button color options --------------------------------------------- */
 
+/* Four-color always means the SNES set, whatever the theme picked. */
+.hh-root[data-buttons="snes"] {
+  --hh-face-ink: #14101f;
+  --hh-face-x-hi: #8f86c6;
+  --hh-face-x-lo: #5c519b;
+  --hh-face-y-hi: #6fdfa8;
+  --hh-face-y-lo: #2f9c66;
+  --hh-face-a-hi: #ffca66;
+  --hh-face-a-lo: #d99a2b;
+  --hh-face-b-hi: #ff8fae;
+  --hh-face-b-lo: #d24a72;
+}
+
 .hh-root[data-buttons="mono"] {
   --hh-face-ink: #ece9f8;
   --hh-face-x-hi: #3a3550;
@@ -186,7 +203,27 @@
       "system system";
     grid-template-rows: minmax(0, 1fr) auto auto;
     grid-template-columns: 1fr 1fr;
-    row-gap: 14px;
+    row-gap: 12px;
+    /* Edge-to-edge screen: the bezel owns the full phone width. */
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+    padding-top: env(safe-area-inset-top);
+  }
+
+  .hh-screen-bezel {
+    border-radius: 0 0 18px 18px;
+    border-left: none;
+    border-right: none;
+    border-top: none;
+    padding: 6px 4px 8px;
+  }
+
+  .hh-left {
+    padding-left: 10px;
+  }
+
+  .hh-right {
+    padding-right: 10px;
   }
 }
 
@@ -301,7 +338,7 @@
   border: none;
   margin: 0;
   padding: 0;
-  background: linear-gradient(180deg, var(--hh-control-a) 0%, var(--hh-control-b) 100%);
+  background: linear-gradient(180deg, var(--hh-dpad-a) 0%, var(--hh-dpad-b) 100%);
   color: var(--hh-control-ink);
   font-size: 15px;
   display: flex;
@@ -321,7 +358,7 @@
 }
 .hh-dpad-center {
   grid-area: 2 / 2;
-  background: var(--hh-control-b);
+  background: var(--hh-dpad-b);
   pointer-events: none;
 }
 .hh-dpad-center::after {
@@ -329,7 +366,7 @@
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: radial-gradient(circle at 35% 30%, var(--hh-control-a), var(--hh-control-b) 70%);
+  background: radial-gradient(circle at 35% 30%, var(--hh-dpad-a), var(--hh-dpad-b) 70%);
 }
 .hh-dpad-right {
   grid-area: 2 / 3;
@@ -342,7 +379,7 @@
 
 .hh-dpad-btn:active,
 .hh-dpad-btn[data-pressed="true"] {
-  background: var(--hh-control-b);
+  background: var(--hh-dpad-b);
   color: var(--hh-control-ink-active);
   transform: translateY(1px);
 }
@@ -453,6 +490,9 @@
 .os-stage {
   position: absolute;
   inset: 0;
+  /* Each stage is its own stacking context, so in-card z-indexes can never
+     bleed through a later overlay (settings over the feed, for example). */
+  z-index: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -742,7 +782,7 @@
 .os-card-stage {
   position: absolute;
   inset: 0;
-  z-index: -1;
+  z-index: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -758,8 +798,16 @@
 .os-card-scrim {
   position: absolute;
   inset: 0;
-  z-index: -1;
+  z-index: 0;
   background: linear-gradient(180deg, transparent 40%, rgba(5, 3, 8, 0.92) 82%);
+}
+
+/* Card copy and buttons float above the stage/scrim. (Negative z-index on
+   the stage painted it beneath the screen's opaque background — the original
+   invisible-gameplay bug.) */
+.os-card > :not(.os-card-stage):not(.os-card-scrim) {
+  position: relative;
+  z-index: 1;
 }
 
 .os-trivia-choices {
@@ -1082,7 +1130,7 @@ select.os-input {
   width: 108px;
   height: 108px;
   border-radius: 50%;
-  background: radial-gradient(circle at 50% 42%, var(--hh-control-a), var(--hh-control-b) 75%);
+  background: radial-gradient(circle at 50% 42%, var(--hh-joy-a), var(--hh-joy-b) 75%);
   box-shadow: inset 0 3px 8px rgba(0, 0, 0, 0.55), 0 1px 0 rgba(255, 255, 255, 0.06);
   display: flex;
   align-items: center;
@@ -1094,7 +1142,7 @@ select.os-input {
   width: 52px;
   height: 52px;
   border-radius: 50%;
-  background: radial-gradient(circle at 38% 30%, var(--hh-control-a), var(--hh-control-b) 80%);
+  background: radial-gradient(circle at 38% 30%, var(--hh-joy-a), var(--hh-joy-b) 80%);
   border: 1px solid rgba(0, 0, 0, 0.4);
   box-shadow: 0 4px 8px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.12);
   pointer-events: none;
@@ -1109,6 +1157,85 @@ select.os-input {
 .hh-system .hh-joystick-knob {
   width: 36px;
   height: 36px;
+}
+
+/* Compact D-pad for the system row (when swapped under "Both"). */
+.hh-dpad-compact {
+  grid-template: repeat(3, 30px) / repeat(3, 30px);
+}
+
+.hh-dpad-compact .hh-dpad-btn {
+  font-size: 10px;
+}
+
+.hh-dpad-compact .hh-dpad-center::after {
+  width: 14px;
+  height: 14px;
+}
+
+/* Shoulder buttons: a row above each control cluster (L1/L2 left, R2/R1 right). */
+.hh-left,
+.hh-right {
+  flex-direction: column;
+  gap: 10px;
+}
+
+.hh-shoulders {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.hh-right .hh-shoulders {
+  justify-content: flex-end;
+}
+
+.hh-shoulder {
+  appearance: none;
+  border: none;
+  padding: 7px 16px;
+  border-radius: 10px 10px 6px 6px;
+  background: linear-gradient(180deg, var(--hh-control-a), var(--hh-control-b));
+  color: var(--hh-control-ink);
+  font: 700 10px var(--font-data);
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  touch-action: none;
+  box-shadow: 0 2px 0 rgba(0, 0, 0, 0.5);
+}
+
+.hh-shoulder:active,
+.hh-shoulder[data-pressed="true"] {
+  transform: translateY(1px);
+  color: var(--hh-control-ink-active);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.5);
+}
+
+/* Custom color pickers in settings. */
+.os-color-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.os-color-field {
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  font: 700 9px var(--font-data);
+  letter-spacing: 0.12em;
+  color: #9990bb;
+}
+
+.os-color {
+  width: 44px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid #2f2846;
+  border-radius: 8px;
+  background: #15121f;
+  cursor: pointer;
 }
 
 /* Mini-game dock: a canvas living behind the controls. Portrait covers the
@@ -1155,7 +1282,7 @@ select.os-input {
   display: flex;
   align-items: center;
   justify-content: center;
-  opacity: 0.45;
+  opacity: 0.8;
 }
 
 .hh-minigame-cart[data-live="true"] {

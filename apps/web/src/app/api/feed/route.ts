@@ -46,8 +46,26 @@ async function fetchCartItems(db: ReturnType<typeof serviceClient>): Promise<Fee
     .order("created_at", { ascending: false })
     .limit(CART_LIMIT);
 
+  // Each cart's most recent replay loops as the card's gameplay preview.
+  const cartIds = (data ?? []).map((cart) => cart.id);
+  const previewByCart = new Map<string, { id: string; data_r2_key: string; frame_count: number }>();
+  if (cartIds.length > 0) {
+    const { data: replays } = await db
+      .from("replays")
+      .select("id, cart_id, data_r2_key, frame_count, created_at")
+      .in("cart_id", cartIds)
+      .order("created_at", { ascending: false })
+      .limit(60);
+    for (const replay of replays ?? []) {
+      if (!previewByCart.has(replay.cart_id)) {
+        previewByCart.set(replay.cart_id, replay);
+      }
+    }
+  }
+
   return (data ?? []).map((cart) => {
     const isFree = cart.price_cents === 0;
+    const preview = previewByCart.get(cart.id);
     return {
       id: `cart:${cart.id}`,
       kind: "cart" as FeedItemKind,
@@ -65,6 +83,14 @@ async function fetchCartItems(db: ReturnType<typeof serviceClient>): Promise<Fee
         // Paid carts route through the detail page for the buy flow instead.
         cartUrl: isFree ? publicUrl(cart.r2_key) : null,
         engineUrl: isFree ? engineUrlForModel(cart.console_model) : null,
+        preview:
+          preview && isFree
+            ? {
+                replayId: preview.id,
+                replayUrl: publicUrl(preview.data_r2_key),
+                frameCount: preview.frame_count,
+              }
+            : null,
       },
     };
   });
