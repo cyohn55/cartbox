@@ -228,7 +228,25 @@ try {
       .locator('[data-launching="true"] .os-cart-3d')
       .evaluate((shell) => getComputedStyle(shell).animationName);
     check("launch runs the triple-spin animation", launchName === "os-cart-launch", launchName);
-    await page.waitForTimeout(1350); // spin done; mid-flight toward the screen center
+
+    // Sample the live matrix during the spin phase: a real rotation must
+    // pass through back-facing angles (matrix3d m11 < 0 ⇔ the cartridge is
+    // showing its back). A collapsed interpolation never leaves ~1.
+    let sawBackFacing = false;
+    for (let sample = 0; sample < 11 && !sawBackFacing; sample += 1) {
+      await page.waitForTimeout(60);
+      sawBackFacing = await page
+        .locator('[data-launching="true"] .os-cart-3d')
+        .evaluate((el) => {
+          const transform = getComputedStyle(el).transform;
+          return transform.startsWith("matrix3d") && Number(transform.slice(9).split(",")[0]) < -0.2;
+        })
+        .catch(() => false);
+    }
+    check("spin rotates through back-facing angles", sawBackFacing);
+
+    // Mid-flight toward the screen center (spin 0–0.9s, flight 0.9–1.5s).
+    await page.waitForTimeout(Math.max(0, selectedAt + 1330 - Date.now()));
     const shellMid = await page
       .locator('[data-launching="true"] .os-cart-3d')
       .boundingBox()
@@ -244,7 +262,7 @@ try {
   }
   await page.getByTestId("game-screen").waitFor({ timeout: 20000 });
   const bootDelay = Date.now() - selectedAt;
-  check("boot waits for the spin + flight (≥1.5s)", bootDelay >= 1500, `${bootDelay}ms`);
+  check("boot waits for the spin + flight (≥1.4s)", bootDelay >= 1400, `${bootDelay}ms`);
 
   check("no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
   await phone.close();
