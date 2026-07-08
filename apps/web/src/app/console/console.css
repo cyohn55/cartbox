@@ -1027,7 +1027,7 @@
    explicit 90° steps because browsers that fall back to matrix
    interpolation normalize angles modulo 360° — a single 0→1080° segment
    collapses to "no rotation". A quarter turn per segment is unambiguous
-   everywhere. Spin runs 0–60% (0.9s ≈ 0.3s per revolution), flight
+   everywhere. Spin runs 0–60% (1.08s ≈ 0.36s per revolution), flight
    60–100%. */
 @keyframes os-cart-launch {
   0% {
@@ -1099,7 +1099,7 @@
 }
 
 .os-cart-card[data-launching="true"] .os-cart-3d {
-  animation: os-cart-launch 1.5s forwards;
+  animation: os-cart-launch 1.8s forwards;
 }
 
 @media (prefers-reduced-motion: reduce) {

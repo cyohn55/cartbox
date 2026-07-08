@@ -245,8 +245,8 @@ try {
     }
     check("spin rotates through back-facing angles", sawBackFacing);
 
-    // Mid-flight toward the screen center (spin 0–0.9s, flight 0.9–1.5s).
-    await page.waitForTimeout(Math.max(0, selectedAt + 1330 - Date.now()));
+    // Mid-flight toward the screen center (spin 0–1.08s, flight 1.08–1.8s).
+    await page.waitForTimeout(Math.max(0, selectedAt + 1600 - Date.now()));
     const shellMid = await page
       .locator('[data-launching="true"] .os-cart-3d')
       .boundingBox()
@@ -262,7 +262,7 @@ try {
   }
   await page.getByTestId("game-screen").waitFor({ timeout: 20000 });
   const bootDelay = Date.now() - selectedAt;
-  check("boot waits for the spin + flight (≥1.4s)", bootDelay >= 1400, `${bootDelay}ms`);
+  check("boot waits for the spin + flight (≥1.7s)", bootDelay >= 1700, `${bootDelay}ms`);
 
   check("no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
   await phone.close();

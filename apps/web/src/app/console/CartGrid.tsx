@@ -24,9 +24,9 @@ const CARTRIDGE_FACE_URLS = {
 /**
  * The boot normally fires on the os-cart-launch animationend event. This is
  * the safety net for the cases where that event never comes (an interrupted
- * animation, an odd browser): roughly double the 1.5s the keyframes run.
+ * animation, an odd browser): roughly double the 1.8s the keyframes run.
  */
-const LAUNCH_FALLBACK_MS = 3200;
+const LAUNCH_FALLBACK_MS = 3600;
 
 export interface GridCart {
   id: string;
