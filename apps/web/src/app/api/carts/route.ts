@@ -26,7 +26,7 @@ export async function GET(request: Request): Promise<NextResponse> {
   const db = serviceClient();
   let query = db
     .from("carts")
-    .select("id, title, slug, tags, price_cents, thumb_key, plays, owner_id")
+    .select("id, title, slug, tags, price_cents, thumb_key, plays, owner_id, console_model, r2_key")
     .eq("published", true)
     .order("created_at", { ascending: false })
     .limit(limit);
@@ -40,9 +40,12 @@ export async function GET(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  const carts = data.map((cart) => ({
+  // cartUrl is exposed only for free carts — paid carts go through the store
+  // page and its entitlement check, so their binary URL stays off this list.
+  const carts = data.map(({ r2_key, ...cart }) => ({
     ...cart,
     thumbUrl: cart.thumb_key ? publicUrl(cart.thumb_key) : null,
+    cartUrl: cart.price_cents === 0 ? publicUrl(r2_key) : null,
   }));
   return NextResponse.json({ carts });
 }

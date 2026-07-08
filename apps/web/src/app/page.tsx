@@ -1,10 +1,17 @@
 import Link from "next/link";
 
+import { MobileConsoleRedirect } from "./MobileConsoleRedirect";
+
 export default function HomePage() {
   return (
     <main>
+      {/* Phones boot straight into the handheld console. */}
+      <MobileConsoleRedirect />
       <h1>Cartbox</h1>
       <p>Make and play tiny games. Play free in your browser; keep the revenue on what you sell.</p>
+      <p>
+        <Link href="/console">Power on the handheld console →</Link>
+      </p>
       <p>
         <Link href="/edit/new">Create a Classic cartridge →</Link>
       </p>

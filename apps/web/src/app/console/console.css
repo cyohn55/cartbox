@@ -1,0 +1,890 @@
+/*
+ * Handheld console shell + console OS styling.
+ *
+ * One DOM structure, two physical layouts driven by orientation:
+ *  - Portrait  = Game Boy: screen on top; D-pad left / face buttons right below.
+ *  - Landscape = AYN Thor: screen centered; controls flank it left and right.
+ *
+ * The shell is a fixed overlay covering the whole viewport (including the
+ * site header), so entering the console feels like picking up a device, not
+ * visiting a page. Colors extend the Cartbox indigo-workbench tokens.
+ */
+
+.hh-root {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  background: radial-gradient(120% 120% at 50% 0%, #241d38 0%, #0d0b16 70%);
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+
+/* The device body. Grid areas move between orientations. */
+.hh-shell {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  padding: calc(10px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right))
+    calc(12px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left));
+  background: linear-gradient(165deg, #221c36 0%, #16121f 55%, #120e1c 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 -14px 30px rgba(0, 0, 0, 0.45);
+}
+
+/* Game Boy layout: screen block on top, controls below. */
+@media (orientation: portrait) {
+  .hh-shell {
+    grid-template-areas:
+      "screen screen"
+      "left   right"
+      "system system";
+    grid-template-rows: minmax(0, 1fr) auto auto;
+    grid-template-columns: 1fr 1fr;
+    row-gap: 14px;
+  }
+}
+
+/* AYN Thor layout: controls flanking a centered screen. */
+@media (orientation: landscape) {
+  .hh-shell {
+    grid-template-areas:
+      "left screen right"
+      "left system right";
+    grid-template-columns: minmax(128px, 18%) minmax(0, 1fr) minmax(128px, 18%);
+    grid-template-rows: minmax(0, 1fr) auto;
+    column-gap: 12px;
+    row-gap: 6px;
+  }
+}
+
+/* --- Screen ---------------------------------------------------------------- */
+
+.hh-screen-bezel {
+  grid-area: screen;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 10px 12px 8px;
+  border-radius: 18px;
+  background: linear-gradient(180deg, #0b0913 0%, #100d1b 100%);
+  border: 1px solid #2f2846;
+  box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.8), 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.hh-bezel-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 2px 6px;
+  font-size: 10px;
+  letter-spacing: 0.24em;
+  color: #6b638c;
+  font-weight: 700;
+}
+
+.hh-power-led {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ff5d8f;
+  box-shadow: 0 0 8px 2px rgba(255, 93, 143, 0.6);
+}
+
+.hh-screen {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #08060f;
+  border: 1px solid #1d1830;
+}
+
+/* Subtle CRT scanlines + glass sheen over whatever the OS draws. */
+.hh-screen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(115deg, rgba(255, 255, 255, 0.05) 0%, transparent 30%),
+    repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.14) 0 1px, transparent 1px 3px);
+  z-index: 5;
+}
+
+/* --- Controls -------------------------------------------------------------- */
+
+.hh-left {
+  grid-area: left;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hh-right {
+  grid-area: right;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hh-system {
+  grid-area: system;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  padding-bottom: 2px;
+}
+
+@media (orientation: landscape) {
+  .hh-system {
+    gap: 40px;
+  }
+}
+
+/* D-pad: a 3x3 cross. */
+.hh-dpad {
+  display: grid;
+  grid-template: repeat(3, 46px) / repeat(3, 46px);
+  filter: drop-shadow(0 3px 4px rgba(0, 0, 0, 0.5));
+}
+
+.hh-dpad-btn {
+  appearance: none;
+  border: none;
+  margin: 0;
+  padding: 0;
+  background: linear-gradient(180deg, #322a4e 0%, #241d38 100%);
+  color: #9990bb;
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.hh-dpad-up {
+  grid-area: 1 / 2;
+  border-radius: 9px 9px 0 0;
+}
+.hh-dpad-left {
+  grid-area: 2 / 1;
+  border-radius: 9px 0 0 9px;
+}
+.hh-dpad-center {
+  grid-area: 2 / 2;
+  background: #241d38;
+  pointer-events: none;
+}
+.hh-dpad-center::after {
+  content: "";
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #322a4e, #1d1830 70%);
+}
+.hh-dpad-right {
+  grid-area: 2 / 3;
+  border-radius: 0 9px 9px 0;
+}
+.hh-dpad-down {
+  grid-area: 3 / 2;
+  border-radius: 0 0 9px 9px;
+}
+
+.hh-dpad-btn:active,
+.hh-dpad-btn[data-pressed="true"] {
+  background: #1d1830;
+  color: #ece9f8;
+  transform: translateY(1px);
+}
+
+/* Face buttons: SNES diamond — X top, Y left, A right, B bottom. */
+.hh-face {
+  display: grid;
+  grid-template: repeat(3, 50px) / repeat(3, 50px);
+  place-items: center;
+}
+
+.hh-face-btn {
+  appearance: none;
+  border: none;
+  margin: 0;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  font: 700 16px/1 var(--font-ui);
+  color: #14101f;
+  cursor: pointer;
+  touch-action: none;
+  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.hh-face-x {
+  grid-area: 1 / 2;
+  background: radial-gradient(circle at 35% 30%, #8f86c6, #5c519b);
+}
+.hh-face-y {
+  grid-area: 2 / 1;
+  background: radial-gradient(circle at 35% 30%, #6fdfa8, #2f9c66);
+}
+.hh-face-a {
+  grid-area: 2 / 3;
+  background: radial-gradient(circle at 35% 30%, #ffca66, #d99a2b);
+}
+.hh-face-b {
+  grid-area: 3 / 2;
+  background: radial-gradient(circle at 35% 30%, #ff8fae, #d24a72);
+}
+
+.hh-face-btn:active,
+.hh-face-btn[data-pressed="true"] {
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.55), inset 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+/* Start / Select pills. */
+.hh-pill {
+  appearance: none;
+  border: none;
+  padding: 6px 18px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #322a4e, #241d38);
+  color: #9990bb;
+  font: 600 10px/1 var(--font-ui);
+  letter-spacing: 0.18em;
+  cursor: pointer;
+  touch-action: none;
+  box-shadow: 0 2px 0 rgba(0, 0, 0, 0.5);
+  transform: rotate(-14deg);
+}
+
+.hh-pill:active,
+.hh-pill[data-pressed="true"] {
+  transform: rotate(-14deg) translateY(1px);
+  color: #ece9f8;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.5);
+}
+
+@media (orientation: landscape) {
+  .hh-pill {
+    transform: rotate(0deg);
+  }
+  .hh-pill:active,
+  .hh-pill[data-pressed="true"] {
+    transform: translateY(1px);
+  }
+}
+
+/* Speaker grill flourish (portrait only, like the Game Boy's lower-right). */
+.hh-speaker {
+  position: absolute;
+  right: 18px;
+  bottom: calc(14px + env(safe-area-inset-bottom));
+  width: 64px;
+  height: 44px;
+  background: repeating-linear-gradient(
+    -35deg,
+    transparent 0 8px,
+    rgba(0, 0, 0, 0.45) 8px 12px
+  );
+  border-radius: 8px;
+  pointer-events: none;
+}
+
+@media (orientation: landscape) {
+  .hh-speaker {
+    display: none;
+  }
+}
+
+/* ==========================================================================
+ * Console OS — everything drawn inside .hh-screen
+ * ======================================================================== */
+
+.os-stage {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  color: #ece9f8;
+}
+
+/* --- Boot loader ----------------------------------------------------------- */
+
+.os-boot {
+  padding: 14px;
+  font-family: var(--font-data);
+  font-size: 12px;
+  line-height: 1.7;
+  color: #57d18d;
+  background: #050308;
+}
+
+.os-boot-line {
+  white-space: pre-wrap;
+  animation: os-boot-line-in 0.08s steps(1) both;
+}
+
+.os-boot-cursor::after {
+  content: "▮";
+  animation: os-blink 0.8s steps(1) infinite;
+}
+
+@keyframes os-boot-line-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes os-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* --- Title screen ----------------------------------------------------------- */
+
+.os-title {
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  background:
+    radial-gradient(80% 60% at 50% 20%, rgba(246, 183, 74, 0.12), transparent 70%),
+    #08060f;
+  cursor: pointer;
+}
+
+.os-title-logo {
+  font: 800 clamp(34px, 9vw, 56px) / 1 var(--font-ui);
+  letter-spacing: 0.06em;
+  color: #f6b74a;
+  text-shadow:
+    0 0 24px rgba(246, 183, 74, 0.45),
+    3px 3px 0 #57154a;
+  animation: os-title-in 0.9s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+
+.os-title-sub {
+  color: #9990bb;
+  font-size: 12px;
+  letter-spacing: 0.2em;
+}
+
+.os-title-start {
+  margin-top: 12px;
+  font: 700 13px/1 var(--font-data);
+  letter-spacing: 0.28em;
+  color: #ece9f8;
+  animation: os-blink 1.2s steps(1) infinite;
+}
+
+@keyframes os-title-in {
+  from {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* --- Auth screen ------------------------------------------------------------ */
+
+.os-auth {
+  padding: 20px 18px;
+  gap: 12px;
+  overflow-y: auto;
+  background: #08060f;
+}
+
+.os-auth h2 {
+  font-size: 16px;
+  letter-spacing: 0.08em;
+  color: #f6b74a;
+  margin: 0;
+}
+
+.os-auth form {
+  display: grid;
+  gap: 8px;
+}
+
+.os-input {
+  font: 14px var(--font-ui);
+  color: #ece9f8;
+  background: #15121f;
+  border: 1px solid #2f2846;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.os-input:focus {
+  outline: none;
+  border-color: #f6b74a;
+}
+
+.os-btn {
+  font: 650 13px var(--font-ui);
+  letter-spacing: 0.04em;
+  color: #1c1305;
+  background: #f6b74a;
+  border: none;
+  border-radius: 8px;
+  padding: 11px 12px;
+  cursor: pointer;
+}
+
+.os-btn:disabled {
+  opacity: 0.6;
+}
+
+.os-btn-ghost {
+  background: transparent;
+  color: #9990bb;
+  border: 1px solid #2f2846;
+}
+
+.os-error {
+  color: #ff5d8f;
+  font-size: 12px;
+  margin: 0;
+}
+
+.os-auth-switch {
+  background: none;
+  border: none;
+  color: #f6b74a;
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+
+/* --- Shell (tabs + screens) -------------------------------------------------- */
+
+.os-shell {
+  background: #08060f;
+}
+
+.os-screen-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.os-tabbar {
+  display: flex;
+  border-top: 1px solid #1d1830;
+  background: #0b0913;
+}
+
+.os-tab {
+  flex: 1;
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 8px 0 9px;
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  font: 600 9px var(--font-ui);
+  letter-spacing: 0.14em;
+  color: #6b638c;
+  cursor: pointer;
+}
+
+.os-tab[data-active="true"] {
+  color: #f6b74a;
+}
+
+.os-tab-icon {
+  font-size: 15px;
+  line-height: 1;
+}
+
+/* --- Feed -------------------------------------------------------------------- */
+
+.os-feed {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  scroll-snap-type: y mandatory;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+
+.os-feed::-webkit-scrollbar {
+  display: none;
+}
+
+.os-card {
+  position: relative;
+  height: 100%;
+  scroll-snap-align: start;
+  scroll-snap-stop: always;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 14px;
+  gap: 8px;
+  border-bottom: 1px solid #15121f;
+  overflow: hidden;
+}
+
+.os-card-kind {
+  font: 700 9px var(--font-data);
+  letter-spacing: 0.22em;
+  color: #08060f;
+  background: #f6b74a;
+  border-radius: 4px;
+  padding: 3px 7px;
+  width: fit-content;
+}
+
+.os-card-kind[data-kind="clip"] {
+  background: #ff5d8f;
+  color: #fff;
+}
+.os-card-kind[data-kind="achievement"] {
+  background: #57d18d;
+  color: #062b17;
+}
+.os-card-kind[data-kind="news"] {
+  background: #8f86c6;
+  color: #14101f;
+}
+.os-card-kind[data-kind="lfp"] {
+  background: #ff8fae;
+  color: #3d0f1e;
+}
+.os-card-kind[data-kind="dev_tip"],
+.os-card-kind[data-kind="dev_post"] {
+  background: #6fdfa8;
+  color: #062b17;
+}
+
+.os-card h3 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.25;
+}
+
+.os-card-body {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #9990bb;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.os-card-author {
+  font: 600 10px var(--font-data);
+  letter-spacing: 0.06em;
+  color: #6b638c;
+}
+
+.os-card-stage {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #050308;
+}
+
+.os-card-stage canvas,
+.os-card-stage img {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.os-card-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(180deg, transparent 40%, rgba(5, 3, 8, 0.92) 82%);
+}
+
+.os-trivia-choices {
+  display: grid;
+  gap: 6px;
+}
+
+.os-trivia-choice {
+  text-align: left;
+  font: 600 12px var(--font-ui);
+  color: #ece9f8;
+  background: #15121f;
+  border: 1px solid #2f2846;
+  border-radius: 8px;
+  padding: 9px 11px;
+  cursor: pointer;
+}
+
+.os-trivia-choice[data-result="right"] {
+  border-color: #57d18d;
+  color: #57d18d;
+}
+
+.os-trivia-choice[data-result="wrong"] {
+  border-color: #ff5d8f;
+  color: #ff5d8f;
+}
+
+/* --- Browse / Library grids ---------------------------------------------------- */
+
+.os-page {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  padding: 12px;
+  overscroll-behavior: contain;
+}
+
+.os-page h2 {
+  font-size: 13px;
+  letter-spacing: 0.18em;
+  color: #f6b74a;
+  margin: 2px 0 10px;
+}
+
+.os-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.os-grid-card {
+  text-align: left;
+  background: #100d1b;
+  border: 1px solid #1d1830;
+  border-radius: 10px;
+  overflow: hidden;
+  cursor: pointer;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+}
+
+.os-grid-thumb {
+  width: 100%;
+  aspect-ratio: 240 / 136;
+  object-fit: cover;
+  image-rendering: pixelated;
+  display: block;
+  background: #050308;
+}
+
+.os-grid-thumb-empty {
+  width: 100%;
+  aspect-ratio: 240 / 136;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  background: linear-gradient(135deg, #15121f, #241d38);
+}
+
+.os-grid-meta {
+  padding: 7px 9px 9px;
+  display: grid;
+  gap: 2px;
+}
+
+.os-grid-title {
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.os-grid-sub {
+  font: 500 10px var(--font-data);
+  color: #6b638c;
+}
+
+.os-empty {
+  color: #6b638c;
+  font-size: 12.5px;
+  text-align: center;
+  padding: 32px 16px;
+  line-height: 1.6;
+}
+
+/* --- Profile ------------------------------------------------------------------ */
+
+.os-profile-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.os-profile-name {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.os-profile-handle {
+  font: 500 11px var(--font-data);
+  color: #6b638c;
+}
+
+.os-section-title {
+  font: 700 10px var(--font-data);
+  letter-spacing: 0.2em;
+  color: #9990bb;
+  margin: 14px 0 8px;
+}
+
+.os-trophy {
+  display: flex;
+  gap: 9px;
+  align-items: baseline;
+  padding: 7px 0;
+  border-bottom: 1px solid #15121f;
+  font-size: 12.5px;
+}
+
+.os-trophy-points {
+  margin-left: auto;
+  font: 600 11px var(--font-data);
+  color: #f6b74a;
+  white-space: nowrap;
+}
+
+/* --- Community composer ---------------------------------------------------------- */
+
+.os-compose-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 6;
+  appearance: none;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 14px;
+  font: 700 11px var(--font-data);
+  letter-spacing: 0.12em;
+  background: #f6b74a;
+  color: #1c1305;
+  cursor: pointer;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.5);
+}
+
+.os-compose-btn:active {
+  transform: translateY(1px);
+}
+
+.os-kind-toggle {
+  display: flex;
+  gap: 6px;
+}
+
+.os-kind-option {
+  flex: 1;
+  appearance: none;
+  border: 1px solid #2f2846;
+  border-radius: 8px;
+  background: #15121f;
+  color: #9990bb;
+  font: 700 9.5px var(--font-data);
+  letter-spacing: 0.1em;
+  padding: 9px 4px;
+  cursor: pointer;
+}
+
+.os-kind-option[data-active="true"] {
+  border-color: #f6b74a;
+  color: #f6b74a;
+}
+
+.os-char-count {
+  font: 500 10px var(--font-data);
+  color: #6b638c;
+  text-align: right;
+}
+
+textarea.os-input {
+  resize: none;
+  font-family: var(--font-ui);
+}
+
+select.os-input {
+  appearance: none;
+}
+
+/* Featured-clip picker: picked cards glow amber and show their order. */
+.os-grid-card[data-picked="true"] {
+  border-color: #f6b74a;
+}
+
+.os-pick-order {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f6b74a;
+  color: #1c1305;
+  font: 700 13px var(--font-data);
+}
+
+/* --- Full-screen game ----------------------------------------------------------- */
+
+.os-game {
+  background: #050308;
+}
+
+.os-game-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.os-game-stage canvas {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.os-game-hint {
+  padding: 5px 10px;
+  font: 600 9px var(--font-data);
+  letter-spacing: 0.14em;
+  color: #6b638c;
+  text-align: center;
+  background: #0b0913;
+  border-top: 1px solid #15121f;
+}
+
+.os-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #6b638c;
+  font: 600 11px var(--font-data);
+  letter-spacing: 0.2em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .os-title-logo,
+  .os-boot-line {
+    animation: none;
+  }
+}

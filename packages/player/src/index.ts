@@ -24,6 +24,11 @@ export type {
 export { ConsoleButton } from "./types.js";
 export { CartridgeLoadError } from "./cartridge.js";
 
+// Keyboard binding table. Exposed so hosts that render their own physical
+// controls (e.g. the handheld console shell) can synthesize key events that
+// match the engine's expected layout instead of duplicating it.
+export { DEFAULT_KEY_BINDINGS, resolveButton } from "./input.js";
+
 // Deterministic replays. Exported for server-side use too (e.g. verifying a
 // submitted score by re-running the replay headlessly).
 export {
