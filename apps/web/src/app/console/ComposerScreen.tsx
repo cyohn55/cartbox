@@ -76,12 +76,12 @@ export function ComposerScreen({ guest, onPosted, onClose }: ComposerScreenProps
 
   if (guest) {
     return (
-      <div className="os-stage os-auth" data-testid="composer-screen">
+      <div className="os-stage os-auth" data-console-nav data-testid="composer-screen">
         <h2>POST TO THE COMMUNITY</h2>
         <p className="os-card-body">
           Posts carry your player name — sign in to invite players or share a devlog.
         </p>
-        <button type="button" className="os-btn os-btn-ghost" onClick={onClose}>
+        <button type="button" className="os-btn os-btn-ghost" data-console-back onClick={onClose}>
           BACK TO FEED
         </button>
       </div>
@@ -115,7 +115,7 @@ export function ComposerScreen({ guest, onPosted, onClose }: ComposerScreenProps
   };
 
   return (
-    <div className="os-stage os-auth" data-testid="composer-screen">
+    <div className="os-stage os-auth" data-console-nav data-testid="composer-screen">
       <h2>POST TO THE COMMUNITY</h2>
 
       <div className="os-kind-toggle" role="tablist" aria-label="Post type">
@@ -180,7 +180,7 @@ export function ComposerScreen({ guest, onPosted, onClose }: ComposerScreenProps
         <button type="submit" className="os-btn" disabled={busy}>
           {busy ? "…" : "PUBLISH"}
         </button>
-        <button type="button" className="os-btn os-btn-ghost" onClick={onClose}>
+        <button type="button" className="os-btn os-btn-ghost" data-console-back onClick={onClose}>
           CANCEL
         </button>
       </form>

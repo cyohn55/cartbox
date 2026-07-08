@@ -1,16 +1,18 @@
 "use client";
 
 /**
- * The physical handheld: screen bezel plus D-pad, four face buttons (A/B/X/Y),
- * and Start/Select. One DOM structure; CSS grid re-arranges it by orientation
+ * The physical handheld: screen bezel plus controls — D-pad and/or virtual
+ * joystick per the player's settings, four face buttons (A/B/X/Y), and
+ * Start/Select. One DOM structure; CSS grid re-arranges it by orientation
  * (portrait = Game Boy stack, landscape = AYN Thor flanks — see console.css).
  *
- * Every control publishes press/release into the ConsoleInputBus, which the
- * console OS consumes for navigation and forwards to a running cartridge as
- * synthetic key events.
+ * Personalization lives here too: the selected theme/button colors apply as
+ * data- attributes the stylesheet keys on, and the arcade theme docks a
+ * mini-game behind the controls. Entering the Konami code (↑↑↓↓←→←→BA) hands
+ * the controls to that game; SELECT hands them back.
  */
 
-import { useMemo, useState, type PointerEvent, type ReactNode } from "react";
+import { useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react";
 
 import "./console.css";
 import {
@@ -18,7 +20,12 @@ import {
   createWindowKeyDispatcher,
   type ConsoleControl,
 } from "./consoleInput";
-import { ConsoleInputContext } from "./ConsoleInputContext";
+import { ConsoleInputContext, useConsoleInput } from "./ConsoleInputContext";
+import { ConsoleSettingsProvider, useConsoleSettings } from "./ConsoleSettingsContext";
+import { KonamiDetector } from "./consoleNavigation";
+import { resolveMiniGame } from "./minigames/registry";
+import { Joystick } from "./Joystick";
+import { MiniGameDock } from "./MiniGameDock";
 
 interface ShellButtonProps {
   bus: ConsoleInputBus;
@@ -64,6 +71,8 @@ function ShellButton({ bus, control, className, label, children }: ShellButtonPr
       onPointerDown={press}
       onPointerUp={release}
       onPointerCancel={release}
+      // Physical buttons must never steal the UI cursor's DOM focus.
+      onMouseDown={(event) => event.preventDefault()}
       onContextMenu={(event) => event.preventDefault()}
     >
       {children}
@@ -71,24 +80,57 @@ function ShellButton({ bus, control, className, label, children }: ShellButtonPr
   );
 }
 
-export function HandheldConsole({ children }: { children: ReactNode }) {
-  // One bus per mounted console. The dispatcher only touches `window` when a
-  // button actually fires, so constructing it during SSR is safe.
-  const bus = useMemo(() => new ConsoleInputBus(createWindowKeyDispatcher()), []);
+function Shell({ bus, children }: { bus: ConsoleInputBus; children: ReactNode }) {
+  const { settings, setPanelOpen } = useConsoleSettings();
+  const konamiRef = useRef(new KonamiDetector());
+  const [miniGameLive, setMiniGameLive] = useState(false);
+
+  const miniGame = useMemo(() => resolveMiniGame(settings.miniGame, new Date()), [settings.miniGame]);
+  const showDpad = settings.controls === "dpad" || settings.controls === "both";
+  const showJoystick = settings.controls === "joystick" || settings.controls === "both";
+  // The dock idles (attract mode) on the arcade shell; the Konami code
+  // summons it on any theme.
+  const dockVisible = settings.theme === "arcade" || miniGameLive;
+
+  useConsoleInput((event) => {
+    if (event.phase === "press" && bus.owner === "ui" && konamiRef.current.feed(event.control)) {
+      setMiniGameLive(true);
+    }
+  });
 
   return (
-    <ConsoleInputContext.Provider value={bus}>
-      <div className="hh-root">
-        <div className="hh-shell">
-          <div className="hh-screen-bezel">
-            <div className="hh-bezel-top">
-              <span>CARTBOX</span>
+    <div className="hh-root" data-theme={settings.theme} data-buttons={settings.buttons}>
+      <div className="hh-shell">
+        <div className="hh-screen-bezel">
+          <div className="hh-bezel-top">
+            <span>CARTBOX</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button
+                type="button"
+                className="hh-gear"
+                aria-label="Console settings"
+                onClick={() => setPanelOpen(true)}
+                onMouseDown={(event) => event.preventDefault()}
+              >
+                ⚙
+              </button>
               <span className="hh-power-led" aria-hidden />
-            </div>
-            <div className="hh-screen">{children}</div>
+            </span>
           </div>
+          <div className="hh-screen">{children}</div>
+        </div>
 
-          <div className="hh-left">
+        {dockVisible && (
+          <MiniGameDock
+            bus={bus}
+            game={miniGame}
+            active={miniGameLive}
+            onExit={() => setMiniGameLive(false)}
+          />
+        )}
+
+        <div className="hh-left">
+          {showDpad ? (
             <div className="hh-dpad" role="group" aria-label="Directional pad">
               <ShellButton bus={bus} control="up" className="hh-dpad-btn hh-dpad-up" label="Up">
                 ▲
@@ -104,36 +146,53 @@ export function HandheldConsole({ children }: { children: ReactNode }) {
                 ▼
               </ShellButton>
             </div>
-          </div>
+          ) : (
+            <Joystick bus={bus} />
+          )}
+        </div>
 
-          <div className="hh-right">
-            <div className="hh-face" role="group" aria-label="Action buttons">
-              <ShellButton bus={bus} control="x" className="hh-face-btn hh-face-x" label="X button">
-                X
-              </ShellButton>
-              <ShellButton bus={bus} control="y" className="hh-face-btn hh-face-y" label="Y button">
-                Y
-              </ShellButton>
-              <ShellButton bus={bus} control="a" className="hh-face-btn hh-face-a" label="A button">
-                A
-              </ShellButton>
-              <ShellButton bus={bus} control="b" className="hh-face-btn hh-face-b" label="B button">
-                B
-              </ShellButton>
-            </div>
-          </div>
-
-          <div className="hh-system">
-            <ShellButton bus={bus} control="select" className="hh-pill" label="Select">
-              SELECT
+        <div className="hh-right">
+          <div className="hh-face" role="group" aria-label="Action buttons">
+            <ShellButton bus={bus} control="x" className="hh-face-btn hh-face-x" label="X button">
+              X
             </ShellButton>
-            <ShellButton bus={bus} control="start" className="hh-pill" label="Start">
-              START
+            <ShellButton bus={bus} control="y" className="hh-face-btn hh-face-y" label="Y button">
+              Y
+            </ShellButton>
+            <ShellButton bus={bus} control="a" className="hh-face-btn hh-face-a" label="A button">
+              A
+            </ShellButton>
+            <ShellButton bus={bus} control="b" className="hh-face-btn hh-face-b" label="B button">
+              B
             </ShellButton>
           </div>
         </div>
-        <div className="hh-speaker" aria-hidden />
+
+        <div className="hh-system">
+          <ShellButton bus={bus} control="select" className="hh-pill" label="Select">
+            SELECT
+          </ShellButton>
+          {showJoystick && showDpad && <Joystick bus={bus} />}
+          <ShellButton bus={bus} control="start" className="hh-pill" label="Start">
+            START
+          </ShellButton>
+        </div>
       </div>
+      <div className="hh-speaker" aria-hidden />
+    </div>
+  );
+}
+
+export function HandheldConsole({ children }: { children: ReactNode }) {
+  // One bus per mounted console. The dispatcher only touches `window` when a
+  // button actually fires, so constructing it during SSR is safe.
+  const bus = useMemo(() => new ConsoleInputBus(createWindowKeyDispatcher()), []);
+
+  return (
+    <ConsoleInputContext.Provider value={bus}>
+      <ConsoleSettingsProvider>
+        <Shell bus={bus}>{children}</Shell>
+      </ConsoleSettingsProvider>
     </ConsoleInputContext.Provider>
   );
 }

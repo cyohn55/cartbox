@@ -13,6 +13,7 @@ import { mount, parseReplay, type ModelId, type PlayerHandle } from "@cartbox/pl
 
 import type { FeedItem } from "@/lib/feedMix";
 import { useConsoleInput, useConsoleInputBus } from "./ConsoleInputContext";
+import { cursorHasFocus } from "./useConsoleCursor";
 import type { PlayingCart } from "./consoleOs";
 
 const KIND_BADGES: Record<FeedItem["kind"], string> = {
@@ -104,15 +105,24 @@ function CartCard({ item, active }: CardProps) {
   }, [playing, cart.cartUrl, cart.engineUrl, cart.modelId, bus]);
 
   useConsoleInput((event) => {
-    if (!playing || event.phase !== "press") {
+    if (event.phase !== "press") {
       return;
     }
-    if (event.control === "select") {
-      setPlaying(false);
+    if (playing) {
+      if (event.control === "select") {
+        setPlaying(false);
+        return;
+      }
+      // A real button press can unblock a browser-suspended AudioContext.
+      void handleRef.current?.resume();
       return;
     }
-    // A real button press can unblock a browser-suspended AudioContext.
-    void handleRef.current?.resume();
+    // A inserts the cartridge when this card is the one on screen (and the
+    // cursor isn't parked on some other element, e.g. the tab bar).
+    if (active && event.control === "a" && bus.owner === "ui" && !cursorHasFocus() && playable) {
+      setFailed(false);
+      setPlaying(true);
+    }
   });
 
   const playable = cart.cartUrl !== null;
@@ -216,10 +226,23 @@ function ClipCard({ item, active }: CardProps) {
   );
 }
 
-/** Multiple-choice trivia; reveals right/wrong on tap. */
-function TriviaCard({ item }: CardProps) {
+/** Face buttons answer trivia: X/Y/A/B pick choices 1-4 (taps work too). */
+const TRIVIA_BUTTON_ORDER = ["x", "y", "a", "b"] as const;
+
+function TriviaCard({ item, active }: CardProps) {
   const [picked, setPicked] = useState<number | null>(null);
+  const bus = useConsoleInputBus();
   const trivia = item.trivia!;
+
+  useConsoleInput((event) => {
+    if (!active || picked !== null || event.phase !== "press" || bus.owner !== "ui") {
+      return;
+    }
+    const index = (TRIVIA_BUTTON_ORDER as readonly string[]).indexOf(event.control);
+    if (index >= 0 && index < trivia.choices.length) {
+      setPicked(index);
+    }
+  });
 
   return (
     <article className="os-card" data-testid="feed-card-trivia">
@@ -243,6 +266,9 @@ function TriviaCard({ item }: CardProps) {
               onClick={() => setPicked(index)}
               disabled={picked !== null}
             >
+              <span className="os-trivia-btn" aria-hidden>
+                {TRIVIA_BUTTON_ORDER[index]?.toUpperCase()}
+              </span>
               {choice}
             </button>
           );

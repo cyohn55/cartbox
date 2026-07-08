@@ -151,7 +151,7 @@ export function BrowseScreen({ onPlayCart }: { onPlayCart: (cart: PlayingCart) =
   }, [arcadeCarts, search]);
 
   return (
-    <div className="os-page" data-testid="browse-screen">
+    <div className="os-page" data-console-nav data-testid="browse-screen">
       <h2>BROWSE CARTRIDGES</h2>
 
       <div className="os-kind-toggle" role="tablist" aria-label="Catalog source">

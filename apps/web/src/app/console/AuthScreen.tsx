@@ -27,7 +27,7 @@ export function AuthScreen({ onSignedIn, onGuest }: AuthScreenProps) {
 
   if (isStaticExport) {
     return (
-      <div className="os-stage os-auth" data-testid="auth-screen">
+      <div className="os-stage os-auth" data-console-nav data-testid="auth-screen">
         <h2>WELCOME</h2>
         <p className="os-card-body">
           This is the static demo build — accounts live on the community server. Play as a guest;
@@ -60,7 +60,7 @@ export function AuthScreen({ onSignedIn, onGuest }: AuthScreenProps) {
   };
 
   return (
-    <div className="os-stage os-auth" data-testid="auth-screen">
+    <div className="os-stage os-auth" data-console-nav data-testid="auth-screen">
       <h2>{mode === "signin" ? "SIGN IN" : "NEW PLAYER"}</h2>
       <form onSubmit={submit}>
         <input

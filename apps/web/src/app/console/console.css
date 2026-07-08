@@ -11,24 +11,169 @@
  */
 
 .hh-root {
+  /* Shell palette — themes override these (see data-theme blocks below). */
+  --hh-outer-a: #241d38;
+  --hh-outer-b: #0d0b16;
+  --hh-shell-a: #221c36;
+  --hh-shell-b: #16121f;
+  --hh-shell-c: #120e1c;
+  --hh-bezel-a: #0b0913;
+  --hh-bezel-b: #100d1b;
+  --hh-bezel-border: #2f2846;
+  --hh-label: #6b638c;
+  --hh-led: #ff5d8f;
+  --hh-control-a: #322a4e;
+  --hh-control-b: #241d38;
+  --hh-control-ink: #9990bb;
+  --hh-control-ink-active: #ece9f8;
+  /* Face buttons — the data-buttons blocks override these. */
+  --hh-face-ink: #14101f;
+  --hh-face-x-hi: #8f86c6;
+  --hh-face-x-lo: #5c519b;
+  --hh-face-y-hi: #6fdfa8;
+  --hh-face-y-lo: #2f9c66;
+  --hh-face-a-hi: #ffca66;
+  --hh-face-a-lo: #d99a2b;
+  --hh-face-b-hi: #ff8fae;
+  --hh-face-b-lo: #d24a72;
+
   position: fixed;
   inset: 0;
   z-index: 100;
   display: grid;
-  background: radial-gradient(120% 120% at 50% 0%, #241d38 0%, #0d0b16 70%);
+  background: radial-gradient(120% 120% at 50% 0%, var(--hh-outer-a) 0%, var(--hh-outer-b) 70%);
   user-select: none;
   -webkit-user-select: none;
   touch-action: manipulation;
 }
 
+/* --- Shell themes ---------------------------------------------------------- */
+
+/* Retro handheld: warm cream body, maroon buttons, olive-grey controls. */
+.hh-root[data-theme="retro"] {
+  --hh-outer-a: #a99f8a;
+  --hh-outer-b: #6e6754;
+  --hh-shell-a: #d9d0bd;
+  --hh-shell-b: #c8bfa9;
+  --hh-shell-c: #b3a98f;
+  --hh-bezel-a: #4b5049;
+  --hh-bezel-b: #3a3f39;
+  --hh-bezel-border: #2c302b;
+  --hh-label: #8b9282;
+  --hh-led: #e0342f;
+  --hh-control-a: #57575c;
+  --hh-control-b: #3d3d42;
+  --hh-control-ink: #cfcbd6;
+  --hh-face-ink: #f2e6da;
+  --hh-face-x-hi: #a64f6a;
+  --hh-face-x-lo: #7c2f47;
+  --hh-face-y-hi: #a64f6a;
+  --hh-face-y-lo: #7c2f47;
+  --hh-face-a-hi: #a64f6a;
+  --hh-face-a-lo: #7c2f47;
+  --hh-face-b-hi: #a64f6a;
+  --hh-face-b-lo: #7c2f47;
+}
+
+/* Sleek clean: near-black glass, hairlines, monochrome hardware. */
+.hh-root[data-theme="sleek"] {
+  --hh-outer-a: #17171b;
+  --hh-outer-b: #060608;
+  --hh-shell-a: #131317;
+  --hh-shell-b: #0e0e12;
+  --hh-shell-c: #0a0a0d;
+  --hh-bezel-a: #050507;
+  --hh-bezel-b: #0a0a0d;
+  --hh-bezel-border: #26262c;
+  --hh-label: #55555f;
+  --hh-led: #7ad7ff;
+  --hh-control-a: #232329;
+  --hh-control-b: #17171c;
+  --hh-control-ink: #8a8a96;
+  --hh-face-ink: #e8e8ee;
+  --hh-face-x-hi: #2c2c33;
+  --hh-face-x-lo: #1b1b21;
+  --hh-face-y-hi: #2c2c33;
+  --hh-face-y-lo: #1b1b21;
+  --hh-face-a-hi: #2c2c33;
+  --hh-face-a-lo: #1b1b21;
+  --hh-face-b-hi: #2c2c33;
+  --hh-face-b-lo: #1b1b21;
+}
+
+/* Arcade shell: deep neon cabinet; the mini-game dock glows underneath. */
+.hh-root[data-theme="arcade"] {
+  --hh-outer-a: #1c0b33;
+  --hh-outer-b: #06030d;
+  --hh-shell-a: #170a2b;
+  --hh-shell-b: #0f0620;
+  --hh-shell-c: #0a0417;
+  --hh-bezel-a: #060310;
+  --hh-bezel-b: #0b0618;
+  --hh-bezel-border: #3d2a66;
+  --hh-label: #7a5fc0;
+  --hh-led: #00ffd0;
+  --hh-control-a: #2c1a52;
+  --hh-control-b: #1c1038;
+  --hh-control-ink: #9a7fe0;
+  --hh-face-ink: #0a0417;
+  --hh-face-x-hi: #6fe3ff;
+  --hh-face-x-lo: #2596c9;
+  --hh-face-y-hi: #7dff9e;
+  --hh-face-y-lo: #2cc95e;
+  --hh-face-a-hi: #ffe066;
+  --hh-face-a-lo: #d9a72b;
+  --hh-face-b-hi: #ff6fd8;
+  --hh-face-b-lo: #c92596;
+}
+
+/* --- Face-button color options --------------------------------------------- */
+
+.hh-root[data-buttons="mono"] {
+  --hh-face-ink: #ece9f8;
+  --hh-face-x-hi: #3a3550;
+  --hh-face-x-lo: #262138;
+  --hh-face-y-hi: #3a3550;
+  --hh-face-y-lo: #262138;
+  --hh-face-a-hi: #3a3550;
+  --hh-face-a-lo: #262138;
+  --hh-face-b-hi: #3a3550;
+  --hh-face-b-lo: #262138;
+}
+
+.hh-root[data-buttons="amber"] {
+  --hh-face-ink: #1c1305;
+  --hh-face-x-hi: #ffca66;
+  --hh-face-x-lo: #d99a2b;
+  --hh-face-y-hi: #ffca66;
+  --hh-face-y-lo: #d99a2b;
+  --hh-face-a-hi: #ffca66;
+  --hh-face-a-lo: #d99a2b;
+  --hh-face-b-hi: #ffca66;
+  --hh-face-b-lo: #d99a2b;
+}
+
+.hh-root[data-buttons="neon"] {
+  --hh-face-ink: #06030d;
+  --hh-face-x-hi: #6fe3ff;
+  --hh-face-x-lo: #2596c9;
+  --hh-face-y-hi: #7dff9e;
+  --hh-face-y-lo: #2cc95e;
+  --hh-face-a-hi: #ffe066;
+  --hh-face-a-lo: #d9a72b;
+  --hh-face-b-hi: #ff6fd8;
+  --hh-face-b-lo: #c92596;
+}
+
 /* The device body. Grid areas move between orientations. */
 .hh-shell {
+  position: relative;
   display: grid;
   width: 100%;
   height: 100%;
   padding: calc(10px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right))
     calc(12px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left));
-  background: linear-gradient(165deg, #221c36 0%, #16121f 55%, #120e1c 100%);
+  background: linear-gradient(165deg, var(--hh-shell-a) 0%, var(--hh-shell-b) 55%, var(--hh-shell-c) 100%);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 -14px 30px rgba(0, 0, 0, 0.45);
 }
 
@@ -67,8 +212,8 @@
   min-height: 0;
   padding: 10px 12px 8px;
   border-radius: 18px;
-  background: linear-gradient(180deg, #0b0913 0%, #100d1b 100%);
-  border: 1px solid #2f2846;
+  background: linear-gradient(180deg, var(--hh-bezel-a) 0%, var(--hh-bezel-b) 100%);
+  border: 1px solid var(--hh-bezel-border);
   box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.8), 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
@@ -79,7 +224,7 @@
   padding: 0 2px 6px;
   font-size: 10px;
   letter-spacing: 0.24em;
-  color: #6b638c;
+  color: var(--hh-label);
   font-weight: 700;
 }
 
@@ -87,8 +232,8 @@
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #ff5d8f;
-  box-shadow: 0 0 8px 2px rgba(255, 93, 143, 0.6);
+  background: var(--hh-led);
+  box-shadow: 0 0 8px 2px var(--hh-led);
 }
 
 .hh-screen {
@@ -156,8 +301,8 @@
   border: none;
   margin: 0;
   padding: 0;
-  background: linear-gradient(180deg, #322a4e 0%, #241d38 100%);
-  color: #9990bb;
+  background: linear-gradient(180deg, var(--hh-control-a) 0%, var(--hh-control-b) 100%);
+  color: var(--hh-control-ink);
   font-size: 15px;
   display: flex;
   align-items: center;
@@ -176,7 +321,7 @@
 }
 .hh-dpad-center {
   grid-area: 2 / 2;
-  background: #241d38;
+  background: var(--hh-control-b);
   pointer-events: none;
 }
 .hh-dpad-center::after {
@@ -184,7 +329,7 @@
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: radial-gradient(circle at 35% 30%, #322a4e, #1d1830 70%);
+  background: radial-gradient(circle at 35% 30%, var(--hh-control-a), var(--hh-control-b) 70%);
 }
 .hh-dpad-right {
   grid-area: 2 / 3;
@@ -197,8 +342,8 @@
 
 .hh-dpad-btn:active,
 .hh-dpad-btn[data-pressed="true"] {
-  background: #1d1830;
-  color: #ece9f8;
+  background: var(--hh-control-b);
+  color: var(--hh-control-ink-active);
   transform: translateY(1px);
 }
 
@@ -217,7 +362,7 @@
   height: 52px;
   border-radius: 50%;
   font: 700 16px/1 var(--font-ui);
-  color: #14101f;
+  color: var(--hh-face-ink);
   cursor: pointer;
   touch-action: none;
   box-shadow: 0 3px 0 rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.35);
@@ -225,19 +370,19 @@
 
 .hh-face-x {
   grid-area: 1 / 2;
-  background: radial-gradient(circle at 35% 30%, #8f86c6, #5c519b);
+  background: radial-gradient(circle at 35% 30%, var(--hh-face-x-hi), var(--hh-face-x-lo));
 }
 .hh-face-y {
   grid-area: 2 / 1;
-  background: radial-gradient(circle at 35% 30%, #6fdfa8, #2f9c66);
+  background: radial-gradient(circle at 35% 30%, var(--hh-face-y-hi), var(--hh-face-y-lo));
 }
 .hh-face-a {
   grid-area: 2 / 3;
-  background: radial-gradient(circle at 35% 30%, #ffca66, #d99a2b);
+  background: radial-gradient(circle at 35% 30%, var(--hh-face-a-hi), var(--hh-face-a-lo));
 }
 .hh-face-b {
   grid-area: 3 / 2;
-  background: radial-gradient(circle at 35% 30%, #ff8fae, #d24a72);
+  background: radial-gradient(circle at 35% 30%, var(--hh-face-b-hi), var(--hh-face-b-lo));
 }
 
 .hh-face-btn:active,
@@ -252,8 +397,8 @@
   border: none;
   padding: 6px 18px;
   border-radius: 999px;
-  background: linear-gradient(180deg, #322a4e, #241d38);
-  color: #9990bb;
+  background: linear-gradient(180deg, var(--hh-control-a), var(--hh-control-b));
+  color: var(--hh-control-ink);
   font: 600 10px/1 var(--font-ui);
   letter-spacing: 0.18em;
   cursor: pointer;
@@ -265,7 +410,7 @@
 .hh-pill:active,
 .hh-pill[data-pressed="true"] {
   transform: rotate(-14deg) translateY(1px);
-  color: #ece9f8;
+  color: var(--hh-control-ink-active);
   box-shadow: 0 1px 0 rgba(0, 0, 0, 0.5);
 }
 
@@ -911,6 +1056,179 @@ select.os-input {
   color: #6b638c;
   font: 600 11px var(--font-data);
   letter-spacing: 0.2em;
+}
+
+/* ==========================================================================
+ * Shell personalization hardware: gear, joystick, mini-game dock
+ * ======================================================================== */
+
+.hh-gear {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0 2px;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--hh-label);
+  cursor: pointer;
+}
+
+.hh-gear:hover {
+  color: var(--hh-control-ink-active);
+}
+
+.hh-joystick {
+  position: relative;
+  width: 108px;
+  height: 108px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 42%, var(--hh-control-a), var(--hh-control-b) 75%);
+  box-shadow: inset 0 3px 8px rgba(0, 0, 0, 0.55), 0 1px 0 rgba(255, 255, 255, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: none;
+}
+
+.hh-joystick-knob {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 38% 30%, var(--hh-control-a), var(--hh-control-b) 80%);
+  border: 1px solid rgba(0, 0, 0, 0.4);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  pointer-events: none;
+}
+
+/* The system row's compact joystick when "Both" is selected. */
+.hh-system .hh-joystick {
+  width: 74px;
+  height: 74px;
+}
+
+.hh-system .hh-joystick-knob {
+  width: 36px;
+  height: 36px;
+}
+
+/* Mini-game dock: a canvas living behind the controls. Portrait covers the
+   whole control deck; landscape uses the left flank behind the D-pad. */
+.hh-minigame {
+  position: relative;
+  pointer-events: none;
+  z-index: 0;
+  overflow: hidden;
+  border-radius: 12px;
+}
+
+@media (orientation: portrait) {
+  .hh-minigame {
+    grid-row: 2 / 4;
+    grid-column: 1 / 3;
+  }
+}
+
+@media (orientation: landscape) {
+  .hh-minigame {
+    grid-column: 1 / 2;
+    grid-row: 1 / 3;
+  }
+}
+
+/* Controls float above the dock. */
+.hh-left,
+.hh-right,
+.hh-system {
+  position: relative;
+  z-index: 1;
+}
+
+.hh-minigame-canvas,
+.hh-minigame-cart {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.hh-minigame-cart {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.45;
+}
+
+.hh-minigame-cart[data-live="true"] {
+  opacity: 1;
+}
+
+.hh-minigame-cart canvas {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.hh-minigame[data-live="true"] {
+  box-shadow: 0 0 0 1px var(--hh-led), 0 0 18px rgba(0, 255, 208, 0.25);
+}
+
+.hh-minigame-note {
+  color: var(--hh-label);
+  font: 700 10px var(--font-data);
+  letter-spacing: 0.2em;
+}
+
+.hh-minigame-banner {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 4px;
+  text-align: center;
+  font: 700 9px var(--font-data);
+  letter-spacing: 0.16em;
+  color: var(--hh-led);
+  text-shadow: 0 0 8px rgba(0, 0, 0, 0.8);
+}
+
+/* ==========================================================================
+ * Console OS: cursor + settings additions
+ * ======================================================================== */
+
+.os-root {
+  position: absolute;
+  inset: 0;
+}
+
+/* The D-pad cursor. A class (not :focus-visible) so programmatic focus from
+   shell buttons always shows the ring. */
+.os-cursor {
+  outline: none !important;
+  box-shadow: 0 0 0 2px #08060f, 0 0 0 4px var(--accent, #f6b74a) !important;
+  border-radius: 8px;
+}
+
+.os-option-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.os-option-row .os-kind-option {
+  flex: 0 1 auto;
+  padding: 8px 10px;
+}
+
+/* Trivia face-button glyphs on the choices. */
+.os-trivia-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: #241d38;
+  color: #9990bb;
+  font: 700 10px var(--font-data);
 }
 
 @media (prefers-reduced-motion: reduce) {

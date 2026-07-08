@@ -217,7 +217,7 @@ export function ProfileScreen({ guest }: { guest: boolean }) {
 
   if (guest || isStaticExport) {
     return (
-      <div className="os-page" data-testid="profile-screen">
+      <div className="os-page" data-console-nav data-testid="profile-screen">
         <h2>PROFILE</h2>
         <div className="os-empty">
           {isStaticExport
@@ -230,7 +230,7 @@ export function ProfileScreen({ guest }: { guest: boolean }) {
 
   if (failed) {
     return (
-      <div className="os-page" data-testid="profile-screen">
+      <div className="os-page" data-console-nav data-testid="profile-screen">
         <h2>PROFILE</h2>
         <div className="os-empty">Your profile could not be reached.</div>
       </div>
@@ -239,7 +239,7 @@ export function ProfileScreen({ guest }: { guest: boolean }) {
 
   if (!me) {
     return (
-      <div className="os-page" data-testid="profile-screen">
+      <div className="os-page" data-console-nav data-testid="profile-screen">
         <h2>PROFILE</h2>
         <div className="os-loading">POLISHING TROPHIES…</div>
       </div>
@@ -249,7 +249,7 @@ export function ProfileScreen({ guest }: { guest: boolean }) {
   const totalPoints = me.unlocks.reduce((sum, unlock) => sum + unlock.points, 0);
 
   return (
-    <div className="os-page" data-testid="profile-screen">
+    <div className="os-page" data-console-nav data-testid="profile-screen">
       <div className="os-profile-head">
         <AvatarPreview avatar={me.profile.avatar} size={56} />
         <div>

@@ -64,7 +64,7 @@ export function LibraryScreen({ guest, onPlayCart }: LibraryScreenProps) {
 
   if (guest && !isStaticExport) {
     return (
-      <div className="os-page" data-testid="library-screen">
+      <div className="os-page" data-console-nav data-testid="library-screen">
         <h2>LIBRARY</h2>
         <div className="os-empty">
           Your library lives on your account.
@@ -76,7 +76,7 @@ export function LibraryScreen({ guest, onPlayCart }: LibraryScreenProps) {
   }
 
   return (
-    <div className="os-page" data-testid="library-screen">
+    <div className="os-page" data-console-nav data-testid="library-screen">
       <h2>LIBRARY</h2>
       {failed && <div className="os-empty">Your library could not be reached.</div>}
       {!failed && carts === null && <div className="os-loading">DUSTING THE SHELVES…</div>}

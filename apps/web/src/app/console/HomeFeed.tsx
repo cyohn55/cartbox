@@ -66,10 +66,10 @@ export function HomeFeed({ guest, onPlayCart }: HomeFeedProps) {
 
   useEffect(() => loadFeed(), [loadFeed]);
 
-  // D-pad up/down page between cards while no game owns the buttons.
+  // D-pad up/down page between cards while the UI owns the buttons.
   useConsoleInput((event) => {
     const scroller = scrollerRef.current;
-    if (!scroller || event.phase !== "press" || bus.isForwardingToGame) {
+    if (!scroller || event.phase !== "press" || bus.owner !== "ui") {
       return;
     }
     if (event.control === "down") {

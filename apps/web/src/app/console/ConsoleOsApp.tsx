@@ -6,11 +6,12 @@
  * the pure consoleOsReducer, hosts the tab screens, and owns the full-screen
  * game session launched from Browse/Library.
  *
- * Shell-button conventions while on the homescreen:
- *   SELECT cycles tabs · A activates · SELECT exits a running game.
+ * Shell-button conventions:
+ *   D-pad moves the cursor · A activates · B backs out · SELECT cycles tabs
+ *   (or ejects a running game) · START opens console settings.
  */
 
-import { useEffect, useReducer, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 
 import { supabaseBrowser } from "@/lib/supabase-browser";
 import { isStaticExport } from "@/lib/staticSite";
@@ -22,6 +23,8 @@ import {
   type PlayingCart,
 } from "./consoleOs";
 import { useConsoleInput, useConsoleInputBus } from "./ConsoleInputContext";
+import { useConsoleSettings } from "./ConsoleSettingsContext";
+import { useConsoleCursor } from "./useConsoleCursor";
 import { BootScreen } from "./BootScreen";
 import { TitleScreen } from "./TitleScreen";
 import { AuthScreen } from "./AuthScreen";
@@ -30,6 +33,7 @@ import { HomeFeed } from "./HomeFeed";
 import { BrowseScreen } from "./BrowseScreen";
 import { LibraryScreen } from "./LibraryScreen";
 import { ProfileScreen } from "./ProfileScreen";
+import { SettingsScreen } from "./SettingsScreen";
 
 const TAB_LABELS: Record<ConsoleTab, { icon: string; label: string }> = {
   feed: { icon: "▶", label: "FEED" },
@@ -42,6 +46,11 @@ export function ConsoleOS() {
   const [state, dispatch] = useReducer(consoleOsReducer, INITIAL_CONSOLE_STATE);
   const [signedIn, setSignedIn] = useState(false);
   const bus = useConsoleInputBus();
+  const { panelOpen, setPanelOpen } = useConsoleSettings();
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  // D-pad cursor across every screen that opts in via data-console-nav.
+  useConsoleCursor(rootRef);
 
   // Resolve the existing session once so the title screen can skip sign-in.
   useEffect(() => {
@@ -68,7 +77,18 @@ export function ConsoleOS() {
   }, [bus, state.playing]);
 
   useConsoleInput((event) => {
-    if (event.phase !== "press" || state.stage !== "shell") {
+    if (event.phase !== "press") {
+      return;
+    }
+
+    // START toggles the settings panel wherever the UI owns the buttons
+    // (boot/title keep their own start handling).
+    if (event.control === "start" && bus.owner === "ui" && state.stage !== "boot" && state.stage !== "title") {
+      setPanelOpen(!panelOpen);
+      return;
+    }
+
+    if (state.stage !== "shell" || panelOpen) {
       return;
     }
     if (state.playing) {
@@ -77,24 +97,21 @@ export function ConsoleOS() {
       }
       return;
     }
-    // An in-feed game owns the buttons while it's mounted (bus is forwarding).
-    if (event.control === "select" && !bus.isForwardingToGame) {
+    // An in-feed game or the mini-game owns the buttons while active.
+    if (event.control === "select" && bus.owner === "ui") {
       dispatch({ type: "NEXT_TAB" });
     }
   });
 
   const playCart = (cart: PlayingCart) => dispatch({ type: "PLAY_CART", cart });
 
+  let stage: React.ReactNode;
   if (state.stage === "boot") {
-    return <BootScreen onComplete={() => dispatch({ type: "BOOT_COMPLETE" })} />;
-  }
-
-  if (state.stage === "title") {
-    return <TitleScreen onContinue={() => dispatch({ type: "TITLE_CONTINUE", signedIn })} />;
-  }
-
-  if (state.stage === "auth") {
-    return (
+    stage = <BootScreen onComplete={() => dispatch({ type: "BOOT_COMPLETE" })} />;
+  } else if (state.stage === "title") {
+    stage = <TitleScreen onContinue={() => dispatch({ type: "TITLE_CONTINUE", signedIn })} />;
+  } else if (state.stage === "auth") {
+    stage = (
       <AuthScreen
         onSignedIn={() => {
           setSignedIn(true);
@@ -103,38 +120,41 @@ export function ConsoleOS() {
         onGuest={() => dispatch({ type: "AUTH_GUEST" })}
       />
     );
-  }
-
-  if (state.playing) {
-    return <GameScreen cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />;
+  } else if (state.playing) {
+    stage = <GameScreen cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />;
+  } else {
+    stage = (
+      <div className="os-stage os-shell" data-testid="console-shell">
+        <div className="os-screen-body">
+          {state.tab === "feed" && <HomeFeed guest={!signedIn} onPlayCart={playCart} />}
+          {state.tab === "browse" && <BrowseScreen onPlayCart={playCart} />}
+          {state.tab === "library" && <LibraryScreen guest={!signedIn} onPlayCart={playCart} />}
+          {state.tab === "profile" && <ProfileScreen guest={!signedIn} />}
+        </div>
+        <nav className="os-tabbar" aria-label="Console tabs" data-console-nav>
+          {CONSOLE_TABS.map((tab) => (
+            <button
+              key={tab}
+              type="button"
+              className="os-tab"
+              data-active={state.tab === tab}
+              onClick={() => dispatch({ type: "SET_TAB", tab })}
+            >
+              <span className="os-tab-icon" aria-hidden>
+                {TAB_LABELS[tab].icon}
+              </span>
+              {TAB_LABELS[tab].label}
+            </button>
+          ))}
+        </nav>
+      </div>
+    );
   }
 
   return (
-    <div className="os-stage os-shell" data-testid="console-shell">
-      <div className="os-screen-body">
-        {state.tab === "feed" && <HomeFeed guest={!signedIn} onPlayCart={playCart} />}
-        {state.tab === "browse" && <BrowseScreen onPlayCart={playCart} />}
-        {state.tab === "library" && (
-          <LibraryScreen guest={!signedIn} onPlayCart={playCart} />
-        )}
-        {state.tab === "profile" && <ProfileScreen guest={!signedIn} />}
-      </div>
-      <nav className="os-tabbar" aria-label="Console tabs">
-        {CONSOLE_TABS.map((tab) => (
-          <button
-            key={tab}
-            type="button"
-            className="os-tab"
-            data-active={state.tab === tab}
-            onClick={() => dispatch({ type: "SET_TAB", tab })}
-          >
-            <span className="os-tab-icon" aria-hidden>
-              {TAB_LABELS[tab].icon}
-            </span>
-            {TAB_LABELS[tab].label}
-          </button>
-        ))}
-      </nav>
+    <div className="os-root" ref={rootRef}>
+      {stage}
+      {panelOpen && <SettingsScreen onClose={() => setPanelOpen(false)} />}
     </div>
   );
 }
