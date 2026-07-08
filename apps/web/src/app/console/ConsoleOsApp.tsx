@@ -7,8 +7,10 @@
  * game session launched from Browse/Library.
  *
  * Shell-button conventions:
- *   D-pad moves the cursor · A activates · B backs out · SELECT cycles tabs
- *   (or ejects a running game) · START opens console settings.
+ *   D-pad moves the cursor · A activates · B backs out · L1/R1 (or SELECT)
+ *   cycle tabs (SELECT ejects a running game) · START opens console settings.
+ *   The tab bar is deliberately NOT a cursor region: pressing down at the
+ *   bottom of a grid must stay in the grid, not wander onto the tabs.
  */
 
 import { useEffect, useReducer, useRef, useState } from "react";
@@ -139,7 +141,9 @@ export function ConsoleOS() {
           {state.tab === "library" && <LibraryScreen guest={!signedIn} onPlayCart={playCart} />}
           {state.tab === "profile" && <ProfileScreen guest={!signedIn} />}
         </div>
-        <nav className="os-tabbar" aria-label="Console tabs" data-console-nav>
+        {/* Tabs stay tappable by touch but are cycled with L1/R1 on the shell —
+            no data-console-nav, so the D-pad cursor can never land here. */}
+        <nav className="os-tabbar" aria-label="Console tabs">
           {CONSOLE_TABS.map((tab) => (
             <button
               key={tab}

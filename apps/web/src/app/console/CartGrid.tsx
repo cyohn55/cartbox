@@ -55,7 +55,7 @@ export function CartGrid({ carts, onPlayCart }: CartGridProps) {
     };
   }, []);
 
-  function launchCart(cart: GridCart) {
+  function launchCart(cart: GridCart, cardElement: HTMLElement) {
     if (launchingCartId !== null) {
       return; // A launch is already in flight; ignore further taps.
     }
@@ -69,6 +69,18 @@ export function CartGrid({ carts, onPlayCart }: CartGridProps) {
     if (prefersReducedMotion()) {
       onPlayCart(playing);
       return;
+    }
+    // Aim the flight at the middle of the console screen: the os-cart-launch
+    // keyframes translate the shell by this vector while it grows.
+    const shell = cardElement.querySelector<HTMLElement>(".os-cart-shell");
+    const stage = cardElement.closest<HTMLElement>(".os-stage");
+    if (shell && stage) {
+      const shellRect = shell.getBoundingClientRect();
+      const stageRect = stage.getBoundingClientRect();
+      const deltaX = stageRect.left + stageRect.width / 2 - (shellRect.left + shellRect.width / 2);
+      const deltaY = stageRect.top + stageRect.height / 2 - (shellRect.top + shellRect.height / 2);
+      cardElement.style.setProperty("--launch-dx", `${deltaX.toFixed(1)}px`);
+      cardElement.style.setProperty("--launch-dy", `${deltaY.toFixed(1)}px`);
     }
     setLaunchingCartId(cart.id);
     launchTimerRef.current = setTimeout(() => {
@@ -114,7 +126,7 @@ export function CartGrid({ carts, onPlayCart }: CartGridProps) {
             type="button"
             className="os-grid-card os-cart-card"
             data-launching={cart.id === launchingCartId ? "true" : undefined}
-            onClick={() => launchCart(cart)}
+            onClick={(event) => launchCart(cart, event.currentTarget)}
           >
             {thumb}
             {meta}

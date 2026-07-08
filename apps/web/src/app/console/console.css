@@ -932,41 +932,55 @@
   width: 100%;
 }
 
-/* The current selection rocks back and forth — a rotation about the model's
-   depth axis (Blender's Y, the axis the render camera looks down), which in
-   screen space is a plain 2D rotate. The shell gets z-index 6 while it
-   animates: the transform starts a stacking context that would otherwise
-   trap the cover art back under the CRT film. */
+/* The current selection rocks once, ±1.2° about the model's depth axis
+   (Blender's Y, the axis the render camera looks down), which in screen
+   space is a plain 2D rotate. The shell gets z-index 6 while it animates:
+   the transform starts a stacking context that would otherwise trap the
+   cover art back under the CRT film. */
 @keyframes os-cart-wobble {
-  from {
-    transform: rotate(-2.4deg);
+  0% {
+    transform: rotate(0deg);
   }
-  to {
-    transform: rotate(2.4deg);
+  25% {
+    transform: rotate(-1.2deg);
+  }
+  75% {
+    transform: rotate(1.2deg);
+  }
+  100% {
+    transform: rotate(0deg);
   }
 }
 
 .os-cart-card:hover .os-cart-shell,
 .os-cart-card:focus .os-cart-shell,
 .os-cart-card:focus-visible .os-cart-shell {
-  animation: os-cart-wobble 0.7s ease-in-out infinite alternate;
+  animation: os-cart-wobble 0.6s ease-in-out 1;
   z-index: 6;
 }
 
 /* Launch: the picked cartridge spins three full turns about its vertical
-   axis (Blender's Z), then zooms toward the player as the game boots. Keep
-   the duration in step with LAUNCH_ANIMATION_MS in CartGrid.tsx. */
+   axis (Blender's Z), then flies to the middle of the console screen,
+   growing as it comes at the player, and the game boots. The flight vector
+   (--launch-dx/--launch-dy) is measured per card in CartGrid.tsx, which
+   also owns the matching LAUNCH_ANIMATION_MS. */
 @keyframes os-cart-launch {
   0% {
-    transform: perspective(700px) rotateY(0turn) scale(1);
+    transform: perspective(700px) translate(0, 0) rotateY(0turn) scale(1);
     opacity: 1;
+    animation-timing-function: linear;
   }
-  72% {
-    transform: perspective(700px) rotateY(3turn) scale(1);
+  66% {
+    transform: perspective(700px) translate(0, 0) rotateY(3turn) scale(1);
+    opacity: 1;
+    animation-timing-function: ease-in;
+  }
+  92% {
     opacity: 1;
   }
   100% {
-    transform: perspective(700px) rotateY(3turn) scale(2.8);
+    transform: perspective(700px) translate(var(--launch-dx, 0px), var(--launch-dy, 0px)) rotateY(3turn)
+      scale(2.4);
     opacity: 0;
   }
 }
@@ -977,7 +991,7 @@
 }
 
 .os-cart-card[data-launching="true"] .os-cart-shell {
-  animation: os-cart-launch 1.6s ease-in forwards;
+  animation: os-cart-launch 1.6s forwards;
   z-index: 6;
 }
 

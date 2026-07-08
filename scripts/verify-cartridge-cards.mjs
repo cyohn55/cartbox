@@ -158,15 +158,45 @@ try {
   await auditGrid(page, "Library");
   await page.screenshot({ path: shot("cart-library") });
 
-  // Hovering (or D-pad focusing) a cart rocks it back and forth.
+  // The D-pad must walk the grid and never wander onto the tab bar.
+  await pressShellButton(page, "Down");
+  let cursorTouchedTabs = false;
+  for (let press = 0; press < 8; press += 1) {
+    await pressShellButton(page, "Down");
+    await page.waitForTimeout(120);
+    const onTab = await page.evaluate(
+      () => document.activeElement?.classList.contains("os-tab") ?? false,
+    );
+    cursorTouchedTabs = cursorTouchedTabs || onTab;
+  }
+  check("D-pad down never lands on the tab bar", !cursorTouchedTabs);
+
+  // Tabs are cycled with the shoulders instead.
+  await pressShellButton(page, "R1");
+  const r1Cycled = await page
+    .getByTestId("profile-screen")
+    .waitFor({ timeout: 3000 })
+    .then(() => true)
+    .catch(() => false);
+  check("R1 cycles Library → Profile", r1Cycled);
+  await pressShellButton(page, "L1");
+  await page.getByTestId("library-screen").waitFor({ timeout: 3000 });
+  check("L1 cycles back to Library", true);
+  await page.locator("button.os-cart-card").first().waitFor({ timeout: 10000 });
+
+  // Hovering (or D-pad focusing) a cart rocks it — once, not forever.
   const hoverCard = page.locator("button.os-cart-card").first();
   await hoverCard.hover();
-  const wobbleName = await hoverCard
-    .locator(".os-cart-shell")
-    .evaluate((shell) => getComputedStyle(shell).animationName);
-  check("hovered cart runs the selection wobble", wobbleName === "os-cart-wobble", wobbleName);
+  const wobble = await hoverCard.locator(".os-cart-shell").evaluate((shell) => {
+    const style = getComputedStyle(shell);
+    return { name: style.animationName, iterations: style.animationIterationCount };
+  });
+  check("hovered cart runs the selection wobble", wobble.name === "os-cart-wobble", wobble.name);
+  check("wobble plays a single cycle", wobble.iterations === "1", `iterations: ${wobble.iterations}`);
 
-  // Selecting a cart spins it three times, zooms it out, THEN boots it.
+  // Selecting a cart spins it three times, flies it to the screen center
+  // while it grows, THEN boots it.
+  const shellBefore = await hoverCard.locator(".os-cart-shell").boundingBox();
   const selectedAt = Date.now();
   await hoverCard.click();
   const launching = await page
@@ -180,11 +210,23 @@ try {
       .locator('[data-launching="true"] .os-cart-shell')
       .evaluate((shell) => getComputedStyle(shell).animationName);
     check("launch runs the triple-spin animation", launchName === "os-cart-launch", launchName);
-    await page.screenshot({ path: shot("cart-launching") });
+    await page.waitForTimeout(1350); // spin done; mid-flight toward the screen center
+    const shellMid = await page
+      .locator('[data-launching="true"] .os-cart-shell')
+      .boundingBox()
+      .catch(() => null);
+    check(
+      "cartridge grows as it flies to the screen",
+      shellBefore !== null && shellMid !== null && shellMid.width > shellBefore.width * 1.2,
+      shellBefore && shellMid
+        ? `${shellBefore.width.toFixed(0)}px → ${shellMid.width.toFixed(0)}px wide`
+        : "shell box unavailable",
+    );
+    await page.screenshot({ path: shot("cart-launch-zoom") });
   }
   await page.getByTestId("game-screen").waitFor({ timeout: 20000 });
   const bootDelay = Date.now() - selectedAt;
-  check("boot waits for the spin + zoom (≥1.5s)", bootDelay >= 1500, `${bootDelay}ms`);
+  check("boot waits for the spin + flight (≥1.5s)", bootDelay >= 1500, `${bootDelay}ms`);
 
   check("no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
   await phone.close();
