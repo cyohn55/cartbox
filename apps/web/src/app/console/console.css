@@ -926,17 +926,73 @@
   overflow: visible;
 }
 
+/* The shell is the 3D viewport for one cartridge: it supplies perspective
+   for the box inside, sizes it (cqw units below need the container), and
+   sits above the stage's CRT film (z-index 5) so the cartridge and its
+   cover art stay crisp. */
 .os-cart-shell {
   position: relative;
   display: block;
   width: 100%;
+  aspect-ratio: 512 / 555;
+  perspective: 700px;
+  container-type: inline-size;
+  z-index: 6;
+}
+
+/* The cartridge body is a real box — front, back and both edges rendered
+   from Cartridge.glb — so rotation shows true depth instead of a flat card
+   flip. Depth measured off the model: 14.3% of the cartridge width. */
+.os-cart-3d {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+}
+
+.os-cart-face {
+  position: absolute;
+  backface-visibility: hidden;
+}
+
+.os-cart-face-front,
+.os-cart-face-back {
+  inset: 0;
+}
+
+.os-cart-face-front {
+  transform: translateZ(7.15cqw);
+}
+
+.os-cart-face-back {
+  transform: rotateY(180deg) translateZ(7.15cqw);
+}
+
+.os-cart-face-side {
+  top: 0;
+  height: 100%;
+  width: 14.3cqw;
+}
+
+.os-cart-face-left {
+  left: -7.15cqw;
+  transform: rotateY(-90deg);
+}
+
+.os-cart-face-right {
+  left: calc(100% - 7.15cqw);
+  transform: rotateY(90deg);
+}
+
+.os-cart-face-img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: fill;
 }
 
 /* The current selection rocks once, ±1.2° about the model's depth axis
    (Blender's Y, the axis the render camera looks down), which in screen
-   space is a plain 2D rotate. The shell gets z-index 6 while it animates:
-   the transform starts a stacking context that would otherwise trap the
-   cover art back under the CRT film. */
+   space is a plain 2D rotate. */
 @keyframes os-cart-wobble {
   0% {
     transform: rotate(0deg);
@@ -952,26 +1008,27 @@
   }
 }
 
-.os-cart-card:hover .os-cart-shell,
-.os-cart-card:focus .os-cart-shell,
-.os-cart-card:focus-visible .os-cart-shell {
+.os-cart-card:hover .os-cart-3d,
+.os-cart-card:focus .os-cart-3d,
+.os-cart-card:focus-visible .os-cart-3d {
   animation: os-cart-wobble 0.6s ease-in-out 1;
-  z-index: 6;
 }
 
 /* Launch: the picked cartridge spins three full turns about its vertical
    axis (Blender's Z), then flies to the middle of the console screen,
    growing as it comes at the player, and the game boots. The flight vector
    (--launch-dx/--launch-dy) is measured per card in CartGrid.tsx, which
-   also owns the matching LAUNCH_ANIMATION_MS. */
+   boots the game when this animation ends. Perspective deliberately lives
+   on .os-cart-shell, NOT in these keyframes: inline perspective() breaks
+   rotation interpolation on iOS Safari. */
 @keyframes os-cart-launch {
   0% {
-    transform: perspective(700px) translate(0, 0) rotateY(0turn) scale(1);
+    transform: translate(0, 0) rotateY(0turn) scale(1);
     opacity: 1;
     animation-timing-function: linear;
   }
   66% {
-    transform: perspective(700px) translate(0, 0) rotateY(3turn) scale(1);
+    transform: translate(0, 0) rotateY(3turn) scale(1);
     opacity: 1;
     animation-timing-function: ease-in;
   }
@@ -979,8 +1036,7 @@
     opacity: 1;
   }
   100% {
-    transform: perspective(700px) translate(var(--launch-dx, 0px), var(--launch-dy, 0px)) rotateY(3turn)
-      scale(2.4);
+    transform: translate(var(--launch-dx, 0px), var(--launch-dy, 0px)) rotateY(3turn) scale(2.4);
     opacity: 0;
   }
 }
@@ -990,19 +1046,19 @@
   z-index: 7;
 }
 
-.os-cart-card[data-launching="true"] .os-cart-shell {
+.os-cart-card[data-launching="true"] .os-cart-3d {
   animation: os-cart-launch 1.6s forwards;
-  z-index: 6;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .os-cart-card .os-cart-shell {
+  .os-cart-card .os-cart-3d {
     animation: none !important;
   }
 }
 
 .os-cart-shell-img {
   width: 100%;
+  height: 100%;
   display: block;
   filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.45));
 }
@@ -1019,8 +1075,6 @@
   background: #050308;
   border-radius: 3px;
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.3);
-  /* Above the stage's CRT film (z-index 5): the cover art stays crisp. */
-  z-index: 6;
 }
 
 .os-cart-label-empty {

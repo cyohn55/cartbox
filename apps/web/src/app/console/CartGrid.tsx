@@ -1,9 +1,11 @@
 "use client";
 
 /**
- * Cartridge grid shared by the Browse and Library screens. Tapping a playable
- * cart plays the launch animation (three spins, then a zoom toward the
- * player) before booting it full-screen in the console; paid, un-owned carts
+ * Cartridge grid shared by the Browse and Library screens. Each cart is a
+ * true 3D box (front/back/side faces rendered from Cartridge.glb) with the
+ * cover art on its label. Tapping a playable cart plays the launch
+ * animation — three spins, then a flight to the screen center — and the
+ * cart boots when the animation reports it finished; paid, un-owned carts
  * link out to their store page.
  */
 
@@ -12,11 +14,19 @@ import { useEffect, useRef, useState } from "react";
 import { withBasePath } from "@/lib/staticSite";
 import type { PlayingCart } from "./consoleOs";
 
-/** Pre-rendered shot of the cartridge shell; the cover art sits on its label. */
-const CARTRIDGE_SHELL_URL = withBasePath("/console/cartridge.png");
+/** Pre-rendered faces of the cartridge shell; the cover art sits on the front. */
+const CARTRIDGE_FACE_URLS = {
+  front: withBasePath("/console/cartridge.png"),
+  back: withBasePath("/console/cartridge-back.png"),
+  side: withBasePath("/console/cartridge-side.png"),
+};
 
-/** How long the os-cart-launch keyframes run — keep in step with console.css. */
-const LAUNCH_ANIMATION_MS = 1600;
+/**
+ * The boot normally fires on the os-cart-launch animationend event. This is
+ * the safety net for the cases where that event never comes (an interrupted
+ * animation, an odd browser): a little over the 1.6s the keyframes run.
+ */
+const LAUNCH_FALLBACK_MS = 3200;
 
 export interface GridCart {
   id: string;
@@ -45,15 +55,30 @@ function prefersReducedMotion(): boolean {
 
 export function CartGrid({ carts, onPlayCart }: CartGridProps) {
   const [launchingCartId, setLaunchingCartId] = useState<string | null>(null);
-  const launchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingLaunchRef = useRef<PlayingCart | null>(null);
+  const fallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     return () => {
-      if (launchTimerRef.current !== null) {
-        clearTimeout(launchTimerRef.current);
+      if (fallbackTimerRef.current !== null) {
+        clearTimeout(fallbackTimerRef.current);
       }
     };
   }, []);
+
+  function bootPendingLaunch() {
+    const playing = pendingLaunchRef.current;
+    if (playing === null) {
+      return; // Already booted (animationend and the fallback can both land).
+    }
+    pendingLaunchRef.current = null;
+    if (fallbackTimerRef.current !== null) {
+      clearTimeout(fallbackTimerRef.current);
+      fallbackTimerRef.current = null;
+    }
+    setLaunchingCartId(null);
+    onPlayCart(playing);
+  }
 
   function launchCart(cart: GridCart, cardElement: HTMLElement) {
     if (launchingCartId !== null) {
@@ -71,7 +96,7 @@ export function CartGrid({ carts, onPlayCart }: CartGridProps) {
       return;
     }
     // Aim the flight at the middle of the console screen: the os-cart-launch
-    // keyframes translate the shell by this vector while it grows.
+    // keyframes translate the cartridge by this vector while it grows.
     const shell = cardElement.querySelector<HTMLElement>(".os-cart-shell");
     const stage = cardElement.closest<HTMLElement>(".os-stage");
     if (shell && stage) {
@@ -82,12 +107,9 @@ export function CartGrid({ carts, onPlayCart }: CartGridProps) {
       cardElement.style.setProperty("--launch-dx", `${deltaX.toFixed(1)}px`);
       cardElement.style.setProperty("--launch-dy", `${deltaY.toFixed(1)}px`);
     }
+    pendingLaunchRef.current = playing;
     setLaunchingCartId(cart.id);
-    launchTimerRef.current = setTimeout(() => {
-      launchTimerRef.current = null;
-      setLaunchingCartId(null);
-      onPlayCart(playing);
-    }, LAUNCH_ANIMATION_MS);
+    fallbackTimerRef.current = setTimeout(bootPendingLaunch, LAUNCH_FALLBACK_MS);
   }
 
   return (
@@ -103,13 +125,27 @@ export function CartGrid({ carts, onPlayCart }: CartGridProps) {
             ▦
           </span>
         );
+        /* eslint-disable @next/next/no-img-element */
         const thumb = (
           <span className="os-cart-shell">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img className="os-cart-shell-img" src={CARTRIDGE_SHELL_URL} alt="" loading="lazy" />
-            {label}
+            <span className="os-cart-3d">
+              <span className="os-cart-face os-cart-face-front">
+                <img className="os-cart-shell-img" src={CARTRIDGE_FACE_URLS.front} alt="" />
+                {label}
+              </span>
+              <span className="os-cart-face os-cart-face-back">
+                <img className="os-cart-face-img" src={CARTRIDGE_FACE_URLS.back} alt="" />
+              </span>
+              <span className="os-cart-face os-cart-face-side os-cart-face-left">
+                <img className="os-cart-face-img" src={CARTRIDGE_FACE_URLS.side} alt="" />
+              </span>
+              <span className="os-cart-face os-cart-face-side os-cart-face-right">
+                <img className="os-cart-face-img" src={CARTRIDGE_FACE_URLS.side} alt="" />
+              </span>
+            </span>
           </span>
         );
+        /* eslint-enable @next/next/no-img-element */
         const meta = (
           <span className="os-grid-meta">
             <span className="os-grid-title">{cart.title}</span>
@@ -127,6 +163,11 @@ export function CartGrid({ carts, onPlayCart }: CartGridProps) {
             className="os-grid-card os-cart-card"
             data-launching={cart.id === launchingCartId ? "true" : undefined}
             onClick={(event) => launchCart(cart, event.currentTarget)}
+            onAnimationEnd={(event) => {
+              if (event.animationName === "os-cart-launch" && cart.id === launchingCartId) {
+                bootPendingLaunch();
+              }
+            }}
           >
             {thumb}
             {meta}

@@ -66,13 +66,16 @@ async function auditGrid(page, screenName) {
   check(`${screenName}: cover sits inside the shell`, layout.inside);
   check(`${screenName}: cover is centered on the shell`, layout.centerDrift < 2, `drift ${layout.centerDrift.toFixed(1)}px`);
 
-  // The cover is drawn 15% wider than the recess-fitted 76% → 87.4%.
+  // The cover is drawn 15% wider than the recess-fitted 76% → 87.4%. Measure
+  // against the front face — the plane the cover sits on — because the face
+  // itself projects slightly larger than the shell (it is translateZ'd
+  // toward the viewer under perspective).
   const widthRatio = await page
-    .locator(".os-cart-card .os-cart-shell")
+    .locator(".os-cart-card .os-cart-face-front")
     .first()
-    .evaluate((shell) => {
-      const labelRect = shell.querySelector(".os-cart-label").getBoundingClientRect();
-      return labelRect.width / shell.getBoundingClientRect().width;
+    .evaluate((face) => {
+      const labelRect = face.querySelector(".os-cart-label").getBoundingClientRect();
+      return labelRect.width / face.getBoundingClientRect().width;
     });
   check(
     `${screenName}: cover is 15% enlarged (≈87.4% of shell width)`,
@@ -83,17 +86,32 @@ async function auditGrid(page, screenName) {
   // The cover must out-stack the CRT film so the art stays crisp.
   const stacking = await page.evaluate(() => {
     const stage = document.querySelector(".os-stage.os-shell");
-    const label = document.querySelector(".os-cart-label");
+    const shell = document.querySelector(".os-cart-shell");
     return {
       film: Number(getComputedStyle(stage, "::after").zIndex),
-      label: Number(getComputedStyle(label).zIndex),
+      shell: Number(getComputedStyle(shell).zIndex),
     };
   });
   check(
-    `${screenName}: cover art stacks above the CRT film`,
-    stacking.label > stacking.film,
-    `label z ${stacking.label} vs film z ${stacking.film}`,
+    `${screenName}: cartridge stacks above the CRT film`,
+    stacking.shell > stacking.film,
+    `shell z ${stacking.shell} vs film z ${stacking.film}`,
   );
+
+  // A real 3D box: four faces per cartridge on a preserve-3d body, and the
+  // back/side textures actually resolve.
+  const box = await page.evaluate(() => {
+    const cards = [...document.querySelectorAll(".os-cart-card")];
+    const boxed = cards.filter((card) => card.querySelectorAll(".os-cart-face").length === 4).length;
+    const body = document.querySelector(".os-cart-3d");
+    const facesLoaded = [...document.querySelectorAll(".os-cart-face-img")]
+      .slice(0, 3)
+      .every((img) => img.complete && img.naturalWidth > 0);
+    return { cards: cards.length, boxed, style: getComputedStyle(body).transformStyle, facesLoaded };
+  });
+  check(`${screenName}: every cartridge is a four-faced 3D box`, box.boxed === box.cards, `${box.boxed}/${box.cards}`);
+  check(`${screenName}: cartridge body preserves 3D`, box.style === "preserve-3d", box.style);
+  check(`${screenName}: back/side face textures load`, box.facesLoaded);
 
   const shellLoaded = await page
     .locator(".os-cart-card .os-cart-shell-img")
@@ -187,7 +205,7 @@ try {
   // Hovering (or D-pad focusing) a cart rocks it — once, not forever.
   const hoverCard = page.locator("button.os-cart-card").first();
   await hoverCard.hover();
-  const wobble = await hoverCard.locator(".os-cart-shell").evaluate((shell) => {
+  const wobble = await hoverCard.locator(".os-cart-3d").evaluate((shell) => {
     const style = getComputedStyle(shell);
     return { name: style.animationName, iterations: style.animationIterationCount };
   });
@@ -196,23 +214,23 @@ try {
 
   // Selecting a cart spins it three times, flies it to the screen center
   // while it grows, THEN boots it.
-  const shellBefore = await hoverCard.locator(".os-cart-shell").boundingBox();
+  const shellBefore = await hoverCard.locator(".os-cart-3d").boundingBox();
   const selectedAt = Date.now();
   await hoverCard.click();
   const launching = await page
-    .locator('[data-launching="true"] .os-cart-shell')
+    .locator('[data-launching="true"] .os-cart-3d')
     .waitFor({ timeout: 1000 })
     .then(() => true)
     .catch(() => false);
   check("selection enters the launch state", launching);
   if (launching) {
     const launchName = await page
-      .locator('[data-launching="true"] .os-cart-shell')
+      .locator('[data-launching="true"] .os-cart-3d')
       .evaluate((shell) => getComputedStyle(shell).animationName);
     check("launch runs the triple-spin animation", launchName === "os-cart-launch", launchName);
     await page.waitForTimeout(1350); // spin done; mid-flight toward the screen center
     const shellMid = await page
-      .locator('[data-launching="true"] .os-cart-shell')
+      .locator('[data-launching="true"] .os-cart-3d')
       .boundingBox()
       .catch(() => null);
     check(
