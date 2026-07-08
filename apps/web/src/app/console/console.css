@@ -825,6 +825,37 @@ select.os-input {
   appearance: none;
 }
 
+/* Category chips (TIC-80 arcade browser). */
+.os-chip-row {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+}
+
+.os-chip-row::-webkit-scrollbar {
+  display: none;
+}
+
+.os-chip {
+  appearance: none;
+  border: 1px solid #2f2846;
+  border-radius: 999px;
+  background: #15121f;
+  color: #9990bb;
+  font: 700 9px var(--font-data);
+  letter-spacing: 0.12em;
+  padding: 6px 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.os-chip[data-active="true"] {
+  border-color: #f6b74a;
+  color: #f6b74a;
+}
+
 /* Featured-clip picker: picked cards glow amber and show their order. */
 .os-grid-card[data-picked="true"] {
   border-color: #f6b74a;

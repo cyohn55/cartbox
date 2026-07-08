@@ -35,8 +35,9 @@ export function CartGrid({ carts, onPlayCart }: CartGridProps) {
       {carts.map((cart) => {
         const playable = cart.cartUrl !== null && cart.engineUrl !== null;
         const thumb = cart.thumbUrl ? (
+          // Lazy: the arcade lists a thousand-plus covers in one grid.
           // eslint-disable-next-line @next/next/no-img-element
-          <img className="os-grid-thumb" src={cart.thumbUrl} alt="" />
+          <img className="os-grid-thumb" src={cart.thumbUrl} alt="" loading="lazy" />
         ) : (
           <span className="os-grid-thumb-empty" aria-hidden>
             ▦
