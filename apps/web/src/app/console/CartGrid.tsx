@@ -2,15 +2,21 @@
 
 /**
  * Cartridge grid shared by the Browse and Library screens. Tapping a playable
- * cart launches it full-screen in the console; paid, un-owned carts link out
- * to their store page.
+ * cart plays the launch animation (three spins, then a zoom toward the
+ * player) before booting it full-screen in the console; paid, un-owned carts
+ * link out to their store page.
  */
+
+import { useEffect, useRef, useState } from "react";
 
 import { withBasePath } from "@/lib/staticSite";
 import type { PlayingCart } from "./consoleOs";
 
 /** Pre-rendered shot of the cartridge shell; the cover art sits on its label. */
 const CARTRIDGE_SHELL_URL = withBasePath("/console/cartridge.png");
+
+/** How long the os-cart-launch keyframes run — keep in step with console.css. */
+const LAUNCH_ANIMATION_MS = 1600;
 
 export interface GridCart {
   id: string;
@@ -33,7 +39,45 @@ function formatPrice(cents: number): string {
   return cents === 0 ? "FREE" : `$${(cents / 100).toFixed(2)}`;
 }
 
+function prefersReducedMotion(): boolean {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
 export function CartGrid({ carts, onPlayCart }: CartGridProps) {
+  const [launchingCartId, setLaunchingCartId] = useState<string | null>(null);
+  const launchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (launchTimerRef.current !== null) {
+        clearTimeout(launchTimerRef.current);
+      }
+    };
+  }, []);
+
+  function launchCart(cart: GridCart) {
+    if (launchingCartId !== null) {
+      return; // A launch is already in flight; ignore further taps.
+    }
+    const playing: PlayingCart = {
+      cartId: cart.id,
+      title: cart.title,
+      cartUrl: cart.cartUrl!,
+      engineUrl: cart.engineUrl!,
+      modelId: cart.modelId,
+    };
+    if (prefersReducedMotion()) {
+      onPlayCart(playing);
+      return;
+    }
+    setLaunchingCartId(cart.id);
+    launchTimerRef.current = setTimeout(() => {
+      launchTimerRef.current = null;
+      setLaunchingCartId(null);
+      onPlayCart(playing);
+    }, LAUNCH_ANIMATION_MS);
+  }
+
   return (
     <div className="os-grid">
       {carts.map((cart) => {
@@ -69,15 +113,8 @@ export function CartGrid({ carts, onPlayCart }: CartGridProps) {
             key={cart.id}
             type="button"
             className="os-grid-card os-cart-card"
-            onClick={() =>
-              onPlayCart({
-                cartId: cart.id,
-                title: cart.title,
-                cartUrl: cart.cartUrl!,
-                engineUrl: cart.engineUrl!,
-                modelId: cart.modelId,
-              })
-            }
+            data-launching={cart.id === launchingCartId ? "true" : undefined}
+            onClick={() => launchCart(cart)}
           >
             {thumb}
             {meta}

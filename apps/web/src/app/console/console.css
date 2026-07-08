@@ -300,8 +300,12 @@
   border: 1px solid #1d1830;
 }
 
-/* Subtle CRT scanlines + glass sheen over whatever the OS draws. */
-.hh-screen::after {
+/* Subtle CRT scanlines + glass sheen over whatever the OS draws. The film
+   lives on each stage (not on .hh-screen) so select elements — the cart
+   cover art, for one — can stack above the shader with a z-index > 5 while
+   stage-over-stage layering keeps working. Stages are opaque, so only the
+   top stage's film ever shows. */
+.os-stage::after {
   content: "";
   position: absolute;
   inset: 0;
@@ -912,7 +916,8 @@
  * cartridge (pre-rendered from Cartridge.glb, transparent PNG) with the
  * cover art composited onto the shell's label recess. The label geometry
  * below was measured off the render: the gray panel spans ~29%–87.5% of
- * the shell's height, so a 240:136 cover centered there starts at 38.4%.
+ * the shell's height. The cover is drawn 15% wider than the recess-fitted
+ * 76% (→ 87.4%), still centered on the panel's midline at 58.25%.
  */
 .os-cart-card {
   background: transparent;
@@ -925,12 +930,61 @@
   position: relative;
   display: block;
   width: 100%;
-  transition: transform 0.15s ease;
+}
+
+/* The current selection rocks back and forth — a rotation about the model's
+   depth axis (Blender's Y, the axis the render camera looks down), which in
+   screen space is a plain 2D rotate. The shell gets z-index 6 while it
+   animates: the transform starts a stacking context that would otherwise
+   trap the cover art back under the CRT film. */
+@keyframes os-cart-wobble {
+  from {
+    transform: rotate(-2.4deg);
+  }
+  to {
+    transform: rotate(2.4deg);
+  }
 }
 
 .os-cart-card:hover .os-cart-shell,
+.os-cart-card:focus .os-cart-shell,
 .os-cart-card:focus-visible .os-cart-shell {
-  transform: translateY(-3px);
+  animation: os-cart-wobble 0.7s ease-in-out infinite alternate;
+  z-index: 6;
+}
+
+/* Launch: the picked cartridge spins three full turns about its vertical
+   axis (Blender's Z), then zooms toward the player as the game boots. Keep
+   the duration in step with LAUNCH_ANIMATION_MS in CartGrid.tsx. */
+@keyframes os-cart-launch {
+  0% {
+    transform: perspective(700px) rotateY(0turn) scale(1);
+    opacity: 1;
+  }
+  72% {
+    transform: perspective(700px) rotateY(3turn) scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: perspective(700px) rotateY(3turn) scale(2.8);
+    opacity: 0;
+  }
+}
+
+.os-cart-card[data-launching="true"] {
+  position: relative;
+  z-index: 7;
+}
+
+.os-cart-card[data-launching="true"] .os-cart-shell {
+  animation: os-cart-launch 1.6s ease-in forwards;
+  z-index: 6;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .os-cart-card .os-cart-shell {
+    animation: none !important;
+  }
 }
 
 .os-cart-shell-img {
@@ -941,9 +995,9 @@
 
 .os-cart-label {
   position: absolute;
-  left: 12%;
-  top: 38.4%;
-  width: 76%;
+  left: 6.3%;
+  top: 35.4%;
+  width: 87.4%;
   aspect-ratio: 240 / 136;
   object-fit: cover;
   image-rendering: pixelated;
@@ -951,6 +1005,8 @@
   background: #050308;
   border-radius: 3px;
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.3);
+  /* Above the stage's CRT film (z-index 5): the cover art stays crisp. */
+  z-index: 6;
 }
 
 .os-cart-label-empty {

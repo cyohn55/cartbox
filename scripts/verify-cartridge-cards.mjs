@@ -66,6 +66,35 @@ async function auditGrid(page, screenName) {
   check(`${screenName}: cover sits inside the shell`, layout.inside);
   check(`${screenName}: cover is centered on the shell`, layout.centerDrift < 2, `drift ${layout.centerDrift.toFixed(1)}px`);
 
+  // The cover is drawn 15% wider than the recess-fitted 76% → 87.4%.
+  const widthRatio = await page
+    .locator(".os-cart-card .os-cart-shell")
+    .first()
+    .evaluate((shell) => {
+      const labelRect = shell.querySelector(".os-cart-label").getBoundingClientRect();
+      return labelRect.width / shell.getBoundingClientRect().width;
+    });
+  check(
+    `${screenName}: cover is 15% enlarged (≈87.4% of shell width)`,
+    Math.abs(widthRatio - 0.874) < 0.01,
+    `${(widthRatio * 100).toFixed(1)}%`,
+  );
+
+  // The cover must out-stack the CRT film so the art stays crisp.
+  const stacking = await page.evaluate(() => {
+    const stage = document.querySelector(".os-stage.os-shell");
+    const label = document.querySelector(".os-cart-label");
+    return {
+      film: Number(getComputedStyle(stage, "::after").zIndex),
+      label: Number(getComputedStyle(label).zIndex),
+    };
+  });
+  check(
+    `${screenName}: cover art stacks above the CRT film`,
+    stacking.label > stacking.film,
+    `label z ${stacking.label} vs film z ${stacking.film}`,
+  );
+
   const shellLoaded = await page
     .locator(".os-cart-card .os-cart-shell-img")
     .first()
@@ -128,6 +157,34 @@ try {
   await page.waitForTimeout(500);
   await auditGrid(page, "Library");
   await page.screenshot({ path: shot("cart-library") });
+
+  // Hovering (or D-pad focusing) a cart rocks it back and forth.
+  const hoverCard = page.locator("button.os-cart-card").first();
+  await hoverCard.hover();
+  const wobbleName = await hoverCard
+    .locator(".os-cart-shell")
+    .evaluate((shell) => getComputedStyle(shell).animationName);
+  check("hovered cart runs the selection wobble", wobbleName === "os-cart-wobble", wobbleName);
+
+  // Selecting a cart spins it three times, zooms it out, THEN boots it.
+  const selectedAt = Date.now();
+  await hoverCard.click();
+  const launching = await page
+    .locator('[data-launching="true"] .os-cart-shell')
+    .waitFor({ timeout: 1000 })
+    .then(() => true)
+    .catch(() => false);
+  check("selection enters the launch state", launching);
+  if (launching) {
+    const launchName = await page
+      .locator('[data-launching="true"] .os-cart-shell')
+      .evaluate((shell) => getComputedStyle(shell).animationName);
+    check("launch runs the triple-spin animation", launchName === "os-cart-launch", launchName);
+    await page.screenshot({ path: shot("cart-launching") });
+  }
+  await page.getByTestId("game-screen").waitFor({ timeout: 20000 });
+  const bootDelay = Date.now() - selectedAt;
+  check("boot waits for the spin + zoom (≥1.5s)", bootDelay >= 1500, `${bootDelay}ms`);
 
   check("no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
   await phone.close();
