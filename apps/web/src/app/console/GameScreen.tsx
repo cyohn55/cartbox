@@ -11,9 +11,11 @@ import { useEffect, useRef, useState } from "react";
 import { mount, type ModelId, type PlayerHandle } from "@cartbox/player";
 
 import type { PlayingCart } from "./consoleOs";
+import { useConsoleInput } from "./ConsoleInputContext";
 
 export function GameScreen({ cart, onExit }: { cart: PlayingCart; onExit: () => void }) {
   const stageRef = useRef<HTMLDivElement>(null);
+  const handleRef = useRef<PlayerHandle | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
 
   useEffect(() => {
@@ -30,15 +32,30 @@ export function GameScreen({ cart, onExit }: { cart: PlayingCart; onExit: () => 
       controls: "keyboard",
       scale: "fit",
       lighting: { autoDetect: true },
-      onReady: () => setStatus("ready"),
+      onReady: () => {
+        setStatus("ready");
+        // Loading is async, so resume() must wait for it — calling it right
+        // after mount() no-ops and leaves the game frozen on frame 0.
+        void handleRef.current?.resume();
+      },
       onError: () => setStatus("error"),
     });
+    handleRef.current = handle;
 
-    // The launch tap was a real user gesture, so audio is allowed to start.
-    void handle.resume();
-
-    return () => handle.destroy();
+    return () => {
+      handleRef.current = null;
+      handle.destroy();
+    };
   }, [cart]);
+
+  // Every shell-button press is a real user gesture; nudging resume() lets a
+  // browser-suspended AudioContext start the moment the player touches a
+  // control (playback itself is already running).
+  useConsoleInput((event) => {
+    if (event.phase === "press") {
+      void handleRef.current?.resume();
+    }
+  });
 
   return (
     <div className="os-stage os-game" data-testid="game-screen">

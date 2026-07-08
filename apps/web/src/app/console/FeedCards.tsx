@@ -85,13 +85,15 @@ function CartCard({ item, active }: CardProps) {
       controls: "keyboard",
       scale: "fit",
       lighting: { autoDetect: true },
+      // Loading is async — resume() only works once the cart is in, so
+      // playback starts from onReady, not right after mount().
+      onReady: () => void handleRef.current?.resume(),
       onError: () => {
         setFailed(true);
         setPlaying(false);
       },
     });
     handleRef.current = handle;
-    void handle.resume(); // the ▶ tap was a real gesture, so audio may start
     bus.setGameForwarding(true);
 
     return () => {
@@ -102,9 +104,15 @@ function CartCard({ item, active }: CardProps) {
   }, [playing, cart.cartUrl, cart.engineUrl, cart.modelId, bus]);
 
   useConsoleInput((event) => {
-    if (playing && event.phase === "press" && event.control === "select") {
-      setPlaying(false);
+    if (!playing || event.phase !== "press") {
+      return;
     }
+    if (event.control === "select") {
+      setPlaying(false);
+      return;
+    }
+    // A real button press can unblock a browser-suspended AudioContext.
+    void handleRef.current?.resume();
   });
 
   const playable = cart.cartUrl !== null;

@@ -37,7 +37,12 @@ function ShellButton({ bus, control, className, label, children }: ShellButtonPr
   const [pressed, setPressed] = useState(false);
 
   const press = (event: PointerEvent<HTMLButtonElement>) => {
-    event.currentTarget.setPointerCapture(event.pointerId);
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Programmatic pointer events carry no active pointer; capture is a
+      // nicety for slid-off thumbs, never a reason to drop the press.
+    }
     setPressed(true);
     bus.press(control);
   };

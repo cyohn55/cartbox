@@ -169,13 +169,18 @@ export class Player {
   }
 
   async resume(): Promise<void> {
-    if (this.running || this.destroyed || !this.console) return;
+    if (this.destroyed || !this.console) return;
     // Start the run loop immediately; audio is best-effort, so a blocked or
     // failed AudioContext can never prevent playback from starting.
-    this.running = true;
-    this.lastFrameTime = this.view.performance.now();
-    this.frameAccumulatorMs = 0;
-    this.frameHandle = this.view.requestAnimationFrame(this.loop);
+    if (!this.running) {
+      this.running = true;
+      this.lastFrameTime = this.view.performance.now();
+      this.frameAccumulatorMs = 0;
+      this.frameHandle = this.view.requestAnimationFrame(this.loop);
+    }
+    // Attempted even when already running: a host can call resume() from a
+    // real user gesture (e.g. a handheld button press) to unblock an
+    // AudioContext the browser suspended when playback started automatically.
     try {
       await this.audio?.resume(); // resume within the user gesture on mobile
     } catch {
