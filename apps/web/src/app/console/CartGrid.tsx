@@ -6,7 +6,11 @@
  * to their store page.
  */
 
+import { withBasePath } from "@/lib/staticSite";
 import type { PlayingCart } from "./consoleOs";
+
+/** Pre-rendered shot of the cartridge shell; the cover art sits on its label. */
+const CARTRIDGE_SHELL_URL = withBasePath("/console/cartridge.png");
 
 export interface GridCart {
   id: string;
@@ -34,13 +38,20 @@ export function CartGrid({ carts, onPlayCart }: CartGridProps) {
     <div className="os-grid">
       {carts.map((cart) => {
         const playable = cart.cartUrl !== null && cart.engineUrl !== null;
-        const thumb = cart.thumbUrl ? (
+        const label = cart.thumbUrl ? (
           // Lazy: the arcade lists a thousand-plus covers in one grid.
           // eslint-disable-next-line @next/next/no-img-element
-          <img className="os-grid-thumb" src={cart.thumbUrl} alt="" loading="lazy" />
+          <img className="os-cart-label" src={cart.thumbUrl} alt="" loading="lazy" />
         ) : (
-          <span className="os-grid-thumb-empty" aria-hidden>
+          <span className="os-cart-label os-cart-label-empty" aria-hidden>
             ▦
+          </span>
+        );
+        const thumb = (
+          <span className="os-cart-shell">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img className="os-cart-shell-img" src={CARTRIDGE_SHELL_URL} alt="" loading="lazy" />
+            {label}
           </span>
         );
         const meta = (
@@ -57,7 +68,7 @@ export function CartGrid({ carts, onPlayCart }: CartGridProps) {
           <button
             key={cart.id}
             type="button"
-            className="os-grid-card"
+            className="os-grid-card os-cart-card"
             onClick={() =>
               onPlayCart({
                 cartId: cart.id,
@@ -72,7 +83,7 @@ export function CartGrid({ carts, onPlayCart }: CartGridProps) {
             {meta}
           </button>
         ) : (
-          <a key={cart.id} className="os-grid-card" href={`/play/${cart.id}`}>
+          <a key={cart.id} className="os-grid-card os-cart-card" href={`/play/${cart.id}`}>
             {thumb}
             {meta}
           </a>

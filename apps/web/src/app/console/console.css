@@ -907,6 +907,71 @@
   background: linear-gradient(135deg, #15121f, #241d38);
 }
 
+/*
+ * Cartridge cards: each Browse/Library entry is drawn as a physical game
+ * cartridge (pre-rendered from Cartridge.glb, transparent PNG) with the
+ * cover art composited onto the shell's label recess. The label geometry
+ * below was measured off the render: the gray panel spans ~29%–87.5% of
+ * the shell's height, so a 240:136 cover centered there starts at 38.4%.
+ */
+.os-cart-card {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  overflow: visible;
+}
+
+.os-cart-shell {
+  position: relative;
+  display: block;
+  width: 100%;
+  transition: transform 0.15s ease;
+}
+
+.os-cart-card:hover .os-cart-shell,
+.os-cart-card:focus-visible .os-cart-shell {
+  transform: translateY(-3px);
+}
+
+.os-cart-shell-img {
+  width: 100%;
+  display: block;
+  filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.45));
+}
+
+.os-cart-label {
+  position: absolute;
+  left: 12%;
+  top: 38.4%;
+  width: 76%;
+  aspect-ratio: 240 / 136;
+  object-fit: cover;
+  image-rendering: pixelated;
+  display: block;
+  background: #050308;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+.os-cart-label-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  color: #6b638c;
+  background: linear-gradient(135deg, #15121f, #241d38);
+}
+
+.os-cart-card .os-grid-meta {
+  padding: 5px 4px 2px;
+  justify-items: center;
+  text-align: center;
+}
+
+.os-cart-card[data-picked="true"] .os-cart-shell-img {
+  filter: drop-shadow(0 0 6px #f6b74a);
+}
+
 .os-grid-meta {
   padding: 7px 9px 9px;
   display: grid;
