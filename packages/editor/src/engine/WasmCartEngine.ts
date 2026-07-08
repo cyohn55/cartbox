@@ -173,7 +173,10 @@ export class WasmCartEngine implements CartEngine {
     const limit = this.codePtr + this.codeCapacity;
     let end = this.codePtr;
     while (end < limit && heap[end] !== 0) end += 1;
-    return new TextDecoder().decode(heap.subarray(this.codePtr, end));
+    // slice(), not subarray(): the Emscripten heap grows, and TextDecoder
+    // refuses views over resizable ArrayBuffers (Chrome 149+). Copying the
+    // code bytes detaches them from the growable memory.
+    return new TextDecoder().decode(heap.slice(this.codePtr, end));
   }
 
   setCode(text: string): void {
