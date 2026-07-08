@@ -1014,73 +1014,57 @@
   animation: os-cart-wobble 0.6s ease-in-out 1;
 }
 
-/* Launch: the picked cartridge whips three full turns about its vertical
-   axis (Blender's Z) in place — a quarter spinning on its edge — then
-   flies to the middle of the console screen, growing as it comes at the
-   player, and the game boots. The flight vector (--launch-dx/--launch-dy)
-   is measured per card in CartGrid.tsx, which boots the game when this
-   animation ends.
+/* Launch: the picked cartridge whips two full turns (720°) about its
+   vertical axis (Blender's Z) in place — a quarter spinning on its edge —
+   then flies to the middle of the console screen, growing as it comes at
+   the player, and the game boots. The flight vector
+   (--launch-dx/--launch-dy) is measured per card in CartGrid.tsx, which
+   boots the game when this animation ends.
 
    Two hard-won cross-browser rules here. Perspective lives on
    .os-cart-shell, NOT inline in these keyframes: inline perspective()
    breaks rotation interpolation on iOS Safari. And the spin is written as
    explicit 90° steps because browsers that fall back to matrix
-   interpolation normalize angles modulo 360° — a single 0→1080° segment
+   interpolation normalize angles modulo 360° — a single 0→720° segment
    collapses to "no rotation". A quarter turn per segment is unambiguous
-   everywhere. Spin runs 0–60% (1.08s ≈ 0.36s per revolution), flight
-   60–100%. */
+   everywhere. Spin runs 0–50% (0.72s ≈ 0.36s per revolution), flight
+   50–100%. */
 @keyframes os-cart-launch {
   0% {
     transform: translate(0, 0) rotateY(0deg) scale(1);
     opacity: 1;
     animation-timing-function: linear;
   }
-  5% {
+  6.25% {
     transform: translate(0, 0) rotateY(90deg) scale(1);
     animation-timing-function: linear;
   }
-  10% {
+  12.5% {
     transform: translate(0, 0) rotateY(180deg) scale(1);
     animation-timing-function: linear;
   }
-  15% {
+  18.75% {
     transform: translate(0, 0) rotateY(270deg) scale(1);
     animation-timing-function: linear;
   }
-  20% {
+  25% {
     transform: translate(0, 0) rotateY(360deg) scale(1);
     animation-timing-function: linear;
   }
-  25% {
+  31.25% {
     transform: translate(0, 0) rotateY(450deg) scale(1);
     animation-timing-function: linear;
   }
-  30% {
+  37.5% {
     transform: translate(0, 0) rotateY(540deg) scale(1);
     animation-timing-function: linear;
   }
-  35% {
+  43.75% {
     transform: translate(0, 0) rotateY(630deg) scale(1);
     animation-timing-function: linear;
   }
-  40% {
-    transform: translate(0, 0) rotateY(720deg) scale(1);
-    animation-timing-function: linear;
-  }
-  45% {
-    transform: translate(0, 0) rotateY(810deg) scale(1);
-    animation-timing-function: linear;
-  }
   50% {
-    transform: translate(0, 0) rotateY(900deg) scale(1);
-    animation-timing-function: linear;
-  }
-  55% {
-    transform: translate(0, 0) rotateY(990deg) scale(1);
-    animation-timing-function: linear;
-  }
-  60% {
-    transform: translate(0, 0) rotateY(1080deg) scale(1);
+    transform: translate(0, 0) rotateY(720deg) scale(1);
     opacity: 1;
     animation-timing-function: ease-in;
   }
@@ -1088,7 +1072,7 @@
     opacity: 1;
   }
   100% {
-    transform: translate(var(--launch-dx, 0px), var(--launch-dy, 0px)) rotateY(1080deg) scale(2.4);
+    transform: translate(var(--launch-dx, 0px), var(--launch-dy, 0px)) rotateY(720deg) scale(2.4);
     opacity: 0;
   }
 }
@@ -1099,7 +1083,7 @@
 }
 
 .os-cart-card[data-launching="true"] .os-cart-3d {
-  animation: os-cart-launch 1.8s forwards;
+  animation: os-cart-launch 1.44s forwards;
 }
 
 @media (prefers-reduced-motion: reduce) {
