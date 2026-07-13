@@ -132,6 +132,10 @@ export function CartGrid({ carts, onPlayCart }: CartGridProps) {
               <span className="os-cart-face os-cart-face-front">
                 <img className="os-cart-shell-img" src={CARTRIDGE_FACE_URLS.front} alt="" />
                 {label}
+                {/* CRT glass over the game art, set into the cartridge's screen
+                    window — scanlines + sheen sit between the preview art and
+                    the front of the shell. */}
+                <span className="os-cart-crt" aria-hidden />
               </span>
               <span className="os-cart-face os-cart-face-back">
                 <img className="os-cart-face-img" src={CARTRIDGE_FACE_URLS.back} alt="" />
