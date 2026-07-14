@@ -90,3 +90,13 @@ export function findDemoCart(cartId: string): DemoCart | undefined {
 export function demoCartUrl(cartId: string): string {
   return withBasePath(`/demo/carts/${cartId}.tic`);
 }
+
+/**
+ * Public URL of a demo cart's cover-art thumbnail (rendered by
+ * scripts/bake-demo-thumbs.mjs), honouring the site base path. The static demo
+ * build has no render worker, so these PNGs stand in for the covers the worker
+ * would otherwise produce — used on the cartridge grid label and the feed card.
+ */
+export function demoThumbUrl(cartId: string): string {
+  return withBasePath(`/demo/thumbs/${cartId}.png`);
+}

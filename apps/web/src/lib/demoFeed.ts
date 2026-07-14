@@ -8,7 +8,7 @@
  * their ordering rules match exactly.
  */
 
-import { DEMO_CARTS, demoCartUrl } from "./demoCatalog";
+import { DEMO_CARTS, demoCartUrl, demoThumbUrl } from "./demoCatalog";
 import { ENGINE_URL_BY_MODEL } from "./consoleModel";
 import { interleaveFeed, type FeedItem } from "./feedMix";
 
@@ -88,7 +88,7 @@ export function buildDemoFeed(): FeedItem[] {
       modelId: cart.consoleModel,
       priceCents: cart.priceCents,
       plays: cart.plays,
-      thumbUrl: null,
+      thumbUrl: demoThumbUrl(cart.id),
       cartUrl: demoCartUrl(cart.id),
       engineUrl: ENGINE_URL_BY_MODEL[cart.consoleModel],
     },

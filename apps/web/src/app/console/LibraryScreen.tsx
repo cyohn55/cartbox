@@ -10,7 +10,7 @@ import { useEffect, useState } from "react";
 
 import { authHeaders } from "@/lib/supabase-browser";
 import { isStaticExport } from "@/lib/staticSite";
-import { DEMO_CARTS, demoCartUrl } from "@/lib/demoCatalog";
+import { DEMO_CARTS, demoCartUrl, demoThumbUrl } from "@/lib/demoCatalog";
 import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
 import type { PlayingCart } from "./consoleOs";
 import { CartGrid, type GridCart } from "./CartGrid";
@@ -26,7 +26,7 @@ function demoLibrary(): GridCart[] {
     title: cart.title,
     priceCents: cart.priceCents,
     modelId: cart.consoleModel,
-    thumbUrl: null,
+    thumbUrl: demoThumbUrl(cart.id),
     cartUrl: demoCartUrl(cart.id),
     engineUrl: ENGINE_URL_BY_MODEL[cart.consoleModel],
   }));

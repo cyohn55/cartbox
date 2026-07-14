@@ -14,7 +14,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { isStaticExport } from "@/lib/staticSite";
-import { DEMO_CARTS, demoCartUrl } from "@/lib/demoCatalog";
+import { DEMO_CARTS, demoCartUrl, demoThumbUrl } from "@/lib/demoCatalog";
 import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
 import {
   TIC_ARCADE_CATEGORIES,
@@ -45,7 +45,7 @@ function demoGridCarts(): GridCart[] {
     title: cart.title,
     priceCents: cart.priceCents,
     modelId: cart.consoleModel,
-    thumbUrl: null,
+    thumbUrl: demoThumbUrl(cart.id),
     cartUrl: demoCartUrl(cart.id),
     engineUrl: ENGINE_URL_BY_MODEL[cart.consoleModel],
     plays: cart.plays,

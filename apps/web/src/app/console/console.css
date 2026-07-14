@@ -816,6 +816,13 @@
   max-height: 100%;
 }
 
+/* Authored-post backdrop art fills the whole stage (it clips to cover itself). */
+.os-post-art {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 .os-card-scrim {
   position: absolute;
   inset: 0;

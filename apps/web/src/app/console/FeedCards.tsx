@@ -12,6 +12,7 @@ import { useEffect, useRef, useState } from "react";
 import { mount, parseReplay, type ModelId, type PlayerHandle } from "@cartbox/player";
 
 import type { FeedCartInfo, FeedClipInfo, FeedItem } from "@/lib/feedMix";
+import { PostArt } from "./PostArt";
 import { useConsoleInput, useConsoleInputBus } from "./ConsoleInputContext";
 import { cursorHasFocus } from "./useConsoleCursor";
 import type { PlayingCart } from "./consoleOs";
@@ -337,6 +338,9 @@ function TriviaCard({ item, active }: CardProps) {
 
   return (
     <article className="os-card" data-testid="feed-card-trivia">
+      <div className="os-card-stage">
+        <PostArt kind="trivia" />
+      </div>
       <div className="os-card-scrim" />
       <Badge kind="trivia" />
       <h3>{item.body}</h3>
@@ -374,6 +378,9 @@ function TriviaCard({ item, active }: CardProps) {
 function ContentCard({ item }: CardProps) {
   return (
     <article className="os-card" data-testid={`feed-card-${item.kind}`}>
+      <div className="os-card-stage">
+        <PostArt kind={item.kind} />
+      </div>
       <div className="os-card-scrim" />
       <Badge kind={item.kind} />
       <h3>
