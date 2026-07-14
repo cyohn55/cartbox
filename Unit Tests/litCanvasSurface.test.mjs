@@ -41,11 +41,29 @@ function fakeGl() {
     texParameteri() {}, activeTexture() {}, createFramebuffer: () => ({}), bindFramebuffer() {},
     framebufferTexture2D() {}, getUniformLocation: (_p, name) => ({ name }),
     uniform1i(loc, v) { if (loc.name === "uLightCount") gl.lightCount = v; if (loc.name === "uUnlit") gl.unlit = v; },
-    uniform1f() {}, uniform2f() {}, uniform3f() {}, uniform1fv() {}, uniform3fv() {}, texImage2D() {},
+    uniform1f() {}, uniform2f() {}, uniform3f() {}, uniform1fv() {}, uniform3fv() {},
+    activeTexture(unit) { gl.activeTex = unit; },
+    // Record real pixel uploads (skip null FBO-storage allocations) tagged with
+    // the bound texture unit, so tests can inspect what reached uMat (TEXTURE1).
+    texImage2D(_t, _l, _if, _w, _h, _b, _f, _ty, pixels) {
+      if (pixels) gl.uploads.push({ unit: gl.activeTex, data: pixels });
+    },
     viewport() {}, drawArrays() { gl.draws += 1; }, deleteProgram() {}, deleteTexture() {},
     deleteFramebuffer() {}, deleteBuffer() {}, draws: 0, lightCount: -1, unlit: -1,
+    activeTex: -1, uploads: [], TEXTURE1: 33985,
   };
   return gl;
+}
+
+// The material buffer is uploaded to the sampler bound to texture unit TEXTURE1;
+// the albedo to TEXTURE0.
+function lastMaterialUpload(gl) {
+  const mat = gl.uploads.filter((u) => u.unit === gl.TEXTURE1);
+  return mat.length ? mat[mat.length - 1].data : null;
+}
+function lastAlbedoUpload(gl) {
+  const alb = gl.uploads.filter((u) => u.unit === gl.TEXTURE0);
+  return alb.length ? alb[alb.length - 1].data : null;
 }
 
 function fake2d() {
@@ -104,6 +122,97 @@ test("consults a material provider once per frame", async () => {
   surface.blit(albedo);
   surface.blit(albedo);
   assert.equal(materialCalls, 2);
+  surface.destroy();
+});
+
+test("engine-emitted material takes precedence over the host material provider", async () => {
+  const { container, gl } = makeContainer(true);
+  let providerCalls = 0;
+  const surface = await LitCanvasSurface.create(container, "fit", MODEL, {
+    lights: () => [{ x: 1, y: 1, z: 8, color: [1, 1, 1], radius: 10 }],
+    material: () => { providerCalls += 1; return null; },
+    bloom: false,
+  });
+  // A distinctive material the engine produced this frame (normal idx in R).
+  const engineMaterial = new Uint8Array(MODEL.width * MODEL.height * 4);
+  engineMaterial[0] = 7; // sprite pixel 0 -> normal direction index 7
+  surface.setCartMaterial(engineMaterial);
+  surface.blit(albedo);
+
+  assert.equal(providerCalls, 0, "the host provider must be skipped when the engine supplies material");
+  const uploaded = lastMaterialUpload(gl);
+  assert.ok(uploaded, "a material texture should have been uploaded");
+  assert.equal(uploaded[0], 7, "the cart's authored normal index should reach the shader");
+  surface.destroy();
+});
+
+test("falls back to the host material provider when the engine material is empty", async () => {
+  const { container } = makeContainer(true);
+  let providerCalls = 0;
+  const surface = await LitCanvasSurface.create(container, "fit", MODEL, {
+    lights: () => [{ x: 1, y: 1, z: 8, color: [1, 1, 1], radius: 10 }],
+    material: () => { providerCalls += 1; return null; },
+    bloom: false,
+  });
+  surface.setCartMaterial(new Uint8Array(0)); // capture disabled / no material this frame
+  surface.blit(albedo);
+  assert.equal(providerCalls, 1, "an empty engine buffer must defer to the host provider");
+  surface.destroy();
+});
+
+test("engine material is copied off the growable WASM buffer, not aliased", async () => {
+  const { container, gl } = makeContainer(true);
+  const surface = await LitCanvasSurface.create(container, "fit", MODEL, {
+    lights: () => [{ x: 1, y: 1, z: 8, color: [1, 1, 1], radius: 10 }],
+    bloom: false,
+  });
+  // Simulate the engine's view over WASM memory being overwritten on the next
+  // tick after the surface has consumed it.
+  const engineView = new Uint8Array(MODEL.width * MODEL.height * 4);
+  engineView[0] = 3;
+  surface.setCartMaterial(engineView);
+  surface.blit(albedo);
+  const uploaded = lastMaterialUpload(gl);
+  engineView[0] = 99; // the next tick clobbers the shared buffer
+
+  assert.notEqual(uploaded, engineView, "the uploaded material must be a distinct buffer");
+  assert.equal(uploaded[0], 3, "the copy taken at blit time must be unaffected by later mutation");
+  surface.destroy();
+});
+
+test("folds engine emissive into the albedo alpha the shader reads", async () => {
+  const { container, gl } = makeContainer(true);
+  const surface = await LitCanvasSurface.create(container, "fit", MODEL, {
+    lights: () => [{ x: 1, y: 1, z: 8, color: [1, 1, 1], radius: 10 }],
+    bloom: false,
+  });
+  const emissive = new Uint8Array(MODEL.width * MODEL.height);
+  emissive[0] = 200; // pixel 0 strongly self-lit
+  emissive[3] = 0; // pixel 3 lit normally
+  surface.setCartEmissive(emissive);
+  surface.blit(albedo);
+
+  const uploaded = lastAlbedoUpload(gl);
+  assert.ok(uploaded, "an albedo texture should have been uploaded");
+  assert.equal(uploaded[0 * 4 + 3], 200, "pixel 0's emissive should land in the albedo alpha");
+  assert.equal(uploaded[3 * 4 + 3], 0, "pixel 3 stays lit-normally (alpha 0)");
+  surface.destroy();
+});
+
+test("an empty emissive buffer leaves the albedo alpha untouched", async () => {
+  const { container, gl } = makeContainer(true);
+  const surface = await LitCanvasSurface.create(container, "fit", MODEL, {
+    lights: () => [{ x: 1, y: 1, z: 8, color: [1, 1, 1], radius: 10 }],
+    bloom: false,
+  });
+  // A framebuffer whose alpha is already opaque, as the engine delivers it.
+  const opaque = new Uint8Array(MODEL.width * MODEL.height * 4);
+  for (let i = 0; i < MODEL.width * MODEL.height; i += 1) opaque[i * 4 + 3] = 255;
+  surface.setCartEmissive(new Uint8Array(0));
+  surface.blit(opaque);
+
+  const uploaded = lastAlbedoUpload(gl);
+  assert.equal(uploaded[3], 255, "without engine emissive the framebuffer alpha is preserved");
   surface.destroy();
 });
 

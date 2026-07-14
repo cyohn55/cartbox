@@ -47,11 +47,45 @@
  * session's time() sequence starts at 0 and advances one 60Hz frame per tick,
  * independent of any other console that ran before it.
  */
+/*
+ * The material G-buffer: written by the core during tile blits when capture is
+ * enabled, aligned 1:1 with the visible 240x136 framebuffer (no overscan border,
+ * so no cropping). Two planes:
+ *   material  - RGBA per pixel: R=normal index, G=height, B=specular, A=roughness
+ *   emissive  - one byte per pixel of self-illumination (0=lit normally)
+ * The host relights the framebuffer with `material` and folds `emissive` into the
+ * albedo's alpha, which its shader reads. Material persists frame-to-frame like
+ * VRAM (the core rematte-s per cls), so both planes live in the console struct.
+ */
 typedef struct {
   tic80 *core;
   uint64_t clock;
+  int material_enabled;
   uint32_t screen[TIC80_WIDTH * TIC80_HEIGHT];
+  uint8_t material[TIC80_WIDTH * TIC80_HEIGHT * 4];
+  uint8_t emissive[TIC80_WIDTH * TIC80_HEIGHT];
 } cbx_console;
+
+/*
+ * Install (or clear, with NULL) the material capture targets in the core.
+ * Defined in the TIC-80 core (src/core/draw.c); declared here as the shim drives it.
+ */
+extern void tic_core_cbx_material_target(void *material, void *emissive);
+
+/* Reset both planes to the flat-matte default: normal index 0 (facing the
+ * camera), height/specular 0, roughness full, emissive 0 — matches
+ * createFlatMaterial on the host so undrawn regions shade identically whether or
+ * not capture is on. Done once when capture is enabled; thereafter the core
+ * rematte-s per cls so material persists like VRAM between clears. */
+static void cbx_material_reset(cbx_console *console) {
+  for (int i = 0; i < TIC80_WIDTH * TIC80_HEIGHT; ++i) {
+    console->material[i * 4 + 0] = 0;
+    console->material[i * 4 + 1] = 0;
+    console->material[i * 4 + 2] = 0;
+    console->material[i * 4 + 3] = 255;
+    console->emissive[i] = 0;
+  }
+}
 
 /*
  * The console currently ticking. tic80_tick's timer callbacks receive the tic80
@@ -131,10 +165,18 @@ void cbx_tick(cbx_console *console, int gamepad_mask) {
   input.gamepads.first.x = (gamepad_mask >> 6) & 1;
   input.gamepads.first.y = (gamepad_mask >> 7) & 1;
 
-  /* Advance this console's virtual clock one frame, then tick + generate sound. */
+  /* Advance this console's virtual clock one frame, then tick + generate sound.
+   * When material capture is on, install the planes as the core's targets for the
+   * duration of the tick; the core rematte-s cleared regions itself (per cls), so
+   * we do NOT wipe them here — material persists like VRAM. Clear the targets
+   * afterwards so a stale pointer can never be written between ticks. */
   cbx_active = console;
   console->clock += CBX_CLOCK_HZ / TIC80_FRAMERATE;
+  if (console->material_enabled) {
+    tic_core_cbx_material_target(console->material, console->emissive);
+  }
   tic80_tick(console->core, input, cbx_counter, cbx_frequency);
+  tic_core_cbx_material_target(NULL, NULL);
   tic80_sound(console->core);
 
   /*
@@ -157,6 +199,33 @@ void cbx_tick(cbx_console *console, int gamepad_mask) {
 EMSCRIPTEN_KEEPALIVE
 void *cbx_screen_ptr(cbx_console *console) {
   return console ? console->screen : NULL;
+}
+
+/*
+ * Material G-buffer (Phase 1). Off by default so unlit carts pay nothing; the
+ * host enables it when it mounts with lighting. cbx_material_ptr returns a
+ * TIC80_WIDTH*TIC80_HEIGHT*4 RGBA plane valid until the next tick.
+ */
+EMSCRIPTEN_KEEPALIVE
+void cbx_set_material_capture(cbx_console *console, int enabled) {
+  if (console) {
+    console->material_enabled = enabled ? 1 : 0;
+    /* Seed the flat-matte default when turning capture on, so pixels never
+     * drawn or cleared still shade as matte rather than as zeroed roughness. */
+    if (console->material_enabled) {
+      cbx_material_reset(console);
+    }
+  }
+}
+
+EMSCRIPTEN_KEEPALIVE
+void *cbx_material_ptr(cbx_console *console) {
+  return console ? console->material : NULL;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void *cbx_emissive_ptr(cbx_console *console) {
+  return console ? console->emissive : NULL;
 }
 
 EMSCRIPTEN_KEEPALIVE

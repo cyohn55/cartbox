@@ -33,6 +33,9 @@ interface EmscriptenModule {
   _cbx_samples_count(handle: number): number;
   _cbx_mailbox_ptr(handle: number): number;
   _cbx_mailbox_words(handle: number): number;
+  _cbx_material_ptr(handle: number): number;
+  _cbx_emissive_ptr(handle: number): number;
+  _cbx_set_material_capture(handle: number, enabled: number): void;
   _cbx_delete(handle: number): void;
 }
 
@@ -51,6 +54,20 @@ export interface ConsoleInstance {
   readAudioSamples(): Int16Array;
   /** Returns a copy of the event-mailbox words (word[0] = sequence counter). */
   readMailbox(): Uint32Array;
+  /** Enables/disables per-pixel material capture (off by default; unlit carts pay nothing). */
+  setMaterialCapture(enabled: boolean): void;
+  /**
+   * Returns a view of the current material G-buffer (RGBA: normal index, height,
+   * specular, roughness), same dimensions as the framebuffer and valid until the
+   * next tick. Empty until {@link setMaterialCapture} is enabled.
+   */
+  readMaterial(): Uint8Array;
+  /**
+   * Returns a view of the current emissive plane (one byte per pixel of self-
+   * illumination; 0 = lit normally), width*height bytes, valid until the next
+   * tick. Empty until {@link setMaterialCapture} is enabled.
+   */
+  readEmissive(): Uint8Array;
   /** Frees the underlying WASM console. */
   dispose(): void;
 }
@@ -134,6 +151,23 @@ export function createConsole(
       // Unsigned view over the current WASM memory (buffer may change on growth);
       // copy out so callers hold a stable snapshot.
       return new Uint32Array(module.HEAPU8.buffer, ptr, words).slice();
+    },
+
+    setMaterialCapture(enabled: boolean): void {
+      module._cbx_set_material_capture(handle, enabled ? 1 : 0);
+    },
+
+    readMaterial(): Uint8Array {
+      const ptr = module._cbx_material_ptr(handle);
+      // The material plane matches the framebuffer's dimensions (w*h*4). Subarray
+      // is a view into WASM memory — the caller copies it before the next tick.
+      return module.HEAPU8.subarray(ptr, ptr + frameBytes);
+    },
+
+    readEmissive(): Uint8Array {
+      const ptr = module._cbx_emissive_ptr(handle);
+      // One byte per pixel (a quarter of the RGBA framebuffer's byte count).
+      return module.HEAPU8.subarray(ptr, ptr + frameBytes / 4);
     },
 
     dispose(): void {

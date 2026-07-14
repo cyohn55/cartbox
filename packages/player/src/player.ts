@@ -89,6 +89,8 @@ export class Player {
       if (!this.console.loadCartridge(preparedBytes)) {
         throw new Error("Engine rejected the cartridge");
       }
+      // Only pay for the per-pixel material G-buffer when a lit surface will use it.
+      this.console.setMaterialCapture(Boolean(this.options.lighting));
       // Baseline the mailbox so any pre-existing persistent memory isn't
       // mistaken for freshly emitted events.
       this.lastMailboxSeq = this.console.readMailbox()[0] ?? 0;
@@ -254,9 +256,12 @@ export class Player {
   private present(): void {
     const framebuffer = this.console?.readFramebuffer();
     if (framebuffer) {
-      // Relight from any lights the cart published this frame via cartbox.light().
+      // Relight from any lights the cart published this frame via cartbox.light(),
+      // and feed the per-pixel material the core emitted for this frame's sprites.
       if (this.litSurface && this.console) {
         this.litSurface.setCartLights(decodeLights(this.console.readMailbox()));
+        this.litSurface.setCartMaterial(this.console.readMaterial());
+        this.litSurface.setCartEmissive(this.console.readEmissive());
       }
       this.surface?.blit(framebuffer);
     }

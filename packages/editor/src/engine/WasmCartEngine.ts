@@ -12,8 +12,6 @@
 
 import {
   BANK_COUNT,
-  CartEngine,
-  MaterialChannel,
   MATERIAL_BANK,
   MATERIAL_LEVELS,
   MUSIC_PATTERNS,
@@ -22,11 +20,14 @@ import {
   SFX_COUNT,
   SFX_MAX_VALUE,
   SFX_TICKS,
-  SpritePage,
   TILE_SIZE,
   WAVEFORM_COUNT,
   WAVEFORM_STEPS,
 } from "./CartEngine";
+// Types only — split out so `--experimental-transform-types` (used by the node
+// integration tests) can strip them; a value import of an interface would make
+// node look for a runtime export that doesn't exist.
+import type { CartEngine, MaterialChannel, SpritePage } from "./CartEngine";
 import type { EditorModule } from "./wasmModule";
 import { loadEditorModule } from "./wasmModule";
 import { CLASSIC_MODEL, type ConsoleModelSpec } from "./consoleModel";

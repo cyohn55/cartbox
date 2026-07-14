@@ -883,6 +883,13 @@ var LitCanvasSurface = class _LitCanvasSurface {
     // and WebGL/WebGPU texture uploads reject resizable ArrayBufferViews. Copying
     // into a plain buffer once per frame satisfies the upload contract.
     this.albedoCopy = null;
+    // The per-pixel material the engine emitted for this frame (same growable-buffer
+    // caveat as the framebuffer, so it is copied into a stable buffer before upload).
+    this.cartMaterial = null;
+    this.cartMaterialCopy = null;
+    // Per-pixel emissive (one byte each) the engine emitted this frame. Folded into
+    // the albedo copy's alpha, which the shader reads as self-illumination.
+    this.cartEmissive = null;
     const view = container.ownerDocument.defaultView;
     this.performanceNow = () => view?.performance.now() ?? Date.now();
     if (!built) {
@@ -921,6 +928,23 @@ var LitCanvasSurface = class _LitCanvasSurface {
   setCartLights(lights) {
     this.cartLights = lights;
   }
+  /**
+   * Sets the per-pixel material buffer the engine emitted for this frame's
+   * sprites (RGBA: normal index, height, specular, roughness). Copied into a
+   * stable buffer on {@link blit}; an empty buffer falls back to host material.
+   */
+  setCartMaterial(material) {
+    this.cartMaterial = material.length ? material : null;
+  }
+  /**
+   * Sets the per-pixel emissive plane (one byte each) the engine emitted this
+   * frame. It is folded into the albedo copy's alpha channel on {@link blit},
+   * which both lighting backends read as self-illumination. An empty buffer
+   * leaves the framebuffer's own alpha untouched.
+   */
+  setCartEmissive(emissive) {
+    this.cartEmissive = emissive.length ? emissive : null;
+  }
   blit(albedo) {
     if (this.fallback || !this.renderer) {
       this.fallback?.blit(albedo);
@@ -940,6 +964,11 @@ var LitCanvasSurface = class _LitCanvasSurface {
       this.albedoCopy = new Uint8Array(albedo.length);
     }
     this.albedoCopy.set(albedo);
+    if (this.cartEmissive && this.cartEmissive.length * 4 === this.albedoCopy.length) {
+      for (let i = 0; i < this.cartEmissive.length; i += 1) {
+        this.albedoCopy[i * 4 + 3] = this.cartEmissive[i] ?? 0;
+      }
+    }
     this.renderer.render(this.albedoCopy, material, {
       lights,
       ambient: this.options.ambient ?? DEFAULT_AMBIENT,
@@ -960,6 +989,13 @@ var LitCanvasSurface = class _LitCanvasSurface {
     this.canvas?.remove();
   }
   resolveMaterial(context) {
+    if (this.cartMaterial) {
+      if (!this.cartMaterialCopy || this.cartMaterialCopy.length !== this.cartMaterial.length) {
+        this.cartMaterialCopy = new Uint8Array(this.cartMaterial.length);
+      }
+      this.cartMaterialCopy.set(this.cartMaterial);
+      return this.cartMaterialCopy;
+    }
     const source = this.options.material;
     if (typeof source === "function") return source(context);
     return source ?? null;
@@ -1499,6 +1535,17 @@ function createConsole(module, model, sampleRate = model.sampleRate) {
       }
       return new Uint32Array(module.HEAPU8.buffer, ptr, words).slice();
     },
+    setMaterialCapture(enabled) {
+      module._cbx_set_material_capture(handle, enabled ? 1 : 0);
+    },
+    readMaterial() {
+      const ptr = module._cbx_material_ptr(handle);
+      return module.HEAPU8.subarray(ptr, ptr + frameBytes);
+    },
+    readEmissive() {
+      const ptr = module._cbx_emissive_ptr(handle);
+      return module.HEAPU8.subarray(ptr, ptr + frameBytes / 4);
+    },
     dispose() {
       module._cbx_delete(handle);
     }
@@ -1966,6 +2013,7 @@ var Player = class {
       if (!this.console.loadCartridge(preparedBytes)) {
         throw new Error("Engine rejected the cartridge");
       }
+      this.console.setMaterialCapture(Boolean(this.options.lighting));
       this.lastMailboxSeq = this.console.readMailbox()[0] ?? 0;
       const scale = this.options.scale ?? "fit";
       const makeBaseSurface = async (target) => {
@@ -2028,11 +2076,13 @@ var Player = class {
     return this.recorder ? this.recorder.finish() : null;
   }
   async resume() {
-    if (this.running || this.destroyed || !this.console) return;
-    this.running = true;
-    this.lastFrameTime = this.view.performance.now();
-    this.frameAccumulatorMs = 0;
-    this.frameHandle = this.view.requestAnimationFrame(this.loop);
+    if (this.destroyed || !this.console) return;
+    if (!this.running) {
+      this.running = true;
+      this.lastFrameTime = this.view.performance.now();
+      this.frameAccumulatorMs = 0;
+      this.frameHandle = this.view.requestAnimationFrame(this.loop);
+    }
     try {
       await this.audio?.resume();
     } catch {
@@ -2073,6 +2123,8 @@ var Player = class {
     if (framebuffer) {
       if (this.litSurface && this.console) {
         this.litSurface.setCartLights(decodeLights(this.console.readMailbox()));
+        this.litSurface.setCartMaterial(this.console.readMaterial());
+        this.litSurface.setCartEmissive(this.console.readEmissive());
       }
       this.surface?.blit(framebuffer);
     }
@@ -2165,6 +2217,7 @@ export {
   CARTBOX_SDK_LUA,
   CartridgeLoadError,
   ConsoleButton,
+  DEFAULT_KEY_BINDINGS,
   DEFAULT_MODEL_ID,
   EVENT_CAPACITY,
   LIGHTS_BASE,
@@ -2213,6 +2266,7 @@ export {
   parseReplay,
   randomSeed,
   readCartCode,
+  resolveButton,
   resolveUnlockedAchievements,
   runReplayEvents,
   seedCartridge,

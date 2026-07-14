@@ -472,6 +472,24 @@ declare class CartridgeLoadError extends Error {
 }
 
 /**
+ * Input handling. Both sources (keyboard, touch) write into a shared
+ * {@link GamepadState} that the run loop samples once per frame as a bitmask.
+ *
+ * The key-binding lookup is a pure function so it can be unit-tested without a DOM.
+ */
+
+/**
+ * Default keyboard layout, matching TIC-80 conventions: arrows for the D-pad,
+ * Z/X for A/B, A/S for X/Y. Keyed by `KeyboardEvent.code` so it is layout-independent.
+ */
+declare const DEFAULT_KEY_BINDINGS: Readonly<Record<string, ConsoleButton>>;
+/**
+ * Resolves a physical key to a console button, or undefined if unbound.
+ * Pure — no DOM access — so callers and tests can use it freely.
+ */
+declare function resolveButton(keyCode: string, bindings?: Readonly<Record<string, ConsoleButton>>): ConsoleButton | undefined;
+
+/**
  * Deterministic RNG seeding via cart-code injection.
  *
  * Cart randomness comes from the scripting language's own RNG (e.g. Lua's
@@ -543,6 +561,9 @@ interface EmscriptenModule {
     _cbx_samples_count(handle: number): number;
     _cbx_mailbox_ptr(handle: number): number;
     _cbx_mailbox_words(handle: number): number;
+    _cbx_material_ptr(handle: number): number;
+    _cbx_emissive_ptr(handle: number): number;
+    _cbx_set_material_capture(handle: number, enabled: number): void;
     _cbx_delete(handle: number): void;
 }
 /** A loaded console ready to run a single cartridge. */
@@ -557,6 +578,20 @@ interface ConsoleInstance {
     readAudioSamples(): Int16Array;
     /** Returns a copy of the event-mailbox words (word[0] = sequence counter). */
     readMailbox(): Uint32Array;
+    /** Enables/disables per-pixel material capture (off by default; unlit carts pay nothing). */
+    setMaterialCapture(enabled: boolean): void;
+    /**
+     * Returns a view of the current material G-buffer (RGBA: normal index, height,
+     * specular, roughness), same dimensions as the framebuffer and valid until the
+     * next tick. Empty until {@link setMaterialCapture} is enabled.
+     */
+    readMaterial(): Uint8Array;
+    /**
+     * Returns a view of the current emissive plane (one byte per pixel of self-
+     * illumination; 0 = lit normally), width*height bytes, valid until the next
+     * tick. Empty until {@link setMaterialCapture} is enabled.
+     */
+    readEmissive(): Uint8Array;
     /** Frees the underlying WASM console. */
     dispose(): void;
 }
@@ -838,6 +873,9 @@ declare class LitCanvasSurface implements DisplaySurface {
     private frame;
     private cartLights;
     private albedoCopy;
+    private cartMaterial;
+    private cartMaterialCopy;
+    private cartEmissive;
     private constructor();
     /** Builds the surface, choosing the best available lighting backend. */
     static create(container: HTMLElement, scaleMode: ScaleMode, model: ConsoleModel, options: LightingOptions): Promise<LitCanvasSurface>;
@@ -850,6 +888,19 @@ declare class LitCanvasSurface implements DisplaySurface {
      * They are combined with any host-provided lights on the next {@link blit}.
      */
     setCartLights(lights: readonly Light[]): void;
+    /**
+     * Sets the per-pixel material buffer the engine emitted for this frame's
+     * sprites (RGBA: normal index, height, specular, roughness). Copied into a
+     * stable buffer on {@link blit}; an empty buffer falls back to host material.
+     */
+    setCartMaterial(material: Uint8Array): void;
+    /**
+     * Sets the per-pixel emissive plane (one byte each) the engine emitted this
+     * frame. It is folded into the albedo copy's alpha channel on {@link blit},
+     * which both lighting backends read as self-illumination. An empty buffer
+     * leaves the framebuffer's own alpha untouched.
+     */
+    setCartEmissive(emissive: Uint8Array): void;
     blit(albedo: Uint8Array): void;
     destroy(): void;
     private resolveMaterial;
@@ -979,4 +1030,4 @@ declare class PostFxSurface implements DisplaySurface {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type BuiltLightingRenderer, CARTBOX_SDK_LUA, CartridgeLoadError, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type InnerSurfaceFactory, type InputChange, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MODELS, type MailboxEvent, type MailboxEventKind, type MailboxRead, type MaterialBuffer, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, POST_FX_EFFECTS, type PlayerHandle, type PlayerOptions, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type Rgb, type ScaleMode, type Vec3, type VerificationResult, WebgpuLightingLayer, anyPostFxEnabled, createConsole, createFlatMaterial, createLightingLayer, decodeLights, decodeMailbox, defaultPostFxSettings, extractScore, extractUnlocks, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parsePostFxSettings, parseReplay, randomSeed, readCartCode, resolveUnlockedAchievements, runReplayEvents, seedCartridge, serializeReplay, shade, uniformsFromSettings, verifyReplayScore };
+export { type BuiltLightingRenderer, CARTBOX_SDK_LUA, CartridgeLoadError, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type InnerSurfaceFactory, type InputChange, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MODELS, type MailboxEvent, type MailboxEventKind, type MailboxRead, type MaterialBuffer, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, POST_FX_EFFECTS, type PlayerHandle, type PlayerOptions, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type Rgb, type ScaleMode, type Vec3, type VerificationResult, WebgpuLightingLayer, anyPostFxEnabled, createConsole, createFlatMaterial, createLightingLayer, decodeLights, decodeMailbox, defaultPostFxSettings, extractScore, extractUnlocks, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parsePostFxSettings, parseReplay, randomSeed, readCartCode, resolveButton, resolveUnlockedAchievements, runReplayEvents, seedCartridge, serializeReplay, shade, uniformsFromSettings, verifyReplayScore };

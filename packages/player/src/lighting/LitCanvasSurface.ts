@@ -34,6 +34,13 @@ export class LitCanvasSurface implements DisplaySurface {
   // and WebGL/WebGPU texture uploads reject resizable ArrayBufferViews. Copying
   // into a plain buffer once per frame satisfies the upload contract.
   private albedoCopy: Uint8Array | null = null;
+  // The per-pixel material the engine emitted for this frame (same growable-buffer
+  // caveat as the framebuffer, so it is copied into a stable buffer before upload).
+  private cartMaterial: Uint8Array | null = null;
+  private cartMaterialCopy: Uint8Array | null = null;
+  // Per-pixel emissive (one byte each) the engine emitted this frame. Folded into
+  // the albedo copy's alpha, which the shader reads as self-illumination.
+  private cartEmissive: Uint8Array | null = null;
 
   private constructor(
     private readonly container: HTMLElement,
@@ -92,6 +99,25 @@ export class LitCanvasSurface implements DisplaySurface {
     this.cartLights = lights;
   }
 
+  /**
+   * Sets the per-pixel material buffer the engine emitted for this frame's
+   * sprites (RGBA: normal index, height, specular, roughness). Copied into a
+   * stable buffer on {@link blit}; an empty buffer falls back to host material.
+   */
+  setCartMaterial(material: Uint8Array): void {
+    this.cartMaterial = material.length ? material : null;
+  }
+
+  /**
+   * Sets the per-pixel emissive plane (one byte each) the engine emitted this
+   * frame. It is folded into the albedo copy's alpha channel on {@link blit},
+   * which both lighting backends read as self-illumination. An empty buffer
+   * leaves the framebuffer's own alpha untouched.
+   */
+  setCartEmissive(emissive: Uint8Array): void {
+    this.cartEmissive = emissive.length ? emissive : null;
+  }
+
   blit(albedo: Uint8Array): void {
     if (this.fallback || !this.renderer) {
       this.fallback?.blit(albedo);
@@ -113,6 +139,14 @@ export class LitCanvasSurface implements DisplaySurface {
       this.albedoCopy = new Uint8Array(albedo.length);
     }
     this.albedoCopy.set(albedo);
+    // Fold per-pixel emissive into the albedo alpha the shader reads. The engine
+    // forces the framebuffer alpha opaque, so without this every pixel would read
+    // as fully self-illuminated; the emissive plane restores real 0-lit pixels.
+    if (this.cartEmissive && this.cartEmissive.length * 4 === this.albedoCopy.length) {
+      for (let i = 0; i < this.cartEmissive.length; i += 1) {
+        this.albedoCopy[i * 4 + 3] = this.cartEmissive[i] ?? 0;
+      }
+    }
     this.renderer.render(this.albedoCopy, material, {
       lights,
       ambient: this.options.ambient ?? DEFAULT_AMBIENT,
@@ -135,6 +169,16 @@ export class LitCanvasSurface implements DisplaySurface {
   }
 
   private resolveMaterial(context: LightingFrameContext): MaterialBuffer | null {
+    // The engine's material (from the cart's authored maps) takes precedence;
+    // it must be copied off the growable WASM buffer before GPU upload, exactly
+    // like the framebuffer. Host-supplied material is the fallback.
+    if (this.cartMaterial) {
+      if (!this.cartMaterialCopy || this.cartMaterialCopy.length !== this.cartMaterial.length) {
+        this.cartMaterialCopy = new Uint8Array(this.cartMaterial.length);
+      }
+      this.cartMaterialCopy.set(this.cartMaterial);
+      return this.cartMaterialCopy;
+    }
     const source = this.options.material;
     if (typeof source === "function") return source(context);
     return source ?? null;

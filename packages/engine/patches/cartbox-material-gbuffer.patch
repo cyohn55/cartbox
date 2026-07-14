@@ -1,0 +1,493 @@
+diff --git a/src/core/core.c b/src/core/core.c
+index add253c3..93bfee6b 100644
+--- a/src/core/core.c
++++ b/src/core/core.c
+@@ -44,9 +44,14 @@
+ #include "blip_buf.h"
+ 
+ static_assert(TIC_BANK_BITS == 3,                   "tic_bank_bits");
+-static_assert(sizeof(tic_map) < 1024 * 32,          "tic_map");
++// Cartbox fork: the map scales with resolution (TIC_MAP_WIDTH/HEIGHT derive from
++// TIC80_WIDTH/HEIGHT), so the sanity bound is overridable for the larger pro map.
++#ifndef TIC_MAP_MAX_SIZE
++#define TIC_MAP_MAX_SIZE (1024 * 32)
++#endif
++static_assert(sizeof(tic_map) < TIC_MAP_MAX_SIZE,   "tic_map");
+ static_assert(sizeof(tic_rgb) == 3,                 "tic_rgb");
+-static_assert(sizeof(tic_palette) == 48,            "tic_palette");
++static_assert(sizeof(tic_palette) == TIC_PALETTE_SIZE * sizeof(tic_rgb), "tic_palette");
+ static_assert(sizeof(((tic_vram *)0)->vars) == 4,   "tic_vram vars");
+ static_assert(sizeof(tic_vram) == TIC_VRAM_SIZE,    "tic_vram");
+ static_assert(sizeof(tic_ram) == TIC_RAM_SIZE,      "tic_ram");
+@@ -190,6 +195,10 @@ static inline tic_vram* vbank1(tic_core* core)
+     return core->state.vbank.id ? &core->memory.ram->vram : &core->state.vbank.mem;
+ }
+ 
++// Defined in core/draw.c (Cartbox material G-buffer); records the tile bank now
++// resident in RAM so material capture can gate on bank 0.
++extern void tic_core_cbx_tiles_bank(s32 bank);
++
+ void tic_api_sync(tic_mem* tic, u32 mask, s32 bank, bool toCart)
+ {
+     tic_core* core = (tic_core*)tic;
+@@ -229,6 +238,12 @@ void tic_api_sync(tic_mem* tic, u32 mask, s32 bank, bool toCart)
+             {
+                 sync(tic->ram->data + Sections[i].ram, (u8*)bankPtr + Sections[i].bank, size, toCart);
+             }
++
++            // Track which cart bank's tiles/sprites are resident in RAM so the
++            // Cartbox material G-buffer (draw.c) can skip capture when a foreign
++            // bank is swapped in — material is authored only for bank 0.
++            if (!toCart && (sectionMask == tic_sync_tiles || sectionMask == tic_sync_sprites))
++                tic_core_cbx_tiles_bank(bank);
+         }
+     }
+ 
+@@ -292,8 +307,14 @@ static void resetVbank(tic_mem* memory)
+ {
+     ZEROMEM(memory->ram->vram.vars);
+ 
++#if TIC_PALETTE_BPP == 8
++    // 8bpp: one identity byte per palette entry (color i maps to i) for all 256.
++    for (s32 i = 0; i < TIC_PALETTE_SIZE; i++)
++        memory->ram->vram.mapping[i] = (u8)i;
++#else
+     static const u8 DefaultMapping[] = { 0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe };
+     memcpy(memory->ram->vram.mapping, DefaultMapping, sizeof DefaultMapping);
++#endif
+     memory->ram->vram.palette = memory->cart.bank0.palette.vbank0;
+     memory->ram->vram.blit.segment = TIC_DEFAULT_BLIT_MODE;
+ }
+@@ -371,6 +392,11 @@ static void cart2ram(tic_mem* memory)
+ {
+     font2ram(memory);
+ 
++    // A cart load makes bank 0 resident in RAM; reset the Cartbox material
++    // capture's tile-bank tracker so material (authored for bank 0) is captured
++    // by default until the cart syncs a foreign bank in.
++    tic_core_cbx_tiles_bank(0);
++
+     enum
+     {
+ #define     TIC_SYNC_DEF(NAME, _, INDEX) sync_##NAME = INDEX,
+@@ -636,11 +662,11 @@ static inline void updbdr(tic_mem* tic, s32 row, u32* ptr, tic_blit_callback clb
+ static inline u32 blitpix(tic_mem* tic, s32 offset0, s32 offset1, const tic_blitpal* pal0, const tic_blitpal* pal1)
+ {
+     tic_core* core = (tic_core*)tic;
+-    u32 pix = tic_tool_peek4(vbank1(core)->screen.data, offset1);
++    u32 pix = tic_tool_peek_screen(vbank1(core)->screen.data, offset1);
+ 
+     return pix != vbank1(core)->vars.clear
+         ? pal1->data[pix]
+-        : pal0->data[tic_tool_peek4(vbank0(core)->screen.data, offset0)];
++        : pal0->data[tic_tool_peek_screen(vbank0(core)->screen.data, offset0)];
+ }
+ 
+ void tic_core_blit_ex(tic_mem* tic, tic_blit_callback clb)
+diff --git a/src/core/draw.c b/src/core/draw.c
+index 0dce77dd..4ec2b3fb 100644
+--- a/src/core/draw.c
++++ b/src/core/draw.c
+@@ -33,6 +33,131 @@
+ 
+ typedef void(*PixelFunc)(tic_mem* memory, s32 x, s32 y, u8 color);
+ 
++/*
++ * Cartbox material G-buffer capture (normal + height + specular + roughness +
++ * emissive). When a capture target is installed, every tile pixel a cart blits
++ * (spr/map/textured-triangle) also emits that source texel's authored material
++ * into two planes aligned 1:1 with the visible framebuffer: an RGBA plane
++ * (normal/height/specular/roughness) and a single-byte emissive plane. The host
++ * (packages/player LightingLayer) consumes them to relight the frame with real
++ * per-pixel normals, speculars, and self-illumination instead of a flat matte.
++ *
++ * Material is authored in the cart's high banks (the same convention the editor
++ * uses, MATERIAL_BANK in CartEngine.ts): normal=bank7, height=bank6,
++ * specular=bank5, roughness=bank4, emissive=bank3. A material tilesheet built
++ * over a bank's contiguous tiles+sprites uses the identical index/(x,y) math as
++ * the colour sheet, so a material texel is just the same lookup in a different
++ * bank.
++ *
++ * Targets are raw pointers set from the shim; NULL disables capture so ordinary
++ * (unlit) carts pay nothing. Material persists frame-to-frame like VRAM and is
++ * reset to the flat-matte default per cleared region by tic_api_cls (not wiped
++ * every tick), so carts that draw once without clearing keep their material.
++ * Single-threaded, one console ticks at a time — the same invariant the shim
++ * already relies on for its active-console clock.
++ */
++#define CBX_MAT_CHANNELS 5 /* normal, height, specular, roughness, emissive */
++#define CBX_MAT_LEVELS 16  /* authored ramp steps; mirrors editor MATERIAL_LEVELS */
++
++// Cart bank holding each channel, in CBX_MAT_CHANNELS order.
++static const s32 CbxMatBank[CBX_MAT_CHANNELS] = {
++    TIC_BANKS - 1, TIC_BANKS - 2, TIC_BANKS - 3, TIC_BANKS - 4, TIC_BANKS - 5,
++};
++
++static u8* CbxMatPlane = NULL;  // TIC80_WIDTH*TIC80_HEIGHT*4 (n/h/s/r), NULL = off.
++static u8* CbxEmisPlane = NULL; // TIC80_WIDTH*TIC80_HEIGHT   (emissive), NULL = off.
++
++// The cart bank whose tiles/sprites are currently resident in RAM. Material is
++// authored only for bank 0, so capture is skipped when a foreign bank is synced
++// in (its sprite indices don't line up with the material banks). Defaults to 0,
++// so the common (never-sync) case captures; updated by tic_api_sync.
++static s32 CbxTilesBank = 0;
++
++// Installed by the shim before each tick (see cbx_tick). Public to the module.
++void tic_core_cbx_material_target(void* matPlane, void* emisPlane)
++{
++    CbxMatPlane = (u8*)matPlane;
++    CbxEmisPlane = (u8*)emisPlane;
++}
++
++// Called by tic_api_sync when a bank's tiles/sprites are copied into RAM.
++void tic_core_cbx_tiles_bank(s32 bank)
++{
++    CbxTilesBank = bank;
++}
++
++static inline u8 cbxClampLevel(u8 value)
++{
++    return value > CBX_MAT_LEVELS - 1 ? CBX_MAT_LEVELS - 1 : value;
++}
++
++// True + fills `out` with the material tilesheets mirroring the colour sheet for
++// `segment`, or false when capture is off, the segment is font (0,1) where no
++// material exists, or a foreign tile bank is resident.
++static bool cbxMatSheets(tic_core* core, u8 segment, tic_tilesheet out[CBX_MAT_CHANNELS])
++{
++    if (!CbxMatPlane || segment < 2 || CbxTilesBank != 0) return false;
++    for (s32 c = 0; c < CBX_MAT_CHANNELS; c++)
++        out[c] = tic_tilesheet_get(segment, (u8*)&core->memory.cart.banks[CbxMatBank[c]].tiles);
++    return true;
++}
++
++// Encode 5 raw ramp levels (0..15) into the material planes at a screen pixel.
++// R = raw normal direction index (shader reads m.r*255 as the index); G/B/A and
++// the emissive plane = the 0..15 ramp scaled to a full 0..255 byte (15*17==255).
++static inline void cbxEncode(s32 pixel, u8 normal, u8 height, u8 specular, u8 roughness, u8 emissive)
++{
++    if (!CbxMatPlane || pixel < 0 || pixel >= TIC80_WIDTH * TIC80_HEIGHT) return;
++    u32 base = pixel * 4;
++    CbxMatPlane[base + 0] = cbxClampLevel(normal);
++    CbxMatPlane[base + 1] = (u8)(cbxClampLevel(height) * 17);
++    CbxMatPlane[base + 2] = (u8)(cbxClampLevel(specular) * 17);
++    CbxMatPlane[base + 3] = (u8)(cbxClampLevel(roughness) * 17);
++    if (CbxEmisPlane) CbxEmisPlane[pixel] = (u8)(cbxClampLevel(emissive) * 17);
++}
++
++// Emit material sampled from per-tile pointers (spr/map path). `pixel` is the
++// linear screen index; `sx,sy` the source texel within the tile (after the same
++// flip/rotate the colour used).
++static inline void cbxWriteMat(s32 pixel, const tic_tileptr* mt, s32 sx, s32 sy)
++{
++    cbxEncode(pixel,
++              tic_tilesheet_gettilepix(&mt[0], sx, sy), tic_tilesheet_gettilepix(&mt[1], sx, sy),
++              tic_tilesheet_gettilepix(&mt[2], sx, sy), tic_tilesheet_gettilepix(&mt[3], sx, sy),
++              tic_tilesheet_gettilepix(&mt[4], sx, sy));
++}
++
++// Emit material sampled at sheet-level coords (textured-triangle tile path,
++// which reads the colour with tic_tilesheet_getpix rather than a tile pointer).
++static inline void cbxWriteMatSheet(s32 pixel, const tic_tilesheet* sheets, s32 sx, s32 sy)
++{
++    cbxEncode(pixel,
++              tic_tilesheet_getpix(&sheets[0], sx, sy), tic_tilesheet_getpix(&sheets[1], sx, sy),
++              tic_tilesheet_getpix(&sheets[2], sx, sy), tic_tilesheet_getpix(&sheets[3], sx, sy),
++              tic_tilesheet_getpix(&sheets[4], sx, sy));
++}
++
++// Reset a screen region to the flat-matte default (normal 0 facing camera,
++// height/specular 0, roughness full, emissive 0). Called by tic_api_cls so
++// material tracks VRAM: whatever cls clears, this rematte-s.
++static void cbxMatteRegion(s32 l, s32 t, s32 r, s32 b)
++{
++    if (!CbxMatPlane) return;
++    if (l < 0) l = 0;
++    if (t < 0) t = 0;
++    if (r > TIC80_WIDTH) r = TIC80_WIDTH;
++    if (b > TIC80_HEIGHT) b = TIC80_HEIGHT;
++    for (s32 y = t; y < b; y++)
++        for (s32 x = l, p = y * TIC80_WIDTH + x; x < r; x++, p++)
++        {
++            CbxMatPlane[p * 4 + 0] = 0;
++            CbxMatPlane[p * 4 + 1] = 0;
++            CbxMatPlane[p * 4 + 2] = 0;
++            CbxMatPlane[p * 4 + 3] = 255;
++            if (CbxEmisPlane) CbxEmisPlane[p] = 0;
++        }
++}
++
+ static tic_tilesheet getTileSheetFromSegment(tic_mem* memory, u8 segment)
+ {
+     u8* src;
+@@ -50,7 +175,7 @@ static tic_tilesheet getTileSheetFromSegment(tic_mem* memory, u8 segment)
+ static u8* getPalette(tic_mem* tic, u8* colors, u8 count)
+ {
+     static u8 mapping[TIC_PALETTE_SIZE];
+-    for (s32 i = 0; i < TIC_PALETTE_SIZE; i++) mapping[i] = tic_tool_peek4(tic->ram->vram.mapping, i);
++    for (s32 i = 0; i < TIC_PALETTE_SIZE; i++) mapping[i] = tic_tool_peek_screen(tic->ram->vram.mapping, i);
+     for (s32 i = 0; i < count; i++) {
+         if (colors[i] < TIC_PALETTE_SIZE)
+         {
+@@ -62,7 +187,7 @@ static u8* getPalette(tic_mem* tic, u8* colors, u8 count)
+ 
+ static inline u8 mapColor(tic_mem* tic, u8 color)
+ {
+-    return tic_tool_peek4(tic->ram->vram.mapping, color & 0xf);
++    return tic_tool_peek_screen(tic->ram->vram.mapping, color & (TIC_PALETTE_SIZE - 1));
+ }
+ 
+ static inline void setPixel(tic_core* core, s32 x, s32 y, u8 color)
+@@ -71,20 +196,20 @@ static inline void setPixel(tic_core* core, s32 x, s32 y, u8 color)
+ 
+     if (x < core->state.clip.l || y < core->state.clip.t || x >= core->state.clip.r || y >= core->state.clip.b) return;
+ 
+-    tic_api_poke4((tic_mem*)core, y * TIC80_WIDTH + x, color);
++    tic_api_poke_pix((tic_mem*)core, y * TIC80_WIDTH + x, color);
+ }
+ 
+ static inline void setPixelFast(tic_core* core, s32 x, s32 y, u8 color)
+ {
+     // does not do any CLIP checking, the caller needs to do that first
+-    tic_api_poke4((tic_mem*)core, y * TIC80_WIDTH + x, color);
++    tic_api_poke_pix((tic_mem*)core, y * TIC80_WIDTH + x, color);
+ }
+ 
+ static inline u8 getPixel(tic_core* core, s32 x, s32 y)
+ {
+     return x < 0 || y < 0 || x >= TIC80_WIDTH || y >= TIC80_HEIGHT
+         ? 0
+-        : tic_api_peek4((tic_mem*)core, y * TIC80_WIDTH + x);
++        : tic_api_peek_pix((tic_mem*)core, y * TIC80_WIDTH + x);
+ }
+ 
+ #define EARLY_CLIP(x, y, width, height) \
+@@ -106,7 +231,7 @@ static void drawHLine(tic_core* core, s32 x, s32 y, s32 width, u8 color)
+     s32 start = y * TIC80_WIDTH;
+ 
+     for(s32 i = start + xl, end = start + xr; i < end; ++i)
+-        tic_api_poke4((tic_mem*)core, i, color);
++        tic_api_poke_pix((tic_mem*)core, i, color);
+ }
+ 
+ static void drawVLine(tic_core* core, s32 x, s32 y, s32 height, u8 color)
+@@ -144,14 +269,17 @@ static void drawRectBorder(tic_core* core, s32 x, s32 y, s32 width, s32 height,
+         for(s32 px=sx; px < ex; px++, xx++) \
+         { \
+             u8 color = mapping[tic_tilesheet_gettilepix(tile, (X), (Y))];\
+-            if(color != TRANSPARENT_COLOR) setPixelFast(core, xx, y, color); \
++            if(color != TRANSPARENT_COLOR) { \
++                setPixelFast(core, xx, y, color); \
++                if(matTiles) cbxWriteMat(y * TIC80_WIDTH + xx, matTiles, (X), (Y)); \
++            } \
+         } \
+     } \
+     } while(0)
+ 
+ #define REVERT(X) (TIC_SPRITESIZE - 1 - (X))
+ 
+-static void drawTile(tic_core* core, tic_tileptr* tile, s32 x, s32 y, u8* colors, s32 count, s32 scale, tic_flip flip, tic_rotate rotate)
++static void drawTile(tic_core* core, tic_tileptr* tile, s32 x, s32 y, u8* colors, s32 count, s32 scale, tic_flip flip, tic_rotate rotate, const tic_tileptr* matTiles)
+ {
+     const tic_vram* vram = &core->memory.ram->vram;
+     u8* mapping = getPalette(&core->memory, colors, count);
+@@ -199,7 +327,13 @@ static void drawTile(tic_core* core, tic_tileptr* tile, s32 x, s32 y, u8* colors
+                 s32 tmp = ix; ix = iy; iy = tmp;
+             }
+             u8 color = mapping[tic_tilesheet_gettilepix(tile, ix, iy)];
+-            if (color != TRANSPARENT_COLOR) drawRect(core, xx, y, scale, scale, color);
++            if (color != TRANSPARENT_COLOR) {
++                drawRect(core, xx, y, scale, scale, color);
++                if (matTiles)
++                    for (s32 ry = 0; ry < scale; ry++)
++                        for (s32 rx = 0; rx < scale; rx++)
++                            cbxWriteMat((y + ry) * TIC80_WIDTH + (xx + rx), matTiles, ix, iy);
++            }
+         }
+     }
+ }
+@@ -217,10 +351,19 @@ static void drawSprite(tic_core* core, s32 index, s32 x, s32 y, s32 w, s32 h, u8
+     rotate &= 3;
+     flip &= 3;
+ 
+-    tic_tilesheet sheet = getTileSheetFromSegment(&core->memory, core->memory.ram->vram.blit.segment);
++    u8 segment = core->memory.ram->vram.blit.segment;
++    tic_tilesheet sheet = getTileSheetFromSegment(&core->memory, segment);
++
++    tic_tilesheet matSheets[CBX_MAT_CHANNELS];
++    bool capture = cbxMatSheets(core, segment, matSheets);
++
+     if (w == 1 && h == 1) {
+         tic_tileptr tile = tic_tilesheet_gettile(&sheet, index, false);
+-        drawTile(core, &tile, x, y, colors, count, scale, flip, rotate);
++        tic_tileptr matTiles[CBX_MAT_CHANNELS];
++        if (capture)
++            for (s32 c = 0; c < CBX_MAT_CHANNELS; c++)
++                matTiles[c] = tic_tilesheet_gettile(&matSheets[c], index, false);
++        drawTile(core, &tile, x, y, colors, count, scale, flip, rotate, capture ? matTiles : NULL);
+     }
+     else
+     {
+@@ -260,11 +403,17 @@ static void drawSprite(tic_core* core, s32 index, s32 x, s32 y, s32 w, s32 h, u8
+                 enum { Cols = TIC_SPRITESHEET_SIZE / TIC_SPRITESIZE };
+ 
+ 
+-                tic_tileptr tile = tic_tilesheet_gettile(&sheet, index + mx + my * cols, false);
++                s32 tileIndex = index + mx + my * cols;
++                tic_tileptr tile = tic_tilesheet_gettile(&sheet, tileIndex, false);
++                tic_tileptr matTiles[CBX_MAT_CHANNELS];
++                if (capture)
++                    for (s32 c = 0; c < CBX_MAT_CHANNELS; c++)
++                        matTiles[c] = tic_tilesheet_gettile(&matSheets[c], tileIndex, false);
++                const tic_tileptr* mt = capture ? matTiles : NULL;
+                 if (rotate == 0 || rotate == 2)
+-                    drawTile(core, &tile, x + i * step, y + j * step, colors, count, scale, flip, rotate);
++                    drawTile(core, &tile, x + i * step, y + j * step, colors, count, scale, flip, rotate, mt);
+                 else
+-                    drawTile(core, &tile, x + j * step, y + i * step, colors, count, scale, flip, rotate);
++                    drawTile(core, &tile, x + j * step, y + i * step, colors, count, scale, flip, rotate, mt);
+             }
+         }
+     }
+@@ -274,7 +423,11 @@ static void drawMap(tic_core* core, const tic_map* src, s32 x, s32 y, s32 width,
+ {
+     const s32 size = TIC_SPRITESIZE * scale;
+ 
+-    tic_tilesheet sheet = getTileSheetFromSegment(&core->memory, core->memory.ram->vram.blit.segment);
++    u8 segment = core->memory.ram->vram.blit.segment;
++    tic_tilesheet sheet = getTileSheetFromSegment(&core->memory, segment);
++
++    tic_tilesheet matSheets[CBX_MAT_CHANNELS];
++    bool capture = cbxMatSheets(core, segment, matSheets);
+ 
+     for (s32 j = y, jj = sy; j < y + height; j++, jj += size)
+         for (s32 i = x, ii = sx; i < x + width; i++, ii += size)
+@@ -289,7 +442,11 @@ static void drawMap(tic_core* core, const tic_map* src, s32 x, s32 y, s32 width,
+                 remap(data, mi, mj, &retile);
+ 
+             tic_tileptr tile = tic_tilesheet_gettile(&sheet, retile.index, true);
+-            drawTile(core, &tile, ii, jj, colors, count, scale, retile.flip, retile.rotate);
++            tic_tileptr matTiles[CBX_MAT_CHANNELS];
++            if (capture)
++                for (s32 c = 0; c < CBX_MAT_CHANNELS; c++)
++                    matTiles[c] = tic_tilesheet_gettile(&matSheets[c], retile.index, true);
++            drawTile(core, &tile, ii, jj, colors, count, scale, retile.flip, retile.rotate, capture ? matTiles : NULL);
+         }
+ }
+ 
+@@ -393,17 +550,25 @@ void tic_api_cls(tic_mem* tic, u8 color)
+ 
+     if (MEMCMP(core->state.clip, EmptyClip))
+     {
++#if TIC_PALETTE_BPP == 8
++        memset(&vram->screen, color, sizeof(tic_screen));
++#else
+         memset(&vram->screen, (color & 0xf) | (color << TIC_PALETTE_BPP), sizeof(tic_screen));
++#endif
+         ZEROMEM(ZBuffer);
++        // Clearing the screen also rematte-s the whole material plane, so material
++        // stays in lockstep with VRAM.
++        cbxMatteRegion(0, 0, TIC80_WIDTH, TIC80_HEIGHT);
+     }
+     else
+     {
+         for(s32 y = core->state.clip.t, start = y * TIC80_WIDTH; y < core->state.clip.b; ++y, start += TIC80_WIDTH)
+             for(s32 x = core->state.clip.l, pixel = start + x; x < core->state.clip.r; ++x, ++pixel)
+             {
+-                tic_api_poke4(tic, pixel, color);
++                tic_api_poke_pix(tic, pixel, color);
+                 ZBuffer[pixel] = 0;
+             }
++        cbxMatteRegion(core->state.clip.l, core->state.clip.t, core->state.clip.r, core->state.clip.b);
+     }
+ }
+ 
+@@ -557,7 +722,7 @@ static void drawSidesBuffer(tic_mem* memory, s32 y0, s32 y1, u8 color)
+         s32 start = y * TIC80_WIDTH;
+ 
+         for(s32 i = start + xl, end = start + xr; i < end; ++i)
+-            tic_api_poke4(memory, i, color);
++            tic_api_poke_pix(memory, i, color);
+     }
+ }
+ 
+@@ -789,7 +954,7 @@ static void drawTri(tic_mem* tic, const Vec2* v0, const Vec2* v1, const Vec2* v2
+             {
+                 u8 color = shader(&a, pixel);
+                 if(color != TRANSPARENT_COLOR)
+-                    tic_api_poke4(tic, pixel, color);
++                    tic_api_poke_pix(tic, pixel, color);
+             }
+ 
+             for(s32 i = 0; i != COUNT_OF(a.w.d); ++i)
+@@ -837,6 +1002,8 @@ typedef struct
+     const u8* map;
+     const tic_vram* vram;
+     bool depth;
++    bool capture;                              // emit material for this triangle?
++    tic_tilesheet matSheets[CBX_MAT_CHANNELS]; // material sources, valid iff capture
+ } TexData;
+ 
+ static inline bool shaderStart(const ShaderAttr* a, Vec3* vars, s32 pixel)
+@@ -898,7 +1065,15 @@ static tic_color triTexMapShader(const ShaderAttr* a, s32 pixel)
+     u8 idx = data->map[(iv >> 3) * TIC_MAP_WIDTH + (iu >> 3)];
+     tic_tileptr tile = tic_tilesheet_gettile(&data->sheet, idx, true);
+ 
+-    return shaderEnd(a, &vars, pixel, data->mapping[tic_tilesheet_gettilepix(&tile, iu & WMask, iv & HMask)]);
++    u8 color = data->mapping[tic_tilesheet_gettilepix(&tile, iu & WMask, iv & HMask)];
++    if (data->capture && color != TRANSPARENT_COLOR)
++    {
++        tic_tileptr matTiles[CBX_MAT_CHANNELS];
++        for (s32 c = 0; c < CBX_MAT_CHANNELS; c++)
++            matTiles[c] = tic_tilesheet_gettile(&data->matSheets[c], idx, true);
++        cbxWriteMat(pixel, matTiles, iu & WMask, iv & HMask);
++    }
++    return shaderEnd(a, &vars, pixel, color);
+ }
+ 
+ static tic_color triTexTileShader(const ShaderAttr* a, s32 pixel)
+@@ -911,8 +1086,12 @@ static tic_color triTexTileShader(const ShaderAttr* a, s32 pixel)
+ 
+     enum { HMask = TIC_SPRITESHEET_SIZE * TIC_SPRITE_BANKS - 1 };
+ 
+-    return shaderEnd(a, &vars, pixel, data->mapping[tic_tilesheet_getpix(&data->sheet,
+-                     (s32)floor(vars.x) & (TIC_SPRITESHEET_SIZE * data->sheet.segment->nb_pages - 1) , (s32)floor(vars.y) & HMask)]);
++    s32 sx = (s32)floor(vars.x) & (TIC_SPRITESHEET_SIZE * data->sheet.segment->nb_pages - 1);
++    s32 sy = (s32)floor(vars.y) & HMask;
++    u8 color = data->mapping[tic_tilesheet_getpix(&data->sheet, sx, sy)];
++    if (data->capture && color != TRANSPARENT_COLOR)
++        cbxWriteMatSheet(pixel, data->matSheets, sx, sy);
++    return shaderEnd(a, &vars, pixel, color);
+ }
+ 
+ static tic_color triTexVbankShader(const ShaderAttr* a, s32 pixel)
+@@ -926,7 +1105,7 @@ static tic_color triTexVbankShader(const ShaderAttr* a, s32 pixel)
+     s32 iu = tic_modulo(floor(vars.x), TIC80_WIDTH);
+     s32 iv = tic_modulo(floor(vars.y), TIC80_HEIGHT);
+ 
+-    return shaderEnd(a, &vars, pixel, data->mapping[tic_tool_peek4(data->vram->data, iv * TIC80_WIDTH + iu)]);
++    return shaderEnd(a, &vars, pixel, data->mapping[tic_tool_peek_screen(data->vram->data, iv * TIC80_WIDTH + iu)]);
+ }
+ 
+ void tic_api_ttri(tic_mem* tic,
+@@ -943,14 +1122,19 @@ void tic_api_ttri(tic_mem* tic,
+     if(z1 < FLT_EPSILON || z2 < FLT_EPSILON || z3 < FLT_EPSILON)
+         depth = false;
+ 
++    u8 segment = tic->ram->vram.blit.segment;
+     TexData texData =
+     {
+-        .sheet = getTileSheetFromSegment(tic, tic->ram->vram.blit.segment),
++        .sheet = getTileSheetFromSegment(tic, segment),
+         .mapping = getPalette(tic, colors, count),
+         .map = tic->ram->map.data,
+         .vram = &((tic_core*)tic)->state.vbank.mem,
+         .depth = depth,
+     };
++    // Only the tile/map textures have authored material; the vbank texture
++    // samples the live screen, so it stays matte.
++    texData.capture = (texsrc == tic_tiles_texture || texsrc == tic_map_texture)
++                      && cbxMatSheets((tic_core*)tic, segment, texData.matSheets);
+ 
+     TexVert t[] =
+     {
