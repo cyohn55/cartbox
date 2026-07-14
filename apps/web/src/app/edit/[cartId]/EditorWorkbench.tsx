@@ -30,7 +30,6 @@ import {
   emptySpriteRig,
   loadWasmCartEngine,
   type ConsoleModelId,
-  type SpriteRig,
 } from "@cartbox/editor";
 
 import { authHeaders } from "@/lib/supabase-browser";
@@ -46,6 +45,7 @@ import { SfxEditor } from "./SfxEditor";
 import { MusicEditor } from "./MusicEditor";
 import { RunOverlay } from "./RunOverlay";
 import { ShaderEditor } from "./ShaderEditor";
+import { useEditorHistory } from "./useEditorHistory";
 
 const TABS = ["Code", "Sprites", "Map", "FX", "SFX", "Music"] as const;
 type Tab = (typeof TABS)[number];
@@ -184,36 +184,68 @@ function WorkbenchBody({
   const requestedModel = CONSOLE_MODELS[modelId];
   const activeModel = engine.model();
   const modelDowngraded = requestedModel.id !== activeModel.id;
-  const sheet = useMemo(() => new SpriteSheet(engine), [engine]);
-  const map = useMemo(() => new TileMap(engine), [engine]);
-  const doc = useMemo(() => new CodeDocument(engine), [engine]);
-  const soundBank = useMemo(() => new SoundBank(engine), [engine]);
-  const tracker = useMemo(() => new MusicTracker(engine), [engine]);
-  const normals = useMemo(() => new NormalMap(engine), [engine]);
-  const heightMap = useMemo(() => new MaterialMap(engine, "height"), [engine]);
-  const specularMap = useMemo(() => new MaterialMap(engine, "specular"), [engine]);
-  const roughnessMap = useMemo(() => new MaterialMap(engine, "roughness"), [engine]);
-  const emissiveMap = useMemo(() => new MaterialMap(engine, "emissive"), [engine]);
-  const [activeTab, setActiveTab] = useState<Tab>("Sprites");
-  const [bank, setBank] = useState(0);
-  const [runBytes, setRunBytes] = useState<Uint8Array | null>(null);
-  const [saveState, setSaveState] = useState<SaveState>("idle");
-  // The character rig is editor-only metadata, held cart-wide here so it
-  // survives tab/bank switches and persists alongside the cart on Save.
-  const [rig, setRig] = useState<SpriteRig>(() => initialRig ?? emptySpriteRig());
-  // The FX stack is cart-wide too: authored in the FX tab, applied by the
-  // player on Run and on the public play page, persisted alongside the cart.
-  const [fx, setFx] = useState<PostFxSettings>(() => initialFx ?? defaultPostFxSettings());
-
-  // Bank is a cart-wide "which set of assets am I editing". Switching repoints
-  // the engine and remounts the active editor (via key) so it reads the new bank.
-  const selectBank = (next: number) => {
-    engine.setBank(next);
-    setBank(next);
-  };
 
   // Run/Save need real .tic bytes, which only the WASM engine can serialise.
   const runnable = engine instanceof WasmCartEngine ? engine : null;
+
+  // One undo/redo timeline for every tab. It also owns the cart-wide state that
+  // must survive tab/bank switches and undo alike: the active bank, the FX stack
+  // (authored in the FX tab, applied by the player on Run and the play page), and
+  // the character rig (editor-only metadata). `editEngine` is the same live cart
+  // memory as `engine`, wrapped so edits feed the history.
+  const history = useEditorHistory({
+    engine,
+    runnable,
+    initialFx: initialFx ?? defaultPostFxSettings(),
+    initialRig: initialRig ?? emptySpriteRig(),
+    initialBank: 0,
+  });
+  const {
+    engine: editEngine,
+    revision,
+    bank,
+    setBank: selectBank,
+    fx,
+    setFx,
+    rig,
+    setRig,
+    canUndo,
+    canRedo,
+    undo,
+    redo,
+  } = history;
+
+  const sheet = useMemo(() => new SpriteSheet(editEngine), [editEngine]);
+  const map = useMemo(() => new TileMap(editEngine), [editEngine]);
+  const doc = useMemo(() => new CodeDocument(editEngine), [editEngine]);
+  const soundBank = useMemo(() => new SoundBank(editEngine), [editEngine]);
+  const tracker = useMemo(() => new MusicTracker(editEngine), [editEngine]);
+  const normals = useMemo(() => new NormalMap(editEngine), [editEngine]);
+  const heightMap = useMemo(() => new MaterialMap(editEngine, "height"), [editEngine]);
+  const specularMap = useMemo(() => new MaterialMap(editEngine, "specular"), [editEngine]);
+  const roughnessMap = useMemo(() => new MaterialMap(editEngine, "roughness"), [editEngine]);
+  const emissiveMap = useMemo(() => new MaterialMap(editEngine, "emissive"), [editEngine]);
+  const [activeTab, setActiveTab] = useState<Tab>("Sprites");
+  const [runBytes, setRunBytes] = useState<Uint8Array | null>(null);
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+
+  // Ctrl/Cmd+Z undoes; Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redoes. The workbench owns
+  // these globally so every tab — including the code textarea — shares one stack.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      const key = event.key.toLowerCase();
+      if (key === "z" && !event.shiftKey) {
+        event.preventDefault();
+        undo();
+      } else if ((key === "z" && event.shiftKey) || key === "y") {
+        event.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [undo, redo]);
 
   const persist = async (publish: boolean) => {
     if (!runnable) return;
@@ -319,6 +351,28 @@ function WorkbenchBody({
         </nav>
 
         <div className={styles.actions}>
+          <div className={styles.historyGroup}>
+            <button
+              type="button"
+              className="cbx-btn"
+              onClick={undo}
+              disabled={!canUndo}
+              title="Undo (Ctrl+Z)"
+              aria-label="Undo"
+            >
+              ↶
+            </button>
+            <button
+              type="button"
+              className="cbx-btn"
+              onClick={redo}
+              disabled={!canRedo}
+              title="Redo (Ctrl+Shift+Z)"
+              aria-label="Redo"
+            >
+              ↷
+            </button>
+          </div>
           <button
             type="button"
             className="cbx-btn"
@@ -349,10 +403,10 @@ function WorkbenchBody({
         </div>
       </header>
 
-      {activeTab === "Code" && <CodeEditor doc={doc} />}
+      {activeTab === "Code" && <CodeEditor key={`code:${revision}`} doc={doc} />}
       {activeTab === "Sprites" && (
         <SpriteEditor
-          key={bank}
+          key={`${bank}:${revision}`}
           sheet={sheet}
           normals={normals}
           height={heightMap}
@@ -363,10 +417,12 @@ function WorkbenchBody({
           onRigChange={setRig}
         />
       )}
-      {activeTab === "Map" && <MapEditor key={bank} sheet={sheet} map={map} />}
-      {activeTab === "FX" && <ShaderEditor key={bank} sheet={sheet} map={map} settings={fx} onSettingsChange={setFx} />}
-      {activeTab === "SFX" && <SfxEditor key={bank} bank={soundBank} />}
-      {activeTab === "Music" && <MusicEditor key={bank} tracker={tracker} />}
+      {activeTab === "Map" && <MapEditor key={`${bank}:${revision}`} sheet={sheet} map={map} />}
+      {activeTab === "FX" && (
+        <ShaderEditor key={`${bank}:${revision}`} sheet={sheet} map={map} settings={fx} onSettingsChange={setFx} />
+      )}
+      {activeTab === "SFX" && <SfxEditor key={`${bank}:${revision}`} bank={soundBank} />}
+      {activeTab === "Music" && <MusicEditor key={`${bank}:${revision}`} tracker={tracker} />}
 
       {runBytes && (
         <RunOverlay

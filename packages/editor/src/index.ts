@@ -21,6 +21,8 @@ export {
   loadWasmCartEngine,
 } from "./engine/WasmCartEngine";
 export { type EditorModule, loadEditorModule } from "./engine/wasmModule";
+export { EditHistory, type EditHistoryOptions } from "./model/EditHistory";
+export { observeEngine } from "./model/observeEngine";
 export { seedDemoCart, DEMO_CODE } from "./model/seed";
 export {
   seedParallaxDemoCart,
@@ -54,6 +56,20 @@ export {
 } from "./model/normals";
 export { shade, type Rgb } from "./model/lighting";
 export { renderLitRgba, type Light, type FogOptions, type LitOptions } from "./render/litRenderer";
+export {
+  renderVoxelRgba,
+  type VoxelLight,
+  type VoxelOptions,
+  type VoxelImage,
+} from "./render/voxelRenderer";
+export {
+  LIGHTING_PRESETS,
+  DEFAULT_LIGHTING_PRESET_ID,
+  lightingPresetConditions,
+  directionFromConditions,
+  type LightingConditions,
+  type LightingPreset,
+} from "./render/lightingConditions";
 export {
   renderLayeredScene,
   projectPlane,

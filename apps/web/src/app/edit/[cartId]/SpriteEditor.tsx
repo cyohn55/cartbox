@@ -24,10 +24,18 @@ import { PixelCanvas } from "./PixelCanvas";
 import { TilePicker } from "./TilePicker";
 import { PalettePicker } from "./PalettePicker";
 import { LitPreview } from "./LitPreview";
+import { VoxelPreview } from "./VoxelPreview";
 import { RigPanel } from "./RigPanel";
 import { MaterialSurface, NormalSurface } from "./paintSurface";
 import { SpriteBlockSurface } from "./spriteBlockSurface";
-import { TOOLS, type Tool } from "./tools";
+import {
+  TOOLS,
+  WEIGHTED_TOOLS,
+  TOLERANCE_TOOLS,
+  MAX_BRUSH_WEIGHT,
+  MAX_TOLERANCE,
+  type Tool,
+} from "./tools";
 
 type Layer = "albedo" | "normal" | "height" | "specular" | "roughness" | "emissive";
 
@@ -82,6 +90,8 @@ export function SpriteEditor({
   const [tile, setTile] = useState(1);
   const [color, setColor] = useState(1);
   const [tool, setTool] = useState<Tool>("pencil");
+  const [weight, setWeight] = useState(1); // brush/line thickness in pixels
+  const [tolerance, setTolerance] = useState(0); // fill/wand colour tolerance (0..100)
   const [version, setVersion] = useState(0);
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
   const [layer, setLayer] = useState<Layer>("albedo");
@@ -214,7 +224,7 @@ export function SpriteEditor({
       <aside className={styles.rail}>
         <div>
           <div className={styles.groupLabel}>Layer</div>
-          <div className={styles.segmented}>
+          <div className={`${styles.segmented} ${styles.segmentedWrap}`}>
             <button
               type="button"
               className={`${styles.segment} ${layer === "albedo" ? styles.segmentActive : ""}`}
@@ -261,6 +271,42 @@ export function SpriteEditor({
             ))}
           </div>
         </div>
+
+        {WEIGHTED_TOOLS.has(tool) && (
+          <div>
+            <div className={styles.groupLabel}>Brush size</div>
+            <div className={styles.rangeRow}>
+              <input
+                type="range"
+                min={1}
+                max={MAX_BRUSH_WEIGHT}
+                step={1}
+                value={weight}
+                onChange={(event) => setWeight(Number(event.target.value))}
+                aria-label="Brush size in pixels"
+              />
+              <span className={`${styles.rangeValue} data`}>{weight}px</span>
+            </div>
+          </div>
+        )}
+
+        {TOLERANCE_TOOLS.has(tool) && (
+          <div>
+            <div className={styles.groupLabel}>Tolerance</div>
+            <div className={styles.rangeRow}>
+              <input
+                type="range"
+                min={0}
+                max={MAX_TOLERANCE}
+                step={1}
+                value={tolerance}
+                onChange={(event) => setTolerance(Number(event.target.value))}
+                aria-label="Fill and magic-wand tolerance"
+              />
+              <span className={`${styles.rangeValue} data`}>{tolerance}%</span>
+            </div>
+          </div>
+        )}
 
         <div>
           <div className={styles.groupLabel}>Page</div>
@@ -353,6 +399,8 @@ export function SpriteEditor({
           tile={tile}
           value={activeValue}
           tool={tool}
+          weight={weight}
+          tolerance={tolerance}
           version={version}
           onEdit={bump}
           onHover={setHover}
@@ -416,6 +464,23 @@ export function SpriteEditor({
           <LitPreview
             key={preferCpu ? "cpu" : "auto"}
             forceCpu={preferCpu}
+            sheet={sheet}
+            normals={normals}
+            height={height}
+            specular={specular}
+            roughness={roughness}
+            emissive={emissive}
+            page={page}
+            tile={tile}
+            version={version}
+            blockTiles={spriteSize}
+          />
+        </div>
+        <div>
+          <div className={styles.panelHead}>
+            <span className={styles.panelTitle}>Voxel preview</span>
+          </div>
+          <VoxelPreview
             sheet={sheet}
             normals={normals}
             height={height}

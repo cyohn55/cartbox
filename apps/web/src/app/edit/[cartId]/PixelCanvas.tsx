@@ -19,15 +19,19 @@ import type { SpritePage } from "@cartbox/editor";
 import styles from "./editor.module.css";
 import type { PaintSurface } from "./paintSurface";
 import {
+  brushStamp,
   ellipseOutlinePoints,
   linePoints,
   maskedFloodFill,
+  parseHexColor,
   pixelKey,
   rectOutlinePoints,
+  thickenPoints,
   wandSelection,
   type PixelPoint,
+  type ToleranceMatch,
 } from "./shapeTools";
-import { SHAPE_TOOLS, type Tool } from "./tools";
+import { SHAPE_TOOLS, WEIGHTED_TOOLS, type Tool } from "./tools";
 
 // The canvas targets a fixed on-screen size; the per-pixel cell shrinks as the
 // surface grows (8×8 → 45px cells, 32×32 → ~11px), keeping the stage stable.
@@ -42,12 +46,27 @@ interface PixelCanvasProps {
   tile: number;
   value: number;
   tool: Tool;
+  /** Stroke thickness in pixels for the pencil/eraser/shape tools (>= 1). */
+  weight: number;
+  /** Colour tolerance (0..100) for the fill and magic-wand tools. */
+  tolerance: number;
   version: number;
   onEdit: () => void;
   onHover: (cell: { x: number; y: number } | null) => void;
 }
 
-export function PixelCanvas({ surface, page, tile, value, tool, version, onEdit, onHover }: PixelCanvasProps) {
+export function PixelCanvas({
+  surface,
+  page,
+  tile,
+  value,
+  tool,
+  weight,
+  tolerance,
+  version,
+  onEdit,
+  onHover,
+}: PixelCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const painting = useRef(false);
   const hoverCell = useRef<{ x: number; y: number } | null>(null);
@@ -64,6 +83,13 @@ export function PixelCanvas({ surface, page, tile, value, tool, version, onEdit,
     (x: number, y: number) => !selection || selection.has(pixelKey(x, y, surface.tileSize)),
     [selection, surface.tileSize],
   );
+
+  // Tolerance for fill/wand: undefined at 0 (exact match), else a colour matcher
+  // that reads each pixel's swatch colour from the surface.
+  const toleranceMatch = useCallback((): ToleranceMatch | undefined => {
+    if (tolerance <= 0) return undefined;
+    return { tolerance: tolerance / 100, sampleColor: (v) => parseHexColor(surface.cssColor(v)) };
+  }, [tolerance, surface]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -140,11 +166,20 @@ export function PixelCanvas({ surface, page, tile, value, tool, version, onEdit,
 
     const cell = hoverCell.current;
     if (cell) {
+      // The hover outline previews the brush footprint, so the chosen weight is
+      // visible before painting; fill/wand stay a single cell.
+      const brushSide = WEIGHTED_TOOLS.has(tool) ? Math.max(1, weight) : 1;
+      const offset = Math.floor((brushSide - 1) / 2);
       context.strokeStyle = "rgba(255,255,255,0.85)";
       context.lineWidth = 2;
-      context.strokeRect(cell.x * cellPx + 1, cell.y * cellPx + 1, cellPx - 2, cellPx - 2);
+      context.strokeRect(
+        (cell.x - offset) * cellPx + 1,
+        (cell.y - offset) * cellPx + 1,
+        brushSide * cellPx - 2,
+        brushSide * cellPx - 2,
+      );
     }
-  }, [surface, page, tile, size, cellPx, value, selection, inSelection]);
+  }, [surface, page, tile, size, cellPx, value, selection, inSelection, tool, weight]);
 
   useEffect(() => {
     draw();
@@ -187,20 +222,27 @@ export function PixelCanvas({ surface, page, tile, value, tool, version, onEdit,
     return { x, y };
   };
 
-  /** The pixels a shape drag from the anchor to `cell` would paint. */
+  /** The pixels a shape drag from the anchor to `cell` would paint, thickened to
+   * the current brush weight. */
   const shapePoints = (anchor: PixelPoint, cell: PixelPoint): PixelPoint[] => {
-    if (tool === "line") return linePoints(anchor.x, anchor.y, cell.x, cell.y);
-    if (tool === "rect") return rectOutlinePoints(anchor.x, anchor.y, cell.x, cell.y);
-    return ellipseOutlinePoints(anchor.x, anchor.y, cell.x, cell.y);
+    const base =
+      tool === "line"
+        ? linePoints(anchor.x, anchor.y, cell.x, cell.y)
+        : tool === "rect"
+          ? rectOutlinePoints(anchor.x, anchor.y, cell.x, cell.y)
+          : ellipseOutlinePoints(anchor.x, anchor.y, cell.x, cell.y);
+    return thickenPoints(base, weight);
   };
 
   const apply = (cell: { x: number; y: number }) => {
     if (tool === "fill") {
-      maskedFloodFill(surface, page, tile, cell.x, cell.y, value, selection);
-    } else if (inSelection(cell.x, cell.y)) {
-      surface.setPixel(page, tile, cell.x, cell.y, tool === "eraser" ? 0 : value);
+      maskedFloodFill(surface, page, tile, cell.x, cell.y, value, selection, toleranceMatch());
     } else {
-      return;
+      // Pencil/eraser stamp a weight×weight brush, clipped to any selection.
+      const paintValue = tool === "eraser" ? 0 : value;
+      for (const point of brushStamp(cell.x, cell.y, weight)) {
+        if (inSelection(point.x, point.y)) surface.setPixel(page, tile, point.x, point.y, paintValue);
+      }
     }
     onEdit();
   };
@@ -211,7 +253,9 @@ export function PixelCanvas({ surface, page, tile, value, tool, version, onEdit,
     (event.target as HTMLElement).setPointerCapture(event.pointerId);
 
     if (tool === "wand") {
-      setSelection(wandSelection((x, y) => surface.getPixel(page, tile, x, y), surface.tileSize, cell.x, cell.y));
+      setSelection(
+        wandSelection((x, y) => surface.getPixel(page, tile, x, y), surface.tileSize, cell.x, cell.y, toleranceMatch()),
+      );
       return;
     }
     if (SHAPE_TOOLS.has(tool)) {

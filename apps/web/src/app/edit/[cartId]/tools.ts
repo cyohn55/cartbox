@@ -4,6 +4,23 @@ export type Tool = "pencil" | "eraser" | "fill" | "wand" | "line" | "rect" | "el
 /** Tools that drag out a shape previewed live and committed on release. */
 export const SHAPE_TOOLS: ReadonlySet<Tool> = new Set<Tool>(["line", "rect", "ellipse"]);
 
+/** Tools whose stroke thickness (brush size) the artist can adjust. */
+export const WEIGHTED_TOOLS: ReadonlySet<Tool> = new Set<Tool>([
+  "pencil",
+  "eraser",
+  "line",
+  "rect",
+  "ellipse",
+]);
+
+/** Tools whose colour tolerance (how much area they affect) the artist can adjust. */
+export const TOLERANCE_TOOLS: ReadonlySet<Tool> = new Set<Tool>(["fill", "wand"]);
+
+/** Brush size runs 1px (a single pixel) to this many pixels thick. */
+export const MAX_BRUSH_WEIGHT = 8;
+/** Tolerance is a 0..100 percentage of the maximum colour distance. */
+export const MAX_TOLERANCE = 100;
+
 export interface ToolDef {
   id: Tool;
   label: string;

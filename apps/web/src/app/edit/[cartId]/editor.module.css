@@ -134,6 +134,13 @@
   gap: 8px;
 }
 
+/* Undo/redo sit together as a paired control, set apart from Run/Save/Publish. */
+.historyGroup {
+  display: flex;
+  gap: 2px;
+  margin-right: 6px;
+}
+
 .loading {
   display: flex;
   align-items: center;
@@ -225,7 +232,7 @@
 
 .body {
   display: grid;
-  grid-template-columns: 168px 1fr 300px;
+  grid-template-columns: 200px 1fr 300px;
   min-height: 0;
 }
 
@@ -313,6 +320,39 @@
   color: var(--accent-ink);
   background: var(--accent);
   font-weight: 650;
+}
+
+/* Brush-size / tolerance sliders: a range that fills the rail with a compact
+ * value readout beside it. */
+.rangeRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rangeRow input[type="range"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.rangeValue {
+  flex-shrink: 0;
+  min-width: 34px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Layer picker: too many options for one row, so wrap into two columns and let
+ * each label sit on its own line without being clipped. */
+.segmentedWrap {
+  flex-wrap: wrap;
+}
+
+.segmentedWrap .segment {
+  flex: 1 1 calc(50% - 3px);
+  padding: 6px 4px;
+  white-space: nowrap;
 }
 
 /* --- Stage: the pixel canvas is the hero, on a checkerboard mat ----------- */
@@ -988,6 +1028,35 @@
 .rendererToggle:hover {
   color: var(--text);
   border-color: var(--accent);
+}
+
+/* Voxel preview: the lit column render sits above a stack of lighting controls. */
+.voxelCanvas {
+  display: block;
+  border-radius: 6px;
+  background: #050308;
+  image-rendering: pixelated;
+  max-width: 100%;
+}
+
+.voxelRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.voxelRow input[type="range"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.voxelLabel {
+  width: 62px;
+  flex-shrink: 0;
+  color: var(--muted);
 }
 
 @media (max-width: 900px) {
