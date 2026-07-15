@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * Handheld selection screen. A new player picks a premade skin or recolours the
- * seven regions live, previewed on a canvas rendered by the pure `renderHandheld`
+ * Handheld selection screen. A new player picks a premade skin or recolours each
+ * region live, previewed on a canvas rendered by the pure `renderHandheld`
  * model. Choosing saves the scheme to the profile (and localStorage) and moves
  * on to `?next` (their profile by default). Detailed pixel edits happen in a
  * pixel tool via the downloadable `.aseprite` template.

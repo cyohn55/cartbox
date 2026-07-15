@@ -2,8 +2,8 @@
  * Server + client shared logic for the stored handheld skin.
  *
  * A stored handheld is `{ presetId, scheme }`: which premade the user started
- * from (or "custom"), and the seven region colours actually applied. Everything
- * that persists a handheld routes through `normalizeHandheld`, so an untrusted
+ * from (or "custom"), and the region colours actually applied. Everything that
+ * persists a handheld routes through `normalizeHandheld`, so an untrusted
  * payload is always coerced to a complete, valid skin before it reaches the DB.
  */
 
@@ -20,7 +20,7 @@ export const CUSTOM_PRESET_ID = "custom";
 export interface StoredHandheld {
   /** The premade the scheme came from, or "custom" after recolouring. */
   presetId: string;
-  /** The seven region colours actually applied. */
+  /** The region colours actually applied. */
   scheme: HandheldScheme;
 }
 

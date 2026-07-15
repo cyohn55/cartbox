@@ -23,7 +23,7 @@ const W = base.width;
 const H = base.height;
 
 // Region ids (mask.png red channel), per HANDHELD_REGIONS order.
-const REGION = { face: 1, buttonLetter: 2, dpadArrow: 3, lButton: 4, rButton: 5, buttonDiamond: 6, dpadRing: 7 };
+const REGION = { face: 1, dpadPanel: 2, buttonPanel: 3, decal: 4, text: 5, dpad: 6, dpadArrow: 7, buttonLetter: 8 };
 
 const frac = (r) => ({ x: r.x0 / W, y: r.y0 / H, w: (r.x1 - r.x0 + 1) / W, h: (r.y1 - r.y0 + 1) / H });
 const emptyRect = () => ({ x0: W, y0: H, x1: -1, y1: -1 });
@@ -123,17 +123,18 @@ function screenBox() {
   return best.box;
 }
 
-// D-pad: the ring + arrows together give the cross's bounds.
-const dpadRing = regionBox(REGION.dpadRing);
+// D-pad: the recess panel behind it bounds the cross cleanly. (The dark D-pad
+// fill layer also carries the face-button circles, so its own box spans the
+// whole width — the panel and arrow masks are the reliable bound.)
+const dpadPanel = regionBox(REGION.dpadPanel);
 const dpadArrow = regionBox(REGION.dpadArrow);
-const dpad = { x0: Math.min(dpadRing.x0, dpadArrow.x0), y0: Math.min(dpadRing.y0, dpadArrow.y0), x1: Math.max(dpadRing.x1, dpadArrow.x1), y1: Math.max(dpadRing.y1, dpadArrow.y1) };
+const dpad = { x0: Math.min(dpadPanel.x0, dpadArrow.x0), y0: Math.min(dpadPanel.y0, dpadArrow.y0), x1: Math.max(dpadPanel.x1, dpadArrow.x1), y1: Math.max(dpadPanel.y1, dpadArrow.y1) };
 
-// Face buttons: the four letter glyphs are separate blobs (the circles are
-// joined by the diamond frame). Use the letters for position, and size each
-// hit-area from the whole button cluster. Labels by layout: Y top, X left,
-// B right, A bottom.
-const diamondBox = regionBox(REGION.buttonDiamond);
-const buttonSize = Math.min(diamondBox.x1 - diamondBox.x0, diamondBox.y1 - diamondBox.y0) * 0.34;
+// Face buttons: the four letter glyphs are separate blobs. Use the letters for
+// position, and size each hit-area from the whole button cluster (the recess
+// panel behind them). Labels by layout: Y top, X left, B right, A bottom.
+const panelBox = regionBox(REGION.buttonPanel);
+const buttonSize = Math.min(panelBox.x1 - panelBox.x0, panelBox.y1 - panelBox.y0) * 0.34;
 const letters = components(REGION.buttonLetter, 30).sort((a, b) => b.area - a.area).slice(0, 4);
 if (letters.length < 4) throw new Error(`Expected 4 button letters, found ${letters.length}`);
 const boxAround = (c) => ({ x0: c.cx - buttonSize / 2, y0: c.cy - buttonSize / 2, x1: c.cx + buttonSize / 2, y1: c.cy + buttonSize / 2 });
@@ -147,7 +148,7 @@ function darkPills() {
   const seen = new Uint8Array(W * H);
   const dark = (p) => base.data[p * 4 + 3] > 200 && (base.data[p * 4] + base.data[p * 4 + 1] + base.data[p * 4 + 2]) / 3 < 75;
   const boxes = [];
-  const [ax, bx, ay, by] = [Math.floor(W * 0.33), Math.floor(W * 0.63), Math.floor(H * 0.7), Math.floor(H * 0.78)];
+  const [ax, bx, ay, by] = [Math.floor(W * 0.34), Math.floor(W * 0.60), Math.floor(H * 0.75), Math.floor(H * 0.81)];
   for (let y = ay; y < by; y += 1) {
     for (let x = ax; x < bx; x += 1) {
       const s = y * W + x;
@@ -173,7 +174,7 @@ function darkPills() {
           }
         }
       }
-      if (area > 120) boxes.push({ box, cx: (box.x0 + box.x1) / 2 });
+      if (area > 800) boxes.push({ box, cx: (box.x0 + box.x1) / 2 }); // the pills; smaller blobs are letter glyphs
     }
   }
   return boxes.sort((a, b) => a.cx - b.cx);
@@ -195,8 +196,8 @@ const layout = {
     pills.length >= 2
       ? { select: frac(pills[0].box), start: frac(pills[1].box) }
       : {
-          select: { x: 0.37, y: 0.725, w: 0.085, h: 0.022 },
-          start: { x: 0.5, y: 0.725, w: 0.085, h: 0.022 },
+          select: { x: 0.364, y: 0.772, w: 0.085, h: 0.02 },
+          start: { x: 0.503, y: 0.772, w: 0.085, h: 0.02 },
         },
 };
 

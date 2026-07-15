@@ -325,7 +325,7 @@ function ImageShell({ bus, children }: { bus: ConsoleInputBus; children: ReactNo
 
   return (
     <div className="hh-img-root" onContextMenu={(event) => event.preventDefault()}>
-      <div className="hh-img-device" style={{ aspectRatio: layout ? String(layout.aspect) : "0.658" }}>
+      <div className="hh-img-device" style={{ aspectRatio: layout ? String(layout.aspect) : "0.549" }}>
         {skinUrl && <img className="hh-img-skin" src={skinUrl} alt="" draggable={false} />}
         {layout && (
           <>

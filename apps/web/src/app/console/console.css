@@ -1730,8 +1730,8 @@ select.os-input {
 
 .hh-img-device {
   position: relative;
-  aspect-ratio: 0.6583;
-  height: min(100dvh, calc(100dvw / 0.6583));
+  aspect-ratio: 0.5491;
+  height: min(100dvh, calc(100dvw / 0.5491));
 }
 
 .hh-img-skin {

@@ -17,8 +17,8 @@ const CONTROL_SHADE = 0.35;
 
 /**
  * CSS-variable overrides that repaint the shell in the handheld's colours:
- * chassis → shell body + outer glow, shoulders → control base, D-pad ring →
- * D-pad/joystick, button diamonds → the four face buttons, button letters →
+ * chassis → shell body + outer glow, D-pad panel → control base, D-pad →
+ * D-pad/joystick, button panel → the four face buttons, button letters →
  * face-button ink.
  */
 export function handheldConsoleVariables(scheme: HandheldScheme): Record<string, string> {
@@ -33,13 +33,13 @@ export function handheldConsoleVariables(scheme: HandheldScheme): Record<string,
     style["--hh-outer-b"] = darkenHexColor(chassis, 0.72);
   }
 
-  const shoulder = normalizeHexColor(scheme.lButton);
-  if (shoulder) {
-    style["--hh-control-a"] = shoulder;
-    style["--hh-control-b"] = darkenHexColor(shoulder, CONTROL_SHADE);
+  const control = normalizeHexColor(scheme.dpadPanel);
+  if (control) {
+    style["--hh-control-a"] = control;
+    style["--hh-control-b"] = darkenHexColor(control, CONTROL_SHADE);
   }
 
-  const dpad = normalizeHexColor(scheme.dpadRing);
+  const dpad = normalizeHexColor(scheme.dpad);
   if (dpad) {
     style["--hh-dpad-a"] = dpad;
     style["--hh-dpad-b"] = darkenHexColor(dpad, CONTROL_SHADE);
@@ -50,7 +50,7 @@ export function handheldConsoleVariables(scheme: HandheldScheme): Record<string,
   const ink = normalizeHexColor(scheme.buttonLetter);
   if (ink) style["--hh-face-ink"] = ink;
 
-  const face = normalizeHexColor(scheme.buttonDiamond);
+  const face = normalizeHexColor(scheme.buttonPanel);
   if (face) {
     for (const key of ["x", "y", "a", "b"] as const) {
       style[`--hh-face-${key}-hi`] = face;

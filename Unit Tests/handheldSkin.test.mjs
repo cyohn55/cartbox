@@ -33,24 +33,29 @@ const hex = (r, g, b) => "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "
 // 1. renderHandheld paints masked pixels with the scheme colour and leaves the
 //    rest of the base untouched.
 {
-  // 2x2 canvas: pixel 0 is region 1 (face), pixel 3 is region 2 (button letters),
-  // pixels 1 and 2 are base chrome that must survive.
+  // 2x2 canvas: pixel 0 is region 1 (first region), pixel 3 is region 2 (second
+  // region); pixels 1 and 2 are base chrome that must survive. Region ids are
+  // taken from the model so this tracks HANDHELD_REGIONS rather than fixed names.
+  const firstRegion = HANDHELD_REGIONS[0].id;
+  const secondRegion = HANDHELD_REGIONS[1].id;
   const base = new Uint8ClampedArray([
-    10, 10, 10, 255, // p0 (will be overwritten by face)
+    10, 10, 10, 255, // p0 (will be overwritten by region 1)
     20, 20, 20, 255, // p1 base
     30, 30, 30, 255, // p2 base
-    40, 40, 40, 255, // p3 (will be overwritten by letters)
+    40, 40, 40, 255, // p3 (will be overwritten by region 2)
   ]);
   const regionMask = new Uint8Array([1, 0, 0, 2]);
   const template = { width: 2, height: 2, base, regionMask };
 
-  const scheme = makeScheme((region) => (region.id === "face" ? "#ff0000" : region.id === "buttonLetter" ? "#00ff00" : "#000000"));
+  const scheme = makeScheme((region) =>
+    region.id === firstRegion ? "#ff0000" : region.id === secondRegion ? "#00ff00" : "#000000",
+  );
   const out = renderHandheld(template, scheme);
 
-  assert.deepEqual([...out.slice(0, 4)], [255, 0, 0, 255], "face pixel recoloured");
+  assert.deepEqual([...out.slice(0, 4)], [255, 0, 0, 255], "region 1 pixel recoloured");
   assert.deepEqual([...out.slice(4, 8)], [20, 20, 20, 255], "base pixel 1 untouched");
   assert.deepEqual([...out.slice(8, 12)], [30, 30, 30, 255], "base pixel 2 untouched");
-  assert.deepEqual([...out.slice(12, 16)], [0, 255, 0, 255], "letters pixel recoloured");
+  assert.deepEqual([...out.slice(12, 16)], [0, 255, 0, 255], "region 2 pixel recoloured");
   // The template's base is not mutated (render returns a copy).
   assert.equal(base[0], 10, "original base preserved");
   passed += 1;
@@ -83,7 +88,7 @@ function layerFrom(mask, color, w, h) {
   const regionColor = (i) => [40 + i * 20, 10 + i * 5, 200 - i * 20];
   const groupChildren = HANDHELD_REGIONS.map((region, i) => {
     const m = new Array(w * h).fill(0);
-    m[i] = 1; // region i owns pixel i (i = 0..6, canvas has 9 pixels)
+    m[i] = 1; // region i owns pixel i (canvas has 9 pixels, one per region + spare)
     return {
       name: region.layer,
       type: 0,
@@ -104,8 +109,10 @@ function layerFrom(mask, color, w, h) {
 
   const template = extractHandheldTemplate(layers, "Handheld", "Test_Scheme");
   assert.equal(template.width, w);
-  // Region ids land on pixels 0..6 (mask id = index + 1); pixels 7,8 are none.
-  assert.deepEqual([...template.regionMask], [1, 2, 3, 4, 5, 6, 7, 0, 0]);
+  // Region i lands on pixel i (mask id = index + 1); the remaining pixels are none.
+  const expectedMask = HANDHELD_REGIONS.map((_, i) => i + 1);
+  while (expectedMask.length < w * h) expectedMask.push(0);
+  assert.deepEqual([...template.regionMask], expectedMask);
   // The base survived into the template unmodified at a base pixel.
   assert.deepEqual([...template.base.slice(16, 20)], [90, 90, 90, 255], "base pixel 4 preserved");
 
@@ -141,6 +148,9 @@ function layerFrom(mask, color, w, h) {
   const w = 2;
   const h = 2;
   // Region shapes on distinct pixels: face@0, letters@1 (so they don't overwrite).
+  // Layer names come from the model so the test tracks HANDHELD_REGIONS.
+  const layerName = (id) => HANDHELD_REGIONS.find((region) => region.id === id).layer;
+  const missingRegion = HANDHELD_REGIONS.find((region) => region.id === "dpad");
   const mask = { face: [1, 0, 0, 0], letters: [0, 1, 0, 0] };
   const layer = (name, shape, color, visible, childLevel = 0, type = 0) => ({
     name,
@@ -156,15 +166,15 @@ function layerFrom(mask, color, w, h) {
     width: w,
     height: h,
     layers: [
-      layer("Face_Color", mask.face, [10, 20, 30], false), // hidden — not drawn
-      layer("Face_Color", mask.face, [200, 100, 50], true), // visible — shows
-      layer("Button_Letter_Color", mask.letters, [1, 2, 3], true),
+      layer(layerName("face"), mask.face, [10, 20, 30], false), // hidden — not drawn
+      layer(layerName("face"), mask.face, [200, 100, 50], true), // visible — shows
+      layer(layerName("buttonLetter"), mask.letters, [1, 2, 3], true),
     ],
   };
   const scheme = extractSchemeFromLayers(layers, fallback);
   assert.equal(scheme.face, hex(200, 100, 50), "face reads the visible layer's colour");
   assert.equal(scheme.buttonLetter, hex(1, 2, 3), "letters read from their own region");
-  assert.equal(scheme.dpadRing, fallback.dpadRing, "region with no layer falls back");
+  assert.equal(scheme[missingRegion.id], fallback[missingRegion.id], "region with no layer falls back");
   passed += 1;
 }
 

@@ -31,8 +31,8 @@ const PREVIEW = path.join(OUT, "preview");
 fs.mkdirSync(PREVIEW, { recursive: true });
 
 // The layer names in the source file.
-const BASE_LAYER = "Handheld";
-const MASK_GROUP = "Blank_Color_Palette"; // the clean, uncoloured region masks
+const BASE_LAYER = "Handheld"; // the shared chrome (top-level layer)
+const MASK_GROUP = "Vertical_Handheld"; // the group holding one flat layer per region
 
 const bytes = new Uint8Array(fs.readFileSync(path.join(OUT, "template.aseprite")));
 const layers = await parseAsepriteLayers(bytes);

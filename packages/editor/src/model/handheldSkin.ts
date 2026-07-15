@@ -2,33 +2,40 @@
  * Handheld console skin model.
  *
  * A handheld's appearance is a shared chrome image (the "base": bezel, screen
- * frame, button outlines) plus seven flat, recolourable regions (chassis face,
- * button letters, D-pad arrows/ring, L/R shoulder backs, button diamonds). A
- * "scheme" is therefore just seven colours; recolouring is an exact mask-fill,
- * which is what makes both quick palette swaps and premade skins cheap.
+ * frame, button outlines) plus a set of flat, recolourable regions (chassis
+ * face, D-pad and button recess panels, the D-pad and its arrows, button
+ * letters, on-shell text and decals). A "scheme" is therefore just one colour
+ * per region; recolouring is an exact mask-fill, which is what makes both quick
+ * palette swaps and premade skins cheap.
  *
  * This module is pure (no DOM): it defines the regions, renders a scheme onto a
  * template to RGBA, and extracts a template/scheme from a parsed Aseprite file
- * (the `Vertical_Pixel_Handheld.aseprite` template, whose named layers encode
- * exactly this structure). The web app and the asset-prep script share it.
+ * (the `Vertical_Pixel_Handheld.aseprite` template, whose `Vertical_Handheld`
+ * group holds one flat layer per region over the shared `Handheld` base). The
+ * web app and the asset-prep script share it.
  */
 
 import type { AsepriteLayers } from "./asepriteImport";
 import { hexToRgb, rgbToHex } from "./palette";
 
 /**
- * The seven recolourable regions, in mask-id order (mask id = index + 1; 0 means
- * "not a region"). `layer` is the Aseprite layer name that carries the region in
- * the template file.
+ * The recolourable regions, in mask-id order (mask id = index + 1; 0 means "not
+ * a region"). `layer` is the Aseprite layer name that carries the region in the
+ * `Vertical_Handheld` group of the template file.
+ *
+ * Order matters: the chassis is the full-face background that every other region
+ * sits on top of, so it comes first (lowest priority) and detail regions follow.
+ * When masks overlap, the later region wins the pixel.
  */
 export const HANDHELD_REGIONS = [
   { id: "face", label: "Chassis", layer: "Face_Color" },
-  { id: "buttonLetter", label: "Button letters", layer: "Button_Letter_Color" },
-  { id: "dpadArrow", label: "D-pad arrows", layer: "DPad_Arrow_Color" },
-  { id: "lButton", label: "L shoulder", layer: "L_Button_BKGR" },
-  { id: "rButton", label: "R shoulder", layer: "R_Button_BkGR" },
-  { id: "buttonDiamond", label: "Button diamonds", layer: "Button_Diamond_Color" },
-  { id: "dpadRing", label: "D-pad ring", layer: "DPad_Ring_Color" },
+  { id: "dpadPanel", label: "D-pad panel", layer: "DPad_Background" },
+  { id: "buttonPanel", label: "Button panel", layer: "Button_Background" },
+  { id: "decal", label: "Decals", layer: "Decal_Color" },
+  { id: "text", label: "Text", layer: "Text_Color" },
+  { id: "dpad", label: "D-pad", layer: "DPad_Color" },
+  { id: "dpadArrow", label: "D-pad arrows", layer: "Arrow_Color" },
+  { id: "buttonLetter", label: "Button letters", layer: "Button_Text_Color" },
 ] as const;
 
 export type HandheldRegion = (typeof HANDHELD_REGIONS)[number];
@@ -54,7 +61,7 @@ export interface HandheldTemplate {
   readonly height: number;
   /** Straight-alpha RGBA of the shared chrome, length `width * height * 4`. */
   readonly base: Uint8ClampedArray;
-  /** Region id per pixel (0 = none, 1..7 = HANDHELD_REGIONS order). */
+  /** Region id per pixel (0 = none, 1..N = HANDHELD_REGIONS order). */
   readonly regionMask: Uint8Array;
 }
 
@@ -65,16 +72,21 @@ export function makeScheme(color: (region: HandheldRegion) => string): HandheldS
   return scheme;
 }
 
-/** A scheme with a single accent (letters/arrows/diamonds/ring) over one body. */
+/**
+ * A scheme with a single accent over one body colour: the chassis and its recess
+ * panels take the body, while the controls and markings (D-pad, arrows, button
+ * letters, text and decals) take the accent.
+ */
 function twoTone(body: string, accent: string): HandheldScheme {
   return {
     face: body,
-    lButton: body,
-    rButton: body,
-    buttonLetter: accent,
+    dpadPanel: body,
+    buttonPanel: body,
+    dpad: accent,
     dpadArrow: accent,
-    buttonDiamond: accent,
-    dpadRing: accent,
+    buttonLetter: accent,
+    text: accent,
+    decal: accent,
   };
 }
 
@@ -271,7 +283,12 @@ export function extractHandheldTemplate(
   maskGroup: string,
 ): HandheldTemplate {
   const { width, height } = layers;
-  const baseSource = layers.layers.find((layer) => layer.name === baseLayer)?.pixels;
+  // The template can carry more than one layer named for the base (e.g. a backup
+  // nested in a hidden group); prefer the top-level chrome layer, which is the
+  // one actually composited on the shell.
+  const baseSource =
+    layers.layers.find((layer) => layer.name === baseLayer && layer.childLevel === 0)?.pixels ??
+    layers.layers.find((layer) => layer.name === baseLayer)?.pixels;
   if (!baseSource) throw new Error(`Base layer "${baseLayer}" not found or empty.`);
   const base = baseSource.slice();
 
