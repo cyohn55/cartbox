@@ -150,8 +150,10 @@ export {
 export {
   encodeAseprite,
   encodeAsepriteRgba,
+  encodeAsepriteRgbaFrames,
   type AsepriteExportImage,
   type AsepriteRgbaLayer,
+  type AsepriteFrameInput,
 } from "./model/asepriteExport";
 export {
   HANDHELD_REGIONS,

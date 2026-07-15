@@ -51,7 +51,7 @@ const dataUrl = (payloadLen) => `data:image/png;base64,${"A".repeat(payloadLen)}
     { label: "zero dimension", art: { url: "https://cdn.example.com/x.png", w: 0, h: 10 } },
     { label: "non-finite dimension", art: { url: "https://cdn.example.com/x.png", w: NaN, h: 10 } },
     { label: "missing dimensions", art: { url: "https://cdn.example.com/x.png" } },
-    { label: "oversize data url", art: { url: dataUrl(2_000_001), w: 10, h: 10 } },
+    { label: "oversize data url", art: { url: dataUrl(4_000_001), w: 10, h: 10 } },
     { label: "non-object", art: "not-an-object" },
     { label: "null", art: null },
     { label: "non-string url", art: { url: 123, w: 10, h: 10 } },
@@ -59,6 +59,26 @@ const dataUrl = (payloadLen) => `data:image/png;base64,${"A".repeat(payloadLen)}
   for (const testCase of cases) {
     assert.equal(normalizeArt(testCase.art), undefined, `${testCase.label} → dropped`);
   }
+  passed += 1;
+}
+
+// 4. Animation fields: a valid multi-frame spec is kept and clamped; junk or a
+//    single frame yields a plain static image (no frames/durationMs).
+{
+  const animated = normalizeArt({ url: dataUrl(100), w: 800, h: 1200, frames: 4, durationMs: 5000 });
+  assert.ok(animated, "animated art is kept");
+  assert.equal(animated.frames, 4, "frame count preserved");
+  assert.equal(animated.durationMs, 2000, "duration clamped to the max");
+
+  const defaulted = normalizeArt({ url: dataUrl(100), w: 800, h: 1200, frames: 3 });
+  assert.equal(defaulted.durationMs, 100, "missing duration defaults");
+
+  const tooMany = normalizeArt({ url: dataUrl(100), w: 800, h: 1200, frames: 999 });
+  assert.equal(tooMany.frames, undefined, "over-limit frame count drops animation");
+  const single = normalizeArt({ url: dataUrl(100), w: 800, h: 1200, frames: 1 });
+  assert.equal(single.frames, undefined, "a single frame is a static image");
+  const garbage = normalizeArt({ url: dataUrl(100), w: 800, h: 1200, frames: "lots" });
+  assert.equal(garbage.frames, undefined, "non-numeric frame count is ignored");
   passed += 1;
 }
 

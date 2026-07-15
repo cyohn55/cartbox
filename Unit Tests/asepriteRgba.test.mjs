@@ -18,8 +18,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const load = (rel) => import(pathToFileURL(path.resolve(here, rel)).href);
 
-const { encodeAsepriteRgba } = await load("../packages/editor/src/model/asepriteExport.ts");
-const { parseAsepriteLayers } = await load("../packages/editor/src/model/asepriteImport.ts");
+const { encodeAsepriteRgba, encodeAsepriteRgbaFrames } = await load("../packages/editor/src/model/asepriteExport.ts");
+const { parseAsepriteLayers, parseAseprite } = await load("../packages/editor/src/model/asepriteImport.ts");
 const { docFromLayers, compositeDoc } = await load("../packages/editor/src/model/handheldPaintDoc.ts");
 
 /** A full-canvas RGBA buffer painted by a per-pixel function. */
@@ -104,6 +104,29 @@ let passed = 0;
   const reference = docFromLayers(input.map((l) => ({ name: l.name, visible: l.visible, opacity: l.opacity / 255, pixels: l.pixels })), width, height);
   assert.deepEqual([...compositeDoc(doc)], [...compositeDoc(reference)], "imported document composites identically to the source");
   assert.equal(doc.layers.length, input.length, "imported document keeps the layer count");
+  passed += 1;
+}
+
+// 4. A multi-frame animation round-trips: encode N composited frames with
+//    per-frame durations, parse them back, and confirm pixels and timing match.
+{
+  const width = 3;
+  const height = 3;
+  const frameInputs = [
+    { pixels: paint(width, height, () => [255, 0, 0, 255]), durationMs: 80 },
+    { pixels: paint(width, height, () => [0, 255, 0, 255]), durationMs: 120 },
+    { pixels: paint(width, height, (x) => [0, 0, x === 0 ? 255 : 0, 255]), durationMs: 200 },
+  ];
+  const bytes = await encodeAsepriteRgbaFrames(frameInputs, width, height);
+  const doc = await parseAseprite(bytes);
+
+  assert.equal(doc.frames.length, frameInputs.length, "frame count round-trips");
+  doc.frames.forEach((frame, index) => {
+    assert.equal(frame.durationMs, frameInputs[index].durationMs, `frame ${index} duration round-trips`);
+    assert.deepEqual([...frame.pixels], [...frameInputs[index].pixels], `frame ${index} pixels round-trip`);
+  });
+
+  await assert.rejects(() => encodeAsepriteRgbaFrames([], width, height), /at least one frame/, "empty animation rejected");
   passed += 1;
 }
 

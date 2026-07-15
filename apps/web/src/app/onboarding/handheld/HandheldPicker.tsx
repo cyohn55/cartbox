@@ -22,14 +22,14 @@ import {
   DEFAULT_HANDHELD_PRESET_ID,
   type HandheldScheme,
   type HandheldTemplate,
-  type PaintDoc,
 } from "@cartbox/editor";
 
 import { authHeaders } from "@/lib/supabase-browser";
 import { isStaticExport } from "@/lib/staticSite";
 import { CUSTOM_PRESET_ID, CUSTOM_ART_PRESET_ID, type HandheldArt, type StoredHandheld } from "@/lib/handheld";
 import { loadHandheldTemplate } from "@/lib/handheldTemplate";
-import { saveHandheldDraft, loadHandheldDraft, clearHandheldDraft } from "@/lib/handheldDraft";
+import { saveHandheldDraft, loadHandheldDraft, clearHandheldDraft, type HandheldDraft } from "@/lib/handheldDraft";
+import { assembleSheetCanvas } from "@/lib/handheldSheet";
 import { loadConsoleSettings, saveConsoleSettings } from "@/app/console/consoleSettings";
 import { handheldAssetUrl } from "@/lib/handheldAssets";
 import { HandheldSkinEditor } from "./HandheldSkinEditor";
@@ -38,17 +38,15 @@ import styles from "./handheld.module.css";
 /** Where the anonymous/offline choice is remembered until an account exists. */
 export const LOCAL_HANDHELD_KEY = "cartbox.handheld";
 
-/** Flatten a paint document to a PNG data URL for the preview (browser only). */
-function docToDataUrl(doc: PaintDoc): string | null {
-  const canvas = document.createElement("canvas");
-  canvas.width = doc.width;
-  canvas.height = doc.height;
-  const context = canvas.getContext("2d");
-  if (!context) return null;
-  const image = context.createImageData(doc.width, doc.height);
-  image.data.set(compositeDoc(doc));
-  context.putImageData(image, 0, 0);
-  return canvas.toDataURL("image/png");
+/** Flatten a resumed draft into displayable art (a sprite sheet when animated). */
+function draftToArt(draft: HandheldDraft): HandheldArt | null {
+  const first = draft.frames[0];
+  if (!first) return null;
+  const canvas = assembleSheetCanvas(draft.frames.map(compositeDoc), first.width, first.height);
+  const url = canvas.toDataURL("image/png");
+  return draft.frames.length > 1
+    ? { url, w: first.width, h: first.height, frames: draft.frames.length, durationMs: draft.frameMs }
+    : { url, w: first.width, h: first.height };
 }
 
 export function HandheldPicker() {
@@ -65,10 +63,10 @@ export function HandheldPicker() {
   const [uploadNote, setUploadNote] = useState<string | null>(null);
   // Free-form pixel art drawn in the editor; when set it supersedes the scheme.
   const [art, setArt] = useState<HandheldArt | null>(null);
-  // The editor's working document, kept so re-opening resumes the same layers
-  // instead of restarting from the scheme render. Dropped when the design is
-  // changed another way (preset, recolour, upload).
-  const [draft, setDraft] = useState<PaintDoc | null>(null);
+  // The editor's working draft (animation frames), kept so re-opening resumes
+  // the same work instead of restarting from the scheme render. Dropped when the
+  // design is changed another way (preset, recolour, upload).
+  const [draft, setDraft] = useState<HandheldDraft | null>(null);
   const [editing, setEditing] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
@@ -84,9 +82,9 @@ export function HandheldPicker() {
         const savedDraft = await loadHandheldDraft(loaded.width, loaded.height);
         if (!alive || !savedDraft) return;
         setDraft(savedDraft);
-        const url = docToDataUrl(savedDraft);
-        if (url) {
-          setArt({ url, w: savedDraft.width, h: savedDraft.height });
+        const restoredArt = draftToArt(savedDraft);
+        if (restoredArt) {
+          setArt(restoredArt);
           setPresetId(CUSTOM_ART_PRESET_ID);
         }
       })
@@ -105,12 +103,18 @@ export function HandheldPicker() {
     if (!context) return;
 
     if (art) {
+      // Animated art is a horizontal sprite sheet; preview its first frame.
+      const frameWidth = art.frames && art.frames > 1 ? art.w : 0;
       const image = new Image();
       image.onload = () => {
-        canvas.width = image.naturalWidth;
+        canvas.width = frameWidth || image.naturalWidth;
         canvas.height = image.naturalHeight;
         context.clearRect(0, 0, canvas.width, canvas.height);
-        context.drawImage(image, 0, 0);
+        if (frameWidth) {
+          context.drawImage(image, 0, 0, frameWidth, image.naturalHeight, 0, 0, frameWidth, image.naturalHeight);
+        } else {
+          context.drawImage(image, 0, 0);
+        }
       };
       image.src = art.url;
       return;
@@ -284,12 +288,12 @@ export function HandheldPicker() {
         <HandheldSkinEditor
           template={template}
           scheme={scheme}
-          initialDoc={draft}
+          initialDraft={draft}
           onCancel={() => setEditing(false)}
-          onApply={(drawn, workingDoc) => {
+          onApply={(drawn, workingDraft) => {
             setArt(drawn);
-            setDraft(workingDoc); // resume from these layers next time
-            void saveHandheldDraft(workingDoc); // survive a reload too
+            setDraft(workingDraft); // resume from these frames next time
+            void saveHandheldDraft(workingDraft); // survive a reload too
             setPresetId(CUSTOM_ART_PRESET_ID);
             setEditing(false);
           }}

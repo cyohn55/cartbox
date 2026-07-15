@@ -26,6 +26,7 @@ import {
   parseAsepriteLayers,
   blitRect,
   encodeAsepriteRgba,
+  encodeAsepriteRgbaFrames,
   HANDHELD_REGIONS,
   MAX_PAINT_LAYERS,
   type PaintDoc,
@@ -37,6 +38,11 @@ import {
 import { authHeaders } from "@/lib/supabase-browser";
 import { isStaticExport } from "@/lib/staticSite";
 import type { HandheldArt } from "@/lib/handheld";
+import type { HandheldDraft } from "@/lib/handheldDraft";
+import { assembleSheetCanvas } from "@/lib/handheldSheet";
+
+/** Cap on the animation length, matching the art gate. */
+const MAX_FRAMES = 8;
 
 import { SkinPaintCanvas, type SkinTool, type StrokeSnapshot } from "./SkinPaintCanvas";
 import { SkinPalette } from "./SkinPalette";
@@ -74,20 +80,29 @@ interface HandheldSkinEditorProps {
   /** The scheme the drawing starts from (rendered as the base bitmap). */
   scheme: HandheldScheme;
   /**
-   * A working document to resume from — the layers left off in a previous visit
-   * to the editor this session. When absent, the drawing starts from the scheme
-   * render. Cloned on seed so the caller's copy is never mutated.
+   * A working draft to resume from — the animation frames left off in a previous
+   * visit this session. When absent, the drawing starts as one frame from the
+   * scheme render. Cloned on seed so the caller's copy is never mutated.
    */
-  initialDoc?: PaintDoc | null;
+  initialDraft?: HandheldDraft | null;
   onCancel: () => void;
-  /** Report the flattened art plus the working document to resume from next time. */
-  onApply: (art: HandheldArt, doc: PaintDoc) => void;
+  /** Report the flattened art plus the working draft to resume from next time. */
+  onApply: (art: HandheldArt, draft: HandheldDraft) => void;
 }
 
-export function HandheldSkinEditor({ template, scheme, initialDoc, onCancel, onApply }: HandheldSkinEditorProps) {
-  const [doc, setDoc] = useState<PaintDoc>(() =>
-    initialDoc ? cloneDoc(initialDoc) : docFromRgba(renderHandheld(template, scheme), template.width, template.height, "Skin"),
-  );
+export function HandheldSkinEditor({ template, scheme, initialDraft, onCancel, onApply }: HandheldSkinEditorProps) {
+  const seedFrames = () =>
+    initialDraft && initialDraft.frames.length > 0
+      ? initialDraft.frames.map(cloneDoc)
+      : [docFromRgba(renderHandheld(template, scheme), template.width, template.height, "Skin")];
+
+  // `frames` holds every animation frame; `doc` is the live copy of the active
+  // frame (all the painting machinery targets it) and is written back into
+  // `frames` whenever the active frame changes or the drawing is saved/exported.
+  const [frames, setFrames] = useState<PaintDoc[]>(seedFrames);
+  const [activeFrame, setActiveFrame] = useState(0);
+  const [frameMs, setFrameMs] = useState(() => initialDraft?.frameMs ?? 100);
+  const [doc, setDoc] = useState<PaintDoc>(() => cloneDoc(frames[0]!));
   const [tool, setTool] = useState<SkinTool>("pencil");
   const [color, setColor] = useState<string>("#ffffff");
   const [recentColors, setRecentColors] = useState<string[]>([]);
@@ -147,6 +162,60 @@ export function HandheldSkinEditor({ template, scheme, initialDoc, onCancel, onA
     });
   }, []);
 
+  // --- Animation frames (the live `doc` is the active frame) ---
+
+  /** Undo/redo history belongs to one frame; drop it when the frame changes. */
+  const clearHistory = useCallback(() => {
+    undoStack.current = [];
+    redoStack.current = [];
+    setHistoryTick((tick) => tick + 1);
+  }, []);
+
+  /** Every frame with the active one refreshed from the live document. */
+  const collectFrames = useCallback(
+    (): PaintDoc[] => frames.map((frame, index) => (index === activeFrame ? doc : frame)),
+    [frames, activeFrame, doc],
+  );
+
+  /** Switch which frame is being edited, committing the current one first. */
+  const gotoFrame = useCallback(
+    (index: number) => {
+      if (index === activeFrame || index < 0 || index >= frames.length) return;
+      const committed = collectFrames();
+      setFrames(committed);
+      setDoc(cloneDoc(committed[index]!));
+      setActiveFrame(index);
+      clearHistory();
+      setStructureVersion((version) => version + 1);
+    },
+    [activeFrame, frames.length, collectFrames, clearHistory],
+  );
+
+  /** Append a new frame (a copy of the current one) and edit it. */
+  const addFrame = useCallback(() => {
+    if (frames.length >= MAX_FRAMES) return;
+    const committed = collectFrames();
+    const copy = cloneDoc(doc);
+    setFrames([...committed, copy]);
+    setDoc(cloneDoc(copy));
+    setActiveFrame(committed.length);
+    clearHistory();
+    setStructureVersion((version) => version + 1);
+  }, [frames.length, collectFrames, doc, clearHistory]);
+
+  /** Remove the active frame (never the last one) and select a neighbour. */
+  const deleteFrame = useCallback(() => {
+    if (frames.length <= 1) return;
+    const committed = collectFrames();
+    committed.splice(activeFrame, 1);
+    const nextIndex = Math.min(activeFrame, committed.length - 1);
+    setFrames(committed);
+    setDoc(cloneDoc(committed[nextIndex]!));
+    setActiveFrame(nextIndex);
+    clearHistory();
+    setStructureVersion((version) => version + 1);
+  }, [frames.length, activeFrame, collectFrames, clearHistory]);
+
   const undo = useCallback(() => {
     const entry = undoStack.current.pop();
     if (!entry) return;
@@ -202,17 +271,12 @@ export function HandheldSkinEditor({ template, scheme, initialDoc, onCancel, onA
     return () => window.removeEventListener("keydown", onKey);
   }, [undo, redo]);
 
-  /** Flatten the document to a PNG (blob for upload, data URL as fallback). */
-  const flattenToPng = async (): Promise<{ blob: Blob | null; dataUrl: string }> => {
-    const rgba = compositeDoc(doc);
-    const canvas = document.createElement("canvas");
-    canvas.width = doc.width;
-    canvas.height = doc.height;
-    const context = canvas.getContext("2d");
-    if (!context) return { blob: null, dataUrl: "" };
-    const image = context.createImageData(doc.width, doc.height);
-    image.data.set(rgba);
-    context.putImageData(image, 0, 0);
+  /**
+   * Flatten every frame into one horizontal sprite-sheet PNG (blob for upload,
+   * data URL as fallback). A single frame produces an ordinary image.
+   */
+  const flattenToPng = async (allFrames: PaintDoc[]): Promise<{ blob: Blob | null; dataUrl: string }> => {
+    const canvas = assembleSheetCanvas(allFrames.map(compositeDoc), template.width, template.height);
     const dataUrl = canvas.toDataURL("image/png");
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
     return { blob, dataUrl };
@@ -222,10 +286,14 @@ export function HandheldSkinEditor({ template, scheme, initialDoc, onCancel, onA
     setSaving(true);
     setError(null);
     try {
-      const { blob, dataUrl } = await flattenToPng();
-      let art: HandheldArt = { url: dataUrl, w: doc.width, h: doc.height };
+      const allFrames = collectFrames();
+      const { blob, dataUrl } = await flattenToPng(allFrames);
+      const animation = allFrames.length > 1 ? { frames: allFrames.length, durationMs: frameMs } : {};
+      let art: HandheldArt = { url: dataUrl, w: template.width, h: template.height, ...animation };
       // Upload to object storage when a backend + auth are available; on any
-      // failure keep the inline data URL so the drawing is never lost.
+      // failure keep the inline data URL so the drawing is never lost. The
+      // uploaded image is the whole sheet, so single-frame dims come from the
+      // template rather than the returned (sheet) dimensions.
       if (!isStaticExport && blob) {
         try {
           const response = await fetch("/api/console/me/handheld/art", {
@@ -234,14 +302,14 @@ export function HandheldSkinEditor({ template, scheme, initialDoc, onCancel, onA
             body: blob,
           });
           if (response.ok) {
-            const body = (await response.json()) as { url: string; w: number; h: number };
-            art = { url: body.url, w: body.w, h: body.h };
+            const body = (await response.json()) as { url: string };
+            art = { url: body.url, w: template.width, h: template.height, ...animation };
           }
         } catch {
           // Fall back to the data URL already in `art`.
         }
       }
-      onApply(art, doc);
+      onApply(art, { frames: allFrames, frameMs });
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Could not save your artwork.");
       setSaving(false);
@@ -278,17 +346,32 @@ export function HandheldSkinEditor({ template, scheme, initialDoc, onCancel, onA
     }
   };
 
-  /** Download the layered drawing as an RGBA .aseprite for external editing. */
+  /**
+   * Download as an RGBA .aseprite: a multi-frame animation when there are
+   * several frames (each flattened, with the shared duration), otherwise the
+   * current frame's layers so external edits keep the layer structure.
+   */
   const exportAseprite = async () => {
     setError(null);
     try {
-      const layers = doc.layers.map((layer) => ({
-        name: layer.name,
-        visible: layer.visible,
-        opacity: Math.round(layer.opacity * 255),
-        pixels: layer.pixels,
-      }));
-      const bytes = await encodeAsepriteRgba(layers, doc.width, doc.height);
+      const allFrames = collectFrames();
+      const bytes =
+        allFrames.length > 1
+          ? await encodeAsepriteRgbaFrames(
+              allFrames.map((frame) => ({ pixels: compositeDoc(frame), durationMs: frameMs })),
+              template.width,
+              template.height,
+            )
+          : await encodeAsepriteRgba(
+              doc.layers.map((layer) => ({
+                name: layer.name,
+                visible: layer.visible,
+                opacity: Math.round(layer.opacity * 255),
+                pixels: layer.pixels,
+              })),
+              doc.width,
+              doc.height,
+            );
       const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: "application/octet-stream" }));
       const link = document.createElement("a");
       link.href = url;
@@ -547,6 +630,58 @@ export function HandheldSkinEditor({ template, scheme, initialDoc, onCancel, onA
               })}
             </ul>
           </aside>
+        </div>
+
+        <div className={styles.frames} aria-label="Animation frames">
+          <span className={styles.framesLabel}>Frames</span>
+          <div className={styles.frameStrip}>
+            {frames.map((_, index) => (
+              <button
+                key={index}
+                type="button"
+                className={`${styles.frameTab} ${index === activeFrame ? styles.frameTabActive : ""}`}
+                onClick={() => gotoFrame(index)}
+                aria-pressed={index === activeFrame}
+                aria-label={`Frame ${index + 1}`}
+              >
+                {index + 1}
+              </button>
+            ))}
+            <button
+              type="button"
+              className={styles.frameAdd}
+              onClick={addFrame}
+              disabled={frames.length >= MAX_FRAMES}
+              title="Add a frame"
+              aria-label="Add frame"
+            >
+              ＋
+            </button>
+            <button
+              type="button"
+              className={styles.frameAdd}
+              onClick={deleteFrame}
+              disabled={frames.length <= 1}
+              title="Delete this frame"
+              aria-label="Delete frame"
+            >
+              🗑
+            </button>
+          </div>
+          {frames.length > 1 && (
+            <label className={styles.frameDuration}>
+              <span>{frameMs}ms / frame</span>
+              <input
+                type="range"
+                min={20}
+                max={1000}
+                step={10}
+                value={frameMs}
+                onChange={(event) => setFrameMs(Number(event.target.value))}
+                aria-label="Frame duration"
+              />
+            </label>
+          )}
         </div>
 
         {error && <p className={styles.error}>{error}</p>}

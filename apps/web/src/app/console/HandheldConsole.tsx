@@ -28,6 +28,7 @@ import { HandheldSkinProvider, useHandheldSkin } from "./HandheldSkinContext";
 import { customColorStyle } from "./consoleSettings";
 import { loadHandheldTemplate } from "@/lib/handheldTemplate";
 import { handheldAssetUrl } from "@/lib/handheldAssets";
+import { sliceSheet } from "@/lib/handheldSheet";
 import { KonamiDetector } from "./consoleNavigation";
 import { resolveMiniGame } from "./minigames/registry";
 import { Joystick } from "./Joystick";
@@ -319,6 +320,40 @@ function ImageShell({ bus, children }: { bus: ConsoleInputBus; children: ReactNo
     [handheld.art?.url, template, handheld.scheme],
   );
 
+  // Animated skin: slice the sprite sheet into per-frame images and cycle them.
+  const art = handheld.art;
+  const frameCount = art?.frames ?? 1;
+  const durationMs = art?.durationMs ?? 100;
+  const [frameUrls, setFrameUrls] = useState<string[]>([]);
+  const [frameIndex, setFrameIndex] = useState(0);
+
+  useEffect(() => {
+    if (!art || frameCount <= 1) {
+      setFrameUrls([]);
+      return;
+    }
+    let alive = true;
+    const image = new Image();
+    image.onload = () => {
+      if (!alive) return;
+      setFrameUrls(sliceSheet(image, art.w, art.h, frameCount));
+      setFrameIndex(0);
+    };
+    image.src = art.url;
+    return () => {
+      alive = false;
+    };
+  }, [art, frameCount]);
+
+  useEffect(() => {
+    if (frameUrls.length <= 1) return;
+    const id = window.setInterval(() => setFrameIndex((index) => (index + 1) % frameUrls.length), durationMs);
+    return () => window.clearInterval(id);
+  }, [frameUrls, durationMs]);
+
+  // Show the current animation frame when animated, else the static skin.
+  const displayUrl = frameCount > 1 ? frameUrls[frameIndex] ?? null : skinUrl;
+
   const hits: Array<{ control: ConsoleControl; rect: LayoutRect; label: string }> = layout
     ? [
         ...dpadZones(layout.dpad),
@@ -336,7 +371,7 @@ function ImageShell({ bus, children }: { bus: ConsoleInputBus; children: ReactNo
   return (
     <div className="hh-img-root" onContextMenu={(event) => event.preventDefault()}>
       <div className="hh-img-device" style={{ aspectRatio: layout ? String(layout.aspect) : "0.549" }}>
-        {skinUrl && <img className="hh-img-skin" src={skinUrl} alt="" draggable={false} />}
+        {displayUrl && <img className="hh-img-skin" src={displayUrl} alt="" draggable={false} />}
         {layout && (
           <>
             <div className="hh-img-screen" style={rectStyle(layout.screen)}>

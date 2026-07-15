@@ -251,4 +251,26 @@ const png = encodePng(composite, WIDTH, HEIGHT);
   passed += 1;
 }
 
+// 8. Multi-frame draft (animation) persistence: several frame documents plus a
+//    shared duration serialise, gzip-compress, and round-trip back to the same
+//    composites — mirroring the handheldDraft payload the editor stores.
+{
+  const frameA = docFromRgba(solidRender(WIDTH, HEIGHT, [200, 40, 40]), WIDTH, HEIGHT);
+  const frameB = docFromRgba(solidRender(WIDTH, HEIGHT, [40, 200, 40]), WIDTH, HEIGHT);
+  const frames = [doc, frameA, frameB];
+  const payload = { frames: frames.map((frame) => serializeDoc(frame)), frameMs: 120 };
+
+  const packed = await gzipToBase64(JSON.stringify(payload));
+  assert.ok(packed.length < 3_000_000, "compressed animation draft fits the budget");
+  const restored = JSON.parse(await base64GunzipToText(packed));
+  assert.equal(restored.frameMs, 120, "frame duration round-trips");
+  assert.equal(restored.frames.length, frames.length, "frame count round-trips");
+  restored.frames.forEach((serial, index) => {
+    const back = deserializeDoc(serial, WIDTH, HEIGHT);
+    assert.ok(back, `frame ${index} deserialises`);
+    assert.deepEqual([...compositeDoc(back)], [...compositeDoc(frames[index])], `frame ${index} composite round-trips`);
+  });
+  passed += 1;
+}
+
 console.log(`PASS — verify-skin-editor: ${passed} pipeline checks green.`);

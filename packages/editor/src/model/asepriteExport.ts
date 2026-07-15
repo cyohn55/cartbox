@@ -275,6 +275,86 @@ export async function encodeAseprite(image: AsepriteExportImage): Promise<Uint8A
   return writer.toUint8Array();
 }
 
+/** One animation frame: a full-canvas composite plus how long it shows. */
+export interface AsepriteFrameInput {
+  /** Straight-alpha RGBA pixels, length `width * height * 4`. */
+  readonly pixels: Uint8ClampedArray;
+  /** On-screen duration in milliseconds (default 100). */
+  readonly durationMs?: number;
+}
+
+/**
+ * Encode a sequence of RGBA composites as a multi-frame `.aseprite` animation:
+ * one "Animation" layer whose cel changes each frame, with per-frame durations.
+ * Each frame is a flattened picture (layers are composited by the caller), which
+ * is the natural shape for animation and keeps every frame's cel valid. Throws
+ * on an empty sequence or a frame whose size disagrees with the canvas.
+ */
+export async function encodeAsepriteRgbaFrames(
+  frames: ReadonlyArray<AsepriteFrameInput>,
+  width: number,
+  height: number,
+): Promise<Uint8Array> {
+  if (frames.length === 0) {
+    throw new Error("An animation needs at least one frame.");
+  }
+  const expected = width * height * 4;
+  for (const frame of frames) {
+    if (frame.pixels.length !== expected) {
+      throw new Error(`A frame has ${frame.pixels.length} bytes, expected ${expected} for ${width}x${height}.`);
+    }
+  }
+
+  const writer = new ByteWriter();
+
+  // --- Header (128 bytes) ---
+  const fileSizeOffset = writer.length;
+  writer.u32(0); // file size (patched below)
+  writer.u16(FILE_MAGIC);
+  writer.u16(frames.length); // frame count
+  writer.u16(width);
+  writer.u16(height);
+  writer.u16(COLOR_DEPTH_RGBA);
+  writer.u32(1); // flags: layer opacity is valid
+  writer.u16(0); // deprecated speed
+  writer.u32(0); // reserved
+  writer.u32(0); // reserved
+  writer.u8(0); // transparent index (unused in RGBA)
+  writer.zeros(3); // ignored
+  writer.u16(0); // palette size (none for RGBA)
+  writer.u8(1); // pixel width ratio
+  writer.u8(1); // pixel height ratio
+  writer.i16(0); // grid x
+  writer.i16(0); // grid y
+  writer.u16(16); // grid width
+  writer.u16(16); // grid height
+  writer.zeros(84); // reserved
+
+  // The single layer is declared once in frame 0; every frame supplies its cel.
+  for (let index = 0; index < frames.length; index += 1) {
+    const chunks: Array<{ type: number; body: Uint8Array }> = [];
+    if (index === 0) {
+      chunks.push({ type: CHUNK_COLOR_PROFILE, body: colorProfileBody() });
+      chunks.push({ type: CHUNK_LAYER, body: rgbaLayerBody("Animation", true, 255) });
+    }
+    const compressed = await deflate(Uint8Array.from(frames[index]!.pixels));
+    chunks.push({ type: CHUNK_CEL, body: celBody(0, width, height, compressed) });
+
+    const frameSizeOffset = writer.length;
+    writer.u32(0); // bytes in frame (patched below)
+    writer.u16(FRAME_MAGIC);
+    writer.u16(chunks.length); // old chunk count
+    writer.u16(frames[index]!.durationMs ?? 100);
+    writer.zeros(2); // reserved
+    writer.u32(chunks.length); // new chunk count
+    for (const chunk of chunks) writeChunk(writer, chunk.type, chunk.body);
+    writer.patchU32(frameSizeOffset, writer.length - frameSizeOffset);
+  }
+
+  writer.patchU32(fileSizeOffset, writer.length);
+  return writer.toUint8Array();
+}
+
 /** One straight-alpha RGBA layer for a multi-layer RGBA `.aseprite` export. */
 export interface AsepriteRgbaLayer {
   readonly name: string;
