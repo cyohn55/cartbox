@@ -6,12 +6,20 @@
  * this class only interprets it.
  */
 
-import { CartEngine, SpritePage } from "../engine/CartEngine";
+import type { CartEngine, SpritePage } from "../engine/CartEngine";
 import { rgbToHex } from "./palette";
+import type { Rgb } from "./paletteImport";
 
 /** An RGBA image the sprite sheet can import from or export to. */
 export interface SheetImage {
   data: Uint8ClampedArray;
+  width: number;
+  height: number;
+}
+
+/** A page rendered as palette indices (one byte per pixel) for indexed export. */
+export interface IndexedImage {
+  indices: Uint8Array;
   width: number;
   height: number;
 }
@@ -87,6 +95,15 @@ export class SpriteSheet {
     return Array.from({ length: this.paletteSize }, (_unused, index) => this.cssColor(index));
   }
 
+  /** All palette entries as RGB triplets, index order (for indexed export). */
+  paletteRgb(): Rgb[] {
+    const palette = this.engine.getPalette();
+    return Array.from({ length: this.paletteSize }, (_unused, index) => {
+      const base = index * 3;
+      return [palette[base] ?? 0, palette[base + 1] ?? 0, palette[base + 2] ?? 0] as Rgb;
+    });
+  }
+
   /** Palette index whose colour is closest to an RGB triplet (squared distance). */
   nearestColorIndex(red: number, green: number, blue: number): number {
     const palette = this.engine.getPalette();
@@ -107,14 +124,14 @@ export class SpriteSheet {
   }
 
   /**
-   * Import an RGBA image into a page: each pixel is snapped to the nearest
-   * palette colour (transparent pixels become colour 0) and written into the
-   * 8x8 tile grid. The image is cropped to the page's `sheetSize`.
+   * Import an RGBA image into a page at a pixel offset: each pixel is snapped to
+   * the nearest palette colour (transparent pixels become colour 0) and written
+   * into the 8x8 tile grid. Anything past the page's `sheetSize` is cropped.
    */
-  importImage(image: SheetImage, page: SpritePage): void {
+  importImageAt(image: SheetImage, page: SpritePage, offsetX: number, offsetY: number): void {
     const limit = this.sheetSize;
-    const width = Math.min(image.width, limit);
-    const height = Math.min(image.height, limit);
+    const width = Math.min(image.width, limit - offsetX);
+    const height = Math.min(image.height, limit - offsetY);
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
         const base = (y * image.width + x) * 4;
@@ -123,10 +140,60 @@ export class SpriteSheet {
           alpha < 128
             ? 0
             : this.nearestColorIndex(image.data[base] ?? 0, image.data[base + 1] ?? 0, image.data[base + 2] ?? 0);
-        const tile = Math.floor(y / this.tileSize) * this.sheetCols + Math.floor(x / this.tileSize);
-        this.setPixel(page, tile, x % this.tileSize, y % this.tileSize, index);
+        const canvasX = offsetX + x;
+        const canvasY = offsetY + y;
+        const tile = Math.floor(canvasY / this.tileSize) * this.sheetCols + Math.floor(canvasX / this.tileSize);
+        this.setPixel(page, tile, canvasX % this.tileSize, canvasY % this.tileSize, index);
       }
     }
+  }
+
+  /**
+   * Import an RGBA image into a page at the top-left origin (the common case).
+   */
+  importImage(image: SheetImage, page: SpritePage): void {
+    this.importImageAt(image, page, 0, 0);
+  }
+
+  /**
+   * Lay a run of same-size animation frames onto a page as consecutive tile
+   * blocks — frame 0 top-left, each next frame in the next block slot going left
+   * to right then wrapping down — so an imported animation becomes a sequence of
+   * sprite tiles the cart can flip through (e.g. `spr(base + frame)`). Frames are
+   * cropped to the page and any that no longer fit are skipped. A frame larger
+   * than the whole sheet still imports its top-left region (`cropped: true`) so
+   * an oversized source is never silently dropped. Returns the placed/skipped
+   * counts, each frame's size in tiles, and whether cropping occurred.
+   */
+  importFrames(
+    frames: ReadonlyArray<SheetImage>,
+    page: SpritePage,
+  ): { placed: number; skipped: number; tilesWide: number; tilesHigh: number; cropped: boolean } {
+    const first = frames[0];
+    if (!first) return { placed: 0, skipped: 0, tilesWide: 0, tilesHigh: 0, cropped: false };
+
+    const tilesWide = Math.max(1, Math.ceil(first.width / this.tileSize));
+    const tilesHigh = Math.max(1, Math.ceil(first.height / this.tileSize));
+    const tileRows = Math.floor(this.tilesPerPage / this.sheetCols);
+    // Clamp block counts to at least one so a frame bigger than the sheet still
+    // gets the origin slot (cropped) instead of yielding zero capacity.
+    const blocksPerRow = Math.max(1, Math.floor(this.sheetCols / tilesWide));
+    const blockRows = Math.max(1, Math.floor(tileRows / tilesHigh));
+    const capacity = blocksPerRow * blockRows;
+    const cropped = first.width > this.sheetSize || first.height > this.sheetSize;
+
+    let placed = 0;
+    for (let index = 0; index < frames.length && index < capacity; index += 1) {
+      const frame = frames[index];
+      if (!frame) continue;
+      const originX = (index % blocksPerRow) * tilesWide * this.tileSize;
+      const originY = Math.floor(index / blocksPerRow) * tilesHigh * this.tileSize;
+      // Stop once a block would start past the sheet (oversized frames overflow).
+      if (originX >= this.sheetSize || originY >= this.sheetSize) break;
+      this.importImageAt(frame, page, originX, originY);
+      placed += 1;
+    }
+    return { placed, skipped: frames.length - placed, tilesWide, tilesHigh, cropped };
   }
 
   /** Render a whole page to one RGBA image (sheetSize x sheetSize) for export. */
@@ -150,6 +217,28 @@ export class SpriteSheet {
       }
     }
     return { data, width: size, height: size };
+  }
+
+  /**
+   * Render a whole page as palette indices (one byte per pixel, sheetSize x
+   * sheetSize), the form an indexed export (e.g. Aseprite) writes directly. This
+   * preserves the exact palette index of every pixel, unlike RGBA export.
+   */
+  exportIndexed(page: SpritePage): IndexedImage {
+    const size = this.sheetSize;
+    const indices = new Uint8Array(size * size);
+    const tileIndices = new Uint8Array(this.pixelsPerTile);
+    for (let tile = 0; tile < this.tilesPerPage; tile += 1) {
+      const originX = (tile % this.sheetCols) * this.tileSize;
+      const originY = Math.floor(tile / this.sheetCols) * this.tileSize;
+      this.engine.readTile(page, tile, tileIndices);
+      for (let y = 0; y < this.tileSize; y += 1) {
+        for (let x = 0; x < this.tileSize; x += 1) {
+          indices[(originY + y) * size + (originX + x)] = tileIndices[y * this.tileSize + x] ?? 0;
+        }
+      }
+    }
+    return { indices, width: size, height: size };
   }
 
   /** Rasterise a tile to RGBA bytes (length this.pixelsPerTile * 4) for a canvas. */

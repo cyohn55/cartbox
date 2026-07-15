@@ -30,9 +30,15 @@ export default async function EditProfilePage() {
   const db = serviceClient();
   const { data: profile } = await db
     .from("profiles")
-    .select("avatar_json")
+    .select("avatar_json, handheld")
     .eq("id", userId)
-    .single();
+    .maybeSingle();
+
+  // Onboarding gate: a signed-in player who hasn't chosen a handheld yet is sent
+  // to the selection step before reaching their profile.
+  if (!profile?.handheld) {
+    redirect("/onboarding/handheld?next=/profile/edit");
+  }
 
   return (
     <main>

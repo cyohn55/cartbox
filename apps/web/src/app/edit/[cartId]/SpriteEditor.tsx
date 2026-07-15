@@ -10,12 +10,16 @@
 import { useMemo, useRef, useState } from "react";
 import {
   parsePaletteFile,
+  parseAseprite,
+  encodeAseprite,
   gradientSortOrder,
+  materialProfileAt,
   MATERIAL_LEVELS,
   type SpriteSheet,
   type SpritePage,
   type NormalMap,
   type MaterialMap,
+  type MaterialSwatches,
   type SpriteRig,
 } from "@cartbox/editor";
 
@@ -26,7 +30,9 @@ import { PalettePicker } from "./PalettePicker";
 import { LitPreview } from "./LitPreview";
 import { VoxelPreview } from "./VoxelPreview";
 import { RigPanel } from "./RigPanel";
+import { MaterialSwatchPanel } from "./MaterialSwatchPanel";
 import { MaterialSurface, NormalSurface } from "./paintSurface";
+import { MaterialBrushSurface } from "./materialBrushSurface";
 import { SpriteBlockSurface } from "./spriteBlockSurface";
 import {
   TOOLS,
@@ -37,7 +43,7 @@ import {
   type Tool,
 } from "./tools";
 
-type Layer = "albedo" | "normal" | "height" | "specular" | "roughness" | "emissive";
+type Layer = "albedo" | "normal" | "material" | "height" | "specular" | "roughness" | "emissive";
 
 /** The greyscale-ramp material layers (everything except albedo and normal). */
 const MATERIAL_LAYERS: ReadonlyArray<{ id: Layer; label: string }> = [
@@ -50,6 +56,7 @@ const MATERIAL_LAYERS: ReadonlyArray<{ id: Layer; label: string }> = [
 const LAYER_LABEL: Record<Layer, string> = {
   albedo: "Colour",
   normal: "Normal",
+  material: "Material",
   height: "Height",
   specular: "Specular",
   roughness: "Roughness",
@@ -71,6 +78,9 @@ interface SpriteEditorProps {
   specular: MaterialMap;
   roughness: MaterialMap;
   emissive: MaterialMap;
+  /** Per-colour material bindings, owned by the workbench so they persist on Save. */
+  swatches: MaterialSwatches;
+  onSwatchesChange: (swatches: MaterialSwatches) => void;
   /** Cart-wide character rig, owned by the workbench so it can persist on Save. */
   rig: SpriteRig;
   onRigChange: (rig: SpriteRig) => void;
@@ -83,6 +93,8 @@ export function SpriteEditor({
   specular,
   roughness,
   emissive,
+  swatches,
+  onSwatchesChange,
   rig,
   onRigChange,
 }: SpriteEditorProps) {
@@ -101,8 +113,10 @@ export function SpriteEditor({
   const [sortPalette, setSortPalette] = useState(true); // show palette as a gradient
   const [preferCpu, setPreferCpu] = useState(false);
   const [paletteNote, setPaletteNote] = useState("");
+  const [asepriteNote, setAsepriteNote] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
   const paletteFileRef = useRef<HTMLInputElement>(null);
+  const asepriteFileRef = useRef<HTMLInputElement>(null);
 
   const bump = () => setVersion((current) => current + 1);
 
@@ -115,38 +129,63 @@ export function SpriteEditor({
   const roughnessSurface = useMemo(() => new MaterialSurface(roughness, sheet.tileSize), [roughness, sheet]);
   const emissiveSurface = useMemo(() => new MaterialSurface(emissive, sheet.tileSize), [emissive, sheet]);
 
+  // The composite "material" brush paints albedo and every channel at once,
+  // reading each colour's profile through a ref so its identity stays stable as
+  // swatches are edited (a rebuilt surface would drop the canvas selection).
+  const swatchesRef = useRef(swatches);
+  swatchesRef.current = swatches;
+  const materialBrush = useMemo(
+    () =>
+      new MaterialBrushSurface(
+        sheet,
+        {
+          normal: normalSurface,
+          height: heightSurface,
+          specular: specularSurface,
+          roughness: roughnessSurface,
+          emissive: emissiveSurface,
+        },
+        (index) => materialProfileAt(swatchesRef.current, index),
+      ),
+    [sheet, normalSurface, heightSurface, specularSurface, roughnessSurface, emissiveSurface],
+  );
+
   const materialMap =
     layer === "specular" ? specular : layer === "roughness" ? roughness : layer === "emissive" ? emissive : height;
   const baseSurface =
     layer === "albedo"
       ? sheet
-      : layer === "normal"
-        ? normalSurface
-        : layer === "specular"
-          ? specularSurface
-          : layer === "roughness"
-            ? roughnessSurface
-            : layer === "emissive"
-              ? emissiveSurface
-              : heightSurface;
+      : layer === "material"
+        ? materialBrush
+        : layer === "normal"
+          ? normalSurface
+          : layer === "specular"
+            ? specularSurface
+            : layer === "roughness"
+              ? roughnessSurface
+              : layer === "emissive"
+                ? emissiveSurface
+                : heightSurface;
   // For sizes above one tile, wrap the base surface so the canvas edits an N×N
   // block of adjacent tiles as one sprite; 1× is the base surface unchanged.
   const surface = useMemo(
     () => (spriteSize === 1 ? baseSurface : new SpriteBlockSurface(baseSurface, sheet.sheetCols, spriteSize)),
     [baseSurface, sheet, spriteSize],
   );
-  const activeValue = layer === "albedo" ? color : layer === "normal" ? direction : level;
-  const setActiveValue = layer === "albedo" ? setColor : layer === "normal" ? setDirection : setLevel;
-  const paletteColors =
-    layer === "albedo"
-      ? sheet.cssPalette()
-      : layer === "normal"
-        ? Array.from({ length: normals.directionCount }, (_unused, index) => normals.colorHex(index))
-        : Array.from({ length: MATERIAL_LEVELS }, (_unused, index) => materialMap.colorHex(index));
+  // The material brush paints in the albedo palette-index domain — it just also
+  // stamps the colour's material channels — so it shares albedo's value/palette.
+  const paintsPalette = layer === "albedo" || layer === "material";
+  const activeValue = paintsPalette ? color : layer === "normal" ? direction : level;
+  const setActiveValue = paintsPalette ? setColor : layer === "normal" ? setDirection : setLevel;
+  const paletteColors = paintsPalette
+    ? sheet.cssPalette()
+    : layer === "normal"
+      ? Array.from({ length: normals.directionCount }, (_unused, index) => normals.colorHex(index))
+      : Array.from({ length: MATERIAL_LEVELS }, (_unused, index) => materialMap.colorHex(index));
 
   // Display the albedo palette as a gradient (grays, then hue→lightness) without
   // touching the underlying indices. Normal-direction swatches are left as-is.
-  const paletteOrder = layer === "albedo" && sortPalette ? gradientSortOrder(paletteColors) : undefined;
+  const paletteOrder = paintsPalette && sortPalette ? gradientSortOrder(paletteColors) : undefined;
 
   const importPng = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -219,6 +258,65 @@ export function SpriteEditor({
     });
   };
 
+  // Import an Aseprite sprite: adopt its palette so indexed colours map exactly,
+  // then lay every animation frame onto the active page as consecutive tile
+  // blocks (frame 0 top-left, wrapping across the sheet) so the animation becomes
+  // a run of sprites the cart can flip through with `spr(base + frame)`.
+  const importAseprite = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setAsepriteNote("Reading…");
+    try {
+      const document_ = await parseAseprite(new Uint8Array(await file.arrayBuffer()));
+      if (document_.frames.length === 0) {
+        setAsepriteNote("That Aseprite file has no frames.");
+        return;
+      }
+      if (document_.palette.length > 0) sheet.applyPalette(document_.palette);
+      const frames = document_.frames.map((frame) => ({
+        data: frame.pixels,
+        width: document_.width,
+        height: document_.height,
+      }));
+      const { placed, skipped, tilesWide, tilesHigh, cropped } = sheet.importFrames(frames, page);
+      if (cropped) {
+        setAsepriteNote(
+          `Imported the top-left ${sheet.sheetSize}×${sheet.sheetSize} — source is ${document_.width}×${document_.height}, ` +
+            `larger than the sprite sheet. Resize it to ${sheet.sheetSize}px or smaller for a full import.`,
+        );
+      } else {
+        const blockLabel = `${tilesWide * sheet.tileSize}×${tilesHigh * sheet.tileSize}`;
+        setAsepriteNote(
+          `Imported ${placed} frame${placed === 1 ? "" : "s"} (${blockLabel} each)` +
+            (skipped > 0 ? ` — ${skipped} didn't fit the page` : "") +
+            ".",
+        );
+      }
+      bump();
+    } catch (error) {
+      setAsepriteNote(error instanceof Error ? error.message : "Could not read that Aseprite file.");
+    }
+  };
+
+  // Export the active page as an indexed .aseprite, preserving the exact palette
+  // index of every pixel so the sprites reopen in Aseprite unchanged.
+  const exportAseprite = async () => {
+    try {
+      const { indices, width, height } = sheet.exportIndexed(page);
+      const bytes = await encodeAseprite({ width, height, palette: sheet.paletteRgb(), indices });
+      const blob = new Blob([bytes as BlobPart], { type: "application/octet-stream" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `cartbox-sprites-page${page}.aseprite`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setAsepriteNote(error instanceof Error ? error.message : "Could not export the Aseprite file.");
+    }
+  };
+
   return (
     <div className={styles.body}>
       <aside className={styles.rail}>
@@ -238,6 +336,14 @@ export function SpriteEditor({
               onClick={() => setLayer("normal")}
             >
               Normal
+            </button>
+            <button
+              type="button"
+              className={`${styles.segment} ${layer === "material" ? styles.segmentActive : ""}`}
+              onClick={() => setLayer("material")}
+              title="Paint albedo and every material channel at once from the colour's swatch"
+            >
+              Material
             </button>
             {MATERIAL_LAYERS.map((material) => (
               <button
@@ -390,6 +496,44 @@ export function SpriteEditor({
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6, lineHeight: 1.35 }}>{paletteNote}</div>
           )}
         </div>
+
+        <div>
+          <div className={styles.groupLabel}>Aseprite</div>
+          <div className={styles.toolGroup}>
+            <button
+              type="button"
+              className={styles.toolBtn}
+              onClick={() => asepriteFileRef.current?.click()}
+              title="Import an Aseprite sprite (.aseprite / .ase): adopts its palette and lays every animation frame across the page's tiles"
+            >
+              <span className={styles.toolGlyph} aria-hidden>
+                ⭳
+              </span>
+              Import Aseprite
+            </button>
+            <button
+              type="button"
+              className={styles.toolBtn}
+              onClick={exportAseprite}
+              title="Export this page as an indexed .aseprite you can edit in Aseprite"
+            >
+              <span className={styles.toolGlyph} aria-hidden>
+                ⭱
+              </span>
+              Export Aseprite
+            </button>
+          </div>
+          <input
+            ref={asepriteFileRef}
+            type="file"
+            accept=".aseprite,.ase"
+            onChange={importAseprite}
+            hidden
+          />
+          {asepriteNote && (
+            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6, lineHeight: 1.35 }}>{asepriteNote}</div>
+          )}
+        </div>
       </aside>
 
       <section className={styles.stage}>
@@ -437,18 +581,30 @@ export function SpriteEditor({
           colors={paletteColors}
           selected={activeValue}
           onSelect={setActiveValue}
-          title={layer === "albedo" ? "Palette" : layer === "normal" ? "Direction" : LAYER_LABEL[layer]}
-          subtitle={
+          title={
             layer === "albedo"
-              ? `${sheet.paletteSize} colors`
-              : layer === "normal"
-                ? "16 normals"
-                : `${MATERIAL_LEVELS} levels`
+              ? "Palette"
+              : layer === "material"
+                ? "Material colors"
+                : layer === "normal"
+                  ? "Direction"
+                  : LAYER_LABEL[layer]
+          }
+          subtitle={
+            paintsPalette ? `${sheet.paletteSize} colors` : layer === "normal" ? "16 normals" : `${MATERIAL_LEVELS} levels`
           }
           order={paletteOrder}
           sorted={sortPalette}
-          onToggleSort={layer === "albedo" ? () => setSortPalette((value) => !value) : undefined}
+          onToggleSort={paintsPalette ? () => setSortPalette((value) => !value) : undefined}
         />
+        {layer === "material" && (
+          <MaterialSwatchPanel
+            colorIndex={color}
+            colorCss={sheet.cssColor(color)}
+            swatches={swatches}
+            onChange={onSwatchesChange}
+          />
+        )}
         <div>
           <div className={styles.panelHead}>
             <span className={styles.panelTitle}>Lit preview</span>

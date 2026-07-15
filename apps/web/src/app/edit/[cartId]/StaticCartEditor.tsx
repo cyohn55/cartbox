@@ -23,6 +23,7 @@ import { useSearchParams } from "next/navigation";
 import { resolveModelId } from "@/lib/consoleModel";
 import { resolveStarterId } from "@/lib/starter";
 import { parseRig, type WireRig } from "@/lib/rig";
+import { parseMaterials, type WireMaterials } from "@/lib/materials";
 import { draftBytes, loadCartDraft } from "@/lib/localCartStore";
 import { findDemoCart, demoCartUrl } from "@/lib/demoCatalog";
 import { parsePostFxSettings, type PostFxSettings } from "@cartbox/player";
@@ -38,6 +39,7 @@ interface ResolvedCart {
   storedModel: string | null;
   rig: WireRig | null;
   fx: PostFxSettings | null;
+  materials: WireMaterials | null;
 }
 
 function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
@@ -57,6 +59,7 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
         storedModel: draft.model,
         rig: parseRig(draft.rigJson ? JSON.parse(draft.rigJson) : null),
         fx: parsePostFxSettings(draft.fxJson ? JSON.parse(draft.fxJson) : null),
+        materials: parseMaterials(draft.materialsJson ? JSON.parse(draft.materialsJson) : null),
       });
       return () => URL.revokeObjectURL(blobUrl);
     }
@@ -66,6 +69,7 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
       storedModel: demoCart?.consoleModel ?? null,
       rig: null,
       fx: null,
+      materials: null,
     });
     return undefined;
   }, [cartId]);
@@ -88,6 +92,7 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
       starterId={starterId}
       initialRig={resolved.rig}
       initialFx={resolved.fx}
+      initialMaterials={resolved.materials}
     />
   );
 }

@@ -27,9 +27,11 @@ import {
   TileMap,
   WasmCartEngine,
   applyStarter,
+  defaultMaterialSwatches,
   emptySpriteRig,
   loadWasmCartEngine,
   type ConsoleModelId,
+  type MaterialSwatches,
 } from "@cartbox/editor";
 
 import { authHeaders } from "@/lib/supabase-browser";
@@ -37,6 +39,7 @@ import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
 import { isStaticExport } from "@/lib/staticSite";
 import { saveCartDraft } from "@/lib/localCartStore";
 import type { WireRig } from "@/lib/rig";
+import type { WireMaterials } from "@/lib/materials";
 import styles from "./editor.module.css";
 import { SpriteEditor } from "./SpriteEditor";
 import { MapEditor } from "./MapEditor";
@@ -65,6 +68,8 @@ interface EditorWorkbenchProps {
   initialRig: WireRig | null;
   /** Persisted post-processing stack loaded with the cart, or null when none. */
   initialFx: PostFxSettings | null;
+  /** Persisted material swatch bindings loaded with the cart, or null when none. */
+  initialMaterials: WireMaterials | null;
 }
 
 export function EditorWorkbench({
@@ -75,6 +80,7 @@ export function EditorWorkbench({
   starterId,
   initialRig,
   initialFx,
+  initialMaterials,
 }: EditorWorkbenchProps) {
   const [engine, setEngine] = useState<CartEngine | null>(null);
   const [mode, setMode] = useState<EngineMode>("wasm");
@@ -154,6 +160,7 @@ export function EditorWorkbench({
       engineUrl={engineUrl}
       initialRig={initialRig}
       initialFx={initialFx}
+      initialMaterials={initialMaterials}
     />
   );
 }
@@ -167,6 +174,7 @@ function WorkbenchBody({
   engineUrl,
   initialRig,
   initialFx,
+  initialMaterials,
 }: {
   engine: CartEngine;
   cartId: string;
@@ -176,6 +184,7 @@ function WorkbenchBody({
   engineUrl: string;
   initialRig: WireRig | null;
   initialFx: PostFxSettings | null;
+  initialMaterials: WireMaterials | null;
 }) {
   // requestedModel is what the URL/DB asked for; activeModel is what the loaded
   // engine actually provides (every editor surface reads geometry from this one).
@@ -198,6 +207,7 @@ function WorkbenchBody({
     runnable,
     initialFx: initialFx ?? defaultPostFxSettings(),
     initialRig: initialRig ?? emptySpriteRig(),
+    initialMaterials: (initialMaterials as MaterialSwatches | null) ?? defaultMaterialSwatches(),
     initialBank: 0,
   });
   const {
@@ -209,6 +219,8 @@ function WorkbenchBody({
     setFx,
     rig,
     setRig,
+    materials,
+    setMaterials,
     canUndo,
     canRedo,
     undo,
@@ -255,7 +267,7 @@ function WorkbenchBody({
       // The static demo build has no API — Save lands in this browser's
       // localStorage instead (same payload the server would persist).
       if (isStaticExport) {
-        const stored = saveCartDraft(cartId, { model: modelId, bytes, rig, fx });
+        const stored = saveCartDraft(cartId, { model: modelId, bytes, rig, fx, materials });
         setSaveState(stored ? "saved" : "error");
         return;
       }
@@ -273,11 +285,12 @@ function WorkbenchBody({
       let ok = response.ok;
       if (ok) {
         const headers = await authHeaders({ "Content-Type": "application/json" });
-        const [rigResponse, fxResponse] = await Promise.all([
+        const [rigResponse, fxResponse, materialsResponse] = await Promise.all([
           fetch(`/api/carts/${cartId}/rig`, { method: "PUT", headers, body: JSON.stringify(rig) }),
           fetch(`/api/carts/${cartId}/fx`, { method: "PUT", headers, body: JSON.stringify(fx) }),
+          fetch(`/api/carts/${cartId}/materials`, { method: "PUT", headers, body: JSON.stringify(materials) }),
         ]);
-        ok = rigResponse.ok && fxResponse.ok;
+        ok = rigResponse.ok && fxResponse.ok && materialsResponse.ok;
       }
       setSaveState(ok ? "saved" : "error");
     } catch {
@@ -413,6 +426,8 @@ function WorkbenchBody({
           specular={specularMap}
           roughness={roughnessMap}
           emissive={emissiveMap}
+          swatches={materials}
+          onSwatchesChange={setMaterials}
           rig={rig}
           onRigChange={setRig}
         />

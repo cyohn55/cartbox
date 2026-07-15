@@ -524,6 +524,36 @@
   border: 1px solid rgba(255, 255, 255, 0.18);
 }
 
+/* --- Material swatch panel: bind a colour to a full material profile ------- */
+
+.swatchToggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1.35;
+}
+
+.swatchToggle input[type="checkbox"] {
+  flex-shrink: 0;
+}
+
+.swatchBody {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+/* Compact 16-direction picker: two rows of eight, same chips as the palette. */
+.directionGrid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 5px;
+}
+
 /* --- Map stage: a scrollable tile grid, screens marked out ---------------- */
 
 .mapStage {

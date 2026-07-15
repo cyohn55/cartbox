@@ -23,7 +23,14 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { EditHistory, WasmCartEngine, observeEngine, type CartEngine, type SpriteRig } from "@cartbox/editor";
+import {
+  EditHistory,
+  WasmCartEngine,
+  observeEngine,
+  type CartEngine,
+  type MaterialSwatches,
+  type SpriteRig,
+} from "@cartbox/editor";
 import type { PostFxSettings } from "@cartbox/player";
 
 /** Idle gap after the last edit before a snapshot is committed as one undo step. */
@@ -37,6 +44,7 @@ interface CartSnapshot {
   bank: number;
   fx: PostFxSettings;
   rig: SpriteRig;
+  materials: MaterialSwatches;
 }
 
 export interface EditorHistory {
@@ -50,6 +58,8 @@ export interface EditorHistory {
   setFx: (fx: PostFxSettings) => void;
   rig: SpriteRig;
   setRig: (rig: SpriteRig) => void;
+  materials: MaterialSwatches;
+  setMaterials: (materials: MaterialSwatches) => void;
   canUndo: boolean;
   canRedo: boolean;
   undo: () => void;
@@ -62,17 +72,19 @@ interface UseEditorHistoryArgs {
   runnable: WasmCartEngine | null;
   initialFx: PostFxSettings;
   initialRig: SpriteRig;
+  initialMaterials: MaterialSwatches;
   initialBank: number;
 }
 
-/** Two cart snapshots are equal when bytes, bank, FX and rig all match. */
+/** Two cart snapshots are equal when bytes, bank, FX, rig and materials match. */
 function snapshotsEqual(a: CartSnapshot, b: CartSnapshot): boolean {
   if (a.bank !== b.bank) return false;
   if (!bytesEqual(a.bytes, b.bytes)) return false;
-  // FX and rig are small plain-data objects produced by the same code paths, so
-  // a structural string compare is a sound and cheap equality here.
+  // FX, rig and materials are small plain-data objects produced by the same code
+  // paths, so a structural string compare is a sound and cheap equality here.
   if (JSON.stringify(a.fx) !== JSON.stringify(b.fx)) return false;
-  return JSON.stringify(a.rig) === JSON.stringify(b.rig);
+  if (JSON.stringify(a.rig) !== JSON.stringify(b.rig)) return false;
+  return JSON.stringify(a.materials) === JSON.stringify(b.materials);
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -88,11 +100,13 @@ export function useEditorHistory({
   runnable,
   initialFx,
   initialRig,
+  initialMaterials,
   initialBank,
 }: UseEditorHistoryArgs): EditorHistory {
   const [bank, setBankState] = useState(initialBank);
   const [fx, setFxState] = useState<PostFxSettings>(initialFx);
   const [rig, setRigState] = useState<SpriteRig>(initialRig);
+  const [materials, setMaterialsState] = useState<MaterialSwatches>(initialMaterials);
   const [revision, setRevision] = useState(0);
   // A monotonic version so canUndo/canRedo re-evaluate when the timeline moves.
   const [, setHistoryVersion] = useState(0);
@@ -102,6 +116,7 @@ export function useEditorHistory({
   const bankRef = useRef(bank);
   const fxRef = useRef(fx);
   const rigRef = useRef(rig);
+  const materialsRef = useRef(materials);
   const runnableRef = useRef(runnable);
   const applyingRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -117,6 +132,7 @@ export function useEditorHistory({
       bank: bankRef.current,
       fx: fxRef.current,
       rig: rigRef.current,
+      materials: materialsRef.current,
     };
   }, []);
 
@@ -163,6 +179,8 @@ export function useEditorHistory({
       setFxState(snapshot.fx);
       rigRef.current = snapshot.rig;
       setRigState(snapshot.rig);
+      materialsRef.current = snapshot.materials;
+      setMaterialsState(snapshot.materials);
     } finally {
       applyingRef.current = false;
     }
@@ -214,9 +232,30 @@ export function useEditorHistory({
     notify();
   }, [notify]);
 
+  const setMaterials = useCallback((next: MaterialSwatches) => {
+    materialsRef.current = next;
+    setMaterialsState(next);
+    notify();
+  }, [notify]);
+
   const history = historyRef.current;
   const canUndo = history?.canUndo() ?? false;
   const canRedo = history?.canRedo() ?? false;
 
-  return { engine: observed, revision, bank, setBank, fx, setFx, rig, setRig, canUndo, canRedo, undo, redo };
+  return {
+    engine: observed,
+    revision,
+    bank,
+    setBank,
+    fx,
+    setFx,
+    rig,
+    setRig,
+    materials,
+    setMaterials,
+    canUndo,
+    canRedo,
+    undo,
+    redo,
+  };
 }

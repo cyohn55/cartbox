@@ -6,6 +6,7 @@
  */
 
 export const CONSOLE_THEMES = [
+  { id: "handheld", label: "My Handheld", blurb: "The handheld you designed at signup." },
   { id: "indigo", label: "Indigo Workbench", blurb: "The Cartbox house look." },
   { id: "retro", label: "Retro Handheld", blurb: "Warm cream shell, classic maroon buttons." },
   { id: "sleek", label: "Sleek Clean", blurb: "Near-black glass, minimal lines." },
@@ -53,7 +54,9 @@ export interface ConsoleSettings {
 }
 
 export const DEFAULT_CONSOLE_SETTINGS: ConsoleSettings = {
-  theme: "indigo",
+  // The player's pixel-art handheld is the default device; onboarding personalises
+  // its colours, and the CSS themes below are opt-in alternatives.
+  theme: "handheld",
   controls: "dpad",
   buttons: "snes",
   miniGame: "monthly",

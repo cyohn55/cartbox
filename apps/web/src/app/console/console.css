@@ -1699,3 +1699,90 @@ select.os-input {
     animation: none;
   }
 }
+
+/* --- Image-based handheld (the "My Handheld" default device) ---------------
+ * The player's pixel-art handheld is the chrome; the game screen sits in its
+ * window and transparent hit-areas cover the drawn controls. The device box is
+ * sized to the art's exact aspect so the fractional hit-areas stay aligned. */
+.hh-img-root {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: radial-gradient(120% 120% at 50% 0%, #241d38 0%, #0d0b16 72%);
+  touch-action: manipulation;
+}
+
+.hh-img-root,
+.hh-img-root * {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.hh-img-root input,
+.hh-img-root textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.hh-img-device {
+  position: relative;
+  aspect-ratio: 0.6583;
+  height: min(100dvh, calc(100dvw / 0.6583));
+}
+
+.hh-img-skin {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+
+.hh-img-screen {
+  position: absolute;
+  overflow: hidden;
+  background: #05060a;
+  border-radius: 3px;
+}
+
+.hh-hit {
+  position: absolute;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 38%;
+  background: transparent;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.hh-hit[data-pressed] {
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.hh-img-gear {
+  position: absolute;
+  top: 1.4%;
+  right: 3%;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(10, 8, 18, 0.55);
+  color: #ece9f8;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.hh-img-gear:focus-visible {
+  outline: 2px solid var(--accent, #f6b74a);
+  outline-offset: 2px;
+}

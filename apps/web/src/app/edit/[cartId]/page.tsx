@@ -12,6 +12,7 @@ import { publicUrl } from "@/lib/storage";
 import { resolveModelId } from "@/lib/consoleModel";
 import { resolveStarterId } from "@/lib/starter";
 import { parseRig, type WireRig } from "@/lib/rig";
+import { parseMaterials, type WireMaterials } from "@/lib/materials";
 import { isStaticExport } from "@/lib/staticSite";
 import { DEMO_CARTS, DEMO_DRAFT_CART_ID } from "@/lib/demoCatalog";
 import { EditorWorkbench } from "./EditorWorkbench";
@@ -42,13 +43,15 @@ interface CartTarget {
   rig: WireRig | null;
   /** Persisted post-processing stack, validated, or null when absent/malformed. */
   fx: PostFxSettings | null;
+  /** Persisted material swatch bindings, validated, or null when absent/malformed. */
+  materials: WireMaterials | null;
 }
 
 async function resolveCart(cartId: string): Promise<CartTarget> {
   try {
     const { data } = await serviceClient()
       .from("carts")
-      .select("title, r2_key, console_model, rig, fx")
+      .select("title, r2_key, console_model, rig, fx, materials")
       .eq("id", cartId)
       .maybeSingle();
     return {
@@ -57,9 +60,10 @@ async function resolveCart(cartId: string): Promise<CartTarget> {
       storedModel: data?.console_model ?? null,
       rig: parseRig(data?.rig),
       fx: parsePostFxSettings(data?.fx),
+      materials: parseMaterials(data?.materials),
     };
   } catch {
-    return { name: "Untitled cartridge", cartUrl: null, storedModel: null, rig: null, fx: null };
+    return { name: "Untitled cartridge", cartUrl: null, storedModel: null, rig: null, fx: null, materials: null };
   }
 }
 
@@ -70,7 +74,7 @@ export default async function EditorPage({ params, searchParams }: EditorPagePro
     return <StaticCartEditor cartId={params.cartId} />;
   }
 
-  const { name, cartUrl, storedModel, rig, fx } = await resolveCart(params.cartId);
+  const { name, cartUrl, storedModel, rig, fx, materials } = await resolveCart(params.cartId);
   // A saved cart's persisted model is authoritative; a brand-new cart (no row)
   // takes the model from the ?model= param carried in from /edit/new.
   const modelId = resolveModelId(storedModel ?? searchParams.model);
@@ -86,6 +90,7 @@ export default async function EditorPage({ params, searchParams }: EditorPagePro
       starterId={starterId}
       initialRig={rig}
       initialFx={fx}
+      initialMaterials={materials}
     />
   );
 }

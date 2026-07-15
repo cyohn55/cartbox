@@ -12,7 +12,7 @@
  * the controls to that game; SELECT hands them back.
  */
 
-import { useMemo, useRef, useState, type CSSProperties, type PointerEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent, type ReactNode } from "react";
 
 import "./console.css";
 import {
@@ -20,9 +20,14 @@ import {
   createWindowKeyDispatcher,
   type ConsoleControl,
 } from "./consoleInput";
+import { handheldPreset, DEFAULT_HANDHELD_PRESET_ID, renderHandheld, type HandheldTemplate } from "@cartbox/editor";
+
 import { ConsoleInputContext, useConsoleInput } from "./ConsoleInputContext";
 import { ConsoleSettingsProvider, useConsoleSettings } from "./ConsoleSettingsContext";
 import { customColorStyle } from "./consoleSettings";
+import { readStoredHandheldScheme } from "./handheldConsoleSkin";
+import { loadHandheldTemplate } from "@/lib/handheldTemplate";
+import { withBasePath } from "@/lib/staticSite";
 import { KonamiDetector } from "./consoleNavigation";
 import { resolveMiniGame } from "./minigames/registry";
 import { Joystick } from "./Joystick";
@@ -34,6 +39,8 @@ interface ShellButtonProps {
   className: string;
   label: string;
   children?: ReactNode;
+  /** Inline positioning, used by the image shell to place transparent hit-areas. */
+  style?: CSSProperties;
 }
 
 /**
@@ -41,7 +48,7 @@ interface ShellButtonProps {
  * real D-pad does; pointer capture keeps the release even when the thumb
  * slides off the button.
  */
-function ShellButton({ bus, control, className, label, children }: ShellButtonProps) {
+function ShellButton({ bus, control, className, label, children, style }: ShellButtonProps) {
   const [pressed, setPressed] = useState(false);
 
   const press = (event: PointerEvent<HTMLButtonElement>) => {
@@ -67,6 +74,7 @@ function ShellButton({ bus, control, className, label, children }: ShellButtonPr
     <button
       type="button"
       className={className}
+      style={style}
       aria-label={label}
       data-pressed={pressed || undefined}
       onPointerDown={press}
@@ -233,6 +241,142 @@ function Shell({ bus, children }: { bus: ConsoleInputBus; children: ReactNode })
   );
 }
 
+/** A control's placement on the handheld art, as 0..1 fractions of the device. */
+interface LayoutRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+interface HandheldLayout {
+  aspect: number;
+  screen: LayoutRect;
+  dpad: LayoutRect;
+  buttons: { y: LayoutRect; a: LayoutRect; x: LayoutRect; b: LayoutRect };
+  shoulders: { l: LayoutRect; r: LayoutRect };
+  system: { select: LayoutRect; start: LayoutRect };
+}
+
+const rectStyle = (rect: LayoutRect): CSSProperties => ({
+  left: `${rect.x * 100}%`,
+  top: `${rect.y * 100}%`,
+  width: `${rect.w * 100}%`,
+  height: `${rect.h * 100}%`,
+});
+
+/** Split the D-pad box into four directional hit-zones (centre stays neutral). */
+function dpadZones(dpad: LayoutRect): Array<{ control: ConsoleControl; rect: LayoutRect; label: string }> {
+  const armLong = 0.42;
+  const armShort = 0.4;
+  return [
+    { control: "up", label: "Up", rect: { x: dpad.x + dpad.w * 0.3, y: dpad.y, w: dpad.w * armShort, h: dpad.h * armLong } },
+    { control: "down", label: "Down", rect: { x: dpad.x + dpad.w * 0.3, y: dpad.y + dpad.h * (1 - armLong), w: dpad.w * armShort, h: dpad.h * armLong } },
+    { control: "left", label: "Left", rect: { x: dpad.x, y: dpad.y + dpad.h * 0.3, w: dpad.w * armLong, h: dpad.h * armShort } },
+    { control: "right", label: "Right", rect: { x: dpad.x + dpad.w * (1 - armLong), y: dpad.y + dpad.h * 0.3, w: dpad.w * armLong, h: dpad.h * armShort } },
+  ];
+}
+
+/**
+ * The image-based console: the player's actual pixel-art handheld, with the live
+ * game screen positioned in its window and transparent hit-areas over each drawn
+ * control. This is the default device ("My Handheld" theme); the CSS Shell above
+ * renders the other themes. Controls share the same input bus, so gameplay is
+ * identical to the CSS shell.
+ */
+function ImageShell({ bus, children }: { bus: ConsoleInputBus; children: ReactNode }) {
+  const { setPanelOpen } = useConsoleSettings();
+  const [layout, setLayout] = useState<HandheldLayout | null>(null);
+  const [skinUrl, setSkinUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const [template, layoutData] = await Promise.all([
+          loadHandheldTemplate(),
+          fetch(withBasePath("/handheld/handheld-layout.json")).then((response) => response.json() as Promise<HandheldLayout>),
+        ]);
+        if (!alive) return;
+        setLayout(layoutData);
+        setSkinUrl(renderSkinDataUrl(template));
+      } catch {
+        // Leave the placeholder up; the CSS shell remains reachable via settings.
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const hits: Array<{ control: ConsoleControl; rect: LayoutRect; label: string }> = layout
+    ? [
+        ...dpadZones(layout.dpad),
+        { control: "y", rect: layout.buttons.y, label: "Y button" },
+        { control: "x", rect: layout.buttons.x, label: "X button" },
+        { control: "a", rect: layout.buttons.a, label: "A button" },
+        { control: "b", rect: layout.buttons.b, label: "B button" },
+        { control: "l1", rect: layout.shoulders.l, label: "L shoulder" },
+        { control: "r1", rect: layout.shoulders.r, label: "R shoulder" },
+        { control: "select", rect: layout.system.select, label: "Select" },
+        { control: "start", rect: layout.system.start, label: "Start" },
+      ]
+    : [];
+
+  return (
+    <div className="hh-img-root" onContextMenu={(event) => event.preventDefault()}>
+      <div className="hh-img-device" style={{ aspectRatio: layout ? String(layout.aspect) : "0.658" }}>
+        {skinUrl && <img className="hh-img-skin" src={skinUrl} alt="" draggable={false} />}
+        {layout && (
+          <>
+            <div className="hh-img-screen" style={rectStyle(layout.screen)}>
+              {children}
+            </div>
+            {hits.map(({ control, rect, label }) => (
+              <ShellButton key={control} bus={bus} control={control} className="hh-hit" style={rectStyle(rect)} label={label} />
+            ))}
+            <button
+              type="button"
+              className="hh-img-gear"
+              aria-label="Console settings"
+              onClick={() => setPanelOpen(true)}
+              onMouseDown={(event) => event.preventDefault()}
+            >
+              ⚙
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Render the player's handheld skin (chrome + their colours) to a data URL. */
+function renderSkinDataUrl(template: HandheldTemplate): string {
+  const base = handheldPreset(DEFAULT_HANDHELD_PRESET_ID).scheme;
+  const scheme = { ...base, ...(readStoredHandheldScheme() ?? {}) };
+  const rgba = renderHandheld(template, scheme);
+  const canvas = document.createElement("canvas");
+  canvas.width = template.width;
+  canvas.height = template.height;
+  const context = canvas.getContext("2d");
+  if (!context) return "";
+  const image = context.createImageData(template.width, template.height);
+  image.data.set(rgba);
+  context.putImageData(image, 0, 0);
+  return canvas.toDataURL();
+}
+
+/** Pick the device shell for the active theme: the player's handheld by default. */
+function ShellRouter({ bus, children }: { bus: ConsoleInputBus; children: ReactNode }) {
+  const { settings } = useConsoleSettings();
+  return settings.theme === "handheld" ? (
+    <ImageShell bus={bus}>{children}</ImageShell>
+  ) : (
+    <Shell bus={bus}>{children}</Shell>
+  );
+}
+
 export function HandheldConsole({ children }: { children: ReactNode }) {
   // One bus per mounted console. The dispatcher only touches `window` when a
   // button actually fires, so constructing it during SSR is safe.
@@ -241,7 +385,7 @@ export function HandheldConsole({ children }: { children: ReactNode }) {
   return (
     <ConsoleInputContext.Provider value={bus}>
       <ConsoleSettingsProvider>
-        <Shell bus={bus}>{children}</Shell>
+        <ShellRouter bus={bus}>{children}</ShellRouter>
       </ConsoleSettingsProvider>
     </ConsoleInputContext.Provider>
   );

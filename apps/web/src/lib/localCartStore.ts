@@ -19,6 +19,8 @@ export interface StoredCartDraft {
   rigJson: string | null;
   /** JSON-serialised post-processing stack, as the fx endpoint would receive. */
   fxJson: string | null;
+  /** JSON-serialised material swatch bindings, as the materials endpoint would receive. */
+  materialsJson: string | null;
   /** ISO timestamp of the save, for future "last edited" UI. */
   savedAt: string;
 }
@@ -64,6 +66,7 @@ export function loadCartDraft(cartId: string): StoredCartDraft | null {
       bytesBase64: parsed.bytesBase64,
       rigJson: typeof parsed.rigJson === "string" ? parsed.rigJson : null,
       fxJson: typeof parsed.fxJson === "string" ? parsed.fxJson : null,
+      materialsJson: typeof parsed.materialsJson === "string" ? parsed.materialsJson : null,
       savedAt: typeof parsed.savedAt === "string" ? parsed.savedAt : new Date(0).toISOString(),
     };
   } catch {
@@ -80,6 +83,7 @@ export interface SaveCartDraftInput {
   bytes: Uint8Array;
   rig: unknown;
   fx: unknown;
+  materials: unknown;
 }
 
 /** Returns false when the write failed (e.g. localStorage quota exceeded). */
@@ -92,6 +96,7 @@ export function saveCartDraft(cartId: string, input: SaveCartDraftInput): boolea
     bytesBase64: toBase64(input.bytes),
     rigJson: input.rig == null ? null : JSON.stringify(input.rig),
     fxJson: input.fx == null ? null : JSON.stringify(input.fx),
+    materialsJson: input.materials == null ? null : JSON.stringify(input.materials),
     savedAt: new Date().toISOString(),
   };
   try {

@@ -41,11 +41,23 @@ export {
   applyStarter,
   type CartStarter,
 } from "./model/starters";
-export { SpriteSheet, type SheetImage } from "./model/SpriteSheet";
+export { SpriteSheet, type SheetImage, type IndexedImage } from "./model/SpriteSheet";
 export { TileMap } from "./model/TileMap";
 export { SoundBank, SFX_CHANNEL, type SfxLoop } from "./model/SoundBank";
 export { NormalMap } from "./model/NormalMap";
 export { MaterialMap } from "./model/MaterialMap";
+export {
+  MATERIAL_PROFILE_CHANNELS,
+  defaultMaterialProfile,
+  defaultMaterialSwatches,
+  normalizeMaterialProfile,
+  materialProfileAt,
+  isMaterialSwatchEnabled,
+  setMaterialProfile,
+  type MaterialProfile,
+  type MaterialProfileChannel,
+  type MaterialSwatches,
+} from "./model/MaterialSwatches";
 export {
   NORMAL_VECTORS,
   NORMAL_DIRECTION_COUNT,
@@ -127,4 +139,30 @@ export {
   PRO_PALETTE_SIZE,
 } from "./model/palette";
 export { parsePaletteFile, type ParsedPalette, type PaletteFormat } from "./model/paletteImport";
+export {
+  parseAseprite,
+  parseAsepriteLayers,
+  type AsepriteDocument,
+  type AsepriteFrame,
+  type AsepriteLayer,
+  type AsepriteLayers,
+} from "./model/asepriteImport";
+export { encodeAseprite, type AsepriteExportImage } from "./model/asepriteExport";
+export {
+  HANDHELD_REGIONS,
+  HANDHELD_PRESETS,
+  DEFAULT_HANDHELD_PRESET_ID,
+  makeScheme,
+  renderHandheld,
+  extractScheme,
+  extractSchemeFromLayers,
+  extractHandheldTemplate,
+  handheldPreset,
+  normalizeScheme,
+  type HandheldRegion,
+  type HandheldRegionId,
+  type HandheldScheme,
+  type HandheldPreset,
+  type HandheldTemplate,
+} from "./model/handheldSkin";
 export { gradientSortOrder } from "./model/paletteSort";

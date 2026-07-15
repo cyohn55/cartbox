@@ -1,0 +1,112 @@
+{
+  "regions": [
+    {
+      "id": "face",
+      "label": "Chassis"
+    },
+    {
+      "id": "buttonLetter",
+      "label": "Button letters"
+    },
+    {
+      "id": "dpadArrow",
+      "label": "D-pad arrows"
+    },
+    {
+      "id": "lButton",
+      "label": "L shoulder"
+    },
+    {
+      "id": "rButton",
+      "label": "R shoulder"
+    },
+    {
+      "id": "buttonDiamond",
+      "label": "Button diamonds"
+    },
+    {
+      "id": "dpadRing",
+      "label": "D-pad ring"
+    }
+  ],
+  "presets": [
+    {
+      "id": "iron-man",
+      "label": "Iron Man",
+      "scheme": {
+        "face": "#195ba6",
+        "lButton": "#195ba6",
+        "rButton": "#195ba6",
+        "buttonLetter": "#fad937",
+        "dpadArrow": "#fad937",
+        "buttonDiamond": "#fad937",
+        "dpadRing": "#fad937"
+      }
+    },
+    {
+      "id": "graphite",
+      "label": "Graphite",
+      "scheme": {
+        "face": "#3a3d42",
+        "lButton": "#3a3d42",
+        "rButton": "#3a3d42",
+        "buttonLetter": "#e6e6e6",
+        "dpadArrow": "#e6e6e6",
+        "buttonDiamond": "#e6e6e6",
+        "dpadRing": "#e6e6e6"
+      }
+    },
+    {
+      "id": "bubblegum",
+      "label": "Bubblegum",
+      "scheme": {
+        "face": "#e84d8a",
+        "lButton": "#e84d8a",
+        "rButton": "#e84d8a",
+        "buttonLetter": "#fff3b0",
+        "dpadArrow": "#fff3b0",
+        "buttonDiamond": "#fff3b0",
+        "dpadRing": "#fff3b0"
+      }
+    },
+    {
+      "id": "mint",
+      "label": "Mint",
+      "scheme": {
+        "face": "#3dbe8a",
+        "lButton": "#3dbe8a",
+        "rButton": "#3dbe8a",
+        "buttonLetter": "#f6f7d7",
+        "dpadArrow": "#f6f7d7",
+        "buttonDiamond": "#f6f7d7",
+        "dpadRing": "#f6f7d7"
+      }
+    },
+    {
+      "id": "grape",
+      "label": "Grape",
+      "scheme": {
+        "face": "#3f3f74",
+        "lButton": "#3f3f74",
+        "rButton": "#3f3f74",
+        "buttonLetter": "#fad937",
+        "dpadArrow": "#fad937",
+        "buttonDiamond": "#fad937",
+        "dpadRing": "#fad937"
+      }
+    },
+    {
+      "id": "ember",
+      "label": "Ember",
+      "scheme": {
+        "face": "#b13e53",
+        "lButton": "#b13e53",
+        "rButton": "#b13e53",
+        "buttonLetter": "#ffcd75",
+        "dpadArrow": "#ffcd75",
+        "buttonDiamond": "#ffcd75",
+        "dpadRing": "#ffcd75"
+      }
+    }
+  ]
+}
