@@ -33,6 +33,7 @@ import { isStaticExport } from "@/lib/staticSite";
 import type { HandheldArt } from "@/lib/handheld";
 
 import { SkinPaintCanvas, type SkinTool, type StrokeSnapshot } from "./SkinPaintCanvas";
+import { SkinPalette } from "./SkinPalette";
 import styles from "./skinEditor.module.css";
 
 /** Undo/redo entry: a rectangular pixel edit, or a whole-document structural change. */
@@ -283,6 +284,8 @@ export function HandheldSkinEditor({ template, scheme, onCancel, onApply }: Hand
               <span>Colour</span>
               <input type="color" value={color} onChange={(event) => pickColor(event.target.value)} aria-label="Paint colour" />
             </label>
+
+            <SkinPalette scheme={scheme} activeColor={color} onPick={pickColor} />
 
             {recentColors.length > 0 && (
               <div className={styles.recents} aria-label="Recent colours">
