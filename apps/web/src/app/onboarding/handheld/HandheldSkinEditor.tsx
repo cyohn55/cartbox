@@ -23,6 +23,7 @@ import {
   docFromRgba,
   renderHandheld,
   blitRect,
+  encodeAsepriteRgba,
   HANDHELD_REGIONS,
   MAX_PAINT_LAYERS,
   type PaintDoc,
@@ -91,6 +92,7 @@ export function HandheldSkinEditor({ template, scheme, initialDoc, onCancel, onA
   const [weight, setWeight] = useState(1);
   const [tolerance, setTolerance] = useState(0);
   const [mirrorX, setMirrorX] = useState(false);
+  const [showGuide, setShowGuide] = useState(false);
   // "all" paints anywhere; a region id confines edits to that part of the body.
   const [clipRegion, setClipRegion] = useState<HandheldRegionId | "all">("all");
   const [structureVersion, setStructureVersion] = useState(0);
@@ -243,6 +245,42 @@ export function HandheldSkinEditor({ template, scheme, initialDoc, onCancel, onA
     }
   };
 
+  /** Download the layered drawing as an RGBA .aseprite for external editing. */
+  const exportAseprite = async () => {
+    setError(null);
+    try {
+      const layers = doc.layers.map((layer) => ({
+        name: layer.name,
+        visible: layer.visible,
+        opacity: Math.round(layer.opacity * 255),
+        pixels: layer.pixels,
+      }));
+      const bytes = await encodeAsepriteRgba(layers, doc.width, doc.height);
+      const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: "application/octet-stream" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "handheld.aseprite";
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (exportError) {
+      setError(exportError instanceof Error ? exportError.message : "Could not export the .aseprite file.");
+    }
+  };
+
+  // An offscreen of the original chrome, drawn once, for the onion-skin overlay.
+  const guideCanvas = useMemo(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = template.width;
+    canvas.height = template.height;
+    const context = canvas.getContext("2d");
+    if (context) {
+      const image = context.createImageData(template.width, template.height);
+      image.data.set(template.base);
+      context.putImageData(image, 0, 0);
+    }
+    return canvas;
+  }, [template]);
+
   // Confine painting to one region by testing the template's per-pixel region
   // map; region ids in the map are 1-based in HANDHELD_REGIONS order.
   const clip = useMemo(() => {
@@ -266,6 +304,9 @@ export function HandheldSkinEditor({ template, scheme, initialDoc, onCancel, onA
             </button>
             <button type="button" className={styles.ghost} onClick={redo} disabled={redoStack.current.length === 0}>
               ↷ Redo
+            </button>
+            <button type="button" className={styles.ghost} onClick={exportAseprite} disabled={saving} title="Download as an .aseprite file">
+              Export
             </button>
             <button type="button" className={styles.ghost} onClick={onCancel} disabled={saving}>
               Cancel
@@ -345,6 +386,16 @@ export function HandheldSkinEditor({ template, scheme, initialDoc, onCancel, onA
               <span aria-hidden>⇋</span> Symmetry
             </button>
 
+            <button
+              type="button"
+              className={`${styles.toggle} ${showGuide ? styles.toggleOn : ""}`}
+              onClick={() => setShowGuide((on) => !on)}
+              aria-pressed={showGuide}
+              title="Show a faint overlay of the original handheld for alignment"
+            >
+              <span aria-hidden>◫</span> Guide
+            </button>
+
             <label className={styles.field}>
               <span>Paint region</span>
               <select
@@ -370,6 +421,7 @@ export function HandheldSkinEditor({ template, scheme, initialDoc, onCancel, onA
             tolerance={tolerance}
             mirrorX={mirrorX}
             clip={clip}
+            guide={showGuide ? guideCanvas : null}
             repaintVersion={repaintVersion}
             structureVersion={structureVersion}
             onStroke={handleStroke}

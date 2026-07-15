@@ -17,6 +17,7 @@ import type { Rgb } from "./paletteImport";
 const FILE_MAGIC = 0xa5e0;
 const FRAME_MAGIC = 0xf1fa;
 const COLOR_DEPTH_INDEXED = 8;
+const COLOR_DEPTH_RGBA = 32;
 const MAX_PALETTE = 256;
 
 /** Chunk type identifiers we write. */
@@ -192,9 +193,9 @@ function layerBody(name: string): Uint8Array {
 }
 
 /** Body of the compressed image cel chunk (0x2005) covering the whole canvas. */
-function celBody(width: number, height: number, compressed: Uint8Array): Uint8Array {
+function celBody(layerIndex: number, width: number, height: number, compressed: Uint8Array): Uint8Array {
   const body = new ByteWriter();
-  body.u16(0); // layer index
+  body.u16(layerIndex);
   body.i16(0); // x
   body.i16(0); // y
   body.u8(255); // opacity
@@ -229,7 +230,7 @@ export async function encodeAseprite(image: AsepriteExportImage): Promise<Uint8A
     { type: CHUNK_OLD_PALETTE, body: oldPaletteBody(image.palette, paletteCount) },
     { type: CHUNK_PALETTE, body: paletteBody(image.palette, paletteCount) },
     { type: CHUNK_LAYER, body: layerBody(layerName) },
-    { type: CHUNK_CEL, body: celBody(width, height, compressed) },
+    { type: CHUNK_CEL, body: celBody(0, width, height, compressed) },
   ];
 
   const writer = new ByteWriter();
@@ -249,6 +250,107 @@ export async function encodeAseprite(image: AsepriteExportImage): Promise<Uint8A
   writer.u8(transparentIndex);
   writer.zeros(3); // ignored
   writer.u16(paletteCount);
+  writer.u8(1); // pixel width ratio
+  writer.u8(1); // pixel height ratio
+  writer.i16(0); // grid x
+  writer.i16(0); // grid y
+  writer.u16(16); // grid width
+  writer.u16(16); // grid height
+  writer.zeros(84); // reserved
+
+  // --- Frame header (16 bytes) ---
+  const frameSizeOffset = writer.length;
+  writer.u32(0); // bytes in frame (patched below)
+  writer.u16(FRAME_MAGIC);
+  writer.u16(chunks.length); // old chunk count
+  writer.u16(durationMs);
+  writer.zeros(2); // reserved
+  writer.u32(chunks.length); // new chunk count
+
+  for (const chunk of chunks) writeChunk(writer, chunk.type, chunk.body);
+
+  writer.patchU32(frameSizeOffset, writer.length - frameSizeOffset);
+  writer.patchU32(fileSizeOffset, writer.length);
+
+  return writer.toUint8Array();
+}
+
+/** One straight-alpha RGBA layer for a multi-layer RGBA `.aseprite` export. */
+export interface AsepriteRgbaLayer {
+  readonly name: string;
+  readonly visible: boolean;
+  /** Layer opacity, 0..255. */
+  readonly opacity: number;
+  /** Straight-alpha RGBA pixels, length `width * height * 4`. */
+  readonly pixels: Uint8ClampedArray;
+}
+
+/** Body of an RGBA normal layer chunk (0x2004) with its own visibility/opacity. */
+function rgbaLayerBody(name: string, visible: boolean, opacity: number): Uint8Array {
+  const body = new ByteWriter();
+  body.u16(visible ? 0x01 : 0x00); // flags: visible bit
+  body.u16(0); // type: normal image
+  body.u16(0); // child level
+  body.u16(0); // default width (ignored)
+  body.u16(0); // default height (ignored)
+  body.u16(0); // blend mode: normal
+  body.u8(Math.max(0, Math.min(255, Math.round(opacity))));
+  body.zeros(3); // reserved
+  body.raw(encodeString(name));
+  return body.toUint8Array();
+}
+
+/**
+ * Encode straight-alpha RGBA layers into a valid one-frame RGBA `.aseprite`
+ * file — one normal layer plus one full-canvas compressed cel per input layer,
+ * bottom-first. Unlike {@link encodeAseprite}, this preserves full colour and
+ * layer structure (no palette quantisation), so free-form art drawn in Cartbox
+ * reopens faithfully in Aseprite. Throws if any layer's size disagrees with the
+ * canvas, so callers fail loudly rather than writing a corrupt file.
+ */
+export async function encodeAsepriteRgba(
+  layers: ReadonlyArray<AsepriteRgbaLayer>,
+  width: number,
+  height: number,
+  durationMs = 100,
+): Promise<Uint8Array> {
+  if (layers.length === 0) {
+    throw new Error("An RGBA .aseprite needs at least one layer.");
+  }
+  const expected = width * height * 4;
+  for (const layer of layers) {
+    if (layer.pixels.length !== expected) {
+      throw new Error(`Layer "${layer.name}" has ${layer.pixels.length} bytes, expected ${expected} for ${width}x${height}.`);
+    }
+  }
+
+  // All layer chunks first (bottom-to-top), then a cel per layer referencing it.
+  const chunks: Array<{ type: number; body: Uint8Array }> = [{ type: CHUNK_COLOR_PROFILE, body: colorProfileBody() }];
+  for (const layer of layers) {
+    chunks.push({ type: CHUNK_LAYER, body: rgbaLayerBody(layer.name, layer.visible, layer.opacity) });
+  }
+  for (let index = 0; index < layers.length; index += 1) {
+    const compressed = await deflate(Uint8Array.from(layers[index]!.pixels));
+    chunks.push({ type: CHUNK_CEL, body: celBody(index, width, height, compressed) });
+  }
+
+  const writer = new ByteWriter();
+
+  // --- Header (128 bytes) ---
+  const fileSizeOffset = writer.length;
+  writer.u32(0); // file size (patched below)
+  writer.u16(FILE_MAGIC);
+  writer.u16(1); // frame count
+  writer.u16(width);
+  writer.u16(height);
+  writer.u16(COLOR_DEPTH_RGBA);
+  writer.u32(1); // flags: layer opacity is valid
+  writer.u16(0); // deprecated speed
+  writer.u32(0); // reserved
+  writer.u32(0); // reserved
+  writer.u8(0); // transparent index (unused in RGBA)
+  writer.zeros(3); // ignored
+  writer.u16(0); // palette size (none for RGBA)
   writer.u8(1); // pixel width ratio
   writer.u8(1); // pixel height ratio
   writer.i16(0); // grid x

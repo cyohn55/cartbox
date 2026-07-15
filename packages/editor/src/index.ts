@@ -147,7 +147,12 @@ export {
   type AsepriteLayer,
   type AsepriteLayers,
 } from "./model/asepriteImport";
-export { encodeAseprite, type AsepriteExportImage } from "./model/asepriteExport";
+export {
+  encodeAseprite,
+  encodeAsepriteRgba,
+  type AsepriteExportImage,
+  type AsepriteRgbaLayer,
+} from "./model/asepriteExport";
 export {
   HANDHELD_REGIONS,
   HANDHELD_PRESETS,

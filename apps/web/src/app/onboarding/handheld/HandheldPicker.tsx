@@ -15,6 +15,7 @@ import {
   HANDHELD_PRESETS,
   HANDHELD_REGIONS,
   renderHandheld,
+  compositeDoc,
   handheldPreset,
   parseAsepriteLayers,
   extractSchemeFromLayers,
@@ -28,6 +29,7 @@ import { authHeaders } from "@/lib/supabase-browser";
 import { isStaticExport } from "@/lib/staticSite";
 import { CUSTOM_PRESET_ID, CUSTOM_ART_PRESET_ID, type HandheldArt, type StoredHandheld } from "@/lib/handheld";
 import { loadHandheldTemplate } from "@/lib/handheldTemplate";
+import { saveHandheldDraft, loadHandheldDraft, clearHandheldDraft } from "@/lib/handheldDraft";
 import { loadConsoleSettings, saveConsoleSettings } from "@/app/console/consoleSettings";
 import { handheldAssetUrl } from "@/lib/handheldAssets";
 import { HandheldSkinEditor } from "./HandheldSkinEditor";
@@ -35,6 +37,19 @@ import styles from "./handheld.module.css";
 
 /** Where the anonymous/offline choice is remembered until an account exists. */
 export const LOCAL_HANDHELD_KEY = "cartbox.handheld";
+
+/** Flatten a paint document to a PNG data URL for the preview (browser only). */
+function docToDataUrl(doc: PaintDoc): string | null {
+  const canvas = document.createElement("canvas");
+  canvas.width = doc.width;
+  canvas.height = doc.height;
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+  const image = context.createImageData(doc.width, doc.height);
+  image.data.set(compositeDoc(doc));
+  context.putImageData(image, 0, 0);
+  return canvas.toDataURL("image/png");
+}
 
 export function HandheldPicker() {
   const router = useRouter();
@@ -58,11 +73,23 @@ export function HandheldPicker() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
 
-  // Load the shared chrome + region mask once.
+  // Load the shared chrome + region mask once, then restore any saved drawing so
+  // a reload resumes it — both as the editable draft and in the live preview.
   useEffect(() => {
     let alive = true;
     loadHandheldTemplate()
-      .then((loaded) => alive && setTemplate(loaded))
+      .then(async (loaded) => {
+        if (!alive) return;
+        setTemplate(loaded);
+        const savedDraft = await loadHandheldDraft(loaded.width, loaded.height);
+        if (!alive || !savedDraft) return;
+        setDraft(savedDraft);
+        const url = docToDataUrl(savedDraft);
+        if (url) {
+          setArt({ url, w: savedDraft.width, h: savedDraft.height });
+          setPresetId(CUSTOM_ART_PRESET_ID);
+        }
+      })
       .catch(() => alive && setError("Could not load the handheld artwork."));
     return () => {
       alive = false;
@@ -105,6 +132,7 @@ export function HandheldPicker() {
     setScheme(preset.scheme);
     setArt(null);
     setDraft(null);
+    clearHandheldDraft();
   };
 
   const recolour = (regionId: string, color: string) => {
@@ -112,6 +140,7 @@ export function HandheldPicker() {
     setPresetId(CUSTOM_PRESET_ID);
     setArt(null);
     setDraft(null);
+    clearHandheldDraft();
   };
 
   // Bring back edits made in Aseprite (or any pixel tool) on the downloaded
@@ -127,6 +156,7 @@ export function HandheldPicker() {
       setPresetId(CUSTOM_PRESET_ID);
       setArt(null);
       setDraft(null);
+      clearHandheldDraft();
       setUploadNote(`Applied colours from ${file.name}.`);
     } catch (importError) {
       setUploadNote(importError instanceof Error ? importError.message : "Could not read that .aseprite file.");
@@ -259,6 +289,7 @@ export function HandheldPicker() {
           onApply={(drawn, workingDoc) => {
             setArt(drawn);
             setDraft(workingDoc); // resume from these layers next time
+            void saveHandheldDraft(workingDoc); // survive a reload too
             setPresetId(CUSTOM_ART_PRESET_ID);
             setEditing(false);
           }}

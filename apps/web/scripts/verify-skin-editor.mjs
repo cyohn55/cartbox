@@ -29,6 +29,7 @@ const load = (rel) => import(pathToFileURL(path.resolve(root, rel)).href);
 const paint = await load("packages/editor/src/model/handheldPaintDoc.ts");
 const { isPng, readPngSize } = await load("apps/web/src/lib/png.ts");
 const { normalizeArt } = await load("apps/web/src/lib/handheldArt.ts");
+const { gzipToBase64, base64GunzipToText } = await load("apps/web/src/lib/gzip.ts");
 
 const {
   docFromRgba,
@@ -233,6 +234,20 @@ const png = encodePng(composite, WIDTH, HEIGHT);
       assert.equal(alpha > 0, inRegion1, `pixel (${x},${y}) painted iff in region 1`);
     }
   }
+  passed += 1;
+}
+
+// 7. Reload persistence (handheldDraft): the working document serialises,
+//    gzip-compresses to well under the localStorage budget, and round-trips back
+//    to the exact same composite — so a page reload can resume the drawing.
+{
+  const json = JSON.stringify(serializeDoc(doc));
+  const packed = await gzipToBase64(json);
+  assert.ok(packed.length < 3_000_000, "compressed draft fits the localStorage budget");
+  assert.ok(packed.length < json.length, "compression actually shrinks the serialised doc");
+  const restored = deserializeDoc(JSON.parse(await base64GunzipToText(packed)), WIDTH, HEIGHT);
+  assert.ok(restored, "compressed draft deserialises");
+  assert.deepEqual([...compositeDoc(restored)], [...compositeDoc(doc)], "draft survives compress → store → restore");
   passed += 1;
 }
 

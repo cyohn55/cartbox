@@ -75,6 +75,11 @@ interface SkinPaintCanvasProps {
    * "region" is — it only asks whether a pixel is paintable.
    */
   clip: ((x: number, y: number) => boolean) | null;
+  /**
+   * A faint reference overlay (the original handheld chrome) drawn on top as an
+   * onion-skin so the artist keeps alignment, or null to hide it.
+   */
+  guide: HTMLCanvasElement | null;
   /** Bumped by the parent after an undo/redo or any external buffer change. */
   repaintVersion: number;
   /** Bumped by the parent when layers are added/removed/reordered/toggled. */
@@ -102,6 +107,7 @@ export function SkinPaintCanvas({
   tolerance,
   mirrorX,
   clip,
+  guide,
   repaintVersion,
   structureVersion,
   onStroke,
@@ -198,6 +204,13 @@ export function SkinPaintCanvas({
     // Dim everything outside the active clip region.
     if (clipVeil.current) context.drawImage(clipVeil.current, 0, 0);
 
+    // Faint onion-skin of the original chrome, for alignment.
+    if (guide) {
+      context.globalAlpha = 0.4;
+      context.drawImage(guide, 0, 0);
+      context.globalAlpha = 1;
+    }
+
     // Live shape preview in the brush colour.
     if (previewPoints.current.length > 0) {
       const [r, g, b] = parseHexColor(color);
@@ -220,7 +233,7 @@ export function SkinPaintCanvas({
       context.stroke();
       context.setLineDash([]);
     }
-  }, [doc.layers, color, mirrorX, width]);
+  }, [doc.layers, color, mirrorX, width, guide]);
 
   // Fit the document into the viewport once it (and the container) are ready.
   const fitToView = useCallback(() => {
