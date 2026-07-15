@@ -20,6 +20,7 @@ const load = (rel) => import(pathToFileURL(path.resolve(here, rel)).href);
 
 const { encodeAsepriteRgba } = await load("../packages/editor/src/model/asepriteExport.ts");
 const { parseAsepriteLayers } = await load("../packages/editor/src/model/asepriteImport.ts");
+const { docFromLayers, compositeDoc } = await load("../packages/editor/src/model/handheldPaintDoc.ts");
 
 /** A full-canvas RGBA buffer painted by a per-pixel function. */
 function paint(width, height, colorAt) {
@@ -76,6 +77,33 @@ let passed = 0;
   const bad = [{ name: "Wrong", visible: true, opacity: 255, pixels: new Uint8ClampedArray(4 * 4) }];
   await assert.rejects(() => encodeAsepriteRgba(bad, 3, 3), /expected/, "mismatched layer size is rejected");
   await assert.rejects(() => encodeAsepriteRgba([], 2, 2), /at least one layer/, "an empty document is rejected");
+  passed += 1;
+}
+
+// 3. The editor's import path round-trips: encode → parse → docFromLayers gives
+//    a document whose composite matches the original drawing.
+{
+  const width = 4;
+  const height = 4;
+  const bottom = paint(width, height, (x, y) => [x * 50, y * 50, 100, 255]);
+  const top = paint(width, height, (x, y) => ((x + y) % 2 === 0 ? [255, 255, 0, 200] : [0, 0, 0, 0]));
+  const input = [
+    { name: "Base", visible: true, opacity: 255, pixels: bottom },
+    { name: "Top", visible: true, opacity: 255, pixels: top },
+  ];
+  const bytes = await encodeAsepriteRgba(input, width, height);
+  const parsed = await parseAsepriteLayers(bytes);
+  const imageLayers = parsed.layers.filter((layer) => layer.type === 0 && layer.pixels);
+  const doc = docFromLayers(
+    imageLayers.map((layer) => ({ name: layer.name, visible: layer.visible, opacity: layer.opacity / 255, pixels: layer.pixels })),
+    width,
+    height,
+  );
+
+  // Reference composite of the original input layers (all fully opaque layers).
+  const reference = docFromLayers(input.map((l) => ({ name: l.name, visible: l.visible, opacity: l.opacity / 255, pixels: l.pixels })), width, height);
+  assert.deepEqual([...compositeDoc(doc)], [...compositeDoc(reference)], "imported document composites identically to the source");
+  assert.equal(doc.layers.length, input.length, "imported document keeps the layer count");
   passed += 1;
 }
 

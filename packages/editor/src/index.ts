@@ -174,6 +174,7 @@ export {
   MAX_PAINT_LAYERS,
   createLayer,
   docFromRgba,
+  docFromLayers,
   activeLayer,
   cloneDoc,
   compositeDoc,
@@ -193,6 +194,7 @@ export {
   deserializeDoc,
   type PaintLayer,
   type PaintDoc,
+  type LayerInput,
   type Rgba,
   type PixelRect,
 } from "./model/handheldPaintDoc";

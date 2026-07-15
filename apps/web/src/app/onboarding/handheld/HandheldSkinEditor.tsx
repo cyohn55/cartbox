@@ -10,7 +10,7 @@
  * data URL for guests/static), and reports the resulting art to the caller.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 
 import {
   addLayer,
@@ -21,7 +21,9 @@ import {
   cloneDoc,
   compositeDoc,
   docFromRgba,
+  docFromLayers,
   renderHandheld,
+  parseAsepriteLayers,
   blitRect,
   encodeAsepriteRgba,
   HANDHELD_REGIONS,
@@ -100,6 +102,7 @@ export function HandheldSkinEditor({ template, scheme, initialDoc, onCancel, onA
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const importInputRef = useRef<HTMLInputElement>(null);
   const undoStack = useRef<HistoryEntry[]>([]);
   const redoStack = useRef<HistoryEntry[]>([]);
   const [historyTick, setHistoryTick] = useState(0); // re-render undo/redo buttons
@@ -245,6 +248,36 @@ export function HandheldSkinEditor({ template, scheme, initialDoc, onCancel, onA
     }
   };
 
+  /** Load a .aseprite's image layers as the current document (dims must match). */
+  const importAseprite = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setError(null);
+    try {
+      const parsed = await parseAsepriteLayers(new Uint8Array(await file.arrayBuffer()));
+      if (parsed.width !== doc.width || parsed.height !== doc.height) {
+        setError(`That file is ${parsed.width}×${parsed.height}; this handheld is ${doc.width}×${doc.height}.`);
+        return;
+      }
+      const imageLayers = parsed.layers.filter((layer) => layer.type === 0 && layer.pixels);
+      if (imageLayers.length === 0) {
+        setError("No image layers found in that file.");
+        return;
+      }
+      const next = docFromLayers(
+        imageLayers.map((layer) => ({ name: layer.name, visible: layer.visible, opacity: layer.opacity / 255, pixels: layer.pixels! })),
+        doc.width,
+        doc.height,
+      );
+      pushHistory({ kind: "doc", before: cloneDoc(doc), after: cloneDoc(next) });
+      setDoc(next);
+      setStructureVersion((version) => version + 1);
+    } catch (importError) {
+      setError(importError instanceof Error ? importError.message : "Could not read that .aseprite file.");
+    }
+  };
+
   /** Download the layered drawing as an RGBA .aseprite for external editing. */
   const exportAseprite = async () => {
     setError(null);
@@ -305,6 +338,16 @@ export function HandheldSkinEditor({ template, scheme, initialDoc, onCancel, onA
             <button type="button" className={styles.ghost} onClick={redo} disabled={redoStack.current.length === 0}>
               ↷ Redo
             </button>
+            <button type="button" className={styles.ghost} onClick={() => importInputRef.current?.click()} disabled={saving} title="Load a .aseprite file's layers">
+              Import
+            </button>
+            <input
+              ref={importInputRef}
+              type="file"
+              accept=".aseprite,.ase"
+              onChange={importAseprite}
+              hidden
+            />
             <button type="button" className={styles.ghost} onClick={exportAseprite} disabled={saving} title="Download as an .aseprite file">
               Export
             </button>

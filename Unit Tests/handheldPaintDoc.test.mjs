@@ -20,6 +20,7 @@ const {
   MAX_PAINT_LAYERS,
   createLayer,
   docFromRgba,
+  docFromLayers,
   activeLayer,
   cloneDoc,
   compositeDoc,
@@ -257,6 +258,46 @@ function solid(width, height, [r, g, b, a]) {
   const originalComposite = [...compositeDoc(doc)];
   setLayerPixel(activeLayer(copy), w, h, 0, 0, [0, 255, 0, 255]);
   assert.deepEqual([...compositeDoc(doc)], originalComposite, "editing the clone leaves the original unchanged");
+  passed += 1;
+}
+
+// 10. docFromLayers builds a document from external layers: keeps matching
+//     layers (own buffers), drops mismatched ones, and flattens when over the cap.
+{
+  const w = 2;
+  const h = 2;
+  const layerA = solid(w, h, [10, 20, 30, 255]);
+  const layerB = solid(w, h, [0, 0, 0, 0]);
+  const built = docFromLayers(
+    [
+      { name: "A", visible: true, opacity: 1, pixels: layerA },
+      { name: "B", visible: false, opacity: 0.5, pixels: layerB },
+      { name: "wrong", visible: true, opacity: 1, pixels: new Uint8ClampedArray(4) }, // mismatched, dropped
+    ],
+    w,
+    h,
+  );
+  assert.equal(built.layers.length, 2, "matching layers kept, mismatched dropped");
+  assert.equal(built.layers[0].name, "A", "layer name preserved");
+  assert.equal(built.layers[1].opacity, 0.5, "layer opacity preserved");
+  assert.notEqual(built.layers[0].pixels, layerA, "document owns copied buffers");
+
+  // Fully-mismatched input still yields a usable one-layer document.
+  const blank = docFromLayers([{ name: "x", visible: true, opacity: 1, pixels: new Uint8ClampedArray(4) }], w, h);
+  assert.equal(blank.layers.length, 1, "fully-mismatched input yields one blank layer");
+
+  // Over the cap: flattened to a single layer that preserves the composite.
+  const many = [];
+  for (let i = 0; i < MAX_PAINT_LAYERS + 3; i += 1) {
+    // Each layer paints one pixel opaque so the flattened result is determinate.
+    const px = solid(w, h, [0, 0, 0, 0]);
+    px[(i % (w * h)) * 4 + 3] = 255;
+    many.push({ name: `L${i}`, visible: true, opacity: 1, pixels: px });
+  }
+  const flattened = docFromLayers(many, w, h);
+  assert.equal(flattened.layers.length, 1, "over-cap layers flatten to one");
+  const reference = compositeDoc({ width: w, height: h, layers: many.map((m, i) => ({ id: `t${i}`, ...m, pixels: m.pixels })), activeId: "" });
+  assert.deepEqual([...compositeDoc(flattened)], [...reference], "flattened composite matches the full stack");
   passed += 1;
 }
 

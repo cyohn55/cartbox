@@ -76,6 +76,46 @@ export function docFromRgba(rgba: Uint8ClampedArray, width: number, height: numb
   return { width, height, layers: [layer], activeId: layer.id };
 }
 
+/** One straight-alpha RGBA layer for building a document from external art. */
+export interface LayerInput {
+  name: string;
+  visible: boolean;
+  /** Layer opacity, 0..1. */
+  opacity: number;
+  /** Straight-alpha RGBA pixels, length `width * height * 4`. Copied in. */
+  pixels: Uint8ClampedArray;
+}
+
+/**
+ * Build a document from a stack of straight-alpha RGBA layers (bottom-first),
+ * e.g. an imported `.aseprite`. Layers whose size doesn't match the canvas are
+ * dropped. When more than {@link MAX_PAINT_LAYERS} remain they are flattened to
+ * one layer, so the imported picture is preserved without exceeding the cap; an
+ * empty or fully-mismatched input yields a single blank layer.
+ */
+export function docFromLayers(inputs: readonly LayerInput[], width: number, height: number): PaintDoc {
+  const expected = width * height * 4;
+  const usable = inputs.filter((input) => input.pixels.length === expected);
+  if (usable.length === 0) {
+    const layer = createLayer(width, height, "Layer 1");
+    return { width, height, layers: [layer], activeId: layer.id };
+  }
+  const toLayer = (input: LayerInput): PaintLayer => ({
+    id: nextLayerId(),
+    name: input.name || "Layer",
+    visible: input.visible,
+    opacity: Math.max(0, Math.min(1, input.opacity)),
+    pixels: input.pixels.slice(),
+  });
+  if (usable.length <= MAX_PAINT_LAYERS) {
+    const layers = usable.map(toLayer);
+    return { width, height, layers, activeId: layers[layers.length - 1]!.id };
+  }
+  // Too many layers to keep separate: flatten to preserve the image.
+  const flattened = compositeDoc({ width, height, layers: usable.map(toLayer), activeId: "" });
+  return docFromRgba(flattened, width, height, "Imported");
+}
+
 /** The layer edits currently target, or null if the active id is stale. */
 export function activeLayer(doc: PaintDoc): PaintLayer | null {
   return doc.layers.find((layer) => layer.id === doc.activeId) ?? null;
