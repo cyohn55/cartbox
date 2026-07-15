@@ -9,12 +9,13 @@
 
 import type { HandheldTemplate } from "@cartbox/editor";
 
-import { withBasePath } from "@/lib/staticSite";
+import { handheldAssetUrl } from "@/lib/handheldAssets";
 
-// Plain-string fetches must carry the base path so they resolve under a GitHub
-// Pages project path (/cartbox) as well as at the domain root.
-const BASE_URL = withBasePath("/handheld/base.png");
-const MASK_URL = withBasePath("/handheld/mask.png");
+// Plain-string fetches carry the base path (so they resolve under the GitHub
+// Pages /cartbox path) plus a revision query so a re-extracted skin isn't masked
+// by a cached copy of these stable filenames.
+const BASE_URL = handheldAssetUrl("/handheld/base.png");
+const MASK_URL = handheldAssetUrl("/handheld/mask.png");
 
 /** Decode an image URL to its raw RGBA pixels via an offscreen canvas. */
 function loadImageData(url: string): Promise<ImageData> {

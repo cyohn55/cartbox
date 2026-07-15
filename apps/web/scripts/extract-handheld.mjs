@@ -97,6 +97,72 @@ console.log(`crop to handheld body: ${crop.width}x${crop.height} @ ${crop.x},${c
 const template = cropTemplate(full, crop);
 const { width, height } = template;
 
+/**
+ * The source art keeps the D-pad cross and the four face-button circles on one
+ * layer (DPad_Color), while the Button_Color group is empty — so out of the box
+ * they recolour together. Split them into separate regions so each is
+ * independent: flood the D-pad region into connected blobs and reassign any blob
+ * that sits inside the button panel (the recess behind A/B/X/Y) to the buttons
+ * region. If the artist ever paints the Button_Color layer directly, that mask
+ * wins and this no-ops.
+ */
+function splitButtonsFromDpad(t) {
+  const regionId = (id) => HANDHELD_REGIONS.findIndex((region) => region.id === id) + 1;
+  const dpadId = regionId("dpad");
+  const buttonsId = regionId("buttonColor");
+  const panelId = regionId("buttonPanel");
+  if (!dpadId || !buttonsId || !panelId) return;
+  if (t.regionMask.includes(buttonsId)) return; // the layer was authored explicitly
+
+  // Bounds of the button recess panel — the region the circles live within.
+  let px0 = t.width, py0 = t.height, px1 = -1, py1 = -1;
+  for (let y = 0; y < t.height; y += 1) {
+    for (let x = 0; x < t.width; x += 1) {
+      if (t.regionMask[y * t.width + x] === panelId) {
+        if (x < px0) px0 = x;
+        if (y < py0) py0 = y;
+        if (x > px1) px1 = x;
+        if (y > py1) py1 = y;
+      }
+    }
+  }
+  if (px1 < 0) return; // no button panel to split against
+
+  const seen = new Uint8Array(t.width * t.height);
+  for (let start = 0; start < t.regionMask.length; start += 1) {
+    if (seen[start] || t.regionMask[start] !== dpadId) continue;
+    const blob = [start];
+    seen[start] = 1;
+    let sumX = 0;
+    let sumY = 0;
+    for (let head = 0; head < blob.length; head += 1) {
+      const p = blob[head];
+      const x = p % t.width;
+      const y = (p / t.width) | 0;
+      sumX += x;
+      sumY += y;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= t.width || ny >= t.height) continue;
+        const np = ny * t.width + nx;
+        if (!seen[np] && t.regionMask[np] === dpadId) {
+          seen[np] = 1;
+          blob.push(np);
+        }
+      }
+    }
+    // A blob is a face button when its centre lies within the button panel.
+    const cx = sumX / blob.length;
+    const cy = sumY / blob.length;
+    if (cx >= px0 && cx <= px1 && cy >= py0 && cy <= py1) {
+      for (const p of blob) t.regionMask[p] = buttonsId;
+    }
+  }
+}
+
+splitButtonsFromDpad(template);
+
 /** Write straight-alpha RGBA to a PNG at full resolution. */
 function writeRgba(rgba, file) {
   const png = new PNG({ width, height });

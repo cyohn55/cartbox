@@ -34,6 +34,7 @@ export const HANDHELD_REGIONS = [
   { id: "decal", label: "Decals", layer: "Decal_Color" },
   { id: "text", label: "Text", layer: "Text_Color" },
   { id: "dpad", label: "D-pad", layer: "DPad_Color" },
+  { id: "buttonColor", label: "Buttons", layer: "Button_Color" },
   { id: "dpadArrow", label: "D-pad arrows", layer: "Arrow_Color" },
   { id: "buttonLetter", label: "Button letters", layer: "Button_Text_Color" },
 ] as const;
@@ -83,6 +84,7 @@ function twoTone(body: string, accent: string): HandheldScheme {
     dpadPanel: body,
     buttonPanel: body,
     dpad: accent,
+    buttonColor: accent,
     dpadArrow: accent,
     buttonLetter: accent,
     text: accent,

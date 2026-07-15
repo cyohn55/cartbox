@@ -21,8 +21,11 @@ const DIRECTIONS = new Set<string>(["up", "down", "left", "right"]);
 
 function collectCandidates(root: HTMLElement): HTMLElement[] {
   // A modal region (e.g. the settings overlay) captures the cursor: elements
-  // underneath it stay in the DOM but must be unreachable.
-  const modal = root.querySelector<HTMLElement>("[data-console-modal]");
+  // underneath it stay in the DOM but must be unreachable. When modals nest
+  // (a colour picker opened from within settings), the innermost — last in
+  // document order — is the one that owns the cursor.
+  const modals = root.querySelectorAll<HTMLElement>("[data-console-modal]");
+  const modal = modals.length ? modals[modals.length - 1]! : null;
   const regions = modal
     ? [modal]
     : [...root.querySelectorAll<HTMLElement>("[data-console-nav]")];

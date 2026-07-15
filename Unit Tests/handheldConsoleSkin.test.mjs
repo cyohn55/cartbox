@@ -21,10 +21,11 @@ let passed = 0;
 const scheme = {
   face: "#195ba6",
   dpadPanel: "#3a3d42",
-  buttonPanel: "#e84d8a",
+  buttonPanel: "#2a2f3a",
   decal: "#ffffff",
   text: "#ffffff",
   dpad: "#57d18d",
+  buttonColor: "#e84d8a",
   dpadArrow: "#fad937",
   buttonLetter: "#fad937",
 };
@@ -38,7 +39,7 @@ const scheme = {
   assert.equal(vars["--hh-joy-a"], "#57d18d", "d-pad -> joystick base");
   assert.equal(vars["--hh-control-a"], "#3a3d42", "d-pad panel -> control base");
   assert.equal(vars["--hh-face-ink"], "#fad937", "button letters -> face ink");
-  // All four face buttons take the button panel colour.
+  // All four face buttons take the buttons colour.
   for (const key of ["x", "y", "a", "b"]) {
     assert.equal(vars[`--hh-face-${key}-hi`], "#e84d8a", `face ${key} hi`);
     assert.equal(vars[`--hh-face-${key}-lo`], darkenHexColor("#e84d8a", 0.35), `face ${key} lo derived`);

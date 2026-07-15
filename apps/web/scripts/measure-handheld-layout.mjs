@@ -23,7 +23,7 @@ const W = base.width;
 const H = base.height;
 
 // Region ids (mask.png red channel), per HANDHELD_REGIONS order.
-const REGION = { face: 1, dpadPanel: 2, buttonPanel: 3, decal: 4, text: 5, dpad: 6, dpadArrow: 7, buttonLetter: 8 };
+const REGION = { face: 1, dpadPanel: 2, buttonPanel: 3, decal: 4, text: 5, dpad: 6, buttonColor: 7, dpadArrow: 8, buttonLetter: 9 };
 
 const frac = (r) => ({ x: r.x0 / W, y: r.y0 / H, w: (r.x1 - r.x0 + 1) / W, h: (r.y1 - r.y0 + 1) / H });
 const emptyRect = () => ({ x0: W, y0: H, x1: -1, y1: -1 });

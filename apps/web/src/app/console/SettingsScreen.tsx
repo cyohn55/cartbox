@@ -9,6 +9,7 @@
 
 import { HANDHELD_PRESETS, HANDHELD_REGIONS } from "@cartbox/editor";
 
+import { ConsoleColorPicker } from "./ConsoleColorPicker";
 import { useConsoleSettings } from "./ConsoleSettingsContext";
 import { useHandheldSkin } from "./HandheldSkinContext";
 import {
@@ -110,44 +111,25 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
       <div className="os-section-title">CUSTOM COLORS</div>
       <div className="os-color-row">
         {(["x", "y", "a", "b"] as const).map((key) => (
-          <label key={key} className="os-color-field">
-            <input
-              type="color"
-              className="os-color"
-              aria-label={`${key.toUpperCase()} button color`}
-              value={settings.faceColors?.[key] ?? CUSTOM_FACE_DEFAULTS[key]}
-              onChange={(event) =>
-                update({
-                  faceColors: {
-                    ...(settings.faceColors ?? CUSTOM_FACE_DEFAULTS),
-                    [key]: event.target.value,
-                  },
-                })
-              }
-            />
-            {key.toUpperCase()}
-          </label>
+          <ConsoleColorPicker
+            key={key}
+            label={`${key.toUpperCase()} button`}
+            value={settings.faceColors?.[key] ?? CUSTOM_FACE_DEFAULTS[key]}
+            onChange={(color) =>
+              update({ faceColors: { ...(settings.faceColors ?? CUSTOM_FACE_DEFAULTS), [key]: color } })
+            }
+          />
         ))}
-        <label className="os-color-field">
-          <input
-            type="color"
-            className="os-color"
-            aria-label="D-pad color"
-            value={settings.dpadColor ?? CUSTOM_DPAD_DEFAULT}
-            onChange={(event) => update({ dpadColor: event.target.value })}
-          />
-          D-PAD
-        </label>
-        <label className="os-color-field">
-          <input
-            type="color"
-            className="os-color"
-            aria-label="Joystick color"
-            value={settings.joystickColor ?? CUSTOM_JOYSTICK_DEFAULT}
-            onChange={(event) => update({ joystickColor: event.target.value })}
-          />
-          STICK
-        </label>
+        <ConsoleColorPicker
+          label="D-pad"
+          value={settings.dpadColor ?? CUSTOM_DPAD_DEFAULT}
+          onChange={(color) => update({ dpadColor: color })}
+        />
+        <ConsoleColorPicker
+          label="Stick"
+          value={settings.joystickColor ?? CUSTOM_JOYSTICK_DEFAULT}
+          onChange={(color) => update({ joystickColor: color })}
+        />
       </div>
       <div className="os-option-row">
         <button
@@ -180,16 +162,12 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
       </div>
       <div className="os-color-row">
         {HANDHELD_REGIONS.map((region) => (
-          <label key={region.id} className="os-color-field">
-            <input
-              type="color"
-              className="os-color"
-              aria-label={`${region.label} colour`}
-              value={handheld.scheme[region.id]}
-              onChange={(event) => recolorRegion(region.id, event.target.value)}
-            />
-            {region.label.toUpperCase()}
-          </label>
+          <ConsoleColorPicker
+            key={region.id}
+            label={region.label}
+            value={handheld.scheme[region.id]}
+            onChange={(color) => recolorRegion(region.id, color)}
+          />
         ))}
       </div>
       <div className="os-option-row">

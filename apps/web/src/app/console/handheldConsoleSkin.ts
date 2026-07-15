@@ -18,7 +18,7 @@ const CONTROL_SHADE = 0.35;
 /**
  * CSS-variable overrides that repaint the shell in the handheld's colours:
  * chassis → shell body + outer glow, D-pad panel → control base, D-pad →
- * D-pad/joystick, button panel → the four face buttons, button letters →
+ * D-pad/joystick, buttons → the four face buttons, button letters →
  * face-button ink.
  */
 export function handheldConsoleVariables(scheme: HandheldScheme): Record<string, string> {
@@ -50,7 +50,7 @@ export function handheldConsoleVariables(scheme: HandheldScheme): Record<string,
   const ink = normalizeHexColor(scheme.buttonLetter);
   if (ink) style["--hh-face-ink"] = ink;
 
-  const face = normalizeHexColor(scheme.buttonPanel);
+  const face = normalizeHexColor(scheme.buttonColor);
   if (face) {
     for (const key of ["x", "y", "a", "b"] as const) {
       style[`--hh-face-${key}-hi`] = face;

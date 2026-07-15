@@ -25,6 +25,10 @@
       "label": "D-pad"
     },
     {
+      "id": "buttonColor",
+      "label": "Buttons"
+    },
+    {
       "id": "dpadArrow",
       "label": "D-pad arrows"
     },
@@ -42,6 +46,7 @@
         "dpadPanel": "#195ba6",
         "buttonPanel": "#195ba6",
         "dpad": "#fad937",
+        "buttonColor": "#fad937",
         "dpadArrow": "#fad937",
         "buttonLetter": "#fad937",
         "text": "#fad937",
@@ -56,6 +61,7 @@
         "dpadPanel": "#3a3d42",
         "buttonPanel": "#3a3d42",
         "dpad": "#e6e6e6",
+        "buttonColor": "#e6e6e6",
         "dpadArrow": "#e6e6e6",
         "buttonLetter": "#e6e6e6",
         "text": "#e6e6e6",
@@ -70,6 +76,7 @@
         "dpadPanel": "#e84d8a",
         "buttonPanel": "#e84d8a",
         "dpad": "#fff3b0",
+        "buttonColor": "#fff3b0",
         "dpadArrow": "#fff3b0",
         "buttonLetter": "#fff3b0",
         "text": "#fff3b0",
@@ -84,6 +91,7 @@
         "dpadPanel": "#3dbe8a",
         "buttonPanel": "#3dbe8a",
         "dpad": "#f6f7d7",
+        "buttonColor": "#f6f7d7",
         "dpadArrow": "#f6f7d7",
         "buttonLetter": "#f6f7d7",
         "text": "#f6f7d7",
@@ -98,6 +106,7 @@
         "dpadPanel": "#3f3f74",
         "buttonPanel": "#3f3f74",
         "dpad": "#fad937",
+        "buttonColor": "#fad937",
         "dpadArrow": "#fad937",
         "buttonLetter": "#fad937",
         "text": "#fad937",
@@ -112,6 +121,7 @@
         "dpadPanel": "#b13e53",
         "buttonPanel": "#b13e53",
         "dpad": "#ffcd75",
+        "buttonColor": "#ffcd75",
         "dpadArrow": "#ffcd75",
         "buttonLetter": "#ffcd75",
         "text": "#ffcd75",

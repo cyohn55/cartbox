@@ -1573,6 +1573,84 @@ select.os-input {
   cursor: pointer;
 }
 
+/* Console-navigable colour picker: a swatch that opens a palette overlay so the
+   handheld's own buttons drive it (A opens, B closes) rather than the OS picker
+   auto-popping as the cursor lands on a native <input type=color>. */
+.os-color-swatch {
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  padding: 0;
+  border: none;
+  background: none;
+  font: 700 9px var(--font-data);
+  letter-spacing: 0.12em;
+  color: #9990bb;
+  cursor: pointer;
+}
+
+.os-color-chip {
+  width: 44px;
+  height: 32px;
+  border: 1px solid #2f2846;
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+
+.os-color-name {
+  max-width: 64px;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.os-colorpicker {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  overflow: auto;
+  background: rgba(8, 6, 15, 0.95);
+}
+
+.os-colorpicker-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font: 700 12px var(--font-data);
+  letter-spacing: 0.1em;
+  color: #cfc6ee;
+  text-transform: uppercase;
+}
+
+.os-colorpicker-title {
+  flex: 1;
+}
+
+.os-colorpicker-grid {
+  display: grid;
+  gap: 5px;
+}
+
+.os-swatch {
+  aspect-ratio: 1;
+  min-width: 0;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.5);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.os-swatch[data-selected="true"] {
+  box-shadow: 0 0 0 2px #08060f, 0 0 0 4px #ffffff;
+}
+
+.os-colorpicker .os-btn {
+  margin-top: auto;
+}
+
 /* Mini-game dock: a canvas living behind the controls. Portrait covers the
    whole control deck; landscape uses the left flank behind the D-pad. */
 .hh-minigame {

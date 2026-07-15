@@ -28,7 +28,7 @@ import { isStaticExport } from "@/lib/staticSite";
 import { CUSTOM_PRESET_ID, type StoredHandheld } from "@/lib/handheld";
 import { loadHandheldTemplate } from "@/lib/handheldTemplate";
 import { loadConsoleSettings, saveConsoleSettings } from "@/app/console/consoleSettings";
-import { withBasePath } from "@/lib/staticSite";
+import { handheldAssetUrl } from "@/lib/handheldAssets";
 import styles from "./handheld.module.css";
 
 /** Where the anonymous/offline choice is remembered until an account exists. */
@@ -156,7 +156,7 @@ export function HandheldPicker() {
                   aria-pressed={presetId === preset.id}
                 >
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img className={styles.presetThumb} src={withBasePath(`/handheld/preview/${preset.id}.png`)} alt={preset.label} />
+                  <img className={styles.presetThumb} src={handheldAssetUrl(`/handheld/preview/${preset.id}.png`)} alt={preset.label} />
                   <span className={styles.presetName}>{preset.label}</span>
                 </button>
               ))}
@@ -187,7 +187,7 @@ export function HandheldPicker() {
               {saving ? "Saving…" : "Use this handheld"}
             </button>
             <div className={styles.secondaryRow}>
-              <a className={styles.secondary} href={withBasePath("/handheld/template.aseprite")} download>
+              <a className={styles.secondary} href={handheldAssetUrl("/handheld/template.aseprite")} download>
                 Download .aseprite template
               </a>
               <button type="button" className={styles.secondary} onClick={() => uploadRef.current?.click()}>
