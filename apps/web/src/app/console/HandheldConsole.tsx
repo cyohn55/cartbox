@@ -310,10 +310,13 @@ function ImageShell({ bus, children }: { bus: ConsoleInputBus; children: ReactNo
     };
   }, []);
 
-  // Re-render the skin whenever the player recolours a region in settings.
+  // Prefer the player's free-form pixel art (drawn in the editor) when present;
+  // otherwise re-render the region-recoloured skin. The art URL is absolute (an
+  // R2 https URL or an inline data URL) and its key is unique per upload, so it
+  // needs neither the base path nor a cache-busting query.
   const skinUrl = useMemo(
-    () => (template ? renderSkinDataUrl(template, handheld.scheme) : null),
-    [template, handheld.scheme],
+    () => handheld.art?.url ?? (template ? renderSkinDataUrl(template, handheld.scheme) : null),
+    [handheld.art?.url, template, handheld.scheme],
   );
 
   const hits: Array<{ control: ConsoleControl; rect: LayoutRect; label: string }> = layout

@@ -25,10 +25,11 @@ import {
 
 import { authHeaders } from "@/lib/supabase-browser";
 import { isStaticExport } from "@/lib/staticSite";
-import { CUSTOM_PRESET_ID, type StoredHandheld } from "@/lib/handheld";
+import { CUSTOM_PRESET_ID, CUSTOM_ART_PRESET_ID, type HandheldArt, type StoredHandheld } from "@/lib/handheld";
 import { loadHandheldTemplate } from "@/lib/handheldTemplate";
 import { loadConsoleSettings, saveConsoleSettings } from "@/app/console/consoleSettings";
 import { handheldAssetUrl } from "@/lib/handheldAssets";
+import { HandheldSkinEditor } from "./HandheldSkinEditor";
 import styles from "./handheld.module.css";
 
 /** Where the anonymous/offline choice is remembered until an account exists. */
@@ -46,6 +47,9 @@ export function HandheldPicker() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [uploadNote, setUploadNote] = useState<string | null>(null);
+  // Free-form pixel art drawn in the editor; when set it supersedes the scheme.
+  const [art, setArt] = useState<HandheldArt | null>(null);
+  const [editing, setEditing] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
 
@@ -60,28 +64,47 @@ export function HandheldPicker() {
     };
   }, []);
 
-  // Re-render the live preview whenever the scheme (or template) changes.
+  // Re-render the live preview. Custom pixel art (when present) wins over the
+  // region-recoloured scheme, so the preview always shows what will be saved.
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !template) return;
-    canvas.width = template.width;
-    canvas.height = template.height;
+    if (!canvas) return;
     const context = canvas.getContext("2d");
     if (!context) return;
+
+    if (art) {
+      const image = new Image();
+      image.onload = () => {
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        context.drawImage(image, 0, 0);
+      };
+      image.src = art.url;
+      return;
+    }
+
+    if (!template) return;
+    canvas.width = template.width;
+    canvas.height = template.height;
     const rgba = renderHandheld(template, scheme);
     const image = context.createImageData(template.width, template.height);
     image.data.set(rgba);
     context.putImageData(image, 0, 0);
-  }, [template, scheme]);
+  }, [template, scheme, art]);
 
+  // Choosing a premade or recolouring a region drops any custom art — the two
+  // ways of designing the handheld are mutually exclusive.
   const choosePreset = (preset: (typeof HANDHELD_PRESETS)[number]) => {
     setPresetId(preset.id);
     setScheme(preset.scheme);
+    setArt(null);
   };
 
   const recolour = (regionId: string, color: string) => {
     setScheme((current) => ({ ...current, [regionId]: color }));
     setPresetId(CUSTOM_PRESET_ID);
+    setArt(null);
   };
 
   // Bring back edits made in Aseprite (or any pixel tool) on the downloaded
@@ -95,6 +118,7 @@ export function HandheldPicker() {
       const layers = await parseAsepriteLayers(new Uint8Array(await file.arrayBuffer()));
       setScheme((current) => extractSchemeFromLayers(layers, current));
       setPresetId(CUSTOM_PRESET_ID);
+      setArt(null);
       setUploadNote(`Applied colours from ${file.name}.`);
     } catch (importError) {
       setUploadNote(importError instanceof Error ? importError.message : "Could not read that .aseprite file.");
@@ -104,7 +128,7 @@ export function HandheldPicker() {
   const save = async () => {
     setSaving(true);
     setError(null);
-    const handheld: StoredHandheld = { presetId, scheme };
+    const handheld: StoredHandheld = art ? { presetId, scheme, art } : { presetId, scheme };
     try {
       window.localStorage.setItem(LOCAL_HANDHELD_KEY, JSON.stringify(handheld));
       // Make the live console default to the handheld they just designed.
@@ -139,7 +163,11 @@ export function HandheldPicker() {
         <section className={styles.stage} aria-label="Handheld preview">
           <canvas ref={canvasRef} className={styles.preview} />
           <span className={styles.stageLabel}>
-            {presetId === CUSTOM_PRESET_ID ? "Custom" : handheldPreset(presetId).label}
+            {art
+              ? "Custom art"
+              : presetId === CUSTOM_PRESET_ID
+                ? "Custom"
+                : handheldPreset(presetId).label}
           </span>
         </section>
 
@@ -187,6 +215,9 @@ export function HandheldPicker() {
               {saving ? "Saving…" : "Use this handheld"}
             </button>
             <div className={styles.secondaryRow}>
+              <button type="button" className={styles.secondary} onClick={() => setEditing(true)} disabled={!template}>
+                Draw your own
+              </button>
               <a className={styles.secondary} href={handheldAssetUrl("/handheld/template.aseprite")} download>
                 Download .aseprite template
               </a>
@@ -210,6 +241,19 @@ export function HandheldPicker() {
           </section>
         </div>
       </div>
+
+      {editing && template && (
+        <HandheldSkinEditor
+          template={template}
+          scheme={scheme}
+          onCancel={() => setEditing(false)}
+          onApply={(drawn) => {
+            setArt(drawn);
+            setPresetId(CUSTOM_ART_PRESET_ID);
+            setEditing(false);
+          }}
+        />
+      )}
     </main>
   );
 }

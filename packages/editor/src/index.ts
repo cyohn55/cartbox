@@ -165,4 +165,28 @@ export {
   type HandheldPreset,
   type HandheldTemplate,
 } from "./model/handheldSkin";
+export {
+  MAX_PAINT_LAYERS,
+  createLayer,
+  docFromRgba,
+  activeLayer,
+  compositeDoc,
+  addLayer,
+  removeLayer,
+  reorderLayer,
+  setLayerProps,
+  setActiveLayer,
+  setLayerPixel,
+  getLayerPixel,
+  floodFillRgba,
+  clampRect,
+  snapshotRect,
+  blitRect,
+  serializeDoc,
+  deserializeDoc,
+  type PaintLayer,
+  type PaintDoc,
+  type Rgba,
+  type PixelRect,
+} from "./model/handheldPaintDoc";
 export { gradientSortOrder } from "./model/paletteSort";

@@ -15,7 +15,14 @@ import { handheldPreset, type HandheldRegionId } from "@cartbox/editor";
 
 import { authHeaders } from "@/lib/supabase-browser";
 import { isStaticExport } from "@/lib/staticSite";
-import { CUSTOM_PRESET_ID, defaultHandheld, normalizeHandheld, type StoredHandheld } from "@/lib/handheld";
+import {
+  CUSTOM_PRESET_ID,
+  CUSTOM_ART_PRESET_ID,
+  defaultHandheld,
+  normalizeHandheld,
+  type HandheldArt,
+  type StoredHandheld,
+} from "@/lib/handheld";
 
 /** localStorage key the onboarding picker and the console both read/write. */
 const STORAGE_KEY = "cartbox.handheld";
@@ -26,10 +33,12 @@ const PROFILE_SYNC_DELAY_MS = 600;
 interface HandheldSkinContextValue {
   /** The current skin (preset id + the applied region colours). */
   handheld: StoredHandheld;
-  /** Recolour one region, marking the skin as custom. */
+  /** Recolour one region, marking the skin as custom (drops any custom art). */
   recolorRegion: (region: HandheldRegionId, color: string) => void;
-  /** Replace the whole skin with a premade preset. */
+  /** Replace the whole skin with a premade preset (drops any custom art). */
   applyPreset: (presetId: string) => void;
+  /** Apply free-form pixel art drawn in the editor as the current skin. */
+  applyCustomArt: (art: HandheldArt) => void;
   /** Restore the default skin. */
   reset: () => void;
 }
@@ -99,10 +108,15 @@ export function HandheldSkinProvider({ children }: { children: ReactNode }) {
     commit(() => ({ presetId: preset.id, scheme: preset.scheme }));
   };
 
+  // Keep the region scheme (so recolouring later still works) but flag the skin
+  // as custom art; the console renders `art` in preference to the scheme.
+  const applyCustomArt = (art: HandheldArt) =>
+    commit((current) => ({ presetId: CUSTOM_ART_PRESET_ID, scheme: current.scheme, art }));
+
   const reset = () => commit(() => defaultHandheld());
 
   return (
-    <HandheldSkinContext.Provider value={{ handheld, recolorRegion, applyPreset, reset }}>
+    <HandheldSkinContext.Provider value={{ handheld, recolorRegion, applyPreset, applyCustomArt, reset }}>
       {children}
     </HandheldSkinContext.Provider>
   );
