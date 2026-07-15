@@ -7,7 +7,10 @@
  * and persist immediately.
  */
 
+import { HANDHELD_PRESETS, HANDHELD_REGIONS } from "@cartbox/editor";
+
 import { useConsoleSettings } from "./ConsoleSettingsContext";
+import { useHandheldSkin } from "./HandheldSkinContext";
 import {
   BUTTON_STYLES,
   CONSOLE_THEMES,
@@ -57,6 +60,7 @@ function OptionRow<T extends string>({
 
 export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const { settings, update } = useConsoleSettings();
+  const { handheld, recolorRegion, applyPreset, reset: resetHandheld } = useHandheldSkin();
   const featured = miniGameForMonth(new Date());
 
   const miniGameOptions = [
@@ -152,6 +156,45 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           onClick={() => update({ faceColors: null, dpadColor: null, joystickColor: null })}
         >
           RESET CUSTOM COLORS
+        </button>
+      </div>
+
+      <div className="os-section-title">HANDHELD COLORS</div>
+      <p className="os-card-body" style={{ margin: 0 }}>
+        Recolour your pixel-art handheld. Applies live to the default “My Handheld” shell.
+      </p>
+      <div className="os-option-row" role="radiogroup" aria-label="Handheld preset">
+        {HANDHELD_PRESETS.map((preset) => (
+          <button
+            key={preset.id}
+            type="button"
+            role="radio"
+            aria-checked={handheld.presetId === preset.id}
+            className="os-kind-option"
+            data-active={handheld.presetId === preset.id}
+            onClick={() => applyPreset(preset.id)}
+          >
+            {preset.label.toUpperCase()}
+          </button>
+        ))}
+      </div>
+      <div className="os-color-row">
+        {HANDHELD_REGIONS.map((region) => (
+          <label key={region.id} className="os-color-field">
+            <input
+              type="color"
+              className="os-color"
+              aria-label={`${region.label} colour`}
+              value={handheld.scheme[region.id]}
+              onChange={(event) => recolorRegion(region.id, event.target.value)}
+            />
+            {region.label.toUpperCase()}
+          </label>
+        ))}
+      </div>
+      <div className="os-option-row">
+        <button type="button" className="os-kind-option" onClick={resetHandheld}>
+          RESET HANDHELD COLORS
         </button>
       </div>
 

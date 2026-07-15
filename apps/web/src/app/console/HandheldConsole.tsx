@@ -20,12 +20,12 @@ import {
   createWindowKeyDispatcher,
   type ConsoleControl,
 } from "./consoleInput";
-import { handheldPreset, DEFAULT_HANDHELD_PRESET_ID, renderHandheld, type HandheldTemplate } from "@cartbox/editor";
+import { renderHandheld, type HandheldScheme, type HandheldTemplate } from "@cartbox/editor";
 
 import { ConsoleInputContext, useConsoleInput } from "./ConsoleInputContext";
 import { ConsoleSettingsProvider, useConsoleSettings } from "./ConsoleSettingsContext";
+import { HandheldSkinProvider, useHandheldSkin } from "./HandheldSkinContext";
 import { customColorStyle } from "./consoleSettings";
-import { readStoredHandheldScheme } from "./handheldConsoleSkin";
 import { loadHandheldTemplate } from "@/lib/handheldTemplate";
 import { withBasePath } from "@/lib/staticSite";
 import { KonamiDetector } from "./consoleNavigation";
@@ -286,20 +286,21 @@ function dpadZones(dpad: LayoutRect): Array<{ control: ConsoleControl; rect: Lay
  */
 function ImageShell({ bus, children }: { bus: ConsoleInputBus; children: ReactNode }) {
   const { setPanelOpen } = useConsoleSettings();
+  const { handheld } = useHandheldSkin();
   const [layout, setLayout] = useState<HandheldLayout | null>(null);
-  const [skinUrl, setSkinUrl] = useState<string | null>(null);
+  const [template, setTemplate] = useState<HandheldTemplate | null>(null);
 
   useEffect(() => {
     let alive = true;
     void (async () => {
       try {
-        const [template, layoutData] = await Promise.all([
+        const [loadedTemplate, layoutData] = await Promise.all([
           loadHandheldTemplate(),
           fetch(withBasePath("/handheld/handheld-layout.json")).then((response) => response.json() as Promise<HandheldLayout>),
         ]);
         if (!alive) return;
         setLayout(layoutData);
-        setSkinUrl(renderSkinDataUrl(template));
+        setTemplate(loadedTemplate);
       } catch {
         // Leave the placeholder up; the CSS shell remains reachable via settings.
       }
@@ -308,6 +309,12 @@ function ImageShell({ bus, children }: { bus: ConsoleInputBus; children: ReactNo
       alive = false;
     };
   }, []);
+
+  // Re-render the skin whenever the player recolours a region in settings.
+  const skinUrl = useMemo(
+    () => (template ? renderSkinDataUrl(template, handheld.scheme) : null),
+    [template, handheld.scheme],
+  );
 
   const hits: Array<{ control: ConsoleControl; rect: LayoutRect; label: string }> = layout
     ? [
@@ -352,9 +359,7 @@ function ImageShell({ bus, children }: { bus: ConsoleInputBus; children: ReactNo
 }
 
 /** Render the player's handheld skin (chrome + their colours) to a data URL. */
-function renderSkinDataUrl(template: HandheldTemplate): string {
-  const base = handheldPreset(DEFAULT_HANDHELD_PRESET_ID).scheme;
-  const scheme = { ...base, ...(readStoredHandheldScheme() ?? {}) };
+function renderSkinDataUrl(template: HandheldTemplate, scheme: HandheldScheme): string {
   const rgba = renderHandheld(template, scheme);
   const canvas = document.createElement("canvas");
   canvas.width = template.width;
@@ -385,7 +390,9 @@ export function HandheldConsole({ children }: { children: ReactNode }) {
   return (
     <ConsoleInputContext.Provider value={bus}>
       <ConsoleSettingsProvider>
-        <ShellRouter bus={bus}>{children}</ShellRouter>
+        <HandheldSkinProvider>
+          <ShellRouter bus={bus}>{children}</ShellRouter>
+        </HandheldSkinProvider>
       </ConsoleSettingsProvider>
     </ConsoleInputContext.Provider>
   );
