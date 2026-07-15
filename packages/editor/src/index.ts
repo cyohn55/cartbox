@@ -178,6 +178,7 @@ export {
   setActiveLayer,
   setLayerPixel,
   getLayerPixel,
+  reflectX,
   floodFillRgba,
   clampRect,
   snapshotRect,

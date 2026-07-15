@@ -22,6 +22,7 @@ import {
   clampRect,
   floodFillRgba,
   getLayerPixel,
+  reflectX,
   setLayerPixel,
   snapshotRect,
   type PaintDoc,
@@ -66,6 +67,8 @@ interface SkinPaintCanvasProps {
   weight: number;
   /** Fill tolerance 0..1. */
   tolerance: number;
+  /** Mirror every edit across the vertical centre line (handhelds are symmetric). */
+  mirrorX: boolean;
   /** Bumped by the parent after an undo/redo or any external buffer change. */
   repaintVersion: number;
   /** Bumped by the parent when layers are added/removed/reordered/toggled. */
@@ -91,6 +94,7 @@ export function SkinPaintCanvas({
   color,
   weight,
   tolerance,
+  mirrorX,
   repaintVersion,
   structureVersion,
   onStroke,
@@ -189,7 +193,21 @@ export function SkinPaintCanvas({
       for (const point of previewPoints.current) context.fillRect(point.x, point.y, 1, 1);
       context.globalAlpha = 1;
     }
-  }, [doc.layers, color]);
+
+    // The symmetry axis: a dashed line in screen space so its width is constant.
+    if (mirrorX) {
+      context.setTransform(1, 0, 0, 1, 0, 0);
+      const axisX = Math.round((panX + (width / 2) * scale) * dpr) + 0.5;
+      context.strokeStyle = "rgba(120, 170, 255, 0.75)";
+      context.lineWidth = 1;
+      context.setLineDash([6, 4]);
+      context.beginPath();
+      context.moveTo(axisX, 0);
+      context.lineTo(axisX, canvas.height);
+      context.stroke();
+      context.setLineDash([]);
+    }
+  }, [doc.layers, color, mirrorX, width]);
 
   // Fit the document into the viewport once it (and the container) are ready.
   const fitToView = useCallback(() => {
@@ -233,6 +251,12 @@ export function SkinPaintCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repaintVersion]);
 
+  // Redraw when a draw input changes (brush colour, symmetry axis) so the
+  // preview colour and the mirror guide update without needing a pointer event.
+  useEffect(() => {
+    draw();
+  }, [draw]);
+
   /** Map a pointer event to an integer art pixel, or null if outside the art. */
   const pixelFromEvent = (event: React.PointerEvent): PixelPoint | null => {
     const canvas = canvasRef.current;
@@ -253,9 +277,16 @@ export function SkinPaintCanvas({
     strokeMaxY.current = Math.max(strokeMaxY.current, y);
   };
 
-  /** Paint a set of points onto the active layer, tracking dirty bounds. */
+  /** A point reflected across the canvas's vertical centre line. */
+  const mirrored = (point: PixelPoint): PixelPoint => ({ x: reflectX(point.x, width), y: point.y });
+
+  /** A point set plus its vertical mirror when symmetry is on (else unchanged). */
+  const withMirror = (points: readonly PixelPoint[]): PixelPoint[] =>
+    mirrorX ? [...points, ...points.map(mirrored)] : [...points];
+
+  /** Paint a set of points (mirrored when symmetry is on) onto the active layer. */
   const paintPoints = (layer: PaintLayer, points: readonly PixelPoint[], value: Rgba) => {
-    for (const point of points) {
+    for (const point of withMirror(points)) {
       if (point.x < 0 || point.x >= width || point.y < 0 || point.y >= height) continue;
       setLayerPixel(layer, width, height, point.x, point.y, value);
       extendBounds(point.x, point.y);
@@ -333,7 +364,7 @@ export function SkinPaintCanvas({
     if (SHAPE_TOOLS.has(tool)) {
       beginStroke(layer);
       shapeAnchor.current = cell;
-      previewPoints.current = [cell];
+      previewPoints.current = withMirror([cell]);
       draw();
       return;
     }
@@ -346,7 +377,13 @@ export function SkinPaintCanvas({
   /** Apply a pencil/eraser/fill at a cell and refresh the active layer canvas. */
   const applyImmediate = (layer: PaintLayer, cell: PixelPoint) => {
     if (tool === "fill") {
-      floodFillRgba(layer, width, height, cell.x, cell.y, hexToRgba(color), tolerance);
+      const paint = hexToRgba(color);
+      floodFillRgba(layer, width, height, cell.x, cell.y, paint, tolerance);
+      // Symmetry fills the mirrored region too, from the reflected seed.
+      if (mirrorX) {
+        const seed = mirrored(cell);
+        floodFillRgba(layer, width, height, seed.x, seed.y, paint, tolerance);
+      }
       // A fill can touch anywhere; mark the whole canvas dirty for this stroke.
       extendBounds(0, 0);
       extendBounds(width - 1, height - 1);
@@ -373,7 +410,7 @@ export function SkinPaintCanvas({
     }
     const cell = pixelFromEvent(event);
     if (shapeAnchor.current && cell) {
-      previewPoints.current = shapePoints(shapeAnchor.current, cell);
+      previewPoints.current = withMirror(shapePoints(shapeAnchor.current, cell));
       draw();
     } else if (painting.current && cell) {
       const layer = activeLayer(doc);

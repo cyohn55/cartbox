@@ -29,6 +29,7 @@ const {
   setActiveLayer,
   setLayerPixel,
   getLayerPixel,
+  reflectX,
   floodFillRgba,
   clampRect,
   snapshotRect,
@@ -208,6 +209,33 @@ function solid(width, height, [r, g, b, a]) {
 {
   const doc = docFromRgba(solid(1, 1, [0, 0, 0, 255]), 1, 1);
   assert.equal(setActiveLayer(doc, "does-not-exist").activeId, doc.activeId, "unknown active id is ignored");
+  passed += 1;
+}
+
+// 8. reflectX mirrors an x across the vertical centre: reflection is an
+//    involution (twice = identity), edges swap, and painting a pixel plus its
+//    reflection makes a row left-right symmetric (the symmetry-mode invariant).
+{
+  const w = 5;
+  for (let x = 0; x < w; x += 1) {
+    assert.equal(reflectX(reflectX(x, w), w), x, `reflectX is its own inverse at x=${x}`);
+  }
+  assert.equal(reflectX(0, w), w - 1, "left edge maps to right edge");
+  assert.equal(reflectX(Math.floor(w / 2), w), Math.floor(w / 2), "odd-width centre is fixed");
+
+  const h = 1;
+  const layer = createLayer(w, h, "S");
+  const dab = [200, 50, 50, 255];
+  const x = 1;
+  setLayerPixel(layer, w, h, x, 0, dab);
+  setLayerPixel(layer, w, h, reflectX(x, w), 0, dab);
+  for (let column = 0; column < w; column += 1) {
+    assert.deepEqual(
+      [...getLayerPixel(layer, w, column, 0)],
+      [...getLayerPixel(layer, w, reflectX(column, w), 0)],
+      `row is symmetric at column ${column}`,
+    );
+  }
   passed += 1;
 }
 

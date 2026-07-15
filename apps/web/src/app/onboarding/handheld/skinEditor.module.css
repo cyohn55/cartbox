@@ -102,6 +102,31 @@
   border-color: var(--accent-strong);
 }
 
+/* A labelled on/off control (e.g. symmetry) in the tool rail. */
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.toggle:hover {
+  border-color: var(--border-strong);
+}
+
+.toggleOn {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent-strong);
+}
+
 .field {
   display: flex;
   flex-direction: column;

@@ -187,6 +187,16 @@ export function setLayerPixel(layer: PaintLayer, width: number, height: number, 
   layer.pixels[base + 3] = color[3];
 }
 
+/**
+ * Reflect an x coordinate across the canvas's vertical centre line. Used by the
+ * editor's symmetry mode to mirror every edit to the opposite side, which suits
+ * the left-right symmetric handheld body. `x` and `width - 1 - x` are equidistant
+ * from the centre, so a full pass leaves a symmetric result.
+ */
+export function reflectX(x: number, width: number): number {
+  return width - 1 - x;
+}
+
 /** Read one straight-alpha RGBA pixel from a layer buffer, or transparent black. */
 export function getLayerPixel(layer: PaintLayer, width: number, x: number, y: number): Rgba {
   const base = (y * width + x) * 4;

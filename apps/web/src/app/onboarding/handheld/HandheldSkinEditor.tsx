@@ -90,6 +90,7 @@ export function HandheldSkinEditor({ template, scheme, onCancel, onApply }: Hand
   const [recentColors, setRecentColors] = useState<string[]>([]);
   const [weight, setWeight] = useState(1);
   const [tolerance, setTolerance] = useState(0);
+  const [mirrorX, setMirrorX] = useState(false);
   const [structureVersion, setStructureVersion] = useState(0);
   const [repaintVersion, setRepaintVersion] = useState(0);
   const [saving, setSaving] = useState(false);
@@ -321,6 +322,16 @@ export function HandheldSkinEditor({ template, scheme, onCancel, onApply }: Hand
                 />
               </label>
             )}
+
+            <button
+              type="button"
+              className={`${styles.toggle} ${mirrorX ? styles.toggleOn : ""}`}
+              onClick={() => setMirrorX((on) => !on)}
+              aria-pressed={mirrorX}
+              title="Mirror edits across the vertical centre line"
+            >
+              <span aria-hidden>⇋</span> Symmetry
+            </button>
           </aside>
 
           <SkinPaintCanvas
@@ -329,6 +340,7 @@ export function HandheldSkinEditor({ template, scheme, onCancel, onApply }: Hand
             color={color}
             weight={weight}
             tolerance={tolerance}
+            mirrorX={mirrorX}
             repaintVersion={repaintVersion}
             structureVersion={structureVersion}
             onStroke={handleStroke}
