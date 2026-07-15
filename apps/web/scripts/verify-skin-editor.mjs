@@ -34,6 +34,8 @@ const {
   docFromRgba,
   addLayer,
   activeLayer,
+  createLayer,
+  getLayerPixel,
   setLayerPixel,
   floodFillRgba,
   setLayerProps,
@@ -202,6 +204,35 @@ const png = encodePng(composite, WIDTH, HEIGHT);
   const renderUrl = "data:image/png;base64,SCHEME_RENDER";
   assert.equal(consoleSkinUrl({ presetId: "custom-art", scheme: {}, art }, renderUrl), art.url, "console prefers custom art");
   assert.equal(consoleSkinUrl({ presetId: "graphite", scheme: {} }, renderUrl), renderUrl, "console falls back to the scheme render");
+  passed += 1;
+}
+
+// 6. Region clipping: the editor builds a predicate from the template's
+//    per-pixel region map (regionMask[y*w+x] === regionValue) and passes it to
+//    the paint model as the clip mask. A fill confined to one region must never
+//    touch another. This mirrors what HandheldSkinEditor.clip does.
+{
+  const w = 6;
+  const h = 2;
+  // Left half is region 1, right half is region 2 (as a template regionMask).
+  const regionMask = new Uint8Array(w * h);
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) regionMask[y * w + x] = x < w / 2 ? 1 : 2;
+  }
+  const clipToRegion = (value) => (x, y) => regionMask[y * w + x] === value;
+
+  const layer = createLayer(w, h, "R");
+  const fill = [30, 200, 120, 255];
+  // Fill starting in region 1, clipped to region 1: region 2 stays transparent.
+  const changed = floodFillRgba(layer, w, h, 0, 0, fill, 0, clipToRegion(1));
+  assert.equal(changed, (w / 2) * h, "fill covers exactly region 1's pixels");
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      const inRegion1 = x < w / 2;
+      const alpha = getLayerPixel(layer, w, x, y)[3];
+      assert.equal(alpha > 0, inRegion1, `pixel (${x},${y}) painted iff in region 1`);
+    }
+  }
   passed += 1;
 }
 

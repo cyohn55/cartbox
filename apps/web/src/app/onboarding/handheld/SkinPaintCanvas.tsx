@@ -69,6 +69,12 @@ interface SkinPaintCanvasProps {
   tolerance: number;
   /** Mirror every edit across the vertical centre line (handhelds are symmetric). */
   mirrorX: boolean;
+  /**
+   * Confine edits to the pixels this predicate accepts (a chosen handheld
+   * region), or null to paint anywhere. The canvas stays decoupled from what a
+   * "region" is — it only asks whether a pixel is paintable.
+   */
+  clip: ((x: number, y: number) => boolean) | null;
   /** Bumped by the parent after an undo/redo or any external buffer change. */
   repaintVersion: number;
   /** Bumped by the parent when layers are added/removed/reordered/toggled. */
@@ -95,6 +101,7 @@ export function SkinPaintCanvas({
   weight,
   tolerance,
   mirrorX,
+  clip,
   repaintVersion,
   structureVersion,
   onStroke,
@@ -102,6 +109,9 @@ export function SkinPaintCanvas({
 }: SkinPaintCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // A dark veil over the non-paintable area when a clip region is active, so the
+  // artist sees where paint will land. Rebuilt from `clip` whenever it changes.
+  const clipVeil = useRef<HTMLCanvasElement | null>(null);
   // One offscreen canvas per layer id, at document resolution.
   const layerCanvases = useRef<Map<string, HTMLCanvasElement>>(new Map());
 
@@ -185,6 +195,9 @@ export function SkinPaintCanvas({
     }
     context.globalAlpha = 1;
 
+    // Dim everything outside the active clip region.
+    if (clipVeil.current) context.drawImage(clipVeil.current, 0, 0);
+
     // Live shape preview in the brush colour.
     if (previewPoints.current.length > 0) {
       const [r, g, b] = parseHexColor(color);
@@ -257,6 +270,31 @@ export function SkinPaintCanvas({
     draw();
   }, [draw]);
 
+  // Rebuild the clip veil when the active region changes: dark over pixels the
+  // clip rejects, transparent where paint is allowed. Then redraw to show it.
+  useEffect(() => {
+    if (!clip) {
+      clipVeil.current = null;
+    } else {
+      const veil = document.createElement("canvas");
+      veil.width = width;
+      veil.height = height;
+      const context = veil.getContext("2d");
+      if (context) {
+        const image = context.createImageData(width, height);
+        for (let y = 0; y < height; y += 1) {
+          for (let x = 0; x < width; x += 1) {
+            if (!clip(x, y)) image.data[(y * width + x) * 4 + 3] = 140; // translucent black
+          }
+        }
+        context.putImageData(image, 0, 0);
+      }
+      clipVeil.current = veil;
+    }
+    draw();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clip, width, height]);
+
   /** Map a pointer event to an integer art pixel, or null if outside the art. */
   const pixelFromEvent = (event: React.PointerEvent): PixelPoint | null => {
     const canvas = canvasRef.current;
@@ -288,6 +326,7 @@ export function SkinPaintCanvas({
   const paintPoints = (layer: PaintLayer, points: readonly PixelPoint[], value: Rgba) => {
     for (const point of withMirror(points)) {
       if (point.x < 0 || point.x >= width || point.y < 0 || point.y >= height) continue;
+      if (clip && !clip(point.x, point.y)) continue; // outside the active region
       setLayerPixel(layer, width, height, point.x, point.y, value);
       extendBounds(point.x, point.y);
     }
@@ -378,11 +417,12 @@ export function SkinPaintCanvas({
   const applyImmediate = (layer: PaintLayer, cell: PixelPoint) => {
     if (tool === "fill") {
       const paint = hexToRgba(color);
-      floodFillRgba(layer, width, height, cell.x, cell.y, paint, tolerance);
+      const inRegion = clip ?? undefined; // confine the fill to the active region
+      floodFillRgba(layer, width, height, cell.x, cell.y, paint, tolerance, inRegion);
       // Symmetry fills the mirrored region too, from the reflected seed.
       if (mirrorX) {
         const seed = mirrored(cell);
-        floodFillRgba(layer, width, height, seed.x, seed.y, paint, tolerance);
+        floodFillRgba(layer, width, height, seed.x, seed.y, paint, tolerance, inRegion);
       }
       // A fill can touch anywhere; mark the whole canvas dirty for this stroke.
       extendBounds(0, 0);

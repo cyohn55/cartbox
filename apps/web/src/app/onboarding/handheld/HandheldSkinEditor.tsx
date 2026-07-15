@@ -10,7 +10,7 @@
  * data URL for guests/static), and reports the resulting art to the caller.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   addLayer,
@@ -22,8 +22,10 @@ import {
   docFromRgba,
   renderHandheld,
   blitRect,
+  HANDHELD_REGIONS,
   MAX_PAINT_LAYERS,
   type PaintDoc,
+  type HandheldRegionId,
   type HandheldScheme,
   type HandheldTemplate,
 } from "@cartbox/editor";
@@ -91,6 +93,8 @@ export function HandheldSkinEditor({ template, scheme, onCancel, onApply }: Hand
   const [weight, setWeight] = useState(1);
   const [tolerance, setTolerance] = useState(0);
   const [mirrorX, setMirrorX] = useState(false);
+  // "all" paints anywhere; a region id confines edits to that part of the body.
+  const [clipRegion, setClipRegion] = useState<HandheldRegionId | "all">("all");
   const [structureVersion, setStructureVersion] = useState(0);
   const [repaintVersion, setRepaintVersion] = useState(0);
   const [saving, setSaving] = useState(false);
@@ -241,6 +245,16 @@ export function HandheldSkinEditor({ template, scheme, onCancel, onApply }: Hand
     }
   };
 
+  // Confine painting to one region by testing the template's per-pixel region
+  // map; region ids in the map are 1-based in HANDHELD_REGIONS order.
+  const clip = useMemo(() => {
+    if (clipRegion === "all") return null;
+    const regionValue = HANDHELD_REGIONS.findIndex((region) => region.id === clipRegion) + 1;
+    if (regionValue <= 0) return null;
+    const { regionMask, width } = template;
+    return (x: number, y: number) => regionMask[y * width + x] === regionValue;
+  }, [clipRegion, template]);
+
   const layersTopFirst = [...doc.layers].reverse(); // panel shows top layer first
 
   return (
@@ -332,6 +346,22 @@ export function HandheldSkinEditor({ template, scheme, onCancel, onApply }: Hand
             >
               <span aria-hidden>⇋</span> Symmetry
             </button>
+
+            <label className={styles.field}>
+              <span>Paint region</span>
+              <select
+                className={styles.select}
+                value={clipRegion}
+                onChange={(event) => setClipRegion(event.target.value as HandheldRegionId | "all")}
+              >
+                <option value="all">Whole handheld</option>
+                {HANDHELD_REGIONS.map((region) => (
+                  <option key={region.id} value={region.id}>
+                    {region.label}
+                  </option>
+                ))}
+              </select>
+            </label>
           </aside>
 
           <SkinPaintCanvas
@@ -341,6 +371,7 @@ export function HandheldSkinEditor({ template, scheme, onCancel, onApply }: Hand
             weight={weight}
             tolerance={tolerance}
             mirrorX={mirrorX}
+            clip={clip}
             repaintVersion={repaintVersion}
             structureVersion={structureVersion}
             onStroke={handleStroke}
