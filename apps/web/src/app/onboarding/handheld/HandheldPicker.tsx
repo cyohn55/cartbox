@@ -21,6 +21,7 @@ import {
   DEFAULT_HANDHELD_PRESET_ID,
   type HandheldScheme,
   type HandheldTemplate,
+  type PaintDoc,
 } from "@cartbox/editor";
 
 import { authHeaders } from "@/lib/supabase-browser";
@@ -49,6 +50,10 @@ export function HandheldPicker() {
   const [uploadNote, setUploadNote] = useState<string | null>(null);
   // Free-form pixel art drawn in the editor; when set it supersedes the scheme.
   const [art, setArt] = useState<HandheldArt | null>(null);
+  // The editor's working document, kept so re-opening resumes the same layers
+  // instead of restarting from the scheme render. Dropped when the design is
+  // changed another way (preset, recolour, upload).
+  const [draft, setDraft] = useState<PaintDoc | null>(null);
   const [editing, setEditing] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
@@ -99,12 +104,14 @@ export function HandheldPicker() {
     setPresetId(preset.id);
     setScheme(preset.scheme);
     setArt(null);
+    setDraft(null);
   };
 
   const recolour = (regionId: string, color: string) => {
     setScheme((current) => ({ ...current, [regionId]: color }));
     setPresetId(CUSTOM_PRESET_ID);
     setArt(null);
+    setDraft(null);
   };
 
   // Bring back edits made in Aseprite (or any pixel tool) on the downloaded
@@ -119,6 +126,7 @@ export function HandheldPicker() {
       setScheme((current) => extractSchemeFromLayers(layers, current));
       setPresetId(CUSTOM_PRESET_ID);
       setArt(null);
+      setDraft(null);
       setUploadNote(`Applied colours from ${file.name}.`);
     } catch (importError) {
       setUploadNote(importError instanceof Error ? importError.message : "Could not read that .aseprite file.");
@@ -246,9 +254,11 @@ export function HandheldPicker() {
         <HandheldSkinEditor
           template={template}
           scheme={scheme}
+          initialDoc={draft}
           onCancel={() => setEditing(false)}
-          onApply={(drawn) => {
+          onApply={(drawn, workingDoc) => {
             setArt(drawn);
+            setDraft(workingDoc); // resume from these layers next time
             setPresetId(CUSTOM_ART_PRESET_ID);
             setEditing(false);
           }}

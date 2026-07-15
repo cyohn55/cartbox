@@ -21,6 +21,7 @@ const {
   createLayer,
   docFromRgba,
   activeLayer,
+  cloneDoc,
   compositeDoc,
   addLayer,
   removeLayer,
@@ -236,6 +237,26 @@ function solid(width, height, [r, g, b, a]) {
       `row is symmetric at column ${column}`,
     );
   }
+  passed += 1;
+}
+
+// 9. cloneDoc makes an independent copy (the resume-from-draft seed): the clone
+//    equals the original, but editing either one never affects the other.
+{
+  const w = 3;
+  const h = 3;
+  let doc = docFromRgba(solid(w, h, [10, 20, 30, 255]), w, h);
+  doc = addLayer(doc, "Top");
+  setLayerPixel(activeLayer(doc), w, h, 1, 1, [200, 0, 0, 255]);
+
+  const copy = cloneDoc(doc);
+  assert.deepEqual([...compositeDoc(copy)], [...compositeDoc(doc)], "clone composites identically to the original");
+  assert.notEqual(copy.layers[0].pixels, doc.layers[0].pixels, "clone layers own separate buffers");
+
+  // Mutate the clone; the original must be untouched (and vice-versa).
+  const originalComposite = [...compositeDoc(doc)];
+  setLayerPixel(activeLayer(copy), w, h, 0, 0, [0, 255, 0, 255]);
+  assert.deepEqual([...compositeDoc(doc)], originalComposite, "editing the clone leaves the original unchanged");
   passed += 1;
 }
 

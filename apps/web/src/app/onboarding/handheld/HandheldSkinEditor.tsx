@@ -18,6 +18,7 @@ import {
   reorderLayer,
   setActiveLayer,
   setLayerProps,
+  cloneDoc,
   compositeDoc,
   docFromRgba,
   renderHandheld,
@@ -69,23 +70,20 @@ interface HandheldSkinEditorProps {
   template: HandheldTemplate;
   /** The scheme the drawing starts from (rendered as the base bitmap). */
   scheme: HandheldScheme;
+  /**
+   * A working document to resume from — the layers left off in a previous visit
+   * to the editor this session. When absent, the drawing starts from the scheme
+   * render. Cloned on seed so the caller's copy is never mutated.
+   */
+  initialDoc?: PaintDoc | null;
   onCancel: () => void;
-  onApply: (art: HandheldArt) => void;
+  /** Report the flattened art plus the working document to resume from next time. */
+  onApply: (art: HandheldArt, doc: PaintDoc) => void;
 }
 
-/** Deep-copy a document (own pixel buffers) for a structural undo snapshot. */
-function cloneDoc(doc: PaintDoc): PaintDoc {
-  return {
-    width: doc.width,
-    height: doc.height,
-    activeId: doc.activeId,
-    layers: doc.layers.map((layer) => ({ ...layer, pixels: layer.pixels.slice() })),
-  };
-}
-
-export function HandheldSkinEditor({ template, scheme, onCancel, onApply }: HandheldSkinEditorProps) {
+export function HandheldSkinEditor({ template, scheme, initialDoc, onCancel, onApply }: HandheldSkinEditorProps) {
   const [doc, setDoc] = useState<PaintDoc>(() =>
-    docFromRgba(renderHandheld(template, scheme), template.width, template.height, "Skin"),
+    initialDoc ? cloneDoc(initialDoc) : docFromRgba(renderHandheld(template, scheme), template.width, template.height, "Skin"),
   );
   const [tool, setTool] = useState<SkinTool>("pencil");
   const [color, setColor] = useState<string>("#ffffff");
@@ -238,7 +236,7 @@ export function HandheldSkinEditor({ template, scheme, onCancel, onApply }: Hand
           // Fall back to the data URL already in `art`.
         }
       }
-      onApply(art);
+      onApply(art, doc);
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Could not save your artwork.");
       setSaving(false);

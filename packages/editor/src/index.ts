@@ -170,6 +170,7 @@ export {
   createLayer,
   docFromRgba,
   activeLayer,
+  cloneDoc,
   compositeDoc,
   addLayer,
   removeLayer,

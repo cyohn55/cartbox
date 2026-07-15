@@ -82,6 +82,20 @@ export function activeLayer(doc: PaintDoc): PaintLayer | null {
 }
 
 /**
+ * Deep-copy a document, giving each layer its own pixel buffer. Used to snapshot
+ * a document for structural undo, and to seed the editor from a resumed working
+ * copy without sharing (and later mutating) the caller's buffers.
+ */
+export function cloneDoc(doc: PaintDoc): PaintDoc {
+  return {
+    width: doc.width,
+    height: doc.height,
+    activeId: doc.activeId,
+    layers: doc.layers.map((layer) => ({ ...layer, pixels: layer.pixels.slice() })),
+  };
+}
+
+/**
  * Flatten the visible layers bottom-to-top into one straight-alpha RGBA bitmap,
  * honouring each layer's opacity. This is the render the console shows and what
  * gets uploaded on save.
