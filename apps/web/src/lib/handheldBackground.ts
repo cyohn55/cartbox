@@ -30,35 +30,57 @@ export function isImageFile(file: File): boolean {
 }
 
 /**
- * Decode an uploaded image file into straight-alpha RGBA pixels, downscaled so
- * its long edge is at most `MAX_BACKGROUND_EDGE`. Rejects if the file is not an
- * image or the browser cannot decode it.
+ * A decoded background: the RGBA pixels used to composite it now, plus a compact
+ * PNG data URL of the same downscaled image kept so the choice can be persisted
+ * and re-composited later (e.g. after recolouring) without the original file.
  */
-export async function readImageBackground(file: File): Promise<HandheldBackground> {
-  if (!isImageFile(file)) throw new Error("Please choose an image file.");
+export interface DecodedBackground {
+  pixels: HandheldBackground;
+  source: HandheldArt;
+}
 
+/**
+ * Decode an uploaded image file into straight-alpha RGBA pixels (downscaled so
+ * its long edge is at most `MAX_BACKGROUND_EDGE`) plus a persistable PNG source.
+ * Rejects if the file is not an image or the browser cannot decode it.
+ */
+export async function readImageBackground(file: File): Promise<DecodedBackground> {
+  if (!isImageFile(file)) throw new Error("Please choose an image file.");
   const url = URL.createObjectURL(file);
   try {
-    const image = await loadImage(url);
-    const naturalWidth = image.naturalWidth;
-    const naturalHeight = image.naturalHeight;
-    if (naturalWidth <= 0 || naturalHeight <= 0) throw new Error("That image is empty.");
-
-    const scale = Math.min(1, MAX_BACKGROUND_EDGE / Math.max(naturalWidth, naturalHeight));
-    const width = Math.max(1, Math.round(naturalWidth * scale));
-    const height = Math.max(1, Math.round(naturalHeight * scale));
-
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("Canvas is unavailable.");
-    context.drawImage(image, 0, 0, width, height);
-    const { data } = context.getImageData(0, 0, width, height);
-    return { width, height, data };
+    return decodeToBackground(await loadImage(url));
   } finally {
     URL.revokeObjectURL(url);
   }
+}
+
+/**
+ * Re-decode a persisted background source (a PNG data / https URL) back into the
+ * pixels needed to re-composite it, so a returning session or the live console
+ * can recolour the chrome and keep the image.
+ */
+export async function decodeBackgroundSource(source: HandheldArt): Promise<HandheldBackground> {
+  return (await decodeToBackground(await loadImage(source.url))).pixels;
+}
+
+/** Downscale a decoded image and read back both its pixels and a PNG source. */
+function decodeToBackground(image: HTMLImageElement): DecodedBackground {
+  const naturalWidth = image.naturalWidth;
+  const naturalHeight = image.naturalHeight;
+  if (naturalWidth <= 0 || naturalHeight <= 0) throw new Error("That image is empty.");
+
+  const scale = Math.min(1, MAX_BACKGROUND_EDGE / Math.max(naturalWidth, naturalHeight));
+  const width = Math.max(1, Math.round(naturalWidth * scale));
+  const height = Math.max(1, Math.round(naturalHeight * scale));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Canvas is unavailable.");
+  context.drawImage(image, 0, 0, width, height);
+  const { data } = context.getImageData(0, 0, width, height);
+  return { pixels: { width, height, data }, source: { url: canvas.toDataURL("image/png"), w: width, h: height } };
 }
 
 /** Load an <img> from a URL, resolving once it has decoded. */

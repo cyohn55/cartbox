@@ -9,11 +9,17 @@
 
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 
-import { HANDHELD_PRESETS, HANDHELD_REGIONS, type HandheldScheme, type HandheldTemplate } from "@cartbox/editor";
+import {
+  HANDHELD_PRESETS,
+  HANDHELD_REGIONS,
+  type HandheldBackground,
+  type HandheldScheme,
+  type HandheldTemplate,
+} from "@cartbox/editor";
 
 import { loadHandheldTemplate } from "@/lib/handheldTemplate";
 import { ANIMATED_PRESETS, renderAnimatedArt, type AnimatedPresetView } from "@/lib/handheldAnimated";
-import { readImageBackground, renderBackgroundArt } from "@/lib/handheldBackground";
+import { decodeBackgroundSource, readImageBackground, renderBackgroundArt } from "@/lib/handheldBackground";
 import { ConsoleColorPicker } from "./ConsoleColorPicker";
 import { useConsoleSettings } from "./ConsoleSettingsContext";
 import { useHandheldSkin } from "./HandheldSkinContext";
@@ -68,13 +74,23 @@ function OptionRow<T extends string>({
 
 export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const { settings, update } = useConsoleSettings();
-  const { handheld, recolorRegion, applyPreset, applyCustomArt, applyAnimation, clearArt, reset: resetHandheld } =
-    useHandheldSkin();
+  const {
+    handheld,
+    recolorRegion,
+    applyPreset,
+    applyBackground,
+    applyAnimation,
+    clearArt,
+    reset: resetHandheld,
+  } = useHandheldSkin();
   const featured = miniGameForMonth(new Date());
 
   // The chrome + region mask, needed to render the marquee/background live from
   // the current colours. Loaded once; the sections stay disabled until it is in.
   const [template, setTemplate] = useState<HandheldTemplate | null>(null);
+  // The decoded background image (from the stored source), kept so recolouring
+  // re-composites it synchronously instead of dropping it.
+  const [backgroundPixels, setBackgroundPixels] = useState<HandheldBackground | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const backgroundInput = useRef<HTMLInputElement>(null);
 
@@ -85,6 +101,23 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
       alive = false;
     };
   }, []);
+
+  // Keep the decoded background in sync with the stored source: decode when one
+  // is present (and not already decoded), drop it when cleared.
+  const backgroundSource = handheld.background;
+  useEffect(() => {
+    if (!backgroundSource) {
+      setBackgroundPixels(null);
+      return;
+    }
+    let alive = true;
+    void decodeBackgroundSource(backgroundSource)
+      .then((pixels) => alive && setBackgroundPixels(pixels))
+      .catch(() => alive && setBackgroundPixels(null));
+    return () => {
+      alive = false;
+    };
+  }, [backgroundSource]);
 
   // The marquee currently playing on the chassis (if any), for highlighting.
   const activeMarquee = handheld.animation
@@ -103,21 +136,33 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
     }
   };
 
-  // Recolour a region, then re-render the active marquee in the new colours so
-  // it recolours with the chassis (mirrors the onboarding picker's behaviour).
+  /** Re-composite the active background (if any) in a given scheme. */
+  const rerenderBackground = (scheme: HandheldScheme) => {
+    if (!template || !backgroundSource || !backgroundPixels) return;
+    try {
+      applyBackground(backgroundSource, renderBackgroundArt(template, scheme, backgroundPixels));
+    } catch {
+      setNote("Could not re-apply the background image.");
+    }
+  };
+
+  // Recolour a region, then re-render whichever live look is active (marquee or
+  // background) in the new colours so it recolours with the chassis, mirroring
+  // the onboarding picker rather than dropping the art.
   const handleRecolor = (region: (typeof HANDHELD_REGIONS)[number]["id"], color: string) => {
     const nextScheme = { ...handheld.scheme, [region]: color };
     recolorRegion(region, color);
     if (activeMarquee) playMarquee(activeMarquee, nextScheme);
+    else rerenderBackground(nextScheme);
   };
 
-  // Apply a premade's colours, keeping any active marquee (re-rendered).
+  // Apply a premade's colours, keeping any active marquee/background (re-rendered).
   const handlePreset = (presetId: string) => {
     applyPreset(presetId);
-    if (activeMarquee) {
-      const preset = HANDHELD_PRESETS.find((candidate) => candidate.id === presetId);
-      if (preset) playMarquee(activeMarquee, preset.scheme);
-    }
+    const preset = HANDHELD_PRESETS.find((candidate) => candidate.id === presetId);
+    if (!preset) return;
+    if (activeMarquee) playMarquee(activeMarquee, preset.scheme);
+    else rerenderBackground(preset.scheme);
   };
 
   const uploadBackground = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -126,8 +171,9 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
     if (!file || !template) return;
     setNote("Reading image…");
     try {
-      const image = await readImageBackground(file);
-      applyCustomArt(renderBackgroundArt(template, handheld.scheme, image));
+      const { pixels, source } = await readImageBackground(file);
+      setBackgroundPixels(pixels);
+      applyBackground(source, renderBackgroundArt(template, handheld.scheme, pixels));
       setNote(`Applied ${file.name} as the chassis background.`);
     } catch (error) {
       setNote(error instanceof Error ? error.message : "Could not read that image.");

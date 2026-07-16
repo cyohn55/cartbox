@@ -39,6 +39,13 @@ export interface StoredHandheld {
   /** Free-form pixel art drawn in the editor; when present the console renders it. */
   art?: HandheldArt;
   /**
+   * The source image shown through the chassis (`face`) region. Kept alongside
+   * the rendered `art` so recolouring the chrome re-composites the background in
+   * the new colours instead of dropping it (the same live-recolour contract the
+   * marquee `animation` has). A bounded PNG data URL / https URL, like `art`.
+   */
+  background?: HandheldArt;
+  /**
    * An arcade scene played on the chassis marquee. Independent of the chassis
    * colours: the animation is rendered live from `scheme`, so recolouring the
    * handheld recolours the animation too. Persisted so re-opening the picker
@@ -64,17 +71,19 @@ function isCustomId(id: string): boolean {
  * per region, and any custom art is passed through the art gate.
  */
 export function normalizeHandheld(input: unknown): StoredHandheld {
-  const source = (input ?? {}) as { presetId?: unknown; scheme?: unknown; art?: unknown };
+  const source = (input ?? {}) as { presetId?: unknown; scheme?: unknown; art?: unknown; background?: unknown };
   const rawId = typeof source.presetId === "string" ? source.presetId : DEFAULT_HANDHELD_PRESET_ID;
   const presetId = isCustomId(rawId) ? rawId : handheldPreset(rawId).id;
   const base = handheldPreset(isCustomId(presetId) ? DEFAULT_HANDHELD_PRESET_ID : presetId).scheme;
   const art = normalizeArt(source.art);
+  const background = normalizeArt(source.background);
   const scheme = normalizeScheme(source.scheme, base);
   const animation = normalizeAnimation((source as { animation?: unknown }).animation);
   return {
     presetId,
     scheme,
     ...(art ? { art } : {}),
+    ...(background ? { background } : {}),
     ...(animation ? { animation } : {}),
   };
 }

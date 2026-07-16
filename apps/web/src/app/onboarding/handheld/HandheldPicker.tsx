@@ -32,7 +32,7 @@ import { loadHandheldTemplate } from "@/lib/handheldTemplate";
 import { saveHandheldDraft, loadHandheldDraft, clearHandheldDraft, type HandheldDraft } from "@/lib/handheldDraft";
 import { assembleSheetCanvas, sliceSheet } from "@/lib/handheldSheet";
 import { ANIMATED_PRESETS, animatedPresetView, renderAnimatedArt } from "@/lib/handheldAnimated";
-import { readImageBackground, renderBackgroundArt } from "@/lib/handheldBackground";
+import { decodeBackgroundSource, readImageBackground, renderBackgroundArt } from "@/lib/handheldBackground";
 import {
   loadConsoleSettings,
   saveConsoleSettings,
@@ -85,6 +85,9 @@ export function HandheldPicker() {
   // changes, so recolouring the chrome keeps the background.
   const [background, setBackground] = useState<HandheldBackground | null>(null);
   const [backgroundArt, setBackgroundArt] = useState<HandheldArt | null>(null);
+  // The persistable source image (a PNG data URL) behind `background`, saved so a
+  // returning session or the live console can re-composite it after recolouring.
+  const [backgroundSource, setBackgroundSource] = useState<HandheldArt | null>(null);
   // The editor's working draft (animation frames), kept so re-opening resumes
   // the same work instead of restarting from the scheme render. Dropped when the
   // design is changed another way (preset, recolour, upload).
@@ -159,6 +162,15 @@ export function HandheldPicker() {
       if (stored.animation) {
         const view = ANIMATED_PRESETS.find((preset) => preset.game === stored.animation);
         if (view) setAnimationId(view.id);
+      } else if (stored.background) {
+        // Resume the chassis background: keep the source for saving and decode it
+        // back to pixels so recolouring re-composites it live.
+        setBackgroundSource(stored.background);
+        void decodeBackgroundSource(stored.background)
+          .then(setBackground)
+          .catch(() => {
+            /* Corrupt source; the recoloured skin still shows. */
+          });
       } else if (stored.art) {
         setDrawnArt(stored.art);
       }
@@ -335,6 +347,7 @@ export function HandheldPicker() {
   const clearBackground = () => {
     setBackground(null);
     setBackgroundArt(null);
+    setBackgroundSource(null);
   };
 
   // Upload an image to show through the chassis. It supersedes any hand-drawn
@@ -346,8 +359,9 @@ export function HandheldPicker() {
     setError(null);
     setUploadNote("Reading image…");
     try {
-      const image = await readImageBackground(file);
-      setBackground(image);
+      const { pixels, source } = await readImageBackground(file);
+      setBackground(pixels);
+      setBackgroundSource(source);
       setAnimationId(null);
       setDrawnArt(null);
       setDraft(null);
@@ -390,6 +404,9 @@ export function HandheldPicker() {
       presetId,
       scheme,
       ...(activeArt ? { art: activeArt } : {}),
+      // Persist the background source (not just the composite) so recolouring in
+      // the live console re-composites it instead of dropping it.
+      ...(background && backgroundSource && !animationId ? { background: backgroundSource } : {}),
       ...(animationGame ? { animation: animationGame } : {}),
     };
     try {

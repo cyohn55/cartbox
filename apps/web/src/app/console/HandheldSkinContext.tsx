@@ -40,6 +40,11 @@ interface HandheldSkinContextValue {
   /** Apply free-form pixel art drawn in the editor as the current skin. */
   applyCustomArt: (art: HandheldArt) => void;
   /**
+   * Show an image through the chassis: `art` is the composited skin the console
+   * renders, `source` is the image kept so recolouring re-composites it.
+   */
+  applyBackground: (source: HandheldArt, art: HandheldArt) => void;
+  /**
    * Play a marquee animation on the chassis: the pre-rendered sheet is the
    * displayed art, and the scene id is recorded so the UI can show which is
    * active and recolouring can re-render it in the new colours.
@@ -121,6 +126,9 @@ export function HandheldSkinProvider({ children }: { children: ReactNode }) {
   const applyCustomArt = (art: HandheldArt) =>
     commit((current) => ({ presetId: CUSTOM_ART_PRESET_ID, scheme: current.scheme, art }));
 
+  const applyBackground = (source: HandheldArt, art: HandheldArt) =>
+    commit((current) => ({ presetId: CUSTOM_ART_PRESET_ID, scheme: current.scheme, art, background: source }));
+
   const applyAnimation = (art: HandheldArt, game: HandheldGameId) =>
     commit((current) => ({ presetId: CUSTOM_ART_PRESET_ID, scheme: current.scheme, art, animation: game }));
 
@@ -136,7 +144,7 @@ export function HandheldSkinProvider({ children }: { children: ReactNode }) {
 
   return (
     <HandheldSkinContext.Provider
-      value={{ handheld, recolorRegion, applyPreset, applyCustomArt, applyAnimation, clearArt, reset }}
+      value={{ handheld, recolorRegion, applyPreset, applyCustomArt, applyBackground, applyAnimation, clearArt, reset }}
     >
       {children}
     </HandheldSkinContext.Provider>
