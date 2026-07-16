@@ -296,14 +296,12 @@ const RETRO_LAYOUT: readonly SpritePlacement[] = [
 ];
 
 /**
- * Build the retro-arcade scene: a night-lit game-room wall (vertical gradient,
- * faint scanlines, sparse pinpoint "stars", a stage floor) stamped with an
- * arrangement of original pixel-art props — an arcade cabinet, console,
- * gamepad, cartridges, and characters. The result feeds the same lighting model
- * as {@link buildBackdropScene}, so every prop is relit each frame with bevels,
- * specular glints, self-shadow and emissive glow.
+ * Build just the night-lit game-room back wall — a vertical gradient, faint CRT
+ * scanlines, sparse pinpoint "stars", and a stage floor — with no props. This is
+ * the backdrop the 3D voxel props are composited over; it still feeds the same
+ * lighting model, so the orbiting light plays gently across it each frame.
  */
-export function buildRetroScene(
+export function buildRetroWall(
   width: number,
   height: number,
   wall: RetroWallPalette = DEFAULT_RETRO_WALL,
@@ -373,6 +371,24 @@ export function buildRetroScene(
       }
     }
   }
+
+  deriveSceneNormals(scene);
+  return scene;
+}
+
+/**
+ * Build the retro-arcade scene: {@link buildRetroWall} stamped with an
+ * arrangement of the original pixel-art props as flat, material-lit reliefs.
+ * This is the 2D relief form of the scene (the 3D voxel backdrop composites
+ * rotating voxel models over the wall instead); kept for the material-lighting
+ * tests and as a static fallback.
+ */
+export function buildRetroScene(
+  width: number,
+  height: number,
+  wall: RetroWallPalette = DEFAULT_RETRO_WALL,
+): BackdropScene {
+  const scene = buildRetroWall(width, height, wall);
 
   for (const { sprite, fx, fy, scale } of RETRO_LAYOUT) {
     stampSprite(scene, sprite, Math.round(fx * width), Math.round(fy * height), scale);

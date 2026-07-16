@@ -75,6 +75,21 @@ export {
   type VoxelImage,
 } from "./render/voxelRenderer";
 export {
+  extrudeSprite,
+  modelDiagonal,
+  type VoxelModel,
+  type ExtrudeOptions,
+  type PixelSource,
+} from "./render/voxelModel";
+export {
+  renderVoxelModel,
+  voxelCanvasSize,
+  DEFAULT_MODEL_LIGHT,
+  type ModelLight,
+  type RenderModelOptions,
+  type VoxelRender,
+} from "./render/voxelModelRenderer";
+export {
   LIGHTING_PRESETS,
   DEFAULT_LIGHTING_PRESET_ID,
   lightingPresetConditions,
