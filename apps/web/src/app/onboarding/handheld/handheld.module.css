@@ -120,9 +120,12 @@
 
 .presetThumb {
   width: 100%;
-  aspect-ratio: 434 / 790;
+  aspect-ratio: 867 / 1579;
   object-fit: contain;
-  image-rendering: pixelated;
+  /* The source is a full-resolution render shrunk to card size, so let the
+     browser downsample smoothly — nearest-neighbour ("pixelated") drops the
+     thin arrows, letters and text at this scale. */
+  image-rendering: auto;
 }
 
 .presetName {

@@ -210,11 +210,14 @@ const presets = {
 };
 fs.writeFileSync(path.join(OUT, "presets.json"), JSON.stringify(presets, null, 2));
 
-// preview/<id>.png — a downscaled render of each preset.
+// preview/<id>.png — a FULL-RESOLUTION render of each preset. The picker shrinks
+// it to card size with the browser's smooth downsampler, which keeps thin details
+// (D-pad arrows, button letters, on-shell text) from being dropped the way a
+// pre-downscaled, nearest-sampled thumbnail lost them.
 for (const preset of HANDHELD_PRESETS) {
   const rendered = renderHandheld(template, preset.scheme);
-  const { w, h } = writePreview(rendered, path.join(PREVIEW, `${preset.id}.png`), 360);
-  console.log(`preview ${preset.id}: ${w}x${h}`);
+  writeRgba(rendered, path.join(PREVIEW, `${preset.id}.png`));
+  console.log(`preview ${preset.id}: ${width}x${height}`);
 }
 
 console.log(`wrote base.png, mask.png, presets.json, ${HANDHELD_PRESETS.length} previews -> ${OUT}`);

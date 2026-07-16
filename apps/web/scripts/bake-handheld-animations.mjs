@@ -35,8 +35,15 @@ fs.mkdirSync(PREVIEW, { recursive: true });
 
 const BASE_LAYER = "Handheld";
 const MASK_GROUP = "Vertical_Handheld";
-/** Frames are downscaled so the sheet stays well under the inline data-URL cap. */
-const TARGET_FRAME_WIDTH = 360;
+/**
+ * Sheet frames are kept at full template resolution so the marquee and every
+ * marking stay crisp when the console renders the device near 1:1 on a
+ * high-DPR screen. The flat chassis compresses well, so even eight full-size
+ * frames stay comfortably under the inline data-URL budget.
+ */
+const TARGET_FRAME_WIDTH = Infinity;
+/** Guard: warn if a sheet's data URL would approach the localStorage cap. */
+const MAX_ART_DATA_URL_CHARS = 4_000_000;
 
 // --- Crop + split, identical to extract-handheld.mjs so the frames align ------
 
@@ -202,12 +209,19 @@ const frameH = Math.round(template.height / scale);
 const manifest = [];
 for (const preset of HANDHELD_ANIMATED_PRESETS) {
   const fullFrames = renderAnimatedFrames(template, preset);
-  const frames = fullFrames.map((frame) => downscaleFrame(frame, template.width, template.height, frameW, frameH));
+  const frames =
+    scale === 1 ? fullFrames : fullFrames.map((frame) => downscaleFrame(frame, template.width, template.height, frameW, frameH));
   writeSheet(frames, frameW, frameH, path.join(ANIM, `${preset.id}.png`));
-  writeFramePng(frames[0], frameW, frameH, path.join(PREVIEW, `${preset.id}.png`));
+  // The card thumbnail is the full-resolution first frame, so it stays crisp
+  // when the picker shrinks it with the browser's smooth downsampler.
+  writeFramePng(fullFrames[0], template.width, template.height, path.join(PREVIEW, `${preset.id}.png`));
   manifest.push({ id: preset.id, label: preset.label, frames: preset.frames, durationMs: preset.durationMs, frameW, frameH });
   const sheetBytes = fs.statSync(path.join(ANIM, `${preset.id}.png`)).size;
-  console.log(`baked ${preset.id}: ${preset.frames} frames @ ${frameW}x${frameH} (${(sheetBytes / 1024).toFixed(0)} KB sheet)`);
+  const approxDataUrlChars = Math.round((sheetBytes * 4) / 3) + 22; // base64 + data: prefix
+  const budget = approxDataUrlChars <= MAX_ART_DATA_URL_CHARS ? "ok" : "OVER BUDGET";
+  console.log(
+    `baked ${preset.id}: ${preset.frames} frames @ ${frameW}x${frameH} (${(sheetBytes / 1024).toFixed(0)} KB sheet, ~${(approxDataUrlChars / 1e6).toFixed(2)}M data URL — ${budget})`,
+  );
 }
 
 fs.writeFileSync(path.join(ANIM, "manifest.json"), JSON.stringify(manifest, null, 2));
