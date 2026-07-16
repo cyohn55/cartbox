@@ -26,7 +26,7 @@ import {
 
 import { authHeaders } from "@/lib/supabase-browser";
 import { isStaticExport } from "@/lib/staticSite";
-import { CUSTOM_PRESET_ID, CUSTOM_ART_PRESET_ID, type HandheldArt, type StoredHandheld } from "@/lib/handheld";
+import { CUSTOM_PRESET_ID, CUSTOM_ART_PRESET_ID, normalizeHandheld, type HandheldArt, type StoredHandheld } from "@/lib/handheld";
 import { loadHandheldTemplate } from "@/lib/handheldTemplate";
 import { saveHandheldDraft, loadHandheldDraft, clearHandheldDraft, type HandheldDraft } from "@/lib/handheldDraft";
 import { assembleSheetCanvas, sliceSheet } from "@/lib/handheldSheet";
@@ -97,6 +97,25 @@ export function HandheldPicker() {
     return () => {
       alive = false;
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Resume the player's current handheld when they come back to edit it: seed the
+  // scheme, preset and any custom art from what the console is showing. Runs once
+  // on mount; a saved editor draft (loaded above) still wins for the art, so an
+  // in-progress drawing is not lost.
+  useEffect(() => {
+    const raw = window.localStorage.getItem(LOCAL_HANDHELD_KEY);
+    if (!raw) return;
+    try {
+      const stored = normalizeHandheld(JSON.parse(raw));
+      setScheme(stored.scheme);
+      setPresetId(stored.presetId);
+      if (stored.art) setArt(stored.art);
+    } catch {
+      // Ignore a corrupt stored value; the defaults stand.
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Re-render the live preview. Custom pixel art (when present) wins over the
@@ -235,7 +254,10 @@ export function HandheldPicker() {
           throw new Error(body?.error ?? "Could not save your handheld.");
         }
       }
-      router.push(next);
+      // The static demo has no account pages (the profile step needs a server),
+      // so boot straight into the console — the chosen skin is already in
+      // localStorage, which is where the console reads it from.
+      router.push(isStaticExport ? "/console" : next);
       router.refresh();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Could not save your handheld.");

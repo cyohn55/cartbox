@@ -47,6 +47,19 @@ export function CreateScreen() {
           </a>
         ))}
       </div>
+
+      <h2 style={{ marginTop: 20 }}>CUSTOMIZE YOUR HANDHELD</h2>
+      <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
+        <a className="os-grid-card" href={withBasePath("/onboarding/handheld")} style={{ padding: 12 }}>
+          <span className="os-grid-title" style={{ fontSize: 13 }}>
+            EDIT MY HANDHELD
+          </span>
+          <span className="os-grid-sub" style={{ marginTop: 4, display: "block" }}>
+            Recolour it, pick a premade or animated skin, or draw your own — your
+            current design opens ready to edit.
+          </span>
+        </a>
+      </div>
     </div>
   );
 }
