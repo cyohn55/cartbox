@@ -16,6 +16,8 @@ import {
   BUTTON_STYLES,
   CONSOLE_THEMES,
   CONTROL_LAYOUTS,
+  OS_PHOSPHORS,
+  OS_STYLES,
   type ConsoleSettings,
   type FaceButtonColors,
 } from "./consoleSettings";
@@ -82,6 +84,37 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
       <p className="os-card-body" style={{ margin: 0 }}>
         {CONSOLE_THEMES.find((theme) => theme.id === settings.theme)?.blurb}
       </p>
+
+      <OptionRow
+        label="INTERFACE"
+        options={OS_STYLES}
+        value={settings.osStyle}
+        onPick={(osStyle) => update({ osStyle })}
+      />
+      <p className="os-card-body" style={{ margin: 0 }}>
+        {OS_STYLES.find((style) => style.id === settings.osStyle)?.blurb}
+      </p>
+      {settings.osStyle === "pipboy" && (
+        <>
+          <OptionRow
+            label="PHOSPHOR"
+            options={OS_PHOSPHORS}
+            value={settings.osPhosphor}
+            onPick={(osPhosphor) => update({ osPhosphor })}
+          />
+          <div className="os-option-row">
+            <button
+              type="button"
+              className="os-kind-option"
+              data-active={settings.osScanlines}
+              aria-pressed={settings.osScanlines}
+              onClick={() => update({ osScanlines: !settings.osScanlines })}
+            >
+              {settings.osScanlines ? "▤ SCANLINES ON" : "▤ SCANLINES OFF"}
+            </button>
+          </div>
+        </>
+      )}
 
       <OptionRow
         label="CONTROLS"

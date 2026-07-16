@@ -30,7 +30,7 @@ import { CUSTOM_PRESET_ID, CUSTOM_ART_PRESET_ID, normalizeHandheld, type Handhel
 import { loadHandheldTemplate } from "@/lib/handheldTemplate";
 import { saveHandheldDraft, loadHandheldDraft, clearHandheldDraft, type HandheldDraft } from "@/lib/handheldDraft";
 import { assembleSheetCanvas, sliceSheet } from "@/lib/handheldSheet";
-import { ANIMATED_PRESETS, loadAnimatedArt, type AnimatedPresetView } from "@/lib/handheldAnimated";
+import { ANIMATED_PRESETS, animatedPresetView, renderAnimatedArt } from "@/lib/handheldAnimated";
 import {
   loadConsoleSettings,
   saveConsoleSettings,
@@ -71,10 +71,12 @@ export function HandheldPicker() {
   const [error, setError] = useState<string | null>(null);
   const [uploadNote, setUploadNote] = useState<string | null>(null);
   // Free-form pixel art drawn in the editor; when set it supersedes the scheme.
-  const [art, setArt] = useState<HandheldArt | null>(null);
-  // Which animated premade is selected, for the card highlight + stage label
-  // (the saved skin records it as custom art, so this is UI state only).
-  const [animatedId, setAnimatedId] = useState<string | null>(null);
+  const [drawnArt, setDrawnArt] = useState<HandheldArt | null>(null);
+  // The selected marquee animation (a preset id), independent of the chassis
+  // colours. When set, the displayed/saved skin is rendered live from `scheme`,
+  // so recolouring recolours the animation too.
+  const [animationId, setAnimationId] = useState<string | null>(null);
+  const [animatedArt, setAnimatedArt] = useState<HandheldArt | null>(null);
   const [animatedError, setAnimatedError] = useState<string | null>(null);
   // The editor's working draft (animation frames), kept so re-opening resumes
   // the same work instead of restarting from the scheme render. Dropped when the
@@ -89,6 +91,20 @@ export function HandheldPicker() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
 
+  // What actually renders/saves: a live animation when one is selected, else the
+  // hand-drawn art (if any), else the static recoloured skin (art === null).
+  const activeArt = animationId ? animatedArt : drawnArt;
+
+  // Stage caption: the chassis name, with the animation appended when set.
+  const chassisLabel =
+    drawnArt && !animationId
+      ? "Custom art"
+      : presetId === CUSTOM_PRESET_ID || presetId === CUSTOM_ART_PRESET_ID
+        ? "Custom"
+        : handheldPreset(presetId).label;
+  const animationLabel = animationId ? animatedPresetView(animationId)?.label : null;
+  const stageLabel = animationLabel ? `${chassisLabel} · ${animationLabel}` : chassisLabel;
+
   // Load the shared chrome + region mask once, then restore any saved drawing so
   // a reload resumes it — both as the editable draft and in the live preview.
   useEffect(() => {
@@ -102,7 +118,7 @@ export function HandheldPicker() {
         setDraft(savedDraft);
         const restoredArt = draftToArt(savedDraft);
         if (restoredArt) {
-          setArt(restoredArt);
+          setDrawnArt(restoredArt);
           setPresetId(CUSTOM_ART_PRESET_ID);
         }
       })
@@ -124,7 +140,14 @@ export function HandheldPicker() {
       const stored = normalizeHandheld(JSON.parse(raw));
       setScheme(stored.scheme);
       setPresetId(stored.presetId);
-      if (stored.art) setArt(stored.art);
+      // An animation re-renders live from the scheme, so restore the selection
+      // rather than the baked sheet; otherwise restore any hand-drawn art.
+      if (stored.animation) {
+        const view = ANIMATED_PRESETS.find((preset) => preset.game === stored.animation);
+        if (view) setAnimationId(view.id);
+      } else if (stored.art) {
+        setDrawnArt(stored.art);
+      }
     } catch {
       // Ignore a corrupt stored value; the defaults stand.
     }
@@ -140,6 +163,34 @@ export function HandheldPicker() {
     setOsScanlines(settings.osScanlines);
   }, []);
 
+  // Render the selected animation live in the current chassis colours. Debounced
+  // so dragging a colour slider coalesces into one render (each frame is a full
+  // template composite). Clears when no animation is selected.
+  useEffect(() => {
+    if (!template || !animationId) {
+      setAnimatedArt(null);
+      return;
+    }
+    const view = animatedPresetView(animationId);
+    if (!view) {
+      setAnimatedArt(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      try {
+        const rendered = renderAnimatedArt(template, scheme, view);
+        if (!cancelled) setAnimatedArt(rendered);
+      } catch {
+        if (!cancelled) setAnimatedError(`Could not render the ${view.label} animation.`);
+      }
+    }, 120);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [template, scheme, animationId]);
+
   // Re-render the live preview. Custom pixel art (when present) wins over the
   // region-recoloured scheme, so the preview always shows what will be saved.
   useEffect(() => {
@@ -148,7 +199,8 @@ export function HandheldPicker() {
     const context = canvas.getContext("2d");
     if (!context) return;
 
-    if (art) {
+    if (activeArt) {
+      const art = activeArt;
       const image = new Image();
       // Animated art is a horizontal sprite sheet: play it back in the preview so
       // the marquee looks alive; a single-frame image just draws once.
@@ -197,43 +249,33 @@ export function HandheldPicker() {
     const image = context.createImageData(template.width, template.height);
     image.data.set(rgba);
     context.putImageData(image, 0, 0);
-  }, [template, scheme, art]);
+  }, [template, scheme, activeArt]);
 
-  // Choosing a premade or recolouring a region drops any custom art — the two
-  // ways of designing the handheld are mutually exclusive.
+  // Choosing a premade or recolouring a region sets the chassis colours and
+  // drops any hand-drawn art, but KEEPS the selected animation so it re-renders
+  // in the new colours (that is the whole point of decoupling the two).
   const choosePreset = (preset: (typeof HANDHELD_PRESETS)[number]) => {
     setPresetId(preset.id);
     setScheme(preset.scheme);
-    setArt(null);
+    setDrawnArt(null);
     setDraft(null);
-    setAnimatedId(null);
     clearHandheldDraft();
   };
 
   const recolour = (regionId: string, color: string) => {
     setScheme((current) => ({ ...current, [regionId]: color }));
     setPresetId(CUSTOM_PRESET_ID);
-    setArt(null);
+    setDrawnArt(null);
     setDraft(null);
-    setAnimatedId(null);
     clearHandheldDraft();
   };
 
-  // Choosing an animated premade loads its baked sprite sheet as playable art.
-  // It is stored as custom art (a sheet the console animates), so `animatedId`
-  // is kept only for the card highlight and stage label in this screen.
-  const chooseAnimated = async (preset: AnimatedPresetView) => {
+  // Pick (or clear) the marquee animation. It rides on the current chassis and
+  // renders live from `scheme` via the effect above, so it works on ANY handheld
+  // and recolours with the chassis. Null turns the animation off.
+  const chooseAnimation = (id: string | null) => {
     setAnimatedError(null);
-    try {
-      const loaded = await loadAnimatedArt(preset);
-      setArt(loaded);
-      setPresetId(CUSTOM_ART_PRESET_ID);
-      setAnimatedId(preset.id);
-      setDraft(null);
-      clearHandheldDraft();
-    } catch {
-      setAnimatedError(`Could not load the ${preset.label} animation.`);
-    }
+    setAnimationId(id);
   };
 
   // Bring back edits made in Aseprite (or any pixel tool) on the downloaded
@@ -247,9 +289,8 @@ export function HandheldPicker() {
       const layers = await parseAsepriteLayers(new Uint8Array(await file.arrayBuffer()));
       setScheme((current) => extractSchemeFromLayers(layers, current));
       setPresetId(CUSTOM_PRESET_ID);
-      setArt(null);
+      setDrawnArt(null);
       setDraft(null);
-      setAnimatedId(null);
       clearHandheldDraft();
       setUploadNote(`Applied colours from ${file.name}.`);
     } catch (importError) {
@@ -260,7 +301,15 @@ export function HandheldPicker() {
   const save = async () => {
     setSaving(true);
     setError(null);
-    const handheld: StoredHandheld = art ? { presetId, scheme, art } : { presetId, scheme };
+    // Persist the chassis (presetId + scheme), the active art (live animation or
+    // hand-drawn), and the animation game id so re-opening resumes recolouring.
+    const animationGame = animationId ? animatedPresetView(animationId)?.game : undefined;
+    const handheld: StoredHandheld = {
+      presetId,
+      scheme,
+      ...(activeArt ? { art: activeArt } : {}),
+      ...(animationGame ? { animation: animationGame } : {}),
+    };
     try {
       window.localStorage.setItem(LOCAL_HANDHELD_KEY, JSON.stringify(handheld));
       // Make the live console default to the handheld they just designed, and
@@ -304,15 +353,7 @@ export function HandheldPicker() {
       <div className={styles.layout}>
         <section className={styles.stage} aria-label="Handheld preview">
           <canvas ref={canvasRef} className={styles.preview} />
-          <span className={styles.stageLabel}>
-            {animatedId
-              ? ANIMATED_PRESETS.find((preset) => preset.id === animatedId)?.label ?? "Animated"
-              : art
-                ? "Custom art"
-                : presetId === CUSTOM_PRESET_ID
-                  ? "Custom"
-                  : handheldPreset(presetId).label}
-          </span>
+          <span className={styles.stageLabel}>{stageLabel}</span>
         </section>
 
         <div className={styles.controls}>
@@ -336,15 +377,30 @@ export function HandheldPicker() {
           </section>
 
           <section className={styles.section}>
-            <div className={styles.sectionHead}>Animated</div>
+            <div className={styles.sectionHead}>Marquee animation</div>
+            <p className={styles.hint}>
+              Play an arcade scene on the chassis — it renders in your handheld&apos;s colours and rides on whichever
+              chassis you pick above.
+            </p>
             <div className={styles.presetGrid}>
+              <button
+                type="button"
+                className={`${styles.presetCard} ${animationId === null ? styles.presetCardActive : ""}`}
+                onClick={() => chooseAnimation(null)}
+                aria-pressed={animationId === null}
+              >
+                <span className={styles.noneThumb} aria-hidden>
+                  —
+                </span>
+                <span className={styles.presetName}>None</span>
+              </button>
               {ANIMATED_PRESETS.map((preset) => (
                 <button
                   key={preset.id}
                   type="button"
-                  className={`${styles.presetCard} ${animatedId === preset.id ? styles.presetCardActive : ""}`}
-                  onClick={() => chooseAnimated(preset)}
-                  aria-pressed={animatedId === preset.id}
+                  className={`${styles.presetCard} ${animationId === preset.id ? styles.presetCardActive : ""}`}
+                  onClick={() => chooseAnimation(preset.id)}
+                  aria-pressed={animationId === preset.id}
                 >
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img className={styles.presetThumb} src={preset.previewUrl} alt={preset.label} />
@@ -467,11 +523,11 @@ export function HandheldPicker() {
           initialDraft={draft}
           onCancel={() => setEditing(false)}
           onApply={(drawn, workingDraft) => {
-            setArt(drawn);
+            setDrawnArt(drawn);
             setDraft(workingDraft); // resume from these frames next time
             void saveHandheldDraft(workingDraft); // survive a reload too
             setPresetId(CUSTOM_ART_PRESET_ID);
-            setAnimatedId(null);
+            setAnimationId(null); // a hand-drawn skin replaces the animation
             setEditing(false);
           }}
         />

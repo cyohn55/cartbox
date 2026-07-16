@@ -173,6 +173,19 @@
   color: var(--text);
 }
 
+/* The "None" animation card: a plain tile matching the thumbnail footprint. */
+.noneThumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 867 / 1579;
+  border-radius: 6px;
+  background: var(--well);
+  color: var(--faint);
+  font-size: 24px;
+}
+
 /* --- Recolour --- */
 .swatchRow {
   display: flex;

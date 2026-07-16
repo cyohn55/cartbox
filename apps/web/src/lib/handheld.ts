@@ -12,7 +12,9 @@
 import {
   normalizeScheme,
   handheldPreset,
+  HANDHELD_ANIMATED_PRESETS,
   DEFAULT_HANDHELD_PRESET_ID,
+  type HandheldGameId,
   type HandheldScheme,
 } from "@cartbox/editor";
 
@@ -26,6 +28,9 @@ export const CUSTOM_PRESET_ID = "custom";
 /** Preset id used when the skin is free-form pixel art from the in-app editor. */
 export const CUSTOM_ART_PRESET_ID = "custom-art";
 
+/** The arcade scenes an animation can play, for validating a stored choice. */
+const ANIMATION_GAMES: readonly string[] = HANDHELD_ANIMATED_PRESETS.map((preset) => preset.game);
+
 export interface StoredHandheld {
   /** The premade the scheme came from, "custom", or "custom-art". */
   presetId: string;
@@ -33,6 +38,18 @@ export interface StoredHandheld {
   scheme: HandheldScheme;
   /** Free-form pixel art drawn in the editor; when present the console renders it. */
   art?: HandheldArt;
+  /**
+   * An arcade scene played on the chassis marquee. Independent of the chassis
+   * colours: the animation is rendered live from `scheme`, so recolouring the
+   * handheld recolours the animation too. Persisted so re-opening the picker
+   * resumes the same animation (and keeps recolouring it).
+   */
+  animation?: HandheldGameId;
+}
+
+/** A stored animation choice, coerced to a known game id or dropped. */
+function normalizeAnimation(value: unknown): HandheldGameId | undefined {
+  return typeof value === "string" && ANIMATION_GAMES.includes(value) ? (value as HandheldGameId) : undefined;
 }
 
 /** True for the ids we keep verbatim rather than resolving to a premade. */
@@ -53,7 +70,13 @@ export function normalizeHandheld(input: unknown): StoredHandheld {
   const base = handheldPreset(isCustomId(presetId) ? DEFAULT_HANDHELD_PRESET_ID : presetId).scheme;
   const art = normalizeArt(source.art);
   const scheme = normalizeScheme(source.scheme, base);
-  return art ? { presetId, scheme, art } : { presetId, scheme };
+  const animation = normalizeAnimation((source as { animation?: unknown }).animation);
+  return {
+    presetId,
+    scheme,
+    ...(art ? { art } : {}),
+    ...(animation ? { animation } : {}),
+  };
 }
 
 /** The default handheld a brand-new account starts on. */
