@@ -198,4 +198,15 @@ function layerFrom(mask, color, w, h) {
   passed += 1;
 }
 
+// 6. Every premade keeps the D-pad arrows distinct from the D-pad and the
+//    button letters distinct from the buttons, so the markings are always
+//    visible against the control they sit on.
+{
+  for (const preset of HANDHELD_PRESETS) {
+    assert.notEqual(preset.scheme.dpadArrow, preset.scheme.dpad, `${preset.id}: arrows differ from the D-pad`);
+    assert.notEqual(preset.scheme.buttonLetter, preset.scheme.buttonColor, `${preset.id}: letters differ from the buttons`);
+  }
+  passed += 1;
+}
+
 console.log(`PASS — handheldSkin: ${passed} checks green.`);

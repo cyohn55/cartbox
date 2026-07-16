@@ -55,6 +55,8 @@ function opaqueTemplate(width, height) {
     for (const region of HANDHELD_REGIONS) {
       assert.match(preset.scheme[region.id], HEX, `${preset.id}.${region.id} is a valid colour`);
     }
+    assert.notEqual(preset.scheme.dpadArrow, preset.scheme.dpad, `${preset.id}: arrows differ from the D-pad`);
+    assert.notEqual(preset.scheme.buttonLetter, preset.scheme.buttonColor, `${preset.id}: letters differ from the buttons`);
     assert.equal(handheldAnimatedPreset(preset.id), preset, "looks up by id");
   }
   assert.equal(handheldAnimatedPreset("not-a-preset"), undefined, "unknown id resolves to undefined");

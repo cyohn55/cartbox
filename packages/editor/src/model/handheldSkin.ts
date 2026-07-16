@@ -75,19 +75,21 @@ export function makeScheme(color: (region: HandheldRegion) => string): HandheldS
 
 /**
  * A scheme with a single accent over one body colour: the chassis and its recess
- * panels take the body, while the controls and markings (D-pad, arrows, button
- * letters, text and decals) take the accent. Exported so the animated-skin model
- * can build the same two-tone base schemes.
+ * panels take the body; the D-pad, buttons, on-shell text and decals take the
+ * accent. The D-pad arrows and button letters sit *on top of* the accent-coloured
+ * D-pad and buttons, so they take `ink` (the chassis colour by default) to read
+ * as an engraved cut-out — never the same colour as the control they mark.
+ * Exported so the animated-skin model can build the same two-tone base schemes.
  */
-export function twoTone(body: string, accent: string): HandheldScheme {
+export function twoTone(body: string, accent: string, ink: string = body): HandheldScheme {
   return {
     face: body,
     dpadPanel: body,
     buttonPanel: body,
     dpad: accent,
     buttonColor: accent,
-    dpadArrow: accent,
-    buttonLetter: accent,
+    dpadArrow: ink,
+    buttonLetter: ink,
     text: accent,
     decal: accent,
   };
