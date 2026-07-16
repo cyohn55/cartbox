@@ -14,6 +14,21 @@
  * same reason `Working/normal-lit-demo/lighting-core.mjs` duplicates it.
  */
 
+import {
+  ARCADE,
+  CARTRIDGE,
+  COIN,
+  CONSOLE,
+  GAMEPAD,
+  GHOST,
+  HEART,
+  INVADER,
+  ROBOT,
+  STAR,
+  stampSprite,
+  type Sprite,
+} from "./retroSprites";
+
 /** A pixel stores one of 16 normal-direction indices (mirror of normals.ts). */
 export const NORMAL_DIRECTION_COUNT = 16;
 const COMPASS_TILT = 0.55;
@@ -213,6 +228,158 @@ export function buildBackdropScene(
   }
 
   return { width, height, albedo, normalIdx, heightField, specular, roughness, emissive, emissiveColor };
+}
+
+/**
+ * Recompute `normalIdx` from the scene's height field via the engine's
+ * nearest-direction quantiser, so every raised sprite and bevel gets an
+ * authentic 16-direction normal. Call after all geometry is painted.
+ */
+export function deriveSceneNormals(scene: BackdropScene): void {
+  const { width, height, heightField, normalIdx } = scene;
+  const at = (x: number, y: number) =>
+    heightField[Math.max(0, Math.min(height - 1, y)) * width + Math.max(0, Math.min(width - 1, x))]!;
+  const slope = 2.6;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const dx = at(x + 1, y) - at(x - 1, y);
+      const dy = at(x, y + 1) - at(x, y - 1);
+      normalIdx[y * width + x] = nearestDirection([-dx * slope, -dy * slope, 1]);
+    }
+  }
+}
+
+/** Colours for the retro-arcade backdrop's back wall and floor. */
+export interface RetroWallPalette {
+  readonly wallTop: Rgb;
+  readonly wallBottom: Rgb;
+  readonly floor: Rgb;
+  readonly star: Rgb;
+}
+
+export const DEFAULT_RETRO_WALL: RetroWallPalette = {
+  wallTop: [34, 38, 74],
+  wallBottom: [58, 42, 88],
+  floor: [40, 34, 58],
+  star: [168, 184, 224],
+};
+
+/** One placed sprite: which art, where (top-left as 0..1 fractions), how big. */
+interface SpritePlacement {
+  readonly sprite: Sprite;
+  readonly fx: number;
+  readonly fy: number;
+  readonly scale: number;
+}
+
+/**
+ * The backdrop composition: a curated, deterministic arrangement of the retro
+ * props across the wall. Positions are viewport fractions so the layout holds
+ * at any buffer size; off-buffer pixels clip harmlessly. Tuned to frame a
+ * roughly 260×160 buffer while leaving the centre calm for the picker on top.
+ */
+const RETRO_LAYOUT: readonly SpritePlacement[] = [
+  { sprite: ARCADE, fx: 0.03, fy: 0.24, scale: 3 },
+  { sprite: CONSOLE, fx: 0.68, fy: 0.7, scale: 2 },
+  { sprite: GAMEPAD, fx: 0.38, fy: 0.72, scale: 2 },
+  { sprite: CARTRIDGE, fx: 0.26, fy: 0.08, scale: 2 },
+  { sprite: CARTRIDGE, fx: 0.86, fy: 0.12, scale: 2 },
+  { sprite: INVADER, fx: 0.55, fy: 0.08, scale: 2 },
+  { sprite: GHOST, fx: 0.74, fy: 0.32, scale: 2 },
+  { sprite: ROBOT, fx: 0.14, fy: 0.66, scale: 2 },
+  { sprite: COIN, fx: 0.47, fy: 0.4, scale: 2 },
+  { sprite: HEART, fx: 0.9, fy: 0.46, scale: 2 },
+  { sprite: STAR, fx: 0.34, fy: 0.5, scale: 2 },
+  { sprite: STAR, fx: 0.62, fy: 0.56, scale: 1 },
+  { sprite: STAR, fx: 0.2, fy: 0.34, scale: 1 },
+  { sprite: STAR, fx: 0.94, fy: 0.72, scale: 1 },
+];
+
+/**
+ * Build the retro-arcade scene: a night-lit game-room wall (vertical gradient,
+ * faint scanlines, sparse pinpoint "stars", a stage floor) stamped with an
+ * arrangement of original pixel-art props — an arcade cabinet, console,
+ * gamepad, cartridges, and characters. The result feeds the same lighting model
+ * as {@link buildBackdropScene}, so every prop is relit each frame with bevels,
+ * specular glints, self-shadow and emissive glow.
+ */
+export function buildRetroScene(
+  width: number,
+  height: number,
+  wall: RetroWallPalette = DEFAULT_RETRO_WALL,
+): BackdropScene {
+  const count = width * height;
+  const scene: BackdropScene = {
+    width,
+    height,
+    albedo: new Uint8ClampedArray(count * 3),
+    normalIdx: new Uint8Array(count),
+    heightField: new Float32Array(count),
+    specular: new Float32Array(count),
+    roughness: new Float32Array(count),
+    emissive: new Float32Array(count),
+    emissiveColor: new Uint8ClampedArray(count * 3),
+  };
+  const { albedo, heightField, specular, roughness, emissive, emissiveColor } = scene;
+
+  const floorStart = Math.floor(height * 0.76);
+  const mix = (a: number, b: number, t: number) => a + (b - a) * t;
+
+  for (let y = 0; y < height; y += 1) {
+    const gradient = y / Math.max(1, height - 1);
+    const onFloor = y >= floorStart;
+    for (let x = 0; x < width; x += 1) {
+      const i = y * width + x;
+
+      let r: number;
+      let g: number;
+      let b: number;
+      if (onFloor) {
+        // Stage floor: recedes to a slightly darker foreground.
+        const depth = (y - floorStart) / Math.max(1, height - floorStart);
+        r = mix(wall.floor[0], wall.floor[0] * 0.72, depth);
+        g = mix(wall.floor[1], wall.floor[1] * 0.72, depth);
+        b = mix(wall.floor[2], wall.floor[2] * 0.72, depth);
+      } else {
+        r = mix(wall.wallTop[0], wall.wallBottom[0], gradient);
+        g = mix(wall.wallTop[1], wall.wallBottom[1], gradient);
+        b = mix(wall.wallTop[2], wall.wallBottom[2], gradient);
+      }
+
+      // Faint CRT scanline every third row keeps the flat wall alive without a
+      // literal grid of blocks.
+      if (y % 3 === 2) {
+        r *= 0.9;
+        g *= 0.9;
+        b *= 0.9;
+      }
+      // Gentle per-pixel grain so the wall is never dead-flat.
+      const grain = (hash(x * 3 + y * 11) - 0.5) * 8;
+
+      albedo[i * 3] = r + grain;
+      albedo[i * 3 + 1] = g + grain;
+      albedo[i * 3 + 2] = b + grain;
+      heightField[i] = 0.18;
+      specular[i] = 0.06;
+      roughness[i] = 0.9;
+
+      // Sparse pinpoint stars on the upper wall (self-lit, so always visible).
+      if (!onFloor && hash(x * 41.3 + y * 71.7) > 0.992) {
+        emissive[i] = 0.8;
+        emissiveColor[i * 3] = wall.star[0];
+        emissiveColor[i * 3 + 1] = wall.star[1];
+        emissiveColor[i * 3 + 2] = wall.star[2];
+        heightField[i] = 0.3;
+      }
+    }
+  }
+
+  for (const { sprite, fx, fy, scale } of RETRO_LAYOUT) {
+    stampSprite(scene, sprite, Math.round(fx * width), Math.round(fy * height), scale);
+  }
+
+  deriveSceneNormals(scene);
+  return scene;
 }
 
 /** How the light animates: an eased orbit clear of the corners. */

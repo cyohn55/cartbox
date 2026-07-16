@@ -26,16 +26,18 @@
   /* Integer-ish upscale of a low-res render — nearest-neighbour keeps the
      pixels crisp (the opposite case from the downscaled skin previews). */
   image-rendering: pixelated;
-  /* Dimmed so the wall reads as atmosphere, never competing with the form. */
-  opacity: 0.5;
+  /* Bright enough that the retro scene reads clearly as fun game art, while
+     still sitting a touch behind the foreground. */
+  opacity: 0.82;
 }
 
-/* A vignette + wash so text and cards stay legible over the lit wall. */
+/* A soft vignette so the busy scene calms toward the centre where the picker
+   sits, keeping cards and text legible without hiding the art. */
 .backdrop::after {
   content: "";
   position: absolute;
   inset: 0;
-  background: radial-gradient(120% 90% at 50% 0%, rgba(8, 10, 18, 0.4), rgba(5, 7, 11, 0.82) 78%);
+  background: radial-gradient(120% 100% at 50% 42%, rgba(6, 8, 16, 0) 30%, rgba(6, 8, 16, 0.35) 70%, rgba(5, 7, 11, 0.62) 100%);
 }
 
 .head {
@@ -48,12 +50,16 @@
   font-weight: 700;
   letter-spacing: -0.01em;
   margin: 0 0 6px;
+  /* Loose text sits directly over the retro scene — a soft shadow keeps it
+     crisp against the brighter, busier backdrop. */
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
 }
 
 .subtitle {
   color: var(--muted);
   margin: 0;
   font-size: 15px;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.65);
 }
 
 .layout {
@@ -146,6 +152,7 @@
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--muted);
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.7);
 }
 
 .presetGrid {
