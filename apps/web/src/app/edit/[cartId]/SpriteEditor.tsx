@@ -138,7 +138,11 @@ export function SpriteEditor({
   useEffect(() => {
     if (seededPending.current || !pendingProp) return;
     seededPending.current = true;
-    // Grow the editing block so the prop's pixels fit before importing them.
+    // importImage writes at the sheet's top-left (tile 0), so view + publish the
+    // block anchored there — otherwise the default tile offset clips the prop's
+    // left edge out of view.
+    setTile(0);
+    // Grow the editing block so the whole prop fits before importing it.
     const longest = Math.max(pendingProp.width, pendingProp.height);
     setSpriteSize(longest <= sheet.tileSize ? 1 : longest <= sheet.tileSize * 2 ? 2 : 4);
     const data = new Uint8ClampedArray(decodeBase64Bytes(pendingProp.albedo));
