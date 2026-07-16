@@ -160,6 +160,7 @@ export {
   HANDHELD_PRESETS,
   DEFAULT_HANDHELD_PRESET_ID,
   makeScheme,
+  twoTone,
   renderHandheld,
   extractScheme,
   extractSchemeFromLayers,
@@ -172,6 +173,14 @@ export {
   type HandheldPreset,
   type HandheldTemplate,
 } from "./model/handheldSkin";
+export {
+  HANDHELD_ANIMATED_PRESETS,
+  handheldAnimatedPreset,
+  renderAnimatedFrame,
+  renderAnimatedFrames,
+  type HandheldGameId,
+  type HandheldAnimatedPreset,
+} from "./model/handheldAnimation";
 export {
   MAX_PAINT_LAYERS,
   createLayer,

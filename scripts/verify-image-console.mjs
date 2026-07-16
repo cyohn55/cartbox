@@ -26,7 +26,7 @@ const browser = await chromium.connectOverCDP(CDP);
 try {
   const context = await browser.newContext({ viewport: { width: 460, height: 940 }, hasTouch: true });
   await context.addInitScript((s) => {
-    localStorage.setItem("cartbox.handheld", JSON.stringify({ presetId: "iron-man", scheme: s }));
+    localStorage.setItem("cartbox.handheld", JSON.stringify({ presetId: "blue", scheme: s }));
     localStorage.setItem("cartbox.console.settings", JSON.stringify({ theme: "handheld" }));
   }, ironMan);
   const page = await context.newPage();

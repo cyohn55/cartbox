@@ -39,18 +39,108 @@
   ],
   "presets": [
     {
-      "id": "iron-man",
-      "label": "Iron Man",
+      "id": "red",
+      "label": "Red",
       "scheme": {
-        "face": "#195ba6",
-        "dpadPanel": "#195ba6",
-        "buttonPanel": "#195ba6",
-        "dpad": "#fad937",
-        "buttonColor": "#fad937",
-        "dpadArrow": "#fad937",
-        "buttonLetter": "#fad937",
-        "text": "#fad937",
-        "decal": "#fad937"
+        "face": "#cc3b3b",
+        "dpadPanel": "#cc3b3b",
+        "buttonPanel": "#cc3b3b",
+        "dpad": "#f2e6c9",
+        "buttonColor": "#f2e6c9",
+        "dpadArrow": "#f2e6c9",
+        "buttonLetter": "#f2e6c9",
+        "text": "#f2e6c9",
+        "decal": "#f2e6c9"
+      }
+    },
+    {
+      "id": "orange",
+      "label": "Orange",
+      "scheme": {
+        "face": "#e8792b",
+        "dpadPanel": "#e8792b",
+        "buttonPanel": "#e8792b",
+        "dpad": "#26374d",
+        "buttonColor": "#26374d",
+        "dpadArrow": "#26374d",
+        "buttonLetter": "#26374d",
+        "text": "#26374d",
+        "decal": "#26374d"
+      }
+    },
+    {
+      "id": "yellow",
+      "label": "Yellow",
+      "scheme": {
+        "face": "#f2c53d",
+        "dpadPanel": "#f2c53d",
+        "buttonPanel": "#f2c53d",
+        "dpad": "#33344a",
+        "buttonColor": "#33344a",
+        "dpadArrow": "#33344a",
+        "buttonLetter": "#33344a",
+        "text": "#33344a",
+        "decal": "#33344a"
+      }
+    },
+    {
+      "id": "green",
+      "label": "Green",
+      "scheme": {
+        "face": "#3fa65a",
+        "dpadPanel": "#3fa65a",
+        "buttonPanel": "#3fa65a",
+        "dpad": "#ef7d57",
+        "buttonColor": "#ef7d57",
+        "dpadArrow": "#ef7d57",
+        "buttonLetter": "#ef7d57",
+        "text": "#ef7d57",
+        "decal": "#ef7d57"
+      }
+    },
+    {
+      "id": "blue",
+      "label": "Blue",
+      "scheme": {
+        "face": "#2f6fd0",
+        "dpadPanel": "#2f6fd0",
+        "buttonPanel": "#2f6fd0",
+        "dpad": "#f2c53d",
+        "buttonColor": "#f2c53d",
+        "dpadArrow": "#f2c53d",
+        "buttonLetter": "#f2c53d",
+        "text": "#f2c53d",
+        "decal": "#f2c53d"
+      }
+    },
+    {
+      "id": "indigo",
+      "label": "Indigo",
+      "scheme": {
+        "face": "#3b3d8f",
+        "dpadPanel": "#3b3d8f",
+        "buttonPanel": "#3b3d8f",
+        "dpad": "#7cc4f2",
+        "buttonColor": "#7cc4f2",
+        "dpadArrow": "#7cc4f2",
+        "buttonLetter": "#7cc4f2",
+        "text": "#7cc4f2",
+        "decal": "#7cc4f2"
+      }
+    },
+    {
+      "id": "violet",
+      "label": "Violet",
+      "scheme": {
+        "face": "#7a3fa6",
+        "dpadPanel": "#7a3fa6",
+        "buttonPanel": "#7a3fa6",
+        "dpad": "#a7f070",
+        "buttonColor": "#a7f070",
+        "dpadArrow": "#a7f070",
+        "buttonLetter": "#a7f070",
+        "text": "#a7f070",
+        "decal": "#a7f070"
       }
     },
     {
@@ -60,72 +150,27 @@
         "face": "#3a3d42",
         "dpadPanel": "#3a3d42",
         "buttonPanel": "#3a3d42",
-        "dpad": "#e6e6e6",
-        "buttonColor": "#e6e6e6",
-        "dpadArrow": "#e6e6e6",
-        "buttonLetter": "#e6e6e6",
-        "text": "#e6e6e6",
-        "decal": "#e6e6e6"
+        "dpad": "#d6d9de",
+        "buttonColor": "#d6d9de",
+        "dpadArrow": "#d6d9de",
+        "buttonLetter": "#d6d9de",
+        "text": "#d6d9de",
+        "decal": "#d6d9de"
       }
     },
     {
-      "id": "bubblegum",
-      "label": "Bubblegum",
+      "id": "white",
+      "label": "White",
       "scheme": {
-        "face": "#e84d8a",
-        "dpadPanel": "#e84d8a",
-        "buttonPanel": "#e84d8a",
-        "dpad": "#fff3b0",
-        "buttonColor": "#fff3b0",
-        "dpadArrow": "#fff3b0",
-        "buttonLetter": "#fff3b0",
-        "text": "#fff3b0",
-        "decal": "#fff3b0"
-      }
-    },
-    {
-      "id": "mint",
-      "label": "Mint",
-      "scheme": {
-        "face": "#3dbe8a",
-        "dpadPanel": "#3dbe8a",
-        "buttonPanel": "#3dbe8a",
-        "dpad": "#f6f7d7",
-        "buttonColor": "#f6f7d7",
-        "dpadArrow": "#f6f7d7",
-        "buttonLetter": "#f6f7d7",
-        "text": "#f6f7d7",
-        "decal": "#f6f7d7"
-      }
-    },
-    {
-      "id": "grape",
-      "label": "Grape",
-      "scheme": {
-        "face": "#3f3f74",
-        "dpadPanel": "#3f3f74",
-        "buttonPanel": "#3f3f74",
-        "dpad": "#fad937",
-        "buttonColor": "#fad937",
-        "dpadArrow": "#fad937",
-        "buttonLetter": "#fad937",
-        "text": "#fad937",
-        "decal": "#fad937"
-      }
-    },
-    {
-      "id": "ember",
-      "label": "Ember",
-      "scheme": {
-        "face": "#b13e53",
-        "dpadPanel": "#b13e53",
-        "buttonPanel": "#b13e53",
-        "dpad": "#ffcd75",
-        "buttonColor": "#ffcd75",
-        "dpadArrow": "#ffcd75",
-        "buttonLetter": "#ffcd75",
-        "text": "#ffcd75",
-        "decal": "#ffcd75"
+        "face": "#eef1f4",
+        "dpadPanel": "#eef1f4",
+        "buttonPanel": "#eef1f4",
+        "dpad": "#cc3b3b",
+        "buttonColor": "#cc3b3b",
+        "dpadArrow": "#cc3b3b",
+        "buttonLetter": "#cc3b3b",
+        "text": "#cc3b3b",
+        "decal": "#cc3b3b"
       }
     }
   ]

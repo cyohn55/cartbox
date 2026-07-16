@@ -29,7 +29,8 @@ import { isStaticExport } from "@/lib/staticSite";
 import { CUSTOM_PRESET_ID, CUSTOM_ART_PRESET_ID, type HandheldArt, type StoredHandheld } from "@/lib/handheld";
 import { loadHandheldTemplate } from "@/lib/handheldTemplate";
 import { saveHandheldDraft, loadHandheldDraft, clearHandheldDraft, type HandheldDraft } from "@/lib/handheldDraft";
-import { assembleSheetCanvas } from "@/lib/handheldSheet";
+import { assembleSheetCanvas, sliceSheet } from "@/lib/handheldSheet";
+import { ANIMATED_PRESETS, loadAnimatedArt, type AnimatedPresetView } from "@/lib/handheldAnimated";
 import { loadConsoleSettings, saveConsoleSettings } from "@/app/console/consoleSettings";
 import { handheldAssetUrl } from "@/lib/handheldAssets";
 import { HandheldSkinEditor } from "./HandheldSkinEditor";
@@ -63,6 +64,10 @@ export function HandheldPicker() {
   const [uploadNote, setUploadNote] = useState<string | null>(null);
   // Free-form pixel art drawn in the editor; when set it supersedes the scheme.
   const [art, setArt] = useState<HandheldArt | null>(null);
+  // Which animated premade is selected, for the card highlight + stage label
+  // (the saved skin records it as custom art, so this is UI state only).
+  const [animatedId, setAnimatedId] = useState<string | null>(null);
+  const [animatedError, setAnimatedError] = useState<string | null>(null);
   // The editor's working draft (animation frames), kept so re-opening resumes
   // the same work instead of restarting from the scheme render. Dropped when the
   // design is changed another way (preset, recolour, upload).
@@ -103,18 +108,42 @@ export function HandheldPicker() {
     if (!context) return;
 
     if (art) {
-      // Animated art is a horizontal sprite sheet; preview its first frame.
-      const frameWidth = art.frames && art.frames > 1 ? art.w : 0;
       const image = new Image();
+      // Animated art is a horizontal sprite sheet: play it back in the preview so
+      // the marquee looks alive; a single-frame image just draws once.
+      if (art.frames && art.frames > 1) {
+        let timer: number | undefined;
+        image.onload = () => {
+          canvas.width = art.w;
+          canvas.height = art.h;
+          const urls = sliceSheet(image, art.w, art.h, art.frames!);
+          const frameImages = urls.map((url) => {
+            const frame = new Image();
+            frame.src = url;
+            return frame;
+          });
+          let index = 0;
+          const paint = () => {
+            const frame = frameImages[index];
+            if (frame) {
+              context.clearRect(0, 0, canvas.width, canvas.height);
+              context.drawImage(frame, 0, 0);
+            }
+            index = (index + 1) % frameImages.length;
+          };
+          paint();
+          timer = window.setInterval(paint, art.durationMs ?? 120);
+        };
+        image.src = art.url;
+        return () => {
+          if (timer !== undefined) window.clearInterval(timer);
+        };
+      }
       image.onload = () => {
-        canvas.width = frameWidth || image.naturalWidth;
+        canvas.width = image.naturalWidth;
         canvas.height = image.naturalHeight;
         context.clearRect(0, 0, canvas.width, canvas.height);
-        if (frameWidth) {
-          context.drawImage(image, 0, 0, frameWidth, image.naturalHeight, 0, 0, frameWidth, image.naturalHeight);
-        } else {
-          context.drawImage(image, 0, 0);
-        }
+        context.drawImage(image, 0, 0);
       };
       image.src = art.url;
       return;
@@ -136,6 +165,7 @@ export function HandheldPicker() {
     setScheme(preset.scheme);
     setArt(null);
     setDraft(null);
+    setAnimatedId(null);
     clearHandheldDraft();
   };
 
@@ -144,7 +174,25 @@ export function HandheldPicker() {
     setPresetId(CUSTOM_PRESET_ID);
     setArt(null);
     setDraft(null);
+    setAnimatedId(null);
     clearHandheldDraft();
+  };
+
+  // Choosing an animated premade loads its baked sprite sheet as playable art.
+  // It is stored as custom art (a sheet the console animates), so `animatedId`
+  // is kept only for the card highlight and stage label in this screen.
+  const chooseAnimated = async (preset: AnimatedPresetView) => {
+    setAnimatedError(null);
+    try {
+      const loaded = await loadAnimatedArt(preset);
+      setArt(loaded);
+      setPresetId(CUSTOM_ART_PRESET_ID);
+      setAnimatedId(preset.id);
+      setDraft(null);
+      clearHandheldDraft();
+    } catch {
+      setAnimatedError(`Could not load the ${preset.label} animation.`);
+    }
   };
 
   // Bring back edits made in Aseprite (or any pixel tool) on the downloaded
@@ -160,6 +208,7 @@ export function HandheldPicker() {
       setPresetId(CUSTOM_PRESET_ID);
       setArt(null);
       setDraft(null);
+      setAnimatedId(null);
       clearHandheldDraft();
       setUploadNote(`Applied colours from ${file.name}.`);
     } catch (importError) {
@@ -205,11 +254,13 @@ export function HandheldPicker() {
         <section className={styles.stage} aria-label="Handheld preview">
           <canvas ref={canvasRef} className={styles.preview} />
           <span className={styles.stageLabel}>
-            {art
-              ? "Custom art"
-              : presetId === CUSTOM_PRESET_ID
-                ? "Custom"
-                : handheldPreset(presetId).label}
+            {animatedId
+              ? ANIMATED_PRESETS.find((preset) => preset.id === animatedId)?.label ?? "Animated"
+              : art
+                ? "Custom art"
+                : presetId === CUSTOM_PRESET_ID
+                  ? "Custom"
+                  : handheldPreset(presetId).label}
           </span>
         </section>
 
@@ -231,6 +282,26 @@ export function HandheldPicker() {
                 </button>
               ))}
             </div>
+          </section>
+
+          <section className={styles.section}>
+            <div className={styles.sectionHead}>Animated</div>
+            <div className={styles.presetGrid}>
+              {ANIMATED_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  className={`${styles.presetCard} ${animatedId === preset.id ? styles.presetCardActive : ""}`}
+                  onClick={() => chooseAnimated(preset)}
+                  aria-pressed={animatedId === preset.id}
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img className={styles.presetThumb} src={preset.previewUrl} alt={preset.label} />
+                  <span className={styles.presetName}>{preset.label}</span>
+                </button>
+              ))}
+            </div>
+            {animatedError && <p className={styles.error}>{animatedError}</p>}
           </section>
 
           <section className={styles.section}>
@@ -295,6 +366,7 @@ export function HandheldPicker() {
             setDraft(workingDraft); // resume from these frames next time
             void saveHandheldDraft(workingDraft); // survive a reload too
             setPresetId(CUSTOM_ART_PRESET_ID);
+            setAnimatedId(null);
             setEditing(false);
           }}
         />

@@ -55,7 +55,7 @@ try {
   // --- Re-skinned console (phone), Iron Man ---
   const phone = await browser.newContext({ viewport: { width: 420, height: 900 }, hasTouch: true });
   await phone.addInitScript((s) => {
-    localStorage.setItem("cartbox.handheld", JSON.stringify({ presetId: "iron-man", scheme: s }));
+    localStorage.setItem("cartbox.handheld", JSON.stringify({ presetId: "blue", scheme: s }));
     localStorage.setItem("cartbox.console.settings", JSON.stringify({ theme: "handheld" }));
   }, ironMan);
   const consolePage = await phone.newPage();

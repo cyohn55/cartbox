@@ -1,0 +1,34 @@
+[
+  {
+    "id": "anim-space-invaders",
+    "label": "Space Invaders",
+    "frames": 8,
+    "durationMs": 180,
+    "frameW": 360,
+    "frameH": 656
+  },
+  {
+    "id": "anim-pac-man",
+    "label": "Pac-Man",
+    "frames": 8,
+    "durationMs": 130,
+    "frameW": 360,
+    "frameH": 656
+  },
+  {
+    "id": "anim-asteroids",
+    "label": "Asteroids",
+    "frames": 8,
+    "durationMs": 110,
+    "frameW": 360,
+    "frameH": 656
+  },
+  {
+    "id": "anim-bullet-hell",
+    "label": "Bullet Hell",
+    "frames": 8,
+    "durationMs": 100,
+    "frameW": 360,
+    "frameH": 656
+  }
+]

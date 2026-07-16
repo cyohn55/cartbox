@@ -76,9 +76,10 @@ export function makeScheme(color: (region: HandheldRegion) => string): HandheldS
 /**
  * A scheme with a single accent over one body colour: the chassis and its recess
  * panels take the body, while the controls and markings (D-pad, arrows, button
- * letters, text and decals) take the accent.
+ * letters, text and decals) take the accent. Exported so the animated-skin model
+ * can build the same two-tone base schemes.
  */
-function twoTone(body: string, accent: string): HandheldScheme {
+export function twoTone(body: string, accent: string): HandheldScheme {
   return {
     face: body,
     dpadPanel: body,
@@ -93,21 +94,25 @@ function twoTone(body: string, accent: string): HandheldScheme {
 }
 
 /**
- * Premade schemes shown on the handheld-selection screen. "Iron Man" is the
- * scheme authored in the template file; the rest are house palettes. Users can
- * pick one as-is or recolour any region from there.
+ * Premade schemes shown on the handheld-selection screen: one chassis per colour
+ * of the spectrum (red through violet) plus neutral graphite and white. Each is
+ * a two-tone pairing whose accent (D-pad, buttons, markings) is chosen to read
+ * clearly against its chassis. Users can pick one as-is or recolour any region.
  */
 export const HANDHELD_PRESETS: readonly HandheldPreset[] = [
-  { id: "iron-man", label: "Iron Man", scheme: twoTone("#195ba6", "#fad937") },
-  { id: "graphite", label: "Graphite", scheme: twoTone("#3a3d42", "#e6e6e6") },
-  { id: "bubblegum", label: "Bubblegum", scheme: twoTone("#e84d8a", "#fff3b0") },
-  { id: "mint", label: "Mint", scheme: twoTone("#3dbe8a", "#f6f7d7") },
-  { id: "grape", label: "Grape", scheme: twoTone("#3f3f74", "#fad937") },
-  { id: "ember", label: "Ember", scheme: twoTone("#b13e53", "#ffcd75") },
+  { id: "red", label: "Red", scheme: twoTone("#cc3b3b", "#f2e6c9") }, // red + cream
+  { id: "orange", label: "Orange", scheme: twoTone("#e8792b", "#26374d") }, // orange + navy
+  { id: "yellow", label: "Yellow", scheme: twoTone("#f2c53d", "#33344a") }, // yellow + charcoal
+  { id: "green", label: "Green", scheme: twoTone("#3fa65a", "#ef7d57") }, // green + coral
+  { id: "blue", label: "Blue", scheme: twoTone("#2f6fd0", "#f2c53d") }, // blue + gold
+  { id: "indigo", label: "Indigo", scheme: twoTone("#3b3d8f", "#7cc4f2") }, // indigo + sky
+  { id: "violet", label: "Violet", scheme: twoTone("#7a3fa6", "#a7f070") }, // violet + lime
+  { id: "graphite", label: "Graphite", scheme: twoTone("#3a3d42", "#d6d9de") }, // graphite + silver
+  { id: "white", label: "White", scheme: twoTone("#eef1f4", "#cc3b3b") }, // white + red
 ];
 
 /** The scheme a brand-new account starts on before choosing. */
-export const DEFAULT_HANDHELD_PRESET_ID = "iron-man";
+export const DEFAULT_HANDHELD_PRESET_ID = "blue";
 
 /** Look up a preset by id, falling back to the default. */
 export function handheldPreset(id: string): HandheldPreset {

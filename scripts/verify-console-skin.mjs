@@ -33,7 +33,7 @@ try {
   // Seed localStorage the way onboarding does, before any page script runs.
   await context.addInitScript(
     ([s]) => {
-      localStorage.setItem("cartbox.handheld", JSON.stringify({ presetId: "bubblegum", scheme: s }));
+      localStorage.setItem("cartbox.handheld", JSON.stringify({ presetId: "green", scheme: s }));
       localStorage.setItem("cartbox.console.settings", JSON.stringify({ theme: "handheld" }));
     },
     [scheme],

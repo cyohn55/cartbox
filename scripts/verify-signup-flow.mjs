@@ -77,7 +77,7 @@ try {
     for (let i = 3; i < data.length; i += 4) if (data[i] > 0) return true;
     return false;
   }, { timeout: 20000 });
-  await page.getByRole("button", { name: /Bubblegum/i }).click();
+  await page.getByRole("button", { name: /Green/i }).click();
   await page.getByRole("button", { name: /Use this handheld/i }).click();
   await page.waitForTimeout(1500);
   const onScreenError = await page.locator("[class*='error']").first().textContent().catch(() => null);
@@ -94,7 +94,7 @@ try {
   const created = user.users.find((u) => u.email === email);
   const { data: profile } = await admin.from("profiles").select("handle, handheld").eq("id", created?.id).maybeSingle();
   check("username persisted as the profile handle", profile?.handle === username, profile?.handle);
-  check("handheld persisted for the account", profile?.handheld?.presetId === "bubblegum", JSON.stringify(profile?.handheld?.presetId));
+  check("handheld persisted for the account", profile?.handheld?.presetId === "green", JSON.stringify(profile?.handheld?.presetId));
 
   check("no uncaught page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
 
