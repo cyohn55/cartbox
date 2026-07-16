@@ -11,7 +11,7 @@
 
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 
-import { handheldPreset, type HandheldRegionId } from "@cartbox/editor";
+import { handheldPreset, type HandheldGameId, type HandheldRegionId } from "@cartbox/editor";
 
 import { authHeaders } from "@/lib/supabase-browser";
 import { isStaticExport } from "@/lib/staticSite";
@@ -39,6 +39,14 @@ interface HandheldSkinContextValue {
   applyPreset: (presetId: string) => void;
   /** Apply free-form pixel art drawn in the editor as the current skin. */
   applyCustomArt: (art: HandheldArt) => void;
+  /**
+   * Play a marquee animation on the chassis: the pre-rendered sheet is the
+   * displayed art, and the scene id is recorded so the UI can show which is
+   * active and recolouring can re-render it in the new colours.
+   */
+  applyAnimation: (art: HandheldArt, game: HandheldGameId) => void;
+  /** Drop any custom art / animation, reverting to the recoloured scheme. */
+  clearArt: () => void;
   /** Restore the default skin. */
   reset: () => void;
 }
@@ -113,10 +121,23 @@ export function HandheldSkinProvider({ children }: { children: ReactNode }) {
   const applyCustomArt = (art: HandheldArt) =>
     commit((current) => ({ presetId: CUSTOM_ART_PRESET_ID, scheme: current.scheme, art }));
 
+  const applyAnimation = (art: HandheldArt, game: HandheldGameId) =>
+    commit((current) => ({ presetId: CUSTOM_ART_PRESET_ID, scheme: current.scheme, art, animation: game }));
+
+  // Drop art/animation but keep the colours; mark the skin custom only if it was
+  // previously custom-art (a premade keeps its own id).
+  const clearArt = () =>
+    commit((current) => ({
+      presetId: current.presetId === CUSTOM_ART_PRESET_ID ? CUSTOM_PRESET_ID : current.presetId,
+      scheme: current.scheme,
+    }));
+
   const reset = () => commit(() => defaultHandheld());
 
   return (
-    <HandheldSkinContext.Provider value={{ handheld, recolorRegion, applyPreset, applyCustomArt, reset }}>
+    <HandheldSkinContext.Provider
+      value={{ handheld, recolorRegion, applyPreset, applyCustomArt, applyAnimation, clearArt, reset }}
+    >
       {children}
     </HandheldSkinContext.Provider>
   );

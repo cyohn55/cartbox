@@ -7,8 +7,13 @@
  * and persist immediately.
  */
 
-import { HANDHELD_PRESETS, HANDHELD_REGIONS } from "@cartbox/editor";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
 
+import { HANDHELD_PRESETS, HANDHELD_REGIONS, type HandheldScheme, type HandheldTemplate } from "@cartbox/editor";
+
+import { loadHandheldTemplate } from "@/lib/handheldTemplate";
+import { ANIMATED_PRESETS, renderAnimatedArt, type AnimatedPresetView } from "@/lib/handheldAnimated";
+import { readImageBackground, renderBackgroundArt } from "@/lib/handheldBackground";
 import { ConsoleColorPicker } from "./ConsoleColorPicker";
 import { useConsoleSettings } from "./ConsoleSettingsContext";
 import { useHandheldSkin } from "./HandheldSkinContext";
@@ -63,8 +68,71 @@ function OptionRow<T extends string>({
 
 export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const { settings, update } = useConsoleSettings();
-  const { handheld, recolorRegion, applyPreset, reset: resetHandheld } = useHandheldSkin();
+  const { handheld, recolorRegion, applyPreset, applyCustomArt, applyAnimation, clearArt, reset: resetHandheld } =
+    useHandheldSkin();
   const featured = miniGameForMonth(new Date());
+
+  // The chrome + region mask, needed to render the marquee/background live from
+  // the current colours. Loaded once; the sections stay disabled until it is in.
+  const [template, setTemplate] = useState<HandheldTemplate | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const backgroundInput = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void loadHandheldTemplate().then((loaded) => alive && setTemplate(loaded));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // The marquee currently playing on the chassis (if any), for highlighting.
+  const activeMarquee = handheld.animation
+    ? ANIMATED_PRESETS.find((view) => view.game === handheld.animation) ?? null
+    : null;
+  // A static custom skin (uploaded background or hand-drawn art) is showing.
+  const hasStaticArt = Boolean(handheld.art) && !handheld.animation;
+
+  /** Render a marquee in a given scheme and apply it (no-op without a template). */
+  const playMarquee = (view: AnimatedPresetView, scheme: HandheldScheme) => {
+    if (!template) return;
+    try {
+      applyAnimation(renderAnimatedArt(template, scheme, view), view.game);
+    } catch {
+      setNote(`Could not render the ${view.label} marquee.`);
+    }
+  };
+
+  // Recolour a region, then re-render the active marquee in the new colours so
+  // it recolours with the chassis (mirrors the onboarding picker's behaviour).
+  const handleRecolor = (region: (typeof HANDHELD_REGIONS)[number]["id"], color: string) => {
+    const nextScheme = { ...handheld.scheme, [region]: color };
+    recolorRegion(region, color);
+    if (activeMarquee) playMarquee(activeMarquee, nextScheme);
+  };
+
+  // Apply a premade's colours, keeping any active marquee (re-rendered).
+  const handlePreset = (presetId: string) => {
+    applyPreset(presetId);
+    if (activeMarquee) {
+      const preset = HANDHELD_PRESETS.find((candidate) => candidate.id === presetId);
+      if (preset) playMarquee(activeMarquee, preset.scheme);
+    }
+  };
+
+  const uploadBackground = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !template) return;
+    setNote("Reading image…");
+    try {
+      const image = await readImageBackground(file);
+      applyCustomArt(renderBackgroundArt(template, handheld.scheme, image));
+      setNote(`Applied ${file.name} as the chassis background.`);
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Could not read that image.");
+    }
+  };
 
   const miniGameOptions = [
     { id: "monthly", label: `Monthly (${featured.title})` },
@@ -187,7 +255,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
             aria-checked={handheld.presetId === preset.id}
             className="os-kind-option"
             data-active={handheld.presetId === preset.id}
-            onClick={() => applyPreset(preset.id)}
+            onClick={() => handlePreset(preset.id)}
           >
             {preset.label.toUpperCase()}
           </button>
@@ -199,7 +267,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
             key={region.id}
             label={region.label}
             value={handheld.scheme[region.id]}
-            onChange={(color) => recolorRegion(region.id, color)}
+            onChange={(color) => handleRecolor(region.id, color)}
           />
         ))}
       </div>
@@ -208,6 +276,63 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           RESET HANDHELD COLORS
         </button>
       </div>
+
+      <div className="os-section-title">MARQUEE</div>
+      <p className="os-card-body" style={{ margin: 0 }}>
+        Play an arcade scene on the chassis. It renders in your handheld’s colours.
+      </p>
+      <div className="os-option-row" role="radiogroup" aria-label="Marquee animation">
+        <button
+          type="button"
+          role="radio"
+          aria-checked={!activeMarquee}
+          className="os-kind-option"
+          data-active={!activeMarquee}
+          onClick={clearArt}
+        >
+          NONE
+        </button>
+        {ANIMATED_PRESETS.map((view) => (
+          <button
+            key={view.id}
+            type="button"
+            role="radio"
+            aria-checked={activeMarquee?.id === view.id}
+            className="os-kind-option"
+            data-active={activeMarquee?.id === view.id}
+            disabled={!template}
+            onClick={() => playMarquee(view, handheld.scheme)}
+          >
+            {view.label.toUpperCase()}
+          </button>
+        ))}
+      </div>
+
+      <div className="os-section-title">CHASSIS BACKGROUND</div>
+      <p className="os-card-body" style={{ margin: 0 }}>
+        Show an image through the chassis. Recolouring or picking a marquee clears it.
+      </p>
+      <div className="os-option-row">
+        <button
+          type="button"
+          className="os-kind-option"
+          disabled={!template}
+          onClick={() => backgroundInput.current?.click()}
+        >
+          UPLOAD IMAGE
+        </button>
+        {hasStaticArt && (
+          <button type="button" className="os-kind-option" onClick={clearArt}>
+            REMOVE BACKGROUND
+          </button>
+        )}
+      </div>
+      <input ref={backgroundInput} type="file" accept="image/*" onChange={uploadBackground} hidden />
+      {note && (
+        <p className="os-card-body" style={{ margin: 0 }}>
+          {note}
+        </p>
+      )}
 
       <OptionRow
         label="MINI-GAME (ARCADE SHELL)"
