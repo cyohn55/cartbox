@@ -1741,10 +1741,9 @@ select.os-input {
 /* ==========================================================================
  * OS skin — Pip-Boy phosphor terminal (data-os-style on .os-root)
  * A separate axis from the device shell `theme`: it restyles everything drawn
- * inside the screen. The phosphor tint lives on `.os-content` so it colours
- * arbitrary content (feed images, cart canvases, avatars) uniformly; the CRT
- * overlay is a *sibling* of that wrapper so its scanlines and vignette are not
- * re-tinted by the same filter.
+ * inside the screen. The phosphor colour is applied only to TEXT and BUTTONS —
+ * media content (feed art, cart canvases, avatars) keeps its real colours — and
+ * the CRT overlay (scanlines/vignette/flicker) is a sibling of `.os-content`.
  * ======================================================================== */
 
 .os-content {
@@ -1752,25 +1751,44 @@ select.os-input {
   inset: 0;
 }
 
-/* Phosphor tint + CRT accent colour, chosen by the phosphor sub-option. */
+/* Phosphor text colour + CRT accent, chosen by the phosphor sub-option. */
 .os-root[data-os-style="pipboy"][data-os-phosphor="green"] {
   --os-crt: #47ffa6;
-  --os-phosphor-filter: grayscale(1) brightness(1.05) sepia(1) hue-rotate(78deg) saturate(2.6) contrast(1.05);
+  --os-phosphor: #6bffb0;
 }
 .os-root[data-os-style="pipboy"][data-os-phosphor="amber"] {
   --os-crt: #ffba4a;
-  --os-phosphor-filter: grayscale(1) brightness(1.08) sepia(1) hue-rotate(-12deg) saturate(3.4) contrast(1.05);
+  --os-phosphor: #ffc65e;
 }
 
-/* Monochrome-tint the whole OS to one phosphor colour so every screen reads as
-   the same CRT, regardless of what it draws. */
+/* Text takes the phosphor colour + a soft bloom; media is untouched. */
 .os-root[data-os-style="pipboy"] .os-content {
-  filter: var(--os-phosphor-filter);
+  color: var(--os-phosphor);
+}
+.os-root[data-os-style="pipboy"] .os-content
+  :is(h1, h2, h3, h4, p, span, label, li, a, strong, small, time) {
+  color: var(--os-phosphor);
+  text-shadow: 0 0 4px color-mix(in srgb, var(--os-phosphor) 40%, transparent);
 }
 
-/* A faint phosphor bloom on text (tinted along with everything else). */
-.os-root[data-os-style="pipboy"] .os-content :is(h1, h2, h3, p, span, button, a) {
-  text-shadow: 0 0 1.5px rgba(255, 255, 255, 0.25);
+/* Buttons / tabs / options read as phosphor terminal controls (no forced
+   border, so nothing shifts; the phosphor border-colour shows where one
+   already exists). */
+.os-root[data-os-style="pipboy"] .os-content
+  :is(button, .os-tab, .os-btn, .os-kind-option, [role="radio"], [role="tab"]) {
+  color: var(--os-phosphor);
+  background: color-mix(in srgb, var(--os-phosphor) 9%, transparent);
+  border-color: color-mix(in srgb, var(--os-phosphor) 55%, transparent);
+  text-shadow: 0 0 5px color-mix(in srgb, var(--os-phosphor) 45%, transparent);
+}
+
+/* Selected / active controls fill with phosphor on dark ink. */
+.os-root[data-os-style="pipboy"] .os-content
+  :is(.os-tab[data-active="true"], .os-kind-option[data-active="true"], [aria-checked="true"], [aria-pressed="true"]) {
+  color: #06140d;
+  background: var(--os-phosphor);
+  border-color: var(--os-phosphor);
+  text-shadow: none;
 }
 
 /* CRT overlay: vignette + edge bloom + gentle flicker, above the tinted content

@@ -372,12 +372,12 @@
 
 .termPreview[data-os-phosphor="green"] {
   --tp-crt: #47ffa6;
-  --tp-filter: grayscale(1) brightness(1.05) sepia(1) hue-rotate(78deg) saturate(2.6);
+  --tp-phosphor: #6bffb0;
 }
 
 .termPreview[data-os-phosphor="amber"] {
   --tp-crt: #ffba4a;
-  --tp-filter: grayscale(1) brightness(1.08) sepia(1) hue-rotate(-12deg) saturate(3.4);
+  --tp-phosphor: #ffc65e;
 }
 
 .termContent {
@@ -391,10 +391,10 @@
   color: var(--text);
 }
 
+/* Phosphor colour on text only — no global tint (mirrors the real OS skin). */
 .termPreview[data-os-style="pipboy"] .termContent {
-  filter: var(--tp-filter);
-  color: #e6fff2;
-  text-shadow: 0 0 2px rgba(255, 255, 255, 0.3);
+  color: var(--tp-phosphor);
+  text-shadow: 0 0 3px color-mix(in srgb, var(--tp-phosphor) 40%, transparent);
 }
 
 .termTop {
@@ -429,6 +429,12 @@
 
 .termPreview[data-os-style="modern"] .termActive {
   color: var(--accent);
+}
+
+.termPreview[data-os-style="pipboy"] .termActive {
+  color: #06140d;
+  background: var(--tp-phosphor);
+  text-shadow: none;
 }
 
 .termFoot {
