@@ -9,8 +9,10 @@ create table if not exists profiles (
   display_name      text,
   bio               text not null default '',
   avatar_json       jsonb,                       -- Mii-style avatar part choices (Platform P1)
+  voxel_avatar      jsonb,                       -- console voxel-character spec (see migration 0006)
   stripe_account_id text,                       -- Stripe Connect account (Phase 3)
   tier              text not null default 'free' check (tier in ('free', 'creator')),
+  featured_clips    uuid[] not null default '{}', -- ordered replay ids the player showcases (see migration 0005)
   created_at        timestamptz not null default now()
 );
 
@@ -29,6 +31,8 @@ create table if not exists carts (
   thumb_key   text,                              -- object key of the rendered thumbnail
   plays       integer not null default 0,
   published   boolean not null default false,
+  rig         jsonb,                             -- editor-only character rig (multi-plane parallax preview)
+  fx          jsonb,                             -- post-processing effect stack, applied by the player at runtime
   created_at  timestamptz not null default now(),
   unique (owner_id, slug)
 );
@@ -115,6 +119,24 @@ create table if not exists unlocks (
   primary key (profile_id, achievement_id)
 );
 
+-- Community feed posts for the console homescreen (see migration 0004).
+-- Authored feed content: gaming news, looking-for-player invites, developer
+-- tips, trivia, and cartridge-developer posts. `meta` carries kind-specific
+-- structure (trivia choices, LFP player counts, news links).
+create table if not exists feed_posts (
+  id         uuid primary key default gen_random_uuid(),
+  kind       text not null check (kind in ('news', 'lfp', 'dev_tip', 'trivia', 'dev_post')),
+  author_id  uuid references profiles (id) on delete set null,
+  cart_id    uuid references carts (id) on delete cascade,
+  title      text not null,
+  body       text not null default '',
+  meta       jsonb not null default '{}',
+  created_at timestamptz not null default now()
+);
+
+create index if not exists feed_posts_created_idx on feed_posts (created_at desc);
+create index if not exists feed_posts_kind_idx on feed_posts (kind, created_at desc);
+
 -- Game jams (Phase 5) and their entries.
 create table if not exists jams (
   id         uuid primary key default gen_random_uuid(),
@@ -149,3 +171,25 @@ alter table purchases enable row level security;
 
 create policy purchases_owner_read on purchases
   for select using (auth.uid() = buyer_id);
+
+alter table feed_posts enable row level security;
+
+create policy feed_posts_public_read on feed_posts
+  for select using (true);
+
+create policy feed_posts_author_write on feed_posts
+  for all using (auth.uid() = author_id) with check (auth.uid() = author_id);
+
+-- Role grants. RLS only filters rows; a role still needs table-level privileges
+-- to touch a table at all. Bypassing RLS (service_role) is not a substitute for
+-- these grants, so server routes 42501 ("permission denied") without them.
+grant usage on schema public to anon, authenticated, service_role;
+
+grant all privileges on all tables in schema public to service_role;
+grant all privileges on all sequences in schema public to service_role;
+grant select on all tables in schema public to anon, authenticated;
+
+-- Apply the same defaults to tables/sequences created by later migrations.
+alter default privileges in schema public grant all on tables to service_role;
+alter default privileges in schema public grant all on sequences to service_role;
+alter default privileges in schema public grant select on tables to anon, authenticated;
