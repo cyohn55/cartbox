@@ -45,6 +45,8 @@ export type OsStyleId = (typeof OS_STYLES)[number]["id"];
 export const OS_PHOSPHORS = [
   { id: "green", label: "Green" },
   { id: "amber", label: "Amber" },
+  { id: "cyan", label: "Cyan" },
+  { id: "red", label: "Red" },
 ] as const;
 export type OsPhosphorId = (typeof OS_PHOSPHORS)[number]["id"];
 

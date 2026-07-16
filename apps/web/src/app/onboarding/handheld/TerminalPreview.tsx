@@ -15,14 +15,16 @@ interface TerminalPreviewProps {
   style: OsStyleId;
   phosphor: OsPhosphorId;
   scanlines: boolean;
+  /** Fill the parent (used when the preview sits inside the device screen). */
+  fill?: boolean;
 }
 
 const MENU = ["FEED", "BROWSE", "LIBRARY", "PROFILE"];
 
-export function TerminalPreview({ style, phosphor, scanlines }: TerminalPreviewProps) {
+export function TerminalPreview({ style, phosphor, scanlines, fill = false }: TerminalPreviewProps) {
   return (
     <div
-      className={styles.termPreview}
+      className={`${styles.termPreview} ${fill ? styles.termFill : ""}`}
       data-os-style={style}
       data-os-phosphor={phosphor}
       data-os-scanlines={scanlines ? "on" : "off"}

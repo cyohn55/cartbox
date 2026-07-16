@@ -13,7 +13,7 @@ import { withBasePath } from "./staticSite";
  * extract-handheld / measure-handheld-layout). Any value that changes works;
  * a date-stamp keeps it legible.
  */
-export const HANDHELD_ASSET_REV = "20260715g";
+export const HANDHELD_ASSET_REV = "20260716a";
 
 /** A cache-busted URL for a handheld asset (path under `/public`). */
 export function handheldAssetUrl(pathFromPublic: string): string {

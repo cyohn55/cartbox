@@ -172,6 +172,56 @@ export function renderHandheld(template: HandheldTemplate, scheme: HandheldSchem
   return out;
 }
 
+/** The 1-based region id of the chassis background (`face`) within the mask. */
+const FACE_REGION_ID = HANDHELD_REGIONS.findIndex((region) => region.id === "face") + 1;
+
+/** A straight-alpha RGBA image supplied as the chassis background. */
+export interface HandheldBackground {
+  readonly width: number;
+  readonly height: number;
+  /** RGBA pixels, length `width * height * 4`. */
+  readonly data: Uint8ClampedArray;
+}
+
+/**
+ * Render a scheme, then replace the chassis (`face`) pixels with an uploaded
+ * image so it shows through the body while the chrome, controls and screen stay
+ * on top. The image is cover-fitted to the device bounds (scaled to fill, then
+ * centre-cropped) so any aspect ratio reads cleanly; every other region keeps
+ * its scheme colour. Pure: returns straight-alpha RGBA like `renderHandheld`.
+ */
+export function renderHandheldWithBackground(
+  template: HandheldTemplate,
+  scheme: HandheldScheme,
+  background: HandheldBackground,
+): Uint8ClampedArray {
+  const out = renderHandheld(template, scheme);
+  const { width, height, regionMask } = template;
+  const { width: imageWidth, height: imageHeight, data } = background;
+  if (imageWidth <= 0 || imageHeight <= 0) return out;
+
+  // Cover fit: scale to fill the device, centre the overflow so it is cropped
+  // symmetrically rather than anchored to a corner.
+  const scale = Math.max(width / imageWidth, height / imageHeight);
+  const offsetX = (width - imageWidth * scale) / 2;
+  const offsetY = (height - imageHeight * scale) / 2;
+
+  for (let pixel = 0; pixel < regionMask.length; pixel += 1) {
+    if (regionMask[pixel] !== FACE_REGION_ID) continue;
+    const x = pixel % width;
+    const y = (pixel / width) | 0;
+    const sampleX = Math.min(imageWidth - 1, Math.max(0, Math.floor((x - offsetX) / scale)));
+    const sampleY = Math.min(imageHeight - 1, Math.max(0, Math.floor((y - offsetY) / scale)));
+    const src = (sampleY * imageWidth + sampleX) * 4;
+    const dst = pixel * 4;
+    out[dst] = data[src] ?? 0;
+    out[dst + 1] = data[src + 1] ?? 0;
+    out[dst + 2] = data[src + 2] ?? 0;
+    out[dst + 3] = 255;
+  }
+  return out;
+}
+
 /** The child image layers of a named group, with the group's own child level. */
 function groupChildren(layers: AsepriteLayers, groupName: string): AsepriteLayers["layers"] {
   const start = layers.layers.findIndex((layer) => layer.name === groupName);

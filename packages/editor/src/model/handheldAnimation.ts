@@ -22,8 +22,20 @@ import {
   type HandheldTemplate,
 } from "./handheldSkin";
 
-/** The arcade scenes a handheld chassis can animate. */
-export type HandheldGameId = "space-invaders" | "pac-man" | "asteroids" | "bullet-hell";
+/**
+ * The scenes a handheld chassis marquee can animate: classic-arcade vignettes
+ * plus a set of "gamer HUD" marquees (an equalizer, an XP bar, a scrolling
+ * gamertag and a virtual pet) that suit a personalised console.
+ */
+export type HandheldGameId =
+  | "space-invaders"
+  | "pac-man"
+  | "asteroids"
+  | "bullet-hell"
+  | "equalizer"
+  | "xp-bar"
+  | "gamertag"
+  | "virtual-pet";
 
 /** A premade animated skin: a base scheme plus the scene played on its chassis. */
 export interface HandheldAnimatedPreset {
@@ -46,6 +58,10 @@ export const HANDHELD_ANIMATED_PRESETS: readonly HandheldAnimatedPreset[] = [
   { id: "anim-pac-man", label: "Pac-Man", game: "pac-man", scheme: twoTone("#1c1c2e", "#ffd24a"), frames: 8, durationMs: 130 },
   { id: "anim-asteroids", label: "Asteroids", game: "asteroids", scheme: twoTone("#20242c", "#8fd3ff"), frames: 8, durationMs: 110 },
   { id: "anim-bullet-hell", label: "Bullet Hell", game: "bullet-hell", scheme: twoTone("#241826", "#ff5d8f"), frames: 8, durationMs: 100 },
+  { id: "anim-equalizer", label: "Equalizer", game: "equalizer", scheme: twoTone("#181a24", "#4ad6c0"), frames: 8, durationMs: 110 },
+  { id: "anim-xp-bar", label: "XP Level", game: "xp-bar", scheme: twoTone("#1a1726", "#b98cff"), frames: 8, durationMs: 150 },
+  { id: "anim-gamertag", label: "Gamertag", game: "gamertag", scheme: twoTone("#14181f", "#5ce0ff"), frames: 8, durationMs: 130 },
+  { id: "anim-virtual-pet", label: "Virtual Pet", game: "virtual-pet", scheme: twoTone("#201a24", "#ff9ecb"), frames: 8, durationMs: 200 },
 ];
 
 /** Look up an animated preset by id, or undefined when it is not one. */
@@ -261,6 +277,76 @@ const GHOST: Sprite = [
 ];
 const SHIP: Sprite = ["  #  ", " ### ", "## ##", "#   #"];
 
+// A small rounded creature for the virtual-pet marquee (eyes are punched out at
+// draw time so they read as the panel's dark background).
+const PET: Sprite = [
+  " ##### ",
+  "#######",
+  "#######",
+  "#######",
+  "#######",
+  " #   # ",
+];
+const HEART: Sprite = ["## ##", "#####", "#####", " ### ", "  #  "];
+
+/**
+ * A compact 3×5 uppercase pixel font (A–Z, 0–9, space and a few marks), used by
+ * the text marquees (gamertag, XP level). Each glyph is five rows of three
+ * cells; any non-space cell is filled. Unknown characters render as blank.
+ */
+const FONT: Record<string, Sprite> = {
+  A: ["###", "# #", "###", "# #", "# #"],
+  B: ["## ", "# #", "## ", "# #", "## "],
+  C: ["###", "#  ", "#  ", "#  ", "###"],
+  D: ["## ", "# #", "# #", "# #", "## "],
+  E: ["###", "#  ", "###", "#  ", "###"],
+  F: ["###", "#  ", "###", "#  ", "#  "],
+  G: ["###", "#  ", "# #", "# #", "###"],
+  H: ["# #", "# #", "###", "# #", "# #"],
+  I: ["###", " # ", " # ", " # ", "###"],
+  J: ["###", "  #", "  #", "# #", "###"],
+  K: ["# #", "# #", "## ", "# #", "# #"],
+  L: ["#  ", "#  ", "#  ", "#  ", "###"],
+  M: ["# #", "###", "###", "# #", "# #"],
+  N: ["# #", "###", "###", "###", "# #"],
+  O: ["###", "# #", "# #", "# #", "###"],
+  P: ["###", "# #", "###", "#  ", "#  "],
+  Q: ["###", "# #", "# #", "###", "  #"],
+  R: ["###", "# #", "## ", "# #", "# #"],
+  S: ["###", "#  ", "###", "  #", "###"],
+  T: ["###", " # ", " # ", " # ", " # "],
+  U: ["# #", "# #", "# #", "# #", "###"],
+  V: ["# #", "# #", "# #", "# #", " # "],
+  W: ["# #", "# #", "###", "###", "# #"],
+  X: ["# #", "# #", " # ", "# #", "# #"],
+  Y: ["# #", "# #", " # ", " # ", " # "],
+  Z: ["###", "  #", " # ", "#  ", "###"],
+  "0": ["###", "# #", "# #", "# #", "###"],
+  "1": [" # ", "## ", " # ", " # ", "###"],
+  "2": ["###", "  #", "###", "#  ", "###"],
+  "3": ["###", "  #", "###", "  #", "###"],
+  "4": ["# #", "# #", "###", "  #", "  #"],
+  "5": ["###", "#  ", "###", "  #", "###"],
+  "6": ["###", "#  ", "###", "# #", "###"],
+  "7": ["###", "  #", " # ", " # ", " # "],
+  "8": ["###", "# #", "###", "# #", "###"],
+  "9": ["###", "# #", "###", "  #", "###"],
+  " ": ["   ", "   ", "   ", "   ", "   "],
+  "-": ["   ", "   ", "###", "   ", "   "],
+  "!": [" # ", " # ", " # ", "   ", " # "],
+};
+
+/** Width in cells of one glyph (3) plus the inter-glyph gap (1). */
+const GLYPH_ADVANCE = 4;
+
+/** Draw a string in the 3×5 font, top-left at (x, y), each cell `scale` px. */
+function drawText(canvas: Canvas, text: string, x: number, y: number, scale: number, color: Rgb): void {
+  for (let i = 0; i < text.length; i += 1) {
+    const glyph = FONT[text[i]!.toUpperCase()];
+    if (glyph) canvas.sprite(glyph, x + i * GLYPH_ADVANCE * scale, y, scale, color);
+  }
+}
+
 // --- Per-game scene renderers -------------------------------------------------
 
 /** Fractional phase [0,1) of the current frame within the loop. */
@@ -383,11 +469,90 @@ function drawBulletHell(canvas: Canvas, lane: ReturnType<typeof laneRect>, frame
   canvas.sprite(SHIP, shipX, lane.y + lane.h - 4 * shipScale, shipScale, accent);
 }
 
+function drawEqualizer(canvas: Canvas, lane: ReturnType<typeof laneRect>, frame: number, frames: number, accent: Rgb) {
+  const bars = 7;
+  const gap = Math.max(1, Math.round(lane.w / (bars * 6)));
+  const barWidth = Math.max(1, Math.floor((lane.w - gap * (bars + 1)) / bars));
+  const capHeight = Math.max(1, Math.round(lane.h * 0.08));
+  const t = phase(frame, frames);
+  for (let bar = 0; bar < bars; bar += 1) {
+    // Each bar oscillates on its own phase so the row reads as a spectrum.
+    const wave = (Math.sin((t + bar / bars) * Math.PI * 2) + 1) / 2;
+    const barHeight = Math.max(capHeight, Math.round(lane.h * (0.18 + 0.78 * wave)));
+    const x = lane.x + gap + bar * (barWidth + gap);
+    const y = lane.y + lane.h - barHeight;
+    canvas.fillRect(x, y, barWidth, barHeight, accent);
+    // A bright cap tracks the top of each bar.
+    canvas.fillRect(x, y, barWidth, capHeight, [255, 255, 255]);
+  }
+}
+
+function drawXpBar(canvas: Canvas, lane: ReturnType<typeof laneRect>, frame: number, frames: number, accent: Rgb) {
+  const pad = Math.max(2, Math.round(lane.w * 0.06));
+  const barHeight = Math.max(2, Math.round(lane.h * 0.26));
+  const barX = lane.x + pad;
+  const barWidth = lane.w - 2 * pad;
+  const barY = lane.y + lane.h - barHeight - Math.max(1, Math.round(lane.h * 0.14));
+  const t = phase(frame, frames);
+
+  // Level counts up as the bar fills; the label sits above the track.
+  const level = 1 + Math.floor(t * 8);
+  const textScale = Math.max(1, Math.round(lane.h / 12));
+  drawText(canvas, `LV ${level}`, barX, lane.y + Math.max(1, Math.round(lane.h * 0.1)), textScale, accent);
+
+  canvas.strokeRect(barX, barY, barWidth, barHeight, accent);
+  const fillWidth = Math.max(0, Math.round((barWidth - 2) * t));
+  canvas.fillRect(barX + 1, barY + 1, fillWidth, barHeight - 2, accent);
+  // A leading edge highlight on the fill.
+  if (fillWidth > 0) canvas.fillRect(barX + fillWidth - 1, barY + 1, 1, barHeight - 2, [255, 255, 255]);
+}
+
+function drawGamertag(canvas: Canvas, lane: ReturnType<typeof laneRect>, frame: number, frames: number, accent: Rgb) {
+  const text = "PLAYER-1  READY  ";
+  const scale = Math.max(1, Math.round(lane.h / 9));
+  const textWidth = text.length * GLYPH_ADVANCE * scale;
+  const y = lane.y + Math.round((lane.h - 5 * scale) / 2);
+  // Scroll one full text-plus-lane span per loop so it enters and exits cleanly.
+  const travel = textWidth + lane.w;
+  const startX = lane.x + lane.w - Math.round(travel * phase(frame, frames));
+  drawText(canvas, text, startX, y, scale, accent);
+}
+
+function drawVirtualPet(canvas: Canvas, lane: ReturnType<typeof laneRect>, frame: number, frames: number, accent: Rgb) {
+  const scale = Math.max(1, Math.round(lane.h / 10));
+  const bodyWidth = 7;
+  const bodyHeight = 6;
+  const centreX = lane.x + Math.round(lane.w / 2);
+  const bob = Math.round(Math.sin(phase(frame, frames) * Math.PI * 2) * scale * 0.7);
+  const x = centreX - Math.round((bodyWidth * scale) / 2);
+  const y = lane.y + Math.round((lane.h - bodyHeight * scale) / 2) + bob;
+  canvas.sprite(PET, x, y, scale, accent);
+
+  // Eyes are punched out of the body; they close to a slit on the blink frame.
+  const eyeY = y + 2 * scale;
+  const blink = frame % 4 === 3;
+  const eyeHeight = blink ? Math.max(1, Math.round(scale / 2)) : scale;
+  const eyeOffset = blink ? Math.round(scale / 2) : 0;
+  canvas.fillRect(x + scale, eyeY + eyeOffset, scale, eyeHeight, PANEL_BG);
+  canvas.fillRect(x + 5 * scale, eyeY + eyeOffset, scale, eyeHeight, PANEL_BG);
+
+  // A heart floats up beside the pet over the back half of the loop.
+  const t = phase(frame, frames);
+  if (t > 0.5) {
+    const heartY = y - Math.round((t - 0.5) * 2 * lane.h * 0.4);
+    canvas.sprite(HEART, x + bodyWidth * scale, heartY, Math.max(1, Math.round(scale * 0.8)), [255, 120, 150]);
+  }
+}
+
 const SCENES: Record<HandheldGameId, (canvas: Canvas, lane: ReturnType<typeof laneRect>, frame: number, frames: number, accent: Rgb) => void> = {
   "space-invaders": drawSpaceInvaders,
   "pac-man": drawPacMan,
   asteroids: drawAsteroids,
   "bullet-hell": drawBulletHell,
+  equalizer: drawEqualizer,
+  "xp-bar": drawXpBar,
+  gamertag: drawGamertag,
+  "virtual-pet": drawVirtualPet,
 };
 
 /**

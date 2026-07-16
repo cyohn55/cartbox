@@ -22,6 +22,7 @@ import {
   DEFAULT_HANDHELD_PRESET_ID,
   type HandheldScheme,
   type HandheldTemplate,
+  type HandheldBackground,
 } from "@cartbox/editor";
 
 import { authHeaders } from "@/lib/supabase-browser";
@@ -31,6 +32,7 @@ import { loadHandheldTemplate } from "@/lib/handheldTemplate";
 import { saveHandheldDraft, loadHandheldDraft, clearHandheldDraft, type HandheldDraft } from "@/lib/handheldDraft";
 import { assembleSheetCanvas, sliceSheet } from "@/lib/handheldSheet";
 import { ANIMATED_PRESETS, animatedPresetView, renderAnimatedArt } from "@/lib/handheldAnimated";
+import { readImageBackground, renderBackgroundArt } from "@/lib/handheldBackground";
 import {
   loadConsoleSettings,
   saveConsoleSettings,
@@ -78,6 +80,11 @@ export function HandheldPicker() {
   const [animationId, setAnimationId] = useState<string | null>(null);
   const [animatedArt, setAnimatedArt] = useState<HandheldArt | null>(null);
   const [animatedError, setAnimatedError] = useState<string | null>(null);
+  // An uploaded image shown through the chassis (`face`) region. Like an
+  // animation it rides on the current chassis and re-renders when the scheme
+  // changes, so recolouring the chrome keeps the background.
+  const [background, setBackground] = useState<HandheldBackground | null>(null);
+  const [backgroundArt, setBackgroundArt] = useState<HandheldArt | null>(null);
   // The editor's working draft (animation frames), kept so re-opening resumes
   // the same work instead of restarting from the scheme render. Dropped when the
   // design is changed another way (preset, recolour, upload).
@@ -88,20 +95,27 @@ export function HandheldPicker() {
   const [osStyle, setOsStyle] = useState<OsStyleId>("pipboy");
   const [osPhosphor, setOsPhosphor] = useState<OsPhosphorId>("green");
   const [osScanlines, setOsScanlines] = useState(true);
+  // The device screen rectangle (0..1 fractions) from the measured layout, used
+  // to overlay the live interface preview inside the handheld's screen.
+  const [screenRect, setScreenRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
+  const backgroundUploadRef = useRef<HTMLInputElement>(null);
 
-  // What actually renders/saves: a live animation when one is selected, else the
-  // hand-drawn art (if any), else the static recoloured skin (art === null).
-  const activeArt = animationId ? animatedArt : drawnArt;
+  // What actually renders/saves, in priority order: a live animation, else an
+  // uploaded chassis background, else hand-drawn art, else the static recoloured
+  // skin (art === null).
+  const activeArt = animationId ? animatedArt : background ? backgroundArt : drawnArt;
 
   // Stage caption: the chassis name, with the animation appended when set.
   const chassisLabel =
-    drawnArt && !animationId
-      ? "Custom art"
-      : presetId === CUSTOM_PRESET_ID || presetId === CUSTOM_ART_PRESET_ID
-        ? "Custom"
-        : handheldPreset(presetId).label;
+    background && !animationId
+      ? "Custom background"
+      : drawnArt && !animationId
+        ? "Custom art"
+        : presetId === CUSTOM_PRESET_ID || presetId === CUSTOM_ART_PRESET_ID
+          ? "Custom"
+          : handheldPreset(presetId).label;
   const animationLabel = animationId ? animatedPresetView(animationId)?.label : null;
   const stageLabel = animationLabel ? `${chassisLabel} · ${animationLabel}` : chassisLabel;
 
@@ -162,6 +176,44 @@ export function HandheldPicker() {
     setOsPhosphor(settings.osPhosphor);
     setOsScanlines(settings.osScanlines);
   }, []);
+
+  // Load the measured device layout so the interface preview can sit in the
+  // handheld's actual screen window. A failure just hides the overlay.
+  useEffect(() => {
+    let alive = true;
+    fetch(handheldAssetUrl("/handheld/handheld-layout.json"))
+      .then((response) => response.json() as Promise<{ screen: { x: number; y: number; w: number; h: number } }>)
+      .then((layout) => alive && setScreenRect(layout.screen))
+      .catch(() => {
+        /* No overlay if the layout can't load; the device still renders. */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Render the uploaded chassis background live in the current chassis colours.
+  // Debounced (like the animation) so dragging a colour slider coalesces into a
+  // single composite. Clears when no background image is set.
+  useEffect(() => {
+    if (!template || !background) {
+      setBackgroundArt(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      try {
+        const rendered = renderBackgroundArt(template, scheme, background);
+        if (!cancelled) setBackgroundArt(rendered);
+      } catch {
+        if (!cancelled) setError("Could not apply that background image.");
+      }
+    }, 120);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [template, scheme, background]);
 
   // Render the selected animation live in the current chassis colours. Debounced
   // so dragging a colour slider coalesces into one render (each frame is a full
@@ -276,6 +328,35 @@ export function HandheldPicker() {
   const chooseAnimation = (id: string | null) => {
     setAnimatedError(null);
     setAnimationId(id);
+    // An animation and a chassis background are mutually exclusive looks.
+    if (id) clearBackground();
+  };
+
+  const clearBackground = () => {
+    setBackground(null);
+    setBackgroundArt(null);
+  };
+
+  // Upload an image to show through the chassis. It supersedes any hand-drawn
+  // art or animation, and re-renders live when the chrome colours change.
+  const uploadBackground = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setError(null);
+    setUploadNote("Reading image…");
+    try {
+      const image = await readImageBackground(file);
+      setBackground(image);
+      setAnimationId(null);
+      setDrawnArt(null);
+      setDraft(null);
+      clearHandheldDraft();
+      setPresetId(CUSTOM_ART_PRESET_ID);
+      setUploadNote(`Applied ${file.name} as the chassis background.`);
+    } catch (backgroundError) {
+      setUploadNote(backgroundError instanceof Error ? backgroundError.message : "Could not read that image.");
+    }
   };
 
   // Bring back edits made in Aseprite (or any pixel tool) on the downloaded
@@ -292,6 +373,7 @@ export function HandheldPicker() {
       setDrawnArt(null);
       setDraft(null);
       clearHandheldDraft();
+      clearBackground();
       setUploadNote(`Applied colours from ${file.name}.`);
     } catch (importError) {
       setUploadNote(importError instanceof Error ? importError.message : "Could not read that .aseprite file.");
@@ -352,7 +434,24 @@ export function HandheldPicker() {
 
       <div className={styles.layout}>
         <section className={styles.stage} aria-label="Handheld preview">
-          <canvas ref={canvasRef} className={styles.preview} />
+          <div className={styles.stageDevice}>
+            <canvas ref={canvasRef} className={styles.preview} />
+            {/* The live interface preview sits in the handheld's actual screen
+                window (positioned from the measured device layout). */}
+            {screenRect && (
+              <div
+                className={styles.screenOverlay}
+                style={{
+                  left: `${screenRect.x * 100}%`,
+                  top: `${screenRect.y * 100}%`,
+                  width: `${screenRect.w * 100}%`,
+                  height: `${screenRect.h * 100}%`,
+                }}
+              >
+                <TerminalPreview fill style={osStyle} phosphor={osPhosphor} scanlines={osScanlines} />
+              </div>
+            )}
+          </div>
           <span className={styles.stageLabel}>{stageLabel}</span>
         </section>
 
@@ -432,8 +531,8 @@ export function HandheldPicker() {
 
           <section className={styles.section}>
             <div className={styles.sectionHead}>Console interface</div>
+            <p className={styles.hint}>Previewed live inside the handheld screen above.</p>
             <div className={styles.uiRow}>
-              <TerminalPreview style={osStyle} phosphor={osPhosphor} scanlines={osScanlines} />
               <div className={styles.uiControls}>
                 <div className={styles.segRow} role="group" aria-label="Interface style">
                   {OS_STYLES.map((option) => (
@@ -498,12 +597,27 @@ export function HandheldPicker() {
               <button type="button" className={styles.secondary} onClick={() => uploadRef.current?.click()}>
                 Upload edited .aseprite
               </button>
+              <button type="button" className={styles.secondary} onClick={() => backgroundUploadRef.current?.click()}>
+                Upload chassis background
+              </button>
+              {background && (
+                <button type="button" className={styles.secondary} onClick={clearBackground}>
+                  Remove background
+                </button>
+              )}
             </div>
             <input
               ref={uploadRef}
               type="file"
               accept=".aseprite,.ase"
               onChange={importAseprite}
+              hidden
+            />
+            <input
+              ref={backgroundUploadRef}
+              type="file"
+              accept="image/*"
+              onChange={uploadBackground}
               hidden
             />
             <p className={styles.hint}>
@@ -528,6 +642,7 @@ export function HandheldPicker() {
             void saveHandheldDraft(workingDraft); // survive a reload too
             setPresetId(CUSTOM_ART_PRESET_ID);
             setAnimationId(null); // a hand-drawn skin replaces the animation
+            clearBackground(); // …and replaces any uploaded background
             setEditing(false);
           }}
         />

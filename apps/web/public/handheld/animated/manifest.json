@@ -30,5 +30,37 @@
     "durationMs": 100,
     "frameW": 867,
     "frameH": 1579
+  },
+  {
+    "id": "anim-equalizer",
+    "label": "Equalizer",
+    "frames": 8,
+    "durationMs": 110,
+    "frameW": 867,
+    "frameH": 1579
+  },
+  {
+    "id": "anim-xp-bar",
+    "label": "XP Level",
+    "frames": 8,
+    "durationMs": 150,
+    "frameW": 867,
+    "frameH": 1579
+  },
+  {
+    "id": "anim-gamertag",
+    "label": "Gamertag",
+    "frames": 8,
+    "durationMs": 130,
+    "frameW": 867,
+    "frameH": 1579
+  },
+  {
+    "id": "anim-virtual-pet",
+    "label": "Virtual Pet",
+    "frames": 8,
+    "durationMs": 200,
+    "frameW": 867,
+    "frameH": 1579
   }
 ]

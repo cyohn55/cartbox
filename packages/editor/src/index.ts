@@ -162,6 +162,7 @@ export {
   makeScheme,
   twoTone,
   renderHandheld,
+  renderHandheldWithBackground,
   extractScheme,
   extractSchemeFromLayers,
   extractHandheldTemplate,
@@ -172,6 +173,7 @@ export {
   type HandheldScheme,
   type HandheldPreset,
   type HandheldTemplate,
+  type HandheldBackground,
 } from "./model/handheldSkin";
 export {
   HANDHELD_ANIMATED_PRESETS,

@@ -1760,6 +1760,14 @@ select.os-input {
   --os-crt: #ffba4a;
   --os-phosphor: #ffc65e;
 }
+.os-root[data-os-style="pipboy"][data-os-phosphor="cyan"] {
+  --os-crt: #35d6ff;
+  --os-phosphor: #6bf0ff;
+}
+.os-root[data-os-style="pipboy"][data-os-phosphor="red"] {
+  --os-crt: #ff4d4d;
+  --os-phosphor: #ff6f6f;
+}
 
 /* Text takes the phosphor colour + a soft bloom; media is untouched. */
 .os-root[data-os-style="pipboy"] .os-content {

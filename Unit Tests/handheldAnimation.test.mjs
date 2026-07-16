@@ -38,12 +38,22 @@ function opaqueTemplate(width, height) {
   return { width, height, base, regionMask: new Uint8Array(width * height) };
 }
 
-// 1. The animated preset catalogue is well-formed: the four requested games,
-//    each with a complete scheme and gate-legal frame/duration bounds.
+// 1. The animated preset catalogue is well-formed: the arcade scenes plus the
+//    gamer-HUD marquees, each with a complete scheme and gate-legal bounds.
 {
-  assert.equal(HANDHELD_ANIMATED_PRESETS.length, 4, "four animated presets");
+  const EXPECTED_GAMES = [
+    "space-invaders",
+    "pac-man",
+    "asteroids",
+    "bullet-hell",
+    "equalizer",
+    "xp-bar",
+    "gamertag",
+    "virtual-pet",
+  ];
+  assert.equal(HANDHELD_ANIMATED_PRESETS.length, EXPECTED_GAMES.length, "every marquee has a preset");
   const games = new Set(HANDHELD_ANIMATED_PRESETS.map((preset) => preset.game));
-  for (const game of ["space-invaders", "pac-man", "asteroids", "bullet-hell"]) {
+  for (const game of EXPECTED_GAMES) {
     assert.ok(games.has(game), `has the ${game} scene`);
   }
   const ids = new Set();

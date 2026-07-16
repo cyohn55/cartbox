@@ -84,6 +84,24 @@
   box-shadow: var(--shadow);
 }
 
+/* Wraps the preview canvas so an overlay can be positioned against the device
+   box. Shrink-wraps the canvas, so the overlay's percentage offsets map to the
+   device pixels. */
+.stageDevice {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  line-height: 0;
+}
+
+/* The interface preview, positioned over the handheld's screen window using the
+   measured layout fractions (set inline). */
+.screenOverlay {
+  position: absolute;
+  overflow: hidden;
+  border-radius: 3px;
+}
+
 .preview {
   /* The source is a high-resolution render (867×1579) shown at a few hundred
      pixels, so it is always downscaled. Nearest-neighbour ("pixelated") drops
@@ -91,6 +109,7 @@
      edges vanish — so let the browser downsample smoothly instead. Matches the
      same reasoning applied to .presetThumb. */
   image-rendering: auto;
+  display: block;
   width: auto;
   max-width: 100%;
   max-height: 60vh;
@@ -366,6 +385,17 @@
   font-family: var(--font-data);
 }
 
+/* Fill mode: the preview stretches to its container (the device screen window)
+   instead of the fixed onboarding-card footprint. */
+.termFill {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  aspect-ratio: auto;
+  border: none;
+  border-radius: 0;
+}
+
 .termPreview[data-os-style="modern"] {
   background: var(--surface-raised);
 }
@@ -378,6 +408,16 @@
 .termPreview[data-os-phosphor="amber"] {
   --tp-crt: #ffba4a;
   --tp-phosphor: #ffc65e;
+}
+
+.termPreview[data-os-phosphor="cyan"] {
+  --tp-crt: #35d6ff;
+  --tp-phosphor: #6bf0ff;
+}
+
+.termPreview[data-os-phosphor="red"] {
+  --tp-crt: #ff4d4d;
+  --tp-phosphor: #ff6f6f;
 }
 
 .termContent {

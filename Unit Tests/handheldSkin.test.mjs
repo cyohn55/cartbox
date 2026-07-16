@@ -19,6 +19,7 @@ const {
   HANDHELD_REGIONS,
   HANDHELD_PRESETS,
   renderHandheld,
+  renderHandheldWithBackground,
   extractScheme,
   extractSchemeFromLayers,
   extractHandheldTemplate,
@@ -206,6 +207,48 @@ function layerFrom(mask, color, w, h) {
     assert.notEqual(preset.scheme.dpadArrow, preset.scheme.dpad, `${preset.id}: arrows differ from the D-pad`);
     assert.notEqual(preset.scheme.buttonLetter, preset.scheme.buttonColor, `${preset.id}: letters differ from the buttons`);
   }
+  passed += 1;
+}
+
+// 7. renderHandheldWithBackground shows the image through the chassis (`face`)
+//    region only: face pixels sample the image, every other region keeps its
+//    scheme colour, and non-region base pixels are untouched.
+{
+  const firstRegion = HANDHELD_REGIONS[0].id; // "face" — the chassis background
+  const secondRegion = HANDHELD_REGIONS[1].id;
+  // 2x2 device: p0 face, p1 second region, p2/p3 base chrome.
+  const base = new Uint8ClampedArray([
+    10, 10, 10, 255,
+    20, 20, 20, 255,
+    30, 30, 30, 255,
+    40, 40, 40, 255,
+  ]);
+  const regionMask = new Uint8Array([1, 2, 0, 0]);
+  const template = { width: 2, height: 2, base, regionMask };
+  const scheme = makeScheme((region) =>
+    region.id === firstRegion ? "#ff0000" : region.id === secondRegion ? "#00ff00" : "#000000",
+  );
+
+  // A 2x2 background: at 1:1 cover-fit, device pixel (x,y) samples image (x,y).
+  const background = {
+    width: 2,
+    height: 2,
+    data: new Uint8ClampedArray([
+      1, 2, 3, 255,
+      4, 5, 6, 255,
+      7, 8, 9, 255,
+      10, 11, 12, 255,
+    ]),
+  };
+  const out = renderHandheldWithBackground(template, scheme, background);
+
+  assert.deepEqual([...out.slice(0, 4)], [1, 2, 3, 255], "face pixel shows the image (sampled at its position)");
+  assert.deepEqual([...out.slice(4, 8)], [0, 255, 0, 255], "non-face region keeps its scheme colour");
+  assert.deepEqual([...out.slice(8, 12)], [30, 30, 30, 255], "base pixel 2 untouched");
+  assert.deepEqual([...out.slice(12, 16)], [40, 40, 40, 255], "base pixel 3 untouched");
+  // A zero-size image is a no-op (returns the plain recolour), never a crash.
+  const noop = renderHandheldWithBackground(template, scheme, { width: 0, height: 0, data: new Uint8ClampedArray() });
+  assert.deepEqual([...noop], [...renderHandheld(template, scheme)], "empty background falls back to the recolour");
   passed += 1;
 }
 
