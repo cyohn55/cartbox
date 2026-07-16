@@ -18,7 +18,8 @@ import { useEffect, useRef } from "react";
 
 import { buildRetroWall, orbitLight, renderBackdropFrame } from "@/lib/litBackdrop";
 import { CpuVoxelCompositor } from "@/lib/cpuVoxelCompositor";
-import { buildRetroProps } from "@/lib/retroVoxels";
+import { buildRetroProps, propSetToVoxelProps, type VoxelProp } from "@/lib/retroVoxels";
+import { loadActiveSet } from "@/lib/backdropPropsStore";
 import { WebGpuVoxelRenderer } from "./WebGpuVoxelRenderer";
 import styles from "./handheld.module.css";
 
@@ -54,7 +55,6 @@ export function LitBackdrop() {
     const wallScene = buildRetroWall(BUFFER_WIDTH, BUFFER_HEIGHT);
     const wallImage = wallContext.createImageData(BUFFER_WIDTH, BUFFER_HEIGHT);
     const wallBuffer = new Uint8ClampedArray(BUFFER_WIDTH * BUFFER_HEIGHT * 4);
-    const props = buildRetroProps();
     const compositorOptions = { bufferWidth: BUFFER_WIDTH, bufferHeight: BUFFER_HEIGHT, pitch: PROP_PITCH };
 
     const paintWall = (seconds: number) => {
@@ -63,22 +63,18 @@ export function LitBackdrop() {
       wallContext.putImageData(wallImage, 0, 0);
     };
 
-    // Motion-sensitive visitors get a single still frame (CPU, no GPU init).
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      gpuCanvas.style.display = "none";
-      paintWall(2.2);
-      new CpuVoxelCompositor(cpuCanvas, props, compositorOptions).render(2.2);
-      return;
-    }
-
+    // Show the wall immediately; props load (from the published/working set)
+    // and their renderer initialise asynchronously.
     paintWall(0);
 
     let renderer: PropRenderer | null = null;
+    let props: VoxelProp[] = [];
     let usingGpu = false;
     let frame = 0;
     let cancelled = false;
     let lastPaint = 0;
     const start = performance.now();
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     const loop = (now: number) => {
       if (now - lastPaint >= FRAME_INTERVAL_MS) {
@@ -103,6 +99,18 @@ export function LitBackdrop() {
     };
 
     void (async () => {
+      const set = await loadActiveSet();
+      if (cancelled) return;
+      props = set.props.length > 0 ? propSetToVoxelProps(set) : buildRetroProps();
+
+      // Motion-sensitive visitors get a single still frame (CPU, no GPU init).
+      if (reducedMotion) {
+        gpuCanvas.style.display = "none";
+        paintWall(2.2);
+        new CpuVoxelCompositor(cpuCanvas, props, compositorOptions).render(2.2);
+        return;
+      }
+
       const gpu = await WebGpuVoxelRenderer.create(gpuCanvas, props, compositorOptions);
       if (cancelled) {
         gpu?.destroy();

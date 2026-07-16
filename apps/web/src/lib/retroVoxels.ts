@@ -10,6 +10,7 @@
 import { extrudeSprite, type VoxelModel, type ModelLight } from "@cartbox/editor";
 
 import type { MotionParams } from "./bobSpin";
+import { decodePropArt, type BackdropPropSet } from "./backdropProps";
 import { BACKDROP_LIGHT as LIGHT_SPEC, PROP_SPECS, spriteToPixels } from "./retroVoxelSpecs";
 
 /** A prop placed in the backdrop: its model, centre anchor, size, and motion. */
@@ -27,8 +28,8 @@ export interface VoxelProp {
 export const BACKDROP_LIGHT: ModelLight = LIGHT_SPEC;
 
 /**
- * Build the placed voxel props. Models are extruded once here; the caller reuses
- * the returned array for the lifetime of the backdrop.
+ * Build the placed voxel props from the code-defined defaults. Used as the
+ * guaranteed fallback; the live backdrop prefers {@link propSetToVoxelProps}.
  */
 export function buildRetroProps(): VoxelProp[] {
   return PROP_SPECS.map(({ sprite, depth, fx, fy, cell, motion }) => {
@@ -39,6 +40,24 @@ export function buildRetroProps(): VoxelProp[] {
       fy,
       cell,
       motion,
+    };
+  });
+}
+
+/**
+ * Extrude an editable {@link BackdropPropSet} into placed voxel props. This is
+ * the path the live backdrop uses once a published/working set is loaded, so
+ * edits to the props flow straight into the rendered 3D scene.
+ */
+export function propSetToVoxelProps(set: BackdropPropSet): VoxelProp[] {
+  return set.props.map((prop) => {
+    const { albedo, emissive, width, height } = decodePropArt(prop.art);
+    return {
+      model: extrudeSprite(albedo, width, height, { depth: prop.depth, emissive }),
+      fx: prop.fx,
+      fy: prop.fy,
+      cell: prop.cell,
+      motion: prop.motion,
     };
   });
 }

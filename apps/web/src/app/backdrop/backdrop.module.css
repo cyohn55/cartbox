@@ -1,0 +1,150 @@
+/* Backdrop prop manager — uses the Cartbox design tokens (globals.css). */
+
+.page {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 32px 24px 64px;
+}
+
+.head {
+  margin-bottom: 20px;
+}
+
+.title {
+  font-size: 26px;
+  font-weight: 700;
+  margin: 0 0 6px;
+}
+
+.subtitle {
+  color: var(--muted);
+  margin: 0;
+  font-size: 14px;
+  max-width: 70ch;
+}
+
+.note {
+  margin: 16px 0;
+  padding: 12px 14px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.note code {
+  font-family: var(--font-data);
+  color: var(--fg);
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.btn {
+  padding: 8px 12px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.btn:hover {
+  border-color: var(--accent);
+}
+
+.btnPrimary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+}
+
+.previewWrap {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 120px;
+  background: radial-gradient(120% 120% at 50% 30%, #121730, #05070f);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.preview {
+  image-rendering: pixelated;
+  max-width: 100%;
+  height: auto;
+}
+
+.nameInput {
+  width: 100%;
+  padding: 6px 8px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.control {
+  display: grid;
+  grid-template-columns: 84px 1fr 40px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.control input[type="range"] {
+  width: 100%;
+}
+
+.controlValue {
+  text-align: right;
+  font-family: var(--font-data);
+  color: var(--fg);
+}
+
+.cardActions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.cardActions .btn {
+  flex: 1;
+  text-align: center;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.danger:hover {
+  border-color: #e0555f;
+  color: #e0555f;
+}

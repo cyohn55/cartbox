@@ -7,7 +7,7 @@
  * an in-place edit.
  */
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   parsePaletteFile,
   parseAseprite,
@@ -24,6 +24,16 @@ import {
 } from "@cartbox/editor";
 
 import styles from "./editor.module.css";
+import { decodeBase64Bytes, encodePropArt } from "@/lib/backdropProps";
+import {
+  clearPendingPropEdit,
+  loadPendingPropEdit,
+  loadPublishedSet,
+  loadWorkingSet,
+  saveWorkingSet,
+  type PendingPropEdit,
+} from "@/lib/backdropPropsStore";
+import { readBlockAlbedo, readBlockMaterial } from "./blockBuffers";
 import { PixelCanvas } from "./PixelCanvas";
 import { TilePicker } from "./TilePicker";
 import { PalettePicker } from "./PalettePicker";
@@ -119,6 +129,64 @@ export function SpriteEditor({
   const asepriteFileRef = useRef<HTMLInputElement>(null);
 
   const bump = () => setVersion((current) => current + 1);
+
+  // --- Backdrop prop publishing ---------------------------------------------
+  // When the backdrop manager hands off a prop to "Edit pixels", seed the sheet
+  // with its pixels once on mount so you draw over the existing art.
+  const [pendingProp] = useState<PendingPropEdit | null>(() => loadPendingPropEdit());
+  const seededPending = useRef(false);
+  useEffect(() => {
+    if (seededPending.current || !pendingProp) return;
+    seededPending.current = true;
+    // Grow the editing block so the prop's pixels fit before importing them.
+    const longest = Math.max(pendingProp.width, pendingProp.height);
+    setSpriteSize(longest <= sheet.tileSize ? 1 : longest <= sheet.tileSize * 2 ? 2 : 4);
+    const data = new Uint8ClampedArray(decodeBase64Bytes(pendingProp.albedo));
+    sheet.importImage({ data, width: pendingProp.width, height: pendingProp.height }, page);
+    bump();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** Publish the current sprite block as a backdrop prop (overwrite or add). */
+  const publishBackdropProp = async () => {
+    const dim = sheet.tileSize * spriteSize;
+    const albedo = readBlockAlbedo(sheet, page, tile, spriteSize);
+    const material = readBlockMaterial(height, specular, roughness, emissive, sheet, page, tile, spriteSize);
+    const emissivePlane = new Uint8Array(dim * dim);
+    for (let i = 0; i < dim * dim; i += 1) emissivePlane[i] = material[i * 4 + 3] ?? 0;
+    const art = encodePropArt(albedo, emissivePlane, dim, dim);
+
+    const base = loadWorkingSet() ?? (await loadPublishedSet());
+    const target = pendingProp?.targetId;
+    let next;
+    if (target && base.props.some((p) => p.id === target)) {
+      // Editing an existing prop: replace its pixels, keep placement + motion.
+      next = { ...base, props: base.props.map((p) => (p.id === target ? { ...p, art } : p)) };
+    } else {
+      const name = pendingProp?.name ?? window.prompt("Name this backdrop prop", "New prop") ?? "New prop";
+      next = {
+        ...base,
+        props: [
+          ...base.props,
+          {
+            id: `prop-${typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : Date.now()}`,
+            name,
+            art,
+            depth: 6,
+            fx: 0.5,
+            fy: 0.5,
+            cell: 2,
+            motion: { bobAmplitude: 3, bobPeriod: 4, bobPhase: Math.random(), spinCycle: 12, spinDuration: 3, spinPhase: Math.random() },
+          },
+        ],
+      };
+    }
+    saveWorkingSet(next);
+    clearPendingPropEdit();
+    window.alert(
+      `Published to your backdrop working set. Open /backdrop to arrange it — it previews live on the onboarding screen.`,
+    );
+  };
 
   // The pixel canvas paints albedo (SpriteSheet), normals, or a material ramp
   // (height/specular/roughness/emissive) — all match the PaintSurface shape, so
@@ -635,6 +703,9 @@ export function SpriteEditor({
         <div>
           <div className={styles.panelHead}>
             <span className={styles.panelTitle}>Voxel preview</span>
+            <button type="button" className={styles.langSelect} onClick={() => void publishBackdropProp()}>
+              {pendingProp?.targetId ? `Update "${pendingProp.name}"` : "Publish as backdrop prop"}
+            </button>
           </div>
           <VoxelPreview
             sheet={sheet}
