@@ -53,7 +53,12 @@
 }
 
 .preview {
-  image-rendering: pixelated;
+  /* The source is a high-resolution render (867×1579) shown at a few hundred
+     pixels, so it is always downscaled. Nearest-neighbour ("pixelated") drops
+     whole rows/columns unevenly at a fractional scale — thin arrows, letters and
+     edges vanish — so let the browser downsample smoothly instead. Matches the
+     same reasoning applied to .presetThumb. */
+  image-rendering: auto;
   width: auto;
   max-width: 100%;
   max-height: 60vh;
