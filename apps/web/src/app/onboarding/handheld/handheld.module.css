@@ -1,9 +1,41 @@
 /* Handheld selection screen — uses the Cartbox design tokens (globals.css). */
 
 .page {
+  position: relative;
+  z-index: 1;
   max-width: 1080px;
   margin: 0 auto;
   padding: 32px 24px 64px;
+}
+
+/* --- Lit pixel-art backdrop (rendered by LitBackdrop.tsx) --- */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  background: #05070b;
+  pointer-events: none;
+}
+
+.backdropCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* Integer-ish upscale of a low-res render — nearest-neighbour keeps the
+     pixels crisp (the opposite case from the downscaled skin previews). */
+  image-rendering: pixelated;
+  /* Dimmed so the wall reads as atmosphere, never competing with the form. */
+  opacity: 0.5;
+}
+
+/* A vignette + wash so text and cards stay legible over the lit wall. */
+.backdrop::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(120% 90% at 50% 0%, rgba(8, 10, 18, 0.4), rgba(5, 7, 11, 0.82) 78%);
 }
 
 .head {
@@ -63,8 +95,11 @@
   max-width: 100%;
   max-height: 60vh;
   border-radius: 8px;
-  /* A soft checker so transparent chrome edges read clearly. */
-  background: repeating-conic-gradient(var(--well) 0% 25%, var(--surface-raised) 0% 50%) 0 / 22px 22px;
+  /* A soft recessed panel so the handheld's transparent chrome edges read
+     cleanly against the dark gamer backdrop (replaces the old transparency
+     checker, which clashed with the lit wall behind the page). */
+  background: radial-gradient(120% 120% at 50% 30%, var(--well), var(--bg));
+  box-shadow: inset 0 0 0 1px var(--border), inset 0 8px 24px rgba(0, 0, 0, 0.4);
 }
 
 .stageLabel {
@@ -238,4 +273,170 @@
 .error {
   color: var(--live);
   font-size: 13px;
+}
+
+/* --- Console interface (OS skin) selector + tuning --- */
+.uiRow {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.uiControls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-width: 170px;
+}
+
+.uiBlurb {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.segRow {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.seg {
+  font-family: var(--font-data);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 7px 11px;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+
+.seg:hover {
+  border-color: var(--accent);
+}
+
+.segActive {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.tuneRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.tuneLabel {
+  font-size: 13px;
+  color: var(--text);
+}
+
+/* --- Live terminal preview (mirrors console.css pipboy treatment, small) --- */
+.termPreview {
+  position: relative;
+  flex: 0 0 auto;
+  width: 150px;
+  min-width: 150px;
+  aspect-ratio: 3 / 4;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  background: radial-gradient(120% 120% at 50% 40%, #05170f, #010402);
+  font-family: var(--font-data);
+}
+
+.termPreview[data-os-style="modern"] {
+  background: var(--surface-raised);
+}
+
+.termPreview[data-os-phosphor="green"] {
+  --tp-crt: #47ffa6;
+  --tp-filter: grayscale(1) brightness(1.05) sepia(1) hue-rotate(78deg) saturate(2.6);
+}
+
+.termPreview[data-os-phosphor="amber"] {
+  --tp-crt: #ffba4a;
+  --tp-filter: grayscale(1) brightness(1.08) sepia(1) hue-rotate(-12deg) saturate(3.4);
+}
+
+.termContent {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  font-size: 9px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.termPreview[data-os-style="pipboy"] .termContent {
+  filter: var(--tp-filter);
+  color: #e6fff2;
+  text-shadow: 0 0 2px rgba(255, 255, 255, 0.3);
+}
+
+.termTop {
+  display: flex;
+  justify-content: space-between;
+  letter-spacing: 0.06em;
+  opacity: 0.8;
+}
+
+.termBoot {
+  margin: 8px 0 6px;
+  opacity: 0.85;
+}
+
+.termMenu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  letter-spacing: 0.08em;
+}
+
+.termMenu li {
+  white-space: pre;
+}
+
+.termActive {
+  color: #ffffff;
+}
+
+.termPreview[data-os-style="modern"] .termActive {
+  color: var(--accent);
+}
+
+.termFoot {
+  display: flex;
+  justify-content: space-between;
+  margin-top: auto;
+  opacity: 0.7;
+}
+
+.termCrt {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(130% 130% at 50% 45%, transparent 55%, rgba(0, 0, 0, 0.5) 100%);
+  box-shadow: inset 0 0 18px color-mix(in srgb, var(--tp-crt, #47ffa6) 22%, transparent);
+}
+
+.termPreview[data-os-scanlines="on"] .termCrt::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(to bottom, rgba(0, 0, 0, 0) 0 2px, rgba(0, 0, 0, 0.22) 2px 3px);
+  mix-blend-mode: multiply;
 }

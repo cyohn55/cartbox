@@ -31,9 +31,17 @@ import { loadHandheldTemplate } from "@/lib/handheldTemplate";
 import { saveHandheldDraft, loadHandheldDraft, clearHandheldDraft, type HandheldDraft } from "@/lib/handheldDraft";
 import { assembleSheetCanvas, sliceSheet } from "@/lib/handheldSheet";
 import { ANIMATED_PRESETS, loadAnimatedArt, type AnimatedPresetView } from "@/lib/handheldAnimated";
-import { loadConsoleSettings, saveConsoleSettings } from "@/app/console/consoleSettings";
+import {
+  loadConsoleSettings,
+  saveConsoleSettings,
+  OS_STYLES,
+  OS_PHOSPHORS,
+  type OsPhosphorId,
+  type OsStyleId,
+} from "@/app/console/consoleSettings";
 import { handheldAssetUrl } from "@/lib/handheldAssets";
 import { HandheldSkinEditor } from "./HandheldSkinEditor";
+import { TerminalPreview } from "./TerminalPreview";
 import styles from "./handheld.module.css";
 
 /** Where the anonymous/offline choice is remembered until an account exists. */
@@ -73,6 +81,11 @@ export function HandheldPicker() {
   // design is changed another way (preset, recolour, upload).
   const [draft, setDraft] = useState<HandheldDraft | null>(null);
   const [editing, setEditing] = useState(false);
+  // The on-screen OS skin (a separate axis from the device art) and its tuning.
+  // Seeded from any stored console settings so returning players keep their pick.
+  const [osStyle, setOsStyle] = useState<OsStyleId>("pipboy");
+  const [osPhosphor, setOsPhosphor] = useState<OsPhosphorId>("green");
+  const [osScanlines, setOsScanlines] = useState(true);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
 
@@ -116,6 +129,15 @@ export function HandheldPicker() {
       // Ignore a corrupt stored value; the defaults stand.
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Seed the OS-skin controls from stored console settings (normalized), so the
+  // selector reflects the player's current choice rather than resetting it.
+  useEffect(() => {
+    const settings = loadConsoleSettings();
+    setOsStyle(settings.osStyle);
+    setOsPhosphor(settings.osPhosphor);
+    setOsScanlines(settings.osScanlines);
   }, []);
 
   // Re-render the live preview. Custom pixel art (when present) wins over the
@@ -241,8 +263,15 @@ export function HandheldPicker() {
     const handheld: StoredHandheld = art ? { presetId, scheme, art } : { presetId, scheme };
     try {
       window.localStorage.setItem(LOCAL_HANDHELD_KEY, JSON.stringify(handheld));
-      // Make the live console default to the handheld they just designed.
-      saveConsoleSettings({ ...loadConsoleSettings(), theme: "handheld" });
+      // Make the live console default to the handheld they just designed, and
+      // carry over the OS-skin choices (terminal style + tuning) they set here.
+      saveConsoleSettings({
+        ...loadConsoleSettings(),
+        theme: "handheld",
+        osStyle,
+        osPhosphor,
+        osScanlines,
+      });
       if (!isStaticExport) {
         const response = await fetch("/api/console/me/handheld", {
           method: "PUT",
@@ -343,6 +372,60 @@ export function HandheldPicker() {
                 </span>
               </div>
             ))}
+          </section>
+
+          <section className={styles.section}>
+            <div className={styles.sectionHead}>Console interface</div>
+            <div className={styles.uiRow}>
+              <TerminalPreview style={osStyle} phosphor={osPhosphor} scanlines={osScanlines} />
+              <div className={styles.uiControls}>
+                <div className={styles.segRow} role="group" aria-label="Interface style">
+                  {OS_STYLES.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      className={`${styles.seg} ${osStyle === option.id ? styles.segActive : ""}`}
+                      onClick={() => setOsStyle(option.id)}
+                      aria-pressed={osStyle === option.id}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                <p className={styles.uiBlurb}>
+                  {OS_STYLES.find((option) => option.id === osStyle)?.blurb}
+                </p>
+
+                {osStyle === "pipboy" && (
+                  <>
+                    <div className={styles.tuneRow}>
+                      <span className={styles.tuneLabel}>Phosphor</span>
+                      <div className={styles.segRow} role="group" aria-label="Phosphor colour">
+                        {OS_PHOSPHORS.map((option) => (
+                          <button
+                            key={option.id}
+                            type="button"
+                            className={`${styles.seg} ${osPhosphor === option.id ? styles.segActive : ""}`}
+                            onClick={() => setOsPhosphor(option.id)}
+                            aria-pressed={osPhosphor === option.id}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <label className={styles.tuneRow}>
+                      <span className={styles.tuneLabel}>Scanlines</span>
+                      <input
+                        type="checkbox"
+                        checked={osScanlines}
+                        onChange={(event) => setOsScanlines(event.target.checked)}
+                      />
+                    </label>
+                  </>
+                )}
+              </div>
+            </div>
           </section>
 
           <section className={styles.actions}>

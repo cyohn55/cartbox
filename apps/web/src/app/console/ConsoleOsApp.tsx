@@ -50,7 +50,7 @@ export function ConsoleOS() {
   const [state, dispatch] = useReducer(consoleOsReducer, INITIAL_CONSOLE_STATE);
   const [signedIn, setSignedIn] = useState(false);
   const bus = useConsoleInputBus();
-  const { panelOpen, setPanelOpen } = useConsoleSettings();
+  const { settings, panelOpen, setPanelOpen } = useConsoleSettings();
   const rootRef = useRef<HTMLDivElement>(null);
 
   // D-pad cursor across every screen that opts in via data-console-nav.
@@ -163,10 +163,24 @@ export function ConsoleOS() {
     );
   }
 
+  // The OS skin is a separate axis from the device shell theme. The phosphor
+  // filter lives on `.os-content` so it monochrome-tints every screen (including
+  // photographic feed content) uniformly; the CRT overlay is a sibling of that
+  // wrapper so its scanlines and vignette are NOT re-tinted by the same filter.
+  const pipboy = settings.osStyle === "pipboy";
   return (
-    <div className="os-root" ref={rootRef}>
-      {stage}
-      {panelOpen && <SettingsScreen onClose={() => setPanelOpen(false)} />}
+    <div
+      className="os-root"
+      ref={rootRef}
+      data-os-style={settings.osStyle}
+      data-os-phosphor={settings.osPhosphor}
+      data-os-scanlines={settings.osScanlines ? "on" : "off"}
+    >
+      <div className="os-content">
+        {stage}
+        {panelOpen && <SettingsScreen onClose={() => setPanelOpen(false)} />}
+      </div>
+      {pipboy && <div className="os-crt" aria-hidden />}
     </div>
   );
 }

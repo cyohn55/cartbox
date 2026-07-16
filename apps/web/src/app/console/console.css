@@ -1738,6 +1738,78 @@ select.os-input {
   inset: 0;
 }
 
+/* ==========================================================================
+ * OS skin — Pip-Boy phosphor terminal (data-os-style on .os-root)
+ * A separate axis from the device shell `theme`: it restyles everything drawn
+ * inside the screen. The phosphor tint lives on `.os-content` so it colours
+ * arbitrary content (feed images, cart canvases, avatars) uniformly; the CRT
+ * overlay is a *sibling* of that wrapper so its scanlines and vignette are not
+ * re-tinted by the same filter.
+ * ======================================================================== */
+
+.os-content {
+  position: absolute;
+  inset: 0;
+}
+
+/* Phosphor tint + CRT accent colour, chosen by the phosphor sub-option. */
+.os-root[data-os-style="pipboy"][data-os-phosphor="green"] {
+  --os-crt: #47ffa6;
+  --os-phosphor-filter: grayscale(1) brightness(1.05) sepia(1) hue-rotate(78deg) saturate(2.6) contrast(1.05);
+}
+.os-root[data-os-style="pipboy"][data-os-phosphor="amber"] {
+  --os-crt: #ffba4a;
+  --os-phosphor-filter: grayscale(1) brightness(1.08) sepia(1) hue-rotate(-12deg) saturate(3.4) contrast(1.05);
+}
+
+/* Monochrome-tint the whole OS to one phosphor colour so every screen reads as
+   the same CRT, regardless of what it draws. */
+.os-root[data-os-style="pipboy"] .os-content {
+  filter: var(--os-phosphor-filter);
+}
+
+/* A faint phosphor bloom on text (tinted along with everything else). */
+.os-root[data-os-style="pipboy"] .os-content :is(h1, h2, h3, p, span, button, a) {
+  text-shadow: 0 0 1.5px rgba(255, 255, 255, 0.25);
+}
+
+/* CRT overlay: vignette + edge bloom + gentle flicker, above the tinted content
+   and never re-tinted (sibling of .os-content, not a child). */
+.os-crt {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  background: radial-gradient(130% 130% at 50% 45%, transparent 55%, rgba(0, 0, 0, 0.55) 100%);
+  box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.55);
+  animation: os-crt-flicker 4.5s infinite steps(60);
+}
+/* Scanlines are their own layer so a player can switch them off. */
+.os-root[data-os-scanlines="on"] .os-crt::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(to bottom, rgba(0, 0, 0, 0) 0 2px, rgba(0, 0, 0, 0.22) 2px 3px);
+  mix-blend-mode: multiply;
+}
+/* A soft coloured glow hugging the screen edges. */
+.os-crt::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  box-shadow: inset 0 0 24px color-mix(in srgb, var(--os-crt, #47ffa6) 22%, transparent);
+}
+
+@keyframes os-crt-flicker {
+  0%, 96%, 100% { opacity: 1; }
+  97% { opacity: 0.88; }
+  98% { opacity: 0.97; }
+  99% { opacity: 0.9; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .os-crt { animation: none; }
+}
+
 /* The D-pad cursor. A class (not :focus-visible) so programmatic focus from
    shell buttons always shows the ring. */
 .os-cursor {

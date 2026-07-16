@@ -29,6 +29,25 @@ export const BUTTON_STYLES = [
 ] as const;
 export type ButtonStyleId = (typeof BUTTON_STYLES)[number]["id"];
 
+/**
+ * The on-screen operating-system skin. This is a separate axis from the device
+ * shell `theme` above: `theme` styles the physical handheld (bezel, buttons),
+ * while `osStyle` restyles everything drawn *inside* the screen. "pipboy" is a
+ * monochrome phosphor CRT terminal; "modern" is the full-colour Cartbox OS.
+ */
+export const OS_STYLES = [
+  { id: "pipboy", label: "Pip-Boy Terminal", blurb: "Monochrome phosphor CRT — scanlines, glow and boot type." },
+  { id: "modern", label: "Modern", blurb: "The clean, full-colour Cartbox interface." },
+] as const;
+export type OsStyleId = (typeof OS_STYLES)[number]["id"];
+
+/** Phosphor tint for the terminal skin. */
+export const OS_PHOSPHORS = [
+  { id: "green", label: "Green" },
+  { id: "amber", label: "Amber" },
+] as const;
+export type OsPhosphorId = (typeof OS_PHOSPHORS)[number]["id"];
+
 /** "monthly" defers to the rotation; anything else pins a registry id. */
 export type MiniGameChoice = "monthly" | string;
 
@@ -51,6 +70,12 @@ export interface ConsoleSettings {
   faceColors: FaceButtonColors | null;
   dpadColor: string | null;
   joystickColor: string | null;
+  /** On-screen OS skin (terminal vs modern) — independent of the shell `theme`. */
+  osStyle: OsStyleId;
+  /** Phosphor tint for the terminal skin. */
+  osPhosphor: OsPhosphorId;
+  /** Scanline overlay on the terminal skin (some players find it too busy). */
+  osScanlines: boolean;
 }
 
 export const DEFAULT_CONSOLE_SETTINGS: ConsoleSettings = {
@@ -64,6 +89,11 @@ export const DEFAULT_CONSOLE_SETTINGS: ConsoleSettings = {
   faceColors: null,
   dpadColor: null,
   joystickColor: null,
+  // The retro terminal is the house look for the OS screen; players can switch
+  // back to "modern" from onboarding or the settings panel.
+  osStyle: "pipboy",
+  osPhosphor: "green",
+  osScanlines: true,
 };
 
 function oneOf<T extends { id: string }>(list: readonly T[], value: unknown, fallback: T["id"]): T["id"] {
@@ -101,6 +131,10 @@ export function normalizeConsoleSettings(input: unknown): ConsoleSettings {
     faceColors: normalizeFaceColors(raw.faceColors),
     dpadColor: normalizeHexColor(raw.dpadColor),
     joystickColor: normalizeHexColor(raw.joystickColor),
+    osStyle: oneOf(OS_STYLES, raw.osStyle, DEFAULT_CONSOLE_SETTINGS.osStyle),
+    osPhosphor: oneOf(OS_PHOSPHORS, raw.osPhosphor, DEFAULT_CONSOLE_SETTINGS.osPhosphor),
+    // Default on; only an explicit `false` disables scanlines.
+    osScanlines: raw.osScanlines !== false,
   };
 }
 
