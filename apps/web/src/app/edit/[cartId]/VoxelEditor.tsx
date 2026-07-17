@@ -54,12 +54,78 @@ function hexToRgb(hex: string): [number, number, number] {
   return [(value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff];
 }
 
-/** A starter cube on the floor so there is always a face to build from. */
+/** Bright wireframe colour of the hovered target cell, per tool. */
+const HIGHLIGHT: Record<VoxelTool, string> = { add: "#7dfcb6", remove: "#ff7b7b", paint: "#ffdd66" };
+
+type Cell = [number, number, number];
+const sameCell = (a: Cell | null, b: Cell | null): boolean =>
+  a === b || (a !== null && b !== null && a[0] === b[0] && a[1] === b[1] && a[2] === b[2]);
+
+/** A small 3×3 floor platform, so a new model reads as a surface to build on. */
 function seededGrid(size: number): VoxelGrid {
   const grid = new VoxelGrid(size, size, size);
   const mid = Math.floor(size / 2);
-  grid.set(mid, 0, mid, SEED_COLOR[0], SEED_COLOR[1], SEED_COLOR[2], 0);
+  for (let dz = -1; dz <= 1; dz += 1) {
+    for (let dx = -1; dx <= 1; dx += 1) {
+      grid.set(mid + dx, 0, mid + dz, SEED_COLOR[0], SEED_COLOR[1], SEED_COLOR[2], 0);
+    }
+  }
   return grid;
+}
+
+/**
+ * Outline a single grid cell as a glowing wireframe cube, using the same
+ * projection as {@link renderVoxelModel}, so the hovered target (where a cube
+ * will be added/removed/painted) is always visible — the feedback that makes the
+ * tools discoverable.
+ */
+function drawHighlight(
+  context: CanvasRenderingContext2D,
+  cell: Cell,
+  gridSize: number,
+  yaw: number,
+  pitch: number,
+  cellPx: number,
+  size: number,
+  color: string,
+): void {
+  const half = (gridSize - 1) / 2;
+  const cx = cell[0] - half;
+  const cy = cell[1] - half;
+  const cz = cell[2] - half;
+  const cosY = Math.cos(yaw);
+  const sinY = Math.sin(yaw);
+  const cosP = Math.cos(pitch);
+  const sinP = Math.sin(pitch);
+  const centre = size / 2;
+  const project = (x: number, y: number, z: number): [number, number] => {
+    const yawX = x * cosY + z * sinY;
+    const yawZ = -x * sinY + z * cosY;
+    const camY = y * cosP - yawZ * sinP;
+    return [centre + yawX * cellPx, centre - camY * cellPx];
+  };
+
+  const corners: [number, number][] = [];
+  for (let i = 0; i < 8; i += 1) {
+    corners.push(project(cx + (i & 1 ? 0.5 : -0.5), cy + (i & 2 ? 0.5 : -0.5), cz + (i & 4 ? 0.5 : -0.5)));
+  }
+  context.save();
+  context.strokeStyle = color;
+  context.lineWidth = Math.max(1.5, cellPx * 0.12);
+  context.lineJoin = "round";
+  context.shadowColor = color;
+  context.shadowBlur = cellPx * 0.4;
+  for (let i = 0; i < 8; i += 1) {
+    for (let j = i + 1; j < 8; j += 1) {
+      const diff = i ^ j;
+      if (diff !== 1 && diff !== 2 && diff !== 4) continue; // only cube edges
+      context.beginPath();
+      context.moveTo(corners[i]![0], corners[i]![1]);
+      context.lineTo(corners[j]![0], corners[j]![1]);
+      context.stroke();
+    }
+  }
+  context.restore();
 }
 
 function loadGrid(serialized: string | null): VoxelGrid {
@@ -93,10 +159,11 @@ export function VoxelEditor({ sheet, model, onModelChange }: VoxelEditorProps) {
   const [gridSize, setGridSize] = useState(() => gridRef.current!.sizeX);
   const [rev, setRev] = useState(0); // bumped to rebuild the model after edits
   const [yaw, setYaw] = useState(0.7);
-  const [pitch, setPitch] = useState(0.5);
+  const [pitch, setPitch] = useState(0.72);
   const [cell, setCell] = useState(12);
   const [tool, setTool] = useState<VoxelTool>("add");
   const [colorIndex, setColorIndex] = useState(1);
+  const [hover, setHover] = useState<Cell | null>(null); // target cell under the cursor
 
   const palette = useMemo(() => sheet.cssPalette(), [sheet]);
   const paintHex = palette[colorIndex] ?? "#ffffff";
@@ -137,7 +204,9 @@ export function VoxelEditor({ sheet, model, onModelChange }: VoxelEditorProps) {
     const image = context.createImageData(size, size);
     image.data.set(buffers.out);
     context.putImageData(image, 0, 0);
-  }, [model3d, yaw, pitch, cell, size, buffers]);
+    // Outline the cell the cursor is targeting so every tool shows where it acts.
+    if (hover) drawHighlight(context, hover, gridSize, yaw, pitch, cell, size, HIGHLIGHT[tool]);
+  }, [model3d, yaw, pitch, cell, size, buffers, hover, tool, gridSize]);
 
   /** Persist the current grid to undo/save; re-seed if it was emptied. */
   const commit = () => {
@@ -155,32 +224,46 @@ export function VoxelEditor({ sheet, model, onModelChange }: VoxelEditorProps) {
     return [rest % grid.sizeX, Math.floor(rest / grid.sizeX), z];
   };
 
-  /** Apply the active tool (or Remove on a right-click) at a canvas pixel. */
-  const editAt = (clientX: number, clientY: number, removeOverride: boolean) => {
+  /** Resolve a canvas pixel to the picked grid cell and its face, or null. */
+  const pickAt = (clientX: number, clientY: number): { x: number; y: number; z: number; face: number } | null => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
     const px = Math.floor(((clientX - rect.left) / rect.width) * size);
     const py = Math.floor(((clientY - rect.top) / rect.height) * size);
-    if (px < 0 || px >= size || py < 0 || py >= size) return;
-
+    if (px < 0 || px >= size || py < 0 || py >= size) return null;
     const di = py * size + px;
     const voxel = buffers.pickVoxel[di]!;
-    if (voxel < 0) return; // clicked empty space — nothing to act on
+    if (voxel < 0) return null; // empty space
+    const [x, y, z] = cellCoords(model3d.gridIndex[voxel]!, gridRef.current!);
+    return { x, y, z, face: buffers.pickFace[di]! };
+  };
 
-    const grid = gridRef.current!;
-    const [x, y, z] = cellCoords(model3d.gridIndex[voxel]!, grid);
-    const [r, g, b] = hexToRgb(paintHex);
-    const action = removeOverride ? "remove" : tool;
-
-    if (action === "remove") {
-      grid.clear(x, y, z);
-    } else if (action === "paint") {
-      grid.set(x, y, z, r, g, b);
-    } else {
-      const [nx, ny, nz] = CUBE_FACES[buffers.pickFace[di]!]!.normal;
-      grid.set(x + nx, y + ny, z + nz, r, g, b);
+  /** The cell a tool would act on: the empty neighbour for Add, else the cell itself. */
+  const targetCell = (pick: { x: number; y: number; z: number; face: number }, action: VoxelTool): Cell | null => {
+    if (action === "add") {
+      const [nx, ny, nz] = CUBE_FACES[pick.face]!.normal;
+      const cell: Cell = [pick.x + nx, pick.y + ny, pick.z + nz];
+      return gridRef.current!.inBounds(cell[0], cell[1], cell[2]) ? cell : null;
     }
+    return [pick.x, pick.y, pick.z];
+  };
+
+  /** Apply the active tool (or Remove on a right-click) at a canvas pixel. */
+  const editAt = (clientX: number, clientY: number, removeOverride: boolean) => {
+    const pick = pickAt(clientX, clientY);
+    if (!pick) return;
+    const action = removeOverride ? "remove" : tool;
+    const cell = targetCell(pick, action);
+    if (!cell) return;
+    const grid = gridRef.current!;
+    if (action === "remove") {
+      grid.clear(cell[0], cell[1], cell[2]);
+    } else {
+      const [r, g, b] = hexToRgb(paintHex);
+      grid.set(cell[0], cell[1], cell[2], r, g, b);
+    }
+    setHover(null);
     commit();
   };
 
@@ -193,21 +276,29 @@ export function VoxelEditor({ sheet, model, onModelChange }: VoxelEditorProps) {
   };
   const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const state = drag.current;
-    if (!state) return;
-    const dx = event.clientX - state.lastX;
-    const dy = event.clientY - state.lastY;
-    if (!state.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
-    state.moved = true;
-    state.lastX = event.clientX;
-    state.lastY = event.clientY;
-    setYaw((value) => value - dx * ORBIT_SPEED);
-    setPitch((value) => Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, value + dy * ORBIT_SPEED)));
+    if (state) {
+      const dx = event.clientX - state.lastX;
+      const dy = event.clientY - state.lastY;
+      if (!state.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+      if (!state.moved) setHover(null); // this press became an orbit, not a click
+      state.moved = true;
+      state.lastX = event.clientX;
+      state.lastY = event.clientY;
+      setYaw((value) => value - dx * ORBIT_SPEED);
+      setPitch((value) => Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, value + dy * ORBIT_SPEED)));
+      return;
+    }
+    // Plain hover: preview the cell the current tool would act on.
+    const pick = pickAt(event.clientX, event.clientY);
+    const next = pick ? targetCell(pick, tool) : null;
+    setHover((prev) => (sameCell(prev, next) ? prev : next));
   };
   const onPointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const state = drag.current;
     drag.current = null;
     if (state && !state.moved) editAt(event.clientX, event.clientY, state.button === 2);
   };
+  const onPointerLeave = () => setHover(null);
   const onWheel = (event: React.WheelEvent<HTMLCanvasElement>) => {
     setCell((value) => Math.max(CELL_MIN, Math.min(CELL_MAX, value - Math.sign(event.deltaY))));
   };
@@ -285,6 +376,7 @@ export function VoxelEditor({ sheet, model, onModelChange }: VoxelEditorProps) {
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
+          onPointerLeave={onPointerLeave}
           onContextMenu={(event) => event.preventDefault()}
           onWheel={onWheel}
           style={{
@@ -341,8 +433,8 @@ export function VoxelEditor({ sheet, model, onModelChange }: VoxelEditorProps) {
         </div>
 
         <p className={styles.panelMeta} style={{ lineHeight: 1.5 }}>
-          Drag to orbit. Click a face to add a cube, right-click to remove, or use the tools. Scroll
-          to zoom.
+          The glowing outline shows where the next cube lands. Click a face to add there, right-click
+          to remove, or switch tools. Drag to orbit, scroll to zoom.
         </p>
       </aside>
     </div>
