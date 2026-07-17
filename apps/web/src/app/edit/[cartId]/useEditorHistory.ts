@@ -45,6 +45,8 @@ interface CartSnapshot {
   fx: PostFxSettings;
   rig: SpriteRig;
   materials: MaterialSwatches;
+  /** Serialized 3D voxel model (Voxel tab), or null when the cart has none. */
+  voxel: string | null;
 }
 
 export interface EditorHistory {
@@ -60,6 +62,8 @@ export interface EditorHistory {
   setRig: (rig: SpriteRig) => void;
   materials: MaterialSwatches;
   setMaterials: (materials: MaterialSwatches) => void;
+  voxel: string | null;
+  setVoxel: (voxel: string) => void;
   canUndo: boolean;
   canRedo: boolean;
   undo: () => void;
@@ -73,6 +77,7 @@ interface UseEditorHistoryArgs {
   initialFx: PostFxSettings;
   initialRig: SpriteRig;
   initialMaterials: MaterialSwatches;
+  initialVoxel: string | null;
   initialBank: number;
 }
 
@@ -84,7 +89,8 @@ function snapshotsEqual(a: CartSnapshot, b: CartSnapshot): boolean {
   // paths, so a structural string compare is a sound and cheap equality here.
   if (JSON.stringify(a.fx) !== JSON.stringify(b.fx)) return false;
   if (JSON.stringify(a.rig) !== JSON.stringify(b.rig)) return false;
-  return JSON.stringify(a.materials) === JSON.stringify(b.materials);
+  if (JSON.stringify(a.materials) !== JSON.stringify(b.materials)) return false;
+  return a.voxel === b.voxel;
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -101,12 +107,14 @@ export function useEditorHistory({
   initialFx,
   initialRig,
   initialMaterials,
+  initialVoxel,
   initialBank,
 }: UseEditorHistoryArgs): EditorHistory {
   const [bank, setBankState] = useState(initialBank);
   const [fx, setFxState] = useState<PostFxSettings>(initialFx);
   const [rig, setRigState] = useState<SpriteRig>(initialRig);
   const [materials, setMaterialsState] = useState<MaterialSwatches>(initialMaterials);
+  const [voxel, setVoxelState] = useState<string | null>(initialVoxel);
   const [revision, setRevision] = useState(0);
   // A monotonic version so canUndo/canRedo re-evaluate when the timeline moves.
   const [, setHistoryVersion] = useState(0);
@@ -117,6 +125,7 @@ export function useEditorHistory({
   const fxRef = useRef(fx);
   const rigRef = useRef(rig);
   const materialsRef = useRef(materials);
+  const voxelRef = useRef(voxel);
   const runnableRef = useRef(runnable);
   const applyingRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -133,6 +142,7 @@ export function useEditorHistory({
       fx: fxRef.current,
       rig: rigRef.current,
       materials: materialsRef.current,
+      voxel: voxelRef.current,
     };
   }, []);
 
@@ -181,6 +191,8 @@ export function useEditorHistory({
       setRigState(snapshot.rig);
       materialsRef.current = snapshot.materials;
       setMaterialsState(snapshot.materials);
+      voxelRef.current = snapshot.voxel;
+      setVoxelState(snapshot.voxel);
     } finally {
       applyingRef.current = false;
     }
@@ -238,6 +250,12 @@ export function useEditorHistory({
     notify();
   }, [notify]);
 
+  const setVoxel = useCallback((next: string) => {
+    voxelRef.current = next;
+    setVoxelState(next);
+    notify();
+  }, [notify]);
+
   const history = historyRef.current;
   const canUndo = history?.canUndo() ?? false;
   const canRedo = history?.canRedo() ?? false;
@@ -253,6 +271,8 @@ export function useEditorHistory({
     setRig,
     materials,
     setMaterials,
+    voxel,
+    setVoxel,
     canUndo,
     canRedo,
     undo,

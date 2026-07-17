@@ -48,11 +48,12 @@ import { SfxEditor } from "./SfxEditor";
 import { MusicEditor } from "./MusicEditor";
 import { RunOverlay } from "./RunOverlay";
 import { ShaderEditor } from "./ShaderEditor";
+import { VoxelEditor } from "./VoxelEditor";
 import { useEditorHistory } from "./useEditorHistory";
 
-const TABS = ["Code", "Sprites", "Map", "FX", "SFX", "Music"] as const;
+const TABS = ["Code", "Sprites", "Voxel", "Map", "FX", "SFX", "Music"] as const;
 type Tab = (typeof TABS)[number];
-const LIVE_TABS: ReadonlySet<Tab> = new Set<Tab>(["Code", "Sprites", "Map", "FX", "SFX", "Music"]);
+const LIVE_TABS: ReadonlySet<Tab> = new Set<Tab>(["Code", "Sprites", "Voxel", "Map", "FX", "SFX", "Music"]);
 
 type EngineMode = "wasm" | "stub";
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -70,6 +71,8 @@ interface EditorWorkbenchProps {
   initialFx: PostFxSettings | null;
   /** Persisted material swatch bindings loaded with the cart, or null when none. */
   initialMaterials: WireMaterials | null;
+  /** Persisted 3D voxel model (serialized) loaded with the cart, or null when none. */
+  initialVoxel: string | null;
 }
 
 export function EditorWorkbench({
@@ -81,6 +84,7 @@ export function EditorWorkbench({
   initialRig,
   initialFx,
   initialMaterials,
+  initialVoxel,
 }: EditorWorkbenchProps) {
   const [engine, setEngine] = useState<CartEngine | null>(null);
   const [mode, setMode] = useState<EngineMode>("wasm");
@@ -161,6 +165,7 @@ export function EditorWorkbench({
       initialRig={initialRig}
       initialFx={initialFx}
       initialMaterials={initialMaterials}
+      initialVoxel={initialVoxel}
     />
   );
 }
@@ -175,6 +180,7 @@ function WorkbenchBody({
   initialRig,
   initialFx,
   initialMaterials,
+  initialVoxel,
 }: {
   engine: CartEngine;
   cartId: string;
@@ -185,6 +191,7 @@ function WorkbenchBody({
   initialRig: WireRig | null;
   initialFx: PostFxSettings | null;
   initialMaterials: WireMaterials | null;
+  initialVoxel: string | null;
 }) {
   // requestedModel is what the URL/DB asked for; activeModel is what the loaded
   // engine actually provides (every editor surface reads geometry from this one).
@@ -208,6 +215,7 @@ function WorkbenchBody({
     initialFx: initialFx ?? defaultPostFxSettings(),
     initialRig: initialRig ?? emptySpriteRig(),
     initialMaterials: (initialMaterials as MaterialSwatches | null) ?? defaultMaterialSwatches(),
+    initialVoxel,
     initialBank: 0,
   });
   const {
@@ -221,6 +229,8 @@ function WorkbenchBody({
     setRig,
     materials,
     setMaterials,
+    voxel,
+    setVoxel,
     canUndo,
     canRedo,
     undo,
@@ -267,7 +277,7 @@ function WorkbenchBody({
       // The static demo build has no API — Save lands in this browser's
       // localStorage instead (same payload the server would persist).
       if (isStaticExport) {
-        const stored = saveCartDraft(cartId, { model: modelId, bytes, rig, fx, materials });
+        const stored = saveCartDraft(cartId, { model: modelId, bytes, rig, fx, materials, voxel });
         setSaveState(stored ? "saved" : "error");
         return;
       }
@@ -431,6 +441,9 @@ function WorkbenchBody({
           rig={rig}
           onRigChange={setRig}
         />
+      )}
+      {activeTab === "Voxel" && (
+        <VoxelEditor key={`${bank}:${revision}`} sheet={sheet} model={voxel} onModelChange={setVoxel} />
       )}
       {activeTab === "Map" && <MapEditor key={`${bank}:${revision}`} sheet={sheet} map={map} />}
       {activeTab === "FX" && (

@@ -49,6 +49,14 @@ export interface RenderModelOptions {
   /** Reuse this output buffer + z-buffer (must match the returned size). */
   readonly out?: Uint8ClampedArray;
   readonly depthBuffer?: Float32Array;
+  /**
+   * Optional picking outputs (size × size). When provided, each pixel records the
+   * index of the voxel whose face won it (`-1` where nothing was drawn) and which
+   * cube face (0..5, matching {@link CUBE_FACES} order; `-1` = none). Lets a 3D
+   * editor turn a cursor position into the voxel and face under it.
+   */
+  readonly pickVoxel?: Int32Array;
+  readonly pickFace?: Int8Array;
 }
 
 export interface VoxelRender {
@@ -56,6 +64,9 @@ export interface VoxelRender {
   readonly depth: Float32Array;
   readonly width: number;
   readonly height: number;
+  /** Present only when requested via {@link RenderModelOptions.pickVoxel}. */
+  readonly pickVoxel?: Int32Array;
+  readonly pickFace?: Int8Array;
 }
 
 function normalizeTriple(x: number, y: number, z: number): [number, number, number] {
@@ -86,8 +97,12 @@ export function renderVoxelModel(model: VoxelModel, options: RenderModelOptions 
   const size = voxelCanvasSize(model, cell);
   const data = options.out ?? new Uint8ClampedArray(size * size * 4);
   const depth = options.depthBuffer ?? new Float32Array(size * size);
+  const pickVoxel = options.pickVoxel;
+  const pickFace = options.pickFace;
   data.fill(0);
   depth.fill(-Infinity);
+  pickVoxel?.fill(-1);
+  pickFace?.fill(-1);
 
   const [lx, ly, lz] = normalizeTriple(light.direction[0], light.direction[1], light.direction[2]);
   const cosY = Math.cos(yaw);
@@ -143,11 +158,11 @@ export function renderVoxelModel(model: VoxelModel, options: RenderModelOptions 
         const off = face.corners[c]!;
         corners[c] = project(vx + off[0], vy + off[1], vz + off[2]);
       }
-      fillQuad(data, depth, size, corners, r, g, b);
+      fillQuad(data, depth, size, corners, r, g, b, pickVoxel, pickFace, v, f);
     }
   }
 
-  return { data, depth, width: size, height: size };
+  return { data, depth, width: size, height: size, pickVoxel, pickFace };
 }
 
 /**
@@ -163,6 +178,10 @@ function fillQuad(
   r: number,
   g: number,
   b: number,
+  pickVoxel: Int32Array | undefined,
+  pickFace: Int8Array | undefined,
+  voxelIndex: number,
+  faceIndex: number,
 ): void {
   const minX = Math.max(0, Math.floor(Math.min(p[0]![0], p[1]![0], p[2]![0], p[3]![0])));
   const maxX = Math.min(size - 1, Math.ceil(Math.max(p[0]![0], p[1]![0], p[2]![0], p[3]![0])));
@@ -199,6 +218,8 @@ function fillQuad(
       data[o + 1] = g;
       data[o + 2] = b;
       data[o + 3] = 255;
+      if (pickVoxel) pickVoxel[di] = voxelIndex;
+      if (pickFace) pickFace[di] = faceIndex;
     }
   }
 }

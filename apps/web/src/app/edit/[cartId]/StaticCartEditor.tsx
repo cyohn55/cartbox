@@ -40,6 +40,7 @@ interface ResolvedCart {
   rig: WireRig | null;
   fx: PostFxSettings | null;
   materials: WireMaterials | null;
+  voxel: string | null;
 }
 
 function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
@@ -60,6 +61,7 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
         rig: parseRig(draft.rigJson ? JSON.parse(draft.rigJson) : null),
         fx: parsePostFxSettings(draft.fxJson ? JSON.parse(draft.fxJson) : null),
         materials: parseMaterials(draft.materialsJson ? JSON.parse(draft.materialsJson) : null),
+        voxel: draft.voxelJson,
       });
       return () => URL.revokeObjectURL(blobUrl);
     }
@@ -70,6 +72,7 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
       rig: null,
       fx: null,
       materials: null,
+      voxel: null,
     });
     return undefined;
   }, [cartId]);
@@ -93,6 +96,7 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
       initialRig={resolved.rig}
       initialFx={resolved.fx}
       initialMaterials={resolved.materials}
+      initialVoxel={resolved.voxel}
     />
   );
 }

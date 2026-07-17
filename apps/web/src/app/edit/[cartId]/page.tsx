@@ -91,6 +91,7 @@ export default async function EditorPage({ params, searchParams }: EditorPagePro
       initialRig={rig}
       initialFx={fx}
       initialMaterials={materials}
+      initialVoxel={null}
     />
   );
 }

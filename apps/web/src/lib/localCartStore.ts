@@ -21,6 +21,8 @@ export interface StoredCartDraft {
   fxJson: string | null;
   /** JSON-serialised material swatch bindings, as the materials endpoint would receive. */
   materialsJson: string | null;
+  /** Serialised 3D voxel model (already a JSON string), or null when none. */
+  voxelJson: string | null;
   /** ISO timestamp of the save, for future "last edited" UI. */
   savedAt: string;
 }
@@ -67,6 +69,7 @@ export function loadCartDraft(cartId: string): StoredCartDraft | null {
       rigJson: typeof parsed.rigJson === "string" ? parsed.rigJson : null,
       fxJson: typeof parsed.fxJson === "string" ? parsed.fxJson : null,
       materialsJson: typeof parsed.materialsJson === "string" ? parsed.materialsJson : null,
+      voxelJson: typeof parsed.voxelJson === "string" ? parsed.voxelJson : null,
       savedAt: typeof parsed.savedAt === "string" ? parsed.savedAt : new Date(0).toISOString(),
     };
   } catch {
@@ -84,6 +87,8 @@ export interface SaveCartDraftInput {
   rig: unknown;
   fx: unknown;
   materials: unknown;
+  /** Already-serialized voxel model string, or null when none. */
+  voxel: string | null;
 }
 
 /** Returns false when the write failed (e.g. localStorage quota exceeded). */
@@ -97,6 +102,7 @@ export function saveCartDraft(cartId: string, input: SaveCartDraftInput): boolea
     rigJson: input.rig == null ? null : JSON.stringify(input.rig),
     fxJson: input.fx == null ? null : JSON.stringify(input.fx),
     materialsJson: input.materials == null ? null : JSON.stringify(input.materials),
+    voxelJson: input.voxel,
     savedAt: new Date().toISOString(),
   };
   try {

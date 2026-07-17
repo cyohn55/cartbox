@@ -83,6 +83,16 @@ export {
   type PixelSource,
 } from "./render/voxelModel";
 export {
+  VoxelGrid,
+  voxelGridToModel,
+  serializeVoxelGrid,
+  deserializeVoxelGrid,
+  MAX_VOXEL_GRID_DIM,
+  VOXEL_GRID_VERSION,
+  type VoxelCell,
+  type GridVoxelModel,
+} from "./model/VoxelGrid";
+export {
   renderVoxelModel,
   voxelCanvasSize,
   DEFAULT_MODEL_LIGHT,
