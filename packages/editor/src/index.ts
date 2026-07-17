@@ -85,18 +85,23 @@ export {
 export {
   VoxelGrid,
   voxelGridToModel,
+  scaleGridAxis,
   serializeVoxelGrid,
   deserializeVoxelGrid,
   MAX_VOXEL_GRID_DIM,
   VOXEL_GRID_VERSION,
   type VoxelCell,
   type GridVoxelModel,
+  type GridAxis,
 } from "./model/VoxelGrid";
 export {
   shapeOffsets,
+  solidOffsets,
   type VoxelShapeKind,
+  type VoxelSolidKind,
   type VoxelShapeStyle,
   type ShapeOffset,
+  type SolidOffset,
 } from "./model/voxelShapes";
 export {
   renderVoxelModel,

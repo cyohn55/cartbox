@@ -20,16 +20,20 @@ import Link from "next/link";
 import {
   VoxelGrid,
   voxelGridToModel,
+  scaleGridAxis,
   serializeVoxelGrid,
   deserializeVoxelGrid,
   renderVoxelModel,
   CUBE_FACES,
-  DEFAULT_MODEL_LIGHT,
   MAX_VOXEL_GRID_DIM,
   shapeOffsets,
+  solidOffsets,
   type VoxelShapeKind,
+  type VoxelSolidKind,
   type VoxelShapeStyle,
   type ShapeOffset,
+  type GridAxis,
+  type ModelLight,
   type SpriteSheet,
 } from "@cartbox/editor";
 
@@ -79,14 +83,19 @@ const TOOLS: readonly { id: VoxelTool; label: string; glyph: string }[] = [
   { id: "shape", label: "Shape", glyph: "◫" },
 ];
 
-// The Shape tool stamps a rectangle or circle of voxels onto the plane of the
-// clicked face. Radius is voxels from the centre to the edge, so the shape spans
-// 2*radius + 1 voxels across; capped so even the largest outline stays a cheap
-// per-cell preview to render.
-const SHAPE_KINDS: readonly { id: VoxelShapeKind; label: string }[] = [
-  { id: "rectangle", label: "Rect" },
-  { id: "circle", label: "Circle" },
+// The Shape tool stamps a shape of voxels at the cursor. Flat shapes (rectangle,
+// circle) land on the plane of the clicked face; solid shapes (cube, sphere) are
+// stamped as a 3D volume centred on the target cell. Radius is voxels from the
+// centre to the edge, so the shape spans 2*radius + 1 voxels across; capped so
+// even the largest outline stays a cheap preview to render.
+type ShapeChoice = VoxelShapeKind | VoxelSolidKind;
+const SHAPE_KINDS: readonly { id: ShapeChoice; label: string; solid: boolean }[] = [
+  { id: "rectangle", label: "Rect", solid: false },
+  { id: "circle", label: "Circle", solid: false },
+  { id: "cube", label: "Cube", solid: true },
+  { id: "sphere", label: "Sphere", solid: true },
 ];
+const isSolidKind = (kind: ShapeChoice): kind is VoxelSolidKind => kind === "cube" || kind === "sphere";
 const SHAPE_STYLES: readonly { id: VoxelShapeStyle; label: string }[] = [
   { id: "outline", label: "Outline" },
   { id: "fill", label: "Fill" },
@@ -94,6 +103,37 @@ const SHAPE_STYLES: readonly { id: VoxelShapeStyle; label: string }[] = [
 const SHAPE_RADIUS_MIN = 1;
 const SHAPE_RADIUS_MAX = 32;
 const DEFAULT_SHAPE_RADIUS = 3;
+
+// Non-uniform scaling: arm an axis with the X/Y/Z key, then the wheel stretches
+// (scroll up) or squashes (scroll down) the model's content along it. One notch
+// is a fixed proportional step, applied by resampling the grid.
+const AXIS_KEYS: Record<string, GridAxis> = { x: 0, y: 1, z: 2 };
+const AXIS_LABELS = ["X", "Y", "Z"] as const;
+const SCALE_STEP = 1.18; // per wheel-notch stretch factor (its reciprocal squashes)
+
+// Live relighting so the sculpt can be judged under different conditions. The
+// direction is derived from an azimuth (around) and elevation (up/down); the
+// toggle's "off" state is a flat, fully-ambient light that shows pure albedo.
+const LIGHT_DEFAULTS = { azimuth: 35, elevation: 45, intensity: 1, ambient: 0.32 };
+
+/** A world-fixed light built from the editor's azimuth/elevation/strength controls. */
+function buildLight(
+  on: boolean,
+  azimuthDeg: number,
+  elevationDeg: number,
+  intensity: number,
+  ambient: number,
+): ModelLight {
+  if (!on) return { direction: [0, 1, 0], color: [1, 1, 1], intensity: 0, ambient: 1 };
+  const az = (azimuthDeg * Math.PI) / 180;
+  const el = (elevationDeg * Math.PI) / 180;
+  return {
+    direction: [Math.cos(el) * Math.sin(az), Math.sin(el), Math.cos(el) * Math.cos(az)],
+    color: [1, 1, 1],
+    intensity,
+    ambient,
+  };
+}
 
 /** `#rrggbb` → 0..255 RGB triple (falls back to white on a malformed value). */
 function hexToRgb(hex: string): [number, number, number] {
@@ -171,6 +211,7 @@ function drawHighlight(
   cellPx: number,
   size: number,
   color: string,
+  half = 0.5,
 ): void {
   const cx = cell[0] - origin[0];
   const cy = cell[1] - origin[1];
@@ -189,7 +230,7 @@ function drawHighlight(
 
   const corners: [number, number][] = [];
   for (let i = 0; i < 8; i += 1) {
-    corners.push(project(cx + (i & 1 ? 0.5 : -0.5), cy + (i & 2 ? 0.5 : -0.5), cz + (i & 4 ? 0.5 : -0.5)));
+    corners.push(project(cx + (i & 1 ? half : -half), cy + (i & 2 ? half : -half), cz + (i & 4 ? half : -half)));
   }
   context.save();
   context.strokeStyle = color;
@@ -248,9 +289,24 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   const [tool, setTool] = useState<VoxelTool>("add");
   const [colorIndex, setColorIndex] = useState(1);
   const [hover, setHover] = useState<HoverTarget | null>(null); // what the cursor is aiming at
-  const [shapeKind, setShapeKind] = useState<VoxelShapeKind>("rectangle");
+  const [shapeKind, setShapeKind] = useState<ShapeChoice>("rectangle");
   const [shapeStyle, setShapeStyle] = useState<VoxelShapeStyle>("outline");
   const [shapeRadius, setShapeRadius] = useState(DEFAULT_SHAPE_RADIUS);
+  const solidShape = isSolidKind(shapeKind);
+
+  // The axis armed for wheel-scaling (X/Y/Z key), or null when the wheel zooms.
+  const [scaleAxis, setScaleAxis] = useState<GridAxis | null>(null);
+
+  // Lighting controls for previewing the sculpt under different conditions.
+  const [lightOn, setLightOn] = useState(true);
+  const [lightAzimuth, setLightAzimuth] = useState(LIGHT_DEFAULTS.azimuth);
+  const [lightElevation, setLightElevation] = useState(LIGHT_DEFAULTS.elevation);
+  const [lightIntensity, setLightIntensity] = useState(LIGHT_DEFAULTS.intensity);
+  const [lightAmbient, setLightAmbient] = useState(LIGHT_DEFAULTS.ambient);
+  const light = useMemo(
+    () => buildLight(lightOn, lightAzimuth, lightElevation, lightIntensity, lightAmbient),
+    [lightOn, lightAzimuth, lightElevation, lightIntensity, lightAmbient],
+  );
 
   const palette = useMemo(() => sheet.cssPalette(), [sheet]);
   const paintHex = palette[colorIndex] ?? "#ffffff";
@@ -289,7 +345,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
       pitch,
       cell: renderCell,
       size: VIEWPORT,
-      light: DEFAULT_MODEL_LIGHT,
+      light,
       out: buffers.out,
       depthBuffer: buffers.depth,
       pickVoxel: buffers.pickVoxel,
@@ -305,15 +361,21 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     if (hover) {
       const origin: [number, number, number] = [model3d.originX, model3d.originY, model3d.originZ];
       const color = HIGHLIGHT[tool];
-      const cells =
-        tool === "shape"
-          ? shapePlaneCells(hover.cell, hover.face, shapeOffsets(shapeKind, "outline", shapeRadius))
-          : [hover.cell];
-      for (const target of cells) {
-        drawHighlight(context, target, origin, yaw, pitch, renderCell, VIEWPORT, color);
+      if (tool === "shape" && solidShape) {
+        // A solid's footprint is a whole volume; one bounding-box wireframe reads
+        // clearly and stays cheap regardless of radius.
+        drawHighlight(context, hover.cell, origin, yaw, pitch, renderCell, VIEWPORT, color, shapeRadius + 0.5);
+      } else {
+        const cells =
+          tool === "shape"
+            ? shapePlaneCells(hover.cell, hover.face, shapeOffsets(shapeKind as VoxelShapeKind, "outline", shapeRadius))
+            : [hover.cell];
+        for (const target of cells) {
+          drawHighlight(context, target, origin, yaw, pitch, renderCell, VIEWPORT, color);
+        }
       }
     }
-  }, [model3d, yaw, pitch, renderCell, buffers, hover, tool, shapeKind, shapeRadius]);
+  }, [model3d, yaw, pitch, renderCell, buffers, hover, tool, shapeKind, solidShape, shapeRadius, light]);
 
   /** Persist the current grid to undo/save; re-seed if it was emptied. */
   const commit = () => {
@@ -381,7 +443,15 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   const stampShape = (pick: Pick, erase: boolean) => {
     const grid = gridRef.current!;
     const center: Cell = erase ? [pick.x, pick.y, pick.z] : shapeCenter(pick);
-    const cells = shapePlaneCells(center, pick.face, shapeOffsets(shapeKind, shapeStyle, shapeRadius));
+    // Flat shapes stamp on the clicked face's plane; solids fill a 3D volume
+    // around the centre cell.
+    const cells: Cell[] = solidShape
+      ? solidOffsets(shapeKind as VoxelSolidKind, shapeStyle, shapeRadius).map(({ du, dv, dw }) => [
+          center[0] + du,
+          center[1] + dv,
+          center[2] + dw,
+        ])
+      : shapePlaneCells(center, pick.face, shapeOffsets(shapeKind as VoxelShapeKind, shapeStyle, shapeRadius));
     const [r, g, b] = hexToRgb(paintHex);
     for (const [cx, cy, cz] of cells) {
       if (!grid.inBounds(cx, cy, cz)) continue;
@@ -448,19 +518,50 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   const onPointerLeave = () => setHover(null);
   const zoomBy = (delta: number) => setCell((value) => Math.max(CELL_MIN, Math.min(CELL_MAX, value + delta)));
 
-  // Wheel-zoom without letting the page scroll under the cursor. React's onWheel
-  // is passive (can't preventDefault), so bind a non-passive native listener.
-  // Scroll up (deltaY < 0) zooms in; the closed-over zoomBy clamps to the fixed range.
+  /** Stretch (grow) or squash the model along `axis` by one proportional step. */
+  const scaleActiveAxis = (axis: GridAxis, grow: boolean) => {
+    const next = scaleGridAxis(gridRef.current!, axis, grow ? SCALE_STEP : 1 / SCALE_STEP);
+    if (next.filledCount === 0) return; // squashed to nothing — keep what we had
+    gridRef.current = next;
+    setHover(null);
+    commit();
+  };
+
+  // Arm/disarm a scale axis with the X/Y/Z keys (press again, or Escape, to
+  // disarm). Ignored while a form field is focused so it never eats typing.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      if (event.key === "Escape") {
+        setScaleAxis(null);
+        return;
+      }
+      const axis = AXIS_KEYS[event.key.toLowerCase()];
+      if (axis === undefined) return;
+      event.preventDefault();
+      setScaleAxis((current) => (current === axis ? null : axis));
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Wheel without letting the page scroll under the cursor. React's onWheel is
+  // passive (can't preventDefault), so bind a non-passive native listener. With
+  // an axis armed the wheel scales the model along it (scroll up = stretch);
+  // otherwise scroll up (deltaY < 0) zooms in, clamped to the fixed range.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const handler = (event: WheelEvent) => {
       event.preventDefault();
-      zoomBy(-Math.sign(event.deltaY) * CELL_STEP);
+      if (scaleAxis !== null) scaleActiveAxis(scaleAxis, event.deltaY < 0);
+      else zoomBy(-Math.sign(event.deltaY) * CELL_STEP);
     };
     canvas.addEventListener("wheel", handler, { passive: false });
     return () => canvas.removeEventListener("wheel", handler);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scaleAxis]);
 
   const resize = (next: number) => {
     const old = gridRef.current!;
@@ -612,6 +713,108 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
           </div>
         </div>
 
+        <div>
+          <div className={styles.groupLabel}>Scale axis · scroll</div>
+          <div className={styles.segmented}>
+            {AXIS_LABELS.map((label, axis) => (
+              <button
+                key={label}
+                type="button"
+                className={`${styles.segment} ${scaleAxis === axis ? styles.segmentActive : ""}`}
+                onClick={() => setScaleAxis((current) => (current === axis ? null : (axis as GridAxis)))}
+                aria-pressed={scaleAxis === axis}
+                title={`Press ${label} then scroll to stretch/squash along ${label}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className={styles.panelMeta} style={{ lineHeight: 1.5, marginTop: 6 }}>
+            {scaleAxis !== null
+              ? `Scroll to stretch or squash along ${AXIS_LABELS[scaleAxis]}. Press ${AXIS_LABELS[scaleAxis]} or Esc to stop.`
+              : "Press X, Y, or Z (or tap above), then scroll to scale that axis."}
+          </p>
+        </div>
+
+        <div>
+          <div className={styles.groupLabel}>Lighting</div>
+          <div className={styles.segmented}>
+            <button
+              type="button"
+              className={`${styles.segment} ${lightOn ? styles.segmentActive : ""}`}
+              onClick={() => setLightOn(true)}
+              aria-pressed={lightOn}
+            >
+              On
+            </button>
+            <button
+              type="button"
+              className={`${styles.segment} ${!lightOn ? styles.segmentActive : ""}`}
+              onClick={() => setLightOn(false)}
+              aria-pressed={!lightOn}
+              title="Flat, fully-lit — shows the raw voxel colours"
+            >
+              Flat
+            </button>
+          </div>
+          {lightOn && (
+            <>
+              <div className={styles.groupLabel} style={{ marginTop: 8 }}>Angle</div>
+              <div className={styles.rangeRow}>
+                <input
+                  type="range"
+                  min={0}
+                  max={360}
+                  step={5}
+                  value={lightAzimuth}
+                  onChange={(event) => setLightAzimuth(Number(event.target.value))}
+                  aria-label="Light angle around the model"
+                />
+                <span className={`${styles.rangeValue} data`}>{lightAzimuth}°</span>
+              </div>
+              <div className={styles.groupLabel} style={{ marginTop: 6 }}>Height</div>
+              <div className={styles.rangeRow}>
+                <input
+                  type="range"
+                  min={-80}
+                  max={80}
+                  step={5}
+                  value={lightElevation}
+                  onChange={(event) => setLightElevation(Number(event.target.value))}
+                  aria-label="Light height above the model"
+                />
+                <span className={`${styles.rangeValue} data`}>{lightElevation}°</span>
+              </div>
+              <div className={styles.groupLabel} style={{ marginTop: 6 }}>Brightness</div>
+              <div className={styles.rangeRow}>
+                <input
+                  type="range"
+                  min={0}
+                  max={150}
+                  step={5}
+                  value={Math.round(lightIntensity * 100)}
+                  onChange={(event) => setLightIntensity(Number(event.target.value) / 100)}
+                  aria-label="Light brightness"
+                />
+                <span className={`${styles.rangeValue} data`}>{Math.round(lightIntensity * 100)}%</span>
+              </div>
+              <div className={styles.groupLabel} style={{ marginTop: 6 }}>Ambient</div>
+              <div className={styles.rangeRow}>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={5}
+                  value={Math.round(lightAmbient * 100)}
+                  onChange={(event) => setLightAmbient(Number(event.target.value) / 100)}
+                  aria-label="Ambient fill light in shadow"
+                />
+                <span className={`${styles.rangeValue} data`}>{Math.round(lightAmbient * 100)}%</span>
+              </div>
+            </>
+          )}
+        </div>
+
         <button type="button" className={styles.toolBtn} onClick={clearAll} title="Clear the model">
           <span className={styles.toolGlyph} aria-hidden>
             ✕
@@ -658,6 +861,10 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
           onPointerLeave={onPointerLeave}
           onContextMenu={(event) => event.preventDefault()}
           style={{
+            // Centre the canvas on the stage's cross axis — without this it
+            // left-aligns in the column-flex stage whenever the stage is wider
+            // than the 560px cap, so the model reads as stuck to the left.
+            alignSelf: "center",
             maxWidth: "min(560px, 100%)",
             width: "100%",
             height: "auto",
@@ -682,8 +889,10 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
             </span>
           </span>
           <span className={styles.hudItem}>
-            <span className={styles.hudLabel}>Drag</span>
-            <span className={`${styles.hudValue} data`}>orbit</span>
+            <span className={styles.hudLabel}>Scroll</span>
+            <span className={`${styles.hudValue} data`}>
+              {scaleAxis !== null ? `scale ${AXIS_LABELS[scaleAxis]}` : "zoom"}
+            </span>
           </span>
         </div>
       </section>
@@ -712,8 +921,8 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
 
         <p className={styles.panelMeta} style={{ lineHeight: 1.5 }}>
           {tool === "shape"
-            ? "The glowing outline shows the shape's footprint on the face you point at. Pick Rect or Circle, Outline or Fill, and set the size; click a face to stamp it, right-click to erase it. Drag to orbit, scroll to zoom."
-            : "The glowing outline shows where the next cube lands. Click a face to add there, right-click to remove, or switch tools. Drag to orbit, scroll to zoom."}
+            ? "The glowing outline shows the shape's footprint. Rect and Circle stamp on the face you point at; Cube and Sphere fill a 3D volume there. Pick Outline or Fill and a size, click a face to stamp, right-click to erase. Drag to orbit, scroll to zoom."
+            : "The glowing outline shows where the next cube lands. Click a face to add there, right-click to remove, or switch tools. Drag to orbit, scroll to zoom — or press X/Y/Z and scroll to scale the model."}
         </p>
       </aside>
     </div>

@@ -11,16 +11,26 @@
  * and can be reused by any future 3D authoring surface.
  */
 
-/** Which shape the tool draws. */
+/** Which flat (in-plane) shape the tool draws. */
 export type VoxelShapeKind = "rectangle" | "circle";
 
-/** Whether the shape is just its border or a solid area. */
+/** Which volumetric (3D) shape the tool draws. */
+export type VoxelSolidKind = "cube" | "sphere";
+
+/** Whether the shape is just its border/shell or a solid area/volume. */
 export type VoxelShapeStyle = "outline" | "fill";
 
 /** A single cell offset in the drawing plane, relative to the shape's centre. */
 export interface ShapeOffset {
   readonly u: number;
   readonly v: number;
+}
+
+/** A single cell offset in 3D space, relative to the solid's centre. */
+export interface SolidOffset {
+  readonly du: number;
+  readonly dv: number;
+  readonly dw: number;
 }
 
 /**
@@ -86,6 +96,72 @@ function circleOffsets(style: VoxelShapeStyle, r: number): ShapeOffset[] {
     const u = Math.round(Math.sqrt(Math.max(0, r * r - v * v)));
     add(u, v);
     add(-u, v);
+  }
+  return offsets;
+}
+
+/**
+ * The 3D cell offsets covered by a `cube` or `sphere` at the given `radius`,
+ * centred on the origin, as a hollow shell (`outline`) or a solid volume
+ * (`fill`). Radius is voxels from the centre to a face/pole, so the solid spans
+ * `2*radius + 1` voxels across each axis. A radius of 0 is always the single
+ * centre cell. `radius` is floored and clamped to be non-negative.
+ *
+ * DOM-free and coordinate-free like {@link shapeOffsets}, so the editor maps the
+ * offsets around whichever grid cell the user targeted and the tests assert on
+ * the raw geometry.
+ */
+export function solidOffsets(kind: VoxelSolidKind, style: VoxelShapeStyle, radius: number): SolidOffset[] {
+  const r = Math.max(0, Math.floor(radius));
+  if (r === 0) return [{ du: 0, dv: 0, dw: 0 }];
+  return kind === "cube" ? cubeOffsets(style, r) : sphereOffsets(style, r);
+}
+
+/** Axis-aligned cube: the whole block (fill) or only its outer shell (outline). */
+function cubeOffsets(style: VoxelShapeStyle, r: number): SolidOffset[] {
+  const offsets: SolidOffset[] = [];
+  for (let dw = -r; dw <= r; dw += 1) {
+    for (let dv = -r; dv <= r; dv += 1) {
+      for (let du = -r; du <= r; du += 1) {
+        // A shell cell touches the cube's boundary on at least one axis.
+        const onShell = Math.abs(du) === r || Math.abs(dv) === r || Math.abs(dw) === r;
+        if (style === "fill" || onShell) offsets.push({ du, dv, dw });
+      }
+    }
+  }
+  return offsets;
+}
+
+/**
+ * Solid ball (fill) or hollow shell (outline). The ball keeps every cell whose
+ * centre is within the radius (the same `r + 0.5` slack the disk uses, so the
+ * poles are included and it reads round). The shell is the subset of the ball
+ * that has at least one empty 6-neighbour — a gap-free single-cell skin at any
+ * radius, without the double-scan a rasterised ring would need in 3D.
+ */
+function sphereOffsets(style: VoxelShapeStyle, r: number): SolidOffset[] {
+  const limit = (r + 0.5) * (r + 0.5);
+  const inside = (du: number, dv: number, dw: number): boolean => du * du + dv * dv + dw * dw <= limit;
+
+  const offsets: SolidOffset[] = [];
+  for (let dw = -r; dw <= r; dw += 1) {
+    for (let dv = -r; dv <= r; dv += 1) {
+      for (let du = -r; du <= r; du += 1) {
+        if (!inside(du, dv, dw)) continue;
+        if (style === "fill") {
+          offsets.push({ du, dv, dw });
+          continue;
+        }
+        const exposed =
+          !inside(du + 1, dv, dw) ||
+          !inside(du - 1, dv, dw) ||
+          !inside(du, dv + 1, dw) ||
+          !inside(du, dv - 1, dw) ||
+          !inside(du, dv, dw + 1) ||
+          !inside(du, dv, dw - 1);
+        if (exposed) offsets.push({ du, dv, dw });
+      }
+    }
   }
   return offsets;
 }

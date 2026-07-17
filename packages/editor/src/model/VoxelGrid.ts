@@ -270,6 +270,69 @@ export function voxelGridToModel(grid: VoxelGrid, options: GridToModelOptions = 
   };
 }
 
+/** A grid axis: 0 = x, 1 = y, 2 = z. */
+export type GridAxis = 0 | 1 | 2;
+
+/**
+ * Stretch or squash the grid's filled content along one axis by `factor`, into a
+ * new grid of the same dimensions. Rescaling is nearest-neighbour over the
+ * content's extent on that axis: growing duplicates layers, shrinking drops
+ * them, so the sculpt's shape and colours are preserved while its proportions
+ * change — the "scale on X/Y/Z" gesture in the editor.
+ *
+ * `factor > 1` lengthens (always by at least one layer so a wheel notch is
+ * visible), `factor < 1` shortens; the result is clamped to the axis size and
+ * anchored at the content's low edge (shifted in only if it would overflow). An
+ * empty grid is returned unchanged.
+ */
+export function scaleGridAxis(grid: VoxelGrid, axis: GridAxis, factor: number): VoxelGrid {
+  const size = [grid.sizeX, grid.sizeY, grid.sizeZ][axis]!;
+  let min = Infinity;
+  let max = -Infinity;
+  grid.forEachFilled((x, y, z) => {
+    const coord = [x, y, z][axis]!;
+    if (coord < min) min = coord;
+    if (coord > max) max = coord;
+  });
+
+  const out = new VoxelGrid(grid.sizeX, grid.sizeY, grid.sizeZ);
+  if (max < min) return out; // nothing filled — nothing to scale
+
+  const oldLength = max - min + 1;
+  let newLength = Math.round(oldLength * factor);
+  // Guarantee each gesture moves at least one layer, so a wheel notch is felt.
+  if (factor > 1 && newLength <= oldLength) newLength = oldLength + 1;
+  if (factor < 1 && newLength >= oldLength) newLength = oldLength - 1;
+  newLength = Math.max(1, Math.min(size, newLength));
+
+  // Keep the content's low edge fixed unless the longer span would overflow.
+  const start = Math.max(0, Math.min(min, size - newLength));
+
+  for (let t = 0; t < newLength; t += 1) {
+    const source = min + Math.min(oldLength - 1, Math.floor((t * oldLength) / newLength));
+    const target = start + t;
+    copyGridLayer(grid, out, axis, source, target);
+  }
+  return out;
+}
+
+/** Copy every filled cell on axis-`source` of `from` onto axis-`target` of `to`. */
+function copyGridLayer(from: VoxelGrid, to: VoxelGrid, axis: GridAxis, source: number, target: number): void {
+  // The two axes the layer spans (everything but `axis`).
+  const [aSize, bSize] = axis === 0 ? [from.sizeY, from.sizeZ] : axis === 1 ? [from.sizeX, from.sizeZ] : [from.sizeX, from.sizeY];
+  for (let b = 0; b < bSize; b += 1) {
+    for (let a = 0; a < aSize; a += 1) {
+      const src: [number, number, number] =
+        axis === 0 ? [source, a, b] : axis === 1 ? [a, source, b] : [a, b, source];
+      const cell = from.get(src[0], src[1], src[2]);
+      if (!cell) continue;
+      const dst: [number, number, number] =
+        axis === 0 ? [target, a, b] : axis === 1 ? [a, target, b] : [a, b, target];
+      to.set(dst[0], dst[1], dst[2], cell.r, cell.g, cell.b, cell.emissive);
+    }
+  }
+}
+
 // --- Serialization (portable base64, no Buffer dependency) ---
 
 function bytesToBase64(bytes: Uint8Array | Uint8ClampedArray): string {

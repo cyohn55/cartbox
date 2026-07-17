@@ -46,9 +46,24 @@ const FRAME_INTERVAL_MS = 33;
 // on some GPUs (no throw, so it wouldn't fall back). Keep it off until verified.
 const USE_WEBGPU = false;
 
+// The page sits behind the lit-wall canvases; its base colour is a deep shade of
+// the selected chassis so the whole viewport reads as e.g. dark blue for a blue
+// handheld, making the bright chassis in front pop against a matching backdrop.
+const BACKDROP_DARKEN = 0.22;
+
 interface PropRenderer {
   render(seconds: number): void;
   destroy(): void;
+}
+
+/** A near-black shade of `#rrggbb` (its own hue, deeply dimmed) for the page base. */
+function darkenChassis(hex: string): string {
+  const value = Number.parseInt(hex.replace("#", ""), 16);
+  if (Number.isNaN(value)) return "#05070b";
+  const r = Math.round(((value >> 16) & 0xff) * BACKDROP_DARKEN);
+  const g = Math.round(((value >> 8) & 0xff) * BACKDROP_DARKEN);
+  const b = Math.round((value & 0xff) * BACKDROP_DARKEN);
+  return `rgb(${r}, ${g}, ${b})`;
 }
 
 export function LitBackdrop() {
@@ -66,6 +81,23 @@ export function LitBackdrop() {
   );
   const wallSceneRef = useRef<BackdropScene>(wallScene);
   wallSceneRef.current = wallScene;
+
+  // Repaint the wall whenever its palette changes, independent of the animation
+  // loop — so selecting a premade re-tints the backdrop immediately even before
+  // the props load, and even for reduced-motion visitors whose loop never runs.
+  useEffect(() => {
+    const wallCanvas = wallRef.current;
+    if (!wallCanvas) return;
+    const context = wallCanvas.getContext("2d");
+    if (!context) return;
+    wallCanvas.width = BUFFER_WIDTH;
+    wallCanvas.height = BUFFER_HEIGHT;
+    const buffer = new Uint8ClampedArray(BUFFER_WIDTH * BUFFER_HEIGHT * 4);
+    renderBackdropFrame(wallScene, orbitLight(BUFFER_WIDTH, BUFFER_HEIGHT, 0), buffer);
+    const image = context.createImageData(BUFFER_WIDTH, BUFFER_HEIGHT);
+    image.data.set(buffer);
+    context.putImageData(image, 0, 0);
+  }, [wallScene]);
 
   useEffect(() => {
     const wallCanvas = wallRef.current;
@@ -162,7 +194,7 @@ export function LitBackdrop() {
   }, []);
 
   return (
-    <div className={styles.backdrop} aria-hidden>
+    <div className={styles.backdrop} style={{ background: darkenChassis(color) }} aria-hidden>
       <canvas ref={wallRef} className={styles.backdropCanvas} />
       <canvas ref={gpuRef} className={styles.backdropCanvas} />
       <canvas ref={cpuRef} className={styles.backdropCanvas} />
