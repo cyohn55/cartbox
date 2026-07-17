@@ -264,6 +264,54 @@ export const DEFAULT_RETRO_WALL: RetroWallPalette = {
   star: [168, 184, 224],
 };
 
+function hexToRgb(hex: string): [number, number, number] {
+  const value = Number.parseInt(hex.replace(/^#/, ""), 16);
+  if (Number.isNaN(value)) return [40, 42, 70];
+  return [(value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff];
+}
+
+function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
+  const rn = r / 255, gn = g / 255, bn = b / 255;
+  const max = Math.max(rn, gn, bn), min = Math.min(rn, gn, bn);
+  const l = (max + min) / 2;
+  const d = max - min;
+  if (d === 0) return [0, 0, l];
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h: number;
+  if (max === rn) h = ((gn - bn) / d) % 6;
+  else if (max === gn) h = (bn - rn) / d + 2;
+  else h = (rn - gn) / d + 4;
+  h = (h * 60 + 360) % 360;
+  return [h, s, l];
+}
+
+function hslToRgb(h: number, s: number, l: number): Rgb {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  const [r, g, b] =
+    h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
+}
+
+/**
+ * A dark wall palette derived from the current chassis colour: it takes the
+ * chassis's *complementary* hue, kept muted and deep, so the bright chassis pops
+ * against a contrasting-but-harmonious background that shifts as the colour does.
+ * A near-grey chassis yields a neutral dark wall (no hue to complement).
+ */
+export function wallPaletteFromChassis(hex: string): RetroWallPalette {
+  const [h, s] = rgbToHsl(...hexToRgb(hex));
+  const hue = (h + 180) % 360; // complementary, for contrast
+  const sat = Math.min(0.5, Math.max(0.22, s * 0.7)); // muted but present
+  return {
+    wallTop: hslToRgb(hue, sat, 0.17),
+    wallBottom: hslToRgb(hue, Math.min(0.6, sat + 0.08), 0.1),
+    floor: hslToRgb(hue, sat * 0.85, 0.08),
+    star: [0, 0, 0],
+  };
+}
+
 /** One placed sprite: which art, where (top-left as 0..1 fractions), how big. */
 interface SpritePlacement {
   readonly sprite: Sprite;
@@ -305,6 +353,7 @@ export function buildRetroWall(
   width: number,
   height: number,
   wall: RetroWallPalette = DEFAULT_RETRO_WALL,
+  stars = true,
 ): BackdropScene {
   const count = width * height;
   const scene: BackdropScene = {
@@ -362,7 +411,7 @@ export function buildRetroWall(
       roughness[i] = 0.9;
 
       // Sparse pinpoint stars on the upper wall (self-lit, so always visible).
-      if (!onFloor && hash(x * 41.3 + y * 71.7) > 0.992) {
+      if (stars && !onFloor && hash(x * 41.3 + y * 71.7) > 0.992) {
         emissive[i] = 0.8;
         emissiveColor[i * 3] = wall.star[0];
         emissiveColor[i * 3 + 1] = wall.star[1];

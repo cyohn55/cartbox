@@ -22,6 +22,8 @@ const {
   buildBackdropScene,
   renderBackdropFrame,
   orbitLight,
+  buildRetroWall,
+  wallPaletteFromChassis,
 } = mod;
 
 const W = 96;
@@ -119,5 +121,33 @@ for (let t = 0; t < 20; t += 0.5) {
   if (light.x < -W || light.x > W * 2 || light.y < -H || light.y > H * 2 || light.z <= 0) orbitInBounds = false;
 }
 check("orbit light stays within a sane band", orbitInBounds);
+
+// 7. buildRetroWall omits the stars when asked (the onboarding backdrop does).
+{
+  const withStars = buildRetroWall(80, 60);
+  const noStars = buildRetroWall(80, 60, undefined, false);
+  let starCount = 0;
+  for (let i = 0; i < withStars.emissive.length; i += 1) if (withStars.emissive[i] > 0) starCount += 1;
+  let noStarCount = 0;
+  for (let i = 0; i < noStars.emissive.length; i += 1) if (noStars.emissive[i] > 0) noStarCount += 1;
+  check("default wall has stars", starCount > 0);
+  check("stars can be turned off", noStarCount === 0);
+}
+
+// 8. The chassis-derived wall is a dark, complementary tint of the chassis hue,
+//    so the bright chassis pops. Derived from the colour, not hard-coded.
+{
+  const sum = (c) => c[0] + c[1] + c[2];
+  // A red chassis → a cyan-ish wall (blue+green dominate red).
+  const red = wallPaletteFromChassis("#e03a3a").wallTop;
+  check("red chassis → cyan-leaning wall", red[1] + red[2] > red[0] * 2);
+  // A blue chassis → a warm (yellow/amber) wall (red+green dominate blue).
+  const blue = wallPaletteFromChassis("#3a80d0").wallTop;
+  check("blue chassis → warm wall", blue[0] + blue[1] > blue[2] * 2);
+  // The wall is dark so the chassis stands out.
+  check("chassis wall is dark", sum(red) < 3 * 90 && sum(blue) < 3 * 90);
+  // No stars in the chassis palette.
+  check("chassis palette has no star colour", sum(wallPaletteFromChassis("#e03a3a").star) === 0);
+}
 
 console.log(`litBackdrop: ${passed}/${passed} checks passed`);

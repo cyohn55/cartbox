@@ -43,6 +43,7 @@ import {
 } from "@/app/console/consoleSettings";
 import { handheldAssetUrl } from "@/lib/handheldAssets";
 import { HandheldSkinEditor } from "./HandheldSkinEditor";
+import { useChassisColor } from "./chassisColor";
 import { TerminalPreview } from "./TerminalPreview";
 import styles from "./handheld.module.css";
 
@@ -109,6 +110,12 @@ export function HandheldPicker() {
   // uploaded chassis background, else hand-drawn art, else the static recoloured
   // skin (art === null).
   const activeArt = animationId ? animatedArt : background ? backgroundArt : drawnArt;
+
+  // Publish the chassis colour so the backdrop can tint itself to it.
+  const { setColor } = useChassisColor();
+  useEffect(() => {
+    setColor(scheme.face);
+  }, [scheme.face, setColor]);
 
   // Stage caption: the chassis name, with the animation appended when set.
   const chassisLabel =

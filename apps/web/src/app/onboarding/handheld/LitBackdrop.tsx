@@ -14,14 +14,15 @@
  * context type.
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
-import { buildRetroWall, orbitLight, renderBackdropFrame } from "@/lib/litBackdrop";
+import { buildRetroWall, orbitLight, renderBackdropFrame, wallPaletteFromChassis, type BackdropScene } from "@/lib/litBackdrop";
 import { CpuVoxelCompositor } from "@/lib/cpuVoxelCompositor";
 import { buildRetroProps, propSetToVoxelProps, type VoxelProp } from "@/lib/retroVoxels";
 import { scaleVoxelProps } from "@/lib/voxelPropScale";
 import { loadActiveSet } from "@/lib/backdropPropsStore";
 import { WebGpuVoxelRenderer } from "./WebGpuVoxelRenderer";
+import { useChassisColor } from "./chassisColor";
 import styles from "./handheld.module.css";
 
 // The backdrop renders into a low-resolution buffer that CSS upscales with
@@ -51,6 +52,17 @@ export function LitBackdrop() {
   const gpuRef = useRef<HTMLCanvasElement>(null);
   const cpuRef = useRef<HTMLCanvasElement>(null);
 
+  // The wall tints to the selected chassis colour (no stars); rebuilding it on a
+  // colour change is cheap, and a ref lets the running animation pick up the new
+  // wall without tearing down the props/renderer.
+  const { color } = useChassisColor();
+  const wallScene = useMemo(
+    () => buildRetroWall(BUFFER_WIDTH, BUFFER_HEIGHT, wallPaletteFromChassis(color), false),
+    [color],
+  );
+  const wallSceneRef = useRef<BackdropScene>(wallScene);
+  wallSceneRef.current = wallScene;
+
   useEffect(() => {
     const wallCanvas = wallRef.current;
     const gpuCanvas = gpuRef.current;
@@ -61,13 +73,13 @@ export function LitBackdrop() {
 
     wallCanvas.width = BUFFER_WIDTH;
     wallCanvas.height = BUFFER_HEIGHT;
-    const wallScene = buildRetroWall(BUFFER_WIDTH, BUFFER_HEIGHT);
     const wallImage = wallContext.createImageData(BUFFER_WIDTH, BUFFER_HEIGHT);
     const wallBuffer = new Uint8ClampedArray(BUFFER_WIDTH * BUFFER_HEIGHT * 4);
     const compositorOptions = { bufferWidth: BUFFER_WIDTH, bufferHeight: BUFFER_HEIGHT, pitch: PROP_PITCH };
 
+    // Reads the current wall (which the memo above swaps on a chassis-colour change).
     const paintWall = (seconds: number) => {
-      renderBackdropFrame(wallScene, orbitLight(BUFFER_WIDTH, BUFFER_HEIGHT, seconds), wallBuffer);
+      renderBackdropFrame(wallSceneRef.current, orbitLight(BUFFER_WIDTH, BUFFER_HEIGHT, seconds), wallBuffer);
       wallImage.data.set(wallBuffer);
       wallContext.putImageData(wallImage, 0, 0);
     };
