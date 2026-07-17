@@ -305,9 +305,20 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     if (state && !state.moved) editAt(event.clientX, event.clientY, state.button === 2);
   };
   const onPointerLeave = () => setHover(null);
-  const onWheel = (event: React.WheelEvent<HTMLCanvasElement>) => {
-    setCell((value) => Math.max(CELL_MIN, Math.min(CELL_MAX, value - Math.sign(event.deltaY))));
-  };
+  const zoomBy = (delta: number) => setCell((value) => Math.max(CELL_MIN, Math.min(CELL_MAX, value + delta)));
+
+  // Wheel-zoom without letting the page scroll under the cursor. React's onWheel
+  // is passive (can't preventDefault), so bind a non-passive native listener.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const handler = (event: WheelEvent) => {
+      event.preventDefault();
+      zoomBy(-Math.sign(event.deltaY) * 2);
+    };
+    canvas.addEventListener("wheel", handler, { passive: false });
+    return () => canvas.removeEventListener("wheel", handler);
+  }, []);
 
   const resize = (next: number) => {
     const old = gridRef.current!;
@@ -386,6 +397,32 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
           </div>
         </div>
 
+        <div>
+          <div className={styles.groupLabel}>Zoom</div>
+          <div className={styles.segmented}>
+            <button
+              type="button"
+              className={styles.segment}
+              onClick={() => zoomBy(-2)}
+              disabled={cell <= CELL_MIN}
+              aria-label="Zoom out"
+              title="Zoom out"
+            >
+              −
+            </button>
+            <button
+              type="button"
+              className={styles.segment}
+              onClick={() => zoomBy(2)}
+              disabled={cell >= CELL_MAX}
+              aria-label="Zoom in"
+              title="Zoom in"
+            >
+              ＋
+            </button>
+          </div>
+        </div>
+
         <button type="button" className={styles.toolBtn} onClick={clearAll} title="Clear the model">
           <span className={styles.toolGlyph} aria-hidden>
             ✕
@@ -431,7 +468,6 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
           onPointerUp={onPointerUp}
           onPointerLeave={onPointerLeave}
           onContextMenu={(event) => event.preventDefault()}
-          onWheel={onWheel}
           style={{
             maxWidth: "min(560px, 100%)",
             width: "100%",
