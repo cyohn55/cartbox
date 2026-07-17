@@ -26,9 +26,8 @@
   /* Integer-ish upscale of a low-res render — nearest-neighbour keeps the
      pixels crisp (the opposite case from the downscaled skin previews). */
   image-rendering: pixelated;
-  /* Bright enough that the retro scene reads clearly as fun game art, while
-     still sitting a touch behind the foreground. */
-  opacity: 0.82;
+  /* Full strength so the vivid, brightly-lit scene reads at its full vibrancy. */
+  opacity: 1;
 }
 
 /* A soft vignette so the busy scene calms toward the centre where the picker

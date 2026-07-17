@@ -46,10 +46,10 @@ const FRAME_INTERVAL_MS = 33;
 // on some GPUs (no throw, so it wouldn't fall back). Keep it off until verified.
 const USE_WEBGPU = false;
 
-// The page sits behind the lit-wall canvases; its base colour is a deep shade of
-// the selected chassis so the whole viewport reads as e.g. dark blue for a blue
-// handheld, making the bright chassis in front pop against a matching backdrop.
-const BACKDROP_DARKEN = 0.22;
+// The page sits behind the lit-wall canvases; its base colour is a rich shade of
+// the selected chassis so the whole viewport reads as e.g. blue for a blue
+// handheld, keeping the vivid wall's tone cohesive to the very edges.
+const BACKDROP_DARKEN = 0.4;
 
 interface PropRenderer {
   render(seconds: number): void;
@@ -76,7 +76,7 @@ export function LitBackdrop() {
   // wall without tearing down the props/renderer.
   const { color } = useChassisColor();
   const wallScene = useMemo(
-    () => buildRetroWall(BUFFER_WIDTH, BUFFER_HEIGHT, wallPaletteFromChassis(color), false),
+    () => buildRetroWall(BUFFER_WIDTH, BUFFER_HEIGHT, wallPaletteFromChassis(color), true),
     [color],
   );
   const wallSceneRef = useRef<BackdropScene>(wallScene);

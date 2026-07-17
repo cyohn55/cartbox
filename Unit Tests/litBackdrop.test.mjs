@@ -134,29 +134,27 @@ check("orbit light stays within a sane band", orbitInBounds);
   check("stars can be turned off", noStarCount === 0);
 }
 
-// 8. The chassis-derived wall is a deep, MATCHING-TONE shade of the chassis hue
-//    (same hue, richer/darker), so the background is cohesive yet the bright
-//    chassis pops by value/saturation contrast. Derived from the colour, not
-//    hard-coded.
+// 8. The chassis-derived wall is a bright, vibrant MATCHING-TONE version of the
+//    chassis hue (same hue, high value + saturation), so the room reads as a
+//    lively colour-lit backdrop. Derived from the colour, not hard-coded.
 {
   const sum = (c) => c[0] + c[1] + c[2];
-  // A red chassis → a deep-red wall (red channel dominates).
+  // A red chassis → a red wall (red channel dominates).
   const red = wallPaletteFromChassis("#e03a3a").wallTop;
   check("red chassis → red-leaning wall", red[0] > red[1] && red[0] > red[2]);
-  // A blue chassis → a deep-blue wall (blue channel dominates).
+  // A blue chassis → a blue wall (blue channel dominates).
   const blue = wallPaletteFromChassis("#3a80d0").wallTop;
   check("blue chassis → blue-leaning wall", blue[2] > blue[0] && blue[2] > blue[1]);
-  // The wall reads as a clear colour (not black) yet stays deep enough to keep
-  // the picker legible on top.
+  // The wall is bright (well above the old ~deep-shade range) yet not blown out.
   check(
-    "chassis wall is a deep, visible colour",
-    sum(red) > 3 * 24 && sum(red) < 3 * 120 && sum(blue) > 3 * 24 && sum(blue) < 3 * 120,
+    "chassis wall is bright and vibrant",
+    sum(red) > 3 * 80 && sum(red) < 3 * 200 && sum(blue) > 3 * 80 && sum(blue) < 3 * 220,
   );
-  // A near-grey chassis stays a neutral dark wall (channels close together).
+  // A near-grey chassis stays a neutral wall (channels close together).
   const grey = wallPaletteFromChassis("#8a8c90").wallTop;
   check("near-grey chassis → neutral wall", Math.max(...grey) - Math.min(...grey) < 24);
-  // No stars in the chassis palette.
-  check("chassis palette has no star colour", sum(wallPaletteFromChassis("#e03a3a").star) === 0);
+  // The chassis palette now adds a bright spark colour for arcade sparkle.
+  check("chassis palette has a bright spark", sum(wallPaletteFromChassis("#e03a3a").star) > 3 * 180);
 }
 
 console.log(`litBackdrop: ${passed}/${passed} checks passed`);

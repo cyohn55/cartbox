@@ -296,24 +296,25 @@ function hslToRgb(h: number, s: number, l: number): Rgb {
 
 /**
  * A wall palette derived from the current chassis colour, in a *matching tone*:
- * it keeps the chassis's own hue but renders it as a deep, richer shade, so the
- * background reads as a clearly-coloured backdrop that is cohesive with the
- * handheld while the bright, high-value chassis still pops against it by contrast
- * of value and saturation. Deep — not black — so the colour is visible, yet still
- * dark enough to keep the picker's cards and text legible on top. A near-grey
- * chassis yields a neutral dark wall (little saturation to deepen).
+ * it keeps the chassis's own hue and renders it as a bright, saturated backdrop
+ * that reads as a vivid, colour-lit game room cohesive with the handheld. The
+ * top of the wall glows lightest and it deepens toward the floor, so the scene
+ * still has depth while staying luminous. A near-grey chassis yields a neutral
+ * but still-bright wall (little hue to saturate).
  */
 export function wallPaletteFromChassis(hex: string): RetroWallPalette {
   const [h, s] = rgbToHsl(...hexToRgb(hex));
-  const hue = h; // matching tone: the chassis's own hue, deepened
-  // Push saturation up so the deep shade still reads as a colour rather than mud,
-  // but keep a near-grey chassis neutral (nothing to saturate).
-  const sat = Math.min(0.62, Math.max(0.16, s * 0.85));
+  const hue = h; // matching tone: the chassis's own hue
+  // Boost saturation for a vibrant colour-lit room, scaled from the chassis's
+  // own saturation (no hard floor) so a near-grey chassis still yields a neutral
+  // wall rather than being forced into a hue.
+  const sat = Math.min(0.95, s * 1.3);
   return {
-    wallTop: hslToRgb(hue, sat, 0.26),
-    wallBottom: hslToRgb(hue, Math.min(0.7, sat + 0.06), 0.15),
-    floor: hslToRgb(hue, sat * 0.9, 0.12),
-    star: [0, 0, 0],
+    wallTop: hslToRgb(hue, sat, 0.54),
+    wallBottom: hslToRgb(hue, Math.min(1, sat + 0.05), 0.36),
+    floor: hslToRgb(hue, sat * 0.95, 0.3),
+    // Bright sparks of the same hue for arcade-room sparkle (grey chassis → white).
+    star: hslToRgb(hue, sat * 0.5, 0.92),
   };
 }
 
