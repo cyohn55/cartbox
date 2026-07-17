@@ -41,6 +41,10 @@ const BUFFER_HEIGHT = 160 * RESOLUTION_SCALE;
 const PROP_PITCH = 0.42;
 // The orbit and bob are slow, so ~30fps looks identical to 60 at half the cost.
 const FRAME_INTERVAL_MS = 33;
+// The CPU compositor is the verified-on-every-device path; the WebGPU accelerator
+// has never been runtime-verified on real hardware and can silently render blank
+// on some GPUs (no throw, so it wouldn't fall back). Keep it off until verified.
+const USE_WEBGPU = false;
 
 interface PropRenderer {
   render(seconds: number): void;
@@ -134,7 +138,7 @@ export function LitBackdrop() {
         return;
       }
 
-      const gpu = await WebGpuVoxelRenderer.create(gpuCanvas, props, compositorOptions);
+      const gpu = USE_WEBGPU ? await WebGpuVoxelRenderer.create(gpuCanvas, props, compositorOptions) : null;
       if (cancelled) {
         gpu?.destroy();
         return;
