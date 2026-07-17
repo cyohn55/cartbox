@@ -295,19 +295,24 @@ function hslToRgb(h: number, s: number, l: number): Rgb {
 }
 
 /**
- * A dark wall palette derived from the current chassis colour: it takes the
- * chassis's *complementary* hue, kept muted and deep, so the bright chassis pops
- * against a contrasting-but-harmonious background that shifts as the colour does.
- * A near-grey chassis yields a neutral dark wall (no hue to complement).
+ * A wall palette derived from the current chassis colour, in a *matching tone*:
+ * it keeps the chassis's own hue but renders it as a deep, richer shade, so the
+ * background reads as a clearly-coloured backdrop that is cohesive with the
+ * handheld while the bright, high-value chassis still pops against it by contrast
+ * of value and saturation. Deep — not black — so the colour is visible, yet still
+ * dark enough to keep the picker's cards and text legible on top. A near-grey
+ * chassis yields a neutral dark wall (little saturation to deepen).
  */
 export function wallPaletteFromChassis(hex: string): RetroWallPalette {
   const [h, s] = rgbToHsl(...hexToRgb(hex));
-  const hue = (h + 180) % 360; // complementary, for contrast
-  const sat = Math.min(0.5, Math.max(0.22, s * 0.7)); // muted but present
+  const hue = h; // matching tone: the chassis's own hue, deepened
+  // Push saturation up so the deep shade still reads as a colour rather than mud,
+  // but keep a near-grey chassis neutral (nothing to saturate).
+  const sat = Math.min(0.62, Math.max(0.16, s * 0.85));
   return {
-    wallTop: hslToRgb(hue, sat, 0.17),
-    wallBottom: hslToRgb(hue, Math.min(0.6, sat + 0.08), 0.1),
-    floor: hslToRgb(hue, sat * 0.85, 0.08),
+    wallTop: hslToRgb(hue, sat, 0.26),
+    wallBottom: hslToRgb(hue, Math.min(0.7, sat + 0.06), 0.15),
+    floor: hslToRgb(hue, sat * 0.9, 0.12),
     star: [0, 0, 0],
   };
 }

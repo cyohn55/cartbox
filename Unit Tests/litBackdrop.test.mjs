@@ -134,18 +134,27 @@ check("orbit light stays within a sane band", orbitInBounds);
   check("stars can be turned off", noStarCount === 0);
 }
 
-// 8. The chassis-derived wall is a dark, complementary tint of the chassis hue,
-//    so the bright chassis pops. Derived from the colour, not hard-coded.
+// 8. The chassis-derived wall is a deep, MATCHING-TONE shade of the chassis hue
+//    (same hue, richer/darker), so the background is cohesive yet the bright
+//    chassis pops by value/saturation contrast. Derived from the colour, not
+//    hard-coded.
 {
   const sum = (c) => c[0] + c[1] + c[2];
-  // A red chassis → a cyan-ish wall (blue+green dominate red).
+  // A red chassis → a deep-red wall (red channel dominates).
   const red = wallPaletteFromChassis("#e03a3a").wallTop;
-  check("red chassis → cyan-leaning wall", red[1] + red[2] > red[0] * 2);
-  // A blue chassis → a warm (yellow/amber) wall (red+green dominate blue).
+  check("red chassis → red-leaning wall", red[0] > red[1] && red[0] > red[2]);
+  // A blue chassis → a deep-blue wall (blue channel dominates).
   const blue = wallPaletteFromChassis("#3a80d0").wallTop;
-  check("blue chassis → warm wall", blue[0] + blue[1] > blue[2] * 2);
-  // The wall is dark so the chassis stands out.
-  check("chassis wall is dark", sum(red) < 3 * 90 && sum(blue) < 3 * 90);
+  check("blue chassis → blue-leaning wall", blue[2] > blue[0] && blue[2] > blue[1]);
+  // The wall reads as a clear colour (not black) yet stays deep enough to keep
+  // the picker legible on top.
+  check(
+    "chassis wall is a deep, visible colour",
+    sum(red) > 3 * 24 && sum(red) < 3 * 120 && sum(blue) > 3 * 24 && sum(blue) < 3 * 120,
+  );
+  // A near-grey chassis stays a neutral dark wall (channels close together).
+  const grey = wallPaletteFromChassis("#8a8c90").wallTop;
+  check("near-grey chassis → neutral wall", Math.max(...grey) - Math.min(...grey) < 24);
   // No stars in the chassis palette.
   check("chassis palette has no star colour", sum(wallPaletteFromChassis("#e03a3a").star) === 0);
 }
