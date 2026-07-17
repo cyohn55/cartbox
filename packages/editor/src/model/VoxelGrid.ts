@@ -150,6 +150,15 @@ export class VoxelGrid {
 export interface GridVoxelModel extends VoxelModel {
   /** For model voxel `v`, the flat grid cell index it came from. */
   readonly gridIndex: Int32Array;
+  /**
+   * The grid coordinate that maps to the model origin (0,0,0) — i.e. what was
+   * subtracted from every cell to centre the model (see {@link GridToModelOptions}).
+   * Lets a caller project an arbitrary grid cell with the model's exact centring,
+   * e.g. to overlay a cursor highlight aligned to the rendered cubes.
+   */
+  readonly originX: number;
+  readonly originY: number;
+  readonly originZ: number;
 }
 
 export interface GridToModelOptions {
@@ -255,6 +264,9 @@ export function voxelGridToModel(grid: VoxelGrid, options: GridToModelOptions = 
     nz: Float32Array.from(nzs),
     faces: Uint8Array.from(faceMasks),
     gridIndex: Int32Array.from(gridIndices),
+    originX: halfX,
+    originY: halfY,
+    originZ: halfZ,
   };
 }
 

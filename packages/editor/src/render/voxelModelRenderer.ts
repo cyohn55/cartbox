@@ -50,6 +50,13 @@ export interface RenderModelOptions {
   readonly out?: Uint8ClampedArray;
   readonly depthBuffer?: Float32Array;
   /**
+   * Explicit square output size in pixels. Defaults to {@link voxelCanvasSize},
+   * which grows the canvas with the model so nothing ever clips. Pass a fixed
+   * size to render into a stable viewport instead — then `cell` scales the model
+   * *within* that viewport (true zoom), and the model is drawn about its centre.
+   */
+  readonly size?: number;
+  /**
    * Optional picking outputs (size × size). When provided, each pixel records the
    * index of the voxel whose face won it (`-1` where nothing was drawn) and which
    * cube face (0..5, matching {@link CUBE_FACES} order; `-1` = none). Lets a 3D
@@ -94,7 +101,7 @@ export function renderVoxelModel(model: VoxelModel, options: RenderModelOptions 
   const cell = Math.max(1, options.cell ?? 3);
   const light = options.light ?? DEFAULT_MODEL_LIGHT;
 
-  const size = voxelCanvasSize(model, cell);
+  const size = Math.max(1, Math.floor(options.size ?? voxelCanvasSize(model, cell)));
   const data = options.out ?? new Uint8ClampedArray(size * size * 4);
   const depth = options.depthBuffer ?? new Float32Array(size * size);
   const pickVoxel = options.pickVoxel;

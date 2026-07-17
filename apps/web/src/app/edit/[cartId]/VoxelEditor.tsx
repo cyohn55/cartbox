@@ -23,7 +23,6 @@ import {
   serializeVoxelGrid,
   deserializeVoxelGrid,
   renderVoxelModel,
-  voxelCanvasSize,
   CUBE_FACES,
   DEFAULT_MODEL_LIGHT,
   MAX_VOXEL_GRID_DIM,
@@ -36,22 +35,32 @@ import styles from "./editor.module.css";
 
 const DEFAULT_GRID = 16;
 const GRID_SIZES = [8, 16, 24, 32, 64, 128, 256].filter((n) => n <= MAX_VOXEL_GRID_DIM);
-const CELL_MIN = 4;
-const CELL_MAX = 22;
-// The renderer draws the whole grid into an orthographic canvas whose pixel size
-// is the model diagonal × the cell (zoom) size. A large grid at a large cell size
-// would allocate a multi-hundred-MB canvas + pick buffers, so cap the canvas edge
-// and derive each grid's usable zoom range from it: small grids keep the full
-// zoom range; big grids (128³, 256³) auto-fit to a smaller cell so the whole
-// model stays on-screen at a bounded cost (~25MB of buffers) instead of crashing.
-const MAX_CANVAS_PX = 1440;
-const GRID_DIAGONAL_FACTOR = Math.sqrt(3); // a cube grid's space diagonal / edge
 
-/** The usable zoom (cell-size) range for a grid of the given edge length. */
-function cellRange(gridSize: number): { min: number; max: number } {
-  const fit = Math.floor(MAX_CANVAS_PX / (gridSize * GRID_DIAGONAL_FACTOR + 2));
-  const max = Math.max(2, Math.min(CELL_MAX, fit));
-  return { min: Math.min(CELL_MIN, max), max };
+// The model renders into a fixed-resolution square viewport, and `cell` (the
+// zoom) scales the model *within* it — so zooming visibly grows/shrinks the
+// model, and the render + pick buffers stay a bounded, constant size regardless
+// of grid size. The model is centred on its filled content, so a small sculpt in
+// a large grid still sits in the middle of the frame.
+const VIEWPORT = 560; // canvas edge in device pixels; also its CSS display width
+const CELL_MIN = 2; // most zoomed-out cube size, in viewport pixels
+const CELL_MAX = 64; // most zoomed-in cube size
+const CELL_STEP = 2; // per wheel-notch / button-press zoom increment
+const FIT_FRACTION = 0.7; // share of the viewport the model fills at the default zoom
+// The opening (fit-to-view) zoom is capped below CELL_MAX so a small model still
+// leaves headroom to zoom in — otherwise a tiny seed would open pinned at maximum
+// zoom, and "Zoom in" would sit disabled as if zooming were broken.
+const DEFAULT_CELL_MAX = 24;
+
+/** The opening cell (zoom) size that frames `contentDiagonal` voxels in the viewport. */
+function fitCell(contentDiagonal: number): number {
+  const fit = Math.floor((VIEWPORT * FIT_FRACTION) / Math.max(1, contentDiagonal));
+  return Math.max(CELL_MIN, Math.min(DEFAULT_CELL_MAX, fit));
+}
+
+/** Default zoom framing a grid's *filled content* (not the whole grid) in the viewport. */
+function fitCellForGrid(grid: VoxelGrid): number {
+  const model = voxelGridToModel(grid, { center: "content" });
+  return fitCell(Math.hypot(model.sizeX, model.sizeY, model.sizeZ));
 }
 const PITCH_LIMIT = 1.45;
 const ORBIT_SPEED = 0.011; // radians per pixel dragged
@@ -100,17 +109,16 @@ function seededGrid(size: number): VoxelGrid {
 function drawHighlight(
   context: CanvasRenderingContext2D,
   cell: Cell,
-  gridSize: number,
+  origin: readonly [number, number, number],
   yaw: number,
   pitch: number,
   cellPx: number,
   size: number,
   color: string,
 ): void {
-  const half = (gridSize - 1) / 2;
-  const cx = cell[0] - half;
-  const cy = cell[1] - half;
-  const cz = cell[2] - half;
+  const cx = cell[0] - origin[0];
+  const cy = cell[1] - origin[1];
+  const cz = cell[2] - origin[2];
   const cosY = Math.cos(yaw);
   const sinY = Math.sin(yaw);
   const cosP = Math.cos(pitch);
@@ -181,7 +189,6 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   const [rev, setRev] = useState(0); // bumped to rebuild the model after edits
   const [yaw, setYaw] = useState(0.7);
   const [pitch, setPitch] = useState(0.72);
-  const [cell, setCell] = useState(12);
   const [tool, setTool] = useState<VoxelTool>("add");
   const [colorIndex, setColorIndex] = useState(1);
   const [hover, setHover] = useState<Cell | null>(null); // target cell under the cursor
@@ -190,48 +197,55 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   const paintHex = palette[colorIndex] ?? "#ffffff";
 
   // Rebuild the renderable model whenever the grid changes (rev) or resizes.
-  const model3d = useMemo(() => voxelGridToModel(gridRef.current!), [rev, gridSize]);
-  // The usable zoom range for the current grid, and the cell actually rendered
-  // (clamped into it) so a big grid never allocates an oversized canvas.
-  const { min: minCell, max: maxCell } = useMemo(() => cellRange(gridSize), [gridSize]);
-  const renderCell = Math.min(Math.max(cell, minCell), maxCell);
-  const size = voxelCanvasSize(model3d, renderCell);
+  // Centre on the filled content so a small sculpt sits in the middle of the
+  // viewport (and rotates about its own centre), not low against the grid floor.
+  const model3d = useMemo(() => voxelGridToModel(gridRef.current!, { center: "content" }), [rev, gridSize]);
 
-  // Reused render + picking buffers, reallocated only when the canvas resizes.
+  // Zoom is the cube size in viewport pixels; it scales the model within a fixed
+  // viewport, so it actually changes the on-screen size. Seed it to fit the model.
+  const [cell, setCell] = useState(() => fitCellForGrid(gridRef.current!));
+  const renderCell = Math.max(CELL_MIN, Math.min(CELL_MAX, cell));
+
+  // Fixed-size render + picking buffers: allocated once, independent of grid size.
   const buffers = useMemo(
     () => ({
-      out: new Uint8ClampedArray(size * size * 4),
-      depth: new Float32Array(size * size),
-      pickVoxel: new Int32Array(size * size),
-      pickFace: new Int8Array(size * size),
+      out: new Uint8ClampedArray(VIEWPORT * VIEWPORT * 4),
+      depth: new Float32Array(VIEWPORT * VIEWPORT),
+      pickVoxel: new Int32Array(VIEWPORT * VIEWPORT),
+      pickFace: new Int8Array(VIEWPORT * VIEWPORT),
     }),
-    [size],
+    [],
   );
 
   // Render on any camera or model change; the pick buffers persist for clicks.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    canvas.width = size;
-    canvas.height = size;
+    canvas.width = VIEWPORT;
+    canvas.height = VIEWPORT;
     const context = canvas.getContext("2d");
     if (!context) return;
     renderVoxelModel(model3d, {
       yaw,
       pitch,
       cell: renderCell,
+      size: VIEWPORT,
       light: DEFAULT_MODEL_LIGHT,
       out: buffers.out,
       depthBuffer: buffers.depth,
       pickVoxel: buffers.pickVoxel,
       pickFace: buffers.pickFace,
     });
-    const image = context.createImageData(size, size);
+    const image = context.createImageData(VIEWPORT, VIEWPORT);
     image.data.set(buffers.out);
     context.putImageData(image, 0, 0);
-    // Outline the cell the cursor is targeting so every tool shows where it acts.
-    if (hover) drawHighlight(context, hover, gridSize, yaw, pitch, renderCell, size, HIGHLIGHT[tool]);
-  }, [model3d, yaw, pitch, renderCell, size, buffers, hover, tool, gridSize]);
+    // Outline the cell the cursor is targeting so every tool shows where it acts,
+    // projected with the model's exact content-centred origin so it lines up.
+    if (hover) {
+      const origin: [number, number, number] = [model3d.originX, model3d.originY, model3d.originZ];
+      drawHighlight(context, hover, origin, yaw, pitch, renderCell, VIEWPORT, HIGHLIGHT[tool]);
+    }
+  }, [model3d, yaw, pitch, renderCell, buffers, hover, tool]);
 
   /** Persist the current grid to undo/save; re-seed if it was emptied. */
   const commit = () => {
@@ -254,10 +268,10 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     const canvas = canvasRef.current;
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
-    const px = Math.floor(((clientX - rect.left) / rect.width) * size);
-    const py = Math.floor(((clientY - rect.top) / rect.height) * size);
-    if (px < 0 || px >= size || py < 0 || py >= size) return null;
-    const di = py * size + px;
+    const px = Math.floor(((clientX - rect.left) / rect.width) * VIEWPORT);
+    const py = Math.floor(((clientY - rect.top) / rect.height) * VIEWPORT);
+    if (px < 0 || px >= VIEWPORT || py < 0 || py >= VIEWPORT) return null;
+    const di = py * VIEWPORT + px;
     const voxel = buffers.pickVoxel[di]!;
     if (voxel < 0) return null; // empty space
     const [x, y, z] = cellCoords(model3d.gridIndex[voxel]!, gridRef.current!);
@@ -324,16 +338,17 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     if (state && !state.moved) editAt(event.clientX, event.clientY, state.button === 2);
   };
   const onPointerLeave = () => setHover(null);
-  const zoomBy = (delta: number) => setCell((value) => Math.max(minCell, Math.min(maxCell, value + delta)));
+  const zoomBy = (delta: number) => setCell((value) => Math.max(CELL_MIN, Math.min(CELL_MAX, value + delta)));
 
   // Wheel-zoom without letting the page scroll under the cursor. React's onWheel
   // is passive (can't preventDefault), so bind a non-passive native listener.
+  // Scroll up (deltaY < 0) zooms in; the closed-over zoomBy clamps to the fixed range.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const handler = (event: WheelEvent) => {
       event.preventDefault();
-      zoomBy(-Math.sign(event.deltaY) * 2);
+      zoomBy(-Math.sign(event.deltaY) * CELL_STEP);
     };
     canvas.addEventListener("wheel", handler, { passive: false });
     return () => canvas.removeEventListener("wheel", handler);
@@ -348,16 +363,15 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     if (grid.filledCount === 0) gridRef.current = seededGrid(next);
     else gridRef.current = grid;
     setGridSize(next);
-    // Refit the zoom into the new grid's usable range so a big grid opens showing
-    // the whole model rather than a slice cropped to an oversized canvas.
-    const range = cellRange(next);
-    setCell((value) => Math.max(range.min, Math.min(range.max, value)));
+    // Refit the zoom so the resized model opens framed to the viewport.
+    setCell(fitCellForGrid(gridRef.current!));
     setRev((value) => value + 1);
     onModelChange(serializeVoxelGrid(gridRef.current!));
   };
 
   const clearAll = () => {
     gridRef.current = seededGrid(gridSize);
+    setCell(fitCellForGrid(gridRef.current!));
     setRev((value) => value + 1);
     onModelChange(serializeVoxelGrid(gridRef.current!));
   };
@@ -426,8 +440,8 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
             <button
               type="button"
               className={styles.segment}
-              onClick={() => zoomBy(-2)}
-              disabled={renderCell <= minCell}
+              onClick={() => zoomBy(-CELL_STEP)}
+              disabled={renderCell <= CELL_MIN}
               aria-label="Zoom out"
               title="Zoom out"
             >
@@ -436,10 +450,10 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
             <button
               type="button"
               className={styles.segment}
-              onClick={() => zoomBy(2)}
-              disabled={renderCell >= maxCell}
+              onClick={() => zoomBy(CELL_STEP)}
+              disabled={renderCell >= CELL_MAX}
               aria-label="Zoom in"
-              title={renderCell >= maxCell ? "Maximum zoom for this grid size" : "Zoom in"}
+              title={renderCell >= CELL_MAX ? "Maximum zoom" : "Zoom in"}
             >
               ＋
             </button>
