@@ -93,6 +93,12 @@ export {
   type GridVoxelModel,
 } from "./model/VoxelGrid";
 export {
+  shapeOffsets,
+  type VoxelShapeKind,
+  type VoxelShapeStyle,
+  type ShapeOffset,
+} from "./model/voxelShapes";
+export {
   renderVoxelModel,
   voxelCanvasSize,
   DEFAULT_MODEL_LIGHT,

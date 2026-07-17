@@ -26,6 +26,10 @@ import {
   CUBE_FACES,
   DEFAULT_MODEL_LIGHT,
   MAX_VOXEL_GRID_DIM,
+  shapeOffsets,
+  type VoxelShapeKind,
+  type VoxelShapeStyle,
+  type ShapeOffset,
   type SpriteSheet,
 } from "@cartbox/editor";
 
@@ -67,12 +71,29 @@ const ORBIT_SPEED = 0.011; // radians per pixel dragged
 const DRAG_THRESHOLD = 4; // px of movement before a press becomes an orbit
 const SEED_COLOR: readonly [number, number, number] = [176, 182, 198];
 
-type VoxelTool = "add" | "remove" | "paint";
+type VoxelTool = "add" | "remove" | "paint" | "shape";
 const TOOLS: readonly { id: VoxelTool; label: string; glyph: string }[] = [
   { id: "add", label: "Add", glyph: "＋" },
   { id: "remove", label: "Remove", glyph: "－" },
   { id: "paint", label: "Paint", glyph: "🖌" },
+  { id: "shape", label: "Shape", glyph: "◫" },
 ];
+
+// The Shape tool stamps a rectangle or circle of voxels onto the plane of the
+// clicked face. Radius is voxels from the centre to the edge, so the shape spans
+// 2*radius + 1 voxels across; capped so even the largest outline stays a cheap
+// per-cell preview to render.
+const SHAPE_KINDS: readonly { id: VoxelShapeKind; label: string }[] = [
+  { id: "rectangle", label: "Rect" },
+  { id: "circle", label: "Circle" },
+];
+const SHAPE_STYLES: readonly { id: VoxelShapeStyle; label: string }[] = [
+  { id: "outline", label: "Outline" },
+  { id: "fill", label: "Fill" },
+];
+const SHAPE_RADIUS_MIN = 1;
+const SHAPE_RADIUS_MAX = 32;
+const DEFAULT_SHAPE_RADIUS = 3;
 
 /** `#rrggbb` → 0..255 RGB triple (falls back to white on a malformed value). */
 function hexToRgb(hex: string): [number, number, number] {
@@ -82,11 +103,46 @@ function hexToRgb(hex: string): [number, number, number] {
 }
 
 /** Bright wireframe colour of the hovered target cell, per tool. */
-const HIGHLIGHT: Record<VoxelTool, string> = { add: "#7dfcb6", remove: "#ff7b7b", paint: "#ffdd66" };
+const HIGHLIGHT: Record<VoxelTool, string> = {
+  add: "#7dfcb6",
+  remove: "#ff7b7b",
+  paint: "#ffdd66",
+  shape: "#7db8fc",
+};
 
 type Cell = [number, number, number];
 const sameCell = (a: Cell | null, b: Cell | null): boolean =>
   a === b || (a !== null && b !== null && a[0] === b[0] && a[1] === b[1] && a[2] === b[2]);
+
+/**
+ * What the cursor is aiming at: the cell a tool will act on, plus the cube face
+ * that was picked. The face fixes the drawing plane for the Shape tool (a shape
+ * is stamped in the plane of the face the cursor is over).
+ */
+interface HoverTarget {
+  cell: Cell;
+  face: number;
+}
+const sameHover = (a: HoverTarget | null, b: HoverTarget | null): boolean =>
+  a === b || (a !== null && b !== null && a.face === b.face && sameCell(a.cell, b.cell));
+
+/** The two in-plane unit axes of a cube face — the axes its normal doesn't run along. */
+function planeAxes(face: number): { u: Cell; v: Cell } {
+  const [nx, ny] = CUBE_FACES[face]!.normal;
+  if (nx !== 0) return { u: [0, 0, 1], v: [0, 1, 0] }; // ±X face → Z/Y plane
+  if (ny !== 0) return { u: [1, 0, 0], v: [0, 0, 1] }; // ±Y face → X/Z plane
+  return { u: [1, 0, 0], v: [0, 1, 0] }; // ±Z face → X/Y plane
+}
+
+/** Map a shape's in-plane offsets to grid cells around `center`, on `face`'s plane. */
+function shapePlaneCells(center: Cell, face: number, offsets: readonly ShapeOffset[]): Cell[] {
+  const { u, v } = planeAxes(face);
+  return offsets.map(({ u: du, v: dv }) => [
+    center[0] + du * u[0] + dv * v[0],
+    center[1] + du * u[1] + dv * v[1],
+    center[2] + du * u[2] + dv * v[2],
+  ]);
+}
 
 /** A small 3×3 floor platform, so a new model reads as a surface to build on. */
 function seededGrid(size: number): VoxelGrid {
@@ -191,7 +247,10 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   const [pitch, setPitch] = useState(0.72);
   const [tool, setTool] = useState<VoxelTool>("add");
   const [colorIndex, setColorIndex] = useState(1);
-  const [hover, setHover] = useState<Cell | null>(null); // target cell under the cursor
+  const [hover, setHover] = useState<HoverTarget | null>(null); // what the cursor is aiming at
+  const [shapeKind, setShapeKind] = useState<VoxelShapeKind>("rectangle");
+  const [shapeStyle, setShapeStyle] = useState<VoxelShapeStyle>("outline");
+  const [shapeRadius, setShapeRadius] = useState(DEFAULT_SHAPE_RADIUS);
 
   const palette = useMemo(() => sheet.cssPalette(), [sheet]);
   const paintHex = palette[colorIndex] ?? "#ffffff";
@@ -239,13 +298,22 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     const image = context.createImageData(VIEWPORT, VIEWPORT);
     image.data.set(buffers.out);
     context.putImageData(image, 0, 0);
-    // Outline the cell the cursor is targeting so every tool shows where it acts,
-    // projected with the model's exact content-centred origin so it lines up.
+    // Outline the cell(s) the cursor is targeting so every tool shows where it
+    // acts, projected with the model's exact content-centred origin so it lines
+    // up. The Shape tool previews the shape's boundary (its outline offsets) even
+    // in Fill mode, so the footprint reads clearly while staying cheap to draw.
     if (hover) {
       const origin: [number, number, number] = [model3d.originX, model3d.originY, model3d.originZ];
-      drawHighlight(context, hover, origin, yaw, pitch, renderCell, VIEWPORT, HIGHLIGHT[tool]);
+      const color = HIGHLIGHT[tool];
+      const cells =
+        tool === "shape"
+          ? shapePlaneCells(hover.cell, hover.face, shapeOffsets(shapeKind, "outline", shapeRadius))
+          : [hover.cell];
+      for (const target of cells) {
+        drawHighlight(context, target, origin, yaw, pitch, renderCell, VIEWPORT, color);
+      }
     }
-  }, [model3d, yaw, pitch, renderCell, buffers, hover, tool]);
+  }, [model3d, yaw, pitch, renderCell, buffers, hover, tool, shapeKind, shapeRadius]);
 
   /** Persist the current grid to undo/save; re-seed if it was emptied. */
   const commit = () => {
@@ -278,8 +346,10 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     return { x, y, z, face: buffers.pickFace[di]! };
   };
 
+  type Pick = { x: number; y: number; z: number; face: number };
+
   /** The cell a tool would act on: the empty neighbour for Add, else the cell itself. */
-  const targetCell = (pick: { x: number; y: number; z: number; face: number }, action: VoxelTool): Cell | null => {
+  const targetCell = (pick: Pick, action: VoxelTool): Cell | null => {
     if (action === "add") {
       const [nx, ny, nz] = CUBE_FACES[pick.face]!.normal;
       const cell: Cell = [pick.x + nx, pick.y + ny, pick.z + nz];
@@ -288,10 +358,48 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     return [pick.x, pick.y, pick.z];
   };
 
+  /** Where the Shape tool centres: the empty neighbour of the clicked face. */
+  const shapeCenter = (pick: Pick): Cell => {
+    const [nx, ny, nz] = CUBE_FACES[pick.face]!.normal;
+    return [pick.x + nx, pick.y + ny, pick.z + nz];
+  };
+
+  /** What the cursor currently targets, for the hover preview. */
+  const hoverFrom = (pick: Pick): HoverTarget | null => {
+    if (tool === "shape") return { cell: shapeCenter(pick), face: pick.face };
+    const cell = targetCell(pick, tool);
+    return cell ? { cell, face: pick.face } : null;
+  };
+
+  /**
+   * Stamp (or, on a right-click, carve) the shape on the clicked face's plane.
+   * Adding lands on the empty layer just off the surface (so it builds outward
+   * like the Add tool); erasing centres on the clicked cell itself, so a
+   * right-click cuts the shape *into* the surface you pointed at rather than into
+   * empty space.
+   */
+  const stampShape = (pick: Pick, erase: boolean) => {
+    const grid = gridRef.current!;
+    const center: Cell = erase ? [pick.x, pick.y, pick.z] : shapeCenter(pick);
+    const cells = shapePlaneCells(center, pick.face, shapeOffsets(shapeKind, shapeStyle, shapeRadius));
+    const [r, g, b] = hexToRgb(paintHex);
+    for (const [cx, cy, cz] of cells) {
+      if (!grid.inBounds(cx, cy, cz)) continue;
+      if (erase) grid.clear(cx, cy, cz);
+      else grid.set(cx, cy, cz, r, g, b);
+    }
+  };
+
   /** Apply the active tool (or Remove on a right-click) at a canvas pixel. */
   const editAt = (clientX: number, clientY: number, removeOverride: boolean) => {
     const pick = pickAt(clientX, clientY);
     if (!pick) return;
+    if (tool === "shape") {
+      stampShape(pick, removeOverride);
+      setHover(null);
+      commit();
+      return;
+    }
     const action = removeOverride ? "remove" : tool;
     const cell = targetCell(pick, action);
     if (!cell) return;
@@ -327,10 +435,10 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
       setPitch((value) => Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, value + dy * ORBIT_SPEED)));
       return;
     }
-    // Plain hover: preview the cell the current tool would act on.
+    // Plain hover: preview where the current tool would act.
     const pick = pickAt(event.clientX, event.clientY);
-    const next = pick ? targetCell(pick, tool) : null;
-    setHover((prev) => (sameCell(prev, next) ? prev : next));
+    const next = pick ? hoverFrom(pick) : null;
+    setHover((prev) => (sameHover(prev, next) ? prev : next));
   };
   const onPointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const state = drag.current;
@@ -416,6 +524,50 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
             ))}
           </div>
         </div>
+
+        {tool === "shape" && (
+          <div>
+            <div className={styles.groupLabel}>Shape</div>
+            <div className={styles.segmented}>
+              {SHAPE_KINDS.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  className={`${styles.segment} ${shapeKind === option.id ? styles.segmentActive : ""}`}
+                  onClick={() => setShapeKind(option.id)}
+                  aria-pressed={shapeKind === option.id}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <div className={styles.segmented} style={{ marginTop: 6 }}>
+              {SHAPE_STYLES.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  className={`${styles.segment} ${shapeStyle === option.id ? styles.segmentActive : ""}`}
+                  onClick={() => setShapeStyle(option.id)}
+                  aria-pressed={shapeStyle === option.id}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <div className={styles.rangeRow} style={{ marginTop: 6 }}>
+              <input
+                type="range"
+                min={SHAPE_RADIUS_MIN}
+                max={SHAPE_RADIUS_MAX}
+                step={1}
+                value={shapeRadius}
+                onChange={(event) => setShapeRadius(Number(event.target.value))}
+                aria-label="Shape size in voxels"
+              />
+              <span className={`${styles.rangeValue} data`}>{shapeRadius * 2 + 1}</span>
+            </div>
+          </div>
+        )}
 
         <div>
           <div className={styles.groupLabel}>Grid</div>
@@ -516,7 +668,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
             borderRadius: 8,
           }}
           role="img"
-          aria-label="3D voxel model — drag to orbit, click a face to add, right-click to remove"
+          aria-label="3D voxel model — drag to orbit, click a face to add or stamp a shape, right-click to remove"
         />
         <div className={styles.hud}>
           <span className={styles.hudItem}>
@@ -559,8 +711,9 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
         </div>
 
         <p className={styles.panelMeta} style={{ lineHeight: 1.5 }}>
-          The glowing outline shows where the next cube lands. Click a face to add there, right-click
-          to remove, or switch tools. Drag to orbit, scroll to zoom.
+          {tool === "shape"
+            ? "The glowing outline shows the shape's footprint on the face you point at. Pick Rect or Circle, Outline or Fill, and set the size; click a face to stamp it, right-click to erase it. Drag to orbit, scroll to zoom."
+            : "The glowing outline shows where the next cube lands. Click a face to add there, right-click to remove, or switch tools. Drag to orbit, scroll to zoom."}
         </p>
       </aside>
     </div>
