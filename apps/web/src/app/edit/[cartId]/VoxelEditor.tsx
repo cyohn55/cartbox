@@ -31,7 +31,7 @@ import {
 } from "@cartbox/editor";
 
 import { createVoxelBackdropProp } from "@/lib/backdropProps";
-import { loadWorkingSet, loadPublishedSet, saveWorkingSet } from "@/lib/backdropPropsStore";
+import { loadWorkingSet, loadPublishedSet, saveWorkingSet, type PendingVoxelEdit } from "@/lib/backdropPropsStore";
 import styles from "./editor.module.css";
 
 const DEFAULT_GRID = 16;
@@ -150,14 +150,17 @@ interface VoxelEditorProps {
   model: string | null;
   /** Called with the serialized grid after every edit (feeds undo + save). */
   onModelChange: (serialized: string) => void;
+  /** A backdrop voxel prop being re-sculpted (manager → "Edit"), or null. */
+  pendingEdit?: PendingVoxelEdit | null;
 }
 
-export function VoxelEditor({ sheet, model, onModelChange }: VoxelEditorProps) {
+export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }: VoxelEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  // The grid is the source of truth; it is seeded once from `model` on mount
-  // (the tab remounts on undo/redo, which re-reads the restored `model`).
+  // The grid is the source of truth; it is seeded once on mount from the cart's
+  // model, or from the prop handed over to re-sculpt (the manager routes through
+  // /edit/new, which clears the draft, so `model` is empty and the prop wins).
   const gridRef = useRef<VoxelGrid | null>(null);
-  if (gridRef.current === null) gridRef.current = loadGrid(model);
+  if (gridRef.current === null) gridRef.current = loadGrid(model ?? pendingEdit?.voxel ?? null);
 
   const [gridSize, setGridSize] = useState(() => gridRef.current!.sizeX);
   const [rev, setRev] = useState(0); // bumped to rebuild the model after edits
@@ -327,14 +330,19 @@ export function VoxelEditor({ sheet, model, onModelChange }: VoxelEditorProps) {
 
   const [publishedNote, setPublishedNote] = useState<string | null>(null);
 
-  /** Add the current model to the backdrop working set to place it in the scene. */
+  /** Add or update this model in the backdrop working set to place it in the scene. */
   const publishAsProp = async () => {
-    const name = window.prompt("Name this backdrop prop", "Voxel prop")?.trim();
+    const name = window.prompt("Name this backdrop prop", pendingEdit?.name ?? "Voxel prop")?.trim();
     if (!name) return;
     const voxel = serializeVoxelGrid(gridRef.current!);
     const base = loadWorkingSet() ?? (await loadPublishedSet());
-    const id = `voxel-${globalThis.crypto?.randomUUID?.() ?? Date.now().toString(36)}`;
-    saveWorkingSet({ version: base.version, props: [...base.props, createVoxelBackdropProp(id, name, voxel)] });
+    const targetId = pendingEdit?.targetId;
+    const props =
+      targetId && base.props.some((p) => p.id === targetId)
+        ? // Re-publish over the same prop, keeping its placement + motion.
+          base.props.map((p) => (p.id === targetId ? { ...p, name, voxel, art: undefined } : p))
+        : [...base.props, createVoxelBackdropProp(targetId ?? `voxel-${globalThis.crypto?.randomUUID?.() ?? Date.now().toString(36)}`, name, voxel)];
+    saveWorkingSet({ version: base.version, props });
     setPublishedNote(name);
   };
 
@@ -396,11 +404,11 @@ export function VoxelEditor({ sheet, model, onModelChange }: VoxelEditorProps) {
             <span className={styles.toolGlyph} aria-hidden>
               ★
             </span>
-            Publish as prop
+            {pendingEdit ? "Update prop" : "Publish as prop"}
           </button>
           {publishedNote && (
             <p className={styles.panelMeta} style={{ lineHeight: 1.5, marginTop: 8 }}>
-              Added “{publishedNote}” to the scene.{" "}
+              Published “{publishedNote}” to the scene.{" "}
               <Link
                 href="/backdrop"
                 target="_blank"

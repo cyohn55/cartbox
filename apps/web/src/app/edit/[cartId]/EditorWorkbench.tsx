@@ -38,6 +38,7 @@ import { authHeaders } from "@/lib/supabase-browser";
 import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
 import { isStaticExport } from "@/lib/staticSite";
 import { saveCartDraft } from "@/lib/localCartStore";
+import { loadPendingVoxelEdit, clearPendingVoxelEdit, type PendingVoxelEdit } from "@/lib/backdropPropsStore";
 import type { WireRig } from "@/lib/rig";
 import type { WireMaterials } from "@/lib/materials";
 import styles from "./editor.module.css";
@@ -247,7 +248,15 @@ function WorkbenchBody({
   const specularMap = useMemo(() => new MaterialMap(editEngine, "specular"), [editEngine]);
   const roughnessMap = useMemo(() => new MaterialMap(editEngine, "roughness"), [editEngine]);
   const emissiveMap = useMemo(() => new MaterialMap(editEngine, "emissive"), [editEngine]);
-  const [activeTab, setActiveTab] = useState<Tab>("Sprites");
+  // A voxel prop handed over from the backdrop manager to re-sculpt: open on the
+  // Voxel tab, seed it with that model, and consume the hand-off once.
+  const [pendingVoxel] = useState<PendingVoxelEdit | null>(() =>
+    typeof window !== "undefined" ? loadPendingVoxelEdit() : null,
+  );
+  const [activeTab, setActiveTab] = useState<Tab>(pendingVoxel ? "Voxel" : "Sprites");
+  useEffect(() => {
+    if (pendingVoxel) clearPendingVoxelEdit();
+  }, [pendingVoxel]);
   const [runBytes, setRunBytes] = useState<Uint8Array | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
 
@@ -443,7 +452,13 @@ function WorkbenchBody({
         />
       )}
       {activeTab === "Voxel" && (
-        <VoxelEditor key={`${bank}:${revision}`} sheet={sheet} model={voxel} onModelChange={setVoxel} />
+        <VoxelEditor
+          key={`${bank}:${revision}`}
+          sheet={sheet}
+          model={voxel}
+          onModelChange={setVoxel}
+          pendingEdit={pendingVoxel}
+        />
       )}
       {activeTab === "Map" && <MapEditor key={`${bank}:${revision}`} sheet={sheet} map={map} />}
       {activeTab === "FX" && (

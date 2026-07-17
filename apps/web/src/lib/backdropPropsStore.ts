@@ -125,3 +125,40 @@ export function clearPendingPropEdit(): void {
   if (typeof window === "undefined") return;
   window.localStorage.removeItem(PENDING_EDIT_KEY);
 }
+
+const PENDING_VOXEL_EDIT_KEY = "cartbox.backdrop.pendingVoxelEdit";
+
+/** A voxel prop the manager handed to the editor's Voxel tab to re-sculpt. */
+export interface PendingVoxelEdit {
+  /** The prop to overwrite on re-publish (its placement + motion are kept). */
+  readonly targetId: string;
+  readonly name: string;
+  /** Serialized VoxelGrid the Voxel tab seeds its model with. */
+  readonly voxel: string;
+}
+
+/** Stash a voxel prop for the editor's Voxel tab to open (manager → "Edit"). */
+export function savePendingVoxelEdit(edit: PendingVoxelEdit): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(PENDING_VOXEL_EDIT_KEY, JSON.stringify(edit));
+}
+
+/** Read the pending voxel edit the Voxel tab should open, if any. */
+export function loadPendingVoxelEdit(): PendingVoxelEdit | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.localStorage.getItem(PENDING_VOXEL_EDIT_KEY);
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw) as PendingVoxelEdit;
+    if (typeof value.targetId !== "string" || typeof value.voxel !== "string") return null;
+    return { targetId: value.targetId, name: typeof value.name === "string" ? value.name : value.targetId, voxel: value.voxel };
+  } catch {
+    return null;
+  }
+}
+
+/** Clear the pending voxel edit (after the Voxel tab consumes it). */
+export function clearPendingVoxelEdit(): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(PENDING_VOXEL_EDIT_KEY);
+}

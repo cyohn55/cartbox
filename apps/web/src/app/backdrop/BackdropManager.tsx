@@ -30,6 +30,7 @@ import {
   loadWorkingSet,
   saveWorkingSet,
   savePendingPropEdit,
+  savePendingVoxelEdit,
 } from "@/lib/backdropPropsStore";
 import { PropPreview } from "./PropPreview";
 import styles from "./backdrop.module.css";
@@ -92,6 +93,12 @@ export function BackdropManager() {
       fy: Math.min(1, prop.fy + 0.04),
     };
     commit({ ...set, props: [...set.props, copy] });
+  };
+
+  const editVoxel = (prop: StoredBackdropProp) => {
+    if (!prop.voxel) return;
+    savePendingVoxelEdit({ targetId: prop.id, name: prop.name, voxel: prop.voxel });
+    router.push("/edit/new");
   };
 
   const editPixels = (prop: StoredBackdropProp) => {
@@ -220,8 +227,12 @@ export function BackdropManager() {
               onChange={(v) => updateMotion(prop.id, { spinDuration: Math.min(v, prop.motion.spinCycle) })} />
 
             <div className={styles.cardActions}>
-              {/* Pixel editing is for 2D sprite props; voxel props are sculpted in the editor's Voxel tab. */}
-              {!prop.voxel && (
+              {/* Sprite props edit their pixels; voxel props re-open in the editor's Voxel tab. */}
+              {prop.voxel ? (
+                <button type="button" className={styles.btn} onClick={() => editVoxel(prop)}>
+                  Edit
+                </button>
+              ) : (
                 <button type="button" className={styles.btn} onClick={() => editPixels(prop)}>
                   Edit pixels
                 </button>
