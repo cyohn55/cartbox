@@ -19,14 +19,23 @@ import { useEffect, useRef } from "react";
 import { buildRetroWall, orbitLight, renderBackdropFrame } from "@/lib/litBackdrop";
 import { CpuVoxelCompositor } from "@/lib/cpuVoxelCompositor";
 import { buildRetroProps, propSetToVoxelProps, type VoxelProp } from "@/lib/retroVoxels";
+import { scaleVoxelProps } from "@/lib/voxelPropScale";
 import { loadActiveSet } from "@/lib/backdropPropsStore";
 import { WebGpuVoxelRenderer } from "./WebGpuVoxelRenderer";
 import styles from "./handheld.module.css";
 
-// Low-resolution buffer; CSS upscales it with nearest-neighbour for crisp
-// pixels. The overlay canvases share these dimensions so props stay aligned.
-const BUFFER_WIDTH = 260;
-const BUFFER_HEIGHT = 160;
+// The backdrop renders into a low-resolution buffer that CSS upscales with
+// nearest-neighbour. At the base 260×160, one buffer pixel spans several screen
+// pixels, so a prop's slow vertical bob visibly *hops* a chunk of pixels per
+// step. Rendering the whole scene at this integer multiple shrinks each buffer
+// pixel, so the bob advances in fine sub-steps and glides; the composition is
+// unchanged because the wall, light, and prop placement are all buffer-relative,
+// and props keep their on-screen size via {@link scaleVoxelProps}. Raising this
+// costs ~scale² more per frame, so it trades a little render budget for smooth
+// motion — 2 is smooth while staying cheap.
+const RESOLUTION_SCALE = 2;
+const BUFFER_WIDTH = 260 * RESOLUTION_SCALE;
+const BUFFER_HEIGHT = 160 * RESOLUTION_SCALE;
 // Fixed tip toward the viewer that gives the props a 3/4 read.
 const PROP_PITCH = 0.42;
 // The orbit and bob are slow, so ~30fps looks identical to 60 at half the cost.
@@ -101,7 +110,9 @@ export function LitBackdrop() {
     void (async () => {
       const set = await loadActiveSet();
       if (cancelled) return;
-      props = set.props.length > 0 ? propSetToVoxelProps(set) : buildRetroProps();
+      const authoredProps = set.props.length > 0 ? propSetToVoxelProps(set) : buildRetroProps();
+      // Props are authored in base-buffer units; scale them to match the buffer.
+      props = scaleVoxelProps(authoredProps, RESOLUTION_SCALE);
 
       // Motion-sensitive visitors get a single still frame (CPU, no GPU init).
       if (reducedMotion) {
