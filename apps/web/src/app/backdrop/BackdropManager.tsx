@@ -95,6 +95,7 @@ export function BackdropManager() {
   };
 
   const editPixels = (prop: StoredBackdropProp) => {
+    if (!prop.art) return; // voxel props have no pixels to edit (button is hidden for them)
     savePendingPropEdit({
       targetId: prop.id,
       name: prop.name,
@@ -204,8 +205,11 @@ export function BackdropManager() {
               onChange={(v) => updateProp(prop.id, { fy: v })} />
             <Slider label="Size" min={1} max={6} step={1} value={prop.cell} format={(v) => String(v)}
               onChange={(v) => updateProp(prop.id, { cell: v })} />
-            <Slider label="Depth" min={1} max={16} step={1} value={prop.depth} format={(v) => String(v)}
-              onChange={(v) => updateProp(prop.id, { depth: v })} />
+            {/* Depth only extrudes 2D sprite props; a voxel model already has 3D shape. */}
+            {!prop.voxel && (
+              <Slider label="Depth" min={1} max={16} step={1} value={prop.depth} format={(v) => String(v)}
+                onChange={(v) => updateProp(prop.id, { depth: v })} />
+            )}
             <Slider label="Bob height" min={0} max={12} step={0.5} value={prop.motion.bobAmplitude} format={(v) => v.toFixed(1)}
               onChange={(v) => updateMotion(prop.id, { bobAmplitude: v })} />
             <Slider label="Bob speed" min={1} max={10} step={0.5} value={prop.motion.bobPeriod} format={(v) => `${v.toFixed(1)}s`}
@@ -216,9 +220,12 @@ export function BackdropManager() {
               onChange={(v) => updateMotion(prop.id, { spinDuration: Math.min(v, prop.motion.spinCycle) })} />
 
             <div className={styles.cardActions}>
-              <button type="button" className={styles.btn} onClick={() => editPixels(prop)}>
-                Edit pixels
-              </button>
+              {/* Pixel editing is for 2D sprite props; voxel props are sculpted in the editor's Voxel tab. */}
+              {!prop.voxel && (
+                <button type="button" className={styles.btn} onClick={() => editPixels(prop)}>
+                  Edit pixels
+                </button>
+              )}
               <button type="button" className={styles.btn} onClick={() => duplicateProp(prop)}>
                 Duplicate
               </button>

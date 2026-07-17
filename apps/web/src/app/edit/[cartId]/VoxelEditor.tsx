@@ -16,6 +16,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import {
   VoxelGrid,
   voxelGridToModel,
@@ -29,6 +30,8 @@ import {
   type SpriteSheet,
 } from "@cartbox/editor";
 
+import { createVoxelBackdropProp } from "@/lib/backdropProps";
+import { loadWorkingSet, loadPublishedSet, saveWorkingSet } from "@/lib/backdropPropsStore";
 import styles from "./editor.module.css";
 
 const DEFAULT_GRID = 16;
@@ -322,6 +325,19 @@ export function VoxelEditor({ sheet, model, onModelChange }: VoxelEditorProps) {
     onModelChange(serializeVoxelGrid(gridRef.current!));
   };
 
+  const [publishedNote, setPublishedNote] = useState<string | null>(null);
+
+  /** Add the current model to the backdrop working set to place it in the scene. */
+  const publishAsProp = async () => {
+    const name = window.prompt("Name this backdrop prop", "Voxel prop")?.trim();
+    if (!name) return;
+    const voxel = serializeVoxelGrid(gridRef.current!);
+    const base = loadWorkingSet() ?? (await loadPublishedSet());
+    const id = `voxel-${globalThis.crypto?.randomUUID?.() ?? Date.now().toString(36)}`;
+    saveWorkingSet({ version: base.version, props: [...base.props, createVoxelBackdropProp(id, name, voxel)] });
+    setPublishedNote(name);
+  };
+
   return (
     <div className={styles.body}>
       <aside className={styles.rail}>
@@ -368,6 +384,35 @@ export function VoxelEditor({ sheet, model, onModelChange }: VoxelEditorProps) {
           </span>
           Clear
         </button>
+
+        <div>
+          <div className={styles.groupLabel}>Backdrop</div>
+          <button
+            type="button"
+            className={styles.toolBtn}
+            onClick={() => void publishAsProp()}
+            title="Add this model to the onboarding backdrop scene"
+          >
+            <span className={styles.toolGlyph} aria-hidden>
+              ★
+            </span>
+            Publish as prop
+          </button>
+          {publishedNote && (
+            <p className={styles.panelMeta} style={{ lineHeight: 1.5, marginTop: 8 }}>
+              Added “{publishedNote}” to the scene.{" "}
+              <Link
+                href="/backdrop"
+                target="_blank"
+                rel="noopener"
+                style={{ color: "#7dfcb6", textDecoration: "underline" }}
+              >
+                Open the Backdrop manager
+              </Link>{" "}
+              to place, size, and animate it.
+            </p>
+          )}
+        </div>
       </aside>
 
       <section className={styles.mapStage}>

@@ -28,12 +28,16 @@ export interface PropArt {
   readonly emissive: string;
 }
 
-/** One editable prop. */
+/** One editable prop. A prop is either a 2D sprite (`art`, extruded) or a true
+ * 3D voxel model (`voxel`, a serialized VoxelGrid) — exactly one is present. */
 export interface StoredBackdropProp {
   readonly id: string;
   readonly name: string;
-  readonly art: PropArt;
-  /** Voxel slab depth. */
+  /** 2D pixel art, extruded by `depth`. Absent for voxel props. */
+  readonly art?: PropArt;
+  /** Serialized 3D voxel grid. Absent for sprite props. */
+  readonly voxel?: string;
+  /** Extrusion depth for a sprite prop; ignored for voxel props. */
   readonly depth: number;
   /** Centre anchor as a fraction of the backdrop (0..1). */
   readonly fx: number;
@@ -57,6 +61,10 @@ const MAX_DIM = 64;
 const MAX_PROPS = 40;
 const MAX_DEPTH = 32;
 const MAX_CELL = 8;
+// A 32³ grid serializes to ~230KB of base64; bound it generously. The strict
+// grid validation (dims, byte lengths) happens in deserializeVoxelGrid when the
+// model is built — this module stays free of the editor/WASM barrel.
+const MAX_VOXEL_CHARS = 400_000;
 
 // --- base64 <-> bytes (portable across node >=16 and browsers) ---------------
 
@@ -157,22 +165,31 @@ function normalizePropArt(value: unknown): PropArt | null {
   return { width, height, albedo: art.albedo, emissive: art.emissive };
 }
 
+/** Coerce an untrusted serialized voxel grid: a bounded non-empty string. */
+function normalizeVoxel(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_VOXEL_CHARS) return null;
+  return trimmed;
+}
+
 /** Coerce one untrusted prop; returns null if it cannot be made valid. */
 function normalizeProp(value: unknown): StoredBackdropProp | null {
   if (typeof value !== "object" || value === null) return null;
   const p = value as Record<string, unknown>;
   const art = normalizePropArt(p.art);
+  const voxel = normalizeVoxel(p.voxel);
   const motion = normalizeMotion(p.motion);
-  if (!art || !motion) return null;
+  if (!motion) return null;
+  if (!art && !voxel) return null; // a prop must carry geometry (sprite or voxel)
   if (typeof p.id !== "string" || p.id.length === 0 || p.id.length > 64) return null;
-  if (!isFiniteNumber(p.depth) || !isFiniteNumber(p.fx) || !isFiniteNumber(p.fy) || !isFiniteNumber(p.cell)) {
-    return null;
-  }
+  if (!isFiniteNumber(p.fx) || !isFiniteNumber(p.fy) || !isFiniteNumber(p.cell)) return null;
   return {
     id: p.id,
     name: typeof p.name === "string" ? p.name.slice(0, 64) : p.id,
-    art,
-    depth: clamp(Math.round(p.depth), 1, MAX_DEPTH),
+    ...(art ? { art } : {}),
+    ...(voxel ? { voxel } : {}),
+    depth: clamp(Math.round(isFiniteNumber(p.depth) ? p.depth : 1), 1, MAX_DEPTH),
     fx: clamp(p.fx, -0.2, 1.2),
     fy: clamp(p.fy, -0.2, 1.2),
     cell: clamp(Math.round(p.cell), 1, MAX_CELL),
@@ -194,6 +211,24 @@ export function normalizePropSet(value: unknown): BackdropPropSet | null {
     .map(normalizeProp)
     .filter((p): p is StoredBackdropProp => p !== null);
   return { version: isFiniteNumber(set.version) ? set.version : BACKDROP_PROP_SET_VERSION, props };
+}
+
+/** A gentle bob + occasional slow spin, the starting motion for a new prop. */
+export const DEFAULT_PROP_MOTION: MotionParams = {
+  bobAmplitude: 3,
+  bobPeriod: 4,
+  bobPhase: 0,
+  spinCycle: 12,
+  spinDuration: 6,
+  spinPhase: 0,
+};
+
+/**
+ * Build a fresh voxel-model prop for the working set, centred on the backdrop
+ * with default motion. Placement and motion are tuned afterwards in the manager.
+ */
+export function createVoxelBackdropProp(id: string, name: string, voxel: string): StoredBackdropProp {
+  return { id, name, voxel, depth: 1, fx: 0.5, fy: 0.5, cell: 2, motion: DEFAULT_PROP_MOTION };
 }
 
 /** Serialise a set to a JSON string. */

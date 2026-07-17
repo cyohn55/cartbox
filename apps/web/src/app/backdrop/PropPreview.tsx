@@ -10,10 +10,10 @@
 
 import { useEffect, useRef } from "react";
 
-import { extrudeSprite, renderVoxelModel, voxelCanvasSize } from "@cartbox/editor";
+import { renderVoxelModel, voxelCanvasSize } from "@cartbox/editor";
 
-import { decodePropArt, type StoredBackdropProp } from "@/lib/backdropProps";
-import { BACKDROP_LIGHT } from "@/lib/retroVoxels";
+import { type StoredBackdropProp } from "@/lib/backdropProps";
+import { BACKDROP_LIGHT, propToVoxelModel } from "@/lib/retroVoxels";
 import styles from "./backdrop.module.css";
 
 const PREVIEW_CELL = 4;
@@ -30,8 +30,8 @@ export function PropPreview({ prop }: { prop: StoredBackdropProp }) {
     const context = canvas.getContext("2d");
     if (!context) return;
 
-    const { albedo, emissive, width, height } = decodePropArt(prop.art);
-    const model = extrudeSprite(albedo, width, height, { depth: prop.depth, emissive });
+    const model = propToVoxelModel(prop);
+    if (!model) return;
     const size = voxelCanvasSize(model, PREVIEW_CELL);
     const bobAmplitude = Math.round(PREVIEW_CELL * 1.2);
     canvas.width = size;
@@ -68,7 +68,7 @@ export function PropPreview({ prop }: { prop: StoredBackdropProp }) {
     };
     frame = window.requestAnimationFrame(loop);
     return () => window.cancelAnimationFrame(frame);
-  }, [prop.art, prop.depth]);
+  }, [prop]);
 
   return <canvas ref={canvasRef} className={styles.preview} aria-label={`3D preview of ${prop.name}`} />;
 }

@@ -22,6 +22,7 @@ const {
   serializePropSet,
   deserializePropSet,
   normalizePropSet,
+  createVoxelBackdropProp,
 } = mod;
 
 let passed = 0;
@@ -108,6 +109,20 @@ check(
 {
   check("invalid JSON deserialises to null", deserializePropSet("{not json") === null);
   check("a non-set value normalises to null", normalizePropSet(42) === null);
+}
+
+// 8. A voxel prop (a serialized grid, no sprite art) survives the gate and
+//    round-trips, and a prop with neither art nor voxel is dropped.
+{
+  const voxelProp = createVoxelBackdropProp("voxel-1", "My model", '{"version":1,"sizeX":4,"sizeY":4,"sizeZ":4,"colors":"x","emissive":"y"}');
+  check("factory prop carries the voxel string and no art", voxelProp.voxel.length > 0 && voxelProp.art === undefined);
+
+  const set = { version: 1, props: [voxelProp] };
+  const back = deserializePropSet(serializePropSet(set));
+  check("voxel prop round-trips through the gate", back !== null && back.props.length === 1 && back.props[0].voxel === voxelProp.voxel);
+
+  const geometryless = normalizePropSet({ version: 1, props: [{ id: "empty", depth: 3, fx: 0, fy: 0, cell: 2, motion: DEFAULT_BACKDROP_PROP_SET.props[0].motion }] });
+  check("a prop with neither art nor voxel is dropped", geometryless !== null && geometryless.props.length === 0);
 }
 
 console.log(`backdropProps: ${passed}/${passed} checks passed`);

@@ -144,17 +144,47 @@ export interface GridVoxelModel extends VoxelModel {
   readonly gridIndex: Int32Array;
 }
 
+export interface GridToModelOptions {
+  /**
+   * What to centre and size the model on. `"grid"` (default) centres on the whole
+   * grid and sizes to it — a stable coordinate system for the editor. `"content"`
+   * centres on the filled cells' bounding box and sizes to that, so a small sculpt
+   * in a large grid still renders centred and tight — what a placed prop wants.
+   */
+  readonly center?: "grid" | "content";
+}
+
 /**
  * Build a renderable model from a grid. Only cells that expose at least one face
  * (a neighbour is empty or off-grid) are kept, and each face bit is set purely
  * from 3D occupancy — so hollow interiors cost nothing and shared faces between
- * touching cubes are hidden. Coordinates are centred on the grid so it rotates
- * about its middle, matching {@link extrudeSprite}'s convention (y up).
+ * touching cubes are hidden. Coordinates are centred (see {@link GridToModelOptions})
+ * so it rotates about its middle, matching {@link extrudeSprite}'s convention (y up).
  */
-export function voxelGridToModel(grid: VoxelGrid): GridVoxelModel {
-  const halfX = (grid.sizeX - 1) / 2;
-  const halfY = (grid.sizeY - 1) / 2;
-  const halfZ = (grid.sizeZ - 1) / 2;
+export function voxelGridToModel(grid: VoxelGrid, options: GridToModelOptions = {}): GridVoxelModel {
+  // Filled bounding box, for content-centred sizing.
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+  grid.forEachFilled((x, y, z) => {
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (z < minZ) minZ = z;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+    if (z > maxZ) maxZ = z;
+  });
+
+  const content = options.center === "content" && maxX >= minX;
+  const halfX = content ? (minX + maxX) / 2 : (grid.sizeX - 1) / 2;
+  const halfY = content ? (minY + maxY) / 2 : (grid.sizeY - 1) / 2;
+  const halfZ = content ? (minZ + maxZ) / 2 : (grid.sizeZ - 1) / 2;
+  const modelSizeX = content ? maxX - minX + 1 : grid.sizeX;
+  const modelSizeY = content ? maxY - minY + 1 : grid.sizeY;
+  const modelSizeZ = content ? maxZ - minZ + 1 : grid.sizeZ;
 
   const xs: number[] = [];
   const ys: number[] = [];
@@ -201,9 +231,9 @@ export function voxelGridToModel(grid: VoxelGrid): GridVoxelModel {
   });
 
   return {
-    sizeX: grid.sizeX,
-    sizeY: grid.sizeY,
-    sizeZ: grid.sizeZ,
+    sizeX: modelSizeX,
+    sizeY: modelSizeY,
+    sizeZ: modelSizeZ,
     count: xs.length,
     x: Float32Array.from(xs),
     y: Float32Array.from(ys),

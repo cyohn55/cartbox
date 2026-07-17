@@ -82,6 +82,19 @@ const bitFor = (nx, ny, nz) =>
   check("full emissive byte becomes 1.0", Math.abs(model.emissive[0] - 1) < 1e-6);
 }
 
+// 4b. center:"content" sizes and centres on the filled cells, not the whole grid,
+//     so a small sculpt in a big grid renders tight and centred (what a prop wants).
+{
+  const grid = new VoxelGrid(8, 8, 8);
+  grid.set(1, 1, 1, 9, 9, 9); // one voxel, far from the grid centre
+  const gridCentred = voxelGridToModel(grid);
+  const contentCentred = voxelGridToModel(grid, { center: "content" });
+  check("grid-centred keeps the full grid size", gridCentred.sizeX === 8 && gridCentred.sizeY === 8);
+  check("content-centred shrinks to the 1-voxel bounds", contentCentred.sizeX === 1 && contentCentred.sizeZ === 1);
+  check("content-centred puts the voxel at the origin", contentCentred.x[0] === 0 && contentCentred.y[0] === 0);
+  check("grid-centred offsets the same voxel off-origin", gridCentred.x[0] !== 0);
+}
+
 // 5. An empty grid yields an empty model.
 {
   const model = voxelGridToModel(new VoxelGrid(2, 2, 2));

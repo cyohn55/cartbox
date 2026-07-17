@@ -7,10 +7,10 @@
  * editor's voxel core.
  */
 
-import { extrudeSprite, type VoxelModel, type ModelLight } from "@cartbox/editor";
+import { extrudeSprite, voxelGridToModel, deserializeVoxelGrid, type VoxelModel, type ModelLight } from "@cartbox/editor";
 
 import type { MotionParams } from "./bobSpin";
-import { decodePropArt, type BackdropPropSet } from "./backdropProps";
+import { decodePropArt, type BackdropPropSet, type StoredBackdropProp } from "./backdropProps";
 import { BACKDROP_LIGHT as LIGHT_SPEC, PROP_SPECS, spriteToPixels } from "./retroVoxelSpecs";
 
 /** A prop placed in the backdrop: its model, centre anchor, size, and motion. */
@@ -45,19 +45,32 @@ export function buildRetroProps(): VoxelProp[] {
 }
 
 /**
+ * Build one prop's voxel model: a true 3D voxel grid when the prop carries one
+ * (centred on its filled content so it sits at its anchor), otherwise the
+ * extruded 2D sprite. Returns null for a malformed voxel payload, so a bad prop
+ * is skipped rather than breaking the whole scene.
+ */
+export function propToVoxelModel(prop: StoredBackdropProp): VoxelModel | null {
+  try {
+    if (prop.voxel) return voxelGridToModel(deserializeVoxelGrid(prop.voxel), { center: "content" });
+    if (prop.art) {
+      const { albedo, emissive, width, height } = decodePropArt(prop.art);
+      return extrudeSprite(albedo, width, height, { depth: prop.depth, emissive });
+    }
+  } catch {
+    // fall through to null
+  }
+  return null;
+}
+
+/**
  * Extrude an editable {@link BackdropPropSet} into placed voxel props. This is
  * the path the live backdrop uses once a published/working set is loaded, so
  * edits to the props flow straight into the rendered 3D scene.
  */
 export function propSetToVoxelProps(set: BackdropPropSet): VoxelProp[] {
-  return set.props.map((prop) => {
-    const { albedo, emissive, width, height } = decodePropArt(prop.art);
-    return {
-      model: extrudeSprite(albedo, width, height, { depth: prop.depth, emissive }),
-      fx: prop.fx,
-      fy: prop.fy,
-      cell: prop.cell,
-      motion: prop.motion,
-    };
+  return set.props.flatMap((prop) => {
+    const model = propToVoxelModel(prop);
+    return model ? [{ model, fx: prop.fx, fy: prop.fy, cell: prop.cell, motion: prop.motion }] : [];
   });
 }
