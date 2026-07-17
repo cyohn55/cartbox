@@ -91,6 +91,11 @@ const CUBE = buildCube();
 
 const DEPTH_RANGE = 256;
 
+// Multisample count for anti-aliasing, matching the CPU path's supersampling:
+// without it a spinning prop's voxel edges snap per pixel and read as a swarm of
+// loose voxels instead of one rigid solid. 4 is universally supported.
+const SAMPLE_COUNT = 4;
+
 interface PropGpu {
   readonly prop: VoxelProp;
   readonly instances: unknown; // GPU buffer
@@ -107,6 +112,7 @@ export class WebGpuVoxelRenderer {
     private readonly pipeline: any,
     private readonly cubeBuffer: any,
     private readonly depthView: any,
+    private readonly msaaView: any,
     private readonly props: PropGpu[],
     private readonly bufferWidth: number,
     private readonly bufferHeight: number,
@@ -155,6 +161,7 @@ export class WebGpuVoxelRenderer {
         fragment: { module, entryPoint: "fs", targets: [{ format }] },
         primitive: { topology: "triangle-list", cullMode: "none" },
         depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
+        multisample: { count: SAMPLE_COUNT },
       });
 
       const cubeBuffer = device.createBuffer({ size: CUBE.byteLength, usage: 0x20 /* VERTEX */ | 0x8 /* COPY_DST */ });
@@ -163,9 +170,20 @@ export class WebGpuVoxelRenderer {
       const depthTexture = device.createTexture({
         size: [options.bufferWidth, options.bufferHeight],
         format: "depth24plus",
+        sampleCount: SAMPLE_COUNT,
         usage: 0x10 /* RENDER_ATTACHMENT */,
       });
       const depthView = depthTexture.createView();
+
+      // Multisampled colour target; each pass resolves it into the swap-chain
+      // texture, so the composited props are anti-aliased.
+      const msaaTexture = device.createTexture({
+        size: [options.bufferWidth, options.bufferHeight],
+        format,
+        sampleCount: SAMPLE_COUNT,
+        usage: 0x10 /* RENDER_ATTACHMENT */,
+      });
+      const msaaView = msaaTexture.createView();
 
       const propGpus: PropGpu[] = props.map((prop) => {
         const instances = buildInstances(prop);
@@ -185,6 +203,7 @@ export class WebGpuVoxelRenderer {
         pipeline,
         cubeBuffer,
         depthView,
+        msaaView,
         propGpus,
         options.bufferWidth,
         options.bufferHeight,
@@ -221,7 +240,8 @@ export class WebGpuVoxelRenderer {
       const pass = encoder.beginRenderPass({
         colorAttachments: [
           {
-            view: target,
+            view: this.msaaView,
+            resolveTarget: target,
             loadOp: index === 0 ? "clear" : "load",
             storeOp: "store",
             clearValue: { r: 0, g: 0, b: 0, a: 0 },

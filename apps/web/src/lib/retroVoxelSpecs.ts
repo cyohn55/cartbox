@@ -78,14 +78,19 @@ export const BACKDROP_LIGHT: BackdropLightSpec = {
   ambient: 0.34,
 };
 
-/** Bob + occasional-spin profile with individual phases so nothing moves in sync. */
+/**
+ * Bob + occasional-spin profile with individual phases so nothing moves in sync.
+ * The spin is deliberately slow (a full turn takes {@link MotionParams.spinDuration}
+ * seconds): a leisurely rotation both reads as a solid object turning and leaves
+ * almost no per-frame voxel crawl for the renderer's anti-aliasing to smooth.
+ */
 function motion(over: Partial<MotionParams> = {}): MotionParams {
   return {
     bobAmplitude: 3,
     bobPeriod: 4,
     bobPhase: 0,
     spinCycle: 15,
-    spinDuration: 3,
+    spinDuration: 6,
     spinPhase: 0,
     ...over,
   };
@@ -111,7 +116,7 @@ export const PROP_SPECS: readonly PropSpec[] = [
   { name: "Invader", sprite: INVADER, depth: 4, fx: 0.58, fy: 0.16, cell: 2, motion: motion({ bobAmplitude: 4, bobPhase: 0.4, spinPhase: 0.45 }) },
   { name: "Ghost", sprite: GHOST, depth: 7, fx: 0.78, fy: 0.42, cell: 2, motion: motion({ bobAmplitude: 4, bobPhase: 0.85, spinPhase: 0.65 }) },
   { name: "Robot", sprite: ROBOT, depth: 6, fx: 0.19, fy: 0.78, cell: 2, motion: motion({ bobPhase: 0.6, spinPhase: 0.25 }) },
-  { name: "Coin", sprite: COIN, depth: 2, fx: 0.48, fy: 0.45, cell: 3, motion: motion({ bobPhase: 0.2, spinCycle: 6, spinDuration: 2, spinPhase: 0.0 }) },
+  { name: "Coin", sprite: COIN, depth: 2, fx: 0.48, fy: 0.45, cell: 3, motion: motion({ bobPhase: 0.2, spinCycle: 10, spinDuration: 4, spinPhase: 0.0 }) },
   { name: "Heart", sprite: HEART, depth: 4, fx: 0.9, fy: 0.54, cell: 3, motion: motion({ bobAmplitude: 4, bobPhase: 0.35, spinCycle: 20, spinPhase: 0.9 }) },
   { name: "Star (centre)", sprite: STAR, depth: 3, fx: 0.36, fy: 0.56, cell: 3, motion: motion({ bobPhase: 0.55, spinCycle: 9, spinPhase: 0.4 }) },
   { name: "Star (right)", sprite: STAR, depth: 3, fx: 0.66, fy: 0.6, cell: 2, motion: motion({ bobPhase: 0.1, spinCycle: 11, spinPhase: 0.7 }) },
