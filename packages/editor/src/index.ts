@@ -77,6 +77,7 @@ export {
 export {
   extrudeSprite,
   modelDiagonal,
+  CUBE_FACES,
   type VoxelModel,
   type ExtrudeOptions,
   type PixelSource,

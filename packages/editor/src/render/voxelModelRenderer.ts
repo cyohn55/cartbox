@@ -1,20 +1,22 @@
 /**
  * Renders a rotatable {@link VoxelModel} to lit RGBA from any yaw/pitch.
  *
- * Orthographic projection with a z-buffer: every surface voxel is rotated (yaw
- * about the vertical axis, then a fixed pitch to tip the model toward the
- * viewer), projected to screen, and splatted as a small square, the z-buffer
- * keeping the nearest one per output pixel. Each voxel's model-space normal is
- * rotated the same way and lit against a *world-fixed* light, so as the model
- * spins its faces turn into and out of the light — the shading is what sells the
- * 3D. Self-emissive voxels keep their glow in shadow.
+ * Orthographic projection with a z-buffer, drawing every voxel as a real cube:
+ * each of its exposed faces is rotated (yaw about the vertical axis, then a
+ * fixed pitch to tip the model toward the viewer), projected to screen as a
+ * quad, and filled with the z-buffer keeping the nearest face per output pixel.
+ * Each face is lit by *its own* normal against a *world-fixed* light, so the top,
+ * front and sides of every cube read at different brightness — that per-face
+ * shading is what makes the object look built from solid blocks rather than a
+ * flat slab, and spinning turns each face into and out of the light.
+ * Self-emissive voxels keep their glow in shadow.
  *
  * Pure and DOM-free, matching the other renderers, so the browser and the unit
  * tests drive it identically and assert on real output pixels.
  */
 
 import type { VoxelModel } from "./voxelModel";
-import { modelDiagonal } from "./voxelModel";
+import { CUBE_FACES, modelDiagonal } from "./voxelModel";
 
 /** A directional light fixed in world space (not rotated with the model). */
 export interface ModelLight {
@@ -93,58 +95,112 @@ export function renderVoxelModel(model: VoxelModel, options: RenderModelOptions 
   const cosP = Math.cos(pitch);
   const sinP = Math.sin(pitch);
   const centre = size / 2;
-  // Splat one output pixel wider than a cell so rotated voxels leave no seams.
-  const half = cell / 2 + 0.5;
+
+  // Rotate one model point to screen (x,y) plus camera depth (larger = nearer).
+  const project = (px: number, py: number, pz: number): [number, number, number] => {
+    const yawX = px * cosY + pz * sinY;
+    const yawZ = -px * sinY + pz * cosY;
+    const camY = py * cosP - yawZ * sinP;
+    const camZ = py * sinP + yawZ * cosP;
+    return [centre + yawX * cell, centre - camY * cell, camZ];
+  };
+
+  // Reused per-face corner buffer to avoid per-face allocation.
+  const corners: [number, number, number][] = [
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ];
 
   for (let v = 0; v < model.count; v += 1) {
-    // Rotate the voxel centre: yaw about Y, then pitch about X.
     const vx = model.x[v]!;
     const vy = model.y[v]!;
     const vz = model.z[v]!;
-    const yawX = vx * cosY + vz * sinY;
-    const yawZ = -vx * sinY + vz * cosY;
-    const camY = vy * cosP - yawZ * sinP;
-    const camZ = vy * sinP + yawZ * cosP; // larger = nearer the viewer
-
-    const screenX = centre + yawX * cell;
-    const screenY = centre - camY * cell; // y up -> screen down
-
-    // Rotate the normal the same way and light it against the world light.
-    const nx = model.nx[v]!;
-    const ny = model.ny[v]!;
-    const nz = model.nz[v]!;
-    const nYawX = nx * cosY + nz * sinY;
-    const nYawZ = -nx * sinY + nz * cosY;
-    const worldNy = ny * cosP - nYawZ * sinP;
-    const worldNz = ny * sinP + nYawZ * cosP;
-    const worldNx = nYawX;
-
-    const diffuse = Math.max(0, worldNx * lx + worldNy * ly + worldNz * lz);
-    const shade = light.ambient + (1 - light.ambient) * diffuse * light.intensity;
+    const mask = model.faces[v]!;
     const emissive = model.emissive[v]!;
-    const r = litChannel(model.r[v]!, shade, light.color[0], emissive);
-    const g = litChannel(model.g[v]!, shade, light.color[1], emissive);
-    const b = litChannel(model.b[v]!, shade, light.color[2], emissive);
 
-    const x0 = Math.max(0, Math.floor(screenX - half));
-    const x1 = Math.min(size - 1, Math.ceil(screenX + half));
-    const y0 = Math.max(0, Math.floor(screenY - half));
-    const y1 = Math.min(size - 1, Math.ceil(screenY + half));
-    for (let py = y0; py <= y1; py += 1) {
-      for (let px = x0; px <= x1; px += 1) {
-        const di = py * size + px;
-        if (camZ <= depth[di]!) continue; // something nearer already here
-        depth[di] = camZ;
-        const o = di * 4;
-        data[o] = r;
-        data[o + 1] = g;
-        data[o + 2] = b;
-        data[o + 3] = 255;
+    for (let f = 0; f < CUBE_FACES.length; f += 1) {
+      const face = CUBE_FACES[f]!;
+      if ((mask & face.bit) === 0) continue; // face is inside the object
+
+      // Rotate the face normal and cull it if it turns away from the viewer.
+      const [fnx, fny, fnz] = face.normal;
+      const nYawX = fnx * cosY + fnz * sinY;
+      const nYawZ = -fnx * sinY + fnz * cosY;
+      const worldNy = fny * cosP - nYawZ * sinP;
+      const worldNz = fny * sinP + nYawZ * cosP;
+      if (worldNz <= 0.0001) continue;
+      const worldNx = nYawX;
+
+      const diffuse = Math.max(0, worldNx * lx + worldNy * ly + worldNz * lz);
+      const shade = light.ambient + (1 - light.ambient) * diffuse * light.intensity;
+      const r = litChannel(model.r[v]!, shade, light.color[0], emissive);
+      const g = litChannel(model.g[v]!, shade, light.color[1], emissive);
+      const b = litChannel(model.b[v]!, shade, light.color[2], emissive);
+
+      for (let c = 0; c < 4; c += 1) {
+        const off = face.corners[c]!;
+        corners[c] = project(vx + off[0], vy + off[1], vz + off[2]);
       }
+      fillQuad(data, depth, size, corners, r, g, b);
     }
   }
 
   return { data, depth, width: size, height: size };
+}
+
+/**
+ * Fill the projected cube face (an affine parallelogram) with a flat colour,
+ * z-testing each pixel against the buffer so nearer faces win. The face's depth
+ * is interpolated across it, since a tipped face spans a range of depths.
+ */
+function fillQuad(
+  data: Uint8ClampedArray,
+  depth: Float32Array,
+  size: number,
+  p: readonly [number, number, number][],
+  r: number,
+  g: number,
+  b: number,
+): void {
+  const minX = Math.max(0, Math.floor(Math.min(p[0]![0], p[1]![0], p[2]![0], p[3]![0])));
+  const maxX = Math.min(size - 1, Math.ceil(Math.max(p[0]![0], p[1]![0], p[2]![0], p[3]![0])));
+  const minY = Math.max(0, Math.floor(Math.min(p[0]![1], p[1]![1], p[2]![1], p[3]![1])));
+  const maxY = Math.min(size - 1, Math.ceil(Math.max(p[0]![1], p[1]![1], p[2]![1], p[3]![1])));
+
+  // Basis from corner 0 along the two edges; a pixel is inside when both
+  // parametric coordinates land in [0,1]. Depth is affine in that basis.
+  const ax = p[0]![0];
+  const ay = p[0]![1];
+  const ex = p[1]![0] - ax;
+  const ey = p[1]![1] - ay;
+  const gx = p[3]![0] - ax;
+  const gy = p[3]![1] - ay;
+  const det = ex * gy - ey * gx;
+  if (Math.abs(det) < 1e-6) return; // face seen edge-on: no area to fill
+  const z0 = p[0]![2];
+  const zu = p[1]![2] - z0;
+  const zv = p[3]![2] - z0;
+
+  for (let py = minY; py <= maxY; py += 1) {
+    for (let px = minX; px <= maxX; px += 1) {
+      const rx = px + 0.5 - ax;
+      const ry = py + 0.5 - ay;
+      const u = (rx * gy - ry * gx) / det;
+      const w = (ex * ry - ey * rx) / det;
+      if (u < 0 || u > 1 || w < 0 || w > 1) continue;
+      const z = z0 + u * zu + w * zv;
+      const di = py * size + px;
+      if (z <= depth[di]!) continue;
+      depth[di] = z;
+      const o = di * 4;
+      data[o] = r;
+      data[o + 1] = g;
+      data[o + 2] = b;
+      data[o + 3] = 255;
+    }
+  }
 }
 
 /** Albedo scaled by the light, floored by its own emissive glow. */

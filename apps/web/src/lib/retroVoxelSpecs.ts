@@ -107,18 +107,21 @@ export interface PropSpec {
   readonly motion: MotionParams;
 }
 
+// Depths give each prop real front-to-back volume (~0.9× its shorter sprite side,
+// floored so nothing collapses to a sliver when it turns side-on) so the props
+// read as solid blocks through a whole spin rather than as flat cards.
 export const PROP_SPECS: readonly PropSpec[] = [
-  { name: "Arcade cabinet", sprite: ARCADE, depth: 10, fx: 0.11, fy: 0.44, cell: 2, motion: motion({ bobPhase: 0.0, spinPhase: 0.05 }) },
-  { name: "Console", sprite: CONSOLE, depth: 8, fx: 0.82, fy: 0.8, cell: 2, motion: motion({ bobPhase: 0.5, spinPhase: 0.55 }) },
-  { name: "Gamepad", sprite: GAMEPAD, depth: 5, fx: 0.47, fy: 0.84, cell: 2, motion: motion({ bobPhase: 0.25, spinPhase: 0.3 }) },
-  { name: "Cartridge (left)", sprite: CARTRIDGE, depth: 6, fx: 0.31, fy: 0.17, cell: 2, motion: motion({ bobPhase: 0.7, spinPhase: 0.15 }) },
-  { name: "Cartridge (right)", sprite: CARTRIDGE, depth: 6, fx: 0.9, fy: 0.24, cell: 2, motion: motion({ bobPhase: 0.15, spinPhase: 0.8 }) },
-  { name: "Invader", sprite: INVADER, depth: 4, fx: 0.58, fy: 0.16, cell: 2, motion: motion({ bobAmplitude: 4, bobPhase: 0.4, spinPhase: 0.45 }) },
-  { name: "Ghost", sprite: GHOST, depth: 7, fx: 0.78, fy: 0.42, cell: 2, motion: motion({ bobAmplitude: 4, bobPhase: 0.85, spinPhase: 0.65 }) },
-  { name: "Robot", sprite: ROBOT, depth: 6, fx: 0.19, fy: 0.78, cell: 2, motion: motion({ bobPhase: 0.6, spinPhase: 0.25 }) },
-  { name: "Coin", sprite: COIN, depth: 2, fx: 0.48, fy: 0.45, cell: 3, motion: motion({ bobPhase: 0.2, spinCycle: 10, spinDuration: 4, spinPhase: 0.0 }) },
-  { name: "Heart", sprite: HEART, depth: 4, fx: 0.9, fy: 0.54, cell: 3, motion: motion({ bobAmplitude: 4, bobPhase: 0.35, spinCycle: 20, spinPhase: 0.9 }) },
-  { name: "Star (centre)", sprite: STAR, depth: 3, fx: 0.36, fy: 0.56, cell: 3, motion: motion({ bobPhase: 0.55, spinCycle: 9, spinPhase: 0.4 }) },
-  { name: "Star (right)", sprite: STAR, depth: 3, fx: 0.66, fy: 0.6, cell: 2, motion: motion({ bobPhase: 0.1, spinCycle: 11, spinPhase: 0.7 }) },
-  { name: "Star (upper-left)", sprite: STAR, depth: 3, fx: 0.24, fy: 0.32, cell: 2, motion: motion({ bobAmplitude: 2, bobPhase: 0.9, spinCycle: 13, spinPhase: 0.2 }) },
+  { name: "Arcade cabinet", sprite: ARCADE, depth: 12, fx: 0.11, fy: 0.44, cell: 2, motion: motion({ bobPhase: 0.0, spinPhase: 0.05 }) },
+  { name: "Console", sprite: CONSOLE, depth: 9, fx: 0.82, fy: 0.8, cell: 2, motion: motion({ bobPhase: 0.5, spinPhase: 0.55 }) },
+  { name: "Gamepad", sprite: GAMEPAD, depth: 8, fx: 0.47, fy: 0.84, cell: 2, motion: motion({ bobPhase: 0.25, spinPhase: 0.3 }) },
+  { name: "Cartridge (left)", sprite: CARTRIDGE, depth: 11, fx: 0.31, fy: 0.17, cell: 2, motion: motion({ bobPhase: 0.7, spinPhase: 0.15 }) },
+  { name: "Cartridge (right)", sprite: CARTRIDGE, depth: 11, fx: 0.9, fy: 0.24, cell: 2, motion: motion({ bobPhase: 0.15, spinPhase: 0.8 }) },
+  { name: "Invader", sprite: INVADER, depth: 7, fx: 0.58, fy: 0.16, cell: 2, motion: motion({ bobAmplitude: 4, bobPhase: 0.4, spinPhase: 0.45 }) },
+  { name: "Ghost", sprite: GHOST, depth: 9, fx: 0.78, fy: 0.42, cell: 2, motion: motion({ bobAmplitude: 4, bobPhase: 0.85, spinPhase: 0.65 }) },
+  { name: "Robot", sprite: ROBOT, depth: 9, fx: 0.19, fy: 0.78, cell: 2, motion: motion({ bobPhase: 0.6, spinPhase: 0.25 }) },
+  { name: "Coin", sprite: COIN, depth: 6, fx: 0.48, fy: 0.45, cell: 3, motion: motion({ bobPhase: 0.2, spinCycle: 10, spinDuration: 4, spinPhase: 0.0 }) },
+  { name: "Heart", sprite: HEART, depth: 7, fx: 0.9, fy: 0.54, cell: 3, motion: motion({ bobAmplitude: 4, bobPhase: 0.35, spinCycle: 20, spinPhase: 0.9 }) },
+  { name: "Star (centre)", sprite: STAR, depth: 6, fx: 0.36, fy: 0.56, cell: 3, motion: motion({ bobPhase: 0.55, spinCycle: 9, spinPhase: 0.4 }) },
+  { name: "Star (right)", sprite: STAR, depth: 6, fx: 0.66, fy: 0.6, cell: 2, motion: motion({ bobPhase: 0.1, spinCycle: 11, spinPhase: 0.7 }) },
+  { name: "Star (upper-left)", sprite: STAR, depth: 6, fx: 0.24, fy: 0.32, cell: 2, motion: motion({ bobAmplitude: 2, bobPhase: 0.9, spinCycle: 13, spinPhase: 0.2 }) },
 ];

@@ -43,7 +43,32 @@ export interface VoxelModel {
   readonly nx: Float32Array;
   readonly ny: Float32Array;
   readonly nz: Float32Array;
+  /**
+   * Per-voxel bitmask of which of the six cube faces are exposed, using the bit
+   * of the matching {@link CUBE_FACES} entry. Lets a renderer draw each voxel as
+   * a real shaded cube (only its outer faces), rather than one flat splat.
+   */
+  readonly faces: Uint8Array;
 }
+
+/**
+ * The six faces of a unit cube centred on the origin: outward normal, the four
+ * corner offsets wound counter-clockwise seen from outside, and the exposure bit
+ * stored in {@link VoxelModel.faces}. Shared so the CPU and WebGPU renderers and
+ * the tests build identical cube geometry.
+ */
+export const CUBE_FACES: ReadonlyArray<{
+  readonly normal: readonly [number, number, number];
+  readonly corners: ReadonlyArray<readonly [number, number, number]>;
+  readonly bit: number;
+}> = [
+  { normal: [1, 0, 0], corners: [[0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [0.5, 0.5, 0.5], [0.5, -0.5, 0.5]], bit: 1 },
+  { normal: [-1, 0, 0], corners: [[-0.5, -0.5, 0.5], [-0.5, 0.5, 0.5], [-0.5, 0.5, -0.5], [-0.5, -0.5, -0.5]], bit: 2 },
+  { normal: [0, 1, 0], corners: [[-0.5, 0.5, 0.5], [0.5, 0.5, 0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5]], bit: 4 },
+  { normal: [0, -1, 0], corners: [[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, -0.5, 0.5], [-0.5, -0.5, 0.5]], bit: 8 },
+  { normal: [0, 0, 1], corners: [[-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5]], bit: 16 },
+  { normal: [0, 0, -1], corners: [[0.5, -0.5, -0.5], [-0.5, -0.5, -0.5], [-0.5, 0.5, -0.5], [0.5, 0.5, -0.5]], bit: 32 },
+];
 
 export interface ExtrudeOptions {
   /** Slab thickness in voxels along depth. Default 6. Clamped to >= 1. */
@@ -89,6 +114,7 @@ export function extrudeSprite(
   const nxs: number[] = [];
   const nys: number[] = [];
   const nzs: number[] = [];
+  const faceMasks: number[] = [];
 
   const halfX = (width - 1) / 2;
   const halfY = (height - 1) / 2;
@@ -128,6 +154,15 @@ export function extrudeSprite(
         if (back) vnz -= 1;
         const len = Math.hypot(vnx, vny, vnz) || 1;
 
+        // Which cube faces are exposed, as bits matching CUBE_FACES.
+        let mask = 0;
+        if (openRight) mask |= 1; // +X
+        if (openLeft) mask |= 2; // -X
+        if (openUp) mask |= 4; // +Y
+        if (openDown) mask |= 8; // -Y
+        if (front) mask |= 16; // +Z
+        if (back) mask |= 32; // -Z
+
         xs.push(px - halfX);
         ys.push(height - 1 - py - halfY); // flip so the top row points up
         zs.push(pz - halfZ);
@@ -138,6 +173,7 @@ export function extrudeSprite(
         nxs.push(vnx / len);
         nys.push(vny / len);
         nzs.push(vnz / len);
+        faceMasks.push(mask);
       }
     }
   }
@@ -157,5 +193,6 @@ export function extrudeSprite(
     nx: Float32Array.from(nxs),
     ny: Float32Array.from(nys),
     nz: Float32Array.from(nzs),
+    faces: Uint8Array.from(faceMasks),
   };
 }

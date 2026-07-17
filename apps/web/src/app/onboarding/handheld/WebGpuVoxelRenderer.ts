@@ -18,6 +18,8 @@
  */
 
 import { propMotion } from "@/lib/bobSpin";
+import { CUBE_FACES } from "@cartbox/editor";
+
 import { BACKDROP_LIGHT, type VoxelProp } from "@/lib/retroVoxels";
 
 const SHADER = /* wgsl */ `
@@ -36,12 +38,25 @@ struct VSOut {
 
 @vertex
 fn vs(
+  @builtin(vertex_index) vi: u32,
   @location(0) corner: vec3<f32>,
+  @location(5) normal: vec3<f32>,
   @location(1) center: vec3<f32>,
   @location(2) color: vec3<f32>,
   @location(3) emissive: f32,
-  @location(4) normal: vec3<f32>,
+  @location(4) faceMask: f32,
 ) -> VSOut {
+  var out: VSOut;
+
+  // Each cube face is 6 vertices; drop the ones whose face is inside the object
+  // (not set in the mask) by emitting a clipped, zero-area triangle.
+  let faceBit = 1u << (vi / 6u);
+  if ((u32(faceMask) & faceBit) == 0u) {
+    out.pos = vec4<f32>(-2.0, -2.0, -2.0, 1.0);
+    out.color = vec3<f32>(0.0);
+    return out;
+  }
+
   let yaw = u.rot.x;
   let pitch = u.rot.y;
   let cell = u.rot.z;
@@ -59,7 +74,6 @@ fn vs(
   let py = u.anchor.y - camY * cell;
   let depth = -camZ * cell;
 
-  var out: VSOut;
   out.pos = vec4<f32>(
     2.0 * px / u.anchor.z - 1.0,
     1.0 - 2.0 * py / u.anchor.w,
@@ -67,7 +81,8 @@ fn vs(
     1.0,
   );
 
-  // Rotate the voxel normal the same way and light it against the world light.
+  // Rotate this face's normal the same way and light it against the world light,
+  // so every face of the cube shades separately (the solid-block read).
   let nYawX = normal.x * cy + normal.z * sy;
   let nYawZ = -normal.x * sy + normal.z * cy;
   let wnY = normal.y * cp - nYawZ * sp;
@@ -145,15 +160,22 @@ export class WebGpuVoxelRenderer {
           module,
           entryPoint: "vs",
           buffers: [
-            { arrayStride: 12, stepMode: "vertex", attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }] },
             {
-              arrayStride: 40,
+              arrayStride: 24,
+              stepMode: "vertex",
+              attributes: [
+                { shaderLocation: 0, offset: 0, format: "float32x3" }, // cube corner
+                { shaderLocation: 5, offset: 12, format: "float32x3" }, // face normal
+              ],
+            },
+            {
+              arrayStride: 32,
               stepMode: "instance",
               attributes: [
                 { shaderLocation: 1, offset: 0, format: "float32x3" }, // center
                 { shaderLocation: 2, offset: 12, format: "float32x3" }, // color
                 { shaderLocation: 3, offset: 24, format: "float32" }, // emissive
-                { shaderLocation: 4, offset: 28, format: "float32x3" }, // normal
+                { shaderLocation: 4, offset: 28, format: "float32" }, // exposed-face mask
               ],
             },
           ],
@@ -194,7 +216,7 @@ export class WebGpuVoxelRenderer {
           layout: pipeline.getBindGroupLayout(0),
           entries: [{ binding: 0, resource: { buffer: uniform } }],
         });
-        return { prop, instances: instanceBuffer, instanceCount: instances.length / 10, uniform, bindGroup };
+        return { prop, instances: instanceBuffer, instanceCount: instances.length / INSTANCE_FLOATS, uniform, bindGroup };
       });
 
       return new WebGpuVoxelRenderer(
@@ -274,12 +296,15 @@ export class WebGpuVoxelRenderer {
   }
 }
 
-/** Per-voxel instance data: center(3) + color(3) + emissive(1) + normal(3). */
+/** Floats per instance: center(3) + color(3) + emissive(1) + exposed-face mask(1). */
+const INSTANCE_FLOATS = 8;
+
+/** Per-voxel instance data: center(3) + color(3) + emissive(1) + face mask(1). */
 function buildInstances(prop: VoxelProp): Float32Array {
   const { model } = prop;
-  const data = new Float32Array(model.count * 10);
+  const data = new Float32Array(model.count * INSTANCE_FLOATS);
   for (let v = 0; v < model.count; v += 1) {
-    const o = v * 10;
+    const o = v * INSTANCE_FLOATS;
     data[o] = model.x[v]!;
     data[o + 1] = model.y[v]!;
     data[o + 2] = model.z[v]!;
@@ -287,24 +312,24 @@ function buildInstances(prop: VoxelProp): Float32Array {
     data[o + 4] = model.g[v]! / 255;
     data[o + 5] = model.b[v]! / 255;
     data[o + 6] = model.emissive[v]!;
-    data[o + 7] = model.nx[v]!;
-    data[o + 8] = model.ny[v]!;
-    data[o + 9] = model.nz[v]!;
+    data[o + 7] = model.faces[v]!;
   }
   return data;
 }
 
-/** 36 vertices of a unit cube centred on the origin (each voxel fills its cell). */
+/**
+ * The unit cube as 36 vertices (6 faces × 2 triangles), each carrying its face's
+ * outward normal, generated from the shared {@link CUBE_FACES} in that exact
+ * order so the shader can map a vertex to its face bit as `1 << (index / 6)`.
+ * Layout per vertex: position(3) + normal(3).
+ */
 function buildCube(): Float32Array {
-  const h = 0.5;
-  const faces: number[][] = [
-    // +z, -z, +x, -x, +y, -y — each two triangles.
-    [-h, -h, h, h, -h, h, h, h, h, -h, -h, h, h, h, h, -h, h, h],
-    [h, -h, -h, -h, -h, -h, -h, h, -h, h, -h, -h, -h, h, -h, h, h, -h],
-    [h, -h, h, h, -h, -h, h, h, -h, h, -h, h, h, h, -h, h, h, h],
-    [-h, -h, -h, -h, -h, h, -h, h, h, -h, -h, -h, -h, h, h, -h, h, -h],
-    [-h, h, h, h, h, h, h, h, -h, -h, h, h, h, h, -h, -h, h, -h],
-    [-h, -h, -h, h, -h, -h, h, -h, h, -h, -h, -h, h, -h, h, -h, -h, h],
-  ];
-  return Float32Array.from(faces.flat());
+  const data: number[] = [];
+  for (const face of CUBE_FACES) {
+    const [a, b, c, d] = face.corners;
+    for (const corner of [a!, b!, c!, a!, c!, d!]) {
+      data.push(corner[0]!, corner[1]!, corner[2]!, face.normal[0], face.normal[1], face.normal[2]);
+    }
+  }
+  return Float32Array.from(data);
 }

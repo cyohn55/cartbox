@@ -21,7 +21,7 @@ const model = await import(
 const renderer = await import(
   pathToFileURL(path.resolve(here, "../packages/editor/src/render/voxelModelRenderer.ts")).href
 );
-const { extrudeSprite } = model;
+const { extrudeSprite, CUBE_FACES } = model;
 const { renderVoxelModel, voxelCanvasSize } = renderer;
 
 let passed = 0;
@@ -108,6 +108,29 @@ check("kept voxel count equals the surface shell", slab.count === expectedShell)
   let frontMax = -Infinity;
   for (let v = 0; v < slab.count; v += 1) if (slab.nz[v] > frontMax) frontMax = slab.nz[v];
   check("front faces point toward the viewer", frontMax > 0.99);
+}
+
+// 5b. The exposed-face mask agrees with the stored normal: the normalized sum of
+//     the set faces' normals reproduces (nx, ny, nz). Every kept voxel exposes at
+//     least one face (it is surface, not interior). Derived from CUBE_FACES, not
+//     hard-coded bits.
+{
+  let allExposed = true;
+  let allAgree = true;
+  for (let v = 0; v < slab.count; v += 1) {
+    const mask = slab.faces[v];
+    if (mask === 0) { allExposed = false; break; }
+    let sx = 0, sy = 0, sz = 0;
+    for (const face of CUBE_FACES) {
+      if (mask & face.bit) { sx += face.normal[0]; sy += face.normal[1]; sz += face.normal[2]; }
+    }
+    const len = Math.hypot(sx, sy, sz) || 1;
+    if (Math.abs(sx / len - slab.nx[v]) > 1e-5 || Math.abs(sy / len - slab.ny[v]) > 1e-5 || Math.abs(sz / len - slab.nz[v]) > 1e-5) {
+      allAgree = false; break;
+    }
+  }
+  check("every surface voxel exposes at least one face", allExposed);
+  check("face mask reconstructs the stored normal", allAgree);
 }
 
 // 6. Emissive is carried per column: marking one pixel emissive lights exactly
