@@ -111,14 +111,68 @@ const check = (label, condition) => {
   check("every filled cell round-trips exactly", match);
 }
 
-// 8. deserialize rejects a payload whose byte length disagrees with its dims.
+// 8. deserialize rejects a payload whose declared count disagrees with its arrays.
 {
   const grid = new VoxelGrid(3, 3, 3);
   grid.set(1, 1, 1, 9, 9, 9);
   const tampered = JSON.parse(serializeVoxelGrid(grid));
-  tampered.sizeX = 4; // now colours/emissive lengths no longer match dims
+  tampered.count += 1; // arrays no longer match the declared cell count
   assert.throws(() => deserializeVoxelGrid(JSON.stringify(tampered)), /size does not match/);
   passed += 1;
+}
+
+// 9. deserialize rejects a sparse payload whose index falls outside the grid.
+{
+  const grid = new VoxelGrid(3, 3, 3);
+  grid.set(2, 2, 2, 5, 5, 5);
+  const payload = JSON.parse(serializeVoxelGrid(grid));
+  // Re-encode a single index that is out of range for a 3³ grid (27 cells).
+  const bytes = new Uint8Array(4);
+  new DataView(bytes.buffer).setUint32(0, 99, true);
+  payload.indices = btoa(String.fromCharCode(...bytes));
+  assert.throws(() => deserializeVoxelGrid(JSON.stringify(payload)), /size does not match/);
+  passed += 1;
+}
+
+// 10. A large sparse grid serializes proportional to its FILLED cells, not its
+//     volume — the property that makes 64/128/256 grids editable. A near-empty
+//     128³ grid (2M cells) must still produce a tiny payload.
+{
+  const bytesToB64 = (b) => {
+    let s = "";
+    for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode(...b.subarray(i, i + 0x8000));
+    return btoa(s);
+  };
+  const grid = new VoxelGrid(128, 128, 128);
+  for (let i = 0; i < 20; i += 1) grid.set(i, i, i, 100, 150, 200, 0);
+  const json = serializeVoxelGrid(grid);
+  check("sparse payload stays small for a near-empty large grid", json.length < 1000);
+  const restored = deserializeVoxelGrid(json);
+  check("large-grid dims round-trip", restored.sizeX === 128 && restored.filledCount === 20);
+  let ok = true;
+  grid.forEachFilled((x, y, z, cell) => {
+    const r = restored.get(x, y, z);
+    if (!r || r.r !== cell.r || r.g !== cell.g || r.b !== cell.b) ok = false;
+  });
+  check("large-grid filled cells round-trip", ok);
+
+  // 11. A legacy v1 dense payload still loads (back-compat with saved carts/props).
+  const dense = new VoxelGrid(2, 2, 2);
+  dense.set(0, 1, 0, 11, 22, 33, 44);
+  const v1 = JSON.stringify({
+    version: 1,
+    sizeX: 2,
+    sizeY: 2,
+    sizeZ: 2,
+    colors: bytesToB64(dense.colors),
+    emissive: bytesToB64(dense.emissive),
+  });
+  const fromV1 = deserializeVoxelGrid(v1);
+  const cell = fromV1.get(0, 1, 0);
+  check(
+    "v1 dense payload deserializes",
+    fromV1.filledCount === 1 && cell.r === 11 && cell.g === 22 && cell.b === 33 && cell.emissive === 44,
+  );
 }
 
 console.log(`voxelGrid: ${passed}/${passed} checks passed`);

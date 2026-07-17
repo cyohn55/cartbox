@@ -35,9 +35,24 @@ import { loadWorkingSet, loadPublishedSet, saveWorkingSet, type PendingVoxelEdit
 import styles from "./editor.module.css";
 
 const DEFAULT_GRID = 16;
-const GRID_SIZES = [8, 16, 24, 32].filter((n) => n <= MAX_VOXEL_GRID_DIM);
+const GRID_SIZES = [8, 16, 24, 32, 64, 128, 256].filter((n) => n <= MAX_VOXEL_GRID_DIM);
 const CELL_MIN = 4;
 const CELL_MAX = 22;
+// The renderer draws the whole grid into an orthographic canvas whose pixel size
+// is the model diagonal × the cell (zoom) size. A large grid at a large cell size
+// would allocate a multi-hundred-MB canvas + pick buffers, so cap the canvas edge
+// and derive each grid's usable zoom range from it: small grids keep the full
+// zoom range; big grids (128³, 256³) auto-fit to a smaller cell so the whole
+// model stays on-screen at a bounded cost (~25MB of buffers) instead of crashing.
+const MAX_CANVAS_PX = 1440;
+const GRID_DIAGONAL_FACTOR = Math.sqrt(3); // a cube grid's space diagonal / edge
+
+/** The usable zoom (cell-size) range for a grid of the given edge length. */
+function cellRange(gridSize: number): { min: number; max: number } {
+  const fit = Math.floor(MAX_CANVAS_PX / (gridSize * GRID_DIAGONAL_FACTOR + 2));
+  const max = Math.max(2, Math.min(CELL_MAX, fit));
+  return { min: Math.min(CELL_MIN, max), max };
+}
 const PITCH_LIMIT = 1.45;
 const ORBIT_SPEED = 0.011; // radians per pixel dragged
 const DRAG_THRESHOLD = 4; // px of movement before a press becomes an orbit
@@ -176,7 +191,11 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
 
   // Rebuild the renderable model whenever the grid changes (rev) or resizes.
   const model3d = useMemo(() => voxelGridToModel(gridRef.current!), [rev, gridSize]);
-  const size = voxelCanvasSize(model3d, cell);
+  // The usable zoom range for the current grid, and the cell actually rendered
+  // (clamped into it) so a big grid never allocates an oversized canvas.
+  const { min: minCell, max: maxCell } = useMemo(() => cellRange(gridSize), [gridSize]);
+  const renderCell = Math.min(Math.max(cell, minCell), maxCell);
+  const size = voxelCanvasSize(model3d, renderCell);
 
   // Reused render + picking buffers, reallocated only when the canvas resizes.
   const buffers = useMemo(
@@ -200,7 +219,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     renderVoxelModel(model3d, {
       yaw,
       pitch,
-      cell,
+      cell: renderCell,
       light: DEFAULT_MODEL_LIGHT,
       out: buffers.out,
       depthBuffer: buffers.depth,
@@ -211,8 +230,8 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     image.data.set(buffers.out);
     context.putImageData(image, 0, 0);
     // Outline the cell the cursor is targeting so every tool shows where it acts.
-    if (hover) drawHighlight(context, hover, gridSize, yaw, pitch, cell, size, HIGHLIGHT[tool]);
-  }, [model3d, yaw, pitch, cell, size, buffers, hover, tool, gridSize]);
+    if (hover) drawHighlight(context, hover, gridSize, yaw, pitch, renderCell, size, HIGHLIGHT[tool]);
+  }, [model3d, yaw, pitch, renderCell, size, buffers, hover, tool, gridSize]);
 
   /** Persist the current grid to undo/save; re-seed if it was emptied. */
   const commit = () => {
@@ -305,7 +324,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     if (state && !state.moved) editAt(event.clientX, event.clientY, state.button === 2);
   };
   const onPointerLeave = () => setHover(null);
-  const zoomBy = (delta: number) => setCell((value) => Math.max(CELL_MIN, Math.min(CELL_MAX, value + delta)));
+  const zoomBy = (delta: number) => setCell((value) => Math.max(minCell, Math.min(maxCell, value + delta)));
 
   // Wheel-zoom without letting the page scroll under the cursor. React's onWheel
   // is passive (can't preventDefault), so bind a non-passive native listener.
@@ -329,6 +348,10 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     if (grid.filledCount === 0) gridRef.current = seededGrid(next);
     else gridRef.current = grid;
     setGridSize(next);
+    // Refit the zoom into the new grid's usable range so a big grid opens showing
+    // the whole model rather than a slice cropped to an oversized canvas.
+    const range = cellRange(next);
+    setCell((value) => Math.max(range.min, Math.min(range.max, value)));
     setRev((value) => value + 1);
     onModelChange(serializeVoxelGrid(gridRef.current!));
   };
@@ -404,7 +427,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
               type="button"
               className={styles.segment}
               onClick={() => zoomBy(-2)}
-              disabled={cell <= CELL_MIN}
+              disabled={renderCell <= minCell}
               aria-label="Zoom out"
               title="Zoom out"
             >
@@ -414,9 +437,9 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
               type="button"
               className={styles.segment}
               onClick={() => zoomBy(2)}
-              disabled={cell >= CELL_MAX}
+              disabled={renderCell >= maxCell}
               aria-label="Zoom in"
-              title="Zoom in"
+              title={renderCell >= maxCell ? "Maximum zoom for this grid size" : "Zoom in"}
             >
               ＋
             </button>

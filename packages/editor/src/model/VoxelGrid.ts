@@ -17,10 +17,18 @@
 import { CUBE_FACES, type VoxelModel } from "../render/voxelModel";
 
 /** Largest grid edge, bounding storage and per-edit render cost. */
-export const MAX_VOXEL_GRID_DIM = 32;
+export const MAX_VOXEL_GRID_DIM = 256;
 
-/** Format version of the serialized grid, bumped on any schema change. */
-export const VOXEL_GRID_VERSION = 1;
+/**
+ * Format version of the serialized grid, bumped on any schema change.
+ *
+ * v2 stores only occupied cells (sparse), so the payload — written on every edit
+ * into the undo timeline and the saved cart — scales with the sculpt's voxel
+ * count rather than the grid *volume*. That is what makes large grids (up to
+ * {@link MAX_VOXEL_GRID_DIM}³) practical: a dense v1 encode of a 256³ grid was
+ * ~85MB and took over a second per edit. v1 (dense) payloads still deserialize.
+ */
+export const VOXEL_GRID_VERSION = 2;
 
 /** A single cell's contents. */
 export interface VoxelCell {
@@ -268,21 +276,65 @@ function base64ToBytes(b64: string): Uint8Array {
   return out;
 }
 
-/** Serialize a grid to a compact JSON string for storage in a cart. */
+const PAYLOAD_MISMATCH = "Voxel grid payload size does not match its dimensions";
+
+/**
+ * Serialize a grid to a compact JSON string for storage in a cart. Sparse: only
+ * occupied cells are written (their flat index, RGB, and emissive), so the size
+ * tracks the sculpt rather than the grid volume — the property that keeps large
+ * grids editable (see {@link VOXEL_GRID_VERSION}). Cell indices are little-endian
+ * u32, decoded the same way on load, so the payload is platform-independent.
+ */
 export function serializeVoxelGrid(grid: VoxelGrid): string {
+  const count = grid.filledCount;
+  const indexBytes = new Uint8Array(count * 4);
+  const indexView = new DataView(indexBytes.buffer);
+  const rgb = new Uint8Array(count * 3);
+  const emissive = new Uint8Array(count);
+
+  let written = 0;
+  grid.forEachFilled((x, y, z, cell) => {
+    indexView.setUint32(written * 4, grid.index(x, y, z), true);
+    rgb[written * 3] = cell.r;
+    rgb[written * 3 + 1] = cell.g;
+    rgb[written * 3 + 2] = cell.b;
+    emissive[written] = cell.emissive;
+    written += 1;
+  });
+
   return JSON.stringify({
     version: VOXEL_GRID_VERSION,
     sizeX: grid.sizeX,
     sizeY: grid.sizeY,
     sizeZ: grid.sizeZ,
-    colors: bytesToBase64(grid.colors),
-    emissive: bytesToBase64(grid.emissive),
+    count,
+    indices: bytesToBase64(indexBytes),
+    rgb: bytesToBase64(rgb),
+    emissive: bytesToBase64(emissive),
   });
+}
+
+/** Restore a legacy v1 dense payload (whole-volume RGBA + emissive base64). */
+function deserializeDenseV1(
+  grid: VoxelGrid,
+  cells: number,
+  colorsB64: string,
+  emissiveB64: string,
+): VoxelGrid {
+  const colors = base64ToBytes(colorsB64);
+  const emissive = base64ToBytes(emissiveB64);
+  if (colors.length !== cells * 4 || emissive.length !== cells) {
+    throw new Error(PAYLOAD_MISMATCH);
+  }
+  grid.colors.set(colors);
+  grid.emissive.set(emissive);
+  return grid;
 }
 
 /**
  * Parse a serialized grid, rejecting anything malformed or oversized (untrusted
- * input: it may come from another user's cart). Throws on invalid input.
+ * input: it may come from another user's cart). Reads the current sparse format
+ * (v2) and the legacy dense format (v1). Throws on invalid input.
  */
 export function deserializeVoxelGrid(json: string): VoxelGrid {
   const raw = JSON.parse(json) as {
@@ -290,20 +342,41 @@ export function deserializeVoxelGrid(json: string): VoxelGrid {
     sizeX?: number;
     sizeY?: number;
     sizeZ?: number;
-    colors?: string;
+    count?: number;
+    indices?: string;
+    rgb?: string;
     emissive?: string;
+    colors?: string; // v1 only
   };
+  const grid = new VoxelGrid(raw.sizeX ?? 0, raw.sizeY ?? 0, raw.sizeZ ?? 0); // constructor bounds-checks dims
+  const cells = grid.sizeX * grid.sizeY * grid.sizeZ;
+
+  if (raw.version === 1) {
+    return deserializeDenseV1(grid, cells, raw.colors ?? "", raw.emissive ?? "");
+  }
   if (raw.version !== VOXEL_GRID_VERSION) {
     throw new Error(`Unsupported voxel grid version: ${String(raw.version)}`);
   }
-  const grid = new VoxelGrid(raw.sizeX ?? 0, raw.sizeY ?? 0, raw.sizeZ ?? 0); // constructor bounds-checks dims
-  const cells = grid.sizeX * grid.sizeY * grid.sizeZ;
-  const colors = base64ToBytes(raw.colors ?? "");
-  const emissive = base64ToBytes(raw.emissive ?? "");
-  if (colors.length !== cells * 4 || emissive.length !== cells) {
-    throw new Error("Voxel grid payload size does not match its dimensions");
+
+  const count = raw.count ?? 0;
+  if (!Number.isInteger(count) || count < 0 || count > cells) {
+    throw new Error(PAYLOAD_MISMATCH);
   }
-  grid.colors.set(colors);
-  grid.emissive.set(emissive);
+  const indices = base64ToBytes(raw.indices ?? "");
+  const rgb = base64ToBytes(raw.rgb ?? "");
+  const emissive = base64ToBytes(raw.emissive ?? "");
+  if (indices.length !== count * 4 || rgb.length !== count * 3 || emissive.length !== count) {
+    throw new Error(PAYLOAD_MISMATCH);
+  }
+  const indexView = new DataView(indices.buffer, indices.byteOffset, indices.byteLength);
+  for (let k = 0; k < count; k += 1) {
+    const cellIndex = indexView.getUint32(k * 4, true);
+    if (cellIndex >= cells) throw new Error(PAYLOAD_MISMATCH); // stray index → reject
+    grid.colors[cellIndex * 4] = rgb[k * 3]!;
+    grid.colors[cellIndex * 4 + 1] = rgb[k * 3 + 1]!;
+    grid.colors[cellIndex * 4 + 2] = rgb[k * 3 + 2]!;
+    grid.colors[cellIndex * 4 + 3] = 255;
+    grid.emissive[cellIndex] = emissive[k]!;
+  }
   return grid;
 }
