@@ -132,6 +132,65 @@ type ScreenRect = { x: number; y: number; w: number; h: number };
 type Premade = (typeof HANDHELD_PRESETS)[number];
 
 /**
+ * How far the tinted screen overlay grows past the measured screen window, in
+ * CSS pixels per side. The chassis render leaves the screen as a transparent
+ * hole; without a little bleed the backdrop shows through along its edges.
+ */
+const SCREEN_BLEED_PX = 5;
+
+/** Absolute box for a screen overlay, bled out so no edge of the hole shows. */
+function screenBoxStyle(rect: ScreenRect): CSSProperties {
+  return {
+    left: `calc(${rect.x * 100}% - ${SCREEN_BLEED_PX}px)`,
+    top: `calc(${rect.y * 100}% - ${SCREEN_BLEED_PX}px)`,
+    width: `calc(${rect.w * 100}% + ${SCREEN_BLEED_PX * 2}px)`,
+    height: `calc(${rect.h * 100}% + ${SCREEN_BLEED_PX * 2}px)`,
+  };
+}
+
+/**
+ * Resize a canvas only when the size actually changes. Assigning `width`/`height`
+ * clears the canvas even when the value is unchanged, which would blank a device
+ * that is merely being repainted with new content.
+ */
+function resizeCanvas(canvas: HTMLCanvasElement, width: number, height: number): void {
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+}
+
+/**
+ * Sprite sheets already decoded for a previous playback, keyed by their source
+ * URL. Turning the carousel re-points every device at a different premade, so
+ * without this each turn would decode the same sheets again — asynchronously,
+ * leaving the canvases blank until they landed (the flicker while flipping).
+ */
+const decodedSheets = new Map<string, HTMLImageElement>();
+
+/**
+ * Resolve a sheet to a decoded image, calling back *synchronously* when it has
+ * been decoded before so the caller can paint within the same frame. Returns a
+ * cleanup that detaches a pending callback.
+ */
+function loadSheet(url: string, onReady: (image: HTMLImageElement) => void): () => void {
+  let image = decodedSheets.get(url);
+  if (!image) {
+    image = new Image();
+    image.src = url;
+    decodedSheets.set(url, image);
+  }
+  const sheet = image;
+  if (sheet.complete && sheet.naturalWidth > 0) {
+    onReady(sheet);
+    return () => {};
+  }
+  const handleLoad = () => onReady(sheet);
+  sheet.addEventListener("load", handleLoad);
+  return () => sheet.removeEventListener("load", handleLoad);
+}
+
+/**
  * Paint a `HandheldArt` onto a canvas: an animation (multi-frame sprite sheet)
  * plays back on an interval; a single-frame image draws once. Returns a cleanup
  * that stops the interval. Shared by the centred handheld and the flanks so both
@@ -140,41 +199,66 @@ type Premade = (typeof HANDHELD_PRESETS)[number];
 function playArt(canvas: HTMLCanvasElement, art: HandheldArt): () => void {
   const context = canvas.getContext("2d");
   if (!context) return () => {};
-  const image = new Image();
+  let timer: number | undefined;
 
-  if (art.frames && art.frames > 1) {
-    const count = art.frames;
-    let timer: number | undefined;
-    image.onload = () => {
-      canvas.width = art.w;
-      canvas.height = art.h;
-      // Draw each frame straight from the already-loaded sheet via a source rect
-      // (the sheet is `art.w * count` wide). Slicing into separate Images would
-      // decode asynchronously and leave the canvas blank between the resize and
-      // the first decode — this paints the first frame synchronously instead.
-      let index = 0;
-      const paint = () => {
-        context.clearRect(0, 0, canvas.width, canvas.height);
-        context.drawImage(image, index * art.w, 0, art.w, art.h, 0, 0, art.w, art.h);
-        index = (index + 1) % count;
-      };
-      paint();
-      timer = window.setInterval(paint, art.durationMs ?? 120);
-    };
-    image.src = art.url;
-    return () => {
-      if (timer !== undefined) window.clearInterval(timer);
-    };
-  }
+  const stopLoading = loadSheet(art.url, (image) => {
+    // Multi-frame sheets are `art.w * frames` wide and are drawn one frame at a
+    // time through a source rect; a single frame is just the whole image.
+    const frames = art.frames && art.frames > 1 ? art.frames : 1;
+    const width = frames > 1 ? art.w : image.naturalWidth;
+    const height = frames > 1 ? art.h : image.naturalHeight;
+    resizeCanvas(canvas, width, height);
 
-  image.onload = () => {
-    canvas.width = image.naturalWidth;
-    canvas.height = image.naturalHeight;
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(image, 0, 0);
+    let index = 0;
+    const paint = () => {
+      context.clearRect(0, 0, width, height);
+      context.drawImage(image, index * width, 0, width, height, 0, 0, width, height);
+      index = (index + 1) % frames;
+    };
+    paint();
+    if (frames > 1) timer = window.setInterval(paint, art.durationMs ?? 120);
+  });
+
+  return () => {
+    stopLoading();
+    if (timer !== undefined) window.clearInterval(timer);
   };
-  image.src = art.url;
-  return () => {};
+}
+
+/**
+ * Recoloured chassis pixels, keyed by premade id. A premade's colours are fixed,
+ * so its full-resolution composite is computed once instead of on every carousel
+ * turn (nine devices × a 867×1579 recolour per turn is what stalled the flip).
+ */
+const chassisCache = new Map<string, ImageData>();
+
+/**
+ * Draw the static recoloured chassis, reusing the cached composite when the
+ * scheme is a premade's (`cacheKey`) and computing it fresh otherwise (the
+ * centred handheld's scheme changes as the player tunes it).
+ */
+function paintChassis(
+  canvas: HTMLCanvasElement,
+  template: HandheldTemplate,
+  scheme: HandheldScheme,
+  cacheKey?: string,
+): void {
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  resizeCanvas(canvas, template.width, template.height);
+  let pixels = cacheKey ? chassisCache.get(cacheKey) : undefined;
+  if (!pixels) {
+    pixels = context.createImageData(template.width, template.height);
+    pixels.data.set(renderHandheld(template, scheme));
+    if (cacheKey) chassisCache.set(cacheKey, pixels);
+  }
+  context.putImageData(pixels, 0, 0);
+}
+
+/** Whether two schemes assign the same colour to every region. */
+function sameScheme(a: HandheldScheme, b: HandheldScheme): boolean {
+  const keys = Object.keys(a) as (keyof HandheldScheme)[];
+  return keys.length === Object.keys(b).length && keys.every((key) => a[key] === b[key]);
 }
 
 /**
@@ -260,18 +344,12 @@ function PremadeFlank({
   }, [template, preset, marqueeId]);
 
   // Draw the static recoloured chassis immediately so the device is never blank,
-  // then play the animated marquee over it once its sheet has decoded.
+  // then play the animated marquee over it. Both paint synchronously once their
+  // composite/sheet is cached, so a repaint never shows a blank frame.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const context = canvas.getContext("2d");
-    if (!context) return;
-    canvas.width = template.width;
-    canvas.height = template.height;
-    const rgba = renderHandheld(template, preset.scheme);
-    const image = context.createImageData(template.width, template.height);
-    image.data.set(rgba);
-    context.putImageData(image, 0, 0);
+    paintChassis(canvas, template, preset.scheme, preset.id);
     if (art) return playArt(canvas, art);
   }, [art, template, preset]);
 
@@ -287,15 +365,7 @@ function PremadeFlank({
       {screenRect && (
         <div
           className={styles.flankScreen}
-          style={
-            {
-              left: `${screenRect.x * 100}%`,
-              top: `${screenRect.y * 100}%`,
-              width: `${screenRect.w * 100}%`,
-              height: `${screenRect.h * 100}%`,
-              "--ui": preset.scheme.face,
-            } as CSSProperties
-          }
+          style={{ ...screenBoxStyle(screenRect), "--ui": preset.scheme.face } as CSSProperties}
         />
       )}
     </div>
@@ -401,10 +471,28 @@ export function HandheldPicker() {
   // premade change on mobile (where the flanks are hidden).
   const touchStartX = useRef<number | null>(null);
 
+  // Bumped whenever a premade's marquee lands in the flank cache, so the centre
+  // picks up a pre-warmed render as soon as it exists.
+  const [flankArtVersion, setFlankArtVersion] = useState(0);
+  useEffect(() => subscribeFlankArt(() => setFlankArtVersion((version) => version + 1)), []);
+
+  // Turning the carousel lands on an untouched premade, whose marquee the flank
+  // pre-warm has already rendered — reuse it rather than re-rendering it behind
+  // the debounce below, which would leave the previous premade's marquee playing
+  // on the centre for a beat after every flip.
+  const premadeArt = useMemo(() => {
+    const preset = HANDHELD_PRESETS.find((candidate) => candidate.id === presetId);
+    if (!preset || !animationId || PREMADE_MARQUEE[preset.id] !== animationId) return null;
+    if (!sameScheme(preset.scheme, scheme)) return null;
+    return flankArtCache.get(preset.id) ?? null;
+    // `flankArtVersion` is the cache's change signal, not an unused dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [presetId, scheme, animationId, flankArtVersion]);
+
   // What actually renders/saves, in priority order: a live animation, else an
   // uploaded chassis background, else hand-drawn art, else the static recoloured
   // skin (art === null).
-  const activeArt = animationId ? animatedArt : background ? backgroundArt : drawnArt;
+  const activeArt = animationId ? premadeArt ?? animatedArt : background ? backgroundArt : drawnArt;
 
   // Publish the chassis colour so the backdrop can tint itself to it.
   const { setColor } = useChassisColor();
@@ -624,6 +712,9 @@ export function HandheldPicker() {
       setAnimatedArt(null);
       return;
     }
+    // An untouched premade already has its marquee cached; `activeArt` prefers
+    // that render, so there is nothing to compute.
+    if (premadeArt) return;
     const view = animatedPresetView(animationId);
     if (!view) {
       setAnimatedArt(null);
@@ -642,7 +733,7 @@ export function HandheldPicker() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [template, scheme, animationId]);
+  }, [template, scheme, animationId, premadeArt]);
 
   // Re-render the live preview. Custom pixel art or the selected marquee (when
   // present) wins over the region-recoloured scheme, so the preview always shows
@@ -652,21 +743,18 @@ export function HandheldPicker() {
   // never blank while an animation sheet decodes — its base colours match.
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const context = canvas.getContext("2d");
-    if (!context || !template) return;
+    if (!canvas || !template) return;
 
     const isAnimated = Boolean(activeArt?.frames && activeArt.frames > 1);
     if (!activeArt || isAnimated) {
-      canvas.width = template.width;
-      canvas.height = template.height;
-      const rgba = renderHandheld(template, scheme);
-      const image = context.createImageData(template.width, template.height);
-      image.data.set(rgba);
-      context.putImageData(image, 0, 0);
+      // Cache the composite under the premade's id whenever the scheme is still
+      // that premade's, so flipping back and forth doesn't recompute it.
+      const preset = HANDHELD_PRESETS.find((candidate) => candidate.id === presetId);
+      const cacheKey = preset && sameScheme(preset.scheme, scheme) ? preset.id : undefined;
+      paintChassis(canvas, template, scheme, cacheKey);
     }
     if (activeArt) return playArt(canvas, activeArt);
-  }, [template, scheme, activeArt]);
+  }, [template, scheme, activeArt, presetId]);
 
   // Load a premade into the centred handheld: set its colours and its marquee,
   // and drop any hand-drawn art or uploaded background (a premade is a fresh
@@ -856,7 +944,11 @@ export function HandheldPicker() {
             const preset = flankAt(-step);
             return (
               <PremadeFlank
-                key={`left-${step}`}
+                // Keyed by premade, not by slot: turning the carousel shifts the
+                // ring, so keying by slot would repaint every flank with a
+                // different premade. Keyed this way the surviving flanks just
+                // move, and only the one entering the ring paints.
+                key={preset.id}
                 template={template}
                 preset={preset}
                 marqueeId={PREMADE_MARQUEE[preset.id] ?? null}
@@ -879,12 +971,7 @@ export function HandheldPicker() {
             {screenRect && (
               <div
                 className={styles.screenOverlay}
-                style={{
-                  left: `${screenRect.x * 100}%`,
-                  top: `${screenRect.y * 100}%`,
-                  width: `${screenRect.w * 100}%`,
-                  height: `${screenRect.h * 100}%`,
-                }}
+                style={screenBoxStyle(screenRect)}
               >
                 <TerminalPreview
                   fill
@@ -905,7 +992,7 @@ export function HandheldPicker() {
             const preset = flankAt(step);
             return (
               <PremadeFlank
-                key={`right-${step}`}
+                key={preset.id}
                 template={template}
                 preset={preset}
                 marqueeId={PREMADE_MARQUEE[preset.id] ?? null}

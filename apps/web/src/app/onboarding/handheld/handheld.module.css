@@ -126,12 +126,12 @@
   /* Kept short enough that the centred device, the parameter switch and the top
      of the unfolding control all sit within one viewport on a laptop. */
   max-height: 52vh;
-  border-radius: 8px;
-  /* A soft recessed panel so the handheld's transparent chrome edges read
-     cleanly against the dark gamer backdrop (replaces the old transparency
-     checker, which clashed with the lit wall behind the page). */
-  background: radial-gradient(120% 120% at 50% 30%, var(--well), var(--bg));
-  box-shadow: inset 0 0 0 1px var(--border), inset 0 8px 24px rgba(0, 0, 0, 0.4);
+  /* No panel behind the device. The canvas is a rectangle with transparent
+     margins around the handheld's silhouette, so any background/border here
+     reads as a dark card sticking out past the device's edges. The lit gamer
+     backdrop shows through instead. */
+  background: none;
+  box-shadow: none;
 }
 
 .stageLabel {
