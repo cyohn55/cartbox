@@ -76,6 +76,12 @@ export interface ConsoleSettings {
   osStyle: OsStyleId;
   /** Phosphor tint for the terminal skin. */
   osPhosphor: OsPhosphorId;
+  /**
+   * A free-form phosphor colour (`#rrggbb`) that overrides the `osPhosphor`
+   * preset when set, so players can tune the terminal glow to any hue for extra
+   * console variety. Null keeps the chosen preset.
+   */
+  osPhosphorColor: string | null;
   /** Scanline overlay on the terminal skin (some players find it too busy). */
   osScanlines: boolean;
 }
@@ -95,6 +101,7 @@ export const DEFAULT_CONSOLE_SETTINGS: ConsoleSettings = {
   // back to "modern" from onboarding or the settings panel.
   osStyle: "pipboy",
   osPhosphor: "green",
+  osPhosphorColor: null,
   osScanlines: true,
 };
 
@@ -135,6 +142,7 @@ export function normalizeConsoleSettings(input: unknown): ConsoleSettings {
     joystickColor: normalizeHexColor(raw.joystickColor),
     osStyle: oneOf(OS_STYLES, raw.osStyle, DEFAULT_CONSOLE_SETTINGS.osStyle),
     osPhosphor: oneOf(OS_PHOSPHORS, raw.osPhosphor, DEFAULT_CONSOLE_SETTINGS.osPhosphor),
+    osPhosphorColor: normalizeHexColor(raw.osPhosphorColor),
     // Default on; only an explicit `false` disables scanlines.
     osScanlines: raw.osScanlines !== false,
   };

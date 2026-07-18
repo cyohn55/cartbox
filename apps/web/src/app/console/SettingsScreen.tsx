@@ -214,7 +214,9 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
             label="PHOSPHOR"
             options={OS_PHOSPHORS}
             value={settings.osPhosphor}
-            onPick={(osPhosphor) => update({ osPhosphor })}
+            // Picking a preset clears any custom phosphor colour so the chosen
+            // preset actually takes effect instead of being masked by the override.
+            onPick={(osPhosphor) => update({ osPhosphor, osPhosphorColor: null })}
           />
           <div className="os-option-row">
             <button

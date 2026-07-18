@@ -13,7 +13,7 @@
  *   bottom of a grid must stay in the grid, not wander onto the tabs.
  */
 
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useEffect, useReducer, useRef, useState, type CSSProperties } from "react";
 
 import { supabaseBrowser } from "@/lib/supabase-browser";
 import { isStaticExport } from "@/lib/staticSite";
@@ -175,6 +175,9 @@ export function ConsoleOS() {
       data-os-style={settings.osStyle}
       data-os-phosphor={settings.osPhosphor}
       data-os-scanlines={settings.osScanlines ? "on" : "off"}
+      // A custom phosphor colour overrides the preset tint via the CSS variable
+      // the preset rules also set, so the whole terminal glows in the chosen hue.
+      style={settings.osPhosphorColor ? ({ "--os-phosphor": settings.osPhosphorColor } as CSSProperties) : undefined}
     >
       <div className="os-content">
         {stage}

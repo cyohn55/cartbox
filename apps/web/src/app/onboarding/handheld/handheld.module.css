@@ -123,7 +123,9 @@
   display: block;
   width: auto;
   max-width: 100%;
-  max-height: 60vh;
+  /* Kept short enough that the centred device, the parameter switch and the top
+     of the unfolding control all sit within one viewport on a laptop. */
+  max-height: 52vh;
   border-radius: 8px;
   /* A soft recessed panel so the handheld's transparent chrome edges read
      cleanly against the dark gamer backdrop (replaces the old transparency
@@ -262,6 +264,8 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  max-width: 760px;
+  margin: 20px auto 0;
 }
 
 .primary {
@@ -511,4 +515,240 @@
   inset: 0;
   background: repeating-linear-gradient(to bottom, rgba(0, 0, 0, 0) 0 2px, rgba(0, 0, 0, 0.22) 2px 3px);
   mix-blend-mode: multiply;
+}
+
+/* ==========================================================================
+   Carousel + parameter-switch layout
+   The working handheld sits centred and large, flanked by the smaller premades
+   the arrows/swipe cycle through; the customize switch unfolds one control at a
+   time beneath it.
+   ========================================================================== */
+
+.carousel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  max-width: 760px;
+  margin: 0 auto 20px;
+  /* Never let a swipe scroll the page horizontally on touch. */
+  touch-action: pan-y;
+}
+
+.carouselArrow {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  font-size: 26px;
+  line-height: 1;
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+  transition: border-color 0.12s, transform 0.12s, background 0.12s;
+}
+
+.carouselArrow:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+/* The flanking premades: smaller than the centre, dimmed and clickable to turn
+   the carousel toward them. */
+.flank {
+  flex: 0 1 148px;
+  width: 148px;
+  max-width: 22vw;
+  aspect-ratio: 867 / 1579;
+  object-fit: contain;
+  image-rendering: auto;
+  cursor: pointer;
+  opacity: 0.62;
+  filter: saturate(0.85);
+  transform: scale(0.92);
+  transition: opacity 0.15s, transform 0.15s, filter 0.15s;
+}
+
+.flank:hover {
+  opacity: 0.9;
+  filter: none;
+  transform: scale(0.96);
+}
+
+/* The centred, live handheld — the largest tile, holding the preview canvas. */
+.centerStage {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+}
+
+/* On mobile only the centre shows; the player swipes to change premades. */
+@media (max-width: 640px) {
+  .flank {
+    display: none;
+  }
+  .carousel {
+    gap: 4px;
+  }
+}
+
+.customize {
+  max-width: 760px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.screenModeRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.screenModeLabel {
+  font-family: var(--font-data);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(226, 233, 244, 0.82);
+  text-shadow: 0 1px 3px rgba(3, 6, 14, 0.85);
+}
+
+/* The parameter switch: a horizontally scrollable strip of part chips. */
+.paramSwitch {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 4px 2px 8px;
+  scrollbar-width: thin;
+}
+
+.paramChip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-data);
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 8px 13px;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+
+.paramChip:hover {
+  border-color: var(--accent);
+}
+
+.paramChipActive {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* A small colour puck on colour/phosphor chips, previewing the current value. */
+.paramDot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.4);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25);
+}
+
+/* The unfolding control area beneath the switch. */
+.paramPanel {
+  min-height: 56px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.paramHint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.colorControl {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.colorInputLarge {
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: none;
+  cursor: pointer;
+}
+
+.colorMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.colorName {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.colorHex {
+  font-family: var(--font-data);
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.phosphorControl {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.toggleControl {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.marqueeControl {
+  display: block;
+}
+
+.linkButton {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12px;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
 }

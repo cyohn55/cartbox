@@ -8,12 +8,16 @@
  * look full-screen via `data-os-*` on `.os-root`.
  */
 
+import type { CSSProperties } from "react";
+
 import type { OsPhosphorId, OsStyleId } from "@/app/console/consoleSettings";
 import styles from "./handheld.module.css";
 
 interface TerminalPreviewProps {
   style: OsStyleId;
   phosphor: OsPhosphorId;
+  /** A free-form phosphor colour that overrides the `phosphor` preset when set. */
+  phosphorColor?: string | null;
   scanlines: boolean;
   /** Fill the parent (used when the preview sits inside the device screen). */
   fill?: boolean;
@@ -21,13 +25,19 @@ interface TerminalPreviewProps {
 
 const MENU = ["FEED", "BROWSE", "LIBRARY", "PROFILE"];
 
-export function TerminalPreview({ style, phosphor, scanlines, fill = false }: TerminalPreviewProps) {
+export function TerminalPreview({ style, phosphor, phosphorColor, scanlines, fill = false }: TerminalPreviewProps) {
+  // A custom hue drives both the text tint (`--tp-phosphor`) and the CRT glow
+  // (`--tp-crt`) the preset rules otherwise set from the `data-os-phosphor` attr.
+  const phosphorStyle = phosphorColor
+    ? ({ "--tp-phosphor": phosphorColor, "--tp-crt": phosphorColor } as CSSProperties)
+    : undefined;
   return (
     <div
       className={`${styles.termPreview} ${fill ? styles.termFill : ""}`}
       data-os-style={style}
       data-os-phosphor={phosphor}
       data-os-scanlines={scanlines ? "on" : "off"}
+      style={phosphorStyle}
       aria-label={`${style === "pipboy" ? "Pip-Boy terminal" : "Modern"} preview`}
     >
       <div className={styles.termContent}>
