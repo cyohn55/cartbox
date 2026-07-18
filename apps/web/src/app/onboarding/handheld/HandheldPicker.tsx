@@ -11,7 +11,7 @@
  * pixel edits happen in a pixel tool via the downloadable `.aseprite` template.
  */
 
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import {
@@ -22,6 +22,7 @@ import {
   handheldPreset,
   parseAsepriteLayers,
   extractSchemeFromLayers,
+  proPaletteHex,
   DEFAULT_HANDHELD_PRESET_ID,
   type HandheldScheme,
   type HandheldTemplate,
@@ -122,6 +123,196 @@ function draftToArt(draft: HandheldDraft): HandheldArt | null {
   return draft.frames.length > 1
     ? { url, w: first.width, h: first.height, frames: draft.frames.length, durationMs: draft.frameMs }
     : { url, w: first.width, h: first.height };
+}
+
+/** The device screen rectangle (0..1 fractions) from the measured layout. */
+type ScreenRect = { x: number; y: number; w: number; h: number };
+
+/** One premade in the ring (an element of HANDHELD_PRESETS). */
+type Premade = (typeof HANDHELD_PRESETS)[number];
+
+/**
+ * Paint a `HandheldArt` onto a canvas: an animation (multi-frame sprite sheet)
+ * plays back on an interval; a single-frame image draws once. Returns a cleanup
+ * that stops the interval. Shared by the centred handheld and the flanks so both
+ * animate their marquee identically.
+ */
+function playArt(canvas: HTMLCanvasElement, art: HandheldArt): () => void {
+  const context = canvas.getContext("2d");
+  if (!context) return () => {};
+  const image = new Image();
+
+  if (art.frames && art.frames > 1) {
+    let timer: number | undefined;
+    image.onload = () => {
+      canvas.width = art.w;
+      canvas.height = art.h;
+      const frames = sliceSheet(image, art.w, art.h, art.frames!).map((url) => {
+        const frame = new Image();
+        frame.src = url;
+        return frame;
+      });
+      let index = 0;
+      const paint = () => {
+        const frame = frames[index];
+        if (frame) {
+          context.clearRect(0, 0, canvas.width, canvas.height);
+          context.drawImage(frame, 0, 0);
+        }
+        index = (index + 1) % frames.length;
+      };
+      paint();
+      timer = window.setInterval(paint, art.durationMs ?? 120);
+    };
+    image.src = art.url;
+    return () => {
+      if (timer !== undefined) window.clearInterval(timer);
+    };
+  }
+
+  image.onload = () => {
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0);
+  };
+  image.src = art.url;
+  return () => {};
+}
+
+/**
+ * Rendered animated marquees for the premades, keyed by preset id. Premade
+ * colours are fixed, so each is rendered once and reused across carousel turns
+ * (rendering every frame of a scene per flank is expensive to repeat).
+ */
+const flankArtCache = new Map<string, HandheldArt>();
+
+/**
+ * A flanking premade: its chassis rendered live (so it always matches the
+ * preset's scheme) with its marquee animating in the marquee panel, and a lit
+ * screen tinted to the chassis colour so the screen never reads as a see-through
+ * hole. Clicking it brings the premade to the centre.
+ */
+function PremadeFlank({
+  template,
+  preset,
+  marqueeId,
+  width,
+  screenRect,
+  onClick,
+}: {
+  template: HandheldTemplate;
+  preset: Premade;
+  marqueeId: string | null;
+  width: number;
+  screenRect: ScreenRect | null;
+  onClick: () => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [art, setArt] = useState<HandheldArt | null>(() => flankArtCache.get(preset.id) ?? null);
+
+  // Render (and cache) this premade's animated marquee off the paint path so a
+  // batch of newly-revealed flanks doesn't block the first frame.
+  useEffect(() => {
+    if (!marqueeId) {
+      setArt(null);
+      return;
+    }
+    const cached = flankArtCache.get(preset.id);
+    if (cached) {
+      setArt(cached);
+      return;
+    }
+    const view = animatedPresetView(marqueeId);
+    if (!view) {
+      setArt(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      try {
+        const rendered = renderAnimatedArt(template, preset.scheme, view);
+        flankArtCache.set(preset.id, rendered);
+        if (!cancelled) setArt(rendered);
+      } catch {
+        /* Fall back to the static chassis if a frame can't render. */
+      }
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [template, preset, marqueeId]);
+
+  // Play the animated marquee, or draw the static recoloured chassis.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    if (art) return playArt(canvas, art);
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    canvas.width = template.width;
+    canvas.height = template.height;
+    const rgba = renderHandheld(template, preset.scheme);
+    const image = context.createImageData(template.width, template.height);
+    image.data.set(rgba);
+    context.putImageData(image, 0, 0);
+  }, [art, template, preset]);
+
+  return (
+    <div
+      className={styles.flankWrap}
+      style={{ width }}
+      onClick={onClick}
+      role="button"
+      aria-label={`${preset.label} handheld`}
+    >
+      <canvas ref={canvasRef} className={styles.flankCanvas} />
+      {screenRect && (
+        <div
+          className={styles.flankScreen}
+          style={
+            {
+              left: `${screenRect.x * 100}%`,
+              top: `${screenRect.y * 100}%`,
+              width: `${screenRect.w * 100}%`,
+              height: `${screenRect.h * 100}%`,
+              "--ui": preset.scheme.face,
+            } as CSSProperties
+          }
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * A grid of fixed colour swatches (the 64-colour Pro palette) — the colour
+ * picker for every recolourable part, replacing the OS gradient picker so a
+ * choice is one tap on a consistent set of colours.
+ */
+function SwatchGrid({ value, onPick }: { value: string; onPick: (hex: string) => void }) {
+  const palette = useMemo(() => proPaletteHex(), []);
+  const current = value.toLowerCase();
+  return (
+    <div className={styles.swatchGrid} role="listbox" aria-label="Colour swatches">
+      {palette.map((hex) => {
+        const active = hex.toLowerCase() === current;
+        return (
+          <button
+            key={hex}
+            type="button"
+            role="option"
+            aria-selected={active}
+            className={`${styles.swatchCell} ${active ? styles.swatchCellActive : ""}`}
+            style={{ background: hex }}
+            onClick={() => onPick(hex)}
+            title={hex}
+          />
+        );
+      })}
+    </div>
+  );
 }
 
 /** Index of a premade in the ring, or the default premade's slot when unknown. */
@@ -427,58 +618,16 @@ export function HandheldPicker() {
     };
   }, [template, scheme, animationId]);
 
-  // Re-render the live preview. Custom pixel art (when present) wins over the
-  // region-recoloured scheme, so the preview always shows what will be saved.
+  // Re-render the live preview. Custom pixel art or the selected marquee (when
+  // present) wins over the region-recoloured scheme, so the preview always shows
+  // what will be saved; the marquee animates via the shared `playArt` playback.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    if (activeArt) return playArt(canvas, activeArt);
+
     const context = canvas.getContext("2d");
-    if (!context) return;
-
-    if (activeArt) {
-      const art = activeArt;
-      const image = new Image();
-      // Animated art is a horizontal sprite sheet: play it back in the preview so
-      // the marquee looks alive; a single-frame image just draws once.
-      if (art.frames && art.frames > 1) {
-        let timer: number | undefined;
-        image.onload = () => {
-          canvas.width = art.w;
-          canvas.height = art.h;
-          const urls = sliceSheet(image, art.w, art.h, art.frames!);
-          const frameImages = urls.map((url) => {
-            const frame = new Image();
-            frame.src = url;
-            return frame;
-          });
-          let index = 0;
-          const paint = () => {
-            const frame = frameImages[index];
-            if (frame) {
-              context.clearRect(0, 0, canvas.width, canvas.height);
-              context.drawImage(frame, 0, 0);
-            }
-            index = (index + 1) % frameImages.length;
-          };
-          paint();
-          timer = window.setInterval(paint, art.durationMs ?? 120);
-        };
-        image.src = art.url;
-        return () => {
-          if (timer !== undefined) window.clearInterval(timer);
-        };
-      }
-      image.onload = () => {
-        canvas.width = image.naturalWidth;
-        canvas.height = image.naturalHeight;
-        context.clearRect(0, 0, canvas.width, canvas.height);
-        context.drawImage(image, 0, 0);
-      };
-      image.src = art.url;
-      return;
-    }
-
-    if (!template) return;
+    if (!context || !template) return;
     canvas.width = template.width;
     canvas.height = template.height;
     const rgba = renderHandheld(template, scheme);
@@ -669,22 +818,22 @@ export function HandheldPicker() {
           ‹
         </button>
 
-        {leftFlanks.map((step) => {
-          const index = ((carouselIndex - step) % presetCount + presetCount) % presetCount;
-          const preset = flankAt(-step);
-          return (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              key={`left-${step}`}
-              className={styles.flank}
-              style={{ width: centerWidth ? centerWidth * flankScale(step) : undefined }}
-              src={handheldAssetUrl(`/handheld/preview/${preset.id}.png`)}
-              alt={`${preset.label} handheld`}
-              onClick={() => goToPreset(index)}
-              aria-hidden
-            />
-          );
-        })}
+        {template &&
+          leftFlanks.map((step) => {
+            const index = ((carouselIndex - step) % presetCount + presetCount) % presetCount;
+            const preset = flankAt(-step);
+            return (
+              <PremadeFlank
+                key={`left-${step}`}
+                template={template}
+                preset={preset}
+                marqueeId={PREMADE_MARQUEE[preset.id] ?? null}
+                width={centerWidth * flankScale(step)}
+                screenRect={screenRect}
+                onClick={() => goToPreset(index)}
+              />
+            );
+          })}
 
         <div className={styles.centerStage}>
           <div className={styles.stageDevice}>
@@ -718,22 +867,22 @@ export function HandheldPicker() {
           <span className={styles.stageLabel}>{stageLabel}</span>
         </div>
 
-        {rightFlanks.map((step) => {
-          const index = (carouselIndex + step) % presetCount;
-          const preset = flankAt(step);
-          return (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              key={`right-${step}`}
-              className={styles.flank}
-              style={{ width: centerWidth ? centerWidth * flankScale(step) : undefined }}
-              src={handheldAssetUrl(`/handheld/preview/${preset.id}.png`)}
-              alt={`${preset.label} handheld`}
-              onClick={() => goToPreset(index)}
-              aria-hidden
-            />
-          );
-        })}
+        {template &&
+          rightFlanks.map((step) => {
+            const index = (carouselIndex + step) % presetCount;
+            const preset = flankAt(step);
+            return (
+              <PremadeFlank
+                key={`right-${step}`}
+                template={template}
+                preset={preset}
+                marqueeId={PREMADE_MARQUEE[preset.id] ?? null}
+                width={centerWidth * flankScale(step)}
+                screenRect={screenRect}
+                onClick={() => goToPreset(index)}
+              />
+            );
+          })}
 
         <button
           type="button"
@@ -780,18 +929,15 @@ export function HandheldPicker() {
             selector — only its parameters show, nothing else. */}
         <div className={styles.paramPanel}>
           {activeDef.kind === "color" && activeDef.regionId && (
-            <div className={styles.colorControl}>
-              <input
-                type="color"
-                className={styles.colorInputCircle}
-                value={scheme[activeDef.regionId]}
-                onChange={(event) => recolour(activeDef.regionId!, event.target.value)}
-                aria-label={`${activeDef.label} colour`}
-              />
+            <div className={styles.controlColumn}>
               <div className={styles.colorMeta}>
                 <span className={styles.colorName}>{activeDef.label}</span>
                 <span className={styles.colorHex}>{scheme[activeDef.regionId]}</span>
               </div>
+              <SwatchGrid
+                value={scheme[activeDef.regionId]}
+                onPick={(hex) => recolour(activeDef.regionId!, hex)}
+              />
               {/* The chassis (face) is where an uploaded background image lives,
                   so its upload/remove controls sit with its colour. */}
               {activeDef.regionId === "face" && (
@@ -848,23 +994,17 @@ export function HandheldPicker() {
                   </button>
                 ))}
               </div>
-              <div className={styles.colorControl}>
-                <input
-                  type="color"
-                  className={styles.colorInputCircle}
-                  value={phosphorValue}
-                  onChange={(event) => setOsPhosphorColor(event.target.value)}
-                  aria-label="Custom phosphor colour"
-                />
+              <div className={styles.controlColumn}>
                 <div className={styles.colorMeta}>
                   <span className={styles.colorName}>Custom glow</span>
                   <span className={styles.colorHex}>{phosphorValue}</span>
+                  {osPhosphorColor && (
+                    <button type="button" className={styles.linkButton} onClick={() => setOsPhosphorColor(null)}>
+                      Reset to preset
+                    </button>
+                  )}
                 </div>
-                {osPhosphorColor && (
-                  <button type="button" className={styles.linkButton} onClick={() => setOsPhosphorColor(null)}>
-                    Reset to preset
-                  </button>
-                )}
+                <SwatchGrid value={phosphorValue} onPick={(hex) => setOsPhosphorColor(hex)} />
               </div>
               {osStyle !== "pipboy" && (
                 <p className={styles.paramHint}>Phosphor applies to the Terminal screen — pick the Screen part and choose Pip-Boy Terminal.</p>
@@ -879,34 +1019,29 @@ export function HandheldPicker() {
             </label>
           )}
 
+          {/* Marquee is previewed on the handhelds themselves (centre + flanks),
+              so the control is just buttons that switch the centre's marquee. */}
           {activeDef.kind === "marquee" && (
-            <div className={styles.marqueeControl}>
-              <div className={styles.presetGrid}>
+            <div className={styles.marqueeButtons} role="group" aria-label="Marquee">
+              <button
+                type="button"
+                className={`${styles.seg} ${animationId === null ? styles.segActive : ""}`}
+                onClick={() => chooseAnimation(null)}
+                aria-pressed={animationId === null}
+              >
+                None
+              </button>
+              {ANIMATED_PRESETS.map((preset) => (
                 <button
+                  key={preset.id}
                   type="button"
-                  className={`${styles.presetCard} ${animationId === null ? styles.presetCardActive : ""}`}
-                  onClick={() => chooseAnimation(null)}
-                  aria-pressed={animationId === null}
+                  className={`${styles.seg} ${animationId === preset.id ? styles.segActive : ""}`}
+                  onClick={() => chooseAnimation(preset.id)}
+                  aria-pressed={animationId === preset.id}
                 >
-                  <span className={styles.noneThumb} aria-hidden>
-                    —
-                  </span>
-                  <span className={styles.presetName}>None</span>
+                  {preset.label}
                 </button>
-                {ANIMATED_PRESETS.map((preset) => (
-                  <button
-                    key={preset.id}
-                    type="button"
-                    className={`${styles.presetCard} ${animationId === preset.id ? styles.presetCardActive : ""}`}
-                    onClick={() => chooseAnimation(preset.id)}
-                    aria-pressed={animationId === preset.id}
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img className={styles.presetThumb} src={preset.previewUrl} alt={preset.label} />
-                    <span className={styles.presetName}>{preset.label}</span>
-                  </button>
-                ))}
-              </div>
+              ))}
             </div>
           )}
 

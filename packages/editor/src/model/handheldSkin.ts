@@ -105,7 +105,7 @@ export const HANDHELD_PRESETS: readonly HandheldPreset[] = [
   { id: "red", label: "Red", scheme: twoTone("#cc3b3b", "#f2e6c9") }, // red + cream
   { id: "orange", label: "Orange", scheme: twoTone("#e8792b", "#26374d") }, // orange + navy
   { id: "yellow", label: "Yellow", scheme: twoTone("#f2c53d", "#33344a") }, // yellow + charcoal
-  { id: "green", label: "Green", scheme: twoTone("#3fa65a", "#ef7d57") }, // green + coral
+  { id: "green", label: "Green", scheme: twoTone("#3fa65a", "#ffffff") }, // green + white accents (decals/text/D-pad/buttons)
   { id: "blue", label: "Blue", scheme: twoTone("#2f6fd0", "#f2c53d") }, // blue + gold
   { id: "indigo", label: "Indigo", scheme: twoTone("#3b3d8f", "#7cc4f2") }, // indigo + sky
   { id: "violet", label: "Violet", scheme: twoTone("#7a3fa6", "#a7f070") }, // violet + lime

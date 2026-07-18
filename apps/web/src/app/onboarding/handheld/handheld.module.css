@@ -264,7 +264,7 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-width: 760px;
+  max-width: 440px;
   margin: 20px auto 0;
 }
 
@@ -583,18 +583,52 @@
   transform: translateY(-2px);
 }
 
-/* The centred, live handheld — the largest tile, holding the preview canvas. */
+/* The centred, live handheld — the largest tile, holding the preview canvas.
+   No card behind it: the device sits directly on the lit backdrop. */
 .centerStage {
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
-  padding: 18px 20px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow);
+  gap: 10px;
+}
+
+/* A flanking premade device: its live canvas plus a lit screen overlay. Width is
+   set inline (centre width × a per-step scale) so each flank steps down in size
+   the further it sits from the centre. */
+.flankWrap {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-block;
+  line-height: 0;
+  cursor: pointer;
+  transition: transform 0.15s;
+}
+
+.flankWrap:hover {
+  transform: translateY(-2px);
+}
+
+.flankCanvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  /* Downscaled render — smooth resample keeps thin arrows/letters (see .preview). */
+  image-rendering: auto;
+}
+
+/* The flank's screen, tinted to its chassis colour (`--ui`) so it reads as a lit
+   UI rather than a see-through hole. A diagonal sheen and inset shadow give it
+   the look of a glass screen. */
+.flankScreen {
+  position: absolute;
+  overflow: hidden;
+  border-radius: 3px;
+  background:
+    linear-gradient(150deg, rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0) 45%),
+    linear-gradient(150deg, rgba(0, 0, 0, 0) 60%, rgba(0, 0, 0, 0.4)),
+    var(--ui, #223);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35), inset 0 2px 6px rgba(0, 0, 0, 0.4);
 }
 
 /* On a narrow screen the fit calculation resolves to zero flanks on its own, so
@@ -606,7 +640,9 @@
 }
 
 .customize {
-  max-width: 760px;
+  /* Kept snug so the selector, its panel and the primary button don't sprawl
+     across empty horizontal space. */
+  max-width: 440px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
@@ -693,6 +729,50 @@
   align-items: center;
   gap: 14px;
   flex-wrap: wrap;
+}
+
+/* A vertically-stacked control: a label/hex header, then the swatch grid, then
+   any extra buttons (e.g. the chassis-background upload). */
+.controlColumn {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* The grid-style colour swatch picker (the 64-colour Pro palette). */
+.swatchGrid {
+  display: grid;
+  grid-template-columns: repeat(16, 1fr);
+  gap: 4px;
+}
+
+.swatchCell {
+  aspect-ratio: 1;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  border-radius: 4px;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  transition: transform 0.08s;
+}
+
+.swatchCell:hover {
+  transform: scale(1.15);
+}
+
+/* The currently-applied colour: a bright ring so it stands out in the grid. */
+.swatchCellActive {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  box-shadow: 0 0 0 1px var(--accent-ink);
+}
+
+/* The marquee switcher: plain labelled buttons (the marquee itself previews on
+   the handhelds), wrapping to fit the narrow panel. */
+.marqueeButtons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .colorInputLarge {
