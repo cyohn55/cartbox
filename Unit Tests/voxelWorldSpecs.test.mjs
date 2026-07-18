@@ -19,7 +19,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const specs = await import(
   pathToFileURL(path.resolve(here, "../apps/web/src/lib/voxelWorldSpecs.ts")).href
 );
-const { generateWorld, DEFAULT_WORLD_PARAMS, skyGradientFromChassis } = specs;
+const { generateWorld, DEFAULT_WORLD_PARAMS, worldParamsForDetail, skyGradientFromChassis } = specs;
 
 let passed = 0;
 const check = (label, condition) => {
@@ -86,6 +86,31 @@ const maxY = (w) => w.cells.reduce((m, c) => Math.max(m, c.y), 0);
 check("trees add blocks", forested.cells.length > treeless.cells.length);
 check("tree canopies rise above the bare terrain", maxY(forested) > maxY(treeless));
 check("some blocks glow (water sheen / lanterns)", world.cells.some((c) => c.emissive > 0));
+
+// --- Granularity knob: worldParamsForDetail scales resolution coherently ---
+const coarse = worldParamsForDetail(1);
+const fine = worldParamsForDetail(2);
+check("higher detail scales every block dimension up", fine.width > coarse.width && fine.height > coarse.height && fine.depth > coarse.depth);
+check("detail 2 roughly doubles the footprint", Math.abs(fine.width / coarse.width - 2) < 0.05);
+check("detail clamps to a sane floor", worldParamsForDetail(0).width >= worldParamsForDetail(0.5).width);
+const coarseWorld = generateWorld(coarse);
+const fineWorld = generateWorld(fine);
+// The same landscape at higher detail is built from far more (finer) voxels.
+check("finer detail yields many more blocks", fineWorld.cells.length > coarseWorld.cells.length * 3);
+// Shape stability: the terrain's relative silhouette is preserved, not made
+// spikier — the fraction of the footprint that is above the ground plane (hills)
+// stays close across resolutions because noise frequency tracks the width.
+const hillFraction = (world) => {
+  const surface = new Map();
+  for (const c of world.cells) {
+    const key = `${c.x},${c.z}`;
+    surface.set(key, Math.max(surface.get(key) ?? 0, c.y));
+  }
+  let above = 0;
+  for (const top of surface.values()) if (top > world.sizeY * 0.28) above += 1;
+  return above / surface.size;
+};
+check("terrain silhouette is stable across detail (not spikier)", Math.abs(hillFraction(fineWorld) - hillFraction(coarseWorld)) < 0.15);
 
 // --- Chassis-tinted sky ---
 const grey = skyGradientFromChassis("#808080");

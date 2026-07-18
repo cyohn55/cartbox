@@ -36,7 +36,11 @@ export interface WorldData {
 export interface WorldGenParams {
   /** Any 32-bit integer; the same seed reproduces the same island. */
   readonly seed: number;
-  /** Island footprint on the X (east-west) axis, in blocks. */
+  /**
+   * Island footprint on the X (east-west) axis, in blocks. Raising width/depth/
+   * height together (see {@link worldParamsForDetail}) is the granularity knob:
+   * the island stays the same on screen but is built from more, finer voxels.
+   */
   readonly width: number;
   /** Island footprint on the Z (north-south) axis, in blocks. */
   readonly depth: number;
@@ -53,12 +57,13 @@ export interface WorldGenParams {
 }
 
 /**
- * A balanced default island: wide enough to read as a landscape, with gentle
- * hills, a pond or two, and scattered trees. Tuned to render smoothly at the
- * backdrop's frame rate (see voxelWorldRenderer.ts).
+ * The reference island design, at detail 1. {@link worldParamsForDetail} scales
+ * every block-measured dimension from this, so the landscape keeps its shape and
+ * proportions while its voxels get finer — the terrain generator derives its noise
+ * frequency and tree sizes from the grid resolution (see {@link worldDetail}), so
+ * only the granularity changes, not the hills, ponds or tree count.
  */
-export const DEFAULT_WORLD_PARAMS: WorldGenParams = {
-  seed: 20260717,
+const BASE_DESIGN = {
   width: 60,
   depth: 46,
   height: 32,
@@ -66,7 +71,46 @@ export const DEFAULT_WORLD_PARAMS: WorldGenParams = {
   seaLevel: 8,
   relief: 15,
   treeDensity: 0.022,
-};
+} as const;
+
+/** The width of the reference design; a params' width ÷ this is its detail. */
+const REFERENCE_WIDTH = BASE_DESIGN.width;
+
+/**
+ * Build world params at a given granularity. `detail` is a resolution multiplier:
+ * 1 is the reference island, 2 packs the same landscape into twice-as-fine voxels
+ * (≈4× as many surface blocks), 0.5 is coarser. All block dimensions scale with
+ * it; tree density scales inversely with its square so the finer island keeps the
+ * same number of (proportionally larger-in-blocks) trees.
+ */
+export function worldParamsForDetail(detail: number, seed: number = 20260717): WorldGenParams {
+  const clamped = Math.max(0.5, detail);
+  return {
+    seed,
+    width: Math.round(BASE_DESIGN.width * clamped),
+    depth: Math.round(BASE_DESIGN.depth * clamped),
+    height: Math.round(BASE_DESIGN.height * clamped),
+    groundLevel: Math.round(BASE_DESIGN.groundLevel * clamped),
+    seaLevel: Math.round(BASE_DESIGN.seaLevel * clamped),
+    relief: BASE_DESIGN.relief * clamped,
+    treeDensity: BASE_DESIGN.treeDensity / (clamped * clamped),
+  };
+}
+
+/**
+ * The granularity of the shipped backdrop. Higher = finer, more numerous voxels
+ * (and more render cost — see voxelWorldRenderer.ts); this is the one number to
+ * change to make the world blockier or chunkier.
+ */
+export const DEFAULT_DETAIL = 2;
+
+/** A balanced default island: gentle hills, a pond or two, and scattered trees. */
+export const DEFAULT_WORLD_PARAMS: WorldGenParams = worldParamsForDetail(DEFAULT_DETAIL);
+
+/** This params' resolution relative to the reference design (its detail factor). */
+function worldDetail(params: WorldGenParams): number {
+  return params.width / REFERENCE_WIDTH;
+}
 
 /** Straight RGB triple, 0..255. */
 type Rgb = readonly [number, number, number];
@@ -89,10 +133,12 @@ const BLOCKS = {
   lantern: [255, 176, 74] as Rgb,
 } as const;
 
-/** How many blocks of dirt sit under the grass before stone begins. */
+/** Blocks of dirt under the grass before stone begins, at detail 1 (scales up). */
 const TOPSOIL_DEPTH = 3;
-/** Terrain tops at or above this height wear snow instead of grass. */
+/** Terrain within this many blocks of the top wears snow, at detail 1 (scales up). */
 const SNOW_LINE_FROM_TOP = 3;
+/** Roughly how many hill crests span the island edge-to-edge, at any resolution. */
+const HILLS_ACROSS = 5.1;
 /** Faint glow on water so ponds keep their colour rather than going dark. */
 const WATER_EMISSIVE = 40;
 
@@ -181,8 +227,10 @@ function edgePlateau(x: number, z: number, width: number, depth: number): number
 
 /** The terrain surface height (top solid block) at a column, in blocks. */
 function terrainHeightAt(x: number, z: number, params: WorldGenParams): number {
-  const NOISE_SCALE = 0.085;
-  const elevation = fractalNoise(x * NOISE_SCALE, z * NOISE_SCALE, params.seed);
+  // Frequency is derived from the footprint so the same number of hills spans the
+  // island at any resolution — raising detail refines the voxels, not the terrain.
+  const noiseScale = HILLS_ACROSS / params.width;
+  const elevation = fractalNoise(x * noiseScale, z * noiseScale, params.seed);
   // Centre the noise so valleys can dip below the ground into ponds and hills
   // rise above it, then shelve the result down at the very edges.
   const relief = (elevation - 0.35) * params.relief * edgePlateau(x, z, params.width, params.depth);
@@ -203,9 +251,9 @@ function jitteredColor(base: Rgb, x: number, y: number, z: number, seed: number)
 }
 
 /** Choose the surface block for a column's top, given how high and wet it is. */
-function surfaceBlock(top: number, seaLevel: number, height: number): Rgb {
+function surfaceBlock(top: number, seaLevel: number, snowStart: number): Rgb {
   if (top <= seaLevel) return BLOCKS.sand; // beaches and pond floors
-  if (top >= height - SNOW_LINE_FROM_TOP) return BLOCKS.snow; // snowy peaks
+  if (top >= snowStart) return BLOCKS.snow; // snowy peaks
   return BLOCKS.grass;
 }
 
@@ -215,6 +263,11 @@ function surfaceBlock(top: number, seaLevel: number, height: number): Rgb {
  */
 export function generateWorld(params: WorldGenParams = DEFAULT_WORLD_PARAMS): WorldData {
   const { width, depth, height, seaLevel, seed } = params;
+  const detail = worldDetail(params);
+  // Layer thicknesses scale with resolution so the strata keep their proportions.
+  const topsoil = Math.max(1, Math.round(TOPSOIL_DEPTH * detail));
+  const snowStart = height - Math.max(1, Math.round(SNOW_LINE_FROM_TOP * detail));
+
   const cells: WorldCell[] = [];
   const push = (x: number, y: number, z: number, color: Rgb, emissive = 0): void => {
     cells.push({ x, y, z, r: color[0], g: color[1], b: color[2], emissive });
@@ -232,8 +285,8 @@ export function generateWorld(params: WorldGenParams = DEFAULT_WORLD_PARAMS): Wo
           y === 0
             ? BLOCKS.bedrock
             : y === top
-              ? surfaceBlock(top, seaLevel, height)
-              : y >= top - TOPSOIL_DEPTH
+              ? surfaceBlock(top, seaLevel, snowStart)
+              : y >= top - topsoil
                 ? BLOCKS.dirt
                 : BLOCKS.stone;
         push(x, y, z, jitteredColor(color, x, y, z, seed));
@@ -246,7 +299,7 @@ export function generateWorld(params: WorldGenParams = DEFAULT_WORLD_PARAMS): Wo
     }
   }
 
-  addTrees(cells, heightMap, params, push);
+  addTrees(cells, heightMap, params, snowStart, push);
   return { sizeX: width, sizeY: height, sizeZ: depth, cells };
 }
 
@@ -259,56 +312,70 @@ function addTrees(
   cells: WorldCell[],
   heightMap: Int32Array,
   params: WorldGenParams,
+  snowStart: number,
   push: (x: number, y: number, z: number, color: Rgb, emissive?: number) => void,
 ): void {
   const { width, depth, height, seaLevel, seed, treeDensity } = params;
+  const detail = worldDetail(params);
   const treeSeed = seed ^ 0x9e3779b9;
-  // Keep trees off the very edge so their canopies stay on the island.
-  const margin = 3;
+  // Tree feature sizes scale with resolution so trees stay the same size on the
+  // island rather than shrinking to twigs as the voxels get finer.
+  const leafRadius = Math.max(1, Math.round(2 * detail));
+  const trunkRadius = Math.max(0, Math.round(detail) - 1);
+  // Keep whole canopies on the island (off the shelving edges).
+  const margin = leafRadius + Math.round(3 * detail);
 
   for (let z = margin; z < depth - margin; z += 1) {
     for (let x = margin; x < width - margin; x += 1) {
       const top = heightMap[z * width + x]!;
-      const surface = surfaceBlock(top, seaLevel, height);
-      if (surface !== BLOCKS.grass) continue; // only on grass, not sand/snow
+      if (surfaceBlock(top, seaLevel, snowStart) !== BLOCKS.grass) continue; // grass only
       if (hash(x, z, treeSeed) > treeDensity) continue;
 
-      const trunkHeight = 4 + Math.floor(hash(x, z, treeSeed + 7) * 3); // 4..6
-      if (top + trunkHeight + 2 >= height) continue; // no headroom for the canopy
+      const trunkHeight = Math.max(2, Math.round((4 + Math.floor(hash(x, z, treeSeed + 7) * 3)) * detail));
+      if (top + trunkHeight + leafRadius + 2 >= height) continue; // no headroom
 
-      buildTree(x, top, z, trunkHeight, treeSeed, push);
+      buildTree(x, top, z, trunkHeight, trunkRadius, leafRadius, treeSeed, push);
     }
   }
 }
 
-/** Place one tree: a trunk, a rounded leaf canopy, and a chance of a lantern. */
+/**
+ * Place one tree: a trunk, a rounded (ellipsoid) leaf canopy, and a chance of a
+ * lantern. The trunk and canopy sizes are passed in so the same shape renders at
+ * any resolution — only the voxel count changes with detail.
+ */
 function buildTree(
   x: number,
   groundTop: number,
   z: number,
   trunkHeight: number,
+  trunkRadius: number,
+  leafRadius: number,
   treeSeed: number,
   push: (x: number, y: number, z: number, color: Rgb, emissive?: number) => void,
 ): void {
   const trunkTop = groundTop + trunkHeight;
   for (let y = groundTop + 1; y <= trunkTop; y += 1) {
-    push(x, y, z, jitteredColor(BLOCKS.trunk, x, y, z, treeSeed));
+    for (let tz = -trunkRadius; tz <= trunkRadius; tz += 1) {
+      for (let tx = -trunkRadius; tx <= trunkRadius; tx += 1) {
+        push(x + tx, y, z + tz, jitteredColor(BLOCKS.trunk, x + tx, y, z + tz, treeSeed));
+      }
+    }
   }
 
-  // A blocky canopy: a fat lower ring tapering to a cap, corners trimmed so it
-  // reads as a rounded crown rather than a cube.
-  const canopy: ReadonlyArray<{ dy: number; radius: number }> = [
-    { dy: -1, radius: 2 },
-    { dy: 0, radius: 2 },
-    { dy: 1, radius: 1 },
-    { dy: 2, radius: 0 },
-  ];
-  for (const { dy, radius } of canopy) {
-    const cy = trunkTop + dy;
-    for (let lz = -radius; lz <= radius; lz += 1) {
-      for (let lx = -radius; lx <= radius; lx += 1) {
-        if (Math.abs(lx) === radius && Math.abs(lz) === radius) continue; // trim corners
-        if (lx === 0 && lz === 0 && dy < 1) continue; // leave room for the trunk
+  // A slightly-taller-than-wide leaf blob sitting over the trunk top. Each layer's
+  // horizontal radius follows an ellipsoid profile so the crown is round and
+  // blocky, like a Minecraft tree, at whatever resolution.
+  const verticalRadius = leafRadius + 1;
+  const centreY = trunkTop + leafRadius - 1;
+  for (let dy = -verticalRadius; dy <= verticalRadius; dy += 1) {
+    const t = dy / (verticalRadius + 0.5);
+    const layerRadius = Math.round(leafRadius * Math.sqrt(Math.max(0, 1 - t * t)));
+    const cy = centreY + dy;
+    for (let lz = -layerRadius; lz <= layerRadius; lz += 1) {
+      for (let lx = -layerRadius; lx <= layerRadius; lx += 1) {
+        if (lx * lx + lz * lz > layerRadius * layerRadius + layerRadius) continue; // round off corners
+        if (Math.abs(lx) <= trunkRadius && Math.abs(lz) <= trunkRadius && cy <= trunkTop) continue; // don't bury the trunk
         push(x + lx, cy, z + lz, jitteredColor(BLOCKS.leaves, x + lx, cy, z + lz, treeSeed));
       }
     }
@@ -316,7 +383,7 @@ function buildTree(
 
   // A lantern beside the trunk on some trees — warm emissive points of light.
   if (hash(x, z, treeSeed + 31) < 0.28) {
-    push(x + 1, trunkTop, z, BLOCKS.lantern, 255);
+    push(x + trunkRadius + 1, trunkTop, z, BLOCKS.lantern, 255);
   }
 }
 
