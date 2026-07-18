@@ -16,7 +16,8 @@
  */
 
 import type { VoxelModel } from "./voxelModel";
-import { CUBE_FACES, modelDiagonal } from "./voxelModel";
+import { modelDiagonal } from "./voxelModel";
+import { CUBE_GEOMETRY } from "./cellGeometry";
 
 /** A directional light fixed in world space (not rotated with the model). */
 export interface ModelLight {
@@ -59,8 +60,9 @@ export interface RenderModelOptions {
   /**
    * Optional picking outputs (size × size). When provided, each pixel records the
    * index of the voxel whose face won it (`-1` where nothing was drawn) and which
-   * cube face (0..5, matching {@link CUBE_FACES} order; `-1` = none). Lets a 3D
-   * editor turn a cursor position into the voxel and face under it.
+   * face (the index into the model's cell geometry — 0..5 for a cube, 0..11 for a
+   * hexel; `-1` = none). Lets a 3D editor turn a cursor position into the voxel
+   * and face under it.
    */
   readonly pickVoxel?: Int32Array;
   readonly pickFace?: Int8Array;
@@ -135,6 +137,9 @@ export function renderVoxelModel(model: VoxelModel, options: RenderModelOptions 
     [0, 0, 0],
   ];
 
+  // Draw whichever cell the model was built from (cubes for older models).
+  const faces = (model.geometry ?? CUBE_GEOMETRY).faces;
+
   for (let v = 0; v < model.count; v += 1) {
     const vx = model.x[v]!;
     const vy = model.y[v]!;
@@ -142,8 +147,8 @@ export function renderVoxelModel(model: VoxelModel, options: RenderModelOptions 
     const mask = model.faces[v]!;
     const emissive = model.emissive[v]!;
 
-    for (let f = 0; f < CUBE_FACES.length; f += 1) {
-      const face = CUBE_FACES[f]!;
+    for (let f = 0; f < faces.length; f += 1) {
+      const face = faces[f]!;
       if ((mask & face.bit) === 0) continue; // face is inside the object
 
       // Rotate the face normal and cull it if it turns away from the viewer.

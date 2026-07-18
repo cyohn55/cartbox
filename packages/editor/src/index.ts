@@ -83,11 +83,21 @@ export {
   type PixelSource,
 } from "./render/voxelModel";
 export {
+  CUBE_GEOMETRY,
+  HEXEL_GEOMETRY,
+  geometryFor,
+  isValidSite,
+  type CellShape,
+  type CellGeometry,
+  type CellFace,
+} from "./render/cellGeometry";
+export {
   VoxelGrid,
   voxelGridToModel,
   scaleGridAxis,
   serializeVoxelGrid,
   deserializeVoxelGrid,
+  deserializeCellShape,
   MAX_VOXEL_GRID_DIM,
   VOXEL_GRID_VERSION,
   type VoxelCell,

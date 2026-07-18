@@ -50,6 +50,12 @@ export interface FloodOptions {
    * regardless of colour. Values outside the range are clamped.
    */
   readonly tolerance?: number;
+  /**
+   * The neighbour offsets that define connectivity. Defaults to the six cube
+   * faces; pass a hexel's twelve face offsets to flood over the rhombic lattice,
+   * so the Wand and Bucket follow whichever cells actually touch.
+   */
+  readonly neighbors?: readonly (readonly [number, number, number])[];
 }
 
 /**
@@ -74,6 +80,7 @@ export function floodRegion(
 
   const tolerance = Math.max(0, Math.min(1, options.tolerance ?? 0));
   const threshold = tolerance * MAX_COLOR_DISTANCE_SQ;
+  const neighbors = options.neighbors ?? NEIGHBORS;
 
   // Visited flags over the whole grid keep the traversal O(cells) and avoid
   // revisiting a cell reached by two paths.
@@ -85,7 +92,7 @@ export function floodRegion(
   while (stack.length > 0) {
     const [cx, cy, cz] = stack.pop()!;
     region.push(grid.index(cx, cy, cz));
-    for (const [dx, dy, dz] of NEIGHBORS) {
+    for (const [dx, dy, dz] of neighbors) {
       const nx = cx + dx;
       const ny = cy + dy;
       const nz = cz + dz;

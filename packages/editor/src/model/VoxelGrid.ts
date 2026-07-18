@@ -14,7 +14,8 @@
  * unit tests, and serializes to a compact JSON string for storage in a cart.
  */
 
-import { CUBE_FACES, type VoxelModel } from "../render/voxelModel";
+import { type VoxelModel } from "../render/voxelModel";
+import { CUBE_GEOMETRY, type CellGeometry, type CellShape } from "../render/cellGeometry";
 
 /** Largest grid edge, bounding storage and per-edit render cost. */
 export const MAX_VOXEL_GRID_DIM = 256;
@@ -169,6 +170,13 @@ export interface GridToModelOptions {
    * in a large grid still renders centred and tight — what a placed prop wants.
    */
   readonly center?: "grid" | "content";
+  /**
+   * The cell shape to build faces for. Defaults to {@link CUBE_GEOMETRY}, so
+   * existing callers (and every model built before hexels) keep producing cubes.
+   * Pass {@link HEXEL_GEOMETRY} to build rhombic hexels: each filled site's faces
+   * come from that geometry's twelve neighbours rather than the six cube faces.
+   */
+  readonly geometry?: CellGeometry;
 }
 
 /**
@@ -179,6 +187,7 @@ export interface GridToModelOptions {
  * so it rotates about its middle, matching {@link extrudeSprite}'s convention (y up).
  */
 export function voxelGridToModel(grid: VoxelGrid, options: GridToModelOptions = {}): GridVoxelModel {
+  const geometry = options.geometry ?? CUBE_GEOMETRY;
   // Filled bounding box, for content-centred sizing.
   let minX = Infinity;
   let minY = Infinity;
@@ -221,13 +230,13 @@ export function voxelGridToModel(grid: VoxelGrid, options: GridToModelOptions = 
     let vnx = 0;
     let vny = 0;
     let vnz = 0;
-    for (const face of CUBE_FACES) {
-      const [dx, dy, dz] = face.normal;
+    for (const face of geometry.faces) {
+      const [dx, dy, dz] = face.offset;
       if (!grid.isFilled(x + dx, y + dy, z + dz)) {
         mask |= face.bit;
-        vnx += dx;
-        vny += dy;
-        vnz += dz;
+        vnx += face.normal[0];
+        vny += face.normal[1];
+        vnz += face.normal[2];
       }
     }
     if (mask === 0) return; // fully enclosed — never visible
@@ -262,7 +271,8 @@ export function voxelGridToModel(grid: VoxelGrid, options: GridToModelOptions = 
     nx: Float32Array.from(nxs),
     ny: Float32Array.from(nys),
     nz: Float32Array.from(nzs),
-    faces: Uint8Array.from(faceMasks),
+    faces: Uint16Array.from(faceMasks),
+    geometry,
     gridIndex: Int32Array.from(gridIndices),
     originX: halfX,
     originY: halfY,
@@ -360,7 +370,7 @@ const PAYLOAD_MISMATCH = "Voxel grid payload size does not match its dimensions"
  * grids editable (see {@link VOXEL_GRID_VERSION}). Cell indices are little-endian
  * u32, decoded the same way on load, so the payload is platform-independent.
  */
-export function serializeVoxelGrid(grid: VoxelGrid): string {
+export function serializeVoxelGrid(grid: VoxelGrid, shape: CellShape = "cube"): string {
   const count = grid.filledCount;
   const indexBytes = new Uint8Array(count * 4);
   const indexView = new DataView(indexBytes.buffer);
@@ -383,10 +393,28 @@ export function serializeVoxelGrid(grid: VoxelGrid): string {
     sizeY: grid.sizeY,
     sizeZ: grid.sizeZ,
     count,
+    // Cube is the default and is omitted, so cube payloads are byte-identical to
+    // the pre-hexel format; only hexel sculpts carry the extra field.
+    ...(shape === "cube" ? {} : { shape }),
     indices: bytesToBase64(indexBytes),
     rgb: bytesToBase64(rgb),
     emissive: bytesToBase64(emissive),
   });
+}
+
+/**
+ * Read just the cell shape from a serialized grid, so the editor can restore
+ * whether a saved sculpt is cubes or hexels without rebuilding the whole grid.
+ * Defaults to `"cube"` for payloads written before hexels (and any malformed
+ * input), so old carts keep loading unchanged.
+ */
+export function deserializeCellShape(json: string): CellShape {
+  try {
+    const raw = JSON.parse(json) as { shape?: unknown };
+    return raw.shape === "hexel" ? "hexel" : "cube";
+  } catch {
+    return "cube";
+  }
 }
 
 /** Restore a legacy v1 dense payload (whole-volume RGBA + emissive base64). */

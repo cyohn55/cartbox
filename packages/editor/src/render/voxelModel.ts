@@ -15,6 +15,8 @@
  * from a sprite's authored material in the editor.
  */
 
+import type { CellGeometry } from "./cellGeometry";
+
 /** Straight-alpha RGBA source, `width*height*4`; alpha 0 marks an empty pixel. */
 export type PixelSource = Uint8ClampedArray;
 
@@ -44,11 +46,18 @@ export interface VoxelModel {
   readonly ny: Float32Array;
   readonly nz: Float32Array;
   /**
-   * Per-voxel bitmask of which of the six cube faces are exposed, using the bit
-   * of the matching {@link CUBE_FACES} entry. Lets a renderer draw each voxel as
-   * a real shaded cube (only its outer faces), rather than one flat splat.
+   * Per-voxel bitmask of which of the cell's faces are exposed, using the bit of
+   * the matching {@link CellGeometry} face. Lets a renderer draw each voxel as a
+   * real shaded cell (only its outer faces), rather than one flat splat. Sixteen
+   * bits so it holds a hexel's twelve rhombic faces as well as a cube's six.
    */
-  readonly faces: Uint8Array;
+  readonly faces: Uint16Array;
+  /**
+   * The cell geometry these faces belong to (cube or hexel). Optional for
+   * backward compatibility: a model without it is drawn as cubes, matching every
+   * model built before hexels existed.
+   */
+  readonly geometry?: CellGeometry;
 }
 
 /**
@@ -193,6 +202,6 @@ export function extrudeSprite(
     nx: Float32Array.from(nxs),
     ny: Float32Array.from(nys),
     nz: Float32Array.from(nzs),
-    faces: Uint8Array.from(faceMasks),
+    faces: Uint16Array.from(faceMasks),
   };
 }

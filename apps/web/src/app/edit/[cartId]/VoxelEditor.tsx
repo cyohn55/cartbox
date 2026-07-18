@@ -23,13 +23,19 @@ import {
   scaleGridAxis,
   serializeVoxelGrid,
   deserializeVoxelGrid,
+  deserializeCellShape,
   renderVoxelModel,
   floodRegion,
   cellCoords,
   CUBE_FACES,
+  HEXEL_GEOMETRY,
+  geometryFor,
+  isValidSite,
   MAX_VOXEL_GRID_DIM,
   shapeOffsets,
   solidOffsets,
+  type CellShape,
+  type CellGeometry,
   type VoxelShapeKind,
   type VoxelSolidKind,
   type VoxelShapeStyle,
@@ -69,8 +75,8 @@ function fitCell(contentDiagonal: number): number {
 }
 
 /** Default zoom framing a grid's *filled content* (not the whole grid) in the viewport. */
-function fitCellForGrid(grid: VoxelGrid): number {
-  const model = voxelGridToModel(grid, { center: "content" });
+function fitCellForGrid(grid: VoxelGrid, geometry?: CellGeometry): number {
+  const model = voxelGridToModel(grid, { center: "content", geometry });
   return fitCell(Math.hypot(model.sizeX, model.sizeY, model.sizeZ));
 }
 const PITCH_LIMIT = 1.45;
@@ -214,13 +220,26 @@ function shapePlaneCells(center: Cell, face: number, offsets: readonly ShapeOffs
   ]);
 }
 
-/** A small 3×3 floor platform, so a new model reads as a surface to build on. */
-function seededGrid(size: number): VoxelGrid {
+/**
+ * A small floor platform so a new model reads as a surface to build on. For
+ * cubes it is the 3×3 patch on the ground layer. For hexels only even-parity
+ * sites are valid, so the same 3×3 footprint is filled across the bottom two
+ * layers (whichever cells are on the FCC lattice), landing nine close-packed
+ * hexels — a comparable pad that is guaranteed to tile.
+ */
+function seededGrid(size: number, shape: CellShape = "cube"): VoxelGrid {
   const grid = new VoxelGrid(size, size, size);
   const mid = Math.floor(size / 2);
-  for (let dz = -1; dz <= 1; dz += 1) {
-    for (let dx = -1; dx <= 1; dx += 1) {
-      grid.set(mid + dx, 0, mid + dz, SEED_COLOR[0], SEED_COLOR[1], SEED_COLOR[2], 0);
+  const geometry = geometryFor(shape);
+  const topLayer = shape === "hexel" ? 1 : 0;
+  for (let y = 0; y <= topLayer; y += 1) {
+    for (let dz = -1; dz <= 1; dz += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        const x = mid + dx;
+        const z = mid + dz;
+        if (!isValidSite(geometry, x, y, z)) continue;
+        grid.set(x, y, z, SEED_COLOR[0], SEED_COLOR[1], SEED_COLOR[2], 0);
+      }
     }
   }
   return grid;
@@ -281,16 +300,66 @@ function drawHighlight(
   context.restore();
 }
 
-function loadGrid(serialized: string | null): VoxelGrid {
+/**
+ * Outline a hexel cell as a glowing rhombic-dodecahedron wireframe, projected
+ * with the same camera as {@link renderVoxelModel}, so the hovered target reads
+ * clearly for the hexel tools (the cube {@link drawHighlight} can't — a hexel has
+ * twelve rhombic faces, not a cube's edges). Strokes each face's outline.
+ */
+function drawHexelHighlight(
+  context: CanvasRenderingContext2D,
+  cell: Cell,
+  origin: readonly [number, number, number],
+  yaw: number,
+  pitch: number,
+  cellPx: number,
+  size: number,
+  color: string,
+): void {
+  const cx = cell[0] - origin[0];
+  const cy = cell[1] - origin[1];
+  const cz = cell[2] - origin[2];
+  const cosY = Math.cos(yaw);
+  const sinY = Math.sin(yaw);
+  const cosP = Math.cos(pitch);
+  const sinP = Math.sin(pitch);
+  const centre = size / 2;
+  const project = (x: number, y: number, z: number): [number, number] => {
+    const yawX = x * cosY + z * sinY;
+    const yawZ = -x * sinY + z * cosY;
+    const camY = y * cosP - yawZ * sinP;
+    return [centre + yawX * cellPx, centre - camY * cellPx];
+  };
+
+  context.save();
+  context.strokeStyle = color;
+  context.lineWidth = Math.max(1.5, cellPx * 0.1);
+  context.lineJoin = "round";
+  context.shadowColor = color;
+  context.shadowBlur = cellPx * 0.4;
+  for (const face of HEXEL_GEOMETRY.faces) {
+    context.beginPath();
+    face.corners.forEach((corner, index) => {
+      const [sx, sy] = project(cx + corner[0], cy + corner[1], cz + corner[2]);
+      if (index === 0) context.moveTo(sx, sy);
+      else context.lineTo(sx, sy);
+    });
+    context.closePath();
+    context.stroke();
+  }
+  context.restore();
+}
+
+function loadGrid(serialized: string | null, shape: CellShape): VoxelGrid {
   if (serialized) {
     try {
       const grid = deserializeVoxelGrid(serialized);
-      return grid.filledCount > 0 ? grid : seededGrid(grid.sizeX);
+      return grid.filledCount > 0 ? grid : seededGrid(grid.sizeX, shape);
     } catch {
       // fall through to a fresh grid on any corrupt payload
     }
   }
-  return seededGrid(DEFAULT_GRID);
+  return seededGrid(DEFAULT_GRID, shape);
 }
 
 interface VoxelEditorProps {
@@ -309,8 +378,15 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   // The grid is the source of truth; it is seeded once on mount from the cart's
   // model, or from the prop handed over to re-sculpt (the manager routes through
   // /edit/new, which clears the draft, so `model` is empty and the prop wins).
+  const initialPayload = model ?? pendingEdit?.voxel ?? null;
   const gridRef = useRef<VoxelGrid | null>(null);
-  if (gridRef.current === null) gridRef.current = loadGrid(model ?? pendingEdit?.voxel ?? null);
+  if (gridRef.current === null) gridRef.current = loadGrid(initialPayload, deserializeCellShape(initialPayload ?? ""));
+
+  // The cell shape (cube or hexel) is authored per model and restored from the
+  // saved payload. It selects the geometry every stage of the pipeline uses.
+  const [cellShape, setCellShape] = useState<CellShape>(() => deserializeCellShape(initialPayload ?? ""));
+  const geometry = useMemo<CellGeometry>(() => geometryFor(cellShape), [cellShape]);
+  const isHexel = cellShape === "hexel";
 
   const [gridSize, setGridSize] = useState(() => gridRef.current!.sizeX);
   const [rev, setRev] = useState(0); // bumped to rebuild the model after edits
@@ -354,7 +430,10 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   // Rebuild the renderable model whenever the grid changes (rev) or resizes.
   // Centre on the filled content so a small sculpt sits in the middle of the
   // viewport (and rotates about its own centre), not low against the grid floor.
-  const model3d = useMemo(() => voxelGridToModel(gridRef.current!, { center: "content" }), [rev, gridSize]);
+  const model3d = useMemo(
+    () => voxelGridToModel(gridRef.current!, { center: "content", geometry }),
+    [rev, gridSize, geometry],
+  );
 
   // The model actually drawn: identical geometry to `model3d` (so picking still
   // resolves through the same voxel/grid indices), but with selected voxels
@@ -378,7 +457,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
 
   // Zoom is the cube size in viewport pixels; it scales the model within a fixed
   // viewport, so it actually changes the on-screen size. Seed it to fit the model.
-  const [cell, setCell] = useState(() => fitCellForGrid(gridRef.current!));
+  const [cell, setCell] = useState(() => fitCellForGrid(gridRef.current!, geometry));
   const renderCell = Math.max(CELL_MIN, Math.min(CELL_MAX, cell));
 
   // Fixed-size render + picking buffers: allocated once, independent of grid size.
@@ -421,7 +500,10 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     if (hover) {
       const origin: [number, number, number] = [model3d.originX, model3d.originY, model3d.originZ];
       const color = HIGHLIGHT[tool];
-      if (tool === "shape" && solidShape) {
+      if (isHexel) {
+        // Hexels have no cube edges; outline the rhombic cell(s) the tool targets.
+        drawHexelHighlight(context, hover.cell, origin, yaw, pitch, renderCell, VIEWPORT, color);
+      } else if (tool === "shape" && solidShape) {
         // A solid's footprint is a whole volume; one bounding-box wireframe reads
         // clearly and stays cheap regardless of radius.
         drawHighlight(context, hover.cell, origin, yaw, pitch, renderCell, VIEWPORT, color, shapeRadius + 0.5);
@@ -438,14 +520,14 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
         }
       }
     }
-  }, [renderModel, model3d, yaw, pitch, renderCell, buffers, hover, tool, brushRadius, shapeKind, solidShape, shapeRadius, light]);
+  }, [renderModel, model3d, yaw, pitch, renderCell, buffers, hover, tool, isHexel, brushRadius, shapeKind, solidShape, shapeRadius, light]);
 
   /** Persist the current grid to undo/save; re-seed if it was emptied. */
   const commit = () => {
     const grid = gridRef.current!;
-    if (grid.filledCount === 0) gridRef.current = seededGrid(grid.sizeX);
+    if (grid.filledCount === 0) gridRef.current = seededGrid(grid.sizeX, cellShape);
     setRev((value) => value + 1);
-    onModelChange(serializeVoxelGrid(gridRef.current!));
+    onModelChange(serializeVoxelGrid(gridRef.current!, cellShape));
   };
 
   /** Resolve a canvas pixel to the picked grid cell and its face, or null. */
@@ -468,14 +550,16 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   /** The cell a tool would act on: the empty neighbour for Add, else the cell itself. */
   const targetCell = (pick: Pick, action: VoxelTool): Cell | null => {
     if (action === "add") {
-      const [nx, ny, nz] = CUBE_FACES[pick.face]!.normal;
+      // Grow against the picked face using that cell shape's own neighbour offset,
+      // so a hexel lands on the correct adjacent FCC site (not an axis step).
+      const [nx, ny, nz] = geometry.faces[pick.face]!.offset;
       const cell: Cell = [pick.x + nx, pick.y + ny, pick.z + nz];
       return gridRef.current!.inBounds(cell[0], cell[1], cell[2]) ? cell : null;
     }
     return [pick.x, pick.y, pick.z];
   };
 
-  /** Where the Shape tool centres: the empty neighbour of the clicked face. */
+  /** Where the Shape tool centres: the empty neighbour of the clicked face (cube only). */
   const shapeCenter = (pick: Pick): Cell => {
     const [nx, ny, nz] = CUBE_FACES[pick.face]!.normal;
     return [pick.x + nx, pick.y + ny, pick.z + nz];
@@ -526,7 +610,10 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     if (!center) return;
     const grid = gridRef.current!;
     const [r, g, b] = hexToRgb(paintHex);
-    for (const { du, dv, dw } of solidOffsets("cube", "fill", brushRadius)) {
+    // A cube brush steps by ±1 on each axis, which would land on off-lattice
+    // (odd-parity) sites for hexels, so hexels only ever stamp a single cell.
+    const radius = isHexel ? 0 : brushRadius;
+    for (const { du, dv, dw } of solidOffsets("cube", "fill", radius)) {
       const cx = center[0] + du;
       const cy = center[1] + dv;
       const cz = center[2] + dw;
@@ -553,7 +640,10 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
 
   /** Magic Wand: flood the connected same-colour run and select it (add on shift). */
   const applyWand = (pick: Pick, additive: boolean) => {
-    const region = floodRegion(gridRef.current!, pick.x, pick.y, pick.z, { tolerance: tolerancePct / 100 });
+    const region = floodRegion(gridRef.current!, pick.x, pick.y, pick.z, {
+      tolerance: tolerancePct / 100,
+      neighbors: geometry.neighbors,
+    });
     if (region.length === 0) return;
     setSelection((prev) => (additive ? new Set([...prev, ...region]) : new Set(region)));
   };
@@ -561,7 +651,10 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   /** Paint Bucket: flood the connected same-colour run and recolour it (erase on right-click). */
   const applyFill = (pick: Pick, erase: boolean) => {
     const grid = gridRef.current!;
-    const region = floodRegion(grid, pick.x, pick.y, pick.z, { tolerance: tolerancePct / 100 });
+    const region = floodRegion(grid, pick.x, pick.y, pick.z, {
+      tolerance: tolerancePct / 100,
+      neighbors: geometry.neighbors,
+    });
     if (region.length === 0) return;
     const [r, g, b] = hexToRgb(paintHex);
     for (const index of region) {
@@ -683,6 +776,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
         setScaleAxis(null);
         return;
       }
+      if (isHexel) return; // axis-scaling is disabled for hexels (breaks the lattice)
       const axis = AXIS_KEYS[event.key.toLowerCase()];
       if (axis === undefined) return;
       event.preventDefault();
@@ -690,7 +784,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [isHexel]);
 
   // Delete/Backspace removes the current selection; Escape clears it. Re-bound on
   // selection changes so the handler closes over the latest set. Ignored while a
@@ -722,13 +816,13 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     if (!canvas) return;
     const handler = (event: WheelEvent) => {
       event.preventDefault();
-      if (scaleAxis !== null) scaleActiveAxis(scaleAxis, event.deltaY < 0);
+      if (!isHexel && scaleAxis !== null) scaleActiveAxis(scaleAxis, event.deltaY < 0);
       else zoomBy(-Math.sign(event.deltaY) * CELL_STEP);
     };
     canvas.addEventListener("wheel", handler, { passive: false });
     return () => canvas.removeEventListener("wheel", handler);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scaleAxis]);
+  }, [scaleAxis, isHexel]);
 
   const resize = (next: number) => {
     const old = gridRef.current!;
@@ -736,22 +830,48 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     old.forEachFilled((x, y, z, voxel) => {
       if (x < next && y < next && z < next) grid.set(x, y, z, voxel.r, voxel.g, voxel.b, voxel.emissive);
     });
-    if (grid.filledCount === 0) gridRef.current = seededGrid(next);
+    if (grid.filledCount === 0) gridRef.current = seededGrid(next, cellShape);
     else gridRef.current = grid;
     setGridSize(next);
     clearSelection(); // indices are relative to the old grid dimensions
     // Refit the zoom so the resized model opens framed to the viewport.
-    setCell(fitCellForGrid(gridRef.current!));
+    setCell(fitCellForGrid(gridRef.current!, geometry));
     setRev((value) => value + 1);
-    onModelChange(serializeVoxelGrid(gridRef.current!));
+    onModelChange(serializeVoxelGrid(gridRef.current!, cellShape));
   };
 
   const clearAll = () => {
-    gridRef.current = seededGrid(gridSize);
+    gridRef.current = seededGrid(gridSize, cellShape);
     clearSelection();
-    setCell(fitCellForGrid(gridRef.current!));
+    setCell(fitCellForGrid(gridRef.current!, geometry));
     setRev((value) => value + 1);
-    onModelChange(serializeVoxelGrid(gridRef.current!));
+    onModelChange(serializeVoxelGrid(gridRef.current!, cellShape));
+  };
+
+  /**
+   * Switch the model between cubes and hexels. The two lattices don't share
+   * sites (hexels live only on even-parity coordinates), so a sculpt can't be
+   * faithfully reinterpreted — switching starts a fresh seed of the new shape.
+   * Guarded by a confirm when there is real work to lose (undo also restores it).
+   */
+  const switchShape = (next: CellShape) => {
+    if (next === cellShape) return;
+    const grid = gridRef.current!;
+    const seedCount = seededGrid(grid.sizeX, cellShape).filledCount;
+    if (grid.filledCount > seedCount && !window.confirm(`Switch to ${next}s? This starts a new model.`)) {
+      return;
+    }
+    gridRef.current = seededGrid(grid.sizeX, next);
+    setCellShape(next);
+    clearSelection();
+    setHover(null);
+    if (next === "hexel") {
+      setScaleAxis(null); // axis-scaling can't preserve the FCC lattice
+      if (tool === "shape") setTool("add"); // the plane Shape tool is cube-only
+    }
+    setCell(fitCellForGrid(gridRef.current!, geometryFor(next)));
+    setRev((value) => value + 1);
+    onModelChange(serializeVoxelGrid(gridRef.current!, next));
   };
 
   const [publishedNote, setPublishedNote] = useState<string | null>(null);
@@ -776,9 +896,33 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     <div className={styles.body}>
       <aside className={styles.rail}>
         <div>
+          <div className={styles.groupLabel}>Cells</div>
+          <div className={styles.segmented}>
+            <button
+              type="button"
+              className={`${styles.segment} ${!isHexel ? styles.segmentActive : ""}`}
+              onClick={() => switchShape("cube")}
+              aria-pressed={!isHexel}
+              title="Cubes — six square faces on the integer grid"
+            >
+              Cube
+            </button>
+            <button
+              type="button"
+              className={`${styles.segment} ${isHexel ? styles.segmentActive : ""}`}
+              onClick={() => switchShape("hexel")}
+              aria-pressed={isHexel}
+              title="Hexels — twelve-faced rhombic cells, close-packed on the FCC lattice"
+            >
+              Hex
+            </button>
+          </div>
+        </div>
+
+        <div>
           <div className={styles.groupLabel}>Tool</div>
           <div className={styles.toolGroup}>
-            {TOOLS.map((definition) => (
+            {TOOLS.filter((definition) => !(isHexel && definition.id === "shape")).map((definition) => (
               <button
                 key={definition.id}
                 type="button"
@@ -795,7 +939,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
           </div>
         </div>
 
-        {BRUSH_TOOLS.includes(tool) && (
+        {BRUSH_TOOLS.includes(tool) && !isHexel && (
           <div>
             <div className={styles.groupLabel}>Brush size</div>
             <div className={styles.rangeRow}>
@@ -969,6 +1113,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
           </div>
         </div>
 
+        {!isHexel && (
         <div>
           <div className={styles.groupLabel}>Scale axis · scroll</div>
           <div className={styles.segmented}>
@@ -991,6 +1136,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
               : "Press X, Y, or Z (or tap above), then scroll to scale that axis."}
           </p>
         </div>
+        )}
 
         <div>
           <div className={styles.groupLabel}>Lighting</div>
@@ -1084,13 +1230,24 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
             type="button"
             className={styles.toolBtn}
             onClick={() => void publishAsProp()}
-            title="Add this model to the onboarding backdrop scene"
+            disabled={isHexel}
+            title={
+              isHexel
+                ? "The backdrop scene renders cube props only — switch to Cube to publish."
+                : "Add this model to the onboarding backdrop scene"
+            }
+            style={isHexel ? { opacity: 0.5, cursor: "not-allowed" } : undefined}
           >
             <span className={styles.toolGlyph} aria-hidden>
               ★
             </span>
             {pendingEdit ? "Update prop" : "Publish as prop"}
           </button>
+          {isHexel && (
+            <p className={styles.panelMeta} style={{ lineHeight: 1.5, marginTop: 6 }}>
+              Hexel models aren’t supported as backdrop props yet.
+            </p>
+          )}
           {publishedNote && (
             <p className={styles.panelMeta} style={{ lineHeight: 1.5, marginTop: 8 }}>
               Published “{publishedNote}” to the scene.{" "}
@@ -1135,7 +1292,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
         />
         <div className={styles.hud}>
           <span className={styles.hudItem}>
-            <span className={styles.hudLabel}>Cubes</span>
+            <span className={styles.hudLabel}>{isHexel ? "Hexels" : "Cubes"}</span>
             <span className={`${styles.hudValue} data`}>{model3d.count}</span>
           </span>
           <span className={styles.hudItem}>
@@ -1184,7 +1341,9 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
                 ? "Click a voxel to select every connected voxel of the same colour; raise the tolerance to grab shaded neighbours. Shift-click adds another run. Then Paint or Delete the selection. Drag to orbit, scroll to zoom."
                 : tool === "fill"
                   ? "Click a voxel to flood the active palette colour through its connected same-colour run; right-click erases the run. Raise the tolerance to spread across shaded neighbours. Drag to orbit, scroll to zoom."
-                  : "The glowing outline shows where the brush lands. Click a face to add there, right-click to remove; raise Brush size to stamp a cube. Drag to orbit, scroll to zoom — or press X/Y/Z and scroll to scale the model."}
+                  : isHexel
+                    ? "Hexels are twelve-faced rhombic cells, close-packed on the FCC lattice. Click a face to grow the neighbouring hexel, right-click to remove, Paint to recolour. Drag to orbit, scroll to zoom."
+                    : "The glowing outline shows where the brush lands. Click a face to add there, right-click to remove; raise Brush size to stamp a cube. Drag to orbit, scroll to zoom — or press X/Y/Z and scroll to scale the model."}
         </p>
       </aside>
     </div>
