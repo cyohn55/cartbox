@@ -81,8 +81,9 @@ const PHOSPHOR_HEX: Record<OsPhosphorId, string> = {
 };
 
 /** How a customizable part is edited: a flat colour, the phosphor glow, the
- * scanline toggle, or the marquee scene. */
-type ParamKind = "color" | "phosphor" | "scanlines" | "marquee";
+ * scanline toggle, the marquee scene, the on-screen OS style, or the free-form
+ * pixel-art tools. */
+type ParamKind = "color" | "phosphor" | "scanlines" | "marquee" | "screen" | "draw";
 
 interface ParamDef {
   readonly id: string;
@@ -93,9 +94,10 @@ interface ParamDef {
 }
 
 /**
- * The parameter switch, in the order the screen presents it: the nine recolour
- * regions first (chassis → button letters), then the three screen/marquee
- * controls. Selecting one unfolds its control beneath the switch.
+ * The parameter selector, in the order the ‹ › switch steps through it: the nine
+ * recolour regions first (chassis → button letters), then the screen/marquee
+ * controls, and finally the free-form drawing tools. Exactly one option shows at
+ * a time, and its matching control unfolds beneath the selector.
  */
 const CUSTOMIZE_PARAMS: readonly ParamDef[] = [
   ...HANDHELD_REGIONS.map((region) => ({
@@ -104,9 +106,11 @@ const CUSTOMIZE_PARAMS: readonly ParamDef[] = [
     kind: "color" as const,
     regionId: region.id as keyof HandheldScheme,
   })),
+  { id: "screen", label: "Screen", kind: "screen" },
   { id: "phosphor", label: "Phosphor", kind: "phosphor" },
   { id: "scanlines", label: "Scanlines", kind: "scanlines" },
   { id: "marquee", label: "Marquee", kind: "marquee" },
+  { id: "draw", label: "Draw your own", kind: "draw" },
 ];
 
 /** Flatten a resumed draft into displayable art (a sprite sheet when animated). */
@@ -169,15 +173,21 @@ export function HandheldPicker() {
   // A free-form phosphor hue; when set it overrides the preset for extra variety.
   const [osPhosphorColor, setOsPhosphorColor] = useState<string | null>(null);
   const [osScanlines, setOsScanlines] = useState(true);
-  // Which slot of the premade ring is centred, and which parameter (if any) is
-  // unfolded in the customize switch. `activeParam` null keeps every control
-  // collapsed until the player chooses a part to change.
+  // Which slot of the premade ring is centred, and which parameter the ‹ ›
+  // selector is showing. Exactly one parameter is always selected (index into
+  // CUSTOMIZE_PARAMS); its control unfolds beneath the selector.
   const [carouselIndex, setCarouselIndex] = useState<number>(() => presetIndex(defaultPreset.id));
-  const [activeParam, setActiveParam] = useState<string | null>(null);
+  const [activeIndex, setActiveIndex] = useState<number>(0);
+  // How many premades flank the centre on each side, and the centre device's
+  // pixel width — both measured from the available space so the carousel fits as
+  // many handhelds as the screen allows and steps each flank down in size.
+  const [flanksPerSide, setFlanksPerSide] = useState<number>(0);
+  const [centerWidth, setCenterWidth] = useState<number>(0);
   // The device screen rectangle (0..1 fractions) from the measured layout, used
   // to overlay the live interface preview inside the handheld's screen.
   const [screenRect, setScreenRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const carouselRef = useRef<HTMLElement>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
   const backgroundUploadRef = useRef<HTMLInputElement>(null);
   // Where a touch began, so the carousel can turn a horizontal swipe into a
@@ -207,11 +217,75 @@ export function HandheldPicker() {
   const animationLabel = animationId ? animatedPresetView(animationId)?.label : null;
   const stageLabel = animationLabel ? `${chassisLabel} · ${animationLabel}` : chassisLabel;
 
-  // The premades flanking the centred handheld (one either side of the current
-  // slot), shown smaller as a preview of what the arrows/swipe will load.
+  // The premades flanking the centred handheld, shown at full opacity but
+  // stepping down in size the further they sit from the centre. The step is
+  // geometric (each flank is `ratio×` its inner neighbour); the ratio widens
+  // toward 1 as more flanks fit, so a crowded carousel steps down more gently
+  // than a sparse one (a lone flank lands at 75% — the sparse-case target).
   const presetCount = HANDHELD_PRESETS.length;
-  const leftPreset = HANDHELD_PRESETS[(carouselIndex - 1 + presetCount) % presetCount]!;
-  const rightPreset = HANDHELD_PRESETS[(carouselIndex + 1) % presetCount]!;
+  const flankRatio = 1 - 0.25 / Math.max(flanksPerSide, 1);
+  const flankScale = (step: number) => Math.pow(flankRatio, step);
+  const flankAt = (offset: number) =>
+    HANDHELD_PRESETS[((carouselIndex + offset) % presetCount + presetCount) % presetCount]!;
+  // Outermost-first on the left (…‑2, ‑1) and inner-first on the right (1, 2…),
+  // so the ring reads continuously left-to-right around the centre.
+  const leftFlanks = Array.from({ length: flanksPerSide }, (_, i) => flanksPerSide - i);
+  const rightFlanks = Array.from({ length: flanksPerSide }, (_, i) => i + 1);
+
+  // Jump straight to a flanked premade when it is clicked (the arrows/swipe move
+  // one at a time; clicking a distant flank brings it to the centre directly).
+  const goToPreset = (index: number) => {
+    setCarouselIndex(index);
+    choosePreset(HANDHELD_PRESETS[index]!);
+  };
+
+  // Measure the available width and the viewport height to decide how many
+  // handhelds fit and how big the centre one should be. Re-runs on resize.
+  useEffect(() => {
+    const carousel = carouselRef.current;
+    if (!carousel || !template) return;
+    const aspect = template.width / template.height; // device width ÷ height
+    const GAP = 10; // must match the carousel's flex gap
+    const ARROW = 44;
+
+    const measure = () => {
+      const available = carousel.clientWidth;
+      if (available <= 0) return;
+      // Centre size: tall enough to stay under the fold (≤52vh), never wider than
+      // the space allows on a narrow screen, and capped so it is not huge on a
+      // big display.
+      const byHeight = 0.52 * window.innerHeight * aspect;
+      const byWidth = available * 0.9;
+      const center = Math.max(150, Math.min(300, byHeight, byWidth));
+      const usable = available - 2 * (ARROW + GAP); // reserve the ‹ › buttons
+
+      // Take the most flanks (each side) whose stepped-down widths still fit.
+      let fits = 0;
+      for (let candidate = 5; candidate >= 1; candidate--) {
+        const ratio = 1 - 0.25 / candidate;
+        let flanksWidth = 0;
+        for (let step = 1; step <= candidate; step++) flanksWidth += Math.pow(ratio, step);
+        flanksWidth *= 2 * center; // both sides
+        const gaps = 2 * candidate * GAP;
+        if (center + flanksWidth + gaps <= usable) {
+          fits = candidate;
+          break;
+        }
+      }
+      setCenterWidth(center);
+      setFlanksPerSide(fits);
+    };
+
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(carousel);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [template]);
 
   // Load the shared chrome + region mask once, then restore any saved drawing so
   // a reload resumes it — both as the editable draft and in the live preview.
@@ -564,7 +638,9 @@ export function HandheldPicker() {
     }
   };
 
-  const activeDef = CUSTOMIZE_PARAMS.find((param) => param.id === activeParam) ?? null;
+  const activeDef = CUSTOMIZE_PARAMS[activeIndex]!;
+  const stepParam = (direction: 1 | -1) =>
+    setActiveIndex((index) => (index + direction + CUSTOMIZE_PARAMS.length) % CUSTOMIZE_PARAMS.length);
   const phosphorValue = osPhosphorColor ?? PHOSPHOR_HEX[osPhosphor];
 
   return (
@@ -578,6 +654,7 @@ export function HandheldPicker() {
 
       {/* --- Carousel: the working handheld centred, flanked by premades --- */}
       <section
+        ref={carouselRef}
         className={styles.carousel}
         aria-label="Handheld carousel"
         onTouchStart={onTouchStart}
@@ -592,18 +669,30 @@ export function HandheldPicker() {
           ‹
         </button>
 
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          className={`${styles.flank} ${styles.flankLeft}`}
-          src={handheldAssetUrl(`/handheld/preview/${leftPreset.id}.png`)}
-          alt={`${leftPreset.label} handheld`}
-          onClick={() => turnCarousel(-1)}
-          aria-hidden
-        />
+        {leftFlanks.map((step) => {
+          const index = ((carouselIndex - step) % presetCount + presetCount) % presetCount;
+          const preset = flankAt(-step);
+          return (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              key={`left-${step}`}
+              className={styles.flank}
+              style={{ width: centerWidth ? centerWidth * flankScale(step) : undefined }}
+              src={handheldAssetUrl(`/handheld/preview/${preset.id}.png`)}
+              alt={`${preset.label} handheld`}
+              onClick={() => goToPreset(index)}
+              aria-hidden
+            />
+          );
+        })}
 
         <div className={styles.centerStage}>
           <div className={styles.stageDevice}>
-            <canvas ref={canvasRef} className={styles.preview} />
+            <canvas
+              ref={canvasRef}
+              className={styles.preview}
+              style={{ width: centerWidth ? centerWidth : undefined }}
+            />
             {/* The live interface preview sits in the handheld's actual screen
                 window (positioned from the measured device layout). */}
             {screenRect && (
@@ -629,14 +718,22 @@ export function HandheldPicker() {
           <span className={styles.stageLabel}>{stageLabel}</span>
         </div>
 
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          className={`${styles.flank} ${styles.flankRight}`}
-          src={handheldAssetUrl(`/handheld/preview/${rightPreset.id}.png`)}
-          alt={`${rightPreset.label} handheld`}
-          onClick={() => turnCarousel(1)}
-          aria-hidden
-        />
+        {rightFlanks.map((step) => {
+          const index = (carouselIndex + step) % presetCount;
+          const preset = flankAt(step);
+          return (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              key={`right-${step}`}
+              className={styles.flank}
+              style={{ width: centerWidth ? centerWidth * flankScale(step) : undefined }}
+              src={handheldAssetUrl(`/handheld/preview/${preset.id}.png`)}
+              alt={`${preset.label} handheld`}
+              onClick={() => goToPreset(index)}
+              aria-hidden
+            />
+          );
+        })}
 
         <button
           type="button"
@@ -649,59 +746,44 @@ export function HandheldPicker() {
       </section>
       {animatedError && <p className={styles.error}>{animatedError}</p>}
 
-      {/* --- Customize: one parameter switch, one unfolding control --- */}
+      {/* --- Customize: a single ‹ › selector, one unfolding control --- */}
       <section className={styles.customize} aria-label="Customize">
-        <div className={styles.screenModeRow} role="group" aria-label="Screen mode">
-          <span className={styles.screenModeLabel}>Screen</span>
-          {OS_STYLES.map((option) => (
-            <button
-              key={option.id}
-              type="button"
-              className={`${styles.seg} ${osStyle === option.id ? styles.segActive : ""}`}
-              onClick={() => setOsStyle(option.id)}
-              aria-pressed={osStyle === option.id}
-            >
-              {option.label}
-            </button>
-          ))}
+        <div className={styles.paramSelector} role="group" aria-label="Part to customize">
+          <button
+            type="button"
+            className={styles.paramNav}
+            onClick={() => stepParam(-1)}
+            aria-label="Previous part"
+          >
+            ‹
+          </button>
+          <div className={styles.paramCurrent} aria-live="polite">
+            {activeDef.kind === "color" && activeDef.regionId && (
+              <span className={styles.paramDot} style={{ background: scheme[activeDef.regionId] }} aria-hidden />
+            )}
+            {activeDef.kind === "phosphor" && (
+              <span className={styles.paramDot} style={{ background: phosphorValue }} aria-hidden />
+            )}
+            <span className={styles.paramCurrentLabel}>{activeDef.label}</span>
+          </div>
+          <button
+            type="button"
+            className={styles.paramNav}
+            onClick={() => stepParam(1)}
+            aria-label="Next part"
+          >
+            ›
+          </button>
         </div>
 
-        <div className={styles.paramSwitch} role="tablist" aria-label="Part to customize">
-          {CUSTOMIZE_PARAMS.map((param) => {
-            const isActive = activeParam === param.id;
-            return (
-              <button
-                key={param.id}
-                type="button"
-                role="tab"
-                aria-selected={isActive}
-                className={`${styles.paramChip} ${isActive ? styles.paramChipActive : ""}`}
-                onClick={() => setActiveParam(isActive ? null : param.id)}
-              >
-                {param.kind === "color" && param.regionId && (
-                  <span className={styles.paramDot} style={{ background: scheme[param.regionId] }} aria-hidden />
-                )}
-                {param.kind === "phosphor" && (
-                  <span className={styles.paramDot} style={{ background: phosphorValue }} aria-hidden />
-                )}
-                {param.label}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* The control unfolds only once a part is picked; otherwise it stays
-            collapsed with a hint, per the "collapsed unless changing" rule. */}
+        {/* The control for the currently selected part unfolds beneath the
+            selector — only its parameters show, nothing else. */}
         <div className={styles.paramPanel}>
-          {!activeDef && (
-            <p className={styles.paramHint}>Pick a part above to change its colour or setting.</p>
-          )}
-
-          {activeDef?.kind === "color" && activeDef.regionId && (
+          {activeDef.kind === "color" && activeDef.regionId && (
             <div className={styles.colorControl}>
               <input
                 type="color"
-                className={styles.colorInputLarge}
+                className={styles.colorInputCircle}
                 value={scheme[activeDef.regionId]}
                 onChange={(event) => recolour(activeDef.regionId!, event.target.value)}
                 aria-label={`${activeDef.label} colour`}
@@ -710,10 +792,44 @@ export function HandheldPicker() {
                 <span className={styles.colorName}>{activeDef.label}</span>
                 <span className={styles.colorHex}>{scheme[activeDef.regionId]}</span>
               </div>
+              {/* The chassis (face) is where an uploaded background image lives,
+                  so its upload/remove controls sit with its colour. */}
+              {activeDef.regionId === "face" && (
+                <div className={styles.inlineButtons}>
+                  <button
+                    type="button"
+                    className={styles.secondary}
+                    onClick={() => backgroundUploadRef.current?.click()}
+                  >
+                    Upload chassis background
+                  </button>
+                  {background && (
+                    <button type="button" className={styles.secondary} onClick={clearBackground}>
+                      Remove background
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
-          {activeDef?.kind === "phosphor" && (
+          {activeDef.kind === "screen" && (
+            <div className={styles.segRow} role="group" aria-label="Screen mode">
+              {OS_STYLES.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  className={`${styles.seg} ${osStyle === option.id ? styles.segActive : ""}`}
+                  onClick={() => setOsStyle(option.id)}
+                  aria-pressed={osStyle === option.id}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {activeDef.kind === "phosphor" && (
             <div className={styles.phosphorControl}>
               <div className={styles.segRow} role="group" aria-label="Phosphor preset">
                 {OS_PHOSPHORS.map((option) => (
@@ -735,7 +851,7 @@ export function HandheldPicker() {
               <div className={styles.colorControl}>
                 <input
                   type="color"
-                  className={styles.colorInputLarge}
+                  className={styles.colorInputCircle}
                   value={phosphorValue}
                   onChange={(event) => setOsPhosphorColor(event.target.value)}
                   aria-label="Custom phosphor colour"
@@ -751,19 +867,19 @@ export function HandheldPicker() {
                 )}
               </div>
               {osStyle !== "pipboy" && (
-                <p className={styles.paramHint}>Phosphor applies to the Terminal screen — switch Screen to Terminal above.</p>
+                <p className={styles.paramHint}>Phosphor applies to the Terminal screen — pick the Screen part and choose Pip-Boy Terminal.</p>
               )}
             </div>
           )}
 
-          {activeDef?.kind === "scanlines" && (
+          {activeDef.kind === "scanlines" && (
             <label className={styles.toggleControl}>
               <input type="checkbox" checked={osScanlines} onChange={(event) => setOsScanlines(event.target.checked)} />
               <span>Scanline overlay on the terminal screen</span>
             </label>
           )}
 
-          {activeDef?.kind === "marquee" && (
+          {activeDef.kind === "marquee" && (
             <div className={styles.marqueeControl}>
               <div className={styles.presetGrid}>
                 <button
@@ -793,6 +909,31 @@ export function HandheldPicker() {
               </div>
             </div>
           )}
+
+          {activeDef.kind === "draw" && (
+            <div className={styles.drawControl}>
+              <div className={styles.inlineButtons}>
+                <button
+                  type="button"
+                  className={styles.secondary}
+                  onClick={() => setEditing(true)}
+                  disabled={!template}
+                >
+                  Edit Handheld
+                </button>
+                <a className={styles.secondary} href={handheldAssetUrl("/handheld/template.aseprite")} download>
+                  Download .aseprite template
+                </a>
+                <button type="button" className={styles.secondary} onClick={() => uploadRef.current?.click()}>
+                  Upload edited .aseprite
+                </button>
+              </div>
+              <p className={styles.paramHint}>
+                Edit the handheld pixel-by-pixel here, or download the template, recolour it in Aseprite (or any
+                pixel-art tool), and upload it back to apply your colours.
+              </p>
+            </div>
+          )}
         </div>
       </section>
 
@@ -800,31 +941,8 @@ export function HandheldPicker() {
         <button type="button" className={styles.primary} onClick={save} disabled={saving || !template}>
           {saving ? "Saving…" : "Use this handheld"}
         </button>
-        <div className={styles.secondaryRow}>
-          <button type="button" className={styles.secondary} onClick={() => setEditing(true)} disabled={!template}>
-            Draw your own
-          </button>
-          <a className={styles.secondary} href={handheldAssetUrl("/handheld/template.aseprite")} download>
-            Download .aseprite template
-          </a>
-          <button type="button" className={styles.secondary} onClick={() => uploadRef.current?.click()}>
-            Upload edited .aseprite
-          </button>
-          <button type="button" className={styles.secondary} onClick={() => backgroundUploadRef.current?.click()}>
-            Upload chassis background
-          </button>
-          {background && (
-            <button type="button" className={styles.secondary} onClick={clearBackground}>
-              Remove background
-            </button>
-          )}
-        </div>
         <input ref={uploadRef} type="file" accept=".aseprite,.ase" onChange={importAseprite} hidden />
         <input ref={backgroundUploadRef} type="file" accept="image/*" onChange={uploadBackground} hidden />
-        <p className={styles.hint}>
-          Want to draw your own? Download the template, recolour it in Aseprite or any pixel-art tool, then upload it
-          back here to apply your colours.
-        </p>
         {uploadNote && <p className={styles.hint}>{uploadNote}</p>}
         {error && <p className={styles.error}>{error}</p>}
       </section>

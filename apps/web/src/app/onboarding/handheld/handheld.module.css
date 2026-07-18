@@ -528,9 +528,19 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  max-width: 760px;
-  margin: 0 auto 20px;
+  /* Must match the GAP constant the fit calculation uses in HandheldPicker. */
+  gap: 10px;
+  /* Break out of the page's max-width so the carousel can use the whole screen
+     — the more room it has, the more premades it fits (the fit calculation reads
+     this element's width). The horizontal padding is the breathing room the
+     outermost flanks keep from the screen edges. */
+  width: 100vw;
+  max-width: 100vw;
+  margin: 0 calc(50% - 50vw) 20px;
+  padding: 0 24px;
+  box-sizing: border-box;
+  /* Clip any sub-pixel overflow rather than letting it scroll the page. */
+  overflow: hidden;
   /* Never let a swipe scroll the page horizontally on touch. */
   touch-action: pan-y;
 }
@@ -557,26 +567,20 @@
   transform: translateY(-1px);
 }
 
-/* The flanking premades: smaller than the centre, dimmed and clickable to turn
-   the carousel toward them. */
+/* The flanking premades: full-opacity, clickable to bring them to the centre.
+   Their width is set inline (centre width × a per-step scale) so each flank
+   steps down in size the further it sits from the centre. */
 .flank {
-  flex: 0 1 148px;
-  width: 148px;
-  max-width: 22vw;
+  flex: 0 0 auto;
   aspect-ratio: 867 / 1579;
   object-fit: contain;
   image-rendering: auto;
   cursor: pointer;
-  opacity: 0.62;
-  filter: saturate(0.85);
-  transform: scale(0.92);
-  transition: opacity 0.15s, transform 0.15s, filter 0.15s;
+  transition: transform 0.15s;
 }
 
 .flank:hover {
-  opacity: 0.9;
-  filter: none;
-  transform: scale(0.96);
+  transform: translateY(-2px);
 }
 
 /* The centred, live handheld — the largest tile, holding the preview canvas. */
@@ -593,13 +597,11 @@
   box-shadow: var(--shadow);
 }
 
-/* On mobile only the centre shows; the player swipes to change premades. */
+/* On a narrow screen the fit calculation resolves to zero flanks on its own, so
+   only the centre shows and the player swipes to change premades. */
 @media (max-width: 640px) {
-  .flank {
-    display: none;
-  }
   .carousel {
-    gap: 4px;
+    gap: 6px;
   }
 }
 
@@ -611,56 +613,54 @@
   gap: 14px;
 }
 
-.screenModeRow {
+/* The parameter selector: a ‹ › pair with the current part named between them.
+   Exactly one part shows at a time; the arrows step through CUSTOMIZE_PARAMS. */
+.paramSelector {
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: 10px;
 }
 
-.screenModeLabel {
-  font-family: var(--font-data);
-  font-size: 12px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: rgba(226, 233, 244, 0.82);
-  text-shadow: 0 1px 3px rgba(3, 6, 14, 0.85);
-}
-
-/* The parameter switch: a horizontally scrollable strip of part chips. */
-.paramSwitch {
-  display: flex;
-  gap: 8px;
-  overflow-x: auto;
-  padding: 4px 2px 8px;
-  scrollbar-width: thin;
-}
-
-.paramChip {
+.paramNav {
   flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  font-family: var(--font-data);
-  font-size: 12px;
-  white-space: nowrap;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  font-size: 22px;
+  line-height: 1;
   color: var(--text);
   background: var(--surface-raised);
   border: 1px solid var(--border-strong);
   border-radius: 999px;
-  padding: 8px 13px;
   cursor: pointer;
-  transition: border-color 0.12s, background 0.12s, color 0.12s;
+  transition: border-color 0.12s, background 0.12s, transform 0.12s;
 }
 
-.paramChip:hover {
+.paramNav:hover {
   border-color: var(--accent);
+  transform: translateY(-1px);
 }
 
-.paramChipActive {
-  color: var(--accent-ink);
-  background: var(--accent);
-  border-color: var(--accent);
+/* The name of the currently selected part, filling the space between the ‹ ›. */
+.paramCurrent {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 9px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.paramCurrentLabel {
+  font-family: var(--font-data);
+  font-size: 14px;
+  letter-spacing: 0.02em;
+  color: var(--text);
 }
 
 /* A small colour puck on colour/phosphor chips, previewing the current value. */
@@ -703,6 +703,53 @@
   border-radius: var(--radius-sm);
   background: none;
   cursor: pointer;
+}
+
+/* The round colour palette button used across the customize controls. The inner
+   swatch is clipped to a circle so the native colour input reads as a puck. */
+.colorInputCircle {
+  width: 52px;
+  height: 52px;
+  padding: 0;
+  border: 2px solid var(--border-strong);
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 0.12s, transform 0.12s;
+}
+
+.colorInputCircle:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.colorInputCircle::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.colorInputCircle::-webkit-color-swatch {
+  border: none;
+  border-radius: 50%;
+}
+
+.colorInputCircle::-moz-color-swatch {
+  border: none;
+  border-radius: 50%;
+}
+
+/* A wrapping row of secondary buttons that sits with a control (e.g. the chassis
+   background upload beside the chassis colour, or the drawing-tool buttons). */
+.inlineButtons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.drawControl {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .colorMeta {
