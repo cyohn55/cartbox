@@ -100,9 +100,11 @@ export function worldParamsForDetail(detail: number, seed: number = 20260717): W
 /**
  * The granularity of the shipped backdrop. Higher = finer, more numerous voxels
  * (and more render cost — see voxelWorldRenderer.ts); this is the one number to
- * change to make the world blockier or chunkier.
+ * change to make the world blockier or chunkier. At 4 the island is ~240×128×184
+ * blocks (~150k surface voxels, ~29ms/frame at 1080p and a ~350ms one-time build
+ * on mount) — near the practical ceiling before the voxel grid's 256-block cap.
  */
-export const DEFAULT_DETAIL = 2;
+export const DEFAULT_DETAIL = 4;
 
 /** A balanced default island: gentle hills, a pond or two, and scattered trees. */
 export const DEFAULT_WORLD_PARAMS: WorldGenParams = worldParamsForDetail(DEFAULT_DETAIL);
