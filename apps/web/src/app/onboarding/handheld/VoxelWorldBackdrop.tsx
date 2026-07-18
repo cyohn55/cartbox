@@ -19,15 +19,29 @@ import { VoxelWorldRenderer } from "@/lib/voxelWorldRenderer";
 import { useChassisColor } from "./chassisColor";
 import styles from "./handheld.module.css";
 
-// The world renders into a low-resolution buffer that CSS upscales with
-// nearest-neighbour, keeping the blocks crisp. This size balances detail against
-// the per-frame cost of re-projecting the island's visible shell.
-const BUFFER_WIDTH = 520;
-const BUFFER_HEIGHT = 320;
+// The world renders at the canvas's actual on-screen size so the cube edges stay
+// crisp (rendering into a small buffer and upscaling is what made them blurry and
+// shimmery). To keep the per-frame cost bounded on very large or high-DPI
+// displays, the render resolution is capped here; beyond the cap the browser
+// upscales the buffer with nearest-neighbour (see `.backdropCanvas`), which keeps
+// the blocks crisp rather than smearing them.
+const MAX_RENDER_WIDTH = 1920;
+const MAX_RENDER_HEIGHT = 1080;
 // The rotation is slow, so ~30fps looks identical to 60 at half the cost.
 const FRAME_INTERVAL_MS = 33;
 // A calm three-quarter view for motion-sensitive visitors' single still frame.
 const STILL_FRAME_SECONDS = 6.4;
+
+/** The buffer size to render at: the viewport, scaled down to fit the caps. */
+function renderBufferSize(): { width: number; height: number } {
+  const viewportWidth = Math.max(1, window.innerWidth);
+  const viewportHeight = Math.max(1, window.innerHeight);
+  const scale = Math.min(1, MAX_RENDER_WIDTH / viewportWidth, MAX_RENDER_HEIGHT / viewportHeight);
+  return {
+    width: Math.round(viewportWidth * scale),
+    height: Math.round(viewportHeight * scale),
+  };
+}
 
 export function VoxelWorldBackdrop() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -54,21 +68,44 @@ export function VoxelWorldBackdrop() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
+    // The island geometry is independent of the canvas size, so it is built once
+    // and reused when the renderer is rebuilt on a resize.
     const model = buildWorldModel();
-    const renderer = new VoxelWorldRenderer(canvas, model, {
-      bufferWidth: BUFFER_WIDTH,
-      bufferHeight: BUFFER_HEIGHT,
-      skyTop: skyRef.current.top,
-      skyHorizon: skyRef.current.horizon,
-    });
-    rendererRef.current = renderer;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-    // Motion-sensitive visitors get a single still frame of the world.
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      lastSecondsRef.current = STILL_FRAME_SECONDS;
-      renderer.render(STILL_FRAME_SECONDS);
+    // (Re)build the renderer at the current display resolution, disposing any
+    // previous one, and paint the current frame so a resize never shows a blank.
+    const rebuild = () => {
+      const { width, height } = renderBufferSize();
+      rendererRef.current?.destroy();
+      const renderer = new VoxelWorldRenderer(canvas, model, {
+        bufferWidth: width,
+        bufferHeight: height,
+        skyTop: skyRef.current.top,
+        skyHorizon: skyRef.current.horizon,
+      });
+      rendererRef.current = renderer;
+      renderer.render(lastSecondsRef.current);
+    };
+
+    lastSecondsRef.current = reducedMotion ? STILL_FRAME_SECONDS : 0;
+    rebuild();
+
+    // Rebuild on resize, coalescing bursts to the next frame so a drag resizes
+    // once it settles rather than reallocating buffers on every pixel.
+    let resizeFrame = 0;
+    const onResize = () => {
+      window.cancelAnimationFrame(resizeFrame);
+      resizeFrame = window.requestAnimationFrame(rebuild);
+    };
+    window.addEventListener("resize", onResize);
+
+    // Motion-sensitive visitors get a single still frame (already painted above).
+    if (reducedMotion) {
       return () => {
-        renderer.destroy();
+        window.removeEventListener("resize", onResize);
+        window.cancelAnimationFrame(resizeFrame);
+        rendererRef.current?.destroy();
         rendererRef.current = null;
       };
     }
@@ -80,7 +117,7 @@ export function VoxelWorldBackdrop() {
       if (now - lastPaint >= FRAME_INTERVAL_MS) {
         const seconds = (now - start) / 1000;
         lastSecondsRef.current = seconds;
-        renderer.render(seconds);
+        rendererRef.current?.render(seconds);
         lastPaint = now;
       }
       frame = window.requestAnimationFrame(loop);
@@ -88,8 +125,10 @@ export function VoxelWorldBackdrop() {
     frame = window.requestAnimationFrame(loop);
 
     return () => {
+      window.removeEventListener("resize", onResize);
+      window.cancelAnimationFrame(resizeFrame);
       window.cancelAnimationFrame(frame);
-      renderer.destroy();
+      rendererRef.current?.destroy();
       rendererRef.current = null;
     };
   }, []);

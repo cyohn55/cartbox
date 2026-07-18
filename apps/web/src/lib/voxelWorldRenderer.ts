@@ -5,17 +5,16 @@
  * panorama on a game's title screen.
  *
  * The island is a static {@link VoxelModel} (voxelWorld.ts). Each frame it is
- * drawn once at the current yaw into an oversampled square tile, then that tile is
- * smoothly scaled down onto the wide backdrop canvas over a sky gradient — the
- * downscale anti-aliases the cube edges so the slow rotation stays crisp instead
- * of crawling pixel by pixel. Buffers are allocated once and reused, so a frame is
- * just re-projecting the visible shell and one composite blit.
+ * drawn once at the current yaw into a square tile that is then blitted 1:1 onto
+ * the backdrop canvas over a sky gradient. Everything is rendered at the canvas's
+ * actual display resolution and composited without smoothing, so the cube faces
+ * keep hard, crisp edges — the blocky Minecraft look — instead of the soft, shimmery
+ * edges that a low-resolution buffer upscaled to the screen would produce. Buffers
+ * are allocated once and reused, so a frame is just re-projecting the visible shell
+ * and one straight blit.
  */
 
 import { renderVoxelModel, type ModelLight, type VoxelModel } from "@cartbox/editor";
-
-/** Oversampling for the anti-aliased island tile (≈N² samples per output pixel). */
-const SUPERSAMPLE = 2;
 
 /**
  * The fixed sun: a warm key light from the upper-front with a high ambient floor,
@@ -36,7 +35,7 @@ const ROTATION_PERIOD_SECONDS = 80;
 const CAMERA_PITCH = 0.62;
 
 export interface WorldRenderOptions {
-  /** Backdrop resolution — the wide, low-res buffer CSS upscales. */
+  /** Backdrop resolution in device pixels — the canvas's true render size. */
   readonly bufferWidth: number;
   readonly bufferHeight: number;
   /** Initial sky gradient endpoints (top of sky → horizon), each `#rrggbb`. */
@@ -61,7 +60,7 @@ export class VoxelWorldRenderer {
   private readonly tileImage: ImageData;
   private readonly out: Uint8ClampedArray;
   private readonly depth: Float32Array;
-  /** Oversampled square tile side, in pixels. */
+  /** Square tile side, in device pixels — equal to {@link destSize} (blitted 1:1). */
   private readonly tileSize: number;
   /** Output pixels per voxel inside the tile. */
   private readonly cell: number;
@@ -83,21 +82,23 @@ export class VoxelWorldRenderer {
     const context = canvas.getContext("2d");
     if (!context) throw new Error("2D context unavailable for the world backdrop");
     this.context = context;
-    this.context.imageSmoothingEnabled = true;
-    this.context.imageSmoothingQuality = "high";
+    // No smoothing anywhere: the tile is blitted 1:1, so a nearest copy keeps the
+    // cube faces hard-edged rather than softening them into a blur.
+    this.context.imageSmoothingEnabled = false;
     this.skyTop = options.skyTop;
     this.skyHorizon = options.skyHorizon;
 
-    // Size the island to fill most of the backdrop's height, then oversample the
-    // tile it renders into. The tile holds the model at any yaw (sized by the
-    // bounding diagonal so no corner clips as it spins).
+    // Size the island to fill most of the backdrop's height. The tile holds the
+    // model at any yaw (sized by the bounding diagonal so no corner clips as it
+    // spins) and, rendered at the canvas's true resolution, is drawn 1:1 — there
+    // is no down- or up-scale to blur or alias the edges.
     this.destSize = Math.round(options.bufferHeight * 1.34);
     this.destX = Math.round((options.bufferWidth - this.destSize) / 2);
     // Nudged down so the island sits a touch below centre, leaving the calmer sky
     // above for the picker's heading.
     this.destY = Math.round(options.bufferHeight * 0.5 - this.destSize * 0.46);
 
-    this.tileSize = this.destSize * SUPERSAMPLE;
+    this.tileSize = this.destSize;
     this.cell = Math.max(1, this.tileSize / (modelDiagonal(model) + 2));
 
     this.tileCanvas = document.createElement("canvas");
@@ -140,8 +141,9 @@ export class VoxelWorldRenderer {
     this.tileImage.data.set(this.out);
     this.tileContext.putImageData(this.tileImage, 0, 0);
 
-    // Smoothly downscale the oversized island tile onto the sky (its transparent
-    // corners let the sky show through around the island).
+    // Blit the island tile 1:1 onto the sky (its transparent corners let the sky
+    // show through around the island). Source and destination sizes are equal, so
+    // this is an exact copy with no resampling.
     this.context.drawImage(
       this.tileCanvas,
       0,
