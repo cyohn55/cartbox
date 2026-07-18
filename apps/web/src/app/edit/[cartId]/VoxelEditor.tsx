@@ -500,7 +500,19 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     if (hover) {
       const origin: [number, number, number] = [model3d.originX, model3d.originY, model3d.originZ];
       const color = HIGHLIGHT[tool];
-      if (isHexel) {
+      if (isHexel && tool === "shape" && !solidShape) {
+        // Preview the flat shape's footprint the stamp will actually place: its
+        // outline cells on the clicked plane, minus the off-lattice (odd-parity)
+        // sites the hexel stamp drops.
+        const footprint = shapePlaneCells(
+          hover.cell,
+          hover.face,
+          shapeOffsets(shapeKind as VoxelShapeKind, "outline", shapeRadius),
+        ).filter(([x, y, z]) => isValidSite(geometry, x, y, z));
+        for (const target of footprint) {
+          drawHexelHighlight(context, target, origin, yaw, pitch, renderCell, VIEWPORT, color);
+        }
+      } else if (isHexel) {
         // Hexels have no cube edges; outline the rhombic cell(s) the tool targets.
         drawHexelHighlight(context, hover.cell, origin, yaw, pitch, renderCell, VIEWPORT, color);
       } else if (tool === "shape" && solidShape) {
@@ -520,7 +532,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
         }
       }
     }
-  }, [renderModel, model3d, yaw, pitch, renderCell, buffers, hover, tool, isHexel, brushRadius, shapeKind, solidShape, shapeRadius, light]);
+  }, [renderModel, model3d, yaw, pitch, renderCell, buffers, hover, tool, isHexel, geometry, brushRadius, shapeKind, solidShape, shapeRadius, light]);
 
   /** Persist the current grid to undo/save; re-seed if it was emptied. */
   const commit = () => {
@@ -594,6 +606,10 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     const [r, g, b] = hexToRgb(paintHex);
     for (const [cx, cy, cz] of cells) {
       if (!grid.inBounds(cx, cy, cz)) continue;
+      // Hexels only exist on even-parity sites; a rectangle/sphere spans every
+      // integer cell, so drop the off-lattice half or the stamp would place
+      // overlapping, mis-rendered hexels.
+      if (!isValidSite(geometry, cx, cy, cz)) continue;
       if (erase) grid.clear(cx, cy, cz);
       else grid.set(cx, cy, cz, r, g, b);
     }
@@ -758,7 +774,9 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
 
   /** Stretch (grow) or squash the model along `axis` by one proportional step. */
   const scaleActiveAxis = (axis: GridAxis, grow: boolean) => {
-    const next = scaleGridAxis(gridRef.current!, axis, grow ? SCALE_STEP : 1 / SCALE_STEP);
+    const next = scaleGridAxis(gridRef.current!, axis, grow ? SCALE_STEP : 1 / SCALE_STEP, {
+      evenParity: geometry.evenParity,
+    });
     if (next.filledCount === 0) return; // squashed to nothing — keep what we had
     gridRef.current = next;
     clearSelection(); // cell indices no longer map to the same voxels
@@ -776,7 +794,6 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
         setScaleAxis(null);
         return;
       }
-      if (isHexel) return; // axis-scaling is disabled for hexels (breaks the lattice)
       const axis = AXIS_KEYS[event.key.toLowerCase()];
       if (axis === undefined) return;
       event.preventDefault();
@@ -784,7 +801,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [isHexel]);
+  }, []);
 
   // Delete/Backspace removes the current selection; Escape clears it. Re-bound on
   // selection changes so the handler closes over the latest set. Ignored while a
@@ -816,7 +833,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     if (!canvas) return;
     const handler = (event: WheelEvent) => {
       event.preventDefault();
-      if (!isHexel && scaleAxis !== null) scaleActiveAxis(scaleAxis, event.deltaY < 0);
+      if (scaleAxis !== null) scaleActiveAxis(scaleAxis, event.deltaY < 0);
       else zoomBy(-Math.sign(event.deltaY) * CELL_STEP);
     };
     canvas.addEventListener("wheel", handler, { passive: false });
@@ -865,10 +882,6 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     setCellShape(next);
     clearSelection();
     setHover(null);
-    if (next === "hexel") {
-      setScaleAxis(null); // axis-scaling can't preserve the FCC lattice
-      if (tool === "shape") setTool("add"); // the plane Shape tool is cube-only
-    }
     setCell(fitCellForGrid(gridRef.current!, geometryFor(next)));
     setRev((value) => value + 1);
     onModelChange(serializeVoxelGrid(gridRef.current!, next));
@@ -880,7 +893,8 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   const publishAsProp = async () => {
     const name = window.prompt("Name this backdrop prop", pendingEdit?.name ?? "Voxel prop")?.trim();
     if (!name) return;
-    const voxel = serializeVoxelGrid(gridRef.current!);
+    // Persist the cell shape so a hexel sculpt is rebuilt as hexels in the scene.
+    const voxel = serializeVoxelGrid(gridRef.current!, cellShape);
     const base = loadWorkingSet() ?? (await loadPublishedSet());
     const targetId = pendingEdit?.targetId;
     const props =
@@ -922,7 +936,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
         <div>
           <div className={styles.groupLabel}>Tool</div>
           <div className={styles.toolGroup}>
-            {TOOLS.filter((definition) => !(isHexel && definition.id === "shape")).map((definition) => (
+            {TOOLS.map((definition) => (
               <button
                 key={definition.id}
                 type="button"
@@ -1113,7 +1127,6 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
           </div>
         </div>
 
-        {!isHexel && (
         <div>
           <div className={styles.groupLabel}>Scale axis · scroll</div>
           <div className={styles.segmented}>
@@ -1136,7 +1149,6 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
               : "Press X, Y, or Z (or tap above), then scroll to scale that axis."}
           </p>
         </div>
-        )}
 
         <div>
           <div className={styles.groupLabel}>Lighting</div>
@@ -1230,24 +1242,13 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
             type="button"
             className={styles.toolBtn}
             onClick={() => void publishAsProp()}
-            disabled={isHexel}
-            title={
-              isHexel
-                ? "The backdrop scene renders cube props only — switch to Cube to publish."
-                : "Add this model to the onboarding backdrop scene"
-            }
-            style={isHexel ? { opacity: 0.5, cursor: "not-allowed" } : undefined}
+            title="Add this model to the onboarding backdrop scene"
           >
             <span className={styles.toolGlyph} aria-hidden>
               ★
             </span>
             {pendingEdit ? "Update prop" : "Publish as prop"}
           </button>
-          {isHexel && (
-            <p className={styles.panelMeta} style={{ lineHeight: 1.5, marginTop: 6 }}>
-              Hexel models aren’t supported as backdrop props yet.
-            </p>
-          )}
           {publishedNote && (
             <p className={styles.panelMeta} style={{ lineHeight: 1.5, marginTop: 8 }}>
               Published “{publishedNote}” to the scene.{" "}

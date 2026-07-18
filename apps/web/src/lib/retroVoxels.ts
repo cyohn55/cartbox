@@ -7,7 +7,15 @@
  * editor's voxel core.
  */
 
-import { extrudeSprite, voxelGridToModel, deserializeVoxelGrid, type VoxelModel, type ModelLight } from "@cartbox/editor";
+import {
+  extrudeSprite,
+  voxelGridToModel,
+  deserializeVoxelGrid,
+  deserializeCellShape,
+  geometryFor,
+  type VoxelModel,
+  type ModelLight,
+} from "@cartbox/editor";
 
 import type { MotionParams } from "./bobSpin";
 import { decodePropArt, type BackdropPropSet, type StoredBackdropProp } from "./backdropProps";
@@ -52,7 +60,12 @@ export function buildRetroProps(): VoxelProp[] {
  */
 export function propToVoxelModel(prop: StoredBackdropProp): VoxelModel | null {
   try {
-    if (prop.voxel) return voxelGridToModel(deserializeVoxelGrid(prop.voxel), { center: "content" });
+    if (prop.voxel) {
+      // Build with the sculpt's own cell shape so a hexel prop renders as
+      // rhombic hexels, not cubes; the shape rides in the serialized payload.
+      const geometry = geometryFor(deserializeCellShape(prop.voxel));
+      return voxelGridToModel(deserializeVoxelGrid(prop.voxel), { center: "content", geometry });
+    }
     if (prop.art) {
       const { albedo, emissive, width, height } = decodePropArt(prop.art);
       return extrudeSprite(albedo, width, height, { depth: prop.depth, emissive });

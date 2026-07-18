@@ -283,6 +283,19 @@ export function voxelGridToModel(grid: VoxelGrid, options: GridToModelOptions = 
 /** A grid axis: 0 = x, 1 = y, 2 = z. */
 export type GridAxis = 0 | 1 | 2;
 
+/** Options for {@link scaleGridAxis}. */
+export interface ScaleGridOptions {
+  /**
+   * Keep the FCC even-parity invariant (set for hexels). Duplicating or dropping
+   * a single layer shifts a coordinate by one, which flips `(x + y + z)` parity
+   * and would push a whole layer of hexels onto invalid, off-lattice sites. When
+   * true, each resampled layer is copied from a source of matching parity — the
+   * copy offset is always even — so every output cell stays a valid hexel site
+   * and no layer is lost. Cubes leave this false and scale by single layers.
+   */
+  readonly evenParity?: boolean;
+}
+
 /**
  * Stretch or squash the grid's filled content along one axis by `factor`, into a
  * new grid of the same dimensions. Rescaling is nearest-neighbour over the
@@ -293,9 +306,15 @@ export type GridAxis = 0 | 1 | 2;
  * `factor > 1` lengthens (always by at least one layer so a wheel notch is
  * visible), `factor < 1` shortens; the result is clamped to the axis size and
  * anchored at the content's low edge (shifted in only if it would overflow). An
- * empty grid is returned unchanged.
+ * empty grid is returned unchanged. With {@link ScaleGridOptions.evenParity}, the
+ * resampling copies same-parity layers so hexel sculpts keep tiling.
  */
-export function scaleGridAxis(grid: VoxelGrid, axis: GridAxis, factor: number): VoxelGrid {
+export function scaleGridAxis(
+  grid: VoxelGrid,
+  axis: GridAxis,
+  factor: number,
+  options: ScaleGridOptions = {},
+): VoxelGrid {
   const size = [grid.sizeX, grid.sizeY, grid.sizeZ][axis]!;
   let min = Infinity;
   let max = -Infinity;
@@ -316,12 +335,22 @@ export function scaleGridAxis(grid: VoxelGrid, axis: GridAxis, factor: number): 
   newLength = Math.max(1, Math.min(size, newLength));
 
   // Keep the content's low edge fixed unless the longer span would overflow.
-  const start = Math.max(0, Math.min(min, size - newLength));
+  let start = Math.max(0, Math.min(min, size - newLength));
+  // For hexels, anchor the low edge on the same parity as the content so a copy
+  // offset (target − source) stays even; nudge inward if the parity nudge fell
+  // off the grid's low edge.
+  if (options.evenParity) {
+    if ((((start - min) % 2) + 2) % 2 !== 0) start = start > 0 ? start - 1 : start + 1;
+  }
 
   for (let t = 0; t < newLength; t += 1) {
-    const source = min + Math.min(oldLength - 1, Math.floor((t * oldLength) / newLength));
-    const target = start + t;
-    copyGridLayer(grid, out, axis, source, target);
+    let sourceOffset = Math.min(oldLength - 1, Math.floor((t * oldLength) / newLength));
+    if (options.evenParity && (((sourceOffset - t) % 2) + 2) % 2 !== 0) {
+      // Match the source layer's parity to the target's, so the copy preserves
+      // every cell's validity; step to the nearest in-range same-parity layer.
+      sourceOffset = sourceOffset + 1 < oldLength ? sourceOffset + 1 : sourceOffset - 1;
+    }
+    copyGridLayer(grid, out, axis, min + sourceOffset, start + t);
   }
   return out;
 }

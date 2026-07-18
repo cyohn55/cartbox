@@ -118,4 +118,49 @@ for (const axis of [0, 1, 2]) {
   check("stretch clamps to the grid size", len === 10 && min >= 0 && max < 10);
 }
 
+/** A solid FCC block: every even-parity site (a valid hexel) in [0,w)×[0,h)×[0,d). */
+const hexelBox = (size, w, h, d, color = [90, 160, 220]) => {
+  const grid = new VoxelGrid(size, size, size);
+  for (let z = 0; z < d; z += 1)
+    for (let y = 0; y < h; y += 1)
+      for (let x = 0; x < w; x += 1) if ((x + y + z) % 2 === 0) grid.set(x, y, z, color[0], color[1], color[2]);
+  return grid;
+};
+
+/** True when every filled cell sits on the even-parity (valid hexel) sublattice. */
+const allEvenParity = (grid) => {
+  let ok = true;
+  grid.forEachFilled((x, y, z) => {
+    if ((x + y + z) % 2 !== 0) ok = false;
+  });
+  return ok;
+};
+
+// 8. The cube path (evenParity off) DOES corrupt a hexel sculpt's parity when it
+//    duplicates a single layer — the very reason the option exists.
+{
+  const grid = hexelBox(24, 6, 6, 6);
+  const naive = scaleGridAxis(grid, 0, 2); // single-layer duplication flips parity
+  check("without evenParity a hexel scale lands on invalid sites", !allEvenParity(naive));
+}
+
+// 9. With evenParity, every axis keeps the sculpt on the FCC lattice while still
+//    growing/shrinking, and no content is lost to invalid-site drops.
+for (const axis of [0, 1, 2]) {
+  const grid = hexelBox(28, 6, 6, 6);
+  const before = grid.filledCount;
+  const grown = scaleGridAxis(grid, axis, 1.8, { evenParity: true });
+  check(`hexel scale axis ${axis} stays on the even-parity lattice`, allEvenParity(grown));
+  check(`hexel scale axis ${axis} grows the extent`, extent(grown, axis)[2] > extent(grid, axis)[2]);
+  check(`hexel scale axis ${axis} keeps a full sculpt (no parity drops)`, grown.filledCount >= before);
+}
+
+// 10. Shrinking a hexel sculpt also preserves parity and keeps it non-empty.
+{
+  const grid = hexelBox(24, 10, 4, 4);
+  const shrunk = scaleGridAxis(grid, 0, 0.5, { evenParity: true });
+  check("hexel shrink preserves parity", allEvenParity(shrunk));
+  check("hexel shrink keeps content", shrunk.filledCount > 0);
+}
+
 console.log(`voxelScaleAxis: ${passed}/${passed} checks passed`);
