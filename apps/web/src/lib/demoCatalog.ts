@@ -8,6 +8,8 @@
  * otherwise.
  */
 
+import type { CatalogEntry } from "./catalog";
+import { runtimeForConsoleModel } from "./catalog";
 import { withBasePath } from "./staticSite";
 
 export interface DemoCart {
@@ -81,6 +83,33 @@ export const DEMO_CARTS: readonly DemoCart[] = [
 
 /** Cart id used for the editable scratch cart in demo mode (localStorage-backed). */
 export const DEMO_DRAFT_CART_ID = "draft";
+
+/**
+ * Ordering anchor for the demo build's unified Browse grid.
+ *
+ * Demo carts carry no timestamp — the array is simply ordered newest-first — but
+ * merging them with demo titles needs a comparable date. Synthesising one per
+ * index off a fixed epoch preserves the authored order and keeps the static
+ * build deterministic, which a `Date.now()`-relative scheme would not.
+ */
+const DEMO_CART_EPOCH_MS = Date.parse("2026-07-14T00:00:00.000Z");
+const DEMO_CART_SPACING_MS = 24 * 60 * 60 * 1000;
+
+/** Adapts a baked-in demo cart to the unified catalog view model. */
+export function demoCartToEntry(cart: DemoCart, index: number): CatalogEntry {
+  return {
+    kind: "cart",
+    id: cart.id,
+    name: cart.title,
+    description: cart.description,
+    runtime: runtimeForConsoleModel(cart.consoleModel),
+    priceCents: cart.priceCents,
+    plays: cart.plays,
+    thumbUrl: demoThumbUrl(cart.id),
+    href: `/play/${cart.id}`,
+    createdAt: new Date(DEMO_CART_EPOCH_MS - index * DEMO_CART_SPACING_MS),
+  };
+}
 
 export function findDemoCart(cartId: string): DemoCart | undefined {
   return DEMO_CARTS.find((cart) => cart.id === cartId);
