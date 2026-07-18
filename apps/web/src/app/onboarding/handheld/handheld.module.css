@@ -30,13 +30,17 @@
   opacity: 1;
 }
 
-/* A soft vignette so the busy scene calms toward the centre where the picker
-   sits, keeping cards and text legible without hiding the art. */
+/* A soft top scrim plus an edge vignette: the scrim gives the heading and its
+   muted subtitle contrast against the bright sky, while the vignette calms the
+   busy scene toward the centre where the picker sits — both keeping cards and
+   text legible without hiding the voxel world below. */
 .backdrop::after {
   content: "";
   position: absolute;
   inset: 0;
-  background: radial-gradient(125% 105% at 50% 42%, rgba(6, 8, 16, 0) 40%, rgba(6, 8, 16, 0.22) 74%, rgba(5, 7, 11, 0.44) 100%);
+  background:
+    linear-gradient(180deg, rgba(8, 12, 22, 0.5) 0%, rgba(8, 12, 22, 0.24) 12%, rgba(8, 12, 22, 0) 30%),
+    radial-gradient(125% 105% at 50% 42%, rgba(6, 8, 16, 0) 44%, rgba(6, 8, 16, 0.16) 76%, rgba(5, 7, 11, 0.4) 100%);
 }
 
 .head {
@@ -55,10 +59,12 @@
 }
 
 .subtitle {
-  color: var(--muted);
+  /* A soft off-white rather than the dim --muted: this text sits over the bright
+     voxel sky, so it needs a light tone with a firm shadow to stay legible. */
+  color: rgba(233, 239, 248, 0.9);
   margin: 0;
   font-size: 15px;
-  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.65);
+  text-shadow: 0 1px 3px rgba(3, 6, 14, 0.85), 0 1px 10px rgba(3, 6, 14, 0.6);
 }
 
 .layout {
@@ -150,8 +156,9 @@
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--muted);
-  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.7);
+  /* Light enough to read over the bright sky (see .subtitle). */
+  color: rgba(226, 233, 244, 0.82);
+  text-shadow: 0 1px 3px rgba(3, 6, 14, 0.85), 0 1px 8px rgba(3, 6, 14, 0.55);
 }
 
 .presetGrid {
