@@ -34,7 +34,7 @@ import { isStaticExport } from "@/lib/staticSite";
 import { CUSTOM_PRESET_ID, CUSTOM_ART_PRESET_ID, normalizeHandheld, type HandheldArt, type StoredHandheld } from "@/lib/handheld";
 import { loadHandheldTemplate } from "@/lib/handheldTemplate";
 import { saveHandheldDraft, loadHandheldDraft, clearHandheldDraft, type HandheldDraft } from "@/lib/handheldDraft";
-import { assembleSheetCanvas, sliceSheet } from "@/lib/handheldSheet";
+import { assembleSheetCanvas } from "@/lib/handheldSheet";
 import { ANIMATED_PRESETS, animatedPresetView, renderAnimatedArt } from "@/lib/handheldAnimated";
 import { decodeBackgroundSource, readImageBackground, renderBackgroundArt } from "@/lib/handheldBackground";
 import {
@@ -143,23 +143,20 @@ function playArt(canvas: HTMLCanvasElement, art: HandheldArt): () => void {
   const image = new Image();
 
   if (art.frames && art.frames > 1) {
+    const count = art.frames;
     let timer: number | undefined;
     image.onload = () => {
       canvas.width = art.w;
       canvas.height = art.h;
-      const frames = sliceSheet(image, art.w, art.h, art.frames!).map((url) => {
-        const frame = new Image();
-        frame.src = url;
-        return frame;
-      });
+      // Draw each frame straight from the already-loaded sheet via a source rect
+      // (the sheet is `art.w * count` wide). Slicing into separate Images would
+      // decode asynchronously and leave the canvas blank between the resize and
+      // the first decode — this paints the first frame synchronously instead.
       let index = 0;
       const paint = () => {
-        const frame = frames[index];
-        if (frame) {
-          context.clearRect(0, 0, canvas.width, canvas.height);
-          context.drawImage(frame, 0, 0);
-        }
-        index = (index + 1) % frames.length;
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        context.drawImage(image, index * art.w, 0, art.w, art.h, 0, 0, art.w, art.h);
+        index = (index + 1) % count;
       };
       paint();
       timer = window.setInterval(paint, art.durationMs ?? 120);
@@ -183,9 +180,48 @@ function playArt(canvas: HTMLCanvasElement, art: HandheldArt): () => void {
 /**
  * Rendered animated marquees for the premades, keyed by preset id. Premade
  * colours are fixed, so each is rendered once and reused across carousel turns
- * (rendering every frame of a scene per flank is expensive to repeat).
+ * (rendering every frame of a scene per flank is expensive to repeat). The cache
+ * is pre-warmed on load so flanks render their animation instantly instead of
+ * computing it lazily as each one appears.
  */
 const flankArtCache = new Map<string, HandheldArt>();
+/** Presets whose art is mid-render, so a warm request is never duplicated. */
+const flankArtPending = new Set<string>();
+/** Notified whenever a preset's art lands in the cache, so mounted flanks swap. */
+const flankArtListeners = new Set<() => void>();
+
+function subscribeFlankArt(listener: () => void): () => void {
+  flankArtListeners.add(listener);
+  return () => {
+    flankArtListeners.delete(listener);
+  };
+}
+
+/**
+ * Render one premade's animated marquee into the cache exactly once, off the
+ * critical path. The work yields to the browser (idle callback) so warming the
+ * whole ring never blocks the first paint or an interaction.
+ */
+function ensureFlankArt(template: HandheldTemplate, preset: Premade, marqueeId: string | null): void {
+  if (!marqueeId || flankArtCache.has(preset.id) || flankArtPending.has(preset.id)) return;
+  const view = animatedPresetView(marqueeId);
+  if (!view) return;
+  flankArtPending.add(preset.id);
+  const run = () => {
+    try {
+      flankArtCache.set(preset.id, renderAnimatedArt(template, preset.scheme, view));
+    } catch {
+      /* Leave it uncached; the flank keeps showing its static chassis. */
+    }
+    flankArtPending.delete(preset.id);
+    flankArtListeners.forEach((listener) => listener());
+  };
+  if (typeof window.requestIdleCallback === "function") {
+    window.requestIdleCallback(run, { timeout: 800 });
+  } else {
+    window.setTimeout(run, 0);
+  }
+}
 
 /**
  * A flanking premade: its chassis rendered live (so it always matches the
@@ -211,44 +247,23 @@ function PremadeFlank({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [art, setArt] = useState<HandheldArt | null>(() => flankArtCache.get(preset.id) ?? null);
 
-  // Render (and cache) this premade's animated marquee off the paint path so a
-  // batch of newly-revealed flanks doesn't block the first frame.
+  // Ensure this premade's marquee is queued for rendering, then adopt it from the
+  // cache the moment it lands (whether this flank or the pre-warm rendered it).
   useEffect(() => {
-    if (!marqueeId) {
-      setArt(null);
-      return;
-    }
-    const cached = flankArtCache.get(preset.id);
-    if (cached) {
-      setArt(cached);
-      return;
-    }
-    const view = animatedPresetView(marqueeId);
-    if (!view) {
-      setArt(null);
-      return;
-    }
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      try {
-        const rendered = renderAnimatedArt(template, preset.scheme, view);
-        flankArtCache.set(preset.id, rendered);
-        if (!cancelled) setArt(rendered);
-      } catch {
-        /* Fall back to the static chassis if a frame can't render. */
-      }
-    }, 0);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
+    ensureFlankArt(template, preset, marqueeId);
+    const sync = () => {
+      const cached = marqueeId ? flankArtCache.get(preset.id) ?? null : null;
+      setArt((current) => (current === cached ? current : cached));
     };
+    sync();
+    return subscribeFlankArt(sync);
   }, [template, preset, marqueeId]);
 
-  // Play the animated marquee, or draw the static recoloured chassis.
+  // Draw the static recoloured chassis immediately so the device is never blank,
+  // then play the animated marquee over it once its sheet has decoded.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    if (art) return playArt(canvas, art);
     const context = canvas.getContext("2d");
     if (!context) return;
     canvas.width = template.width;
@@ -257,6 +272,7 @@ function PremadeFlank({
     const image = context.createImageData(template.width, template.height);
     image.data.set(rgba);
     context.putImageData(image, 0, 0);
+    if (art) return playArt(canvas, art);
   }, [art, template, preset]);
 
   return (
@@ -429,6 +445,16 @@ export function HandheldPicker() {
     setCarouselIndex(index);
     choosePreset(HANDHELD_PRESETS[index]!);
   };
+
+  // Pre-warm every premade's animated marquee once the chrome is loaded, so a
+  // flank (including ones revealed by turning the carousel) shows its animation
+  // instantly from cache instead of rendering it on the fly.
+  useEffect(() => {
+    if (!template) return;
+    for (const preset of HANDHELD_PRESETS) {
+      ensureFlankArt(template, preset, PREMADE_MARQUEE[preset.id] ?? null);
+    }
+  }, [template]);
 
   // Measure the available width and the viewport height to decide how many
   // handhelds fit and how big the centre one should be. Re-runs on resize.
@@ -621,19 +647,25 @@ export function HandheldPicker() {
   // Re-render the live preview. Custom pixel art or the selected marquee (when
   // present) wins over the region-recoloured scheme, so the preview always shows
   // what will be saved; the marquee animates via the shared `playArt` playback.
+  // The static recoloured chassis is drawn first (unless a single-frame custom
+  // drawing/background is active, which isn't scheme-derived) so the device is
+  // never blank while an animation sheet decodes — its base colours match.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    if (activeArt) return playArt(canvas, activeArt);
-
     const context = canvas.getContext("2d");
     if (!context || !template) return;
-    canvas.width = template.width;
-    canvas.height = template.height;
-    const rgba = renderHandheld(template, scheme);
-    const image = context.createImageData(template.width, template.height);
-    image.data.set(rgba);
-    context.putImageData(image, 0, 0);
+
+    const isAnimated = Boolean(activeArt?.frames && activeArt.frames > 1);
+    if (!activeArt || isAnimated) {
+      canvas.width = template.width;
+      canvas.height = template.height;
+      const rgba = renderHandheld(template, scheme);
+      const image = context.createImageData(template.width, template.height);
+      image.data.set(rgba);
+      context.putImageData(image, 0, 0);
+    }
+    if (activeArt) return playArt(canvas, activeArt);
   }, [template, scheme, activeArt]);
 
   // Load a premade into the centred handheld: set its colours and its marquee,
