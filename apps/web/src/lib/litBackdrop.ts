@@ -308,13 +308,16 @@ export function wallPaletteFromChassis(hex: string): RetroWallPalette {
   // Boost saturation for a vibrant colour-lit room, scaled from the chassis's
   // own saturation (no hard floor) so a near-grey chassis still yields a neutral
   // wall rather than being forced into a hue.
-  const sat = Math.min(0.95, s * 1.3);
+  const sat = Math.min(0.95, s * 1.35);
+  // Bright, luminous lightnesses — a vivid daylit game room rather than a dim
+  // one — that still deepen from the glowing top toward the floor so the scene
+  // keeps its depth.
   return {
-    wallTop: hslToRgb(hue, sat, 0.54),
-    wallBottom: hslToRgb(hue, Math.min(1, sat + 0.05), 0.36),
-    floor: hslToRgb(hue, sat * 0.95, 0.3),
+    wallTop: hslToRgb(hue, sat, 0.66),
+    wallBottom: hslToRgb(hue, Math.min(1, sat + 0.05), 0.48),
+    floor: hslToRgb(hue, sat * 0.95, 0.4),
     // Bright sparks of the same hue for arcade-room sparkle (grey chassis → white).
-    star: hslToRgb(hue, sat * 0.5, 0.92),
+    star: hslToRgb(hue, sat * 0.5, 0.95),
   };
 }
 

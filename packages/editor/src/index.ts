@@ -104,6 +104,11 @@ export {
   type SolidOffset,
 } from "./model/voxelShapes";
 export {
+  floodRegion,
+  cellCoords,
+  type FloodOptions,
+} from "./model/voxelSelect";
+export {
   renderVoxelModel,
   voxelCanvasSize,
   DEFAULT_MODEL_LIGHT,

@@ -70,12 +70,18 @@ function normalized(x: number, y: number, z: number): [number, number, number] {
   return [x / len, y / len, z / len];
 }
 
-/** A warm key light from the upper-front; spinning props turn their faces into it. */
+/**
+ * A bright, near-white key light from the upper-front; spinning props turn their
+ * faces into it. The ambient floor is deliberately high so the shadowed sides of
+ * every voxel keep their colour instead of going dark — the props read as
+ * vivid, fully-lit objects (a bright, well-lit game room) while the strong key
+ * still models their 3D form.
+ */
 export const BACKDROP_LIGHT: BackdropLightSpec = {
   direction: normalized(0.45, 0.72, 0.62),
-  color: [1, 0.98, 0.92],
-  intensity: 1,
-  ambient: 0.34,
+  color: [1, 0.99, 0.95],
+  intensity: 1.08,
+  ambient: 0.52,
 };
 
 /**

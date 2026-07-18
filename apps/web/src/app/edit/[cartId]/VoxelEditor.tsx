@@ -24,6 +24,8 @@ import {
   serializeVoxelGrid,
   deserializeVoxelGrid,
   renderVoxelModel,
+  floodRegion,
+  cellCoords,
   CUBE_FACES,
   MAX_VOXEL_GRID_DIM,
   shapeOffsets,
@@ -33,6 +35,7 @@ import {
   type VoxelShapeStyle,
   type ShapeOffset,
   type GridAxis,
+  type GridVoxelModel,
   type ModelLight,
   type SpriteSheet,
 } from "@cartbox/editor";
@@ -75,13 +78,37 @@ const ORBIT_SPEED = 0.011; // radians per pixel dragged
 const DRAG_THRESHOLD = 4; // px of movement before a press becomes an orbit
 const SEED_COLOR: readonly [number, number, number] = [176, 182, 198];
 
-type VoxelTool = "add" | "remove" | "paint" | "shape";
+type VoxelTool = "add" | "remove" | "paint" | "fill" | "select" | "wand" | "shape";
 const TOOLS: readonly { id: VoxelTool; label: string; glyph: string }[] = [
   { id: "add", label: "Add", glyph: "＋" },
   { id: "remove", label: "Remove", glyph: "－" },
   { id: "paint", label: "Paint", glyph: "🖌" },
+  { id: "fill", label: "Fill", glyph: "🪣" },
+  { id: "select", label: "Select", glyph: "⬚" },
+  { id: "wand", label: "Wand", glyph: "✨" },
   { id: "shape", label: "Shape", glyph: "◫" },
 ];
+
+// The paint/add/remove tools stamp a solid cube "brush" of this radius around the
+// target cell (radius 0 = a single voxel, the classic one-cube edit). Kept small
+// so even the largest brush is a cheap stamp.
+const BRUSH_RADIUS_MIN = 0;
+const BRUSH_RADIUS_MAX = 8;
+const DEFAULT_BRUSH_RADIUS = 0;
+const BRUSH_TOOLS: readonly VoxelTool[] = ["add", "remove", "paint"];
+
+// The Magic Wand and Paint Bucket share one colour-matching flood; this is its
+// tolerance, as a 0..100% slider mapped to the 0..1 the flood expects. 0 = an
+// exact colour match, higher grabs progressively more of a shaded region.
+const DEFAULT_TOLERANCE_PCT = 0;
+const TOLERANCE_TOOLS: readonly VoxelTool[] = ["wand", "fill"];
+
+// Selected voxels are tinted toward this colour and given an emissive floor when
+// the model is built, so the selection glows from every camera angle without a
+// per-voxel wireframe overlay (which would be costly for a large flood select).
+const SELECT_TINT: readonly [number, number, number] = [96, 232, 255];
+const SELECT_TINT_MIX = 0.6; // share of the tint blended over a selected voxel's colour
+const SELECT_EMISSIVE_FLOOR = 0.5;
 
 // The Shape tool stamps a shape of voxels at the cursor. Flat shapes (rectangle,
 // circle) land on the plane of the clicked face; solid shapes (cube, sphere) are
@@ -147,6 +174,9 @@ const HIGHLIGHT: Record<VoxelTool, string> = {
   add: "#7dfcb6",
   remove: "#ff7b7b",
   paint: "#ffdd66",
+  fill: "#ffb066",
+  select: "#7df0ff",
+  wand: "#c69dff",
   shape: "#7db8fc",
 };
 
@@ -294,6 +324,16 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   const [shapeRadius, setShapeRadius] = useState(DEFAULT_SHAPE_RADIUS);
   const solidShape = isSolidKind(shapeKind);
 
+  // Brush size for the add/remove/paint tools, and colour tolerance for the
+  // wand/fill flood.
+  const [brushRadius, setBrushRadius] = useState(DEFAULT_BRUSH_RADIUS);
+  const [tolerancePct, setTolerancePct] = useState(DEFAULT_TOLERANCE_PCT);
+
+  // The set of selected grid-cell indices (flat), populated by the Select and
+  // Wand tools. A new Set each change so React re-renders and the memo below
+  // recomputes the tinted model.
+  const [selection, setSelection] = useState<ReadonlySet<number>>(() => new Set());
+
   // The axis armed for wheel-scaling (X/Y/Z key), or null when the wheel zooms.
   const [scaleAxis, setScaleAxis] = useState<GridAxis | null>(null);
 
@@ -315,6 +355,26 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   // Centre on the filled content so a small sculpt sits in the middle of the
   // viewport (and rotates about its own centre), not low against the grid floor.
   const model3d = useMemo(() => voxelGridToModel(gridRef.current!, { center: "content" }), [rev, gridSize]);
+
+  // The model actually drawn: identical geometry to `model3d` (so picking still
+  // resolves through the same voxel/grid indices), but with selected voxels
+  // tinted and made emissive so the selection glows. Falls through to `model3d`
+  // untouched when nothing is selected, the common case.
+  const renderModel = useMemo<GridVoxelModel>(() => {
+    if (selection.size === 0) return model3d;
+    const r = Uint8ClampedArray.from(model3d.r);
+    const g = Uint8ClampedArray.from(model3d.g);
+    const b = Uint8ClampedArray.from(model3d.b);
+    const emissive = Float32Array.from(model3d.emissive);
+    for (let v = 0; v < model3d.count; v += 1) {
+      if (!selection.has(model3d.gridIndex[v]!)) continue;
+      r[v] = Math.round(r[v]! * (1 - SELECT_TINT_MIX) + SELECT_TINT[0] * SELECT_TINT_MIX);
+      g[v] = Math.round(g[v]! * (1 - SELECT_TINT_MIX) + SELECT_TINT[1] * SELECT_TINT_MIX);
+      b[v] = Math.round(b[v]! * (1 - SELECT_TINT_MIX) + SELECT_TINT[2] * SELECT_TINT_MIX);
+      emissive[v] = Math.max(emissive[v]!, SELECT_EMISSIVE_FLOOR);
+    }
+    return { ...model3d, r, g, b, emissive };
+  }, [model3d, selection]);
 
   // Zoom is the cube size in viewport pixels; it scales the model within a fixed
   // viewport, so it actually changes the on-screen size. Seed it to fit the model.
@@ -340,7 +400,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     canvas.height = VIEWPORT;
     const context = canvas.getContext("2d");
     if (!context) return;
-    renderVoxelModel(model3d, {
+    renderVoxelModel(renderModel, {
       yaw,
       pitch,
       cell: renderCell,
@@ -365,6 +425,9 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
         // A solid's footprint is a whole volume; one bounding-box wireframe reads
         // clearly and stays cheap regardless of radius.
         drawHighlight(context, hover.cell, origin, yaw, pitch, renderCell, VIEWPORT, color, shapeRadius + 0.5);
+      } else if (BRUSH_TOOLS.includes(tool) && brushRadius > 0) {
+        // The brush stamps a cube; a single bounding wireframe shows its reach.
+        drawHighlight(context, hover.cell, origin, yaw, pitch, renderCell, VIEWPORT, color, brushRadius + 0.5);
       } else {
         const cells =
           tool === "shape"
@@ -375,7 +438,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
         }
       }
     }
-  }, [model3d, yaw, pitch, renderCell, buffers, hover, tool, shapeKind, solidShape, shapeRadius, light]);
+  }, [renderModel, model3d, yaw, pitch, renderCell, buffers, hover, tool, brushRadius, shapeKind, solidShape, shapeRadius, light]);
 
   /** Persist the current grid to undo/save; re-seed if it was emptied. */
   const commit = () => {
@@ -383,14 +446,6 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     if (grid.filledCount === 0) gridRef.current = seededGrid(grid.sizeX);
     setRev((value) => value + 1);
     onModelChange(serializeVoxelGrid(gridRef.current!));
-  };
-
-  /** Decode a flat grid-cell index back to (x, y, z). */
-  const cellCoords = (cellIndex: number, grid: VoxelGrid): [number, number, number] => {
-    const layer = grid.sizeX * grid.sizeY;
-    const z = Math.floor(cellIndex / layer);
-    const rest = cellIndex - z * layer;
-    return [rest % grid.sizeX, Math.floor(rest / grid.sizeX), z];
   };
 
   /** Resolve a canvas pixel to the picked grid cell and its face, or null. */
@@ -404,7 +459,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     const di = py * VIEWPORT + px;
     const voxel = buffers.pickVoxel[di]!;
     if (voxel < 0) return null; // empty space
-    const [x, y, z] = cellCoords(model3d.gridIndex[voxel]!, gridRef.current!);
+    const [x, y, z] = cellCoords(gridRef.current!, model3d.gridIndex[voxel]!);
     return { x, y, z, face: buffers.pickFace[di]! };
   };
 
@@ -460,36 +515,99 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     }
   };
 
-  /** Apply the active tool (or Remove on a right-click) at a canvas pixel. */
-  const editAt = (clientX: number, clientY: number, removeOverride: boolean) => {
-    const pick = pickAt(clientX, clientY);
-    if (!pick) return;
-    if (tool === "shape") {
-      stampShape(pick, removeOverride);
-      setHover(null);
-      commit();
-      return;
-    }
-    const action = removeOverride ? "remove" : tool;
-    const cell = targetCell(pick, action);
-    if (!cell) return;
+  /**
+   * Stamp the add/remove/paint brush — a solid cube of `brushRadius` centred on
+   * the target cell (the empty neighbour for Add, the clicked cell otherwise).
+   * Add fills every cell in the cube, Remove clears them, Paint recolours only
+   * the cells that are already solid (so it never conjures new voxels).
+   */
+  const applyBrush = (pick: Pick, action: "add" | "remove" | "paint") => {
+    const center = targetCell(pick, action);
+    if (!center) return;
     const grid = gridRef.current!;
-    if (action === "remove") {
-      grid.clear(cell[0], cell[1], cell[2]);
-    } else {
-      const [r, g, b] = hexToRgb(paintHex);
-      grid.set(cell[0], cell[1], cell[2], r, g, b);
+    const [r, g, b] = hexToRgb(paintHex);
+    for (const { du, dv, dw } of solidOffsets("cube", "fill", brushRadius)) {
+      const cx = center[0] + du;
+      const cy = center[1] + dv;
+      const cz = center[2] + dw;
+      if (!grid.inBounds(cx, cy, cz)) continue;
+      if (action === "remove") grid.clear(cx, cy, cz);
+      else if (action === "add") grid.set(cx, cy, cz, r, g, b);
+      else if (grid.isFilled(cx, cy, cz)) grid.set(cx, cy, cz, r, g, b);
     }
     setHover(null);
     commit();
   };
 
-  // Pointer: a drag past the threshold orbits the camera; a click edits.
-  const drag = useRef<{ lastX: number; lastY: number; moved: boolean; button: number } | null>(null);
+  /** Toggle (additive) or set (replace) the picked voxel in the selection. */
+  const applySelect = (pick: Pick, additive: boolean) => {
+    const index = gridRef.current!.index(pick.x, pick.y, pick.z);
+    setSelection((prev) => {
+      if (!additive) return new Set([index]);
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  };
+
+  /** Magic Wand: flood the connected same-colour run and select it (add on shift). */
+  const applyWand = (pick: Pick, additive: boolean) => {
+    const region = floodRegion(gridRef.current!, pick.x, pick.y, pick.z, { tolerance: tolerancePct / 100 });
+    if (region.length === 0) return;
+    setSelection((prev) => (additive ? new Set([...prev, ...region]) : new Set(region)));
+  };
+
+  /** Paint Bucket: flood the connected same-colour run and recolour it (erase on right-click). */
+  const applyFill = (pick: Pick, erase: boolean) => {
+    const grid = gridRef.current!;
+    const region = floodRegion(grid, pick.x, pick.y, pick.z, { tolerance: tolerancePct / 100 });
+    if (region.length === 0) return;
+    const [r, g, b] = hexToRgb(paintHex);
+    for (const index of region) {
+      const [x, y, z] = cellCoords(grid, index);
+      if (erase) grid.clear(x, y, z);
+      else grid.set(x, y, z, r, g, b);
+    }
+    setHover(null);
+    commit();
+  };
+
+  /** Apply the active tool at a canvas pixel. Right-click removes/erases; Shift adds to a selection. */
+  const applyAt = (clientX: number, clientY: number, secondary: boolean, shift: boolean) => {
+    const pick = pickAt(clientX, clientY);
+    if (!pick) {
+      // Clicking empty space with the Select tool (no modifier) clears the selection.
+      if (tool === "select" && !shift) setSelection(new Set());
+      return;
+    }
+    switch (tool) {
+      case "shape":
+        stampShape(pick, secondary);
+        setHover(null);
+        commit();
+        return;
+      case "select":
+        applySelect(pick, shift || secondary);
+        return;
+      case "wand":
+        applyWand(pick, shift);
+        return;
+      case "fill":
+        applyFill(pick, secondary);
+        return;
+      default:
+        applyBrush(pick, secondary ? "remove" : (tool as "add" | "remove" | "paint"));
+    }
+  };
+
+  // Pointer: a drag past the threshold orbits the camera; a click edits. The
+  // Shift state is captured at press time so Shift-click accumulates a selection.
+  const drag = useRef<{ lastX: number; lastY: number; moved: boolean; button: number; shift: boolean } | null>(null);
 
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
-    drag.current = { lastX: event.clientX, lastY: event.clientY, moved: false, button: event.button };
+    drag.current = { lastX: event.clientX, lastY: event.clientY, moved: false, button: event.button, shift: event.shiftKey };
   };
   const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const state = drag.current;
@@ -513,16 +631,44 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   const onPointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const state = drag.current;
     drag.current = null;
-    if (state && !state.moved) editAt(event.clientX, event.clientY, state.button === 2);
+    if (state && !state.moved) applyAt(event.clientX, event.clientY, state.button === 2, state.shift);
   };
   const onPointerLeave = () => setHover(null);
   const zoomBy = (delta: number) => setCell((value) => Math.max(CELL_MIN, Math.min(CELL_MAX, value + delta)));
+
+  const clearSelection = () => setSelection(new Set());
+
+  /** Recolour every selected (still-solid) voxel to the active palette colour. */
+  const paintSelection = () => {
+    if (selection.size === 0) return;
+    const grid = gridRef.current!;
+    const [r, g, b] = hexToRgb(paintHex);
+    for (const index of selection) {
+      const [x, y, z] = cellCoords(grid, index);
+      if (grid.isFilled(x, y, z)) grid.set(x, y, z, r, g, b);
+    }
+    commit();
+  };
+
+  /** Delete every selected voxel, then clear the (now-empty) selection. */
+  const deleteSelection = () => {
+    if (selection.size === 0) return;
+    const grid = gridRef.current!;
+    for (const index of selection) {
+      const [x, y, z] = cellCoords(grid, index);
+      grid.clear(x, y, z);
+    }
+    clearSelection();
+    setHover(null);
+    commit();
+  };
 
   /** Stretch (grow) or squash the model along `axis` by one proportional step. */
   const scaleActiveAxis = (axis: GridAxis, grow: boolean) => {
     const next = scaleGridAxis(gridRef.current!, axis, grow ? SCALE_STEP : 1 / SCALE_STEP);
     if (next.filledCount === 0) return; // squashed to nothing — keep what we had
     gridRef.current = next;
+    clearSelection(); // cell indices no longer map to the same voxels
     setHover(null);
     commit();
   };
@@ -545,6 +691,27 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // Delete/Backspace removes the current selection; Escape clears it. Re-bound on
+  // selection changes so the handler closes over the latest set. Ignored while a
+  // form field is focused so it never eats typing.
+  useEffect(() => {
+    if (selection.size === 0) return;
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        deleteSelection();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        clearSelection();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selection]);
 
   // Wheel without letting the page scroll under the cursor. React's onWheel is
   // passive (can't preventDefault), so bind a non-passive native listener. With
@@ -572,6 +739,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     if (grid.filledCount === 0) gridRef.current = seededGrid(next);
     else gridRef.current = grid;
     setGridSize(next);
+    clearSelection(); // indices are relative to the old grid dimensions
     // Refit the zoom so the resized model opens framed to the viewport.
     setCell(fitCellForGrid(gridRef.current!));
     setRev((value) => value + 1);
@@ -580,6 +748,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
 
   const clearAll = () => {
     gridRef.current = seededGrid(gridSize);
+    clearSelection();
     setCell(fitCellForGrid(gridRef.current!));
     setRev((value) => value + 1);
     onModelChange(serializeVoxelGrid(gridRef.current!));
@@ -625,6 +794,93 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
             ))}
           </div>
         </div>
+
+        {BRUSH_TOOLS.includes(tool) && (
+          <div>
+            <div className={styles.groupLabel}>Brush size</div>
+            <div className={styles.rangeRow}>
+              <input
+                type="range"
+                min={BRUSH_RADIUS_MIN}
+                max={BRUSH_RADIUS_MAX}
+                step={1}
+                value={brushRadius}
+                onChange={(event) => setBrushRadius(Number(event.target.value))}
+                aria-label="Brush size in voxels"
+              />
+              <span className={`${styles.rangeValue} data`}>{brushRadius * 2 + 1}</span>
+            </div>
+            <p className={styles.panelMeta} style={{ lineHeight: 1.5, marginTop: 6 }}>
+              {brushRadius === 0
+                ? "One voxel per click."
+                : `Stamps a ${brushRadius * 2 + 1}³ cube per click.`}
+            </p>
+          </div>
+        )}
+
+        {TOLERANCE_TOOLS.includes(tool) && (
+          <div>
+            <div className={styles.groupLabel}>Colour tolerance</div>
+            <div className={styles.rangeRow}>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={tolerancePct}
+                onChange={(event) => setTolerancePct(Number(event.target.value))}
+                aria-label="Colour match tolerance"
+              />
+              <span className={`${styles.rangeValue} data`}>{tolerancePct}%</span>
+            </div>
+            <p className={styles.panelMeta} style={{ lineHeight: 1.5, marginTop: 6 }}>
+              {tool === "wand"
+                ? "Click a voxel to select its connected colour run. Shift-click adds another run."
+                : "Click a voxel to flood the palette colour through its connected run. Right-click erases it."}
+            </p>
+          </div>
+        )}
+
+        {selection.size > 0 && (
+          <div>
+            <div className={styles.groupLabel}>Selection · {selection.size}</div>
+            <button
+              type="button"
+              className={styles.toolBtn}
+              onClick={paintSelection}
+              title="Recolour the selected voxels to the active palette colour"
+            >
+              <span className={styles.toolGlyph} aria-hidden>
+                🖌
+              </span>
+              Paint selection
+            </button>
+            <button
+              type="button"
+              className={styles.toolBtn}
+              onClick={deleteSelection}
+              title="Delete the selected voxels (Delete key)"
+              style={{ marginTop: 6 }}
+            >
+              <span className={styles.toolGlyph} aria-hidden>
+                🗑
+              </span>
+              Delete selection
+            </button>
+            <button
+              type="button"
+              className={styles.toolBtn}
+              onClick={clearSelection}
+              title="Clear the selection (Esc)"
+              style={{ marginTop: 6 }}
+            >
+              <span className={styles.toolGlyph} aria-hidden>
+                ✕
+              </span>
+              Deselect
+            </button>
+          </div>
+        )}
 
         {tool === "shape" && (
           <div>
@@ -922,7 +1178,13 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
         <p className={styles.panelMeta} style={{ lineHeight: 1.5 }}>
           {tool === "shape"
             ? "The glowing outline shows the shape's footprint. Rect and Circle stamp on the face you point at; Cube and Sphere fill a 3D volume there. Pick Outline or Fill and a size, click a face to stamp, right-click to erase. Drag to orbit, scroll to zoom."
-            : "The glowing outline shows where the next cube lands. Click a face to add there, right-click to remove, or switch tools. Drag to orbit, scroll to zoom — or press X/Y/Z and scroll to scale the model."}
+            : tool === "select"
+              ? "Click a voxel to select it; Shift-click to add or remove more. Selected voxels glow — Paint or Delete the whole selection from the panel on the left. Drag to orbit, scroll to zoom."
+              : tool === "wand"
+                ? "Click a voxel to select every connected voxel of the same colour; raise the tolerance to grab shaded neighbours. Shift-click adds another run. Then Paint or Delete the selection. Drag to orbit, scroll to zoom."
+                : tool === "fill"
+                  ? "Click a voxel to flood the active palette colour through its connected same-colour run; right-click erases the run. Raise the tolerance to spread across shaded neighbours. Drag to orbit, scroll to zoom."
+                  : "The glowing outline shows where the brush lands. Click a face to add there, right-click to remove; raise Brush size to stamp a cube. Drag to orbit, scroll to zoom — or press X/Y/Z and scroll to scale the model."}
         </p>
       </aside>
     </div>

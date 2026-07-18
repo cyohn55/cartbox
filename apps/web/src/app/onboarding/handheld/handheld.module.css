@@ -36,7 +36,7 @@
   content: "";
   position: absolute;
   inset: 0;
-  background: radial-gradient(120% 100% at 50% 42%, rgba(6, 8, 16, 0) 30%, rgba(6, 8, 16, 0.35) 70%, rgba(5, 7, 11, 0.62) 100%);
+  background: radial-gradient(125% 105% at 50% 42%, rgba(6, 8, 16, 0) 40%, rgba(6, 8, 16, 0.22) 74%, rgba(5, 7, 11, 0.44) 100%);
 }
 
 .head {

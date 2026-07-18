@@ -48,8 +48,9 @@ const USE_WEBGPU = false;
 
 // The page sits behind the lit-wall canvases; its base colour is a rich shade of
 // the selected chassis so the whole viewport reads as e.g. blue for a blue
-// handheld, keeping the vivid wall's tone cohesive to the very edges.
-const BACKDROP_DARKEN = 0.4;
+// handheld, keeping the vivid wall's tone cohesive to the very edges. Kept fairly
+// bright so the surround past the wall stays luminous, not near-black.
+const BACKDROP_DARKEN = 0.52;
 
 interface PropRenderer {
   render(seconds: number): void;
