@@ -1915,7 +1915,14 @@ select.os-input {
   inset: 0;
   width: 100%;
   height: 100%;
-  image-rendering: pixelated;
+  /* The chassis art is a high-resolution render (867x1579), not 1:1 pixel art,
+     and the device box almost always scales it by a non-integer factor to fit
+     the viewport. Nearest-neighbour (`pixelated`) then drops or doubles source
+     rows unevenly, which reads as aliased, low-resolution chrome with pixels of
+     uneven size. Smooth resampling keeps the edges clean at any scale — the same
+     fix the onboarding preview already uses. The game canvas inside keeps its
+     own `pixelated` rule, so genuine pixel art stays crisp. */
+  image-rendering: auto;
   pointer-events: none;
 }
 
