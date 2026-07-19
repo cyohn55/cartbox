@@ -32,3 +32,10 @@ supabase/.temp/
 # tree). The web app consumes its prebuilt WASM from apps/web/public/engine,
 # so the fork stays local until it gets its own repository.
 packages/engine/tic80/
+
+# Doom title: fetched assets and the built payload.
+# freedoom1.wad and game.data are ~27MB each and fully reproducible
+# (scripts/fetch-freedoom.mjs + scripts/build-doom.mjs), so they are rebuilt
+# rather than committed — a blob that size is permanent once it is in history.
+games/doom/assets/
+apps/web/public/games/doom/

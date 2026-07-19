@@ -56,6 +56,25 @@ export const DEMO_TITLES: readonly DemoTitle[] = [
     height: 180,
   },
   {
+    id: "00000000-0000-4000-9000-000000000005",
+    slug: "doom",
+    name: "Doom",
+    description:
+      "The 1993 shooter that defined the genre, running on the original id Software engine with Freedoom's own freely licensed levels, monsters and weapons. Engine and assets are both free software, so the whole game ships with the console.",
+    runtime: "wasm-app",
+    assetSource: "bundled",
+    tier: "A",
+    // The engine is GPL-2 (doomgeneric, from id's own source release); the
+    // assets are Freedoom's, which are BSD-3-Clause. The stricter of the two
+    // governs what the title as a whole may be redistributed under.
+    license: "gpl-2.0",
+    sourceUrl: "https://github.com/ozkl/doomgeneric",
+    releasedAt: "2026-07-18T00:00:00.000Z",
+    bundleName: "doom",
+    width: 320,
+    height: 200,
+  },
+  {
     id: "00000000-0000-4000-9000-000000000001",
     slug: "supertux",
     name: "SuperTux",
