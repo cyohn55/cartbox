@@ -31,6 +31,24 @@ jobs:
       - name: Install workspace dependencies
         run: npm ci
 
+      # Ported titles whose artefacts are too large to commit are rebuilt here
+      # instead: the Doom payload (~27MB game.data) and its wasm are gitignored
+      # and fully reproducible, so the deploy fetches the Freedoom IWAD and
+      # compiles the engine. Without this the Browse tab would list a Doom card
+      # that 404s on the live site. Emscripten is pinned to the version the
+      # build was authored against.
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.2
+          actions-cache-folder: emsdk-cache
+
+      - name: Fetch Freedoom assets
+        run: node scripts/fetch-freedoom.mjs
+
+      - name: Build Doom (WebAssembly)
+        run: node scripts/build-doom.mjs
+
       - name: Build static export
         run: npm run build:static --workspace apps/web
         env:
