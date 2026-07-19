@@ -12,7 +12,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { withBasePath } from "@/lib/staticSite";
-import type { PlayingCart } from "./consoleOs";
+import type { PlayingCart, PlayingGame } from "./consoleOs";
 
 /** Pre-rendered faces of the cartridge shell; the cover art sits on the front. */
 const CARTRIDGE_FACE_URLS = {
@@ -38,6 +38,8 @@ export interface GridCart {
   cartUrl: string | null;
   engineUrl: string | null;
   plays?: number;
+  /** Set for ported catalog titles, which play without a cart binary. */
+  game?: PlayingGame;
 }
 
 interface CartGridProps {
@@ -87,9 +89,11 @@ export function CartGrid({ carts, onPlayCart }: CartGridProps) {
     const playing: PlayingCart = {
       cartId: cart.id,
       title: cart.title,
-      cartUrl: cart.cartUrl!,
-      engineUrl: cart.engineUrl!,
+      // A ported title has no cart binary; GameScreen reads `game` instead.
+      cartUrl: cart.cartUrl ?? "",
+      engineUrl: cart.engineUrl ?? "",
       modelId: cart.modelId,
+      game: cart.game,
     };
     if (prefersReducedMotion()) {
       onPlayCart(playing);
@@ -115,7 +119,10 @@ export function CartGrid({ carts, onPlayCart }: CartGridProps) {
   return (
     <div className="os-grid">
       {carts.map((cart) => {
-        const playable = cart.cartUrl !== null && cart.engineUrl !== null;
+        // Ported titles play from their own bundle, so they are playable
+        // without the cart binary a Cartbox cartridge needs.
+        const playable =
+          cart.game !== undefined || (cart.cartUrl !== null && cart.engineUrl !== null);
         const label = cart.thumbUrl ? (
           // Lazy: the arcade lists a thousand-plus covers in one grid.
           // eslint-disable-next-line @next/next/no-img-element
@@ -154,7 +161,10 @@ export function CartGrid({ carts, onPlayCart }: CartGridProps) {
           <span className="os-grid-meta">
             <span className="os-grid-title">{cart.title}</span>
             <span className="os-grid-sub">
-              {formatPrice(cart.priceCents)} · {cart.modelId === "pro" ? "PRO" : "CLASSIC"}
+              {/* A ported title runs on the Game ABI runtime, not one of our
+                  cores, so labelling it CLASSIC would misdescribe it. */}
+              {formatPrice(cart.priceCents)} ·{" "}
+              {cart.game ? "GAME" : cart.modelId === "pro" ? "PRO" : "CLASSIC"}
               {cart.plays !== undefined ? ` · ${cart.plays} plays` : ""}
             </span>
           </span>

@@ -4,7 +4,9 @@
  * Browse tab — the comprehensive cartridge archive, from two sources:
  *
  *  - CARTBOX: carts published on this platform (free ones launch in-console,
- *    paid ones link to their store page).
+ *    paid ones link to their store page), plus catalog titles — ported
+ *    open-source and freeware games that run on the Cartbox Game ABI runtime.
+ *    Both appear in one grid; a title carries `game` instead of a cart binary.
  *  - TIC-80 ARCADE: the entire tic80.com community archive, listed live from
  *    the site's own SURF API and played directly from its CORS-open cart
  *    binaries — every category, nothing rehosted or hand-picked. This works
@@ -15,6 +17,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { isStaticExport } from "@/lib/staticSite";
 import { DEMO_CARTS, demoCartUrl, demoThumbUrl } from "@/lib/demoCatalog";
+import { DEMO_TITLES } from "@/lib/demoTitles";
 import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
 import {
   TIC_ARCADE_CATEGORIES,
@@ -39,8 +42,47 @@ interface ApiCart {
   cartUrl: string | null;
 }
 
+interface ApiTitle {
+  id: string;
+  name: string;
+  price_cents: number;
+  plays: number;
+  thumbUrl: string | null;
+  bundleName: string | null;
+  width: number;
+  height: number;
+}
+
+/**
+ * Catalog titles as grid entries.
+ *
+ * Only titles with a published bundle are listed: the catalog deliberately
+ * carries games ahead of their ports, and a cartridge that cannot boot is worse
+ * on a console than one that is simply absent.
+ */
+function titleGridCarts(
+  titles: readonly { id: string; name: string; bundleName?: string | null; width?: number; height?: number }[],
+): GridCart[] {
+  return titles
+    .filter((title) => Boolean(title.bundleName))
+    .map((title) => ({
+      id: title.id,
+      title: title.name,
+      priceCents: 0,
+      modelId: "classic",
+      thumbUrl: null,
+      cartUrl: null,
+      engineUrl: null,
+      game: {
+        bundleName: title.bundleName as string,
+        width: title.width ?? 320,
+        height: title.height ?? 180,
+      },
+    }));
+}
+
 function demoGridCarts(): GridCart[] {
-  return DEMO_CARTS.map((cart) => ({
+  return DEMO_CARTS.map<GridCart>((cart) => ({
     id: cart.id,
     title: cart.title,
     priceCents: cart.priceCents,
@@ -68,7 +110,7 @@ function arcadeGridCarts(entries: TicArcadeEntry[]): GridCart[] {
 export function BrowseScreen({ onPlayCart }: { onPlayCart: (cart: PlayingCart) => void }) {
   const [source, setSource] = useState<CatalogSource>("cartbox");
   const [cartboxCarts, setCartboxCarts] = useState<GridCart[] | null>(
-    isStaticExport ? demoGridCarts() : null,
+    isStaticExport ? [...titleGridCarts(DEMO_TITLES), ...demoGridCarts()] : null,
   );
   const [cartboxFailed, setCartboxFailed] = useState(false);
 
@@ -85,15 +127,25 @@ export function BrowseScreen({ onPlayCart }: { onPlayCart: (cart: PlayingCart) =
       return;
     }
     let cancelled = false;
-    fetch("/api/carts?limit=100")
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error(`carts request failed: ${response.status}`);
+    Promise.all([
+      fetch("/api/carts?limit=100"),
+      // A missing titles route must not blank the cart grid, so this failure is
+      // absorbed rather than rejecting the pair.
+      fetch("/api/titles?limit=100").catch(() => null),
+    ])
+      .then(async ([cartsResponse, titlesResponse]) => {
+        if (!cartsResponse.ok) {
+          throw new Error(`carts request failed: ${cartsResponse.status}`);
         }
-        const body = (await response.json()) as { carts: ApiCart[] };
+        const body = (await cartsResponse.json()) as { carts: ApiCart[] };
+        const titles: ApiTitle[] =
+          titlesResponse && titlesResponse.ok
+            ? ((await titlesResponse.json()) as { titles: ApiTitle[] }).titles
+            : [];
         if (!cancelled) {
-          setCartboxCarts(
-            body.carts.map((cart) => ({
+          setCartboxCarts([
+            ...titleGridCarts(titles.map((title) => ({ ...title, bundleName: title.bundleName }))),
+            ...body.carts.map<GridCart>((cart) => ({
               id: cart.id,
               title: cart.title,
               priceCents: cart.price_cents,
@@ -105,7 +157,7 @@ export function BrowseScreen({ onPlayCart }: { onPlayCart: (cart: PlayingCart) =
                 : null,
               plays: cart.plays,
             })),
-          );
+          ]);
         }
       })
       .catch(() => {

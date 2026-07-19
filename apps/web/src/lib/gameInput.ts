@@ -18,15 +18,19 @@ export const BUTTON_BITS = {
   b: 0x20,
   start: 0x40,
   select: 0x80,
+  x: 0x100,
+  y: 0x200,
 } as const;
 
 export type ButtonName = keyof typeof BUTTON_BITS;
 
+export type KeyBindings = Readonly<Record<string, ButtonName>>;
+
 /**
- * Keyboard bindings. Arrows and WASD both drive the d-pad because players expect
- * either, and neither is more "correct" on a console shell shown in a browser.
+ * Desktop bindings. Arrows and WASD both drive the d-pad because players expect
+ * either when a game is shown on a normal page.
  */
-const KEY_BINDINGS: Record<string, ButtonName> = {
+export const DESKTOP_KEY_BINDINGS: KeyBindings = {
   ArrowUp: "up",
   ArrowDown: "down",
   ArrowLeft: "left",
@@ -43,9 +47,32 @@ const KEY_BINDINGS: Record<string, ButtonName> = {
   ShiftRight: "select",
 };
 
+/**
+ * Bindings for the handheld shell, which forwards its physical buttons as
+ * synthetic key events using the player package's DEFAULT_KEY_BINDINGS.
+ *
+ * WASD is deliberately absent: the shell sends KeyA for its X button and KeyS
+ * for Y, so honouring the desktop table here would make pressing X walk the
+ * player left. Matching the shell's own table is what keeps the buttons meaning
+ * what they are labelled.
+ */
+export const CONSOLE_KEY_BINDINGS: KeyBindings = {
+  ArrowUp: "up",
+  ArrowDown: "down",
+  ArrowLeft: "left",
+  ArrowRight: "right",
+  KeyZ: "a",
+  KeyX: "b",
+  KeyA: "x",
+  KeyS: "y",
+};
+
 /** The button a physical key drives, or undefined when the key is unbound. */
-export function buttonForKey(code: string): ButtonName | undefined {
-  return KEY_BINDINGS[code];
+export function buttonForKey(
+  code: string,
+  bindings: KeyBindings = DESKTOP_KEY_BINDINGS,
+): ButtonName | undefined {
+  return bindings[code];
 }
 
 /**
@@ -54,8 +81,8 @@ export function buttonForKey(code: string): ButtonName | undefined {
  * a game unplayable — and leaves every other key alone so browser shortcuts and
  * assistive technology keep working.
  */
-export function isBoundKey(code: string): boolean {
-  return code in KEY_BINDINGS;
+export function isBoundKey(code: string, bindings: KeyBindings = DESKTOP_KEY_BINDINGS): boolean {
+  return code in bindings;
 }
 
 /**

@@ -17,12 +17,28 @@ export const CONSOLE_TABS = ["feed", "browse", "create", "library", "profile"] a
 export type ConsoleTab = (typeof CONSOLE_TABS)[number];
 
 /** Everything the full-screen player needs to boot a cartridge. */
+/**
+ * Something occupying the whole screen. Either a Cartbox cartridge (a .tic run
+ * by the player package) or a ported catalog title (a WebAssembly game run by
+ * the Cartbox Game ABI runtime). `game` is what distinguishes them: when it is
+ * present the cart fields are unused, so both kinds can flow through one
+ * reducer, one launch animation, and one eject path.
+ */
 export interface PlayingCart {
   cartId: string;
   title: string;
   cartUrl: string;
   engineUrl: string;
   modelId: string;
+  /** Present only for ported `wasm-app` titles. */
+  game?: PlayingGame;
+}
+
+export interface PlayingGame {
+  /** Directory under public/games holding game.js + game.wasm. */
+  bundleName: string;
+  width: number;
+  height: number;
 }
 
 export interface ConsoleOsState {

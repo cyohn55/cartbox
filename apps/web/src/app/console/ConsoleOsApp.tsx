@@ -31,6 +31,7 @@ import { BootScreen } from "./BootScreen";
 import { TitleScreen } from "./TitleScreen";
 import { AuthScreen } from "./AuthScreen";
 import { GameScreen } from "./GameScreen";
+import { PortedGameScreen } from "./PortedGameScreen";
 import { HomeFeed } from "./HomeFeed";
 import { BrowseScreen } from "./BrowseScreen";
 import { LibraryScreen } from "./LibraryScreen";
@@ -130,7 +131,12 @@ export function ConsoleOS() {
       />
     );
   } else if (state.playing) {
-    stage = <GameScreen cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />;
+    // Ported titles run on the Game ABI runtime; cartridges run the player.
+    stage = state.playing.game ? (
+      <PortedGameScreen cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />
+    ) : (
+      <GameScreen cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />
+    );
   } else {
     stage = (
       <div className="os-stage os-shell" data-testid="console-shell">
