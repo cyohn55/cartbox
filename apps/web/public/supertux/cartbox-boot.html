@@ -116,9 +116,22 @@
     // Autofit: SuperTux renders at whatever resolution we hand it; keep it matched
     // to the iframe so the platformer fills the handheld screen.
     var autofit = true;
+    // SuperTux's minimum virtual screen (Viewport::s_min_size). If the drawable is
+    // smaller than this in EITHER axis, its viewport math renders the scene into
+    // only part of the canvas (top-left), leaving the rest black. The handheld
+    // screen is small in CSS pixels, so we must never hand the engine a sub-minimum
+    // resolution.
+    var MIN_W = 640, MIN_H = 480;
     function tryResize() {
       if (!autofit || !setResolution) return;
-      try { setResolution(window.innerWidth, window.innerHeight); } catch (err) {}
+      var dpr = window.devicePixelRatio || 1;
+      // Render at physical-pixel resolution so the downscaled canvas stays crisp…
+      var w = window.innerWidth * dpr, h = window.innerHeight * dpr;
+      // …then scale up uniformly (preserving aspect) to clear the engine minimum.
+      var floorScale = Math.max(1, MIN_W / w, MIN_H / h);
+      w = Math.round(w * floorScale);
+      h = Math.round(h * floorScale);
+      try { setResolution(w, h); } catch (err) {}
     }
     window.supertux_setAutofit = function (v) { autofit = v; tryResize(); };
     window.addEventListener("resize", tryResize);

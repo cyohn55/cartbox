@@ -26,7 +26,7 @@ import { ConsoleInputContext, useConsoleInput } from "./ConsoleInputContext";
 import { ConsoleSettingsProvider, useConsoleSettings } from "./ConsoleSettingsContext";
 import { HandheldSkinProvider, useHandheldSkin } from "./HandheldSkinContext";
 import { customColorStyle } from "./consoleSettings";
-import { loadHandheldTemplateHiRes } from "@/lib/handheldTemplate";
+import { loadHandheldTemplate } from "@/lib/handheldTemplate";
 import { handheldAssetUrl } from "@/lib/handheldAssets";
 import { sliceSheet } from "@/lib/handheldSheet";
 import { KonamiDetector } from "./consoleNavigation";
@@ -279,6 +279,28 @@ function dpadZones(dpad: LayoutRect): Array<{ control: ConsoleControl; rect: Lay
 }
 
 /**
+ * Track the live devicePixelRatio. It changes when the window moves between
+ * displays of different densities or the user zooms, so we watch a resolution
+ * media query (which fires on every change) rather than reading it once.
+ */
+function useDevicePixelRatio(): number {
+  const [ratio, setRatio] = useState(1);
+  useEffect(() => {
+    const update = () => setRatio(window.devicePixelRatio || 1);
+    update();
+    // A media query bound to the *current* ratio fires precisely when it moves.
+    const query = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+    query.addEventListener("change", update);
+    window.addEventListener("resize", update);
+    return () => {
+      query.removeEventListener("change", update);
+      window.removeEventListener("resize", update);
+    };
+  }, [ratio]);
+  return ratio;
+}
+
+/**
  * The image-based console: the player's actual pixel-art handheld, with the live
  * game screen positioned in its window and transparent hit-areas over each drawn
  * control. This is the default device ("My Handheld" theme); the CSS Shell above
@@ -290,13 +312,14 @@ function ImageShell({ bus, children }: { bus: ConsoleInputBus; children: ReactNo
   const { handheld } = useHandheldSkin();
   const [layout, setLayout] = useState<HandheldLayout | null>(null);
   const [template, setTemplate] = useState<HandheldTemplate | null>(null);
+  const dpr = useDevicePixelRatio();
 
   useEffect(() => {
     let alive = true;
     void (async () => {
       try {
         const [loadedTemplate, layoutData] = await Promise.all([
-          loadHandheldTemplateHiRes(),
+          loadHandheldTemplate(),
           fetch(handheldAssetUrl("/handheld/handheld-layout.json")).then((response) => response.json() as Promise<HandheldLayout>),
         ]);
         if (!alive) return;
@@ -370,7 +393,21 @@ function ImageShell({ bus, children }: { bus: ConsoleInputBus; children: ReactNo
 
   return (
     <div className="hh-img-root" onContextMenu={(event) => event.preventDefault()}>
-      <div className="hh-img-device" style={{ aspectRatio: layout ? String(layout.aspect) : "0.549" }}>
+      <div
+        className="hh-img-device"
+        style={{
+          aspectRatio: layout ? String(layout.aspect) : "0.549",
+          // Pixel-perfect ceiling: never let the chassis cover more screen pixels
+          // than the art actually has. Capping the device's *physical* size at the
+          // template's native resolution keeps it at 1:1 (or a crisp downscale) and
+          // avoids the soft, fractional upscale a high-DPI phone would force. The
+          // cap is derived from the loaded art, so re-baking at a higher resolution
+          // automatically allows a larger crisp device.
+          ...(template
+            ? { maxWidth: `${template.width / dpr}px`, maxHeight: `${template.height / dpr}px` }
+            : null),
+        }}
+      >
         {displayUrl && <img className="hh-img-skin" src={displayUrl} alt="" draggable={false} />}
         {layout && (
           <>

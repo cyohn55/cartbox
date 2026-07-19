@@ -17,13 +17,6 @@ import { handheldAssetUrl } from "@/lib/handheldAssets";
 const BASE_URL = handheldAssetUrl("/handheld/base.png");
 const MASK_URL = handheldAssetUrl("/handheld/mask.png");
 
-// The crisp @2x chrome (see scripts/bake-handheld-hires.mjs). The console shows a
-// single chassis at up to ~1290 physical pixels on a phone, so downscaling this
-// 1734-wide art reads sharp where upscaling the 867-wide 1x art reads soft. Same
-// aspect ratio and region ids, so it is a drop-in higher-resolution template.
-const BASE_HIRES_URL = handheldAssetUrl("/handheld/base@2x.png");
-const MASK_HIRES_URL = handheldAssetUrl("/handheld/mask@2x.png");
-
 /** Decode an image URL to its raw RGBA pixels via an offscreen canvas. */
 function loadImageData(url: string): Promise<ImageData> {
   return new Promise((resolve, reject) => {
@@ -54,24 +47,14 @@ function toTemplate(base: ImageData, mask: ImageData): HandheldTemplate {
   return { width: base.width, height: base.height, base: base.data, regionMask };
 }
 
-/** Load the shared handheld template (chrome + per-pixel region mask). */
+/**
+ * Load the shared handheld template (chrome + per-pixel region mask). This is the
+ * art's native 1x resolution; the console renders it at 1:1 (or a crisp downscale)
+ * and caps the on-screen device so it is never fractionally upscaled — see
+ * HandheldConsole's ImageShell. Rendering a higher-resolution chassis would mean
+ * baking genuinely more detail here, not upscaling this source.
+ */
 export async function loadHandheldTemplate(): Promise<HandheldTemplate> {
   const [base, mask] = await Promise.all([loadImageData(BASE_URL), loadImageData(MASK_URL)]);
   return toTemplate(base, mask);
-}
-
-/**
- * Load the crisp @2x chassis template for the console, falling back to the 1x
- * template if the higher-resolution asset is unavailable (e.g. an older build
- * that predates the bake). Reserved for the console's single chassis render —
- * the onboarding picker keeps the 1x template because it recolours many devices
- * live per turn and the @2x buffer is four times the pixels.
- */
-export async function loadHandheldTemplateHiRes(): Promise<HandheldTemplate> {
-  try {
-    const [base, mask] = await Promise.all([loadImageData(BASE_HIRES_URL), loadImageData(MASK_HIRES_URL)]);
-    return toTemplate(base, mask);
-  } catch {
-    return loadHandheldTemplate();
-  }
 }
