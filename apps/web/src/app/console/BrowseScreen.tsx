@@ -61,7 +61,15 @@ interface ApiTitle {
  * on a console than one that is simply absent.
  */
 function titleGridCarts(
-  titles: readonly { id: string; name: string; bundleName?: string | null; width?: number; height?: number }[],
+  titles: readonly {
+    id: string;
+    name: string;
+    bundleName?: string | null;
+    width?: number;
+    height?: number;
+    /** Present for ScummVM titles: the engine directory and launch target. */
+    scummvmTarget?: string | null;
+  }[],
 ): GridCart[] {
   return titles
     .filter((title) => Boolean(title.bundleName))
@@ -74,9 +82,13 @@ function titleGridCarts(
       cartUrl: null,
       engineUrl: null,
       game: {
+        // A ScummVM target routes to the ScummVM iframe player; everything else
+        // is a Cartbox Game ABI module.
+        runtime: title.scummvmTarget ? ("scummvm" as const) : ("wasm-app" as const),
         bundleName: title.bundleName as string,
         width: title.width ?? 320,
         height: title.height ?? 180,
+        target: title.scummvmTarget ?? undefined,
       },
     }));
 }

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en-us">
+<head>
+  <meta charset="utf-8" />
+  <meta content="width=device-width,initial-scale=1,viewport-fit=cover" name="viewport" />
+  <title>ScummVM (Cartbox)</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
+    /* The canvas must carry no border or padding, or SDL's mouse coordinates
+       are offset. It fills the frame; the host sizes the iframe. */
+    canvas.emscripten {
+      border: 0; margin: 0; padding: 0; display: block;
+      width: 100%; height: 100%;
+      image-rendering: auto;
+      background: #000;
+    }
+  </style>
+</head>
+<body>
+  <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+  <script>
+    // ScummVM's Emscripten build has DATA_PATH="/data" compiled in, so its
+    // filesystem fetches engine and game data from the site-absolute path
+    // "/data/...". This page is served from a sub-path (…/scummvm/), so rewrite
+    // those absolute fetches to be relative to this document — the whole engine
+    // then works under any base path (dev, and the /cartbox GitHub Pages prefix)
+    // without recompiling. Only the engine's own "/data" prefix is touched.
+    (function () {
+      var nativeFetch = window.fetch.bind(window);
+      window.fetch = function (input, init) {
+        try {
+          if (typeof input === "string" && input.indexOf("/data/") === 0) {
+            input = "." + input; // "/data/x" -> "./data/x", relative to this page
+          }
+        } catch (e) { /* fall through with the original request */ }
+        return nativeFetch(input, init);
+      };
+    })();
+
+    // Launch target comes from the fragment, e.g. cartbox-boot.html#sky.
+    var target = decodeURIComponent(location.hash.replace(/^#/, "")).trim();
+
+    var Module = {
+      arguments: target ? target.split(" ").filter(Boolean) : [],
+      canvas: document.getElementById("canvas"),
+      printErr: function (text) { console.error(text); },
+      print: function (text) { console.log(text); },
+      // Tell the host when the engine has finished starting, so it can drop any
+      // loading affordance without polling pixels.
+      onRuntimeInitialized: function () {
+        parent.postMessage({ source: "cartbox-scummvm", type: "runtime-initialized" }, "*");
+      },
+    };
+    window.Module = Module;
+
+    // Surface a hard failure to the host rather than hanging on a black canvas.
+    window.addEventListener("error", function (event) {
+      parent.postMessage({ source: "cartbox-scummvm", type: "error", message: String(event.message) }, "*");
+    });
+  </script>
+  <script src="scummvm.js"></script>
+</body>
+</html>

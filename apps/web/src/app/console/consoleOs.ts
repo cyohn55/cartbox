@@ -35,10 +35,18 @@ export interface PlayingCart {
 }
 
 export interface PlayingGame {
-  /** Directory under public/games holding game.js + game.wasm. */
+  /**
+   * Which player drives this title. `wasm-app` games run on the Cartbox Game
+   * ABI (a framebuffer this host ticks); `scummvm` games run inside ScummVM's
+   * own Emscripten build, which owns its canvas and loop.
+   */
+  runtime?: "wasm-app" | "scummvm";
+  /** Directory under public/games holding game.js + game.wasm (wasm-app). */
   bundleName: string;
   width: number;
   height: number;
+  /** ScummVM launch target (its game id, e.g. "sky"), for the scummvm runtime. */
+  target?: string;
 }
 
 export interface ConsoleOsState {

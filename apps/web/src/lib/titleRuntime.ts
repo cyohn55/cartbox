@@ -63,7 +63,7 @@ const DESCRIPTORS: Record<RuntimeId, RuntimeDescriptor> = {
     consoleModel: "pro",
   },
   "wasm-app": { id: "wasm-app", label: "Open source", implemented: true },
-  scummvm: { id: "scummvm", label: "Adventure", implemented: false },
+  scummvm: { id: "scummvm", label: "Adventure", implemented: true },
   dos: { id: "dos", label: "DOS", implemented: false },
   libretro: { id: "libretro", label: "Console", implemented: false },
 };

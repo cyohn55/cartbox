@@ -28,9 +28,12 @@ export interface DemoTitle {
   /**
    * Directory under public/games holding the compiled game (game.js + game.wasm),
    * for bundled titles the console can run today. Absent while a title is
-   * catalogued but not yet ported.
+   * catalogued but not yet ported. ScummVM titles set it to the shared engine
+   * directory ("scummvm") so the Browse grid lists them as playable.
    */
   bundleName?: string;
+  /** ScummVM launch target (its game id, e.g. "sky") for the scummvm runtime. */
+  scummvmTarget?: string;
   /** Native resolution the game is initialised at. */
   width?: number;
   height?: number;
@@ -92,13 +95,18 @@ export const DEMO_TITLES: readonly DemoTitle[] = [
     slug: "beneath-a-steel-sky",
     name: "Beneath a Steel Sky",
     description:
-      "Revolution's cyberpunk point-and-click adventure, released as freeware by its authors and playable through the ScummVM runtime.",
+      "Revolution's cyberpunk point-and-click adventure, released as freeware by its authors and playable through the ScummVM runtime. The d-pad moves the cursor; A interacts and B examines.",
     runtime: "scummvm",
     assetSource: "bundled",
     tier: "B",
     license: "proprietary-freeware",
     sourceUrl: "https://www.scummvm.org/games/",
     releasedAt: "2026-07-08T00:00:00.000Z",
+    // The engine lives at public/scummvm; "sky" is the ScummVM game id.
+    bundleName: "scummvm",
+    scummvmTarget: "sky",
+    width: 320,
+    height: 200,
   },
   {
     id: "00000000-0000-4000-9000-000000000003",

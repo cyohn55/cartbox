@@ -39,3 +39,10 @@ packages/engine/tic80/
 # rather than committed — a blob that size is permanent once it is in history.
 games/doom/assets/
 apps/web/public/games/doom/
+
+# ScummVM runtime: the built engine (scummvm.js/wasm ~10MB, data/) and the
+# fetched Beneath a Steel Sky data (~9MB) are large and fully reproducible
+# (scripts/build-scummvm.mjs + scripts/fetch-scummvm-games.mjs), so they are
+# rebuilt rather than committed. The small iframe loader is source and stays.
+apps/web/public/scummvm/*
+!apps/web/public/scummvm/cartbox-boot.html

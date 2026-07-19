@@ -49,6 +49,28 @@ jobs:
       - name: Build Doom (WebAssembly)
         run: node scripts/build-doom.mjs
 
+      # The ScummVM engine (scummvm.js/wasm + data/) and the Beneath a Steel Sky
+      # freeware data are large and reproducible, so — like Doom — they are built
+      # here rather than committed. ScummVM's own build downloads its pinned emsdk
+      # (4.0.10), so this does not reuse the Emscripten set up above. The compile
+      # is slow, so the engine output is cached and only rebuilt when the build or
+      # fetch script changes.
+      - name: Cache ScummVM engine
+        id: scummvm-cache
+        uses: actions/cache@v4
+        with:
+          path: apps/web/public/scummvm
+          # The cached directory also holds the committed loader, so key on it too:
+          # editing the loader must not be masked by a stale cached copy.
+          key: scummvm-${{ hashFiles('scripts/build-scummvm.mjs', 'scripts/fetch-scummvm-games.mjs', 'apps/web/public/scummvm/cartbox-boot.html') }}
+
+      - name: Build ScummVM engine + fetch game data
+        if: steps.scummvm-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update && sudo apt-get install -y pkg-config zip
+          node scripts/build-scummvm.mjs
+          node scripts/fetch-scummvm-games.mjs
+
       - name: Build static export
         run: npm run build:static --workspace apps/web
         env:
