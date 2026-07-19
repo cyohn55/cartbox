@@ -96,13 +96,14 @@ jobs:
 
       - name: Build SuperTux (WebAssembly)
         if: steps.supertux-cache.outputs.cache-hit != 'true'
+        # GitHub-hosted runners ship a bootstrapped vcpkg at $VCPKG_INSTALLATION_ROOT
+        # (a runner env var, not in the ${{ env }} context), so export it in the
+        # shell. build-supertux.mjs reads EMSDK, set by setup-emsdk above.
         run: |
           sudo apt-get update && sudo apt-get install -y ninja-build pkg-config zip unzip
+          export VCPKG_ROOT="$VCPKG_INSTALLATION_ROOT"
           node scripts/build-supertux.mjs
         env:
-          # GitHub-hosted runners ship a bootstrapped vcpkg; reuse it rather than
-          # cloning one. build-supertux.mjs reads EMSDK (set by setup-emsdk above).
-          VCPKG_ROOT: ${{ env.VCPKG_INSTALLATION_ROOT }}
           NPROC: 4
 
       - name: Build static export
