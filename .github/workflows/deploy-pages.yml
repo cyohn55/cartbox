@@ -71,6 +71,40 @@ jobs:
           node scripts/build-scummvm.mjs
           node scripts/fetch-scummvm-games.mjs
 
+      # SuperTux (SDL3 + vcpkg) is the third iframe-hosted engine. Its engine
+      # (supertux2.js/wasm) and preloaded asset package (supertux2.data ~170MB,
+      # over GitHub's file limit) are gitignored and reproducible, so — like Doom
+      # and ScummVM — they are built here. The build is slow (vcpkg compiles SDL3
+      # and friends for wasm), so the output is cached and only rebuilt when the
+      # build script or loader changes.
+      - name: Cache SuperTux engine
+        id: supertux-cache
+        uses: actions/cache@v4
+        with:
+          path: apps/web/public/supertux
+          key: supertux-${{ hashFiles('scripts/build-supertux.mjs', 'apps/web/public/supertux/cartbox-boot.html') }}
+
+      # SuperTux needs the sdl3 + sdl3_ttf emscripten ports, which the 6.0.2 used
+      # for Doom lacks; 6.0.3 has them. Doom is already built above, so switching
+      # the active emsdk now is safe.
+      - name: Set up Emscripten for SuperTux
+        if: steps.supertux-cache.outputs.cache-hit != 'true'
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.3
+          actions-cache-folder: emsdk-cache-supertux
+
+      - name: Build SuperTux (WebAssembly)
+        if: steps.supertux-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build pkg-config zip unzip
+          node scripts/build-supertux.mjs
+        env:
+          # GitHub-hosted runners ship a bootstrapped vcpkg; reuse it rather than
+          # cloning one. build-supertux.mjs reads EMSDK (set by setup-emsdk above).
+          VCPKG_ROOT: ${{ env.VCPKG_INSTALLATION_ROOT }}
+          NPROC: 4
+
       - name: Build static export
         run: npm run build:static --workspace apps/web
         env:

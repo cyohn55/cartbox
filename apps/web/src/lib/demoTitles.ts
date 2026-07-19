@@ -82,13 +82,18 @@ export const DEMO_TITLES: readonly DemoTitle[] = [
     slug: "supertux",
     name: "SuperTux",
     description:
-      "A classic 2D side-scrolling platformer starring the Linux mascot. Free software with free assets, so the whole game ships with the console.",
-    runtime: "wasm-app",
+      "A classic 2D side-scrolling platformer starring the Linux mascot. Free software with free assets, so the whole game ships with the console. Arrow keys run, A jumps, B shoots.",
+    runtime: "supertux",
     assetSource: "bundled",
     tier: "A",
     license: "gpl-3.0",
     sourceUrl: "https://github.com/SuperTux/supertux",
     releasedAt: "2026-07-10T00:00:00.000Z",
+    // The engine lives at public/supertux; SuperTux boots to its own title
+    // screen, so there is no launch target.
+    bundleName: "supertux",
+    width: 1280,
+    height: 800,
   },
   {
     id: "00000000-0000-4000-9000-000000000002",

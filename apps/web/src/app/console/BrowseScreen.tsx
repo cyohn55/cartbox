@@ -49,6 +49,7 @@ interface ApiTitle {
   plays: number;
   thumbUrl: string | null;
   bundleName: string | null;
+  runtime?: string | null;
   width: number;
   height: number;
 }
@@ -67,6 +68,8 @@ function titleGridCarts(
     bundleName?: string | null;
     width?: number;
     height?: number;
+    /** The catalog runtime id; disambiguates the iframe players from wasm-app. */
+    runtime?: string | null;
     /** Present for ScummVM titles: the engine directory and launch target. */
     scummvmTarget?: string | null;
   }[],
@@ -82,9 +85,15 @@ function titleGridCarts(
       cartUrl: null,
       engineUrl: null,
       game: {
-        // A ScummVM target routes to the ScummVM iframe player; everything else
-        // is a Cartbox Game ABI module.
-        runtime: title.scummvmTarget ? ("scummvm" as const) : ("wasm-app" as const),
+        // The iframe-hosted engines (ScummVM, SuperTux) name themselves; a
+        // ScummVM target is honoured for older rows that predate the runtime
+        // column; everything else is a Cartbox Game ABI module.
+        runtime:
+          title.runtime === "supertux"
+            ? ("supertux" as const)
+            : title.runtime === "scummvm" || title.scummvmTarget
+              ? ("scummvm" as const)
+              : ("wasm-app" as const),
         bundleName: title.bundleName as string,
         width: title.width ?? 320,
         height: title.height ?? 180,

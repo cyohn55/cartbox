@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en-us">
+<head>
+  <meta charset="utf-8" />
+  <meta content="width=device-width,initial-scale=1,viewport-fit=cover" name="viewport" />
+  <title>SuperTux (Cartbox)</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
+    /* No border or padding — SDL keys off the canvas box for pointer/size. */
+    canvas.emscripten {
+      border: 0; margin: 0; padding: 0; display: block;
+      width: 100%; height: 100%;
+      image-rendering: auto;
+      background: #000;
+      outline: none;
+    }
+    /* SuperTux's own loading overlay, simplified: no external background images
+       (they would 404 in this embed) — the console host draws its own overlay on
+       top until the engine reports ready. */
+    #overlay {
+      position: fixed; inset: 0; z-index: 10;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      background: #06040c; color: #d7d7d7; font: 600 13px arial;
+    }
+    #status { margin-top: 14px; }
+    #progress { height: 6px; width: 200px; border: 0; border-radius: 3px; background: #787878; margin-top: 10px; }
+    progress::-moz-progress-bar { border-radius: 3px; background: #fff; }
+    progress::-webkit-progress-value { border-radius: 3px; background: #fff; }
+    #output { display: none; }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <div id="status">Downloading…</div>
+    <progress hidden id="progress" max="100" value="0"></progress>
+    <p id="progress_desc" style="color:#fff7;font-size:11px"></p>
+    <p id="data_warning" style="display:none"></p>
+  </div>
+  <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex="0"></canvas>
+  <p id="output"></p>
+  <input type="file" id="file_upload" multiple="multiple" style="display:none" />
+  <script>
+    // Bridge engine lifecycle to the console host (SuperTuxPlayer) so it can drop
+    // its own loading overlay and surface hard errors without polling pixels.
+    function postToHost(msg) { try { parent.postMessage(Object.assign({ source: "cartbox-supertux" }, msg), "*"); } catch (e) {} }
+
+    // Persistent storage: the engine calls supertux2_ispersistent() to decide
+    // whether to warn about volatile saves. Request persistence best-effort.
+    var data_persistent = false;
+    if (navigator.storage && navigator.storage.persist) {
+      navigator.storage.persist().then(function (persists) { data_persistent = !!persists; });
+    }
+    window.supertux2_ispersistent = function () { return data_persistent ? 1 : 0; };
+
+    var statusElement = document.getElementById("status"),
+        progressElement = document.getElementById("progress"),
+        progressDescElement = document.getElementById("progress_desc"),
+        overlayElement = document.getElementById("overlay");
+
+    // Functions loaded by cwrap once the runtime is up (SuperTux's addon system).
+    var setResolution = null, onDownloadProgress = null, onDownloadFinished = null,
+        onDownloadError = null, onDownloadAborted = null;
+
+    var Module = {
+      preRun: [], postRun: [],
+      print: function (t) { console.log(t); },
+      printErr: function (t) { console.error(t); },
+      canvas: (function () {
+        var c = document.getElementById("canvas");
+        c.addEventListener("webglcontextlost", function (e) { postToHost({ type: "error", message: "WebGL context lost" }); e.preventDefault(); }, false);
+        // Keep keyboard focus on the canvas when tapped (arrows must reach SDL).
+        c.addEventListener("click", function () { c.focus(); });
+        return c;
+      })(),
+      // Emscripten's file-packager reports data download + asset-instantiation
+      // progress through setStatus("... (n/total)"); relay it to the host bar.
+      setStatus: function (e) {
+        overlayElement.style.display = e ? "flex" : "none";
+        var match = e.match(/([^(]+)\((\d+(\.\d+)?)\/(\d+)\)/);
+        if (match) {
+          var loaded = parseInt(match[2]), total = parseInt(match[4]);
+          progressElement.hidden = false;
+          progressElement.value = loaded; progressElement.max = total;
+          statusElement.innerHTML = match[1];
+          if (total > 0) postToHost({ type: "progress", loaded: loaded, total: total });
+        } else {
+          progressElement.hidden = true;
+          statusElement.innerHTML = e;
+        }
+      },
+      totalDependencies: 0,
+      monitorRunDependencies: function (left) {
+        this.totalDependencies = Math.max(this.totalDependencies, left);
+        Module.setStatus(left ? "Preparing… (" + (this.totalDependencies - left) + "/" + this.totalDependencies + ")" : "");
+      },
+      onRuntimeInitialized: function () {
+        setResolution = Module.cwrap("set_resolution", "void", ["number"]);
+        onDownloadProgress = Module.cwrap("onDownloadProgress", "void", ["number", "number", "number", "number"]);
+        onDownloadFinished = Module.cwrap("onDownloadFinished", "void", ["number", "number", "string"]);
+        onDownloadError = Module.cwrap("onDownloadError", "void", ["number", "number"]);
+        onDownloadAborted = Module.cwrap("onDownloadAborted", "void", ["number", "number"]);
+        postToHost({ type: "runtime-initialized" });
+      },
+    };
+    window.Module = Module;
+    Module.setStatus("Downloading…");
+
+    // Turn an SDL/C++ exception into a host error instead of a black canvas.
+    window.onerror = function (message, source, line, col, error) {
+      if (typeof error == "number") {
+        try { message = Module.ccall("getExceptionMessage", "string", ["number"], [error]); } catch (e) {}
+      }
+      postToHost({ type: "error", message: String(message) });
+    };
+
+    // Autofit: SuperTux renders at whatever resolution we hand it; keep it matched
+    // to the iframe so the platformer fills the handheld screen.
+    var autofit = true;
+    function tryResize() {
+      if (!autofit || !setResolution) return;
+      try { setResolution(window.innerWidth, window.innerHeight); } catch (err) {}
+    }
+    window.supertux_setAutofit = function (v) { autofit = v; tryResize(); };
+    window.addEventListener("resize", tryResize);
+
+    // --- The save/config/addon file bridge the engine calls into (verbatim from
+    // SuperTux's web template; the engine depends on these existing). ---------
+    var root = "/home/web_user/.local/share/supertux2/";
+
+    window.supertux_loadFiles = function () {
+      try {
+        for (var key of Object.keys(localStorage)) {
+          if (key !== "supertux2_config") continue;
+          var keyfilename = key.replace(/^supertux2_/, "");
+          if (keyfilename.indexOf("/") !== -1) {
+            try { FS.mkdir(root + keyfilename.substr(0, keyfilename.indexOf("/"))); } catch (e) {}
+          }
+          FS.writeFile(root + keyfilename, localStorage.getItem(key));
+        }
+      } catch (e) {}
+    };
+
+    window.supertux_saveFiles = function () {
+      try { FS.syncfs(function (err) { if (err) console.log(err); }); } catch (err) { console.log(err); }
+      try { localStorage.setItem("supertux2_config", FS.readFile(root + "config", { encoding: "utf8" })); } catch (e) {}
+    };
+
+    window.supertux2_syncfs = (function () {
+      var saving = false;
+      return function () {
+        if (saving) return;
+        saving = true;
+        try { FS.syncfs(function () { saving = false; }); } catch (err) { saving = false; }
+      };
+    })();
+
+    window.supertux_download = function (path) {
+      try {
+        var stat = FS.stat(path), size = stat.size, file = FS.open(path, "r"), buf = new Uint8Array(size);
+        FS.read(file, buf, 0, size, 0); FS.close(file);
+        var blob = new Blob([buf], { type: "application/octet-stream" });
+        var url = URL.createObjectURL(blob), a = document.createElement("a");
+        a.href = url; a.download = path.substr(path.lastIndexOf("/") + 1); a.style.display = "none";
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+        return true;
+      } catch (e) { console.error(e); return false; }
+    };
+
+    var file_upload = document.getElementById("file_upload");
+    var base_path = "/";
+    window.supertux_upload = function (base) {
+      base_path = base;
+      while (base_path.startsWith("/")) base_path = base_path.substr(1);
+      if (!base_path.endsWith("/")) base_path += "/";
+      base_path = base_path.replace(/\/+/g, "/");
+      file_upload.click();
+    };
+    file_upload.addEventListener("change", function () {
+      for (var file of file_upload.files) {
+        var fr = new FileReader();
+        fr.filename = file.name;
+        fr.onload = function (e) {
+          var data = new Uint8Array(e.target.result), index = 0;
+          while (base_path.indexOf("/", index) != -1) {
+            index = base_path.indexOf("/", index);
+            var subfolder = base_path.substr(0, index);
+            if (!FS.analyzePath(root + subfolder).exists) FS.mkdir(root + subfolder);
+            index += 1;
+          }
+          var em = FS.open(root + base_path + e.target.filename, "w");
+          FS.write(em, data, 0, data.length, 0); FS.close(em);
+        };
+        fr.readAsArrayBuffer(file);
+      }
+    });
+
+    // Addon downloads run through the host's XHR (engine passes C callbacks).
+    window.supertux_xhr_file_download = function (ptr, id, url, file) {
+      if (!onDownloadProgress) return;
+      var xhr = new XMLHttpRequest();
+      xhr.responseType = "arraybuffer";
+      xhr.onreadystatechange = function () {
+        if (xhr.readyState == 4) {
+          var data = new Uint8Array(xhr.response), stream = FS.open(file, "w+");
+          FS.write(stream, data, 0, data.length, 0); FS.close(stream);
+          onDownloadFinished(ptr, id, "");
+        }
+      };
+      xhr.open("GET", url); xhr.send();
+      xhr.addEventListener("progress", function (e) { onDownloadProgress(ptr, id, e.loaded, e.total); });
+      xhr.addEventListener("error", function () { onDownloadError(ptr, id); });
+      xhr.addEventListener("abort", function () { onDownloadAborted(ptr, id); });
+    };
+    window.supertux_xhr_string_download = function (ptr, id, url) {
+      if (!onDownloadProgress) return;
+      var xhr = new XMLHttpRequest();
+      xhr.responseType = "text";
+      xhr.onreadystatechange = function () { if (xhr.readyState == 4) onDownloadFinished(ptr, id, xhr.responseText); };
+      xhr.open("GET", url); xhr.send();
+      xhr.addEventListener("progress", function (e) { onDownloadProgress(ptr, id, e.loaded, e.total); });
+      xhr.addEventListener("error", function () { onDownloadError(ptr, id); });
+      xhr.addEventListener("abort", function () { onDownloadAborted(ptr, id); });
+    };
+
+    // Flush saves when the embed is torn down.
+    window.addEventListener("unload", function () {
+      try { Module.ccall("save_config", "void", [], []); } catch (e) {}
+      window.supertux_saveFiles();
+    });
+  </script>
+  <script async src="supertux2.js"></script>
+</body>
+</html>

@@ -47,6 +47,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     plays: title.plays,
     thumbUrl: title.thumb_key ? publicUrl(title.thumb_key) : null,
     bundleName: title.bundle_key,
+    runtime: title.runtime,
     width: DEFAULT_WIDTH,
     height: DEFAULT_HEIGHT,
   }));

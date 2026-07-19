@@ -20,6 +20,7 @@ export const RUNTIME_IDS = [
   "cartbox-pro",
   "wasm-app",
   "scummvm",
+  "supertux",
   "dos",
   "libretro",
 ] as const;
@@ -64,6 +65,7 @@ const DESCRIPTORS: Record<RuntimeId, RuntimeDescriptor> = {
   },
   "wasm-app": { id: "wasm-app", label: "Open source", implemented: true },
   scummvm: { id: "scummvm", label: "Adventure", implemented: true },
+  supertux: { id: "supertux", label: "Platformer", implemented: true },
   dos: { id: "dos", label: "DOS", implemented: false },
   libretro: { id: "libretro", label: "Console", implemented: false },
 };

@@ -46,3 +46,10 @@ apps/web/public/games/doom/
 # rebuilt rather than committed. The small iframe loader is source and stays.
 apps/web/public/scummvm/*
 !apps/web/public/scummvm/cartbox-boot.html
+
+# SuperTux runtime: the built engine (supertux2.js/wasm ~9MB) and its preloaded
+# data package (supertux2.data ~170MB — over GitHub's 100MB file limit) are large
+# and fully reproducible (scripts/build-supertux.mjs), so they are rebuilt in the
+# deploy rather than committed. The small iframe loader is source and stays.
+apps/web/public/supertux/*
+!apps/web/public/supertux/cartbox-boot.html
