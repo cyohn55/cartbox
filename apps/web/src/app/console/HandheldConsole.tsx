@@ -26,7 +26,7 @@ import { ConsoleInputContext, useConsoleInput } from "./ConsoleInputContext";
 import { ConsoleSettingsProvider, useConsoleSettings } from "./ConsoleSettingsContext";
 import { HandheldSkinProvider, useHandheldSkin } from "./HandheldSkinContext";
 import { customColorStyle } from "./consoleSettings";
-import { loadHandheldTemplate } from "@/lib/handheldTemplate";
+import { loadHandheldTemplateHiRes } from "@/lib/handheldTemplate";
 import { handheldAssetUrl } from "@/lib/handheldAssets";
 import { sliceSheet } from "@/lib/handheldSheet";
 import { KonamiDetector } from "./consoleNavigation";
@@ -296,7 +296,7 @@ function ImageShell({ bus, children }: { bus: ConsoleInputBus; children: ReactNo
     void (async () => {
       try {
         const [loadedTemplate, layoutData] = await Promise.all([
-          loadHandheldTemplate(),
+          loadHandheldTemplateHiRes(),
           fetch(handheldAssetUrl("/handheld/handheld-layout.json")).then((response) => response.json() as Promise<HandheldLayout>),
         ]);
         if (!alive) return;
