@@ -22,17 +22,19 @@
   <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
   <script src="js-dos.js"></script>
   <script>
-    // Which game to boot comes from the fragment as "<bundle>:<exe>", e.g.
-    // cartbox-boot.html#cdogs:CDOGS.EXE — <bundle>.zip is fetched relative to
-    // this page (so any base path, dev or the /cartbox Pages prefix, just works)
-    // and <exe> is run inside DOSBox. Defaulting to C-Dogs keeps a bare open of
-    // the page useful.
+    // Which game to boot comes from the fragment as "<bundle>:<exe>" or
+    // "<bundle>:<exe>:<cd-image>", e.g. cartbox-boot.html#cdogs:CDOGS.EXE or
+    // #cnc:C&C.COM:CNC.ISO — <bundle>.zip is fetched relative to this page (so any
+    // base path, dev or the /cartbox Pages prefix, just works) and <exe> is run
+    // inside DOSBox. A third field names an ISO (packed into <bundle>.zip) that is
+    // mounted as a CD-ROM drive before launch — some games (C&C) refuse to run
+    // without a CD present. Splitting on ":" is safe: DOS paths separate with "\".
+    // Defaulting to C-Dogs keeps a bare open of the page useful.
     function parseTarget() {
       var raw = decodeURIComponent(location.hash.replace(/^#/, "")).trim();
-      var sep = raw.indexOf(":");
-      if (!raw) return { bundle: "cdogs", exe: "CDOGS.EXE" };
-      if (sep < 0) return { bundle: raw, exe: "CDOGS.EXE" };
-      return { bundle: raw.slice(0, sep), exe: raw.slice(sep + 1) };
+      if (!raw) return { bundle: "cdogs", exe: "CDOGS.EXE", cd: null };
+      var parts = raw.split(":");
+      return { bundle: parts[0], exe: parts[1] || "CDOGS.EXE", cd: parts[2] || null };
     }
 
     function post(type, extra) {
@@ -70,7 +72,12 @@
             return applyOverlay(fs, target.bundle);
           })
           .then(function () {
-            main(["-c", target.exe]);
+            // A CD-backed game mounts its ISO (extracted to C: from the zip) as a
+            // CD-ROM drive D: before running the exe, so the game's CD check passes.
+            var commands = target.cd
+              ? ["-c", "imgmount d " + target.cd + " -t iso -fs iso", "-c", target.exe]
+              : ["-c", target.exe];
+            main(commands);
             // DOSBox is now running the game; the host can drop the loader.
             post("runtime-initialized");
           })

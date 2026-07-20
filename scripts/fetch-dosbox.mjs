@@ -91,6 +91,16 @@ const ARTEFACTS = [
     output: "arena.zip",
     sha256: "1679d9716ae8b7540ef07b7bd500f436401adbe8e9fee3dcc88f83620bb6b3fa",
   },
+  {
+    // Command & Conquer (Tiberian Dawn), released as freeware by EA. Vendored
+    // like Arena: its clean source is EA's ~490MB CD ISO, so the playable HD
+    // layout is assembled once and committed. The zip carries a small CNC.ISO
+    // (volume label "GDI", the label the game checks for) mounted as a CD-ROM so
+    // the game's CD check passes. games/cnc/README.md records how it is produced.
+    source: join(repoRoot, "games", "cnc", "cnc.zip"),
+    output: "cnc.zip",
+    sha256: "55220a1ec0d7532048c8a0dc47c879203aca50a92d93496d91251e668314c90d",
+  },
 ];
 
 /**

@@ -140,6 +140,27 @@ export const DEMO_TITLES: readonly DemoTitle[] = [
     releasedAt: "2026-07-20T00:00:03.000Z",
   },
   {
+    id: "00000000-0000-4000-9000-000000000010",
+    slug: "command-and-conquer",
+    name: "Command & Conquer",
+    description:
+      "Westwood's genre-defining 1995 real-time strategy game — command GDI or the Brotherhood of Nod in the war over Tiberium, released as freeware by EA and running authentically in DOSBox. Tap to select and command units; the d-pad scrolls the battlefield.",
+    runtime: "dos",
+    assetSource: "bundled",
+    tier: "B",
+    // EA released Tiberian Dawn as freeware (and later GPL'd the engine).
+    // Proprietary game code, so proprietary-freeware / Tier B. The dosTarget's
+    // third field is a CD image the boot page mounts — C&C refuses to run without
+    // its CD. See games/cnc/README.md for how the bundle is produced.
+    license: "proprietary-freeware",
+    sourceUrl: "https://archive.org/details/cnc-dos-eng-v-1.22",
+    bundleName: "dosbox",
+    dosTarget: "cnc:C&C.COM:CNC.ISO",
+    width: 320,
+    height: 200,
+    releasedAt: "2026-07-20T00:00:04.000Z",
+  },
+  {
     id: "00000000-0000-4000-9000-000000000004",
     slug: "collector",
     name: "Collector",
