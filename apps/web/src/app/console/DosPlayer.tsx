@@ -68,8 +68,10 @@ export function DosPlayer({ cart, onExit }: { cart: PlayingCart; onExit: () => v
   const inputRef = useRef<IframeKeyboard | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
 
-  // The launch target ("<bundle>:<exe>") selects the game zip and its exe.
+  // The launch target ("<bundle>:<exe>") selects the game zip and its exe; the
+  // bundle also selects the game's DOS key bindings.
   const target = cart.game?.target ?? "";
+  const bundle = target.split(":")[0] ?? "";
   const src = withBasePath(`/dosbox/cartbox-boot.html${target ? `#${encodeURIComponent(target)}` : ""}`);
 
   // The engine reports readiness and hard failures by postMessage — the same
@@ -94,7 +96,7 @@ export function DosPlayer({ cart, onExit }: { cart: PlayingCart; onExit: () => v
       const control = CONTROL_FOR_CODE[code];
       const input = inputRef.current;
       if (!control || !input) return;
-      const dosKey = dosKeyForControl(control);
+      const dosKey = dosKeyForControl(bundle, control);
       if (dosKey) input.key(dosKey, down);
     };
     const onKeyDown = (event: KeyboardEvent) => route(event.code, true);
@@ -105,7 +107,7 @@ export function DosPlayer({ cart, onExit }: { cart: PlayingCart; onExit: () => v
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, []);
+  }, [bundle]);
 
   const onFrameLoad = () => {
     if (frameRef.current) {

@@ -11,8 +11,9 @@
  *
  * ScummVM ships its own Emscripten build (dists/emscripten/build.sh) which pins
  * and downloads its own emsdk (4.0.10) — so this deliberately does NOT use the
- * repo's emsdk. The build is limited to the Sky engine (Beneath a Steel Sky) to
- * keep the wasm small (~10MB) and the compile short.
+ * repo's emsdk. The build enables only the engines whose freeware titles the
+ * catalog actually ships (see fetch-scummvm-games.mjs), not every ScummVM engine,
+ * so the wasm carries just those games and stays small enough for a web handheld.
  *
  * System prerequisites the ScummVM build needs on PATH: pkg-config and zip.
  * On CI: `apt-get install -y pkg-config zip`. Output lands in
@@ -38,8 +39,18 @@ const outputDirectory = join(repoRoot, "apps", "web", "public", "scummvm");
 const SCUMMVM_COMMIT = "ce70c890a6d8016a97d49a9795614ddbfc3336ac";
 const SCUMMVM_REPO = "https://github.com/scummvm/scummvm.git";
 
-/** Only the Sky engine, so the wasm carries Beneath a Steel Sky and nothing else. */
-const ENGINE_ARGS = ["--disable-all-engines", "--enable-engine=sky"];
+/**
+ * The engines behind the shipped freeware titles, and only those:
+ *   sky      Beneath a Steel Sky      queen  Flight of the Amazon Queen
+ *   lure     Lure of the Temptress    cge    Soltys
+ *   dreamweb DreamWeb                 drascula  Drascula: The Vampire Strikes Back
+ * Detection tables for every engine are always compiled in, so a title is
+ * *detected* without its engine — but launching it needs the engine plugin here.
+ */
+const ENGINE_ARGS = [
+  "--disable-all-engines",
+  "--enable-engine=sky,queen,lure,cge,dreamweb,drascula",
+];
 
 /** The engine files the iframe loader needs; everything else in the dist is unused. */
 const ENGINE_ARTEFACTS = ["scummvm.js", "scummvm.wasm", "data"];

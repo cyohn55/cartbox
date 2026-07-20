@@ -41,6 +41,64 @@ const GAMES = [
       "sky.dnr": "e1ea726858bfa024b9696856c32cd2f525d0e33b5fb0e0284ad2e6ce943115c8",
     },
   },
+  {
+    target: "queen",
+    description: "Flight of the Amazon Queen",
+    // Released as freeware by John Passfield and Steve Stamatiadis; the ScummVM
+    // team hosts the rebuilt single-file datafile (queen.1c, the English talkie).
+    url: "https://downloads.scummvm.org/frs/extras/Flight%20of%20the%20Amazon%20Queen/FOTAQ_Talkie-1.1.zip",
+    files: {
+      "queen.1c": "8bba6dee7fdb6f4203e3284fa77bd5e539e88b4aeb38ae154eb3543cfecd3e3c",
+    },
+  },
+  {
+    target: "lure",
+    description: "Lure of the Temptress",
+    // Released as freeware by Revolution Software. The archive ships the VGA disk
+    // set with mixed-case names (Disk1.vga); they are written lowercased to match
+    // ScummVM's Lure detector, which keys on disk1.vga.
+    url: "https://downloads.scummvm.org/frs/extras/Lure%20of%20the%20Temptress/lure-1.1.zip",
+    files: {
+      "Disk1.vga": "7475e38373dcf62b6101e0008bdb939d4b42717b610d6f7553400cd588131c45",
+      "disk1.ega": "eb69e8b3ca34790abd2ceedf6ebb14cc640b205f3285ef114a00589b2ebe7108",
+      "Disk2.vga": "c2e37bae781e89b77f565980900e2cf21c558ed1d681e6a6940de07e7e3aba85",
+      "disk2.ega": "751b562a0386ecc8d468a20d6c31ce7bee1b3f117dd4bd818179b2d9ec34fac4",
+      "Disk3.vga": "81678a2d90dd07a7e959e309bde17a664562d0a7c490d636a3e37f77d61ffa85",
+      "disk3.ega": "657193bcc383b6c52dd15a25111c3504085d7d228dcd0e9231bfc13f37dc1ab3",
+      "Disk4.vga": "a3bcf4026a5fc47e36d665e321d78ee3a6c14bc6fcd81bca6706be5a0d9fcb17",
+      "disk4.ega": "c4c24f101ac7e42006947836bb8b1647b0efc3dabc528765a4df813b2ad4ac55",
+    },
+  },
+  {
+    target: "soltys",
+    description: "Soltys",
+    // Released as freeware by its author, Lech Sokolowski; the CGE engine data is
+    // the vol.cat catalogue and vol.dat archive.
+    url: "https://downloads.scummvm.org/frs/extras/Soltys/soltys-en-v1.0.zip",
+    files: {
+      "vol.cat": "e394b8ab19ffb808555fa1bbe1fc578f1123927230c1744e273f5e91ca3b14ef",
+      "vol.dat": "4c34d82d1c0f9456f970578ae7a96398019f11b41f45dcfef72592e6de833994",
+    },
+  },
+  {
+    target: "drascula",
+    description: "Drascula: The Vampire Strikes Back",
+    // Released as freeware by Alcachofa Soft / Digital Tales; the ScummVM team
+    // hosts the game data. Packet.001 (written lowercased) is the whole game.
+    url: "https://downloads.scummvm.org/frs/extras/Drascula_%20The%20Vampire%20Strikes%20Back/drascula-1.0.zip",
+    files: {
+      "Packet.001": "1927bf76365ed0dcf6858b8e5b232ef7f2b73e75deeb441dfe3372617d88e7b6",
+    },
+  },
+  {
+    target: "dreamweb",
+    description: "DreamWeb",
+    // Released as freeware by Creative Reality / Empire. The only freeware release
+    // is the CD talkie: ~590 files (most of them speech), too many to pin one by
+    // one, so it is verified by the archive digest and extracted whole.
+    url: "https://downloads.scummvm.org/frs/extras/Dreamweb/dreamweb-cd-uk-1.1.zip",
+    archiveSha256: "4a6f13911ce67d62c526e41048ec067b279f1b378c9210f39e0ce8d3f2b80142",
+  },
 ];
 
 function sha256(bytes) {
@@ -86,11 +144,96 @@ function extractEntries(archive, wanted) {
   return found;
 }
 
+/**
+ * Reads every file entry out of a zip archive, keyed by its full relative path.
+ *
+ * Games with hundreds of data files (DreamWeb ships ~590, most of them speech)
+ * cannot be pinned file-by-file, so those are verified by the archive's own
+ * digest and then extracted wholesale. Directory entries are skipped; the
+ * on-disk tree is recreated from the file paths.
+ */
+function extractAllEntries(archive) {
+  let end = archive.length - 22;
+  while (end >= 0 && archive.readUInt32LE(end) !== 0x06054b50) end--;
+  if (end < 0) throw new Error("Not a zip archive: no end-of-central-directory record");
+
+  const entryCount = archive.readUInt16LE(end + 10);
+  let cursor = archive.readUInt32LE(end + 16);
+  const found = new Map();
+
+  for (let index = 0; index < entryCount; index++) {
+    if (archive.readUInt32LE(cursor) !== 0x02014b50) throw new Error("Corrupt zip central directory");
+    const method = archive.readUInt16LE(cursor + 10);
+    const compressedSize = archive.readUInt32LE(cursor + 20);
+    const nameLength = archive.readUInt16LE(cursor + 28);
+    const extraLength = archive.readUInt16LE(cursor + 30);
+    const commentLength = archive.readUInt16LE(cursor + 32);
+    const localHeaderOffset = archive.readUInt32LE(cursor + 42);
+    const fullName = archive.subarray(cursor + 46, cursor + 46 + nameLength).toString("utf8");
+
+    if (!fullName.endsWith("/")) {
+      const localNameLength = archive.readUInt16LE(localHeaderOffset + 26);
+      const localExtraLength = archive.readUInt16LE(localHeaderOffset + 28);
+      const dataStart = localHeaderOffset + 30 + localNameLength + localExtraLength;
+      const data = archive.subarray(dataStart, dataStart + compressedSize);
+      found.set(fullName, method === 0 ? Buffer.from(data) : inflateRawSync(data));
+    }
+    cursor += 46 + nameLength + extraLength + commentLength;
+  }
+  return found;
+}
+
+/**
+ * Fetches a game pinned by its whole-archive digest and extracts every file,
+ * recreating the archive's directory tree (lowercased) under the game directory.
+ * Used for games too large to pin file-by-file.
+ */
+async function fetchArchiveGame(game, gameDirectory) {
+  const alreadyExtracted =
+    existsSync(gameDirectory) && readdirSync(gameDirectory).some((name) => name !== "index.json");
+  if (alreadyExtracted) {
+    console.log(`${game.description} already present`);
+    return;
+  }
+
+  console.log(`Fetching ${game.description}… (large archive)`);
+  const response = await fetch(game.url);
+  if (!response.ok) throw new Error(`Download failed: ${response.status} ${response.statusText}`);
+  const archive = Buffer.from(await response.arrayBuffer());
+
+  const digest = sha256(archive);
+  if (digest !== game.archiveSha256) {
+    throw new Error(
+      `${game.description} archive digest mismatch.\n  expected ${game.archiveSha256}\n  got      ${digest}\n` +
+        "Refusing to write: the pinned release changed or the download was tampered with.",
+    );
+  }
+
+  const entries = extractAllEntries(archive);
+  let bytesWritten = 0;
+  for (const [path, bytes] of entries) {
+    // ScummVM's detectors key on lowercase names; the freeware tree ships upper
+    // case (DREAMWEB.*, SPEECH/…), so the whole relative path is lowercased.
+    const destination = join(gameDirectory, path.toLowerCase());
+    mkdirSync(dirname(destination), { recursive: true });
+    writeFileSync(destination, bytes);
+    bytesWritten += bytes.length;
+  }
+  console.log(`  ${entries.size} files (${(bytesWritten / 1024 / 1024).toFixed(1)} MB)`);
+}
+
 async function fetchGame(game) {
   const gameDirectory = join(dataDirectory, "games", game.target);
   mkdirSync(gameDirectory, { recursive: true });
 
-  const present = Object.keys(game.files).every((name) => existsSync(join(gameDirectory, name)));
+  if (game.archiveSha256) {
+    await fetchArchiveGame(game, gameDirectory);
+    return;
+  }
+
+  const present = Object.keys(game.files).every((name) =>
+    existsSync(join(gameDirectory, name.toLowerCase())),
+  );
   if (present) {
     console.log(`${game.description} already present`);
     return;
@@ -112,8 +255,11 @@ async function fetchGame(game) {
           "Refusing to write: the pinned release changed or the download was tampered with.",
       );
     }
-    writeFileSync(join(gameDirectory, name), bytes);
-    console.log(`  ${name} (${(bytes.length / 1024 / 1024).toFixed(1)} MB)`);
+    // ScummVM's detectors key on lowercase data filenames; some freeware archives
+    // ship mixed case (e.g. Lure's Disk1.vga). Normalise so the case-sensitive
+    // Emscripten HTTP filesystem and index.json match what the engine looks for.
+    writeFileSync(join(gameDirectory, name.toLowerCase()), bytes);
+    console.log(`  ${name.toLowerCase()} (${(bytes.length / 1024 / 1024).toFixed(1)} MB)`);
   }
 }
 

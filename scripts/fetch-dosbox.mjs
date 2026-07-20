@@ -17,13 +17,41 @@
  */
 
 import { createHash } from "node:crypto";
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const vendorDirectory = join(repoRoot, "games", "cdogs");
 const outputDirectory = join(repoRoot, "apps", "web", "public", "dosbox");
+
+/**
+ * DOS games fetched from a pinned upstream rather than vendored. C-Dogs is
+ * vendored because its js-dos engine URL is a rolling pointer; a redistributable
+ * game with a stable download (id's Wolfenstein 3D shareware episode) is better
+ * fetched and digest-pinned than committed as a binary — the same choice
+ * fetch-freedoom.mjs and fetch-chex.mjs make.
+ */
+const FETCHED_GAMES = [
+  {
+    // Wolfenstein 3D, shareware episode 1 ("Escape from Wolfenstein"). id gave
+    // the shareware episode free redistribution; these are the raw .WL1 data
+    // files (not the registered .WL6 episodes), so the whole title ships intact.
+    // Real-mode DOS, launch exe WOLF3D.EXE.
+    output: "wolf3d.zip",
+    url: "https://archive.org/download/wolf3dsw/wolf3dsw.zip",
+    sha256: "76ee5e73e7d6341aefff620989bb5f828e9d295982afd5415b62dee7fe54eb64",
+  },
+  {
+    // Descent, shareware (the 7-level demo; descent.hog is ~2.3MB, not the ~7MB
+    // registered game). Interplay/Parallax gave the shareware free redistribution.
+    // The extender is bound into descent.exe. The archive nests the files under
+    // Descent/, so the dosTarget runs Descent\descent.exe.
+    output: "descent.zip",
+    url: "https://archive.org/download/msdos_Descent_1995/Descent_1995.zip",
+    sha256: "0e47005b4825b928f400e1ab81c41882c56b0ecbf80628b746f2c68750e94f07",
+  },
+];
 
 /**
  * Each vendored source, its destination name under public/dosbox, and the
@@ -95,8 +123,33 @@ function verifiedRead(source, expected) {
   return bytes;
 }
 
-function main() {
+async function fetchGame(game) {
+  const destination = join(outputDirectory, game.output);
+  if (existsSync(destination) && sha256(readFileSync(destination)) === game.sha256) {
+    console.log(`${game.output} already present (sha256 ok)`);
+    return;
+  }
+  console.log(`Fetching ${game.output}…`);
+  const response = await fetch(game.url);
+  if (!response.ok) throw new Error(`Download failed: ${response.status} ${response.statusText}`);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  const digest = sha256(bytes);
+  if (digest !== game.sha256) {
+    throw new Error(
+      `${game.output} digest mismatch.\n  expected ${game.sha256}\n  got      ${digest}\n` +
+        "Refusing to write: the pinned release changed or the download was tampered with.",
+    );
+  }
+  writeFileSync(destination, bytes);
+  console.log(`Wrote ${game.output} (${(bytes.length / 1024).toFixed(0)} KB, sha256 ok)`);
+}
+
+async function main() {
   mkdirSync(outputDirectory, { recursive: true });
+
+  for (const game of FETCHED_GAMES) {
+    await fetchGame(game);
+  }
 
   for (const artefact of ARTEFACTS) {
     const bytes = verifiedRead(artefact.source, artefact.sha256);
@@ -117,9 +170,7 @@ function main() {
   console.log("DOS runtime assembled into apps/web/public/dosbox");
 }
 
-try {
-  main();
-} catch (error) {
+main().catch((error) => {
   console.error(error.message);
   process.exit(1);
-}
+});

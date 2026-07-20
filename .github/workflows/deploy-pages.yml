@@ -49,6 +49,14 @@ jobs:
       - name: Build Doom (WebAssembly)
         run: node scripts/build-doom.mjs
 
+      # Chex Quest reuses the Doom engine with its own IWAD (build-doom.mjs chex),
+      # so it is fetched and built here alongside Doom rather than committed.
+      - name: Fetch Chex Quest assets
+        run: node scripts/fetch-chex.mjs
+
+      - name: Build Chex Quest (WebAssembly)
+        run: node scripts/build-doom.mjs chex
+
       # The ScummVM engine (scummvm.js/wasm + data/) and the Beneath a Steel Sky
       # freeware data are large and reproducible, so — like Doom — they are built
       # here rather than committed. ScummVM's own build downloads its pinned emsdk

@@ -72,6 +72,53 @@ export const DEMO_TITLES: readonly DemoTitle[] = [
     height: 200,
   },
   {
+    id: "00000000-0000-4000-9000-00000000000d",
+    slug: "wolfenstein-3d",
+    name: "Wolfenstein 3D",
+    description:
+      "id Software's 1992 original — the game that launched the first-person shooter. Blast your way out of Castle Wolfenstein through the shareware episode, Escape from Wolfenstein, running authentically in DOSBox. Arrows move, A fires, B opens doors, X confirms menus.",
+    runtime: "dos",
+    assetSource: "bundled",
+    tier: "B",
+    // id gave the shareware episode free redistribution; the shipped data is the
+    // shareware .WL1 files (not the registered .WL6 episodes). The code is id's
+    // proprietary shareware binary, so this is proprietary-freeware / Tier B —
+    // unlike C-Dogs, whose GPL code and CC-BY assets make it Tier A.
+    license: "proprietary-freeware",
+    sourceUrl: "https://archive.org/details/wolf3dsw",
+    // DOS titles share the dosbox engine directory; the game zip and exe are
+    // named by dosTarget. Bindings for the "wolf3d" bundle are the arrow-key
+    // default in dosRuntime.ts.
+    bundleName: "dosbox",
+    dosTarget: "wolf3d:WOLF3D.EXE",
+    width: 320,
+    height: 200,
+    releasedAt: "2026-07-20T00:00:01.000Z",
+  },
+  {
+    id: "00000000-0000-4000-9000-00000000000e",
+    slug: "descent",
+    name: "Descent",
+    description:
+      "Parallax's 1995 six-degrees-of-freedom shooter — fly through the twisting mines of a sabotaged mining colony in the shareware demo, running authentically in DOSBox. The d-pad steers, A fires, B fires secondary, X confirms menus.",
+    runtime: "dos",
+    assetSource: "bundled",
+    tier: "B",
+    // Interplay/Parallax gave the shareware free redistribution; the shipped data
+    // is the 7-level shareware HOG (not the ~7MB registered game). Proprietary
+    // shareware code, so proprietary-freeware / Tier B.
+    license: "proprietary-freeware",
+    sourceUrl: "https://archive.org/details/msdos_Descent_1995",
+    // DOS titles share the dosbox engine directory. The archive nests files under
+    // Descent/, so the exe path in the dosTarget is Descent\descent.exe. Uses the
+    // arrow-key default bindings in dosRuntime.ts.
+    bundleName: "dosbox",
+    dosTarget: "descent:Descent\\descent.exe",
+    width: 320,
+    height: 200,
+    releasedAt: "2026-07-20T00:00:02.000Z",
+  },
+  {
     id: "00000000-0000-4000-9000-000000000004",
     slug: "collector",
     name: "Collector",
@@ -105,6 +152,26 @@ export const DEMO_TITLES: readonly DemoTitle[] = [
     bundleName: "doom",
     width: 320,
     height: 200,
+  },
+  {
+    id: "00000000-0000-4000-9000-00000000000c",
+    slug: "chex-quest",
+    name: "Chex Quest",
+    description:
+      "The 1996 cereal-box promotion that became a cult classic: a non-violent total conversion of Doom where you zorch slimy aliens back to their own dimension. Runs on the same free Doom engine as Doom, with the original Chex Quest levels and art. Arrows move, A fires, B opens doors.",
+    runtime: "wasm-app",
+    assetSource: "bundled",
+    tier: "B",
+    // The doomgeneric engine is GPL-2; the Chex Quest data is freeware by the
+    // rightsholder's long-standing custom (a free promotional giveaway) rather
+    // than an explicit licence — hence proprietary-freeware and Tier B, unlike
+    // Doom's BSD-licensed Freedoom assets. See scripts/fetch-chex.mjs.
+    license: "proprietary-freeware",
+    sourceUrl: "https://doomwiki.org/wiki/Chex_Quest",
+    bundleName: "chex",
+    width: 320,
+    height: 200,
+    releasedAt: "2026-07-20T00:00:00.000Z",
   },
   {
     id: "00000000-0000-4000-9000-000000000001",
@@ -141,6 +208,92 @@ export const DEMO_TITLES: readonly DemoTitle[] = [
     scummvmTarget: "sky",
     width: 320,
     height: 200,
+  },
+  {
+    id: "00000000-0000-4000-9000-000000000007",
+    slug: "flight-of-the-amazon-queen",
+    name: "Flight of the Amazon Queen",
+    description:
+      "A comic 1995 jungle adventure — pilot Joe King crash-lands in the Amazon and stumbles into a plot of Amazons, dinosaurs and a mad scientist. Released as freeware by its authors and played through the ScummVM runtime. The d-pad moves the cursor; A interacts and B examines.",
+    runtime: "scummvm",
+    assetSource: "bundled",
+    tier: "B",
+    license: "proprietary-freeware",
+    sourceUrl: "https://www.scummvm.org/games/",
+    // Shared ScummVM engine at public/scummvm; "queen" is the ScummVM game id.
+    bundleName: "scummvm",
+    scummvmTarget: "queen",
+    width: 320,
+    height: 200,
+    releasedAt: "2026-07-19T00:00:03.000Z",
+  },
+  {
+    id: "00000000-0000-4000-9000-000000000008",
+    slug: "lure-of-the-temptress",
+    name: "Lure of the Temptress",
+    description:
+      "Revolution Software's 1992 fantasy adventure, notable for its Virtual Theatre engine of characters who go about their lives independently. Released as freeware and played through the ScummVM runtime. The d-pad moves the cursor; A interacts and B examines.",
+    runtime: "scummvm",
+    assetSource: "bundled",
+    tier: "B",
+    license: "proprietary-freeware",
+    sourceUrl: "https://www.scummvm.org/games/",
+    bundleName: "scummvm",
+    scummvmTarget: "lure",
+    width: 320,
+    height: 200,
+    releasedAt: "2026-07-19T00:00:02.000Z",
+  },
+  {
+    id: "00000000-0000-4000-9000-00000000000a",
+    slug: "soltys",
+    name: "Soltys",
+    description:
+      "A Polish point-and-click comedy adventure by Lech Sokolowski, released as freeware by its author and played through the ScummVM runtime. The d-pad moves the cursor; A interacts and B examines.",
+    runtime: "scummvm",
+    assetSource: "bundled",
+    tier: "B",
+    license: "proprietary-freeware",
+    sourceUrl: "https://www.scummvm.org/games/",
+    bundleName: "scummvm",
+    scummvmTarget: "soltys",
+    width: 320,
+    height: 200,
+    releasedAt: "2026-07-19T00:00:01.000Z",
+  },
+  {
+    id: "00000000-0000-4000-9000-000000000009",
+    slug: "dreamweb",
+    name: "DreamWeb",
+    description:
+      "A dark cyberpunk point-and-click thriller (1994) with a top-down view and a full voice cast — you are Ryan, compelled by visions to hunt seven people before an ancient evil awakens. Released as freeware and played through the ScummVM runtime. The d-pad moves the cursor; A interacts and B examines.",
+    runtime: "scummvm",
+    assetSource: "bundled",
+    tier: "B",
+    license: "proprietary-freeware",
+    sourceUrl: "https://www.scummvm.org/games/",
+    bundleName: "scummvm",
+    scummvmTarget: "dreamweb",
+    width: 320,
+    height: 200,
+    releasedAt: "2026-07-19T00:00:04.000Z",
+  },
+  {
+    id: "00000000-0000-4000-9000-00000000000b",
+    slug: "drascula",
+    name: "Drascula: The Vampire Strikes Back",
+    description:
+      "A slapstick horror-comedy adventure (1996) in the LucasArts mould — estate agent John Hacker takes on Count Drascula to rescue the kidnapped Von Braun. Released as freeware and played through the ScummVM runtime. The d-pad moves the cursor; A interacts and B examines.",
+    runtime: "scummvm",
+    assetSource: "bundled",
+    tier: "B",
+    license: "proprietary-freeware",
+    sourceUrl: "https://www.scummvm.org/games/",
+    bundleName: "scummvm",
+    scummvmTarget: "drascula",
+    width: 320,
+    height: 200,
+    releasedAt: "2026-07-19T00:00:05.000Z",
   },
   {
     id: "00000000-0000-4000-9000-000000000003",

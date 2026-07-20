@@ -60,3 +60,8 @@ apps/web/public/supertux/*
 # regenerated rather than committed; the small iframe loader is source and stays.
 apps/web/public/dosbox/*
 !apps/web/public/dosbox/cartbox-boot.html
+
+# Chex Quest reuses the Doom engine; its IWAD is fetched (fetch-chex.mjs) and
+# the bundle is built (build-doom.mjs chex), not committed — same as Doom.
+games/chex/assets/
+apps/web/public/games/chex/

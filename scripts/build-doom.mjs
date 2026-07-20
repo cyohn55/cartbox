@@ -1,8 +1,8 @@
 /**
- * Builds Doom (Freedoom) to WebAssembly as a Cartbox Game ABI title.
+ * Builds a Doom-engine title to WebAssembly as a Cartbox Game ABI title.
  *
  *   source ~/emsdk/emsdk_env.sh
- *   node scripts/build-doom.mjs
+ *   node scripts/build-doom.mjs [doom|chex]
  *
  * build-game.mjs covers the single-translation-unit case; Doom needs its own
  * script because it is 80 vendored sources plus a ~29MB asset payload. The link
@@ -10,7 +10,12 @@
  * differences here are the source list, the preloaded IWAD, and the fixed
  * 320x200 resolution compiled into doomgeneric.
  *
- * Output lands in apps/web/public/games/doom/ as game.js + game.wasm + game.data.
+ * The doomgeneric engine and cartbox_doom.c shim are shared: cartbox_doom.c
+ * passes a fixed -iwad path, so a variant is nothing more than a different IWAD
+ * preloaded at that path and a different output directory. Chex Quest (a vanilla
+ * Doom total conversion) reuses the whole engine this way.
+ *
+ * Output lands in apps/web/public/games/<variant>/ as game.js + game.wasm + game.data.
  */
 
 import { execFileSync } from "node:child_process";
@@ -19,9 +24,42 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-const gameDirectory = join(repoRoot, "games", "doom");
-const vendorDirectory = join(gameDirectory, "vendor");
-const outputDirectory = join(repoRoot, "apps", "web", "public", "games", "doom");
+// The engine, shim and ABI live under games/doom regardless of variant; only the
+// IWAD asset and output bundle differ.
+const engineDirectory = join(repoRoot, "games", "doom");
+const vendorDirectory = join(engineDirectory, "vendor");
+
+/**
+ * Path cartbox_doom.c passes to the engine's -iwad. Every variant's IWAD is
+ * preloaded here, so the shim needs no per-variant change.
+ */
+const IWAD_MOUNT_PATH = "/freedoom1.wad";
+
+/**
+ * The Doom-engine titles this script can build. Each names the IWAD asset (under
+ * its game directory's assets/) and the fetch script that produces it.
+ */
+const VARIANTS = {
+  doom: {
+    gameDirectory: join(repoRoot, "games", "doom"),
+    iwadName: "freedoom1.wad",
+    fetchScript: "fetch-freedoom.mjs",
+    outputName: "doom",
+  },
+  chex: {
+    gameDirectory: join(repoRoot, "games", "chex"),
+    iwadName: "chex.wad",
+    fetchScript: "fetch-chex.mjs",
+    outputName: "chex",
+  },
+};
+
+const variantName = process.argv[2] ?? "doom";
+const variant = VARIANTS[variantName];
+if (!variant) {
+  throw new Error(`Unknown variant '${variantName}'. Known: ${Object.keys(VARIANTS).join(", ")}.`);
+}
+const outputDirectory = join(repoRoot, "apps", "web", "public", "games", variant.outputName);
 
 /** See games/README.md; identical to build-game.mjs. */
 const ABI_EXPORTS = [
@@ -74,16 +112,16 @@ function collectSources() {
     .filter((file) => file.endsWith(".c"))
     .map((file) => join(vendorDirectory, file));
 
-  return [join(gameDirectory, "cartbox_doom.c"), ...vendored];
+  // The shim and engine are shared across variants; only the IWAD differs.
+  return [join(engineDirectory, "cartbox_doom.c"), ...vendored];
 }
 
 function resolveIwad() {
-  const iwad = join(gameDirectory, "assets", "freedoom1.wad");
+  const iwad = join(variant.gameDirectory, "assets", variant.iwadName);
   if (!existsSync(iwad)) {
     throw new Error(
       `Missing IWAD at ${iwad}.\n` +
-        "Freedoom is BSD-3-Clause and redistributable, but it is not committed here.\n" +
-        "Fetch it with: node scripts/fetch-freedoom.mjs",
+        `Fetch it with: node scripts/${variant.fetchScript}`,
     );
   }
   return iwad;
@@ -107,7 +145,7 @@ function build() {
     // change far less often than the code, so bundling them into the wasm
     // would re-download all of it on every engine rebuild.
     "--preload-file",
-    `${iwad}@/freedoom1.wad`,
+    `${iwad}@${IWAD_MOUNT_PATH}`,
     "-o",
     join(outputDirectory, "game.js"),
     "-s",
@@ -144,4 +182,4 @@ for (const artefact of ["game.js", "game.wasm", "game.data"]) {
   const megabytes = (statSync(path).size / 1024 / 1024).toFixed(1);
   console.log(`  ${artefact}  ${megabytes} MB`);
 }
-console.log(`Built doom → ${outputDirectory}`);
+console.log(`Built ${variant.outputName} → ${outputDirectory}`);
