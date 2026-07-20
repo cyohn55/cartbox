@@ -34,6 +34,12 @@ export interface DemoTitle {
   bundleName?: string;
   /** ScummVM launch target (its game id, e.g. "sky") for the scummvm runtime. */
   scummvmTarget?: string;
+  /**
+   * DOS launch target for the dos runtime: "<bundle>:<exe>" (e.g.
+   * "cdogs:CDOGS.EXE"), naming the game zip under public/dosbox and the
+   * executable DOSBox runs.
+   */
+  dosTarget?: string;
   /** Native resolution the game is initialised at. */
   width?: number;
   height?: number;
@@ -42,6 +48,29 @@ export interface DemoTitle {
 }
 
 export const DEMO_TITLES: readonly DemoTitle[] = [
+  {
+    id: "00000000-0000-4000-9000-000000000006",
+    slug: "c-dogs",
+    name: "C-Dogs",
+    description:
+      "Ronny Wester's 1997 top-down run-and-gun, running authentically in DOSBox. Fight through three campaigns of elite-soldier mayhem: arrows move, A fires, B changes weapon, X toggles the automap. The source is GPL and the assets are CC-BY, so the whole game ships with the console.",
+    runtime: "dos",
+    assetSource: "bundled",
+    tier: "A",
+    // Code is GPL-2 (Ronny Wester released the source in 2002); the game assets
+    // are CC-BY (released 2016). The stricter of the two governs redistribution
+    // of the title as a whole, and the original 1997 release already granted free
+    // unmodified redistribution — which is how the game is bundled here, intact.
+    license: "gpl-2.0",
+    sourceUrl: "https://www.dosgamesarchive.com/download/c-dogs/",
+    releasedAt: "2026-07-19T00:00:00.000Z",
+    // DOS titles share one engine directory (public/dosbox); the game zip and its
+    // executable are named by dosTarget.
+    bundleName: "dosbox",
+    dosTarget: "cdogs:CDOGS.EXE",
+    width: 320,
+    height: 200,
+  },
   {
     id: "00000000-0000-4000-9000-000000000004",
     slug: "collector",

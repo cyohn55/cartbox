@@ -53,3 +53,10 @@ apps/web/public/scummvm/*
 # deploy rather than committed. The small iframe loader is source and stays.
 apps/web/public/supertux/*
 !apps/web/public/supertux/cartbox-boot.html
+
+# DOS runtime: the js-dos/DOSBox engine and the C-Dogs game zip are vendored
+# under games/cdogs (small, but the engine's upstream URL is a rolling pointer),
+# and scripts/fetch-dosbox.mjs assembles them here. The assembled copies are
+# regenerated rather than committed; the small iframe loader is source and stays.
+apps/web/public/dosbox/*
+!apps/web/public/dosbox/cartbox-boot.html

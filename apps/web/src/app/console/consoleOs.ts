@@ -37,15 +37,19 @@ export interface PlayingCart {
 export interface PlayingGame {
   /**
    * Which player drives this title. `wasm-app` games run on the Cartbox Game
-   * ABI (a framebuffer this host ticks); `scummvm` and `supertux` games run
-   * inside their own Emscripten builds, which own their canvas and loop.
+   * ABI (a framebuffer this host ticks); `scummvm`, `supertux` and `dos` games
+   * run inside their own Emscripten builds, which own their canvas and loop.
    */
-  runtime?: "wasm-app" | "scummvm" | "supertux";
+  runtime?: "wasm-app" | "scummvm" | "supertux" | "dos";
   /** Directory under public/games holding game.js + game.wasm (wasm-app). */
   bundleName: string;
   width: number;
   height: number;
-  /** ScummVM launch target (its game id, e.g. "sky"), for the scummvm runtime. */
+  /**
+   * Launch target for the iframe engines: the ScummVM game id (e.g. "sky") for
+   * the scummvm runtime, or "<bundle>:<exe>" (e.g. "cdogs:CDOGS.EXE") naming the
+   * game zip and its executable for the dos runtime.
+   */
   target?: string;
 }
 

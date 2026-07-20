@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en-us">
+<head>
+  <meta charset="utf-8" />
+  <meta content="width=device-width,initial-scale=1,viewport-fit=cover" name="viewport" />
+  <title>DOS (Cartbox)</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
+    /* The canvas fills the frame with no border or padding — DOSBox derives its
+       mouse coordinates from the canvas rect, and the host sizes the iframe.
+       image-rendering:auto lets the browser smooth the upscale of the low DOS
+       resolution rather than showing hard-edged giant pixels. */
+    canvas {
+      border: 0; margin: 0; padding: 0; display: block;
+      width: 100%; height: 100%;
+      image-rendering: auto;
+      background: #000;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+  <script src="js-dos.js"></script>
+  <script>
+    // Which game to boot comes from the fragment as "<bundle>:<exe>", e.g.
+    // cartbox-boot.html#cdogs:CDOGS.EXE — <bundle>.zip is fetched relative to
+    // this page (so any base path, dev or the /cartbox Pages prefix, just works)
+    // and <exe> is run inside DOSBox. Defaulting to C-Dogs keeps a bare open of
+    // the page useful.
+    function parseTarget() {
+      var raw = decodeURIComponent(location.hash.replace(/^#/, "")).trim();
+      var sep = raw.indexOf(":");
+      if (!raw) return { bundle: "cdogs", exe: "CDOGS.EXE" };
+      if (sep < 0) return { bundle: raw, exe: "CDOGS.EXE" };
+      return { bundle: raw.slice(0, sep), exe: raw.slice(sep + 1) };
+    }
+
+    function post(type, extra) {
+      var message = { source: "cartbox-dos", type: type };
+      if (extra) for (var key in extra) message[key] = extra[key];
+      parent.postMessage(message, "*");
+    }
+
+    // Surface a hard failure to the host rather than hanging on a black canvas.
+    window.addEventListener("error", function (event) {
+      post("error", { message: String(event.message) });
+    });
+
+    (function () {
+      var target = parseTarget();
+      var canvas = document.getElementById("canvas");
+
+      // js-dos 6.22: Dos(canvas, options).ready(fs, main). wdosboxUrl is resolved
+      // relative to this page, and its sibling wdosbox.wasm.js is located the same
+      // way, so the engine is base-path independent. (6.22's onprogress reports a
+      // stage label, not a percentage, so the host just shows an indeterminate
+      // "LOADING…" until runtime-initialized rather than a bogus number.)
+      Dos(canvas, {
+        wdosboxUrl: "wdosbox.js",
+        cycles: "auto",
+        autolock: false,
+      }).ready(function (fs, main) {
+        fs.extract(target.bundle + ".zip")
+          .then(function () {
+            // Optional per-game overlay: extra files that must sit in C: next to
+            // the game but cannot be baked into its distribution archive (a
+            // "distribute unmodified" title like C-Dogs). <bundle>.files.json maps
+            // a DOS path to the base64 bytes to write there — e.g. a pre-made
+            // SOUND.CFG so the game finds a sound device instead of failing setup.
+            return applyOverlay(fs, target.bundle);
+          })
+          .then(function () {
+            main(["-c", target.exe]);
+            // DOSBox is now running the game; the host can drop the loader.
+            post("runtime-initialized");
+          })
+          .catch(function (error) {
+            post("error", { message: "boot failed: " + String(error) });
+          });
+      });
+    })();
+
+    function applyOverlay(fs, bundle) {
+      return fetch(bundle + ".files.json")
+        .then(function (response) {
+          return response.ok ? response.json() : {};
+        })
+        .then(function (files) {
+          Object.keys(files).forEach(function (path) {
+            var binary = atob(files[path]);
+            var bytes = new Uint8Array(binary.length);
+            for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            fs.createFile(path, bytes);
+          });
+        })
+        .catch(function () {
+          // No overlay for this game, or it failed to load — the game may still
+          // run (C-Dogs only needs a keypress past its sound warning), so this is
+          // not fatal.
+        });
+    }
+  </script>
+</body>
+</html>

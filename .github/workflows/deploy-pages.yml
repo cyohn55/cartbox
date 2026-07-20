@@ -106,6 +106,13 @@ jobs:
         env:
           NPROC: 4
 
+      # DOS runtime: unlike the other ported titles this compiles nothing — the
+      # js-dos/DOSBox engine and the C-Dogs game are vendored under games/cdogs and
+      # this step just copies them into public/, verifying pinned digests. Without
+      # it the Browse tab would list a C-Dogs card that 404s on the live site.
+      - name: Assemble DOS runtime (js-dos + C-Dogs)
+        run: node scripts/fetch-dosbox.mjs
+
       - name: Build static export
         run: npm run build:static --workspace apps/web
         env:

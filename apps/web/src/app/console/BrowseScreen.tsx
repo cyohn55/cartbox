@@ -72,6 +72,8 @@ function titleGridCarts(
     runtime?: string | null;
     /** Present for ScummVM titles: the engine directory and launch target. */
     scummvmTarget?: string | null;
+    /** Present for DOS titles: "<bundle>:<exe>", the game zip and its executable. */
+    dosTarget?: string | null;
   }[],
 ): GridCart[] {
   return titles
@@ -85,19 +87,21 @@ function titleGridCarts(
       cartUrl: null,
       engineUrl: null,
       game: {
-        // The iframe-hosted engines (ScummVM, SuperTux) name themselves; a
+        // The iframe-hosted engines (ScummVM, SuperTux, DOS) name themselves; a
         // ScummVM target is honoured for older rows that predate the runtime
         // column; everything else is a Cartbox Game ABI module.
         runtime:
           title.runtime === "supertux"
             ? ("supertux" as const)
-            : title.runtime === "scummvm" || title.scummvmTarget
-              ? ("scummvm" as const)
-              : ("wasm-app" as const),
+            : title.runtime === "dos"
+              ? ("dos" as const)
+              : title.runtime === "scummvm" || title.scummvmTarget
+                ? ("scummvm" as const)
+                : ("wasm-app" as const),
         bundleName: title.bundleName as string,
         width: title.width ?? 320,
         height: title.height ?? 180,
-        target: title.scummvmTarget ?? undefined,
+        target: title.dosTarget ?? title.scummvmTarget ?? undefined,
       },
     }));
 }

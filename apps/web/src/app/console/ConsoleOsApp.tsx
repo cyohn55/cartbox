@@ -34,6 +34,7 @@ import { GameScreen } from "./GameScreen";
 import { PortedGameScreen } from "./PortedGameScreen";
 import { ScummVmPlayer } from "./ScummVmPlayer";
 import { SuperTuxPlayer } from "./SuperTuxPlayer";
+import { DosPlayer } from "./DosPlayer";
 import { HomeFeed } from "./HomeFeed";
 import { BrowseScreen } from "./BrowseScreen";
 import { LibraryScreen } from "./LibraryScreen";
@@ -133,7 +134,7 @@ export function ConsoleOS() {
       />
     );
   } else if (state.playing) {
-    // Four player kinds behind one launch/eject path: a ScummVM or SuperTux
+    // Five player kinds behind one launch/eject path: a ScummVM, SuperTux or DOS
     // title in its own iframe, a Game ABI title on the wasm runtime, or a .tic
     // cartridge.
     const game = state.playing.game;
@@ -141,6 +142,8 @@ export function ConsoleOS() {
       stage = <ScummVmPlayer cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />;
     } else if (game?.runtime === "supertux") {
       stage = <SuperTuxPlayer cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />;
+    } else if (game?.runtime === "dos") {
+      stage = <DosPlayer cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />;
     } else if (game) {
       stage = <PortedGameScreen cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />;
     } else {
