@@ -81,6 +81,16 @@ const ARTEFACTS = [
     output: "cdogs.zip",
     sha256: "de6c5e025b5c03b475e55c2ec6ab88b493517a4d4e8c649e2e7dd1919b7b50cc",
   },
+  {
+    // The Elder Scrolls: Arena, released as freeware by Bethesda. It is vendored
+    // rather than fetched because its only clean source is Bethesda's official
+    // RAR self-extracting installer (Arena106.exe) — there is no ready-to-run
+    // zip URL, and extracting the RAR would add a nonfree `unrar` build
+    // dependency. games/arena/README.md records how the vendored zip is produced.
+    source: join(repoRoot, "games", "arena", "arena.zip"),
+    output: "arena.zip",
+    sha256: "1679d9716ae8b7540ef07b7bd500f436401adbe8e9fee3dcc88f83620bb6b3fa",
+  },
 ];
 
 /**

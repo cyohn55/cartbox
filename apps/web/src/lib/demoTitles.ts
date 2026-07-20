@@ -119,6 +119,27 @@ export const DEMO_TITLES: readonly DemoTitle[] = [
     releasedAt: "2026-07-20T00:00:02.000Z",
   },
   {
+    id: "00000000-0000-4000-9000-00000000000f",
+    slug: "elder-scrolls-arena",
+    name: "The Elder Scrolls: Arena",
+    description:
+      "The 1994 game that started The Elder Scrolls — a vast first-person open-world RPG across the whole of Tamriel, released as freeware by Bethesda and running authentically in DOSBox. The d-pad moves and turns, A/B act, X confirms, Y opens the menu.",
+    runtime: "dos",
+    assetSource: "bundled",
+    tier: "B",
+    // Bethesda released the full game (v1.06) as freeware for the series' 10th
+    // anniversary; proprietary code, so proprietary-freeware / Tier B. Launched
+    // via ARENA.BAT (which passes the Sound Blaster args A.EXE needs). See
+    // games/arena/README.md for provenance.
+    license: "proprietary-freeware",
+    sourceUrl: "https://archive.org/details/ElderScrollsArena",
+    bundleName: "dosbox",
+    dosTarget: "arena:ARENA.BAT",
+    width: 320,
+    height: 200,
+    releasedAt: "2026-07-20T00:00:03.000Z",
+  },
+  {
     id: "00000000-0000-4000-9000-000000000004",
     slug: "collector",
     name: "Collector",
