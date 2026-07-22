@@ -48,7 +48,6 @@ import {
 import { handheldAssetUrl } from "@/lib/handheldAssets";
 import { HandheldSkinEditor } from "./HandheldSkinEditor";
 import { useChassisColor } from "./chassisColor";
-import { TerminalPreview } from "./TerminalPreview";
 import styles from "./handheld.module.css";
 
 /** Where the anonymous/offline choice is remembered until an account exists. */
@@ -563,12 +562,13 @@ export function HandheldPicker() {
     const measure = () => {
       const available = carousel.clientWidth;
       if (available <= 0) return;
-      // Centre size: tall enough to stay under the fold (≤52vh), never wider than
-      // the space allows on a narrow screen, and capped so it is not huge on a
-      // big display.
-      const byHeight = 0.52 * window.innerHeight * aspect;
+      // Centre size: the handheld now runs the customizer on its own screen, so it
+      // is sized to fill most of the viewport height (its screen window has to be
+      // large enough to operate the controls), never wider than a narrow screen
+      // allows, and capped so it is not enormous on a big display.
+      const byHeight = 0.82 * window.innerHeight * aspect;
       const byWidth = available * 0.9;
-      const center = Math.max(150, Math.min(300, byHeight, byWidth));
+      const center = Math.max(240, Math.min(460, byHeight, byWidth));
       const usable = available - 2 * (ARROW + GAP); // reserve the ‹ › buttons
 
       // Take the most flanks (each side) whose stepped-down widths still fit.
@@ -977,20 +977,231 @@ export function HandheldPicker() {
               className={styles.preview}
               style={{ width: centerWidth ? centerWidth : undefined }}
             />
-            {/* The live interface preview sits in the handheld's actual screen
-                window (positioned from the measured device layout). */}
+            {/* The customizer runs *inside* the handheld's screen window: the
+                device shows its own OS operating the part selector, the control
+                panel and the confirm action, wearing the same phosphor/scanline
+                CRT treatment the live console uses so Screen/Phosphor/Scanline
+                changes preview on the chrome the moment they are made. */}
             {screenRect && (
               <div
                 className={styles.screenOverlay}
                 style={screenBoxStyle(screenRect)}
+                // The carousel turns on a horizontal swipe; a swipe across the
+                // in-screen swatches or buttons must operate them, not flip the
+                // whole premade out from under the edit, so keep touches local.
+                onTouchStart={(event) => event.stopPropagation()}
+                onTouchEnd={(event) => event.stopPropagation()}
               >
-                <TerminalPreview
-                  fill
-                  style={osStyle}
-                  phosphor={osPhosphor}
-                  phosphorColor={osPhosphorColor}
-                  scanlines={osScanlines}
-                />
+                <div
+                  className={styles.osScreen}
+                  data-os-style={osStyle}
+                  data-os-phosphor={osPhosphor}
+                  data-os-scanlines={osScanlines ? "on" : "off"}
+                  style={
+                    osPhosphorColor
+                      ? ({ "--tp-phosphor": osPhosphorColor, "--tp-crt": osPhosphorColor } as CSSProperties)
+                      : undefined
+                  }
+                  aria-label="Handheld OS — customizer"
+                >
+                  {/* Part selector: a ‹ › pair naming the current part between them. */}
+                  <div className={styles.osSelector} role="group" aria-label="Part to customize">
+                    <button
+                      type="button"
+                      className={styles.osNav}
+                      onClick={() => stepParam(-1)}
+                      aria-label="Previous part"
+                    >
+                      ‹
+                    </button>
+                    <div className={styles.osCurrent} aria-live="polite">
+                      {activeDef.kind === "color" && activeDef.regionId && (
+                        <span className={styles.paramDot} style={{ background: scheme[activeDef.regionId] }} aria-hidden />
+                      )}
+                      {activeDef.kind === "phosphor" && (
+                        <span className={styles.paramDot} style={{ background: phosphorValue }} aria-hidden />
+                      )}
+                      <span className={styles.osCurrentLabel}>{activeDef.label}</span>
+                    </div>
+                    <button
+                      type="button"
+                      className={styles.osNav}
+                      onClick={() => stepParam(1)}
+                      aria-label="Next part"
+                    >
+                      ›
+                    </button>
+                  </div>
+
+                  {/* The control for the selected part, scrolling within the screen. */}
+                  <div className={styles.osPanel}>
+                    {activeDef.kind === "color" && activeDef.regionId && (
+                      <div className={styles.controlColumn}>
+                        <div className={styles.colorMeta}>
+                          <span className={styles.colorName}>{activeDef.label}</span>
+                          <span className={styles.colorHex}>{scheme[activeDef.regionId]}</span>
+                        </div>
+                        <SwatchGrid
+                          value={scheme[activeDef.regionId]}
+                          onPick={(hex) => recolour(activeDef.regionId!, hex)}
+                        />
+                        {activeDef.regionId === "face" && (
+                          <div className={styles.inlineButtons}>
+                            <button
+                              type="button"
+                              className={styles.secondary}
+                              onClick={() => backgroundUploadRef.current?.click()}
+                            >
+                              Upload chassis background
+                            </button>
+                            {background && (
+                              <button type="button" className={styles.secondary} onClick={clearBackground}>
+                                Remove background
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {activeDef.kind === "screen" && (
+                      <div className={styles.segRow} role="group" aria-label="Screen mode">
+                        {OS_STYLES.map((option) => (
+                          <button
+                            key={option.id}
+                            type="button"
+                            className={`${styles.seg} ${osStyle === option.id ? styles.segActive : ""}`}
+                            onClick={() => setOsStyle(option.id)}
+                            aria-pressed={osStyle === option.id}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {activeDef.kind === "phosphor" && (
+                      <div className={styles.phosphorControl}>
+                        <div className={styles.segRow} role="group" aria-label="Phosphor preset">
+                          {OS_PHOSPHORS.map((option) => (
+                            <button
+                              key={option.id}
+                              type="button"
+                              className={`${styles.seg} ${osPhosphor === option.id && !osPhosphorColor ? styles.segActive : ""}`}
+                              onClick={() => {
+                                setOsPhosphor(option.id);
+                                setOsPhosphorColor(null);
+                              }}
+                              aria-pressed={osPhosphor === option.id && !osPhosphorColor}
+                            >
+                              <span className={styles.paramDot} style={{ background: PHOSPHOR_HEX[option.id] }} aria-hidden />
+                              {option.label}
+                            </button>
+                          ))}
+                        </div>
+                        <div className={styles.controlColumn}>
+                          <div className={styles.colorMeta}>
+                            <span className={styles.colorName}>Custom glow</span>
+                            <span className={styles.colorHex}>{phosphorValue}</span>
+                            {osPhosphorColor && (
+                              <button type="button" className={styles.linkButton} onClick={() => setOsPhosphorColor(null)}>
+                                Reset to preset
+                              </button>
+                            )}
+                          </div>
+                          <SwatchGrid value={phosphorValue} onPick={(hex) => setOsPhosphorColor(hex)} />
+                        </div>
+                        {osStyle !== "pipboy" && (
+                          <p className={styles.paramHint}>Phosphor applies to the Terminal screen — pick the Screen part and choose Pip-Boy Terminal.</p>
+                        )}
+                      </div>
+                    )}
+
+                    {activeDef.kind === "scanlines" && (
+                      <label className={styles.toggleControl}>
+                        <input type="checkbox" checked={osScanlines} onChange={(event) => setOsScanlines(event.target.checked)} />
+                        <span>Scanline overlay on the terminal screen</span>
+                      </label>
+                    )}
+
+                    {activeDef.kind === "marquee" && (
+                      <div className={styles.marqueeControl}>
+                        <div className={styles.marqueeButtons} role="group" aria-label="Marquee">
+                          <button
+                            type="button"
+                            className={`${styles.seg} ${animationId === null ? styles.segActive : ""}`}
+                            onClick={() => chooseAnimation(null)}
+                            aria-pressed={animationId === null}
+                          >
+                            None
+                          </button>
+                          {ANIMATED_PRESETS.map((preset) => (
+                            <button
+                              key={preset.id}
+                              type="button"
+                              className={`${styles.seg} ${animationId === preset.id ? styles.segActive : ""}`}
+                              onClick={() => chooseAnimation(preset.id)}
+                              aria-pressed={animationId === preset.id}
+                            >
+                              {preset.label}
+                            </button>
+                          ))}
+                        </div>
+                        {animationId && (
+                          <div className={styles.controlColumn}>
+                            <div className={styles.colorMeta}>
+                              <span className={styles.colorName}>Marquee colour</span>
+                              <span className={styles.colorHex}>{marqueeColor ?? "Match buttons"}</span>
+                              {marqueeColor && (
+                                <button type="button" className={styles.linkButton} onClick={() => setMarqueeColor(null)}>
+                                  Match buttons
+                                </button>
+                              )}
+                            </div>
+                            <SwatchGrid value={marqueeColor ?? scheme.buttonColor} onPick={(hex) => setMarqueeColor(hex)} />
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {activeDef.kind === "draw" && (
+                      <div className={styles.drawControl}>
+                        <div className={styles.inlineButtons}>
+                          <button
+                            type="button"
+                            className={styles.secondary}
+                            onClick={() => setEditing(true)}
+                            disabled={!template}
+                          >
+                            Edit Handheld
+                          </button>
+                          <a className={styles.secondary} href={handheldAssetUrl("/handheld/template.aseprite")} download>
+                            Download .aseprite template
+                          </a>
+                          <button type="button" className={styles.secondary} onClick={() => uploadRef.current?.click()}>
+                            Upload edited .aseprite
+                          </button>
+                        </div>
+                        <p className={styles.paramHint}>
+                          Edit the handheld pixel-by-pixel here, or download the template, recolour it in Aseprite (or any
+                          pixel-art tool), and upload it back to apply your colours.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Confirm the design — the OS's own action, at the foot of the screen. */}
+                  <button
+                    type="button"
+                    className={styles.osUse}
+                    onClick={save}
+                    disabled={saving || !template}
+                  >
+                    {saving ? "Saving…" : "Use this handheld"}
+                  </button>
+
+                  {osStyle === "pipboy" && <div className={styles.termCrt} aria-hidden />}
+                </div>
               </div>
             )}
           </div>
@@ -1025,205 +1236,10 @@ export function HandheldPicker() {
       </section>
       {animatedError && <p className={styles.error}>{animatedError}</p>}
 
-      {/* --- Customize: a single ‹ › selector, one unfolding control --- */}
-      <section className={styles.customize} aria-label="Customize">
-        <div className={styles.paramSelector} role="group" aria-label="Part to customize">
-          <button
-            type="button"
-            className={styles.paramNav}
-            onClick={() => stepParam(-1)}
-            aria-label="Previous part"
-          >
-            ‹
-          </button>
-          <div className={styles.paramCurrent} aria-live="polite">
-            {activeDef.kind === "color" && activeDef.regionId && (
-              <span className={styles.paramDot} style={{ background: scheme[activeDef.regionId] }} aria-hidden />
-            )}
-            {activeDef.kind === "phosphor" && (
-              <span className={styles.paramDot} style={{ background: phosphorValue }} aria-hidden />
-            )}
-            <span className={styles.paramCurrentLabel}>{activeDef.label}</span>
-          </div>
-          <button
-            type="button"
-            className={styles.paramNav}
-            onClick={() => stepParam(1)}
-            aria-label="Next part"
-          >
-            ›
-          </button>
-        </div>
-
-        {/* The control for the currently selected part unfolds beneath the
-            selector — only its parameters show, nothing else. */}
-        <div className={styles.paramPanel}>
-          {activeDef.kind === "color" && activeDef.regionId && (
-            <div className={styles.controlColumn}>
-              <div className={styles.colorMeta}>
-                <span className={styles.colorName}>{activeDef.label}</span>
-                <span className={styles.colorHex}>{scheme[activeDef.regionId]}</span>
-              </div>
-              <SwatchGrid
-                value={scheme[activeDef.regionId]}
-                onPick={(hex) => recolour(activeDef.regionId!, hex)}
-              />
-              {/* The chassis (face) is where an uploaded background image lives,
-                  so its upload/remove controls sit with its colour. */}
-              {activeDef.regionId === "face" && (
-                <div className={styles.inlineButtons}>
-                  <button
-                    type="button"
-                    className={styles.secondary}
-                    onClick={() => backgroundUploadRef.current?.click()}
-                  >
-                    Upload chassis background
-                  </button>
-                  {background && (
-                    <button type="button" className={styles.secondary} onClick={clearBackground}>
-                      Remove background
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-          {activeDef.kind === "screen" && (
-            <div className={styles.segRow} role="group" aria-label="Screen mode">
-              {OS_STYLES.map((option) => (
-                <button
-                  key={option.id}
-                  type="button"
-                  className={`${styles.seg} ${osStyle === option.id ? styles.segActive : ""}`}
-                  onClick={() => setOsStyle(option.id)}
-                  aria-pressed={osStyle === option.id}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {activeDef.kind === "phosphor" && (
-            <div className={styles.phosphorControl}>
-              <div className={styles.segRow} role="group" aria-label="Phosphor preset">
-                {OS_PHOSPHORS.map((option) => (
-                  <button
-                    key={option.id}
-                    type="button"
-                    className={`${styles.seg} ${osPhosphor === option.id && !osPhosphorColor ? styles.segActive : ""}`}
-                    onClick={() => {
-                      setOsPhosphor(option.id);
-                      setOsPhosphorColor(null);
-                    }}
-                    aria-pressed={osPhosphor === option.id && !osPhosphorColor}
-                  >
-                    <span className={styles.paramDot} style={{ background: PHOSPHOR_HEX[option.id] }} aria-hidden />
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-              <div className={styles.controlColumn}>
-                <div className={styles.colorMeta}>
-                  <span className={styles.colorName}>Custom glow</span>
-                  <span className={styles.colorHex}>{phosphorValue}</span>
-                  {osPhosphorColor && (
-                    <button type="button" className={styles.linkButton} onClick={() => setOsPhosphorColor(null)}>
-                      Reset to preset
-                    </button>
-                  )}
-                </div>
-                <SwatchGrid value={phosphorValue} onPick={(hex) => setOsPhosphorColor(hex)} />
-              </div>
-              {osStyle !== "pipboy" && (
-                <p className={styles.paramHint}>Phosphor applies to the Terminal screen — pick the Screen part and choose Pip-Boy Terminal.</p>
-              )}
-            </div>
-          )}
-
-          {activeDef.kind === "scanlines" && (
-            <label className={styles.toggleControl}>
-              <input type="checkbox" checked={osScanlines} onChange={(event) => setOsScanlines(event.target.checked)} />
-              <span>Scanline overlay on the terminal screen</span>
-            </label>
-          )}
-
-          {/* Marquee is previewed on the handhelds themselves (centre + flanks),
-              so the control is just buttons that switch the centre's marquee. */}
-          {activeDef.kind === "marquee" && (
-            <div className={styles.marqueeControl}>
-              <div className={styles.marqueeButtons} role="group" aria-label="Marquee">
-                <button
-                  type="button"
-                  className={`${styles.seg} ${animationId === null ? styles.segActive : ""}`}
-                  onClick={() => chooseAnimation(null)}
-                  aria-pressed={animationId === null}
-                >
-                  None
-                </button>
-                {ANIMATED_PRESETS.map((preset) => (
-                  <button
-                    key={preset.id}
-                    type="button"
-                    className={`${styles.seg} ${animationId === preset.id ? styles.segActive : ""}`}
-                    onClick={() => chooseAnimation(preset.id)}
-                    aria-pressed={animationId === preset.id}
-                  >
-                    {preset.label}
-                  </button>
-                ))}
-              </div>
-              {/* Colour the marquee content itself — independent of the chassis
-                  buttons it otherwise follows. Only meaningful with a marquee on. */}
-              {animationId && (
-                <div className={styles.controlColumn}>
-                  <div className={styles.colorMeta}>
-                    <span className={styles.colorName}>Marquee colour</span>
-                    <span className={styles.colorHex}>{marqueeColor ?? "Match buttons"}</span>
-                    {marqueeColor && (
-                      <button type="button" className={styles.linkButton} onClick={() => setMarqueeColor(null)}>
-                        Match buttons
-                      </button>
-                    )}
-                  </div>
-                  <SwatchGrid value={marqueeColor ?? scheme.buttonColor} onPick={(hex) => setMarqueeColor(hex)} />
-                </div>
-              )}
-            </div>
-          )}
-
-          {activeDef.kind === "draw" && (
-            <div className={styles.drawControl}>
-              <div className={styles.inlineButtons}>
-                <button
-                  type="button"
-                  className={styles.secondary}
-                  onClick={() => setEditing(true)}
-                  disabled={!template}
-                >
-                  Edit Handheld
-                </button>
-                <a className={styles.secondary} href={handheldAssetUrl("/handheld/template.aseprite")} download>
-                  Download .aseprite template
-                </a>
-                <button type="button" className={styles.secondary} onClick={() => uploadRef.current?.click()}>
-                  Upload edited .aseprite
-                </button>
-              </div>
-              <p className={styles.paramHint}>
-                Edit the handheld pixel-by-pixel here, or download the template, recolour it in Aseprite (or any
-                pixel-art tool), and upload it back to apply your colours.
-              </p>
-            </div>
-          )}
-        </div>
-      </section>
-
+      {/* The selector, control panel and confirm button now live inside the
+          handheld's screen (rendered above). What remains below is the file-input
+          plumbing those in-screen controls drive, plus any status notes/errors. */}
       <section className={styles.actions}>
-        <button type="button" className={styles.primary} onClick={save} disabled={saving || !template}>
-          {saving ? "Saving…" : "Use this handheld"}
-        </button>
         <input ref={uploadRef} type="file" accept=".aseprite,.ase" onChange={importAseprite} hidden />
         <input ref={backgroundUploadRef} type="file" accept="image/*" onChange={uploadBackground} hidden />
         {uploadNote && <p className={styles.hint}>{uploadNote}</p>}
