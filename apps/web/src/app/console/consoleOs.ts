@@ -37,10 +37,12 @@ export interface PlayingCart {
 export interface PlayingGame {
   /**
    * Which player drives this title. `wasm-app` games run on the Cartbox Game
-   * ABI (a framebuffer this host ticks); `scummvm`, `supertux` and `dos` games
-   * run inside their own Emscripten builds, which own their canvas and loop.
+   * ABI (a framebuffer this host ticks); `scummvm`, `supertux`, `dos` and
+   * `quake` games run inside their own in-browser engines, which own their
+   * canvas and loop (`quake` is WebQuake, a pure-JS WebGL Quake engine;
+   * `cube2` is BananaBread, a WASM Cube 2: Sauerbraten engine).
    */
-  runtime?: "wasm-app" | "scummvm" | "supertux" | "dos";
+  runtime?: "wasm-app" | "scummvm" | "supertux" | "dos" | "quake" | "cube2";
   /** Directory under public/games holding game.js + game.wasm (wasm-app). */
   bundleName: string;
   width: number;

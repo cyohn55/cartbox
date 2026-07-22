@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en-us">
+<head>
+  <meta charset="utf-8" />
+  <meta content="width=device-width,initial-scale=1,viewport-fit=cover" name="viewport" />
+  <title>Cube 2: Sauerbraten (Cartbox)</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
+    /* WebGL keys off the canvas box for pointer/size; fill the iframe. */
+    canvas.emscripten { border: 0; margin: 0; padding: 0; display: block; width: 100%; height: 100%; background: #000; outline: none; }
+    #status { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center; color: #d7d7d7; font: 600 13px arial; background: #06040c; }
+    #progress, #spinner, #output { display: none; }
+  </style>
+  <!-- Loaded first so its alert/error overrides beat any engine code. -->
+  <script src="cartbox-bridge.js"></script>
+</head>
+<body>
+  <div id="status">Downloading…</div>
+  <progress id="progress" max="100" value="0"></progress>
+  <span id="spinner"></span>
+  <div class="emscripten_border">
+    <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex="0"></canvas>
+  </div>
+  <textarea id="output" rows="8"></textarea>
+
+  <script>
+    var statusElement = document.getElementById("status");
+    var progressElement = document.getElementById("progress");
+    var spinnerElement = document.getElementById("spinner");
+
+    // The handheld d-pad drives movement with W/S and turning with synthetic mouse
+    // motion (Sauerbraten has no keyboard-turn bind); the face buttons need two
+    // non-default binds. Applied once the world is up.
+    function applyCartboxBinds() {
+      try {
+        BananaBread.execute("bind F attack"); // A = fire
+        BananaBread.execute("bind Q weapon"); // Y = cycle weapon
+        BananaBread.execute("sensitivity 10");
+      } catch (e) {}
+    }
+
+    var Module = {
+      preRun: [],
+      postRun: [],
+      print: function () { console.log(Array.prototype.slice.call(arguments).join(" ")); },
+      printErr: function (text) { console.error(Array.prototype.slice.call(arguments).join(" ")); },
+      canvas: (function () {
+        var canvas = document.getElementById("canvas");
+        canvas.addEventListener("webglcontextlost", function (e) { window.alert("WebGL context lost. You will need to reload."); e.preventDefault(); }, false);
+        // Real mouse users still get pointer-lock look; the handheld synthesizes motion.
+        canvas.addEventListener("click", function () { try { canvas.requestPointerLock(); } catch (e) {} });
+        return canvas;
+      })(),
+      setStatus: function (text) {
+        statusElement.style.display = text ? "flex" : "none";
+        var m = text.match(/([^(]+)\((\d+(\.\d+)?)\/(\d+)\)/);
+        statusElement.innerHTML = m ? m[1] : text;
+      },
+      totalDependencies: 0,
+      monitorRunDependencies: function (left) {
+        this.totalDependencies = Math.max(this.totalDependencies, left);
+        Module.setStatus(left ? "Preparing… (" + (this.totalDependencies - left) + "/" + this.totalDependencies + ")" : "");
+      },
+      desiredWidth: 640,
+      desiredHeight: 480,
+      autoexec: function () { Module.setStatus(""); },
+      postLoadWorld: function () {
+        try { Module.tweakDetail(); } catch (e) {}
+        applyCartboxBinds();
+        Module.setStatus("");
+        if (typeof window.cartboxCube2Ready === "function") window.cartboxCube2Ready();
+      },
+    };
+    window.Module = Module;
+    Module.setStatus("Downloading…");
+    window.addEventListener("error", function () { Module.setStatus(""); });
+  </script>
+
+  <!-- Engine glue, in the same order the upstream launcher loads it. -->
+  <script async src="js/api.js"></script>
+  <script async src="js/zee.js"></script>
+  <script async src="game/gl-matrix.js"></script>
+  <script async src="game/setup_low.js"></script>
+  <script async src="game/preload_base.js"></script>
+  <script async src="game/preload_character.js"></script>
+  <script async src="game/preload_low.js"></script>
+
+  <!-- Hand the engine the wasm bytes, then load the glue that instantiates it. -->
+  <script>
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", "bb.wasm", true);
+    xhr.responseType = "arraybuffer";
+    xhr.onload = function () {
+      Module.wasmBinary = xhr.response;
+      var script = document.createElement("script");
+      script.src = "bb.js";
+      document.body.appendChild(script);
+    };
+    xhr.send(null);
+  </script>
+</body>
+</html>

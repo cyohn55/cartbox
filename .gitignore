@@ -65,3 +65,16 @@ apps/web/public/dosbox/*
 # the bundle is built (build-doom.mjs chex), not committed — same as Doom.
 games/chex/assets/
 apps/web/public/games/chex/
+
+# Quake runtime: the WebQuake engine is vendored source under games/webquake, and
+# scripts/fetch-quake.mjs assembles public/quake/ (engine copy + generated boot
+# page + the ~18MB shareware pak0.pak fetched from id's mirror). The whole tree is
+# regenerated on deploy rather than committed — and here even the boot page is
+# generated from the vendored launcher, so the entire directory is ignored.
+apps/web/public/quake/
+
+# Cube 2 runtime: the BananaBread engine + data packages are vendored source
+# under games/bananabread, and scripts/fetch-cube2.mjs assembles public/cube2/
+# (engine + generated boot page). The ~23MB assembled tree is regenerated on
+# deploy rather than committed.
+apps/web/public/cube2/

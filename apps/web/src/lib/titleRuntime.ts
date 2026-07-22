@@ -22,6 +22,8 @@ export const RUNTIME_IDS = [
   "scummvm",
   "supertux",
   "dos",
+  "quake",
+  "cube2",
   "libretro",
 ] as const;
 
@@ -67,6 +69,8 @@ const DESCRIPTORS: Record<RuntimeId, RuntimeDescriptor> = {
   scummvm: { id: "scummvm", label: "Adventure", implemented: true },
   supertux: { id: "supertux", label: "Platformer", implemented: true },
   dos: { id: "dos", label: "DOS", implemented: true },
+  quake: { id: "quake", label: "Shooter", implemented: true },
+  cube2: { id: "cube2", label: "Arena FPS", implemented: true },
   libretro: { id: "libretro", label: "Console", implemented: false },
 };
 

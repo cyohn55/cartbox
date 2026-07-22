@@ -95,9 +95,13 @@ function titleGridCarts(
             ? ("supertux" as const)
             : title.runtime === "dos"
               ? ("dos" as const)
-              : title.runtime === "scummvm" || title.scummvmTarget
-                ? ("scummvm" as const)
-                : ("wasm-app" as const),
+              : title.runtime === "quake"
+                ? ("quake" as const)
+                : title.runtime === "cube2"
+                  ? ("cube2" as const)
+                  : title.runtime === "scummvm" || title.scummvmTarget
+                    ? ("scummvm" as const)
+                    : ("wasm-app" as const),
         bundleName: title.bundleName as string,
         width: title.width ?? 320,
         height: title.height ?? 180,

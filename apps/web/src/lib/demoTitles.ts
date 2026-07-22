@@ -338,6 +338,51 @@ export const DEMO_TITLES: readonly DemoTitle[] = [
     releasedAt: "2026-07-19T00:00:05.000Z",
   },
   {
+    id: "00000000-0000-4000-9000-000000000011",
+    slug: "quake",
+    name: "Quake",
+    description:
+      "id Software's genre-defining 1996 3D shooter, playable in the browser through WebGL. This is the freely redistributable shareware — the full first episode, Dimension of the Doomed. The d-pad moves and turns, A fires, B jumps, X opens the menu (and pauses), Y confirms.",
+    runtime: "quake",
+    assetSource: "bundled",
+    tier: "B",
+    // The engine is WebQuake (GPL-2, corresponding source vendored under
+    // games/webquake). The game data is id's Quake *shareware* pak0.pak, which
+    // id's shareware licence grants the right to distribute free of charge by
+    // electronic means with the agreement attached — the stricter, data-side term
+    // that governs redistribution of the title as a whole. Tier B, never
+    // priceable. See scripts/fetch-quake.mjs.
+    license: "proprietary-freeware",
+    sourceUrl: "https://www.gamers.org/pub/idgames/idstuff/quake/",
+    releasedAt: "2026-07-20T00:00:00.000Z",
+    // The WebQuake engine lives at public/quake and boots to its own menu, so
+    // there is no launch target.
+    bundleName: "quake",
+    width: 640,
+    height: 480,
+  },
+  {
+    id: "00000000-0000-4000-9000-000000000012",
+    slug: "cube2",
+    name: "Cube 2: Sauerbraten",
+    description:
+      "The open-source arena FPS, running in the browser via WebGL (Mozilla's BananaBread engine port). Drop into an instagib bot match on the Colos arena. The d-pad moves and turns, A fires, B jumps, X opens the menu, Y switches weapon.",
+    runtime: "cube2",
+    assetSource: "bundled",
+    tier: "A",
+    // Cube 2's engine and Sauerbraten's game assets are both zlib-licensed and
+    // freely redistributable, so the whole game — engine + data — ships with the
+    // console. Tier A. See scripts/fetch-cube2.mjs and games/bananabread.
+    license: "zlib",
+    sourceUrl: "https://github.com/kripken/BananaBread",
+    releasedAt: "2026-07-20T00:00:01.000Z",
+    // The BananaBread engine lives at public/cube2 and boots straight into the
+    // default bot match, so there is no launch target.
+    bundleName: "cube2",
+    width: 640,
+    height: 480,
+  },
+  {
     id: "00000000-0000-4000-9000-000000000003",
     slug: "openmw",
     name: "OpenMW",

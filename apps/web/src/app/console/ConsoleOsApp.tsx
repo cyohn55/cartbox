@@ -35,6 +35,8 @@ import { PortedGameScreen } from "./PortedGameScreen";
 import { ScummVmPlayer } from "./ScummVmPlayer";
 import { SuperTuxPlayer } from "./SuperTuxPlayer";
 import { DosPlayer } from "./DosPlayer";
+import { QuakePlayer } from "./QuakePlayer";
+import { Cube2Player } from "./Cube2Player";
 import { HomeFeed } from "./HomeFeed";
 import { BrowseScreen } from "./BrowseScreen";
 import { LibraryScreen } from "./LibraryScreen";
@@ -134,9 +136,9 @@ export function ConsoleOS() {
       />
     );
   } else if (state.playing) {
-    // Five player kinds behind one launch/eject path: a ScummVM, SuperTux or DOS
-    // title in its own iframe, a Game ABI title on the wasm runtime, or a .tic
-    // cartridge.
+    // Seven player kinds behind one launch/eject path: a ScummVM, SuperTux, DOS,
+    // Quake or Cube 2 title in its own iframe, a Game ABI title on the wasm
+    // runtime, or a .tic cartridge.
     const game = state.playing.game;
     if (game?.runtime === "scummvm") {
       stage = <ScummVmPlayer cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />;
@@ -144,6 +146,10 @@ export function ConsoleOS() {
       stage = <SuperTuxPlayer cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />;
     } else if (game?.runtime === "dos") {
       stage = <DosPlayer cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />;
+    } else if (game?.runtime === "quake") {
+      stage = <QuakePlayer cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />;
+    } else if (game?.runtime === "cube2") {
+      stage = <Cube2Player cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />;
     } else if (game) {
       stage = <PortedGameScreen cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />;
     } else {

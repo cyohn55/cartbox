@@ -20,6 +20,15 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # R2 credentials for publishing the game bundles (step 2 of the hosting
+    # migration — see apps/web/DEPLOY-VERCEL.md). Sourced from repo secrets; when
+    # unset, the R2 upload step below is skipped, so this workflow still works for
+    # a Pages-only deploy.
+    env:
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
     steps:
       - uses: actions/checkout@v5
 
@@ -120,6 +129,25 @@ jobs:
       # it the Browse tab would list a C-Dogs card that 404s on the live site.
       - name: Assemble DOS runtime (js-dos + C-Dogs)
         run: node scripts/fetch-dosbox.mjs
+
+      # Quake (WebQuake) and Cube 2 (BananaBread) compile nothing — pure-JS /
+      # vendored-WASM engines — so they just fetch/assemble here (no Emscripten).
+      # fetch-quake downloads the freely redistributable shareware pak0; fetch-cube2
+      # copies the vendored BananaBread bundle. Without these the Browse tab lists
+      # Quake/Cube 2 cards that 404 on the live site.
+      - name: Assemble Quake runtime (WebQuake + shareware pak0)
+        run: node scripts/fetch-quake.mjs
+
+      - name: Assemble Cube 2 runtime (BananaBread)
+        run: node scripts/fetch-cube2.mjs
+
+      # Step 2 of the hosting migration: push the built bundles to Cloudflare R2 so
+      # the Vercel deployment can serve them (next.config.mjs rewrites the same-origin
+      # bundle paths to GAME_CDN_URL). Skipped when the R2_* secrets are absent, so a
+      # Pages-only deploy is unaffected.
+      - name: Publish game bundles to R2
+        if: ${{ env.R2_ENDPOINT != '' }}
+        run: node scripts/publish-bundles-r2.mjs
 
       - name: Build static export
         run: npm run build:static --workspace apps/web
