@@ -123,9 +123,10 @@
   display: block;
   width: auto;
   max-width: 100%;
-  /* Kept short enough that the centred device, the parameter switch and the top
-     of the unfolding control all sit within one viewport on a laptop. */
-  max-height: 52vh;
+  /* No max-height: the centre is width-sized (inline) by `measure()`, exactly
+     like the flanks, so the whole row is uniform. A height cap here would clamp
+     only the centre and make it a different size from its neighbours; `measure()`
+     already bounds the width by the viewport height so the device stays in view. */
   /* No panel behind the device. The canvas is a rectangle with transparent
      margins around the handheld's silhouette, so any background/border here
      reads as a dark card sticking out past the device's edges. The lit gamer

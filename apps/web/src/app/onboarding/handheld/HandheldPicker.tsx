@@ -137,6 +137,13 @@ type Premade = (typeof HANDHELD_PRESETS)[number];
  */
 const SCREEN_BLEED_PX = 5;
 
+/**
+ * The smallest a handheld may shrink to while still keeping a premade visible on
+ * each side. Below this the flanks are dropped and the centre fills the width
+ * (the narrow/mobile case, where a horizontal swipe changes premades instead).
+ */
+const MIN_UNIFORM_WIDTH = 210;
+
 /** Absolute box for a screen overlay, bled out so no edge of the hole shows. */
 function screenBoxStyle(rect: ScreenRect): CSSProperties {
   return {
@@ -518,14 +525,12 @@ export function HandheldPicker() {
   const animationLabel = animationId ? animatedPresetView(animationId)?.label : null;
   const stageLabel = animationLabel ? `${chassisLabel} · ${animationLabel}` : chassisLabel;
 
-  // The premades flanking the centred handheld, shown at full opacity but
-  // stepping down in size the further they sit from the centre. The step is
-  // geometric (each flank is `ratio×` its inner neighbour); the ratio widens
-  // toward 1 as more flanks fit, so a crowded carousel steps down more gently
-  // than a sparse one (a lone flank lands at 75% — the sparse-case target).
+  // The premades flank the centred handheld at the SAME size as it — the device
+  // now runs the customizer on its own screen, so the centre and its neighbours
+  // read as one uniform row (a prev/current/next carousel) rather than a large
+  // centre stepping down to smaller flanks. `measure()` sizes all three together
+  // so they fit between the arrows.
   const presetCount = HANDHELD_PRESETS.length;
-  const flankRatio = 1 - 0.25 / Math.max(flanksPerSide, 1);
-  const flankScale = (step: number) => Math.pow(flankRatio, step);
   const flankAt = (offset: number) =>
     HANDHELD_PRESETS[((carouselIndex + offset) % presetCount + presetCount) % presetCount]!;
   // Outermost-first on the left (…‑2, ‑1) and inner-first on the right (1, 2…),
@@ -562,30 +567,32 @@ export function HandheldPicker() {
     const measure = () => {
       const available = carousel.clientWidth;
       if (available <= 0) return;
-      // Centre size: the handheld now runs the customizer on its own screen, so it
-      // is sized to fill most of the viewport height (its screen window has to be
-      // large enough to operate the controls), never wider than a narrow screen
-      // allows, and capped so it is not enormous on a big display.
-      const byHeight = 0.82 * window.innerHeight * aspect;
-      const byWidth = available * 0.9;
-      const center = Math.max(240, Math.min(460, byHeight, byWidth));
-      const usable = available - 2 * (ARROW + GAP); // reserve the ‹ › buttons
+      // Every handheld (centre + flanks) is the same width, so they read as one
+      // uniform row. Cap that width by the viewport height — the handheld runs the
+      // customizer on its own screen, so it must stay tall enough to operate the
+      // controls — and by an absolute ceiling so it is not enormous on a big
+      // display. `usable` is the room left between the ‹ › buttons.
+      const capWidth = Math.min(460, 0.82 * window.innerHeight * aspect);
+      const usable = available - 2 * (ARROW + GAP);
 
-      // Take the most flanks (each side) whose stepped-down widths still fit.
-      let fits = 0;
-      for (let candidate = 5; candidate >= 1; candidate--) {
-        const ratio = 1 - 0.25 / candidate;
-        let flanksWidth = 0;
-        for (let step = 1; step <= candidate; step++) flanksWidth += Math.pow(ratio, step);
-        flanksWidth *= 2 * center; // both sides
-        const gaps = 2 * candidate * GAP;
-        if (center + flanksWidth + gaps <= usable) {
-          fits = candidate;
+      // Prefer the most premades per side whose *equal* widths still land at least
+      // near the cap (so adding a neighbour never shrinks the row much); fall back
+      // to a single premade each side at whatever width fits, and finally to the
+      // centre alone (the narrow/mobile case, where a swipe changes premades).
+      let perSide = 0;
+      let width = Math.min(capWidth, usable);
+      for (let candidate = 3; candidate >= 1; candidate--) {
+        const count = 1 + 2 * candidate; // centre + both sides
+        const fitWidth = Math.min(capWidth, (usable - 2 * candidate * GAP) / count);
+        const acceptable = candidate === 1 ? MIN_UNIFORM_WIDTH : 0.9 * capWidth;
+        if (fitWidth >= acceptable) {
+          perSide = candidate;
+          width = fitWidth;
           break;
         }
       }
-      setCenterWidth(center);
-      setFlanksPerSide(fits);
+      setCenterWidth(width);
+      setFlanksPerSide(perSide);
     };
 
     measure();
@@ -963,7 +970,7 @@ export function HandheldPicker() {
                 template={template}
                 preset={preset}
                 marqueeId={PREMADE_MARQUEE[preset.id] ?? null}
-                width={centerWidth * flankScale(step)}
+                width={centerWidth}
                 screenRect={screenRect}
                 onClick={() => goToPreset(index)}
               />
@@ -1218,7 +1225,7 @@ export function HandheldPicker() {
                 template={template}
                 preset={preset}
                 marqueeId={PREMADE_MARQUEE[preset.id] ?? null}
-                width={centerWidth * flankScale(step)}
+                width={centerWidth}
                 screenRect={screenRect}
                 onClick={() => goToPreset(index)}
               />
