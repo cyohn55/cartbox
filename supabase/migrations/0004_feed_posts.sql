@@ -26,8 +26,10 @@ alter table feed_posts enable row level security;
 
 -- The feed is public; authoring is limited to the post's owner (server routes
 -- use the service role and bypass RLS, matching the other tables).
+drop policy if exists feed_posts_public_read on feed_posts;
 create policy feed_posts_public_read on feed_posts
   for select using (true);
 
+drop policy if exists feed_posts_author_write on feed_posts;
 create policy feed_posts_author_write on feed_posts
   for all using (auth.uid() = author_id) with check (auth.uid() = author_id);
