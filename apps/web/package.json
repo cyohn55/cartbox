@@ -12,6 +12,8 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",
+    "@cartbox/editor": "*",
+    "@cartbox/payments": "*",
     "@cartbox/player": "*",
     "@supabase/ssr": "^0.5.0",
     "@supabase/supabase-js": "^2.45.0",
