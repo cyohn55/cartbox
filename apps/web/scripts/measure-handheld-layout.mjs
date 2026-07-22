@@ -148,7 +148,9 @@ function darkPills() {
   const seen = new Uint8Array(W * H);
   const dark = (p) => base.data[p * 4 + 3] > 200 && (base.data[p * 4] + base.data[p * 4 + 1] + base.data[p * 4 + 2]) / 3 < 75;
   const boxes = [];
-  const [ax, bx, ay, by] = [Math.floor(W * 0.34), Math.floor(W * 0.60), Math.floor(H * 0.75), Math.floor(H * 0.81)];
+  // The pill row sits below the face buttons. Start past the D-pad's right edge
+  // so its dark arrow fill can't be mistaken for a pill.
+  const [ax, bx, ay, by] = [Math.floor(W * 0.40), Math.floor(W * 0.62), Math.floor(H * 0.72), Math.floor(H * 0.80)];
   for (let y = ay; y < by; y += 1) {
     for (let x = ax; x < bx; x += 1) {
       const s = y * W + x;
@@ -180,18 +182,79 @@ function darkPills() {
   return boxes.sort((a, b) => a.cx - b.cx);
 }
 
+/**
+ * The four shoulder buttons sit in a row beneath the screen. This art places
+ * them R1, R2 (left) and L1, L2 (right) with the scroll wheel between. They are
+ * uniform dark button pills on the chassis, so detect dark blobs in that band
+ * and keep the four button-sized ones, ordered left to right. The scroll wheel
+ * has no colour region of its own; it occupies the gap between the inner two.
+ */
+function shoulderButtons() {
+  const dark = (p) => base.data[p * 4 + 3] > 180 && (base.data[p * 4] + base.data[p * 4 + 1] + base.data[p * 4 + 2]) / 3 < 90;
+  const [ay, by] = [Math.floor(H * 0.55), Math.floor(H * 0.645)];
+  const seen = new Uint8Array(W * H);
+  const blobs = [];
+  for (let y = ay; y < by; y += 1) {
+    for (let x = 0; x < W; x += 1) {
+      const s = y * W + x;
+      if (seen[s] || !dark(s)) continue;
+      const box = emptyRect();
+      let area = 0;
+      const stack = [s];
+      seen[s] = 1;
+      while (stack.length) {
+        const p = stack.pop();
+        const px = p % W;
+        const py = (p / W) | 0;
+        grow(box, px, py);
+        area += 1;
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nx = px + dx;
+          const ny = py + dy;
+          if (nx < 0 || ny < ay || nx >= W || ny >= by) continue;
+          const np = ny * W + nx;
+          if (!seen[np] && dark(np)) { seen[np] = 1; stack.push(np); }
+        }
+      }
+      const w = (box.x1 - box.x0 + 1) / W;
+      const h = (box.y1 - box.y0 + 1) / H;
+      // Keep only button-sized blobs — this drops the side rails and the
+      // full-width recess shelf the buttons sit on.
+      if (w >= 0.08 && w <= 0.13 && h >= 0.02 && h <= 0.045) blobs.push(box);
+    }
+  }
+  return blobs.sort((a, b) => a.x0 + a.x1 - (b.x0 + b.x1));
+}
+
+const shoulderBoxes = shoulderButtons();
+if (shoulderBoxes.length !== 4) throw new Error(`Expected 4 shoulder buttons, found ${shoulderBoxes.length}`);
+// Authored order, left to right: L2, L1, (wheel), R1, R2.
+const [l2Box, l1Box, r1Box, r2Box] = shoulderBoxes;
+// The wheel lives between the inner two shoulders (L1 and R1), inset from each so
+// its hit-area doesn't overlap them.
+const wheelGap = r1Box.x0 - l1Box.x1;
+const wheelBox = {
+  x0: l1Box.x1 + Math.round(wheelGap * 0.16),
+  x1: r1Box.x0 - Math.round(wheelGap * 0.16),
+  y0: Math.min(l1Box.y0, r1Box.y0),
+  y1: Math.max(l1Box.y1, r1Box.y1),
+};
+
 const pills = darkPills();
 const layout = {
   aspect: W / H,
   screen: frac(screenBox()),
   dpad: frac(dpad),
   buttons: Object.fromEntries(Object.entries(buttons).map(([k, v]) => [k, frac(v.box)])),
-  // The physical shoulder tabs live on the top-left and top-right edges (not a
-  // colour region), so they're placed by proportion.
+  // Four shoulder buttons in a row beneath the screen, detected from the art:
+  // left pair is R1/R2, right pair is L1/L2 (as authored).
   shoulders: {
-    l: { x: 0.0, y: 0.135, w: 0.055, h: 0.16 },
-    r: { x: 0.945, y: 0.135, w: 0.055, h: 0.16 },
+    r1: frac(r1Box),
+    r2: frac(r2Box),
+    l1: frac(l1Box),
+    l2: frac(l2Box),
   },
+  wheel: frac(wheelBox),
   system:
     pills.length >= 2
       ? { select: frac(pills[0].box), start: frac(pills[1].box) }
@@ -215,8 +278,8 @@ const strokeFrac = (r, col) => {
 strokeFrac(layout.screen, [255, 0, 255]);
 strokeFrac(layout.dpad, [0, 255, 255]);
 for (const r of Object.values(layout.buttons)) strokeFrac(r, [255, 0, 0]);
-strokeFrac(layout.shoulders.l, [0, 255, 0]);
-strokeFrac(layout.shoulders.r, [0, 255, 0]);
+for (const r of Object.values(layout.shoulders)) strokeFrac(r, [0, 255, 0]);
+strokeFrac(layout.wheel, [0, 128, 255]);
 strokeFrac(layout.system.select, [255, 128, 0]);
 strokeFrac(layout.system.start, [255, 128, 0]);
 fs.writeFileSync("/mnt/c/Temp/cbx-verify/layout-debug.png", PNG.sync.write(dbg));

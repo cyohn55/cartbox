@@ -26,7 +26,11 @@ export type ConsoleControl =
   | "r1"
   | "r2"
   | "start"
-  | "select";
+  | "select"
+  // The scroll wheel emits a momentary tick per detent in each direction; the OS
+  // maps these to tab-bar navigation. It never forwards to a game.
+  | "wheelUp"
+  | "wheelDown";
 
 export type ConsoleInputPhase = "press" | "release";
 
@@ -42,9 +46,11 @@ export type KeyEventDispatcher = (type: "keydown" | "keyup", code: string) => vo
 
 /**
  * Shell control → `KeyboardEvent.code` used by the engine's default bindings
- * (see @cartbox/player DEFAULT_KEY_BINDINGS). Start/Select and the shoulder
- * buttons are system controls — the TIC-80 gamepad has no bits for them, so
- * they never forward to a game (the OS uses shoulders for tab/page moves).
+ * (see @cartbox/player DEFAULT_KEY_BINDINGS). Start/Select, the shoulder buttons
+ * and the scroll wheel are system controls — the TIC-80 gamepad has no bits for
+ * them, so they never forward to a .tic cartridge. The OS uses the wheel for tab
+ * navigation and the shoulders to page a screen's content. (In-game shoulder
+ * input for the ported iframe runtimes is handled per-runtime, not here.)
  */
 export const CONTROL_KEY_CODES: Readonly<Record<ConsoleControl, string | null>> = {
   up: "ArrowUp",
@@ -61,6 +67,8 @@ export const CONTROL_KEY_CODES: Readonly<Record<ConsoleControl, string | null>> 
   r2: null,
   start: null,
   select: null,
+  wheelUp: null,
+  wheelDown: null,
 };
 
 /**

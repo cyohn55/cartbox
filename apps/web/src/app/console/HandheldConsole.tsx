@@ -90,6 +90,73 @@ function ShellButton({ bus, control, className, label, children, style }: ShellB
   );
 }
 
+/**
+ * The scroll wheel. Unlike a button it has no press/hold state; each mouse-wheel
+ * detent or drag-step emits one momentary tick (`wheelUp`/`wheelDown`) that the
+ * OS turns into a tab move. Wheel events are throttled so a single flick can't
+ * skip several tabs, and a vertical drag works the same way for touch.
+ */
+function WheelControl({ bus, className, style, label = "Scroll wheel" }: { bus: ConsoleInputBus; className: string; style?: CSSProperties; label?: string }) {
+  const lastTick = useRef(0);
+  const dragFrom = useRef<number | null>(null);
+  const dragAccum = useRef(0);
+  const DRAG_STEP_PX = 20;
+  const WHEEL_THROTTLE_MS = 140;
+
+  const tick = (direction: -1 | 1) => {
+    const control: ConsoleControl = direction > 0 ? "wheelDown" : "wheelUp";
+    bus.press(control);
+    bus.release(control);
+  };
+
+  return (
+    <div
+      className={className}
+      style={style}
+      role="slider"
+      aria-label={label}
+      aria-valuetext="Tab selector"
+      tabIndex={-1}
+      onWheel={(event) => {
+        const now = Date.now();
+        if (now - lastTick.current < WHEEL_THROTTLE_MS) return;
+        lastTick.current = now;
+        tick(event.deltaY > 0 ? 1 : -1);
+      }}
+      onPointerDown={(event) => {
+        try {
+          event.currentTarget.setPointerCapture(event.pointerId);
+        } catch {
+          // Capture is a nicety for drags that slide off; never required.
+        }
+        dragFrom.current = event.clientY;
+        dragAccum.current = 0;
+      }}
+      onPointerMove={(event) => {
+        if (dragFrom.current === null) return;
+        dragAccum.current += event.clientY - dragFrom.current;
+        dragFrom.current = event.clientY;
+        while (dragAccum.current >= DRAG_STEP_PX) {
+          dragAccum.current -= DRAG_STEP_PX;
+          tick(1);
+        }
+        while (dragAccum.current <= -DRAG_STEP_PX) {
+          dragAccum.current += DRAG_STEP_PX;
+          tick(-1);
+        }
+      }}
+      onPointerUp={() => {
+        dragFrom.current = null;
+      }}
+      onPointerCancel={() => {
+        dragFrom.current = null;
+      }}
+      onMouseDown={(event) => event.preventDefault()}
+      onContextMenu={(event) => event.preventDefault()}
+    />
+  );
+}
+
 function Shell({ bus, children }: { bus: ConsoleInputBus; children: ReactNode }) {
   const { settings, setPanelOpen } = useConsoleSettings();
   const konamiRef = useRef(new KonamiDetector());
@@ -235,6 +302,9 @@ function Shell({ bus, children }: { bus: ConsoleInputBus; children: ReactNode })
           <ShellButton bus={bus} control="start" className="hh-pill" label="Start">
             START
           </ShellButton>
+          {/* The wheel drives tab navigation on the styled shells too (the image
+              handheld places it over the drawn wheel instead). */}
+          <WheelControl bus={bus} className="hh-css-wheel" />
         </div>
       </div>
       <div className="hh-speaker" aria-hidden />
@@ -255,7 +325,8 @@ interface HandheldLayout {
   screen: LayoutRect;
   dpad: LayoutRect;
   buttons: { y: LayoutRect; a: LayoutRect; x: LayoutRect; b: LayoutRect };
-  shoulders: { l: LayoutRect; r: LayoutRect };
+  shoulders: { l1: LayoutRect; l2: LayoutRect; r1: LayoutRect; r2: LayoutRect };
+  wheel: LayoutRect;
   system: { select: LayoutRect; start: LayoutRect };
 }
 
@@ -384,8 +455,10 @@ function ImageShell({ bus, children }: { bus: ConsoleInputBus; children: ReactNo
         { control: "x", rect: layout.buttons.x, label: "X button" },
         { control: "a", rect: layout.buttons.a, label: "A button" },
         { control: "b", rect: layout.buttons.b, label: "B button" },
-        { control: "l1", rect: layout.shoulders.l, label: "L shoulder" },
-        { control: "r1", rect: layout.shoulders.r, label: "R shoulder" },
+        { control: "l1", rect: layout.shoulders.l1, label: "L1 shoulder" },
+        { control: "l2", rect: layout.shoulders.l2, label: "L2 shoulder" },
+        { control: "r1", rect: layout.shoulders.r1, label: "R1 shoulder" },
+        { control: "r2", rect: layout.shoulders.r2, label: "R2 shoulder" },
         { control: "select", rect: layout.system.select, label: "Select" },
         { control: "start", rect: layout.system.start, label: "Start" },
       ]
@@ -417,6 +490,7 @@ function ImageShell({ bus, children }: { bus: ConsoleInputBus; children: ReactNo
             {hits.map(({ control, rect, label }) => (
               <ShellButton key={control} bus={bus} control={control} className="hh-hit" style={rectStyle(rect)} label={label} />
             ))}
+            <WheelControl bus={bus} className="hh-hit hh-wheel-hit" style={rectStyle(layout.wheel)} />
             <button
               type="button"
               className="hh-img-gear"

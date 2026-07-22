@@ -40,6 +40,8 @@ const CONTROL_TO_KEY_CODE: Readonly<Record<ConsoleControl, string | null>> = {
   start: "Escape",
   // Select ejects the cartridge — the OS owns it, never forwarded to the game.
   select: null,
+  wheelUp: null,
+  wheelDown: null,
   l1: null,
   l2: null,
   r1: null,

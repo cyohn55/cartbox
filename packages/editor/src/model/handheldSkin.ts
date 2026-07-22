@@ -37,6 +37,7 @@ export const HANDHELD_REGIONS = [
   { id: "buttonColor", label: "Buttons", layer: "Button_Color" },
   { id: "dpadArrow", label: "D-pad arrows", layer: "Arrow_Color" },
   { id: "buttonLetter", label: "Button letters", layer: "Button_Text_Color" },
+  { id: "shoulderText", label: "Shoulder labels", layer: "Shoulder_Button_Text_Color" },
 ] as const;
 
 export type HandheldRegion = (typeof HANDHELD_REGIONS)[number];
@@ -90,6 +91,10 @@ export function twoTone(body: string, accent: string, ink: string = body): Handh
     buttonColor: accent,
     dpadArrow: ink,
     buttonLetter: ink,
+    // Shoulder-button labels sit on the body-coloured chassis (the shoulder
+    // bodies are baked into the base chrome, not an accent-coloured control), so
+    // they take the accent to read as clear markings — like the on-shell text.
+    shoulderText: accent,
     text: accent,
     decal: accent,
   };

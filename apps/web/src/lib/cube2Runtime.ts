@@ -42,6 +42,8 @@ const CONTROL_TO_ACTION: Readonly<Record<ConsoleControl, Cube2Action | null>> = 
   r2: null,
   start: null,
   select: null,
+  wheelUp: null,
+  wheelDown: null,
 };
 
 /**

@@ -86,6 +86,20 @@ export function ConsoleOS() {
     return () => bus.setGameForwarding(false);
   }, [bus, state.playing]);
 
+  // Shoulder page-flip scrolls the active tab's content by most of a page. The
+  // tab content owns its overflow, so scroll the first scrollable element within
+  // the screen body, falling back to the body itself.
+  const screenBodyRef = useRef<HTMLDivElement>(null);
+  const pageActiveContent = (direction: -1 | 1) => {
+    const root = screenBodyRef.current;
+    if (!root) return;
+    const scroller =
+      root.scrollHeight > root.clientHeight + 4
+        ? root
+        : Array.from(root.querySelectorAll<HTMLElement>("*")).find((el) => el.scrollHeight > el.clientHeight + 4) ?? root;
+    scroller.scrollBy({ top: direction * scroller.clientHeight * 0.85, behavior: "smooth" });
+  };
+
   useConsoleInput((event) => {
     if (event.phase !== "press") {
       return;
@@ -111,10 +125,15 @@ export function ConsoleOS() {
     if (bus.owner !== "ui") {
       return;
     }
-    if (event.control === "select" || event.control === "r1") {
+    // The scroll wheel steps the tab bar; the shoulders page the active screen.
+    if (event.control === "wheelDown") {
       dispatch({ type: "NEXT_TAB" });
-    } else if (event.control === "l1") {
+    } else if (event.control === "wheelUp") {
       dispatch({ type: "PREVIOUS_TAB" });
+    } else if (event.control === "r1" || event.control === "r2") {
+      pageActiveContent(1);
+    } else if (event.control === "l1" || event.control === "l2") {
+      pageActiveContent(-1);
     }
   });
 
@@ -158,15 +177,16 @@ export function ConsoleOS() {
   } else {
     stage = (
       <div className="os-stage os-shell" data-testid="console-shell">
-        <div className="os-screen-body">
+        <div className="os-screen-body" ref={screenBodyRef}>
           {state.tab === "feed" && <HomeFeed guest={!signedIn} onPlayCart={playCart} />}
           {state.tab === "browse" && <BrowseScreen onPlayCart={playCart} />}
           {state.tab === "create" && <CreateScreen />}
           {state.tab === "library" && <LibraryScreen guest={!signedIn} onPlayCart={playCart} />}
           {state.tab === "profile" && <ProfileScreen guest={!signedIn} />}
         </div>
-        {/* Tabs stay tappable by touch but are cycled with L1/R1 on the shell —
-            no data-console-nav, so the D-pad cursor can never land here. */}
+        {/* Tabs stay tappable by touch but are stepped with the scroll wheel on
+            the shell — no data-console-nav, so the D-pad cursor can never land
+            here. */}
         <nav className="os-tabbar" aria-label="Console tabs">
           {CONSOLE_TABS.map((tab) => (
             <button

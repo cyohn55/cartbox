@@ -79,17 +79,18 @@ function layerFrom(mask, color, w, h) {
 // 2. extractScheme reads the seven region colours from a named group, and
 //    extractHandheldTemplate builds base + mask from the same tree.
 {
-  const w = 3;
+  const w = 4;
   const h = 3;
-  // Base chrome: a diagonal of grey (not part of any region).
-  const baseMask = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  // Base chrome: grey pixels (not part of any region). The canvas holds one pixel
+  // per region plus spares, so it must stay at least HANDHELD_REGIONS.length wide.
+  const baseMask = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0];
   const baseLayer = { name: "Handheld", type: 0, childLevel: 0, visible: true, opacity: 255, pixels: layerFrom(baseMask, [90, 90, 90], w, h) };
 
   // Give each region a distinct colour and a distinct single-pixel mask.
   const regionColor = (i) => [40 + i * 20, 10 + i * 5, 200 - i * 20];
   const groupChildren = HANDHELD_REGIONS.map((region, i) => {
     const m = new Array(w * h).fill(0);
-    m[i] = 1; // region i owns pixel i (canvas has 9 pixels, one per region + spare)
+    m[i] = 1; // region i owns pixel i (canvas has 12 pixels, one per region + spare)
     return {
       name: region.layer,
       type: 0,

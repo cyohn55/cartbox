@@ -52,15 +52,17 @@ type DosControlMap = Readonly<Record<ConsoleControl, DosKey | null>>;
 
 /**
  * Controls the shell always keeps for the OS, never forwarded to any game:
- * Select ejects the cartridge and the analog shoulders are unused by DOS games.
- * Factored out because every per-game map shares it.
+ * Select ejects the cartridge; the analog shoulders and the scroll wheel are
+ * unused by DOS games. Factored out because every per-game map shares it.
  */
-const UNFORWARDED: Pick<DosControlMap, "select" | "l1" | "l2" | "r1" | "r2"> = {
+const UNFORWARDED: Pick<DosControlMap, "select" | "l1" | "l2" | "r1" | "r2" | "wheelUp" | "wheelDown"> = {
   select: null,
   l1: null,
   l2: null,
   r1: null,
   r2: null,
+  wheelUp: null,
+  wheelDown: null,
 };
 
 /**

@@ -35,6 +35,10 @@
     {
       "id": "buttonLetter",
       "label": "Button letters"
+    },
+    {
+      "id": "shoulderText",
+      "label": "Shoulder labels"
     }
   ],
   "presets": [
@@ -49,6 +53,7 @@
         "buttonColor": "#f2e6c9",
         "dpadArrow": "#cc3b3b",
         "buttonLetter": "#cc3b3b",
+        "shoulderText": "#f2e6c9",
         "text": "#f2e6c9",
         "decal": "#f2e6c9"
       }
@@ -64,6 +69,7 @@
         "buttonColor": "#26374d",
         "dpadArrow": "#e8792b",
         "buttonLetter": "#e8792b",
+        "shoulderText": "#26374d",
         "text": "#26374d",
         "decal": "#26374d"
       }
@@ -79,6 +85,7 @@
         "buttonColor": "#33344a",
         "dpadArrow": "#f2c53d",
         "buttonLetter": "#f2c53d",
+        "shoulderText": "#33344a",
         "text": "#33344a",
         "decal": "#33344a"
       }
@@ -90,12 +97,13 @@
         "face": "#3fa65a",
         "dpadPanel": "#3fa65a",
         "buttonPanel": "#3fa65a",
-        "dpad": "#ef7d57",
-        "buttonColor": "#ef7d57",
+        "dpad": "#ffffff",
+        "buttonColor": "#ffffff",
         "dpadArrow": "#3fa65a",
         "buttonLetter": "#3fa65a",
-        "text": "#ef7d57",
-        "decal": "#ef7d57"
+        "shoulderText": "#ffffff",
+        "text": "#ffffff",
+        "decal": "#ffffff"
       }
     },
     {
@@ -109,6 +117,7 @@
         "buttonColor": "#f2c53d",
         "dpadArrow": "#2f6fd0",
         "buttonLetter": "#2f6fd0",
+        "shoulderText": "#f2c53d",
         "text": "#f2c53d",
         "decal": "#f2c53d"
       }
@@ -124,6 +133,7 @@
         "buttonColor": "#7cc4f2",
         "dpadArrow": "#3b3d8f",
         "buttonLetter": "#3b3d8f",
+        "shoulderText": "#7cc4f2",
         "text": "#7cc4f2",
         "decal": "#7cc4f2"
       }
@@ -139,6 +149,7 @@
         "buttonColor": "#a7f070",
         "dpadArrow": "#7a3fa6",
         "buttonLetter": "#7a3fa6",
+        "shoulderText": "#a7f070",
         "text": "#a7f070",
         "decal": "#a7f070"
       }
@@ -154,6 +165,7 @@
         "buttonColor": "#d6d9de",
         "dpadArrow": "#3a3d42",
         "buttonLetter": "#3a3d42",
+        "shoulderText": "#d6d9de",
         "text": "#d6d9de",
         "decal": "#d6d9de"
       }
@@ -169,6 +181,7 @@
         "buttonColor": "#cc3b3b",
         "dpadArrow": "#eef1f4",
         "buttonLetter": "#eef1f4",
+        "shoulderText": "#cc3b3b",
         "text": "#cc3b3b",
         "decal": "#cc3b3b"
       }

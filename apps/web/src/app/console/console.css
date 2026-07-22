@@ -1948,6 +1948,37 @@ select.os-input {
   background: rgba(0, 0, 0, 0.28);
 }
 
+/* The scroll wheel over the drawn wheel art: transparent like other hit-areas,
+   but hints vertical scrubbing and never shows a press flash (it has no held
+   state — each detent is a momentary tick). */
+.hh-wheel-hit {
+  border-radius: 22%;
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.hh-wheel-hit[data-pressed] {
+  background: transparent;
+}
+
+/* The styled (non-image) shells draw a compact ridged wheel in the system row. */
+.hh-css-wheel {
+  width: 2.4rem;
+  height: 1.1rem;
+  border-radius: 0.4rem;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  background: repeating-linear-gradient(
+    90deg,
+    rgba(0, 0, 0, 0.45) 0,
+    rgba(0, 0, 0, 0.45) 2px,
+    rgba(255, 255, 255, 0.18) 2px,
+    rgba(255, 255, 255, 0.18) 4px
+  );
+  cursor: ns-resize;
+  touch-action: none;
+  align-self: center;
+}
+
 .hh-img-gear {
   position: absolute;
   top: 1.4%;

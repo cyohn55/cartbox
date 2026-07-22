@@ -59,6 +59,8 @@ const CONTROL_TO_KEY: Readonly<Record<ConsoleControl, QuakeKey | null>> = {
   r2: null,
   start: null,
   select: null,
+  wheelUp: null,
+  wheelDown: null,
 };
 
 /**
