@@ -189,6 +189,9 @@ export {
   proPaletteHex,
   paletteForModel,
   PRO_PALETTE_SIZE,
+  relativeLuminance,
+  contrastRatio,
+  ensureContrast,
 } from "./model/palette";
 export { parsePaletteFile, type ParsedPalette, type PaletteFormat } from "./model/paletteImport";
 export {

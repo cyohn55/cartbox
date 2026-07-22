@@ -50,6 +50,74 @@ export function defaultPaletteBytes(): Uint8Array {
   return bytes;
 }
 
+/** An [r, g, b] triplet, each channel 0..255. */
+type Rgb = readonly [number, number, number];
+
+/** An [r, g, b] triplet to HSL (hue in degrees, saturation/lightness in 0..1). */
+function rgbToHsl(red: number, green: number, blue: number): [number, number, number] {
+  const r = red / 255;
+  const g = green / 255;
+  const b = blue / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const lightness = (max + min) / 2;
+  if (max === min) return [0, 0, lightness]; // achromatic
+  const delta = max - min;
+  const saturation = lightness > 0.5 ? delta / (2 - max - min) : delta / (max + min);
+  let hue: number;
+  if (max === r) hue = (g - b) / delta + (g < b ? 6 : 0);
+  else if (max === g) hue = (b - r) / delta + 2;
+  else hue = (r - g) / delta + 4;
+  return [hue * 60, saturation, lightness];
+}
+
+/**
+ * WCAG relative luminance (0..1) of an [r, g, b] triplet — the perceptual
+ * brightness used to reason about contrast, weighting green far above blue.
+ */
+export function relativeLuminance([red, green, blue]: Rgb): number {
+  const linear = (value: number) => {
+    const channel = value / 255;
+    return channel <= 0.03928 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue);
+}
+
+/** WCAG contrast ratio (1..21) between two colours; order-independent. */
+export function contrastRatio(foreground: Rgb, background: Rgb): number {
+  const light = Math.max(relativeLuminance(foreground), relativeLuminance(background));
+  const dark = Math.min(relativeLuminance(foreground), relativeLuminance(background));
+  return (light + 0.05) / (dark + 0.05);
+}
+
+/**
+ * Lighten `hex` just enough to reach `minContrast` against `background`, keeping
+ * its hue and saturation, so a coloured mark stays legible on a dark surface
+ * (the marquee panel, the shoulder buttons) without losing its identity. Returns
+ * the colour unchanged when it already clears the target. Because raising HSL
+ * lightness toward white monotonically raises luminance, a binary search finds
+ * the least lightening that satisfies the target.
+ */
+export function ensureContrast(hex: string, background: Rgb, minContrast: number): string {
+  const rgb = hexToRgb(hex);
+  if (contrastRatio(rgb, background) >= minContrast) return hex;
+  const [hue, saturation, lightness] = rgbToHsl(rgb[0], rgb[1], rgb[2]);
+  let lowLightness = lightness; // known too dark
+  let highLightness = 1; // white: maximally contrasting on any dark surface
+  let result = rgbToHex(...hslToRgb(hue, saturation, highLightness));
+  for (let step = 0; step < 24; step += 1) {
+    const midLightness = (lowLightness + highLightness) / 2;
+    const candidate = hslToRgb(hue, saturation, midLightness);
+    if (contrastRatio(candidate, background) >= minContrast) {
+      highLightness = midLightness;
+      result = rgbToHex(...candidate);
+    } else {
+      lowLightness = midLightness;
+    }
+  }
+  return result;
+}
+
 /** HSL (hue in degrees, saturation/lightness in 0..1) to an [r, g, b] triplet (0..255). */
 function hslToRgb(hueDegrees: number, saturation: number, lightness: number): [number, number, number] {
   const hue = ((((hueDegrees % 360) + 360) % 360) / 360);

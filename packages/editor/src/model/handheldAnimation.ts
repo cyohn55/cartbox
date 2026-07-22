@@ -21,6 +21,7 @@ import {
   type HandheldScheme,
   type HandheldTemplate,
 } from "./handheldSkin";
+import { ensureContrast } from "./palette";
 
 /**
  * The scenes a handheld chassis marquee can animate: classic-arcade vignettes
@@ -169,6 +170,13 @@ type Sprite = readonly string[];
 
 const PANEL_BG: Rgb = [13, 16, 32]; // near-black marquee screen
 const PANEL_BORDER: Rgb = [58, 64, 96];
+
+/**
+ * Minimum contrast the scene's accent needs against the near-black panel. The
+ * scene rides on whatever chassis colours the player has, so a dark accent (a
+ * navy or charcoal button colour) would read as dark-grey-on-black without this.
+ */
+const SCENE_MIN_CONTRAST = 3.5;
 
 /**
  * A drawing surface over an RGBA buffer that only writes where `clip` is true
@@ -580,7 +588,9 @@ export function renderAnimatedFrame(
   const withinInner = (x: number, y: number) => x >= inner.x && y >= inner.y && x < inner.x + inner.w && y < inner.y + inner.h;
   const scene = new Canvas(out, template.width, template.height, withinInner);
 
-  const accent: Rgb = hexToTriple(preset.scheme.buttonColor);
+  // Draw the scene in the button accent, lightened when necessary so it always
+  // reads on the near-black panel regardless of the chassis colours.
+  const accent: Rgb = hexToTriple(ensureContrast(preset.scheme.buttonColor, PANEL_BG, SCENE_MIN_CONTRAST));
   const frame = ((frameIndex % preset.frames) + preset.frames) % preset.frames;
   SCENES[preset.game](scene, inner, frame, preset.frames, accent);
   return out;

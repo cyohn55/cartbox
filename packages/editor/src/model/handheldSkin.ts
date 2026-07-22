@@ -16,7 +16,18 @@
  */
 
 import type { AsepriteLayers } from "./asepriteImport";
-import { hexToRgb, rgbToHex } from "./palette";
+import { ensureContrast, hexToRgb, rgbToHex } from "./palette";
+
+/**
+ * The baked shoulder-button colour in the shared chrome (a dark brown-grey). The
+ * R1/R2/L1/L2 markings sit directly on these baked buttons — not on the chassis —
+ * so a two-tone accent chosen to read against a light chassis can vanish here.
+ * Shoulder labels are therefore held to a minimum contrast against this surface.
+ */
+const SHOULDER_BUTTON_RGB = [47, 43, 37] as const;
+
+/** Minimum contrast the small shoulder markings need to stay readable. */
+const SHOULDER_LABEL_MIN_CONTRAST = 4;
 
 /**
  * The recolourable regions, in mask-id order (mask id = index + 1; 0 means "not
@@ -91,10 +102,11 @@ export function twoTone(body: string, accent: string, ink: string = body): Handh
     buttonColor: accent,
     dpadArrow: ink,
     buttonLetter: ink,
-    // Shoulder-button labels sit on the body-coloured chassis (the shoulder
-    // bodies are baked into the base chrome, not an accent-coloured control), so
-    // they take the accent to read as clear markings — like the on-shell text.
-    shoulderText: accent,
+    // Shoulder-button labels sit on the dark baked shoulder buttons (part of the
+    // shared chrome, not an accent-coloured control), so they take the accent
+    // lightened as needed to read against that dark surface — a dark accent (e.g.
+    // navy or charcoal) would otherwise disappear on the near-black buttons.
+    shoulderText: ensureContrast(accent, SHOULDER_BUTTON_RGB, SHOULDER_LABEL_MIN_CONTRAST),
     text: accent,
     decal: accent,
   };
