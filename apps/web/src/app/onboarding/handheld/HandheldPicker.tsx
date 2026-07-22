@@ -138,11 +138,13 @@ type Premade = (typeof HANDHELD_PRESETS)[number];
 const SCREEN_BLEED_PX = 5;
 
 /**
- * The smallest a handheld may shrink to while still keeping a premade visible on
- * each side. Below this the flanks are dropped and the centre fills the width
- * (the narrow/mobile case, where a horizontal swipe changes premades instead).
+ * The smallest a handheld may shrink to. `measure()` fits as many equal-width
+ * handhelds as it can without dropping below this; below it (a narrow/mobile
+ * screen) the flanks are dropped and the centre fills the width, and a horizontal
+ * swipe changes premades instead. Chosen so a typical desktop (≥1200px) seats
+ * five handhelds (two premades each side).
  */
-const MIN_UNIFORM_WIDTH = 210;
+const MIN_UNIFORM_WIDTH = 172;
 
 /** Absolute box for a screen overlay, bled out so no edge of the hole shows. */
 function screenBoxStyle(rect: ScreenRect): CSSProperties {
@@ -164,6 +166,41 @@ function resizeCanvas(canvas: HTMLCanvasElement, width: number, height: number):
     canvas.width = width;
     canvas.height = height;
   }
+}
+
+/** Physical pixels per CSS pixel, clamped so the backing store never balloons. */
+function pixelRatio(): number {
+  return Math.min(3, Math.max(1, window.devicePixelRatio || 1));
+}
+
+/**
+ * Blit a native-resolution source (the full-res chassis composite or an animation
+ * frame) into `canvas` at its true **on-screen device-pixel** size, so the device
+ * art is pixel-perfect. The visible canvas's backing store is set to
+ * `displayWidth × devicePixelRatio`, i.e. one canvas pixel per physical screen
+ * pixel, so the browser applies no further scaling — the single high-quality
+ * `drawImage` downsample is the only resampling, which is far sharper than letting
+ * CSS bilinear-shrink a native-resolution canvas. `sx`/`sw`/`sh` select the source
+ * rectangle (a sprite-sheet frame; the whole image for a single frame).
+ */
+function blitCrisp(
+  canvas: HTMLCanvasElement,
+  source: CanvasImageSource,
+  sx: number,
+  sw: number,
+  sh: number,
+  displayWidth: number,
+): void {
+  const context = canvas.getContext("2d");
+  if (!context || displayWidth <= 0 || sw <= 0 || sh <= 0) return;
+  const dpr = pixelRatio();
+  const width = Math.max(1, Math.round(displayWidth * dpr));
+  const height = Math.max(1, Math.round((displayWidth * sh) / sw * dpr));
+  resizeCanvas(canvas, width, height);
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.clearRect(0, 0, width, height);
+  context.drawImage(source, sx, 0, sw, sh, 0, 0, width, height);
 }
 
 /**
@@ -202,23 +239,19 @@ function loadSheet(url: string, onReady: (image: HTMLImageElement) => void): () 
  * that stops the interval. Shared by the centred handheld and the flanks so both
  * animate their marquee identically.
  */
-function playArt(canvas: HTMLCanvasElement, art: HandheldArt): () => void {
-  const context = canvas.getContext("2d");
-  if (!context) return () => {};
+function playArt(canvas: HTMLCanvasElement, art: HandheldArt, displayWidth: number): () => void {
   let timer: number | undefined;
 
   const stopLoading = loadSheet(art.url, (image) => {
     // Multi-frame sheets are `art.w * frames` wide and are drawn one frame at a
     // time through a source rect; a single frame is just the whole image.
     const frames = art.frames && art.frames > 1 ? art.frames : 1;
-    const width = frames > 1 ? art.w : image.naturalWidth;
-    const height = frames > 1 ? art.h : image.naturalHeight;
-    resizeCanvas(canvas, width, height);
+    const frameWidth = frames > 1 ? art.w : image.naturalWidth;
+    const frameHeight = frames > 1 ? art.h : image.naturalHeight;
 
     let index = 0;
     const paint = () => {
-      context.clearRect(0, 0, width, height);
-      context.drawImage(image, index * width, 0, width, height, 0, 0, width, height);
+      blitCrisp(canvas, image, index * frameWidth, frameWidth, frameHeight, displayWidth);
       index = (index + 1) % frames;
     };
     paint();
@@ -232,33 +265,50 @@ function playArt(canvas: HTMLCanvasElement, art: HandheldArt): () => void {
 }
 
 /**
- * Recoloured chassis pixels, keyed by premade id. A premade's colours are fixed,
- * so its full-resolution composite is computed once instead of on every carousel
- * turn (nine devices × a 867×1579 recolour per turn is what stalled the flip).
+ * Full-resolution recoloured chassis, one offscreen native-res canvas per premade
+ * id. A premade's colours are fixed, so its composite is rendered once instead of
+ * on every carousel turn (nine devices × a 867×1579 recolour per turn is what
+ * stalled the flip). Held as canvases (not `ImageData`) so `blitCrisp` can
+ * downsample them straight to display resolution.
  */
-const chassisCache = new Map<string, ImageData>();
+const chassisCanvasCache = new Map<string, HTMLCanvasElement>();
+
+/** A native-res offscreen canvas holding the recoloured chassis, cached by id. */
+function nativeChassis(
+  template: HandheldTemplate,
+  scheme: HandheldScheme,
+  cacheKey?: string,
+): HTMLCanvasElement {
+  const cached = cacheKey ? chassisCanvasCache.get(cacheKey) : undefined;
+  if (cached) return cached;
+  const offscreen = document.createElement("canvas");
+  offscreen.width = template.width;
+  offscreen.height = template.height;
+  const context = offscreen.getContext("2d");
+  if (context) {
+    const pixels = context.createImageData(template.width, template.height);
+    pixels.data.set(renderHandheld(template, scheme));
+    context.putImageData(pixels, 0, 0);
+  }
+  if (cacheKey) chassisCanvasCache.set(cacheKey, offscreen);
+  return offscreen;
+}
 
 /**
- * Draw the static recoloured chassis, reusing the cached composite when the
- * scheme is a premade's (`cacheKey`) and computing it fresh otherwise (the
+ * Draw the static recoloured chassis into `canvas` at its on-screen device-pixel
+ * size (pixel-perfect via `blitCrisp`). Reuses the cached native composite when
+ * the scheme is a premade's (`cacheKey`) and renders it fresh otherwise (the
  * centred handheld's scheme changes as the player tunes it).
  */
 function paintChassis(
   canvas: HTMLCanvasElement,
   template: HandheldTemplate,
   scheme: HandheldScheme,
+  displayWidth: number,
   cacheKey?: string,
 ): void {
-  const context = canvas.getContext("2d");
-  if (!context) return;
-  resizeCanvas(canvas, template.width, template.height);
-  let pixels = cacheKey ? chassisCache.get(cacheKey) : undefined;
-  if (!pixels) {
-    pixels = context.createImageData(template.width, template.height);
-    pixels.data.set(renderHandheld(template, scheme));
-    if (cacheKey) chassisCache.set(cacheKey, pixels);
-  }
-  context.putImageData(pixels, 0, 0);
+  const source = nativeChassis(template, scheme, cacheKey);
+  blitCrisp(canvas, source, 0, template.width, template.height, displayWidth);
 }
 
 /** Whether two schemes assign the same colour to every region. */
@@ -351,13 +401,14 @@ function PremadeFlank({
 
   // Draw the static recoloured chassis immediately so the device is never blank,
   // then play the animated marquee over it. Both paint synchronously once their
-  // composite/sheet is cached, so a repaint never shows a blank frame.
+  // composite/sheet is cached, so a repaint never shows a blank frame. Repaints
+  // when `width` changes so the device re-blits at its new device-pixel size.
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    paintChassis(canvas, template, preset.scheme, preset.id);
-    if (art) return playArt(canvas, art);
-  }, [art, template, preset]);
+    if (!canvas || width <= 0) return;
+    paintChassis(canvas, template, preset.scheme, width, preset.id);
+    if (art) return playArt(canvas, art, width);
+  }, [art, template, preset, width]);
 
   return (
     <div
@@ -572,20 +623,19 @@ export function HandheldPicker() {
       // customizer on its own screen, so it must stay tall enough to operate the
       // controls — and by an absolute ceiling so it is not enormous on a big
       // display. `usable` is the room left between the ‹ › buttons.
-      const capWidth = Math.min(460, 0.82 * window.innerHeight * aspect);
+      const capWidth = Math.min(300, 0.62 * window.innerHeight * aspect);
       const usable = available - 2 * (ARROW + GAP);
 
-      // Prefer the most premades per side whose *equal* widths still land at least
-      // near the cap (so adding a neighbour never shrinks the row much); fall back
-      // to a single premade each side at whatever width fits, and finally to the
-      // centre alone (the narrow/mobile case, where a swipe changes premades).
+      // Seat as many premades per side as fit while every handheld stays at least
+      // MIN_UNIFORM_WIDTH wide — so a typical desktop shows five (two each side),
+      // a wide one up to nine, and a narrow one falls back to the centre alone
+      // (perSide 0), where a horizontal swipe changes premades.
       let perSide = 0;
       let width = Math.min(capWidth, usable);
-      for (let candidate = 3; candidate >= 1; candidate--) {
+      for (let candidate = 4; candidate >= 1; candidate--) {
         const count = 1 + 2 * candidate; // centre + both sides
         const fitWidth = Math.min(capWidth, (usable - 2 * candidate * GAP) / count);
-        const acceptable = candidate === 1 ? MIN_UNIFORM_WIDTH : 0.9 * capWidth;
-        if (fitWidth >= acceptable) {
+        if (fitWidth >= MIN_UNIFORM_WIDTH) {
           perSide = candidate;
           width = fitWidth;
           break;
@@ -758,7 +808,7 @@ export function HandheldPicker() {
   // never blank while an animation sheet decodes — its base colours match.
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !template) return;
+    if (!canvas || !template || centerWidth <= 0) return;
 
     const isAnimated = Boolean(activeArt?.frames && activeArt.frames > 1);
     if (!activeArt || isAnimated) {
@@ -766,10 +816,10 @@ export function HandheldPicker() {
       // that premade's, so flipping back and forth doesn't recompute it.
       const preset = HANDHELD_PRESETS.find((candidate) => candidate.id === presetId);
       const cacheKey = preset && sameScheme(preset.scheme, scheme) ? preset.id : undefined;
-      paintChassis(canvas, template, scheme, cacheKey);
+      paintChassis(canvas, template, scheme, centerWidth, cacheKey);
     }
-    if (activeArt) return playArt(canvas, activeArt);
-  }, [template, scheme, activeArt, presetId]);
+    if (activeArt) return playArt(canvas, activeArt, centerWidth);
+  }, [template, scheme, activeArt, presetId, centerWidth]);
 
   // Load a premade into the centred handheld: set its colours and its marquee,
   // and drop any hand-drawn art or uploaded background (a premade is a fresh
