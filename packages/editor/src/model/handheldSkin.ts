@@ -100,20 +100,31 @@ export function twoTone(body: string, accent: string, ink: string = body): Handh
 }
 
 /**
+ * Copy a scheme, pointing the shoulder-button labels at the colour another region
+ * already uses, so the markings match an existing colour on the handheld rather
+ * than the default (the button-letter `ink`). `source` names that region.
+ */
+function withShoulder(scheme: HandheldScheme, source: HandheldRegionId): HandheldScheme {
+  return { ...scheme, shoulderText: scheme[source] };
+}
+
+/**
  * Premade schemes shown on the handheld-selection screen: one chassis per colour
  * of the spectrum (red through violet) plus neutral graphite and white. Each is
  * a two-tone pairing whose accent (D-pad, buttons, markings) is chosen to read
  * clearly against its chassis. Users can pick one as-is or recolour any region.
+ * Most point their shoulder labels at another colour already on the shell (its
+ * accent, or the chassis body) so the markings pick up a second on-shell hue.
  */
 export const HANDHELD_PRESETS: readonly HandheldPreset[] = [
-  { id: "red", label: "Red", scheme: twoTone("#cc3b3b", "#f2e6c9") }, // red + cream
+  { id: "red", label: "Red", scheme: withShoulder(twoTone("#cc3b3b", "#f2e6c9"), "buttonColor") }, // red + cream; cream shoulders
   { id: "orange", label: "Orange", scheme: twoTone("#e8792b", "#26374d") }, // orange + navy
-  { id: "yellow", label: "Yellow", scheme: twoTone("#f2c53d", "#33344a") }, // yellow + charcoal
-  { id: "green", label: "Green", scheme: twoTone("#3fa65a", "#ffffff") }, // green + white accents (decals/text/D-pad/buttons)
-  { id: "blue", label: "Blue", scheme: twoTone("#2f6fd0", "#f2c53d") }, // blue + gold
-  { id: "indigo", label: "Indigo", scheme: twoTone("#3b3d8f", "#7cc4f2") }, // indigo + sky
-  { id: "violet", label: "Violet", scheme: twoTone("#7a3fa6", "#a7f070") }, // violet + lime
-  { id: "graphite", label: "Graphite", scheme: twoTone("#3a3d42", "#d6d9de") }, // graphite + silver
+  { id: "yellow", label: "Yellow", scheme: withShoulder(twoTone("#f2c53d", "#33344a"), "face") }, // yellow + charcoal; yellow shoulders
+  { id: "green", label: "Green", scheme: withShoulder(twoTone("#3fa65a", "#ffffff"), "buttonColor") }, // green + white; white shoulders
+  { id: "blue", label: "Blue", scheme: withShoulder(twoTone("#2f6fd0", "#f2c53d"), "buttonColor") }, // blue + gold; gold/yellow shoulders
+  { id: "indigo", label: "Indigo", scheme: withShoulder(twoTone("#3b3d8f", "#7cc4f2"), "buttonColor") }, // indigo + sky; blue shoulders
+  { id: "violet", label: "Violet", scheme: withShoulder(twoTone("#7a3fa6", "#a7f070"), "buttonColor") }, // violet + lime; green shoulders
+  { id: "graphite", label: "Graphite", scheme: withShoulder(twoTone("#3a3d42", "#d6d9de"), "buttonColor") }, // graphite + silver; white/silver shoulders
   { id: "white", label: "White", scheme: twoTone("#eef1f4", "#cc3b3b") }, // white + red
 ];
 
