@@ -48,6 +48,13 @@ export interface HandheldAnimatedPreset {
   readonly frames: number;
   /** Per-frame duration in ms when the console plays the loop. */
   readonly durationMs: number;
+  /**
+   * Colour the scene is drawn in. When omitted the scene follows the button
+   * accent (`scheme.buttonColor`); set it to let the player colour the marquee
+   * content independently of the chassis. Either way it is lightened as needed
+   * to stay legible on the near-black panel.
+   */
+  readonly marqueeColor?: string;
 }
 
 /**
@@ -588,9 +595,11 @@ export function renderAnimatedFrame(
   const withinInner = (x: number, y: number) => x >= inner.x && y >= inner.y && x < inner.x + inner.w && y < inner.y + inner.h;
   const scene = new Canvas(out, template.width, template.height, withinInner);
 
-  // Draw the scene in the button accent, lightened when necessary so it always
-  // reads on the near-black panel regardless of the chassis colours.
-  const accent: Rgb = hexToTriple(ensureContrast(preset.scheme.buttonColor, PANEL_BG, SCENE_MIN_CONTRAST));
+  // Draw the scene in its chosen colour (falling back to the button accent),
+  // lightened when necessary so it always reads on the near-black panel
+  // regardless of the chassis colours.
+  const sceneColor = preset.marqueeColor ?? preset.scheme.buttonColor;
+  const accent: Rgb = hexToTriple(ensureContrast(sceneColor, PANEL_BG, SCENE_MIN_CONTRAST));
   const frame = ((frameIndex % preset.frames) + preset.frames) % preset.frames;
   SCENES[preset.game](scene, inner, frame, preset.frames, accent);
   return out;

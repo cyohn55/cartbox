@@ -52,11 +52,22 @@ export interface StoredHandheld {
    * resumes the same animation (and keeps recolouring it).
    */
   animation?: HandheldGameId;
+  /**
+   * Colour the marquee scene is drawn in, chosen independently of the chassis.
+   * When absent the scene follows the button accent (`scheme.buttonColor`). Only
+   * meaningful alongside `animation`. A `#rrggbb` colour.
+   */
+  marqueeColor?: string;
 }
 
 /** A stored animation choice, coerced to a known game id or dropped. */
 function normalizeAnimation(value: unknown): HandheldGameId | undefined {
   return typeof value === "string" && ANIMATION_GAMES.includes(value) ? (value as HandheldGameId) : undefined;
+}
+
+/** A stored marquee colour, coerced to a `#rrggbb` string or dropped. */
+function normalizeHexColor(value: unknown): string | undefined {
+  return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value.trim()) ? value.trim().toLowerCase() : undefined;
 }
 
 /** True for the ids we keep verbatim rather than resolving to a premade. */
@@ -79,12 +90,15 @@ export function normalizeHandheld(input: unknown): StoredHandheld {
   const background = normalizeArt(source.background);
   const scheme = normalizeScheme(source.scheme, base);
   const animation = normalizeAnimation((source as { animation?: unknown }).animation);
+  const marqueeColor = normalizeHexColor((source as { marqueeColor?: unknown }).marqueeColor);
   return {
     presetId,
     scheme,
     ...(art ? { art } : {}),
     ...(background ? { background } : {}),
     ...(animation ? { animation } : {}),
+    // A marquee colour is only meaningful while a marquee is playing.
+    ...(animation && marqueeColor ? { marqueeColor } : {}),
   };
 }
 

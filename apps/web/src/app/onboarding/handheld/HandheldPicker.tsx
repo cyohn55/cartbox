@@ -430,6 +430,10 @@ export function HandheldPicker() {
   const [animationId, setAnimationId] = useState<string | null>(PREMADE_MARQUEE[defaultPreset.id] ?? null);
   const [animatedArt, setAnimatedArt] = useState<HandheldArt | null>(null);
   const [animatedError, setAnimatedError] = useState<string | null>(null);
+  // A colour for the marquee scene chosen independently of the chassis. Null
+  // means the scene follows the button accent (the default). Only applies while
+  // a marquee is selected.
+  const [marqueeColor, setMarqueeColor] = useState<string | null>(null);
   // An uploaded image shown through the chassis (`face`) region. Like an
   // animation it rides on the current chassis and re-renders when the scheme
   // changes, so recolouring the chrome keeps the background.
@@ -481,13 +485,16 @@ export function HandheldPicker() {
   // the debounce below, which would leave the previous premade's marquee playing
   // on the centre for a beat after every flip.
   const premadeArt = useMemo(() => {
+    // A chosen marquee colour is not baked into the flank cache (those follow the
+    // button accent), so a custom colour must fall through to a live render.
+    if (marqueeColor) return null;
     const preset = HANDHELD_PRESETS.find((candidate) => candidate.id === presetId);
     if (!preset || !animationId || PREMADE_MARQUEE[preset.id] !== animationId) return null;
     if (!sameScheme(preset.scheme, scheme)) return null;
     return flankArtCache.get(preset.id) ?? null;
     // `flankArtVersion` is the cache's change signal, not an unused dependency.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [presetId, scheme, animationId, flankArtVersion]);
+  }, [presetId, scheme, animationId, marqueeColor, flankArtVersion]);
 
   // What actually renders/saves, in priority order: a live animation, else an
   // uploaded chassis background, else hand-drawn art, else the static recoloured
@@ -635,6 +642,7 @@ export function HandheldPicker() {
       if (stored.animation) {
         const view = ANIMATED_PRESETS.find((preset) => preset.game === stored.animation);
         setAnimationId(view ? view.id : null);
+        if (view && stored.marqueeColor) setMarqueeColor(stored.marqueeColor);
       } else {
         setAnimationId(null);
         if (stored.background) {
@@ -723,7 +731,7 @@ export function HandheldPicker() {
     let cancelled = false;
     const timer = window.setTimeout(() => {
       try {
-        const rendered = renderAnimatedArt(template, scheme, view);
+        const rendered = renderAnimatedArt(template, scheme, view, marqueeColor);
         if (!cancelled) setAnimatedArt(rendered);
       } catch {
         if (!cancelled) setAnimatedError(`Could not render the ${view.label} animation.`);
@@ -733,7 +741,7 @@ export function HandheldPicker() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [template, scheme, animationId, premadeArt]);
+  }, [template, scheme, animationId, marqueeColor, premadeArt]);
 
   // Re-render the live preview. Custom pixel art or the selected marquee (when
   // present) wins over the region-recoloured scheme, so the preview always shows
@@ -767,6 +775,7 @@ export function HandheldPicker() {
     clearHandheldDraft();
     setAnimatedError(null);
     setAnimationId(PREMADE_MARQUEE[preset.id] ?? null);
+    setMarqueeColor(null); // a premade's marquee follows its own button accent
     clearBackground();
   };
 
@@ -804,8 +813,8 @@ export function HandheldPicker() {
   const chooseAnimation = (id: string | null) => {
     setAnimatedError(null);
     setAnimationId(id);
-    // An animation and a chassis background are mutually exclusive looks.
-    if (id) clearBackground();
+    if (id) clearBackground(); // an animation and a chassis background are exclusive
+    else setMarqueeColor(null); // turning the marquee off drops its colour override
   };
 
   const clearBackground = () => {
@@ -872,6 +881,8 @@ export function HandheldPicker() {
       // the live console re-composites it instead of dropping it.
       ...(background && backgroundSource && !animationId ? { background: backgroundSource } : {}),
       ...(animationGame ? { animation: animationGame } : {}),
+      // A chosen marquee colour only travels with an actual marquee.
+      ...(animationGame && marqueeColor ? { marqueeColor } : {}),
     };
     try {
       window.localStorage.setItem(LOCAL_HANDHELD_KEY, JSON.stringify(handheld));
@@ -1141,26 +1152,44 @@ export function HandheldPicker() {
           {/* Marquee is previewed on the handhelds themselves (centre + flanks),
               so the control is just buttons that switch the centre's marquee. */}
           {activeDef.kind === "marquee" && (
-            <div className={styles.marqueeButtons} role="group" aria-label="Marquee">
-              <button
-                type="button"
-                className={`${styles.seg} ${animationId === null ? styles.segActive : ""}`}
-                onClick={() => chooseAnimation(null)}
-                aria-pressed={animationId === null}
-              >
-                None
-              </button>
-              {ANIMATED_PRESETS.map((preset) => (
+            <div className={styles.marqueeControl}>
+              <div className={styles.marqueeButtons} role="group" aria-label="Marquee">
                 <button
-                  key={preset.id}
                   type="button"
-                  className={`${styles.seg} ${animationId === preset.id ? styles.segActive : ""}`}
-                  onClick={() => chooseAnimation(preset.id)}
-                  aria-pressed={animationId === preset.id}
+                  className={`${styles.seg} ${animationId === null ? styles.segActive : ""}`}
+                  onClick={() => chooseAnimation(null)}
+                  aria-pressed={animationId === null}
                 >
-                  {preset.label}
+                  None
                 </button>
-              ))}
+                {ANIMATED_PRESETS.map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    className={`${styles.seg} ${animationId === preset.id ? styles.segActive : ""}`}
+                    onClick={() => chooseAnimation(preset.id)}
+                    aria-pressed={animationId === preset.id}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+              {/* Colour the marquee content itself — independent of the chassis
+                  buttons it otherwise follows. Only meaningful with a marquee on. */}
+              {animationId && (
+                <div className={styles.controlColumn}>
+                  <div className={styles.colorMeta}>
+                    <span className={styles.colorName}>Marquee colour</span>
+                    <span className={styles.colorHex}>{marqueeColor ?? "Match buttons"}</span>
+                    {marqueeColor && (
+                      <button type="button" className={styles.linkButton} onClick={() => setMarqueeColor(null)}>
+                        Match buttons
+                      </button>
+                    )}
+                  </div>
+                  <SwatchGrid value={marqueeColor ?? scheme.buttonColor} onPick={(hex) => setMarqueeColor(hex)} />
+                </div>
+              )}
             </div>
           )}
 

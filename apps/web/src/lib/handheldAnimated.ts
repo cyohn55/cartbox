@@ -70,6 +70,7 @@ export function renderAnimatedArt(
   template: HandheldTemplate,
   scheme: HandheldScheme,
   view: AnimatedPresetView,
+  marqueeColor?: string | null,
 ): HandheldArt {
   const preset: HandheldAnimatedPreset = {
     id: view.id,
@@ -78,6 +79,9 @@ export function renderAnimatedArt(
     scheme,
     frames: view.frames,
     durationMs: view.durationMs,
+    // A chosen marquee colour overrides the button accent for the scene; null /
+    // undefined keeps the scene following the chassis buttons.
+    ...(marqueeColor ? { marqueeColor } : {}),
   };
   const frames = renderAnimatedFrames(template, preset);
 

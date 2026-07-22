@@ -867,7 +867,9 @@
 }
 
 .marqueeControl {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
 .linkButton {
