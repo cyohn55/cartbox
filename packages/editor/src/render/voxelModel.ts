@@ -58,6 +58,13 @@ export interface VoxelModel {
    * model built before hexels existed.
    */
   readonly geometry?: CellGeometry;
+  /**
+   * Optional per-voxel texture-tile index into the {@link TextureAtlas} passed to
+   * the renderer. When present and non-negative, the voxel's faces are sampled
+   * from that tile instead of filled with its flat colour; a negative index (or
+   * an absent array) keeps the flat colour, so texturing is opt-in per voxel.
+   */
+  readonly tile?: Int16Array;
 }
 
 /**

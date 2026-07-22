@@ -122,10 +122,28 @@ export {
   renderVoxelModel,
   voxelCanvasSize,
   DEFAULT_MODEL_LIGHT,
+  drawModelInto,
+  makeDrawContext,
+  normalizeTriple,
+  type DrawContext,
   type ModelLight,
   type RenderModelOptions,
   type VoxelRender,
 } from "./render/voxelModelRenderer";
+export {
+  renderScene,
+  drawParticlesInto,
+  type PlacedModel,
+  type Particle,
+  type SceneCamera,
+  type RenderSceneOptions,
+  type SceneRender,
+} from "./render/sceneRenderer";
+export {
+  tileAt,
+  type FaceTexture,
+  type TextureAtlas,
+} from "./render/faceTexture";
 export {
   LIGHTING_PRESETS,
   DEFAULT_LIGHTING_PRESET_ID,

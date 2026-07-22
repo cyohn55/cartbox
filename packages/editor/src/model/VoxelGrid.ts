@@ -177,6 +177,13 @@ export interface GridToModelOptions {
    * come from that geometry's twelve neighbours rather than the six cube faces.
    */
   readonly geometry?: CellGeometry;
+  /**
+   * Optional mapping from a filled cell to a texture-tile index (into the atlas
+   * the renderer is given). Return a negative value to leave that voxel flat.
+   * When provided, the model carries a per-voxel `tile` array; when omitted, no
+   * `tile` array is built and every voxel renders with its flat colour.
+   */
+  readonly tileForCell?: (x: number, y: number, z: number, cell: VoxelCell) => number;
 }
 
 /**
@@ -224,6 +231,8 @@ export function voxelGridToModel(grid: VoxelGrid, options: GridToModelOptions = 
   const nzs: number[] = [];
   const faceMasks: number[] = [];
   const gridIndices: number[] = [];
+  const tileForCell = options.tileForCell;
+  const tiles: number[] | undefined = tileForCell ? [] : undefined;
 
   grid.forEachFilled((x, y, z, cell) => {
     let mask = 0;
@@ -254,6 +263,7 @@ export function voxelGridToModel(grid: VoxelGrid, options: GridToModelOptions = 
     nzs.push(vnz / len);
     faceMasks.push(mask);
     gridIndices.push(grid.index(x, y, z));
+    if (tiles) tiles.push(tileForCell!(x, y, z, cell));
   });
 
   return {
@@ -273,6 +283,7 @@ export function voxelGridToModel(grid: VoxelGrid, options: GridToModelOptions = 
     nz: Float32Array.from(nzs),
     faces: Uint16Array.from(faceMasks),
     geometry,
+    ...(tiles ? { tile: Int16Array.from(tiles) } : {}),
     gridIndex: Int32Array.from(gridIndices),
     originX: halfX,
     originY: halfY,
