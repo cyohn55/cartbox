@@ -31,10 +31,9 @@ const WORLD_LIGHT: ModelLight = {
 
 /** A full turn of the island takes this many seconds — a calm, unhurried drift. */
 const ROTATION_PERIOD_SECONDS = 80;
-/** A gentle isometric tip toward the viewer (radians): the ground recedes with
- *  depth so the upright handhelds read as standing ON the world, not lying on a
- *  flat top-down plane parallel to them. */
-const CAMERA_PITCH = 0.52;
+/** No tip toward the viewer (radians): the world is seen edge-on, level with the
+ *  eye, so the horizon is flat and the upright handhelds stand straight on it. */
+const CAMERA_PITCH = 0;
 /** Where the island's rotation axis sits vertically, as a fraction of the canvas
  *  height — low, so the island's top surface rises to just under the handhelds'
  *  feet and they stand on it (floating only slightly above), rather than hovering
