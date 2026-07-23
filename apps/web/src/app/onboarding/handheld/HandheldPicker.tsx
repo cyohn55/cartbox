@@ -48,6 +48,7 @@ import {
 import { handheldAssetUrl } from "@/lib/handheldAssets";
 import { HandheldSkinEditor } from "./HandheldSkinEditor";
 import { useChassisColor } from "./chassisColor";
+import { VoxelHeadline } from "./VoxelHeadline";
 import styles from "./handheld.module.css";
 
 /** Where the anonymous/offline choice is remembered until an account exists. */
@@ -137,14 +138,18 @@ type Premade = (typeof HANDHELD_PRESETS)[number];
  */
 const SCREEN_BLEED_PX = 5;
 
+/** Absolute ceiling on the centred handheld's width (so it is not enormous on a
+ *  big display); the viewport height caps it further in `measure()`. */
+const CENTER_MAX_WIDTH = 300;
+
 /**
- * The smallest a handheld may shrink to. `measure()` fits as many equal-width
- * handhelds as it can without dropping below this; below it (a narrow/mobile
- * screen) the flanks are dropped and the centre fills the width, and a horizontal
- * swipe changes premades instead. Chosen so a typical desktop (≥1200px) seats
- * five handhelds (two premades each side).
+ * The smallest the *centre* handheld may shrink to while still showing flanks.
+ * `measure()` seats the most premades per side whose stepped-down row keeps the
+ * centre at or above this; below it (a narrow/mobile screen) the flanks drop and
+ * the centre fills the width, and a horizontal swipe changes premades instead.
+ * Chosen so a typical desktop (≥1024px) seats five handhelds (two each side).
  */
-const MIN_UNIFORM_WIDTH = 172;
+const MIN_CENTER_WIDTH = 190;
 
 /** Absolute box for a screen overlay, bled out so no edge of the hole shows. */
 function screenBoxStyle(rect: ScreenRect): CSSProperties {
@@ -576,12 +581,15 @@ export function HandheldPicker() {
   const animationLabel = animationId ? animatedPresetView(animationId)?.label : null;
   const stageLabel = animationLabel ? `${chassisLabel} · ${animationLabel}` : chassisLabel;
 
-  // The premades flank the centred handheld at the SAME size as it — the device
-  // now runs the customizer on its own screen, so the centre and its neighbours
-  // read as one uniform row (a prev/current/next carousel) rather than a large
-  // centre stepping down to smaller flanks. `measure()` sizes all three together
-  // so they fit between the arrows.
+  // The premades step DOWN in size from the centre so the working handheld reads
+  // as the largest, most prominent device and each successive layer is smaller
+  // than the last. The step is geometric (each flank is `ratio×` its inner
+  // neighbour); the ratio eases toward 1 as more flanks fit, so a crowded ring
+  // steps down more gently than a sparse one (a lone flank lands at 75%).
+  // `measure()` picks the centre width + flank count so the whole row fits.
   const presetCount = HANDHELD_PRESETS.length;
+  const flankRatio = 1 - 0.25 / Math.max(flanksPerSide, 1);
+  const flankScale = (step: number) => Math.pow(flankRatio, step);
   const flankAt = (offset: number) =>
     HANDHELD_PRESETS[((carouselIndex + offset) % presetCount + presetCount) % presetCount]!;
   // Outermost-first on the left (…‑2, ‑1) and inner-first on the right (1, 2…),
@@ -618,30 +626,34 @@ export function HandheldPicker() {
     const measure = () => {
       const available = carousel.clientWidth;
       if (available <= 0) return;
-      // Every handheld (centre + flanks) is the same width, so they read as one
-      // uniform row. Cap that width by the viewport height — the handheld runs the
+      // Cap the centre width by the viewport height (the handheld runs the
       // customizer on its own screen, so it must stay tall enough to operate the
-      // controls — and by an absolute ceiling so it is not enormous on a big
-      // display. `usable` is the room left between the ‹ › buttons.
-      const capWidth = Math.min(300, 0.62 * window.innerHeight * aspect);
+      // controls) and by an absolute ceiling. `usable` is the room between arrows.
+      const capWidth = Math.min(CENTER_MAX_WIDTH, 0.62 * window.innerHeight * aspect);
       const usable = available - 2 * (ARROW + GAP);
 
-      // Seat as many premades per side as fit while every handheld stays at least
-      // MIN_UNIFORM_WIDTH wide — so a typical desktop shows five (two each side),
-      // a wide one up to nine, and a narrow one falls back to the centre alone
-      // (perSide 0), where a horizontal swipe changes premades.
+      // Seat the most premades per side whose stepped-down row still leaves the
+      // centre prominent (≥ MIN_CENTER_WIDTH). Each side spans `center × Σ ratio^step`,
+      // so the whole row is `center × (1 + 2Σ)`; solve that for the largest centre
+      // that fits `usable`, capped. A typical desktop lands on two premades each
+      // side (five handhelds); wider fits more, narrower falls back to the centre
+      // alone (perSide 0), where a swipe changes premades.
       let perSide = 0;
-      let width = Math.min(capWidth, usable);
+      let center = Math.min(capWidth, usable);
       for (let candidate = 4; candidate >= 1; candidate--) {
-        const count = 1 + 2 * candidate; // centre + both sides
-        const fitWidth = Math.min(capWidth, (usable - 2 * candidate * GAP) / count);
-        if (fitWidth >= MIN_UNIFORM_WIDTH) {
+        const ratio = 1 - 0.25 / candidate;
+        let flanksSpan = 0;
+        for (let step = 1; step <= candidate; step++) flanksSpan += Math.pow(ratio, step);
+        const rowFactor = 1 + 2 * flanksSpan; // centre + both sides, in centre-widths
+        const gaps = 2 * candidate * GAP;
+        const fitCenter = Math.min(capWidth, (usable - gaps) / rowFactor);
+        if (fitCenter >= MIN_CENTER_WIDTH) {
           perSide = candidate;
-          width = fitWidth;
+          center = fitCenter;
           break;
         }
       }
-      setCenterWidth(width);
+      setCenterWidth(center);
       setFlanksPerSide(perSide);
     };
 
@@ -983,10 +995,7 @@ export function HandheldPicker() {
   return (
     <main className={styles.page}>
       <header className={styles.head}>
-        <h1 className={styles.title}>Choose your handheld</h1>
-        <p className={styles.subtitle}>
-          Flip through the premades, then tune any part of your own. You can change it later.
-        </p>
+        <VoxelHeadline />
       </header>
 
       {/* --- Carousel: the working handheld centred, flanked by premades --- */}
@@ -1020,7 +1029,7 @@ export function HandheldPicker() {
                 template={template}
                 preset={preset}
                 marqueeId={PREMADE_MARQUEE[preset.id] ?? null}
-                width={centerWidth}
+                width={centerWidth * flankScale(step)}
                 screenRect={screenRect}
                 onClick={() => goToPreset(index)}
               />
@@ -1275,7 +1284,7 @@ export function HandheldPicker() {
                 template={template}
                 preset={preset}
                 marqueeId={PREMADE_MARQUEE[preset.id] ?? null}
-                width={centerWidth}
+                width={centerWidth * flankScale(step)}
                 screenRect={screenRect}
                 onClick={() => goToPreset(index)}
               />

@@ -105,6 +105,18 @@ export {
   type GridAxis,
 } from "./model/VoxelGrid";
 export {
+  VOXEL_FONT,
+  FONT_WIDTH,
+  FONT_HEIGHT,
+  buildGlyphModel,
+  buildVoxelText,
+  layoutVoxelText,
+  type GlyphColor,
+  type VoxelTextOptions,
+  type VoxelLetter,
+  type VoxelTextLayout,
+} from "./model/voxelText";
+export {
   shapeOffsets,
   solidOffsets,
   type VoxelShapeKind,

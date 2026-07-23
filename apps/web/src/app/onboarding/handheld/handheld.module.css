@@ -45,26 +45,45 @@
 
 .head {
   text-align: center;
-  margin-bottom: 28px;
+  margin-bottom: 20px;
 }
 
-.title {
-  font-size: 28px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  margin: 0 0 6px;
-  /* Loose text sits directly over the retro scene — a soft shadow keeps it
-     crisp against the brighter, busier backdrop. */
-  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
+/* The 3D voxel headline (rendered by VoxelHeadline.tsx). The canvas carries its
+   own aspect ratio via a custom property so it scales responsively without
+   distorting the type; a soft drop-shadow lifts the glowing letters off the busy
+   voxel world behind them. */
+.voxelHead {
+  display: flex;
+  justify-content: center;
+  min-height: 120px;
 }
 
-.subtitle {
-  /* A soft off-white rather than the dim --muted: this text sits over the bright
-     voxel sky, so it needs a light tone with a firm shadow to stay legible. */
-  color: rgba(233, 239, 248, 0.9);
-  margin: 0;
-  font-size: 15px;
-  text-shadow: 0 1px 3px rgba(3, 6, 14, 0.85), 0 1px 10px rgba(3, 6, 14, 0.6);
+.voxelHeadCanvas {
+  display: block;
+  /* Natural width is set inline (buffer ÷ DPR) so the type renders 1:1; this caps
+     it on narrow screens, scaling down without distorting the aspect. */
+  max-width: 92vw;
+  height: auto;
+  aspect-ratio: var(--headline-aspect, 4 / 1);
+  image-rendering: auto;
+  /* A tight dark outline plus a soft drop shadow so the glowing voxel type stays
+     legible over any part of the bright, busy world behind it. */
+  filter: drop-shadow(0 0 2px rgba(4, 8, 16, 0.95)) drop-shadow(0 5px 12px rgba(4, 8, 16, 0.6));
+  transition: opacity 0.2s linear;
+}
+
+/* Off-screen but present for assistive tech and SEO. */
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .layout {
