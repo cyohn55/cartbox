@@ -35,10 +35,10 @@ const ROTATION_PERIOD_SECONDS = 80;
  *  eye, so the horizon is flat and the upright handhelds stand straight on it. */
 const CAMERA_PITCH = 0;
 /** Where the island's rotation axis sits vertically, as a fraction of the canvas
- *  height — low, so the island's top surface rises to just under the handhelds'
- *  feet and they stand on it (floating only slightly above), rather than hovering
- *  high over a distant world. */
-const WORLD_CENTER_Y = 0.82;
+ *  height — low enough that the island's top surface sits just *below* the
+ *  handhelds' feet, so they float centred a little above the world rather than
+ *  standing in front of (and occluding) it. */
+const WORLD_CENTER_Y = 0.89;
 /** The island tile's size relative to the canvas height. Large enough that no
  *  corner clips as it spins, and that the surface reads as a broad ground. */
 const WORLD_SCALE = 1.34;
