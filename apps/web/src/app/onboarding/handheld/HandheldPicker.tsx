@@ -980,6 +980,14 @@ export function HandheldPicker() {
           headers: await authHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({ handheld }),
         });
+        if (response.status === 401) {
+          // Not signed in yet. The pick is already saved to localStorage above, so
+          // send the player to sign in and return here to finish — the server save
+          // then succeeds and continues to `next`. (Onboarding is account-gated.)
+          const returnTo = `${window.location.pathname}${window.location.search}`;
+          router.push(`/login?next=${encodeURIComponent(returnTo)}`);
+          return;
+        }
         if (!response.ok) {
           const body = (await response.json().catch(() => null)) as { error?: string } | null;
           throw new Error(body?.error ?? "Could not save your handheld.");

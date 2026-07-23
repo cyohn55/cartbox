@@ -21,6 +21,19 @@ type Mode = "signin" | "signup";
 /** Where a new player goes to set up their handheld before reaching the app. */
 const ONBOARDING_NEXT = "/onboarding/handheld?next=/profile/edit";
 
+/**
+ * A same-origin `?next` return path from the current URL, or `null`. Used to send
+ * a player back where they came from after signing in (e.g. onboarding bounces
+ * here when saving a handheld needs auth). Only internal absolute paths are
+ * honoured — an absolute or protocol-relative URL is rejected to avoid an open
+ * redirect to another site.
+ */
+function safeNextPath(): string | null {
+  if (typeof window === "undefined") return null;
+  const next = new URLSearchParams(window.location.search).get("next");
+  return next && next.startsWith("/") && !next.startsWith("//") ? next : null;
+}
+
 export default function LoginPage() {
   // Accounts need the auth server; the static demo build has none. The flag is
   // a build-time constant, so the hook order below stays consistent.
@@ -79,9 +92,10 @@ function LoginForm() {
     }
 
     // With email confirmation on there is no session yet — the player must click
-    // the verification link. Otherwise they are signed in and continue now.
+    // the verification link. Otherwise they are signed in and continue now: back
+    // to a `next` return path if one sent them here, else on to onboarding.
     if (data.session) {
-      router.push(ONBOARDING_NEXT);
+      router.push(safeNextPath() ?? ONBOARDING_NEXT);
       router.refresh();
     } else {
       setCheckEmail(true);
@@ -94,8 +108,10 @@ function LoginForm() {
       setError(authError.message);
       return;
     }
-    // The profile page sends players without a handheld to onboarding.
-    router.push("/profile/edit");
+    // Return to wherever the player came from (e.g. onboarding, which bounces here
+    // when saving a handheld needs auth); otherwise the profile page routes them on
+    // and, if they have no handheld yet, sends them to onboarding.
+    router.push(safeNextPath() ?? "/profile/edit");
     router.refresh();
   };
 
