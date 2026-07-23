@@ -14,7 +14,7 @@
  * and one straight blit.
  */
 
-import { renderVoxelModel, type ModelLight, type VoxelModel } from "@cartbox/editor";
+import { renderScene, type ModelLight, type PlacedModel, type VoxelModel } from "@cartbox/editor";
 
 /**
  * The fixed sun: a warm key light from the upper-front with a high ambient floor,
@@ -38,7 +38,12 @@ const CAMERA_PITCH = 0;
  *  height — low enough that the island's top surface sits just *below* the
  *  handhelds' feet, so they float centred a little above the world rather than
  *  standing in front of (and occluding) it. */
-const WORLD_CENTER_Y = 0;
+const WORLD_CENTER_Y = 0.89;
+/** Where the island's centre sits along the camera's depth axis, 0.5 being the
+ *  neutral centre (no offset). Below/above 0.5 pushes the world toward or away
+ *  from the viewer in true 3D. (At pitch 0 a depth shift is not visible on its
+ *  own — an orthographic side view — so it only bites once the camera tips.) */
+const WORLD_CENTER_Z = 0.5;
 /** The island tile's size relative to the canvas height. Large enough that no
  *  corner clips as it spins, and that the surface reads as a broad ground. */
 const WORLD_SCALE = 1.34;
@@ -77,6 +82,10 @@ export class VoxelWorldRenderer {
   private readonly destSize: number;
   private readonly destX: number;
   private readonly destY: number;
+  /** The island's world-space depth offset (from {@link WORLD_CENTER_Z}), voxels. */
+  private readonly worldZ: number;
+  /** The placed island, reused each frame (only its yaw changes). */
+  private readonly placed: PlacedModel;
   /** Current sky gradient (mutable so a chassis-colour change retints in place). */
   private skyTop: string;
   private skyHorizon: string;
@@ -111,6 +120,11 @@ export class VoxelWorldRenderer {
     this.tileSize = this.destSize;
     this.cell = Math.max(1, this.tileSize / (modelDiagonal(model) + 2));
 
+    // Depth offset from the neutral centre (0.5), scaled by the model's span so
+    // the control reads in the same 0..1 range as the on-screen placement.
+    this.worldZ = (WORLD_CENTER_Z - 0.5) * modelDiagonal(model);
+    this.placed = { model, position: [0, 0, this.worldZ] };
+
     this.tileCanvas = document.createElement("canvas");
     this.tileCanvas.width = this.tileSize;
     this.tileCanvas.height = this.tileSize;
@@ -139,11 +153,15 @@ export class VoxelWorldRenderer {
     this.context.fillRect(0, 0, bufferWidth, bufferHeight);
 
     const yaw = (seconds / ROTATION_PERIOD_SECONDS) * Math.PI * 2;
-    renderVoxelModel(this.model, {
+    // Rendered through the scene compositor so the island carries a true 3D
+    // position (its depth set by WORLD_CENTER_Z); a lone model at the origin
+    // otherwise matches the single-model path exactly.
+    renderScene([this.placed], {
       yaw,
       pitch: CAMERA_PITCH,
       cell: this.cell,
       size: this.tileSize,
+      origin: [0, 0, 0],
       light: WORLD_LIGHT,
       out: this.out,
       depthBuffer: this.depth,
