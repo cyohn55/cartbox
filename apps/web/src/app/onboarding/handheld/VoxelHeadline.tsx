@@ -24,6 +24,9 @@ import {
   type VoxelTextLayout,
 } from "@cartbox/editor";
 
+import { TAGLINE_ANCHOR } from "@/lib/scene3d";
+import { useSceneAnchorTransform } from "@/lib/useSceneAnchor";
+
 import styles from "./handheld.module.css";
 
 /** The taglines, pre-wrapped into short lines so the voxel type stays legible. */
@@ -142,6 +145,9 @@ function buildPhrase(
 
 export function VoxelHeadline() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Seat the headline at its world anchor under the shared scene camera, so it is
+  // positioned in 3D (up and back by default) rather than merely stacked on top.
+  const anchorTransform = useSceneAnchorTransform(TAGLINE_ANCHOR, true);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -228,7 +234,7 @@ export function VoxelHeadline() {
   }, []);
 
   return (
-    <div className={styles.voxelHead}>
+    <div className={styles.voxelHead} style={{ transform: anchorTransform }}>
       {/* The real heading for assistive tech + SEO; the voxel canvas is decorative. */}
       <h1 className={styles.visuallyHidden}>Choose your handheld</h1>
       <canvas ref={canvasRef} className={styles.voxelHeadCanvas} aria-hidden />

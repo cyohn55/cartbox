@@ -16,6 +16,15 @@
 
 import { renderScene, type ModelLight, type PlacedModel, type VoxelModel } from "@cartbox/editor";
 
+import {
+  HANDHELD_ANCHOR,
+  SCENE_PITCH,
+  WORLD_ANCHOR,
+  WORLD_ROTATION_PERIOD_SECONDS,
+  publishSceneLayout,
+  viewDepth,
+} from "./scene3d";
+
 /**
  * The fixed sun: a warm key light from the upper-front with a high ambient floor,
  * so the island reads as a bright, fully-lit day scene while the strong key still
@@ -29,29 +38,23 @@ const WORLD_LIGHT: ModelLight = {
   ambient: 0.5,
 };
 
-/** A full turn of the island takes this many seconds — a calm, unhurried drift. */
-const ROTATION_PERIOD_SECONDS = 80;
-/** No tip toward the viewer (radians): the world is seen edge-on, level with the
- *  eye, so the horizon is flat and the upright handhelds stand straight on it. */
-const CAMERA_PITCH = 0;
 /** Where the island's rotation axis sits vertically, as a fraction of the canvas
  *  height — low enough that the island's top surface sits just *below* the
  *  handhelds' feet, so they float centred a little above the world rather than
- *  standing in front of (and occluding) it. */
+ *  standing in front of (and occluding) it. This is screen framing for the terrain
+ *  art; the shared camera (scene3d.ts) still projects the world origin to the
+ *  viewport centre, which is where the handhelds' `[0,0,0]` anchor lands. */
 const WORLD_CENTER_Y = 0.8;
-/** Where the island's centre sits along the camera's depth axis, 0.5 being the
- *  neutral centre (no offset). Below/above 0.5 pushes the world toward or away
- *  from the viewer in true 3D. (At pitch 0 a depth shift is not visible on its
- *  own — an orthographic side view — so it only bites once the camera tips.) */
-const WORLD_CENTER_Z = 0.5;
-/** The camera-depth plane the handhelds occupy — the world's rotation axis, which
- *  always projects to depth 0. Voxels nearer than this (larger depth) are drawn
- *  over the handhelds, so trees on the near side of the island pass in front of
- *  them and they sit *amongst* the world rather than in front of all of it. */
-const HANDHELD_DEPTH = 0;
+/** The camera-depth plane the handhelds occupy: the depth of {@link HANDHELD_ANCHOR}
+ *  under the shared camera. Voxels nearer than this are drawn over the handhelds,
+ *  so trees on the near side of the island pass in front of them and they sit
+ *  *amongst* the world rather than in front of all of it. Moving the handheld
+ *  anchor's z moves this occlusion plane with it. */
+const HANDHELD_DEPTH = viewDepth(HANDHELD_ANCHOR);
 /** The island tile's size relative to the canvas height. Large enough that no
- *  corner clips as it spins, and that the surface reads as a broad ground. */
-const WORLD_SCALE = 1.34;
+ *  corner clips as it spins, and that the surface reads as a broad ground.
+ *  Doubled from the original 1.34 to render the world at 2× scale. */
+const WORLD_SCALE = 2.68;
 
 export interface WorldRenderOptions {
   /** Backdrop resolution in device pixels — the canvas's true render size. */
@@ -90,8 +93,6 @@ export class VoxelWorldRenderer {
   private readonly destSize: number;
   private readonly destX: number;
   private readonly destY: number;
-  /** The island's world-space depth offset (from {@link WORLD_CENTER_Z}), voxels. */
-  private readonly worldZ: number;
   /** The placed island, reused each frame (only its yaw changes). */
   private readonly placed: PlacedModel;
   /** Current sky gradient (mutable so a chassis-colour change retints in place). */
@@ -134,10 +135,19 @@ export class VoxelWorldRenderer {
     this.tileSize = this.destSize;
     this.cell = Math.max(1, this.tileSize / (modelDiagonal(model) + 2));
 
-    // Depth offset from the neutral centre (0.5), scaled by the model's span so
-    // the control reads in the same 0..1 range as the on-screen placement.
-    this.worldZ = (WORLD_CENTER_Z - 0.5) * modelDiagonal(model);
-    this.placed = { model, position: [0, 0, this.worldZ] };
+    // The island sits at its shared-scene anchor; the world is the orbiting layer,
+    // so keeping the anchor at the origin spins it in place about the view centre.
+    this.placed = { model, position: WORLD_ANCHOR };
+
+    // Publish the camera zoom so the DOM billboards (handhelds, tagline) project
+    // through this exact camera. `cell` is device pixels per world unit; scaling by
+    // the buffer→CSS ratio gives CSS pixels per unit, the shared on-screen zoom.
+    const deviceToCss = window.innerHeight / options.bufferHeight;
+    publishSceneLayout({
+      pixelsPerUnit: this.cell * deviceToCss,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+    });
 
     this.tileCanvas = document.createElement("canvas");
     this.tileCanvas.width = this.tileSize;
@@ -166,13 +176,12 @@ export class VoxelWorldRenderer {
     this.context.fillStyle = sky;
     this.context.fillRect(0, 0, bufferWidth, bufferHeight);
 
-    const yaw = (seconds / ROTATION_PERIOD_SECONDS) * Math.PI * 2;
-    // Rendered through the scene compositor so the island carries a true 3D
-    // position (its depth set by WORLD_CENTER_Z); a lone model at the origin
-    // otherwise matches the single-model path exactly.
+    const yaw = (seconds / WORLD_ROTATION_PERIOD_SECONDS) * Math.PI * 2;
+    // Rendered through the shared scene camera (scene3d.ts) so the island, the
+    // handhelds and the tagline all sort against one depth axis.
     renderScene([this.placed], {
       yaw,
-      pitch: CAMERA_PITCH,
+      pitch: SCENE_PITCH,
       cell: this.cell,
       size: this.tileSize,
       origin: [0, 0, 0],

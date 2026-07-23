@@ -46,6 +46,8 @@ import {
   type OsStyleId,
 } from "@/app/console/consoleSettings";
 import { handheldAssetUrl } from "@/lib/handheldAssets";
+import { HANDHELD_ANCHOR } from "@/lib/scene3d";
+import { useSceneAnchorTransform } from "@/lib/useSceneAnchor";
 import { HandheldSkinEditor } from "./HandheldSkinEditor";
 import { useChassisColor } from "./chassisColor";
 import { VoxelHeadline } from "./VoxelHeadline";
@@ -1004,6 +1006,13 @@ export function HandheldPicker() {
     }
   };
 
+  // Seat the whole handheld cluster at its world anchor under the shared scene
+  // camera. The carousel keeps its own internal layout/measurement (a transform
+  // does not affect the box it measures); this only translates + depth-scales it as
+  // a billboard, so the devices sit in the 3D scene while staying crisp and
+  // clickable. At the default anchor ([0,0,0]) this is the identity transform.
+  const carouselTransform = useSceneAnchorTransform(HANDHELD_ANCHOR);
+
   const activeDef = CUSTOMIZE_PARAMS[activeIndex]!;
   const stepParam = (direction: 1 | -1) =>
     setActiveIndex((index) => (index + direction + CUSTOMIZE_PARAMS.length) % CUSTOMIZE_PARAMS.length);
@@ -1019,6 +1028,7 @@ export function HandheldPicker() {
       <section
         ref={carouselRef}
         className={styles.carousel}
+        style={{ transform: carouselTransform }}
         aria-label="Handheld carousel"
         onTouchStart={onTouchStart}
         onTouchEnd={onTouchEnd}

@@ -84,10 +84,21 @@
    fit via its intrinsic aspect (its backing store). The device size is measured
    from the viewport height (not this element), so cycling taglines of different
    heights never jitters the handhelds. */
+/* Pinned to the viewport centre so its world anchor (scene3d.ts) can place it in
+   3D via a transform — up and back by default. Non-interactive (the canvas is
+   decorative and the heading is visually hidden) so it never blocks the handhelds
+   it may float over. Its z-index sits below the foreground world canvas, so near
+   trees still pass in front of it. */
 .voxelHead {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
   display: flex;
   align-items: center;
   justify-content: center;
+  pointer-events: none;
+  z-index: 1;
 }
 
 .voxelHeadCanvas {
