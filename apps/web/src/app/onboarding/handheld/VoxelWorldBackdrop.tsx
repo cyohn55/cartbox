@@ -45,6 +45,9 @@ function renderBufferSize(): { width: number; height: number } {
 
 export function VoxelWorldBackdrop() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // The foreground layer: the near-side of the world, drawn *over* the handhelds
+  // so trees pass in front of them (they sit amongst the world, not before it).
+  const frontCanvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<VoxelWorldRenderer | null>(null);
   // The most recent frame time, so a chassis-colour change can retint and redraw
   // immediately without waiting for the next animation tick.
@@ -66,7 +69,8 @@ export function VoxelWorldBackdrop() {
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const frontCanvas = frontCanvasRef.current;
+    if (!canvas || !frontCanvas) return;
 
     // The island geometry is independent of the canvas size, so it is built once
     // and reused when the renderer is rebuilt on a resize.
@@ -78,7 +82,7 @@ export function VoxelWorldBackdrop() {
     const rebuild = () => {
       const { width, height } = renderBufferSize();
       rendererRef.current?.destroy();
-      const renderer = new VoxelWorldRenderer(canvas, model, {
+      const renderer = new VoxelWorldRenderer(canvas, frontCanvas, model, {
         bufferWidth: width,
         bufferHeight: height,
         skyTop: skyRef.current.top,
@@ -134,8 +138,13 @@ export function VoxelWorldBackdrop() {
   }, []);
 
   return (
-    <div className={styles.backdrop} style={{ background: sky.horizon }} aria-hidden>
-      <canvas ref={canvasRef} className={styles.backdropCanvas} />
-    </div>
+    <>
+      <div className={styles.backdrop} style={{ background: sky.horizon }} aria-hidden>
+        <canvas ref={canvasRef} className={styles.backdropCanvas} />
+      </div>
+      {/* Drawn over the handhelds (see .foreground z-index); only the near-side
+          voxels land here, so trees pass in front of the handhelds. */}
+      <canvas ref={frontCanvasRef} className={styles.foreground} aria-hidden />
+    </>
   );
 }

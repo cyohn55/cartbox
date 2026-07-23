@@ -38,12 +38,17 @@ const CAMERA_PITCH = 0;
  *  height — low enough that the island's top surface sits just *below* the
  *  handhelds' feet, so they float centred a little above the world rather than
  *  standing in front of (and occluding) it. */
-const WORLD_CENTER_Y = 0.89;
+const WORLD_CENTER_Y = 0.8;
 /** Where the island's centre sits along the camera's depth axis, 0.5 being the
  *  neutral centre (no offset). Below/above 0.5 pushes the world toward or away
  *  from the viewer in true 3D. (At pitch 0 a depth shift is not visible on its
  *  own — an orthographic side view — so it only bites once the camera tips.) */
 const WORLD_CENTER_Z = 0.5;
+/** The camera-depth plane the handhelds occupy — the world's rotation axis, which
+ *  always projects to depth 0. Voxels nearer than this (larger depth) are drawn
+ *  over the handhelds, so trees on the near side of the island pass in front of
+ *  them and they sit *amongst* the world rather than in front of all of it. */
+const HANDHELD_DEPTH = 0;
 /** The island tile's size relative to the canvas height. Large enough that no
  *  corner clips as it spins, and that the surface reads as a broad ground. */
 const WORLD_SCALE = 1.34;
@@ -69,6 +74,9 @@ function modelDiagonal(model: VoxelModel): number {
 
 export class VoxelWorldRenderer {
   private readonly context: CanvasRenderingContext2D;
+  /** The layer drawn *over* the handhelds: only the voxels nearer than the
+   *  handhelds' plane, so trees on the near side pass in front of them. */
+  private readonly frontContext: CanvasRenderingContext2D;
   private readonly tileCanvas: HTMLCanvasElement;
   private readonly tileContext: CanvasRenderingContext2D;
   private readonly tileImage: ImageData;
@@ -92,17 +100,23 @@ export class VoxelWorldRenderer {
 
   constructor(
     canvas: HTMLCanvasElement,
+    frontCanvas: HTMLCanvasElement,
     private readonly model: VoxelModel,
     private readonly options: WorldRenderOptions,
   ) {
     canvas.width = options.bufferWidth;
     canvas.height = options.bufferHeight;
+    frontCanvas.width = options.bufferWidth;
+    frontCanvas.height = options.bufferHeight;
     const context = canvas.getContext("2d");
-    if (!context) throw new Error("2D context unavailable for the world backdrop");
+    const frontContext = frontCanvas.getContext("2d");
+    if (!context || !frontContext) throw new Error("2D context unavailable for the world backdrop");
     this.context = context;
+    this.frontContext = frontContext;
     // No smoothing anywhere: the tile is blitted 1:1, so a nearest copy keeps the
     // cube faces hard-edged rather than softening them into a blur.
     this.context.imageSmoothingEnabled = false;
+    this.frontContext.imageSmoothingEnabled = false;
     this.skyTop = options.skyTop;
     this.skyHorizon = options.skyHorizon;
 
@@ -169,19 +183,25 @@ export class VoxelWorldRenderer {
     this.tileImage.data.set(this.out);
     this.tileContext.putImageData(this.tileImage, 0, 0);
 
-    // Blit the island tile 1:1 onto the sky (its transparent corners let the sky
-    // show through around the island). Source and destination sizes are equal, so
-    // this is an exact copy with no resampling.
+    // Back layer (below the handhelds): the whole island, 1:1 over the sky (its
+    // transparent corners let the sky show through). Source and destination sizes
+    // are equal, so this is an exact copy with no resampling.
     this.context.drawImage(
-      this.tileCanvas,
-      0,
-      0,
-      this.tileSize,
-      this.tileSize,
-      this.destX,
-      this.destY,
-      this.destSize,
-      this.destSize,
+      this.tileCanvas, 0, 0, this.tileSize, this.tileSize, this.destX, this.destY, this.destSize, this.destSize,
+    );
+
+    // Front layer (above the handhelds): keep only the voxels nearer than the
+    // handhelds' plane by zeroing the alpha of everything at or behind it, then
+    // blit what remains over the (otherwise transparent) foreground canvas — so
+    // near-side trees pass in front of the handhelds and they sit amongst them.
+    const data = this.tileImage.data;
+    for (let i = 0; i < this.depth.length; i += 1) {
+      if (this.depth[i]! <= HANDHELD_DEPTH) data[i * 4 + 3] = 0;
+    }
+    this.tileContext.putImageData(this.tileImage, 0, 0);
+    this.frontContext.clearRect(0, 0, bufferWidth, bufferHeight);
+    this.frontContext.drawImage(
+      this.tileCanvas, 0, 0, this.tileSize, this.tileSize, this.destX, this.destY, this.destSize, this.destSize,
     );
   }
 
