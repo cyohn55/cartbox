@@ -142,6 +142,10 @@ const SCREEN_BLEED_PX = 5;
  *  big display); the viewport height caps it further in `measure()`. */
 const CENTER_MAX_WIDTH = 300;
 
+/** Share of the viewport height the centre device may occupy, leaving the rest as
+ *  the (equal) gaps above and below that centre the handhelds and hold the tagline. */
+const DEVICE_HEIGHT_FRACTION = 0.58;
+
 /**
  * The smallest the *centre* handheld may shrink to while still showing flanks.
  * `measure()` seats the most premades per side whose stepped-down row keeps the
@@ -622,16 +626,15 @@ export function HandheldPicker() {
     const aspect = template.width / template.height; // device width ÷ height
     const GAP = 10; // must match the carousel's flex gap
     const EDGE = 12; // breathing room the outermost flanks keep from the edges
-    const LABEL_RESERVE = 30; // the stage label + gap under the device
 
     const measure = () => {
       const available = carousel.clientWidth;
-      const availableHeight = carousel.clientHeight;
-      if (available <= 0 || availableHeight <= 0) return;
-      // The whole scene must fit the viewport, so the centre is capped by the
-      // height the carousel actually has (its flex band, less the label) as well
-      // as by width and an absolute ceiling — never taller than there is room for.
-      const capWidth = Math.min(CENTER_MAX_WIDTH, (availableHeight - LABEL_RESERVE) * aspect);
+      if (available <= 0) return;
+      // The handhelds are vertically centred with the tagline above them, so the
+      // device height is a fraction of the viewport (leaving room for the tagline
+      // gap top and bottom); it never overflows, so nothing scrolls. Width and an
+      // absolute ceiling cap it too.
+      const capWidth = Math.min(CENTER_MAX_WIDTH, DEVICE_HEIGHT_FRACTION * window.innerHeight * aspect);
       const usable = available - 2 * EDGE;
 
       // Seat the most premades per side whose stepped-down row still leaves the
@@ -1285,6 +1288,10 @@ export function HandheldPicker() {
           })}
       </section>
       {animatedError && <p className={styles.error}>{animatedError}</p>}
+
+      {/* Balances the top region so the handhelds sit vertically centred in the
+          viewport — on the world's rotation axis, so it spins around them. */}
+      <div className={styles.footSpacer} aria-hidden />
 
       {/* The selector, control panel and confirm button now live inside the
           handheld's screen (rendered above). What remains below is the file-input

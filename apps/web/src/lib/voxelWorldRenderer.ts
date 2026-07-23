@@ -94,9 +94,10 @@ export class VoxelWorldRenderer {
     // is no down- or up-scale to blur or alias the edges.
     this.destSize = Math.round(options.bufferHeight * 1.34);
     this.destX = Math.round((options.bufferWidth - this.destSize) / 2);
-    // Nudged down so the island sits a touch below centre, leaving the calmer sky
-    // above for the picker's heading.
-    this.destY = Math.round(options.bufferHeight * 0.5 - this.destSize * 0.46);
+    // Centre the tile so the island's rotation axis (its middle) sits at the exact
+    // centre of the viewport — where the handhelds stand — so the world turns
+    // *around* them and they read as standing within it.
+    this.destY = Math.round(options.bufferHeight * 0.5 - this.destSize * 0.5);
 
     this.tileSize = this.destSize;
     this.cell = Math.max(1, this.tileSize / (modelDiagonal(model) + 2));

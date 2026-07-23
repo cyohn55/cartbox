@@ -38,38 +38,43 @@
   opacity: 1;
 }
 
-/* A soft top scrim plus an edge vignette: the scrim gives the heading and its
-   muted subtitle contrast against the bright sky, while the vignette calms the
-   busy scene toward the centre where the picker sits — both keeping cards and
-   text legible without hiding the voxel world below. */
+/* Just a faint edge vignette that calms the busy scene toward the corners; no top
+   scrim — the world reads full-bleed to the top of the page. */
 .backdrop::after {
   content: "";
   position: absolute;
   inset: 0;
-  background:
-    linear-gradient(180deg, rgba(8, 12, 22, 0.5) 0%, rgba(8, 12, 22, 0.24) 12%, rgba(8, 12, 22, 0) 30%),
-    radial-gradient(125% 105% at 50% 42%, rgba(6, 8, 16, 0) 44%, rgba(6, 8, 16, 0.16) 76%, rgba(5, 7, 11, 0.4) 100%);
+  background: radial-gradient(125% 105% at 50% 42%, rgba(6, 8, 16, 0) 52%, rgba(6, 8, 16, 0.12) 80%, rgba(5, 7, 11, 0.32) 100%);
 }
 
+/* The top region: it grows to fill the space above the (vertically-centred)
+   handhelds and centres the tagline within it, so the headline sits midway
+   between the top of the page and the handhelds. A matching .footSpacer below the
+   carousel keeps the handhelds centred in the viewport (and the world's rotation
+   axis). */
 .head {
-  flex: 0 0 auto;
-  text-align: center;
-  padding: 10px 0 2px;
+  flex: 1 1 0;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-/* The 3D voxel headline (rendered by VoxelHeadline.tsx). It must not reserve
-   layout height that pushes the handhelds down, so the canvas is bounded by a
-   viewport-relative max-height and scales to fit that band via its intrinsic
-   aspect (its backing store). A soft drop-shadow lifts the glowing letters off
-   the busy world behind them. */
+.footSpacer {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+/* The 3D voxel headline (rendered by VoxelHeadline.tsx). Bounded by a
+   viewport-relative max-height so it never grows into the handhelds; it scales to
+   fit via its intrinsic aspect (its backing store). The device size is measured
+   from the viewport height (not this element), so cycling taglines of different
+   heights never jitters the handhelds. */
 .voxelHead {
   display: flex;
   align-items: center;
   justify-content: center;
-  /* A FIXED band, so the header height (and thus the carousel height and the
-     device size measured from it) doesn't shift as taglines of different heights
-     cycle through — the handhelds never jitter. */
-  height: 19vh;
 }
 
 .voxelHeadCanvas {
@@ -77,7 +82,7 @@
   width: auto;
   height: auto;
   max-width: 92vw;
-  max-height: 100%;
+  max-height: 17vh;
   image-rendering: auto;
   /* A tight dark outline plus a soft drop shadow so the glowing voxel type stays
      legible over any part of the bright, busy world behind it. */
@@ -546,10 +551,9 @@
    ========================================================================== */
 
 .carousel {
-  /* Fills the height left under the headline; the device is sized to fit it so
-     the whole scene stays within the viewport. */
-  flex: 1 1 auto;
-  min-height: 0;
+  /* Natural height (the centre device); the .head and .footSpacer flex around it
+     to keep the handhelds centred in the viewport. */
+  flex: 0 0 auto;
   width: 100%;
   box-sizing: border-box;
   display: flex;
