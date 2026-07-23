@@ -94,8 +94,8 @@
   display: block;
   width: auto;
   height: auto;
-  max-width: 92vw;
-  max-height: 17vh;
+  max-width: 66vw;
+  max-height: 10vh;
   image-rendering: auto;
   /* A tight dark outline plus a soft drop shadow so the glowing voxel type stays
      legible over any part of the bright, busy world behind it. */

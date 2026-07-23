@@ -140,11 +140,13 @@ const SCREEN_BLEED_PX = 5;
 
 /** Absolute ceiling on the centred handheld's width (so it is not enormous on a
  *  big display); the viewport height caps it further in `measure()`. */
-const CENTER_MAX_WIDTH = 300;
+const CENTER_MAX_WIDTH = 190;
 
-/** Share of the viewport height the centre device may occupy, leaving the rest as
- *  the (equal) gaps above and below that centre the handhelds and hold the tagline. */
-const DEVICE_HEIGHT_FRACTION = 0.58;
+/** Share of the viewport height the centre device may occupy. Kept small so the
+ *  handhelds read as objects standing *amongst* the voxel trees (roughly twice a
+ *  tree's height) rather than looming over the whole world; the rest of the
+ *  column is the gaps above and below that hold the tagline. */
+const DEVICE_HEIGHT_FRACTION = 0.32;
 
 /**
  * The smallest the *centre* handheld may shrink to while still showing flanks.
@@ -152,8 +154,10 @@ const DEVICE_HEIGHT_FRACTION = 0.58;
  * centre at or above this; below it (a narrow/mobile screen) the flanks drop and
  * the centre fills the width, and a horizontal swipe changes premades instead.
  * Chosen so a typical desktop (≥1024px) seats five handhelds (two each side).
+ * Kept below the (now smaller) height-capped centre width so the flanks still
+ * appear rather than the fit calculation collapsing to the centre alone.
  */
-const MIN_CENTER_WIDTH = 190;
+const MIN_CENTER_WIDTH = 120;
 
 /** Absolute box for a screen overlay, bled out so no edge of the hole shows. */
 function screenBoxStyle(rect: ScreenRect): CSSProperties {
