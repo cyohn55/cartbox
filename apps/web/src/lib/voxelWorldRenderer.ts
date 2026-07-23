@@ -31,8 +31,14 @@ const WORLD_LIGHT: ModelLight = {
 
 /** A full turn of the island takes this many seconds — a calm, unhurried drift. */
 const ROTATION_PERIOD_SECONDS = 80;
-/** Bird's-eye tip toward the viewer (radians): shows the tops and two cliff sides. */
-const CAMERA_PITCH = 0.62;
+/** A steep, looking-down tip toward the viewer (radians): the island reads as a
+ *  near-horizontal platform spinning beneath the handhelds rather than an
+ *  isometric slab beside them. (π/2 would be fully top-down.) */
+const CAMERA_PITCH = 1.06;
+/** Where the island's rotation axis sits vertically, as a fraction of the canvas
+ *  height — just below the viewport centre, so the centred handhelds float just
+ *  above the world's centre and the world turns horizontally beneath them. */
+const WORLD_CENTER_Y = 0.62;
 
 export interface WorldRenderOptions {
   /** Backdrop resolution in device pixels — the canvas's true render size. */
@@ -94,10 +100,10 @@ export class VoxelWorldRenderer {
     // is no down- or up-scale to blur or alias the edges.
     this.destSize = Math.round(options.bufferHeight * 1.34);
     this.destX = Math.round((options.bufferWidth - this.destSize) / 2);
-    // Centre the tile so the island's rotation axis (its middle) sits at the exact
-    // centre of the viewport — where the handhelds stand — so the world turns
-    // *around* them and they read as standing within it.
-    this.destY = Math.round(options.bufferHeight * 0.5 - this.destSize * 0.5);
+    // Sit the island's rotation axis (its middle) just below the viewport centre,
+    // so the centred handhelds float just above the world's centre and it spins
+    // horizontally beneath them.
+    this.destY = Math.round(options.bufferHeight * WORLD_CENTER_Y - this.destSize * 0.5);
 
     this.tileSize = this.destSize;
     this.cell = Math.max(1, this.tileSize / (modelDiagonal(model) + 2));
