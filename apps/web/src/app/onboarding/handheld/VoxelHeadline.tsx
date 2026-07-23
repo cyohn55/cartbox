@@ -90,7 +90,6 @@ interface PhraseRender {
   readonly layout: VoxelTextLayout;
   readonly cell: number; // output pixels per voxel face (DPR-scaled)
   readonly size: number; // square render buffer edge, in device pixels
-  readonly cssWidth: number; // the buffer's natural on-screen width (size / DPR)
   readonly bandHeight: number; // visible slice (the type + bob margin)
   readonly bandTop: number; // first row of that slice within the square
   readonly out: Uint8ClampedArray;
@@ -114,11 +113,7 @@ function buildPhrase(
   dpr: number,
   makeBand: (w: number, h: number) => ImageData,
 ): PhraseRender {
-  // Alternate the cell shape per tagline so the page shows both forms: square
-  // voxels and rounded, close-packed hexels spelling the sayings.
-  const shape = index % 2 === 0 ? "cube" : "hexel";
   const layout = layoutVoxelText(PHRASES[index]!, {
-    shape,
     depth: DEPTH,
     emissive: EMISSIVE,
     color: phraseColor(ACCENTS[index % ACCENTS.length]!),
@@ -137,7 +132,6 @@ function buildPhrase(
     layout,
     cell,
     size,
-    cssWidth: size / dpr,
     bandHeight,
     bandTop,
     out: new Uint8ClampedArray(size * size * 4),
@@ -161,16 +155,16 @@ export function VoxelHeadline() {
     let phraseIndex = 0;
     let current = buildPhrase(phraseIndex, dpr, makeBand);
 
-    // Size the visible canvas's backing store to the tagline's band, and its CSS
-    // width to the buffer's natural (device-pixel ÷ DPR) size so it renders 1:1
-    // and crisp; CSS `max-width` scales it down responsively without distortion.
+    // Size the visible canvas's backing store to the tagline's band. Its on-screen
+    // size comes from CSS `max-width`/`max-height` acting on the canvas's intrinsic
+    // aspect (this backing store), so the headline scales to fit its header band
+    // without reserving layout height or distorting — the type never pushes the
+    // handhelds down.
     const fitCanvas = (render: PhraseRender) => {
       if (canvas.width !== render.size || canvas.height !== render.bandHeight) {
         canvas.width = render.size;
         canvas.height = render.bandHeight;
       }
-      canvas.style.setProperty("--headline-aspect", `${render.size} / ${render.bandHeight}`);
-      canvas.style.width = `${Math.round(render.cssWidth)}px`;
     };
     fitCanvas(current);
 

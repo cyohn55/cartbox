@@ -621,16 +621,18 @@ export function HandheldPicker() {
     if (!carousel || !template) return;
     const aspect = template.width / template.height; // device width ÷ height
     const GAP = 10; // must match the carousel's flex gap
-    const ARROW = 44;
+    const EDGE = 12; // breathing room the outermost flanks keep from the edges
+    const LABEL_RESERVE = 30; // the stage label + gap under the device
 
     const measure = () => {
       const available = carousel.clientWidth;
-      if (available <= 0) return;
-      // Cap the centre width by the viewport height (the handheld runs the
-      // customizer on its own screen, so it must stay tall enough to operate the
-      // controls) and by an absolute ceiling. `usable` is the room between arrows.
-      const capWidth = Math.min(CENTER_MAX_WIDTH, 0.62 * window.innerHeight * aspect);
-      const usable = available - 2 * (ARROW + GAP);
+      const availableHeight = carousel.clientHeight;
+      if (available <= 0 || availableHeight <= 0) return;
+      // The whole scene must fit the viewport, so the centre is capped by the
+      // height the carousel actually has (its flex band, less the label) as well
+      // as by width and an absolute ceiling — never taller than there is room for.
+      const capWidth = Math.min(CENTER_MAX_WIDTH, (availableHeight - LABEL_RESERVE) * aspect);
+      const usable = available - 2 * EDGE;
 
       // Seat the most premades per side whose stepped-down row still leaves the
       // centre prominent (≥ MIN_CENTER_WIDTH). Each side spans `center × Σ ratio^step`,
@@ -1006,15 +1008,6 @@ export function HandheldPicker() {
         onTouchStart={onTouchStart}
         onTouchEnd={onTouchEnd}
       >
-        <button
-          type="button"
-          className={styles.carouselArrow}
-          onClick={() => turnCarousel(-1)}
-          aria-label="Previous premade"
-        >
-          ‹
-        </button>
-
         {template &&
           leftFlanks.map((step) => {
             const index = ((carouselIndex - step) % presetCount + presetCount) % presetCount;
@@ -1290,15 +1283,6 @@ export function HandheldPicker() {
               />
             );
           })}
-
-        <button
-          type="button"
-          className={styles.carouselArrow}
-          onClick={() => turnCarousel(1)}
-          aria-label="Next premade"
-        >
-          ›
-        </button>
       </section>
       {animatedError && <p className={styles.error}>{animatedError}</p>}
 
