@@ -38,7 +38,7 @@ const CAMERA_PITCH = 0;
  *  height — low enough that the island's top surface sits just *below* the
  *  handhelds' feet, so they float centred a little above the world rather than
  *  standing in front of (and occluding) it. */
-const WORLD_CENTER_Y = 0.89;
+const WORLD_CENTER_Y = 0;
 /** The island tile's size relative to the canvas height. Large enough that no
  *  corner clips as it spins, and that the surface reads as a broad ground. */
 const WORLD_SCALE = 1.34;
