@@ -53,8 +53,8 @@ const WORLD_CENTER_Y = 0.8;
 const HANDHELD_DEPTH = viewDepth(HANDHELD_ANCHOR);
 /** The island tile's size relative to the canvas height. Large enough that no
  *  corner clips as it spins, and that the surface reads as a broad ground.
- *  Doubled from the original 1.34 to render the world at 2× scale. */
-const WORLD_SCALE = 2.68;
+ *  6× the original 1.34 to render the world at 6× scale. */
+const WORLD_SCALE = 8.04;
 
 export interface WorldRenderOptions {
   /** Backdrop resolution in device pixels — the canvas's true render size. */
