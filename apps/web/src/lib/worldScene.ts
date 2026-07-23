@@ -81,7 +81,12 @@ export interface WorldScene {
   readonly snow: Particle[];
   /** World-space bounds the snow falls within. */
   readonly snowBounds: SnowBounds;
-  /** Largest span to frame, so the camera can fit the whole scene. */
+  /**
+   * The span the camera frames: the onboarding handheld cluster (hero + siblings),
+   * not the full terrain. Keeping it independent of the ground footprint means the
+   * world can grow without shrinking the hero handheld — and its readable OS
+   * screen — as the player enters.
+   */
   readonly fitSpan: number;
   /** World y the camera should look at (a little above the terrain centre). */
   readonly lookY: number;
@@ -404,7 +409,11 @@ export function buildWorldScene(options: WorldSceneOptions = {}): WorldScene {
   };
   const snow = createSnow(options.snowCount ?? 260, snowBounds, random);
 
-  const fitSpan = Math.max(terrainModel.sizeX, terrainModel.sizeZ, hoverY * 2 + 8);
+  // Frame the floating-handheld cluster the camera holds on during onboarding (its
+  // hover height above and below the origin), not the terrain footprint, so
+  // enlarging the world keeps the hero — and its readable OS screen — the same size
+  // on entry. This is the value the terrain terms were already dominated by.
+  const fitSpan = hoverY * 2 + 8;
 
   return {
     atlas,

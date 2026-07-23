@@ -66,8 +66,8 @@ export interface TerrainParams {
 }
 
 export const DEFAULT_TERRAIN_PARAMS: TerrainParams = {
-  sizeX: 40,
-  sizeZ: 40,
+  sizeX: 80,
+  sizeZ: 80,
   sizeY: 28,
   baseHeight: 12,
   amplitude: 7,
