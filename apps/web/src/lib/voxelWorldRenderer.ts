@@ -31,14 +31,18 @@ const WORLD_LIGHT: ModelLight = {
 
 /** A full turn of the island takes this many seconds — a calm, unhurried drift. */
 const ROTATION_PERIOD_SECONDS = 80;
-/** A steep, looking-down tip toward the viewer (radians): the island reads as a
- *  near-horizontal platform spinning beneath the handhelds rather than an
- *  isometric slab beside them. (π/2 would be fully top-down.) */
-const CAMERA_PITCH = 1.06;
+/** A gentle isometric tip toward the viewer (radians): the ground recedes with
+ *  depth so the upright handhelds read as standing ON the world, not lying on a
+ *  flat top-down plane parallel to them. */
+const CAMERA_PITCH = 0.52;
 /** Where the island's rotation axis sits vertically, as a fraction of the canvas
- *  height — just below the viewport centre, so the centred handhelds float just
- *  above the world's centre and the world turns horizontally beneath them. */
-const WORLD_CENTER_Y = 0.62;
+ *  height — low, so the island's top surface rises to just under the handhelds'
+ *  feet and they stand on it (floating only slightly above), rather than hovering
+ *  high over a distant world. */
+const WORLD_CENTER_Y = 0.82;
+/** The island tile's size relative to the canvas height. Large enough that no
+ *  corner clips as it spins, and that the surface reads as a broad ground. */
+const WORLD_SCALE = 1.34;
 
 export interface WorldRenderOptions {
   /** Backdrop resolution in device pixels — the canvas's true render size. */
@@ -98,11 +102,11 @@ export class VoxelWorldRenderer {
     // model at any yaw (sized by the bounding diagonal so no corner clips as it
     // spins) and, rendered at the canvas's true resolution, is drawn 1:1 — there
     // is no down- or up-scale to blur or alias the edges.
-    this.destSize = Math.round(options.bufferHeight * 1.34);
+    this.destSize = Math.round(options.bufferHeight * WORLD_SCALE);
     this.destX = Math.round((options.bufferWidth - this.destSize) / 2);
-    // Sit the island's rotation axis (its middle) just below the viewport centre,
-    // so the centred handhelds float just above the world's centre and it spins
-    // horizontally beneath them.
+    // Sit the island low so its surface rises to just under the handhelds' feet:
+    // they stand on the world and float only slightly above it, and it turns
+    // beneath them.
     this.destY = Math.round(options.bufferHeight * WORLD_CENTER_Y - this.destSize * 0.5);
 
     this.tileSize = this.destSize;
