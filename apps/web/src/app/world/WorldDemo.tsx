@@ -16,17 +16,39 @@
 
 import { useEffect, useRef } from "react";
 
-import { renderScene, DEFAULT_MODEL_LIGHT, type ModelLight, type PlacedModel } from "@cartbox/editor";
+import { renderScene, CUBE_GEOMETRY, DEFAULT_MODEL_LIGHT, type ModelLight, type PlacedModel } from "@cartbox/editor";
 
 import { applyHandheldConfig, applyOsScreen, buildWorldScene, sceneModelsAt, stepSnow } from "@/lib/worldScene";
 import { renderOsApp, osReduce, initialOsState, type OsButton, type OsState } from "@/lib/cartboxOs";
 import { saveHandheldChoice } from "@/lib/handheldChoice";
 import { stepWalk, type WalkParams, type WalkState } from "@/lib/walkControls";
+import { BuildLayer, screenToBuffer, unprojectScreen, type BlockColor, type WorldCamera } from "@/lib/worldEdit";
 
 /** Native render resolution; the canvas is upscaled by CSS for a crisp pixel look. */
 const RENDER = 380;
 const WALK_PITCH = 0.5;
 const OS_PITCH = 0.4; // flatter while reading the screen
+
+/**
+ * Render cadence, capped well below the display refresh: the scene is a CPU
+ * software rasterizer, so every frame costs real main-thread time. Walking wants
+ * responsiveness; the onboarding hold barely moves, so it runs slower still. The
+ * loop also pauses entirely when the canvas is offscreen or the tab is hidden, so
+ * an unwatched world stops burning the CPU (see the IntersectionObserver below).
+ */
+const WALK_FPS = 30;
+const OS_FPS = 20;
+
+/** How far (CSS px²) a pointer may travel before a tap becomes a look-drag. */
+const TAP_SLOP_SQUARED = 6 * 6;
+
+/** Extra lattice cells around the terrain footprint, so blocks can be built out. */
+const BUILD_MARGIN = 8;
+/** Extra vertical lattice above the terrain, so blocks can be stacked up. */
+const BUILD_HEIGHT_HEADROOM = 32;
+
+/** The colour a placed block is painted. A warm sandstone that reads on the terrain. */
+const BLOCK_COLOR: BlockColor = { r: 214, g: 176, b: 122 };
 
 /** A low sun that rakes the terrain so the hexel slopes read. */
 const WORLD_LIGHT: ModelLight = {
@@ -94,6 +116,11 @@ export function WorldDemo() {
     // Reused across frames: the compositor's buffers and a tile to blit through.
     const out = new Uint8ClampedArray(RENDER * RENDER * 4);
     const depthBuffer = new Float32Array(RENDER * RENDER);
+    // Pick buffers turn a click into an edit: per pixel, which placed model won it
+    // and which of that model's faces. Populated only while walking (the edit mode);
+    // the depth buffer above supplies the surface distance the click unprojects to.
+    const pickInstance = new Int32Array(RENDER * RENDER);
+    const pickFace = new Int8Array(RENDER * RENDER);
     const tile = document.createElement("canvas");
     tile.width = RENDER;
     tile.height = RENDER;
@@ -106,12 +133,37 @@ export function WorldDemo() {
     sky.addColorStop(0.55, "#3d5a86");
     sky.addColorStop(1, "#7c93b8");
 
+    // The editable cube layer the player builds on top of the read-only world,
+    // sized to the terrain footprint with margin to build outward and headroom to
+    // stack up. Its model is rebuilt only on edit (see `applyEdit`), never per frame.
+    const terrainModel = scene.terrain.model;
+    const build = new BuildLayer(
+      terrainModel.sizeX + BUILD_MARGIN * 2,
+      terrainModel.sizeY + BUILD_HEIGHT_HEADROOM,
+      terrainModel.sizeZ + BUILD_MARGIN * 2,
+    );
+    // What the last drawn frame projected with, so a click can unproject exactly.
+    // `models` and `buildIndex` let a pick's model index name the object (and tell
+    // a build block from terrain); `buildModel` caches the layer between edits.
+    const lastFrame: {
+      camera: WorldCamera | null;
+      models: readonly PlacedModel[];
+      buildIndex: number;
+    } = { camera: null, models: [], buildIndex: -1 };
+    let buildModel = build.toPlacedModel();
+
     const drawFrame = (
-      models: PlacedModel[],
+      baseModels: PlacedModel[],
       yaw: number,
       pitch: number,
       origin: readonly [number, number, number],
+      withPick: boolean,
     ) => {
+      // Append the build layer (if any) so it composites into the same depth buffer
+      // and its face wins the pick where it is in front.
+      const models = buildModel ? [...baseModels, buildModel] : baseModels;
+      const buildIndex = buildModel ? models.length - 1 : -1;
+
       renderScene(models, {
         size: RENDER,
         cell,
@@ -122,12 +174,18 @@ export function WorldDemo() {
         particles: scene.snow,
         out,
         depthBuffer,
+        pickInstance: withPick ? pickInstance : undefined,
+        pickFace: withPick ? pickFace : undefined,
       });
       image.data.set(out);
       tileContext.putImageData(image, 0, 0);
       context.fillStyle = sky;
       context.fillRect(0, 0, RENDER, RENDER);
       context.drawImage(tile, 0, 0);
+
+      lastFrame.camera = { yaw, pitch, cell, centre: RENDER / 2, origin };
+      lastFrame.models = models;
+      lastFrame.buildIndex = buildIndex;
     };
 
     const walkParams: WalkParams = {
@@ -147,6 +205,12 @@ export function WorldDemo() {
     const pressed = new Set<string>();
     let dragging = false;
     let lastPointerY = 0;
+    // Distinguish a look-drag from a build tap: a pointer that barely moves between
+    // down and up is a tap (place/remove a block); one that travels tilts the view.
+    let pointerStartX = 0;
+    let pointerStartY = 0;
+    let pointerMoved = false;
+    let pointerButton = 0;
 
     const axis = (positive: Set<string>, negative: Set<string>): number => {
       let value = 0;
@@ -183,23 +247,71 @@ export function WorldDemo() {
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
 
+    /**
+     * Turn a tap into a build edit. The tapped pixel names a placed model and a
+     * face (the pick buffers) and carries a surface depth (the depth buffer); the
+     * camera the frame was drawn with unprojects that to a world point, and the
+     * picked face's outward normal says which side was hit. Left tap places a block
+     * in the empty neighbour; right tap removes the block tapped (terrain and props
+     * are never removed — {@link BuildLayer.remove} no-ops off the build lattice).
+     */
+    const applyEdit = (event: PointerEvent, remove: boolean) => {
+      if (os.mode !== "done") return; // building is a walk-mode action only
+      const camera = lastFrame.camera;
+      if (!camera) return;
+      const rect = canvas.getBoundingClientRect();
+      const buf = screenToBuffer(event.clientX - rect.left, event.clientY - rect.top, rect.width, rect.height, RENDER);
+      if (!buf) return;
+      const di = buf.py * RENDER + buf.px;
+      const instance = pickInstance[di]!;
+      if (instance < 0) return; // tapped the open sky
+      const faceIndex = pickFace[di]!;
+      if (faceIndex < 0) return;
+      const placed = lastFrame.models[instance];
+      if (!placed) return;
+      const face = (placed.model.geometry ?? CUBE_GEOMETRY).faces[faceIndex];
+      if (!face) return;
+
+      const hit = unprojectScreen(buf.px + 0.5, buf.py + 0.5, depthBuffer[di]!, camera);
+      const changed = remove
+        ? build.remove(hit, face.normal)
+        : build.place(hit, face.normal, BLOCK_COLOR);
+      if (changed) {
+        buildModel = build.toPlacedModel();
+        requestRender(); // reflect the edit even between capped frames
+      }
+    };
+
     const onPointerDown = (event: PointerEvent) => {
       dragging = true;
+      pointerMoved = false;
+      pointerButton = event.button;
+      pointerStartX = event.clientX;
+      pointerStartY = event.clientY;
       lastPointerY = event.clientY;
       canvas.setPointerCapture(event.pointerId);
     };
     const onPointerMove = (event: PointerEvent) => {
       if (!dragging) return;
+      const dx = event.clientX - pointerStartX;
+      const dy = event.clientY - pointerStartY;
+      if (dx * dx + dy * dy > TAP_SLOP_SQUARED) pointerMoved = true;
       view.dragPitch = Math.max(-0.2, Math.min(1.1, view.dragPitch + (event.clientY - lastPointerY) * 0.006));
       lastPointerY = event.clientY;
     };
     const onPointerUp = (event: PointerEvent) => {
-      dragging = false;
       if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+      const wasTap = dragging && !pointerMoved;
+      dragging = false;
+      if (wasTap) applyEdit(event, pointerButton === 2); // secondary button removes
+    };
+    const onContextMenu = (event: MouseEvent) => {
+      event.preventDefault(); // free the right button for block removal
     };
     canvas.addEventListener("pointerdown", onPointerDown);
     canvas.addEventListener("pointermove", onPointerMove);
     canvas.addEventListener("pointerup", onPointerUp);
+    canvas.addEventListener("contextmenu", onContextMenu);
 
     const teardown = () => {
       window.removeEventListener("keydown", onKeyDown);
@@ -207,32 +319,61 @@ export function WorldDemo() {
       canvas.removeEventListener("pointerdown", onPointerDown);
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerup", onPointerUp);
+      canvas.removeEventListener("contextmenu", onContextMenu);
     };
 
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      drawFrame(sceneModelsAt(scene, 0), 0, OS_PITCH, [heroBase[0], heroBase[1], heroBase[2]]);
+      drawFrame(sceneModelsAt(scene, 0), 0, OS_PITCH, [heroBase[0], heroBase[1], heroBase[2]], false);
       return teardown;
     }
 
     let frame = 0;
-    let last = performance.now();
-    const start = last;
+    let lastDraw = 0;
+    let forceRender = false;
+    let onScreen = true; // toggled by the IntersectionObserver below
+    let osFrozen = false; // the OS screen is drawn once more on entering walk mode, then held
+    const start = performance.now();
+    // Skip the frame-rate cap for one tick, so an edit shows immediately.
+    const requestRender = () => {
+      forceRender = true;
+    };
+
     const loop = (now: number) => {
+      // Pause entirely when the canvas is offscreen or the tab is hidden: the
+      // software rasterizer is pure main-thread cost, and an unwatched world should
+      // not burn it. `resume()` restarts the loop when the canvas is seen again.
+      if (!onScreen || document.hidden) {
+        frame = 0;
+        return;
+      }
+      frame = window.requestAnimationFrame(loop);
+
+      const walking = os.mode === "done";
+      // Cap the cadence well under the display refresh — walking wants response, the
+      // onboarding hold barely moves — so each expensive render is spaced out.
+      const interval = 1000 / (walking ? WALK_FPS : OS_FPS);
+      if (!forceRender && now - lastDraw < interval) return;
+      forceRender = false;
+      const delta = Math.min(0.05, (now - lastDraw) / 1000);
+      lastDraw = now;
       const seconds = (now - start) / 1000;
-      const delta = Math.min(0.05, (now - last) / 1000);
-      last = now;
 
       stepSnow(scene.snow, scene.snowBounds, delta, Math.random);
-      // Boot + drive the OS, and mirror its state onto the hero handheld.
-      renderOsApp(scene.osFramebuffer, os, seconds);
-      applyOsScreen(scene.hero, scene.osFramebuffer);
-      applyHandheldConfig(scene.hero, os.config);
+      // Drive the OS only while it is the focus. Once the handheld is chosen the
+      // menu is gone and its framebuffer is static, so draw it one final time on
+      // entering walk mode and then stop re-rendering it every frame.
+      if (!walking || !osFrozen) {
+        renderOsApp(scene.osFramebuffer, os, seconds);
+        applyOsScreen(scene.hero, scene.osFramebuffer);
+        applyHandheldConfig(scene.hero, os.config);
+        if (walking) osFrozen = true;
+      }
 
       let yaw: number;
       let pitch: number;
       let origin: readonly [number, number, number];
       let models: PlacedModel[];
-      if (os.mode !== "done") {
+      if (!walking) {
         // Hold on the hero, swaying gently, so the screen stays readable.
         yaw = 0.06 * Math.sin(seconds * 0.5);
         pitch = OS_PITCH + view.dragPitch;
@@ -253,13 +394,34 @@ export function WorldDemo() {
       view.lastYaw = yaw;
       view.lastOrigin = origin;
 
-      drawFrame(models, yaw, pitch, origin);
+      drawFrame(models, yaw, pitch, origin, walking);
+    };
+
+    // Resume the loop if it stopped itself while hidden; a no-op if already running.
+    const resume = () => {
+      if (frame || !onScreen || document.hidden) return;
+      lastDraw = performance.now() - 1000 / WALK_FPS; // draw promptly on return
       frame = window.requestAnimationFrame(loop);
     };
+
+    // Track on-screen visibility so a scrolled-away world stops rendering.
+    const observer = new IntersectionObserver(
+      (entries) => {
+        onScreen = entries[0]?.isIntersecting ?? true;
+        if (onScreen) resume();
+      },
+      { threshold: 0.05 },
+    );
+    observer.observe(canvas);
+    const onVisibility = () => resume();
+    document.addEventListener("visibilitychange", onVisibility);
+
     frame = window.requestAnimationFrame(loop);
 
     return () => {
-      window.cancelAnimationFrame(frame);
+      if (frame) window.cancelAnimationFrame(frame);
+      observer.disconnect();
+      document.removeEventListener("visibilitychange", onVisibility);
       teardown();
     };
   }, []);
