@@ -177,6 +177,53 @@ async function voxelCount(page) {
   check((await activeChipName(page)) === spriteNames[0], "selecting the asset returns the editor to its block");
   await page.screenshot({ path: `${OUT}/assets-tab-sprite-asset.png` });
 
+  // --- 7. Thumbnails, duplicate and drag-to-reorder -------------------------
+  console.log("\n--- browsing affordances ---");
+  const thumbCount = await chips(page).locator("canvas").count();
+  check(thumbCount === (await chipNames(page)).length, `every chip carries a thumbnail (${thumbCount})`);
+  // A sprite thumbnail must actually draw the block's pixels, not a blank canvas.
+  const thumbPainted = await chips(page)
+    .first()
+    .locator("canvas")
+    .evaluate((canvas) => {
+      const data = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+      for (let index = 3; index < data.length; index += 4) if (data[index] > 0) return true;
+      return false;
+    });
+  check(thumbPainted, "the sprite thumbnail draws the block's pixels");
+
+  await pickMedium(page, "Voxels");
+  const sculptThumbPainted = await chips(page)
+    .first()
+    .locator("canvas")
+    .evaluate((canvas) => {
+      const data = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+      for (let index = 3; index < data.length; index += 4) if (data[index] > 0) return true;
+      return false;
+    });
+  check(sculptThumbPainted, "the sculpt thumbnail renders the model");
+
+  const beforeDuplicate = await chipNames(page);
+  await strip(page).locator('button:text-is("Duplicate")').click();
+  await page.waitForTimeout(1000);
+  const afterDuplicate = await chipNames(page);
+  check(
+    afterDuplicate.length === beforeDuplicate.length + 1,
+    `Duplicate copies the active sculpt (${beforeDuplicate.length} → ${afterDuplicate.length})`,
+  );
+  check(afterDuplicate.some((name) => /copy/.test(name)), `the copy is named for its source (${afterDuplicate.join(", ")})`);
+
+  // Drag the last chip in front of the first and confirm the order really moved.
+  const order = await chipNames(page);
+  if (order.length >= 2) {
+    await chips(page).last().dragTo(chips(page).first());
+    await page.waitForTimeout(1000);
+    const reordered = await chipNames(page);
+    check(reordered[0] === order[order.length - 1], `dragging reorders the list (${reordered.join(", ")})`);
+    check(reordered.length === order.length, "reordering drops nothing");
+  }
+  await page.screenshot({ path: `${OUT}/assets-tab-browser.png` });
+
   const realErrors = errors.filter((text) => !/favicon|404|Failed to load resource|401/i.test(text));
   check(realErrors.length === 0, `no console errors (${realErrors.length})`);
   if (realErrors.length) console.log(realErrors.slice(0, 8).join("\n"));

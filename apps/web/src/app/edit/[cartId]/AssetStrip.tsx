@@ -15,8 +15,12 @@
  * cart's payload.
  */
 
+import { useState } from "react";
+import type { SpriteSheet } from "@cartbox/editor";
+
 import type { CartAsset } from "@/lib/cartAssets";
 
+import { AssetThumb } from "./AssetThumb";
 import styles from "./editor.module.css";
 import { SegmentedControl } from "./railControls";
 
@@ -44,8 +48,15 @@ interface AssetStripProps {
   onCreate: () => void;
   onRename: (id: string) => void;
   onDelete: (id: string) => void;
+  onDuplicate: (id: string) => void;
+  /** Move `id` to sit before `beforeId`, or to the end when that is null. */
+  onReorder: (id: string, beforeId: string | null) => void;
   /** Copy explaining what an unnamed medium means, shown when the list is empty. */
   emptyHint: string;
+  /** Provides the pixels a sprite asset's thumbnail names. */
+  sheet: SpriteSheet;
+  /** Bumped when the sheet changes, so sprite thumbnails stay current. */
+  version: number;
 }
 
 export function AssetStrip({
@@ -57,9 +68,24 @@ export function AssetStrip({
   onCreate,
   onRename,
   onDelete,
+  onDuplicate,
+  onReorder,
   emptyHint,
+  sheet,
+  version,
 }: AssetStripProps) {
   const active = assets.find((asset) => asset.id === activeId) ?? null;
+
+  // The chip being dragged, and the one it would land before. Held here rather
+  // than in the DOM because the drop target needs to render an insertion marker
+  // while the drag is still in flight.
+  const [dragging, setDragging] = useState<string | null>(null);
+  const [dropBefore, setDropBefore] = useState<string | null>(null);
+
+  const endDrag = () => {
+    setDragging(null);
+    setDropBefore(null);
+  };
 
   return (
     <div className={styles.assetStrip}>
@@ -70,7 +96,24 @@ export function AssetStrip({
         ariaLabel="Asset medium"
       />
 
-      <div className={styles.assetList} role="tablist" aria-label="Assets">
+      <div
+        className={styles.assetList}
+        role="tablist"
+        aria-label="Assets"
+        // Dropping past the last chip appends; without this the gap at the end of
+        // the row rejects the drop and the drag silently does nothing.
+        onDragOver={(event) => {
+          if (!dragging) return;
+          event.preventDefault();
+          setDropBefore(null);
+        }}
+        onDrop={(event) => {
+          if (!dragging) return;
+          event.preventDefault();
+          onReorder(dragging, dropBefore);
+          endDrag();
+        }}
+      >
         {assets.length === 0 ? (
           <span className={styles.assetEmpty}>{emptyHint}</span>
         ) : (
@@ -79,12 +122,42 @@ export function AssetStrip({
               key={asset.id}
               type="button"
               role="tab"
-              className={`${styles.assetChip} ${asset.id === activeId ? styles.assetChipActive : ""}`}
+              draggable
+              data-asset={asset.id}
+              className={[
+                styles.assetChip,
+                asset.id === activeId ? styles.assetChipActive : "",
+                asset.id === dragging ? styles.assetChipDragging : "",
+                dropBefore === asset.id && dragging !== asset.id ? styles.assetChipDropBefore : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
               aria-selected={asset.id === activeId}
               onClick={() => onSelect(asset.id)}
               onDoubleClick={() => onRename(asset.id)}
-              title={`${asset.name} — double-click to rename`}
+              onDragStart={(event) => {
+                setDragging(asset.id);
+                event.dataTransfer.effectAllowed = "move";
+                // Firefox ignores a drag that carries no data at all.
+                event.dataTransfer.setData("text/plain", asset.id);
+              }}
+              onDragEnd={endDrag}
+              onDragOver={(event) => {
+                if (!dragging) return;
+                event.preventDefault();
+                event.stopPropagation();
+                setDropBefore(asset.id);
+              }}
+              onDrop={(event) => {
+                if (!dragging) return;
+                event.preventDefault();
+                event.stopPropagation();
+                onReorder(dragging, asset.id);
+                endDrag();
+              }}
+              title={`${asset.name} — double-click to rename, drag to reorder`}
             >
+              <AssetThumb asset={asset} sheet={sheet} version={version} />
               {asset.name}
             </button>
           ))
@@ -103,6 +176,15 @@ export function AssetStrip({
           title={active ? `Rename “${active.name}”` : "Select an asset to rename it"}
         >
           Rename
+        </button>
+        <button
+          type="button"
+          className="cbx-btn"
+          onClick={() => active && onDuplicate(active.id)}
+          disabled={!active}
+          title={active ? `Duplicate “${active.name}”` : "Select an asset to duplicate it"}
+        >
+          Duplicate
         </button>
         <button
           type="button"

@@ -277,16 +277,49 @@
 }
 
 .assetChip {
+  position: relative;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
   font: inherit;
   font-size: 12px;
-  padding: 5px 12px;
+  padding: 4px 12px 4px 5px;
   border-radius: 999px;
   border: 1px solid var(--border);
   background: transparent;
   color: var(--muted);
-  cursor: pointer;
+  cursor: grab;
   white-space: nowrap;
+}
+
+/* The thumbnail sits in a round well so a sprite's transparent corners read as
+ * part of the chip rather than as a ragged edge. `pixelated` keeps 8×8 art crisp
+ * when it is scaled up to chip size. */
+.assetThumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--bg);
+  image-rendering: pixelated;
+  flex-shrink: 0;
+}
+
+.assetChipDragging {
+  opacity: 0.4;
+  cursor: grabbing;
+}
+
+/* The insertion point, drawn on the chip the drop would land in front of. */
+.assetChipDropBefore::before {
+  content: "";
+  position: absolute;
+  left: -4px;
+  top: 2px;
+  bottom: 2px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
 }
 
 .assetChip:hover {

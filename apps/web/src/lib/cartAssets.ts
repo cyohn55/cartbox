@@ -163,6 +163,64 @@ export function removeAsset(assets: readonly CartAsset[], id: string): CartAsset
   return assets.filter((asset) => asset.id !== id);
 }
 
+/**
+ * The list with one asset moved to sit immediately before another — or at the
+ * end, when `beforeId` is null.
+ *
+ * Expressed in terms of a *neighbour* rather than an index because the browser
+ * reorders within a filtered view (one medium, one bank), where positions are
+ * the filtered list's and mean nothing in the full one. Two real ids do mean the
+ * same thing in both.
+ *
+ * Moving an asset onto itself, or naming an id the list does not hold, leaves the
+ * order untouched.
+ */
+export function moveAssetBefore(
+  assets: readonly CartAsset[],
+  id: string,
+  beforeId: string | null,
+): CartAsset[] {
+  if (id === beforeId) return [...assets];
+  const moving = assets.find((asset) => asset.id === id);
+  if (!moving) return [...assets];
+  if (beforeId !== null && !assets.some((asset) => asset.id === beforeId)) return [...assets];
+
+  const without = assets.filter((asset) => asset.id !== id);
+  if (beforeId === null) return [...without, moving];
+
+  const target = without.findIndex((asset) => asset.id === beforeId);
+  return [...without.slice(0, target), moving, ...without.slice(target)];
+}
+
+/**
+ * A copy of an asset, with a fresh id and an unused name.
+ *
+ * Copying a sprite block copies only the *name and coordinates* — both entries
+ * then point at the same pixels, which is the honest meaning of duplicating a
+ * reference. Copying a sculpt copies its grid, giving a genuinely independent
+ * model to diverge from.
+ */
+export function duplicateAsset(assets: readonly CartAsset[], id: string): CartAsset[] {
+  const source = assets.find((asset) => asset.id === id);
+  if (!source) return [...assets];
+
+  const copy: CartAsset = { ...source, id: createAssetId(), name: copyName(source.name, assets) };
+  const index = assets.findIndex((asset) => asset.id === id);
+  return [...assets.slice(0, index + 1), copy, ...assets.slice(index + 1)];
+}
+
+/** "Hero" → "Hero copy", then "Hero copy 2", … — the first name not in use. */
+function copyName(name: string, assets: readonly CartAsset[]): string {
+  const taken = new Set(assets.map((asset) => asset.name));
+  const base = `${name} copy`.slice(0, MAX_ASSET_NAME_CHARS);
+  if (!taken.has(base)) return base;
+  for (let ordinal = 2; ordinal <= assets.length + 2; ordinal += 1) {
+    const candidate = `${base} ${ordinal}`.slice(0, MAX_ASSET_NAME_CHARS);
+    if (!taken.has(candidate)) return candidate;
+  }
+  return base;
+}
+
 /** The list with one asset renamed; a blank name is rejected and changes nothing. */
 export function renameAsset(assets: readonly CartAsset[], id: string, name: string): CartAsset[] {
   const clean = cleanName(name);

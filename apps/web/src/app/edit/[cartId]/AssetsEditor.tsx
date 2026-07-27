@@ -34,7 +34,9 @@ import {
 import {
   createAssetId,
   defaultAssetName,
+  duplicateAsset,
   isSpriteBlockAsset,
+  moveAssetBefore,
   removeAsset,
   renameAsset,
   spriteBlockAssets,
@@ -199,6 +201,17 @@ export function AssetsEditor({
     commitAssets(removeAsset(assets, id));
   };
 
+  const duplicate = (id: string) => {
+    const next = duplicateAsset(assets, id);
+    commitAssets(next);
+    // Open the copy, so duplicating a sculpt lands you in the thing you copied
+    // rather than leaving you on the original wondering whether it worked.
+    const copy = next.find((asset, index) => index > 0 && next[index - 1]?.id === id);
+    if (copy && !isSpriteBlockAsset(copy)) setActiveVoxelId(copy.id);
+  };
+
+  const reorder = (id: string, beforeId: string | null) => commitAssets(moveAssetBefore(assets, id, beforeId));
+
   const switchMedium = (next: AssetMedium) => {
     setMedium(next);
     // Leave the voxel selection to resolve itself against the new lattice: the
@@ -219,7 +232,11 @@ export function AssetsEditor({
         onCreate={createAsset}
         onRename={promptRename}
         onDelete={confirmDelete}
+        onDuplicate={duplicate}
+        onReorder={reorder}
         emptyHint={EMPTY_HINT[medium]}
+        sheet={sheet}
+        version={revision}
       />
 
       {medium === "pixels" ? (
