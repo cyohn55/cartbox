@@ -18,7 +18,7 @@
 import type { VoxelModel } from "./voxelModel";
 import { modelDiagonal } from "./voxelModel";
 import { CUBE_GEOMETRY } from "./cellGeometry";
-import { tileAt, type FaceTexture, type TextureAtlas } from "./faceTexture";
+import { faceTile, type FaceTexture, type TextureAtlas } from "./faceTexture";
 
 /** A directional light fixed in world space (not rotated with the model). */
 export interface ModelLight {
@@ -212,8 +212,8 @@ export function drawModelInto(
     const mask = model.faces[v]!;
     const emissive = model.emissive[v]!;
     const id = pickId ?? v;
-    // Which tile (if any) skins this voxel's faces; undefined = flat colour.
-    const tex = tiles ? tileAt(atlas, tiles[v]!) : undefined;
+    // This voxel's tile/material index; a face resolves it to its own tile below.
+    const tileIndex = tiles ? tiles[v]! : -1;
 
     for (let f = 0; f < faces.length; f += 1) {
       const face = faces[f]!;
@@ -221,6 +221,9 @@ export function drawModelInto(
 
       // Rotate the face normal and cull it if it turns away from the viewer.
       const [fnx, fny, fnz] = face.normal;
+      // Which tile (if any) skins *this* face: a material picks by the face's
+      // upward component (top/side/bottom); a plain atlas gives one tile for all.
+      const tex = tiles ? faceTile(atlas, tileIndex, fny) : undefined;
       const nYawX = fnx * cosYaw + fnz * sinYaw;
       const nYawZ = -fnx * sinYaw + fnz * cosYaw;
       const worldNy = fny * cosPitch - nYawZ * sinPitch;

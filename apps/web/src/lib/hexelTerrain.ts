@@ -21,28 +21,33 @@ import {
   generateTerrain,
   type TerrainParams,
 } from "./hexelTerrainSpecs";
-import { terrainTile } from "./faceTextures";
+import { terrainMaterial } from "./faceTextures";
 
 /**
  * Build the terrain's hexel model, textured by material. Grid coordinates map
  * straight through, and content-centred sizing makes the model rotate about the
  * filled terrain's middle and render tight to its extent — ready to place into a
- * scene alongside the atlas from {@link buildWorldAtlas}. Each cell's texture tile
- * is looked up by its material via a grid-index map, so grass, dirt, rock and
- * crystal each get their own surface.
+ * scene alongside the atlas from {@link buildWorldAtlas}. Each cell's *material*
+ * (grass, dirt, rock, crystal) is looked up via a grid-index map so its faces
+ * sample the right tiles — grass capping the surface over soil sides, and so on.
+ *
+ * Cells are painted near-white so the authored colour tiles show as drawn (the
+ * renderer tints a tile by the voxel colour); a cell's emissive is still carried
+ * through so cave crystals glow.
  */
 export function buildTerrainModel(params: TerrainParams = DEFAULT_TERRAIN_PARAMS): GridVoxelModel {
   const volume = generateTerrain(params);
   const grid = new VoxelGrid(volume.sizeX, volume.sizeY, volume.sizeZ);
-  const tileByIndex = new Map<number, number>();
+  const materialByIndex = new Map<number, number>();
   for (const cell of volume.cells) {
-    // The grid stores emissive as a 0..255 byte; the cell's is 0..1.
-    grid.set(cell.x, cell.y, cell.z, cell.r, cell.g, cell.b, Math.round(cell.emissive * 255));
-    tileByIndex.set(grid.index(cell.x, cell.y, cell.z), terrainTile(cell.material));
+    // White albedo lets the coloured tile show true; emissive (0..1 → 0..255 byte)
+    // still floors a cave crystal's glow alongside its tile's own emissive.
+    grid.set(cell.x, cell.y, cell.z, 255, 255, 255, Math.round(cell.emissive * 255));
+    materialByIndex.set(grid.index(cell.x, cell.y, cell.z), terrainMaterial(cell.material));
   }
   return voxelGridToModel(grid, {
     center: "content",
     geometry: HEXEL_GEOMETRY,
-    tileForCell: (x, y, z) => tileByIndex.get(grid.index(x, y, z)) ?? -1,
+    tileForCell: (x, y, z) => materialByIndex.get(grid.index(x, y, z)) ?? -1,
   });
 }

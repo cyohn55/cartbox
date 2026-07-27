@@ -1,141 +1,132 @@
 /**
- * The demo world's texture atlas — procedural pixel-art tiles that skin the voxel
- * and hexel faces (grass, dirt, rock, crystal, metal, screen, monolith).
+ * The world's texture atlas — hand-authored pixel-art tiles (see
+ * {@link AUTHORED_TILES}) plus the {@link FaceMaterial}s that decide which tile
+ * skins a face. A voxel carries a *material* index (not a raw tile index): the
+ * renderer then picks the material's top / side / bottom tile per face, so a grass
+ * block shows grass on top, a grassy lip on its sides and soil beneath, and a log
+ * shows rings on its ends and bark around it.
  *
- * These stand in for sprites authored in the editor: a {@link FaceTexture} is the
- * same straight-alpha RGBA format the sprite tools produce, so a real drawn tile
- * would drop into the same atlas slot with no renderer change. Generation is
- * deterministic per seed, so the world textures the same way every load, and the
- * unit tests can assert on the produced texels.
+ * Materials index into the tile list, so the two stay a single atlas the renderer
+ * samples directly. Colour tiles (terrain, blocks) are drawn true-colour and used
+ * on near-white voxels; console tiles (metal, screen, monolith) stay greyscale so
+ * the voxel's own colour tints them.
  */
 
-import type { FaceTexture, TextureAtlas } from "@cartbox/editor";
+import type { FaceMaterial, TextureAtlas } from "@cartbox/editor";
+import { AUTHORED_TILES, type AuthoredTileName } from "./authoredTiles";
 import type { TerrainMaterial } from "./hexelTerrainSpecs";
 
-/** Atlas slot indices; the order the tiles are built in {@link buildWorldAtlas}. */
-export const TILE = {
+/**
+ * Atlas tile slots, in the order the tiles are laid out. Named for the art each
+ * holds; materials below reference these. Deriving the order from the authored
+ * library keeps slots and art in lockstep.
+ */
+const TILE_ORDER = [
+  "grassTop",
+  "grassSide",
+  "dirt",
+  "rock",
+  "sand",
+  "water",
+  "brick",
+  "planks",
+  "woodBark",
+  "woodRings",
+  "leaves",
+  "crystal",
+  "metal",
+  "screen",
+  "monolith",
+] as const satisfies readonly AuthoredTileName[];
+
+/** Tile index by name, so materials read declaratively. */
+const TILE: Record<AuthoredTileName, number> = TILE_ORDER.reduce(
+  (map, name, index) => ({ ...map, [name]: index }),
+  {} as Record<AuthoredTileName, number>,
+);
+
+/** A material whose three face groups all sample the one tile `tile`. */
+function uniform(tile: number): FaceMaterial {
+  return { top: tile, side: tile, bottom: tile };
+}
+
+/**
+ * Named materials, in the order they occupy atlas material slots. A voxel's tile
+ * value is one of these indices. The genuinely per-face ones are grass (grass cap
+ * over soil sides) and wood (ringed ends, bark sides); the rest are uniform.
+ */
+export const MATERIAL = {
   grass: 0,
   dirt: 1,
   rock: 2,
-  crystal: 3,
-  metal: 4,
-  screen: 5,
-  monolith: 6,
+  sand: 3,
+  water: 4,
+  brick: 5,
+  planks: 6,
+  wood: 7,
+  leaves: 8,
+  crystal: 9,
+  metal: 10,
+  screen: 11,
+  monolith: 12,
 } as const;
 
-/** Tile a terrain material samples from. */
-export function terrainTile(material: TerrainMaterial): number {
-  return TILE[material];
+export type MaterialName = keyof typeof MATERIAL;
+
+/** The face→tile mapping for each material, indexed by its {@link MATERIAL} value. */
+const MATERIAL_FACES: readonly FaceMaterial[] = [
+  { top: TILE.grassTop, side: TILE.grassSide, bottom: TILE.dirt }, // grass
+  uniform(TILE.dirt),
+  uniform(TILE.rock),
+  uniform(TILE.sand),
+  uniform(TILE.water),
+  uniform(TILE.brick),
+  uniform(TILE.planks),
+  { top: TILE.woodRings, side: TILE.woodBark, bottom: TILE.woodRings }, // wood
+  uniform(TILE.leaves),
+  uniform(TILE.crystal),
+  uniform(TILE.metal),
+  uniform(TILE.screen),
+  uniform(TILE.monolith),
+];
+
+/** Map a terrain cell's material to its atlas material index. */
+export function terrainMaterial(material: TerrainMaterial): number {
+  return MATERIAL[material];
 }
 
-/** Edge length of every tile, in texels. Chosen to out-resolve a face's pixels. */
-const TILE_SIZE = 12;
-
-/** A per-texel RGBA (+ optional emissive 0..255) the tile painter returns. */
-interface Texel {
-  readonly r: number;
-  readonly g: number;
-  readonly b: number;
-  /** Alpha 0..255; 0 leaves a hole the face shows through. Default 255. */
-  readonly a?: number;
-  /** Self-emissive 0..255. Default 0. */
-  readonly e?: number;
-}
-
-/** A small, fast, seedable PRNG so each tile is reproducible. */
-function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/** Build one square tile by calling `paint` for each texel. */
-function makeTile(seed: number, paint: (x: number, y: number, random: () => number) => Texel): FaceTexture {
-  const data = new Uint8ClampedArray(TILE_SIZE * TILE_SIZE * 4);
-  const emissive = new Uint8Array(TILE_SIZE * TILE_SIZE);
-  let anyEmissive = false;
-  const random = mulberry32(seed);
-  for (let y = 0; y < TILE_SIZE; y += 1) {
-    for (let x = 0; x < TILE_SIZE; x += 1) {
-      const texel = paint(x, y, random);
-      const i = y * TILE_SIZE + x;
-      data[i * 4] = texel.r;
-      data[i * 4 + 1] = texel.g;
-      data[i * 4 + 2] = texel.b;
-      data[i * 4 + 3] = texel.a ?? 255;
-      emissive[i] = texel.e ?? 0;
-      if (emissive[i]! > 0) anyEmissive = true;
-    }
-  }
-  return anyEmissive ? { size: TILE_SIZE, data, emissive } : { size: TILE_SIZE, data };
+/** A material offered in a build/paint palette: its index, a label and a swatch. */
+export interface BuildMaterial {
+  readonly name: MaterialName;
+  readonly material: number;
+  /** A representative colour for the palette button, matching the tile art. */
+  readonly swatch: string;
 }
 
 /**
- * A greyscale texel: the tiles carry *luminance and detail*, and the renderer
- * tints them by each voxel's colour (see fillTexturedQuad). So one grass tile
- * greened by the grass cell, one metal tile reddened by a handheld body, and one
- * screen tile hued by each screen all come from neutral art — the tile supplies
- * the grain, the voxel supplies the colour.
+ * The materials a player can build or paint with, in palette order. Excludes the
+ * console-only surfaces (metal / screen / monolith), which are greyscale detail
+ * meant to be tinted by a specific voxel rather than placed as world blocks.
  */
-function grey(luminance: number, emissive = 0, alpha = 255): Texel {
-  return { r: luminance, g: luminance, b: luminance, a: alpha, e: emissive };
-}
+export const BUILD_MATERIALS: readonly BuildMaterial[] = [
+  { name: "grass", material: MATERIAL.grass, swatch: "#4a9644" },
+  { name: "dirt", material: MATERIAL.dirt, swatch: "#78562f" },
+  { name: "sand", material: MATERIAL.sand, swatch: "#deca95" },
+  { name: "rock", material: MATERIAL.rock, swatch: "#6c6c74" },
+  { name: "brick", material: MATERIAL.brick, swatch: "#a84a3a" },
+  { name: "planks", material: MATERIAL.planks, swatch: "#a87c4c" },
+  { name: "wood", material: MATERIAL.wood, swatch: "#7a5836" },
+  { name: "leaves", material: MATERIAL.leaves, swatch: "#3a8238" },
+  { name: "water", material: MATERIAL.water, swatch: "#2e6cbe" },
+  { name: "crystal", material: MATERIAL.crystal, swatch: "#5adceb" },
+];
 
 /**
- * Build the demo atlas. Tile order matches {@link TILE}. Tiles are greyscale
- * detail (tinted at render time by the voxel colour); the ones that should glow
- * carry emissive. Deterministic per seed so the same world always textures
- * identically.
+ * Build the world atlas: the authored tiles in slot order, plus the material
+ * face-maps. Unlike the old procedural atlas this takes no seed — the art is
+ * fixed, so the world textures identically every load.
  */
-export function buildWorldAtlas(seed = 20260722): TextureAtlas {
-  const tiles: FaceTexture[] = [
-    // grass: bright grain with a few darker blades (greened by the grass cell).
-    makeTile(seed + TILE.grass, (_x, y, random) => {
-      const blade = random() > 0.86;
-      const jitter = Math.round((random() - 0.5) * 26);
-      if (blade) return grey(150 + jitter);
-      return grey(228 + jitter - Math.round((y / TILE_SIZE) * 10));
-    }),
-    // dirt: grainy with scattered darker pebbles (browned by the dirt cell).
-    makeTile(seed + TILE.dirt, (_x, _y, random) => {
-      if (random() > 0.9) return grey(150);
-      return grey(224 + Math.round((random() - 0.5) * 28));
-    }),
-    // rock: speckle broken by darker cracks (greyed by the rock cell).
-    makeTile(seed + TILE.rock, (x, y, random) => {
-      const crack = (x + y) % 5 === 0 && random() > 0.5;
-      if (crack) return grey(150);
-      return grey(230 + Math.round((random() - 0.5) * 24));
-    }),
-    // crystal: bright facets that glow (cyaned by the crystal cell).
-    makeTile(seed + TILE.crystal, (x, y, random) => {
-      const facet = ((x >> 1) + (y >> 1)) % 2 === 0;
-      const base = facet ? 245 : 200;
-      return grey(base, (facet ? 170 : 110) + Math.round(random() * 30));
-    }),
-    // metal: brushed sheen with a lighter horizontal band (hued by the body).
-    makeTile(seed + TILE.metal, (_x, y, random) => {
-      const band = y === 3 || y === 4;
-      return grey((band ? 245 : 205) + Math.round((random() - 0.5) * 12));
-    }),
-    // screen: scanlines with a bright corner glint, all emissive (hued by the
-    // screen cell so each handheld's display glows in its own colour).
-    makeTile(seed + TILE.screen, (x, y, random) => {
-      const glint = x >= TILE_SIZE - 3 && y <= 2;
-      if (glint) return grey(245, 235);
-      const scan = y % 2 === 0;
-      return grey(scan ? 200 : 120, (scan ? 150 : 80) + Math.round(random() * 20));
-    }),
-    // monolith: stone with glowing runes (purpled by the monolith cell).
-    makeTile(seed + TILE.monolith, (x, y, random) => {
-      const rune = (x === 5 || x === 6) && y >= 2 && y <= TILE_SIZE - 3 && random() > 0.4;
-      if (rune) return grey(245, 220);
-      return grey(200 + Math.round((random() - 0.5) * 18), 40);
-    }),
-  ];
-  return { tiles };
+export function buildWorldAtlas(): TextureAtlas {
+  const tiles = TILE_ORDER.map((name) => AUTHORED_TILES[name]);
+  return { tiles, materials: MATERIAL_FACES };
 }

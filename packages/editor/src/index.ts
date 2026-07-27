@@ -100,6 +100,7 @@ export {
   deserializeCellShape,
   MAX_VOXEL_GRID_DIM,
   VOXEL_GRID_VERSION,
+  MATERIAL_NONE,
   type VoxelCell,
   type GridVoxelModel,
   type GridAxis,
@@ -153,8 +154,12 @@ export {
 } from "./render/sceneRenderer";
 export {
   tileAt,
+  faceTile,
+  spriteToFaceTexture,
+  MATERIAL_TOP_THRESHOLD,
   type FaceTexture,
   type TextureAtlas,
+  type FaceMaterial,
 } from "./render/faceTexture";
 export {
   LIGHTING_PRESETS,

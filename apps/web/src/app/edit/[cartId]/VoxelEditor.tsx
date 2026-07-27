@@ -32,6 +32,7 @@ import {
   geometryFor,
   isValidSite,
   MAX_VOXEL_GRID_DIM,
+  MATERIAL_NONE,
   shapeOffsets,
   solidOffsets,
   type CellShape,
@@ -48,7 +49,16 @@ import {
 
 import { createVoxelBackdropProp } from "@/lib/backdropProps";
 import { loadWorkingSet, loadPublishedSet, saveWorkingSet, type PendingVoxelEdit } from "@/lib/backdropPropsStore";
+import { buildWorldAtlas, BUILD_MATERIALS } from "@/lib/faceTextures";
 import styles from "./editor.module.css";
+
+/**
+ * The world's authored tile atlas, shared by every editor instance. The Tiles
+ * tool assigns one of its materials to a voxel; the preview then samples the
+ * material's per-face tiles instead of the flat colour. Fixed art, so it is built
+ * once at module load.
+ */
+const WORLD_ATLAS = buildWorldAtlas();
 
 const DEFAULT_GRID = 16;
 const GRID_SIZES = [8, 16, 24, 32, 64, 128, 256].filter((n) => n <= MAX_VOXEL_GRID_DIM);
@@ -84,7 +94,7 @@ const ORBIT_SPEED = 0.011; // radians per pixel dragged
 const DRAG_THRESHOLD = 4; // px of movement before a press becomes an orbit
 const SEED_COLOR: readonly [number, number, number] = [176, 182, 198];
 
-type VoxelTool = "add" | "remove" | "paint" | "fill" | "select" | "wand" | "shape";
+type VoxelTool = "add" | "remove" | "paint" | "fill" | "select" | "wand" | "shape" | "material";
 const TOOLS: readonly { id: VoxelTool; label: string; glyph: string }[] = [
   { id: "add", label: "Add", glyph: "＋" },
   { id: "remove", label: "Remove", glyph: "－" },
@@ -93,6 +103,7 @@ const TOOLS: readonly { id: VoxelTool; label: string; glyph: string }[] = [
   { id: "select", label: "Select", glyph: "⬚" },
   { id: "wand", label: "Wand", glyph: "✨" },
   { id: "shape", label: "Shape", glyph: "◫" },
+  { id: "material", label: "Tiles", glyph: "🧱" },
 ];
 
 // The paint/add/remove tools stamp a solid cube "brush" of this radius around the
@@ -184,6 +195,7 @@ const HIGHLIGHT: Record<VoxelTool, string> = {
   select: "#7df0ff",
   wand: "#c69dff",
   shape: "#7db8fc",
+  material: "#ffd27d",
 };
 
 type Cell = [number, number, number];
@@ -394,6 +406,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   const [pitch, setPitch] = useState(0.72);
   const [tool, setTool] = useState<VoxelTool>("add");
   const [colorIndex, setColorIndex] = useState(1);
+  const [materialIndex, setMaterialIndex] = useState(BUILD_MATERIALS[0]!.material);
   const [hover, setHover] = useState<HoverTarget | null>(null); // what the cursor is aiming at
   const [shapeKind, setShapeKind] = useState<ShapeChoice>("rectangle");
   const [shapeStyle, setShapeStyle] = useState<VoxelShapeStyle>("outline");
@@ -485,6 +498,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
       cell: renderCell,
       size: VIEWPORT,
       light,
+      atlas: WORLD_ATLAS,
       out: buffers.out,
       depthBuffer: buffers.depth,
       pickVoxel: buffers.pickVoxel,
@@ -682,6 +696,25 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     commit();
   };
 
+  /**
+   * Tiles tool: skin the clicked voxel with the selected material (right-click
+   * clears it back to flat). Assigning paints the voxel white so the authored
+   * material tile shows as drawn — the renderer tints a tile by the voxel colour,
+   * so a white voxel reproduces the art faithfully. The cell's emissive is kept.
+   */
+  const applyMaterial = (pick: Pick, erase: boolean) => {
+    const grid = gridRef.current!;
+    if (!grid.isFilled(pick.x, pick.y, pick.z)) return;
+    if (erase) {
+      grid.setMaterial(pick.x, pick.y, pick.z, MATERIAL_NONE);
+    } else {
+      const cell = grid.get(pick.x, pick.y, pick.z)!;
+      grid.set(pick.x, pick.y, pick.z, 255, 255, 255, cell.emissive, materialIndex);
+    }
+    setHover(null);
+    commit();
+  };
+
   /** Apply the active tool at a canvas pixel. Right-click removes/erases; Shift adds to a selection. */
   const applyAt = (clientX: number, clientY: number, secondary: boolean, shift: boolean) => {
     const pick = pickAt(clientX, clientY);
@@ -704,6 +737,9 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
         return;
       case "fill":
         applyFill(pick, secondary);
+        return;
+      case "material":
+        applyMaterial(pick, secondary);
         return;
       default:
         applyBrush(pick, secondary ? "remove" : (tool as "add" | "remove" | "paint"));
@@ -995,6 +1031,31 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
               {tool === "wand"
                 ? "Click a voxel to select its connected colour run. Shift-click adds another run."
                 : "Click a voxel to flood the palette colour through its connected run. Right-click erases it."}
+            </p>
+          </div>
+        )}
+
+        {tool === "material" && (
+          <div>
+            <div className={styles.groupLabel}>Material</div>
+            <div className={styles.paletteGrid}>
+              {BUILD_MATERIALS.map((entry) => (
+                <button
+                  key={entry.name}
+                  type="button"
+                  className={`${styles.swatch} ${entry.material === materialIndex ? styles.swatchActive : ""}`}
+                  style={{ background: entry.swatch }}
+                  onClick={() => setMaterialIndex(entry.material)}
+                  title={entry.name}
+                  aria-label={`Material ${entry.name}`}
+                  aria-pressed={entry.material === materialIndex}
+                />
+              ))}
+            </div>
+            <p className={styles.panelMeta} style={{ lineHeight: 1.5, marginTop: 6 }}>
+              Click a voxel to skin it with the selected tile material — grass caps
+              a dirt block, a log rings its ends. Right-click clears a voxel back to
+              flat colour.
             </p>
           </div>
         )}
@@ -1334,7 +1395,9 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
         </div>
 
         <p className={styles.panelMeta} style={{ lineHeight: 1.5 }}>
-          {tool === "shape"
+          {tool === "material"
+            ? "Click a voxel to skin it with the selected tile material; the preview textures it live. Materials carry per-face art, so grass shows blades on top and soil on the sides. Right-click clears a voxel back to flat colour. Drag to orbit, scroll to zoom."
+            : tool === "shape"
             ? "The glowing outline shows the shape's footprint. Rect and Circle stamp on the face you point at; Cube and Sphere fill a 3D volume there. Pick Outline or Fill and a size, click a face to stamp, right-click to erase. Drag to orbit, scroll to zoom."
             : tool === "select"
               ? "Click a voxel to select it; Shift-click to add or remove more. Selected voxels glow — Paint or Delete the whole selection from the panel on the left. Drag to orbit, scroll to zoom."

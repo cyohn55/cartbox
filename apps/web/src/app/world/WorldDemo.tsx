@@ -14,15 +14,25 @@
  * Reduced motion draws a single still frame.
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import { renderScene, CUBE_GEOMETRY, DEFAULT_MODEL_LIGHT, type ModelLight, type PlacedModel } from "@cartbox/editor";
+import { renderScene, DEFAULT_MODEL_LIGHT, type ModelLight, type PlacedModel } from "@cartbox/editor";
 
+import { BUILD_MATERIALS } from "@/lib/faceTextures";
 import { applyHandheldConfig, applyOsScreen, buildWorldScene, sceneModelsAt, stepSnow } from "@/lib/worldScene";
 import { renderOsApp, osReduce, initialOsState, type OsButton, type OsState } from "@/lib/cartboxOs";
 import { saveHandheldChoice } from "@/lib/handheldChoice";
 import { stepWalk, type WalkParams, type WalkState } from "@/lib/walkControls";
-import { BuildLayer, screenToBuffer, unprojectScreen, type BlockColor, type WorldCamera } from "@/lib/worldEdit";
+import {
+  BuildLayer,
+  cubeEdgesScreen,
+  pickSurface,
+  screenToBuffer,
+  type BlockColor,
+  type PickBuffers,
+  type WorldCamera,
+} from "@/lib/worldEdit";
+import { loadBuildLayer, saveBuildLayer } from "@/lib/worldStorage";
 
 /** Native render resolution; the canvas is upscaled by CSS for a crisp pixel look. */
 const RENDER = 380;
@@ -49,6 +59,17 @@ const BUILD_HEIGHT_HEADROOM = 32;
 
 /** The colour a placed block is painted. A warm sandstone that reads on the terrain. */
 const BLOCK_COLOR: BlockColor = { r: 214, g: 176, b: 122 };
+
+/** How the hover cursor's wireframe is stroked over the rasterized scene. */
+const CURSOR_STROKE = "rgba(255,255,255,0.9)";
+const CURSOR_SHADOW = "rgba(0,0,0,0.55)";
+
+/**
+ * Quiet period after the last edit before the build layer is written to storage.
+ * Saving walks the whole lattice, so a burst of clicks writes once at the end
+ * rather than once per block.
+ */
+const SAVE_DEBOUNCE_MS = 600;
 
 /** A low sun that rakes the terrain so the hexel slopes read. */
 const WORLD_LIGHT: ModelLight = {
@@ -98,6 +119,17 @@ function osButtonFor(key: string): OsButton | null {
 
 export function WorldDemo() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // The material a placed block is skinned with. Held in a ref too so the render
+  // loop's edit handler reads the current choice without re-running the effect.
+  const [selectedMaterial, setSelectedMaterial] = useState<number>(BUILD_MATERIALS[0]!.material);
+  const selectedMaterialRef = useRef<number>(selectedMaterial);
+  // Whether the player has chosen a handheld and is now walking/building — gates
+  // the material palette, which is only meaningful in build mode.
+  const [walking, setWalking] = useState(false);
+
+  useEffect(() => {
+    selectedMaterialRef.current = selectedMaterial;
+  }, [selectedMaterial]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -141,7 +173,19 @@ export function WorldDemo() {
       terrainModel.sizeX + BUILD_MARGIN * 2,
       terrainModel.sizeY + BUILD_HEIGHT_HEADROOM,
       terrainModel.sizeZ + BUILD_MARGIN * 2,
+      scene.atlas,
     );
+    // Blocks built in an earlier visit are still standing (a save from a
+    // differently sized world is rejected and simply starts empty).
+    loadBuildLayer(build);
+    // The pick + depth buffers as one bundle, so an edit and the hover cursor
+    // resolve a pixel through exactly the same path.
+    const pickBuffers: PickBuffers = {
+      instance: pickInstance,
+      face: pickFace,
+      depth: depthBuffer,
+      size: RENDER,
+    };
     // What the last drawn frame projected with, so a click can unproject exactly.
     // `models` and `buildIndex` let a pick's model index name the object (and tell
     // a build block from terrain); `buildModel` caches the layer between edits.
@@ -183,9 +227,44 @@ export function WorldDemo() {
       context.fillRect(0, 0, RENDER, RENDER);
       context.drawImage(tile, 0, 0);
 
-      lastFrame.camera = { yaw, pitch, cell, centre: RENDER / 2, origin };
+      const camera: WorldCamera = { yaw, pitch, cell, centre: RENDER / 2, origin };
+      lastFrame.camera = camera;
       lastFrame.models = models;
       lastFrame.buildIndex = buildIndex;
+
+      // The cursor is recomputed every frame from the pointer's pixel, so it keeps
+      // tracking the surface as the player walks and turns under a still mouse.
+      if (withPick) drawBuildCursor(models, camera);
+    };
+
+    /**
+     * Outline the cell a left-tap would fill, so building is aimed rather than
+     * guessed. Drawn as a wireframe over the finished frame (a dark pass under a
+     * light one, so it reads against both sky and terrain). Nothing is drawn when
+     * the pointer is off the canvas, over open sky, or over a spot where a block
+     * cannot go — the preview shows only legal placements.
+     */
+    const drawBuildCursor = (models: readonly PlacedModel[], camera: WorldCamera) => {
+      if (!hover) return;
+      const hit = pickSurface(hover.px, hover.py, pickBuffers, models, camera);
+      if (!hit) return;
+      const target = build.placementCell(hit.point, hit.normal);
+      if (!target) return;
+
+      const centre = build.cellToWorld(target[0], target[1], target[2]);
+      context.save();
+      context.beginPath();
+      for (const [from, to] of cubeEdgesScreen(centre, camera)) {
+        context.moveTo(from[0], from[1]);
+        context.lineTo(to[0], to[1]);
+      }
+      context.lineWidth = 2;
+      context.strokeStyle = CURSOR_SHADOW;
+      context.stroke();
+      context.lineWidth = 1;
+      context.strokeStyle = CURSOR_STROKE;
+      context.stroke();
+      context.restore();
     };
 
     const walkParams: WalkParams = {
@@ -211,6 +290,25 @@ export function WorldDemo() {
     let pointerStartY = 0;
     let pointerMoved = false;
     let pointerButton = 0;
+    // The buffer pixel the pointer rests on, or null when it is off the canvas or
+    // mid-drag; the hover cursor previews the block that pixel would place.
+    let hover: { readonly px: number; readonly py: number } | null = null;
+    // Trailing timer that persists the build layer once the clicking stops.
+    let saveTimer: number | null = null;
+
+    const flushSave = () => {
+      if (saveTimer === null) return;
+      window.clearTimeout(saveTimer);
+      saveTimer = null;
+      saveBuildLayer(build);
+    };
+    const scheduleSave = () => {
+      if (saveTimer !== null) window.clearTimeout(saveTimer);
+      saveTimer = window.setTimeout(() => {
+        saveTimer = null;
+        saveBuildLayer(build);
+      }, SAVE_DEBOUNCE_MS);
+    };
 
     const axis = (positive: Set<string>, negative: Set<string>): number => {
       let value = 0;
@@ -234,6 +332,7 @@ export function WorldDemo() {
           // camera to the player from where the OS view left it.
           saveHandheldChoice(os.config);
           walk = { origin: view.lastOrigin, yaw: view.lastYaw };
+          setWalking(true); // reveal the build-material palette
         }
         return;
       }
@@ -259,27 +358,25 @@ export function WorldDemo() {
       if (os.mode !== "done") return; // building is a walk-mode action only
       const camera = lastFrame.camera;
       if (!camera) return;
-      const rect = canvas.getBoundingClientRect();
-      const buf = screenToBuffer(event.clientX - rect.left, event.clientY - rect.top, rect.width, rect.height, RENDER);
+      const buf = pointerToBuffer(event);
       if (!buf) return;
-      const di = buf.py * RENDER + buf.px;
-      const instance = pickInstance[di]!;
-      if (instance < 0) return; // tapped the open sky
-      const faceIndex = pickFace[di]!;
-      if (faceIndex < 0) return;
-      const placed = lastFrame.models[instance];
-      if (!placed) return;
-      const face = (placed.model.geometry ?? CUBE_GEOMETRY).faces[faceIndex];
-      if (!face) return;
+      const hit = pickSurface(buf.px, buf.py, pickBuffers, lastFrame.models, camera);
+      if (!hit) return;
 
-      const hit = unprojectScreen(buf.px + 0.5, buf.py + 0.5, depthBuffer[di]!, camera);
       const changed = remove
-        ? build.remove(hit, face.normal)
-        : build.place(hit, face.normal, BLOCK_COLOR);
+        ? build.remove(hit.point, hit.normal)
+        : build.place(hit.point, hit.normal, BLOCK_COLOR, selectedMaterialRef.current);
       if (changed) {
         buildModel = build.toPlacedModel();
+        scheduleSave(); // keep the build across visits, once the clicking settles
         requestRender(); // reflect the edit even between capped frames
       }
+    };
+
+    /** The render-buffer pixel a pointer event points at, or null if off-canvas. */
+    const pointerToBuffer = (event: PointerEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      return screenToBuffer(event.clientX - rect.left, event.clientY - rect.top, rect.width, rect.height, RENDER);
     };
 
     const onPointerDown = (event: PointerEvent) => {
@@ -292,7 +389,11 @@ export function WorldDemo() {
       canvas.setPointerCapture(event.pointerId);
     };
     const onPointerMove = (event: PointerEvent) => {
-      if (!dragging) return;
+      if (!dragging) {
+        hover = pointerToBuffer(event); // aim the build cursor
+        return;
+      }
+      hover = null; // a look-drag isn't aiming; hide the cursor until it settles
       const dx = event.clientX - pointerStartX;
       const dy = event.clientY - pointerStartY;
       if (dx * dx + dy * dy > TAP_SLOP_SQUARED) pointerMoved = true;
@@ -303,7 +404,11 @@ export function WorldDemo() {
       if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
       const wasTap = dragging && !pointerMoved;
       dragging = false;
+      hover = pointerToBuffer(event); // re-aim where the pointer came to rest
       if (wasTap) applyEdit(event, pointerButton === 2); // secondary button removes
+    };
+    const onPointerLeave = () => {
+      hover = null;
     };
     const onContextMenu = (event: MouseEvent) => {
       event.preventDefault(); // free the right button for block removal
@@ -311,14 +416,17 @@ export function WorldDemo() {
     canvas.addEventListener("pointerdown", onPointerDown);
     canvas.addEventListener("pointermove", onPointerMove);
     canvas.addEventListener("pointerup", onPointerUp);
+    canvas.addEventListener("pointerleave", onPointerLeave);
     canvas.addEventListener("contextmenu", onContextMenu);
 
     const teardown = () => {
+      flushSave(); // don't lose an edit made in the last moment before unmount
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       canvas.removeEventListener("pointerdown", onPointerDown);
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerup", onPointerUp);
+      canvas.removeEventListener("pointerleave", onPointerLeave);
       canvas.removeEventListener("contextmenu", onContextMenu);
     };
 
@@ -427,19 +535,77 @@ export function WorldDemo() {
   }, []);
 
   return (
-    <canvas
-      ref={canvasRef}
-      tabIndex={0}
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10, width: "100%" }}>
+      <canvas
+        ref={canvasRef}
+        tabIndex={0}
+        style={{
+          width: "min(100%, 560px)",
+          aspectRatio: "1 / 1",
+          imageRendering: "pixelated",
+          borderRadius: 12,
+          touchAction: "none",
+          cursor: "grab",
+          boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
+        }}
+        aria-label="Onboarding world: customise the handheld in its OS, then walk the world"
+      />
+      {walking && (
+        <MaterialPalette selected={selectedMaterial} onSelect={setSelectedMaterial} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * The build-material palette shown once the player is walking: a swatch per
+ * buildable material, the selected one ringed. Left-tap the world to place the
+ * chosen material, right-tap to remove.
+ */
+function MaterialPalette({
+  selected,
+  onSelect,
+}: {
+  readonly selected: number;
+  readonly onSelect: (material: number) => void;
+}) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Build material"
       style={{
-        width: "min(100%, 560px)",
-        aspectRatio: "1 / 1",
-        imageRendering: "pixelated",
-        borderRadius: 12,
-        touchAction: "none",
-        cursor: "grab",
-        boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
+        display: "flex",
+        flexWrap: "wrap",
+        justifyContent: "center",
+        gap: 6,
+        maxWidth: "min(100%, 560px)",
       }}
-      aria-label="Onboarding world: customise the handheld in its OS, then walk the world"
-    />
+    >
+      {BUILD_MATERIALS.map((entry) => {
+        const isSelected = entry.material === selected;
+        return (
+          <button
+            key={entry.name}
+            type="button"
+            role="radio"
+            aria-checked={isSelected}
+            aria-label={entry.name}
+            title={entry.name}
+            onClick={() => onSelect(entry.material)}
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: 8,
+              background: entry.swatch,
+              border: isSelected ? "3px solid #fff" : "3px solid rgba(0,0,0,0.35)",
+              outline: isSelected ? "2px solid #4a9eff" : "none",
+              cursor: "pointer",
+              padding: 0,
+              boxShadow: "0 2px 6px rgba(0,0,0,0.3)",
+            }}
+          />
+        );
+      })}
+    </div>
   );
 }

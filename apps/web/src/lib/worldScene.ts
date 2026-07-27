@@ -25,7 +25,7 @@ import {
 
 import { buildTerrainModel } from "./hexelTerrain";
 import { DEFAULT_TERRAIN_PARAMS, type TerrainParams } from "./hexelTerrainSpecs";
-import { buildWorldAtlas, TILE } from "./faceTextures";
+import { buildWorldAtlas, MATERIAL } from "./faceTextures";
 import {
   renderOsApp,
   initialOsState,
@@ -164,9 +164,9 @@ function buildHandheldModel(
   return voxelGridToModel(grid, {
     center: "content",
     tileForCell: (_x, _y, _z, cell) => {
-      if (cell.emissive > 0) return TILE.screen;
+      if (cell.emissive > 0) return MATERIAL.screen;
       if (cell.r < 60 && cell.g < 60) return -1; // keep buttons flat-dark
-      return TILE.metal;
+      return MATERIAL.metal;
     },
   });
 }
@@ -206,7 +206,7 @@ function buildHeroHandheld(body: readonly [number, number, number]): { model: Vo
     tileForCell: (x, y, z, cell) => {
       if (onScreen(x, y, z)) return -1; // flat voxel display, no tile
       if (cell.r < 60 && cell.g < 60) return -1; // dark buttons stay flat
-      return TILE.metal;
+      return MATERIAL.metal;
     },
   });
 
@@ -354,7 +354,7 @@ export function buildWorldScene(options: WorldSceneOptions = {}): WorldScene {
   const seed = options.seed ?? terrainParams.seed;
   const random = mulberry32(seed);
 
-  const atlas = buildWorldAtlas(seed);
+  const atlas = buildWorldAtlas();
   const terrainModel = buildTerrainModel(terrainParams);
   const halfHeight = terrainModel.sizeY / 2;
   const halfWidth = terrainModel.sizeX / 2;
@@ -367,7 +367,7 @@ export function buildWorldScene(options: WorldSceneOptions = {}): WorldScene {
   const monolith: PlacedModel = {
     model: voxelGridToModel(block(4, monolithHeight, 4, 165, 95, 250, 150), {
       center: "content",
-      tileForCell: () => TILE.monolith,
+      tileForCell: () => MATERIAL.monolith,
     }),
     position: [-halfWidth * 0.5, 0, halfDepth * 0.35],
     atlas,

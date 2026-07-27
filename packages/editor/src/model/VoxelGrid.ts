@@ -20,6 +20,9 @@ import { CUBE_GEOMETRY, type CellGeometry, type CellShape } from "../render/cell
 /** Largest grid edge, bounding storage and per-edit render cost. */
 export const MAX_VOXEL_GRID_DIM = 256;
 
+/** A cell's material index meaning "no material" — render the flat colour. */
+export const MATERIAL_NONE = -1;
+
 /**
  * Format version of the serialized grid, bumped on any schema change.
  *
@@ -28,8 +31,12 @@ export const MAX_VOXEL_GRID_DIM = 256;
  * count rather than the grid *volume*. That is what makes large grids (up to
  * {@link MAX_VOXEL_GRID_DIM}³) practical: a dense v1 encode of a 256³ grid was
  * ~85MB and took over a second per edit. v1 (dense) payloads still deserialize.
+ *
+ * v3 adds an optional per-cell material index (see {@link VoxelGrid.setMaterial}).
+ * A grid with no materials still serializes as v2 — byte-identical to before — so
+ * only textured sculpts pay for the extra field; v1 and v2 payloads still load.
  */
-export const VOXEL_GRID_VERSION = 2;
+export const VOXEL_GRID_VERSION = 3;
 
 /** A single cell's contents. */
 export interface VoxelCell {
@@ -38,6 +45,12 @@ export interface VoxelCell {
   readonly b: number;
   /** Self-emissive strength, 0..255. */
   readonly emissive: number;
+  /**
+   * Texture material index into the atlas the renderer is given, or
+   * {@link MATERIAL_NONE} for a flat (untextured) cell. Optional so code that
+   * only reads colour is unaffected.
+   */
+  readonly tile?: number;
 }
 
 function assertDim(dim: number, axis: string): void {
@@ -54,6 +67,13 @@ export class VoxelGrid {
   readonly colors: Uint8ClampedArray;
   /** Emissive per cell (`sizeX*sizeY*sizeZ`), 0..255. */
   readonly emissive: Uint8Array;
+  /**
+   * Per-cell material index (`sizeX*sizeY*sizeZ`), or `null` until the first one
+   * is assigned. Allocated lazily so an untextured sculpt — the common case — pays
+   * no memory for it (a 256³ grid would otherwise reserve 32MB of unused indices).
+   * Each entry is {@link MATERIAL_NONE} when unset.
+   */
+  private tiles: Int16Array | null = null;
 
   constructor(sizeX: number, sizeY: number, sizeZ: number) {
     assertDim(sizeX, "sizeX");
@@ -65,6 +85,38 @@ export class VoxelGrid {
     const cells = sizeX * sizeY * sizeZ;
     this.colors = new Uint8ClampedArray(cells * 4);
     this.emissive = new Uint8Array(cells);
+  }
+
+  /** Allocate the per-cell material array on first use, filled with "none". */
+  private ensureTiles(): Int16Array {
+    if (!this.tiles) {
+      this.tiles = new Int16Array(this.sizeX * this.sizeY * this.sizeZ).fill(MATERIAL_NONE);
+    }
+    return this.tiles;
+  }
+
+  /** Whether any cell carries a material (so callers can skip the tile path). */
+  hasMaterials(): boolean {
+    if (!this.tiles) return false;
+    for (let i = 0; i < this.tiles.length; i += 1) if (this.tiles[i]! >= 0) return true;
+    return false;
+  }
+
+  /** The material index of a filled cell, or {@link MATERIAL_NONE} if none/empty. */
+  materialAt(x: number, y: number, z: number): number {
+    if (!this.tiles || !this.isFilled(x, y, z)) return MATERIAL_NONE;
+    return this.tiles[this.index(x, y, z)]!;
+  }
+
+  /**
+   * Set (or clear, with a negative index) the material of a filled cell. No-op on
+   * an empty or out-of-bounds cell, so a material always belongs to a real voxel.
+   */
+  setMaterial(x: number, y: number, z: number, tile: number): void {
+    if (!this.isFilled(x, y, z)) return;
+    const i = this.index(x, y, z);
+    if (tile >= 0) this.ensureTiles()[i] = tile;
+    else if (this.tiles) this.tiles[i] = MATERIAL_NONE;
   }
 
   /** Flat cell index for `(x, y, z)`; assumes the coordinates are in bounds. */
@@ -85,11 +137,21 @@ export class VoxelGrid {
   get(x: number, y: number, z: number): VoxelCell | null {
     if (!this.isFilled(x, y, z)) return null;
     const i = this.index(x, y, z);
-    return { r: this.colors[i * 4]!, g: this.colors[i * 4 + 1]!, b: this.colors[i * 4 + 2]!, emissive: this.emissive[i]! };
+    return {
+      r: this.colors[i * 4]!,
+      g: this.colors[i * 4 + 1]!,
+      b: this.colors[i * 4 + 2]!,
+      emissive: this.emissive[i]!,
+      tile: this.tiles ? this.tiles[i]! : MATERIAL_NONE,
+    };
   }
 
-  /** Place (or recolour) a solid cell. No-op if out of bounds. */
-  set(x: number, y: number, z: number, r: number, g: number, b: number, emissive = 0): void {
+  /**
+   * Place (or recolour) a solid cell. No-op if out of bounds. `tile` sets the
+   * cell's material (default {@link MATERIAL_NONE} = flat); passing a negative
+   * value clears any material the cell had, so a plain `set` untextures it.
+   */
+  set(x: number, y: number, z: number, r: number, g: number, b: number, emissive = 0, tile = MATERIAL_NONE): void {
     if (!this.inBounds(x, y, z)) return;
     const i = this.index(x, y, z);
     this.colors[i * 4] = r;
@@ -97,6 +159,8 @@ export class VoxelGrid {
     this.colors[i * 4 + 2] = b;
     this.colors[i * 4 + 3] = 255;
     this.emissive[i] = emissive;
+    if (tile >= 0) this.ensureTiles()[i] = tile;
+    else if (this.tiles) this.tiles[i] = MATERIAL_NONE;
   }
 
   /** Empty a cell. No-op if out of bounds. */
@@ -108,6 +172,7 @@ export class VoxelGrid {
     this.colors[i * 4 + 2] = 0;
     this.colors[i * 4 + 3] = 0;
     this.emissive[i] = 0;
+    if (this.tiles) this.tiles[i] = MATERIAL_NONE;
   }
 
   /** Number of occupied cells. */
@@ -129,17 +194,19 @@ export class VoxelGrid {
             g: this.colors[i * 4 + 1]!,
             b: this.colors[i * 4 + 2]!,
             emissive: this.emissive[i]!,
+            tile: this.tiles ? this.tiles[i]! : MATERIAL_NONE,
           });
         }
       }
     }
   }
 
-  /** A deep copy. */
+  /** A deep copy, including any per-cell materials. */
   clone(): VoxelGrid {
     const copy = new VoxelGrid(this.sizeX, this.sizeY, this.sizeZ);
     copy.colors.set(this.colors);
     copy.emissive.set(this.emissive);
+    if (this.tiles) copy.ensureTiles().set(this.tiles);
     return copy;
   }
 }
@@ -231,8 +298,13 @@ export function voxelGridToModel(grid: VoxelGrid, options: GridToModelOptions = 
   const nzs: number[] = [];
   const faceMasks: number[] = [];
   const gridIndices: number[] = [];
+  // Where each voxel's tile comes from: an explicit `tileForCell` override wins
+  // (terrain/props tag by material there), otherwise the grid's own per-cell
+  // materials skin an authored sculpt automatically. Only build the array if one
+  // of those supplies tiles, so untextured models stay tile-free as before.
   const tileForCell = options.tileForCell;
-  const tiles: number[] | undefined = tileForCell ? [] : undefined;
+  const emitTiles = tileForCell !== undefined || grid.hasMaterials();
+  const tiles: number[] | undefined = emitTiles ? [] : undefined;
 
   grid.forEachFilled((x, y, z, cell) => {
     let mask = 0;
@@ -263,7 +335,7 @@ export function voxelGridToModel(grid: VoxelGrid, options: GridToModelOptions = 
     nzs.push(vnz / len);
     faceMasks.push(mask);
     gridIndices.push(grid.index(x, y, z));
-    if (tiles) tiles.push(tileForCell!(x, y, z, cell));
+    if (tiles) tiles.push(tileForCell ? tileForCell(x, y, z, cell) : (cell.tile ?? MATERIAL_NONE));
   });
 
   return {
@@ -416,6 +488,12 @@ export function serializeVoxelGrid(grid: VoxelGrid, shape: CellShape = "cube"): 
   const indexView = new DataView(indexBytes.buffer);
   const rgb = new Uint8Array(count * 3);
   const emissive = new Uint8Array(count);
+  // Materials are written parallel to the filled cells (same order), as signed
+  // 16-bit indices, but only when the sculpt actually uses any — a material-free
+  // grid stays byte-identical to the v2 payload so old carts are untouched.
+  const hasMaterials = grid.hasMaterials();
+  const tileBytes = hasMaterials ? new Uint8Array(count * 2) : null;
+  const tileView = tileBytes ? new DataView(tileBytes.buffer) : null;
 
   let written = 0;
   grid.forEachFilled((x, y, z, cell) => {
@@ -424,11 +502,13 @@ export function serializeVoxelGrid(grid: VoxelGrid, shape: CellShape = "cube"): 
     rgb[written * 3 + 1] = cell.g;
     rgb[written * 3 + 2] = cell.b;
     emissive[written] = cell.emissive;
+    if (tileView) tileView.setInt16(written * 2, cell.tile ?? MATERIAL_NONE, true);
     written += 1;
   });
 
   return JSON.stringify({
-    version: VOXEL_GRID_VERSION,
+    // Only a textured sculpt bumps to v3; without materials it is still v2.
+    version: hasMaterials ? VOXEL_GRID_VERSION : 2,
     sizeX: grid.sizeX,
     sizeY: grid.sizeY,
     sizeZ: grid.sizeZ,
@@ -439,6 +519,7 @@ export function serializeVoxelGrid(grid: VoxelGrid, shape: CellShape = "cube"): 
     indices: bytesToBase64(indexBytes),
     rgb: bytesToBase64(rgb),
     emissive: bytesToBase64(emissive),
+    ...(tileBytes ? { tiles: bytesToBase64(tileBytes) } : {}),
   });
 }
 
@@ -489,6 +570,7 @@ export function deserializeVoxelGrid(json: string): VoxelGrid {
     indices?: string;
     rgb?: string;
     emissive?: string;
+    tiles?: string; // v3 only
     colors?: string; // v1 only
   };
   const grid = new VoxelGrid(raw.sizeX ?? 0, raw.sizeY ?? 0, raw.sizeZ ?? 0); // constructor bounds-checks dims
@@ -497,7 +579,9 @@ export function deserializeVoxelGrid(json: string): VoxelGrid {
   if (raw.version === 1) {
     return deserializeDenseV1(grid, cells, raw.colors ?? "", raw.emissive ?? "");
   }
-  if (raw.version !== VOXEL_GRID_VERSION) {
+  // v2 (no materials) and v3 (with materials) share the sparse cell layout; v3
+  // just carries an extra parallel `tiles` payload, absent on v2.
+  if (raw.version !== 2 && raw.version !== VOXEL_GRID_VERSION) {
     throw new Error(`Unsupported voxel grid version: ${String(raw.version)}`);
   }
 
@@ -511,6 +595,9 @@ export function deserializeVoxelGrid(json: string): VoxelGrid {
   if (indices.length !== count * 4 || rgb.length !== count * 3 || emissive.length !== count) {
     throw new Error(PAYLOAD_MISMATCH);
   }
+  const tiles = raw.tiles ? base64ToBytes(raw.tiles) : null;
+  if (tiles && tiles.length !== count * 2) throw new Error(PAYLOAD_MISMATCH);
+  const tileView = tiles ? new DataView(tiles.buffer, tiles.byteOffset, tiles.byteLength) : null;
   const indexView = new DataView(indices.buffer, indices.byteOffset, indices.byteLength);
   for (let k = 0; k < count; k += 1) {
     const cellIndex = indexView.getUint32(k * 4, true);
@@ -520,6 +607,12 @@ export function deserializeVoxelGrid(json: string): VoxelGrid {
     grid.colors[cellIndex * 4 + 2] = rgb[k * 3 + 2]!;
     grid.colors[cellIndex * 4 + 3] = 255;
     grid.emissive[cellIndex] = emissive[k]!;
+    if (tileView) {
+      const x = cellIndex % grid.sizeX;
+      const y = Math.floor(cellIndex / grid.sizeX) % grid.sizeY;
+      const z = Math.floor(cellIndex / (grid.sizeX * grid.sizeY));
+      grid.setMaterial(x, y, z, tileView.getInt16(k * 2, true));
+    }
   }
   return grid;
 }

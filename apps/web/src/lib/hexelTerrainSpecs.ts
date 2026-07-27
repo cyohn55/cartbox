@@ -16,7 +16,7 @@
  */
 
 /** The surface material of a terrain cell, used to pick its texture tile. */
-export type TerrainMaterial = "grass" | "dirt" | "rock" | "crystal";
+export type TerrainMaterial = "grass" | "dirt" | "rock" | "crystal" | "sand" | "water";
 
 /** A single solid hexel: an FCC lattice site with a colour and emissive glow. */
 export interface TerrainCell {
@@ -61,6 +61,12 @@ export interface TerrainParams {
   readonly caveThreshold: number;
   /** Sites of solid crust kept below the surface before caves may carve. */
   readonly crust: number;
+  /**
+   * Water table height, in sites. Columns whose surface falls below it flood to
+   * this level (a lake of `water` cells over a `sand` bed); columns cresting just
+   * above it get a `sand` beach. Set at or below 0 to disable water entirely.
+   */
+  readonly seaLevel: number;
   /** Seed for the deterministic noise. */
   readonly seed: number;
 }
@@ -75,6 +81,7 @@ export const DEFAULT_TERRAIN_PARAMS: TerrainParams = {
   caveScale: 7,
   caveThreshold: 0.62,
   crust: 2,
+  seaLevel: 7,
   seed: 1337,
 };
 
@@ -145,18 +152,33 @@ function surfaceHeight(x: number, z: number, params: TerrainParams): number {
   return Math.max(1, Math.min(params.sizeY - 1, Math.round(height)));
 }
 
-/** The colour and material of a solid cell by its depth below the local surface. */
-function shadeByDepth(depthBelowSurface: number, glow: number): Omit<TerrainCell, "x" | "y" | "z"> {
+/** How a column's surface sits relative to the water table. */
+type SurfaceKind = "underwater" | "beach" | "land";
+
+/** Classify a column by its surface height against the water table. */
+function surfaceKind(height: number, seaLevel: number): SurfaceKind {
+  if (height < seaLevel) return "underwater"; // floods to a lake
+  if (height <= seaLevel + 1) return "beach"; // sandy shore just above the water
+  return "land";
+}
+
+/**
+ * The colour and material of a solid cell by its depth below the local surface
+ * and how its column sits against the water table. The exposed top is grass on
+ * dry land, sand on a beach or lakebed; deeper cells are soil then rock.
+ */
+function shadeByDepth(depthBelowSurface: number, glow: number, kind: SurfaceKind): Omit<TerrainCell, "x" | "y" | "z"> {
   if (glow > 0) {
     // A cave crystal: cyan, self-lit so it reads in the dark.
     return { r: 90, g: 220, b: 235, emissive: glow, material: "crystal" };
   }
-  // The top two potential layers are grass: on the FCC lattice a column's
+  // The top two potential layers are the surface: on the FCC lattice a column's
   // surface site may be off-parity, so its highest *filled* cell can sit one
-  // below the nominal surface — keeping both grass makes the exposed top read as
-  // grass rather than patchy dirt.
+  // below the nominal surface — keeping both makes the exposed top read cleanly
+  // rather than patchy.
   if (depthBelowSurface <= 1) {
-    return { r: 74, g: 150, b: 68, emissive: 0, material: "grass" }; // grassy top
+    if (kind === "land") return { r: 74, g: 150, b: 68, emissive: 0, material: "grass" }; // grassy top
+    return { r: 222, g: 202, b: 150, emissive: 0, material: "sand" }; // beach / lakebed
   }
   if (depthBelowSurface <= 4) {
     return { r: 120, g: 86, b: 54, emissive: 0, material: "dirt" }; // soil
@@ -193,6 +215,7 @@ export function generateTerrain(params: TerrainParams = DEFAULT_TERRAIN_PARAMS):
   for (let z = 0; z < params.sizeZ; z += 1) {
     for (let x = 0; x < params.sizeX; x += 1) {
       const height = surfaceHeight(x, z, params);
+      const kind = surfaceKind(height, params.seaLevel);
       for (let y = 0; y <= height; y += 1) {
         if (!isSolid(x, y, z)) continue;
 
@@ -205,7 +228,17 @@ export function generateTerrain(params: TerrainParams = DEFAULT_TERRAIN_PARAMS):
             ? 0.85
             : 0;
 
-        cells.push({ x, y, z, ...shadeByDepth(height - y, glow) });
+        cells.push({ x, y, z, ...shadeByDepth(height - y, glow, kind) });
+      }
+
+      // Flood a below-water column up to the water table: every even-parity site
+      // above the ground and at or below sea level becomes a water cell, so the
+      // surface reads as one flat pool over the sand bed placed above.
+      if (kind === "underwater") {
+        for (let y = height + 1; y <= params.seaLevel && y < params.sizeY; y += 1) {
+          if (!isEvenParity(x, y, z)) continue; // water tiles the lattice too
+          cells.push({ x, y, z, r: 46, g: 108, b: 190, emissive: 0, material: "water" });
+        }
       }
     }
   }
