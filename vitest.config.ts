@@ -15,12 +15,17 @@ const playerSource = fileURLToPath(
 const editorSource = fileURLToPath(
   new URL("./packages/editor/src/index.ts", import.meta.url),
 );
+// The web app's own "@/..." alias. Without it, any app module that imports a
+// sibling that way is untestable — the test resolves the app file fine and then
+// dies on its imports.
+const webSource = fileURLToPath(new URL("./apps/web/src", import.meta.url));
 
 export default defineConfig({
   resolve: {
     alias: {
       "@cartbox/player": playerSource,
       "@cartbox/editor": editorSource,
+      "@": webSource,
     },
   },
   test: {

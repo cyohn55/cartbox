@@ -230,6 +230,88 @@
 
 /* --- Body: tool rail | stage | inspector --------------------------------- */
 
+/* --- Assets tab: the medium switch and the cart's named assets ------------
+ * Sits above the editor body rather than in either rail: the rails below swap
+ * wholesale when the medium changes, so a control living in one would vanish
+ * exactly when it is needed. */
+
+/* The tab's own two rows — strip, then editor — so the workbench above still
+ * sees a single grid item in its `52px 1fr` layout. */
+.assetsPane {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
+}
+
+.assetStrip {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  min-width: 0;
+}
+
+/* The medium switch sizes to its content here rather than filling a 200px rail,
+ * so its segments need horizontal padding of their own to stay legible — and it
+ * must not shrink when the asset list fills up. */
+.assetStrip .segmented {
+  flex-shrink: 0;
+}
+
+.assetStrip .segment {
+  padding: 6px 14px;
+}
+
+/* The asset chips take the slack and scroll on their own, so a cart with many
+ * assets never pushes the actions off the end of the strip. */
+.assetList {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.assetChip {
+  flex-shrink: 0;
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.assetChip:hover {
+  color: var(--fg);
+  border-color: var(--faint);
+}
+
+.assetChipActive {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1a1205;
+  font-weight: 600;
+}
+
+.assetEmpty {
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.assetActions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 .body {
   display: grid;
   grid-template-columns: 200px 1fr 300px;
@@ -253,6 +335,27 @@
   letter-spacing: 0.08em;
   color: var(--faint);
   margin-bottom: 8px;
+}
+
+/* A groupLabel heading a control nested inside an already-labelled group — the
+ * lighting sliders under "Lighting", for instance. Needs to breathe above, since
+ * the rail's own flex gap only separates top-level groups. */
+.railSubLabel {
+  margin-top: 8px;
+}
+
+/* Explanatory copy under a rail control: what the active tool does, what the
+ * current setting means. */
+.railHint {
+  font-size: 12px;
+  color: var(--faint);
+  line-height: 1.5;
+  margin-top: 6px;
+}
+
+/* A rail control stacked directly under another inside the same group. */
+.railSpaced {
+  margin-top: 6px;
 }
 
 .toolGroup {

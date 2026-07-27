@@ -46,6 +46,7 @@ import { ClassMappingEditor } from "./ClassMappingEditor";
 import { FieldPreview } from "./FieldPreview";
 import { GeneratorPanel } from "./GeneratorPanel";
 import { MapCanvas } from "./MapCanvas";
+import { RailGroup, RangeControl, SegmentedControl, ToolRail } from "./railControls";
 import { MaterialSurface, NormalSurface } from "./paintSurface";
 import { MaterialBrushSurface } from "./materialBrushSurface";
 import { TilePicker } from "./TilePicker";
@@ -64,6 +65,9 @@ import {
 
 /** The tiles page the map stamps from. */
 const TILES_PAGE = 0;
+
+/** The zoom levels as the rail selects them — by index, which is what `zoom` holds. */
+const ZOOM_OPTIONS = MAP_ZOOMS.map((option, index) => ({ id: index, label: option.label }));
 
 interface MapEditorProps {
   sheet: SpriteSheet;
@@ -294,84 +298,26 @@ export function MapEditor({
   return (
     <div className={styles.body}>
       <aside className={styles.rail}>
-        <div>
-          <div className={styles.groupLabel}>Layer</div>
-          <div className={styles.toolGroup}>
-            {MAP_LAYERS.map((entry) => (
-              <button
-                key={entry.id}
-                type="button"
-                className={`${styles.toolBtn} ${layer === entry.id ? styles.toolBtnActive : ""}`}
-                onClick={() => selectLayer(entry.id)}
-                aria-pressed={layer === entry.id}
-                title={entry.description}
-              >
-                <span className={styles.toolGlyph} aria-hidden>
-                  {entry.glyph}
-                </span>
-                {entry.label}
-              </button>
-            ))}
-          </div>
-        </div>
+        <ToolRail label="Layer" tools={MAP_LAYERS} selected={layer} onSelect={selectLayer} />
 
-        <div>
-          <div className={styles.groupLabel}>Tool</div>
-          <div className={styles.toolGroup}>
-            {definition.tools.map((entry) => (
-              <button
-                key={entry.id}
-                type="button"
-                className={`${styles.toolBtn} ${tool === entry.id ? styles.toolBtnActive : ""}`}
-                onClick={() => setTool(entry.id)}
-                aria-pressed={tool === entry.id}
-                title={entry.hint}
-              >
-                <span className={styles.toolGlyph} aria-hidden>
-                  {entry.glyph}
-                </span>
-                {entry.label}
-              </button>
-            ))}
-          </div>
-        </div>
+        <ToolRail label="Tool" tools={definition.tools} selected={tool} onSelect={setTool} />
 
         {isColumnLayer(layer) && (
-          <div>
-            <div className={styles.groupLabel}>Step · {columnStep}</div>
-            <div className={styles.rangeRow}>
-              <input
-                type="range"
-                min={1}
-                max={16}
-                step={1}
-                value={columnStep}
-                onChange={(event) => setColumnStep(Number(event.target.value))}
-                aria-label="Column step"
-              />
-              <span className={styles.rangeValue}>{columnStep}</span>
-            </div>
+          <RailGroup label={`Step · ${columnStep}`}>
+            <RangeControl
+              min={1}
+              max={16}
+              value={columnStep}
+              onChange={setColumnStep}
+              ariaLabel="Column step"
+            />
             <button type="button" className={styles.rendererToggle} onClick={clearColumns}>
               Clear columns
             </button>
-          </div>
+          </RailGroup>
         )}
 
-        <div>
-          <div className={styles.groupLabel}>Zoom</div>
-          <div className={styles.segmented}>
-            {MAP_ZOOMS.map((option, index) => (
-              <button
-                key={option.label}
-                type="button"
-                className={`${styles.segment} ${zoom === index ? styles.segmentActive : ""}`}
-                onClick={() => setZoom(index)}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-        </div>
+        <SegmentedControl label="Zoom" options={ZOOM_OPTIONS} selected={zoom} onSelect={setZoom} />
       </aside>
 
       <section className={styles.mapStage}>

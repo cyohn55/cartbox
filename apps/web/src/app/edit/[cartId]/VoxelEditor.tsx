@@ -65,10 +65,29 @@ import {
   type SpriteMaterial,
   type SpriteRef,
 } from "@/lib/spriteTiles";
-import { decodeVoxelSidecar, encodeVoxelSidecar } from "@/lib/voxelSidecar";
+import {
+  decodeVoxelSidecar,
+  encodeVoxelSidecar,
+  primaryVoxelAsset,
+  voxelAssetById,
+  withPrimaryVoxel,
+  withVoxelAsset,
+} from "@/lib/voxelSidecar";
 import styles from "./editor.module.css";
 import { GeneratorPanel } from "./GeneratorPanel";
+import { RailGroup, RailHint, RangeControl, SegmentedControl, ToolRail } from "./railControls";
 import { SpritePixelPad } from "./SpritePixelPad";
+import { DEFAULT_GRID, seededGrid } from "./voxelSeed";
+import { capabilitiesOf } from "./toolCapabilities";
+import {
+  VOXEL_TOOLS,
+  MATERIAL_TOOLS,
+  BRUSH_RADIUS_MIN,
+  BRUSH_RADIUS_MAX,
+  DEFAULT_BRUSH_RADIUS,
+  DEFAULT_TOLERANCE_PCT,
+  type VoxelTool,
+} from "./voxelTools";
 
 /**
  * The world's authored tile atlas, shared by every editor instance. The Tiles
@@ -78,8 +97,10 @@ import { SpritePixelPad } from "./SpritePixelPad";
  */
 const WORLD_ATLAS = buildWorldAtlas();
 
-const DEFAULT_GRID = 16;
 const GRID_SIZES = [8, 16, 24, 32, 64, 128, 256].filter((n) => n <= MAX_VOXEL_GRID_DIM);
+
+/** The grid sizes as the rail selects them. */
+const GRID_OPTIONS = GRID_SIZES.map((size) => ({ id: size, label: String(size), hint: `${size}³ voxels` }));
 
 /** The "from sprites" form's three sprite-number fields, as typed. */
 interface SpriteFields {
@@ -169,39 +190,21 @@ function fitCellForGrid(grid: VoxelGrid, geometry?: CellGeometry): number {
 const PITCH_LIMIT = 1.45;
 const ORBIT_SPEED = 0.011; // radians per pixel dragged
 const DRAG_THRESHOLD = 4; // px of movement before a press becomes an orbit
-const SEED_COLOR: readonly [number, number, number] = [176, 182, 198];
 
-type VoxelTool = "add" | "remove" | "paint" | "fill" | "select" | "wand" | "shape" | "material";
-const TOOLS: readonly { id: VoxelTool; label: string; glyph: string }[] = [
-  { id: "add", label: "Add", glyph: "＋" },
-  { id: "remove", label: "Remove", glyph: "－" },
-  { id: "paint", label: "Paint", glyph: "🖌" },
-  { id: "fill", label: "Fill", glyph: "🪣" },
-  { id: "select", label: "Select", glyph: "⬚" },
-  { id: "wand", label: "Wand", glyph: "✨" },
-  { id: "shape", label: "Shape", glyph: "◫" },
-  { id: "material", label: "Tiles", glyph: "🧱" },
+const CELL_SHAPE_OPTIONS: readonly { id: CellShape; label: string; hint: string }[] = [
+  { id: "cube", label: "Cube", hint: "Cubes — six square faces on the integer grid" },
+  {
+    id: "hexel",
+    label: "Hex",
+    hint: "Hexels — twelve-faced rhombic cells, close-packed on the FCC lattice",
+  },
 ];
 
-// The paint/add/remove tools stamp a solid cube "brush" of this radius around the
-// target cell (radius 0 = a single voxel, the classic one-cube edit). Kept small
-// so even the largest brush is a cheap stamp.
-const BRUSH_RADIUS_MIN = 0;
-const BRUSH_RADIUS_MAX = 8;
-const DEFAULT_BRUSH_RADIUS = 0;
-const BRUSH_TOOLS: readonly VoxelTool[] = ["add", "remove", "paint"];
-
-// The Magic Wand and Paint Bucket share one colour-matching flood; this is its
-// tolerance, as a 0..100% slider mapped to the 0..1 the flood expects. 0 = an
-// exact colour match, higher grabs progressively more of a shaded region.
-const DEFAULT_TOLERANCE_PCT = 0;
-const TOLERANCE_TOOLS: readonly VoxelTool[] = ["wand", "fill"];
-
-// Tools that write cells, and so can apply the armed material. Keeping the
-// material palette visible for all of them is what lets "fill this run with
-// grass" or "stamp a brick shape" work at all — before, a material could only be
-// assigned one voxel at a time with the Tiles tool.
-const MATERIAL_TOOLS: readonly VoxelTool[] = ["add", "paint", "fill", "shape", "select", "material"];
+/** Lighting is either a directional rig or flat, fully-lit raw colour. */
+const LIGHT_OPTIONS = [
+  { id: "on", label: "On" },
+  { id: "flat", label: "Flat", hint: "Flat, fully-lit — shows the raw voxel colours" },
+] as const;
 
 // Selected voxels are tinted toward this colour and given an emissive floor when
 // the model is built, so the selection glows from every camera angle without a
@@ -236,6 +239,15 @@ const DEFAULT_SHAPE_RADIUS = 3;
 // is a fixed proportional step, applied by resampling the grid.
 const AXIS_KEYS: Record<string, GridAxis> = { x: 0, y: 1, z: 2 };
 const AXIS_LABELS = ["X", "Y", "Z"] as const;
+
+/** The scale axes as the rail arms them; the id is the {@link GridAxis} itself. */
+const AXIS_OPTIONS: readonly { id: GridAxis; label: string; hint: string }[] = AXIS_LABELS.map(
+  (label, axis) => ({
+    id: axis as GridAxis,
+    label,
+    hint: `Press ${label} then scroll to stretch/squash along ${label}`,
+  }),
+);
 const SCALE_STEP = 1.18; // per wheel-notch stretch factor (its reciprocal squashes)
 
 // Live relighting so the sculpt can be judged under different conditions. The
@@ -322,24 +334,6 @@ function shapePlaneCells(center: Cell, face: number, offsets: readonly ShapeOffs
  * layers (whichever cells are on the FCC lattice), landing nine close-packed
  * hexels — a comparable pad that is guaranteed to tile.
  */
-function seededGrid(size: number, shape: CellShape = "cube"): VoxelGrid {
-  const grid = new VoxelGrid(size, size, size);
-  const mid = Math.floor(size / 2);
-  const geometry = geometryFor(shape);
-  const topLayer = shape === "hexel" ? 1 : 0;
-  for (let y = 0; y <= topLayer; y += 1) {
-    for (let dz = -1; dz <= 1; dz += 1) {
-      for (let dx = -1; dx <= 1; dx += 1) {
-        const x = mid + dx;
-        const z = mid + dz;
-        if (!isValidSite(geometry, x, y, z)) continue;
-        grid.set(x, y, z, SEED_COLOR[0], SEED_COLOR[1], SEED_COLOR[2], 0);
-      }
-    }
-  }
-  return grid;
-}
-
 /**
  * Outline a single grid cell as a glowing wireframe cube, using the same
  * projection as {@link renderVoxelModel}, so the hovered target (where a cube
@@ -460,15 +454,34 @@ function loadGrid(serialized: string | null, shape: CellShape): VoxelGrid {
 interface VoxelEditorProps {
   /** Provides the cart palette to paint with. */
   sheet: SpriteSheet;
-  /** Serialized {@link VoxelGrid} from the cart, or null for a new model. */
+  /** The cart's whole authoring payload, or null for a new cart. */
   model: string | null;
-  /** Called with the serialized grid after every edit (feeds undo + save). */
+  /** Called with the re-encoded payload after every edit (feeds undo + save). */
   onModelChange: (serialized: string) => void;
+  /**
+   * Which sculpt in the payload to edit. Null edits the cart's main sculpt,
+   * which is what a cart that has never named an asset always has.
+   */
+  assetId?: string | null;
   /** A backdrop voxel prop being re-sculpted (manager → "Edit"), or null. */
   pendingEdit?: PendingVoxelEdit | null;
+  /**
+   * The active palette index, shared with the sprite editor so picking a colour
+   * in one medium is picking it in the other.
+   */
+  color: number;
+  onColorChange: (index: number) => void;
 }
 
-export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }: VoxelEditorProps) {
+export function VoxelEditor({
+  sheet,
+  model,
+  onModelChange,
+  assetId = null,
+  pendingEdit = null,
+  color,
+  onColorChange,
+}: VoxelEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // The grid is the source of truth; it is seeded once on mount from the cart's
   // model, or from the prop handed over to re-sculpt (the manager routes through
@@ -479,7 +492,10 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     () => decodeVoxelSidecar(model ?? pendingEdit?.voxel ?? null),
     [model, pendingEdit],
   );
-  const initialPayload = initialSidecar.grid;
+  // The sculpt this instance edits. Every other asset in the payload — and the
+  // Map tab's columns — ride through untouched; see the emitModel comment.
+  const initialSculpt = assetId ? voxelAssetById(initialSidecar, assetId) : primaryVoxelAsset(initialSidecar);
+  const initialPayload = initialSculpt?.grid ?? null;
   const gridRef = useRef<VoxelGrid | null>(null);
   if (gridRef.current === null) gridRef.current = loadGrid(initialPayload, deserializeCellShape(initialPayload ?? ""));
 
@@ -494,14 +510,18 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   const [yaw, setYaw] = useState(0.7);
   const [pitch, setPitch] = useState(0.72);
   const [tool, setTool] = useState<VoxelTool>("add");
-  const [colorIndex, setColorIndex] = useState(1);
+  // Which optional rail sliders the active tool drives — asked of the tool table
+  // rather than of a separate list of ids kept in step by hand.
+  const toolControls = capabilitiesOf(VOXEL_TOOLS, tool);
+  const colorIndex = color;
+  const setColorIndex = onColorChange;
   // Flat by default, so colour tools behave exactly as they always did until a
   // material is deliberately armed.
   const [materialIndex, setMaterialIndex] = useState<number>(MATERIAL_NONE);
   // Sprite-backed materials authored on this sculpt. They extend the world atlas,
   // so their indices start where its own materials end and follow list order.
   const [spriteMaterials, setSpriteMaterials] = useState<SpriteMaterial[]>(() => [
-    ...initialSidecar.spriteMaterials,
+    ...(initialSculpt?.spriteMaterials ?? []),
   ]);
   // The "from sprites" form: which page, and the sprite number for each face
   // group (top/bottom blank = the same sprite as the sides).
@@ -509,7 +529,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   const [spriteFields, setSpriteFields] = useState<SpriteFields>({ sides: "0", top: "", bottom: "" });
   // The sprite the in-tab pixel pad edits. Seeded from the first sprite skin
   // this sculpt uses, so the pad opens on the texture actually on the model.
-  const [padTile, setPadTile] = useState(() => initialSidecar.spriteMaterials[0]?.side.tile ?? 0);
+  const [padTile, setPadTile] = useState(() => initialSculpt?.spriteMaterials[0]?.side.tile ?? 0);
   const [padVersion, setPadVersion] = useState(0);
   const [hover, setHover] = useState<HoverTarget | null>(null); // what the cursor is aiming at
   const [shapeKind, setShapeKind] = useState<ShapeChoice>("rectangle");
@@ -662,7 +682,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
         // A solid's footprint is a whole volume; one bounding-box wireframe reads
         // clearly and stays cheap regardless of radius.
         drawHighlight(context, hover.cell, origin, yaw, pitch, renderCell, VIEWPORT, color, shapeRadius + 0.5);
-      } else if (BRUSH_TOOLS.includes(tool) && brushRadius > 0) {
+      } else if (toolControls.weighted && brushRadius > 0) {
         // The brush stamps a cube; a single bounding wireframe shows its reach.
         drawHighlight(context, hover.cell, origin, yaw, pitch, renderCell, VIEWPORT, color, brushRadius + 0.5);
       } else {
@@ -682,16 +702,24 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
    * would lose which sprites its material indices point at, so both travel in one
    * sidecar payload — which stays the bare grid string while no sprite skin is
    * used, keeping older carts byte-identical.
+   *
+   * Patching the decoded sidecar rather than building a fresh one is what carries
+   * everything this tab does not own — the Map tab's columns, and any other named
+   * asset — through a sculpt edit untouched.
    */
   const emitModel = (shape: CellShape, materials: readonly SpriteMaterial[]) => {
     onModelChange(
-      encodeVoxelSidecar({
-        grid: serializeVoxelGrid(gridRef.current!, shape),
-        spriteMaterials: materials,
-        // The Map tab's columns share this payload; carry whatever it holds
-        // through untouched rather than dropping it on a sculpt edit.
-        mapLayer: initialSidecar.mapLayer,
-      }),
+      encodeVoxelSidecar(
+        assetId
+          ? withVoxelAsset(initialSidecar, assetId, {
+              grid: serializeVoxelGrid(gridRef.current!, shape),
+              spriteMaterials: materials,
+            })
+          : withPrimaryVoxel(initialSidecar, {
+              grid: serializeVoxelGrid(gridRef.current!, shape),
+              spriteMaterials: materials,
+            }),
+      ),
     );
   };
 
@@ -1193,99 +1221,51 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   return (
     <div className={styles.body}>
       <aside className={styles.rail}>
-        <div>
-          <div className={styles.groupLabel}>Cells</div>
-          <div className={styles.segmented}>
-            <button
-              type="button"
-              className={`${styles.segment} ${!isHexel ? styles.segmentActive : ""}`}
-              onClick={() => switchShape("cube")}
-              aria-pressed={!isHexel}
-              title="Cubes — six square faces on the integer grid"
-            >
-              Cube
-            </button>
-            <button
-              type="button"
-              className={`${styles.segment} ${isHexel ? styles.segmentActive : ""}`}
-              onClick={() => switchShape("hexel")}
-              aria-pressed={isHexel}
-              title="Hexels — twelve-faced rhombic cells, close-packed on the FCC lattice"
-            >
-              Hex
-            </button>
-          </div>
-        </div>
+        <SegmentedControl
+          label="Cells"
+          options={CELL_SHAPE_OPTIONS}
+          selected={cellShape}
+          onSelect={switchShape}
+        />
 
-        <div>
-          <div className={styles.groupLabel}>Tool</div>
-          <div className={styles.toolGroup}>
-            {TOOLS.map((definition) => (
-              <button
-                key={definition.id}
-                type="button"
-                className={`${styles.toolBtn} ${tool === definition.id ? styles.toolBtnActive : ""}`}
-                onClick={() => setTool(definition.id)}
-                aria-pressed={tool === definition.id}
-              >
-                <span className={styles.toolGlyph} aria-hidden>
-                  {definition.glyph}
-                </span>
-                {definition.label}
-              </button>
-            ))}
-          </div>
-        </div>
+        <ToolRail label="Tool" tools={VOXEL_TOOLS} selected={tool} onSelect={setTool} />
 
-        {BRUSH_TOOLS.includes(tool) && !isHexel && (
-          <div>
-            <div className={styles.groupLabel}>Brush size</div>
-            <div className={styles.rangeRow}>
-              <input
-                type="range"
-                min={BRUSH_RADIUS_MIN}
-                max={BRUSH_RADIUS_MAX}
-                step={1}
-                value={brushRadius}
-                onChange={(event) => setBrushRadius(Number(event.target.value))}
-                aria-label="Brush size in voxels"
-              />
-              <span className={`${styles.rangeValue} data`}>{brushRadius * 2 + 1}</span>
-            </div>
-            <p className={styles.panelMeta} style={{ lineHeight: 1.5, marginTop: 6 }}>
-              {brushRadius === 0
-                ? "One voxel per click."
-                : `Stamps a ${brushRadius * 2 + 1}³ cube per click.`}
-            </p>
-          </div>
+        {toolControls.weighted && !isHexel && (
+          <RailGroup label="Brush size">
+            <RangeControl
+              min={BRUSH_RADIUS_MIN}
+              max={BRUSH_RADIUS_MAX}
+              value={brushRadius}
+              onChange={setBrushRadius}
+              ariaLabel="Brush size in voxels"
+              display={String(brushRadius * 2 + 1)}
+            />
+            <RailHint>
+              {brushRadius === 0 ? "One voxel per click." : `Stamps a ${brushRadius * 2 + 1}³ cube per click.`}
+            </RailHint>
+          </RailGroup>
         )}
 
-        {TOLERANCE_TOOLS.includes(tool) && (
-          <div>
-            <div className={styles.groupLabel}>Colour tolerance</div>
-            <div className={styles.rangeRow}>
-              <input
-                type="range"
-                min={0}
-                max={100}
-                step={1}
-                value={tolerancePct}
-                onChange={(event) => setTolerancePct(Number(event.target.value))}
-                aria-label="Colour match tolerance"
-              />
-              <span className={`${styles.rangeValue} data`}>{tolerancePct}%</span>
-            </div>
-            <p className={styles.panelMeta} style={{ lineHeight: 1.5, marginTop: 6 }}>
+        {toolControls.tolerant && (
+          <RailGroup label="Colour tolerance">
+            <RangeControl
+              min={0}
+              max={100}
+              value={tolerancePct}
+              onChange={setTolerancePct}
+              ariaLabel="Colour match tolerance"
+              display={`${tolerancePct}%`}
+            />
+            <RailHint>
               {tool === "wand"
                 ? "Click a voxel to select its connected colour run. Shift-click adds another run."
                 : "Click a voxel to flood the palette colour through its connected run. Right-click erases it."}
-            </p>
-          </div>
+            </RailHint>
+          </RailGroup>
         )}
 
         {MATERIAL_TOOLS.includes(tool) && (
-          <div>
-            <div className={styles.groupLabel}>Material</div>
+          <RailGroup label="Material">
             <div className={styles.paletteGrid}>
               <button
                 type="button"
@@ -1309,15 +1289,13 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
                 />
               ))}
             </div>
-            <p className={styles.panelMeta} style={{ lineHeight: 1.5, marginTop: 6 }}>
+            <RailHint>
               {materialIndex < 0
                 ? "Flat: tools paint the palette colour and leave any material a voxel already wears. Pick a material to build, fill and stamp with it."
                 : "Armed: Add, Paint, Fill and Shape all apply this material — so you can flood a whole run with grass, not just one voxel. Pick Flat to go back to plain colour."}
-            </p>
+            </RailHint>
 
-            <div className={styles.groupLabel} style={{ marginTop: 14 }}>
-              From sprites
-            </div>
+            <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>From sprites</div>
             {spriteMaterials.length > 0 && (
               <div className={styles.paletteGrid}>
                 {spriteMaterials.map((material, ordinal) => {
@@ -1401,18 +1379,17 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
                 Sprite {pendingSpriteRef?.tile} is empty — draw it in the Sprites tab first.
               </p>
             )}
-            <p className={styles.panelMeta} style={{ lineHeight: 1.5, marginTop: 6 }}>
+            <RailHint>
               Draw a sprite in the Sprites tab, then name its number here to skin
               voxels with it. Sides is required; Top and Bottom are optional — leave
               them blank to wrap the same art all round. Right-click a sprite
               material to remove it.
-            </p>
-          </div>
+            </RailHint>
+          </RailGroup>
         )}
 
         {selection.size > 0 && (
-          <div>
-            <div className={styles.groupLabel}>Selection · {selection.size}</div>
+          <RailGroup label={`Selection · ${selection.size}`}>
             <button
               type="button"
               className={styles.toolBtn}
@@ -1448,73 +1425,43 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
               </span>
               Deselect
             </button>
-          </div>
+          </RailGroup>
         )}
 
         {tool === "shape" && (
-          <div>
-            <div className={styles.groupLabel}>Shape</div>
-            <div className={styles.segmented}>
-              {SHAPE_KINDS.map((option) => (
-                <button
-                  key={option.id}
-                  type="button"
-                  className={`${styles.segment} ${shapeKind === option.id ? styles.segmentActive : ""}`}
-                  onClick={() => setShapeKind(option.id)}
-                  aria-pressed={shapeKind === option.id}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-            <div className={styles.segmented} style={{ marginTop: 6 }}>
-              {SHAPE_STYLES.map((option) => (
-                <button
-                  key={option.id}
-                  type="button"
-                  className={`${styles.segment} ${shapeStyle === option.id ? styles.segmentActive : ""}`}
-                  onClick={() => setShapeStyle(option.id)}
-                  aria-pressed={shapeStyle === option.id}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-            <div className={styles.rangeRow} style={{ marginTop: 6 }}>
-              <input
-                type="range"
+          <RailGroup label="Shape">
+            <SegmentedControl
+              options={SHAPE_KINDS}
+              selected={shapeKind}
+              onSelect={setShapeKind}
+              ariaLabel="Shape"
+            />
+            <SegmentedControl
+              options={SHAPE_STYLES}
+              selected={shapeStyle}
+              onSelect={setShapeStyle}
+              ariaLabel="Shape style"
+              spaced
+            />
+            <div className={styles.railSpaced}>
+              <RangeControl
                 min={SHAPE_RADIUS_MIN}
                 max={SHAPE_RADIUS_MAX}
-                step={1}
                 value={shapeRadius}
-                onChange={(event) => setShapeRadius(Number(event.target.value))}
-                aria-label="Shape size in voxels"
+                onChange={setShapeRadius}
+                ariaLabel="Shape size in voxels"
+                display={String(shapeRadius * 2 + 1)}
               />
-              <span className={`${styles.rangeValue} data`}>{shapeRadius * 2 + 1}</span>
             </div>
-          </div>
+          </RailGroup>
         )}
 
-        <div>
-          <div className={styles.groupLabel}>Grid</div>
-          <div className={styles.segmented}>
-            {GRID_SIZES.map((option) => (
-              <button
-                key={option}
-                type="button"
-                className={`${styles.segment} ${gridSize === option ? styles.segmentActive : ""}`}
-                onClick={() => resize(option)}
-                title={`${option}³ voxels`}
-              >
-                {option}
-              </button>
-            ))}
-          </div>
-        </div>
+        <SegmentedControl label="Grid" options={GRID_OPTIONS} selected={gridSize} onSelect={resize} />
 
-        <div>
-          <div className={styles.groupLabel}>Zoom</div>
-          <div className={styles.segmented}>
+        {/* Two actions rather than a selection, so this keeps its own markup —
+            SegmentedControl models "pick one of these", which zoom is not. */}
+        <RailGroup label="Zoom">
+          <div className={styles.segmented} role="group" aria-label="Zoom">
             <button
               type="button"
               className={styles.segment}
@@ -1536,106 +1483,80 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
               ＋
             </button>
           </div>
-        </div>
+        </RailGroup>
 
         <div>
           <div className={styles.groupLabel}>Scale axis · scroll</div>
-          <div className={styles.segmented}>
-            {AXIS_LABELS.map((label, axis) => (
-              <button
-                key={label}
-                type="button"
-                className={`${styles.segment} ${scaleAxis === axis ? styles.segmentActive : ""}`}
-                onClick={() => setScaleAxis((current) => (current === axis ? null : (axis as GridAxis)))}
-                aria-pressed={scaleAxis === axis}
-                title={`Press ${label} then scroll to stretch/squash along ${label}`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <p className={styles.panelMeta} style={{ lineHeight: 1.5, marginTop: 6 }}>
+          <SegmentedControl
+            options={AXIS_OPTIONS}
+            selected={scaleAxis}
+            // Re-picking the armed axis disarms it, so scrolling goes back to zoom.
+            onSelect={(axis) => setScaleAxis((current) => (current === axis ? null : axis))}
+            ariaLabel="Scale axis"
+          />
+          <RailHint>
             {scaleAxis !== null
               ? `Scroll to stretch or squash along ${AXIS_LABELS[scaleAxis]}. Press ${AXIS_LABELS[scaleAxis]} or Esc to stop.`
               : "Press X, Y, or Z (or tap above), then scroll to scale that axis."}
-          </p>
+          </RailHint>
         </div>
 
         <div>
           <div className={styles.groupLabel}>Lighting</div>
-          <div className={styles.segmented}>
-            <button
-              type="button"
-              className={`${styles.segment} ${lightOn ? styles.segmentActive : ""}`}
-              onClick={() => setLightOn(true)}
-              aria-pressed={lightOn}
-            >
-              On
-            </button>
-            <button
-              type="button"
-              className={`${styles.segment} ${!lightOn ? styles.segmentActive : ""}`}
-              onClick={() => setLightOn(false)}
-              aria-pressed={!lightOn}
-              title="Flat, fully-lit — shows the raw voxel colours"
-            >
-              Flat
-            </button>
-          </div>
+          <SegmentedControl
+            options={LIGHT_OPTIONS}
+            selected={lightOn ? "on" : "flat"}
+            onSelect={(id) => setLightOn(id === "on")}
+            ariaLabel="Lighting"
+          />
           {lightOn && (
             <>
-              <div className={styles.groupLabel} style={{ marginTop: 8 }}>Angle</div>
-              <div className={styles.rangeRow}>
-                <input
-                  type="range"
-                  min={0}
-                  max={360}
-                  step={5}
-                  value={lightAzimuth}
-                  onChange={(event) => setLightAzimuth(Number(event.target.value))}
-                  aria-label="Light angle around the model"
-                />
-                <span className={`${styles.rangeValue} data`}>{lightAzimuth}°</span>
-              </div>
-              <div className={styles.groupLabel} style={{ marginTop: 6 }}>Height</div>
-              <div className={styles.rangeRow}>
-                <input
-                  type="range"
-                  min={-80}
-                  max={80}
-                  step={5}
-                  value={lightElevation}
-                  onChange={(event) => setLightElevation(Number(event.target.value))}
-                  aria-label="Light height above the model"
-                />
-                <span className={`${styles.rangeValue} data`}>{lightElevation}°</span>
-              </div>
-              <div className={styles.groupLabel} style={{ marginTop: 6 }}>Brightness</div>
-              <div className={styles.rangeRow}>
-                <input
-                  type="range"
-                  min={0}
-                  max={150}
-                  step={5}
-                  value={Math.round(lightIntensity * 100)}
-                  onChange={(event) => setLightIntensity(Number(event.target.value) / 100)}
-                  aria-label="Light brightness"
-                />
-                <span className={`${styles.rangeValue} data`}>{Math.round(lightIntensity * 100)}%</span>
-              </div>
-              <div className={styles.groupLabel} style={{ marginTop: 6 }}>Ambient</div>
-              <div className={styles.rangeRow}>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  step={5}
-                  value={Math.round(lightAmbient * 100)}
-                  onChange={(event) => setLightAmbient(Number(event.target.value) / 100)}
-                  aria-label="Ambient fill light in shadow"
-                />
-                <span className={`${styles.rangeValue} data`}>{Math.round(lightAmbient * 100)}%</span>
-              </div>
+              <RangeControl
+                label="Angle"
+                min={0}
+                max={360}
+                step={5}
+                value={lightAzimuth}
+                onChange={setLightAzimuth}
+                ariaLabel="Light angle around the model"
+                display={`${lightAzimuth}°`}
+                nested
+              />
+              <RangeControl
+                label="Height"
+                min={-80}
+                max={80}
+                step={5}
+                value={lightElevation}
+                onChange={setLightElevation}
+                ariaLabel="Light height above the model"
+                display={`${lightElevation}°`}
+                nested
+              />
+              {/* Intensity and ambient are stored as 0..1 fractions but read out
+                  as percentages, so the slider works in whole percent. */}
+              <RangeControl
+                label="Brightness"
+                min={0}
+                max={150}
+                step={5}
+                value={Math.round(lightIntensity * 100)}
+                onChange={(percent) => setLightIntensity(percent / 100)}
+                ariaLabel="Light brightness"
+                display={`${Math.round(lightIntensity * 100)}%`}
+                nested
+              />
+              <RangeControl
+                label="Ambient"
+                min={0}
+                max={100}
+                step={5}
+                value={Math.round(lightAmbient * 100)}
+                onChange={(percent) => setLightAmbient(percent / 100)}
+                ariaLabel="Ambient fill light in shadow"
+                display={`${Math.round(lightAmbient * 100)}%`}
+                nested
+              />
             </>
           )}
         </div>
@@ -1647,8 +1568,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
           Clear
         </button>
 
-        <div>
-          <div className={styles.groupLabel}>Backdrop</div>
+        <RailGroup label="Backdrop">
           <button
             type="button"
             className={styles.toolBtn}
@@ -1661,7 +1581,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
             {pendingEdit ? "Update prop" : "Publish as prop"}
           </button>
           {publishedNote && (
-            <p className={styles.panelMeta} style={{ lineHeight: 1.5, marginTop: 8 }}>
+            <RailHint>
               Published “{publishedNote}” to the scene.{" "}
               <Link
                 href="/backdrop"
@@ -1672,9 +1592,9 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
                 Open the Backdrop manager
               </Link>{" "}
               to place, size, and animate it.
-            </p>
+            </RailHint>
           )}
-        </div>
+        </RailGroup>
       </aside>
 
       <section className={styles.mapStage}>

@@ -1,10 +1,14 @@
 "use client";
 
 /**
- * Sprite editor: owns the editing state (page, selected tile, colour, tool) and
- * lays out the three work zones — tool rail, canvas stage, and inspector. The
- * SpriteSheet holds the actual pixels; `version` bumps to re-render views after
- * an in-place edit.
+ * Sprite editor: the pixel half of the Assets tab. It owns its own tool state
+ * (tool, brush, layer) and lays out the three work zones — tool rail, canvas
+ * stage, and inspector. The SpriteSheet holds the actual pixels; `version` bumps
+ * to re-render views after an in-place edit.
+ *
+ * What it does *not* own is which block is open or which colour is active: both
+ * are lifted to the Assets container, so a named sprite asset can point at a
+ * block and so a colour picked here is still the colour in the voxel sculptor.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -44,14 +48,9 @@ import { MaterialSwatchPanel } from "./MaterialSwatchPanel";
 import { MaterialSurface, NormalSurface } from "./paintSurface";
 import { MaterialBrushSurface } from "./materialBrushSurface";
 import { SpriteBlockSurface } from "./spriteBlockSurface";
-import {
-  TOOLS,
-  WEIGHTED_TOOLS,
-  TOLERANCE_TOOLS,
-  MAX_BRUSH_WEIGHT,
-  MAX_TOLERANCE,
-  type Tool,
-} from "./tools";
+import { RailGroup, RailHint, RangeControl, SegmentedControl, ToolRail } from "./railControls";
+import { capabilitiesOf } from "./toolCapabilities";
+import { TOOLS, MAX_BRUSH_WEIGHT, MAX_TOLERANCE, type Tool } from "./tools";
 
 type Layer = "albedo" | "normal" | "material" | "height" | "specular" | "roughness" | "emissive";
 
@@ -73,13 +72,43 @@ const LAYER_LABEL: Record<Layer, string> = {
   emissive: "Emissive",
 };
 
+/** The layer picker's options, in rail order. */
+const LAYER_OPTIONS: ReadonlyArray<{ id: Layer; label: string; hint?: string }> = [
+  { id: "albedo", label: "Albedo" },
+  { id: "normal", label: "Normal" },
+  {
+    id: "material",
+    label: "Material",
+    hint: "Paint albedo and every material channel at once from the colour's swatch",
+  },
+  ...MATERIAL_LAYERS,
+];
+
 /** Sprite sizes offered, as tiles-per-side. A base tile is 8px, so 1/2/4 tiles
  *  per side are 8×8, 16×16, and 32×32 sprites (blocks of adjacent tiles). */
 const SPRITE_SIZES = [
-  { tilesPerSide: 1, label: "8×8" },
-  { tilesPerSide: 2, label: "16×16" },
-  { tilesPerSide: 4, label: "32×32" },
+  { id: 1, label: "8×8" },
+  { id: 2, label: "16×16" },
+  { id: 4, label: "32×32" },
 ] as const;
+
+/** The sprite sheet's two pages, as the rail names them. */
+const PAGE_OPTIONS = [
+  { id: 0, label: "Tiles" },
+  { id: 1, label: "Sprites" },
+] as const;
+
+/**
+ * Which block of the sheet is being edited. Lifted out of this component so a
+ * named sprite asset can address it — selecting one in the asset browser moves
+ * the editor here, and creating one records wherever the editor already is.
+ */
+export interface SpriteSelection {
+  readonly page: SpritePage;
+  readonly tile: number;
+  /** Block size in tiles per side (1/2/4 → 8×8/16×16/32×32). */
+  readonly tilesPerSide: number;
+}
 
 interface SpriteEditorProps {
   sheet: SpriteSheet;
@@ -94,6 +123,15 @@ interface SpriteEditorProps {
   /** Cart-wide character rig, owned by the workbench so it can persist on Save. */
   rig: SpriteRig;
   onRigChange: (rig: SpriteRig) => void;
+  /** Which block of the sheet is open — owned above so an asset can address it. */
+  selection: SpriteSelection;
+  onSelectionChange: (selection: SpriteSelection) => void;
+  /**
+   * The active palette index, shared with the voxel sculptor so picking a colour
+   * in one medium is picking it in the other.
+   */
+  color: number;
+  onColorChange: (index: number) => void;
 }
 
 export function SpriteEditor({
@@ -107,10 +145,16 @@ export function SpriteEditor({
   onSwatchesChange,
   rig,
   onRigChange,
+  selection,
+  onSelectionChange,
+  color,
+  onColorChange,
 }: SpriteEditorProps) {
-  const [page, setPage] = useState<SpritePage>(0);
-  const [tile, setTile] = useState(1);
-  const [color, setColor] = useState(1);
+  const { page, tile, tilesPerSide: spriteSize } = selection;
+  const setPage = (next: SpritePage) => onSelectionChange({ ...selection, page: next });
+  const setTile = (next: number) => onSelectionChange({ ...selection, tile: next });
+  const setSpriteSize = (next: number) => onSelectionChange({ ...selection, tilesPerSide: next });
+  const setColor = onColorChange;
   const [tool, setTool] = useState<Tool>("pencil");
   const [weight, setWeight] = useState(1); // brush/line thickness in pixels
   const [tolerance, setTolerance] = useState(0); // fill/wand colour tolerance (0..100)
@@ -119,7 +163,6 @@ export function SpriteEditor({
   const [layer, setLayer] = useState<Layer>("albedo");
   const [direction, setDirection] = useState(1);
   const [level, setLevel] = useState(8); // brush value for material (height/spec/rough) layers
-  const [spriteSize, setSpriteSize] = useState(1); // tiles per side (1/2/4)
   const [sortPalette, setSortPalette] = useState(true); // show palette as a gradient
   const [preferCpu, setPreferCpu] = useState(false);
   const [paletteNote, setPaletteNote] = useState("");
@@ -130,6 +173,10 @@ export function SpriteEditor({
 
   const bump = () => setVersion((current) => current + 1);
 
+  // Which optional rail sliders the active tool drives — asked of the tool table
+  // rather than of a separate list of ids kept in step by hand.
+  const toolControls = capabilitiesOf(TOOLS, tool);
+
   // --- Backdrop prop publishing ---------------------------------------------
   // When the backdrop manager hands off a prop to "Edit pixels", seed the sheet
   // with its pixels once on mount so you draw over the existing art.
@@ -138,13 +185,17 @@ export function SpriteEditor({
   useEffect(() => {
     if (seededPending.current || !pendingProp) return;
     seededPending.current = true;
+    // One combined update, not two: the setters each derive from the selection
+    // captured this render, so a second call would discard the first's change.
     // importImage writes at the sheet's top-left (tile 0), so view + publish the
     // block anchored there — otherwise the default tile offset clips the prop's
-    // left edge out of view.
-    setTile(0);
-    // Grow the editing block so the whole prop fits before importing it.
+    // left edge out of view — and the block grows so the whole prop fits.
     const longest = Math.max(pendingProp.width, pendingProp.height);
-    setSpriteSize(longest <= sheet.tileSize ? 1 : longest <= sheet.tileSize * 2 ? 2 : 4);
+    onSelectionChange({
+      ...selection,
+      tile: 0,
+      tilesPerSide: longest <= sheet.tileSize ? 1 : longest <= sheet.tileSize * 2 ? 2 : 4,
+    });
     const data = new Uint8ClampedArray(decodeBase64Bytes(pendingProp.albedo));
     sheet.importImage({ data, width: pendingProp.width, height: pendingProp.height }, page);
     bump();
@@ -392,139 +443,49 @@ export function SpriteEditor({
   return (
     <div className={styles.body}>
       <aside className={styles.rail}>
-        <div>
-          <div className={styles.groupLabel}>Layer</div>
-          <div className={`${styles.segmented} ${styles.segmentedWrap}`}>
-            <button
-              type="button"
-              className={`${styles.segment} ${layer === "albedo" ? styles.segmentActive : ""}`}
-              onClick={() => setLayer("albedo")}
-            >
-              Albedo
-            </button>
-            <button
-              type="button"
-              className={`${styles.segment} ${layer === "normal" ? styles.segmentActive : ""}`}
-              onClick={() => setLayer("normal")}
-            >
-              Normal
-            </button>
-            <button
-              type="button"
-              className={`${styles.segment} ${layer === "material" ? styles.segmentActive : ""}`}
-              onClick={() => setLayer("material")}
-              title="Paint albedo and every material channel at once from the colour's swatch"
-            >
-              Material
-            </button>
-            {MATERIAL_LAYERS.map((material) => (
-              <button
-                key={material.id}
-                type="button"
-                className={`${styles.segment} ${layer === material.id ? styles.segmentActive : ""}`}
-                onClick={() => setLayer(material.id)}
-              >
-                {material.label}
-              </button>
-            ))}
-          </div>
-        </div>
+        <SegmentedControl label="Layer" options={LAYER_OPTIONS} selected={layer} onSelect={setLayer} wrap />
 
-        <div>
-          <div className={styles.groupLabel}>Tool</div>
-          <div className={styles.toolGroup}>
-            {TOOLS.map((definition) => (
-              <button
-                key={definition.id}
-                type="button"
-                className={`${styles.toolBtn} ${tool === definition.id ? styles.toolBtnActive : ""}`}
-                onClick={() => setTool(definition.id)}
-                aria-pressed={tool === definition.id}
-              >
-                <span className={styles.toolGlyph} aria-hidden>
-                  {definition.glyph}
-                </span>
-                {definition.label}
-              </button>
-            ))}
-          </div>
-        </div>
+        <ToolRail label="Tool" tools={TOOLS} selected={tool} onSelect={setTool} />
 
-        {WEIGHTED_TOOLS.has(tool) && (
-          <div>
-            <div className={styles.groupLabel}>Brush size</div>
-            <div className={styles.rangeRow}>
-              <input
-                type="range"
-                min={1}
-                max={MAX_BRUSH_WEIGHT}
-                step={1}
-                value={weight}
-                onChange={(event) => setWeight(Number(event.target.value))}
-                aria-label="Brush size in pixels"
-              />
-              <span className={`${styles.rangeValue} data`}>{weight}px</span>
-            </div>
-          </div>
+        {toolControls.weighted && (
+          <RangeControl
+            label="Brush size"
+            min={1}
+            max={MAX_BRUSH_WEIGHT}
+            value={weight}
+            onChange={setWeight}
+            ariaLabel="Brush size in pixels"
+            display={`${weight}px`}
+          />
         )}
 
-        {TOLERANCE_TOOLS.has(tool) && (
-          <div>
-            <div className={styles.groupLabel}>Tolerance</div>
-            <div className={styles.rangeRow}>
-              <input
-                type="range"
-                min={0}
-                max={MAX_TOLERANCE}
-                step={1}
-                value={tolerance}
-                onChange={(event) => setTolerance(Number(event.target.value))}
-                aria-label="Fill and magic-wand tolerance"
-              />
-              <span className={`${styles.rangeValue} data`}>{tolerance}%</span>
-            </div>
-          </div>
+        {toolControls.tolerant && (
+          <RangeControl
+            label="Tolerance"
+            min={0}
+            max={MAX_TOLERANCE}
+            value={tolerance}
+            onChange={setTolerance}
+            ariaLabel="Fill and magic-wand tolerance"
+            display={`${tolerance}%`}
+          />
         )}
 
-        <div>
-          <div className={styles.groupLabel}>Page</div>
-          <div className={styles.segmented}>
-            <button
-              type="button"
-              className={`${styles.segment} ${page === 0 ? styles.segmentActive : ""}`}
-              onClick={() => setPage(0)}
-            >
-              Tiles
-            </button>
-            <button
-              type="button"
-              className={`${styles.segment} ${page === 1 ? styles.segmentActive : ""}`}
-              onClick={() => setPage(1)}
-            >
-              Sprites
-            </button>
-          </div>
-        </div>
+        <SegmentedControl
+          label="Page"
+          options={PAGE_OPTIONS}
+          selected={page}
+          onSelect={(id) => setPage(id === 1 ? 1 : 0)}
+        />
 
-        <div>
-          <div className={styles.groupLabel}>Sprite size</div>
-          <div className={styles.segmented}>
-            {SPRITE_SIZES.map((option) => (
-              <button
-                key={option.tilesPerSide}
-                type="button"
-                className={`${styles.segment} ${spriteSize === option.tilesPerSide ? styles.segmentActive : ""}`}
-                onClick={() => setSpriteSize(option.tilesPerSide)}
-                aria-pressed={spriteSize === option.tilesPerSide}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-        </div>
+        <SegmentedControl
+          label="Sprite size"
+          options={SPRITE_SIZES}
+          selected={spriteSize}
+          onSelect={setSpriteSize}
+        />
 
-        <div>
-          <div className={styles.groupLabel}>Image</div>
+        <RailGroup label="Image">
           <div className={styles.toolGroup}>
             <button type="button" className={styles.toolBtn} onClick={() => fileRef.current?.click()}>
               <span className={styles.toolGlyph} aria-hidden>
@@ -540,10 +501,9 @@ export function SpriteEditor({
             </button>
           </div>
           <input ref={fileRef} type="file" accept="image/png,image/*" onChange={importPng} hidden />
-        </div>
+        </RailGroup>
 
-        <div>
-          <div className={styles.groupLabel}>Palette</div>
+        <RailGroup label="Palette">
           <div className={styles.toolGroup}>
             <button
               type="button"
@@ -564,13 +524,10 @@ export function SpriteEditor({
             onChange={importPalette}
             hidden
           />
-          {paletteNote && (
-            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6, lineHeight: 1.35 }}>{paletteNote}</div>
-          )}
-        </div>
+          {paletteNote && <RailHint>{paletteNote}</RailHint>}
+        </RailGroup>
 
-        <div>
-          <div className={styles.groupLabel}>Aseprite</div>
+        <RailGroup label="Aseprite">
           <div className={styles.toolGroup}>
             <button
               type="button"
@@ -602,10 +559,8 @@ export function SpriteEditor({
             onChange={importAseprite}
             hidden
           />
-          {asepriteNote && (
-            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6, lineHeight: 1.35 }}>{asepriteNote}</div>
-          )}
-        </div>
+          {asepriteNote && <RailHint>{asepriteNote}</RailHint>}
+        </RailGroup>
       </aside>
 
       <section className={styles.stage}>

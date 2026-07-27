@@ -44,7 +44,8 @@ import { assembleSheetCanvas } from "@/lib/handheldSheet";
 /** Cap on the animation length, matching the art gate. */
 const MAX_FRAMES = 8;
 
-import { SkinPaintCanvas, type SkinTool, type StrokeSnapshot } from "./SkinPaintCanvas";
+import { SkinPaintCanvas, type StrokeSnapshot } from "./SkinPaintCanvas";
+import { SKIN_TOOLS, TOLERANCE_TOOLS, WEIGHTED_TOOLS, type SkinTool } from "./skinTools";
 import { SkinPalette } from "./SkinPalette";
 import styles from "./skinEditor.module.css";
 
@@ -56,24 +57,6 @@ type HistoryEntry =
 /** Cap on undo depth — enough to feel unlimited without unbounded memory. */
 const MAX_HISTORY = 24;
 
-interface ToolButton {
-  id: SkinTool;
-  label: string;
-  glyph: string;
-}
-
-const TOOLBAR: ToolButton[] = [
-  { id: "pencil", label: "Pencil", glyph: "✎" },
-  { id: "eraser", label: "Eraser", glyph: "⌫" },
-  { id: "fill", label: "Fill", glyph: "▦" },
-  { id: "line", label: "Line", glyph: "╱" },
-  { id: "rect", label: "Rectangle", glyph: "▭" },
-  { id: "ellipse", label: "Ellipse", glyph: "◯" },
-  { id: "eyedropper", label: "Eyedropper", glyph: "⦿" },
-  { id: "pan", label: "Pan", glyph: "✋" },
-];
-
-const WEIGHTED: ReadonlySet<SkinTool> = new Set<SkinTool>(["pencil", "eraser", "line", "rect", "ellipse"]);
 
 interface HandheldSkinEditorProps {
   template: HandheldTemplate;
@@ -446,7 +429,7 @@ export function HandheldSkinEditor({ template, scheme, initialDraft, onCancel, o
         <div className={styles.body}>
           <aside className={styles.tools} aria-label="Tools">
             <div className={styles.toolGrid}>
-              {TOOLBAR.map((entry) => (
+              {SKIN_TOOLS.map((entry) => (
                 <button
                   key={entry.id}
                   type="button"
@@ -482,14 +465,14 @@ export function HandheldSkinEditor({ template, scheme, initialDraft, onCancel, o
               </div>
             )}
 
-            {WEIGHTED.has(tool) && (
+            {WEIGHTED_TOOLS.has(tool) && (
               <label className={styles.field}>
                 <span>Brush {weight}px</span>
                 <input type="range" min={1} max={16} value={weight} onChange={(event) => setWeight(Number(event.target.value))} />
               </label>
             )}
 
-            {tool === "fill" && (
+            {TOLERANCE_TOOLS.has(tool) && (
               <label className={styles.field}>
                 <span>Tolerance {Math.round(tolerance * 100)}%</span>
                 <input

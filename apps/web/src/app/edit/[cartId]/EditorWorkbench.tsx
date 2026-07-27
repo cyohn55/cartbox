@@ -43,19 +43,18 @@ import { decodeVoxelSidecar, mergeVoxelSidecar } from "@/lib/voxelSidecar";
 import type { WireRig } from "@/lib/rig";
 import type { WireMaterials } from "@/lib/materials";
 import styles from "./editor.module.css";
-import { SpriteEditor } from "./SpriteEditor";
 import { MapEditor } from "./MapEditor";
 import { CodeEditor } from "./CodeEditor";
 import { SfxEditor } from "./SfxEditor";
 import { MusicEditor } from "./MusicEditor";
 import { RunOverlay } from "./RunOverlay";
 import { ShaderEditor } from "./ShaderEditor";
-import { VoxelEditor } from "./VoxelEditor";
+import { AssetsEditor } from "./AssetsEditor";
 import { useEditorHistory } from "./useEditorHistory";
 
-const TABS = ["Code", "Sprites", "Voxel", "Map", "FX", "SFX", "Music"] as const;
+const TABS = ["Code", "Assets", "Map", "FX", "SFX", "Music"] as const;
 type Tab = (typeof TABS)[number];
-const LIVE_TABS: ReadonlySet<Tab> = new Set<Tab>(["Code", "Sprites", "Voxel", "Map", "FX", "SFX", "Music"]);
+const LIVE_TABS: ReadonlySet<Tab> = new Set<Tab>(["Code", "Assets", "Map", "FX", "SFX", "Music"]);
 
 type EngineMode = "wasm" | "stub";
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -263,7 +262,7 @@ function WorkbenchBody({
   const [pendingVoxel] = useState<PendingVoxelEdit | null>(() =>
     typeof window !== "undefined" ? loadPendingVoxelEdit() : null,
   );
-  const [activeTab, setActiveTab] = useState<Tab>(pendingVoxel ? "Voxel" : "Sprites");
+  const [activeTab, setActiveTab] = useState<Tab>("Assets");
   useEffect(() => {
     if (pendingVoxel) clearPendingVoxelEdit();
   }, [pendingVoxel]);
@@ -447,9 +446,8 @@ function WorkbenchBody({
       </header>
 
       {activeTab === "Code" && <CodeEditor key={`code:${revision}`} doc={doc} />}
-      {activeTab === "Sprites" && (
-        <SpriteEditor
-          key={`${bank}:${revision}`}
+      {activeTab === "Assets" && (
+        <AssetsEditor
           sheet={sheet}
           normals={normals}
           height={heightMap}
@@ -460,15 +458,11 @@ function WorkbenchBody({
           onSwatchesChange={setMaterials}
           rig={rig}
           onRigChange={setRig}
-        />
-      )}
-      {activeTab === "Voxel" && (
-        <VoxelEditor
-          key={`${bank}:${revision}`}
-          sheet={sheet}
-          model={voxel}
-          onModelChange={setVoxel}
-          pendingEdit={pendingVoxel}
+          voxel={voxel}
+          onVoxelChange={setVoxel}
+          bank={bank}
+          revision={revision}
+          pendingVoxel={pendingVoxel}
         />
       )}
       {activeTab === "Map" && (

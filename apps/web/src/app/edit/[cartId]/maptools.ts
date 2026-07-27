@@ -13,6 +13,8 @@
 
 import type { CellShape } from "@cartbox/editor";
 
+import type { ToolDefinition } from "./toolCapabilities";
+
 /** The four things the Map tab can author. */
 export type MapLayer = "tiles" | "pixels" | "voxels" | "hexels";
 
@@ -28,20 +30,15 @@ export type MapTool =
   | "paint"
   | "flatten";
 
-export interface MapToolDef {
-  id: MapTool;
-  label: string;
-  glyph: string;
-  /** What the tool does, shown as its tooltip. */
-  hint: string;
-}
+/** A map tool as the shared rail renders it; `hint` becomes its tooltip. */
+export type MapToolDef = ToolDefinition<MapTool>;
 
-export interface MapLayerDef {
-  id: MapLayer;
-  label: string;
-  glyph: string;
-  /** One-line description shown under the layer switch. */
-  description: string;
+/**
+ * A map layer. Shares the rail's tool shape — the layer switch is itself a tool
+ * rail, so a layer needs the same id/label/glyph/hint — and adds the tools that
+ * layer offers.
+ */
+export interface MapLayerDef extends ToolDefinition<MapLayer> {
   tools: readonly MapToolDef[];
 }
 
@@ -70,28 +67,28 @@ export const MAP_LAYERS: readonly MapLayerDef[] = [
     id: "tiles",
     label: "Tiles",
     glyph: "▦",
-    description: "Stamp tiles from the sprite sheet across the map grid.",
+    hint: "Stamp tiles from the sprite sheet across the map grid.",
     tools: TILE_TOOLS,
   },
   {
     id: "pixels",
     label: "Pixels",
     glyph: "▪",
-    description: "Paint individual pixels into the tiles the map references.",
+    hint: "Paint individual pixels into the tiles the map references.",
     tools: PIXEL_TOOLS,
   },
   {
     id: "voxels",
     label: "Voxels",
     glyph: "◼",
-    description: "Give the map height as cubes — raise, lower and paint columns.",
+    hint: "Give the map height as cubes — raise, lower and paint columns.",
     tools: COLUMN_TOOLS,
   },
   {
     id: "hexels",
     label: "Hexels",
     glyph: "⬡",
-    description: "The same columns built from close-packed rhombic hexels.",
+    hint: "The same columns built from close-packed rhombic hexels.",
     tools: COLUMN_TOOLS,
   },
 ];

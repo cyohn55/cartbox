@@ -41,14 +41,7 @@ import {
 } from "../../edit/[cartId]/shapeTools";
 
 import styles from "./skinEditor.module.css";
-
-/** A tool the paint canvas understands (a superset of the sprite tools). */
-export type SkinTool = "pencil" | "eraser" | "fill" | "line" | "rect" | "ellipse" | "eyedropper" | "pan";
-
-/** Tools that drag out a shape previewed live and committed on release. */
-const SHAPE_TOOLS: ReadonlySet<SkinTool> = new Set<SkinTool>(["line", "rect", "ellipse"]);
-/** Tools whose stroke thickness the artist can adjust. */
-const WEIGHTED_TOOLS: ReadonlySet<SkinTool> = new Set<SkinTool>(["pencil", "eraser", "line", "rect", "ellipse"]);
+import { SHAPE_TOOLS, WEIGHTED_TOOLS, type SkinTool } from "./skinTools";
 
 /** A completed pixel edit, as the rectangle that changed with its before/after. */
 export interface StrokeSnapshot {
