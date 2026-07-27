@@ -1488,3 +1488,16 @@
   cursor: crosshair;
   touch-action: none;
 }
+
+/* Per-class material picker in the generator's class mapping. */
+.classMaterial {
+  flex: none;
+  max-width: 72px;
+  padding: 2px 4px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}

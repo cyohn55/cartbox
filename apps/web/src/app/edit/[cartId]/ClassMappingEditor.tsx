@@ -13,6 +13,7 @@
 
 import type { ClassInfo, ClassMapping } from "@cartbox/editor";
 
+import { BUILD_MATERIALS } from "@/lib/faceTextures";
 import styles from "./editor.module.css";
 import { isColumnLayer, type MapLayer } from "./maptools";
 
@@ -42,6 +43,8 @@ export function ClassMappingEditor({
   const showTile = layer === "tiles";
   const showColor = layer !== "tiles";
   const showHeight = isColumnLayer(layer);
+  // Only the column layers are skinned, so the material picker follows height.
+  const showMaterial = isColumnLayer(layer);
 
   const update = (index: number, patch: Partial<ClassMapping>) => {
     onChange(mapping.map((entry, i) => (i === index ? { ...entry, ...patch } : entry)));
@@ -51,7 +54,7 @@ export function ClassMappingEditor({
     <div className={styles.classMapping}>
       <div className={styles.groupLabel}>Classes → {layer}</div>
       {legend.map((info, index) => {
-        const entry = mapping[index] ?? { tile: 0, colorIndex: 0, columnHeight: 0 };
+        const entry = mapping[index] ?? { tile: 0, colorIndex: 0, columnHeight: 0, material: -1 };
         return (
           <div key={info.id} className={styles.classRow}>
             <span
@@ -107,6 +110,23 @@ export function ClassMappingEditor({
                   aria-label={`${info.label} column height`}
                 />
               </label>
+            )}
+
+            {showMaterial && (
+              <select
+                className={styles.classMaterial}
+                value={entry.material}
+                onChange={(event) => update(index, { material: Number(event.target.value) })}
+                aria-label={`${info.label} material`}
+                title={`Texture ${info.label} columns with this material`}
+              >
+                <option value={-1}>flat</option>
+                {BUILD_MATERIALS.map((material) => (
+                  <option key={material.name} value={material.material}>
+                    {material.name}
+                  </option>
+                ))}
+              </select>
             )}
           </div>
         );

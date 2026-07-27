@@ -12,7 +12,7 @@
  * the voxel's own colour tints them.
  */
 
-import type { FaceMaterial, TextureAtlas } from "@cartbox/editor";
+import type { FaceMaterial, SurfaceId, TextureAtlas } from "@cartbox/editor";
 import { AUTHORED_TILES, type AuthoredTileName } from "./authoredTiles";
 import type { TerrainMaterial } from "./hexelTerrainSpecs";
 
@@ -129,4 +129,26 @@ export const BUILD_MATERIALS: readonly BuildMaterial[] = [
 export function buildWorldAtlas(): TextureAtlas {
   const tiles = TILE_ORDER.map((name) => AUTHORED_TILES[name]);
   return { tiles, materials: MATERIAL_FACES };
+}
+
+/**
+ * The world atlas's answer to each surface a procedural generator can emit.
+ *
+ * Generators are pure and know nothing about this atlas — they say only what a
+ * cell *is* ("grass", "bedrock") and a resolver like this one decides how it
+ * looks. Surfaces the atlas has no art for (snow) resolve to no material, so
+ * those cells keep the generator's own colour instead of wearing the wrong tile.
+ */
+export function worldSurfaceMaterial(surface: SurfaceId): number {
+  const MATERIAL_BY_SURFACE: Partial<Record<SurfaceId, number>> = {
+    grass: MATERIAL.grass,
+    forest: MATERIAL.leaves,
+    dirt: MATERIAL.dirt,
+    rock: MATERIAL.rock,
+    sand: MATERIAL.sand,
+    water: MATERIAL.water,
+    brick: MATERIAL.brick,
+    planks: MATERIAL.planks,
+  };
+  return MATERIAL_BY_SURFACE[surface] ?? -1;
 }

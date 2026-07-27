@@ -19,6 +19,7 @@ const load = (rel) => import(pathToFileURL(path.resolve(here, rel)).href);
 
 const {
   MapVoxelLayer,
+  COLUMN_MATERIAL_NONE,
   mapLayerToVoxelGrid,
   serializeMapVoxelLayer,
   deserializeMapVoxelLayer,
@@ -67,7 +68,7 @@ test("invalid dimensions are rejected rather than silently accepted", () => {
 test("a column round-trips through the layer", () => {
   const layer = new MapVoxelLayer(8, 8);
   layer.setColumn(3, 4, 5, 11);
-  assert.deepEqual(layer.columnAt(3, 4), { height: 5, colorIndex: 11 });
+  assert.deepEqual(layer.columnAt(3, 4), { height: 5, colorIndex: 11, material: COLUMN_MATERIAL_NONE });
   assert.equal(layer.heightAt(3, 4), 5);
   assert.equal(layer.columnCount, 1);
   assert.equal(layer.peakHeight, 5);
@@ -117,7 +118,7 @@ test("paint only recolours a column that exists", () => {
 
   layer.setColumn(4, 4, 2, 1);
   layer.paint(4, 4, 12);
-  assert.deepEqual(layer.columnAt(4, 4), { height: 2, colorIndex: 12 });
+  assert.deepEqual(layer.columnAt(4, 4), { height: 2, colorIndex: 12, material: COLUMN_MATERIAL_NONE });
 });
 
 test("forEachColumn visits every raised cell exactly once", () => {
@@ -183,7 +184,9 @@ test("the payload declares its version and tracks the columns, not the area", ()
   const dense = seededLayer(240, 136);
 
   const parsed = JSON.parse(serializeMapVoxelLayer(small));
-  assert.equal(parsed.version, MAP_VOXEL_LAYER_VERSION);
+  // Untextured layers stay on version 1 so pre-material carts are byte-identical;
+  // the version bump is covered separately.
+  assert.equal(parsed.version, 1);
   assert.equal(parsed.count, 1);
   assert.equal(parsed.shape, undefined, "cube is the default and is omitted");
 
@@ -263,6 +266,112 @@ test("an oversized map is downsampled to fit the grid's footprint limit", () => 
   assert.ok(grid.sizeX <= 64, `grid width ${grid.sizeX} fits the limit`);
   assert.ok(grid.sizeZ <= 64, `grid depth ${grid.sizeZ} fits the limit`);
   assert.ok(grid.filledCount > 0, "the downsample still carries content");
+});
+
+test("a column's material round-trips and only exists where a column does", () => {
+  const layer = new MapVoxelLayer(8, 8);
+  assert.ok(!layer.hasMaterials(), "a new layer is untextured");
+
+  layer.setColumn(2, 2, 4, 6, 3);
+  assert.equal(layer.materialAt(2, 2), 3);
+  assert.deepEqual(layer.columnAt(2, 2), { height: 4, colorIndex: 6, material: 3 });
+  assert.ok(layer.hasMaterials());
+
+  // A material needs a column to sit on.
+  layer.setMaterial(5, 5, 2);
+  assert.equal(layer.materialAt(5, 5), COLUMN_MATERIAL_NONE, "an empty cell takes no material");
+
+  // Clearing the column clears its material with it.
+  layer.clear(2, 2);
+  assert.equal(layer.materialAt(2, 2), COLUMN_MATERIAL_NONE);
+});
+
+test("recolouring a column keeps its material unless a new one is given", () => {
+  const layer = new MapVoxelLayer(8, 8);
+  layer.setColumn(1, 1, 3, 5, 7);
+
+  layer.paint(1, 1, 9);
+  assert.deepEqual(layer.columnAt(1, 1), { height: 3, colorIndex: 9, material: 7 }, "the skin survived");
+
+  layer.paint(1, 1, 9, 2);
+  assert.equal(layer.materialAt(1, 1), 2, "an explicit material replaces it");
+
+  layer.paint(1, 1, 9, COLUMN_MATERIAL_NONE);
+  assert.equal(layer.materialAt(1, 1), COLUMN_MATERIAL_NONE, "and flat is reachable");
+});
+
+test("raising an existing column keeps its skin; a new one takes the armed material", () => {
+  const layer = new MapVoxelLayer(8, 8);
+  layer.setColumn(3, 3, 2, 4, 8);
+
+  layer.raise(3, 3, 3, 1, 5);
+  assert.deepEqual(layer.columnAt(3, 3), { height: 5, colorIndex: 4, material: 8 }, "existing ground is untouched");
+
+  layer.raise(6, 6, 2, 1, 5);
+  assert.deepEqual(layer.columnAt(6, 6), { height: 2, colorIndex: 1, material: 5 }, "new ground takes both");
+});
+
+test("materials survive serialization and cloning", () => {
+  for (const shape of ["cube", "hexel"]) {
+    const layer = seededLayer(20, 16, shape);
+    layer.forEachColumn((x, y) => layer.setMaterial(x, y, (x + y) % 6));
+
+    const restored = deserializeMapVoxelLayer(serializeMapVoxelLayer(layer));
+    assert.ok(restored.hasMaterials(), `${shape}: the payload carried materials`);
+    layer.forEachColumn((x, y, column) => {
+      assert.deepEqual(restored.columnAt(x, y), column, `${shape}: column ${x},${y} survived intact`);
+    });
+
+    const copy = layer.clone(shape === "cube" ? "hexel" : "cube");
+    layer.forEachColumn((x, y, column) => {
+      assert.equal(copy.materialAt(x, y), column.material, `${shape}: re-shaping kept the skin`);
+    });
+  }
+});
+
+test("an untextured layer still serializes as the original version-1 payload", () => {
+  const layer = seededLayer(24, 18);
+  const parsed = JSON.parse(serializeMapVoxelLayer(layer));
+  assert.equal(parsed.version, 1, "no materials means no version bump");
+  assert.equal(parsed.materials, undefined, "and no materials payload");
+
+  layer.setMaterial(...(() => {
+    let first = null;
+    layer.forEachColumn((x, y) => {
+      if (first === null) first = [x, y];
+    });
+    return [first[0], first[1], 2];
+  })());
+  const textured = JSON.parse(serializeMapVoxelLayer(layer));
+  assert.equal(textured.version, MAP_VOXEL_LAYER_VERSION, "one material bumps the version");
+  assert.ok(typeof textured.materials === "string", "and adds the payload");
+});
+
+test("a version-1 payload still loads, as untextured columns", () => {
+  const layer = seededLayer(12, 12);
+  const legacy = JSON.parse(serializeMapVoxelLayer(layer));
+  assert.equal(legacy.version, 1);
+  const restored = deserializeMapVoxelLayer(JSON.stringify(legacy));
+  assert.equal(restored.columnCount, layer.columnCount);
+  assert.ok(!restored.hasMaterials());
+});
+
+test("rebuilding as voxels carries the column material onto every cell", () => {
+  const layer = new MapVoxelLayer(6, 5);
+  layer.setColumn(1, 2, 4, 3, 6);
+  layer.setColumn(4, 0, 2, 5); // deliberately flat
+  const grid = mapLayerToVoxelGrid(layer, (index) => [index * 10, index, 255 - index]);
+
+  for (let y = 0; y < 4; y += 1) {
+    assert.equal(grid.materialAt(1, y, 2), 6, `skinned column cell at height ${y}`);
+  }
+  // A skinned column is built white so its art reads true; a flat one keeps its
+  // palette colour.
+  const skinned = grid.get(1, 0, 2);
+  assert.deepEqual([skinned.r, skinned.g, skinned.b], [255, 255, 255]);
+  const flat = grid.get(4, 0, 0);
+  assert.equal(grid.materialAt(4, 0, 0), -1);
+  assert.deepEqual([flat.r, flat.g, flat.b], [50, 5, 250]);
 });
 
 let failed = 0;

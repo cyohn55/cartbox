@@ -45,6 +45,8 @@ export {
   isWaterClass,
   isClassEdge,
   strataColorAt,
+  strataSurfaceAt,
+  terrainSurfaceOf,
   TERRAIN_LEGEND,
   TERRAIN_CLASS,
   SUBSURFACE_COLORS,
@@ -89,10 +91,18 @@ export {
   type VoxelSink,
 } from "./generators";
 export {
+  SURFACE_IDS,
+  NO_MATERIAL,
+  resolveMaterial,
+  type SurfaceId,
+  type MaterialResolver,
+} from "./surfaces";
+export {
   applyFieldToTiles,
   applyFieldToPixels,
   applyFieldToColumns,
   defaultClassMapping,
+  surfaceForClassId,
   type ApplyOptions,
   type ClassMapping,
   type DefaultMappingOptions,

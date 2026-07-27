@@ -31,6 +31,46 @@ function check(name, ok, detail = "") {
   console.log(`${ok ? "PASS" : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
 }
 
+/**
+ * How often colour changes between horizontally adjacent pixels, per thousand
+ * drawn pixels — the structural signature of *texture*.
+ *
+ * A flat-shaded render changes colour only where one face meets the next; a
+ * textured one changes within every face. Measured on this build: a flat sculpt
+ * scores 16, the same sculpt generated with materials scores 395, so the two
+ * cases are separated by more than an order of magnitude rather than by a
+ * hand-picked colour count.
+ */
+async function textureDensity(page, selector) {
+  return page.evaluate((sel) => {
+    const canvas = document.querySelector(sel);
+    if (!canvas) return 0;
+    const { data, width, height } = canvas
+      .getContext("2d")
+      .getImageData(0, 0, canvas.width, canvas.height);
+    let drawn = 0;
+    let changes = 0;
+    for (let y = 0; y < height; y += 1) {
+      let previous = null;
+      for (let x = 0; x < width; x += 1) {
+        const i = (y * width + x) * 4;
+        if (data[i + 3] === 0) {
+          previous = null;
+          continue;
+        }
+        drawn += 1;
+        const colour = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
+        if (previous !== null && previous !== colour) changes += 1;
+        previous = colour;
+      }
+    }
+    return Math.round((changes / Math.max(1, drawn)) * 1000);
+  }, selector);
+}
+
+/** Colour changes per thousand pixels below which a render reads as flat. */
+const TEXTURED_THRESHOLD = 150;
+
 /** The map canvas's pixels, as a stable fingerprint we can compare across edits. */
 async function canvasSignature(page, selector) {
   return page.evaluate((sel) => {
@@ -88,6 +128,10 @@ try {
   page.on("pageerror", (error) => errors.push(String(error)));
   page.on("console", (message) => {
     if (message.type() === "error") errors.push(message.text());
+  });
+  page.on("requestfailed", (request) => errors.push(`request failed: ${request.url()}`));
+  page.on("response", (response) => {
+    if (response.status() >= 400) errors.push(`HTTP ${response.status()}: ${response.url()}`);
   });
   // Confirms are used before destructive generator runs; accept them.
   page.on("dialog", (dialog) => dialog.accept());
@@ -237,6 +281,101 @@ try {
     survivingColumns,
   );
   await page.screenshot({ path: shot("map-07-columns-persisted") });
+
+  // --- Materials -----------------------------------------------------------
+  // The reason this section exists: a colour-writing tool used to strip the
+  // material off every voxel it touched, and generation never applied one.
+
+  await page.getByRole("button", { name: "Voxel", exact: true }).click();
+  await page.waitForTimeout(1200);
+  // Switching cell shape reseeds a fresh, untextured pad — the flat baseline the
+  // generated sculpt is compared against.
+  await page.getByRole("button", { name: "Cube", exact: true }).click();
+  await page.waitForTimeout(800);
+  const flatDensity = await textureDensity(page, sculptSelector);
+
+  // Generation must produce a skinned sculpt, not flat colour.
+  await page.getByRole("button", { name: /Generate…/ }).click();
+  await page.waitForTimeout(600);
+  await page.selectOption("select[aria-label='Generator']", "terrain");
+  await page.waitForTimeout(400);
+  await page.getByRole("button", { name: "Generate", exact: true }).click();
+  await page.waitForTimeout(2500);
+  const generatedDensity = await textureDensity(page, sculptSelector);
+  check(
+    "generated terrain renders textured, not flat",
+    generatedDensity > TEXTURED_THRESHOLD,
+    `${generatedDensity} changes/1k pixels`,
+  );
+  check(
+    "and far more textured than the flat sculpt it replaced",
+    generatedDensity > flatDensity * 3,
+    `flat ${flatDensity} → generated ${generatedDensity}`,
+  );
+  await page.screenshot({ path: shot("mat-01-generated-textured") });
+
+  // The material palette must now be reachable from the colour tools, not only
+  // from the Tiles tool.
+  await page.getByRole("button", { name: "Fill", exact: true }).click();
+  await page.waitForTimeout(400);
+  const paletteOnFill = await page.getByRole("button", { name: "Material grass" }).count();
+  check("the material palette is available to the Fill tool", paletteOnFill > 0);
+  const flatSwatch = await page.getByRole("button", { name: "Flat colour, no material" }).count();
+  check("a Flat option is offered so colour-only painting still works", flatSwatch > 0);
+
+  // Fill with a material armed must change the render (it applies the skin).
+  const sculptCanvasSel = (await page.locator(voxelCanvas).count()) > 0 ? voxelCanvas : "canvas";
+  await page.getByRole("button", { name: "Material brick" }).click();
+  await page.waitForTimeout(300);
+  const beforeFill = await canvasSignature(page, sculptCanvasSel);
+  await clickCanvasAt(page, sculptCanvasSel, 0.5, 0.45);
+  await page.waitForTimeout(1200);
+  check("filling with an armed material re-skins the run", (await canvasSignature(page, sculptCanvasSel)) !== beforeFill);
+  await page.screenshot({ path: shot("mat-02-filled-brick") });
+
+  // Scaling an axis must not strip the sculpt back to flat colour.
+  const beforeScale = await canvasSignature(page, sculptCanvasSel);
+  await page.getByRole("button", { name: "X", exact: true }).click();
+  await page.waitForTimeout(300);
+  const box = await visibleBox(page, sculptCanvasSel);
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  // Squash, not stretch: generated terrain already spans the whole grid, so
+  // growing it is legitimately a no-op (the axis is clamped to the grid size).
+  await page.mouse.wheel(0, 120);
+  await page.waitForTimeout(1500);
+  check("scaling an axis changes the sculpt", (await canvasSignature(page, sculptCanvasSel)) !== beforeScale);
+  const scaledDensity = await textureDensity(page, sculptCanvasSel);
+  check(
+    "and the scaled sculpt keeps its materials",
+    scaledDensity > TEXTURED_THRESHOLD,
+    `${scaledDensity} changes/1k pixels`,
+  );
+  await page.screenshot({ path: shot("mat-03-scaled-still-textured") });
+
+  // Map columns: generation must skin them, and the overlay must show the art.
+  await page.getByRole("button", { name: "Map", exact: true }).click();
+  await page.waitForTimeout(1000);
+  await page.getByRole("button", { name: "Voxels", exact: true }).click();
+  await page.waitForTimeout(600);
+  const columnMaterialPalette = await page.getByRole("button", { name: "Material grass" }).count();
+  check("the map's column tools offer a material palette", columnMaterialPalette > 0);
+
+  await page.getByRole("button", { name: /Generate…/ }).click();
+  await page.waitForTimeout(1000);
+  await page.selectOption("select[aria-label='Generator']", "terrain");
+  await page.waitForTimeout(1200);
+  const materialSelects = await page.locator("select[aria-label$='material']").count();
+  check("each class exposes a material in the mapping", materialSelects > 0, `${materialSelects} classes`);
+
+  await page.getByRole("button", { name: "Generate", exact: true }).click();
+  await page.waitForTimeout(2000);
+  const mapDensity = await textureDensity(page, mapCanvas);
+  check(
+    "generated map columns draw their material art",
+    mapDensity > TEXTURED_THRESHOLD,
+    `${mapDensity} changes/1k pixels`,
+  );
+  await page.screenshot({ path: shot("mat-04-map-columns-textured") });
 
   check("no uncaught page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
 } finally {

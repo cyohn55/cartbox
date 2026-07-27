@@ -22,8 +22,14 @@ import { VoxelGrid, MAX_VOXEL_GRID_DIM } from "./VoxelGrid";
 /** Tallest column a map cell can hold. Bounds both storage and preview cost. */
 export const MAX_MAP_COLUMN_HEIGHT = 64;
 
-/** Format version of the serialized layer, bumped on any schema change. */
-export const MAP_VOXEL_LAYER_VERSION = 1;
+/**
+ * Format version of the serialized layer.
+ *
+ * v2 adds a per-column texture material. It is written only when at least one
+ * column carries one, so a purely coloured layer still serializes exactly as v1
+ * did; v1 payloads load unchanged, as untextured columns.
+ */
+export const MAP_VOXEL_LAYER_VERSION = 2;
 
 /** A column's contents. */
 export interface MapColumn {
@@ -31,7 +37,16 @@ export interface MapColumn {
   readonly height: number;
   /** Palette index the column is painted with, so it follows the cart palette. */
   readonly colorIndex: number;
+  /**
+   * Texture-material index skinning the column, or {@link COLUMN_MATERIAL_NONE}
+   * for a flat colour. Lets a generated or hand-raised landscape wear grass,
+   * sand and rock the same way a sculpt in the Voxel tab does.
+   */
+  readonly material: number;
 }
+
+/** A column's material index meaning "no material — render the flat colour". */
+export const COLUMN_MATERIAL_NONE = -1;
 
 const PAYLOAD_MISMATCH = "Map voxel layer payload size does not match its dimensions";
 
@@ -48,6 +63,12 @@ export class MapVoxelLayer {
   private readonly heights: Uint8Array;
   /** Palette index per cell, row-major; meaningful only where height > 0. */
   private readonly colors: Uint8Array;
+  /**
+   * Texture material per cell, row-major, as a signed index. Allocated lazily so
+   * an untextured layer — the common case, and every layer saved before
+   * materials existed — costs nothing for it.
+   */
+  private materials: Int16Array | null = null;
 
   constructor(
     width: number,
@@ -67,6 +88,35 @@ export class MapVoxelLayer {
     return y * this.width + x;
   }
 
+  /** Allocate the per-cell material array on first use, filled with "none". */
+  private ensureMaterials(): Int16Array {
+    if (!this.materials) {
+      this.materials = new Int16Array(this.width * this.height).fill(COLUMN_MATERIAL_NONE);
+    }
+    return this.materials;
+  }
+
+  /** Whether any column carries a material, so callers can skip the tile path. */
+  hasMaterials(): boolean {
+    if (!this.materials) return false;
+    for (let i = 0; i < this.materials.length; i += 1) if (this.materials[i]! >= 0) return true;
+    return false;
+  }
+
+  /** The material of a column, or {@link COLUMN_MATERIAL_NONE} if none/empty. */
+  materialAt(x: number, y: number): number {
+    if (!this.materials || this.heightAt(x, y) <= 0) return COLUMN_MATERIAL_NONE;
+    return this.materials[this.index(x, y)]!;
+  }
+
+  /** Skin an existing column. No-op on an empty cell, as a material needs a column. */
+  setMaterial(x: number, y: number, material: number): void {
+    if (this.heightAt(x, y) <= 0) return;
+    const i = this.index(x, y);
+    if (material >= 0) this.ensureMaterials()[i] = material;
+    else if (this.materials) this.materials[i] = COLUMN_MATERIAL_NONE;
+  }
+
   inBounds(x: number, y: number): boolean {
     return x >= 0 && x < this.width && y >= 0 && y < this.height;
   }
@@ -76,7 +126,12 @@ export class MapVoxelLayer {
     if (!this.inBounds(x, y)) return null;
     const i = this.index(x, y);
     const height = this.heights[i]!;
-    return height > 0 ? { height, colorIndex: this.colors[i]! } : null;
+    if (height === 0) return null;
+    return {
+      height,
+      colorIndex: this.colors[i]!,
+      material: this.materials ? this.materials[i]! : COLUMN_MATERIAL_NONE,
+    };
   }
 
   /** A column's height, or 0 when there is none. */
@@ -88,17 +143,20 @@ export class MapVoxelLayer {
    * Set a column outright. A height of 0 or less clears the cell; taller values
    * are clamped to {@link MAX_MAP_COLUMN_HEIGHT}. Out-of-bounds writes are ignored.
    */
-  setColumn(x: number, y: number, height: number, colorIndex: number): void {
+  setColumn(x: number, y: number, height: number, colorIndex: number, material = COLUMN_MATERIAL_NONE): void {
     if (!this.inBounds(x, y)) return;
     const i = this.index(x, y);
     const clamped = Math.min(MAX_MAP_COLUMN_HEIGHT, Math.floor(height));
     if (clamped <= 0) {
       this.heights[i] = 0;
       this.colors[i] = 0;
+      if (this.materials) this.materials[i] = COLUMN_MATERIAL_NONE;
       return;
     }
     this.heights[i] = clamped;
     this.colors[i] = Math.max(0, Math.min(255, Math.floor(colorIndex)));
+    if (material >= 0) this.ensureMaterials()[i] = material;
+    else if (this.materials) this.materials[i] = COLUMN_MATERIAL_NONE;
   }
 
   /**
@@ -106,19 +164,33 @@ export class MapVoxelLayer {
    * `colorIndex` if it is being created. Returns the resulting height, so a UI
    * can report what the edit did without reading back.
    */
-  raise(x: number, y: number, delta: number, colorIndex: number): number {
+  raise(x: number, y: number, delta: number, colorIndex: number, material = COLUMN_MATERIAL_NONE): number {
     if (!this.inBounds(x, y)) return 0;
+    const i = this.index(x, y);
     const current = this.heightAt(x, y);
     const next = Math.max(0, Math.min(MAX_MAP_COLUMN_HEIGHT, current + Math.round(delta)));
-    // A brand-new column takes the active colour; an existing one keeps its own.
-    this.setColumn(x, y, next, current > 0 ? this.colors[this.index(x, y)]! : colorIndex);
+    // A brand-new column takes the active colour and material; an existing one
+    // keeps its own, so raising ground never restyles what is already there.
+    const existing = current > 0;
+    this.setColumn(
+      x,
+      y,
+      next,
+      existing ? this.colors[i]! : colorIndex,
+      existing ? (this.materials ? this.materials[i]! : COLUMN_MATERIAL_NONE) : material,
+    );
     return next;
   }
 
-  /** Recolour an existing column. No-op on an empty cell, so colour implies a column. */
-  paint(x: number, y: number, colorIndex: number): void {
+  /**
+   * Recolour an existing column, optionally re-skinning it. No-op on an empty
+   * cell, so colour implies a column. Passing no material keeps the one the
+   * column already wears — recolouring must not silently strip its texture.
+   */
+  paint(x: number, y: number, colorIndex: number, material?: number): void {
     if (this.heightAt(x, y) <= 0) return;
     this.colors[this.index(x, y)] = Math.max(0, Math.min(255, Math.floor(colorIndex)));
+    if (material !== undefined) this.setMaterial(x, y, material);
   }
 
   /** Remove a column. */
@@ -130,6 +202,7 @@ export class MapVoxelLayer {
   clearAll(): void {
     this.heights.fill(0);
     this.colors.fill(0);
+    if (this.materials) this.materials.fill(COLUMN_MATERIAL_NONE);
   }
 
   /** How many cells carry a column. */
@@ -156,7 +229,11 @@ export class MapVoxelLayer {
       for (let x = 0; x < this.width; x += 1) {
         const i = this.index(x, y);
         if (this.heights[i]! === 0) continue;
-        callback(x, y, { height: this.heights[i]!, colorIndex: this.colors[i]! });
+        callback(x, y, {
+          height: this.heights[i]!,
+          colorIndex: this.colors[i]!,
+          material: this.materials ? this.materials[i]! : COLUMN_MATERIAL_NONE,
+        });
       }
     }
   }
@@ -166,6 +243,7 @@ export class MapVoxelLayer {
     const copy = new MapVoxelLayer(this.width, this.height, shape);
     copy.heights.set(this.heights);
     copy.colors.set(this.colors);
+    if (this.materials) copy.ensureMaterials().set(this.materials);
     return copy;
   }
 }
@@ -200,17 +278,25 @@ export function serializeMapVoxelLayer(layer: MapVoxelLayer): string {
   const indexView = new DataView(indexBytes.buffer);
   const heights = new Uint8Array(count);
   const colors = new Uint8Array(count);
+  // Materials ride parallel to the columns (same order) as signed 16-bit
+  // indices, but only when the layer actually uses any — an untextured layer
+  // stays byte-identical to the v1 payload, so old carts are untouched.
+  const textured = layer.hasMaterials();
+  const materialBytes = textured ? new Uint8Array(count * 2) : null;
+  const materialView = materialBytes ? new DataView(materialBytes.buffer) : null;
 
   let written = 0;
   layer.forEachColumn((x, y, column) => {
     indexView.setUint32(written * 4, y * layer.width + x, true);
     heights[written] = column.height;
     colors[written] = column.colorIndex;
+    if (materialView) materialView.setInt16(written * 2, column.material, true);
     written += 1;
   });
 
   return JSON.stringify({
-    version: MAP_VOXEL_LAYER_VERSION,
+    // Only a textured layer bumps to v2; without materials it is still v1.
+    version: textured ? MAP_VOXEL_LAYER_VERSION : 1,
     width: layer.width,
     height: layer.height,
     // Cube is the default and is omitted, so a cube layer's payload stays minimal.
@@ -219,6 +305,7 @@ export function serializeMapVoxelLayer(layer: MapVoxelLayer): string {
     indices: bytesToBase64(indexBytes),
     heights: bytesToBase64(heights),
     colors: bytesToBase64(colors),
+    ...(materialBytes ? { materials: bytesToBase64(materialBytes) } : {}),
   });
 }
 
@@ -238,8 +325,11 @@ export function deserializeMapVoxelLayer(json: string): MapVoxelLayer {
     indices?: string;
     heights?: string;
     colors?: string;
+    materials?: string; // v2 only
   };
-  if (raw.version !== MAP_VOXEL_LAYER_VERSION) {
+  // v1 (no materials) and v2 share the sparse layout; v2 just carries an extra
+  // parallel `materials` payload, absent on v1.
+  if (raw.version !== 1 && raw.version !== MAP_VOXEL_LAYER_VERSION) {
     throw new Error(`Unsupported map voxel layer version: ${String(raw.version)}`);
   }
   const layer = new MapVoxelLayer(
@@ -259,14 +349,29 @@ export function deserializeMapVoxelLayer(json: string): MapVoxelLayer {
     throw new Error(PAYLOAD_MISMATCH);
   }
 
+  const materials = raw.materials ? base64ToBytes(raw.materials) : null;
+  if (materials && materials.length !== count * 2) throw new Error(PAYLOAD_MISMATCH);
+  const materialView = materials
+    ? new DataView(materials.buffer, materials.byteOffset, materials.byteLength)
+    : null;
+
   const indexView = new DataView(indices.buffer, indices.byteOffset, indices.byteLength);
   for (let k = 0; k < count; k += 1) {
     const cellIndex = indexView.getUint32(k * 4, true);
     if (cellIndex >= cells) throw new Error(PAYLOAD_MISMATCH); // stray index → reject
-    layer.setColumn(cellIndex % layer.width, Math.floor(cellIndex / layer.width), heights[k]!, colors[k]!);
+    layer.setColumn(
+      cellIndex % layer.width,
+      Math.floor(cellIndex / layer.width),
+      heights[k]!,
+      colors[k]!,
+      materialView ? materialView.getInt16(k * 2, true) : COLUMN_MATERIAL_NONE,
+    );
   }
   return layer;
 }
+
+/** Albedo for a skinned column, so the renderer reproduces its tile art faithfully. */
+const TEXTURED_ALBEDO: readonly [number, number, number] = [255, 255, 255];
 
 /** How the layer's palette indices become RGB when it is rebuilt as voxels. */
 export type PaletteLookup = (colorIndex: number) => readonly [number, number, number];
@@ -306,11 +411,15 @@ export function mapLayerToVoxelGrid(
     for (let x = 0; x < sizeX; x += 1) {
       const column = layer.columnAt(x * stride, z * stride);
       if (!column) continue;
-      const [r, g, b] = palette(column.colorIndex);
+      // A skinned column is built white so its tile art shows as drawn — the
+      // renderer tints a tile by its voxel's colour. An unskinned one keeps the
+      // palette colour it was painted with.
+      const textured = column.material >= 0;
+      const [r, g, b] = textured ? TEXTURED_ALBEDO : palette(column.colorIndex);
       const top = Math.min(sizeY, column.height);
       for (let y = 0; y < top; y += 1) {
         if (evenParity && (((x + y + z) % 2) + 2) % 2 !== 0) continue;
-        grid.set(x, y, z, r, g, b);
+        grid.set(x, y, z, r, g, b, 0, column.material);
       }
     }
   }

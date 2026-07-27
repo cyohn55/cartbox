@@ -12,6 +12,7 @@
 
 import { classAt, createClassField, type ClassField, type ClassInfo } from "./classField";
 import type { Rgb } from "../model/lighting";
+import type { SurfaceId } from "./surfaces";
 import { heightAt, moistureAt, type HeightField } from "./heightField";
 
 /**
@@ -174,11 +175,46 @@ export function isWaterClass(value: number): boolean {
  */
 export function strataColorAt(surfaceClass: number, below: number, columnHeight: number): Rgb {
   if (below === 0) return TERRAIN_LEGEND[surfaceClass]?.color ?? SUBSURFACE_COLORS.stone;
-  const soilDepth = Math.max(1, Math.round(columnHeight * 0.15));
-  const stoneDepth = Math.max(soilDepth + 1, Math.round(columnHeight * 0.85));
-  if (below <= soilDepth) return SUBSURFACE_COLORS.soil;
-  if (below <= stoneDepth) return SUBSURFACE_COLORS.stone;
+  if (below <= soilDepthOf(columnHeight)) return SUBSURFACE_COLORS.soil;
+  if (below <= stoneDepthOf(columnHeight)) return SUBSURFACE_COLORS.stone;
   return SUBSURFACE_COLORS.bedrock;
+}
+
+/** Where soil gives way to stone in a column of this height. */
+function soilDepthOf(columnHeight: number): number {
+  return Math.max(1, Math.round(columnHeight * 0.15));
+}
+
+/** Where stone gives way to bedrock. */
+function stoneDepthOf(columnHeight: number): number {
+  return Math.max(soilDepthOf(columnHeight) + 1, Math.round(columnHeight * 0.85));
+}
+
+/** The surface each terrain class presents, for callers that texture it. */
+const CLASS_SURFACES: readonly SurfaceId[] = [
+  "water", // deep water
+  "water", // shallow water
+  "sand",
+  "grass",
+  "forest",
+  "rock",
+  "snow",
+];
+
+/** The surface of a terrain class, for {@link MaterialResolver} lookups. */
+export function terrainSurfaceOf(surfaceClass: number): SurfaceId {
+  return CLASS_SURFACES[surfaceClass] ?? "rock";
+}
+
+/**
+ * The surface of the block at depth `below` under a column's surface — the
+ * texturing counterpart of {@link strataColorAt}, sharing its depth thresholds
+ * so a column's colours and its materials always change at the same place.
+ */
+export function strataSurfaceAt(surfaceClass: number, below: number, columnHeight: number): SurfaceId {
+  if (below === 0) return terrainSurfaceOf(surfaceClass);
+  if (below <= soilDepthOf(columnHeight)) return "dirt";
+  return "rock"; // stone and bedrock share the rock face; their colours differ
 }
 
 /**

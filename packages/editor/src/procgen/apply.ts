@@ -17,8 +17,9 @@
 
 import { classAt, type ClassField, type ClassInfo } from "./classField";
 import type { Rgb } from "../model/lighting";
+import { NO_MATERIAL, resolveMaterial, type MaterialResolver, type SurfaceId } from "./surfaces";
 
-/** How a class maps onto each target: which tile, which colour, how tall. */
+/** How a class maps onto each target: which tile, colour, height and material. */
 export interface ClassMapping {
   /** Tile index stamped for this class on the tile layer. */
   readonly tile: number;
@@ -26,6 +27,12 @@ export interface ClassMapping {
   readonly colorIndex: number;
   /** Column height for this class on the voxel/hexel layer; 0 leaves it empty. */
   readonly columnHeight: number;
+  /**
+   * Texture-material index the column layer skins this class with, or
+   * {@link NO_MATERIAL} for a flat colour. Generated ground therefore comes out
+   * wearing grass, sand and rock rather than untextured blocks.
+   */
+  readonly material: number;
 }
 
 /** A map whose cells can be stamped with tile indices. */
@@ -42,11 +49,11 @@ export interface PixelTarget {
   setPixel(x: number, y: number, colorIndex: number): void;
 }
 
-/** A column layer that can be raised and painted per cell. */
+/** A column layer that can be raised, painted and skinned per cell. */
 export interface ColumnTarget {
   readonly width: number;
   readonly height: number;
-  setColumn(x: number, y: number, height: number, colorIndex: number): void;
+  setColumn(x: number, y: number, height: number, colorIndex: number, material?: number): void;
 }
 
 /** Where a field is written, when it is smaller than the target. */
@@ -67,6 +74,12 @@ export interface DefaultMappingOptions {
    * sit at palette slots 1..7.
    */
   readonly nearestColor?: (color: Rgb) => number;
+  /**
+   * Resolve a class to a texture material, via the surface its legend id names.
+   * Supplying it opens the mapping already skinned; omitting it leaves every
+   * class flat.
+   */
+  readonly materialFor?: MaterialResolver;
 }
 
 /**
@@ -89,12 +102,38 @@ export function defaultClassMapping(
     // Spread the legend's classes over a modest height range so the shape of the
     // generated ground reads immediately without towering over the map.
     columnHeight: index === 0 ? 0 : Math.max(1, Math.round((index / tallest) * 8)),
+    material: resolveMaterial(options.materialFor, surfaceForClassId(entry.id)),
   }));
+}
+
+/**
+ * The surface a legend class presents. Legend ids are already surface-like
+ * ("sand", "rock", "wall"), so most map straight through; the rest are named
+ * here once rather than each generator having to declare a parallel table.
+ */
+const CLASS_ID_SURFACES: Readonly<Record<string, SurfaceId>> = {
+  deepWater: "water",
+  shallowWater: "water",
+  sand: "sand",
+  grass: "grass",
+  forest: "forest",
+  rock: "rock",
+  snow: "snow",
+  floor: "dirt",
+  wall: "brick",
+  path: "planks",
+  room: "planks",
+  corridor: "dirt",
+};
+
+/** The surface a legend class id names, defaulting to bare rock. */
+export function surfaceForClassId(id: string): SurfaceId {
+  return CLASS_ID_SURFACES[id] ?? "rock";
 }
 
 /** The mapping for a class, falling back to a benign entry for a stray index. */
 function mappingFor(mapping: readonly ClassMapping[], value: number): ClassMapping {
-  return mapping[value] ?? { tile: 0, colorIndex: 0, columnHeight: 0 };
+  return mapping[value] ?? { tile: 0, colorIndex: 0, columnHeight: 0, material: NO_MATERIAL };
 }
 
 /**
@@ -168,7 +207,7 @@ export function applyFieldToColumns(
       const ty = originY + y;
       if (tx < 0 || ty < 0 || tx >= target.width || ty >= target.height) continue;
       const entry = mappingFor(mapping, classAt(field, x, y));
-      target.setColumn(tx, ty, entry.columnHeight, entry.colorIndex);
+      target.setColumn(tx, ty, entry.columnHeight, entry.colorIndex, entry.material);
       if (entry.columnHeight > 0) raised += 1;
     }
   }

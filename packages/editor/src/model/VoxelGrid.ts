@@ -163,6 +163,22 @@ export class VoxelGrid {
     else if (this.tiles) this.tiles[i] = MATERIAL_NONE;
   }
 
+  /**
+   * Recolour a cell that is already filled, keeping the material and emissive it
+   * wears. This — not {@link set} — is what a Paint or Fill tool means: `set`
+   * defaults the material to {@link MATERIAL_NONE}, so recolouring through it
+   * would silently strip a textured voxel back to flat colour.
+   *
+   * No-op on an empty or out-of-bounds cell, so painting never conjures voxels.
+   */
+  recolor(x: number, y: number, z: number, r: number, g: number, b: number): void {
+    if (!this.isFilled(x, y, z)) return;
+    const i = this.index(x, y, z);
+    this.colors[i * 4] = r;
+    this.colors[i * 4 + 1] = g;
+    this.colors[i * 4 + 2] = b;
+  }
+
   /** Empty a cell. No-op if out of bounds. */
   clear(x: number, y: number, z: number): void {
     if (!this.inBounds(x, y, z)) return;
@@ -438,7 +454,11 @@ export function scaleGridAxis(
   return out;
 }
 
-/** Copy every filled cell on axis-`source` of `from` onto axis-`target` of `to`. */
+/**
+ * Copy every filled cell on axis-`source` of `from` onto axis-`target` of `to`,
+ * including each cell's material — a scaled sculpt must keep its skin, or
+ * stretching a textured model would silently strip it back to flat colour.
+ */
 function copyGridLayer(from: VoxelGrid, to: VoxelGrid, axis: GridAxis, source: number, target: number): void {
   // The two axes the layer spans (everything but `axis`).
   const [aSize, bSize] = axis === 0 ? [from.sizeY, from.sizeZ] : axis === 1 ? [from.sizeX, from.sizeZ] : [from.sizeX, from.sizeY];
@@ -450,7 +470,7 @@ function copyGridLayer(from: VoxelGrid, to: VoxelGrid, axis: GridAxis, source: n
       if (!cell) continue;
       const dst: [number, number, number] =
         axis === 0 ? [target, a, b] : axis === 1 ? [a, target, b] : [a, b, target];
-      to.set(dst[0], dst[1], dst[2], cell.r, cell.g, cell.b, cell.emissive);
+      to.set(dst[0], dst[1], dst[2], cell.r, cell.g, cell.b, cell.emissive, cell.tile ?? MATERIAL_NONE);
     }
   }
 }

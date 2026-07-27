@@ -14,12 +14,15 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import type { MapVoxelLayer, SpriteSheet, TileMap } from "@cartbox/editor";
+import { faceTile, type MapVoxelLayer, type SpriteSheet, type TileMap } from "@cartbox/editor";
+
+import { buildWorldAtlas } from "@/lib/faceTextures";
 
 import styles from "./editor.module.css";
 import { blockTileIndex } from "./spriteBlock";
 import type { MapBrush } from "./mapBrush";
 import { isColumnLayer, type MapLayer, type MapTool } from "./maptools";
+import type { PaintSurface } from "./paintSurface";
 
 /** The tiles page the map references — the map can only stamp from page 0. */
 const TILES_PAGE = 0;
@@ -29,6 +32,12 @@ const HEIGHT_LIFT = 0.55;
 
 /** Opacity of the column overlay, so the tile art still reads underneath it. */
 const COLUMN_ALPHA = 0.88;
+
+/** The atlas the column overlay samples: the same world materials the sculpts use. */
+const WORLD_ATLAS = buildWorldAtlas();
+
+/** Upward normal, so a column samples its material's *top* face — the map is top-down. */
+const FACE_UP = 1;
 
 interface MapCanvasProps {
   sheet: SpriteSheet;
@@ -40,6 +49,14 @@ interface MapCanvasProps {
   tool: MapTool;
   /** Palette index painted by the pixel and column tools. */
   colorIndex: number;
+  /**
+   * The surface pixel edits are written through. It is the composite material
+   * brush, so a stroke stamps the colour's material channels as well as albedo —
+   * the same thing the Sprites tab's Material layer does.
+   */
+  pixels: PaintSurface;
+  /** Texture material the column tools apply, or a negative value for flat colour. */
+  columnMaterial: number;
   /** Height the Raise/Lower tools step by, and Flatten sets outright. */
   columnStep: number;
   cell: number;
@@ -61,6 +78,8 @@ export function MapCanvas({
   brush,
   tool,
   colorIndex,
+  pixels,
+  columnMaterial,
   columnStep,
   cell,
   version,
@@ -101,6 +120,27 @@ export function MapCanvas({
     return cache;
   }, [sheet, version]);
 
+  // A column skinned with a material draws that material's top face, which is
+  // what you would actually see looking down at it. Rasterised once per
+  // material, like the tile cache, so the overlay stays a blit.
+  const materialCache = useMemo(() => {
+    const cache = new Map<number, HTMLCanvasElement>();
+    const count = WORLD_ATLAS.materials?.length ?? 0;
+    for (let material = 0; material < count; material += 1) {
+      const texture = faceTile(WORLD_ATLAS, material, FACE_UP);
+      if (!texture) continue;
+      const canvas = document.createElement("canvas");
+      canvas.width = texture.size;
+      canvas.height = texture.size;
+      const context = canvas.getContext("2d")!;
+      const image = context.createImageData(texture.size, texture.size);
+      image.data.set(texture.data);
+      context.putImageData(image, 0, 0);
+      cache.set(material, canvas);
+    }
+    return cache;
+  }, []);
+
   /** Re-rasterise one cached tile after its pixels changed. */
   const refreshTile = useCallback(
     (tile: number) => {
@@ -123,8 +163,29 @@ export function MapCanvas({
       const px = x * cell;
       const py = y * cell;
 
+      const texture = column.material >= 0 ? materialCache.get(column.material) : undefined;
       context.save();
       context.globalAlpha = COLUMN_ALPHA;
+      if (texture) {
+        // A skinned column shows its material's art; clip it to the cell shape so
+        // hexels stay diamonds.
+        if (columns.shape === "hexel") {
+          context.beginPath();
+          context.moveTo(px + cell / 2, py);
+          context.lineTo(px + cell, py + cell / 2);
+          context.lineTo(px + cell / 2, py + cell);
+          context.lineTo(px, py + cell / 2);
+          context.closePath();
+          context.clip();
+        }
+        context.imageSmoothingEnabled = false;
+        context.drawImage(texture, px, py, cell, cell);
+        context.globalAlpha = (column.height / Math.max(1, peakRef.current)) * HEIGHT_LIFT;
+        context.fillStyle = "#ffffff";
+        context.fillRect(px, py, cell, cell);
+        context.restore();
+        return;
+      }
       context.fillStyle = palette[column.colorIndex] ?? "#ffffff";
       if (columns.shape === "hexel") {
         // Hexels close-pack on a diagonal lattice; drawing them as diamonds makes
@@ -146,7 +207,7 @@ export function MapCanvas({
       context.fillRect(px, py, cell, cell);
       context.restore();
     },
-    [columns, cell, palette],
+    [columns, cell, palette, materialCache],
   );
 
   const drawCell = useCallback(
@@ -271,8 +332,10 @@ export function MapCanvas({
     if (!local) return;
     const tile = map.getCell(target.x, target.y);
     const value = tool === "eraser" ? 0 : colorIndex;
-    if (tool === "pixelFill") sheet.fill(TILES_PAGE, tile, local.px, local.py, value);
-    else sheet.setPixel(TILES_PAGE, tile, local.px, local.py, value);
+    // Through the material surface, so the fill and the pencil both carry each
+    // colour's material profile into the channel banks.
+    if (tool === "pixelFill") pixels.fill(TILES_PAGE, tile, local.px, local.py, value);
+    else pixels.setPixel(TILES_PAGE, tile, local.px, local.py, value);
     // Tiles are shared, so one pixel edit can change many cells at once.
     refreshTile(tile);
     redrawTileUsers(context, tile);
@@ -282,16 +345,18 @@ export function MapCanvas({
   const applyColumns = (context: CanvasRenderingContext2D, target: { x: number; y: number }) => {
     switch (tool) {
       case "raise":
-        columns.raise(target.x, target.y, columnStep, colorIndex);
+        columns.raise(target.x, target.y, columnStep, colorIndex, columnMaterial);
         break;
       case "lower":
-        columns.raise(target.x, target.y, -columnStep, colorIndex);
+        columns.raise(target.x, target.y, -columnStep, colorIndex, columnMaterial);
         break;
       case "paint":
-        columns.paint(target.x, target.y, colorIndex);
+        // Painting always restyles: it is the tool for changing how a column
+        // looks, so it applies the armed material (or clears it, when flat).
+        columns.paint(target.x, target.y, colorIndex, columnMaterial);
         break;
       case "flatten":
-        columns.setColumn(target.x, target.y, columnStep, colorIndex);
+        columns.setColumn(target.x, target.y, columnStep, colorIndex, columnMaterial);
         break;
       case "eraser":
         columns.clear(target.x, target.y);

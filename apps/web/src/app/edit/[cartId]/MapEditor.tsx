@@ -16,6 +16,11 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import {
   MapVoxelLayer,
+  MaterialMap,
+  NormalMap,
+  materialProfileAt,
+  COLUMN_MATERIAL_NONE,
+  surfaceForClassId,
   MAP_GENERATORS,
   MAX_MAP_COLUMN_HEIGHT,
   applyFieldToColumns,
@@ -30,15 +35,19 @@ import {
   type ClassInfo,
   type ClassMapping,
   type GeneratorValues,
+  type MaterialSwatches,
   type SpriteSheet,
   type TileMap,
 } from "@cartbox/editor";
 
+import { BUILD_MATERIALS, worldSurfaceMaterial } from "@/lib/faceTextures";
 import styles from "./editor.module.css";
 import { ClassMappingEditor } from "./ClassMappingEditor";
 import { FieldPreview } from "./FieldPreview";
 import { GeneratorPanel } from "./GeneratorPanel";
 import { MapCanvas } from "./MapCanvas";
+import { MaterialSurface, NormalSurface } from "./paintSurface";
+import { MaterialBrushSurface } from "./materialBrushSurface";
 import { TilePicker } from "./TilePicker";
 import { singleTileBrush, type MapBrush } from "./mapBrush";
 import {
@@ -63,6 +72,18 @@ interface MapEditorProps {
   columnPayload: string | null;
   /** Persist the column layer (feeds the undo timeline and the save). */
   onColumnsChange: (serialized: string) => void;
+  /**
+   * The cart's material channels. The pixel layer paints through them exactly as
+   * the Sprites tab's Material layer does, so a colour with a swatch profile
+   * stamps its normal, height, specular, roughness and emissive here too rather
+   * than writing bare albedo.
+   */
+  normals: NormalMap;
+  height: MaterialMap;
+  specular: MaterialMap;
+  roughness: MaterialMap;
+  emissive: MaterialMap;
+  swatches: MaterialSwatches;
 }
 
 /**
@@ -84,7 +105,18 @@ function loadColumns(payload: string | null, map: TileMap): MapVoxelLayer {
   }
 }
 
-export function MapEditor({ sheet, map, columnPayload, onColumnsChange }: MapEditorProps) {
+export function MapEditor({
+  sheet,
+  map,
+  columnPayload,
+  onColumnsChange,
+  normals,
+  height: heightMap,
+  specular,
+  roughness,
+  emissive,
+  swatches,
+}: MapEditorProps) {
   // The column layer is the source of truth for map height; it is seeded once
   // from the cart and handed back up serialized after every stroke.
   const columnsRef = useRef<MapVoxelLayer | null>(null);
@@ -95,6 +127,8 @@ export function MapEditor({ sheet, map, columnPayload, onColumnsChange }: MapEdi
   const [brush, setBrush] = useState<MapBrush>(() => singleTileBrush(2));
   const [colorIndex, setColorIndex] = useState(1);
   const [columnStep, setColumnStep] = useState(1);
+  // The material armed for the column tools, or "flat" for plain palette colour.
+  const [columnMaterial, setColumnMaterial] = useState<number>(COLUMN_MATERIAL_NONE);
   const [zoom, setZoom] = useState(1);
   const [version, setVersion] = useState(0);
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
@@ -108,20 +142,47 @@ export function MapEditor({ sheet, map, columnPayload, onColumnsChange }: MapEdi
   // Snap each class to the nearest colour the cart's own palette holds, so a
   // generated landscape opens in plausible colours rather than at whatever sits
   // in palette slots 1..7.
+  // Each class opens mapped to the nearest colour the cart's palette holds *and*
+  // to the world atlas material its surface names, so a generated landscape
+  // arrives both plausibly coloured and properly skinned.
   const paletteMapping = useCallback(
     (legend: readonly ClassInfo[]) =>
       defaultClassMapping(legend, {
         nearestColor: ([r, g, b]) => sheet.nearestColorIndex(r, g, b),
+        materialFor: worldSurfaceMaterial,
       }),
     [sheet],
   );
   const [mappings, setMappings] = useState<Record<string, ClassMapping[]>>(() => ({
     [MAP_GENERATORS[0]!.id]: defaultClassMapping(MAP_GENERATORS[0]!.legend, {
       nearestColor: ([r, g, b]) => sheet.nearestColorIndex(r, g, b),
+      materialFor: worldSurfaceMaterial,
     }),
   }));
   const [generateNote, setGenerateNote] = useState<string | null>(null);
   const [showGenerator, setShowGenerator] = useState(false);
+
+  // The pixel layer writes through the same composite brush the Sprites tab's
+  // Material layer uses, so one stroke here stamps albedo *and* the colour's
+  // normal/height/specular/roughness/emissive profile. Reading the swatches
+  // through a ref keeps the surface identity stable while they are edited.
+  const swatchesRef = useRef(swatches);
+  swatchesRef.current = swatches;
+  const pixelSurface = useMemo(
+    () =>
+      new MaterialBrushSurface(
+        sheet,
+        {
+          normal: new NormalSurface(normals, sheet.tileSize),
+          height: new MaterialSurface(heightMap, sheet.tileSize),
+          specular: new MaterialSurface(specular, sheet.tileSize),
+          roughness: new MaterialSurface(roughness, sheet.tileSize),
+          emissive: new MaterialSurface(emissive, sheet.tileSize),
+        },
+        (index) => materialProfileAt(swatchesRef.current, index),
+      ),
+    [sheet, normals, heightMap, specular, roughness, emissive],
+  );
 
   const columns = columnsRef.current!;
   const definition = layerDef(layer);
@@ -205,7 +266,9 @@ export function MapEditor({ sheet, map, columnPayload, onColumnsChange }: MapEdi
           height: sheet.sheetSize,
           setPixel: (x, y, value) => {
             const tile = Math.floor(y / sheet.tileSize) * sheet.sheetCols + Math.floor(x / sheet.tileSize);
-            sheet.setPixel(TILES_PAGE, tile, x % sheet.tileSize, y % sheet.tileSize, value);
+            // Through the material brush, so a generated texture carries its
+            // colours' material profiles rather than bare albedo.
+            pixelSurface.setPixel(TILES_PAGE, tile, x % sheet.tileSize, y % sheet.tileSize, value);
           },
         },
         field,
@@ -320,6 +383,8 @@ export function MapEditor({ sheet, map, columnPayload, onColumnsChange }: MapEdi
           brush={brush}
           tool={tool}
           colorIndex={colorIndex}
+          pixels={pixelSurface}
+          columnMaterial={columnMaterial}
           columnStep={columnStep}
           cell={cell}
           version={version}
@@ -422,10 +487,43 @@ export function MapEditor({ sheet, map, columnPayload, onColumnsChange }: MapEdi
                 />
               ))}
             </div>
+            {isColumnLayer(layer) && (
+              <>
+                <div className={styles.panelHead} style={{ marginTop: 14 }}>
+                  <span className={styles.panelTitle}>Material</span>
+                  <span className={styles.panelMeta}>
+                    {columnMaterial < 0 ? "flat" : BUILD_MATERIALS.find((entry) => entry.material === columnMaterial)?.name}
+                  </span>
+                </div>
+                <div className={styles.paletteGrid}>
+                  <button
+                    type="button"
+                    className={`${styles.swatch} ${columnMaterial < 0 ? styles.swatchActive : ""}`}
+                    style={{ background: palette[colorIndex] ?? "#000", outline: "1px dashed var(--faint)" }}
+                    onClick={() => setColumnMaterial(COLUMN_MATERIAL_NONE)}
+                    title="Flat — raise columns in the palette colour, with no texture"
+                    aria-label="Flat colour, no material"
+                    aria-pressed={columnMaterial < 0}
+                  />
+                  {BUILD_MATERIALS.map((entry) => (
+                    <button
+                      key={entry.name}
+                      type="button"
+                      className={`${styles.swatch} ${entry.material === columnMaterial ? styles.swatchActive : ""}`}
+                      style={{ background: entry.swatch }}
+                      onClick={() => setColumnMaterial(entry.material)}
+                      title={entry.name}
+                      aria-label={`Material ${entry.name}`}
+                      aria-pressed={entry.material === columnMaterial}
+                    />
+                  ))}
+                </div>
+              </>
+            )}
             <p className={styles.pickerHint}>
               {layer === "pixels"
-                ? "Pixels belong to the tile, not the cell — editing one cell changes every cell that stamps the same tile."
-                : `Raise builds ${shapeForLayer(layer)} columns up to ${MAX_MAP_COLUMN_HEIGHT} cells tall. Brightness shows height; ${
+                ? "Pixels belong to the tile, not the cell — editing one cell changes every cell that stamps the same tile. A colour with a material swatch stamps its whole profile, exactly as in the Sprites tab."
+                : `Raise builds ${shapeForLayer(layer)} columns up to ${MAX_MAP_COLUMN_HEIGHT} cells tall, skinned with the armed material. Brightness shows height; ${
                     layer === "hexels" ? "diamonds mark the close-packed lattice" : "squares mark cube columns"
                   }.`}
             </p>

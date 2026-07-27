@@ -24,10 +24,12 @@ import {
   classifyTerrain,
   isWaterClass,
   strataColorAt,
+  strataSurfaceAt,
   terrainClassOf,
   TERRAIN_CLASS,
   TERRAIN_LEGEND,
 } from "./terrain";
+import { resolveMaterial, NO_MATERIAL, type MaterialResolver, type SurfaceId } from "./surfaces";
 import type { ClassInfo } from "./classField";
 import type { Rgb } from "../model/lighting";
 
@@ -210,11 +212,25 @@ export interface VoxelSink {
   readonly sizeX: number;
   readonly sizeY: number;
   readonly sizeZ: number;
-  set(x: number, y: number, z: number, r: number, g: number, b: number, emissive?: number): void;
+  /**
+   * Place a cell. `tile` is the texture-material index — the same trailing
+   * parameter `VoxelGrid.set` takes — so a generator can skin what it builds
+   * rather than only colour it.
+   */
+  set(
+    x: number,
+    y: number,
+    z: number,
+    r: number,
+    g: number,
+    b: number,
+    emissive?: number,
+    tile?: number,
+  ): void;
   clear(x: number, y: number, z: number): void;
 }
 
-/** The lattice a generator must place cells on. */
+/** The lattice a generator must place cells on, and how to texture what it builds. */
 export interface LatticeOptions {
   /**
    * True for hexels: only sites whose coordinates sum to an even number are
@@ -222,6 +238,13 @@ export interface LatticeOptions {
    * overlap on the FCC lattice.
    */
   readonly evenParity: boolean;
+  /**
+   * Turns a generated cell's {@link SurfaceId} into a material index in the
+   * caller's texture atlas. Supplying it is what makes generated terrain come
+   * out skinned in grass, soil and rock instead of flat colour; omitting it
+   * leaves every cell flat, which is what a caller with no atlas wants.
+   */
+  readonly materialFor?: MaterialResolver;
 }
 
 /** A generator that fills a 3D volume. */
@@ -247,10 +270,29 @@ function clearAll(sink: VoxelSink): void {
   }
 }
 
-/** Place a cell only where the lattice allows it. */
-function place(sink: VoxelSink, lattice: LatticeOptions, x: number, y: number, z: number, color: Rgb, emissive = 0): void {
+/** Cells wearing a material are painted white so the tile art shows as drawn —
+ * the renderer tints a tile by its voxel's colour, so any other colour would
+ * stain the texture. Untextured cells keep the generator's own colour. */
+const TEXTURED_ALBEDO: Rgb = [255, 255, 255];
+
+/**
+ * Place a cell only where the lattice allows it, skinned with the material its
+ * surface resolves to.
+ */
+function place(
+  sink: VoxelSink,
+  lattice: LatticeOptions,
+  x: number,
+  y: number,
+  z: number,
+  color: Rgb,
+  surface: SurfaceId,
+  emissive = 0,
+): void {
   if (!isValidSite(lattice, x, y, z)) return;
-  sink.set(x, y, z, color[0], color[1], color[2], emissive);
+  const material = resolveMaterial(lattice.materialFor, surface);
+  const albedo = material === NO_MATERIAL ? color : TEXTURED_ALBEDO;
+  sink.set(x, y, z, albedo[0], albedo[1], albedo[2], emissive, material);
 }
 
 const VOXEL_TERRAIN_PARAMS: readonly ParamSpec[] = [
@@ -298,13 +340,22 @@ export const VOXEL_GENERATORS: readonly VolumeGenerator[] = [
           const surfaceClass = terrainClassOf(normalized, moistureAt(field, x, z), bands, forestMoisture);
           const columnTop = Math.max(0, Math.min(top, Math.round(normalized * top)));
           for (let y = 0; y <= columnTop; y += 1) {
-            place(sink, lattice, x, y, z, strataColorAt(surfaceClass, columnTop - y, columnTop + 1));
+            const below = columnTop - y;
+            place(
+              sink,
+              lattice,
+              x,
+              y,
+              z,
+              strataColorAt(surfaceClass, below, columnTop + 1),
+              strataSurfaceAt(surfaceClass, below, columnTop + 1),
+            );
           }
           // Flood everything below the water level that the ground did not reach.
           if (isWaterClass(surfaceClass)) {
             const waterColor = TERRAIN_LEGEND[TERRAIN_CLASS.shallowWater]!.color;
             for (let y = columnTop + 1; y <= waterTop; y += 1) {
-              place(sink, lattice, x, y, z, waterColor);
+              place(sink, lattice, x, y, z, waterColor, "water");
             }
           }
         }
@@ -328,7 +379,8 @@ export const VOXEL_GENERATORS: readonly VolumeGenerator[] = [
             // Rock that is exposed downward reads as a cavern floor, which gives
             // the sculpt a lit surface to stand on instead of uniform dark rock.
             const below = y > 0 && volume.solid[((z * sink.sizeY + (y - 1)) * sink.sizeX) + x] === 1;
-            place(sink, lattice, x, y, z, below ? rock : floor);
+            if (below) place(sink, lattice, x, y, z, rock, "rock");
+            else place(sink, lattice, x, y, z, floor, "dirt");
           }
         }
       }
@@ -353,9 +405,9 @@ export const VOXEL_GENERATORS: readonly VolumeGenerator[] = [
       const pathColor = MAZE_LEGEND[MAZE_CLASS.path]!.color;
       for (let z = 0; z < sink.sizeZ; z += 1) {
         for (let x = 0; x < sink.sizeX; x += 1) {
-          place(sink, lattice, x, 0, z, pathColor); // floor slab under the whole maze
+          place(sink, lattice, x, 0, z, pathColor, "planks"); // floor slab under the whole maze
           if (classAt(field, x, z) !== MAZE_CLASS.wall) continue;
-          for (let y = 1; y <= wallHeight; y += 1) place(sink, lattice, x, y, z, wallColor);
+          for (let y = 1; y <= wallHeight; y += 1) place(sink, lattice, x, y, z, wallColor, "brick");
         }
       }
     },

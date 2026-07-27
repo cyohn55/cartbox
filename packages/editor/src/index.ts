@@ -112,11 +112,12 @@ export {
   deserializeMapVoxelLayer,
   MAX_MAP_COLUMN_HEIGHT,
   MAP_VOXEL_LAYER_VERSION,
+  COLUMN_MATERIAL_NONE,
   type MapColumn,
   type MapLayerGridOptions,
   type PaletteLookup,
 } from "./model/MapVoxelLayer";
-export * from "./procgen";
+export * from "./procgen/index";
 export {
   VOXEL_FONT,
   FONT_WIDTH,

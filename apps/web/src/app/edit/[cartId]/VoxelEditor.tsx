@@ -55,7 +55,7 @@ import {
 
 import { createVoxelBackdropProp } from "@/lib/backdropProps";
 import { loadWorkingSet, loadPublishedSet, saveWorkingSet, type PendingVoxelEdit } from "@/lib/backdropPropsStore";
-import { buildWorldAtlas, BUILD_MATERIALS } from "@/lib/faceTextures";
+import { buildWorldAtlas, BUILD_MATERIALS, worldSurfaceMaterial } from "@/lib/faceTextures";
 import {
   buildSpriteMaterialAtlas,
   firstSpriteMaterialIndex,
@@ -196,6 +196,12 @@ const BRUSH_TOOLS: readonly VoxelTool[] = ["add", "remove", "paint"];
 // exact colour match, higher grabs progressively more of a shaded region.
 const DEFAULT_TOLERANCE_PCT = 0;
 const TOLERANCE_TOOLS: readonly VoxelTool[] = ["wand", "fill"];
+
+// Tools that write cells, and so can apply the armed material. Keeping the
+// material palette visible for all of them is what lets "fill this run with
+// grass" or "stamp a brick shape" work at all — before, a material could only be
+// assigned one voxel at a time with the Tiles tool.
+const MATERIAL_TOOLS: readonly VoxelTool[] = ["add", "paint", "fill", "shape", "select", "material"];
 
 // Selected voxels are tinted toward this colour and given an emissive floor when
 // the model is built, so the selection glows from every camera angle without a
@@ -489,7 +495,9 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   const [pitch, setPitch] = useState(0.72);
   const [tool, setTool] = useState<VoxelTool>("add");
   const [colorIndex, setColorIndex] = useState(1);
-  const [materialIndex, setMaterialIndex] = useState(BUILD_MATERIALS[0]!.material);
+  // Flat by default, so colour tools behave exactly as they always did until a
+  // material is deliberately armed.
+  const [materialIndex, setMaterialIndex] = useState<number>(MATERIAL_NONE);
   // Sprite-backed materials authored on this sculpt. They extend the world atlas,
   // so their indices start where its own materials end and follow list order.
   const [spriteMaterials, setSpriteMaterials] = useState<SpriteMaterial[]>(() => [
@@ -695,6 +703,23 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     emitModel(cellShape, spriteMaterials);
   };
 
+  /**
+   * Paint a cell that already exists, keeping or replacing its skin.
+   *
+   * With a material armed in the palette every colour-writing tool applies it —
+   * that is what makes "fill this run with grass" possible at all. With none
+   * armed it recolours through the grid's `recolor`, so the material the voxel
+   * already wears survives: repainting a textured voxel must not silently strip
+   * it back to flat.
+   */
+  const writeExisting = (x: number, y: number, z: number, r: number, g: number, b: number): void => {
+    const grid = gridRef.current!;
+    if (materialIndex < 0) grid.recolor(x, y, z, r, g, b);
+    // A skinned voxel is painted white so its tile art shows as drawn — the
+    // renderer tints a tile by the voxel's colour.
+    else grid.set(x, y, z, 255, 255, 255, grid.get(x, y, z)?.emissive ?? 0, materialIndex);
+  };
+
   /** Resolve a canvas pixel to the picked grid cell and its face, or null. */
   const pickAt = (clientX: number, clientY: number): { x: number; y: number; z: number; face: number } | null => {
     const canvas = canvasRef.current;
@@ -764,6 +789,8 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
       // overlapping, mis-rendered hexels.
       if (!isValidSite(geometry, cx, cy, cz)) continue;
       if (erase) grid.clear(cx, cy, cz);
+      else if (grid.isFilled(cx, cy, cz)) writeExisting(cx, cy, cz, r, g, b);
+      else if (materialIndex >= 0) grid.set(cx, cy, cz, 255, 255, 255, 0, materialIndex);
       else grid.set(cx, cy, cz, r, g, b);
     }
   };
@@ -788,8 +815,13 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
       const cz = center[2] + dw;
       if (!grid.inBounds(cx, cy, cz)) continue;
       if (action === "remove") grid.clear(cx, cy, cz);
-      else if (action === "add") grid.set(cx, cy, cz, r, g, b);
-      else if (grid.isFilled(cx, cy, cz)) grid.set(cx, cy, cz, r, g, b);
+      else if (action === "add") {
+        // Adding onto an existing cell repaints it; a brand-new cell takes the
+        // armed material, or none when the palette is set to flat colour.
+        if (grid.isFilled(cx, cy, cz)) writeExisting(cx, cy, cz, r, g, b);
+        else if (materialIndex >= 0) grid.set(cx, cy, cz, 255, 255, 255, 0, materialIndex);
+        else grid.set(cx, cy, cz, r, g, b);
+      } else if (grid.isFilled(cx, cy, cz)) writeExisting(cx, cy, cz, r, g, b);
     }
     setHover(null);
     commit();
@@ -829,7 +861,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     for (const index of region) {
       const [x, y, z] = cellCoords(grid, index);
       if (erase) grid.clear(x, y, z);
-      else grid.set(x, y, z, r, g, b);
+      else writeExisting(x, y, z, r, g, b);
     }
     setHover(null);
     commit();
@@ -890,7 +922,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
 
     const next = spriteMaterials.filter((_material, index) => index !== ordinal);
     setSpriteMaterials(next);
-    if (materialIndex >= dropped) setMaterialIndex(BUILD_MATERIALS[0]!.material);
+    if (materialIndex >= dropped) setMaterialIndex(MATERIAL_NONE);
     setRev((value) => value + 1);
     emitModel(cellShape, next);
   };
@@ -970,7 +1002,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     const [r, g, b] = hexToRgb(paintHex);
     for (const index of selection) {
       const [x, y, z] = cellCoords(grid, index);
-      if (grid.isFilled(x, y, z)) grid.set(x, y, z, r, g, b);
+      if (grid.isFilled(x, y, z)) writeExisting(x, y, z, r, g, b);
     }
     commit();
   };
@@ -1061,7 +1093,10 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     const old = gridRef.current!;
     const grid = new VoxelGrid(next, next, next);
     old.forEachFilled((x, y, z, voxel) => {
-      if (x < next && y < next && z < next) grid.set(x, y, z, voxel.r, voxel.g, voxel.b, voxel.emissive);
+      // Carry the material across too, or resizing would strip a textured sculpt.
+      if (x < next && y < next && z < next) {
+        grid.set(x, y, z, voxel.r, voxel.g, voxel.b, voxel.emissive, voxel.tile ?? MATERIAL_NONE);
+      }
     });
     if (grid.filledCount === 0) gridRef.current = seededGrid(next, cellShape);
     else gridRef.current = grid;
@@ -1122,7 +1157,13 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     if (grid.filledCount > seededGrid(grid.sizeX, cellShape).filledCount) {
       if (!window.confirm(`Replace this sculpt with generated ${generator.label.toLowerCase()}?`)) return;
     }
-    generator.generate(grid, { evenParity: geometry.evenParity }, generatorValues);
+    // Hand the generator this atlas's material lookup, so what it builds comes
+    // out skinned in grass, soil and rock rather than flat colour.
+    generator.generate(
+      grid,
+      { evenParity: geometry.evenParity, materialFor: worldSurfaceMaterial },
+      generatorValues,
+    );
     clearSelection();
     setHover(null);
     setCell(fitCellForGrid(grid, geometry));
@@ -1242,10 +1283,19 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
           </div>
         )}
 
-        {tool === "material" && (
+        {MATERIAL_TOOLS.includes(tool) && (
           <div>
             <div className={styles.groupLabel}>Material</div>
             <div className={styles.paletteGrid}>
+              <button
+                type="button"
+                className={`${styles.swatch} ${materialIndex < 0 ? styles.swatchActive : ""}`}
+                style={{ background: paintHex, outline: "1px dashed var(--faint)" }}
+                onClick={() => setMaterialIndex(MATERIAL_NONE)}
+                title="Flat — paint the palette colour, leaving any material a voxel already wears"
+                aria-label="Flat colour, no material"
+                aria-pressed={materialIndex < 0}
+              />
               {BUILD_MATERIALS.map((entry) => (
                 <button
                   key={entry.name}
@@ -1260,9 +1310,9 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
               ))}
             </div>
             <p className={styles.panelMeta} style={{ lineHeight: 1.5, marginTop: 6 }}>
-              Click a voxel to skin it with the selected tile material — grass caps
-              a dirt block, a log rings its ends. Right-click clears a voxel back to
-              flat colour.
+              {materialIndex < 0
+                ? "Flat: tools paint the palette colour and leave any material a voxel already wears. Pick a material to build, fill and stamp with it."
+                : "Armed: Add, Paint, Fill and Shape all apply this material — so you can flood a whole run with grass, not just one voxel. Pick Flat to go back to plain colour."}
             </p>
 
             <div className={styles.groupLabel} style={{ marginTop: 14 }}>

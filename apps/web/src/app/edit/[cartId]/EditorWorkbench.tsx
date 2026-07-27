@@ -478,6 +478,12 @@ function WorkbenchBody({
           map={map}
           columnPayload={mapColumns}
           onColumnsChange={setMapColumns}
+          normals={normals}
+          height={heightMap}
+          specular={specularMap}
+          roughness={roughnessMap}
+          emissive={emissiveMap}
+          swatches={materials}
         />
       )}
       {activeTab === "FX" && (
