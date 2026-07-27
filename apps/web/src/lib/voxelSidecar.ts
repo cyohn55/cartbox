@@ -14,6 +14,8 @@
  * the editor's mount path.
  */
 
+import { MAX_VOXEL_GRID_DIM } from "@cartbox/editor";
+
 import { isSpriteRef, type SpriteMaterial } from "./spriteTiles";
 
 /** Marks a payload as the wrapped form rather than a bare grid. */
@@ -74,6 +76,54 @@ export function decodeVoxelSidecar(raw: string | null): VoxelSidecar {
     grid: envelope.grid === "" ? null : envelope.grid,
     spriteMaterials: readSpriteMaterials(envelope.spriteMaterials),
   };
+}
+
+/**
+ * Ceiling on a saved payload, in characters. The payload is ASCII (JSON around
+ * base64), so characters track bytes closely enough to bound a request; the value
+ * sits under the 4.5 MB body limit a serverless deploy enforces, and far above any
+ * real sculpt — a sparse 128³ model is tens of kilobytes.
+ */
+export const MAX_VOXEL_PAYLOAD_CHARS = 4_000_000;
+
+/**
+ * Validate a payload arriving from a client before it is stored: it must be a
+ * bounded string that parses, and whose sculpt declares a grid the editor could
+ * actually have produced. Returns the payload to store, or null to reject.
+ *
+ * Deliberately structural — the declared dimensions are checked *without*
+ * building the grid, so a payload claiming a huge volume is rejected rather than
+ * allocated. The editor re-validates for real when it loads the sculpt.
+ */
+export function parseVoxelPayload(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const payload = value.trim();
+  if (payload === "" || payload.length > MAX_VOXEL_PAYLOAD_CHARS) return null;
+
+  const sidecar = decodeVoxelSidecar(payload);
+  if (!sidecar.grid) return null; // an envelope with no sculpt in it
+  if (!describesAGrid(sidecar.grid)) return null;
+  return payload;
+}
+
+/** Whether a serialized-grid payload declares dimensions the editor allows. */
+function describesAGrid(grid: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(grid);
+  } catch {
+    return false;
+  }
+  if (typeof parsed !== "object" || parsed === null) return false;
+
+  const { sizeX, sizeY, sizeZ, count } = parsed as Record<string, unknown>;
+  const dims = [sizeX, sizeY, sizeZ];
+  if (!dims.every((dim) => Number.isInteger(dim) && (dim as number) >= 1 && (dim as number) <= MAX_VOXEL_GRID_DIM)) {
+    return false;
+  }
+  if (count === undefined) return true; // the v1 dense payload carries no count
+  const volume = (sizeX as number) * (sizeY as number) * (sizeZ as number);
+  return Number.isInteger(count) && (count as number) >= 0 && (count as number) <= volume;
 }
 
 /** Keep only well-formed materials; a corrupt entry is dropped, not thrown on. */

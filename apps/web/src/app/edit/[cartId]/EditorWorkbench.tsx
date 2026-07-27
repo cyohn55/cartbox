@@ -304,12 +304,13 @@ function WorkbenchBody({
       let ok = response.ok;
       if (ok) {
         const headers = await authHeaders({ "Content-Type": "application/json" });
-        const [rigResponse, fxResponse, materialsResponse] = await Promise.all([
+        const [rigResponse, fxResponse, materialsResponse, voxelResponse] = await Promise.all([
           fetch(`/api/carts/${cartId}/rig`, { method: "PUT", headers, body: JSON.stringify(rig) }),
           fetch(`/api/carts/${cartId}/fx`, { method: "PUT", headers, body: JSON.stringify(fx) }),
           fetch(`/api/carts/${cartId}/materials`, { method: "PUT", headers, body: JSON.stringify(materials) }),
+          fetch(`/api/carts/${cartId}/voxel`, { method: "PUT", headers, body: JSON.stringify({ voxel }) }),
         ]);
-        ok = rigResponse.ok && fxResponse.ok && materialsResponse.ok;
+        ok = rigResponse.ok && fxResponse.ok && materialsResponse.ok && voxelResponse.ok;
       }
       setSaveState(ok ? "saved" : "error");
     } catch {
