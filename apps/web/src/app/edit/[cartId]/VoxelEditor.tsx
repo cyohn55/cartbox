@@ -15,7 +15,7 @@
  * in the cart's undo timeline and saves with the cart, exactly like the FX stack.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import Link from "next/link";
 import {
   VoxelGrid,
@@ -45,11 +45,23 @@ import {
   type GridVoxelModel,
   type ModelLight,
   type SpriteSheet,
+  type SpritePage,
+  type FaceTexture,
 } from "@cartbox/editor";
 
 import { createVoxelBackdropProp } from "@/lib/backdropProps";
 import { loadWorkingSet, loadPublishedSet, saveWorkingSet, type PendingVoxelEdit } from "@/lib/backdropPropsStore";
 import { buildWorldAtlas, BUILD_MATERIALS } from "@/lib/faceTextures";
+import {
+  buildSpriteMaterialAtlas,
+  firstSpriteMaterialIndex,
+  isBlankSprite,
+  spriteFaceTexture,
+  uniformSpriteMaterial,
+  type SpriteMaterial,
+  type SpriteRef,
+} from "@/lib/spriteTiles";
+import { decodeVoxelSidecar, encodeVoxelSidecar } from "@/lib/voxelSidecar";
 import styles from "./editor.module.css";
 
 /**
@@ -62,6 +74,65 @@ const WORLD_ATLAS = buildWorldAtlas();
 
 const DEFAULT_GRID = 16;
 const GRID_SIZES = [8, 16, 24, 32, 64, 128, 256].filter((n) => n <= MAX_VOXEL_GRID_DIM);
+
+/** The "from sprites" form's three sprite-number fields, as typed. */
+interface SpriteFields {
+  readonly sides: string;
+  readonly top: string;
+  readonly bottom: string;
+}
+
+const SPRITE_FACE_FIELDS: readonly { id: keyof SpriteFields; label: string; placeholder: string; aria: string }[] = [
+  { id: "sides", label: "Sides", placeholder: "0", aria: "Sprite number for the side faces" },
+  { id: "top", label: "Top", placeholder: "same", aria: "Sprite number for the top face" },
+  { id: "bottom", label: "Bottom", placeholder: "same", aria: "Sprite number for the bottom face" },
+];
+
+const SPRITE_FIELD_STYLE: CSSProperties = {
+  width: 68,
+  background: "rgba(0,0,0,0.3)",
+  color: "inherit",
+  border: "1px solid rgba(255,255,255,0.14)",
+  borderRadius: 5,
+  padding: "4px 6px",
+  font: "inherit",
+};
+
+/**
+ * Read a typed sprite number as an address on `page`, or null when the field is
+ * blank or names a slot the sheet doesn't have — so "no top override" and "12345"
+ * both simply mean no sprite, and the Add button can gate on it.
+ */
+function parseSpriteRef(text: string, page: SpritePage, tilesPerPage: number): SpriteRef | null {
+  const trimmed = text.trim();
+  if (trimmed === "") return null;
+  const tile = Number(trimmed);
+  if (!Number.isInteger(tile) || tile < 0 || tile >= tilesPerPage) return null;
+  return { page, tile };
+}
+
+/** A sprite tile drawn at its native resolution and scaled up crisply. */
+function SpriteTileThumb({ texture }: { texture: FaceTexture }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.width = texture.size;
+    canvas.height = texture.size;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    // FaceTexture data is straight-alpha RGBA — exactly what putImageData wants.
+    const image = context.createImageData(texture.size, texture.size);
+    image.data.set(texture.data);
+    context.putImageData(image, 0, 0);
+  }, [texture]);
+  return (
+    <canvas
+      ref={canvasRef}
+      style={{ display: "block", width: "100%", height: "100%", imageRendering: "pixelated", borderRadius: 4 }}
+    />
+  );
+}
 
 // The model renders into a fixed-resolution square viewport, and `cell` (the
 // zoom) scales the model *within* it — so zooming visibly grows/shrinks the
@@ -390,7 +461,13 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   // The grid is the source of truth; it is seeded once on mount from the cart's
   // model, or from the prop handed over to re-sculpt (the manager routes through
   // /edit/new, which clears the draft, so `model` is empty and the prop wins).
-  const initialPayload = model ?? pendingEdit?.voxel ?? null;
+  // The saved payload carries the sculpt and, when it uses sprite skins, the list
+  // of sprites those skins name (material indices alone would be meaningless).
+  const initialSidecar = useMemo(
+    () => decodeVoxelSidecar(model ?? pendingEdit?.voxel ?? null),
+    [model, pendingEdit],
+  );
+  const initialPayload = initialSidecar.grid;
   const gridRef = useRef<VoxelGrid | null>(null);
   if (gridRef.current === null) gridRef.current = loadGrid(initialPayload, deserializeCellShape(initialPayload ?? ""));
 
@@ -407,6 +484,15 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   const [tool, setTool] = useState<VoxelTool>("add");
   const [colorIndex, setColorIndex] = useState(1);
   const [materialIndex, setMaterialIndex] = useState(BUILD_MATERIALS[0]!.material);
+  // Sprite-backed materials authored on this sculpt. They extend the world atlas,
+  // so their indices start where its own materials end and follow list order.
+  const [spriteMaterials, setSpriteMaterials] = useState<SpriteMaterial[]>(() => [
+    ...initialSidecar.spriteMaterials,
+  ]);
+  // The "from sprites" form: which page, and the sprite number for each face
+  // group (top/bottom blank = the same sprite as the sides).
+  const [spritePage, setSpritePage] = useState<SpritePage>(0);
+  const [spriteFields, setSpriteFields] = useState<SpriteFields>({ sides: "0", top: "", bottom: "" });
   const [hover, setHover] = useState<HoverTarget | null>(null); // what the cursor is aiming at
   const [shapeKind, setShapeKind] = useState<ShapeChoice>("rectangle");
   const [shapeStyle, setShapeStyle] = useState<VoxelShapeStyle>("outline");
@@ -439,6 +525,27 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
 
   const palette = useMemo(() => sheet.cssPalette(), [sheet]);
   const paintHex = palette[colorIndex] ?? "#ffffff";
+
+  // The atlas the preview samples: the world's authored tiles plus this sculpt's
+  // sprite skins, read live from the cart's sprite sheet. Rebuilt when a skin is
+  // added or removed; the sheet itself is re-read on every remount, which the
+  // workbench does whenever a sprite edit bumps the cart revision.
+  const atlas = useMemo(
+    () => buildSpriteMaterialAtlas(WORLD_ATLAS, spriteMaterials, sheet),
+    [spriteMaterials, sheet],
+  );
+  const firstSpriteMaterial = firstSpriteMaterialIndex(WORLD_ATLAS);
+  // A thumbnail per sprite material (its side art), so the palette shows the
+  // actual sprite rather than an anonymous swatch.
+  const spriteThumbs = useMemo(
+    () => spriteMaterials.map((material) => spriteFaceTexture(sheet, material.side)),
+    [spriteMaterials, sheet],
+  );
+  /** The sprite the form would add, or null while the sides field is unusable. */
+  const pendingSpriteRef = parseSpriteRef(spriteFields.sides, spritePage, sheet.tilesPerPage);
+  // An untouched sprite would skin the voxel with nothing at all (transparent
+  // texels are skipped), so say so instead of letting a face quietly disappear.
+  const pendingSpriteBlank = pendingSpriteRef !== null && isBlankSprite(sheet, pendingSpriteRef);
 
   // Rebuild the renderable model whenever the grid changes (rev) or resizes.
   // Centre on the filled content so a small sculpt sits in the middle of the
@@ -498,7 +605,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
       cell: renderCell,
       size: VIEWPORT,
       light,
-      atlas: WORLD_ATLAS,
+      atlas,
       out: buffers.out,
       depthBuffer: buffers.depth,
       pickVoxel: buffers.pickVoxel,
@@ -548,12 +655,27 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     }
   }, [renderModel, model3d, yaw, pitch, renderCell, buffers, hover, tool, isHexel, geometry, brushRadius, shapeKind, solidShape, shapeRadius, light]);
 
+  /**
+   * Hand the current sculpt up to the cart (undo timeline + save). The grid alone
+   * would lose which sprites its material indices point at, so both travel in one
+   * sidecar payload — which stays the bare grid string while no sprite skin is
+   * used, keeping older carts byte-identical.
+   */
+  const emitModel = (shape: CellShape, materials: readonly SpriteMaterial[]) => {
+    onModelChange(
+      encodeVoxelSidecar({
+        grid: serializeVoxelGrid(gridRef.current!, shape),
+        spriteMaterials: materials,
+      }),
+    );
+  };
+
   /** Persist the current grid to undo/save; re-seed if it was emptied. */
   const commit = () => {
     const grid = gridRef.current!;
     if (grid.filledCount === 0) gridRef.current = seededGrid(grid.sizeX, cellShape);
     setRev((value) => value + 1);
-    onModelChange(serializeVoxelGrid(gridRef.current!, cellShape));
+    emitModel(cellShape, spriteMaterials);
   };
 
   /** Resolve a canvas pixel to the picked grid cell and its face, or null. */
@@ -713,6 +835,47 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     }
     setHover(null);
     commit();
+  };
+
+  /**
+   * Add a sprite as a material: the chosen sprite skins the sides, with optional
+   * separate sprites for the top and bottom faces (blank = the same sprite all
+   * round). The new material lands at the end of the palette and is armed, so the
+   * next click paints with it.
+   */
+  const addSpriteMaterial = (sides: SpriteRef, top: SpriteRef | null, bottom: SpriteRef | null, name: string) => {
+    const material: SpriteMaterial =
+      top || bottom
+        ? { name, side: sides, top: top ?? sides, bottom: bottom ?? sides }
+        : uniformSpriteMaterial(name, sides);
+    const next = [...spriteMaterials, material];
+    setSpriteMaterials(next);
+    setMaterialIndex(firstSpriteMaterial + next.length - 1);
+    emitModel(cellShape, next);
+  };
+
+  /**
+   * Drop a sprite material. Every later material shifts down one, so the voxels
+   * already skinned are remapped in the same pass — voxels wearing the dropped
+   * material fall back to flat colour, and the rest keep the skin they were given
+   * rather than silently inheriting their neighbour's.
+   */
+  const removeSpriteMaterial = (ordinal: number) => {
+    const dropped = firstSpriteMaterial + ordinal;
+    const grid = gridRef.current!;
+    const remapped: Array<[number, number, number, number]> = [];
+    grid.forEachFilled((x, y, z, cell) => {
+      const material = cell.tile ?? MATERIAL_NONE;
+      if (material < dropped) return;
+      remapped.push([x, y, z, material === dropped ? MATERIAL_NONE : material - 1]);
+    });
+    for (const [x, y, z, material] of remapped) grid.setMaterial(x, y, z, material);
+
+    const next = spriteMaterials.filter((_material, index) => index !== ordinal);
+    setSpriteMaterials(next);
+    if (materialIndex >= dropped) setMaterialIndex(BUILD_MATERIALS[0]!.material);
+    setRev((value) => value + 1);
+    emitModel(cellShape, next);
   };
 
   /** Apply the active tool at a canvas pixel. Right-click removes/erases; Shift adds to a selection. */
@@ -890,7 +1053,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     // Refit the zoom so the resized model opens framed to the viewport.
     setCell(fitCellForGrid(gridRef.current!, geometry));
     setRev((value) => value + 1);
-    onModelChange(serializeVoxelGrid(gridRef.current!, cellShape));
+    emitModel(cellShape, spriteMaterials);
   };
 
   const clearAll = () => {
@@ -898,7 +1061,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     clearSelection();
     setCell(fitCellForGrid(gridRef.current!, geometry));
     setRev((value) => value + 1);
-    onModelChange(serializeVoxelGrid(gridRef.current!, cellShape));
+    emitModel(cellShape, spriteMaterials);
   };
 
   /**
@@ -920,7 +1083,7 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     setHover(null);
     setCell(fitCellForGrid(gridRef.current!, geometryFor(next)));
     setRev((value) => value + 1);
-    onModelChange(serializeVoxelGrid(gridRef.current!, next));
+    emitModel(next, spriteMaterials);
   };
 
   const [publishedNote, setPublishedNote] = useState<string | null>(null);
@@ -1056,6 +1219,99 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
               Click a voxel to skin it with the selected tile material — grass caps
               a dirt block, a log rings its ends. Right-click clears a voxel back to
               flat colour.
+            </p>
+
+            <div className={styles.groupLabel} style={{ marginTop: 14 }}>
+              From sprites
+            </div>
+            {spriteMaterials.length > 0 && (
+              <div className={styles.paletteGrid}>
+                {spriteMaterials.map((material, ordinal) => {
+                  const index = firstSpriteMaterial + ordinal;
+                  const texture = spriteThumbs[ordinal];
+                  return (
+                    <button
+                      key={`${material.name}:${ordinal}`}
+                      type="button"
+                      className={`${styles.swatch} ${index === materialIndex ? styles.swatchActive : ""}`}
+                      onClick={() => setMaterialIndex(index)}
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        removeSpriteMaterial(ordinal);
+                      }}
+                      title={`${material.name} — right-click to remove`}
+                      aria-label={`Sprite material ${material.name}`}
+                      aria-pressed={index === materialIndex}
+                    >
+                      {texture && <SpriteTileThumb texture={texture} />}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "flex-end", marginTop: 8 }}>
+              <label className={styles.panelMeta} style={{ display: "grid", gap: 2 }}>
+                Page
+                <select
+                  value={spritePage}
+                  onChange={(event) => setSpritePage(Number(event.target.value) === 1 ? 1 : 0)}
+                  aria-label="Sprite page"
+                  style={SPRITE_FIELD_STYLE}
+                >
+                  <option value={0}>Sprites</option>
+                  <option value={1}>Tiles</option>
+                </select>
+              </label>
+              {SPRITE_FACE_FIELDS.map((field) => (
+                <label key={field.id} className={styles.panelMeta} style={{ display: "grid", gap: 2 }}>
+                  {field.label}
+                  <input
+                    type="number"
+                    min={0}
+                    max={sheet.tilesPerPage - 1}
+                    value={spriteFields[field.id]}
+                    placeholder={field.placeholder}
+                    onChange={(event) =>
+                      setSpriteFields((fields) => ({ ...fields, [field.id]: event.target.value }))
+                    }
+                    aria-label={field.aria}
+                    style={SPRITE_FIELD_STYLE}
+                  />
+                </label>
+              ))}
+              <button
+                type="button"
+                className={styles.toolBtn}
+                aria-label="Add sprite material"
+                disabled={!pendingSpriteRef || pendingSpriteBlank}
+                onClick={() => {
+                  if (!pendingSpriteRef || pendingSpriteBlank) return;
+                  addSpriteMaterial(
+                    pendingSpriteRef,
+                    parseSpriteRef(spriteFields.top, spritePage, sheet.tilesPerPage),
+                    parseSpriteRef(spriteFields.bottom, spritePage, sheet.tilesPerPage),
+                    `Sprite ${pendingSpriteRef.tile}`,
+                  );
+                }}
+                title={
+                  pendingSpriteBlank
+                    ? "That sprite is empty — draw it in the Sprites tab first"
+                    : "Use this sprite as a voxel material"
+                }
+              >
+                Add
+              </button>
+            </div>
+            {pendingSpriteBlank && (
+              <p className={styles.panelMeta} style={{ marginTop: 6, color: "#ffb4a2" }} role="status">
+                Sprite {pendingSpriteRef?.tile} is empty — draw it in the Sprites tab first.
+              </p>
+            )}
+            <p className={styles.panelMeta} style={{ lineHeight: 1.5, marginTop: 6 }}>
+              Draw a sprite in the Sprites tab, then name its number here to skin
+              voxels with it. Sides is required; Top and Bottom are optional — leave
+              them blank to wrap the same art all round. Right-click a sprite
+              material to remove it.
             </p>
           </div>
         )}
