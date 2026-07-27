@@ -35,6 +35,10 @@ import {
   MATERIAL_NONE,
   shapeOffsets,
   solidOffsets,
+  VOXEL_GENERATORS,
+  defaultValues,
+  findGenerator,
+  type GeneratorValues,
   type CellShape,
   type CellGeometry,
   type VoxelShapeKind,
@@ -63,6 +67,8 @@ import {
 } from "@/lib/spriteTiles";
 import { decodeVoxelSidecar, encodeVoxelSidecar } from "@/lib/voxelSidecar";
 import styles from "./editor.module.css";
+import { GeneratorPanel } from "./GeneratorPanel";
+import { SpritePixelPad } from "./SpritePixelPad";
 
 /**
  * The world's authored tile atlas, shared by every editor instance. The Tiles
@@ -493,6 +499,10 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   // group (top/bottom blank = the same sprite as the sides).
   const [spritePage, setSpritePage] = useState<SpritePage>(0);
   const [spriteFields, setSpriteFields] = useState<SpriteFields>({ sides: "0", top: "", bottom: "" });
+  // The sprite the in-tab pixel pad edits. Seeded from the first sprite skin
+  // this sculpt uses, so the pad opens on the texture actually on the model.
+  const [padTile, setPadTile] = useState(() => initialSidecar.spriteMaterials[0]?.side.tile ?? 0);
+  const [padVersion, setPadVersion] = useState(0);
   const [hover, setHover] = useState<HoverTarget | null>(null); // what the cursor is aiming at
   const [shapeKind, setShapeKind] = useState<ShapeChoice>("rectangle");
   const [shapeStyle, setShapeStyle] = useState<VoxelShapeStyle>("outline");
@@ -530,16 +540,20 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
   // sprite skins, read live from the cart's sprite sheet. Rebuilt when a skin is
   // added or removed; the sheet itself is re-read on every remount, which the
   // workbench does whenever a sprite edit bumps the cart revision.
+  // padVersion is a dependency because the in-tab pixel pad edits the sprite art
+  // in place: the sheet object is the same, but its texels are not.
   const atlas = useMemo(
     () => buildSpriteMaterialAtlas(WORLD_ATLAS, spriteMaterials, sheet),
-    [spriteMaterials, sheet],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [spriteMaterials, sheet, padVersion],
   );
   const firstSpriteMaterial = firstSpriteMaterialIndex(WORLD_ATLAS);
   // A thumbnail per sprite material (its side art), so the palette shows the
   // actual sprite rather than an anonymous swatch.
   const spriteThumbs = useMemo(
     () => spriteMaterials.map((material) => spriteFaceTexture(sheet, material.side)),
-    [spriteMaterials, sheet],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [spriteMaterials, sheet, padVersion],
   );
   /** The sprite the form would add, or null while the sides field is unusable. */
   const pendingSpriteRef = parseSpriteRef(spriteFields.sides, spritePage, sheet.tilesPerPage);
@@ -666,6 +680,9 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
       encodeVoxelSidecar({
         grid: serializeVoxelGrid(gridRef.current!, shape),
         spriteMaterials: materials,
+        // The Map tab's columns share this payload; carry whatever it holds
+        // through untouched rather than dropping it on a sculpt edit.
+        mapLayer: initialSidecar.mapLayer,
       }),
     );
   };
@@ -1084,6 +1101,33 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
     setCell(fitCellForGrid(gridRef.current!, geometryFor(next)));
     setRev((value) => value + 1);
     emitModel(next, spriteMaterials);
+  };
+
+  // --- Procedural generation -----------------------------------------------
+  // The generators write straight into the grid through its VoxelSink shape and
+  // are handed the lattice, so a hexel sculpt is generated on the FCC sites
+  // rather than being cubes reinterpreted after the fact.
+  const [generatorId, setGeneratorId] = useState(VOXEL_GENERATORS[0]!.id);
+  const generator = findGenerator(VOXEL_GENERATORS, generatorId);
+  const [generatorValues, setGeneratorValues] = useState<GeneratorValues>(() =>
+    defaultValues(VOXEL_GENERATORS[0]!.params),
+  );
+  const [generateNote, setGenerateNote] = useState<string | null>(null);
+  const [showGenerator, setShowGenerator] = useState(false);
+
+  const runGenerator = () => {
+    const grid = gridRef.current!;
+    // Generating replaces the sculpt outright; undo restores it, but say so
+    // before throwing away work the user can see on screen.
+    if (grid.filledCount > seededGrid(grid.sizeX, cellShape).filledCount) {
+      if (!window.confirm(`Replace this sculpt with generated ${generator.label.toLowerCase()}?`)) return;
+    }
+    generator.generate(grid, { evenParity: geometry.evenParity }, generatorValues);
+    clearSelection();
+    setHover(null);
+    setCell(fitCellForGrid(grid, geometry));
+    setGenerateNote(`${generator.label}: ${grid.filledCount.toLocaleString()} cells.`);
+    commit();
   };
 
   const [publishedNote, setPublishedNote] = useState<string | null>(null);
@@ -1649,6 +1693,39 @@ export function VoxelEditor({ sheet, model, onModelChange, pendingEdit = null }:
             ))}
           </div>
         </div>
+
+        <SpritePixelPad
+          sheet={sheet}
+          page={spritePage}
+          tile={padTile}
+          onTileChange={setPadTile}
+          colorIndex={colorIndex}
+          version={padVersion}
+          onEdit={() => setPadVersion((value) => value + 1)}
+        />
+
+        <button
+          type="button"
+          className={styles.rendererToggle}
+          onClick={() => setShowGenerator((open) => !open)}
+          aria-expanded={showGenerator}
+        >
+          {showGenerator ? "Close generator" : "Generate…"}
+        </button>
+        {showGenerator && (
+          <GeneratorPanel
+            generators={VOXEL_GENERATORS}
+            selectedId={generator.id}
+            onSelect={(id) => {
+              setGeneratorId(id);
+              setGenerateNote(null);
+            }}
+            values={generatorValues}
+            onValuesChange={setGeneratorValues}
+            onGenerate={runGenerator}
+            note={generateNote}
+          />
+        )}
 
         <p className={styles.panelMeta} style={{ lineHeight: 1.5 }}>
           {tool === "material"

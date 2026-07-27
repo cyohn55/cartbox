@@ -5,9 +5,7 @@
  * SpriteSheet, so the UI and the tests drive it identically.
  */
 
-import {
-  CartEngine,
-} from "../engine/CartEngine";
+import type { CartEngine } from "../engine/CartEngine";
 
 export class TileMap {
   // Map dimensions come from the engine's console model.

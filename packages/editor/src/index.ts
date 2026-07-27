@@ -106,6 +106,18 @@ export {
   type GridAxis,
 } from "./model/VoxelGrid";
 export {
+  MapVoxelLayer,
+  mapLayerToVoxelGrid,
+  serializeMapVoxelLayer,
+  deserializeMapVoxelLayer,
+  MAX_MAP_COLUMN_HEIGHT,
+  MAP_VOXEL_LAYER_VERSION,
+  type MapColumn,
+  type MapLayerGridOptions,
+  type PaletteLookup,
+} from "./model/MapVoxelLayer";
+export * from "./procgen";
+export {
   VOXEL_FONT,
   FONT_WIDTH,
   FONT_HEIGHT,

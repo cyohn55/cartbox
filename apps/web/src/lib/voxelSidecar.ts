@@ -24,31 +24,49 @@ export const VOXEL_SIDECAR_KIND = "cartbox.voxel";
 /** Current envelope version, bumped only on a breaking change to the shape. */
 export const VOXEL_SIDECAR_VERSION = 1;
 
-/** What the Voxel tab persists: the sculpt, plus the sprite skins it uses. */
+/** What the cart's 3D payload holds: the sculpt, its skins, and the map's height. */
 export interface VoxelSidecar {
   /** Serialized {@link VoxelGrid} payload, or null when there is no sculpt yet. */
   readonly grid: string | null;
   /** Sprite-backed materials, in the order their indices follow the base atlas. */
   readonly spriteMaterials: readonly SpriteMaterial[];
+  /**
+   * Serialized `MapVoxelLayer` — the Map tab's voxel/hexel columns — or null
+   * when the map has no height authored. It rides in this envelope rather than
+   * in a column of its own because it is the same kind of thing (3D data hung
+   * off the cart) and the storage path for it already exists end to end.
+   */
+  readonly mapLayer: string | null;
 }
 
-/** An empty sidecar — a cart with no sculpt and no sprite skins. */
-export const EMPTY_VOXEL_SIDECAR: VoxelSidecar = { grid: null, spriteMaterials: [] };
+/** An empty sidecar — a cart with no sculpt, no sprite skins and a flat map. */
+export const EMPTY_VOXEL_SIDECAR: VoxelSidecar = { grid: null, spriteMaterials: [], mapLayer: null };
 
 /**
- * Encode a sidecar for saving. With no sprite materials the grid payload is
- * returned as-is, so nothing about existing carts changes; only a sculpt that
- * actually uses sprite skins pays for the envelope.
+ * Encode a sidecar for saving. With nothing beyond the sculpt to say, the grid
+ * payload is returned as-is, so nothing about existing carts changes; only a
+ * cart that uses sprite skins or map columns pays for the envelope.
  */
 export function encodeVoxelSidecar(sidecar: VoxelSidecar): string {
   const grid = sidecar.grid ?? "";
-  if (sidecar.spriteMaterials.length === 0) return grid;
+  if (sidecar.spriteMaterials.length === 0 && !sidecar.mapLayer) return grid;
   return JSON.stringify({
     kind: VOXEL_SIDECAR_KIND,
     version: VOXEL_SIDECAR_VERSION,
     grid,
     spriteMaterials: sidecar.spriteMaterials,
+    ...(sidecar.mapLayer ? { mapLayer: sidecar.mapLayer } : {}),
   });
+}
+
+/**
+ * Re-encode a payload with some fields replaced, preserving everything else it
+ * carried. The Map and Voxel tabs each own one part of this envelope; routing
+ * their updates through here is what stops either from dropping the other's
+ * work when it saves.
+ */
+export function mergeVoxelSidecar(raw: string | null, patch: Partial<VoxelSidecar>): string {
+  return encodeVoxelSidecar({ ...decodeVoxelSidecar(raw), ...patch });
 }
 
 /**
@@ -60,21 +78,24 @@ export function encodeVoxelSidecar(sidecar: VoxelSidecar): string {
 export function decodeVoxelSidecar(raw: string | null): VoxelSidecar {
   if (!raw) return EMPTY_VOXEL_SIDECAR;
 
+  const bare = (payload: string): VoxelSidecar => ({ grid: payload, spriteMaterials: [], mapLayer: null });
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return { grid: raw, spriteMaterials: [] };
+    return bare(raw);
   }
-  if (typeof parsed !== "object" || parsed === null) return { grid: raw, spriteMaterials: [] };
+  if (typeof parsed !== "object" || parsed === null) return bare(raw);
 
-  const envelope = parsed as { kind?: unknown; grid?: unknown; spriteMaterials?: unknown };
+  const envelope = parsed as { kind?: unknown; grid?: unknown; spriteMaterials?: unknown; mapLayer?: unknown };
   if (envelope.kind !== VOXEL_SIDECAR_KIND || typeof envelope.grid !== "string") {
-    return { grid: raw, spriteMaterials: [] }; // a bare grid payload
+    return bare(raw); // a bare grid payload
   }
   return {
     grid: envelope.grid === "" ? null : envelope.grid,
     spriteMaterials: readSpriteMaterials(envelope.spriteMaterials),
+    mapLayer: typeof envelope.mapLayer === "string" && envelope.mapLayer !== "" ? envelope.mapLayer : null,
   };
 }
 
@@ -101,7 +122,10 @@ export function parseVoxelPayload(value: unknown): string | null {
   if (payload === "" || payload.length > MAX_VOXEL_PAYLOAD_CHARS) return null;
 
   const sidecar = decodeVoxelSidecar(payload);
-  if (!sidecar.grid) return null; // an envelope with no sculpt in it
+  // A cart may carry map columns without ever having a sculpt — the Map tab can
+  // author height without the Voxel tab being opened — so either half is enough
+  // to make the payload worth storing.
+  if (!sidecar.grid) return sidecar.mapLayer ? payload : null;
   if (!describesAGrid(sidecar.grid)) return null;
   return payload;
 }

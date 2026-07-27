@@ -10,7 +10,7 @@
  * shown.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { defaultPostFxSettings, type PostFxSettings } from "@cartbox/player";
 import {
@@ -39,6 +39,7 @@ import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
 import { isStaticExport } from "@/lib/staticSite";
 import { saveCartDraft } from "@/lib/localCartStore";
 import { loadPendingVoxelEdit, clearPendingVoxelEdit, type PendingVoxelEdit } from "@/lib/backdropPropsStore";
+import { decodeVoxelSidecar, mergeVoxelSidecar } from "@/lib/voxelSidecar";
 import type { WireRig } from "@/lib/rig";
 import type { WireMaterials } from "@/lib/materials";
 import styles from "./editor.module.css";
@@ -248,6 +249,15 @@ function WorkbenchBody({
   const specularMap = useMemo(() => new MaterialMap(editEngine, "specular"), [editEngine]);
   const roughnessMap = useMemo(() => new MaterialMap(editEngine, "roughness"), [editEngine]);
   const emissiveMap = useMemo(() => new MaterialMap(editEngine, "emissive"), [editEngine]);
+  // The Map tab's voxel/hexel columns ride in the same payload as the Voxel
+  // tab's sculpt (see voxelSidecar). Composing the two here — rather than in
+  // either editor — is what keeps one tab's save from dropping the other's work.
+  const mapColumns = useMemo(() => decodeVoxelSidecar(voxel).mapLayer, [voxel]);
+  const setMapColumns = useCallback(
+    (serialized: string) => setVoxel(mergeVoxelSidecar(voxel, { mapLayer: serialized })),
+    [voxel, setVoxel],
+  );
+
   // A voxel prop handed over from the backdrop manager to re-sculpt: open on the
   // Voxel tab, seed it with that model, and consume the hand-off once.
   const [pendingVoxel] = useState<PendingVoxelEdit | null>(() =>
@@ -461,7 +471,15 @@ function WorkbenchBody({
           pendingEdit={pendingVoxel}
         />
       )}
-      {activeTab === "Map" && <MapEditor key={`${bank}:${revision}`} sheet={sheet} map={map} />}
+      {activeTab === "Map" && (
+        <MapEditor
+          key={`${bank}:${revision}`}
+          sheet={sheet}
+          map={map}
+          columnPayload={mapColumns}
+          onColumnsChange={setMapColumns}
+        />
+      )}
       {activeTab === "FX" && (
         <ShaderEditor key={`${bank}:${revision}`} sheet={sheet} map={map} settings={fx} onSettingsChange={setFx} />
       )}
