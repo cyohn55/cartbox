@@ -10,12 +10,46 @@
  * failure or when WebGPU is unavailable, so the caller falls back to the CPU
  * renderer — this is never a blank screen.
  *
+ * It also carries the authoring views: a channel can be isolated (see the normal
+ * map *as* a normal map, rather than inferring it from a highlight) and the
+ * shading model can be swapped for Gooch, which keeps unlit pixels legible.
+ * Matcap is deliberately absent here — this preview looks straight down a fixed
+ * view vector, so "shade from the view-space normal" and "shade from the normal"
+ * are the same picture, and offering it would be a mode that does nothing.
+ *
  * WebGPU isn't in the TS DOM lib here and we don't want the @webgpu/types
  * dependency, so the GPU handles are loosely typed. The lighting maths is what
  * matters, and it's identical to the tested CPU path.
  */
 
 import type { Light, FogOptions } from "@cartbox/editor";
+
+import {
+  CHANNEL_VIEW_IDS,
+  DEFAULT_GOOCH,
+  SHADING_MODEL_IDS,
+  type GoochOptions,
+  type MaterialChannelView,
+  type RimOptions,
+  type ShadingModel,
+} from "./shadingModes";
+
+/** How the preview shades and what it shows; all optional, all defaulted. */
+export interface LitPreviewView {
+  readonly shading?: ShadingModel;
+  readonly channel?: MaterialChannelView;
+  readonly rim?: RimOptions;
+  readonly gooch?: GoochOptions;
+}
+
+/**
+ * The rim strength this preview has always applied. Kept as the default so
+ * adding the control changes nothing for a caller that does not pass one.
+ */
+const LEGACY_RIM: RimOptions = { strength: 0.15, power: 3 };
+
+/** Depth has no meaning in a flat sprite preview, so it stands in for height. */
+const FLAT_DEPTH_FALLBACK = CHANNEL_VIEW_IDS.height;
 
 const SHADER = /* wgsl */ `
 struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
@@ -30,7 +64,13 @@ fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
   return out;
 }
 
-struct Uniforms { light: vec4<f32>, dims: vec4<f32>, fog: vec4<f32> }; // fog = rgb, density
+struct Uniforms {
+  light: vec4<f32>,
+  dims: vec4<f32>,
+  fog: vec4<f32>,  // rgb, density
+  view: vec4<f32>, // shadingMode, channelView, rimStrength, rimPower
+  gooch: vec4<f32>, // cool, warm, unused, unused
+};
 @group(0) @binding(0) var samp: sampler;
 @group(0) @binding(1) var albedoTex: texture_2d<f32>;
 @group(0) @binding(2) var normalTex: texture_2d<f32>;
@@ -99,14 +139,39 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   let specStr = m.g;
   let rough = m.b;
   let emissive = m.a;
+
+  // Channel views answer before any lighting runs: the value the artist painted
+  // is the whole point, so shading it would hide what is being inspected.
+  let channelView = i32(round(u.view.y));
+  if (channelView > 0) {
+    var probe = vec3<f32>(0.0);
+    if (channelView == 1) { probe = albedo.rgb; }
+    else if (channelView == 2) { probe = n * 0.5 + 0.5; }
+    else if (channelView == 3) { probe = vec3<f32>(m.r); }
+    else if (channelView == 4) { probe = vec3<f32>(specStr); }
+    else if (channelView == 5) { probe = vec3<f32>(rough); }
+    else { probe = albedo.rgb * emissive; }
+    return vec4<f32>(probe, albedo.a);
+  }
+
   let shadow = shadowFactor(px, h0, u.light.xy, u.light.z, u.dims.xy);
   let diffuse = max(0.0, dot(n, toLight)) * shadow;
   let intensity = u.light.w + (1.0 - u.light.w) * diffuse;
   let shininess = mix(6.0, 120.0, 1.0 - rough);
   let halfVec = normalize(toLight + VIEW);
   let spec = pow(max(0.0, dot(n, halfVec)), shininess) * specStr * shadow;
-  let rim = pow(1.0 - max(0.0, dot(n, VIEW)), 3.0) * 0.15;
-  let lit = albedo.rgb * (intensity + rim) + vec3<f32>(spec);
+  let rim = pow(1.0 - max(0.0, dot(n, VIEW)), max(u.view.w, 0.1)) * u.view.z;
+
+  var lit = albedo.rgb * (intensity + rim) + vec3<f32>(spec);
+  if (i32(round(u.view.x)) == 2) {
+    // Gooch: cool away from the light, warm toward it, each carrying some of the
+    // albedo. The shadow term still modulates it, so the self-shadowing this
+    // preview exists to show is not lost to the change of model.
+    let cool = vec3<f32>(0.0, 0.0, 0.55) + u.gooch.x * albedo.rgb;
+    let warm = vec3<f32>(0.4, 0.4, 0.0) + u.gooch.y * albedo.rgb;
+    lit = mix(cool, warm, (1.0 + dot(n, toLight)) * 0.5) * mix(0.55, 1.0, shadow)
+      + vec3<f32>(spec) + albedo.rgb * rim;
+  }
   let surface = max(lit, albedo.rgb * emissive);
   let visibility = lightShaftVisibility(px, h0, u.light.xy, u.light.z, u.dims.xy);
   let shaft = u.fog.rgb * (u.fog.a * visibility);
@@ -159,7 +224,8 @@ export class WebGpuLitRenderer {
       const albedoTex = texture();
       const normalTex = texture();
       const matTex = texture();
-      const uniform = device.createBuffer({ size: 48, usage: 0x40 /* UNIFORM */ | 0x8 /* COPY_DST */ });
+      // Five vec4s: light, dims, fog, view, gooch.
+      const uniform = device.createBuffer({ size: 5 * 16, usage: 0x40 /* UNIFORM */ | 0x8 /* COPY_DST */ });
       const sampler = device.createSampler({ magFilter: "nearest", minFilter: "nearest" });
       const linearSampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
 
@@ -187,6 +253,7 @@ export class WebGpuLitRenderer {
     material: Uint8ClampedArray,
     light: Light,
     fog?: FogOptions,
+    view?: LitPreviewView,
   ): void {
     const layout = { bytesPerRow: this.width * 4, rowsPerImage: this.height };
     const size = { width: this.width, height: this.height };
@@ -195,11 +262,27 @@ export class WebGpuLitRenderer {
     this.device.queue.writeTexture({ texture: this.matTex }, material, layout, size);
     const density = fog && fog.density > 0 ? fog.density : 0;
     const [fogR, fogG, fogB] = fog ? fog.color : [0, 0, 0];
+
+    const rim = view?.rim ?? LEGACY_RIM;
+    const gooch = view?.gooch ?? DEFAULT_GOOCH;
+    // Matcap degenerates to the lit model at a fixed view vector, so it is folded
+    // back to `lit` rather than offered as a mode that changes nothing.
+    const shading = view?.shading === "gooch" ? "gooch" : "lit";
+    const requested = CHANNEL_VIEW_IDS[view?.channel ?? "shaded"];
+    const channel = requested === CHANNEL_VIEW_IDS.depth ? FLAT_DEPTH_FALLBACK : requested;
+
     this.device.queue.writeBuffer(
       this.uniform,
       0,
-      // Uniforms: light(col,row,height,ambient), dims(w,h,_,_), fog(r,g,b,density).
-      new Float32Array([light.col, light.row, light.height, light.ambient, this.width, this.height, 0, 0, fogR, fogG, fogB, density]),
+      // Uniforms: light(col,row,height,ambient), dims(w,h,_,_), fog(r,g,b,density),
+      // view(shading,channel,rimStrength,rimPower), gooch(cool,warm,_,_).
+      new Float32Array([
+        light.col, light.row, light.height, light.ambient,
+        this.width, this.height, 0, 0,
+        fogR, fogG, fogB, density,
+        SHADING_MODEL_IDS[shading], channel, rim.strength, rim.power,
+        gooch.cool, gooch.warm, 0, 0,
+      ]),
     );
 
     const encoder = this.device.createCommandEncoder();

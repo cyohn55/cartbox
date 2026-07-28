@@ -51,6 +51,7 @@ import { MaterialBrushSurface } from "./materialBrushSurface";
 import { SpriteBlockSurface } from "./spriteBlockSurface";
 import { measureCoverage, sampleChannels, valueUsage } from "./layerCoverage";
 import { RailGroup, RailHint, RangeControl, SegmentedControl, ToolRail } from "./railControls";
+import { SurfaceToolsPanel } from "./SurfaceToolsPanel";
 import {
   InspectorHint,
   InspectorPanel,
@@ -707,6 +708,21 @@ export function SpriteEditor({
           />
           {asepriteNote && <RailHint>{asepriteNote}</RailHint>}
         </RailGroup>
+
+        {/* The generative tools sit below the file groups deliberately: they are
+            also "something arrives in this block from outside a brush stroke",
+            and grouping them with import/export is what makes that legible. */}
+        <SurfaceToolsPanel
+          sheet={sheet}
+          normals={normals}
+          height={height}
+          specular={specular}
+          roughness={roughness}
+          emissive={emissive}
+          selection={selection}
+          color={color}
+          onEdit={bump}
+        />
       </>
     ),
   };

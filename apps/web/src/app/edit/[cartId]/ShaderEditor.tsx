@@ -106,6 +106,10 @@ export function ShaderEditor({ sheet, map, settings, onSettingsChange }: ShaderE
     onSettingsChange({ ...settings, values: { ...settings.values, [key]: value } });
   };
 
+  const setColor = (key: string, value: string) => {
+    onSettingsChange({ ...settings, colors: { ...settings.colors, [key]: value } });
+  };
+
   const enabledCount = POST_FX_EFFECTS.filter((effect) => settings.enabled[effect.id]).length;
 
   const effectList = POST_FX_EFFECTS.map((effect) => (
@@ -117,15 +121,19 @@ export function ShaderEditor({ sheet, map, settings, onSettingsChange }: ShaderE
           onChange={() => toggleEffect(effect.id)}
         />
         <span className={styles.fxEffectName}>{effect.label}</span>
-        {effect.hasColor && (
-          <input
-            type="color"
-            value={settings.fogColor}
-            onChange={(event) => onSettingsChange({ ...settings, fogColor: event.target.value })}
-            aria-label={`${effect.label} colour`}
-            title={`${effect.label} colour`}
-          />
-        )}
+        {(effect.colors ?? []).map((color) => {
+          const key = paramKey(effect.id, color.id);
+          return (
+            <input
+              key={color.id}
+              type="color"
+              value={settings.colors[key] ?? color.defaultValue}
+              onChange={(event) => setColor(key, event.target.value)}
+              aria-label={`${effect.label} ${color.label}`}
+              title={color.label}
+            />
+          );
+        })}
       </label>
       <div className={styles.fxEffectDescription}>{effect.description}</div>
       {settings.enabled[effect.id] &&

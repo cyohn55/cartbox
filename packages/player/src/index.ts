@@ -128,6 +128,7 @@ export {
 } from "./fx/index.js";
 export type {
   InnerSurfaceFactory,
+  PostFxColorDef,
   PostFxEffectDef,
   PostFxEffectId,
   PostFxParamDef,

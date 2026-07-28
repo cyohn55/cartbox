@@ -317,6 +317,52 @@ export {
 } from "./model/palette";
 export { parsePaletteFile, type ParsedPalette, type PaletteFormat } from "./model/paletteImport";
 export {
+  MATERIAL_DERIVE_PARAMS,
+  DERIVABLE_CHANNELS,
+  defaultMaterialDeriveParams,
+  normalizeMaterialDeriveParams,
+  deriveMaterials,
+  deriveHeight,
+  deriveNormal,
+  deriveOcclusion,
+  deriveRoughness,
+  deriveSpecular,
+  deriveEmissive,
+  applyDerivedMaterials,
+  quantizeLevel,
+  boxBlur,
+  sobelGradient,
+  type DerivedChannel,
+  type DerivedMaterials,
+  type LevelWriter,
+  type MaterialDeriveParams,
+  type MaterialTarget,
+  type MaterialWriters,
+  type NormalWriter,
+  type ScalarField,
+} from "./model/materialDerive";
+export {
+  DITHER_MODES,
+  DEFAULT_QUANTIZE_OPTIONS,
+  DEFAULT_PIXELATE_OPTIONS,
+  ditherOffset,
+  downscaleImage,
+  quantizeToPalette,
+  pixelateImage,
+  type DitherMode,
+  type PixelateOptions,
+  type QuantizeOptions,
+} from "./model/imageQuantize";
+export {
+  CubeLutError,
+  parseCubeLut,
+  applyLut01,
+  applyLutRgb,
+  gradePalette,
+  lutToBytes,
+  type CubeLut,
+} from "./model/cubeLut";
+export {
   parseAseprite,
   parseAsepriteLayers,
   type AsepriteDocument,

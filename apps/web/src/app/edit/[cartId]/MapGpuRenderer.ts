@@ -48,6 +48,18 @@ import {
   type VoxelModel,
 } from "@cartbox/editor";
 
+import {
+  CHANNEL_VIEW_IDS,
+  DEFAULT_GOOCH,
+  DEFAULT_RIM,
+  SHADING_MODEL_IDS,
+  isChannelIsolated,
+  type GoochOptions,
+  type MaterialChannelView,
+  type RimOptions,
+  type ShadingModel,
+} from "./shadingModes";
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 /** GPUTextureUsage, spelled out because the enum is not in the TS DOM lib. */
@@ -94,6 +106,12 @@ export interface MapGpuFrame {
   readonly fogDistance: number;
   /** How much light the emissive channel bleeds into its surroundings, 0..1. */
   readonly bloom: number;
+  /** Shading model; defaults to `lit`. */
+  readonly shading?: ShadingModel;
+  /** Channel to isolate; defaults to `shaded` (the composed image). */
+  readonly channel?: MaterialChannelView;
+  readonly rim?: RimOptions;
+  readonly gooch?: GoochOptions;
 }
 
 const SCENE_SHADER = /* wgsl */ `
@@ -111,6 +129,10 @@ struct Camera {
   // rgb light colour, a ambient
   lightColor: vec4<f32>,
   sky: vec4<f32>,
+  // shadingMode, channelView, rimStrength, rimPower
+  view: vec4<f32>,
+  // goochCool, goochWarm, matcapRim, depthRange
+  stylize: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -206,6 +228,24 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
 
   if (alpha < 0.5) { discard; }
 
+  // Channel views short-circuit everything below: the point of isolating a
+  // channel is to see the authored value, so lighting it would defeat the view.
+  // Every texture read is already done, so returning here keeps control flow
+  // uniform for the sampler.
+  let channelView = i32(round(camera.view.y));
+  if (channelView > 0) {
+    var probe = vec3<f32>(0.0);
+    if (channelView == 1) { probe = albedo; }
+    else if (channelView == 2) { probe = normal * 0.5 + 0.5; }
+    else if (channelView == 3) { probe = vec3<f32>(packed.a); }
+    else if (channelView == 4) { probe = vec3<f32>(specular); }
+    else if (channelView == 5) { probe = vec3<f32>(roughness); }
+    else if (channelView == 6) { probe = albedo * glow; }
+    else { probe = vec3<f32>(clamp(in.depth / max(camera.stylize.w, 1.0), 0.0, 1.0)); }
+    // Alpha 0: a channel view has nothing to bloom, whatever the frame asked for.
+    return vec4<f32>(probe, 0.0);
+  }
+
   let toLight = normalize(camera.light.xyz);
   let diffuse = max(0.0, dot(normal, toLight));
   let ambient = camera.lightColor.a;
@@ -217,7 +257,42 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   let highlight = pow(max(0.0, dot(normal, halfway)), mix(160.0, 4.0, roughness))
     * specular * step(0.001, diffuse);
 
-  let lit = albedo * shade * camera.lightColor.rgb + vec3<f32>(highlight);
+  let shadingMode = i32(round(camera.view.x));
+  var lit = albedo * shade * camera.lightColor.rgb + vec3<f32>(highlight);
+
+  if (shadingMode == 1) {
+    // Matcap: shade from the *view-space* normal alone, so the lighting is
+    // welded to the camera and orbiting reveals silhouette and curvature rather
+    // than moving the highlights around. Built analytically as a studio-lit
+    // sphere — key, fill, and a rim at the limb — rather than sampled from a
+    // matcap image, so it needs no asset and no extra binding.
+    let viewNormal = vec3<f32>(
+      dot(normal, camera.right.xyz),
+      dot(normal, camera.up.xyz),
+      dot(normal, camera.forward.xyz)
+    );
+    let key = max(0.0, dot(viewNormal, normalize(vec3<f32>(-0.5, 0.6, -0.6))));
+    let fill = max(0.0, dot(viewNormal, normalize(vec3<f32>(0.5, -0.4, -0.7))));
+    let limb = pow(1.0 - abs(viewNormal.z), 3.0) * camera.stylize.z;
+    let studio = key * 0.85 + fill * 0.25 + limb;
+    lit = albedo * (0.15 + studio)
+      + vec3<f32>(pow(key, mix(160.0, 8.0, roughness)) * specular);
+  } else if (shadingMode == 2) {
+    // Gooch: a cool tint away from the light and a warm one toward it, each
+    // carrying some of the albedo. Nothing goes to black, which is the whole
+    // point — an unlit face still shows its form.
+    let cool = vec3<f32>(0.0, 0.0, 0.55) + camera.stylize.x * albedo;
+    let warm = vec3<f32>(0.4, 0.4, 0.0) + camera.stylize.y * albedo;
+    lit = mix(cool, warm, (1.0 + dot(normal, toLight)) * 0.5) + vec3<f32>(highlight);
+  }
+
+  // Rim light, on top of whichever model ran: brighten where the surface turns
+  // away from the eye, which separates a silhouette from whatever is behind it.
+  if (camera.view.z > 0.0) {
+    let rim = pow(1.0 - max(0.0, dot(normal, eyeDir)), max(camera.view.w, 0.1));
+    lit = lit + camera.lightColor.rgb * rim * camera.view.z;
+  }
+
   // Emissive is a floor, not an addition: a glowing texel keeps its own colour
   // in shadow rather than washing out toward white.
   var colour = max(lit, albedo * glow);
@@ -449,7 +524,8 @@ export class MapGpuRenderer {
         screenPipeline(postModule, "bright", HDR_FORMAT),
         screenPipeline(postModule, "blur", HDR_FORMAT),
         screenPipeline(resolveModule, "fs", format),
-        uniform(9 * 16),
+        // 11 vec4s: the camera block through to the stylization controls.
+        uniform(11 * 16),
         uniform(16),
         uniform(16),
         uniform(16),
@@ -569,13 +645,17 @@ export class MapGpuRenderer {
       this.device.queue.writeBuffer(this.cameraBuffer, 0, cameraUniform(frame));
 
       const encoder = this.device.createCommandEncoder();
+      // A channel view clears to black rather than to sky: the background is not
+      // part of the channel being inspected, and tinting it would invite reading
+      // the sky's blue as a normal or a roughness value.
+      const clearSky = isChannelIsolated(frame.channel) ? [0, 0, 0] : frame.sky;
       const scenePass = encoder.beginRenderPass({
         colorAttachments: [
           {
             view: targets.sceneView,
             loadOp: "clear",
             storeOp: "store",
-            clearValue: { r: frame.sky[0], g: frame.sky[1], b: frame.sky[2], a: 0 },
+            clearValue: { r: clearSky[0]!, g: clearSky[1]!, b: clearSky[2]!, a: 0 },
           },
         ],
         depthStencilAttachment: {
@@ -802,10 +882,21 @@ function destroySafely(resource: any): void {
   }
 }
 
+/** How far the depth channel view ramps from black to white when fog is off. */
+const DEFAULT_DEPTH_RANGE = 64;
+
+/** How brightly the procedural matcap lights its limb. */
+const MATCAP_RIM = 0.35;
+
 /** The camera block, laid out to match the shader's `Camera` struct exactly. */
 function cameraUniform(frame: MapGpuFrame): Float32Array {
   const { eye, basis, projection, light, sky } = frame;
   const length = Math.hypot(light.direction[0], light.direction[1], light.direction[2]) || 1;
+  const rim = frame.rim ?? DEFAULT_RIM;
+  const gooch = frame.gooch ?? DEFAULT_GOOCH;
+  // The depth view needs a range to normalise against. Fog distance is the
+  // frame's own idea of "far" when it has one, so the two views agree.
+  const depthRange = frame.fogDistance > 0 ? frame.fogDistance : DEFAULT_DEPTH_RANGE;
   return new Float32Array([
     eye[0], eye[1], eye[2], 0,
     basis.right[0], basis.right[1], basis.right[2], 0,
@@ -816,5 +907,7 @@ function cameraUniform(frame: MapGpuFrame): Float32Array {
     light.direction[0] / length, light.direction[1] / length, light.direction[2] / length, light.intensity,
     light.color[0], light.color[1], light.color[2], light.ambient,
     sky[0], sky[1], sky[2], 1,
+    SHADING_MODEL_IDS[frame.shading ?? "lit"], CHANNEL_VIEW_IDS[frame.channel ?? "shaded"], rim.strength, rim.power,
+    gooch.cool, gooch.warm, MATCAP_RIM, depthRange,
   ]);
 }

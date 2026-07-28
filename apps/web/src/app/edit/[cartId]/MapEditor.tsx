@@ -68,6 +68,14 @@ import { MaterialPicker } from "./MaterialPicker";
 import { PalettePicker } from "./PalettePicker";
 import { RailGroup, RailHint, RangeControl, SegmentedControl, ToolRail } from "./railControls";
 import {
+  CHANNEL_VIEWS,
+  SHADING_MODELS,
+  channelHint,
+  shadingHint,
+  type MaterialChannelView,
+  type ShadingModel,
+} from "./shadingModes";
+import {
   InspectorHint,
   WorkbenchInspector,
   WorkbenchRail,
@@ -214,6 +222,11 @@ export function MapEditor({
   }));
   const [camera, setCamera] = useState(DEFAULT_CAMERA);
   const [radius, setRadius] = useState(16);
+  // How the orbit view shades, and which channel it isolates. Authoring state:
+  // it is never persisted with the cart, because it changes what you see and
+  // nothing about what you built.
+  const [shading, setShading] = useState<ShadingModel>("lit");
+  const [channel, setChannel] = useState<MaterialChannelView>("shaded");
 
   // The first-person camera is its own thing: it has a position in the world
   // rather than a point it circles, so switching between orbiting and walking
@@ -583,7 +596,34 @@ export function MapEditor({
             </RailGroup>
           </>
         ) : (
-          <SegmentedControl label="Range" options={RANGE_OPTIONS} selected={radius} onSelect={setRadius} />
+          <>
+            <SegmentedControl label="Range" options={RANGE_OPTIONS} selected={radius} onSelect={setRadius} />
+            {/* Shading and channel are hardware-only. Offering them under the
+                software fallback would show a lit frame under a "Normal" label,
+                which is worse than not offering them. */}
+            {renderer === "gpu" && (
+              <>
+                <SegmentedControl
+                  label="Shading"
+                  options={SHADING_MODELS}
+                  selected={shading}
+                  onSelect={setShading}
+                  wrap
+                />
+                <SegmentedControl
+                  label="Channel"
+                  options={CHANNEL_VIEWS}
+                  selected={channel}
+                  onSelect={setChannel}
+                  wrap
+                  spaced
+                />
+                <RailHint>
+                  {channelHint(channel) ?? shadingHint(shading)}
+                </RailHint>
+              </>
+            )}
+          </>
         )}
 
         {/* Which renderer the 3D stage got. Belongs with the stage's own settings
@@ -772,6 +812,8 @@ export function MapEditor({
             onHover={setSpaceHover}
             onNote={setSpaceNote}
             onRendererChange={setRenderer}
+            shading={shading}
+            channel={channel}
           />
         ) : (
           <MapCanvas

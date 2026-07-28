@@ -91,6 +91,15 @@ export {
   type VoxelSink,
 } from "./generators";
 export {
+  TEXTURE_GENERATORS,
+  DEFAULT_RAMP_OPTIONS,
+  findTextureGenerator,
+  textureToIndices,
+  type RampOptions,
+  type TextureField,
+  type TextureGenerator,
+} from "./textures";
+export {
   SURFACE_IDS,
   NO_MATERIAL,
   resolveMaterial,

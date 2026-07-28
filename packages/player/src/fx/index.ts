@@ -13,6 +13,7 @@ export {
   uniformsFromSettings,
 } from "./postfx.js";
 export type {
+  PostFxColorDef,
   PostFxEffectDef,
   PostFxEffectId,
   PostFxParamDef,

@@ -63,6 +63,7 @@ import {
 } from "./mapSpaceTools";
 import { useLiveValue } from "./useLiveValue";
 import { useMapGpu, type MapGpuStatus } from "./useMapGpu";
+import { isChannelIsolated, type MaterialChannelView, type ShadingModel } from "./shadingModes";
 
 /** Canvas edge in device pixels; also the pick buffers' resolution. */
 const VIEWPORT = 640;
@@ -152,6 +153,13 @@ interface Map3DCanvasProps {
   onNote: (note: string | null) => void;
   /** Which renderer ended up drawing, so the rail can say so. */
   onRendererChange?: (status: MapGpuStatus) => void;
+  /**
+   * Shading model and isolated channel for the hardware view. Authoring aids,
+   * not part of the cart: the software fallback ignores them, and the rail says
+   * so rather than silently showing a lit frame under a "Normal" label.
+   */
+  shading?: ShadingModel;
+  channel?: MaterialChannelView;
 }
 
 /** `#rrggbb` → 0..255 RGB triple, falling back to white on a malformed value. */
@@ -292,6 +300,8 @@ export function Map3DCanvas({
   onHover,
   onNote,
   onRendererChange,
+  shading = "lit",
+  channel = "shaded",
 }: Map3DCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -540,10 +550,14 @@ export function Map3DCanvas({
       // Orbiting looks at the whole build from outside, where haze would only
       // grey it out; the window's edge is a visible slice, and that is honest.
       fogDistance: 0,
-      bloom: BLOOM,
+      // An isolated channel is a measurement, not a picture: bloom would bleed
+      // one texel's value into its neighbours and make the readout a lie.
+      bloom: isChannelIsolated(channel) ? 0 : BLOOM,
+      shading,
+      channel,
     });
     paintRef.current();
-  }, [basis, gpu, gpuProjection]);
+  }, [basis, channel, gpu, gpuProjection, shading]);
   const drawRef = useRef(drawGpu);
   drawRef.current = drawGpu;
 

@@ -31,6 +31,8 @@ export type InnerSurfaceFactory = (container: HTMLElement) => Promise<DisplaySur
 export class PostFxSurface implements DisplaySurface {
   private readonly resizeObserver: ResizeObserver;
   private uniforms: PostFxUniforms;
+  /** When this surface started, so animated effects get a monotonic clock. */
+  private readonly startedAt = performance.now();
 
   private constructor(
     private readonly container: HTMLElement,
@@ -92,7 +94,13 @@ export class PostFxSurface implements DisplaySurface {
 
   blit(rgba: Uint8Array): void {
     this.inner.blit(rgba);
-    this.pass.render(this.innerCanvas, this.model.width, this.model.height, this.uniforms);
+    this.pass.render(
+      this.innerCanvas,
+      this.model.width,
+      this.model.height,
+      this.uniforms,
+      (performance.now() - this.startedAt) / 1000,
+    );
   }
 
   destroy(): void {

@@ -300,8 +300,16 @@ declare function hashEventId(id: string): number;
  *
  * DOM-free so server code (the save API validates with `parsePostFxSettings`)
  * and tests consume it without a browser.
+ *
+ * The stack divides into two halves. The first seven effects are the console's
+ * own signal path — the grade, the tube, the lens. The rest are screen-space
+ * looks ported from the Shade Studio shader library, chosen for being
+ * single-pass (the no-recompile design has no room for a second target) and for
+ * suiting pixel art rather than fighting it: ordered dithering and halftone are
+ * how a small palette fakes a gradient, and light shafts and streaks are how a
+ * flat 2D scene suggests a light source it cannot actually cast.
  */
-type PostFxEffectId = "grade" | "fog" | "bloom" | "crt" | "chroma" | "vignette" | "posterize";
+type PostFxEffectId = "grade" | "fog" | "bloom" | "crt" | "chroma" | "vignette" | "posterize" | "dither" | "halftone" | "godrays" | "streaks" | "splittone" | "kaleidoscope" | "grain";
 interface PostFxParamDef {
     id: string;
     label: string;
@@ -310,22 +318,29 @@ interface PostFxParamDef {
     step: number;
     defaultValue: number;
 }
+/** A colour an effect exposes, e.g. the fog tint or a split-tone end. */
+interface PostFxColorDef {
+    id: string;
+    label: string;
+    /** #rrggbb. */
+    defaultValue: string;
+}
 interface PostFxEffectDef {
     id: PostFxEffectId;
     label: string;
     description: string;
     params: PostFxParamDef[];
-    /** Effect exposes a colour picker (fog tint). */
-    hasColor?: boolean;
+    /** Colour pickers this effect exposes, if any. */
+    colors?: PostFxColorDef[];
 }
 declare const POST_FX_EFFECTS: PostFxEffectDef[];
-/** Key for one parameter's value in the settings map. */
+/** Key for one parameter's (or colour's) value in the settings map. */
 declare function paramKey(effect: PostFxEffectId, param: string): string;
 interface PostFxSettings {
     enabled: Record<PostFxEffectId, boolean>;
     values: Record<string, number>;
-    /** Fog tint as #rrggbb. */
-    fogColor: string;
+    /** Effect colours as #rrggbb, keyed by {@link paramKey}. */
+    colors: Record<string, string>;
 }
 declare function defaultPostFxSettings(): PostFxSettings;
 /** Whether any effect in the stack is switched on. */
@@ -336,6 +351,11 @@ declare function anyPostFxEnabled(settings: PostFxSettings): boolean;
  * dropped and missing ones take their defaults, so the wire format survives
  * adding effects later — but strict about types and ranges, clamping values
  * into each parameter's declared bounds.
+ *
+ * A top-level `fogColor` string is still honoured: rows written before effects
+ * could declare their own colours carry the fog tint there, and silently losing
+ * an artist's fog colour on the next save would be a worse outcome than one
+ * branch here.
  */
 declare function parsePostFxSettings(value: unknown): PostFxSettings | null;
 /** The flat uniform block the post-process shader consumes. */
@@ -354,6 +374,28 @@ interface PostFxUniforms {
     vignette: number;
     /** 0 disables posterisation; otherwise the level count. */
     posterize: number;
+    ditherAmount: number;
+    ditherScale: number;
+    halftoneStrength: number;
+    halftoneScale: number;
+    /** Screen angle in radians. */
+    halftoneAngle: number;
+    godrayStrength: number;
+    godrayDensity: number;
+    godrayDecay: number;
+    godrayOrigin: [number, number];
+    streakStrength: number;
+    streakLength: number;
+    splitStrength: number;
+    splitBalance: number;
+    splitShadows: [number, number, number];
+    splitHighlights: [number, number, number];
+    /** Below 2 the shader leaves the frame alone. */
+    kaleidoSegments: number;
+    /** Rotation in radians. */
+    kaleidoAngle: number;
+    grainAmount: number;
+    grainSize: number;
 }
 /** Parse #rrggbb into a 0..1 RGB triplet. */
 declare function hexToRgb01(hex: string): [number, number, number];
@@ -942,9 +984,17 @@ declare function shade(albedo: Rgb, normal: Vec3, toLight: Vec3, ambient: number
  * compiles once. WebGL1 is used (not WebGPU) because this is a one-texture
  * full-screen quad — maximum compatibility, no async device setup.
  *
- * Effect order mirrors a physical signal path: sample through CRT curvature
- * and chromatic aberration, add bloom, then grade → posterize → fog →
- * vignette → scanlines on the composed colour.
+ * Effect order mirrors a physical signal path. The frame is folded and bowed
+ * first (kaleidoscope, then CRT curvature), sampled through chromatic
+ * aberration, and lit (bloom, god rays, streaks). The composed colour is then
+ * graded and split-toned, quantised (dither feeding posterize), screened
+ * (halftone), and finally passed through the things that sit in front of the
+ * picture rather than in it: fog, vignette, grain, scanlines.
+ *
+ * Everything stays in one pass. That constraint is why the effects here are the
+ * ones they are — a separable blur or a depth-aware effect would need a second
+ * render target, and the whole point of the flat-uniform design is that there is
+ * exactly one program, compiled once, whatever the artist switches on.
  */
 
 /** A frame to post-process: raw RGBA bytes or a canvas to sample. */
@@ -958,8 +1008,15 @@ declare class PostFxPass {
     /** Returns null when WebGL is unavailable or the shaders fail to compile. */
     static create(canvas: HTMLCanvasElement): PostFxPass | null;
     private location;
-    /** Upload one frame and draw it through the effect chain. */
-    render(source: PostFxSource, width: number, height: number, uniforms: PostFxUniforms): void;
+    /**
+     * Upload one frame and draw it through the effect chain.
+     *
+     * `time` (seconds) drives the only effect that moves, the grain. It is a
+     * parameter rather than a clock read inside the pass so a still preview — the
+     * editor's FX tab, a test — renders deterministically, and only a caller that
+     * actually has a running frame loop supplies one.
+     */
+    render(source: PostFxSource, width: number, height: number, uniforms: PostFxUniforms, time?: number): void;
     dispose(): void;
 }
 
@@ -988,6 +1045,8 @@ declare class PostFxSurface implements DisplaySurface {
     private readonly pass;
     private readonly resizeObserver;
     private uniforms;
+    /** When this surface started, so animated effects get a monotonic clock. */
+    private readonly startedAt;
     private constructor();
     /**
      * Builds the FX surface, or returns null when post-processing cannot run
@@ -1030,4 +1089,4 @@ declare class PostFxSurface implements DisplaySurface {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type BuiltLightingRenderer, CARTBOX_SDK_LUA, CartridgeLoadError, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type InnerSurfaceFactory, type InputChange, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MODELS, type MailboxEvent, type MailboxEventKind, type MailboxRead, type MaterialBuffer, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, POST_FX_EFFECTS, type PlayerHandle, type PlayerOptions, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type Rgb, type ScaleMode, type Vec3, type VerificationResult, WebgpuLightingLayer, anyPostFxEnabled, createConsole, createFlatMaterial, createLightingLayer, decodeLights, decodeMailbox, defaultPostFxSettings, extractScore, extractUnlocks, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parsePostFxSettings, parseReplay, randomSeed, readCartCode, resolveButton, resolveUnlockedAchievements, runReplayEvents, seedCartridge, serializeReplay, shade, uniformsFromSettings, verifyReplayScore };
+export { type BuiltLightingRenderer, CARTBOX_SDK_LUA, CartridgeLoadError, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type InnerSurfaceFactory, type InputChange, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MODELS, type MailboxEvent, type MailboxEventKind, type MailboxRead, type MaterialBuffer, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, POST_FX_EFFECTS, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type Rgb, type ScaleMode, type Vec3, type VerificationResult, WebgpuLightingLayer, anyPostFxEnabled, createConsole, createFlatMaterial, createLightingLayer, decodeLights, decodeMailbox, defaultPostFxSettings, extractScore, extractUnlocks, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parsePostFxSettings, parseReplay, randomSeed, readCartCode, resolveButton, resolveUnlockedAchievements, runReplayEvents, seedCartridge, serializeReplay, shade, uniformsFromSettings, verifyReplayScore };

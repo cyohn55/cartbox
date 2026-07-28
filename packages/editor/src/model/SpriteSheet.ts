@@ -156,6 +156,42 @@ export class SpriteSheet {
   }
 
   /**
+   * Write an already-indexed image into a page at a pixel offset.
+   *
+   * This is the landing point for anything that has *already* decided which
+   * palette entry each pixel takes — the dithering importer in `imageQuantize`,
+   * or a texture generator. Matching per pixel here as well would undo that
+   * decision: a dithered pixel is deliberately not the nearest colour to its
+   * source, and re-matching it would collapse the dither back to flat bands.
+   *
+   * Indices past the palette are clamped rather than dropped, so a page written
+   * from a wider palette degrades instead of failing. Returns the pixels written.
+   */
+  importIndexedAt(image: IndexedImage, page: SpritePage, offsetX: number, offsetY: number): number {
+    const limit = this.sheetSize;
+    const width = Math.min(image.width, limit - offsetX);
+    const height = Math.min(image.height, limit - offsetY);
+    let written = 0;
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const canvasX = offsetX + x;
+        const canvasY = offsetY + y;
+        if (canvasX < 0 || canvasY < 0) continue;
+        const index = Math.min(this.paletteSize - 1, image.indices[y * image.width + x] ?? 0);
+        const tile = Math.floor(canvasY / this.tileSize) * this.sheetCols + Math.floor(canvasX / this.tileSize);
+        this.setPixel(page, tile, canvasX % this.tileSize, canvasY % this.tileSize, index);
+        written += 1;
+      }
+    }
+    return written;
+  }
+
+  /** Write an indexed image into a page at the top-left origin. */
+  importIndexed(image: IndexedImage, page: SpritePage): number {
+    return this.importIndexedAt(image, page, 0, 0);
+  }
+
+  /**
    * Lay a run of same-size animation frames onto a page as consecutive tile
    * blocks — frame 0 top-left, each next frame in the next block slot going left
    * to right then wrapping down — so an imported animation becomes a sequence of
