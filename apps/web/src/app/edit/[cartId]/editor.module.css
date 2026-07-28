@@ -657,6 +657,25 @@
   box-shadow: var(--ring);
 }
 
+/* A colour that stamps a whole material profile, not just albedo. Marked with a
+   notch in the top-right corner rather than a border or a ring: the chip's job
+   is to show its colour, a border would fight the active ring, and the corner is
+   the one region a flat colour swatch has nothing to say in. */
+.swatchMaterial::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  border-width: 0 9px 9px 0;
+  border-style: solid;
+  border-color: transparent var(--accent) transparent transparent;
+  border-top-right-radius: 4px;
+  /* The notch is drawn in the accent colour, which is also the active-chip ring:
+     the dark halo keeps it legible on a pale swatch and separates it from that
+     ring when the material colour is the one selected. */
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.85));
+}
+
 .paletteInfo {
   display: flex;
   align-items: center;
@@ -1345,10 +1364,6 @@
     height: 60vh;
   }
 
-  .fxBody {
-    grid-template-columns: 1fr;
-    overflow-y: auto;
-  }
 }
 
 /* Small helper line above pickers that support drag selection. */
@@ -1356,6 +1371,102 @@
   font-size: 11px;
   color: var(--faint);
   margin: -4px 0 8px;
+}
+
+/* The paragraph that closes every inspector, explaining what the active tool
+   does here. One class rather than the three ad-hoc styles it replaces — a
+   `pickerHint` in the map, a `panelMeta` with an inline line-height in the
+   sculptor — so the footnote reads the same weight in every tab. The rail's
+   flex gap already separates it from the panel above, so it carries no margin
+   of its own. */
+.inspectorHint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+
+/* --- Pixel layers readout: every channel's value at the hovered pixel ------ */
+
+.layerReadout {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.layerRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.layerRow dt {
+  color: var(--muted);
+}
+
+.layerRow dd {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+}
+
+/* A channel with nothing painted at this pixel. Dimmed rather than dropped, so
+   the readout keeps one height and "empty here" stays a readable answer. */
+.layerRow[data-empty="true"] {
+  opacity: 0.42;
+}
+
+/* "material" beside a colour that stamps a whole profile — same claim the
+   palette's corner notch makes, spelled out where there is room for a word. */
+.layerTag {
+  font-size: 10px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 0 5px;
+}
+
+/* A warning under a panel — the sculptor's "that sprite is empty". */
+.panelWarning {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #ffb4a2;
+}
+
+/* The sculptor's "skin voxels with a sprite" form: a page picker, three sprite
+   numbers and an Add button, wrapping onto as many rows as the inspector's width
+   allows. Was a hand-written inline flex object with a per-field style constant;
+   the fields are ordinary form controls and belong in the stylesheet with the
+   rest of them. */
+.spriteMaterialForm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: flex-end;
+  margin-top: 8px;
+}
+
+.spriteMaterialForm label {
+  display: grid;
+  gap: 2px;
+}
+
+.spriteMaterialField {
+  width: 68px;
+  padding: 4px 6px;
+  font: inherit;
+  color: inherit;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 5px;
 }
 
 /* Status row under the pixel canvas while a magic-wand selection is active. */
@@ -1370,13 +1481,6 @@
 .selectionHint {
   color: var(--faint);
   flex: 1;
-}
-
-/* FX tab: preview stage on the left, the effect stack on the right. */
-.fxBody {
-  display: grid;
-  grid-template-columns: 1fr 320px;
-  min-height: 0;
 }
 
 .fxCanvas {
@@ -1403,14 +1507,12 @@
   text-align: center;
 }
 
-.fxPanel {
-  border-left: 1px solid var(--border);
-  background: var(--surface);
-  padding: 18px 16px;
+/* The effect stack, in the inspector like every other tab's panel content. The
+   inspector's own gap separates panels, not the rows inside one. */
+.fxEffectList {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  overflow-y: auto;
 }
 
 .fxEffect {
@@ -1467,19 +1569,6 @@
   width: 34px;
   text-align: right;
   color: var(--faint);
-}
-
-@media (max-width: 1100px) {
-  .fxBody {
-    grid-template-columns: 1fr;
-    grid-auto-rows: min-content;
-    overflow-y: auto;
-  }
-
-  .fxPanel {
-    border-left: 0;
-    border-top: 1px solid var(--border);
-  }
 }
 
 /* --- Generate panel (Map + Voxel tabs) ---------------------------------- */

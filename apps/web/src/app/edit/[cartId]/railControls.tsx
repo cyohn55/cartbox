@@ -142,6 +142,67 @@ export function SegmentedControl<Id extends OptionId>({
   return label ? <RailGroup label={label}>{row}</RailGroup> : row;
 }
 
+interface StepperProps {
+  label: string;
+  /** Accessible name and tooltip for the decrement button. */
+  decreaseLabel: string;
+  /** Accessible name and tooltip for the increment button. */
+  increaseLabel: string;
+  onDecrease: () => void;
+  onIncrease: () => void;
+  decreaseDisabled?: boolean;
+  increaseDisabled?: boolean;
+  /** Tooltip override for a disabled increment — "Maximum zoom" rather than silence. */
+  increaseHint?: string;
+}
+
+/**
+ * A −/＋ pair in the shape of a segmented control.
+ *
+ * Zoom is the case this exists for, and it is deliberately *not* a
+ * {@link SegmentedControl}: that models "pick one of these", and stepping a
+ * continuous value is not picking. Borrowing the segmented look keeps it in the
+ * rail's visual family anyway, so a tab that steps its zoom and one that picks
+ * from presets still read as the same control in the same slot.
+ */
+export function Stepper({
+  label,
+  decreaseLabel,
+  increaseLabel,
+  onDecrease,
+  onIncrease,
+  decreaseDisabled = false,
+  increaseDisabled = false,
+  increaseHint,
+}: StepperProps) {
+  return (
+    <RailGroup label={label}>
+      <div className={styles.segmented} role="group" aria-label={label}>
+        <button
+          type="button"
+          className={styles.segment}
+          onClick={onDecrease}
+          disabled={decreaseDisabled}
+          aria-label={decreaseLabel}
+          title={decreaseLabel}
+        >
+          −
+        </button>
+        <button
+          type="button"
+          className={styles.segment}
+          onClick={onIncrease}
+          disabled={increaseDisabled}
+          aria-label={increaseLabel}
+          title={increaseDisabled ? (increaseHint ?? increaseLabel) : increaseLabel}
+        >
+          ＋
+        </button>
+      </div>
+    </RailGroup>
+  );
+}
+
 interface RangeControlProps {
   /** Group heading; omitted when the caller supplies its own surrounding label. */
   label?: string;

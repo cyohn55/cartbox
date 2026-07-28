@@ -17,6 +17,7 @@ import {
   parseAseprite,
   encodeAseprite,
   gradientSortOrder,
+  isMaterialSwatchEnabled,
   materialProfileAt,
   MATERIAL_LEVELS,
   type SpriteSheet,
@@ -45,10 +46,19 @@ import { LitPreview } from "./LitPreview";
 import { VoxelPreview } from "./VoxelPreview";
 import { RigPanel } from "./RigPanel";
 import { MaterialSwatchPanel } from "./MaterialSwatchPanel";
-import { MaterialSurface, NormalSurface } from "./paintSurface";
+import { MaterialSurface, NormalSurface, type PaintSurface } from "./paintSurface";
 import { MaterialBrushSurface } from "./materialBrushSurface";
 import { SpriteBlockSurface } from "./spriteBlockSurface";
+import { measureCoverage, sampleChannels, valueUsage } from "./layerCoverage";
 import { RailGroup, RailHint, RangeControl, SegmentedControl, ToolRail } from "./railControls";
+import {
+  InspectorHint,
+  InspectorPanel,
+  WorkbenchInspector,
+  WorkbenchRail,
+  type InspectorSlots,
+  type RailSlots,
+} from "./workbenchPanels";
 import { capabilitiesOf } from "./toolCapabilities";
 import { TOOLS, MAX_BRUSH_WEIGHT, MAX_TOLERANCE, type Tool } from "./tools";
 
@@ -97,6 +107,40 @@ const PAGE_OPTIONS = [
   { id: 0, label: "Tiles" },
   { id: 1, label: "Sprites" },
 ] as const;
+
+/**
+ * The layers the coverage readout probes, in the order it reports them.
+ *
+ * Albedo is absent because it is what the coverage annotates, and "material" is
+ * absent because it is not a plane of its own — it is the composite brush that
+ * writes the other five at once, so its work already shows up in them.
+ */
+const COVERAGE_LAYERS = ["normal", "height", "specular", "roughness", "emissive"] as const;
+type CoverageLayer = (typeof COVERAGE_LAYERS)[number];
+
+/** Whether the canvas ticks the pixels carrying other-layer data. */
+const COVERAGE_OPTIONS = [
+  { id: "off", label: "Hide", hint: "Show the active layer alone." },
+  { id: "on", label: "Layers", hint: "Tick the pixels that carry data on another layer." },
+] as const;
+
+/**
+ * What each tool does, for the inspector's closing note.
+ *
+ * The map editor and the sculptor have always ended their inspector with a
+ * sentence explaining the active tool; the sprite editor was the one drawing
+ * surface without one, which made the same footnote look like a map-only idea
+ * rather than the workbench's way of explaining a tool.
+ */
+const TOOL_HINT: Record<Tool, string> = {
+  pencil: "Drag to paint. Raise Brush size to draw a thicker stroke; right-click paints colour 0.",
+  eraser: "Drag to clear pixels back to colour 0 — transparent wherever the sprite is drawn over something.",
+  fill: "Click to flood the connected run of matching pixels. Raise Tolerance to spread across near-matching shades.",
+  wand: "Click to select the connected run of matching pixels. Raise Tolerance to grab shaded neighbours too.",
+  line: "Drag from one point to another; the line previews live and commits when you let go.",
+  rect: "Drag out a rectangle; it previews live and commits when you let go.",
+  ellipse: "Drag out an ellipse from corner to corner; it previews live and commits when you let go.",
+};
 
 /**
  * Which block of the sheet is being edited. Lifted out of this component so a
@@ -164,6 +208,8 @@ export function SpriteEditor({
   const [direction, setDirection] = useState(1);
   const [level, setLevel] = useState(8); // brush value for material (height/spec/rough) layers
   const [sortPalette, setSortPalette] = useState(true); // show palette as a gradient
+  const [usedColorsOnly, setUsedColorsOnly] = useState(false); // hide palette colours this block never uses
+  const [showCoverage, setShowCoverage] = useState(false); // tick pixels carrying other-layer data
   const [preferCpu, setPreferCpu] = useState(false);
   const [paletteNote, setPaletteNote] = useState("");
   const [asepriteNote, setAsepriteNote] = useState("");
@@ -310,6 +356,76 @@ export function SpriteEditor({
   // touching the underlying indices. Normal-direction swatches are left as-is.
   const paletteOrder = paintsPalette && sortPalette ? gradientSortOrder(paletteColors) : undefined;
 
+  // --- What the other six layers carry --------------------------------------
+  // The block shows one layer at a time, so everything painted on the other six
+  // is invisible from here. These reads answer the three questions that were
+  // unanswerable: which layers this block uses, which pixels carry the work, and
+  // what every channel says at the pixel under the cursor.
+  // Each probed layer's surface, addressed over the *block* rather than the tile
+  // — the same wrapper the canvas paints through, so a 2× or 4× sprite reports
+  // its whole area instead of its top-left tile.
+  const channelSurfaces = useMemo<Record<CoverageLayer, PaintSurface>>(() => {
+    const base: Record<CoverageLayer, PaintSurface> = {
+      normal: normalSurface,
+      height: heightSurface,
+      specular: specularSurface,
+      roughness: roughnessSurface,
+      emissive: emissiveSurface,
+    };
+    if (spriteSize === 1) return base;
+    const wrapped = { ...base };
+    for (const id of COVERAGE_LAYERS) {
+      wrapped[id] = new SpriteBlockSurface(base[id], sheet.sheetCols, spriteSize);
+    }
+    return wrapped;
+  }, [normalSurface, heightSurface, specularSurface, roughnessSurface, emissiveSurface, sheet, spriteSize]);
+
+  const channels = useMemo(
+    () => COVERAGE_LAYERS.map((id) => ({ id, surface: channelSurfaces[id] })),
+    [channelSurfaces],
+  );
+
+  const blockSize = sheet.tileSize * spriteSize;
+  const coverage = useMemo(
+    () => measureCoverage(channels, page, tile, blockSize),
+    // `version` is the dependency that matters and is not otherwise read here:
+    // the surfaces are mutated in place, so their identity does not change when
+    // their pixels do.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [channels, page, tile, blockSize, version],
+  );
+
+  // Palette usage drives both the per-chip counts and the "in use" filter, and
+  // is only meaningful for the albedo domain — a ramp level is not a colour a
+  // sprite "uses". Measured on the albedo surface whatever layer is active, so
+  // switching to Height does not empty the counts.
+  const albedoBlock = useMemo(
+    () => (spriteSize === 1 ? sheet : new SpriteBlockSurface(sheet, sheet.sheetCols, spriteSize)),
+    [sheet, spriteSize],
+  );
+  const paletteUsage = useMemo(
+    () => (paintsPalette ? valueUsage(albedoBlock, page, tile, blockSize) : undefined),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [albedoBlock, page, tile, blockSize, paintsPalette, version],
+  );
+
+  // Which palette colours stamp a whole material profile when painted with.
+  const materialColors = useMemo(() => {
+    const marked = new Set<number>();
+    for (let index = 0; index < sheet.paletteSize; index += 1) {
+      if (isMaterialSwatchEnabled(swatches, index)) marked.add(index);
+    }
+    return marked;
+  }, [swatches, sheet.paletteSize]);
+
+  // Every channel's value at the pixel under the cursor, for the readout.
+  const hoveredChannels = useMemo(
+    () => (hover ? sampleChannels(channels, page, tile, hover.x, hover.y) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [channels, page, tile, hover, version],
+  );
+  const hoveredColor = hover ? albedoBlock.getPixel(page, tile, hover.x, hover.y) : null;
+
   const importPng = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -440,13 +556,50 @@ export function SpriteEditor({
     }
   };
 
-  return (
-    <div className={styles.body}>
-      <aside className={styles.rail}>
-        <SegmentedControl label="Layer" options={LAYER_OPTIONS} selected={layer} onSelect={setLayer} wrap />
+  // Every rail control and inspector panel is handed to the shared containers by
+  // slot; they decide the order, identically for every tab. See workbenchLayout.
+  const rail: RailSlots = {
+    view: (
+      <>
+        <SegmentedControl
+          label="Page"
+          options={PAGE_OPTIONS}
+          selected={page}
+          onSelect={(id) => setPage(id === 1 ? 1 : 0)}
+        />
+        <SegmentedControl
+          label="Sprite size"
+          options={SPRITE_SIZES}
+          selected={spriteSize}
+          onSelect={setSpriteSize}
+        />
+      </>
+    ),
 
-        <ToolRail label="Tool" tools={TOOLS} selected={tool} onSelect={setTool} />
+    layer: (
+      <RailGroup label="Layer">
+        <SegmentedControl options={LAYER_OPTIONS} selected={layer} onSelect={setLayer} wrap ariaLabel="Layer" />
+        <SegmentedControl
+          options={COVERAGE_OPTIONS}
+          selected={showCoverage ? "on" : "off"}
+          onSelect={(id) => setShowCoverage(id === "on")}
+          ariaLabel="Show other-layer coverage"
+          spaced
+        />
+        <RailHint>
+          {coverage.channels.length === 0
+            ? "Nothing painted on the other layers yet."
+            : showCoverage
+              ? `Ticked pixels carry ${coverage.channels.map((id) => LAYER_LABEL[id]).join(", ").toLowerCase()} data.`
+              : `This block also uses ${coverage.channels.map((id) => LAYER_LABEL[id]).join(", ").toLowerCase()}.`}
+        </RailHint>
+      </RailGroup>
+    ),
 
+    tool: <ToolRail label="Tool" tools={TOOLS} selected={tool} onSelect={setTool} />,
+
+    toolOptions: (
+      <>
         {toolControls.weighted && (
           <RangeControl
             label="Brush size"
@@ -458,7 +611,6 @@ export function SpriteEditor({
             display={`${weight}px`}
           />
         )}
-
         {toolControls.tolerant && (
           <RangeControl
             label="Tolerance"
@@ -470,21 +622,11 @@ export function SpriteEditor({
             display={`${tolerance}%`}
           />
         )}
+      </>
+    ),
 
-        <SegmentedControl
-          label="Page"
-          options={PAGE_OPTIONS}
-          selected={page}
-          onSelect={(id) => setPage(id === 1 ? 1 : 0)}
-        />
-
-        <SegmentedControl
-          label="Sprite size"
-          options={SPRITE_SIZES}
-          selected={spriteSize}
-          onSelect={setSpriteSize}
-        />
-
+    io: (
+      <>
         <RailGroup label="Image">
           <div className={styles.toolGroup}>
             <button type="button" className={styles.toolBtn} onClick={() => fileRef.current?.click()}>
@@ -503,7 +645,11 @@ export function SpriteEditor({
           <input ref={fileRef} type="file" accept="image/png,image/*" onChange={importPng} hidden />
         </RailGroup>
 
-        <RailGroup label="Palette">
+        {/* "Palette file", not "Palette": the inspector's colour picker is the
+            Palette, and two groups by that name on opposite sides of the screen
+            is precisely the kind of collision this tab had too much of. This one
+            loads a palette *file*. */}
+        <RailGroup label="Palette file">
           <div className={styles.toolGroup}>
             <button
               type="button"
@@ -561,7 +707,179 @@ export function SpriteEditor({
           />
           {asepriteNote && <RailHint>{asepriteNote}</RailHint>}
         </RailGroup>
-      </aside>
+      </>
+    ),
+  };
+
+  const inspector: InspectorSlots = {
+    source: (
+      <TilePicker
+        sheet={sheet}
+        page={page}
+        selected={tile}
+        version={version}
+        onSelect={setTile}
+        blockTiles={spriteSize}
+      />
+    ),
+
+    palette: (
+      <PalettePicker
+        colors={paletteColors}
+        selected={activeValue}
+        onSelect={setActiveValue}
+        title={
+          layer === "albedo"
+            ? "Palette"
+            : layer === "material"
+              ? "Material colors"
+              : layer === "normal"
+                ? "Direction"
+                : LAYER_LABEL[layer]
+        }
+        subtitle={
+          paintsPalette ? `${sheet.paletteSize} colors` : layer === "normal" ? "16 normals" : `${MATERIAL_LEVELS} levels`
+        }
+        order={paletteOrder}
+        sorted={sortPalette}
+        onToggleSort={paintsPalette ? () => setSortPalette((value) => !value) : undefined}
+        materials={paintsPalette ? materialColors : undefined}
+        usage={paletteUsage}
+        usedOnly={usedColorsOnly}
+        onToggleUsedOnly={paintsPalette ? () => setUsedColorsOnly((value) => !value) : undefined}
+      />
+    ),
+
+    material: (
+      <>
+        {layer === "material" && (
+          <MaterialSwatchPanel
+            colorIndex={color}
+            colorCss={sheet.cssColor(color)}
+            swatches={swatches}
+            onChange={onSwatchesChange}
+          />
+        )}
+
+        {/* Every layer's value at the pixel under the cursor. The HUD only ever
+            showed the layer you were on, so the other six were unreadable
+            without switching to each in turn and hovering again. */}
+        <InspectorPanel
+          title="Pixel layers"
+          meta={hover ? `${hover.x},${hover.y}` : "—"}
+        >
+          {hoveredChannels === null || hoveredColor === null ? (
+            <p className={styles.inspectorHint}>Hover the canvas to read every layer at a pixel.</p>
+          ) : (
+            <dl className={styles.layerReadout}>
+              <div className={styles.layerRow}>
+                <dt>{LAYER_LABEL.albedo}</dt>
+                <dd>
+                  <span className={styles.hudChip} style={{ background: sheet.cssColor(hoveredColor) }} />
+                  <span className="data">{hoveredColor.toString().padStart(2, "0")}</span>
+                  {materialColors.has(hoveredColor) && <span className={styles.layerTag}>material</span>}
+                </dd>
+              </div>
+              {COVERAGE_LAYERS.map((id) => {
+                const value = hoveredChannels[id];
+                return (
+                  // Unpainted channels are dimmed rather than hidden: a row that
+                  // disappears makes the readout a different height per pixel,
+                  // and "this layer is empty here" is itself the answer half the
+                  // time this panel is being read.
+                  <div key={id} className={styles.layerRow} data-empty={value === 0}>
+                    <dt>{LAYER_LABEL[id]}</dt>
+                    <dd>
+                      <span
+                        className={styles.hudChip}
+                        style={{ background: channelSurfaces[id].cssColor(value) }}
+                      />
+                      <span className="data">{value}</span>
+                    </dd>
+                  </div>
+                );
+              })}
+            </dl>
+          )}
+        </InspectorPanel>
+      </>
+    ),
+
+    preview: (
+      <>
+        <InspectorPanel
+          title="Lit preview"
+          action={
+            <button
+              type="button"
+              className={styles.rendererToggle}
+              onClick={() => setPreferCpu((value) => !value)}
+              title="Toggle GPU/CPU to verify they match"
+            >
+              {preferCpu ? "Force CPU" : "Auto (GPU)"}
+            </button>
+          }
+        >
+          <LitPreview
+            key={preferCpu ? "cpu" : "auto"}
+            forceCpu={preferCpu}
+            sheet={sheet}
+            normals={normals}
+            height={height}
+            specular={specular}
+            roughness={roughness}
+            emissive={emissive}
+            page={page}
+            tile={tile}
+            version={version}
+            blockTiles={spriteSize}
+          />
+        </InspectorPanel>
+
+        <InspectorPanel
+          title="Voxel preview"
+          action={
+            <button type="button" className={styles.langSelect} onClick={() => void publishBackdropProp()}>
+              {pendingProp?.targetId ? `Update "${pendingProp.name}"` : "Publish as backdrop prop"}
+            </button>
+          }
+        >
+          <VoxelPreview
+            sheet={sheet}
+            normals={normals}
+            height={height}
+            specular={specular}
+            roughness={roughness}
+            emissive={emissive}
+            page={page}
+            tile={tile}
+            version={version}
+            blockTiles={spriteSize}
+          />
+        </InspectorPanel>
+      </>
+    ),
+
+    extras: (
+      <InspectorPanel title="Character rig">
+        <RigPanel
+          sheet={sheet}
+          page={page}
+          tile={tile}
+          blockTiles={spriteSize}
+          version={version}
+          rig={rig}
+          onRigChange={onRigChange}
+        />
+      </InspectorPanel>
+    ),
+
+    hint: <InspectorHint>{TOOL_HINT[tool]}</InspectorHint>,
+  };
+
+  return (
+    <div className={styles.body}>
+      <WorkbenchRail slots={rail} />
 
       <section className={styles.stage}>
         <PixelCanvas
@@ -575,6 +893,9 @@ export function SpriteEditor({
           version={version}
           onEdit={bump}
           onHover={setHover}
+          // Only over albedo/material: on Height, ticking "this pixel has height
+          // data" would annotate the very plane it was read from.
+          coverage={showCoverage && paintsPalette ? coverage.pixels : null}
         />
         <div className={styles.hud}>
           <span className={styles.hudItem}>
@@ -595,105 +916,7 @@ export function SpriteEditor({
         </div>
       </section>
 
-      <aside className={styles.inspector}>
-        <TilePicker
-          sheet={sheet}
-          page={page}
-          selected={tile}
-          version={version}
-          onSelect={setTile}
-          blockTiles={spriteSize}
-        />
-        <PalettePicker
-          colors={paletteColors}
-          selected={activeValue}
-          onSelect={setActiveValue}
-          title={
-            layer === "albedo"
-              ? "Palette"
-              : layer === "material"
-                ? "Material colors"
-                : layer === "normal"
-                  ? "Direction"
-                  : LAYER_LABEL[layer]
-          }
-          subtitle={
-            paintsPalette ? `${sheet.paletteSize} colors` : layer === "normal" ? "16 normals" : `${MATERIAL_LEVELS} levels`
-          }
-          order={paletteOrder}
-          sorted={sortPalette}
-          onToggleSort={paintsPalette ? () => setSortPalette((value) => !value) : undefined}
-        />
-        {layer === "material" && (
-          <MaterialSwatchPanel
-            colorIndex={color}
-            colorCss={sheet.cssColor(color)}
-            swatches={swatches}
-            onChange={onSwatchesChange}
-          />
-        )}
-        <div>
-          <div className={styles.panelHead}>
-            <span className={styles.panelTitle}>Lit preview</span>
-            <button
-              type="button"
-              className={styles.rendererToggle}
-              onClick={() => setPreferCpu((value) => !value)}
-              title="Toggle GPU/CPU to verify they match"
-            >
-              {preferCpu ? "Force CPU" : "Auto (GPU)"}
-            </button>
-          </div>
-          <LitPreview
-            key={preferCpu ? "cpu" : "auto"}
-            forceCpu={preferCpu}
-            sheet={sheet}
-            normals={normals}
-            height={height}
-            specular={specular}
-            roughness={roughness}
-            emissive={emissive}
-            page={page}
-            tile={tile}
-            version={version}
-            blockTiles={spriteSize}
-          />
-        </div>
-        <div>
-          <div className={styles.panelHead}>
-            <span className={styles.panelTitle}>Voxel preview</span>
-            <button type="button" className={styles.langSelect} onClick={() => void publishBackdropProp()}>
-              {pendingProp?.targetId ? `Update "${pendingProp.name}"` : "Publish as backdrop prop"}
-            </button>
-          </div>
-          <VoxelPreview
-            sheet={sheet}
-            normals={normals}
-            height={height}
-            specular={specular}
-            roughness={roughness}
-            emissive={emissive}
-            page={page}
-            tile={tile}
-            version={version}
-            blockTiles={spriteSize}
-          />
-        </div>
-        <div>
-          <div className={styles.panelHead}>
-            <span className={styles.panelTitle}>Character rig</span>
-          </div>
-          <RigPanel
-            sheet={sheet}
-            page={page}
-            tile={tile}
-            blockTiles={spriteSize}
-            version={version}
-            rig={rig}
-            onRigChange={onRigChange}
-          />
-        </div>
-      </aside>
+      <WorkbenchInspector slots={inspector} />
     </div>
   );
 }

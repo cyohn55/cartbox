@@ -38,6 +38,9 @@ import { SHAPE_TOOLS, WEIGHTED_TOOLS, type Tool } from "./tools";
 const TARGET_CANVAS_PX = 360;
 const MIN_CELL_PX = 6;
 const SELECTION_STROKE = "rgba(140, 200, 255, 0.95)";
+// The coverage tick. Warm and semi-transparent so it reads as an annotation over
+// the art rather than as a pixel someone painted.
+const COVERAGE_STROKE = "rgba(255, 196, 92, 0.85)";
 const PREVIEW_ALPHA = 0.8;
 
 interface PixelCanvasProps {
@@ -53,6 +56,13 @@ interface PixelCanvasProps {
   version: number;
   onEdit: () => void;
   onHover: (cell: { x: number; y: number } | null) => void;
+  /**
+   * Pixels ({@link pixelKey}) carrying data on a layer other than the one being
+   * shown, hatched over the art so material work is visible while painting
+   * colour. Null when the overlay is off — the common case, since the hatch
+   * would otherwise compete with the art it annotates.
+   */
+  coverage?: ReadonlySet<number> | null;
 }
 
 export function PixelCanvas({
@@ -66,6 +76,7 @@ export function PixelCanvas({
   version,
   onEdit,
   onHover,
+  coverage = null,
 }: PixelCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const painting = useRef(false);
@@ -109,6 +120,23 @@ export function PixelCanvas({
         context.fillStyle = surface.cssColor(surface.getPixel(page, tile, x, y));
         context.fillRect(x * cellPx, y * cellPx, cellPx, cellPx);
       }
+    }
+
+    // Layer coverage: a diagonal tick in each pixel that carries data on some
+    // other layer. A tick rather than a tint, because a tint would change the
+    // colour of the pixel it is describing — which is the one thing the albedo
+    // canvas has to report faithfully.
+    if (coverage && coverage.size > 0) {
+      context.strokeStyle = COVERAGE_STROKE;
+      context.lineWidth = Math.max(1, Math.floor(cellPx / 8));
+      context.beginPath();
+      for (const key of coverage) {
+        const x = (key % surface.tileSize) * cellPx;
+        const y = Math.floor(key / surface.tileSize) * cellPx;
+        context.moveTo(x + cellPx * 0.62, y + cellPx * 0.16);
+        context.lineTo(x + cellPx * 0.84, y + cellPx * 0.38);
+      }
+      context.stroke();
     }
 
     context.strokeStyle = "rgba(255,255,255,0.06)";
@@ -179,7 +207,7 @@ export function PixelCanvas({
         brushSide * cellPx - 2,
       );
     }
-  }, [surface, page, tile, size, cellPx, value, selection, inSelection, tool, weight]);
+  }, [surface, page, tile, size, cellPx, value, selection, inSelection, tool, weight, coverage]);
 
   useEffect(() => {
     draw();

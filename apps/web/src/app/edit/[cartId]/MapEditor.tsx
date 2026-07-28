@@ -28,6 +28,8 @@ import {
   MapVoxelSpace,
   MaterialMap,
   NormalMap,
+  gradientSortOrder,
+  isMaterialSwatchEnabled,
   materialProfileAt,
   COLUMN_MATERIAL_NONE,
   MAP_GENERATORS,
@@ -52,7 +54,7 @@ import {
   type TileMap,
 } from "@cartbox/editor";
 
-import { BUILD_MATERIALS, worldSurfaceMaterial } from "@/lib/faceTextures";
+import { worldSurfaceMaterial } from "@/lib/faceTextures";
 import { buildMapAtlas, materialSpriteTile, spriteTileMaterial } from "@/lib/mapAtlas";
 import styles from "./editor.module.css";
 import { ClassMappingEditor } from "./ClassMappingEditor";
@@ -62,7 +64,16 @@ import { Map3DCanvas, type SpaceHover } from "./Map3DCanvas";
 import { MapCanvas } from "./MapCanvas";
 import { MapWalkCanvas, standOnGround, type WalkCamera, type WalkHover } from "./MapWalkCanvas";
 import type { MapGpuStatus } from "./useMapGpu";
+import { MaterialPicker } from "./MaterialPicker";
+import { PalettePicker } from "./PalettePicker";
 import { RailGroup, RailHint, RangeControl, SegmentedControl, ToolRail } from "./railControls";
+import {
+  InspectorHint,
+  WorkbenchInspector,
+  WorkbenchRail,
+  type InspectorSlots,
+  type RailSlots,
+} from "./workbenchPanels";
 import { MaterialSurface, NormalSurface } from "./paintSurface";
 import { MaterialBrushSurface } from "./materialBrushSurface";
 import { TilePicker } from "./TilePicker";
@@ -276,6 +287,25 @@ export function MapEditor({
   const definition = layerDef(layer);
   const cell = (MAP_ZOOMS[zoom] ?? MAP_ZOOMS[1])!.cell;
   const palette = useMemo(() => sheet.cssPalette(), [sheet, version]);
+  // Gradient ordering was a sprite-editor-only affordance; the map paints with
+  // the same palette and had no way to read it. Display order only — the indices
+  // under the chips, and everything stored, are untouched.
+  const [sortPalette, setSortPalette] = useState(true);
+  const paletteOrder = useMemo(
+    () => (sortPalette ? gradientSortOrder(palette) : undefined),
+    [sortPalette, palette],
+  );
+  // Colours that stamp a whole material profile when painted with. The map's
+  // pixel tools paint through the same composite brush the sprite editor uses,
+  // so the same colours behave the same way here — and the palette should say so
+  // in both places rather than only in the tab where the binding is authored.
+  const materialColors = useMemo(() => {
+    const marked = new Set<number>();
+    for (let index = 0; index < sheet.paletteSize; index += 1) {
+      if (isMaterialSwatchEnabled(swatches, index)) marked.add(index);
+    }
+    return marked;
+  }, [swatches, sheet.paletteSize]);
   const mapping = mappings[generator.id] ?? paletteMapping(generator.legend);
   const bump = () => setVersion((current) => current + 1);
   const screen = hover ? map.screenOf(hover.x, hover.y) : null;
@@ -475,103 +505,222 @@ export function MapEditor({
     if (tile !== null) setBrush(singleTileBrush(tile));
   };
 
-  return (
-    <div className={styles.body}>
-      <aside className={styles.rail}>
+  // Every rail control and inspector panel is handed to the shared containers by
+  // slot; they decide the order, identically for every tab. See workbenchLayout.
+  const rail: RailSlots = {
+    view: (
+      <>
         <SegmentedControl label="View" options={MAP_VIEW_MODES} selected={view} onSelect={selectView} />
-
-        <ToolRail label="Layer" tools={MAP_LAYERS} selected={layer} onSelect={selectLayer} />
-
-        {inSpace ? (
-          <ToolRail label="Tool" tools={spaceTools} selected={spaceTool} onSelect={setSpaceTool} />
-        ) : (
-          <ToolRail label="Tool" tools={definition.tools} selected={tool} onSelect={setTool} />
-        )}
-
-        {inSpace && spaceTool === "plane" && (
+        {inSpace && (
           <SegmentedControl
-            label="Plane"
-            options={PLANE_KINDS}
-            selected={planeKind}
-            onSelect={setPlaneKind}
+            label="Camera"
+            options={MAP_CAMERA_MODES}
+            selected={cameraMode}
+            onSelect={selectCameraMode}
           />
         )}
+      </>
+    ),
 
-        {inSpace ? (
+    layer: <ToolRail label="Layer" tools={MAP_LAYERS} selected={layer} onSelect={selectLayer} />,
+
+    tool: inSpace ? (
+      <ToolRail label="Tool" tools={spaceTools} selected={spaceTool} onSelect={setSpaceTool} />
+    ) : (
+      <ToolRail label="Tool" tools={definition.tools} selected={tool} onSelect={setTool} />
+    ),
+
+    toolOptions: (
+      <>
+        {inSpace && spaceTool === "plane" && (
+          <SegmentedControl label="Plane" options={PLANE_KINDS} selected={planeKind} onSelect={setPlaneKind} />
+        )}
+        {!inSpace && isColumnLayer(layer) && (
           <>
-            <SegmentedControl
-              label="Camera"
-              options={MAP_CAMERA_MODES}
-              selected={cameraMode}
-              onSelect={selectCameraMode}
+            <RangeControl
+              label="Step"
+              min={1}
+              max={16}
+              value={columnStep}
+              onChange={setColumnStep}
+              ariaLabel="Column step"
+              // The value belongs beside the slider, as it is in every other tab —
+              // it used to be folded into the group heading ("Step · 4"), which is
+              // a fourth way of showing a number the rail already had three of.
+              display={`${columnStep} cells`}
             />
-
-            {walking ? (
-              <>
-                {renderer === "cpu" && (
-                  <SegmentedControl
-                    label="Detail"
-                    options={WALK_DETAIL_LEVELS}
-                    selected={walkDetail}
-                    onSelect={setWalkDetail}
-                  />
-                )}
-                <RailHint>
-                  Click the view to capture the mouse, then look with the mouse and move with W A S D. Space and
-                  Shift change height, Ctrl sprints, Escape releases. Click builds, right-click breaks.
-                </RailHint>
-                <button
-                  type="button"
-                  className={styles.rendererToggle}
-                  onClick={() => setWalk((current) => standOnGround(space, current))}
-                >
-                  Stand on ground
-                </button>
-              </>
-            ) : (
-              <>
-                <SegmentedControl label="Range" options={RANGE_OPTIONS} selected={radius} onSelect={setRadius} />
-                <RailHint>
-                  Drag to orbit, shift-drag to pan, wheel to zoom. W A S D walks the focus; Q and E change height.
-                  Right-click removes.
-                </RailHint>
-              </>
-            )}
-
-            {isColumnLayer(layer) && (
-              <button type="button" className={styles.rendererToggle} onClick={clearCells}>
-                Clear cells
-              </button>
-            )}
-
-            <RailHint>
-              {renderer === "gpu"
-                ? "Drawing on the GPU (WebGPU): full resolution, lit by the material channels your art carries, with glowing pixels bloomed."
-                : renderer === "cpu"
-                  ? "WebGPU is unavailable here, so the view is being drawn in software — lower resolution and slower. Enabling hardware acceleration in your browser restores it."
-                  : "Choosing a renderer…"}
-            </RailHint>
-          </>
-        ) : (
-          <>
-            {isColumnLayer(layer) && (
-              <RailGroup label={`Step · ${columnStep}`}>
-                <RangeControl
-                  min={1}
-                  max={16}
-                  value={columnStep}
-                  onChange={setColumnStep}
-                  ariaLabel="Column step"
-                />
-                <button type="button" className={styles.rendererToggle} onClick={clearCells}>
-                  Clear cells
-                </button>
-              </RailGroup>
-            )}
-            <SegmentedControl label="Zoom" options={ZOOM_OPTIONS} selected={zoom} onSelect={setZoom} />
+            <RailHint>How many cells Raise and Lower move a column per click.</RailHint>
           </>
         )}
-      </aside>
+      </>
+    ),
+
+    canvas: inSpace ? (
+      <>
+        {walking ? (
+          <>
+            {renderer === "cpu" && (
+              <SegmentedControl
+                label="Detail"
+                options={WALK_DETAIL_LEVELS}
+                selected={walkDetail}
+                onSelect={setWalkDetail}
+              />
+            )}
+            <RailGroup label="Position">
+              <div className={styles.toolGroup}>
+                <button
+                  type="button"
+                  className={styles.toolBtn}
+                  onClick={() => setWalk((current) => standOnGround(space, current))}
+                >
+                  <span className={styles.toolGlyph} aria-hidden>
+                    ⤓
+                  </span>
+                  Stand on ground
+                </button>
+              </div>
+            </RailGroup>
+          </>
+        ) : (
+          <SegmentedControl label="Range" options={RANGE_OPTIONS} selected={radius} onSelect={setRadius} />
+        )}
+
+        {/* Which renderer the 3D stage got. Belongs with the stage's own settings
+            rather than with the Clear action it used to trail, so it still shows
+            on the pixel layer — which has no cells to clear. */}
+        <RailGroup label="Renderer">
+          <RailHint>
+            {renderer === "gpu"
+              ? "Drawing on the GPU (WebGPU): full resolution, lit by the material channels your art carries, with glowing pixels bloomed."
+              : renderer === "cpu"
+                ? "WebGPU is unavailable here, so the view is being drawn in software — lower resolution and slower. Enabling hardware acceleration in your browser restores it."
+                : "Choosing a renderer…"}
+          </RailHint>
+        </RailGroup>
+      </>
+    ) : (
+      <SegmentedControl label="Zoom" options={ZOOM_OPTIONS} selected={zoom} onSelect={setZoom} />
+    ),
+
+    io: isColumnLayer(layer) && (
+      <RailGroup label="Cells">
+        <div className={styles.toolGroup}>
+          <button type="button" className={styles.toolBtn} onClick={clearCells}>
+            <span className={styles.toolGlyph} aria-hidden>
+              ✕
+            </span>
+            Clear cells
+          </button>
+        </div>
+      </RailGroup>
+    ),
+  };
+
+  const inspector: InspectorSlots = {
+    // The sprite sheet, whenever a tool stamps it, stands it in the world, or
+    // paints on it. Above the palette, as in the sprite editor — it is the art
+    // you are pointed at, and the palette is what you change it with.
+    source: (needsSpriteBrush(spaceTool, planeKind) || !inSpace) && (
+      <TilePicker
+        sheet={sheet}
+        page={TILES_PAGE}
+        selected={brush.tile}
+        version={version}
+        onSelect={(tile) => setBrush(singleTileBrush(tile))}
+        onSelectBrush={setBrush}
+        brush={brush}
+      />
+    ),
+
+    // Colour and material are always here.
+    // They used to be swapped out — for the tile picker on the Tiles layer, and
+    // for the generator while it was open — which meant that opening the Map tab,
+    // or generating a landscape and then wanting to paint it, left you with
+    // nothing to paint *with* and no sign that a palette existed at all.
+    palette: (
+      <PalettePicker
+        colors={palette}
+        selected={colorIndex}
+        onSelect={setColorIndex}
+        title="Palette"
+        subtitle={`${palette.length} colors`}
+        order={paletteOrder}
+        sorted={sortPalette}
+        onToggleSort={() => setSortPalette((value) => !value)}
+        materials={materialColors}
+      />
+    ),
+
+    material: (
+      <MaterialPicker
+        selected={columnMaterial}
+        onSelect={setColumnMaterial}
+        colorCss={palette[colorIndex] ?? "#000"}
+        tilesPerPage={sheet.tilesPerPage}
+        // The armed sprite, offered as one material among the world's own rather
+        // than as a separate button: skinning a cell with your own art is the
+        // same kind of choice as skinning it with grass.
+        extras={[
+          {
+            material: spriteTileMaterial(brush.tile),
+            name: `Sprite #${brush.tile}`,
+            art: <SpriteSwatch sheet={sheet} tile={brush.tile} version={version} />,
+          },
+        ]}
+      />
+    ),
+
+    generate: (
+      <div>
+        <button
+          type="button"
+          className={styles.rendererToggle}
+          onClick={() => setShowGenerator((open) => !open)}
+          aria-expanded={showGenerator}
+        >
+          {showGenerator ? "Close generator" : "Generate…"}
+        </button>
+
+        {showGenerator && (
+          <GeneratorPanel
+            generators={MAP_GENERATORS}
+            selectedId={generator.id}
+            onSelect={selectGenerator}
+            values={values}
+            onValuesChange={setValues}
+            onGenerate={runGenerator}
+            note={generateNote}
+          >
+            <FieldPreview field={preview} label={`${generator.label} preview`} />
+            <ClassMappingEditor
+              legend={generator.legend}
+              mapping={mapping}
+              onChange={(next) => setMappings((current) => ({ ...current, [generator.id]: next }))}
+              layer={layer}
+              palette={palette}
+              maxTile={sheet.tilesPerPage - 1}
+              maxColumnHeight={MAX_MAP_VOXEL_HEIGHT}
+            />
+          </GeneratorPanel>
+        )}
+      </div>
+    ),
+
+    hint: (
+      <InspectorHint>
+        {walking
+          ? "Click the view to capture the mouse, then look with the mouse and move with W A S D. Space and Shift change height, Ctrl sprints, Escape releases. Click builds, right-click breaks."
+          : inSpace
+            ? `Drag to orbit, shift-drag to pan, wheel to zoom. W A S D walks the focus; Q and E change height. ${hintFor(view, cameraMode, layer, spaceTool, space.shape)}`
+            : hintFor(view, cameraMode, layer, spaceTool, space.shape)}
+      </InspectorHint>
+    ),
+  };
+
+  return (
+    <div className={styles.body}>
+      <WorkbenchRail slots={rail} />
 
       <section className={styles.mapStage}>
         {walking ? (
@@ -706,130 +855,7 @@ export function MapEditor({
         )}
       </section>
 
-      <aside className={styles.inspector}>
-        <button
-          type="button"
-          className={styles.rendererToggle}
-          onClick={() => setShowGenerator((open) => !open)}
-          aria-expanded={showGenerator}
-        >
-          {showGenerator ? "Close generator" : "Generate…"}
-        </button>
-
-        {showGenerator && (
-          <GeneratorPanel
-            generators={MAP_GENERATORS}
-            selectedId={generator.id}
-            onSelect={selectGenerator}
-            values={values}
-            onValuesChange={setValues}
-            onGenerate={runGenerator}
-            note={generateNote}
-          >
-            <FieldPreview field={preview} label={`${generator.label} preview`} />
-            <ClassMappingEditor
-              legend={generator.legend}
-              mapping={mapping}
-              onChange={(next) => setMappings((current) => ({ ...current, [generator.id]: next }))}
-              layer={layer}
-              palette={palette}
-              maxTile={sheet.tilesPerPage - 1}
-              maxColumnHeight={MAX_MAP_VOXEL_HEIGHT}
-            />
-          </GeneratorPanel>
-        )}
-
-        {/* Colour and material are always here.
-            They used to be swapped out — for the tile picker on the Tiles layer,
-            and for the generator while it was open — which meant that opening the
-            Map tab, or generating a landscape and then wanting to paint it, left
-            you with nothing to paint *with* and no sign that a palette existed at
-            all. Every layer here has some use for a colour, so the palette stays
-            and the specialised pickers stack under it. */}
-        <div>
-          <div className={styles.panelHead}>
-            <span className={styles.panelTitle}>Palette</span>
-            <span className={styles.panelMeta}>{palette[colorIndex] ?? "—"}</span>
-          </div>
-          <div className={styles.paletteGrid}>
-            {palette.map((css, index) => (
-              <button
-                key={index}
-                type="button"
-                className={`${styles.swatch} ${index === colorIndex ? styles.swatchActive : ""}`}
-                style={{ background: css }}
-                onClick={() => setColorIndex(index)}
-                title={`${index} · ${css}`}
-                aria-label={`Colour ${index}, ${css}`}
-                aria-pressed={index === colorIndex}
-              />
-            ))}
-          </div>
-
-          <div className={styles.panelHead} style={{ marginTop: 14 }}>
-            <span className={styles.panelTitle}>Material</span>
-            <span className={styles.panelMeta}>{materialLabel(columnMaterial, sheet.tilesPerPage)}</span>
-          </div>
-          <div className={styles.paletteGrid}>
-            <button
-              type="button"
-              className={`${styles.swatch} ${columnMaterial < 0 ? styles.swatchActive : ""}`}
-              style={{ background: palette[colorIndex] ?? "#000", outline: "1px dashed var(--faint)" }}
-              onClick={() => setColumnMaterial(COLUMN_MATERIAL_NONE)}
-              title="Flat — build in the palette colour, with no texture"
-              aria-label="Flat colour, no material"
-              aria-pressed={columnMaterial < 0}
-            />
-            {BUILD_MATERIALS.map((entry) => (
-              <button
-                key={entry.name}
-                type="button"
-                className={`${styles.swatch} ${entry.material === columnMaterial ? styles.swatchActive : ""}`}
-                style={{ background: entry.swatch }}
-                onClick={() => setColumnMaterial(entry.material)}
-                title={entry.name}
-                aria-label={`Material ${entry.name}`}
-                aria-pressed={entry.material === columnMaterial}
-              />
-            ))}
-            {/* The armed sprite, offered as one material among the world's own
-                rather than as a separate button: skinning a cell with your own art
-                is the same kind of choice as skinning it with grass, and the
-                sprite picker below chooses which sprite. */}
-            <button
-              type="button"
-              className={`${styles.swatch} ${
-                columnMaterial === spriteTileMaterial(brush.tile) ? styles.swatchActive : ""
-              }`}
-              style={{ padding: 0, overflow: "hidden" }}
-              onClick={() => setColumnMaterial(spriteTileMaterial(brush.tile))}
-              title={`Sprite #${brush.tile} — skin cells with your own art`}
-              aria-label={`Material from sprite ${brush.tile}`}
-              aria-pressed={columnMaterial === spriteTileMaterial(brush.tile)}
-            >
-              <SpriteSwatch sheet={sheet} tile={brush.tile} version={version} />
-            </button>
-          </div>
-
-          {/* The sprite sheet, whenever a tool stamps it, stands it in the world,
-              or paints on it. */}
-          {(needsSpriteBrush(spaceTool, planeKind) || !inSpace) && (
-            <div style={{ marginTop: 14 }}>
-              <TilePicker
-                sheet={sheet}
-                page={TILES_PAGE}
-                selected={brush.tile}
-                version={version}
-                onSelect={(tile) => setBrush(singleTileBrush(tile))}
-                onSelectBrush={setBrush}
-                brush={brush}
-              />
-            </div>
-          )}
-
-          <p className={styles.pickerHint}>{hintFor(view, cameraMode, layer, spaceTool, space.shape)}</p>
-        </div>
-      </aside>
+      <WorkbenchInspector slots={inspector} />
     </div>
   );
 }
@@ -841,14 +867,6 @@ export function MapEditor({
  */
 function needsSpriteBrush(tool: MapSpaceTool, planeKind: MapCellKind): boolean {
   return isPixelSpaceTool(tool) || (tool === "plane" && planeKind !== "solid");
-}
-
-/** What the armed material is, for the inspector's readout. */
-function materialLabel(material: number, tilesPerPage: number): string {
-  if (material < 0) return "flat";
-  const tile = materialSpriteTile(material, tilesPerPage);
-  if (tile !== null) return `sprite #${tile}`;
-  return BUILD_MATERIALS.find((entry) => entry.material === material)?.name ?? "flat";
 }
 
 /**

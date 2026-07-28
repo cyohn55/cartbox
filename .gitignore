@@ -78,3 +78,7 @@ apps/web/public/quake/
 # (engine + generated boot page). The ~23MB assembled tree is regenerated on
 # deploy rather than committed.
 apps/web/public/cube2/
+
+# Screenshots written by the verify-* scripts as evidence of a passing run.
+# Regenerated on demand, never reviewed as source.
+*-shots/

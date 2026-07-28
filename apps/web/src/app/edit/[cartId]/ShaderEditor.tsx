@@ -24,6 +24,15 @@ import {
 } from "@cartbox/player";
 
 import styles from "./editor.module.css";
+import { RailGroup, RailHint } from "./railControls";
+import {
+  InspectorHint,
+  InspectorPanel,
+  WorkbenchInspector,
+  WorkbenchRail,
+  type InspectorSlots,
+  type RailSlots,
+} from "./workbenchPanels";
 
 /** Upscale factor from cart pixels to canvas pixels (240×136 → 960×544). */
 const PREVIEW_SCALE = 4;
@@ -97,8 +106,118 @@ export function ShaderEditor({ sheet, map, settings, onSettingsChange }: ShaderE
     onSettingsChange({ ...settings, values: { ...settings.values, [key]: value } });
   };
 
+  const enabledCount = POST_FX_EFFECTS.filter((effect) => settings.enabled[effect.id]).length;
+
+  const effectList = POST_FX_EFFECTS.map((effect) => (
+    <div key={effect.id} className={styles.fxEffect} data-enabled={settings.enabled[effect.id]}>
+      <label className={styles.fxEffectHead}>
+        <input
+          type="checkbox"
+          checked={settings.enabled[effect.id]}
+          onChange={() => toggleEffect(effect.id)}
+        />
+        <span className={styles.fxEffectName}>{effect.label}</span>
+        {effect.hasColor && (
+          <input
+            type="color"
+            value={settings.fogColor}
+            onChange={(event) => onSettingsChange({ ...settings, fogColor: event.target.value })}
+            aria-label={`${effect.label} colour`}
+            title={`${effect.label} colour`}
+          />
+        )}
+      </label>
+      <div className={styles.fxEffectDescription}>{effect.description}</div>
+      {settings.enabled[effect.id] &&
+        effect.params.map((param) => {
+          const key = paramKey(effect.id, param.id);
+          return (
+            <label key={param.id} className={styles.fxParam}>
+              <span className={styles.fxParamLabel}>{param.label}</span>
+              <input
+                type="range"
+                min={param.min}
+                max={param.max}
+                step={param.step}
+                value={settings.values[key] ?? param.defaultValue}
+                onChange={(event) => setValue(key, Number(event.target.value))}
+                aria-label={`${effect.label} ${param.label}`}
+              />
+              <span className={`${styles.fxParamValue} data`}>
+                {(settings.values[key] ?? param.defaultValue).toFixed(param.step >= 1 ? 0 : 2)}
+              </span>
+            </label>
+          );
+        })}
+    </div>
+  ));
+
+  // The FX tab used to be the one editor with no rail at all — a two-column
+  // layout of its own while every sibling had three. Its two non-effect controls
+  // (which screen to preview, and Reset) are exactly a `view` and an `io`, so it
+  // now wears the same skeleton as the rest. See workbenchLayout.
+  const rail: RailSlots = {
+    view: (
+      <RailGroup label="Screen">
+        <select
+          className={styles.fxSelect}
+          value={`${screen.column},${screen.row}`}
+          onChange={(event) => {
+            const [column = 0, row = 0] = event.target.value.split(",").map(Number);
+            setScreen({ column, row });
+          }}
+          aria-label="Map screen to preview"
+        >
+          {Array.from({ length: screenRows }, (_unused, row) =>
+            Array.from({ length: screenColumns }, (_unused2, column) => (
+              <option key={`${column},${row}`} value={`${column},${row}`}>
+                {column},{row}
+              </option>
+            )),
+          )}
+        </select>
+        <RailHint>Which screen of the map the preview composes.</RailHint>
+      </RailGroup>
+    ),
+
+    io: (
+      <RailGroup label="Stack">
+        <div className={styles.toolGroup}>
+          <button
+            type="button"
+            className={styles.toolBtn}
+            onClick={() => onSettingsChange(defaultPostFxSettings())}
+            title="Return every effect to its default"
+          >
+            <span className={styles.toolGlyph} aria-hidden>
+              ↺
+            </span>
+            Reset stack
+          </button>
+        </div>
+      </RailGroup>
+    ),
+  };
+
+  const inspector: InspectorSlots = {
+    extras: (
+      <InspectorPanel title="Post-processing" meta={`${enabledCount} on`}>
+        <div className={styles.fxEffectList}>{effectList}</div>
+      </InspectorPanel>
+    ),
+
+    hint: (
+      <InspectorHint>
+        Saved with the cart on Save and applied when it runs (playtest and the play page). Fog here is the
+        screen-space kind — the volumetric god rays live in the Assets tab&apos;s lit preview.
+      </InspectorHint>
+    ),
+  };
+
   return (
-    <div className={styles.fxBody}>
+    <div className={styles.body}>
+      <WorkbenchRail slots={rail} />
+
       <section className={styles.stage}>
         <div className={styles.canvasPanel}>
           <canvas
@@ -112,23 +231,9 @@ export function ShaderEditor({ sheet, map, settings, onSettingsChange }: ShaderE
         <div className={styles.hud}>
           <span className={styles.hudItem}>
             <span className={styles.hudLabel}>Screen</span>
-            <select
-              className={styles.fxSelect}
-              value={`${screen.column},${screen.row}`}
-              onChange={(event) => {
-                const [column = 0, row = 0] = event.target.value.split(",").map(Number);
-                setScreen({ column, row });
-              }}
-              aria-label="Map screen to preview"
-            >
-              {Array.from({ length: screenRows }, (_unused, row) =>
-                Array.from({ length: screenColumns }, (_unused2, column) => (
-                  <option key={`${column},${row}`} value={`${column},${row}`}>
-                    {column},{row}
-                  </option>
-                )),
-              )}
-            </select>
+            <span className={`${styles.hudValue} data`}>
+              {screen.column},{screen.row}
+            </span>
           </span>
           <span className={styles.hudItem}>
             <span className={styles.hudLabel}>Source</span>
@@ -137,63 +242,9 @@ export function ShaderEditor({ sheet, map, settings, onSettingsChange }: ShaderE
             </span>
           </span>
         </div>
-        <div className={styles.fxNote}>
-          Saved with the cart on Save and applied when it runs (playtest and the play page). Fog here is the
-          screen-space kind — the volumetric god rays live in the Sprites tab&apos;s lit preview.
-        </div>
       </section>
 
-      <aside className={styles.fxPanel}>
-        <div className={styles.panelHead}>
-          <span className={styles.panelTitle}>Post-processing</span>
-          <button type="button" className="cbx-btn" onClick={() => onSettingsChange(defaultPostFxSettings())}>
-            Reset
-          </button>
-        </div>
-        {POST_FX_EFFECTS.map((effect) => (
-          <div key={effect.id} className={styles.fxEffect} data-enabled={settings.enabled[effect.id]}>
-            <label className={styles.fxEffectHead}>
-              <input
-                type="checkbox"
-                checked={settings.enabled[effect.id]}
-                onChange={() => toggleEffect(effect.id)}
-              />
-              <span className={styles.fxEffectName}>{effect.label}</span>
-              {effect.hasColor && (
-                <input
-                  type="color"
-                  value={settings.fogColor}
-                  onChange={(event) => onSettingsChange({ ...settings, fogColor: event.target.value })}
-                  aria-label={`${effect.label} colour`}
-                  title={`${effect.label} colour`}
-                />
-              )}
-            </label>
-            <div className={styles.fxEffectDescription}>{effect.description}</div>
-            {settings.enabled[effect.id] &&
-              effect.params.map((param) => {
-                const key = paramKey(effect.id, param.id);
-                return (
-                  <label key={param.id} className={styles.fxParam}>
-                    <span className={styles.fxParamLabel}>{param.label}</span>
-                    <input
-                      type="range"
-                      min={param.min}
-                      max={param.max}
-                      step={param.step}
-                      value={settings.values[key] ?? param.defaultValue}
-                      onChange={(event) => setValue(key, Number(event.target.value))}
-                      aria-label={`${effect.label} ${param.label}`}
-                    />
-                    <span className={`${styles.fxParamValue} data`}>
-                      {(settings.values[key] ?? param.defaultValue).toFixed(param.step >= 1 ? 0 : 2)}
-                    </span>
-                  </label>
-                );
-              })}
-          </div>
-        ))}
-      </aside>
+      <WorkbenchInspector slots={inspector} />
     </div>
   );
 }
