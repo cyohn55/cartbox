@@ -14,13 +14,28 @@ import { publicUrl } from "@/lib/storage";
 import { getSessionUserId } from "@/lib/auth";
 import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
 import { validateFeedPostInput } from "@/lib/consoleProfile";
-import { interleaveFeed, type FeedItem, type FeedItemKind } from "@/lib/feedMix";
+import { assembleFeed, type FeedItem, type FeedItemKind } from "@/lib/feedMix";
 
 /** Per-source fetch caps keep one feed page light enough for a phone. */
 const CART_LIMIT = 10;
 const CLIP_LIMIT = 6;
 const UNLOCK_LIMIT = 6;
 const POST_LIMIT = 24;
+
+/**
+ * Unwraps a Supabase result, turning a query error into a thrown one.
+ *
+ * Every feed source used to read `data` and ignore `error`, so an unreachable
+ * database produced `{ items: [] }` with a 200 — indistinguishable, from the
+ * console's side, from a platform where nobody has published anything. Failing
+ * loudly here is what lets the caller tell "empty" from "broken".
+ */
+function unwrap<Row>(result: { data: Row[] | null; error: { message: string } | null }): Row[] {
+  if (result.error) {
+    throw new Error(result.error.message);
+  }
+  return result.data ?? [];
+}
 
 interface ProfileRef {
   handle: string | null;
@@ -39,31 +54,35 @@ function authorFields(profile: ProfileRef | null | undefined): Pick<FeedItem, "a
 }
 
 async function fetchCartItems(db: ReturnType<typeof serviceClient>): Promise<FeedItem[]> {
-  const { data } = await db
-    .from("carts")
-    .select("id, title, description, price_cents, plays, thumb_key, r2_key, console_model, profiles(handle, display_name)")
-    .eq("published", true)
-    .order("created_at", { ascending: false })
-    .limit(CART_LIMIT);
+  const carts = unwrap(
+    await db
+      .from("carts")
+      .select("id, title, description, price_cents, plays, thumb_key, r2_key, console_model, profiles(handle, display_name)")
+      .eq("published", true)
+      .order("created_at", { ascending: false })
+      .limit(CART_LIMIT),
+  );
 
   // Each cart's most recent replay loops as the card's gameplay preview.
-  const cartIds = (data ?? []).map((cart) => cart.id);
+  const cartIds = carts.map((cart) => cart.id);
   const previewByCart = new Map<string, { id: string; data_r2_key: string; frame_count: number }>();
   if (cartIds.length > 0) {
-    const { data: replays } = await db
-      .from("replays")
-      .select("id, cart_id, data_r2_key, frame_count, created_at")
-      .in("cart_id", cartIds)
-      .order("created_at", { ascending: false })
-      .limit(60);
-    for (const replay of replays ?? []) {
+    const replays = unwrap(
+      await db
+        .from("replays")
+        .select("id, cart_id, data_r2_key, frame_count, created_at")
+        .in("cart_id", cartIds)
+        .order("created_at", { ascending: false })
+        .limit(60),
+    );
+    for (const replay of replays) {
       if (!previewByCart.has(replay.cart_id)) {
         previewByCart.set(replay.cart_id, replay);
       }
     }
   }
 
-  return (data ?? []).map((cart) => {
+  return carts.map((cart) => {
     const isFree = cart.price_cents === 0;
     const preview = previewByCart.get(cart.id);
     return {
@@ -97,16 +116,18 @@ async function fetchCartItems(db: ReturnType<typeof serviceClient>): Promise<Fee
 }
 
 async function fetchClipItems(db: ReturnType<typeof serviceClient>): Promise<FeedItem[]> {
-  const { data } = await db
-    .from("replays")
-    .select(
-      "id, model_id, frame_count, data_r2_key, created_at, carts(id, title, r2_key, console_model), profiles(handle, display_name)",
-    )
-    .order("created_at", { ascending: false })
-    .limit(CLIP_LIMIT);
+  const replays = unwrap(
+    await db
+      .from("replays")
+      .select(
+        "id, model_id, frame_count, data_r2_key, created_at, carts(id, title, r2_key, console_model), profiles(handle, display_name)",
+      )
+      .order("created_at", { ascending: false })
+      .limit(CLIP_LIMIT),
+  );
 
   const items: FeedItem[] = [];
-  for (const replay of data ?? []) {
+  for (const replay of replays) {
     const cart = replay.carts as unknown as {
       id: string;
       title: string;
@@ -144,14 +165,16 @@ async function fetchClipItems(db: ReturnType<typeof serviceClient>): Promise<Fee
 }
 
 async function fetchAchievementItems(db: ReturnType<typeof serviceClient>): Promise<FeedItem[]> {
-  const { data } = await db
-    .from("unlocks")
-    .select("unlocked_at, profiles(handle, display_name), achievements(title, description, points, cart_id)")
-    .order("unlocked_at", { ascending: false })
-    .limit(UNLOCK_LIMIT);
+  const unlocks = unwrap(
+    await db
+      .from("unlocks")
+      .select("unlocked_at, profiles(handle, display_name), achievements(title, description, points, cart_id)")
+      .order("unlocked_at", { ascending: false })
+      .limit(UNLOCK_LIMIT),
+  );
 
   const items: FeedItem[] = [];
-  for (const unlock of data ?? []) {
+  for (const unlock of unlocks) {
     const achievement = unlock.achievements as unknown as {
       title: string;
       description: string;
@@ -176,13 +199,15 @@ async function fetchAchievementItems(db: ReturnType<typeof serviceClient>): Prom
 }
 
 async function fetchPostItems(db: ReturnType<typeof serviceClient>): Promise<FeedItem[]> {
-  const { data } = await db
-    .from("feed_posts")
-    .select("id, kind, title, body, meta, created_at, cart_id, profiles(handle, display_name)")
-    .order("created_at", { ascending: false })
-    .limit(POST_LIMIT);
+  const posts = unwrap(
+    await db
+      .from("feed_posts")
+      .select("id, kind, title, body, meta, created_at, cart_id, profiles(handle, display_name)")
+      .order("created_at", { ascending: false })
+      .limit(POST_LIMIT),
+  );
 
-  return (data ?? []).map((post) => {
+  return posts.map((post) => {
     const meta = (post.meta ?? {}) as { choices?: string[]; answerIndex?: number; link?: string };
     const hasTrivia = post.kind === "trivia" && Array.isArray(meta.choices);
     return {
@@ -203,24 +228,26 @@ export const dynamic = "force-dynamic";
 export async function GET(): Promise<NextResponse> {
   const db = serviceClient();
 
-  const [carts, clips, unlocks, posts] = await Promise.all([
-    fetchCartItems(db),
-    fetchClipItems(db),
-    fetchAchievementItems(db),
-    fetchPostItems(db),
-  ]);
+  // One flaky source should not blank the whole feed, but every source failing
+  // means the backend is unreachable — and the console must be told that rather
+  // than shown a convincingly empty homescreen.
+  const assembly = assembleFeed(
+    await Promise.allSettled([
+      fetchCartItems(db),
+      fetchClipItems(db),
+      fetchAchievementItems(db),
+      fetchPostItems(db),
+    ]),
+  );
 
-  // Split authored posts by kind so the interleave alternates card varieties
-  // instead of treating "posts" as one clump.
-  const postsByKind = new Map<FeedItemKind, FeedItem[]>();
-  for (const post of posts) {
-    const group = postsByKind.get(post.kind) ?? [];
-    group.push(post);
-    postsByKind.set(post.kind, group);
+  if (!assembly.ok) {
+    return NextResponse.json(
+      { error: `Feed sources unavailable: ${assembly.reason}` },
+      { status: 503 },
+    );
   }
 
-  const items = interleaveFeed([carts, clips, unlocks, ...postsByKind.values()]);
-  return NextResponse.json({ items });
+  return NextResponse.json({ items: assembly.items });
 }
 
 /**

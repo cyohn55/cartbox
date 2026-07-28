@@ -12,6 +12,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { withBasePath } from "@/lib/staticSite";
+import { modelBadge } from "@/lib/consoleModel";
 import type { PlayingCart, PlayingGame } from "./consoleOs";
 
 /** Pre-rendered faces of the cartridge shell; the cover art sits on the front. */
@@ -164,17 +165,24 @@ export function CartGrid({ carts, onPlayCart }: CartGridProps) {
               {/* A ported title runs on the Game ABI runtime, not one of our
                   cores, so labelling it CLASSIC would misdescribe it. */}
               {formatPrice(cart.priceCents)} ·{" "}
-              {cart.game ? "GAME" : cart.modelId === "pro" ? "PRO" : "CLASSIC"}
+              {cart.game ? "GAME" : modelBadge(cart.modelId)}
               {cart.plays !== undefined ? ` · ${cart.plays} plays` : ""}
             </span>
           </span>
         );
+
+        // The grid mixes two different things that look alike: Cartbox
+        // cartridges, which boot one of our cores, and catalog titles, which
+        // boot a ported runtime. Marking which is which keeps them addressable
+        // from styling and from tests that mean one specifically.
+        const entryKind = cart.game ? "game" : "cart";
 
         return playable ? (
           <button
             key={cart.id}
             type="button"
             className="os-grid-card os-cart-card"
+            data-entry-kind={entryKind}
             data-launching={cart.id === launchingCartId ? "true" : undefined}
             onClick={(event) => launchCart(cart, event.currentTarget)}
             onAnimationEnd={(event) => {
@@ -187,7 +195,12 @@ export function CartGrid({ carts, onPlayCart }: CartGridProps) {
             {meta}
           </button>
         ) : (
-          <a key={cart.id} className="os-grid-card os-cart-card" href={`/play/${cart.id}`}>
+          <a
+            key={cart.id}
+            className="os-grid-card os-cart-card"
+            data-entry-kind={entryKind}
+            href={`/play/${cart.id}`}
+          >
             {thumb}
             {meta}
           </a>

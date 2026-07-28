@@ -64,6 +64,73 @@ export interface FeedItem {
 }
 
 /**
+ * Outcome of assembling a feed from independently-fetched sources.
+ *
+ * A feed with no items is a real, renderable state (nobody has published yet),
+ * which is exactly why a backend outage must not be allowed to produce one: the
+ * two look identical on screen but mean opposite things. `ok: false` keeps them
+ * distinguishable all the way to the console.
+ */
+export type FeedAssembly =
+  | { ok: true; items: FeedItem[]; degraded: boolean }
+  | { ok: false; reason: string };
+
+/**
+ * Assembles the feed from per-source results, tolerating partial failure.
+ *
+ * One flaky source should not blank the homescreen, so surviving sources are
+ * mixed and the result is flagged `degraded`. Every source failing means the
+ * backend is unreachable, and that is reported as a failure rather than as an
+ * empty platform.
+ *
+ * Authored posts are split by kind before interleaving so the mix alternates
+ * card varieties instead of treating "posts" as one clump.
+ */
+export function assembleFeed(sources: ReadonlyArray<PromiseSettledResult<FeedItem[]>>): FeedAssembly {
+  if (sources.length === 0) {
+    return { ok: true, items: [], degraded: false };
+  }
+
+  const failures = sources.filter(
+    (source): source is PromiseRejectedResult => source.status === "rejected",
+  );
+  if (failures.length === sources.length) {
+    const reason = failures[0]?.reason;
+    return { ok: false, reason: reason instanceof Error ? reason.message : String(reason) };
+  }
+
+  const groups: FeedItem[][] = [];
+  const postsByKind = new Map<FeedItemKind, FeedItem[]>();
+  for (const source of sources) {
+    if (source.status !== "fulfilled") {
+      continue;
+    }
+    // Cards that carry their own payload stay grouped by source; authored posts
+    // are one source but many kinds, so they fan out into a group per kind.
+    for (const item of source.value) {
+      if (item.kind === "cart" || item.kind === "clip" || item.kind === "achievement") {
+        continue;
+      }
+      const group = postsByKind.get(item.kind) ?? [];
+      group.push(item);
+      postsByKind.set(item.kind, group);
+    }
+    const carried = source.value.filter(
+      (item) => item.kind === "cart" || item.kind === "clip" || item.kind === "achievement",
+    );
+    if (carried.length > 0) {
+      groups.push(carried);
+    }
+  }
+
+  return {
+    ok: true,
+    items: interleaveFeed([...groups, ...postsByKind.values()]),
+    degraded: failures.length > 0,
+  };
+}
+
+/**
  * Mixes per-source groups into one feed.
  *
  * Greedy proportional round-robin: at each step the group with the largest

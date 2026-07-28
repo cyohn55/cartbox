@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { interleaveFeed } from "../apps/web/src/lib/feedMix";
+import { assembleFeed, interleaveFeed, type FeedItem, type FeedItemKind } from "../apps/web/src/lib/feedMix";
 
 interface Item {
   kind: string;
@@ -64,5 +64,105 @@ describe("interleaveFeed", () => {
   it("is deterministic for the same input", () => {
     const groups = [group("cart", 3), group("clip", 2), group("trivia", 2)];
     expect(interleaveFeed(groups)).toEqual(interleaveFeed(groups));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Assembly from independently-fetched sources
+// ---------------------------------------------------------------------------
+
+/** A real FeedItem, so the assembler is exercised against the shipped shape. */
+function feedItem(kind: FeedItemKind, index: number): FeedItem {
+  return {
+    id: `${kind}:${index}`,
+    kind,
+    title: `${kind} ${index}`,
+    body: "",
+    authorHandle: "maker",
+    authorName: "Maker",
+    createdAt: "2026-07-28T00:00:00.000Z",
+  };
+}
+
+function fulfilled(items: FeedItem[]): PromiseSettledResult<FeedItem[]> {
+  return { status: "fulfilled", value: items };
+}
+
+function rejected(message: string): PromiseSettledResult<FeedItem[]> {
+  return { status: "rejected", reason: new Error(message) };
+}
+
+describe("assembleFeed", () => {
+  it("mixes every item from every source that succeeded", () => {
+    const result = assembleFeed([
+      fulfilled([feedItem("cart", 0), feedItem("cart", 1)]),
+      fulfilled([feedItem("clip", 0)]),
+      fulfilled([feedItem("news", 0), feedItem("trivia", 0)]),
+    ]);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.items.map((item) => item.id).sort()).toEqual([
+      "cart:0",
+      "cart:1",
+      "clip:0",
+      "news:0",
+      "trivia:0",
+    ]);
+    expect(result.degraded).toBe(false);
+  });
+
+  /**
+   * The bug this exists for: every source used to swallow its query error, so an
+   * unreachable database produced a 200 with an empty feed — a blank homescreen
+   * that looked exactly like a platform where nobody had published anything.
+   */
+  it("reports failure, not an empty feed, when every source failed", () => {
+    const result = assembleFeed([rejected("fetch failed"), rejected("fetch failed")]);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("fetch failed");
+  });
+
+  it("still renders the sources that survived when only some failed", () => {
+    const result = assembleFeed([
+      fulfilled([feedItem("cart", 0)]),
+      rejected("replays unavailable"),
+      fulfilled([feedItem("news", 0)]),
+    ]);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.items).toHaveLength(2);
+    expect(result.degraded).toBe(true);
+  });
+
+  it("splits authored posts by kind so varieties alternate", () => {
+    // News and trivia arrive from one source; without the split they would be
+    // one clump and the interleaver could not separate them.
+    const result = assembleFeed([
+      fulfilled([feedItem("news", 0), feedItem("news", 1), feedItem("trivia", 0), feedItem("trivia", 1)]),
+    ]);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const kinds = result.items.map((item) => item.kind);
+    for (let index = 1; index < kinds.length; index += 1) {
+      expect(kinds[index]).not.toBe(kinds[index - 1]);
+    }
+  });
+
+  it("treats a genuinely empty platform as a successful empty feed", () => {
+    const result = assembleFeed([fulfilled([]), fulfilled([])]);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.items).toEqual([]);
+    expect(result.degraded).toBe(false);
+  });
+
+  it("reports no failure when there were no sources to begin with", () => {
+    expect(assembleFeed([])).toEqual({ ok: true, items: [], degraded: false });
   });
 });

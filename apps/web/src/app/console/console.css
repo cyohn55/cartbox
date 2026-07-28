@@ -882,9 +882,22 @@
 }
 
 .os-grid {
+  --os-grid-gap: 10px;
+
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 10px;
+  /*
+   * Two cartridges per row, minimum. A plain minmax(120px, …) needs 250px to
+   * fit two tracks, which the screen of a 360px-wide phone does not have — the
+   * grid then dropped to one column and drew a single cartridge nearly the full
+   * height of the screen. Capping the track at half a row (less the gap) keeps
+   * the shelf reading as a shelf on the smallest handhelds, while still growing
+   * to three or more columns on the landscape layout.
+   */
+  grid-template-columns: repeat(
+    auto-fill,
+    minmax(min(120px, calc((100% - var(--os-grid-gap)) / 2)), 1fr)
+  );
+  gap: var(--os-grid-gap);
 }
 
 .os-grid-card {

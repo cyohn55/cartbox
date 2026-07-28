@@ -18,7 +18,7 @@ import { useEffect, useMemo, useState } from "react";
 import { isStaticExport } from "@/lib/staticSite";
 import { DEMO_CARTS, demoCartUrl, demoThumbUrl } from "@/lib/demoCatalog";
 import { DEMO_TITLES } from "@/lib/demoTitles";
-import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
+import { ENGINE_URL_BY_MODEL, resolveModelId } from "@/lib/consoleModel";
 import {
   TIC_ARCADE_CATEGORIES,
   fetchTicArcadeCategory,
@@ -50,6 +50,8 @@ interface ApiTitle {
   thumbUrl: string | null;
   bundleName: string | null;
   runtime?: string | null;
+  /** Game selector inside a shared engine bundle (DOSBox, ScummVM). */
+  target?: string | null;
   width: number;
   height: number;
 }
@@ -74,6 +76,8 @@ function titleGridCarts(
     scummvmTarget?: string | null;
     /** Present for DOS titles: "<bundle>:<exe>", the game zip and its executable. */
     dosTarget?: string | null;
+    /** The server catalog's single launch-target column, whatever the runtime. */
+    target?: string | null;
   }[],
 ): GridCart[] {
   return titles
@@ -105,7 +109,7 @@ function titleGridCarts(
         bundleName: title.bundleName as string,
         width: title.width ?? 320,
         height: title.height ?? 180,
-        target: title.dosTarget ?? title.scummvmTarget ?? undefined,
+        target: title.dosTarget ?? title.scummvmTarget ?? title.target ?? undefined,
       },
     }));
 }
@@ -173,7 +177,7 @@ export function BrowseScreen({ onPlayCart }: { onPlayCart: (cart: PlayingCart) =
             : [];
         if (!cancelled) {
           setCartboxCarts([
-            ...titleGridCarts(titles.map((title) => ({ ...title, bundleName: title.bundleName }))),
+            ...titleGridCarts(titles),
             ...body.carts.map<GridCart>((cart) => ({
               id: cart.id,
               title: cart.title,
@@ -181,9 +185,10 @@ export function BrowseScreen({ onPlayCart }: { onPlayCart: (cart: PlayingCart) =
               modelId: cart.console_model,
               thumbUrl: cart.thumbUrl,
               cartUrl: cart.cartUrl,
-              engineUrl: cart.cartUrl
-                ? ENGINE_URL_BY_MODEL[cart.console_model as "classic" | "pro"]
-                : null,
+              // resolveModelId, not a cast: console_model is an untrusted text
+              // column, and a cast would index the map with an unknown value and
+              // hand the player `undefined` for its engine.
+              engineUrl: cart.cartUrl ? ENGINE_URL_BY_MODEL[resolveModelId(cart.console_model)] : null,
               plays: cart.plays,
             })),
           ]);

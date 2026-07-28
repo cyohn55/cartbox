@@ -64,6 +64,20 @@ const MIGRATION_PATH = fileURLToPath(
 
 const migrationSql = readFileSync(MIGRATION_PATH, "utf8");
 
+/**
+ * The migration that owns the current `titles.runtime` whitelist. 0011 fixed it
+ * at the runtimes of the time; 0013 restates it, so that is the one to read.
+ */
+const runtimeMigrationSql = readFileSync(
+  fileURLToPath(new URL("../supabase/migrations/0013_title_runtimes.sql", import.meta.url)),
+  "utf8",
+);
+
+const launchMetadataMigrationSql = readFileSync(
+  fileURLToPath(new URL("../supabase/migrations/0014_title_launch_metadata.sql", import.meta.url)),
+  "utf8",
+);
+
 // ---------------------------------------------------------------------------
 // Fixtures — built from the modules' own types so a shape change breaks here.
 // ---------------------------------------------------------------------------
@@ -247,11 +261,12 @@ describe("runtime registry", () => {
     }
   });
 
-  it("reports the Cartbox runtimes plus the ported-game, ScummVM, SuperTux and DOS runtimes as implemented", () => {
+  it("reports every runtime with a player as implemented, and libretro as not", () => {
     // libretro is declared so catalog rows can exist before its player does;
     // wasm-app gained a player in Phase 2, scummvm followed with the ScummVM
-    // engine build and its iframe player, supertux with the SuperTux one, and dos
-    // with the js-dos/DOSBox iframe player.
+    // engine build and its iframe player, supertux with the SuperTux one, dos
+    // with the js-dos/DOSBox iframe player, then quake (WebQuake) and cube2
+    // (BananaBread).
     const implemented = implementedRuntimes().map((runtime) => runtime.id);
     expect(implemented).toEqual([
       "cartbox-classic",
@@ -260,6 +275,8 @@ describe("runtime registry", () => {
       "scummvm",
       "supertux",
       "dos",
+      "quake",
+      "cube2",
     ]);
   });
 
@@ -535,5 +552,57 @@ describe("migration 0011", () => {
   it("keeps Tier C titles off our storage and Tier B titles free", () => {
     expect(migrationSql).toContain("titles_tier_c_is_user_supplied");
     expect(migrationSql).toContain("titles_freeware_is_free");
+  });
+});
+
+describe("titles.runtime whitelist", () => {
+  /** The runtime ids the database will actually accept, read from 0013. */
+  function runtimeIdsFromMigration(): string[] {
+    const constraint = runtimeMigrationSql.split("add constraint titles_runtime_check")[1] ?? "";
+    return [...constraint.slice(0, constraint.indexOf("));")).matchAll(/'([a-z0-9-]+)'/g)].map(
+      (match) => match[1],
+    );
+  }
+
+  /**
+   * The regression this guards: SuperTux, Quake and Cube 2 were registered in
+   * RUNTIME_IDS but never added to the constraint, so a catalog row for any of
+   * them was rejected outright and those games could not appear in Browse on a
+   * server build. Anything the app can dispatch to, the database must accept.
+   */
+  it("accepts every runtime the app can dispatch to", () => {
+    expect(runtimeIdsFromMigration().sort()).toEqual([...RUNTIME_IDS].sort());
+  });
+
+  it("accepts the runtime of every catalog title", () => {
+    const accepted = new Set(runtimeIdsFromMigration());
+    for (const title of DEMO_TITLES) {
+      expect(accepted.has(title.runtime), `${title.slug} runs on ${title.runtime}`).toBe(true);
+    }
+  });
+});
+
+describe("titles launch metadata", () => {
+  it("refuses a shared-engine title that names no game to launch", () => {
+    // DOSBox and ScummVM host many games from one bundle; without a target such
+    // a row lists in Browse and then has nothing to boot.
+    expect(launchMetadataMigrationSql).toContain("titles_shared_engine_needs_target");
+    expect(launchMetadataMigrationSql).toMatch(/runtime not in \('dos', 'scummvm'\)/);
+  });
+
+  it("stores each title's own resolution rather than assuming one", () => {
+    expect(launchMetadataMigrationSql).toMatch(/add column if not exists width\s+integer/);
+    expect(launchMetadataMigrationSql).toMatch(/add column if not exists height integer/);
+    expect(launchMetadataMigrationSql).toContain("titles_dimensions_positive");
+  });
+
+  it("has a launch target for every shared-engine catalog title", () => {
+    const sharedEngine = DEMO_TITLES.filter(
+      (title) => (title.runtime === "dos" || title.runtime === "scummvm") && title.bundleName,
+    );
+    expect(sharedEngine.length).toBeGreaterThan(0);
+    for (const title of sharedEngine) {
+      expect(title.dosTarget ?? title.scummvmTarget, `${title.slug} launch target`).toBeTruthy();
+    }
   });
 });

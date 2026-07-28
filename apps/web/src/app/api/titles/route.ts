@@ -18,8 +18,6 @@ import { publicUrl } from "@/lib/storage";
 
 const DEFAULT_LIMIT = 40;
 const MAX_LIMIT = 100;
-const DEFAULT_WIDTH = 320;
-const DEFAULT_HEIGHT = 180;
 
 export async function GET(request: Request): Promise<NextResponse> {
   const { searchParams } = new URL(request.url);
@@ -29,7 +27,7 @@ export async function GET(request: Request): Promise<NextResponse> {
   const db = serviceClient();
   const { data, error } = await db
     .from("titles")
-    .select("id, name, price_cents, plays, thumb_key, bundle_key, asset_source, runtime")
+    .select("id, name, price_cents, plays, thumb_key, bundle_key, asset_source, runtime, launch_target, width, height")
     .eq("published", true)
     .eq("asset_source", "bundled")
     .not("bundle_key", "is", null)
@@ -48,8 +46,11 @@ export async function GET(request: Request): Promise<NextResponse> {
     thumbUrl: title.thumb_key ? publicUrl(title.thumb_key) : null,
     bundleName: title.bundle_key,
     runtime: title.runtime,
-    width: DEFAULT_WIDTH,
-    height: DEFAULT_HEIGHT,
+    // Names the game inside a shared engine bundle (DOSBox, ScummVM); without it
+    // those runtimes list in Browse but have nothing to launch.
+    target: title.launch_target,
+    width: title.width,
+    height: title.height,
   }));
 
   return NextResponse.json({ titles });

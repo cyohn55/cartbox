@@ -35,6 +35,19 @@ async function pressShellButton(page, label) {
   await button.dispatchEvent("pointerup", { pointerId: 1 });
 }
 
+/**
+ * Steps the scroll wheel one detent. The wheel — not SELECT — is what moves
+ * between tabs since the shoulders/wheel redesign; SELECT now only ejects a
+ * running game. Ticks are throttled, so each step waits out the throttle.
+ */
+async function stepWheel(page, direction) {
+  await page
+    .getByRole("slider", { name: "Scroll wheel" })
+    .first()
+    .dispatchEvent("wheel", { deltaY: direction > 0 ? 60 : -60 });
+  await page.waitForTimeout(200);
+}
+
 const browser = await chromium.connectOverCDP(CDP);
 try {
   // --- Portrait phone (Game Boy layout) ------------------------------------
@@ -92,9 +105,16 @@ try {
   check("Browse tab renders", true);
   await page.screenshot({ path: shot("05-browse-portrait") });
 
-  await pressShellButton(page, "Select");
+  // The wheel steps one tab at a time through CONSOLE_TABS, which is
+  // feed / browse / create / library / profile — so Library is two detents from
+  // Browse. (This assertion predated both the CREATE tab and the wheel.)
+  await stepWheel(page, 1);
+  await page.getByTestId("create-screen").waitFor({ timeout: 5000 });
+  check("wheel steps Browse → Create", true);
+
+  await stepWheel(page, 1);
   await page.getByTestId("library-screen").waitFor({ timeout: 5000 });
-  check("SELECT cycles Browse → Library", true);
+  check("wheel steps Create → Library", true);
   await page.screenshot({ path: shot("06-library-portrait") });
 
   await page.getByRole("button", { name: "PROFILE" }).click();
@@ -110,7 +130,10 @@ try {
     .first()
     .waitFor({ timeout: 10000 })
     .catch(() => {});
-  const gridCards = page.locator("button.os-grid-card");
+  // Specifically a Cartbox cartridge: the grid now also lists catalog titles,
+  // which boot a ported runtime in an iframe rather than a core on a canvas, so
+  // "first card" would no longer be testing what this check is named for.
+  const gridCards = page.locator('button.os-grid-card[data-entry-kind="cart"]');
   if ((await gridCards.count()) > 0) {
     await gridCards.first().click();
     await page.getByTestId("game-screen").waitFor({ timeout: 15000 });
@@ -180,7 +203,12 @@ try {
   await app.screenshot({ path: shot("12-profile-signed-in") });
   await member.close();
 
-  // --- Landscape phone (AYN Thor layout) ------------------------------------
+  // --- Landscape phone -------------------------------------------------------
+  // The default device is the image handheld: one piece of chassis art with a
+  // single physical layout, so landscape does not re-arrange the controls the
+  // way the CSS shell's AYN Thor mode did. What must hold is that the whole
+  // device still fits the short viewport, stays centred, and keeps its screen
+  // and controls inside the chassis.
   const wide = await browser.newContext({
     viewport: { width: 844, height: 390 },
     hasTouch: true,
@@ -189,14 +217,42 @@ try {
   await land.goto(BASE + "/console", { waitUntil: "domcontentloaded" });
   await land.getByTestId("title-screen").waitFor({ timeout: 10000 });
   const geometry = await land.evaluate(() => {
-    const rect = (selector) => document.querySelector(selector)?.getBoundingClientRect() ?? null;
-    return { screen: rect(".hh-screen-bezel"), dpad: rect(".hh-dpad"), face: rect(".hh-face") };
+    const rect = (selector) => {
+      const element = document.querySelector(selector);
+      return element ? element.getBoundingClientRect() : null;
+    };
+    return {
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      device: rect(".hh-img-device, .hh-device"),
+      screen: rect(".hh-img-screen, .hh-screen"),
+      dpad: rect('[aria-label="Left"]'),
+      face: rect('[aria-label="B button"]'),
+    };
   });
-  const flanked =
-    geometry.dpad && geometry.screen && geometry.face
-      ? geometry.dpad.right <= geometry.screen.left + 1 && geometry.screen.right <= geometry.face.left + 1
-      : false;
-  check("landscape flanks the screen (D-pad left, buttons right)", flanked);
+  const { viewport: vp, device, screen, dpad, face } = geometry;
+  const fits = Boolean(
+    device && device.height <= vp.height + 1 && device.width <= vp.width + 1,
+  );
+  // Centred within a pixel of rounding.
+  const centred = Boolean(device && Math.abs((device.left + device.right) / 2 - vp.width / 2) <= 1);
+  const containsControls = Boolean(
+    device &&
+      screen &&
+      dpad &&
+      face &&
+      [screen, dpad, face].every(
+        (part) =>
+          part.left >= device.left - 1 &&
+          part.right <= device.right + 1 &&
+          part.top >= device.top - 1 &&
+          part.bottom <= device.bottom + 1,
+      ),
+  );
+  check(
+    "landscape fits the device on screen, centred, controls inside the chassis",
+    fits && centred && containsControls,
+    `device ${device ? `${Math.round(device.width)}x${Math.round(device.height)}` : "missing"} in ${vp.width}x${vp.height}`,
+  );
   await land.screenshot({ path: shot("08-title-landscape") });
 
   await pressShellButton(land, "Start");
