@@ -1490,6 +1490,18 @@
   image-rendering: pixelated;
 }
 
+/* The 3D preview sources are navigable, so the frame has to look draggable and
+   must not let a drag select the page or a touch scroll it. The flat source is
+   a picture and stays inert. */
+.fxCanvas[data-interactive] {
+  cursor: grab;
+  touch-action: none;
+}
+
+.fxCanvas[data-interactive]:active {
+  cursor: grabbing;
+}
+
 .fxSelect {
   background: var(--surface-raised);
   color: inherit;

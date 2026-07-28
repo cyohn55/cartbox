@@ -32,17 +32,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   DEFAULT_MODEL_LIGHT,
-  MapVoxelSpace,
   castMapRay,
-  cellContaining,
   firstPersonBasis,
-  geometryFor,
   mapSpaceToModel,
   perspectiveProjection,
   renderMapFirstPerson,
   screenRay,
   walkAxes,
   type MapCellKind,
+  type MapVoxelSpace,
   type MapWindow,
   type SpriteSheet,
   type TextureAtlas,
@@ -59,12 +57,10 @@ import {
 } from "./mapSpaceTools";
 import { useLiveValue } from "./useLiveValue";
 import { useMapGpu, type MapGpuStatus } from "./useMapGpu";
+import { WALK_FOV, clampToMap, type WalkCamera } from "./walkCamera";
 
 /** Vertical field of view, in radians — close to what a block game shows. */
-const FOV = 1.22;
-
-/** How high above the ground the eye sits when standing, in cells. */
-const EYE_HEIGHT = 1.7;
+const FOV = WALK_FOV;
 
 /** Cells per second walked, and the multiplier while a run key is held. */
 const WALK_SPEED = 7;
@@ -97,15 +93,6 @@ const SKY: readonly [number, number, number] = [16 / 255, 20 / 255, 34 / 255];
 
 /** How much an emissive texel bleeds into its surroundings. */
 const BLOOM = 0.55;
-
-/** Where the viewer is standing and looking. */
-export interface WalkCamera {
-  readonly x: number;
-  readonly y: number;
-  readonly z: number;
-  readonly yaw: number;
-  readonly pitch: number;
-}
 
 /** What the crosshair is on, for the HUD. */
 export interface WalkHover {
@@ -678,24 +665,3 @@ export function MapWalkCanvas({
   );
 }
 
-/** Keep the viewer inside the map, and off the floor below it. */
-function clampToMap(space: MapVoxelSpace, camera: WalkCamera): WalkCamera {
-  return {
-    ...camera,
-    x: Math.max(0, Math.min(space.width - 1, camera.x)),
-    y: Math.max(0, Math.min(space.maxHeight - 1, camera.y)),
-    z: Math.max(0, Math.min(space.depth - 1, camera.z)),
-  };
-}
-
-/**
- * Drop the viewer onto whatever is beneath them, at eye height — the "put my feet
- * on the ground" gesture that free movement otherwise lacks. Exported because the
- * control that offers it belongs on the editor's rail, not over the canvas.
- */
-export function standOnGround(space: MapVoxelSpace, camera: WalkCamera): WalkCamera {
-  const geometry = geometryFor(space.shape);
-  const [column, , row] = cellContaining(geometry, camera.x, camera.y, camera.z);
-  const ground = space.heightAt(column, row);
-  return clampToMap(space, { ...camera, y: ground - 0.5 + EYE_HEIGHT });
-}

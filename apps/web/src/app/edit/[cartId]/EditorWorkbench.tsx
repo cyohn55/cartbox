@@ -481,7 +481,14 @@ function WorkbenchBody({
         />
       )}
       {activeTab === "FX" && (
-        <ShaderEditor key={`${bank}:${revision}`} sheet={sheet} map={map} settings={fx} onSettingsChange={setFx} />
+        <ShaderEditor
+          key={`${bank}:${revision}`}
+          sheet={sheet}
+          map={map}
+          columnPayload={mapColumns}
+          settings={fx}
+          onSettingsChange={setFx}
+        />
       )}
       {activeTab === "SFX" && <SfxEditor key={`${bank}:${revision}`} bank={soundBank} />}
       {activeTab === "Music" && <MusicEditor key={`${bank}:${revision}`} tracker={tracker} />}
