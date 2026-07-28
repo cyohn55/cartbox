@@ -57,6 +57,7 @@ import {
   type SpacePick,
   type SpaceToolResult,
 } from "./mapSpaceTools";
+import { useLiveValue } from "./useLiveValue";
 import { useMapGpu, type MapGpuStatus } from "./useMapGpu";
 
 /** Vertical field of view, in radians — close to what a block game shows. */
@@ -194,10 +195,12 @@ export function MapWalkCanvas({
   const onGpu = gpu.status === "gpu";
   const activeCanvasRef = onGpu ? gpu.canvasRef : cpuCanvasRef;
 
-  // The camera is mirrored into a ref because the animation loop reads it every
-  // frame and must not be rebuilt (and re-subscribed) on each move.
-  const cameraRef = useRef(camera);
-  cameraRef.current = camera;
+  // The camera is live in a ref rather than read from the prop: the animation
+  // loop and the mouse-look listener both write to it, many times between two
+  // React commits, and each has to see what the other just did. Reading the prop
+  // instead means looking and moving overwrite one another — hold W and the mouse
+  // stops turning the view. See useLiveValue.
+  const [cameraRef, updateCamera] = useLiveValue(camera, onCameraChange);
   const heldKeys = useRef(new Set<string>());
   const dirty = useRef(true);
   const hoverRef = useRef<WalkHover | null>(null);
@@ -467,7 +470,6 @@ export function MapWalkCanvas({
 
       const keys = heldKeys.current;
       if (keys.size > 0) {
-        const view = cameraRef.current;
         const running_ = keys.has("ControlLeft") || keys.has("ControlRight");
         const distance = WALK_SPEED * (running_ ? RUN_MULTIPLIER : 1) * elapsed;
         // Movement is relative to where you are looking, but stays level: looking
@@ -477,18 +479,21 @@ export function MapWalkCanvas({
         const lift = (keys.has("Space") ? 1 : 0) - (keys.has("ShiftLeft") || keys.has("ShiftRight") ? 1 : 0);
 
         if (forward !== 0 || strafe !== 0 || lift !== 0) {
-          // Both axes come from the renderer's own basis rather than from trig
-          // written out again here: walking "right" has to mean the direction
-          // the frame draws on the right, and two copies of that rule drift.
-          const axes = walkAxes(view.yaw);
-          onCameraChange(
-            clampToMap(space, {
+          // The step is computed from whatever the camera is *now*, inside the
+          // update — so a turn the mouse made a moment ago is already applied and
+          // this walks along the new heading rather than replacing it.
+          updateCamera((view) => {
+            // Both axes come from the renderer's own basis rather than from trig
+            // written out again here: walking "right" has to mean the direction
+            // the frame draws on the right, and two copies of that rule drift.
+            const axes = walkAxes(view.yaw);
+            return clampToMap(space, {
               ...view,
               x: view.x + (axes.forward[0] * forward + axes.right[0] * strafe) * distance,
               z: view.z + (axes.forward[1] * forward + axes.right[1] * strafe) * distance,
               y: view.y + lift * distance,
-            }),
-          );
+            });
+          });
           dirty.current = true;
         }
       }
@@ -505,7 +510,7 @@ export function MapWalkCanvas({
       running = false;
       cancelAnimationFrame(frame);
     };
-  }, [onCameraChange, render, space]);
+  }, [render, space, updateCamera]);
 
   // Keys are tracked on the window while the pointer is captured, and on the
   // canvas otherwise, so walking never eats typing elsewhere in the editor.
@@ -557,17 +562,17 @@ export function MapWalkCanvas({
     };
     const onMove = (event: MouseEvent) => {
       if (document.pointerLockElement !== canvas) return;
-      const view = cameraRef.current;
       // Yaw decreases as the pointer travels right, which turns the view right:
       // the basis rotates toward screen-left as yaw grows (see firstPersonBasis).
-      onCameraChange({
+      // Applied to the live camera, so a step the walk loop just took is kept.
+      updateCamera((view) => ({
         ...view,
         yaw: view.yaw - event.movementX * LOOK_SPEED,
         pitch: Math.max(
           -PITCH_LIMIT,
           Math.min(PITCH_LIMIT, view.pitch - event.movementY * LOOK_SPEED),
         ),
-      });
+      }));
       dirty.current = true;
     };
 
@@ -577,7 +582,7 @@ export function MapWalkCanvas({
       document.removeEventListener("pointerlockchange", onLockChange);
       document.removeEventListener("mousemove", onMove);
     };
-  }, [activeCanvasRef, onCameraChange]);
+  }, [activeCanvasRef, updateCamera]);
 
   /** Everything the shared tools need besides where the pointer was aimed. */
   const toolContext = () => ({

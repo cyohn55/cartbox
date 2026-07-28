@@ -182,6 +182,32 @@ try {
     `${bearingRight?.toFixed(2)} → ${bearingLeft?.toFixed(2)} rad`,
   );
 
+  // 6b. Looking and moving at the same time.
+  //
+  //     The walk loop and the mouse listener both write the camera, many times
+  //     between two React commits. Reading it from a mirror that only refreshes
+  //     on render made them overwrite one another, so holding W stopped the mouse
+  //     turning the view. Measured as: how much of the same sweep survives.
+  const sweep = async (holdKey) => {
+    if (holdKey) await page.keyboard.down(holdKey);
+    await page.mouse.move(centreX, centreY);
+    await page.waitForTimeout(400);
+    const before = await bearing();
+    await page.mouse.move(centreX + 240, centreY, { steps: 60 });
+    await page.waitForTimeout(500);
+    const after = await bearing();
+    if (holdKey) await page.keyboard.up(holdKey);
+    await page.waitForTimeout(300);
+    return before === null || after === null ? null : after - before;
+  };
+  const turnAlone = await sweep(null);
+  const turnWhileWalking = await sweep("w");
+  check(
+    "the mouse still turns the view while a movement key is held",
+    turnAlone !== null && turnWhileWalking !== null && turnWhileWalking > turnAlone * 0.6,
+    `${turnAlone?.toFixed(2)} rad alone vs ${turnWhileWalking?.toFixed(2)} rad while walking`,
+  );
+
   // 7. Frame rate while moving. The software path used to cast ~50,000 rays per
   //    frame in JavaScript; the point of this work is that walking is smooth.
   await page.keyboard.down("w");

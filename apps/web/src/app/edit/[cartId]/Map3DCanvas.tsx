@@ -61,6 +61,7 @@ import {
   type SpacePick,
   type SpaceToolResult,
 } from "./mapSpaceTools";
+import { useLiveValue } from "./useLiveValue";
 import { useMapGpu, type MapGpuStatus } from "./useMapGpu";
 
 /** Canvas edge in device pixels; also the pick buffers' resolution. */
@@ -701,21 +702,34 @@ export function Map3DCanvas({
   };
 
   // --- Camera and travel -----------------------------------------------------
-  // Screen-right and screen-forward on the ground plane, from the current yaw.
-  // Both are what "move me that way" means once the camera has been turned.
-  const groundAxes = () => ({
-    right: [Math.cos(yaw), Math.sin(yaw)] as const,
-    forward: [-Math.sin(yaw), Math.cos(yaw)] as const,
-  });
+  // Both the camera and the focus are written far faster than React re-renders —
+  // a drag is dozens of pointer events per commit, and a held key repeats — so
+  // both go through a live value. Computing each step from the prop instead means
+  // every event after the first in a frame starts from the same stale angle, and
+  // all but the last one's movement is thrown away: a fast drag turns a fraction
+  // of what the hand asked for. See useLiveValue.
+  const [, updateCamera] = useLiveValue(
+    useMemo(() => ({ yaw, pitch, cell }), [yaw, pitch, cell]),
+    onCameraChange,
+    (a, b) => a.yaw === b.yaw && a.pitch === b.pitch && a.cell === b.cell,
+  );
+  const [, updateFocus] = useLiveValue(
+    focus,
+    onFocusChange,
+    (a, b) => a.x === b.x && a.y === b.y && a.z === b.z,
+  );
 
   const moveFocus = (right: number, forward: number, up: number) => {
-    const axes = groundAxes();
-    const x = focus.x + axes.right[0] * right + axes.forward[0] * forward;
-    const z = focus.z + axes.right[1] * right + axes.forward[1] * forward;
-    onFocusChange({
-      x: Math.max(0, Math.min(space.width - 1, x)),
-      y: Math.max(0, Math.min(space.maxHeight - 1, focus.y + up)),
-      z: Math.max(0, Math.min(space.depth - 1, z)),
+    updateFocus((current) => {
+      // Screen-right and screen-forward on the ground plane, from the current
+      // yaw — what "move me that way" means once the camera has been turned.
+      const x = current.x + Math.cos(yaw) * right - Math.sin(yaw) * forward;
+      const z = current.z + Math.sin(yaw) * right + Math.cos(yaw) * forward;
+      return {
+        x: Math.max(0, Math.min(space.width - 1, x)),
+        y: Math.max(0, Math.min(space.maxHeight - 1, current.y + up)),
+        z: Math.max(0, Math.min(space.depth - 1, z)),
+      };
     });
   };
 
@@ -754,11 +768,11 @@ export function Map3DCanvas({
         const foreshorten = Math.max(0.25, Math.sin(pitch));
         moveFocus(-dx / cell, -dy / (cell * foreshorten), 0);
       } else {
-        onCameraChange({
-          yaw: yaw - dx * ORBIT_SPEED,
-          pitch: Math.max(PITCH_MIN, Math.min(PITCH_MAX, pitch + dy * ORBIT_SPEED)),
-          cell,
-        });
+        updateCamera((current) => ({
+          yaw: current.yaw - dx * ORBIT_SPEED,
+          pitch: Math.max(PITCH_MIN, Math.min(PITCH_MAX, current.pitch + dy * ORBIT_SPEED)),
+          cell: current.cell,
+        }));
       }
       return;
     }
@@ -779,12 +793,14 @@ export function Map3DCanvas({
     if (!canvas) return;
     const handler = (event: WheelEvent) => {
       event.preventDefault();
-      const next = cell - Math.sign(event.deltaY) * CELL_STEP;
-      onCameraChange({ yaw, pitch, cell: Math.max(CELL_MIN, Math.min(CELL_MAX, next)) });
+      updateCamera((current) => ({
+        ...current,
+        cell: Math.max(CELL_MIN, Math.min(CELL_MAX, current.cell - Math.sign(event.deltaY) * CELL_STEP)),
+      }));
     };
     canvas.addEventListener("wheel", handler, { passive: false });
     return () => canvas.removeEventListener("wheel", handler);
-  }, [activeCanvasRef, cell, yaw, pitch, onCameraChange]);
+  }, [activeCanvasRef, updateCamera]);
 
   // Walk the focus with the keyboard. Bound to the canvas rather than the window
   // so it never eats typing elsewhere in the editor; the canvas is focusable and
