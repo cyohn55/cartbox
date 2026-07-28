@@ -20,6 +20,11 @@ const STARTERS = [
     blurb: "640×360 · 64 colors · 8 channels — the big screen.",
   },
   {
+    href: "/edit/new?model=portrait",
+    title: "NEW PORTRAIT CART",
+    blurb: "360×640 · 64 colors · 8 channels — held the way a handheld is.",
+  },
+  {
     href: "/edit/new?starter=parallax",
     title: "PARALLAX SCENE",
     blurb: "Start from three scrolling map layers.",

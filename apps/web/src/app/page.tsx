@@ -19,6 +19,11 @@ export default function HomePage() {
         <Link href="/edit/new?model=pro">Create a Pro cartridge — 640×360, 64 colors, 8 channels →</Link>
       </p>
       <p>
+        <Link href="/edit/new?model=portrait">
+          Create a Portrait cartridge — 360×640, 64 colors, 8 channels →
+        </Link>
+      </p>
+      <p>
         <Link href="/edit/new?starter=parallax">Create a parallax scene — three scrolling map layers →</Link>
       </p>
       <p>

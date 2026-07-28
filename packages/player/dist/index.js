@@ -1733,6 +1733,26 @@ var MODELS = {
     engineUrl: "/engine/pro/engine.js",
     inputs: ["gamepad", "mouse", "keyboard"]
   },
+  portrait: {
+    id: "portrait",
+    label: "Portrait",
+    kind: "raster2d",
+    // 9:16 (360x640) — the Pro spec turned on its side, for carts played the way
+    // a handheld is actually held. Deliberately Pro's exact pixel count
+    // (360*640 == 640*360), so the core reuses Pro's framebuffer and memory map
+    // unchanged; only the two dimensions and the overscan buffer differ.
+    // Both divide the 8px tile grid (45x80 cells).
+    width: 360,
+    height: 640,
+    pixelBytes: 4,
+    fps: 60,
+    audioChannels: 8,
+    sampleRate: 44100,
+    paletteSize: 64,
+    cartSizeBytes: 1024 * 1024,
+    engineUrl: "/engine/portrait/engine.js",
+    inputs: ["gamepad", "mouse", "keyboard"]
+  },
   voxel: {
     id: "voxel",
     label: "Voxel",

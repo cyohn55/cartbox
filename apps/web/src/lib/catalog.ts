@@ -68,7 +68,15 @@ export type ThumbResolver = (key: string | null | undefined) => string | null;
  * than requiring a migration of the `carts` table.
  */
 export function runtimeForConsoleModel(consoleModel: string): RuntimeId {
-  return consoleModel === "pro" ? "cartbox-pro" : "cartbox-classic";
+  // Each Cartbox model runs on its own core binary, so the mapping has to be
+  // exhaustive rather than a pro/not-pro test — an unlisted model would
+  // otherwise be labelled Classic and offered the wrong engine. Unknown values
+  // still fall back to Classic, which is what `resolveModelId` stores for them.
+  const RUNTIME_BY_MODEL: Record<string, RuntimeId> = {
+    pro: "cartbox-pro",
+    portrait: "cartbox-portrait",
+  };
+  return RUNTIME_BY_MODEL[consoleModel] ?? "cartbox-classic";
 }
 
 export function cartToEntry(cart: CartRow, resolveThumb: ThumbResolver): CatalogEntry {

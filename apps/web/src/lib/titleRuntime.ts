@@ -18,6 +18,7 @@ import type { ConsoleModelId } from "@cartbox/editor";
 export const RUNTIME_IDS = [
   "cartbox-classic",
   "cartbox-pro",
+  "cartbox-portrait",
   "wasm-app",
   "scummvm",
   "supertux",
@@ -64,6 +65,12 @@ const DESCRIPTORS: Record<RuntimeId, RuntimeDescriptor> = {
     label: "Cartbox Pro",
     implemented: true,
     consoleModel: "pro",
+  },
+  "cartbox-portrait": {
+    id: "cartbox-portrait",
+    label: "Cartbox Portrait",
+    implemented: true,
+    consoleModel: "portrait",
   },
   "wasm-app": { id: "wasm-app", label: "Open source", implemented: true },
   scummvm: { id: "scummvm", label: "Adventure", implemented: true },

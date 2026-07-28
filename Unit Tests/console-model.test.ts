@@ -32,9 +32,37 @@ describe("console model registry", () => {
     });
   });
 
-  it("registers classic, pro, and voxel", () => {
-    expect(Object.keys(CONSOLE_MODELS).sort()).toEqual(["classic", "pro", "voxel"]);
+  it("registers classic, pro, portrait, and voxel", () => {
+    expect(Object.keys(CONSOLE_MODELS).sort()).toEqual(["classic", "portrait", "pro", "voxel"]);
     expect(CONSOLE_MODELS.pro.paletteSize).toBeGreaterThan(CLASSIC_MODEL.paletteSize);
+  });
+
+  it("keys every model by its own id", () => {
+    for (const [id, model] of Object.entries(CONSOLE_MODELS)) {
+      expect(model.id).toBe(id);
+    }
+  });
+
+  it("gives portrait the same budget as pro, only taller than it is wide", () => {
+    // Portrait is deliberately Pro transposed: identical pixel count means the
+    // core reuses Pro's framebuffer and memory map, which is what makes the
+    // model cheap. If these drift apart the shared build config is wrong.
+    const { pro, portrait } = CONSOLE_MODELS;
+    expect(portrait.width * portrait.height).toBe(pro.width * pro.height);
+    expect(portrait.height).toBeGreaterThan(portrait.width);
+    expect(portrait.paletteSize).toBe(pro.paletteSize);
+    expect(portrait.tilePixelBits).toBe(pro.tilePixelBits);
+  });
+
+  it("measures every raster model's screen in whole tiles", () => {
+    // A partial cell would leave a strip the tile renderer cannot address.
+    for (const model of Object.values(CONSOLE_MODELS)) {
+      if (model.kind !== "raster2d") continue;
+      expect(model.width % model.tileSize, `${model.id} width`).toBe(0);
+      expect(model.height % model.tileSize, `${model.id} height`).toBe(0);
+      expect(model.screenWidth).toBe(model.width / model.tileSize);
+      expect(model.screenHeight).toBe(model.height / model.tileSize);
+    }
   });
 });
 

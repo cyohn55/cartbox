@@ -14,10 +14,28 @@ matte reset) and `src/core/core.c` (tracks the tile bank resident in RAM so
 capture is skipped for foreign-bank syncs). Pairs with `../shim.c`
 (`cbx_material_ptr` / `cbx_emissive_ptr` / `cbx_set_material_capture`).
 
-Apply after fetching the submodule, then rebuild:
+## cartbox-model-specs.patch
+
+Makes the **fixed spec overridable at build time** so one source tree can compile
+every console model. Guards the display constants in `include/tic80.h`, the
+memory-map and palette/sound constants in `src/tic.h`, and widens what those
+sizes ripple into (`src/core/sound.c`, `src/tilesheet.c`, `src/tools.{c,h}` — the
+music-track pattern packing needs u64 at 8 channels). Every change is
+`#ifndef`-guarded, so a build with no `-D` compiles to the exact upstream values
+and the classic core stays byte-for-byte stock.
+
+`TIC80_FULLHEIGHT` is guarded here too, which is what makes a **portrait** model
+possible at all: upstream derives the overscan buffer's height from its width at
+16:9, so a 360-wide screen would get a 288-line buffer and render nothing below
+that line — not a build error, just a frame that stops two-thirds of the way
+down.
+
+Apply both after fetching the submodule, then rebuild:
 
 ```bash
+git -C packages/engine/tic80 apply packages/engine/patches/cartbox-model-specs.patch
 git -C packages/engine/tic80 apply packages/engine/patches/cartbox-material-gbuffer.patch
-npm run engine:build:wasm      # classic core -> dist/tic80.{js,wasm}
-bash packages/engine/scripts/build-pro-wasm.sh   # pro core -> dist/pro/engine.{js,wasm}
+npm run engine:build:wasm        # classic  -> dist/tic80.{js,wasm}
+npm run engine:build:pro         # pro      -> dist/pro/engine.{js,wasm}
+npm run engine:build:portrait    # portrait -> dist/portrait/engine.{js,wasm}
 ```

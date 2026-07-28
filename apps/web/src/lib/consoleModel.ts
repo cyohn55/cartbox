@@ -15,10 +15,26 @@ import { withBasePath } from "./staticSite";
  * no built engine, so it is deliberately excluded — an unknown or unsupported
  * value resolves to "classic".
  */
-const SELECTABLE_MODEL_IDS: readonly ConsoleModelId[] = ["classic", "pro"];
+export const SELECTABLE_MODEL_IDS: readonly ConsoleModelId[] = ["classic", "pro", "portrait"];
 
 export function resolveModelId(value: string | null | undefined): ConsoleModelId {
   return SELECTABLE_MODEL_IDS.includes(value as ConsoleModelId) ? (value as ConsoleModelId) : "classic";
+}
+
+/**
+ * Short badge naming a cart's model on a grid card. Derived from the model id
+ * rather than tested against one of them, so a new model shows its own name
+ * instead of silently reading as Classic.
+ */
+const MODEL_BADGES: Record<ConsoleModelId, string> = {
+  classic: "CLASSIC",
+  pro: "PRO",
+  portrait: "PORTRAIT",
+  voxel: "VOXEL",
+};
+
+export function modelBadge(value: string | null | undefined): string {
+  return MODEL_BADGES[resolveModelId(value)];
 }
 
 /**
@@ -29,6 +45,11 @@ export function resolveModelId(value: string | null | undefined): ConsoleModelId
 export const ENGINE_URL_BY_MODEL: Record<ConsoleModelId, string> = {
   classic: withBasePath(process.env.NEXT_PUBLIC_ENGINE_URL ?? "/engine/tic80.js"),
   pro: withBasePath(process.env.NEXT_PUBLIC_PRO_ENGINE_URL ?? "/engine/pro/engine.js"),
+  // Portrait is Pro's spec transposed, but the dimensions are compile-time
+  // constants in the core, so it is a separate binary rather than a mode of pro.
+  portrait: withBasePath(
+    process.env.NEXT_PUBLIC_PORTRAIT_ENGINE_URL ?? "/engine/portrait/engine.js",
+  ),
   // No voxel engine yet; falls back to classic so the type stays total.
   voxel: withBasePath(process.env.NEXT_PUBLIC_ENGINE_URL ?? "/engine/tic80.js"),
 };

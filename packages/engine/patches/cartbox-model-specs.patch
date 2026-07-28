@@ -1,0 +1,238 @@
+diff --git a/include/tic80.h b/include/tic80.h
+index 325b5b63..654ff103 100644
+--- a/include/tic80.h
++++ b/include/tic80.h
+@@ -30,11 +30,29 @@
+ extern "C" {
+ #endif
+ 
++// Cartbox fork: the base display dimensions are overridable at build time via -D
++// so a second "pro" core build can select a larger fixed spec (640x360) while the
++// classic build compiles to the exact upstream values. Guards leave classic
++// untouched (no -D => the original defaults) and keep the change upstream-friendly.
++#ifndef TIC80_WIDTH
+ #define TIC80_WIDTH             240
++#endif
++#ifndef TIC80_HEIGHT
+ #define TIC80_HEIGHT            136
++#endif
++#ifndef TIC80_FULLWIDTH_BITS
+ #define TIC80_FULLWIDTH_BITS    8
++#endif
+ #define TIC80_FULLWIDTH         (1 << TIC80_FULLWIDTH_BITS)
++// Cartbox fork: the overscan buffer's height is derived from its width at 16:9,
++// which cannot express a portrait model — at 360x640 the widest sensible
++// FULLWIDTH (512) yields a 288-line buffer, far short of the 640 the screen
++// needs. Overridable at build time so the portrait core can state its own
++// height; undefined it keeps the exact upstream derivation, so the classic and
++// pro builds are unaffected.
++#ifndef TIC80_FULLHEIGHT
+ #define TIC80_FULLHEIGHT        (TIC80_FULLWIDTH*9/16)
++#endif
+ 
+ #define TIC80_MARGIN_TOP        ((TIC80_FULLHEIGHT - TIC80_HEIGHT) / 2)
+ #define TIC80_MARGIN_BOTTOM     TIC80_MARGIN_TOP
+diff --git a/src/core/sound.c b/src/core/sound.c
+index 637c56cc..352bd743 100644
+--- a/src/core/sound.c
++++ b/src/core/sound.c
+@@ -40,7 +40,7 @@ static_assert(COUNT_OF(NoteFreqs) == NOTES * OCTAVES + PIANO_START, "count_of_fr
+ static_assert(sizeof(tic_sound_register) == 16 + 2,                 "tic_sound_register");
+ static_assert(sizeof(tic_sample) == 66,                             "tic_sample");
+ static_assert(sizeof(tic_track_pattern) == 3 * MUSIC_PATTERN_ROWS,  "tic_track_pattern");
+-static_assert(sizeof(tic_track) == 3 * MUSIC_FRAMES + 3,            "tic_track");
++static_assert(sizeof(tic_track) == TRACK_PATTERNS_SIZE * MUSIC_FRAMES + 3, "tic_track");
+ static_assert(tic_music_cmd_count == 1 << MUSIC_CMD_BITS,           "tic_music_cmd_count");
+ static_assert(sizeof(tic_music_state) == 4,                         "tic_music_state_size");
+ 
+diff --git a/src/tic.h b/src/tic.h
+index 27b63fdb..88d0fa2d 100644
+--- a/src/tic.h
++++ b/src/tic.h
+@@ -26,13 +26,28 @@
+ #include "tic80.h"
+ #include "defines.h"
+ 
++// Cartbox fork: VRAM/RAM sizes are overridable at build time so the pro core can
++// enlarge the fixed memory map for its bigger framebuffer and map (see tic80.h).
++// The static_asserts in core.c require these to equal sizeof(tic_vram)/sizeof(tic_ram);
++// the union's data[SIZE] member makes that hold as long as SIZE >= the struct
++// members, so the pro build sizes them generously above the computed layout.
++#ifndef TIC_VRAM_SIZE
+ #define TIC_VRAM_SIZE (16*1024) //16K
++#endif
++#ifndef TIC_RAM_SIZE
+ #define TIC_RAM_SIZE (TIC_VRAM_SIZE+80*1024) //16K+80K
++#endif
+ #define TIC_WASM_PAGE_COUNT 4 // 256K
+ #define TIC_FONT_WIDTH 6
+ #define TIC_FONT_HEIGHT 6
+ #define TIC_ALTFONT_WIDTH 4
++// Cartbox fork: palette bit depth is overridable so the pro core can build at
++// 8bpp (256-entry palette, one byte per framebuffer pixel). No -D => classic 4bpp
++// (16 colors). This cascades to the screen/tile/palette/mapping struct sizes; the
++// shared draw/blit code selects the matching pixel access via TIC_PALETTE_BPP.
++#ifndef TIC_PALETTE_BPP
+ #define TIC_PALETTE_BPP 4
++#endif
+ #define TIC_PALETTE_SIZE (1 << TIC_PALETTE_BPP)
+ #define TIC_PALETTES 2
+ #define TIC_SPRITESIZE 8
+@@ -62,7 +77,12 @@
+ #define TIC_PERSISTENT_SIZE (1024/sizeof(s32)) // 1K
+ #define TIC_SAVEID_SIZE 64
+ 
++// Cartbox fork: overridable so the pro core builds with 8 sound channels. No -D =>
++// classic 4. Channel arrays (registers/sfxpos/state) and the mixer all size from
++// this; the music-track pattern packing widens accordingly (see tools.c getPatternData).
++#ifndef TIC_SOUND_CHANNELS
+ #define TIC_SOUND_CHANNELS 4
++#endif
+ #define SFX_TICKS 30
+ #define SFX_COUNT_BITS 6
+ #define SFX_COUNT (1 << SFX_COUNT_BITS)
+@@ -402,7 +422,14 @@ typedef union
+ #endif
+     };
+ 
++    // Per-channel stereo volume is packed 2 nibbles (left/right) per channel, so
++    // 4 channels fill a u32 but 8 need 64 bits. Widened only when the build has
++    // >4 channels so the classic 4-channel RAM layout is byte-identical.
++#if TIC_SOUND_CHANNELS > 4
++    u64 data;
++#else
+     u32 data;
++#endif
+ } tic_stereo_volume;
+ 
+ typedef struct
+@@ -557,21 +584,21 @@ typedef union
+             {
+ 		struct {
+ #if RETRO_IS_BIG_ENDIAN
+-		    u8 padding_border:4;
++		    u8 :(BITS_IN_BYTE - TIC_PALETTE_BPP);
+ 		    u8 border:TIC_PALETTE_BPP;
+ #else
+ 		    u8 border:TIC_PALETTE_BPP;
+-		    u8 padding_border:4;
++		    u8 :(BITS_IN_BYTE - TIC_PALETTE_BPP);
+ #endif
+ 		};
+                 // clear color for the BANK1
+ 		struct {
+ #if RETRO_IS_BIG_ENDIAN
+-		    u8 padding_clear:4;
++		    u8 :(BITS_IN_BYTE - TIC_PALETTE_BPP);
+ 		    u8 clear:TIC_PALETTE_BPP;
+ #else
+ 		    u8 clear:TIC_PALETTE_BPP;
+-		    u8 padding_clear:4;
++		    u8 :(BITS_IN_BYTE - TIC_PALETTE_BPP);
+ #endif
+ 		};
+             };
+diff --git a/src/tilesheet.c b/src/tilesheet.c
+index 40c7294f..b659d0bc 100644
+--- a/src/tilesheet.c
++++ b/src/tilesheet.c
+@@ -32,8 +32,11 @@ static const tic_blit_segment segments[] = {
+     //   |  |  |  |     |   +tile_width
+         {0, 0, 1, 256,  16, 8,  TIC_SPRITESIZE,   tic_tool_peek1, tic_tool_poke1}, // system gfx
+         {0, 0, 1, 256,  16, 8,  TIC_SPRITESIZE,   tic_tool_peek1, tic_tool_poke1}, // system font
+-        {0, 0, 1, 256,  16, 8,  sizeof(tic_tile), tic_tool_peek4, tic_tool_poke4}, // 4bpp p0 bg
+-        {0, 1, 1, 256,  16, 8,  sizeof(tic_tile), tic_tool_peek4, tic_tool_poke4}, // 4bpp p0 fg
++        // Default sprite mode: pixel access follows the palette bit depth via the
++        // tic_tool_*_screen selector — 4bpp/16-color on classic, 8bpp/256-color on
++        // the pro core. ptr_size (sizeof(tic_tile)) tracks it automatically.
++        {0, 0, 1, 256,  16, 8,  sizeof(tic_tile), tic_tool_peek_screen, tic_tool_poke_screen}, // default p0 bg
++        {0, 1, 1, 256,  16, 8,  sizeof(tic_tile), tic_tool_peek_screen, tic_tool_poke_screen}, // default p0 fg
+ 
+         {0, 0, 2, 512,  32, 16, sizeof(tic_tile), tic_tool_peek2, tic_tool_poke2}, // 2bpp p0 bg
+         {1, 0, 2, 512,  32, 16, sizeof(tic_tile), tic_tool_peek2, tic_tool_poke2}, // 2bpp p1 bg
+diff --git a/src/tools.c b/src/tools.c
+index bff64277..7ad9dff8 100644
+--- a/src/tools.c
++++ b/src/tools.c
+@@ -33,15 +33,20 @@ extern void tic_tool_poke2(void* addr, u32 index, u8 value);
+ extern u8 tic_tool_peek2(const void* addr, u32 index);
+ extern void tic_tool_poke1(void* addr, u32 index, u8 value);
+ extern u8 tic_tool_peek1(const void* addr, u32 index);
++extern void tic_tool_poke8(void* addr, u32 index, u8 value);
++extern u8 tic_tool_peek8(const void* addr, u32 index);
+ extern s32 tic_tool_sfx_pos(s32 speed, s32 ticks);
+ extern u32 tic_rgba(const tic_rgb* c);
+ extern s32 tic_modulo(s32 x, s32 m);
+ 
+-static u32 getPatternData(const tic_track* track, s32 frame)
++// 64-bit accumulator: the packed pattern IDs are TRACK_PATTERN_BITS (6) per channel,
++// so 8 channels need 48 bits — a u32 (as upstream uses for 4 channels) would drop
++// channels 6-7. u64 covers up to 10 channels.
++static u64 getPatternData(const tic_track* track, s32 frame)
+ {
+-    u32 patternData = 0;
++    u64 patternData = 0;
+     for(s32 b = 0; b < TRACK_PATTERNS_SIZE; b++)
+-        patternData |= track->data[frame * TRACK_PATTERNS_SIZE + b] << (BITS_IN_BYTE * b);
++        patternData |= (u64)track->data[frame * TRACK_PATTERNS_SIZE + b] << (BITS_IN_BYTE * b);
+ 
+     return patternData;
+ }
+@@ -53,11 +58,11 @@ s32 tic_tool_get_pattern_id(const tic_track* track, s32 frame, s32 channel)
+ 
+ void tic_tool_set_pattern_id(tic_track* track, s32 frame, s32 channel, s32 pattern)
+ {
+-    u32 patternData = getPatternData(track, frame);
++    u64 patternData = getPatternData(track, frame);
+     s32 shift = channel * TRACK_PATTERN_BITS;
+ 
+-    patternData &= ~(TRACK_PATTERN_MASK << shift);
+-    patternData |= pattern << shift;
++    patternData &= ~((u64)TRACK_PATTERN_MASK << shift);
++    patternData |= (u64)pattern << shift;
+ 
+     for(s32 b = 0; b < TRACK_PATTERNS_SIZE; b++)
+         track->data[frame * TRACK_PATTERNS_SIZE + b] = (patternData >> (b * BITS_IN_BYTE)) & 0xff;
+diff --git a/src/tools.h b/src/tools.h
+index 5d53612e..f1622f59 100644
+--- a/src/tools.h
++++ b/src/tools.h
+@@ -71,9 +71,38 @@ inline u8 tic_tool_peek1(const void* addr, u32 index)
+     return PEEK_N(addr, index, 3,7,0,1);
+ }
+ 
++// One pixel per byte (8bpp). Unlike peek1/2/4 there is no sub-byte packing, so
++// this is a plain indexed access. Used by the pro core's 8bpp framebuffer.
++inline void tic_tool_poke8(void* addr, u32 index, u8 value)
++{
++    ((u8*)addr)[index] = value;
++}
++
++inline u8 tic_tool_peek8(const void* addr, u32 index)
++{
++    return ((const u8*)addr)[index];
++}
++
+ #undef PEEK_N
+ #undef POKE_N
+ 
++// Framebuffer, color-mapping table, and blit source are all stored at the
++// palette bit depth: 4bpp on the classic core, 8bpp on the pro core. These
++// selectors let the shared draw/blit code address a screen pixel without
++// hardcoding the packing; on the classic build they expand to the exact 4bpp
++// calls it used before, so its behavior is unchanged.
++#if TIC_PALETTE_BPP == 8
++#   define tic_tool_peek_screen         tic_tool_peek8
++#   define tic_tool_poke_screen         tic_tool_poke8
++#   define tic_api_peek_pix(mem, idx)        tic_api_peek((mem), (idx), 8)
++#   define tic_api_poke_pix(mem, idx, val)   tic_api_poke((mem), (idx), (val), 8)
++#else
++#   define tic_tool_peek_screen         tic_tool_peek4
++#   define tic_tool_poke_screen         tic_tool_poke4
++#   define tic_api_peek_pix(mem, idx)        tic_api_peek4((mem), (idx))
++#   define tic_api_poke_pix(mem, idx, val)   tic_api_poke4((mem), (idx), (val))
++#endif
++
+ inline u32 tic_rgba(const tic_rgb* c)
+ {
+     return (0xff << 24) | (c->b << 16) | (c->g << 8) | (c->r << 0);

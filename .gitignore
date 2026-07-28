@@ -22,6 +22,7 @@ tsconfig.tsbuildinfo
 # Engine build trees and scratch copies (rebuilt by packages/engine/scripts)
 packages/engine/build-wasm/
 packages/engine/build-wasm-pro/
+packages/engine/build-wasm-portrait/
 packages/engine/build-native/
 packages/engine/dist.bak/
 

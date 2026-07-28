@@ -10,7 +10,7 @@
  * live in @cartbox/player's model registry, which these mirror.
  */
 
-export type ConsoleModelId = "classic" | "pro" | "voxel";
+export type ConsoleModelId = "classic" | "pro" | "portrait" | "voxel";
 export type RasterKind = "raster2d" | "voxel3d";
 
 export interface ConsoleModelSpec {
@@ -98,6 +98,38 @@ export const PRO_MODEL: ConsoleModelSpec = {
   screenHeight: 45,
 };
 
+/**
+ * Portrait — Pro's spec turned on its side, 360x640 (9:16), for carts played the
+ * way a handheld is actually held. Everything except the two dimensions is Pro's:
+ * 360*640 is exactly 640*360, so the core reuses Pro's framebuffer, memory map,
+ * 8bpp tiles, 64-colour authoring palette and 8 sound channels unchanged.
+ *
+ * The map is WIDTHxHEIGHT cells like the other models, so it too is the same
+ * 225KB as Pro's — only its shape differs (45x80 screens of 8px cells).
+ *
+ * Core #defines the built portrait engine uses: TIC80_WIDTH=360/TIC80_HEIGHT=640,
+ * TIC80_FULLWIDTH_BITS=9 and TIC80_FULLHEIGHT=704 for the overscan buffer (the
+ * upstream 16:9 derivation cannot express a portrait frame), plus Pro's
+ * TIC_PALETTE_BPP=8, TIC_SOUND_CHANNELS=8 and enlarged VRAM/RAM.
+ */
+export const PORTRAIT_MODEL: ConsoleModelSpec = {
+  id: "portrait",
+  label: "Portrait",
+  kind: "raster2d",
+  width: 360,
+  height: 640,
+  tileSize: 8,
+  tilePixelBits: 8,
+  paletteSize: 64,
+  tilesPerPage: 256,
+  spritePages: 2,
+  sheetCols: 16,
+  mapWidth: 360,
+  mapHeight: 640,
+  screenWidth: 45,
+  screenHeight: 80,
+};
+
 /** Provisional — finalised when the voxel engine is built. */
 export const VOXEL_MODEL: ConsoleModelSpec = {
   id: "voxel",
@@ -120,5 +152,6 @@ export const VOXEL_MODEL: ConsoleModelSpec = {
 export const CONSOLE_MODELS: Record<ConsoleModelId, ConsoleModelSpec> = {
   classic: CLASSIC_MODEL,
   pro: PRO_MODEL,
+  portrait: PORTRAIT_MODEL,
   voxel: VOXEL_MODEL,
 };

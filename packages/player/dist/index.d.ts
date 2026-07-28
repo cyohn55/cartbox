@@ -8,7 +8,7 @@
  * toggles: that would dissolve the aesthetic and break the fixed-spec
  * assumptions the platform layer depends on.
  */
-type ModelId = "classic" | "pro" | "voxel";
+type ModelId = "classic" | "pro" | "portrait" | "voxel";
 interface ConsoleModel {
     id: ModelId;
     label: string;

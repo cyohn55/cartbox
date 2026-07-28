@@ -54,6 +54,7 @@ import {
   type TitleClaim,
 } from "../apps/web/src/lib/titleClaims";
 import { DEMO_TITLES } from "../apps/web/src/lib/demoTitles";
+import { SELECTABLE_MODEL_IDS } from "../apps/web/src/lib/consoleModel";
 
 const MIGRATION_PATH = fileURLToPath(
   new URL(
@@ -65,11 +66,13 @@ const MIGRATION_PATH = fileURLToPath(
 const migrationSql = readFileSync(MIGRATION_PATH, "utf8");
 
 /**
- * The migration that owns the current `titles.runtime` whitelist. 0011 fixed it
- * at the runtimes of the time; 0013 restates it, so that is the one to read.
+ * The migration that owns the current `titles.runtime` whitelist. Each addition
+ * restates the whole constraint, so this points at the latest one — 0011 fixed
+ * it at the runtimes of the time, 0013 caught up the three iframe runtimes, and
+ * 0015 added the portrait core.
  */
 const runtimeMigrationSql = readFileSync(
-  fileURLToPath(new URL("../supabase/migrations/0013_title_runtimes.sql", import.meta.url)),
+  fileURLToPath(new URL("../supabase/migrations/0015_portrait_runtime.sql", import.meta.url)),
   "utf8",
 );
 
@@ -135,6 +138,18 @@ describe("catalog normalisation", () => {
   it("maps a cart's console model onto the matching Cartbox runtime", () => {
     expect(runtimeForConsoleModel("pro")).toBe("cartbox-pro");
     expect(runtimeForConsoleModel("classic")).toBe("cartbox-classic");
+    expect(runtimeForConsoleModel("portrait")).toBe("cartbox-portrait");
+  });
+
+  it("gives every authorable model a runtime of its own", () => {
+    // Each model runs on its own core binary, so sharing a runtime id would
+    // hand a cart the wrong engine. This is the check that would have caught
+    // portrait being silently labelled Classic.
+    const runtimes = SELECTABLE_MODEL_IDS.map((model) => runtimeForConsoleModel(model));
+    expect(new Set(runtimes).size).toBe(SELECTABLE_MODEL_IDS.length);
+    for (const [index, runtime] of runtimes.entries()) {
+      expect(resolveRuntime(runtime)?.consoleModel).toBe(SELECTABLE_MODEL_IDS[index]);
+    }
   });
 
   it("treats an unknown console model as Classic rather than failing", () => {
@@ -266,11 +281,12 @@ describe("runtime registry", () => {
     // wasm-app gained a player in Phase 2, scummvm followed with the ScummVM
     // engine build and its iframe player, supertux with the SuperTux one, dos
     // with the js-dos/DOSBox iframe player, then quake (WebQuake) and cube2
-    // (BananaBread).
+    // (BananaBread). cartbox-portrait runs the 360x640 core.
     const implemented = implementedRuntimes().map((runtime) => runtime.id);
     expect(implemented).toEqual([
       "cartbox-classic",
       "cartbox-pro",
+      "cartbox-portrait",
       "wasm-app",
       "scummvm",
       "supertux",
