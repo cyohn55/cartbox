@@ -23,7 +23,7 @@
  *   and standing sprite planes need, none of which a column can describe.
  */
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   MapVoxelSpace,
   MaterialMap,
@@ -60,15 +60,18 @@ import { FieldPreview } from "./FieldPreview";
 import { GeneratorPanel } from "./GeneratorPanel";
 import { Map3DCanvas, type SpaceHover } from "./Map3DCanvas";
 import { MapCanvas } from "./MapCanvas";
+import { MapWalkCanvas, standOnGround, type WalkCamera, type WalkHover } from "./MapWalkCanvas";
 import { RailGroup, RailHint, RangeControl, SegmentedControl, ToolRail } from "./railControls";
 import { MaterialSurface, NormalSurface } from "./paintSurface";
 import { MaterialBrushSurface } from "./materialBrushSurface";
 import { TilePicker } from "./TilePicker";
 import { singleTileBrush, type MapBrush } from "./mapBrush";
 import {
+  MAP_CAMERA_MODES,
   MAP_LAYERS,
   MAP_VIEW_MODES,
   MAP_ZOOMS,
+  WALK_DETAIL_LEVELS,
   PIXEL_ZOOM_INDEX,
   PLANE_KINDS,
   defaultSpaceToolFor,
@@ -79,6 +82,7 @@ import {
   shapeForLayer,
   spaceLayerFor,
   spaceToolsFor,
+  type MapCameraMode,
   type MapLayer,
   type MapSpaceTool,
   type MapTool,
@@ -110,6 +114,24 @@ const RANGE_OPTIONS = [
  * a distant speck. The wheel takes it from there.
  */
 const DEFAULT_CAMERA = { yaw: 0.7, pitch: 0.62, cell: 22 };
+
+/** How far down the first-person camera looks when you first step into the map. */
+const WALK_ENTRY_PITCH = -0.35;
+
+/**
+ * Convert between the two cameras' headings.
+ *
+ * They describe opposite things with the same number: the orbit camera's yaw is
+ * the angle it has swung *around* the focus, so it looks back along `(sin yaw, 0,
+ * -cos yaw)`, while the walking camera's yaw is the direction it faces, `(sin yaw,
+ * 0, cos yaw)`. Reflecting through π is what makes stepping between them continue
+ * the same view instead of spinning you round to face the way you came.
+ *
+ * Its own inverse, so one function serves both directions.
+ */
+function walkYawOf(yaw: number): number {
+  return Math.PI - yaw;
+}
 
 interface MapEditorProps {
   sheet: SpriteSheet;
@@ -181,6 +203,21 @@ export function MapEditor({
   const [camera, setCamera] = useState(DEFAULT_CAMERA);
   const [radius, setRadius] = useState(16);
 
+  // The first-person camera is its own thing: it has a position in the world
+  // rather than a point it circles, so switching between orbiting and walking
+  // must not try to reinterpret one as the other. Each keeps its own place, and
+  // stepping between them carries the position across (see selectCameraMode).
+  const [cameraMode, setCameraMode] = useState<MapCameraMode>("orbit");
+  const [walk, setWalk] = useState<WalkCamera>(() => ({
+    x: Math.floor(map.width / 2),
+    y: 4,
+    z: Math.floor(map.height / 2),
+    yaw: 0.7,
+    pitch: -0.15,
+  }));
+  const [walkDetail, setWalkDetail] = useState(WALK_DETAIL_LEVELS[1]!.id);
+  const [walkHover, setWalkHover] = useState<WalkHover | null>(null);
+
   // Generator state: which one, its values, and how its classes map onto the
   // active layer. The mapping is per generator, so switching back to one you
   // tuned earlier restores what you set up.
@@ -237,7 +274,11 @@ export function MapEditor({
   const bump = () => setVersion((current) => current + 1);
   const screen = hover ? map.screenOf(hover.x, hover.y) : null;
   const inSpace = view === "space";
+  const walking = inSpace && cameraMode === "walk";
   const spaceTools = spaceToolsFor(layer, space.shape);
+  // Where the active 3D view says you are aiming — the two cameras report the
+  // same thing about different pointers, so the HUD reads one of them.
+  const aiming = walking ? walkHover : spaceHover;
 
   // The atlas the 3D view samples: the world's materials plus every sprite on the
   // tiles page. Rebuilt when the art changes so a texture painted on a face shows
@@ -305,6 +346,35 @@ export function MapEditor({
     }
     setSpaceNote(null);
     setView(next);
+  };
+
+  /**
+   * Step between circling the map and standing in it, carrying your place across
+   * so the two are the same trip rather than two unrelated cameras. Walking in
+   * lands you at eye height over the ground you were looking at; orbiting back
+   * out circles the cell you were standing on.
+   */
+  const selectCameraMode = (next: MapCameraMode) => {
+    if (next === cameraMode) return;
+    if (next === "walk") {
+      setWalk(
+        standOnGround(space, {
+          x: focus.x,
+          y: focus.y,
+          z: focus.z,
+          yaw: walkYawOf(camera.yaw),
+          // Tilted a little downward, because what you step in to do is build on
+          // the ground in front of you — arriving level puts the crosshair on the
+          // sky and gives the tools nothing to act on.
+          pitch: WALK_ENTRY_PITCH,
+        }),
+      );
+    } else {
+      setFocus({ x: walk.x, y: Math.max(0, walk.y - 1), z: walk.z });
+      setCamera((current) => ({ ...current, yaw: walkYawOf(walk.yaw) }));
+    }
+    setSpaceNote(null);
+    setCameraMode(next);
   };
 
   const selectGenerator = (id: string) => {
@@ -404,11 +474,43 @@ export function MapEditor({
 
         {inSpace ? (
           <>
-            <SegmentedControl label="Range" options={RANGE_OPTIONS} selected={radius} onSelect={setRadius} />
-            <RailHint>
-              Drag to orbit, shift-drag to pan, wheel to zoom. W A S D walks; Q and E change height. Right-click
-              removes.
-            </RailHint>
+            <SegmentedControl
+              label="Camera"
+              options={MAP_CAMERA_MODES}
+              selected={cameraMode}
+              onSelect={selectCameraMode}
+            />
+
+            {walking ? (
+              <>
+                <SegmentedControl
+                  label="Detail"
+                  options={WALK_DETAIL_LEVELS}
+                  selected={walkDetail}
+                  onSelect={setWalkDetail}
+                />
+                <RailHint>
+                  Click the view to capture the mouse, then look with the mouse and move with W A S D. Space and
+                  Shift change height, Ctrl sprints, Escape releases. Click builds, right-click breaks.
+                </RailHint>
+                <button
+                  type="button"
+                  className={styles.rendererToggle}
+                  onClick={() => setWalk((current) => standOnGround(space, current))}
+                >
+                  Stand on ground
+                </button>
+              </>
+            ) : (
+              <>
+                <SegmentedControl label="Range" options={RANGE_OPTIONS} selected={radius} onSelect={setRadius} />
+                <RailHint>
+                  Drag to orbit, shift-drag to pan, wheel to zoom. W A S D walks the focus; Q and E change height.
+                  Right-click removes.
+                </RailHint>
+              </>
+            )}
+
             {isColumnLayer(layer) && (
               <button type="button" className={styles.rendererToggle} onClick={clearCells}>
                 Clear cells
@@ -437,7 +539,29 @@ export function MapEditor({
       </aside>
 
       <section className={styles.mapStage}>
-        {inSpace ? (
+        {walking ? (
+          <MapWalkCanvas
+            sheet={sheet}
+            space={space}
+            atlas={atlas}
+            tool={spaceTool}
+            colorIndex={colorIndex}
+            material={columnMaterial}
+            planeKind={planeKind}
+            brushTile={brush.tile}
+            pixels={pixelSurface}
+            palette={palette}
+            camera={walk}
+            onCameraChange={setWalk}
+            resolution={walkDetail}
+            version={version}
+            onEdit={bump}
+            onSpaceCommitted={commitSpace}
+            onPickStyle={adoptStyle}
+            onHover={setWalkHover}
+            onNote={setSpaceNote}
+          />
+        ) : inSpace ? (
           <Map3DCanvas
             sheet={sheet}
             space={space}
@@ -489,13 +613,15 @@ export function MapEditor({
             <span className={styles.hudItem}>
               <span className={styles.hudLabel}>Standing</span>
               <span className={`${styles.hudValue} data`}>
-                {Math.round(focus.x)},{Math.round(focus.y)},{Math.round(focus.z)}
+                {walking
+                  ? `${Math.round(walk.x)},${Math.round(walk.y)},${Math.round(walk.z)}`
+                  : `${Math.round(focus.x)},${Math.round(focus.y)},${Math.round(focus.z)}`}
               </span>
             </span>
             <span className={styles.hudItem}>
               <span className={styles.hudLabel}>Aiming</span>
               <span className={`${styles.hudValue} data`}>
-                {spaceHover ? `${spaceHover.x},${spaceHover.y},${spaceHover.z}` : "—"}
+                {aiming ? `${aiming.x},${aiming.y},${aiming.z}` : "—"}
               </span>
             </span>
             <span className={styles.hudItem}>
@@ -503,7 +629,7 @@ export function MapEditor({
               <span className={`${styles.hudValue} data`}>{space.cellCount.toLocaleString()}</span>
             </span>
             {spaceNote && (
-              <span className={styles.hudNote} title={spaceNote}>
+              <span className={styles.hudNote} title={spaceNote} data-testid="map-note">
                 {spaceNote}
               </span>
             )}
@@ -574,7 +700,7 @@ export function MapEditor({
               maxColumnHeight={MAX_MAP_VOXEL_HEIGHT}
             />
           </GeneratorPanel>
-        ) : layer === "tiles" || (inSpace && needsSpriteBrush(spaceTool, planeKind)) ? (
+        ) : !inSpace && layer === "tiles" ? (
           <TilePicker
             sheet={sheet}
             page={TILES_PAGE}
@@ -586,6 +712,9 @@ export function MapEditor({
           />
         ) : (
           <div>
+            {/* Colour, always. Every 3D tool paints with it — a cell's colour, a
+                plane's tint, and the pixel the pencil lays down — so hiding it
+                behind a tool choice left the pixel tools with no colour to use. */}
             <div className={styles.panelHead}>
               <span className={styles.panelTitle}>Palette</span>
               <span className={styles.panelMeta}>{palette[colorIndex] ?? "—"}</span>
@@ -604,7 +733,8 @@ export function MapEditor({
                 />
               ))}
             </div>
-            {(isColumnLayer(layer) || inSpace) && (
+
+            {(inSpace || isColumnLayer(layer)) && (
               <>
                 <div className={styles.panelHead} style={{ marginTop: 14 }}>
                   <span className={styles.panelTitle}>Material</span>
@@ -632,20 +762,46 @@ export function MapEditor({
                       aria-pressed={entry.material === columnMaterial}
                     />
                   ))}
+                  {/* The armed sprite, offered as one material among the world's
+                      own rather than as a separate button: skinning a cell with
+                      your own art is the same kind of choice as skinning it with
+                      grass, and the Sprites panel below chooses which sprite. */}
+                  {inSpace && (
+                    <button
+                      type="button"
+                      className={`${styles.swatch} ${
+                        columnMaterial === spriteTileMaterial(brush.tile) ? styles.swatchActive : ""
+                      }`}
+                      style={{ padding: 0, overflow: "hidden" }}
+                      onClick={() => setColumnMaterial(spriteTileMaterial(brush.tile))}
+                      title={`Sprite #${brush.tile} — skin cells with your own art`}
+                      aria-label={`Material from sprite ${brush.tile}`}
+                      aria-pressed={columnMaterial === spriteTileMaterial(brush.tile)}
+                    >
+                      <SpriteSwatch sheet={sheet} tile={brush.tile} version={version} />
+                    </button>
+                  )}
                 </div>
-                {inSpace && (
-                  <button
-                    type="button"
-                    className={styles.rendererToggle}
-                    style={{ marginTop: 10 }}
-                    onClick={() => setColumnMaterial(spriteTileMaterial(brush.tile))}
-                  >
-                    Skin with sprite #{brush.tile}
-                  </button>
-                )}
               </>
             )}
-            <p className={styles.pickerHint}>{hintFor(view, layer, spaceTool, space.shape)}</p>
+
+            {/* The sprite itself, whenever a tool is about to stand it in the
+                world or paint on it. */}
+            {inSpace && needsSpriteBrush(spaceTool, planeKind) && (
+              <div style={{ marginTop: 14 }}>
+                <TilePicker
+                  sheet={sheet}
+                  page={TILES_PAGE}
+                  selected={brush.tile}
+                  version={version}
+                  onSelect={(tile) => setBrush(singleTileBrush(tile))}
+                  onSelectBrush={setBrush}
+                  brush={brush}
+                />
+              </div>
+            )}
+
+            <p className={styles.pickerHint}>{hintFor(view, cameraMode, layer, spaceTool, space.shape)}</p>
           </div>
         )}
       </aside>
@@ -670,16 +826,53 @@ function materialLabel(material: number, tilesPerPage: number): string {
   return BUILD_MATERIALS.find((entry) => entry.material === material)?.name ?? "flat";
 }
 
+/**
+ * The sprite the material swatch stands for, drawn at its own resolution and
+ * scaled up crisply — a swatch of the actual art says far more than a label.
+ */
+function SpriteSwatch({ sheet, tile, version }: { sheet: SpriteSheet; tile: number; version: number }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+    if (!canvas || !context) return;
+    const image = context.createImageData(sheet.tileSize, sheet.tileSize);
+    image.data.set(sheet.renderTileRgba(TILES_PAGE, tile));
+    context.putImageData(image, 0, 0);
+  }, [sheet, tile, version]);
+  return (
+    <canvas
+      ref={canvasRef}
+      width={sheet.tileSize}
+      height={sheet.tileSize}
+      style={{ display: "block", width: "100%", height: "100%", imageRendering: "pixelated" }}
+    />
+  );
+}
+
 /** The one-paragraph explanation of what the active tool does where you are. */
-function hintFor(view: MapViewMode, layer: MapLayer, tool: MapSpaceTool, shape: string): string {
+function hintFor(
+  view: MapViewMode,
+  cameraMode: MapCameraMode,
+  layer: MapLayer,
+  tool: MapSpaceTool,
+  shape: string,
+): string {
   if (view === "space") {
     if (isPixelSpaceTool(tool)) {
-      return "Paints the sprite a cell is skinned with, on the face you clicked, at the pixel under the cursor. A cell with no sprite yet takes the armed one on the first click.";
+      return "Paints the sprite a cell wears, on the face you clicked, at the pixel under the cursor. A cell with no sprite yet is given the armed one and painted in the same click — and every cell wearing that sprite shares its pixels.";
     }
     if (tool === "plane") {
-      return "Stands a flat sprite quad in the cell across the face you click — grass, wires, banners, anything that should read as art on a surface rather than a solid block. Cross stands two, so it looks the same from every side.";
+      return "Stands the armed sprite as a flat quad in the cell across the face you click — grass, wires, banners, anything that should read as art on a surface rather than a solid block. Cross stands two, so it looks the same from every side.";
     }
-    return `Cells are placed against the face you point at and removed by clicking them, so overhangs, caves and bridges are all just cells. ${
+    if (tool === "paintCell") {
+      return "Restyles the cell you click with the armed colour and material. Right-click strips it back to flat colour.";
+    }
+    const where =
+      cameraMode === "walk"
+        ? "Cells are placed against the face under the crosshair and broken by clicking them"
+        : "Cells are placed against the face you point at and removed by clicking them";
+    return `${where}, so overhangs, caves and bridges are all just cells. ${
       shape === "hexel" ? "Hexels only sit on the close-packed lattice, so some neighbours are not valid sites." : ""
     }`;
   }

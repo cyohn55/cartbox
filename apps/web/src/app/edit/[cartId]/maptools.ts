@@ -203,6 +203,26 @@ export function spaceLayerFor(layer: MapLayer): MapLayer {
   return layer === "tiles" ? "voxels" : layer;
 }
 
+/**
+ * How the 3D stage is looking at the map. Orbiting keeps the whole build in
+ * frame and is the better view for shaping terrain; walking puts you inside it at
+ * eye level, which is the only way to judge what a place will actually feel like
+ * — and the only way to reach the inside of something you have enclosed.
+ */
+export type MapCameraMode = "orbit" | "walk";
+
+export const MAP_CAMERA_MODES: readonly { id: MapCameraMode; label: string; hint: string }[] = [
+  { id: "orbit", label: "Orbit", hint: "Circle the map from outside and build on the faces you can see." },
+  { id: "walk", label: "Walk", hint: "Stand in the map in first person: mouse to look, W A S D to move, Space and Shift for height." },
+];
+
+/** Render sizes the first-person view offers, as the rail selects them. */
+export const WALK_DETAIL_LEVELS: readonly { id: number; label: string; hint: string }[] = [
+  { id: 160, label: "S", hint: "Coarsest and fastest — best while you are getting somewhere." },
+  { id: 224, label: "M", hint: "A balance of sharpness and frame rate." },
+  { id: 320, label: "L", hint: "Sharpest, and the heaviest to cast." },
+];
+
 /** The plane orientations the Plane tool can stand, as the rail selects them. */
 export const PLANE_KINDS: readonly { id: MapCellKind; label: string; hint: string }[] = [
   { id: "planeZ", label: "Z", hint: "A quad facing along the map's rows." },

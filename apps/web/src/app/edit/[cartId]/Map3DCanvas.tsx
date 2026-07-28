@@ -32,7 +32,6 @@ import {
   mapSpaceToModel,
   planeAxisOf,
   renderVoxelModel,
-  COLUMN_MATERIAL_NONE,
   type CellGeometry,
   type MapCellKind,
   type MapViewFocus,
@@ -40,11 +39,15 @@ import {
   type TextureAtlas,
 } from "@cartbox/editor";
 
-import { MAP_SPRITE_PAGE, materialSpriteTile, spriteTileMaterial } from "@/lib/mapAtlas";
-
 import styles from "./editor.module.css";
 import type { PaintSurface } from "./paintSurface";
 import { isPixelSpaceTool, type MapSpaceTool } from "./maptools";
+import {
+  applySpaceTool,
+  targetOfTool,
+  type SpacePick,
+  type SpaceToolResult,
+} from "./mapSpaceTools";
 
 /** Canvas edge in device pixels; also the pick buffers' resolution. */
 const VIEWPORT = 640;
@@ -71,20 +74,6 @@ const HIGHLIGHT: Record<MapSpaceTool, string> = {
   pixelFill: "#ffb066",
   pixelEraser: "#ff7b7b",
 };
-
-/** A resolved click: the cell under the cursor, and where on its face it landed. */
-export interface SpacePick {
-  readonly x: number;
-  readonly y: number;
-  readonly z: number;
-  /** Index into the picked cell's face table — cube faces for a plane cell. */
-  readonly face: number;
-  /** Face-local coordinates in 0..1, the same the texture fill samples with. */
-  readonly u: number;
-  readonly v: number;
-  /** Whether the picked quad belongs to a plane cell rather than a solid block. */
-  readonly plane: boolean;
-}
 
 /** What the cursor is aiming at, for the HUD and the wireframe. */
 export interface SpaceHover {
@@ -452,77 +441,28 @@ export function Map3DCanvas({
     };
   };
 
-  /**
-   * The neighbouring site across the picked face. A plane's faces are cube faces
-   * whatever the map's lattice, so it steps by a cube normal; a solid steps by its
-   * own geometry's offset, which is what keeps a hexel landing on the FCC lattice.
-   */
-  const acrossFace = (pick: SpacePick): [number, number, number] => {
-    const offset = pick.plane ? CUBE_FACES[pick.face]?.normal : geometry.faces[pick.face]?.offset;
-    const [dx, dy, dz] = offset ?? [0, 0, 0];
-    return [pick.x + dx, pick.y + dy, pick.z + dz];
+  /** Everything the shared tools need besides where the pointer was aimed. */
+  const toolContext = () => ({
+    space,
+    tileSize: sheet.tileSize,
+    tilesPerPage: sheet.tilesPerPage,
+    pixels,
+    colorIndex,
+    material,
+    planeKind,
+    brushTile,
+  });
+
+  /** Route a tool's report to the caller: persist, redraw, arm, explain. */
+  const report = (result: SpaceToolResult) => {
+    if (result.picked) onPickStyle(result.picked.colorIndex, result.picked.material);
+    if (result.changedCells) onSpaceCommitted();
+    else if (result.changedPixels) onEdit();
+    onNote(result.note);
   };
 
   /** The cell the active tool would act on. */
-  const targetOf = (pick: SpacePick): [number, number, number] =>
-    tool === "place" || tool === "plane" ? acrossFace(pick) : [pick.x, pick.y, pick.z];
-
-  const placeCell = (pick: SpacePick, kind: MapCellKind) => {
-    const [x, y, z] = acrossFace(pick);
-    if (!space.isValidSite(x, y, z)) {
-      onNote(
-        space.inBounds(x, y, z)
-          ? "That site is off the hexel lattice — try an adjacent face."
-          : "That is past the edge of the map.",
-      );
-      return;
-    }
-    // A plane *is* sprite art standing in space — a flat-coloured quad would just
-    // be a rectangle — so it always wears the sprite the tile picker has armed,
-    // which is the control the rail shows while the Plane tool is active. Solid
-    // blocks take the material palette's choice instead.
-    const skin = kind === "solid" ? material : spriteTileMaterial(brushTile);
-    space.set(x, y, z, { colorIndex, material: skin, kind });
-    onSpaceCommitted();
-  };
-
-  const removeCell = (pick: SpacePick) => {
-    space.clear(pick.x, pick.y, pick.z);
-    onSpaceCommitted();
-  };
-
-  const restyleCell = (pick: SpacePick, strip: boolean) => {
-    space.recolor(pick.x, pick.y, pick.z, colorIndex, strip ? COLUMN_MATERIAL_NONE : material);
-    onSpaceCommitted();
-  };
-
-  /**
-   * Paint a texel of the sprite skinning the picked face.
-   *
-   * A cell with no editable sprite has nothing to paint, so the first click skins
-   * it with the armed tile and stops there — one click, one change the author can
-   * see and undo — and the next click paints on it.
-   */
-  const paintTexel = (pick: SpacePick) => {
-    const target = space.cellAt(pick.x, pick.y, pick.z);
-    if (!target) return;
-    const tile = materialSpriteTile(target.material, sheet.tilesPerPage);
-    if (tile === null) {
-      space.recolor(pick.x, pick.y, pick.z, target.colorIndex, spriteTileMaterial(brushTile));
-      onNote(`Skinned this cell with sprite #${brushTile}. Click again to paint it.`);
-      onSpaceCommitted();
-      return;
-    }
-
-    const size = sheet.tileSize;
-    const texelX = Math.max(0, Math.min(size - 1, Math.floor(pick.u * size)));
-    const texelY = Math.max(0, Math.min(size - 1, Math.floor(pick.v * size)));
-    const value = tool === "pixelEraser" ? 0 : colorIndex;
-    if (tool === "pixelFill") pixels.fill(MAP_SPRITE_PAGE, tile, texelX, texelY, value);
-    else pixels.setPixel(MAP_SPRITE_PAGE, tile, texelX, texelY, value);
-    onNote(null);
-    onEdit();
-  };
+  const targetOf = (pick: SpacePick): [number, number, number] => targetOfTool(tool, space, pick);
 
   /** Apply the active tool at a canvas position. The secondary button removes. */
   const applyAt = (clientX: number, clientY: number, secondary: boolean) => {
@@ -531,32 +471,7 @@ export function Map3DCanvas({
       onNote("Nothing under the cursor — aim at a cell.");
       return;
     }
-    onNote(null);
-    if (isPixelSpaceTool(tool)) {
-      paintTexel(pick);
-      return;
-    }
-    switch (tool) {
-      case "place":
-        if (secondary) removeCell(pick);
-        else placeCell(pick, "solid");
-        return;
-      case "plane":
-        if (secondary) removeCell(pick);
-        else placeCell(pick, planeKind);
-        return;
-      case "remove":
-        removeCell(pick);
-        return;
-      case "paintCell":
-        restyleCell(pick, secondary);
-        return;
-      case "picker": {
-        const target = space.cellAt(pick.x, pick.y, pick.z);
-        if (target) onPickStyle(target.colorIndex, target.material);
-        return;
-      }
-    }
+    report(applySpaceTool(tool, pick, secondary, toolContext()));
   };
 
   /**

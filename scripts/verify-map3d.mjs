@@ -2,7 +2,8 @@
 //
 // Drives a real Chrome over CDP through the things the view exists to do:
 // step inside the map, travel through it, place and remove a cell on a face,
-// stand a sprite plane, and paint a pixel of a face in place.
+// stand a sprite plane, paint a pixel of a face in place, change the material
+// being built with, and do all of it again from the first-person camera.
 //
 // Designed for the WSL dev setup, where Linux browsers can't run but Windows
 // Chrome can: start Chrome headless with CDP, then run this with Windows Node:
@@ -42,6 +43,24 @@ async function hud(page, label) {
   return value.innerText().then((text) => text.trim()).catch(() => "");
 }
 
+/** The HUD's note, or an empty string when there is nothing to say. */
+async function noteOf(page) {
+  const note = page.getByTestId("map-note");
+  return (await note.count()) === 0 ? "" : note.innerText().then((text) => text.trim());
+}
+
+/** The small right-hand readout beside a panel title, e.g. "flat" or "rock". */
+async function panelMeta(page, title) {
+  return page
+    .locator("span")
+    .filter({ hasText: new RegExp(`^${title}$`) })
+    .first()
+    .locator("xpath=following-sibling::span[1]")
+    .innerText()
+    .then((text) => text.trim())
+    .catch(() => "");
+}
+
 /** How many cells the map holds, as the HUD reports it. */
 async function cellCount(page) {
   const text = await hud(page, "Cells");
@@ -79,11 +98,16 @@ try {
   await page.getByRole("button", { name: /^Voxels/ }).click();
   const grid = page.locator("canvas").first();
   const gridBox = await grid.boundingBox();
-  for (let i = 0; i < 6; i += 1) {
-    await page.mouse.move(gridBox.x + 60 + i * 16, gridBox.y + 60);
-    await page.mouse.down();
-    await page.mouse.up();
-    await page.waitForTimeout(60);
+  // A patch rather than a line: the first-person camera stands *in* the map, so
+  // a single row of cells is walked past in under a second and everything after
+  // it would be testing an empty horizon.
+  for (let row = 0; row < 6; row += 1) {
+    for (let column = 0; column < 6; column += 1) {
+      await page.mouse.move(gridBox.x + 60 + column * 16, gridBox.y + 60 + row * 16);
+      await page.mouse.down();
+      await page.mouse.up();
+      await page.waitForTimeout(25);
+    }
   }
   await page.screenshot({ path: shot("1-topdown"), fullPage: false });
   check("raised columns from the top-down view", (await cellCount(page)) === 0 || true);
@@ -136,7 +160,40 @@ try {
     await page.screenshot({ path: shot("5-removed") });
   }
 
-  // 7. Stand a sprite plane — the grass/wire case.
+  // 7. The inspector must offer colour and material whatever tool is active —
+  //     the pixel tools paint with the palette, so hiding it made them unusable.
+  await page.getByRole("button", { name: /^Pixels/ }).click();
+  await page.waitForTimeout(300);
+  check("the pixel layer offers face-painting tools", await page.getByRole("button", { name: /^Pencil/ }).isVisible());
+  check("the palette stays reachable while painting pixels", await page.getByText("Palette", { exact: true }).isVisible());
+  check("the material stays reachable while painting pixels", await page.getByText("Material", { exact: true }).isVisible());
+  check("the sprite picker is offered too", await page.getByText("Sprites", { exact: true }).isVisible());
+
+  // 8. Painting a pixel paints on the first click, not the second. The cell has
+  //    to be one with no sprite yet, so it is placed fresh and flat first —
+  //    landing on a cell something else already skinned would test nothing.
+  await page.getByRole("button", { name: /^Voxels/ }).click();
+  await page.getByRole("button", { name: "Flat colour, no material" }).click();
+  await page.getByRole("button", { name: /^Place/ }).click();
+  const paintSpot = await findCell(page, canvas);
+  if (paintSpot) {
+    await clickCanvas(page, paintSpot.fx, paintSpot.fy); // a fresh, unskinned cell
+    await page.getByRole("button", { name: /^Pixels/ }).click();
+    await page.waitForTimeout(250);
+
+    await clickCanvas(page, paintSpot.fx, paintSpot.fy);
+    const noteText = await noteOf(page);
+    check("the first click explains the sprite it gave the cell", /sprite|wears/i.test(noteText), noteText);
+    await clickCanvas(page, paintSpot.fx, paintSpot.fy);
+    check("a second click just paints, with nothing to explain", (await noteOf(page)) === "", await noteOf(page));
+    await page.screenshot({ path: shot("7-painted") });
+  }
+
+  // 9. Stand a sprite plane — the grass/wire case.
+  // Back to the cell layer: the Plane tool builds, so the pixel layer does not
+  // offer it.
+  await page.getByRole("button", { name: /^Voxels/ }).click();
+  await page.waitForTimeout(250);
   const planeSpot = await findCell(page, canvas);
   if (planeSpot) {
     await page.getByRole("button", { name: /^Plane/ }).click();
@@ -148,18 +205,82 @@ try {
     await page.screenshot({ path: shot("6-plane") });
   }
 
-  // 8. Paint a pixel of a face, in place.
-  const paintSpot = await findCell(page, canvas);
-  if (paintSpot) {
-    await page.getByRole("button", { name: /^Pixels/ }).click();
-    await page.waitForTimeout(300);
-    check("the pixel layer offers face-painting tools", await page.getByRole("button", { name: /^Pencil/ }).isVisible());
-    await clickCanvas(page, paintSpot.fx, paintSpot.fy); // skins the cell
-    await page.waitForTimeout(300);
-    await clickCanvas(page, paintSpot.fx, paintSpot.fy); // paints a texel
-    await page.screenshot({ path: shot("7-painted") });
-    check("painting a face raises no error", true);
-  }
+  // 10. Changing the material being built with.
+  await page.getByRole("button", { name: /^Voxels/ }).click();
+  await page.waitForTimeout(250);
+  const materialBefore = await panelMeta(page, "Material");
+  await page.getByRole("button", { name: "Material rock" }).click();
+  await page.waitForTimeout(200);
+  const materialAfter = await panelMeta(page, "Material");
+  check("a material can be armed", materialAfter === "rock" && materialAfter !== materialBefore, `${materialBefore} → ${materialAfter}`);
+
+  await page.getByRole("button", { name: /^Material from sprite/ }).click();
+  await page.waitForTimeout(200);
+  check("a cart sprite can be armed as a material", /^sprite #/.test(await panelMeta(page, "Material")), await panelMeta(page, "Material"));
+
+  // 11. First person: step into the map and walk it.
+  await page.getByRole("button", { name: "Walk", exact: true }).click();
+  await page.waitForTimeout(900);
+  const walkCanvas = page.locator("canvas").first();
+  check("walk mode shows a crosshair", await page.getByText(/Click to look around/).isVisible());
+
+  const walkShot = await walkCanvas.screenshot();
+  check("the first-person view renders something", walkShot.length > 1000);
+  await page.screenshot({ path: shot("8-walk") });
+
+  // Stepping in has to land you looking at your own work, not at empty sky —
+  // there is nothing to build against otherwise.
+  const enteredAiming = await hud(page, "Aiming");
+  check("stepping in lands you looking at the map", enteredAiming !== "" && enteredAiming !== "—", enteredAiming);
+
+  // 12. Editing from first person, at the crosshair.
+  await page.getByRole("button", { name: /^Place/ }).click();
+  await page.waitForTimeout(200);
+  const walkBox = await walkCanvas.boundingBox();
+  await page.mouse.move(walkBox.x + walkBox.width / 2, walkBox.y + walkBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.waitForTimeout(400); // captures the mouse, so the crosshair aims
+
+  const captured = await page.evaluate(() => document.pointerLockElement !== null);
+  check("the view captures the mouse to look around", captured);
+
+  const aimed = await hud(page, "Aiming");
+  check("the crosshair reports what it is on", aimed !== "" && aimed !== "—", aimed);
+  const walkCells = await cellCount(page);
+  await page.mouse.down({ button: "right" });
+  await page.mouse.up({ button: "right" });
+  await page.waitForTimeout(350);
+  const afterBreak = await cellCount(page);
+  check("right-click breaks the cell at the crosshair", afterBreak < walkCells, `${walkCells} → ${afterBreak}`);
+  await page.screenshot({ path: shot("10-walk-edit") });
+
+  // 13. Travelling on foot.
+  const standingBeforeWalk = await hud(page, "Standing");
+  await page.keyboard.down("KeyW");
+  await page.waitForTimeout(500);
+  await page.keyboard.up("KeyW");
+  await page.waitForTimeout(300);
+  const standingAfterWalk = await hud(page, "Standing");
+  check("W walks the viewer forward", standingBeforeWalk !== standingAfterWalk, `${standingBeforeWalk} → ${standingAfterWalk}`);
+  await page.screenshot({ path: shot("9-walked") });
+
+  // The captured mouse belongs to the view, so the rail is genuinely
+  // unreachable until it is given back. Escape is the browser's own release
+  // gesture and cannot be driven from CDP (it only honours a trusted key
+  // event), so the release goes through the same API the browser calls; what is
+  // checked is ours, that letting go makes the editor's controls reachable.
+  await page.evaluate(() => document.exitPointerLock());
+  await page.waitForTimeout(300);
+  check(
+    "releasing the mouse gives the rail back",
+    await page.evaluate(() => document.pointerLockElement === null),
+  );
+
+  // 14. Back to orbit, with the position carried across.
+  await page.getByRole("button", { name: "Orbit", exact: true }).click();
+  await page.waitForTimeout(700);
+  check("returning to orbit keeps the map on screen", (await cellCount(page)) > 0);
 
   check("no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
   await context.close();

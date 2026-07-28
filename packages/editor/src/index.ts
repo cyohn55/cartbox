@@ -135,6 +135,13 @@ export {
   type MapVoxelCell,
 } from "./model/MapVoxelSpace";
 export {
+  renderMapFirstPerson,
+  cellContaining,
+  type FirstPersonCamera,
+  type FirstPersonOptions,
+  type FirstPersonRender,
+} from "./render/mapRaycaster";
+export {
   mapSpaceToModel,
   planeFaceIndices,
   isPlaneVoxel,
