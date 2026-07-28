@@ -11,7 +11,7 @@ profiles. This file is the map: what exists, and how to look at each piece.
 |---|---|
 | **See the engine + player run in a browser** | The demo server is running on port **8099** → open `http://localhost:8099/packages/player/examples/smoke-test.html` (press ▶). If it's not up: `npm run serve:demo` from `Working/tic80-console`. |
 | **Prove the engine renders (headless)** | `npm run verify:engine` → renders a real cart, prints PASS. |
-| **Run the test suite** | From the repo root: `npx vitest run --config "Working/tic80-console/vitest.config.ts"` → **62 tests**. |
+| **Run the test suite** | From `Working/tic80-console`: `npx vitest run` → **1,207 tests** in `Unit Tests/`. (`vitest` is not yet a declared devDependency, so npx fetches it.) |
 | **Typecheck the web app** | From `Working/tic80-console`: `npx tsc --noEmit -p apps/web/tsconfig.json`. |
 | **Build the web app** | `cd apps/web && npx next build` (needs the `NEXT_PUBLIC_*` env; see infra/.env.example). |
 | **Boot the whole thing locally (one command)** | Install Docker + the Supabase CLI, then `npm run bootstrap` — brings up Supabase + MinIO, applies the schema, seeds a demo cart/achievement/user, wires the engine, writes `.env.local`. Then `npm run dev --workspace apps/web` → `http://localhost:3000` (demo login `demo@cartbox.dev` / `demo1234`). |
