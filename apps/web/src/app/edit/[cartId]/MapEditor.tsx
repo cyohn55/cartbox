@@ -2,65 +2,87 @@
 
 /**
  * Map editor: owns the map's editing state — which layer is active, its tool,
- * the brush, the zoom — and lays out the tool rail, the scrollable map stage,
+ * the brush, the zoom, the camera — and lays out the tool rail, the map stage,
  * and the inspector.
  *
  * The map is authored on four layers over one grid: tiles, the pixels inside
- * those tiles, and a column layer that gives the map height as cubes or hexels.
+ * those tiles, and a cell layer that gives the map height as cubes or hexels.
  * All of them share the cart's SpriteSheet and TileMap, so art drawn in the
  * Sprites tab is immediately stampable here and a pixel touched up here shows up
  * there. Any of the four can also be filled procedurally: the generators produce
  * classes, and the mapping panel says what a class means on the active layer.
+ *
+ * The stage shows the map from one of two vantage points, and the toggle between
+ * them is the only thing that changes — both views drive the same
+ * {@link MapVoxelSpace}, so nothing is lost or converted by switching:
+ *
+ * - **2D** looks straight down and edits stacks as columns: raise, lower,
+ *   flatten, paint. It is how terrain and ground plans are laid out quickly.
+ * - **3D** puts you inside the map, where a cell is placed against the face you
+ *   point at and removed by clicking it. That is what overhangs, caves, bridges
+ *   and standing sprite planes need, none of which a column can describe.
  */
 
 import { useCallback, useMemo, useRef, useState } from "react";
 import {
-  MapVoxelLayer,
+  MapVoxelSpace,
   MaterialMap,
   NormalMap,
   materialProfileAt,
   COLUMN_MATERIAL_NONE,
-  surfaceForClassId,
   MAP_GENERATORS,
-  MAX_MAP_COLUMN_HEIGHT,
+  MAX_MAP_VOXEL_HEIGHT,
   applyFieldToColumns,
   applyFieldToPixels,
   applyFieldToTiles,
   defaultClassMapping,
   defaultValues,
-  deserializeMapVoxelLayer,
   findGenerator,
-  serializeMapVoxelLayer,
+  loadMapVoxelSpace,
+  mapColumnTarget,
+  serializeMapVoxelSpace,
   type ClassField,
   type ClassInfo,
   type ClassMapping,
   type GeneratorValues,
+  type MapCellKind,
+  type MapViewFocus,
   type MaterialSwatches,
   type SpriteSheet,
   type TileMap,
 } from "@cartbox/editor";
 
 import { BUILD_MATERIALS, worldSurfaceMaterial } from "@/lib/faceTextures";
+import { buildMapAtlas, materialSpriteTile, spriteTileMaterial } from "@/lib/mapAtlas";
 import styles from "./editor.module.css";
 import { ClassMappingEditor } from "./ClassMappingEditor";
 import { FieldPreview } from "./FieldPreview";
 import { GeneratorPanel } from "./GeneratorPanel";
+import { Map3DCanvas, type SpaceHover } from "./Map3DCanvas";
 import { MapCanvas } from "./MapCanvas";
-import { RailGroup, RangeControl, SegmentedControl, ToolRail } from "./railControls";
+import { RailGroup, RailHint, RangeControl, SegmentedControl, ToolRail } from "./railControls";
 import { MaterialSurface, NormalSurface } from "./paintSurface";
 import { MaterialBrushSurface } from "./materialBrushSurface";
 import { TilePicker } from "./TilePicker";
 import { singleTileBrush, type MapBrush } from "./mapBrush";
 import {
   MAP_LAYERS,
+  MAP_VIEW_MODES,
   MAP_ZOOMS,
   PIXEL_ZOOM_INDEX,
+  PLANE_KINDS,
+  defaultSpaceToolFor,
   defaultToolFor,
   isColumnLayer,
+  isPixelSpaceTool,
   layerDef,
   shapeForLayer,
+  spaceLayerFor,
+  spaceToolsFor,
   type MapLayer,
+  type MapSpaceTool,
   type MapTool,
+  type MapViewMode,
 } from "./maptools";
 
 /** The tiles page the map stamps from. */
@@ -69,12 +91,32 @@ const TILES_PAGE = 0;
 /** The zoom levels as the rail selects them — by index, which is what `zoom` holds. */
 const ZOOM_OPTIONS = MAP_ZOOMS.map((option, index) => ({ id: index, label: option.label }));
 
+/**
+ * How far the 3D view builds around the camera, as the rail offers it. A map is
+ * far larger than any one frame, so the window is what bounds the cost of a
+ * rebuild; the options trade how much of the world you can see against how
+ * quickly it redraws while you move.
+ */
+const RANGE_OPTIONS = [
+  { id: 8, label: "S", hint: "17 cells across — fastest, for close detail work." },
+  { id: 16, label: "M", hint: "33 cells across." },
+  { id: 24, label: "L", hint: "49 cells across." },
+  { id: 32, label: "XL", hint: "65 cells across — the widest view, and the slowest." },
+];
+
+/**
+ * The camera the 3D view opens with: a raised three-quarter look at the ground,
+ * zoomed close enough that individual cells are comfortably clickable rather than
+ * a distant speck. The wheel takes it from there.
+ */
+const DEFAULT_CAMERA = { yaw: 0.7, pitch: 0.62, cell: 22 };
+
 interface MapEditorProps {
   sheet: SpriteSheet;
   map: TileMap;
-  /** The saved column layer for this cart, or null when none was authored. */
+  /** The saved map cells for this cart, or null when none were authored. */
   columnPayload: string | null;
-  /** Persist the column layer (feeds the undo timeline and the save). */
+  /** Persist the map cells (feeds the undo timeline and the save). */
   onColumnsChange: (serialized: string) => void;
   /**
    * The cart's material channels. The pixel layer paints through them exactly as
@@ -90,25 +132,6 @@ interface MapEditorProps {
   swatches: MaterialSwatches;
 }
 
-/**
- * Restore the saved column layer, or start an empty one. A payload that does not
- * match the current map's dimensions (the console model changed) is rebuilt at
- * the map's size rather than discarded, so the columns that still fit survive.
- */
-function loadColumns(payload: string | null, map: TileMap): MapVoxelLayer {
-  if (!payload) return new MapVoxelLayer(map.width, map.height);
-  try {
-    const saved = deserializeMapVoxelLayer(payload);
-    if (saved.width === map.width && saved.height === map.height) return saved;
-    const resized = new MapVoxelLayer(map.width, map.height, saved.shape);
-    saved.forEachColumn((x, y, column) => resized.setColumn(x, y, column.height, column.colorIndex));
-    return resized;
-  } catch {
-    // A corrupt payload must not break the mount; start clean instead.
-    return new MapVoxelLayer(map.width, map.height);
-  }
-}
-
 export function MapEditor({
   sheet,
   map,
@@ -121,21 +144,42 @@ export function MapEditor({
   emissive,
   swatches,
 }: MapEditorProps) {
-  // The column layer is the source of truth for map height; it is seeded once
-  // from the cart and handed back up serialized after every stroke.
-  const columnsRef = useRef<MapVoxelLayer | null>(null);
-  if (columnsRef.current === null) columnsRef.current = loadColumns(columnPayload, map);
+  // The cell space is the source of truth for everything above the ground; it is
+  // seeded once from the cart and handed back up serialized after every action.
+  // Payloads saved before free-form cells existed are column layers, which
+  // `loadMapVoxelSpace` upgrades on the way in — and which are written back out
+  // unchanged for as long as the map stays columnar.
+  const spaceRef = useRef<MapVoxelSpace | null>(null);
+  if (spaceRef.current === null) {
+    spaceRef.current = loadMapVoxelSpace(columnPayload, map.width, map.height);
+  }
 
+  const [view, setView] = useState<MapViewMode>("top");
   const [layer, setLayer] = useState<MapLayer>("tiles");
   const [tool, setTool] = useState<MapTool>(() => defaultToolFor("tiles"));
+  const [spaceTool, setSpaceTool] = useState<MapSpaceTool>(() => defaultSpaceToolFor("voxels"));
   const [brush, setBrush] = useState<MapBrush>(() => singleTileBrush(2));
   const [colorIndex, setColorIndex] = useState(1);
   const [columnStep, setColumnStep] = useState(1);
-  // The material armed for the column tools, or "flat" for plain palette colour.
+  // The material armed for the cell tools, or "flat" for plain palette colour.
   const [columnMaterial, setColumnMaterial] = useState<number>(COLUMN_MATERIAL_NONE);
+  const [planeKind, setPlaneKind] = useState<MapCellKind>("cross");
   const [zoom, setZoom] = useState(1);
   const [version, setVersion] = useState(0);
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
+  const [spaceHover, setSpaceHover] = useState<SpaceHover | null>(null);
+  const [spaceNote, setSpaceNote] = useState<string | null>(null);
+
+  // Where the 3D camera stands and how it looks. Held here rather than in the
+  // canvas so switching to the top-down view and back returns you to the same
+  // place, and so the HUD can report it.
+  const [focus, setFocus] = useState<MapViewFocus>(() => ({
+    x: Math.floor(map.width / 2),
+    y: 2,
+    z: Math.floor(map.height / 2),
+  }));
+  const [camera, setCamera] = useState(DEFAULT_CAMERA);
+  const [radius, setRadius] = useState(16);
 
   // Generator state: which one, its values, and how its classes map onto the
   // active layer. The mapping is per generator, so switching back to one you
@@ -143,9 +187,6 @@ export function MapEditor({
   const [generatorId, setGeneratorId] = useState(MAP_GENERATORS[0]!.id);
   const generator = findGenerator(MAP_GENERATORS, generatorId);
   const [values, setValues] = useState<GeneratorValues>(() => defaultValues(MAP_GENERATORS[0]!.params));
-  // Snap each class to the nearest colour the cart's own palette holds, so a
-  // generated landscape opens in plausible colours rather than at whatever sits
-  // in palette slots 1..7.
   // Each class opens mapped to the nearest colour the cart's palette holds *and*
   // to the world atlas material its surface names, so a generated landscape
   // arrives both plausibly coloured and properly skinned.
@@ -188,46 +229,82 @@ export function MapEditor({
     [sheet, normals, heightMap, specular, roughness, emissive],
   );
 
-  const columns = columnsRef.current!;
+  const space = spaceRef.current!;
   const definition = layerDef(layer);
   const cell = (MAP_ZOOMS[zoom] ?? MAP_ZOOMS[1])!.cell;
   const palette = useMemo(() => sheet.cssPalette(), [sheet, version]);
   const mapping = mappings[generator.id] ?? paletteMapping(generator.legend);
   const bump = () => setVersion((current) => current + 1);
   const screen = hover ? map.screenOf(hover.x, hover.y) : null;
+  const inSpace = view === "space";
+  const spaceTools = spaceToolsFor(layer, space.shape);
 
-  /** Serialize the column layer up to the cart after a stroke or a generate run. */
-  const commitColumns = () => {
-    onColumnsChange(serializeMapVoxelLayer(columns));
+  // The atlas the 3D view samples: the world's materials plus every sprite on the
+  // tiles page. Rebuilt when the art changes so a texture painted on a face shows
+  // on every cell wearing that sprite.
+  const atlas = useMemo(() => buildMapAtlas(sheet), [sheet, version]);
+
+  /** Serialize the cells up to the cart after an edit or a generate run. */
+  const commitSpace = () => {
+    onColumnsChange(serializeMapVoxelSpace(space));
     bump();
   };
 
   /**
-   * Switch layers. The two column layers share one store and one cell shape, so
-   * moving between Voxels and Hexels re-shapes the columns already authored —
+   * Switch layers. The two cell layers share one store and one cell shape, so
+   * moving between Voxels and Hexels re-shapes what is already authored —
    * confirmed first, since the two lattices read very differently.
    */
   const selectLayer = (next: MapLayer) => {
     if (next === layer) return;
-    if (isColumnLayer(next) && isColumnLayer(layer)) {
+    if (isColumnLayer(next) && space.shape !== shapeForLayer(next)) {
       const shape = shapeForLayer(next);
       if (
-        !columns.isEmpty &&
-        !window.confirm(`Rebuild the ${columns.columnCount} authored columns as ${shape}s?`)
+        !space.isEmpty &&
+        !window.confirm(`Rebuild the ${space.cellCount} authored cells as ${shape}s?`)
       ) {
         return;
       }
-      columnsRef.current = columns.clone(shape);
-      commitColumns();
-    } else if (isColumnLayer(next) && columns.shape !== shapeForLayer(next)) {
-      // Arriving from a non-column layer: adopt the shape the user picked.
-      columnsRef.current = columns.clone(shapeForLayer(next));
-      commitColumns();
+      spaceRef.current = space.clone({ shape });
+      commitSpace();
     }
     setLayer(next);
     setTool(defaultToolFor(next));
-    // The pixel layer is unusable until a tile's pixels are big enough to hit.
-    if (next === "pixels" && zoom < PIXEL_ZOOM_INDEX) setZoom(PIXEL_ZOOM_INDEX);
+    setSpaceTool(defaultSpaceToolFor(next));
+    // The pixel layer is unusable from above until a tile's pixels are big enough
+    // to hit; in the 3D view zoom means something else entirely, so leave it.
+    if (next === "pixels" && !inSpace && zoom < PIXEL_ZOOM_INDEX) setZoom(PIXEL_ZOOM_INDEX);
+  };
+
+  /**
+   * Switch vantage point.
+   *
+   * Tiles are the ground plan and have no meaning as a thing to point at in
+   * space, so stepping inside opens on the cell layer the map's own shape names
+   * rather than leaving the rail with no usable tool.
+   *
+   * The camera also has to land somewhere worth looking at. A map is far wider
+   * than one window, so stepping in over empty ground shows a black void with
+   * nothing to aim at and no hint which way to walk; when that would happen, the
+   * camera goes to the middle of what is actually built instead. Somewhere you
+   * have already walked to is left alone — being teleported off your own work
+   * every time you glance at the plan would be worse than the void.
+   */
+  const selectView = (next: MapViewMode) => {
+    if (next === view) return;
+    if (next === "space") {
+      if (layer === "tiles") {
+        const target = spaceLayerFor(layer);
+        setLayer(target);
+        setSpaceTool(defaultSpaceToolFor(target));
+      }
+      if (!space.hasCellsNear(focus.x, focus.z, radius)) {
+        const centre = space.contentCentre();
+        if (centre) setFocus(centre);
+      }
+    }
+    setSpaceNote(null);
+    setView(next);
   };
 
   const selectGenerator = (id: string) => {
@@ -251,8 +328,8 @@ export function MapEditor({
   const runGenerator = () => {
     const field = preview ?? generator.generate(map.width, map.height, values);
     if (isColumnLayer(layer)) {
-      const raised = applyFieldToColumns(columns, field, mapping);
-      commitColumns();
+      const raised = applyFieldToColumns(mapColumnTarget(space), field, mapping);
+      commitSpace();
       setGenerateNote(`${generator.label}: raised ${raised.toLocaleString()} columns.`);
       return;
     }
@@ -288,88 +365,182 @@ export function MapEditor({
     setGenerateNote(`${generator.label}: stamped ${stamped.toLocaleString()} cells.`);
   };
 
-  const clearColumns = () => {
-    if (columns.isEmpty) return;
-    if (!window.confirm(`Remove all ${columns.columnCount} columns?`)) return;
-    columns.clearAll();
-    commitColumns();
+  const clearCells = () => {
+    if (space.isEmpty) return;
+    if (!window.confirm(`Remove all ${space.cellCount} cells?`)) return;
+    space.clearAll();
+    commitSpace();
+  };
+
+  /** The Picker adopted a cell's look: arm both its colour and its skin. */
+  const adoptStyle = (pickedColor: number, pickedMaterial: number) => {
+    setColorIndex(pickedColor);
+    setColumnMaterial(pickedMaterial);
+    const tile = materialSpriteTile(pickedMaterial, sheet.tilesPerPage);
+    if (tile !== null) setBrush(singleTileBrush(tile));
   };
 
   return (
     <div className={styles.body}>
       <aside className={styles.rail}>
+        <SegmentedControl label="View" options={MAP_VIEW_MODES} selected={view} onSelect={selectView} />
+
         <ToolRail label="Layer" tools={MAP_LAYERS} selected={layer} onSelect={selectLayer} />
 
-        <ToolRail label="Tool" tools={definition.tools} selected={tool} onSelect={setTool} />
-
-        {isColumnLayer(layer) && (
-          <RailGroup label={`Step · ${columnStep}`}>
-            <RangeControl
-              min={1}
-              max={16}
-              value={columnStep}
-              onChange={setColumnStep}
-              ariaLabel="Column step"
-            />
-            <button type="button" className={styles.rendererToggle} onClick={clearColumns}>
-              Clear columns
-            </button>
-          </RailGroup>
+        {inSpace ? (
+          <ToolRail label="Tool" tools={spaceTools} selected={spaceTool} onSelect={setSpaceTool} />
+        ) : (
+          <ToolRail label="Tool" tools={definition.tools} selected={tool} onSelect={setTool} />
         )}
 
-        <SegmentedControl label="Zoom" options={ZOOM_OPTIONS} selected={zoom} onSelect={setZoom} />
+        {inSpace && spaceTool === "plane" && (
+          <SegmentedControl
+            label="Plane"
+            options={PLANE_KINDS}
+            selected={planeKind}
+            onSelect={setPlaneKind}
+          />
+        )}
+
+        {inSpace ? (
+          <>
+            <SegmentedControl label="Range" options={RANGE_OPTIONS} selected={radius} onSelect={setRadius} />
+            <RailHint>
+              Drag to orbit, shift-drag to pan, wheel to zoom. W A S D walks; Q and E change height. Right-click
+              removes.
+            </RailHint>
+            {isColumnLayer(layer) && (
+              <button type="button" className={styles.rendererToggle} onClick={clearCells}>
+                Clear cells
+              </button>
+            )}
+          </>
+        ) : (
+          <>
+            {isColumnLayer(layer) && (
+              <RailGroup label={`Step · ${columnStep}`}>
+                <RangeControl
+                  min={1}
+                  max={16}
+                  value={columnStep}
+                  onChange={setColumnStep}
+                  ariaLabel="Column step"
+                />
+                <button type="button" className={styles.rendererToggle} onClick={clearCells}>
+                  Clear cells
+                </button>
+              </RailGroup>
+            )}
+            <SegmentedControl label="Zoom" options={ZOOM_OPTIONS} selected={zoom} onSelect={setZoom} />
+          </>
+        )}
       </aside>
 
       <section className={styles.mapStage}>
-        <MapCanvas
-          sheet={sheet}
-          map={map}
-          columns={columns}
-          layer={layer}
-          brush={brush}
-          tool={tool}
-          colorIndex={colorIndex}
-          pixels={pixelSurface}
-          columnMaterial={columnMaterial}
-          columnStep={columnStep}
-          cell={cell}
-          version={version}
-          palette={palette}
-          onEdit={bump}
-          onColumnsCommitted={commitColumns}
-          onHover={setHover}
-        />
-        <div className={styles.hud}>
-          <span className={styles.hudItem}>
-            <span className={styles.hudLabel}>Cell</span>
-            <span className={`${styles.hudValue} data`}>{hover ? `${hover.x},${hover.y}` : "—"}</span>
-          </span>
-          <span className={styles.hudItem}>
-            <span className={styles.hudLabel}>Screen</span>
-            <span className={`${styles.hudValue} data`}>{screen ? `${screen[0]},${screen[1]}` : "—"}</span>
-          </span>
-          {isColumnLayer(layer) ? (
+        {inSpace ? (
+          <Map3DCanvas
+            sheet={sheet}
+            space={space}
+            atlas={atlas}
+            tool={spaceTool}
+            colorIndex={colorIndex}
+            material={columnMaterial}
+            planeKind={planeKind}
+            brushTile={brush.tile}
+            pixels={pixelSurface}
+            palette={palette}
+            focus={focus}
+            onFocusChange={setFocus}
+            radius={radius}
+            yaw={camera.yaw}
+            pitch={camera.pitch}
+            cell={camera.cell}
+            onCameraChange={setCamera}
+            version={version}
+            onEdit={bump}
+            onSpaceCommitted={commitSpace}
+            onPickStyle={adoptStyle}
+            onHover={setSpaceHover}
+            onNote={setSpaceNote}
+          />
+        ) : (
+          <MapCanvas
+            sheet={sheet}
+            map={map}
+            space={space}
+            layer={layer}
+            brush={brush}
+            tool={tool}
+            colorIndex={colorIndex}
+            pixels={pixelSurface}
+            columnMaterial={columnMaterial}
+            columnStep={columnStep}
+            cell={cell}
+            version={version}
+            palette={palette}
+            onEdit={bump}
+            onColumnsCommitted={commitSpace}
+            onHover={setHover}
+          />
+        )}
+
+        {inSpace ? (
+          <div className={styles.hud}>
             <span className={styles.hudItem}>
-              <span className={styles.hudLabel}>Column</span>
+              <span className={styles.hudLabel}>Standing</span>
               <span className={`${styles.hudValue} data`}>
-                {hover ? `${columns.heightAt(hover.x, hover.y)}` : "—"} / {columns.columnCount} cells
+                {Math.round(focus.x)},{Math.round(focus.y)},{Math.round(focus.z)}
               </span>
             </span>
-          ) : (
             <span className={styles.hudItem}>
-              <span className={styles.hudLabel}>{layer === "pixels" ? "Tile" : "Brush"}</span>
+              <span className={styles.hudLabel}>Aiming</span>
               <span className={`${styles.hudValue} data`}>
-                {layer === "pixels"
-                  ? hover
-                    ? `#${map.getCell(hover.x, hover.y).toString().padStart(3, "0")}`
-                    : "—"
-                  : `#${brush.tile.toString().padStart(3, "0")}${
-                      brush.width * brush.height > 1 ? ` ${brush.width}×${brush.height}` : ""
-                    }`}
+                {spaceHover ? `${spaceHover.x},${spaceHover.y},${spaceHover.z}` : "—"}
               </span>
             </span>
-          )}
-        </div>
+            <span className={styles.hudItem}>
+              <span className={styles.hudLabel}>Cells</span>
+              <span className={`${styles.hudValue} data`}>{space.cellCount.toLocaleString()}</span>
+            </span>
+            {spaceNote && (
+              <span className={styles.hudNote} title={spaceNote}>
+                {spaceNote}
+              </span>
+            )}
+          </div>
+        ) : (
+          <div className={styles.hud}>
+            <span className={styles.hudItem}>
+              <span className={styles.hudLabel}>Cell</span>
+              <span className={`${styles.hudValue} data`}>{hover ? `${hover.x},${hover.y}` : "—"}</span>
+            </span>
+            <span className={styles.hudItem}>
+              <span className={styles.hudLabel}>Screen</span>
+              <span className={`${styles.hudValue} data`}>{screen ? `${screen[0]},${screen[1]}` : "—"}</span>
+            </span>
+            {isColumnLayer(layer) ? (
+              <span className={styles.hudItem}>
+                <span className={styles.hudLabel}>Column</span>
+                <span className={`${styles.hudValue} data`}>
+                  {hover ? `${space.heightAt(hover.x, hover.y)}` : "—"} / {space.columnCount} columns
+                </span>
+              </span>
+            ) : (
+              <span className={styles.hudItem}>
+                <span className={styles.hudLabel}>{layer === "pixels" ? "Tile" : "Brush"}</span>
+                <span className={`${styles.hudValue} data`}>
+                  {layer === "pixels"
+                    ? hover
+                      ? `#${map.getCell(hover.x, hover.y).toString().padStart(3, "0")}`
+                      : "—"
+                    : `#${brush.tile.toString().padStart(3, "0")}${
+                        brush.width * brush.height > 1 ? ` ${brush.width}×${brush.height}` : ""
+                      }`}
+                </span>
+              </span>
+            )}
+          </div>
+        )}
       </section>
 
       <aside className={styles.inspector}>
@@ -400,10 +571,10 @@ export function MapEditor({
               layer={layer}
               palette={palette}
               maxTile={sheet.tilesPerPage - 1}
-              maxColumnHeight={MAX_MAP_COLUMN_HEIGHT}
+              maxColumnHeight={MAX_MAP_VOXEL_HEIGHT}
             />
           </GeneratorPanel>
-        ) : layer === "tiles" ? (
+        ) : layer === "tiles" || (inSpace && needsSpriteBrush(spaceTool, planeKind)) ? (
           <TilePicker
             sheet={sheet}
             page={TILES_PAGE}
@@ -433,13 +604,11 @@ export function MapEditor({
                 />
               ))}
             </div>
-            {isColumnLayer(layer) && (
+            {(isColumnLayer(layer) || inSpace) && (
               <>
                 <div className={styles.panelHead} style={{ marginTop: 14 }}>
                   <span className={styles.panelTitle}>Material</span>
-                  <span className={styles.panelMeta}>
-                    {columnMaterial < 0 ? "flat" : BUILD_MATERIALS.find((entry) => entry.material === columnMaterial)?.name}
-                  </span>
+                  <span className={styles.panelMeta}>{materialLabel(columnMaterial, sheet.tilesPerPage)}</span>
                 </div>
                 <div className={styles.paletteGrid}>
                   <button
@@ -447,7 +616,7 @@ export function MapEditor({
                     className={`${styles.swatch} ${columnMaterial < 0 ? styles.swatchActive : ""}`}
                     style={{ background: palette[colorIndex] ?? "#000", outline: "1px dashed var(--faint)" }}
                     onClick={() => setColumnMaterial(COLUMN_MATERIAL_NONE)}
-                    title="Flat — raise columns in the palette colour, with no texture"
+                    title="Flat — build in the palette colour, with no texture"
                     aria-label="Flat colour, no material"
                     aria-pressed={columnMaterial < 0}
                   />
@@ -464,18 +633,60 @@ export function MapEditor({
                     />
                   ))}
                 </div>
+                {inSpace && (
+                  <button
+                    type="button"
+                    className={styles.rendererToggle}
+                    style={{ marginTop: 10 }}
+                    onClick={() => setColumnMaterial(spriteTileMaterial(brush.tile))}
+                  >
+                    Skin with sprite #{brush.tile}
+                  </button>
+                )}
               </>
             )}
-            <p className={styles.pickerHint}>
-              {layer === "pixels"
-                ? "Pixels belong to the tile, not the cell — editing one cell changes every cell that stamps the same tile. A colour with a material swatch stamps its whole profile, exactly as in the Sprites tab."
-                : `Raise builds ${shapeForLayer(layer)} columns up to ${MAX_MAP_COLUMN_HEIGHT} cells tall, skinned with the armed material. Brightness shows height; ${
-                    layer === "hexels" ? "diamonds mark the close-packed lattice" : "squares mark cube columns"
-                  }.`}
-            </p>
+            <p className={styles.pickerHint}>{hintFor(view, layer, spaceTool, space.shape)}</p>
           </div>
         )}
       </aside>
     </div>
   );
+}
+
+/**
+ * Whether the inspector should offer the sprite sheet rather than the palette:
+ * the tools that stand or paint sprite art need a tile chosen, and the tile
+ * picker is the only control that does that.
+ */
+function needsSpriteBrush(tool: MapSpaceTool, planeKind: MapCellKind): boolean {
+  return isPixelSpaceTool(tool) || (tool === "plane" && planeKind !== "solid");
+}
+
+/** What the armed material is, for the inspector's readout. */
+function materialLabel(material: number, tilesPerPage: number): string {
+  if (material < 0) return "flat";
+  const tile = materialSpriteTile(material, tilesPerPage);
+  if (tile !== null) return `sprite #${tile}`;
+  return BUILD_MATERIALS.find((entry) => entry.material === material)?.name ?? "flat";
+}
+
+/** The one-paragraph explanation of what the active tool does where you are. */
+function hintFor(view: MapViewMode, layer: MapLayer, tool: MapSpaceTool, shape: string): string {
+  if (view === "space") {
+    if (isPixelSpaceTool(tool)) {
+      return "Paints the sprite a cell is skinned with, on the face you clicked, at the pixel under the cursor. A cell with no sprite yet takes the armed one on the first click.";
+    }
+    if (tool === "plane") {
+      return "Stands a flat sprite quad in the cell across the face you click — grass, wires, banners, anything that should read as art on a surface rather than a solid block. Cross stands two, so it looks the same from every side.";
+    }
+    return `Cells are placed against the face you point at and removed by clicking them, so overhangs, caves and bridges are all just cells. ${
+      shape === "hexel" ? "Hexels only sit on the close-packed lattice, so some neighbours are not valid sites." : ""
+    }`;
+  }
+  if (layer === "pixels") {
+    return "Pixels belong to the tile, not the cell — editing one cell changes every cell that stamps the same tile. A colour with a material swatch stamps its whole profile, exactly as in the Sprites tab.";
+  }
+  return `Raise builds ${shape} columns up to ${MAX_MAP_VOXEL_HEIGHT} cells tall, skinned with the armed material. Brightness shows height; ${
+    shape === "hexel" ? "diamonds mark the close-packed lattice" : "squares mark cube columns"
+  }. Switch to 3D to build anything a column cannot describe.`;
 }

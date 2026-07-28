@@ -3,18 +3,22 @@
 /**
  * The scrollable map grid, across all four map layers.
  *
+ * This is the top-down half of the Map tab; {@link Map3DCanvas} is the other,
+ * and both edit the same {@link MapVoxelSpace}. Looking straight down, a stack of
+ * cells reads as a column, so that is what this draws and what its tools edit.
+ *
  * The tile art is always the base: each cell draws the tile it references,
  * scaled to the current zoom with nearest-neighbour so pixels stay crisp. On a
  * column layer the height map is composited over that base — brightness carries
- * height, and hexel columns draw as diamonds so the lattice is visible at a
- * glance without a 3D view.
+ * height, and hexel columns draw as diamonds so the lattice reads at a glance
+ * without having to step into the 3D view.
  *
  * Painting redraws only what changed: one cell for a stamp, every cell sharing a
  * tile for a pixel edit, the whole map for a flood fill.
  */
 
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { faceTile, type MapVoxelLayer, type SpriteSheet, type TileMap } from "@cartbox/editor";
+import { faceTile, type MapVoxelSpace, type SpriteSheet, type TileMap } from "@cartbox/editor";
 
 import { buildWorldAtlas } from "@/lib/faceTextures";
 
@@ -42,8 +46,8 @@ const FACE_UP = 1;
 interface MapCanvasProps {
   sheet: SpriteSheet;
   map: TileMap;
-  /** The column layer shared by the voxel and hexel layers. */
-  columns: MapVoxelLayer;
+  /** The map's 3D cells. The voxel and hexel layers read them as columns. */
+  space: MapVoxelSpace;
   layer: MapLayer;
   brush: MapBrush;
   tool: MapTool;
@@ -73,7 +77,7 @@ interface MapCanvasProps {
 export function MapCanvas({
   sheet,
   map,
-  columns,
+  space,
   layer,
   brush,
   tool,
@@ -158,7 +162,7 @@ export function MapCanvas({
   /** Paint the column overlay for one cell, if it carries a column. */
   const drawColumn = useCallback(
     (context: CanvasRenderingContext2D, x: number, y: number) => {
-      const column = columns.columnAt(x, y);
+      const column = space.columnAt(x, y);
       if (!column) return;
       const px = x * cell;
       const py = y * cell;
@@ -169,7 +173,7 @@ export function MapCanvas({
       if (texture) {
         // A skinned column shows its material's art; clip it to the cell shape so
         // hexels stay diamonds.
-        if (columns.shape === "hexel") {
+        if (space.shape === "hexel") {
           context.beginPath();
           context.moveTo(px + cell / 2, py);
           context.lineTo(px + cell, py + cell / 2);
@@ -187,9 +191,9 @@ export function MapCanvas({
         return;
       }
       context.fillStyle = palette[column.colorIndex] ?? "#ffffff";
-      if (columns.shape === "hexel") {
+      if (space.shape === "hexel") {
         // Hexels close-pack on a diagonal lattice; drawing them as diamonds makes
-        // that legible from the top down without needing the 3D preview.
+        // that legible from the top down without stepping into the 3D view.
         context.beginPath();
         context.moveTo(px + cell / 2, py);
         context.lineTo(px + cell, py + cell / 2);
@@ -207,7 +211,7 @@ export function MapCanvas({
       context.fillRect(px, py, cell, cell);
       context.restore();
     },
-    [columns, cell, palette, materialCache],
+    [space, cell, palette, materialCache],
   );
 
   const drawCell = useCallback(
@@ -244,7 +248,7 @@ export function MapCanvas({
     if (!canvas) return;
     const context = canvas.getContext("2d");
     if (!context) return;
-    peakRef.current = Math.max(1, columns.peakHeight);
+    peakRef.current = Math.max(1, space.peakHeight);
     context.imageSmoothingEnabled = false;
     context.clearRect(0, 0, width, height);
     for (let y = 0; y < map.height; y += 1) {
@@ -253,7 +257,7 @@ export function MapCanvas({
       }
     }
     drawGuides(context);
-  }, [map, columns, width, height, drawCell, drawGuides]);
+  }, [map, space, width, height, drawCell, drawGuides]);
 
   useEffect(() => {
     renderAll();
@@ -345,21 +349,21 @@ export function MapCanvas({
   const applyColumns = (context: CanvasRenderingContext2D, target: { x: number; y: number }) => {
     switch (tool) {
       case "raise":
-        columns.raise(target.x, target.y, columnStep, colorIndex, columnMaterial);
+        space.raise(target.x, target.y, columnStep, colorIndex, columnMaterial);
         break;
       case "lower":
-        columns.raise(target.x, target.y, -columnStep, colorIndex, columnMaterial);
+        space.raise(target.x, target.y, -columnStep, colorIndex, columnMaterial);
         break;
       case "paint":
         // Painting always restyles: it is the tool for changing how a column
         // looks, so it applies the armed material (or clears it, when flat).
-        columns.paint(target.x, target.y, colorIndex, columnMaterial);
+        space.paintColumn(target.x, target.y, colorIndex, columnMaterial);
         break;
       case "flatten":
-        columns.setColumn(target.x, target.y, columnStep, colorIndex, columnMaterial);
+        space.setColumn(target.x, target.y, columnStep, colorIndex, columnMaterial);
         break;
       case "eraser":
-        columns.clear(target.x, target.y);
+        space.clearColumn(target.x, target.y);
         break;
       default:
         return;
@@ -367,7 +371,7 @@ export function MapCanvas({
     columnsDirty.current = true;
     // A new tallest column rescales the whole overlay's ramp, so redraw it all;
     // otherwise just the touched cell needs repainting.
-    const height = columns.heightAt(target.x, target.y);
+    const height = space.heightAt(target.x, target.y);
     if (height > peakRef.current) {
       renderAll();
     } else {

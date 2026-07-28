@@ -65,6 +65,23 @@ export interface VoxelModel {
    * an absent array) keeps the flat colour, so texturing is opt-in per voxel.
    */
   readonly tile?: Int16Array;
+  /**
+   * Optional per-voxel *plane axis*: `0`/`1`/`2` to draw the voxel collapsed to a
+   * flat quad standing across x/y/z, or `-1` (and an absent array) for an ordinary
+   * solid cell.
+   *
+   * A plane is how art that lives on a 2D surface inside a 3D world is
+   * represented — a grass tuft, a wire, a hanging banner — where a full cube would
+   * read as a solid block of foliage. The renderer collapses the cell's extent
+   * along the axis, so the voxel's two faces on that axis land on the same central
+   * plane and exactly one of them survives back-face culling; the quad is
+   * therefore visible from both sides, lit by whichever side faces the viewer.
+   *
+   * A plane's quad is a square whatever lattice the model is built on, so its face
+   * bits and the face index a pick returns are always {@link CUBE_FACES}
+   * positions, even when {@link geometry} is a hexel's.
+   */
+  readonly plane?: Int8Array;
 }
 
 /**

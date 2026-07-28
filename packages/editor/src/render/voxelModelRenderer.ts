@@ -72,6 +72,16 @@ export interface RenderModelOptions {
    */
   readonly pickVoxel?: Int32Array;
   readonly pickFace?: Int8Array;
+  /**
+   * Optional picking outputs (size × size) recording *where on the face* each
+   * pixel landed, as the face's own parametric coordinates in 0..1 — the same
+   * `(u, v)` the textured fill samples its tile with. `-1` where nothing was drawn.
+   *
+   * This is what lets an editor paint a single texel of the art on a face: without
+   * it a pick can only say which face was hit, not which pixel of it.
+   */
+  readonly pickU?: Float32Array;
+  readonly pickV?: Float32Array;
 }
 
 export interface VoxelRender {
@@ -82,6 +92,9 @@ export interface VoxelRender {
   /** Present only when requested via {@link RenderModelOptions.pickVoxel}. */
   readonly pickVoxel?: Int32Array;
   readonly pickFace?: Int8Array;
+  /** Present only when requested via {@link RenderModelOptions.pickU}. */
+  readonly pickU?: Float32Array;
+  readonly pickV?: Float32Array;
 }
 
 export function normalizeTriple(x: number, y: number, z: number): [number, number, number] {
@@ -117,6 +130,8 @@ export interface DrawContext {
   readonly light: ModelLight;
   readonly pickVoxel?: Int32Array;
   readonly pickFace?: Int8Array;
+  readonly pickU?: Float32Array;
+  readonly pickV?: Float32Array;
 }
 
 /**
@@ -135,6 +150,8 @@ export function makeDrawContext(params: {
   readonly centre?: number;
   readonly pickVoxel?: Int32Array;
   readonly pickFace?: Int8Array;
+  readonly pickU?: Float32Array;
+  readonly pickV?: Float32Array;
 }): DrawContext {
   const [lx, ly, lz] = normalizeTriple(
     params.light.direction[0],
@@ -157,6 +174,8 @@ export function makeDrawContext(params: {
     light: params.light,
     pickVoxel: params.pickVoxel,
     pickFace: params.pickFace,
+    pickU: params.pickU,
+    pickV: params.pickV,
   };
 }
 
@@ -177,10 +196,11 @@ export function drawModelInto(
   pickId?: number,
   atlas?: TextureAtlas,
 ): void {
-  const { data, depth, size, centre, cell, light, pickVoxel, pickFace } = ctx;
+  const { centre, cell, light } = ctx;
   const { cosYaw, sinYaw, cosPitch, sinPitch, lx, ly, lz } = ctx;
   const [ox, oy, oz] = offset;
   const tiles = model.tile;
+  const planes = model.plane;
 
   // Rotate one world point (model point + offset) to screen (x,y) + camera depth.
   const project = (px: number, py: number, pz: number): [number, number, number] => {
@@ -203,7 +223,7 @@ export function drawModelInto(
   ];
 
   // Draw whichever cell the model was built from (cubes for older models).
-  const faces = (model.geometry ?? CUBE_GEOMETRY).faces;
+  const cellFaces = (model.geometry ?? CUBE_GEOMETRY).faces;
 
   for (let v = 0; v < model.count; v += 1) {
     const vx = model.x[v]!;
@@ -214,6 +234,11 @@ export function drawModelInto(
     const id = pickId ?? v;
     // This voxel's tile/material index; a face resolves it to its own tile below.
     const tileIndex = tiles ? tiles[v]! : -1;
+    // A plane voxel is drawn collapsed along one axis, as a square quad standing
+    // in the middle of its cell — so it always uses the cube face table, whatever
+    // lattice the rest of the model is built on.
+    const planeAxis = planes ? planes[v]! : -1;
+    const faces = planeAxis >= 0 ? CUBE_GEOMETRY.faces : cellFaces;
 
     for (let f = 0; f < faces.length; f += 1) {
       const face = faces[f]!;
@@ -236,7 +261,12 @@ export function drawModelInto(
 
       for (let c = 0; c < 4; c += 1) {
         const off = face.corners[c]!;
-        corners[c] = project(vx + off[0], vy + off[1], vz + off[2]);
+        // Collapsing the corner offset along the plane's axis is what flattens the
+        // cell: both of its faces on that axis land on one central quad.
+        const cx = planeAxis === 0 ? 0 : off[0]!;
+        const cy = planeAxis === 1 ? 0 : off[1]!;
+        const cz = planeAxis === 2 ? 0 : off[2]!;
+        corners[c] = project(vx + cx, vy + cy, vz + cz);
       }
 
       if (tex) {
@@ -245,15 +275,15 @@ export function drawModelInto(
         // colours (each handheld's body, each screen's hue) while the tile supplies
         // the grain; a white voxel shows the tile as authored.
         fillTexturedQuad(
-          data, depth, size, corners, tex,
+          ctx, corners, tex,
           model.r[v]!, model.g[v]!, model.b[v]!,
-          shade, light.color, emissive, pickVoxel, pickFace, id, f,
+          shade, light.color, emissive, id, f,
         );
       } else {
         const r = litChannel(model.r[v]!, shade, light.color[0], emissive);
         const g = litChannel(model.g[v]!, shade, light.color[1], emissive);
         const b = litChannel(model.b[v]!, shade, light.color[2], emissive);
-        fillQuad(data, depth, size, corners, r, g, b, pickVoxel, pickFace, id, f);
+        fillQuad(ctx, corners, r, g, b, id, f);
       }
     }
   }
@@ -282,10 +312,14 @@ export function renderVoxelModel(model: VoxelModel, options: RenderModelOptions 
   const depth = options.depthBuffer ?? new Float32Array(size * size);
   const pickVoxel = options.pickVoxel;
   const pickFace = options.pickFace;
+  const pickU = options.pickU;
+  const pickV = options.pickV;
   data.fill(0);
   depth.fill(-Infinity);
   pickVoxel?.fill(-1);
   pickFace?.fill(-1);
+  pickU?.fill(-1);
+  pickV?.fill(-1);
 
   const ctx = makeDrawContext({
     data,
@@ -297,12 +331,14 @@ export function renderVoxelModel(model: VoxelModel, options: RenderModelOptions 
     light,
     pickVoxel,
     pickFace,
+    pickU,
+    pickV,
   });
   // A single model sits at the world origin; leaving pickId undefined records
   // each voxel's own index, which the editor's pick relies on.
   drawModelInto(ctx, model, [0, 0, 0], undefined, options.atlas);
 
-  return { data, depth, width: size, height: size, pickVoxel, pickFace };
+  return { data, depth, width: size, height: size, pickVoxel, pickFace, pickU, pickV };
 }
 
 /**
@@ -311,18 +347,15 @@ export function renderVoxelModel(model: VoxelModel, options: RenderModelOptions 
  * is interpolated across it, since a tipped face spans a range of depths.
  */
 function fillQuad(
-  data: Uint8ClampedArray,
-  depth: Float32Array,
-  size: number,
+  ctx: DrawContext,
   p: readonly [number, number, number][],
   r: number,
   g: number,
   b: number,
-  pickVoxel: Int32Array | undefined,
-  pickFace: Int8Array | undefined,
   voxelIndex: number,
   faceIndex: number,
 ): void {
+  const { data, depth, size, pickVoxel, pickFace, pickU, pickV } = ctx;
   const minX = Math.max(0, Math.floor(Math.min(p[0]![0], p[1]![0], p[2]![0], p[3]![0])));
   const maxX = Math.min(size - 1, Math.ceil(Math.max(p[0]![0], p[1]![0], p[2]![0], p[3]![0])));
   const minY = Math.max(0, Math.floor(Math.min(p[0]![1], p[1]![1], p[2]![1], p[3]![1])));
@@ -360,6 +393,8 @@ function fillQuad(
       data[o + 3] = 255;
       if (pickVoxel) pickVoxel[di] = voxelIndex;
       if (pickFace) pickFace[di] = faceIndex;
+      if (pickU) pickU[di] = u;
+      if (pickV) pickV[di] = w;
     }
   }
 }
@@ -378,9 +413,7 @@ function litChannel(albedo: number, shade: number, lightColor: number, emissive:
  * emissive, and fully transparent texels are skipped so the face shows through.
  */
 function fillTexturedQuad(
-  data: Uint8ClampedArray,
-  depth: Float32Array,
-  size: number,
+  ctx: DrawContext,
   p: readonly [number, number, number][],
   tile: FaceTexture,
   tintR: number,
@@ -389,11 +422,10 @@ function fillTexturedQuad(
   shade: number,
   lightColor: readonly [number, number, number],
   voxelEmissive: number,
-  pickVoxel: Int32Array | undefined,
-  pickFace: Int8Array | undefined,
   voxelIndex: number,
   faceIndex: number,
 ): void {
+  const { data, depth, size, pickVoxel, pickFace, pickU, pickV } = ctx;
   const minX = Math.max(0, Math.floor(Math.min(p[0]![0], p[1]![0], p[2]![0], p[3]![0])));
   const maxX = Math.min(size - 1, Math.ceil(Math.max(p[0]![0], p[1]![0], p[2]![0], p[3]![0])));
   const minY = Math.max(0, Math.floor(Math.min(p[0]![1], p[1]![1], p[2]![1], p[3]![1])));
@@ -442,6 +474,8 @@ function fillTexturedQuad(
       data[o + 3] = 255;
       if (pickVoxel) pickVoxel[di] = voxelIndex;
       if (pickFace) pickFace[di] = faceIndex;
+      if (pickU) pickU[di] = u;
+      if (pickV) pickV[di] = w;
     }
   }
 }

@@ -117,6 +117,30 @@ export {
   type MapLayerGridOptions,
   type PaletteLookup,
 } from "./model/MapVoxelLayer";
+export {
+  MapVoxelSpace,
+  mapColumnTarget,
+  mapSpaceFromColumns,
+  mapSpaceToColumns,
+  serializeMapVoxelSpace,
+  deserializeMapVoxelSpace,
+  loadMapVoxelSpace,
+  isPlaneKind,
+  planeAxisOf,
+  MAP_CELL_KINDS,
+  MAP_VOXEL_SPACE_VERSION,
+  MAX_MAP_VOXEL_HEIGHT,
+  MAX_MAP_CELL_MATERIAL,
+  type MapCellKind,
+  type MapVoxelCell,
+} from "./model/MapVoxelSpace";
+export {
+  mapSpaceToModel,
+  planeFaceIndices,
+  isPlaneVoxel,
+  type MapSpaceModelOptions,
+  type MapViewFocus,
+} from "./model/mapSpaceModel";
 export * from "./procgen/index";
 export {
   VOXEL_FONT,

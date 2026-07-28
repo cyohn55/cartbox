@@ -1,5 +1,12 @@
 /**
- * MapVoxelLayer — the map's third dimension.
+ * MapVoxelLayer — the map's third dimension, as one column per cell.
+ *
+ * **{@link MapVoxelSpace} is what the editor authors now.** This remains the
+ * *columnar* form of the same data: it is the shape every map saved before
+ * free-form cells existed is stored in, so it is still what a space loads from
+ * and — for as long as a map's cells really do form plain columns — what a space
+ * saves back to, byte for byte. That is what lets free-form 3D ship without
+ * rewriting a single stored cart.
  *
  * The tile map says what the ground *looks* like from above; this layer says how
  * tall it *is*. Each map cell carries a column: a height in cells and a palette
