@@ -136,10 +136,16 @@ export {
 } from "./model/MapVoxelSpace";
 export {
   renderMapFirstPerson,
+  castMapRay,
   cellContaining,
+  firstPersonBasis,
+  walkAxes,
+  type FirstPersonBasis,
   type FirstPersonCamera,
   type FirstPersonOptions,
   type FirstPersonRender,
+  type MapRayHit,
+  type MapWindow,
 } from "./render/mapRaycaster";
 export {
   mapSpaceToModel,
@@ -205,6 +211,43 @@ export {
   type TextureAtlas,
   type FaceMaterial,
 } from "./render/faceTexture";
+export {
+  withDerivedSurface,
+  heightFromArt,
+  normalsFromHeight,
+  luminance,
+  MATTE_FINISH,
+  type SurfaceFinish,
+} from "./render/faceRelief";
+export {
+  packAtlasTexture,
+  buildFaceLayers,
+  commonTileSize,
+  faceGroupOf,
+  FACE_GROUPS,
+  type AtlasTexture,
+  type AtlasTextureLevel,
+  type FaceGroup,
+  type PackAtlasOptions,
+} from "./render/tileAtlasTexture";
+export {
+  voxelModelToMesh,
+  VOXEL_MESH_STRIDE,
+  type VoxelMesh,
+  type VoxelMeshOptions,
+} from "./render/voxelMesh";
+export {
+  orbitBasis,
+  orthographicProjection,
+  perspectiveProjection,
+  projectToScreen,
+  screenRay,
+  type CameraBasis,
+  type OrthographicOptions,
+  type PerspectiveOptions,
+  type Projection,
+  type WorldRay,
+} from "./render/mapCamera";
 export {
   LIGHTING_PRESETS,
   DEFAULT_LIGHTING_PRESET_ID,

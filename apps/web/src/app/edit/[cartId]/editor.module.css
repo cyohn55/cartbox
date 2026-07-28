@@ -1699,6 +1699,60 @@
   justify-content: center;
 }
 
+/* The hardware path is not confined to a square: it renders at the canvas's own
+   size, so it should have the whole stage rather than a letterboxed patch of it. */
+.walkFrameWide {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+/* A GPU canvas carries no upscale and no pixel-doubling — its texels are already
+   the size the shader drew them, so smoothing here would only blur the result. */
+.gpuCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #05070c;
+  cursor: crosshair;
+  touch-action: none;
+  outline: none;
+}
+
+.gpuCanvas:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* `hidden` has to win. The browser's own rule for it is a bare `[hidden]`
+   selector, which any class rule setting `display` outranks — so the renderer
+   that is *not* drawing would otherwise still sit in the layout and take half the
+   stage away from the one that is. */
+.gpuCanvas[hidden],
+.spaceCanvas[hidden] {
+  display: none;
+}
+
+/* The wireframe cursor and the picked-face outline, stroked over the hardware
+   frame rather than into it — a WebGPU canvas has no 2D context to draw on. */
+.overlayCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* Stacked so the overlay sits exactly over whichever renderer is drawing. */
+.spaceStack {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 /* Two thin bars rather than a dot: a dot disappears against pixel art of the
    same value, while a cross reads over anything. */
 .crosshair {

@@ -27,6 +27,7 @@ import {
   buildSpriteMaterialAtlas,
   firstSpriteMaterialIndex,
   uniformSpriteMaterial,
+  type SpriteChannelSource,
   type SpriteMaterial,
   type SpritePixelSource,
 } from "./spriteTiles";
@@ -71,10 +72,13 @@ export function materialSpriteTile(material: number, tilesPerPage: number): numb
  * material per sprite on the tiles page, in tile order — the ordering
  * {@link spriteTileMaterial} depends on.
  */
-export function buildMapAtlas(sheet: MapSpriteSource): TextureAtlas {
+export function buildMapAtlas(
+  sheet: MapSpriteSource,
+  channels?: SpriteChannelSource,
+): TextureAtlas {
   const sprites: SpriteMaterial[] = [];
   for (let tile = 0; tile < sheet.tilesPerPage; tile += 1) {
     sprites.push(uniformSpriteMaterial(`Tile ${tile}`, { page: MAP_SPRITE_PAGE, tile }));
   }
-  return buildSpriteMaterialAtlas(WORLD_ATLAS, sprites, sheet);
+  return buildSpriteMaterialAtlas(WORLD_ATLAS, sprites, sheet, channels);
 }

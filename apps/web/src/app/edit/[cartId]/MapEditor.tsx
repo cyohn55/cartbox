@@ -61,6 +61,7 @@ import { GeneratorPanel } from "./GeneratorPanel";
 import { Map3DCanvas, type SpaceHover } from "./Map3DCanvas";
 import { MapCanvas } from "./MapCanvas";
 import { MapWalkCanvas, standOnGround, type WalkCamera, type WalkHover } from "./MapWalkCanvas";
+import type { MapGpuStatus } from "./useMapGpu";
 import { RailGroup, RailHint, RangeControl, SegmentedControl, ToolRail } from "./railControls";
 import { MaterialSurface, NormalSurface } from "./paintSurface";
 import { MaterialBrushSurface } from "./materialBrushSurface";
@@ -217,6 +218,11 @@ export function MapEditor({
   }));
   const [walkDetail, setWalkDetail] = useState(WALK_DETAIL_LEVELS[1]!.id);
   const [walkHover, setWalkHover] = useState<WalkHover | null>(null);
+  // Which renderer the 3D stage settled on. Worth surfacing rather than hiding:
+  // the controls that only matter to the software path (its render resolution)
+  // are meaningless on the hardware one, and an author who is quietly on the slow
+  // path deserves to be told why it is slow.
+  const [renderer, setRenderer] = useState<MapGpuStatus>("probing");
 
   // Generator state: which one, its values, and how its classes map onto the
   // active layer. The mapping is per generator, so switching back to one you
@@ -281,9 +287,28 @@ export function MapEditor({
   const aiming = walking ? walkHover : spaceHover;
 
   // The atlas the 3D view samples: the world's materials plus every sprite on the
-  // tiles page. Rebuilt when the art changes so a texture painted on a face shows
-  // on every cell wearing that sprite.
-  const atlas = useMemo(() => buildMapAtlas(sheet), [sheet, version]);
+  // tiles page, each carrying whatever the cart's Material layer painted onto it.
+  // That last part is what lets a surface authored in the Sprites tab arrive in
+  // the world as a *material* — its normals, height, gloss and glow intact —
+  // rather than as flat colour the renderer has to guess about. Rebuilt when the
+  // art changes, so a texture painted on a face shows on every cell wearing it.
+  const channels = useMemo(
+    () => ({
+      levels: heightMap.levels,
+      normalDirection: (page: 0 | 1, tile: number, x: number, y: number) =>
+        normals.getDirection(page, tile, x, y),
+      height: (page: 0 | 1, tile: number, x: number, y: number) => heightMap.getValue(page, tile, x, y),
+      specular: (page: 0 | 1, tile: number, x: number, y: number) => specular.getValue(page, tile, x, y),
+      roughness: (page: 0 | 1, tile: number, x: number, y: number) => roughness.getValue(page, tile, x, y),
+      emissive: (page: 0 | 1, tile: number, x: number, y: number) => emissive.getValue(page, tile, x, y),
+    }),
+    [normals, heightMap, specular, roughness, emissive],
+  );
+  const atlas = useMemo(
+    () => buildMapAtlas(sheet, channels),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sheet, channels, version],
+  );
 
   /** Serialize the cells up to the cart after an edit or a generate run. */
   const commitSpace = () => {
@@ -483,12 +508,14 @@ export function MapEditor({
 
             {walking ? (
               <>
-                <SegmentedControl
-                  label="Detail"
-                  options={WALK_DETAIL_LEVELS}
-                  selected={walkDetail}
-                  onSelect={setWalkDetail}
-                />
+                {renderer === "cpu" && (
+                  <SegmentedControl
+                    label="Detail"
+                    options={WALK_DETAIL_LEVELS}
+                    selected={walkDetail}
+                    onSelect={setWalkDetail}
+                  />
+                )}
                 <RailHint>
                   Click the view to capture the mouse, then look with the mouse and move with W A S D. Space and
                   Shift change height, Ctrl sprints, Escape releases. Click builds, right-click breaks.
@@ -516,6 +543,14 @@ export function MapEditor({
                 Clear cells
               </button>
             )}
+
+            <RailHint>
+              {renderer === "gpu"
+                ? "Drawing on the GPU (WebGPU): full resolution, lit by the material channels your art carries, with glowing pixels bloomed."
+                : renderer === "cpu"
+                  ? "WebGPU is unavailable here, so the view is being drawn in software — lower resolution and slower. Enabling hardware acceleration in your browser restores it."
+                  : "Choosing a renderer…"}
+            </RailHint>
           </>
         ) : (
           <>
@@ -560,6 +595,7 @@ export function MapEditor({
             onPickStyle={adoptStyle}
             onHover={setWalkHover}
             onNote={setSpaceNote}
+            onRendererChange={setRenderer}
           />
         ) : inSpace ? (
           <Map3DCanvas
@@ -586,6 +622,7 @@ export function MapEditor({
             onPickStyle={adoptStyle}
             onHover={setSpaceHover}
             onNote={setSpaceNote}
+            onRendererChange={setRenderer}
           />
         ) : (
           <MapCanvas
@@ -679,7 +716,7 @@ export function MapEditor({
           {showGenerator ? "Close generator" : "Generate…"}
         </button>
 
-        {showGenerator ? (
+        {showGenerator && (
           <GeneratorPanel
             generators={MAP_GENERATORS}
             selectedId={generator.id}
@@ -700,110 +737,98 @@ export function MapEditor({
               maxColumnHeight={MAX_MAP_VOXEL_HEIGHT}
             />
           </GeneratorPanel>
-        ) : !inSpace && layer === "tiles" ? (
-          <TilePicker
-            sheet={sheet}
-            page={TILES_PAGE}
-            selected={brush.tile}
-            version={version}
-            onSelect={(tile) => setBrush(singleTileBrush(tile))}
-            onSelectBrush={setBrush}
-            brush={brush}
-          />
-        ) : (
-          <div>
-            {/* Colour, always. Every 3D tool paints with it — a cell's colour, a
-                plane's tint, and the pixel the pencil lays down — so hiding it
-                behind a tool choice left the pixel tools with no colour to use. */}
-            <div className={styles.panelHead}>
-              <span className={styles.panelTitle}>Palette</span>
-              <span className={styles.panelMeta}>{palette[colorIndex] ?? "—"}</span>
-            </div>
-            <div className={styles.paletteGrid}>
-              {palette.map((css, index) => (
-                <button
-                  key={index}
-                  type="button"
-                  className={`${styles.swatch} ${index === colorIndex ? styles.swatchActive : ""}`}
-                  style={{ background: css }}
-                  onClick={() => setColorIndex(index)}
-                  title={`${index} · ${css}`}
-                  aria-label={`Colour ${index}, ${css}`}
-                  aria-pressed={index === colorIndex}
-                />
-              ))}
-            </div>
-
-            {(inSpace || isColumnLayer(layer)) && (
-              <>
-                <div className={styles.panelHead} style={{ marginTop: 14 }}>
-                  <span className={styles.panelTitle}>Material</span>
-                  <span className={styles.panelMeta}>{materialLabel(columnMaterial, sheet.tilesPerPage)}</span>
-                </div>
-                <div className={styles.paletteGrid}>
-                  <button
-                    type="button"
-                    className={`${styles.swatch} ${columnMaterial < 0 ? styles.swatchActive : ""}`}
-                    style={{ background: palette[colorIndex] ?? "#000", outline: "1px dashed var(--faint)" }}
-                    onClick={() => setColumnMaterial(COLUMN_MATERIAL_NONE)}
-                    title="Flat — build in the palette colour, with no texture"
-                    aria-label="Flat colour, no material"
-                    aria-pressed={columnMaterial < 0}
-                  />
-                  {BUILD_MATERIALS.map((entry) => (
-                    <button
-                      key={entry.name}
-                      type="button"
-                      className={`${styles.swatch} ${entry.material === columnMaterial ? styles.swatchActive : ""}`}
-                      style={{ background: entry.swatch }}
-                      onClick={() => setColumnMaterial(entry.material)}
-                      title={entry.name}
-                      aria-label={`Material ${entry.name}`}
-                      aria-pressed={entry.material === columnMaterial}
-                    />
-                  ))}
-                  {/* The armed sprite, offered as one material among the world's
-                      own rather than as a separate button: skinning a cell with
-                      your own art is the same kind of choice as skinning it with
-                      grass, and the Sprites panel below chooses which sprite. */}
-                  {inSpace && (
-                    <button
-                      type="button"
-                      className={`${styles.swatch} ${
-                        columnMaterial === spriteTileMaterial(brush.tile) ? styles.swatchActive : ""
-                      }`}
-                      style={{ padding: 0, overflow: "hidden" }}
-                      onClick={() => setColumnMaterial(spriteTileMaterial(brush.tile))}
-                      title={`Sprite #${brush.tile} — skin cells with your own art`}
-                      aria-label={`Material from sprite ${brush.tile}`}
-                      aria-pressed={columnMaterial === spriteTileMaterial(brush.tile)}
-                    >
-                      <SpriteSwatch sheet={sheet} tile={brush.tile} version={version} />
-                    </button>
-                  )}
-                </div>
-              </>
-            )}
-
-            {/* The sprite itself, whenever a tool is about to stand it in the
-                world or paint on it. */}
-            {inSpace && needsSpriteBrush(spaceTool, planeKind) && (
-              <div style={{ marginTop: 14 }}>
-                <TilePicker
-                  sheet={sheet}
-                  page={TILES_PAGE}
-                  selected={brush.tile}
-                  version={version}
-                  onSelect={(tile) => setBrush(singleTileBrush(tile))}
-                  onSelectBrush={setBrush}
-                  brush={brush}
-                />
-              </div>
-            )}
-
-            <p className={styles.pickerHint}>{hintFor(view, cameraMode, layer, spaceTool, space.shape)}</p>
-          </div>
         )}
+
+        {/* Colour and material are always here.
+            They used to be swapped out — for the tile picker on the Tiles layer,
+            and for the generator while it was open — which meant that opening the
+            Map tab, or generating a landscape and then wanting to paint it, left
+            you with nothing to paint *with* and no sign that a palette existed at
+            all. Every layer here has some use for a colour, so the palette stays
+            and the specialised pickers stack under it. */}
+        <div>
+          <div className={styles.panelHead}>
+            <span className={styles.panelTitle}>Palette</span>
+            <span className={styles.panelMeta}>{palette[colorIndex] ?? "—"}</span>
+          </div>
+          <div className={styles.paletteGrid}>
+            {palette.map((css, index) => (
+              <button
+                key={index}
+                type="button"
+                className={`${styles.swatch} ${index === colorIndex ? styles.swatchActive : ""}`}
+                style={{ background: css }}
+                onClick={() => setColorIndex(index)}
+                title={`${index} · ${css}`}
+                aria-label={`Colour ${index}, ${css}`}
+                aria-pressed={index === colorIndex}
+              />
+            ))}
+          </div>
+
+          <div className={styles.panelHead} style={{ marginTop: 14 }}>
+            <span className={styles.panelTitle}>Material</span>
+            <span className={styles.panelMeta}>{materialLabel(columnMaterial, sheet.tilesPerPage)}</span>
+          </div>
+          <div className={styles.paletteGrid}>
+            <button
+              type="button"
+              className={`${styles.swatch} ${columnMaterial < 0 ? styles.swatchActive : ""}`}
+              style={{ background: palette[colorIndex] ?? "#000", outline: "1px dashed var(--faint)" }}
+              onClick={() => setColumnMaterial(COLUMN_MATERIAL_NONE)}
+              title="Flat — build in the palette colour, with no texture"
+              aria-label="Flat colour, no material"
+              aria-pressed={columnMaterial < 0}
+            />
+            {BUILD_MATERIALS.map((entry) => (
+              <button
+                key={entry.name}
+                type="button"
+                className={`${styles.swatch} ${entry.material === columnMaterial ? styles.swatchActive : ""}`}
+                style={{ background: entry.swatch }}
+                onClick={() => setColumnMaterial(entry.material)}
+                title={entry.name}
+                aria-label={`Material ${entry.name}`}
+                aria-pressed={entry.material === columnMaterial}
+              />
+            ))}
+            {/* The armed sprite, offered as one material among the world's own
+                rather than as a separate button: skinning a cell with your own art
+                is the same kind of choice as skinning it with grass, and the
+                sprite picker below chooses which sprite. */}
+            <button
+              type="button"
+              className={`${styles.swatch} ${
+                columnMaterial === spriteTileMaterial(brush.tile) ? styles.swatchActive : ""
+              }`}
+              style={{ padding: 0, overflow: "hidden" }}
+              onClick={() => setColumnMaterial(spriteTileMaterial(brush.tile))}
+              title={`Sprite #${brush.tile} — skin cells with your own art`}
+              aria-label={`Material from sprite ${brush.tile}`}
+              aria-pressed={columnMaterial === spriteTileMaterial(brush.tile)}
+            >
+              <SpriteSwatch sheet={sheet} tile={brush.tile} version={version} />
+            </button>
+          </div>
+
+          {/* The sprite sheet, whenever a tool stamps it, stands it in the world,
+              or paints on it. */}
+          {(needsSpriteBrush(spaceTool, planeKind) || !inSpace) && (
+            <div style={{ marginTop: 14 }}>
+              <TilePicker
+                sheet={sheet}
+                page={TILES_PAGE}
+                selected={brush.tile}
+                version={version}
+                onSelect={(tile) => setBrush(singleTileBrush(tile))}
+                onSelectBrush={setBrush}
+                brush={brush}
+              />
+            </div>
+          )}
+
+          <p className={styles.pickerHint}>{hintFor(view, cameraMode, layer, spaceTool, space.shape)}</p>
+        </div>
       </aside>
     </div>
   );

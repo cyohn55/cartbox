@@ -11,10 +11,17 @@
  * cell coordinate the camera orbits about and the window is built around; moving
  * it is how you travel a map far larger than any one frame.
  *
- * Picking is exact rather than ray-marched: the shared voxel renderer already
- * emits a per-pixel voxel + face buffer, and this asks it for the face-local
- * coordinates too — which is what lets the pixel tools paint a single texel of the
- * sprite skinning the face you clicked, in place, at the angle you are seeing it.
+ * It draws two ways. With WebGPU the built window is uploaded once per edit and
+ * redrawn in hardware, at the stage's full size, with the material channels the
+ * editor authors; without it the shared software rasteriser fills a fixed square
+ * frame, as it always has. The two share a camera, so switching between them
+ * changes only how sharp the picture is.
+ *
+ * Picking is exact rather than approximate. On the software path the rasteriser
+ * already emits a per-pixel voxel + face buffer; on the hardware path the pointer
+ * becomes a world ray and is marched through the same space. Either way a click
+ * resolves to the face-local coordinates the pixel tools need to paint a single
+ * texel of the sprite skinning the face you clicked, at the angle you see it.
  *
  * The space is the caller's, mutated in place and committed after each edit, the
  * same contract the top-down canvas has — so both views drive one store and an
@@ -27,14 +34,20 @@ import {
   DEFAULT_MODEL_LIGHT,
   HEXEL_GEOMETRY,
   MapVoxelSpace,
+  castMapRay,
   geometryFor,
   isPlaneVoxel,
   mapSpaceToModel,
+  orbitBasis,
+  orthographicProjection,
   planeAxisOf,
+  projectToScreen,
   renderVoxelModel,
+  screenRay,
   type CellGeometry,
   type MapCellKind,
   type MapViewFocus,
+  type MapWindow,
   type SpriteSheet,
   type TextureAtlas,
 } from "@cartbox/editor";
@@ -48,9 +61,16 @@ import {
   type SpacePick,
   type SpaceToolResult,
 } from "./mapSpaceTools";
+import { useMapGpu, type MapGpuStatus } from "./useMapGpu";
 
 /** Canvas edge in device pixels; also the pick buffers' resolution. */
 const VIEWPORT = 640;
+
+/** Sky behind the orbiting view, and what distance fades toward; each 0..1. */
+const SKY: readonly [number, number, number] = [10 / 255, 13 / 255, 22 / 255];
+
+/** How much an emissive texel bleeds into its surroundings. */
+const BLOOM = 0.5;
 
 /** Zoom, as output pixels per cell. */
 const CELL_MIN = 3;
@@ -129,6 +149,8 @@ interface Map3DCanvasProps {
   onHover: (hover: SpaceHover | null) => void;
   /** Reports why a click did nothing, so the HUD can explain rather than stay silent. */
   onNote: (note: string | null) => void;
+  /** Which renderer ended up drawing, so the rail can say so. */
+  onRendererChange?: (status: MapGpuStatus) => void;
 }
 
 /** `#rrggbb` → 0..255 RGB triple, falling back to white on a malformed value. */
@@ -268,11 +290,20 @@ export function Map3DCanvas({
   onPickStyle,
   onHover,
   onNote,
+  onRendererChange,
 }: Map3DCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayRef = useRef<HTMLCanvasElement>(null);
   /** The last rendered frame, so a hover change only redraws the overlay. */
   const frameRef = useRef<ImageData | null>(null);
   const hoverRef = useRef<SpaceHover | null>(null);
+  const gpu = useMapGpu(atlas, version);
+  const onGpu = gpu.status === "gpu";
+  const activeCanvasRef = onGpu ? gpu.canvasRef : canvasRef;
+
+  useEffect(() => {
+    onRendererChange?.(gpu.status);
+  }, [gpu.status, onRendererChange]);
 
   const geometry = useMemo<CellGeometry>(() => geometryFor(space.shape), [space.shape]);
   const paletteRgb = useCallback(
@@ -301,7 +332,59 @@ export function Map3DCanvas({
     [space, version, focus.x, focus.y, focus.z, radius, geometry, paletteRgb],
   );
 
-  const project = useMemo(() => makeProject(yaw, pitch, cell, focus), [yaw, pitch, cell, focus]);
+  /**
+   * The window of columns that was actually built. A pick has to be held to it:
+   * the map extends well past what the view drew, and a click near the frame's
+   * edge must not act on a cell nobody can see.
+   */
+  const bounds = useMemo<MapWindow>(
+    () => ({
+      minX: Math.max(0, Math.floor(focus.x) - radius),
+      maxX: Math.min(space.width - 1, Math.floor(focus.x) + radius),
+      minZ: Math.max(0, Math.floor(focus.z) - radius),
+      maxZ: Math.min(space.depth - 1, Math.floor(focus.z) + radius),
+    }),
+    [focus.x, focus.z, radius, space.depth, space.width],
+  );
+
+  const basis = useMemo(() => orbitBasis(yaw, pitch), [yaw, pitch]);
+
+  /**
+   * The orthographic slab, sized to hold the whole built window at any rotation.
+   * Too shallow and the far half of your own landscape is clipped away.
+   */
+  const depthRange = useMemo(
+    () => radius * 2 + space.maxHeight + 8,
+    [radius, space.maxHeight],
+  );
+
+  /** The hardware projection for the canvas as it is currently sized. */
+  const gpuProjection = useCallback(
+    (canvas: HTMLCanvasElement) =>
+      orthographicProjection({
+        // `cell` is stated in CSS pixels, and the canvas is drawn in device ones.
+        cell: cell * (canvas.clientWidth > 0 ? canvas.width / canvas.clientWidth : 1),
+        width: canvas.width,
+        height: canvas.height,
+        range: depthRange,
+      }),
+    [cell, depthRange],
+  );
+
+  /** The software frame's projection, in its fixed square of pixels. */
+  const projectFixed = useMemo(() => makeProject(yaw, pitch, cell, focus), [yaw, pitch, cell, focus]);
+
+  /** The same projection over the hardware frame, in that canvas's own pixels. */
+  const gpuProject = useCallback(
+    (canvas: HTMLCanvasElement): Project => {
+      const projection = gpuProjection(canvas);
+      return (x, y, z) => {
+        const at = projectToScreen([0, 0, 0], basis, projection, [x - focus.x, y - focus.y, z - focus.z]);
+        return [at.x * canvas.width, at.y * canvas.height];
+      };
+    },
+    [basis, focus.x, focus.y, focus.z, gpuProjection],
+  );
 
   /**
    * The model-space corners of a picked face, with a plane's collapsed along its
@@ -324,18 +407,40 @@ export function Map3DCanvas({
     [geometry],
   );
 
-  /** Blit the last render and stroke the cursor overlay over it. */
+  /**
+   * Blit the last render and stroke the cursor overlay over it.
+   *
+   * On the hardware path the frame is already on screen and the overlay lives on
+   * its own transparent canvas — a WebGPU canvas has no 2D context to stroke into
+   * — so the two paths differ only in which surface is drawn on and at what
+   * scale. Everything after that is one piece of code.
+   */
   const paint = useCallback(() => {
-    const canvas = canvasRef.current;
-    const frame = frameRef.current;
-    const context = canvas?.getContext("2d");
-    if (!canvas || !frame || !context) return;
-    context.putImageData(frame, 0, 0);
+    let context: CanvasRenderingContext2D | null = null;
+    let project: Project;
+    let scale = 1;
+
+    if (onGpu) {
+      const overlay = overlayRef.current;
+      const canvas = gpu.canvasRef.current;
+      context = overlay?.getContext("2d") ?? null;
+      if (!overlay || !canvas || !context) return;
+      context.clearRect(0, 0, overlay.width, overlay.height);
+      project = gpuProject(canvas);
+      scale = canvas.clientWidth > 0 ? canvas.width / canvas.clientWidth : 1;
+    } else {
+      const canvas = canvasRef.current;
+      const frame = frameRef.current;
+      context = canvas?.getContext("2d") ?? null;
+      if (!canvas || !frame || !context) return;
+      context.putImageData(frame, 0, 0);
+      project = projectFixed;
+    }
 
     const hover = hoverRef.current;
     if (!hover) return;
     const color = HIGHLIGHT[tool];
-    const lineWidth = Math.max(1.5, cell * 0.1);
+    const lineWidth = Math.max(1.5, cell * 0.1) * scale;
 
     if (isPixelSpaceTool(tool)) {
       // Outline the face, then the single texel the stroke would land on — the
@@ -379,7 +484,7 @@ export function Map3DCanvas({
       if (axis >= 0) half[axis] = 0;
       drawBoxOutline(context, project, [tx, ty, tz], half, color, lineWidth);
     }
-  }, [tool, cell, faceCorners, project, sheet.tileSize, space.shape, planeKind]);
+  }, [tool, cell, faceCorners, gpu.canvasRef, gpuProject, onGpu, projectFixed, sheet.tileSize, space.shape, planeKind]);
 
   // Rendering the window is the expensive step, so it is kept off the overlay's
   // path: changing tool or hover only re-blits the frame and re-strokes the
@@ -387,7 +492,68 @@ export function Map3DCanvas({
   const paintRef = useRef(paint);
   paintRef.current = paint;
 
+  /** Fit the hardware canvas and its overlay to the stage, in device pixels. */
   useEffect(() => {
+    if (!onGpu) return;
+    const canvas = gpu.canvasRef.current;
+    if (!canvas) return;
+    const fit = () => {
+      const ratio = Math.min(2, window.devicePixelRatio || 1);
+      const width = Math.max(1, Math.round(canvas.clientWidth * ratio));
+      const height = Math.max(1, Math.round(canvas.clientHeight * ratio));
+      const overlay = overlayRef.current;
+      if (overlay && (overlay.width !== width || overlay.height !== height)) {
+        overlay.width = width;
+        overlay.height = height;
+      }
+      if (canvas.width === width && canvas.height === height) return;
+      canvas.width = width;
+      canvas.height = height;
+      drawRef.current();
+    };
+    fit();
+    const observer = new ResizeObserver(fit);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [gpu.canvasRef, onGpu]);
+
+  // Upload the built window whenever it changes. This is the work the GPU path
+  // trades for: once per edit or camera move, rather than once per frame.
+  useEffect(() => {
+    if (!onGpu) return;
+    gpu.uploadModel(model);
+  }, [gpu, model, onGpu]);
+
+  /** Draw one hardware frame at the canvas's current size. */
+  const drawGpu = useCallback(() => {
+    const canvas = gpu.canvasRef.current;
+    if (!canvas) return;
+    gpu.draw({
+      // The model is already expressed relative to the focus, so the eye sits at
+      // the origin and the camera is pure rotation.
+      eye: [0, 0, 0],
+      basis,
+      projection: gpuProjection(canvas),
+      light: DEFAULT_MODEL_LIGHT,
+      sky: SKY,
+      // Orbiting looks at the whole build from outside, where haze would only
+      // grey it out; the window's edge is a visible slice, and that is honest.
+      fogDistance: 0,
+      bloom: BLOOM,
+    });
+    paintRef.current();
+  }, [basis, gpu, gpuProjection]);
+  const drawRef = useRef(drawGpu);
+  drawRef.current = drawGpu;
+
+  useEffect(() => {
+    if (!onGpu) return;
+    drawGpu();
+  }, [drawGpu, model, onGpu]);
+
+  // The software path: rasterise into the fixed square frame and blit it.
+  useEffect(() => {
+    if (onGpu) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     canvas.width = VIEWPORT;
@@ -412,20 +578,55 @@ export function Map3DCanvas({
     frame.data.set(buffers.out);
     frameRef.current = frame;
     paintRef.current();
-  }, [model, yaw, pitch, cell, atlas, buffers]);
+  }, [model, yaw, pitch, cell, atlas, buffers, onGpu]);
 
   useEffect(() => {
     paint();
   }, [paint]);
 
-  /** Resolve a canvas position to the cell and face under it. */
+  /**
+   * Resolve a canvas position to the cell and face under it.
+   *
+   * The software path reads its own pick buffers. The hardware path has none, so
+   * the pointer becomes a world ray and is marched through the space — held to
+   * the window that was actually built, so a click can only reach what was drawn.
+   */
   const pickAt = (clientX: number, clientY: number): SpacePick | null => {
-    const canvas = canvasRef.current;
+    const canvas = activeCanvasRef.current;
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
-    const px = Math.floor(((clientX - rect.left) / rect.width) * VIEWPORT);
-    const py = Math.floor(((clientY - rect.top) / rect.height) * VIEWPORT);
-    if (px < 0 || px >= VIEWPORT || py < 0 || py >= VIEWPORT) return null;
+    const fx = (clientX - rect.left) / rect.width;
+    const fy = (clientY - rect.top) / rect.height;
+    if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return null;
+
+    if (onGpu) {
+      const ray = screenRay(
+        [focus.x, focus.y, focus.z],
+        basis,
+        orthographicProjection({ cell, width: rect.width, height: rect.height, range: depthRange }),
+        fx,
+        fy,
+      );
+      const hit = castMapRay(space, ray.origin, ray.direction, {
+        atlas,
+        maxDistance: depthRange * 2,
+        bounds,
+      });
+      if (!hit) return null;
+      const struck = space.cellAt(hit.x, hit.y, hit.z);
+      return {
+        x: hit.x,
+        y: hit.y,
+        z: hit.z,
+        face: hit.face,
+        u: hit.u,
+        v: hit.v,
+        plane: struck !== null && struck.kind !== "solid",
+      };
+    }
+
+    const px = Math.floor(fx * VIEWPORT);
+    const py = Math.floor(fy * VIEWPORT);
     const index = py * VIEWPORT + px;
     const voxel = buffers.pickVoxel[index]!;
     if (voxel < 0) return null; // empty space
@@ -574,7 +775,7 @@ export function Map3DCanvas({
   // Wheel zoom without letting the page scroll under the cursor. React's onWheel
   // is passive and cannot preventDefault, so bind a native listener.
   useEffect(() => {
-    const canvas = canvasRef.current;
+    const canvas = activeCanvasRef.current;
     if (!canvas) return;
     const handler = (event: WheelEvent) => {
       event.preventDefault();
@@ -583,7 +784,7 @@ export function Map3DCanvas({
     };
     canvas.addEventListener("wheel", handler, { passive: false });
     return () => canvas.removeEventListener("wheel", handler);
-  }, [cell, yaw, pitch, onCameraChange]);
+  }, [activeCanvasRef, cell, yaw, pitch, onCameraChange]);
 
   // Walk the focus with the keyboard. Bound to the canvas rather than the window
   // so it never eats typing elsewhere in the editor; the canvas is focusable and
@@ -610,24 +811,37 @@ export function Map3DCanvas({
     moveFocus(move[0], move[1], move[2]);
   };
 
+  const label = `Map in 3D, ${space.width} by ${space.depth} cells. Drag to orbit, shift-drag to pan, W A S D to move, Q and E for height.`;
+  const pointerProps = {
+    tabIndex: 0,
+    onPointerDown,
+    onPointerMove,
+    onPointerUp,
+    onPointerCancel: () => (drag.current = null),
+    onPointerLeave: () => setHover(null),
+    onKeyDown,
+    onContextMenu: (event: React.MouseEvent) => event.preventDefault(),
+    role: "application",
+    "aria-label": label,
+  } as const;
+
   return (
     <div className={styles.spaceViewport}>
-      <canvas
-        ref={canvasRef}
-        className={styles.spaceCanvas}
-        width={VIEWPORT}
-        height={VIEWPORT}
-        tabIndex={0}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={() => (drag.current = null)}
-        onPointerLeave={() => setHover(null)}
-        onKeyDown={onKeyDown}
-        onContextMenu={(event) => event.preventDefault()}
-        role="application"
-        aria-label={`Map in 3D, ${space.width} by ${space.depth} cells. Drag to orbit, shift-drag to pan, W A S D to move, Q and E for height.`}
-      />
+      <div className={styles.spaceStack}>
+        {/* Both canvases exist from the first render: a WebGPU context can only
+            be taken from a canvas that has never had a 2D one, so which renderer
+            draws cannot be decided after the element is created. */}
+        <canvas ref={gpu.canvasRef} className={styles.gpuCanvas} hidden={!onGpu} {...pointerProps} />
+        <canvas
+          ref={canvasRef}
+          className={styles.spaceCanvas}
+          hidden={onGpu}
+          width={VIEWPORT}
+          height={VIEWPORT}
+          {...pointerProps}
+        />
+        {onGpu && <canvas ref={overlayRef} className={styles.overlayCanvas} aria-hidden />}
+      </div>
     </div>
   );
 }

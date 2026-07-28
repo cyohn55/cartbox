@@ -6,9 +6,20 @@
  *
  * The orbit view looks *at* the map from outside; this one puts the camera in it.
  * That is not a camera setting — an orthographic projection has no inside — so
- * this renders through {@link renderMapFirstPerson}, which casts a ray per pixel
- * and therefore gives true perspective and, incidentally, an exact answer for
- * what is under the crosshair.
+ * this needs a true perspective view, and it renders one two ways:
+ *
+ * - **On the GPU**, when the browser has one. The window of the map around you is
+ *   uploaded as a surface once and redrawn in hardware, at the canvas's own
+ *   resolution, with the materials the editor authors: normals, height, specular,
+ *   roughness and emissive. This is the path that makes a generated landscape
+ *   walkable rather than a slideshow.
+ * - **By casting a ray per pixel** otherwise, into a small square frame that is
+ *   scaled up. Correct, self-contained, and slow — which is why it is the
+ *   fallback and no longer the plan.
+ *
+ * Both agree about where the camera is and what the crosshair is on, because both
+ * read the camera basis from one place and both resolve a pick by marching the
+ * same ray through the same space.
  *
  * Controls are the ones every voxel game shares, so nothing has to be learned:
  * click to capture the mouse and look around, W A S D to move, Space and Shift
@@ -16,20 +27,23 @@
  * rather than gravity-bound — an editor is not a game, and being unable to reach
  * the underside of your own bridge would be absurd — with a Stand control that
  * drops you onto the ground when you want to feel the terrain.
- *
- * Rendering is deliberately coarse and upscaled with hard pixel edges: the map is
- * pixel art, so a low-resolution frame is both faithful and what keeps a
- * CPU-cast view moving at a usable rate.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   DEFAULT_MODEL_LIGHT,
   MapVoxelSpace,
+  castMapRay,
   cellContaining,
+  firstPersonBasis,
   geometryFor,
+  mapSpaceToModel,
+  perspectiveProjection,
   renderMapFirstPerson,
+  screenRay,
+  walkAxes,
   type MapCellKind,
+  type MapWindow,
   type SpriteSheet,
   type TextureAtlas,
 } from "@cartbox/editor";
@@ -43,6 +57,7 @@ import {
   type SpacePick,
   type SpaceToolResult,
 } from "./mapSpaceTools";
+import { useMapGpu, type MapGpuStatus } from "./useMapGpu";
 
 /** Vertical field of view, in radians — close to what a block game shows. */
 const FOV = 1.22;
@@ -62,6 +77,25 @@ const PITCH_LIMIT = Math.PI / 2 - 0.02;
 
 /** How far a ray travels before giving up, in cells. */
 const VIEW_DISTANCE = 72;
+
+/**
+ * Half-width of the window built for the hardware path, and how far you may
+ * stray from its centre before it is rebuilt. Generous, because the cost of a
+ * rebuild tracks the *whole* map (the cells are stored sparsely and iterated in
+ * full) rather than the window, so a wide window is nearly free while a narrow
+ * one would rebuild constantly.
+ */
+const GPU_RADIUS = 48;
+const GPU_RECENTRE = 16;
+
+/** Where the view fades into the sky, so the window's edge is haze, not a cliff. */
+const FOG_DISTANCE = GPU_RADIUS * 0.9;
+
+/** Night-sky colour behind everything, matching the ray marcher's own. */
+const SKY: readonly [number, number, number] = [16 / 255, 20 / 255, 34 / 255];
+
+/** How much an emissive texel bleeds into its surroundings. */
+const BLOOM = 0.55;
 
 /** Where the viewer is standing and looking. */
 export interface WalkCamera {
@@ -95,7 +129,7 @@ interface MapWalkCanvasProps {
   /** Where the viewer stands, owned by the caller so it survives a view swap. */
   camera: WalkCamera;
   onCameraChange: (camera: WalkCamera) => void;
-  /** Square render resolution in pixels; the frame is upscaled to the stage. */
+  /** Square render resolution for the fallback path; ignored on the GPU path. */
   resolution: number;
   /** Bumped when the cart's art changes, so the view redraws. */
   version: number;
@@ -104,6 +138,8 @@ interface MapWalkCanvasProps {
   onPickStyle: (colorIndex: number, material: number) => void;
   onHover: (hover: WalkHover | null) => void;
   onNote: (note: string | null) => void;
+  /** Which renderer ended up drawing, so the rail can say so. */
+  onRendererChange?: (status: MapGpuStatus) => void;
 }
 
 /** `#rrggbb` → 0..255 RGB triple, falling back to white on a malformed value. */
@@ -150,9 +186,13 @@ export function MapWalkCanvas({
   onPickStyle,
   onHover,
   onNote,
+  onRendererChange,
 }: MapWalkCanvasProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const cpuCanvasRef = useRef<HTMLCanvasElement>(null);
   const [locked, setLocked] = useState(false);
+  const gpu = useMapGpu(atlas, version);
+  const onGpu = gpu.status === "gpu";
+  const activeCanvasRef = onGpu ? gpu.canvasRef : cpuCanvasRef;
 
   // The camera is mirrored into a ref because the animation loop reads it every
   // frame and must not be rebuilt (and re-subscribed) on each move.
@@ -161,6 +201,12 @@ export function MapWalkCanvas({
   const heldKeys = useRef(new Set<string>());
   const dirty = useRef(true);
   const hoverRef = useRef<WalkHover | null>(null);
+  /** Centre of the window currently uploaded, and the columns it covers. */
+  const windowRef = useRef<{ focus: { x: number; y: number; z: number }; bounds: MapWindow } | null>(null);
+
+  useEffect(() => {
+    onRendererChange?.(gpu.status);
+  }, [gpu.status, onRendererChange]);
 
   const paletteRgb = useCallback(
     (index: number): readonly [number, number, number] => hexToRgb(palette[index] ?? "#ffffff"),
@@ -178,8 +224,86 @@ export function MapWalkCanvas({
     [resolution],
   );
 
-  /** Resolve a pixel of the last frame to the cell and face it struck. */
-  const pickAtPixel = useCallback(
+  /**
+   * Build and upload the window around a position. Called when the map changes
+   * and when the viewer has walked far enough that the edge would come into view.
+   */
+  const uploadWindow = useCallback(
+    (at: WalkCamera) => {
+      const focus = { x: Math.round(at.x), y: Math.round(at.y), z: Math.round(at.z) };
+      const model = mapSpaceToModel(space, { palette: paletteRgb, focus, radius: GPU_RADIUS });
+      gpu.uploadModel(model);
+      windowRef.current = {
+        focus,
+        bounds: {
+          minX: Math.max(0, focus.x - GPU_RADIUS),
+          maxX: Math.min(space.width - 1, focus.x + GPU_RADIUS),
+          minZ: Math.max(0, focus.z - GPU_RADIUS),
+          maxZ: Math.min(space.depth - 1, focus.z + GPU_RADIUS),
+        },
+      };
+    },
+    [gpu, paletteRgb, space],
+  );
+
+  // Rebuild the uploaded surface whenever the map or the art changes.
+  useEffect(() => {
+    if (!onGpu) return;
+    uploadWindow(cameraRef.current);
+    dirty.current = true;
+  }, [onGpu, space, version, uploadWindow]);
+
+  /** Fit the hardware canvas to its box, in real device pixels. */
+  useEffect(() => {
+    if (!onGpu) return;
+    const canvas = gpu.canvasRef.current;
+    if (!canvas) return;
+    const fit = () => {
+      const ratio = Math.min(2, window.devicePixelRatio || 1);
+      const width = Math.max(1, Math.round(canvas.clientWidth * ratio));
+      const height = Math.max(1, Math.round(canvas.clientHeight * ratio));
+      if (canvas.width === width && canvas.height === height) return;
+      canvas.width = width;
+      canvas.height = height;
+      dirty.current = true;
+    };
+    fit();
+    const observer = new ResizeObserver(fit);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [gpu.canvasRef, onGpu]);
+
+  /** The window bounds a pick may strike: the built window, or the whole map. */
+  const pickBounds = useCallback(
+    (): MapWindow | undefined => (onGpu ? windowRef.current?.bounds : undefined),
+    [onGpu],
+  );
+
+  /** Resolve a ray to the cell and face it struck, in the shared pick shape. */
+  const pickAlong = useCallback(
+    (origin: readonly [number, number, number], direction: readonly [number, number, number]): SpacePick | null => {
+      const hit = castMapRay(space, origin, direction, {
+        atlas,
+        maxDistance: VIEW_DISTANCE,
+        bounds: pickBounds(),
+      });
+      if (!hit) return null;
+      const cell = space.cellAt(hit.x, hit.y, hit.z);
+      return {
+        x: hit.x,
+        y: hit.y,
+        z: hit.z,
+        face: hit.face,
+        u: hit.u,
+        v: hit.v,
+        plane: cell !== null && cell.kind !== "solid",
+      };
+    },
+    [atlas, pickBounds, space],
+  );
+
+  /** Resolve a pixel of the last CPU frame to the cell and face it struck. */
+  const pickFromBuffers = useCallback(
     (px: number, py: number): SpacePick | null => {
       if (px < 0 || px >= resolution || py < 0 || py >= resolution) return null;
       const index = py * resolution + px;
@@ -200,38 +324,95 @@ export function MapWalkCanvas({
     [buffers, resolution, space],
   );
 
-  /** What the crosshair is on — the centre pixel of the frame. */
-  const crosshairPick = useCallback(
-    () => pickAtPixel(resolution >> 1, resolution >> 1),
-    [pickAtPixel, resolution],
+  /** What the crosshair is on: the exact centre of the frame, either way. */
+  const crosshairPick = useCallback((): SpacePick | null => {
+    const view = cameraRef.current;
+    if (onGpu) {
+      return pickAlong([view.x, view.y, view.z], firstPersonBasis(view.yaw, view.pitch).forward);
+    }
+    return pickFromBuffers(resolution >> 1, resolution >> 1);
+  }, [onGpu, pickAlong, pickFromBuffers, resolution]);
+
+  /** Aim at an arbitrary point of the canvas — used when the pointer is free. */
+  const pickAtClient = useCallback(
+    (clientX: number, clientY: number): SpacePick | null => {
+      const canvas = activeCanvasRef.current;
+      if (!canvas) return null;
+      const rect = canvas.getBoundingClientRect();
+      const fx = (clientX - rect.left) / rect.width;
+      const fy = (clientY - rect.top) / rect.height;
+      if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return null;
+      if (!onGpu) {
+        return pickFromBuffers(Math.floor(fx * resolution), Math.floor(fy * resolution));
+      }
+      const view = cameraRef.current;
+      const ray = screenRay(
+        [view.x, view.y, view.z],
+        firstPersonBasis(view.yaw, view.pitch),
+        perspectiveProjection({ fov: FOV, width: rect.width, height: rect.height, near: 0.05, far: 256 }),
+        fx,
+        fy,
+      );
+      return pickAlong(ray.origin, ray.direction);
+    },
+    [activeCanvasRef, onGpu, pickAlong, pickFromBuffers, resolution],
   );
 
-  /** Draw the frame, then the crosshair over it. */
+  /** Draw the frame, then report what the crosshair landed on. */
   const render = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const context = canvas.getContext("2d");
-    if (!context) return;
     const view = cameraRef.current;
 
-    renderMapFirstPerson(space, {
-      camera: { eye: [view.x, view.y, view.z], yaw: view.yaw, pitch: view.pitch, fov: FOV },
-      palette: paletteRgb,
-      atlas,
-      light: DEFAULT_MODEL_LIGHT,
-      width: resolution,
-      height: resolution,
-      maxDistance: VIEW_DISTANCE,
-      out: buffers.out,
-      pickSite: buffers.pickSite,
-      pickFace: buffers.pickFace,
-      pickU: buffers.pickU,
-      pickV: buffers.pickV,
-    });
-
-    const frame = context.createImageData(resolution, resolution);
-    frame.data.set(buffers.out);
-    context.putImageData(frame, 0, 0);
+    if (onGpu) {
+      const canvas = gpu.canvasRef.current;
+      const built = windowRef.current;
+      if (!canvas || !built) return;
+      // Recentre before drawing, so the surface always extends past the horizon.
+      if (
+        Math.abs(view.x - built.focus.x) > GPU_RECENTRE ||
+        Math.abs(view.z - built.focus.z) > GPU_RECENTRE
+      ) {
+        uploadWindow(view);
+      }
+      const centre = windowRef.current!.focus;
+      gpu.draw({
+        // The uploaded surface is expressed relative to the window's centre, so
+        // the eye is too — the two must be in one space or nothing lines up.
+        eye: [view.x - centre.x, view.y - centre.y, view.z - centre.z],
+        basis: firstPersonBasis(view.yaw, view.pitch),
+        projection: perspectiveProjection({
+          fov: FOV,
+          width: canvas.width,
+          height: canvas.height,
+          near: 0.05,
+          far: 256,
+        }),
+        light: DEFAULT_MODEL_LIGHT,
+        sky: SKY,
+        fogDistance: FOG_DISTANCE,
+        bloom: BLOOM,
+      });
+    } else {
+      const canvas = cpuCanvasRef.current;
+      const context = canvas?.getContext("2d");
+      if (!canvas || !context) return;
+      renderMapFirstPerson(space, {
+        camera: { eye: [view.x, view.y, view.z], yaw: view.yaw, pitch: view.pitch, fov: FOV },
+        palette: paletteRgb,
+        atlas,
+        light: DEFAULT_MODEL_LIGHT,
+        width: resolution,
+        height: resolution,
+        maxDistance: VIEW_DISTANCE,
+        out: buffers.out,
+        pickSite: buffers.pickSite,
+        pickFace: buffers.pickFace,
+        pickU: buffers.pickU,
+        pickV: buffers.pickV,
+      });
+      const frame = context.createImageData(resolution, resolution);
+      frame.data.set(buffers.out);
+      context.putImageData(frame, 0, 0);
+    }
 
     // Report what the crosshair landed on, so the HUD names the cell you would
     // edit before you commit to editing it.
@@ -252,12 +433,24 @@ export function MapWalkCanvas({
       hoverRef.current = next;
       onHover(next);
     }
-  }, [atlas, buffers, crosshairPick, onHover, paletteRgb, resolution, space, tool]);
+  }, [
+    atlas,
+    buffers,
+    crosshairPick,
+    gpu,
+    onGpu,
+    onHover,
+    paletteRgb,
+    resolution,
+    space,
+    tool,
+    uploadWindow,
+  ]);
 
   // Redraw whenever the map, the art or the render size changes.
   useEffect(() => {
     dirty.current = true;
-  }, [space, version, atlas, resolution, tool]);
+  }, [space, version, atlas, resolution, tool, gpu.status]);
 
   // One animation loop drives both movement and drawing: a frame is rendered
   // only when something actually moved or changed, so standing still costs
@@ -284,13 +477,15 @@ export function MapWalkCanvas({
         const lift = (keys.has("Space") ? 1 : 0) - (keys.has("ShiftLeft") || keys.has("ShiftRight") ? 1 : 0);
 
         if (forward !== 0 || strafe !== 0 || lift !== 0) {
-          const sinYaw = Math.sin(view.yaw);
-          const cosYaw = Math.cos(view.yaw);
+          // Both axes come from the renderer's own basis rather than from trig
+          // written out again here: walking "right" has to mean the direction
+          // the frame draws on the right, and two copies of that rule drift.
+          const axes = walkAxes(view.yaw);
           onCameraChange(
             clampToMap(space, {
               ...view,
-              x: view.x + (sinYaw * forward + cosYaw * strafe) * distance,
-              z: view.z + (cosYaw * forward - sinYaw * strafe) * distance,
+              x: view.x + (axes.forward[0] * forward + axes.right[0] * strafe) * distance,
+              z: view.z + (axes.forward[1] * forward + axes.right[1] * strafe) * distance,
               y: view.y + lift * distance,
             }),
           );
@@ -315,7 +510,7 @@ export function MapWalkCanvas({
   // Keys are tracked on the window while the pointer is captured, and on the
   // canvas otherwise, so walking never eats typing elsewhere in the editor.
   useEffect(() => {
-    const canvas = canvasRef.current;
+    const canvas = activeCanvasRef.current;
     if (!canvas) return;
 
     const isTyping = (target: EventTarget | null): boolean => {
@@ -346,13 +541,13 @@ export function MapWalkCanvas({
       window.removeEventListener("blur", clearAll);
       clearAll();
     };
-  }, [locked]);
+  }, [activeCanvasRef, locked]);
 
   // Mouse-look while the pointer is captured. Releasing the lock (Escape) is the
   // browser's own gesture, so the state is read back from the document rather
   // than assumed.
   useEffect(() => {
-    const canvas = canvasRef.current;
+    const canvas = activeCanvasRef.current;
     if (!canvas) return;
 
     const onLockChange = () => {
@@ -363,6 +558,8 @@ export function MapWalkCanvas({
     const onMove = (event: MouseEvent) => {
       if (document.pointerLockElement !== canvas) return;
       const view = cameraRef.current;
+      // Yaw decreases as the pointer travels right, which turns the view right:
+      // the basis rotates toward screen-left as yaw grows (see firstPersonBasis).
       onCameraChange({
         ...view,
         yaw: view.yaw - event.movementX * LOOK_SPEED,
@@ -380,7 +577,7 @@ export function MapWalkCanvas({
       document.removeEventListener("pointerlockchange", onLockChange);
       document.removeEventListener("mousemove", onMove);
     };
-  }, [onCameraChange]);
+  }, [activeCanvasRef, onCameraChange]);
 
   /** Everything the shared tools need besides where the pointer was aimed. */
   const toolContext = () => ({
@@ -408,7 +605,7 @@ export function MapWalkCanvas({
    * without capture (after Escape) aims where the cursor actually is.
    */
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
+    const canvas = activeCanvasRef.current;
     if (!canvas) return;
     canvas.focus();
 
@@ -419,10 +616,7 @@ export function MapWalkCanvas({
         void canvas.requestPointerLock?.();
         return;
       }
-      const rect = canvas.getBoundingClientRect();
-      const px = Math.floor(((event.clientX - rect.left) / rect.width) * resolution);
-      const py = Math.floor(((event.clientY - rect.top) / rect.height) * resolution);
-      const free = pickAtPixel(px, py);
+      const free = pickAtClient(event.clientX, event.clientY);
       if (!free) {
         onNote("Nothing under the cursor — aim at a cell.");
         return;
@@ -439,21 +633,38 @@ export function MapWalkCanvas({
     report(applySpaceTool(tool, pick, event.button === 2, toolContext()));
   };
 
+  const label = `Map in first person at ${Math.round(camera.x)}, ${Math.round(camera.y)}, ${Math.round(
+    camera.z,
+  )}. Click to capture the mouse, W A S D to move, Space and Shift for height, Escape to release.`;
+
   return (
     <div className={styles.spaceViewport}>
-      <div className={styles.walkFrame}>
+      <div className={onGpu ? styles.walkFrameWide : styles.walkFrame}>
+        {/* Both canvases exist from the first render: a WebGPU context can only
+            be taken from a canvas that has never had a 2D one, so the choice
+            cannot be made after the element is created. The unused one is
+            hidden, never absent. */}
         <canvas
-          ref={canvasRef}
+          ref={gpu.canvasRef}
+          className={styles.gpuCanvas}
+          hidden={!onGpu}
+          tabIndex={0}
+          onPointerDown={onPointerDown}
+          onContextMenu={(event) => event.preventDefault()}
+          role="application"
+          aria-label={label}
+        />
+        <canvas
+          ref={cpuCanvasRef}
           className={styles.spaceCanvas}
+          hidden={onGpu}
           width={resolution}
           height={resolution}
           tabIndex={0}
           onPointerDown={onPointerDown}
           onContextMenu={(event) => event.preventDefault()}
           role="application"
-          aria-label={`Map in first person at ${Math.round(camera.x)}, ${Math.round(camera.y)}, ${Math.round(
-            camera.z,
-          )}. Click to capture the mouse, W A S D to move, Space and Shift for height, Escape to release.`}
+          aria-label={label}
         />
         <div className={styles.crosshair} aria-hidden />
         {!locked && <p className={styles.walkPrompt}>Click to look around · Esc releases the mouse</p>}

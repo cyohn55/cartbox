@@ -26,6 +26,19 @@ export interface FaceTexture {
    * voxel's own emissive. Absent means the tile is fully lit by the scene.
    */
   readonly emissive?: Uint8Array;
+  /**
+   * Optional tangent-space normals, three bytes per texel (x, y, z each encoded
+   * `value * 127.5 + 127.5`) — the same encoding a normal-map image uses. This is
+   * what makes a flat quad of brick read as *brick* rather than as a picture of
+   * brick: the light responds to the mortar lines as the view moves.
+   */
+  readonly normal?: Uint8Array;
+  /** Optional per-texel height, 0..255. Drives parallax and self-occlusion. */
+  readonly height?: Uint8Array;
+  /** Optional per-texel specular strength, 0..255 (how much it glints). */
+  readonly specular?: Uint8Array;
+  /** Optional per-texel roughness, 0..255 (0 = mirror-tight highlight). */
+  readonly roughness?: Uint8Array;
 }
 
 /**

@@ -12,7 +12,7 @@
  * the voxel's own colour tints them.
  */
 
-import type { FaceMaterial, SurfaceId, TextureAtlas } from "@cartbox/editor";
+import type { FaceMaterial, SurfaceFinish, SurfaceId, TextureAtlas } from "@cartbox/editor";
 import { AUTHORED_TILES, type AuthoredTileName } from "./authoredTiles";
 import type { TerrainMaterial } from "./hexelTerrainSpecs";
 
@@ -89,6 +89,49 @@ const MATERIAL_FACES: readonly FaceMaterial[] = [
   uniform(TILE.screen),
   uniform(TILE.monolith),
 ];
+
+/**
+ * How each tile takes light, by tile slot.
+ *
+ * Albedo alone cannot tell water from stone — both are just coloured pixels — so
+ * this is where a surface becomes a *material*: how glossy it is, how tight its
+ * highlight, how strongly its own drawn light and shade is read as relief, and
+ * whether it glows. It is what makes the same landscape read as wet sand beside
+ * dull rock beside a lit crystal instead of as three flat colours.
+ *
+ * Relief is deliberately low on the smooth things (water, screens) and high on
+ * the coarse ones (rock, bark), because the art already says so — those tiles are
+ * drawn with visible grain, and reading it as bumpiness is reading the artist.
+ */
+const TILE_FINISHES: Record<AuthoredTileName, SurfaceFinish> = {
+  grassTop: { specular: 0.06, roughness: 0.95, relief: 0.7 },
+  grassSide: { specular: 0.06, roughness: 0.95, relief: 0.7 },
+  dirt: { specular: 0.04, roughness: 1, relief: 0.75 },
+  rock: { specular: 0.16, roughness: 0.78, relief: 0.9 },
+  sand: { specular: 0.1, roughness: 0.88, relief: 0.45 },
+  // Water is the one surface that should mirror the sky rather than diffuse it.
+  water: { specular: 0.85, roughness: 0.08, relief: 0.18 },
+  brick: { specular: 0.12, roughness: 0.82, relief: 1 },
+  planks: { specular: 0.18, roughness: 0.68, relief: 0.7 },
+  woodBark: { specular: 0.08, roughness: 0.92, relief: 0.95 },
+  woodRings: { specular: 0.14, roughness: 0.75, relief: 0.6 },
+  leaves: { specular: 0.12, roughness: 0.8, relief: 0.65 },
+  // A crystal lights its own surroundings: high gloss and a real glow.
+  crystal: { specular: 0.7, roughness: 0.12, relief: 0.5, emissive: 0.85 },
+  metal: { specular: 0.75, roughness: 0.22, relief: 0.35 },
+  screen: { specular: 0.4, roughness: 0.3, relief: 0.1, emissive: 1 },
+  monolith: { specular: 0.5, roughness: 0.35, relief: 0.4, emissive: 0.6 },
+};
+
+/**
+ * The finish for a tile slot. Sprite tiles appended after the world's own are
+ * given a neutral finish: their channels come from the cart's Material layer
+ * where the author painted them, and this only fills what was left blank.
+ */
+export function worldTileFinish(tile: number): SurfaceFinish {
+  const name = TILE_ORDER[tile];
+  return name ? TILE_FINISHES[name] : { specular: 0.14, roughness: 0.72, relief: 0.55 };
+}
 
 /** Map a terrain cell's material to its atlas material index. */
 export function terrainMaterial(material: TerrainMaterial): number {

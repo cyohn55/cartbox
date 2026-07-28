@@ -201,6 +201,72 @@ export function cellContaining(
   return site;
 }
 
+/** The three axes of a first-person camera, in world space. */
+export interface FirstPersonBasis {
+  /** Where the camera looks. */
+  readonly forward: readonly [number, number, number];
+  /** Which way is right *on screen* — the +x direction of the image. */
+  readonly right: readonly [number, number, number];
+  /** Which way is up on screen. */
+  readonly up: readonly [number, number, number];
+}
+
+/**
+ * The camera basis for a heading and tilt.
+ *
+ * `forward` is the documented yaw convention: 0 looks along +z, and increasing
+ * yaw swings toward +x.
+ *
+ * `right` is the part that has to be derived rather than guessed. The map's world
+ * is right-handed — x runs east across the columns, z runs south down the rows,
+ * y is up — so screen-right is fixed by the requirement that `right × up` point
+ * *back* out of the screen, i.e. against `forward`. That gives `(-cos, 0, sin)`,
+ * not `(cos, 0, -sin)`; the latter looks plausible and is a mirror, which is
+ * invisible to any test that only asks which cells a ray struck but shows up
+ * immediately as a view that swings the wrong way under the mouse and strafes
+ * the wrong way under D.
+ *
+ * The check that this is the *same* frame the orbit view draws: the orbit camera
+ * maps the world direction `(cos θ, 0, sin θ)` onto screen-right at its own yaw
+ * θ, and the two headings are related by `walk = π − θ`, which turns `(-cos walk,
+ * 0, sin walk)` into exactly that. Stepping between the cameras therefore
+ * continues the same view rather than flipping it.
+ *
+ * Exported because the GPU renderer builds its view matrix from the same basis —
+ * two cameras that disagree by a mirror would be far worse than one that is
+ * merely wrong.
+ */
+export function firstPersonBasis(yaw: number, pitch: number): FirstPersonBasis {
+  const cosYaw = Math.cos(yaw);
+  const sinYaw = Math.sin(yaw);
+  const cosPitch = Math.cos(pitch);
+  const sinPitch = Math.sin(pitch);
+  const forward: [number, number, number] = [sinYaw * cosPitch, sinPitch, cosYaw * cosPitch];
+  const right: [number, number, number] = [-cosYaw, 0, sinYaw];
+  // up = right x forward, so the image is upright rather than mirrored top to
+  // bottom. (Swapping the operands negates it without changing which cells are
+  // struck, so it too hides from hit-only assertions.)
+  const up: [number, number, number] = [
+    right[1] * forward[2] - right[2] * forward[1],
+    right[2] * forward[0] - right[0] * forward[2],
+    right[0] * forward[1] - right[1] * forward[0],
+  ];
+  return { forward, right, up };
+}
+
+/**
+ * The world direction the viewer walks when pressing "forward", and the one they
+ * strafe when pressing "right" — the horizontal parts of {@link firstPersonBasis},
+ * which is what keeps movement and the image in step. Exported so the walking
+ * canvas cannot drift from the renderer's own idea of which way right is.
+ */
+export function walkAxes(yaw: number): {
+  readonly forward: readonly [number, number];
+  readonly right: readonly [number, number];
+} {
+  return { forward: [Math.sin(yaw), Math.cos(yaw)], right: [-Math.cos(yaw), Math.sin(yaw)] };
+}
+
 /** Albedo scaled by the light, floored by its own emissive glow. */
 function litChannel(albedo: number, shade: number, lightColor: number, emissive: number): number {
   return Math.max(albedo * shade * lightColor, albedo * emissive);
@@ -236,23 +302,8 @@ export function renderMapFirstPerson(
   pickDistance?.fill(Infinity);
 
   const { eye, yaw, pitch, fov } = options.camera;
-  // Camera basis. Forward follows the same yaw convention as the orbit view, so
-  // turning right in one view turns right in the other.
-  const cosYaw = Math.cos(yaw);
-  const sinYaw = Math.sin(yaw);
-  const cosPitch = Math.cos(pitch);
-  const sinPitch = Math.sin(pitch);
-  const forward: [number, number, number] = [sinYaw * cosPitch, sinPitch, cosYaw * cosPitch];
-  const right: [number, number, number] = [cosYaw, 0, -sinYaw];
-  // Screen up is forward x right. Getting the operands the other way round
-  // negates it, which mirrors the whole frame vertically — and does so without
-  // changing *which* cells are struck, so it hides from anything that only checks
-  // what was hit rather than where it was drawn.
-  const up: [number, number, number] = [
-    forward[1] * right[2] - forward[2] * right[1],
-    forward[2] * right[0] - forward[0] * right[2],
-    forward[0] * right[1] - forward[1] * right[0],
-  ];
+  const basis = firstPersonBasis(yaw, pitch);
+  const { forward, right, up } = basis;
   const halfHeight = Math.tan(fov / 2);
   const halfWidth = (halfHeight * width) / height;
 
@@ -308,6 +359,130 @@ export function renderMapFirstPerson(
   }
 
   return { data, width, height, pickSite, pickFace, pickU, pickV, pickDistance };
+}
+
+/** The columns a windowed view built, as a ray is allowed to strike them. */
+export interface MapWindow {
+  readonly minX: number;
+  readonly maxX: number;
+  readonly minZ: number;
+  readonly maxZ: number;
+}
+
+/** Where a single cast ray landed. The same answer a pick buffer would give. */
+export interface MapRayHit {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  /** Index into the struck cell's face table — cube faces for a plane cell. */
+  readonly face: number;
+  /** Where on that face, in the face's own 0..1 coordinates. */
+  readonly u: number;
+  readonly v: number;
+  /** Distance travelled in cells. */
+  readonly distance: number;
+}
+
+/** Stand-in palette for picking, where nothing is drawn and colour is moot. */
+const PICK_PALETTE: PaletteLookup = () => [255, 255, 255];
+
+/**
+ * How far along a ray the map begins: 0 when the start is already inside it, the
+ * distance to the first face of its bounding box when it is outside, and null
+ * when the ray misses the map altogether.
+ *
+ * The usual slab test. Cells are centred on their integer coordinates, so the box
+ * runs from −½ to size−½ on each axis.
+ */
+function enterBounds(
+  space: MapVoxelSpace,
+  origin: readonly [number, number, number],
+  dx: number,
+  dy: number,
+  dz: number,
+): number | null {
+  const min = [-0.5, -0.5, -0.5];
+  const max = [space.width - 0.5, space.maxHeight - 0.5, space.depth - 0.5];
+  const direction = [dx, dy, dz];
+  let near = 0;
+  let far = Infinity;
+
+  for (let axis = 0; axis < 3; axis += 1) {
+    const step = direction[axis]!;
+    const start = origin[axis]!;
+    if (Math.abs(step) < 1e-12) {
+      if (start < min[axis]! || start > max[axis]!) return null; // parallel and outside
+      continue;
+    }
+    const first = (min[axis]! - start) / step;
+    const second = (max[axis]! - start) / step;
+    near = Math.max(near, Math.min(first, second));
+    far = Math.min(far, Math.max(first, second));
+    if (near > far) return null;
+  }
+  // Step just inside. Landing exactly on the boundary rounds to the cell *past*
+  // the last one, which the marcher immediately rejects as out of bounds.
+  return near > 0 ? near + 1e-3 : 0;
+}
+
+/**
+ * Cast one ray and report what it struck, or null for open sky.
+ *
+ * This is the whole of picking once the *drawing* moves to the GPU. The frame no
+ * longer comes with pick buffers attached, but a pointer only ever asks about one
+ * pixel, and one ray is a rounding error next to the hundred thousand a frame
+ * used to cost. Sharing {@link castRay} with the CPU renderer is the point:
+ * whatever subtleties the marcher has about transparent texels, plane quads and
+ * hexel faces, the crosshair and the image cannot disagree about them.
+ */
+export function castMapRay(
+  space: MapVoxelSpace,
+  origin: readonly [number, number, number],
+  direction: readonly [number, number, number],
+  options: {
+    readonly atlas?: TextureAtlas;
+    readonly maxDistance?: number;
+    /**
+     * Column range the ray may strike, matching the window the view actually
+     * built. Without it a click near the edge of the frame could name a cell that
+     * is genuinely there but was never drawn — the pointer would act on something
+     * invisible.
+     */
+    readonly bounds?: MapWindow;
+  } = {},
+): MapRayHit | null {
+  const length = Math.hypot(direction[0], direction[1], direction[2]);
+  if (!Number.isFinite(length) || length < 1e-9) return null;
+  const dx = direction[0] / length;
+  const dy = direction[1] / length;
+  const dz = direction[2] / length;
+
+  // Bring the start onto the map before marching. An orthographic pick begins
+  // far outside it by construction — every ray of that camera starts on a plane
+  // behind the whole scene — and the marcher stops the moment it steps out of
+  // bounds, so without this the answer is always "nothing there".
+  const entry = enterBounds(space, origin, dx, dy, dz);
+  if (entry === null) return null;
+  const maxDistance = options.maxDistance ?? DEFAULT_MAX_DISTANCE;
+  if (entry > maxDistance) return null;
+
+  const geometry = geometryFor(space.shape);
+  const struck = castRay(
+    space,
+    geometry,
+    marchFaces(geometry),
+    marchFaces(CUBE_GEOMETRY),
+    origin[0] + dx * entry, origin[1] + dy * entry, origin[2] + dz * entry,
+    dx, dy, dz,
+    maxDistance - entry,
+    options.atlas,
+    PICK_PALETTE,
+    options.bounds,
+  );
+  if (!struck) return null;
+  // Distance is reported from the caller's own origin, not from where the march
+  // was allowed to begin.
+  return { x: HIT.x, y: HIT.y, z: HIT.z, face: HIT.face, u: HIT.u, v: HIT.v, distance: HIT.distance + entry };
 }
 
 /**
@@ -383,6 +558,7 @@ function castRay(
   maxDistance: number,
   atlas: TextureAtlas | undefined,
   palette: PaletteLookup,
+  bounds?: MapWindow,
 ): boolean {
   const start = cellContaining(geometry, ox, oy, oz);
   let sx = start[0];
@@ -395,7 +571,13 @@ function castRay(
   const stepLimit = Math.ceil(maxDistance * 2) + 4;
   for (let step = 0; step < stepLimit && travelled <= maxDistance; step += 1) {
     if (!space.inBounds(sx, sy, sz)) return false;
-    const occupied = space.isFilled(sx, sy, sz);
+    // A windowed view only drew part of the map; a ray must not report what was
+    // left out, but it still has to *travel* through that space to reach what was
+    // drawn beyond it, so this skips the cell rather than ending the march.
+    const outside =
+      bounds !== undefined &&
+      (sx < bounds.minX || sx > bounds.maxX || sz < bounds.minZ || sz > bounds.maxZ);
+    const occupied = !outside && space.isFilled(sx, sy, sz);
 
     // Where the ray leaves this cell, and into which neighbour. The ray's origin
     // relative to the cell centre is fixed across the face loop, so it is taken
@@ -419,11 +601,29 @@ function castRay(
 
     if (occupied) {
       const cell = space.cellAt(sx, sy, sz)!;
-      const struck =
-        cell.kind === "solid"
-          ? solidHit(cell, sx, sy, sz, faces, entryFace, travelled, ox, oy, oz, dx, dy, dz, atlas, palette)
-          : planeHit(cell, sx, sy, sz, planeFaces, travelled, exitT, ox, oy, oz, dx, dy, dz, atlas, palette);
-      if (struck) return true;
+      if (cell.kind !== "solid") {
+        if (planeHit(cell, sx, sy, sz, planeFaces, travelled, exitT, ox, oy, oz, dx, dy, dz, atlas, palette)) {
+          return true;
+        }
+      } else if (exposedEntry(space, faces, entryFace, sx, sy, sz)) {
+        // The ordinary case: the ray arrived from open space onto a face that is
+        // actually drawn. A transparent texel there is not a surface, and
+        // returning false carries the ray on through the cell.
+        if (solidHit(cell, sx, sy, sz, faces, entryFace, travelled, ox, oy, oz, dx, dy, dz, atlas, palette)) {
+          return true;
+        }
+      } else {
+        // The ray is *inside* solid ground — free flight lets the camera go
+        // there — so the face it came in through is interior and nothing draws
+        // it. What is drawn, and what it must therefore strike, is the far side
+        // of the terrain: the face it leaves through, once that one is exposed.
+        const exit = faces[exitFace]!;
+        const [ex, ey, ez] = exit.offset;
+        if (!space.isFilled(sx + ex, sy + ey, sz + ez)) {
+          faceCoordinates(exit, ox + dx * exitT - sx, oy + dy * exitT - sy, oz + dz * exitT - sz);
+          if (shadeSurface(cell, sx, sy, sz, exit, exitT, atlas, palette)) return true;
+        }
+      }
     }
 
     travelled = exitT;
@@ -434,6 +634,25 @@ function castRay(
     entryFace = exit.opposite;
   }
   return false;
+}
+
+/**
+ * Whether the face a ray came in through is one the world actually shows: it
+ * exists, and the cell across it is not itself solid. Only exposed faces are
+ * meshed for the GPU, so this is the test that keeps what a pick reports and
+ * what a frame draws describing the same surface.
+ */
+function exposedEntry(
+  space: MapVoxelSpace,
+  faces: readonly MarchFace[],
+  entryFace: number,
+  sx: number,
+  sy: number,
+  sz: number,
+): boolean {
+  const face = entryFace >= 0 ? faces[entryFace] : undefined;
+  if (!face) return false;
+  return !space.isFilled(sx + face.offset[0], sy + face.offset[1], sz + face.offset[2]);
 }
 
 /** Resolve a hit on a solid cell, or false when its texel is see-through. */
@@ -454,8 +673,7 @@ function solidHit(
   atlas: TextureAtlas | undefined,
   palette: PaletteLookup,
 ): boolean {
-  // A ray that began inside a solid has no entry face; pass through it rather
-  // than blacking out the view when the viewer steps into terrain.
+  // The caller has already established that this face is one the world shows.
   const face = faces[entryFace];
   if (!face) return false;
 

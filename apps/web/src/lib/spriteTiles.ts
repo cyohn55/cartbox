@@ -15,6 +15,7 @@
  */
 
 import {
+  normalVector,
   spriteToFaceTexture,
   type FaceMaterial,
   type FaceTexture,
@@ -33,6 +34,30 @@ export interface SpritePixelSource {
   getPixel(page: SpritePage, tile: number, x: number, y: number): number;
   /** The cart palette as RGB triplets, index order. */
   paletteRgb(): ReadonlyArray<readonly [number, number, number]>;
+}
+
+/**
+ * The cart's per-pixel material channels, as the Material layer authors them.
+ *
+ * A sprite is not only colour: the editor paints a normal direction, a height, a
+ * specular level, a roughness and an emissive level onto every pixel of it. Those
+ * channels are the difference between a wall that is a picture of brick and a
+ * wall that *is* brick — the light has to have something to respond to. Passing
+ * them here is what carries an author's material work out of the Sprites tab and
+ * onto the surfaces of the world.
+ *
+ * Optional throughout: a sheet with no channels still skins a cell perfectly
+ * well, its relief simply derived from the art instead of read from the cart.
+ */
+export interface SpriteChannelSource {
+  /** How many levels a scalar channel has; level `levels - 1` is full. */
+  readonly levels: number;
+  /** Normal direction index at a pixel, resolved through the shared table. */
+  normalDirection(page: SpritePage, tile: number, x: number, y: number): number;
+  height(page: SpritePage, tile: number, x: number, y: number): number;
+  specular(page: SpritePage, tile: number, x: number, y: number): number;
+  roughness(page: SpritePage, tile: number, x: number, y: number): number;
+  emissive(page: SpritePage, tile: number, x: number, y: number): number;
 }
 
 /** A sprite, addressed the way the sheet addresses it. */
@@ -98,6 +123,7 @@ export function spriteFaceTexture(
   source: SpritePixelSource,
   sprite: SpriteRef,
   transparentIndex: number = TRANSPARENT_COLOR_INDEX,
+  channels?: SpriteChannelSource,
 ): FaceTexture {
   if (!isSpriteRef(sprite)) {
     throw new Error(`not a sprite address: ${JSON.stringify(sprite)}`);
@@ -118,7 +144,72 @@ export function spriteFaceTexture(
       pixels[base + 3] = 255;
     }
   }
-  return spriteToFaceTexture(pixels, size, size);
+  const texture = spriteToFaceTexture(pixels, size, size);
+  return channels ? { ...texture, ...readChannels(source, sprite, channels) } : texture;
+}
+
+/**
+ * Read a sprite's authored material channels into the tile's own buffers.
+ *
+ * A channel that is blank everywhere is left off entirely rather than written as
+ * zeros, because "the author painted nothing here" and "the author painted zero
+ * here" mean opposite things downstream: the first should fall back to relief
+ * derived from the art, and the second is a deliberate flat, dull, unlit surface.
+ */
+function readChannels(
+  source: SpritePixelSource,
+  sprite: SpriteRef,
+  channels: SpriteChannelSource,
+): Partial<FaceTexture> {
+  const size = source.tileSize;
+  const count = size * size;
+  const normal = new Uint8Array(count * 3);
+  const height = new Uint8Array(count);
+  const specular = new Uint8Array(count);
+  const roughness = new Uint8Array(count);
+  const emissive = new Uint8Array(count);
+  const top = Math.max(1, channels.levels - 1);
+  let paintedNormal = false;
+  let paintedHeight = false;
+  let paintedSpecular = false;
+  let paintedRoughness = false;
+  let paintedEmissive = false;
+
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const at = y * size + x;
+      const direction = channels.normalDirection(sprite.page, sprite.tile, x, y);
+      if (direction > 0) paintedNormal = true;
+      // The cart stores a screen-space normal with y running down the image, and
+      // a tile's own v runs down it too, so the two agree without a flip.
+      const [nx, ny, nz] = normalVector(direction);
+      normal[at * 3] = Math.round(nx * 127.5 + 127.5);
+      normal[at * 3 + 1] = Math.round(ny * 127.5 + 127.5);
+      normal[at * 3 + 2] = Math.round(nz * 127.5 + 127.5);
+
+      const scale = (value: number) => Math.round((Math.max(0, Math.min(top, value)) / top) * 255);
+      const h = channels.height(sprite.page, sprite.tile, x, y);
+      const s = channels.specular(sprite.page, sprite.tile, x, y);
+      const r = channels.roughness(sprite.page, sprite.tile, x, y);
+      const e = channels.emissive(sprite.page, sprite.tile, x, y);
+      if (h > 0) paintedHeight = true;
+      if (s > 0) paintedSpecular = true;
+      if (r > 0) paintedRoughness = true;
+      if (e > 0) paintedEmissive = true;
+      height[at] = scale(h);
+      specular[at] = scale(s);
+      roughness[at] = scale(r);
+      emissive[at] = scale(e);
+    }
+  }
+
+  return {
+    ...(paintedNormal ? { normal } : {}),
+    ...(paintedHeight ? { height } : {}),
+    ...(paintedSpecular ? { specular } : {}),
+    ...(paintedRoughness ? { roughness } : {}),
+    ...(paintedEmissive ? { emissive } : {}),
+  };
 }
 
 /**
@@ -145,6 +236,7 @@ export function buildSpriteMaterialAtlas(
   base: TextureAtlas,
   materials: readonly SpriteMaterial[],
   source: SpritePixelSource,
+  channels?: SpriteChannelSource,
 ): TextureAtlas {
   const tiles: FaceTexture[] = [...base.tiles];
   const faces: FaceMaterial[] = base.materials
@@ -159,7 +251,7 @@ export function buildSpriteMaterialAtlas(
     const existing = slotBySprite.get(key);
     if (existing !== undefined) return existing;
     const slot = tiles.length;
-    tiles.push(spriteFaceTexture(source, sprite));
+    tiles.push(spriteFaceTexture(source, sprite, TRANSPARENT_COLOR_INDEX, channels));
     slotBySprite.set(key, slot);
     return slot;
   };
