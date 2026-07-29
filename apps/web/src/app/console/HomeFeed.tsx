@@ -104,13 +104,21 @@ export function HomeFeed({ guest, onPlayCart }: HomeFeedProps) {
     );
   }
 
+  // Each settled branch below carries data-testid="home-feed" and names itself in
+  // data-feed-state. The marker means "the feed has settled", not "the feed has
+  // content" — without that, a feed showing its empty state was indistinguishable
+  // from one that never rendered at all, the same empty-versus-broken confusion
+  // this screen exists to avoid.
+  //
+  // Loading deliberately does NOT carry it: it is transient, and waiting for the
+  // marker is what callers use to mean "done loading".
   if (loadState === "loading") {
     return <div className="os-loading">TUNING THE FEED…</div>;
   }
 
   if (loadState === "error") {
     return (
-      <div className="os-empty">
+      <div className="os-empty" data-testid="home-feed" data-feed-state="error">
         The feed could not be reached.
         <br />
         Check the community server and try again.
@@ -120,7 +128,7 @@ export function HomeFeed({ guest, onPlayCart }: HomeFeedProps) {
 
   if (items.length === 0) {
     return (
-      <div className="os-empty">
+      <div className="os-empty" data-testid="home-feed" data-feed-state="empty">
         Nothing here yet — publish a cartridge
         <br />
         and it will headline the feed.
@@ -130,7 +138,13 @@ export function HomeFeed({ guest, onPlayCart }: HomeFeedProps) {
 
   return (
     <>
-      <div className="os-feed" ref={scrollerRef} onScroll={handleScroll} data-testid="home-feed">
+      <div
+        className="os-feed"
+        ref={scrollerRef}
+        onScroll={handleScroll}
+        data-testid="home-feed"
+        data-feed-state="ready"
+      >
         {items.map((item, index) => (
           <FeedCard key={item.id} item={item} active={index === activeIndex} onPlayCart={onPlayCart} />
         ))}
