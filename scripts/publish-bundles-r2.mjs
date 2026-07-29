@@ -20,11 +20,24 @@
 
 import { createReadStream, existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, extname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const publicDir = join(repoRoot, "apps", "web", "public");
 const dryRun = process.argv.includes("--dry-run");
+
+/** Re-upload objects that are already present and the right size. */
+const force = process.argv.includes("--force");
+
+/**
+ * Parallel uploads. The payload is ~670MB across ~700 objects, so serial PUTs
+ * spend most of their time waiting on round-trips; a handful in flight cuts the
+ * wall time several-fold without putting the connection under pressure.
+ */
+const DEFAULT_CONCURRENCY = 6;
+const concurrency =
+  Number(process.argv.find((a) => a.startsWith("--concurrency="))?.split("=")[1]) ||
+  DEFAULT_CONCURRENCY;
 
 /** Bundle roots served from public/ that mirror next.config's GAME_BUNDLE_ROOTS. */
 const BUNDLE_ROOTS = ["quake", "cube2", "scummvm", "supertux", "dosbox", "games"];
@@ -54,7 +67,8 @@ const CONTENT_TYPES = {
   ".zip": "application/zip",
 };
 
-const contentType = (path) => CONTENT_TYPES[extname(path).toLowerCase()] ?? "application/octet-stream";
+export const contentType = (path) =>
+  CONTENT_TYPES[extname(path).toLowerCase()] ?? "application/octet-stream";
 
 /** Bundle data is stable per build but the path is not versioned, so cache modestly. */
 const CACHE_CONTROL = "public, max-age=3600";
@@ -65,8 +79,49 @@ function required(name) {
   return value;
 }
 
+/**
+ * Whether an object still needs uploading, given what the bucket already holds.
+ *
+ * A run over ~670MB can be interrupted — a dropped connection, a cancelled job,
+ * a token that expired mid-flight. Re-running then used to re-send every byte
+ * from the start. Comparing against the object already in the bucket makes the
+ * script resumable: a second run costs one HEAD per file and uploads only the
+ * remainder.
+ *
+ * Size is the comparison because these files are build outputs identified by
+ * path — a bundle rebuild that changes a file changes its length in practice,
+ * and the alternative (checksumming 670MB locally on every run) costs more than
+ * the re-upload it would save. `--force` exists for the case it misses.
+ *
+ * @param {{size: number}} file
+ * @param {{size: number} | null} remote  null when the object is absent
+ */
+export function shouldUpload(file, remote, { force: forced = false } = {}) {
+  if (forced) return true;
+  if (!remote) return true;
+  return remote.size !== file.size;
+}
+
+/**
+ * Runs `worker` over `items` with at most `limit` in flight.
+ *
+ * Workers pull from a shared cursor rather than being handed fixed slices, so
+ * one 162MB file cannot leave five idle workers waiting on it.
+ */
+export async function mapWithConcurrency(items, limit, worker) {
+  let cursor = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+}
+
 /** All files under a directory, as { key, absolute, size } with POSIX keys. */
-function listBundle(root) {
+export function listBundle(root) {
   const base = join(publicDir, root);
   if (!existsSync(base)) return [];
   const out = [];
@@ -99,7 +154,7 @@ async function main() {
     return;
   }
 
-  const { S3Client, PutObjectCommand } = await import("@aws-sdk/client-s3");
+  const { S3Client, PutObjectCommand, HeadObjectCommand } = await import("@aws-sdk/client-s3");
   const bucket = required("R2_BUCKET");
   const client = new S3Client({
     region: "auto",
@@ -108,27 +163,79 @@ async function main() {
       accessKeyId: required("R2_ACCESS_KEY_ID"),
       secretAccessKey: required("R2_SECRET_ACCESS_KEY"),
     },
+    // A little more patience than the default 3: the long tail here is a 162MB
+    // PUT, and losing the whole object to one blip is expensive.
+    maxAttempts: 5,
   });
 
-  let done = 0;
-  for (const f of files) {
-    await client.send(
-      new PutObjectCommand({
-        Bucket: bucket,
-        Key: f.key,
-        Body: createReadStream(f.absolute),
-        ContentLength: f.size,
-        ContentType: contentType(f.absolute),
-        CacheControl: CACHE_CONTROL,
-      }),
-    );
-    done += 1;
-    if (done % 50 === 0 || done === files.length) console.log(`  uploaded ${done}/${files.length}`);
+  /** The object already in the bucket, or null when it is not there yet. */
+  const head = async (key) => {
+    try {
+      const found = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+      return { size: found.ContentLength };
+    } catch (error) {
+      if (error?.$metadata?.httpStatusCode === 404 || error?.name === "NotFound") return null;
+      throw error;
+    }
+  };
+
+  let uploaded = 0;
+  let skipped = 0;
+  let uploadedBytes = 0;
+  const failures = [];
+
+  await mapWithConcurrency(files, concurrency, async (f) => {
+    try {
+      if (!shouldUpload(f, await head(f.key), { force })) {
+        skipped += 1;
+        return;
+      }
+
+      await client.send(
+        new PutObjectCommand({
+          Bucket: bucket,
+          Key: f.key,
+          Body: createReadStream(f.absolute),
+          ContentLength: f.size,
+          ContentType: contentType(f.absolute),
+          CacheControl: CACHE_CONTROL,
+        }),
+      );
+
+      uploaded += 1;
+      uploadedBytes += f.size;
+    } catch (error) {
+      // Keep going: one bad object should not strand the other 700. They are
+      // listed at the end and a re-run retries exactly those.
+      failures.push({ key: f.key, message: error.message });
+    }
+
+    const seen = uploaded + skipped + failures.length;
+    if (seen % 50 === 0 || seen === files.length) {
+      console.log(
+        `  ${seen}/${files.length}  (${uploaded} uploaded, ${skipped} already present` +
+          `${failures.length ? `, ${failures.length} failed` : ""}, ${(uploadedBytes / 1e6).toFixed(0)} MB sent)`,
+      );
+    }
+  });
+
+  console.log(
+    `publish-bundles-r2: ${uploaded} uploaded, ${skipped} already present -> r2://${bucket}`,
+  );
+
+  if (failures.length) {
+    console.error(`publish-bundles-r2: ${failures.length} object(s) failed:`);
+    for (const f of failures.slice(0, 20)) console.error(`  ${f.key}: ${f.message}`);
+    if (failures.length > 20) console.error(`  … and ${failures.length - 20} more`);
+    console.error("Re-run to retry only these — objects already uploaded are skipped.");
+    process.exitCode = 1;
   }
-  console.log(`publish-bundles-r2: uploaded ${done} objects to r2://${bucket}`);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// Importable for tests; only runs the upload when invoked as a script.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
