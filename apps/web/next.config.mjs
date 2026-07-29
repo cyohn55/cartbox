@@ -3,13 +3,21 @@
 const isStaticExport = process.env.NEXT_PUBLIC_STATIC_EXPORT === "1";
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
-// Off-origin CDN base for the large emulated-game bundles (Cloudflare R2). When
-// set, the game bundle directories are served from R2 instead of shipping in the
-// deploy — the fix for hitting GitHub Pages' size limits (scripts/fetch-* / build-*
-// produce these; scripts/publish-bundles-r2.mjs uploads them). Crucially the
-// browser still requests same-origin paths (/cube2/…, /quake/…) and Next rewrites
-// them to R2, so the iframe runtimes' same-origin input bridges keep working.
-const gameCdnUrl = (process.env.GAME_CDN_URL ?? "").replace(/\/$/, "");
+// Off-origin CDN base for the large emulated-game bundles (Cloudflare R2). The
+// bundle directories are served from R2 instead of shipping in the deploy — the
+// fix for hitting GitHub Pages' size limits (scripts/fetch-* / build-* produce
+// these; scripts/publish-bundles-r2.mjs uploads them). Crucially the browser
+// still requests same-origin paths (/cube2/…, /quake/…) and Next rewrites them
+// to R2, so the iframe runtimes' same-origin input bridges keep working.
+//
+// The default is the project's own public R2 bucket. It lives here rather than
+// in each host's environment because it is a public URL, not a credential, and
+// it is a property of the project rather than of a deployment: leaving it to be
+// configured per host is what makes a fresh deploy 404 every game until someone
+// remembers the variable. GAME_CDN_URL still overrides it — set it to point a
+// deployment at a different bucket, or to "" to serve bundles from public/.
+const DEFAULT_GAME_CDN_URL = "https://pub-b6ce848723704dc5a863b41aa15c804c.r2.dev";
+const gameCdnUrl = (process.env.GAME_CDN_URL ?? DEFAULT_GAME_CDN_URL).replace(/\/$/, "");
 
 /** The bundle roots served from public/ today, reroutable to the CDN. */
 const GAME_BUNDLE_ROOTS = ["quake", "cube2", "scummvm", "supertux", "dosbox", "games"];
