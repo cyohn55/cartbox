@@ -21,6 +21,37 @@ function required(name) {
   return value;
 }
 
+/** True when SUPABASE_URL points at a Supabase running on this machine. */
+function targetIsLocal(url) {
+  const { hostname } = new URL(url);
+  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
+}
+
+/**
+ * Password for the seeded demo account.
+ *
+ * The convenience default is fine against a local stack and is written down in
+ * the README — but this repository is public, so seeding a *hosted* project with
+ * it would publish a working login for that deployment to anyone who reads the
+ * source. Away from localhost the password must be supplied explicitly, and the
+ * script refuses rather than quietly falling back.
+ */
+function demoPassword(supabaseUrl) {
+  const supplied = process.env.SEED_DEMO_PASSWORD;
+  if (supplied) {
+    return supplied;
+  }
+  if (targetIsLocal(supabaseUrl)) {
+    return "demo1234";
+  }
+  throw new Error(
+    `Refusing to seed ${supabaseUrl} with the public default password.\n` +
+      "This repo is public, so 'demo1234' would be a known credential on a hosted\n" +
+      "project. Set SEED_DEMO_PASSWORD to a strong value and re-run, e.g.\n" +
+      "  SEED_DEMO_PASSWORD=\"$(openssl rand -base64 24)\" node --env-file=… scripts/seed.mjs",
+  );
+}
+
 const supabase = createClient(required("SUPABASE_URL"), required("SUPABASE_SERVICE_ROLE_KEY"), {
   auth: { persistSession: false },
 });
@@ -79,10 +110,10 @@ const litCartSource = [
 
 async function main() {
   // Demo user + profile.
-  const email = "demo@cartbox.dev";
+  const email = process.env.SEED_DEMO_EMAIL ?? "demo@cartbox.dev";
   const { data: created, error: userError } = await supabase.auth.admin.createUser({
     email,
-    password: "demo1234",
+    password: demoPassword(required("SUPABASE_URL")),
     email_confirm: true,
   });
   if (userError && !/already/i.test(userError.message)) throw userError;
