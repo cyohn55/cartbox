@@ -3,7 +3,7 @@
 // Run via bootstrap-local.sh, which passes env through --env-file.
 
 import { createClient } from "@supabase/supabase-js";
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { putCartObject, storageBackend } from "./lib/seedStorage.mjs";
 
 // Resolve sibling packages against this module's URL directly. Going through
 // URL.pathname would percent-encode spaces in the repo path, which a second
@@ -56,14 +56,6 @@ const supabase = createClient(required("SUPABASE_URL"), required("SUPABASE_SERVI
   auth: { persistSession: false },
 });
 
-const s3 = new S3Client({
-  region: "auto",
-  endpoint: required("R2_ENDPOINT"),
-  credentials: {
-    accessKeyId: required("R2_ACCESS_KEY_ID"),
-    secretAccessKey: required("R2_SECRET_ACCESS_KEY"),
-  },
-});
 
 // Stable ids for the demo carts so the seed is idempotent across re-runs.
 const DEMO_CART_ID = "00000000-0000-4000-8000-000000000001";
@@ -133,6 +125,7 @@ async function main() {
     if (error) throw new Error(`seeding ${table} failed: ${error.message}`);
   };
 
+  console.log(`Storing cartridges in: ${storageBackend()}`);
   await insert("profiles", { id: userId, handle: "demo", display_name: "Demo" });
 
   // Published cart (with the SDK injected) uploaded to R2. The id is fixed so
@@ -141,14 +134,7 @@ async function main() {
   const cartId = DEMO_CART_ID;
   const r2Key = `carts/${cartId}.tic`;
   const cartBytes = injectSdk(buildLuaCart(cartSource));
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: required("R2_BUCKET"),
-      Key: r2Key,
-      Body: cartBytes,
-      ContentType: "application/octet-stream",
-    }),
-  );
+  const storedKey = await putCartObject(r2Key, cartBytes);
   await insert("carts", {
     id: cartId,
     owner_id: userId,
@@ -156,7 +142,7 @@ async function main() {
     slug: "ring-runner-demo",
     console_model: "classic",
     price_cents: 0,
-    r2_key: r2Key,
+    r2_key: storedKey,
     published: true,
   });
 
@@ -177,14 +163,7 @@ async function main() {
   // Lit demo cart: same pattern as above (SDK injected, uploaded to R2, row
   // upserted by a fixed id so re-seeding is idempotent).
   const litR2Key = `carts/${LIT_CART_ID}.tic`;
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: required("R2_BUCKET"),
-      Key: litR2Key,
-      Body: injectSdk(buildLuaCart(litCartSource)),
-      ContentType: "application/octet-stream",
-    }),
-  );
+  const litStoredKey = await putCartObject(litR2Key, injectSdk(buildLuaCart(litCartSource)));
   await insert("carts", {
     id: LIT_CART_ID,
     owner_id: userId,
@@ -192,7 +171,7 @@ async function main() {
     slug: "lantern-lit-demo",
     console_model: "classic",
     price_cents: 0,
-    r2_key: litR2Key,
+    r2_key: litStoredKey,
     published: true,
   });
 

@@ -8,7 +8,7 @@
 //   node --env-file=apps/web/.env.local scripts/seed-portrait.mjs
 
 import { createClient } from "@supabase/supabase-js";
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { putCartObject, storageBackend } from "./lib/seedStorage.mjs";
 
 // Resolve sibling packages against this module's URL directly; going through
 // URL.pathname would percent-encode the spaces in the repo path.
@@ -29,14 +29,6 @@ const supabase = createClient(required("SUPABASE_URL"), required("SUPABASE_SERVI
   auth: { persistSession: false },
 });
 
-const s3 = new S3Client({
-  region: "auto",
-  endpoint: required("R2_ENDPOINT"),
-  credentials: {
-    accessKeyId: required("R2_ACCESS_KEY_ID"),
-    secretAccessKey: required("R2_SECRET_ACCESS_KEY"),
-  },
-});
 
 const PORTRAIT_CART_ID = "00000000-0000-4000-8000-000000000013";
 
@@ -71,14 +63,7 @@ if (!profile) {
 const r2Key = `carts/${PORTRAIT_CART_ID}.tic`;
 const cartBytes = injectSdk(buildLuaCart(cartSource));
 
-await s3.send(
-  new PutObjectCommand({
-    Bucket: required("R2_BUCKET"),
-    Key: r2Key,
-    Body: cartBytes,
-    ContentType: "application/octet-stream",
-  }),
-);
+const storedKey = await putCartObject(r2Key, cartBytes);
 
 const { error } = await supabase.from("carts").upsert({
   id: PORTRAIT_CART_ID,
@@ -87,7 +72,7 @@ const { error } = await supabase.from("carts").upsert({
   slug: "tall-order-portrait-demo",
   console_model: "portrait",
   price_cents: 0,
-  r2_key: r2Key,
+  r2_key: storedKey,
   published: true,
 });
 

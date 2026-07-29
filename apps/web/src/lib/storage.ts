@@ -51,7 +51,20 @@ export async function putObject(
   );
 }
 
-/** Builds the public CDN URL for an object key. */
+/**
+ * Builds the public CDN URL for an object key.
+ *
+ * A key that is already an absolute URL is returned unchanged. Objects are
+ * normally bucket-relative keys resolved against the R2 CDN, but some content
+ * legitimately lives elsewhere — assets mirrored from another store, or content
+ * seeded into a deployment whose R2 credentials are not to hand — and it should
+ * be addressable without a schema change or a parallel column. Concatenating in
+ * that case yields a mangled `https://cdn/https://elsewhere/...`, so the check
+ * is what makes the mixed case work at all rather than an optimisation.
+ */
 export function publicUrl(key: string): string {
+  if (/^https?:\/\//i.test(key)) {
+    return key;
+  }
   return `${required("R2_PUBLIC_BASE_URL")}/${key}`;
 }

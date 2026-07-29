@@ -4,7 +4,7 @@
 
 import { readFileSync } from "node:fs";
 import { createClient } from "@supabase/supabase-js";
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { putCartObject, storageBackend } from "./lib/seedStorage.mjs";
 
 function required(name) {
   const v = process.env[name];
@@ -18,11 +18,6 @@ const CART_PATH = new URL("../../gotta-catch-em-all/game.tic", import.meta.url);
 const supabase = createClient(required("SUPABASE_URL"), required("SUPABASE_SERVICE_ROLE_KEY"), {
   auth: { persistSession: false },
 });
-const s3 = new S3Client({
-  region: "auto",
-  endpoint: required("R2_ENDPOINT"),
-  credentials: { accessKeyId: required("R2_ACCESS_KEY_ID"), secretAccessKey: required("R2_SECRET_ACCESS_KEY") },
-});
 
 async function main() {
   const { data: profile, error: pe } = await supabase.from("profiles").select("id").eq("handle", "demo").single();
@@ -30,9 +25,7 @@ async function main() {
 
   const bytes = new Uint8Array(readFileSync(CART_PATH));
   const r2Key = `carts/${CART_ID}.tic`;
-  await s3.send(new PutObjectCommand({
-    Bucket: required("R2_BUCKET"), Key: r2Key, Body: bytes, ContentType: "application/octet-stream",
-  }));
+  const storedKey = await putCartObject(r2Key, bytes);
 
   const { error } = await supabase.from("carts").upsert({
     id: CART_ID,
@@ -43,7 +36,7 @@ async function main() {
     tags: ["rpg", "classic", "demo"],
     console_model: "classic",
     price_cents: 0,
-    r2_key: r2Key,
+    r2_key: storedKey,
     published: true,
   });
   if (error) throw new Error(`seeding carts failed: ${error.message}`);
