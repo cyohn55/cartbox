@@ -10,6 +10,14 @@
  * Run from the repo root (packages/editor is TS, so use the Node type stripper):
  *   node --experimental-transform-types --import "./Unit Tests/registerTsHooks.mjs" \
  *        apps/web/scripts/extract-handheld.mjs
+ *
+ * THIS IS STEP 1 OF 3. It rewrites base.png/mask.png from the .aseprite, which
+ * DISCARDS the enlarged glass. Always follow it with:
+ *   node apps/web/scripts/reshape-handheld-glass.mjs    # thin bezel, bigger glass
+ *   node apps/web/scripts/measure-handheld-layout.mjs   # re-derive the layout
+ * then bump HANDHELD_ASSET_REV in apps/web/src/lib/handheldAssets.ts so the new
+ * art actually reaches cached clients. `Unit Tests/handheld-glass.test.ts` fails
+ * if this sequence is left half-run.
  */
 
 import fs from "node:fs";
