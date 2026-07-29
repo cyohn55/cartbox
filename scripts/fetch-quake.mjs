@@ -40,6 +40,7 @@ import {
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { downloadBytes } from "./lib/download.mjs";
 import { lh5Decode, readLhaEntries } from "./lib/lzh.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -104,9 +105,11 @@ function readZipEntry(zip, name) {
 }
 
 async function fetchBuffer(url) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`fetch-quake: ${url} -> HTTP ${response.status}`);
-  return Buffer.from(await response.arrayBuffer());
+  try {
+    return await downloadBytes(url);
+  } catch (error) {
+    throw new Error(`fetch-quake: ${url} -> ${error.message}`);
+  }
 }
 
 /** Turn the vendored WebQuake launcher into the console boot page. */

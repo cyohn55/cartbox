@@ -19,6 +19,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { downloadBytes } from "./lib/download.mjs";
+
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const assetDirectory = join(repoRoot, "games", "doom", "assets");
 
@@ -96,11 +98,7 @@ async function main() {
   }
 
   console.log(`Fetching Freedoom ${RELEASE.version}…`);
-  const response = await fetch(RELEASE.url);
-  if (!response.ok) {
-    throw new Error(`Download failed: ${response.status} ${response.statusText}`);
-  }
-  const archive = Buffer.from(await response.arrayBuffer());
+  const archive = await downloadBytes(RELEASE.url);
 
   const wad = await extractEntry(archive, RELEASE.entry);
   const licence = await extractEntry(archive, RELEASE.licenceEntry);

@@ -22,6 +22,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inflateRawSync } from "node:zlib";
 
+import { downloadBytes } from "./lib/download.mjs";
+
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const engineDirectory = join(repoRoot, "apps", "web", "public", "scummvm");
 const dataDirectory = join(engineDirectory, "data");
@@ -197,9 +199,7 @@ async function fetchArchiveGame(game, gameDirectory) {
   }
 
   console.log(`Fetching ${game.description}… (large archive)`);
-  const response = await fetch(game.url);
-  if (!response.ok) throw new Error(`Download failed: ${response.status} ${response.statusText}`);
-  const archive = Buffer.from(await response.arrayBuffer());
+  const archive = await downloadBytes(game.url);
 
   const digest = sha256(archive);
   if (digest !== game.archiveSha256) {
@@ -240,9 +240,7 @@ async function fetchGame(game) {
   }
 
   console.log(`Fetching ${game.description}…`);
-  const response = await fetch(game.url);
-  if (!response.ok) throw new Error(`Download failed: ${response.status} ${response.statusText}`);
-  const archive = Buffer.from(await response.arrayBuffer());
+  const archive = await downloadBytes(game.url);
   const extracted = extractEntries(archive, new Set(Object.keys(game.files)));
 
   for (const [name, expectedDigest] of Object.entries(game.files)) {

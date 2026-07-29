@@ -21,6 +21,8 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { downloadBytes } from "./lib/download.mjs";
+
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const vendorDirectory = join(repoRoot, "games", "cdogs");
 const outputDirectory = join(repoRoot, "apps", "web", "public", "dosbox");
@@ -150,9 +152,7 @@ async function fetchGame(game) {
     return;
   }
   console.log(`Fetching ${game.output}…`);
-  const response = await fetch(game.url);
-  if (!response.ok) throw new Error(`Download failed: ${response.status} ${response.statusText}`);
-  const bytes = Buffer.from(await response.arrayBuffer());
+  const bytes = await downloadBytes(game.url);
   const digest = sha256(bytes);
   if (digest !== game.sha256) {
     throw new Error(

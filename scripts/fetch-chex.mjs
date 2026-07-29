@@ -27,6 +27,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inflateRawSync } from "node:zlib";
 
+import { downloadBytes } from "./lib/download.mjs";
+
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const assetDirectory = join(repoRoot, "games", "chex", "assets");
 
@@ -88,9 +90,7 @@ async function main() {
   }
 
   console.log("Fetching Chex Quest…");
-  const response = await fetch(RELEASE.url);
-  if (!response.ok) throw new Error(`Download failed: ${response.status} ${response.statusText}`);
-  const archive = Buffer.from(await response.arrayBuffer());
+  const archive = await downloadBytes(RELEASE.url);
 
   const wad = extractEntry(archive, RELEASE.entry);
   const digest = sha256(wad);
