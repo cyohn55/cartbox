@@ -31,6 +31,10 @@ Copy the values from your local `apps/web/.env.local`. Grouped by exposure:
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anon key |
 | `NEXT_PUBLIC_ENGINE_URL` | Cartbox Classic engine URL |
 | `NEXT_PUBLIC_PRO_ENGINE_URL` | Cartbox Pro engine URL |
+| `NEXT_PUBLIC_PORTRAIT_ENGINE_URL` | Cartbox Portrait (360x640) engine URL |
+
+All three engine vars are optional: each core ships under `public/engine/`, and
+the defaults point there. Set them only to serve the cores from somewhere else.
 
 **Server-only (runtime secrets):**
 | Var | Purpose |

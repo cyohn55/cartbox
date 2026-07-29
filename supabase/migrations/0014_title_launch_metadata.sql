@@ -24,12 +24,40 @@ alter table titles
 
 -- A shared-engine runtime without a launch target is a title that cannot boot.
 -- Catching it here keeps the failure at insert time rather than in the player.
+--
+-- NOT VALID, deliberately: a database that already holds bundled DOS/ScummVM
+-- rows has exactly the rows this rule forbids, and a plain ADD CONSTRAINT would
+-- refuse to install at all rather than install and flag them — failing the
+-- migration on the databases that need it most. NOT VALID enforces the rule on
+-- every future insert and update while tolerating what predates it; the block
+-- below promotes it to fully validated as soon as nothing violates it, so a
+-- fresh database ends up with an ordinary validated constraint and a populated
+-- one self-heals after scripts/seed-titles.mjs fills the targets in.
 alter table titles
   add constraint titles_shared_engine_needs_target check (
     runtime not in ('dos', 'scummvm')
     or asset_source <> 'bundled'
     or launch_target is not null
-  );
+  ) not valid;
+
+do $$
+declare
+  unbootable integer;
+begin
+  select count(*) into unbootable
+  from titles
+  where runtime in ('dos', 'scummvm')
+    and asset_source = 'bundled'
+    and launch_target is null;
+
+  if unbootable = 0 then
+    alter table titles validate constraint titles_shared_engine_needs_target;
+  else
+    raise notice
+      'titles_shared_engine_needs_target left NOT VALID: % existing title(s) name no game to launch. Enforced for new and updated rows; seed the catalog and re-run to validate.',
+      unbootable;
+  end if;
+end $$;
 
 comment on column titles.launch_target is
   'Game selector inside a shared engine bundle: "<zip>:<EXE>" for dos, the engine target id for scummvm.';
