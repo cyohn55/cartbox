@@ -111,11 +111,12 @@ function compile() {
   mkdirSync(buildDir, { recursive: true });
   const sdlInc = sdlIncludeDir();
   const sdlFlags = "-sUSE_SDL=2 -sUSE_SDL_IMAGE=2 -sUSE_SDL_MIXER=2";
-  // Pre-build the SDL2 ports so their CMake config (lib/cmake/SDL2/) lands in the
-  // sysroot before configuring: the engine's `find_package(SDL2 CONFIG REQUIRED)`
-  // needs it, and on a fresh emsdk (CI) the ports are not materialised until first
-  // use, so find_package fails. On a warm cache (local) this is a no-op.
-  run("embuilder", ["build", "sdl2", "sdl2_image", "sdl2_mixer"]);
+  // Pre-build the ports NXEngine's CMake resolves via find_package (SDL2, plus
+  // zlib and libpng, which pngfuncs.cpp includes directly). Emscripten materialises
+  // ports lazily on first compile, so on a fresh emsdk (CI) their headers, libs and
+  // CMake configs do not exist at configure time and find_package fails. Building
+  // them up front fixes that; on a warm cache (local) this is a no-op.
+  run("embuilder", ["build", "sdl2", "sdl2_image", "sdl2_mixer", "zlib", "libpng"]);
   run(
     "emcmake",
     [
