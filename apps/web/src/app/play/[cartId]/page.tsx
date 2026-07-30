@@ -25,7 +25,7 @@ import { requiresSourceOffer } from "@/lib/licensing";
 import { parsePostFxSettings, type ModelId } from "@cartbox/player";
 import { CartridgePlayer } from "./CartridgePlayer";
 import { AssetSupply } from "./AssetSupply";
-import { WasmGamePlayer } from "./WasmGamePlayer";
+import { TitlePlayer } from "./TitlePlayer";
 import { BuyButton } from "@/app/play/[cartId]/BuyButton";
 
 /**
@@ -79,6 +79,7 @@ function TitleDetail({
   bundleName,
   width,
   height,
+  target,
 }: {
   id: string;
   name: string;
@@ -90,6 +91,8 @@ function TitleDetail({
   bundleName?: string;
   width?: number;
   height?: number;
+  /** Names the game inside a shared engine bundle (DOSBox, ScummVM). */
+  target?: string | null;
 }) {
   const runtime = resolveRuntime(runtimeId);
   // A title is runnable only once its runtime exists *and* a compiled bundle has
@@ -106,11 +109,14 @@ function TitleDetail({
         // silently falling back to a Cartbox engine that would fail obscurely.
         <p>This title is not playable on this console.</p>
       ) : playable ? (
-        <WasmGamePlayer
+        <TitlePlayer
           titleId={id}
+          name={name}
+          runtimeId={runtimeId}
           bundleName={bundleName as string}
           width={width ?? DEFAULT_GAME_WIDTH}
           height={height ?? DEFAULT_GAME_HEIGHT}
+          target={target}
         />
       ) : requiresUserAssets(assetSource) ? null : (
         <p>{name} has not been ported to this console yet.</p>
@@ -159,6 +165,7 @@ function StaticCartridgePage({ cartId }: { cartId: string }) {
         bundleName={title.bundleName}
         width={title.width}
         height={title.height}
+        target={title.dosTarget ?? title.scummvmTarget ?? null}
       />
     );
   }
@@ -227,7 +234,9 @@ async function CatalogTitlePage(titleId: string) {
   const db = serviceClient();
   const { data: title } = await db
     .from("titles")
-    .select("id, name, description, runtime, asset_source, license, source_url, bundle_key")
+    .select(
+      "id, name, description, runtime, asset_source, license, source_url, bundle_key, launch_target, width, height",
+    )
     .eq("id", titleId)
     .eq("published", true)
     .single();
@@ -246,6 +255,9 @@ async function CatalogTitlePage(titleId: string) {
       license={title.license}
       sourceUrl={title.source_url}
       bundleName={title.bundle_key ?? undefined}
+      target={title.launch_target}
+      width={title.width ?? undefined}
+      height={title.height ?? undefined}
     />
   );
 }

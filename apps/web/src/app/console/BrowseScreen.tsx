@@ -16,6 +16,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { isStaticExport } from "@/lib/staticSite";
+import { gamePlayerRuntime } from "@/lib/titleRuntime";
 import { DEMO_CARTS, demoCartUrl, demoThumbUrl } from "@/lib/demoCatalog";
 import { DEMO_TITLES } from "@/lib/demoTitles";
 import { ENGINE_URL_BY_MODEL, resolveModelId } from "@/lib/consoleModel";
@@ -91,21 +92,9 @@ function titleGridCarts(
       cartUrl: null,
       engineUrl: null,
       game: {
-        // The iframe-hosted engines (ScummVM, SuperTux, DOS) name themselves; a
-        // ScummVM target is honoured for older rows that predate the runtime
-        // column; everything else is a Cartbox Game ABI module.
-        runtime:
-          title.runtime === "supertux"
-            ? ("supertux" as const)
-            : title.runtime === "dos"
-              ? ("dos" as const)
-              : title.runtime === "quake"
-                ? ("quake" as const)
-                : title.runtime === "cube2"
-                  ? ("cube2" as const)
-                  : title.runtime === "scummvm" || title.scummvmTarget
-                    ? ("scummvm" as const)
-                    : ("wasm-app" as const),
+        // Shared with /play so the two surfaces cannot disagree about which
+        // engine a title runs on.
+        runtime: gamePlayerRuntime(title),
         bundleName: title.bundleName as string,
         width: title.width ?? 320,
         height: title.height ?? 180,

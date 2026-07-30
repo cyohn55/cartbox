@@ -111,3 +111,38 @@ export function implementedRuntimes(): RuntimeDescriptor[] {
 export function requiresUserAssets(assetSource: AssetSource): boolean {
   return assetSource === "user-supplied";
 }
+
+/**
+ * Which in-browser player drives a catalog title.
+ *
+ * `wasm-app` titles run on the Cartbox Game ABI — a framebuffer the host ticks.
+ * The rest own their own canvas and loop inside an iframe (ScummVM, SuperTux,
+ * DOSBox, WebQuake, BananaBread). The distinction decides which player component
+ * a title mounts, so getting it wrong does not degrade gracefully: it loads the
+ * wrong engine and 404s on a bundle path that was never meant to exist.
+ *
+ * `scummvmTarget` is honoured as a fallback for rows written before `titles` had
+ * a `runtime` column.
+ */
+export type GamePlayerRuntime = "wasm-app" | "scummvm" | "supertux" | "dos" | "quake" | "cube2";
+
+const IFRAME_HOSTED: readonly GamePlayerRuntime[] = ["scummvm", "supertux", "dos", "quake", "cube2"];
+
+export function gamePlayerRuntime(title: {
+  runtime?: string | null;
+  scummvmTarget?: string | null;
+}): GamePlayerRuntime {
+  const runtime = title.runtime;
+
+  if (runtime && (IFRAME_HOSTED as readonly string[]).includes(runtime)) {
+    return runtime as GamePlayerRuntime;
+  }
+  if (title.scummvmTarget) return "scummvm";
+
+  return "wasm-app";
+}
+
+/** True when the runtime hosts itself in an iframe rather than on the ABI. */
+export function isIframeHostedRuntime(runtime: GamePlayerRuntime): boolean {
+  return IFRAME_HOSTED.includes(runtime);
+}
