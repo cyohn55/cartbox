@@ -24,7 +24,8 @@ import { CONTROL_KEY_CODES } from "./consoleInput";
 import type { ConsoleControl } from "./consoleInput";
 import {
   VirtualCursor,
-  controlAction,
+  controlActionFor,
+  inputSchemeForTarget,
   type CursorPosition,
 } from "@/lib/scummvmRuntime";
 import type { PlayingCart } from "./consoleOs";
@@ -98,6 +99,9 @@ export function ScummVmPlayer({ cart, onExit }: { cart: PlayingCart; onExit: () 
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
 
   const target = cart.game?.target ?? "";
+  // Point-and-click adventures nudge a cursor; action games (e.g. The Griffon
+  // Legend) map the d-pad straight onto the keys their engine reads.
+  const scheme = inputSchemeForTarget(target);
   const src = withBasePath(`/scummvm/cartbox-boot.html#${encodeURIComponent(target)}`);
 
   // The engine reports readiness and hard failures by postMessage, so the host
@@ -148,7 +152,7 @@ export function ScummVmPlayer({ cart, onExit }: { cart: PlayingCart; onExit: () 
       const input = inputRef.current;
       const cursor = cursorRef.current;
       if (!control || !input) return;
-      const action = controlAction(control);
+      const action = controlActionFor(scheme, control);
       if (!action) return;
       switch (action.kind) {
         case "cursor":
@@ -176,7 +180,7 @@ export function ScummVmPlayer({ cart, onExit }: { cart: PlayingCart; onExit: () 
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
     };
-  }, []);
+  }, [scheme]);
 
   const onFrameLoad = () => {
     if (frameRef.current) {

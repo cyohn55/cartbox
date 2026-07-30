@@ -49,7 +49,7 @@ const SCUMMVM_REPO = "https://github.com/scummvm/scummvm.git";
  */
 const ENGINE_ARGS = [
   "--disable-all-engines",
-  "--enable-engine=sky,queen,lure,cge,dreamweb,drascula",
+  "--enable-engine=sky,queen,lure,cge,dreamweb,drascula,ultima,griffon",
 ];
 
 /** The engine files the iframe loader needs; everything else in the dist is unused. */

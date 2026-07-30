@@ -73,6 +73,74 @@ export function controlAction(control: ConsoleControl): ControlAction {
   }
 }
 
+/**
+ * Which control model a ScummVM title wants.
+ *
+ * Most ScummVM games the catalog hosts are point-and-click adventures driven by
+ * the `pointer` scheme (`controlAction`): the d-pad slides a virtual cursor and
+ * the face buttons click. But ScummVM also hosts keyboard-driven action games —
+ * The Griffon Legend is a real-time action-RPG where the arrows *walk the hero*
+ * and a button *swings the sword*, not a cursor to nudge. Those use the
+ * `keyboard` scheme, so the handheld's buttons become the keys the engine reads.
+ */
+export type ScummvmInputScheme = "pointer" | "keyboard";
+
+/**
+ * The `keyboard` scheme: map the handheld directly onto the keys an action game
+ * reads. Tuned for The Griffon Legend, whose ScummVM keymap walks the hero with
+ * the arrow keys, attacks on Ctrl, and opens the menu on Enter/Escape.
+ */
+function keyboardAction(control: ConsoleControl): ControlAction {
+  switch (control) {
+    case "up":
+      return { kind: "key", code: "ArrowUp" };
+    case "down":
+      return { kind: "key", code: "ArrowDown" };
+    case "left":
+      return { kind: "key", code: "ArrowLeft" };
+    case "right":
+      return { kind: "key", code: "ArrowRight" };
+    // Attack — the action game's primary verb on the primary face button.
+    case "a":
+      return { kind: "key", code: "ControlLeft" };
+    // Confirm / open the inventory-menu.
+    case "b":
+      return { kind: "key", code: "Enter" };
+    // A second confirm some players reach for; harmless in play.
+    case "y":
+      return { kind: "key", code: "Enter" };
+    case "x":
+      return { kind: "key", code: "Space" };
+    // Menu / back.
+    case "start":
+      return { kind: "key", code: "Escape" };
+    default:
+      // Select is the shell's eject; the shoulders are unused by these games.
+      return null;
+  }
+}
+
+/**
+ * Resolves a control to its action under a given input scheme. The pointer scheme
+ * is `controlAction` (the adventure default); the keyboard scheme is for action
+ * games. Pure and DOM-free, so both schemes are unit-tested on plain values.
+ */
+export function controlActionFor(scheme: ScummvmInputScheme, control: ConsoleControl): ControlAction {
+  return scheme === "keyboard" ? keyboardAction(control) : controlAction(control);
+}
+
+/**
+ * ScummVM targets that want the keyboard scheme rather than the pointer. Kept as
+ * data next to the schemes so adding another action title is a one-line change
+ * and the mapping is testable without a running engine.
+ */
+const KEYBOARD_TARGETS: ReadonlySet<string> = new Set(["griffon"]);
+
+/** The input scheme a ScummVM target uses; pointer unless it is a known action game. */
+export function inputSchemeForTarget(target: string): ScummvmInputScheme {
+  return KEYBOARD_TARGETS.has(target) ? "keyboard" : "pointer";
+}
+
 export interface ScreenBounds {
   width: number;
   height: number;

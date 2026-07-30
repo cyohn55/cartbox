@@ -101,6 +101,17 @@ const GAMES = [
     url: "https://downloads.scummvm.org/frs/extras/Dreamweb/dreamweb-cd-uk-1.1.zip",
     archiveSha256: "4a6f13911ce67d62c526e41048ec067b279f1b378c9210f39e0ce8d3f2b80142",
   },
+  {
+    target: "griffon",
+    description: "The Griffon Legend",
+    // Released as freeware by its author, Daniel "Syn9" Kennedy, and hosted by the
+    // ScummVM team with permission. ~340 files (maps, NPCs, triggers, Ogg music),
+    // too many to pin one by one, so it is verified by the archive digest — the
+    // exact SHA-256 the ScummVM team publishes beside the archive — and extracted
+    // whole.
+    url: "https://downloads.scummvm.org/frs/extras/Griffon%20Legend/griffon-1.0.zip",
+    archiveSha256: "0aad5fb10f51afb5c121cf04cc86539a6f0d89db85809f9e1767dfdc8d3191a4",
+  },
 ];
 
 function sha256(bytes) {

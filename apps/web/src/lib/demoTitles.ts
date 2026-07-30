@@ -338,6 +338,29 @@ export const DEMO_TITLES: readonly DemoTitle[] = [
     releasedAt: "2026-07-19T00:00:05.000Z",
   },
   {
+    id: "00000000-0000-4000-9000-000000000015",
+    slug: "the-griffon-legend",
+    name: "The Griffon Legend",
+    description:
+      "A freeware top-down action-RPG — explore a fantasy world, battle monsters and free the land, running through the ScummVM runtime. Unlike the point-and-click adventures, the d-pad walks the hero directly: A attacks, B opens the menu, Start pauses.",
+    runtime: "scummvm",
+    assetSource: "bundled",
+    tier: "B",
+    // Released as freeware by its author, Daniel "Syn9" Kennedy, and hosted by the
+    // ScummVM team with permission — the same clean provenance as the other bundled
+    // ScummVM titles (fetched + digest-pinned by scripts/fetch-scummvm-games.mjs).
+    license: "proprietary-freeware",
+    sourceUrl: "https://www.scummvm.org/games/",
+    releasedAt: "2026-07-30T00:00:02.000Z",
+    // The engine lives at public/scummvm; "griffon" is the ScummVM game id. This
+    // is an action game, so the ScummVM runtime drives it with its keyboard input
+    // scheme (see inputSchemeForTarget) rather than the adventure cursor.
+    bundleName: "scummvm",
+    scummvmTarget: "griffon",
+    width: 320,
+    height: 240,
+  },
+  {
     id: "00000000-0000-4000-9000-000000000011",
     slug: "quake",
     name: "Quake",
