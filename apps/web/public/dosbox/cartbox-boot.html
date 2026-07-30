@@ -20,6 +20,89 @@
 </head>
 <body>
   <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+  <script>
+    // Keep an optional cache from wedging the engine. MUST run before js-dos.js.
+    //
+    // js-dos opens an IndexedDB ("js-dos-cache (<version>)") to memoise the
+    // wdosbox binary, and starts DOSBox from that request's callbacks. It handles
+    // `onerror` — falling back to a no-op cache, so the cache is provably
+    // optional — but a database that fires *no* event at all has no handler, and
+    // a profile whose IndexedDB is wedged reaches exactly that state. The boot
+    // then stops before the engine exists: no error, no canvas, an indefinite
+    // "LOADING GAME…". Every DOS title fails and nothing else does, because
+    // js-dos is the only runtime here that touches IndexedDB.
+    //
+    // The fix is to give the open request a deadline and synthesise the failure
+    // js-dos already knows how to handle, so a broken cache costs a re-download
+    // instead of the whole game. Scoped to this iframe, which runs nothing else.
+    window.CARTBOX_IDB_OPEN_TIMEOUT_MS = 5000;
+
+    function guardIndexedDbOpen(factory, timeoutMs, setTimer) {
+      if (!factory || typeof factory.open !== "function") return factory;
+      var schedule = setTimer || window.setTimeout.bind(window);
+
+      return {
+        open: function (name, version) {
+          var request = factory.open(name, version);
+          var settled = false;
+          // The shim stands in for the real IDBOpenDBRequest: js-dos assigns the
+          // three handlers and reads `.result` off whatever open() returned.
+          var shim = {
+            onerror: null,
+            onsuccess: null,
+            onupgradeneeded: null,
+            onblocked: null,
+            get result() {
+              return request.result;
+            },
+          };
+
+          var forward = function (name) {
+            return function (event) {
+              if (settled) return;
+              // upgradeneeded is a step on the way to success, not an outcome:
+              // the database is demonstrably alive, so only stop the clock.
+              if (name !== "onupgradeneeded") settled = true;
+              if (typeof shim[name] === "function") shim[name](event);
+            };
+          };
+          request.onsuccess = forward("onsuccess");
+          request.onupgradeneeded = forward("onupgradeneeded");
+          request.onerror = forward("onerror");
+          // A blocked open never completes on its own; treat it as a failure so
+          // js-dos takes its no-op cache path rather than waiting forever.
+          request.onblocked = forward("onerror");
+
+          schedule(function () {
+            if (settled) return;
+            settled = true;
+            if (typeof shim.onerror === "function") {
+              shim.onerror({ target: shim, cartboxTimedOut: true });
+            }
+          }, timeoutMs);
+
+          return shim;
+        },
+      };
+    }
+
+    // Guard the real factory in the browser; the export is for the unit test,
+    // which drives this exact function with a database that never answers.
+    if (typeof window !== "undefined" && window.indexedDB) {
+      var guarded = guardIndexedDbOpen(window.indexedDB, window.CARTBOX_IDB_OPEN_TIMEOUT_MS);
+      try {
+        Object.defineProperty(window, "indexedDB", {
+          configurable: true,
+          get: function () {
+            return guarded;
+          },
+        });
+      } catch (error) {
+        // A browser that refuses the override keeps the unguarded factory; the
+        // boot watchdog below still bounds the damage.
+      }
+    }
+  </script>
   <script src="js-dos.js"></script>
   <script>
     // Which game to boot comes from the fragment as "<bundle>:<exe>" or
@@ -48,6 +131,33 @@
       post("error", { message: String(event.message) });
     });
 
+    /**
+     * Bounds each boot stage so a stall is reported instead of hung on.
+     *
+     * Every *failure* here already reaches the host, but "the engine never
+     * called back" is not a failure — no promise rejects and no error fires, so
+     * without this the loader spins for as long as the player is willing to
+     * wait. The two stages get very different budgets on purpose: bringing the
+     * engine up is local work (a 1.8MB script plus the cache open) and should
+     * take seconds, while extracting the game means downloading up to 13MB,
+     * which is legitimately slow on a bad connection and must not be cut short.
+     */
+    var ENGINE_STAGE_TIMEOUT_MS = 45000;
+    var EXTRACT_STAGE_TIMEOUT_MS = 300000;
+
+    function stageWatchdog(stage, timeoutMs) {
+      var done = false;
+      var timer = setTimeout(function () {
+        if (done) return;
+        done = true;
+        post("error", { message: "timed out waiting for " + stage, stage: stage });
+      }, timeoutMs);
+      return function clear() {
+        done = true;
+        clearTimeout(timer);
+      };
+    }
+
     (function () {
       var target = parseTarget();
       var canvas = document.getElementById("canvas");
@@ -57,13 +167,19 @@
       // way, so the engine is base-path independent. (6.22's onprogress reports a
       // stage label, not a percentage, so the host just shows an indeterminate
       // "LOADING…" until runtime-initialized rather than a bogus number.)
+      var engineReady = stageWatchdog("the DOSBox engine to start", ENGINE_STAGE_TIMEOUT_MS);
+
       Dos(canvas, {
         wdosboxUrl: "wdosbox.js",
         cycles: "auto",
         autolock: false,
       }).ready(function (fs, main) {
+        engineReady();
+        var extracted = stageWatchdog("the game files to download", EXTRACT_STAGE_TIMEOUT_MS);
+
         fs.extract(target.bundle + ".zip")
           .then(function () {
+            extracted();
             // Optional per-game overlay: extra files that must sit in C: next to
             // the game but cannot be baked into its distribution archive (a
             // "distribute unmodified" title like C-Dogs). <bundle>.files.json maps
@@ -82,6 +198,9 @@
             post("runtime-initialized");
           })
           .catch(function (error) {
+            // A real failure is the more precise report, so retire the watchdog
+            // rather than letting it fire a second, vaguer error afterwards.
+            extracted();
             post("error", { message: "boot failed: " + String(error) });
           });
       });

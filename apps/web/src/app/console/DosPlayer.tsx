@@ -67,6 +67,10 @@ export function DosPlayer({ cart, onExit }: { cart: PlayingCart; onExit: () => v
   const frameRef = useRef<HTMLIFrameElement>(null);
   const inputRef = useRef<IframeKeyboard | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  // Why the boot failed, when the page told us. A DOS boot can fail for reasons
+  // the player can act on (a stalled download) and reasons they cannot, so the
+  // reason is worth showing rather than collapsing every case into "GAME ERROR".
+  const [failure, setFailure] = useState<string | null>(null);
 
   // The launch target ("<bundle>:<exe>") selects the game zip and its exe; the
   // bundle also selects the game's DOS key bindings.
@@ -80,10 +84,13 @@ export function DosPlayer({ cart, onExit }: { cart: PlayingCart; onExit: () => v
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
       if (event.source !== frameRef.current?.contentWindow) return;
-      const data = event.data as { source?: string; type?: string } | null;
+      const data = event.data as { source?: string; type?: string; message?: string } | null;
       if (data?.source !== "cartbox-dos") return;
       if (data.type === "runtime-initialized") setStatus("ready");
-      else if (data.type === "error") setStatus("error");
+      else if (data.type === "error") {
+        setFailure(typeof data.message === "string" ? data.message : null);
+        setStatus("error");
+      }
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
@@ -133,7 +140,7 @@ export function DosPlayer({ cart, onExit }: { cart: PlayingCart; onExit: () => v
       {status === "loading" && <div className="os-loading">LOADING GAME…</div>}
       {status === "error" && (
         <div className="os-loading" role="alert">
-          GAME ERROR —{" "}
+          GAME ERROR{failure ? ` — ${failure}` : ""} —{" "}
           <button type="button" className="os-auth-switch" onClick={onExit}>
             EJECT
           </button>
