@@ -28,6 +28,14 @@ const BUNDLE_ROOTS: string[] = (() => {
   return [...declaration[1].matchAll(/"([^"]+)"/g)].map(([, root]) => root);
 })();
 
+/** The roots the config marks as range-streamed, read from its source. */
+const RANGE_STREAMED_ROOTS: string[] = (() => {
+  const source = readFileSync(fileURLToPath(CONFIG_URL), "utf8");
+  const declaration = source.match(/const RANGE_STREAMED_ROOTS\s*=\s*\[([^\]]*)\]/);
+  if (!declaration) throw new Error("RANGE_STREAMED_ROOTS not found in next.config.mjs");
+  return [...declaration[1].matchAll(/"([^"]+)"/g)].map(([, root]) => root);
+})();
+
 /** Loads next.config.mjs fresh under the given environment. */
 async function loadConfig(env: Record<string, string | undefined>) {
   for (const [key, value] of Object.entries(env)) {
@@ -105,16 +113,18 @@ describe("game bundle CDN rewrites", () => {
     expect(await rewritesFor({ GAME_CDN_URL: "" })).toEqual([]);
   });
 
-  it("marks every bundle path no-store so ranged responses are not cached", async () => {
-    // The Quake regression: Vercel's edge caches on URL alone and ignores the
-    // Range request header, so a cached `bytes=0-11` partial was returned for
-    // every later range of pak0.pak.
+  it("sends no-store only for the range-streamed roots", async () => {
+    // Over-scoping this is a real regression, not a tidiness point: no-store on
+    // every root tells the browser not to cache any bundle, so a launch
+    // re-downloads C&C's 13MB zip or SuperTux's 162MB data file every time and
+    // the game appears to hang on its loading screen.
     const config = await loadConfig({});
     const headers = await config.headers();
 
-    expect(headers).toHaveLength(BUNDLE_ROOTS.length);
+    expect(headers).toHaveLength(RANGE_STREAMED_ROOTS.length);
+    expect(RANGE_STREAMED_ROOTS.length).toBeLessThan(BUNDLE_ROOTS.length);
 
-    for (const root of BUNDLE_ROOTS) {
+    for (const root of RANGE_STREAMED_ROOTS) {
       const rule = headers.find((h: { source: string }) => h.source === `/${root}/:path*`);
       expect(rule, `no header rule for /${root}`).toBeDefined();
       const cacheControl = rule.headers.find(
@@ -122,6 +132,25 @@ describe("game bundle CDN rewrites", () => {
       );
       expect(cacheControl.value).toBe("no-store");
     }
+
+    // Whole-file bundles keep browser caching.
+    for (const root of BUNDLE_ROOTS.filter((r) => !RANGE_STREAMED_ROOTS.includes(r))) {
+      expect(headers.find((h: { source: string }) => h.source === `/${root}/:path*`)).toBeUndefined();
+    }
+  });
+
+  it("agrees with the publisher about which roots stream by range", async () => {
+    // The config cannot import the script (Next config must stand alone), so the
+    // two lists are kept honest here instead of by convention.
+    const publisher = readFileSync(
+      fileURLToPath(new URL("../scripts/publish-bundles-r2.mjs", import.meta.url)),
+      "utf8",
+    );
+    const declaration = publisher.match(/const RANGE_STREAMED_ROOTS = new Set\(\[([^\]]*)\]\)/);
+    expect(declaration, "RANGE_STREAMED_ROOTS not found in the publisher").toBeTruthy();
+
+    const publisherRoots = [...declaration![1].matchAll(/"([^"]+)"/g)].map(([, r]) => r);
+    expect([...publisherRoots].sort()).toEqual([...RANGE_STREAMED_ROOTS].sort());
   });
 
   it("declares no header overrides when bundles are served from public/", async () => {

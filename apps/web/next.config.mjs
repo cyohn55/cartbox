@@ -22,6 +22,16 @@ const gameCdnUrl = (process.env.GAME_CDN_URL ?? DEFAULT_GAME_CDN_URL).replace(/\
 /** The bundle roots served from public/ today, reroutable to the CDN. */
 const GAME_BUNDLE_ROOTS = ["quake", "cube2", "scummvm", "supertux", "dosbox", "games"];
 
+/**
+ * Roots whose engine streams with Range requests, and so must not be cached.
+ *
+ * Mirrors RANGE_STREAMED_ROOTS in scripts/publish-bundles-r2.mjs, which is where
+ * the fix that matters lives (the origin's Cache-Control). Next requires config
+ * to stand alone, so the list cannot be imported from a script; the test asserts
+ * the two still agree.
+ */
+const RANGE_STREAMED_ROOTS = ["quake"];
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   // @cartbox/player and @cartbox/payments are consumed as pre-built dist (ESM +
@@ -47,33 +57,25 @@ const nextConfig = {
           };
         },
 
-        // Tell the *client* not to cache these proxied responses.
+        // Keep the *browser* from holding a partial of a range-streamed bundle.
         //
-        // NOTE: this does not stop Vercel's edge from caching them — the edge
-        // stores the upstream object with the upstream Cache-Control, so a
-        // `headers()` rule here is decoration on the outgoing response only.
-        // Preventing the poisoned entry is the origin's job; see
-        // RANGE_STREAMED_ROOTS in scripts/publish-bundles-r2.mjs. This rule is
-        // still worth keeping so a browser does not hold a partial either.
+        // Scoped to RANGE_STREAMED_ROOTS, and it must stay that way: applied to
+        // every root it tells the browser not to cache any bundle at all, so a
+        // player re-downloads C&C's 13MB zip — or SuperTux's 162MB data file —
+        // from scratch on every single launch. That reads as a game hanging on
+        // its loading screen, which is exactly what it caused.
         //
-        // Vercel's CDN keys its cache on the URL and ignores the `Range` request
-        // header (no `Vary: Range` on the response). Proxying a range-capable
-        // origin through it therefore poisons the entry: WebQuake asks for
-        // `bytes=0-11` of pak0.pak to read the header, that 12-byte partial gets
-        // cached for the whole URL, and its next range — the pak directory at
-        // byte 18254423 — is answered with the same 12 bytes and
-        // `content-range: bytes 0-11`. The engine cannot find gfx.wad inside the
-        // pak, falls back to a loose file that does not exist, and dies on
-        // `W.LoadWadFile: couldn't load gfx.wad`.
+        // This rule is *not* what fixes the edge. Vercel's CDN keys its cache on
+        // the URL, ignores the `Range` request header, and stores what the
+        // origin sent — so preventing the poisoned entry is the origin's job
+        // (`cacheControlForKey` in scripts/publish-bundles-r2.mjs). Reading a
+        // `headers()` rule as though it governed the edge is how that fix first
+        // went out half-working.
         //
-        // Runtimes that fetch whole files (Cube 2, SuperTux, DOSBox, ScummVM,
-        // Doom) never saw this, which is why Quake alone was broken.
-        //
-        // The cost is edge caching for the bundles, not bandwidth: Vercel meters
-        // what it sends the user either way, and R2 -> Vercel egress is free. A
-        // correct byte range is worth more than a warm cache.
+        // "Unit Tests/game-cdn-rewrites.test.ts" asserts this list still matches
+        // the publisher's.
         async headers() {
-          return GAME_BUNDLE_ROOTS.map((root) => ({
+          return RANGE_STREAMED_ROOTS.map((root) => ({
             source: `/${root}/:path*`,
             headers: [{ key: "Cache-Control", value: "no-store" }],
           }));
