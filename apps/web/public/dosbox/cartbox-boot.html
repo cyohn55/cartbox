@@ -43,8 +43,22 @@
 
       return {
         open: function (name, version) {
-          var request = factory.open(name, version);
           var settled = false;
+          var request = null;
+          var openThrew = null;
+          // open() is not always safe to call: a sandboxed or storage-partitioned
+          // iframe (this DOS player runs in one) makes it throw *synchronously* —
+          // typically a SecurityError, "access to the Indexed Database API is
+          // denied in this context." js-dos does not guard this call, so the
+          // throw aborts engine bring-up with no fallback and the loader hangs
+          // until the boot watchdog fires ~45s later. Swallow it and take the
+          // same failure path as a timeout, so js-dos drops to its no-op cache.
+          try {
+            request = factory.open(name, version);
+          } catch (error) {
+            openThrew = error;
+          }
+
           // The shim stands in for the real IDBOpenDBRequest: js-dos assigns the
           // three handlers and reads `.result` off whatever open() returned.
           var shim = {
@@ -53,9 +67,24 @@
             onupgradeneeded: null,
             onblocked: null,
             get result() {
-              return request.result;
+              return request ? request.result : null;
             },
           };
+
+          var fail = function (detail) {
+            if (settled) return;
+            settled = true;
+            if (typeof shim.onerror === "function") shim.onerror(detail);
+          };
+
+          if (openThrew) {
+            // open() returns before js-dos assigns shim.onerror, so the failure
+            // must fire asynchronously (after the caller has wired its handler).
+            schedule(function () {
+              fail({ target: shim, cartboxOpenThrew: true, error: openThrew });
+            }, 0);
+            return shim;
+          }
 
           var forward = function (name) {
             return function (event) {
@@ -74,11 +103,7 @@
           request.onblocked = forward("onerror");
 
           schedule(function () {
-            if (settled) return;
-            settled = true;
-            if (typeof shim.onerror === "function") {
-              shim.onerror({ target: shim, cartboxTimedOut: true });
-            }
+            fail({ target: shim, cartboxTimedOut: true });
           }, timeoutMs);
 
           return shim;
@@ -126,9 +151,26 @@
       parent.postMessage(message, "*");
     }
 
+    // Set once the game is running, so post-boot noise can't flip a running
+    // game to GAME ERROR (see the unhandledrejection net below).
+    var booted = false;
+
     // Surface a hard failure to the host rather than hanging on a black canvas.
     window.addEventListener("error", function (event) {
       post("error", { message: String(event.message) });
+    });
+
+    // js-dos brings the engine up inside a Promise whose rejection it never
+    // forwards, and `.ready()` attaches no reject handler — so a bring-up
+    // failure (a thrown IndexedDB open, a WASM instantiate error) is a *silent*
+    // rejection, invisible until the 45s engine watchdog fires. Report it the
+    // moment it happens, but only before boot: once the game is running, later
+    // rejections are background noise and must not tear down a live session.
+    window.addEventListener("unhandledrejection", function (event) {
+      if (booted) return;
+      var reason = event && event.reason;
+      var detail = reason && reason.message ? reason.message : String(reason);
+      post("error", { message: "engine bring-up failed: " + detail });
     });
 
     /**
@@ -194,7 +236,9 @@
               ? ["-c", "imgmount d " + target.cd + " -t iso -fs iso", "-c", target.exe]
               : ["-c", target.exe];
             main(commands);
-            // DOSBox is now running the game; the host can drop the loader.
+            // DOSBox is now running the game; the host can drop the loader, and
+            // post-boot rejections are no longer bring-up failures.
+            booted = true;
             post("runtime-initialized");
           })
           .catch(function (error) {

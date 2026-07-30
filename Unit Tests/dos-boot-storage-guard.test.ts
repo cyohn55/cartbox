@@ -186,6 +186,52 @@ describe("guardIndexedDbOpen — a cache that never answers", () => {
     expect(events).toEqual(["error"]);
   });
 
+  it("turns a synchronously thrown open — a storage-blocked iframe — into the handled failure", () => {
+    // A sandboxed or storage-partitioned iframe (this DOS player runs in one)
+    // makes IDBFactory.open() throw synchronously, e.g. a SecurityError. js-dos
+    // does not guard the call, so an unswallowed throw aborts engine bring-up
+    // with no fallback — the 45s dead loader the user hit. The guard must absorb
+    // it and still surface the onerror js-dos knows how to handle.
+    const thrown = new Error("access to the Indexed Database API is denied in this context");
+    const factory = {
+      open() {
+        throw thrown;
+      },
+    };
+    const timer = manualTimer();
+    const guarded = guardIndexedDbOpen(factory, 5000, timer.schedule);
+
+    // The throw must not escape open(): js-dos assigns handlers to the return value.
+    let shim!: GuardedRequest;
+    expect(() => {
+      shim = guarded.open("js-dos-cache (6.22)", 1);
+    }).not.toThrow();
+
+    const events: unknown[] = [];
+    shim.onerror = (event) => events.push(event);
+    shim.onsuccess = () => events.push("unexpected success");
+
+    // The failure is deferred so it lands after js-dos has wired shim.onerror.
+    expect(events).toHaveLength(0);
+    timer.fire();
+
+    expect(events).toHaveLength(1);
+    expect((events[0] as { cartboxOpenThrew?: boolean }).cartboxOpenThrew).toBe(true);
+    expect((events[0] as { error?: unknown }).error).toBe(thrown);
+  });
+
+  it("reads result as null when open threw, since there is no request to read from", () => {
+    const factory = {
+      open() {
+        throw new Error("denied");
+      },
+    };
+    const guarded = guardIndexedDbOpen(factory, 5000, manualTimer().schedule);
+
+    const shim = guarded.open("js-dos-cache (6.22)", 1);
+    expect(shim.result).toBeNull();
+  });
+
   it("exposes the real request's result, which js-dos reads to get the database", () => {
     const { factory, request } = fakeFactory();
     const guarded = guardIndexedDbOpen(factory, 5000, manualTimer().schedule);
