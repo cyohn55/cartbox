@@ -43,20 +43,6 @@ interface ApiCart {
   cartUrl: string | null;
 }
 
-interface ApiTitle {
-  id: string;
-  name: string;
-  price_cents: number;
-  plays: number;
-  thumbUrl: string | null;
-  bundleName: string | null;
-  runtime?: string | null;
-  /** Game selector inside a shared engine bundle (DOSBox, ScummVM). */
-  target?: string | null;
-  width: number;
-  height: number;
-}
-
 /**
  * Catalog titles as grid entries.
  *
@@ -131,10 +117,16 @@ function arcadeGridCarts(entries: TicArcadeEntry[]): GridCart[] {
 
 export function BrowseScreen({ onPlayCart }: { onPlayCart: (cart: PlayingCart) => void }) {
   const [source, setSource] = useState<CatalogSource>("cartbox");
-  const [cartboxCarts, setCartboxCarts] = useState<GridCart[] | null>(
-    isStaticExport ? [...titleGridCarts(DEMO_TITLES), ...demoGridCarts()] : null,
+  // The ported-game catalog is identical on every deployment — it lives in
+  // DEMO_TITLES, the source the DB seed merely copies — so render it directly in
+  // both the static and server builds. This is what keeps the catalog from
+  // depending on the `titles` table being seeded (the gap that left the Cartbox
+  // tab empty on the server deploy); the server build enriches it with user carts.
+  const [cartboxCarts, setCartboxCarts] = useState<GridCart[]>(
+    isStaticExport
+      ? [...titleGridCarts(DEMO_TITLES), ...demoGridCarts()]
+      : titleGridCarts(DEMO_TITLES),
   );
-  const [cartboxFailed, setCartboxFailed] = useState(false);
 
   const [category, setCategory] = useState<TicArcadeCategory>("Games");
   const [arcadeByCategory, setArcadeByCategory] = useState<
@@ -149,24 +141,18 @@ export function BrowseScreen({ onPlayCart }: { onPlayCart: (cart: PlayingCart) =
       return;
     }
     let cancelled = false;
-    Promise.all([
-      fetch("/api/carts?limit=100"),
-      // A missing titles route must not blank the cart grid, so this failure is
-      // absorbed rather than rejecting the pair.
-      fetch("/api/titles?limit=100").catch(() => null),
-    ])
-      .then(async ([cartsResponse, titlesResponse]) => {
+    // The catalog is already shown from DEMO_TITLES (set above); here we only
+    // fetch the user carts to append. A carts failure therefore leaves the
+    // catalog intact rather than blanking the Cartbox tab.
+    fetch("/api/carts?limit=100")
+      .then(async (cartsResponse) => {
         if (!cartsResponse.ok) {
           throw new Error(`carts request failed: ${cartsResponse.status}`);
         }
         const body = (await cartsResponse.json()) as { carts: ApiCart[] };
-        const titles: ApiTitle[] =
-          titlesResponse && titlesResponse.ok
-            ? ((await titlesResponse.json()) as { titles: ApiTitle[] }).titles
-            : [];
         if (!cancelled) {
           setCartboxCarts([
-            ...titleGridCarts(titles),
+            ...titleGridCarts(DEMO_TITLES),
             ...body.carts.map<GridCart>((cart) => ({
               id: cart.id,
               title: cart.title,
@@ -184,9 +170,8 @@ export function BrowseScreen({ onPlayCart }: { onPlayCart: (cart: PlayingCart) =
         }
       })
       .catch(() => {
-        if (!cancelled) {
-          setCartboxFailed(true);
-        }
+        // The DEMO_TITLES catalog is already displayed; a failed carts fetch just
+        // means no user carts are appended, not an empty archive.
       });
     return () => {
       cancelled = true;
@@ -254,12 +239,9 @@ export function BrowseScreen({ onPlayCart }: { onPlayCart: (cart: PlayingCart) =
 
       {source === "cartbox" && (
         <div style={{ marginTop: 10 }}>
-          {cartboxFailed && <div className="os-empty">The archive could not be reached.</div>}
-          {!cartboxFailed && cartboxCarts === null && <div className="os-loading">OPENING THE ARCHIVE…</div>}
-          {cartboxCarts !== null && cartboxCarts.length === 0 && (
+          {cartboxCarts.length === 0 ? (
             <div className="os-empty">No cartridges published yet.</div>
-          )}
-          {cartboxCarts !== null && cartboxCarts.length > 0 && (
+          ) : (
             <CartGrid carts={cartboxCarts} onPlayCart={onPlayCart} />
           )}
         </div>
