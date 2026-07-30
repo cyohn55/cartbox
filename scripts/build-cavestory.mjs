@@ -229,7 +229,10 @@ function cpuCount() {
 
 async function main() {
   requireTool("git", "Install git.");
-  requireTool("emcmake", "Activate emsdk (source emsdk_env.sh).");
+  // Probe emcc, not emcmake: `emcmake --version` is not a valid invocation (it is a
+  // wrapper that runs `emcmake <cmd>`), so it would false-negative. emcc lives in the
+  // same emsdk bin dir, so its presence guarantees emcmake/emmake are available too.
+  requireTool("emcc", "Activate emsdk (source emsdk_env.sh).");
   requireTool("cmake", "Install cmake.");
   requireTool("g++", "Install a host C++ compiler (builds the extract tool).");
   requireTool("python3", "Install python3 (used to unzip the data).");
