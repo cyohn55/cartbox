@@ -39,6 +39,7 @@ import { QuakePlayer } from "./QuakePlayer";
 import { Cube2Player } from "./Cube2Player";
 import { OpenTyrianPlayer } from "./OpenTyrianPlayer";
 import { OpenTtdPlayer } from "./OpenTtdPlayer";
+import { CaveStoryPlayer } from "./CaveStoryPlayer";
 import { HomeFeed } from "./HomeFeed";
 import { BrowseScreen } from "./BrowseScreen";
 import { LibraryScreen } from "./LibraryScreen";
@@ -157,9 +158,9 @@ export function ConsoleOS() {
       />
     );
   } else if (state.playing) {
-    // Nine player kinds behind one launch/eject path: a ScummVM, SuperTux, DOS,
-    // Quake, Cube 2, OpenTyrian or OpenTTD title in its own iframe, a Game ABI title
-    // on the wasm runtime, or a .tic cartridge.
+    // Ten player kinds behind one launch/eject path: a ScummVM, SuperTux, DOS,
+    // Quake, Cube 2, OpenTyrian, OpenTTD or Cave Story title in its own iframe, a
+    // Game ABI title on the wasm runtime, or a .tic cartridge.
     const game = state.playing.game;
     if (game?.runtime === "scummvm") {
       stage = <ScummVmPlayer cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />;
@@ -175,6 +176,8 @@ export function ConsoleOS() {
       stage = <OpenTyrianPlayer cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />;
     } else if (game?.runtime === "openttd") {
       stage = <OpenTtdPlayer cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />;
+    } else if (game?.runtime === "cavestory") {
+      stage = <CaveStoryPlayer cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />;
     } else if (game) {
       stage = <PortedGameScreen cart={state.playing} onExit={() => dispatch({ type: "EXIT_GAME" })} />;
     } else {

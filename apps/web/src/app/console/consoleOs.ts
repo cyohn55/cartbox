@@ -52,7 +52,8 @@ export interface PlayingGame {
     | "quake"
     | "cube2"
     | "opentyrian"
-    | "openttd";
+    | "openttd"
+    | "cavestory";
   /** Directory under public/games holding game.js + game.wasm (wasm-app). */
   bundleName: string;
   width: number;

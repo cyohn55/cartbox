@@ -451,6 +451,30 @@ export const DEMO_TITLES: readonly DemoTitle[] = [
     height: 480,
   },
   {
+    id: "00000000-0000-4000-9000-000000000016",
+    slug: "cave-story",
+    name: "Cave Story",
+    description:
+      "Pixel's landmark freeware Metroidvania, running in the browser via WebAssembly (the NXEngine reimplementation). Explore a mysterious floating island, gather weapons and uncover its story. The d-pad moves, A jumps, B fires, X opens your inventory, Y cycles weapons.",
+    runtime: "cavestory",
+    assetSource: "bundled",
+    tier: "A",
+    // The engine is NXEngine-evo (GPL-3, a clean-room reimplementation — not a
+    // decompilation — built by scripts/build-cavestory.mjs). The game data is
+    // Studio Pixel's Cave Story, released as freeware and assessed as freely
+    // redistributable (even commercially) by Debian's game-data-packager; the
+    // build fetches it from the libretro asset mirror and completes it with
+    // NXEngine's own extractor. Free engine + freely-redistributable data → Tier A.
+    license: "gpl-3.0",
+    sourceUrl: "https://github.com/nxengine/nxengine-evo",
+    releasedAt: "2026-07-30T00:00:03.000Z",
+    // The NXEngine build lives at public/cavestory and boots straight to Cave
+    // Story's intro, so there is no launch target.
+    bundleName: "cavestory",
+    width: 640,
+    height: 480,
+  },
+  {
     id: "00000000-0000-4000-9000-000000000003",
     slug: "openmw",
     name: "OpenMW",

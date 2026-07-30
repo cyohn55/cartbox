@@ -21,6 +21,7 @@ import { useRouter } from "next/navigation";
 import { Cube2Player } from "@/app/console/Cube2Player";
 import { OpenTyrianPlayer } from "@/app/console/OpenTyrianPlayer";
 import { OpenTtdPlayer } from "@/app/console/OpenTtdPlayer";
+import { CaveStoryPlayer } from "@/app/console/CaveStoryPlayer";
 import { DosPlayer } from "@/app/console/DosPlayer";
 import { QuakePlayer } from "@/app/console/QuakePlayer";
 import { ScummVmPlayer } from "@/app/console/ScummVmPlayer";
@@ -72,6 +73,7 @@ const IFRAME_PLAYERS: Record<
   supertux: SuperTuxPlayer,
   opentyrian: OpenTyrianPlayer,
   openttd: OpenTtdPlayer,
+  cavestory: CaveStoryPlayer,
 };
 
 export function TitlePlayer(props: TitlePlayerProps) {

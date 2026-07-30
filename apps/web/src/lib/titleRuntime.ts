@@ -27,6 +27,7 @@ export const RUNTIME_IDS = [
   "cube2",
   "opentyrian",
   "openttd",
+  "cavestory",
   "libretro",
 ] as const;
 
@@ -82,6 +83,7 @@ const DESCRIPTORS: Record<RuntimeId, RuntimeDescriptor> = {
   cube2: { id: "cube2", label: "Arena FPS", implemented: true },
   opentyrian: { id: "opentyrian", label: "Shoot 'em up", implemented: true },
   openttd: { id: "openttd", label: "Tycoon", implemented: true },
+  cavestory: { id: "cavestory", label: "Metroidvania", implemented: true },
   libretro: { id: "libretro", label: "Console", implemented: false },
 };
 
@@ -136,7 +138,8 @@ export type GamePlayerRuntime =
   | "quake"
   | "cube2"
   | "opentyrian"
-  | "openttd";
+  | "openttd"
+  | "cavestory";
 
 const IFRAME_HOSTED: readonly GamePlayerRuntime[] = [
   "scummvm",
@@ -146,6 +149,7 @@ const IFRAME_HOSTED: readonly GamePlayerRuntime[] = [
   "cube2",
   "opentyrian",
   "openttd",
+  "cavestory",
 ];
 
 export function gamePlayerRuntime(title: {

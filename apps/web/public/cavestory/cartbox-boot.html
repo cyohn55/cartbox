@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en-us">
+<head>
+  <meta charset="utf-8" />
+  <meta content="width=device-width,initial-scale=1,viewport-fit=cover" name="viewport" />
+  <title>Cave Story (Cartbox)</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
+    canvas.emscripten {
+      border: 0; margin: 0; padding: 0; display: block;
+      position: absolute; inset: 0; margin: auto;
+      max-width: 100%; max-height: 100%;
+      /* Nearest-neighbour keeps the pixel art crisp when upscaled. */
+      image-rendering: pixelated;
+      background: #000; outline: none;
+    }
+    #overlay {
+      position: fixed; inset: 0; z-index: 10;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      background: #06040c; color: #d7d7d7; font: 600 13px arial;
+    }
+    #status { margin-top: 14px; }
+    #progress { height: 6px; width: 200px; border: 0; border-radius: 3px; background: #787878; margin-top: 10px; }
+    progress::-moz-progress-bar { border-radius: 3px; background: #fff; }
+    progress::-webkit-progress-value { border-radius: 3px; background: #fff; }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <div id="status">Downloading…</div>
+    <progress hidden id="progress" max="100" value="0"></progress>
+  </div>
+  <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+  <script>
+    // Bridge engine lifecycle to the console host (CaveStoryPlayer) so it can drop
+    // its own loading overlay and surface hard errors without polling pixels.
+    function postToHost(msg) {
+      try { parent.postMessage(Object.assign({ source: "cartbox-cavestory" }, msg), "*"); } catch (e) {}
+    }
+    var statusElement = document.getElementById("status"),
+        progressElement = document.getElementById("progress"),
+        overlayElement = document.getElementById("overlay");
+
+    var Module = {
+      preRun: [], postRun: [],
+      print: function (t) { console.log(t); },
+      printErr: function (t) { console.error(t); },
+      canvas: (function () {
+        var c = document.getElementById("canvas");
+        c.addEventListener("webglcontextlost", function (e) {
+          postToHost({ type: "error", message: "WebGL context lost" });
+          e.preventDefault();
+        }, false);
+        c.addEventListener("click", function () { c.focus(); });
+        return c;
+      })(),
+      // Emscripten's file-packager reports .data download/instantiation progress
+      // through setStatus("... (n/total)"); relay it to the host bar.
+      setStatus: function (e) {
+        if (overlayElement) overlayElement.style.display = e ? "flex" : "none";
+        var match = e.match(/([^(]+)\((\d+(\.\d+)?)\/(\d+)\)/);
+        if (match) {
+          var loaded = parseInt(match[2]), total = parseInt(match[4]);
+          progressElement.hidden = false;
+          progressElement.value = loaded; progressElement.max = total;
+          statusElement.innerHTML = match[1];
+          if (total > 0) postToHost({ type: "progress", loaded: loaded, total: total });
+        } else {
+          progressElement.hidden = true;
+          statusElement.innerHTML = e;
+        }
+      },
+      totalDependencies: 0,
+      monitorRunDependencies: function (left) {
+        this.totalDependencies = Math.max(this.totalDependencies, left);
+        Module.setStatus(left
+          ? "Preparing… (" + (this.totalDependencies - left) + "/" + this.totalDependencies + ")"
+          : "");
+      },
+      onRuntimeInitialized: function () {
+        // Wasm is up and the preloaded /data package is mounted; NXEngine's main()
+        // runs from here (ASYNCIFY-driven). Drop the host overlay.
+        postToHost({ type: "runtime-initialized" });
+      },
+    };
+    window.Module = Module;
+    Module.setStatus("Downloading…");
+
+    // Turn a runtime abort into a host error instead of a black canvas.
+    window.onerror = function (message) { postToHost({ type: "error", message: String(message) }); };
+  </script>
+  <script async src="nxengine.js"></script>
+</body>
+</html>

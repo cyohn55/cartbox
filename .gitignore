@@ -94,6 +94,13 @@ apps/web/public/opentyrian/*
 apps/web/public/openttd/*
 !apps/web/public/openttd/cartbox-boot.html
 
+# Cave Story runtime: the built NXEngine (nxengine.js/wasm ~2.5MB) and its preloaded
+# data package (nxengine.data ~7MB — the freeware Cave Story assets) are large and
+# fully reproducible (scripts/build-cavestory.mjs), so they are rebuilt on deploy
+# rather than committed. The authored boot page is kept.
+apps/web/public/cavestory/*
+!apps/web/public/cavestory/cartbox-boot.html
+
 # Screenshots written by the verify-* scripts as evidence of a passing run.
 # Regenerated on demand, never reviewed as source.
 *-shots/
