@@ -14,7 +14,12 @@
 import { describe, expect, it } from "vitest";
 
 // @ts-expect-error - plain ESM script module, no type declarations
-import { contentType, mapWithConcurrency, shouldUpload } from "../scripts/publish-bundles-r2.mjs";
+import {
+  cacheControlForKey,
+  contentType,
+  mapWithConcurrency,
+  shouldUpload,
+} from "../scripts/publish-bundles-r2.mjs";
 
 describe("shouldUpload", () => {
   const file = { size: 1024 };
@@ -117,5 +122,34 @@ describe("contentType", () => {
 
   it("ignores extension case", () => {
     expect(contentType("/games/WOLF3D.ZIP")).toBe("application/zip");
+  });
+});
+
+describe("cacheControlForKey", () => {
+  it("makes the range-streamed bundle uncacheable", () => {
+    // Vercel's edge ignores the Range request header and caches what the origin
+    // sends, so a cacheable pak0.pak answers every later range with the first
+    // partial it stored. Only the origin can stop that entry existing.
+    expect(cacheControlForKey("quake/id1/pak0.pak")).toBe("no-store");
+    expect(cacheControlForKey("quake/cartbox-boot.html")).toBe("no-store");
+  });
+
+  it("leaves whole-file bundles cacheable", () => {
+    // These runtimes never issue range requests, so they are unaffected by the
+    // bug and should keep the benefit of the edge cache.
+    for (const key of [
+      "cube2/bb.wasm",
+      "supertux/supertux2.data",
+      "scummvm/scummvm.js",
+      "dosbox/wdosbox.wasm.js",
+      "games/doom/game.wasm",
+    ]) {
+      expect(cacheControlForKey(key)).toMatch(/^public, max-age=\d+$/);
+    }
+  });
+
+  it("keys off the bundle root, not a substring of the path", () => {
+    // A file merely named "quake" under another bundle must not inherit no-store.
+    expect(cacheControlForKey("games/quake-clone/game.wasm")).toMatch(/^public/);
   });
 });

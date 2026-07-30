@@ -47,7 +47,14 @@ const nextConfig = {
           };
         },
 
-        // Keep the edge from caching these proxied responses.
+        // Tell the *client* not to cache these proxied responses.
+        //
+        // NOTE: this does not stop Vercel's edge from caching them — the edge
+        // stores the upstream object with the upstream Cache-Control, so a
+        // `headers()` rule here is decoration on the outgoing response only.
+        // Preventing the poisoned entry is the origin's job; see
+        // RANGE_STREAMED_ROOTS in scripts/publish-bundles-r2.mjs. This rule is
+        // still worth keeping so a browser does not hold a partial either.
         //
         // Vercel's CDN keys its cache on the URL and ignores the `Range` request
         // header (no `Vary: Range` on the response). Proxying a range-capable

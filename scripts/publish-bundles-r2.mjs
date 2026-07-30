@@ -73,6 +73,35 @@ export const contentType = (path) =>
 /** Bundle data is stable per build but the path is not versioned, so cache modestly. */
 const CACHE_CONTROL = "public, max-age=3600";
 
+/**
+ * Bundle roots that must not be cached at the edge.
+ *
+ * Vercel's CDN keys its cache on the URL and ignores the `Range` request header,
+ * and it caches what the *origin* sends — so a cacheable range-capable object
+ * poisons its own entry: WebQuake reads pak0.pak's 12-byte header with
+ * `Range: bytes=0-11`, that partial is stored for the whole URL, and the next
+ * range (the pak directory, ~18MB in) is answered with the same 12 bytes and
+ * `content-range: bytes 0-11`. The engine cannot find gfx.wad inside the pak and
+ * dies on `W.LoadWadFile: couldn't load gfx.wad`.
+ *
+ * Setting no-store here rather than in next.config is deliberate: a Next
+ * `headers()` rule decorates the response handed to the client, but the edge
+ * still stores the upstream object with the upstream Cache-Control, so the
+ * poisoning resumes on the very next request. Only the origin can prevent the
+ * entry from existing.
+ *
+ * Scoped to the roots that actually stream by range — no-store costs edge
+ * caching, and the whole-file runtimes (Cube 2, SuperTux, DOSBox, ScummVM, Doom)
+ * are unaffected by the bug and should stay cacheable.
+ */
+const RANGE_STREAMED_ROOTS = new Set(["quake"]);
+
+/** Cache-Control for an object, by the bundle root its key falls under. */
+export function cacheControlForKey(key) {
+  const root = key.split("/")[0];
+  return RANGE_STREAMED_ROOTS.has(root) ? "no-store" : CACHE_CONTROL;
+}
+
 function required(name) {
   const value = process.env[name];
   if (!value) throw new Error(`publish-bundles-r2: missing env ${name}`);
@@ -198,7 +227,7 @@ async function main() {
           Body: createReadStream(f.absolute),
           ContentLength: f.size,
           ContentType: contentType(f.absolute),
-          CacheControl: CACHE_CONTROL,
+          CacheControl: cacheControlForKey(f.key),
         }),
       );
 
