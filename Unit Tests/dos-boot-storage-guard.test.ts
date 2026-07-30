@@ -103,13 +103,20 @@ function manualTimer() {
 
 const guardIndexedDbOpen = loadGuard();
 
-describe("guardIndexedDbOpen — a cache that never answers", () => {
+// The engine binary memo js-dos keeps in IndexedDB. The guard denies this one by
+// name so the engine is always re-downloaded (and validated) over HTTP.
+const ENGINE_CACHE_DB = "js-dos-cache (6.22.60 (c3627d34f97fcc6e98ceef7fbea6e090))";
+// A game-save database: emscripten's IDBFS opens one per mount, keyed by path.
+// These must still pass through the guard so saves keep working.
+const SAVE_DB = "/home/web_user/.dosbox";
+
+describe("guardIndexedDbOpen — a save database that misbehaves", () => {
   it("reports the failure js-dos handles when the open request stays silent", () => {
     const { factory } = fakeFactory();
     const timer = manualTimer();
     const guarded = guardIndexedDbOpen(factory, 5000, timer.schedule);
 
-    const request = guarded.open("js-dos-cache (6.22)", 1);
+    const request = guarded.open(SAVE_DB, 1);
     const errors: unknown[] = [];
     request.onerror = (event) => errors.push(event);
     request.onsuccess = () => errors.push("unexpected success");
@@ -127,7 +134,7 @@ describe("guardIndexedDbOpen — a cache that never answers", () => {
     const timer = manualTimer();
     const guarded = guardIndexedDbOpen(factory, 5000, timer.schedule);
 
-    const shim = guarded.open("js-dos-cache (6.22)", 1);
+    const shim = guarded.open(SAVE_DB, 1);
     const events: string[] = [];
     shim.onsuccess = () => events.push("success");
     shim.onerror = () => events.push("error");
@@ -143,7 +150,7 @@ describe("guardIndexedDbOpen — a cache that never answers", () => {
     const timer = manualTimer();
     const guarded = guardIndexedDbOpen(factory, 5000, timer.schedule);
 
-    const shim = guarded.open("js-dos-cache (6.22)", 1);
+    const shim = guarded.open(SAVE_DB, 1);
     const events: string[] = [];
     shim.onupgradeneeded = () => events.push("upgrade");
     shim.onsuccess = () => events.push("success");
@@ -161,7 +168,7 @@ describe("guardIndexedDbOpen — a cache that never answers", () => {
     const timer = manualTimer();
     const guarded = guardIndexedDbOpen(factory, 5000, timer.schedule);
 
-    const shim = guarded.open("js-dos-cache (6.22)", 1);
+    const shim = guarded.open(SAVE_DB, 1);
     const events: string[] = [];
     shim.onerror = () => events.push("error");
 
@@ -176,7 +183,7 @@ describe("guardIndexedDbOpen — a cache that never answers", () => {
     const timer = manualTimer();
     const guarded = guardIndexedDbOpen(factory, 5000, timer.schedule);
 
-    const shim = guarded.open("js-dos-cache (6.22)", 1);
+    const shim = guarded.open(SAVE_DB, 1);
     const events: string[] = [];
     shim.onerror = () => events.push("error");
 
@@ -189,9 +196,8 @@ describe("guardIndexedDbOpen — a cache that never answers", () => {
   it("turns a synchronously thrown open — a storage-blocked iframe — into the handled failure", () => {
     // A sandboxed or storage-partitioned iframe (this DOS player runs in one)
     // makes IDBFactory.open() throw synchronously, e.g. a SecurityError. js-dos
-    // does not guard the call, so an unswallowed throw aborts engine bring-up
-    // with no fallback — the 45s dead loader the user hit. The guard must absorb
-    // it and still surface the onerror js-dos knows how to handle.
+    // does not guard the call, so an unswallowed throw would abort a save mount
+    // with no fallback. The guard must absorb it and still surface the onerror.
     const thrown = new Error("access to the Indexed Database API is denied in this context");
     const factory = {
       open() {
@@ -204,7 +210,7 @@ describe("guardIndexedDbOpen — a cache that never answers", () => {
     // The throw must not escape open(): js-dos assigns handlers to the return value.
     let shim!: GuardedRequest;
     expect(() => {
-      shim = guarded.open("js-dos-cache (6.22)", 1);
+      shim = guarded.open(SAVE_DB, 1);
     }).not.toThrow();
 
     const events: unknown[] = [];
@@ -228,7 +234,7 @@ describe("guardIndexedDbOpen — a cache that never answers", () => {
     };
     const guarded = guardIndexedDbOpen(factory, 5000, manualTimer().schedule);
 
-    const shim = guarded.open("js-dos-cache (6.22)", 1);
+    const shim = guarded.open(SAVE_DB, 1);
     expect(shim.result).toBeNull();
   });
 
@@ -236,7 +242,7 @@ describe("guardIndexedDbOpen — a cache that never answers", () => {
     const { factory, request } = fakeFactory();
     const guarded = guardIndexedDbOpen(factory, 5000, manualTimer().schedule);
 
-    const shim = guarded.open("js-dos-cache (6.22)", 1);
+    const shim = guarded.open(SAVE_DB, 1);
     expect(shim.result).toBe(request.result);
   });
 
@@ -244,13 +250,67 @@ describe("guardIndexedDbOpen — a cache that never answers", () => {
     const { factory, opened } = fakeFactory();
     const guarded = guardIndexedDbOpen(factory, 5000, manualTimer().schedule);
 
-    guarded.open("js-dos-cache (6.22)", 1);
-    expect(opened).toEqual(["js-dos-cache (6.22)"]);
+    guarded.open(SAVE_DB, 1);
+    expect(opened).toEqual([SAVE_DB]);
   });
 
   it("leaves a host without IndexedDB alone, so js-dos takes its no-op path", () => {
     expect(guardIndexedDbOpen(undefined, 5000)).toBeUndefined();
     expect(guardIndexedDbOpen(null, 5000)).toBeNull();
+  });
+});
+
+describe("guardIndexedDbOpen — the engine binary cache is denied", () => {
+  it("never opens the engine cache database, so a corrupt entry can't be read", () => {
+    // js-dos feeds the cached engine bytes straight to WebAssembly.compile with
+    // no length check; a truncated entry throws "expected 4 bytes, fell off end"
+    // on every launch. Denying the database routes js-dos to its no-op cache and
+    // a fresh, validated download — the real DB must never be touched.
+    const { factory, opened } = fakeFactory();
+    const timer = manualTimer();
+    const guarded = guardIndexedDbOpen(factory, 5000, timer.schedule);
+
+    const shim = guarded.open(ENGINE_CACHE_DB, 1);
+    expect(opened).toEqual([]);
+
+    const events: unknown[] = [];
+    shim.onerror = (event) => events.push(event);
+    shim.onsuccess = () => events.push("unexpected success");
+
+    // Deferred, so js-dos has wired shim.onerror before it fires.
+    expect(events).toHaveLength(0);
+    timer.fire();
+
+    expect(events).toHaveLength(1);
+    expect((events[0] as { cartboxCacheBypassed?: boolean }).cartboxCacheBypassed).toBe(true);
+  });
+
+  it("reads result as null for the denied cache, since no database was opened", () => {
+    const { factory } = fakeFactory();
+    const guarded = guardIndexedDbOpen(factory, 5000, manualTimer().schedule);
+
+    expect(guarded.open(ENGINE_CACHE_DB, 1).result).toBeNull();
+  });
+
+  it("denies the cache without even calling open, so a throwing factory is moot", () => {
+    const factory = {
+      open() {
+        throw new Error("should not be called for the engine cache");
+      },
+    };
+    const timer = manualTimer();
+    const guarded = guardIndexedDbOpen(factory, 5000, timer.schedule);
+
+    let shim!: GuardedRequest;
+    expect(() => {
+      shim = guarded.open(ENGINE_CACHE_DB, 1);
+    }).not.toThrow();
+
+    const events: unknown[] = [];
+    shim.onerror = (event) => events.push(event);
+    timer.fire();
+
+    expect((events[0] as { cartboxCacheBypassed?: boolean }).cartboxCacheBypassed).toBe(true);
   });
 });
 

@@ -46,18 +46,6 @@
           var settled = false;
           var request = null;
           var openThrew = null;
-          // open() is not always safe to call: a sandboxed or storage-partitioned
-          // iframe (this DOS player runs in one) makes it throw *synchronously* —
-          // typically a SecurityError, "access to the Indexed Database API is
-          // denied in this context." js-dos does not guard this call, so the
-          // throw aborts engine bring-up with no fallback and the loader hangs
-          // until the boot watchdog fires ~45s later. Swallow it and take the
-          // same failure path as a timeout, so js-dos drops to its no-op cache.
-          try {
-            request = factory.open(name, version);
-          } catch (error) {
-            openThrew = error;
-          }
 
           // The shim stands in for the real IDBOpenDBRequest: js-dos assigns the
           // three handlers and reads `.result` off whatever open() returned.
@@ -76,6 +64,35 @@
             settled = true;
             if (typeof shim.onerror === "function") shim.onerror(detail);
           };
+
+          // js-dos memoises the DOSBox engine binary in its own IndexedDB, then
+          // feeds the stored bytes straight to WebAssembly.compile() with no
+          // length check. A profile whose entry is truncated or empty makes
+          // compile throw "expected 4 bytes, fell off end @+0" on *every* launch,
+          // and a wedged or storage-blocked open hangs it — two real failures
+          // from one optional store. The browser's HTTP cache already memoises
+          // wdosbox correctly and with integrity, so this copy is pure downside:
+          // deny the cache database so js-dos falls back to its no-op cache and
+          // downloads the engine fresh, and never read or write the poison entry.
+          // Scoped by name so game-save IDBFS databases keep working normally.
+          if (typeof name === "string" && name.indexOf("js-dos-cache") === 0) {
+            schedule(function () {
+              fail({ target: shim, cartboxCacheBypassed: true });
+            }, 0);
+            return shim;
+          }
+
+          // open() is not always safe to call either: a sandboxed or storage-
+          // partitioned iframe (this DOS player runs in one) makes it throw
+          // *synchronously* — typically a SecurityError, "access to the Indexed
+          // Database API is denied in this context." js-dos does not guard the
+          // call, so an unswallowed throw would abort a save mount with no
+          // fallback. Take the same failure path as a timeout.
+          try {
+            request = factory.open(name, version);
+          } catch (error) {
+            openThrew = error;
+          }
 
           if (openThrew) {
             // open() returns before js-dos assigns shim.onerror, so the failure
