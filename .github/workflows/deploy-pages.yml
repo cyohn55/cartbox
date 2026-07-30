@@ -141,6 +141,76 @@ jobs:
       - name: Assemble Cube 2 runtime (BananaBread)
         run: node scripts/fetch-cube2.mjs
 
+      # OpenTyrian (Tyrian 2000) — OpenTyrian2000 compiled to WebAssembly via
+      # Emscripten's SDL2 port (build-opentyrian.mjs), bundling the freeware
+      # Tyrian 2000 data. Engine + data are gitignored and reproducible, so built
+      # here. continue-on-error keeps a build failure from blocking the rest of the
+      # deploy — the card would then list but not play, the same as before.
+      - name: Cache OpenTyrian engine
+        id: opentyrian-cache
+        uses: actions/cache@v4
+        with:
+          path: apps/web/public/opentyrian
+          key: opentyrian-${{ hashFiles('scripts/build-opentyrian.mjs', 'apps/web/public/opentyrian/cartbox-boot.html') }}
+
+      - name: Set up Emscripten for OpenTyrian
+        if: steps.opentyrian-cache.outputs.cache-hit != 'true'
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.3
+          actions-cache-folder: emsdk-cache-opentyrian
+
+      - name: Build OpenTyrian (WebAssembly)
+        if: steps.opentyrian-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: node scripts/build-opentyrian.mjs
+
+      # OpenTTD — built from source with its own documented known-good toolchain
+      # (emsdk 3.1.57) and its OpenGFX base graphics preloaded (build-openttd.mjs).
+      # The two-stage build uses the runner's native g++/cmake/make for the host
+      # tools; no apt packages needed.
+      - name: Cache OpenTTD engine
+        id: openttd-cache
+        uses: actions/cache@v4
+        with:
+          path: apps/web/public/openttd
+          key: openttd-${{ hashFiles('scripts/build-openttd.mjs', 'apps/web/public/openttd/cartbox-boot.html') }}
+
+      - name: Set up Emscripten for OpenTTD
+        if: steps.openttd-cache.outputs.cache-hit != 'true'
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.57
+          actions-cache-folder: emsdk-cache-openttd
+
+      - name: Build OpenTTD (WebAssembly)
+        if: steps.openttd-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: node scripts/build-openttd.mjs
+
+      # Cave Story — NXEngine (GPL clean-room reimplementation) compiled to
+      # WebAssembly, with the freeware data fetched and completed by the engine's
+      # own extractor (build-cavestory.mjs). Built with the emsdk it was authored
+      # against (3.1.57); needs the runner's native g++ for the extract tool.
+      - name: Cache Cave Story engine
+        id: cavestory-cache
+        uses: actions/cache@v4
+        with:
+          path: apps/web/public/cavestory
+          key: cavestory-${{ hashFiles('scripts/build-cavestory.mjs', 'apps/web/public/cavestory/cartbox-boot.html') }}
+
+      - name: Set up Emscripten for Cave Story
+        if: steps.cavestory-cache.outputs.cache-hit != 'true'
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.57
+          actions-cache-folder: emsdk-cache-cavestory
+
+      - name: Build Cave Story (WebAssembly)
+        if: steps.cavestory-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: node scripts/build-cavestory.mjs
+
       # Step 2 of the hosting migration: push the built bundles to Cloudflare R2 so
       # the Vercel deployment can serve them (next.config.mjs rewrites the same-origin
       # bundle paths to GAME_CDN_URL). Skipped when the R2_* secrets are absent, so a
