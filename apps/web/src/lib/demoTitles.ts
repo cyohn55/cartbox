@@ -383,6 +383,51 @@ export const DEMO_TITLES: readonly DemoTitle[] = [
     height: 480,
   },
   {
+    id: "00000000-0000-4000-9000-000000000013",
+    slug: "opentyrian",
+    name: "Tyrian 2000",
+    description:
+      "The classic 1995 vertical shoot-'em-up, running in the browser via WebAssembly (the OpenTyrian2000 engine). Blast through Tyrian's story campaign upgrading your ship between missions. The d-pad flies, A fires your main weapon, B toggles rear fire, X and Y fire your sidekicks, Start pauses.",
+    runtime: "opentyrian",
+    assetSource: "bundled",
+    tier: "B",
+    // The engine is OpenTyrian2000 (GPL-2, corresponding source built by
+    // scripts/build-opentyrian.mjs). The game data is Tyrian 2000, which the
+    // original developer Jason Emery released as freeware — the stricter, data-side
+    // term that governs redistribution of the title as a whole — mirrored at
+    // camanis.net. Tier B, never priceable.
+    license: "proprietary-freeware",
+    sourceUrl: "https://github.com/KScl/opentyrian2000",
+    releasedAt: "2026-07-30T00:00:00.000Z",
+    // The OpenTyrian2000 engine lives at public/opentyrian and boots straight to
+    // its intro/menu, so there is no launch target.
+    bundleName: "opentyrian",
+    width: 640,
+    height: 400,
+  },
+  {
+    id: "00000000-0000-4000-9000-000000000014",
+    slug: "openttd",
+    name: "OpenTTD",
+    description:
+      "The beloved open-source transport tycoon, running in the browser via WebAssembly. Build a rail, road, sea and air empire and turn a profit. Because it's a point-and-click game, the d-pad drives an on-screen cursor: A clicks and drags (lay track, select), B scrolls the map and cancels, X/Y and the scroll wheel zoom, Start closes windows.",
+    runtime: "openttd",
+    assetSource: "bundled",
+    tier: "A",
+    // Both halves ship freely: the OpenTTD engine is GPL-2 (built from the 15.3
+    // release by scripts/build-openttd.mjs) and the graphics are OpenGFX 7.1, the
+    // project's own GPL-2 base set, preloaded into the bundle so no base-graphics
+    // download is needed at runtime. Engine + free assets → Tier A.
+    license: "gpl-2.0",
+    sourceUrl: "https://github.com/OpenTTD/OpenTTD",
+    releasedAt: "2026-07-30T00:00:01.000Z",
+    // The OpenTTD engine lives at public/openttd and boots straight to its title
+    // screen menu, so there is no launch target.
+    bundleName: "openttd",
+    width: 640,
+    height: 480,
+  },
+  {
     id: "00000000-0000-4000-9000-000000000003",
     slug: "openmw",
     name: "OpenMW",

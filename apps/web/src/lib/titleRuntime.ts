@@ -25,6 +25,8 @@ export const RUNTIME_IDS = [
   "dos",
   "quake",
   "cube2",
+  "opentyrian",
+  "openttd",
   "libretro",
 ] as const;
 
@@ -78,6 +80,8 @@ const DESCRIPTORS: Record<RuntimeId, RuntimeDescriptor> = {
   dos: { id: "dos", label: "DOS", implemented: true },
   quake: { id: "quake", label: "Shooter", implemented: true },
   cube2: { id: "cube2", label: "Arena FPS", implemented: true },
+  opentyrian: { id: "opentyrian", label: "Shoot 'em up", implemented: true },
+  openttd: { id: "openttd", label: "Tycoon", implemented: true },
   libretro: { id: "libretro", label: "Console", implemented: false },
 };
 
@@ -124,9 +128,25 @@ export function requiresUserAssets(assetSource: AssetSource): boolean {
  * `scummvmTarget` is honoured as a fallback for rows written before `titles` had
  * a `runtime` column.
  */
-export type GamePlayerRuntime = "wasm-app" | "scummvm" | "supertux" | "dos" | "quake" | "cube2";
+export type GamePlayerRuntime =
+  | "wasm-app"
+  | "scummvm"
+  | "supertux"
+  | "dos"
+  | "quake"
+  | "cube2"
+  | "opentyrian"
+  | "openttd";
 
-const IFRAME_HOSTED: readonly GamePlayerRuntime[] = ["scummvm", "supertux", "dos", "quake", "cube2"];
+const IFRAME_HOSTED: readonly GamePlayerRuntime[] = [
+  "scummvm",
+  "supertux",
+  "dos",
+  "quake",
+  "cube2",
+  "opentyrian",
+  "openttd",
+];
 
 export function gamePlayerRuntime(title: {
   runtime?: string | null;

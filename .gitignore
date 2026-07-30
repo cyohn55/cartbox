@@ -80,6 +80,20 @@ apps/web/public/quake/
 # deploy rather than committed.
 apps/web/public/cube2/
 
+# OpenTyrian runtime: the built engine (opentyrian2000.js/wasm ~1.7MB) and its
+# preloaded Tyrian 2000 freeware data package (opentyrian2000.data ~12MB) are
+# large and fully reproducible (scripts/build-opentyrian.mjs), so they are rebuilt
+# on deploy rather than committed. The authored boot page is kept.
+apps/web/public/opentyrian/*
+!apps/web/public/opentyrian/cartbox-boot.html
+
+# OpenTTD runtime: the built engine (openttd.js/wasm ~10MB) and its preloaded data
+# package (openttd.data ~8MB, includes the OpenGFX 7.1 base set) are large and fully
+# reproducible (scripts/build-openttd.mjs), so they are rebuilt on deploy rather than
+# committed. The authored boot page is kept.
+apps/web/public/openttd/*
+!apps/web/public/openttd/cartbox-boot.html
+
 # Screenshots written by the verify-* scripts as evidence of a passing run.
 # Regenerated on demand, never reviewed as source.
 *-shots/

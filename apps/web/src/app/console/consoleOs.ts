@@ -40,9 +40,19 @@ export interface PlayingGame {
    * ABI (a framebuffer this host ticks); `scummvm`, `supertux`, `dos` and
    * `quake` games run inside their own in-browser engines, which own their
    * canvas and loop (`quake` is WebQuake, a pure-JS WebGL Quake engine;
-   * `cube2` is BananaBread, a WASM Cube 2: Sauerbraten engine).
+   * `cube2` is BananaBread, a WASM Cube 2: Sauerbraten engine; `opentyrian` is
+   * the OpenTyrian2000 SDL2 engine compiled to WebAssembly; `openttd` is the
+   * OpenTTD SDL2 engine, driven by an emulated cursor).
    */
-  runtime?: "wasm-app" | "scummvm" | "supertux" | "dos" | "quake" | "cube2";
+  runtime?:
+    | "wasm-app"
+    | "scummvm"
+    | "supertux"
+    | "dos"
+    | "quake"
+    | "cube2"
+    | "opentyrian"
+    | "openttd";
   /** Directory under public/games holding game.js + game.wasm (wasm-app). */
   bundleName: string;
   width: number;
