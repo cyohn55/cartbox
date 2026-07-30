@@ -40,7 +40,17 @@ const concurrency =
   DEFAULT_CONCURRENCY;
 
 /** Bundle roots served from public/ that mirror next.config's GAME_BUNDLE_ROOTS. */
-const BUNDLE_ROOTS = ["quake", "cube2", "scummvm", "supertux", "dosbox", "games"];
+const BUNDLE_ROOTS = [
+  "quake",
+  "cube2",
+  "scummvm",
+  "supertux",
+  "dosbox",
+  "games",
+  "opentyrian",
+  "openttd",
+  "cavestory",
+];
 
 /** Content types the bundles use; default to octet-stream for opaque data. */
 const CONTENT_TYPES = {

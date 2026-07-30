@@ -20,7 +20,17 @@ const DEFAULT_GAME_CDN_URL = "https://pub-b6ce848723704dc5a863b41aa15c804c.r2.de
 const gameCdnUrl = (process.env.GAME_CDN_URL ?? DEFAULT_GAME_CDN_URL).replace(/\/$/, "");
 
 /** The bundle roots served from public/ today, reroutable to the CDN. */
-const GAME_BUNDLE_ROOTS = ["quake", "cube2", "scummvm", "supertux", "dosbox", "games"];
+const GAME_BUNDLE_ROOTS = [
+  "quake",
+  "cube2",
+  "scummvm",
+  "supertux",
+  "dosbox",
+  "games",
+  "opentyrian",
+  "openttd",
+  "cavestory",
+];
 
 /**
  * Roots whose engine streams with Range requests, and so must not be cached.
