@@ -68,11 +68,12 @@ const migrationSql = readFileSync(MIGRATION_PATH, "utf8");
 /**
  * The migration that owns the current `titles.runtime` whitelist. Each addition
  * restates the whole constraint, so this points at the latest one — 0011 fixed
- * it at the runtimes of the time, 0013 caught up the three iframe runtimes, and
- * 0015 added the portrait core.
+ * it at the runtimes of the time, 0013 caught up the three iframe runtimes, 0015
+ * added the portrait core, and 0016 added the OpenTyrian/OpenTTD/Cave Story
+ * engines.
  */
 const runtimeMigrationSql = readFileSync(
-  fileURLToPath(new URL("../supabase/migrations/0015_portrait_runtime.sql", import.meta.url)),
+  fileURLToPath(new URL("../supabase/migrations/0016_web_engine_runtimes.sql", import.meta.url)),
   "utf8",
 );
 
@@ -281,7 +282,8 @@ describe("runtime registry", () => {
     // wasm-app gained a player in Phase 2, scummvm followed with the ScummVM
     // engine build and its iframe player, supertux with the SuperTux one, dos
     // with the js-dos/DOSBox iframe player, then quake (WebQuake) and cube2
-    // (BananaBread). cartbox-portrait runs the 360x640 core.
+    // (BananaBread). cartbox-portrait runs the 360x640 core. OpenTyrian, OpenTTD
+    // and Cave Story (NXEngine) each landed with their own iframe player.
     const implemented = implementedRuntimes().map((runtime) => runtime.id);
     expect(implemented).toEqual([
       "cartbox-classic",
@@ -293,6 +295,9 @@ describe("runtime registry", () => {
       "dos",
       "quake",
       "cube2",
+      "opentyrian",
+      "openttd",
+      "cavestory",
     ]);
   });
 
