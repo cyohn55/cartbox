@@ -105,10 +105,36 @@ describe("game bundle CDN rewrites", () => {
     expect(await rewritesFor({ GAME_CDN_URL: "" })).toEqual([]);
   });
 
+  it("marks every bundle path no-store so ranged responses are not cached", async () => {
+    // The Quake regression: Vercel's edge caches on URL alone and ignores the
+    // Range request header, so a cached `bytes=0-11` partial was returned for
+    // every later range of pak0.pak.
+    const config = await loadConfig({});
+    const headers = await config.headers();
+
+    expect(headers).toHaveLength(BUNDLE_ROOTS.length);
+
+    for (const root of BUNDLE_ROOTS) {
+      const rule = headers.find((h: { source: string }) => h.source === `/${root}/:path*`);
+      expect(rule, `no header rule for /${root}`).toBeDefined();
+      const cacheControl = rule.headers.find(
+        (h: { key: string }) => h.key.toLowerCase() === "cache-control",
+      );
+      expect(cacheControl.value).toBe("no-store");
+    }
+  });
+
+  it("declares no header overrides when bundles are served from public/", async () => {
+    // Nothing is proxied then, so nothing needs its caching suppressed.
+    const config = await loadConfig({ GAME_CDN_URL: "" });
+    expect(config.headers).toBeUndefined();
+  });
+
   it("declares no rewrites in a static export, which cannot perform them", async () => {
     const config = await loadConfig({ NEXT_PUBLIC_STATIC_EXPORT: "1" });
 
     expect(config.output).toBe("export");
     expect(config.rewrites).toBeUndefined();
+    expect(config.headers).toBeUndefined();
   });
 });

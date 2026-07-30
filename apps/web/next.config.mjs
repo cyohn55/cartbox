@@ -46,6 +46,31 @@ const nextConfig = {
             })),
           };
         },
+
+        // Keep the edge from caching these proxied responses.
+        //
+        // Vercel's CDN keys its cache on the URL and ignores the `Range` request
+        // header (no `Vary: Range` on the response). Proxying a range-capable
+        // origin through it therefore poisons the entry: WebQuake asks for
+        // `bytes=0-11` of pak0.pak to read the header, that 12-byte partial gets
+        // cached for the whole URL, and its next range — the pak directory at
+        // byte 18254423 — is answered with the same 12 bytes and
+        // `content-range: bytes 0-11`. The engine cannot find gfx.wad inside the
+        // pak, falls back to a loose file that does not exist, and dies on
+        // `W.LoadWadFile: couldn't load gfx.wad`.
+        //
+        // Runtimes that fetch whole files (Cube 2, SuperTux, DOSBox, ScummVM,
+        // Doom) never saw this, which is why Quake alone was broken.
+        //
+        // The cost is edge caching for the bundles, not bandwidth: Vercel meters
+        // what it sends the user either way, and R2 -> Vercel egress is free. A
+        // correct byte range is worth more than a warm cache.
+        async headers() {
+          return GAME_BUNDLE_ROOTS.map((root) => ({
+            source: `/${root}/:path*`,
+            headers: [{ key: "Cache-Control", value: "no-store" }],
+          }));
+        },
       }
     : {}),
   ...(isStaticExport
