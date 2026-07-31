@@ -14,7 +14,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const modelPath = path.resolve(here, "../packages/player/src/lighting/lightingModel.ts");
-const { NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, normalVector, nearestDirection, shade } =
+const { NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, normalVector, nearestDirection, shade, sampleLight } =
   await import(pathToFileURL(modelPath).href);
 
 const cases = [];
@@ -78,6 +78,41 @@ test("brightness rises monotonically as the light aligns with the normal", () =>
   });
   for (let i = 1; i < lums.length; i += 1) assert.ok(lums[i] >= lums[i - 1]);
   assert.equal(lums.at(-1), albedo[0]);
+});
+
+// --- sampleLight: the per-light geometry the three kinds share with the shader ---
+
+test("a point light falls off with distance and vanishes past its radius", () => {
+  const light = { kind: "point", x: 0, y: 0, z: 0, radius: 100, color: [1, 1, 1] };
+  const near = sampleLight(light, 10, 0, 0).attenuation;
+  const far = sampleLight(light, 60, 0, 0).attenuation;
+  assert.ok(near > far, "closer pixels are brighter");
+  assert.equal(sampleLight(light, 150, 0, 0).attenuation, 0, "beyond the radius is dark");
+});
+
+test("an omitted kind is treated as a point light", () => {
+  const explicit = sampleLight({ kind: "point", x: 0, y: 0, z: 0, radius: 80, color: [1, 1, 1] }, 20, 10, 0);
+  const implicit = sampleLight({ x: 0, y: 0, z: 0, radius: 80, color: [1, 1, 1] }, 20, 10, 0);
+  assert.equal(implicit.attenuation, explicit.attenuation);
+  assert.deepEqual(implicit.toLight, explicit.toLight);
+});
+
+test("a directional light is uniform everywhere and points toward its direction", () => {
+  const light = { kind: "directional", x: 0, y: 0, z: 0, radius: 0, color: [1, 1, 1], direction: [0, 0, 1] };
+  const a = sampleLight(light, 5, 5, 0);
+  const b = sampleLight(light, 300, 200, 4);
+  assert.equal(a.attenuation, 1);
+  assert.equal(b.attenuation, 1, "distance and position are irrelevant");
+  assert.deepEqual(a.toLight, [0, 0, 1]);
+});
+
+test("a spot light lights inside its cone and cuts off outside it", () => {
+  // A downward beam (+y) from above the surface; radius large so falloff ~ constant nearby.
+  const light = { kind: "spot", x: 100, y: 0, z: 0, radius: 400, color: [1, 1, 1], direction: [0, 1, 0], coneCos: 0.9 };
+  const inside = sampleLight(light, 100, 40, 0).attenuation;   // straight down the axis
+  const outside = sampleLight(light, 40, 5, 0).attenuation;    // far off-axis
+  assert.ok(inside > 0, "on-axis pixels are lit");
+  assert.equal(outside, 0, "pixels outside the cone are dark");
 });
 
 let passed = 0;

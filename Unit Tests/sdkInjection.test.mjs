@@ -36,6 +36,8 @@ test("injecting the SDK makes cartbox.light available in a Lua cart", () => {
   const code = readCartCode(injectSdk(cart));
   assert.ok(code.includes("cartbox"), "cartbox table should be present");
   assert.ok(code.includes("light ="), "cartbox.light should be defined");
+  assert.ok(code.includes("sun ="), "cartbox.sun (directional light) should be defined");
+  assert.ok(code.includes("spot ="), "cartbox.spot (cone light) should be defined");
   assert.ok(code.includes("clearlights"), "cartbox.clearlights should be defined");
   assert.ok(code.includes("function TIC() end"), "the original cart code should remain");
 });

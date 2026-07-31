@@ -21,7 +21,7 @@
  * This module is pure — no engine, no DOM — so the protocol is unit-testable.
  */
 
-import type { Light } from "./lighting/types.js";
+import type { Light, LightKind } from "./lighting/types.js";
 
 export const MAILBOX_TYPE_ACHIEVEMENT = 1;
 export const MAILBOX_TYPE_SCORE = 2;
@@ -39,6 +39,37 @@ export const LIGHTS_CAPACITY = 6;
 export const LIGHT_STRIDE = 6;
 /** Fixed-point scale the SDK multiplies a light's intensity by before storing. */
 export const LIGHT_INTENSITY_SCALE = 256;
+
+/**
+ * Directional and spot lights ride in the bits that a point light leaves zero,
+ * so the record stays 6 words wide and every existing cart keeps working — an
+ * old light simply decodes with kind 0 and no direction. Two words carry the
+ * extras:
+ *
+ *   word[4] (colour):    bits 0..23  = 0xRRGGBB (as before)
+ *                        bits 24..25 = light kind (0 point, 1 directional, 2 spot)
+ *                        bits 26..31 = spot inner-cone cosine × {@link LIGHT_CONE_SCALE}
+ *   word[5] (intensity): bits 0..15  = intensity × {@link LIGHT_INTENSITY_SCALE}
+ *                        bits 16..23 = direction x as a signed byte (× {@link LIGHT_DIR_SCALE})
+ *                        bits 24..31 = direction y as a signed byte
+ *
+ * The direction's z is derived as sqrt(1 − x² − y²) — a light on the viewer's
+ * side of the scene — so two bytes carry a full unit vector.
+ */
+export const LIGHT_KIND_POINT = 0;
+export const LIGHT_KIND_DIRECTIONAL = 1;
+export const LIGHT_KIND_SPOT = 2;
+/** Fixed-point scale for a direction component packed as a signed byte. */
+export const LIGHT_DIR_SCALE = 127;
+/** Fixed-point scale for a spot's inner-cone cosine packed in 6 bits. */
+export const LIGHT_CONE_SCALE = 63;
+
+const KIND_BY_CODE: readonly LightKind[] = ["point", "directional", "spot"];
+
+/** Reads a byte as a two's-complement signed value (−128..127). */
+function signedByte(byte: number): number {
+  return byte < 128 ? byte : byte - 256;
+}
 
 export type MailboxEventKind = "achievement" | "score" | "progress" | "unknown";
 
@@ -122,8 +153,9 @@ export function decodeLights(words: Uint32Array): Light[] {
   for (let i = 0; i < count; i++) {
     const base = LIGHTS_BASE + 1 + i * LIGHT_STRIDE;
     const packed = words[base + 4] ?? 0xffffff;
-    const intensity = (words[base + 5] ?? LIGHT_INTENSITY_SCALE) / LIGHT_INTENSITY_SCALE;
-    lights.push({
+    const intensityWord = words[base + 5] ?? LIGHT_INTENSITY_SCALE;
+    const intensity = (intensityWord & 0xffff) / LIGHT_INTENSITY_SCALE;
+    const light: Light = {
       x: words[base] ?? 0,
       y: words[base + 1] ?? 0,
       z: words[base + 2] ?? 0,
@@ -133,7 +165,22 @@ export function decodeLights(words: Uint32Array): Light[] {
         (((packed >>> 8) & 0xff) / 255) * intensity,
         ((packed & 0xff) / 255) * intensity,
       ],
-    });
+    };
+
+    // A point light leaves all the extra bits zero, so decode them only when a
+    // producer set the kind — keeping the common case byte-for-byte unchanged.
+    const kindCode = (packed >>> 24) & 0x3;
+    if (kindCode !== LIGHT_KIND_POINT) {
+      light.kind = KIND_BY_CODE[kindCode] ?? "point";
+      const dirX = signedByte((intensityWord >>> 16) & 0xff) / LIGHT_DIR_SCALE;
+      const dirY = signedByte((intensityWord >>> 24) & 0xff) / LIGHT_DIR_SCALE;
+      const dirZ = Math.sqrt(Math.max(0, 1 - dirX * dirX - dirY * dirY));
+      light.direction = [dirX, dirY, dirZ];
+      if (kindCode === LIGHT_KIND_SPOT) {
+        light.coneCos = ((packed >>> 26) & 0x3f) / LIGHT_CONE_SCALE;
+      }
+    }
+    lights.push(light);
   }
   return lights;
 }

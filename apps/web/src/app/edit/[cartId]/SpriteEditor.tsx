@@ -39,10 +39,12 @@ import {
   type PendingPropEdit,
 } from "@/lib/backdropPropsStore";
 import { readBlockAlbedo, readBlockMaterial } from "./blockBuffers";
+import { blockTileIndex } from "./spriteBlock";
 import { PixelCanvas } from "./PixelCanvas";
 import { TilePicker } from "./TilePicker";
 import { PalettePicker } from "./PalettePicker";
 import { LitPreview } from "./LitPreview";
+import { litSpriteCode } from "./litSpriteCode";
 import { VoxelPreview } from "./VoxelPreview";
 import { RigPanel } from "./RigPanel";
 import { MaterialSwatchPanel } from "./MaterialSwatchPanel";
@@ -212,6 +214,7 @@ export function SpriteEditor({
   const [usedColorsOnly, setUsedColorsOnly] = useState(false); // hide palette colours this block never uses
   const [showCoverage, setShowCoverage] = useState(false); // tick pixels carrying other-layer data
   const [preferCpu, setPreferCpu] = useState(false);
+  const [codeCopied, setCodeCopied] = useState(false);
   const [paletteNote, setPaletteNote] = useState("");
   const [asepriteNote, setAsepriteNote] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
@@ -288,6 +291,39 @@ export function SpriteEditor({
     window.alert(
       `Published to your backdrop working set. Open /backdrop to arrange it — it previews live on the onboarding screen.`,
     );
+  };
+
+  /** Whether the open block has any painted emissive pixels (worth a code note). */
+  const blockHasEmissive = (): boolean => {
+    const size = sheet.tileSize;
+    for (let tileRow = 0; tileRow < spriteSize; tileRow += 1) {
+      for (let tileColumn = 0; tileColumn < spriteSize; tileColumn += 1) {
+        const subTile = blockTileIndex(tile, tileRow, tileColumn, sheet.sheetCols);
+        for (let y = 0; y < size; y += 1) {
+          for (let x = 0; x < size; x += 1) {
+            if (emissive.getValue(page, subTile, x, y) > 0) return true;
+          }
+        }
+      }
+    }
+    return false;
+  };
+
+  /**
+   * Copy a runnable, lit cart scaffold for the open sprite block — the gap-#7
+   * bridge from an authored normal-mapped sprite to a code-driven scene. Paste it
+   * into the Code tab and the engine relights the sprite's authored normals.
+   */
+  const copyLitSpriteCode = async () => {
+    const code = litSpriteCode({ page, tile, tilesPerSide: spriteSize, emissive: blockHasEmissive() });
+    try {
+      await navigator.clipboard.writeText(code);
+    } catch {
+      // Clipboard blocked (permissions / insecure context): show it to copy by hand.
+      window.prompt("Copy this lit-sprite cart code:", code);
+    }
+    setCodeCopied(true);
+    window.setTimeout(() => setCodeCopied(false), 1600);
   };
 
   // The pixel canvas paints albedo (SpriteSheet), normals, or a material ramp
@@ -826,14 +862,24 @@ export function SpriteEditor({
         <InspectorPanel
           title="Lit preview"
           action={
-            <button
-              type="button"
-              className={styles.rendererToggle}
-              onClick={() => setPreferCpu((value) => !value)}
-              title="Toggle GPU/CPU to verify they match"
-            >
-              {preferCpu ? "Force CPU" : "Auto (GPU)"}
-            </button>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button
+                type="button"
+                className={styles.rendererToggle}
+                onClick={() => void copyLitSpriteCode()}
+                title="Copy runnable cart code that draws this sprite lit — paste into the Code tab"
+              >
+                {codeCopied ? "Copied ✓" : "Copy cart code"}
+              </button>
+              <button
+                type="button"
+                className={styles.rendererToggle}
+                onClick={() => setPreferCpu((value) => !value)}
+                title="Toggle GPU/CPU to verify they match"
+              >
+                {preferCpu ? "Force CPU" : "Auto (GPU)"}
+              </button>
+            </div>
           }
         >
           <LitPreview

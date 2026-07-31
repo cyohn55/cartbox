@@ -18,17 +18,23 @@ export { createFlatMaterial } from "./LightingRenderer.js";
 export type { LightingBackend, LightingRenderer } from "./LightingRenderer.js";
 export { LitCanvasSurface } from "./LitCanvasSurface.js";
 export {
+  DEFAULT_LIGHT_DIRECTION,
+  DEFAULT_SPOT_CONE_COS,
+  LIGHT_KIND_CODE,
   NORMAL_DIRECTION_COUNT,
   NORMAL_VECTORS,
+  SPOT_CONE_SOFTNESS,
   nearestDirection,
   normalVector,
+  sampleLight,
   shade,
 } from "./lightingModel.js";
-export type { Rgb, Vec3 } from "./lightingModel.js";
+export type { LightSample, Rgb, Vec3 } from "./lightingModel.js";
 export type {
   Light,
   LightingFrameContext,
   LightingOptions,
   LightingScene,
+  LightKind,
   MaterialBuffer,
 } from "./types.js";

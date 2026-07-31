@@ -3,18 +3,47 @@
  * and tests can build lighting scenes without importing the renderer.
  */
 
-/** A coloured point light positioned over the console framebuffer. */
+/**
+ * How a light casts. Defaults to "point" everywhere it is omitted, so a bare
+ * `{x, y, z, color, radius}` keeps meaning exactly what it always has.
+ *
+ * - `point`       an omnidirectional pool at (x, y, z), fading to nothing at `radius`.
+ * - `directional` a distant key (sun / moon): parallel rays with no falloff, so
+ *                 x/y/z and radius are ignored and only `direction` and `color`
+ *                 matter. This is the sun/moon shaft central to the cinematic look.
+ * - `spot`        a cone from (x, y, z) opening along `direction`, gated by
+ *                 `coneCos` and attenuated by `radius` like a point light.
+ */
+export type LightKind = "point" | "directional" | "spot";
+
+/** A coloured light positioned over the console framebuffer. */
 export interface Light {
-  /** Column in native framebuffer pixels (0 = left). */
+  /** Column in native framebuffer pixels (0 = left). Ignored for directional. */
   x: number;
-  /** Row in native framebuffer pixels (0 = top). */
+  /** Row in native framebuffer pixels (0 = top). Ignored for directional. */
   y: number;
   /** Height above the surface, in pixel units; larger = a broader, softer pool. */
   z: number;
   /** Light colour; each channel is a multiplier (may exceed 1 for a hot light). */
   color: readonly [number, number, number];
-  /** Reach in pixels; brightness falls to zero at this distance. */
+  /** Reach in pixels; brightness falls to zero at this distance. Ignored for directional. */
   radius: number;
+  /** Cast type. Omit for a point light (the historical default). */
+  kind?: LightKind;
+  /**
+   * Unit direction, meaning per kind:
+   * - directional: the direction that points *toward* the light (where the sun is).
+   * - spot: the cone axis — the direction the beam travels.
+   * Its z component is taken as non-negative (a light on the viewer's side of the
+   * scene); the runtime derives it when a producer only supplies x and y.
+   * Ignored for point lights.
+   */
+  direction?: readonly [number, number, number];
+  /**
+   * Spot cone: cosine of the inner (full-bright) half-angle, 0..1. A fixed
+   * softness feathers the edge to zero just outside it. Ignored unless spot.
+   */
+  coneCos?: number;
 }
 
 /** Context passed to a per-frame light provider. */

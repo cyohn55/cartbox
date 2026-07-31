@@ -18,19 +18,43 @@ const {
   decodeLights, decodeMailbox,
   MAILBOX_WORDS, EVENT_CAPACITY, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE,
   MAILBOX_TYPE_SCORE,
+  LIGHT_KIND_POINT, LIGHT_KIND_DIRECTIONAL, LIGHT_KIND_SPOT,
+  LIGHT_DIR_SCALE, LIGHT_CONE_SCALE, LIGHT_INTENSITY_SCALE,
 } = await import(pathToFileURL(mailboxPath).href);
 
 // --- mirror of the SDK's Lua encoders (sdk/cartbox.lua) ---
 const EVENT_BASE = 0;
-function writeLight(words, index, light) {
+// Pack a direction component (-1..1) as the SDK's unsigned byte.
+function dirByte(v) {
+  let b = Math.floor(v * LIGHT_DIR_SCALE + 0.5);
+  if (b < -127) b = -127; else if (b > 127) b = 127;
+  return b < 0 ? b + 256 : b;
+}
+// The shared writer, mirroring _light() in the Lua SDK.
+function writeAnyLight(words, index, kind, x, y, z, radius, r, g, b, intensity, dx, dy, cone) {
   const base = LIGHTS_BASE + 1 + index * LIGHT_STRIDE;
-  words[base] = Math.trunc(light.x);
-  words[base + 1] = Math.trunc(light.y);
-  words[base + 2] = Math.trunc(light.z ?? 12);
-  words[base + 3] = Math.trunc(light.radius);
-  words[base + 4] = (((light.r ?? 255) & 0xff) << 16) | (((light.g ?? 255) & 0xff) << 8) | ((light.b ?? 255) & 0xff);
-  words[base + 5] = Math.trunc((light.intensity ?? 1) * 256);
+  words[base] = Math.trunc(x);
+  words[base + 1] = Math.trunc(y);
+  words[base + 2] = Math.trunc(z);
+  words[base + 3] = Math.trunc(radius);
+  const rgb = (((r ?? 255) & 0xff) << 16) | (((g ?? 255) & 0xff) << 8) | ((b ?? 255) & 0xff);
+  words[base + 4] = (rgb | (kind << 24) | (cone << 26)) >>> 0;
+  const inten = Math.min(0xffff, Math.max(0, Math.floor((intensity ?? 1) * LIGHT_INTENSITY_SCALE)));
+  words[base + 5] = (inten | (dx << 16) | (dy << 24)) >>> 0;
   words[LIGHTS_BASE] = index + 1; // publish the count
+}
+function writeLight(words, index, light) {
+  writeAnyLight(words, index, LIGHT_KIND_POINT, light.x, light.y, light.z ?? 12, light.radius,
+    light.r, light.g, light.b, light.intensity, 0, 0, 0);
+}
+function writeSun(words, index, light) {
+  writeAnyLight(words, index, LIGHT_KIND_DIRECTIONAL, 0, 0, 0, 0, light.r, light.g, light.b,
+    light.intensity, dirByte(light.dx), dirByte(light.dy), 0);
+}
+function writeSpot(words, index, light) {
+  const cone = Math.round(Math.cos((light.halfAngleDeg * Math.PI) / 180) * LIGHT_CONE_SCALE);
+  writeAnyLight(words, index, LIGHT_KIND_SPOT, light.x, light.y, light.z ?? 12, light.radius,
+    light.r, light.g, light.b, light.intensity, dirByte(light.dx), dirByte(light.dy), cone);
 }
 function emitEvent(words, kind, id, value) {
   const seq = words[EVENT_BASE];
@@ -43,7 +67,7 @@ function emitEvent(words, kind, id, value) {
 
 const cases = [];
 const test = (name, fn) => cases.push([name, fn]);
-const near = (a, b) => Math.abs(a - b) < 1e-6;
+const near = (a, b, tol = 1e-6) => Math.abs(a - b) < tol;
 
 test("the lights block fits inside the reserved window", () => {
   const lastWord = LIGHTS_BASE + 1 + (LIGHTS_CAPACITY - 1) * LIGHT_STRIDE + (LIGHT_STRIDE - 1);
@@ -116,6 +140,51 @@ test("clearing lights (count 0) hides stale records", () => {
   writeLight(words, 0, { x: 9, y: 9, radius: 9 });
   words[LIGHTS_BASE] = 0; // cartbox.clearlights()
   assert.deepEqual(decodeLights(words), []);
+});
+
+test("a point light decodes with no kind or direction (back-compat)", () => {
+  const words = new Uint32Array(MAILBOX_WORDS);
+  writeLight(words, 0, { x: 5, y: 6, radius: 20 });
+  const [light] = decodeLights(words);
+  assert.equal(light.kind, undefined);
+  assert.equal(light.direction, undefined);
+  assert.equal(light.coneCos, undefined);
+});
+
+test("a directional light round-trips kind + direction", () => {
+  const words = new Uint32Array(MAILBOX_WORDS);
+  writeSun(words, 0, { dx: -0.4, dy: -0.6, r: 120, g: 140, b: 210, intensity: 0.9 });
+  const [light] = decodeLights(words);
+  assert.equal(light.kind, "directional");
+  assert.ok(near(light.direction[0], -0.4, 1 / LIGHT_DIR_SCALE));
+  assert.ok(near(light.direction[1], -0.6, 1 / LIGHT_DIR_SCALE));
+  // z is derived as the positive root of a unit vector.
+  const [dx, dy] = light.direction;
+  assert.ok(near(light.direction[2], Math.sqrt(Math.max(0, 1 - dx * dx - dy * dy))));
+  // Intensity is stored as intensity×256 (0.9 → 230/256), so allow a quantisation margin.
+  assert.ok(near(light.color[0], (120 / 255) * (230 / 256), 1e-3));
+});
+
+test("a spot light round-trips kind, axis and cone", () => {
+  const words = new Uint32Array(MAILBOX_WORDS);
+  writeSpot(words, 0, { x: 200, y: 20, z: 40, dx: 0.2, dy: 1, radius: 140, halfAngleDeg: 22, r: 255, g: 210, b: 150 });
+  const [light] = decodeLights(words);
+  assert.equal(light.kind, "spot");
+  assert.equal(light.x, 200);
+  assert.equal(light.radius, 140);
+  assert.ok(near(light.coneCos, Math.cos((22 * Math.PI) / 180), 1 / LIGHT_CONE_SCALE));
+});
+
+test("kind and direction do not disturb colour or the coexisting event ring", () => {
+  const words = new Uint32Array(MAILBOX_WORDS);
+  emitEvent(words, MAILBOX_TYPE_SCORE, 0, 77);
+  writeSun(words, 0, { dx: 0.5, dy: -0.5, r: 255, g: 255, b: 255, intensity: 1 });
+  const { events } = decodeMailbox(words, 0);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].value, 77);
+  const [light] = decodeLights(words);
+  assert.deepEqual(light.color, [1, 1, 1]);
+  assert.equal(light.kind, "directional");
 });
 
 let passed = 0;

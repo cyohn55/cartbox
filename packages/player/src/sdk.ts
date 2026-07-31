@@ -31,25 +31,51 @@ local function _hash(s)
   end
   return h
 end
+local function _norm(x, y, z)
+  local m = math.sqrt(x * x + y * y + z * z)
+  if m < 1e-6 then return 0, 0, 1 end
+  return x / m, y / m, z / m
+end
+local function _byte(v)
+  local b = math.floor((v or 0) * 127 + 0.5)
+  if b < -127 then b = -127 elseif b > 127 then b = 127 end
+  if b < 0 then b = b + 256 end
+  return b
+end
+local function _light(kind, x, y, z, radius, r, g, b, intensity, dx, dy, cone)
+  if _ln >= _LCAP then return end
+  local base = _LB + 1 + _ln * 6
+  pmem(base, x // 1)
+  pmem(base + 1, y // 1)
+  pmem(base + 2, z // 1)
+  pmem(base + 3, radius // 1)
+  local rgb = (math.floor(r or 255) & 0xff) << 16
+  rgb = rgb | ((math.floor(g or 255) & 0xff) << 8)
+  rgb = rgb | (math.floor(b or 255) & 0xff)
+  pmem(base + 4, rgb | (kind << 24) | (cone << 26))
+  local inten = math.floor((intensity or 1) * 256)
+  if inten < 0 then inten = 0 elseif inten > 0xffff then inten = 0xffff end
+  pmem(base + 5, inten | (dx << 16) | (dy << 24))
+  _ln = _ln + 1
+  pmem(_LB, _ln)
+end
 cartbox = {
   unlock = function(id) _emit(1, _hash(id), 0) end,
   score = function(v) _emit(2, 0, v // 1) end,
   progress = function(id, v) _emit(3, _hash(id), v // 1) end,
   clearlights = function() _ln = 0 pmem(_LB, 0) end,
   light = function(x, y, radius, r, g, b, z, intensity)
-    if _ln >= _LCAP then return end
-    local base = _LB + 1 + _ln * 6
-    pmem(base, x // 1)
-    pmem(base + 1, y // 1)
-    pmem(base + 2, (z or 12) // 1)
-    pmem(base + 3, radius // 1)
-    local rr = (r or 255) & 0xff
-    local gg = (g or 255) & 0xff
-    local bb = (b or 255) & 0xff
-    pmem(base + 4, (rr << 16) | (gg << 8) | bb)
-    pmem(base + 5, ((intensity or 1) * 256) // 1)
-    _ln = _ln + 1
-    pmem(_LB, _ln)
+    _light(0, x, y, z or 12, radius, r, g, b, intensity, 0, 0, 0)
+  end,
+  sun = function(dx, dy, dz, r, g, b, intensity)
+    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)
+    _light(1, 0, 0, 0, 0, r, g, b, intensity, _byte(nx), _byte(ny), 0)
+  end,
+  spot = function(x, y, z, dx, dy, dz, radius, angle, r, g, b, intensity)
+    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)
+    local cone = math.floor(math.cos(math.rad(angle or 30)) * 63 + 0.5)
+    if cone < 0 then cone = 0 elseif cone > 63 then cone = 63 end
+    _light(2, x, y, z or 12, radius, r, g, b, intensity, _byte(nx), _byte(ny), cone)
   end,
 }`;
 

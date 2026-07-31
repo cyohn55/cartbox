@@ -18,7 +18,12 @@
  * The diffuse term matches {@link shade} in lightingModel.ts by construction.
  */
 
-import { NORMAL_VECTORS } from "./lightingModel.js";
+import {
+  DEFAULT_LIGHT_DIRECTION as DEFAULT_DIRECTION,
+  DEFAULT_SPOT_CONE_COS as DEFAULT_CONE_COS,
+  LIGHT_KIND_CODE as KIND_CODE,
+  NORMAL_VECTORS,
+} from "./lightingModel.js";
 import { createFlatMaterial, type LightingBackend, type LightingRenderer } from "./LightingRenderer.js";
 import type { LightingScene, MaterialBuffer } from "./types.js";
 
@@ -48,6 +53,9 @@ uniform vec3 uNormals[16];
 uniform vec3 uLightPos[${MAX_LIGHTS}];
 uniform vec3 uLightColor[${MAX_LIGHTS}];
 uniform float uLightRadius[${MAX_LIGHTS}];
+uniform float uLightKind[${MAX_LIGHTS}];   // 0 point, 1 directional, 2 spot
+uniform vec3 uLightDir[${MAX_LIGHTS}];     // directional: toward light; spot: beam axis
+uniform float uLightCone[${MAX_LIGHTS}];   // spot inner-cone cosine
 uniform int uLightCount;
 uniform float uAmbient;
 uniform vec3 uAmbientColor;
@@ -79,6 +87,20 @@ float shadowFactor(vec2 px, float h0, vec3 lightPos) {
   return 1.0;
 }
 
+// A directional light has no position, so its shadow marches a fixed number of
+// pixel steps up the to-light direction, rising by the ray's slope each step.
+float dirShadowFactor(vec2 px, float h0, vec3 toLight) {
+  float len = length(toLight.xy);
+  if (len < 0.05) return 1.0;              // key is overhead: no long shadow
+  vec2 step = (toLight.xy / len) * 3.0;
+  float slope = toLight.z / len;           // height gained per pixel toward the light
+  for (int i = 1; i <= 16; i++) {
+    float rayH = h0 + slope * float(i) * 3.0;
+    if (heightAt(px + step * float(i)) > rayH + 0.45) return 0.25;
+  }
+  return 1.0;
+}
+
 void main() {
   vec4 alb = texture2D(uAlbedo, vUv);
   if (uUnlit == 1) { gl_FragColor = vec4(alb.rgb, 1.0); return; } // passthrough
@@ -94,12 +116,33 @@ void main() {
   vec3 lightSum = uAmbient * uAmbientColor;
   for (int i = 0; i < ${MAX_LIGHTS}; i++) {
     if (i >= uLightCount) break;
-    vec3 toLight = vec3(uLightPos[i].xy - px, uLightPos[i].z - height);
-    float dist = length(toLight.xy);
-    float atten = clamp(1.0 - dist / uLightRadius[i], 0.0, 1.0);
-    atten *= atten;
-    vec3 L = normalize(toLight);
-    float shadow = uEnableShadows > 0.5 ? shadowFactor(px, height, uLightPos[i]) : 1.0;
+    float kind = uLightKind[i];
+    vec3 L;
+    float atten;
+    float shadow;
+    if (kind > 0.5 && kind < 1.5) {
+      // Directional: parallel rays toward uLightDir, no distance falloff.
+      L = normalize(uLightDir[i]);
+      atten = 1.0;
+      shadow = uEnableShadows > 0.5 ? dirShadowFactor(px, height, L) : 1.0;
+    } else {
+      // Point and spot both radiate from a position.
+      vec3 toLight = vec3(uLightPos[i].xy - px, uLightPos[i].z - height);
+      float dist = length(toLight.xy);
+      atten = clamp(1.0 - dist / uLightRadius[i], 0.0, 1.0);
+      atten *= atten;
+      L = normalize(toLight);
+      shadow = uEnableShadows > 0.5 ? shadowFactor(px, height, uLightPos[i]) : 1.0;
+      if (kind > 1.5) {
+        // Spot: gate by how well the beam axis aligns with this pixel.
+        vec3 axis = normalize(uLightDir[i]);
+        vec3 beam = normalize(vec3(px - uLightPos[i].xy, height - uLightPos[i].z));
+        float alignment = dot(beam, axis);
+        float inner = uLightCone[i];
+        float outer = inner - 0.15;        // matches SPOT_CONE_SOFTNESS
+        atten *= clamp((alignment - outer) / max(1e-3, inner - outer), 0.0, 1.0);
+      }
+    }
     float diffuse = max(0.0, dot(n, L)) * shadow;
     vec3 halfVec = normalize(L + VIEW);
     float specular = pow(max(0.0, dot(n, halfVec)), shininess) * specStr * shadow;
@@ -193,6 +236,9 @@ export class LightingLayer implements LightingRenderer {
   private readonly lightPos = new Float32Array(MAX_LIGHTS * 3);
   private readonly lightColor = new Float32Array(MAX_LIGHTS * 3);
   private readonly lightRadius = new Float32Array(MAX_LIGHTS);
+  private readonly lightKind = new Float32Array(MAX_LIGHTS);
+  private readonly lightDir = new Float32Array(MAX_LIGHTS * 3);
+  private readonly lightCone = new Float32Array(MAX_LIGHTS);
   private flatMaterial: Uint8Array | null = null;
 
   /** Whether a WebGL lighting context can be created on this canvas. */
@@ -283,10 +329,19 @@ export class LightingLayer implements LightingRenderer {
       this.lightColor[i * 3 + 1] = light.color[1];
       this.lightColor[i * 3 + 2] = light.color[2];
       this.lightRadius[i] = light.radius;
+      this.lightKind[i] = KIND_CODE[light.kind ?? "point"];
+      const dir = light.direction ?? DEFAULT_DIRECTION;
+      this.lightDir[i * 3] = dir[0];
+      this.lightDir[i * 3 + 1] = dir[1];
+      this.lightDir[i * 3 + 2] = dir[2];
+      this.lightCone[i] = light.coneCos ?? DEFAULT_CONE_COS;
     }
     gl.uniform3fv(this.uni(this.pLight, "uLightPos"), this.lightPos);
     gl.uniform3fv(this.uni(this.pLight, "uLightColor"), this.lightColor);
     gl.uniform1fv(this.uni(this.pLight, "uLightRadius"), this.lightRadius);
+    gl.uniform1fv(this.uni(this.pLight, "uLightKind"), this.lightKind);
+    gl.uniform3fv(this.uni(this.pLight, "uLightDir"), this.lightDir);
+    gl.uniform1fv(this.uni(this.pLight, "uLightCone"), this.lightCone);
     gl.uniform1i(this.uni(this.pLight, "uLightCount"), count);
     gl.uniform1f(this.uni(this.pLight, "uAmbient"), scene.ambient);
     gl.uniform3f(this.uni(this.pLight, "uAmbientColor"), scene.ambientColor[0], scene.ambientColor[1], scene.ambientColor[2]);

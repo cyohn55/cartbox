@@ -12,7 +12,12 @@
  * targets, so — unlike the WebGL path — no pass needs a Y-flip.
  */
 
-import { NORMAL_VECTORS } from "./lightingModel.js";
+import {
+  DEFAULT_LIGHT_DIRECTION as DEFAULT_DIRECTION,
+  DEFAULT_SPOT_CONE_COS as DEFAULT_CONE_COS,
+  LIGHT_KIND_CODE as KIND_CODE,
+  NORMAL_VECTORS,
+} from "./lightingModel.js";
 import { createFlatMaterial, type LightingBackend, type LightingRenderer } from "./LightingRenderer.js";
 import type { LightingScene, MaterialBuffer } from "./types.js";
 import type { RenderCanvas } from "./LightingLayer.js";
@@ -46,7 +51,8 @@ struct LightU {
   flags: vec4<f32>,                             // enableShadows, _, _, _
   normals: array<vec4<f32>, 16>,                // xyz = normal
   lightPosRadius: array<vec4<f32>, ${MAX_LIGHTS}>,
-  lightColor: array<vec4<f32>, ${MAX_LIGHTS}>,
+  lightColor: array<vec4<f32>, ${MAX_LIGHTS}>,    // xyz = colour, w = kind (0/1/2)
+  lightDirCone: array<vec4<f32>, ${MAX_LIGHTS}>,  // xyz = direction, w = spot cone cosine
 };
 @group(0) @binding(0) var samp: sampler;
 @group(0) @binding(1) var albedoTex: texture_2d<f32>;
@@ -72,6 +78,18 @@ fn shadowFactor(px: vec2<f32>, h0: f32, lp: vec3<f32>) -> f32 {
   return 1.0;
 }
 
+fn dirShadowFactor(px: vec2<f32>, h0: f32, toLight: vec3<f32>) -> f32 {
+  let len = length(toLight.xy);
+  if (len < 0.05) { return 1.0; }            // key is overhead: no long shadow
+  let step = (toLight.xy / len) * 3.0;
+  let slope = toLight.z / len;
+  for (var i = 1; i <= 16; i = i + 1) {
+    let rayH = h0 + slope * f32(i) * 3.0;
+    if (heightAt(px + step * f32(i)) > rayH + 0.45) { return 0.25; }
+  }
+  return 1.0;
+}
+
 @fragment fn fs(in: VSOut) -> @location(0) vec4<f32> {
   let alb = textureSampleLevel(albedoTex, samp, in.uv, 0.0);
   if (u.dims.w > 0.5) { return vec4<f32>(alb.rgb, 1.0); } // unlit passthrough
@@ -89,13 +107,32 @@ fn shadowFactor(px: vec2<f32>, h0: f32, lp: vec3<f32>) -> f32 {
   for (var i = 0; i < ${MAX_LIGHTS}; i = i + 1) {
     if (i >= count) { break; }
     let lp = u.lightPosRadius[i];
-    let toLight = vec3<f32>(lp.xy - px, lp.z - height);
-    let dist = length(toLight.xy);
-    var atten = clamp(1.0 - dist / lp.w, 0.0, 1.0);
-    atten = atten * atten;
-    let L = normalize(toLight);
+    let kind = u.lightColor[i].w;
+    var L: vec3<f32>;
+    var atten: f32;
     var shadow = 1.0;
-    if (u.flags.x > 0.5) { shadow = shadowFactor(px, height, lp.xyz); }
+    if (kind > 0.5 && kind < 1.5) {
+      // Directional: parallel rays toward the stored direction, no falloff.
+      L = normalize(u.lightDirCone[i].xyz);
+      atten = 1.0;
+      if (u.flags.x > 0.5) { shadow = dirShadowFactor(px, height, L); }
+    } else {
+      let toLight = vec3<f32>(lp.xy - px, lp.z - height);
+      let dist = length(toLight.xy);
+      atten = clamp(1.0 - dist / lp.w, 0.0, 1.0);
+      atten = atten * atten;
+      L = normalize(toLight);
+      if (u.flags.x > 0.5) { shadow = shadowFactor(px, height, lp.xyz); }
+      if (kind > 1.5) {
+        // Spot: gate by the beam axis alignment with this pixel.
+        let axis = normalize(u.lightDirCone[i].xyz);
+        let beam = normalize(vec3<f32>(px - lp.xy, height - lp.z));
+        let alignment = dot(beam, axis);
+        let inner = u.lightDirCone[i].w;
+        let outer = inner - 0.15;              // matches SPOT_CONE_SOFTNESS
+        atten = atten * clamp((alignment - outer) / max(1e-3, inner - outer), 0.0, 1.0);
+      }
+    }
     let diffuse = max(0.0, dot(n, L)) * shadow;
     let halfVec = normalize(L + VIEW);
     let spec = pow(max(0.0, dot(n, halfVec)), shininess) * specStr * shadow;
@@ -149,7 +186,7 @@ const COMPOSITE_WGSL = VS + /* wgsl */ `
 export class WebgpuLightingLayer implements LightingRenderer {
   readonly backend: LightingBackend = "webgpu";
   private flatMaterial: Uint8Array | null = null;
-  private readonly lightData = new Float32Array(124); // matches LightU (496 bytes)
+  private readonly lightData = new Float32Array(148); // matches LightU (592 bytes)
   private readonly compData = new Float32Array(4);
 
   private constructor(
@@ -216,7 +253,7 @@ export class WebgpuLightingLayer implements LightingRenderer {
       const composite = pipe(COMPOSITE_WGSL, format);
 
       const uniform = (size: number) => device.createBuffer({ size, usage: UNIFORM | COPY_DST_BUF });
-      const lightBuffer = uniform(496);
+      const lightBuffer = uniform(592);
       const brightBuffer = uniform(16);
       const blurBufferH = uniform(16);
       const blurBufferV = uniform(16);
@@ -291,6 +328,10 @@ export class WebgpuLightingLayer implements LightingRenderer {
       const light = scene.lights[i]!;
       u[76 + i * 4] = light.x; u[76 + i * 4 + 1] = light.y; u[76 + i * 4 + 2] = light.z; u[76 + i * 4 + 3] = light.radius;
       u[100 + i * 4] = light.color[0]; u[100 + i * 4 + 1] = light.color[1]; u[100 + i * 4 + 2] = light.color[2];
+      u[100 + i * 4 + 3] = KIND_CODE[light.kind ?? "point"];
+      const dir = light.direction ?? DEFAULT_DIRECTION;
+      u[124 + i * 4] = dir[0]; u[124 + i * 4 + 1] = dir[1]; u[124 + i * 4 + 2] = dir[2];
+      u[124 + i * 4 + 3] = light.coneCos ?? DEFAULT_CONE_COS;
     }
     q.writeBuffer(this.buffers.light, 0, u);
 
