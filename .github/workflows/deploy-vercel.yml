@@ -75,7 +75,15 @@ jobs:
         if: steps.guard.outputs.ok == 'true'
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          SCOPE: ${{ secrets.VERCEL_ORG_ID }}
         run: |
-          npx --yes vercel@latest deploy --prod --yes \
-            --token="$VERCEL_TOKEN" \
-            --scope="${{ secrets.VERCEL_ORG_ID }}"
+          set -e
+          URL=$(npx --yes vercel@latest deploy --prod --yes --token="$VERCEL_TOKEN" --scope="$SCOPE")
+          echo "Deployed: $URL"
+          # Some projects require an explicit promotion for the production domain to
+          # follow (deployment protection / manual promotion). deploy --prod alone
+          # then builds "Ready" but does not move the alias — so promote it.
+          echo "Promoting $URL to production…"
+          npx --yes vercel@latest promote "$URL" --yes --token="$VERCEL_TOKEN" --scope="$SCOPE"
+          echo "What the production domain resolves to now:"
+          npx --yes vercel@latest inspect https://cartbox-web-bfug.vercel.app --token="$VERCEL_TOKEN" --scope="$SCOPE" 2>&1 | grep -iE "url|age|created|deployment|alias" | head -20 || true
