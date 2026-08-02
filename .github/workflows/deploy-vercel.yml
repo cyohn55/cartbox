@@ -79,11 +79,14 @@ jobs:
         run: |
           set -e
           URL=$(npx --yes vercel@latest deploy --prod --yes --token="$VERCEL_TOKEN" --scope="$SCOPE")
-          echo "Deployed: $URL"
-          # Some projects require an explicit promotion for the production domain to
-          # follow (deployment protection / manual promotion). deploy --prod alone
-          # then builds "Ready" but does not move the alias — so promote it.
-          echo "Promoting $URL to production…"
-          npx --yes vercel@latest promote "$URL" --yes --token="$VERCEL_TOKEN" --scope="$SCOPE"
-          echo "What the production domain resolves to now:"
-          npx --yes vercel@latest inspect https://cartbox-web-bfug.vercel.app --token="$VERCEL_TOKEN" --scope="$SCOPE" 2>&1 | grep -iE "url|age|created|deployment|alias" | head -20 || true
+          echo "Deployed and promoted to production: $URL"
+          # `deploy --prod` already promotes to the production domain. A belt-and-
+          # suspenders `promote` then reports 409 "already the current production
+          # deployment" — which is success, not failure — so tolerate that case.
+          echo "Confirming promotion…"
+          if ! out=$(npx --yes vercel@latest promote "$URL" --yes --token="$VERCEL_TOKEN" --scope="$SCOPE" 2>&1); then
+            echo "$out"
+            echo "$out" | grep -qi "already the current production deployment" \
+              && echo "→ already live in production (ok)" \
+              || { echo "promote failed for a real reason"; exit 1; }
+          fi
