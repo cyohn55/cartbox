@@ -185,6 +185,9 @@ function nearestDirection(vector) {
   }
   return best;
 }
+var LIGHT_KIND_CODE = { point: 0, directional: 1, spot: 2 };
+var DEFAULT_LIGHT_DIRECTION = [0, 0, 1];
+var DEFAULT_SPOT_CONE_COS = 0.9;
 function shade(albedo, normal, toLight, ambient) {
   const n = normalize(normal);
   const l = normalize(toLight);
@@ -221,6 +224,9 @@ uniform vec3 uNormals[16];
 uniform vec3 uLightPos[${MAX_LIGHTS}];
 uniform vec3 uLightColor[${MAX_LIGHTS}];
 uniform float uLightRadius[${MAX_LIGHTS}];
+uniform float uLightKind[${MAX_LIGHTS}];   // 0 point, 1 directional, 2 spot
+uniform vec3 uLightDir[${MAX_LIGHTS}];     // directional: toward light; spot: beam axis
+uniform float uLightCone[${MAX_LIGHTS}];   // spot inner-cone cosine
 uniform int uLightCount;
 uniform float uAmbient;
 uniform vec3 uAmbientColor;
@@ -252,6 +258,20 @@ float shadowFactor(vec2 px, float h0, vec3 lightPos) {
   return 1.0;
 }
 
+// A directional light has no position, so its shadow marches a fixed number of
+// pixel steps up the to-light direction, rising by the ray's slope each step.
+float dirShadowFactor(vec2 px, float h0, vec3 toLight) {
+  float len = length(toLight.xy);
+  if (len < 0.05) return 1.0;              // key is overhead: no long shadow
+  vec2 step = (toLight.xy / len) * 3.0;
+  float slope = toLight.z / len;           // height gained per pixel toward the light
+  for (int i = 1; i <= 16; i++) {
+    float rayH = h0 + slope * float(i) * 3.0;
+    if (heightAt(px + step * float(i)) > rayH + 0.45) return 0.25;
+  }
+  return 1.0;
+}
+
 void main() {
   vec4 alb = texture2D(uAlbedo, vUv);
   if (uUnlit == 1) { gl_FragColor = vec4(alb.rgb, 1.0); return; } // passthrough
@@ -267,12 +287,33 @@ void main() {
   vec3 lightSum = uAmbient * uAmbientColor;
   for (int i = 0; i < ${MAX_LIGHTS}; i++) {
     if (i >= uLightCount) break;
-    vec3 toLight = vec3(uLightPos[i].xy - px, uLightPos[i].z - height);
-    float dist = length(toLight.xy);
-    float atten = clamp(1.0 - dist / uLightRadius[i], 0.0, 1.0);
-    atten *= atten;
-    vec3 L = normalize(toLight);
-    float shadow = uEnableShadows > 0.5 ? shadowFactor(px, height, uLightPos[i]) : 1.0;
+    float kind = uLightKind[i];
+    vec3 L;
+    float atten;
+    float shadow;
+    if (kind > 0.5 && kind < 1.5) {
+      // Directional: parallel rays toward uLightDir, no distance falloff.
+      L = normalize(uLightDir[i]);
+      atten = 1.0;
+      shadow = uEnableShadows > 0.5 ? dirShadowFactor(px, height, L) : 1.0;
+    } else {
+      // Point and spot both radiate from a position.
+      vec3 toLight = vec3(uLightPos[i].xy - px, uLightPos[i].z - height);
+      float dist = length(toLight.xy);
+      atten = clamp(1.0 - dist / uLightRadius[i], 0.0, 1.0);
+      atten *= atten;
+      L = normalize(toLight);
+      shadow = uEnableShadows > 0.5 ? shadowFactor(px, height, uLightPos[i]) : 1.0;
+      if (kind > 1.5) {
+        // Spot: gate by how well the beam axis aligns with this pixel.
+        vec3 axis = normalize(uLightDir[i]);
+        vec3 beam = normalize(vec3(px - uLightPos[i].xy, height - uLightPos[i].z));
+        float alignment = dot(beam, axis);
+        float inner = uLightCone[i];
+        float outer = inner - 0.15;        // matches SPOT_CONE_SOFTNESS
+        atten *= clamp((alignment - outer) / max(1e-3, inner - outer), 0.0, 1.0);
+      }
+    }
     float diffuse = max(0.0, dot(n, L)) * shadow;
     vec3 halfVec = normalize(L + VIEW);
     float specular = pow(max(0.0, dot(n, halfVec)), shininess) * specStr * shadow;
@@ -332,6 +373,9 @@ var LightingLayer = class {
     this.lightPos = new Float32Array(MAX_LIGHTS * 3);
     this.lightColor = new Float32Array(MAX_LIGHTS * 3);
     this.lightRadius = new Float32Array(MAX_LIGHTS);
+    this.lightKind = new Float32Array(MAX_LIGHTS);
+    this.lightDir = new Float32Array(MAX_LIGHTS * 3);
+    this.lightCone = new Float32Array(MAX_LIGHTS);
     this.flatMaterial = null;
     renderCanvas.width = width;
     renderCanvas.height = height;
@@ -404,10 +448,19 @@ var LightingLayer = class {
       this.lightColor[i * 3 + 1] = light.color[1];
       this.lightColor[i * 3 + 2] = light.color[2];
       this.lightRadius[i] = light.radius;
+      this.lightKind[i] = LIGHT_KIND_CODE[light.kind ?? "point"];
+      const dir = light.direction ?? DEFAULT_LIGHT_DIRECTION;
+      this.lightDir[i * 3] = dir[0];
+      this.lightDir[i * 3 + 1] = dir[1];
+      this.lightDir[i * 3 + 2] = dir[2];
+      this.lightCone[i] = light.coneCos ?? DEFAULT_SPOT_CONE_COS;
     }
     gl.uniform3fv(this.uni(this.pLight, "uLightPos"), this.lightPos);
     gl.uniform3fv(this.uni(this.pLight, "uLightColor"), this.lightColor);
     gl.uniform1fv(this.uni(this.pLight, "uLightRadius"), this.lightRadius);
+    gl.uniform1fv(this.uni(this.pLight, "uLightKind"), this.lightKind);
+    gl.uniform3fv(this.uni(this.pLight, "uLightDir"), this.lightDir);
+    gl.uniform1fv(this.uni(this.pLight, "uLightCone"), this.lightCone);
     gl.uniform1i(this.uni(this.pLight, "uLightCount"), count);
     gl.uniform1f(this.uni(this.pLight, "uAmbient"), scene.ambient);
     gl.uniform3f(this.uni(this.pLight, "uAmbientColor"), scene.ambientColor[0], scene.ambientColor[1], scene.ambientColor[2]);
@@ -556,7 +609,8 @@ struct LightU {
   flags: vec4<f32>,                             // enableShadows, _, _, _
   normals: array<vec4<f32>, 16>,                // xyz = normal
   lightPosRadius: array<vec4<f32>, ${MAX_LIGHTS2}>,
-  lightColor: array<vec4<f32>, ${MAX_LIGHTS2}>,
+  lightColor: array<vec4<f32>, ${MAX_LIGHTS2}>,    // xyz = colour, w = kind (0/1/2)
+  lightDirCone: array<vec4<f32>, ${MAX_LIGHTS2}>,  // xyz = direction, w = spot cone cosine
 };
 @group(0) @binding(0) var samp: sampler;
 @group(0) @binding(1) var albedoTex: texture_2d<f32>;
@@ -582,6 +636,18 @@ fn shadowFactor(px: vec2<f32>, h0: f32, lp: vec3<f32>) -> f32 {
   return 1.0;
 }
 
+fn dirShadowFactor(px: vec2<f32>, h0: f32, toLight: vec3<f32>) -> f32 {
+  let len = length(toLight.xy);
+  if (len < 0.05) { return 1.0; }            // key is overhead: no long shadow
+  let step = (toLight.xy / len) * 3.0;
+  let slope = toLight.z / len;
+  for (var i = 1; i <= 16; i = i + 1) {
+    let rayH = h0 + slope * f32(i) * 3.0;
+    if (heightAt(px + step * f32(i)) > rayH + 0.45) { return 0.25; }
+  }
+  return 1.0;
+}
+
 @fragment fn fs(in: VSOut) -> @location(0) vec4<f32> {
   let alb = textureSampleLevel(albedoTex, samp, in.uv, 0.0);
   if (u.dims.w > 0.5) { return vec4<f32>(alb.rgb, 1.0); } // unlit passthrough
@@ -599,13 +665,32 @@ fn shadowFactor(px: vec2<f32>, h0: f32, lp: vec3<f32>) -> f32 {
   for (var i = 0; i < ${MAX_LIGHTS2}; i = i + 1) {
     if (i >= count) { break; }
     let lp = u.lightPosRadius[i];
-    let toLight = vec3<f32>(lp.xy - px, lp.z - height);
-    let dist = length(toLight.xy);
-    var atten = clamp(1.0 - dist / lp.w, 0.0, 1.0);
-    atten = atten * atten;
-    let L = normalize(toLight);
+    let kind = u.lightColor[i].w;
+    var L: vec3<f32>;
+    var atten: f32;
     var shadow = 1.0;
-    if (u.flags.x > 0.5) { shadow = shadowFactor(px, height, lp.xyz); }
+    if (kind > 0.5 && kind < 1.5) {
+      // Directional: parallel rays toward the stored direction, no falloff.
+      L = normalize(u.lightDirCone[i].xyz);
+      atten = 1.0;
+      if (u.flags.x > 0.5) { shadow = dirShadowFactor(px, height, L); }
+    } else {
+      let toLight = vec3<f32>(lp.xy - px, lp.z - height);
+      let dist = length(toLight.xy);
+      atten = clamp(1.0 - dist / lp.w, 0.0, 1.0);
+      atten = atten * atten;
+      L = normalize(toLight);
+      if (u.flags.x > 0.5) { shadow = shadowFactor(px, height, lp.xyz); }
+      if (kind > 1.5) {
+        // Spot: gate by the beam axis alignment with this pixel.
+        let axis = normalize(u.lightDirCone[i].xyz);
+        let beam = normalize(vec3<f32>(px - lp.xy, height - lp.z));
+        let alignment = dot(beam, axis);
+        let inner = u.lightDirCone[i].w;
+        let outer = inner - 0.15;              // matches SPOT_CONE_SOFTNESS
+        atten = atten * clamp((alignment - outer) / max(1e-3, inner - outer), 0.0, 1.0);
+      }
+    }
     let diffuse = max(0.0, dot(n, L)) * shadow;
     let halfVec = normalize(L + VIEW);
     let spec = pow(max(0.0, dot(n, halfVec)), shininess) * specStr * shadow;
@@ -667,8 +752,8 @@ var WebgpuLightingLayer = class _WebgpuLightingLayer {
     this.buffers = buffers;
     this.backend = "webgpu";
     this.flatMaterial = null;
-    this.lightData = new Float32Array(124);
-    // matches LightU (496 bytes)
+    this.lightData = new Float32Array(148);
+    // matches LightU (592 bytes)
     this.compData = new Float32Array(4);
     NORMAL_VECTORS.forEach((v, i) => {
       this.lightData[12 + i * 4] = v[0];
@@ -710,7 +795,7 @@ var WebgpuLightingLayer = class _WebgpuLightingLayer {
       const blurPipe = pipe(BLUR_WGSL, "rgba8unorm");
       const composite = pipe(COMPOSITE_WGSL, format);
       const uniform = (size) => device.createBuffer({ size, usage: UNIFORM | COPY_DST_BUF });
-      const lightBuffer = uniform(496);
+      const lightBuffer = uniform(592);
       const brightBuffer = uniform(16);
       const blurBufferH = uniform(16);
       const blurBufferV = uniform(16);
@@ -794,6 +879,12 @@ var WebgpuLightingLayer = class _WebgpuLightingLayer {
       u[100 + i * 4] = light.color[0];
       u[100 + i * 4 + 1] = light.color[1];
       u[100 + i * 4 + 2] = light.color[2];
+      u[100 + i * 4 + 3] = LIGHT_KIND_CODE[light.kind ?? "point"];
+      const dir = light.direction ?? DEFAULT_LIGHT_DIRECTION;
+      u[124 + i * 4] = dir[0];
+      u[124 + i * 4 + 1] = dir[1];
+      u[124 + i * 4 + 2] = dir[2];
+      u[124 + i * 4 + 3] = light.coneCos ?? DEFAULT_SPOT_CONE_COS;
     }
     q.writeBuffer(this.buffers.light, 0, u);
     const useBloom = scene.bloom && !scene.unlit;
@@ -2155,25 +2246,51 @@ local function _hash(s)
   end
   return h
 end
+local function _norm(x, y, z)
+  local m = math.sqrt(x * x + y * y + z * z)
+  if m < 1e-6 then return 0, 0, 1 end
+  return x / m, y / m, z / m
+end
+local function _byte(v)
+  local b = math.floor((v or 0) * 127 + 0.5)
+  if b < -127 then b = -127 elseif b > 127 then b = 127 end
+  if b < 0 then b = b + 256 end
+  return b
+end
+local function _light(kind, x, y, z, radius, r, g, b, intensity, dx, dy, cone)
+  if _ln >= _LCAP then return end
+  local base = _LB + 1 + _ln * 6
+  pmem(base, x // 1)
+  pmem(base + 1, y // 1)
+  pmem(base + 2, z // 1)
+  pmem(base + 3, radius // 1)
+  local rgb = (math.floor(r or 255) & 0xff) << 16
+  rgb = rgb | ((math.floor(g or 255) & 0xff) << 8)
+  rgb = rgb | (math.floor(b or 255) & 0xff)
+  pmem(base + 4, rgb | (kind << 24) | (cone << 26))
+  local inten = math.floor((intensity or 1) * 256)
+  if inten < 0 then inten = 0 elseif inten > 0xffff then inten = 0xffff end
+  pmem(base + 5, inten | (dx << 16) | (dy << 24))
+  _ln = _ln + 1
+  pmem(_LB, _ln)
+end
 cartbox = {
   unlock = function(id) _emit(1, _hash(id), 0) end,
   score = function(v) _emit(2, 0, v // 1) end,
   progress = function(id, v) _emit(3, _hash(id), v // 1) end,
   clearlights = function() _ln = 0 pmem(_LB, 0) end,
   light = function(x, y, radius, r, g, b, z, intensity)
-    if _ln >= _LCAP then return end
-    local base = _LB + 1 + _ln * 6
-    pmem(base, x // 1)
-    pmem(base + 1, y // 1)
-    pmem(base + 2, (z or 12) // 1)
-    pmem(base + 3, radius // 1)
-    local rr = (r or 255) & 0xff
-    local gg = (g or 255) & 0xff
-    local bb = (b or 255) & 0xff
-    pmem(base + 4, (rr << 16) | (gg << 8) | bb)
-    pmem(base + 5, ((intensity or 1) * 256) // 1)
-    _ln = _ln + 1
-    pmem(_LB, _ln)
+    _light(0, x, y, z or 12, radius, r, g, b, intensity, 0, 0, 0)
+  end,
+  sun = function(dx, dy, dz, r, g, b, intensity)
+    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)
+    _light(1, 0, 0, 0, 0, r, g, b, intensity, _byte(nx), _byte(ny), 0)
+  end,
+  spot = function(x, y, z, dx, dy, dz, radius, angle, r, g, b, intensity)
+    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)
+    local cone = math.floor(math.cos(math.rad(angle or 30)) * 63 + 0.5)
+    if cone < 0 then cone = 0 elseif cone > 63 then cone = 63 end
+    _light(2, x, y, z or 12, radius, r, g, b, intensity, _byte(nx), _byte(ny), cone)
   end,
 }`;
 function injectSdk(bytes) {
@@ -2190,6 +2307,14 @@ var LIGHTS_BASE = 1 + EVENT_CAPACITY * 3;
 var LIGHTS_CAPACITY = 6;
 var LIGHT_STRIDE = 6;
 var LIGHT_INTENSITY_SCALE = 256;
+var LIGHT_KIND_POINT = 0;
+var LIGHT_KIND_SPOT = 2;
+var LIGHT_DIR_SCALE = 127;
+var LIGHT_CONE_SCALE = 63;
+var KIND_BY_CODE = ["point", "directional", "spot"];
+function signedByte(byte) {
+  return byte < 128 ? byte : byte - 256;
+}
 function kindOf(type) {
   switch (type) {
     case MAILBOX_TYPE_ACHIEVEMENT:
@@ -2232,8 +2357,9 @@ function decodeLights(words) {
   for (let i = 0; i < count; i++) {
     const base = LIGHTS_BASE + 1 + i * LIGHT_STRIDE;
     const packed = words[base + 4] ?? 16777215;
-    const intensity = (words[base + 5] ?? LIGHT_INTENSITY_SCALE) / LIGHT_INTENSITY_SCALE;
-    lights.push({
+    const intensityWord = words[base + 5] ?? LIGHT_INTENSITY_SCALE;
+    const intensity = (intensityWord & 65535) / LIGHT_INTENSITY_SCALE;
+    const light = {
       x: words[base] ?? 0,
       y: words[base + 1] ?? 0,
       z: words[base + 2] ?? 0,
@@ -2243,7 +2369,19 @@ function decodeLights(words) {
         (packed >>> 8 & 255) / 255 * intensity,
         (packed & 255) / 255 * intensity
       ]
-    });
+    };
+    const kindCode = packed >>> 24 & 3;
+    if (kindCode !== LIGHT_KIND_POINT) {
+      light.kind = KIND_BY_CODE[kindCode] ?? "point";
+      const dirX = signedByte(intensityWord >>> 16 & 255) / LIGHT_DIR_SCALE;
+      const dirY = signedByte(intensityWord >>> 24 & 255) / LIGHT_DIR_SCALE;
+      const dirZ = Math.sqrt(Math.max(0, 1 - dirX * dirX - dirY * dirY));
+      light.direction = [dirX, dirY, dirZ];
+      if (kindCode === LIGHT_KIND_SPOT) {
+        light.coneCos = (packed >>> 26 & 63) / LIGHT_CONE_SCALE;
+      }
+    }
+    lights.push(light);
   }
   return lights;
 }

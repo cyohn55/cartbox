@@ -136,18 +136,46 @@ declare function parseReplay(json: string): Replay;
  * Public types for the player's dynamic lighting layer. Kept DOM-free so hosts
  * and tests can build lighting scenes without importing the renderer.
  */
-/** A coloured point light positioned over the console framebuffer. */
+/**
+ * How a light casts. Defaults to "point" everywhere it is omitted, so a bare
+ * `{x, y, z, color, radius}` keeps meaning exactly what it always has.
+ *
+ * - `point`       an omnidirectional pool at (x, y, z), fading to nothing at `radius`.
+ * - `directional` a distant key (sun / moon): parallel rays with no falloff, so
+ *                 x/y/z and radius are ignored and only `direction` and `color`
+ *                 matter. This is the sun/moon shaft central to the cinematic look.
+ * - `spot`        a cone from (x, y, z) opening along `direction`, gated by
+ *                 `coneCos` and attenuated by `radius` like a point light.
+ */
+type LightKind = "point" | "directional" | "spot";
+/** A coloured light positioned over the console framebuffer. */
 interface Light {
-    /** Column in native framebuffer pixels (0 = left). */
+    /** Column in native framebuffer pixels (0 = left). Ignored for directional. */
     x: number;
-    /** Row in native framebuffer pixels (0 = top). */
+    /** Row in native framebuffer pixels (0 = top). Ignored for directional. */
     y: number;
     /** Height above the surface, in pixel units; larger = a broader, softer pool. */
     z: number;
     /** Light colour; each channel is a multiplier (may exceed 1 for a hot light). */
     color: readonly [number, number, number];
-    /** Reach in pixels; brightness falls to zero at this distance. */
+    /** Reach in pixels; brightness falls to zero at this distance. Ignored for directional. */
     radius: number;
+    /** Cast type. Omit for a point light (the historical default). */
+    kind?: LightKind;
+    /**
+     * Unit direction, meaning per kind:
+     * - directional: the direction that points *toward* the light (where the sun is).
+     * - spot: the cone axis — the direction the beam travels.
+     * Its z component is taken as non-negative (a light on the viewer's side of the
+     * scene); the runtime derives it when a producer only supplies x and y.
+     * Ignored for point lights.
+     */
+    direction?: readonly [number, number, number];
+    /**
+     * Spot cone: cosine of the inner (full-bright) half-angle, 0..1. A fixed
+     * softness feathers the edge to zero just outside it. Ignored unless spot.
+     */
+    coneCos?: number;
 }
 /** Context passed to a per-frame light provider. */
 interface LightingFrameContext {
@@ -566,7 +594,7 @@ declare function seedCartridge(bytes: Uint8Array, seed: number): Uint8Array;
  * capacity 8, lights block at word 217, event types 1/2/3, FNV-1a id hash).
  */
 /** Lua source of the cartbox SDK. */
-declare const CARTBOX_SDK_LUA = "local _MB = 192\nlocal _CAP = 8\nlocal _LB = _MB + 25\nlocal _LCAP = 6\nlocal _ln = 0\nlocal function _emit(kind, id, value)\n  local seq = pmem(_MB)\n  local slot = seq % _CAP\n  local base = _MB + 1 + slot * 3\n  pmem(base, kind)\n  pmem(base + 1, id)\n  pmem(base + 2, value)\n  pmem(_MB, seq + 1)\nend\nlocal function _hash(s)\n  local h = 2166136261\n  for i = 1, #s do\n    h = ((h ~ string.byte(s, i)) * 16777619) & 0xffffffff\n  end\n  return h\nend\ncartbox = {\n  unlock = function(id) _emit(1, _hash(id), 0) end,\n  score = function(v) _emit(2, 0, v // 1) end,\n  progress = function(id, v) _emit(3, _hash(id), v // 1) end,\n  clearlights = function() _ln = 0 pmem(_LB, 0) end,\n  light = function(x, y, radius, r, g, b, z, intensity)\n    if _ln >= _LCAP then return end\n    local base = _LB + 1 + _ln * 6\n    pmem(base, x // 1)\n    pmem(base + 1, y // 1)\n    pmem(base + 2, (z or 12) // 1)\n    pmem(base + 3, radius // 1)\n    local rr = (r or 255) & 0xff\n    local gg = (g or 255) & 0xff\n    local bb = (b or 255) & 0xff\n    pmem(base + 4, (rr << 16) | (gg << 8) | bb)\n    pmem(base + 5, ((intensity or 1) * 256) // 1)\n    _ln = _ln + 1\n    pmem(_LB, _ln)\n  end,\n}";
+declare const CARTBOX_SDK_LUA = "local _MB = 192\nlocal _CAP = 8\nlocal _LB = _MB + 25\nlocal _LCAP = 6\nlocal _ln = 0\nlocal function _emit(kind, id, value)\n  local seq = pmem(_MB)\n  local slot = seq % _CAP\n  local base = _MB + 1 + slot * 3\n  pmem(base, kind)\n  pmem(base + 1, id)\n  pmem(base + 2, value)\n  pmem(_MB, seq + 1)\nend\nlocal function _hash(s)\n  local h = 2166136261\n  for i = 1, #s do\n    h = ((h ~ string.byte(s, i)) * 16777619) & 0xffffffff\n  end\n  return h\nend\nlocal function _norm(x, y, z)\n  local m = math.sqrt(x * x + y * y + z * z)\n  if m < 1e-6 then return 0, 0, 1 end\n  return x / m, y / m, z / m\nend\nlocal function _byte(v)\n  local b = math.floor((v or 0) * 127 + 0.5)\n  if b < -127 then b = -127 elseif b > 127 then b = 127 end\n  if b < 0 then b = b + 256 end\n  return b\nend\nlocal function _light(kind, x, y, z, radius, r, g, b, intensity, dx, dy, cone)\n  if _ln >= _LCAP then return end\n  local base = _LB + 1 + _ln * 6\n  pmem(base, x // 1)\n  pmem(base + 1, y // 1)\n  pmem(base + 2, z // 1)\n  pmem(base + 3, radius // 1)\n  local rgb = (math.floor(r or 255) & 0xff) << 16\n  rgb = rgb | ((math.floor(g or 255) & 0xff) << 8)\n  rgb = rgb | (math.floor(b or 255) & 0xff)\n  pmem(base + 4, rgb | (kind << 24) | (cone << 26))\n  local inten = math.floor((intensity or 1) * 256)\n  if inten < 0 then inten = 0 elseif inten > 0xffff then inten = 0xffff end\n  pmem(base + 5, inten | (dx << 16) | (dy << 24))\n  _ln = _ln + 1\n  pmem(_LB, _ln)\nend\ncartbox = {\n  unlock = function(id) _emit(1, _hash(id), 0) end,\n  score = function(v) _emit(2, 0, v // 1) end,\n  progress = function(id, v) _emit(3, _hash(id), v // 1) end,\n  clearlights = function() _ln = 0 pmem(_LB, 0) end,\n  light = function(x, y, radius, r, g, b, z, intensity)\n    _light(0, x, y, z or 12, radius, r, g, b, intensity, 0, 0, 0)\n  end,\n  sun = function(dx, dy, dz, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    _light(1, 0, 0, 0, 0, r, g, b, intensity, _byte(nx), _byte(ny), 0)\n  end,\n  spot = function(x, y, z, dx, dy, dz, radius, angle, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    local cone = math.floor(math.cos(math.rad(angle or 30)) * 63 + 0.5)\n    if cone < 0 then cone = 0 elseif cone > 63 then cone = 63 end\n    _light(2, x, y, z or 12, radius, r, g, b, intensity, _byte(nx), _byte(ny), cone)\n  end,\n}";
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */
 declare function injectSdk(bytes: Uint8Array): Uint8Array;
 
@@ -786,6 +814,9 @@ declare class LightingLayer implements LightingRenderer {
     private readonly lightPos;
     private readonly lightColor;
     private readonly lightRadius;
+    private readonly lightKind;
+    private readonly lightDir;
+    private readonly lightCone;
     private flatMaterial;
     /** Whether a WebGL lighting context can be created on this canvas. */
     static isSupported(canvas: RenderCanvas): boolean;
@@ -957,6 +988,7 @@ declare class LitCanvasSurface implements DisplaySurface {
  * diffuse lifted over an ambient floor. The runtime {@link LightingLayer} runs
  * the same maths in a shader; keeping this here lets both agree by construction.
  */
+
 /** A 3-component vector. */
 type Vec3 = readonly [number, number, number];
 /** An RGB colour, each channel 0..255. */
