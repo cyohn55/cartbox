@@ -137,6 +137,28 @@ export type {
   PostFxUniforms,
 } from "./fx/index.js";
 
+// Runtime parallax scene (optional): a cart declares a backdrop of depth layers
+// (regions of its own sprite sheet) with aerial-perspective atmosphere; the
+// player composites it behind the cart's frame, ahead of lighting + FX.
+export {
+  SceneBackdropSurface,
+  compositeOverBackdrop,
+  createCartSpriteSource,
+  parseScene,
+  resolveSceneLayers,
+  renderSceneBackdrop,
+  DEFAULT_ATMOSPHERE,
+} from "./scene/index.js";
+export type {
+  AtmosphereParams,
+  CartSpriteSource,
+  SceneSpec,
+  SceneLayer,
+  SceneCamera,
+  SpriteRegion,
+  SpriteRegionSource,
+} from "./scene/index.js";
+
 /**
  * Mounts a cartridge player into a container element and begins loading.
  *

@@ -193,8 +193,8 @@ function shade(albedo, normal, toLight, ambient) {
   const l = normalize(toLight);
   const diffuse = Math.max(0, n[0] * l[0] + n[1] * l[1] + n[2] * l[2]);
   const intensity = ambient + (1 - ambient) * diffuse;
-  const clamp = (value) => Math.max(0, Math.min(255, Math.round(value * intensity)));
-  return [clamp(albedo[0]), clamp(albedo[1]), clamp(albedo[2])];
+  const clamp2 = (value) => Math.max(0, Math.min(255, Math.round(value * intensity)));
+  return [clamp2(albedo[0]), clamp2(albedo[1]), clamp2(albedo[2])];
 }
 
 // src/lighting/LightingRenderer.ts
@@ -2394,6 +2394,216 @@ function hashEventId(id) {
   return hash >>> 0;
 }
 
+// src/scene/cartSpriteSource.ts
+var TILE_SIZE = 8;
+var PIXELS_PER_TILE = TILE_SIZE * TILE_SIZE;
+var SHEET_COLS = 16;
+function readPixel(heap, tileBase, pixelIndex, bits) {
+  if (bits === 8) return heap[tileBase + pixelIndex] ?? 0;
+  const byte = heap[tileBase + (pixelIndex >> 1)] ?? 0;
+  return pixelIndex & 1 ? byte >> 4 & 15 : byte & 15;
+}
+function createCartSpriteSource(module, bytes, paletteSize) {
+  if (typeof module._cbx_cart_create !== "function") return null;
+  const cart = module._cbx_cart_create();
+  if (!cart) return null;
+  const ptr = module._malloc(bytes.byteLength);
+  module.HEAPU8.set(bytes, ptr);
+  module._cbx_cart_load(cart, ptr, bytes.byteLength);
+  module._free(ptr);
+  const bits = paletteSize <= 16 ? 4 : 8;
+  const bytesPerTile = bits === 8 ? PIXELS_PER_TILE : PIXELS_PER_TILE / 2;
+  const bank = 0;
+  const tilesPtr = module._cbx_cart_tiles_ptr(cart, bank);
+  const spritesPtr = module._cbx_cart_sprites_ptr(cart, bank);
+  const palettePtr = module._cbx_cart_palette_ptr(cart, bank);
+  const source = {
+    readRegion(page, baseTile, tilesW, tilesH) {
+      const width = tilesW * TILE_SIZE;
+      const height = tilesH * TILE_SIZE;
+      const pixels = new Uint8ClampedArray(width * height * 4);
+      const heap = module.HEAPU8;
+      const sheetBase = page === 0 ? tilesPtr : spritesPtr;
+      for (let ty = 0; ty < tilesH; ty += 1) {
+        for (let tx = 0; tx < tilesW; tx += 1) {
+          const subTile = baseTile + ty * SHEET_COLS + tx;
+          const tileBase = sheetBase + subTile * bytesPerTile;
+          for (let y = 0; y < TILE_SIZE; y += 1) {
+            for (let x = 0; x < TILE_SIZE; x += 1) {
+              const idx = readPixel(heap, tileBase, y * TILE_SIZE + x, bits);
+              if (idx === 0) continue;
+              const o = ((ty * TILE_SIZE + y) * width + (tx * TILE_SIZE + x)) * 4;
+              const p = palettePtr + idx * 3;
+              pixels[o] = heap[p] ?? 0;
+              pixels[o + 1] = heap[p + 1] ?? 0;
+              pixels[o + 2] = heap[p + 2] ?? 0;
+              pixels[o + 3] = 255;
+            }
+          }
+        }
+      }
+      return { pixels, width, height };
+    }
+  };
+  const paletteRgb = (index) => {
+    const heap = module.HEAPU8;
+    const p = palettePtr + index * 3;
+    return [heap[p] ?? 0, heap[p + 1] ?? 0, heap[p + 2] ?? 0];
+  };
+  return { source, paletteRgb, dispose: () => module._cbx_cart_delete(cart) };
+}
+
+// src/scene/parallaxScene.ts
+var clampUnit = (v) => v < 0 ? 0 : v > 1 ? 1 : v;
+var lerp = (a, b, t) => a + (b - a) * t;
+function parallaxOf(layer) {
+  return layer.parallax ?? clampUnit(1 - layer.depth);
+}
+function hazeColor(rgb, haze, atmosphere) {
+  const t = clampUnit(haze);
+  const desat = atmosphere.desaturate * t;
+  const lift = atmosphere.lift * t;
+  const blend = atmosphere.density * t;
+  const out = [rgb[0], rgb[1], rgb[2]];
+  const luma = out[0] * 0.299 + out[1] * 0.587 + out[2] * 0.114;
+  for (let c = 0; c < 3; c += 1) {
+    let v = out[c];
+    v = lerp(v, luma, desat);
+    v = lerp(v, lerp(v, atmosphere.fog[c], 0.5), lift);
+    v = lerp(v, atmosphere.fog[c], blend);
+    out[c] = v;
+  }
+  return [out[0], out[1], out[2]];
+}
+function composeParallax(out, outW, outH, layers, camera, atmosphere) {
+  const ordered = [...layers].sort((a, b) => b.depth - a.depth);
+  for (const layer of ordered) {
+    const factor = parallaxOf(layer);
+    const shiftX = Math.round(-camera.x * factor);
+    const shiftY = Math.round(-camera.y * factor) + (layer.offsetY ?? 0);
+    const wrapX = layer.wrapX ?? true;
+    const haze = clampUnit(layer.depth);
+    for (let y = 0; y < outH; y += 1) {
+      let sy = y - shiftY;
+      if (sy < 0 || sy >= layer.height) continue;
+      for (let x = 0; x < outW; x += 1) {
+        let sx = x - shiftX;
+        if (wrapX) sx = (sx % layer.width + layer.width) % layer.width;
+        else if (sx < 0 || sx >= layer.width) continue;
+        const si = (sy * layer.width + sx) * 4;
+        const alpha = layer.pixels[si + 3] / 255;
+        if (alpha <= 0) continue;
+        const src = [layer.pixels[si], layer.pixels[si + 1], layer.pixels[si + 2]];
+        const hazed = haze > 0 ? hazeColor(src, haze, atmosphere) : src;
+        const di = (y * outW + x) * 4;
+        out[di] = lerp(out[di], hazed[0], alpha);
+        out[di + 1] = lerp(out[di + 1], hazed[1], alpha);
+        out[di + 2] = lerp(out[di + 2], hazed[2], alpha);
+        out[di + 3] = 255;
+      }
+    }
+  }
+}
+
+// src/scene/sceneRender.ts
+function resolveSceneLayers(spec, source) {
+  return spec.layers.map((layer) => {
+    const image = source.readRegion(layer.source.page, layer.source.tile, layer.source.tilesW, layer.source.tilesH);
+    const resolved = {
+      pixels: image.pixels,
+      width: image.width,
+      height: image.height,
+      depth: layer.depth,
+      wrapX: layer.wrapX,
+      offsetY: layer.offsetY
+    };
+    if (layer.parallax !== void 0) resolved.parallax = layer.parallax;
+    return resolved;
+  });
+}
+function cameraAt(spec, frame, base = { x: 0, y: 0 }) {
+  return {
+    x: base.x + (spec.camera.autoScrollX ?? 0) * frame,
+    y: base.y + (spec.camera.autoScrollY ?? 0) * frame
+  };
+}
+function fillSky(out, width, height, atmosphere, horizonY = height) {
+  const zenith = [
+    Math.round(atmosphere.fog[0] * 0.16),
+    Math.round(atmosphere.fog[1] * 0.16),
+    Math.round(atmosphere.fog[2] * 0.22)
+  ];
+  for (let y = 0; y < height; y += 1) {
+    const t = Math.min(1, horizonY > 0 ? y / horizonY : 1);
+    const r = Math.round(zenith[0] + (atmosphere.fog[0] - zenith[0]) * t);
+    const g = Math.round(zenith[1] + (atmosphere.fog[1] - zenith[1]) * t);
+    const b = Math.round(zenith[2] + (atmosphere.fog[2] - zenith[2]) * t);
+    for (let x = 0; x < width; x += 1) {
+      const i = (y * width + x) * 4;
+      out[i] = r;
+      out[i + 1] = g;
+      out[i + 2] = b;
+      out[i + 3] = 255;
+    }
+  }
+}
+function renderSceneBackdrop(out, width, height, layers, spec, frame, base) {
+  fillSky(out, width, height, spec.atmosphere);
+  composeParallax(out, width, height, layers, cameraAt(spec, frame, base), spec.atmosphere);
+}
+
+// src/scene/sceneComposite.ts
+function matchesKey(r, g, b, key, tolerance) {
+  return Math.abs(r - key[0]) <= tolerance && Math.abs(g - key[1]) <= tolerance && Math.abs(b - key[2]) <= tolerance;
+}
+function compositeOverBackdrop(cartFrame, backdrop, width, height, keyRgb, tolerance = 0, out) {
+  const target = out ?? new Uint8ClampedArray(width * height * 4);
+  const count = width * height;
+  for (let i = 0; i < count; i += 1) {
+    const o = i * 4;
+    const r = cartFrame[o], g = cartFrame[o + 1], b = cartFrame[o + 2];
+    if (matchesKey(r, g, b, keyRgb, tolerance)) {
+      target[o] = backdrop[o];
+      target[o + 1] = backdrop[o + 1];
+      target[o + 2] = backdrop[o + 2];
+      target[o + 3] = 255;
+    } else {
+      target[o] = r;
+      target[o + 1] = g;
+      target[o + 2] = b;
+      target[o + 3] = 255;
+    }
+  }
+  return target;
+}
+
+// src/scene/SceneBackdropSurface.ts
+var SceneBackdropSurface = class {
+  constructor(inner, width, height, layers, spec, keyRgb) {
+    this.inner = inner;
+    this.width = width;
+    this.height = height;
+    this.layers = layers;
+    this.spec = spec;
+    this.keyRgb = keyRgb;
+    this.frame = 0;
+    const size = width * height * 4;
+    this.backdrop = new Uint8ClampedArray(size);
+    this.composited = new Uint8ClampedArray(size);
+    this.presented = new Uint8Array(this.composited.buffer);
+  }
+  blit(rgba) {
+    const cartFrame = new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength);
+    renderSceneBackdrop(this.backdrop, this.width, this.height, this.layers, this.spec, this.frame);
+    compositeOverBackdrop(cartFrame, this.backdrop, this.width, this.height, this.keyRgb, 0, this.composited);
+    this.inner.blit(this.presented);
+    this.frame += 1;
+  }
+  destroy() {
+    this.inner.destroy();
+  }
+};
+
 // src/player.ts
 function shouldUseTouch(scheme, view) {
   if (scheme === "touch") return true;
@@ -2461,12 +2671,23 @@ var Player = class {
       this.console.setMaterialCapture(Boolean(this.options.lighting));
       this.lastMailboxSeq = this.console.readMailbox()[0] ?? 0;
       const scale = this.options.scale ?? "fit";
-      const makeBaseSurface = async (target) => {
-        if (this.options.lighting) {
-          this.litSurface = await LitCanvasSurface.create(target, scale, this.model, this.options.lighting);
-          return this.litSurface;
+      const scene = this.options.scene;
+      let backdrop = null;
+      if (scene) {
+        this.cartSource = createCartSpriteSource(module, preparedBytes, this.model.paletteSize) ?? void 0;
+        if (this.cartSource) {
+          backdrop = {
+            layers: resolveSceneLayers(scene, this.cartSource.source),
+            keyRgb: this.cartSource.paletteRgb(scene.keyColor)
+          };
         }
-        return new CanvasSurface(target, scale, this.model);
+      }
+      const makeBaseSurface = async (target) => {
+        const base = this.options.lighting ? this.litSurface = await LitCanvasSurface.create(target, scale, this.model, this.options.lighting) : new CanvasSurface(target, scale, this.model);
+        if (scene && backdrop) {
+          return new SceneBackdropSurface(base, this.model.width, this.model.height, backdrop.layers, scene, backdrop.keyRgb);
+        }
+        return base;
       };
       const postFx = this.options.postFx;
       if (postFx && anyPostFxEnabled(postFx)) {
@@ -2593,6 +2814,7 @@ var Player = class {
     this.touch?.destroy();
     this.audio?.destroy();
     this.surface?.destroy();
+    this.cartSource?.dispose();
     this.console?.dispose();
   }
 };
@@ -2644,6 +2866,78 @@ function resolveUnlockedAchievements(unlockHashes, registered) {
   return registered.filter((achievement) => unlocked.has(achievement.hash >>> 0));
 }
 
+// src/scene/sceneModel.ts
+var MAX_LAYERS = 8;
+var MAX_TILE = 255;
+var MAX_TILES_PER_SIDE = 32;
+var isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var num = (v, fallback) => typeof v === "number" && Number.isFinite(v) ? v : fallback;
+var clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+var clampInt = (v, lo, hi) => Math.round(clamp(v, lo, hi));
+function parseRgb(raw, fallback) {
+  if (!Array.isArray(raw) || raw.length < 3) return fallback;
+  return [
+    clampInt(num(raw[0], fallback[0]), 0, 255),
+    clampInt(num(raw[1], fallback[1]), 0, 255),
+    clampInt(num(raw[2], fallback[2]), 0, 255)
+  ];
+}
+var DEFAULT_ATMOSPHERE = {
+  fog: [96, 116, 168],
+  density: 0.85,
+  desaturate: 0.7,
+  lift: 0.4
+};
+function parseRegion(raw) {
+  if (!isObject(raw)) return null;
+  const page = raw.page === 1 ? 1 : 0;
+  const tile = clampInt(num(raw.tile, -1), 0, MAX_TILE);
+  const tilesW = clampInt(num(raw.tilesW, 1), 1, MAX_TILES_PER_SIDE);
+  const tilesH = clampInt(num(raw.tilesH, 1), 1, MAX_TILES_PER_SIDE);
+  if (!Number.isInteger(tile) || num(raw.tile, -1) < 0) return null;
+  return { page, tile, tilesW, tilesH };
+}
+function parseLayer(raw) {
+  if (!isObject(raw)) return null;
+  const source = parseRegion(raw.source);
+  if (!source) return null;
+  const layer = {
+    source,
+    depth: clamp(num(raw.depth, 0.5), 0, 1),
+    wrapX: raw.wrapX === void 0 ? true : Boolean(raw.wrapX),
+    offsetY: Math.round(num(raw.offsetY, 0))
+  };
+  if (typeof raw.parallax === "number" && Number.isFinite(raw.parallax)) {
+    layer.parallax = clamp(raw.parallax, 0, 4);
+  }
+  return layer;
+}
+function parseScene(raw) {
+  if (!isObject(raw)) return null;
+  const layersRaw = Array.isArray(raw.layers) ? raw.layers : [];
+  const layers = [];
+  for (const entry of layersRaw) {
+    if (layers.length >= MAX_LAYERS) break;
+    const layer = parseLayer(entry);
+    if (layer) layers.push(layer);
+  }
+  if (layers.length === 0) return null;
+  const atmoRaw = isObject(raw.atmosphere) ? raw.atmosphere : {};
+  const atmosphere = {
+    fog: parseRgb(atmoRaw.fog, DEFAULT_ATMOSPHERE.fog),
+    density: clamp(num(atmoRaw.density, DEFAULT_ATMOSPHERE.density), 0, 1),
+    desaturate: clamp(num(atmoRaw.desaturate, DEFAULT_ATMOSPHERE.desaturate), 0, 1),
+    lift: clamp(num(atmoRaw.lift, DEFAULT_ATMOSPHERE.lift), 0, 1)
+  };
+  const camRaw = isObject(raw.camera) ? raw.camera : {};
+  const camera = {
+    autoScrollX: num(camRaw.autoScrollX, 0),
+    autoScrollY: num(camRaw.autoScrollY, 0)
+  };
+  const keyColor = clampInt(num(raw.keyColor, 0), 0, MAX_TILE);
+  return { layers, atmosphere, camera, keyColor };
+}
+
 // src/index.ts
 function mount(container, options) {
   const player = new Player(container, options);
@@ -2662,6 +2956,7 @@ export {
   CARTBOX_SDK_LUA,
   CartridgeLoadError,
   ConsoleButton,
+  DEFAULT_ATMOSPHERE,
   DEFAULT_KEY_BINDINGS,
   DEFAULT_MODEL_ID,
   EVENT_CAPACITY,
@@ -2684,8 +2979,11 @@ export {
   ReplayError,
   ReplayRecorder,
   ReplaySource,
+  SceneBackdropSurface,
   WebgpuLightingLayer,
   anyPostFxEnabled,
+  compositeOverBackdrop,
+  createCartSpriteSource,
   createConsole,
   createFlatMaterial,
   createLightingLayer,
@@ -2709,9 +3007,12 @@ export {
   paramKey,
   parsePostFxSettings,
   parseReplay,
+  parseScene,
   randomSeed,
   readCartCode,
+  renderSceneBackdrop,
   resolveButton,
+  resolveSceneLayers,
   resolveUnlockedAchievements,
   runReplayEvents,
   seedCartridge,

@@ -17,6 +17,9 @@ import { ReplayRecorder, ReplaySource, hashCart, randomSeed, type Replay } from 
 import { seedCartridge } from "./cartseed.js";
 import { injectSdk } from "./sdk.js";
 import { decodeLights, decodeMailbox } from "./mailbox.js";
+import { createCartSpriteSource, type CartSpriteSource } from "./scene/cartSpriteSource.js";
+import { resolveSceneLayers } from "./scene/sceneRender.js";
+import { SceneBackdropSurface } from "./scene/SceneBackdropSurface.js";
 import type { ControlScheme, PlayerOptions } from "./types.js";
 
 /**
@@ -38,6 +41,7 @@ export class Player {
   private keyboard?: KeyboardInput;
   private touch?: TouchInput;
   private console?: ConsoleInstance;
+  private cartSource?: CartSpriteSource;
   private readonly model: ConsoleModel;
 
   private recorder?: ReplayRecorder;
@@ -96,16 +100,34 @@ export class Player {
       this.lastMailboxSeq = this.console.readMailbox()[0] ?? 0;
 
       const scale = this.options.scale ?? "fit";
+      // A declared parallax scene: read the cart's own sprite regions for the
+      // backdrop layers once (their pixels are static), then wrap the base surface
+      // so each frame composites the backdrop behind the cart's live frame. Reads
+      // the cart from a separate cart object built from the same bytes; if that
+      // fails the cart simply plays without a backdrop.
+      const scene = this.options.scene;
+      let backdrop: { layers: ReturnType<typeof resolveSceneLayers>; keyRgb: readonly [number, number, number] } | null = null;
+      if (scene) {
+        this.cartSource = createCartSpriteSource(module, preparedBytes, this.model.paletteSize) ?? undefined;
+        if (this.cartSource) {
+          backdrop = {
+            layers: resolveSceneLayers(scene, this.cartSource.source),
+            keyRgb: this.cartSource.paletteRgb(scene.keyColor),
+          };
+        }
+      }
       // The base surface renders the cart (optionally relit). With an active FX
       // stack it draws offscreen and PostFxSurface presents it through the
       // effect chain; if FX can't run (no WebGL), the base surface mounts
       // directly, so post-processing never blocks playback.
       const makeBaseSurface = async (target: HTMLElement): Promise<DisplaySurface> => {
-        if (this.options.lighting) {
-          this.litSurface = await LitCanvasSurface.create(target, scale, this.model, this.options.lighting);
-          return this.litSurface;
+        const base: DisplaySurface = this.options.lighting
+          ? (this.litSurface = await LitCanvasSurface.create(target, scale, this.model, this.options.lighting))
+          : new CanvasSurface(target, scale, this.model);
+        if (scene && backdrop) {
+          return new SceneBackdropSurface(base, this.model.width, this.model.height, backdrop.layers, scene, backdrop.keyRgb);
         }
-        return new CanvasSurface(target, scale, this.model);
+        return base;
       };
       const postFx = this.options.postFx;
       if (postFx && anyPostFxEnabled(postFx)) {
@@ -288,6 +310,7 @@ export class Player {
     this.touch?.destroy();
     this.audio?.destroy();
     this.surface?.destroy();
+    this.cartSource?.dispose();
     this.console?.dispose();
   }
 }

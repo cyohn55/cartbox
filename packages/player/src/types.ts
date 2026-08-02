@@ -10,6 +10,7 @@ import type { Replay } from "./replay.js";
 import type { MailboxEvent } from "./mailbox.js";
 import type { LightingOptions } from "./lighting/types.js";
 import type { PostFxSettings } from "./fx/postfx.js";
+import type { SceneSpec } from "./scene/sceneModel.js";
 
 /**
  * Which input methods the player wires up.
@@ -83,6 +84,15 @@ export interface PlayerOptions {
    * enabled or WebGL is unavailable, so it can never stop a cart from playing.
    */
   postFx?: PostFxSettings;
+  /**
+   * Composite a declared parallax scene behind the cart's frame: layers point at
+   * regions of the cart's own sprite sheet at depths, rendered with parallax
+   * scroll + aerial-perspective atmosphere and chroma-keyed under the cart's
+   * foreground (its background {@link SceneSpec.keyColor}). Runs before lighting
+   * and post-FX, so both finish the backdrop and foreground together. Parse a
+   * cart's sidecar into a SceneSpec with `parseScene`.
+   */
+  scene?: SceneSpec;
 }
 
 /** Handle returned by {@link mount} for controlling a live player instance. */

@@ -435,6 +435,129 @@ declare function hexToRgb01(hex: string): [number, number, number];
 declare function uniformsFromSettings(settings: PostFxSettings): PostFxUniforms;
 
 /**
+ * Gap #3 — a runtime parallax + atmosphere compositor.
+ *
+ * The editor already has a preview-only layered-scene compositor
+ * (packages/editor/src/render/layeredScene.ts) with parallax projection, but no
+ * *aerial perspective*: the thing that makes REPLACED / THE LAST NIGHT read as
+ * deep space rather than stacked stickers — distant layers go dimmer, bluer,
+ * lower-contrast and haze toward the sky. Carts hand-roll parallax scroll in Lua
+ * today; the atmosphere is the hard part they can't easily fake.
+ *
+ * This module is the reusable core of the runtime system: pure, DOM-free,
+ * RGBA-in / RGBA-out (same shape as renderLitRgba / the editor compositor), so it
+ * can be unit-tested and later driven by a cart-facing SDK/sidecar and composited
+ * ahead of the lighting + post-FX passes. Intended app home:
+ * packages/player/src/scene/parallaxScene.ts.
+ */
+type Rgb$1 = readonly [number, number, number];
+/** One depth layer of the scene. */
+interface ParallaxLayer {
+    /** Straight-alpha RGBA pixels, width*height*4 bytes. */
+    pixels: Uint8ClampedArray;
+    width: number;
+    height: number;
+    /**
+     * Depth, 0 (nearest, on the camera plane) .. 1 (farthest, at the horizon).
+     * Drives both how little the layer parallaxes and how much atmosphere it takes.
+     */
+    depth: number;
+    /**
+     * How much the layer shifts with the camera: 1 = locked to the world (full
+     * parallax), 0 = locked to the screen. Defaults to `1 - depth` so near layers
+     * slide under far ones without the author computing anything.
+     */
+    parallax?: number;
+    /** Tile the layer horizontally when the camera scrolls past its edge. Default true. */
+    wrapX?: boolean;
+    /** Vertical placement in the output, in pixels (align a horizon). Default 0. */
+    offsetY?: number;
+}
+/** Aerial-perspective parameters, shared by the whole scene. */
+interface AtmosphereParams {
+    /** The haze/sky colour distance fades toward (each channel 0..255). */
+    fog: Rgb$1;
+    /** 0..1 — how strongly the farthest layer is pulled toward `fog`. */
+    density: number;
+    /** 0..1 — how much colour the farthest layer loses (aerial desaturation). */
+    desaturate: number;
+    /** 0..1 — how much the farthest layer's contrast flattens (haze lifts blacks). */
+    lift: number;
+}
+/** The camera, in world pixels; only its offset matters for parallax. */
+interface ParallaxCamera {
+    x: number;
+    y: number;
+}
+
+/**
+ * Gap #3 part 2 — the cart-facing `scene` model.
+ *
+ * A cart declares a parallax scene the way it declares fx / rig / materials:
+ * a JSON sidecar validated on load. Each layer points at a region of the cart's
+ * OWN sprite sheet (authored in the editor), sits at a depth, and the runtime
+ * composites the layers with parallax scroll + aerial-perspective atmosphere
+ * (see parallaxScene.ts) BEHIND the cart's interactive foreground. This is what
+ * turns "hand-roll parallax + fake haze in Lua" into "author art, declare depth".
+ *
+ * This module is the pure, DOM-free data + validation half (mirrors the defensive
+ * parse style of apps/web/src/lib/rig.ts): parse untrusted JSON into a safe
+ * SceneSpec, dropping anything malformed rather than throwing. The rendering half
+ * is sceneRender.ts. Intended app homes: apps/web/src/lib/scene.ts (parse) +
+ * packages/player/src/scene/ (render).
+ */
+
+/** A region of the sprite sheet backing one parallax layer. */
+interface SpriteRegion {
+    /** Sprite page: 0 (fg) or 1 (bg). */
+    page: 0 | 1;
+    /** Top-left tile index of the region within the page. */
+    tile: number;
+    /** Region size in tiles. */
+    tilesW: number;
+    tilesH: number;
+}
+/** One declared parallax layer. */
+interface SceneLayer {
+    source: SpriteRegion;
+    /** 0 (nearest) .. 1 (horizon) — drives parallax factor + atmosphere. */
+    depth: number;
+    /** Optional explicit parallax factor (else derived from depth). */
+    parallax?: number;
+    /** Tile horizontally as the camera scrolls. Default true. */
+    wrapX?: boolean;
+    /** Vertical placement in the backdrop, in pixels. Default 0. */
+    offsetY?: number;
+}
+/** How the scene camera moves each frame. */
+interface SceneCamera {
+    /** Auto-scroll in px/frame (a living backdrop with no cart input). Default 0. */
+    autoScrollX?: number;
+    autoScrollY?: number;
+}
+/** A full declared scene. */
+interface SceneSpec {
+    layers: SceneLayer[];
+    atmosphere: AtmosphereParams;
+    camera: SceneCamera;
+    /**
+     * The palette index the cart leaves as "background": the runtime shows the
+     * parallax backdrop through every pixel the cart drew in this colour, and keeps
+     * the rest as the cart's own foreground. Default 0 (TIC-80's conventional
+     * background colour).
+     */
+    keyColor: number;
+}
+/** The default atmosphere — a cool dusk haze, if a cart omits it. */
+declare const DEFAULT_ATMOSPHERE: AtmosphereParams;
+/**
+ * Parse untrusted sidecar JSON into a SceneSpec, or null when there is no usable
+ * scene (no object, or every layer malformed). Layers are validated individually
+ * and bad ones dropped — losing one layer beats refusing the whole backdrop.
+ */
+declare function parseScene(raw: unknown): SceneSpec | null;
+
+/**
  * Public and shared types for @cartbox/player.
  *
  * Kept free of DOM/engine imports so it can be consumed by any module without
@@ -510,6 +633,15 @@ interface PlayerOptions {
      * enabled or WebGL is unavailable, so it can never stop a cart from playing.
      */
     postFx?: PostFxSettings;
+    /**
+     * Composite a declared parallax scene behind the cart's frame: layers point at
+     * regions of the cart's own sprite sheet at depths, rendered with parallax
+     * scroll + aerial-perspective atmosphere and chroma-keyed under the cart's
+     * foreground (its background {@link SceneSpec.keyColor}). Runs before lighting
+     * and post-FX, so both finish the backdrop and foreground together. Parse a
+     * cart's sidecar into a SceneSpec with `parseScene`.
+     */
+    scene?: SceneSpec;
 }
 /** Handle returned by {@link mount} for controlling a live player instance. */
 interface PlayerHandle {
@@ -1094,6 +1226,141 @@ declare class PostFxSurface implements DisplaySurface {
 }
 
 /**
+ * Gap #3 part 2 — rendering a declared scene.
+ *
+ * Turns a {@link SceneSpec} (sceneModel.ts) into a composited parallax backdrop:
+ * each layer's sprite-sheet region is read to RGBA through a {@link
+ * SpriteRegionSource}, becomes a {@link ParallaxLayer}, and the whole set is
+ * composited with parallax scroll + aerial-perspective atmosphere by
+ * composeParallax. The camera is driven by the scene's auto-scroll plus an
+ * optional cart-supplied offset (so gameplay can pan the world).
+ *
+ * Pure and DOM-free: the sprite source is a tiny interface the real engine (or a
+ * test) satisfies, so this is unit-testable without a WASM core or a canvas.
+ * Intended app home: packages/player/src/scene/.
+ */
+
+/** An RGBA image read out of the cart's sprite sheet. */
+interface RegionImage {
+    pixels: Uint8ClampedArray;
+    width: number;
+    height: number;
+}
+/** Reads a rectangular tile region of the cart's sprite sheet as straight-alpha RGBA. */
+interface SpriteRegionSource {
+    readRegion(page: 0 | 1, tile: number, tilesW: number, tilesH: number): RegionImage;
+}
+/**
+ * Resolve a scene's layers to renderable {@link ParallaxLayer}s by reading each
+ * region's pixels once. Call this when the scene or the cart's art changes, not
+ * every frame — the images are static; only the camera moves.
+ */
+declare function resolveSceneLayers(spec: SceneSpec, source: SpriteRegionSource): ParallaxLayer[];
+/**
+ * Render the full backdrop for one frame into `out`: sky, then the parallax
+ * layers with atmosphere at the frame's camera. `layers` come from
+ * {@link resolveSceneLayers} (resolved once and reused).
+ */
+declare function renderSceneBackdrop(out: Uint8ClampedArray, width: number, height: number, layers: readonly ParallaxLayer[], spec: SceneSpec, frame: number, base?: ParallaxCamera): void;
+
+/**
+ * Gap #3 part 3 — composite a cart's live frame over the parallax backdrop.
+ *
+ * A TIC-80 cart draws an opaque, full-screen framebuffer, so a backdrop can only
+ * show if the cart LEAVES it room: the runtime treats every pixel the cart drew
+ * in its background "key" colour as transparent and shows the backdrop there,
+ * keeping the rest as the cart's foreground. This is chroma-keying on the cart's
+ * own palette background (index 0 by convention; configurable via the scene's
+ * keyColor) — the standard, zero-cost way to layer a backdrop behind sprite art.
+ *
+ * It runs on the RAW cart frame, before lighting + post-FX, so the composited
+ * image (backdrop + foreground) is what those later passes finish together.
+ *
+ * Pure and DOM-free (RGBA in / RGBA out). Intended app home:
+ * packages/player/src/scene/.
+ */
+
+/**
+ * Composite `cartFrame` over `backdrop`: where the cart pixel matches `keyRgb`
+ * (its background colour, resolved from the cart palette), show the backdrop;
+ * everywhere else keep the cart's own pixel.
+ *
+ * @param cartFrame The cart's raw RGBA framebuffer (width*height*4).
+ * @param backdrop  The rendered scene backdrop, same dimensions.
+ * @param width     Framebuffer width.
+ * @param height    Framebuffer height.
+ * @param keyRgb    The background colour to key out (the cart palette's keyColor).
+ * @param tolerance Per-channel match tolerance (0 = exact). Default 0.
+ * @param out       Optional target buffer; defaults to a fresh one.
+ * @returns The composited RGBA (the same array as `out` when supplied).
+ */
+declare function compositeOverBackdrop(cartFrame: Uint8ClampedArray, backdrop: Uint8ClampedArray, width: number, height: number, keyRgb: Rgb$1, tolerance?: number, out?: Uint8ClampedArray): Uint8ClampedArray;
+
+/**
+ * A {@link SpriteRegionSource} that reads a loaded cart's sprite sheet at runtime.
+ *
+ * The scene backdrop's layers reference regions of the cart's OWN sprite art; to
+ * render them the player reads those tiles out of a cart object created from the
+ * same .tic bytes (the `cbx_cart_*` authoring API the engine exposes), resolves
+ * each pixel through the cart palette, and returns straight-alpha RGBA — palette
+ * index 0 (the sheet's transparent colour) becomes a hole so sky shows through.
+ *
+ * Bit depth is derived from the model's palette size (Classic packs 4bpp, Pro and
+ * the rest are 8bpp), mirroring the editor's tile codec, so no engine change is
+ * needed. Pure apart from the WASM reads; the module handle is loosely typed
+ * because the engine glue is (matching engine.ts).
+ */
+
+/** A region source plus the cart palette lookup + teardown the player needs. */
+interface CartSpriteSource {
+    source: SpriteRegionSource;
+    /** The RGB of a cart palette index (e.g. the scene's background keyColor). */
+    paletteRgb(index: number): Rgb$1;
+    /** Free the cart object. */
+    dispose(): void;
+}
+type EngineModule = any;
+/**
+ * Build a region source over a cart's bytes. Returns the source plus a `dispose`
+ * that frees the cart object; call it when the player tears down. Returns null if
+ * the engine lacks the cart API or the cart fails to load, so the caller can skip
+ * the backdrop rather than crash.
+ */
+declare function createCartSpriteSource(module: EngineModule, bytes: Uint8Array, paletteSize: number): CartSpriteSource | null;
+
+/**
+ * SceneBackdropSurface — a display surface that draws a parallax scene backdrop
+ * behind the cart's live frame, then presents the result through an inner surface.
+ *
+ * It decorates any {@link DisplaySurface} (plain 2D, lit, or the FX chain's base):
+ * each frame it renders the declared backdrop (parallax layers + aerial-perspective
+ * atmosphere) at the scene camera, chroma-keys the cart's own frame over it (the
+ * cart's background colour shows the backdrop, its foreground is kept), and blits
+ * the composite to the inner surface. Because it runs on the RAW frame before the
+ * inner surface, any lighting / post-FX the inner surface applies finishes the
+ * backdrop and foreground together.
+ *
+ * The layers are resolved once (their pixels are static); only the camera advances
+ * per frame, so per-frame cost is one composite pass.
+ */
+
+declare class SceneBackdropSurface implements DisplaySurface {
+    private readonly inner;
+    private readonly width;
+    private readonly height;
+    private readonly layers;
+    private readonly spec;
+    private readonly keyRgb;
+    private frame;
+    private readonly backdrop;
+    private readonly composited;
+    private readonly presented;
+    constructor(inner: DisplaySurface, width: number, height: number, layers: readonly ParallaxLayer[], spec: SceneSpec, keyRgb: Rgb$1);
+    blit(rgba: Uint8Array): void;
+    destroy(): void;
+}
+
+/**
  * @cartbox/player — public entry point.
  *
  * Usage:
@@ -1121,4 +1388,4 @@ declare class PostFxSurface implements DisplaySurface {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type BuiltLightingRenderer, CARTBOX_SDK_LUA, CartridgeLoadError, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type InnerSurfaceFactory, type InputChange, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MODELS, type MailboxEvent, type MailboxEventKind, type MailboxRead, type MaterialBuffer, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, POST_FX_EFFECTS, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type Rgb, type ScaleMode, type Vec3, type VerificationResult, WebgpuLightingLayer, anyPostFxEnabled, createConsole, createFlatMaterial, createLightingLayer, decodeLights, decodeMailbox, defaultPostFxSettings, extractScore, extractUnlocks, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parsePostFxSettings, parseReplay, randomSeed, readCartCode, resolveButton, resolveUnlockedAchievements, runReplayEvents, seedCartridge, serializeReplay, shade, uniformsFromSettings, verifyReplayScore };
+export { type AtmosphereParams, type BuiltLightingRenderer, CARTBOX_SDK_LUA, type CartSpriteSource, CartridgeLoadError, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type InnerSurfaceFactory, type InputChange, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MODELS, type MailboxEvent, type MailboxEventKind, type MailboxRead, type MaterialBuffer, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, POST_FX_EFFECTS, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, type Vec3, type VerificationResult, WebgpuLightingLayer, anyPostFxEnabled, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeLights, decodeMailbox, defaultPostFxSettings, extractScore, extractUnlocks, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parsePostFxSettings, parseReplay, parseScene, randomSeed, readCartCode, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, seedCartridge, serializeReplay, shade, uniformsFromSettings, verifyReplayScore };
