@@ -26,7 +26,7 @@ import { parseRig, type WireRig } from "@/lib/rig";
 import { parseMaterials, type WireMaterials } from "@/lib/materials";
 import { draftBytes, loadCartDraft } from "@/lib/localCartStore";
 import { findDemoCart, demoCartUrl } from "@/lib/demoCatalog";
-import { parsePostFxSettings, parseScene, type PostFxSettings, type SceneSpec } from "@cartbox/player";
+import { parsePostFxSettings, parseScene, parseAnim, type AnimSpec, type PostFxSettings, type SceneSpec } from "@cartbox/player";
 import { EditorWorkbench } from "./EditorWorkbench";
 
 interface StaticCartEditorProps {
@@ -42,6 +42,7 @@ interface ResolvedCart {
   materials: WireMaterials | null;
   voxel: string | null;
   scene: SceneSpec | null;
+  anim: AnimSpec | null;
 }
 
 function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
@@ -64,6 +65,7 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
         materials: parseMaterials(draft.materialsJson ? JSON.parse(draft.materialsJson) : null),
         voxel: draft.voxelJson,
         scene: parseScene(draft.sceneJson ? JSON.parse(draft.sceneJson) : null),
+        anim: parseAnim(draft.animJson ? JSON.parse(draft.animJson) : null),
       });
       return () => URL.revokeObjectURL(blobUrl);
     }
@@ -76,6 +78,7 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
       materials: null,
       voxel: null,
       scene: null,
+      anim: null,
     });
     return undefined;
   }, [cartId]);
@@ -101,6 +104,7 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
       initialMaterials={resolved.materials}
       initialVoxel={resolved.voxel}
       initialScene={resolved.scene}
+      initialAnim={resolved.anim}
     />
   );
 }

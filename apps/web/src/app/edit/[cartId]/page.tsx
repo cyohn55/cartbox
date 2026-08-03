@@ -5,7 +5,7 @@
  * with no stored bytes opens on the demo seed.
  */
 
-import { parsePostFxSettings, parseScene, type PostFxSettings, type SceneSpec } from "@cartbox/player";
+import { parsePostFxSettings, parseScene, parseAnim, type AnimSpec, type PostFxSettings, type SceneSpec } from "@cartbox/player";
 
 import { serviceClient } from "@/lib/supabase";
 import { publicUrl } from "@/lib/storage";
@@ -50,13 +50,15 @@ interface CartTarget {
   voxel: string | null;
   /** Persisted parallax-scene backdrop, validated, or null when absent/malformed. */
   scene: SceneSpec | null;
+  /** Persisted animation timeline, validated, or null when absent/malformed. */
+  anim: AnimSpec | null;
 }
 
 async function resolveCart(cartId: string): Promise<CartTarget> {
   try {
     const { data } = await serviceClient()
       .from("carts")
-      .select("title, r2_key, console_model, rig, fx, materials, voxel, scene")
+      .select("title, r2_key, console_model, rig, fx, materials, voxel, scene, anim")
       .eq("id", cartId)
       .maybeSingle();
     return {
@@ -68,11 +70,12 @@ async function resolveCart(cartId: string): Promise<CartTarget> {
       materials: parseMaterials(data?.materials),
       voxel: parseVoxelPayload(data?.voxel),
       scene: parseScene(data?.scene),
+      anim: parseAnim(data?.anim),
     };
   } catch {
     // A missing `voxel`/`scene` column (migration not yet applied) lands here too,
     // and simply opens the editor with no sculpt/backdrop rather than failing.
-    return { name: "Untitled cartridge", cartUrl: null, storedModel: null, rig: null, fx: null, materials: null, voxel: null, scene: null };
+    return { name: "Untitled cartridge", cartUrl: null, storedModel: null, rig: null, fx: null, materials: null, voxel: null, scene: null, anim: null };
   }
 }
 
@@ -83,7 +86,7 @@ export default async function EditorPage({ params, searchParams }: EditorPagePro
     return <StaticCartEditor cartId={params.cartId} />;
   }
 
-  const { name, cartUrl, storedModel, rig, fx, materials, voxel, scene } = await resolveCart(params.cartId);
+  const { name, cartUrl, storedModel, rig, fx, materials, voxel, scene, anim } = await resolveCart(params.cartId);
   // A saved cart's persisted model is authoritative; a brand-new cart (no row)
   // takes the model from the ?model= param carried in from /edit/new.
   const modelId = resolveModelId(storedModel ?? searchParams.model);
@@ -102,6 +105,7 @@ export default async function EditorPage({ params, searchParams }: EditorPagePro
       initialMaterials={materials}
       initialVoxel={voxel}
       initialScene={scene}
+      initialAnim={anim}
     />
   );
 }

@@ -9,7 +9,7 @@ import { fetchCartridge } from "./cartridge.js";
 import { CanvasSurface, type DisplaySurface } from "./display.js";
 import { LitCanvasSurface } from "./lighting/LitCanvasSurface.js";
 import { PostFxSurface } from "./fx/PostFxSurface.js";
-import { anyPostFxEnabled } from "./fx/postfx.js";
+import { anyPostFxEnabled, type PostFxSettings } from "./fx/postfx.js";
 import { createConsole, loadEngineModule, type ConsoleInstance } from "./engine.js";
 import { GamepadState, KeyboardInput, TouchInput } from "./input.js";
 import { frameDurationMs, getModel, type ConsoleModel } from "./models.js";
@@ -20,6 +20,9 @@ import { decodeCamera, decodeLights, decodeMailbox } from "./mailbox.js";
 import { createCartSpriteSource, type CartSpriteSource } from "./scene/cartSpriteSource.js";
 import { resolveSceneLayers } from "./scene/sceneRender.js";
 import { SceneBackdropSurface } from "./scene/SceneBackdropSurface.js";
+import { AnimatedForegroundSurface } from "./anim/AnimatedForegroundSurface.js";
+import { evaluate } from "./anim/animPlayer.js";
+import type { AnimSpec } from "./anim/animModel.js";
 import type { ControlScheme, PlayerOptions } from "./types.js";
 
 /**
@@ -38,6 +41,12 @@ export class Player {
   private surface?: DisplaySurface;
   private litSurface?: LitCanvasSurface;
   private sceneSurface?: SceneBackdropSurface;
+  private foregroundSurface?: AnimatedForegroundSurface;
+  private postFxSurface?: PostFxSurface;
+  private basePostFx?: PostFxSettings;
+  private anim?: AnimSpec;
+  /** Presented-frame clock for animation, kept in lockstep with the scene backdrop. */
+  private presentFrame = 0;
   private audio?: AudioController;
   private keyboard?: KeyboardInput;
   private touch?: TouchInput;
@@ -107,41 +116,57 @@ export class Player {
       // the cart from a separate cart object built from the same bytes; if that
       // fails the cart simply plays without a backdrop.
       const scene = this.options.scene;
+      // Animation placements read the cart's sprite sheet too, so a cart source is
+      // built when either a scene backdrop OR foreground placements need it.
+      this.anim = this.options.anim;
+      const wantsForeground = Boolean(this.anim && this.anim.placements.length > 0);
       let backdrop: { layers: ReturnType<typeof resolveSceneLayers>; keyRgb: readonly [number, number, number] } | null = null;
-      if (scene) {
+      if (scene || wantsForeground) {
         this.cartSource = createCartSpriteSource(module, preparedBytes, this.model.paletteSize) ?? undefined;
-        if (this.cartSource) {
-          backdrop = {
-            layers: resolveSceneLayers(scene, this.cartSource.source),
-            keyRgb: this.cartSource.paletteRgb(scene.keyColor),
-          };
-        }
+      }
+      if (scene && this.cartSource) {
+        backdrop = {
+          layers: resolveSceneLayers(scene, this.cartSource.source),
+          keyRgb: this.cartSource.paletteRgb(scene.keyColor),
+        };
       }
       // The base surface renders the cart (optionally relit). With an active FX
       // stack it draws offscreen and PostFxSurface presents it through the
       // effect chain; if FX can't run (no WebGL), the base surface mounts
       // directly, so post-processing never blocks playback.
       const makeBaseSurface = async (target: HTMLElement): Promise<DisplaySurface> => {
-        const base: DisplaySurface = this.options.lighting
+        let surface: DisplaySurface = this.options.lighting
           ? (this.litSurface = await LitCanvasSurface.create(target, scale, this.model, this.options.lighting))
           : new CanvasSurface(target, scale, this.model);
+        // Foreground placements draw over the cart AND the backdrop, so they wrap
+        // the base surface FIRST (innermost); the scene backdrop then wraps around
+        // them, compositing behind the cart before placements land on top.
+        if (wantsForeground && this.cartSource) {
+          surface = this.foregroundSurface = new AnimatedForegroundSurface(
+            surface,
+            this.model.width,
+            this.model.height,
+            this.cartSource.source,
+          );
+        }
         if (scene && backdrop) {
-          return (this.sceneSurface = new SceneBackdropSurface(
-            base,
+          surface = this.sceneSurface = new SceneBackdropSurface(
+            surface,
             this.model.width,
             this.model.height,
             backdrop.layers,
             scene,
             backdrop.keyRgb,
-          ));
+          );
         }
-        return base;
+        return surface;
       };
       const postFx = this.options.postFx;
+      this.basePostFx = postFx;
       if (postFx && anyPostFxEnabled(postFx)) {
-        this.surface =
-          (await PostFxSurface.create(this.container, scale, this.model, postFx, makeBaseSurface)) ??
-          (await makeBaseSurface(this.container));
+        const fx = await PostFxSurface.create(this.container, scale, this.model, postFx, makeBaseSurface);
+        if (fx) this.postFxSurface = fx;
+        this.surface = fx ?? (await makeBaseSurface(this.container));
       } else {
         this.surface = await makeBaseSurface(this.container);
       }
@@ -297,7 +322,35 @@ export class Player {
       if (this.sceneSurface && this.console) {
         this.sceneSurface.setCameraBase(decodeCamera(this.console.readMailbox()));
       }
+      // Play the declared animation for this frame: route the sampled state to the
+      // scene layers, foreground placements, and post-FX before the frame is blit.
+      this.applyAnimation();
       this.surface?.blit(framebuffer);
+      this.presentFrame += 1; // advance in lockstep with the scene backdrop's own clock
+    }
+  }
+
+  /**
+   * Sample the declared animation at the current presented frame and route it to
+   * the surfaces that consume it. Feeds the scene backdrop's layer overrides, the
+   * foreground placements, and (only when animated) the post-FX values. Runs before
+   * blit so the composite reflects this frame; a no-op when no anim is declared.
+   */
+  private applyAnimation(): void {
+    if (!this.anim) return;
+    const state = evaluate(this.anim, this.presentFrame);
+
+    if (this.sceneSurface) {
+      const hasLayerOverrides = Object.keys(state.layers).length > 0;
+      this.sceneSurface.setLayerOverrides(hasLayerOverrides ? state.layers : null);
+    }
+    this.foregroundSurface?.setPlacements(state.placements);
+
+    if (this.postFxSurface && this.basePostFx && Object.keys(state.postfx).length > 0) {
+      this.postFxSurface.setSettings({
+        ...this.basePostFx,
+        values: { ...this.basePostFx.values, ...state.postfx },
+      });
     }
   }
 

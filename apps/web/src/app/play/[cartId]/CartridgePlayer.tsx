@@ -18,6 +18,7 @@ import {
   type PlayerHandle,
   type PostFxSettings,
   type SceneSpec,
+  type AnimSpec,
 } from "@cartbox/player";
 
 import { authHeaders } from "@/lib/supabase-browser";
@@ -32,11 +33,13 @@ interface CartridgePlayerProps {
   postFx: PostFxSettings | null;
   /** The cart's authored parallax-scene backdrop, or null when none is saved. */
   scene: SceneSpec | null;
+  /** The cart's authored animation timeline, or null when none is saved. */
+  anim: AnimSpec | null;
 }
 
 type SubmitState = "idle" | "working" | "submitted" | "error";
 
-export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, scene }: CartridgePlayerProps) {
+export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, scene, anim }: CartridgePlayerProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<PlayerHandle | null>(null);
   const bestScoreRef = useRef<number | null>(null);
@@ -71,6 +74,9 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       // The cart's authored parallax backdrop, composited behind the live
       // foreground via chroma-key before lighting/post-FX.
       scene: scene ?? undefined,
+      // The cart's authored animation, played host-side off the frame clock
+      // (drives scene layers, post-FX values, and foreground placements).
+      anim: anim ?? undefined,
       onReady: () => setStatus("ready"),
       onError: () => setStatus("error"),
       onEvent: (event: MailboxEvent) => {
@@ -86,7 +92,7 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
     handleRef.current = handle;
 
     return () => handle.destroy();
-  }, [cartUrl, engineUrl, modelId, postFx, scene]);
+  }, [cartUrl, engineUrl, modelId, postFx, scene, anim]);
 
   const togglePlayback = () => {
     const handle = handleRef.current;

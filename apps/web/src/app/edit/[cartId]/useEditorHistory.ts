@@ -31,7 +31,7 @@ import {
   type MaterialSwatches,
   type SpriteRig,
 } from "@cartbox/editor";
-import type { PostFxSettings, SceneSpec } from "@cartbox/player";
+import type { AnimSpec, PostFxSettings, SceneSpec } from "@cartbox/player";
 
 /** Idle gap after the last edit before a snapshot is committed as one undo step. */
 const COALESCE_MS = 400;
@@ -49,6 +49,8 @@ interface CartSnapshot {
   voxel: string | null;
   /** Authored parallax-scene backdrop (Scene tab), or null when the cart has none. */
   scene: SceneSpec | null;
+  /** Authored animation timeline (Anim tab), or null when the cart has none. */
+  anim: AnimSpec | null;
 }
 
 export interface EditorHistory {
@@ -68,6 +70,8 @@ export interface EditorHistory {
   setVoxel: (voxel: string) => void;
   scene: SceneSpec | null;
   setScene: (scene: SceneSpec | null) => void;
+  anim: AnimSpec | null;
+  setAnim: (anim: AnimSpec | null) => void;
   canUndo: boolean;
   canRedo: boolean;
   undo: () => void;
@@ -83,6 +87,7 @@ interface UseEditorHistoryArgs {
   initialMaterials: MaterialSwatches;
   initialVoxel: string | null;
   initialScene: SceneSpec | null;
+  initialAnim: AnimSpec | null;
   initialBank: number;
 }
 
@@ -97,6 +102,7 @@ function snapshotsEqual(a: CartSnapshot, b: CartSnapshot): boolean {
   if (JSON.stringify(a.rig) !== JSON.stringify(b.rig)) return false;
   if (JSON.stringify(a.materials) !== JSON.stringify(b.materials)) return false;
   if (JSON.stringify(a.scene) !== JSON.stringify(b.scene)) return false;
+  if (JSON.stringify(a.anim) !== JSON.stringify(b.anim)) return false;
   return a.voxel === b.voxel;
 }
 
@@ -116,6 +122,7 @@ export function useEditorHistory({
   initialMaterials,
   initialVoxel,
   initialScene,
+  initialAnim,
   initialBank,
 }: UseEditorHistoryArgs): EditorHistory {
   const [bank, setBankState] = useState(initialBank);
@@ -124,6 +131,7 @@ export function useEditorHistory({
   const [materials, setMaterialsState] = useState<MaterialSwatches>(initialMaterials);
   const [voxel, setVoxelState] = useState<string | null>(initialVoxel);
   const [scene, setSceneState] = useState<SceneSpec | null>(initialScene);
+  const [anim, setAnimState] = useState<AnimSpec | null>(initialAnim);
   const [revision, setRevision] = useState(0);
   // A monotonic version so canUndo/canRedo re-evaluate when the timeline moves.
   const [, setHistoryVersion] = useState(0);
@@ -136,6 +144,7 @@ export function useEditorHistory({
   const materialsRef = useRef(materials);
   const voxelRef = useRef(voxel);
   const sceneRef = useRef(scene);
+  const animRef = useRef(anim);
   const runnableRef = useRef(runnable);
   const applyingRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -154,6 +163,7 @@ export function useEditorHistory({
       materials: materialsRef.current,
       voxel: voxelRef.current,
       scene: sceneRef.current,
+      anim: animRef.current,
     };
   }, []);
 
@@ -206,6 +216,8 @@ export function useEditorHistory({
       setVoxelState(snapshot.voxel);
       sceneRef.current = snapshot.scene;
       setSceneState(snapshot.scene);
+      animRef.current = snapshot.anim;
+      setAnimState(snapshot.anim);
     } finally {
       applyingRef.current = false;
     }
@@ -275,6 +287,12 @@ export function useEditorHistory({
     notify();
   }, [notify]);
 
+  const setAnim = useCallback((next: AnimSpec | null) => {
+    animRef.current = next;
+    setAnimState(next);
+    notify();
+  }, [notify]);
+
   const history = historyRef.current;
   const canUndo = history?.canUndo() ?? false;
   const canRedo = history?.canRedo() ?? false;
@@ -294,6 +312,8 @@ export function useEditorHistory({
     setVoxel,
     scene,
     setScene,
+    anim,
+    setAnim,
     canUndo,
     canRedo,
     undo,

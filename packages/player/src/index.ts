@@ -176,6 +176,38 @@ export type {
   SpriteRegionSource,
 } from "./scene/index.js";
 
+// Runtime animation (optional): a cart declares clips/tracks/placements; the
+// player plays them host-side off the frame clock, driving scene-layer channels,
+// post-FX values, and foreground set-dressing — no cart code needed.
+export {
+  AnimatedForegroundSurface,
+  parseAnim,
+  evaluate,
+  sampleClipFrame,
+  sampleTrack,
+  pulse,
+  sway,
+  drift,
+  flicker,
+} from "./anim/index.js";
+export type {
+  AnimSpec,
+  AnimClip,
+  AnimTrack,
+  AnimTarget,
+  AnimPlacement,
+  Keyframe,
+  AnimMode,
+  TrackMode,
+  Ease,
+  LayerChannel,
+  PlacementChannel,
+  AnimState,
+  ResolvedPlacement,
+  ClipSample,
+  GeneratedTrack,
+} from "./anim/index.js";
+
 /**
  * Mounts a cartridge player into a container element and begins loading.
  *

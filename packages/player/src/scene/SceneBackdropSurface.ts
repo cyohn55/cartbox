@@ -20,10 +20,27 @@ import { composeParallax, prehazeLayers, type ParallaxCamera, type ParallaxLayer
 import { cameraAt, fillSky } from "./sceneRender.js";
 import type { SceneSpec } from "./sceneModel.js";
 
+/**
+ * Per-frame animation overrides for one layer, addressed by its index in the
+ * declared scene. Offsets ADD to the layer's authored placement (sway around a
+ * base); opacity/emissive are absolute. Deliberately structural — the scene does
+ * not depend on the anim module — and deliberately pixel-free, so the pre-hazed
+ * layer cache stays valid (sprite-frame swaps, which would invalidate it, are the
+ * foreground surface's job, not a scene layer's).
+ */
+export interface SceneLayerOverride {
+  opacity?: number;
+  offsetX?: number;
+  offsetY?: number;
+  emissive?: number;
+}
+
 export class SceneBackdropSurface implements DisplaySurface {
   private frame = 0;
   /** The cart-published camera base, added to the scene's auto-scroll each frame. */
   private cameraBase: ParallaxCamera = { x: 0, y: 0 };
+  /** Per-layer animation overrides for this frame, keyed by layer index (or null). */
+  private layerOverrides: Record<number, SceneLayerOverride> | null = null;
   /** Layers with aerial haze baked in once (see prehazeLayers) — the per-frame win. */
   private readonly hazedLayers: readonly ParallaxLayer[];
   /** The sky gradient, computed once (it depends only on the constant atmosphere). */
@@ -61,6 +78,32 @@ export class SceneBackdropSurface implements DisplaySurface {
     this.cameraBase = base;
   }
 
+  /**
+   * Set this frame's per-layer animation overrides (or null for none). Applied on
+   * top of the pre-hazed layers without touching their baked pixels, so the
+   * frame-invariant haze cache is preserved.
+   */
+  setLayerOverrides(overrides: Record<number, SceneLayerOverride> | null): void {
+    this.layerOverrides = overrides;
+  }
+
+  /** The layers to composite this frame: the cached ones, plus any overrides. */
+  private frameLayers(): readonly ParallaxLayer[] {
+    const overrides = this.layerOverrides;
+    if (!overrides) return this.hazedLayers;
+    return this.hazedLayers.map((layer, index) => {
+      const override = overrides[index];
+      if (!override) return layer;
+      return {
+        ...layer,
+        offsetX: (layer.offsetX ?? 0) + (override.offsetX ?? 0),
+        offsetY: (layer.offsetY ?? 0) + (override.offsetY ?? 0),
+        opacity: override.opacity ?? layer.opacity,
+        emissive: override.emissive ?? layer.emissive,
+      };
+    });
+  }
+
   blit(rgba: Uint8Array): void {
     // A cart frame is Uint8Array; the scene passes work in Uint8ClampedArray.
     // They share byte semantics, so wrap without copying.
@@ -72,7 +115,7 @@ export class SceneBackdropSurface implements DisplaySurface {
       this.backdrop,
       this.width,
       this.height,
-      this.hazedLayers,
+      this.frameLayers(),
       cameraAt(this.spec, this.frame, this.cameraBase),
       this.spec.atmosphere,
     );

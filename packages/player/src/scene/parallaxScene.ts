@@ -39,6 +39,18 @@ export interface ParallaxLayer {
   /** Vertical placement in the output, in pixels (align a horizon). Default 0. */
   offsetY?: number;
   /**
+   * Horizontal placement in the output, in pixels, ADDED to the parallax shift.
+   * Default 0. Lets a layer drift independently of the camera (e.g. animated fog).
+   */
+  offsetX?: number;
+  /** Layer-wide alpha multiplier, 0..1. Default 1 (fully as authored). */
+  opacity?: number;
+  /**
+   * Layer-wide RGB gain. Default 1. Values > 1 brighten the layer's contribution
+   * (an animated emissive glow), which the post-FX bloom pass then picks up.
+   */
+  emissive?: number;
+  /**
    * The aerial-perspective haze is already baked into {@link pixels} (see
    * {@link prehazeLayers}), so compositing must not apply it again. A layer's haze
    * is frame-invariant — it depends only on the layer's depth and the scene
@@ -148,12 +160,14 @@ export function composeParallax(
   const ordered = [...layers].sort((a, b) => b.depth - a.depth); // far first (painter's)
   for (const layer of ordered) {
     const factor = parallaxOf(layer);
-    const shiftX = Math.round(-camera.x * factor);
+    const shiftX = Math.round(-camera.x * factor) + (layer.offsetX ?? 0);
     const shiftY = Math.round(-camera.y * factor) + (layer.offsetY ?? 0);
     const wrapX = layer.wrapX ?? true;
     // A pre-hazed layer already carries its aerial perspective in its pixels, so
     // skip the per-pixel haze here — this is the per-frame cost the runtime avoids.
     const haze = layer.hazed ? 0 : clampUnit(layer.depth);
+    const opacity = layer.opacity ?? 1;
+    const emissive = layer.emissive ?? 1;
 
     for (let y = 0; y < outH; y += 1) {
       let sy = y - shiftY;
@@ -164,16 +178,17 @@ export function composeParallax(
         else if (sx < 0 || sx >= layer.width) continue;
 
         const si = (sy * layer.width + sx) * 4;
-        const alpha = layer.pixels[si + 3]! / 255;
+        const alpha = (layer.pixels[si + 3]! / 255) * opacity;
         if (alpha <= 0) continue;
 
         const src: Rgb = [layer.pixels[si]!, layer.pixels[si + 1]!, layer.pixels[si + 2]!];
         const hazed = haze > 0 ? hazeColor(src, haze, atmosphere) : src;
         const di = (y * outW + x) * 4;
-        // straight-alpha over
-        out[di] = lerp(out[di]!, hazed[0], alpha);
-        out[di + 1] = lerp(out[di + 1]!, hazed[1], alpha);
-        out[di + 2] = lerp(out[di + 2]!, hazed[2], alpha);
+        // straight-alpha over (emissive gain brightens the source; the clamped
+        // output array caps any overshoot, and bloom later blooms the hot pixels)
+        out[di] = lerp(out[di]!, hazed[0] * emissive, alpha);
+        out[di + 1] = lerp(out[di + 1]!, hazed[1] * emissive, alpha);
+        out[di + 2] = lerp(out[di + 2]!, hazed[2] * emissive, alpha);
         out[di + 3] = 255;
       }
     }

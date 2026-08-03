@@ -11,6 +11,7 @@ import type { MailboxEvent } from "./mailbox.js";
 import type { LightingOptions } from "./lighting/types.js";
 import type { PostFxSettings } from "./fx/postfx.js";
 import type { SceneSpec } from "./scene/sceneModel.js";
+import type { AnimSpec } from "./anim/animModel.js";
 
 /**
  * Which input methods the player wires up.
@@ -93,6 +94,15 @@ export interface PlayerOptions {
    * cart's sidecar into a SceneSpec with `parseScene`.
    */
   scene?: SceneSpec;
+  /**
+   * Play a declared animation set host-side (no cart code): sprite-frame clips as
+   * foreground placements, plus keyframed tracks that drive scene-layer channels
+   * (opacity/offset/emissive), post-FX values, and placement transforms — the
+   * ambient motion (flickering neon, drifting fog, a guttering candle) the
+   * REPLACED / THE LAST NIGHT look leans on. Driven off the same frame clock as the
+   * scene backdrop. Parse a cart's sidecar into an AnimSpec with `parseAnim`.
+   */
+  anim?: AnimSpec;
 }
 
 /** Handle returned by {@link mount} for controlling a live player instance. */

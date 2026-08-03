@@ -25,6 +25,8 @@ export interface StoredCartDraft {
   voxelJson: string | null;
   /** JSON-serialised parallax-scene backdrop, as the scene endpoint would receive. */
   sceneJson: string | null;
+  /** JSON-serialised animation timeline, as the anim endpoint would receive. */
+  animJson: string | null;
   /** ISO timestamp of the save, for future "last edited" UI. */
   savedAt: string;
 }
@@ -73,6 +75,7 @@ export function loadCartDraft(cartId: string): StoredCartDraft | null {
       materialsJson: typeof parsed.materialsJson === "string" ? parsed.materialsJson : null,
       voxelJson: typeof parsed.voxelJson === "string" ? parsed.voxelJson : null,
       sceneJson: typeof parsed.sceneJson === "string" ? parsed.sceneJson : null,
+      animJson: typeof parsed.animJson === "string" ? parsed.animJson : null,
       savedAt: typeof parsed.savedAt === "string" ? parsed.savedAt : new Date(0).toISOString(),
     };
   } catch {
@@ -94,6 +97,8 @@ export interface SaveCartDraftInput {
   voxel: string | null;
   /** Parallax-scene backdrop object, or null when none. */
   scene: unknown;
+  /** Animation timeline object, or null when none. */
+  anim: unknown;
 }
 
 /** Returns false when the write failed (e.g. localStorage quota exceeded). */
@@ -109,6 +114,7 @@ export function saveCartDraft(cartId: string, input: SaveCartDraftInput): boolea
     materialsJson: input.materials == null ? null : JSON.stringify(input.materials),
     voxelJson: input.voxel,
     sceneJson: input.scene == null ? null : JSON.stringify(input.scene),
+    animJson: input.anim == null ? null : JSON.stringify(input.anim),
     savedAt: new Date().toISOString(),
   };
   try {

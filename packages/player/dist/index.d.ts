@@ -510,6 +510,18 @@ interface ParallaxLayer {
     /** Vertical placement in the output, in pixels (align a horizon). Default 0. */
     offsetY?: number;
     /**
+     * Horizontal placement in the output, in pixels, ADDED to the parallax shift.
+     * Default 0. Lets a layer drift independently of the camera (e.g. animated fog).
+     */
+    offsetX?: number;
+    /** Layer-wide alpha multiplier, 0..1. Default 1 (fully as authored). */
+    opacity?: number;
+    /**
+     * Layer-wide RGB gain. Default 1. Values > 1 brighten the layer's contribution
+     * (an animated emissive glow), which the post-FX bloom pass then picks up.
+     */
+    emissive?: number;
+    /**
      * The aerial-perspective haze is already baked into {@link pixels} (see
      * {@link prehazeLayers}), so compositing must not apply it again. A layer's haze
      * is frame-invariant — it depends only on the layer's depth and the scene
@@ -623,6 +635,99 @@ declare const DEFAULT_ATMOSPHERE: AtmosphereParams;
 declare function parseScene(raw: unknown): SceneSpec | null;
 
 /**
+ * Cinematic gap #1 (animation timeline) — the cart-facing `anim` model.
+ *
+ * A cart declares ambient motion the way it declares fx / scene / rig: a JSON
+ * sidecar validated on load. The runtime plays it back host-side from the frame
+ * clock (no cart Lua, no mailbox words — the mailbox is full), which is exactly
+ * what the REPLACED / THE LAST NIGHT look needs: flickering neon, drifting fog,
+ * a guttering candle, idle sway. See Working/cinematic-artstyle/anim-timeline-spec.md.
+ *
+ * This module is the pure, DOM-free data + validation half (mirrors the defensive
+ * parse style of scene/sceneModel.ts + apps/web/src/lib/rig.ts): parse untrusted
+ * JSON into a safe AnimSpec, dropping anything malformed rather than throwing. The
+ * playback half is animPlayer.ts. Intended app homes: apps/web/src/lib/anim.ts
+ * (parse) + packages/player/src/anim/ (playback).
+ */
+
+/** How a sprite clip repeats. */
+type AnimMode = "loop" | "pingpong" | "once";
+/** How a property track repeats past its key range. */
+type TrackMode = "loop" | "pingpong" | "hold";
+/** Interpolation on the segment beginning at a keyframe. */
+type Ease = "linear" | "step" | "smooth";
+/** A named sprite-frame animation drawn from the cart's own sheet. */
+interface AnimClip {
+    name: string;
+    /** Ordered frames; each a region of the sprite sheet. */
+    frames: SpriteRegion[];
+    /** Ticks each frame is held; always aligned 1:1 with `frames`. */
+    durations: number[];
+    mode: AnimMode;
+}
+/** One control point on a property track. */
+interface Keyframe {
+    /** Tick position (>= 0). */
+    t: number;
+    value: number;
+    /** Ease applied from this key to the next. */
+    ease: Ease;
+}
+/** Channels a track can drive on a parallax scene layer (by index). */
+type LayerChannel = "opacity" | "offsetX" | "offsetY" | "emissive";
+/** Channels a track can drive on a foreground placement (by index). */
+type PlacementChannel = "x" | "y" | "opacity" | "scale";
+/** What a track animates. Loosely coupled: scene layers are addressed by index. */
+type AnimTarget = {
+    kind: "sceneLayer";
+    index: number;
+    channel: LayerChannel;
+} | {
+    kind: "postfx";
+    key: string;
+} | {
+    kind: "placement";
+    index: number;
+    channel: PlacementChannel;
+};
+/** A keyframed scalar curve bound to one target channel. */
+interface AnimTrack {
+    target: AnimTarget;
+    /** Sorted ascending by `t`; at least one key. */
+    keys: Keyframe[];
+    mode: TrackMode;
+    /** Loop period in ticks (loop mode only). Defaults to the last key's `t`. */
+    loopLength?: number;
+}
+/** A clip instance drawn OVER the cart frame (animated set-dressing). */
+interface AnimPlacement {
+    /** References an AnimClip by name. */
+    clip: string;
+    x: number;
+    y: number;
+    /** 0 (nearest) .. 1 (far) — for future ordering; not composited in Phase A. */
+    depth: number;
+    /** Base opacity 0..1 (tracks may override). */
+    opacity: number;
+    /** Base scale > 0 (tracks may override). */
+    scale: number;
+}
+/** A full declared animation set. */
+interface AnimSpec {
+    clips: AnimClip[];
+    tracks: AnimTrack[];
+    placements: AnimPlacement[];
+}
+/**
+ * Parse untrusted sidecar JSON into an AnimSpec, or null when there is nothing
+ * usable (no object, or no valid clips/tracks/placements). Entries are validated
+ * individually and bad ones dropped — losing one clip beats refusing the whole
+ * animation. Order matters: clips first (placements reference clip names), then
+ * placements (tracks bounds-check placement indices), then tracks.
+ */
+declare function parseAnim(raw: unknown): AnimSpec | null;
+
+/**
  * Public and shared types for @cartbox/player.
  *
  * Kept free of DOM/engine imports so it can be consumed by any module without
@@ -707,6 +812,15 @@ interface PlayerOptions {
      * cart's sidecar into a SceneSpec with `parseScene`.
      */
     scene?: SceneSpec;
+    /**
+     * Play a declared animation set host-side (no cart code): sprite-frame clips as
+     * foreground placements, plus keyframed tracks that drive scene-layer channels
+     * (opacity/offset/emissive), post-FX values, and placement transforms — the
+     * ambient motion (flickering neon, drifting fog, a guttering candle) the
+     * REPLACED / THE LAST NIGHT look leans on. Driven off the same frame clock as the
+     * scene backdrop. Parse a cart's sidecar into an AnimSpec with `parseAnim`.
+     */
+    anim?: AnimSpec;
 }
 /** Handle returned by {@link mount} for controlling a live player instance. */
 interface PlayerHandle {
@@ -1541,6 +1655,20 @@ declare function createCartSpriteSource(module: EngineModule, bytes: Uint8Array,
  * per frame, so per-frame cost is one composite pass.
  */
 
+/**
+ * Per-frame animation overrides for one layer, addressed by its index in the
+ * declared scene. Offsets ADD to the layer's authored placement (sway around a
+ * base); opacity/emissive are absolute. Deliberately structural — the scene does
+ * not depend on the anim module — and deliberately pixel-free, so the pre-hazed
+ * layer cache stays valid (sprite-frame swaps, which would invalidate it, are the
+ * foreground surface's job, not a scene layer's).
+ */
+interface SceneLayerOverride {
+    opacity?: number;
+    offsetX?: number;
+    offsetY?: number;
+    emissive?: number;
+}
 declare class SceneBackdropSurface implements DisplaySurface {
     private readonly inner;
     private readonly width;
@@ -1550,6 +1678,8 @@ declare class SceneBackdropSurface implements DisplaySurface {
     private frame;
     /** The cart-published camera base, added to the scene's auto-scroll each frame. */
     private cameraBase;
+    /** Per-layer animation overrides for this frame, keyed by layer index (or null). */
+    private layerOverrides;
     /** Layers with aerial haze baked in once (see prehazeLayers) — the per-frame win. */
     private readonly hazedLayers;
     /** The sky gradient, computed once (it depends only on the constant atmosphere). */
@@ -1564,7 +1694,153 @@ declare class SceneBackdropSurface implements DisplaySurface {
      * sets it keeps panning as before with the default (0, 0).
      */
     setCameraBase(base: ParallaxCamera): void;
+    /**
+     * Set this frame's per-layer animation overrides (or null for none). Applied on
+     * top of the pre-hazed layers without touching their baked pixels, so the
+     * frame-invariant haze cache is preserved.
+     */
+    setLayerOverrides(overrides: Record<number, SceneLayerOverride> | null): void;
+    /** The layers to composite this frame: the cached ones, plus any overrides. */
+    private frameLayers;
     blit(rgba: Uint8Array): void;
+    destroy(): void;
+}
+
+/**
+ * Cinematic gap #1 (animation timeline) — pure, deterministic playback.
+ *
+ * The host feeds the frame clock (the same counter scene auto-scroll uses) and
+ * gets back the resolved animation state for that tick: which sprite frame each
+ * clip is on, each track's sampled value routed to its target, and each foreground
+ * placement's current transform. No engine, no DOM, no time — same tick in, same
+ * state out — so the wiring half (Phase B) and the editor preview can share it and
+ * it is fully unit-testable.
+ *
+ * Combine semantics (how a sampled value meets the thing it drives) are the
+ * wiring's job, not this module's: `evaluate` returns absolute sampled numbers.
+ */
+
+/** The frame a clip shows at a given tick. */
+interface ClipSample {
+    region: SpriteRegion;
+    /** Index into the clip's original `frames` array. */
+    frameIndex: number;
+}
+/** A foreground placement resolved for one tick. */
+interface ResolvedPlacement {
+    region: SpriteRegion;
+    frameIndex: number;
+    x: number;
+    y: number;
+    opacity: number;
+    scale: number;
+    depth: number;
+}
+/** Everything animated at one tick. */
+interface AnimState {
+    /** Scene-layer channel overrides, keyed by layer index. */
+    layers: Record<number, Partial<Record<LayerChannel, number>>>;
+    /** Post-FX value overrides, keyed by effect value key (e.g. "bloom.strength"). */
+    postfx: Record<string, number>;
+    placements: ResolvedPlacement[];
+}
+/**
+ * Which frame a clip shows at `frame` ticks, honoring per-frame durations and the
+ * clip's repeat mode. `once` clamps at the last frame; loop/pingpong wrap.
+ * Assumes a non-empty clip with durations aligned to frames (parseAnim guarantees).
+ */
+declare function sampleClipFrame(clip: AnimClip, frame: number): ClipSample;
+/**
+ * A track's value at `frame`, folded into its key range by mode. `hold` clamps to
+ * the end values; `loop` wraps over `loopLength` (defaulting to the key span);
+ * `pingpong` reflects over the key span into a triangle wave.
+ */
+declare function sampleTrack(track: AnimTrack, frame: number): number;
+/**
+ * Resolve the whole animation set at one tick. Tracks are routed to their targets
+ * (scene layer / post-fx / placement channel); placements resolve their clip's
+ * current frame and apply any placement-channel track overrides over their base
+ * transform. Placements whose clip is missing are skipped (parseAnim already drops
+ * unknown-clip placements; this is belt-and-braces).
+ */
+declare function evaluate(spec: AnimSpec, frame: number): AnimState;
+
+/**
+ * Cinematic gap #1 (animation timeline) — procedural track generators.
+ *
+ * The artist-friendly path: instead of hand-placing dozens of keyframes for a
+ * neon buzz or a drifting cloud, call a generator and get a ready `keys`/`mode`
+ * shape to drop onto a target. Output is plain keyframes (not a hidden analytic
+ * evaluator) so the sidecar stays self-describing and the editor can show and tweak
+ * the generated curve — Phase-A pragmatism over the spec's analytic option, which
+ * can come later if periodic-noise JSON size ever bites.
+ *
+ * All generators are deterministic (flicker is seeded), so preview == reload.
+ */
+
+/** A generated track shape: merge with a target to form an AnimTrack. */
+interface GeneratedTrack {
+    keys: Keyframe[];
+    mode: TrackMode;
+    loopLength?: number;
+}
+/**
+ * A breathing glow: smoothly rises from `min` to `max` and back over `period`
+ * ticks. Pingpong makes the return automatic, so two keys suffice.
+ */
+declare function pulse(period: number, min: number, max: number): GeneratedTrack;
+/**
+ * A sinusoid-like sway of `±amplitude` around `center` over `period` ticks — for
+ * idle bob, gentle offset drift on a foreground element, or a swaying sign.
+ */
+declare function sway(period: number, amplitude: number, center?: number): GeneratedTrack;
+/**
+ * Linear travel from 0 to `distance` over `period` ticks, then a seamless jump
+ * back to 0 — for drifting fog/clouds on a wrapX scene layer (the wrap hides the
+ * reset). Bind to a layer's offsetX/offsetY.
+ */
+declare function drift(period: number, distance: number): GeneratedTrack;
+/**
+ * Erratic buzz between `min` and `max` — for neon flicker or a failing lamp.
+ * `steps` random hard-switch levels are spread over `period` ticks and loop; the
+ * same `seed` always yields the same pattern. Bind to a layer's emissive/opacity.
+ */
+declare function flicker(period: number, min: number, max: number, steps?: number, seed?: number): GeneratedTrack;
+
+/**
+ * AnimatedForegroundSurface — a display surface that draws animated placements
+ * (foreground set-dressing) over the presented frame, then hands off to an inner
+ * surface.
+ *
+ * Each placement is one frame of an AnimClip drawn from the cart's OWN sprite
+ * sheet (via a {@link SpriteRegionSource}) at a position, scale, and opacity the
+ * animation resolved for this tick (see animPlayer's `evaluate`). It decorates any
+ * {@link DisplaySurface} and sits INSIDE the scene backdrop but OUTSIDE lighting/
+ * post-FX: placements land in front of the cart + parallax backdrop, and the
+ * inner surface's lighting/FX finish them together with the rest of the frame.
+ *
+ * Region pixels are static for the cart's life, so they are read once and cached;
+ * per-frame cost is a frame copy plus the composited placement footprints (nothing
+ * when there are no placements — the pass-through fast path).
+ */
+
+declare class AnimatedForegroundSurface implements DisplaySurface {
+    private readonly inner;
+    private readonly width;
+    private readonly height;
+    private readonly source;
+    private placements;
+    /** Static region pixels cached by region key (page:tile:tilesW:tilesH). */
+    private readonly regionCache;
+    private readonly output;
+    private readonly presented;
+    constructor(inner: DisplaySurface, width: number, height: number, source: SpriteRegionSource);
+    /** Set the placements resolved for this frame (empty for none). */
+    setPlacements(placements: readonly ResolvedPlacement[]): void;
+    private region;
+    blit(rgba: Uint8Array): void;
+    /** Nearest-neighbour scale + straight-alpha composite of one placement. */
+    private drawPlacement;
     destroy(): void;
 }
 
@@ -1596,4 +1872,4 @@ declare class SceneBackdropSurface implements DisplaySurface {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, type CartSpriteSource, CartridgeLoadError, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type InnerSurfaceFactory, type InputChange, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_PYRAMID_LEVELS, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxRead, type MaterialBuffer, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, POST_FX_EFFECTS, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, type Vec3, type VerificationResult, WebgpuLightingLayer, acesFilmic, acesFilmicChannel, anyPostFxEnabled, cameraAt, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeCamera, decodeLights, decodeMailbox, defaultPostFxSettings, extractScore, extractUnlocks, fillSky, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parsePostFxSettings, parseReplay, parseScene, prehazeLayers, pyramidLevelCount, pyramidLevelSize, randomSeed, readCartCode, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, seedCartridge, serializeReplay, shade, softKneePrefilter, uniformsFromSettings, verifyReplayScore };
+export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, type CartSpriteSource, CartridgeLoadError, type ClipSample, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, type GeneratedTrack, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_PYRAMID_LEVELS, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxRead, type MaterialBuffer, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, POST_FX_EFFECTS, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPlacement, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, type TrackMode, type Vec3, type VerificationResult, WebgpuLightingLayer, acesFilmic, acesFilmicChannel, anyPostFxEnabled, cameraAt, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeCamera, decodeLights, decodeMailbox, defaultPostFxSettings, drift, evaluate, extractScore, extractUnlocks, fillSky, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parseAnim, parsePostFxSettings, parseReplay, parseScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, readCartCode, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleTrack, seedCartridge, serializeReplay, shade, softKneePrefilter, sway, uniformsFromSettings, verifyReplayScore };

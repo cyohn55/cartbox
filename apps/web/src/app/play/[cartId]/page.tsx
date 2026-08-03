@@ -22,7 +22,7 @@ import { DEMO_CARTS, demoCartUrl, findDemoCart } from "@/lib/demoCatalog";
 import { DEMO_TITLES, findDemoTitle } from "@/lib/demoTitles";
 import { requiresUserAssets, resolveRuntime, type AssetSource } from "@/lib/titleRuntime";
 import { requiresSourceOffer } from "@/lib/licensing";
-import { parsePostFxSettings, parseScene, type ModelId } from "@cartbox/player";
+import { parsePostFxSettings, parseScene, parseAnim, type ModelId } from "@cartbox/player";
 import { CartridgePlayer } from "./CartridgePlayer";
 import { AssetSupply } from "./AssetSupply";
 import { TitlePlayer } from "./TitlePlayer";
@@ -179,6 +179,7 @@ function StaticCartridgePage({ cartId }: { cartId: string }) {
         modelId={cart.consoleModel as ModelId}
         postFx={null}
         scene={null}
+        anim={null}
       />
       <p>{cart.description}</p>
     </main>
@@ -193,7 +194,7 @@ export default async function CartridgePage({ params }: PageProps) {
   const db = serviceClient();
   const { data: cart } = await db
     .from("carts")
-    .select("id, title, description, price_cents, r2_key, owner_id, console_model, fx, scene")
+    .select("id, title, description, price_cents, r2_key, owner_id, console_model, fx, scene, anim")
     .eq("id", params.cartId)
     .eq("published", true)
     .single();
@@ -217,6 +218,7 @@ export default async function CartridgePage({ params }: PageProps) {
           modelId={cart.console_model as ModelId}
           postFx={parsePostFxSettings(cart.fx)}
           scene={parseScene(cart.scene)}
+          anim={parseAnim(cart.anim)}
         />
       ) : (
         <section>

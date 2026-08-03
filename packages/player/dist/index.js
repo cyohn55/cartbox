@@ -193,8 +193,8 @@ function shade(albedo, normal, toLight, ambient) {
   const l = normalize(toLight);
   const diffuse = Math.max(0, n[0] * l[0] + n[1] * l[1] + n[2] * l[2]);
   const intensity = ambient + (1 - ambient) * diffuse;
-  const clamp2 = (value) => Math.max(0, Math.min(255, Math.round(value * intensity)));
-  return [clamp2(albedo[0]), clamp2(albedo[1]), clamp2(albedo[2])];
+  const clamp3 = (value) => Math.max(0, Math.min(255, Math.round(value * intensity)));
+  return [clamp3(albedo[0]), clamp3(albedo[1]), clamp3(albedo[2])];
 }
 
 // src/lighting/LightingRenderer.ts
@@ -2898,10 +2898,12 @@ function composeParallax(out, outW, outH, layers, camera, atmosphere) {
   const ordered = [...layers].sort((a, b) => b.depth - a.depth);
   for (const layer of ordered) {
     const factor = parallaxOf(layer);
-    const shiftX = Math.round(-camera.x * factor);
+    const shiftX = Math.round(-camera.x * factor) + (layer.offsetX ?? 0);
     const shiftY = Math.round(-camera.y * factor) + (layer.offsetY ?? 0);
     const wrapX = layer.wrapX ?? true;
     const haze = layer.hazed ? 0 : clampUnit(layer.depth);
+    const opacity = layer.opacity ?? 1;
+    const emissive = layer.emissive ?? 1;
     for (let y = 0; y < outH; y += 1) {
       let sy = y - shiftY;
       if (sy < 0 || sy >= layer.height) continue;
@@ -2910,14 +2912,14 @@ function composeParallax(out, outW, outH, layers, camera, atmosphere) {
         if (wrapX) sx = (sx % layer.width + layer.width) % layer.width;
         else if (sx < 0 || sx >= layer.width) continue;
         const si = (sy * layer.width + sx) * 4;
-        const alpha = layer.pixels[si + 3] / 255;
+        const alpha = layer.pixels[si + 3] / 255 * opacity;
         if (alpha <= 0) continue;
         const src = [layer.pixels[si], layer.pixels[si + 1], layer.pixels[si + 2]];
         const hazed = haze > 0 ? hazeColor(src, haze, atmosphere) : src;
         const di = (y * outW + x) * 4;
-        out[di] = lerp(out[di], hazed[0], alpha);
-        out[di + 1] = lerp(out[di + 1], hazed[1], alpha);
-        out[di + 2] = lerp(out[di + 2], hazed[2], alpha);
+        out[di] = lerp(out[di], hazed[0] * emissive, alpha);
+        out[di + 1] = lerp(out[di + 1], hazed[1] * emissive, alpha);
+        out[di + 2] = lerp(out[di + 2], hazed[2] * emissive, alpha);
         out[di + 3] = 255;
       }
     }
@@ -3007,6 +3009,8 @@ var SceneBackdropSurface = class {
     this.frame = 0;
     /** The cart-published camera base, added to the scene's auto-scroll each frame. */
     this.cameraBase = { x: 0, y: 0 };
+    /** Per-layer animation overrides for this frame, keyed by layer index (or null). */
+    this.layerOverrides = null;
     const size = width * height * 4;
     this.hazedLayers = prehazeLayers(layers, spec.atmosphere);
     this.sky = new Uint8ClampedArray(size);
@@ -3023,6 +3027,30 @@ var SceneBackdropSurface = class {
   setCameraBase(base) {
     this.cameraBase = base;
   }
+  /**
+   * Set this frame's per-layer animation overrides (or null for none). Applied on
+   * top of the pre-hazed layers without touching their baked pixels, so the
+   * frame-invariant haze cache is preserved.
+   */
+  setLayerOverrides(overrides) {
+    this.layerOverrides = overrides;
+  }
+  /** The layers to composite this frame: the cached ones, plus any overrides. */
+  frameLayers() {
+    const overrides = this.layerOverrides;
+    if (!overrides) return this.hazedLayers;
+    return this.hazedLayers.map((layer, index) => {
+      const override = overrides[index];
+      if (!override) return layer;
+      return {
+        ...layer,
+        offsetX: (layer.offsetX ?? 0) + (override.offsetX ?? 0),
+        offsetY: (layer.offsetY ?? 0) + (override.offsetY ?? 0),
+        opacity: override.opacity ?? layer.opacity,
+        emissive: override.emissive ?? layer.emissive
+      };
+    });
+  }
   blit(rgba) {
     const cartFrame = new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength);
     this.backdrop.set(this.sky);
@@ -3030,7 +3058,7 @@ var SceneBackdropSurface = class {
       this.backdrop,
       this.width,
       this.height,
-      this.hazedLayers,
+      this.frameLayers(),
       cameraAt(this.spec, this.frame, this.cameraBase),
       this.spec.atmosphere
     );
@@ -3043,6 +3071,186 @@ var SceneBackdropSurface = class {
   }
 };
 
+// src/anim/AnimatedForegroundSurface.ts
+var AnimatedForegroundSurface = class {
+  constructor(inner, width, height, source) {
+    this.inner = inner;
+    this.width = width;
+    this.height = height;
+    this.source = source;
+    this.placements = [];
+    /** Static region pixels cached by region key (page:tile:tilesW:tilesH). */
+    this.regionCache = /* @__PURE__ */ new Map();
+    this.output = new Uint8ClampedArray(width * height * 4);
+    this.presented = new Uint8Array(this.output.buffer);
+  }
+  /** Set the placements resolved for this frame (empty for none). */
+  setPlacements(placements) {
+    this.placements = placements;
+  }
+  region(placement) {
+    const { page, tile, tilesW, tilesH } = placement.region;
+    const key = `${page}:${tile}:${tilesW}:${tilesH}`;
+    let image = this.regionCache.get(key);
+    if (!image) {
+      image = this.source.readRegion(page, tile, tilesW, tilesH);
+      this.regionCache.set(key, image);
+    }
+    return image;
+  }
+  blit(rgba) {
+    if (this.placements.length === 0) {
+      this.inner.blit(rgba);
+      return;
+    }
+    this.output.set(rgba);
+    const ordered = [...this.placements].sort((a, b) => b.depth - a.depth);
+    for (const placement of ordered) this.drawPlacement(placement);
+    this.inner.blit(this.presented);
+  }
+  /** Nearest-neighbour scale + straight-alpha composite of one placement. */
+  drawPlacement(placement) {
+    const opacity = Math.max(0, Math.min(1, placement.opacity));
+    if (opacity <= 0) return;
+    const scale = placement.scale > 0 ? placement.scale : 1;
+    const image = this.region(placement);
+    const destWidth = Math.max(1, Math.round(image.width * scale));
+    const destHeight = Math.max(1, Math.round(image.height * scale));
+    const originX = Math.round(placement.x);
+    const originY = Math.round(placement.y);
+    for (let dy = 0; dy < destHeight; dy += 1) {
+      const y = originY + dy;
+      if (y < 0 || y >= this.height) continue;
+      const sy = Math.min(image.height - 1, Math.floor(dy / scale));
+      for (let dx = 0; dx < destWidth; dx += 1) {
+        const x = originX + dx;
+        if (x < 0 || x >= this.width) continue;
+        const sx = Math.min(image.width - 1, Math.floor(dx / scale));
+        const si = (sy * image.width + sx) * 4;
+        const alpha = image.pixels[si + 3] / 255 * opacity;
+        if (alpha <= 0) continue;
+        const di = (y * this.width + x) * 4;
+        this.output[di] = lerp2(this.output[di], image.pixels[si], alpha);
+        this.output[di + 1] = lerp2(this.output[di + 1], image.pixels[si + 1], alpha);
+        this.output[di + 2] = lerp2(this.output[di + 2], image.pixels[si + 2], alpha);
+        this.output[di + 3] = 255;
+      }
+    }
+  }
+  destroy() {
+    this.inner.destroy();
+  }
+};
+var lerp2 = (a, b, t) => a + (b - a) * t;
+
+// src/anim/animPlayer.ts
+var mod = (a, m) => (a % m + m) % m;
+function frameSequence(clip) {
+  const count = clip.frames.length;
+  if (count <= 1) return [0];
+  const forward = [];
+  for (let i = 0; i < count; i += 1) forward.push(i);
+  if (clip.mode !== "pingpong") return forward;
+  for (let i = count - 2; i >= 1; i -= 1) forward.push(i);
+  return forward;
+}
+function sampleClipFrame(clip, frame) {
+  const lastIndex = clip.frames.length - 1;
+  const at = (index) => ({ region: clip.frames[index], frameIndex: index });
+  const tick = Math.max(0, Math.floor(frame));
+  if (clip.mode === "once") {
+    let acc2 = 0;
+    for (let i = 0; i < clip.frames.length; i += 1) {
+      acc2 += clip.durations[i];
+      if (tick < acc2) return at(i);
+    }
+    return at(lastIndex);
+  }
+  const sequence = frameSequence(clip);
+  const sequenceDurations = sequence.map((index) => clip.durations[index]);
+  const period = sequenceDurations.reduce((sum, d) => sum + d, 0);
+  if (period <= 0) return at(0);
+  const local = mod(tick, period);
+  let acc = 0;
+  for (let step = 0; step < sequence.length; step += 1) {
+    acc += sequenceDurations[step];
+    if (local < acc) return at(sequence[step]);
+  }
+  return at(sequence[sequence.length - 1]);
+}
+function valueAtLocalTime(keys, local) {
+  const first = keys[0];
+  const last = keys[keys.length - 1];
+  if (local <= first.t) return first.value;
+  if (local >= last.t) return last.value;
+  for (let i = 0; i < keys.length - 1; i += 1) {
+    const start = keys[i];
+    const end = keys[i + 1];
+    if (local < start.t || local > end.t) continue;
+    const dt = end.t - start.t;
+    if (dt <= 0) return end.value;
+    if (start.ease === "step") return start.value;
+    let u = (local - start.t) / dt;
+    if (start.ease === "smooth") u = u * u * (3 - 2 * u);
+    return start.value + (end.value - start.value) * u;
+  }
+  return last.value;
+}
+function sampleTrack(track, frame) {
+  const keys = track.keys;
+  const firstT = keys[0].t;
+  const lastT = keys[keys.length - 1].t;
+  if (track.mode === "hold") {
+    return valueAtLocalTime(keys, Math.min(Math.max(frame, firstT), lastT));
+  }
+  if (track.mode === "pingpong") {
+    const span2 = lastT - firstT;
+    if (span2 <= 0) return keys[0].value;
+    const phase = mod(frame - firstT, span2 * 2);
+    const local = phase <= span2 ? firstT + phase : firstT + (span2 * 2 - phase);
+    return valueAtLocalTime(keys, local);
+  }
+  const span = track.loopLength && track.loopLength > 0 ? track.loopLength : lastT - firstT;
+  if (span <= 0) return keys[0].value;
+  return valueAtLocalTime(keys, firstT + mod(frame - firstT, span));
+}
+function evaluate(spec, frame) {
+  var _a, _b;
+  const clipByName = /* @__PURE__ */ new Map();
+  for (const clip of spec.clips) clipByName.set(clip.name, clip);
+  const layers = {};
+  const postfx = {};
+  const placementOverrides = {};
+  for (const track of spec.tracks) {
+    const value = sampleTrack(track, frame);
+    const target = track.target;
+    if (target.kind === "sceneLayer") {
+      (layers[_a = target.index] ?? (layers[_a] = {}))[target.channel] = value;
+    } else if (target.kind === "postfx") {
+      postfx[target.key] = value;
+    } else {
+      (placementOverrides[_b = target.index] ?? (placementOverrides[_b] = {}))[target.channel] = value;
+    }
+  }
+  const placements = [];
+  spec.placements.forEach((placement, index) => {
+    const clip = clipByName.get(placement.clip);
+    if (!clip) return;
+    const sample = sampleClipFrame(clip, frame);
+    const override = placementOverrides[index] ?? {};
+    placements.push({
+      region: sample.region,
+      frameIndex: sample.frameIndex,
+      x: override.x ?? placement.x,
+      y: override.y ?? placement.y,
+      opacity: override.opacity ?? placement.opacity,
+      scale: override.scale ?? placement.scale,
+      depth: placement.depth
+    });
+  });
+  return { layers, postfx, placements };
+}
+
 // src/player.ts
 function shouldUseTouch(scheme, view) {
   if (scheme === "touch") return true;
@@ -3054,6 +3262,8 @@ var Player = class {
     this.container = container;
     this.options = options;
     this.gamepad = new GamepadState();
+    /** Presented-frame clock for animation, kept in lockstep with the scene backdrop. */
+    this.presentFrame = 0;
     this.tickFrame = 0;
     this.lastMailboxSeq = 0;
     this.frameHandle = 0;
@@ -3111,21 +3321,31 @@ var Player = class {
       this.lastMailboxSeq = this.console.readMailbox()[0] ?? 0;
       const scale = this.options.scale ?? "fit";
       const scene = this.options.scene;
+      this.anim = this.options.anim;
+      const wantsForeground = Boolean(this.anim && this.anim.placements.length > 0);
       let backdrop = null;
-      if (scene) {
+      if (scene || wantsForeground) {
         this.cartSource = createCartSpriteSource(module, preparedBytes, this.model.paletteSize) ?? void 0;
-        if (this.cartSource) {
-          backdrop = {
-            layers: resolveSceneLayers(scene, this.cartSource.source),
-            keyRgb: this.cartSource.paletteRgb(scene.keyColor)
-          };
-        }
+      }
+      if (scene && this.cartSource) {
+        backdrop = {
+          layers: resolveSceneLayers(scene, this.cartSource.source),
+          keyRgb: this.cartSource.paletteRgb(scene.keyColor)
+        };
       }
       const makeBaseSurface = async (target) => {
-        const base = this.options.lighting ? this.litSurface = await LitCanvasSurface.create(target, scale, this.model, this.options.lighting) : new CanvasSurface(target, scale, this.model);
+        let surface = this.options.lighting ? this.litSurface = await LitCanvasSurface.create(target, scale, this.model, this.options.lighting) : new CanvasSurface(target, scale, this.model);
+        if (wantsForeground && this.cartSource) {
+          surface = this.foregroundSurface = new AnimatedForegroundSurface(
+            surface,
+            this.model.width,
+            this.model.height,
+            this.cartSource.source
+          );
+        }
         if (scene && backdrop) {
-          return this.sceneSurface = new SceneBackdropSurface(
-            base,
+          surface = this.sceneSurface = new SceneBackdropSurface(
+            surface,
             this.model.width,
             this.model.height,
             backdrop.layers,
@@ -3133,11 +3353,14 @@ var Player = class {
             backdrop.keyRgb
           );
         }
-        return base;
+        return surface;
       };
       const postFx = this.options.postFx;
+      this.basePostFx = postFx;
       if (postFx && anyPostFxEnabled(postFx)) {
-        this.surface = await PostFxSurface.create(this.container, scale, this.model, postFx, makeBaseSurface) ?? await makeBaseSurface(this.container);
+        const fx = await PostFxSurface.create(this.container, scale, this.model, postFx, makeBaseSurface);
+        if (fx) this.postFxSurface = fx;
+        this.surface = fx ?? await makeBaseSurface(this.container);
       } else {
         this.surface = await makeBaseSurface(this.container);
       }
@@ -3241,7 +3464,30 @@ var Player = class {
       if (this.sceneSurface && this.console) {
         this.sceneSurface.setCameraBase(decodeCamera(this.console.readMailbox()));
       }
+      this.applyAnimation();
       this.surface?.blit(framebuffer);
+      this.presentFrame += 1;
+    }
+  }
+  /**
+   * Sample the declared animation at the current presented frame and route it to
+   * the surfaces that consume it. Feeds the scene backdrop's layer overrides, the
+   * foreground placements, and (only when animated) the post-FX values. Runs before
+   * blit so the composite reflects this frame; a no-op when no anim is declared.
+   */
+  applyAnimation() {
+    if (!this.anim) return;
+    const state = evaluate(this.anim, this.presentFrame);
+    if (this.sceneSurface) {
+      const hasLayerOverrides = Object.keys(state.layers).length > 0;
+      this.sceneSurface.setLayerOverrides(hasLayerOverrides ? state.layers : null);
+    }
+    this.foregroundSurface?.setPlacements(state.placements);
+    if (this.postFxSurface && this.basePostFx && Object.keys(state.postfx).length > 0) {
+      this.postFxSurface.setSettings({
+        ...this.basePostFx,
+        values: { ...this.basePostFx.values, ...state.postfx }
+      });
     }
   }
   renderSingleFrame() {
@@ -3387,6 +3633,192 @@ function parseScene(raw) {
   return { layers, atmosphere, camera, keyColor };
 }
 
+// src/anim/animModel.ts
+var MAX_CLIPS = 32;
+var MAX_TRACKS = 64;
+var MAX_PLACEMENTS = 32;
+var MAX_KEYS = 64;
+var MAX_FRAMES = 64;
+var MAX_TILE2 = 255;
+var MAX_TILES_PER_SIDE2 = 32;
+var MAX_LAYER_INDEX = 7;
+var MAX_FRAME_TICKS = 600;
+var isObject2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var num2 = (v, fallback) => typeof v === "number" && Number.isFinite(v) ? v : fallback;
+var clamp2 = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+var clampInt2 = (v, lo, hi) => Math.round(clamp2(v, lo, hi));
+var ANIM_MODES = /* @__PURE__ */ new Set(["loop", "pingpong", "once"]);
+var TRACK_MODES = /* @__PURE__ */ new Set(["loop", "pingpong", "hold"]);
+var EASES = /* @__PURE__ */ new Set(["linear", "step", "smooth"]);
+var LAYER_CHANNELS = /* @__PURE__ */ new Set(["opacity", "offsetX", "offsetY", "emissive"]);
+var PLACEMENT_CHANNELS = /* @__PURE__ */ new Set(["x", "y", "opacity", "scale"]);
+function parseRegion2(raw) {
+  if (!isObject2(raw)) return null;
+  if (typeof raw.tile !== "number" || !Number.isFinite(raw.tile) || raw.tile < 0) return null;
+  return {
+    page: raw.page === 1 ? 1 : 0,
+    tile: clampInt2(raw.tile, 0, MAX_TILE2),
+    tilesW: clampInt2(num2(raw.tilesW, 1), 1, MAX_TILES_PER_SIDE2),
+    tilesH: clampInt2(num2(raw.tilesH, 1), 1, MAX_TILES_PER_SIDE2)
+  };
+}
+function parseClip(raw) {
+  if (!isObject2(raw)) return null;
+  if (typeof raw.name !== "string" || raw.name.length === 0) return null;
+  const framesRaw = Array.isArray(raw.frames) ? raw.frames : [];
+  const frames = [];
+  for (const entry of framesRaw) {
+    if (frames.length >= MAX_FRAMES) break;
+    const region = parseRegion2(entry);
+    if (region) frames.push(region);
+  }
+  if (frames.length === 0) return null;
+  const durationsRaw = Array.isArray(raw.durations) ? raw.durations : [];
+  const durations = frames.map((_, i) => clampInt2(num2(durationsRaw[i], 1), 1, MAX_FRAME_TICKS));
+  const mode = ANIM_MODES.has(raw.mode) ? raw.mode : "loop";
+  return { name: raw.name, frames, durations, mode };
+}
+function parseKeyframe(raw) {
+  if (!isObject2(raw)) return null;
+  if (typeof raw.t !== "number" || !Number.isFinite(raw.t) || raw.t < 0) return null;
+  if (typeof raw.value !== "number" || !Number.isFinite(raw.value)) return null;
+  return { t: raw.t, value: raw.value, ease: EASES.has(raw.ease) ? raw.ease : "linear" };
+}
+function parseTarget(raw, placementCount) {
+  if (!isObject2(raw)) return null;
+  if (raw.kind === "sceneLayer") {
+    if (typeof raw.index !== "number" || !Number.isInteger(raw.index) || raw.index < 0 || raw.index > MAX_LAYER_INDEX) return null;
+    if (!LAYER_CHANNELS.has(raw.channel)) return null;
+    return { kind: "sceneLayer", index: raw.index, channel: raw.channel };
+  }
+  if (raw.kind === "postfx") {
+    if (typeof raw.key !== "string" || raw.key.length === 0) return null;
+    return { kind: "postfx", key: raw.key };
+  }
+  if (raw.kind === "placement") {
+    if (typeof raw.index !== "number" || !Number.isInteger(raw.index) || raw.index < 0 || raw.index >= placementCount) return null;
+    if (!PLACEMENT_CHANNELS.has(raw.channel)) return null;
+    return { kind: "placement", index: raw.index, channel: raw.channel };
+  }
+  return null;
+}
+function parseTrack(raw, placementCount) {
+  if (!isObject2(raw)) return null;
+  const target = parseTarget(raw.target, placementCount);
+  if (!target) return null;
+  const keysRaw = Array.isArray(raw.keys) ? raw.keys : [];
+  const keys = [];
+  for (const entry of keysRaw) {
+    if (keys.length >= MAX_KEYS) break;
+    const key = parseKeyframe(entry);
+    if (key) keys.push(key);
+  }
+  if (keys.length === 0) return null;
+  keys.sort((a, b) => a.t - b.t);
+  const track = {
+    target,
+    keys,
+    mode: TRACK_MODES.has(raw.mode) ? raw.mode : "loop"
+  };
+  if (typeof raw.loopLength === "number" && Number.isFinite(raw.loopLength) && raw.loopLength > 0) {
+    track.loopLength = raw.loopLength;
+  }
+  return track;
+}
+function parsePlacement(raw, clipNames) {
+  if (!isObject2(raw)) return null;
+  if (typeof raw.clip !== "string" || !clipNames.has(raw.clip)) return null;
+  return {
+    clip: raw.clip,
+    x: num2(raw.x, 0),
+    y: num2(raw.y, 0),
+    depth: clamp2(num2(raw.depth, 0), 0, 1),
+    opacity: clamp2(num2(raw.opacity, 1), 0, 1),
+    scale: Math.max(0.01, num2(raw.scale, 1))
+  };
+}
+function parseAnim(raw) {
+  if (!isObject2(raw)) return null;
+  const clips = [];
+  const clipNames = /* @__PURE__ */ new Set();
+  for (const entry of Array.isArray(raw.clips) ? raw.clips : []) {
+    if (clips.length >= MAX_CLIPS) break;
+    const clip = parseClip(entry);
+    if (clip && !clipNames.has(clip.name)) {
+      clipNames.add(clip.name);
+      clips.push(clip);
+    }
+  }
+  const placements = [];
+  for (const entry of Array.isArray(raw.placements) ? raw.placements : []) {
+    if (placements.length >= MAX_PLACEMENTS) break;
+    const placement = parsePlacement(entry, clipNames);
+    if (placement) placements.push(placement);
+  }
+  const tracks = [];
+  for (const entry of Array.isArray(raw.tracks) ? raw.tracks : []) {
+    if (tracks.length >= MAX_TRACKS) break;
+    const track = parseTrack(entry, placements.length);
+    if (track) tracks.push(track);
+  }
+  if (clips.length === 0 && tracks.length === 0 && placements.length === 0) return null;
+  return { clips, tracks, placements };
+}
+
+// src/anim/generators.ts
+function seededRandom(seed) {
+  let state = seed >>> 0 || 1;
+  return () => {
+    state = Math.imul(state, 1664525) + 1013904223 >>> 0;
+    return state / 4294967296;
+  };
+}
+function pulse(period, min, max) {
+  const half = Math.max(1, Math.round(period / 2));
+  return {
+    keys: [
+      { t: 0, value: min, ease: "smooth" },
+      { t: half, value: max, ease: "smooth" }
+    ],
+    mode: "pingpong"
+  };
+}
+function sway(period, amplitude, center = 0) {
+  const half = Math.max(1, Math.round(period / 2));
+  return {
+    keys: [
+      { t: 0, value: center - amplitude, ease: "smooth" },
+      { t: half, value: center + amplitude, ease: "smooth" }
+    ],
+    mode: "pingpong"
+  };
+}
+function drift(period, distance) {
+  const length = Math.max(1, Math.round(period));
+  return {
+    keys: [
+      { t: 0, value: 0, ease: "linear" },
+      { t: length, value: distance, ease: "linear" }
+    ],
+    mode: "loop",
+    loopLength: length
+  };
+}
+function flicker(period, min, max, steps = 8, seed = 1) {
+  const length = Math.max(2, Math.round(period));
+  const count = Math.max(2, Math.min(64, Math.min(Math.round(steps), length)));
+  const random = seededRandom(seed);
+  const keys = [];
+  let previousT = -1;
+  for (let i = 0; i < count; i += 1) {
+    let t = Math.floor(i / count * length);
+    if (t <= previousT) t = previousT + 1;
+    previousT = t;
+    keys.push({ t, value: min + (max - min) * random(), ease: "step" });
+  }
+  return { keys, mode: "loop", loopLength: length };
+}
+
 // src/index.ts
 function mount(container, options) {
   const player = new Player(container, options);
@@ -3402,6 +3834,7 @@ function mount(container, options) {
   };
 }
 export {
+  AnimatedForegroundSurface,
   BLOOM_KNEE,
   BloomPyramid,
   CAMERA_BASE,
@@ -3450,9 +3883,12 @@ export {
   decodeLights,
   decodeMailbox,
   defaultPostFxSettings,
+  drift,
+  evaluate,
   extractScore,
   extractUnlocks,
   fillSky,
+  flicker,
   frameDurationMs,
   framebufferBytes,
   getModel,
@@ -3466,10 +3902,12 @@ export {
   nearestDirection,
   normalVector,
   paramKey,
+  parseAnim,
   parsePostFxSettings,
   parseReplay,
   parseScene,
   prehazeLayers,
+  pulse,
   pyramidLevelCount,
   pyramidLevelSize,
   randomSeed,
@@ -3479,10 +3917,13 @@ export {
   resolveSceneLayers,
   resolveUnlockedAchievements,
   runReplayEvents,
+  sampleClipFrame,
+  sampleTrack,
   seedCartridge,
   serializeReplay,
   shade,
   softKneePrefilter,
+  sway,
   uniformsFromSettings,
   verifyReplayScore
 };

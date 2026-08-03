@@ -9,6 +9,7 @@
 
 import { readFileSync } from "node:fs";
 import { createClient } from "@supabase/supabase-js";
+import { flicker, pulse } from "@cartbox/player";
 import { putCartObject } from "./lib/seedStorage.mjs";
 
 function required(name) {
@@ -50,6 +51,19 @@ const FX = {
   },
 };
 
+// Ambient motion (cinematic gap #1), played host-side over the painted frame. As a
+// painted cart OVERLOOK has no scene layers or sprite clips to animate, so the
+// motion rides on the post-FX finish: the candle/neon bloom gutters like a live
+// flame, and the moon's god rays breathe. Built from the player's own generators so
+// it matches the Anim-tab authoring. Both keys already exist in FX above; the tracks
+// override them per frame around their base values.
+const ANIM = {
+  tracks: [
+    { target: { kind: "postfx", key: "bloom.strength" }, ...flicker(34, 0.72, 1.0, 10, 7) },
+    { target: { kind: "postfx", key: "godrays.strength" }, ...pulse(200, 0.78, 0.98) },
+  ],
+};
+
 const supabase = createClient(required("SUPABASE_URL"), required("SUPABASE_SERVICE_ROLE_KEY"), {
   auth: { persistSession: false },
 });
@@ -84,6 +98,7 @@ async function main() {
     price_cents: 0,
     r2_key: storedKey,
     fx: FX,
+    anim: ANIM,
     published: true,
   });
   if (error) throw new Error(`seeding carts failed: ${error.message}`);
