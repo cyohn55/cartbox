@@ -152,6 +152,7 @@ export {
 export type {
   AtmosphereParams,
   CartSpriteSource,
+  RegionImage,
   SceneSpec,
   SceneLayer,
   SceneCamera,

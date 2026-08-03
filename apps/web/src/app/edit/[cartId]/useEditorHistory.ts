@@ -31,7 +31,7 @@ import {
   type MaterialSwatches,
   type SpriteRig,
 } from "@cartbox/editor";
-import type { PostFxSettings } from "@cartbox/player";
+import type { PostFxSettings, SceneSpec } from "@cartbox/player";
 
 /** Idle gap after the last edit before a snapshot is committed as one undo step. */
 const COALESCE_MS = 400;
@@ -47,6 +47,8 @@ interface CartSnapshot {
   materials: MaterialSwatches;
   /** Serialized 3D voxel model (Voxel tab), or null when the cart has none. */
   voxel: string | null;
+  /** Authored parallax-scene backdrop (Scene tab), or null when the cart has none. */
+  scene: SceneSpec | null;
 }
 
 export interface EditorHistory {
@@ -64,6 +66,8 @@ export interface EditorHistory {
   setMaterials: (materials: MaterialSwatches) => void;
   voxel: string | null;
   setVoxel: (voxel: string) => void;
+  scene: SceneSpec | null;
+  setScene: (scene: SceneSpec | null) => void;
   canUndo: boolean;
   canRedo: boolean;
   undo: () => void;
@@ -78,18 +82,21 @@ interface UseEditorHistoryArgs {
   initialRig: SpriteRig;
   initialMaterials: MaterialSwatches;
   initialVoxel: string | null;
+  initialScene: SceneSpec | null;
   initialBank: number;
 }
 
-/** Two cart snapshots are equal when bytes, bank, FX, rig and materials match. */
+/** Two cart snapshots are equal when bytes, bank and every sidecar match. */
 function snapshotsEqual(a: CartSnapshot, b: CartSnapshot): boolean {
   if (a.bank !== b.bank) return false;
   if (!bytesEqual(a.bytes, b.bytes)) return false;
-  // FX, rig and materials are small plain-data objects produced by the same code
-  // paths, so a structural string compare is a sound and cheap equality here.
+  // FX, rig, materials and scene are small plain-data objects produced by the
+  // same code paths, so a structural string compare is a sound and cheap
+  // equality here (null scene stringifies distinctly from any real scene).
   if (JSON.stringify(a.fx) !== JSON.stringify(b.fx)) return false;
   if (JSON.stringify(a.rig) !== JSON.stringify(b.rig)) return false;
   if (JSON.stringify(a.materials) !== JSON.stringify(b.materials)) return false;
+  if (JSON.stringify(a.scene) !== JSON.stringify(b.scene)) return false;
   return a.voxel === b.voxel;
 }
 
@@ -108,6 +115,7 @@ export function useEditorHistory({
   initialRig,
   initialMaterials,
   initialVoxel,
+  initialScene,
   initialBank,
 }: UseEditorHistoryArgs): EditorHistory {
   const [bank, setBankState] = useState(initialBank);
@@ -115,6 +123,7 @@ export function useEditorHistory({
   const [rig, setRigState] = useState<SpriteRig>(initialRig);
   const [materials, setMaterialsState] = useState<MaterialSwatches>(initialMaterials);
   const [voxel, setVoxelState] = useState<string | null>(initialVoxel);
+  const [scene, setSceneState] = useState<SceneSpec | null>(initialScene);
   const [revision, setRevision] = useState(0);
   // A monotonic version so canUndo/canRedo re-evaluate when the timeline moves.
   const [, setHistoryVersion] = useState(0);
@@ -126,6 +135,7 @@ export function useEditorHistory({
   const rigRef = useRef(rig);
   const materialsRef = useRef(materials);
   const voxelRef = useRef(voxel);
+  const sceneRef = useRef(scene);
   const runnableRef = useRef(runnable);
   const applyingRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -143,6 +153,7 @@ export function useEditorHistory({
       rig: rigRef.current,
       materials: materialsRef.current,
       voxel: voxelRef.current,
+      scene: sceneRef.current,
     };
   }, []);
 
@@ -193,6 +204,8 @@ export function useEditorHistory({
       setMaterialsState(snapshot.materials);
       voxelRef.current = snapshot.voxel;
       setVoxelState(snapshot.voxel);
+      sceneRef.current = snapshot.scene;
+      setSceneState(snapshot.scene);
     } finally {
       applyingRef.current = false;
     }
@@ -256,6 +269,12 @@ export function useEditorHistory({
     notify();
   }, [notify]);
 
+  const setScene = useCallback((next: SceneSpec | null) => {
+    sceneRef.current = next;
+    setSceneState(next);
+    notify();
+  }, [notify]);
+
   const history = historyRef.current;
   const canUndo = history?.canUndo() ?? false;
   const canRedo = history?.canRedo() ?? false;
@@ -273,6 +292,8 @@ export function useEditorHistory({
     setMaterials,
     voxel,
     setVoxel,
+    scene,
+    setScene,
     canUndo,
     canRedo,
     undo,
