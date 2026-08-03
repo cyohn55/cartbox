@@ -119,14 +119,23 @@ export type {
 // Post-processing FX (optional): the shared effect model, the WebGL pass, and
 // the surface decorator that applies a cart's effect stack while it runs.
 export {
+  BLOOM_KNEE,
+  BloomPyramid,
+  MAX_PYRAMID_LEVELS,
+  MIN_PYRAMID_DIMENSION,
   POST_FX_EFFECTS,
   PostFxPass,
   PostFxSurface,
+  acesFilmic,
+  acesFilmicChannel,
   anyPostFxEnabled,
   defaultPostFxSettings,
   hexToRgb01,
   paramKey,
   parsePostFxSettings,
+  pyramidLevelCount,
+  pyramidLevelSize,
+  softKneePrefilter,
   uniformsFromSettings,
 } from "./fx/index.js";
 export type {

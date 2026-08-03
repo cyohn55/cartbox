@@ -24,3 +24,14 @@ export { PostFxPass } from "./PostFxPass.js";
 export type { PostFxSource } from "./PostFxPass.js";
 export { PostFxSurface } from "./PostFxSurface.js";
 export type { InnerSurfaceFactory } from "./PostFxSurface.js";
+export { BloomPyramid } from "./BloomPyramid.js";
+export {
+  BLOOM_KNEE,
+  MAX_PYRAMID_LEVELS,
+  MIN_PYRAMID_DIMENSION,
+  acesFilmic,
+  acesFilmicChannel,
+  pyramidLevelCount,
+  pyramidLevelSize,
+  softKneePrefilter,
+} from "./bloomModel.js";

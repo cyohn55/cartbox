@@ -368,7 +368,7 @@ declare function hashEventId(id: string): number;
  * how a small palette fakes a gradient, and light shafts and streaks are how a
  * flat 2D scene suggests a light source it cannot actually cast.
  */
-type PostFxEffectId = "grade" | "fog" | "bloom" | "crt" | "chroma" | "vignette" | "posterize" | "dither" | "halftone" | "godrays" | "streaks" | "splittone" | "kaleidoscope" | "grain";
+type PostFxEffectId = "grade" | "fog" | "bloom" | "tonemap" | "crt" | "chroma" | "vignette" | "posterize" | "dither" | "halftone" | "godrays" | "streaks" | "splittone" | "kaleidoscope" | "grain";
 interface PostFxParamDef {
     id: string;
     label: string;
@@ -427,6 +427,12 @@ interface PostFxUniforms {
     fogColor: [number, number, number];
     bloomStrength: number;
     bloomThreshold: number;
+    /** Pyramid spread, 0..1: how much the coarse blur levels contribute. */
+    bloomRadius: number;
+    /** 0 leaves the frame in gamma space; 1 applies the ACES filmic rolloff. */
+    toneMap: number;
+    /** Pre-tonemap exposure multiplier (only read when {@link toneMap} is on). */
+    exposure: number;
     curvature: number;
     scanlines: number;
     aberration: number;
@@ -1226,6 +1232,11 @@ declare class PostFxPass {
     private readonly gl;
     private readonly program;
     private readonly texture;
+    private readonly quad;
+    private readonly positionLocation;
+    /** Null when render-to-texture is unavailable; the shader then falls back
+     * to its inline 3x3 bloom rather than the multi-scale pyramid. */
+    private readonly bloom;
     private readonly uniformLocations;
     private constructor();
     /** Returns null when WebGL is unavailable or the shaders fail to compile. */
@@ -1283,6 +1294,121 @@ declare class PostFxSurface implements DisplaySurface {
     destroy(): void;
     private applyScale;
 }
+
+/**
+ * A true multi-pass bloom: the wide, soft, energy-preserving glow the old
+ * single-pass 3x3 tap could not produce (cinematic gap #4). The frame's bright
+ * pixels are extracted through a soft knee, then blurred across a pyramid of
+ * successively halved render targets using the dual-Kawase filter — a downsample
+ * chain followed by an additive upsample chain — so light spreads across many
+ * scales in a handful of cheap passes rather than one fixed-width kernel.
+ *
+ * The targets are half-float when the GPU can render and linearly filter them
+ * (`OES_texture_half_float` + its linear and colour-buffer companions), which is
+ * the other half of gap #4: bright light accumulates past 1.0 in the pyramid and
+ * only comes back into range at the tonemap, so emissives keep their colour
+ * instead of clipping to white. Where half-float is unavailable it falls back to
+ * 8-bit targets — still a wide multi-scale blur, just clamped in range.
+ *
+ * The arithmetic (level count, soft-knee prefilter) lives in {@link bloomModel},
+ * which has headless tests; the shaders here are a direct port of it. Creation
+ * returns null on any GL failure so {@link PostFxPass} can fall back to its
+ * inline bloom and a cart never stops playing.
+ */
+declare class BloomPyramid {
+    private readonly gl;
+    private readonly quad;
+    private readonly prefilter;
+    private readonly downsample;
+    private readonly upsample;
+    /** The pixel type of the render targets: half-float for HDR, else 8-bit. */
+    private readonly textureType;
+    private levels;
+    private baseWidth;
+    private baseHeight;
+    private constructor();
+    /** Whether the pyramid can hold light past 1.0 (true HDR) or clamps at it. */
+    get isHdr(): boolean;
+    /**
+     * Build the pyramid against an existing GL context, or return null if any
+     * shader/buffer allocation fails. The context is shared with the owning pass;
+     * this class only ever renders into its own framebuffers and leaves the
+     * default framebuffer bound when it is done.
+     */
+    static create(gl: WebGLRenderingContext): BloomPyramid | null;
+    /**
+     * Generate the bloom for one frame and return the finest pyramid level (a
+     * half-resolution texture holding the accumulated glow), ready to be sampled
+     * and added by the composite pass. Targets are reallocated only when the base
+     * resolution changes, so steady-state playback allocates nothing.
+     */
+    generate(source: WebGLTexture, baseWidth: number, baseHeight: number, threshold: number, radius: number): WebGLTexture | null;
+    dispose(): void;
+    /** Bind a program and its target framebuffer, and point the shared quad at the
+     * program's attribute — GLSL ES 1.00 has no VAOs, so this repeats per draw. */
+    private begin;
+    private allocate;
+    private makeLevel;
+    private freeLevels;
+}
+
+/**
+ * The pure arithmetic behind the HDR bloom + tonemap stage, split out from the
+ * WebGL plumbing so the algorithm can be validated headlessly (no GL context)
+ * and so {@link BloomPyramid}'s shaders are a faithful port of code that has
+ * tests rather than the other way round.
+ *
+ * Three pieces model gap #4's two halves — a real multi-scale bloom and an HDR
+ * rolloff: how deep the blur pyramid goes for a given frame, the soft-knee
+ * bright pass that seeds it, and the ACES filmic curve that maps the summed HDR
+ * light back into the displayable 0..1 range. Every function here has an exact
+ * GLSL twin in {@link BloomPyramid} and {@link PostFxPass}; keeping them in step
+ * is the whole point of testing this layer.
+ */
+/** Below this many pixels a further halving has nothing left to blur. */
+declare const MIN_PYRAMID_DIMENSION = 4;
+/** The pyramid never grows past this many levels, whatever the resolution. */
+declare const MAX_PYRAMID_LEVELS = 6;
+/**
+ * The soft-knee half-width of the bright pass, as a fraction of the 0..1 range.
+ * A hard threshold makes bloom pop on and off as a pixel crosses it; the knee
+ * fades contribution in across `threshold ± knee` so motion stays smooth.
+ */
+declare const BLOOM_KNEE = 0.5;
+/**
+ * How many downsample levels a frame of the given size supports: each level
+ * halves both dimensions, stopping once the shorter side would fall below
+ * {@link MIN_PYRAMID_DIMENSION} or {@link MAX_PYRAMID_LEVELS} is reached. Always
+ * at least one, so a bloom is drawn even for a tiny frame.
+ */
+declare function pyramidLevelCount(width: number, height: number, maxLevels?: number): number;
+/** The pixel size of pyramid level `index` (0 = half the base resolution). */
+declare function pyramidLevelSize(baseWidth: number, baseHeight: number, index: number): {
+    width: number;
+    height: number;
+};
+/**
+ * The soft-knee bright pass (Unity's bloom prefilter). Returns the input colour
+ * scaled by how far its brightest channel sits above `threshold`: nothing below
+ * `threshold - knee`, the full colour above `threshold + knee`, a quadratic ramp
+ * between. Scaling the whole colour rather than each channel keeps the hue of a
+ * bright pixel intact instead of tinting the glow toward whichever channel
+ * crossed first.
+ */
+declare function softKneePrefilter(rgb: readonly [number, number, number], threshold: number, knee?: number): [number, number, number];
+/**
+ * The ACES filmic tonemap for one channel: an S-curve that is near-linear in the
+ * shadows and rolls asymptotically toward 1 in the highlights, so summed HDR
+ * light compresses into range instead of clipping flat to white. Narkowicz's
+ * fitted approximation of the full ACES curve.
+ */
+declare function acesFilmicChannel(x: number): number;
+/**
+ * Apply the ACES rolloff to an RGB colour after an exposure multiply. The result
+ * is always within 0..1, so however bright the pre-tonemap light was, nothing
+ * clips — it rolls off instead.
+ */
+declare function acesFilmic(rgb: readonly [number, number, number], exposure?: number): [number, number, number];
 
 /**
  * Gap #3 part 2 — rendering a declared scene.
@@ -1470,4 +1596,4 @@ declare class SceneBackdropSurface implements DisplaySurface {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type AtmosphereParams, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, type CartSpriteSource, CartridgeLoadError, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type InnerSurfaceFactory, type InputChange, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxRead, type MaterialBuffer, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, POST_FX_EFFECTS, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, type Vec3, type VerificationResult, WebgpuLightingLayer, anyPostFxEnabled, cameraAt, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeCamera, decodeLights, decodeMailbox, defaultPostFxSettings, extractScore, extractUnlocks, fillSky, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parsePostFxSettings, parseReplay, parseScene, prehazeLayers, randomSeed, readCartCode, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, seedCartridge, serializeReplay, shade, uniformsFromSettings, verifyReplayScore };
+export { type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, type CartSpriteSource, CartridgeLoadError, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type InnerSurfaceFactory, type InputChange, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_PYRAMID_LEVELS, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxRead, type MaterialBuffer, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, POST_FX_EFFECTS, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, type Vec3, type VerificationResult, WebgpuLightingLayer, acesFilmic, acesFilmicChannel, anyPostFxEnabled, cameraAt, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeCamera, decodeLights, decodeMailbox, defaultPostFxSettings, extractScore, extractUnlocks, fillSky, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parsePostFxSettings, parseReplay, parseScene, prehazeLayers, pyramidLevelCount, pyramidLevelSize, randomSeed, readCartCode, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, seedCartridge, serializeReplay, shade, softKneePrefilter, uniformsFromSettings, verifyReplayScore };

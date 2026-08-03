@@ -43,6 +43,9 @@ function fakeGl() {
     uniform1f(location, value) { gl.uniforms[location.name] = value; },
     texImage2D(...args) { gl.lastTextureSource = args[args.length - 1]; },
     viewport() {}, drawArrays() { gl.draws += 1; }, deleteTexture() {}, deleteProgram() {},
+    // The bloom pyramid probes for HDR render targets and owns its own quad
+    // buffer; a minimal context reports no extensions (8-bit fallback path).
+    getExtension: () => null, bindFramebuffer() {}, deleteBuffer() {},
     draws: 0, uniforms: {}, lastTextureSource: null,
   };
   return gl;

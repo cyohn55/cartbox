@@ -21,18 +21,21 @@ const OVERLOOK_CART_ID = "00000000-0000-4000-8000-000000000020";
 const CART_PATH = new URL("../packages/player/examples/overlook.tic", import.meta.url);
 
 // The cinematic finish, applied by the player at runtime. A PostFxSettings
-// object: bloom the neon/moon, split-tone shadows teal and highlights amber,
-// hold the frame with vignette + grain. God-ray source aims at the moon disc.
+// object: bloom the neon/moon through the multi-scale pyramid (gap #4) and roll
+// the hot highlights off the HDR tonemap so they keep their colour, split-tone
+// shadows teal and highlights amber, hold the frame with vignette + grain.
+// God-ray source aims at the moon disc. Kept in step with fx-preset.json.
 const FX = {
   enabled: {
-    grade: true, fog: true, bloom: true, crt: false, chroma: true,
+    grade: true, fog: true, bloom: true, tonemap: true, crt: false, chroma: true,
     vignette: true, posterize: false, dither: false, halftone: false,
     godrays: true, streaks: true, splittone: true, kaleidoscope: false, grain: true,
   },
   values: {
     "grade.brightness": 0.98, "grade.contrast": 1.12, "grade.saturation": 1.14,
     "fog.density": 0.14, "fog.horizon": 0.52,
-    "bloom.strength": 1.0, "bloom.threshold": 0.55,
+    "bloom.strength": 0.9, "bloom.threshold": 0.55, "bloom.radius": 0.78,
+    "tonemap.exposure": 1.15,
     "chroma.amount": 0.6, "vignette.strength": 0.42,
     "godrays.strength": 0.9, "godrays.density": 0.6, "godrays.decay": 0.96,
     "godrays.x": 0.73, "godrays.y": 0.49,

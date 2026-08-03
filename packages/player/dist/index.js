@@ -1105,8 +1105,317 @@ var LitCanvasSurface = class _LitCanvasSurface {
   }
 };
 
-// src/fx/PostFxPass.ts
+// src/fx/bloomModel.ts
+var MIN_PYRAMID_DIMENSION = 4;
+var MAX_PYRAMID_LEVELS = 6;
+var BLOOM_KNEE = 0.5;
+var EPSILON = 1e-4;
+function pyramidLevelCount(width, height, maxLevels = MAX_PYRAMID_LEVELS) {
+  let shorterSide = Math.min(width, height);
+  let levels = 0;
+  while (levels < maxLevels && Math.floor(shorterSide / 2) >= MIN_PYRAMID_DIMENSION) {
+    shorterSide = Math.floor(shorterSide / 2);
+    levels += 1;
+  }
+  return Math.max(1, levels);
+}
+function pyramidLevelSize(baseWidth, baseHeight, index) {
+  const divisor = 2 ** (index + 1);
+  return {
+    width: Math.max(1, Math.floor(baseWidth / divisor)),
+    height: Math.max(1, Math.floor(baseHeight / divisor))
+  };
+}
+function softKneePrefilter(rgb, threshold, knee = BLOOM_KNEE) {
+  const brightest = Math.max(rgb[0], rgb[1], rgb[2]);
+  const kneeWidth = Math.max(knee, EPSILON);
+  let soft = brightest - threshold + kneeWidth;
+  soft = Math.min(Math.max(soft, 0), 2 * kneeWidth);
+  soft = soft * soft / (4 * kneeWidth + EPSILON);
+  const contribution = Math.max(soft, brightest - threshold) / Math.max(brightest, EPSILON);
+  const clamped = Math.max(contribution, 0);
+  return [rgb[0] * clamped, rgb[1] * clamped, rgb[2] * clamped];
+}
+function acesFilmicChannel(x) {
+  const a = 2.51;
+  const b = 0.03;
+  const c = 2.43;
+  const d = 0.59;
+  const e = 0.14;
+  const mapped = x * (a * x + b) / (x * (c * x + d) + e);
+  return Math.min(Math.max(mapped, 0), 1);
+}
+function acesFilmic(rgb, exposure = 1) {
+  return [
+    acesFilmicChannel(rgb[0] * exposure),
+    acesFilmicChannel(rgb[1] * exposure),
+    acesFilmicChannel(rgb[2] * exposure)
+  ];
+}
+
+// src/fx/BloomPyramid.ts
 var VERTEX_SOURCE = `
+attribute vec2 aPosition;
+varying vec2 vUv;
+void main() {
+  vUv = (aPosition + 1.0) * 0.5;
+  gl_Position = vec4(aPosition, 0.0, 1.0);
+}
+`;
+var PREFILTER_SOURCE = `
+precision mediump float;
+varying vec2 vUv;
+uniform sampler2D uTex;
+uniform vec2 uSourceTexel;
+uniform float uThreshold;
+uniform float uKnee;
+
+vec3 prefilter(vec3 c) {
+  float brightest = max(c.r, max(c.g, c.b));
+  float kneeWidth = max(uKnee, 1e-4);
+  float soft = brightest - uThreshold + kneeWidth;
+  soft = clamp(soft, 0.0, 2.0 * kneeWidth);
+  soft = soft * soft / (4.0 * kneeWidth + 1e-4);
+  float contribution = max(soft, brightest - uThreshold) / max(brightest, 1e-4);
+  return c * max(contribution, 0.0);
+}
+
+void main() {
+  vec2 o = uSourceTexel * 0.5;
+  vec3 sum = texture2D(uTex, vUv + vec2(o.x, o.y)).rgb;
+  sum += texture2D(uTex, vUv + vec2(-o.x, o.y)).rgb;
+  sum += texture2D(uTex, vUv + vec2(o.x, -o.y)).rgb;
+  sum += texture2D(uTex, vUv + vec2(-o.x, -o.y)).rgb;
+  gl_FragColor = vec4(prefilter(sum * 0.25), 1.0);
+}
+`;
+var DOWNSAMPLE_SOURCE = `
+precision mediump float;
+varying vec2 vUv;
+uniform sampler2D uTex;
+uniform vec2 uTexel;
+
+void main() {
+  vec2 halfTexel = uTexel * 0.5;
+  vec3 sum = texture2D(uTex, vUv).rgb * 4.0;
+  sum += texture2D(uTex, vUv - halfTexel).rgb;
+  sum += texture2D(uTex, vUv + halfTexel).rgb;
+  sum += texture2D(uTex, vUv + vec2(halfTexel.x, -halfTexel.y)).rgb;
+  sum += texture2D(uTex, vUv - vec2(halfTexel.x, -halfTexel.y)).rgb;
+  gl_FragColor = vec4(sum / 8.0, 1.0);
+}
+`;
+var UPSAMPLE_SOURCE = `
+precision mediump float;
+varying vec2 vUv;
+uniform sampler2D uTex;
+uniform vec2 uTexel;
+uniform float uRadius;
+
+void main() {
+  vec2 spread = uTexel * 0.5 * (0.5 + uRadius);
+  vec3 sum = texture2D(uTex, vUv + vec2(-spread.x * 2.0, 0.0)).rgb;
+  sum += texture2D(uTex, vUv + vec2(-spread.x, spread.y)).rgb * 2.0;
+  sum += texture2D(uTex, vUv + vec2(0.0, spread.y * 2.0)).rgb;
+  sum += texture2D(uTex, vUv + vec2(spread.x, spread.y)).rgb * 2.0;
+  sum += texture2D(uTex, vUv + vec2(spread.x * 2.0, 0.0)).rgb;
+  sum += texture2D(uTex, vUv + vec2(spread.x, -spread.y)).rgb * 2.0;
+  sum += texture2D(uTex, vUv + vec2(0.0, -spread.y * 2.0)).rgb;
+  sum += texture2D(uTex, vUv + vec2(-spread.x, -spread.y)).rgb * 2.0;
+  gl_FragColor = vec4(sum / 12.0, 1.0);
+}
+`;
+var BloomPyramid = class _BloomPyramid {
+  constructor(gl, quad, prefilter, downsample, upsample, textureType) {
+    this.gl = gl;
+    this.quad = quad;
+    this.prefilter = prefilter;
+    this.downsample = downsample;
+    this.upsample = upsample;
+    this.textureType = textureType;
+    this.levels = [];
+    this.baseWidth = 0;
+    this.baseHeight = 0;
+  }
+  /** Whether the pyramid can hold light past 1.0 (true HDR) or clamps at it. */
+  get isHdr() {
+    return this.textureType !== this.gl.UNSIGNED_BYTE;
+  }
+  /**
+   * Build the pyramid against an existing GL context, or return null if any
+   * shader/buffer allocation fails. The context is shared with the owning pass;
+   * this class only ever renders into its own framebuffers and leaves the
+   * default framebuffer bound when it is done.
+   */
+  static create(gl) {
+    const quad = gl.createBuffer();
+    if (!quad) return null;
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    const prefilter = buildProgram(gl, PREFILTER_SOURCE, ["uTex", "uSourceTexel", "uThreshold", "uKnee"]);
+    const downsample = buildProgram(gl, DOWNSAMPLE_SOURCE, ["uTex", "uTexel"]);
+    const upsample = buildProgram(gl, UPSAMPLE_SOURCE, ["uTex", "uTexel", "uRadius"]);
+    if (!prefilter || !downsample || !upsample) {
+      gl.deleteBuffer(quad);
+      return null;
+    }
+    return new _BloomPyramid(gl, quad, prefilter, downsample, upsample, detectTargetType(gl));
+  }
+  /**
+   * Generate the bloom for one frame and return the finest pyramid level (a
+   * half-resolution texture holding the accumulated glow), ready to be sampled
+   * and added by the composite pass. Targets are reallocated only when the base
+   * resolution changes, so steady-state playback allocates nothing.
+   */
+  generate(source, baseWidth, baseHeight, threshold, radius) {
+    const gl = this.gl;
+    if (baseWidth !== this.baseWidth || baseHeight !== this.baseHeight) {
+      this.allocate(baseWidth, baseHeight);
+    }
+    if (this.levels.length === 0) return null;
+    gl.disable(gl.BLEND);
+    this.begin(this.prefilter, this.levels[0]);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, source);
+    gl.uniform1i(this.prefilter.uniforms.get("uTex"), 0);
+    gl.uniform2f(this.prefilter.uniforms.get("uSourceTexel"), 1 / baseWidth, 1 / baseHeight);
+    gl.uniform1f(this.prefilter.uniforms.get("uThreshold"), threshold);
+    gl.uniform1f(this.prefilter.uniforms.get("uKnee"), BLOOM_KNEE);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    for (let index = 1; index < this.levels.length; index++) {
+      const finer = this.levels[index - 1];
+      this.begin(this.downsample, this.levels[index]);
+      gl.bindTexture(gl.TEXTURE_2D, finer.texture);
+      gl.uniform1i(this.downsample.uniforms.get("uTex"), 0);
+      gl.uniform2f(this.downsample.uniforms.get("uTexel"), 1 / finer.width, 1 / finer.height);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    for (let index = this.levels.length - 2; index >= 0; index--) {
+      const coarser = this.levels[index + 1];
+      this.begin(this.upsample, this.levels[index]);
+      gl.bindTexture(gl.TEXTURE_2D, coarser.texture);
+      gl.uniform1i(this.upsample.uniforms.get("uTex"), 0);
+      gl.uniform2f(this.upsample.uniforms.get("uTexel"), 1 / coarser.width, 1 / coarser.height);
+      gl.uniform1f(this.upsample.uniforms.get("uRadius"), radius);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+    gl.disable(gl.BLEND);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return this.levels[0].texture;
+  }
+  dispose() {
+    const gl = this.gl;
+    this.freeLevels();
+    gl.deleteBuffer(this.quad);
+    gl.deleteProgram(this.prefilter.program);
+    gl.deleteProgram(this.downsample.program);
+    gl.deleteProgram(this.upsample.program);
+  }
+  /** Bind a program and its target framebuffer, and point the shared quad at the
+   * program's attribute — GLSL ES 1.00 has no VAOs, so this repeats per draw. */
+  begin(program, level) {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, level.framebuffer);
+    gl.viewport(0, 0, level.width, level.height);
+    gl.useProgram(program.program);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
+    gl.enableVertexAttribArray(program.attribLocation);
+    gl.vertexAttribPointer(program.attribLocation, 2, gl.FLOAT, false, 0, 0);
+    gl.activeTexture(gl.TEXTURE0);
+  }
+  allocate(baseWidth, baseHeight) {
+    this.freeLevels();
+    this.baseWidth = baseWidth;
+    this.baseHeight = baseHeight;
+    const count = pyramidLevelCount(baseWidth, baseHeight);
+    for (let index = 0; index < count; index++) {
+      const { width, height } = pyramidLevelSize(baseWidth, baseHeight, index);
+      const level = this.makeLevel(width, height);
+      if (!level) break;
+      this.levels.push(level);
+    }
+  }
+  makeLevel(width, height) {
+    const gl = this.gl;
+    const texture = gl.createTexture();
+    const framebuffer = gl.createFramebuffer();
+    if (!texture || !framebuffer) return null;
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, this.textureType, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+      gl.deleteTexture(texture);
+      gl.deleteFramebuffer(framebuffer);
+      return null;
+    }
+    return { texture, framebuffer, width, height };
+  }
+  freeLevels() {
+    const gl = this.gl;
+    for (const level of this.levels) {
+      gl.deleteTexture(level.texture);
+      gl.deleteFramebuffer(level.framebuffer);
+    }
+    this.levels = [];
+  }
+};
+function buildProgram(gl, fragmentSource, uniformNames) {
+  const compile = (type, source) => {
+    const shader = gl.createShader(type);
+    if (!shader) return null;
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      console.error("BloomPyramid shader compile failed:", gl.getShaderInfoLog(shader));
+      gl.deleteShader(shader);
+      return null;
+    }
+    return shader;
+  };
+  const vertex = compile(gl.VERTEX_SHADER, VERTEX_SOURCE);
+  const fragment = compile(gl.FRAGMENT_SHADER, fragmentSource);
+  const program = gl.createProgram();
+  if (!vertex || !fragment || !program) return null;
+  gl.attachShader(program, vertex);
+  gl.attachShader(program, fragment);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    console.error("BloomPyramid program link failed:", gl.getProgramInfoLog(program));
+    return null;
+  }
+  const uniforms = /* @__PURE__ */ new Map();
+  for (const name of uniformNames) uniforms.set(name, gl.getUniformLocation(program, name));
+  return { program, attribLocation: gl.getAttribLocation(program, "aPosition"), uniforms };
+}
+function detectTargetType(gl) {
+  const halfFloat = gl.getExtension("OES_texture_half_float");
+  const halfFloatLinear = gl.getExtension("OES_texture_half_float_linear");
+  const colorBufferHalfFloat = gl.getExtension("EXT_color_buffer_half_float");
+  if (!halfFloat || !halfFloatLinear || !colorBufferHalfFloat) return gl.UNSIGNED_BYTE;
+  const type = halfFloat.HALF_FLOAT_OES;
+  const texture = gl.createTexture();
+  const framebuffer = gl.createFramebuffer();
+  if (!texture || !framebuffer) return gl.UNSIGNED_BYTE;
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 4, 4, 0, gl.RGBA, type, null);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+  const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.deleteTexture(texture);
+  gl.deleteFramebuffer(framebuffer);
+  return complete ? type : gl.UNSIGNED_BYTE;
+}
+
+// src/fx/PostFxPass.ts
+var VERTEX_SOURCE2 = `
 attribute vec2 aPosition;
 varying vec2 vUv;
 void main() {
@@ -1128,6 +1437,13 @@ uniform float uFogHorizon;
 uniform vec3 uFogColor;
 uniform float uBloomStrength;
 uniform float uBloomThreshold;
+// The multi-scale bloom the pyramid produces, and whether it is available: when
+// it is not (no framebuffers/extensions) the shader falls back to an inline 3x3.
+uniform sampler2D uBloomTex;
+uniform float uHasBloomTex;
+// HDR rolloff: uToneMap gates the ACES curve, uExposure scales into it.
+uniform float uToneMap;
+uniform float uExposure;
 uniform float uCurvature;
 uniform float uScanlines;
 uniform float uAberration;
@@ -1168,6 +1484,20 @@ float luma(vec3 color) {
 vec3 brightPass(vec2 uv) {
   vec3 color = texture2D(uSource, uv).rgb;
   return color * smoothstep(uBloomThreshold, 1.0, luma(color));
+}
+
+/**
+ * ACES filmic tonemap (Narkowicz's fit), the exact twin of acesFilmic() in
+ * bloomModel.ts. Maps summed HDR light back into 0..1 with a highlight shoulder,
+ * so a bloomed emissive rolls off keeping its colour rather than clipping white.
+ */
+vec3 acesFilmic(vec3 x) {
+  const float a = 2.51;
+  const float b = 0.03;
+  const float c = 2.43;
+  const float d = 0.59;
+  const float e = 0.14;
+  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
 /**
@@ -1231,14 +1561,21 @@ void main() {
     texture2D(uSource, uv - fringe).b
   );
 
-  // Bloom: 3x3 bright-pass blur added on top (cheap at cart resolution).
+  // Bloom: add the wide multi-scale glow the pyramid pre-computed. Where the
+  // pyramid could not be built, fall back to the original 3x3 bright-pass blur so
+  // bloom still does something on a context without render-to-texture.
   if (uBloomStrength > 0.0) {
-    vec2 texel = 1.0 / uSourceSize;
-    vec3 glow = vec3(0.0);
-    for (int dy = -1; dy <= 1; dy++) {
-      for (int dx = -1; dx <= 1; dx++) {
-        float weight = (dx == 0 && dy == 0) ? 0.25 : (dx == 0 || dy == 0) ? 0.125 : 0.0625;
-        glow += brightPass(uv + vec2(float(dx), float(dy)) * texel) * weight;
+    vec3 glow;
+    if (uHasBloomTex > 0.5) {
+      glow = texture2D(uBloomTex, uv).rgb;
+    } else {
+      vec2 texel = 1.0 / uSourceSize;
+      glow = vec3(0.0);
+      for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+          float weight = (dx == 0 && dy == 0) ? 0.25 : (dx == 0 || dy == 0) ? 0.125 : 0.0625;
+          glow += brightPass(uv + vec2(float(dx), float(dy)) * texel) * weight;
+        }
       }
     }
     color += glow * uBloomStrength;
@@ -1276,6 +1613,14 @@ void main() {
       total += weight * 2.0;
     }
     color += streak * (uStreakStrength / max(total, 1.0));
+  }
+
+  // HDR tonemap: with the additive light (bloom, god rays, streaks) now summed,
+  // roll the highlights off the ACES curve so they compress into range with
+  // their colour intact instead of clipping flat. Left of here everything is
+  // HDR; right of here everything is displayable 0..1.
+  if (uToneMap > 0.5) {
+    color = acesFilmic(color * uExposure);
   }
 
   // Grade: brightness, then contrast around mid-grey, then saturation.
@@ -1344,10 +1689,13 @@ void main() {
 }
 `;
 var PostFxPass = class _PostFxPass {
-  constructor(gl, program, texture) {
+  constructor(gl, program, texture, quad, positionLocation, bloom) {
     this.gl = gl;
     this.program = program;
     this.texture = texture;
+    this.quad = quad;
+    this.positionLocation = positionLocation;
+    this.bloom = bloom;
     this.uniformLocations = /* @__PURE__ */ new Map();
   }
   /** Returns null when WebGL is unavailable or the shaders fail to compile. */
@@ -1366,7 +1714,7 @@ var PostFxPass = class _PostFxPass {
       }
       return shader;
     };
-    const vertex = compile(gl.VERTEX_SHADER, VERTEX_SOURCE);
+    const vertex = compile(gl.VERTEX_SHADER, VERTEX_SOURCE2);
     const fragment = compile(gl.FRAGMENT_SHADER, FRAGMENT_SOURCE);
     const program = gl.createProgram();
     if (!vertex || !fragment || !program) return null;
@@ -1385,13 +1733,14 @@ var PostFxPass = class _PostFxPass {
     gl.enableVertexAttribArray(positionLocation);
     gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
     const texture = gl.createTexture();
-    if (!texture) return null;
+    if (!texture || !buffer) return null;
     gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    return new _PostFxPass(gl, program, texture);
+    const bloom = BloomPyramid.create(gl);
+    return new _PostFxPass(gl, program, texture, buffer, positionLocation, bloom);
   }
   location(name) {
     if (!this.uniformLocations.has(name)) {
@@ -1409,8 +1758,6 @@ var PostFxPass = class _PostFxPass {
    */
   render(source, width, height, uniforms, time = 0) {
     const gl = this.gl;
-    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-    gl.useProgram(this.program);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     if (source instanceof Uint8Array || source instanceof Uint8ClampedArray) {
@@ -1428,7 +1775,24 @@ var PostFxPass = class _PostFxPass {
     } else {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
     }
+    let bloomTexture = null;
+    if (this.bloom && uniforms.bloomStrength > 0) {
+      bloomTexture = this.bloom.generate(this.texture, width, height, uniforms.bloomThreshold, uniforms.bloomRadius);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+    gl.useProgram(this.program);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
+    gl.enableVertexAttribArray(this.positionLocation);
+    gl.vertexAttribPointer(this.positionLocation, 2, gl.FLOAT, false, 0, 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, bloomTexture ?? this.texture);
+    gl.activeTexture(gl.TEXTURE0);
     gl.uniform1i(this.location("uSource"), 0);
+    gl.uniform1i(this.location("uBloomTex"), 1);
+    gl.uniform1f(this.location("uHasBloomTex"), bloomTexture ? 1 : 0);
     gl.uniform2f(this.location("uSourceSize"), width, height);
     gl.uniform1f(this.location("uBrightness"), uniforms.brightness);
     gl.uniform1f(this.location("uContrast"), uniforms.contrast);
@@ -1438,6 +1802,8 @@ var PostFxPass = class _PostFxPass {
     gl.uniform3f(this.location("uFogColor"), ...uniforms.fogColor);
     gl.uniform1f(this.location("uBloomStrength"), uniforms.bloomStrength);
     gl.uniform1f(this.location("uBloomThreshold"), uniforms.bloomThreshold);
+    gl.uniform1f(this.location("uToneMap"), uniforms.toneMap);
+    gl.uniform1f(this.location("uExposure"), uniforms.exposure);
     gl.uniform1f(this.location("uCurvature"), uniforms.curvature);
     gl.uniform1f(this.location("uScanlines"), uniforms.scanlines);
     gl.uniform1f(this.location("uAberration"), uniforms.aberration);
@@ -1466,6 +1832,8 @@ var PostFxPass = class _PostFxPass {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
   dispose() {
+    this.bloom?.dispose();
+    this.gl.deleteBuffer(this.quad);
     this.gl.deleteTexture(this.texture);
     this.gl.deleteProgram(this.program);
   }
@@ -1496,11 +1864,25 @@ var POST_FX_EFFECTS = [
   {
     id: "bloom",
     label: "Bloom",
-    description: "Bright pixels glow past their edges.",
+    description: "Bright pixels glow past their edges through a multi-scale blur pyramid.",
     params: [
       { id: "strength", label: "Strength", min: 0, max: 1.5, step: 0.01, defaultValue: 0.6 },
-      // Max stays below 1: the shader's smoothstep(threshold, 1.0, …) needs edge0 < edge1.
-      { id: "threshold", label: "Threshold", min: 0, max: 0.95, step: 0.01, defaultValue: 0.6 }
+      // The bright-pass gate. Max stays below 1 so a soft knee still has headroom
+      // above it (the extract ramps from threshold - knee up to threshold + knee).
+      { id: "threshold", label: "Threshold", min: 0, max: 0.95, step: 0.01, defaultValue: 0.6 },
+      // How far up the pyramid the glow reaches: 0 keeps it tight around edges, 1
+      // spreads the widest, softest halo by weighting the coarser blur levels more.
+      { id: "radius", label: "Radius", min: 0, max: 1, step: 0.01, defaultValue: 0.6 }
+    ]
+  },
+  {
+    id: "tonemap",
+    label: "HDR tonemap",
+    description: "Rolls bright highlights off the ACES filmic curve so bloomed light keeps its colour instead of clipping to white.",
+    params: [
+      // Scales the scene into the curve before mapping: >1 lifts the whole image
+      // toward the shoulder (more rolloff), <1 holds detail in the highlights.
+      { id: "exposure", label: "Exposure", min: 0.2, max: 3, step: 0.01, defaultValue: 1 }
     ]
   },
   {
@@ -1678,6 +2060,9 @@ function uniformsFromSettings(settings) {
     fogColor: color("fog", "tint"),
     bloomStrength: value("bloom", "strength", 0),
     bloomThreshold: shape("bloom", "threshold", 0.6),
+    bloomRadius: shape("bloom", "radius", 0.6),
+    toneMap: settings.enabled.tonemap ? 1 : 0,
+    exposure: shape("tonemap", "exposure", 1),
     curvature: value("crt", "curvature", 0),
     scanlines: value("crt", "scanlines", 0),
     aberration: value("chroma", "amount", 0),
@@ -3017,6 +3402,8 @@ function mount(container, options) {
   };
 }
 export {
+  BLOOM_KNEE,
+  BloomPyramid,
   CAMERA_BASE,
   CAMERA_SCALE,
   CARTBOX_SDK_LUA,
@@ -3035,6 +3422,8 @@ export {
   MAILBOX_TYPE_PROGRESS,
   MAILBOX_TYPE_SCORE,
   MAILBOX_WORDS,
+  MAX_PYRAMID_LEVELS,
+  MIN_PYRAMID_DIMENSION,
   MODELS,
   NORMAL_DIRECTION_COUNT,
   NORMAL_VECTORS,
@@ -3047,6 +3436,8 @@ export {
   ReplaySource,
   SceneBackdropSurface,
   WebgpuLightingLayer,
+  acesFilmic,
+  acesFilmicChannel,
   anyPostFxEnabled,
   cameraAt,
   composeParallax,
@@ -3079,6 +3470,8 @@ export {
   parseReplay,
   parseScene,
   prehazeLayers,
+  pyramidLevelCount,
+  pyramidLevelSize,
   randomSeed,
   readCartCode,
   renderSceneBackdrop,
@@ -3089,6 +3482,7 @@ export {
   seedCartridge,
   serializeReplay,
   shade,
+  softKneePrefilter,
   uniformsFromSettings,
   verifyReplayScore
 };

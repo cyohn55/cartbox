@@ -22,6 +22,7 @@ export type PostFxEffectId =
   | "grade"
   | "fog"
   | "bloom"
+  | "tonemap"
   | "crt"
   | "chroma"
   | "vignette"
@@ -84,11 +85,25 @@ export const POST_FX_EFFECTS: PostFxEffectDef[] = [
   {
     id: "bloom",
     label: "Bloom",
-    description: "Bright pixels glow past their edges.",
+    description: "Bright pixels glow past their edges through a multi-scale blur pyramid.",
     params: [
       { id: "strength", label: "Strength", min: 0, max: 1.5, step: 0.01, defaultValue: 0.6 },
-      // Max stays below 1: the shader's smoothstep(threshold, 1.0, …) needs edge0 < edge1.
+      // The bright-pass gate. Max stays below 1 so a soft knee still has headroom
+      // above it (the extract ramps from threshold - knee up to threshold + knee).
       { id: "threshold", label: "Threshold", min: 0, max: 0.95, step: 0.01, defaultValue: 0.6 },
+      // How far up the pyramid the glow reaches: 0 keeps it tight around edges, 1
+      // spreads the widest, softest halo by weighting the coarser blur levels more.
+      { id: "radius", label: "Radius", min: 0, max: 1, step: 0.01, defaultValue: 0.6 },
+    ],
+  },
+  {
+    id: "tonemap",
+    label: "HDR tonemap",
+    description: "Rolls bright highlights off the ACES filmic curve so bloomed light keeps its colour instead of clipping to white.",
+    params: [
+      // Scales the scene into the curve before mapping: >1 lifts the whole image
+      // toward the shoulder (more rolloff), <1 holds detail in the highlights.
+      { id: "exposure", label: "Exposure", min: 0.2, max: 3, step: 0.01, defaultValue: 1 },
     ],
   },
   {
@@ -286,6 +301,12 @@ export interface PostFxUniforms {
   fogColor: [number, number, number];
   bloomStrength: number;
   bloomThreshold: number;
+  /** Pyramid spread, 0..1: how much the coarse blur levels contribute. */
+  bloomRadius: number;
+  /** 0 leaves the frame in gamma space; 1 applies the ACES filmic rolloff. */
+  toneMap: number;
+  /** Pre-tonemap exposure multiplier (only read when {@link toneMap} is on). */
+  exposure: number;
   curvature: number;
   scanlines: number;
   aberration: number;
@@ -355,6 +376,9 @@ export function uniformsFromSettings(settings: PostFxSettings): PostFxUniforms {
     fogColor: color("fog", "tint"),
     bloomStrength: value("bloom", "strength", 0),
     bloomThreshold: shape("bloom", "threshold", 0.6),
+    bloomRadius: shape("bloom", "radius", 0.6),
+    toneMap: settings.enabled.tonemap ? 1 : 0,
+    exposure: shape("tonemap", "exposure", 1),
     curvature: value("crt", "curvature", 0),
     scanlines: value("crt", "scanlines", 0),
     aberration: value("chroma", "amount", 0),

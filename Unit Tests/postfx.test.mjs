@@ -61,7 +61,10 @@ let passed = 0;
   const settings = defaultPostFxSettings();
   settings.enabled.fog = true;
   settings.values[paramKey("fog", "density")] = 0.8;
-  settings.fogColor = "#ff8040";
+  // Effects declare their colours generically now: uniformsFromSettings reads the
+  // fog tint from settings.colors, not the legacy top-level fogColor field (that
+  // is honoured only by parsePostFxSettings, covered in postfx-effects.test.ts).
+  settings.colors[paramKey("fog", "tint")] = "#ff8040";
   const uniforms = uniformsFromSettings(settings);
   assert.equal(uniforms.fogDensity, 0.8);
   assert.deepEqual(uniforms.fogColor, hexToRgb01("#ff8040"));
@@ -110,7 +113,7 @@ let passed = 0;
   const settings = defaultPostFxSettings();
   settings.enabled.bloom = true;
   settings.values[paramKey("bloom", "strength")] = 1.2;
-  settings.fogColor = "#123abc";
+  settings.colors[paramKey("fog", "tint")] = "#123abc";
   assert.deepEqual(parsePostFxSettings(JSON.parse(JSON.stringify(settings))), settings);
   passed += 1;
 }
@@ -149,7 +152,7 @@ let passed = 0;
   assert.equal(parsed.values[paramKey("fog", "horizon")], fogHorizon.min);
   assert.equal(parsed.values[paramKey("grade", "brightness")], 1);
   assert.equal("unknown.param" in parsed.values, false);
-  assert.equal(parsed.fogColor, defaultPostFxSettings().fogColor);
+  assert.equal(parsed.colors[paramKey("fog", "tint")], defaultPostFxSettings().colors[paramKey("fog", "tint")]);
   assert.equal("nonsense" in parsed.enabled, false);
   passed += 1;
 }

@@ -20,6 +20,7 @@
  * exactly one program, compiled once, whatever the artist switches on.
  */
 
+import { BloomPyramid } from "./BloomPyramid.js";
 import type { PostFxUniforms } from "./postfx.js";
 
 /** A frame to post-process: raw RGBA bytes or a canvas to sample. */
@@ -48,6 +49,13 @@ uniform float uFogHorizon;
 uniform vec3 uFogColor;
 uniform float uBloomStrength;
 uniform float uBloomThreshold;
+// The multi-scale bloom the pyramid produces, and whether it is available: when
+// it is not (no framebuffers/extensions) the shader falls back to an inline 3x3.
+uniform sampler2D uBloomTex;
+uniform float uHasBloomTex;
+// HDR rolloff: uToneMap gates the ACES curve, uExposure scales into it.
+uniform float uToneMap;
+uniform float uExposure;
 uniform float uCurvature;
 uniform float uScanlines;
 uniform float uAberration;
@@ -88,6 +96,20 @@ float luma(vec3 color) {
 vec3 brightPass(vec2 uv) {
   vec3 color = texture2D(uSource, uv).rgb;
   return color * smoothstep(uBloomThreshold, 1.0, luma(color));
+}
+
+/**
+ * ACES filmic tonemap (Narkowicz's fit), the exact twin of acesFilmic() in
+ * bloomModel.ts. Maps summed HDR light back into 0..1 with a highlight shoulder,
+ * so a bloomed emissive rolls off keeping its colour rather than clipping white.
+ */
+vec3 acesFilmic(vec3 x) {
+  const float a = 2.51;
+  const float b = 0.03;
+  const float c = 2.43;
+  const float d = 0.59;
+  const float e = 0.14;
+  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
 /**
@@ -151,14 +173,21 @@ void main() {
     texture2D(uSource, uv - fringe).b
   );
 
-  // Bloom: 3x3 bright-pass blur added on top (cheap at cart resolution).
+  // Bloom: add the wide multi-scale glow the pyramid pre-computed. Where the
+  // pyramid could not be built, fall back to the original 3x3 bright-pass blur so
+  // bloom still does something on a context without render-to-texture.
   if (uBloomStrength > 0.0) {
-    vec2 texel = 1.0 / uSourceSize;
-    vec3 glow = vec3(0.0);
-    for (int dy = -1; dy <= 1; dy++) {
-      for (int dx = -1; dx <= 1; dx++) {
-        float weight = (dx == 0 && dy == 0) ? 0.25 : (dx == 0 || dy == 0) ? 0.125 : 0.0625;
-        glow += brightPass(uv + vec2(float(dx), float(dy)) * texel) * weight;
+    vec3 glow;
+    if (uHasBloomTex > 0.5) {
+      glow = texture2D(uBloomTex, uv).rgb;
+    } else {
+      vec2 texel = 1.0 / uSourceSize;
+      glow = vec3(0.0);
+      for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+          float weight = (dx == 0 && dy == 0) ? 0.25 : (dx == 0 || dy == 0) ? 0.125 : 0.0625;
+          glow += brightPass(uv + vec2(float(dx), float(dy)) * texel) * weight;
+        }
       }
     }
     color += glow * uBloomStrength;
@@ -196,6 +225,14 @@ void main() {
       total += weight * 2.0;
     }
     color += streak * (uStreakStrength / max(total, 1.0));
+  }
+
+  // HDR tonemap: with the additive light (bloom, god rays, streaks) now summed,
+  // roll the highlights off the ACES curve so they compress into range with
+  // their colour intact instead of clipping flat. Left of here everything is
+  // HDR; right of here everything is displayable 0..1.
+  if (uToneMap > 0.5) {
+    color = acesFilmic(color * uExposure);
   }
 
   // Grade: brightness, then contrast around mid-grey, then saturation.
@@ -271,6 +308,11 @@ export class PostFxPass {
     private readonly gl: WebGLRenderingContext,
     private readonly program: WebGLProgram,
     private readonly texture: WebGLTexture,
+    private readonly quad: WebGLBuffer,
+    private readonly positionLocation: number,
+    /** Null when render-to-texture is unavailable; the shader then falls back
+     * to its inline 3x3 bloom rather than the multi-scale pyramid. */
+    private readonly bloom: BloomPyramid | null,
   ) {}
 
   /** Returns null when WebGL is unavailable or the shaders fail to compile. */
@@ -313,14 +355,18 @@ export class PostFxPass {
     gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
 
     const texture = gl.createTexture();
-    if (!texture) return null;
+    if (!texture || !buffer) return null;
     gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
-    return new PostFxPass(gl, program, texture);
+    // The pyramid shares this context; a null result is fine — the shader's
+    // inline bloom covers the case, so FX still runs without render-to-texture.
+    const bloom = BloomPyramid.create(gl);
+
+    return new PostFxPass(gl, program, texture, buffer, positionLocation, bloom);
   }
 
   private location(name: string): WebGLUniformLocation | null {
@@ -340,9 +386,8 @@ export class PostFxPass {
    */
   render(source: PostFxSource, width: number, height: number, uniforms: PostFxUniforms, time = 0): void {
     const gl = this.gl;
-    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-    gl.useProgram(this.program);
 
+    // Upload this frame to the source texture first: the bloom pyramid reads it.
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     if (source instanceof Uint8Array || source instanceof Uint8ClampedArray) {
@@ -362,7 +407,33 @@ export class PostFxPass {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
     }
 
+    // Build the multi-scale bloom when the effect is on and the pyramid exists;
+    // otherwise the shader's inline fallback runs and uHasBloomTex stays 0.
+    let bloomTexture: WebGLTexture | null = null;
+    if (this.bloom && uniforms.bloomStrength > 0) {
+      bloomTexture = this.bloom.generate(this.texture, width, height, uniforms.bloomThreshold, uniforms.bloomRadius);
+    }
+
+    // Composite to the visible framebuffer. Generating the pyramid bound its own
+    // framebuffers and quad, so re-establish ours before the final draw.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+    gl.useProgram(this.program);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
+    gl.enableVertexAttribArray(this.positionLocation);
+    gl.vertexAttribPointer(this.positionLocation, 2, gl.FLOAT, false, 0, 0);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    // Unit 1 carries the bloom; bind the source as a harmless placeholder when
+    // there is no bloom, so the declared sampler always has a complete texture.
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, bloomTexture ?? this.texture);
+    gl.activeTexture(gl.TEXTURE0);
+
     gl.uniform1i(this.location("uSource"), 0);
+    gl.uniform1i(this.location("uBloomTex"), 1);
+    gl.uniform1f(this.location("uHasBloomTex"), bloomTexture ? 1 : 0);
     gl.uniform2f(this.location("uSourceSize"), width, height);
     gl.uniform1f(this.location("uBrightness"), uniforms.brightness);
     gl.uniform1f(this.location("uContrast"), uniforms.contrast);
@@ -372,6 +443,8 @@ export class PostFxPass {
     gl.uniform3f(this.location("uFogColor"), ...uniforms.fogColor);
     gl.uniform1f(this.location("uBloomStrength"), uniforms.bloomStrength);
     gl.uniform1f(this.location("uBloomThreshold"), uniforms.bloomThreshold);
+    gl.uniform1f(this.location("uToneMap"), uniforms.toneMap);
+    gl.uniform1f(this.location("uExposure"), uniforms.exposure);
     gl.uniform1f(this.location("uCurvature"), uniforms.curvature);
     gl.uniform1f(this.location("uScanlines"), uniforms.scanlines);
     gl.uniform1f(this.location("uAberration"), uniforms.aberration);
@@ -402,6 +475,8 @@ export class PostFxPass {
   }
 
   dispose(): void {
+    this.bloom?.dispose();
+    this.gl.deleteBuffer(this.quad);
     this.gl.deleteTexture(this.texture);
     this.gl.deleteProgram(this.program);
   }
