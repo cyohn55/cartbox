@@ -30,11 +30,19 @@
 --     cartbox.light(px, py, 90, 255, 180, 90)            -- a warm torch on the player
 --     cartbox.spot(200, 20, 40, 0.2, 1, 0.3, 140, 22, 255, 210, 150) -- a lamp cone
 --   end
+--
+-- Parallax backdrop camera (needs the cart mounted with a `scene`): publish where
+-- the backdrop should look each frame so it pans with gameplay instead of only
+-- auto-scrolling. x,y are in cart pixels and are ADDED to the scene's own
+-- auto-scroll; nearer layers move more (their parallax factor scales this).
+--
+--   cartbox.camera(worldX, 0)   -- backdrop follows the player's world position
 
 local _MB = 192   -- pmem word: mailbox base (event sequence counter)
 local _CAP = 8    -- event ring capacity (must match the host)
 local _LB = _MB + 25 -- pmem word: light-count header (must match the host)
 local _LCAP = 6   -- maximum lights per frame (must match the host)
+local _CB = _LB + 1 + _LCAP * 6 -- pmem word: backdrop camera x (must match the host)
 local _ln = 0     -- lights written since the last clearlights()
 
 local function _emit(kind, id, value)
@@ -123,5 +131,14 @@ cartbox = {
     local cone = math.floor(math.cos(math.rad(angle or 30)) * 63 + 0.5)
     if cone < 0 then cone = 0 elseif cone > 63 then cone = 63 end
     _light(2, x, y, z or 12, radius, r, g, b, intensity, _byte(nx), _byte(ny), cone)
+  end,
+
+  -- Publish the parallax backdrop camera for this frame (scene carts only). x,y
+  -- are cart pixels, stored as signed fixed-point (× 16). math.floor keeps the
+  -- value integer so the mask never sees a float (the Pro core's Lua throws on
+  -- bitwise-of-float). Must match decodeCamera() on the host (mailbox.ts).
+  camera = function(x, y)
+    pmem(_CB, math.floor((x or 0) * 16 + 0.5) & 0xffffffff)
+    pmem(_CB + 1, math.floor((y or 0) * 16 + 0.5) & 0xffffffff)
   end,
 }

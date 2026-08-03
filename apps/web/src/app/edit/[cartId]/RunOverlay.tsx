@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { mount, type PlayerHandle, type PostFxSettings } from "@cartbox/player";
+import { mount, type PlayerHandle, type PostFxSettings, type SceneSpec } from "@cartbox/player";
 
 import styles from "./editor.module.css";
 
@@ -19,10 +19,12 @@ interface RunOverlayProps {
   cartName: string;
   /** The cart's post-processing stack, applied live during the playtest. */
   postFx?: PostFxSettings;
+  /** The cart's parallax-scene backdrop, composited live during the playtest. */
+  scene?: SceneSpec;
   onClose: () => void;
 }
 
-export function RunOverlay({ bytes, engineUrl, cartName, postFx, onClose }: RunOverlayProps) {
+export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, onClose }: RunOverlayProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<PlayerHandle | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
@@ -48,6 +50,8 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, onClose }: RunO
       lighting: { autoDetect: true },
       // Playtest with the cart's authored FX stack, exactly as players see it.
       postFx,
+      // Playtest with the cart's parallax backdrop behind its live frame.
+      scene,
       onReady: () => setStatus("ready"),
       onError: () => setStatus("error"),
     });
@@ -57,7 +61,7 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, onClose }: RunO
       handle.destroy();
       URL.revokeObjectURL(url);
     };
-  }, [bytes, engineUrl, postFx]);
+  }, [bytes, engineUrl, postFx, scene]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {

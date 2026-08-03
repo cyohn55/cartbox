@@ -261,6 +261,12 @@ interface LightingScene {
  *   per-frame *state*: the cart rewrites the whole block each tick (clear + add),
  *   and the host reads the latest set to relight the frame.
  *
+ *   Camera (words 62..63): the parallax-scene backdrop position a cart publishes
+ *   via `cartbox.camera(x, y)`, so a gameplay-driven backdrop can pan instead of
+ *   only auto-scrolling. Like lights it is per-frame state: two signed
+ *   fixed-point words (× {@link CAMERA_SCALE}) for x and y. An unset camera reads
+ *   as (0, 0), which adds nothing to the scene's own auto-scroll.
+ *
  * This module is pure — no engine, no DOM — so the protocol is unit-testable.
  */
 
@@ -277,6 +283,14 @@ declare const LIGHTS_BASE: number;
 declare const LIGHTS_CAPACITY = 6;
 /** Words per light record: x, y, z, radius, packedRGB, intensity*256. */
 declare const LIGHT_STRIDE = 6;
+/** Word index of the cart-published parallax camera, just past the lights block. */
+declare const CAMERA_BASE: number;
+/**
+ * Fixed-point scale for the camera's x/y, stored as signed 32-bit words. 16 gives
+ * sub-pixel panning (parallax factors scale it further) with a range of ±134M px
+ * — far beyond any cart world.
+ */
+declare const CAMERA_SCALE = 16;
 type MailboxEventKind = "achievement" | "score" | "progress" | "unknown";
 interface MailboxEvent {
     kind: MailboxEventKind;
@@ -312,6 +326,23 @@ declare function decodeMailbox(words: Uint32Array, lastSeq: number): MailboxRead
  * @returns The decoded lights, clamped to {@link LIGHTS_CAPACITY}.
  */
 declare function decodeLights(words: Uint32Array): Light[];
+/** A backdrop camera position in cart pixels. */
+interface MailboxCamera {
+    x: number;
+    y: number;
+}
+/**
+ * Decodes the parallax-scene camera a cart published this frame via
+ * `cartbox.camera(x, y)`.
+ *
+ * The two words are signed fixed-point: reinterpreted from u32 to int32 (`| 0`)
+ * and divided by {@link CAMERA_SCALE}. A cart that never calls `cartbox.camera`
+ * leaves the words zero, so this returns (0, 0) — which the scene adds to its own
+ * auto-scroll, leaving auto-scroll-only carts unchanged.
+ *
+ * @param words The mailbox window (same array {@link decodeMailbox} reads).
+ */
+declare function decodeCamera(words: Uint32Array): MailboxCamera;
 /**
  * FNV-1a 32-bit hash of a string event id. Mirrors the hash in the cartbox SDK
  * so the platform can map a mailbox id back to the achievement/stat key.
@@ -472,6 +503,13 @@ interface ParallaxLayer {
     wrapX?: boolean;
     /** Vertical placement in the output, in pixels (align a horizon). Default 0. */
     offsetY?: number;
+    /**
+     * The aerial-perspective haze is already baked into {@link pixels} (see
+     * {@link prehazeLayers}), so compositing must not apply it again. A layer's haze
+     * is frame-invariant — it depends only on the layer's depth and the scene
+     * atmosphere — so the runtime bakes it once and skips it in the per-frame loop.
+     */
+    hazed?: boolean;
 }
 /** Aerial-perspective parameters, shared by the whole scene. */
 interface AtmosphereParams {
@@ -489,6 +527,27 @@ interface ParallaxCamera {
     x: number;
     y: number;
 }
+/**
+ * Bake each layer's aerial-perspective haze into its pixels once, returning new
+ * layers flagged {@link ParallaxLayer.hazed} so {@link composeParallax} skips the
+ * per-pixel haze in the hot path.
+ *
+ * A layer's haze depends only on its depth and the (constant) atmosphere, so it
+ * is identical every frame — computing it once here instead of per pixel per
+ * frame is what keeps an N-layer scene inside the 60fps budget. The input layers
+ * are not mutated; a layer that takes no haze is returned with its pixels shared.
+ */
+declare function prehazeLayers(layers: readonly ParallaxLayer[], atmosphere: AtmosphereParams): ParallaxLayer[];
+/**
+ * Composite parallax layers into `out` (outW×outH RGBA), far to near, applying
+ * per-layer aerial perspective by depth. `out` should already hold the sky /
+ * clear colour; layers blend over it by their own alpha.
+ *
+ * Parallax: a layer shifts by `-camera * parallaxOf(layer)`, so the nearest
+ * layers slide fastest. Horizontal wrap tiles a layer seamlessly; vertical uses
+ * `offsetY` and clips.
+ */
+declare function composeParallax(out: Uint8ClampedArray, outW: number, outH: number, layers: readonly ParallaxLayer[], camera: ParallaxCamera, atmosphere: AtmosphereParams): void;
 
 /**
  * Gap #3 part 2 — the cart-facing `scene` model.
@@ -726,7 +785,7 @@ declare function seedCartridge(bytes: Uint8Array, seed: number): Uint8Array;
  * capacity 8, lights block at word 217, event types 1/2/3, FNV-1a id hash).
  */
 /** Lua source of the cartbox SDK. */
-declare const CARTBOX_SDK_LUA = "local _MB = 192\nlocal _CAP = 8\nlocal _LB = _MB + 25\nlocal _LCAP = 6\nlocal _ln = 0\nlocal function _emit(kind, id, value)\n  local seq = pmem(_MB)\n  local slot = seq % _CAP\n  local base = _MB + 1 + slot * 3\n  pmem(base, kind)\n  pmem(base + 1, id)\n  pmem(base + 2, value)\n  pmem(_MB, seq + 1)\nend\nlocal function _hash(s)\n  local h = 2166136261\n  for i = 1, #s do\n    h = ((h ~ string.byte(s, i)) * 16777619) & 0xffffffff\n  end\n  return h\nend\nlocal function _norm(x, y, z)\n  local m = math.sqrt(x * x + y * y + z * z)\n  if m < 1e-6 then return 0, 0, 1 end\n  return x / m, y / m, z / m\nend\nlocal function _byte(v)\n  local b = math.floor((v or 0) * 127 + 0.5)\n  if b < -127 then b = -127 elseif b > 127 then b = 127 end\n  if b < 0 then b = b + 256 end\n  return b\nend\nlocal function _light(kind, x, y, z, radius, r, g, b, intensity, dx, dy, cone)\n  if _ln >= _LCAP then return end\n  local base = _LB + 1 + _ln * 6\n  pmem(base, x // 1)\n  pmem(base + 1, y // 1)\n  pmem(base + 2, z // 1)\n  pmem(base + 3, radius // 1)\n  local rgb = (math.floor(r or 255) & 0xff) << 16\n  rgb = rgb | ((math.floor(g or 255) & 0xff) << 8)\n  rgb = rgb | (math.floor(b or 255) & 0xff)\n  pmem(base + 4, rgb | (kind << 24) | (cone << 26))\n  local inten = math.floor((intensity or 1) * 256)\n  if inten < 0 then inten = 0 elseif inten > 0xffff then inten = 0xffff end\n  pmem(base + 5, inten | (dx << 16) | (dy << 24))\n  _ln = _ln + 1\n  pmem(_LB, _ln)\nend\ncartbox = {\n  unlock = function(id) _emit(1, _hash(id), 0) end,\n  score = function(v) _emit(2, 0, v // 1) end,\n  progress = function(id, v) _emit(3, _hash(id), v // 1) end,\n  clearlights = function() _ln = 0 pmem(_LB, 0) end,\n  light = function(x, y, radius, r, g, b, z, intensity)\n    _light(0, x, y, z or 12, radius, r, g, b, intensity, 0, 0, 0)\n  end,\n  sun = function(dx, dy, dz, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    _light(1, 0, 0, 0, 0, r, g, b, intensity, _byte(nx), _byte(ny), 0)\n  end,\n  spot = function(x, y, z, dx, dy, dz, radius, angle, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    local cone = math.floor(math.cos(math.rad(angle or 30)) * 63 + 0.5)\n    if cone < 0 then cone = 0 elseif cone > 63 then cone = 63 end\n    _light(2, x, y, z or 12, radius, r, g, b, intensity, _byte(nx), _byte(ny), cone)\n  end,\n}";
+declare const CARTBOX_SDK_LUA = "local _MB = 192\nlocal _CAP = 8\nlocal _LB = _MB + 25\nlocal _LCAP = 6\nlocal _CB = _LB + 1 + _LCAP * 6\nlocal _ln = 0\nlocal function _emit(kind, id, value)\n  local seq = pmem(_MB)\n  local slot = seq % _CAP\n  local base = _MB + 1 + slot * 3\n  pmem(base, kind)\n  pmem(base + 1, id)\n  pmem(base + 2, value)\n  pmem(_MB, seq + 1)\nend\nlocal function _hash(s)\n  local h = 2166136261\n  for i = 1, #s do\n    h = ((h ~ string.byte(s, i)) * 16777619) & 0xffffffff\n  end\n  return h\nend\nlocal function _norm(x, y, z)\n  local m = math.sqrt(x * x + y * y + z * z)\n  if m < 1e-6 then return 0, 0, 1 end\n  return x / m, y / m, z / m\nend\nlocal function _byte(v)\n  local b = math.floor((v or 0) * 127 + 0.5)\n  if b < -127 then b = -127 elseif b > 127 then b = 127 end\n  if b < 0 then b = b + 256 end\n  return b\nend\nlocal function _light(kind, x, y, z, radius, r, g, b, intensity, dx, dy, cone)\n  if _ln >= _LCAP then return end\n  local base = _LB + 1 + _ln * 6\n  pmem(base, x // 1)\n  pmem(base + 1, y // 1)\n  pmem(base + 2, z // 1)\n  pmem(base + 3, radius // 1)\n  local rgb = (math.floor(r or 255) & 0xff) << 16\n  rgb = rgb | ((math.floor(g or 255) & 0xff) << 8)\n  rgb = rgb | (math.floor(b or 255) & 0xff)\n  pmem(base + 4, rgb | (kind << 24) | (cone << 26))\n  local inten = math.floor((intensity or 1) * 256)\n  if inten < 0 then inten = 0 elseif inten > 0xffff then inten = 0xffff end\n  pmem(base + 5, inten | (dx << 16) | (dy << 24))\n  _ln = _ln + 1\n  pmem(_LB, _ln)\nend\ncartbox = {\n  unlock = function(id) _emit(1, _hash(id), 0) end,\n  score = function(v) _emit(2, 0, v // 1) end,\n  progress = function(id, v) _emit(3, _hash(id), v // 1) end,\n  clearlights = function() _ln = 0 pmem(_LB, 0) end,\n  light = function(x, y, radius, r, g, b, z, intensity)\n    _light(0, x, y, z or 12, radius, r, g, b, intensity, 0, 0, 0)\n  end,\n  sun = function(dx, dy, dz, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    _light(1, 0, 0, 0, 0, r, g, b, intensity, _byte(nx), _byte(ny), 0)\n  end,\n  spot = function(x, y, z, dx, dy, dz, radius, angle, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    local cone = math.floor(math.cos(math.rad(angle or 30)) * 63 + 0.5)\n    if cone < 0 then cone = 0 elseif cone > 63 then cone = 63 end\n    _light(2, x, y, z or 12, radius, r, g, b, intensity, _byte(nx), _byte(ny), cone)\n  end,\n  camera = function(x, y)\n    pmem(_CB, math.floor((x or 0) * 16 + 0.5) & 0xffffffff)\n    pmem(_CB + 1, math.floor((y or 0) * 16 + 0.5) & 0xffffffff)\n  end,\n}";
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */
 declare function injectSdk(bytes: Uint8Array): Uint8Array;
 
@@ -1257,6 +1316,18 @@ interface SpriteRegionSource {
  */
 declare function resolveSceneLayers(spec: SceneSpec, source: SpriteRegionSource): ParallaxLayer[];
 /**
+ * The camera for a given presented frame: the scene's constant auto-scroll plus
+ * an optional cart-supplied base offset (e.g. the player's world position, which
+ * a cart can publish for the backdrop to follow).
+ */
+declare function cameraAt(spec: SceneSpec, frame: number, base?: ParallaxCamera): ParallaxCamera;
+/**
+ * Fill `out` with a vertical sky gradient (dark zenith → the atmosphere's fog
+ * colour at the horizon), so distant layers hazing toward fog meet a matching
+ * sky. Convenience for the common case; a cart can paint its own sky instead.
+ */
+declare function fillSky(out: Uint8ClampedArray, width: number, height: number, atmosphere: AtmosphereParams, horizonY?: number): void;
+/**
  * Render the full backdrop for one frame into `out`: sky, then the parallax
  * layers with atmosphere at the frame's camera. `layers` come from
  * {@link resolveSceneLayers} (resolved once and reused).
@@ -1348,14 +1419,25 @@ declare class SceneBackdropSurface implements DisplaySurface {
     private readonly inner;
     private readonly width;
     private readonly height;
-    private readonly layers;
     private readonly spec;
     private readonly keyRgb;
     private frame;
+    /** The cart-published camera base, added to the scene's auto-scroll each frame. */
+    private cameraBase;
+    /** Layers with aerial haze baked in once (see prehazeLayers) — the per-frame win. */
+    private readonly hazedLayers;
+    /** The sky gradient, computed once (it depends only on the constant atmosphere). */
+    private readonly sky;
     private readonly backdrop;
     private readonly composited;
     private readonly presented;
     constructor(inner: DisplaySurface, width: number, height: number, layers: readonly ParallaxLayer[], spec: SceneSpec, keyRgb: Rgb$1);
+    /**
+     * Set the backdrop camera the cart published this frame (via `cartbox.camera`).
+     * Added to the scene's own auto-scroll, so an auto-scroll-only cart that never
+     * sets it keeps panning as before with the default (0, 0).
+     */
+    setCameraBase(base: ParallaxCamera): void;
     blit(rgba: Uint8Array): void;
     destroy(): void;
 }
@@ -1388,4 +1470,4 @@ declare class SceneBackdropSurface implements DisplaySurface {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type AtmosphereParams, type BuiltLightingRenderer, CARTBOX_SDK_LUA, type CartSpriteSource, CartridgeLoadError, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type InnerSurfaceFactory, type InputChange, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MODELS, type MailboxEvent, type MailboxEventKind, type MailboxRead, type MaterialBuffer, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, POST_FX_EFFECTS, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, type Vec3, type VerificationResult, WebgpuLightingLayer, anyPostFxEnabled, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeLights, decodeMailbox, defaultPostFxSettings, extractScore, extractUnlocks, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parsePostFxSettings, parseReplay, parseScene, randomSeed, readCartCode, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, seedCartridge, serializeReplay, shade, uniformsFromSettings, verifyReplayScore };
+export { type AtmosphereParams, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, type CartSpriteSource, CartridgeLoadError, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type InnerSurfaceFactory, type InputChange, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxRead, type MaterialBuffer, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, POST_FX_EFFECTS, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, type Vec3, type VerificationResult, WebgpuLightingLayer, anyPostFxEnabled, cameraAt, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeCamera, decodeLights, decodeMailbox, defaultPostFxSettings, extractScore, extractUnlocks, fillSky, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parsePostFxSettings, parseReplay, parseScene, prehazeLayers, randomSeed, readCartCode, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, seedCartridge, serializeReplay, shade, uniformsFromSettings, verifyReplayScore };

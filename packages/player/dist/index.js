@@ -2229,6 +2229,7 @@ var CARTBOX_SDK_LUA = `local _MB = 192
 local _CAP = 8
 local _LB = _MB + 25
 local _LCAP = 6
+local _CB = _LB + 1 + _LCAP * 6
 local _ln = 0
 local function _emit(kind, id, value)
   local seq = pmem(_MB)
@@ -2292,6 +2293,10 @@ cartbox = {
     if cone < 0 then cone = 0 elseif cone > 63 then cone = 63 end
     _light(2, x, y, z or 12, radius, r, g, b, intensity, _byte(nx), _byte(ny), cone)
   end,
+  camera = function(x, y)
+    pmem(_CB, math.floor((x or 0) * 16 + 0.5) & 0xffffffff)
+    pmem(_CB + 1, math.floor((y or 0) * 16 + 0.5) & 0xffffffff)
+  end,
 }`;
 function injectSdk(bytes) {
   return prependLuaCode(bytes, CARTBOX_SDK_LUA);
@@ -2307,6 +2312,8 @@ var LIGHTS_BASE = 1 + EVENT_CAPACITY * 3;
 var LIGHTS_CAPACITY = 6;
 var LIGHT_STRIDE = 6;
 var LIGHT_INTENSITY_SCALE = 256;
+var CAMERA_BASE = LIGHTS_BASE + 1 + LIGHTS_CAPACITY * LIGHT_STRIDE;
+var CAMERA_SCALE = 16;
 var LIGHT_KIND_POINT = 0;
 var LIGHT_KIND_SPOT = 2;
 var LIGHT_DIR_SCALE = 127;
@@ -2384,6 +2391,15 @@ function decodeLights(words) {
     lights.push(light);
   }
   return lights;
+}
+function decodeCamera(words) {
+  if (words.length <= CAMERA_BASE + 1) {
+    return { x: 0, y: 0 };
+  }
+  return {
+    x: ((words[CAMERA_BASE] ?? 0) | 0) / CAMERA_SCALE,
+    y: ((words[CAMERA_BASE + 1] ?? 0) | 0) / CAMERA_SCALE
+  };
 }
 function hashEventId(id) {
   let hash = 2166136261 >>> 0;
@@ -2475,6 +2491,24 @@ function hazeColor(rgb, haze, atmosphere) {
   }
   return [out[0], out[1], out[2]];
 }
+function prehazeLayers(layers, atmosphere) {
+  return layers.map((layer) => {
+    const haze = clampUnit(layer.depth);
+    if (haze <= 0) {
+      return { ...layer, hazed: true };
+    }
+    const src = layer.pixels;
+    const pixels = new Uint8ClampedArray(src.length);
+    for (let i = 0; i < src.length; i += 4) {
+      const [r, g, b] = hazeColor([src[i], src[i + 1], src[i + 2]], haze, atmosphere);
+      pixels[i] = r;
+      pixels[i + 1] = g;
+      pixels[i + 2] = b;
+      pixels[i + 3] = src[i + 3];
+    }
+    return { ...layer, pixels, hazed: true };
+  });
+}
 function composeParallax(out, outW, outH, layers, camera, atmosphere) {
   const ordered = [...layers].sort((a, b) => b.depth - a.depth);
   for (const layer of ordered) {
@@ -2482,7 +2516,7 @@ function composeParallax(out, outW, outH, layers, camera, atmosphere) {
     const shiftX = Math.round(-camera.x * factor);
     const shiftY = Math.round(-camera.y * factor) + (layer.offsetY ?? 0);
     const wrapX = layer.wrapX ?? true;
-    const haze = clampUnit(layer.depth);
+    const haze = layer.hazed ? 0 : clampUnit(layer.depth);
     for (let y = 0; y < outH; y += 1) {
       let sy = y - shiftY;
       if (sy < 0 || sy >= layer.height) continue;
@@ -2583,18 +2617,38 @@ var SceneBackdropSurface = class {
     this.inner = inner;
     this.width = width;
     this.height = height;
-    this.layers = layers;
     this.spec = spec;
     this.keyRgb = keyRgb;
     this.frame = 0;
+    /** The cart-published camera base, added to the scene's auto-scroll each frame. */
+    this.cameraBase = { x: 0, y: 0 };
     const size = width * height * 4;
+    this.hazedLayers = prehazeLayers(layers, spec.atmosphere);
+    this.sky = new Uint8ClampedArray(size);
+    fillSky(this.sky, width, height, spec.atmosphere);
     this.backdrop = new Uint8ClampedArray(size);
     this.composited = new Uint8ClampedArray(size);
     this.presented = new Uint8Array(this.composited.buffer);
   }
+  /**
+   * Set the backdrop camera the cart published this frame (via `cartbox.camera`).
+   * Added to the scene's own auto-scroll, so an auto-scroll-only cart that never
+   * sets it keeps panning as before with the default (0, 0).
+   */
+  setCameraBase(base) {
+    this.cameraBase = base;
+  }
   blit(rgba) {
     const cartFrame = new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength);
-    renderSceneBackdrop(this.backdrop, this.width, this.height, this.layers, this.spec, this.frame);
+    this.backdrop.set(this.sky);
+    composeParallax(
+      this.backdrop,
+      this.width,
+      this.height,
+      this.hazedLayers,
+      cameraAt(this.spec, this.frame, this.cameraBase),
+      this.spec.atmosphere
+    );
     compositeOverBackdrop(cartFrame, this.backdrop, this.width, this.height, this.keyRgb, 0, this.composited);
     this.inner.blit(this.presented);
     this.frame += 1;
@@ -2685,7 +2739,14 @@ var Player = class {
       const makeBaseSurface = async (target) => {
         const base = this.options.lighting ? this.litSurface = await LitCanvasSurface.create(target, scale, this.model, this.options.lighting) : new CanvasSurface(target, scale, this.model);
         if (scene && backdrop) {
-          return new SceneBackdropSurface(base, this.model.width, this.model.height, backdrop.layers, scene, backdrop.keyRgb);
+          return this.sceneSurface = new SceneBackdropSurface(
+            base,
+            this.model.width,
+            this.model.height,
+            backdrop.layers,
+            scene,
+            backdrop.keyRgb
+          );
         }
         return base;
       };
@@ -2791,6 +2852,9 @@ var Player = class {
         this.litSurface.setCartLights(decodeLights(this.console.readMailbox()));
         this.litSurface.setCartMaterial(this.console.readMaterial());
         this.litSurface.setCartEmissive(this.console.readEmissive());
+      }
+      if (this.sceneSurface && this.console) {
+        this.sceneSurface.setCameraBase(decodeCamera(this.console.readMailbox()));
       }
       this.surface?.blit(framebuffer);
     }
@@ -2953,6 +3017,8 @@ function mount(container, options) {
   };
 }
 export {
+  CAMERA_BASE,
+  CAMERA_SCALE,
   CARTBOX_SDK_LUA,
   CartridgeLoadError,
   ConsoleButton,
@@ -2982,16 +3048,20 @@ export {
   SceneBackdropSurface,
   WebgpuLightingLayer,
   anyPostFxEnabled,
+  cameraAt,
+  composeParallax,
   compositeOverBackdrop,
   createCartSpriteSource,
   createConsole,
   createFlatMaterial,
   createLightingLayer,
+  decodeCamera,
   decodeLights,
   decodeMailbox,
   defaultPostFxSettings,
   extractScore,
   extractUnlocks,
+  fillSky,
   frameDurationMs,
   framebufferBytes,
   getModel,
@@ -3008,6 +3078,7 @@ export {
   parsePostFxSettings,
   parseReplay,
   parseScene,
+  prehazeLayers,
   randomSeed,
   readCartCode,
   renderSceneBackdrop,

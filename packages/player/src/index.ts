@@ -54,11 +54,14 @@ export {
   MAILBOX_TYPE_PROGRESS,
   MAILBOX_TYPE_SCORE,
   MAILBOX_WORDS,
+  CAMERA_BASE,
+  CAMERA_SCALE,
+  decodeCamera,
   decodeLights,
   decodeMailbox,
   hashEventId,
 } from "./mailbox.js";
-export type { MailboxEvent, MailboxEventKind, MailboxRead } from "./mailbox.js";
+export type { MailboxCamera, MailboxEvent, MailboxEventKind, MailboxRead } from "./mailbox.js";
 export { CARTBOX_SDK_LUA, injectSdk } from "./sdk.js";
 
 // Replay verification (P2): recompute a score by re-running the replay headlessly.
@@ -143,6 +146,10 @@ export type {
 export {
   SceneBackdropSurface,
   compositeOverBackdrop,
+  composeParallax,
+  prehazeLayers,
+  fillSky,
+  cameraAt,
   createCartSpriteSource,
   parseScene,
   resolveSceneLayers,
@@ -152,6 +159,7 @@ export {
 export type {
   AtmosphereParams,
   CartSpriteSource,
+  RegionImage,
   SceneSpec,
   SceneLayer,
   SceneCamera,

@@ -18,6 +18,12 @@
  *   per-frame *state*: the cart rewrites the whole block each tick (clear + add),
  *   and the host reads the latest set to relight the frame.
  *
+ *   Camera (words 62..63): the parallax-scene backdrop position a cart publishes
+ *   via `cartbox.camera(x, y)`, so a gameplay-driven backdrop can pan instead of
+ *   only auto-scrolling. Like lights it is per-frame state: two signed
+ *   fixed-point words (× {@link CAMERA_SCALE}) for x and y. An unset camera reads
+ *   as (0, 0), which adds nothing to the scene's own auto-scroll.
+ *
  * This module is pure — no engine, no DOM — so the protocol is unit-testable.
  */
 
@@ -39,6 +45,15 @@ export const LIGHTS_CAPACITY = 6;
 export const LIGHT_STRIDE = 6;
 /** Fixed-point scale the SDK multiplies a light's intensity by before storing. */
 export const LIGHT_INTENSITY_SCALE = 256;
+
+/** Word index of the cart-published parallax camera, just past the lights block. */
+export const CAMERA_BASE = LIGHTS_BASE + 1 + LIGHTS_CAPACITY * LIGHT_STRIDE;
+/**
+ * Fixed-point scale for the camera's x/y, stored as signed 32-bit words. 16 gives
+ * sub-pixel panning (parallax factors scale it further) with a range of ±134M px
+ * — far beyond any cart world.
+ */
+export const CAMERA_SCALE = 16;
 
 /**
  * Directional and spot lights ride in the bits that a point light leaves zero,
@@ -183,6 +198,33 @@ export function decodeLights(words: Uint32Array): Light[] {
     lights.push(light);
   }
   return lights;
+}
+
+/** A backdrop camera position in cart pixels. */
+export interface MailboxCamera {
+  x: number;
+  y: number;
+}
+
+/**
+ * Decodes the parallax-scene camera a cart published this frame via
+ * `cartbox.camera(x, y)`.
+ *
+ * The two words are signed fixed-point: reinterpreted from u32 to int32 (`| 0`)
+ * and divided by {@link CAMERA_SCALE}. A cart that never calls `cartbox.camera`
+ * leaves the words zero, so this returns (0, 0) — which the scene adds to its own
+ * auto-scroll, leaving auto-scroll-only carts unchanged.
+ *
+ * @param words The mailbox window (same array {@link decodeMailbox} reads).
+ */
+export function decodeCamera(words: Uint32Array): MailboxCamera {
+  if (words.length <= CAMERA_BASE + 1) {
+    return { x: 0, y: 0 };
+  }
+  return {
+    x: ((words[CAMERA_BASE] ?? 0) | 0) / CAMERA_SCALE,
+    y: ((words[CAMERA_BASE + 1] ?? 0) | 0) / CAMERA_SCALE,
+  };
 }
 
 /**

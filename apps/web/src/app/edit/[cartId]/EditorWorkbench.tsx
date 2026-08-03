@@ -12,7 +12,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { defaultPostFxSettings, type PostFxSettings } from "@cartbox/player";
+import { defaultPostFxSettings, type PostFxSettings, type SceneSpec } from "@cartbox/player";
 import {
   BANK_COUNT,
   CartEngine,
@@ -48,13 +48,14 @@ import { CodeEditor } from "./CodeEditor";
 import { SfxEditor } from "./SfxEditor";
 import { MusicEditor } from "./MusicEditor";
 import { RunOverlay } from "./RunOverlay";
+import { SceneEditor } from "./SceneEditor";
 import { ShaderEditor } from "./ShaderEditor";
 import { AssetsEditor } from "./AssetsEditor";
 import { useEditorHistory } from "./useEditorHistory";
 
-const TABS = ["Code", "Assets", "Map", "FX", "SFX", "Music"] as const;
+const TABS = ["Code", "Assets", "Map", "Scene", "FX", "SFX", "Music"] as const;
 type Tab = (typeof TABS)[number];
-const LIVE_TABS: ReadonlySet<Tab> = new Set<Tab>(["Code", "Assets", "Map", "FX", "SFX", "Music"]);
+const LIVE_TABS: ReadonlySet<Tab> = new Set<Tab>(["Code", "Assets", "Map", "Scene", "FX", "SFX", "Music"]);
 
 type EngineMode = "wasm" | "stub";
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -74,6 +75,8 @@ interface EditorWorkbenchProps {
   initialMaterials: WireMaterials | null;
   /** Persisted 3D voxel model (serialized) loaded with the cart, or null when none. */
   initialVoxel: string | null;
+  /** Persisted parallax-scene backdrop loaded with the cart, or null when none. */
+  initialScene: SceneSpec | null;
 }
 
 export function EditorWorkbench({
@@ -86,6 +89,7 @@ export function EditorWorkbench({
   initialFx,
   initialMaterials,
   initialVoxel,
+  initialScene,
 }: EditorWorkbenchProps) {
   const [engine, setEngine] = useState<CartEngine | null>(null);
   const [mode, setMode] = useState<EngineMode>("wasm");
@@ -167,6 +171,7 @@ export function EditorWorkbench({
       initialFx={initialFx}
       initialMaterials={initialMaterials}
       initialVoxel={initialVoxel}
+      initialScene={initialScene}
     />
   );
 }
@@ -182,6 +187,7 @@ function WorkbenchBody({
   initialFx,
   initialMaterials,
   initialVoxel,
+  initialScene,
 }: {
   engine: CartEngine;
   cartId: string;
@@ -193,6 +199,7 @@ function WorkbenchBody({
   initialFx: PostFxSettings | null;
   initialMaterials: WireMaterials | null;
   initialVoxel: string | null;
+  initialScene: SceneSpec | null;
 }) {
   // requestedModel is what the URL/DB asked for; activeModel is what the loaded
   // engine actually provides (every editor surface reads geometry from this one).
@@ -217,6 +224,7 @@ function WorkbenchBody({
     initialRig: initialRig ?? emptySpriteRig(),
     initialMaterials: (initialMaterials as MaterialSwatches | null) ?? defaultMaterialSwatches(),
     initialVoxel,
+    initialScene,
     initialBank: 0,
   });
   const {
@@ -232,6 +240,8 @@ function WorkbenchBody({
     setMaterials,
     voxel,
     setVoxel,
+    scene,
+    setScene,
     canUndo,
     canRedo,
     undo,
@@ -295,7 +305,7 @@ function WorkbenchBody({
       // The static demo build has no API — Save lands in this browser's
       // localStorage instead (same payload the server would persist).
       if (isStaticExport) {
-        const stored = saveCartDraft(cartId, { model: modelId, bytes, rig, fx, materials, voxel });
+        const stored = saveCartDraft(cartId, { model: modelId, bytes, rig, fx, materials, voxel, scene });
         setSaveState(stored ? "saved" : "error");
         return;
       }
@@ -313,13 +323,19 @@ function WorkbenchBody({
       let ok = response.ok;
       if (ok) {
         const headers = await authHeaders({ "Content-Type": "application/json" });
-        const [rigResponse, fxResponse, materialsResponse, voxelResponse] = await Promise.all([
+        const [rigResponse, fxResponse, materialsResponse, voxelResponse, sceneResponse] = await Promise.all([
           fetch(`/api/carts/${cartId}/rig`, { method: "PUT", headers, body: JSON.stringify(rig) }),
           fetch(`/api/carts/${cartId}/fx`, { method: "PUT", headers, body: JSON.stringify(fx) }),
           fetch(`/api/carts/${cartId}/materials`, { method: "PUT", headers, body: JSON.stringify(materials) }),
           fetch(`/api/carts/${cartId}/voxel`, { method: "PUT", headers, body: JSON.stringify({ voxel }) }),
+          fetch(`/api/carts/${cartId}/scene`, { method: "PUT", headers, body: JSON.stringify(scene) }),
         ]);
-        ok = rigResponse.ok && fxResponse.ok && materialsResponse.ok && voxelResponse.ok;
+        ok =
+          rigResponse.ok &&
+          fxResponse.ok &&
+          materialsResponse.ok &&
+          voxelResponse.ok &&
+          sceneResponse.ok;
       }
       setSaveState(ok ? "saved" : "error");
     } catch {
@@ -480,6 +496,17 @@ function WorkbenchBody({
           swatches={materials}
         />
       )}
+      {activeTab === "Scene" && (
+        <SceneEditor
+          key={`scene:${revision}`}
+          sheet={sheet}
+          width={activeModel.width}
+          height={activeModel.height}
+          scene={scene}
+          onSceneChange={setScene}
+          revision={revision}
+        />
+      )}
       {activeTab === "FX" && (
         <ShaderEditor
           key={`${bank}:${revision}`}
@@ -499,6 +526,7 @@ function WorkbenchBody({
           engineUrl={engineUrl}
           cartName={cartName}
           postFx={fx}
+          scene={scene ?? undefined}
           onClose={() => setRunBytes(null)}
         />
       )}
