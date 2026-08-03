@@ -37,6 +37,8 @@ const ZEROED: Array<keyof PostFxUniforms> = [
   "godrayStrength",
   "streakStrength",
   "splitStrength",
+  "reflectionStrength",
+  "tiltStrength",
   "kaleidoSegments",
   "grainAmount",
 ];

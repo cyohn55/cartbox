@@ -210,6 +210,13 @@ interface LightingOptions {
     /** Cast height-field shadows. Needs a material buffer with height. Default false. */
     shadows?: boolean;
     /**
+     * Bilinearly interpolate the per-pixel normals instead of using the raw
+     * 16-direction quantised value. Kills the facet banding that betrays the
+     * discrete normal palette on curved surfaces (cinematic gap #2). A no-op on
+     * flat/unmapped materials, whose normals are uniform. Default true.
+     */
+    smoothNormals?: boolean;
+    /**
      * When true, a frame with no lights (neither cart- nor host-provided) is shown
      * unlit — the cart looks exactly as it would without lighting until it emits a
      * light. This is what lets the app enable lighting for every cart safely:
@@ -237,6 +244,8 @@ interface LightingScene {
     ambientColor: readonly [number, number, number];
     bloom: boolean;
     shadows: boolean;
+    /** Bilinearly interpolate the quantised normals to remove facet banding. */
+    smoothNormals?: boolean;
     /** Skip lighting entirely and present the albedo unchanged (see autoDetect). */
     unlit?: boolean;
 }
@@ -368,7 +377,7 @@ declare function hashEventId(id: string): number;
  * how a small palette fakes a gradient, and light shafts and streaks are how a
  * flat 2D scene suggests a light source it cannot actually cast.
  */
-type PostFxEffectId = "grade" | "fog" | "bloom" | "tonemap" | "crt" | "chroma" | "vignette" | "posterize" | "dither" | "halftone" | "godrays" | "streaks" | "splittone" | "kaleidoscope" | "grain";
+type PostFxEffectId = "grade" | "fog" | "bloom" | "tonemap" | "crt" | "chroma" | "vignette" | "posterize" | "dither" | "halftone" | "godrays" | "streaks" | "splittone" | "reflection" | "tiltshift" | "kaleidoscope" | "grain";
 interface PostFxParamDef {
     id: string;
     label: string;
@@ -455,6 +464,20 @@ interface PostFxUniforms {
     splitBalance: number;
     splitShadows: [number, number, number];
     splitHighlights: [number, number, number];
+    /** Wet-floor reflection strength (0 disables the mirror). */
+    reflectionStrength: number;
+    /** Screen row of the reflective surface's near edge, 0..1. */
+    reflectionHorizon: number;
+    /** How far below the horizon the reflection persists, in screen-height units. */
+    reflectionFalloff: number;
+    /** Sideways ripple amplitude of the reflection. */
+    reflectionWobble: number;
+    /** Tilt-shift max blur (0 disables the depth of field). */
+    tiltStrength: number;
+    /** Centre row of the in-focus band, 0..1. */
+    tiltFocus: number;
+    /** Half-height of the fully-sharp band, in screen-height units. */
+    tiltRange: number;
     /** Below 2 the shader leaves the frame alone. */
     kaleidoSegments: number;
     /** Rotation in radians. */
@@ -728,6 +751,63 @@ interface AnimSpec {
 declare function parseAnim(raw: unknown): AnimSpec | null;
 
 /**
+ * The particle sidecar data model + its defensive parser — cinematic gap #6
+ * (weather and atmosphere: rain, snow, drifting embers, rolling fog). Kept DOM-free
+ * so the save API validates with the same code the runtime and editor consume, the
+ * way the scene and anim sidecars are.
+ *
+ * A cart declares a small set of emitters; the runtime {@link ./particleField.ts}
+ * turns each into a deterministic, host-played particle field and the
+ * {@link ./ParticleOverlaySurface.ts} composites them over the frame. Emitters
+ * carry only the handful of knobs that read differently per weather — count,
+ * colour, opacity, size, fall/rise speed, wind — while the per-kind *motion*
+ * (streaking, sway, flicker) is baked into the field, so the sidecar stays small
+ * and an author picks a preset and nudges a few sliders.
+ */
+/** The weather an emitter produces; also selects how the field draws and moves it. */
+type ParticleKind = "rain" | "snow" | "embers" | "fog";
+/** Every kind, in a stable order (used by the editor's kind picker). */
+declare const PARTICLE_KINDS: readonly ParticleKind[];
+/** At most this many emitters per cart — a full weather system needs only a few. */
+declare const MAX_EMITTERS = 6;
+/** Per-emitter particle-count ceiling, bounding worst-case per-frame draw cost. */
+declare const MAX_PARTICLES_PER_EMITTER = 600;
+/** One weather layer. */
+interface ParticleEmitter {
+    /** Weather kind — chooses draw style and motion. */
+    kind: ParticleKind;
+    /** How many particles this layer maintains, 1..{@link MAX_PARTICLES_PER_EMITTER}. */
+    count: number;
+    /** Particle colour, each channel 0..255. */
+    color: readonly [number, number, number];
+    /** Base opacity of each particle, 0..1. */
+    opacity: number;
+    /** Particle size in pixels, 1..8. */
+    size: number;
+    /** Speed along the kind's axis (fall or rise), in pixels/frame, 0..12. */
+    speed: number;
+    /** Horizontal drift in pixels/frame, signed, -6..6. */
+    wind: number;
+    /** Integer seed so the field is reproducible across reloads and replays. */
+    seed: number;
+}
+/** A cart's declared weather: an ordered list of emitters. */
+interface ParticleSpec {
+    emitters: ParticleEmitter[];
+}
+/** A ready-to-use emitter for a kind, at that kind's preset with the given seed. */
+declare function emitterPreset(kind: ParticleKind, seed: number): ParticleEmitter;
+/**
+ * Validate untrusted JSON (a PUT body or a jsonb column) into a {@link ParticleSpec},
+ * or null when nothing usable is present. Lenient about shape — malformed emitters
+ * are dropped and missing fields take their kind's preset — but strict about kind
+ * and ranges. Caps at {@link MAX_EMITTERS}. Returns null for an emitter-less result,
+ * the same null-on-empty contract the scene and anim routes rely on so an empty
+ * declaration clears the column rather than storing a no-op.
+ */
+declare function parseParticles(raw: unknown): ParticleSpec | null;
+
+/**
  * Public and shared types for @cartbox/player.
  *
  * Kept free of DOM/engine imports so it can be consumed by any module without
@@ -821,6 +901,15 @@ interface PlayerOptions {
      * scene backdrop. Parse a cart's sidecar into an AnimSpec with `parseAnim`.
      */
     anim?: AnimSpec;
+    /**
+     * Composite a declared weather system over each frame: rain, snow, drifting
+     * embers, or rolling fog, played host-side (no cart code) as a stateless field.
+     * Drawn in front of the cart, its backdrop, and any foreground placements, and —
+     * with post-FX active — graded and bloomed with the scene. The atmosphere layer
+     * of the REPLACED / THE LAST NIGHT look. Parse a cart's sidecar into a
+     * ParticleSpec with `parseParticles`.
+     */
+    particles?: ParticleSpec;
 }
 /** Handle returned by {@link mount} for controlling a live player instance. */
 interface PlayerHandle {
@@ -1312,6 +1401,39 @@ declare function normalVector(direction: number): Vec3;
 /** The direction index whose stored normal is closest to an arbitrary vector. */
 declare function nearestDirection(vector: Vec3): number;
 /**
+ * Bilinearly blend four corner normals — decoded unit *vectors*, never the
+ * direction indices — by fractional weights and renormalise. Interpolating the
+ * vectors is the whole point: the 16 stored directions are an unordered palette,
+ * so blending their indices would be meaningless, but blending the vectors they
+ * decode to turns the quantised, facet-banded field into a smooth one. This is
+ * cinematic gap #2 — the fix for the Mach banding that betrays the 16-direction
+ * normals on any curved surface. The shaders (WebGL + WebGPU) run this exact
+ * blend per fragment from four material-texel lookups; keeping it here lets a
+ * test pin the behaviour the GLSL only shows on a GPU.
+ *
+ * @param corner00 Normal at the top-left texel.
+ * @param corner10 Normal at the top-right texel.
+ * @param corner01 Normal at the bottom-left texel.
+ * @param corner11 Normal at the bottom-right texel.
+ * @param fractionX Horizontal blend weight, 0 (left) .. 1 (right).
+ * @param fractionY Vertical blend weight, 0 (top) .. 1 (bottom).
+ */
+declare function interpolateNormal(corner00: Vec3, corner10: Vec3, corner01: Vec3, corner11: Vec3, fractionX: number, fractionY: number): Vec3;
+/**
+ * The smoothed surface normal at a continuous pixel position, bilinearly blended
+ * from the four surrounding material texels' normals. `indexAt(x, y)` returns the
+ * stored direction index for an integer pixel (implementations clamp to the
+ * material's bounds); this decodes the four corners around `(sampleX, sampleY)`
+ * to vectors and hands them to {@link interpolateNormal}. A region of uniform
+ * index returns exactly that index's normal, so flat and unmapped surfaces are
+ * untouched — only genuinely varying normals get de-banded.
+ *
+ * @param indexAt  Reads the stored normal index at an integer pixel.
+ * @param sampleX  Continuous column (pixel centres at integer coordinates).
+ * @param sampleY  Continuous row.
+ */
+declare function sampleNormalBilinear(indexAt: (x: number, y: number) => number, sampleX: number, sampleY: number): Vec3;
+/**
  * Shade an albedo colour by a surface normal and a direction toward the light:
  * Lambert diffuse lifted by an ambient floor, so a surface never drops below
  * `ambient` of its base colour. Each channel is clamped to 0..255.
@@ -1523,6 +1645,63 @@ declare function acesFilmicChannel(x: number): number;
  * clips — it rolls off instead.
  */
 declare function acesFilmic(rgb: readonly [number, number, number], exposure?: number): [number, number, number];
+
+/**
+ * Pure lens-and-surface maths the single-pass post-process shader is a port of,
+ * kept DOM-free so the same arithmetic the GLSL runs can be unit-tested headlessly
+ * — the pattern {@link ./bloomModel.ts} established for bloom.
+ *
+ * Two screen-space effects for the cinematic 2.5D look share this file because
+ * both key their behaviour off the vertical screen coordinate — the only "depth"
+ * a flat frame has:
+ *
+ * - Tilt-shift depth of field: a horizontal band of the frame stays sharp and
+ *   everything above/below it blurs, the miniature-diorama look REPLACED and THE
+ *   LAST NIGHT lean on. Screen row stands in for distance.
+ * - Screen-space reflection: the picture above a horizon line is mirrored down
+ *   into the floor below it and faded with distance, the wet-street reflection
+ *   those games use everywhere (and that Neon City hand-rolled per cart).
+ *
+ * The UV convention matches the shader: y = 0 is the top row, y = 1 the bottom.
+ */
+/** Feather distance (in screen-height units) over which DoF ramps to full blur. */
+declare const TILT_SHIFT_FEATHER = 0.35;
+/**
+ * Blur weight, 0..1, for a pixel at screen row `y` given a tilt-shift focus band.
+ *
+ * Inside the band — within `range` of `focus` — the weight is 0 (perfectly
+ * sharp). Outside it, the weight ramps up linearly over {@link TILT_SHIFT_FEATHER}
+ * and saturates at 1, so the transition from focus to full blur is smooth rather
+ * than a hard edge. The shader multiplies this by the effect strength to get the
+ * sampling radius, so a returned 0 costs nothing and reads as untouched.
+ *
+ * @param y      Screen row, 0 (top) .. 1 (bottom).
+ * @param focus  Centre of the in-focus band, 0..1.
+ * @param range  Half-height of the fully-sharp band, in screen-height units.
+ */
+declare function tiltShiftBlur(y: number, focus: number, range: number): number;
+/**
+ * The source row to sample for a mirror reflection of `y` about `horizon`.
+ *
+ * A pixel `d` below the horizon reflects the pixel `d` above it, so the world
+ * standing on the floor appears upside-down in it. Returned unclamped; the shader
+ * clamps to the frame and the {@link reflectionFade} of an off-frame sample is
+ * already near zero.
+ */
+declare function reflectionSampleY(y: number, horizon: number): number;
+/**
+ * Reflection opacity, 0..1, for a pixel at screen row `y`.
+ *
+ * Zero at and above the horizon (nothing reflects into the scene itself), then
+ * fading linearly from full strength at the horizon to zero `falloff` below it —
+ * a wet floor mirrors what is close to the waterline sharply and loses the far
+ * scene, which is what sells it as a surface rather than a flip of the image.
+ *
+ * @param y        Screen row, 0 (top) .. 1 (bottom).
+ * @param horizon  Row of the reflective surface's near edge, 0..1.
+ * @param falloff  How far below the horizon the reflection persists, in screen-height units.
+ */
+declare function reflectionFade(y: number, horizon: number, falloff: number): number;
 
 /**
  * Gap #3 part 2 — rendering a declared scene.
@@ -1845,6 +2024,81 @@ declare class AnimatedForegroundSurface implements DisplaySurface {
 }
 
 /**
+ * The deterministic particle field — cinematic gap #6. Turns one
+ * {@link ParticleEmitter} into the set of particles visible at a given frame,
+ * with zero retained state: a particle's whole trajectory is a closed-form
+ * function of its index and the frame counter, so the same frame always yields
+ * the same field (matching the editor preview to playback and to a replay) and
+ * there is nothing to advance or reset. This is the classic stateless
+ * screen-wrapping particle field, and being pure it can be unit-tested headlessly
+ * the way the scene and anim models are.
+ *
+ * The per-kind character lives here, not in the sidecar: rain streaks and slants,
+ * snow drifts and sways, embers rise and flicker and fade as they climb, fog
+ * crawls sideways in large soft blobs. An emitter only supplies the handful of
+ * knobs those share (count/colour/opacity/size/speed/wind).
+ */
+
+/** One drawable particle at a moment in time. */
+interface Particle {
+    /** Column in framebuffer pixels. */
+    x: number;
+    /** Row in framebuffer pixels. */
+    y: number;
+    /** Footprint size in pixels. */
+    size: number;
+    /** Composite alpha, 0..1. */
+    alpha: number;
+    /** Colour, each channel 0..255. */
+    color: readonly [number, number, number];
+    /** Vertical streak length in pixels (rain); 0 draws a dot. */
+    streak: number;
+}
+/**
+ * The particles an emitter shows at `frame`, wrapped into a `width`×`height` field.
+ *
+ * Every particle is placed from its hashed spawn point and advanced by the frame
+ * clock along its kind's motion; screen-wrapping keeps the field full forever
+ * without spawning or retiring anything. Positions are always inside the field.
+ */
+declare function simulateEmitter(emitter: ParticleEmitter, frame: number, width: number, height: number): Particle[];
+
+/**
+ * ParticleOverlaySurface — a display surface that composites a declared weather
+ * system (rain/snow/embers/fog) over each presented frame, then hands off to an
+ * inner surface. Cinematic gap #6.
+ *
+ * It decorates any {@link DisplaySurface} and is placed as the INNERMOST decorator
+ * (wrapping the base terminal surface, inside the animated foreground and scene
+ * backdrop): the weather is drawn last into the framebuffer, so it lands in front
+ * of the cart, its parallax backdrop, and any foreground set-dressing — and when a
+ * post-FX stack is active it wraps the whole base, so the weather is graded and
+ * bloomed with the scene rather than pasted on flat.
+ *
+ * The field is stateless ({@link simulateEmitter}): each blit advances a frame
+ * counter — kept in lockstep with the run loop, one tick per present — and redraws
+ * the particles that frame implies, with no simulation to retain. A spec with no
+ * emitters is a straight pass-through.
+ */
+
+declare class ParticleOverlaySurface implements DisplaySurface {
+    private readonly inner;
+    private readonly width;
+    private readonly height;
+    private readonly spec;
+    private frame;
+    private readonly output;
+    private readonly presented;
+    constructor(inner: DisplaySurface, width: number, height: number, spec: ParticleSpec);
+    blit(rgba: Uint8Array): void;
+    destroy(): void;
+    /** Straight-alpha composite one particle: a vertical streak, or a square dot. */
+    private draw;
+    /** Alpha-blend a particle's colour onto one framebuffer pixel (bounds-checked). */
+    private blend;
+}
+
+/**
  * @cartbox/player — public entry point.
  *
  * Usage:
@@ -1872,4 +2126,4 @@ declare class AnimatedForegroundSurface implements DisplaySurface {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, type CartSpriteSource, CartridgeLoadError, type ClipSample, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, type GeneratedTrack, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_PYRAMID_LEVELS, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxRead, type MaterialBuffer, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, POST_FX_EFFECTS, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPlacement, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, type TrackMode, type Vec3, type VerificationResult, WebgpuLightingLayer, acesFilmic, acesFilmicChannel, anyPostFxEnabled, cameraAt, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeCamera, decodeLights, decodeMailbox, defaultPostFxSettings, drift, evaluate, extractScore, extractUnlocks, fillSky, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parseAnim, parsePostFxSettings, parseReplay, parseScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, readCartCode, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleTrack, seedCartridge, serializeReplay, shade, softKneePrefilter, sway, uniformsFromSettings, verifyReplayScore };
+export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, type CartSpriteSource, CartridgeLoadError, type ClipSample, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, type GeneratedTrack, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxRead, type MaterialBuffer, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, PARTICLE_KINDS, POST_FX_EFFECTS, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPlacement, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, TILT_SHIFT_FEATHER, type TrackMode, type Vec3, type VerificationResult, WebgpuLightingLayer, acesFilmic, acesFilmicChannel, anyPostFxEnabled, cameraAt, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeCamera, decodeLights, decodeMailbox, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interpolateNormal, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parseAnim, parseParticles, parsePostFxSettings, parseReplay, parseScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, readCartCode, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleNormalBilinear, sampleTrack, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, sway, tiltShiftBlur, uniformsFromSettings, verifyReplayScore };

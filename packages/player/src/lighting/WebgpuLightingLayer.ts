@@ -90,12 +90,34 @@ fn dirShadowFactor(px: vec2<f32>, h0: f32, toLight: vec3<f32>) -> f32 {
   return 1.0;
 }
 
+// The decoded, normalised normal at a UV (nearest material texel).
+fn normalIndexAt(uv: vec2<f32>) -> vec3<f32> {
+  let idx = clamp(i32(textureSampleLevel(matTex, samp, uv, 0.0).r * 255.0 + 0.5), 0, 15);
+  return normalize(u.normals[idx].xyz);
+}
+
+// Bilinearly blend the four surrounding texels' decoded normals — the WGSL twin
+// of sampleNormalBilinear (lightingModel.ts). Blending vectors, not the unordered
+// indices, melts the 16-facet banding to a smooth field (cinematic gap #2).
+fn sampleNormalSmooth(uv: vec2<f32>) -> vec3<f32> {
+  let res = u.dims.xy;
+  let texelSpace = uv * res - vec2<f32>(0.5, 0.5);
+  let base = floor(texelSpace);
+  let f = texelSpace - base;
+  let inv = vec2<f32>(1.0, 1.0) / res;
+  let n00 = normalIndexAt((base + vec2<f32>(0.5, 0.5)) * inv);
+  let n10 = normalIndexAt((base + vec2<f32>(1.5, 0.5)) * inv);
+  let n01 = normalIndexAt((base + vec2<f32>(0.5, 1.5)) * inv);
+  let n11 = normalIndexAt((base + vec2<f32>(1.5, 1.5)) * inv);
+  return normalize(mix(mix(n00, n10, f.x), mix(n01, n11, f.x), f.y));
+}
+
 @fragment fn fs(in: VSOut) -> @location(0) vec4<f32> {
   let alb = textureSampleLevel(albedoTex, samp, in.uv, 0.0);
   if (u.dims.w > 0.5) { return vec4<f32>(alb.rgb, 1.0); } // unlit passthrough
   let m = textureSampleLevel(matTex, samp, in.uv, 0.0);
   let idx = clamp(i32(m.r * 255.0 + 0.5), 0, 15);
-  let n = normalize(u.normals[idx].xyz);
+  let n = select(normalize(u.normals[idx].xyz), sampleNormalSmooth(in.uv), u.flags.y > 0.5);
   let height = m.g * HMAX;
   let specStr = m.b;
   let rough = m.a;
@@ -323,7 +345,7 @@ export class WebgpuLightingLayer implements LightingRenderer {
     const count = Math.min(scene.lights.length, MAX_LIGHTS);
     u[0] = this.width; u[1] = this.height; u[2] = scene.ambient; u[3] = scene.unlit ? 1 : 0;
     u[4] = scene.ambientColor[0]; u[5] = scene.ambientColor[1]; u[6] = scene.ambientColor[2]; u[7] = count;
-    u[8] = scene.shadows && material ? 1 : 0; u[9] = 0; u[10] = 0; u[11] = 0;
+    u[8] = scene.shadows && material ? 1 : 0; u[9] = scene.smoothNormals ? 1 : 0; u[10] = 0; u[11] = 0;
     for (let i = 0; i < count; i += 1) {
       const light = scene.lights[i]!;
       u[76 + i * 4] = light.x; u[76 + i * 4 + 1] = light.y; u[76 + i * 4 + 2] = light.z; u[76 + i * 4 + 3] = light.radius;

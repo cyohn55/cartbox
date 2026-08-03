@@ -81,6 +81,13 @@ export interface LightingOptions {
   /** Cast height-field shadows. Needs a material buffer with height. Default false. */
   shadows?: boolean;
   /**
+   * Bilinearly interpolate the per-pixel normals instead of using the raw
+   * 16-direction quantised value. Kills the facet banding that betrays the
+   * discrete normal palette on curved surfaces (cinematic gap #2). A no-op on
+   * flat/unmapped materials, whose normals are uniform. Default true.
+   */
+  smoothNormals?: boolean;
+  /**
    * When true, a frame with no lights (neither cart- nor host-provided) is shown
    * unlit — the cart looks exactly as it would without lighting until it emits a
    * light. This is what lets the app enable lighting for every cart safely:
@@ -109,6 +116,8 @@ export interface LightingScene {
   ambientColor: readonly [number, number, number];
   bloom: boolean;
   shadows: boolean;
+  /** Bilinearly interpolate the quantised normals to remove facet banding. */
+  smoothNormals?: boolean;
   /** Skip lighting entirely and present the albedo unchanged (see autoDetect). */
   unlit?: boolean;
 }

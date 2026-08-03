@@ -35,3 +35,9 @@ export {
   pyramidLevelSize,
   softKneePrefilter,
 } from "./bloomModel.js";
+export {
+  TILT_SHIFT_FEATHER,
+  reflectionFade,
+  reflectionSampleY,
+  tiltShiftBlur,
+} from "./lensModel.js";

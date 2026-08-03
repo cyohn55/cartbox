@@ -27,6 +27,8 @@ export interface StoredCartDraft {
   sceneJson: string | null;
   /** JSON-serialised animation timeline, as the anim endpoint would receive. */
   animJson: string | null;
+  /** JSON-serialised weather/particle system, as the particles endpoint would receive. */
+  particlesJson: string | null;
   /** ISO timestamp of the save, for future "last edited" UI. */
   savedAt: string;
 }
@@ -76,6 +78,7 @@ export function loadCartDraft(cartId: string): StoredCartDraft | null {
       voxelJson: typeof parsed.voxelJson === "string" ? parsed.voxelJson : null,
       sceneJson: typeof parsed.sceneJson === "string" ? parsed.sceneJson : null,
       animJson: typeof parsed.animJson === "string" ? parsed.animJson : null,
+      particlesJson: typeof parsed.particlesJson === "string" ? parsed.particlesJson : null,
       savedAt: typeof parsed.savedAt === "string" ? parsed.savedAt : new Date(0).toISOString(),
     };
   } catch {
@@ -99,6 +102,8 @@ export interface SaveCartDraftInput {
   scene: unknown;
   /** Animation timeline object, or null when none. */
   anim: unknown;
+  /** Weather/particle system object, or null when none. */
+  particles: unknown;
 }
 
 /** Returns false when the write failed (e.g. localStorage quota exceeded). */
@@ -115,6 +120,7 @@ export function saveCartDraft(cartId: string, input: SaveCartDraftInput): boolea
     voxelJson: input.voxel,
     sceneJson: input.scene == null ? null : JSON.stringify(input.scene),
     animJson: input.anim == null ? null : JSON.stringify(input.anim),
+    particlesJson: input.particles == null ? null : JSON.stringify(input.particles),
     savedAt: new Date().toISOString(),
   };
   try {

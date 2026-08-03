@@ -61,6 +61,7 @@ uniform float uAmbient;
 uniform vec3 uAmbientColor;
 uniform vec2 uResolution;
 uniform float uEnableShadows;
+uniform float uSmoothNormals;
 uniform int uUnlit;
 
 const float HMAX = ${HEIGHT_MAX.toFixed(1)};
@@ -71,6 +72,23 @@ vec3 normalFor(float idxF) {
   vec3 n = vec3(0.0, 0.0, 1.0);
   for (int k = 0; k < 16; k++) { if (k == idx) n = uNormals[k]; }
   return n;
+}
+
+// The smoothed normal at a UV: bilinearly blend the decoded normals of the four
+// surrounding material texels (interpolateNormal / sampleNormalBilinear in
+// lightingModel.ts). Blends the vectors, never the indices — the palette is
+// unordered — so the 16-facet banding melts to a continuous field. A uniform
+// region returns that region's normal unchanged.
+vec3 sampleNormalSmooth(vec2 uv) {
+  vec2 texelSpace = uv * uResolution - 0.5;
+  vec2 base = floor(texelSpace);
+  vec2 f = texelSpace - base;
+  vec2 inv = 1.0 / uResolution;
+  vec3 n00 = normalFor(texture2D(uMat, (base + vec2(0.5, 0.5)) * inv).r * 255.0);
+  vec3 n10 = normalFor(texture2D(uMat, (base + vec2(1.5, 0.5)) * inv).r * 255.0);
+  vec3 n01 = normalFor(texture2D(uMat, (base + vec2(0.5, 1.5)) * inv).r * 255.0);
+  vec3 n11 = normalFor(texture2D(uMat, (base + vec2(1.5, 1.5)) * inv).r * 255.0);
+  return normalize(mix(mix(n00, n10, f.x), mix(n01, n11, f.x), f.y));
 }
 
 float heightAt(vec2 p) { return texture2D(uMat, p / uResolution).g * HMAX; }
@@ -105,7 +123,7 @@ void main() {
   vec4 alb = texture2D(uAlbedo, vUv);
   if (uUnlit == 1) { gl_FragColor = vec4(alb.rgb, 1.0); return; } // passthrough
   vec4 m = texture2D(uMat, vUv);
-  vec3 n = normalFor(m.r * 255.0);
+  vec3 n = uSmoothNormals > 0.5 ? sampleNormalSmooth(vUv) : normalFor(m.r * 255.0);
   float height = m.g * HMAX;
   float specStr = m.b;
   float rough = m.a;
@@ -346,6 +364,7 @@ export class LightingLayer implements LightingRenderer {
     gl.uniform1f(this.uni(this.pLight, "uAmbient"), scene.ambient);
     gl.uniform3f(this.uni(this.pLight, "uAmbientColor"), scene.ambientColor[0], scene.ambientColor[1], scene.ambientColor[2]);
     gl.uniform1f(this.uni(this.pLight, "uEnableShadows"), scene.shadows && material ? 1 : 0);
+    gl.uniform1f(this.uni(this.pLight, "uSmoothNormals"), scene.smoothNormals ? 1 : 0);
     gl.uniform1i(this.uni(this.pLight, "uUnlit"), scene.unlit ? 1 : 0);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 

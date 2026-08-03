@@ -153,6 +153,7 @@ export class LitCanvasSurface implements DisplaySurface {
       ambientColor: this.options.ambientColor ?? DEFAULT_AMBIENT_COLOR,
       bloom: this.options.bloom ?? true,
       shadows: this.options.shadows ?? false,
+      smoothNormals: this.options.smoothNormals ?? true,
       unlit,
     });
     this.frame += 1;

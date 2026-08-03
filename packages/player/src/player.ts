@@ -23,6 +23,7 @@ import { SceneBackdropSurface } from "./scene/SceneBackdropSurface.js";
 import { AnimatedForegroundSurface } from "./anim/AnimatedForegroundSurface.js";
 import { evaluate } from "./anim/animPlayer.js";
 import type { AnimSpec } from "./anim/animModel.js";
+import { ParticleOverlaySurface } from "./particles/ParticleOverlaySurface.js";
 import type { ControlScheme, PlayerOptions } from "./types.js";
 
 /**
@@ -138,6 +139,14 @@ export class Player {
         let surface: DisplaySurface = this.options.lighting
           ? (this.litSurface = await LitCanvasSurface.create(target, scale, this.model, this.options.lighting))
           : new CanvasSurface(target, scale, this.model);
+        // Weather overlay wraps the terminal FIRST (innermost decorator), so it is
+        // drawn last into the framebuffer — in front of the cart, backdrop, and
+        // foreground placements — and, with post-FX active, still passes through
+        // the effect stack (graded/bloomed with the scene rather than pasted flat).
+        const particles = this.options.particles;
+        if (particles && particles.emitters.length > 0) {
+          surface = new ParticleOverlaySurface(surface, this.model.width, this.model.height, particles);
+        }
         // Foreground placements draw over the cart AND the backdrop, so they wrap
         // the base surface FIRST (innermost); the scene backdrop then wraps around
         // them, compositing behind the cart before placements land on top.

@@ -19,6 +19,7 @@ import {
   type PostFxSettings,
   type SceneSpec,
   type AnimSpec,
+  type ParticleSpec,
 } from "@cartbox/player";
 
 import { authHeaders } from "@/lib/supabase-browser";
@@ -35,11 +36,13 @@ interface CartridgePlayerProps {
   scene: SceneSpec | null;
   /** The cart's authored animation timeline, or null when none is saved. */
   anim: AnimSpec | null;
+  /** The cart's authored weather/particle system, or null when none is saved. */
+  particles: ParticleSpec | null;
 }
 
 type SubmitState = "idle" | "working" | "submitted" | "error";
 
-export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, scene, anim }: CartridgePlayerProps) {
+export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, scene, anim, particles }: CartridgePlayerProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<PlayerHandle | null>(null);
   const bestScoreRef = useRef<number | null>(null);
@@ -77,6 +80,9 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       // The cart's authored animation, played host-side off the frame clock
       // (drives scene layers, post-FX values, and foreground placements).
       anim: anim ?? undefined,
+      // The cart's authored weather system (rain/snow/embers/fog), composited
+      // over each frame in front of the scene and under the post-FX finish.
+      particles: particles ?? undefined,
       onReady: () => setStatus("ready"),
       onError: () => setStatus("error"),
       onEvent: (event: MailboxEvent) => {
@@ -92,7 +98,7 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
     handleRef.current = handle;
 
     return () => handle.destroy();
-  }, [cartUrl, engineUrl, modelId, postFx, scene, anim]);
+  }, [cartUrl, engineUrl, modelId, postFx, scene, anim, particles]);
 
   const togglePlayback = () => {
     const handle = handleRef.current;

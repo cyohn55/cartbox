@@ -12,6 +12,7 @@ import type { LightingOptions } from "./lighting/types.js";
 import type { PostFxSettings } from "./fx/postfx.js";
 import type { SceneSpec } from "./scene/sceneModel.js";
 import type { AnimSpec } from "./anim/animModel.js";
+import type { ParticleSpec } from "./particles/particleModel.js";
 
 /**
  * Which input methods the player wires up.
@@ -103,6 +104,15 @@ export interface PlayerOptions {
    * scene backdrop. Parse a cart's sidecar into an AnimSpec with `parseAnim`.
    */
   anim?: AnimSpec;
+  /**
+   * Composite a declared weather system over each frame: rain, snow, drifting
+   * embers, or rolling fog, played host-side (no cart code) as a stateless field.
+   * Drawn in front of the cart, its backdrop, and any foreground placements, and —
+   * with post-FX active — graded and bloomed with the scene. The atmosphere layer
+   * of the REPLACED / THE LAST NIGHT look. Parse a cart's sidecar into a
+   * ParticleSpec with `parseParticles`.
+   */
+  particles?: ParticleSpec;
 }
 
 /** Handle returned by {@link mount} for controlling a live player instance. */

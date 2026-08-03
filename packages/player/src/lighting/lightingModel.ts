@@ -69,6 +69,82 @@ export function nearestDirection(vector: Vec3): number {
   return best;
 }
 
+/**
+ * Bilinearly blend four corner normals — decoded unit *vectors*, never the
+ * direction indices — by fractional weights and renormalise. Interpolating the
+ * vectors is the whole point: the 16 stored directions are an unordered palette,
+ * so blending their indices would be meaningless, but blending the vectors they
+ * decode to turns the quantised, facet-banded field into a smooth one. This is
+ * cinematic gap #2 — the fix for the Mach banding that betrays the 16-direction
+ * normals on any curved surface. The shaders (WebGL + WebGPU) run this exact
+ * blend per fragment from four material-texel lookups; keeping it here lets a
+ * test pin the behaviour the GLSL only shows on a GPU.
+ *
+ * @param corner00 Normal at the top-left texel.
+ * @param corner10 Normal at the top-right texel.
+ * @param corner01 Normal at the bottom-left texel.
+ * @param corner11 Normal at the bottom-right texel.
+ * @param fractionX Horizontal blend weight, 0 (left) .. 1 (right).
+ * @param fractionY Vertical blend weight, 0 (top) .. 1 (bottom).
+ */
+export function interpolateNormal(
+  corner00: Vec3,
+  corner10: Vec3,
+  corner01: Vec3,
+  corner11: Vec3,
+  fractionX: number,
+  fractionY: number,
+): Vec3 {
+  const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+  const top: Vec3 = [
+    lerp(corner00[0], corner10[0], fractionX),
+    lerp(corner00[1], corner10[1], fractionX),
+    lerp(corner00[2], corner10[2], fractionX),
+  ];
+  const bottom: Vec3 = [
+    lerp(corner01[0], corner11[0], fractionX),
+    lerp(corner01[1], corner11[1], fractionX),
+    lerp(corner01[2], corner11[2], fractionX),
+  ];
+  return normalize([
+    lerp(top[0], bottom[0], fractionY),
+    lerp(top[1], bottom[1], fractionY),
+    lerp(top[2], bottom[2], fractionY),
+  ]);
+}
+
+/**
+ * The smoothed surface normal at a continuous pixel position, bilinearly blended
+ * from the four surrounding material texels' normals. `indexAt(x, y)` returns the
+ * stored direction index for an integer pixel (implementations clamp to the
+ * material's bounds); this decodes the four corners around `(sampleX, sampleY)`
+ * to vectors and hands them to {@link interpolateNormal}. A region of uniform
+ * index returns exactly that index's normal, so flat and unmapped surfaces are
+ * untouched — only genuinely varying normals get de-banded.
+ *
+ * @param indexAt  Reads the stored normal index at an integer pixel.
+ * @param sampleX  Continuous column (pixel centres at integer coordinates).
+ * @param sampleY  Continuous row.
+ */
+export function sampleNormalBilinear(
+  indexAt: (x: number, y: number) => number,
+  sampleX: number,
+  sampleY: number,
+): Vec3 {
+  const x0 = Math.floor(sampleX);
+  const y0 = Math.floor(sampleY);
+  const fractionX = sampleX - x0;
+  const fractionY = sampleY - y0;
+  return interpolateNormal(
+    normalVector(indexAt(x0, y0)),
+    normalVector(indexAt(x0 + 1, y0)),
+    normalVector(indexAt(x0, y0 + 1)),
+    normalVector(indexAt(x0 + 1, y0 + 1)),
+    fractionX,
+    fractionY,
+  );
+}
+
 /** Feathering applied just below a spot's inner cone, in cosine units. */
 export const SPOT_CONE_SOFTNESS = 0.15;
 

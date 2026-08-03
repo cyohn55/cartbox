@@ -97,8 +97,10 @@ export {
   createFlatMaterial,
   createLightingLayer,
   getWebgpuDevice,
+  interpolateNormal,
   nearestDirection,
   normalVector,
+  sampleNormalBilinear,
   shade,
 } from "./lighting/index.js";
 export type {
@@ -137,6 +139,10 @@ export {
   pyramidLevelSize,
   softKneePrefilter,
   uniformsFromSettings,
+  TILT_SHIFT_FEATHER,
+  reflectionFade,
+  reflectionSampleY,
+  tiltShiftBlur,
 } from "./fx/index.js";
 export type {
   InnerSurfaceFactory,
@@ -207,6 +213,25 @@ export type {
   ClipSample,
   GeneratedTrack,
 } from "./anim/index.js";
+
+// Runtime particles (optional): a cart declares a weather system (rain/snow/
+// embers/fog); the player composites it over each frame host-side off a stateless
+// field — the atmosphere layer of the cinematic look, no cart code needed.
+export {
+  MAX_EMITTERS,
+  MAX_PARTICLES_PER_EMITTER,
+  PARTICLE_KINDS,
+  ParticleOverlaySurface,
+  emitterPreset,
+  parseParticles,
+  simulateEmitter,
+} from "./particles/index.js";
+export type {
+  Particle,
+  ParticleEmitter,
+  ParticleKind,
+  ParticleSpec,
+} from "./particles/index.js";
 
 /**
  * Mounts a cartridge player into a container element and begins loading.

@@ -185,6 +185,38 @@ function nearestDirection(vector) {
   }
   return best;
 }
+function interpolateNormal(corner00, corner10, corner01, corner11, fractionX, fractionY) {
+  const lerp4 = (a, b, t) => a + (b - a) * t;
+  const top = [
+    lerp4(corner00[0], corner10[0], fractionX),
+    lerp4(corner00[1], corner10[1], fractionX),
+    lerp4(corner00[2], corner10[2], fractionX)
+  ];
+  const bottom = [
+    lerp4(corner01[0], corner11[0], fractionX),
+    lerp4(corner01[1], corner11[1], fractionX),
+    lerp4(corner01[2], corner11[2], fractionX)
+  ];
+  return normalize([
+    lerp4(top[0], bottom[0], fractionY),
+    lerp4(top[1], bottom[1], fractionY),
+    lerp4(top[2], bottom[2], fractionY)
+  ]);
+}
+function sampleNormalBilinear(indexAt, sampleX, sampleY) {
+  const x0 = Math.floor(sampleX);
+  const y0 = Math.floor(sampleY);
+  const fractionX = sampleX - x0;
+  const fractionY = sampleY - y0;
+  return interpolateNormal(
+    normalVector(indexAt(x0, y0)),
+    normalVector(indexAt(x0 + 1, y0)),
+    normalVector(indexAt(x0, y0 + 1)),
+    normalVector(indexAt(x0 + 1, y0 + 1)),
+    fractionX,
+    fractionY
+  );
+}
 var LIGHT_KIND_CODE = { point: 0, directional: 1, spot: 2 };
 var DEFAULT_LIGHT_DIRECTION = [0, 0, 1];
 var DEFAULT_SPOT_CONE_COS = 0.9;
@@ -193,8 +225,8 @@ function shade(albedo, normal, toLight, ambient) {
   const l = normalize(toLight);
   const diffuse = Math.max(0, n[0] * l[0] + n[1] * l[1] + n[2] * l[2]);
   const intensity = ambient + (1 - ambient) * diffuse;
-  const clamp3 = (value) => Math.max(0, Math.min(255, Math.round(value * intensity)));
-  return [clamp3(albedo[0]), clamp3(albedo[1]), clamp3(albedo[2])];
+  const clamp4 = (value) => Math.max(0, Math.min(255, Math.round(value * intensity)));
+  return [clamp4(albedo[0]), clamp4(albedo[1]), clamp4(albedo[2])];
 }
 
 // src/lighting/LightingRenderer.ts
@@ -232,6 +264,7 @@ uniform float uAmbient;
 uniform vec3 uAmbientColor;
 uniform vec2 uResolution;
 uniform float uEnableShadows;
+uniform float uSmoothNormals;
 uniform int uUnlit;
 
 const float HMAX = ${HEIGHT_MAX.toFixed(1)};
@@ -242,6 +275,23 @@ vec3 normalFor(float idxF) {
   vec3 n = vec3(0.0, 0.0, 1.0);
   for (int k = 0; k < 16; k++) { if (k == idx) n = uNormals[k]; }
   return n;
+}
+
+// The smoothed normal at a UV: bilinearly blend the decoded normals of the four
+// surrounding material texels (interpolateNormal / sampleNormalBilinear in
+// lightingModel.ts). Blends the vectors, never the indices \u2014 the palette is
+// unordered \u2014 so the 16-facet banding melts to a continuous field. A uniform
+// region returns that region's normal unchanged.
+vec3 sampleNormalSmooth(vec2 uv) {
+  vec2 texelSpace = uv * uResolution - 0.5;
+  vec2 base = floor(texelSpace);
+  vec2 f = texelSpace - base;
+  vec2 inv = 1.0 / uResolution;
+  vec3 n00 = normalFor(texture2D(uMat, (base + vec2(0.5, 0.5)) * inv).r * 255.0);
+  vec3 n10 = normalFor(texture2D(uMat, (base + vec2(1.5, 0.5)) * inv).r * 255.0);
+  vec3 n01 = normalFor(texture2D(uMat, (base + vec2(0.5, 1.5)) * inv).r * 255.0);
+  vec3 n11 = normalFor(texture2D(uMat, (base + vec2(1.5, 1.5)) * inv).r * 255.0);
+  return normalize(mix(mix(n00, n10, f.x), mix(n01, n11, f.x), f.y));
 }
 
 float heightAt(vec2 p) { return texture2D(uMat, p / uResolution).g * HMAX; }
@@ -276,7 +326,7 @@ void main() {
   vec4 alb = texture2D(uAlbedo, vUv);
   if (uUnlit == 1) { gl_FragColor = vec4(alb.rgb, 1.0); return; } // passthrough
   vec4 m = texture2D(uMat, vUv);
-  vec3 n = normalFor(m.r * 255.0);
+  vec3 n = uSmoothNormals > 0.5 ? sampleNormalSmooth(vUv) : normalFor(m.r * 255.0);
   float height = m.g * HMAX;
   float specStr = m.b;
   float rough = m.a;
@@ -465,6 +515,7 @@ var LightingLayer = class {
     gl.uniform1f(this.uni(this.pLight, "uAmbient"), scene.ambient);
     gl.uniform3f(this.uni(this.pLight, "uAmbientColor"), scene.ambientColor[0], scene.ambientColor[1], scene.ambientColor[2]);
     gl.uniform1f(this.uni(this.pLight, "uEnableShadows"), scene.shadows && material ? 1 : 0);
+    gl.uniform1f(this.uni(this.pLight, "uSmoothNormals"), scene.smoothNormals ? 1 : 0);
     gl.uniform1i(this.uni(this.pLight, "uUnlit"), scene.unlit ? 1 : 0);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     const useBloom = scene.bloom && !scene.unlit;
@@ -648,12 +699,34 @@ fn dirShadowFactor(px: vec2<f32>, h0: f32, toLight: vec3<f32>) -> f32 {
   return 1.0;
 }
 
+// The decoded, normalised normal at a UV (nearest material texel).
+fn normalIndexAt(uv: vec2<f32>) -> vec3<f32> {
+  let idx = clamp(i32(textureSampleLevel(matTex, samp, uv, 0.0).r * 255.0 + 0.5), 0, 15);
+  return normalize(u.normals[idx].xyz);
+}
+
+// Bilinearly blend the four surrounding texels' decoded normals \u2014 the WGSL twin
+// of sampleNormalBilinear (lightingModel.ts). Blending vectors, not the unordered
+// indices, melts the 16-facet banding to a smooth field (cinematic gap #2).
+fn sampleNormalSmooth(uv: vec2<f32>) -> vec3<f32> {
+  let res = u.dims.xy;
+  let texelSpace = uv * res - vec2<f32>(0.5, 0.5);
+  let base = floor(texelSpace);
+  let f = texelSpace - base;
+  let inv = vec2<f32>(1.0, 1.0) / res;
+  let n00 = normalIndexAt((base + vec2<f32>(0.5, 0.5)) * inv);
+  let n10 = normalIndexAt((base + vec2<f32>(1.5, 0.5)) * inv);
+  let n01 = normalIndexAt((base + vec2<f32>(0.5, 1.5)) * inv);
+  let n11 = normalIndexAt((base + vec2<f32>(1.5, 1.5)) * inv);
+  return normalize(mix(mix(n00, n10, f.x), mix(n01, n11, f.x), f.y));
+}
+
 @fragment fn fs(in: VSOut) -> @location(0) vec4<f32> {
   let alb = textureSampleLevel(albedoTex, samp, in.uv, 0.0);
   if (u.dims.w > 0.5) { return vec4<f32>(alb.rgb, 1.0); } // unlit passthrough
   let m = textureSampleLevel(matTex, samp, in.uv, 0.0);
   let idx = clamp(i32(m.r * 255.0 + 0.5), 0, 15);
-  let n = normalize(u.normals[idx].xyz);
+  let n = select(normalize(u.normals[idx].xyz), sampleNormalSmooth(in.uv), u.flags.y > 0.5);
   let height = m.g * HMAX;
   let specStr = m.b;
   let rough = m.a;
@@ -867,7 +940,7 @@ var WebgpuLightingLayer = class _WebgpuLightingLayer {
     u[6] = scene.ambientColor[2];
     u[7] = count;
     u[8] = scene.shadows && material ? 1 : 0;
-    u[9] = 0;
+    u[9] = scene.smoothNormals ? 1 : 0;
     u[10] = 0;
     u[11] = 0;
     for (let i = 0; i < count; i += 1) {
@@ -1066,6 +1139,7 @@ var LitCanvasSurface = class _LitCanvasSurface {
       ambientColor: this.options.ambientColor ?? DEFAULT_AMBIENT_COLOR,
       bloom: this.options.bloom ?? true,
       shadows: this.options.shadows ?? false,
+      smoothNormals: this.options.smoothNormals ?? true,
       unlit
     });
     this.frame += 1;
@@ -1464,6 +1538,13 @@ uniform float uSplitStrength;
 uniform float uSplitBalance;
 uniform vec3 uSplitShadows;
 uniform vec3 uSplitHighlights;
+uniform float uReflectStrength;
+uniform float uReflectHorizon;
+uniform float uReflectFalloff;
+uniform float uReflectWobble;
+uniform float uTiltStrength;
+uniform float uTiltFocus;
+uniform float uTiltRange;
 uniform float uKaleidoSegments;
 uniform float uKaleidoAngle;
 uniform float uGrainAmount;
@@ -1476,6 +1557,8 @@ const float TAU = 6.2831853;
 // around the loop rather than by shortening it.
 const int GODRAY_SAMPLES = 16;
 const int STREAK_SAMPLES = 8;
+// Ring taps for the tilt-shift disk blur. Two rings + centre per iteration.
+const int DOF_SAMPLES = 10;
 
 float luma(vec3 color) {
   return dot(color, vec3(0.299, 0.587, 0.114));
@@ -1560,6 +1643,46 @@ void main() {
     texture2D(uSource, uv).g,
     texture2D(uSource, uv - fringe).b
   );
+
+  // Tilt-shift depth of field: keep a horizontal band sharp and blur outside it,
+  // the row standing in for distance in a flat scene. The blur weight is the pure
+  // tiltShiftBlur() of lensModel.ts \u2014 0 inside the band, ramping to 1 over a fixed
+  // feather \u2014 scaled by strength into a disk radius. Offsets come from sin/cos of
+  // the loop index rather than an indexed array (GLSL ES 1.00 forbids the latter).
+  if (uTiltStrength > 0.0) {
+    float outside = abs(uv.y - uTiltFocus) - max(uTiltRange, 0.0);
+    float blurAmount = clamp(outside / 0.35, 0.0, 1.0) * uTiltStrength;
+    if (blurAmount > 0.001) {
+      float radius = blurAmount * 6.0;             // max ~6px kernel at full blur
+      vec2 texel = 1.0 / uSourceSize;
+      vec3 blurred = color;
+      float total = 1.0;
+      for (int i = 0; i < DOF_SAMPLES; i++) {
+        float a = float(i) / float(DOF_SAMPLES) * TAU;
+        vec2 dir = vec2(cos(a), sin(a));
+        blurred += texture2D(uSource, uv + dir * radius * texel).rgb;
+        blurred += texture2D(uSource, uv + dir * (radius * 0.5) * texel).rgb;
+        total += 2.0;
+      }
+      color = mix(color, blurred / total, clamp(blurAmount, 0.0, 1.0));
+    }
+  }
+
+  // Wet-floor reflection: below the horizon, mirror the frame above it downward and
+  // fade with distance (reflectionSampleY / reflectionFade in lensModel.ts). A
+  // clock-driven sideways ripple, growing with depth, makes the surface read as wet
+  // rather than a mirror. Sampled from the raw source so the reflected scene is the
+  // upright picture, not one already reflected.
+  if (uReflectStrength > 0.0) {
+    float below = uv.y - uReflectHorizon;
+    if (below > 0.0) {
+      float ripple = sin(uv.x * 40.0 + uTime * 2.2) * uReflectWobble * 0.02 * below / max(uReflectFalloff, 0.001);
+      vec2 rUv = clamp(vec2(uv.x + ripple, uReflectHorizon - below), 0.0, 1.0);
+      vec3 mirror = texture2D(uSource, rUv).rgb;
+      float fade = uReflectStrength * clamp(1.0 - below / max(uReflectFalloff, 0.001), 0.0, 1.0);
+      color = mix(color, mirror, fade);
+    }
+  }
 
   // Bloom: add the wide multi-scale glow the pyramid pre-computed. Where the
   // pyramid could not be built, fall back to the original 3x3 bright-pass blur so
@@ -1824,6 +1947,13 @@ var PostFxPass = class _PostFxPass {
     gl.uniform1f(this.location("uSplitBalance"), uniforms.splitBalance);
     gl.uniform3f(this.location("uSplitShadows"), ...uniforms.splitShadows);
     gl.uniform3f(this.location("uSplitHighlights"), ...uniforms.splitHighlights);
+    gl.uniform1f(this.location("uReflectStrength"), uniforms.reflectionStrength);
+    gl.uniform1f(this.location("uReflectHorizon"), uniforms.reflectionHorizon);
+    gl.uniform1f(this.location("uReflectFalloff"), uniforms.reflectionFalloff);
+    gl.uniform1f(this.location("uReflectWobble"), uniforms.reflectionWobble);
+    gl.uniform1f(this.location("uTiltStrength"), uniforms.tiltStrength);
+    gl.uniform1f(this.location("uTiltFocus"), uniforms.tiltFocus);
+    gl.uniform1f(this.location("uTiltRange"), uniforms.tiltRange);
     gl.uniform1f(this.location("uKaleidoSegments"), uniforms.kaleidoSegments);
     gl.uniform1f(this.location("uKaleidoAngle"), uniforms.kaleidoAngle);
     gl.uniform1f(this.location("uGrainAmount"), uniforms.grainAmount);
@@ -1966,6 +2096,31 @@ var POST_FX_EFFECTS = [
     ]
   },
   {
+    id: "reflection",
+    label: "Wet-floor reflection",
+    description: "Mirrors the scene above a horizon line down into the floor below it, fading with distance \u2014 the screen-space reflection of a rain-slick street.",
+    params: [
+      { id: "strength", label: "Strength", min: 0, max: 1, step: 0.01, defaultValue: 0.5 },
+      // Where the reflective surface begins. Shape, not intensity: it chooses the
+      // waterline whether or not the effect is dialled up, so it is read always.
+      { id: "horizon", label: "Horizon", min: 0, max: 1, step: 0.01, defaultValue: 0.7 },
+      { id: "falloff", label: "Falloff", min: 0.05, max: 1, step: 0.01, defaultValue: 0.4 },
+      // Sideways ripple amplitude; animated by the clock so the surface shimmers.
+      { id: "wobble", label: "Ripple", min: 0, max: 1, step: 0.01, defaultValue: 0.25 }
+    ]
+  },
+  {
+    id: "tiltshift",
+    label: "Tilt-shift focus",
+    description: "Keeps a horizontal band sharp and blurs above and below it, the miniature-diorama depth of field the cinematic look leans on.",
+    params: [
+      { id: "strength", label: "Strength", min: 0, max: 1, step: 0.01, defaultValue: 0.6 },
+      // The in-focus band's centre row and half-height. Both are shape.
+      { id: "focus", label: "Focus row", min: 0, max: 1, step: 0.01, defaultValue: 0.55 },
+      { id: "range", label: "In-focus band", min: 0, max: 0.5, step: 0.01, defaultValue: 0.12 }
+    ]
+  },
+  {
     id: "kaleidoscope",
     label: "Kaleidoscope",
     description: "Mirrors a wedge of the frame around the centre.",
@@ -2083,6 +2238,13 @@ function uniformsFromSettings(settings) {
     splitBalance: shape("splittone", "balance", 0.5),
     splitShadows: color("splittone", "shadows"),
     splitHighlights: color("splittone", "highlights"),
+    reflectionStrength: value("reflection", "strength", 0),
+    reflectionHorizon: shape("reflection", "horizon", 0.7),
+    reflectionFalloff: shape("reflection", "falloff", 0.4),
+    reflectionWobble: shape("reflection", "wobble", 0.25),
+    tiltStrength: value("tiltshift", "strength", 0),
+    tiltFocus: shape("tiltshift", "focus", 0.55),
+    tiltRange: shape("tiltshift", "range", 0.12),
     kaleidoSegments: settings.enabled.kaleidoscope ? shape("kaleidoscope", "segments", 6) : 0,
     kaleidoAngle: shape("kaleidoscope", "angle", 0) * Math.PI / 180,
     grainAmount: value("grain", "amount", 0),
@@ -3251,6 +3413,123 @@ function evaluate(spec, frame) {
   return { layers, postfx, placements };
 }
 
+// src/particles/particleField.ts
+var TAU = Math.PI * 2;
+function hash01(seed, index, salt) {
+  let h = Math.imul(seed, 374761393) + Math.imul(index, 668265263) + Math.imul(salt, 2246822519) >>> 0;
+  h = Math.imul(h ^ h >>> 13, 1274126177) >>> 0;
+  h = (h ^ h >>> 16) >>> 0;
+  return h / 4294967296;
+}
+function wrap(value, span) {
+  return (value % span + span) % span;
+}
+var clamp01 = (value) => value < 0 ? 0 : value > 1 ? 1 : value;
+function simulateEmitter(emitter, frame, width, height) {
+  const particles = [];
+  const kind = emitter.kind;
+  for (let index = 0; index < emitter.count; index += 1) {
+    const spawnX = hash01(emitter.seed, index, 1);
+    const spawnY = hash01(emitter.seed, index, 2);
+    const phase = hash01(emitter.seed, index, 3) * TAU;
+    const jitter = hash01(emitter.seed, index, 4);
+    let x = spawnX * width + emitter.wind * frame;
+    let y;
+    let streak = 0;
+    let alpha = emitter.opacity;
+    let size = emitter.size;
+    if (kind === "rain") {
+      y = spawnY * height + emitter.speed * frame;
+      streak = 2 + emitter.speed * 0.6;
+    } else if (kind === "snow") {
+      y = spawnY * height + emitter.speed * frame;
+      x += Math.sin(frame * 0.05 + phase) * 6;
+      size = emitter.size * (0.7 + 0.6 * jitter);
+    } else if (kind === "embers") {
+      y = spawnY * height - emitter.speed * frame;
+      x += Math.sin(frame * 0.08 + phase) * 4;
+      const climb = wrap(y, height) / height;
+      const flicker2 = 0.55 + 0.45 * Math.sin(frame * 0.3 + phase * 5);
+      alpha = emitter.opacity * flicker2 * (0.3 + 0.7 * climb);
+    } else {
+      y = spawnY * height + emitter.speed * frame * 0.3;
+      size = emitter.size * (0.8 + 0.5 * jitter);
+    }
+    particles.push({
+      x: wrap(x, width),
+      y: wrap(y, height),
+      size: Math.max(1, size),
+      alpha: clamp01(alpha),
+      color: emitter.color,
+      streak
+    });
+  }
+  return particles;
+}
+
+// src/particles/ParticleOverlaySurface.ts
+var ParticleOverlaySurface = class {
+  constructor(inner, width, height, spec) {
+    this.inner = inner;
+    this.width = width;
+    this.height = height;
+    this.spec = spec;
+    this.frame = 0;
+    this.output = new Uint8ClampedArray(width * height * 4);
+    this.presented = new Uint8Array(this.output.buffer);
+  }
+  blit(rgba) {
+    if (this.spec.emitters.length === 0) {
+      this.inner.blit(rgba);
+      return;
+    }
+    this.output.set(rgba);
+    for (const emitter of this.spec.emitters) {
+      for (const particle of simulateEmitter(emitter, this.frame, this.width, this.height)) {
+        this.draw(particle);
+      }
+    }
+    this.frame += 1;
+    this.inner.blit(this.presented);
+  }
+  destroy() {
+    this.inner.destroy();
+  }
+  /** Straight-alpha composite one particle: a vertical streak, or a square dot. */
+  draw(particle) {
+    if (particle.alpha <= 0) return;
+    const half = Math.max(0, Math.floor(particle.size / 2));
+    const originX = Math.round(particle.x);
+    if (particle.streak > 0) {
+      const top = Math.round(particle.y);
+      const bottom = top + Math.round(particle.streak);
+      for (let y = top; y <= bottom; y += 1) {
+        for (let dx = -half; dx <= half; dx += 1) {
+          this.blend(originX + dx, y, particle);
+        }
+      }
+      return;
+    }
+    const originY = Math.round(particle.y);
+    for (let dy = -half; dy <= half; dy += 1) {
+      for (let dx = -half; dx <= half; dx += 1) {
+        this.blend(originX + dx, originY + dy, particle);
+      }
+    }
+  }
+  /** Alpha-blend a particle's colour onto one framebuffer pixel (bounds-checked). */
+  blend(x, y, particle) {
+    if (x < 0 || x >= this.width || y < 0 || y >= this.height) return;
+    const index = (y * this.width + x) * 4;
+    const alpha = particle.alpha;
+    this.output[index] = lerp3(this.output[index], particle.color[0], alpha);
+    this.output[index + 1] = lerp3(this.output[index + 1], particle.color[1], alpha);
+    this.output[index + 2] = lerp3(this.output[index + 2], particle.color[2], alpha);
+    this.output[index + 3] = 255;
+  }
+};
+var lerp3 = (a, b, t) => a + (b - a) * t;
+
 // src/player.ts
 function shouldUseTouch(scheme, view) {
   if (scheme === "touch") return true;
@@ -3335,6 +3614,10 @@ var Player = class {
       }
       const makeBaseSurface = async (target) => {
         let surface = this.options.lighting ? this.litSurface = await LitCanvasSurface.create(target, scale, this.model, this.options.lighting) : new CanvasSurface(target, scale, this.model);
+        const particles = this.options.particles;
+        if (particles && particles.emitters.length > 0) {
+          surface = new ParticleOverlaySurface(surface, this.model.width, this.model.height, particles);
+        }
         if (wantsForeground && this.cartSource) {
           surface = this.foregroundSurface = new AnimatedForegroundSurface(
             surface,
@@ -3559,6 +3842,26 @@ function verifyReplayScore(console2, replay, claimedScore) {
 function resolveUnlockedAchievements(unlockHashes, registered) {
   const unlocked = new Set(unlockHashes.map((hash) => hash >>> 0));
   return registered.filter((achievement) => unlocked.has(achievement.hash >>> 0));
+}
+
+// src/fx/lensModel.ts
+var TILT_SHIFT_FEATHER = 0.35;
+var EPSILON2 = 1e-3;
+function clamp012(value) {
+  return value < 0 ? 0 : value > 1 ? 1 : value;
+}
+function tiltShiftBlur(y, focus, range) {
+  const outside = Math.abs(y - focus) - Math.max(0, range);
+  if (outside <= 0) return 0;
+  return clamp012(outside / TILT_SHIFT_FEATHER);
+}
+function reflectionSampleY(y, horizon) {
+  return horizon - (y - horizon);
+}
+function reflectionFade(y, horizon, falloff) {
+  const below = y - horizon;
+  if (below <= 0) return 0;
+  return clamp012(1 - below / Math.max(EPSILON2, falloff));
 }
 
 // src/scene/sceneModel.ts
@@ -3819,6 +4122,61 @@ function flicker(period, min, max, steps = 8, seed = 1) {
   return { keys, mode: "loop", loopLength: length };
 }
 
+// src/particles/particleModel.ts
+var PARTICLE_KINDS = ["rain", "snow", "embers", "fog"];
+var MAX_EMITTERS = 6;
+var MAX_PARTICLES_PER_EMITTER = 600;
+var PRESETS = {
+  rain: { count: 220, color: [180, 205, 235], opacity: 0.35, size: 1, speed: 9, wind: -1.2 },
+  snow: { count: 140, color: [235, 240, 255], opacity: 0.75, size: 2, speed: 1.4, wind: 0.3 },
+  embers: { count: 60, color: [255, 150, 60], opacity: 0.9, size: 1, speed: 0.7, wind: 0.4 },
+  fog: { count: 18, color: [150, 160, 180], opacity: 0.12, size: 7, speed: 0.25, wind: 0.5 }
+};
+function emitterPreset(kind, seed) {
+  return { kind, seed, ...PRESETS[kind] };
+}
+function clamp3(value, min, max) {
+  return value < min ? min : value > max ? max : value;
+}
+function readNumber(raw, min, max, fallback) {
+  return typeof raw === "number" && Number.isFinite(raw) ? clamp3(raw, min, max) : fallback;
+}
+function readColor(raw, fallback) {
+  if (!Array.isArray(raw) || raw.length !== 3) return [...fallback];
+  const channels = raw.map((c) => typeof c === "number" && Number.isFinite(c) ? clamp3(Math.round(c), 0, 255) : null);
+  if (channels.some((c) => c === null)) return [...fallback];
+  return channels;
+}
+function parseEmitter(raw) {
+  if (typeof raw !== "object" || raw === null) return null;
+  const record = raw;
+  const kind = record.kind;
+  if (typeof kind !== "string" || !PARTICLE_KINDS.includes(kind)) return null;
+  const preset = PRESETS[kind];
+  return {
+    kind,
+    count: Math.round(readNumber(record.count, 1, MAX_PARTICLES_PER_EMITTER, preset.count)),
+    color: readColor(record.color, preset.color),
+    opacity: readNumber(record.opacity, 0, 1, preset.opacity),
+    size: readNumber(record.size, 1, 8, preset.size),
+    speed: readNumber(record.speed, 0, 12, preset.speed),
+    wind: readNumber(record.wind, -6, 6, preset.wind),
+    seed: Math.round(readNumber(record.seed, 0, 4294967295, 1))
+  };
+}
+function parseParticles(raw) {
+  if (typeof raw !== "object" || raw === null) return null;
+  const rawEmitters = raw.emitters;
+  if (!Array.isArray(rawEmitters)) return null;
+  const emitters = [];
+  for (const entry of rawEmitters) {
+    if (emitters.length >= MAX_EMITTERS) break;
+    const emitter = parseEmitter(entry);
+    if (emitter) emitters.push(emitter);
+  }
+  return emitters.length > 0 ? { emitters } : null;
+}
+
 // src/index.ts
 function mount(container, options) {
   const player = new Player(container, options);
@@ -3855,12 +4213,16 @@ export {
   MAILBOX_TYPE_PROGRESS,
   MAILBOX_TYPE_SCORE,
   MAILBOX_WORDS,
+  MAX_EMITTERS,
+  MAX_PARTICLES_PER_EMITTER,
   MAX_PYRAMID_LEVELS,
   MIN_PYRAMID_DIMENSION,
   MODELS,
   NORMAL_DIRECTION_COUNT,
   NORMAL_VECTORS,
+  PARTICLE_KINDS,
   POST_FX_EFFECTS,
+  ParticleOverlaySurface,
   PostFxPass,
   PostFxSurface,
   REPLAY_VERSION,
@@ -3868,6 +4230,7 @@ export {
   ReplayRecorder,
   ReplaySource,
   SceneBackdropSurface,
+  TILT_SHIFT_FEATHER,
   WebgpuLightingLayer,
   acesFilmic,
   acesFilmicChannel,
@@ -3884,6 +4247,7 @@ export {
   decodeMailbox,
   defaultPostFxSettings,
   drift,
+  emitterPreset,
   evaluate,
   extractScore,
   extractUnlocks,
@@ -3897,12 +4261,14 @@ export {
   hashEventId,
   hexToRgb01,
   injectSdk,
+  interpolateNormal,
   loadEngineModule,
   mount,
   nearestDirection,
   normalVector,
   paramKey,
   parseAnim,
+  parseParticles,
   parsePostFxSettings,
   parseReplay,
   parseScene,
@@ -3912,18 +4278,23 @@ export {
   pyramidLevelSize,
   randomSeed,
   readCartCode,
+  reflectionFade,
+  reflectionSampleY,
   renderSceneBackdrop,
   resolveButton,
   resolveSceneLayers,
   resolveUnlockedAchievements,
   runReplayEvents,
   sampleClipFrame,
+  sampleNormalBilinear,
   sampleTrack,
   seedCartridge,
   serializeReplay,
   shade,
+  simulateEmitter,
   softKneePrefilter,
   sway,
+  tiltShiftBlur,
   uniformsFromSettings,
   verifyReplayScore
 };

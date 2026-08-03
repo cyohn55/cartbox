@@ -24,9 +24,11 @@ export {
   NORMAL_DIRECTION_COUNT,
   NORMAL_VECTORS,
   SPOT_CONE_SOFTNESS,
+  interpolateNormal,
   nearestDirection,
   normalVector,
   sampleLight,
+  sampleNormalBilinear,
   shade,
 } from "./lightingModel.js";
 export type { LightSample, Rgb, Vec3 } from "./lightingModel.js";

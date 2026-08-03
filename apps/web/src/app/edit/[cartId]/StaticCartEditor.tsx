@@ -26,7 +26,7 @@ import { parseRig, type WireRig } from "@/lib/rig";
 import { parseMaterials, type WireMaterials } from "@/lib/materials";
 import { draftBytes, loadCartDraft } from "@/lib/localCartStore";
 import { findDemoCart, demoCartUrl } from "@/lib/demoCatalog";
-import { parsePostFxSettings, parseScene, parseAnim, type AnimSpec, type PostFxSettings, type SceneSpec } from "@cartbox/player";
+import { parsePostFxSettings, parseScene, parseAnim, parseParticles, type AnimSpec, type ParticleSpec, type PostFxSettings, type SceneSpec } from "@cartbox/player";
 import { EditorWorkbench } from "./EditorWorkbench";
 
 interface StaticCartEditorProps {
@@ -43,6 +43,7 @@ interface ResolvedCart {
   voxel: string | null;
   scene: SceneSpec | null;
   anim: AnimSpec | null;
+  particles: ParticleSpec | null;
 }
 
 function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
@@ -66,6 +67,7 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
         voxel: draft.voxelJson,
         scene: parseScene(draft.sceneJson ? JSON.parse(draft.sceneJson) : null),
         anim: parseAnim(draft.animJson ? JSON.parse(draft.animJson) : null),
+        particles: parseParticles(draft.particlesJson ? JSON.parse(draft.particlesJson) : null),
       });
       return () => URL.revokeObjectURL(blobUrl);
     }
@@ -79,6 +81,7 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
       voxel: null,
       scene: null,
       anim: null,
+      particles: null,
     });
     return undefined;
   }, [cartId]);
@@ -105,6 +108,7 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
       initialVoxel={resolved.voxel}
       initialScene={resolved.scene}
       initialAnim={resolved.anim}
+      initialParticles={resolved.particles}
     />
   );
 }

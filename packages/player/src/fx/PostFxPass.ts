@@ -76,6 +76,13 @@ uniform float uSplitStrength;
 uniform float uSplitBalance;
 uniform vec3 uSplitShadows;
 uniform vec3 uSplitHighlights;
+uniform float uReflectStrength;
+uniform float uReflectHorizon;
+uniform float uReflectFalloff;
+uniform float uReflectWobble;
+uniform float uTiltStrength;
+uniform float uTiltFocus;
+uniform float uTiltRange;
 uniform float uKaleidoSegments;
 uniform float uKaleidoAngle;
 uniform float uGrainAmount;
@@ -88,6 +95,8 @@ const float TAU = 6.2831853;
 // around the loop rather than by shortening it.
 const int GODRAY_SAMPLES = 16;
 const int STREAK_SAMPLES = 8;
+// Ring taps for the tilt-shift disk blur. Two rings + centre per iteration.
+const int DOF_SAMPLES = 10;
 
 float luma(vec3 color) {
   return dot(color, vec3(0.299, 0.587, 0.114));
@@ -172,6 +181,46 @@ void main() {
     texture2D(uSource, uv).g,
     texture2D(uSource, uv - fringe).b
   );
+
+  // Tilt-shift depth of field: keep a horizontal band sharp and blur outside it,
+  // the row standing in for distance in a flat scene. The blur weight is the pure
+  // tiltShiftBlur() of lensModel.ts — 0 inside the band, ramping to 1 over a fixed
+  // feather — scaled by strength into a disk radius. Offsets come from sin/cos of
+  // the loop index rather than an indexed array (GLSL ES 1.00 forbids the latter).
+  if (uTiltStrength > 0.0) {
+    float outside = abs(uv.y - uTiltFocus) - max(uTiltRange, 0.0);
+    float blurAmount = clamp(outside / 0.35, 0.0, 1.0) * uTiltStrength;
+    if (blurAmount > 0.001) {
+      float radius = blurAmount * 6.0;             // max ~6px kernel at full blur
+      vec2 texel = 1.0 / uSourceSize;
+      vec3 blurred = color;
+      float total = 1.0;
+      for (int i = 0; i < DOF_SAMPLES; i++) {
+        float a = float(i) / float(DOF_SAMPLES) * TAU;
+        vec2 dir = vec2(cos(a), sin(a));
+        blurred += texture2D(uSource, uv + dir * radius * texel).rgb;
+        blurred += texture2D(uSource, uv + dir * (radius * 0.5) * texel).rgb;
+        total += 2.0;
+      }
+      color = mix(color, blurred / total, clamp(blurAmount, 0.0, 1.0));
+    }
+  }
+
+  // Wet-floor reflection: below the horizon, mirror the frame above it downward and
+  // fade with distance (reflectionSampleY / reflectionFade in lensModel.ts). A
+  // clock-driven sideways ripple, growing with depth, makes the surface read as wet
+  // rather than a mirror. Sampled from the raw source so the reflected scene is the
+  // upright picture, not one already reflected.
+  if (uReflectStrength > 0.0) {
+    float below = uv.y - uReflectHorizon;
+    if (below > 0.0) {
+      float ripple = sin(uv.x * 40.0 + uTime * 2.2) * uReflectWobble * 0.02 * below / max(uReflectFalloff, 0.001);
+      vec2 rUv = clamp(vec2(uv.x + ripple, uReflectHorizon - below), 0.0, 1.0);
+      vec3 mirror = texture2D(uSource, rUv).rgb;
+      float fade = uReflectStrength * clamp(1.0 - below / max(uReflectFalloff, 0.001), 0.0, 1.0);
+      color = mix(color, mirror, fade);
+    }
+  }
 
   // Bloom: add the wide multi-scale glow the pyramid pre-computed. Where the
   // pyramid could not be built, fall back to the original 3x3 bright-pass blur so
@@ -465,6 +514,13 @@ export class PostFxPass {
     gl.uniform1f(this.location("uSplitBalance"), uniforms.splitBalance);
     gl.uniform3f(this.location("uSplitShadows"), ...uniforms.splitShadows);
     gl.uniform3f(this.location("uSplitHighlights"), ...uniforms.splitHighlights);
+    gl.uniform1f(this.location("uReflectStrength"), uniforms.reflectionStrength);
+    gl.uniform1f(this.location("uReflectHorizon"), uniforms.reflectionHorizon);
+    gl.uniform1f(this.location("uReflectFalloff"), uniforms.reflectionFalloff);
+    gl.uniform1f(this.location("uReflectWobble"), uniforms.reflectionWobble);
+    gl.uniform1f(this.location("uTiltStrength"), uniforms.tiltStrength);
+    gl.uniform1f(this.location("uTiltFocus"), uniforms.tiltFocus);
+    gl.uniform1f(this.location("uTiltRange"), uniforms.tiltRange);
     gl.uniform1f(this.location("uKaleidoSegments"), uniforms.kaleidoSegments);
     gl.uniform1f(this.location("uKaleidoAngle"), uniforms.kaleidoAngle);
     gl.uniform1f(this.location("uGrainAmount"), uniforms.grainAmount);

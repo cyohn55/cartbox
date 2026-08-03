@@ -32,6 +32,8 @@ export type PostFxEffectId =
   | "godrays"
   | "streaks"
   | "splittone"
+  | "reflection"
+  | "tiltshift"
   | "kaleidoscope"
   | "grain";
 
@@ -187,6 +189,31 @@ export const POST_FX_EFFECTS: PostFxEffectDef[] = [
     ],
   },
   {
+    id: "reflection",
+    label: "Wet-floor reflection",
+    description: "Mirrors the scene above a horizon line down into the floor below it, fading with distance — the screen-space reflection of a rain-slick street.",
+    params: [
+      { id: "strength", label: "Strength", min: 0, max: 1, step: 0.01, defaultValue: 0.5 },
+      // Where the reflective surface begins. Shape, not intensity: it chooses the
+      // waterline whether or not the effect is dialled up, so it is read always.
+      { id: "horizon", label: "Horizon", min: 0, max: 1, step: 0.01, defaultValue: 0.7 },
+      { id: "falloff", label: "Falloff", min: 0.05, max: 1, step: 0.01, defaultValue: 0.4 },
+      // Sideways ripple amplitude; animated by the clock so the surface shimmers.
+      { id: "wobble", label: "Ripple", min: 0, max: 1, step: 0.01, defaultValue: 0.25 },
+    ],
+  },
+  {
+    id: "tiltshift",
+    label: "Tilt-shift focus",
+    description: "Keeps a horizontal band sharp and blurs above and below it, the miniature-diorama depth of field the cinematic look leans on.",
+    params: [
+      { id: "strength", label: "Strength", min: 0, max: 1, step: 0.01, defaultValue: 0.6 },
+      // The in-focus band's centre row and half-height. Both are shape.
+      { id: "focus", label: "Focus row", min: 0, max: 1, step: 0.01, defaultValue: 0.55 },
+      { id: "range", label: "In-focus band", min: 0, max: 0.5, step: 0.01, defaultValue: 0.12 },
+    ],
+  },
+  {
     id: "kaleidoscope",
     label: "Kaleidoscope",
     description: "Mirrors a wedge of the frame around the centre.",
@@ -329,6 +356,20 @@ export interface PostFxUniforms {
   splitBalance: number;
   splitShadows: [number, number, number];
   splitHighlights: [number, number, number];
+  /** Wet-floor reflection strength (0 disables the mirror). */
+  reflectionStrength: number;
+  /** Screen row of the reflective surface's near edge, 0..1. */
+  reflectionHorizon: number;
+  /** How far below the horizon the reflection persists, in screen-height units. */
+  reflectionFalloff: number;
+  /** Sideways ripple amplitude of the reflection. */
+  reflectionWobble: number;
+  /** Tilt-shift max blur (0 disables the depth of field). */
+  tiltStrength: number;
+  /** Centre row of the in-focus band, 0..1. */
+  tiltFocus: number;
+  /** Half-height of the fully-sharp band, in screen-height units. */
+  tiltRange: number;
   /** Below 2 the shader leaves the frame alone. */
   kaleidoSegments: number;
   /** Rotation in radians. */
@@ -399,6 +440,13 @@ export function uniformsFromSettings(settings: PostFxSettings): PostFxUniforms {
     splitBalance: shape("splittone", "balance", 0.5),
     splitShadows: color("splittone", "shadows"),
     splitHighlights: color("splittone", "highlights"),
+    reflectionStrength: value("reflection", "strength", 0),
+    reflectionHorizon: shape("reflection", "horizon", 0.7),
+    reflectionFalloff: shape("reflection", "falloff", 0.4),
+    reflectionWobble: shape("reflection", "wobble", 0.25),
+    tiltStrength: value("tiltshift", "strength", 0),
+    tiltFocus: shape("tiltshift", "focus", 0.55),
+    tiltRange: shape("tiltshift", "range", 0.12),
     kaleidoSegments: settings.enabled.kaleidoscope ? shape("kaleidoscope", "segments", 6) : 0,
     kaleidoAngle: (shape("kaleidoscope", "angle", 0) * Math.PI) / 180,
     grainAmount: value("grain", "amount", 0),
