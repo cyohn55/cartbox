@@ -38,6 +38,13 @@ export interface ParallaxLayer {
   wrapX?: boolean;
   /** Vertical placement in the output, in pixels (align a horizon). Default 0. */
   offsetY?: number;
+  /**
+   * The aerial-perspective haze is already baked into {@link pixels} (see
+   * {@link prehazeLayers}), so compositing must not apply it again. A layer's haze
+   * is frame-invariant — it depends only on the layer's depth and the scene
+   * atmosphere — so the runtime bakes it once and skips it in the per-frame loop.
+   */
+  hazed?: boolean;
 }
 
 /** Aerial-perspective parameters, shared by the whole scene. */
@@ -90,6 +97,38 @@ export function hazeColor(rgb: Rgb, haze: number, atmosphere: AtmosphereParams):
 }
 
 /**
+ * Bake each layer's aerial-perspective haze into its pixels once, returning new
+ * layers flagged {@link ParallaxLayer.hazed} so {@link composeParallax} skips the
+ * per-pixel haze in the hot path.
+ *
+ * A layer's haze depends only on its depth and the (constant) atmosphere, so it
+ * is identical every frame — computing it once here instead of per pixel per
+ * frame is what keeps an N-layer scene inside the 60fps budget. The input layers
+ * are not mutated; a layer that takes no haze is returned with its pixels shared.
+ */
+export function prehazeLayers(
+  layers: readonly ParallaxLayer[],
+  atmosphere: AtmosphereParams,
+): ParallaxLayer[] {
+  return layers.map((layer) => {
+    const haze = clampUnit(layer.depth);
+    if (haze <= 0) {
+      return { ...layer, hazed: true }; // nearest layer: no haze to bake in
+    }
+    const src = layer.pixels;
+    const pixels = new Uint8ClampedArray(src.length);
+    for (let i = 0; i < src.length; i += 4) {
+      const [r, g, b] = hazeColor([src[i]!, src[i + 1]!, src[i + 2]!], haze, atmosphere);
+      pixels[i] = r;
+      pixels[i + 1] = g;
+      pixels[i + 2] = b;
+      pixels[i + 3] = src[i + 3]!; // alpha is untouched by haze
+    }
+    return { ...layer, pixels, hazed: true };
+  });
+}
+
+/**
  * Composite parallax layers into `out` (outW×outH RGBA), far to near, applying
  * per-layer aerial perspective by depth. `out` should already hold the sky /
  * clear colour; layers blend over it by their own alpha.
@@ -112,7 +151,9 @@ export function composeParallax(
     const shiftX = Math.round(-camera.x * factor);
     const shiftY = Math.round(-camera.y * factor) + (layer.offsetY ?? 0);
     const wrapX = layer.wrapX ?? true;
-    const haze = clampUnit(layer.depth);
+    // A pre-hazed layer already carries its aerial perspective in its pixels, so
+    // skip the per-pixel haze here — this is the per-frame cost the runtime avoids.
+    const haze = layer.hazed ? 0 : clampUnit(layer.depth);
 
     for (let y = 0; y < outH; y += 1) {
       let sy = y - shiftY;

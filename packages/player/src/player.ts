@@ -16,7 +16,7 @@ import { frameDurationMs, getModel, type ConsoleModel } from "./models.js";
 import { ReplayRecorder, ReplaySource, hashCart, randomSeed, type Replay } from "./replay.js";
 import { seedCartridge } from "./cartseed.js";
 import { injectSdk } from "./sdk.js";
-import { decodeLights, decodeMailbox } from "./mailbox.js";
+import { decodeCamera, decodeLights, decodeMailbox } from "./mailbox.js";
 import { createCartSpriteSource, type CartSpriteSource } from "./scene/cartSpriteSource.js";
 import { resolveSceneLayers } from "./scene/sceneRender.js";
 import { SceneBackdropSurface } from "./scene/SceneBackdropSurface.js";
@@ -37,6 +37,7 @@ export class Player {
   private readonly view: Window;
   private surface?: DisplaySurface;
   private litSurface?: LitCanvasSurface;
+  private sceneSurface?: SceneBackdropSurface;
   private audio?: AudioController;
   private keyboard?: KeyboardInput;
   private touch?: TouchInput;
@@ -125,7 +126,14 @@ export class Player {
           ? (this.litSurface = await LitCanvasSurface.create(target, scale, this.model, this.options.lighting))
           : new CanvasSurface(target, scale, this.model);
         if (scene && backdrop) {
-          return new SceneBackdropSurface(base, this.model.width, this.model.height, backdrop.layers, scene, backdrop.keyRgb);
+          return (this.sceneSurface = new SceneBackdropSurface(
+            base,
+            this.model.width,
+            this.model.height,
+            backdrop.layers,
+            scene,
+            backdrop.keyRgb,
+          ));
         }
         return base;
       };
@@ -284,6 +292,10 @@ export class Player {
         this.litSurface.setCartLights(decodeLights(this.console.readMailbox()));
         this.litSurface.setCartMaterial(this.console.readMaterial());
         this.litSurface.setCartEmissive(this.console.readEmissive());
+      }
+      // Let a scene cart pan its backdrop by publishing cartbox.camera(x, y).
+      if (this.sceneSurface && this.console) {
+        this.sceneSurface.setCameraBase(decodeCamera(this.console.readMailbox()));
       }
       this.surface?.blit(framebuffer);
     }

@@ -13,6 +13,7 @@ export {
   composeParallax,
   hazeColor,
   parallaxOf,
+  prehazeLayers,
   type AtmosphereParams,
   type ParallaxCamera,
   type ParallaxLayer,

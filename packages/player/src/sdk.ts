@@ -14,6 +14,7 @@ export const CARTBOX_SDK_LUA = `local _MB = 192
 local _CAP = 8
 local _LB = _MB + 25
 local _LCAP = 6
+local _CB = _LB + 1 + _LCAP * 6
 local _ln = 0
 local function _emit(kind, id, value)
   local seq = pmem(_MB)
@@ -76,6 +77,10 @@ cartbox = {
     local cone = math.floor(math.cos(math.rad(angle or 30)) * 63 + 0.5)
     if cone < 0 then cone = 0 elseif cone > 63 then cone = 63 end
     _light(2, x, y, z or 12, radius, r, g, b, intensity, _byte(nx), _byte(ny), cone)
+  end,
+  camera = function(x, y)
+    pmem(_CB, math.floor((x or 0) * 16 + 0.5) & 0xffffffff)
+    pmem(_CB + 1, math.floor((y or 0) * 16 + 0.5) & 0xffffffff)
   end,
 }`;
 
