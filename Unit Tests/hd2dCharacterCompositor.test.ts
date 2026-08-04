@@ -8,11 +8,11 @@ import { describe, it, expect } from "vitest";
 import {
   projectWorld,
   compositeCharacter,
-  buildCharacterLayers,
-  CHAR_H,
+  rigToLayers,
   type Camera,
   type CharacterLayer,
 } from "../apps/web/src/lib/hd2d/character";
+import { buildHeroRig } from "../apps/web/src/lib/hd2d/heroRig";
 
 const baseCamera = (yaw: number): Camera => ({ yaw, pitch: 0.5, cell: 13, size: 360, origin: [0, 2, 0] });
 
@@ -54,10 +54,10 @@ describe("projectWorld", () => {
 });
 
 describe("compositeCharacter", () => {
-  const layers: CharacterLayer[] = buildCharacterLayers();
+  const layers: CharacterLayer[] = rigToLayers(buildHeroRig());
 
-  it("authors five non-empty depth layers", () => {
-    expect(layers).toHaveLength(5);
+  it("adapts the hero rig into depth-ordered, non-empty layers", () => {
+    expect(layers.length).toBe(buildHeroRig().parts.length);
     for (const layer of layers) {
       const painted = layer.sprite.data.some((_, i) => i % 4 === 3 && layer.sprite.data[i]! > 0);
       expect(painted).toBe(true);

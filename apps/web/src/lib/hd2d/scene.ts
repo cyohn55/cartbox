@@ -3,9 +3,10 @@
 // REPLACED-style night sky. A FIXED ¾ camera follows the character (its look-at
 // tracks the foot) so walking scrolls the world while the hero stays framed.
 
-import { renderScene, DEFAULT_MODEL_LIGHT, type ModelLight } from "@cartbox/editor";
+import { renderScene, DEFAULT_MODEL_LIGHT, type ModelLight, type Particle } from "@cartbox/editor";
 import { buildWorld, buildAtlas, type Hd2dWorld } from "./world";
-import { buildCharacterLayers, compositeCharacter, type Camera, type CharacterLayer } from "./character";
+import { rigToLayers, compositeCharacter, type Camera, type CharacterLayer } from "./character";
+import { buildHeroRig } from "./heroRig";
 import type { CharState } from "./walk";
 
 // Tunables (kept together so the look is easy to iterate).
@@ -36,6 +37,30 @@ export function getWorld(): Hd2dWorld {
   return world;
 }
 
+// ---- rain (renderScene particles, sorted into the world's depth buffer) ------
+const RAIN_COUNT = 230;
+const RAIN_HEIGHT = 24;   // world units the drops fall through before wrapping
+const RAIN_SPEED = 26;    // world units/second — fast enough to read as rain, not snow
+let rainSeeds: { x: number; z: number; phase: number }[] | null = null;
+function hash(n: number): number { const s = Math.sin(n * 12.9898 + 1.7) * 43758.5453; return s - Math.floor(s); }
+
+/** Rain drops falling in a box around the character, so they occlude / are occluded
+ *  by the 3D geometry (drops behind a tower are hidden) — depth-true rain. */
+function rainParticles(char: CharState, seconds: number): Particle[] {
+  if (!rainSeeds) {
+    rainSeeds = Array.from({ length: RAIN_COUNT }, (_, i) => ({
+      x: (hash(i) * 2 - 1) * 20, z: (hash(i + 9) * 2 - 1) * 9, phase: hash(i + 3),
+    }));
+  }
+  return rainSeeds.map((s): Particle => {
+    const fall = ((s.phase * RAIN_HEIGHT - seconds * RAIN_SPEED) % RAIN_HEIGHT + RAIN_HEIGHT) % RAIN_HEIGHT;
+    return {
+      position: [char.pos[0] + s.x, fall, char.pos[2] + s.z + 2],
+      r: 120, g: 150, b: 190, emissive: 0.28, radius: 1, // dim + cool so it recedes like rain
+    };
+  });
+}
+
 function skyFor(size: number): Uint8ClampedArray {
   const s = new Uint8ClampedArray(size * size * 4);
   const moonX = size * 0.72, moonY = size * 0.2, moonR = size * 0.05;
@@ -54,10 +79,10 @@ function skyFor(size: number): Uint8ClampedArray {
   return s;
 }
 
-/** Render one frame following `char` into an RGBA buffer (size×size). */
-export function renderFrame(size: number, char: CharState): Uint8ClampedArray {
+/** Render one frame following `char` (at time `seconds`) into an RGBA buffer. */
+export function renderFrame(size: number, char: CharState, seconds: number): Uint8ClampedArray {
   if (!world) world = buildWorld(buildAtlas());
-  if (!layers) layers = buildCharacterLayers();
+  if (!layers) layers = rigToLayers(buildHeroRig());
   if (!outBuf || outBuf.length !== size * size * 4) {
     outBuf = new Uint8ClampedArray(size * size * 4);
     depthBuf = new Float32Array(size * size);
@@ -71,6 +96,7 @@ export function renderFrame(size: number, char: CharState): Uint8ClampedArray {
 
   const rendered = renderScene(world.models, {
     size, cell: CELL, yaw: YAW, pitch: PITCH, origin, light: LIGHT,
+    particles: rainParticles(char, seconds),
     out: outBuf, depthBuffer: depthBuf!,
   });
 

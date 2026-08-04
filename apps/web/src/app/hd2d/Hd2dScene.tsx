@@ -66,7 +66,7 @@ export function Hd2dScene() {
       const deltaSeconds = Math.min(0.05, accumulator / 1000);
       accumulator = 0;
       char = stepCharacter(char, keys, deltaSeconds, { speed: 8, yaw: YAW, bounds: world.bounds, stride: 10 });
-      image.data.set(renderFrame(RENDER, char));
+      image.data.set(renderFrame(RENDER, char, now / 1000));
       ctx.putImageData(image, 0, 0);
     };
     raf = requestAnimationFrame(loop);
