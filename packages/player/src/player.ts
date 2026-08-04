@@ -14,8 +14,9 @@ import { createConsole, loadEngineModule, type ConsoleInstance } from "./engine.
 import { GamepadState, KeyboardInput, TouchInput } from "./input.js";
 import { frameDurationMs, getModel, type ConsoleModel } from "./models.js";
 import { ReplayRecorder, ReplaySource, hashCart, randomSeed, type Replay } from "./replay.js";
-import { seedCartridge } from "./cartseed.js";
+import { seedCartridge, prependLuaCode } from "./cartseed.js";
 import { injectSdk } from "./sdk.js";
+import { collisionSdkLua } from "./collisionSdk.js";
 import { decodeCamera, decodeLights, decodeMailbox } from "./mailbox.js";
 import { createCartSpriteSource, type CartSpriteSource } from "./scene/cartSpriteSource.js";
 import { resolveSceneLayers } from "./scene/sceneRender.js";
@@ -98,7 +99,14 @@ export class Player {
       // so replays still reproduce exactly. The cart identity hash is taken from
       // the original (unprepared) bytes.
       const seed = this.options.replay ? this.options.replay.seed : randomSeed();
-      const preparedBytes = injectSdk(seedCartridge(bytes, seed));
+      // Order matters: prepended code runs top-first, so the collision accessor
+      // is prepended BEFORE the SDK — the SDK ends up above it and defines the
+      // `cartbox` table first, then this overrides its solid/mapsize stubs with
+      // the cart's real layer. A null/empty layer contributes nothing.
+      const seeded = seedCartridge(bytes, seed);
+      const collisionLua = collisionSdkLua(this.options.collision);
+      const withCollision = collisionLua ? prependLuaCode(seeded, collisionLua) : seeded;
+      const preparedBytes = injectSdk(withCollision);
 
       this.console = createConsole(module, this.model, sampleRate);
       if (!this.console.loadCartridge(preparedBytes)) {

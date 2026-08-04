@@ -13,6 +13,7 @@ import type { PostFxSettings } from "./fx/postfx.js";
 import type { SceneSpec } from "./scene/sceneModel.js";
 import type { AnimSpec } from "./anim/animModel.js";
 import type { ParticleSpec } from "./particles/particleModel.js";
+import type { CollisionField } from "./collisionSdk.js";
 
 /**
  * Which input methods the player wires up.
@@ -113,6 +114,15 @@ export interface PlayerOptions {
    * ParticleSpec with `parseParticles`.
    */
   particles?: ParticleSpec;
+  /**
+   * Expose the cart's authored collision layer to its own Lua as
+   * `cartbox.solid(x, y)` (true when a map cell is solid) and `cartbox.mapsize()`.
+   * The whole bitmap is injected once as cart data — collision never changes
+   * during play — so the cart runs its own physics against it with no per-frame
+   * protocol. Parse a cart's sidecar into a CollisionField with
+   * `parseCollisionField`.
+   */
+  collision?: CollisionField;
 }
 
 /** Handle returned by {@link mount} for controlling a live player instance. */

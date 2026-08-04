@@ -20,6 +20,7 @@ import {
   type SceneSpec,
   type AnimSpec,
   type ParticleSpec,
+  type CollisionField,
 } from "@cartbox/player";
 
 import { authHeaders } from "@/lib/supabase-browser";
@@ -38,11 +39,13 @@ interface CartridgePlayerProps {
   anim: AnimSpec | null;
   /** The cart's authored weather/particle system, or null when none is saved. */
   particles: ParticleSpec | null;
+  /** The cart's authored collision layer, or null when none is saved. */
+  collision: CollisionField | null;
 }
 
 type SubmitState = "idle" | "working" | "submitted" | "error";
 
-export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, scene, anim, particles }: CartridgePlayerProps) {
+export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision }: CartridgePlayerProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<PlayerHandle | null>(null);
   const bestScoreRef = useRef<number | null>(null);
@@ -83,6 +86,9 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       // The cart's authored weather system (rain/snow/embers/fog), composited
       // over each frame in front of the scene and under the post-FX finish.
       particles: particles ?? undefined,
+      // The cart's authored collision layer, injected as cart data so the cart's
+      // own Lua can read it via cartbox.solid(x, y) / cartbox.mapsize().
+      collision: collision ?? undefined,
       onReady: () => setStatus("ready"),
       onError: () => setStatus("error"),
       onEvent: (event: MailboxEvent) => {
@@ -98,7 +104,7 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
     handleRef.current = handle;
 
     return () => handle.destroy();
-  }, [cartUrl, engineUrl, modelId, postFx, scene, anim, particles]);
+  }, [cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision]);
 
   const togglePlayback = () => {
     const handle = handleRef.current;

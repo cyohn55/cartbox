@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { mount, type AnimSpec, type ParticleSpec, type PlayerHandle, type PostFxSettings, type SceneSpec } from "@cartbox/player";
+import { mount, type AnimSpec, type CollisionField, type ParticleSpec, type PlayerHandle, type PostFxSettings, type SceneSpec } from "@cartbox/player";
 
 import styles from "./editor.module.css";
 
@@ -25,10 +25,12 @@ interface RunOverlayProps {
   anim?: AnimSpec;
   /** The cart's weather system, composited live during the playtest. */
   particles?: ParticleSpec;
+  /** The cart's collision layer, exposed to its Lua via cartbox.solid during the playtest. */
+  collision?: CollisionField;
   onClose: () => void;
 }
 
-export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, particles, onClose }: RunOverlayProps) {
+export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, particles, collision, onClose }: RunOverlayProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<PlayerHandle | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
@@ -58,6 +60,8 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
       scene,
       anim,
       particles,
+      // Playtest with the cart's collision layer available to its own Lua.
+      collision,
       onReady: () => setStatus("ready"),
       onError: () => setStatus("error"),
     });
@@ -67,7 +71,7 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
       handle.destroy();
       URL.revokeObjectURL(url);
     };
-  }, [bytes, engineUrl, postFx, scene, anim, particles]);
+  }, [bytes, engineUrl, postFx, scene, anim, particles, collision]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {

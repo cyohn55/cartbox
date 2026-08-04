@@ -63,6 +63,10 @@ export {
 } from "./mailbox.js";
 export type { MailboxCamera, MailboxEvent, MailboxEventKind, MailboxRead } from "./mailbox.js";
 export { CARTBOX_SDK_LUA, injectSdk } from "./sdk.js";
+// Collision: a cart's authored solidity layer, exposed to its own Lua as
+// cartbox.solid(x, y) / cartbox.mapsize(). Injected as static cart data.
+export { collisionSdkLua, parseCollisionField } from "./collisionSdk.js";
+export type { CollisionField } from "./collisionSdk.js";
 
 // Replay verification (P2): recompute a score by re-running the replay headlessly.
 export { extractScore, extractUnlocks, runReplayEvents, verifyReplayScore } from "./verify.js";

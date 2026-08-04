@@ -655,6 +655,7 @@ function WorkbenchBody({
           scene={scene ?? undefined}
           anim={anim ?? undefined}
           particles={particles ?? undefined}
+          collision={collision ?? undefined}
           onClose={() => setRunBytes(null)}
         />
       )}

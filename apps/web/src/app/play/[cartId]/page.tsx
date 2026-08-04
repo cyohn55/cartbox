@@ -22,7 +22,7 @@ import { DEMO_CARTS, demoCartUrl, findDemoCart } from "@/lib/demoCatalog";
 import { DEMO_TITLES, findDemoTitle } from "@/lib/demoTitles";
 import { requiresUserAssets, resolveRuntime, type AssetSource } from "@/lib/titleRuntime";
 import { requiresSourceOffer } from "@/lib/licensing";
-import { parsePostFxSettings, parseScene, parseAnim, parseParticles, type ModelId } from "@cartbox/player";
+import { parsePostFxSettings, parseScene, parseAnim, parseParticles, parseCollisionField, type CollisionField, type ModelId } from "@cartbox/player";
 import { CartridgePlayer } from "./CartridgePlayer";
 import { AssetSupply } from "./AssetSupply";
 import { TitlePlayer } from "./TitlePlayer";
@@ -181,6 +181,7 @@ function StaticCartridgePage({ cartId }: { cartId: string }) {
         scene={null}
         anim={null}
         particles={null}
+        collision={null}
       />
       <p>{cart.description}</p>
     </main>
@@ -208,6 +209,18 @@ export default async function CartridgePage({ params }: PageProps) {
   const owned = isFree ? true : await hasEntitlement(cart.id);
   const cartUrl = publicUrl(cart.r2_key);
 
+  // The collision layer lives in a column added later (migration 0020), so it is
+  // fetched on its own rather than in the cart query above: a not-yet-migrated
+  // deployment simply plays without collision instead of failing the whole cart
+  // lookup on an undefined column.
+  let collision: CollisionField | null = null;
+  try {
+    const { data: extra, error } = await db.from("carts").select("collision").eq("id", cart.id).maybeSingle();
+    if (!error) collision = parseCollisionField(extra?.collision);
+  } catch {
+    collision = null;
+  }
+
   return (
     <main>
       <h1>{cart.title}</h1>
@@ -221,6 +234,7 @@ export default async function CartridgePage({ params }: PageProps) {
           scene={parseScene(cart.scene)}
           anim={parseAnim(cart.anim)}
           particles={parseParticles(cart.particles)}
+          collision={collision}
         />
       ) : (
         <section>

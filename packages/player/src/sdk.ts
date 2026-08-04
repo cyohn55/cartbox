@@ -82,6 +82,11 @@ cartbox = {
     pmem(_CB, math.floor((x or 0) * 16 + 0.5) & 0xffffffff)
     pmem(_CB + 1, math.floor((y or 0) * 16 + 0.5) & 0xffffffff)
   end,
+  -- Collision defaults: overridden by the injected layer when the cart has one,
+  -- so cartbox.solid/mapsize are always safe to call (a cart with no collision
+  -- layer simply sees every cell as non-solid).
+  solid = function() return false end,
+  mapsize = function() return 0, 0 end,
 }`;
 
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */

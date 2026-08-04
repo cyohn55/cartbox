@@ -2844,9 +2844,65 @@ cartbox = {
     pmem(_CB, math.floor((x or 0) * 16 + 0.5) & 0xffffffff)
     pmem(_CB + 1, math.floor((y or 0) * 16 + 0.5) & 0xffffffff)
   end,
+  -- Collision defaults: overridden by the injected layer when the cart has one,
+  -- so cartbox.solid/mapsize are always safe to call (a cart with no collision
+  -- layer simply sees every cell as non-solid).
+  solid = function() return false end,
+  mapsize = function() return 0, 0 end,
 }`;
 function injectSdk(bytes) {
   return prependLuaCode(bytes, CARTBOX_SDK_LUA);
+}
+
+// src/collisionSdk.ts
+function parseCollisionField(value) {
+  if (typeof value !== "object" || value === null) return null;
+  const data = value;
+  if (typeof data.width !== "number" || typeof data.height !== "number") return null;
+  if (typeof data.bits !== "string") return null;
+  if (data.width <= 0 || data.height <= 0 || !Number.isFinite(data.width) || !Number.isFinite(data.height)) {
+    return null;
+  }
+  return { width: Math.floor(data.width), height: Math.floor(data.height), bits: data.bits };
+}
+function collisionSdkLua(collision) {
+  const field = parseCollisionField(collision);
+  if (!field || field.bits.length === 0) return "";
+  const width = field.width;
+  const height = field.height;
+  return `do
+  local _cw, _ch = ${width}, ${height}
+  local function _b64(s)
+    local _T = {}
+    local _A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    for i = 1, #_A do _T[string.byte(_A, i)] = i - 1 end
+    local out, acc, bits = {}, 0, 0
+    for i = 1, #s do
+      local v = _T[string.byte(s, i)]
+      if v then
+        acc = (acc << 6) | v
+        bits = bits + 6
+        if bits >= 8 then
+          bits = bits - 8
+          out[#out + 1] = string.char((acc >> bits) & 0xff)
+          acc = acc & ((1 << bits) - 1)
+        end
+      end
+    end
+    return table.concat(out)
+  end
+  local _cb = _b64("${field.bits}")
+  cartbox = cartbox or {}
+  cartbox.mapsize = function() return _cw, _ch end
+  cartbox.solid = function(x, y)
+    x = math.floor(x or 0)
+    y = math.floor(y or 0)
+    if x < 0 or x >= _cw or y < 0 or y >= _ch then return false end
+    local cell = y * _cw + x
+    local byte = string.byte(_cb, (cell >> 3) + 1) or 0
+    return (byte & (1 << (cell & 7))) ~= 0
+  end
+end`;
 }
 
 // src/mailbox.ts
@@ -3591,7 +3647,10 @@ var Player = class {
       if (this.destroyed) return;
       const sampleRate = this.options.sampleRate ?? this.model.sampleRate;
       const seed = this.options.replay ? this.options.replay.seed : randomSeed();
-      const preparedBytes = injectSdk(seedCartridge(bytes, seed));
+      const seeded = seedCartridge(bytes, seed);
+      const collisionLua = collisionSdkLua(this.options.collision);
+      const withCollision = collisionLua ? prependLuaCode(seeded, collisionLua) : seeded;
+      const preparedBytes = injectSdk(withCollision);
       this.console = createConsole(module, this.model, sampleRate);
       if (!this.console.loadCartridge(preparedBytes)) {
         throw new Error("Engine rejected the cartridge");
@@ -4236,6 +4295,7 @@ export {
   acesFilmicChannel,
   anyPostFxEnabled,
   cameraAt,
+  collisionSdkLua,
   composeParallax,
   compositeOverBackdrop,
   createCartSpriteSource,
@@ -4268,6 +4328,7 @@ export {
   normalVector,
   paramKey,
   parseAnim,
+  parseCollisionField,
   parseParticles,
   parsePostFxSettings,
   parseReplay,

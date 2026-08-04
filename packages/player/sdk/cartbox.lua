@@ -37,6 +37,17 @@
 -- auto-scroll; nearer layers move more (their parallax factor scales this).
 --
 --   cartbox.camera(worldX, 0)   -- backdrop follows the player's world position
+--
+-- Collision (needs a collision layer authored in the Map tab): read which map
+-- cells are solid so your cart can do its own physics. The whole layer is static,
+-- so the platform injects it as data — no per-frame protocol. Cells are the map's
+-- own grid; out-of-bounds reads as not solid.
+--
+--   if cartbox.solid(cx, cy) then ... end   -- is map cell (cx, cy) solid?
+--   local w, h = cartbox.mapsize()          -- collision grid size, in cells
+--
+-- Without an authored layer these return false / 0, 0, so they are always safe
+-- to call.
 
 local _MB = 192   -- pmem word: mailbox base (event sequence counter)
 local _CAP = 8    -- event ring capacity (must match the host)
@@ -141,4 +152,10 @@ cartbox = {
     pmem(_CB, math.floor((x or 0) * 16 + 0.5) & 0xffffffff)
     pmem(_CB + 1, math.floor((y or 0) * 16 + 0.5) & 0xffffffff)
   end,
+
+  -- Collision defaults. When the cart has an authored collision layer the
+  -- platform injects real implementations that override these, so a cart can
+  -- always call cartbox.solid / cartbox.mapsize whether or not a layer exists.
+  solid = function() return false end,
+  mapsize = function() return 0, 0 end,
 }
