@@ -20,7 +20,7 @@
 
 import { readFileSync } from "node:fs";
 import { createClient } from "@supabase/supabase-js";
-import { flicker, drift, pulse, sway } from "@cartbox/player";
+import { flicker, drift, pulse } from "@cartbox/player";
 import { putCartObject } from "./lib/seedStorage.mjs";
 
 function required(name) {
@@ -34,53 +34,46 @@ const CART_PATH = new URL("../packages/player/examples/transit.tic", import.meta
 
 // Scene tab — two tall parallax layers pointing at the cart's own sprite strips:
 // a far distant plane that hazes into the sky glow, and a near dark neon canyon
-// whose gaps reveal the far plane. Chroma-keyed under the cart's foreground.
+// whose gaps reveal the far plane. Chroma-keyed under the cart's foreground, which
+// scrolls the whole backdrop by publishing cartbox.camera() as the player walks.
+// (Kept in sync with Working/cinematic-artstyle/transit2-preview-entry.mjs.)
 const SCENE = {
   layers: [
-    { source: { page: 0, tile: 0, tilesW: 16, tilesH: 6 }, depth: 0.88, parallax: 0.16, offsetY: 150, wrapX: true },
-    { source: { page: 0, tile: 96, tilesW: 16, tilesH: 7 }, depth: 0.34, parallax: 0.42, offsetY: 174, wrapX: true },
+    { source: { page: 0, tile: 0, tilesW: 16, tilesH: 5 }, depth: 0.86, parallax: 0.16, offsetY: 200, wrapX: true },
+    { source: { page: 0, tile: 80, tilesW: 16, tilesH: 10 }, depth: 0.40, parallax: 0.42, offsetY: 170, wrapX: true },
   ],
-  atmosphere: { fog: [78, 100, 124], density: 0.74, desaturate: 0.35, lift: 0.46 },
-  camera: { autoScrollX: 0 },
+  atmosphere: { fog: [80, 104, 132], density: 0.72, desaturate: 0.34, lift: 0.46 },
+  camera: { autoScrollX: 0 }, // scroll is driven by the cart's cartbox.camera()
   keyColor: 0,
 };
 
-// Anim tab — host-played ambient motion: the neon canyon buzzes (emissive flicker),
-// the far plane drifts, a steam plume rises off a grate, and the bloom/god-ray glow
-// breathes. Built from the player's own generators so it matches Anim-tab authoring.
+// Anim tab — host-played ambient life on the backdrop (the foreground motion — the
+// walk cycle and scrolling street — is the interactive cart itself): the neon canyon
+// buzzes (emissive flicker), the far plane drifts, and the bloom/god-ray glow breathes.
 const ANIM = {
-  clips: [
-    { name: "steam", frames: [
-      { page: 0, tile: 235, tilesW: 1, tilesH: 1 },
-      { page: 0, tile: 236, tilesW: 1, tilesH: 1 },
-    ], durations: [16, 16], mode: "loop" },
-  ],
-  placements: [
-    { clip: "steam", x: 250, y: 250, opacity: 0.7, scale: 3, depth: 0 },
-  ],
+  clips: [],
+  placements: [],
   tracks: [
-    { target: { kind: "sceneLayer", index: 1, channel: "emissive" }, ...flicker(52, 0.5, 1.05, 10, 7) },
-    { target: { kind: "sceneLayer", index: 0, channel: "offsetX" }, ...drift(360, 20) },
-    { target: { kind: "placement", index: 0, channel: "y" }, ...sway(48, 10, 244) },
-    { target: { kind: "placement", index: 0, channel: "opacity" }, ...pulse(48, 0.35, 0.8) },
-    { target: { kind: "postfx", key: "bloom.strength" }, ...pulse(150, 0.42, 0.6) },
-    { target: { kind: "postfx", key: "godrays.strength" }, ...pulse(200, 0.35, 0.55) },
+    { target: { kind: "sceneLayer", index: 1, channel: "emissive" }, ...flicker(52, 0.5, 1.06, 10, 7) },
+    { target: { kind: "sceneLayer", index: 0, channel: "offsetX" }, ...drift(360, 16) },
+    { target: { kind: "postfx", key: "bloom.strength" }, ...pulse(150, 0.44, 0.6) },
+    { target: { kind: "postfx", key: "godrays.strength" }, ...pulse(200, 0.34, 0.52) },
   ],
 };
 
 // Weather tab — rain driven slantwise by wind, a low rolling fog, and a few embers.
 const PARTICLES = {
   emitters: [
-    { kind: "rain", count: 340, color: [150, 180, 210], opacity: 0.30, size: 1, speed: 10, wind: -2.2, seed: 3 },
+    { kind: "rain", count: 360, color: [150, 180, 210], opacity: 0.30, size: 1, speed: 11, wind: -2.4, seed: 3 },
     { kind: "fog", count: 16, color: [40, 66, 84], opacity: 0.10, size: 8, speed: 0.2, wind: 0.5, seed: 11 },
-    { kind: "embers", count: 22, color: [255, 150, 70], opacity: 0.8, size: 1, speed: 0.6, wind: 0.6, seed: 5 },
+    { kind: "embers", count: 20, color: [255, 150, 70], opacity: 0.8, size: 1, speed: 0.6, wind: 0.6, seed: 5 },
   ],
 };
 
 // FX tab — the cinematic finish, tuned for the live route's unlit-passthrough frame:
 // teal shadows / amber highlights, wide bloom + ACES tonemap so the neon keeps its
-// colour, god rays + streaks off the lamp, a wet-floor reflection of the city, a
-// tilt-shift band on the figure, chromatic aberration, vignette and fine grain.
+// colour, god rays from the moon, streaks, a wet-floor reflection of the city, a
+// tilt-shift band, chromatic aberration, vignette and fine grain.
 const FX = {
   enabled: {
     grade: true, fog: true, bloom: true, tonemap: true, crt: false, chroma: true,
@@ -88,17 +81,17 @@ const FX = {
     streaks: true, splittone: true, reflection: true, tiltshift: true, kaleidoscope: false, grain: true,
   },
   values: {
-    "grade.brightness": 1.0, "grade.contrast": 1.2, "grade.saturation": 1.18,
-    "fog.density": 0.14, "fog.horizon": 0.5,
-    "bloom.strength": 0.62, "bloom.threshold": 0.62, "bloom.radius": 0.76,
-    "tonemap.exposure": 1.12,
-    "chroma.amount": 0.7,
+    "grade.brightness": 1.02, "grade.contrast": 1.18, "grade.saturation": 1.2,
+    "fog.density": 0.12, "fog.horizon": 0.52,
+    "bloom.strength": 0.6, "bloom.threshold": 0.62, "bloom.radius": 0.78,
+    "tonemap.exposure": 1.14,
+    "chroma.amount": 0.6,
     "vignette.strength": 0.5,
-    "godrays.strength": 0.4, "godrays.density": 0.5, "godrays.decay": 0.95, "godrays.x": 0.38, "godrays.y": 0.56,
-    "streaks.strength": 0.5, "streaks.length": 0.4,
-    "splittone.strength": 0.66, "splittone.balance": 0.46,
-    "reflection.strength": 0.32, "reflection.horizon": 0.69, "reflection.falloff": 0.6, "reflection.wobble": 0.45,
-    "tiltshift.strength": 0.6, "tiltshift.focus": 0.64, "tiltshift.range": 0.12,
+    "godrays.strength": 0.38, "godrays.density": 0.5, "godrays.decay": 0.95, "godrays.x": 0.5, "godrays.y": 0.22,
+    "streaks.strength": 0.5, "streaks.length": 0.42,
+    "splittone.strength": 0.64, "splittone.balance": 0.46,
+    "reflection.strength": 0.34, "reflection.horizon": 0.69, "reflection.falloff": 0.6, "reflection.wobble": 0.45,
+    "tiltshift.strength": 0.5, "tiltshift.focus": 0.7, "tiltshift.range": 0.16,
     "grain.amount": 0.06, "grain.size": 1,
   },
   colors: {
@@ -138,11 +131,12 @@ async function main() {
     title: "Transit",
     slug: "transit",
     description:
-      "A cinematic REPLACED-style scene on the Pro core: a lone figure on a rain-soaked " +
-      "neon street canyon at night, the retro-future city receding into teal haze above a " +
-      "mirror-slick road. Uses every editor tab — parallax scene, ambient animation, weather, " +
-      "and a full post-FX finish (bloom, tonemap, god rays, wet-floor reflection, tilt-shift).",
-    tags: ["cinematic", "pixel-art", "pro", "demo"],
+      "A playable, cinematic REPLACED-style side-scroller on the Pro core: WALK a lone " +
+      "augmented figure (arrow keys / d-pad) through an endless rain-soaked neon street " +
+      "canyon at night. The retro-future city scrolls in parallax behind you, streetlamps " +
+      "and neon signs pass by, and the whole scene rides a full post-FX finish (bloom, " +
+      "tonemap, god rays, wet-floor reflection, tilt-shift).",
+    tags: ["cinematic", "pixel-art", "pro", "playable", "demo"],
     console_model: "pro",
     price_cents: 0,
     r2_key: storedKey,
