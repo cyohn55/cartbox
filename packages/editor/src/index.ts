@@ -43,6 +43,12 @@ export {
 } from "./model/starters";
 export { SpriteSheet, type SheetImage, type IndexedImage } from "./model/SpriteSheet";
 export { TileMap } from "./model/TileMap";
+export {
+  CollisionMap,
+  isCollisionData,
+  COLLISION_MAP_VERSION,
+  type CollisionData,
+} from "./model/CollisionMap";
 export { SoundBank, SFX_CHANNEL, type SfxLoop } from "./model/SoundBank";
 export { NormalMap } from "./model/NormalMap";
 export { MaterialMap } from "./model/MaterialMap";

@@ -18,7 +18,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { faceTile, type MapVoxelSpace, type SpriteSheet, type TileMap } from "@cartbox/editor";
+import { faceTile, type CollisionMap, type MapVoxelSpace, type SpriteSheet, type TileMap } from "@cartbox/editor";
 
 import { buildWorldAtlas } from "@/lib/faceTextures";
 
@@ -30,6 +30,11 @@ import type { PaintSurface } from "./paintSurface";
 
 /** The tiles page the map references — the map can only stamp from page 0. */
 const TILES_PAGE = 0;
+
+/** Fill of a solid cell on the collision layer — a translucent red the tile shows through. */
+const COLLISION_FILL = "rgba(255,64,64,0.45)";
+/** Outline of a solid cell, so adjacent solids still read as separate cells. */
+const COLLISION_STROKE = "rgba(255,96,96,0.9)";
 
 /** How strongly a column's height brightens its overlay, at the tallest column. */
 const HEIGHT_LIFT = 0.55;
@@ -63,6 +68,8 @@ interface MapCanvasProps {
   columnMaterial: number;
   /** Height the Raise/Lower tools step by, and Flatten sets outright. */
   columnStep: number;
+  /** The cart's per-cell solidity layer, painted and drawn on the collision layer. */
+  collision: CollisionMap;
   cell: number;
   version: number;
   /** CSS colours of the cart palette, for drawing the column overlay. */
@@ -71,6 +78,8 @@ interface MapCanvasProps {
   onEdit: () => void;
   /** A stroke on the column layer finished — the caller persists the layer. */
   onColumnsCommitted: () => void;
+  /** A stroke on the collision layer finished — the caller persists the layer. */
+  onCollisionCommitted: () => void;
   onHover: (cell: { x: number; y: number } | null) => void;
 }
 
@@ -85,11 +94,13 @@ export function MapCanvas({
   pixels,
   columnMaterial,
   columnStep,
+  collision,
   cell,
   version,
   palette,
   onEdit,
   onColumnsCommitted,
+  onCollisionCommitted,
   onHover,
 }: MapCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -98,6 +109,8 @@ export function MapCanvas({
   // Whether the stroke in progress changed the column layer, so pointer-up knows
   // whether to persist (one undo entry per stroke, not per sample).
   const columnsDirty = useRef(false);
+  // Same, for the collision layer — one undo entry per stroke.
+  const collisionDirty = useRef(false);
   // The tallest column, which sets the overlay's brightness ramp. Cached because
   // a full scan per painted sample would cost more than the drawing does.
   const peakRef = useRef(1);
@@ -105,6 +118,7 @@ export function MapCanvas({
   const width = map.width * cell;
   const height = map.height * cell;
   const showColumns = isColumnLayer(layer);
+  const showCollision = layer === "collision";
   const pixelSize = cell / sheet.tileSize;
 
   // Pre-rasterise each tile once so map redraws are drawImage blits, not
@@ -214,13 +228,29 @@ export function MapCanvas({
     [space, cell, palette, materialCache],
   );
 
+  /** Paint the collision overlay for one cell, when it is marked solid. */
+  const drawCollision = useCallback(
+    (context: CanvasRenderingContext2D, x: number, y: number) => {
+      if (!collision.isSolid(x, y)) return;
+      const px = x * cell;
+      const py = y * cell;
+      context.fillStyle = COLLISION_FILL;
+      context.fillRect(px, py, cell, cell);
+      context.strokeStyle = COLLISION_STROKE;
+      context.lineWidth = 1;
+      context.strokeRect(px + 0.5, py + 0.5, cell - 1, cell - 1);
+    },
+    [collision, cell],
+  );
+
   const drawCell = useCallback(
     (context: CanvasRenderingContext2D, x: number, y: number) => {
       const tile = tileCache[map.getCell(x, y)];
       if (tile) context.drawImage(tile, x * cell, y * cell, cell, cell);
       if (showColumns) drawColumn(context, x, y);
+      if (showCollision) drawCollision(context, x, y);
     },
-    [tileCache, map, cell, showColumns, drawColumn],
+    [tileCache, map, cell, showColumns, drawColumn, showCollision, drawCollision],
   );
 
   const drawGuides = useCallback(
@@ -381,11 +411,29 @@ export function MapCanvas({
     }
   };
 
+  /** Apply a collision-layer tool at a cell. */
+  const applyCollision = (context: CanvasRenderingContext2D, target: { x: number; y: number }) => {
+    if (tool === "fill") {
+      // Flood the connected run of matching cells to the opposite value, so one
+      // fill both solidifies an open area and clears an enclosed solid one.
+      collision.fill(target.x, target.y, !collision.isSolid(target.x, target.y));
+      collisionDirty.current = true;
+      renderAll();
+      return;
+    }
+    collision.setSolid(target.x, target.y, tool === "solid");
+    collisionDirty.current = true;
+    context.clearRect(target.x * cell, target.y * cell, cell, cell);
+    drawCell(context, target.x, target.y);
+    drawGuides(context);
+  };
+
   const apply = (target: { x: number; y: number }, event: React.PointerEvent) => {
     const context = canvasRef.current?.getContext("2d");
     if (!context) return;
     context.imageSmoothingEnabled = false;
     if (showColumns) applyColumns(context, target);
+    else if (showCollision) applyCollision(context, target);
     else if (layer === "pixels") applyPixels(context, target, event);
     else applyTiles(context, target);
   };
@@ -429,11 +477,14 @@ export function MapCanvas({
   const stop = () => {
     if (!painting.current) return;
     painting.current = false;
-    // One history entry per stroke: pixel and column strokes report at the end
-    // rather than on every sample the pointer produced.
+    // One history entry per stroke: pixel, column and collision strokes report at
+    // the end rather than on every sample the pointer produced.
     if (columnsDirty.current) {
       columnsDirty.current = false;
       onColumnsCommitted();
+    } else if (collisionDirty.current) {
+      collisionDirty.current = false;
+      onCollisionCommitted();
     } else if (layer === "pixels") {
       onEdit();
     }

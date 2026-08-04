@@ -27,6 +27,8 @@ import { parseMaterials, type WireMaterials } from "@/lib/materials";
 import { draftBytes, loadCartDraft } from "@/lib/localCartStore";
 import { findDemoCart, demoCartUrl } from "@/lib/demoCatalog";
 import { parsePostFxSettings, parseScene, parseAnim, parseParticles, type AnimSpec, type ParticleSpec, type PostFxSettings, type SceneSpec } from "@cartbox/player";
+import type { CollisionData } from "@cartbox/editor";
+import { parseCollision } from "@/lib/collision";
 import { EditorWorkbench } from "./EditorWorkbench";
 
 interface StaticCartEditorProps {
@@ -44,6 +46,7 @@ interface ResolvedCart {
   scene: SceneSpec | null;
   anim: AnimSpec | null;
   particles: ParticleSpec | null;
+  collision: CollisionData | null;
 }
 
 function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
@@ -68,6 +71,7 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
         scene: parseScene(draft.sceneJson ? JSON.parse(draft.sceneJson) : null),
         anim: parseAnim(draft.animJson ? JSON.parse(draft.animJson) : null),
         particles: parseParticles(draft.particlesJson ? JSON.parse(draft.particlesJson) : null),
+        collision: parseCollision(draft.collisionJson ? JSON.parse(draft.collisionJson) : null),
       });
       return () => URL.revokeObjectURL(blobUrl);
     }
@@ -82,6 +86,7 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
       scene: null,
       anim: null,
       particles: null,
+      collision: null,
     });
     return undefined;
   }, [cartId]);
@@ -109,6 +114,9 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
       initialScene={resolved.scene}
       initialAnim={resolved.anim}
       initialParticles={resolved.particles}
+      initialCollision={resolved.collision}
+      initialDescription=""
+      initialTags={[]}
     />
   );
 }

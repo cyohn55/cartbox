@@ -15,8 +15,8 @@ import type { CellShape, MapCellKind } from "@cartbox/editor";
 
 import type { ToolDefinition } from "./toolCapabilities";
 
-/** The four things the Map tab can author. */
-export type MapLayer = "tiles" | "pixels" | "voxels" | "hexels";
+/** The things the Map tab can author. */
+export type MapLayer = "tiles" | "pixels" | "voxels" | "hexels" | "collision";
 
 /** Tools available across the map layers; each layer offers a subset. */
 export type MapTool =
@@ -28,7 +28,8 @@ export type MapTool =
   | "raise"
   | "lower"
   | "paint"
-  | "flatten";
+  | "flatten"
+  | "solid";
 
 /** A map tool as the shared rail renders it; `hint` becomes its tooltip. */
 export type MapToolDef = ToolDefinition<MapTool>;
@@ -62,6 +63,12 @@ const COLUMN_TOOLS: readonly MapToolDef[] = [
   { id: "eraser", label: "Eraser", glyph: "⌫", hint: "Remove the column entirely." },
 ];
 
+const COLLISION_TOOLS: readonly MapToolDef[] = [
+  { id: "solid", label: "Solid", glyph: "▩", hint: "Mark cells solid — walls and ground a game should collide with." },
+  { id: "eraser", label: "Clear", glyph: "⌫", hint: "Clear a cell's solid flag." },
+  { id: "fill", label: "Fill", glyph: "▦", hint: "Flood the connected run of matching cells." },
+];
+
 export const MAP_LAYERS: readonly MapLayerDef[] = [
   {
     id: "tiles",
@@ -91,6 +98,13 @@ export const MAP_LAYERS: readonly MapLayerDef[] = [
     hint: "The same columns built from close-packed rhombic hexels.",
     tools: COLUMN_TOOLS,
   },
+  {
+    id: "collision",
+    label: "Collision",
+    glyph: "▩",
+    hint: "Mark which cells are solid, so a game knows what to collide with.",
+    tools: COLLISION_TOOLS,
+  },
 ];
 
 /** The layer definition for an id, falling back to tiles so the UI always has one. */
@@ -101,6 +115,15 @@ export function layerDef(id: MapLayer): MapLayerDef {
 /** Whether a layer edits the column layer (voxels and hexels share one). */
 export function isColumnLayer(layer: MapLayer): boolean {
   return layer === "voxels" || layer === "hexels";
+}
+
+/**
+ * Whether a layer is a flat, top-down-only attribute of the grid rather than
+ * something you can build or point at in the 3D view. Collision is such a layer:
+ * it is per-cell gameplay data, authored from above, with no presence in space.
+ */
+export function isFlatLayer(layer: MapLayer): boolean {
+  return layer === "collision";
 }
 
 /** The cell shape a column layer authors. */
@@ -200,7 +223,9 @@ export function isPixelSpaceTool(tool: MapSpaceTool): boolean {
  * layer selected would leave the rail with no usable tool at all.
  */
 export function spaceLayerFor(layer: MapLayer): MapLayer {
-  return layer === "tiles" ? "voxels" : layer;
+  // Tiles are the ground plan and collision is a flat attribute — neither has a
+  // usable tool inside the map, so stepping in from either opens on the cells.
+  return layer === "tiles" || isFlatLayer(layer) ? "voxels" : layer;
 }
 
 /**

@@ -35,6 +35,34 @@
   color: var(--faint);
 }
 
+/* The cart title doubles as the button that opens the details panel. */
+.cartNameButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: inherit;
+  background: none;
+  border: 0;
+  padding: 2px 4px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.cartNameButton:hover {
+  background: var(--surface);
+}
+
+.cartNameEdit {
+  color: var(--faint);
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.cartNameButton:hover .cartNameEdit {
+  opacity: 1;
+}
+
 .tabs {
   display: flex;
   gap: 2px;
@@ -147,6 +175,112 @@
   justify-content: center;
   color: var(--muted);
   font-size: 15px;
+}
+
+/* --- Cart-details panel --------------------------------------------------- */
+
+.detailsOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(8, 7, 14, 0.82);
+  backdrop-filter: blur(6px);
+}
+
+.detailsCard {
+  width: min(92vw, 460px);
+  max-height: 88vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.detailsHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.detailsTitle {
+  font-weight: 650;
+  font-size: 15px;
+}
+
+.detailsHeader .cbx-btn {
+  margin-left: auto;
+}
+
+.detailsField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.detailsLabel {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.detailsInput,
+.detailsTextarea {
+  font: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg, #0c0a14);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.detailsInput:focus,
+.detailsTextarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.detailsTextarea {
+  resize: vertical;
+  min-height: 72px;
+  line-height: 1.4;
+}
+
+.detailsHint {
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.detailsTagChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.detailsTagChip {
+  font-size: 12px;
+  color: var(--text);
+  background: var(--border);
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+
+.detailsFooter {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
 }
 
 /* --- Playtest overlay ----------------------------------------------------- */

@@ -6,8 +6,10 @@
  */
 
 import { parsePostFxSettings, parseScene, parseAnim, parseParticles, type AnimSpec, type ParticleSpec, type PostFxSettings, type SceneSpec } from "@cartbox/player";
+import type { CollisionData } from "@cartbox/editor";
 
 import { serviceClient } from "@/lib/supabase";
+import { parseCollision } from "@/lib/collision";
 import { publicUrl } from "@/lib/storage";
 import { resolveModelId } from "@/lib/consoleModel";
 import { resolveStarterId } from "@/lib/starter";
@@ -54,13 +56,19 @@ interface CartTarget {
   anim: AnimSpec | null;
   /** Persisted weather/particle system, validated, or null when absent/malformed. */
   particles: ParticleSpec | null;
+  /** Persisted per-cell collision layer, validated, or null when absent/malformed. */
+  collision: CollisionData | null;
+  /** Persisted marketplace description, or empty when none. */
+  description: string;
+  /** Persisted marketplace tags, or empty when none. */
+  tags: string[];
 }
 
 async function resolveCart(cartId: string): Promise<CartTarget> {
   try {
     const { data } = await serviceClient()
       .from("carts")
-      .select("title, r2_key, console_model, rig, fx, materials, voxel, scene, anim, particles")
+      .select("title, description, tags, r2_key, console_model, rig, fx, materials, voxel, scene, anim, particles, collision")
       .eq("id", cartId)
       .maybeSingle();
     return {
@@ -74,11 +82,29 @@ async function resolveCart(cartId: string): Promise<CartTarget> {
       scene: parseScene(data?.scene),
       anim: parseAnim(data?.anim),
       particles: parseParticles(data?.particles),
+      collision: parseCollision(data?.collision),
+      description: typeof data?.description === "string" ? data.description : "",
+      tags: Array.isArray(data?.tags) ? (data.tags as string[]) : [],
     };
   } catch {
-    // A missing `voxel`/`scene` column (migration not yet applied) lands here too,
-    // and simply opens the editor with no sculpt/backdrop rather than failing.
-    return { name: "Untitled cartridge", cartUrl: null, storedModel: null, rig: null, fx: null, materials: null, voxel: null, scene: null, anim: null, particles: null };
+    // A missing `voxel`/`scene`/`collision` column (migration not yet applied)
+    // lands here too, and simply opens the editor with no sculpt/backdrop/collision
+    // rather than failing.
+    return {
+      name: "Untitled cartridge",
+      cartUrl: null,
+      storedModel: null,
+      rig: null,
+      fx: null,
+      materials: null,
+      voxel: null,
+      scene: null,
+      anim: null,
+      particles: null,
+      collision: null,
+      description: "",
+      tags: [],
+    };
   }
 }
 
@@ -89,7 +115,8 @@ export default async function EditorPage({ params, searchParams }: EditorPagePro
     return <StaticCartEditor cartId={params.cartId} />;
   }
 
-  const { name, cartUrl, storedModel, rig, fx, materials, voxel, scene, anim, particles } = await resolveCart(params.cartId);
+  const { name, cartUrl, storedModel, rig, fx, materials, voxel, scene, anim, particles, collision, description, tags } =
+    await resolveCart(params.cartId);
   // A saved cart's persisted model is authoritative; a brand-new cart (no row)
   // takes the model from the ?model= param carried in from /edit/new.
   const modelId = resolveModelId(storedModel ?? searchParams.model);
@@ -110,6 +137,9 @@ export default async function EditorPage({ params, searchParams }: EditorPagePro
       initialScene={scene}
       initialAnim={anim}
       initialParticles={particles}
+      initialCollision={collision}
+      initialDescription={description}
+      initialTags={tags}
     />
   );
 }

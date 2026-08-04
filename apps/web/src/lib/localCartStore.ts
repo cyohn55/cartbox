@@ -29,6 +29,8 @@ export interface StoredCartDraft {
   animJson: string | null;
   /** JSON-serialised weather/particle system, as the particles endpoint would receive. */
   particlesJson: string | null;
+  /** JSON-serialised per-cell collision layer, as the collision endpoint would receive. */
+  collisionJson: string | null;
   /** ISO timestamp of the save, for future "last edited" UI. */
   savedAt: string;
 }
@@ -79,6 +81,7 @@ export function loadCartDraft(cartId: string): StoredCartDraft | null {
       sceneJson: typeof parsed.sceneJson === "string" ? parsed.sceneJson : null,
       animJson: typeof parsed.animJson === "string" ? parsed.animJson : null,
       particlesJson: typeof parsed.particlesJson === "string" ? parsed.particlesJson : null,
+      collisionJson: typeof parsed.collisionJson === "string" ? parsed.collisionJson : null,
       savedAt: typeof parsed.savedAt === "string" ? parsed.savedAt : new Date(0).toISOString(),
     };
   } catch {
@@ -104,6 +107,8 @@ export interface SaveCartDraftInput {
   anim: unknown;
   /** Weather/particle system object, or null when none. */
   particles: unknown;
+  /** Per-cell collision layer object, or null when none. */
+  collision: unknown;
 }
 
 /** Returns false when the write failed (e.g. localStorage quota exceeded). */
@@ -121,6 +126,7 @@ export function saveCartDraft(cartId: string, input: SaveCartDraftInput): boolea
     sceneJson: input.scene == null ? null : JSON.stringify(input.scene),
     animJson: input.anim == null ? null : JSON.stringify(input.anim),
     particlesJson: input.particles == null ? null : JSON.stringify(input.particles),
+    collisionJson: input.collision == null ? null : JSON.stringify(input.collision),
     savedAt: new Date().toISOString(),
   };
   try {

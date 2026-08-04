@@ -30,11 +30,14 @@ import {
   defaultMaterialSwatches,
   emptySpriteRig,
   loadWasmCartEngine,
+  type CollisionData,
   type ConsoleModelId,
   type MaterialSwatches,
 } from "@cartbox/editor";
 
 import { authHeaders } from "@/lib/supabase-browser";
+import type { CartMeta } from "@/lib/cartMeta";
+import { DetailsPanel } from "./DetailsPanel";
 import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
 import { isStaticExport } from "@/lib/staticSite";
 import { saveCartDraft } from "@/lib/localCartStore";
@@ -83,6 +86,12 @@ interface EditorWorkbenchProps {
   initialAnim: AnimSpec | null;
   /** Persisted weather/particle system loaded with the cart, or null when none. */
   initialParticles: ParticleSpec | null;
+  /** Persisted per-cell collision layer loaded with the cart, or null when none. */
+  initialCollision: CollisionData | null;
+  /** Persisted marketplace description, or empty when none. */
+  initialDescription: string;
+  /** Persisted marketplace tags, or empty when none. */
+  initialTags: string[];
 }
 
 export function EditorWorkbench({
@@ -98,6 +107,9 @@ export function EditorWorkbench({
   initialScene,
   initialAnim,
   initialParticles,
+  initialCollision,
+  initialDescription,
+  initialTags,
 }: EditorWorkbenchProps) {
   const [engine, setEngine] = useState<CartEngine | null>(null);
   const [mode, setMode] = useState<EngineMode>("wasm");
@@ -182,6 +194,9 @@ export function EditorWorkbench({
       initialScene={initialScene}
       initialAnim={initialAnim}
       initialParticles={initialParticles}
+      initialCollision={initialCollision}
+      initialDescription={initialDescription}
+      initialTags={initialTags}
     />
   );
 }
@@ -200,6 +215,9 @@ function WorkbenchBody({
   initialScene,
   initialAnim,
   initialParticles,
+  initialCollision,
+  initialDescription,
+  initialTags,
 }: {
   engine: CartEngine;
   cartId: string;
@@ -214,6 +232,9 @@ function WorkbenchBody({
   initialScene: SceneSpec | null;
   initialAnim: AnimSpec | null;
   initialParticles: ParticleSpec | null;
+  initialCollision: CollisionData | null;
+  initialDescription: string;
+  initialTags: string[];
 }) {
   // requestedModel is what the URL/DB asked for; activeModel is what the loaded
   // engine actually provides (every editor surface reads geometry from this one).
@@ -241,6 +262,7 @@ function WorkbenchBody({
     initialScene,
     initialAnim,
     initialParticles,
+    initialCollision,
     initialBank: 0,
   });
   const {
@@ -262,6 +284,8 @@ function WorkbenchBody({
     setAnim,
     particles,
     setParticles,
+    collision,
+    setCollision,
     canUndo,
     canRedo,
     undo,
@@ -299,6 +323,17 @@ function WorkbenchBody({
   const [runBytes, setRunBytes] = useState<Uint8Array | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
 
+  // The cart's marketplace details (title, description, tags). Held here so the
+  // Details panel can edit them and Save/Publish can persist them; the title also
+  // drives the header name and the .tic's first-save row. Not part of the undo
+  // timeline — these are publishing metadata, not cart content.
+  const [details, setDetails] = useState<CartMeta>({
+    title: cartName,
+    description: initialDescription,
+    tags: initialTags,
+  });
+  const [showDetails, setShowDetails] = useState(false);
+
   // Ctrl/Cmd+Z undoes; Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redoes. The workbench owns
   // these globally so every tab — including the code textarea — shares one stack.
   useEffect(() => {
@@ -325,14 +360,18 @@ function WorkbenchBody({
       // The static demo build has no API — Save lands in this browser's
       // localStorage instead (same payload the server would persist).
       if (isStaticExport) {
-        const stored = saveCartDraft(cartId, { model: modelId, bytes, rig, fx, materials, voxel, scene, anim, particles });
+        const stored = saveCartDraft(cartId, { model: modelId, bytes, rig, fx, materials, voxel, scene, anim, particles, collision });
         setSaveState(stored ? "saved" : "error");
         return;
       }
       // Tag the save with the model so the cart row persists console_model
-      // (the URL param that opened a new Pro cart becomes durable on first save).
+      // (the URL param that opened a new Pro cart becomes durable on first save),
+      // and with the title so a new cart's first row carries the author's name
+      // rather than the "Untitled cartridge" default.
       const query = new URLSearchParams({ model: modelId });
       if (publish) query.set("publish", "1");
+      const trimmedTitle = details.title.trim();
+      if (trimmedTitle) query.set("title", trimmedTitle);
       const response = await fetch(`/api/carts/${cartId}?${query.toString()}`, {
         method: "PUT",
         headers: await authHeaders({ "Content-Type": "application/octet-stream" }),
@@ -343,7 +382,17 @@ function WorkbenchBody({
       let ok = response.ok;
       if (ok) {
         const headers = await authHeaders({ "Content-Type": "application/json" });
-        const [rigResponse, fxResponse, materialsResponse, voxelResponse, sceneResponse, animResponse, particlesResponse] = await Promise.all([
+        const [
+          rigResponse,
+          fxResponse,
+          materialsResponse,
+          voxelResponse,
+          sceneResponse,
+          animResponse,
+          particlesResponse,
+          collisionResponse,
+          metaResponse,
+        ] = await Promise.all([
           fetch(`/api/carts/${cartId}/rig`, { method: "PUT", headers, body: JSON.stringify(rig) }),
           fetch(`/api/carts/${cartId}/fx`, { method: "PUT", headers, body: JSON.stringify(fx) }),
           fetch(`/api/carts/${cartId}/materials`, { method: "PUT", headers, body: JSON.stringify(materials) }),
@@ -351,6 +400,8 @@ function WorkbenchBody({
           fetch(`/api/carts/${cartId}/scene`, { method: "PUT", headers, body: JSON.stringify(scene) }),
           fetch(`/api/carts/${cartId}/anim`, { method: "PUT", headers, body: JSON.stringify(anim) }),
           fetch(`/api/carts/${cartId}/particles`, { method: "PUT", headers, body: JSON.stringify(particles) }),
+          fetch(`/api/carts/${cartId}/collision`, { method: "PUT", headers, body: JSON.stringify(collision) }),
+          fetch(`/api/carts/${cartId}/meta`, { method: "PUT", headers, body: JSON.stringify(details) }),
         ]);
         ok =
           rigResponse.ok &&
@@ -359,7 +410,9 @@ function WorkbenchBody({
           voxelResponse.ok &&
           sceneResponse.ok &&
           particlesResponse.ok &&
-          animResponse.ok;
+          animResponse.ok &&
+          collisionResponse.ok &&
+          metaResponse.ok;
       }
       setSaveState(ok ? "saved" : "error");
     } catch {
@@ -376,7 +429,17 @@ function WorkbenchBody({
         <Link href="/" className={styles.wordmark} title="Back to the Cartbox home page">
           Cartbox
         </Link>
-        <span className={styles.cartName}>{cartName}</span>
+        <button
+          type="button"
+          className={styles.cartNameButton}
+          onClick={() => setShowDetails(true)}
+          title="Edit this cartridge's title, description and tags"
+        >
+          <span className={styles.cartName}>{details.title || "Untitled cartridge"}</span>
+          <span className={styles.cartNameEdit} aria-hidden>
+            ✎
+          </span>
+        </button>
         <span className={styles.engineBadge} data-mode={mode}>
           {activeModel.label} · {mode === "wasm" ? "engine" : "offline stub"}
         </span>
@@ -458,6 +521,14 @@ function WorkbenchBody({
           <button
             type="button"
             className="cbx-btn"
+            onClick={() => setShowDetails(true)}
+            title="Edit title, description and tags"
+          >
+            Details
+          </button>
+          <button
+            type="button"
+            className="cbx-btn"
             onClick={() => runnable && setRunBytes(runnable.saveTic())}
             disabled={!runnable}
             title={runnable ? "Run this cartridge" : "Run needs the TIC-80 engine"}
@@ -512,6 +583,8 @@ function WorkbenchBody({
           map={map}
           columnPayload={mapColumns}
           onColumnsChange={setMapColumns}
+          collision={collision}
+          onCollisionChange={setCollision}
           normals={normals}
           height={heightMap}
           specular={specularMap}
@@ -565,11 +638,19 @@ function WorkbenchBody({
       {activeTab === "SFX" && <SfxEditor key={`${bank}:${revision}`} bank={soundBank} />}
       {activeTab === "Music" && <MusicEditor key={`${bank}:${revision}`} tracker={tracker} />}
 
+      {showDetails && (
+        <DetailsPanel
+          details={details}
+          onChange={setDetails}
+          onClose={() => setShowDetails(false)}
+        />
+      )}
+
       {runBytes && (
         <RunOverlay
           bytes={runBytes}
           engineUrl={engineUrl}
-          cartName={cartName}
+          cartName={details.title || cartName}
           postFx={fx}
           scene={scene ?? undefined}
           anim={anim ?? undefined}

@@ -25,6 +25,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  CollisionMap,
   MapVoxelSpace,
   MaterialMap,
   NormalMap,
@@ -46,6 +47,7 @@ import {
   type ClassField,
   type ClassInfo,
   type ClassMapping,
+  type CollisionData,
   type GeneratorValues,
   type MapCellKind,
   type MapViewFocus,
@@ -98,6 +100,7 @@ import {
   defaultSpaceToolFor,
   defaultToolFor,
   isColumnLayer,
+  isFlatLayer,
   isPixelSpaceTool,
   layerDef,
   shapeForLayer,
@@ -161,6 +164,10 @@ interface MapEditorProps {
   columnPayload: string | null;
   /** Persist the map cells (feeds the undo timeline and the save). */
   onColumnsChange: (serialized: string) => void;
+  /** The saved collision layer for this cart, or null when none was authored. */
+  collision: CollisionData | null;
+  /** Persist the collision layer (feeds the undo timeline and the save). */
+  onCollisionChange: (data: CollisionData | null) => void;
   /**
    * The cart's material channels. The pixel layer paints through them exactly as
    * the Sprites tab's Material layer does, so a colour with a swatch profile
@@ -180,6 +187,8 @@ export function MapEditor({
   map,
   columnPayload,
   onColumnsChange,
+  collision,
+  onCollisionChange,
   normals,
   height: heightMap,
   specular,
@@ -196,6 +205,15 @@ export function MapEditor({
   if (spaceRef.current === null) {
     spaceRef.current = loadMapVoxelSpace(columnPayload, map.width, map.height);
   }
+
+  // The collision layer is seeded once from the cart and mutated in place; the
+  // serialized form is handed back up after every stroke. Sized to the map, so a
+  // payload saved at another size is remapped onto the current grid on the way in.
+  const collisionRef = useRef<CollisionMap | null>(null);
+  if (collisionRef.current === null) {
+    collisionRef.current = CollisionMap.deserialize(collision, map.width, map.height);
+  }
+  const collisionMap = collisionRef.current;
 
   const [view, setView] = useState<MapViewMode>("top");
   const [layer, setLayer] = useState<MapLayer>("tiles");
@@ -324,6 +342,9 @@ export function MapEditor({
   const bump = () => setVersion((current) => current + 1);
   const screen = hover ? map.screenOf(hover.x, hover.y) : null;
   const inSpace = view === "space";
+  // A flat layer (collision) has no palette, material, tile or generator — it is
+  // pure per-cell solidity — so the inspector drops those controls for it.
+  const flat = isFlatLayer(layer);
   const walking = inSpace && cameraMode === "walk";
   const spaceTools = spaceToolsFor(layer, space.shape);
   // Where the active 3D view says you are aiming — the two cameras report the
@@ -361,6 +382,23 @@ export function MapEditor({
   };
 
   /**
+   * Serialize the collision layer up to the cart after a stroke. An empty layer
+   * is stored as null so a cart that ends up with no collision keeps a clean row
+   * rather than an all-zero payload.
+   */
+  const commitCollision = () => {
+    onCollisionChange(collisionMap.isEmpty ? null : collisionMap.serialize());
+    bump();
+  };
+
+  const clearCollision = () => {
+    if (collisionMap.isEmpty) return;
+    if (!window.confirm(`Clear all ${collisionMap.solidCount} solid cells?`)) return;
+    collisionMap.clear();
+    commitCollision();
+  };
+
+  /**
    * Switch layers. The two cell layers share one store and one cell shape, so
    * moving between Voxels and Hexels re-shapes what is already authored —
    * confirmed first, since the two lattices read very differently.
@@ -378,6 +416,9 @@ export function MapEditor({
       spaceRef.current = space.clone({ shape });
       commitSpace();
     }
+    // Collision is a flat, top-down attribute with no presence in 3D; selecting
+    // it from inside the map steps back out so the tool has something to act on.
+    if (isFlatLayer(next) && inSpace) setView("top");
     setLayer(next);
     setTool(defaultToolFor(next));
     setSpaceTool(defaultSpaceToolFor(next));
@@ -403,7 +444,7 @@ export function MapEditor({
   const selectView = (next: MapViewMode) => {
     if (next === view) return;
     if (next === "space") {
-      if (layer === "tiles") {
+      if (layer === "tiles" || isFlatLayer(layer)) {
         const target = spaceLayerFor(layer);
         setLayer(target);
         setSpaceTool(defaultSpaceToolFor(target));
@@ -465,6 +506,9 @@ export function MapEditor({
 
   /** Apply the previewed field to whichever layer is active. */
   const runGenerator = () => {
+    // Collision is authored by hand, not generated; the panel is hidden there, but
+    // guard the action too so it can never stamp a field onto the wrong layer.
+    if (isFlatLayer(layer)) return;
     const field = preview ?? generator.generate(map.width, map.height, values);
     if (isColumnLayer(layer)) {
       const raised = applyFieldToColumns(mapColumnTarget(space), field, mapping);
@@ -644,7 +688,7 @@ export function MapEditor({
       <SegmentedControl label="Zoom" options={ZOOM_OPTIONS} selected={zoom} onSelect={setZoom} />
     ),
 
-    io: isColumnLayer(layer) && (
+    io: isColumnLayer(layer) ? (
       <RailGroup label="Cells">
         <div className={styles.toolGroup}>
           <button type="button" className={styles.toolBtn} onClick={clearCells}>
@@ -655,14 +699,25 @@ export function MapEditor({
           </button>
         </div>
       </RailGroup>
-    ),
+    ) : flat ? (
+      <RailGroup label="Collision">
+        <div className={styles.toolGroup}>
+          <button type="button" className={styles.toolBtn} onClick={clearCollision}>
+            <span className={styles.toolGlyph} aria-hidden>
+              ✕
+            </span>
+            Clear solids
+          </button>
+        </div>
+      </RailGroup>
+    ) : null,
   };
 
   const inspector: InspectorSlots = {
     // The sprite sheet, whenever a tool stamps it, stands it in the world, or
     // paints on it. Above the palette, as in the sprite editor — it is the art
     // you are pointed at, and the palette is what you change it with.
-    source: (needsSpriteBrush(spaceTool, planeKind) || !inSpace) && (
+    source: !flat && (needsSpriteBrush(spaceTool, planeKind) || !inSpace) && (
       <TilePicker
         sheet={sheet}
         page={TILES_PAGE}
@@ -679,7 +734,7 @@ export function MapEditor({
     // for the generator while it was open — which meant that opening the Map tab,
     // or generating a landscape and then wanting to paint it, left you with
     // nothing to paint *with* and no sign that a palette existed at all.
-    palette: (
+    palette: flat ? null : (
       <PalettePicker
         colors={palette}
         selected={colorIndex}
@@ -693,7 +748,7 @@ export function MapEditor({
       />
     ),
 
-    material: (
+    material: flat ? null : (
       <MaterialPicker
         selected={columnMaterial}
         onSelect={setColumnMaterial}
@@ -712,7 +767,7 @@ export function MapEditor({
       />
     ),
 
-    generate: (
+    generate: flat ? null : (
       <div>
         <button
           type="button"
@@ -828,11 +883,13 @@ export function MapEditor({
             pixels={pixelSurface}
             columnMaterial={columnMaterial}
             columnStep={columnStep}
+            collision={collisionMap}
             cell={cell}
             version={version}
             palette={palette}
             onEdit={bump}
             onColumnsCommitted={commitSpace}
+            onCollisionCommitted={commitCollision}
             onHover={setHover}
           />
         )}
@@ -878,6 +935,14 @@ export function MapEditor({
                 <span className={styles.hudLabel}>Column</span>
                 <span className={`${styles.hudValue} data`}>
                   {hover ? `${space.heightAt(hover.x, hover.y)}` : "—"} / {space.columnCount} columns
+                </span>
+              </span>
+            ) : flat ? (
+              <span className={styles.hudItem}>
+                <span className={styles.hudLabel}>Solid</span>
+                <span className={`${styles.hudValue} data`}>
+                  {hover ? (collisionMap.isSolid(hover.x, hover.y) ? "yes" : "no") : "—"} ·{" "}
+                  {collisionMap.solidCount.toLocaleString()} cells
                 </span>
               </span>
             ) : (
@@ -964,6 +1029,9 @@ function hintFor(
   }
   if (layer === "pixels") {
     return "Pixels belong to the tile, not the cell — editing one cell changes every cell that stamps the same tile. A colour with a material swatch stamps its whole profile, exactly as in the Sprites tab.";
+  }
+  if (layer === "collision") {
+    return "Mark which cells are solid — the walls and ground a game should collide with. Solid cells show as a red overlay over the map art; Fill floods a whole enclosed region at once. The layer is saved with the cart for its own logic to read.";
   }
   return `Raise builds ${shape} columns up to ${MAX_MAP_VOXEL_HEIGHT} cells tall, skinned with the armed material. Brightness shows height; ${
     shape === "hexel" ? "diamonds mark the close-packed lattice" : "squares mark cube columns"
