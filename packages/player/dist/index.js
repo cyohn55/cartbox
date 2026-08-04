@@ -3060,8 +3060,8 @@ function composeParallax(out, outW, outH, layers, camera, atmosphere) {
   const ordered = [...layers].sort((a, b) => b.depth - a.depth);
   for (const layer of ordered) {
     const factor = parallaxOf(layer);
-    const shiftX = Math.round(-camera.x * factor) + (layer.offsetX ?? 0);
-    const shiftY = Math.round(-camera.y * factor) + (layer.offsetY ?? 0);
+    const shiftX = Math.round(-camera.x * factor + (layer.offsetX ?? 0));
+    const shiftY = Math.round(-camera.y * factor + (layer.offsetY ?? 0));
     const wrapX = layer.wrapX ?? true;
     const haze = layer.hazed ? 0 : clampUnit(layer.depth);
     const opacity = layer.opacity ?? 1;

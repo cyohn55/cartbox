@@ -105,6 +105,24 @@ test("the same layer reads dimmer/hazier when placed farther away", () => {
   }
 });
 
+test("a fractional layer offset still samples on the integer pixel grid", () => {
+  // An animation track drives a scene layer's offsetX/offsetY with an eased
+  // generator, so the offset can be fractional (e.g. 6.666). A fractional shift used
+  // to make the source index sy*width+sx fractional, which reads `undefined` from
+  // the pixel array → NaN → a clamped [0,0,0] — a black band wherever the drifted
+  // layer showed. A fully opaque, un-hazed solid layer must stay its own colour at
+  // every pixel regardless of a fractional offset.
+  const W = 8, H = 8;
+  const out = new Uint8ClampedArray(W * H * 4);
+  const layer = solidLayer(W, H, [120, 80, 40], 0.0, { offsetX: 6.666, wrapX: true });
+  composeParallax(out, W, H, [layer], { x: 0, y: 0 }, { ...ATMO, density: 0 });
+  for (let y = 0; y < H; y += 1) {
+    for (let x = 0; x < W; x += 1) {
+      assert.deepEqual(px(out, W, x, y), [120, 80, 40, 255], `pixel ${x},${y} keeps the layer colour, not black`);
+    }
+  }
+});
+
 let passed = 0;
 for (const [name, fn] of cases) {
   try { fn(); passed += 1; console.log(`  ok  ${name}`); }

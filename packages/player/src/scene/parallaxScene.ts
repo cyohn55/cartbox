@@ -160,8 +160,13 @@ export function composeParallax(
   const ordered = [...layers].sort((a, b) => b.depth - a.depth); // far first (painter's)
   for (const layer of ordered) {
     const factor = parallaxOf(layer);
-    const shiftX = Math.round(-camera.x * factor) + (layer.offsetX ?? 0);
-    const shiftY = Math.round(-camera.y * factor) + (layer.offsetY ?? 0);
+    // Round the TOTAL shift (not just the camera term): a layer's offsetX/offsetY
+    // can be fractional — an animation track drives them with an eased generator —
+    // and a fractional shift makes the source index (sy*width+sx) fractional, which
+    // reads `undefined` from the pixel array → NaN → a black band. Flooring to whole
+    // pixels keeps sampling on the integer grid.
+    const shiftX = Math.round(-camera.x * factor + (layer.offsetX ?? 0));
+    const shiftY = Math.round(-camera.y * factor + (layer.offsetY ?? 0));
     const wrapX = layer.wrapX ?? true;
     // A pre-hazed layer already carries its aerial perspective in its pixels, so
     // skip the per-pixel haze here — this is the per-frame cost the runtime avoids.
