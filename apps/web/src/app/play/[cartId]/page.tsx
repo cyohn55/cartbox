@@ -22,7 +22,7 @@ import { DEMO_CARTS, demoCartUrl, findDemoCart } from "@/lib/demoCatalog";
 import { DEMO_TITLES, findDemoTitle } from "@/lib/demoTitles";
 import { requiresUserAssets, resolveRuntime, type AssetSource } from "@/lib/titleRuntime";
 import { requiresSourceOffer } from "@/lib/licensing";
-import { parsePostFxSettings, parseScene, parseAnim, parseParticles, parseCollisionField, type CollisionField, type ModelId } from "@cartbox/player";
+import { parsePostFxSettings, parseScene, parseAnim, parseParticles, parseCollisionField, parseFlagsField, type CollisionField, type FlagsField, type ModelId } from "@cartbox/player";
 import { CartridgePlayer } from "./CartridgePlayer";
 import { AssetSupply } from "./AssetSupply";
 import { TitlePlayer } from "./TitlePlayer";
@@ -182,6 +182,7 @@ function StaticCartridgePage({ cartId }: { cartId: string }) {
         anim={null}
         particles={null}
         collision={null}
+        flags={null}
       />
       <p>{cart.description}</p>
     </main>
@@ -213,12 +214,22 @@ export default async function CartridgePage({ params }: PageProps) {
   // fetched on its own rather than in the cart query above: a not-yet-migrated
   // deployment simply plays without collision instead of failing the whole cart
   // lookup on an undefined column.
+  // Each gameplay-layer column was added by a later migration, and they are
+  // fetched in their OWN queries so a not-yet-migrated column degrades on its own
+  // rather than taking the others (or the cart lookup) down with it.
   let collision: CollisionField | null = null;
   try {
     const { data: extra, error } = await db.from("carts").select("collision").eq("id", cart.id).maybeSingle();
     if (!error) collision = parseCollisionField(extra?.collision);
   } catch {
     collision = null;
+  }
+  let flags: FlagsField | null = null;
+  try {
+    const { data: extra, error } = await db.from("carts").select("flags").eq("id", cart.id).maybeSingle();
+    if (!error) flags = parseFlagsField(extra?.flags);
+  } catch {
+    flags = null;
   }
 
   return (
@@ -235,6 +246,7 @@ export default async function CartridgePage({ params }: PageProps) {
           anim={parseAnim(cart.anim)}
           particles={parseParticles(cart.particles)}
           collision={collision}
+          flags={flags}
         />
       ) : (
         <section>

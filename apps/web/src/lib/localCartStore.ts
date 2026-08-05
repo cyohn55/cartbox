@@ -31,6 +31,8 @@ export interface StoredCartDraft {
   particlesJson: string | null;
   /** JSON-serialised per-cell collision layer, as the collision endpoint would receive. */
   collisionJson: string | null;
+  /** JSON-serialised per-cell tile-flags layer, as the flags endpoint would receive. */
+  flagsJson: string | null;
   /** ISO timestamp of the save, for future "last edited" UI. */
   savedAt: string;
 }
@@ -82,6 +84,7 @@ export function loadCartDraft(cartId: string): StoredCartDraft | null {
       animJson: typeof parsed.animJson === "string" ? parsed.animJson : null,
       particlesJson: typeof parsed.particlesJson === "string" ? parsed.particlesJson : null,
       collisionJson: typeof parsed.collisionJson === "string" ? parsed.collisionJson : null,
+      flagsJson: typeof parsed.flagsJson === "string" ? parsed.flagsJson : null,
       savedAt: typeof parsed.savedAt === "string" ? parsed.savedAt : new Date(0).toISOString(),
     };
   } catch {
@@ -109,6 +112,8 @@ export interface SaveCartDraftInput {
   particles: unknown;
   /** Per-cell collision layer object, or null when none. */
   collision: unknown;
+  /** Per-cell tile-flags layer object, or null when none. */
+  flags: unknown;
 }
 
 /** Returns false when the write failed (e.g. localStorage quota exceeded). */
@@ -127,6 +132,7 @@ export function saveCartDraft(cartId: string, input: SaveCartDraftInput): boolea
     animJson: input.anim == null ? null : JSON.stringify(input.anim),
     particlesJson: input.particles == null ? null : JSON.stringify(input.particles),
     collisionJson: input.collision == null ? null : JSON.stringify(input.collision),
+    flagsJson: input.flags == null ? null : JSON.stringify(input.flags),
     savedAt: new Date().toISOString(),
   };
   try {

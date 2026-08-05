@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { mount, type AnimSpec, type CollisionField, type ParticleSpec, type PlayerHandle, type PostFxSettings, type SceneSpec } from "@cartbox/player";
+import { mount, type AnimSpec, type CollisionField, type FlagsField, type ParticleSpec, type PlayerHandle, type PostFxSettings, type SceneSpec } from "@cartbox/player";
 
 import styles from "./editor.module.css";
 
@@ -27,14 +27,33 @@ interface RunOverlayProps {
   particles?: ParticleSpec;
   /** The cart's collision layer, exposed to its Lua via cartbox.solid during the playtest. */
   collision?: CollisionField;
+  /** The cart's tile-flags layer, exposed to its Lua via cartbox.flag during the playtest. */
+  flags?: FlagsField;
   onClose: () => void;
 }
 
-export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, particles, collision, onClose }: RunOverlayProps) {
+export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, particles, collision, flags, onClose }: RunOverlayProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<PlayerHandle | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [running, setRunning] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [fps, setFps] = useState<number | null>(null);
+  // Frames the cart has presented since the last FPS sample. A ref, not state, so
+  // the 60Hz onFrame handler never triggers a React render — the interval below
+  // reads and resets it once a second.
+  const frameCountRef = useRef(0);
+
+  // The sidecars the player is actually applying this playtest, so a creator can
+  // confirm at a glance what is (and isn't) in effect.
+  const activeLayers = [
+    postFx ? "FX" : null,
+    scene ? "Scene" : null,
+    anim ? "Anim" : null,
+    particles ? "Weather" : null,
+    collision ? "Collision" : null,
+    flags ? "Flags" : null,
+  ].filter((name): name is string => name !== null);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -60,10 +79,20 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
       scene,
       anim,
       particles,
-      // Playtest with the cart's collision layer available to its own Lua.
+      // Playtest with the cart's collision + flags layers available to its own Lua.
       collision,
+      flags,
       onReady: () => setStatus("ready"),
-      onError: () => setStatus("error"),
+      // Surface the real load-error message instead of a generic failure line.
+      // (A runtime Lua error renders on the cart's own screen — the core does not
+      // report it to the host.)
+      onError: (error) => {
+        setStatus("error");
+        setErrorMessage(error.message);
+      },
+      onFrame: () => {
+        frameCountRef.current += 1;
+      },
     });
     handleRef.current = handle;
 
@@ -71,7 +100,7 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
       handle.destroy();
       URL.revokeObjectURL(url);
     };
-  }, [bytes, engineUrl, postFx, scene, anim, particles, collision]);
+  }, [bytes, engineUrl, postFx, scene, anim, particles, collision, flags]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -80,6 +109,15 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  // Sample the cart's true frame rate once a second from the onFrame tally.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setFps(frameCountRef.current);
+      frameCountRef.current = 0;
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const togglePlayback = () => {
     const handle = handleRef.current;
@@ -111,11 +149,36 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
 
         <div ref={stageRef} className={styles.runStage} />
 
+        <div className={styles.runDebug}>
+          <span className={styles.runDebugItem}>
+            <span className={styles.runDebugLabel}>Status</span>
+            <span className={`${styles.runDebugValue} data`}>
+              {status === "loading" ? "building…" : status === "error" ? "error" : running ? "running" : "paused"}
+            </span>
+          </span>
+          <span className={styles.runDebugItem}>
+            <span className={styles.runDebugLabel}>FPS</span>
+            <span className={`${styles.runDebugValue} data`}>{status === "ready" && fps !== null ? fps : "—"}</span>
+          </span>
+          <span className={styles.runDebugItem}>
+            <span className={styles.runDebugLabel}>Layers</span>
+            <span className={styles.runDebugValue}>
+              {activeLayers.length > 0 ? activeLayers.join(" · ") : "none"}
+            </span>
+          </span>
+        </div>
+
+        {status === "error" && (
+          <p className={styles.runError}>
+            {errorMessage
+              ? `Failed to load: ${errorMessage}`
+              : "This cartridge failed to run. A code error shows on the cart screen above."}
+          </p>
+        )}
+
         <p className={styles.runHint}>
           <span className="data">← ↑ ↓ →</span> move · <span className="data">Z</span> /{" "}
           <span className="data">X</span> action · <span className="data">Esc</span> to stop
-          {status === "loading" && " · building cartridge…"}
-          {status === "error" && " · this cartridge failed to run"}
         </p>
       </div>
     </div>

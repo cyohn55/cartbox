@@ -46,7 +46,13 @@
 --   if cartbox.solid(cx, cy) then ... end   -- is map cell (cx, cy) solid?
 --   local w, h = cartbox.mapsize()          -- collision grid size, in cells
 --
--- Without an authored layer these return false / 0, 0, so they are always safe
+-- Tile flags (needs a flags layer authored in the Map tab): eight independent
+-- gameplay properties per cell — hazard, ladder, one-way platform, water, trigger
+-- zones — whatever your rules need beyond solidity. Flag n is 0..7.
+--
+--   if cartbox.flag(cx, cy, 0) then hurt() end   -- flag 0 set on this cell?
+--
+-- Without authored layers these all return false / 0, 0, so they are always safe
 -- to call.
 
 local _MB = 192   -- pmem word: mailbox base (event sequence counter)
@@ -158,4 +164,5 @@ cartbox = {
   -- always call cartbox.solid / cartbox.mapsize whether or not a layer exists.
   solid = function() return false end,
   mapsize = function() return 0, 0 end,
+  flag = function() return false end,
 }

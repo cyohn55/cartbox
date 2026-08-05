@@ -30,8 +30,10 @@ import {
   defaultMaterialSwatches,
   emptySpriteRig,
   loadWasmCartEngine,
+  resolveStarter,
   type CollisionData,
   type ConsoleModelId,
+  type FlagData,
   type MaterialSwatches,
 } from "@cartbox/editor";
 
@@ -88,6 +90,8 @@ interface EditorWorkbenchProps {
   initialParticles: ParticleSpec | null;
   /** Persisted per-cell collision layer loaded with the cart, or null when none. */
   initialCollision: CollisionData | null;
+  /** Persisted per-cell tile-flags layer loaded with the cart, or null when none. */
+  initialFlags: FlagData | null;
   /** Persisted marketplace description, or empty when none. */
   initialDescription: string;
   /** Persisted marketplace tags, or empty when none. */
@@ -108,6 +112,7 @@ export function EditorWorkbench({
   initialAnim,
   initialParticles,
   initialCollision,
+  initialFlags,
   initialDescription,
   initialTags,
 }: EditorWorkbenchProps) {
@@ -179,6 +184,13 @@ export function EditorWorkbench({
     );
   }
 
+  // A brand-new cart (no stored bytes) opened on a starter that ships a collision
+  // layer — the Platformer — gets that layer as its initial collision, so its
+  // cartbox.solid physics works the moment it opens. A saved cart keeps its own
+  // (which is null here for a starter that authors none).
+  const starterCollision = cartUrl ? null : resolveStarter(starterId).collision ?? null;
+  const effectiveCollision = initialCollision ?? starterCollision;
+
   return (
     <WorkbenchBody
       engine={engine}
@@ -194,7 +206,8 @@ export function EditorWorkbench({
       initialScene={initialScene}
       initialAnim={initialAnim}
       initialParticles={initialParticles}
-      initialCollision={initialCollision}
+      initialCollision={effectiveCollision}
+      initialFlags={initialFlags}
       initialDescription={initialDescription}
       initialTags={initialTags}
     />
@@ -216,6 +229,7 @@ function WorkbenchBody({
   initialAnim,
   initialParticles,
   initialCollision,
+  initialFlags,
   initialDescription,
   initialTags,
 }: {
@@ -233,6 +247,7 @@ function WorkbenchBody({
   initialAnim: AnimSpec | null;
   initialParticles: ParticleSpec | null;
   initialCollision: CollisionData | null;
+  initialFlags: FlagData | null;
   initialDescription: string;
   initialTags: string[];
 }) {
@@ -263,6 +278,7 @@ function WorkbenchBody({
     initialAnim,
     initialParticles,
     initialCollision,
+    initialFlags,
     initialBank: 0,
   });
   const {
@@ -286,6 +302,8 @@ function WorkbenchBody({
     setParticles,
     collision,
     setCollision,
+    flags,
+    setFlags,
     canUndo,
     canRedo,
     undo,
@@ -360,7 +378,7 @@ function WorkbenchBody({
       // The static demo build has no API — Save lands in this browser's
       // localStorage instead (same payload the server would persist).
       if (isStaticExport) {
-        const stored = saveCartDraft(cartId, { model: modelId, bytes, rig, fx, materials, voxel, scene, anim, particles, collision });
+        const stored = saveCartDraft(cartId, { model: modelId, bytes, rig, fx, materials, voxel, scene, anim, particles, collision, flags });
         setSaveState(stored ? "saved" : "error");
         return;
       }
@@ -391,6 +409,7 @@ function WorkbenchBody({
           animResponse,
           particlesResponse,
           collisionResponse,
+          flagsResponse,
           metaResponse,
         ] = await Promise.all([
           fetch(`/api/carts/${cartId}/rig`, { method: "PUT", headers, body: JSON.stringify(rig) }),
@@ -401,6 +420,7 @@ function WorkbenchBody({
           fetch(`/api/carts/${cartId}/anim`, { method: "PUT", headers, body: JSON.stringify(anim) }),
           fetch(`/api/carts/${cartId}/particles`, { method: "PUT", headers, body: JSON.stringify(particles) }),
           fetch(`/api/carts/${cartId}/collision`, { method: "PUT", headers, body: JSON.stringify(collision) }),
+          fetch(`/api/carts/${cartId}/flags`, { method: "PUT", headers, body: JSON.stringify(flags) }),
           fetch(`/api/carts/${cartId}/meta`, { method: "PUT", headers, body: JSON.stringify(details) }),
         ]);
         ok =
@@ -412,6 +432,7 @@ function WorkbenchBody({
           particlesResponse.ok &&
           animResponse.ok &&
           collisionResponse.ok &&
+          flagsResponse.ok &&
           metaResponse.ok;
       }
       setSaveState(ok ? "saved" : "error");
@@ -422,6 +443,24 @@ function WorkbenchBody({
 
   const saveLabel =
     saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved ✓" : saveState === "error" ? "Retry save" : "Save";
+
+  // Export the exact in-memory cartridge as a .tic file the creator can back up,
+  // share, or open in real TIC-80. Named from the cart title so downloads are
+  // legible rather than a raw uuid.
+  const downloadCart = () => {
+    if (!runnable) return;
+    const bytes = runnable.saveTic();
+    const blob = new Blob([bytes.buffer as ArrayBuffer], { type: "application/octet-stream" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    const safeName =
+      (details.title || "cartridge").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") ||
+      "cartridge";
+    anchor.download = `${safeName}.tic`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div className={styles.workbench}>
@@ -538,6 +577,15 @@ function WorkbenchBody({
           <button
             type="button"
             className="cbx-btn"
+            onClick={downloadCart}
+            disabled={!runnable}
+            title={runnable ? "Download this cartridge as a .tic file" : "Download needs the TIC-80 engine"}
+          >
+            Download
+          </button>
+          <button
+            type="button"
+            className="cbx-btn"
             onClick={() => void persist(false)}
             disabled={!runnable || saveState === "saving"}
             title={runnable ? "Save to your account" : "Save needs the TIC-80 engine"}
@@ -585,6 +633,8 @@ function WorkbenchBody({
           onColumnsChange={setMapColumns}
           collision={collision}
           onCollisionChange={setCollision}
+          flags={flags}
+          onFlagsChange={setFlags}
           normals={normals}
           height={heightMap}
           specular={specularMap}
@@ -656,6 +706,7 @@ function WorkbenchBody({
           anim={anim ?? undefined}
           particles={particles ?? undefined}
           collision={collision ?? undefined}
+          flags={flags ?? undefined}
           onClose={() => setRunBytes(null)}
         />
       )}

@@ -21,6 +21,7 @@ import {
   type AnimSpec,
   type ParticleSpec,
   type CollisionField,
+  type FlagsField,
 } from "@cartbox/player";
 
 import { authHeaders } from "@/lib/supabase-browser";
@@ -41,11 +42,13 @@ interface CartridgePlayerProps {
   particles: ParticleSpec | null;
   /** The cart's authored collision layer, or null when none is saved. */
   collision: CollisionField | null;
+  /** The cart's authored tile-flags layer, or null when none is saved. */
+  flags: FlagsField | null;
 }
 
 type SubmitState = "idle" | "working" | "submitted" | "error";
 
-export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision }: CartridgePlayerProps) {
+export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags }: CartridgePlayerProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<PlayerHandle | null>(null);
   const bestScoreRef = useRef<number | null>(null);
@@ -89,6 +92,8 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       // The cart's authored collision layer, injected as cart data so the cart's
       // own Lua can read it via cartbox.solid(x, y) / cartbox.mapsize().
       collision: collision ?? undefined,
+      // The cart's authored tile-flags layer, read via cartbox.flag(x, y, n).
+      flags: flags ?? undefined,
       onReady: () => setStatus("ready"),
       onError: () => setStatus("error"),
       onEvent: (event: MailboxEvent) => {
@@ -104,7 +109,7 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
     handleRef.current = handle;
 
     return () => handle.destroy();
-  }, [cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision]);
+  }, [cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags]);
 
   const togglePlayback = () => {
     const handle = handleRef.current;

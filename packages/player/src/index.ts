@@ -67,6 +67,10 @@ export { CARTBOX_SDK_LUA, injectSdk } from "./sdk.js";
 // cartbox.solid(x, y) / cartbox.mapsize(). Injected as static cart data.
 export { collisionSdkLua, parseCollisionField } from "./collisionSdk.js";
 export type { CollisionField } from "./collisionSdk.js";
+// Tile flags: a cart's per-cell gameplay properties, exposed to its own Lua as
+// cartbox.flag(cx, cy, n). Injected as static cart data alongside collision.
+export { flagsSdkLua, parseFlagsField } from "./flagsSdk.js";
+export type { FlagsField } from "./flagsSdk.js";
 
 // Replay verification (P2): recompute a score by re-running the replay headlessly.
 export { extractScore, extractUnlocks, runReplayEvents, verifyReplayScore } from "./verify.js";

@@ -7,8 +7,10 @@
  */
 
 import type { CartEngine } from "../engine/CartEngine";
+import type { CollisionData } from "./CollisionMap";
 import { seedDemoCart } from "./seed";
 import { seedParallaxDemoCart } from "./parallaxSeed";
+import { seedPlatformerCart, PLATFORMER_COLLISION } from "./platformerSeed";
 
 /** Applies starter content to a cart's engine, in place. */
 type SeedFunction = (engine: CartEngine) => void;
@@ -22,6 +24,12 @@ interface CartStarter {
   readonly description: string;
   /** Seeds the engine with this starter's palette, assets, and code. */
   readonly seed: SeedFunction;
+  /**
+   * A collision sidecar the editor loads for a brand-new cart of this starter,
+   * when the starter's code needs one (the Platformer runs its physics against
+   * it). Absent for starters that author no collision.
+   */
+  readonly collision?: CollisionData;
 }
 
 // Typed as a non-empty tuple so index 0 (the default) is statically known to
@@ -38,6 +46,13 @@ export const CART_STARTERS: readonly [CartStarter, ...CartStarter[]] = [
     label: "Parallax scene",
     description: "Three scrolling map layers that drift at different speeds.",
     seed: seedParallaxDemoCart,
+  },
+  {
+    id: "platformer",
+    label: "Platformer",
+    description: "Run and jump on a collision layer — a worked cartbox.solid example.",
+    seed: seedPlatformerCart,
+    collision: PLATFORMER_COLLISION,
   },
 ];
 

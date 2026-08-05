@@ -6,10 +6,11 @@
  */
 
 import { parsePostFxSettings, parseScene, parseAnim, parseParticles, type AnimSpec, type ParticleSpec, type PostFxSettings, type SceneSpec } from "@cartbox/player";
-import type { CollisionData } from "@cartbox/editor";
+import type { CollisionData, FlagData } from "@cartbox/editor";
 
 import { serviceClient } from "@/lib/supabase";
 import { parseCollision } from "@/lib/collision";
+import { parseFlags } from "@/lib/flags";
 import { publicUrl } from "@/lib/storage";
 import { resolveModelId } from "@/lib/consoleModel";
 import { resolveStarterId } from "@/lib/starter";
@@ -58,6 +59,8 @@ interface CartTarget {
   particles: ParticleSpec | null;
   /** Persisted per-cell collision layer, validated, or null when absent/malformed. */
   collision: CollisionData | null;
+  /** Persisted per-cell tile-flags layer, validated, or null when absent/malformed. */
+  flags: FlagData | null;
   /** Persisted marketplace description, or empty when none. */
   description: string;
   /** Persisted marketplace tags, or empty when none. */
@@ -68,7 +71,7 @@ async function resolveCart(cartId: string): Promise<CartTarget> {
   try {
     const { data } = await serviceClient()
       .from("carts")
-      .select("title, description, tags, r2_key, console_model, rig, fx, materials, voxel, scene, anim, particles, collision")
+      .select("title, description, tags, r2_key, console_model, rig, fx, materials, voxel, scene, anim, particles, collision, flags")
       .eq("id", cartId)
       .maybeSingle();
     return {
@@ -83,6 +86,7 @@ async function resolveCart(cartId: string): Promise<CartTarget> {
       anim: parseAnim(data?.anim),
       particles: parseParticles(data?.particles),
       collision: parseCollision(data?.collision),
+      flags: parseFlags(data?.flags),
       description: typeof data?.description === "string" ? data.description : "",
       tags: Array.isArray(data?.tags) ? (data.tags as string[]) : [],
     };
@@ -102,6 +106,7 @@ async function resolveCart(cartId: string): Promise<CartTarget> {
       anim: null,
       particles: null,
       collision: null,
+      flags: null,
       description: "",
       tags: [],
     };
@@ -115,7 +120,7 @@ export default async function EditorPage({ params, searchParams }: EditorPagePro
     return <StaticCartEditor cartId={params.cartId} />;
   }
 
-  const { name, cartUrl, storedModel, rig, fx, materials, voxel, scene, anim, particles, collision, description, tags } =
+  const { name, cartUrl, storedModel, rig, fx, materials, voxel, scene, anim, particles, collision, flags, description, tags } =
     await resolveCart(params.cartId);
   // A saved cart's persisted model is authoritative; a brand-new cart (no row)
   // takes the model from the ?model= param carried in from /edit/new.
@@ -138,6 +143,7 @@ export default async function EditorPage({ params, searchParams }: EditorPagePro
       initialAnim={anim}
       initialParticles={particles}
       initialCollision={collision}
+      initialFlags={flags}
       initialDescription={description}
       initialTags={tags}
     />

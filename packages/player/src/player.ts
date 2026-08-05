@@ -17,6 +17,7 @@ import { ReplayRecorder, ReplaySource, hashCart, randomSeed, type Replay } from 
 import { seedCartridge, prependLuaCode } from "./cartseed.js";
 import { injectSdk } from "./sdk.js";
 import { collisionSdkLua } from "./collisionSdk.js";
+import { flagsSdkLua } from "./flagsSdk.js";
 import { decodeCamera, decodeLights, decodeMailbox } from "./mailbox.js";
 import { createCartSpriteSource, type CartSpriteSource } from "./scene/cartSpriteSource.js";
 import { resolveSceneLayers } from "./scene/sceneRender.js";
@@ -104,9 +105,15 @@ export class Player {
       // `cartbox` table first, then this overrides its solid/mapsize stubs with
       // the cart's real layer. A null/empty layer contributes nothing.
       const seeded = seedCartridge(bytes, seed);
+      // Static cart-data accessors (collision + flags) are prepended BEFORE the
+      // SDK so the SDK sits above them and defines `cartbox` first; each then
+      // overrides its no-op stub. Empty layers contribute nothing.
+      let prepared = seeded;
       const collisionLua = collisionSdkLua(this.options.collision);
-      const withCollision = collisionLua ? prependLuaCode(seeded, collisionLua) : seeded;
-      const preparedBytes = injectSdk(withCollision);
+      if (collisionLua) prepared = prependLuaCode(prepared, collisionLua);
+      const flagsLua = flagsSdkLua(this.options.flags);
+      if (flagsLua) prepared = prependLuaCode(prepared, flagsLua);
+      const preparedBytes = injectSdk(prepared);
 
       this.console = createConsole(module, this.model, sampleRate);
       if (!this.console.loadCartridge(preparedBytes)) {
@@ -344,6 +351,7 @@ export class Player {
       this.applyAnimation();
       this.surface?.blit(framebuffer);
       this.presentFrame += 1; // advance in lockstep with the scene backdrop's own clock
+      this.options.onFrame?.();
     }
   }
 

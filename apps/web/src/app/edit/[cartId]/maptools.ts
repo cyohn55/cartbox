@@ -16,7 +16,7 @@ import type { CellShape, MapCellKind } from "@cartbox/editor";
 import type { ToolDefinition } from "./toolCapabilities";
 
 /** The things the Map tab can author. */
-export type MapLayer = "tiles" | "pixels" | "voxels" | "hexels" | "collision";
+export type MapLayer = "tiles" | "pixels" | "voxels" | "hexels" | "collision" | "flags";
 
 /** Tools available across the map layers; each layer offers a subset. */
 export type MapTool =
@@ -29,7 +29,8 @@ export type MapTool =
   | "lower"
   | "paint"
   | "flatten"
-  | "solid";
+  | "solid"
+  | "flag";
 
 /** A map tool as the shared rail renders it; `hint` becomes its tooltip. */
 export type MapToolDef = ToolDefinition<MapTool>;
@@ -69,6 +70,12 @@ const COLLISION_TOOLS: readonly MapToolDef[] = [
   { id: "fill", label: "Fill", glyph: "▦", hint: "Flood the connected run of matching cells." },
 ];
 
+const FLAG_TOOLS: readonly MapToolDef[] = [
+  { id: "flag", label: "Tag", glyph: "⚑", hint: "Set the chosen flag on cells — hazard, ladder, water, trigger zones." },
+  { id: "eraser", label: "Clear", glyph: "⌫", hint: "Clear the chosen flag from a cell." },
+  { id: "fill", label: "Fill", glyph: "▦", hint: "Flood the connected run of matching cells with the chosen flag." },
+];
+
 export const MAP_LAYERS: readonly MapLayerDef[] = [
   {
     id: "tiles",
@@ -105,6 +112,13 @@ export const MAP_LAYERS: readonly MapLayerDef[] = [
     hint: "Mark which cells are solid, so a game knows what to collide with.",
     tools: COLLISION_TOOLS,
   },
+  {
+    id: "flags",
+    label: "Flags",
+    glyph: "⚑",
+    hint: "Tag cells with gameplay properties — hazard, ladder, water, triggers.",
+    tools: FLAG_TOOLS,
+  },
 ];
 
 /** The layer definition for an id, falling back to tiles so the UI always has one. */
@@ -123,7 +137,7 @@ export function isColumnLayer(layer: MapLayer): boolean {
  * it is per-cell gameplay data, authored from above, with no presence in space.
  */
 export function isFlatLayer(layer: MapLayer): boolean {
-  return layer === "collision";
+  return layer === "collision" || layer === "flags";
 }
 
 /** The cell shape a column layer authors. */

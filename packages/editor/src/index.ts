@@ -49,6 +49,14 @@ export {
   COLLISION_MAP_VERSION,
   type CollisionData,
 } from "./model/CollisionMap";
+export {
+  TileFlags,
+  isFlagData,
+  TILE_FLAGS_VERSION,
+  FLAG_COUNT,
+  FLAG_LABELS,
+  type FlagData,
+} from "./model/TileFlags";
 export { SoundBank, SFX_CHANNEL, type SfxLoop } from "./model/SoundBank";
 export { NormalMap } from "./model/NormalMap";
 export { MaterialMap } from "./model/MaterialMap";

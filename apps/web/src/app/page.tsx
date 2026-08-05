@@ -27,6 +27,9 @@ export default function HomePage() {
         <Link href="/edit/new?starter=parallax">Create a parallax scene — three scrolling map layers →</Link>
       </p>
       <p>
+        <Link href="/edit/new?starter=platformer">Create a platformer — run and jump on a collision layer →</Link>
+      </p>
+      <p>
         <Link href="/parallax">Open the Parallax Lab — 3D layered scene + segmented character →</Link>
       </p>
       <p>

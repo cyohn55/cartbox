@@ -26,6 +26,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CollisionMap,
+  TileFlags,
+  FLAG_LABELS,
   MapVoxelSpace,
   MaterialMap,
   NormalMap,
@@ -48,6 +50,7 @@ import {
   type ClassInfo,
   type ClassMapping,
   type CollisionData,
+  type FlagData,
   type GeneratorValues,
   type MapCellKind,
   type MapViewFocus,
@@ -116,6 +119,9 @@ import {
 /** The tiles page the map stamps from. */
 const TILES_PAGE = 0;
 
+/** The eight tile flags as the rail selects them — index plus its suggested label. */
+const FLAG_OPTIONS = FLAG_LABELS.map((label, index) => ({ id: index, label: `${index}·${label}` }));
+
 /** The zoom levels as the rail selects them — by index, which is what `zoom` holds. */
 const ZOOM_OPTIONS = MAP_ZOOMS.map((option, index) => ({ id: index, label: option.label }));
 
@@ -168,6 +174,10 @@ interface MapEditorProps {
   collision: CollisionData | null;
   /** Persist the collision layer (feeds the undo timeline and the save). */
   onCollisionChange: (data: CollisionData | null) => void;
+  /** The saved tile-flags layer for this cart, or null when none was authored. */
+  flags: FlagData | null;
+  /** Persist the tile-flags layer (feeds the undo timeline and the save). */
+  onFlagsChange: (data: FlagData | null) => void;
   /**
    * The cart's material channels. The pixel layer paints through them exactly as
    * the Sprites tab's Material layer does, so a colour with a swatch profile
@@ -189,6 +199,8 @@ export function MapEditor({
   onColumnsChange,
   collision,
   onCollisionChange,
+  flags,
+  onFlagsChange,
   normals,
   height: heightMap,
   specular,
@@ -214,6 +226,15 @@ export function MapEditor({
     collisionRef.current = CollisionMap.deserialize(collision, map.width, map.height);
   }
   const collisionMap = collisionRef.current;
+
+  // The tile-flags layer is seeded once from the cart and mutated in place, same
+  // as collision; the active flag is which of the eight the tools act on.
+  const flagsRef = useRef<TileFlags | null>(null);
+  if (flagsRef.current === null) {
+    flagsRef.current = TileFlags.deserialize(flags, map.width, map.height);
+  }
+  const flagsMap = flagsRef.current;
+  const [activeFlag, setActiveFlag] = useState(0);
 
   const [view, setView] = useState<MapViewMode>("top");
   const [layer, setLayer] = useState<MapLayer>("tiles");
@@ -396,6 +417,19 @@ export function MapEditor({
     if (!window.confirm(`Clear all ${collisionMap.solidCount} solid cells?`)) return;
     collisionMap.clear();
     commitCollision();
+  };
+
+  /** Serialize the flags layer up to the cart after a stroke (null when empty). */
+  const commitFlags = () => {
+    onFlagsChange(flagsMap.isEmpty ? null : flagsMap.serialize());
+    bump();
+  };
+
+  const clearActiveFlag = () => {
+    if (flagsMap.countBit(activeFlag) === 0) return;
+    if (!window.confirm(`Clear every "${FLAG_LABELS[activeFlag]}" tag?`)) return;
+    flagsMap.clearBit(activeFlag);
+    commitFlags();
   };
 
   /**
@@ -610,6 +644,12 @@ export function MapEditor({
             <RailHint>How many cells Raise and Lower move a column per click.</RailHint>
           </>
         )}
+        {!inSpace && layer === "flags" && (
+          <>
+            <SegmentedControl label="Flag" options={FLAG_OPTIONS} selected={activeFlag} onSelect={setActiveFlag} wrap />
+            <RailHint>Which of the eight gameplay flags the tools tag — read in-cart as cartbox.flag(cx, cy, {activeFlag}).</RailHint>
+          </>
+        )}
       </>
     ),
 
@@ -699,7 +739,7 @@ export function MapEditor({
           </button>
         </div>
       </RailGroup>
-    ) : flat ? (
+    ) : layer === "collision" ? (
       <RailGroup label="Collision">
         <div className={styles.toolGroup}>
           <button type="button" className={styles.toolBtn} onClick={clearCollision}>
@@ -707,6 +747,17 @@ export function MapEditor({
               ✕
             </span>
             Clear solids
+          </button>
+        </div>
+      </RailGroup>
+    ) : layer === "flags" ? (
+      <RailGroup label="Flags">
+        <div className={styles.toolGroup}>
+          <button type="button" className={styles.toolBtn} onClick={clearActiveFlag}>
+            <span className={styles.toolGlyph} aria-hidden>
+              ✕
+            </span>
+            Clear “{FLAG_LABELS[activeFlag]}”
           </button>
         </div>
       </RailGroup>
@@ -884,12 +935,15 @@ export function MapEditor({
             columnMaterial={columnMaterial}
             columnStep={columnStep}
             collision={collisionMap}
+            flags={flagsMap}
+            activeFlag={activeFlag}
             cell={cell}
             version={version}
             palette={palette}
             onEdit={bump}
             onColumnsCommitted={commitSpace}
             onCollisionCommitted={commitCollision}
+            onFlagsCommitted={commitFlags}
             onHover={setHover}
           />
         )}
@@ -937,12 +991,20 @@ export function MapEditor({
                   {hover ? `${space.heightAt(hover.x, hover.y)}` : "—"} / {space.columnCount} columns
                 </span>
               </span>
-            ) : flat ? (
+            ) : layer === "collision" ? (
               <span className={styles.hudItem}>
                 <span className={styles.hudLabel}>Solid</span>
                 <span className={`${styles.hudValue} data`}>
                   {hover ? (collisionMap.isSolid(hover.x, hover.y) ? "yes" : "no") : "—"} ·{" "}
                   {collisionMap.solidCount.toLocaleString()} cells
+                </span>
+              </span>
+            ) : layer === "flags" ? (
+              <span className={styles.hudItem}>
+                <span className={styles.hudLabel}>{FLAG_LABELS[activeFlag]}</span>
+                <span className={`${styles.hudValue} data`}>
+                  {hover ? (flagsMap.get(hover.x, hover.y, activeFlag) ? "on" : "off") : "—"} ·{" "}
+                  {flagsMap.countBit(activeFlag).toLocaleString()} cells
                 </span>
               </span>
             ) : (
@@ -1032,6 +1094,9 @@ function hintFor(
   }
   if (layer === "collision") {
     return "Mark which cells are solid — the walls and ground a game should collide with. Solid cells show as a red overlay over the map art; Fill floods a whole enclosed region at once. The layer is saved with the cart for its own logic to read.";
+  }
+  if (layer === "flags") {
+    return "Tag cells with gameplay properties beyond solidity — hazard, ladder, one-way platform, water, trigger zones. Pick a flag in the rail, then Tag/Clear/Fill. The active flag fills the cell; other flags on it show as corner dots. A cart reads them as cartbox.flag(cx, cy, n).";
   }
   return `Raise builds ${shape} columns up to ${MAX_MAP_VOXEL_HEIGHT} cells tall, skinned with the armed material. Brightness shows height; ${
     shape === "hexel" ? "diamonds mark the close-packed lattice" : "squares mark cube columns"

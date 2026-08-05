@@ -29,6 +29,7 @@ import {
   observeEngine,
   type CartEngine,
   type CollisionData,
+  type FlagData,
   type MaterialSwatches,
   type SpriteRig,
 } from "@cartbox/editor";
@@ -56,6 +57,8 @@ interface CartSnapshot {
   particles: ParticleSpec | null;
   /** Authored per-cell collision layer (Map tab), or null when the cart has none. */
   collision: CollisionData | null;
+  /** Authored per-cell tile-flags layer (Map tab), or null when the cart has none. */
+  flags: FlagData | null;
 }
 
 export interface EditorHistory {
@@ -81,6 +84,8 @@ export interface EditorHistory {
   setParticles: (particles: ParticleSpec | null) => void;
   collision: CollisionData | null;
   setCollision: (collision: CollisionData | null) => void;
+  flags: FlagData | null;
+  setFlags: (flags: FlagData | null) => void;
   canUndo: boolean;
   canRedo: boolean;
   undo: () => void;
@@ -99,6 +104,7 @@ interface UseEditorHistoryArgs {
   initialAnim: AnimSpec | null;
   initialParticles: ParticleSpec | null;
   initialCollision: CollisionData | null;
+  initialFlags: FlagData | null;
   initialBank: number;
 }
 
@@ -116,6 +122,7 @@ function snapshotsEqual(a: CartSnapshot, b: CartSnapshot): boolean {
   if (JSON.stringify(a.anim) !== JSON.stringify(b.anim)) return false;
   if (JSON.stringify(a.particles) !== JSON.stringify(b.particles)) return false;
   if (JSON.stringify(a.collision) !== JSON.stringify(b.collision)) return false;
+  if (JSON.stringify(a.flags) !== JSON.stringify(b.flags)) return false;
   return a.voxel === b.voxel;
 }
 
@@ -138,6 +145,7 @@ export function useEditorHistory({
   initialAnim,
   initialParticles,
   initialCollision,
+  initialFlags,
   initialBank,
 }: UseEditorHistoryArgs): EditorHistory {
   const [bank, setBankState] = useState(initialBank);
@@ -149,6 +157,7 @@ export function useEditorHistory({
   const [anim, setAnimState] = useState<AnimSpec | null>(initialAnim);
   const [particles, setParticlesState] = useState<ParticleSpec | null>(initialParticles);
   const [collision, setCollisionState] = useState<CollisionData | null>(initialCollision);
+  const [flags, setFlagsState] = useState<FlagData | null>(initialFlags);
   const [revision, setRevision] = useState(0);
   // A monotonic version so canUndo/canRedo re-evaluate when the timeline moves.
   const [, setHistoryVersion] = useState(0);
@@ -164,6 +173,7 @@ export function useEditorHistory({
   const animRef = useRef(anim);
   const particlesRef = useRef(particles);
   const collisionRef = useRef(collision);
+  const flagsRef = useRef(flags);
   const runnableRef = useRef(runnable);
   const applyingRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -185,6 +195,7 @@ export function useEditorHistory({
       anim: animRef.current,
       particles: particlesRef.current,
       collision: collisionRef.current,
+      flags: flagsRef.current,
     };
   }, []);
 
@@ -243,6 +254,8 @@ export function useEditorHistory({
       setParticlesState(snapshot.particles);
       collisionRef.current = snapshot.collision;
       setCollisionState(snapshot.collision);
+      flagsRef.current = snapshot.flags;
+      setFlagsState(snapshot.flags);
     } finally {
       applyingRef.current = false;
     }
@@ -330,6 +343,12 @@ export function useEditorHistory({
     notify();
   }, [notify]);
 
+  const setFlags = useCallback((next: FlagData | null) => {
+    flagsRef.current = next;
+    setFlagsState(next);
+    notify();
+  }, [notify]);
+
   const history = historyRef.current;
   const canUndo = history?.canUndo() ?? false;
   const canRedo = history?.canRedo() ?? false;
@@ -355,6 +374,8 @@ export function useEditorHistory({
     setParticles,
     collision,
     setCollision,
+    flags,
+    setFlags,
     canUndo,
     canRedo,
     undo,

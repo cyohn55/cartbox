@@ -12,6 +12,7 @@ import { useMemo, useRef, useState } from "react";
 import { CodeDocument, LANGUAGES, languageById, tokenize, type TokenType } from "@cartbox/editor";
 
 import styles from "./editor.module.css";
+import { SdkPanel } from "./SdkPanel";
 
 const TOKEN_CLASS: Record<TokenType, string> = {
   keyword: styles.tokKeyword ?? "",
@@ -90,6 +91,23 @@ export function CodeEditor({ doc }: CodeEditorProps) {
   const changeLanguage = (event: React.ChangeEvent<HTMLSelectElement>) => {
     setLanguage(event.target.value);
     doc.setLanguage(event.target.value);
+  };
+
+  // Drop a reference snippet in at the caret (replacing any selection), then put
+  // the caret at the end of what was inserted and return focus to the code.
+  const insertAtCaret = (snippet: string) => {
+    const element = textareaRef.current;
+    if (!element) return;
+    const start = element.selectionStart;
+    const end = element.selectionEnd;
+    const next = text.slice(0, start) + snippet + text.slice(end);
+    commit(next);
+    const caret = start + snippet.length;
+    requestAnimationFrame(() => {
+      element.focus();
+      element.selectionStart = element.selectionEnd = caret;
+      syncCursor();
+    });
   };
 
   return (
@@ -175,6 +193,8 @@ export function CodeEditor({ doc }: CodeEditorProps) {
             ))}
           </div>
         </div>
+
+        <SdkPanel onInsert={insertAtCaret} />
       </aside>
     </div>
   );

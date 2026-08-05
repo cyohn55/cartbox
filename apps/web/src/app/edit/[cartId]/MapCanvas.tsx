@@ -18,7 +18,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { faceTile, type CollisionMap, type MapVoxelSpace, type SpriteSheet, type TileMap } from "@cartbox/editor";
+import { faceTile, type CollisionMap, type MapVoxelSpace, type SpriteSheet, type TileFlags, type TileMap } from "@cartbox/editor";
 
 import { buildWorldAtlas } from "@/lib/faceTextures";
 
@@ -35,6 +35,21 @@ const TILES_PAGE = 0;
 const COLLISION_FILL = "rgba(255,64,64,0.45)";
 /** Outline of a solid cell, so adjacent solids still read as separate cells. */
 const COLLISION_STROKE = "rgba(255,96,96,0.9)";
+
+/**
+ * A distinct translucent colour per flag (0..7), so a tagged cell reads as its
+ * flag at a glance. The order matches FLAG_LABELS in @cartbox/editor.
+ */
+const FLAG_FILLS: readonly string[] = [
+  "rgba(255,96,64,0.5)", // 0 hazard — red-orange
+  "rgba(120,200,90,0.5)", // 1 ladder — green
+  "rgba(255,210,70,0.5)", // 2 platform — amber
+  "rgba(80,170,255,0.5)", // 3 water — blue
+  "rgba(210,110,255,0.5)", // 4 trigger — violet
+  "rgba(255,140,200,0.5)", // 5 zone A — pink
+  "rgba(120,235,220,0.5)", // 6 zone B — teal
+  "rgba(200,200,210,0.5)", // 7 zone C — grey
+];
 
 /** How strongly a column's height brightens its overlay, at the tallest column. */
 const HEIGHT_LIFT = 0.55;
@@ -70,6 +85,10 @@ interface MapCanvasProps {
   columnStep: number;
   /** The cart's per-cell solidity layer, painted and drawn on the collision layer. */
   collision: CollisionMap;
+  /** The cart's per-cell tile-flags layer, painted and drawn on the flags layer. */
+  flags: TileFlags;
+  /** Which flag (0..7) the flags-layer tools act on and highlight. */
+  activeFlag: number;
   cell: number;
   version: number;
   /** CSS colours of the cart palette, for drawing the column overlay. */
@@ -80,6 +99,8 @@ interface MapCanvasProps {
   onColumnsCommitted: () => void;
   /** A stroke on the collision layer finished — the caller persists the layer. */
   onCollisionCommitted: () => void;
+  /** A stroke on the flags layer finished — the caller persists the layer. */
+  onFlagsCommitted: () => void;
   onHover: (cell: { x: number; y: number } | null) => void;
 }
 
@@ -95,12 +116,15 @@ export function MapCanvas({
   columnMaterial,
   columnStep,
   collision,
+  flags,
+  activeFlag,
   cell,
   version,
   palette,
   onEdit,
   onColumnsCommitted,
   onCollisionCommitted,
+  onFlagsCommitted,
   onHover,
 }: MapCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -111,6 +135,8 @@ export function MapCanvas({
   const columnsDirty = useRef(false);
   // Same, for the collision layer — one undo entry per stroke.
   const collisionDirty = useRef(false);
+  // Same, for the flags layer.
+  const flagsDirty = useRef(false);
   // The tallest column, which sets the overlay's brightness ramp. Cached because
   // a full scan per painted sample would cost more than the drawing does.
   const peakRef = useRef(1);
@@ -119,6 +145,7 @@ export function MapCanvas({
   const height = map.height * cell;
   const showColumns = isColumnLayer(layer);
   const showCollision = layer === "collision";
+  const showFlags = layer === "flags";
   const pixelSize = cell / sheet.tileSize;
 
   // Pre-rasterise each tile once so map redraws are drawImage blits, not
@@ -243,14 +270,39 @@ export function MapCanvas({
     [collision, cell],
   );
 
+  /** Paint the flags overlay for one cell: the active flag, plus a dot per other set flag. */
+  const drawFlags = useCallback(
+    (context: CanvasRenderingContext2D, x: number, y: number) => {
+      const px = x * cell;
+      const py = y * cell;
+      // The active flag fills the cell so it reads as the thing you're painting.
+      if (flags.get(x, y, activeFlag)) {
+        context.fillStyle = FLAG_FILLS[activeFlag] ?? COLLISION_FILL;
+        context.fillRect(px, py, cell, cell);
+      }
+      // Other flags on this cell show as small corner dots, so a cell's full set is
+      // visible without switching flags — but the active one still dominates.
+      let slot = 0;
+      const dot = Math.max(2, Math.floor(cell / 6));
+      for (let bit = 0; bit < FLAG_FILLS.length; bit += 1) {
+        if (bit === activeFlag || !flags.get(x, y, bit)) continue;
+        context.fillStyle = FLAG_FILLS[bit]!;
+        context.fillRect(px + 1 + slot * (dot + 1), py + 1, dot, dot);
+        slot += 1;
+      }
+    },
+    [flags, activeFlag, cell],
+  );
+
   const drawCell = useCallback(
     (context: CanvasRenderingContext2D, x: number, y: number) => {
       const tile = tileCache[map.getCell(x, y)];
       if (tile) context.drawImage(tile, x * cell, y * cell, cell, cell);
       if (showColumns) drawColumn(context, x, y);
       if (showCollision) drawCollision(context, x, y);
+      if (showFlags) drawFlags(context, x, y);
     },
-    [tileCache, map, cell, showColumns, drawColumn, showCollision, drawCollision],
+    [tileCache, map, cell, showColumns, drawColumn, showCollision, drawCollision, showFlags, drawFlags],
   );
 
   const drawGuides = useCallback(
@@ -428,12 +480,30 @@ export function MapCanvas({
     drawGuides(context);
   };
 
+  /** Apply a flags-layer tool at a cell, acting on the active flag. */
+  const applyFlags = (context: CanvasRenderingContext2D, target: { x: number; y: number }) => {
+    if (tool === "fill") {
+      // Flood the connected run sharing the active flag's value to the opposite,
+      // so one fill both tags an open area and clears an enclosed tagged one.
+      flags.fill(target.x, target.y, activeFlag, !flags.get(target.x, target.y, activeFlag));
+      flagsDirty.current = true;
+      renderAll();
+      return;
+    }
+    flags.set(target.x, target.y, activeFlag, tool === "flag");
+    flagsDirty.current = true;
+    context.clearRect(target.x * cell, target.y * cell, cell, cell);
+    drawCell(context, target.x, target.y);
+    drawGuides(context);
+  };
+
   const apply = (target: { x: number; y: number }, event: React.PointerEvent) => {
     const context = canvasRef.current?.getContext("2d");
     if (!context) return;
     context.imageSmoothingEnabled = false;
     if (showColumns) applyColumns(context, target);
     else if (showCollision) applyCollision(context, target);
+    else if (showFlags) applyFlags(context, target);
     else if (layer === "pixels") applyPixels(context, target, event);
     else applyTiles(context, target);
   };
@@ -485,6 +555,9 @@ export function MapCanvas({
     } else if (collisionDirty.current) {
       collisionDirty.current = false;
       onCollisionCommitted();
+    } else if (flagsDirty.current) {
+      flagsDirty.current = false;
+      onFlagsCommitted();
     } else if (layer === "pixels") {
       onEdit();
     }

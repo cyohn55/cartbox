@@ -2849,6 +2849,8 @@ cartbox = {
   -- layer simply sees every cell as non-solid).
   solid = function() return false end,
   mapsize = function() return 0, 0 end,
+  -- Tile-flags default: overridden by the injected layer when the cart has one.
+  flag = function() return false end,
 }`;
 function injectSdk(bytes) {
   return prependLuaCode(bytes, CARTBOX_SDK_LUA);
@@ -2901,6 +2903,56 @@ function collisionSdkLua(collision) {
     local cell = y * _cw + x
     local byte = string.byte(_cb, (cell >> 3) + 1) or 0
     return (byte & (1 << (cell & 7))) ~= 0
+  end
+end`;
+}
+
+// src/flagsSdk.ts
+function parseFlagsField(value) {
+  if (typeof value !== "object" || value === null) return null;
+  const data = value;
+  if (typeof data.width !== "number" || typeof data.height !== "number") return null;
+  if (typeof data.bytes !== "string") return null;
+  if (data.width <= 0 || data.height <= 0 || !Number.isFinite(data.width) || !Number.isFinite(data.height)) {
+    return null;
+  }
+  return { width: Math.floor(data.width), height: Math.floor(data.height), bytes: data.bytes };
+}
+function flagsSdkLua(flags) {
+  const field = parseFlagsField(flags);
+  if (!field || field.bytes.length === 0) return "";
+  const width = field.width;
+  const height = field.height;
+  return `do
+  local _fw, _fh = ${width}, ${height}
+  local function _b64(s)
+    local _T = {}
+    local _A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    for i = 1, #_A do _T[string.byte(_A, i)] = i - 1 end
+    local out, acc, bits = {}, 0, 0
+    for i = 1, #s do
+      local v = _T[string.byte(s, i)]
+      if v then
+        acc = (acc << 6) | v
+        bits = bits + 6
+        if bits >= 8 then
+          bits = bits - 8
+          out[#out + 1] = string.char((acc >> bits) & 0xff)
+          acc = acc & ((1 << bits) - 1)
+        end
+      end
+    end
+    return table.concat(out)
+  end
+  local _fb = _b64("${field.bytes}")
+  cartbox = cartbox or {}
+  cartbox.flag = function(x, y, n)
+    x = math.floor(x or 0)
+    y = math.floor(y or 0)
+    n = math.floor(n or 0)
+    if x < 0 or x >= _fw or y < 0 or y >= _fh or n < 0 or n > 7 then return false end
+    local byte = string.byte(_fb, y * _fw + x + 1) or 0
+    return ((byte >> n) & 1) ~= 0
   end
 end`;
 }
@@ -3648,9 +3700,12 @@ var Player = class {
       const sampleRate = this.options.sampleRate ?? this.model.sampleRate;
       const seed = this.options.replay ? this.options.replay.seed : randomSeed();
       const seeded = seedCartridge(bytes, seed);
+      let prepared = seeded;
       const collisionLua = collisionSdkLua(this.options.collision);
-      const withCollision = collisionLua ? prependLuaCode(seeded, collisionLua) : seeded;
-      const preparedBytes = injectSdk(withCollision);
+      if (collisionLua) prepared = prependLuaCode(prepared, collisionLua);
+      const flagsLua = flagsSdkLua(this.options.flags);
+      if (flagsLua) prepared = prependLuaCode(prepared, flagsLua);
+      const preparedBytes = injectSdk(prepared);
       this.console = createConsole(module, this.model, sampleRate);
       if (!this.console.loadCartridge(preparedBytes)) {
         throw new Error("Engine rejected the cartridge");
@@ -3809,6 +3864,7 @@ var Player = class {
       this.applyAnimation();
       this.surface?.blit(framebuffer);
       this.presentFrame += 1;
+      this.options.onFrame?.();
     }
   }
   /**
@@ -4312,6 +4368,7 @@ export {
   extractScore,
   extractUnlocks,
   fillSky,
+  flagsSdkLua,
   flicker,
   frameDurationMs,
   framebufferBytes,
@@ -4329,6 +4386,7 @@ export {
   paramKey,
   parseAnim,
   parseCollisionField,
+  parseFlagsField,
   parseParticles,
   parsePostFxSettings,
   parseReplay,

@@ -87,6 +87,8 @@ cartbox = {
   -- layer simply sees every cell as non-solid).
   solid = function() return false end,
   mapsize = function() return 0, 0 end,
+  -- Tile-flags default: overridden by the injected layer when the cart has one.
+  flag = function() return false end,
 }`;
 
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */

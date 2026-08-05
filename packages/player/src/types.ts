@@ -14,6 +14,7 @@ import type { SceneSpec } from "./scene/sceneModel.js";
 import type { AnimSpec } from "./anim/animModel.js";
 import type { ParticleSpec } from "./particles/particleModel.js";
 import type { CollisionField } from "./collisionSdk.js";
+import type { FlagsField } from "./flagsSdk.js";
 
 /**
  * Which input methods the player wires up.
@@ -123,6 +124,20 @@ export interface PlayerOptions {
    * `parseCollisionField`.
    */
   collision?: CollisionField;
+  /**
+   * Expose the cart's authored tile-flags layer to its own Lua as
+   * `cartbox.flag(cx, cy, n)` (flag n, 0..7, on that map cell). Injected once as
+   * static cart data alongside collision. Parse a cart's sidecar into a
+   * FlagsField with `parseFlagsField`.
+   */
+  flags?: FlagsField;
+  /**
+   * Called once per presented frame (after blit), for lightweight instrumentation
+   * — an editor playtest HUD counting these gets the cart's true 60Hz frame rate
+   * rather than the browser's paint rate. Keep the handler cheap; it runs every
+   * frame.
+   */
+  onFrame?: () => void;
 }
 
 /** Handle returned by {@link mount} for controlling a live player instance. */

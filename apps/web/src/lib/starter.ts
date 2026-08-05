@@ -7,7 +7,7 @@
  */
 
 /** Starter ids a fresh cart can open on. Must stay in sync with CART_STARTERS. */
-const SELECTABLE_STARTER_IDS = ["demo", "parallax"] as const;
+const SELECTABLE_STARTER_IDS = ["demo", "parallax", "platformer"] as const;
 
 export type StarterId = (typeof SELECTABLE_STARTER_IDS)[number];
 
