@@ -183,6 +183,7 @@ function StaticCartridgePage({ cartId }: { cartId: string }) {
         particles={null}
         collision={null}
         flags={null}
+        meshRaw={null}
       />
       <p>{cart.description}</p>
     </main>
@@ -231,6 +232,17 @@ export default async function CartridgePage({ params }: PageProps) {
   } catch {
     flags = null;
   }
+  // The mesh sidecar (migration 0022) is fetched raw and parsed client-side; a
+  // not-yet-migrated deployment simply plays without meshes. The raw JSON is
+  // handed to the client leaf because its decoded geometry (typed arrays) can't
+  // cross the RSC boundary the plain-object sidecars use.
+  let meshRaw: string | null = null;
+  try {
+    const { data: extra, error } = await db.from("carts").select("mesh").eq("id", cart.id).maybeSingle();
+    if (!error) meshRaw = (extra?.mesh as string | null) ?? null;
+  } catch {
+    meshRaw = null;
+  }
 
   return (
     <main>
@@ -247,6 +259,7 @@ export default async function CartridgePage({ params }: PageProps) {
           particles={parseParticles(cart.particles)}
           collision={collision}
           flags={flags}
+          meshRaw={meshRaw}
         />
       ) : (
         <section>

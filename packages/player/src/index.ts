@@ -241,6 +241,13 @@ export type {
   ParticleSpec,
 } from "./particles/index.js";
 
+// Runtime 3D meshes (optional): a cart declares a mesh sidecar (imported OBJ/glTF
+// geometry with placement transforms); the player rasterises it over each frame
+// with a pure software rasteriser — the runtime has no GPU triangle path — no cart
+// code needed. Phase 2 of the mesh asset feature.
+export { MeshOverlaySurface, parseMeshScene, buildOrbitCamera } from "./mesh/index.js";
+export type { MeshScene, MeshInstance, SceneBounds, MeshSceneCamera } from "./mesh/index.js";
+
 /**
  * Mounts a cartridge player into a container element and begins loading.
  *

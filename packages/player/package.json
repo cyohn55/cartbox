@@ -14,6 +14,9 @@
     }
   },
   "files": ["dist"],
+  "dependencies": {
+    "@cartbox/editor": "*"
+  },
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",
     "dev": "tsup src/index.ts --format esm --dts --watch",

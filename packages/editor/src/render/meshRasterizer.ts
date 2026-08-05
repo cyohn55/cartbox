@@ -61,7 +61,8 @@ export interface RenderMeshOptions {
 
 // --- Column-major 4×4 matrix helpers --------------------------------------
 
-type Mat4 = Float64Array;
+/** A column-major 4×4 matrix (translation lives in elements 12,13,14). */
+export type Mat4 = Float64Array;
 
 function multiply(a: Mat4, b: Mat4): Mat4 {
   const out = new Float64Array(16);
@@ -114,6 +115,75 @@ function perspective(fovY: number, aspect: number, near: number, far: number): M
     0, 0, (near + far) * range, -1,
     0, 0, near * far * range * 2, 0,
   ]);
+}
+
+/**
+ * Build a column-major model matrix from a translation, an X→Y→Z Euler rotation
+ * in degrees (matching the mesh sidecar's `MeshTransform`), and a per-axis scale.
+ * Composed as T · Rz · Ry · Rx · S: scale first, then rotate X, Y, Z, then place.
+ */
+export function composeModelMatrix(
+  position: readonly [number, number, number],
+  rotationDegrees: readonly [number, number, number],
+  scale: readonly [number, number, number],
+): Mat4 {
+  const rx = (rotationDegrees[0] * Math.PI) / 180;
+  const ry = (rotationDegrees[1] * Math.PI) / 180;
+  const rz = (rotationDegrees[2] * Math.PI) / 180;
+  const cx = Math.cos(rx);
+  const sx = Math.sin(rx);
+  const cy = Math.cos(ry);
+  const sy = Math.sin(ry);
+  const cz = Math.cos(rz);
+  const sz = Math.sin(rz);
+
+  // R = Rz · Ry · Rx, expanded (column-major storage).
+  const r00 = cz * cy;
+  const r01 = cz * sy * sx - sz * cx;
+  const r02 = cz * sy * cx + sz * sx;
+  const r10 = sz * cy;
+  const r11 = sz * sy * sx + cz * cx;
+  const r12 = sz * sy * cx - cz * sx;
+  const r20 = -sy;
+  const r21 = cy * sx;
+  const r22 = cy * cx;
+
+  const [sX, sY, sZ] = scale;
+  return Float64Array.from([
+    r00 * sX, r10 * sX, r20 * sX, 0,
+    r01 * sY, r11 * sY, r21 * sY, 0,
+    r02 * sZ, r12 * sZ, r22 * sZ, 0,
+    position[0], position[1], position[2], 1,
+  ]);
+}
+
+/** A right-handed view matrix looking from `eye` at `center`, y-up. Public wrapper over {@link lookAt}. */
+export function viewMatrix(
+  eye: readonly [number, number, number],
+  center: readonly [number, number, number],
+  up: readonly [number, number, number] = [0, 1, 0],
+): Mat4 {
+  return lookAt(eye, center, up);
+}
+
+/** A right-handed perspective projection. Public wrapper over {@link perspective}. */
+export function projectionMatrix(fovY: number, aspect: number, near: number, far: number): Mat4 {
+  return perspective(fovY, aspect, near, far);
+}
+
+/** The identity basis, used when a mesh has no model transform (normals pass through). */
+const IDENTITY_3X3: readonly number[] = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+
+/**
+ * The 3×3 basis that carries an object normal into world space: the model
+ * matrix's upper-left block, kept in the same column-major layout so `drawMesh`
+ * can apply it as R·n directly (`basis[0,3,6]` = column 0, etc.). Applying the
+ * rotation+scale rather than its inverse-transpose is correct for rotation and
+ * uniform scale; a non-uniform scale skews normals slightly, which two-sided
+ * Lambert tolerates — the right trade for arbitrary imported geometry.
+ */
+function normalMatrix3x3(model: Mat4): readonly number[] {
+  return [model[0]!, model[1]!, model[2]!, model[4]!, model[5]!, model[6]!, model[8]!, model[9]!, model[10]!];
 }
 
 /** A vertex after transforms: view-space z (for clipping) + clip-space + attributes. */
@@ -228,32 +298,132 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
   const ll = Math.hypot(lx, ly, lz) || 1;
   const light: [number, number, number] = [lx / ll, ly / ll, lz / ll];
 
+  // The single mesh has no model transform, so model-view is the plain view and
+  // normals need no re-basing: reuse the scene path with an identity model.
+  drawMesh(mesh, viewProj, view, IDENTITY_3X3, size, size, out, depth, options.textures ?? null, light, ambient);
+}
+
+// --- Scene rendering: many placed meshes through one camera -----------------
+
+/** A mesh placed in a shared world by a model matrix, with its own textures. */
+export interface MeshSceneInstance {
+  readonly mesh: MeshAsset;
+  /** Column-major world transform (see {@link composeModelMatrix}). */
+  readonly model: Mat4;
+  /** Decoded base-colour texture per primitive (index-aligned), or null entries. */
+  readonly textures?: readonly (DecodedTexture | null)[];
+}
+
+export interface RenderMeshSceneOptions {
+  /** Framebuffer width in pixels; `out`/`depth` are `width × height`. */
+  readonly width: number;
+  /** Framebuffer height in pixels. */
+  readonly height: number;
+  /** RGBA output, `width × height × 4`. */
+  readonly out: Uint8ClampedArray;
+  /** Depth buffer, `width × height`; reset to +Infinity each call. */
+  readonly depth: Float32Array;
+  /** Column-major view matrix (see {@link viewMatrix}). */
+  readonly view: Mat4;
+  /** Column-major projection matrix (see {@link projectionMatrix}); aspect must be `width/height`. */
+  readonly projection: Mat4;
+  /** World-space direction *towards* the light (normalised internally). */
+  readonly lightDirection?: readonly [number, number, number];
+  /** Fill light in shadow, 0..1 (default 0.35). */
+  readonly ambient?: number;
+  /** Background clear colour RGBA (default transparent); pass null to composite over existing `out`. */
+  readonly background?: readonly [number, number, number, number] | null;
+}
+
+/**
+ * Rasterise many placed meshes through one shared camera into `width × height`
+ * RGBA + depth buffers. This is the runtime entry point: the player poses a
+ * cart's mesh sidecar with model matrices and a scene camera, and this draws
+ * every instance with a single shared depth buffer so they occlude each other
+ * correctly. `renderMesh` (the editor's single-mesh orbit preview) is the special
+ * case of one identity-posed instance auto-framed.
+ *
+ * Unlike `renderMesh`, `background` may be null to composite the meshes *over*
+ * whatever `out` already holds (the cart's framebuffer) — the depth buffer is
+ * still reset, so the meshes form one consistent 3D layer on top of the 2D frame.
+ */
+export function renderMeshScene(instances: readonly MeshSceneInstance[], options: RenderMeshSceneOptions): void {
+  const { width, height, out, depth, view, projection } = options;
+  const ambient = options.ambient ?? 0.35;
+  const viewProj = multiply(projection, view);
+
+  depth.fill(Infinity);
+  if (options.background !== null) {
+    const background = options.background ?? [0, 0, 0, 0];
+    for (let i = 0; i < width * height; i += 1) {
+      out[i * 4] = background[0]!;
+      out[i * 4 + 1] = background[1]!;
+      out[i * 4 + 2] = background[2]!;
+      out[i * 4 + 3] = background[3]!;
+    }
+  }
+
+  const [lx, ly, lz] = options.lightDirection ?? [0.4, 0.8, 0.6];
+  const ll = Math.hypot(lx, ly, lz) || 1;
+  const light: [number, number, number] = [lx / ll, ly / ll, lz / ll];
+
+  for (const instance of instances) {
+    const mvp = multiply(viewProj, instance.model);
+    const modelView = multiply(view, instance.model);
+    const normalBasis = normalMatrix3x3(instance.model);
+    drawMesh(instance.mesh, mvp, modelView, normalBasis, width, height, out, depth, instance.textures ?? null, light, ambient);
+  }
+}
+
+/**
+ * Draw one mesh's primitives, projecting positions by `mvp` (to clip space) and
+ * `modelView` (for the view-space z the near clipper needs), and re-basing object
+ * normals into world space by `normalBasis`. Shared by the single-mesh preview
+ * and the scene renderer so the projection + clip + raster path is written once.
+ */
+function drawMesh(
+  mesh: MeshAsset,
+  mvp: Mat4,
+  modelView: Mat4,
+  normalBasis: readonly number[],
+  width: number,
+  height: number,
+  out: Uint8ClampedArray,
+  depth: Float32Array,
+  textures: readonly (DecodedTexture | null)[] | null,
+  light: readonly [number, number, number],
+  ambient: number,
+): void {
   mesh.primitives.forEach((primitive, primitiveIndex) => {
     const positions = primitive.positions;
-    const normals = primitive.normals ?? computeSmoothNormals(positions, primitive.indices);
+    const objectNormals = primitive.normals ?? computeSmoothNormals(positions, primitive.indices);
     const uvs = primitive.uvs;
     const indices = primitive.indices;
-    const texture = options.textures?.[primitiveIndex] ?? null;
+    const texture = textures?.[primitiveIndex] ?? null;
     const [baseR, baseG, baseB, baseA] = primitive.material.baseColorFactor;
 
-    // Project one vertex through view (for near-z) and clip space.
     const project = (i: number): Vertex => {
       const x = positions[i * 3]!;
       const y = positions[i * 3 + 1]!;
       const z = positions[i * 3 + 2]!;
-      const viewZ = view[2]! * x + view[6]! * y + view[10]! * z + view[14]!;
-      const cx = viewProj[0]! * x + viewProj[4]! * y + viewProj[8]! * z + viewProj[12]!;
-      const cy = viewProj[1]! * x + viewProj[5]! * y + viewProj[9]! * z + viewProj[13]!;
-      const cz = viewProj[2]! * x + viewProj[6]! * y + viewProj[10]! * z + viewProj[14]!;
-      const cw = viewProj[3]! * x + viewProj[7]! * y + viewProj[11]! * z + viewProj[15]!;
+      // View-space z (for near-plane clipping) from the model-view matrix.
+      const viewZ = modelView[2]! * x + modelView[6]! * y + modelView[10]! * z + modelView[14]!;
+      const cx = mvp[0]! * x + mvp[4]! * y + mvp[8]! * z + mvp[12]!;
+      const cy = mvp[1]! * x + mvp[5]! * y + mvp[9]! * z + mvp[13]!;
+      const cz = mvp[2]! * x + mvp[6]! * y + mvp[10]! * z + mvp[14]!;
+      const cw = mvp[3]! * x + mvp[7]! * y + mvp[11]! * z + mvp[15]!;
+      // Re-base the object normal into world space (rotation/scale only).
+      const onx = objectNormals[i * 3]!;
+      const ony = objectNormals[i * 3 + 1]!;
+      const onz = objectNormals[i * 3 + 2]!;
       return {
         clip: [cx, cy, cz, cw],
         viewZ,
         u: uvs ? uvs[i * 2]! : 0,
         v: uvs ? uvs[i * 2 + 1]! : 0,
-        nx: normals[i * 3]!,
-        ny: normals[i * 3 + 1]!,
-        nz: normals[i * 3 + 2]!,
+        nx: normalBasis[0]! * onx + normalBasis[3]! * ony + normalBasis[6]! * onz,
+        ny: normalBasis[1]! * onx + normalBasis[4]! * ony + normalBasis[7]! * onz,
+        nz: normalBasis[2]! * onx + normalBasis[5]! * ony + normalBasis[8]! * onz,
       };
     };
 
@@ -264,7 +434,8 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
           clipped[c]!,
           clipped[c + 1]!,
           clipped[c + 2]!,
-          size,
+          width,
+          height,
           out,
           depth,
           texture,
@@ -282,7 +453,8 @@ function rasterizeTriangle(
   a: Vertex,
   b: Vertex,
   c: Vertex,
-  size: number,
+  width: number,
+  height: number,
   out: Uint8ClampedArray,
   depth: Float32Array,
   texture: DecodedTexture | null,
@@ -290,12 +462,15 @@ function rasterizeTriangle(
   light: readonly [number, number, number],
   ambient: number,
 ): void {
-  // Perspective divide to NDC, then to screen pixels.
+  // Perspective divide to NDC, then to screen pixels. NDC spans the full extent
+  // of each axis independently, so x maps by width and y by height — a mesh drawn
+  // into a non-square framebuffer (the runtime's 240×136) is undistorted as long
+  // as the projection's aspect matches width/height.
   const toScreen = (v: Vertex): { x: number; y: number; z: number; invW: number } => {
     const invW = 1 / v.clip[3];
     return {
-      x: (v.clip[0] * invW * 0.5 + 0.5) * size,
-      y: (1 - (v.clip[1] * invW * 0.5 + 0.5)) * size,
+      x: (v.clip[0] * invW * 0.5 + 0.5) * width,
+      y: (1 - (v.clip[1] * invW * 0.5 + 0.5)) * height,
       z: v.clip[2] * invW, // NDC z, linear in screen space → the depth value
       invW,
     };
@@ -310,9 +485,9 @@ function rasterizeTriangle(
   const invArea = 1 / area;
 
   const minX = Math.max(0, Math.floor(Math.min(sa.x, sb.x, sc.x)));
-  const maxX = Math.min(size - 1, Math.ceil(Math.max(sa.x, sb.x, sc.x)));
+  const maxX = Math.min(width - 1, Math.ceil(Math.max(sa.x, sb.x, sc.x)));
   const minY = Math.max(0, Math.floor(Math.min(sa.y, sb.y, sc.y)));
-  const maxY = Math.min(size - 1, Math.ceil(Math.max(sa.y, sb.y, sc.y)));
+  const maxY = Math.min(height - 1, Math.ceil(Math.max(sa.y, sb.y, sc.y)));
 
   for (let y = minY; y <= maxY; y += 1) {
     for (let x = minX; x <= maxX; x += 1) {
@@ -325,7 +500,7 @@ function rasterizeTriangle(
       if (w0 < 0 || w1 < 0 || w2 < 0) continue;
 
       const zNdc = w0 * sa.z + w1 * sb.z + w2 * sc.z; // linear in screen space
-      const di = y * size + x;
+      const di = y * width + x;
       if (zNdc >= depth[di]!) continue;
 
       // Perspective-correct attribute interpolation: weight by 1/w, then divide.

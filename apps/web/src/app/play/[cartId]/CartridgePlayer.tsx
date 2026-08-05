@@ -8,10 +8,11 @@
  * server component.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   getModel,
   mount,
+  parseMeshScene,
   serializeReplay,
   type MailboxEvent,
   type ModelId,
@@ -44,12 +45,21 @@ interface CartridgePlayerProps {
   collision: CollisionField | null;
   /** The cart's authored tile-flags layer, or null when none is saved. */
   flags: FlagsField | null;
+  /**
+   * The cart's raw mesh sidecar JSON, or null when none is saved. Parsed on the
+   * client (its geometry decodes into typed arrays that can't cross the RSC
+   * server→client boundary the plain-object sidecars use).
+   */
+  meshRaw: string | null;
 }
 
 type SubmitState = "idle" | "working" | "submitted" | "error";
 
-export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags }: CartridgePlayerProps) {
+export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, meshRaw }: CartridgePlayerProps) {
   const stageRef = useRef<HTMLDivElement>(null);
+  // Decode the mesh sidecar once per cart: parsing deserialises geometry, so it
+  // must not rerun on every render (and a malformed payload yields null → no meshes).
+  const mesh = useMemo(() => parseMeshScene(meshRaw), [meshRaw]);
   const handleRef = useRef<PlayerHandle | null>(null);
   const bestScoreRef = useRef<number | null>(null);
   const unlockedRef = useRef(false);
@@ -94,6 +104,9 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       collision: collision ?? undefined,
       // The cart's authored tile-flags layer, read via cartbox.flag(x, y, n).
       flags: flags ?? undefined,
+      // The cart's authored 3D mesh scene, rasterised over each frame by the
+      // player's software rasteriser (Phase 2 of the mesh asset feature).
+      mesh: mesh ?? undefined,
       onReady: () => setStatus("ready"),
       onError: () => setStatus("error"),
       onEvent: (event: MailboxEvent) => {
@@ -109,7 +122,7 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
     handleRef.current = handle;
 
     return () => handle.destroy();
-  }, [cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags]);
+  }, [cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh]);
 
   const togglePlayback = () => {
     const handle = handleRef.current;

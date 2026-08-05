@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { mount, type AnimSpec, type CollisionField, type FlagsField, type ParticleSpec, type PlayerHandle, type PostFxSettings, type SceneSpec } from "@cartbox/player";
+import { mount, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ParticleSpec, type PlayerHandle, type PostFxSettings, type SceneSpec } from "@cartbox/player";
 
 import styles from "./editor.module.css";
 
@@ -29,10 +29,12 @@ interface RunOverlayProps {
   collision?: CollisionField;
   /** The cart's tile-flags layer, exposed to its Lua via cartbox.flag during the playtest. */
   flags?: FlagsField;
+  /** The cart's 3D mesh scene, rasterised over each frame during the playtest. */
+  mesh?: MeshScene;
   onClose: () => void;
 }
 
-export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, particles, collision, flags, onClose }: RunOverlayProps) {
+export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, particles, collision, flags, mesh, onClose }: RunOverlayProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<PlayerHandle | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
@@ -53,6 +55,7 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
     particles ? "Weather" : null,
     collision ? "Collision" : null,
     flags ? "Flags" : null,
+    mesh ? "Mesh" : null,
   ].filter((name): name is string => name !== null);
 
   useEffect(() => {
@@ -82,6 +85,8 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
       // Playtest with the cart's collision + flags layers available to its own Lua.
       collision,
       flags,
+      // Playtest the cart's imported 3D meshes, rasterised over each frame.
+      mesh,
       onReady: () => setStatus("ready"),
       // Surface the real load-error message instead of a generic failure line.
       // (A runtime Lua error renders on the cart's own screen — the core does not
@@ -100,7 +105,7 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
       handle.destroy();
       URL.revokeObjectURL(url);
     };
-  }, [bytes, engineUrl, postFx, scene, anim, particles, collision, flags]);
+  }, [bytes, engineUrl, postFx, scene, anim, particles, collision, flags, mesh]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {

@@ -26,6 +26,7 @@ import { AnimatedForegroundSurface } from "./anim/AnimatedForegroundSurface.js";
 import { evaluate } from "./anim/animPlayer.js";
 import type { AnimSpec } from "./anim/animModel.js";
 import { ParticleOverlaySurface } from "./particles/ParticleOverlaySurface.js";
+import { MeshOverlaySurface } from "./mesh/MeshOverlaySurface.js";
 import type { ControlScheme, PlayerOptions } from "./types.js";
 
 /**
@@ -44,6 +45,7 @@ export class Player {
   private surface?: DisplaySurface;
   private litSurface?: LitCanvasSurface;
   private sceneSurface?: SceneBackdropSurface;
+  private meshSurface?: MeshOverlaySurface;
   private foregroundSurface?: AnimatedForegroundSurface;
   private postFxSurface?: PostFxSurface;
   private basePostFx?: PostFxSettings;
@@ -161,6 +163,14 @@ export class Player {
         const particles = this.options.particles;
         if (particles && particles.emitters.length > 0) {
           surface = new ParticleOverlaySurface(surface, this.model.width, this.model.height, particles);
+        }
+        // A declared 3D mesh scene rasterises over the cart frame. It wraps just
+        // OUTSIDE the weather overlay, so the meshes sit in the scene (weather
+        // still falls in front of them) but ahead of the cart, foreground, and
+        // backdrop. Being a decorator, its output flows through lighting + FX.
+        const mesh = this.options.mesh;
+        if (mesh) {
+          surface = this.meshSurface = await MeshOverlaySurface.create(surface, this.model.width, this.model.height, mesh);
         }
         // Foreground placements draw over the cart AND the backdrop, so they wrap
         // the base surface FIRST (innermost); the scene backdrop then wraps around

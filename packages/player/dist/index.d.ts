@@ -1,3 +1,5 @@
+import { MeshSceneInstance, MeshAsset, Mat4 } from '@cartbox/editor';
+
 /**
  * Console models. A model is a fixed hardware spec plus the WASM runtime that
  * runs it. Threading a model through the player/engine/replay/thumbnail paths
@@ -630,7 +632,7 @@ interface SceneLayer {
     offsetY?: number;
 }
 /** How the scene camera moves each frame. */
-interface SceneCamera {
+interface SceneCamera$1 {
     /** Auto-scroll in px/frame (a living backdrop with no cart input). Default 0. */
     autoScrollX?: number;
     autoScrollY?: number;
@@ -639,7 +641,7 @@ interface SceneCamera {
 interface SceneSpec {
     layers: SceneLayer[];
     atmosphere: AtmosphereParams;
-    camera: SceneCamera;
+    camera: SceneCamera$1;
     /**
      * The palette index the cart leaves as "background": the runtime shows the
      * parallax backdrop through every pixel the cart drew in this colour, and keeps
@@ -806,6 +808,57 @@ declare function emitterPreset(kind: ParticleKind, seed: number): ParticleEmitte
  * declaration clears the column rather than storing a no-op.
  */
 declare function parseParticles(raw: unknown): ParticleSpec | null;
+
+/**
+ * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
+ * the software rasteriser can draw. This is the player-side counterpart to the
+ * editor's `MeshSidecar` — it decodes the same stored JSON but yields ready-to-
+ * render geometry (a decoded {@link MeshAsset} plus a baked model matrix) rather
+ * than the editable envelope.
+ *
+ * Kept pure and DOM-free so the parse + camera maths are unit-testable: texture
+ * decoding (which needs the browser) is the surface's job, not this module's. A
+ * malformed sidecar never throws into the run loop — bad entries are dropped, and
+ * an empty or unparseable payload yields null (the cart plays without meshes).
+ */
+
+/** One placed mesh ready to rasterise: decoded geometry + its baked world matrix. */
+interface MeshInstance extends MeshSceneInstance {
+    readonly mesh: MeshAsset;
+    readonly model: Mat4;
+}
+/** A world-space axis-aligned bounding box with a framing centre + radius. */
+interface SceneBounds {
+    readonly min: readonly [number, number, number];
+    readonly max: readonly [number, number, number];
+    readonly center: readonly [number, number, number];
+    /** Half the bounding sphere's diameter — the radius the camera frames. */
+    readonly radius: number;
+}
+/** The parsed runtime scene: every placed mesh and their shared world bounds. */
+interface MeshScene {
+    readonly instances: readonly MeshInstance[];
+    readonly bounds: SceneBounds;
+}
+/** A view + projection pair ready to hand to `renderMeshScene`. */
+interface SceneCamera {
+    readonly view: Mat4;
+    readonly projection: Mat4;
+}
+/**
+ * Parse a cart's stored mesh sidecar into a runtime {@link MeshScene}. Returns
+ * null when there is nothing to render (no payload, unparseable JSON, or every
+ * entry dropped as malformed), so the player can skip the mesh surface entirely.
+ */
+declare function parseMeshScene(raw: string | null | undefined): MeshScene | null;
+/**
+ * Build an orbit camera that frames the scene bounds from `yaw`/`pitch`, fitting
+ * the whole scene into the vertical field of view. `aspect` is the framebuffer's
+ * width/height, so the projection is undistorted on the runtime's non-square
+ * screen. This is the P2 placeholder for camera control; the P3 draw mailbox will
+ * let a cart drive the camera itself.
+ */
+declare function buildOrbitCamera(bounds: SceneBounds, yaw: number, pitch: number, aspect: number, fovY?: number): SceneCamera;
 
 /**
  * The cart-facing collision accessor, as injectable Lua.
@@ -993,6 +1046,16 @@ interface PlayerOptions {
      * ParticleSpec with `parseParticles`.
      */
     particles?: ParticleSpec;
+    /**
+     * Rasterise a declared 3D mesh scene over each frame: imported triangle meshes
+     * (OBJ/glTF/GLB) placed by transforms, drawn by a pure software rasteriser
+     * (the runtime has no GPU triangle path). Composited over the cart frame with a
+     * shared depth buffer, and — being a decorator — graded and bloomed through the
+     * lighting + post-FX stack. The scene auto-orbits for now; a later draw mailbox
+     * will let a cart drive the camera. Parse a cart's `mesh` sidecar into a
+     * MeshScene with `parseMeshScene`.
+     */
+    mesh?: MeshScene;
     /**
      * Expose the cart's authored collision layer to its own Lua as
      * `cartbox.solid(x, y)` (true when a map cell is solid) and `cartbox.mapsize()`.
@@ -2205,6 +2268,50 @@ declare class ParticleOverlaySurface implements DisplaySurface {
 }
 
 /**
+ * MeshOverlaySurface — a display surface that rasterises a cart's declared 3D
+ * mesh scene over each presented frame, then hands off to an inner surface. This
+ * is Phase 2 of the mesh asset feature: the runtime has no GPU triangle path, so
+ * the same pure software rasteriser the editor previews with (`renderMeshScene`
+ * in `@cartbox/editor`) draws the meshes straight into the framebuffer here.
+ *
+ * It decorates any {@link DisplaySurface}, compositing the meshes *over* the cart
+ * frame with a shared depth buffer so the instances occlude each other correctly.
+ * Because it is a decorator, its output flows through the lighting and post-FX
+ * stack that wrap the base surface — the meshes are graded and bloomed with the
+ * rest of the scene rather than pasted on flat.
+ *
+ * Camera control is deliberately minimal for Phase 2: the scene auto-orbits at a
+ * gentle rate so a declared mesh is visibly rendered in the runtime. The Phase 3
+ * draw mailbox will let a cart drive the camera itself; nothing here needs to
+ * change when it does — only the camera source.
+ *
+ * Textures are decoded once, asynchronously, at construction (the browser owns
+ * image decoding), which is why the surface is built through a static async
+ * `create`, mirroring `LitCanvasSurface.create`.
+ */
+
+declare class MeshOverlaySurface implements DisplaySurface {
+    private readonly inner;
+    private readonly width;
+    private readonly height;
+    private readonly scene;
+    private readonly instances;
+    private frame;
+    private readonly output;
+    private readonly presented;
+    private readonly depth;
+    private constructor();
+    /**
+     * Decode every instance's base-colour textures, then build the surface. Any
+     * texture that fails to decode falls back to null (flat base colour), so a
+     * bad image never blocks the cart — the mesh still renders, just untextured.
+     */
+    static create(inner: DisplaySurface, width: number, height: number, scene: MeshScene): Promise<MeshOverlaySurface>;
+    blit(rgba: Uint8Array): void;
+    destroy(): void;
+}
+
+/**
  * @cartbox/player — public entry point.
  *
  * Usage:
@@ -2232,4 +2339,4 @@ declare class ParticleOverlaySurface implements DisplaySurface {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, type CartSpriteSource, CartridgeLoadError, type ClipSample, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, type FlagsField, type GeneratedTrack, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxRead, type MaterialBuffer, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, PARTICLE_KINDS, POST_FX_EFFECTS, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPlacement, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, TILT_SHIFT_FEATHER, type TrackMode, type Vec3, type VerificationResult, WebgpuLightingLayer, acesFilmic, acesFilmicChannel, anyPostFxEnabled, cameraAt, collisionSdkLua, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeCamera, decodeLights, decodeMailbox, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interpolateNormal, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parseAnim, parseCollisionField, parseFlagsField, parseParticles, parsePostFxSettings, parseReplay, parseScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, readCartCode, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleNormalBilinear, sampleTrack, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, sway, tiltShiftBlur, uniformsFromSettings, verifyReplayScore };
+export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, type CartSpriteSource, CartridgeLoadError, type ClipSample, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, type FlagsField, type GeneratedTrack, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxRead, type MaterialBuffer, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera as MeshSceneCamera, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, PARTICLE_KINDS, POST_FX_EFFECTS, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPlacement, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera$1 as SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, TILT_SHIFT_FEATHER, type TrackMode, type Vec3, type VerificationResult, WebgpuLightingLayer, acesFilmic, acesFilmicChannel, anyPostFxEnabled, buildOrbitCamera, cameraAt, collisionSdkLua, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeCamera, decodeLights, decodeMailbox, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interpolateNormal, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parseAnim, parseCollisionField, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, readCartCode, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleNormalBilinear, sampleTrack, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, sway, tiltShiftBlur, uniformsFromSettings, verifyReplayScore };

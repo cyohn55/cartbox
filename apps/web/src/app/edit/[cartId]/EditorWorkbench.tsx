@@ -12,7 +12,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { defaultPostFxSettings, type AnimSpec, type ParticleSpec, type PostFxSettings, type SceneSpec } from "@cartbox/player";
+import { defaultPostFxSettings, parseMeshScene, type AnimSpec, type MeshScene, type ParticleSpec, type PostFxSettings, type SceneSpec } from "@cartbox/player";
 import {
   BANK_COUNT,
   CartEngine,
@@ -346,6 +346,10 @@ function WorkbenchBody({
   // coarse operations, not per-stroke history); they persist with the cart via
   // their own sidecar column, like the voxel/anim/particle sidecars.
   const [mesh, setMesh] = useState<MeshSidecar>(() => decodeMeshSidecar(initialMesh));
+  // The runtime consumes a MeshScene (decoded geometry + baked matrices), so the
+  // authoring sidecar is re-encoded and parsed for the playtest. Memoised on the
+  // sidecar because decoding geometry is not free; import/transform edits are coarse.
+  const meshScene = useMemo<MeshScene | null>(() => parseMeshScene(encodeMeshSidecar(mesh)), [mesh]);
   const [activeTab, setActiveTab] = useState<Tab>("Assets");
   useEffect(() => {
     if (pendingVoxel) clearPendingVoxelEdit();
@@ -758,6 +762,7 @@ function WorkbenchBody({
           particles={particles ?? undefined}
           collision={collision ?? undefined}
           flags={flags ?? undefined}
+          mesh={meshScene ?? undefined}
           onClose={() => setRunBytes(null)}
         />
       )}

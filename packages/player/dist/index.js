@@ -3638,6 +3638,177 @@ var ParticleOverlaySurface = class {
 };
 var lerp3 = (a, b, t) => a + (b - a) * t;
 
+// src/mesh/MeshOverlaySurface.ts
+import { renderMeshScene } from "@cartbox/editor";
+
+// src/mesh/meshScene.ts
+import {
+  composeModelMatrix,
+  deserializeMeshAsset,
+  meshBounds,
+  projectionMatrix,
+  viewMatrix
+} from "@cartbox/editor";
+function isFiniteTriple(value) {
+  return Array.isArray(value) && value.length === 3 && value.every((n) => typeof n === "number" && Number.isFinite(n));
+}
+function readTransform(value) {
+  const raw = value ?? {};
+  return {
+    position: isFiniteTriple(raw.position) ? raw.position : [0, 0, 0],
+    rotation: isFiniteTriple(raw.rotation) ? raw.rotation : [0, 0, 0],
+    scale: isFiniteTriple(raw.scale) ? raw.scale : [1, 1, 1]
+  };
+}
+function transformPoint(m, x, y, z) {
+  return [
+    m[0] * x + m[4] * y + m[8] * z + m[12],
+    m[1] * x + m[5] * y + m[9] * z + m[13],
+    m[2] * x + m[6] * y + m[10] * z + m[14]
+  ];
+}
+function sceneBounds(instances) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+  for (const instance of instances) {
+    const local = meshBounds(instance.mesh);
+    if (!local) continue;
+    for (let corner = 0; corner < 8; corner += 1) {
+      const cx = corner & 1 ? local.max[0] : local.min[0];
+      const cy = corner & 2 ? local.max[1] : local.min[1];
+      const cz = corner & 4 ? local.max[2] : local.min[2];
+      const [wx, wy, wz] = transformPoint(instance.model, cx, cy, cz);
+      minX = Math.min(minX, wx);
+      minY = Math.min(minY, wy);
+      minZ = Math.min(minZ, wz);
+      maxX = Math.max(maxX, wx);
+      maxY = Math.max(maxY, wy);
+      maxZ = Math.max(maxZ, wz);
+    }
+  }
+  if (!Number.isFinite(minX)) {
+    return { min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5], center: [0, 0, 0], radius: 1 };
+  }
+  const center = [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2];
+  const radius = Math.max(1e-3, 0.5 * Math.hypot(maxX - minX, maxY - minY, maxZ - minZ));
+  return { min: [minX, minY, minZ], max: [maxX, maxY, maxZ], center, radius };
+}
+function parseMeshScene(raw) {
+  if (!raw) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const entries = parsed.meshes;
+  if (!Array.isArray(entries)) return null;
+  const instances = [];
+  for (const entry of entries) {
+    const record = entry;
+    if (typeof record.mesh !== "string") continue;
+    let mesh;
+    try {
+      mesh = deserializeMeshAsset(record.mesh);
+    } catch {
+      continue;
+    }
+    const t = readTransform(record.transform);
+    instances.push({ mesh, model: composeModelMatrix(t.position, t.rotation, t.scale) });
+  }
+  if (instances.length === 0) return null;
+  return { instances, bounds: sceneBounds(instances) };
+}
+function buildOrbitCamera(bounds, yaw, pitch, aspect, fovY = 50 * Math.PI / 180) {
+  const { center, radius } = bounds;
+  const distance = radius / Math.sin(fovY / 2) + radius;
+  const cosPitch = Math.cos(pitch);
+  const eye = [
+    center[0] + distance * cosPitch * Math.sin(yaw),
+    center[1] + distance * Math.sin(pitch),
+    center[2] + distance * cosPitch * Math.cos(yaw)
+  ];
+  return {
+    view: viewMatrix(eye, center),
+    projection: projectionMatrix(fovY, aspect, Math.max(0.01, radius * 0.05), distance + radius * 4)
+  };
+}
+
+// src/mesh/MeshOverlaySurface.ts
+var AUTO_ORBIT_YAW_PER_FRAME = 2 * Math.PI / 720;
+var AUTO_ORBIT_PITCH = 0.35;
+var MeshOverlaySurface = class _MeshOverlaySurface {
+  constructor(inner, width, height, scene, instances) {
+    this.inner = inner;
+    this.width = width;
+    this.height = height;
+    this.scene = scene;
+    this.instances = instances;
+    this.frame = 0;
+    this.output = new Uint8ClampedArray(width * height * 4);
+    this.presented = new Uint8Array(this.output.buffer);
+    this.depth = new Float32Array(width * height);
+  }
+  /**
+   * Decode every instance's base-colour textures, then build the surface. Any
+   * texture that fails to decode falls back to null (flat base colour), so a
+   * bad image never blocks the cart — the mesh still renders, just untextured.
+   */
+  static async create(inner, width, height, scene) {
+    const instances = [];
+    for (const instance of scene.instances) {
+      const textures = await Promise.all(
+        instance.mesh.primitives.map(
+          (primitive) => primitive.material.baseColorImage ? decodeTexture(primitive.material.baseColorImage.mime, primitive.material.baseColorImage.bytes) : Promise.resolve(null)
+        )
+      );
+      instances.push({ mesh: instance.mesh, model: instance.model, textures });
+    }
+    return new _MeshOverlaySurface(inner, width, height, scene, instances);
+  }
+  blit(rgba) {
+    this.output.set(rgba);
+    const yaw = this.frame * AUTO_ORBIT_YAW_PER_FRAME;
+    const camera = buildOrbitCamera(this.scene.bounds, yaw, AUTO_ORBIT_PITCH, this.width / this.height);
+    renderMeshScene(this.instances, {
+      width: this.width,
+      height: this.height,
+      out: this.output,
+      depth: this.depth,
+      view: camera.view,
+      projection: camera.projection,
+      background: null
+    });
+    this.frame += 1;
+    this.inner.blit(this.presented);
+  }
+  destroy() {
+    this.inner.destroy();
+  }
+};
+async function decodeTexture(mime, bytes) {
+  if (typeof createImageBitmap !== "function" || typeof OffscreenCanvas !== "function") return null;
+  try {
+    const bitmap = await createImageBitmap(new Blob([bytes], { type: mime }));
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const context = canvas.getContext("2d");
+    if (!context) {
+      bitmap.close();
+      return null;
+    }
+    context.drawImage(bitmap, 0, 0);
+    const image = context.getImageData(0, 0, bitmap.width, bitmap.height);
+    bitmap.close();
+    return { width: image.width, height: image.height, data: image.data };
+  } catch {
+    return null;
+  }
+}
+
 // src/player.ts
 function shouldUseTouch(scheme, view) {
   if (scheme === "touch") return true;
@@ -3731,6 +3902,10 @@ var Player = class {
         const particles = this.options.particles;
         if (particles && particles.emitters.length > 0) {
           surface = new ParticleOverlaySurface(surface, this.model.width, this.model.height, particles);
+        }
+        const mesh = this.options.mesh;
+        if (mesh) {
+          surface = this.meshSurface = await MeshOverlaySurface.create(surface, this.model.width, this.model.height, mesh);
         }
         if (wantsForeground && this.cartSource) {
           surface = this.foregroundSurface = new AnimatedForegroundSurface(
@@ -4333,6 +4508,7 @@ export {
   MAX_PYRAMID_LEVELS,
   MIN_PYRAMID_DIMENSION,
   MODELS,
+  MeshOverlaySurface,
   NORMAL_DIRECTION_COUNT,
   NORMAL_VECTORS,
   PARTICLE_KINDS,
@@ -4350,6 +4526,7 @@ export {
   acesFilmic,
   acesFilmicChannel,
   anyPostFxEnabled,
+  buildOrbitCamera,
   cameraAt,
   collisionSdkLua,
   composeParallax,
@@ -4387,6 +4564,7 @@ export {
   parseAnim,
   parseCollisionField,
   parseFlagsField,
+  parseMeshScene,
   parseParticles,
   parsePostFxSettings,
   parseReplay,

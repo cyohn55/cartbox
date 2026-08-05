@@ -141,6 +141,13 @@ export { parseObj, encodeObj, type ParseObjOptions, type ObjFiles } from "./mode
 export { parseGlb, parseGltf, parseGltfText, encodeGlb } from "./model/gltfCodec";
 export {
   renderMesh,
+  renderMeshScene,
+  composeModelMatrix,
+  viewMatrix,
+  projectionMatrix,
+  type Mat4,
+  type MeshSceneInstance,
+  type RenderMeshSceneOptions,
   type DecodedTexture,
   type OrbitCamera,
   type RenderMeshOptions,

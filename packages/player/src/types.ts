@@ -13,6 +13,7 @@ import type { PostFxSettings } from "./fx/postfx.js";
 import type { SceneSpec } from "./scene/sceneModel.js";
 import type { AnimSpec } from "./anim/animModel.js";
 import type { ParticleSpec } from "./particles/particleModel.js";
+import type { MeshScene } from "./mesh/meshScene.js";
 import type { CollisionField } from "./collisionSdk.js";
 import type { FlagsField } from "./flagsSdk.js";
 
@@ -115,6 +116,16 @@ export interface PlayerOptions {
    * ParticleSpec with `parseParticles`.
    */
   particles?: ParticleSpec;
+  /**
+   * Rasterise a declared 3D mesh scene over each frame: imported triangle meshes
+   * (OBJ/glTF/GLB) placed by transforms, drawn by a pure software rasteriser
+   * (the runtime has no GPU triangle path). Composited over the cart frame with a
+   * shared depth buffer, and — being a decorator — graded and bloomed through the
+   * lighting + post-FX stack. The scene auto-orbits for now; a later draw mailbox
+   * will let a cart drive the camera. Parse a cart's `mesh` sidecar into a
+   * MeshScene with `parseMeshScene`.
+   */
+  mesh?: MeshScene;
   /**
    * Expose the cart's authored collision layer to its own Lua as
    * `cartbox.solid(x, y)` (true when a map cell is solid) and `cartbox.mapsize()`.
