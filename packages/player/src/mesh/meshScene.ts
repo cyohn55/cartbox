@@ -144,32 +144,49 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
   return { instances, bounds: sceneBounds(instances) };
 }
 
+/** Optional overrides a cart supplies via `cartbox.meshcam(...)` (see the mailbox). */
+export interface OrbitCameraOptions {
+  /** Vertical field of view, radians; defaults to ~50°. */
+  readonly fov?: number;
+  /** Explicit distance from the target, world units; omitted/≤0 auto-fits the scene. */
+  readonly distance?: number | null;
+  /** Offset added to the scene centre to aim the camera, world units. */
+  readonly targetOffset?: readonly [number, number, number];
+}
+
 /**
  * Build an orbit camera that frames the scene bounds from `yaw`/`pitch`, fitting
  * the whole scene into the vertical field of view. `aspect` is the framebuffer's
  * width/height, so the projection is undistorted on the runtime's non-square
- * screen. This is the P2 placeholder for camera control; the P3 draw mailbox will
- * let a cart drive the camera itself.
+ * screen. With no options this auto-fits the scene (the player's gentle P2
+ * auto-orbit); a cart drives it explicitly through `options` via the mesh camera.
  */
 export function buildOrbitCamera(
   bounds: SceneBounds,
   yaw: number,
   pitch: number,
   aspect: number,
-  fovY = (50 * Math.PI) / 180,
+  options: OrbitCameraOptions = {},
 ): SceneCamera {
-  const { center, radius } = bounds;
-  // Distance that fits the bounding sphere in the vertical FOV, plus its radius so
-  // the near face never clips the frame edge.
-  const distance = radius / Math.sin(fovY / 2) + radius;
+  const { radius } = bounds;
+  const fovY = options.fov && options.fov > 0 ? options.fov : (50 * Math.PI) / 180;
+  const target: [number, number, number] = [
+    bounds.center[0] + (options.targetOffset?.[0] ?? 0),
+    bounds.center[1] + (options.targetOffset?.[1] ?? 0),
+    bounds.center[2] + (options.targetOffset?.[2] ?? 0),
+  ];
+  // Auto-fit: the distance that frames the bounding sphere in the vertical FOV,
+  // plus its radius so the near face never clips the frame edge. A cart can
+  // override it (e.g. to push in or pull back) via options.distance.
+  const distance = options.distance && options.distance > 0 ? options.distance : radius / Math.sin(fovY / 2) + radius;
   const cosPitch = Math.cos(pitch);
   const eye: [number, number, number] = [
-    center[0] + distance * cosPitch * Math.sin(yaw),
-    center[1] + distance * Math.sin(pitch),
-    center[2] + distance * cosPitch * Math.cos(yaw),
+    target[0] + distance * cosPitch * Math.sin(yaw),
+    target[1] + distance * Math.sin(pitch),
+    target[2] + distance * cosPitch * Math.cos(yaw),
   ];
   return {
-    view: viewMatrix(eye, center),
+    view: viewMatrix(eye, target),
     projection: projectionMatrix(fovY, aspect, Math.max(0.01, radius * 0.05), distance + radius * 4),
   };
 }

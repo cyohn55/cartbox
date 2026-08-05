@@ -24,6 +24,15 @@
  *   fixed-point words (× {@link CAMERA_SCALE}) for x and y. An unset camera reads
  *   as (0, 0), which adds nothing to the scene's own auto-scroll.
  *
+ *   Mesh camera (words 64..71): the orbit camera a cart drives its 3D meshes with
+ *   via `cartbox.meshcam(yaw, pitch, distance, fov)`, so runtime meshes stop
+ *   auto-orbiting and follow gameplay. Per-frame state like the lights and camera:
+ *   word 64 is a control flag (bit 0 = active this frame — an unset block reads 0
+ *   and leaves the player's auto-orbit in charge, so existing carts are
+ *   unaffected), then yaw/pitch (× {@link MESH_CAM_ANGLE_SCALE}), distance
+ *   (× {@link MESH_CAM_DIST_SCALE}, 0 = auto-fit), a target offset x/y/z from the
+ *   scene centre (× {@link MESH_CAM_DIST_SCALE}), and fov (× {@link MESH_CAM_ANGLE_SCALE}, 0 = default).
+ *
  * This module is pure — no engine, no DOM — so the protocol is unit-testable.
  */
 
@@ -34,7 +43,7 @@ export const MAILBOX_TYPE_SCORE = 2;
 export const MAILBOX_TYPE_PROGRESS = 3;
 
 /** Total reserved pmem words (mirrors CBX_MAILBOX_WORDS in the engine shim). */
-export const MAILBOX_WORDS = 64;
+export const MAILBOX_WORDS = 72;
 /** Event ring capacity. Small on purpose: the host drains the ring every tick. */
 export const EVENT_CAPACITY = 8;
 /** Word index of the light-count header (just past the event ring). */
@@ -54,6 +63,17 @@ export const CAMERA_BASE = LIGHTS_BASE + 1 + LIGHTS_CAPACITY * LIGHT_STRIDE;
  * — far beyond any cart world.
  */
 export const CAMERA_SCALE = 16;
+
+/** Word index of the cart-driven mesh camera block, just past the parallax camera. */
+export const MESH_CAM_BASE = CAMERA_BASE + 2;
+/** Words in the mesh-camera block: flags, yaw, pitch, distance, targetX/Y/Z, fov. */
+export const MESH_CAM_STRIDE = 8;
+/** Fixed-point scale for the mesh camera's yaw/pitch/fov (radians × this), signed. */
+export const MESH_CAM_ANGLE_SCALE = 1024;
+/** Fixed-point scale for the mesh camera's distance + target offset (world units × this), signed. */
+export const MESH_CAM_DIST_SCALE = 256;
+/** Bit 0 of the flags word: the cart is driving the mesh camera this frame. */
+export const MESH_CAM_ACTIVE = 1;
 
 /**
  * Directional and spot lights ride in the bits that a point light leaves zero,
@@ -224,6 +244,51 @@ export function decodeCamera(words: Uint32Array): MailboxCamera {
   return {
     x: ((words[CAMERA_BASE] ?? 0) | 0) / CAMERA_SCALE,
     y: ((words[CAMERA_BASE + 1] ?? 0) | 0) / CAMERA_SCALE,
+  };
+}
+
+/** An orbit camera a cart drives its 3D meshes with, all fields already de-scaled. */
+export interface MailboxMeshCamera {
+  /** Yaw around the scene centre, radians. */
+  yaw: number;
+  /** Pitch above the horizon, radians. */
+  pitch: number;
+  /** Distance from the target, world units; null means auto-fit to the scene. */
+  distance: number | null;
+  /** Target offset from the scene centre, world units. */
+  target: [number, number, number];
+  /** Vertical field of view, radians; null means the player's default. */
+  fov: number | null;
+}
+
+/**
+ * Decodes the mesh camera a cart published this frame via `cartbox.meshcam(...)`.
+ *
+ * Returns null when the block's active flag is clear — the common case for every
+ * cart that doesn't drive its meshes — so the player keeps auto-orbiting. Like
+ * the lights and parallax camera this is per-frame state, not an event, so there
+ * is no sequence to track: the block always holds the latest pose the cart set.
+ *
+ * @param words The mailbox window (same array {@link decodeMailbox} reads).
+ */
+export function decodeMeshCamera(words: Uint32Array): MailboxMeshCamera | null {
+  if (words.length <= MESH_CAM_BASE + MESH_CAM_STRIDE - 1) {
+    return null;
+  }
+  const flags = words[MESH_CAM_BASE] ?? 0;
+  if ((flags & MESH_CAM_ACTIVE) === 0) {
+    return null;
+  }
+  const angle = (word: number): number => ((word | 0) / MESH_CAM_ANGLE_SCALE);
+  const dist = (word: number): number => ((word | 0) / MESH_CAM_DIST_SCALE);
+  const distanceWord = words[MESH_CAM_BASE + 3] ?? 0;
+  const fovWord = words[MESH_CAM_BASE + 7] ?? 0;
+  return {
+    yaw: angle(words[MESH_CAM_BASE + 1] ?? 0),
+    pitch: angle(words[MESH_CAM_BASE + 2] ?? 0),
+    distance: distanceWord > 0 ? dist(distanceWord) : null,
+    target: [dist(words[MESH_CAM_BASE + 4] ?? 0), dist(words[MESH_CAM_BASE + 5] ?? 0), dist(words[MESH_CAM_BASE + 6] ?? 0)],
+    fov: fovWord > 0 ? angle(fovWord) : null,
   };
 }
 

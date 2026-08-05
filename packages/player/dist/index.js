@@ -2772,11 +2772,12 @@ function seedCartridge(bytes, seed) {
 }
 
 // src/sdk.ts
-var CARTBOX_SDK_LUA = `local _MB = 192
+var CARTBOX_SDK_LUA = `local _MB = 184
 local _CAP = 8
 local _LB = _MB + 25
 local _LCAP = 6
 local _CB = _LB + 1 + _LCAP * 6
+local _MCB = _CB + 2
 local _ln = 0
 local function _emit(kind, id, value)
   local seq = pmem(_MB)
@@ -2843,6 +2844,19 @@ cartbox = {
   camera = function(x, y)
     pmem(_CB, math.floor((x or 0) * 16 + 0.5) & 0xffffffff)
     pmem(_CB + 1, math.floor((y or 0) * 16 + 0.5) & 0xffffffff)
+  end,
+  -- Drive the 3D mesh orbit camera this frame: yaw/pitch (radians), distance in
+  -- world units (0 = auto-fit the scene), fov (radians, 0 = default). Call every
+  -- frame; not calling leaves the player's gentle auto-orbit in charge.
+  meshcam = function(yaw, pitch, dist, fov)
+    pmem(_MCB, 1)
+    pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(_MCB + 4, 0)
+    pmem(_MCB + 5, 0)
+    pmem(_MCB + 6, 0)
+    pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)
   end,
   -- Collision defaults: overridden by the injected layer when the cart has one,
   -- so cartbox.solid/mapsize are always safe to call (a cart with no collision
@@ -2961,7 +2975,7 @@ end`;
 var MAILBOX_TYPE_ACHIEVEMENT = 1;
 var MAILBOX_TYPE_SCORE = 2;
 var MAILBOX_TYPE_PROGRESS = 3;
-var MAILBOX_WORDS = 64;
+var MAILBOX_WORDS = 72;
 var EVENT_CAPACITY = 8;
 var LIGHTS_BASE = 1 + EVENT_CAPACITY * 3;
 var LIGHTS_CAPACITY = 6;
@@ -2969,6 +2983,11 @@ var LIGHT_STRIDE = 6;
 var LIGHT_INTENSITY_SCALE = 256;
 var CAMERA_BASE = LIGHTS_BASE + 1 + LIGHTS_CAPACITY * LIGHT_STRIDE;
 var CAMERA_SCALE = 16;
+var MESH_CAM_BASE = CAMERA_BASE + 2;
+var MESH_CAM_STRIDE = 8;
+var MESH_CAM_ANGLE_SCALE = 1024;
+var MESH_CAM_DIST_SCALE = 256;
+var MESH_CAM_ACTIVE = 1;
 var LIGHT_KIND_POINT = 0;
 var LIGHT_KIND_SPOT = 2;
 var LIGHT_DIR_SCALE = 127;
@@ -3054,6 +3073,26 @@ function decodeCamera(words) {
   return {
     x: ((words[CAMERA_BASE] ?? 0) | 0) / CAMERA_SCALE,
     y: ((words[CAMERA_BASE + 1] ?? 0) | 0) / CAMERA_SCALE
+  };
+}
+function decodeMeshCamera(words) {
+  if (words.length <= MESH_CAM_BASE + MESH_CAM_STRIDE - 1) {
+    return null;
+  }
+  const flags = words[MESH_CAM_BASE] ?? 0;
+  if ((flags & MESH_CAM_ACTIVE) === 0) {
+    return null;
+  }
+  const angle = (word) => (word | 0) / MESH_CAM_ANGLE_SCALE;
+  const dist = (word) => (word | 0) / MESH_CAM_DIST_SCALE;
+  const distanceWord = words[MESH_CAM_BASE + 3] ?? 0;
+  const fovWord = words[MESH_CAM_BASE + 7] ?? 0;
+  return {
+    yaw: angle(words[MESH_CAM_BASE + 1] ?? 0),
+    pitch: angle(words[MESH_CAM_BASE + 2] ?? 0),
+    distance: distanceWord > 0 ? dist(distanceWord) : null,
+    target: [dist(words[MESH_CAM_BASE + 4] ?? 0), dist(words[MESH_CAM_BASE + 5] ?? 0), dist(words[MESH_CAM_BASE + 6] ?? 0)],
+    fov: fovWord > 0 ? angle(fovWord) : null
   };
 }
 function hashEventId(id) {
@@ -3723,17 +3762,23 @@ function parseMeshScene(raw) {
   if (instances.length === 0) return null;
   return { instances, bounds: sceneBounds(instances) };
 }
-function buildOrbitCamera(bounds, yaw, pitch, aspect, fovY = 50 * Math.PI / 180) {
-  const { center, radius } = bounds;
-  const distance = radius / Math.sin(fovY / 2) + radius;
+function buildOrbitCamera(bounds, yaw, pitch, aspect, options = {}) {
+  const { radius } = bounds;
+  const fovY = options.fov && options.fov > 0 ? options.fov : 50 * Math.PI / 180;
+  const target = [
+    bounds.center[0] + (options.targetOffset?.[0] ?? 0),
+    bounds.center[1] + (options.targetOffset?.[1] ?? 0),
+    bounds.center[2] + (options.targetOffset?.[2] ?? 0)
+  ];
+  const distance = options.distance && options.distance > 0 ? options.distance : radius / Math.sin(fovY / 2) + radius;
   const cosPitch = Math.cos(pitch);
   const eye = [
-    center[0] + distance * cosPitch * Math.sin(yaw),
-    center[1] + distance * Math.sin(pitch),
-    center[2] + distance * cosPitch * Math.cos(yaw)
+    target[0] + distance * cosPitch * Math.sin(yaw),
+    target[1] + distance * Math.sin(pitch),
+    target[2] + distance * cosPitch * Math.cos(yaw)
   ];
   return {
-    view: viewMatrix(eye, center),
+    view: viewMatrix(eye, target),
     projection: projectionMatrix(fovY, aspect, Math.max(0.01, radius * 0.05), distance + radius * 4)
   };
 }
@@ -3749,6 +3794,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.scene = scene;
     this.instances = instances;
     this.frame = 0;
+    this.cartCamera = null;
     this.output = new Uint8ClampedArray(width * height * 4);
     this.presented = new Uint8Array(this.output.buffer);
     this.depth = new Float32Array(width * height);
@@ -3770,10 +3816,22 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     }
     return new _MeshOverlaySurface(inner, width, height, scene, instances);
   }
+  /**
+   * Set the cart-driven camera for the next frame(s), or null to auto-orbit. The
+   * player calls this each frame from the decoded mesh-camera mailbox, so a cart
+   * that stops publishing (null) smoothly hands the camera back to the auto-orbit.
+   */
+  setCameraOverride(camera) {
+    this.cartCamera = camera;
+  }
   blit(rgba) {
     this.output.set(rgba);
-    const yaw = this.frame * AUTO_ORBIT_YAW_PER_FRAME;
-    const camera = buildOrbitCamera(this.scene.bounds, yaw, AUTO_ORBIT_PITCH, this.width / this.height);
+    const cart = this.cartCamera;
+    const camera = cart ? buildOrbitCamera(this.scene.bounds, cart.yaw, cart.pitch, this.width / this.height, {
+      fov: cart.fov ?? void 0,
+      distance: cart.distance,
+      targetOffset: cart.target
+    }) : buildOrbitCamera(this.scene.bounds, this.frame * AUTO_ORBIT_YAW_PER_FRAME, AUTO_ORBIT_PITCH, this.width / this.height);
     renderMeshScene(this.instances, {
       width: this.width,
       height: this.height,
@@ -4035,6 +4093,9 @@ var Player = class {
       }
       if (this.sceneSurface && this.console) {
         this.sceneSurface.setCameraBase(decodeCamera(this.console.readMailbox()));
+      }
+      if (this.meshSurface && this.console) {
+        this.meshSurface.setCameraOverride(decodeMeshCamera(this.console.readMailbox()));
       }
       this.applyAnimation();
       this.surface?.blit(framebuffer);
@@ -4506,6 +4567,10 @@ export {
   MAX_EMITTERS,
   MAX_PARTICLES_PER_EMITTER,
   MAX_PYRAMID_LEVELS,
+  MESH_CAM_ANGLE_SCALE,
+  MESH_CAM_BASE,
+  MESH_CAM_DIST_SCALE,
+  MESH_CAM_STRIDE,
   MIN_PYRAMID_DIMENSION,
   MODELS,
   MeshOverlaySurface,
@@ -4538,6 +4603,7 @@ export {
   decodeCamera,
   decodeLights,
   decodeMailbox,
+  decodeMeshCamera,
   defaultPostFxSettings,
   drift,
   emitterPreset,

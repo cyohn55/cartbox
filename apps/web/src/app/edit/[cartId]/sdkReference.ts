@@ -114,6 +114,12 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
         doc: "Pan the parallax backdrop (scene carts): x,y are added to the scene's auto-scroll.",
         snippet: "cartbox.camera(worldX, 0)",
       },
+      {
+        name: "cartbox.meshcam",
+        signature: "cartbox.meshcam(yaw, pitch, distance, fov)",
+        doc: "Drive the 3D mesh orbit camera (mesh carts): radians + world units; 0 = auto-fit / default. Replaces the auto-orbit.",
+        snippet: "cartbox.meshcam(t / 60, 0.4, 0)",
+      },
     ],
   },
   {

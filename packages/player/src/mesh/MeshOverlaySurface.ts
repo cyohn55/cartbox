@@ -11,10 +11,11 @@
  * stack that wrap the base surface — the meshes are graded and bloomed with the
  * rest of the scene rather than pasted on flat.
  *
- * Camera control is deliberately minimal for Phase 2: the scene auto-orbits at a
- * gentle rate so a declared mesh is visibly rendered in the runtime. The Phase 3
- * draw mailbox will let a cart drive the camera itself; nothing here needs to
- * change when it does — only the camera source.
+ * The scene auto-orbits at a gentle rate by default, so a declared mesh is
+ * visibly rendered even with no cart code. A cart can take over the camera each
+ * frame via `cartbox.meshcam(...)`: the player decodes that from the mailbox and
+ * feeds it to {@link setCameraOverride}, which wins for that frame; clearing the
+ * override drops back to the auto-orbit.
  *
  * Textures are decoded once, asynchronously, at construction (the browser owns
  * image decoding), which is why the surface is built through a static async
@@ -23,6 +24,7 @@
 
 import { renderMeshScene, type DecodedTexture, type MeshSceneInstance } from "@cartbox/editor";
 import type { DisplaySurface } from "../display.js";
+import type { MailboxMeshCamera } from "../mailbox.js";
 import type { MeshScene } from "./meshScene.js";
 import { buildOrbitCamera } from "./meshScene.js";
 
@@ -33,6 +35,7 @@ const AUTO_ORBIT_PITCH = 0.35;
 
 export class MeshOverlaySurface implements DisplaySurface {
   private frame = 0;
+  private cartCamera: MailboxMeshCamera | null = null;
   private readonly output: Uint8ClampedArray;
   private readonly presented: Uint8Array;
   private readonly depth: Float32Array;
@@ -69,13 +72,29 @@ export class MeshOverlaySurface implements DisplaySurface {
     return new MeshOverlaySurface(inner, width, height, scene, instances);
   }
 
+  /**
+   * Set the cart-driven camera for the next frame(s), or null to auto-orbit. The
+   * player calls this each frame from the decoded mesh-camera mailbox, so a cart
+   * that stops publishing (null) smoothly hands the camera back to the auto-orbit.
+   */
+  setCameraOverride(camera: MailboxMeshCamera | null): void {
+    this.cartCamera = camera;
+  }
+
   blit(rgba: Uint8Array): void {
     // Copy the cart frame in, then composite the meshes on top (background: null
     // leaves untouched pixels showing the cart). The depth buffer is reset inside
     // renderMeshScene, so the instances form one consistent 3D layer each frame.
     this.output.set(rgba);
-    const yaw = this.frame * AUTO_ORBIT_YAW_PER_FRAME;
-    const camera = buildOrbitCamera(this.scene.bounds, yaw, AUTO_ORBIT_PITCH, this.width / this.height);
+    // A cart-driven camera wins for this frame; otherwise the scene auto-orbits.
+    const cart = this.cartCamera;
+    const camera = cart
+      ? buildOrbitCamera(this.scene.bounds, cart.yaw, cart.pitch, this.width / this.height, {
+          fov: cart.fov ?? undefined,
+          distance: cart.distance,
+          targetOffset: cart.target,
+        })
+      : buildOrbitCamera(this.scene.bounds, this.frame * AUTO_ORBIT_YAW_PER_FRAME, AUTO_ORBIT_PITCH, this.width / this.height);
     renderMeshScene(this.instances, {
       width: this.width,
       height: this.height,

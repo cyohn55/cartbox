@@ -3,18 +3,20 @@
  *
  * Kept in sync with sdk/cartbox.lua (that file is the copy creators read/import;
  * this string is what the platform injects into carts that opt in). Both must
- * agree with the mailbox protocol in mailbox.ts (base word 192, event ring
- * capacity 8, lights block at word 217, event types 1/2/3, FNV-1a id hash).
+ * agree with the mailbox protocol in mailbox.ts (base word 184, event ring
+ * capacity 8, lights block at word 209, parallax camera at 246, mesh camera at
+ * 248, event types 1/2/3, FNV-1a id hash).
  */
 
 import { prependLuaCode } from "./cartseed.js";
 
 /** Lua source of the cartbox SDK. */
-export const CARTBOX_SDK_LUA = `local _MB = 192
+export const CARTBOX_SDK_LUA = `local _MB = 184
 local _CAP = 8
 local _LB = _MB + 25
 local _LCAP = 6
 local _CB = _LB + 1 + _LCAP * 6
+local _MCB = _CB + 2
 local _ln = 0
 local function _emit(kind, id, value)
   local seq = pmem(_MB)
@@ -81,6 +83,19 @@ cartbox = {
   camera = function(x, y)
     pmem(_CB, math.floor((x or 0) * 16 + 0.5) & 0xffffffff)
     pmem(_CB + 1, math.floor((y or 0) * 16 + 0.5) & 0xffffffff)
+  end,
+  -- Drive the 3D mesh orbit camera this frame: yaw/pitch (radians), distance in
+  -- world units (0 = auto-fit the scene), fov (radians, 0 = default). Call every
+  -- frame; not calling leaves the player's gentle auto-orbit in charge.
+  meshcam = function(yaw, pitch, dist, fov)
+    pmem(_MCB, 1)
+    pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(_MCB + 4, 0)
+    pmem(_MCB + 5, 0)
+    pmem(_MCB + 6, 0)
+    pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)
   end,
   -- Collision defaults: overridden by the injected layer when the cart has one,
   -- so cartbox.solid/mapsize are always safe to call (a cart with no collision

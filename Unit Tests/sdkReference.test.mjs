@@ -47,7 +47,7 @@ check(
   const cartboxDocumented = new Set(
     allEntries.map((e) => e.name).filter((n) => n.startsWith("cartbox.")).map((n) => n.slice("cartbox.".length)),
   );
-  const shipped = ["solid", "mapsize", "flag", "clearlights", "light", "sun", "spot", "score", "unlock", "progress", "camera"];
+  const shipped = ["solid", "mapsize", "flag", "clearlights", "light", "sun", "spot", "score", "unlock", "progress", "camera", "meshcam"];
   check(
     "every shipped cartbox.* is documented",
     shipped.every((fn) => cartboxDocumented.has(fn)),

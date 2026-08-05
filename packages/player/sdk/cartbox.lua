@@ -1,8 +1,8 @@
 -- Cartbox SDK — emit platform events and dynamic lights to the host.
 --
 -- Include this at the top of your cart, or let the platform inject it for you.
--- It writes into a reserved slice of persistent memory (pmem words 192..255);
--- the host reads it each frame. Your cart may still use pmem words 0..191 for
+-- It writes into a reserved slice of persistent memory (pmem words 184..255);
+-- the host reads it each frame. Your cart may still use pmem words 0..183 for
 -- its own save data.
 --
 --   cartbox.unlock("first_blood")      -- fire an achievement
@@ -38,6 +38,19 @@
 --
 --   cartbox.camera(worldX, 0)   -- backdrop follows the player's world position
 --
+-- Mesh camera (needs the cart mounted with a 3D `mesh` sidecar): drive the orbit
+-- camera your imported meshes are viewed through, replacing the gentle auto-orbit.
+-- Call it every frame; stop calling and the auto-orbit resumes.
+--
+--   cartbox.meshcam(yaw, pitch, distance, fov)
+--       yaw/pitch orbit the scene centre (radians); distance is in world units
+--       (0 = auto-fit the whole scene); fov is the vertical field of view in
+--       radians (0 = the player default).
+--
+--   function TIC()
+--     cartbox.meshcam(t / 60, 0.4, 0)   -- spin the model, auto-fit distance
+--   end
+--
 -- Collision (needs a collision layer authored in the Map tab): read which map
 -- cells are solid so your cart can do its own physics. The whole layer is static,
 -- so the platform injects it as data — no per-frame protocol. Cells are the map's
@@ -55,11 +68,12 @@
 -- Without authored layers these all return false / 0, 0, so they are always safe
 -- to call.
 
-local _MB = 192   -- pmem word: mailbox base (event sequence counter)
+local _MB = 184   -- pmem word: mailbox base (event sequence counter)
 local _CAP = 8    -- event ring capacity (must match the host)
 local _LB = _MB + 25 -- pmem word: light-count header (must match the host)
 local _LCAP = 6   -- maximum lights per frame (must match the host)
 local _CB = _LB + 1 + _LCAP * 6 -- pmem word: backdrop camera x (must match the host)
+local _MCB = _CB + 2 -- pmem word: mesh-camera block (flags word; must match the host)
 local _ln = 0     -- lights written since the last clearlights()
 
 local function _emit(kind, id, value)
@@ -157,6 +171,22 @@ cartbox = {
   camera = function(x, y)
     pmem(_CB, math.floor((x or 0) * 16 + 0.5) & 0xffffffff)
     pmem(_CB + 1, math.floor((y or 0) * 16 + 0.5) & 0xffffffff)
+  end,
+
+  -- Drive the 3D mesh orbit camera for this frame (mesh carts only). yaw/pitch/fov
+  -- are radians and distance is world units (0 = auto-fit), stored as signed
+  -- fixed-point; word _MCB's bit 0 flags the frame as cart-driven so the host
+  -- stops auto-orbiting. math.floor keeps every value integer (the Pro core's Lua
+  -- throws on bitwise-of-float). Must match decodeMeshCamera() on the host.
+  meshcam = function(yaw, pitch, dist, fov)
+    pmem(_MCB, 1)
+    pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(_MCB + 4, 0)
+    pmem(_MCB + 5, 0)
+    pmem(_MCB + 6, 0)
+    pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)
   end,
 
   -- Collision defaults. When the cart has an authored collision layer the

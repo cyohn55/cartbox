@@ -61,6 +61,10 @@ test("the SDK's Lua layout matches the host decoder constants", () => {
   assert.ok(CARTBOX_SDK_LUA.includes(`_CAP = ${EVENT_CAPACITY}`), "event ring capacity must agree");
   assert.ok(CARTBOX_SDK_LUA.includes(`_LB = _MB + ${LIGHTS_BASE}`), "lights base offset must agree");
   assert.ok(CARTBOX_SDK_LUA.includes(`_LCAP = ${LIGHTS_CAPACITY}`), "lights capacity must agree");
+  // The mesh-camera block sits two words past the parallax camera; keep the Lua
+  // producer and the host decoder from drifting apart on that offset.
+  assert.ok(CARTBOX_SDK_LUA.includes("_MCB = _CB + 2"), "mesh-camera base offset must agree");
+  assert.ok(CARTBOX_SDK_LUA.includes("meshcam = function"), "cartbox.meshcam must be defined");
 });
 
 let passed = 0;

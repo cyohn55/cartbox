@@ -18,7 +18,7 @@ import { seedCartridge, prependLuaCode } from "./cartseed.js";
 import { injectSdk } from "./sdk.js";
 import { collisionSdkLua } from "./collisionSdk.js";
 import { flagsSdkLua } from "./flagsSdk.js";
-import { decodeCamera, decodeLights, decodeMailbox } from "./mailbox.js";
+import { decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera } from "./mailbox.js";
 import { createCartSpriteSource, type CartSpriteSource } from "./scene/cartSpriteSource.js";
 import { resolveSceneLayers } from "./scene/sceneRender.js";
 import { SceneBackdropSurface } from "./scene/SceneBackdropSurface.js";
@@ -355,6 +355,11 @@ export class Player {
       // Let a scene cart pan its backdrop by publishing cartbox.camera(x, y).
       if (this.sceneSurface && this.console) {
         this.sceneSurface.setCameraBase(decodeCamera(this.console.readMailbox()));
+      }
+      // Let a mesh cart drive its 3D orbit camera via cartbox.meshcam(...); a null
+      // decode (the cart isn't driving it) leaves the surface auto-orbiting.
+      if (this.meshSurface && this.console) {
+        this.meshSurface.setCameraOverride(decodeMeshCamera(this.console.readMailbox()));
       }
       // Play the declared animation for this frame: route the sampled state to the
       // scene layers, foreground placements, and post-FX before the frame is blit.

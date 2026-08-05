@@ -252,13 +252,19 @@ void cbx_delete(cbx_console *console) {
 /*
  * Event mailbox (Platform P2). Carts emit platform events (achievements, scores)
  * by writing to a reserved slice of persistent memory (pmem) via the cartbox
- * SDK; the host reads that slice each frame. We reserve the top 64 of pmem's 256
- * words (indices 192..255 = 256 bytes), leaving 0..191 for the cart's own save
- * data. Word 192 is a monotonic sequence counter; the rest is a ring of 3-word
- * event records {type, id, value}.
+ * SDK; the host reads that slice each frame. We reserve the top 72 of pmem's 256
+ * words (indices 184..255 = 288 bytes), leaving 0..183 for the cart's own save
+ * data. Word 184 is a monotonic sequence counter; the rest is a ring of 3-word
+ * event records {type, id, value}, then the lights block, the parallax camera,
+ * and finally the 8-word mesh-camera block a cart uses to drive its 3D meshes.
+ *
+ * The block grew from 64 to 72 words (base 192 → 184) to make room for the
+ * mesh camera; the sub-protocol offsets are all relative to the base, so every
+ * existing producer/consumer keeps working — only the base moved. mailbox.ts and
+ * the cartbox SDK Lua (sdk.ts) mirror these constants and MUST move in lockstep.
  */
-#define CBX_MAILBOX_PMEM_START 192
-#define CBX_MAILBOX_WORDS 64
+#define CBX_MAILBOX_PMEM_START 184
+#define CBX_MAILBOX_WORDS 72
 
 EMSCRIPTEN_KEEPALIVE
 void *cbx_mailbox_ptr(cbx_console *console) {

@@ -56,12 +56,17 @@ export {
   MAILBOX_WORDS,
   CAMERA_BASE,
   CAMERA_SCALE,
+  MESH_CAM_BASE,
+  MESH_CAM_STRIDE,
+  MESH_CAM_ANGLE_SCALE,
+  MESH_CAM_DIST_SCALE,
   decodeCamera,
   decodeLights,
   decodeMailbox,
+  decodeMeshCamera,
   hashEventId,
 } from "./mailbox.js";
-export type { MailboxCamera, MailboxEvent, MailboxEventKind, MailboxRead } from "./mailbox.js";
+export type { MailboxCamera, MailboxEvent, MailboxEventKind, MailboxMeshCamera, MailboxRead } from "./mailbox.js";
 export { CARTBOX_SDK_LUA, injectSdk } from "./sdk.js";
 // Collision: a cart's authored solidity layer, exposed to its own Lua as
 // cartbox.solid(x, y) / cartbox.mapsize(). Injected as static cart data.

@@ -278,6 +278,15 @@ interface LightingScene {
  *   fixed-point words (× {@link CAMERA_SCALE}) for x and y. An unset camera reads
  *   as (0, 0), which adds nothing to the scene's own auto-scroll.
  *
+ *   Mesh camera (words 64..71): the orbit camera a cart drives its 3D meshes with
+ *   via `cartbox.meshcam(yaw, pitch, distance, fov)`, so runtime meshes stop
+ *   auto-orbiting and follow gameplay. Per-frame state like the lights and camera:
+ *   word 64 is a control flag (bit 0 = active this frame — an unset block reads 0
+ *   and leaves the player's auto-orbit in charge, so existing carts are
+ *   unaffected), then yaw/pitch (× {@link MESH_CAM_ANGLE_SCALE}), distance
+ *   (× {@link MESH_CAM_DIST_SCALE}, 0 = auto-fit), a target offset x/y/z from the
+ *   scene centre (× {@link MESH_CAM_DIST_SCALE}), and fov (× {@link MESH_CAM_ANGLE_SCALE}, 0 = default).
+ *
  * This module is pure — no engine, no DOM — so the protocol is unit-testable.
  */
 
@@ -285,7 +294,7 @@ declare const MAILBOX_TYPE_ACHIEVEMENT = 1;
 declare const MAILBOX_TYPE_SCORE = 2;
 declare const MAILBOX_TYPE_PROGRESS = 3;
 /** Total reserved pmem words (mirrors CBX_MAILBOX_WORDS in the engine shim). */
-declare const MAILBOX_WORDS = 64;
+declare const MAILBOX_WORDS = 72;
 /** Event ring capacity. Small on purpose: the host drains the ring every tick. */
 declare const EVENT_CAPACITY = 8;
 /** Word index of the light-count header (just past the event ring). */
@@ -302,6 +311,14 @@ declare const CAMERA_BASE: number;
  * — far beyond any cart world.
  */
 declare const CAMERA_SCALE = 16;
+/** Word index of the cart-driven mesh camera block, just past the parallax camera. */
+declare const MESH_CAM_BASE: number;
+/** Words in the mesh-camera block: flags, yaw, pitch, distance, targetX/Y/Z, fov. */
+declare const MESH_CAM_STRIDE = 8;
+/** Fixed-point scale for the mesh camera's yaw/pitch/fov (radians × this), signed. */
+declare const MESH_CAM_ANGLE_SCALE = 1024;
+/** Fixed-point scale for the mesh camera's distance + target offset (world units × this), signed. */
+declare const MESH_CAM_DIST_SCALE = 256;
 type MailboxEventKind = "achievement" | "score" | "progress" | "unknown";
 interface MailboxEvent {
     kind: MailboxEventKind;
@@ -354,6 +371,30 @@ interface MailboxCamera {
  * @param words The mailbox window (same array {@link decodeMailbox} reads).
  */
 declare function decodeCamera(words: Uint32Array): MailboxCamera;
+/** An orbit camera a cart drives its 3D meshes with, all fields already de-scaled. */
+interface MailboxMeshCamera {
+    /** Yaw around the scene centre, radians. */
+    yaw: number;
+    /** Pitch above the horizon, radians. */
+    pitch: number;
+    /** Distance from the target, world units; null means auto-fit to the scene. */
+    distance: number | null;
+    /** Target offset from the scene centre, world units. */
+    target: [number, number, number];
+    /** Vertical field of view, radians; null means the player's default. */
+    fov: number | null;
+}
+/**
+ * Decodes the mesh camera a cart published this frame via `cartbox.meshcam(...)`.
+ *
+ * Returns null when the block's active flag is clear — the common case for every
+ * cart that doesn't drive its meshes — so the player keeps auto-orbiting. Like
+ * the lights and parallax camera this is per-frame state, not an event, so there
+ * is no sequence to track: the block always holds the latest pose the cart set.
+ *
+ * @param words The mailbox window (same array {@link decodeMailbox} reads).
+ */
+declare function decodeMeshCamera(words: Uint32Array): MailboxMeshCamera | null;
 /**
  * FNV-1a 32-bit hash of a string event id. Mirrors the hash in the cartbox SDK
  * so the platform can map a mailbox id back to the achievement/stat key.
@@ -851,14 +892,23 @@ interface SceneCamera {
  * entry dropped as malformed), so the player can skip the mesh surface entirely.
  */
 declare function parseMeshScene(raw: string | null | undefined): MeshScene | null;
+/** Optional overrides a cart supplies via `cartbox.meshcam(...)` (see the mailbox). */
+interface OrbitCameraOptions {
+    /** Vertical field of view, radians; defaults to ~50°. */
+    readonly fov?: number;
+    /** Explicit distance from the target, world units; omitted/≤0 auto-fits the scene. */
+    readonly distance?: number | null;
+    /** Offset added to the scene centre to aim the camera, world units. */
+    readonly targetOffset?: readonly [number, number, number];
+}
 /**
  * Build an orbit camera that frames the scene bounds from `yaw`/`pitch`, fitting
  * the whole scene into the vertical field of view. `aspect` is the framebuffer's
  * width/height, so the projection is undistorted on the runtime's non-square
- * screen. This is the P2 placeholder for camera control; the P3 draw mailbox will
- * let a cart drive the camera itself.
+ * screen. With no options this auto-fits the scene (the player's gentle P2
+ * auto-orbit); a cart drives it explicitly through `options` via the mesh camera.
  */
-declare function buildOrbitCamera(bounds: SceneBounds, yaw: number, pitch: number, aspect: number, fovY?: number): SceneCamera;
+declare function buildOrbitCamera(bounds: SceneBounds, yaw: number, pitch: number, aspect: number, options?: OrbitCameraOptions): SceneCamera;
 
 /**
  * The cart-facing collision accessor, as injectable Lua.
@@ -1159,11 +1209,12 @@ declare function seedCartridge(bytes: Uint8Array, seed: number): Uint8Array;
  *
  * Kept in sync with sdk/cartbox.lua (that file is the copy creators read/import;
  * this string is what the platform injects into carts that opt in). Both must
- * agree with the mailbox protocol in mailbox.ts (base word 192, event ring
- * capacity 8, lights block at word 217, event types 1/2/3, FNV-1a id hash).
+ * agree with the mailbox protocol in mailbox.ts (base word 184, event ring
+ * capacity 8, lights block at word 209, parallax camera at 246, mesh camera at
+ * 248, event types 1/2/3, FNV-1a id hash).
  */
 /** Lua source of the cartbox SDK. */
-declare const CARTBOX_SDK_LUA = "local _MB = 192\nlocal _CAP = 8\nlocal _LB = _MB + 25\nlocal _LCAP = 6\nlocal _CB = _LB + 1 + _LCAP * 6\nlocal _ln = 0\nlocal function _emit(kind, id, value)\n  local seq = pmem(_MB)\n  local slot = seq % _CAP\n  local base = _MB + 1 + slot * 3\n  pmem(base, kind)\n  pmem(base + 1, id)\n  pmem(base + 2, value)\n  pmem(_MB, seq + 1)\nend\nlocal function _hash(s)\n  local h = 2166136261\n  for i = 1, #s do\n    h = ((h ~ string.byte(s, i)) * 16777619) & 0xffffffff\n  end\n  return h\nend\nlocal function _norm(x, y, z)\n  local m = math.sqrt(x * x + y * y + z * z)\n  if m < 1e-6 then return 0, 0, 1 end\n  return x / m, y / m, z / m\nend\nlocal function _byte(v)\n  local b = math.floor((v or 0) * 127 + 0.5)\n  if b < -127 then b = -127 elseif b > 127 then b = 127 end\n  if b < 0 then b = b + 256 end\n  return b\nend\nlocal function _light(kind, x, y, z, radius, r, g, b, intensity, dx, dy, cone)\n  if _ln >= _LCAP then return end\n  local base = _LB + 1 + _ln * 6\n  pmem(base, x // 1)\n  pmem(base + 1, y // 1)\n  pmem(base + 2, z // 1)\n  pmem(base + 3, radius // 1)\n  local rgb = (math.floor(r or 255) & 0xff) << 16\n  rgb = rgb | ((math.floor(g or 255) & 0xff) << 8)\n  rgb = rgb | (math.floor(b or 255) & 0xff)\n  pmem(base + 4, rgb | (kind << 24) | (cone << 26))\n  local inten = math.floor((intensity or 1) * 256)\n  if inten < 0 then inten = 0 elseif inten > 0xffff then inten = 0xffff end\n  pmem(base + 5, inten | (dx << 16) | (dy << 24))\n  _ln = _ln + 1\n  pmem(_LB, _ln)\nend\ncartbox = {\n  unlock = function(id) _emit(1, _hash(id), 0) end,\n  score = function(v) _emit(2, 0, v // 1) end,\n  progress = function(id, v) _emit(3, _hash(id), v // 1) end,\n  clearlights = function() _ln = 0 pmem(_LB, 0) end,\n  light = function(x, y, radius, r, g, b, z, intensity)\n    _light(0, x, y, z or 12, radius, r, g, b, intensity, 0, 0, 0)\n  end,\n  sun = function(dx, dy, dz, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    _light(1, 0, 0, 0, 0, r, g, b, intensity, _byte(nx), _byte(ny), 0)\n  end,\n  spot = function(x, y, z, dx, dy, dz, radius, angle, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    local cone = math.floor(math.cos(math.rad(angle or 30)) * 63 + 0.5)\n    if cone < 0 then cone = 0 elseif cone > 63 then cone = 63 end\n    _light(2, x, y, z or 12, radius, r, g, b, intensity, _byte(nx), _byte(ny), cone)\n  end,\n  camera = function(x, y)\n    pmem(_CB, math.floor((x or 0) * 16 + 0.5) & 0xffffffff)\n    pmem(_CB + 1, math.floor((y or 0) * 16 + 0.5) & 0xffffffff)\n  end,\n  -- Collision defaults: overridden by the injected layer when the cart has one,\n  -- so cartbox.solid/mapsize are always safe to call (a cart with no collision\n  -- layer simply sees every cell as non-solid).\n  solid = function() return false end,\n  mapsize = function() return 0, 0 end,\n  -- Tile-flags default: overridden by the injected layer when the cart has one.\n  flag = function() return false end,\n}";
+declare const CARTBOX_SDK_LUA = "local _MB = 184\nlocal _CAP = 8\nlocal _LB = _MB + 25\nlocal _LCAP = 6\nlocal _CB = _LB + 1 + _LCAP * 6\nlocal _MCB = _CB + 2\nlocal _ln = 0\nlocal function _emit(kind, id, value)\n  local seq = pmem(_MB)\n  local slot = seq % _CAP\n  local base = _MB + 1 + slot * 3\n  pmem(base, kind)\n  pmem(base + 1, id)\n  pmem(base + 2, value)\n  pmem(_MB, seq + 1)\nend\nlocal function _hash(s)\n  local h = 2166136261\n  for i = 1, #s do\n    h = ((h ~ string.byte(s, i)) * 16777619) & 0xffffffff\n  end\n  return h\nend\nlocal function _norm(x, y, z)\n  local m = math.sqrt(x * x + y * y + z * z)\n  if m < 1e-6 then return 0, 0, 1 end\n  return x / m, y / m, z / m\nend\nlocal function _byte(v)\n  local b = math.floor((v or 0) * 127 + 0.5)\n  if b < -127 then b = -127 elseif b > 127 then b = 127 end\n  if b < 0 then b = b + 256 end\n  return b\nend\nlocal function _light(kind, x, y, z, radius, r, g, b, intensity, dx, dy, cone)\n  if _ln >= _LCAP then return end\n  local base = _LB + 1 + _ln * 6\n  pmem(base, x // 1)\n  pmem(base + 1, y // 1)\n  pmem(base + 2, z // 1)\n  pmem(base + 3, radius // 1)\n  local rgb = (math.floor(r or 255) & 0xff) << 16\n  rgb = rgb | ((math.floor(g or 255) & 0xff) << 8)\n  rgb = rgb | (math.floor(b or 255) & 0xff)\n  pmem(base + 4, rgb | (kind << 24) | (cone << 26))\n  local inten = math.floor((intensity or 1) * 256)\n  if inten < 0 then inten = 0 elseif inten > 0xffff then inten = 0xffff end\n  pmem(base + 5, inten | (dx << 16) | (dy << 24))\n  _ln = _ln + 1\n  pmem(_LB, _ln)\nend\ncartbox = {\n  unlock = function(id) _emit(1, _hash(id), 0) end,\n  score = function(v) _emit(2, 0, v // 1) end,\n  progress = function(id, v) _emit(3, _hash(id), v // 1) end,\n  clearlights = function() _ln = 0 pmem(_LB, 0) end,\n  light = function(x, y, radius, r, g, b, z, intensity)\n    _light(0, x, y, z or 12, radius, r, g, b, intensity, 0, 0, 0)\n  end,\n  sun = function(dx, dy, dz, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    _light(1, 0, 0, 0, 0, r, g, b, intensity, _byte(nx), _byte(ny), 0)\n  end,\n  spot = function(x, y, z, dx, dy, dz, radius, angle, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    local cone = math.floor(math.cos(math.rad(angle or 30)) * 63 + 0.5)\n    if cone < 0 then cone = 0 elseif cone > 63 then cone = 63 end\n    _light(2, x, y, z or 12, radius, r, g, b, intensity, _byte(nx), _byte(ny), cone)\n  end,\n  camera = function(x, y)\n    pmem(_CB, math.floor((x or 0) * 16 + 0.5) & 0xffffffff)\n    pmem(_CB + 1, math.floor((y or 0) * 16 + 0.5) & 0xffffffff)\n  end,\n  -- Drive the 3D mesh orbit camera this frame: yaw/pitch (radians), distance in\n  -- world units (0 = auto-fit the scene), fov (radians, 0 = default). Call every\n  -- frame; not calling leaves the player's gentle auto-orbit in charge.\n  meshcam = function(yaw, pitch, dist, fov)\n    pmem(_MCB, 1)\n    pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 4, 0)\n    pmem(_MCB + 5, 0)\n    pmem(_MCB + 6, 0)\n    pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)\n  end,\n  -- Collision defaults: overridden by the injected layer when the cart has one,\n  -- so cartbox.solid/mapsize are always safe to call (a cart with no collision\n  -- layer simply sees every cell as non-solid).\n  solid = function() return false end,\n  mapsize = function() return 0, 0 end,\n  -- Tile-flags default: overridden by the injected layer when the cart has one.\n  flag = function() return false end,\n}";
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */
 declare function injectSdk(bytes: Uint8Array): Uint8Array;
 
@@ -2280,10 +2331,11 @@ declare class ParticleOverlaySurface implements DisplaySurface {
  * stack that wrap the base surface — the meshes are graded and bloomed with the
  * rest of the scene rather than pasted on flat.
  *
- * Camera control is deliberately minimal for Phase 2: the scene auto-orbits at a
- * gentle rate so a declared mesh is visibly rendered in the runtime. The Phase 3
- * draw mailbox will let a cart drive the camera itself; nothing here needs to
- * change when it does — only the camera source.
+ * The scene auto-orbits at a gentle rate by default, so a declared mesh is
+ * visibly rendered even with no cart code. A cart can take over the camera each
+ * frame via `cartbox.meshcam(...)`: the player decodes that from the mailbox and
+ * feeds it to {@link setCameraOverride}, which wins for that frame; clearing the
+ * override drops back to the auto-orbit.
  *
  * Textures are decoded once, asynchronously, at construction (the browser owns
  * image decoding), which is why the surface is built through a static async
@@ -2297,6 +2349,7 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private readonly scene;
     private readonly instances;
     private frame;
+    private cartCamera;
     private readonly output;
     private readonly presented;
     private readonly depth;
@@ -2307,6 +2360,12 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * bad image never blocks the cart — the mesh still renders, just untextured.
      */
     static create(inner: DisplaySurface, width: number, height: number, scene: MeshScene): Promise<MeshOverlaySurface>;
+    /**
+     * Set the cart-driven camera for the next frame(s), or null to auto-orbit. The
+     * player calls this each frame from the decoded mesh-camera mailbox, so a cart
+     * that stops publishing (null) smoothly hands the camera back to the auto-orbit.
+     */
+    setCameraOverride(camera: MailboxMeshCamera | null): void;
     blit(rgba: Uint8Array): void;
     destroy(): void;
 }
@@ -2339,4 +2398,4 @@ declare class MeshOverlaySurface implements DisplaySurface {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, type CartSpriteSource, CartridgeLoadError, type ClipSample, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, type FlagsField, type GeneratedTrack, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxRead, type MaterialBuffer, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera as MeshSceneCamera, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, PARTICLE_KINDS, POST_FX_EFFECTS, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPlacement, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera$1 as SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, TILT_SHIFT_FEATHER, type TrackMode, type Vec3, type VerificationResult, WebgpuLightingLayer, acesFilmic, acesFilmicChannel, anyPostFxEnabled, buildOrbitCamera, cameraAt, collisionSdkLua, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeCamera, decodeLights, decodeMailbox, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interpolateNormal, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parseAnim, parseCollisionField, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, readCartCode, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleNormalBilinear, sampleTrack, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, sway, tiltShiftBlur, uniformsFromSettings, verifyReplayScore };
+export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, type CartSpriteSource, CartridgeLoadError, type ClipSample, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, type FlagsField, type GeneratedTrack, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxRead, type MaterialBuffer, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera as MeshSceneCamera, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, PARTICLE_KINDS, POST_FX_EFFECTS, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPlacement, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera$1 as SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, TILT_SHIFT_FEATHER, type TrackMode, type Vec3, type VerificationResult, WebgpuLightingLayer, acesFilmic, acesFilmicChannel, anyPostFxEnabled, buildOrbitCamera, cameraAt, collisionSdkLua, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interpolateNormal, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parseAnim, parseCollisionField, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, readCartCode, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleNormalBilinear, sampleTrack, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, sway, tiltShiftBlur, uniformsFromSettings, verifyReplayScore };
