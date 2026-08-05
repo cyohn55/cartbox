@@ -3,21 +3,24 @@
  *
  * Kept in sync with sdk/cartbox.lua (that file is the copy creators read/import;
  * this string is what the platform injects into carts that opt in). Both must
- * agree with the mailbox protocol in mailbox.ts (base word 184, event ring
- * capacity 8, lights block at word 209, parallax camera at 246, mesh camera at
- * 248, event types 1/2/3, FNV-1a id hash).
+ * agree with the mailbox protocol in mailbox.ts (base word 119, event ring
+ * capacity 8, lights block at word 144, parallax camera at 181, mesh camera at
+ * 183, mesh-pose block at 191, event types 1/2/3, FNV-1a id hash).
  */
 
 import { prependLuaCode } from "./cartseed.js";
 
 /** Lua source of the cartbox SDK. */
-export const CARTBOX_SDK_LUA = `local _MB = 184
+export const CARTBOX_SDK_LUA = `local _MB = 119
 local _CAP = 8
 local _LB = _MB + 25
 local _LCAP = 6
 local _CB = _LB + 1 + _LCAP * 6
 local _MCB = _CB + 2
+local _MPB = _MCB + 8
+local _MPCAP = 8
 local _ln = 0
+local _mn = 0
 local function _emit(kind, id, value)
   local seq = pmem(_MB)
   local slot = seq % _CAP
@@ -96,6 +99,28 @@ cartbox = {
     pmem(_MCB + 5, 0)
     pmem(_MCB + 6, 0)
     pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)
+  end,
+  -- Start a fresh frame's mesh-pose list. Call once before any meshpose() calls;
+  -- instances you don't pose keep their authored transform.
+  clearposes = function() _mn = 0 pmem(_MPB, 0) end,
+  -- Move/rotate/scale one mesh instance (by its sidecar index) this frame, on top
+  -- of its authored placement. x,y,z are world units; yaw,pitch,roll radians;
+  -- scale defaults to 1 (pass 0 to hide). math.floor keeps every value integer so
+  -- the bitwise mask never sees a float (the Pro core's Lua throws on that). Must
+  -- match decodeMeshPoses() on the host.
+  meshpose = function(index, x, y, z, yaw, pitch, roll, scale)
+    if _mn >= _MPCAP then return end
+    local base = _MPB + 1 + _mn * 8
+    pmem(base, math.floor(index or 0) & 0xff)
+    pmem(base + 1, math.floor((x or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(base + 2, math.floor((y or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(base + 3, math.floor((z or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(base + 4, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(base + 5, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(base + 6, math.floor((roll or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(base + 7, math.floor((scale or 1) * 256 + 0.5) & 0xffffffff)
+    _mn = _mn + 1
+    pmem(_MPB, _mn)
   end,
   -- Collision defaults: overridden by the injected layer when the cart has one,
   -- so cartbox.solid/mapsize are always safe to call (a cart with no collision

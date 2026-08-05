@@ -1,8 +1,8 @@
 -- Cartbox SDK — emit platform events and dynamic lights to the host.
 --
 -- Include this at the top of your cart, or let the platform inject it for you.
--- It writes into a reserved slice of persistent memory (pmem words 184..255);
--- the host reads it each frame. Your cart may still use pmem words 0..183 for
+-- It writes into a reserved slice of persistent memory (pmem words 119..255);
+-- the host reads it each frame. Your cart may still use pmem words 0..118 for
 -- its own save data.
 --
 --   cartbox.unlock("first_blood")      -- fire an achievement
@@ -51,6 +51,21 @@
 --     cartbox.meshcam(t / 60, 0.4, 0)   -- spin the model, auto-fit distance
 --   end
 --
+-- Mesh poses (mesh carts): move/rotate/scale individual mesh instances each frame,
+-- on top of their authored placement, so a scene's objects can animate. Rebuild
+-- the pose list every frame — clear, then pose up to 8 instances by their sidecar
+-- index. Instances you don't pose keep their authored transform.
+--
+--   cartbox.meshpose(index, x, y, z, yaw, pitch, roll, scale)
+--       x,y,z are world units; yaw,pitch,roll radians; scale defaults to 1
+--       (pass 0 to hide the instance).
+--
+--   function TIC()
+--     cartbox.clearposes()
+--     cartbox.meshpose(0, 0, 0, 0, t / 30, 0, 0)   -- spin instance 0 in place
+--     cartbox.meshpose(1, math.sin(t / 60) * 4, 0, 0)  -- slide instance 1 side to side
+--   end
+--
 -- Collision (needs a collision layer authored in the Map tab): read which map
 -- cells are solid so your cart can do its own physics. The whole layer is static,
 -- so the platform injects it as data — no per-frame protocol. Cells are the map's
@@ -68,13 +83,16 @@
 -- Without authored layers these all return false / 0, 0, so they are always safe
 -- to call.
 
-local _MB = 184   -- pmem word: mailbox base (event sequence counter)
+local _MB = 119   -- pmem word: mailbox base (event sequence counter)
 local _CAP = 8    -- event ring capacity (must match the host)
 local _LB = _MB + 25 -- pmem word: light-count header (must match the host)
 local _LCAP = 6   -- maximum lights per frame (must match the host)
 local _CB = _LB + 1 + _LCAP * 6 -- pmem word: backdrop camera x (must match the host)
 local _MCB = _CB + 2 -- pmem word: mesh-camera block (flags word; must match the host)
+local _MPB = _MCB + 8 -- pmem word: mesh-pose count header (must match the host)
+local _MPCAP = 8  -- maximum posed mesh instances per frame (must match the host)
 local _ln = 0     -- lights written since the last clearlights()
+local _mn = 0     -- mesh poses written since the last clearposes()
 
 local function _emit(kind, id, value)
   local seq = pmem(_MB)
@@ -187,6 +205,31 @@ cartbox = {
     pmem(_MCB + 5, 0)
     pmem(_MCB + 6, 0)
     pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)
+  end,
+
+  -- Start a fresh frame's mesh-pose list. Call once before any meshpose() calls.
+  clearposes = function()
+    _mn = 0
+    pmem(_MPB, 0)
+  end,
+
+  -- Move/rotate/scale one mesh instance (by its sidecar index) this frame, on top
+  -- of its authored placement. Up to 8 per frame; scale defaults to 1 (0 hides).
+  -- math.floor keeps every value integer so the mask never sees a float (the Pro
+  -- core's Lua throws on bitwise-of-float). Must match decodeMeshPoses() (mailbox.ts).
+  meshpose = function(index, x, y, z, yaw, pitch, roll, scale)
+    if _mn >= _MPCAP then return end
+    local base = _MPB + 1 + _mn * 8
+    pmem(base, math.floor(index or 0) & 0xff)
+    pmem(base + 1, math.floor((x or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(base + 2, math.floor((y or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(base + 3, math.floor((z or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(base + 4, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(base + 5, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(base + 6, math.floor((roll or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(base + 7, math.floor((scale or 1) * 256 + 0.5) & 0xffffffff)
+    _mn = _mn + 1
+    pmem(_MPB, _mn) -- publish the count last
   end,
 
   -- Collision defaults. When the cart has an authored collision layer the

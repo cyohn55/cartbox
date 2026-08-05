@@ -143,6 +143,7 @@ export {
   renderMesh,
   renderMeshScene,
   composeModelMatrix,
+  multiplyMat4,
   viewMatrix,
   projectionMatrix,
   type Mat4,

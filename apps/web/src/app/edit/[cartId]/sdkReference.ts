@@ -120,6 +120,18 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
         doc: "Drive the 3D mesh orbit camera (mesh carts): radians + world units; 0 = auto-fit / default. Replaces the auto-orbit.",
         snippet: "cartbox.meshcam(t / 60, 0.4, 0)",
       },
+      {
+        name: "cartbox.clearposes",
+        signature: "cartbox.clearposes()",
+        doc: "Start a fresh frame's mesh-pose list. Call once before any meshpose() calls.",
+        snippet: "cartbox.clearposes()",
+      },
+      {
+        name: "cartbox.meshpose",
+        signature: "cartbox.meshpose(index, x, y, z, yaw, pitch, roll, scale)",
+        doc: "Move/rotate/scale one mesh instance by its sidecar index, on top of its authored placement (up to 8/frame; scale 0 hides).",
+        snippet: "cartbox.meshpose(0, 0, 0, 0, t / 30, 0, 0)",
+      },
     ],
   },
   {

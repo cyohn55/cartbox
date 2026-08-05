@@ -2772,13 +2772,16 @@ function seedCartridge(bytes, seed) {
 }
 
 // src/sdk.ts
-var CARTBOX_SDK_LUA = `local _MB = 184
+var CARTBOX_SDK_LUA = `local _MB = 119
 local _CAP = 8
 local _LB = _MB + 25
 local _LCAP = 6
 local _CB = _LB + 1 + _LCAP * 6
 local _MCB = _CB + 2
+local _MPB = _MCB + 8
+local _MPCAP = 8
 local _ln = 0
+local _mn = 0
 local function _emit(kind, id, value)
   local seq = pmem(_MB)
   local slot = seq % _CAP
@@ -2857,6 +2860,28 @@ cartbox = {
     pmem(_MCB + 5, 0)
     pmem(_MCB + 6, 0)
     pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)
+  end,
+  -- Start a fresh frame's mesh-pose list. Call once before any meshpose() calls;
+  -- instances you don't pose keep their authored transform.
+  clearposes = function() _mn = 0 pmem(_MPB, 0) end,
+  -- Move/rotate/scale one mesh instance (by its sidecar index) this frame, on top
+  -- of its authored placement. x,y,z are world units; yaw,pitch,roll radians;
+  -- scale defaults to 1 (pass 0 to hide). math.floor keeps every value integer so
+  -- the bitwise mask never sees a float (the Pro core's Lua throws on that). Must
+  -- match decodeMeshPoses() on the host.
+  meshpose = function(index, x, y, z, yaw, pitch, roll, scale)
+    if _mn >= _MPCAP then return end
+    local base = _MPB + 1 + _mn * 8
+    pmem(base, math.floor(index or 0) & 0xff)
+    pmem(base + 1, math.floor((x or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(base + 2, math.floor((y or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(base + 3, math.floor((z or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(base + 4, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(base + 5, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(base + 6, math.floor((roll or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(base + 7, math.floor((scale or 1) * 256 + 0.5) & 0xffffffff)
+    _mn = _mn + 1
+    pmem(_MPB, _mn)
   end,
   -- Collision defaults: overridden by the injected layer when the cart has one,
   -- so cartbox.solid/mapsize are always safe to call (a cart with no collision
@@ -2975,7 +3000,7 @@ end`;
 var MAILBOX_TYPE_ACHIEVEMENT = 1;
 var MAILBOX_TYPE_SCORE = 2;
 var MAILBOX_TYPE_PROGRESS = 3;
-var MAILBOX_WORDS = 72;
+var MAILBOX_WORDS = 137;
 var EVENT_CAPACITY = 8;
 var LIGHTS_BASE = 1 + EVENT_CAPACITY * 3;
 var LIGHTS_CAPACITY = 6;
@@ -2988,6 +3013,10 @@ var MESH_CAM_STRIDE = 8;
 var MESH_CAM_ANGLE_SCALE = 1024;
 var MESH_CAM_DIST_SCALE = 256;
 var MESH_CAM_ACTIVE = 1;
+var MESH_POSE_BASE = MESH_CAM_BASE + MESH_CAM_STRIDE;
+var MESH_POSE_CAPACITY = 8;
+var MESH_POSE_STRIDE = 8;
+var MESH_POSE_HIDDEN = 1 << 8;
 var LIGHT_KIND_POINT = 0;
 var LIGHT_KIND_SPOT = 2;
 var LIGHT_DIR_SCALE = 127;
@@ -3094,6 +3123,27 @@ function decodeMeshCamera(words) {
     target: [dist(words[MESH_CAM_BASE + 4] ?? 0), dist(words[MESH_CAM_BASE + 5] ?? 0), dist(words[MESH_CAM_BASE + 6] ?? 0)],
     fov: fovWord > 0 ? angle(fovWord) : null
   };
+}
+function decodeMeshPoses(words) {
+  if (words.length <= MESH_POSE_BASE) {
+    return [];
+  }
+  const count = Math.min(words[MESH_POSE_BASE] ?? 0, MESH_POSE_CAPACITY);
+  const poses = [];
+  for (let i = 0; i < count; i += 1) {
+    const base = MESH_POSE_BASE + 1 + i * MESH_POSE_STRIDE;
+    const indexWord = words[base] ?? 0;
+    const pos = (word) => (word | 0) / MESH_CAM_DIST_SCALE;
+    const angle = (word) => (word | 0) / MESH_CAM_ANGLE_SCALE;
+    poses.push({
+      index: indexWord & 255,
+      hidden: (indexWord & MESH_POSE_HIDDEN) !== 0,
+      position: [pos(words[base + 1] ?? 0), pos(words[base + 2] ?? 0), pos(words[base + 3] ?? 0)],
+      rotation: [angle(words[base + 4] ?? 0), angle(words[base + 5] ?? 0), angle(words[base + 6] ?? 0)],
+      scale: (words[base + 7] ?? 0) / MESH_CAM_DIST_SCALE
+    });
+  }
+  return poses;
 }
 function hashEventId(id) {
   let hash = 2166136261 >>> 0;
@@ -3678,7 +3728,7 @@ var ParticleOverlaySurface = class {
 var lerp3 = (a, b, t) => a + (b - a) * t;
 
 // src/mesh/MeshOverlaySurface.ts
-import { renderMeshScene } from "@cartbox/editor";
+import { composeModelMatrix as composeModelMatrix2, multiplyMat4, renderMeshScene } from "@cartbox/editor";
 
 // src/mesh/meshScene.ts
 import {
@@ -3784,6 +3834,7 @@ function buildOrbitCamera(bounds, yaw, pitch, aspect, options = {}) {
 }
 
 // src/mesh/MeshOverlaySurface.ts
+var RAD_TO_DEG = 180 / Math.PI;
 var AUTO_ORBIT_YAW_PER_FRAME = 2 * Math.PI / 720;
 var AUTO_ORBIT_PITCH = 0.35;
 var MeshOverlaySurface = class _MeshOverlaySurface {
@@ -3795,6 +3846,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.instances = instances;
     this.frame = 0;
     this.cartCamera = null;
+    this.poses = [];
     this.output = new Uint8ClampedArray(width * height * 4);
     this.presented = new Uint8Array(this.output.buffer);
     this.depth = new Float32Array(width * height);
@@ -3824,6 +3876,15 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   setCameraOverride(camera) {
     this.cartCamera = camera;
   }
+  /**
+   * Set the per-instance poses a cart published this frame (empty to leave every
+   * instance at its authored transform). The player calls this each frame from the
+   * decoded mesh-pose mailbox; a pose composes on top of the instance's authored
+   * placement, and a hidden pose drops the instance from the frame.
+   */
+  setPoseOverrides(poses) {
+    this.poses = poses;
+  }
   blit(rgba) {
     this.output.set(rgba);
     const cart = this.cartCamera;
@@ -3832,7 +3893,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       distance: cart.distance,
       targetOffset: cart.target
     }) : buildOrbitCamera(this.scene.bounds, this.frame * AUTO_ORBIT_YAW_PER_FRAME, AUTO_ORBIT_PITCH, this.width / this.height);
-    renderMeshScene(this.instances, {
+    renderMeshScene(this.posedInstances(), {
       width: this.width,
       height: this.height,
       out: this.output,
@@ -3843,6 +3904,33 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     });
     this.frame += 1;
     this.inner.blit(this.presented);
+  }
+  /**
+   * The instances to draw this frame: the authored set when the cart posed none
+   * (the fast, allocation-free path), otherwise each authored instance with any
+   * matching pose composed on top — a hidden pose drops the instance entirely.
+   * A pose's transform is applied in the instance's LOCAL space (authored · pose),
+   * so a cart spins/moves an object relative to where the editor placed it.
+   */
+  posedInstances() {
+    if (this.poses.length === 0) return this.instances;
+    const result = [];
+    for (let i = 0; i < this.instances.length; i += 1) {
+      const authored = this.instances[i];
+      const pose = this.poses.find((p) => p.index === i);
+      if (!pose) {
+        result.push(authored);
+        continue;
+      }
+      if (pose.hidden) continue;
+      const local = composeModelMatrix2(
+        pose.position,
+        [pose.rotation[0] * RAD_TO_DEG, pose.rotation[1] * RAD_TO_DEG, pose.rotation[2] * RAD_TO_DEG],
+        [pose.scale, pose.scale, pose.scale]
+      );
+      result.push({ mesh: authored.mesh, model: multiplyMat4(authored.model, local), textures: authored.textures });
+    }
+    return result;
   }
   destroy() {
     this.inner.destroy();
@@ -4095,7 +4183,9 @@ var Player = class {
         this.sceneSurface.setCameraBase(decodeCamera(this.console.readMailbox()));
       }
       if (this.meshSurface && this.console) {
-        this.meshSurface.setCameraOverride(decodeMeshCamera(this.console.readMailbox()));
+        const mailbox = this.console.readMailbox();
+        this.meshSurface.setCameraOverride(decodeMeshCamera(mailbox));
+        this.meshSurface.setPoseOverrides(decodeMeshPoses(mailbox));
       }
       this.applyAnimation();
       this.surface?.blit(framebuffer);
@@ -4571,6 +4661,10 @@ export {
   MESH_CAM_BASE,
   MESH_CAM_DIST_SCALE,
   MESH_CAM_STRIDE,
+  MESH_POSE_BASE,
+  MESH_POSE_CAPACITY,
+  MESH_POSE_HIDDEN,
+  MESH_POSE_STRIDE,
   MIN_PYRAMID_DIMENSION,
   MODELS,
   MeshOverlaySurface,
@@ -4604,6 +4698,7 @@ export {
   decodeLights,
   decodeMailbox,
   decodeMeshCamera,
+  decodeMeshPoses,
   defaultPostFxSettings,
   drift,
   emitterPreset,

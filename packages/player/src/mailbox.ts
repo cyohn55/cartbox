@@ -43,7 +43,7 @@ export const MAILBOX_TYPE_SCORE = 2;
 export const MAILBOX_TYPE_PROGRESS = 3;
 
 /** Total reserved pmem words (mirrors CBX_MAILBOX_WORDS in the engine shim). */
-export const MAILBOX_WORDS = 72;
+export const MAILBOX_WORDS = 137;
 /** Event ring capacity. Small on purpose: the host drains the ring every tick. */
 export const EVENT_CAPACITY = 8;
 /** Word index of the light-count header (just past the event ring). */
@@ -74,6 +74,15 @@ export const MESH_CAM_ANGLE_SCALE = 1024;
 export const MESH_CAM_DIST_SCALE = 256;
 /** Bit 0 of the flags word: the cart is driving the mesh camera this frame. */
 export const MESH_CAM_ACTIVE = 1;
+
+/** Word index of the mesh-pose block's count header, just past the mesh camera. */
+export const MESH_POSE_BASE = MESH_CAM_BASE + MESH_CAM_STRIDE;
+/** Maximum mesh instances a cart can pose per frame. */
+export const MESH_POSE_CAPACITY = 8;
+/** Words per pose record: index/flags, posX/Y/Z, yaw/pitch/roll, scale. */
+export const MESH_POSE_STRIDE = 8;
+/** Bit 8 of a pose record's index word: hide this instance this frame. */
+export const MESH_POSE_HIDDEN = 1 << 8;
 
 /**
  * Directional and spot lights ride in the bits that a point light leaves zero,
@@ -290,6 +299,55 @@ export function decodeMeshCamera(words: Uint32Array): MailboxMeshCamera | null {
     target: [dist(words[MESH_CAM_BASE + 4] ?? 0), dist(words[MESH_CAM_BASE + 5] ?? 0), dist(words[MESH_CAM_BASE + 6] ?? 0)],
     fov: fovWord > 0 ? angle(fovWord) : null,
   };
+}
+
+/** A per-instance transform a cart applies to one mesh, on top of its authored placement. */
+export interface MailboxMeshPose {
+  /** Which scene instance (index into the mesh sidecar) this poses. */
+  index: number;
+  /** Hide the instance this frame (skip drawing it). */
+  hidden: boolean;
+  /** Local translation, world units. */
+  position: [number, number, number];
+  /** Local Euler rotation, radians, applied X→Y→Z. */
+  rotation: [number, number, number];
+  /** Local uniform-ish scale; 1 when the cart omits it. */
+  scale: number;
+}
+
+/**
+ * Decodes the per-instance mesh poses a cart published this frame via
+ * `cartbox.meshpose(...)`. Like the lights, the block is a count header followed
+ * by a ring of records the cart rewrites each frame (clear + add), so there is no
+ * sequence to track. An empty block (count 0 — the common case) yields no poses,
+ * leaving every instance at its authored transform.
+ *
+ * Rotations come back in radians (the SDK's unit); the player converts to the
+ * degrees `composeModelMatrix` expects. Scale 0 is passed through untouched, so a
+ * cart can collapse an instance to nothing deliberately (`cartbox.meshpose(i, …, 0)`).
+ *
+ * @param words The mailbox window (same array {@link decodeMailbox} reads).
+ */
+export function decodeMeshPoses(words: Uint32Array): MailboxMeshPose[] {
+  if (words.length <= MESH_POSE_BASE) {
+    return [];
+  }
+  const count = Math.min(words[MESH_POSE_BASE] ?? 0, MESH_POSE_CAPACITY);
+  const poses: MailboxMeshPose[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const base = MESH_POSE_BASE + 1 + i * MESH_POSE_STRIDE;
+    const indexWord = words[base] ?? 0;
+    const pos = (word: number): number => (word | 0) / MESH_CAM_DIST_SCALE;
+    const angle = (word: number): number => (word | 0) / MESH_CAM_ANGLE_SCALE;
+    poses.push({
+      index: indexWord & 0xff,
+      hidden: (indexWord & MESH_POSE_HIDDEN) !== 0,
+      position: [pos(words[base + 1] ?? 0), pos(words[base + 2] ?? 0), pos(words[base + 3] ?? 0)],
+      rotation: [angle(words[base + 4] ?? 0), angle(words[base + 5] ?? 0), angle(words[base + 6] ?? 0)],
+      scale: (words[base + 7] ?? 0) / MESH_CAM_DIST_SCALE,
+    });
+  }
+  return poses;
 }
 
 /**

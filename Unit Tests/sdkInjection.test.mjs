@@ -65,6 +65,9 @@ test("the SDK's Lua layout matches the host decoder constants", () => {
   // producer and the host decoder from drifting apart on that offset.
   assert.ok(CARTBOX_SDK_LUA.includes("_MCB = _CB + 2"), "mesh-camera base offset must agree");
   assert.ok(CARTBOX_SDK_LUA.includes("meshcam = function"), "cartbox.meshcam must be defined");
+  // The mesh-pose block sits one mesh-camera stride (8 words) past the camera.
+  assert.ok(CARTBOX_SDK_LUA.includes("_MPB = _MCB + 8"), "mesh-pose base offset must agree");
+  assert.ok(CARTBOX_SDK_LUA.includes("meshpose = function"), "cartbox.meshpose must be defined");
 });
 
 let passed = 0;

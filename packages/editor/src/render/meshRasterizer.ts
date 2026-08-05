@@ -157,6 +157,11 @@ export function composeModelMatrix(
   ]);
 }
 
+/** Multiply two column-major 4×4 matrices (`a · b`). Public wrapper for composing transforms. */
+export function multiplyMat4(a: Mat4, b: Mat4): Mat4 {
+  return multiply(a, b);
+}
+
 /** A right-handed view matrix looking from `eye` at `center`, y-up. Public wrapper over {@link lookAt}. */
 export function viewMatrix(
   eye: readonly [number, number, number],

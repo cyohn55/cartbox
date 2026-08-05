@@ -252,19 +252,23 @@ void cbx_delete(cbx_console *console) {
 /*
  * Event mailbox (Platform P2). Carts emit platform events (achievements, scores)
  * by writing to a reserved slice of persistent memory (pmem) via the cartbox
- * SDK; the host reads that slice each frame. We reserve the top 72 of pmem's 256
- * words (indices 184..255 = 288 bytes), leaving 0..183 for the cart's own save
- * data. Word 184 is a monotonic sequence counter; the rest is a ring of 3-word
+ * SDK; the host reads that slice each frame. We reserve the top 137 of pmem's 256
+ * words (indices 119..255 = 548 bytes), leaving 0..118 for the cart's own save
+ * data. Word 119 is a monotonic sequence counter; the rest is a ring of 3-word
  * event records {type, id, value}, then the lights block, the parallax camera,
- * and finally the 8-word mesh-camera block a cart uses to drive its 3D meshes.
+ * the 8-word mesh-camera block, and finally the mesh-pose block (a count word +
+ * a ring of per-instance transform records) a cart uses to move/spin its meshes.
  *
- * The block grew from 64 to 72 words (base 192 → 184) to make room for the
- * mesh camera; the sub-protocol offsets are all relative to the base, so every
- * existing producer/consumer keeps working — only the base moved. mailbox.ts and
- * the cartbox SDK Lua (sdk.ts) mirror these constants and MUST move in lockstep.
+ * The block grew 64 → 72 (base 192 → 184, for the mesh camera) → 137 (base
+ * 184 → 119, for the mesh poses). Every sub-protocol offset is relative to the
+ * base, so existing producers/consumers keep working — only the base moved. Note
+ * a widening shrinks the cart's own pmem region, so a cart that stored save data
+ * in the newly-reserved words would collide; carts use low indices in practice.
+ * mailbox.ts and the cartbox SDK Lua (sdk.ts) mirror these constants and MUST
+ * move in lockstep, and the WASM cores must be rebuilt for a change to take hold.
  */
-#define CBX_MAILBOX_PMEM_START 184
-#define CBX_MAILBOX_WORDS 72
+#define CBX_MAILBOX_PMEM_START 119
+#define CBX_MAILBOX_WORDS 137
 
 EMSCRIPTEN_KEEPALIVE
 void *cbx_mailbox_ptr(cbx_console *console) {

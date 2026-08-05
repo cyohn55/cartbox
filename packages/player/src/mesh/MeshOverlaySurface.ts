@@ -22,11 +22,13 @@
  * `create`, mirroring `LitCanvasSurface.create`.
  */
 
-import { renderMeshScene, type DecodedTexture, type MeshSceneInstance } from "@cartbox/editor";
+import { composeModelMatrix, multiplyMat4, renderMeshScene, type DecodedTexture, type MeshSceneInstance } from "@cartbox/editor";
 import type { DisplaySurface } from "../display.js";
-import type { MailboxMeshCamera } from "../mailbox.js";
+import type { MailboxMeshCamera, MailboxMeshPose } from "../mailbox.js";
 import type { MeshScene } from "./meshScene.js";
 import { buildOrbitCamera } from "./meshScene.js";
+
+const RAD_TO_DEG = 180 / Math.PI;
 
 /** Radians of yaw per presented frame — one full turn every ~12s at 60Hz. */
 const AUTO_ORBIT_YAW_PER_FRAME = (2 * Math.PI) / 720;
@@ -36,6 +38,7 @@ const AUTO_ORBIT_PITCH = 0.35;
 export class MeshOverlaySurface implements DisplaySurface {
   private frame = 0;
   private cartCamera: MailboxMeshCamera | null = null;
+  private poses: readonly MailboxMeshPose[] = [];
   private readonly output: Uint8ClampedArray;
   private readonly presented: Uint8Array;
   private readonly depth: Float32Array;
@@ -45,6 +48,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     private readonly width: number,
     private readonly height: number,
     private readonly scene: MeshScene,
+    /** The authored instances (baked placement); per-frame poses compose on top. */
     private readonly instances: readonly MeshSceneInstance[],
   ) {
     this.output = new Uint8ClampedArray(width * height * 4);
@@ -81,6 +85,16 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.cartCamera = camera;
   }
 
+  /**
+   * Set the per-instance poses a cart published this frame (empty to leave every
+   * instance at its authored transform). The player calls this each frame from the
+   * decoded mesh-pose mailbox; a pose composes on top of the instance's authored
+   * placement, and a hidden pose drops the instance from the frame.
+   */
+  setPoseOverrides(poses: readonly MailboxMeshPose[]): void {
+    this.poses = poses;
+  }
+
   blit(rgba: Uint8Array): void {
     // Copy the cart frame in, then composite the meshes on top (background: null
     // leaves untouched pixels showing the cart). The depth buffer is reset inside
@@ -95,7 +109,7 @@ export class MeshOverlaySurface implements DisplaySurface {
           targetOffset: cart.target,
         })
       : buildOrbitCamera(this.scene.bounds, this.frame * AUTO_ORBIT_YAW_PER_FRAME, AUTO_ORBIT_PITCH, this.width / this.height);
-    renderMeshScene(this.instances, {
+    renderMeshScene(this.posedInstances(), {
       width: this.width,
       height: this.height,
       out: this.output,
@@ -106,6 +120,34 @@ export class MeshOverlaySurface implements DisplaySurface {
     });
     this.frame += 1; // advance in lockstep with the run loop's present cadence
     this.inner.blit(this.presented);
+  }
+
+  /**
+   * The instances to draw this frame: the authored set when the cart posed none
+   * (the fast, allocation-free path), otherwise each authored instance with any
+   * matching pose composed on top — a hidden pose drops the instance entirely.
+   * A pose's transform is applied in the instance's LOCAL space (authored · pose),
+   * so a cart spins/moves an object relative to where the editor placed it.
+   */
+  private posedInstances(): readonly MeshSceneInstance[] {
+    if (this.poses.length === 0) return this.instances;
+    const result: MeshSceneInstance[] = [];
+    for (let i = 0; i < this.instances.length; i += 1) {
+      const authored = this.instances[i]!;
+      const pose = this.poses.find((p) => p.index === i);
+      if (!pose) {
+        result.push(authored);
+        continue;
+      }
+      if (pose.hidden) continue; // dropped from the frame this tick
+      const local = composeModelMatrix(
+        pose.position,
+        [pose.rotation[0] * RAD_TO_DEG, pose.rotation[1] * RAD_TO_DEG, pose.rotation[2] * RAD_TO_DEG],
+        [pose.scale, pose.scale, pose.scale],
+      );
+      result.push({ mesh: authored.mesh, model: multiplyMat4(authored.model, local), textures: authored.textures });
+    }
+    return result;
   }
 
   destroy(): void {
