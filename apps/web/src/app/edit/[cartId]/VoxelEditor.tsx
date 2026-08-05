@@ -25,6 +25,8 @@ import {
   serializeVoxelGrid,
   deserializeVoxelGrid,
   deserializeCellShape,
+  parseVox,
+  encodeVox,
   renderVoxelModel,
   floodRegion,
   cellCoords,
@@ -111,6 +113,22 @@ const GRID_SIZES = [8, 16, 24, 32, 64, 128, 256].filter((n) => n <= MAX_VOXEL_GR
 
 /** The grid sizes as the rail selects them. */
 const GRID_OPTIONS = GRID_SIZES.map((size) => ({ id: size, label: String(size), hint: `${size}³ voxels` }));
+
+/**
+ * Re-home an imported (possibly non-cubic) sculpt into the editor's cubic grid,
+ * whose size the rail selects as a single N×N×N option. The cube edge is the
+ * smallest offered size that holds the model's longest axis, so the whole sculpt
+ * fits without cropping; voxels keep their coordinates (the imported model
+ * already sits inside its own dimensions, which are ≤ this edge). Materials and
+ * emissive aren't carried because a `.vox` model has neither.
+ */
+function fitImportedGrid(source: VoxelGrid): { grid: VoxelGrid; size: number } {
+  const extent = Math.max(source.sizeX, source.sizeY, source.sizeZ);
+  const size = GRID_SIZES.find((option) => option >= extent) ?? GRID_SIZES[GRID_SIZES.length - 1]!;
+  const grid = new VoxelGrid(size, size, size);
+  source.forEachFilled((x, y, z, cell) => grid.set(x, y, z, cell.r, cell.g, cell.b));
+  return { grid, size };
+}
 
 /** The "from sprites" form's three sprite-number fields, as typed. */
 interface SpriteFields {
@@ -483,6 +501,9 @@ export function VoxelEditor({
   onColorChange,
 }: VoxelEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Hidden picker for Import .vox, and the status line both it and Export write to.
+  const voxFileRef = useRef<HTMLInputElement>(null);
+  const [voxNote, setVoxNote] = useState<string | null>(null);
   // The grid is the source of truth; it is seeded once on mount from the cart's
   // model, or from the prop handed over to re-sculpt (the manager routes through
   // /edit/new, which clears the draft, so `model` is empty and the prop wins).
@@ -1153,6 +1174,61 @@ export function VoxelEditor({
   };
 
   /**
+   * Download the current sculpt as a MagicaVoxel `.vox` file — the standard
+   * interchange format, so the model opens in MagicaVoxel and other voxel tools.
+   * `.vox` describes cubes with flat colours, so a hexel sculpt exports as its
+   * raw lattice occupancy and any material/emissive is dropped (see the codec).
+   */
+  const exportVox = () => {
+    try {
+      const bytes = encodeVox(gridRef.current!);
+      const blob = new Blob([bytes as BlobPart], { type: "application/octet-stream" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "cartbox-voxel.vox";
+      link.click();
+      URL.revokeObjectURL(url);
+      setVoxNote(`Exported ${gridRef.current!.filledCount.toLocaleString()} voxels.`);
+    } catch (error) {
+      setVoxNote(error instanceof Error ? error.message : "Could not export the .vox file.");
+    }
+  };
+
+  /**
+   * Load a MagicaVoxel `.vox` file, replacing the current sculpt. The imported
+   * model is re-homed into the nearest cubic grid the rail offers, reset to cubes
+   * with flat colours (the only thing `.vox` carries), and committed to the cart.
+   */
+  const importVox = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = ""; // let the same file be re-picked after a failure
+    if (!file) return;
+    setVoxNote("Reading…");
+    try {
+      const source = parseVox(new Uint8Array(await file.arrayBuffer()));
+      if (source.filledCount === 0) {
+        setVoxNote("That .vox file has no voxels.");
+        return;
+      }
+      const { grid, size } = fitImportedGrid(source);
+      gridRef.current = grid;
+      setCellShape("cube");
+      setSpriteMaterials([]);
+      setMaterialIndex(MATERIAL_NONE);
+      setGridSize(size);
+      clearSelection();
+      setHover(null);
+      setCell(fitCellForGrid(grid, geometryFor("cube")));
+      setRev((value) => value + 1);
+      emitModel("cube", []);
+      setVoxNote(`Imported ${grid.filledCount.toLocaleString()} voxels into a ${size}³ grid.`);
+    } catch (error) {
+      setVoxNote(error instanceof Error ? error.message : "Could not read that .vox file.");
+    }
+  };
+
+  /**
    * Switch the model between cubes and hexels. The two lattices don't share
    * sites (hexels live only on even-parity coordinates), so a sculpt can't be
    * faithfully reinterpreted — switching starts a fresh seed of the new shape.
@@ -1448,7 +1524,37 @@ export function VoxelEditor({
               </span>
               Clear
             </button>
+            <button
+              type="button"
+              className={styles.toolBtn}
+              onClick={() => voxFileRef.current?.click()}
+              title="Import a MagicaVoxel .vox file, replacing this model"
+            >
+              <span className={styles.toolGlyph} aria-hidden>
+                ⬆
+              </span>
+              Import .vox
+            </button>
+            <button
+              type="button"
+              className={styles.toolBtn}
+              onClick={exportVox}
+              title="Download this model as a MagicaVoxel .vox file"
+            >
+              <span className={styles.toolGlyph} aria-hidden>
+                ⬇
+              </span>
+              Export .vox
+            </button>
           </div>
+          <input
+            ref={voxFileRef}
+            type="file"
+            accept=".vox,application/octet-stream"
+            onChange={importVox}
+            hidden
+          />
+          {voxNote && <RailHint>{voxNote}</RailHint>}
         </RailGroup>
 
         <RailGroup label="Backdrop">

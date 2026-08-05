@@ -51,6 +51,8 @@ interface CartTarget {
   materials: WireMaterials | null;
   /** Persisted voxel sculpt payload, validated, or null when absent/malformed. */
   voxel: string | null;
+  /** Persisted imported-mesh sidecar (opaque string), or null when absent. */
+  mesh: string | null;
   /** Persisted parallax-scene backdrop, validated, or null when absent/malformed. */
   scene: SceneSpec | null;
   /** Persisted animation timeline, validated, or null when absent/malformed. */
@@ -65,6 +67,23 @@ interface CartTarget {
   description: string;
   /** Persisted marketplace tags, or empty when none. */
   tags: string[];
+}
+
+/**
+ * Read the mesh sidecar in its own query so a not-yet-provisioned `mesh` column
+ * (the migration lagging a deploy) degrades to "no meshes" instead of failing the
+ * whole cart load. Folding it into the main select would make one missing column
+ * blank every sidecar — the editor would open with no sculpt/scene/anim at all.
+ */
+async function resolveMeshColumn(cartId: string): Promise<string | null> {
+  try {
+    const { data, error } = await serviceClient().from("carts").select("mesh").eq("id", cartId).maybeSingle();
+    if (error) return null;
+    const mesh = data?.mesh;
+    return typeof mesh === "string" ? mesh : mesh ? JSON.stringify(mesh) : null;
+  } catch {
+    return null;
+  }
 }
 
 async function resolveCart(cartId: string): Promise<CartTarget> {
@@ -82,6 +101,7 @@ async function resolveCart(cartId: string): Promise<CartTarget> {
       fx: parsePostFxSettings(data?.fx),
       materials: parseMaterials(data?.materials),
       voxel: parseVoxelPayload(data?.voxel),
+      mesh: await resolveMeshColumn(cartId),
       scene: parseScene(data?.scene),
       anim: parseAnim(data?.anim),
       particles: parseParticles(data?.particles),
@@ -102,6 +122,7 @@ async function resolveCart(cartId: string): Promise<CartTarget> {
       fx: null,
       materials: null,
       voxel: null,
+      mesh: null,
       scene: null,
       anim: null,
       particles: null,
@@ -120,7 +141,7 @@ export default async function EditorPage({ params, searchParams }: EditorPagePro
     return <StaticCartEditor cartId={params.cartId} />;
   }
 
-  const { name, cartUrl, storedModel, rig, fx, materials, voxel, scene, anim, particles, collision, flags, description, tags } =
+  const { name, cartUrl, storedModel, rig, fx, materials, voxel, mesh, scene, anim, particles, collision, flags, description, tags } =
     await resolveCart(params.cartId);
   // A saved cart's persisted model is authoritative; a brand-new cart (no row)
   // takes the model from the ?model= param carried in from /edit/new.
@@ -139,6 +160,7 @@ export default async function EditorPage({ params, searchParams }: EditorPagePro
       initialFx={fx}
       initialMaterials={materials}
       initialVoxel={voxel}
+      initialMesh={mesh}
       initialScene={scene}
       initialAnim={anim}
       initialParticles={particles}

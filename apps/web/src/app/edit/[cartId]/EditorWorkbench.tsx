@@ -58,11 +58,13 @@ import { AnimEditor } from "./AnimEditor";
 import { ParticlesEditor } from "./ParticlesEditor";
 import { ShaderEditor } from "./ShaderEditor";
 import { AssetsEditor } from "./AssetsEditor";
+import { MeshEditor } from "./MeshEditor";
 import { useEditorHistory } from "./useEditorHistory";
+import { decodeMeshSidecar, encodeMeshSidecar, type MeshSidecar } from "@/lib/meshSidecar";
 
-const TABS = ["Code", "Assets", "Map", "Scene", "Anim", "Weather", "FX", "SFX", "Music"] as const;
+const TABS = ["Code", "Assets", "Map", "Scene", "Mesh", "Anim", "Weather", "FX", "SFX", "Music"] as const;
 type Tab = (typeof TABS)[number];
-const LIVE_TABS: ReadonlySet<Tab> = new Set<Tab>(["Code", "Assets", "Map", "Scene", "Anim", "Weather", "FX", "SFX", "Music"]);
+const LIVE_TABS: ReadonlySet<Tab> = new Set<Tab>(["Code", "Assets", "Map", "Scene", "Mesh", "Anim", "Weather", "FX", "SFX", "Music"]);
 
 type EngineMode = "wasm" | "stub";
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -82,6 +84,8 @@ interface EditorWorkbenchProps {
   initialMaterials: WireMaterials | null;
   /** Persisted 3D voxel model (serialized) loaded with the cart, or null when none. */
   initialVoxel: string | null;
+  /** Persisted imported-mesh sidecar (serialized) loaded with the cart, or null when none. */
+  initialMesh: string | null;
   /** Persisted parallax-scene backdrop loaded with the cart, or null when none. */
   initialScene: SceneSpec | null;
   /** Persisted animation timeline loaded with the cart, or null when none. */
@@ -108,6 +112,7 @@ export function EditorWorkbench({
   initialFx,
   initialMaterials,
   initialVoxel,
+  initialMesh,
   initialScene,
   initialAnim,
   initialParticles,
@@ -203,6 +208,7 @@ export function EditorWorkbench({
       initialFx={initialFx}
       initialMaterials={initialMaterials}
       initialVoxel={initialVoxel}
+      initialMesh={initialMesh}
       initialScene={initialScene}
       initialAnim={initialAnim}
       initialParticles={initialParticles}
@@ -225,6 +231,7 @@ function WorkbenchBody({
   initialFx,
   initialMaterials,
   initialVoxel,
+  initialMesh,
   initialScene,
   initialAnim,
   initialParticles,
@@ -243,6 +250,7 @@ function WorkbenchBody({
   initialFx: PostFxSettings | null;
   initialMaterials: WireMaterials | null;
   initialVoxel: string | null;
+  initialMesh: string | null;
   initialScene: SceneSpec | null;
   initialAnim: AnimSpec | null;
   initialParticles: ParticleSpec | null;
@@ -334,6 +342,10 @@ function WorkbenchBody({
   const [pendingVoxel] = useState<PendingVoxelEdit | null>(() =>
     typeof window !== "undefined" ? loadPendingVoxelEdit() : null,
   );
+  // Imported meshes ride outside the undo timeline for now (import/transform are
+  // coarse operations, not per-stroke history); they persist with the cart via
+  // their own sidecar column, like the voxel/anim/particle sidecars.
+  const [mesh, setMesh] = useState<MeshSidecar>(() => decodeMeshSidecar(initialMesh));
   const [activeTab, setActiveTab] = useState<Tab>("Assets");
   useEffect(() => {
     if (pendingVoxel) clearPendingVoxelEdit();
@@ -410,6 +422,7 @@ function WorkbenchBody({
           fxResponse,
           materialsResponse,
           voxelResponse,
+          meshResponse,
           sceneResponse,
           animResponse,
           particlesResponse,
@@ -421,6 +434,7 @@ function WorkbenchBody({
           fetch(`/api/carts/${cartId}/fx`, { method: "PUT", headers, body: JSON.stringify(fx) }),
           fetch(`/api/carts/${cartId}/materials`, { method: "PUT", headers, body: JSON.stringify(materials) }),
           fetch(`/api/carts/${cartId}/voxel`, { method: "PUT", headers, body: JSON.stringify({ voxel }) }),
+          fetch(`/api/carts/${cartId}/mesh`, { method: "PUT", headers, body: JSON.stringify({ mesh: encodeMeshSidecar(mesh) }) }),
           fetch(`/api/carts/${cartId}/scene`, { method: "PUT", headers, body: JSON.stringify(scene) }),
           fetch(`/api/carts/${cartId}/anim`, { method: "PUT", headers, body: JSON.stringify(anim) }),
           fetch(`/api/carts/${cartId}/particles`, { method: "PUT", headers, body: JSON.stringify(particles) }),
@@ -433,6 +447,7 @@ function WorkbenchBody({
           fxResponse.ok &&
           materialsResponse.ok &&
           voxelResponse.ok &&
+          meshResponse.ok &&
           sceneResponse.ok &&
           particlesResponse.ok &&
           animResponse.ok &&
@@ -686,6 +701,9 @@ function WorkbenchBody({
           onSceneChange={setScene}
           revision={revision}
         />
+      )}
+      {activeTab === "Mesh" && (
+        <MeshEditor key="mesh" sidecar={mesh} onSidecarChange={setMesh} />
       )}
       {activeTab === "Anim" && (
         <AnimEditor

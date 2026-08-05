@@ -115,6 +115,7 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
       initialFx={resolved.fx}
       initialMaterials={resolved.materials}
       initialVoxel={resolved.voxel}
+      initialMesh={null}
       initialScene={resolved.scene}
       initialAnim={resolved.anim}
       initialParticles={resolved.particles}

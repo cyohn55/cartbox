@@ -119,6 +119,32 @@ export {
   type GridVoxelModel,
   type GridAxis,
 } from "./model/VoxelGrid";
+export { parseVox, encodeVox, DEFAULT_VOX_PALETTE } from "./model/voxCodec";
+export {
+  serializeMeshAsset,
+  deserializeMeshAsset,
+  defaultMaterial,
+  meshVertexCount,
+  meshTriangleCount,
+  meshBounds,
+  computeSmoothNormals,
+  MESH_ASSET_VERSION,
+  MAX_MESH_VERTICES,
+  MAX_MESH_INDICES,
+  type MeshAsset,
+  type MeshPrimitive,
+  type MeshMaterial,
+  type EncodedImage,
+  type MeshBounds,
+} from "./model/MeshAsset";
+export { parseObj, encodeObj, type ParseObjOptions, type ObjFiles } from "./model/objCodec";
+export { parseGlb, parseGltf, parseGltfText, encodeGlb } from "./model/gltfCodec";
+export {
+  renderMesh,
+  type DecodedTexture,
+  type OrbitCamera,
+  type RenderMeshOptions,
+} from "./render/meshRasterizer";
 export {
   MapVoxelLayer,
   mapLayerToVoxelGrid,
