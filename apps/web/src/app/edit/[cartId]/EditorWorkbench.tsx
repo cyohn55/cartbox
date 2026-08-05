@@ -351,6 +351,10 @@ function WorkbenchBody({
     tags: initialTags,
   });
   const [showDetails, setShowDetails] = useState(false);
+  // Collapse the right inspector to give the stage the full width; toggled from
+  // the top bar. A workbench-level flag (via a data attribute) so one control
+  // hides whichever tab's inspector is showing, without threading a prop to each.
+  const [inspectorHidden, setInspectorHidden] = useState(false);
 
   // Ctrl/Cmd+Z undoes; Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redoes. The workbench owns
   // these globally so every tab — including the code textarea — shares one stack.
@@ -463,7 +467,7 @@ function WorkbenchBody({
   };
 
   return (
-    <div className={styles.workbench}>
+    <div className={styles.workbench} data-inspector={inspectorHidden ? "hidden" : undefined}>
       <header className={styles.topbar}>
         <Link href="/" className={styles.wordmark} title="Back to the Cartbox home page">
           Cartbox
@@ -557,6 +561,16 @@ function WorkbenchBody({
               ↷
             </button>
           </div>
+          <button
+            type="button"
+            className="cbx-btn"
+            onClick={() => setInspectorHidden((hidden) => !hidden)}
+            aria-pressed={inspectorHidden}
+            title={inspectorHidden ? "Show the inspector panel" : "Hide the inspector panel"}
+            aria-label={inspectorHidden ? "Show inspector" : "Hide inspector"}
+          >
+            {inspectorHidden ? "▤ Panel" : "▥ Panel"}
+          </button>
           <button
             type="button"
             className="cbx-btn"

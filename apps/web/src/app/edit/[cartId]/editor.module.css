@@ -5,6 +5,11 @@
   inset: 0;
   display: grid;
   grid-template-rows: 52px 1fr;
+  /* Pin the single column to the viewport width. Without minmax(0, …) the column
+     sizes to its widest row's min-content — the crowded top bar — which stretched
+     the body past the screen and pushed the inspector off the right edge. */
+  grid-template-columns: minmax(0, 1fr);
+  overflow: hidden;
   background: var(--bg);
 }
 
@@ -17,6 +22,10 @@
   padding: 0 16px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
+  /* The bar is content-dense; if it can't fit, scroll it on its own axis rather
+     than forcing the whole editor wider than the screen. */
+  min-width: 0;
+  overflow-x: auto;
 }
 
 .wordmark {
@@ -636,8 +645,24 @@
 
 .body {
   display: grid;
-  grid-template-columns: 200px 1fr 300px;
+  /* minmax(0, 1fr) — not a bare 1fr — so the middle stage can shrink below its
+     content's min-content width. A bare 1fr keeps its auto minimum, which blows
+     the grid wider than the viewport and pushes the fixed 300px inspector
+     off-screen. */
+  grid-template-columns: 200px minmax(0, 1fr) 300px;
   min-height: 0;
+  /* Never scroll the whole editor sideways; panels scroll vertically instead. */
+  overflow: hidden;
+}
+
+/* The inspector-hidden state (toggled from the top bar): drop the 300px column
+   and hide the right panel, giving the stage the full remaining width. */
+.workbench[data-inspector="hidden"] .body {
+  grid-template-columns: 200px minmax(0, 1fr);
+}
+
+.workbench[data-inspector="hidden"] .inspector {
+  display: none;
 }
 
 .rail {
