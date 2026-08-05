@@ -665,24 +665,37 @@
   overflow: hidden;
 }
 
-/* The inspector-hidden state (toggled from the top bar): drop the 300px column
-   and hide the right panel, giving the stage the full remaining width. */
+/* Collapsed-panel states (toggled by the chevron tabs): drop the hidden side's
+   fixed column so the stage takes its width. The two-attribute rule wins by
+   specificity when both panels are hidden. */
 .workbench[data-inspector="hidden"] .body {
   grid-template-columns: 200px minmax(0, 1fr);
+}
+
+.workbench[data-rail="hidden"] .body {
+  grid-template-columns: minmax(0, 1fr) 300px;
+}
+
+.workbench[data-rail="hidden"][data-inspector="hidden"] .body {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .workbench[data-inspector="hidden"] .inspector {
   display: none;
 }
 
-/* The inspector's collapse handle: a small vertical tab sitting on the panel's
-   left edge, centred over the body (below the 52px top bar). Its right edge is
-   pinned to the inspector's left edge (300px in), and moves to the screen edge
-   when the panel is hidden — so it is always reachable to reopen it. */
+.workbench[data-rail="hidden"] .rail {
+  display: none;
+}
+
+/* Each side panel's collapse handle: a small vertical tab on the panel's inner
+   edge, centred over the body (below the 52px top bar). The tab is pinned to the
+   panel's inner edge and slides to the screen edge when that panel is hidden, so
+   it is always reachable to reopen the panel. */
+.railToggle,
 .inspectorToggle {
   position: absolute;
   top: calc(52px + (100% - 52px) / 2);
-  right: 300px;
   transform: translateY(-50%);
   z-index: 20;
   width: 18px;
@@ -695,18 +708,35 @@
   color: var(--muted);
   background: var(--surface);
   border: 1px solid var(--border);
-  border-right: 0;
-  border-radius: var(--radius) 0 0 var(--radius);
   cursor: pointer;
 }
 
+.railToggle:hover,
 .inspectorToggle:hover {
   color: var(--text);
   background: var(--bg, #0c0a14);
 }
 
+/* Right inspector handle: pinned to its left edge (300px in), rounded left. */
+.inspectorToggle {
+  right: 300px;
+  border-right: 0;
+  border-radius: var(--radius) 0 0 var(--radius);
+}
+
 .workbench[data-inspector="hidden"] .inspectorToggle {
   right: 0;
+}
+
+/* Left rail handle: pinned to its right edge (200px in), rounded right. */
+.railToggle {
+  left: 200px;
+  border-left: 0;
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.workbench[data-rail="hidden"] .railToggle {
+  left: 0;
 }
 
 .rail {

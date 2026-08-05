@@ -351,10 +351,11 @@ function WorkbenchBody({
     tags: initialTags,
   });
   const [showDetails, setShowDetails] = useState(false);
-  // Collapse the right inspector to give the stage the full width; toggled from
-  // the top bar. A workbench-level flag (via a data attribute) so one control
-  // hides whichever tab's inspector is showing, without threading a prop to each.
+  // Collapse either side panel to give the stage more width. Workbench-level
+  // flags (via data attributes) so one chevron each hides whichever tab's rail /
+  // inspector is showing, without threading a prop to every editor.
   const [inspectorHidden, setInspectorHidden] = useState(false);
+  const [railHidden, setRailHidden] = useState(false);
 
   // Ctrl/Cmd+Z undoes; Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redoes. The workbench owns
   // these globally so every tab — including the code textarea — shares one stack.
@@ -467,7 +468,11 @@ function WorkbenchBody({
   };
 
   return (
-    <div className={styles.workbench} data-inspector={inspectorHidden ? "hidden" : undefined}>
+    <div
+      className={styles.workbench}
+      data-inspector={inspectorHidden ? "hidden" : undefined}
+      data-rail={railHidden ? "hidden" : undefined}
+    >
       <header className={styles.topbar}>
         <Link href="/" className={styles.wordmark} title="Back to the Cartbox home page">
           Cartbox
@@ -608,9 +613,19 @@ function WorkbenchBody({
         </div>
       </header>
 
-      {/* A chevron tab on the inspector's left edge, centred over the body. It
-          lives at the workbench level — not inside the inspector — so it stays
-          reachable to reopen the panel after it is hidden. */}
+      {/* Chevron tabs on each side panel's inner edge, centred over the body.
+          They live at the workbench level — not inside the panels — so they stay
+          reachable to reopen a panel after it is hidden. */}
+      <button
+        type="button"
+        className={styles.railToggle}
+        onClick={() => setRailHidden((hidden) => !hidden)}
+        aria-pressed={railHidden}
+        aria-label={railHidden ? "Show the left panel" : "Hide the left panel"}
+        title={railHidden ? "Show the left panel" : "Hide the left panel"}
+      >
+        <span aria-hidden>{railHidden ? "›" : "‹"}</span>
+      </button>
       <button
         type="button"
         className={styles.inspectorToggle}
