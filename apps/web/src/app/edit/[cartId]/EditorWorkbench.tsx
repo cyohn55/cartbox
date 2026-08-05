@@ -564,16 +564,6 @@ function WorkbenchBody({
           <button
             type="button"
             className="cbx-btn"
-            onClick={() => setInspectorHidden((hidden) => !hidden)}
-            aria-pressed={inspectorHidden}
-            title={inspectorHidden ? "Show the inspector panel" : "Hide the inspector panel"}
-            aria-label={inspectorHidden ? "Show inspector" : "Hide inspector"}
-          >
-            {inspectorHidden ? "▤ Panel" : "▥ Panel"}
-          </button>
-          <button
-            type="button"
-            className="cbx-btn"
             onClick={() => setShowDetails(true)}
             title="Edit title, description and tags"
           >
@@ -617,6 +607,20 @@ function WorkbenchBody({
           </button>
         </div>
       </header>
+
+      {/* A chevron tab on the inspector's left edge, centred over the body. It
+          lives at the workbench level — not inside the inspector — so it stays
+          reachable to reopen the panel after it is hidden. */}
+      <button
+        type="button"
+        className={styles.inspectorToggle}
+        onClick={() => setInspectorHidden((hidden) => !hidden)}
+        aria-pressed={inspectorHidden}
+        aria-label={inspectorHidden ? "Show the inspector" : "Hide the inspector"}
+        title={inspectorHidden ? "Show the inspector" : "Hide the inspector"}
+      >
+        <span aria-hidden>{inspectorHidden ? "‹" : "›"}</span>
+      </button>
 
       {activeTab === "Code" && <CodeEditor key={`code:${revision}`} doc={doc} />}
       {activeTab === "Assets" && (
