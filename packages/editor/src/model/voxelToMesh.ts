@@ -162,8 +162,8 @@ export function voxelGridToMeshAsset(grid: VoxelGrid, options: VoxelToMeshOption
 }
 
 /** Two mask cells merge only when the same colour faces the same way. */
-function sameCell(a: MaskCell | null, b: MaskCell): boolean {
-  return a !== null && a.rgb === b.rgb && a.dir === b.dir;
+function sameCell(a: MaskCell | null | undefined, b: MaskCell): boolean {
+  return a != null && a.rgb === b.rgb && a.dir === b.dir;
 }
 
 /**

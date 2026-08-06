@@ -15,6 +15,7 @@ import { notFound } from "next/navigation";
 
 import { serviceClient } from "@/lib/supabase";
 import { publicUrl } from "@/lib/storage";
+import { resolveMeshSidecar } from "@/lib/meshStorage";
 import { getServerUserId } from "@/lib/supabase-server";
 import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
 import { isStaticExport } from "@/lib/staticSite";
@@ -239,7 +240,9 @@ export default async function CartridgePage({ params }: PageProps) {
   let meshRaw: string | null = null;
   try {
     const { data: extra, error } = await db.from("carts").select("mesh").eq("id", cart.id).maybeSingle();
-    if (!error) meshRaw = (extra?.mesh as string | null) ?? null;
+    // A large sidecar is stored as a reference to object storage; resolve it back
+    // to the full payload the client parses (inline sidecars pass through).
+    if (!error) meshRaw = await resolveMeshSidecar((extra?.mesh as string | null) ?? null);
   } catch {
     meshRaw = null;
   }

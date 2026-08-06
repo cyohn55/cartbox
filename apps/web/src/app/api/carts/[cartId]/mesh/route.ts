@@ -18,6 +18,7 @@ import { NextResponse } from "next/server";
 import { serviceClient } from "@/lib/supabase";
 import { getSessionUserId } from "@/lib/auth";
 import { decodeMeshSidecar, encodeMeshSidecar } from "@/lib/meshSidecar";
+import { storeMeshSidecar } from "@/lib/meshStorage";
 
 export async function PUT(
   request: Request,
@@ -42,7 +43,7 @@ export async function PUT(
   if (raw !== null && raw !== "" && typeof raw !== "string") {
     return NextResponse.json({ error: "Mesh payload must be a string." }, { status: 400 });
   }
-  const mesh = raw === null || raw === "" ? null : encodeMeshSidecar(decodeMeshSidecar(raw));
+  const encoded = raw === null || raw === "" ? null : encodeMeshSidecar(decodeMeshSidecar(raw));
 
   const db = serviceClient();
   const { data: cart, error: lookupError } = await db
@@ -61,6 +62,9 @@ export async function PUT(
     return NextResponse.json({ error: "You can only save your own cartridges." }, { status: 403 });
   }
 
+  // Large sidecars offload to object storage, leaving only a reference in the
+  // column; small ones (and any save when R2 isn't configured) stay inline.
+  const mesh = await storeMeshSidecar(cart.id, encoded);
   const { error: updateError } = await db.from("carts").update({ mesh }).eq("id", cart.id);
   if (updateError) {
     // A not-yet-provisioned `mesh` column (migration lagging this deploy) makes

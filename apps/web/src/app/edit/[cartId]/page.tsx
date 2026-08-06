@@ -12,6 +12,7 @@ import { serviceClient } from "@/lib/supabase";
 import { parseCollision } from "@/lib/collision";
 import { parseFlags } from "@/lib/flags";
 import { publicUrl } from "@/lib/storage";
+import { resolveMeshSidecar } from "@/lib/meshStorage";
 import { resolveModelId } from "@/lib/consoleModel";
 import { resolveStarterId } from "@/lib/starter";
 import { parseRig, type WireRig } from "@/lib/rig";
@@ -80,7 +81,10 @@ async function resolveMeshColumn(cartId: string): Promise<string | null> {
     const { data, error } = await serviceClient().from("carts").select("mesh").eq("id", cartId).maybeSingle();
     if (error) return null;
     const mesh = data?.mesh;
-    return typeof mesh === "string" ? mesh : mesh ? JSON.stringify(mesh) : null;
+    const stored = typeof mesh === "string" ? mesh : mesh ? JSON.stringify(mesh) : null;
+    // A large sidecar is stored as a reference to object storage; resolve it back
+    // to the full payload so the editor loads the real geometry (inline is a no-op).
+    return await resolveMeshSidecar(stored);
   } catch {
     return null;
   }
