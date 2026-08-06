@@ -17,7 +17,7 @@
  * Server-only — the storage client uses secret credentials.
  */
 
-import { putObject, publicUrl } from "./storage";
+import { deleteObject, putObject, publicUrl } from "./storage";
 
 /**
  * Sidecars larger than this (UTF-8 bytes) offload to R2; smaller ones stay inline.
@@ -92,6 +92,21 @@ export async function storeMeshSidecar(cartId: string, encoded: string | null): 
   } catch (error) {
     console.error(`mesh offload to R2 failed for cart ${cartId}; storing inline`, error);
     return encoded;
+  }
+}
+
+/**
+ * Best-effort delete of a cart's offloaded mesh object, for when a save no longer
+ * offloads (the sidecar was cleared or shrank below the inline limit) and the old
+ * object would otherwise be orphaned. Never throws — cleanup must not fail a Save,
+ * and a missing object is a no-op. A no-op when object storage isn't configured.
+ */
+export async function deleteMeshObject(cartId: string): Promise<void> {
+  if (!isObjectStorageConfigured()) return;
+  try {
+    await deleteObject(meshObjectKey(cartId));
+  } catch (error) {
+    console.error(`mesh object cleanup failed for cart ${cartId}`, error);
   }
 }
 

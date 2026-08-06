@@ -3,7 +3,7 @@
  * rendered thumbnails. Server-only — uses secret credentials.
  */
 
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 
 function required(name: string): string {
   const value = process.env[name];
@@ -47,6 +47,22 @@ export async function putObject(
       Key: key,
       Body: body,
       ContentType: contentType,
+    }),
+  );
+}
+
+/**
+ * Deletes an object by key. A missing key is not an error (S3/R2 delete is
+ * idempotent), so callers can use this to clean up an object that may or may not
+ * exist without checking first.
+ *
+ * @param key Object key to remove.
+ */
+export async function deleteObject(key: string): Promise<void> {
+  await client().send(
+    new DeleteObjectCommand({
+      Bucket: required("R2_BUCKET"),
+      Key: key,
     }),
   );
 }

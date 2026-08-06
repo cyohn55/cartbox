@@ -18,7 +18,7 @@ import { NextResponse } from "next/server";
 import { serviceClient } from "@/lib/supabase";
 import { getSessionUserId } from "@/lib/auth";
 import { decodeMeshSidecar, encodeMeshSidecar } from "@/lib/meshSidecar";
-import { storeMeshSidecar } from "@/lib/meshStorage";
+import { storeMeshSidecar, deleteMeshObject, parseMeshReference } from "@/lib/meshStorage";
 
 export async function PUT(
   request: Request,
@@ -73,6 +73,13 @@ export async function PUT(
       return NextResponse.json({ ok: true, skipped: "mesh column not provisioned" });
     }
     return NextResponse.json({ error: updateError.message }, { status: 500 });
+  }
+
+  // When this save didn't offload (cleared, or shrank back under the inline
+  // limit), drop any object a previous offloaded save left behind. A re-offload
+  // reuses the same deterministic key, so only these transitions can orphan one.
+  if (!parseMeshReference(mesh)) {
+    await deleteMeshObject(cart.id);
   }
 
   return NextResponse.json({ ok: true });

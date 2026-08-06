@@ -91,6 +91,6 @@ export const config = {
   // imported from next.config.mjs; "Unit Tests/middleware-matcher.test.ts"
   // asserts the two lists still agree.
   matcher: [
-    "/((?!_next/static|_next/image|favicon\\.ico|engine/|quake/|cube2/|scummvm/|supertux/|dosbox/|games/).*)",
+    "/((?!_next/static|_next/image|favicon\\.ico|engine/|quake/|cube2/|scummvm/|supertux/|dosbox/|games/|opentyrian/|openttd/|cavestory/).*)",
   ],
 };

@@ -16,6 +16,7 @@ import {
   shouldOffload,
   storeMeshSidecar,
   resolveMeshSidecar,
+  deleteMeshObject,
   meshObjectKey,
 } from "@/lib/meshStorage";
 
@@ -80,5 +81,13 @@ describe("resolveMeshSidecar", () => {
 
   it("returns null for an empty stored value", async () => {
     expect(await resolveMeshSidecar(null)).toBeNull();
+  });
+});
+
+describe("deleteMeshObject", () => {
+  it("is a safe no-op when object storage is unconfigured", async () => {
+    // No R2_* env in the test environment: cleanup must never throw (it can't
+    // fail a Save), so this resolves without touching storage.
+    await expect(deleteMeshObject("cart-1")).resolves.toBeUndefined();
   });
 });
