@@ -29,14 +29,24 @@ describe("voxelGridToMeshAsset", () => {
     expect(triCount(mesh)).toBe(12); // 6 faces × 2 triangles
   });
 
-  it("culls the shared faces between two adjacent same-colour voxels", () => {
+  it("greedily merges two adjacent same-colour voxels into one box (6 quads)", () => {
     const grid = new VoxelGrid(2, 1, 1);
     grid.set(0, 0, 0, 10, 20, 30);
     grid.set(1, 0, 0, 10, 20, 30);
     const mesh = voxelGridToMeshAsset(grid);
-    // Two cubes would be 24 tris; the touching faces (one each) are culled → 20.
-    expect(triCount(mesh)).toBe(20);
+    // Per-face culling alone gives 20 tris; greedy merges each of the 6 planar
+    // faces of the 2×1×1 box into a single quad → 6 quads = 12 tris.
+    expect(triCount(mesh)).toBe(12);
     expect(mesh.primitives).toHaveLength(1); // same colour → one primitive
+  });
+
+  it("greedily merges a flat same-colour slab far below its surface-face count", () => {
+    const grid = new VoxelGrid(4, 4, 1);
+    for (let x = 0; x < 4; x += 1) for (let y = 0; y < 4; y += 1) grid.set(x, y, 0, 90, 90, 90);
+    const mesh = voxelGridToMeshAsset(grid);
+    // The 4×4×1 slab has 2*(16+4+4)=48 surface faces (96 tris) per-face; greedy
+    // collapses each planar face to one quad: top + bottom + 4 sides = 6 quads.
+    expect(triCount(mesh)).toBe(12);
   });
 
   it("splits distinct colours into separate primitives", () => {

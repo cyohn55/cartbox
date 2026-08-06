@@ -5,13 +5,15 @@
  * [[mesh-asset-3d-feature]]). This is the editor bridge between the two 3D asset
  * kinds: voxels stay voxels, but they can now *become* a mesh on demand.
  *
- * The conversion is a surface mesher: it emits only the faces between a solid
- * cell and empty space (interior faces are never seen, so they are culled), which
- * keeps the triangle count to the sculpt's surface area rather than its volume.
- * Faces are grouped by colour into one {@link MeshPrimitive} per distinct colour —
- * the mesh format carries colour per material, not per vertex, so this is how a
- * multi-coloured sculpt keeps its palette without a texture. Each face gets a flat
- * axis-aligned normal, so the mesh lights correctly.
+ * The mesher is a **greedy surface mesher**: it emits only the faces between a
+ * solid cell and empty space (interior faces are never seen, so they are culled),
+ * and then merges coplanar, same-colour faces into the largest possible
+ * rectangles — a flat 8×8 wall becomes two triangles, not 128. That keeps the
+ * triangle count to the sculpt's *shape* rather than its surface-cell count, which
+ * matters because the runtime rasteriser is a CPU renderer whose cost scales with
+ * triangles. Faces are grouped by colour into one {@link MeshPrimitive} per
+ * distinct colour — the mesh format carries colour per material, not per vertex —
+ * and each gets a flat axis-aligned normal, so the mesh lights correctly.
  *
  * Pure and DOM-free: geometry only, unit-testable, no rendering.
  */
@@ -31,32 +33,18 @@ export interface VoxelToMeshOptions {
   readonly center?: boolean;
 }
 
-/** One cube face: the neighbour direction that must be empty for it to show, its
- * outward normal, and its four corner offsets in CCW winding (viewed from outside). */
-interface Face {
-  readonly neighbor: readonly [number, number, number];
-  readonly normal: readonly [number, number, number];
-  readonly corners: readonly (readonly [number, number, number])[];
-}
-
-// The six cube faces. Corner windings are CCW when viewed from outside, so the
-// cross product of the first two edges points along `normal` — correct front
-// faces for any renderer that culls, and harmless for the two-sided rasteriser.
-const FACES: readonly Face[] = [
-  { neighbor: [1, 0, 0], normal: [1, 0, 0], corners: [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]] },
-  { neighbor: [-1, 0, 0], normal: [-1, 0, 0], corners: [[0, 0, 1], [0, 1, 1], [0, 1, 0], [0, 0, 0]] },
-  { neighbor: [0, 1, 0], normal: [0, 1, 0], corners: [[0, 1, 0], [0, 1, 1], [1, 1, 1], [1, 1, 0]] },
-  { neighbor: [0, -1, 0], normal: [0, -1, 0], corners: [[0, 0, 1], [0, 0, 0], [1, 0, 0], [1, 0, 1]] },
-  { neighbor: [0, 0, 1], normal: [0, 0, 1], corners: [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]] },
-  { neighbor: [0, 0, -1], normal: [0, 0, -1], corners: [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]] },
-];
-
-/** Accumulates one colour's faces into growable position/normal/index streams. */
+/** Accumulates one colour's quads into growable position/normal/index streams. */
 interface ColorGroup {
-  readonly rgb: readonly [number, number, number];
+  readonly rgb: number; // packed 0xRRGGBB
   readonly positions: number[];
   readonly normals: number[];
   readonly indices: number[];
+}
+
+/** A surface quad's mask cell: the colour showing and which way its face points. */
+interface MaskCell {
+  readonly rgb: number;
+  readonly dir: 1 | -1;
 }
 
 /**
@@ -66,37 +54,95 @@ interface ColorGroup {
 export function voxelGridToMeshAsset(grid: VoxelGrid, options: VoxelToMeshOptions = {}): MeshAsset {
   const scale = options.scale ?? 1;
   const center = options.center ?? true;
-  const offsetX = center ? -grid.sizeX / 2 : 0;
-  const offsetY = center ? -grid.sizeY / 2 : 0;
-  const offsetZ = center ? -grid.sizeZ / 2 : 0;
+  const dims: [number, number, number] = [grid.sizeX, grid.sizeY, grid.sizeZ];
+  const offset: [number, number, number] = center ? [-dims[0] / 2, -dims[1] / 2, -dims[2] / 2] : [0, 0, 0];
 
-  // Group faces by packed colour so each distinct colour becomes one primitive.
   const groups = new Map<number, ColorGroup>();
-  const groupFor = (r: number, g: number, b: number): ColorGroup => {
-    const key = (r << 16) | (g << 8) | b;
-    let group = groups.get(key);
+  const groupFor = (rgb: number): ColorGroup => {
+    let group = groups.get(rgb);
     if (!group) {
-      group = { rgb: [r, g, b], positions: [], normals: [], indices: [] };
-      groups.set(key, group);
+      group = { rgb, positions: [], normals: [], indices: [] };
+      groups.set(rgb, group);
     }
     return group;
   };
 
-  grid.forEachFilled((x, y, z, cell) => {
-    for (const face of FACES) {
-      // Skip the face if a solid neighbour hides it (interior face → culled).
-      if (grid.isFilled(x + face.neighbor[0], y + face.neighbor[1], z + face.neighbor[2])) continue;
+  /** Packed colour of the cell, or -1 when empty / out of bounds. */
+  const colorAt = (x: number, y: number, z: number): number => {
+    const cell = grid.get(x, y, z);
+    return cell ? (cell.r << 16) | (cell.g << 8) | cell.b : -1;
+  };
 
-      const group = groupFor(cell.r, cell.g, cell.b);
-      const baseVertex = group.positions.length / 3;
-      for (const corner of face.corners) {
-        group.positions.push((x + corner[0] + offsetX) * scale, (y + corner[1] + offsetY) * scale, (z + corner[2] + offsetZ) * scale);
-        group.normals.push(face.normal[0], face.normal[1], face.normal[2]);
+  // One greedy sweep per axis. `d` is the slice axis; `u`,`v` span the slice plane.
+  for (let d = 0; d < 3; d += 1) {
+    const u = (d + 1) % 3;
+    const v = (d + 2) % 3;
+    const du = dims[u]!;
+    const dv = dims[v]!;
+    const dd = dims[d]!;
+
+    const coord: [number, number, number] = [0, 0, 0];
+    const next: [number, number, number] = [0, 0, 0];
+    const mask: (MaskCell | null)[] = new Array(du * dv).fill(null);
+
+    // Slices sit *between* cells: at each boundary `s` (the plane at coord d = s+1),
+    // a face shows where exactly one of the two cells it separates is solid.
+    for (let s = -1; s < dd; s += 1) {
+      let n = 0;
+      for (let jv = 0; jv < dv; jv += 1) {
+        for (let iu = 0; iu < du; iu += 1) {
+          coord[d] = s;
+          coord[u] = iu;
+          coord[v] = jv;
+          next[d] = s + 1;
+          next[u] = iu;
+          next[v] = jv;
+          const a = s >= 0 ? colorAt(coord[0], coord[1], coord[2]) : -1;
+          const b = s < dd - 1 ? colorAt(next[0], next[1], next[2]) : -1;
+          if (a >= 0 && b < 0) mask[n] = { rgb: a, dir: 1 };
+          else if (b >= 0 && a < 0) mask[n] = { rgb: b, dir: -1 };
+          else mask[n] = null;
+          n += 1;
+        }
       }
-      // Two triangles fan the quad: (0,1,2) and (0,2,3).
-      group.indices.push(baseVertex, baseVertex + 1, baseVertex + 2, baseVertex, baseVertex + 2, baseVertex + 3);
+
+      // Greedily merge the mask into maximal same-cell rectangles.
+      n = 0;
+      for (let jv = 0; jv < dv; jv += 1) {
+        for (let iu = 0; iu < du; ) {
+          const cell = mask[n];
+          if (!cell) {
+            iu += 1;
+            n += 1;
+            continue;
+          }
+          // Grow the run along u, then along v while every row matches.
+          let w = 1;
+          while (iu + w < du && sameCell(mask[n + w], cell)) w += 1;
+          let h = 1;
+          let done = false;
+          while (jv + h < dv && !done) {
+            for (let k = 0; k < w; k += 1) {
+              if (!sameCell(mask[n + k + h * du], cell)) {
+                done = true;
+                break;
+              }
+            }
+            if (!done) h += 1;
+          }
+
+          emitQuad(groupFor(cell.rgb), d, u, v, s + 1, iu, jv, w, h, cell.dir, offset, scale);
+
+          // Consume the rectangle so it isn't emitted again.
+          for (let l = 0; l < h; l += 1) {
+            for (let k = 0; k < w; k += 1) mask[n + k + l * du] = null;
+          }
+          iu += w;
+          n += w;
+        }
+      }
     }
-  });
+  }
 
   const primitives: MeshPrimitive[] = [];
   for (const group of groups.values()) {
@@ -107,10 +153,57 @@ export function voxelGridToMeshAsset(grid: VoxelGrid, options: VoxelToMeshOption
       indices: Uint32Array.from(group.indices),
       material: {
         ...defaultMaterial("voxel"),
-        baseColorFactor: [group.rgb[0] / 255, group.rgb[1] / 255, group.rgb[2] / 255, 1],
+        baseColorFactor: [((group.rgb >> 16) & 0xff) / 255, ((group.rgb >> 8) & 0xff) / 255, (group.rgb & 0xff) / 255, 1],
       },
     });
   }
 
   return { name: options.name ?? "voxel-mesh", primitives };
+}
+
+/** Two mask cells merge only when the same colour faces the same way. */
+function sameCell(a: MaskCell | null, b: MaskCell): boolean {
+  return a !== null && a.rgb === b.rgb && a.dir === b.dir;
+}
+
+/**
+ * Append one merged quad (a `w × h` rectangle in the slice plane at `plane`) to a
+ * colour group as two triangles. `dir` sets the winding so the face's normal
+ * points outward (±the slice axis).
+ */
+function emitQuad(
+  group: ColorGroup,
+  d: number,
+  u: number,
+  v: number,
+  plane: number,
+  iu: number,
+  jv: number,
+  w: number,
+  h: number,
+  dir: 1 | -1,
+  offset: readonly [number, number, number],
+  scale: number,
+): void {
+  const corner = (su: number, sv: number): [number, number, number] => {
+    const p: [number, number, number] = [0, 0, 0];
+    p[d] = plane;
+    p[u] = iu + su;
+    p[v] = jv + sv;
+    return [(p[0] + offset[0]) * scale, (p[1] + offset[1]) * scale, (p[2] + offset[2]) * scale];
+  };
+
+  // CCW winding for an outward normal: (0,0)->(w,0)->(w,h)->(0,h) when dir>0, and
+  // reversed when the face points the other way.
+  const quad = dir > 0 ? [corner(0, 0), corner(w, 0), corner(w, h), corner(0, h)] : [corner(0, 0), corner(0, h), corner(w, h), corner(w, 0)];
+
+  const normal: [number, number, number] = [0, 0, 0];
+  normal[d] = dir;
+
+  const baseVertex = group.positions.length / 3;
+  for (const [px, py, pz] of quad) {
+    group.positions.push(px, py, pz);
+    group.normals.push(normal[0], normal[1], normal[2]);
+  }
+  group.indices.push(baseVertex, baseVertex + 1, baseVertex + 2, baseVertex, baseVertex + 2, baseVertex + 3);
 }
