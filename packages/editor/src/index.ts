@@ -284,6 +284,7 @@ export {
   type VoxelMesh,
   type VoxelMeshOptions,
 } from "./render/voxelMesh";
+export { voxelGridToMeshAsset, type VoxelToMeshOptions } from "./model/voxelToMesh";
 export {
   orbitBasis,
   orthographicProjection,

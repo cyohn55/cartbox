@@ -25,6 +25,7 @@
 import { useMemo, useState } from "react";
 import {
   type MaterialMap,
+  type MeshAsset,
   type MaterialSwatches,
   type NormalMap,
   type SpriteRig,
@@ -99,6 +100,8 @@ interface AssetsEditorProps {
   revision: number;
   /** A backdrop voxel prop handed over to re-sculpt, or null. */
   pendingVoxel?: PendingVoxelEdit | null;
+  /** Convert the current voxel sculpt to a mesh and add it to the cart's mesh sidecar. */
+  onExportVoxelMesh?: (mesh: MeshAsset, name: string) => void;
 }
 
 export function AssetsEditor({
@@ -117,6 +120,7 @@ export function AssetsEditor({
   bank,
   revision,
   pendingVoxel = null,
+  onExportVoxelMesh,
 }: AssetsEditorProps) {
   const sidecar = useMemo(() => decodeVoxelSidecar(voxel), [voxel]);
   const assets = sidecar.assets;
@@ -269,6 +273,7 @@ export function AssetsEditor({
           pendingEdit={pendingVoxel}
           color={color}
           onColorChange={setColor}
+          onExportMesh={onExportVoxelMesh}
         />
       )}
     </div>

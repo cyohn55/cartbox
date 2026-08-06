@@ -60,7 +60,8 @@ import { ShaderEditor } from "./ShaderEditor";
 import { AssetsEditor } from "./AssetsEditor";
 import { MeshEditor } from "./MeshEditor";
 import { useEditorHistory } from "./useEditorHistory";
-import { decodeMeshSidecar, encodeMeshSidecar, type MeshSidecar } from "@/lib/meshSidecar";
+import { addMesh, decodeMeshSidecar, encodeMeshSidecar, type MeshSidecar } from "@/lib/meshSidecar";
+import type { MeshAsset } from "@cartbox/editor";
 
 const TABS = ["Code", "Assets", "Map", "Scene", "Mesh", "Anim", "Weather", "FX", "SFX", "Music"] as const;
 type Tab = (typeof TABS)[number];
@@ -350,6 +351,12 @@ function WorkbenchBody({
   // authoring sidecar is re-encoded and parsed for the playtest. Memoised on the
   // sidecar because decoding geometry is not free; import/transform edits are coarse.
   const meshScene = useMemo<MeshScene | null>(() => parseMeshScene(encodeMeshSidecar(mesh)), [mesh]);
+  // Turn the current voxel sculpt into a placed mesh: add it to the sidecar and
+  // jump to the Mesh tab so the creator sees (and can transform) the result.
+  const exportVoxelMesh = useCallback((asset: MeshAsset, name: string) => {
+    setMesh((current) => addMesh(current, asset, name).sidecar);
+    setActiveTab("Mesh");
+  }, []);
   const [activeTab, setActiveTab] = useState<Tab>("Assets");
   useEffect(() => {
     if (pendingVoxel) clearPendingVoxelEdit();
@@ -674,6 +681,7 @@ function WorkbenchBody({
           bank={bank}
           revision={revision}
           pendingVoxel={pendingVoxel}
+          onExportVoxelMesh={exportVoxelMesh}
         />
       )}
       {activeTab === "Map" && (

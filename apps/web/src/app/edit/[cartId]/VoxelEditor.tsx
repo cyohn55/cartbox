@@ -27,6 +27,8 @@ import {
   deserializeCellShape,
   parseVox,
   encodeVox,
+  voxelGridToMeshAsset,
+  meshTriangleCount,
   renderVoxelModel,
   floodRegion,
   cellCoords,
@@ -41,6 +43,7 @@ import {
   VOXEL_GENERATORS,
   defaultValues,
   findGenerator,
+  type MeshAsset,
   type GeneratorValues,
   type CellShape,
   type CellGeometry,
@@ -489,6 +492,12 @@ interface VoxelEditorProps {
    */
   color: number;
   onColorChange: (index: number) => void;
+  /**
+   * Convert the current sculpt to a true triangle mesh and hand it to the cart's
+   * mesh sidecar. Absent when the host doesn't accept meshes (e.g. the backdrop
+   * prop editor). Cube sculpts only — hexels have no axis-aligned cube geometry.
+   */
+  onExportMesh?: (mesh: MeshAsset, name: string) => void;
 }
 
 export function VoxelEditor({
@@ -499,6 +508,7 @@ export function VoxelEditor({
   pendingEdit = null,
   color,
   onColorChange,
+  onExportMesh,
 }: VoxelEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // Hidden picker for Import .vox, and the status line both it and Export write to.
@@ -1196,6 +1206,23 @@ export function VoxelEditor({
   };
 
   /**
+   * Convert the current sculpt into a true triangle mesh and add it to the cart's
+   * mesh sidecar, so the voxel model becomes a placeable, transformable 3D mesh.
+   * Cube sculpts only — a hexel lattice has no axis-aligned cube faces to mesh.
+   */
+  const exportMesh = () => {
+    const grid = gridRef.current;
+    if (!grid || !onExportMesh) return;
+    if (grid.filledCount === 0) {
+      setVoxNote("Nothing to convert — the sculpt is empty.");
+      return;
+    }
+    const mesh = voxelGridToMeshAsset(grid, { name: "Voxel mesh" });
+    onExportMesh(mesh, "Voxel mesh");
+    setVoxNote(`Added a ${meshTriangleCount(mesh).toLocaleString()}-triangle mesh to the Mesh tab.`);
+  };
+
+  /**
    * Load a MagicaVoxel `.vox` file, replacing the current sculpt. The imported
    * model is re-homed into the nearest cubic grid the rail offers, reset to cubes
    * with flat colours (the only thing `.vox` carries), and committed to the cart.
@@ -1546,6 +1573,24 @@ export function VoxelEditor({
               </span>
               Export .vox
             </button>
+            {onExportMesh && (
+              <button
+                type="button"
+                className={styles.toolBtn}
+                onClick={exportMesh}
+                disabled={isHexel}
+                title={
+                  isHexel
+                    ? "Cube sculpts only — hexels have no cube geometry to mesh"
+                    : "Convert this sculpt to a 3D mesh and add it to the Mesh tab"
+                }
+              >
+                <span className={styles.toolGlyph} aria-hidden>
+                  ◈
+                </span>
+                To mesh
+              </button>
+            )}
           </div>
           <input
             ref={voxFileRef}
