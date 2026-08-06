@@ -70,6 +70,36 @@ export const INSPECTOR_SLOTS = [
 
 export type InspectorSlot = (typeof INSPECTOR_SLOTS)[number];
 
+/**
+ * How a whole slot folds away, decided once for every tab that fills it.
+ *
+ * Some slots are, by their nature, a long tail: `io` is the verbs that leave the
+ * tab (import, export, publish, clear); `generate` is procedural fills; `lighting`
+ * only ever changes the preview, never the saved cart. Rather than have each tab
+ * fold its own — and drift on the label and the default — the fold is declared
+ * here, so every tab's `io` reads "Import / Export" and behaves the same.
+ *
+ * `advanced` ties the fold to the editor's density (folded in Simple, open in
+ * Full); a plain entry rests folded regardless, one click from open.
+ */
+export interface SlotFold {
+  /** The disclosure heading, e.g. "Import / Export". */
+  readonly label: string;
+  /** Follow the Simple/Full density rather than resting folded unconditionally. */
+  readonly advanced?: boolean;
+}
+
+/** Rail slots that render behind one disclosure each. */
+export const RAIL_SLOT_FOLDS: Partial<Record<RailSlot, SlotFold>> = {
+  lighting: { label: "Preview lighting", advanced: true },
+  io: { label: "Import / Export" },
+};
+
+/** Inspector slots that render behind one disclosure each. */
+export const INSPECTOR_SLOT_FOLDS: Partial<Record<InspectorSlot, SlotFold>> = {
+  generate: { label: "Generate" },
+};
+
 /** A tab's contributions, by slot. Every slot is optional — most tabs fill few. */
 export type SlotContent<Slot extends string, Content> = Partial<Record<Slot, Content>>;
 

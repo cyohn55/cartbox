@@ -167,33 +167,6 @@ export function ParticlesEditor({ width, height, particles, onParticlesChange }:
           ariaLabel="Particle opacity"
           display={`${Math.round(activeEmitter.opacity * 100)}%`}
         />
-        <RangeControl
-          label="Size"
-          min={1}
-          max={8}
-          value={activeEmitter.size}
-          onChange={(size) => onParticlesChange(withEmitterUpdated(particles, activeIndex, { size }))}
-          ariaLabel="Particle size in pixels"
-          display={`${activeEmitter.size}px`}
-        />
-        <RangeControl
-          label="Speed"
-          min={0}
-          max={120}
-          value={Math.round(activeEmitter.speed * 10)}
-          onChange={(value) => onParticlesChange(withEmitterUpdated(particles, activeIndex, { speed: value / 10 }))}
-          ariaLabel="Particle speed"
-          display={`${activeEmitter.speed.toFixed(1)}`}
-        />
-        <RangeControl
-          label="Wind"
-          min={-60}
-          max={60}
-          value={Math.round(activeEmitter.wind * 10)}
-          onChange={(value) => onParticlesChange(withEmitterUpdated(particles, activeIndex, { wind: value / 10 }))}
-          ariaLabel="Horizontal wind drift"
-          display={`${activeEmitter.wind.toFixed(1)}`}
-        />
         <div className={styles.rangeRow}>
           <label htmlFor="particle-color" className={styles.groupLabel}>
             Colour
@@ -206,6 +179,42 @@ export function ParticlesEditor({ width, height, particles, onParticlesChange }:
             aria-label="Particle colour"
           />
         </div>
+
+        {/* The motion knobs each kind ships a sensible default for — folded away so
+            the everyday choice (which weather, how much, what colour) stays uncluttered. */}
+        <RailGroup label="Fine tune" advanced>
+          <RangeControl
+            label="Size"
+            nested
+            min={1}
+            max={8}
+            value={activeEmitter.size}
+            onChange={(size) => onParticlesChange(withEmitterUpdated(particles, activeIndex, { size }))}
+            ariaLabel="Particle size in pixels"
+            display={`${activeEmitter.size}px`}
+          />
+          <RangeControl
+            label="Speed"
+            nested
+            min={0}
+            max={120}
+            value={Math.round(activeEmitter.speed * 10)}
+            onChange={(value) => onParticlesChange(withEmitterUpdated(particles, activeIndex, { speed: value / 10 }))}
+            ariaLabel="Particle speed"
+            display={`${activeEmitter.speed.toFixed(1)}`}
+          />
+          <RangeControl
+            label="Wind"
+            nested
+            min={-60}
+            max={60}
+            value={Math.round(activeEmitter.wind * 10)}
+            onChange={(value) => onParticlesChange(withEmitterUpdated(particles, activeIndex, { wind: value / 10 }))}
+            ariaLabel="Horizontal wind drift"
+            display={`${activeEmitter.wind.toFixed(1)}`}
+          />
+        </RailGroup>
+
         <button
           type="button"
           className={styles.toolBtn}

@@ -37,6 +37,7 @@ import {
   type MaterialSwatches,
 } from "@cartbox/editor";
 
+import { EditorDensityProvider, useDensityPreference } from "./editorDensity";
 import { authHeaders } from "@/lib/supabase-browser";
 import type { CartMeta } from "@/lib/cartMeta";
 import { DetailsPanel } from "./DetailsPanel";
@@ -66,6 +67,13 @@ import type { MeshAsset } from "@cartbox/editor";
 const TABS = ["Code", "Assets", "Map", "Scene", "Mesh", "Anim", "Weather", "FX", "SFX", "Music"] as const;
 type Tab = (typeof TABS)[number];
 const LIVE_TABS: ReadonlySet<Tab> = new Set<Tab>(["Code", "Assets", "Map", "Scene", "Mesh", "Anim", "Weather", "FX", "SFX", "Music"]);
+
+// The everyday five sit on the bar; the cinematic/3D set — reached rarely, and
+// never before there is art to dress — tucks into a "More" menu so a cart opens
+// looking like a fantasy-console editor, not a flight deck. Both draw from the
+// same TABS, so the ordering above still governs the slot layout.
+const PRIMARY_TABS: readonly Tab[] = ["Code", "Assets", "Map", "SFX", "Music"];
+const MORE_TABS: readonly Tab[] = ["Scene", "Mesh", "Anim", "Weather", "FX"];
 
 type EngineMode = "wasm" | "stub";
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -380,6 +388,12 @@ function WorkbenchBody({
   const [inspectorHidden, setInspectorHidden] = useState(false);
   const [railHidden, setRailHidden] = useState(false);
 
+  // How much of each tab's controls show at rest, persisted across sessions, and
+  // whether the "More" tab menu is open. Both are chrome state, not cart content.
+  const [density, setDensity] = useDensityPreference();
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreActive = MORE_TABS.includes(activeTab);
+
   // Ctrl/Cmd+Z undoes; Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redoes. The workbench owns
   // these globally so every tab — including the code textarea — shares one stack.
   useEffect(() => {
@@ -494,6 +508,7 @@ function WorkbenchBody({
   };
 
   return (
+    <EditorDensityProvider value={density}>
     <div
       className={styles.workbench}
       data-inspector={inspectorHidden ? "hidden" : undefined}
@@ -550,7 +565,7 @@ function WorkbenchBody({
         </div>
 
         <nav className={styles.tabs} aria-label="Editors">
-          {TABS.map((tab) => {
+          {PRIMARY_TABS.map((tab) => {
             const live = LIVE_TABS.has(tab);
             const active = tab === activeTab;
             return (
@@ -567,9 +582,63 @@ function WorkbenchBody({
               </button>
             );
           })}
+
+          {/* The cinematic/3D tabs behind one menu. It names the active one when
+              the creator is inside it, so "which tab am I on" survives the fold. */}
+          <div className={styles.moreTab}>
+            <button
+              type="button"
+              className={`${styles.tab} ${moreActive ? styles.tabActive : ""}`}
+              aria-haspopup="menu"
+              aria-expanded={moreOpen}
+              onClick={() => setMoreOpen((open) => !open)}
+              onBlur={() => setMoreOpen(false)}
+            >
+              {moreActive ? `More · ${activeTab}` : "More"} ▾
+            </button>
+            {moreOpen && (
+              <div className={styles.moreMenu} role="menu">
+                {MORE_TABS.map((tab) => {
+                  const live = LIVE_TABS.has(tab);
+                  return (
+                    <button
+                      key={tab}
+                      type="button"
+                      role="menuitem"
+                      className={`${styles.moreMenuItem} ${tab === activeTab ? styles.moreMenuItemActive : ""}`}
+                      disabled={!live}
+                      // onMouseDown, not onClick: the button's onBlur closes the
+                      // menu first otherwise, and the click never lands.
+                      onMouseDown={() => {
+                        if (live) setActiveTab(tab);
+                        setMoreOpen(false);
+                      }}
+                    >
+                      {tab}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </nav>
 
         <div className={styles.actions}>
+          {/* One lever over every tab's advanced controls: Simple folds them to a
+              heading each, Full opens them. Persists across sessions. */}
+          <button
+            type="button"
+            className="cbx-btn"
+            onClick={() => setDensity(density === "simple" ? "full" : "simple")}
+            aria-pressed={density === "full"}
+            title={
+              density === "simple"
+                ? "Simple: advanced controls are folded away. Switch to Full to show them all."
+                : "Full: every control is shown. Switch to Simple to fold the advanced ones away."
+            }
+          >
+            {density === "simple" ? "Simple" : "Full"}
+          </button>
           <div className={styles.historyGroup}>
             <button
               type="button"
@@ -775,5 +844,6 @@ function WorkbenchBody({
         />
       )}
     </div>
+    </EditorDensityProvider>
   );
 }

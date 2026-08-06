@@ -744,26 +744,28 @@ export function SpriteEditor({
           />
           {asepriteNote && <RailHint>{asepriteNote}</RailHint>}
         </RailGroup>
-
-        {/* The generative tools sit below the file groups deliberately: they are
-            also "something arrives in this block from outside a brush stroke",
-            and grouping them with import/export is what makes that legible. */}
-        <SurfaceToolsPanel
-          sheet={sheet}
-          normals={normals}
-          height={height}
-          specular={specular}
-          roughness={roughness}
-          emissive={emissive}
-          selection={selection}
-          color={color}
-          onEdit={bump}
-        />
       </>
     ),
   };
 
   const inspector: InspectorSlots = {
+    // The generative tools (derive materials, pixelate, texture fill, LUT grade)
+    // are procedural fills, so they live in the inspector's `generate` slot — which
+    // folds them behind one "Generate" disclosure — rather than padding the rail's
+    // import/export stack. Each is a start the artist can then paint over.
+    generate: (
+      <SurfaceToolsPanel
+        sheet={sheet}
+        normals={normals}
+        height={height}
+        specular={specular}
+        roughness={roughness}
+        emissive={emissive}
+        selection={selection}
+        color={color}
+        onEdit={bump}
+      />
+    ),
     source: (
       <TilePicker
         sheet={sheet}

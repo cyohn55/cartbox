@@ -392,7 +392,9 @@ export function AnimEditor({ sheet, width, height, scene, anim, onAnimChange, re
             </button>
           ))}
         </div>
-        <GeneratorParamControls params={generatorParams} onChange={setGeneratorParams} />
+        <RailGroup label="Generator params" advanced>
+          <GeneratorParamControls params={generatorParams} onChange={setGeneratorParams} />
+        </RailGroup>
         <RailHint>{isGenerated ? "This track is animated by a generator. Adjust params then re-apply." : "This track holds a constant. Pick a generator to animate it."}</RailHint>
       </InspectorPanel>
     );

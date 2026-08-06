@@ -16,9 +16,10 @@
  * having to agree on what they are editing.
  */
 
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import styles from "./editor.module.css";
+import { resolveGroupOpen, useEditorDensity } from "./editorDensity";
 
 /** An id a control can be keyed and selected by. */
 type OptionId = string | number;
@@ -27,14 +28,65 @@ interface RailGroupProps {
   /** Uppercase group heading, e.g. "Tool". */
   label: string;
   children: ReactNode;
+  /**
+   * Render as a disclosure the creator can fold away. A collapsible group rests
+   * closed; pass {@link advanced} to have it follow the editor's density instead.
+   */
+  collapsible?: boolean;
+  /**
+   * Mark this as an infrequently-used group. It becomes collapsible and, unless
+   * {@link defaultOpen} overrides it, folds away in Simple density and opens in
+   * Full — the single lever that declutters every tab at once.
+   */
+  advanced?: boolean;
+  /** Force the initial open state, overriding the density-driven default. */
+  defaultOpen?: boolean;
 }
 
-/** A labelled section of the rail. */
-export function RailGroup({ label, children }: RailGroupProps) {
+/**
+ * A labelled section of the rail.
+ *
+ * Plain by default: a heading over its controls, exactly as every tab has always
+ * drawn it. Passing {@link RailGroupProps.collapsible} or
+ * {@link RailGroupProps.advanced} turns it into a disclosure so the rare controls
+ * can tuck behind their heading — the mechanism the whole declutter rests on, so
+ * it lives in the one shared primitive rather than being re-invented per tab.
+ */
+export function RailGroup({ label, children, collapsible = false, advanced = false, defaultOpen }: RailGroupProps) {
+  const density = useEditorDensity();
+  const foldable = collapsible || advanced;
+  const [open, setOpen] = useState(() => resolveGroupOpen(density, { advanced, defaultOpen }));
+
+  // An advanced group follows the density switch: flipping Simple/Full is an
+  // explicit "hide/show the advanced controls" gesture, so it re-resolves the
+  // rest state. A caller that pinned the state with defaultOpen keeps its choice.
+  useEffect(() => {
+    if (advanced && defaultOpen === undefined) setOpen(density === "full");
+  }, [density, advanced, defaultOpen]);
+
+  if (!foldable) {
+    return (
+      <div>
+        <div className={styles.groupLabel}>{label}</div>
+        {children}
+      </div>
+    );
+  }
+
   return (
-    <div>
-      <div className={styles.groupLabel}>{label}</div>
-      {children}
+    <div className={styles.railGroupFoldable} data-open={open || undefined}>
+      <button
+        type="button"
+        className={styles.railDisclosure}
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className={styles.railDisclosureCaret} aria-hidden>
+          {open ? "▾" : "▸"}
+        </span>
+        <span className={styles.groupLabel}>{label}</span>
+      </button>
+      {open && <div className={styles.railGroupBody}>{children}</div>}
     </div>
   );
 }

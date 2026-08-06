@@ -16,13 +16,17 @@
 import { Fragment, type ReactNode } from "react";
 
 import styles from "./editor.module.css";
+import { RailGroup } from "./railControls";
 import {
   INSPECTOR_SLOTS,
+  INSPECTOR_SLOT_FOLDS,
   RAIL_SLOTS,
+  RAIL_SLOT_FOLDS,
   orderedSlots,
   type InspectorSlot,
   type RailSlot,
   type SlotContent,
+  type SlotFold,
 } from "./workbenchLayout";
 
 /** A tab's rail controls, by slot. */
@@ -31,12 +35,27 @@ export type RailSlots = SlotContent<RailSlot, ReactNode>;
 /** A tab's inspector panels, by slot. */
 export type InspectorSlots = SlotContent<InspectorSlot, ReactNode>;
 
+/**
+ * A slot's content, wrapped in its wholesale disclosure when the layout declares
+ * one. Groups the slot already contains render plainly inside it — the fold sits
+ * one level above them, so there is a single caret over the whole slot rather
+ * than one per group.
+ */
+function foldedSlot(fold: SlotFold | undefined, content: ReactNode): ReactNode {
+  if (!fold) return content;
+  return (
+    <RailGroup label={fold.label} collapsible advanced={fold.advanced}>
+      {content}
+    </RailGroup>
+  );
+}
+
 /** The left rail: how you are editing. */
 export function WorkbenchRail({ slots }: { slots: RailSlots }) {
   return (
     <aside className={styles.rail}>
       {orderedSlots(RAIL_SLOTS, slots).map(({ slot, content }) => (
-        <Fragment key={slot}>{content}</Fragment>
+        <Fragment key={slot}>{foldedSlot(RAIL_SLOT_FOLDS[slot], content)}</Fragment>
       ))}
     </aside>
   );
@@ -47,7 +66,7 @@ export function WorkbenchInspector({ slots }: { slots: InspectorSlots }) {
   return (
     <aside className={styles.inspector}>
       {orderedSlots(INSPECTOR_SLOTS, slots).map(({ slot, content }) => (
-        <Fragment key={slot}>{content}</Fragment>
+        <Fragment key={slot}>{foldedSlot(INSPECTOR_SLOT_FOLDS[slot], content)}</Fragment>
       ))}
     </aside>
   );

@@ -711,10 +711,10 @@ export function MapEditor({
           </>
         )}
 
-        {/* Which renderer the 3D stage got. Belongs with the stage's own settings
-            rather than with the Clear action it used to trail, so it still shows
-            on the pixel layer — which has no cells to clear. */}
-        <RailGroup label="Renderer">
+        {/* Which renderer the 3D stage got. A status explainer, not a control the
+            creator drives — folded away by default, one caret from readable when a
+            downgrade needs explaining. */}
+        <RailGroup label="Renderer" advanced>
           <RailHint>
             {renderer === "gpu"
               ? "Drawing on the GPU (WebGPU): full resolution, lit by the material channels your art carries, with glowing pixels bloomed."

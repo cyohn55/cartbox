@@ -47,6 +47,40 @@ import {
 /** Auto-scroll range offered in the UI, in cart pixels per frame. */
 const SCROLL_LIMIT = 4;
 
+/** Named air looks: each sets density, desaturation and lift together. */
+const ATMOSPHERE_PRESET_VALUES = {
+  clear: { density: 0.1, desaturate: 0.1, lift: 0.05 },
+  hazy: { density: 0.35, desaturate: 0.35, lift: 0.2 },
+  foggy: { density: 0.7, desaturate: 0.6, lift: 0.45 },
+} as const;
+
+type AtmospherePresetId = keyof typeof ATMOSPHERE_PRESET_VALUES;
+
+const ATMOSPHERE_PRESETS: readonly { id: AtmospherePresetId; label: string }[] = [
+  { id: "clear", label: "Clear" },
+  { id: "hazy", label: "Hazy" },
+  { id: "foggy", label: "Foggy" },
+];
+
+/** The preset the current atmosphere matches exactly, or null when hand-tuned. */
+function activeAtmospherePreset(atmosphere: {
+  density: number;
+  desaturate: number;
+  lift: number;
+}): AtmospherePresetId | null {
+  for (const id of Object.keys(ATMOSPHERE_PRESET_VALUES) as AtmospherePresetId[]) {
+    const preset = ATMOSPHERE_PRESET_VALUES[id];
+    if (
+      Math.abs(atmosphere.density - preset.density) < 0.005 &&
+      Math.abs(atmosphere.desaturate - preset.desaturate) < 0.005 &&
+      Math.abs(atmosphere.lift - preset.lift) < 0.005
+    ) {
+      return id;
+    }
+  }
+  return null;
+}
+
 interface SceneEditorProps {
   sheet: SpriteSheet;
   /** The cart's screen size, so the preview matches the runtime backdrop. */
@@ -349,36 +383,48 @@ export function SceneEditor({ sheet, width, height, scene, onSceneChange, revisi
             aria-label="Atmosphere fog colour"
           />
         </div>
-        <RangeControl
-          label="Density"
-          nested
-          min={0}
-          max={100}
-          value={Math.round(scene.atmosphere.density * 100)}
-          onChange={(percent) => onSceneChange(withAtmosphere(scene, { density: percent / 100 }))}
-          ariaLabel="Atmosphere density"
-          display={`${Math.round(scene.atmosphere.density * 100)}%`}
+
+        {/* Most authors want a look, not three numbers: the presets set density,
+            desaturation and lift together, and the exact sliders fold away below
+            for the author who wants to dial them in. */}
+        <SegmentedControl
+          label="Depth of air"
+          options={ATMOSPHERE_PRESETS}
+          selected={activeAtmospherePreset(scene.atmosphere)}
+          onSelect={(id) => onSceneChange(withAtmosphere(scene, ATMOSPHERE_PRESET_VALUES[id]))}
         />
-        <RangeControl
-          label="Desaturation"
-          nested
-          min={0}
-          max={100}
-          value={Math.round(scene.atmosphere.desaturate * 100)}
-          onChange={(percent) => onSceneChange(withAtmosphere(scene, { desaturate: percent / 100 }))}
-          ariaLabel="Atmosphere desaturation with distance"
-          display={`${Math.round(scene.atmosphere.desaturate * 100)}%`}
-        />
-        <RangeControl
-          label="Contrast lift"
-          nested
-          min={0}
-          max={100}
-          value={Math.round(scene.atmosphere.lift * 100)}
-          onChange={(percent) => onSceneChange(withAtmosphere(scene, { lift: percent / 100 }))}
-          ariaLabel="Atmosphere contrast lift toward fog"
-          display={`${Math.round(scene.atmosphere.lift * 100)}%`}
-        />
+        <RailGroup label="Fine tune" advanced>
+          <RangeControl
+            label="Density"
+            nested
+            min={0}
+            max={100}
+            value={Math.round(scene.atmosphere.density * 100)}
+            onChange={(percent) => onSceneChange(withAtmosphere(scene, { density: percent / 100 }))}
+            ariaLabel="Atmosphere density"
+            display={`${Math.round(scene.atmosphere.density * 100)}%`}
+          />
+          <RangeControl
+            label="Desaturation"
+            nested
+            min={0}
+            max={100}
+            value={Math.round(scene.atmosphere.desaturate * 100)}
+            onChange={(percent) => onSceneChange(withAtmosphere(scene, { desaturate: percent / 100 }))}
+            ariaLabel="Atmosphere desaturation with distance"
+            display={`${Math.round(scene.atmosphere.desaturate * 100)}%`}
+          />
+          <RangeControl
+            label="Contrast lift"
+            nested
+            min={0}
+            max={100}
+            value={Math.round(scene.atmosphere.lift * 100)}
+            onChange={(percent) => onSceneChange(withAtmosphere(scene, { lift: percent / 100 }))}
+            ariaLabel="Atmosphere contrast lift toward fog"
+            display={`${Math.round(scene.atmosphere.lift * 100)}%`}
+          />
+        </RailGroup>
       </InspectorPanel>
     ) : undefined,
     hint: (
