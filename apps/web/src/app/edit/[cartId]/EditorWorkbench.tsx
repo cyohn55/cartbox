@@ -10,7 +10,7 @@
  * shown.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { defaultPostFxSettings, parseMeshScene, type AnimSpec, type MeshScene, type ParticleSpec, type PostFxSettings, type SceneSpec } from "@cartbox/player";
 import {
@@ -394,6 +394,20 @@ function WorkbenchBody({
   const [moreOpen, setMoreOpen] = useState(false);
   const moreActive = MORE_TABS.includes(activeTab);
 
+  // The "More" menu is positioned with fixed viewport coordinates, captured from
+  // the button when it opens: the tab strip scrolls horizontally, which makes it
+  // an overflow-clipping box, and an absolutely-positioned dropdown inside it gets
+  // clipped away. A fixed menu escapes that clip; the coords anchor it to the button.
+  const moreButtonRef = useRef<HTMLButtonElement>(null);
+  const [moreMenuPos, setMoreMenuPos] = useState<{ top: number; left: number } | null>(null);
+  const toggleMore = () => {
+    if (!moreOpen && moreButtonRef.current) {
+      const rect = moreButtonRef.current.getBoundingClientRect();
+      setMoreMenuPos({ top: rect.bottom + 4, left: rect.left });
+    }
+    setMoreOpen((open) => !open);
+  };
+
   // Ctrl/Cmd+Z undoes; Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redoes. The workbench owns
   // these globally so every tab — including the code textarea — shares one stack.
   useEffect(() => {
@@ -587,17 +601,22 @@ function WorkbenchBody({
               the creator is inside it, so "which tab am I on" survives the fold. */}
           <div className={styles.moreTab}>
             <button
+              ref={moreButtonRef}
               type="button"
               className={`${styles.tab} ${moreActive ? styles.tabActive : ""}`}
               aria-haspopup="menu"
               aria-expanded={moreOpen}
-              onClick={() => setMoreOpen((open) => !open)}
+              onClick={toggleMore}
               onBlur={() => setMoreOpen(false)}
             >
               {moreActive ? `More · ${activeTab}` : "More"} ▾
             </button>
-            {moreOpen && (
-              <div className={styles.moreMenu} role="menu">
+            {moreOpen && moreMenuPos && (
+              <div
+                className={styles.moreMenu}
+                role="menu"
+                style={{ top: moreMenuPos.top, left: moreMenuPos.left }}
+              >
                 {MORE_TABS.map((tab) => {
                   const live = LIVE_TABS.has(tab);
                   return (

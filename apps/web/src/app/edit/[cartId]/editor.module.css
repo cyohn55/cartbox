@@ -114,10 +114,12 @@
   cursor: pointer;
 }
 
+/* Fixed, not absolute: the tab strip scrolls horizontally and so clips its
+   overflow in both axes — an absolute dropdown inside it is cut off. Fixed
+   positioning escapes that clip; the button's viewport rect anchors it (top/left
+   set inline in EditorWorkbench). */
 .moreMenu {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
+  position: fixed;
   z-index: 20;
   display: flex;
   flex-direction: column;
