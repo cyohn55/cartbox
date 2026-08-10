@@ -15,8 +15,8 @@
  * persists it via the `world` sidecar.
  */
 
-import { useMemo } from "react";
-import type { WorldScene, WorldTileCell, WorldBillboard } from "@cartbox/player";
+import { useMemo, useState } from "react";
+import type { WorldScene, WorldTileCell, WorldBillboard, WorldProp } from "@cartbox/player";
 
 import styles from "./editor.module.css";
 
@@ -41,28 +41,80 @@ function makeDefaultWorld(): WorldScene {
     rows: DEFAULT_ROWS,
     tilesPerSide: TILES_PER_SIDE,
     cells,
+    props: [],
     billboards: [{ sprite: 4, width: 1, height: 1.6 }],
     camera: { yaw: Math.PI / 4, pitch: 0.62, distance: 0, fov: 0 },
   };
 }
 
-/** Height → a green ramp so the top-down grid reads as terrain relief. */
-function heightColor(h: number): string {
-  const t = Math.min(1, h / MAX_HEIGHT);
-  const light = 26 + t * 45; // % lightness
-  return `hsl(140 45% ${light}%)`;
+/** Tiles-per-side and height limits reused below; height→lightness in cellColor. */
+/** A named tile the brush can paint, with a swatch hue so the grid reads as a map. */
+const TILE_BRUSHES: ReadonlyArray<{ sprite: number; label: string; hue: number }> = [
+  { sprite: 0, label: "Grass", hue: 140 },
+  { sprite: 4, label: "Path", hue: 40 },
+  { sprite: 8, label: "Water", hue: 210 },
+  { sprite: 12, label: "Stone", hue: 220 },
+];
+
+/** Scenery props the brush can drop on a cell (sprite + world size in units). */
+const PROP_BRUSHES: ReadonlyArray<{ sprite: number; label: string; width: number; height: number }> = [
+  { sprite: 64, label: "Tree", width: 2.4, height: 3.0 },
+  { sprite: 68, label: "Lantern", width: 0.9, height: 1.8 },
+  { sprite: 72, label: "Rock", width: 1.3, height: 0.9 },
+  { sprite: 76, label: "Bush", width: 1.3, height: 1.0 },
+];
+
+/** Cell colour: hue from its tile brush (grass/path/water/…), lightness from height. */
+function cellColor(sprite: number, h: number): string {
+  const brush = TILE_BRUSHES.find((t) => t.sprite === sprite);
+  const hue = brush?.hue ?? 0;
+  const sat = brush ? (brush.sprite === 8 ? 55 : 40) : 8;
+  const light = 24 + Math.min(1, h / MAX_HEIGHT) * 42;
+  return `hsl(${hue} ${sat}% ${light}%)`;
 }
 
 export function WorldEditor({ world, onChange, brushHeight, onBrushHeightChange }: WorldEditorProps) {
   const cols = world?.cols ?? DEFAULT_COLS;
   const rows = world?.rows ?? DEFAULT_ROWS;
+  // Painting a cell either raises it to the brush height or repaints its tile —
+  // two brushes over one grid, so a diorama's relief and its ground materials
+  // (grass / path / water / stone) are both authored here.
+  const [paintMode, setPaintMode] = useState<"height" | "tile" | "prop">("height");
+  const [brushTile, setBrushTile] = useState(0);
+  const [brushProp, setBrushProp] = useState(0);
 
   const groundSprite = world?.cells[0]?.sprite ?? 0;
 
   const paintCell = (index: number) => {
     if (!world) return;
-    const cells = world.cells.map((cell, i) => (i === index ? { ...cell, h: brushHeight } : cell));
+    const i = index % cols;
+    const j = Math.floor(index / cols);
+    if (paintMode === "prop") {
+      // Drop (or clear) a scenery prop at the cell centre, standing on its top.
+      const cx = i + 0.5;
+      const cz = j + 0.5;
+      const existing = world.props.findIndex((p) => Math.abs(p.x - cx) < 0.5 && Math.abs(p.z - cz) < 0.5);
+      if (existing >= 0) {
+        onChange({ ...world, props: world.props.filter((_p, k) => k !== existing) });
+        return;
+      }
+      const brush = PROP_BRUSHES[brushProp]!;
+      const cell = world.cells[index]!;
+      const prop: WorldProp = { sprite: brush.sprite, x: cx, y: cell.h, z: cz, width: brush.width, height: brush.height };
+      onChange({ ...world, props: [...world.props, prop] });
+      return;
+    }
+    const patch = paintMode === "height" ? { h: brushHeight } : { sprite: brushTile };
+    const cells = world.cells.map((cell, k) => (k === index ? { ...cell, ...patch } : cell));
     onChange({ ...world, cells });
+  };
+
+  /** Whether a cell has a prop on it (for a marker dot in the grid). */
+  const cellHasProp = (index: number): boolean => {
+    if (!world) return false;
+    const cx = (index % cols) + 0.5;
+    const cz = Math.floor(index / cols) + 0.5;
+    return world.props.some((p) => Math.abs(p.x - cx) < 0.5 && Math.abs(p.z - cz) < 0.5);
   };
 
   const setGroundSprite = (sprite: number) => {
@@ -132,20 +184,93 @@ export function WorldEditor({ world, onChange, brushHeight, onBrushHeightChange 
       {/* Left rail: brush + terrain settings. */}
       <aside className={styles.rail} style={{ minWidth: 190, display: "grid", gap: 14, alignContent: "start", padding: 12 }}>
         <div>
-          <div className={styles.groupLabel}>Brush height</div>
-          <input
-            type="range"
-            min={0}
-            max={MAX_HEIGHT}
-            value={brushHeight}
-            aria-label="Brush height"
-            onChange={(event) => onBrushHeightChange(Number(event.target.value))}
-            style={{ width: "100%" }}
-          />
-          <span className="data">{brushHeight}</span>
+          <div className={styles.groupLabel}>Paint mode</div>
+          <div role="group" aria-label="Paint mode" style={{ display: "flex", gap: 6 }}>
+            {(["height", "tile", "prop"] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                className="cbx-btn"
+                aria-pressed={paintMode === m}
+                onClick={() => setPaintMode(m)}
+                style={{ flex: 1, opacity: paintMode === m ? 1 : 0.55 }}
+              >
+                {m === "height" ? "Height" : m === "tile" ? "Tile" : "Prop"}
+              </button>
+            ))}
+          </div>
         </div>
+        {paintMode === "prop" && (
+          <div>
+            <div className={styles.groupLabel}>Prop brush</div>
+            <div style={{ display: "grid", gap: 4 }}>
+              {PROP_BRUSHES.map((p, k) => (
+                <button
+                  key={p.sprite}
+                  type="button"
+                  className="cbx-btn"
+                  aria-label={`Prop ${p.label}`}
+                  aria-pressed={brushProp === k}
+                  onClick={() => setBrushProp(k)}
+                  style={{ textAlign: "left", opacity: brushProp === k ? 1 : 0.6 }}
+                >
+                  {p.label} <span className="data">#{p.sprite}</span>
+                </button>
+              ))}
+            </div>
+            <div className="data" style={{ marginTop: 6, opacity: 0.7 }}>{world.props.length} props placed</div>
+          </div>
+        )}
+        {paintMode === "height" && (
+          <div>
+            <div className={styles.groupLabel}>Brush height</div>
+            <input
+              type="range"
+              min={0}
+              max={MAX_HEIGHT}
+              value={brushHeight}
+              aria-label="Brush height"
+              onChange={(event) => onBrushHeightChange(Number(event.target.value))}
+              style={{ width: "100%" }}
+            />
+            <span className="data">{brushHeight}</span>
+          </div>
+        )}
+        {paintMode === "tile" && (
+          <div>
+            <div className={styles.groupLabel}>Tile brush</div>
+            <div style={{ display: "grid", gap: 4 }}>
+              {TILE_BRUSHES.map((t) => (
+                <button
+                  key={t.sprite}
+                  type="button"
+                  className="cbx-btn"
+                  aria-label={`Tile ${t.label}`}
+                  aria-pressed={brushTile === t.sprite}
+                  onClick={() => setBrushTile(t.sprite)}
+                  style={{
+                    textAlign: "left",
+                    opacity: brushTile === t.sprite ? 1 : 0.6,
+                    borderLeft: `10px solid ${cellColor(t.sprite, 3)}`,
+                  }}
+                >
+                  {t.label} <span className="data">#{t.sprite}</span>
+                </button>
+              ))}
+            </div>
+            <input
+              type="number"
+              min={0}
+              value={brushTile}
+              aria-label="Tile brush sprite id"
+              onChange={(event) => setBrushTile(Math.max(0, Math.floor(Number(event.target.value) || 0)))}
+              className={styles.detailsInput}
+              style={{ width: 90, marginTop: 6 }}
+            />
+          </div>
+        )}
         <div>
-          <div className={styles.groupLabel}>Ground tile sprite</div>
+          <div className={styles.groupLabel}>Fill all with tile</div>
           <input
             type="number"
             min={0}
@@ -220,23 +345,35 @@ export function WorldEditor({ world, onChange, brushHeight, onBrushHeightChange 
             <button
               key={index}
               type="button"
-              aria-label={`Cell ${index % cols},${Math.floor(index / cols)} height ${cell.h}`}
+              aria-label={`Cell ${index % cols},${Math.floor(index / cols)} height ${cell.h} tile ${cell.sprite}`}
               onClick={() => paintCell(index)}
               style={{
-                background: heightColor(cell.h),
+                background: cellColor(cell.sprite, cell.h),
                 border: "1px solid rgba(0,0,0,0.35)",
                 color: cell.h > 3 ? "#0b140b" : "#dfeadf",
                 fontSize: 11,
                 cursor: "pointer",
                 aspectRatio: "1",
+                position: "relative",
               }}
             >
               {cell.h}
+              {cellHasProp(index) && (
+                <span
+                  aria-hidden
+                  style={{ position: "absolute", top: 2, right: 3, fontSize: 9, color: "#ffe9a8" }}
+                >
+                  ●
+                </span>
+              )}
             </button>
           ))}
         </div>
         <p style={{ marginTop: 10, opacity: 0.7, fontSize: 12 }}>
-          Click a cell to set its height to the brush value. Press Run to see the 3D world with your characters in it.
+          {paintMode === "height"
+            ? "Click cells to raise them to the brush height."
+            : "Click cells to paint the selected ground tile."}{" "}
+          Cell colour = tile; brightness = height. Press Run to see the 3D world.
         </p>
       </section>
 

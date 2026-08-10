@@ -412,6 +412,10 @@ export class Player {
         const mailbox = this.console.readMailbox();
         this.worldSurface.setCameraOverride(decodeMeshCamera(mailbox));
         this.worldSurface.setBillboards(decodeMeshPoses(mailbox));
+        // Shade the terrain by the cart's key light (cartbox.sun) so the 3D blocks
+        // read as solid geometry lit from the scene's sun, not a flat top-down key.
+        const sun = decodeLights(mailbox).find((light) => light.kind === "directional");
+        this.worldSurface.setSun(sun?.direction ?? null);
       }
       // Play the declared animation for this frame: route the sampled state to the
       // scene layers, foreground placements, and post-FX before the frame is blit.

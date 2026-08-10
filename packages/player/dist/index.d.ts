@@ -983,7 +983,21 @@ interface WorldBillboard {
     /** Height in world units (the quad rises this along the camera's up axis). */
     readonly height: number;
 }
-/** A cart's authored 3D world: a tile grid + the billboard slots that live in it. */
+/** A static scenery billboard placed at a fixed spot in the world (a tree, rock,
+ *  lantern…). Unlike {@link WorldBillboard} slots, props need no cart code — the
+ *  runtime draws them every frame as camera-facing sprites, so a scene can hold
+ *  far more scenery than the 8 cart-driven billboards the mailbox allows. */
+interface WorldProp {
+    readonly sprite: number;
+    /** World position of the prop's feet: x/z in grid units, y in height units. */
+    readonly x: number;
+    readonly y: number;
+    readonly z: number;
+    readonly width: number;
+    readonly height: number;
+}
+/** A cart's authored 3D world: a tile grid, static scenery props, and the
+ *  billboard slots the cart drives (characters). */
 interface WorldScene {
     readonly cols: number;
     readonly rows: number;
@@ -991,6 +1005,8 @@ interface WorldScene {
     readonly tilesPerSide: number;
     /** cols×rows cells, row-major (`cells[j * cols + i]`). */
     readonly cells: readonly WorldTileCell[];
+    /** Static scenery placed at fixed positions; drawn by the runtime, no cart code. */
+    readonly props: readonly WorldProp[];
     /** Declarative billboard slots the cart moves each frame by index. */
     readonly billboards: readonly WorldBillboard[];
     /** Default camera framing when the cart drives none. */
@@ -2659,15 +2675,26 @@ declare class WorldOverlaySurface implements DisplaySurface {
     private readonly scene;
     private cartCamera;
     private billboards;
+    /** The cart's key light direction (points toward the sun), for terrain shading. */
+    private sunDirection;
     private readonly output;
     private readonly presented;
     private readonly depth;
     private readonly terrain;
     /** Per-slot billboard texture, index-aligned to `scene.billboards`. */
     private readonly billboardTextures;
+    /** Per-prop texture, index-aligned to `scene.props`. */
+    private readonly propTextures;
     constructor(inner: DisplaySurface, width: number, height: number, scene: WorldScene, textureFor: TextureLookup);
     /** Set the cart-driven camera for the next frame(s), or null to auto-frame. */
     setCameraOverride(camera: MailboxMeshCamera | null): void;
+    /**
+     * Set the key-light direction the terrain is shaded by (the cart's `cartbox.sun`,
+     * pointing toward the light), or null to fall back to a default top-down key.
+     * Colour is left to the post-FX grade, so this only steers the directional
+     * light/shadow that makes the 3D blocks read as solid geometry.
+     */
+    setSun(direction: readonly [number, number, number] | null): void;
     /**
      * Set the billboard positions the cart published this frame. Reuses the mesh-pose
      * mailbox: each pose's index selects a billboard slot and its position places the
@@ -2707,4 +2734,4 @@ declare class WorldOverlaySurface implements DisplaySurface {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, type CartSpriteSource, CartridgeLoadError, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, type FlagsField, type GeneratedTrack, HEIGHT_WORLD, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera as MeshSceneCamera, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, PARTICLE_KINDS, POST_FX_EFFECTS, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPlacement, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera$1 as SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, TILT_SHIFT_FEATHER, type TextureLookup, type TrackMode, type Vec3, type VerificationResult, WebgpuLightingLayer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, WorldOverlaySurface, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, animClipsSdkLua, anyPostFxEnabled, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildTerrainInstances, buildWorldCamera, cameraAt, cellAt, clipFrameIndex, collisionSdkLua, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interpolateNormal, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parseAnim, parseCollisionField, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, readCartCode, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleNormalBilinear, sampleTrack, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, sway, tiltShiftBlur, uniformsFromSettings, verifyReplayScore, worldCenter };
+export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, type CartSpriteSource, CartridgeLoadError, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, type FlagsField, type GeneratedTrack, HEIGHT_WORLD, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera as MeshSceneCamera, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, PARTICLE_KINDS, POST_FX_EFFECTS, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPlacement, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera$1 as SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, TILT_SHIFT_FEATHER, type TextureLookup, type TrackMode, type Vec3, type VerificationResult, WebgpuLightingLayer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, animClipsSdkLua, anyPostFxEnabled, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildTerrainInstances, buildWorldCamera, cameraAt, cellAt, clipFrameIndex, collisionSdkLua, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interpolateNormal, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parseAnim, parseCollisionField, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, readCartCode, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleNormalBilinear, sampleTrack, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, sway, tiltShiftBlur, uniformsFromSettings, verifyReplayScore, worldCenter };

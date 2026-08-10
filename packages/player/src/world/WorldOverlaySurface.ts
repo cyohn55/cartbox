@@ -49,12 +49,16 @@ export interface WorldBillboardPose {
 export class WorldOverlaySurface implements DisplaySurface {
   private cartCamera: MailboxMeshCamera | null = null;
   private billboards: readonly WorldBillboardPose[] = [];
+  /** The cart's key light direction (points toward the sun), for terrain shading. */
+  private sunDirection: readonly [number, number, number] | null = null;
   private readonly output: Uint8ClampedArray;
   private readonly presented: Uint8Array;
   private readonly depth: Float32Array;
   private readonly terrain: MeshSceneInstance[];
   /** Per-slot billboard texture, index-aligned to `scene.billboards`. */
   private readonly billboardTextures: (DecodedTexture | null)[];
+  /** Per-prop texture, index-aligned to `scene.props`. */
+  private readonly propTextures: (DecodedTexture | null)[];
 
   constructor(
     private readonly inner: DisplaySurface,
@@ -69,11 +73,22 @@ export class WorldOverlaySurface implements DisplaySurface {
     // Terrain is static: build it once. Textures are cached by the lookup.
     this.terrain = buildTerrainInstances(scene, textureFor);
     this.billboardTextures = scene.billboards.map((slot) => textureFor(slot.sprite));
+    this.propTextures = scene.props.map((prop) => textureFor(prop.sprite));
   }
 
   /** Set the cart-driven camera for the next frame(s), or null to auto-frame. */
   setCameraOverride(camera: MailboxMeshCamera | null): void {
     this.cartCamera = camera;
+  }
+
+  /**
+   * Set the key-light direction the terrain is shaded by (the cart's `cartbox.sun`,
+   * pointing toward the light), or null to fall back to a default top-down key.
+   * Colour is left to the post-FX grade, so this only steers the directional
+   * light/shadow that makes the 3D blocks read as solid geometry.
+   */
+  setSun(direction: readonly [number, number, number] | null): void {
+    this.sunDirection = direction;
   }
 
   /**
@@ -98,6 +113,17 @@ export class WorldOverlaySurface implements DisplaySurface {
     const spec = this.cameraSpec();
     const camera = buildWorldCamera(this.scene, spec, this.width / this.height);
 
+    // Static scenery props: camera-facing billboards at fixed positions, rebuilt
+    // each frame from the current camera basis so they always face the viewer.
+    const propInstances: MeshSceneInstance[] = [];
+    for (let i = 0; i < this.scene.props.length; i += 1) {
+      const prop = this.scene.props[i]!;
+      const foot: [number, number, number] = [prop.x * CELL_WORLD, prop.y * HEIGHT_WORLD, prop.z * CELL_WORLD];
+      propInstances.push(
+        buildBillboardInstance(foot, prop.width, prop.height, camera.right, camera.up, this.propTextures[i] ?? null),
+      );
+    }
+
     // Billboards, rebuilt each frame to face the camera, at the cart's positions.
     const billboardInstances: MeshSceneInstance[] = [];
     for (const pose of this.billboards) {
@@ -116,7 +142,10 @@ export class WorldOverlaySurface implements DisplaySurface {
 
     // One shared depth buffer over terrain + billboards → correct HD-2D occlusion.
     // background null composites the world over the cart's 2D frame (sky / HUD).
-    renderMeshScene([...this.terrain, ...billboardInstances], {
+    // A cart-driven sun gives the terrain directional light with more contrast so
+    // raised blocks read as solid 3D; with no sun we keep a soft top-down key.
+    const lit = this.sunDirection !== null;
+    renderMeshScene([...this.terrain, ...propInstances, ...billboardInstances], {
       width: this.width,
       height: this.height,
       out: this.output,
@@ -124,7 +153,8 @@ export class WorldOverlaySurface implements DisplaySurface {
       view: camera.view,
       projection: camera.projection,
       background: null,
-      ambient: 0.62,
+      lightDirection: this.sunDirection ?? undefined,
+      ambient: lit ? 0.45 : 0.62,
     });
     this.inner.blit(this.presented);
   }

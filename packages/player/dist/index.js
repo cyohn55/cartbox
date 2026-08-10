@@ -4141,8 +4141,20 @@ function parseWorldScene(raw) {
       height: asFloat(b.height, 1)
     };
   });
+  const rawProps = Array.isArray(record.props) ? record.props : [];
+  const props = rawProps.map((pp) => {
+    const p = pp ?? {};
+    return {
+      sprite: Math.max(0, asInt(p.sprite)),
+      x: asFloat(p.x, 0),
+      y: asFloat(p.y, 0),
+      z: asFloat(p.z, 0),
+      width: asFloat(p.width, 1),
+      height: asFloat(p.height, 1)
+    };
+  });
   const camera = parseCamera(record.camera);
-  return { cols, rows, tilesPerSide, cells, billboards, camera };
+  return { cols, rows, tilesPerSide, cells, props, billboards, camera };
 }
 function parseCamera(value) {
   if (typeof value !== "object" || value === null) return void 0;
@@ -4333,15 +4345,27 @@ var WorldOverlaySurface = class {
     this.scene = scene;
     this.cartCamera = null;
     this.billboards = [];
+    /** The cart's key light direction (points toward the sun), for terrain shading. */
+    this.sunDirection = null;
     this.output = new Uint8ClampedArray(width * height * 4);
     this.presented = new Uint8Array(this.output.buffer);
     this.depth = new Float32Array(width * height);
     this.terrain = buildTerrainInstances(scene, textureFor);
     this.billboardTextures = scene.billboards.map((slot) => textureFor(slot.sprite));
+    this.propTextures = scene.props.map((prop) => textureFor(prop.sprite));
   }
   /** Set the cart-driven camera for the next frame(s), or null to auto-frame. */
   setCameraOverride(camera) {
     this.cartCamera = camera;
+  }
+  /**
+   * Set the key-light direction the terrain is shaded by (the cart's `cartbox.sun`,
+   * pointing toward the light), or null to fall back to a default top-down key.
+   * Colour is left to the post-FX grade, so this only steers the directional
+   * light/shadow that makes the 3D blocks read as solid geometry.
+   */
+  setSun(direction) {
+    this.sunDirection = direction;
   }
   /**
    * Set the billboard positions the cart published this frame. Reuses the mesh-pose
@@ -4361,6 +4385,14 @@ var WorldOverlaySurface = class {
     this.output.set(rgba);
     const spec = this.cameraSpec();
     const camera = buildWorldCamera(this.scene, spec, this.width / this.height);
+    const propInstances = [];
+    for (let i = 0; i < this.scene.props.length; i += 1) {
+      const prop = this.scene.props[i];
+      const foot = [prop.x * CELL_WORLD, prop.y * HEIGHT_WORLD, prop.z * CELL_WORLD];
+      propInstances.push(
+        buildBillboardInstance(foot, prop.width, prop.height, camera.right, camera.up, this.propTextures[i] ?? null)
+      );
+    }
     const billboardInstances = [];
     for (const pose of this.billboards) {
       if (pose.scale <= 0) continue;
@@ -4375,7 +4407,8 @@ var WorldOverlaySurface = class {
         buildBillboardInstance(foot, slot.width * pose.scale, slot.height * pose.scale, camera.right, camera.up, texture)
       );
     }
-    renderMeshScene2([...this.terrain, ...billboardInstances], {
+    const lit = this.sunDirection !== null;
+    renderMeshScene2([...this.terrain, ...propInstances, ...billboardInstances], {
       width: this.width,
       height: this.height,
       out: this.output,
@@ -4383,7 +4416,8 @@ var WorldOverlaySurface = class {
       view: camera.view,
       projection: camera.projection,
       background: null,
-      ambient: 0.62
+      lightDirection: this.sunDirection ?? void 0,
+      ambient: lit ? 0.45 : 0.62
     });
     this.inner.blit(this.presented);
   }
@@ -4663,6 +4697,8 @@ var Player = class {
         const mailbox = this.console.readMailbox();
         this.worldSurface.setCameraOverride(decodeMeshCamera(mailbox));
         this.worldSurface.setBillboards(decodeMeshPoses(mailbox));
+        const sun = decodeLights(mailbox).find((light) => light.kind === "directional");
+        this.worldSurface.setSun(sun?.direction ?? null);
       }
       this.applyAnimation();
       this.surface?.blit(framebuffer);

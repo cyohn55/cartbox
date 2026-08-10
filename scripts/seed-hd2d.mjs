@@ -27,9 +27,11 @@ function required(name) {
 const CART_ID = "00000000-0000-4000-8000-000000000041";
 const fixture = (rel) => new URL(`./fixtures/${rel}`, import.meta.url);
 
-// The cart bytes (sprites + code) and the world sidecar, authored in the editor.
+// The cart bytes (sprites + code), the world sidecar and the post-FX stack, all
+// authored in the editor (World tab + FX tab).
 const bytes = readFileSync(fixture("hd2d-octopath.tic"));
 const WORLD_SIDECAR = readFileSync(fixture("hd2d-octopath.world.json"), "utf8").trim();
+const FX = JSON.parse(readFileSync(fixture("hd2d-octopath.fx.json"), "utf8"));
 
 // Cart binaries belong in Supabase Storage (publicly served); strip any R2 vars
 // so putCartObject never routes the .tic to the object store, whose prod public
@@ -58,16 +60,19 @@ async function main() {
     title: "Octopath — Cartbox HD-2D",
     slug: "octopath-cartbox-hd-2d",
     description:
-      "A true HD-2D vertical slice built entirely in the Cartbox editor. The world is real 3D — a " +
-      "height-mapped tile terrain rendered by the runtime — and the characters are 2D sprites " +
-      "(billboards) standing in it, sharing ONE depth buffer so raised terrain occludes a hero " +
-      "behind it and he draws over terrain in front. Authored with the World tab; the cart only " +
-      "drives cartbox.worldcam and cartbox.billboard. Arrows to move.",
-    tags: ["hd-2d", "octopath", "isometric", "3d-world", "demo"],
+      "A true HD-2D village diorama built entirely in the Cartbox editor: a 3D height-mapped tile " +
+      "world (grass, a stone path, a pond and a raised village) with 2D-sprite trees, glowing " +
+      "lanterns, rocks and a walking hero composited into ONE depth buffer, so raised terrain " +
+      "occludes what's behind it. A golden-hour sun shades the terrain; the post-FX stack — " +
+      "tilt-shift depth-of-field, bloom, split-tone grade, HDR tonemap and vignette — gives the " +
+      "cinematic finish. Authored with the World tab (height/tile/prop brushes) + FX tab; the cart " +
+      "drives cartbox.worldcam and cartbox.billboard. Arrows to explore.",
+    tags: ["hd-2d", "octopath", "diorama", "isometric", "3d-world"],
     console_model: "classic",
     price_cents: 0,
     r2_key: storedKey,
     world: WORLD_SIDECAR,
+    fx: FX,
     published: true,
   });
   if (error) throw new Error(`seeding carts failed: ${error.message}`);

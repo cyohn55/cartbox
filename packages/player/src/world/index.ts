@@ -20,6 +20,7 @@ export type {
   WorldScene,
   WorldTileCell,
   WorldBillboard,
+  WorldProp,
   WorldCameraSpec,
   WorldCamera,
   TextureLookup,

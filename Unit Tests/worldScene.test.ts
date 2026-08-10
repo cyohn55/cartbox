@@ -32,7 +32,7 @@ function makeScene(overrides: Partial<WorldScene> = {}): WorldScene {
   const cols = 3;
   const rows = 3;
   const cells = Array.from({ length: cols * rows }, () => ({ h: 0, sprite: 7 }));
-  return { cols, rows, tilesPerSide: 4, cells, billboards: [], ...overrides };
+  return { cols, rows, tilesPerSide: 4, cells, props: [], billboards: [], ...overrides };
 }
 
 describe("parseWorldScene", () => {
@@ -48,6 +48,16 @@ describe("parseWorldScene", () => {
     expect(parseWorldScene("{not json")).toBeNull();
     // cells length must match cols*rows.
     expect(parseWorldScene(JSON.stringify({ cols: 2, rows: 2, tilesPerSide: 4, cells: [{ h: 0, sprite: 0 }] }))).toBeNull();
+  });
+
+  it("parses static scenery props with positions and sizes", () => {
+    const scene = makeScene({ props: [{ sprite: 64, x: 2.5, y: 1, z: 3.5, width: 2.4, height: 3 }] });
+    const parsed = parseWorldScene(JSON.stringify(scene))!;
+    expect(parsed.props).toHaveLength(1);
+    expect(parsed.props[0]).toEqual({ sprite: 64, x: 2.5, y: 1, z: 3.5, width: 2.4, height: 3 });
+    // Absent props default to an empty list (back-compat with pre-props worlds).
+    const noProps = parseWorldScene(JSON.stringify({ cols: 1, rows: 1, tilesPerSide: 4, cells: [{ h: 0, sprite: 0 }] }))!;
+    expect(noProps.props).toEqual([]);
   });
 
   it("clamps negative heights and defaults missing billboard sizes", () => {

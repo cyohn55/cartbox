@@ -47,7 +47,22 @@ export interface WorldBillboard {
   readonly height: number;
 }
 
-/** A cart's authored 3D world: a tile grid + the billboard slots that live in it. */
+/** A static scenery billboard placed at a fixed spot in the world (a tree, rock,
+ *  lantern…). Unlike {@link WorldBillboard} slots, props need no cart code — the
+ *  runtime draws them every frame as camera-facing sprites, so a scene can hold
+ *  far more scenery than the 8 cart-driven billboards the mailbox allows. */
+export interface WorldProp {
+  readonly sprite: number;
+  /** World position of the prop's feet: x/z in grid units, y in height units. */
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+/** A cart's authored 3D world: a tile grid, static scenery props, and the
+ *  billboard slots the cart drives (characters). */
 export interface WorldScene {
   readonly cols: number;
   readonly rows: number;
@@ -55,6 +70,8 @@ export interface WorldScene {
   readonly tilesPerSide: number;
   /** cols×rows cells, row-major (`cells[j * cols + i]`). */
   readonly cells: readonly WorldTileCell[];
+  /** Static scenery placed at fixed positions; drawn by the runtime, no cart code. */
+  readonly props: readonly WorldProp[];
   /** Declarative billboard slots the cart moves each frame by index. */
   readonly billboards: readonly WorldBillboard[];
   /** Default camera framing when the cart drives none. */
@@ -116,8 +133,20 @@ export function parseWorldScene(raw: string | null | undefined): WorldScene | nu
       height: asFloat(b.height, 1),
     };
   });
+  const rawProps = Array.isArray(record.props) ? record.props : [];
+  const props: WorldProp[] = rawProps.map((pp) => {
+    const p = (pp ?? {}) as Record<string, unknown>;
+    return {
+      sprite: Math.max(0, asInt(p.sprite)),
+      x: asFloat(p.x, 0),
+      y: asFloat(p.y, 0),
+      z: asFloat(p.z, 0),
+      width: asFloat(p.width, 1),
+      height: asFloat(p.height, 1),
+    };
+  });
   const camera = parseCamera(record.camera);
-  return { cols, rows, tilesPerSide, cells, billboards, camera };
+  return { cols, rows, tilesPerSide, cells, props, billboards, camera };
 }
 
 function parseCamera(value: unknown): WorldCameraSpec | undefined {
