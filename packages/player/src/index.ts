@@ -258,6 +258,31 @@ export type {
 export { MeshOverlaySurface, parseMeshScene, buildOrbitCamera } from "./mesh/index.js";
 export type { MeshScene, MeshInstance, SceneBounds, MeshSceneCamera } from "./mesh/index.js";
 
+// Runtime HD-2D world (optional): a cart declares a height-mapped 3D tile world
+// (the `world` sidecar) and stands its 2D character sprites in it as camera-facing
+// billboards, all sharing one depth buffer so terrain and characters occlude each
+// other correctly. This is what makes "3D world, 2D characters" shippable in a cart.
+export {
+  WorldOverlaySurface,
+  parseWorldScene,
+  buildTerrainInstances,
+  buildBillboardInstance,
+  buildWorldCamera,
+  worldCenter,
+  cellAt,
+  CELL_WORLD,
+  HEIGHT_WORLD,
+} from "./world/index.js";
+export type {
+  WorldScene,
+  WorldTileCell,
+  WorldBillboard,
+  WorldCameraSpec,
+  WorldCamera,
+  WorldBillboardPose,
+  TextureLookup,
+} from "./world/index.js";
+
 /**
  * Mounts a cartridge player into a container element and begins loading.
  *

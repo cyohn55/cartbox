@@ -3,11 +3,11 @@
  *
  * The editor PUTs the serialised .tic bytes here; we authenticate the caller
  * and store the bytes in R2. A cart id minted by /edit/new has no row yet, so
- * the first save creates one — published, so every cart a user makes appears
- * in Browse immediately. Later saves confirm ownership and overwrite the
- * stored bytes in place (same r2_key), so the play page serves the new bytes
- * immediately; `?publish=1` additionally marks a previously hidden cart
- * published.
+ * the first save creates one — as a PRIVATE DRAFT unless `?publish=1`, so a
+ * plain Save no longer lists an untitled work-in-progress in Browse. Later saves
+ * confirm ownership and overwrite the stored bytes in place (same r2_key), so
+ * the play page serves the new bytes immediately; `?publish=1` additionally
+ * marks the cart published (Save alone never unpublishes a live cart).
  */
 
 import { NextResponse } from "next/server";
@@ -56,7 +56,8 @@ export async function PUT(
   const publish = query.get("publish") === "1";
 
   // First save of a cart minted by /edit/new: no row exists yet, so create it.
-  // The row is published from birth so the cart shows up in Browse right away.
+  // Save creates it as a private draft; only Publish (?publish=1) lists it in
+  // Browse — so a first Save no longer exposes a still-untitled work-in-progress.
   if (!cart) {
     // Signup creates only the auth user; carts.owner_id references profiles,
     // so materialise a default profile for first-time savers. A duplicate-key
@@ -74,6 +75,7 @@ export async function PUT(
       ownerId: userId,
       title: query.get("title"),
       model: query.get("model"),
+      published: publish,
     });
     await putObject(row.r2_key, bytes, "application/octet-stream");
 
@@ -81,7 +83,7 @@ export async function PUT(
     if (insertError) {
       return NextResponse.json({ error: insertError.message }, { status: 500 });
     }
-    return NextResponse.json({ ok: true, published: true, slug: row.slug }, { status: 201 });
+    return NextResponse.json({ ok: true, published: row.published, slug: row.slug }, { status: 201 });
   }
 
   await putObject(cart.r2_key, bytes, "application/octet-stream");

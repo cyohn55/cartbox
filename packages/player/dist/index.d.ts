@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4 } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, DecodedTexture } from '@cartbox/editor';
 
 /**
  * Console models. A model is a fixed hardware spec plus the WASM runtime that
@@ -946,6 +946,116 @@ interface OrbitCameraOptions {
 declare function buildOrbitCamera(bounds: SceneBounds, yaw: number, pitch: number, aspect: number, options?: OrbitCameraOptions): SceneCamera;
 
 /**
+ * The HD-2D "world" model: a height-mapped tile grid drawn as real 3D geometry,
+ * with 2D character sprites composited into it as camera-facing billboards. This
+ * is the piece that makes "the world is 3D, the characters are 2D" expressible in
+ * a shipped cart — the gap the first Octopath pass had to fake in Lua.
+ *
+ * The trick is to lean entirely on the existing z-buffered software rasteriser
+ * ({@link renderMeshScene}): terrain cells become textured quads, and each
+ * character becomes a textured quad turned to face the camera. Because both flow
+ * through one shared depth buffer, a billboard standing behind a raised tile is
+ * occluded by it and one standing in front draws over it — correct HD-2D
+ * occlusion, for free, with no new rasteriser. Textures come from the cart's own
+ * sprite sheet (palette index 0 → transparent), so a character's silhouette is a
+ * true alpha cutout.
+ *
+ * This module is pure geometry: it takes a parsed {@link WorldScene} and a
+ * texture lookup and returns {@link MeshSceneInstance}s plus a camera. All WASM
+ * reads and frame compositing live in {@link WorldOverlaySurface}. DOM-free and
+ * unit-testable.
+ */
+
+/** One terrain cell: a stack height (in height units) and the tile sprite on top. */
+interface WorldTileCell {
+    /** Height of the cell's top face, in height units (0 = floor). */
+    readonly h: number;
+    /** Sprite id of the tile block drawn on the cell's top (and walls). */
+    readonly sprite: number;
+}
+/** A declarative billboard slot: the sprite art a character instance draws with.
+ *  Its position is supplied per-frame by the cart (see WorldOverlaySurface). */
+interface WorldBillboard {
+    /** Sprite id of the block used as the billboard's texture. */
+    readonly sprite: number;
+    /** Width in world units (the quad spans this across the camera's right axis). */
+    readonly width: number;
+    /** Height in world units (the quad rises this along the camera's up axis). */
+    readonly height: number;
+}
+/** A cart's authored 3D world: a tile grid + the billboard slots that live in it. */
+interface WorldScene {
+    readonly cols: number;
+    readonly rows: number;
+    /** Sprite block size in 8px tiles per side (4 → a 32×32 sprite per cell). */
+    readonly tilesPerSide: number;
+    /** cols×rows cells, row-major (`cells[j * cols + i]`). */
+    readonly cells: readonly WorldTileCell[];
+    /** Declarative billboard slots the cart moves each frame by index. */
+    readonly billboards: readonly WorldBillboard[];
+    /** Default camera framing when the cart drives none. */
+    readonly camera?: WorldCameraSpec;
+}
+interface WorldCameraSpec {
+    /** Orbit yaw around the world centre, radians. */
+    readonly yaw: number;
+    /** Orbit pitch (downward tilt), radians. */
+    readonly pitch: number;
+    /** Distance from the framed centre; 0 → auto-fit. */
+    readonly distance: number;
+    /** Vertical field of view, radians; 0 → default. */
+    readonly fov: number;
+}
+/** One world cell spans a unit square in XZ; one height unit raises it this much. */
+declare const CELL_WORLD = 1;
+declare const HEIGHT_WORLD = 0.6;
+/** Look up a decoded texture for a sprite id (cached by the surface). */
+type TextureLookup = (sprite: number) => DecodedTexture | null;
+/**
+ * Parse the stored world sidecar (opaque JSON string) into a {@link WorldScene},
+ * or null when absent/invalid — mirroring the other sidecars' defensive parse so
+ * a malformed payload makes the cart play without a world rather than crash.
+ */
+declare function parseWorldScene(raw: string | null | undefined): WorldScene | null;
+/** Read a cell, clamping out-of-bounds to a floor cell so edge walls close. */
+declare function cellAt(scene: WorldScene, i: number, j: number): WorldTileCell;
+/**
+ * Build the terrain as one {@link MeshSceneInstance} per distinct tile sprite
+ * (each carrying that sprite's texture). Each cell contributes a top quad at its
+ * height and vertical wall quads on any side that drops to a lower neighbour, so a
+ * raised cell reads as a solid 3D block, not a floating tile.
+ */
+declare function buildTerrainInstances(scene: WorldScene, textureFor: TextureLookup): MeshSceneInstance[];
+/**
+ * A camera-facing quad standing at `foot` (its bottom-centre), spanning `width`
+ * across the camera's right axis and rising `height` along its up axis. Because
+ * it is built from the live camera basis each frame it always squarely faces the
+ * viewer, and it shares the scene depth buffer so terrain occludes it correctly.
+ * The sprite's palette-0 pixels are transparent, so what draws is the silhouette.
+ */
+declare function buildBillboardInstance(foot: readonly [number, number, number], width: number, height: number, camRight: readonly [number, number, number], camUp: readonly [number, number, number], texture: DecodedTexture | null): MeshSceneInstance;
+interface WorldCamera {
+    readonly view: Mat4;
+    readonly projection: Mat4;
+    /** World-space right axis of the camera (for billboard orientation). */
+    readonly right: readonly [number, number, number];
+    /** World-space up axis of the camera. */
+    readonly up: readonly [number, number, number];
+}
+/** The XZ/height centre and radius the camera frames. */
+declare function worldCenter(scene: WorldScene): {
+    center: [number, number, number];
+    radius: number;
+};
+/**
+ * Build the world camera from an orbit spec, framing the terrain. `aspect` is the
+ * framebuffer's width/height so the projection is undistorted; `distance`/`fov`
+ * of 0 mean auto-fit / default. Returns the matrices plus the camera basis a
+ * billboard needs to face the viewer.
+ */
+declare function buildWorldCamera(scene: WorldScene, spec: WorldCameraSpec, aspect: number): WorldCamera;
+
+/**
  * The cart-facing collision accessor, as injectable Lua.
  *
  * A cart's collision layer is authored in the editor and stored as a sidecar (a
@@ -1142,6 +1252,15 @@ interface PlayerOptions {
      */
     mesh?: MeshScene;
     /**
+     * Render a declared HD-2D {@link WorldScene}: a height-mapped 3D tile world with
+     * the cart's own 2D character sprites standing in it as camera-facing billboards,
+     * all sharing one depth buffer so terrain and characters occlude correctly. The
+     * cart drives the camera with `cartbox.worldcam` and places characters with
+     * `cartbox.billboard` (both reuse the mesh camera/pose mailbox channels). Parse a
+     * cart's `world` sidecar into a WorldScene with `parseWorldScene`.
+     */
+    world?: WorldScene;
+    /**
      * Expose the cart's authored collision layer to its own Lua as
      * `cartbox.solid(x, y)` (true when a map cell is solid) and `cartbox.mapsize()`.
      * The whole bitmap is injected once as cart data — collision never changes
@@ -1249,7 +1368,7 @@ declare function seedCartridge(bytes: Uint8Array, seed: number): Uint8Array;
  * 183, mesh-pose block at 191, event types 1/2/3, FNV-1a id hash).
  */
 /** Lua source of the cartbox SDK. */
-declare const CARTBOX_SDK_LUA = "local _MB = 119\nlocal _CAP = 8\nlocal _LB = _MB + 25\nlocal _LCAP = 6\nlocal _CB = _LB + 1 + _LCAP * 6\nlocal _MCB = _CB + 2\nlocal _MPB = _MCB + 8\nlocal _MPCAP = 8\nlocal _ln = 0\nlocal _mn = 0\nlocal function _emit(kind, id, value)\n  local seq = pmem(_MB)\n  local slot = seq % _CAP\n  local base = _MB + 1 + slot * 3\n  pmem(base, kind)\n  pmem(base + 1, id)\n  pmem(base + 2, value)\n  pmem(_MB, seq + 1)\nend\nlocal function _hash(s)\n  local h = 2166136261\n  for i = 1, #s do\n    h = ((h ~ string.byte(s, i)) * 16777619) & 0xffffffff\n  end\n  return h\nend\nlocal function _norm(x, y, z)\n  local m = math.sqrt(x * x + y * y + z * z)\n  if m < 1e-6 then return 0, 0, 1 end\n  return x / m, y / m, z / m\nend\nlocal function _byte(v)\n  local b = math.floor((v or 0) * 127 + 0.5)\n  if b < -127 then b = -127 elseif b > 127 then b = 127 end\n  if b < 0 then b = b + 256 end\n  return b\nend\nlocal function _light(kind, x, y, z, radius, r, g, b, intensity, dx, dy, cone)\n  if _ln >= _LCAP then return end\n  local base = _LB + 1 + _ln * 6\n  pmem(base, x // 1)\n  pmem(base + 1, y // 1)\n  pmem(base + 2, z // 1)\n  pmem(base + 3, radius // 1)\n  local rgb = (math.floor(r or 255) & 0xff) << 16\n  rgb = rgb | ((math.floor(g or 255) & 0xff) << 8)\n  rgb = rgb | (math.floor(b or 255) & 0xff)\n  pmem(base + 4, rgb | (kind << 24) | (cone << 26))\n  local inten = math.floor((intensity or 1) * 256)\n  if inten < 0 then inten = 0 elseif inten > 0xffff then inten = 0xffff end\n  pmem(base + 5, inten | (dx << 16) | (dy << 24))\n  _ln = _ln + 1\n  pmem(_LB, _ln)\nend\ncartbox = {\n  unlock = function(id) _emit(1, _hash(id), 0) end,\n  score = function(v) _emit(2, 0, v // 1) end,\n  progress = function(id, v) _emit(3, _hash(id), v // 1) end,\n  clearlights = function() _ln = 0 pmem(_LB, 0) end,\n  light = function(x, y, radius, r, g, b, z, intensity)\n    _light(0, x, y, z or 12, radius, r, g, b, intensity, 0, 0, 0)\n  end,\n  sun = function(dx, dy, dz, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    _light(1, 0, 0, 0, 0, r, g, b, intensity, _byte(nx), _byte(ny), 0)\n  end,\n  spot = function(x, y, z, dx, dy, dz, radius, angle, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    local cone = math.floor(math.cos(math.rad(angle or 30)) * 63 + 0.5)\n    if cone < 0 then cone = 0 elseif cone > 63 then cone = 63 end\n    _light(2, x, y, z or 12, radius, r, g, b, intensity, _byte(nx), _byte(ny), cone)\n  end,\n  camera = function(x, y)\n    pmem(_CB, math.floor((x or 0) * 16 + 0.5) & 0xffffffff)\n    pmem(_CB + 1, math.floor((y or 0) * 16 + 0.5) & 0xffffffff)\n  end,\n  -- Drive the 3D mesh orbit camera this frame: yaw/pitch (radians), distance in\n  -- world units (0 = auto-fit the scene), fov (radians, 0 = default). Call every\n  -- frame; not calling leaves the player's gentle auto-orbit in charge.\n  meshcam = function(yaw, pitch, dist, fov)\n    pmem(_MCB, 1)\n    pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 4, 0)\n    pmem(_MCB + 5, 0)\n    pmem(_MCB + 6, 0)\n    pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)\n  end,\n  -- Start a fresh frame's mesh-pose list. Call once before any meshpose() calls;\n  -- instances you don't pose keep their authored transform.\n  clearposes = function() _mn = 0 pmem(_MPB, 0) end,\n  -- Move/rotate/scale one mesh instance (by its sidecar index) this frame, on top\n  -- of its authored placement. x,y,z are world units; yaw,pitch,roll radians;\n  -- scale defaults to 1 (pass 0 to hide). math.floor keeps every value integer so\n  -- the bitwise mask never sees a float (the Pro core's Lua throws on that). Must\n  -- match decodeMeshPoses() on the host.\n  meshpose = function(index, x, y, z, yaw, pitch, roll, scale)\n    if _mn >= _MPCAP then return end\n    local base = _MPB + 1 + _mn * 8\n    pmem(base, math.floor(index or 0) & 0xff)\n    pmem(base + 1, math.floor((x or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 2, math.floor((y or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 3, math.floor((z or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 4, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(base + 5, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(base + 6, math.floor((roll or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(base + 7, math.floor((scale or 1) * 256 + 0.5) & 0xffffffff)\n    _mn = _mn + 1\n    pmem(_MPB, _mn)\n  end,\n  -- Collision defaults: overridden by the injected layer when the cart has one,\n  -- so cartbox.solid/mapsize are always safe to call (a cart with no collision\n  -- layer simply sees every cell as non-solid).\n  solid = function() return false end,\n  mapsize = function() return 0, 0 end,\n  -- Tile-flags default: overridden by the injected layer when the cart has one.\n  flag = function() return false end,\n}";
+declare const CARTBOX_SDK_LUA = "local _MB = 119\nlocal _CAP = 8\nlocal _LB = _MB + 25\nlocal _LCAP = 6\nlocal _CB = _LB + 1 + _LCAP * 6\nlocal _MCB = _CB + 2\nlocal _MPB = _MCB + 8\nlocal _MPCAP = 8\nlocal _ln = 0\nlocal _mn = 0\nlocal function _emit(kind, id, value)\n  local seq = pmem(_MB)\n  local slot = seq % _CAP\n  local base = _MB + 1 + slot * 3\n  pmem(base, kind)\n  pmem(base + 1, id)\n  pmem(base + 2, value)\n  pmem(_MB, seq + 1)\nend\nlocal function _hash(s)\n  local h = 2166136261\n  for i = 1, #s do\n    h = ((h ~ string.byte(s, i)) * 16777619) & 0xffffffff\n  end\n  return h\nend\nlocal function _norm(x, y, z)\n  local m = math.sqrt(x * x + y * y + z * z)\n  if m < 1e-6 then return 0, 0, 1 end\n  return x / m, y / m, z / m\nend\nlocal function _byte(v)\n  local b = math.floor((v or 0) * 127 + 0.5)\n  if b < -127 then b = -127 elseif b > 127 then b = 127 end\n  if b < 0 then b = b + 256 end\n  return b\nend\nlocal function _light(kind, x, y, z, radius, r, g, b, intensity, dx, dy, cone)\n  if _ln >= _LCAP then return end\n  local base = _LB + 1 + _ln * 6\n  pmem(base, x // 1)\n  pmem(base + 1, y // 1)\n  pmem(base + 2, z // 1)\n  pmem(base + 3, radius // 1)\n  local rgb = (math.floor(r or 255) & 0xff) << 16\n  rgb = rgb | ((math.floor(g or 255) & 0xff) << 8)\n  rgb = rgb | (math.floor(b or 255) & 0xff)\n  pmem(base + 4, rgb | (kind << 24) | (cone << 26))\n  local inten = math.floor((intensity or 1) * 256)\n  if inten < 0 then inten = 0 elseif inten > 0xffff then inten = 0xffff end\n  pmem(base + 5, inten | (dx << 16) | (dy << 24))\n  _ln = _ln + 1\n  pmem(_LB, _ln)\nend\ncartbox = {\n  unlock = function(id) _emit(1, _hash(id), 0) end,\n  score = function(v) _emit(2, 0, v // 1) end,\n  progress = function(id, v) _emit(3, _hash(id), v // 1) end,\n  clearlights = function() _ln = 0 pmem(_LB, 0) end,\n  light = function(x, y, radius, r, g, b, z, intensity)\n    _light(0, x, y, z or 12, radius, r, g, b, intensity, 0, 0, 0)\n  end,\n  sun = function(dx, dy, dz, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    _light(1, 0, 0, 0, 0, r, g, b, intensity, _byte(nx), _byte(ny), 0)\n  end,\n  spot = function(x, y, z, dx, dy, dz, radius, angle, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    local cone = math.floor(math.cos(math.rad(angle or 30)) * 63 + 0.5)\n    if cone < 0 then cone = 0 elseif cone > 63 then cone = 63 end\n    _light(2, x, y, z or 12, radius, r, g, b, intensity, _byte(nx), _byte(ny), cone)\n  end,\n  camera = function(x, y)\n    pmem(_CB, math.floor((x or 0) * 16 + 0.5) & 0xffffffff)\n    pmem(_CB + 1, math.floor((y or 0) * 16 + 0.5) & 0xffffffff)\n  end,\n  -- Drive the 3D mesh orbit camera this frame: yaw/pitch (radians), distance in\n  -- world units (0 = auto-fit the scene), fov (radians, 0 = default). Call every\n  -- frame; not calling leaves the player's gentle auto-orbit in charge.\n  meshcam = function(yaw, pitch, dist, fov)\n    pmem(_MCB, 1)\n    pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 4, 0)\n    pmem(_MCB + 5, 0)\n    pmem(_MCB + 6, 0)\n    pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)\n  end,\n  -- Start a fresh frame's mesh-pose list. Call once before any meshpose() calls;\n  -- instances you don't pose keep their authored transform.\n  clearposes = function() _mn = 0 pmem(_MPB, 0) end,\n  -- Move/rotate/scale one mesh instance (by its sidecar index) this frame, on top\n  -- of its authored placement. x,y,z are world units; yaw,pitch,roll radians;\n  -- scale defaults to 1 (pass 0 to hide). math.floor keeps every value integer so\n  -- the bitwise mask never sees a float (the Pro core's Lua throws on that). Must\n  -- match decodeMeshPoses() on the host.\n  meshpose = function(index, x, y, z, yaw, pitch, roll, scale)\n    if _mn >= _MPCAP then return end\n    local base = _MPB + 1 + _mn * 8\n    pmem(base, math.floor(index or 0) & 0xff)\n    pmem(base + 1, math.floor((x or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 2, math.floor((y or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 3, math.floor((z or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 4, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(base + 5, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(base + 6, math.floor((roll or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(base + 7, math.floor((scale or 1) * 256 + 0.5) & 0xffffffff)\n    _mn = _mn + 1\n    pmem(_MPB, _mn)\n  end,\n  -- HD-2D world (optional): a cart with a world sidecar draws a 3D tile terrain\n  -- and stands its 2D character sprites in it as depth-sorted billboards. The\n  -- world camera and billboards reuse the mesh camera/pose mailbox channels, so\n  -- no engine change is needed \u2014 these are thin aliases with the world's naming.\n  --\n  -- Drive the world camera this frame: yaw/pitch (radians), distance (world units,\n  -- 0 = auto-fit), fov (radians, 0 = default). Same layout as meshcam.\n  worldcam = function(yaw, pitch, dist, fov)\n    pmem(_MCB, 1)\n    pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 4, 0)\n    pmem(_MCB + 5, 0)\n    pmem(_MCB + 6, 0)\n    pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)\n  end,\n  -- Start a fresh frame's billboard list. Call once before billboard() calls each\n  -- frame (an alias of clearposes \u2014 they share the mesh-pose channel).\n  clearbillboards = function() _mn = 0 pmem(_MPB, 0) end,\n  -- Place billboard index (declared in the world sidecar) at world position\n  -- (x,z grid units, y height units) this frame; scale defaults to 1 (0 hides).\n  -- math.floor keeps every value integer so the bitwise mask never sees a float.\n  billboard = function(index, x, y, z, scale)\n    if _mn >= _MPCAP then return end\n    local base = _MPB + 1 + _mn * 8\n    pmem(base, math.floor(index or 0) & 0xff)\n    pmem(base + 1, math.floor((x or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 2, math.floor((y or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 3, math.floor((z or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 4, 0)\n    pmem(base + 5, 0)\n    pmem(base + 6, 0)\n    pmem(base + 7, math.floor((scale or 1) * 256 + 0.5) & 0xffffffff)\n    _mn = _mn + 1\n    pmem(_MPB, _mn)\n  end,\n  -- Collision defaults: overridden by the injected layer when the cart has one,\n  -- so cartbox.solid/mapsize are always safe to call (a cart with no collision\n  -- layer simply sees every cell as non-solid).\n  solid = function() return false end,\n  mapsize = function() return 0, 0 end,\n  -- Tile-flags default: overridden by the injected layer when the cart has one.\n  flag = function() return false end,\n}";
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */
 declare function injectSdk(bytes: Uint8Array): Uint8Array;
 
@@ -2423,6 +2542,65 @@ declare class MeshOverlaySurface implements DisplaySurface {
 }
 
 /**
+ * WorldOverlaySurface — draws a cart's declared HD-2D {@link WorldScene} over the
+ * frame: a height-mapped 3D terrain with the cart's 2D character sprites standing
+ * in it as camera-facing billboards, all sharing one depth buffer so terrain and
+ * characters occlude each other correctly.
+ *
+ * Like {@link MeshOverlaySurface} it decorates a {@link DisplaySurface}, so its
+ * output flows through the lighting and post-FX stack. The terrain geometry is
+ * built once (it is static); billboards are rebuilt each frame from the camera
+ * basis (so they always face the viewer) at positions the cart supplies.
+ *
+ * To avoid a new engine mailbox channel, the world reuses the generic 3D-scene
+ * channels the mesh feature already ships: the camera rides `cartbox.meshcam`
+ * (exposed to carts as `cartbox.worldcam`) and each billboard's position rides a
+ * `cartbox.meshpose` slot (exposed as `cartbox.billboard`). The player decodes
+ * both and hands them here via {@link setCameraOverride} / {@link setBillboards}.
+ *
+ * Textures come from the cart's own sprite sheet through a {@link TextureLookup}
+ * (built over `createCartSpriteSource`), decoded once per sprite and cached.
+ */
+
+/** A billboard the cart placed this frame: which slot, and where its feet stand. */
+interface WorldBillboardPose {
+    /** Index into the scene's declared billboard slots. */
+    readonly index: number;
+    /** World position of the billboard's feet (grid units in x/z, height units in y). */
+    readonly x: number;
+    readonly y: number;
+    readonly z: number;
+    /** Uniform scale on the slot's authored size (1 = as authored, 0 = hidden). */
+    readonly scale: number;
+}
+declare class WorldOverlaySurface implements DisplaySurface {
+    private readonly inner;
+    private readonly width;
+    private readonly height;
+    private readonly scene;
+    private cartCamera;
+    private billboards;
+    private readonly output;
+    private readonly presented;
+    private readonly depth;
+    private readonly terrain;
+    /** Per-slot billboard texture, index-aligned to `scene.billboards`. */
+    private readonly billboardTextures;
+    constructor(inner: DisplaySurface, width: number, height: number, scene: WorldScene, textureFor: TextureLookup);
+    /** Set the cart-driven camera for the next frame(s), or null to auto-frame. */
+    setCameraOverride(camera: MailboxMeshCamera | null): void;
+    /**
+     * Set the billboard positions the cart published this frame. Reuses the mesh-pose
+     * mailbox: each pose's index selects a billboard slot and its position places the
+     * billboard's feet; a hidden or zero-scale pose drops the billboard.
+     */
+    setBillboards(poses: readonly MailboxMeshPose[]): void;
+    blit(rgba: Uint8Array): void;
+    private cameraSpec;
+    destroy(): void;
+}
+
+/**
  * @cartbox/player — public entry point.
  *
  * Usage:
@@ -2450,4 +2628,4 @@ declare class MeshOverlaySurface implements DisplaySurface {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, type CartSpriteSource, CartridgeLoadError, type ClipSample, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, type FlagsField, type GeneratedTrack, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera as MeshSceneCamera, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, PARTICLE_KINDS, POST_FX_EFFECTS, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPlacement, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera$1 as SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, TILT_SHIFT_FEATHER, type TrackMode, type Vec3, type VerificationResult, WebgpuLightingLayer, acesFilmic, acesFilmicChannel, anyPostFxEnabled, buildOrbitCamera, cameraAt, collisionSdkLua, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interpolateNormal, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parseAnim, parseCollisionField, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, readCartCode, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleNormalBilinear, sampleTrack, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, sway, tiltShiftBlur, uniformsFromSettings, verifyReplayScore };
+export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, type CartSpriteSource, CartridgeLoadError, type ClipSample, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, type FlagsField, type GeneratedTrack, HEIGHT_WORLD, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera as MeshSceneCamera, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, PARTICLE_KINDS, POST_FX_EFFECTS, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPlacement, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera$1 as SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, TILT_SHIFT_FEATHER, type TextureLookup, type TrackMode, type Vec3, type VerificationResult, WebgpuLightingLayer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, WorldOverlaySurface, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, anyPostFxEnabled, buildBillboardInstance, buildOrbitCamera, buildTerrainInstances, buildWorldCamera, cameraAt, cellAt, collisionSdkLua, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interpolateNormal, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parseAnim, parseCollisionField, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, readCartCode, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleNormalBilinear, sampleTrack, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, sway, tiltShiftBlur, uniformsFromSettings, verifyReplayScore, worldCenter };

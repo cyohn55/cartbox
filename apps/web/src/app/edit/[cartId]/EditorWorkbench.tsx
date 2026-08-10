@@ -12,7 +12,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { defaultPostFxSettings, parseMeshScene, type AnimSpec, type MeshScene, type ParticleSpec, type PostFxSettings, type SceneSpec } from "@cartbox/player";
+import { defaultPostFxSettings, parseMeshScene, parseWorldScene, type AnimSpec, type MeshScene, type ParticleSpec, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
 import {
   BANK_COUNT,
   CartEngine,
@@ -60,20 +60,21 @@ import { ParticlesEditor } from "./ParticlesEditor";
 import { ShaderEditor } from "./ShaderEditor";
 import { AssetsEditor } from "./AssetsEditor";
 import { MeshEditor } from "./MeshEditor";
+import { WorldEditor } from "./WorldEditor";
 import { useEditorHistory } from "./useEditorHistory";
 import { addMesh, decodeMeshSidecar, encodeMeshSidecar, type MeshSidecar } from "@/lib/meshSidecar";
 import type { MeshAsset } from "@cartbox/editor";
 
-const TABS = ["Code", "Assets", "Map", "Scene", "Mesh", "Anim", "Weather", "FX", "SFX", "Music"] as const;
+const TABS = ["Code", "Assets", "Map", "World", "Scene", "Mesh", "Anim", "Weather", "FX", "SFX", "Music"] as const;
 type Tab = (typeof TABS)[number];
-const LIVE_TABS: ReadonlySet<Tab> = new Set<Tab>(["Code", "Assets", "Map", "Scene", "Mesh", "Anim", "Weather", "FX", "SFX", "Music"]);
+const LIVE_TABS: ReadonlySet<Tab> = new Set<Tab>(["Code", "Assets", "Map", "World", "Scene", "Mesh", "Anim", "Weather", "FX", "SFX", "Music"]);
 
 // The everyday five sit on the bar; the cinematic/3D set — reached rarely, and
 // never before there is art to dress — tucks into a "More" menu so a cart opens
 // looking like a fantasy-console editor, not a flight deck. Both draw from the
 // same TABS, so the ordering above still governs the slot layout.
 const PRIMARY_TABS: readonly Tab[] = ["Code", "Assets", "Map", "SFX", "Music"];
-const MORE_TABS: readonly Tab[] = ["Scene", "Mesh", "Anim", "Weather", "FX"];
+const MORE_TABS: readonly Tab[] = ["World", "Scene", "Mesh", "Anim", "Weather", "FX"];
 
 type EngineMode = "wasm" | "stub";
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -95,6 +96,8 @@ interface EditorWorkbenchProps {
   initialVoxel: string | null;
   /** Persisted imported-mesh sidecar (serialized) loaded with the cart, or null when none. */
   initialMesh: string | null;
+  /** Persisted HD-2D world sidecar (opaque JSON string) loaded with the cart, or null when none. */
+  initialWorld: string | null;
   /** Persisted parallax-scene backdrop loaded with the cart, or null when none. */
   initialScene: SceneSpec | null;
   /** Persisted animation timeline loaded with the cart, or null when none. */
@@ -122,6 +125,7 @@ export function EditorWorkbench({
   initialMaterials,
   initialVoxel,
   initialMesh,
+  initialWorld,
   initialScene,
   initialAnim,
   initialParticles,
@@ -218,6 +222,7 @@ export function EditorWorkbench({
       initialMaterials={initialMaterials}
       initialVoxel={initialVoxel}
       initialMesh={initialMesh}
+      initialWorld={initialWorld}
       initialScene={initialScene}
       initialAnim={initialAnim}
       initialParticles={initialParticles}
@@ -241,6 +246,7 @@ function WorkbenchBody({
   initialMaterials,
   initialVoxel,
   initialMesh,
+  initialWorld,
   initialScene,
   initialAnim,
   initialParticles,
@@ -260,6 +266,7 @@ function WorkbenchBody({
   initialMaterials: WireMaterials | null;
   initialVoxel: string | null;
   initialMesh: string | null;
+  initialWorld: string | null;
   initialScene: SceneSpec | null;
   initialAnim: AnimSpec | null;
   initialParticles: ParticleSpec | null;
@@ -359,6 +366,10 @@ function WorkbenchBody({
   // authoring sidecar is re-encoded and parsed for the playtest. Memoised on the
   // sidecar because decoding geometry is not free; import/transform edits are coarse.
   const meshScene = useMemo<MeshScene | null>(() => parseMeshScene(encodeMeshSidecar(mesh)), [mesh]);
+  // The HD-2D world sidecar: authored in the World tab, persisted as an opaque JSON
+  // string like the mesh sidecar, and parsed into a WorldScene for the playtest.
+  const [world, setWorld] = useState<WorldScene | null>(() => parseWorldScene(initialWorld));
+  const [worldBrushHeight, setWorldBrushHeight] = useState(1);
   // Turn the current voxel sculpt into a placed mesh: add it to the sidecar and
   // jump to the Mesh tab so the creator sees (and can transform) the result.
   const exportVoxelMesh = useCallback((asset: MeshAsset, name: string) => {
@@ -462,6 +473,7 @@ function WorkbenchBody({
           materialsResponse,
           voxelResponse,
           meshResponse,
+          worldResponse,
           sceneResponse,
           animResponse,
           particlesResponse,
@@ -474,6 +486,7 @@ function WorkbenchBody({
           fetch(`/api/carts/${cartId}/materials`, { method: "PUT", headers, body: JSON.stringify(materials) }),
           fetch(`/api/carts/${cartId}/voxel`, { method: "PUT", headers, body: JSON.stringify({ voxel }) }),
           fetch(`/api/carts/${cartId}/mesh`, { method: "PUT", headers, body: JSON.stringify({ mesh: encodeMeshSidecar(mesh) }) }),
+          fetch(`/api/carts/${cartId}/world`, { method: "PUT", headers, body: JSON.stringify({ world: world ? JSON.stringify(world) : null }) }),
           fetch(`/api/carts/${cartId}/scene`, { method: "PUT", headers, body: JSON.stringify(scene) }),
           fetch(`/api/carts/${cartId}/anim`, { method: "PUT", headers, body: JSON.stringify(anim) }),
           fetch(`/api/carts/${cartId}/particles`, { method: "PUT", headers, body: JSON.stringify(particles) }),
@@ -487,6 +500,7 @@ function WorkbenchBody({
           materialsResponse.ok &&
           voxelResponse.ok &&
           meshResponse.ok &&
+          worldResponse.ok &&
           sceneResponse.ok &&
           particlesResponse.ok &&
           animResponse.ok &&
@@ -805,6 +819,15 @@ function WorkbenchBody({
       {activeTab === "Mesh" && (
         <MeshEditor key="mesh" sidecar={mesh} onSidecarChange={setMesh} />
       )}
+      {activeTab === "World" && (
+        <WorldEditor
+          key="world"
+          world={world}
+          onChange={setWorld}
+          brushHeight={worldBrushHeight}
+          onBrushHeightChange={setWorldBrushHeight}
+        />
+      )}
       {activeTab === "Anim" && (
         <AnimEditor
           key={`anim:${revision}`}
@@ -859,6 +882,7 @@ function WorkbenchBody({
           collision={collision ?? undefined}
           flags={flags ?? undefined}
           mesh={meshScene ?? undefined}
+          world={world ?? undefined}
           onClose={() => setRunBytes(null)}
         />
       )}

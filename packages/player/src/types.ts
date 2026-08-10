@@ -14,6 +14,7 @@ import type { SceneSpec } from "./scene/sceneModel.js";
 import type { AnimSpec } from "./anim/animModel.js";
 import type { ParticleSpec } from "./particles/particleModel.js";
 import type { MeshScene } from "./mesh/meshScene.js";
+import type { WorldScene } from "./world/worldScene.js";
 import type { CollisionField } from "./collisionSdk.js";
 import type { FlagsField } from "./flagsSdk.js";
 
@@ -126,6 +127,15 @@ export interface PlayerOptions {
    * MeshScene with `parseMeshScene`.
    */
   mesh?: MeshScene;
+  /**
+   * Render a declared HD-2D {@link WorldScene}: a height-mapped 3D tile world with
+   * the cart's own 2D character sprites standing in it as camera-facing billboards,
+   * all sharing one depth buffer so terrain and characters occlude correctly. The
+   * cart drives the camera with `cartbox.worldcam` and places characters with
+   * `cartbox.billboard` (both reuse the mesh camera/pose mailbox channels). Parse a
+   * cart's `world` sidecar into a WorldScene with `parseWorldScene`.
+   */
+  world?: WorldScene;
   /**
    * Expose the cart's authored collision layer to its own Lua as
    * `cartbox.solid(x, y)` (true when a map cell is solid) and `cartbox.mapsize()`.

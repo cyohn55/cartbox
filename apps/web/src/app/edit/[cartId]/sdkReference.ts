@@ -132,6 +132,24 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
         doc: "Move/rotate/scale one mesh instance by its sidecar index, on top of its authored placement (up to 8/frame; scale 0 hides).",
         snippet: "cartbox.meshpose(0, 0, 0, 0, t / 30, 0, 0)",
       },
+      {
+        name: "cartbox.worldcam",
+        signature: "cartbox.worldcam(yaw, pitch, distance, fov)",
+        doc: "Drive the HD-2D world camera (World tab carts): radians + world units; 0 = auto-fit/default. Call each frame.",
+        snippet: "cartbox.worldcam(t / 200, 0.62, 0)",
+      },
+      {
+        name: "cartbox.clearbillboards",
+        signature: "cartbox.clearbillboards()",
+        doc: "Start a fresh frame's billboard list. Call once before any billboard() calls each frame.",
+        snippet: "cartbox.clearbillboards()",
+      },
+      {
+        name: "cartbox.billboard",
+        signature: "cartbox.billboard(index, x, y, z, scale)",
+        doc: "Stand billboard `index` (a 2D character declared in the World tab) at world position (x,z grid, y height); scale 0 hides. Occludes correctly against the 3D terrain.",
+        snippet: "cartbox.billboard(0, px, 0, pz)",
+      },
     ],
   },
   {

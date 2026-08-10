@@ -20,11 +20,13 @@ import styles from "./editor.module.css";
 import type { PaintSurface } from "./paintSurface";
 import {
   brushStamp,
+  ellipseFillPoints,
   ellipseOutlinePoints,
   linePoints,
   maskedFloodFill,
   parseHexColor,
   pixelKey,
+  rectFillPoints,
   rectOutlinePoints,
   thickenPoints,
   wandSelection,
@@ -53,6 +55,8 @@ interface PixelCanvasProps {
   weight: number;
   /** Colour tolerance (0..100) for the fill and magic-wand tools. */
   tolerance: number;
+  /** Whether the rectangle/ellipse tools fill their interior (vs. draw an outline). */
+  fillShape: boolean;
   version: number;
   onEdit: () => void;
   onHover: (cell: { x: number; y: number } | null) => void;
@@ -73,6 +77,7 @@ export function PixelCanvas({
   tool,
   weight,
   tolerance,
+  fillShape,
   version,
   onEdit,
   onHover,
@@ -253,6 +258,10 @@ export function PixelCanvas({
   /** The pixels a shape drag from the anchor to `cell` would paint, thickened to
    * the current brush weight. */
   const shapePoints = (anchor: PixelPoint, cell: PixelPoint): PixelPoint[] => {
+    // A filled rectangle/ellipse already covers its interior, so it neither needs
+    // nor wants brush-weight thickening — only outlines and lines are thickened.
+    if (fillShape && tool === "rect") return rectFillPoints(anchor.x, anchor.y, cell.x, cell.y);
+    if (fillShape && tool === "ellipse") return ellipseFillPoints(anchor.x, anchor.y, cell.x, cell.y);
     const base =
       tool === "line"
         ? linePoints(anchor.x, anchor.y, cell.x, cell.y)

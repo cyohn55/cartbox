@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { mount, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ParticleSpec, type PlayerHandle, type PostFxSettings, type SceneSpec } from "@cartbox/player";
+import { mount, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ParticleSpec, type PlayerHandle, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
 
 import styles from "./editor.module.css";
 
@@ -31,10 +31,12 @@ interface RunOverlayProps {
   flags?: FlagsField;
   /** The cart's 3D mesh scene, rasterised over each frame during the playtest. */
   mesh?: MeshScene;
+  /** The cart's HD-2D world (3D terrain + 2D character billboards), during the playtest. */
+  world?: WorldScene;
   onClose: () => void;
 }
 
-export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, particles, collision, flags, mesh, onClose }: RunOverlayProps) {
+export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, particles, collision, flags, mesh, world, onClose }: RunOverlayProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<PlayerHandle | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
@@ -56,6 +58,7 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
     collision ? "Collision" : null,
     flags ? "Flags" : null,
     mesh ? "Mesh" : null,
+    world ? "World" : null,
   ].filter((name): name is string => name !== null);
 
   useEffect(() => {
@@ -87,6 +90,9 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
       flags,
       // Playtest the cart's imported 3D meshes, rasterised over each frame.
       mesh,
+      // Playtest the cart's HD-2D world: 3D terrain with the cart's 2D character
+      // sprites standing in it as depth-composited billboards.
+      world,
       onReady: () => setStatus("ready"),
       // Surface the real load-error message instead of a generic failure line.
       // (A runtime Lua error renders on the cart's own screen — the core does not
@@ -105,7 +111,7 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
       handle.destroy();
       URL.revokeObjectURL(url);
     };
-  }, [bytes, engineUrl, postFx, scene, anim, particles, collision, flags, mesh]);
+  }, [bytes, engineUrl, postFx, scene, anim, particles, collision, flags, mesh, world]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {

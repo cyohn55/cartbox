@@ -205,6 +205,7 @@ export function SpriteEditor({
   const [tool, setTool] = useState<Tool>("pencil");
   const [weight, setWeight] = useState(1); // brush/line thickness in pixels
   const [tolerance, setTolerance] = useState(0); // fill/wand colour tolerance (0..100)
+  const [fillShape, setFillShape] = useState(false); // rect/ellipse: fill interior vs outline
   const [version, setVersion] = useState(0);
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
   const [layer, setLayer] = useState<Layer>("albedo");
@@ -659,6 +660,21 @@ export function SpriteEditor({
             display={`${tolerance}%`}
           />
         )}
+        {/* Rectangle/ellipse can draw a hollow outline or a solid fill — the fill
+            is the fast path for blocking in shapes (previously only flood-fill
+            could fill an area, which needs an already-closed boundary). */}
+        {(tool === "rect" || tool === "ellipse") && (
+          <SegmentedControl
+            label="Shape"
+            options={[
+              { id: "outline", label: "Outline" },
+              { id: "fill", label: "Fill" },
+            ]}
+            selected={fillShape ? "fill" : "outline"}
+            onSelect={(id) => setFillShape(id === "fill")}
+            ariaLabel="Shape fill mode"
+          />
+        )}
       </>
     ),
 
@@ -954,6 +970,7 @@ export function SpriteEditor({
           tool={tool}
           weight={weight}
           tolerance={tolerance}
+          fillShape={fillShape}
           version={version}
           onEdit={bump}
           onHover={setHover}

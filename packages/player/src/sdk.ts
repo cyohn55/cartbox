@@ -122,6 +122,43 @@ cartbox = {
     _mn = _mn + 1
     pmem(_MPB, _mn)
   end,
+  -- HD-2D world (optional): a cart with a world sidecar draws a 3D tile terrain
+  -- and stands its 2D character sprites in it as depth-sorted billboards. The
+  -- world camera and billboards reuse the mesh camera/pose mailbox channels, so
+  -- no engine change is needed — these are thin aliases with the world's naming.
+  --
+  -- Drive the world camera this frame: yaw/pitch (radians), distance (world units,
+  -- 0 = auto-fit), fov (radians, 0 = default). Same layout as meshcam.
+  worldcam = function(yaw, pitch, dist, fov)
+    pmem(_MCB, 1)
+    pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(_MCB + 4, 0)
+    pmem(_MCB + 5, 0)
+    pmem(_MCB + 6, 0)
+    pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)
+  end,
+  -- Start a fresh frame's billboard list. Call once before billboard() calls each
+  -- frame (an alias of clearposes — they share the mesh-pose channel).
+  clearbillboards = function() _mn = 0 pmem(_MPB, 0) end,
+  -- Place billboard index (declared in the world sidecar) at world position
+  -- (x,z grid units, y height units) this frame; scale defaults to 1 (0 hides).
+  -- math.floor keeps every value integer so the bitwise mask never sees a float.
+  billboard = function(index, x, y, z, scale)
+    if _mn >= _MPCAP then return end
+    local base = _MPB + 1 + _mn * 8
+    pmem(base, math.floor(index or 0) & 0xff)
+    pmem(base + 1, math.floor((x or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(base + 2, math.floor((y or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(base + 3, math.floor((z or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(base + 4, 0)
+    pmem(base + 5, 0)
+    pmem(base + 6, 0)
+    pmem(base + 7, math.floor((scale or 1) * 256 + 0.5) & 0xffffffff)
+    _mn = _mn + 1
+    pmem(_MPB, _mn)
+  end,
   -- Collision defaults: overridden by the injected layer when the cart has one,
   -- so cartbox.solid/mapsize are always safe to call (a cart with no collision
   -- layer simply sees every cell as non-solid).

@@ -185,6 +185,7 @@ function StaticCartridgePage({ cartId }: { cartId: string }) {
         collision={null}
         flags={null}
         meshRaw={null}
+        worldRaw={null}
       />
       <p>{cart.description}</p>
     </main>
@@ -246,6 +247,15 @@ export default async function CartridgePage({ params }: PageProps) {
   } catch {
     meshRaw = null;
   }
+  // The HD-2D world sidecar (migration 0023), fetched raw and parsed client-side
+  // like the mesh one; a not-yet-migrated deployment simply plays without a world.
+  let worldRaw: string | null = null;
+  try {
+    const { data: extra, error } = await db.from("carts").select("world").eq("id", cart.id).maybeSingle();
+    if (!error) worldRaw = typeof extra?.world === "string" ? extra.world : null;
+  } catch {
+    worldRaw = null;
+  }
 
   return (
     <main>
@@ -263,6 +273,7 @@ export default async function CartridgePage({ params }: PageProps) {
           collision={collision}
           flags={flags}
           meshRaw={meshRaw}
+          worldRaw={worldRaw}
         />
       ) : (
         <section>

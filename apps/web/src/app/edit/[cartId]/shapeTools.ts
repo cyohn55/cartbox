@@ -187,6 +187,47 @@ export function ellipseOutlinePoints(x0: number, y0: number, x1: number, y1: num
   return points;
 }
 
+/** Every pixel inside (and on) the rectangle spanned by two corners. */
+export function rectFillPoints(x0: number, y0: number, x1: number, y1: number): PixelPoint[] {
+  const left = Math.min(x0, x1);
+  const right = Math.max(x0, x1);
+  const top = Math.min(y0, y1);
+  const bottom = Math.max(y0, y1);
+  const points: PixelPoint[] = [];
+  for (let y = top; y <= bottom; y += 1) {
+    for (let x = left; x <= right; x += 1) points.push({ x, y });
+  }
+  return points;
+}
+
+/**
+ * Every pixel inside (and on) the ellipse inscribed in the rectangle spanned by
+ * two corners. Scans each row and fills the span between the ellipse's two x
+ * solutions, so a filled ellipse has no interior gaps regardless of aspect.
+ * Degenerate boxes fall back to a filled rectangle.
+ */
+export function ellipseFillPoints(x0: number, y0: number, x1: number, y1: number): PixelPoint[] {
+  const left = Math.min(x0, x1);
+  const right = Math.max(x0, x1);
+  const top = Math.min(y0, y1);
+  const bottom = Math.max(y0, y1);
+  if (right - left < 2 || bottom - top < 2) return rectFillPoints(left, top, right, bottom);
+
+  const centerX = (left + right) / 2;
+  const centerY = (top + bottom) / 2;
+  const radiusX = (right - left) / 2;
+  const radiusY = (bottom - top) / 2;
+  const points: PixelPoint[] = [];
+  for (let y = top; y <= bottom; y += 1) {
+    const t = (y - centerY) / radiusY;
+    const dx = radiusX * Math.sqrt(Math.max(0, 1 - t * t));
+    const spanLeft = Math.ceil(centerX - dx);
+    const spanRight = Math.floor(centerX + dx);
+    for (let x = spanLeft; x <= spanRight; x += 1) points.push({ x, y });
+  }
+  return points;
+}
+
 /**
  * Magic-wand selection: the contiguous (4-connected) region of pixels that match
  * the start pixel. With no tolerance that means the exact same value; with a

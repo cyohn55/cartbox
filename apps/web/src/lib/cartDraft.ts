@@ -4,8 +4,10 @@
  * save must create the row, not just overwrite bytes. The defaulting and id
  * validation live here, pure and database-free, so they are unit-testable.
  *
- * New carts are published immediately: everything a user makes should appear
- * in Browse and stay reachable, rather than existing only as an editor URL.
+ * Save vs Publish are decoupled: a first Save creates the row as a PRIVATE DRAFT
+ * (unlisted), and only Publish marks it live in Browse. This keeps a creator's
+ * still-untitled work-in-progress out of the marketplace until they choose to
+ * ship it, while Save still persists everything so nothing is lost.
  */
 
 import type { ConsoleModelId } from "@cartbox/editor";
@@ -64,6 +66,8 @@ export function buildNewCartRow(params: {
   ownerId: string;
   title?: string | null;
   model?: string | null;
+  /** Whether this first save is a Publish (go live) or a plain Save (private draft). */
+  published?: boolean;
 }): NewCartRow {
   const title = params.title?.trim() || DEFAULT_CART_TITLE;
   return {
@@ -73,6 +77,8 @@ export function buildNewCartRow(params: {
     slug: `${slugify(title)}-${params.cartId.slice(0, 8)}`,
     r2_key: `carts/${params.cartId}.tic`,
     console_model: resolveModelId(params.model),
-    published: true,
+    // Save keeps a new cart a private draft; only Publish lists it in Browse. A
+    // creator's first Save no longer exposes an untitled work-in-progress.
+    published: params.published ?? false,
   };
 }

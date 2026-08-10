@@ -2883,6 +2883,43 @@ cartbox = {
     _mn = _mn + 1
     pmem(_MPB, _mn)
   end,
+  -- HD-2D world (optional): a cart with a world sidecar draws a 3D tile terrain
+  -- and stands its 2D character sprites in it as depth-sorted billboards. The
+  -- world camera and billboards reuse the mesh camera/pose mailbox channels, so
+  -- no engine change is needed \u2014 these are thin aliases with the world's naming.
+  --
+  -- Drive the world camera this frame: yaw/pitch (radians), distance (world units,
+  -- 0 = auto-fit), fov (radians, 0 = default). Same layout as meshcam.
+  worldcam = function(yaw, pitch, dist, fov)
+    pmem(_MCB, 1)
+    pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)
+    pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(_MCB + 4, 0)
+    pmem(_MCB + 5, 0)
+    pmem(_MCB + 6, 0)
+    pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)
+  end,
+  -- Start a fresh frame's billboard list. Call once before billboard() calls each
+  -- frame (an alias of clearposes \u2014 they share the mesh-pose channel).
+  clearbillboards = function() _mn = 0 pmem(_MPB, 0) end,
+  -- Place billboard index (declared in the world sidecar) at world position
+  -- (x,z grid units, y height units) this frame; scale defaults to 1 (0 hides).
+  -- math.floor keeps every value integer so the bitwise mask never sees a float.
+  billboard = function(index, x, y, z, scale)
+    if _mn >= _MPCAP then return end
+    local base = _MPB + 1 + _mn * 8
+    pmem(base, math.floor(index or 0) & 0xff)
+    pmem(base + 1, math.floor((x or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(base + 2, math.floor((y or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(base + 3, math.floor((z or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(base + 4, 0)
+    pmem(base + 5, 0)
+    pmem(base + 6, 0)
+    pmem(base + 7, math.floor((scale or 1) * 256 + 0.5) & 0xffffffff)
+    _mn = _mn + 1
+    pmem(_MPB, _mn)
+  end,
   -- Collision defaults: overridden by the injected layer when the cart has one,
   -- so cartbox.solid/mapsize are always safe to call (a cart with no collision
   -- layer simply sees every cell as non-solid).
@@ -3955,6 +3992,312 @@ async function decodeTexture(mime, bytes) {
   }
 }
 
+// src/world/WorldOverlaySurface.ts
+import { renderMeshScene as renderMeshScene2 } from "@cartbox/editor";
+
+// src/world/worldScene.ts
+import {
+  projectionMatrix as projectionMatrix2,
+  viewMatrix as viewMatrix2
+} from "@cartbox/editor";
+var CELL_WORLD = 1;
+var HEIGHT_WORLD = 0.6;
+var DEFAULT_FOV = 42 * Math.PI / 180;
+var DEFAULT_YAW = Math.PI / 4;
+var DEFAULT_PITCH = 0.62;
+function parseWorldScene(raw) {
+  if (!raw) return null;
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof value !== "object" || value === null) return null;
+  const record = value;
+  const cols = asInt(record.cols);
+  const rows = asInt(record.rows);
+  const tilesPerSide = asInt(record.tilesPerSide);
+  if (cols <= 0 || rows <= 0 || tilesPerSide <= 0) return null;
+  const rawCells = Array.isArray(record.cells) ? record.cells : [];
+  if (rawCells.length !== cols * rows) return null;
+  const cells = rawCells.map((cell) => {
+    const c = cell ?? {};
+    return { h: Math.max(0, asInt(c.h)), sprite: Math.max(0, asInt(c.sprite)) };
+  });
+  const rawBillboards = Array.isArray(record.billboards) ? record.billboards : [];
+  const billboards = rawBillboards.map((bb) => {
+    const b = bb ?? {};
+    return {
+      sprite: Math.max(0, asInt(b.sprite)),
+      width: asFloat(b.width, 1),
+      height: asFloat(b.height, 1)
+    };
+  });
+  const camera = parseCamera(record.camera);
+  return { cols, rows, tilesPerSide, cells, billboards, camera };
+}
+function parseCamera(value) {
+  if (typeof value !== "object" || value === null) return void 0;
+  const c = value;
+  return {
+    yaw: asFloat(c.yaw, DEFAULT_YAW),
+    pitch: asFloat(c.pitch, DEFAULT_PITCH),
+    distance: asFloat(c.distance, 0),
+    fov: asFloat(c.fov, 0)
+  };
+}
+function asInt(value) {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? Math.round(n) : 0;
+}
+function asFloat(value, fallback) {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+function cellAt(scene, i, j) {
+  if (i < 0 || j < 0 || i >= scene.cols || j >= scene.rows) return { h: -1, sprite: 0 };
+  return scene.cells[j * scene.cols + i] ?? { h: 0, sprite: 0 };
+}
+function newPrimitive() {
+  return { positions: [], normals: [], uvs: [], indices: [] };
+}
+function pushQuad(b, p0, p1, p2, p3, normal, uv) {
+  const base = b.positions.length / 3;
+  for (const p of [p0, p1, p2, p3]) b.positions.push(p[0], p[1], p[2]);
+  for (let k = 0; k < 4; k += 1) b.normals.push(normal[0], normal[1], normal[2]);
+  b.uvs.push(uv[0], uv[1], uv[2], uv[3], uv[4], uv[5], uv[6], uv[7]);
+  b.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+}
+function buildTerrainInstances(scene, textureFor) {
+  const builders = /* @__PURE__ */ new Map();
+  const builderFor = (sprite) => {
+    let b = builders.get(sprite);
+    if (!b) {
+      b = newPrimitive();
+      builders.set(sprite, b);
+    }
+    return b;
+  };
+  for (let j = 0; j < scene.rows; j += 1) {
+    for (let i = 0; i < scene.cols; i += 1) {
+      const cell = cellAt(scene, i, j);
+      const b = builderFor(cell.sprite);
+      const x0 = i * CELL_WORLD;
+      const x1 = x0 + CELL_WORLD;
+      const z0 = j * CELL_WORLD;
+      const z1 = z0 + CELL_WORLD;
+      const top = cell.h * HEIGHT_WORLD;
+      pushQuad(
+        b,
+        [x0, top, z0],
+        [x0, top, z1],
+        [x1, top, z1],
+        [x1, top, z0],
+        [0, 1, 0],
+        [0, 0, 0, 1, 1, 1, 1, 0]
+      );
+      const sides = [
+        { di: 1, dj: 0 },
+        { di: -1, dj: 0 },
+        { di: 0, dj: 1 },
+        { di: 0, dj: -1 }
+      ];
+      for (const { di, dj } of sides) {
+        const neighbour = cellAt(scene, i + di, j + dj);
+        const bottomH = Math.max(0, neighbour.h);
+        if (bottomH >= cell.h) continue;
+        const bottom = bottomH * HEIGHT_WORLD;
+        let e0, e1, nrm;
+        if (di === 1) {
+          e0 = [x1, z0];
+          e1 = [x1, z1];
+          nrm = [1, 0, 0];
+        } else if (di === -1) {
+          e0 = [x0, z1];
+          e1 = [x0, z0];
+          nrm = [-1, 0, 0];
+        } else if (dj === 1) {
+          e0 = [x1, z1];
+          e1 = [x0, z1];
+          nrm = [0, 0, 1];
+        } else {
+          e0 = [x0, z0];
+          e1 = [x1, z0];
+          nrm = [0, 0, -1];
+        }
+        pushQuad(
+          b,
+          [e0[0], top, e0[1]],
+          [e0[0], bottom, e0[1]],
+          [e1[0], bottom, e1[1]],
+          [e1[0], top, e1[1]],
+          nrm,
+          [0, 0, 0, 1, 1, 1, 1, 0]
+        );
+      }
+    }
+  }
+  const instances = [];
+  for (const [sprite, b] of builders) {
+    if (b.indices.length === 0) continue;
+    const mesh = primitiveToMesh(`terrain-${sprite}`, b);
+    instances.push({ mesh, model: identityMat4(), textures: [textureFor(sprite)] });
+  }
+  return instances;
+}
+function primitiveToMesh(name, b) {
+  return {
+    name,
+    primitives: [
+      {
+        positions: Float32Array.from(b.positions),
+        normals: Float32Array.from(b.normals),
+        uvs: Float32Array.from(b.uvs),
+        indices: Uint32Array.from(b.indices),
+        material: { name: "tile", baseColorFactor: [1, 1, 1, 1], baseColorImage: null }
+      }
+    ]
+  };
+}
+function buildBillboardInstance(foot, width, height, camRight, camUp, texture) {
+  const hw = width / 2;
+  const rx = camRight[0] * hw;
+  const ry = camRight[1] * hw;
+  const rz = camRight[2] * hw;
+  const ux = camUp[0] * height;
+  const uy = camUp[1] * height;
+  const uz = camUp[2] * height;
+  const [fx, fy, fz] = foot;
+  const bl = [fx - rx, fy - ry, fz - rz];
+  const tl = [fx - rx + ux, fy - ry + uy, fz - rz + uz];
+  const tr = [fx + rx + ux, fy + ry + uy, fz + rz + uz];
+  const br = [fx + rx, fy + ry, fz + rz];
+  const nrm = [
+    camRight[1] * camUp[2] - camRight[2] * camUp[1],
+    camRight[2] * camUp[0] - camRight[0] * camUp[2],
+    camRight[0] * camUp[1] - camRight[1] * camUp[0]
+  ];
+  const b = newPrimitive();
+  pushQuad(b, bl, tl, tr, br, nrm, [0, 1, 0, 0, 1, 0, 1, 1]);
+  return { mesh: primitiveToMesh("billboard", b), model: identityMat4(), textures: [texture] };
+}
+function worldCenter(scene) {
+  let maxH = 0;
+  for (const c of scene.cells) maxH = Math.max(maxH, c.h);
+  const cx = scene.cols * CELL_WORLD / 2;
+  const cz = scene.rows * CELL_WORLD / 2;
+  const cy = maxH * HEIGHT_WORLD / 2;
+  const radius = Math.max(
+    1e-3,
+    0.5 * Math.hypot(scene.cols * CELL_WORLD, maxH * HEIGHT_WORLD, scene.rows * CELL_WORLD)
+  );
+  return { center: [cx, cy, cz], radius };
+}
+function buildWorldCamera(scene, spec, aspect) {
+  const { center, radius } = worldCenter(scene);
+  const fov = spec.fov > 0 ? spec.fov : DEFAULT_FOV;
+  const distance = spec.distance > 0 ? spec.distance : radius / Math.sin(fov / 2) + radius;
+  const cosPitch = Math.cos(spec.pitch);
+  const eye = [
+    center[0] + distance * cosPitch * Math.sin(spec.yaw),
+    center[1] + distance * Math.sin(spec.pitch),
+    center[2] + distance * cosPitch * Math.cos(spec.yaw)
+  ];
+  const view = viewMatrix2(eye, center, [0, 1, 0]);
+  const projection = projectionMatrix2(fov, aspect, 0.05, distance + radius * 6);
+  const right = [view[0], view[4], view[8]];
+  const up = [view[1], view[5], view[9]];
+  return { view, projection, right, up };
+}
+function defaultCameraSpec(scene) {
+  return scene.camera ?? { yaw: DEFAULT_YAW, pitch: DEFAULT_PITCH, distance: 0, fov: 0 };
+}
+function identityMat4() {
+  return Float64Array.from([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+}
+
+// src/world/WorldOverlaySurface.ts
+var WorldOverlaySurface = class {
+  constructor(inner, width, height, scene, textureFor) {
+    this.inner = inner;
+    this.width = width;
+    this.height = height;
+    this.scene = scene;
+    this.cartCamera = null;
+    this.billboards = [];
+    this.output = new Uint8ClampedArray(width * height * 4);
+    this.presented = new Uint8Array(this.output.buffer);
+    this.depth = new Float32Array(width * height);
+    this.terrain = buildTerrainInstances(scene, textureFor);
+    this.billboardTextures = scene.billboards.map((slot) => textureFor(slot.sprite));
+  }
+  /** Set the cart-driven camera for the next frame(s), or null to auto-frame. */
+  setCameraOverride(camera) {
+    this.cartCamera = camera;
+  }
+  /**
+   * Set the billboard positions the cart published this frame. Reuses the mesh-pose
+   * mailbox: each pose's index selects a billboard slot and its position places the
+   * billboard's feet; a hidden or zero-scale pose drops the billboard.
+   */
+  setBillboards(poses) {
+    this.billboards = poses.filter((pose) => !pose.hidden && pose.index < this.scene.billboards.length).map((pose) => ({
+      index: pose.index,
+      x: pose.position[0],
+      y: pose.position[1],
+      z: pose.position[2],
+      scale: pose.scale
+    }));
+  }
+  blit(rgba) {
+    this.output.set(rgba);
+    const spec = this.cameraSpec();
+    const camera = buildWorldCamera(this.scene, spec, this.width / this.height);
+    const billboardInstances = [];
+    for (const pose of this.billboards) {
+      if (pose.scale <= 0) continue;
+      const slot = this.scene.billboards[pose.index];
+      const texture = this.billboardTextures[pose.index] ?? null;
+      const foot = [
+        pose.x * CELL_WORLD,
+        pose.y * HEIGHT_WORLD,
+        pose.z * CELL_WORLD
+      ];
+      billboardInstances.push(
+        buildBillboardInstance(foot, slot.width * pose.scale, slot.height * pose.scale, camera.right, camera.up, texture)
+      );
+    }
+    renderMeshScene2([...this.terrain, ...billboardInstances], {
+      width: this.width,
+      height: this.height,
+      out: this.output,
+      depth: this.depth,
+      view: camera.view,
+      projection: camera.projection,
+      background: null,
+      ambient: 0.62
+    });
+    this.inner.blit(this.presented);
+  }
+  cameraSpec() {
+    const base = defaultCameraSpec(this.scene);
+    const cart = this.cartCamera;
+    if (!cart) return base;
+    const cartDistance = cart.distance ?? 0;
+    const cartFov = cart.fov ?? 0;
+    return {
+      yaw: cart.yaw,
+      pitch: cart.pitch,
+      distance: cartDistance > 0 ? cartDistance : base.distance,
+      fov: cartFov > 0 ? cartFov : base.fov
+    };
+  }
+  destroy() {
+    this.inner.destroy();
+  }
+};
+
 // src/player.ts
 function shouldUseTouch(scheme, view) {
   if (scheme === "touch") return true;
@@ -4033,8 +4376,9 @@ var Player = class {
       const scene = this.options.scene;
       this.anim = this.options.anim;
       const wantsForeground = Boolean(this.anim && this.anim.placements.length > 0);
+      const world = this.options.world;
       let backdrop = null;
-      if (scene || wantsForeground) {
+      if (scene || wantsForeground || world) {
         this.cartSource = createCartSpriteSource(module, preparedBytes, this.model.paletteSize) ?? void 0;
       }
       if (scene && this.cartSource) {
@@ -4052,6 +4396,15 @@ var Player = class {
         const mesh = this.options.mesh;
         if (mesh) {
           surface = this.meshSurface = await MeshOverlaySurface.create(surface, this.model.width, this.model.height, mesh);
+        }
+        if (world && this.cartSource) {
+          surface = this.worldSurface = new WorldOverlaySurface(
+            surface,
+            this.model.width,
+            this.model.height,
+            world,
+            makeWorldTextureLookup(this.cartSource, world.tilesPerSide)
+          );
         }
         if (wantsForeground && this.cartSource) {
           surface = this.foregroundSurface = new AnimatedForegroundSurface(
@@ -4187,6 +4540,11 @@ var Player = class {
         this.meshSurface.setCameraOverride(decodeMeshCamera(mailbox));
         this.meshSurface.setPoseOverrides(decodeMeshPoses(mailbox));
       }
+      if (this.worldSurface && this.console) {
+        const mailbox = this.console.readMailbox();
+        this.worldSurface.setCameraOverride(decodeMeshCamera(mailbox));
+        this.worldSurface.setBillboards(decodeMeshPoses(mailbox));
+      }
       this.applyAnimation();
       this.surface?.blit(framebuffer);
       this.presentFrame += 1;
@@ -4237,6 +4595,17 @@ var Player = class {
     this.console?.dispose();
   }
 };
+function makeWorldTextureLookup(cartSource, tilesPerSide) {
+  const cache = /* @__PURE__ */ new Map();
+  return (sprite) => {
+    const cached = cache.get(sprite);
+    if (cached !== void 0) return cached;
+    const region = cartSource.source.readRegion(0, sprite, tilesPerSide, tilesPerSide);
+    const texture = region.width > 0 && region.height > 0 ? { width: region.width, height: region.height, data: region.pixels } : null;
+    cache.set(sprite, texture);
+    return texture;
+  };
+}
 
 // src/verify.ts
 function runReplayEvents(console2, replay) {
@@ -4639,12 +5008,14 @@ export {
   CAMERA_BASE,
   CAMERA_SCALE,
   CARTBOX_SDK_LUA,
+  CELL_WORLD,
   CartridgeLoadError,
   ConsoleButton,
   DEFAULT_ATMOSPHERE,
   DEFAULT_KEY_BINDINGS,
   DEFAULT_MODEL_ID,
   EVENT_CAPACITY,
+  HEIGHT_WORLD,
   LIGHTS_BASE,
   LIGHTS_CAPACITY,
   LIGHT_STRIDE,
@@ -4682,11 +5053,16 @@ export {
   SceneBackdropSurface,
   TILT_SHIFT_FEATHER,
   WebgpuLightingLayer,
+  WorldOverlaySurface,
   acesFilmic,
   acesFilmicChannel,
   anyPostFxEnabled,
+  buildBillboardInstance,
   buildOrbitCamera,
+  buildTerrainInstances,
+  buildWorldCamera,
   cameraAt,
+  cellAt,
   collisionSdkLua,
   composeParallax,
   compositeOverBackdrop,
@@ -4730,6 +5106,7 @@ export {
   parsePostFxSettings,
   parseReplay,
   parseScene,
+  parseWorldScene,
   prehazeLayers,
   pulse,
   pyramidLevelCount,
@@ -4754,5 +5131,6 @@ export {
   sway,
   tiltShiftBlur,
   uniformsFromSettings,
-  verifyReplayScore
+  verifyReplayScore,
+  worldCenter
 };

@@ -27,6 +27,9 @@ import { evaluate } from "./anim/animPlayer.js";
 import type { AnimSpec } from "./anim/animModel.js";
 import { ParticleOverlaySurface } from "./particles/ParticleOverlaySurface.js";
 import { MeshOverlaySurface } from "./mesh/MeshOverlaySurface.js";
+import { WorldOverlaySurface } from "./world/WorldOverlaySurface.js";
+import type { TextureLookup } from "./world/worldScene.js";
+import { type DecodedTexture } from "@cartbox/editor";
 import type { ControlScheme, PlayerOptions } from "./types.js";
 
 /**
@@ -46,6 +49,7 @@ export class Player {
   private litSurface?: LitCanvasSurface;
   private sceneSurface?: SceneBackdropSurface;
   private meshSurface?: MeshOverlaySurface;
+  private worldSurface?: WorldOverlaySurface;
   private foregroundSurface?: AnimatedForegroundSurface;
   private postFxSurface?: PostFxSurface;
   private basePostFx?: PostFxSettings;
@@ -138,8 +142,11 @@ export class Player {
       // built when either a scene backdrop OR foreground placements need it.
       this.anim = this.options.anim;
       const wantsForeground = Boolean(this.anim && this.anim.placements.length > 0);
+      // The HD-2D world layer textures its terrain and billboards from the cart's
+      // own sprite sheet too, so it needs the same cart sprite source.
+      const world = this.options.world;
       let backdrop: { layers: ReturnType<typeof resolveSceneLayers>; keyRgb: readonly [number, number, number] } | null = null;
-      if (scene || wantsForeground) {
+      if (scene || wantsForeground || world) {
         this.cartSource = createCartSpriteSource(module, preparedBytes, this.model.paletteSize) ?? undefined;
       }
       if (scene && this.cartSource) {
@@ -171,6 +178,19 @@ export class Player {
         const mesh = this.options.mesh;
         if (mesh) {
           surface = this.meshSurface = await MeshOverlaySurface.create(surface, this.model.width, this.model.height, mesh);
+        }
+        // The HD-2D world composites a 3D tile terrain plus the cart's 2D character
+        // billboards over the frame, textured from the cart's sprite sheet and
+        // sharing one depth buffer. It wraps like the mesh overlay, so its output
+        // also flows through lighting + FX. Textures are decoded once per sprite.
+        if (world && this.cartSource) {
+          surface = this.worldSurface = new WorldOverlaySurface(
+            surface,
+            this.model.width,
+            this.model.height,
+            world,
+            makeWorldTextureLookup(this.cartSource, world.tilesPerSide),
+          );
         }
         // Foreground placements draw over the cart AND the backdrop, so they wrap
         // the base surface FIRST (innermost); the scene backdrop then wraps around
@@ -364,6 +384,14 @@ export class Player {
         this.meshSurface.setCameraOverride(decodeMeshCamera(mailbox));
         this.meshSurface.setPoseOverrides(decodeMeshPoses(mailbox));
       }
+      // The HD-2D world reuses the same channels: cartbox.worldcam drives its
+      // camera (decoded as a mesh camera) and cartbox.billboard places its 2D
+      // characters (decoded as mesh poses — index + world position + scale).
+      if (this.worldSurface && this.console) {
+        const mailbox = this.console.readMailbox();
+        this.worldSurface.setCameraOverride(decodeMeshCamera(mailbox));
+        this.worldSurface.setBillboards(decodeMeshPoses(mailbox));
+      }
       // Play the declared animation for this frame: route the sampled state to the
       // scene layers, foreground placements, and post-FX before the frame is blit.
       this.applyAnimation();
@@ -421,4 +449,27 @@ export class Player {
     this.cartSource?.dispose();
     this.console?.dispose();
   }
+}
+
+/**
+ * A cached {@link TextureLookup} over a cart's sprite sheet for the world layer:
+ * each distinct sprite id is read once as an N×N tile block (N = the world's
+ * `tilesPerSide`) and decoded to a straight-alpha {@link DecodedTexture} (palette
+ * index 0 → transparent, so a billboard shows its silhouette). Reads come from the
+ * same `readRegion` the parallax backdrop uses, so no engine change is needed.
+ */
+function makeWorldTextureLookup(cartSource: CartSpriteSource, tilesPerSide: number): TextureLookup {
+  const cache = new Map<number, DecodedTexture | null>();
+  return (sprite: number): DecodedTexture | null => {
+    const cached = cache.get(sprite);
+    if (cached !== undefined) return cached;
+    // Tiles page (0) holds the map/tile bank the world's sprite ids index into.
+    const region = cartSource.source.readRegion(0, sprite, tilesPerSide, tilesPerSide);
+    const texture: DecodedTexture | null =
+      region.width > 0 && region.height > 0
+        ? { width: region.width, height: region.height, data: region.pixels }
+        : null;
+    cache.set(sprite, texture);
+    return texture;
+  };
 }

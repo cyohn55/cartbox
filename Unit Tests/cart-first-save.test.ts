@@ -3,7 +3,7 @@
  * row; the first save must create that row itself. These tests exercise the
  * pure builder the save route uses, asserting the invariants the schema and
  * the Browse page depend on rather than snapshotting constants:
- *   - the row is published from birth, so every cart a user makes is browsable
+ *   - Save creates a private draft; only Publish lists it in Browse (upgrade #5)
  *   - the slug stays unique per owner (schema: unique (owner_id, slug)) even
  *     when many carts share the default title
  *   - the r2_key matches the `carts/<id>.tic` layout the play page serves from
@@ -42,9 +42,13 @@ describe("isValidCartId", () => {
 describe("buildNewCartRow", () => {
   const ownerId = randomUUID();
 
-  it("publishes the cart from birth so it appears in Browse", () => {
-    const row = buildNewCartRow({ cartId: randomUUID(), ownerId });
-    expect(row.published).toBe(true);
+  it("creates a private draft on a plain Save, and publishes only when asked", () => {
+    // A first Save (no publish flag) keeps the new cart unlisted so an untitled
+    // work-in-progress does not appear in Browse the moment it is saved.
+    expect(buildNewCartRow({ cartId: randomUUID(), ownerId }).published).toBe(false);
+    expect(buildNewCartRow({ cartId: randomUUID(), ownerId, published: false }).published).toBe(false);
+    // A first Publish creates it live.
+    expect(buildNewCartRow({ cartId: randomUUID(), ownerId, published: true }).published).toBe(true);
   });
 
   it("stores bytes under the carts/<id>.tic key the play page expects", () => {
