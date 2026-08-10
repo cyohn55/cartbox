@@ -8,3 +8,5 @@ export * from "./animModel.js";
 export * from "./animPlayer.js";
 export * from "./generators.js";
 export { AnimatedForegroundSurface } from "./AnimatedForegroundSurface.js";
+export { animClipsSdkLua, buildClipTable, clipFrameIndex } from "./animClipsSdk.js";
+export type { ClipTableEntry } from "./animClipsSdk.js";

@@ -1203,6 +1203,13 @@ interface PlayerOptions {
     /** Called for each platform event a cart emits via the cartbox SDK. */
     onEvent?: (event: MailboxEvent) => void;
     /**
+     * Called with the message when the cart's Lua raises a runtime error mid-frame.
+     * The core keeps running (it aborts only that frame's TIC), so this is a report
+     * for the creator (e.g. the playtest HUD), not a fatal `onError`. Fires once per
+     * new error; no-op on engines built before runtime-error capture.
+     */
+    onRuntimeError?: (message: string) => void;
+    /**
      * Relight the cart's frames with dynamic point lights. When set, the player
      * renders through a WebGL lighting layer (falling back to plain 2D if WebGL is
      * unavailable). See {@link LightingOptions}.
@@ -1409,6 +1416,8 @@ interface EmscriptenModule {
     _cbx_emissive_ptr(handle: number): number;
     _cbx_set_material_capture(handle: number, enabled: number): void;
     _cbx_delete(handle: number): void;
+    _cbx_error_seq?(): number;
+    _cbx_last_error?(): number;
 }
 /** A loaded console ready to run a single cartridge. */
 interface ConsoleInstance {
@@ -1436,6 +1445,17 @@ interface ConsoleInstance {
      * tick. Empty until {@link setMaterialCapture} is enabled.
      */
     readEmissive(): Uint8Array;
+    /**
+     * The last Lua runtime error the core reported, with a monotonic `seq` so a
+     * caller can tell a fresh error from a repeat (baseline `seq` after load, then
+     * treat any increase as new). `message` is empty until the VM reports one.
+     * Returns null on engines built before the error-capture exports — they simply
+     * surface no runtime errors rather than breaking.
+     */
+    readError(): {
+        seq: number;
+        message: string;
+    } | null;
     /** Frees the underlying WASM console. */
     dispose(): void;
 }
@@ -2398,6 +2418,65 @@ declare class AnimatedForegroundSurface implements DisplaySurface {
 }
 
 /**
+ * The cart-facing animation-clip accessor, as injectable Lua (upgrade #4).
+ *
+ * The Anim tab already lets a creator author named sprite-frame clips (an ordered
+ * set of sprite-sheet regions with per-frame durations and a loop/pingpong/once
+ * mode). Until now those clips only drove host-played set-dressing; a gameplay
+ * entity that wanted to animate had to swap sprite ids by hand in Lua. This
+ * exposes the SAME authored clips to the cart's own code as
+ * `cartbox.clip(name, tick) -> id, w, h`, so a cart draws the current frame with
+ * `spr(id, x, y, key, 1, flip, 0, w, h)` and never re-derives the timing.
+ *
+ * Like the collision/flags accessors this is host data the cart *reads* and it
+ * never changes during play, so the whole clip table is injected once as Lua data
+ * (after the base SDK, so `cartbox` already exists). Pingpong is baked into a
+ * forward+reverse loop sequence here so the Lua only needs loop/once logic, and
+ * every value feeding an integer op is floored (the Pro core's Lua throws on a
+ * bitwise/`%` of a float — see the lua-bitwise-float-trap note).
+ *
+ * Pure and import-free apart from the AnimSpec types, so it is unit-testable on
+ * its own inputs and outputs.
+ */
+
+/** The encoded playback table for one clip — the exact data the Lua drives from. */
+interface ClipTableEntry {
+    readonly name: string;
+    /** Total cycle length in ticks. */
+    readonly total: number;
+    /** Once clips clamp to the last frame past the end; loops wrap. */
+    readonly once: boolean;
+    /** Sprite id per (flattened) frame. */
+    readonly tile: readonly number[];
+    readonly w: readonly number[];
+    readonly h: readonly number[];
+    /** Cumulative end-tick of each frame (cum[i-1] <= t < cum[i] selects frame i). */
+    readonly cum: readonly number[];
+}
+/**
+ * Build the per-clip playback tables from an AnimSpec — the pure step the Lua
+ * generator and the tests share. Pingpong is flattened to a forward+reverse loop
+ * sequence here, so the frame table is the single source of truth for timing.
+ */
+declare function buildClipTable(anim: AnimSpec | null | undefined): ClipTableEntry[];
+/**
+ * The frame index (1-based, as the Lua uses) an entry shows at `tick` — the exact
+ * selection the emitted Lua implements. Exposed so the timing contract is tested
+ * against real inputs without executing Lua (mirroring the collision SDK tests).
+ */
+declare function clipFrameIndex(entry: ClipTableEntry, tick: number): number;
+/**
+ * Build the Lua that exposes a cart's authored clips as
+ * `cartbox.clip(name, tick)`. Returns an empty string when there are no usable
+ * clips, so the caller injects nothing.
+ *
+ * `cartbox.clip(name, tick)` returns the current frame's top-left sprite id and
+ * its width/height in tiles; an unknown clip returns `0, 1, 1`. `tick` is the
+ * cart's own frame counter (durations are authored in ticks at 60Hz).
+ */
+declare function animClipsSdkLua(anim: AnimSpec | null | undefined): string;
+
+/**
  * The deterministic particle field — cinematic gap #6. Turns one
  * {@link ParticleEmitter} into the set of particles visible at a given frame,
  * with zero retained state: a particle's whole trajectory is a closed-form
@@ -2628,4 +2707,4 @@ declare class WorldOverlaySurface implements DisplaySurface {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, type CartSpriteSource, CartridgeLoadError, type ClipSample, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, type FlagsField, type GeneratedTrack, HEIGHT_WORLD, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera as MeshSceneCamera, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, PARTICLE_KINDS, POST_FX_EFFECTS, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPlacement, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera$1 as SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, TILT_SHIFT_FEATHER, type TextureLookup, type TrackMode, type Vec3, type VerificationResult, WebgpuLightingLayer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, WorldOverlaySurface, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, anyPostFxEnabled, buildBillboardInstance, buildOrbitCamera, buildTerrainInstances, buildWorldCamera, cameraAt, cellAt, collisionSdkLua, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interpolateNormal, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parseAnim, parseCollisionField, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, readCartCode, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleNormalBilinear, sampleTrack, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, sway, tiltShiftBlur, uniformsFromSettings, verifyReplayScore, worldCenter };
+export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, type CartSpriteSource, CartridgeLoadError, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, type FlagsField, type GeneratedTrack, HEIGHT_WORLD, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera as MeshSceneCamera, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, PARTICLE_KINDS, POST_FX_EFFECTS, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPlacement, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera$1 as SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, TILT_SHIFT_FEATHER, type TextureLookup, type TrackMode, type Vec3, type VerificationResult, WebgpuLightingLayer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, WorldOverlaySurface, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, animClipsSdkLua, anyPostFxEnabled, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildTerrainInstances, buildWorldCamera, cameraAt, cellAt, clipFrameIndex, collisionSdkLua, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interpolateNormal, loadEngineModule, mount, nearestDirection, normalVector, paramKey, parseAnim, parseCollisionField, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, readCartCode, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleNormalBilinear, sampleTrack, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, sway, tiltShiftBlur, uniformsFromSettings, verifyReplayScore, worldCenter };

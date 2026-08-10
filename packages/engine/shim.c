@@ -109,9 +109,25 @@ static uint64_t cbx_frequency(void *context) {
   return CBX_CLOCK_HZ;
 }
 
-/* No-op VM callbacks so trace/error/exit are never a null call. */
+/* The last Lua runtime error the VM reported, kept so the host can surface it in
+ * the playtest HUD. The error callback carries no console handle and the core
+ * aborts TIC() for the frame after calling it, so a single global buffer plus a
+ * monotonic sequence counter lets the host detect a *new* error (seq changed) and
+ * read its text — without this the message was simply discarded. */
+static char cbx_error_buf[256];
+static int cbx_error_generation = 0;
+
+/* No-op trace/exit; the error callback now records the message (see above). */
 static void cbx_trace(const char *text, uint8_t color) { (void)text; (void)color; }
-static void cbx_error(const char *info) { (void)info; }
+static void cbx_error(const char *info) {
+  if (info) {
+    strncpy(cbx_error_buf, info, sizeof(cbx_error_buf) - 1);
+    cbx_error_buf[sizeof(cbx_error_buf) - 1] = '\0';
+  } else {
+    cbx_error_buf[0] = '\0';
+  }
+  cbx_error_generation++;
+}
 static void cbx_exit(void) {}
 
 EMSCRIPTEN_KEEPALIVE
@@ -133,6 +149,15 @@ cbx_console *cbx_create(int sample_rate) {
   console->core->callback.exit = cbx_exit;
   return console;
 }
+
+/* Pointer to the last runtime-error string (empty until the VM reports one). */
+EMSCRIPTEN_KEEPALIVE
+const char *cbx_last_error(void) { return cbx_error_buf; }
+
+/* A counter bumped on every VM error; the host baselines it after load and treats
+ * any increase as a new error to surface. Monotonic across the module's life. */
+EMSCRIPTEN_KEEPALIVE
+int cbx_error_seq(void) { return cbx_error_generation; }
 
 EMSCRIPTEN_KEEPALIVE
 int cbx_load(cbx_console *console, void *cart, int size) {

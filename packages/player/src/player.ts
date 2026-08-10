@@ -18,6 +18,7 @@ import { seedCartridge, prependLuaCode } from "./cartseed.js";
 import { injectSdk } from "./sdk.js";
 import { collisionSdkLua } from "./collisionSdk.js";
 import { flagsSdkLua } from "./flagsSdk.js";
+import { animClipsSdkLua } from "./anim/animClipsSdk.js";
 import { decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses } from "./mailbox.js";
 import { createCartSpriteSource, type CartSpriteSource } from "./scene/cartSpriteSource.js";
 import { resolveSceneLayers } from "./scene/sceneRender.js";
@@ -67,6 +68,8 @@ export class Player {
   private replaySource?: ReplaySource;
   private tickFrame = 0;
   private lastMailboxSeq = 0;
+  /** Error-generation counter last seen from the engine; a rise means a new error. */
+  private lastErrorSeq = 0;
 
   private frameHandle = 0;
   private lastFrameTime = 0;
@@ -119,6 +122,11 @@ export class Player {
       if (collisionLua) prepared = prependLuaCode(prepared, collisionLua);
       const flagsLua = flagsSdkLua(this.options.flags);
       if (flagsLua) prepared = prependLuaCode(prepared, flagsLua);
+      // The Anim tab's authored sprite clips, exposed to the cart's own Lua as
+      // cartbox.clip(name, tick) so gameplay entities animate without swapping
+      // sprite ids by hand. Injected like collision/flags: after the base SDK.
+      const animClipsLua = animClipsSdkLua(this.options.anim);
+      if (animClipsLua) prepared = prependLuaCode(prepared, animClipsLua);
       const preparedBytes = injectSdk(prepared);
 
       this.console = createConsole(module, this.model, sampleRate);
@@ -130,6 +138,9 @@ export class Player {
       // Baseline the mailbox so any pre-existing persistent memory isn't
       // mistaken for freshly emitted events.
       this.lastMailboxSeq = this.console.readMailbox()[0] ?? 0;
+      // Baseline the runtime-error counter so a pre-existing value from a prior
+      // cart on this module isn't mistaken for a fresh error on the first frame.
+      this.lastErrorSeq = this.console.readError()?.seq ?? 0;
 
       const scale = this.options.scale ?? "fit";
       // A declared parallax scene: read the cart's own sprite regions for the
@@ -340,6 +351,16 @@ export class Player {
     this.console?.tick(mask);
     this.recorder?.record(mask);
     this.tickFrame++;
+    // Surface a Lua runtime error raised during this tick (once per new error).
+    // The core aborts only this frame's TIC and keeps running, so this reports to
+    // the creator rather than tearing the player down.
+    if (this.console && this.options.onRuntimeError) {
+      const error = this.console.readError();
+      if (error && error.seq > this.lastErrorSeq) {
+        this.lastErrorSeq = error.seq;
+        if (error.message) this.options.onRuntimeError(error.message);
+      }
+    }
 
     this.pollEvents();
 

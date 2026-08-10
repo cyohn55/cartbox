@@ -79,6 +79,13 @@ export interface PlayerOptions {
   /** Called for each platform event a cart emits via the cartbox SDK. */
   onEvent?: (event: MailboxEvent) => void;
   /**
+   * Called with the message when the cart's Lua raises a runtime error mid-frame.
+   * The core keeps running (it aborts only that frame's TIC), so this is a report
+   * for the creator (e.g. the playtest HUD), not a fatal `onError`. Fires once per
+   * new error; no-op on engines built before runtime-error capture.
+   */
+  onRuntimeError?: (message: string) => void;
+  /**
    * Relight the cart's frames with dynamic point lights. When set, the player
    * renders through a WebGL lighting layer (falling back to plain 2D if WebGL is
    * unavailable). See {@link LightingOptions}.

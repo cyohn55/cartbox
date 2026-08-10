@@ -150,6 +150,12 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
         doc: "Stand billboard `index` (a 2D character declared in the World tab) at world position (x,z grid, y height); scale 0 hides. Occludes correctly against the 3D terrain.",
         snippet: "cartbox.billboard(0, px, 0, pz)",
       },
+      {
+        name: "cartbox.clip",
+        signature: "cartbox.clip(name, tick) -> id, w, h",
+        doc: "Current frame of an Anim-tab sprite clip at `tick` (your frame counter): returns the sprite id + size in tiles. Draw it with spr(id, x, y, key, 1, flip, 0, w, h).",
+        snippet: 'local id, w, h = cartbox.clip("walk", t)',
+      },
     ],
   },
   {

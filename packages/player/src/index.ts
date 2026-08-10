@@ -205,6 +205,9 @@ export type {
 // post-FX values, and foreground set-dressing — no cart code needed.
 export {
   AnimatedForegroundSurface,
+  animClipsSdkLua,
+  buildClipTable,
+  clipFrameIndex,
   parseAnim,
   evaluate,
   sampleClipFrame,
@@ -230,6 +233,7 @@ export type {
   ResolvedPlacement,
   ClipSample,
   GeneratedTrack,
+  ClipTableEntry,
 } from "./anim/index.js";
 
 // Runtime particles (optional): a cart declares a weather system (rain/snow/

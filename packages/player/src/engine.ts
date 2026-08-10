@@ -37,6 +37,10 @@ interface EmscriptenModule {
   _cbx_emissive_ptr(handle: number): number;
   _cbx_set_material_capture(handle: number, enabled: number): void;
   _cbx_delete(handle: number): void;
+  // Runtime-error capture (engines built with the cbx_error hook). Optional so an
+  // older engine binary without them still type-checks and degrades gracefully.
+  _cbx_error_seq?(): number;
+  _cbx_last_error?(): number;
 }
 
 /** Signature of the Emscripten factory exported by the engine glue script. */
@@ -68,8 +72,24 @@ export interface ConsoleInstance {
    * tick. Empty until {@link setMaterialCapture} is enabled.
    */
   readEmissive(): Uint8Array;
+  /**
+   * The last Lua runtime error the core reported, with a monotonic `seq` so a
+   * caller can tell a fresh error from a repeat (baseline `seq` after load, then
+   * treat any increase as new). `message` is empty until the VM reports one.
+   * Returns null on engines built before the error-capture exports — they simply
+   * surface no runtime errors rather than breaking.
+   */
+  readError(): { seq: number; message: string } | null;
   /** Frees the underlying WASM console. */
   dispose(): void;
+}
+
+/** Read a NUL-terminated UTF-8 C string out of WASM memory at `ptr`. */
+function readCString(heap: Uint8Array, ptr: number): string {
+  if (ptr === 0) return "";
+  let end = ptr;
+  while (end < heap.length && heap[end] !== 0) end += 1;
+  return new TextDecoder().decode(heap.subarray(ptr, end));
 }
 
 /**
@@ -168,6 +188,17 @@ export function createConsole(
       const ptr = module._cbx_emissive_ptr(handle);
       // One byte per pixel (a quarter of the RGBA framebuffer's byte count).
       return module.HEAPU8.subarray(ptr, ptr + frameBytes / 4);
+    },
+
+    readError(): { seq: number; message: string } | null {
+      // Feature-detect: engines built before the error-capture exports lack these,
+      // so an older binary simply reports no runtime errors.
+      if (typeof module._cbx_error_seq !== "function" || typeof module._cbx_last_error !== "function") {
+        return null;
+      }
+      const seq = module._cbx_error_seq();
+      const message = readCString(module.HEAPU8, module._cbx_last_error());
+      return { seq, message };
     },
 
     dispose(): void {

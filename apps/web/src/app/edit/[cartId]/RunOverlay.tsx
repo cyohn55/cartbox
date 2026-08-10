@@ -42,6 +42,9 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [running, setRunning] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // The most recent Lua runtime error the cart raised. Unlike errorMessage (a
+  // fatal load failure) the cart keeps running, so this is a dismissible report.
+  const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [fps, setFps] = useState<number | null>(null);
   // Frames the cart has presented since the last FPS sample. A ref, not state, so
   // the 60Hz onFrame handler never triggers a React render — the interval below
@@ -64,6 +67,8 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;
+    // A fresh run clears any error from the previous cart bytes.
+    setRuntimeError(null);
 
     // saveTic() returns an exact-length buffer, so its ArrayBuffer is the cart
     // bytes verbatim. The cast sidesteps the DOM lib's SharedArrayBuffer union.
@@ -104,6 +109,9 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
       onFrame: () => {
         frameCountRef.current += 1;
       },
+      // A Lua runtime error mid-frame: the cart keeps running, so show it as a
+      // dismissible banner rather than tearing the playtest down.
+      onRuntimeError: (message) => setRuntimeError(message),
     });
     handleRef.current = handle;
 
@@ -184,6 +192,20 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
             {errorMessage
               ? `Failed to load: ${errorMessage}`
               : "This cartridge failed to run. A code error shows on the cart screen above."}
+          </p>
+        )}
+
+        {runtimeError && status !== "error" && (
+          <p className={styles.runError} role="alert">
+            Lua error: {runtimeError}{" "}
+            <button
+              type="button"
+              className={styles.rendererToggle}
+              onClick={() => setRuntimeError(null)}
+              style={{ marginLeft: 8 }}
+            >
+              Dismiss
+            </button>
           </p>
         )}
 
