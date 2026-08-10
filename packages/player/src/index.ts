@@ -271,6 +271,8 @@ export {
   parseWorldScene,
   buildTerrainInstances,
   buildBillboardInstance,
+  buildShadowInstance,
+  makeShadowTexture,
   buildWorldCamera,
   worldCenter,
   cellAt,

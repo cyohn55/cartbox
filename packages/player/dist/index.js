@@ -2903,15 +2903,18 @@ cartbox = {
   -- no engine change is needed \u2014 these are thin aliases with the world's naming.
   --
   -- Drive the world camera this frame: yaw/pitch (radians), distance (world units,
-  -- 0 = auto-fit), fov (radians, 0 = default). Same layout as meshcam.
-  worldcam = function(yaw, pitch, dist, fov)
+  -- 0 = auto-fit), fov (radians, 0 = default). Optional tx,ty,tz make the camera
+  -- LOOK AT that point (grid x/z units, height units for y) so it follows the
+  -- player; omit them (or pass 0,0,0) to frame the whole terrain. Same mailbox
+  -- layout as meshcam (target rides at _MCB+4..6).
+  worldcam = function(yaw, pitch, dist, fov, tx, ty, tz)
     pmem(_MCB, 1)
     pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)
     pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)
     pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)
-    pmem(_MCB + 4, 0)
-    pmem(_MCB + 5, 0)
-    pmem(_MCB + 6, 0)
+    pmem(_MCB + 4, math.floor((tx or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(_MCB + 5, math.floor((ty or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(_MCB + 6, math.floor((tz or 0) * 256 + 0.5) & 0xffffffff)
     pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)
   end,
   -- Start a fresh frame's billboard list. Call once before billboard() calls each
@@ -4298,8 +4301,43 @@ function buildBillboardInstance(foot, width, height, camRight, camUp, texture) {
     camRight[0] * camUp[1] - camRight[1] * camUp[0]
   ];
   const b = newPrimitive();
-  pushQuad(b, bl, tl, tr, br, nrm, [0, 1, 0, 0, 1, 0, 1, 1]);
+  pushQuad(b, bl, tl, tr, br, nrm, [0, 0, 0, 1, 1, 1, 1, 0]);
   return { mesh: primitiveToMesh("billboard", b), model: identityMat4(), textures: [texture] };
+}
+function makeShadowTexture(size = 24) {
+  const data = new Uint8ClampedArray(size * size * 4);
+  const c = (size - 1) / 2;
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const dx = (x - c) / c;
+      const dy = (y - c) / c;
+      const d = Math.hypot(dx, dy);
+      const dither = (x + y) % 2 === 0 ? 0 : 0.5;
+      if (d < 1 && 1 - d > dither) {
+        const o = (y * size + x) * 4;
+        data[o] = 16;
+        data[o + 1] = 18;
+        data[o + 2] = 26;
+        data[o + 3] = 255;
+      }
+    }
+  }
+  return { width: size, height: size, data };
+}
+function buildShadowInstance(foot, radius, texture) {
+  const [fx, fy, fz] = foot;
+  const y = fy + 0.02;
+  const b = newPrimitive();
+  pushQuad(
+    b,
+    [fx - radius, y, fz - radius],
+    [fx - radius, y, fz + radius],
+    [fx + radius, y, fz + radius],
+    [fx + radius, y, fz - radius],
+    [0, 1, 0],
+    [0, 0, 0, 1, 1, 1, 1, 0]
+  );
+  return { mesh: primitiveToMesh("shadow", b), model: identityMat4(), textures: [texture] };
 }
 function worldCenter(scene) {
   let maxH = 0;
@@ -4314,7 +4352,9 @@ function worldCenter(scene) {
   return { center: [cx, cy, cz], radius };
 }
 function buildWorldCamera(scene, spec, aspect) {
-  const { center, radius } = worldCenter(scene);
+  const framed = worldCenter(scene);
+  const radius = framed.radius;
+  const center = spec.target ? [spec.target[0] * CELL_WORLD, spec.target[1] * HEIGHT_WORLD, spec.target[2] * CELL_WORLD] : framed.center;
   const fov = spec.fov > 0 ? spec.fov : DEFAULT_FOV;
   const distance = spec.distance > 0 ? spec.distance : radius / Math.sin(fov / 2) + radius;
   const cosPitch = Math.cos(spec.pitch);
@@ -4347,6 +4387,8 @@ var WorldOverlaySurface = class {
     this.billboards = [];
     /** The cart's key light direction (points toward the sun), for terrain shading. */
     this.sunDirection = null;
+    /** Shared soft contact-shadow texture, drawn under characters and props. */
+    this.shadowTexture = makeShadowTexture();
     this.output = new Uint8ClampedArray(width * height * 4);
     this.presented = new Uint8Array(this.output.buffer);
     this.depth = new Float32Array(width * height);
@@ -4385,10 +4427,12 @@ var WorldOverlaySurface = class {
     this.output.set(rgba);
     const spec = this.cameraSpec();
     const camera = buildWorldCamera(this.scene, spec, this.width / this.height);
+    const shadowInstances = [];
     const propInstances = [];
     for (let i = 0; i < this.scene.props.length; i += 1) {
       const prop = this.scene.props[i];
       const foot = [prop.x * CELL_WORLD, prop.y * HEIGHT_WORLD, prop.z * CELL_WORLD];
+      shadowInstances.push(buildShadowInstance(foot, prop.width * 0.42, this.shadowTexture));
       propInstances.push(
         buildBillboardInstance(foot, prop.width, prop.height, camera.right, camera.up, this.propTextures[i] ?? null)
       );
@@ -4403,12 +4447,13 @@ var WorldOverlaySurface = class {
         pose.y * HEIGHT_WORLD,
         pose.z * CELL_WORLD
       ];
+      shadowInstances.push(buildShadowInstance(foot, slot.width * pose.scale * 0.42, this.shadowTexture));
       billboardInstances.push(
         buildBillboardInstance(foot, slot.width * pose.scale, slot.height * pose.scale, camera.right, camera.up, texture)
       );
     }
     const lit = this.sunDirection !== null;
-    renderMeshScene2([...this.terrain, ...propInstances, ...billboardInstances], {
+    renderMeshScene2([...this.terrain, ...shadowInstances, ...propInstances, ...billboardInstances], {
       width: this.width,
       height: this.height,
       out: this.output,
@@ -4427,11 +4472,14 @@ var WorldOverlaySurface = class {
     if (!cart) return base;
     const cartDistance = cart.distance ?? 0;
     const cartFov = cart.fov ?? 0;
+    const t = cart.target;
+    const hasTarget = Boolean(t && (t[0] !== 0 || t[1] !== 0 || t[2] !== 0));
     return {
       yaw: cart.yaw,
       pitch: cart.pitch,
       distance: cartDistance > 0 ? cartDistance : base.distance,
-      fov: cartFov > 0 ? cartFov : base.fov
+      fov: cartFov > 0 ? cartFov : base.fov,
+      target: hasTarget ? t : null
     };
   }
   destroy() {
@@ -5216,6 +5264,7 @@ export {
   buildBillboardInstance,
   buildClipTable,
   buildOrbitCamera,
+  buildShadowInstance,
   buildTerrainInstances,
   buildWorldCamera,
   cameraAt,
@@ -5252,6 +5301,7 @@ export {
   injectSdk,
   interpolateNormal,
   loadEngineModule,
+  makeShadowTexture,
   mount,
   nearestDirection,
   normalVector,

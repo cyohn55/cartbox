@@ -87,6 +87,10 @@ export interface WorldCameraSpec {
   readonly distance: number;
   /** Vertical field of view, radians; 0 → default. */
   readonly fov: number;
+  /** World-space point (grid x/z units, height units for y) the camera looks at.
+   *  Null → frame the whole terrain (its centre). Non-null makes the camera follow
+   *  that point — e.g. the player's position — so it tracks the hero as he moves. */
+  readonly target?: readonly [number, number, number] | null;
 }
 
 /** One world cell spans a unit square in XZ; one height unit raises it this much. */
@@ -350,9 +354,65 @@ export function buildBillboardInstance(
     camRight[0] * camUp[1] - camRight[1] * camUp[0],
   ];
   const b = newPrimitive();
-  // V origin is top-left (the rasteriser flips V), so top corners are v=0.
-  pushQuad(b, bl, tl, tr, br, nrm, [0, 1, 0, 0, 1, 0, 1, 1]);
+  // The rasteriser samples with `ty = (1 - v) * h`, so the sprite's TOP row (head)
+  // needs v = 1 and the bottom (feet) v = 0 — otherwise the billboard is flipped
+  // vertically (characters render upside-down). bl,tl,tr,br → (0,0)(0,1)(1,1)(1,0).
+  pushQuad(b, bl, tl, tr, br, nrm, [0, 0, 0, 1, 1, 1, 1, 0]);
   return { mesh: primitiveToMesh("billboard", b), model: identityMat4(), textures: [texture] };
+}
+
+// --- Contact shadows ---------------------------------------------------------
+
+/**
+ * A soft, round shadow texture. The software rasteriser is opaque-only (it skips
+ * transparent texels and never blends), so translucency is faked with a 2×2 dither
+ * whose density falls off with radius: a solid dark centre, a stippled ring, then
+ * nothing — which reads as a soft contact shadow on the ground.
+ */
+export function makeShadowTexture(size = 24): DecodedTexture {
+  const data = new Uint8ClampedArray(size * size * 4);
+  const c = (size - 1) / 2;
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const dx = (x - c) / c;
+      const dy = (y - c) / c;
+      const d = Math.hypot(dx, dy);
+      const dither = (x + y) % 2 === 0 ? 0 : 0.5; // 2×2 checker
+      if (d < 1 && 1 - d > dither) {
+        const o = (y * size + x) * 4;
+        data[o] = 16;
+        data[o + 1] = 18;
+        data[o + 2] = 26;
+        data[o + 3] = 255;
+      }
+    }
+  }
+  return { width: size, height: size, data };
+}
+
+/**
+ * A flat, ground-hugging shadow quad centred under `foot` (world units), lifted a
+ * hair to avoid z-fighting the terrain top. Foreshortening under the camera turns
+ * the square into the expected shadow ellipse.
+ */
+export function buildShadowInstance(
+  foot: readonly [number, number, number],
+  radius: number,
+  texture: DecodedTexture | null,
+): MeshSceneInstance {
+  const [fx, fy, fz] = foot;
+  const y = fy + 0.02;
+  const b = newPrimitive();
+  pushQuad(
+    b,
+    [fx - radius, y, fz - radius],
+    [fx - radius, y, fz + radius],
+    [fx + radius, y, fz + radius],
+    [fx + radius, y, fz - radius],
+    [0, 1, 0],
+    [0, 0, 0, 1, 1, 1, 1, 0],
+  );
+  return { mesh: primitiveToMesh("shadow", b), model: identityMat4(), textures: [texture] };
 }
 
 // --- Camera ------------------------------------------------------------------
@@ -387,7 +447,14 @@ export function worldCenter(scene: WorldScene): { center: [number, number, numbe
  * billboard needs to face the viewer.
  */
 export function buildWorldCamera(scene: WorldScene, spec: WorldCameraSpec, aspect: number): WorldCamera {
-  const { center, radius } = worldCenter(scene);
+  const framed = worldCenter(scene);
+  const radius = framed.radius;
+  // Look at the cart's target (the player) when given, so the camera follows it;
+  // otherwise frame the whole terrain's centre. The target is in the same units as
+  // billboards (grid x/z, height units for y), converted to world space here.
+  const center: [number, number, number] = spec.target
+    ? [spec.target[0] * CELL_WORLD, spec.target[1] * HEIGHT_WORLD, spec.target[2] * CELL_WORLD]
+    : framed.center;
   const fov = spec.fov > 0 ? spec.fov : DEFAULT_FOV;
   const distance = spec.distance > 0 ? spec.distance : radius / Math.sin(fov / 2) + radius;
   const cosPitch = Math.cos(spec.pitch);

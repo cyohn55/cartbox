@@ -14,8 +14,11 @@ import {
   parseWorldScene,
   buildTerrainInstances,
   buildBillboardInstance,
+  buildShadowInstance,
+  makeShadowTexture,
   buildWorldCamera,
   cellAt,
+  worldCenter,
   CELL_WORLD,
   HEIGHT_WORLD,
   type WorldScene,
@@ -126,6 +129,62 @@ describe("buildBillboardInstance", () => {
     expect(Math.max(...xs)).toBeCloseTo(6, 5);
     expect(Math.min(...ys)).toBeCloseTo(0, 5);
     expect(Math.max(...ys)).toBeCloseTo(3, 5);
+  });
+
+  it("maps the sprite upright: top vertices sample the top of the texture (v=1)", () => {
+    // The rasteriser samples ty = (1 - v) * h, so the top of the billboard (higher
+    // y) must carry v = 1 to show the sprite's head, not its feet (upside-down bug).
+    const instance = buildBillboardInstance([0, 0, 0], 2, 4, [1, 0, 0], [0, 1, 0], solidTexture(0, 0, 0));
+    const prim = instance.mesh.primitives[0]!;
+    const ys = prim.positions;
+    const vs = prim.uvs!;
+    for (let i = 0; i < 4; i += 1) {
+      const y = ys[i * 3 + 1]!;
+      const v = vs[i * 2 + 1]!;
+      // Bottom vertices (y≈0) → v=0; top vertices (y≈4) → v=1.
+      expect(v).toBeCloseTo(y > 2 ? 1 : 0, 5);
+    }
+  });
+});
+
+describe("buildShadowInstance + makeShadowTexture", () => {
+  it("lays a flat ground quad centred under the feet", () => {
+    const inst = buildShadowInstance([3, 1, 4], 0.5, makeShadowTexture());
+    const p = inst.mesh.primitives[0]!.positions;
+    const ys = [p[1], p[4], p[7], p[10]] as number[];
+    // Horizontal quad, lifted a hair above the foot height (1) to avoid z-fighting.
+    for (const y of ys) expect(y).toBeCloseTo(1.02, 5);
+    const xs = [p[0], p[3], p[6], p[9]] as number[];
+    expect(Math.min(...xs)).toBeCloseTo(2.5, 5);
+    expect(Math.max(...xs)).toBeCloseTo(3.5, 5);
+  });
+
+  it("makes an opaque dark centre fading to transparent edges", () => {
+    const t = makeShadowTexture(24);
+    const at = (x: number, y: number, ch: number) => t.data[(y * 24 + x) * 4 + ch]!;
+    expect(at(12, 12, 3)).toBe(255); // centre opaque
+    expect(at(12, 12, 0)).toBeLessThan(40); // and dark
+    expect(at(0, 0, 3)).toBe(0); // corners transparent
+  });
+});
+
+describe("buildWorldCamera follow target", () => {
+  it("frames the terrain centre with no target, and the target when given", () => {
+    const scene = makeScene({ cols: 8, rows: 8 });
+    const { center } = worldCenter(scene);
+    const noTarget = buildWorldCamera(scene, { yaw: 0, pitch: 0.5, distance: 10, fov: 0 }, 1);
+    // With a follow target the look-at centre moves; the view matrix's translation
+    // differs from the no-target framing. Assert the camera actually recentres.
+    const withTarget = buildWorldCamera(
+      scene,
+      { yaw: 0, pitch: 0.5, distance: 10, fov: 0, target: [1, 2, 1] },
+      1,
+    );
+    // Different target → different view matrix.
+    expect(Array.from(withTarget.view)).not.toEqual(Array.from(noTarget.view));
+    // The target is in grid/height units; its world centre is target * cell/height.
+    // Sanity: the framed no-target centre is the terrain middle (> the small target).
+    expect(center[0]).toBeGreaterThan(1 * CELL_WORLD);
   });
 });
 

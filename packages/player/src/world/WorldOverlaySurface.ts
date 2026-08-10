@@ -24,9 +24,11 @@ import type { DisplaySurface } from "../display.js";
 import type { MailboxMeshCamera, MailboxMeshPose } from "../mailbox.js";
 import {
   buildBillboardInstance,
+  buildShadowInstance,
   buildTerrainInstances,
   buildWorldCamera,
   defaultCameraSpec,
+  makeShadowTexture,
   CELL_WORLD,
   HEIGHT_WORLD,
   type TextureLookup,
@@ -59,6 +61,8 @@ export class WorldOverlaySurface implements DisplaySurface {
   private readonly billboardTextures: (DecodedTexture | null)[];
   /** Per-prop texture, index-aligned to `scene.props`. */
   private readonly propTextures: (DecodedTexture | null)[];
+  /** Shared soft contact-shadow texture, drawn under characters and props. */
+  private readonly shadowTexture: DecodedTexture = makeShadowTexture();
 
   constructor(
     private readonly inner: DisplaySurface,
@@ -113,12 +117,18 @@ export class WorldOverlaySurface implements DisplaySurface {
     const spec = this.cameraSpec();
     const camera = buildWorldCamera(this.scene, spec, this.width / this.height);
 
+    // A contact shadow on the ground under each character and prop, so they feel
+    // planted in the scene rather than floating. Drawn before the sprites, all in
+    // the one shared-depth pass below.
+    const shadowInstances: MeshSceneInstance[] = [];
+
     // Static scenery props: camera-facing billboards at fixed positions, rebuilt
     // each frame from the current camera basis so they always face the viewer.
     const propInstances: MeshSceneInstance[] = [];
     for (let i = 0; i < this.scene.props.length; i += 1) {
       const prop = this.scene.props[i]!;
       const foot: [number, number, number] = [prop.x * CELL_WORLD, prop.y * HEIGHT_WORLD, prop.z * CELL_WORLD];
+      shadowInstances.push(buildShadowInstance(foot, prop.width * 0.42, this.shadowTexture));
       propInstances.push(
         buildBillboardInstance(foot, prop.width, prop.height, camera.right, camera.up, this.propTextures[i] ?? null),
       );
@@ -135,17 +145,18 @@ export class WorldOverlaySurface implements DisplaySurface {
         pose.y * HEIGHT_WORLD,
         pose.z * CELL_WORLD,
       ];
+      shadowInstances.push(buildShadowInstance(foot, slot.width * pose.scale * 0.42, this.shadowTexture));
       billboardInstances.push(
         buildBillboardInstance(foot, slot.width * pose.scale, slot.height * pose.scale, camera.right, camera.up, texture),
       );
     }
 
-    // One shared depth buffer over terrain + billboards → correct HD-2D occlusion.
-    // background null composites the world over the cart's 2D frame (sky / HUD).
-    // A cart-driven sun gives the terrain directional light with more contrast so
-    // raised blocks read as solid 3D; with no sun we keep a soft top-down key.
+    // One shared depth buffer over terrain + shadows + billboards → correct HD-2D
+    // occlusion. background null composites the world over the cart's 2D frame
+    // (sky / HUD). A cart-driven sun gives the terrain directional light with more
+    // contrast so raised blocks read as solid 3D; with no sun a soft top-down key.
     const lit = this.sunDirection !== null;
-    renderMeshScene([...this.terrain, ...propInstances, ...billboardInstances], {
+    renderMeshScene([...this.terrain, ...shadowInstances, ...propInstances, ...billboardInstances], {
       width: this.width,
       height: this.height,
       out: this.output,
@@ -167,11 +178,17 @@ export class WorldOverlaySurface implements DisplaySurface {
     // authored/default framing, matching the mesh camera's "0 = default" contract.
     const cartDistance = cart.distance ?? 0;
     const cartFov = cart.fov ?? 0;
+    // A non-zero target (e.g. the player's position) makes the camera follow it;
+    // all-zero means the cart set none, so we frame the whole terrain. (A cart
+    // wanting the world origin can nudge the target by a hair.)
+    const t = cart.target;
+    const hasTarget = Boolean(t && (t[0] !== 0 || t[1] !== 0 || t[2] !== 0));
     return {
       yaw: cart.yaw,
       pitch: cart.pitch,
       distance: cartDistance > 0 ? cartDistance : base.distance,
       fov: cartFov > 0 ? cartFov : base.fov,
+      target: hasTarget ? t : null,
     };
   }
 

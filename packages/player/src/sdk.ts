@@ -128,15 +128,18 @@ cartbox = {
   -- no engine change is needed — these are thin aliases with the world's naming.
   --
   -- Drive the world camera this frame: yaw/pitch (radians), distance (world units,
-  -- 0 = auto-fit), fov (radians, 0 = default). Same layout as meshcam.
-  worldcam = function(yaw, pitch, dist, fov)
+  -- 0 = auto-fit), fov (radians, 0 = default). Optional tx,ty,tz make the camera
+  -- LOOK AT that point (grid x/z units, height units for y) so it follows the
+  -- player; omit them (or pass 0,0,0) to frame the whole terrain. Same mailbox
+  -- layout as meshcam (target rides at _MCB+4..6).
+  worldcam = function(yaw, pitch, dist, fov, tx, ty, tz)
     pmem(_MCB, 1)
     pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)
     pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)
     pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)
-    pmem(_MCB + 4, 0)
-    pmem(_MCB + 5, 0)
-    pmem(_MCB + 6, 0)
+    pmem(_MCB + 4, math.floor((tx or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(_MCB + 5, math.floor((ty or 0) * 256 + 0.5) & 0xffffffff)
+    pmem(_MCB + 6, math.floor((tz or 0) * 256 + 0.5) & 0xffffffff)
     pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)
   end,
   -- Start a fresh frame's billboard list. Call once before billboard() calls each
