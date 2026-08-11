@@ -32,6 +32,7 @@ const fixture = (rel) => new URL(`./fixtures/${rel}`, import.meta.url);
 const bytes = readFileSync(fixture("hd2d-octopath.tic"));
 const WORLD_SIDECAR = readFileSync(fixture("hd2d-octopath.world.json"), "utf8").trim();
 const FX = JSON.parse(readFileSync(fixture("hd2d-octopath.fx.json"), "utf8"));
+const PARTICLES = JSON.parse(readFileSync(fixture("hd2d-octopath.particles.json"), "utf8"));
 
 // Cart binaries belong in Supabase Storage (publicly served); strip any R2 vars
 // so putCartObject never routes the .tic to the object store, whose prod public
@@ -74,6 +75,7 @@ async function main() {
     r2_key: storedKey,
     world: WORLD_SIDECAR,
     fx: FX,
+    particles: PARTICLES,
     published: true,
   });
   if (error) throw new Error(`seeding carts failed: ${error.message}`);

@@ -1,0 +1,32 @@
+{
+  "emitters": [
+    {
+      "kind": "embers",
+      "count": 44,
+      "color": [
+        255,
+        206,
+        120
+      ],
+      "opacity": 0.5,
+      "size": 1,
+      "speed": 0.5,
+      "wind": 0.35,
+      "seed": 7
+    },
+    {
+      "kind": "embers",
+      "count": 22,
+      "color": [
+        255,
+        232,
+        176
+      ],
+      "opacity": 0.32,
+      "size": 2,
+      "speed": 0.32,
+      "wind": -0.25,
+      "seed": 19
+    }
+  ]
+}

@@ -205,32 +205,40 @@ const BAKED = [
   ["village-fence", PROP_BLOCKS.fence],
 ];
 
-// --- World layout (8×8), composed from the library blocks ---------------------
-// Terrain map picks a block per cell; props are billboards placed at cell centres.
+// --- World layout (14×12 town), composed from the library blocks --------------
+// Terrain is authored from named FEATURES (a pond with a flower fringe, a path
+// network, a raised knoll) rather than a hand-typed char grid — so it can't drift
+// out of alignment — and props are billboards placed at authored cell centres,
+// deliberately layered front-to-back (rows increase toward the camera): dense
+// trees frame the far edge and the near foreground, buildings sit mid, the plaza
+// opens in the middle. That layered depth + the ¾ camera is the HD-2D read.
 
-const GRID = 8;
-const TILE_CHAR = { g: TERRAIN_BLOCKS.grass, d: TERRAIN_BLOCKS.dirt, w: TERRAIN_BLOCKS.water, f: TERRAIN_BLOCKS.flowers };
-const TERRAIN_ROWS = [
-  "ggggfggg",
-  "gggdgggf",
-  "wwgdgggg",
-  "wwgddddg",
-  "ggggggdg",
-  "gfgggddg",
-  "ggggggdg",
-  "gfggggdg",
-];
-// Heights (village knoll top-right where the cottage sits).
-const HEIGHT_ROWS = [
-  "00000000",
-  "00000011",
-  "00000011",
-  "00000000",
-  "00000000",
-  "00000000",
-  "00000000",
-  "00000000",
-];
+const GRID_W = 14;
+const GRID_H = 12;
+
+/** Pond footprint (back-left) and the flower meadow that fringes it. */
+const POND = { x0: 2, x1: 4, z0: 1, z1: 3 };
+const POND_FRINGE = { x0: 1, x1: 5, z0: 0, z1: 4 };
+/** The raised knoll (back-right) the cottages stand on. */
+const KNOLL = { x0: 10, x1: 13, z0: 0, z1: 2 };
+
+const inBox = (i, j, b) => i >= b.x0 && i <= b.x1 && j >= b.z0 && j <= b.z1;
+
+/** The terrain block for a cell, chosen from the town's features. */
+function terrainAt(i, j) {
+  if (inBox(i, j, POND)) return TERRAIN_BLOCKS.water;
+  // Path: a vertical spine at x=7,8 and a horizontal branch across the plaza row.
+  if (i === 7 || i === 8) return TERRAIN_BLOCKS.dirt;
+  if ((j === 5 || j === 6) && i >= 2 && i <= 11) return TERRAIN_BLOCKS.dirt;
+  // Flower meadow fringing the pond (the box minus the water itself).
+  if (inBox(i, j, POND_FRINGE)) return TERRAIN_BLOCKS.flowers;
+  return TERRAIN_BLOCKS.grass;
+}
+
+/** Terrain height: the back-right knoll rises one step; everywhere else is flat. */
+function heightAt(i, j) {
+  return inBox(i, j, KNOLL) ? 1 : 0;
+}
 
 /** Prop proportions (world units) so each billboard matches its sprite's shape. */
 const PROP_SIZE = {
@@ -240,33 +248,52 @@ const PROP_SIZE = {
   [PROP_BLOCKS.lantern]: [0.8, 1.8], [PROP_BLOCKS.fence]: [1.4, 1.1],
 };
 
-/** Authored scenery placements: [blockId, col, row]. */
+/** Authored scenery placements: [blockId, col, row]. Layered by row (depth):
+ *  0–1 far background, 10–11 near foreground framing, buildings on the knoll. */
 const PLACEMENTS = [
-  [PROP_BLOCKS.house, 6, 1],
-  [PROP_BLOCKS.well, 4, 5],
+  // cottages on the knoll
+  [PROP_BLOCKS.house, 11, 1],
+  [PROP_BLOCKS.house, 13, 2],
+  // the well by the plaza
+  [PROP_BLOCKS.well, 9, 5],
+  // trees — a framing ring: far edge + tall near-foreground pair
   [PROP_BLOCKS.pine, 0, 0],
-  [PROP_BLOCKS.pine, 7, 6],
-  [PROP_BLOCKS.oak, 1, 6],
-  [PROP_BLOCKS.oak, 6, 4],
-  [PROP_BLOCKS.lantern, 3, 1],
-  [PROP_BLOCKS.lantern, 5, 3],
-  [PROP_BLOCKS.lantern, 6, 6],
-  [PROP_BLOCKS.rock, 2, 4],
-  [PROP_BLOCKS.rock, 5, 7],
-  [PROP_BLOCKS.bush, 1, 2],
-  [PROP_BLOCKS.bush, 7, 2],
-  [PROP_BLOCKS.fence, 3, 7],
+  [PROP_BLOCKS.pine, 13, 0],
+  [PROP_BLOCKS.pine, 1, 11],
+  [PROP_BLOCKS.pine, 12, 11],
+  [PROP_BLOCKS.pine, 3, 6],
+  [PROP_BLOCKS.pine, 11, 7],
+  [PROP_BLOCKS.oak, 12, 4],
+  [PROP_BLOCKS.oak, 2, 8],
+  [PROP_BLOCKS.oak, 10, 9],
+  [PROP_BLOCKS.oak, 6, 10],
+  // rocks + bushes for ground texture
+  [PROP_BLOCKS.rock, 5, 2],
+  [PROP_BLOCKS.rock, 11, 9],
+  [PROP_BLOCKS.rock, 1, 6],
+  [PROP_BLOCKS.bush, 1, 4],
+  [PROP_BLOCKS.bush, 4, 8],
+  [PROP_BLOCKS.bush, 10, 3],
+  [PROP_BLOCKS.bush, 12, 7],
+  [PROP_BLOCKS.bush, 7, 1],
+  // lanterns lining the path
+  [PROP_BLOCKS.lantern, 6, 3],
+  [PROP_BLOCKS.lantern, 9, 3],
+  [PROP_BLOCKS.lantern, 6, 8],
+  [PROP_BLOCKS.lantern, 9, 8],
+  [PROP_BLOCKS.lantern, 6, 10],
+  // a garden fence line down the west edge
+  [PROP_BLOCKS.fence, 0, 7],
+  [PROP_BLOCKS.fence, 0, 8],
+  [PROP_BLOCKS.fence, 13, 6],
+  [PROP_BLOCKS.fence, 13, 7],
 ];
-
-function heightAt(col, row) {
-  return Number(HEIGHT_ROWS[row][col]) || 0;
-}
 
 function buildWorldSidecar() {
   const cells = [];
-  for (let j = 0; j < GRID; j += 1) {
-    for (let i = 0; i < GRID; i += 1) {
-      cells.push({ h: heightAt(i, j), sprite: TILE_CHAR[TERRAIN_ROWS[j][i]] });
+  for (let j = 0; j < GRID_H; j += 1) {
+    for (let i = 0; i < GRID_W; i += 1) {
+      cells.push({ h: heightAt(i, j), sprite: terrainAt(i, j) });
     }
   }
   const props = PLACEMENTS.map(([sprite, col, row]) => {
@@ -279,7 +306,7 @@ function buildWorldSidecar() {
     { sprite: HERO_BLOCKS[2], width: 1.5, height: 2.3 },
     { sprite: HERO_BLOCKS[3], width: 1.4, height: 2.2 },
   ];
-  return { cols: GRID, rows: GRID, tilesPerSide: 4, cells, props, billboards, camera: { yaw: 0.55, pitch: 0.5, distance: 0, fov: 0 } };
+  return { cols: GRID_W, rows: GRID_H, tilesPerSide: 4, cells, props, billboards, camera: { yaw: 0.55, pitch: 0.52, distance: 0, fov: 0 } };
 }
 
 // --- Cart Lua -----------------------------------------------------------------
@@ -295,8 +322,8 @@ function buildCartCode() {
 -- three-frame cycle. Golden-hour sun + the post-FX stack give the HD-2D finish.
 -- Art: Cartbox Village Pack (CC0-1.0).
 
-local W,H=8,8
-local px,pz=4.0,6.0
+local W,H=14,12
+local px,pz=7.5,9.0
 local t=0
 
 function TIC()
@@ -317,7 +344,7 @@ function TIC()
  if cartbox then
   cartbox.clearlights()
   cartbox.sun(0.45, 0.8, 0.5, 255, 208, 150, 1.0)
-  cartbox.worldcam(0.62 + math.sin(t/520) * 0.05, 0.44, 10, 0, px, 1.2, pz)
+  cartbox.worldcam(0.62 + math.sin(t/520) * 0.05, 0.5, 11, 0, px, 1.2, pz)
   cartbox.clearbillboards()
   local frame = 0
   if moving then frame = 1 + (math.floor(t / 8) % 2) end
@@ -325,8 +352,8 @@ function TIC()
   for s = 0, 2 do
    if s == frame then cartbox.billboard(s, px, bob, pz, 1.35) else cartbox.billboard(s, px, 0, pz, 0) end
   end
-  -- A villager standing on the raised knoll by the cottage.
-  cartbox.billboard(3, 6.5, 1, 1.6, 1.1)
+  -- A villager standing on the raised knoll by the cottages.
+  cartbox.billboard(3, 12.5, 1, 1.5, 1.1)
  end
 
  print("OCTOPATH . CARTBOX HD-2D", 6, 6, 15)
@@ -349,6 +376,56 @@ function buildCredits() {
     return { id, name, source: "Cartbox Village Pack", license: "CC0-1.0" };
   });
   return { pack: "Cartbox Village Pack", license: "CC0-1.0", assets: credits };
+}
+
+// --- Post-FX + atmosphere sidecars --------------------------------------------
+// The HD-2D "look": a strong tilt-shift depth-of-field (the diorama/miniature
+// read), warm bloom on the lanterns and lit windows, a warm-highlight/cool-shadow
+// split-tone with rich grade, gentle fog for aerial perspective, golden god-rays,
+// a vignette to focus the eye, and drifting warm light motes for atmosphere.
+
+function buildFx() {
+  return {
+    colors: {
+      "fog.tint": "#aeb9c8",
+      "splittone.shadows": "#33507f",
+      "splittone.highlights": "#ffd9a0",
+    },
+    values: {
+      "godrays.x": 0.5, "godrays.y": 0.18, "godrays.decay": 0.95,
+      "godrays.density": 0.5, "godrays.strength": 0.35,
+      "fog.density": 0.22, "fog.horizon": 0.46,
+      "bloom.radius": 0.72, "bloom.strength": 0.9, "bloom.threshold": 0.68,
+      "grade.contrast": 1.16, "grade.brightness": 1.05, "grade.saturation": 1.18,
+      "tiltshift.focus": 0.54, "tiltshift.range": 0.2, "tiltshift.strength": 0.8,
+      "tonemap.exposure": 1.16,
+      "splittone.balance": 0.5, "splittone.strength": 0.6,
+      "vignette.strength": 0.34,
+      // Inert defaults for the effects left disabled.
+      "grain.size": 1, "grain.amount": 0.08, "dither.scale": 1, "dither.amount": 0.5,
+      "chroma.amount": 1, "crt.curvature": 0.08, "crt.scanlines": 0.35,
+      "halftone.angle": 45, "halftone.scale": 5, "halftone.strength": 0.6,
+      "streaks.length": 0.4, "streaks.strength": 0.6, "posterize.levels": 4,
+      "reflection.wobble": 0.25, "reflection.falloff": 0.4, "reflection.horizon": 0.7,
+      "reflection.strength": 0.5, "kaleidoscope.angle": 0, "kaleidoscope.segments": 6,
+    },
+    enabled: {
+      tiltshift: true, bloom: true, splittone: true, grade: true, tonemap: true,
+      vignette: true, fog: true, godrays: true,
+      crt: false, grain: false, chroma: false, dither: false, streaks: false,
+      halftone: false, posterize: false, reflection: false, kaleidoscope: false,
+    },
+  };
+}
+
+function buildParticles() {
+  // Two embers layers = warm light motes drifting up through the golden air.
+  return {
+    emitters: [
+      { kind: "embers", count: 44, color: [255, 206, 120], opacity: 0.5, size: 1, speed: 0.5, wind: 0.35, seed: 7 },
+      { kind: "embers", count: 22, color: [255, 232, 176], opacity: 0.32, size: 2, speed: 0.32, wind: -0.25, seed: 19 },
+    ],
+  };
 }
 
 // --- Assemble -----------------------------------------------------------------
@@ -389,13 +466,17 @@ function main() {
   }
   const ticBytes = Buffer.concat(out);
 
+  const world = buildWorldSidecar();
   writeFileSync(join(fixtures, "hd2d-octopath.tic"), ticBytes);
-  writeFileSync(join(fixtures, "hd2d-octopath.world.json"), `${JSON.stringify(buildWorldSidecar())}\n`);
+  writeFileSync(join(fixtures, "hd2d-octopath.world.json"), `${JSON.stringify(world)}\n`);
+  writeFileSync(join(fixtures, "hd2d-octopath.fx.json"), `${JSON.stringify(buildFx(), null, 2)}\n`);
+  writeFileSync(join(fixtures, "hd2d-octopath.particles.json"), `${JSON.stringify(buildParticles(), null, 2)}\n`);
   writeFileSync(join(fixtures, "hd2d-octopath.credits.json"), `${JSON.stringify(buildCredits(), null, 2)}\n`);
 
   console.log(
     `Rebuilt hd2d-octopath: .tic ${ticBytes.length} B (was ${original.length}), ` +
-      `${BAKED.length} library blocks baked, ${HERO_BLOCKS.length} billboards re-quantised.`,
+      `${BAKED.length} library blocks baked, ${HERO_BLOCKS.length} billboards re-quantised, ` +
+      `world ${world.cols}×${world.rows} with ${world.props.length} props, fx + particles authored.`,
   );
 }
 
