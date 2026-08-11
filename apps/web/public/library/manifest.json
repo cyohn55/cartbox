@@ -6,7 +6,11 @@
       "name": "Wooden Barrel",
       "kind": "mesh",
       "category": "props",
-      "tags": ["barrel", "container", "wood"],
+      "tags": [
+        "barrel",
+        "container",
+        "wood"
+      ],
       "thumbnailUrl": "/library/thumbs/kenney-barrel.png",
       "payloadUrl": "/library/meshes/kenney-barrel.glb",
       "sizeBytes": 2224,
@@ -22,7 +26,11 @@
       "name": "Crate",
       "kind": "mesh",
       "category": "props",
-      "tags": ["crate", "container", "wood"],
+      "tags": [
+        "crate",
+        "container",
+        "wood"
+      ],
       "thumbnailUrl": "/library/thumbs/kenney-crate.png",
       "payloadUrl": "/library/meshes/kenney-crate.glb",
       "sizeBytes": 2224,
@@ -38,7 +46,12 @@
       "name": "Grass Tile",
       "kind": "tile",
       "category": "tilesets",
-      "tags": ["grass", "nature", "green", "terrain"],
+      "tags": [
+        "grass",
+        "nature",
+        "green",
+        "terrain"
+      ],
       "thumbnailUrl": "/library/thumbs/kenney-grass-tile.png",
       "payloadUrl": "/library/sprites/kenney-grass-tile.png",
       "sizeBytes": 116,
@@ -54,7 +67,11 @@
       "name": "Stepped Pyramid",
       "kind": "voxel",
       "category": "structures",
-      "tags": ["pyramid", "structure", "stone"],
+      "tags": [
+        "pyramid",
+        "structure",
+        "stone"
+      ],
       "thumbnailUrl": "/library/thumbs/voxel-pyramid.png",
       "payloadUrl": "/library/voxels/kenney-pyramid.vox",
       "sizeBytes": 1576,
