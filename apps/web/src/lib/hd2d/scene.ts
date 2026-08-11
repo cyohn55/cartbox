@@ -4,13 +4,13 @@
 // tracks the foot) so walking scrolls the world while the hero stays framed.
 
 import { renderScene, DEFAULT_MODEL_LIGHT, type ModelLight, type Particle } from "@cartbox/editor";
-import { buildWorld, buildAtlas, type Hd2dWorld } from "./world";
+import { loadVillageWorld, type Hd2dWorld } from "./world";
 import { rigToLayers, compositeCharacter, type Camera, type CharacterLayer } from "./character";
 import { buildHeroRig } from "./heroRig";
 import type { CharState } from "./walk";
 
 // Tunables (kept together so the look is easy to iterate).
-export const CELL = 13;          // output px per world unit (zoom)
+export const CELL = 11;          // output px per world unit (zoom)
 export const PITCH = 0.5;        // Octopath-style downward tilt
 export const YAW = 0.32;         // fixed ¾ camera angle
 export const SPRITE_SCALE = 2;   // output px per character texel
@@ -24,17 +24,24 @@ const LIGHT: ModelLight = {
   ambient: 0.34,
 };
 
-// Built once — the street geometry/atlas and the character layers don't change.
-let world: Hd2dWorld | null = null;
+// Built once — the character layers and per-size buffers don't change; the world
+// is loaded from the asset library once and passed into each frame.
 let layers: CharacterLayer[] | null = null;
 let outBuf: Uint8ClampedArray | null = null;
 let depthBuf: Float32Array | null = null;
 let sky: Uint8ClampedArray | null = null;
 let skySize = 0;
 
-export function getWorld(): Hd2dWorld {
-  if (!world) world = buildWorld(buildAtlas());
-  return world;
+let worldPromise: Promise<Hd2dWorld> | null = null;
+
+/**
+ * Load the village world from the asset library, once. Cached so repeated calls
+ * (a remount) reuse the same decoded assets rather than re-fetching. `baseUrl`
+ * is forwarded to the loader ("" = same-origin library).
+ */
+export function getWorld(baseUrl = ""): Promise<Hd2dWorld> {
+  if (!worldPromise) worldPromise = loadVillageWorld(baseUrl);
+  return worldPromise;
 }
 
 // ---- rain (renderScene particles, sorted into the world's depth buffer) ------
@@ -79,9 +86,8 @@ function skyFor(size: number): Uint8ClampedArray {
   return s;
 }
 
-/** Render one frame following `char` (at time `seconds`) into an RGBA buffer. */
-export function renderFrame(size: number, char: CharState, seconds: number): Uint8ClampedArray {
-  if (!world) world = buildWorld(buildAtlas());
+/** Render one frame of `world` following `char` (at time `seconds`) into RGBA. */
+export function renderFrame(world: Hd2dWorld, size: number, char: CharState, seconds: number): Uint8ClampedArray {
   if (!layers) layers = rigToLayers(buildHeroRig());
   if (!outBuf || outBuf.length !== size * size * 4) {
     outBuf = new Uint8ClampedArray(size * size * 4);

@@ -11,9 +11,10 @@
  * live in scene.ts / walk.ts so they stay testable and framework-free.
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { renderFrame, getWorld, YAW } from "@/lib/hd2d/scene";
 import { stepCharacter, type CharState, type WalkKeys } from "@/lib/hd2d/walk";
+import type { Hd2dWorld } from "@/lib/hd2d/world";
 
 /** Native square render size; CSS upscales it with nearest-neighbour for crisp pixels. */
 const RENDER = 340;
@@ -27,6 +28,10 @@ const KEY_BINDINGS: Record<string, keyof WalkKeys> = {
 
 export function Hd2dScene() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  // The world is assembled from library assets fetched over the network, so the
+  // first frame waits on that load; this flag drives the "Loading…" overlay.
+  const [error, setError] = useState<string | null>(null);
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -37,12 +42,9 @@ export function Hd2dScene() {
     if (!ctx) return;
     const image = ctx.createImageData(RENDER, RENDER);
 
-    const world = getWorld();
-    let char: CharState = { pos: [world.start[0], world.start[1], world.start[2]], facing: 1, walkPhase: 0, moving: false };
     // A mutable held-key set; a plain object (not the readonly WalkKeys) so the
     // handlers can flip flags, and it satisfies WalkKeys when passed to stepCharacter.
     const keys: Record<keyof WalkKeys, boolean> = { left: false, right: false, up: false, down: false };
-
     const onKeyDown = (e: KeyboardEvent) => {
       const bound = KEY_BINDINGS[e.code];
       if (bound) { keys[bound] = true; e.preventDefault(); }
@@ -55,23 +57,37 @@ export function Hd2dScene() {
     window.addEventListener("keyup", onKeyUp);
 
     let raf = 0;
-    let last = performance.now();
-    let accumulator = 0;
-    const loop = (now: number) => {
-      raf = requestAnimationFrame(loop);
-      const elapsed = now - last;
-      last = now;
-      accumulator += elapsed;
-      if (accumulator < FRAME_MS) return; // throttle to the target cadence
-      const deltaSeconds = Math.min(0.05, accumulator / 1000);
-      accumulator = 0;
-      char = stepCharacter(char, keys, deltaSeconds, { speed: 8, yaw: YAW, bounds: world.bounds, stride: 10 });
-      image.data.set(renderFrame(RENDER, char, now / 1000));
-      ctx.putImageData(image, 0, 0);
-    };
-    raf = requestAnimationFrame(loop);
+    let cancelled = false;
+
+    getWorld()
+      .then((world: Hd2dWorld) => {
+        if (cancelled) return;
+        setReady(true);
+        let char: CharState = {
+          pos: [world.start[0], world.start[1], world.start[2]], facing: 1, walkPhase: 0, moving: false,
+        };
+        let last = performance.now();
+        let accumulator = 0;
+        const loop = (now: number) => {
+          raf = requestAnimationFrame(loop);
+          const elapsed = now - last;
+          last = now;
+          accumulator += elapsed;
+          if (accumulator < FRAME_MS) return; // throttle to the target cadence
+          const deltaSeconds = Math.min(0.05, accumulator / 1000);
+          accumulator = 0;
+          char = stepCharacter(char, keys, deltaSeconds, { speed: 8, yaw: YAW, bounds: world.bounds, stride: 10 });
+          image.data.set(renderFrame(world, RENDER, char, now / 1000));
+          ctx.putImageData(image, 0, 0);
+        };
+        raf = requestAnimationFrame(loop);
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : "failed to load the world");
+      });
 
     return () => {
+      cancelled = true;
       cancelAnimationFrame(raf);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
@@ -79,17 +95,30 @@ export function Hd2dScene() {
   }, []);
 
   return (
-    <canvas
-      ref={canvasRef}
-      aria-label="HD-2D street — arrow keys or WASD to walk"
-      style={{
-        width: "min(100%, 640px)",
-        aspectRatio: "1 / 1",
-        imageRendering: "pixelated",
-        borderRadius: 8,
-        background: "#06080f",
-        touchAction: "none",
-      }}
-    />
+    <div style={{ position: "relative", width: "min(100%, 640px)", aspectRatio: "1 / 1" }}>
+      <canvas
+        ref={canvasRef}
+        aria-label="HD-2D village — arrow keys or WASD to walk"
+        style={{
+          width: "100%",
+          height: "100%",
+          imageRendering: "pixelated",
+          borderRadius: 8,
+          background: "#06080f",
+          touchAction: "none",
+        }}
+      />
+      {!ready && (
+        <div
+          role="status"
+          style={{
+            position: "absolute", inset: 0, display: "grid", placeItems: "center",
+            color: error ? "#f3a" : "#8ab", font: "600 14px system-ui, sans-serif", textAlign: "center", padding: 16,
+          }}
+        >
+          {error ? `Couldn’t build the world: ${error}` : "Loading village from the asset library…"}
+        </div>
+      )}
+    </div>
   );
 }

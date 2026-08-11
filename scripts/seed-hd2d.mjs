@@ -60,14 +60,15 @@ async function main() {
     title: "Octopath — Cartbox HD-2D",
     slug: "octopath-cartbox-hd-2d",
     description:
-      "A true HD-2D village diorama built entirely in the Cartbox editor: a 3D height-mapped tile " +
-      "world (grass, a stone path, a pond and a raised village) with 2D-sprite trees, glowing " +
-      "lanterns, rocks and a walking hero composited into ONE depth buffer, so raised terrain " +
-      "occludes what's behind it. A golden-hour sun shades the terrain; the post-FX stack — " +
-      "tilt-shift depth-of-field, bloom, split-tone grade, HDR tonemap and vignette — gives the " +
-      "cinematic finish. Authored with the World tab (height/tile/prop brushes) + FX tab; the cart " +
-      "drives cartbox.worldcam and cartbox.billboard. Arrows to explore.",
-    tags: ["hd-2d", "octopath", "diorama", "isometric", "3d-world"],
+      "A true HD-2D village whose world is composed entirely from the in-editor asset library: a " +
+      "3D height-mapped tile terrain (grass, a dirt path, a pond and a raised knoll) skinned with " +
+      "the CC0 Village-Pack tiles, and 2D-sprite scenery — pine & oak trees, a cottage, a well, " +
+      "lamp posts, rocks, bushes and a fence — all dropped in from the library and composited with " +
+      "a walking hero into ONE depth buffer, so raised terrain occludes what's behind it. A " +
+      "golden-hour sun shades the terrain; the post-FX stack (tilt-shift depth-of-field, bloom, " +
+      "split-tone grade, HDR tonemap and vignette) gives the cinematic finish. The cart drives " +
+      "cartbox.worldcam and cartbox.billboard. Arrows to explore. Art: Cartbox Village Pack (CC0-1.0).",
+    tags: ["hd-2d", "octopath", "diorama", "isometric", "3d-world", "asset-library"],
     console_model: "classic",
     price_cents: 0,
     r2_key: storedKey,

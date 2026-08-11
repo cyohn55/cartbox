@@ -81,6 +81,397 @@
         "license": "CC0-1.0",
         "url": "https://kenney.nl/assets"
       }
+    },
+    {
+      "id": "village-grass",
+      "name": "Village Grass",
+      "kind": "tile",
+      "category": "tilesets",
+      "tags": [
+        "grass",
+        "nature",
+        "green",
+        "terrain",
+        "village"
+      ],
+      "thumbnailUrl": "/library/thumbs/village-grass.png",
+      "payloadUrl": "/library/sprites/village-grass.png",
+      "sizeBytes": 222,
+      "provenance": {
+        "source": "Cartbox Village Pack",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://cartbox.app/library/village"
+      }
+    },
+    {
+      "id": "village-flowers",
+      "name": "Flowering Meadow",
+      "kind": "tile",
+      "category": "tilesets",
+      "tags": [
+        "grass",
+        "flowers",
+        "meadow",
+        "terrain",
+        "village"
+      ],
+      "thumbnailUrl": "/library/thumbs/village-flowers.png",
+      "payloadUrl": "/library/sprites/village-flowers.png",
+      "sizeBytes": 248,
+      "provenance": {
+        "source": "Cartbox Village Pack",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://cartbox.app/library/village"
+      }
+    },
+    {
+      "id": "village-dirt-path",
+      "name": "Dirt Path",
+      "kind": "tile",
+      "category": "tilesets",
+      "tags": [
+        "dirt",
+        "path",
+        "road",
+        "terrain",
+        "village"
+      ],
+      "thumbnailUrl": "/library/thumbs/village-dirt-path.png",
+      "payloadUrl": "/library/sprites/village-dirt-path.png",
+      "sizeBytes": 232,
+      "provenance": {
+        "source": "Cartbox Village Pack",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://cartbox.app/library/village"
+      }
+    },
+    {
+      "id": "village-cobble",
+      "name": "Cobblestone",
+      "kind": "tile",
+      "category": "tilesets",
+      "tags": [
+        "stone",
+        "cobble",
+        "path",
+        "terrain",
+        "village"
+      ],
+      "thumbnailUrl": "/library/thumbs/village-cobble.png",
+      "payloadUrl": "/library/sprites/village-cobble.png",
+      "sizeBytes": 167,
+      "provenance": {
+        "source": "Cartbox Village Pack",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://cartbox.app/library/village"
+      }
+    },
+    {
+      "id": "village-water",
+      "name": "Pond Water",
+      "kind": "tile",
+      "category": "tilesets",
+      "tags": [
+        "water",
+        "pond",
+        "blue",
+        "terrain",
+        "village"
+      ],
+      "thumbnailUrl": "/library/thumbs/village-water.png",
+      "payloadUrl": "/library/sprites/village-water.png",
+      "sizeBytes": 165,
+      "provenance": {
+        "source": "Cartbox Village Pack",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://cartbox.app/library/village"
+      }
+    },
+    {
+      "id": "village-pine",
+      "name": "Pine Tree",
+      "kind": "sprite",
+      "category": "nature",
+      "tags": [
+        "tree",
+        "pine",
+        "conifer",
+        "nature",
+        "village"
+      ],
+      "thumbnailUrl": "/library/thumbs/village-pine.png",
+      "payloadUrl": "/library/sprites/village-pine.png",
+      "sizeBytes": 227,
+      "provenance": {
+        "source": "Cartbox Village Pack",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://cartbox.app/library/village"
+      }
+    },
+    {
+      "id": "village-oak",
+      "name": "Oak Tree",
+      "kind": "sprite",
+      "category": "nature",
+      "tags": [
+        "tree",
+        "oak",
+        "round",
+        "nature",
+        "village"
+      ],
+      "thumbnailUrl": "/library/thumbs/village-oak.png",
+      "payloadUrl": "/library/sprites/village-oak.png",
+      "sizeBytes": 264,
+      "provenance": {
+        "source": "Cartbox Village Pack",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://cartbox.app/library/village"
+      }
+    },
+    {
+      "id": "village-rock",
+      "name": "Boulder",
+      "kind": "sprite",
+      "category": "nature",
+      "tags": [
+        "rock",
+        "boulder",
+        "stone",
+        "nature",
+        "village"
+      ],
+      "thumbnailUrl": "/library/thumbs/village-rock.png",
+      "payloadUrl": "/library/sprites/village-rock.png",
+      "sizeBytes": 222,
+      "provenance": {
+        "source": "Cartbox Village Pack",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://cartbox.app/library/village"
+      }
+    },
+    {
+      "id": "village-bush",
+      "name": "Berry Bush",
+      "kind": "sprite",
+      "category": "nature",
+      "tags": [
+        "bush",
+        "shrub",
+        "berries",
+        "nature",
+        "village"
+      ],
+      "thumbnailUrl": "/library/thumbs/village-bush.png",
+      "payloadUrl": "/library/sprites/village-bush.png",
+      "sizeBytes": 248,
+      "provenance": {
+        "source": "Cartbox Village Pack",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://cartbox.app/library/village"
+      }
+    },
+    {
+      "id": "village-lantern",
+      "name": "Street Lantern",
+      "kind": "sprite",
+      "category": "props",
+      "tags": [
+        "lantern",
+        "lamp",
+        "light",
+        "props",
+        "village"
+      ],
+      "thumbnailUrl": "/library/thumbs/village-lantern.png",
+      "payloadUrl": "/library/sprites/village-lantern.png",
+      "sizeBytes": 159,
+      "provenance": {
+        "source": "Cartbox Village Pack",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://cartbox.app/library/village"
+      }
+    },
+    {
+      "id": "village-house",
+      "name": "Cottage",
+      "kind": "sprite",
+      "category": "structures",
+      "tags": [
+        "house",
+        "cottage",
+        "building",
+        "structures",
+        "village"
+      ],
+      "thumbnailUrl": "/library/thumbs/village-house.png",
+      "payloadUrl": "/library/sprites/village-house.png",
+      "sizeBytes": 232,
+      "provenance": {
+        "source": "Cartbox Village Pack",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://cartbox.app/library/village"
+      }
+    },
+    {
+      "id": "village-fence",
+      "name": "Wooden Fence",
+      "kind": "sprite",
+      "category": "props",
+      "tags": [
+        "fence",
+        "wood",
+        "barrier",
+        "props",
+        "village"
+      ],
+      "thumbnailUrl": "/library/thumbs/village-fence.png",
+      "payloadUrl": "/library/sprites/village-fence.png",
+      "sizeBytes": 162,
+      "provenance": {
+        "source": "Cartbox Village Pack",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://cartbox.app/library/village"
+      }
+    },
+    {
+      "id": "village-well",
+      "name": "Stone Well",
+      "kind": "sprite",
+      "category": "structures",
+      "tags": [
+        "well",
+        "water",
+        "stone",
+        "structures",
+        "village"
+      ],
+      "thumbnailUrl": "/library/thumbs/village-well.png",
+      "payloadUrl": "/library/sprites/village-well.png",
+      "sizeBytes": 270,
+      "provenance": {
+        "source": "Cartbox Village Pack",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://cartbox.app/library/village"
+      }
+    },
+    {
+      "id": "village-tree-vox",
+      "name": "Voxel Tree",
+      "kind": "voxel",
+      "category": "nature",
+      "tags": [
+        "tree",
+        "nature",
+        "voxel",
+        "village"
+      ],
+      "thumbnailUrl": "/library/thumbs/village-tree-vox.png",
+      "payloadUrl": "/library/voxels/village-tree.vox",
+      "sizeBytes": 1408,
+      "provenance": {
+        "source": "Cartbox Village Pack",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://cartbox.app/library/village"
+      }
+    },
+    {
+      "id": "village-rock-vox",
+      "name": "Voxel Boulder",
+      "kind": "voxel",
+      "category": "nature",
+      "tags": [
+        "rock",
+        "boulder",
+        "voxel",
+        "village"
+      ],
+      "thumbnailUrl": "/library/thumbs/village-rock-vox.png",
+      "payloadUrl": "/library/voxels/village-rock.vox",
+      "sizeBytes": 1364,
+      "provenance": {
+        "source": "Cartbox Village Pack",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://cartbox.app/library/village"
+      }
+    },
+    {
+      "id": "village-house-vox",
+      "name": "Voxel Cottage",
+      "kind": "voxel",
+      "category": "structures",
+      "tags": [
+        "house",
+        "cottage",
+        "voxel",
+        "village"
+      ],
+      "thumbnailUrl": "/library/thumbs/village-house-vox.png",
+      "payloadUrl": "/library/voxels/village-house.vox",
+      "sizeBytes": 2016,
+      "provenance": {
+        "source": "Cartbox Village Pack",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://cartbox.app/library/village"
+      }
+    },
+    {
+      "id": "village-well-vox",
+      "name": "Voxel Well",
+      "kind": "voxel",
+      "category": "structures",
+      "tags": [
+        "well",
+        "voxel",
+        "village"
+      ],
+      "thumbnailUrl": "/library/thumbs/village-well-vox.png",
+      "payloadUrl": "/library/voxels/village-well.vox",
+      "sizeBytes": 1624,
+      "provenance": {
+        "source": "Cartbox Village Pack",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://cartbox.app/library/village"
+      }
+    },
+    {
+      "id": "village-lamp-vox",
+      "name": "Voxel Lamp Post",
+      "kind": "voxel",
+      "category": "props",
+      "tags": [
+        "lamp",
+        "lantern",
+        "light",
+        "voxel",
+        "village"
+      ],
+      "thumbnailUrl": "/library/thumbs/village-lamp-vox.png",
+      "payloadUrl": "/library/voxels/village-lamp.vox",
+      "sizeBytes": 1180,
+      "provenance": {
+        "source": "Cartbox Village Pack",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://cartbox.app/library/village"
+      }
     }
   ]
 }

@@ -1,130 +1,27 @@
-// The HD-2D vertical slice's 3D world: real voxel geometry wearing hand-authored
-// pixel-art face tiles (the "3D objects with pixel-art materials" half of the
-// spec). A REPLACED teal-night street corner — wet asphalt ground, two neon-lit
-// building blocks behind, a streetlamp, and a foreground pillar that proves the
-// character shares the world's z-buffer (it occludes / is occluded correctly).
+// The HD-2D vertical slice's 3D world, composed ENTIRELY from named asset-library
+// entries instead of procedural code. Terrain tiles (grass, cobblestone, water)
+// come from the library's 2D tile assets worn as face textures; the scenery
+// (trees, rocks, a cottage, a well, lamp posts) are the library's voxel props,
+// each placed at an authored spot. Nothing here is hashed or randomised — the
+// village is a fixed layout that references library assets by id, so "make the
+// world from the library" is literally what the code does.
 //
-// Built from the real editor primitives (VoxelGrid → voxelGridToModel) so this is
-// the same 3D renderer the editor's Voxel tab and /world use — nothing faked.
+// Split into a pure assembler (`assembleVillageWorld`, testable against decoded
+// assets with no I/O) and an async loader (`loadVillageWorld`, which reads the
+// library manifest and decodes payloads in the browser). Both feed the same
+// z-buffered voxel renderer the editor's Voxel tab and /world already use.
 
 import {
   VoxelGrid,
   voxelGridToModel,
   spriteToFaceTexture,
+  parseVox,
   type PlacedModel,
   type TextureAtlas,
   type FaceTexture,
 } from "@cartbox/editor";
-import { makeCanvas, fillRect, setPixel, hashNoise, type Rgb } from "./pixelArt";
 
-const TILE = 16; // face-tile resolution in texels
-
-// ---- pixel-art face tiles (the "materials") --------------------------------
-type Emissive = Uint8Array;
-function emissiveBuf(): Emissive { return new Uint8Array(TILE * TILE); }
-function setEmis(e: Emissive, x: number, y: number, v: number) { e[y * TILE + x] = v; }
-
-/** Wet dark asphalt: near-black speckle with faint wet streaks + rare puddle fleck. */
-function asphaltTile(): FaceTexture {
-  const c = makeCanvas(TILE, TILE);
-  for (let y = 0; y < TILE; y += 1) for (let x = 0; x < TILE; x += 1) {
-    const n = hashNoise(x, y);
-    const streak = Math.sin(y * 0.9 + x * 0.1) > 0.7;
-    const base: Rgb = n > 0.93 ? [46, 60, 84] : streak ? [26, 32, 46] : [16, 19, 28];
-    setPixel(c, x, y, base);
-  }
-  return spriteToFaceTexture(c.data, TILE, TILE);
-}
-
-/** Sidewalk cobble: slightly lighter with a grid of mortar lines. */
-function cobbleTile(): FaceTexture {
-  const c = makeCanvas(TILE, TILE);
-  for (let y = 0; y < TILE; y += 1) for (let x = 0; x < TILE; x += 1) {
-    const seam = x % 8 === 0 || y % 8 === 0;
-    setPixel(c, x, y, seam ? [12, 15, 22] : [30, 36, 48]);
-  }
-  return spriteToFaceTexture(c.data, TILE, TILE);
-}
-
-/** A REPLACED wall: dark teal brick courses with mortar lines. */
-function brickTile(): FaceTexture {
-  const c = makeCanvas(TILE, TILE);
-  for (let y = 0; y < TILE; y += 1) for (let x = 0; x < TILE; x += 1) {
-    const course = Math.floor(y / 4);
-    const stagger = course % 2 === 0 ? 0 : 4;
-    const mortar = y % 4 === 0 || (x + stagger) % 8 === 0;
-    const tint = hashNoise(x, y) > 0.85 ? 8 : 0;
-    setPixel(c, x, y, mortar ? [10, 14, 20] : [26 + tint, 34 + tint, 50 + tint]);
-  }
-  return spriteToFaceTexture(c.data, TILE, TILE);
-}
-
-/** A lit window pane grid — warm interior glow (emissive). */
-function windowTile(): FaceTexture {
-  const c = makeCanvas(TILE, TILE);
-  const e = emissiveBuf();
-  for (let y = 0; y < TILE; y += 1) for (let x = 0; x < TILE; x += 1) {
-    const paneOn = x % 6 >= 1 && x % 6 <= 4 && y % 8 >= 1 && y % 8 <= 6 && hashNoise(Math.floor(x / 6), Math.floor(y / 8)) > 0.35;
-    if (paneOn) { setPixel(c, x, y, [255, 198, 120]); setEmis(e, x, y, 230); }
-    else setPixel(c, x, y, [14, 18, 28]);
-  }
-  return spriteToFaceTexture(c.data, TILE, TILE, e);
-}
-
-/** A saturated neon panel (emissive). */
-function neonTile(rgb: Rgb): FaceTexture {
-  const c = makeCanvas(TILE, TILE);
-  const e = emissiveBuf();
-  for (let y = 0; y < TILE; y += 1) for (let x = 0; x < TILE; x += 1) {
-    const bar = (y % 5) < 3 && (x % 4) < 3;
-    if (bar) { setPixel(c, x, y, rgb); setEmis(e, x, y, 255); }
-    else setPixel(c, x, y, [10, 12, 20]);
-  }
-  return spriteToFaceTexture(c.data, TILE, TILE, e);
-}
-
-/** Dark brushed metal (lamp post, railings). */
-function metalTile(): FaceTexture {
-  const c = makeCanvas(TILE, TILE);
-  for (let y = 0; y < TILE; y += 1) for (let x = 0; x < TILE; x += 1) {
-    setPixel(c, x, y, x % 8 === 2 ? [40, 46, 60] : [20, 24, 34]);
-  }
-  return spriteToFaceTexture(c.data, TILE, TILE);
-}
-
-/** A glowing amber lamp head (fully emissive). */
-function lampTile(): FaceTexture {
-  const c = makeCanvas(TILE, TILE);
-  const e = emissiveBuf();
-  for (let y = 0; y < TILE; y += 1) for (let x = 0; x < TILE; x += 1) { setPixel(c, x, y, [255, 210, 138]); setEmis(e, x, y, 255); }
-  return spriteToFaceTexture(c.data, TILE, TILE, e);
-}
-
-// Atlas slots (a voxel's `tile` is one of these indices; one tile skins all faces).
-const T = { asphalt: 0, cobble: 1, brick: 2, window: 3, neonCyan: 4, neonMagenta: 5, metal: 6, lamp: 7 } as const;
-export function buildAtlas(): TextureAtlas {
-  return {
-    tiles: [
-      asphaltTile(), cobbleTile(), brickTile(), windowTile(),
-      neonTile([92, 226, 242]), neonTile([255, 88, 182]), metalTile(), lampTile(),
-    ],
-  };
-}
-
-// ---- voxel geometry --------------------------------------------------------
-/** A solid box grid filled with one colour + tile, returned as a placed model. */
-function box(
-  sx: number, sy: number, sz: number,
-  rgb: Rgb, tile: number, position: readonly [number, number, number],
-  atlas: TextureAtlas, skin?: (x: number, y: number, z: number) => number,
-): PlacedModel {
-  const grid = new VoxelGrid(sx, sy, sz);
-  for (let z = 0; z < sz; z += 1) for (let y = 0; y < sy; y += 1) for (let x = 0; x < sx; x += 1) {
-    grid.set(x, y, z, rgb[0], rgb[1], rgb[2], 0, skin ? skin(x, y, z) : tile);
-  }
-  return { model: voxelGridToModel(grid, { center: "content" }), position, atlas };
-}
-
+/** A ready-to-render world: placed models plus where the hero stands and roams. */
 export interface Hd2dWorld {
   readonly models: readonly PlacedModel[];
   /** Where the character starts (foot centre), world units. */
@@ -133,51 +30,236 @@ export interface Hd2dWorld {
   readonly bounds: { readonly radiusX: number; readonly radiusZ: number };
 }
 
-const NEONS = [T.neonMagenta, T.neonCyan] as const;
-function hash(n: number): number { const s = Math.sin(n * 12.9898 + 4.13) * 43758.5453; return s - Math.floor(s); }
+// --- Library asset ids the village is built from -----------------------------
+// These name real entries in the asset-library manifest (see
+// scripts/library-sources.mts → "Village Pack"). The loader resolves each id to
+// its payload URL through the manifest, so the world tracks the library.
 
-/** A building block skinned brick, with lit-window rows and a neon band up top. */
-function building(
-  px: number, pz: number, w: number, h: number, d: number, neon: number, atlas: TextureAtlas,
-): PlacedModel {
-  return box(w, h, d, [255, 255, 255], T.brick, [px, h / 2 - 0.5, pz], atlas, (x, y, z) => {
-    const front = z === d - 1;
-    if (front && y % 3 === 1 && x % 2 === 0) return T.window;
-    if (front && y === h - 2 && x >= 1 && x <= w - 2) return neon;
-    return T.brick;
+/** Terrain tile assets, in the order they occupy the shared face-texture atlas. */
+export const TILE_ASSETS = ["village-grass", "village-flowers", "village-dirt-path", "village-cobble", "village-water"] as const;
+export type TileAssetId = (typeof TILE_ASSETS)[number];
+
+/** Voxel scenery assets placed into the world. */
+export const PROP_ASSETS = ["village-tree-vox", "village-rock-vox", "village-house-vox", "village-well-vox", "village-lamp-vox"] as const;
+export type PropAssetId = (typeof PROP_ASSETS)[number];
+
+/** Atlas slot index for each tile asset — the terrain map references these. */
+const TILE_SLOT: Record<TileAssetId, number> = {
+  "village-grass": 0,
+  "village-flowers": 1,
+  "village-dirt-path": 2,
+  "village-cobble": 3,
+  "village-water": 4,
+};
+
+/**
+ * The village floor plan. One character per cell picks a terrain tile; a grass
+ * field with a cobble path down the middle, a pond, and flower patches. Authored,
+ * not generated — the layout is data, so it reads exactly as drawn.
+ *   g grass · f flowers · d dirt · c cobble path · w pond water
+ */
+const TERRAIN_MAP = [
+  "gggggggggfggggggggg",
+  "ggfgggggcggggggfggg",
+  "ggggggggcgggggggggg",
+  "gwwwggggcggggggggfg",
+  "gwwwwgggcgggggggggg",
+  "gwwwggggcccccccgggg",
+  "ggggggggggggggcgggg",
+  "ggfggggggggggccgggg",
+  "gggggggggfggggcgggg",
+  "ggggggggggggggcgfgg",
+  "gfggggggggggggcgggg",
+  "gggggggfggggggcgggg",
+] as const;
+
+const TILE_CHAR_SLOT: Record<string, number> = { g: 0, f: 1, d: 2, c: 3, w: 4 };
+
+/** A prop placed on the map: which voxel asset, and the grid cell it stands on. */
+interface PropPlacement {
+  readonly asset: PropAssetId;
+  /** Grid column and row (into TERRAIN_MAP) of the prop's foot. */
+  readonly col: number;
+  readonly row: number;
+}
+
+/** Authored scenery: trees framing the field, a cottage and well by the path,
+ *  lamp posts lighting it, and boulders for texture. All library voxel props. */
+const PROP_PLACEMENTS: readonly PropPlacement[] = [
+  { asset: "village-house-vox", col: 15, row: 2 },
+  { asset: "village-house-vox", col: 3, row: 10 },
+  { asset: "village-well-vox", col: 11, row: 6 },
+  { asset: "village-tree-vox", col: 1, row: 1 },
+  { asset: "village-tree-vox", col: 17, row: 5 },
+  { asset: "village-tree-vox", col: 16, row: 10 },
+  { asset: "village-tree-vox", col: 2, row: 7 },
+  { asset: "village-lamp-vox", col: 7, row: 3 },
+  { asset: "village-lamp-vox", col: 7, row: 8 },
+  { asset: "village-lamp-vox", col: 13, row: 9 },
+  { asset: "village-rock-vox", col: 5, row: 4 },
+  { asset: "village-rock-vox", col: 12, row: 11 },
+  { asset: "village-rock-vox", col: 10, row: 1 },
+];
+
+// --- Grid ↔ world mapping ----------------------------------------------------
+// The ground is one content-centred voxel grid, so its cell (i,j) sits at world
+// (i - (cols-1)/2, 0, j - (rows-1)/2) with its top face at y = 0. Every prop is
+// placed with the same mapping so scenery lands exactly on the tile it names.
+
+const GROUND_TOP_Y = 0;
+
+function gridToWorldX(col: number, cols: number): number {
+  return col - (cols - 1) / 2;
+}
+function gridToWorldZ(row: number, rows: number): number {
+  return row - (rows - 1) / 2;
+}
+
+/** Vertical extent (in voxels) of a grid's filled content — a prop's height. */
+function contentHeight(grid: VoxelGrid): number {
+  let minY = Infinity;
+  let maxY = -Infinity;
+  grid.forEachFilled((_x, y) => {
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
   });
+  return maxY >= minY ? maxY - minY + 1 : 0;
+}
+
+// --- Pure assembler ----------------------------------------------------------
+
+/** Turn one 16×16 straight-alpha RGBA tile into an atlas face texture. */
+export function tileTextureFromPixels(pixels: Uint8ClampedArray, width: number, height: number): FaceTexture {
+  return spriteToFaceTexture(pixels, width, height);
 }
 
 /**
- * Assemble a REPLACED night street that runs along X. +x right, +y up, +z toward
- * the camera. The ground top sits at y≈0 so the character's foot rests at y=0. The
- * street is long enough to walk (the camera follows), lined with varied neon-lit
- * buildings at the back and streetlamps + occluder pillars near the front.
+ * Assemble the village from decoded library assets. Pure: given the tile face
+ * textures and the prop voxel grids (keyed by their library id), it returns the
+ * placed models, hero start and roam bounds — no I/O, so a test can hand it
+ * fixture assets and assert the world it produces.
  */
-export function buildWorld(atlas: TextureAtlas = buildAtlas()): Hd2dWorld {
+export function assembleVillageWorld(
+  tiles: ReadonlyMap<TileAssetId, FaceTexture>,
+  props: ReadonlyMap<PropAssetId, VoxelGrid>,
+): Hd2dWorld {
+  const rows = TERRAIN_MAP.length;
+  const cols = TERRAIN_MAP[0]!.length;
+
+  // The shared terrain atlas, in TILE_ASSETS order; a missing tile is skipped so
+  // a partial library still yields a (flatter) world rather than throwing.
+  const atlas: TextureAtlas = {
+    tiles: TILE_ASSETS.map((id) => tiles.get(id)).filter((t): t is FaceTexture => t !== undefined),
+  };
+
   const models: PlacedModel[] = [];
-  const LENGTH = 56;   // ground span along X
-  const DEPTH = 12;    // ground span along Z
-  const halfLen = LENGTH / 2;
 
-  // Wet asphalt roadway with a cobble sidewalk strip at the back edge (far from camera).
-  models.push(box(LENGTH, 1, DEPTH, [255, 255, 255], T.asphalt, [0, -0.5, -DEPTH / 2 + 3], atlas,
-    (_x, _y, z) => (z < 2 ? T.cobble : T.asphalt)));
+  // Ground: one voxel per cell, skinned with the cell's terrain tile.
+  const ground = new VoxelGrid(cols, 1, rows);
+  for (let j = 0; j < rows; j += 1) {
+    for (let i = 0; i < cols; i += 1) {
+      const slot = TILE_CHAR_SLOT[TERRAIN_MAP[j]![i]!] ?? 0;
+      // Tint the base voxel toward the tile so a face with no atlas still reads.
+      ground.set(i, 0, j, 255, 255, 255, 0, slot);
+    }
+  }
+  models.push({
+    model: voxelGridToModel(ground, {
+      center: "content",
+      tileForCell: (x, _y, z) => TILE_CHAR_SLOT[TERRAIN_MAP[z]![x]!] ?? 0,
+    }),
+    position: [0, GROUND_TOP_Y - 0.5, 0],
+    atlas,
+  });
 
-  // Buildings line the back edge at intervals, hashed for varied height/width/neon.
-  for (let bx = -halfLen + 4; bx < halfLen - 4; bx += 9) {
-    const h = 10 + Math.floor(hash(bx) * 10);
-    const w = 5 + Math.floor(hash(bx + 1.3) * 3);
-    const neon = NEONS[Math.floor(hash(bx + 2.7) * NEONS.length)]!;
-    models.push(building(bx, -DEPTH + 3, w, h, 5, neon, atlas));
+  // Props: each library voxel prop placed on its named cell, lifted so its base
+  // rests on the ground (content-centred models sit centred on their origin).
+  for (const placement of PROP_PLACEMENTS) {
+    const grid = props.get(placement.asset);
+    if (!grid) continue; // skip absent assets rather than crash
+    const height = contentHeight(grid);
+    models.push({
+      model: voxelGridToModel(grid, { center: "content" }),
+      position: [
+        gridToWorldX(placement.col, cols),
+        GROUND_TOP_Y + height / 2,
+        gridToWorldZ(placement.row, rows),
+      ],
+    });
   }
 
-  // Streetlamps down the near sidewalk; occasional foreground pillars as occluders.
-  for (let lx = -halfLen + 6; lx < halfLen - 4; lx += 12) {
-    models.push(box(1, 8, 1, [80, 90, 110], T.metal, [lx, 3.5, 3], atlas));
-    models.push(box(2, 1, 2, [255, 210, 138], T.lamp, [lx, 7.5, 3], atlas));
-    if (hash(lx + 5) > 0.5) models.push(box(2, 9, 2, [255, 255, 255], T.brick, [lx + 6, 4, 5], atlas));
-  }
+  // Start the hero on the grass just off the path, free to roam most of the field.
+  const start: [number, number, number] = [gridToWorldX(9, cols), 0, gridToWorldZ(6, rows)];
+  return {
+    models,
+    start,
+    bounds: { radiusX: cols / 2 - 1.5, radiusZ: rows / 2 - 1.5 },
+  };
+}
 
-  return { models, start: [0, 0, 0], bounds: { radiusX: halfLen - 3, radiusZ: 3 } };
+// --- Async library loading (browser) -----------------------------------------
+
+/** Minimal shape of the library manifest this module reads. */
+interface ManifestLike {
+  readonly assets: ReadonlyArray<{ readonly id: string; readonly payloadUrl: string }>;
+}
+
+/** Fetch the library manifest and index payload URLs by asset id. */
+async function loadAssetUrls(baseUrl: string): Promise<Map<string, string>> {
+  const response = await fetch(`${baseUrl}/library/manifest.json`, { cache: "default" });
+  if (!response.ok) throw new Error(`library manifest request failed (${response.status})`);
+  const manifest = (await response.json()) as ManifestLike;
+  const urls = new Map<string, string>();
+  for (const asset of manifest.assets) urls.set(asset.id, asset.payloadUrl);
+  return urls;
+}
+
+/** Decode a PNG at `url` into straight-alpha RGBA pixels via the browser codec. */
+async function loadImagePixels(url: string): Promise<{ pixels: Uint8ClampedArray; width: number; height: number }> {
+  const blob = await (await fetch(url)).blob();
+  const bitmap = await createImageBitmap(blob);
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("2D canvas unavailable for tile decode");
+  context.drawImage(bitmap, 0, 0);
+  const { data } = context.getImageData(0, 0, bitmap.width, bitmap.height);
+  return { pixels: new Uint8ClampedArray(data), width: bitmap.width, height: bitmap.height };
+}
+
+/** Fetch and parse a `.vox` payload into a VoxelGrid. */
+async function loadVoxelGrid(url: string): Promise<VoxelGrid> {
+  const buffer = await (await fetch(url)).arrayBuffer();
+  return parseVox(new Uint8Array(buffer));
+}
+
+/**
+ * Load the village world from the asset library. Reads the manifest, resolves
+ * each tile and prop asset to its payload, decodes them (PNG → face texture,
+ * `.vox` → voxel grid), and hands the decoded assets to
+ * {@link assembleVillageWorld}. `baseUrl` prefixes the manifest path ("" =
+ * same-origin, the local library).
+ */
+export async function loadVillageWorld(baseUrl = ""): Promise<Hd2dWorld> {
+  const urls = await loadAssetUrls(baseUrl);
+
+  const tiles = new Map<TileAssetId, FaceTexture>();
+  await Promise.all(
+    TILE_ASSETS.map(async (id) => {
+      const url = urls.get(id);
+      if (!url) return;
+      const { pixels, width, height } = await loadImagePixels(url);
+      tiles.set(id, tileTextureFromPixels(pixels, width, height));
+    }),
+  );
+
+  const props = new Map<PropAssetId, VoxelGrid>();
+  await Promise.all(
+    PROP_ASSETS.map(async (id) => {
+      const url = urls.get(id);
+      if (!url) return;
+      props.set(id, await loadVoxelGrid(url));
+    }),
+  );
+
+  return assembleVillageWorld(tiles, props);
 }

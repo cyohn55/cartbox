@@ -1,0 +1,78 @@
+{
+  "pack": "Cartbox Village Pack",
+  "license": "CC0-1.0",
+  "assets": [
+    {
+      "id": "village-grass",
+      "name": "Village Grass",
+      "source": "Cartbox Village Pack",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "village-dirt-path",
+      "name": "Dirt Path",
+      "source": "Cartbox Village Pack",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "village-water",
+      "name": "Pond Water",
+      "source": "Cartbox Village Pack",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "village-flowers",
+      "name": "Flowering Meadow",
+      "source": "Cartbox Village Pack",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "village-pine",
+      "name": "Pine Tree",
+      "source": "Cartbox Village Pack",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "village-oak",
+      "name": "Oak Tree",
+      "source": "Cartbox Village Pack",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "village-rock",
+      "name": "Boulder",
+      "source": "Cartbox Village Pack",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "village-bush",
+      "name": "Berry Bush",
+      "source": "Cartbox Village Pack",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "village-house",
+      "name": "Cottage",
+      "source": "Cartbox Village Pack",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "village-well",
+      "name": "Stone Well",
+      "source": "Cartbox Village Pack",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "village-lantern",
+      "name": "Street Lantern",
+      "source": "Cartbox Village Pack",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "village-fence",
+      "name": "Wooden Fence",
+      "source": "Cartbox Village Pack",
+      "license": "CC0-1.0"
+    }
+  ]
+}

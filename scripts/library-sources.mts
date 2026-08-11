@@ -42,6 +42,19 @@ export interface RegistrySource {
 
 const KENNEY = { source: "Kenney", author: "Kenney", license: "CC0-1.0", url: "https://kenney.nl/assets" } as const;
 
+/**
+ * First-party public-domain art authored for Cartbox (see
+ * `scripts/gen-village-assets.mts`). The "Village Pack" — terrain tiles, 2D
+ * scenery sprites, and voxel props — exists so a whole HD-2D village can be
+ * *composed from named library assets* instead of built by procedural code.
+ */
+const CARTBOX = {
+  source: "Cartbox Village Pack",
+  author: "Cartbox",
+  license: "CC0-1.0",
+  url: "https://cartbox.app/library/village",
+} as const;
+
 export const LIBRARY_SOURCES: readonly RegistrySource[] = [
   {
     id: "kenney-barrel",
@@ -78,5 +91,173 @@ export const LIBRARY_SOURCES: readonly RegistrySource[] = [
     tags: ["pyramid", "structure", "stone"],
     provenance: { source: "Cartbox samples", author: "Cartbox", license: "CC0-1.0", url: "https://kenney.nl/assets" },
     origin: { kind: "local", path: "voxels/kenney-pyramid.vox" },
+  },
+
+  // --- Village Pack: terrain tiles (2D, seamless) ----------------------------
+  {
+    id: "village-grass",
+    name: "Village Grass",
+    kind: "tile",
+    category: "tilesets",
+    tags: ["grass", "nature", "green", "terrain", "village"],
+    provenance: CARTBOX,
+    origin: { kind: "local", path: "sprites/village-grass.png" },
+  },
+  {
+    id: "village-flowers",
+    name: "Flowering Meadow",
+    kind: "tile",
+    category: "tilesets",
+    tags: ["grass", "flowers", "meadow", "terrain", "village"],
+    provenance: CARTBOX,
+    origin: { kind: "local", path: "sprites/village-flowers.png" },
+  },
+  {
+    id: "village-dirt-path",
+    name: "Dirt Path",
+    kind: "tile",
+    category: "tilesets",
+    tags: ["dirt", "path", "road", "terrain", "village"],
+    provenance: CARTBOX,
+    origin: { kind: "local", path: "sprites/village-dirt-path.png" },
+  },
+  {
+    id: "village-cobble",
+    name: "Cobblestone",
+    kind: "tile",
+    category: "tilesets",
+    tags: ["stone", "cobble", "path", "terrain", "village"],
+    provenance: CARTBOX,
+    origin: { kind: "local", path: "sprites/village-cobble.png" },
+  },
+  {
+    id: "village-water",
+    name: "Pond Water",
+    kind: "tile",
+    category: "tilesets",
+    tags: ["water", "pond", "blue", "terrain", "village"],
+    provenance: CARTBOX,
+    origin: { kind: "local", path: "sprites/village-water.png" },
+  },
+
+  // --- Village Pack: scenery sprites (2D billboards) -------------------------
+  {
+    id: "village-pine",
+    name: "Pine Tree",
+    kind: "sprite",
+    category: "nature",
+    tags: ["tree", "pine", "conifer", "nature", "village"],
+    provenance: CARTBOX,
+    origin: { kind: "local", path: "sprites/village-pine.png" },
+  },
+  {
+    id: "village-oak",
+    name: "Oak Tree",
+    kind: "sprite",
+    category: "nature",
+    tags: ["tree", "oak", "round", "nature", "village"],
+    provenance: CARTBOX,
+    origin: { kind: "local", path: "sprites/village-oak.png" },
+  },
+  {
+    id: "village-rock",
+    name: "Boulder",
+    kind: "sprite",
+    category: "nature",
+    tags: ["rock", "boulder", "stone", "nature", "village"],
+    provenance: CARTBOX,
+    origin: { kind: "local", path: "sprites/village-rock.png" },
+  },
+  {
+    id: "village-bush",
+    name: "Berry Bush",
+    kind: "sprite",
+    category: "nature",
+    tags: ["bush", "shrub", "berries", "nature", "village"],
+    provenance: CARTBOX,
+    origin: { kind: "local", path: "sprites/village-bush.png" },
+  },
+  {
+    id: "village-lantern",
+    name: "Street Lantern",
+    kind: "sprite",
+    category: "props",
+    tags: ["lantern", "lamp", "light", "props", "village"],
+    provenance: CARTBOX,
+    origin: { kind: "local", path: "sprites/village-lantern.png" },
+  },
+  {
+    id: "village-house",
+    name: "Cottage",
+    kind: "sprite",
+    category: "structures",
+    tags: ["house", "cottage", "building", "structures", "village"],
+    provenance: CARTBOX,
+    origin: { kind: "local", path: "sprites/village-house.png" },
+  },
+  {
+    id: "village-fence",
+    name: "Wooden Fence",
+    kind: "sprite",
+    category: "props",
+    tags: ["fence", "wood", "barrier", "props", "village"],
+    provenance: CARTBOX,
+    origin: { kind: "local", path: "sprites/village-fence.png" },
+  },
+  {
+    id: "village-well",
+    name: "Stone Well",
+    kind: "sprite",
+    category: "structures",
+    tags: ["well", "water", "stone", "structures", "village"],
+    provenance: CARTBOX,
+    origin: { kind: "local", path: "sprites/village-well.png" },
+  },
+
+  // --- Village Pack: voxel props (for true-3D worlds) -----------------------
+  {
+    id: "village-tree-vox",
+    name: "Voxel Tree",
+    kind: "voxel",
+    category: "nature",
+    tags: ["tree", "nature", "voxel", "village"],
+    provenance: CARTBOX,
+    origin: { kind: "local", path: "voxels/village-tree.vox" },
+  },
+  {
+    id: "village-rock-vox",
+    name: "Voxel Boulder",
+    kind: "voxel",
+    category: "nature",
+    tags: ["rock", "boulder", "voxel", "village"],
+    provenance: CARTBOX,
+    origin: { kind: "local", path: "voxels/village-rock.vox" },
+  },
+  {
+    id: "village-house-vox",
+    name: "Voxel Cottage",
+    kind: "voxel",
+    category: "structures",
+    tags: ["house", "cottage", "voxel", "village"],
+    provenance: CARTBOX,
+    origin: { kind: "local", path: "voxels/village-house.vox" },
+  },
+  {
+    id: "village-well-vox",
+    name: "Voxel Well",
+    kind: "voxel",
+    category: "structures",
+    tags: ["well", "voxel", "village"],
+    provenance: CARTBOX,
+    origin: { kind: "local", path: "voxels/village-well.vox" },
+  },
+  {
+    id: "village-lamp-vox",
+    name: "Voxel Lamp Post",
+    kind: "voxel",
+    category: "props",
+    tags: ["lamp", "lantern", "light", "voxel", "village"],
+    provenance: CARTBOX,
+    origin: { kind: "local", path: "voxels/village-lamp.vox" },
   },
 ];
