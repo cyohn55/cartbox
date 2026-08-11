@@ -62,6 +62,15 @@ import {
 import { SpriteEditor, type SpriteSelection } from "./SpriteEditor";
 import { VoxelEditor } from "./VoxelEditor";
 import { seededGridPayload } from "./voxelSeed";
+import { LibraryBrowser } from "./LibraryBrowser";
+import {
+  fetchLibraryVoxel,
+  fetchLibrarySprite,
+  INSERTABLE_SPRITE_KINDS,
+} from "@/lib/libraryClient";
+import type { LibraryAsset } from "@/lib/libraryManifest";
+import { blockSizeForImage, findFreeSpriteBlock, SPRITE_PAGE_COUNT } from "@/lib/spriteInsert";
+import { serializeVoxelGrid, type SpritePage } from "@cartbox/editor";
 
 /** The block a new cart opens on — sprite 1, one tile square. */
 const INITIAL_SELECTION: SpriteSelection = { page: 0, tile: 1, tilesPerSide: 1 };
@@ -130,6 +139,7 @@ export function AssetsEditor({
   const [selection, setSelection] = useState<SpriteSelection>(INITIAL_SELECTION);
   const [color, setColor] = useState(1);
   const [activeVoxelId, setActiveVoxelId] = useState<string | null>(null);
+  const [libraryOpen, setLibraryOpen] = useState(false);
 
   const shape = shapeForMedium(medium);
   const sculptsOfShape = useMemo(() => sculptsForMedium(assets, medium), [assets, medium]);
@@ -186,6 +196,71 @@ export function AssetsEditor({
     setActiveVoxelId(id);
   };
 
+  // Insert a sculpt chosen from the asset library. The payload is decoded and
+  // serialised into the cart's own voxel format, so a library sculpt becomes an
+  // ordinary named asset — indistinguishable from one built in the editor.
+  const insertVoxelFromLibrary = async (asset: LibraryAsset) => {
+    const grid = await fetchLibraryVoxel(asset.payloadUrl, asset.name);
+    const id = createAssetId();
+    commitAssets(
+      upsertAsset(assets, {
+        kind: VOXEL_GRID_KIND,
+        id,
+        name: asset.name,
+        grid: serializeVoxelGrid(grid, shape ?? "cube"),
+        spriteMaterials: [],
+      }),
+    );
+    setActiveVoxelId(id);
+    setLibraryOpen(false);
+  };
+
+  // Whether a sheet tile holds only the transparent colour (index 0). Used to
+  // find somewhere to drop a library sprite without painting over existing art.
+  const isTileEmpty = (page: SpritePage, tile: number): boolean => {
+    for (let y = 0; y < sheet.tileSize; y += 1) {
+      for (let x = 0; x < sheet.tileSize; x += 1) {
+        if (sheet.getPixel(page, tile, x, y) !== 0) return false;
+      }
+    }
+    return true;
+  };
+
+  // Insert a sprite/tile chosen from the library. Its pixels are written into the
+  // first free block of the current bank's sheet — never over occupied tiles — and
+  // named as an ordinary sprite asset; a full bank declines rather than clobbers.
+  const insertSpriteFromLibrary = async (asset: LibraryAsset) => {
+    const image = await fetchLibrarySprite(asset.payloadUrl, asset.name);
+    const tilesPerSide = blockSizeForImage(image.width, image.height, sheet.tileSize);
+    const spot = findFreeSpriteBlock(
+      { sheetCols: sheet.sheetCols, pageCount: SPRITE_PAGE_COUNT },
+      tilesPerSide,
+      (page, tile) => isTileEmpty(page as SpritePage, tile),
+    );
+    if (!spot) {
+      throw new Error(
+        `No free ${tilesPerSide}×${tilesPerSide} sprite space in this bank. Clear some tiles or switch bank, then try again.`,
+      );
+    }
+    const page = spot.page as SpritePage;
+    const column = spot.tile % sheet.sheetCols;
+    const row = Math.floor(spot.tile / sheet.sheetCols);
+    sheet.importImageAt(image, page, column * sheet.tileSize, row * sheet.tileSize);
+
+    const named: SpriteBlockAsset = {
+      kind: SPRITE_BLOCK_KIND,
+      id: createAssetId(),
+      name: asset.name,
+      bank,
+      page,
+      tile: spot.tile,
+      tilesPerSide,
+    };
+    commitAssets(upsertAsset(assets, named));
+    setSelection(selectionForBlock(named));
+    setLibraryOpen(false);
+  };
+
   const promptRename = (id: string) => {
     const asset = assets.find((entry) => entry.id === id);
     if (!asset) return;
@@ -234,6 +309,7 @@ export function AssetsEditor({
         activeId={activeId}
         onSelect={selectAsset}
         onCreate={createAsset}
+        onBrowseLibrary={() => setLibraryOpen(true)}
         onRename={promptRename}
         onDelete={confirmDelete}
         onDuplicate={duplicate}
@@ -276,6 +352,13 @@ export function AssetsEditor({
           onExportMesh={onExportVoxelMesh}
         />
       )}
+
+      <LibraryBrowser
+        open={libraryOpen}
+        onClose={() => setLibraryOpen(false)}
+        kinds={medium === "pixels" ? INSERTABLE_SPRITE_KINDS : ["voxel"]}
+        onInsert={medium === "pixels" ? insertSpriteFromLibrary : insertVoxelFromLibrary}
+      />
     </div>
   );
 }

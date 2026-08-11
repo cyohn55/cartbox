@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "assets": [
+    {
+      "id": "kenney-barrel",
+      "name": "Wooden Barrel",
+      "kind": "mesh",
+      "category": "props",
+      "tags": ["barrel", "container", "wood"],
+      "thumbnailUrl": "/library/thumbs/kenney-barrel.png",
+      "payloadUrl": "/library/meshes/kenney-barrel.glb",
+      "sizeBytes": 2224,
+      "provenance": {
+        "source": "Kenney",
+        "author": "Kenney",
+        "license": "CC0-1.0",
+        "url": "https://kenney.nl/assets"
+      }
+    },
+    {
+      "id": "kenney-crate",
+      "name": "Crate",
+      "kind": "mesh",
+      "category": "props",
+      "tags": ["crate", "container", "wood"],
+      "thumbnailUrl": "/library/thumbs/kenney-crate.png",
+      "payloadUrl": "/library/meshes/kenney-crate.glb",
+      "sizeBytes": 2224,
+      "provenance": {
+        "source": "Kenney",
+        "author": "Kenney",
+        "license": "CC0-1.0",
+        "url": "https://kenney.nl/assets"
+      }
+    },
+    {
+      "id": "kenney-grass-tile",
+      "name": "Grass Tile",
+      "kind": "tile",
+      "category": "tilesets",
+      "tags": ["grass", "nature", "green", "terrain"],
+      "thumbnailUrl": "/library/thumbs/kenney-grass-tile.png",
+      "payloadUrl": "/library/sprites/kenney-grass-tile.png",
+      "sizeBytes": 116,
+      "provenance": {
+        "source": "Kenney",
+        "author": "Kenney",
+        "license": "CC0-1.0",
+        "url": "https://kenney.nl/assets"
+      }
+    },
+    {
+      "id": "voxel-pyramid",
+      "name": "Stepped Pyramid",
+      "kind": "voxel",
+      "category": "structures",
+      "tags": ["pyramid", "structure", "stone"],
+      "thumbnailUrl": "/library/thumbs/voxel-pyramid.png",
+      "payloadUrl": "/library/voxels/kenney-pyramid.vox",
+      "sizeBytes": 1576,
+      "provenance": {
+        "source": "Cartbox samples",
+        "author": "Cartbox",
+        "license": "CC0-1.0",
+        "url": "https://kenney.nl/assets"
+      }
+    }
+  ]
+}

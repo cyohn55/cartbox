@@ -36,8 +36,11 @@ import {
   type MeshTransform,
 } from "@/lib/meshSidecar";
 import { importMeshFile, decodeMeshTextures } from "@/lib/meshImport";
+import { fetchLibraryMesh } from "@/lib/libraryClient";
+import type { LibraryAsset } from "@/lib/libraryManifest";
 import styles from "./editor.module.css";
 import { RailGroup, RailHint } from "./railControls";
+import { LibraryBrowser } from "./LibraryBrowser";
 
 const VIEWPORT = 512; // preview canvas edge in device pixels
 const ORBIT_SPEED = 0.01; // radians per pixel dragged
@@ -81,6 +84,7 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
   const [zoom, setZoom] = useState(1);
   const [note, setNote] = useState<string | null>(null);
   const [textures, setTextures] = useState<(DecodedTexture | null)[] | null>(null);
+  const [libraryOpen, setLibraryOpen] = useState(false);
 
   // Keep the selection valid as the list changes (import selects the new mesh;
   // deleting the selected one falls back to the first remaining).
@@ -194,6 +198,20 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
     }
   };
 
+  // Insert a mesh chosen from the asset library. Downloads the payload and runs
+  // it through the same decode-and-add path as a file import, so a library mesh
+  // and an uploaded one are indistinguishable once in the cart.
+  const insertFromLibrary = async (asset: LibraryAsset) => {
+    const mesh = await fetchLibraryMesh(asset.payloadUrl, asset.name);
+    const { sidecar: next, id } = addMesh(sidecar, mesh, asset.name);
+    onSidecarChange(next);
+    setSelectedId(id);
+    setNote(
+      `Inserted “${asset.name}” from the library — ${meshTriangleCount(mesh).toLocaleString()} triangles.`,
+    );
+    setLibraryOpen(false);
+  };
+
   const updateTransform = (patch: Partial<MeshTransform>) => {
     if (!selectedEntry) return;
     onSidecarChange(setMeshTransform(sidecar, selectedEntry.id, { ...selectedEntry.transform, ...patch }));
@@ -223,6 +241,12 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
                 ⬆
               </span>
               Import 3D model
+            </button>
+            <button type="button" className={styles.toolBtn} onClick={() => setLibraryOpen(true)}>
+              <span className={styles.toolGlyph} aria-hidden>
+                ⧉
+              </span>
+              Browse library
             </button>
           </div>
           <input
@@ -361,6 +385,13 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
           <RailHint>Import a 3D model to preview and place it.</RailHint>
         )}
       </aside>
+
+      <LibraryBrowser
+        open={libraryOpen}
+        onClose={() => setLibraryOpen(false)}
+        kinds={["mesh"]}
+        onInsert={insertFromLibrary}
+      />
     </div>
   );
 }

@@ -46,6 +46,9 @@ interface AssetStripProps {
   activeId: string | null;
   onSelect: (id: string) => void;
   onCreate: () => void;
+  /** Open the asset library to insert a ready-made asset; omitted when the active
+   *  medium has no library insert path yet, which hides the control. */
+  onBrowseLibrary?: () => void;
   onRename: (id: string) => void;
   onDelete: (id: string) => void;
   onDuplicate: (id: string) => void;
@@ -66,6 +69,7 @@ export function AssetStrip({
   activeId,
   onSelect,
   onCreate,
+  onBrowseLibrary,
   onRename,
   onDelete,
   onDuplicate,
@@ -168,6 +172,16 @@ export function AssetStrip({
         <button type="button" className="cbx-btn" onClick={onCreate} title="Create a new asset in this medium">
           New
         </button>
+        {onBrowseLibrary && (
+          <button
+            type="button"
+            className="cbx-btn"
+            onClick={onBrowseLibrary}
+            title="Insert a ready-made asset from the library"
+          >
+            Library
+          </button>
+        )}
         <button
           type="button"
           className="cbx-btn"
