@@ -91,6 +91,23 @@ vec3 sampleNormalSmooth(vec2 uv) {
   return normalize(mix(mix(n00, n10, f.x), mix(n01, n11, f.x), f.y));
 }
 
+// The smoothed ramp channels (g=height, b=spec, a=rough) at a UV: the scalar
+// twin of sampleNormalSmooth (sampleScalarBilinear in lightingModel.ts). The
+// four ramp channels are 4-bit, so a painted gradient steps; hardware LINEAR
+// can't do this because .r is an unindexable normal index, so the blend is done
+// by hand here, per channel. .r is deliberately left off the result.
+vec3 sampleRampSmooth(vec2 uv) {
+  vec2 texelSpace = uv * uResolution - 0.5;
+  vec2 base = floor(texelSpace);
+  vec2 f = texelSpace - base;
+  vec2 inv = 1.0 / uResolution;
+  vec4 m00 = texture2D(uMat, (base + vec2(0.5, 0.5)) * inv);
+  vec4 m10 = texture2D(uMat, (base + vec2(1.5, 0.5)) * inv);
+  vec4 m01 = texture2D(uMat, (base + vec2(0.5, 1.5)) * inv);
+  vec4 m11 = texture2D(uMat, (base + vec2(1.5, 1.5)) * inv);
+  return mix(mix(m00, m10, f.x), mix(m01, m11, f.x), f.y).gba; // height, spec, rough
+}
+
 float heightAt(vec2 p) { return texture2D(uMat, p / uResolution).g * HMAX; }
 
 float shadowFactor(vec2 px, float h0, vec3 lightPos) {
@@ -124,9 +141,11 @@ void main() {
   if (uUnlit == 1) { gl_FragColor = vec4(alb.rgb, 1.0); return; } // passthrough
   vec4 m = texture2D(uMat, vUv);
   vec3 n = uSmoothNormals > 0.5 ? sampleNormalSmooth(vUv) : normalFor(m.r * 255.0);
-  float height = m.g * HMAX;
-  float specStr = m.b;
-  float rough = m.a;
+  // The same flag de-bands the ramp channels: normals and ramps smooth together.
+  vec3 ramp = uSmoothNormals > 0.5 ? sampleRampSmooth(vUv) : m.gba;
+  float height = ramp.x * HMAX;
+  float specStr = ramp.y;
+  float rough = ramp.z;
   float emissive = alb.a;
   vec2 px = vUv * uResolution;
 

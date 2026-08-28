@@ -145,6 +145,40 @@ export function sampleNormalBilinear(
   );
 }
 
+/**
+ * A material ramp channel (height, specular, or roughness) bilinearly sampled at
+ * a continuous pixel position, the scalar twin of {@link sampleNormalBilinear}.
+ * `valueAt(x, y)` returns the stored 0..1 level at an integer texel (clamped by
+ * the implementation); this blends the four texels around `(sampleX, sampleY)`.
+ *
+ * The ramp channels are 4-bit (16 levels), so a smooth gradient painted across a
+ * surface reads back as visible steps. Blending them here — exactly as the normal
+ * field is blended — dissolves that banding without touching the stored art. The
+ * normal channel cannot use the GPU's linear filter (its bytes are an unordered
+ * direction index), so the shaders keep the material texture NEAREST and blend
+ * both the normals and these ramps by hand; this is the reference for the ramp
+ * half of that, and the shaders must match it per channel.
+ *
+ * A uniform region returns its constant exactly, so flat materials are untouched.
+ *
+ * @param valueAt  Reads the stored 0..1 ramp value at an integer texel.
+ * @param sampleX  Continuous column (texel centres at integer coordinates).
+ * @param sampleY  Continuous row.
+ */
+export function sampleScalarBilinear(
+  valueAt: (x: number, y: number) => number,
+  sampleX: number,
+  sampleY: number,
+): number {
+  const x0 = Math.floor(sampleX);
+  const y0 = Math.floor(sampleY);
+  const fractionX = sampleX - x0;
+  const fractionY = sampleY - y0;
+  const top = valueAt(x0, y0) + (valueAt(x0 + 1, y0) - valueAt(x0, y0)) * fractionX;
+  const bottom = valueAt(x0, y0 + 1) + (valueAt(x0 + 1, y0 + 1) - valueAt(x0, y0 + 1)) * fractionX;
+  return top + (bottom - top) * fractionY;
+}
+
 /** Feathering applied just below a spot's inner cone, in cosine units. */
 export const SPOT_CONE_SOFTNESS = 0.15;
 

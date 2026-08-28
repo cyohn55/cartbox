@@ -29,6 +29,7 @@ export {
   normalVector,
   sampleLight,
   sampleNormalBilinear,
+  sampleScalarBilinear,
   shade,
 } from "./lightingModel.js";
 export type { LightSample, Rgb, Vec3 } from "./lightingModel.js";

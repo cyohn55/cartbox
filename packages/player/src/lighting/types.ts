@@ -81,10 +81,11 @@ export interface LightingOptions {
   /** Cast height-field shadows. Needs a material buffer with height. Default false. */
   shadows?: boolean;
   /**
-   * Bilinearly interpolate the per-pixel normals instead of using the raw
-   * 16-direction quantised value. Kills the facet banding that betrays the
-   * discrete normal palette on curved surfaces (cinematic gap #2). A no-op on
-   * flat/unmapped materials, whose normals are uniform. Default true.
+   * Bilinearly interpolate the per-pixel material fields instead of using the
+   * raw 4-bit quantised values: the 16-direction normals (cinematic gap #2) and
+   * the height/specular/roughness ramps alike. Kills the facet banding on curved
+   * surfaces and the stair-stepping on painted ramp gradients. A no-op on
+   * flat/unmapped materials, whose fields are uniform. Default true.
    */
   smoothNormals?: boolean;
   /**
@@ -116,7 +117,7 @@ export interface LightingScene {
   ambientColor: readonly [number, number, number];
   bloom: boolean;
   shadows: boolean;
-  /** Bilinearly interpolate the quantised normals to remove facet banding. */
+  /** Bilinearly interpolate the quantised material fields (normals + ramps) to remove banding. */
   smoothNormals?: boolean;
   /** Skip lighting entirely and present the albedo unchanged (see autoDetect). */
   unlit?: boolean;

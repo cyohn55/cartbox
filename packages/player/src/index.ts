@@ -119,6 +119,7 @@ export {
   nearestDirection,
   normalVector,
   sampleNormalBilinear,
+  sampleScalarBilinear,
   shade,
 } from "./lighting/index.js";
 export type {

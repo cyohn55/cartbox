@@ -112,15 +112,35 @@ fn sampleNormalSmooth(uv: vec2<f32>) -> vec3<f32> {
   return normalize(mix(mix(n00, n10, f.x), mix(n01, n11, f.x), f.y));
 }
 
+// The scalar twin of sampleNormalSmooth for the ramp channels (g=height, b=spec,
+// a=rough) — the WGSL port of sampleScalarBilinear (lightingModel.ts). The mat
+// texture stays NEAREST (its .r is an unindexable normal index), so the ramps
+// are blended by hand here, per channel, rather than by the sampler. .r is left
+// off the result.
+fn sampleRampSmooth(uv: vec2<f32>) -> vec3<f32> {
+  let res = u.dims.xy;
+  let texelSpace = uv * res - vec2<f32>(0.5, 0.5);
+  let base = floor(texelSpace);
+  let f = texelSpace - base;
+  let inv = vec2<f32>(1.0, 1.0) / res;
+  let m00 = textureSampleLevel(matTex, samp, (base + vec2<f32>(0.5, 0.5)) * inv, 0.0);
+  let m10 = textureSampleLevel(matTex, samp, (base + vec2<f32>(1.5, 0.5)) * inv, 0.0);
+  let m01 = textureSampleLevel(matTex, samp, (base + vec2<f32>(0.5, 1.5)) * inv, 0.0);
+  let m11 = textureSampleLevel(matTex, samp, (base + vec2<f32>(1.5, 1.5)) * inv, 0.0);
+  return mix(mix(m00, m10, f.x), mix(m01, m11, f.x), f.y).gba; // height, spec, rough
+}
+
 @fragment fn fs(in: VSOut) -> @location(0) vec4<f32> {
   let alb = textureSampleLevel(albedoTex, samp, in.uv, 0.0);
   if (u.dims.w > 0.5) { return vec4<f32>(alb.rgb, 1.0); } // unlit passthrough
   let m = textureSampleLevel(matTex, samp, in.uv, 0.0);
   let idx = clamp(i32(m.r * 255.0 + 0.5), 0, 15);
   let n = select(normalize(u.normals[idx].xyz), sampleNormalSmooth(in.uv), u.flags.y > 0.5);
-  let height = m.g * HMAX;
-  let specStr = m.b;
-  let rough = m.a;
+  // The same flag de-bands the ramp channels: normals and ramps smooth together.
+  let ramp = select(vec3<f32>(m.g, m.b, m.a), sampleRampSmooth(in.uv), u.flags.y > 0.5);
+  let height = ramp.x * HMAX;
+  let specStr = ramp.y;
+  let rough = ramp.z;
   let emissive = alb.a;
   let px = in.uv * u.dims.xy;
   let shininess = mix(6.0, 120.0, 1.0 - rough);
