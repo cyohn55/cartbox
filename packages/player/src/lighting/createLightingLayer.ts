@@ -22,24 +22,46 @@ export interface BuiltLightingRenderer {
 /** Resolves a shared WebGPU device, or null. Injectable for tests. */
 export type DeviceProvider = () => Promise<any | null>;
 
+/**
+ * Above this many framebuffer pixels, auto-supersampling backs off to 1×: the
+ * N² lighting-pass cost stops being worth the de-banding on large targets (the
+ * Pro core's 640×360 = 230k lands here; the standard 240×136 = 33k does not).
+ */
+const SUPERSAMPLE_AUTO_MAX_PIXELS = 100_000;
+
+/**
+ * The supersample factor to actually use: an explicit request clamped to 1..4,
+ * or — when unset — 2 for standard-resolution framebuffers and 1 for large ones.
+ * Exposed so both the layer factory and its tests resolve it the same way.
+ */
+export function resolveSupersample(width: number, height: number, requested?: number): number {
+  if (requested !== undefined && Number.isFinite(requested)) {
+    return Math.max(1, Math.min(4, Math.round(requested)));
+  }
+  return width * height <= SUPERSAMPLE_AUTO_MAX_PIXELS ? 2 : 1;
+}
+
 export async function createLightingLayer(
   doc: Document,
   width: number,
   height: number,
   deviceProvider: DeviceProvider = getWebgpuDevice,
+  supersample?: number,
 ): Promise<BuiltLightingRenderer | null> {
+  const factor = resolveSupersample(width, height, supersample);
+
   // Preferred path: WebGPU.
   const device = await deviceProvider();
   if (device) {
     const canvas = doc.createElement("canvas");
-    const renderer = await WebgpuLightingLayer.create(canvas, width, height, device);
+    const renderer = await WebgpuLightingLayer.create(canvas, width, height, device, factor);
     if (renderer) return { renderer, canvas };
   }
 
   // Fallback: WebGL on a fresh, unclaimed canvas.
   const canvas = doc.createElement("canvas");
   try {
-    return { renderer: new LightingLayer(canvas, width, height), canvas };
+    return { renderer: new LightingLayer(canvas, width, height, factor), canvas };
   } catch {
     return null;
   }

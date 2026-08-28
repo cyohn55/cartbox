@@ -114,6 +114,7 @@ export {
   WebgpuLightingLayer,
   createFlatMaterial,
   createLightingLayer,
+  resolveSupersample,
   getWebgpuDevice,
   interpolateNormal,
   nearestDirection,

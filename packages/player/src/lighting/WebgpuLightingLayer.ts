@@ -24,6 +24,17 @@ import type { RenderCanvas } from "./LightingLayer.js";
 
 const MAX_LIGHTS = 6;
 const HEIGHT_MAX = 8.0;
+/**
+ * Default supersample factor for the lighting pass — the WebGPU twin of the
+ * WebGL backend's default. The 4-bit material fields are de-banded by bilinearly
+ * sampling them, but that blend is a no-op at a 1:1 render because every fragment
+ * sits dead-centre on its texel. Drawing the light pass into a scene target N×
+ * larger — while keeping the shader's resolution (u.dims.xy) at the native size —
+ * puts N² fragments per texel so the blend engages; the bright/composite passes
+ * resolve it to native by sampling the scene target with a LINEAR sampler. The
+ * host picks the factor (LightingOptions.supersample); this is the fallback.
+ */
+const DEFAULT_SUPERSAMPLE = 2;
 
 // GPU*Usage flag values (numeric because the handles are loosely typed).
 const TEXTURE_BINDING = 0x04;
@@ -254,6 +265,7 @@ export class WebgpuLightingLayer implements LightingRenderer {
     width: number,
     height: number,
     device: any,
+    supersample: number = DEFAULT_SUPERSAMPLE,
   ): Promise<WebgpuLightingLayer | null> {
     try {
       const gpu = (globalThis as any).navigator?.gpu;
@@ -272,7 +284,14 @@ export class WebgpuLightingLayer implements LightingRenderer {
 
       const albedo = dataTexture();
       const mat = dataTexture();
-      const scene = targetTexture();
+      // The scene target is supersampled: the light pass draws it at SUPERSAMPLE×
+      // so the material smoothing engages, and bright/composite sample it LINEAR
+      // to resolve back to native.
+      const scene = device.createTexture({
+        size: [width * supersample, height * supersample],
+        format: "rgba8unorm",
+        usage: TEXTURE_BINDING | RENDER_ATTACHMENT,
+      });
       const bright = targetTexture();
       const blurA = targetTexture();
       const blurB = targetTexture();
@@ -318,7 +337,7 @@ export class WebgpuLightingLayer implements LightingRenderer {
           { binding: 3, resource: { buffer: lightBuffer } },
         ]),
         bright: bind(brightPipe, [
-          { binding: 0, resource: nearest },
+          { binding: 0, resource: linear }, // downsamples the supersampled scene
           { binding: 1, resource: tex(scene) },
           { binding: 2, resource: { buffer: brightBuffer } },
         ]),
@@ -333,7 +352,7 @@ export class WebgpuLightingLayer implements LightingRenderer {
           { binding: 2, resource: { buffer: blurBufferV } },
         ]),
         composite: bind(composite, [
-          { binding: 0, resource: nearest },
+          { binding: 0, resource: linear }, // downsamples the supersampled scene
           { binding: 1, resource: tex(scene) },
           { binding: 2, resource: tex(blurB) },
           { binding: 3, resource: { buffer: compositeBuffer } },

@@ -77,7 +77,15 @@ export class LitCanvasSurface implements DisplaySurface {
     model: ConsoleModel,
     options: LightingOptions,
   ): Promise<LitCanvasSurface> {
-    const built = await createLightingLayer(container.ownerDocument, model.width, model.height);
+    // Pass undefined for the device provider to keep its default; forward the
+    // host's supersample choice (undefined → auto-picked by resolution).
+    const built = await createLightingLayer(
+      container.ownerDocument,
+      model.width,
+      model.height,
+      undefined,
+      options.supersample,
+    );
     return new LitCanvasSurface(container, scaleMode, model, options, built);
   }
 

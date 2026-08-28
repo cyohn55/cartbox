@@ -102,6 +102,15 @@ export interface LightingOptions {
    */
   material?: MaterialBuffer | ((context: LightingFrameContext) => MaterialBuffer | null);
   /**
+   * Supersample factor for the lighting pass: 1 disables it (crisp, cheapest),
+   * 2 is the smooth default. Higher factors de-band the 4-bit material fields
+   * harder — the smoothing only engages when the light pass renders above the
+   * material resolution — at an N² fragment-shading cost. Omit to auto-pick: 2
+   * for standard-resolution consoles, 1 for large framebuffers (e.g. the Pro
+   * core) where the 4× cost is not worth it. Clamped to 1..4.
+   */
+  supersample?: number;
+  /**
    * Returns host-provided lights for a frame, called once per presented frame.
    * Optional: a cart can instead emit its own lights via `cartbox.light(...)`,
    * and when both are present they are combined. Omit both and the frame is lit

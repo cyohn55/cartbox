@@ -29,6 +29,20 @@ import type { LightingScene, MaterialBuffer } from "./types.js";
 
 const MAX_LIGHTS = 6;
 const HEIGHT_MAX = 8.0;
+/**
+ * Default supersample factor for the lighting pass. The material fields are
+ * 4-bit and are de-banded by bilinearly sampling them (sampleNormalSmooth /
+ * sampleRampSmooth), but that blend only does anything when a fragment lands
+ * *between* texels — and at a 1:1 render every fragment sits dead-centre on its
+ * texel, so the smoothing is a no-op. Rendering the light pass at N× the
+ * material resolution (while keeping uResolution at the native size) puts N²
+ * fragments per texel, so the blend engages; the result is box-resolved back to
+ * native by the downstream passes' LINEAR sampling of the scene target. 2× (a
+ * 2×2 grid) is the sweet spot for a single-tap bilinear resolve; higher factors
+ * would want a dedicated box-downsample pass. The host picks the factor (see
+ * LightingOptions.supersample); this is only the fallback for direct callers.
+ */
+const DEFAULT_SUPERSAMPLE = 2;
 
 // Straight mapping — passes that render INTO an off-screen framebuffer.
 const QUAD_VS = `
@@ -293,6 +307,7 @@ export class LightingLayer implements LightingRenderer {
     private readonly renderCanvas: RenderCanvas,
     private readonly width: number,
     private readonly height: number,
+    private readonly supersample: number = DEFAULT_SUPERSAMPLE,
   ) {
     renderCanvas.width = width;
     renderCanvas.height = height;
@@ -315,7 +330,10 @@ export class LightingLayer implements LightingRenderer {
 
     const halfW = Math.max(1, width >> 1);
     const halfH = Math.max(1, height >> 1);
-    this.scene = this.makeTarget(width, height, false);
+    // The scene target is supersampled and LINEAR-filtered: the light pass draws
+    // it at SUPERSAMPLE× so the material smoothing engages, and the bright/
+    // composite passes resolve it back to native by sampling it bilinearly.
+    this.scene = this.makeTarget(width * this.supersample, height * this.supersample, true);
     this.bright = this.makeTarget(halfW, halfH, true);
     this.blurA = this.makeTarget(halfW, halfH, true);
     this.blurB = this.makeTarget(halfW, halfH, true);
@@ -347,13 +365,16 @@ export class LightingLayer implements LightingRenderer {
     gl.bindTexture(gl.TEXTURE_2D, this.matTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this.width, this.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, material0);
 
-    // ---- Pass 1: lighting -> scene ----
+    // ---- Pass 1: lighting -> scene (supersampled) ----
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.scene.fbo);
-    gl.viewport(0, 0, this.width, this.height);
+    gl.viewport(0, 0, this.scene.width, this.scene.height);
     this.bindQuad(this.pLight);
     this.bindSampler(0, this.albedoTex, this.pLight, "uAlbedo");
     this.bindSampler(1, this.matTex, this.pLight, "uMat");
     gl.uniform3fv(this.uni(this.pLight, "uNormals"), this.flatNormals);
+    // uResolution stays the NATIVE material size, not the supersampled target —
+    // that mismatch is what makes fragments fall between texels so the material
+    // smoothing blends, and it keeps light positions in native pixel space.
     gl.uniform2f(this.uni(this.pLight, "uResolution"), this.width, this.height);
 
     const count = Math.min(scene.lights.length, MAX_LIGHTS);

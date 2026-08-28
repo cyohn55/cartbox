@@ -248,6 +248,7 @@ function createFlatMaterial(width, height) {
 // src/lighting/LightingLayer.ts
 var MAX_LIGHTS = 6;
 var HEIGHT_MAX = 8;
+var DEFAULT_SUPERSAMPLE = 2;
 var QUAD_VS = `
 attribute vec2 aPos;
 varying vec2 vUv;
@@ -443,10 +444,11 @@ void main() {
   gl_FragColor = vec4(c, 1.0);
 }`;
 var LightingLayer = class {
-  constructor(renderCanvas, width, height) {
+  constructor(renderCanvas, width, height, supersample = DEFAULT_SUPERSAMPLE) {
     this.renderCanvas = renderCanvas;
     this.width = width;
     this.height = height;
+    this.supersample = supersample;
     this.backend = "webgl";
     this.lightPos = new Float32Array(MAX_LIGHTS * 3);
     this.lightColor = new Float32Array(MAX_LIGHTS * 3);
@@ -471,7 +473,7 @@ var LightingLayer = class {
     this.matTex = this.makeDataTexture();
     const halfW = Math.max(1, width >> 1);
     const halfH = Math.max(1, height >> 1);
-    this.scene = this.makeTarget(width, height, false);
+    this.scene = this.makeTarget(width * this.supersample, height * this.supersample, true);
     this.bright = this.makeTarget(halfW, halfH, true);
     this.blurA = this.makeTarget(halfW, halfH, true);
     this.blurB = this.makeTarget(halfW, halfH, true);
@@ -510,7 +512,7 @@ var LightingLayer = class {
     gl.bindTexture(gl.TEXTURE_2D, this.matTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this.width, this.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, material0);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.scene.fbo);
-    gl.viewport(0, 0, this.width, this.height);
+    gl.viewport(0, 0, this.scene.width, this.scene.height);
     this.bindQuad(this.pLight);
     this.bindSampler(0, this.albedoTex, this.pLight, "uAlbedo");
     this.bindSampler(1, this.matTex, this.pLight, "uMat");
@@ -662,6 +664,7 @@ function linkProgram(gl, vsSrc, fsSrc) {
 // src/lighting/WebgpuLightingLayer.ts
 var MAX_LIGHTS2 = 6;
 var HEIGHT_MAX2 = 8;
+var DEFAULT_SUPERSAMPLE2 = 2;
 var TEXTURE_BINDING = 4;
 var COPY_DST_TEX = 2;
 var RENDER_ATTACHMENT = 16;
@@ -882,7 +885,7 @@ var WebgpuLightingLayer = class _WebgpuLightingLayer {
       this.lightData[12 + i * 4 + 2] = v[2];
     });
   }
-  static async create(canvas, width, height, device) {
+  static async create(canvas, width, height, device, supersample = DEFAULT_SUPERSAMPLE2) {
     try {
       const gpu = globalThis.navigator?.gpu;
       if (!gpu || !device) return null;
@@ -896,7 +899,11 @@ var WebgpuLightingLayer = class _WebgpuLightingLayer {
       const targetTexture = () => device.createTexture({ size: [width, height], format: "rgba8unorm", usage: TEXTURE_BINDING | RENDER_ATTACHMENT });
       const albedo = dataTexture();
       const mat = dataTexture();
-      const scene = targetTexture();
+      const scene = device.createTexture({
+        size: [width * supersample, height * supersample],
+        format: "rgba8unorm",
+        usage: TEXTURE_BINDING | RENDER_ATTACHMENT
+      });
       const bright = targetTexture();
       const blurA = targetTexture();
       const blurB = targetTexture();
@@ -934,7 +941,8 @@ var WebgpuLightingLayer = class _WebgpuLightingLayer {
           { binding: 3, resource: { buffer: lightBuffer } }
         ]),
         bright: bind(brightPipe, [
-          { binding: 0, resource: nearest },
+          { binding: 0, resource: linear },
+          // downsamples the supersampled scene
           { binding: 1, resource: tex(scene) },
           { binding: 2, resource: { buffer: brightBuffer } }
         ]),
@@ -949,7 +957,8 @@ var WebgpuLightingLayer = class _WebgpuLightingLayer {
           { binding: 2, resource: { buffer: blurBufferV } }
         ]),
         composite: bind(composite, [
-          { binding: 0, resource: nearest },
+          { binding: 0, resource: linear },
+          // downsamples the supersampled scene
           { binding: 1, resource: tex(scene) },
           { binding: 2, resource: tex(blurB) },
           { binding: 3, resource: { buffer: compositeBuffer } }
@@ -1064,16 +1073,24 @@ async function acquireDevice() {
 }
 
 // src/lighting/createLightingLayer.ts
-async function createLightingLayer(doc, width, height, deviceProvider = getWebgpuDevice) {
+var SUPERSAMPLE_AUTO_MAX_PIXELS = 1e5;
+function resolveSupersample(width, height, requested) {
+  if (requested !== void 0 && Number.isFinite(requested)) {
+    return Math.max(1, Math.min(4, Math.round(requested)));
+  }
+  return width * height <= SUPERSAMPLE_AUTO_MAX_PIXELS ? 2 : 1;
+}
+async function createLightingLayer(doc, width, height, deviceProvider = getWebgpuDevice, supersample) {
+  const factor = resolveSupersample(width, height, supersample);
   const device = await deviceProvider();
   if (device) {
     const canvas2 = doc.createElement("canvas");
-    const renderer = await WebgpuLightingLayer.create(canvas2, width, height, device);
+    const renderer = await WebgpuLightingLayer.create(canvas2, width, height, device, factor);
     if (renderer) return { renderer, canvas: canvas2 };
   }
   const canvas = doc.createElement("canvas");
   try {
-    return { renderer: new LightingLayer(canvas, width, height), canvas };
+    return { renderer: new LightingLayer(canvas, width, height, factor), canvas };
   } catch {
     return null;
   }
@@ -1122,7 +1139,13 @@ var LitCanvasSurface = class _LitCanvasSurface {
   }
   /** Builds the surface, choosing the best available lighting backend. */
   static async create(container, scaleMode, model, options) {
-    const built = await createLightingLayer(container.ownerDocument, model.width, model.height);
+    const built = await createLightingLayer(
+      container.ownerDocument,
+      model.width,
+      model.height,
+      void 0,
+      options.supersample
+    );
     return new _LitCanvasSurface(container, scaleMode, model, options, built);
   }
   /** Whether the lit path is active (false means it fell back to plain 2D). */
@@ -5374,6 +5397,7 @@ export {
   renderSceneBackdrop,
   resolveButton,
   resolveSceneLayers,
+  resolveSupersample,
   resolveUnlockedAchievements,
   runReplayEvents,
   sampleClipFrame,

@@ -12,7 +12,7 @@ export { LightingLayer } from "./LightingLayer.js";
 export type { RenderCanvas } from "./LightingLayer.js";
 export { WebgpuLightingLayer } from "./WebgpuLightingLayer.js";
 export { getWebgpuDevice } from "./webgpuDevice.js";
-export { createLightingLayer } from "./createLightingLayer.js";
+export { createLightingLayer, resolveSupersample } from "./createLightingLayer.js";
 export type { BuiltLightingRenderer, DeviceProvider } from "./createLightingLayer.js";
 export { createFlatMaterial } from "./LightingRenderer.js";
 export type { LightingBackend, LightingRenderer } from "./LightingRenderer.js";
