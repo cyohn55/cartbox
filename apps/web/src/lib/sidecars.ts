@@ -75,6 +75,11 @@ export interface SidecarDef<T> {
    * True when a not-yet-provisioned column (a migration lagging a deploy)
    * should degrade to "this cart has no such sidecar" instead of failing the
    * whole load or save.
+   *
+   * Set for every sidecar whose own route carried that tolerance before the
+   * registry existed — mesh, world, collision and flags. Folding one of these
+   * into the shared UPDATE would make a deploy that ran ahead of its migration
+   * fail the creator's *whole* save rather than one layer of it.
    */
   readonly optionalColumn?: boolean;
   /**
@@ -208,6 +213,7 @@ export const SIDECARS = {
     column: "collision",
     label: "collision",
     inHistory: true,
+    optionalColumn: true,
     parse: parseCollision,
     resolveUpdate: (body) => {
       const update = resolveCollisionUpdate(body);
@@ -218,6 +224,7 @@ export const SIDECARS = {
     column: "flags",
     label: "tile flags",
     inHistory: true,
+    optionalColumn: true,
     parse: parseFlags,
     resolveUpdate: (body) => {
       const update = resolveFlagsUpdate(body);

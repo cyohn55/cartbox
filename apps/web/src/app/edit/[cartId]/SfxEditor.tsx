@@ -26,7 +26,7 @@ import {
 import styles from "./editor.module.css";
 import { SfxEnvelope } from "./SfxEnvelope";
 import { WaveformCurve } from "./WaveformCurve";
-import { useAudioPreview, previewSampleRate } from "./useAudioPreview";
+import { useAudioPreview } from "./useAudioPreview";
 import { useShortcuts } from "./shortcuts";
 
 const WAVEFORMS = Array.from({ length: 16 }, (_unused, index) => index);
@@ -94,13 +94,7 @@ export function SfxEditor({ bank, revision }: SfxEditorProps) {
       setPlayhead(null);
       return;
     }
-    const samples = renderSfx({
-      ...bank.renderSpec(sample),
-      note,
-      octave,
-      sampleRate: previewSampleRate(),
-    });
-    preview.play(samples);
+    preview.play((sampleRate) => renderSfx({ ...bank.renderSpec(sample), note, octave, sampleRate }));
   }, [bank, note, octave, preview, sample]);
 
   // Walk a playhead across the envelope while a preview sounds, so the creator

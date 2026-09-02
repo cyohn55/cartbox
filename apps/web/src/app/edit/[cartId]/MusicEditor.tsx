@@ -19,7 +19,7 @@ import { MUSIC_COMMANDS, NOTE_NAMES, renderPattern, renderSfx, type MusicTracker
 import styles from "./editor.module.css";
 import { MusicGrid } from "./MusicGrid";
 import { SongArrangement } from "./SongArrangement";
-import { useAudioPreview, previewSampleRate } from "./useAudioPreview";
+import { useAudioPreview } from "./useAudioPreview";
 import { activatesOnKey, isTypingTarget } from "./shortcuts";
 
 const OCTAVES = [0, 1, 2, 3, 4, 5, 6, 7];
@@ -62,13 +62,8 @@ export function MusicEditor({ tracker, bank, revision }: MusicEditorProps) {
   /** Sound one note through its sample, so notes can be entered by ear. */
   const audition = useCallback(
     (note: number, noteOctave: number, sampleIndex: number) => {
-      preview.play(
-        renderSfx({
-          ...bank.renderSpec(sampleIndex),
-          note,
-          octave: noteOctave,
-          sampleRate: previewSampleRate(),
-        }),
+      preview.play((sampleRate) =>
+        renderSfx({ ...bank.renderSpec(sampleIndex), note, octave: noteOctave, sampleRate }),
       );
     },
     [bank, preview],
@@ -93,12 +88,8 @@ export function MusicEditor({ tracker, bank, revision }: MusicEditorProps) {
         ? { note: cell.note ?? 0, octave: cell.octave ?? 4, sfx: cell.sfx ?? 0 }
         : { note: null, octave: 4, sfx: 0 };
     });
-    preview.play(
-      renderPattern({
-        rows,
-        sample: (index) => bank.renderSpec(index),
-        sampleRate: previewSampleRate(),
-      }),
+    preview.play((sampleRate) =>
+      renderPattern({ rows, sample: (index) => bank.renderSpec(index), sampleRate }),
     );
   }, [bank, pattern, preview, tracker]);
   const placeStop = () => {

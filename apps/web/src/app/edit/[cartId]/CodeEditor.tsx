@@ -14,9 +14,15 @@
  *   closes the edit → run → fix loop the whole editor exists to serve.
  * - **Find and replace**, over a cart's whole source.
  * - **Auto-indent**, so a `function` opens a level and an `end` closes one.
- * - **Stay fast.** Every keystroke re-tokenised the entire document and
- *   re-rendered one span per token. Tokenising is memoised per line now, so
- *   typing costs one line's work rather than the file's.
+ *
+ * One thing deliberately *not* changed: the whole document is still tokenised
+ * on every keystroke. Caching per line looks obvious and is wrong — Lua's
+ * `--[[ … ]]` block comments and long strings span lines, so a line tokenised
+ * on its own highlights the inside of a block comment as code. Making that
+ * cache correct means teaching the tokenizer to carry a line-start state, which
+ * is a change to a module the whole editor's colouring depends on; it is worth
+ * doing if a cart's source ever gets big enough for this to be felt, and not
+ * before.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -59,9 +65,15 @@ interface CodeEditorProps {
   revision: number;
   /** A line to jump to and highlight, from a runtime error. */
   errorLine?: number | null;
+  /**
+   * Called once the jump has been made. Without it the line would be a standing
+   * instruction: every later visit to this tab would re-fire the jump, stealing
+   * focus and scrolling to a stale error for the rest of the session.
+   */
+  onErrorLineHandled?: () => void;
 }
 
-export function CodeEditor({ doc, revision, errorLine }: CodeEditorProps) {
+export function CodeEditor({ doc, revision, errorLine, onErrorLineHandled }: CodeEditorProps) {
   const [text, setText] = useState(() => doc.getText());
   const [language, setLanguage] = useState(() => doc.language);
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
@@ -80,35 +92,9 @@ export function CodeEditor({ doc, revision, errorLine }: CodeEditorProps) {
   const config = useMemo(() => languageById(language), [language]);
   const lines = useMemo(() => text.split("\n"), [text]);
 
-  /**
-   * Tokenise per line and cache by line text.
-   *
-   * A cart's source is highlighted on every keystroke. Tokenising the whole
-   * document each time is O(file) per character typed, and rendering one span
-   * per token re-creates thousands of DOM nodes for a one-character change.
-   * Because the tokenizer is stateless within a line for everything the editor
-   * colours, a plain content-keyed cache turns that into O(line): the edited
-   * line is re-tokenised and every other line is reused.
-   */
-  const cacheRef = useRef(new Map<string, ReturnType<typeof tokenize>>());
-  useEffect(() => {
-    // The cache is keyed by line text, so a language switch invalidates it all.
-    cacheRef.current = new Map();
-  }, [language]);
-
-  const tokenLines = useMemo(() => {
-    const cache = cacheRef.current;
-    const next = new Map<string, ReturnType<typeof tokenize>>();
-    const rendered = lines.map((line) => {
-      const hit = cache.get(line) ?? tokenize(line, config);
-      next.set(line, hit);
-      return hit;
-    });
-    // Keep only what is still on screen, so the cache cannot grow unbounded
-    // across a long editing session.
-    cacheRef.current = next;
-    return rendered;
-  }, [lines, config]);
+  // The whole document, so multi-line comments and long strings colour
+  // correctly (see the note at the top of this file).
+  const tokens = useMemo(() => tokenize(text, config), [text, config]);
 
   const matches = useMemo(
     () => (findOpen ? findMatches(text, query, { caseSensitive }) : []),
@@ -155,12 +141,17 @@ export function CodeEditor({ doc, revision, errorLine }: CodeEditorProps) {
   }, [doc, revision]);
 
   // A runtime error names a line; select it so the cause is under the caret.
+  // The gutter keeps marking it after the jump — the mark is the useful part —
+  // but the jump itself happens once.
+  const jumpedToRef = useRef<number | null>(null);
   useEffect(() => {
-    if (!errorLine) return;
+    if (!errorLine || jumpedToRef.current === errorLine) return;
+    jumpedToRef.current = errorLine;
     const start = offsetOfLine(doc.getText(), errorLine);
     const range = lineRangeAt(doc.getText(), start);
     select(range.start, range.end);
-  }, [doc, errorLine, select]);
+    onErrorLineHandled?.();
+  }, [doc, errorLine, onErrorLineHandled, select]);
 
   const handleChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     commit(event.target.value);
@@ -382,14 +373,9 @@ export function CodeEditor({ doc, revision, errorLine }: CodeEditorProps) {
           <div className={styles.codeScroll}>
             <pre ref={highlightRef} className={`${styles.codeLayer} ${styles.highlight} ${styles.codeMetrics}`} aria-hidden>
               <code>
-                {tokenLines.map((tokens, line) => (
-                  <span key={line}>
-                    {tokens.map((token, index) => (
-                      <span key={index} className={TOKEN_CLASS[token.type]}>
-                        {token.value}
-                      </span>
-                    ))}
-                    {line < tokenLines.length - 1 ? "\n" : ""}
+                {tokens.map((token, index) => (
+                  <span key={index} className={TOKEN_CLASS[token.type]}>
+                    {token.value}
                   </span>
                 ))}
               </code>

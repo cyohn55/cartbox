@@ -71,7 +71,7 @@ import { ShaderEditor } from "./ShaderEditor";
 import { AssetsEditor } from "./AssetsEditor";
 import { MeshEditor } from "./MeshEditor";
 import { WorldEditor } from "./WorldEditor";
-import { useEditorHistory, snapshotsEqual, type CartSnapshot } from "./useEditorHistory";
+import { useEditorHistory, hashBytes, snapshotsEqual, type CartSnapshot } from "./useEditorHistory";
 import { saveCartLocally, saveCartToAccount, type SaveOutcome } from "./persistCart";
 import { ShortcutHelp } from "./ShortcutHelp";
 import { useShortcuts, WORKBENCH_SHORTCUTS, type Shortcut } from "./shortcuts";
@@ -307,7 +307,11 @@ function WorkbenchBody({
   // One undo/redo timeline for every tab, carrying the cart bytes and every
   // sidecar. `editEngine` is the same live cart memory as `engine`, wrapped so
   // edits feed the history.
-  const historyRef = useRef<{ current: () => CartSnapshot | null } | null>(null);
+  const historyRef = useRef<{ current: () => CartSnapshot | null; resync: () => void } | null>(null);
+  // Bumped on every committed edit. The autosave timer keys off this: the cart
+  // bytes change without any prop identity changing, so nothing else in this
+  // component would tell a "dirty" effect that more work has happened since.
+  const [commitCount, setCommitCount] = useState(0);
   const detailsRef = useRef(details);
   detailsRef.current = details;
 
@@ -321,12 +325,17 @@ function WorkbenchBody({
     if (!clean) setSaveState((state) => (state === "saved" ? "idle" : state));
   }, []);
 
+  const onCommit = useCallback(() => {
+    setCommitCount((count) => count + 1);
+    evaluateDirty();
+  }, [evaluateDirty]);
+
   const history = useEditorHistory({
     engine,
     runnable,
     initialSidecars,
     initialBank: 0,
-    onCommit: evaluateDirty,
+    onCommit,
   });
   historyRef.current = history;
 
@@ -471,16 +480,24 @@ function WorkbenchBody({
     [cartId, details, modelId, runnable, sidecars],
   );
 
-  const markSaved = useCallback(() => {
-    savedSnapshotRef.current = historyRef.current?.current() ?? null;
-    savedMetaRef.current = detailsRef.current;
+  /**
+   * Record what the server (or this browser) just accepted.
+   *
+   * Marked from the snapshot that was *uploaded*, not from the timeline's
+   * current one: a save inside the 400 ms coalescing window uploads edits the
+   * timeline has not committed yet, and marking the older snapshot would flip
+   * the button straight back to "Save •" over work that had in fact landed.
+   */
+  const markSaved = useCallback((uploaded: CartSnapshot | null, meta: CartMeta) => {
+    savedSnapshotRef.current = uploaded ?? historyRef.current?.current() ?? null;
+    savedMetaRef.current = meta;
     setDirty(false);
   }, []);
 
   const applyOutcome = useCallback(
-    (outcome: SaveOutcome) => {
+    (outcome: SaveOutcome, uploaded: CartSnapshot | null, meta: CartMeta) => {
       if (outcome.ok) {
-        markSaved();
+        markSaved(uploaded, meta);
         setSaveState("saved");
         setSaveError(null);
         setSkippedLayers(outcome.skipped);
@@ -497,33 +514,47 @@ function WorkbenchBody({
     async (publish: boolean) => {
       const request = buildRequest(publish);
       if (!request) return;
+      // Exactly what is going up, so the saved mark matches the upload rather
+      // than whatever the timeline had last committed.
+      const uploaded: CartSnapshot = {
+        bytes: request.bytes,
+        bank,
+        sidecars: request.sidecars,
+        hash: hashBytes(request.bytes),
+      };
       setSaveState("saving");
       // The static demo build has no API — Save lands in this browser's
       // localStorage instead (the same payload the server would persist).
       if (isStaticExport) {
-        applyOutcome(saveCartLocally({ ...request, saved: true }));
+        applyOutcome(saveCartLocally({ ...request, saved: true }), uploaded, request.meta);
         return;
       }
       const outcome = await saveCartToAccount(request);
-      if (applyOutcome(outcome)) remoteSaveProvenRef.current = true;
+      if (applyOutcome(outcome, uploaded, request.meta)) remoteSaveProvenRef.current = true;
       // Whatever the server said, keep a local copy so a failed save is not a
       // lost afternoon.
       saveCartLocally({ ...request, saved: outcome.ok });
     },
-    [applyOutcome, buildRequest],
+    [applyOutcome, bank, buildRequest],
   );
 
-  // Seed the saved mark once, from the cart as it opened: a freshly loaded cart
-  // is by definition not dirty.
+  /**
+   * Seed the saved mark from the cart as it opened: a freshly loaded cart is by
+   * definition not dirty.
+   *
+   * Runs before the dirty check below, and re-evaluates once seeded — without
+   * that second step an untouched cart opens permanently "dirty", which means a
+   * Save • label nobody earned, an unload prompt on every close, and a bogus
+   * "unsaved changes" recovery banner on the next visit.
+   */
   useEffect(() => {
-    if (savedSnapshotRef.current === null && savedMetaRef.current === null) {
-      const opening = historyRef.current?.current() ?? null;
-      if (opening) {
-        savedSnapshotRef.current = opening;
-        savedMetaRef.current = detailsRef.current;
-      }
-    }
-  }, [revision]);
+    if (savedSnapshotRef.current !== null || savedMetaRef.current !== null) return;
+    const opening = historyRef.current?.current() ?? null;
+    if (!opening) return;
+    savedSnapshotRef.current = opening;
+    savedMetaRef.current = detailsRef.current;
+    evaluateDirty();
+  }, [evaluateDirty, revision]);
 
   // Autosave. The local draft is written soon after every edit — it costs no
   // network and it is what makes a crashed tab survivable. The server copy
@@ -542,8 +573,14 @@ function WorkbenchBody({
         void (async () => {
           const request = buildRequest(false);
           if (!request) return;
+          const uploaded: CartSnapshot = {
+            bytes: request.bytes,
+            bank,
+            sidecars: request.sidecars,
+            hash: hashBytes(request.bytes),
+          };
           setSaveState("saving");
-          applyOutcome(await saveCartToAccount(request));
+          applyOutcome(await saveCartToAccount(request), uploaded, request.meta);
         })();
       }, REMOTE_AUTOSAVE_MS);
     }
@@ -552,7 +589,11 @@ function WorkbenchBody({
       window.clearTimeout(localTimer);
       if (remoteTimer !== undefined) window.clearTimeout(remoteTimer);
     };
-  }, [applyOutcome, buildRequest, dirty, runnable]);
+    // `commitCount` is what makes this fire again while a creator keeps
+    // working: cart bytes change in WASM memory without any prop here changing
+    // identity, so without it the recovery draft would be written once per
+    // dirty cycle and then go stale for the rest of the session.
+  }, [applyOutcome, bank, buildRequest, commitCount, dirty, runnable]);
 
   // Closing the tab on unsaved work asks first. The browser shows its own
   // wording; returnValue is what makes the prompt appear at all.
@@ -579,11 +620,17 @@ function WorkbenchBody({
   const restoreDraft = useCallback(() => {
     const draft = loadCartDraft(cartId);
     if (!draft || !runnable) return;
+    // Loaded straight into engine memory, behind the observer, so nothing here
+    // reports it as an edit. `resync` is what tells every view to re-read and
+    // restarts the timeline from the restored cart — without it the tabs would
+    // keep showing the pre-restore cart and the next keystroke would write the
+    // stale source back over the work just recovered.
     runnable.loadTic(draftBytes(draft));
     for (const [key, value] of Object.entries(draft.sidecars)) {
       setSidecar(key as keyof Sidecars, value as never);
     }
-    setDetails(draft.meta.title ? draft.meta : detailsRef.current);
+    if (draft.meta.title) setDetails(draft.meta);
+    historyRef.current?.resync();
     setRecovery(null);
   }, [cartId, runnable, setSidecar]);
 
@@ -617,6 +664,9 @@ function WorkbenchBody({
   }, [details.title, runnable]);
 
   const runCart = useCallback(() => {
+    // A new playtest starts from a clean slate: last run's error line should not
+    // still be marked in the gutter while this one is running.
+    setRuntimeErrorLine(null);
     if (runnable) setRunBytes(runnable.saveTic());
   }, [runnable]);
 

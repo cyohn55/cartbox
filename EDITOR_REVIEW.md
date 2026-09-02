@@ -233,6 +233,13 @@ thousand. Either memoise per-line or move to CodeMirror 6 — but only if
 find/replace and folding are wanted anyway; the current approach is otherwise
 worth keeping for its zero dependencies.
 
+**Correction, from implementing it:** memoising per line is wrong as stated.
+Lua's `--[[ … ]]` block comments and long strings span lines, so a line
+tokenised in isolation colours the inside of a block comment as code. Doing it
+properly means teaching `tokenize` to carry a line-start state — a change to the
+module every tab's colouring depends on, worth making only once a cart's source
+is big enough for the cost to be felt. Whole-document tokenising was kept.
+
 **U10. Stop remounting tabs on undo.** Every tab is keyed on `revision`
 (`key={`code:${revision}`}` etc.), so each undo tears down and rebuilds the
 active editor, discarding tool selection, scroll position, camera, and canvas
@@ -326,6 +333,21 @@ pitch over the cart's real 4-bit wavetables at the console's tick rate; it does
 not reproduce channel mixing or the envelope loop hardware. That is the right
 trade for "does this laser sound right", and the editor says so where a creator
 can see it.
+
+### Corrections found by reviewing the implementation
+
+Two claims in §3 did not survive contact, and one behaviour was nearly lost:
+
+- **U9's per-line tokenisation** is unsound; see the correction inline above.
+- **The audio preview must render at the output device's sample rate**, not at
+  a fixed 44.1 kHz. Rendering at 44.1 and playing through a 48 kHz device
+  detunes every preview by about a semitone and a half, which for a sound
+  editor is worse than no preview at all.
+- **`collision` and `flags` carried missing-column tolerance** in their own
+  routes, which the first cut of the registry dropped by marking only `mesh`
+  and `world` optional. On a deploy running ahead of its migration that would
+  have failed a creator's whole save instead of one layer. All four are marked
+  optional now, and a test pins the set.
 
 ### Verification
 

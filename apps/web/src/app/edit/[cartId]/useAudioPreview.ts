@@ -16,8 +16,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export interface AudioPreview {
-  /** Play a rendered mono buffer, replacing anything already sounding. */
-  play: (samples: Float32Array) => void;
+  /**
+   * Play a mono buffer, replacing anything already sounding.
+   *
+   * The caller passes a *renderer*, not samples, because only this hook knows
+   * the rate the buffer will be played back at. Rendering at a fixed 44.1 kHz
+   * and playing through a 48 kHz device detunes every preview by about a
+   * semitone and a half — which for a sound editor is worse than no preview.
+   */
+  play: (render: (sampleRate: number) => Float32Array) => void;
   stop: () => void;
   playing: boolean;
   /** False when this browser has no Web Audio at all. */
@@ -46,8 +53,8 @@ export function useAudioPreview(): AudioPreview {
   }, []);
 
   const play = useCallback(
-    (samples: Float32Array) => {
-      if (!supported || samples.length === 0) return;
+    (render: (sampleRate: number) => Float32Array) => {
+      if (!supported) return;
       stop();
 
       let context = contextRef.current;
@@ -58,6 +65,11 @@ export function useAudioPreview(): AudioPreview {
       // A context created before a gesture, or suspended by a background tab,
       // stays silent until resumed.
       void context.resume();
+
+      // Rendered at the context's own rate, so the preview plays at the pitch
+      // and length it was written for on any device.
+      const samples = render(context.sampleRate);
+      if (samples.length === 0) return;
 
       const buffer = context.createBuffer(1, samples.length, context.sampleRate);
       // The lib's signature narrows to Float32Array<ArrayBuffer>; a rendered
@@ -100,7 +112,4 @@ export function useAudioPreview(): AudioPreview {
   return { play, stop, playing, supported };
 }
 
-/** The sample rate a preview renders at, matching the context it will play in. */
-export function previewSampleRate(): number {
-  return 44_100;
-}
+

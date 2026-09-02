@@ -75,6 +75,13 @@ export interface EditorHistory {
   redo: () => void;
   /** The snapshot currently applied, for callers tracking what has been saved. */
   current: () => CartSnapshot | null;
+  /**
+   * Tell every view the cart underneath was replaced by something this hook did
+   * not do — restoring a recovery draft straight into engine memory, say. Bumps
+   * `revision` and restarts the timeline from what is now in the engine, so
+   * undo cannot step back into the cart that was replaced.
+   */
+  resync: () => void;
 }
 
 interface UseEditorHistoryArgs {
@@ -245,6 +252,16 @@ export function useEditorHistory({
 
   const current = useCallback(() => historyRef.current?.current() ?? null, []);
 
+  const resync = useCallback(() => {
+    const snapshot = capture();
+    if (snapshot) {
+      historyRef.current = new EditHistory(snapshot, { limit: HISTORY_LIMIT, equals: snapshotsEqual });
+      sidecarsRef.current = snapshot.sidecars;
+      setHistoryVersion((version) => version + 1);
+    }
+    setRevision((value) => value + 1);
+  }, [capture]);
+
   const history = historyRef.current;
   const canUndo = history?.canUndo() ?? false;
   const canRedo = history?.canRedo() ?? false;
@@ -261,6 +278,7 @@ export function useEditorHistory({
     undo,
     redo,
     current,
+    resync,
   };
 }
 

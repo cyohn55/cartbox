@@ -150,10 +150,12 @@ describe("the sidecar registry", () => {
     expect(sidecarsEqual(a, { ...a, collision: null })).toBe(false);
   });
 
-  it("marks exactly the columns a migration may not have created as optional", () => {
-    // These two are written in their own statement so an unprovisioned column
-    // costs that sidecar rather than blanking the whole cart.
+  it("marks every column a migration may not have created as optional", () => {
+    // Each is written in its own statement, so an unprovisioned column costs
+    // that sidecar rather than failing the creator's whole save. The set is
+    // exactly the sidecars whose own routes carried that tolerance before the
+    // registry existed; dropping one from here is a silent regression.
     const optional = SIDECAR_KEYS.filter((key) => SIDECARS[key].optionalColumn === true);
-    expect(optional.sort()).toEqual(["mesh", "world"]);
+    expect(optional.sort()).toEqual(["collision", "flags", "mesh", "world"]);
   });
 });
