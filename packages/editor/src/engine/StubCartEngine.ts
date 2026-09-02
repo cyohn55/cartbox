@@ -49,6 +49,8 @@ export class StubCartEngine implements CartEngine {
   private readonly map = new Uint8Array(BANK_COUNT * MAP_CELLS_PER_BANK);
   private readonly sfxVolume = new Uint8Array(BANK_COUNT * SFX_CELLS_PER_BANK);
   private readonly sfxWave = new Uint8Array(BANK_COUNT * SFX_CELLS_PER_BANK);
+  private readonly sfxChord = new Uint8Array(BANK_COUNT * SFX_CELLS_PER_BANK);
+  private readonly sfxPitch = new Int8Array(BANK_COUNT * SFX_CELLS_PER_BANK);
   private readonly sfxLoopStart = new Uint8Array(BANK_COUNT * SFX_LOOP_CELLS_PER_BANK);
   private readonly sfxLoopSize = new Uint8Array(BANK_COUNT * SFX_LOOP_CELLS_PER_BANK);
   private readonly musicNote = new Uint8Array(BANK_COUNT * MUSIC_CELLS_PER_BANK);
@@ -155,6 +157,26 @@ export class StubCartEngine implements CartEngine {
   setSfxWave(sample: number, tick: number, value: number): void {
     if (!this.inSfx(sample, tick)) return;
     this.sfxWave[this.sfxIndex(sample, tick)] = clampNibble(value);
+  }
+
+  getSfxChord(sample: number, tick: number): number {
+    if (!this.inSfx(sample, tick)) return 0;
+    return this.sfxChord[this.sfxIndex(sample, tick)] ?? 0;
+  }
+
+  setSfxChord(sample: number, tick: number, value: number): void {
+    if (!this.inSfx(sample, tick)) return;
+    this.sfxChord[this.sfxIndex(sample, tick)] = clampNibble(value);
+  }
+
+  getSfxPitch(sample: number, tick: number): number {
+    if (!this.inSfx(sample, tick)) return 0;
+    return this.sfxPitch[this.sfxIndex(sample, tick)] ?? 0;
+  }
+
+  setSfxPitch(sample: number, tick: number, value: number): void {
+    if (!this.inSfx(sample, tick)) return;
+    this.sfxPitch[this.sfxIndex(sample, tick)] = Math.max(-8, Math.min(7, Math.trunc(value) || 0));
   }
 
   getSfxLoopStart(sample: number, channel: number): number {
@@ -330,6 +352,11 @@ export class StubCartEngine implements CartEngine {
 
   private inMap(x: number, y: number): boolean {
     return x >= 0 && x < MAP_WIDTH && y >= 0 && y < MAP_HEIGHT;
+  }
+
+  /** Nothing to release: the stub's storage is plain typed arrays. */
+  dispose(): void {
+    /* no-op */
   }
 
   private inSfx(sample: number, tick: number): boolean {

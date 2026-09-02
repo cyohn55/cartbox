@@ -2381,3 +2381,233 @@
   pointer-events: none;
   white-space: nowrap;
 }
+
+/* ── Save banners ─────────────────────────────────────────────────────────
+   A save that failed, a save that could not store every layer, or unsaved
+   work recovered from this browser. One strip under the top bar, toned by
+   severity, because all three are "read this before you keep working". */
+.saveBanner {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--tone, var(--panel)) 18%, var(--panel));
+  color: var(--text);
+}
+
+.saveBanner[data-tone="error"] {
+  --tone: #ff6b6b;
+}
+
+.saveBanner[data-tone="warn"] {
+  --tone: #f6b74a;
+}
+
+.saveBanner[data-tone="info"] {
+  --tone: #57d18d;
+}
+
+.saveBanner > span:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.bannerDismiss {
+  background: none;
+  border: 0;
+  color: var(--faint);
+  font: inherit;
+  cursor: pointer;
+  padding: 2px 6px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.bannerDismiss:hover {
+  color: var(--text);
+}
+
+/* The engine-downgrade warning, previously an inline style. */
+.downgradeBadge {
+  color: #ff8a8a;
+  font-size: 12px;
+}
+
+/* A Save button over unsaved work carries a dot; the label says "Save •". */
+.actions .cbx-btn[data-dirty="true"] {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+/* ── Small-screen notice ──────────────────────────────────────────────────
+   The 3D tabs have no phone layout. Saying so beats rendering an orbit
+   camera into a scrolling page and letting the creator conclude it is
+   broken. Hidden above the breakpoint, where those tabs work fine. */
+.smallScreenNotice {
+  display: none;
+}
+
+/* ── Find & replace ───────────────────────────────────────────────────────
+   One row above the code pane. It scrolls horizontally rather than wrapping,
+   so a narrow window shortens the bar instead of pushing the code down. */
+.findBar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  margin-bottom: 8px;
+  overflow-x: auto;
+}
+
+.findInput {
+  flex: 1 1 120px;
+  min-width: 90px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--sunken, rgba(0, 0, 0, 0.25));
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.findCount {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.findToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* The gutter line a runtime error blamed. */
+.gutterError {
+  color: #ff8a8a;
+  font-weight: 700;
+}
+
+/* ── Shortcut overlay ─────────────────────────────────────────────────────
+   Opened with ?. Rendered from the same tables the keyboard obeys. */
+.helpOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.helpCard {
+  width: min(880px, 100%);
+  max-height: 82vh;
+  overflow-y: auto;
+  padding: 20px 22px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+
+.helpHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.helpTitle {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.helpGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 18px 28px;
+}
+
+.helpGroupTitle {
+  margin: 0 0 8px;
+  font-size: 11px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: 600;
+}
+
+.helpList {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.helpRow {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.helpChord {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.helpLabel {
+  margin: 0;
+  font-size: 13px;
+  color: var(--faint);
+}
+
+.helpFoot {
+  margin: 18px 0 0;
+  font-size: 12px;
+  color: var(--faint);
+}
+
+@media (max-width: 900px) {
+  /* On a phone the 3D tabs say what they need instead of rendering a camera
+     into a scrolling page. */
+  .smallScreenNotice {
+    display: block;
+    grid-column: 1 / -1;
+    margin: 0;
+    padding: 12px 14px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--faint);
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+
+  /* …and the viewport itself is hidden, rather than shown broken beneath it. */
+  .workbench[data-spatial="true"] .body {
+    display: none;
+  }
+
+  .helpRow {
+    grid-template-columns: 96px 1fr;
+  }
+
+  .findBar {
+    gap: 4px;
+  }
+}

@@ -12,6 +12,7 @@ import { useEffect, useRef, useState } from "react";
 import { mount, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ParticleSpec, type PlayerHandle, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
 
 import styles from "./editor.module.css";
+import { errorLineFrom } from "./codeTools";
 
 interface RunOverlayProps {
   bytes: Uint8Array;
@@ -33,10 +34,16 @@ interface RunOverlayProps {
   mesh?: MeshScene;
   /** The cart's HD-2D world (3D terrain + 2D character billboards), during the playtest. */
   world?: WorldScene;
+  /**
+   * Open the Code tab on a line. A runtime error names one, and the shortest
+   * path from "it crashed" to "here is why" is a click — previously the message
+   * was shown and the creator had to find the line themselves.
+   */
+  onGoToLine?: (line: number) => void;
   onClose: () => void;
 }
 
-export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, particles, collision, flags, mesh, world, onClose }: RunOverlayProps) {
+export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, particles, collision, flags, mesh, world, onGoToLine, onClose }: RunOverlayProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<PlayerHandle | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
@@ -46,6 +53,9 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
   // fatal load failure) the cart keeps running, so this is a dismissible report.
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [fps, setFps] = useState<number | null>(null);
+  // The line the error blames, when it names one. Parsed rather than shown raw
+  // so the "go to line" button only appears where it can actually go somewhere.
+  const errorLine = runtimeError === null ? null : errorLineFrom(runtimeError);
   // Frames the cart has presented since the last FPS sample. A ref, not state, so
   // the 60Hz onFrame handler never triggers a React render — the interval below
   // reads and resets it once a second.
@@ -198,6 +208,16 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
         {runtimeError && status !== "error" && (
           <p className={styles.runError} role="alert">
             Lua error: {runtimeError}{" "}
+            {errorLine !== null && onGoToLine && (
+              <button
+                type="button"
+                className={styles.rendererToggle}
+                onClick={() => onGoToLine(errorLine)}
+                style={{ marginLeft: 8 }}
+              >
+                Go to line {errorLine}
+              </button>
+            )}
             <button
               type="button"
               className={styles.rendererToggle}

@@ -8,6 +8,16 @@
  * real .tic on Save/Publish. If the engine can't load, an in-memory stub keeps
  * the UI working. This chrome is custom Cartbox UI — the TIC-80 editor is not
  * shown.
+ *
+ * The shell also owns the three things a creator's trust rests on:
+ *
+ * - **Their work is not lost.** Every committed edit writes a crash-recovery
+ *   draft to this browser; the Save button tells the truth about whether the
+ *   current state has reached the server; and closing a dirty tab warns first.
+ * - **A save is one write.** The sidecars go up as one bundle rather than
+ *   eleven racing requests that could each half-fail.
+ * - **A failure says why.** The server's own message is shown, and a 401 offers
+ *   sign-in instead of an eternal "Retry save".
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -35,18 +45,18 @@ import {
   type ConsoleModelId,
   type FlagData,
   type MaterialSwatches,
+  type SpriteRig,
 } from "@cartbox/editor";
 
 import { EditorDensityProvider, useDensityPreference } from "./editorDensity";
-import { authHeaders } from "@/lib/supabase-browser";
 import type { CartMeta } from "@/lib/cartMeta";
 import { DetailsPanel } from "./DetailsPanel";
 import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
 import { isStaticExport } from "@/lib/staticSite";
-import { saveCartDraft } from "@/lib/localCartStore";
+import { loadCartDraft, draftBytes } from "@/lib/localCartStore";
 import { loadPendingVoxelEdit, clearPendingVoxelEdit, type PendingVoxelEdit } from "@/lib/backdropPropsStore";
 import { decodeVoxelSidecar, mergeVoxelSidecar } from "@/lib/voxelSidecar";
-import type { WireRig } from "@/lib/rig";
+import { emptySidecars, type Sidecars } from "@/lib/sidecars";
 import type { WireMaterials } from "@/lib/materials";
 import styles from "./editor.module.css";
 import { MapEditor } from "./MapEditor";
@@ -61,13 +71,15 @@ import { ShaderEditor } from "./ShaderEditor";
 import { AssetsEditor } from "./AssetsEditor";
 import { MeshEditor } from "./MeshEditor";
 import { WorldEditor } from "./WorldEditor";
-import { useEditorHistory } from "./useEditorHistory";
-import { addMesh, decodeMeshSidecar, encodeMeshSidecar, type MeshSidecar } from "@/lib/meshSidecar";
+import { useEditorHistory, snapshotsEqual, type CartSnapshot } from "./useEditorHistory";
+import { saveCartLocally, saveCartToAccount, type SaveOutcome } from "./persistCart";
+import { ShortcutHelp } from "./ShortcutHelp";
+import { useShortcuts, WORKBENCH_SHORTCUTS, type Shortcut } from "./shortcuts";
+import { decodeMeshSidecar, encodeMeshSidecar, addMesh, type MeshSidecar } from "@/lib/meshSidecar";
 import type { MeshAsset } from "@cartbox/editor";
 
 const TABS = ["Code", "Assets", "Map", "World", "Scene", "Mesh", "Anim", "Weather", "FX", "SFX", "Music"] as const;
 type Tab = (typeof TABS)[number];
-const LIVE_TABS: ReadonlySet<Tab> = new Set<Tab>(["Code", "Assets", "Map", "World", "Scene", "Mesh", "Anim", "Weather", "FX", "SFX", "Music"]);
 
 // The everyday five sit on the bar; the cinematic/3D set — reached rarely, and
 // never before there is art to dress — tucks into a "More" menu so a cart opens
@@ -75,6 +87,29 @@ const LIVE_TABS: ReadonlySet<Tab> = new Set<Tab>(["Code", "Assets", "Map", "Worl
 // same TABS, so the ordering above still governs the slot layout.
 const PRIMARY_TABS: readonly Tab[] = ["Code", "Assets", "Map", "SFX", "Music"];
 const MORE_TABS: readonly Tab[] = ["World", "Scene", "Mesh", "Anim", "Weather", "FX"];
+
+// Tabs whose stage is a 3D viewport with its own camera controls. They have no
+// phone layout — a pinch-zoom orbit camera inside a scrolling page fights the
+// page — so on a small screen they say so rather than rendering something
+// unusable. See the `smallScreenNotice` block in editor.module.css.
+const SPATIAL_TABS: ReadonlySet<Tab> = new Set<Tab>(["World", "Mesh"]);
+
+/** Ctrl+1..9 selects from the bar, then the More menu, in display order. */
+const SHORTCUT_TAB_ORDER: readonly Tab[] = [...PRIMARY_TABS, ...MORE_TABS];
+
+/** How long after the last edit the crash-recovery draft is written. */
+const LOCAL_AUTOSAVE_MS = 1_500;
+/** How long after the last edit an established session pushes to the server. */
+const REMOTE_AUTOSAVE_MS = 10_000;
+
+/**
+ * Fallbacks for the three sidecars whose editors need a value rather than a
+ * null. Module constants, not fresh objects per render, so an editor memoised
+ * on its props does not rebuild every time the workbench re-renders.
+ */
+const DEFAULT_FX: PostFxSettings = defaultPostFxSettings();
+const DEFAULT_RIG: SpriteRig = emptySpriteRig();
+const DEFAULT_MATERIALS: MaterialSwatches = defaultMaterialSwatches();
 
 type EngineMode = "wasm" | "stub";
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -86,28 +121,8 @@ interface EditorWorkbenchProps {
   modelId: ConsoleModelId;
   /** Starter to seed a brand-new cart with; ignored once stored bytes load. */
   starterId: string;
-  /** Persisted character rig loaded with the cart, or null when none. */
-  initialRig: WireRig | null;
-  /** Persisted post-processing stack loaded with the cart, or null when none. */
-  initialFx: PostFxSettings | null;
-  /** Persisted material swatch bindings loaded with the cart, or null when none. */
-  initialMaterials: WireMaterials | null;
-  /** Persisted 3D voxel model (serialized) loaded with the cart, or null when none. */
-  initialVoxel: string | null;
-  /** Persisted imported-mesh sidecar (serialized) loaded with the cart, or null when none. */
-  initialMesh: string | null;
-  /** Persisted HD-2D world sidecar (opaque JSON string) loaded with the cart, or null when none. */
-  initialWorld: string | null;
-  /** Persisted parallax-scene backdrop loaded with the cart, or null when none. */
-  initialScene: SceneSpec | null;
-  /** Persisted animation timeline loaded with the cart, or null when none. */
-  initialAnim: AnimSpec | null;
-  /** Persisted weather/particle system loaded with the cart, or null when none. */
-  initialParticles: ParticleSpec | null;
-  /** Persisted per-cell collision layer loaded with the cart, or null when none. */
-  initialCollision: CollisionData | null;
-  /** Persisted per-cell tile-flags layer loaded with the cart, or null when none. */
-  initialFlags: FlagData | null;
+  /** Every sidecar the cart carries, each null when it has none. */
+  initialSidecars: Sidecars;
   /** Persisted marketplace description, or empty when none. */
   initialDescription: string;
   /** Persisted marketplace tags, or empty when none. */
@@ -120,17 +135,7 @@ export function EditorWorkbench({
   cartUrl,
   modelId,
   starterId,
-  initialRig,
-  initialFx,
-  initialMaterials,
-  initialVoxel,
-  initialMesh,
-  initialWorld,
-  initialScene,
-  initialAnim,
-  initialParticles,
-  initialCollision,
-  initialFlags,
+  initialSidecars,
   initialDescription,
   initialTags,
 }: EditorWorkbenchProps) {
@@ -144,6 +149,11 @@ export function EditorWorkbench({
 
   useEffect(() => {
     let active = true;
+    // The engine that actually reached state, so unmount can free it. Without
+    // this the cartridge — eight banks of tiles, sprites, map, SFX and music
+    // plus a 512 KB code buffer — was orphaned in the WASM heap on every visit
+    // to the editor, and WASM heaps never shrink.
+    let live: CartEngine | null = null;
 
     const boot = async () => {
       const loaded = await loadWasmCartEngine(engineUrl, model);
@@ -167,6 +177,7 @@ export function EditorWorkbench({
     boot()
       .then((loaded) => {
         if (active) {
+          live = loaded;
           setEngine(loaded);
           setMode("wasm");
         } else {
@@ -178,6 +189,7 @@ export function EditorWorkbench({
         if (active) {
           const stub = new StubCartEngine();
           if (!cartUrl) applyStarter(stub, starterId);
+          live = stub;
           setEngine(stub);
           setMode("stub");
         }
@@ -185,6 +197,8 @@ export function EditorWorkbench({
 
     return () => {
       active = false;
+      live?.dispose();
+      live = null;
     };
   }, [cartUrl, engineUrl, model, starterId]);
 
@@ -207,7 +221,10 @@ export function EditorWorkbench({
   // cartbox.solid physics works the moment it opens. A saved cart keeps its own
   // (which is null here for a starter that authors none).
   const starterCollision = cartUrl ? null : resolveStarter(starterId).collision ?? null;
-  const effectiveCollision = initialCollision ?? starterCollision;
+  const seeded: Sidecars = {
+    ...initialSidecars,
+    collision: initialSidecars.collision ?? starterCollision,
+  };
 
   return (
     <WorkbenchBody
@@ -217,17 +234,7 @@ export function EditorWorkbench({
       mode={mode}
       modelId={modelId}
       engineUrl={engineUrl}
-      initialRig={initialRig}
-      initialFx={initialFx}
-      initialMaterials={initialMaterials}
-      initialVoxel={initialVoxel}
-      initialMesh={initialMesh}
-      initialWorld={initialWorld}
-      initialScene={initialScene}
-      initialAnim={initialAnim}
-      initialParticles={initialParticles}
-      initialCollision={effectiveCollision}
-      initialFlags={initialFlags}
+      initialSidecars={seeded}
       initialDescription={initialDescription}
       initialTags={initialTags}
     />
@@ -241,17 +248,7 @@ function WorkbenchBody({
   mode,
   modelId,
   engineUrl,
-  initialRig,
-  initialFx,
-  initialMaterials,
-  initialVoxel,
-  initialMesh,
-  initialWorld,
-  initialScene,
-  initialAnim,
-  initialParticles,
-  initialCollision,
-  initialFlags,
+  initialSidecars,
   initialDescription,
   initialTags,
 }: {
@@ -261,17 +258,7 @@ function WorkbenchBody({
   mode: EngineMode;
   modelId: ConsoleModelId;
   engineUrl: string;
-  initialRig: WireRig | null;
-  initialFx: PostFxSettings | null;
-  initialMaterials: WireMaterials | null;
-  initialVoxel: string | null;
-  initialMesh: string | null;
-  initialWorld: string | null;
-  initialScene: SceneSpec | null;
-  initialAnim: AnimSpec | null;
-  initialParticles: ParticleSpec | null;
-  initialCollision: CollisionData | null;
-  initialFlags: FlagData | null;
+  initialSidecars: Sidecars;
   initialDescription: string;
   initialTags: string[];
 }) {
@@ -286,53 +273,117 @@ function WorkbenchBody({
   // Run/Save need real .tic bytes, which only the WASM engine can serialise.
   const runnable = engine instanceof WasmCartEngine ? engine : null;
 
-  // One undo/redo timeline for every tab. It also owns the cart-wide state that
-  // must survive tab/bank switches and undo alike: the active bank, the FX stack
-  // (authored in the FX tab, applied by the player on Run and the play page), and
-  // the character rig (editor-only metadata). `editEngine` is the same live cart
-  // memory as `engine`, wrapped so edits feed the history.
+  // The cart's marketplace details (title, description, tags). Held here so the
+  // Details panel can edit them and Save/Publish can persist them; the title also
+  // drives the header name and the .tic's first-save row.
+  const [details, setDetails] = useState<CartMeta>({
+    title: cartName,
+    description: initialDescription,
+    tags: initialTags,
+  });
+
+  // What the server (or, in the demo build, this browser) last accepted. Dirty
+  // state is the difference between this and the live timeline, which is what
+  // makes "Saved ✓" honest: it used to stick forever after one successful save,
+  // no matter how much was edited afterwards.
+  const savedSnapshotRef = useRef<CartSnapshot | null>(null);
+  const savedMetaRef = useRef<CartMeta | null>(null);
+  const [dirty, setDirty] = useState(false);
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [saveError, setSaveError] = useState<{ message: string; canSignIn: boolean } | null>(null);
+  const [skippedLayers, setSkippedLayers] = useState<string[]>([]);
+  // True once a save to the account has succeeded, which proves the creator is
+  // signed in and owns this cart. Only then does autosave push to the server —
+  // otherwise a signed-out creator would generate a 401 every ten seconds.
+  const remoteSaveProvenRef = useRef(false);
+
+  const metaEqual = (a: CartMeta | null, b: CartMeta): boolean =>
+    a !== null &&
+    a.title === b.title &&
+    a.description === b.description &&
+    a.tags.length === b.tags.length &&
+    a.tags.every((tag, index) => tag === b.tags[index]);
+
+  // One undo/redo timeline for every tab, carrying the cart bytes and every
+  // sidecar. `editEngine` is the same live cart memory as `engine`, wrapped so
+  // edits feed the history.
+  const historyRef = useRef<{ current: () => CartSnapshot | null } | null>(null);
+  const detailsRef = useRef(details);
+  detailsRef.current = details;
+
+  const evaluateDirty = useCallback(() => {
+    const now = historyRef.current?.current() ?? null;
+    const saved = savedSnapshotRef.current;
+    const clean = now !== null && saved !== null && snapshotsEqual(now, saved) && metaEqual(savedMetaRef.current, detailsRef.current);
+    setDirty(!clean);
+    // A save label that says "Saved ✓" over unsaved work is a lie; the moment
+    // the timeline moves away from what was saved, the button says Save again.
+    if (!clean) setSaveState((state) => (state === "saved" ? "idle" : state));
+  }, []);
+
   const history = useEditorHistory({
     engine,
     runnable,
-    initialFx: initialFx ?? defaultPostFxSettings(),
-    initialRig: initialRig ?? emptySpriteRig(),
-    initialMaterials: (initialMaterials as MaterialSwatches | null) ?? defaultMaterialSwatches(),
-    initialVoxel,
-    initialScene,
-    initialAnim,
-    initialParticles,
-    initialCollision,
-    initialFlags,
+    initialSidecars,
     initialBank: 0,
+    onCommit: evaluateDirty,
   });
+  historyRef.current = history;
+
   const {
     engine: editEngine,
     revision,
     bank,
     setBank: selectBank,
-    fx,
-    setFx,
-    rig,
-    setRig,
-    materials,
-    setMaterials,
-    voxel,
-    setVoxel,
-    scene,
-    setScene,
-    anim,
-    setAnim,
-    particles,
-    setParticles,
-    collision,
-    setCollision,
-    flags,
-    setFlags,
+    sidecars,
+    setSidecar,
     canUndo,
     canRedo,
     undo,
     redo,
   } = history;
+
+  // Undo and redo move the timeline without committing, so dirty state has to be
+  // re-derived from the new present.
+  useEffect(() => {
+    evaluateDirty();
+  }, [revision, details, evaluateDirty]);
+
+  // Named views onto the sidecar bundle, so each editor keeps the prop it had.
+  const fx = sidecars.fx ?? DEFAULT_FX;
+  const rig = (sidecars.rig as SpriteRig | null) ?? DEFAULT_RIG;
+  const materials = (sidecars.materials as MaterialSwatches | null) ?? DEFAULT_MATERIALS;
+  const { voxel, scene, anim, particles, collision, flags } = sidecars;
+
+  const setFx = useCallback((next: PostFxSettings) => setSidecar("fx", next), [setSidecar]);
+  const setRig = useCallback((next: SpriteRig) => setSidecar("rig", next as never), [setSidecar]);
+  const setMaterials = useCallback((next: MaterialSwatches) => setSidecar("materials", next as never), [setSidecar]);
+  const setVoxel = useCallback((next: string) => setSidecar("voxel", next), [setSidecar]);
+  const setScene = useCallback((next: SceneSpec | null) => setSidecar("scene", next), [setSidecar]);
+  const setAnim = useCallback((next: AnimSpec | null) => setSidecar("anim", next), [setSidecar]);
+  const setParticles = useCallback((next: ParticleSpec | null) => setSidecar("particles", next), [setSidecar]);
+  const setCollision = useCallback((next: CollisionData | null) => setSidecar("collision", next), [setSidecar]);
+  const setFlags = useCallback((next: FlagData | null) => setSidecar("flags", next), [setSidecar]);
+
+  // Meshes and the HD-2D world are stored as opaque strings and authored as
+  // decoded objects. Decoding is memoised on the string — geometry is not free
+  // — and both now ride the undo timeline like every other sidecar, so deleting
+  // a mesh or flattening terrain is recoverable.
+  const mesh = useMemo<MeshSidecar>(() => decodeMeshSidecar(sidecars.mesh), [sidecars.mesh]);
+  const setMesh = useCallback(
+    (update: MeshSidecar | ((current: MeshSidecar) => MeshSidecar)) => {
+      const next = typeof update === "function" ? update(decodeMeshSidecar(sidecars.mesh)) : update;
+      setSidecar("mesh", encodeMeshSidecar(next));
+    },
+    [sidecars.mesh, setSidecar],
+  );
+  const meshScene = useMemo<MeshScene | null>(() => parseMeshScene(sidecars.mesh), [sidecars.mesh]);
+  const world = useMemo<WorldScene | null>(() => parseWorldScene(sidecars.world), [sidecars.world]);
+  const setWorld = useCallback(
+    (next: WorldScene | null) => setSidecar("world", next ? JSON.stringify(next) : null),
+    [setSidecar],
+  );
+  const [worldBrushHeight, setWorldBrushHeight] = useState(1);
 
   const sheet = useMemo(() => new SpriteSheet(editEngine), [editEngine]);
   const map = useMemo(() => new TileMap(editEngine), [editEngine]);
@@ -358,41 +409,27 @@ function WorkbenchBody({
   const [pendingVoxel] = useState<PendingVoxelEdit | null>(() =>
     typeof window !== "undefined" ? loadPendingVoxelEdit() : null,
   );
-  // Imported meshes ride outside the undo timeline for now (import/transform are
-  // coarse operations, not per-stroke history); they persist with the cart via
-  // their own sidecar column, like the voxel/anim/particle sidecars.
-  const [mesh, setMesh] = useState<MeshSidecar>(() => decodeMeshSidecar(initialMesh));
-  // The runtime consumes a MeshScene (decoded geometry + baked matrices), so the
-  // authoring sidecar is re-encoded and parsed for the playtest. Memoised on the
-  // sidecar because decoding geometry is not free; import/transform edits are coarse.
-  const meshScene = useMemo<MeshScene | null>(() => parseMeshScene(encodeMeshSidecar(mesh)), [mesh]);
-  // The HD-2D world sidecar: authored in the World tab, persisted as an opaque JSON
-  // string like the mesh sidecar, and parsed into a WorldScene for the playtest.
-  const [world, setWorld] = useState<WorldScene | null>(() => parseWorldScene(initialWorld));
-  const [worldBrushHeight, setWorldBrushHeight] = useState(1);
-  // Turn the current voxel sculpt into a placed mesh: add it to the sidecar and
-  // jump to the Mesh tab so the creator sees (and can transform) the result.
-  const exportVoxelMesh = useCallback((asset: MeshAsset, name: string) => {
-    setMesh((current) => addMesh(current, asset, name).sidecar);
-    setActiveTab("Mesh");
-  }, []);
   const [activeTab, setActiveTab] = useState<Tab>("Assets");
   useEffect(() => {
     if (pendingVoxel) clearPendingVoxelEdit();
   }, [pendingVoxel]);
-  const [runBytes, setRunBytes] = useState<Uint8Array | null>(null);
-  const [saveState, setSaveState] = useState<SaveState>("idle");
 
-  // The cart's marketplace details (title, description, tags). Held here so the
-  // Details panel can edit them and Save/Publish can persist them; the title also
-  // drives the header name and the .tic's first-save row. Not part of the undo
-  // timeline — these are publishing metadata, not cart content.
-  const [details, setDetails] = useState<CartMeta>({
-    title: cartName,
-    description: initialDescription,
-    tags: initialTags,
-  });
+  // Turn the current voxel sculpt into a placed mesh: add it to the sidecar and
+  // jump to the Mesh tab so the creator sees (and can transform) the result.
+  const exportVoxelMesh = useCallback(
+    (asset: MeshAsset, name: string) => {
+      setMesh((current) => addMesh(current, asset, name).sidecar);
+      setActiveTab("Mesh");
+    },
+    [setMesh],
+  );
+
+  const [runBytes, setRunBytes] = useState<Uint8Array | null>(null);
+  // The line a Lua runtime error blamed, carried from the playtest to the Code
+  // tab so "it crashed" and "here is where" are one click apart.
+  const [runtimeErrorLine, setRuntimeErrorLine] = useState<number | null>(null);
   const [showDetails, setShowDetails] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   // Collapse either side panel to give the stage more width. Workbench-level
   // flags (via data attributes) so one chevron each hides whichever tab's rail /
   // inspector is showing, without threading a prop to every editor.
@@ -405,122 +442,154 @@ function WorkbenchBody({
   const [moreOpen, setMoreOpen] = useState(false);
   const moreActive = MORE_TABS.includes(activeTab);
 
-  // The "More" menu is positioned with fixed viewport coordinates, captured from
-  // the button when it opens: the tab strip scrolls horizontally, which makes it
-  // an overflow-clipping box, and an absolutely-positioned dropdown inside it gets
-  // clipped away. A fixed menu escapes that clip; the coords anchor it to the button.
-  const moreButtonRef = useRef<HTMLButtonElement>(null);
-  const [moreMenuPos, setMoreMenuPos] = useState<{ top: number; left: number } | null>(null);
-  const toggleMore = () => {
-    if (!moreOpen && moreButtonRef.current) {
-      const rect = moreButtonRef.current.getBoundingClientRect();
-      setMoreMenuPos({ top: rect.bottom + 4, left: rect.left });
-    }
-    setMoreOpen((open) => !open);
-  };
+  // ---- saving -------------------------------------------------------------
 
-  // Ctrl/Cmd+Z undoes; Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redoes. The workbench owns
-  // these globally so every tab — including the code textarea — shares one stack.
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey)) return;
-      const key = event.key.toLowerCase();
-      if (key === "z" && !event.shiftKey) {
-        event.preventDefault();
-        undo();
-      } else if ((key === "z" && event.shiftKey) || key === "y") {
-        event.preventDefault();
-        redo();
+  const buildRequest = useCallback(
+    (publish: boolean) => {
+      if (!runnable) return null;
+      return {
+        cartId,
+        modelId,
+        bytes: runnable.saveTic(),
+        sidecars,
+        meta: details,
+        publish,
+      };
+    },
+    [cartId, details, modelId, runnable, sidecars],
+  );
+
+  const markSaved = useCallback(() => {
+    savedSnapshotRef.current = historyRef.current?.current() ?? null;
+    savedMetaRef.current = detailsRef.current;
+    setDirty(false);
+  }, []);
+
+  const applyOutcome = useCallback(
+    (outcome: SaveOutcome) => {
+      if (outcome.ok) {
+        markSaved();
+        setSaveState("saved");
+        setSaveError(null);
+        setSkippedLayers(outcome.skipped);
+        return true;
       }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [undo, redo]);
+      setSaveState("error");
+      setSaveError({ message: outcome.message, canSignIn: outcome.reason === "auth" });
+      return false;
+    },
+    [markSaved],
+  );
 
-  const persist = async (publish: boolean) => {
-    if (!runnable) return;
-    setSaveState("saving");
-    try {
-      const bytes = runnable.saveTic();
+  const persist = useCallback(
+    async (publish: boolean) => {
+      const request = buildRequest(publish);
+      if (!request) return;
+      setSaveState("saving");
       // The static demo build has no API — Save lands in this browser's
-      // localStorage instead (same payload the server would persist).
+      // localStorage instead (the same payload the server would persist).
       if (isStaticExport) {
-        const stored = saveCartDraft(cartId, { model: modelId, bytes, rig, fx, materials, voxel, scene, anim, particles, collision, flags });
-        setSaveState(stored ? "saved" : "error");
+        applyOutcome(saveCartLocally({ ...request, saved: true }));
         return;
       }
-      // Tag the save with the model so the cart row persists console_model
-      // (the URL param that opened a new Pro cart becomes durable on first save),
-      // and with the title so a new cart's first row carries the author's name
-      // rather than the "Untitled cartridge" default.
-      const query = new URLSearchParams({ model: modelId });
-      if (publish) query.set("publish", "1");
-      const trimmedTitle = details.title.trim();
-      if (trimmedTitle) query.set("title", trimmedTitle);
-      const response = await fetch(`/api/carts/${cartId}?${query.toString()}`, {
-        method: "PUT",
-        headers: await authHeaders({ "Content-Type": "application/octet-stream" }),
-        body: bytes.buffer as ArrayBuffer,
-      });
-      // The .tic must land before the sidecars, since their endpoints require
-      // the cart row to exist. Only report success if everything wrote.
-      let ok = response.ok;
-      if (ok) {
-        const headers = await authHeaders({ "Content-Type": "application/json" });
-        const [
-          rigResponse,
-          fxResponse,
-          materialsResponse,
-          voxelResponse,
-          meshResponse,
-          worldResponse,
-          sceneResponse,
-          animResponse,
-          particlesResponse,
-          collisionResponse,
-          flagsResponse,
-          metaResponse,
-        ] = await Promise.all([
-          fetch(`/api/carts/${cartId}/rig`, { method: "PUT", headers, body: JSON.stringify(rig) }),
-          fetch(`/api/carts/${cartId}/fx`, { method: "PUT", headers, body: JSON.stringify(fx) }),
-          fetch(`/api/carts/${cartId}/materials`, { method: "PUT", headers, body: JSON.stringify(materials) }),
-          fetch(`/api/carts/${cartId}/voxel`, { method: "PUT", headers, body: JSON.stringify({ voxel }) }),
-          fetch(`/api/carts/${cartId}/mesh`, { method: "PUT", headers, body: JSON.stringify({ mesh: encodeMeshSidecar(mesh) }) }),
-          fetch(`/api/carts/${cartId}/world`, { method: "PUT", headers, body: JSON.stringify({ world: world ? JSON.stringify(world) : null }) }),
-          fetch(`/api/carts/${cartId}/scene`, { method: "PUT", headers, body: JSON.stringify(scene) }),
-          fetch(`/api/carts/${cartId}/anim`, { method: "PUT", headers, body: JSON.stringify(anim) }),
-          fetch(`/api/carts/${cartId}/particles`, { method: "PUT", headers, body: JSON.stringify(particles) }),
-          fetch(`/api/carts/${cartId}/collision`, { method: "PUT", headers, body: JSON.stringify(collision) }),
-          fetch(`/api/carts/${cartId}/flags`, { method: "PUT", headers, body: JSON.stringify(flags) }),
-          fetch(`/api/carts/${cartId}/meta`, { method: "PUT", headers, body: JSON.stringify(details) }),
-        ]);
-        ok =
-          rigResponse.ok &&
-          fxResponse.ok &&
-          materialsResponse.ok &&
-          voxelResponse.ok &&
-          meshResponse.ok &&
-          worldResponse.ok &&
-          sceneResponse.ok &&
-          particlesResponse.ok &&
-          animResponse.ok &&
-          collisionResponse.ok &&
-          flagsResponse.ok &&
-          metaResponse.ok;
+      const outcome = await saveCartToAccount(request);
+      if (applyOutcome(outcome)) remoteSaveProvenRef.current = true;
+      // Whatever the server said, keep a local copy so a failed save is not a
+      // lost afternoon.
+      saveCartLocally({ ...request, saved: outcome.ok });
+    },
+    [applyOutcome, buildRequest],
+  );
+
+  // Seed the saved mark once, from the cart as it opened: a freshly loaded cart
+  // is by definition not dirty.
+  useEffect(() => {
+    if (savedSnapshotRef.current === null && savedMetaRef.current === null) {
+      const opening = historyRef.current?.current() ?? null;
+      if (opening) {
+        savedSnapshotRef.current = opening;
+        savedMetaRef.current = detailsRef.current;
       }
-      setSaveState(ok ? "saved" : "error");
-    } catch {
-      setSaveState("error");
     }
-  };
+  }, [revision]);
+
+  // Autosave. The local draft is written soon after every edit — it costs no
+  // network and it is what makes a crashed tab survivable. The server copy
+  // follows more slowly, and only once a manual save has proved the session can
+  // write this cart.
+  useEffect(() => {
+    if (!dirty || !runnable) return undefined;
+    const localTimer = window.setTimeout(() => {
+      const request = buildRequest(false);
+      if (request) saveCartLocally({ ...request, saved: false });
+    }, LOCAL_AUTOSAVE_MS);
+
+    let remoteTimer: number | undefined;
+    if (!isStaticExport && remoteSaveProvenRef.current) {
+      remoteTimer = window.setTimeout(() => {
+        void (async () => {
+          const request = buildRequest(false);
+          if (!request) return;
+          setSaveState("saving");
+          applyOutcome(await saveCartToAccount(request));
+        })();
+      }, REMOTE_AUTOSAVE_MS);
+    }
+
+    return () => {
+      window.clearTimeout(localTimer);
+      if (remoteTimer !== undefined) window.clearTimeout(remoteTimer);
+    };
+  }, [applyOutcome, buildRequest, dirty, runnable]);
+
+  // Closing the tab on unsaved work asks first. The browser shows its own
+  // wording; returnValue is what makes the prompt appear at all.
+  useEffect(() => {
+    if (!dirty) return undefined;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [dirty]);
+
+  // An unsaved draft left behind by a crashed tab or an expired session. Offered
+  // rather than applied: a creator who abandoned that draft should not have it
+  // resurrected under them.
+  const [recovery, setRecovery] = useState<{ savedAt: string } | null>(null);
+  useEffect(() => {
+    if (isStaticExport || !runnable) return;
+    const draft = loadCartDraft(cartId);
+    if (draft && !draft.saved) setRecovery({ savedAt: draft.savedAt });
+  }, [cartId, runnable]);
+
+  const restoreDraft = useCallback(() => {
+    const draft = loadCartDraft(cartId);
+    if (!draft || !runnable) return;
+    runnable.loadTic(draftBytes(draft));
+    for (const [key, value] of Object.entries(draft.sidecars)) {
+      setSidecar(key as keyof Sidecars, value as never);
+    }
+    setDetails(draft.meta.title ? draft.meta : detailsRef.current);
+    setRecovery(null);
+  }, [cartId, runnable, setSidecar]);
 
   const saveLabel =
-    saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved ✓" : saveState === "error" ? "Retry save" : "Save";
+    saveState === "saving"
+      ? "Saving…"
+      : saveState === "error"
+        ? "Retry save"
+        : saveState === "saved" && !dirty
+          ? "Saved ✓"
+          : dirty
+            ? "Save •"
+            : "Save";
 
   // Export the exact in-memory cartridge as a .tic file the creator can back up,
   // share, or open in real TIC-80. Named from the cart title so downloads are
   // legible rather than a raw uuid.
-  const downloadCart = () => {
+  const downloadCart = useCallback(() => {
     if (!runnable) return;
     const bytes = runnable.saveTic();
     const blob = new Blob([bytes.buffer as ArrayBuffer], { type: "application/octet-stream" });
@@ -533,7 +602,70 @@ function WorkbenchBody({
     anchor.download = `${safeName}.tic`;
     anchor.click();
     URL.revokeObjectURL(url);
-  };
+  }, [details.title, runnable]);
+
+  const runCart = useCallback(() => {
+    if (runnable) setRunBytes(runnable.saveTic());
+  }, [runnable]);
+
+  // ---- shortcuts ----------------------------------------------------------
+
+  const bindings = useMemo<ReadonlyArray<readonly [Shortcut, () => void]>>(() => {
+    const tabBindings = SHORTCUT_TAB_ORDER.slice(0, 9).map(
+      (tab, index) =>
+        [
+          { key: String(index + 1), mod: true, label: `${tab} tab`, group: "Navigation" } as Shortcut,
+          () => setActiveTab(tab),
+        ] as const,
+    );
+    return [
+      [WORKBENCH_SHORTCUTS.save, () => void persist(false)],
+      [WORKBENCH_SHORTCUTS.run, runCart],
+      [WORKBENCH_SHORTCUTS.download, downloadCart],
+      [WORKBENCH_SHORTCUTS.redo, redo],
+      [WORKBENCH_SHORTCUTS.redoAlt, redo],
+      [WORKBENCH_SHORTCUTS.undo, undo],
+      [WORKBENCH_SHORTCUTS.details, () => setShowDetails(true)],
+      [WORKBENCH_SHORTCUTS.help, () => setShowHelp((open) => !open)],
+      ...tabBindings,
+    ];
+  }, [downloadCart, persist, redo, runCart, undo]);
+
+  // The playtest overlay takes the keyboard while it is open — the cart itself
+  // is reading those keys.
+  useShortcuts(bindings, runBytes === null);
+
+  // ---- the "More" menu ----------------------------------------------------
+
+  // The menu is positioned with fixed viewport coordinates because the tab strip
+  // scrolls horizontally, which makes it an overflow-clipping box that would
+  // clip an absolutely-positioned dropdown away. Fixed escapes that clip — but
+  // then nothing moves the menu when the page does, so it is re-measured on
+  // scroll and resize rather than positioned once and stranded.
+  const moreButtonRef = useRef<HTMLButtonElement>(null);
+  const [moreMenuPos, setMoreMenuPos] = useState<{ top: number; left: number } | null>(null);
+
+  const measureMore = useCallback(() => {
+    const rect = moreButtonRef.current?.getBoundingClientRect();
+    if (rect) setMoreMenuPos({ top: rect.bottom + 4, left: rect.left });
+  }, []);
+
+  useEffect(() => {
+    if (!moreOpen) return undefined;
+    measureMore();
+    const onScroll = () => measureMore();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMoreOpen(false);
+    };
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onScroll);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onScroll);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [measureMore, moreOpen]);
 
   return (
     <EditorDensityProvider value={density}>
@@ -541,6 +673,7 @@ function WorkbenchBody({
       className={styles.workbench}
       data-inspector={inspectorHidden ? "hidden" : undefined}
       data-rail={railHidden ? "hidden" : undefined}
+      data-spatial={SPATIAL_TABS.has(activeTab) ? "true" : undefined}
     >
       <header className={styles.topbar}>
         <Link href="/" className={styles.wordmark} title="Back to the Cartbox home page">
@@ -562,7 +695,7 @@ function WorkbenchBody({
         </span>
         {modelDowngraded && (
           <span
-            style={{ color: "#ff8a8a", fontSize: 12 }}
+            className={styles.downgradeBadge}
             title={`The ${requestedModel.label} engine failed to load; falling back to ${activeModel.label}.`}
           >
             ⚠ {requestedModel.label} unavailable — using {activeModel.label}
@@ -594,7 +727,6 @@ function WorkbenchBody({
 
         <nav className={styles.tabs} aria-label="Editors">
           {PRIMARY_TABS.map((tab) => {
-            const live = LIVE_TABS.has(tab);
             const active = tab === activeTab;
             return (
               <button
@@ -602,9 +734,7 @@ function WorkbenchBody({
                 type="button"
                 className={`${styles.tab} ${active ? styles.tabActive : ""}`}
                 aria-current={active ? "page" : undefined}
-                disabled={!live}
-                onClick={() => live && setActiveTab(tab)}
-                title={live ? undefined : `${tab} editor — coming soon`}
+                onClick={() => setActiveTab(tab)}
               >
                 {tab}
               </button>
@@ -620,7 +750,7 @@ function WorkbenchBody({
               className={`${styles.tab} ${moreActive ? styles.tabActive : ""}`}
               aria-haspopup="menu"
               aria-expanded={moreOpen}
-              onClick={toggleMore}
+              onClick={() => setMoreOpen((open) => !open)}
               onBlur={() => setMoreOpen(false)}
             >
               {moreActive ? `More · ${activeTab}` : "More"} ▾
@@ -631,26 +761,22 @@ function WorkbenchBody({
                 role="menu"
                 style={{ top: moreMenuPos.top, left: moreMenuPos.left }}
               >
-                {MORE_TABS.map((tab) => {
-                  const live = LIVE_TABS.has(tab);
-                  return (
-                    <button
-                      key={tab}
-                      type="button"
-                      role="menuitem"
-                      className={`${styles.moreMenuItem} ${tab === activeTab ? styles.moreMenuItemActive : ""}`}
-                      disabled={!live}
-                      // onMouseDown, not onClick: the button's onBlur closes the
-                      // menu first otherwise, and the click never lands.
-                      onMouseDown={() => {
-                        if (live) setActiveTab(tab);
-                        setMoreOpen(false);
-                      }}
-                    >
-                      {tab}
-                    </button>
-                  );
-                })}
+                {MORE_TABS.map((tab) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    role="menuitem"
+                    className={`${styles.moreMenuItem} ${tab === activeTab ? styles.moreMenuItemActive : ""}`}
+                    // onMouseDown, not onClick: the button's onBlur closes the
+                    // menu first otherwise, and the click never lands.
+                    onMouseDown={() => {
+                      setActiveTab(tab);
+                      setMoreOpen(false);
+                    }}
+                  >
+                    {tab}
+                  </button>
+                ))}
               </div>
             )}
           </div>
@@ -697,17 +823,26 @@ function WorkbenchBody({
           <button
             type="button"
             className="cbx-btn"
+            onClick={() => setShowHelp(true)}
+            title="Keyboard shortcuts (?)"
+            aria-label="Keyboard shortcuts"
+          >
+            ?
+          </button>
+          <button
+            type="button"
+            className="cbx-btn"
             onClick={() => setShowDetails(true)}
-            title="Edit title, description and tags"
+            title="Edit title, description and tags (Ctrl+I)"
           >
             Details
           </button>
           <button
             type="button"
             className="cbx-btn"
-            onClick={() => runnable && setRunBytes(runnable.saveTic())}
+            onClick={runCart}
             disabled={!runnable}
-            title={runnable ? "Run this cartridge" : "Run needs the TIC-80 engine"}
+            title={runnable ? "Run this cartridge (Ctrl+Enter)" : "Run needs the TIC-80 engine"}
           >
             Run
           </button>
@@ -723,9 +858,10 @@ function WorkbenchBody({
           <button
             type="button"
             className="cbx-btn"
+            data-dirty={dirty ? "true" : undefined}
             onClick={() => void persist(false)}
             disabled={!runnable || saveState === "saving"}
-            title={runnable ? "Save to your account" : "Save needs the TIC-80 engine"}
+            title={runnable ? "Save to your account (Ctrl+S)" : "Save needs the TIC-80 engine"}
           >
             {saveLabel}
           </button>
@@ -740,6 +876,46 @@ function WorkbenchBody({
           </button>
         </div>
       </header>
+
+      {/* A failed save says what went wrong, in the server's own words, and
+          offers the one action that can fix the common case. */}
+      {saveError && (
+        <div className={styles.saveBanner} data-tone="error" role="alert">
+          <span>{saveError.message}</span>
+          {saveError.canSignIn && (
+            <Link href="/login" className="cbx-btn">
+              Sign in
+            </Link>
+          )}
+          <button type="button" className={styles.bannerDismiss} onClick={() => setSaveError(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {/* A save that landed everywhere except a column this deployment has not
+          migrated yet. Silence here would let a creator believe work was stored
+          that was not. */}
+      {skippedLayers.length > 0 && (
+        <div className={styles.saveBanner} data-tone="warn" role="status">
+          <span>Saved, but this server cannot store {skippedLayers.join(" and ")} yet — that work stays in this browser.</span>
+          <button type="button" className={styles.bannerDismiss} onClick={() => setSkippedLayers([])}>
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {recovery && (
+        <div className={styles.saveBanner} data-tone="info" role="status">
+          <span>Unsaved changes from {new Date(recovery.savedAt).toLocaleString()} are stored in this browser.</span>
+          <button type="button" className="cbx-btn" onClick={restoreDraft}>
+            Restore them
+          </button>
+          <button type="button" className={styles.bannerDismiss} onClick={() => setRecovery(null)}>
+            Discard
+          </button>
+        </div>
+      )}
 
       {/* Chevron tabs on each side panel's inner edge, centred over the body.
           They live at the workbench level — not inside the panels — so they stay
@@ -765,7 +941,14 @@ function WorkbenchBody({
         <span aria-hidden>{inspectorHidden ? "‹" : "›"}</span>
       </button>
 
-      {activeTab === "Code" && <CodeEditor key={`code:${revision}`} doc={doc} />}
+      {SPATIAL_TABS.has(activeTab) && (
+        <p className={styles.smallScreenNotice}>
+          The {activeTab} tab is a 3D viewport with its own orbit camera — it needs a larger screen than this
+          one. Everything else in the cartridge edits fine here.
+        </p>
+      )}
+
+      {activeTab === "Code" && <CodeEditor doc={doc} revision={revision} errorLine={runtimeErrorLine} />}
       {activeTab === "Assets" && (
         <AssetsEditor
           sheet={sheet}
@@ -816,9 +999,7 @@ function WorkbenchBody({
           revision={revision}
         />
       )}
-      {activeTab === "Mesh" && (
-        <MeshEditor key="mesh" sidecar={mesh} onSidecarChange={setMesh} />
-      )}
+      {activeTab === "Mesh" && <MeshEditor key="mesh" sidecar={mesh} onSidecarChange={setMesh} />}
       {activeTab === "World" && (
         <WorldEditor
           key="world"
@@ -859,16 +1040,14 @@ function WorkbenchBody({
           onSettingsChange={setFx}
         />
       )}
-      {activeTab === "SFX" && <SfxEditor key={`${bank}:${revision}`} bank={soundBank} />}
-      {activeTab === "Music" && <MusicEditor key={`${bank}:${revision}`} tracker={tracker} />}
+      {activeTab === "SFX" && <SfxEditor bank={soundBank} revision={`${bank}:${revision}`} />}
+      {activeTab === "Music" && <MusicEditor tracker={tracker} bank={soundBank} revision={`${bank}:${revision}`} />}
 
       {showDetails && (
-        <DetailsPanel
-          details={details}
-          onChange={setDetails}
-          onClose={() => setShowDetails(false)}
-        />
+        <DetailsPanel details={details} onChange={setDetails} onClose={() => setShowDetails(false)} />
       )}
+
+      {showHelp && <ShortcutHelp tabs={SHORTCUT_TAB_ORDER.slice(0, 9)} onClose={() => setShowHelp(false)} />}
 
       {runBytes && (
         <RunOverlay
@@ -883,6 +1062,11 @@ function WorkbenchBody({
           flags={flags ?? undefined}
           mesh={meshScene ?? undefined}
           world={world ?? undefined}
+          onGoToLine={(line) => {
+            setRuntimeErrorLine(line);
+            setRunBytes(null);
+            setActiveTab("Code");
+          }}
           onClose={() => setRunBytes(null)}
         />
       )}

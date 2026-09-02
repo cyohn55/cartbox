@@ -42,6 +42,13 @@ export interface ToolDefinition<Id extends string> {
   /** Tooltip text. Omitted when the label already says enough. */
   readonly hint?: string;
   /**
+   * Single key that selects this tool, lower-case. Declared beside the tool so
+   * a binding, its tooltip and its row in the shortcut overlay all come from
+   * one place — a key documented in three files is a key that stops matching
+   * what the editor actually does.
+   */
+  readonly key?: string;
+  /**
    * The controls this tool drives. Anything left out is off, so a plain tool
    * needs no entry at all and the tables stay readable.
    */

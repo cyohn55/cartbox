@@ -1,12 +1,26 @@
 /**
- * Browser-local cart persistence for the static "demo" build
- * (src/lib/staticSite.ts).
+ * Browser-local cart persistence.
  *
- * The demo build has no API or database, so Save in the editor lands here:
- * the serialised .tic bytes plus the same sidecars the server would persist
- * (console model, character rig, FX stack), keyed by cart id in localStorage.
+ * Two jobs, one store:
+ *
+ * 1. **The static demo build** (src/lib/staticSite.ts) has no API and no
+ *    database, so Save in the editor lands here — the serialised .tic bytes
+ *    plus every sidecar the server would have persisted.
+ * 2. **Crash recovery, everywhere.** The editor also writes a draft here after
+ *    each committed edit, signed in or not, so a closed tab, a crashed browser
+ *    or an expired session leaves the work recoverable rather than gone.
+ *
+ * The sidecars travel as one registry-parsed bundle rather than a field per
+ * payload. The old shape had a hand-written field, a hand-written reader and a
+ * hand-written writer for each of eleven sidecars — and had never grown the two
+ * for `mesh` and `world`, so the demo build's Save reported success while
+ * silently discarding every mesh and every HD-2D world a creator had built.
+ *
  * Client-only — every entry point guards on `typeof window`.
  */
+
+import { emptySidecars, parseSidecars, type Sidecars } from "./sidecars";
+import type { CartMeta } from "./cartMeta";
 
 const STORAGE_KEY_PREFIX = "cartbox.demo.cart.";
 
@@ -15,26 +29,19 @@ export interface StoredCartDraft {
   model: string;
   /** Base64-encoded .tic bytes. */
   bytesBase64: string;
-  /** JSON-serialised character rig, as the rig API endpoint would receive. */
-  rigJson: string | null;
-  /** JSON-serialised post-processing stack, as the fx endpoint would receive. */
-  fxJson: string | null;
-  /** JSON-serialised material swatch bindings, as the materials endpoint would receive. */
-  materialsJson: string | null;
-  /** Serialised 3D voxel model (already a JSON string), or null when none. */
-  voxelJson: string | null;
-  /** JSON-serialised parallax-scene backdrop, as the scene endpoint would receive. */
-  sceneJson: string | null;
-  /** JSON-serialised animation timeline, as the anim endpoint would receive. */
-  animJson: string | null;
-  /** JSON-serialised weather/particle system, as the particles endpoint would receive. */
-  particlesJson: string | null;
-  /** JSON-serialised per-cell collision layer, as the collision endpoint would receive. */
-  collisionJson: string | null;
-  /** JSON-serialised per-cell tile-flags layer, as the flags endpoint would receive. */
-  flagsJson: string | null;
-  /** ISO timestamp of the save, for future "last edited" UI. */
+  /** Every sidecar the cart carries, validated on read. */
+  sidecars: Sidecars;
+  /** Marketplace details, so a demo cart's title and tags survive a reload. */
+  meta: CartMeta;
+  /** ISO timestamp of the save, shown as "last edited". */
   savedAt: string;
+  /**
+   * False while this draft is only a crash-recovery copy of unsaved work — it
+   * was written automatically, not by the creator pressing Save. The editor
+   * uses it to offer recovery rather than silently resurrecting a draft the
+   * creator had already abandoned.
+   */
+  saved: boolean;
 }
 
 function storageKey(cartId: string): string {
@@ -60,6 +67,13 @@ function fromBase64(encoded: string): Uint8Array {
   return bytes;
 }
 
+/**
+ * Read a stored draft.
+ *
+ * Drafts written before the sidecars became a bundle kept one `<key>Json`
+ * string per payload; those are still read, so an in-progress cart survives the
+ * upgrade rather than opening blank.
+ */
 export function loadCartDraft(cartId: string): StoredCartDraft | null {
   if (typeof window === "undefined") {
     return null;
@@ -69,27 +83,43 @@ export function loadCartDraft(cartId: string): StoredCartDraft | null {
     if (!raw) {
       return null;
     }
-    const parsed = JSON.parse(raw) as Partial<StoredCartDraft>;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
     if (typeof parsed.model !== "string" || typeof parsed.bytesBase64 !== "string") {
       return null;
     }
+    const meta = parsed.meta as Partial<CartMeta> | undefined;
     return {
       model: parsed.model,
       bytesBase64: parsed.bytesBase64,
-      rigJson: typeof parsed.rigJson === "string" ? parsed.rigJson : null,
-      fxJson: typeof parsed.fxJson === "string" ? parsed.fxJson : null,
-      materialsJson: typeof parsed.materialsJson === "string" ? parsed.materialsJson : null,
-      voxelJson: typeof parsed.voxelJson === "string" ? parsed.voxelJson : null,
-      sceneJson: typeof parsed.sceneJson === "string" ? parsed.sceneJson : null,
-      animJson: typeof parsed.animJson === "string" ? parsed.animJson : null,
-      particlesJson: typeof parsed.particlesJson === "string" ? parsed.particlesJson : null,
-      collisionJson: typeof parsed.collisionJson === "string" ? parsed.collisionJson : null,
-      flagsJson: typeof parsed.flagsJson === "string" ? parsed.flagsJson : null,
+      sidecars: parsed.sidecars ? parseSidecars(parsed.sidecars) : legacySidecars(parsed),
+      meta: {
+        title: typeof meta?.title === "string" ? meta.title : "",
+        description: typeof meta?.description === "string" ? meta.description : "",
+        tags: Array.isArray(meta?.tags) ? meta.tags.filter((tag): tag is string => typeof tag === "string") : [],
+      },
       savedAt: typeof parsed.savedAt === "string" ? parsed.savedAt : new Date(0).toISOString(),
+      saved: parsed.saved !== false,
     };
   } catch {
     return null;
   }
+}
+
+/** Read the pre-bundle draft shape: one JSON string per sidecar. */
+function legacySidecars(parsed: Record<string, unknown>): Sidecars {
+  const source: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!key.endsWith("Json") || typeof value !== "string") continue;
+    const name = key.slice(0, -"Json".length);
+    try {
+      // The voxel sidecar was stored as its own already-serialised payload, not
+      // as JSON of an object, so a parse failure means "use the string as-is".
+      source[name] = JSON.parse(value);
+    } catch {
+      source[name] = value;
+    }
+  }
+  return Object.keys(source).length > 0 ? parseSidecars(source) : emptySidecars();
 }
 
 export function draftBytes(draft: StoredCartDraft): Uint8Array {
@@ -99,21 +129,10 @@ export function draftBytes(draft: StoredCartDraft): Uint8Array {
 export interface SaveCartDraftInput {
   model: string;
   bytes: Uint8Array;
-  rig: unknown;
-  fx: unknown;
-  materials: unknown;
-  /** Already-serialized voxel model string, or null when none. */
-  voxel: string | null;
-  /** Parallax-scene backdrop object, or null when none. */
-  scene: unknown;
-  /** Animation timeline object, or null when none. */
-  anim: unknown;
-  /** Weather/particle system object, or null when none. */
-  particles: unknown;
-  /** Per-cell collision layer object, or null when none. */
-  collision: unknown;
-  /** Per-cell tile-flags layer object, or null when none. */
-  flags: unknown;
+  sidecars: Sidecars;
+  meta: CartMeta;
+  /** False for an automatic crash-recovery write; true when the creator saved. */
+  saved?: boolean;
 }
 
 /** Returns false when the write failed (e.g. localStorage quota exceeded). */
@@ -124,16 +143,10 @@ export function saveCartDraft(cartId: string, input: SaveCartDraftInput): boolea
   const draft: StoredCartDraft = {
     model: input.model,
     bytesBase64: toBase64(input.bytes),
-    rigJson: input.rig == null ? null : JSON.stringify(input.rig),
-    fxJson: input.fx == null ? null : JSON.stringify(input.fx),
-    materialsJson: input.materials == null ? null : JSON.stringify(input.materials),
-    voxelJson: input.voxel,
-    sceneJson: input.scene == null ? null : JSON.stringify(input.scene),
-    animJson: input.anim == null ? null : JSON.stringify(input.anim),
-    particlesJson: input.particles == null ? null : JSON.stringify(input.particles),
-    collisionJson: input.collision == null ? null : JSON.stringify(input.collision),
-    flagsJson: input.flags == null ? null : JSON.stringify(input.flags),
+    sidecars: input.sidecars,
+    meta: input.meta,
     savedAt: new Date().toISOString(),
+    saved: input.saved !== false,
   };
   try {
     window.localStorage.setItem(storageKey(cartId), JSON.stringify(draft));

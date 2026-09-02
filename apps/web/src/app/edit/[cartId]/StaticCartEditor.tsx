@@ -3,7 +3,7 @@
 /**
  * Static-demo entry into the editor (see src/lib/staticSite.ts).
  *
- * The server build resolves a cart's stored bytes, model, rig, and FX from the
+ * The server build resolves a cart's stored bytes, model and sidecars from the
  * database before mounting the workbench. The static build has no database, so
  * this client leaf does the same resolution in the browser:
  *
@@ -15,6 +15,11 @@
  *   3. Otherwise the workbench opens a fresh cart on the chosen starter, with
  *      model/starter read from the URL query (?model=pro&starter=parallax),
  *      which a statically exported server component cannot see.
+ *
+ * The sidecars come back from the draft as one registry bundle. Listing them
+ * here by hand is what made the demo build drop every mesh and world a creator
+ * built: this file passed `initialMesh={null}` and `initialWorld={null}` no
+ * matter what the draft held.
  */
 
 import { useEffect, useState, Suspense } from "react";
@@ -22,14 +27,9 @@ import { useSearchParams } from "next/navigation";
 
 import { resolveModelId } from "@/lib/consoleModel";
 import { resolveStarterId } from "@/lib/starter";
-import { parseRig, type WireRig } from "@/lib/rig";
-import { parseMaterials, type WireMaterials } from "@/lib/materials";
 import { draftBytes, loadCartDraft } from "@/lib/localCartStore";
 import { findDemoCart, demoCartUrl } from "@/lib/demoCatalog";
-import { parsePostFxSettings, parseScene, parseAnim, parseParticles, type AnimSpec, type ParticleSpec, type PostFxSettings, type SceneSpec } from "@cartbox/player";
-import type { CollisionData, FlagData } from "@cartbox/editor";
-import { parseCollision } from "@/lib/collision";
-import { parseFlags } from "@/lib/flags";
+import { emptySidecars, type Sidecars } from "@/lib/sidecars";
 import { EditorWorkbench } from "./EditorWorkbench";
 
 interface StaticCartEditorProps {
@@ -40,15 +40,9 @@ interface ResolvedCart {
   name: string;
   cartUrl: string | null;
   storedModel: string | null;
-  rig: WireRig | null;
-  fx: PostFxSettings | null;
-  materials: WireMaterials | null;
-  voxel: string | null;
-  scene: SceneSpec | null;
-  anim: AnimSpec | null;
-  particles: ParticleSpec | null;
-  collision: CollisionData | null;
-  flags: FlagData | null;
+  sidecars: Sidecars;
+  description: string;
+  tags: string[];
 }
 
 function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
@@ -63,18 +57,12 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
         new Blob([draftBytes(draft) as unknown as BlobPart], { type: "application/octet-stream" }),
       );
       setResolved({
-        name: demoCart ? `${demoCart.title} (local edits)` : "Draft cartridge",
+        name: draft.meta.title || (demoCart ? `${demoCart.title} (local edits)` : "Draft cartridge"),
         cartUrl: blobUrl,
         storedModel: draft.model,
-        rig: parseRig(draft.rigJson ? JSON.parse(draft.rigJson) : null),
-        fx: parsePostFxSettings(draft.fxJson ? JSON.parse(draft.fxJson) : null),
-        materials: parseMaterials(draft.materialsJson ? JSON.parse(draft.materialsJson) : null),
-        voxel: draft.voxelJson,
-        scene: parseScene(draft.sceneJson ? JSON.parse(draft.sceneJson) : null),
-        anim: parseAnim(draft.animJson ? JSON.parse(draft.animJson) : null),
-        particles: parseParticles(draft.particlesJson ? JSON.parse(draft.particlesJson) : null),
-        collision: parseCollision(draft.collisionJson ? JSON.parse(draft.collisionJson) : null),
-        flags: parseFlags(draft.flagsJson ? JSON.parse(draft.flagsJson) : null),
+        sidecars: draft.sidecars,
+        description: draft.meta.description,
+        tags: draft.meta.tags,
       });
       return () => URL.revokeObjectURL(blobUrl);
     }
@@ -82,15 +70,9 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
       name: demoCart?.title ?? "Draft cartridge",
       cartUrl: demoCart ? demoCartUrl(demoCart.id) : null,
       storedModel: demoCart?.consoleModel ?? null,
-      rig: null,
-      fx: null,
-      materials: null,
-      voxel: null,
-      scene: null,
-      anim: null,
-      particles: null,
-      collision: null,
-      flags: null,
+      sidecars: emptySidecars(),
+      description: "",
+      tags: [],
     });
     return undefined;
   }, [cartId]);
@@ -111,19 +93,9 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
       cartUrl={resolved.cartUrl}
       modelId={modelId}
       starterId={starterId}
-      initialRig={resolved.rig}
-      initialFx={resolved.fx}
-      initialMaterials={resolved.materials}
-      initialVoxel={resolved.voxel}
-      initialMesh={null}
-      initialWorld={null}
-      initialScene={resolved.scene}
-      initialAnim={resolved.anim}
-      initialParticles={resolved.particles}
-      initialCollision={resolved.collision}
-      initialFlags={resolved.flags}
-      initialDescription=""
-      initialTags={[]}
+      initialSidecars={resolved.sidecars}
+      initialDescription={resolved.description}
+      initialTags={resolved.tags}
     />
   );
 }
