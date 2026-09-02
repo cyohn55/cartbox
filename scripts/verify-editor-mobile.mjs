@@ -1,6 +1,13 @@
 // Verifies the editor fits and works on a phone: no horizontal overflow, the
 // canvas leads and fits the width, the tab strip swipes, tools flow under the
 // stage, and drawing still lands on the right pixels at CSS scale.
+//
+// It used to check the sprite tab and nothing else, which is how the four 3D
+// tabs came to have no phone story at all — an orbit camera inside a scrolling
+// page, shipped and never looked at on a small screen. Every tab is checked
+// now, and the ones that genuinely need a bigger screen have to *say so*
+// rather than render something unusable.
+//
 // Run like verify-console.mjs (Windows Node + CDP Chrome).
 
 import { chromium } from "playwright";
@@ -61,24 +68,57 @@ try {
   const after = await stageCanvas.screenshot();
   check("touch drawing still lands (scaled canvas)", !before.equals(after));
 
-  // 4. The tab strip scrolls and other editors lay out without overflow.
-  for (const tab of ["Map", "Code", "SFX", "Music"]) {
-    const tabButton = page.locator("nav button", { hasText: new RegExp(`^${tab}$`, "i") });
-    if ((await tabButton.count()) === 0) {
+  // 4. Every tab lays out without overflow — including the ones behind "More",
+  //    which is where the 3D editors live and where nothing was ever checked.
+  const BAR_TABS = ["Map", "Code", "SFX", "Music"];
+  const MORE_TABS = ["World", "Scene", "Mesh", "Anim", "Weather", "FX"];
+  /** Tabs that decline to render a viewport on a phone and say why instead. */
+  const SPATIAL_TABS = new Set(["World", "Mesh"]);
+
+  /** Click a tab, whether it sits on the bar or inside the More menu. */
+  const openTab = async (tab) => {
+    const onBar = page.locator("nav button", { hasText: new RegExp(`^${tab}$`, "i") });
+    if ((await onBar.count()) > 0) {
+      await onBar.first().click();
+      return true;
+    }
+    const more = page.locator("nav button", { hasText: /^More/ });
+    if ((await more.count()) === 0) return false;
+    await more.first().click();
+    await page.waitForTimeout(150);
+    const item = page.locator('[role="menuitem"]', { hasText: new RegExp(`^${tab}$`, "i") });
+    if ((await item.count()) === 0) return false;
+    // The menu closes on blur, so the click has to land on mousedown.
+    await item.first().dispatchEvent("mousedown");
+    return true;
+  };
+
+  for (const tab of [...BAR_TABS, ...MORE_TABS]) {
+    if (!(await openTab(tab))) {
       check(`${tab} tab reachable`, false, "tab not found");
       continue;
     }
-    await tabButton.first().click();
     await page.waitForTimeout(900);
-    const tabOverflow = await page.evaluate(() => ({
+    const state = await page.evaluate(() => ({
       scrollWidth: document.documentElement.scrollWidth,
       innerWidth: window.innerWidth,
+      // A tab that needs a bigger screen renders a notice and hides its body.
+      notice: document.body.innerText.includes("needs a larger screen"),
+      bodyVisible: [...document.querySelectorAll("div")].some(
+        (node) => node.className.includes("body") && node.getBoundingClientRect().height > 0,
+      ),
     }));
     check(
       `${tab} tab fits the phone`,
-      tabOverflow.scrollWidth <= tabOverflow.innerWidth + 1,
-      `${tabOverflow.scrollWidth}/${tabOverflow.innerWidth}`,
+      state.scrollWidth <= state.innerWidth + 1,
+      `${state.scrollWidth}/${state.innerWidth}`,
     );
+    if (SPATIAL_TABS.has(tab)) {
+      // The honest failure: say a 3D viewport needs a bigger screen. The
+      // dishonest one is rendering an orbit camera into a scrolling page.
+      check(`${tab} tab explains it needs a bigger screen`, state.notice);
+      check(`${tab} tab does not render an unusable viewport`, !state.bodyVisible);
+    }
   }
   await page.screenshot({ path: `${OUT}/51-editor-map.png` });
 

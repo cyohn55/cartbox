@@ -5,8 +5,11 @@ Scope: the Cartbox creation editor — `apps/web/src/app/edit/[cartId]/` (79 fil
 `packages/editor/src/` (~19.4k lines), and the save path in
 `apps/web/src/app/api/carts/[cartId]/`.
 
-Reviewed at `75439ca`. Nothing in this document has been implemented; it is a
-review with a proposed order of work.
+Reviewed at `75439ca`.
+
+**Status: implemented.** All eight defects are fixed and twelve of the fourteen
+upgrades have shipped; see §5 for what was deliberately left and why. The
+document is kept as the record of what was found and what was done about it.
 
 ---
 
@@ -270,7 +273,7 @@ the CSS anchor-positioning / popover API), and add Escape-to-close.
 
 ---
 
-## 4. Suggested order
+## 4. Order of work (as done)
 
 1. **D1 + U1** (sidecar registry) — kills a data-loss bug and the class it came
    from, and shrinks the save path by ~700 lines.
@@ -285,3 +288,57 @@ the CSS anchor-positioning / popover API), and add Escape-to-close.
    the shape.
 
 Items 1–4 are the ones I would not ship the editor publicly without.
+
+---
+
+## 5. What shipped, and what did not
+
+Everything in §2 and §3 is implemented except **U12** and part of **U6**, both
+recorded below with the reason rather than quietly dropped.
+
+### Not done: U12, splitting the giant files
+
+`VoxelEditor.tsx` (1,849 lines), `MapEditor.tsx` (1,104), `SpriteEditor.tsx`
+(1,003) and the 2,383-line shared CSS module are still that size. Splitting them
+is a large mechanical refactor with no behavioural payoff and a real regression
+risk in files with no component-level test coverage, and it would have tripled
+the size of a diff that already changes how every cart is saved. It is the right
+next piece of work, and it is easier now: the workbench shed its save path
+(`persistCart.ts`), its shortcut handling (`shortcuts.ts`) and its sidecar
+plumbing (`lib/sidecars.ts`) along the way, and the pixel editor shed its
+selection geometry (`pixelSelection.ts`).
+
+### Partly done: U6, the SFX model
+
+Per-tick **wave**, **arpeggio** and **pitch** are editable — the three channels
+`SFX_CHANNEL` had always named and nothing could write. The sample's `speed`,
+`octave` and `reverse` fields are still unreachable: they sit past the packed
+`data[]` region the WASM shim exposes, so reaching them needs a new `cbx_*`
+accessor in `shim.c` and an engine rebuild, which is engine work rather than
+editor work. `MusicTracker`'s tempo and speed are unreachable for the same
+reason.
+
+### Worth knowing about the audio preview
+
+`renderSfx` is the editor's own synthesis of the envelopes a creator has drawn,
+not the core's mixer. It reproduces per-tick volume, waveform, arpeggio and fine
+pitch over the cart's real 4-bit wavetables at the console's tick rate; it does
+not reproduce channel mixing or the envelope loop hardware. That is the right
+trade for "does this laser sound right", and the editor says so where a creator
+can see it.
+
+### Verification
+
+`tsc --noEmit` clean, `next build` succeeds (28 routes), and the suite went from
+1,651 to 1,794 passing tests — 143 new ones covering the sidecar registry and
+its route handler, the draft store (including the mesh/world regression stated
+directly), snapshot hashing and equality, the SFX synthesiser and the four
+envelope channels, the selection and clipboard geometry, the code-editor text
+operations, and the shortcut matcher. One pre-existing failure remains in
+`neon-city-cart.test.ts`, which imports a build script that is not in this
+repository; it is unrelated to the editor and was failing before this work.
+
+`scripts/verify-editor-mobile.mjs` now walks every tab rather than the sprite
+tab alone, and asserts that the two tabs with no phone layout say so instead of
+rendering an unusable viewport. It needs a running server and a CDP browser, so
+it was not executed here.

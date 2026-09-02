@@ -190,6 +190,12 @@ interface MapEditorProps {
   roughness: MaterialMap;
   emissive: MaterialMap;
   swatches: MaterialSwatches;
+  /**
+   * Changes when the cart in engine memory is replaced — an undo, a redo, or a
+   * bank switch. The editor re-reads rather than being remounted, so the
+   * camera, tool and zoom the creator set survive an undo.
+   */
+  resyncKey: string;
 }
 
 export function MapEditor({
@@ -207,6 +213,7 @@ export function MapEditor({
   roughness,
   emissive,
   swatches,
+  resyncKey,
 }: MapEditorProps) {
   // The cell space is the source of truth for everything above the ground; it is
   // seeded once from the cart and handed back up serialized after every action.
@@ -233,6 +240,24 @@ export function MapEditor({
   if (flagsRef.current === null) {
     flagsRef.current = TileFlags.deserialize(flags, map.width, map.height);
   }
+
+  /**
+   * The cart underneath was replaced — an undo, a redo, or a bank switch — so
+   * the three layers seeded once above are stale.
+   *
+   * Re-seeding beats being remounted, which is what used to happen: the tab was
+   * keyed on the revision, so every undo tore the whole map editor down and
+   * rebuilt it, discarding the camera, the zoom, the active tool and the brush.
+   * Undoing one tile stroke should not send the creator back to the default
+   * viewpoint. Derived during render, like the seeding it mirrors.
+   */
+  const resyncRef = useRef(resyncKey);
+  if (resyncRef.current !== resyncKey) {
+    resyncRef.current = resyncKey;
+    spaceRef.current = loadMapVoxelSpace(columnPayload, map.width, map.height);
+    collisionRef.current = CollisionMap.deserialize(collision, map.width, map.height);
+    flagsRef.current = TileFlags.deserialize(flags, map.width, map.height);
+  }
   const flagsMap = flagsRef.current;
   const [activeFlag, setActiveFlag] = useState(0);
 
@@ -248,6 +273,10 @@ export function MapEditor({
   const [planeKind, setPlaneKind] = useState<MapCellKind>("cross");
   const [zoom, setZoom] = useState(1);
   const [version, setVersion] = useState(0);
+  // Everything memoised on the cart's art has to re-derive after a resync too.
+  useEffect(() => {
+    setVersion((current) => current + 1);
+  }, [resyncKey]);
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
   const [spaceHover, setSpaceHover] = useState<SpaceHover | null>(null);
   const [spaceNote, setSpaceNote] = useState<string | null>(null);

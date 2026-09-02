@@ -147,6 +147,12 @@ export const SIDECARS = {
       const encoded = asString(raw);
       return encoded ? encodeMeshSidecar(decodeMeshSidecar(encoded)) : null;
     },
+    // A sidecar the decoder empties is a legitimate save — the creator removed
+    // their last mesh — so it clears the column instead of being rejected as
+    // malformed. Without this, deleting every mesh would 400 the whole save.
+    resolveUpdate: (body) => ({
+      value: typeof body === "string" ? encodeMeshSidecar(decodeMeshSidecar(body)) : null,
+    }),
   }),
   world: define<string>({
     column: "world",
@@ -159,6 +165,13 @@ export const SIDECARS = {
       const encoded = asString(raw);
       const parsed = encoded ? parseWorldScene(encoded) : null;
       return parsed ? JSON.stringify(parsed) : null;
+    },
+    // Like the mesh sidecar: a world the parser empties clears the column
+    // rather than failing the save the creator just asked for.
+    resolveUpdate: (body) => {
+      const encoded = asString(body);
+      const parsed = encoded ? parseWorldScene(encoded) : null;
+      return { value: parsed ? JSON.stringify(parsed) : null };
     },
   }),
   scene: define<SceneSpec>({

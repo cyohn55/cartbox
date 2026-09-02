@@ -97,9 +97,15 @@ interface ShaderEditorProps {
   /** The cart's FX stack, owned by the workbench so it persists on Save. */
   settings: PostFxSettings;
   onSettingsChange: (settings: PostFxSettings) => void;
+  /**
+   * Changes when the cart in engine memory is replaced — an undo, a redo, or a
+   * bank switch. The preview re-reads the art rather than being remounted, so
+   * the camera and source the creator chose survive an undo.
+   */
+  resyncKey: string;
 }
 
-export function ShaderEditor({ sheet, map, columnPayload, settings, onSettingsChange }: ShaderEditorProps) {
+export function ShaderEditor({ sheet, map, columnPayload, settings, onSettingsChange, resyncKey }: ShaderEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<PostFxPass | null>(null);
   const [source, setSource] = useState<FxSourceId>("screen");
@@ -124,11 +130,15 @@ export function ShaderEditor({ sheet, map, columnPayload, settings, onSettingsCh
   // channels are deliberately not passed: the software renderers behind both 3D
   // sources light by face normal and never read them, so building them would be
   // work whose result is discarded.
+  // `sheet` is a stable view onto engine memory, so its identity does not
+  // change when the cart underneath does; resyncKey is what says "re-read".
   const palette = useMemo(() => {
     const table = sheet.paletteRgb();
     return (index: number): Rgb => table[index] ?? WHITE;
-  }, [sheet]);
-  const atlas = useMemo(() => buildMapAtlas(sheet), [sheet]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sheet, resyncKey]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const atlas = useMemo(() => buildMapAtlas(sheet), [sheet, resyncKey]);
   const view = useMemo(() => ({ space, atlas, palette }), [space, atlas, palette]);
 
   const [orbit, setOrbit] = useState<FxOrbitCamera>(() => orbitCameraOnContent(space, sourceWidth));

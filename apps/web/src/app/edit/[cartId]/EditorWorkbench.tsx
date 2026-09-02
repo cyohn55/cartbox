@@ -385,6 +385,18 @@ function WorkbenchBody({
   );
   const [worldBrushHeight, setWorldBrushHeight] = useState(1);
 
+  /**
+   * "The cart in engine memory was replaced": an undo, a redo, or a bank
+   * switch. Every tab that caches something read from the engine watches this
+   * and re-reads.
+   *
+   * It used to be a React `key`, which remounted the whole tab — so undoing one
+   * pencil stroke also threw away the map camera, the open SFX sample, the code
+   * editor's scroll position and every tool selection. A tab that re-reads keeps
+   * the creator where they were.
+   */
+  const resyncKey = `${bank}:${revision}`;
+
   const sheet = useMemo(() => new SpriteSheet(editEngine), [editEngine]);
   const map = useMemo(() => new TileMap(editEngine), [editEngine]);
   const doc = useMemo(() => new CodeDocument(editEngine), [editEngine]);
@@ -971,7 +983,7 @@ function WorkbenchBody({
       )}
       {activeTab === "Map" && (
         <MapEditor
-          key={`${bank}:${revision}`}
+          resyncKey={resyncKey}
           sheet={sheet}
           map={map}
           columnPayload={mapColumns}
@@ -990,7 +1002,6 @@ function WorkbenchBody({
       )}
       {activeTab === "Scene" && (
         <SceneEditor
-          key={`scene:${revision}`}
           sheet={sheet}
           width={activeModel.width}
           height={activeModel.height}
@@ -1011,7 +1022,6 @@ function WorkbenchBody({
       )}
       {activeTab === "Anim" && (
         <AnimEditor
-          key={`anim:${revision}`}
           sheet={sheet}
           width={activeModel.width}
           height={activeModel.height}
@@ -1023,7 +1033,6 @@ function WorkbenchBody({
       )}
       {activeTab === "Weather" && (
         <ParticlesEditor
-          key={`particles:${revision}`}
           width={activeModel.width}
           height={activeModel.height}
           particles={particles}
@@ -1032,7 +1041,7 @@ function WorkbenchBody({
       )}
       {activeTab === "FX" && (
         <ShaderEditor
-          key={`${bank}:${revision}`}
+          resyncKey={resyncKey}
           sheet={sheet}
           map={map}
           columnPayload={mapColumns}
@@ -1040,8 +1049,8 @@ function WorkbenchBody({
           onSettingsChange={setFx}
         />
       )}
-      {activeTab === "SFX" && <SfxEditor bank={soundBank} revision={`${bank}:${revision}`} />}
-      {activeTab === "Music" && <MusicEditor tracker={tracker} bank={soundBank} revision={`${bank}:${revision}`} />}
+      {activeTab === "SFX" && <SfxEditor bank={soundBank} revision={resyncKey} />}
+      {activeTab === "Music" && <MusicEditor tracker={tracker} bank={soundBank} revision={resyncKey} />}
 
       {showDetails && (
         <DetailsPanel details={details} onChange={setDetails} onClose={() => setShowDetails(false)} />

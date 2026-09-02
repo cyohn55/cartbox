@@ -176,6 +176,8 @@ interface SpriteEditorProps {
   rig: SpriteRig;
   onRigChange: (rig: SpriteRig) => void;
   /** Which block of the sheet is open — owned above so an asset can address it. */
+  /** Changes when the cart in engine memory is replaced (undo, bank switch). */
+  resyncKey: string;
   selection: SpriteSelection;
   onSelectionChange: (selection: SpriteSelection) => void;
   /**
@@ -197,6 +199,7 @@ export function SpriteEditor({
   onSwatchesChange,
   rig,
   onRigChange,
+  resyncKey,
   selection,
   onSelectionChange,
   color,
@@ -229,6 +232,17 @@ export function SpriteEditor({
   const asepriteFileRef = useRef<HTMLInputElement>(null);
 
   const bump = () => setVersion((current) => current + 1);
+
+  /**
+   * The cart underneath was replaced — an undo, a redo, or a bank switch — so
+   * everything read from the sheet is stale. Bumping the version re-derives it
+   * all; the editor used to be remounted instead, which threw away the tool,
+   * the brush size, the zoom and the canvas selection every time a creator
+   * pressed Ctrl+Z.
+   */
+  useEffect(() => {
+    setVersion((current) => current + 1);
+  }, [resyncKey]);
 
   // Which optional rail sliders the active tool drives — asked of the tool table
   // rather than of a separate list of ids kept in step by hand.

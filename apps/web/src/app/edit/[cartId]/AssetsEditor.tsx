@@ -321,7 +321,7 @@ export function AssetsEditor({
 
       {medium === "pixels" ? (
         <SpriteEditor
-          key={`sprites:${bank}:${revision}`}
+          resyncKey={`${bank}:${revision}`}
           sheet={sheet}
           normals={normals}
           height={height}
