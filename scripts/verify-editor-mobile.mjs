@@ -8,6 +8,9 @@
 // now, and the ones that genuinely need a bigger screen have to *say so*
 // rather than render something unusable.
 //
+// It also checks the top bar at desktop widths, where the tab strip was being
+// squeezed to nothing by the action bar beside it.
+//
 // Run like verify-console.mjs (Windows Node + CDP Chrome).
 
 import { chromium } from "playwright";
@@ -124,6 +127,54 @@ try {
 
   check("no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
   await context.close();
+
+  // 5. The top bar, at the desktop widths where it is most crowded.
+  //
+  //    The bar carries the identity block, the bank stepper, the tab strip and
+  //    seven action buttons. The strip was the only shrinkable child, so flex
+  //    resolved the squeeze by taking its width — 287px of the 407px it needs at
+  //    1500px wide, and *zero* at 1100, leaving an editor with no reachable tab
+  //    navigation. It now wraps onto its own row instead, and these pin that:
+  //    every tab reachable, the strip inside the bar, and the tab content below
+  //    it rather than under it.
+  const desktop = await browser.newContext({ viewport: { width: 1500, height: 950 } });
+  for (const width of [1920, 1500, 1100]) {
+    const wide = await desktop.newPage();
+    await wide.setViewportSize({ width, height: 950 });
+    await wide.goto(BASE + "/edit/new", { waitUntil: "domcontentloaded" });
+    await wide.waitForURL("**/edit/**", { timeout: 10000 });
+    await wide.waitForSelector("canvas", { timeout: 20000 });
+    await wide.waitForTimeout(1200);
+
+    const bar = await wide.evaluate(() => {
+      const box = (el) => el.getBoundingClientRect();
+      const tabs = document.querySelector("nav[aria-label='Editors']");
+      // The editor's own bar, not the site nav header that precedes it.
+      const strip = tabs.closest("header");
+      const workbench = strip.parentElement;
+      const content = [...workbench.children].find(
+        (el) => el.tagName === "DIV" && box(el).height > 100,
+      );
+      return {
+        hidden: tabs.scrollWidth - tabs.clientWidth,
+        spill: Math.round(box(tabs).bottom - box(strip).bottom),
+        contentTop: content ? Math.round(box(content).top) : null,
+        barBottom: Math.round(box(strip).bottom),
+        tabCursor: getComputedStyle(tabs.querySelector("button")).cursor,
+      };
+    });
+    check(`w=${width}: every tab reachable`, bar.hidden === 0, `${bar.hidden}px hidden`);
+    check(`w=${width}: tab strip stays inside the bar`, bar.spill <= 0, `${bar.spill}px spill`);
+    check(
+      `w=${width}: tab content starts below the bar`,
+      bar.contentTop === null || bar.contentTop >= bar.barBottom - 1,
+      `${bar.contentTop} vs ${bar.barBottom}`,
+    );
+    // Every tab is reachable, so none may look forbidden.
+    check(`w=${width}: tabs look clickable`, bar.tabCursor === "pointer", bar.tabCursor);
+    await wide.close();
+  }
+  await desktop.close();
 } finally {
   await browser.close();
 }

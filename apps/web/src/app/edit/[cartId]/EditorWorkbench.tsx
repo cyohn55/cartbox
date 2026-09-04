@@ -634,6 +634,8 @@ function WorkbenchBody({
     setRecovery(null);
   }, [cartId, runnable, setSidecar]);
 
+  // The unsaved-work dot is drawn by CSS off `data-dirty`, not put in the label:
+  // "Save •" wraps onto two lines in the action bar and pushes the header taller.
   const saveLabel =
     saveState === "saving"
       ? "Saving…"
@@ -641,9 +643,7 @@ function WorkbenchBody({
         ? "Retry save"
         : saveState === "saved" && !dirty
           ? "Saved ✓"
-          : dirty
-            ? "Save •"
-            : "Save";
+          : "Save";
 
   // Export the exact in-memory cartridge as a .tic file the creator can back up,
   // share, or open in real TIC-80. Named from the cart title so downloads are

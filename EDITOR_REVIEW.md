@@ -361,6 +361,30 @@ operations, and the shortcut matcher. One pre-existing failure remains in
 repository; it is unrelated to the editor and was failing before this work.
 
 `scripts/verify-editor-mobile.mjs` now walks every tab rather than the sprite
-tab alone, and asserts that the two tabs with no phone layout say so instead of
-rendering an unusable viewport. It needs a running server and a CDP browser, so
-it was not executed here.
+tab alone, asserts that the two tabs with no phone layout say so instead of
+rendering an unusable viewport, and checks the top bar at desktop widths.
+
+### Looking at it in a browser
+
+The static export was built and driven with a real Chromium, which found five
+layout defects no unit test could have — three of them mine:
+
+- **Every tab showed a "forbidden" cursor.** `.tab { cursor: not-allowed }`
+  existed to serve the disabled "coming soon" state; removing that state (D7)
+  left the rule behind, so all five primary tabs looked unclickable.
+- **The tab strip was squeezed to nothing.** It needs 407px and was getting
+  287px at 1500px wide, 110px at 1280, and **zero at 1100** — an editor with no
+  reachable tab navigation at all. The bar already overflowed by 80px before
+  this branch; the `?` button added 28px more and tipped it over. The strip now
+  takes its own row below ~1650px, the width at which it stops fitting.
+- **The header row was a fixed 52px track**, so the wrapped strip rendered 28px
+  *below* the bar, on top of the tab content.
+- **The unsaved-work dot never rendered.** `.cbx-btn` is a global class, and a
+  bare `.cbx-btn` selector inside a `.module.css` is hashed — it matched
+  nothing. It needed `:global(...)`.
+- **"Save •" wrapped onto two lines**, making the whole bar taller. The dot is
+  drawn by CSS now, so no label can wrap.
+
+Each is pinned by a check in `verify-editor-mobile.mjs` at 1920, 1500 and
+1100px. The script needs a running server and a browser, so it does not run in
+CI as things stand.
