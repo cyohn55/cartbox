@@ -6,14 +6,21 @@
  * (Z..M is a chromatic octave), with per-row SFX and effects. In Song mode it's
  * the arrangement matrix, assigning patterns to the 4 channels across a track's
  * frames. Both edit the same cart the rest of the workbench does.
+ *
+ * A pattern can now be **heard**: Space renders it through the same synthesiser
+ * the SFX tab previews with, so a melody can be checked without pressing Run.
+ * Placing a note also sounds it, which is what makes entering one by ear
+ * possible at all.
  */
 
-import { useEffect, useState } from "react";
-import { MUSIC_COMMANDS, NOTE_NAMES, type MusicTracker } from "@cartbox/editor";
+import { useCallback, useEffect, useState } from "react";
+import { MUSIC_COMMANDS, NOTE_NAMES, renderPattern, renderSfx, type MusicTracker, type SoundBank } from "@cartbox/editor";
 
 import styles from "./editor.module.css";
 import { MusicGrid } from "./MusicGrid";
 import { SongArrangement } from "./SongArrangement";
+import { useAudioPreview } from "./useAudioPreview";
+import { activatesOnKey, isTypingTarget } from "./shortcuts";
 
 const OCTAVES = [0, 1, 2, 3, 4, 5, 6, 7];
 const SHARP = new Set([1, 3, 6, 8, 10]);
@@ -26,9 +33,13 @@ type Mode = "pattern" | "song";
 
 interface MusicEditorProps {
   tracker: MusicTracker;
+  /** The cart's samples, which voice the pattern preview. */
+  bank: SoundBank;
+  /** Changes when the cart underneath is replaced (bank switch, undo). */
+  revision: string;
 }
 
-export function MusicEditor({ tracker }: MusicEditorProps) {
+export function MusicEditor({ tracker, bank, revision }: MusicEditorProps) {
   const [mode, setMode] = useState<Mode>("pattern");
   const [track, setTrack] = useState(0);
   const [pattern, setPattern] = useState(0);
@@ -37,14 +48,50 @@ export function MusicEditor({ tracker }: MusicEditorProps) {
   const [sfx, setSfx] = useState(0);
   const [version, setVersion] = useState(0);
 
+  const preview = useAudioPreview();
   const bump = () => setVersion((current) => current + 1);
   const advance = () => setCursor((current) => (current + 1) % tracker.rows);
 
+  // The cart underneath was replaced — an undo, or a bank switch — so anything
+  // read from it is stale. Re-reading beats being remounted: the pattern and
+  // cursor the creator was working on survive.
+  useEffect(() => {
+    setVersion((current) => current + 1);
+  }, [revision]);
+
+  /** Sound one note through its sample, so notes can be entered by ear. */
+  const audition = useCallback(
+    (note: number, noteOctave: number, sampleIndex: number) => {
+      preview.play((sampleRate) =>
+        renderSfx({ ...bank.renderSpec(sampleIndex), note, octave: noteOctave, sampleRate }),
+      );
+    },
+    [bank, preview],
+  );
+
   const placeNote = (note: number) => {
     tracker.setNote(pattern, cursor, note, octave, sfx);
+    audition(note, octave, sfx);
     bump();
     advance();
   };
+
+  /** Play the whole pattern, laying each row's sample onto one buffer. */
+  const playPattern = useCallback(() => {
+    if (preview.playing) {
+      preview.stop();
+      return;
+    }
+    const rows = Array.from({ length: tracker.rows }, (_unused, row) => {
+      const cell = tracker.getCell(pattern, row);
+      return cell.kind === "note"
+        ? { note: cell.note ?? 0, octave: cell.octave ?? 4, sfx: cell.sfx ?? 0 }
+        : { note: null, octave: 4, sfx: 0 };
+    });
+    preview.play((sampleRate) =>
+      renderPattern({ rows, sample: (index) => bank.renderSpec(index), sampleRate }),
+    );
+  }, [bank, pattern, preview, tracker]);
   const placeStop = () => {
     tracker.setStop(pattern, cursor);
     bump();
@@ -75,8 +122,12 @@ export function MusicEditor({ tracker }: MusicEditorProps) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (mode !== "pattern") return; // the piano row only edits patterns
-      const target = event.target as HTMLElement;
-      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
+      if (isTypingTarget(event.target) || activatesOnKey(event.target, event.key)) return;
+      if (event.key === " ") {
+        event.preventDefault();
+        playPattern();
+        return;
+      }
       const note = KEY_TO_NOTE[event.key.toLowerCase()];
       if (note !== undefined) {
         event.preventDefault();
@@ -118,6 +169,19 @@ export function MusicEditor({ tracker }: MusicEditorProps) {
 
         {mode === "pattern" ? (
           <>
+            <div>
+              <div className={styles.groupLabel}>Preview</div>
+              <button
+                type="button"
+                className="cbx-btn cbx-btn-accent"
+                onClick={playPattern}
+                disabled={!preview.supported}
+                title={preview.supported ? "Play this pattern (Space)" : "This browser has no Web Audio"}
+              >
+                {preview.playing ? "■ Stop" : "▶ Play pattern"}
+              </button>
+            </div>
+
             <div>
               <div className={styles.groupLabel}>Octave</div>
               <div className={styles.waveGrid}>

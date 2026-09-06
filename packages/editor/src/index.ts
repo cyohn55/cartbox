@@ -57,7 +57,16 @@ export {
   FLAG_LABELS,
   type FlagData,
 } from "./model/TileFlags";
-export { SoundBank, SFX_CHANNEL, type SfxLoop } from "./model/SoundBank";
+export { SoundBank, SFX_CHANNEL, SFX_CHANNEL_INFO, type SfxChannelName, type SfxLoop } from "./model/SoundBank";
+export {
+  renderSfx,
+  renderPattern,
+  noteFrequency,
+  SFX_TICK_HZ,
+  type PatternStep,
+  type PatternRenderRequest,
+  type SfxRenderRequest,
+} from "./audio/sfxSynth";
 export { NormalMap } from "./model/NormalMap";
 export { MaterialMap } from "./model/MaterialMap";
 export {

@@ -151,6 +151,30 @@ export interface CartEngine {
   /** Set the waveform index (0..15) at one envelope tick. */
   setSfxWave(sample: number, tick: number, value: number): void;
 
+  /**
+   * Arpeggio offset (0..15 semitones above the played note) at one envelope
+   * tick. Sits in the second byte of the tick's packed pair, beside the pitch
+   * nibble, exactly as `volume` and `wave` share the first.
+   */
+  getSfxChord(sample: number, tick: number): number;
+
+  /** Set the arpeggio offset (0..15 semitones) at one envelope tick. */
+  setSfxChord(sample: number, tick: number, value: number): void;
+
+  /** Fine pitch offset (-8..7) at one envelope tick. */
+  getSfxPitch(sample: number, tick: number): number;
+
+  /** Set the fine pitch offset (-8..7) at one envelope tick. */
+  setSfxPitch(sample: number, tick: number, value: number): void;
+
+  /**
+   * Release whatever the engine holds. On the WASM engine this frees the
+   * cartridge in the module's heap; the editor calls it when it unmounts, and
+   * without it every visit to the editor stranded a cartridge there for the
+   * life of the page.
+   */
+  dispose(): void;
+
   /** Amplitude (0..15) of a custom waveform at one step. */
   getWaveformSample(waveform: number, step: number): number;
 

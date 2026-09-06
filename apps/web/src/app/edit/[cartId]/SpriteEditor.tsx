@@ -63,7 +63,9 @@ import {
   type RailSlots,
 } from "./workbenchPanels";
 import { capabilitiesOf } from "./toolCapabilities";
-import { TOOLS, MAX_BRUSH_WEIGHT, MAX_TOLERANCE, type Tool } from "./tools";
+import { SPRITE_TOOL_SHORTCUTS, TOOLS, MAX_BRUSH_WEIGHT, MAX_TOLERANCE, type Tool } from "./tools";
+import { MAX_ZOOM, MIN_ZOOM } from "./PixelCanvas";
+import { useShortcuts, type Shortcut } from "./shortcuts";
 
 type Layer = "albedo" | "normal" | "material" | "height" | "specular" | "roughness" | "emissive";
 
@@ -140,6 +142,9 @@ const TOOL_HINT: Record<Tool, string> = {
   eraser: "Drag to clear pixels back to colour 0 — transparent wherever the sprite is drawn over something.",
   fill: "Click to flood the connected run of matching pixels. Raise Tolerance to spread across near-matching shades.",
   wand: "Click to select the connected run of matching pixels. Raise Tolerance to grab shaded neighbours too.",
+  marquee:
+    "Drag out a box to select it, then drag inside it to move it. Arrows nudge, H and V flip, R rotates, Ctrl+C/X/V copy, cut and paste.",
+  picker: "Click a pixel to take its colour as the active one. Alt-click does the same with any tool held.",
   line: "Drag from one point to another; the line previews live and commits when you let go.",
   rect: "Drag out a rectangle; it previews live and commits when you let go.",
   ellipse: "Drag out an ellipse from corner to corner; it previews live and commits when you let go.",
@@ -171,6 +176,8 @@ interface SpriteEditorProps {
   rig: SpriteRig;
   onRigChange: (rig: SpriteRig) => void;
   /** Which block of the sheet is open — owned above so an asset can address it. */
+  /** Changes when the cart in engine memory is replaced (undo, bank switch). */
+  resyncKey: string;
   selection: SpriteSelection;
   onSelectionChange: (selection: SpriteSelection) => void;
   /**
@@ -192,6 +199,7 @@ export function SpriteEditor({
   onSwatchesChange,
   rig,
   onRigChange,
+  resyncKey,
   selection,
   onSelectionChange,
   color,
@@ -203,6 +211,7 @@ export function SpriteEditor({
   const setSpriteSize = (next: number) => onSelectionChange({ ...selection, tilesPerSide: next });
   const setColor = onColorChange;
   const [tool, setTool] = useState<Tool>("pencil");
+  const [zoom, setZoom] = useState(1); // on-screen scale of the pixel canvas
   const [weight, setWeight] = useState(1); // brush/line thickness in pixels
   const [tolerance, setTolerance] = useState(0); // fill/wand colour tolerance (0..100)
   const [fillShape, setFillShape] = useState(false); // rect/ellipse: fill interior vs outline
@@ -223,6 +232,17 @@ export function SpriteEditor({
   const asepriteFileRef = useRef<HTMLInputElement>(null);
 
   const bump = () => setVersion((current) => current + 1);
+
+  /**
+   * The cart underneath was replaced — an undo, a redo, or a bank switch — so
+   * everything read from the sheet is stale. Bumping the version re-derives it
+   * all; the editor used to be remounted instead, which threw away the tool,
+   * the brush size, the zoom and the canvas selection every time a creator
+   * pressed Ctrl+Z.
+   */
+  useEffect(() => {
+    setVersion((current) => current + 1);
+  }, [resyncKey]);
 
   // Which optional rail sliders the active tool drives — asked of the tool table
   // rather than of a separate list of ids kept in step by hand.
@@ -384,6 +404,36 @@ export function SpriteEditor({
   const paintsPalette = layer === "albedo" || layer === "material";
   const activeValue = paintsPalette ? color : layer === "normal" ? direction : level;
   const setActiveValue = paintsPalette ? setColor : layer === "normal" ? setDirection : setLevel;
+
+  /**
+   * Single-key tool selection and brush sizing.
+   *
+   * Every binding comes from the tool table, so a tool cannot be added to the
+   * palette and left unbound — or bound to a key the help overlay never lists.
+   * `useShortcuts` suppresses bare letters while a field has focus, which is
+   * what keeps "b" from switching tools while someone types a sprite's name.
+   */
+  const toolShortcuts = useMemo<ReadonlyArray<readonly [Shortcut, () => void]>>(
+    () => [
+      ...SPRITE_TOOL_SHORTCUTS.map(
+        (binding) =>
+          [
+            { key: binding.key, label: binding.label, group: "Tools" as const },
+            () => setTool(binding.tool),
+          ] as const,
+      ),
+      [
+        { key: "[", label: "Smaller brush", group: "Tools" as const },
+        () => setWeight((current) => Math.max(1, current - 1)),
+      ],
+      [
+        { key: "]", label: "Bigger brush", group: "Tools" as const },
+        () => setWeight((current) => Math.min(MAX_BRUSH_WEIGHT, current + 1)),
+      ],
+    ],
+    [],
+  );
+  useShortcuts(toolShortcuts);
   const paletteColors = paintsPalette
     ? sheet.cssPalette()
     : layer === "normal"
@@ -638,6 +688,16 @@ export function SpriteEditor({
 
     toolOptions: (
       <>
+        <RangeControl
+          label="Zoom"
+          min={MIN_ZOOM * 100}
+          max={MAX_ZOOM * 100}
+          step={25}
+          value={Math.round(zoom * 100)}
+          onChange={(next) => setZoom(next / 100)}
+          ariaLabel="Canvas zoom"
+          display={`${Math.round(zoom * 100)}%`}
+        />
         {toolControls.weighted && (
           <RangeControl
             label="Brush size"
@@ -972,8 +1032,10 @@ export function SpriteEditor({
           tolerance={tolerance}
           fillShape={fillShape}
           version={version}
+          zoom={zoom}
           onEdit={bump}
           onHover={setHover}
+          onPickValue={setActiveValue}
           // Only over albedo/material: on Height, ticking "this pixel has height
           // data" would annotate the very plane it was read from.
           coverage={showCoverage && paintsPalette ? coverage.pixels : null}

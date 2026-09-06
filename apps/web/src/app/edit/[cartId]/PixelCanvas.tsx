@@ -1,16 +1,28 @@
 "use client";
 
 /**
- * The zoomed 8x8 editing surface — the hero of the sprite editor. Draws the
- * current tile at a large cell size with a pixel grid, a hover outline, and a
- * live coordinate report. Painting mutates the SpriteSheet and asks the parent
- * to re-render via onEdit.
+ * The zoomed editing surface — the hero of the sprite editor. Draws the current
+ * tile at a large cell size with a pixel grid, a hover outline, and a live
+ * coordinate report. Painting mutates the SpriteSheet and asks the parent to
+ * re-render via onEdit.
  *
- * Tools work in three families:
+ * Tools work in four families:
  * - immediate (pencil/eraser/fill) — mutate the surface as the pointer moves;
  * - shapes (line/rect/ellipse) — preview while dragging, commit on release;
- * - magic wand — selects the contiguous same-value region; while a selection
- *   is active every tool only affects selected pixels (Esc clears, Del erases).
+ * - selections (wand, marquee) — mark a region without painting it;
+ * - the colour picker, which takes a value rather than placing one. Alt-drag
+ *   does the same thing with whatever tool is active, which is the reflex most
+ *   pixel artists arrive with.
+ *
+ * A selection is what the editing verbs act on. It used to be erasable and
+ * nothing else; now it can also be moved, nudged, copied, cut, pasted, flipped
+ * and rotated — the operations that make a pixel editor feel finished. The
+ * geometry for all of that lives in `pixelSelection.ts`, pure and unit-tested;
+ * this file only binds it to pointers and keys.
+ *
+ * Zoom is the artist's, not the layout's. The canvas used to be pinned to a
+ * fixed on-screen size, so a 32×32 block drew at ~11px cells and could not be
+ * enlarged.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -33,12 +45,28 @@ import {
   type PixelPoint,
   type ToleranceMatch,
 } from "./shapeTools";
-import { SHAPE_TOOLS, WEIGHTED_TOOLS, type Tool } from "./tools";
+import {
+  clearSelection,
+  copySelection,
+  marqueeSelection,
+  moveSelection,
+  pasteStamp,
+  rotateStamp,
+  flipStampHorizontal,
+  flipStampVertical,
+  selectionBounds,
+  transformSelection,
+  type Stamp,
+} from "./pixelSelection";
+import { SELECTION_TOOLS, SHAPE_TOOLS, WEIGHTED_TOOLS, type Tool } from "./tools";
 
-// The canvas targets a fixed on-screen size; the per-pixel cell shrinks as the
-// surface grows (8×8 → 45px cells, 32×32 → ~11px), keeping the stage stable.
+// The canvas targets this on-screen size at zoom 1; the per-pixel cell shrinks
+// as the surface grows (8×8 → 45px cells, 32×32 → ~11px), keeping the stage
+// stable. Zoom multiplies it, so a 32×32 block can be worked on at any size.
 const TARGET_CANVAS_PX = 360;
 const MIN_CELL_PX = 6;
+export const MIN_ZOOM = 0.5;
+export const MAX_ZOOM = 4;
 const SELECTION_STROKE = "rgba(140, 200, 255, 0.95)";
 // The coverage tick. Warm and semi-transparent so it reads as an annotation over
 // the art rather than as a pixel someone painted.
@@ -67,6 +95,10 @@ interface PixelCanvasProps {
    * would otherwise compete with the art it annotates.
    */
   coverage?: ReadonlySet<number> | null;
+  /** On-screen scale, 0.5..4. The pixel grid stays crisp at any of them. */
+  zoom?: number;
+  /** Take a value from the art as the active colour (the picker, and Alt-drag). */
+  onPickValue?: (value: number) => void;
 }
 
 export function PixelCanvas({
@@ -82,6 +114,8 @@ export function PixelCanvas({
   onEdit,
   onHover,
   coverage = null,
+  zoom = 1,
+  onPickValue,
 }: PixelCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const painting = useRef(false);
@@ -92,7 +126,17 @@ export function PixelCanvas({
   const previewPoints = useRef<PixelPoint[]>([]);
   // Magic-wand selection, as pixel keys (y * tileSize + x). Null = no selection.
   const [selection, setSelection] = useState<Set<number> | null>(null);
-  const cellPx = Math.max(MIN_CELL_PX, Math.floor(TARGET_CANVAS_PX / surface.tileSize));
+  // Marquee drags: the anchor, and whether the drag is moving an existing
+  // selection rather than drawing a new one.
+  const marqueeAnchor = useRef<PixelPoint | null>(null);
+  const movingFrom = useRef<PixelPoint | null>(null);
+  // The clipboard is a ref, not state: pasting reads it, nothing renders it,
+  // and it must survive a tool change without re-rendering the canvas.
+  const clipboard = useRef<Stamp | null>(null);
+  const cellPx = Math.max(
+    MIN_CELL_PX,
+    Math.round((TARGET_CANVAS_PX / surface.tileSize) * Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom))),
+  );
   const size = surface.tileSize * cellPx;
 
   const inSelection = useCallback(
@@ -226,18 +270,77 @@ export function PixelCanvas({
     shapeAnchor.current = null;
   }, [surface, page, tile]);
 
-  // Esc clears the selection; Delete/Backspace erases the selected pixels.
+  /**
+   * Everything a creator can do to a selection from the keyboard.
+   *
+   * Bound here rather than in the workbench because every verb needs the
+   * surface, the open tile and the live selection — state this component owns.
+   * Paste is the one binding that works without a selection, since its whole
+   * job is to create one.
+   */
   useEffect(() => {
-    if (!selection) return;
+    const size = surface.tileSize;
     const handleKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
-      if (event.key === "Escape") {
-        setSelection(null);
-      } else if (event.key === "Delete" || event.key === "Backspace") {
-        for (const key of selection) {
-          surface.setPixel(page, tile, key % surface.tileSize, Math.floor(key / surface.tileSize), 0);
+      const mod = event.ctrlKey || event.metaKey;
+
+      // Paste lands at the current selection's corner, or at the origin, and
+      // becomes the new selection so it can be nudged into place immediately.
+      if (mod && event.key.toLowerCase() === "v") {
+        const stamp = clipboard.current;
+        if (!stamp) return;
+        event.preventDefault();
+        const corner = selection ? selectionBounds(selection, size) : null;
+        setSelection(pasteStamp(surface, page, tile, stamp, corner?.left ?? 0, corner?.top ?? 0, size));
+        onEdit();
+        return;
+      }
+
+      if (!selection || selection.size === 0) return;
+
+      if (mod && (event.key.toLowerCase() === "c" || event.key.toLowerCase() === "x")) {
+        event.preventDefault();
+        clipboard.current = copySelection(surface, page, tile, selection, size);
+        if (event.key.toLowerCase() === "x") {
+          clearSelection(surface, page, tile, selection, size);
+          onEdit();
         }
+        return;
+      }
+      if (mod) return; // leave every other chord to the workbench
+
+      switch (event.key) {
+        case "Escape":
+          setSelection(null);
+          return;
+        case "Delete":
+        case "Backspace":
+          event.preventDefault();
+          clearSelection(surface, page, tile, selection, size);
+          onEdit();
+          return;
+        case "ArrowLeft":
+        case "ArrowRight":
+        case "ArrowUp":
+        case "ArrowDown": {
+          event.preventDefault();
+          const dx = event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0;
+          const dy = event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0;
+          setSelection(moveSelection(surface, page, tile, selection, size, dx, dy));
+          onEdit();
+          return;
+        }
+        default:
+          break;
+      }
+
+      const key = event.key.toLowerCase();
+      const transform =
+        key === "h" ? flipStampHorizontal : key === "v" ? flipStampVertical : key === "r" ? rotateStamp : null;
+      if (transform) {
+        event.preventDefault();
+        setSelection(transformSelection(surface, page, tile, selection, size, transform));
         onEdit();
       }
     };
@@ -284,10 +387,22 @@ export function PixelCanvas({
     onEdit();
   };
 
+  /** Take the value under the cursor as the active one. */
+  const pick = (cell: PixelPoint) => {
+    onPickValue?.(surface.getPixel(page, tile, cell.x, cell.y));
+  };
+
   const handleDown = (event: React.PointerEvent) => {
     const cell = cellFromEvent(event);
     if (!cell) return;
     (event.target as HTMLElement).setPointerCapture(event.pointerId);
+
+    // Alt is the eyedropper with any tool held — the reflex most pixel artists
+    // arrive with, and it beats round-tripping through the tool rail.
+    if (event.altKey || tool === "picker") {
+      pick(cell);
+      return;
+    }
 
     if (tool === "wand") {
       setSelection(
@@ -295,6 +410,19 @@ export function PixelCanvas({
       );
       return;
     }
+
+    if (tool === "marquee") {
+      // Pressing inside an existing selection drags it; pressing outside starts
+      // a new box. That is what makes "select, then move" one gesture.
+      if (selection?.has(pixelKey(cell.x, cell.y, surface.tileSize))) {
+        movingFrom.current = cell;
+      } else {
+        marqueeAnchor.current = cell;
+        setSelection(marqueeSelection(cell, cell, surface.tileSize));
+      }
+      return;
+    }
+
     if (SHAPE_TOOLS.has(tool)) {
       shapeAnchor.current = cell;
       previewPoints.current = [cell];
@@ -309,6 +437,25 @@ export function PixelCanvas({
     const cell = cellFromEvent(event);
     hoverCell.current = cell;
     onHover(cell);
+
+    if (event.altKey && event.buttons > 0 && cell) {
+      pick(cell);
+      return;
+    }
+    if (marqueeAnchor.current && cell) {
+      setSelection(marqueeSelection(marqueeAnchor.current, cell, surface.tileSize));
+      return;
+    }
+    if (movingFrom.current && cell && selection) {
+      const dx = cell.x - movingFrom.current.x;
+      const dy = cell.y - movingFrom.current.y;
+      if (dx !== 0 || dy !== 0) {
+        setSelection(moveSelection(surface, page, tile, selection, surface.tileSize, dx, dy));
+        movingFrom.current = cell;
+        onEdit();
+      }
+      return;
+    }
     if (shapeAnchor.current && cell) {
       previewPoints.current = shapePoints(shapeAnchor.current, cell);
       draw();
@@ -321,6 +468,8 @@ export function PixelCanvas({
 
   const stop = (event: React.PointerEvent) => {
     painting.current = false;
+    marqueeAnchor.current = null;
+    movingFrom.current = null;
     if (shapeAnchor.current) {
       const cell = cellFromEvent(event) ?? previewPoints.current[previewPoints.current.length - 1] ?? null;
       const anchor = shapeAnchor.current;
@@ -357,7 +506,9 @@ export function PixelCanvas({
       {selection && (
         <div className={styles.selectionBar}>
           <span className="data">{selection.size} px selected</span>
-          <span className={styles.selectionHint}>Esc clears · Del erases</span>
+          <span className={styles.selectionHint}>
+            drag to move · arrows nudge · H/V flip · R rotate · Ctrl+C/X/V · Del erases · Esc clears
+          </span>
           <button type="button" className="cbx-btn" onClick={() => setSelection(null)}>
             Clear
           </button>

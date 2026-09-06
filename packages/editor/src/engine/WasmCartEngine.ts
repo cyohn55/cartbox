@@ -226,6 +226,34 @@ export class WasmCartEngine implements CartEngine {
     heap[offset] = ((heap[offset] ?? 0) & 0x0f) | ((clampSfx(value) & 0x0f) << 4);
   }
 
+  // A tick occupies two bytes of the bitfield-packed sample: `volume:4, wave:4`
+  // in the first and `chord:4, pitch:4` in the second, little-endian, so the
+  // same low/high-nibble split applies to both. The shim's own loop-channel
+  // comment names the four channels in that order.
+  getSfxChord(sample: number, tick: number): number {
+    if (!inSfxRange(sample, tick)) return 0;
+    return (this.heap()[this.sfxByteOffset(sample, tick) + 1] ?? 0) & 0x0f;
+  }
+
+  setSfxChord(sample: number, tick: number, value: number): void {
+    if (!inSfxRange(sample, tick)) return;
+    const heap = this.heap();
+    const offset = this.sfxByteOffset(sample, tick) + 1;
+    heap[offset] = ((heap[offset] ?? 0) & 0xf0) | (clampSfx(value) & 0x0f);
+  }
+
+  getSfxPitch(sample: number, tick: number): number {
+    if (!inSfxRange(sample, tick)) return 0;
+    return fromSignedNibble(((this.heap()[this.sfxByteOffset(sample, tick) + 1] ?? 0) >> 4) & 0x0f);
+  }
+
+  setSfxPitch(sample: number, tick: number, value: number): void {
+    if (!inSfxRange(sample, tick)) return;
+    const heap = this.heap();
+    const offset = this.sfxByteOffset(sample, tick) + 1;
+    heap[offset] = ((heap[offset] ?? 0) & 0x0f) | (toSignedNibble(value) << 4);
+  }
+
   // Material channels live in their bank's sprite pages, stored in tiles like
   // pixels (same bit depth), but the value is a direction/ramp index, not colour.
   private materialTileBaseOffset(channel: MaterialChannel, page: SpritePage, tile: number): number {
@@ -408,6 +436,18 @@ export class WasmCartEngine implements CartEngine {
 
 function inSfxRange(sample: number, tick: number): boolean {
   return sample >= 0 && sample < SFX_COUNT && tick >= 0 && tick < SFX_TICKS;
+}
+
+/** Pitch is a signed 4-bit field: 0..7 positive, 8..15 the negatives -8..-1. */
+export function fromSignedNibble(nibble: number): number {
+  const value = nibble & 0x0f;
+  return value > 7 ? value - 16 : value;
+}
+
+/** Clamp to -8..7 and pack as two's complement in a nibble. */
+export function toSignedNibble(value: number): number {
+  const clamped = Math.max(-8, Math.min(7, Math.trunc(value) || 0));
+  return (clamped < 0 ? clamped + 16 : clamped) & 0x0f;
 }
 
 function clampSfx(value: number): number {
