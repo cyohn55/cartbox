@@ -10,6 +10,12 @@
 > that would dissolve the aesthetic, the approachability, and the fixed-spec
 > assumptions the platform layer depends on.
 
+>
+> **Where this goes next:** `ERA_MODELS.md` extends this abstraction along a
+> second axis — each future model replicates a distinct *era* of gaming
+> history (PS1, N64, and eventually 360) rather than another spec of the same
+> era. Classic stays byte-compatible with TIC-80 as one member of that family.
+
 ---
 
 ## 1. The `ConsoleModel` abstraction

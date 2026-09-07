@@ -9,7 +9,7 @@
 
 1. **Marketplace first, editor second.** TIC-80's engine already exists and is excellent. The business is the *distribution layer* (gallery, payments, remix, jams). Build web/marketplace value before touching the desktop app.
 2. **Ship playable in the browser on day one of real work.** A public URL where anyone can play an existing `.tic` cartridge is the earliest thing that proves the whole idea and can seed a waitlist.
-3. **Stay compatible with the existing TIC-80 cartridge format.** Don't fork the VM's behavior — inherit the entire existing catalog of community carts as instant seed content.
+3. **Stay compatible with the existing TIC-80 cartridge format.** Don't fork the VM's behavior — inherit the entire existing catalog of community carts as instant seed content. This binds the **Classic** model specifically: later models target other eras of gaming history with their own formats, and Classic stays TIC-80-compatible as one member of that family (see `ERA_MODELS.md`).
 4. **Respect the community.** Contribute fixes upstream, credit TIC-80 prominently, lead with creator revenue-share as the reason to join. Never present it as a replacement for the free tool.
 
 ---
