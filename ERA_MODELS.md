@@ -203,19 +203,45 @@ outright:
 > (`renderMeshScene` in `@cartbox/editor`) draws the meshes straight into the
 > framebuffer here."*
 
-Meanwhile a working WebGPU triangle pipeline already exists, but only on the
-authoring side, and scattered across route directories:
+WebGPU code already existed on the authoring side, scattered across route
+directories — but a correction to an earlier reading of it, because it changes
+the size of the job:
 
-| File | Lines | Location |
-|---|---|---|
-| `MapGpuRenderer.ts` | 913 | `apps/web/src/app/edit/[cartId]/` |
-| `WebGpuLitRenderer.ts` | 313 | `apps/web/src/app/edit/[cartId]/` |
-| `WebGpuVoxelRenderer.ts` | 335 | `apps/web/src/app/onboarding/handheld/` |
+| File | Lines | Location | Draws |
+|---|---|---|---|
+| `MapGpuRenderer.ts` | 913 | `apps/web/src/app/edit/[cartId]/` | A voxel surface mesh (`voxelModelToMesh`) |
+| `WebGpuVoxelRenderer.ts` | 335 | `apps/web/src/app/onboarding/handheld/` | Instanced cubes |
+| `WebGpuLitRenderer.ts` | 313 | `apps/web/src/app/edit/[cartId]/` | A full-screen sprite-lighting pass — no geometry at all |
 
-1,561 lines of renderer living in Next.js page directories, drawing editor
-previews only. An N64-era model cannot run at 60 fps in a browser tab on a CPU
-rasteriser, so promoting these into `packages/player` stops being a cleanup and
-becomes the foundation the entire era family stands on.
+Only the first is a general triangle pipeline, and none of the three consumes
+the `MeshAsset` vertex format the player's overlays actually carry. So this was
+never a file move. `MapGpuRenderer` is the proven *pattern* — device handling,
+depth, passes, readback-free presentation — and the player needed a renderer
+written against it, not relocated from it.
+
+An N64-era model cannot run at 60 fps in a browser tab on a CPU rasteriser, so
+that renderer is the foundation the entire era family stands on.
+
+**Shipped** (`packages/player/src/render/`):
+
+- `sceneRenderer.ts` — the seam. Both overlays called `renderMeshScene`
+  *directly*, which is precisely why there was no GPU path: the rasteriser was a
+  function they invoked, not a dependency they could be handed. They now draw
+  through a `SceneRenderer`.
+- `WebgpuSceneRenderer.ts` — the GPU path, shading matched to the software
+  rasteriser exactly: two-sided Lambert with an ambient floor, nearest-sampled
+  wrapped textures, glTF's flipped V, the same alpha-discard threshold, and the
+  same non-inverse-transpose normal basis. Parity is the contract — a cart must
+  not look different depending on the viewer's browser.
+- `scenePacking.ts` — the pure half (uniform layout, vertex interleaving,
+  readback unpadding, light resolution), so the parts that fail silently on a
+  GPU are the parts covered by tests.
+- `createSceneRenderer.ts` — the probe-and-fall-back factory. Unlike
+  `createLightingLayer` it never returns null: the software path needs nothing
+  from the platform, so no caller needs a third branch.
+
+The player builds one renderer per cart, shared by both overlays, and only when
+something 3D is declared — a plain 2D cart never touches WebGPU.
 
 **The shape to copy** is `packages/player/src/lighting/createLightingLayer.ts`,
 which already solves both hard parts: `getWebgpuDevice()` memoises one adapter
@@ -225,20 +251,56 @@ canvas creation because *"a canvas is locked to one context type once
 deviceProvider)` mirroring that signature gets WebGPU when available, software
 when not, and `null` never.
 
-**The constraint to respect:** the GPU path must *read back into the
-framebuffer*, not present to its own swapchain. `MeshOverlaySurface` and
-`WorldOverlaySurface` are decorators over the two-method `DisplaySurface`
-interface; they write into an RGBA buffer and share a depth buffer with the
-compositing step. A renderer that presents directly breaks lighting, post-FX,
-and depth-correct occlusion. That means render-to-texture plus
-`copyTextureToBuffer`, which costs a pipeline stall per frame — so at 240×136 the
-software path may still win, and the real gain is in **triangle count**, not
-resolution.
+**The constraint that shaped it:** the GPU path must *read back into the
+framebuffer*, not present to its own swapchain. The overlays are decorators over
+the two-method `DisplaySurface` interface, so their output has to flow onward
+through lighting and post-FX; a renderer that presents directly breaks grading,
+bloom and depth-correct occlusion.
 
-**Keeping the software path alive:** inject `() => Promise.resolve(null)` as the
-device provider in tests so both backends run against the same fixtures, and
-keep `renderMeshScene` as the reference implementation to assert GPU output
-against. Otherwise the fallback rots and fails the first browser that needs it.
+That collides with `blit` being synchronous while GPU readback is not. Resolved
+by rendering one frame behind: the renderer submits the current frame and
+composites the most recently *completed* readback, typically one to two frames
+old, on the overlay only — the cart's own 2D frame is never delayed. Waiting on
+`mapAsync` inside `blit` would turn a GPU win into a pipeline bubble worse than
+the CPU path it replaces. Until the first readback lands, the software
+rasteriser draws, so there is no pop-in on the opening frames.
+
+The depth buffer turned out not to need reading back at all: it is scratch
+internal to a single `renderMeshScene` call and no caller reads it, so the GPU
+path keeps depth on the GPU. That is now stated in `SceneDraw`, since a future
+caller reading it would be a real bug.
+
+**Keeping the software path alive:** `createSceneRenderer` takes an injectable
+device provider, so passing one that resolves null forces the software path in
+tests; the software renderer is asserted byte-identical to `renderMeshScene`;
+and it is the live warm-up path on every cart's opening frames rather than code
+that only runs on someone else's browser.
+
+### 5.1a What the GPU path's tests do and do not cover
+
+Stated plainly, because a renderer that has never run on a GPU is a liability
+if its status is vague.
+
+**Covered:** the packing and layout (uniform offsets including WGSL's 16-byte
+mat3x3 column padding, vertex stride against the pipeline descriptor, readback
+row unpadding, light resolution); the full renderer class driven through a
+recording fake device (bind group layout, dynamic offsets per draw, geometry
+uploaded once per mesh, transparent clear, aligned readback stride, the software
+warm-up, compositing a landed readback, teardown, and surviving a device that
+starts throwing); and the software path asserted byte-identical to
+`renderMeshScene`.
+
+**Not covered, and not coverable here:** WGSL compilation, and whether the GPU
+output matches the software rasteriser pixel for pixel. Both need a real
+adapter. The Chromium available in CI exposes no `navigator.gpu` at all, so
+there is no software-adapter fallback to test against either.
+
+One hardware-only defect was already caught by review rather than by a test: an
+`"auto"` pipeline layout infers the uniform binding *without* a dynamic offset,
+which would have made every `setBindGroup` call in the frame fail on a device
+while passing everything runnable here. The layout is now explicit, and its
+`hasDynamicOffset` and `minBindingSize` are pinned by test. **The first run on
+real hardware should be treated as the real test.**
 
 ### 5.2 Asset storage breaks at the PS1 tier, not the 360 tier
 
@@ -265,9 +327,8 @@ any real machine.
 1. ~~**Write the family down.**~~ **Done** — this document, plus a pointer from
    `BUILD_PLAN.md` scoping its TIC-80 principle to Classic.
 2. ~~**Gate the tab list on the model.**~~ **Done** — `editorTabs.ts` (§3).
-3. **Promote the GPU renderer into `packages/player`** behind the
-   `createLightingLayer` probe/fallback shape. Prerequisite for everything 3D
-   (§5.1), and the largest remaining piece before any era model is possible.
+3. ~~**Give the player a GPU triangle path**~~ **Done** — `packages/player/src/render/`
+   (§5.1). Not verified on real hardware: see §5.3.
 4. ~~**Widen `ConsoleModel` with `RenderCaps`.**~~ **Done** (§4).
 5. **Build the PS1-era model.** Best first 3D era: cheapest constraints to
    enforce, highest aesthetic payoff. The existing 3D sidecars become its native

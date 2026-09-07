@@ -29,6 +29,8 @@ import type { AnimSpec } from "./anim/animModel.js";
 import { ParticleOverlaySurface } from "./particles/ParticleOverlaySurface.js";
 import { MeshOverlaySurface } from "./mesh/MeshOverlaySurface.js";
 import { WorldOverlaySurface } from "./world/WorldOverlaySurface.js";
+import { createSceneRenderer } from "./render/createSceneRenderer.js";
+import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
 import { type DecodedTexture } from "@cartbox/editor";
 import type { ControlScheme, PlayerOptions } from "./types.js";
@@ -51,6 +53,13 @@ export class Player {
   private sceneSurface?: SceneBackdropSurface;
   private meshSurface?: MeshOverlaySurface;
   private worldSurface?: WorldOverlaySurface;
+  /**
+   * The 3D renderer both overlays draw through — WebGPU when the device allows,
+   * the software rasteriser otherwise. One per player, shared: a cart with both
+   * a mesh scene and a world would otherwise probe the adapter and allocate a
+   * second set of GPU targets for the same framebuffer.
+   */
+  private sceneRenderer?: SceneRenderer;
   private foregroundSurface?: AnimatedForegroundSurface;
   private postFxSurface?: PostFxSurface;
   private basePostFx?: PostFxSettings;
@@ -187,8 +196,20 @@ export class Player {
         // still falls in front of them) but ahead of the cart, foreground, and
         // backdrop. Being a decorator, its output flows through lighting + FX.
         const mesh = this.options.mesh;
+        // Built once, only when something 3D is actually declared, so a plain 2D
+        // cart never touches WebGPU. `createSceneRenderer` always resolves — it
+        // falls back to the software rasteriser rather than returning null.
+        if (mesh || (world && this.cartSource)) {
+          this.sceneRenderer = await createSceneRenderer(this.model.width, this.model.height);
+        }
         if (mesh) {
-          surface = this.meshSurface = await MeshOverlaySurface.create(surface, this.model.width, this.model.height, mesh);
+          surface = this.meshSurface = await MeshOverlaySurface.create(
+            surface,
+            this.model.width,
+            this.model.height,
+            mesh,
+            this.sceneRenderer,
+          );
         }
         // The HD-2D world composites a 3D tile terrain plus the cart's 2D character
         // billboards over the frame, textured from the cart's sprite sheet and
@@ -201,6 +222,7 @@ export class Player {
             this.model.height,
             world,
             makeWorldTextureLookup(this.cartSource, world.tilesPerSide),
+            this.sceneRenderer,
           );
         }
         // Foreground placements draw over the cart AND the backdrop, so they wrap
@@ -471,6 +493,9 @@ export class Player {
     this.touch?.destroy();
     this.audio?.destroy();
     this.surface?.destroy();
+    // After the surfaces: they draw through it, and the decorator chain's
+    // destroy() cascades inward before anything here releases GPU resources.
+    this.sceneRenderer?.dispose();
     this.cartSource?.dispose();
     this.console?.dispose();
   }

@@ -102,6 +102,26 @@ export {
   getModel,
 } from "./models.js";
 export type { ConsoleModel, ModelId, RenderCaps } from "./models.js";
+// The 3D scene renderer: the seam that lets the player rasterise meshes on the
+// GPU, with the software path as the fallback (see ERA_MODELS.md).
+export { SoftwareSceneRenderer } from "./render/sceneRenderer.js";
+export type { SceneDraw, SceneRenderer } from "./render/sceneRenderer.js";
+export { createSceneRenderer } from "./render/createSceneRenderer.js";
+export { WebgpuSceneRenderer } from "./render/WebgpuSceneRenderer.js";
+export {
+  DEFAULT_AMBIENT,
+  DEFAULT_LIGHT,
+  UNIFORM_BYTES_USED,
+  UNIFORM_FLOATS,
+  UNIFORM_STRIDE,
+  VERTEX_FLOATS,
+  alignBytesPerRow,
+  interleaveVertices,
+  normalBasis3x3,
+  resolveLight,
+  unpadRows,
+  writeInstanceUniform,
+} from "./render/scenePacking.js";
 export { createConsole, loadEngineModule } from "./engine.js";
 export type { ConsoleInstance } from "./engine.js";
 
