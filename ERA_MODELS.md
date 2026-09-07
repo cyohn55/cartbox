@@ -98,22 +98,35 @@ None of these models need be *literally* faithful. TIC-80 is not literally any
 rather than reproduce the silicon — which is what keeps asset budgets sane
 (see §5).
 
+Note that the ladder stops at the last *era*, and an era is by definition a
+historical ceiling. A model that targets the best the web can do today is not an
+era model at all; it is a different kind of tier, and it needs stating
+separately — see §7.
+
 ---
 
 ## 3. The sidecars are the first era model, born in the wrong house
 
 The most actionable finding in the current codebase.
 
-`apps/web/src/app/edit/[cartId]/EditorWorkbench.tsx:81`:
+The tab list in `EditorWorkbench.tsx` was a flat constant:
 
 ```ts
 const TABS = ["Code", "Assets", "Map", "World", "Scene", "Mesh", "Anim", "Weather", "FX", "SFX", "Music"] as const;
 ```
 
-This list is **not gated on `modelId`**. `modelId` correctly drives palette
-size, canvas geometry, sound channels and which WASM core loads — but every cart
-gets every tab. A 240×136, 16-colour Classic cart is offered the World, Mesh,
-Scene and Weather editors.
+It was **not gated on `modelId`**. `modelId` correctly drove palette size,
+canvas geometry, sound channels and which WASM core loaded — but every cart got
+every tab, so a 240×136, 16-colour Classic cart was offered the World and Mesh
+editors.
+
+**Shipped** (`editorTabs.ts`): a 2D model now hides the two tabs that open an
+orbit camera. Scene, Anim, Weather and FX dress a 2D frame, so they stay
+everywhere. The rule that makes the gate safe is that a spatial tab also shows
+when the *cart* already carries that sidecar's data — carts saved before the
+gate keep their tab and can still empty it, so nothing is stranded. The
+Ctrl+1..9 order is derived from the same resolved set, so a numeric shortcut can
+never select a hidden tab.
 
 Alongside it, eleven sidecar payloads (`fx`, `rig`, `materials`, `voxel`,
 `mesh`, `world`, `scene`, `anim`, `particles`, `collision`, `flags`) exist
@@ -161,10 +174,16 @@ export interface RenderCaps {
 ```
 
 This is what makes a PS1 model *feel* like PS1 rather than merely look
-low-resolution. **Widen the interface now, while there are four models — not
-later, with eight.** Retrofitting a capability block across eight models, two
-engines, the replay format and the thumbnail renderer is the expensive version
-of this change.
+low-resolution. Widening the interface while there are four models is much
+cheaper than retrofitting a capability block across eight models, two engines,
+the replay format and the thumbnail renderer.
+
+**Shipped** (`packages/player/src/models.ts`): `RenderCaps` as above, required
+on every `ConsoleModel`. All four shipping models declare the same
+`SOFTWARE_RASTER_CAPS` — correct rather than lazy, because they rasterise
+triangles through the same overlay surfaces — so the field is truthful today and
+the seam is real. `programmableShaders` is the line between a fantasy console
+and the Unlimited tier (§7), and is pinned `false` for every model by test.
 
 `console_model text not null default 'classic'` already exists in
 `0001_init.sql`, so the database discriminator needs no migration to add eras.
@@ -243,30 +262,108 @@ any real machine.
 
 ## 6. Sequencing
 
-1. **Write the family down.** This document plus a pointer from `BUILD_PLAN.md`.
-   Cheap, and it prevents years of drift toward an accidental general engine.
-2. **Gate `TABS` on `modelId`.** Small change; immediately makes Classic feel
-   like a fantasy console again, and establishes the pattern every era model
-   will use.
+1. ~~**Write the family down.**~~ **Done** — this document, plus a pointer from
+   `BUILD_PLAN.md` scoping its TIC-80 principle to Classic.
+2. ~~**Gate the tab list on the model.**~~ **Done** — `editorTabs.ts` (§3).
 3. **Promote the GPU renderer into `packages/player`** behind the
    `createLightingLayer` probe/fallback shape. Prerequisite for everything 3D
-   (§5.1).
-4. **Widen `ConsoleModel` with `RenderCaps`** (§4) while the model set is small.
+   (§5.1), and the largest remaining piece before any era model is possible.
+4. ~~**Widen `ConsoleModel` with `RenderCaps`.**~~ **Done** (§4).
 5. **Build the PS1-era model.** Best first 3D era: cheapest constraints to
    enforce, highest aesthetic payoff. The existing 3D sidecars become its native
    format (§3), and the asset store lands here (§5.2).
 6. **N64-era model.** Mostly a `RenderCaps` variation on PS1 plus mipmapping and
    the texture-cache limit. Cheap once PS1 exists.
-7. **Creator-uploaded `wasm-app` titles.** Orthogonal to the era family; gated on
-   serving player pages from a sandboxed origin, since the Emscripten JS glue is
-   arbitrary same-origin JavaScript. See `games/README.md` for the ABI, which is
-   already specified and validated by `assertImplementsAbi`.
+7. **Creator-uploaded `wasm-app` titles.** Gated on serving player pages from a
+   sandboxed origin, since the Emscripten JS glue is arbitrary same-origin
+   JavaScript. See `games/README.md` for the ABI, already specified and
+   validated by `assertImplementsAbi`. This is **on the critical path for the
+   Unlimited tier, not orthogonal to it** (§7) — both deliver a creator-authored
+   WASM module against a host-owned ABI, approached from opposite ends.
 8. **360-era tier, knowingly** (§2). This is where the platform becomes a general
    engine; do it deliberately, late, with the earlier tiers behind it.
+9. **Unlimited tier** (§7) — the 360 tier with the era ceiling removed. Its
+   *runtime* falls out of steps 3–8; its *tooling* is a separate long product.
 
 ---
 
-## 7. The honest version
+## 7. The Unlimited tier — best-possible web engine, no era ceiling
+
+**This is not in the era ladder above, and it needs to be stated explicitly,
+because the ladder cannot reach it.** Every tier in §2 is defined by a
+historical ceiling: a PS1 model is *good* precisely because it refuses to draw
+what a PS1 could not. Even the 360 tier is a 2005 ceiling. A creator who wants
+the most capable thing the web can render today is not served by any of them.
+
+So the family has two kinds of member:
+
+| | Era models | Unlimited |
+|---|---|---|
+| Defined by | A historical spec | The current capability of WebGPU/WASM |
+| Constraints | Fixed, enforced, aesthetic | None beyond the browser's |
+| `programmableShaders` | `false` | `true` |
+| Resolution | Fixed framebuffer | Canvas-native, device pixel ratio |
+| Cartridge | Format per era | A project: manifest + content-addressed blobs |
+| Game code | Interpreted script buffer (Classic) / era runtime | A creator-compiled WASM module |
+| Spec stability | Frozen at ship | Moves as the platform moves |
+| Value proposition | Constraints make good-looking work easy | Nothing is in your way |
+
+**Unlimited is deliberately not a fantasy console.** It breaks the `models.ts`
+doctrine — "no free-form toggles: that would dissolve the aesthetic" — on
+purpose, which is fine so long as it is declared rather than smuggled in one
+sidecar at a time. The `RenderCaps.programmableShaders` flag exists to make that
+line explicit in code: it is `false` for every console model, and the tier that
+sets it `true` is announcing that it is a different kind of thing.
+
+### It converges with the `wasm-app` runtime
+
+The most useful structural observation, and the one that makes this tractable:
+**Unlimited and creator-uploaded `wasm-app` titles are the same system
+approached from two directions.**
+
+- `wasm-app` today is *bring your own engine, we host it*: seven exported
+  functions (`games/README.md`), a host-owned framebuffer, clock, input and save
+  storage. Eight ported games already run on it.
+- Unlimited is *use our engine tooling, which compiles to the same target*.
+
+Both end at a creator-authored WASM module driven by a host that owns the frame
+loop. They should share one ABI — a v2 of the Cartbox Game ABI that adds a
+WebGPU device handle and an asset-fetch callback to the existing seven exports —
+rather than growing two runtimes that do the same job. This is why step 7 in §6
+is on the critical path rather than beside it.
+
+### What is genuinely hard here
+
+Split the tier honestly, because the two halves have very different costs:
+
+- **The Unlimited *runtime*** — a WebGPU renderer, a WASM ABI, an asset
+  pipeline, a scene format — is largely a **byproduct of shipping the era
+  tiers**. §5.1 builds the renderer, §5.2 builds the asset store, the N64 tier
+  forces texture streaming, the 360 tier forces shader plumbing. Removing the
+  constraints from that stack is a much smaller step than building it.
+- **The Unlimited *tooling*** — "the best possible engine tooling" — is a
+  separate multi-year product competing with Unity, Godot and Bevy on the web.
+  Nothing in this roadmap shortens that, and no amount of sequencing makes it
+  cheap.
+
+The strategically useful part is that **the era ladder is a good way to build
+toward Unlimited rather than a detour from it.** Each tier forces one piece of a
+modern engine into existence under constraints tight enough to make it
+tractable, shippable, and revenue-generating on the way. Building the general
+engine first means building all of it before anything ships.
+
+### Where it sits
+
+Unlimited should be declared in this document from the start so the architecture
+leaves room for it, and built last. It is deliberately **not** added to
+`MODELS` yet: a model id with invented specs and no engine creates dead code
+paths through `ENGINE_URL_BY_MODEL`, the badge map and the runtime registry, for
+a tier whose spec cannot be written until the renderer exists. `voxel` already
+demonstrates the cost of a defined-but-unbuilt model.
+
+---
+
+## 8. The honest version
 
 - **What this buys:** the TIC-80 seed catalog *and* a path to modern 3D, without
   either compromising the other. Classic never has to bend.
@@ -274,7 +371,11 @@ any real machine.
   This is a multi-year family, not a feature.
 - **Where it stops being a console family:** the 360 tier. Everything up to and
   including N64 is fixed-spec and doctrine-compliant. The 360 tier is a general
-  engine, and calling it a "model" does not change that.
+  engine, and calling it a "model" does not change that. The Unlimited tier (§7)
+  is openly one, which is the better way to hold it.
+- **What the plan does not shorten:** Unlimited's *tooling*. The era ladder
+  builds Unlimited's runtime incrementally and profitably; it does nothing to
+  make a Unity-class editor cheaper. Do not let the roadmap imply otherwise.
 - **The failure mode to avoid:** arriving at a general engine by accretion.
   Each new sidecar column and each new 3D tab bolted onto Classic drifts toward
   that outcome without anyone deciding it. Deciding deliberately is cheaper than

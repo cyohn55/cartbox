@@ -96,11 +96,12 @@ export type { RegisteredAchievement } from "./achievements.js";
 export {
   DEFAULT_MODEL_ID,
   MODELS,
+  SOFTWARE_RASTER_CAPS,
   framebufferBytes,
   frameDurationMs,
   getModel,
 } from "./models.js";
-export type { ConsoleModel, ModelId } from "./models.js";
+export type { ConsoleModel, ModelId, RenderCaps } from "./models.js";
 export { createConsole, loadEngineModule } from "./engine.js";
 export type { ConsoleInstance } from "./engine.js";
 
