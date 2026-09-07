@@ -23,6 +23,9 @@
 import { renderMeshScene, type MeshSceneInstance } from "@cartbox/editor";
 import type { Mat4 } from "@cartbox/editor";
 
+import type { RenderCaps } from "../models.js";
+import { applyRenderCaps, createTextureBudgetCache } from "./renderCaps.js";
+
 /** One frame's worth of drawing parameters — mirrors `renderMeshScene`'s options. */
 export interface SceneDraw {
   readonly width: number;
@@ -87,4 +90,38 @@ export class SoftwareSceneRenderer implements SceneRenderer {
   dispose(): void {
     // Nothing to release: the rasteriser holds no resources.
   }
+}
+
+/**
+ * Applies a model's scene-level {@link RenderCaps} before delegating.
+ *
+ * A decorator rather than a branch inside each backend, so the software
+ * rasteriser and the GPU enforce a model's limits *identically*. An era model's
+ * constraints are part of the model, not of the viewer's graphics stack: a cart
+ * that overruns a poly budget must overrun it the same way on both.
+ */
+export class CappedSceneRenderer implements SceneRenderer {
+  private readonly cache = createTextureBudgetCache();
+
+  constructor(
+    private readonly inner: SceneRenderer,
+    private readonly caps: RenderCaps,
+  ) {}
+
+  get backend(): SceneRenderer["backend"] {
+    return this.inner.backend;
+  }
+
+  render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
+    this.inner.render(applyRenderCaps(instances, this.caps, this.cache), draw);
+  }
+
+  dispose(): void {
+    this.inner.dispose();
+  }
+}
+
+/** True when a model's caps constrain the scene, so wrapping would do something. */
+export function capsConstrainScene(caps: RenderCaps): boolean {
+  return caps.polyBudget > 0 || caps.textureCacheBytes > 0;
 }

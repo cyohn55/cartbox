@@ -200,7 +200,11 @@ export class Player {
         // cart never touches WebGPU. `createSceneRenderer` always resolves — it
         // falls back to the software rasteriser rather than returning null.
         if (mesh || (world && this.cartSource)) {
-          this.sceneRenderer = await createSceneRenderer(this.model.width, this.model.height);
+          this.sceneRenderer = await createSceneRenderer(
+            this.model.width,
+            this.model.height,
+            this.model.renderCaps,
+          );
         }
         if (mesh) {
           surface = this.meshSurface = await MeshOverlaySurface.create(

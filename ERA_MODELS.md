@@ -191,6 +191,52 @@ Models stay in code, per `CONSOLE_MODELS.md` §2.
 
 ---
 
+### 4a. Which caps are actually enforced
+
+A descriptor nothing reads is a comment with a type annotation. `RenderCaps` is
+now read — but only partly, and the split is worth stating because it decides
+what the PS1 tier still needs.
+
+| Cap | Enforced | Where |
+|---|---|---|
+| `polyBudget` | **Yes** | Scene pre-pass |
+| `textureCacheBytes` | **Yes** | Scene pre-pass |
+| `zBuffer` | No | Inside the rasteriser |
+| `perspectiveCorrect` | No | Inside the rasteriser |
+| `vertexPrecision` | No | Inside the rasteriser |
+| `textureFiltering` | No | Inside the rasteriser |
+| `programmableShaders` | n/a | False for every console model by definition |
+
+**Why that line falls where it does.** The two enforced caps are properties of
+the *scene*, so they can be applied above the renderer — `CappedSceneRenderer`
+wraps whichever backend is live, and the software rasteriser and the GPU obey a
+model's limits identically. That matters more than it sounds: an era model's
+constraints belong to the model, not to the viewer's graphics stack. A cart that
+overruns a poly budget must overrun it the same way on both.
+
+The four unenforced caps are properties of *rasterisation* — they live inside
+the per-pixel loop. Honouring them on the GPU alone would break the parity
+contract the WebGPU path was built to keep (§5.1): a PS1 cart would render with
+affine texture warp on a WebGPU browser and perspective-correct on every other
+one, which is a worse failure than not having the era look at all. **So they
+need `renderMeshScene` in `@cartbox/editor` taught the same options first.**
+That is the next concrete step toward the PS1 tier, and it is a change to code
+the editor previews also depend on — so it wants its own pass.
+
+**Enforcement choices worth knowing**, since both are visible to creators:
+
+- The poly budget cuts at *instance* granularity, and always draws the first
+  instance even if it alone busts the budget. Slicing index buffers mid-mesh
+  would allocate fresh geometry every frame and miss the renderer's upload
+  cache; and a single over-budget object is a content problem for the editor to
+  flag, not something the runtime should silently blank. So the budget bounds
+  scene complexity *across objects*, which is what a poly budget is for.
+- The texture cache halves textures with a box filter until they fit. That is
+  not an approximation of the N64 look — it *is* the N64 look. Its 4KB cache is
+  why that era reads soft and low-resolution. Results are memoised by source
+  texture, because the GPU renderer caches uploads by object identity and a cap
+  returning fresh objects each frame would be worse than no cap at all.
+
 ## 5. Two things the era roadmap forces
 
 ### 5.1 The player needs a GPU triangle path — it is a prerequisite, not a polish item
@@ -329,7 +375,10 @@ any real machine.
 2. ~~**Gate the tab list on the model.**~~ **Done** — `editorTabs.ts` (§3).
 3. ~~**Give the player a GPU triangle path**~~ **Done** — `packages/player/src/render/`
    (§5.1). Not verified on real hardware: see §5.3.
-4. ~~**Widen `ConsoleModel` with `RenderCaps`.**~~ **Done** (§4).
+4. ~~**Widen `ConsoleModel` with `RenderCaps`.**~~ **Done** (§4), and the two
+   scene-level caps are now enforced (§4a). The four rasterisation-level caps
+   need `renderMeshScene` taught the same options before they can be honoured
+   without breaking GPU/software parity — the next concrete step toward PS1.
 5. **Build the PS1-era model.** Best first 3D era: cheapest constraints to
    enforce, highest aesthetic payoff. The existing 3D sidecars become its native
    format (§3), and the asset store lands here (§5.2).

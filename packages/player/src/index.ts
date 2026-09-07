@@ -104,7 +104,14 @@ export {
 export type { ConsoleModel, ModelId, RenderCaps } from "./models.js";
 // The 3D scene renderer: the seam that lets the player rasterise meshes on the
 // GPU, with the software path as the fallback (see ERA_MODELS.md).
-export { SoftwareSceneRenderer } from "./render/sceneRenderer.js";
+export { CappedSceneRenderer, SoftwareSceneRenderer, capsConstrainScene } from "./render/sceneRenderer.js";
+export {
+  applyRenderCaps,
+  capTextures,
+  capTriangles,
+  createTextureBudgetCache,
+  fitTextureToBudget,
+} from "./render/renderCaps.js";
 export type { SceneDraw, SceneRenderer } from "./render/sceneRenderer.js";
 export { createSceneRenderer } from "./render/createSceneRenderer.js";
 export { WebgpuSceneRenderer } from "./render/WebgpuSceneRenderer.js";

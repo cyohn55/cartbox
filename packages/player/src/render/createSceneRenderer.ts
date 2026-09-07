@@ -13,14 +13,26 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { getWebgpuDevice } from "../lighting/webgpuDevice.js";
-import { SoftwareSceneRenderer, type SceneRenderer } from "./sceneRenderer.js";
+import type { RenderCaps } from "../models.js";
+import {
+  CappedSceneRenderer,
+  SoftwareSceneRenderer,
+  capsConstrainScene,
+  type SceneRenderer,
+} from "./sceneRenderer.js";
 import { WebgpuSceneRenderer } from "./WebgpuSceneRenderer.js";
 
 /** Resolves a shared WebGPU device, or null. Injectable for tests. */
 export type DeviceProvider = () => Promise<any | null>;
 
 /**
- * Build the best available renderer for one framebuffer size.
+ * Build the best available renderer for one framebuffer size, under one model's
+ * {@link RenderCaps}.
+ *
+ * Caps are required rather than optional: a renderer exists to draw *some
+ * model's* scenes, and leaving its limits implicit is how an era model ends up
+ * silently rendering with another era's rules. The caps wrapper is only applied
+ * when it would do something, so an unbounded model pays nothing for it.
  *
  * Pass a provider returning null to force the software path — which is how the
  * fallback stays tested rather than becoming code nobody runs until a browser
@@ -29,12 +41,12 @@ export type DeviceProvider = () => Promise<any | null>;
 export async function createSceneRenderer(
   width: number,
   height: number,
+  caps: RenderCaps,
   deviceProvider: DeviceProvider = getWebgpuDevice,
 ): Promise<SceneRenderer> {
   const device = await deviceProvider();
-  if (device) {
-    const renderer = await WebgpuSceneRenderer.create(device, width, height);
-    if (renderer) return renderer;
-  }
-  return new SoftwareSceneRenderer();
+  let renderer: SceneRenderer | null = null;
+  if (device) renderer = await WebgpuSceneRenderer.create(device, width, height);
+  renderer ??= new SoftwareSceneRenderer();
+  return capsConstrainScene(caps) ? new CappedSceneRenderer(renderer, caps) : renderer;
 }

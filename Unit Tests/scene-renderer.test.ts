@@ -29,6 +29,7 @@ import {
   type MeshSceneInstance,
 } from "@cartbox/editor";
 import {
+  SOFTWARE_RASTER_CAPS,
   SoftwareSceneRenderer,
   createSceneRenderer,
   type SceneDraw,
@@ -81,7 +82,7 @@ function draw(overrides: Partial<SceneDraw> = {}): SceneDraw {
 
 describe("createSceneRenderer", () => {
   it("falls back to software when no device is available", async () => {
-    const renderer = await createSceneRenderer(WIDTH, HEIGHT, async () => null);
+    const renderer = await createSceneRenderer(WIDTH, HEIGHT, SOFTWARE_RASTER_CAPS, async () => null);
     expect(renderer.backend).toBe("software");
   });
 
@@ -93,12 +94,12 @@ describe("createSceneRenderer", () => {
         throw new Error("no shader compiler");
       },
     };
-    const renderer = await createSceneRenderer(WIDTH, HEIGHT, async () => brokenDevice);
+    const renderer = await createSceneRenderer(WIDTH, HEIGHT, SOFTWARE_RASTER_CAPS, async () => brokenDevice);
     expect(renderer.backend).toBe("software");
   });
 
   it("never resolves to null, so no caller needs a third branch", async () => {
-    const renderer = await createSceneRenderer(WIDTH, HEIGHT, async () => null);
+    const renderer = await createSceneRenderer(WIDTH, HEIGHT, SOFTWARE_RASTER_CAPS, async () => null);
     expect(renderer).not.toBeNull();
     expect(typeof renderer.render).toBe("function");
     expect(() => renderer.dispose()).not.toThrow();
