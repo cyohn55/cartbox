@@ -111,6 +111,8 @@ export {
   capTriangles,
   createTextureBudgetCache,
   fitTextureToBudget,
+  rasterStyleFor,
+  webgpuCanHonour,
 } from "./render/renderCaps.js";
 export type { SceneDraw, SceneRenderer } from "./render/sceneRenderer.js";
 export { createSceneRenderer } from "./render/createSceneRenderer.js";

@@ -245,13 +245,44 @@ function clipNear(tri: [Vertex, Vertex, Vertex]): Vertex[] {
   return triangles;
 }
 
-function sampleTexture(texture: DecodedTexture, u: number, v: number): [number, number, number, number] {
-  // Wrap, then nearest-sample. glTF's V origin is top-left, so flip.
+function sampleTexture(
+  texture: DecodedTexture,
+  u: number,
+  v: number,
+  filtering: RasterStyle["textureFiltering"] = "none",
+): [number, number, number, number] {
+  // Wrap, then sample. glTF's V origin is top-left, so flip.
   const wrap = (x: number): number => x - Math.floor(x);
-  const tx = Math.min(texture.width - 1, Math.floor(wrap(u) * texture.width));
-  const ty = Math.min(texture.height - 1, Math.floor(wrap(1 - v) * texture.height));
-  const at = (ty * texture.width + tx) * 4;
-  return [texture.data[at]!, texture.data[at + 1]!, texture.data[at + 2]!, texture.data[at + 3]!];
+  const fx = wrap(u) * texture.width;
+  const fy = wrap(1 - v) * texture.height;
+
+  if (filtering === "none") {
+    const tx = Math.min(texture.width - 1, Math.floor(fx));
+    const ty = Math.min(texture.height - 1, Math.floor(fy));
+    const at = (ty * texture.width + tx) * 4;
+    return [texture.data[at]!, texture.data[at + 1]!, texture.data[at + 2]!, texture.data[at + 3]!];
+  }
+
+  // Bilinear: sample about the texel *centre*, so a filter over a solid texture
+  // returns that texture rather than blending toward its neighbours' edges.
+  // Neighbours wrap, matching the repeat addressing above (and the GPU sampler).
+  const cx = fx - 0.5;
+  const cy = fy - 0.5;
+  const x0 = Math.floor(cx);
+  const y0 = Math.floor(cy);
+  const tx = cx - x0;
+  const ty = cy - y0;
+  const wrapIndex = (value: number, size: number): number => ((value % size) + size) % size;
+  const texel = (ix: number, iy: number, channel: number): number =>
+    texture.data[(wrapIndex(iy, texture.height) * texture.width + wrapIndex(ix, texture.width)) * 4 + channel]!;
+
+  const out: [number, number, number, number] = [0, 0, 0, 0];
+  for (let channel = 0; channel < 4; channel += 1) {
+    const top = texel(x0, y0, channel) * (1 - tx) + texel(x0 + 1, y0, channel) * tx;
+    const bottom = texel(x0, y0 + 1, channel) * (1 - tx) + texel(x0 + 1, y0 + 1, channel) * tx;
+    out[channel] = top * (1 - ty) + bottom * ty;
+  }
+  return out;
 }
 
 /**
@@ -319,6 +350,54 @@ export interface MeshSceneInstance {
   readonly textures?: readonly (DecodedTexture | null)[];
 }
 
+/**
+ * How the rasteriser rasterises — the per-pixel behaviour that separates one
+ * console generation from another.
+ *
+ * These are not quality settings. A PS1-era console is *defined* by having no
+ * depth buffer and affine texture mapping; those artefacts are the era's look,
+ * not defects to be tolerated. Keeping them here, rather than in the renderer
+ * that calls this, is what lets the software path and the GPU path produce the
+ * same picture for the same console model — see ERA_MODELS.md §4a.
+ *
+ * Every field defaults to what this rasteriser has always done, so an editor
+ * preview that passes no style renders exactly as before.
+ */
+export interface RasterStyle {
+  /**
+   * False draws with no depth test or write, so draw order alone decides what
+   * is in front. The scene path then sorts triangles back-to-front (an ordering
+   * table, as the hardware without a depth buffer actually did), which is why
+   * surfaces of similar depth interpenetrate and flicker.
+   */
+  readonly zBuffer: boolean;
+  /**
+   * False interpolates attributes affinely — linear in screen space rather than
+   * weighted by 1/w. This is the texture "swimming" of the era: a wall's texture
+   * warps as the camera slides past it.
+   */
+  readonly perspectiveCorrect: boolean;
+  /**
+   * "integer" snaps projected vertices to whole pixels, which is the
+   * characteristic wobble of hardware whose transform unit had no subpixel
+   * precision.
+   */
+  readonly vertexPrecision: "integer" | "float";
+  /**
+   * Texture magnification filter. "none" is nearest — crunchy, aliased texels.
+   * "bilinear" is the softness of the generation that could afford to filter.
+   */
+  readonly textureFiltering: "none" | "bilinear";
+}
+
+/** What this rasteriser has always done: depth-buffered, correct, crisp. */
+export const DEFAULT_RASTER_STYLE: RasterStyle = {
+  zBuffer: true,
+  perspectiveCorrect: true,
+  vertexPrecision: "float",
+  textureFiltering: "none",
+};
+
 export interface RenderMeshSceneOptions {
   /** Framebuffer width in pixels; `out`/`depth` are `width × height`. */
   readonly width: number;
@@ -338,6 +417,8 @@ export interface RenderMeshSceneOptions {
   readonly ambient?: number;
   /** Background clear colour RGBA (default transparent); pass null to composite over existing `out`. */
   readonly background?: readonly [number, number, number, number] | null;
+  /** Per-pixel rasterisation behaviour; defaults to {@link DEFAULT_RASTER_STYLE}. */
+  readonly style?: RasterStyle;
 }
 
 /**
@@ -355,6 +436,7 @@ export interface RenderMeshSceneOptions {
 export function renderMeshScene(instances: readonly MeshSceneInstance[], options: RenderMeshSceneOptions): void {
   const { width, height, out, depth, view, projection } = options;
   const ambient = options.ambient ?? 0.35;
+  const style = options.style ?? DEFAULT_RASTER_STYLE;
   const viewProj = multiply(projection, view);
 
   depth.fill(Infinity);
@@ -372,11 +454,44 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
   const ll = Math.hypot(lx, ly, lz) || 1;
   const light: [number, number, number] = [lx / ll, ly / ll, lz / ll];
 
+  // With a depth buffer, order does not matter: rasterise as we project, which
+  // allocates nothing. Without one, every triangle in the *whole scene* has to
+  // be collected and sorted back-to-front before any of it is drawn — an
+  // ordering table, which is what hardware without a depth buffer actually did.
+  // Sorting per instance would not do: the artefact that defines the look is
+  // triangles within and across objects resolving in the wrong order.
+  const queue: PendingTriangle[] = [];
   for (const instance of instances) {
     const mvp = multiply(viewProj, instance.model);
     const modelView = multiply(view, instance.model);
     const normalBasis = normalMatrix3x3(instance.model);
-    drawMesh(instance.mesh, mvp, modelView, normalBasis, width, height, out, depth, instance.textures ?? null, light, ambient);
+    const textures = instance.textures ?? null;
+    if (style.zBuffer) {
+      drawMesh(instance.mesh, mvp, modelView, normalBasis, width, height, out, depth, textures, light, ambient, style);
+    } else {
+      eachTriangle(instance.mesh, mvp, modelView, normalBasis, textures, (triangle) => queue.push(triangle));
+    }
+  }
+
+  if (queue.length > 0) {
+    // Ascending view z = farthest first, since the view looks down -z.
+    queue.sort((a, b) => a.viewDepth - b.viewDepth);
+    for (const triangle of queue) {
+      rasterizeTriangle(
+        triangle.a,
+        triangle.b,
+        triangle.c,
+        width,
+        height,
+        out,
+        depth,
+        triangle.texture,
+        triangle.base,
+        light,
+        ambient,
+        style,
+      );
+    }
   }
 }
 
@@ -386,18 +501,36 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
  * normals into world space by `normalBasis`. Shared by the single-mesh preview
  * and the scene renderer so the projection + clip + raster path is written once.
  */
-function drawMesh(
+/** One projected, clipped triangle ready to rasterise. */
+interface PendingTriangle {
+  readonly a: Vertex;
+  readonly b: Vertex;
+  readonly c: Vertex;
+  readonly texture: DecodedTexture | null;
+  readonly base: readonly [number, number, number, number];
+  /**
+   * Mean view-space z, for back-to-front ordering when there is no depth
+   * buffer. The view looks down -z, so farther is more negative and ascending
+   * order is farthest-first.
+   */
+  readonly viewDepth: number;
+}
+
+/**
+ * Project, clip and hand out one mesh's triangles.
+ *
+ * Split out from {@link drawMesh} so a caller can either rasterise each triangle
+ * as it arrives (the depth-buffered path, which needs no ordering and so
+ * allocates nothing) or collect them all and sort before drawing (the path for
+ * a console model with no depth buffer).
+ */
+function eachTriangle(
   mesh: MeshAsset,
   mvp: Mat4,
   modelView: Mat4,
   normalBasis: readonly number[],
-  width: number,
-  height: number,
-  out: Uint8ClampedArray,
-  depth: Float32Array,
   textures: readonly (DecodedTexture | null)[] | null,
-  light: readonly [number, number, number],
-  ambient: number,
+  emit: (triangle: PendingTriangle) => void,
 ): void {
   mesh.primitives.forEach((primitive, primitiveIndex) => {
     const positions = primitive.positions;
@@ -432,24 +565,50 @@ function drawMesh(
       };
     };
 
+    const base: readonly [number, number, number, number] = [baseR, baseG, baseB, baseA];
+
     for (let t = 0; t < indices.length; t += 3) {
       const clipped = clipNear([project(indices[t]!), project(indices[t + 1]!), project(indices[t + 2]!)]);
       for (let c = 0; c < clipped.length; c += 3) {
-        rasterizeTriangle(
-          clipped[c]!,
-          clipped[c + 1]!,
-          clipped[c + 2]!,
-          width,
-          height,
-          out,
-          depth,
-          texture,
-          [baseR, baseG, baseB, baseA],
-          light,
-          ambient,
-        );
+        const a = clipped[c]!;
+        const b = clipped[c + 1]!;
+        const cc = clipped[c + 2]!;
+        emit({ a, b, c: cc, texture, base, viewDepth: (a.viewZ + b.viewZ + cc.viewZ) / 3 });
       }
     }
+  });
+}
+
+/** Project and rasterise one mesh straight into the buffers. */
+function drawMesh(
+  mesh: MeshAsset,
+  mvp: Mat4,
+  modelView: Mat4,
+  normalBasis: readonly number[],
+  width: number,
+  height: number,
+  out: Uint8ClampedArray,
+  depth: Float32Array,
+  textures: readonly (DecodedTexture | null)[] | null,
+  light: readonly [number, number, number],
+  ambient: number,
+  style: RasterStyle = DEFAULT_RASTER_STYLE,
+): void {
+  eachTriangle(mesh, mvp, modelView, normalBasis, textures, (triangle) => {
+    rasterizeTriangle(
+      triangle.a,
+      triangle.b,
+      triangle.c,
+      width,
+      height,
+      out,
+      depth,
+      triangle.texture,
+      triangle.base,
+      light,
+      ambient,
+      style,
+    );
   });
 }
 
@@ -466,16 +625,23 @@ function rasterizeTriangle(
   base: readonly [number, number, number, number],
   light: readonly [number, number, number],
   ambient: number,
+  style: RasterStyle = DEFAULT_RASTER_STYLE,
 ): void {
   // Perspective divide to NDC, then to screen pixels. NDC spans the full extent
   // of each axis independently, so x maps by width and y by height — a mesh drawn
   // into a non-square framebuffer (the runtime's 240×136) is undistorted as long
   // as the projection's aspect matches width/height.
+  const snap = style.vertexPrecision === "integer";
   const toScreen = (v: Vertex): { x: number; y: number; z: number; invW: number } => {
     const invW = 1 / v.clip[3];
+    const x = (v.clip[0] * invW * 0.5 + 0.5) * width;
+    const y = (1 - (v.clip[1] * invW * 0.5 + 0.5)) * height;
     return {
-      x: (v.clip[0] * invW * 0.5 + 0.5) * width,
-      y: (1 - (v.clip[1] * invW * 0.5 + 0.5)) * height,
+      // Snapping to whole pixels is the wobble of a transform unit with no
+      // subpixel precision: a vertex jumps between pixels as the camera moves
+      // instead of sliding smoothly across them.
+      x: snap ? Math.round(x) : x,
+      y: snap ? Math.round(y) : y,
       z: v.clip[2] * invW, // NDC z, linear in screen space → the depth value
       invW,
     };
@@ -506,13 +672,22 @@ function rasterizeTriangle(
 
       const zNdc = w0 * sa.z + w1 * sb.z + w2 * sc.z; // linear in screen space
       const di = y * width + x;
-      if (zNdc >= depth[di]!) continue;
+      // Without a depth buffer nothing is rejected here: draw order decides,
+      // which is why the scene path sorts back-to-front when zBuffer is off.
+      if (style.zBuffer && zNdc >= depth[di]!) continue;
 
-      // Perspective-correct attribute interpolation: weight by 1/w, then divide.
-      const iw = w0 * sa.invW + w1 * sb.invW + w2 * sc.invW;
-      const pw0 = (w0 * sa.invW) / iw;
-      const pw1 = (w1 * sb.invW) / iw;
-      const pw2 = (w2 * sc.invW) / iw;
+      // Perspective-correct interpolation weights by 1/w and divides. Affine
+      // (the era look) uses the screen-space weights directly, which is what
+      // makes a texture swim as the camera slides past a surface.
+      let pw0 = w0;
+      let pw1 = w1;
+      let pw2 = w2;
+      if (style.perspectiveCorrect) {
+        const iw = w0 * sa.invW + w1 * sb.invW + w2 * sc.invW;
+        pw0 = (w0 * sa.invW) / iw;
+        pw1 = (w1 * sb.invW) / iw;
+        pw2 = (w2 * sc.invW) / iw;
+      }
 
       // Two-sided Lambert: |N·L| so inconsistent winding still lights.
       const nx = pw0 * a.nx + pw1 * b.nx + pw2 * c.nx;
@@ -528,7 +703,7 @@ function rasterizeTriangle(
       if (texture) {
         const u = pw0 * a.u + pw1 * b.u + pw2 * c.u;
         const v = pw0 * a.v + pw1 * b.v + pw2 * c.v;
-        const [tr, tg, tb, ta] = sampleTexture(texture, u, v);
+        const [tr, tg, tb, ta] = sampleTexture(texture, u, v, style.textureFiltering);
         r = (r * tr) / 255;
         g = (g * tg) / 255;
         bl = (bl * tb) / 255;
@@ -536,7 +711,7 @@ function rasterizeTriangle(
       }
       if (al < 1) continue; // skip fully-transparent texels rather than blend (opaque preview)
 
-      depth[di] = zNdc;
+      if (style.zBuffer) depth[di] = zNdc;
       out[di * 4] = r * shade;
       out[di * 4 + 1] = g * shade;
       out[di * 4 + 2] = bl * shade;

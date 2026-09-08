@@ -20,8 +20,8 @@
  * rasteriser is a hardcoded call. See ERA_MODELS.md §5.1.
  */
 
-import { renderMeshScene, type MeshSceneInstance } from "@cartbox/editor";
-import type { Mat4 } from "@cartbox/editor";
+import { DEFAULT_RASTER_STYLE, renderMeshScene, type MeshSceneInstance } from "@cartbox/editor";
+import type { Mat4, RasterStyle } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
 import { applyRenderCaps, createTextureBudgetCache } from "./renderCaps.js";
@@ -73,6 +73,13 @@ export interface SceneRenderer {
 export class SoftwareSceneRenderer implements SceneRenderer {
   readonly backend = "software" as const;
 
+  /**
+   * @param style How to rasterise — the era behaviour a console model asks for.
+   *   Defaults to the modern one, so an editor preview or a test that passes
+   *   nothing renders exactly as it always has.
+   */
+  constructor(private readonly style: RasterStyle = DEFAULT_RASTER_STYLE) {}
+
   render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
     renderMeshScene(instances, {
       width: draw.width,
@@ -84,6 +91,7 @@ export class SoftwareSceneRenderer implements SceneRenderer {
       background: draw.background,
       lightDirection: draw.lightDirection,
       ambient: draw.ambient,
+      style: this.style,
     });
   }
 

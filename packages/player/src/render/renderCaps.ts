@@ -15,7 +15,7 @@
  * Pure and DOM-free, so the limits are testable without a GPU.
  */
 
-import type { DecodedTexture, MeshSceneInstance } from "@cartbox/editor";
+import type { DecodedTexture, MeshSceneInstance, RasterStyle } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
 
@@ -173,4 +173,48 @@ export function applyRenderCaps(
   cache: TextureBudgetCache,
 ): readonly MeshSceneInstance[] {
   return capTextures(capTriangles(instances, caps.polyBudget), caps.textureCacheBytes, cache);
+}
+
+
+/**
+ * The rasteriser style a model's caps ask for.
+ *
+ * `trilinear` maps to bilinear because no mip chain exists yet on either
+ * backend. Mapping it the same way in both is the point: an N64-era model then
+ * renders identically whether or not the viewer has WebGPU, and gains real
+ * trilinear filtering on both at once when mips land.
+ */
+export function rasterStyleFor(caps: RenderCaps): RasterStyle {
+  return {
+    zBuffer: caps.zBuffer,
+    perspectiveCorrect: caps.perspectiveCorrect,
+    vertexPrecision: caps.vertexPrecision,
+    textureFiltering: caps.textureFiltering === "none" ? "none" : "bilinear",
+  };
+}
+
+/**
+ * Whether the WebGPU path can reproduce a style, or the software rasteriser has
+ * to take the model.
+ *
+ * Filtering is just a sampler, so the GPU handles it. The other three are not
+ * cheap on a GPU:
+ *
+ * - **No depth buffer** needs a per-*triangle* back-to-front sort across the
+ *   whole scene. On the GPU that means rebuilding and re-uploading index
+ *   buffers every frame, which destroys the geometry cache the renderer is
+ *   built around. Sorting whole draws instead would be coarser than the
+ *   software path and break parity, which is worse than not offering it.
+ * - **Affine interpolation** and **vertex snapping** are both reachable in WGSL
+ *   (`@interpolate(linear)`, and rounding in the vertex shader), but each needs
+ *   a shader variant, and shader variants cannot be verified without a device.
+ *
+ * Falling back is not a loss for the models that need them: a console with no
+ * depth buffer and integer vertices is a low-polygon, low-resolution machine,
+ * which is exactly the workload the software rasteriser already handles. An
+ * N64-era model — depth-buffered, perspective-correct, filtered — is the tier
+ * that actually needs the GPU, and it keeps it.
+ */
+export function webgpuCanHonour(style: RasterStyle): boolean {
+  return style.zBuffer && style.perspectiveCorrect && style.vertexPrecision === "float";
 }

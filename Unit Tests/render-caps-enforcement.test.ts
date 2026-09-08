@@ -21,6 +21,8 @@ import {
   capsConstrainScene,
   createTextureBudgetCache,
   fitTextureToBudget,
+  rasterStyleFor,
+  webgpuCanHonour,
   type RenderCaps,
   type SceneDraw,
   type SceneRenderer,
@@ -240,5 +242,47 @@ describe("applyRenderCaps", () => {
   it("is a no-op for an unbounded model", () => {
     const scene = [instance(mesh(9999), [texture(256)])];
     expect(applyRenderCaps(scene, SOFTWARE_RASTER_CAPS, createTextureBudgetCache())).toBe(scene);
+  });
+});
+
+describe("rasterStyleFor", () => {
+  it("passes the era's rasterisation traits straight through", () => {
+    const era = caps({ zBuffer: false, perspectiveCorrect: false, vertexPrecision: "integer" });
+    expect(rasterStyleFor(era)).toEqual({
+      zBuffer: false,
+      perspectiveCorrect: false,
+      vertexPrecision: "integer",
+      textureFiltering: "none",
+    });
+  });
+
+  it("maps trilinear to bilinear, identically for both backends", () => {
+    // No mip chain exists on either path yet. Mapping it the same way in both
+    // is what keeps an N64-era model looking the same with and without WebGPU —
+    // and both gain real trilinear at once when mips land.
+    expect(rasterStyleFor(caps({ textureFiltering: "trilinear" })).textureFiltering).toBe("bilinear");
+    expect(rasterStyleFor(caps({ textureFiltering: "bilinear" })).textureFiltering).toBe("bilinear");
+    expect(rasterStyleFor(caps({ textureFiltering: "none" })).textureFiltering).toBe("none");
+  });
+});
+
+describe("webgpuCanHonour", () => {
+  it("accepts the modern style every shipping model uses", () => {
+    expect(webgpuCanHonour(rasterStyleFor(SOFTWARE_RASTER_CAPS))).toBe(true);
+  });
+
+  it("accepts filtering, which is only a sampler setting", () => {
+    // An N64-era model is depth-buffered and perspective-correct, so the tier
+    // that most needs GPU throughput keeps it.
+    expect(webgpuCanHonour(rasterStyleFor(caps({ textureFiltering: "trilinear" })))).toBe(true);
+  });
+
+  it("declines the three that would need per-frame re-uploads or shader variants", () => {
+    // Declining sends the model to the software rasteriser, which is the whole
+    // point: a console must not render with another era's rules just because
+    // the viewer happens to have a device.
+    expect(webgpuCanHonour(rasterStyleFor(caps({ zBuffer: false })))).toBe(false);
+    expect(webgpuCanHonour(rasterStyleFor(caps({ perspectiveCorrect: false })))).toBe(false);
+    expect(webgpuCanHonour(rasterStyleFor(caps({ vertexPrecision: "integer" })))).toBe(false);
   });
 });

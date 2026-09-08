@@ -197,15 +197,15 @@ A descriptor nothing reads is a comment with a type annotation. `RenderCaps` is
 now read — but only partly, and the split is worth stating because it decides
 what the PS1 tier still needs.
 
-| Cap | Enforced | Where |
-|---|---|---|
-| `polyBudget` | **Yes** | Scene pre-pass |
-| `textureCacheBytes` | **Yes** | Scene pre-pass |
-| `zBuffer` | No | Inside the rasteriser |
-| `perspectiveCorrect` | No | Inside the rasteriser |
-| `vertexPrecision` | No | Inside the rasteriser |
-| `textureFiltering` | No | Inside the rasteriser |
-| `programmableShaders` | n/a | False for every console model by definition |
+| Cap | Enforced | Where | Software | WebGPU |
+|---|---|---|---|---|
+| `polyBudget` | **Yes** | Scene pre-pass | ✓ | ✓ |
+| `textureCacheBytes` | **Yes** | Scene pre-pass | ✓ | ✓ |
+| `textureFiltering` | **Yes** | Rasteriser | ✓ | ✓ (sampler) |
+| `zBuffer` | **Yes** | Rasteriser | ✓ | declines → software |
+| `perspectiveCorrect` | **Yes** | Rasteriser | ✓ | declines → software |
+| `vertexPrecision` | **Yes** | Rasteriser | ✓ | declines → software |
+| `programmableShaders` | n/a | — | False for every console model by definition | |
 
 **Why that line falls where it does.** The two enforced caps are properties of
 the *scene*, so they can be applied above the renderer — `CappedSceneRenderer`
@@ -214,14 +214,41 @@ model's limits identically. That matters more than it sounds: an era model's
 constraints belong to the model, not to the viewer's graphics stack. A cart that
 overruns a poly budget must overrun it the same way on both.
 
-The four unenforced caps are properties of *rasterisation* — they live inside
-the per-pixel loop. Honouring them on the GPU alone would break the parity
-contract the WebGPU path was built to keep (§5.1): a PS1 cart would render with
-affine texture warp on a WebGPU browser and perspective-correct on every other
-one, which is a worse failure than not having the era look at all. **So they
-need `renderMeshScene` in `@cartbox/editor` taught the same options first.**
-That is the next concrete step toward the PS1 tier, and it is a change to code
-the editor previews also depend on — so it wants its own pass.
+The other four are properties of *rasterisation*, in the per-pixel loop.
+`renderMeshScene` now takes a `RasterStyle` carrying all four, defaulting to
+exactly what it always did so the editor's previews are untouched:
+
+- **No depth buffer** disables the depth test and write, and the scene path then
+  collects every triangle in the *whole scene* and sorts it back-to-front — an
+  ordering table, which is what hardware without a depth buffer actually did.
+  Sorting per instance would not do: the artefact that defines the look is
+  triangles resolving wrongly *within* and across objects.
+- **Affine interpolation** uses the screen-space barycentric weights directly
+  instead of weighting by 1/w. This is the texture swimming of the era.
+- **Integer vertex precision** rounds projected vertices to whole pixels — the
+  wobble of a transform unit with no subpixel precision.
+- **Filtering** adds a bilinear path to the texture sampler.
+
+**Which backend takes a model is now decided by its era.** WebGPU handles
+filtering (it is only a sampler setting) but *declines* the other three, so the
+factory falls back to software for a model that needs them. That is deliberate,
+not a gap:
+
+- No depth buffer would need a per-*triangle* sort across the scene every frame,
+  which on the GPU means rebuilding and re-uploading index buffers and destroying
+  the geometry cache the renderer is built around. Sorting whole draws instead
+  would be coarser than the software path and break parity — worse than not
+  offering it.
+- Affine interpolation and vertex snapping are both reachable in WGSL
+  (`@interpolate(linear)`, rounding in the vertex shader) but each needs a shader
+  variant, and shader variants cannot be verified without a device (§5.1a).
+
+This lands well rather than awkwardly: a console with no depth buffer and integer
+vertices is a low-polygon, low-resolution machine, which is exactly the workload
+the software rasteriser already handles. An N64-era model — depth-buffered,
+perspective-correct, filtered — is the tier that actually needs GPU throughput,
+and it keeps it. `trilinear` maps to bilinear on *both* backends until a mip
+chain exists, so parity holds and both gain real trilinear at once.
 
 **Enforcement choices worth knowing**, since both are visible to creators:
 
@@ -375,10 +402,10 @@ any real machine.
 2. ~~**Gate the tab list on the model.**~~ **Done** — `editorTabs.ts` (§3).
 3. ~~**Give the player a GPU triangle path**~~ **Done** — `packages/player/src/render/`
    (§5.1). Not verified on real hardware: see §5.3.
-4. ~~**Widen `ConsoleModel` with `RenderCaps`.**~~ **Done** (§4), and the two
-   scene-level caps are now enforced (§4a). The four rasterisation-level caps
-   need `renderMeshScene` taught the same options before they can be honoured
-   without breaking GPU/software parity — the next concrete step toward PS1.
+4. ~~**Widen `ConsoleModel` with `RenderCaps`.**~~ **Done** (§4), and every cap
+   is now enforced (§4a) — the scene-level pair above the backend, the
+   rasterisation-level four inside it, with the backend chosen by what the
+   model's era needs. **The renderer can now express a PS1-era look.**
 5. **Build the PS1-era model.** Best first 3D era: cheapest constraints to
    enforce, highest aesthetic payoff. The existing 3D sidecars become its native
    format (§3), and the asset store lands here (§5.2).

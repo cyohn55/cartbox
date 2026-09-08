@@ -38,6 +38,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import {
+  DEFAULT_RASTER_STYLE,
   computeSmoothNormals,
   multiplyMat4,
   type DecodedTexture,
@@ -45,9 +46,11 @@ import {
   type MeshPrimitive,
   type MeshAsset,
   type MeshSceneInstance,
+  type RasterStyle,
 } from "@cartbox/editor";
 
 import { SoftwareSceneRenderer, type SceneDraw, type SceneRenderer } from "./sceneRenderer.js";
+import { webgpuCanHonour } from "./renderCaps.js";
 import {
   UNIFORM_FLOATS,
   UNIFORM_STRIDE,
@@ -136,7 +139,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   readonly backend = "webgpu" as const;
 
   /** Draws the opening frames, and any frame before the first readback lands. */
-  private readonly software = new SoftwareSceneRenderer();
+  private readonly software: SoftwareSceneRenderer;
 
   private readonly meshes = new WeakMap<MeshAsset, GpuPrimitive[]>();
   private readonly textures = new WeakMap<DecodedTexture, any>();
@@ -163,14 +166,27 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     private readonly blankTexture: any,
     private readonly readback: { buffer: any; busy: boolean }[],
     private readonly bytesPerRow: number,
-  ) {}
+    style: RasterStyle,
+  ) {
+    // The warm-up rasteriser must draw the same era as the GPU it stands in for.
+    this.software = new SoftwareSceneRenderer(style);
+  }
 
   /**
    * Build the renderer for one framebuffer size. Returns null on any failure, so
    * the factory falls back to software rather than the caller seeing an
    * exception mid-frame.
    */
-  static async create(device: any, width: number, height: number): Promise<WebgpuSceneRenderer | null> {
+  static async create(
+    device: any,
+    width: number,
+    height: number,
+    style: RasterStyle = DEFAULT_RASTER_STYLE,
+  ): Promise<WebgpuSceneRenderer | null> {
+    // Refuse a style this path cannot reproduce, so the factory falls back to
+    // the software rasteriser rather than rendering a console model with the
+    // wrong era's rules. See `webgpuCanHonour` for why these three are hard.
+    if (!webgpuCanHonour(style)) return null;
     try {
       const module = device.createShaderModule({ code: SHADER });
 
@@ -234,9 +250,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         format: "depth24plus",
         usage: 0x10, // RENDER_ATTACHMENT
       });
+      // Filtering is the one era trait that is just a sampler setting. Nearest
+      // gives the crunchy, aliased texels of a machine that could not filter;
+      // linear gives the softness of one that could.
+      const filter = style.textureFiltering === "none" ? "nearest" : "linear";
       const sampler = device.createSampler({
-        magFilter: "nearest",
-        minFilter: "nearest",
+        magFilter: filter,
+        minFilter: filter,
         addressModeU: "repeat",
         addressModeV: "repeat",
       });
@@ -276,6 +296,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         blankTexture,
         readback,
         bytesPerRow,
+        style,
       );
     } catch {
       return null;

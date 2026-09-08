@@ -14,6 +14,7 @@
 
 import { getWebgpuDevice } from "../lighting/webgpuDevice.js";
 import type { RenderCaps } from "../models.js";
+import { rasterStyleFor } from "./renderCaps.js";
 import {
   CappedSceneRenderer,
   SoftwareSceneRenderer,
@@ -44,9 +45,16 @@ export async function createSceneRenderer(
   caps: RenderCaps,
   deviceProvider: DeviceProvider = getWebgpuDevice,
 ): Promise<SceneRenderer> {
+  // The model's era decides how to rasterise, and therefore which backends are
+  // even eligible: WebGPU declines a style it cannot reproduce (see
+  // `webgpuCanHonour`), which is what keeps a console model looking the same
+  // whether or not the viewer has a device.
+  const style = rasterStyleFor(caps);
+
   const device = await deviceProvider();
   let renderer: SceneRenderer | null = null;
-  if (device) renderer = await WebgpuSceneRenderer.create(device, width, height);
-  renderer ??= new SoftwareSceneRenderer();
+  if (device) renderer = await WebgpuSceneRenderer.create(device, width, height, style);
+  renderer ??= new SoftwareSceneRenderer(style);
+
   return capsConstrainScene(caps) ? new CappedSceneRenderer(renderer, caps) : renderer;
 }
