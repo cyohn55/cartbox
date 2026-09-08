@@ -401,7 +401,7 @@ any real machine.
    `BUILD_PLAN.md` scoping its TIC-80 principle to Classic.
 2. ~~**Gate the tab list on the model.**~~ **Done** — `editorTabs.ts` (§3).
 3. ~~**Give the player a GPU triangle path**~~ **Done** — `packages/player/src/render/`
-   (§5.1). Not verified on real hardware: see §5.3.
+   (§5.1). Not verified on real hardware: see §5.1a.
 4. ~~**Widen `ConsoleModel` with `RenderCaps`.**~~ **Done** (§4), and every cap
    is now enforced (§4a) — the scene-level pair above the backend, the
    rasterisation-level four inside it, with the backend chosen by what the
