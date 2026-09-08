@@ -2403,6 +2403,15 @@ var PostFxSurface = class _PostFxSurface {
 };
 
 // src/models.ts
+var SOFTWARE_RASTER_CAPS = {
+  zBuffer: true,
+  perspectiveCorrect: true,
+  textureFiltering: "none",
+  vertexPrecision: "float",
+  textureCacheBytes: 0,
+  polyBudget: 0,
+  programmableShaders: false
+};
 var MODELS = {
   classic: {
     id: "classic",
@@ -2417,7 +2426,9 @@ var MODELS = {
     paletteSize: 16,
     cartSizeBytes: 64 * 1024,
     engineUrl: "/engine/classic/tic80.js",
-    inputs: ["gamepad", "mouse", "keyboard"]
+    inputs: ["gamepad", "mouse", "keyboard"],
+    renderCaps: SOFTWARE_RASTER_CAPS,
+    assetBudgetBytes: 0
   },
   pro: {
     id: "pro",
@@ -2440,7 +2451,9 @@ var MODELS = {
     paletteSize: 64,
     cartSizeBytes: 1024 * 1024,
     engineUrl: "/engine/pro/engine.js",
-    inputs: ["gamepad", "mouse", "keyboard"]
+    inputs: ["gamepad", "mouse", "keyboard"],
+    renderCaps: SOFTWARE_RASTER_CAPS,
+    assetBudgetBytes: 0
   },
   portrait: {
     id: "portrait",
@@ -2460,7 +2473,9 @@ var MODELS = {
     paletteSize: 64,
     cartSizeBytes: 1024 * 1024,
     engineUrl: "/engine/portrait/engine.js",
-    inputs: ["gamepad", "mouse", "keyboard"]
+    inputs: ["gamepad", "mouse", "keyboard"],
+    renderCaps: SOFTWARE_RASTER_CAPS,
+    assetBudgetBytes: 0
   },
   voxel: {
     id: "voxel",
@@ -2475,7 +2490,9 @@ var MODELS = {
     paletteSize: 256,
     cartSizeBytes: 2 * 1024 * 1024,
     engineUrl: "/engine/voxel/engine.js",
-    inputs: ["gamepad", "mouse"]
+    inputs: ["gamepad", "mouse"],
+    renderCaps: SOFTWARE_RASTER_CAPS,
+    assetBudgetBytes: 0
   }
 };
 var DEFAULT_MODEL_ID = "classic";
@@ -3946,7 +3963,149 @@ var ParticleOverlaySurface = class {
 var lerp3 = (a, b, t) => a + (b - a) * t;
 
 // src/mesh/MeshOverlaySurface.ts
-import { composeModelMatrix as composeModelMatrix2, multiplyMat4, renderMeshScene } from "@cartbox/editor";
+import { composeModelMatrix as composeModelMatrix2, multiplyMat4 } from "@cartbox/editor";
+
+// src/render/sceneRenderer.ts
+import { DEFAULT_RASTER_STYLE, renderMeshScene } from "@cartbox/editor";
+
+// src/render/renderCaps.ts
+function createTextureBudgetCache() {
+  return /* @__PURE__ */ new WeakMap();
+}
+function triangleCount(instance) {
+  let total = 0;
+  for (const primitive of instance.mesh.primitives) total += primitive.indices.length / 3;
+  return total;
+}
+function capTriangles(instances, polyBudget) {
+  if (polyBudget <= 0 || instances.length === 0) return instances;
+  let used = 0;
+  for (let index = 0; index < instances.length; index += 1) {
+    used += triangleCount(instances[index]);
+    if (used > polyBudget) {
+      return instances.slice(0, Math.max(1, index));
+    }
+  }
+  return instances;
+}
+function fitTextureToBudget(source, budgetBytes) {
+  if (budgetBytes <= 0) return source;
+  let current = source;
+  while (current.width * current.height * 4 > budgetBytes && (current.width > 1 || current.height > 1)) {
+    current = halve(current);
+  }
+  return current;
+}
+function halve(source) {
+  const width = Math.max(1, source.width >> 1);
+  const height = Math.max(1, source.height >> 1);
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const x0 = Math.min(source.width - 1, x * 2);
+      const x1 = Math.min(source.width - 1, x * 2 + 1);
+      const y0 = Math.min(source.height - 1, y * 2);
+      const y1 = Math.min(source.height - 1, y * 2 + 1);
+      const at = (px, py) => (py * source.width + px) * 4;
+      const a = at(x0, y0);
+      const b = at(x1, y0);
+      const c = at(x0, y1);
+      const d = at(x1, y1);
+      const to = (y * width + x) * 4;
+      for (let channel = 0; channel < 4; channel += 1) {
+        data[to + channel] = (source.data[a + channel] + source.data[b + channel] + source.data[c + channel] + source.data[d + channel]) / 4;
+      }
+    }
+  }
+  return { width, height, data };
+}
+function capTextures(instances, budgetBytes, cache) {
+  if (budgetBytes <= 0) return instances;
+  let changed = false;
+  const capped = instances.map((instance) => {
+    const textures = instance.textures;
+    if (!textures) return instance;
+    let instanceChanged = false;
+    const fitted = textures.map((texture) => {
+      if (!texture) return texture;
+      const memo = cache.get(texture);
+      if (memo) {
+        if (memo !== texture) instanceChanged = true;
+        return memo;
+      }
+      const result = fitTextureToBudget(texture, budgetBytes);
+      cache.set(texture, result);
+      if (result !== texture) instanceChanged = true;
+      return result;
+    });
+    if (!instanceChanged) return instance;
+    changed = true;
+    return { mesh: instance.mesh, model: instance.model, textures: fitted };
+  });
+  return changed ? capped : instances;
+}
+function applyRenderCaps(instances, caps, cache) {
+  return capTextures(capTriangles(instances, caps.polyBudget), caps.textureCacheBytes, cache);
+}
+function rasterStyleFor(caps) {
+  return {
+    zBuffer: caps.zBuffer,
+    perspectiveCorrect: caps.perspectiveCorrect,
+    vertexPrecision: caps.vertexPrecision,
+    textureFiltering: caps.textureFiltering === "none" ? "none" : "bilinear"
+  };
+}
+function webgpuCanHonour(style) {
+  return style.zBuffer && style.perspectiveCorrect && style.vertexPrecision === "float";
+}
+
+// src/render/sceneRenderer.ts
+var SoftwareSceneRenderer = class {
+  /**
+   * @param style How to rasterise — the era behaviour a console model asks for.
+   *   Defaults to the modern one, so an editor preview or a test that passes
+   *   nothing renders exactly as it always has.
+   */
+  constructor(style = DEFAULT_RASTER_STYLE) {
+    this.style = style;
+    this.backend = "software";
+  }
+  render(instances, draw) {
+    renderMeshScene(instances, {
+      width: draw.width,
+      height: draw.height,
+      out: draw.out,
+      depth: draw.depth,
+      view: draw.view,
+      projection: draw.projection,
+      background: draw.background,
+      lightDirection: draw.lightDirection,
+      ambient: draw.ambient,
+      style: this.style
+    });
+  }
+  dispose() {
+  }
+};
+var CappedSceneRenderer = class {
+  constructor(inner, caps) {
+    this.inner = inner;
+    this.caps = caps;
+    this.cache = createTextureBudgetCache();
+  }
+  get backend() {
+    return this.inner.backend;
+  }
+  render(instances, draw) {
+    this.inner.render(applyRenderCaps(instances, this.caps, this.cache), draw);
+  }
+  dispose() {
+    this.inner.dispose();
+  }
+};
+function capsConstrainScene(caps) {
+  return caps.polyBudget > 0 || caps.textureCacheBytes > 0;
+}
 
 // src/mesh/meshScene.ts
 import {
@@ -4056,12 +4215,13 @@ var RAD_TO_DEG = 180 / Math.PI;
 var AUTO_ORBIT_YAW_PER_FRAME = 2 * Math.PI / 720;
 var AUTO_ORBIT_PITCH = 0.35;
 var MeshOverlaySurface = class _MeshOverlaySurface {
-  constructor(inner, width, height, scene, instances) {
+  constructor(inner, width, height, scene, instances, renderer) {
     this.inner = inner;
     this.width = width;
     this.height = height;
     this.scene = scene;
     this.instances = instances;
+    this.renderer = renderer;
     this.frame = 0;
     this.cartCamera = null;
     this.poses = [];
@@ -4074,7 +4234,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * texture that fails to decode falls back to null (flat base colour), so a
    * bad image never blocks the cart — the mesh still renders, just untextured.
    */
-  static async create(inner, width, height, scene) {
+  static async create(inner, width, height, scene, renderer = new SoftwareSceneRenderer()) {
     const instances = [];
     for (const instance of scene.instances) {
       const textures = await Promise.all(
@@ -4084,7 +4244,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       );
       instances.push({ mesh: instance.mesh, model: instance.model, textures });
     }
-    return new _MeshOverlaySurface(inner, width, height, scene, instances);
+    return new _MeshOverlaySurface(inner, width, height, scene, instances, renderer);
   }
   /**
    * Set the cart-driven camera for the next frame(s), or null to auto-orbit. The
@@ -4111,7 +4271,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       distance: cart.distance,
       targetOffset: cart.target
     }) : buildOrbitCamera(this.scene.bounds, this.frame * AUTO_ORBIT_YAW_PER_FRAME, AUTO_ORBIT_PITCH, this.width / this.height);
-    renderMeshScene(this.posedInstances(), {
+    this.renderer.render(this.posedInstances(), {
       width: this.width,
       height: this.height,
       out: this.output,
@@ -4172,9 +4332,6 @@ async function decodeTexture(mime, bytes) {
     return null;
   }
 }
-
-// src/world/WorldOverlaySurface.ts
-import { renderMeshScene as renderMeshScene2 } from "@cartbox/editor";
 
 // src/world/worldScene.ts
 import {
@@ -4449,11 +4606,12 @@ function identityMat4() {
 
 // src/world/WorldOverlaySurface.ts
 var WorldOverlaySurface = class {
-  constructor(inner, width, height, scene, textureFor) {
+  constructor(inner, width, height, scene, textureFor, renderer = new SoftwareSceneRenderer()) {
     this.inner = inner;
     this.width = width;
     this.height = height;
     this.scene = scene;
+    this.renderer = renderer;
     this.cartCamera = null;
     this.billboards = [];
     /** The cart's key light direction (points toward the sun), for terrain shading. */
@@ -4524,7 +4682,7 @@ var WorldOverlaySurface = class {
       );
     }
     const lit = this.sunDirection !== null;
-    renderMeshScene2([...this.terrain, ...shadowInstances, ...propInstances, ...billboardInstances], {
+    this.renderer.render([...this.terrain, ...shadowInstances, ...propInstances, ...billboardInstances], {
       width: this.width,
       height: this.height,
       out: this.output,
@@ -4557,6 +4715,493 @@ var WorldOverlaySurface = class {
     this.inner.destroy();
   }
 };
+
+// src/render/WebgpuSceneRenderer.ts
+import {
+  DEFAULT_RASTER_STYLE as DEFAULT_RASTER_STYLE2,
+  computeSmoothNormals,
+  multiplyMat4 as multiplyMat42
+} from "@cartbox/editor";
+
+// src/render/scenePacking.ts
+var UNIFORM_STRIDE = 256;
+var UNIFORM_BYTES_USED = 160;
+var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
+var OFFSET_MVP = 0;
+var OFFSET_NRM = 16;
+var OFFSET_BASE = 28;
+var OFFSET_LIGHT = 32;
+var OFFSET_FLAGS = 36;
+var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
+var DEFAULT_AMBIENT2 = 0.35;
+function resolveLight(direction, ambient) {
+  const [lx, ly, lz] = direction ?? DEFAULT_LIGHT;
+  const length = Math.hypot(lx, ly, lz) || 1;
+  return {
+    direction: [lx / length, ly / length, lz / length],
+    ambient: ambient ?? DEFAULT_AMBIENT2
+  };
+}
+function alignBytesPerRow(width) {
+  return Math.ceil(width * 4 / 256) * 256;
+}
+function normalBasis3x3(model) {
+  return [model[0], model[1], model[2], model[4], model[5], model[6], model[8], model[9], model[10]];
+}
+function writeInstanceUniform(target, index, uniform) {
+  const base = index * UNIFORM_FLOATS;
+  for (let i = 0; i < 16; i += 1) target[base + OFFSET_MVP + i] = uniform.mvp[i];
+  for (let column = 0; column < 3; column += 1) {
+    for (let row = 0; row < 3; row += 1) {
+      target[base + OFFSET_NRM + column * 4 + row] = uniform.normalBasis[column * 3 + row];
+    }
+  }
+  target[base + OFFSET_BASE] = uniform.baseColor[0];
+  target[base + OFFSET_BASE + 1] = uniform.baseColor[1];
+  target[base + OFFSET_BASE + 2] = uniform.baseColor[2];
+  target[base + OFFSET_BASE + 3] = uniform.baseColor[3];
+  target[base + OFFSET_LIGHT] = uniform.light.direction[0];
+  target[base + OFFSET_LIGHT + 1] = uniform.light.direction[1];
+  target[base + OFFSET_LIGHT + 2] = uniform.light.direction[2];
+  target[base + OFFSET_LIGHT + 3] = uniform.light.ambient;
+  target[base + OFFSET_FLAGS] = uniform.hasTexture ? 1 : 0;
+  target[base + OFFSET_FLAGS + 1] = 0;
+  target[base + OFFSET_FLAGS + 2] = 0;
+  target[base + OFFSET_FLAGS + 3] = 0;
+}
+var VERTEX_FLOATS = 8;
+function interleaveVertices(positions, normals, uvs) {
+  const count = Math.floor(positions.length / 3);
+  const out = new Float32Array(count * VERTEX_FLOATS);
+  for (let i = 0; i < count; i += 1) {
+    const to = i * VERTEX_FLOATS;
+    out[to] = positions[i * 3] ?? 0;
+    out[to + 1] = positions[i * 3 + 1] ?? 0;
+    out[to + 2] = positions[i * 3 + 2] ?? 0;
+    out[to + 3] = normals[i * 3] ?? 0;
+    out[to + 4] = normals[i * 3 + 1] ?? 0;
+    out[to + 5] = normals[i * 3 + 2] ?? 0;
+    out[to + 6] = uvs ? uvs[i * 2] ?? 0 : 0;
+    out[to + 7] = uvs ? uvs[i * 2 + 1] ?? 0 : 0;
+  }
+  return out;
+}
+function unpadRows(padded, width, height, bytesPerRow, reuse = null) {
+  const rowBytes = width * 4;
+  const out = reuse && reuse.length === rowBytes * height ? reuse : new Uint8Array(rowBytes * height);
+  for (let y = 0; y < height; y += 1) {
+    out.set(padded.subarray(y * bytesPerRow, y * bytesPerRow + rowBytes), y * rowBytes);
+  }
+  return out;
+}
+
+// src/render/WebgpuSceneRenderer.ts
+var READBACK_BUFFERS = 3;
+var SHADER_STAGE_VERTEX = 1;
+var SHADER_STAGE_FRAGMENT = 2;
+var SHADER = (
+  /* wgsl */
+  `
+struct Uniforms {
+  mvp: mat4x4<f32>,
+  nrm: mat3x3<f32>,
+  base: vec4<f32>,
+  light: vec4<f32>,  // xyz = normalised direction, w = ambient floor
+  flags: vec4<f32>,  // x = 1 when a base-colour texture is bound
+};
+@group(0) @binding(0) var<uniform> u: Uniforms;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var tex: texture_2d<f32>;
+
+struct VSOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) normal: vec3<f32>,
+  @location(1) uv: vec2<f32>,
+};
+
+@vertex
+fn vs(
+  @location(0) position: vec3<f32>,
+  @location(1) normal: vec3<f32>,
+  @location(2) uv: vec2<f32>,
+) -> VSOut {
+  var out: VSOut;
+  out.pos = u.mvp * vec4<f32>(position, 1.0);
+  out.normal = u.nrm * normal;
+  out.uv = uv;
+  return out;
+}
+
+@fragment
+fn fs(in: VSOut) -> @location(0) vec4<f32> {
+  // Two-sided Lambert: abs(N\xB7L) so inconsistent winding still lights. The normal
+  // is deliberately NOT renormalised \u2014 the software rasteriser interpolates and
+  // dots without normalising, and parity with it is the contract here. Both
+  // therefore skew identically under non-uniform scale.
+  let nl = abs(dot(in.normal, u.light.xyz));
+  let shade = u.light.w + (1.0 - u.light.w) * nl;
+
+  var colour = u.base;
+  if (u.flags.x > 0.5) {
+    // glTF's V origin is top-left, so flip; the sampler wraps and nearest-samples.
+    colour = colour * textureSample(tex, samp, vec2<f32>(in.uv.x, 1.0 - in.uv.y));
+  }
+  // The CPU path skips a texel whose combined alpha is below 1/255 rather than
+  // blending it, so this is a discard and not an alpha-blend state.
+  if (colour.a * 255.0 < 1.0) { discard; }
+
+  return vec4<f32>(colour.rgb * shade, colour.a);
+}
+`
+);
+var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
+  constructor(device, width, height, pipeline, bindGroupLayout, colourTexture, depthTexture, sampler, blankTexture, readback, bytesPerRow, style) {
+    this.device = device;
+    this.width = width;
+    this.height = height;
+    this.pipeline = pipeline;
+    this.bindGroupLayout = bindGroupLayout;
+    this.colourTexture = colourTexture;
+    this.depthTexture = depthTexture;
+    this.sampler = sampler;
+    this.blankTexture = blankTexture;
+    this.readback = readback;
+    this.bytesPerRow = bytesPerRow;
+    this.backend = "webgpu";
+    this.meshes = /* @__PURE__ */ new WeakMap();
+    this.textures = /* @__PURE__ */ new WeakMap();
+    // Not readonly: a resized uniform buffer invalidates every cached group at
+    // once, and WeakMap has no clear(), so the map itself is replaced.
+    this.bindGroups = /* @__PURE__ */ new WeakMap();
+    /** Most recent completed readback, or null before the first one lands. */
+    this.latest = null;
+    this.uniformCapacity = 0;
+    this.uniformBuffer = null;
+    this.uniformData = new Float32Array(0);
+    this.destroyed = false;
+    this.software = new SoftwareSceneRenderer(style);
+  }
+  /**
+   * Build the renderer for one framebuffer size. Returns null on any failure, so
+   * the factory falls back to software rather than the caller seeing an
+   * exception mid-frame.
+   */
+  static async create(device, width, height, style = DEFAULT_RASTER_STYLE2) {
+    if (!webgpuCanHonour(style)) return null;
+    try {
+      const module = device.createShaderModule({ code: SHADER });
+      const bindGroupLayout = device.createBindGroupLayout({
+        entries: [
+          {
+            binding: 0,
+            visibility: SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT,
+            buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: UNIFORM_BYTES_USED }
+          },
+          { binding: 1, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "filtering" } },
+          { binding: 2, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } }
+        ]
+      });
+      const pipeline = device.createRenderPipeline({
+        layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+        vertex: {
+          module,
+          entryPoint: "vs",
+          buffers: [
+            {
+              // Interleaved position(3) + normal(3) + uv(2).
+              arrayStride: 32,
+              attributes: [
+                { shaderLocation: 0, offset: 0, format: "float32x3" },
+                { shaderLocation: 1, offset: 12, format: "float32x3" },
+                { shaderLocation: 2, offset: 24, format: "float32x2" }
+              ]
+            }
+          ]
+        },
+        fragment: {
+          module,
+          entryPoint: "fs",
+          // rgba8unorm, never rgba8unorm-srgb: the framebuffer these bytes land
+          // in is the same 8-bit buffer the CPU path writes, so any gamma
+          // conversion here would show up as the GPU path looking washed out.
+          targets: [{ format: "rgba8unorm" }]
+        },
+        // cullMode "none" matches the software rasteriser, which draws both
+        // faces (its Lambert is two-sided for exactly this reason).
+        primitive: { topology: "triangle-list", cullMode: "none" },
+        depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" }
+      });
+      const colourTexture = device.createTexture({
+        size: { width, height },
+        format: "rgba8unorm",
+        usage: 16 | 1
+        // RENDER_ATTACHMENT | COPY_SRC
+      });
+      const depthTexture = device.createTexture({
+        size: { width, height },
+        format: "depth24plus",
+        usage: 16
+        // RENDER_ATTACHMENT
+      });
+      const filter = style.textureFiltering === "none" ? "nearest" : "linear";
+      const sampler = device.createSampler({
+        magFilter: filter,
+        minFilter: filter,
+        addressModeU: "repeat",
+        addressModeV: "repeat"
+      });
+      const blankTexture = device.createTexture({
+        size: { width: 1, height: 1 },
+        format: "rgba8unorm",
+        usage: 4 | 2
+        // TEXTURE_BINDING | COPY_DST
+      });
+      device.queue.writeTexture(
+        { texture: blankTexture },
+        new Uint8Array([255, 255, 255, 255]),
+        { bytesPerRow: 4 },
+        { width: 1, height: 1 }
+      );
+      const bytesPerRow = alignBytesPerRow(width);
+      const readback = Array.from({ length: READBACK_BUFFERS }, () => ({
+        buffer: device.createBuffer({
+          size: bytesPerRow * height,
+          usage: 8 | 1
+          // MAP_READ | COPY_DST
+        }),
+        busy: false
+      }));
+      return new _WebgpuSceneRenderer(
+        device,
+        width,
+        height,
+        pipeline,
+        bindGroupLayout,
+        colourTexture,
+        depthTexture,
+        sampler,
+        blankTexture,
+        readback,
+        bytesPerRow,
+        style
+      );
+    } catch {
+      return null;
+    }
+  }
+  render(instances, draw) {
+    if (this.destroyed) return;
+    if (this.latest) {
+      this.composite(draw);
+    } else {
+      this.software.render(instances, draw);
+    }
+    try {
+      this.submit(instances, draw);
+    } catch {
+      this.latest = null;
+    }
+  }
+  /** Paint the last completed GPU frame over the cart's own pixels. */
+  composite(draw) {
+    const source = this.latest;
+    const out = draw.out;
+    if (draw.background !== null) {
+      const [br, bg, bb, ba] = draw.background;
+      for (let i = 0; i < draw.width * draw.height; i += 1) {
+        out[i * 4] = br;
+        out[i * 4 + 1] = bg;
+        out[i * 4 + 2] = bb;
+        out[i * 4 + 3] = ba;
+      }
+    }
+    for (let i = 0; i < draw.width * draw.height; i += 1) {
+      const alpha = source[i * 4 + 3];
+      if (alpha === 0) continue;
+      out[i * 4] = source[i * 4];
+      out[i * 4 + 1] = source[i * 4 + 1];
+      out[i * 4 + 2] = source[i * 4 + 2];
+      out[i * 4 + 3] = alpha;
+    }
+  }
+  /** Encode and submit one frame, and start a readback if a buffer is free. */
+  submit(instances, draw) {
+    const viewProj = multiplyMat42(draw.projection, draw.view);
+    const draws = [];
+    for (const instance of instances) {
+      const geometries = this.uploadMesh(instance.mesh);
+      instance.mesh.primitives.forEach((primitive, index) => {
+        const geometry = geometries[index];
+        if (!geometry || geometry.indexCount === 0) return;
+        draws.push({ primitive, geometry, texture: instance.textures?.[index] ?? null, model: instance.model });
+      });
+    }
+    if (draws.length === 0) return;
+    this.ensureUniformCapacity(draws.length);
+    const light = resolveLight(draw.lightDirection, draw.ambient);
+    draws.forEach((entry, index) => {
+      writeInstanceUniform(this.uniformData, index, {
+        mvp: multiplyMat42(viewProj, entry.model),
+        normalBasis: normalBasis3x3(entry.model),
+        baseColor: entry.primitive.material.baseColorFactor,
+        hasTexture: entry.texture !== null,
+        light
+      });
+    });
+    this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
+    const encoder = this.device.createCommandEncoder();
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [
+        {
+          view: this.colourTexture.createView(),
+          // Transparent black: every untouched pixel reads as "nothing drawn",
+          // which is what lets the composite leave the cart's frame showing.
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp: "clear",
+          storeOp: "store"
+        }
+      ],
+      depthStencilAttachment: {
+        view: this.depthTexture.createView(),
+        depthClearValue: 1,
+        depthLoadOp: "clear",
+        depthStoreOp: "store"
+      }
+    });
+    pass.setPipeline(this.pipeline);
+    draws.forEach((entry, index) => {
+      pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.texture), [index * UNIFORM_STRIDE]);
+      pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
+      pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
+      pass.drawIndexed(entry.geometry.indexCount);
+    });
+    pass.end();
+    const slot = this.readback.find((entry) => !entry.busy);
+    if (slot) {
+      slot.busy = true;
+      encoder.copyTextureToBuffer(
+        { texture: this.colourTexture },
+        { buffer: slot.buffer, bytesPerRow: this.bytesPerRow, rowsPerImage: this.height },
+        { width: this.width, height: this.height }
+      );
+      this.device.queue.submit([encoder.finish()]);
+      void this.drain(slot);
+    } else {
+      this.device.queue.submit([encoder.finish()]);
+    }
+  }
+  /** Await one readback and publish it as the newest frame. */
+  async drain(slot) {
+    try {
+      await slot.buffer.mapAsync(1);
+      if (this.destroyed) return;
+      const padded = new Uint8Array(slot.buffer.getMappedRange());
+      this.latest = unpadRows(padded, this.width, this.height, this.bytesPerRow, this.latest);
+      slot.buffer.unmap();
+    } catch {
+    } finally {
+      slot.busy = false;
+    }
+  }
+  /** Grow the per-draw uniform buffer to hold at least `count` draws. */
+  ensureUniformCapacity(count) {
+    if (count <= this.uniformCapacity) return;
+    this.uniformBuffer?.destroy?.();
+    this.uniformCapacity = Math.max(count, this.uniformCapacity * 2, 8);
+    this.uniformBuffer = this.device.createBuffer({
+      size: this.uniformCapacity * UNIFORM_STRIDE,
+      usage: 64 | 8
+      // UNIFORM | COPY_DST
+    });
+    this.uniformData = new Float32Array(this.uniformCapacity * UNIFORM_FLOATS);
+    this.bindGroups = /* @__PURE__ */ new WeakMap();
+  }
+  /** Upload (once) a mesh's primitives as interleaved vertex + index buffers. */
+  uploadMesh(mesh) {
+    const cached = this.meshes.get(mesh);
+    if (cached) return cached;
+    const uploaded = mesh.primitives.map((primitive) => {
+      const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
+      const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs);
+      const vertexBuffer = this.device.createBuffer({
+        size: Math.max(32, vertices.byteLength),
+        usage: 32 | 8
+        // VERTEX | COPY_DST
+      });
+      this.device.queue.writeBuffer(vertexBuffer, 0, vertices);
+      const indexBuffer = this.device.createBuffer({
+        size: Math.max(4, primitive.indices.byteLength),
+        usage: 16 | 8
+        // INDEX | COPY_DST
+      });
+      this.device.queue.writeBuffer(indexBuffer, 0, primitive.indices);
+      return { vertexBuffer, indexBuffer, indexCount: primitive.indices.length };
+    });
+    this.meshes.set(mesh, uploaded);
+    return uploaded;
+  }
+  /** The bind group for one primitive, rebuilt if its texture changed. */
+  bindGroupFor(primitive, texture) {
+    const cached = this.bindGroups.get(primitive);
+    if (cached && cached.source === texture) return cached.group;
+    const group = this.device.createBindGroup({
+      layout: this.bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: this.uniformBuffer, offset: 0, size: UNIFORM_STRIDE } },
+        { binding: 1, resource: this.sampler },
+        { binding: 2, resource: (texture ? this.uploadTexture(texture) : this.blankTexture).createView() }
+      ]
+    });
+    this.bindGroups.set(primitive, { group, source: texture });
+    return group;
+  }
+  /** Upload (once) a decoded texture. */
+  uploadTexture(source) {
+    const cached = this.textures.get(source);
+    if (cached) return cached;
+    const texture = this.device.createTexture({
+      size: { width: source.width, height: source.height },
+      format: "rgba8unorm",
+      usage: 4 | 2
+      // TEXTURE_BINDING | COPY_DST
+    });
+    this.device.queue.writeTexture(
+      { texture },
+      source.data,
+      { bytesPerRow: source.width * 4, rowsPerImage: source.height },
+      { width: source.width, height: source.height }
+    );
+    this.textures.set(source, texture);
+    return texture;
+  }
+  dispose() {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.latest = null;
+    this.software.dispose();
+    destroySafely(this.colourTexture);
+    destroySafely(this.depthTexture);
+    destroySafely(this.blankTexture);
+    destroySafely(this.uniformBuffer);
+    for (const slot of this.readback) destroySafely(slot.buffer);
+  }
+};
+function destroySafely(resource) {
+  try {
+    resource?.destroy?.();
+  } catch {
+  }
+}
+
+// src/render/createSceneRenderer.ts
+async function createSceneRenderer(width, height, caps, deviceProvider = getWebgpuDevice) {
+  const style = rasterStyleFor(caps);
+  const device = await deviceProvider();
+  let renderer = null;
+  if (device) renderer = await WebgpuSceneRenderer.create(device, width, height, style);
+  renderer ?? (renderer = new SoftwareSceneRenderer(style));
+  return capsConstrainScene(caps) ? new CappedSceneRenderer(renderer, caps) : renderer;
+}
 
 // src/player.ts
 function shouldUseTouch(scheme, view) {
@@ -4659,8 +5304,21 @@ var Player = class {
           surface = new ParticleOverlaySurface(surface, this.model.width, this.model.height, particles);
         }
         const mesh = this.options.mesh;
+        if (mesh || world && this.cartSource) {
+          this.sceneRenderer = await createSceneRenderer(
+            this.model.width,
+            this.model.height,
+            this.model.renderCaps
+          );
+        }
         if (mesh) {
-          surface = this.meshSurface = await MeshOverlaySurface.create(surface, this.model.width, this.model.height, mesh);
+          surface = this.meshSurface = await MeshOverlaySurface.create(
+            surface,
+            this.model.width,
+            this.model.height,
+            mesh,
+            this.sceneRenderer
+          );
         }
         if (world && this.cartSource) {
           surface = this.worldSurface = new WorldOverlaySurface(
@@ -4668,7 +5326,8 @@ var Player = class {
             this.model.width,
             this.model.height,
             world,
-            makeWorldTextureLookup(this.cartSource, world.tilesPerSide)
+            makeWorldTextureLookup(this.cartSource, world.tilesPerSide),
+            this.sceneRenderer
           );
         }
         if (wantsForeground && this.cartSource) {
@@ -4865,6 +5524,7 @@ var Player = class {
     this.touch?.destroy();
     this.audio?.destroy();
     this.surface?.destroy();
+    this.sceneRenderer?.dispose();
     this.cartSource?.dispose();
     this.console?.dispose();
   }
@@ -5283,10 +5943,13 @@ export {
   CAMERA_SCALE,
   CARTBOX_SDK_LUA,
   CELL_WORLD,
+  CappedSceneRenderer,
   CartridgeLoadError,
   ConsoleButton,
+  DEFAULT_AMBIENT2 as DEFAULT_AMBIENT,
   DEFAULT_ATMOSPHERE,
   DEFAULT_KEY_BINDINGS,
+  DEFAULT_LIGHT,
   DEFAULT_MODEL_ID,
   EVENT_CAPACITY,
   HEIGHT_WORLD,
@@ -5324,14 +5987,23 @@ export {
   ReplayError,
   ReplayRecorder,
   ReplaySource,
+  SOFTWARE_RASTER_CAPS,
   SceneBackdropSurface,
+  SoftwareSceneRenderer,
   TILT_SHIFT_FEATHER,
+  UNIFORM_BYTES_USED,
+  UNIFORM_FLOATS,
+  UNIFORM_STRIDE,
+  VERTEX_FLOATS,
   WebgpuLightingLayer,
+  WebgpuSceneRenderer,
   WorldOverlaySurface,
   acesFilmic,
   acesFilmicChannel,
+  alignBytesPerRow,
   animClipsSdkLua,
   anyPostFxEnabled,
+  applyRenderCaps,
   buildBillboardInstance,
   buildClipTable,
   buildOrbitCamera,
@@ -5339,6 +6011,9 @@ export {
   buildTerrainInstances,
   buildWorldCamera,
   cameraAt,
+  capTextures,
+  capTriangles,
+  capsConstrainScene,
   cellAt,
   clipFrameIndex,
   collisionSdkLua,
@@ -5348,6 +6023,8 @@ export {
   createConsole,
   createFlatMaterial,
   createLightingLayer,
+  createSceneRenderer,
+  createTextureBudgetCache,
   decodeCamera,
   decodeLights,
   decodeMailbox,
@@ -5360,6 +6037,7 @@ export {
   extractScore,
   extractUnlocks,
   fillSky,
+  fitTextureToBudget,
   flagsSdkLua,
   flicker,
   frameDurationMs,
@@ -5370,11 +6048,13 @@ export {
   hashEventId,
   hexToRgb01,
   injectSdk,
+  interleaveVertices,
   interpolateNormal,
   loadEngineModule,
   makeShadowTexture,
   mount,
   nearestDirection,
+  normalBasis3x3,
   normalVector,
   paramKey,
   parseAnim,
@@ -5391,11 +6071,13 @@ export {
   pyramidLevelCount,
   pyramidLevelSize,
   randomSeed,
+  rasterStyleFor,
   readCartCode,
   reflectionFade,
   reflectionSampleY,
   renderSceneBackdrop,
   resolveButton,
+  resolveLight,
   resolveSceneLayers,
   resolveSupersample,
   resolveUnlockedAchievements,
@@ -5412,6 +6094,9 @@ export {
   sway,
   tiltShiftBlur,
   uniformsFromSettings,
+  unpadRows,
   verifyReplayScore,
-  worldCenter
+  webgpuCanHonour,
+  worldCenter,
+  writeInstanceUniform
 };

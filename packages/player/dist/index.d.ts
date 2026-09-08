@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, DecodedTexture } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, DecodedTexture, RasterStyle } from '@cartbox/editor';
 
 /**
  * Console models. A model is a fixed hardware spec plus the WASM runtime that
@@ -11,6 +11,49 @@ import { MeshSceneInstance, MeshAsset, Mat4, DecodedTexture } from '@cartbox/edi
  * assumptions the platform layer depends on.
  */
 type ModelId = "classic" | "pro" | "portrait" | "voxel";
+/**
+ * How a model rasterises triangles.
+ *
+ * Display specs (width, palette, channels) distinguish the 2D models from each
+ * other. They cannot distinguish the *era* models on the roadmap, which differ
+ * almost entirely in rendering semantics: a PS1-era model is defined by having
+ * no depth buffer and affine texture mapping, an N64-era model by trilinear
+ * filtering and a 4KB texture cache. Those are the traits that make era content
+ * look like its era, so they belong in the model descriptor beside the
+ * resolution rather than inside a renderer.
+ *
+ * Every model carries these today because the mesh and world overlay surfaces
+ * rasterise triangles over any model's framebuffer, whatever its `kind`. The
+ * four shipping models therefore declare identical caps — they all run the same
+ * software rasteriser. That is the point: the field exists so that adding an era
+ * model is a descriptor change plus a renderer that honours it, not a fork of
+ * the rendering path. See ERA_MODELS.md.
+ */
+interface RenderCaps {
+    /** False means painter's-algorithm sorting, so surfaces interpenetrate. */
+    zBuffer: boolean;
+    /** False means affine texture mapping — the PS1 texture warp. */
+    perspectiveCorrect: boolean;
+    textureFiltering: "none" | "bilinear" | "trilinear";
+    /** Integer vertex coordinates produce the PS1 wobble. */
+    vertexPrecision: "integer" | "float";
+    /** Texture memory a frame may draw from; 0 means unbounded. */
+    textureCacheBytes: number;
+    /** Triangles submitted per frame; 0 means unbounded. */
+    polyBudget: number;
+    /**
+     * Whether creators may supply their own shaders. True dissolves the
+     * fixed-spec guarantee the platform layer relies on, so it stays false for
+     * every fantasy-console model.
+     */
+    programmableShaders: boolean;
+}
+/**
+ * What the shared software rasteriser behind the mesh/world overlays actually
+ * does today: depth-buffered, perspective-correct, unfiltered, float vertices,
+ * and unbounded because nothing enforces a ceiling. Era models override this.
+ */
+declare const SOFTWARE_RASTER_CAPS: RenderCaps;
 interface ConsoleModel {
     id: ModelId;
     label: string;
@@ -30,9 +73,24 @@ interface ConsoleModel {
     /** Editor-enforced creative limits (informational at runtime). */
     paletteSize: number;
     cartSizeBytes: number;
+    /**
+     * Bytes of content-addressed assets a cart on this model may reference,
+     * beyond its cartridge. 0 means none: the cartridge is the whole cart.
+     *
+     * This is the constraint that lets a 3D era model exist at all. A textured
+     * scene does not fit in a cartridge at any resolution, so an era model stores
+     * its bulk beside the cart and references it by hash (see
+     * `cartAssetStore.ts`). Keeping the allowance *per model* rather than global
+     * is the same doctrine as every other limit here: an era model should pick a
+     * budget that evokes its generation rather than reproducing a disc, and a
+     * cartridge-only model should not silently acquire an asset store.
+     */
+    assetBudgetBytes: number;
     /** Default runtime URL for this model; overridable per player instance. */
     engineUrl: string;
     inputs: Array<"gamepad" | "mouse" | "keyboard">;
+    /** Triangle-rasterisation semantics. See {@link RenderCaps}. */
+    renderCaps: RenderCaps;
 }
 declare const MODELS: Record<ModelId, ConsoleModel>;
 /** Model used when a cart or caller does not specify one. */
@@ -1572,6 +1630,415 @@ interface RegisteredAchievement {
 declare function resolveUnlockedAchievements(unlockHashes: number[], registered: RegisteredAchievement[]): RegisteredAchievement[];
 
 /**
+ * Scene rendering: the seam between "what to draw" and "what draws it".
+ *
+ * Both 3D overlays — {@link MeshOverlaySurface} and {@link WorldOverlaySurface} —
+ * called `renderMeshScene` from `@cartbox/editor` directly, which is a pure
+ * software rasteriser running on the main thread. That was Phase 2 of the mesh
+ * feature and it is why the player has had no GPU triangle path: the renderer
+ * was not a dependency the surfaces could swap, it was a function they called.
+ *
+ * This makes it a dependency. Both overlays now draw through a `SceneRenderer`,
+ * of which there are two: the software one (the existing rasteriser, unchanged)
+ * and a WebGPU one. `createSceneRenderer` probes for a device and returns the
+ * GPU renderer when it can, the software renderer when it cannot — the same
+ * probe-and-fall-back shape `createLightingLayer` uses for lighting, for the
+ * same reason: a missing or failed device must degrade, never blank the screen.
+ *
+ * Why an era roadmap needs this: a PS1-era console model is defined by *how* it
+ * rasterises (no depth buffer, affine texture mapping), not by its resolution.
+ * That is a renderer that honours a `RenderCaps` block — impossible while the
+ * rasteriser is a hardcoded call. See ERA_MODELS.md §5.1.
+ */
+
+/** One frame's worth of drawing parameters — mirrors `renderMeshScene`'s options. */
+interface SceneDraw {
+    readonly width: number;
+    readonly height: number;
+    /** The framebuffer to composite into, RGBA8, `width * height * 4`. */
+    readonly out: Uint8ClampedArray;
+    /**
+     * Depth scratch, `width * height`.
+     *
+     * Owned by the renderer for the duration of the call and meaningless outside
+     * it: the software renderer fills it, the GPU renderer keeps depth on the GPU
+     * and never touches this array. No caller reads it back, and none may start —
+     * a renderer is free to ignore it entirely.
+     */
+    readonly depth: Float32Array;
+    readonly view: Mat4;
+    readonly projection: Mat4;
+    /**
+     * Clear colour, or null to composite over whatever `out` already holds (the
+     * cart's own frame). Null is what makes these surfaces overlays.
+     */
+    readonly background: readonly [number, number, number, number] | null;
+    /**
+     * Key light direction, or omitted for the rasteriser's default. The world
+     * overlay publishes a cart-driven sun here, so it changes per frame.
+     */
+    readonly lightDirection?: readonly [number, number, number];
+    /** Ambient floor, or omitted for the rasteriser's default (0.35). */
+    readonly ambient?: number;
+}
+/** Draws placed 3D instances into a framebuffer. */
+interface SceneRenderer {
+    /** Human-readable backend name, for diagnostics and tests. */
+    readonly backend: "software" | "webgpu";
+    render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
+    dispose(): void;
+}
+/**
+ * The existing pure rasteriser, behind the interface. Nothing about it changes:
+ * it stays the reference implementation the GPU path is checked against, and
+ * the fallback whenever WebGPU is absent.
+ */
+declare class SoftwareSceneRenderer implements SceneRenderer {
+    private readonly style;
+    readonly backend: "software";
+    /**
+     * @param style How to rasterise — the era behaviour a console model asks for.
+     *   Defaults to the modern one, so an editor preview or a test that passes
+     *   nothing renders exactly as it always has.
+     */
+    constructor(style?: RasterStyle);
+    render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
+    dispose(): void;
+}
+/**
+ * Applies a model's scene-level {@link RenderCaps} before delegating.
+ *
+ * A decorator rather than a branch inside each backend, so the software
+ * rasteriser and the GPU enforce a model's limits *identically*. An era model's
+ * constraints are part of the model, not of the viewer's graphics stack: a cart
+ * that overruns a poly budget must overrun it the same way on both.
+ */
+declare class CappedSceneRenderer implements SceneRenderer {
+    private readonly inner;
+    private readonly caps;
+    private readonly cache;
+    constructor(inner: SceneRenderer, caps: RenderCaps);
+    get backend(): SceneRenderer["backend"];
+    render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
+    dispose(): void;
+}
+/** True when a model's caps constrain the scene, so wrapping would do something. */
+declare function capsConstrainScene(caps: RenderCaps): boolean;
+
+/**
+ * Enforcing a model's {@link RenderCaps} on a scene, before anything rasterises it.
+ *
+ * `RenderCaps` landed as a descriptor nothing read — which is the difference
+ * between a field and a seam. This reads two of them.
+ *
+ * Both are enforced *here*, above the renderer, rather than inside either
+ * backend. That is deliberate: a constraint applied to the scene is honoured
+ * identically by the software rasteriser and the GPU, so an era model's limits
+ * do not depend on whether the viewer's browser has WebGPU. The caps that
+ * cannot be lifted out this way — no depth buffer, affine texture mapping,
+ * integer vertex snapping, texture filtering — live inside the rasteriser and
+ * are not honoured yet; see ERA_MODELS.md §4a for why that ordering matters.
+ *
+ * Pure and DOM-free, so the limits are testable without a GPU.
+ */
+
+/**
+ * Memo of downsampled textures, keyed by their source.
+ *
+ * Identity stability is the point, not just the saved work: the GPU renderer
+ * caches its uploads by texture object, so returning a fresh object each frame
+ * would re-upload every texture on every frame — strictly worse than no cap at
+ * all. Held by the caller so it lives as long as the renderer does.
+ */
+type TextureBudgetCache = WeakMap<DecodedTexture, DecodedTexture>;
+declare function createTextureBudgetCache(): TextureBudgetCache;
+/**
+ * Drop whole instances once the frame's triangle budget is spent.
+ *
+ * Granularity is the instance, not the triangle, for two reasons. Slicing index
+ * buffers mid-mesh would allocate fresh geometry every frame and miss the
+ * renderer's upload cache; and half an object is not a thing any real console
+ * drew — it ran out of time and dropped the frame.
+ *
+ * The first instance always draws even if it alone exceeds the budget: a single
+ * over-budget object is a content problem for the editor to flag, not something
+ * the runtime should silently blank. So this bounds scene *complexity across
+ * objects*, which is what a poly budget is actually for.
+ */
+declare function capTriangles(instances: readonly MeshSceneInstance[], polyBudget: number): readonly MeshSceneInstance[];
+/**
+ * Halve a texture with a box filter until it fits the budget.
+ *
+ * This is what a small texture cache actually looked like: the N64's 4KB budget
+ * is why its era reads as soft and low-resolution, not because the hardware
+ * blurred things for effect. Halving (rather than resampling to an arbitrary
+ * size) keeps the filter exact — every output texel is the mean of four inputs —
+ * and keeps power-of-two art on its grid.
+ */
+declare function fitTextureToBudget(source: DecodedTexture, budgetBytes: number): DecodedTexture;
+/**
+ * Fit every instance's textures into the budget, reusing cached results so a
+ * texture is downsampled once rather than once per frame.
+ *
+ * Returns the original array when nothing needed shrinking, so an unbounded
+ * model allocates nothing. When something does shrink, only the instance
+ * wrapper is rebuilt — `mesh` keeps its identity, so the renderer's geometry
+ * cache still hits.
+ */
+declare function capTextures(instances: readonly MeshSceneInstance[], budgetBytes: number, cache: TextureBudgetCache): readonly MeshSceneInstance[];
+/** Apply every scene-level cap a model declares. */
+declare function applyRenderCaps(instances: readonly MeshSceneInstance[], caps: RenderCaps, cache: TextureBudgetCache): readonly MeshSceneInstance[];
+/**
+ * The rasteriser style a model's caps ask for.
+ *
+ * `trilinear` maps to bilinear because no mip chain exists yet on either
+ * backend. Mapping it the same way in both is the point: an N64-era model then
+ * renders identically whether or not the viewer has WebGPU, and gains real
+ * trilinear filtering on both at once when mips land.
+ */
+declare function rasterStyleFor(caps: RenderCaps): RasterStyle;
+/**
+ * Whether the WebGPU path can reproduce a style, or the software rasteriser has
+ * to take the model.
+ *
+ * Filtering is just a sampler, so the GPU handles it. The other three are not
+ * cheap on a GPU:
+ *
+ * - **No depth buffer** needs a per-*triangle* back-to-front sort across the
+ *   whole scene. On the GPU that means rebuilding and re-uploading index
+ *   buffers every frame, which destroys the geometry cache the renderer is
+ *   built around. Sorting whole draws instead would be coarser than the
+ *   software path and break parity, which is worse than not offering it.
+ * - **Affine interpolation** and **vertex snapping** are both reachable in WGSL
+ *   (`@interpolate(linear)`, and rounding in the vertex shader), but each needs
+ *   a shader variant, and shader variants cannot be verified without a device.
+ *
+ * Falling back is not a loss for the models that need them: a console with no
+ * depth buffer and integer vertices is a low-polygon, low-resolution machine,
+ * which is exactly the workload the software rasteriser already handles. An
+ * N64-era model — depth-buffered, perspective-correct, filtered — is the tier
+ * that actually needs the GPU, and it keeps it.
+ */
+declare function webgpuCanHonour(style: RasterStyle): boolean;
+
+/**
+ * Chooses and builds the 3D scene renderer: WebGPU when a device is available,
+ * the software rasteriser otherwise.
+ *
+ * The same shape as `createLightingLayer`, deliberately — one memoised adapter
+ * probe per page, a provider that returns null rather than throwing, and a
+ * caller that never has to know which backend it got. The one difference is the
+ * return type: lighting can genuinely fail to build (the cart then shows unlit),
+ * but there is always a scene renderer, because the software path needs nothing
+ * from the platform. This never returns null, so no caller needs a third branch.
+ */
+
+/** Resolves a shared WebGPU device, or null. Injectable for tests. */
+type DeviceProvider$1 = () => Promise<any | null>;
+/**
+ * Build the best available renderer for one framebuffer size, under one model's
+ * {@link RenderCaps}.
+ *
+ * Caps are required rather than optional: a renderer exists to draw *some
+ * model's* scenes, and leaving its limits implicit is how an era model ends up
+ * silently rendering with another era's rules. The caps wrapper is only applied
+ * when it would do something, so an unbounded model pays nothing for it.
+ *
+ * Pass a provider returning null to force the software path — which is how the
+ * fallback stays tested rather than becoming code nobody runs until a browser
+ * without WebGPU finds the bug.
+ */
+declare function createSceneRenderer(width: number, height: number, caps: RenderCaps, deviceProvider?: DeviceProvider$1): Promise<SceneRenderer>;
+
+/**
+ * The player's WebGPU triangle path.
+ *
+ * The runtime had no GPU renderer for 3D: both overlays rasterised meshes on the
+ * CPU, on the main thread, every presented frame. That capped how much geometry
+ * a cart could carry far below what the World and Mesh editors let people
+ * author, and it is the reason no era console model beyond a 2D one was
+ * possible (ERA_MODELS.md §5.1).
+ *
+ * This draws the same instances in hardware and matches the software
+ * rasteriser's shading *exactly* — two-sided Lambert with an ambient floor,
+ * nearest-sampled wrapped textures, glTF's flipped V, and the same
+ * alpha-discard threshold. Parity is the contract: the fallback must be
+ * indistinguishable, not merely similar, or a cart looks different depending on
+ * the viewer's browser.
+ *
+ * ## Why the readback, and why it lags
+ *
+ * `DisplaySurface.blit` is synchronous and the overlays are decorators: their
+ * output has to flow onward through the lighting and post-FX stack, so this
+ * cannot present to its own swapchain and be done. It must land RGBA bytes back
+ * in the framebuffer. GPU readback is asynchronous, so the renderer submits work
+ * for the current frame and composites the most recently *completed* readback —
+ * in practice one to two frames old on the overlay only. The cart's own 2D frame
+ * is never delayed. Until the first readback lands, the software rasteriser
+ * draws instead, so there is no pop-in on the opening frames.
+ *
+ * A stale overlay is the deliberate trade for not stalling the run loop: waiting
+ * on `mapAsync` inside `blit` would convert a GPU win into a pipeline bubble
+ * worse than the CPU path it replaces.
+ *
+ * WebGPU is not in this project's TS DOM lib and we do not want the
+ * @webgpu/types dependency, so the handles are loosely typed — the same
+ * convention the editor's GPU renderers use. Everything with real logic in it
+ * (layout, packing, the parity maths) is pure and tested without a GPU.
+ */
+
+declare class WebgpuSceneRenderer implements SceneRenderer {
+    private readonly device;
+    private readonly width;
+    private readonly height;
+    private readonly pipeline;
+    private readonly bindGroupLayout;
+    private readonly colourTexture;
+    private readonly depthTexture;
+    private readonly sampler;
+    private readonly blankTexture;
+    private readonly readback;
+    private readonly bytesPerRow;
+    readonly backend: "webgpu";
+    /** Draws the opening frames, and any frame before the first readback lands. */
+    private readonly software;
+    private readonly meshes;
+    private readonly textures;
+    private bindGroups;
+    /** Most recent completed readback, or null before the first one lands. */
+    private latest;
+    private uniformCapacity;
+    private uniformBuffer;
+    private uniformData;
+    private destroyed;
+    private constructor();
+    /**
+     * Build the renderer for one framebuffer size. Returns null on any failure, so
+     * the factory falls back to software rather than the caller seeing an
+     * exception mid-frame.
+     */
+    static create(device: any, width: number, height: number, style?: RasterStyle): Promise<WebgpuSceneRenderer | null>;
+    render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
+    /** Paint the last completed GPU frame over the cart's own pixels. */
+    private composite;
+    /** Encode and submit one frame, and start a readback if a buffer is free. */
+    private submit;
+    /** Await one readback and publish it as the newest frame. */
+    private drain;
+    /** Grow the per-draw uniform buffer to hold at least `count` draws. */
+    private ensureUniformCapacity;
+    /** Upload (once) a mesh's primitives as interleaved vertex + index buffers. */
+    private uploadMesh;
+    /** The bind group for one primitive, rebuilt if its texture changed. */
+    private bindGroupFor;
+    /** Upload (once) a decoded texture. */
+    private uploadTexture;
+    dispose(): void;
+}
+
+/**
+ * The pure half of the WebGPU scene renderer: memory layout and buffer packing.
+ *
+ * A GPU renderer is mostly untestable in CI — there is no adapter on a build
+ * machine. What *is* testable is everything that decides where a byte goes, and
+ * that is also where a GPU renderer's bugs actually live: a uniform written at
+ * the wrong offset, a vertex stride that disagrees with the pipeline layout, a
+ * readback row copied without removing WebGPU's 256-byte padding. Keeping all
+ * of it here, pure and DOM-free, means the parts that break silently on a GPU
+ * are the parts covered by tests.
+ */
+
+/**
+ * WGSL uniform layout, in bytes:
+ *
+ * ```
+ *   0  mvp    mat4x4<f32>   64
+ *  64  nrm    mat3x3<f32>   48   (three vec3 columns, each padded to 16)
+ * 112  base   vec4<f32>     16
+ * 128  light  vec4<f32>     16   xyz = direction, w = ambient
+ * 144  flags  vec4<f32>     16   x = 1 when a texture is bound
+ * ```
+ *
+ * 160 bytes used, padded to the 256-byte minimum alignment a dynamic uniform
+ * offset requires, so one buffer holds every draw in a frame.
+ */
+declare const UNIFORM_STRIDE = 256;
+/**
+ * Bytes the struct actually occupies, before the stride padding. This is what a
+ * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
+ * grows past what this module writes fail at pipeline creation.
+ */
+declare const UNIFORM_BYTES_USED = 160;
+/** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
+declare const UNIFORM_FLOATS: number;
+/** The rasteriser's defaults, restated so an unlit draw shades identically. */
+declare const DEFAULT_LIGHT: readonly [number, number, number];
+declare const DEFAULT_AMBIENT = 0.35;
+interface ResolvedLight {
+    /** Unit direction; the shader dots against it without normalising. */
+    readonly direction: readonly [number, number, number];
+    readonly ambient: number;
+}
+/**
+ * Apply the rasteriser's light defaulting and normalisation.
+ *
+ * The world overlay drives both per frame — a cart-published sun direction, and
+ * an ambient level that differs by whether a sun is set at all — so this cannot
+ * be a constant. It reproduces `renderMeshScene`'s exact handling, including its
+ * degenerate-vector guard (a zero-length direction divides by 1, not by 0).
+ */
+declare function resolveLight(direction?: readonly [number, number, number] | null, ambient?: number | null): ResolvedLight;
+/** Bytes per row in a texture-to-buffer copy: WebGPU requires a 256 multiple. */
+declare function alignBytesPerRow(width: number): number;
+/**
+ * The upper-left 3x3 of a model matrix, column-major — what re-bases an object
+ * normal into world space.
+ *
+ * This applies the rotation and scale rather than their inverse-transpose,
+ * matching the software rasteriser exactly: correct for rotation and uniform
+ * scale, slightly skewed under non-uniform scale, which two-sided Lambert
+ * tolerates. Diverging here would make the two backends shade differently on
+ * precisely the geometry most likely to be imported.
+ */
+declare function normalBasis3x3(model: Mat4): readonly number[];
+interface InstanceUniform {
+    readonly mvp: Mat4;
+    /** Column-major 3x3 from {@link normalBasis3x3}. */
+    readonly normalBasis: readonly number[];
+    readonly baseColor: readonly [number, number, number, number];
+    readonly hasTexture: boolean;
+    /** This frame's light, from {@link resolveLight}. */
+    readonly light: ResolvedLight;
+}
+/**
+ * Write one draw's uniforms into the shared staging array at `index`.
+ *
+ * The mat3x3 is the fiddly part: WGSL pads each column to 16 bytes, so the nine
+ * values are written at float offsets 0,1,2 / 4,5,6 / 8,9,10 within the field
+ * and never packed tight. Getting this wrong does not error — it silently shears
+ * every normal, which reads as bad lighting rather than as a layout bug.
+ */
+declare function writeInstanceUniform(target: Float32Array, index: number, uniform: InstanceUniform): void;
+/** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2). */
+declare const VERTEX_FLOATS = 8;
+/**
+ * Interleave the separate attribute streams into the single buffer the pipeline
+ * declares (arrayStride 32). A primitive with no UVs gets zeros, which is what
+ * the software path effectively uses — and the shader ignores them anyway
+ * because its texture flag is off.
+ */
+declare function interleaveVertices(positions: Float32Array, normals: Float32Array, uvs: Float32Array | null): Float32Array;
+/**
+ * Strip WebGPU's row padding from a mapped readback.
+ *
+ * `copyTextureToBuffer` writes each row at a 256-byte stride, so a 240-wide
+ * frame arrives with 1024 bytes per row carrying 960 of image. Copying it
+ * blindly shears the picture diagonally. `reuse` avoids allocating a fresh
+ * frame buffer every readback.
+ */
+declare function unpadRows(padded: Uint8Array, width: number, height: number, bytesPerRow: number, reuse?: Uint8Array | null): Uint8Array;
+
+/**
  * The backend-agnostic contract for the lighting renderer. Two implementations
  * satisfy it — {@link WebgpuLightingLayer} (preferred) and the WebGL
  * {@link LightingLayer} (fallback) — so the display surface and the factory can
@@ -2653,6 +3120,12 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private readonly scene;
     /** The authored instances (baked placement); per-frame poses compose on top. */
     private readonly instances;
+    /**
+     * What actually draws the triangles. Owned by whoever passed it — a renderer
+     * is typically shared with the world overlay, so destroying this surface must
+     * not dispose it. The default software renderer holds no resources.
+     */
+    private readonly renderer;
     private frame;
     private cartCamera;
     private poses;
@@ -2665,7 +3138,7 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * texture that fails to decode falls back to null (flat base colour), so a
      * bad image never blocks the cart — the mesh still renders, just untextured.
      */
-    static create(inner: DisplaySurface, width: number, height: number, scene: MeshScene): Promise<MeshOverlaySurface>;
+    static create(inner: DisplaySurface, width: number, height: number, scene: MeshScene, renderer?: SceneRenderer): Promise<MeshOverlaySurface>;
     /**
      * Set the cart-driven camera for the next frame(s), or null to auto-orbit. The
      * player calls this each frame from the decoded mesh-camera mailbox, so a cart
@@ -2728,6 +3201,11 @@ declare class WorldOverlaySurface implements DisplaySurface {
     private readonly width;
     private readonly height;
     private readonly scene;
+    /**
+     * What actually draws the triangles. Owned by the caller — typically shared
+     * with the mesh overlay — so destroying this surface must not dispose it.
+     */
+    private readonly renderer;
     private cartCamera;
     private billboards;
     /** The cart's key light direction (points toward the sun), for terrain shading. */
@@ -2742,7 +3220,12 @@ declare class WorldOverlaySurface implements DisplaySurface {
     private readonly propTextures;
     /** Shared soft contact-shadow texture, drawn under characters and props. */
     private readonly shadowTexture;
-    constructor(inner: DisplaySurface, width: number, height: number, scene: WorldScene, textureFor: TextureLookup);
+    constructor(inner: DisplaySurface, width: number, height: number, scene: WorldScene, textureFor: TextureLookup, 
+    /**
+     * What actually draws the triangles. Owned by the caller — typically shared
+     * with the mesh overlay — so destroying this surface must not dispose it.
+     */
+    renderer?: SceneRenderer);
     /** Set the cart-driven camera for the next frame(s), or null to auto-frame. */
     setCameraOverride(camera: MailboxMeshCamera | null): void;
     /**
@@ -2791,4 +3274,4 @@ declare class WorldOverlaySurface implements DisplaySurface {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, type CartSpriteSource, CartridgeLoadError, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, type FlagsField, type GeneratedTrack, HEIGHT_WORLD, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera as MeshSceneCamera, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, PARTICLE_KINDS, POST_FX_EFFECTS, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPlacement, type Rgb, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera$1 as SceneCamera, type SceneLayer, type SceneSpec, type SpriteRegion, type SpriteRegionSource, TILT_SHIFT_FEATHER, type TextureLookup, type TrackMode, type Vec3, type VerificationResult, WebgpuLightingLayer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, animClipsSdkLua, anyPostFxEnabled, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, cellAt, clipFrameIndex, collisionSdkLua, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interpolateNormal, loadEngineModule, makeShadowTexture, mount, nearestDirection, normalVector, paramKey, parseAnim, parseCollisionField, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, readCartCode, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, sway, tiltShiftBlur, uniformsFromSettings, verifyReplayScore, worldCenter };
+export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, type FlagsField, type GeneratedTrack, HEIGHT_WORLD, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera as MeshSceneCamera, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, PARTICLE_KINDS, POST_FX_EFFECTS, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPlacement, type Rgb, SOFTWARE_RASTER_CAPS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera$1 as SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, SoftwareSceneRenderer, type SpriteRegion, type SpriteRegionSource, TILT_SHIFT_FEATHER, type TextureLookup, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3, type VerificationResult, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, alignBytesPerRow, animClipsSdkLua, anyPostFxEnabled, applyRenderCaps, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, collisionSdkLua, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interleaveVertices, interpolateNormal, loadEngineModule, makeShadowTexture, mount, nearestDirection, normalBasis3x3, normalVector, paramKey, parseAnim, parseCollisionField, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveLight, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, sway, tiltShiftBlur, uniformsFromSettings, unpadRows, verifyReplayScore, webgpuCanHonour, worldCenter, writeInstanceUniform };
