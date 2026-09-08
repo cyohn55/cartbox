@@ -33,3 +33,22 @@ create index if not exists cart_assets_created_at_idx on cart_assets (created_at
 -- reference must degrade to "this asset is missing" (the cart still plays)
 -- rather than blocking the write that introduced it. Validation lives in
 -- cartAssetStore.ts, where a bad entry is dropped rather than fatal.
+
+-- Row-level security. `carts` and `titles` enable it, so a new table without it
+-- is writable by anyone holding the anon key — which is public by design.
+-- (Service-role keys used by server routes bypass RLS; these protect the anon key.)
+alter table cart_assets enable row level security;
+
+-- Metadata is world-readable: it is a hash, a size and a MIME type, and the
+-- bytes themselves already sit behind a public CDN URL derived from the hash.
+-- Withholding the row would hide nothing while breaking any future client-side
+-- read of a cart's manifest.
+create policy cart_assets_public_read on cart_assets
+  for select using (true);
+
+-- No insert, update or delete policy, deliberately. Every write goes through
+-- /api/carts/[cartId]/assets on the service role, which is what recomputes the
+-- hash from the bytes. A client that could insert here could claim a hash it
+-- never uploaded, or point a row at another creator's content — the exact
+-- attack the route's server-side hashing exists to prevent. RLS with no write
+-- policy denies all anon writes.
