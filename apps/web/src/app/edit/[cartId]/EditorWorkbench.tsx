@@ -73,29 +73,20 @@ import { MeshEditor } from "./MeshEditor";
 import { WorldEditor } from "./WorldEditor";
 import { useEditorHistory, hashBytes, snapshotsEqual, type CartSnapshot } from "./useEditorHistory";
 import { saveCartLocally, saveCartToAccount, type SaveOutcome } from "./persistCart";
+import { SPATIAL_TABS, visibleTabs, type Tab } from "./editorTabs";
 import { ShortcutHelp } from "./ShortcutHelp";
 import { useShortcuts, WORKBENCH_SHORTCUTS, type Shortcut } from "./shortcuts";
 import { decodeMeshSidecar, encodeMeshSidecar, addMesh, type MeshSidecar } from "@/lib/meshSidecar";
 import type { MeshAsset } from "@cartbox/editor";
 
-const TABS = ["Code", "Assets", "Map", "World", "Scene", "Mesh", "Anim", "Weather", "FX", "SFX", "Music"] as const;
-type Tab = (typeof TABS)[number];
-
-// The everyday five sit on the bar; the cinematic/3D set — reached rarely, and
-// never before there is art to dress — tucks into a "More" menu so a cart opens
-// looking like a fantasy-console editor, not a flight deck. Both draw from the
-// same TABS, so the ordering above still governs the slot layout.
-const PRIMARY_TABS: readonly Tab[] = ["Code", "Assets", "Map", "SFX", "Music"];
-const MORE_TABS: readonly Tab[] = ["World", "Scene", "Mesh", "Anim", "Weather", "FX"];
-
-// Tabs whose stage is a 3D viewport with its own camera controls. They have no
-// phone layout — a pinch-zoom orbit camera inside a scrolling page fights the
-// page — so on a small screen they say so rather than rendering something
-// unusable. See the `smallScreenNotice` block in editor.module.css.
-const SPATIAL_TABS: ReadonlySet<Tab> = new Set<Tab>(["World", "Mesh"]);
-
-/** Ctrl+1..9 selects from the bar, then the More menu, in display order. */
-const SHORTCUT_TAB_ORDER: readonly Tab[] = [...PRIMARY_TABS, ...MORE_TABS];
+// Which tabs a cart gets depends on its console model and what it already
+// carries — a 2D model hides the 3D authoring tabs unless the cart has content
+// in them. See editorTabs.ts, and ERA_MODELS.md for why.
+//
+// SPATIAL_TABS are the ones whose stage is a 3D viewport with its own camera
+// controls. They have no phone layout — a pinch-zoom orbit camera inside a
+// scrolling page fights the page — so on a small screen they say so rather than
+// rendering something unusable. See `smallScreenNotice` in editor.module.css.
 
 /** How long after the last edit the crash-recovery draft is written. */
 const LOCAL_AUTOSAVE_MS = 1_500;
@@ -461,7 +452,14 @@ function WorkbenchBody({
   // whether the "More" tab menu is open. Both are chrome state, not cart content.
   const [density, setDensity] = useDensityPreference();
   const [moreOpen, setMoreOpen] = useState(false);
-  const moreActive = MORE_TABS.includes(activeTab);
+
+  // The 3D tabs are hidden on a 2D model unless this cart already has data in
+  // them, so an older cart never loses access to content it saved.
+  const tabs = useMemo(
+    () => visibleTabs(activeModel.kind, (sidecar) => sidecars[sidecar] !== null),
+    [activeModel.kind, sidecars],
+  );
+  const moreActive = tabs.more.includes(activeTab);
 
   // ---- saving -------------------------------------------------------------
 
@@ -673,7 +671,7 @@ function WorkbenchBody({
   // ---- shortcuts ----------------------------------------------------------
 
   const bindings = useMemo<ReadonlyArray<readonly [Shortcut, () => void]>>(() => {
-    const tabBindings = SHORTCUT_TAB_ORDER.slice(0, 9).map(
+    const tabBindings = tabs.order.slice(0, 9).map(
       (tab, index) =>
         [
           { key: String(index + 1), mod: true, label: `${tab} tab`, group: "Navigation" } as Shortcut,
@@ -691,7 +689,7 @@ function WorkbenchBody({
       [WORKBENCH_SHORTCUTS.help, () => setShowHelp((open) => !open)],
       ...tabBindings,
     ];
-  }, [downloadCart, persist, redo, runCart, undo]);
+  }, [downloadCart, persist, redo, runCart, tabs, undo]);
 
   // The playtest overlay takes the keyboard while it is open — the cart itself
   // is reading those keys.
@@ -788,7 +786,7 @@ function WorkbenchBody({
         </div>
 
         <nav className={styles.tabs} aria-label="Editors">
-          {PRIMARY_TABS.map((tab) => {
+          {tabs.primary.map((tab) => {
             const active = tab === activeTab;
             return (
               <button
@@ -823,7 +821,7 @@ function WorkbenchBody({
                 role="menu"
                 style={{ top: moreMenuPos.top, left: moreMenuPos.left }}
               >
-                {MORE_TABS.map((tab) => (
+                {tabs.more.map((tab) => (
                   <button
                     key={tab}
                     type="button"
@@ -1106,7 +1104,7 @@ function WorkbenchBody({
         <DetailsPanel details={details} onChange={setDetails} onClose={() => setShowDetails(false)} />
       )}
 
-      {showHelp && <ShortcutHelp tabs={SHORTCUT_TAB_ORDER.slice(0, 9)} onClose={() => setShowHelp(false)} />}
+      {showHelp && <ShortcutHelp tabs={tabs.order.slice(0, 9)} onClose={() => setShowHelp(false)} />}
 
       {runBytes && (
         <RunOverlay

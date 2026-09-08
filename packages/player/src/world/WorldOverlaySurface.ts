@@ -19,9 +19,10 @@
  * (built over `createCartSpriteSource`), decoded once per sprite and cached.
  */
 
-import { renderMeshScene, type DecodedTexture, type MeshSceneInstance } from "@cartbox/editor";
+import { type DecodedTexture, type MeshSceneInstance } from "@cartbox/editor";
 import type { DisplaySurface } from "../display.js";
 import type { MailboxMeshCamera, MailboxMeshPose } from "../mailbox.js";
+import { SoftwareSceneRenderer, type SceneRenderer } from "../render/sceneRenderer.js";
 import {
   buildBillboardInstance,
   buildShadowInstance,
@@ -70,6 +71,11 @@ export class WorldOverlaySurface implements DisplaySurface {
     private readonly height: number,
     private readonly scene: WorldScene,
     textureFor: TextureLookup,
+    /**
+     * What actually draws the triangles. Owned by the caller — typically shared
+     * with the mesh overlay — so destroying this surface must not dispose it.
+     */
+    private readonly renderer: SceneRenderer = new SoftwareSceneRenderer(),
   ) {
     this.output = new Uint8ClampedArray(width * height * 4);
     this.presented = new Uint8Array(this.output.buffer);
@@ -156,7 +162,7 @@ export class WorldOverlaySurface implements DisplaySurface {
     // (sky / HUD). A cart-driven sun gives the terrain directional light with more
     // contrast so raised blocks read as solid 3D; with no sun a soft top-down key.
     const lit = this.sunDirection !== null;
-    renderMeshScene([...this.terrain, ...shadowInstances, ...propInstances, ...billboardInstances], {
+    this.renderer.render([...this.terrain, ...shadowInstances, ...propInstances, ...billboardInstances], {
       width: this.width,
       height: this.height,
       out: this.output,

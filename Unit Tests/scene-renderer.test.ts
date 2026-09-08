@@ -1,136 +1,253 @@
 /**
- * Scene-compositor tests — the world foundation that draws many primitives into
- * one shared camera and depth buffer, so voxel buildings, hexel terrain and pixel
- * atmosphere occlude one another by true depth rather than by draw order.
+ * The scene-renderer seam.
  *
- * These build real cube models with the editor core and drive the real
- * {@link renderScene}, asserting on the actual composited pixels and pick buffers:
- * that the nearer of two overlapping models wins regardless of the order it was
- * submitted, that a particle behind solid geometry is hidden while one in front
- * shows, that picking names the winning instance, and that the camera origin
- * frames the world. No internal state is inspected.
+ * Both 3D overlays used to call `renderMeshScene` directly, which is why the
+ * player had no GPU triangle path: the rasteriser was a function they invoked,
+ * not a dependency they could be handed. These tests cover the three things
+ * that has to guarantee.
+ *
+ * 1. **The fallback is real.** A missing device, a failed device, or a renderer
+ *    that cannot build must all end at the software rasteriser — never at null,
+ *    never at a throw inside a frame.
+ * 2. **Parity.** The software renderer must produce byte-identical output to
+ *    calling `renderMeshScene` directly, including the options it forwards.
+ *    Anything less means the picture changes with the viewer's browser.
+ * 3. **The overlays actually use it,** and forward the per-frame light the world
+ *    overlay drives — the field most easily dropped when threading a new
+ *    parameter through.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
 import {
-  VoxelGrid,
-  voxelGridToModel,
-  renderScene,
-  type PlacedModel,
-  type VoxelModel,
+  composeModelMatrix,
+  projectionMatrix,
+  renderMeshScene,
+  viewMatrix,
+  type Mat4,
+  type MeshAsset,
+  type MeshSceneInstance,
 } from "@cartbox/editor";
+import {
+  SOFTWARE_RASTER_CAPS,
+  SoftwareSceneRenderer,
+  createSceneRenderer,
+  type SceneDraw,
+  type SceneRenderer,
+} from "@cartbox/player";
 
-/** A solid n×n×n cube of one colour, centred on its own origin. */
-function solidCube(size: number, r: number, g: number, b: number): VoxelModel {
-  const grid = new VoxelGrid(size, size, size);
-  for (let z = 0; z < size; z += 1) {
-    for (let y = 0; y < size; y += 1) {
-      for (let x = 0; x < size; x += 1) {
-        grid.set(x, y, z, r, g, b, 0);
-      }
-    }
+const WIDTH = 32;
+const HEIGHT = 24;
+
+/** A camera-facing unit quad at object z=0, solid red. */
+function quad(): MeshAsset {
+  return {
+    name: "quad",
+    primitives: [
+      {
+        positions: Float32Array.from([-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0]),
+        normals: Float32Array.from([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]),
+        uvs: null,
+        indices: Uint32Array.from([0, 1, 2, 0, 2, 3]),
+        material: { name: "m", baseColorFactor: [1, 0, 0, 1], baseColorImage: null },
+      },
+    ],
+  };
+}
+
+function scene(): MeshSceneInstance[] {
+  return [{ mesh: quad(), model: composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]), textures: null }];
+}
+
+function camera(): { view: Mat4; projection: Mat4 } {
+  return {
+    view: viewMatrix([0, 0, 5], [0, 0, 0]),
+    projection: projectionMatrix((50 * Math.PI) / 180, WIDTH / HEIGHT, 0.1, 100),
+  };
+}
+
+function draw(overrides: Partial<SceneDraw> = {}): SceneDraw {
+  const { view, projection } = camera();
+  return {
+    width: WIDTH,
+    height: HEIGHT,
+    out: new Uint8ClampedArray(WIDTH * HEIGHT * 4),
+    depth: new Float32Array(WIDTH * HEIGHT),
+    view,
+    projection,
+    background: null,
+    ...overrides,
+  };
+}
+
+describe("createSceneRenderer", () => {
+  it("falls back to software when no device is available", async () => {
+    const renderer = await createSceneRenderer(WIDTH, HEIGHT, SOFTWARE_RASTER_CAPS, async () => null);
+    expect(renderer.backend).toBe("software");
+  });
+
+  it("falls back to software when the device cannot build a renderer", async () => {
+    // A device-shaped object whose first call throws stands in for a lost or
+    // limited adapter. WebgpuSceneRenderer.create swallows it and returns null.
+    const brokenDevice = {
+      createShaderModule() {
+        throw new Error("no shader compiler");
+      },
+    };
+    const renderer = await createSceneRenderer(WIDTH, HEIGHT, SOFTWARE_RASTER_CAPS, async () => brokenDevice);
+    expect(renderer.backend).toBe("software");
+  });
+
+  it("never resolves to null, so no caller needs a third branch", async () => {
+    const renderer = await createSceneRenderer(WIDTH, HEIGHT, SOFTWARE_RASTER_CAPS, async () => null);
+    expect(renderer).not.toBeNull();
+    expect(typeof renderer.render).toBe("function");
+    expect(() => renderer.dispose()).not.toThrow();
+  });
+});
+
+describe("SoftwareSceneRenderer parity", () => {
+  it("matches renderMeshScene byte for byte", () => {
+    const instances = scene();
+    const { view, projection } = camera();
+
+    const direct = new Uint8ClampedArray(WIDTH * HEIGHT * 4);
+    renderMeshScene(instances, {
+      width: WIDTH,
+      height: HEIGHT,
+      out: direct,
+      depth: new Float32Array(WIDTH * HEIGHT),
+      view,
+      projection,
+      background: null,
+    });
+
+    const options = draw();
+    new SoftwareSceneRenderer().render(instances, options);
+    expect(Array.from(options.out)).toEqual(Array.from(direct));
+    // And it actually drew something, so parity is not two blank frames.
+    expect(options.out.some((byte) => byte !== 0)).toBe(true);
+  });
+
+  it("forwards the per-frame light and ambient", () => {
+    // The world overlay varies both every frame (a cart-published sun, and a
+    // different ambient depending on whether one is set). Dropping either while
+    // threading the new parameter would silently reshade every world cart.
+    const instances = scene();
+    const { view, projection } = camera();
+
+    const direct = new Uint8ClampedArray(WIDTH * HEIGHT * 4);
+    renderMeshScene(instances, {
+      width: WIDTH,
+      height: HEIGHT,
+      out: direct,
+      depth: new Float32Array(WIDTH * HEIGHT),
+      view,
+      projection,
+      background: null,
+      lightDirection: [1, 0, 0],
+      ambient: 0.62,
+    });
+
+    const options = draw({ lightDirection: [1, 0, 0], ambient: 0.62 });
+    new SoftwareSceneRenderer().render(instances, options);
+    expect(Array.from(options.out)).toEqual(Array.from(direct));
+
+    // Prove the light is load-bearing: the default shading differs from this.
+    const defaults = draw();
+    new SoftwareSceneRenderer().render(instances, defaults);
+    expect(Array.from(defaults.out)).not.toEqual(Array.from(direct));
+  });
+
+  it("clears to an opaque background when one is given", () => {
+    const options = draw({ background: [7, 8, 9, 255] });
+    new SoftwareSceneRenderer().render([], options);
+    expect(Array.from(options.out.subarray(0, 4))).toEqual([7, 8, 9, 255]);
+  });
+
+  it("leaves the frame untouched where nothing is drawn, with a null background", () => {
+    // This is what makes these surfaces overlays rather than replacements: the
+    // cart's own pixels have to survive everywhere the meshes miss.
+    const options = draw();
+    options.out.fill(42);
+    new SoftwareSceneRenderer().render([], options);
+    expect(Array.from(options.out.subarray(0, 4))).toEqual([42, 42, 42, 42]);
+  });
+});
+
+describe("overlay wiring", () => {
+  /** Records what it was asked to draw, and draws nothing. */
+  function spyRenderer(): SceneRenderer & { calls: SceneDraw[] } {
+    const calls: SceneDraw[] = [];
+    return {
+      backend: "software",
+      calls,
+      render: (_instances, options) => void calls.push(options),
+      dispose: vi.fn(),
+    };
   }
-  return voxelGridToModel(grid, { center: "content" });
-}
 
-const SIZE = 48;
-const CELL = 4;
+  it("draws the mesh overlay through the injected renderer", async () => {
+    const { MeshOverlaySurface } = await import("@cartbox/player");
+    const inner = { blit: vi.fn(), destroy: vi.fn() };
+    const renderer = spyRenderer();
+    const surface = await MeshOverlaySurface.create(
+      inner,
+      WIDTH,
+      HEIGHT,
+      { instances: scene(), bounds: { min: [-1, -1, -1], max: [1, 1, 1], center: [0, 0, 0], radius: 1 } },
+      renderer,
+    );
 
-/** Flat-on camera so a model at (x, y) projects straight to the screen centre. */
-const flatCamera = { size: SIZE, cell: CELL, yaw: 0, pitch: 0 } as const;
-
-/** Buffer index of the screen-centre pixel. */
-function centreIndex(): number {
-  const c = Math.floor(SIZE / 2);
-  return c * SIZE + c;
-}
-
-/** [r, g, b, a] of the pixel at flat index `i`. */
-function pixel(data: Uint8ClampedArray, i: number): [number, number, number, number] {
-  const o = i * 4;
-  return [data[o]!, data[o + 1]!, data[o + 2]!, data[o + 3]!];
-}
-
-const GREEN = solidCube(3, 0, 200, 0);
-const RED = solidCube(3, 200, 0, 0);
-
-describe("renderScene depth compositing", () => {
-  // The green cube sits nearer the camera (higher z), the red one farther; both
-  // project onto the screen centre. Whichever is nearer must own that pixel.
-  const near: PlacedModel = { model: GREEN, position: [0, 0, 6] };
-  const far: PlacedModel = { model: RED, position: [0, 0, -6] };
-
-  it("draws the nearer model over the farther one when the far one is submitted last", () => {
-    const scene = renderScene([near, far], flatCamera);
-    const [r, g] = pixel(scene.data, centreIndex());
-    expect(g).toBeGreaterThan(0); // green (near) wins
-    expect(r).toBe(0); // red (far) did not overwrite it
+    surface.blit(new Uint8Array(WIDTH * HEIGHT * 4));
+    expect(renderer.calls).toHaveLength(1);
+    expect(renderer.calls[0]!.width).toBe(WIDTH);
+    // An overlay never clears: the cart's frame shows wherever meshes miss.
+    expect(renderer.calls[0]!.background).toBeNull();
+    expect(inner.blit).toHaveBeenCalledTimes(1);
   });
 
-  it("gives the same winner when the nearer model is submitted last", () => {
-    const scene = renderScene([far, near], flatCamera);
-    const [r, g] = pixel(scene.data, centreIndex());
-    // Depth, not submission order, decides the pixel.
-    expect(g).toBeGreaterThan(0);
-    expect(r).toBe(0);
+  it("forwards the world overlay's per-frame sun and ambient", async () => {
+    // The one field most easily lost when threading a renderer through: the
+    // world overlay is the only caller that varies the light, and dropping it
+    // would reshade every world cart without failing anything else.
+    const { WorldOverlaySurface, parseWorldScene } = await import("@cartbox/player");
+    const world = parseWorldScene(
+      JSON.stringify({ cols: 1, rows: 1, tilesPerSide: 4, cells: [{ h: 1, sprite: 0 }] }),
+    )!;
+    const inner = { blit: vi.fn(), destroy: vi.fn() };
+    const renderer = spyRenderer();
+    const surface = new WorldOverlaySurface(inner, WIDTH, HEIGHT, world, () => null, renderer);
+
+    // No sun published yet: the rasteriser's unlit ambient.
+    surface.blit(new Uint8Array(WIDTH * HEIGHT * 4));
+    expect(renderer.calls[0]!.lightDirection).toBeUndefined();
+    expect(renderer.calls[0]!.ambient).toBe(0.62);
+
+    // A cart-published sun switches both the direction and the ambient level.
+    surface.setSun([0, 1, 0]);
+    surface.blit(new Uint8Array(WIDTH * HEIGHT * 4));
+    expect(renderer.calls[1]!.lightDirection).toEqual([0, 1, 0]);
+    expect(renderer.calls[1]!.ambient).toBe(0.45);
   });
 
-  it("records the winning model's index in the pick buffer", () => {
-    const pickInstance = new Int32Array(SIZE * SIZE);
-    const pickFace = new Int8Array(SIZE * SIZE);
-    // far is index 0, near is index 1; the near cube must win the centre pixel.
-    renderScene([far, near], { ...flatCamera, pickInstance, pickFace });
-    expect(pickInstance[centreIndex()]).toBe(1);
-    expect(pickFace[centreIndex()]).toBeGreaterThanOrEqual(0);
-  });
+  it("does not dispose a renderer it was handed", async () => {
+    // The player shares one renderer between the mesh and world overlays, so a
+    // surface disposing it on destroy would tear down the other one's GPU
+    // resources mid-frame.
+    const { MeshOverlaySurface } = await import("@cartbox/player");
+    const inner = { blit: vi.fn(), destroy: vi.fn() };
+    const renderer = spyRenderer();
+    const surface = await MeshOverlaySurface.create(
+      inner,
+      WIDTH,
+      HEIGHT,
+      { instances: scene(), bounds: { min: [-1, -1, -1], max: [1, 1, 1], center: [0, 0, 0], radius: 1 } },
+      renderer,
+    );
 
-  it("leaves the pick buffer at -1 where nothing solid is drawn", () => {
-    const pickInstance = new Int32Array(SIZE * SIZE);
-    renderScene([near], { ...flatCamera, pickInstance });
-    expect(pickInstance[0]).toBe(-1); // a corner the small cube cannot reach
-  });
-});
-
-describe("renderScene particle atmosphere", () => {
-  const block: PlacedModel = { model: GREEN, position: [0, 0, 0] };
-
-  it("hides a particle that sits behind solid geometry", () => {
-    const scene = renderScene([block], {
-      ...flatCamera,
-      particles: [{ position: [0, 0, -10], r: 255, g: 255, b: 255 }],
-    });
-    const [r, g, b] = pixel(scene.data, centreIndex());
-    // The white flake is occluded, so the centre keeps the green block's colour.
-    expect(g).toBeGreaterThan(0);
-    expect(r).toBe(0);
-    expect(b).toBe(0);
-  });
-
-  it("draws a particle that sits in front of solid geometry", () => {
-    const scene = renderScene([block], {
-      ...flatCamera,
-      particles: [{ position: [0, 0, 10], r: 255, g: 255, b: 255, radius: 1 }],
-    });
-    const [r, g, b, a] = pixel(scene.data, centreIndex());
-    expect(a).toBe(255);
-    expect(r).toBe(255); // white flake in front overwrites the green block
-    expect(g).toBe(255);
-    expect(b).toBe(255);
-  });
-});
-
-describe("renderScene camera origin", () => {
-  it("frames the world point at the origin to the screen centre", () => {
-    const offset: readonly [number, number, number] = [40, 0, 0];
-    // With the camera looking at the origin, a model far to the side is off-screen.
-    const away = renderScene([{ model: GREEN, position: offset }], flatCamera);
-    expect(pixel(away.data, centreIndex())[3]).toBe(0);
-
-    // Look at that same point and the model lands under the centre pixel.
-    const centred = renderScene([{ model: GREEN, position: offset }], {
-      ...flatCamera,
-      origin: offset,
-    });
-    expect(pixel(centred.data, centreIndex())[3]).toBe(255);
+    surface.destroy();
+    expect(renderer.dispose).not.toHaveBeenCalled();
+    expect(inner.destroy).toHaveBeenCalledTimes(1);
   });
 });

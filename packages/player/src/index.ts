@@ -96,11 +96,41 @@ export type { RegisteredAchievement } from "./achievements.js";
 export {
   DEFAULT_MODEL_ID,
   MODELS,
+  SOFTWARE_RASTER_CAPS,
   framebufferBytes,
   frameDurationMs,
   getModel,
 } from "./models.js";
-export type { ConsoleModel, ModelId } from "./models.js";
+export type { ConsoleModel, ModelId, RenderCaps } from "./models.js";
+// The 3D scene renderer: the seam that lets the player rasterise meshes on the
+// GPU, with the software path as the fallback (see ERA_MODELS.md).
+export { CappedSceneRenderer, SoftwareSceneRenderer, capsConstrainScene } from "./render/sceneRenderer.js";
+export {
+  applyRenderCaps,
+  capTextures,
+  capTriangles,
+  createTextureBudgetCache,
+  fitTextureToBudget,
+  rasterStyleFor,
+  webgpuCanHonour,
+} from "./render/renderCaps.js";
+export type { SceneDraw, SceneRenderer } from "./render/sceneRenderer.js";
+export { createSceneRenderer } from "./render/createSceneRenderer.js";
+export { WebgpuSceneRenderer } from "./render/WebgpuSceneRenderer.js";
+export {
+  DEFAULT_AMBIENT,
+  DEFAULT_LIGHT,
+  UNIFORM_BYTES_USED,
+  UNIFORM_FLOATS,
+  UNIFORM_STRIDE,
+  VERTEX_FLOATS,
+  alignBytesPerRow,
+  interleaveVertices,
+  normalBasis3x3,
+  resolveLight,
+  unpadRows,
+  writeInstanceUniform,
+} from "./render/scenePacking.js";
 export { createConsole, loadEngineModule } from "./engine.js";
 export type { ConsoleInstance } from "./engine.js";
 

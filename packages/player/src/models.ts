@@ -11,6 +11,59 @@
 
 export type ModelId = "classic" | "pro" | "portrait" | "voxel";
 
+/**
+ * How a model rasterises triangles.
+ *
+ * Display specs (width, palette, channels) distinguish the 2D models from each
+ * other. They cannot distinguish the *era* models on the roadmap, which differ
+ * almost entirely in rendering semantics: a PS1-era model is defined by having
+ * no depth buffer and affine texture mapping, an N64-era model by trilinear
+ * filtering and a 4KB texture cache. Those are the traits that make era content
+ * look like its era, so they belong in the model descriptor beside the
+ * resolution rather than inside a renderer.
+ *
+ * Every model carries these today because the mesh and world overlay surfaces
+ * rasterise triangles over any model's framebuffer, whatever its `kind`. The
+ * four shipping models therefore declare identical caps — they all run the same
+ * software rasteriser. That is the point: the field exists so that adding an era
+ * model is a descriptor change plus a renderer that honours it, not a fork of
+ * the rendering path. See ERA_MODELS.md.
+ */
+export interface RenderCaps {
+  /** False means painter's-algorithm sorting, so surfaces interpenetrate. */
+  zBuffer: boolean;
+  /** False means affine texture mapping — the PS1 texture warp. */
+  perspectiveCorrect: boolean;
+  textureFiltering: "none" | "bilinear" | "trilinear";
+  /** Integer vertex coordinates produce the PS1 wobble. */
+  vertexPrecision: "integer" | "float";
+  /** Texture memory a frame may draw from; 0 means unbounded. */
+  textureCacheBytes: number;
+  /** Triangles submitted per frame; 0 means unbounded. */
+  polyBudget: number;
+  /**
+   * Whether creators may supply their own shaders. True dissolves the
+   * fixed-spec guarantee the platform layer relies on, so it stays false for
+   * every fantasy-console model.
+   */
+  programmableShaders: boolean;
+}
+
+/**
+ * What the shared software rasteriser behind the mesh/world overlays actually
+ * does today: depth-buffered, perspective-correct, unfiltered, float vertices,
+ * and unbounded because nothing enforces a ceiling. Era models override this.
+ */
+export const SOFTWARE_RASTER_CAPS: RenderCaps = {
+  zBuffer: true,
+  perspectiveCorrect: true,
+  textureFiltering: "none",
+  vertexPrecision: "float",
+  textureCacheBytes: 0,
+  polyBudget: 0,
+  programmableShaders: false,
+};
+
 export interface ConsoleModel {
   id: ModelId;
   label: string;
@@ -33,6 +86,8 @@ export interface ConsoleModel {
   /** Default runtime URL for this model; overridable per player instance. */
   engineUrl: string;
   inputs: Array<"gamepad" | "mouse" | "keyboard">;
+  /** Triangle-rasterisation semantics. See {@link RenderCaps}. */
+  renderCaps: RenderCaps;
 }
 
 export const MODELS: Record<ModelId, ConsoleModel> = {
@@ -50,6 +105,7 @@ export const MODELS: Record<ModelId, ConsoleModel> = {
     cartSizeBytes: 64 * 1024,
     engineUrl: "/engine/classic/tic80.js",
     inputs: ["gamepad", "mouse", "keyboard"],
+    renderCaps: SOFTWARE_RASTER_CAPS,
   },
   pro: {
     id: "pro",
@@ -73,6 +129,7 @@ export const MODELS: Record<ModelId, ConsoleModel> = {
     cartSizeBytes: 1024 * 1024,
     engineUrl: "/engine/pro/engine.js",
     inputs: ["gamepad", "mouse", "keyboard"],
+    renderCaps: SOFTWARE_RASTER_CAPS,
   },
   portrait: {
     id: "portrait",
@@ -93,6 +150,7 @@ export const MODELS: Record<ModelId, ConsoleModel> = {
     cartSizeBytes: 1024 * 1024,
     engineUrl: "/engine/portrait/engine.js",
     inputs: ["gamepad", "mouse", "keyboard"],
+    renderCaps: SOFTWARE_RASTER_CAPS,
   },
   voxel: {
     id: "voxel",
@@ -108,6 +166,7 @@ export const MODELS: Record<ModelId, ConsoleModel> = {
     cartSizeBytes: 2 * 1024 * 1024,
     engineUrl: "/engine/voxel/engine.js",
     inputs: ["gamepad", "mouse"],
+    renderCaps: SOFTWARE_RASTER_CAPS,
   },
 };
 

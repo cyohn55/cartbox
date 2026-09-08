@@ -161,6 +161,8 @@ export {
   type DecodedTexture,
   type OrbitCamera,
   type RenderMeshOptions,
+  DEFAULT_RASTER_STYLE,
+  type RasterStyle,
 } from "./render/meshRasterizer";
 export {
   MapVoxelLayer,

@@ -22,8 +22,9 @@
  * `create`, mirroring `LitCanvasSurface.create`.
  */
 
-import { composeModelMatrix, multiplyMat4, renderMeshScene, type DecodedTexture, type MeshSceneInstance } from "@cartbox/editor";
+import { composeModelMatrix, multiplyMat4, type DecodedTexture, type MeshSceneInstance } from "@cartbox/editor";
 import type { DisplaySurface } from "../display.js";
+import { SoftwareSceneRenderer, type SceneRenderer } from "../render/sceneRenderer.js";
 import type { MailboxMeshCamera, MailboxMeshPose } from "../mailbox.js";
 import type { MeshScene } from "./meshScene.js";
 import { buildOrbitCamera } from "./meshScene.js";
@@ -50,6 +51,12 @@ export class MeshOverlaySurface implements DisplaySurface {
     private readonly scene: MeshScene,
     /** The authored instances (baked placement); per-frame poses compose on top. */
     private readonly instances: readonly MeshSceneInstance[],
+    /**
+     * What actually draws the triangles. Owned by whoever passed it — a renderer
+     * is typically shared with the world overlay, so destroying this surface must
+     * not dispose it. The default software renderer holds no resources.
+     */
+    private readonly renderer: SceneRenderer,
   ) {
     this.output = new Uint8ClampedArray(width * height * 4);
     this.presented = new Uint8Array(this.output.buffer);
@@ -61,7 +68,13 @@ export class MeshOverlaySurface implements DisplaySurface {
    * texture that fails to decode falls back to null (flat base colour), so a
    * bad image never blocks the cart — the mesh still renders, just untextured.
    */
-  static async create(inner: DisplaySurface, width: number, height: number, scene: MeshScene): Promise<MeshOverlaySurface> {
+  static async create(
+    inner: DisplaySurface,
+    width: number,
+    height: number,
+    scene: MeshScene,
+    renderer: SceneRenderer = new SoftwareSceneRenderer(),
+  ): Promise<MeshOverlaySurface> {
     const instances: MeshSceneInstance[] = [];
     for (const instance of scene.instances) {
       const textures = await Promise.all(
@@ -73,7 +86,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       );
       instances.push({ mesh: instance.mesh, model: instance.model, textures });
     }
-    return new MeshOverlaySurface(inner, width, height, scene, instances);
+    return new MeshOverlaySurface(inner, width, height, scene, instances, renderer);
   }
 
   /**
@@ -109,7 +122,7 @@ export class MeshOverlaySurface implements DisplaySurface {
           targetOffset: cart.target,
         })
       : buildOrbitCamera(this.scene.bounds, this.frame * AUTO_ORBIT_YAW_PER_FRAME, AUTO_ORBIT_PITCH, this.width / this.height);
-    renderMeshScene(this.posedInstances(), {
+    this.renderer.render(this.posedInstances(), {
       width: this.width,
       height: this.height,
       out: this.output,
