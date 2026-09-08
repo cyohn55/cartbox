@@ -125,7 +125,7 @@ export function lh5Decode(src, originalSize) {
   }
 
   function readPtLen(nn, nbit, iSpecial) {
-    let n = getbits(nbit);
+    const n = getbits(nbit);
     if (n === 0) {
       const c = getbits(nbit);
       for (let i = 0; i < nn; i++) pt_len[i] = 0;
@@ -154,7 +154,7 @@ export function lh5Decode(src, originalSize) {
   }
 
   function readCLen() {
-    let n = getbits(CBIT);
+    const n = getbits(CBIT);
     if (n === 0) {
       const c = getbits(CBIT);
       for (let i = 0; i < NC; i++) c_len[i] = 0;

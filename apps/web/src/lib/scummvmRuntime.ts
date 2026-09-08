@@ -478,12 +478,12 @@ export class ScummVmSession {
     }
     const savePath = options.savePath ?? DEFAULT_SAVE_PATH;
     const args = buildScummvmArgs(options.target, { savePath, noAspectCorrection: true });
-    const module = await factory({ arguments: args, ...extraConfig });
-    module.FS.mkdirTree(savePath);
+    const instance = await factory({ arguments: args, ...extraConfig });
+    instance.FS.mkdirTree(savePath);
     if (options.restoreBlob && options.restoreBlob.byteLength > 0) {
-      restoreSavesTo(module.FS, savePath, options.restoreBlob);
+      restoreSavesTo(instance.FS, savePath, options.restoreBlob);
     }
-    return new ScummVmSession(module, sink, options.bounds, savePath, options.cursorSpeed ?? DEFAULT_CURSOR_SPEED);
+    return new ScummVmSession(instance, sink, options.bounds, savePath, options.cursorSpeed ?? DEFAULT_CURSOR_SPEED);
   }
 
   /** Routes one handheld control press or release to ScummVM. */

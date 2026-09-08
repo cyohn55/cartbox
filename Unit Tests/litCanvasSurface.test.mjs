@@ -38,7 +38,7 @@ function fakeGl() {
     getProgramParameter: () => true, getProgramInfoLog: () => "", useProgram() {},
     createBuffer: () => ({}), bindBuffer() {}, bufferData() {}, getAttribLocation: () => 0,
     enableVertexAttribArray() {}, vertexAttribPointer() {}, createTexture: () => ({}), bindTexture() {},
-    texParameteri() {}, activeTexture() {}, createFramebuffer: () => ({}), bindFramebuffer() {},
+    texParameteri() {}, createFramebuffer: () => ({}), bindFramebuffer() {},
     framebufferTexture2D() {}, getUniformLocation: (_p, name) => ({ name }),
     uniform1i(loc, v) { if (loc.name === "uLightCount") gl.lightCount = v; if (loc.name === "uUnlit") gl.unlit = v; },
     uniform1f() {}, uniform2f() {}, uniform3f() {}, uniform1fv() {}, uniform3fv() {},
@@ -50,7 +50,7 @@ function fakeGl() {
     },
     viewport() {}, drawArrays() { gl.draws += 1; }, deleteProgram() {}, deleteTexture() {},
     deleteFramebuffer() {}, deleteBuffer() {}, draws: 0, lightCount: -1, unlit: -1,
-    activeTex: -1, uploads: [], TEXTURE1: 33985,
+    activeTex: -1, uploads: [],
   };
   return gl;
 }

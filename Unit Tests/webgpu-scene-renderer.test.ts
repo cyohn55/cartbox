@@ -17,7 +17,7 @@
  * pixel for pixel. Both need real hardware.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { composeModelMatrix, type MeshAsset, type MeshSceneInstance } from "@cartbox/editor";
 import {
@@ -32,7 +32,6 @@ import {
 const WIDTH = 3;
 const HEIGHT = 2;
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 
 interface Recorded {
   pipelines: any[];

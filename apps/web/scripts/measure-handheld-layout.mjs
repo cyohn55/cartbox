@@ -199,7 +199,6 @@ function shoulderButtons() {
       const s = y * W + x;
       if (seen[s] || !dark(s)) continue;
       const box = emptyRect();
-      let area = 0;
       const stack = [s];
       seen[s] = 1;
       while (stack.length) {
@@ -207,7 +206,6 @@ function shoulderButtons() {
         const px = p % W;
         const py = (p / W) | 0;
         grow(box, px, py);
-        area += 1;
         for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
           const nx = px + dx;
           const ny = py + dy;

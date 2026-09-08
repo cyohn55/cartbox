@@ -207,11 +207,11 @@ export class WebGpuLitRenderer {
       const format = gpu.getPreferredCanvasFormat();
       context.configure({ device, format, alphaMode: "premultiplied" });
 
-      const module = device.createShaderModule({ code: SHADER });
+      const shaderModule = device.createShaderModule({ code: SHADER });
       const pipeline = device.createRenderPipeline({
         layout: "auto",
-        vertex: { module, entryPoint: "vs" },
-        fragment: { module, entryPoint: "fs", targets: [{ format }] },
+        vertex: { module: shaderModule, entryPoint: "vs" },
+        fragment: { module: shaderModule, entryPoint: "fs", targets: [{ format }] },
         primitive: { topology: "triangle-list" },
       });
 

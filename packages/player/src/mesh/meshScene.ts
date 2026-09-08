@@ -49,8 +49,6 @@ export interface SceneCamera {
   readonly projection: Mat4;
 }
 
-const DEFAULT_TRIPLE: readonly [number, number, number] = [0, 0, 0];
-
 function isFiniteTriple(value: unknown): value is [number, number, number] {
   return Array.isArray(value) && value.length === 3 && value.every((n) => typeof n === "number" && Number.isFinite(n));
 }

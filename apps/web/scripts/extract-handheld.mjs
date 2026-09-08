@@ -66,7 +66,7 @@ function computeCrop(base, w, h, gap = 16) {
     }
   }
   const bounds = (filled, size) => {
-    let start = filled.findIndex(Boolean);
+    const start = filled.findIndex(Boolean);
     if (start < 0) return [0, size];
     let end = start;
     let run = 0;
@@ -179,27 +179,6 @@ function writeRgba(rgba, file) {
 }
 
 /** Write a downscaled RGBA preview (nearest sample) for the picker. */
-function writePreview(rgba, file, targetW) {
-  const scale = Math.max(1, Math.round(width / targetW));
-  const w = Math.round(width / scale);
-  const h = Math.round(height / scale);
-  const png = new PNG({ width: w, height: h });
-  for (let y = 0; y < h; y += 1) {
-    for (let x = 0; x < w; x += 1) {
-      const sx = Math.min(width - 1, x * scale);
-      const sy = Math.min(height - 1, y * scale);
-      const s = (sy * width + sx) * 4;
-      const d = (y * w + x) * 4;
-      png.data[d] = rgba[s];
-      png.data[d + 1] = rgba[s + 1];
-      png.data[d + 2] = rgba[s + 2];
-      png.data[d + 3] = rgba[s + 3];
-    }
-  }
-  fs.writeFileSync(file, PNG.sync.write(png));
-  return { w, h };
-}
-
 // base.png — the shared chrome.
 writeRgba(template.base, path.join(OUT, "base.png"));
 

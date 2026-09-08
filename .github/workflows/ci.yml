@@ -1,0 +1,55 @@
+# Verification gate.
+#
+# Until this existed the repository had two workflows, both of which deployed.
+# Nothing ran the tests, nothing ran the linter, and nothing noticed when the
+# committed `packages/player/dist` drifted from its source — so every check in
+# this file is one that had, in practice, never run on a pull request.
+#
+# It gates on errors only. The linter reports warnings for genuine smells that
+# are not worth blocking a merge over (see eslint.config.mjs), and those stay
+# visible in the log without turning the gate into something people route
+# around.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch makes the older run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      # The suite skips anything whose optional fixture is absent: the cart
+      # harness that lives beside the repository, engine builds that need emsdk,
+      # and the WebGPU parity check that needs a real adapter. Those skips are
+      # deliberate — see each file's header for how to run it locally.
+      - name: Test
+        run: npm test
+
+      # `apps/web` type-checks against the committed player dist, so a stale one
+      # hides player changes from the web app entirely. This rebuilds and fails
+      # if the result differs from what was committed.
+      - name: Check player dist is current
+        run: npm run check:dist

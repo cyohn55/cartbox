@@ -153,11 +153,11 @@ export class WebGpuVoxelRenderer {
       const format = gpu.getPreferredCanvasFormat();
       context.configure({ device, format, alphaMode: "premultiplied" });
 
-      const module = device.createShaderModule({ code: SHADER });
+      const shaderModule = device.createShaderModule({ code: SHADER });
       const pipeline = device.createRenderPipeline({
         layout: "auto",
         vertex: {
-          module,
+          module: shaderModule,
           entryPoint: "vs",
           buffers: [
             {
@@ -180,7 +180,7 @@ export class WebGpuVoxelRenderer {
             },
           ],
         },
-        fragment: { module, entryPoint: "fs", targets: [{ format }] },
+        fragment: { module: shaderModule, entryPoint: "fs", targets: [{ format }] },
         primitive: { topology: "triangle-list", cullMode: "none" },
         depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
         multisample: { count: SAMPLE_COUNT },

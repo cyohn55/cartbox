@@ -85,7 +85,7 @@ test("scale enlarges the placement footprint (nearest-neighbour)", () => {
 test("placements are drawn far-first so nearer depth wins overlap", () => {
   const W = 1, H = 1;
   const inner = fakeInner();
-  const surface = new AnimatedForegroundSurface(inner, W, H, stubSource(1, 1, [0, 0, 0]));
+  const _surface = new AnimatedForegroundSurface(inner, W, H, stubSource(1, 1, [0, 0, 0]));
   // Two overlapping opaque placements; the source colour is the same, so instead
   // assert ordering via a source that colours by the region tile.
   const source = {

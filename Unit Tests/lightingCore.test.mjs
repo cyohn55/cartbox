@@ -23,7 +23,6 @@ function test(name, fn) {
   cases.push([name, fn]);
 }
 
-const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const magnitude = (v) => Math.hypot(v[0], v[1], v[2]);
 
 // --- Normal set ------------------------------------------------------------

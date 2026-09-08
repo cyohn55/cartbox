@@ -21,7 +21,6 @@ import {
   isMaterialSwatchEnabled,
   normalizeMaterialProfile,
   type MaterialProfile,
-  type MaterialSwatches,
   type SpritePage,
 } from "@cartbox/editor";
 import {

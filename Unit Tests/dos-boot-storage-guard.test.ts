@@ -34,7 +34,7 @@ interface FakeRequest {
 }
 
 /** The shim the guard hands back in place of the real request. */
-interface GuardedRequest extends FakeRequest {}
+type GuardedRequest = FakeRequest;
 
 type GuardFn = (
   factory: { open: (name: string, version?: number) => FakeRequest } | null | undefined,

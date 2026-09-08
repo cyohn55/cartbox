@@ -26,19 +26,40 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 
-// The cart's own build harness is the single source of truth for how the cart is
-// packed and which engine runs it — reuse it instead of re-deriving the format.
-import {
-  buildLuaCart,
-  createRunner,
-  WIDTH,
-  HEIGHT,
-  ENGINE,
-} from "../../neon-city-cart/build.mjs";
+/**
+ * The cart's own build harness is the single source of truth for how the cart
+ * is packed and which engine runs it — reuse it instead of re-deriving the
+ * format.
+ *
+ * It is imported *dynamically* because the cart lives beside the repository
+ * rather than in it: `neon-city-cart/` is a sibling directory, so a clean clone
+ * does not have it. A static import fails at module load, which defeats the
+ * engine guard below and turns a missing optional fixture into a hard suite
+ * error on every fresh checkout.
+ */
+interface CartHarness {
+  buildLuaCart: (lua: string) => Uint8Array;
+  createRunner: (cart: Uint8Array) => Promise<{
+    tick: (delta: number) => void;
+    framebuffer: () => Uint8Array;
+    dispose: () => void;
+  }>;
+  WIDTH: number;
+  HEIGHT: number;
+  /** Absolute path to the Pro engine build the harness runs against. */
+  ENGINE: string;
+}
 
-const CART_LUA = fileURLToPath(
-  new URL("../../neon-city-cart/cart.lua", import.meta.url),
-);
+const HARNESS = fileURLToPath(new URL("../../neon-city-cart/build.mjs", import.meta.url));
+const CART_LUA = fileURLToPath(new URL("../../neon-city-cart/cart.lua", import.meta.url));
+
+const harness: CartHarness | null = existsSync(HARNESS)
+  ? ((await import(/* @vite-ignore */ HARNESS)) as CartHarness)
+  : null;
+
+// Zero when the harness is absent; the suite is skipped, so nothing reads them.
+const WIDTH = harness?.WIDTH ?? 0;
+const HEIGHT = harness?.HEIGHT ?? 0;
 
 // --- the cart's design contract (mirrors constants in cart.lua) --------------
 // The waterline where the reflection begins, and the per-layer scroll speeds and
@@ -146,19 +167,24 @@ function pearson(a: Float64Array, b: Float64Array): number {
   return cov / Math.sqrt(va * vb);
 }
 
-// ENGINE is an absolute path string exported by the harness; existsSync it directly.
-const engineBuilt = existsSync(ENGINE);
+// Both halves are optional: the cart is a sibling checkout, and the Pro engine
+// is a build artefact. Missing either skips rather than fails, and says which.
+const engineBuilt = harness !== null && existsSync(harness.ENGINE);
 const suite = engineBuilt ? describe : describe.skip;
-if (!engineBuilt) {
-  console.warn(`[neon-city-cart] Pro engine not built at ${ENGINE}; skipping. Run npm run engine:build:pro.`);
+if (!harness) {
+  console.warn(`[neon-city-cart] cart harness not found at ${HARNESS}; skipping.`);
+} else if (!engineBuilt) {
+  console.warn(
+    `[neon-city-cart] Pro engine not built at ${harness.ENGINE}; skipping. Run npm run engine:build:pro.`,
+  );
 }
 
 suite("NEON CITY cart on the real Cartbox Pro core", () => {
-  const cart = () => buildLuaCart(readFileSync(CART_LUA, "utf8"));
+  const cart = () => harness!.buildLuaCart(readFileSync(CART_LUA, "utf8"));
 
   /** Run the cart and return snapshots (deep copies) at the requested frames. */
   async function capture(frames: number[]): Promise<Map<number, Frame>> {
-    const runner = await createRunner(cart());
+    const runner = await harness!.createRunner(cart());
     const want = new Set(frames);
     const out = new Map<number, Frame>();
     const last = Math.max(...frames);
