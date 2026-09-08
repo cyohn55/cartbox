@@ -417,9 +417,28 @@ This is the largest single piece of work in the plan, and it arrives with the
   test: **the first non-zero budget is the first era model.**
 - `POST/GET /api/carts/[cartId]/assets`, and migration `0024_cart_assets.sql`.
 
-**Deliberately not done yet:** the editor does not upload to it, the player does
-not read from it, and no garbage collection reclaims unreferenced blobs. The
-last is a real decision rather than an omission — assets are shared by hash, so
+**Wired up:** mesh textures no longer live as base64 inside the mesh sidecar.
+`serializeMeshAsset` still embeds them, but the storage layer lifts each one
+into the asset store on write and puts it back on read, so nothing downstream —
+the deserializer, either renderer, the editor — knows it happened. Carts with
+inline bytes keep working untouched, the round trip is byte-identical, and a
+texture that cannot be fetched degrades to an untextured surface rather than
+failing the mesh.
+
+Two rules that fell out of building it:
+
+- **Offloaded textures are recorded in the cart's manifest** (`mesh-<hash>`),
+  and the offload is *skipped entirely* if the manifest cannot be read. A cart
+  must never reference an asset it did not also record: an unrecorded reference
+  is invisible to the sweep below, which would then delete a texture in use.
+- **The offload does not check the model's budget.** The budget bounds how much
+  a cart may *carry*; offloading changes where existing content lives, not how
+  much there is. Charging for it would make a cartridge-only model (budget 0)
+  unable to save a textured mesh it could save yesterday.
+
+**Still not done:** the editor has no upload UI of its own, and no garbage
+collection reclaims unreferenced blobs. The latter is a real decision rather
+than an omission — assets are shared by hash, so
 "this cart dropped it" never means "nobody wants it", and deleting on
 dereference would let one creator's edit break another's published cart. It
 wants an offline mark-and-sweep with a grace period, not a request-path delete.
