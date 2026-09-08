@@ -21,6 +21,9 @@
 
 import { serviceClient } from "./supabase";
 import { deleteMeshObject, parseMeshReference, resolveMeshSidecar, storeMeshSidecar } from "./meshStorage";
+import { hashAsset, parseCartAssets, EMPTY_CART_ASSETS } from "./cartAssetStore";
+import { readCartAsset, storeCartAsset } from "./cartAssetStorage";
+import { extractMeshTextures, inlineMeshTextures, manifestUpdate } from "./meshTextureAssets";
 import {
   OPTIONAL_SIDECAR_KEYS,
   SIDECARS,
@@ -71,8 +74,10 @@ export async function loadSidecars(cartId: string): Promise<Sidecars> {
         const { data, error } = await db.from("carts").select(column).eq("id", cartId).maybeSingle();
         if (error || !data) return;
         const raw = (data as unknown as Record<string, unknown>)[column];
-        // A large mesh lives in object storage with only a reference on the row.
-        const resolved = key === "mesh" ? await resolveMeshSidecar(toStored(raw)) : raw;
+        // A large mesh lives in object storage with only a reference on the row,
+        // and its textures live in the cart asset store — put both back before
+        // parsing, so every consumer downstream sees the payload as authored.
+        const resolved = key === "mesh" ? await resolveMeshTextures(await resolveMeshSidecar(toStored(raw))) : raw;
         assignSidecar(sidecars, key, SIDECARS[key].parse(resolved));
       } catch {
         // Leaves this sidecar null.
@@ -161,9 +166,22 @@ async function writeOptionalColumn(
   key: SidecarKey,
   value: unknown,
 ): Promise<{ ok: boolean; skipped?: boolean; error?: string }> {
+  // Mesh textures move to the cart asset store first, so what is stored (and
+  // possibly offloaded whole) is the already-slimmed payload. The manifest
+  // update rides along in the same statement: an asset with no reference is a
+  // storage bill, but a cart referencing an asset it never recorded would be
+  // invisible to the sweep that eventually reclaims unused ones.
+  let manifest: string | null = null;
+  let payload = value;
+  if (key === "mesh") {
+    const offloaded = await offloadMeshTextures(cartId, toStored(value));
+    payload = offloaded.encoded;
+    manifest = offloaded.manifest;
+  }
+
   // storeMeshSidecar returns either the payload itself or a reference to the
   // object it wrote, depending on size and whether R2 is configured.
-  const stored = key === "mesh" ? await storeMeshSidecar(cartId, toStored(value)) : value;
+  const stored = key === "mesh" ? await storeMeshSidecar(cartId, toStored(payload)) : payload;
 
   const { error } = await serviceClient()
     .from("carts")
@@ -175,6 +193,14 @@ async function writeOptionalColumn(
     return { ok: false, error: error.message };
   }
 
+  // The manifest is its own statement, matching this file's rule that one
+  // unprovisioned column costs only itself: folded into the update above, a
+  // missing `assets` column would take the mesh write down with it and the
+  // 42703 handler would report the whole save as skipped.
+  if (manifest !== null) {
+    await serviceClient().from("carts").update({ assets: manifest }).eq("id", cartId);
+  }
+
   // A save that inlined (or cleared) the mesh leaves any previously offloaded
   // object orphaned; a re-offload reuses the same deterministic key, so only
   // these transitions can strand one.
@@ -182,4 +208,59 @@ async function writeOptionalColumn(
     await deleteMeshObject(cartId);
   }
   return { ok: true };
+}
+
+
+/**
+ * Lift a mesh payload's textures into the cart asset store.
+ *
+ * Best-effort on purpose. If hashing, uploading or the manifest read fails, the
+ * payload is returned exactly as it arrived and stored inline as it always was:
+ * a save must not fail because an optimisation could not be applied. The cost
+ * of the fallback is a fatter row, which is the situation before this existed.
+ */
+async function offloadMeshTextures(
+  cartId: string,
+  encoded: string | null,
+): Promise<{ encoded: string | null; manifest: string | null }> {
+  if (!encoded) return { encoded, manifest: null };
+
+  try {
+    const extracted = await extractMeshTextures(encoded, hashAsset);
+    if (extracted.textures.length === 0) return { encoded, manifest: null };
+
+    // The manifest is read before anything is stored, because a cart must never
+    // reference an asset it cannot also record: an unrecorded reference is
+    // invisible to the sweep that reclaims unused assets, which would delete a
+    // texture that is in use. On a deployment without migration 0024 this read
+    // fails, and the right answer is to store the mesh the old way.
+    const { data, error } = await serviceClient()
+      .from("carts")
+      .select("assets")
+      .eq("id", cartId)
+      .maybeSingle();
+    if (error) return { encoded, manifest: null };
+    const current = parseCartAssets(data?.assets) ?? EMPTY_CART_ASSETS;
+
+    // Blobs next: a stored asset nothing references is a bill, where a
+    // reference to an asset that was never stored is a missing texture.
+    for (const texture of extracted.textures) {
+      await storeCartAsset(texture.hash, texture.bytes, texture.mime);
+    }
+
+    return { encoded: extracted.encoded, manifest: manifestUpdate(current, extracted.textures) };
+  } catch {
+    return { encoded, manifest: null };
+  }
+}
+
+/** Put asset-backed textures back into a mesh payload on the way out. */
+async function resolveMeshTextures(encoded: string | null): Promise<string | null> {
+  if (!encoded) return encoded;
+  try {
+    return await inlineMeshTextures(encoded, readCartAsset);
+  } catch {
+    // The mesh still loads; any asset-backed texture reads as untextured.
+    return encoded;
+  }
 }

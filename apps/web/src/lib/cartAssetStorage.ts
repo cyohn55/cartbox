@@ -20,7 +20,7 @@
  */
 
 import { assetKey, isValidHash, type AssetRef } from "./cartAssetStore";
-import { putObject, publicUrl } from "./storage";
+import { getObject, putObject, publicUrl } from "./storage";
 import { serviceClient } from "./supabase";
 
 /** Postgres unique-violation. An asset that already exists is success, not error. */
@@ -93,4 +93,16 @@ export async function findCartAsset(hash: string): Promise<AssetRef | null> {
  */
 export function cartAssetUrl(ref: AssetRef): string {
   return publicUrl(assetKey(ref.hash));
+}
+
+/**
+ * The bytes behind a hash, or null when they are not stored.
+ *
+ * Goes to object storage directly rather than through the public URL: this runs
+ * server-side, where the CDN is an extra hop and a public base URL may not even
+ * be configured.
+ */
+export async function readCartAsset(hash: string): Promise<Uint8Array | null> {
+  if (!isValidHash(hash)) return null;
+  return getObject(assetKey(hash));
 }

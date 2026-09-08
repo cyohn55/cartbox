@@ -23,6 +23,7 @@ import {
   parseCartAssets,
   serializeCartAssets,
   withAsset,
+  withoutAsset,
   EMPTY_CART_ASSETS,
   MAX_ASSET_BYTES,
 } from "@/lib/cartAssetStore";
@@ -148,4 +149,44 @@ export async function POST(
     url: cartAssetUrl(stored.ref),
     deduplicated: !stored.uploaded,
   });
+}
+
+/**
+ * Drop one entry from a cart's manifest.
+ *
+ * Removes the *reference*, never the blob. Assets are shared across carts by
+ * hash, so "this cart stopped using it" says nothing about whether anyone else
+ * still does — deleting here would let one creator's edit break another
+ * creator's published cart. Reclaiming genuinely unused bytes is an offline
+ * sweep's job (see `cartAssetStore.ts`).
+ */
+export async function DELETE(
+  request: Request,
+  { params }: { params: { cartId: string } },
+): Promise<NextResponse> {
+  const guard = await guardCartWrite(request, params.cartId, "assets");
+  if ("response" in guard) return guard.response;
+
+  const name = new URL(request.url).searchParams.get("name");
+  if (!name) {
+    return NextResponse.json({ error: "Expected a `name` query parameter." }, { status: 400 });
+  }
+
+  const context = await loadCartContext(params.cartId);
+  if ("error" in context) return NextResponse.json({ error: context.error }, { status: 500 });
+
+  const assets = context.assets!;
+  if (!(name in assets.entries)) {
+    // Idempotent: removing what is already gone is success, so a retried
+    // request does not read as a failure.
+    return NextResponse.json({ name, removed: false });
+  }
+
+  const { error } = await serviceClient()
+    .from("carts")
+    .update({ assets: serializeCartAssets(withoutAsset(assets, name)) })
+    .eq("id", params.cartId);
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  return NextResponse.json({ name, removed: true });
 }

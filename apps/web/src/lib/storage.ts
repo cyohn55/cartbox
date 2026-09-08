@@ -3,7 +3,7 @@
  * rendered thumbnails. Server-only — uses secret credentials.
  */
 
-import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 
 function required(name: string): string {
   const value = process.env[name];
@@ -49,6 +49,26 @@ export async function putObject(
       ContentType: contentType,
     }),
   );
+}
+
+/**
+ * Reads an object's bytes, or null when it is not there.
+ *
+ * A missing key is null rather than a throw: callers here are resolving content
+ * a cart references, and a reference that has gone away has to degrade to
+ * "missing" rather than take down the read that found it.
+ */
+export async function getObject(key: string): Promise<Uint8Array | null> {
+  try {
+    const result = await client().send(
+      new GetObjectCommand({ Bucket: required("R2_BUCKET"), Key: key }),
+    );
+    const body = result.Body as { transformToByteArray?: () => Promise<Uint8Array> } | undefined;
+    if (!body?.transformToByteArray) return null;
+    return await body.transformToByteArray();
+  } catch {
+    return null;
+  }
 }
 
 /**
