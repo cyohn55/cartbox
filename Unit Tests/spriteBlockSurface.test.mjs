@@ -91,7 +91,7 @@ for (const tilesPerSide of [1, 2, 4]) {
 // 3. Neighbouring block regions resolve to distinct sub-tiles (not aliased).
 {
   const baseTile = 10;
-  const block = new SpriteBlockSurface(new FakeTileSurface(TILE_EDGE), SHEET_COLS, 2);
+  const _block = new SpriteBlockSurface(new FakeTileSurface(TILE_EDGE), SHEET_COLS, 2);
   const corners = {
     topLeft: expectedLocation(baseTile, 0, 0).tile,
     topRight: expectedLocation(baseTile, TILE_EDGE, 0).tile,

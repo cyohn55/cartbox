@@ -30,7 +30,6 @@ import { createHash } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
 import {
   cpSync,
-  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -108,7 +107,7 @@ async function fetchBuffer(url) {
   try {
     return await downloadBytes(url);
   } catch (error) {
-    throw new Error(`fetch-quake: ${url} -> ${error.message}`);
+    throw new Error(`fetch-quake: ${url} -> ${error.message}`, { cause: error });
   }
 }
 

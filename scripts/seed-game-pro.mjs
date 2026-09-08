@@ -4,7 +4,7 @@
 
 import { readFileSync } from "node:fs";
 import { createClient } from "@supabase/supabase-js";
-import { putCartObject, storageBackend } from "./lib/seedStorage.mjs";
+import { putCartObject } from "./lib/seedStorage.mjs";
 
 function required(name) {
   const v = process.env[name];

@@ -10,28 +10,36 @@
     "services/*"
   ],
   "scripts": {
-    "dev": "npm run dev --workspace apps/web",
-    "engine:build:wasm": "bash packages/engine/scripts/build-wasm.sh",
-    "engine:build:pro": "bash packages/engine/scripts/build-pro-wasm.sh",
-    "engine:build:portrait": "bash packages/engine/scripts/build-portrait-wasm.sh",
-    "engine:build:native": "bash packages/engine/scripts/build-native.sh",
-    "verify:engine": "node packages/engine/examples/verify-engine.mjs",
-    "verify:pro": "node packages/engine/examples/verify-pro-engine.mjs",
-    "verify:portrait": "node packages/engine/examples/verify-portrait-engine.mjs",
-    "verify:pro:colors": "node packages/engine/examples/verify-pro-colors.mjs",
-    "verify:pro:sprites": "node packages/engine/examples/verify-pro-sprites.mjs",
-    "verify:pro:audio": "node packages/engine/examples/verify-pro-audio.mjs",
-    "serve:demo": "node packages/player/examples/serve.mjs",
     "bootstrap": "bash scripts/bootstrap-local.sh",
+    "build:player": "npm run build --workspace packages/player",
+    "check:dist": "node scripts/check-player-dist.mjs",
     "desktop:dev": "npm run tauri:dev --workspace apps/desktop",
-    "lint": "eslint . --ext .ts,.tsx",
-    "test": "npm run test --workspaces --if-present"
+    "dev": "npm run dev --workspace apps/web",
+    "engine:build:native": "bash packages/engine/scripts/build-native.sh",
+    "engine:build:portrait": "bash packages/engine/scripts/build-portrait-wasm.sh",
+    "engine:build:pro": "bash packages/engine/scripts/build-pro-wasm.sh",
+    "engine:build:wasm": "bash packages/engine/scripts/build-wasm.sh",
+    "lint": "eslint .",
+    "serve:demo": "node packages/player/examples/serve.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p apps/web/tsconfig.json && tsc --noEmit -p packages/player/tsconfig.json",
+    "verify": "npm run typecheck && npm run lint && npm run test && npm run check:dist",
+    "verify:engine": "node packages/engine/examples/verify-engine.mjs",
+    "verify:portrait": "node packages/engine/examples/verify-portrait-engine.mjs",
+    "verify:pro": "node packages/engine/examples/verify-pro-engine.mjs",
+    "verify:pro:audio": "node packages/engine/examples/verify-pro-audio.mjs",
+    "verify:pro:colors": "node packages/engine/examples/verify-pro-colors.mjs",
+    "verify:pro:sprites": "node packages/engine/examples/verify-pro-sprites.mjs"
   },
   "engines": {
     "node": ">=20"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.10.0",
+    "eslint-config-next": "^16.3.4",
     "playwright": "^1.62.1",
+    "typescript-eslint": "^8.70.0",
     "vitest": "^4.1.11"
   }
 }

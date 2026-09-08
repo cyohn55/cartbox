@@ -99,14 +99,14 @@ export class GameSession {
     if (dimensions.width <= 0 || dimensions.height <= 0) {
       throw new GameAbiError("Game dimensions must be positive");
     }
-    const module = await factory(options);
-    assertImplementsAbi(module);
+    const instance = await factory(options);
+    assertImplementsAbi(instance);
 
-    const framePointer = module._cartbox_init(dimensions.width, dimensions.height);
+    const framePointer = instance._cartbox_init(dimensions.width, dimensions.height);
     if (!framePointer) {
       throw new GameAbiError("cartbox_init returned a null framebuffer");
     }
-    return new GameSession(module, dimensions, framePointer);
+    return new GameSession(instance, dimensions, framePointer);
   }
 
   /**

@@ -144,21 +144,6 @@ const HILLS_ACROSS = 5.1;
 /** Faint glow on water so ponds keep their colour rather than going dark. */
 const WATER_EMISSIVE = 40;
 
-/**
- * A fast, seedable PRNG (mulberry32). Returns a function yielding floats in
- * [0, 1). Used only where a stream of values is wanted; positional randomness
- * uses {@link hash} so it is independent of iteration order.
- */
-function mulberry32(seed: number): () => number {
-  let state = seed >>> 0;
-  return () => {
-    state |= 0;
-    state = (state + 0x6d2b79f5) | 0;
-    let t = Math.imul(state ^ (state >>> 15), 1 | state);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
 
 /**
  * A stable hash of integer lattice coordinates to a float in [0, 1). Because it
@@ -433,7 +418,7 @@ function hslToHex(h: number, s: number, l: number): string {
 
 /** Interpolate between two hue angles along the shorter way around the wheel. */
 function blendHue(from: number, to: number, amount: number): number {
-  let delta = ((to - from + 540) % 360) - 180;
+  const delta = ((to - from + 540) % 360) - 180;
   return (from + delta * amount + 360) % 360;
 }
 

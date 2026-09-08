@@ -51,6 +51,9 @@ const HASH_PATTERN = /^[0-9a-f]{64}$/;
  * log line, or a filesystem-shaped cache: path separators and control
  * characters. Traversal is checked separately.
  */
+// Matching control characters is the entire point: they are what must never
+// reach a URL or a log line.
+// eslint-disable-next-line no-control-regex
 const UNSAFE_NAME = /[\u0000-\u001f\u007f/\\]/;
 
 /**

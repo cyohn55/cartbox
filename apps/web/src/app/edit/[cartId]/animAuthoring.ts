@@ -25,7 +25,6 @@ import type {
   LayerChannel,
   PlacementChannel,
   SpriteRegion,
-  TrackMode,
 } from "@cartbox/player";
 import { drift, flicker, pulse, sway } from "@cartbox/player";
 

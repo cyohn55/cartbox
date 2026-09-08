@@ -3499,7 +3499,7 @@ function composeParallax(out, outW, outH, layers, camera, atmosphere) {
     const opacity = layer.opacity ?? 1;
     const emissive = layer.emissive ?? 1;
     for (let y = 0; y < outH; y += 1) {
-      let sy = y - shiftY;
+      const sy = y - shiftY;
       if (sy < 0 || sy >= layer.height) continue;
       for (let x = 0; x < outW; x += 1) {
         let sx = x - shiftX;

@@ -58,7 +58,7 @@ import {
   transformSelection,
   type Stamp,
 } from "./pixelSelection";
-import { SELECTION_TOOLS, SHAPE_TOOLS, WEIGHTED_TOOLS, type Tool } from "./tools";
+import { SHAPE_TOOLS, WEIGHTED_TOOLS, type Tool } from "./tools";
 
 // The canvas targets this on-screen size at zoom 1; the per-pixel cell shrinks
 // as the surface grows (8×8 → 45px cells, 32×32 → ~11px), keeping the stage

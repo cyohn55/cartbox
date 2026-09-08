@@ -32,7 +32,7 @@ import {
   MAX_MESH_VERTICES,
   MAX_MESH_INDICES,
 } from "./MeshAsset";
-import { base64ToBytes, bytesToBase64 } from "./base64";
+import { base64ToBytes } from "./base64";
 
 // --- glTF JSON shape (only the fields this codec reads/writes) -------------
 

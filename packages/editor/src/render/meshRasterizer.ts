@@ -665,9 +665,9 @@ function rasterizeTriangle(
       const px = x + 0.5;
       const py = y + 0.5;
       // Barycentric weights via edge functions (same sign as `area` when inside).
-      let w0 = ((sb.x - px) * (sc.y - py) - (sb.y - py) * (sc.x - px)) * invArea;
-      let w1 = ((sc.x - px) * (sa.y - py) - (sc.y - py) * (sa.x - px)) * invArea;
-      let w2 = ((sa.x - px) * (sb.y - py) - (sa.y - py) * (sb.x - px)) * invArea;
+      const w0 = ((sb.x - px) * (sc.y - py) - (sb.y - py) * (sc.x - px)) * invArea;
+      const w1 = ((sc.x - px) * (sa.y - py) - (sc.y - py) * (sa.x - px)) * invArea;
+      const w2 = ((sa.x - px) * (sb.y - py) - (sa.y - py) * (sb.x - px)) * invArea;
       if (w0 < 0 || w1 < 0 || w2 < 0) continue;
 
       const zNdc = w0 * sa.z + w1 * sb.z + w2 * sc.z; // linear in screen space

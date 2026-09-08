@@ -48,7 +48,7 @@ async function resolveCartSource(cartId: string): Promise<{ cartUrl: string; mod
   }
 }
 
-function CanvasMiniGameView({ bus, game, active }: { bus: ConsoleInputBus; game: Extract<MiniGame, { kind: "canvas" }>; active: boolean }) {
+function CanvasMiniGameView({ game, active }: { bus: ConsoleInputBus; game: Extract<MiniGame, { kind: "canvas" }>; active: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const inputRef = useRef<MiniGameInput>({ ...IDLE_INPUT });
   const activeRef = useRef(active);

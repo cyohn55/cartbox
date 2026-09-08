@@ -43,15 +43,6 @@ export type TileAssetId = (typeof TILE_ASSETS)[number];
 export const PROP_ASSETS = ["village-tree-vox", "village-rock-vox", "village-house-vox", "village-well-vox", "village-lamp-vox"] as const;
 export type PropAssetId = (typeof PROP_ASSETS)[number];
 
-/** Atlas slot index for each tile asset — the terrain map references these. */
-const TILE_SLOT: Record<TileAssetId, number> = {
-  "village-grass": 0,
-  "village-flowers": 1,
-  "village-dirt-path": 2,
-  "village-cobble": 3,
-  "village-water": 4,
-};
-
 /**
  * The village floor plan. One character per cell picks a terrain tile; a grass
  * field with a cobble path down the middle, a pond, and flower patches. Authored,

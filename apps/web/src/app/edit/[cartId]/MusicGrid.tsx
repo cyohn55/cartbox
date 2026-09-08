@@ -19,7 +19,7 @@ interface MusicGridProps {
   onSelectRow: (row: number) => void;
 }
 
-export function MusicGrid({ tracker, pattern, cursor, version, onSelectRow }: MusicGridProps) {
+export function MusicGrid({ tracker, pattern, cursor, onSelectRow }: MusicGridProps) {
   const cursorRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {

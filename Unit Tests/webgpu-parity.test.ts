@@ -45,7 +45,6 @@ import {
 } from "@cartbox/editor";
 import { SoftwareSceneRenderer, WebgpuSceneRenderer, type SceneDraw } from "@cartbox/player";
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 
 const W = 64;
 const H = 48;

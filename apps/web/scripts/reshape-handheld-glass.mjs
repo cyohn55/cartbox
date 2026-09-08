@@ -87,7 +87,6 @@ const BAND_COLORS = {
 };
 
 /** Chassis face colour in the un-recoloured art, and its mask region id. */
-const FACE_COLOR = [138, 111, 48];
 const FACE_REGION_ID = 1;
 
 /**

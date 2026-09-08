@@ -8,7 +8,7 @@
 //   node --env-file=apps/web/.env.local scripts/seed-portrait.mjs
 
 import { createClient } from "@supabase/supabase-js";
-import { putCartObject, storageBackend } from "./lib/seedStorage.mjs";
+import { putCartObject } from "./lib/seedStorage.mjs";
 
 // Resolve sibling packages against this module's URL directly; going through
 // URL.pathname would percent-encode the spaces in the repo path.
