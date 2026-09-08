@@ -349,31 +349,42 @@ tests; the software renderer is asserted byte-identical to `renderMeshScene`;
 and it is the live warm-up path on every cart's opening frames rather than code
 that only runs on someone else's browser.
 
-### 5.1a What the GPU path's tests do and do not cover
+### 5.1a What the GPU path's tests cover
 
-Stated plainly, because a renderer that has never run on a GPU is a liability
-if its status is vague.
+**The GPU path has been verified on a real WebGPU device.** The WGSL compiles,
+the pipeline builds, and its output is **byte-identical** to the software
+rasteriser — zero differing channels across a scene of angled, overlapping,
+textured and untextured instances. `Unit Tests/webgpu-parity.test.ts` is that
+check, and its header says how to run it.
 
-**Covered:** the packing and layout (uniform offsets including WGSL's 16-byte
-mat3x3 column padding, vertex stride against the pipeline descriptor, readback
-row unpadding, light resolution); the full renderer class driven through a
-recording fake device (bind group layout, dynamic offsets per draw, geometry
-uploaded once per mesh, transparent clear, aligned readback stride, the software
-warm-up, compositing a landed readback, teardown, and surviving a device that
-starts throwing); and the software path asserted byte-identical to
-`renderMeshScene`.
+**How, with no GPU:** Dawn bound into Node (`@kmamal/gpu`) on top of Mesa's
+software Vulkan (`mesa-vulkan-drivers`, providing the lavapipe ICD). Playwright's
+bundled Chromium ships without WebGPU — `navigator.gpu` is undefined regardless
+of flags, headless or headed — so the browser is a dead end for this; Node is
+not. Pin `@kmamal/gpu@0.2.0`: 0.2.1 has a binding bug where `createView()`
+passes a swizzle field Dawn rejects, unrelated to any Cartbox code.
 
-**Not covered, and not coverable here:** WGSL compilation, and whether the GPU
-output matches the software rasteriser pixel for pixel. Both need a real
-adapter. The Chromium available in CI exposes no `navigator.gpu` at all, so
-there is no software-adapter fallback to test against either.
+The test is opt-in — it skips unless the binding is installed, because a ~100MB
+native dependency should not be in every `npm install` to serve one suite.
 
-One hardware-only defect was already caught by review rather than by a test: an
-`"auto"` pipeline layout infers the uniform binding *without* a dynamic offset,
-which would have made every `setBindGroup` call in the frame fail on a device
-while passing everything runnable here. The layout is now explicit, and its
-`hasDynamicOffset` and `minBindingSize` are pinned by test. **The first run on
-real hardware should be treated as the real test.**
+**Also covered, without a device:** the packing and layout (uniform offsets
+including WGSL's 16-byte mat3x3 column padding, vertex stride against the
+pipeline descriptor, readback row unpadding, light resolution); and the renderer
+class driven through a recording fake (bind group layout, dynamic offsets per
+draw, geometry uploaded once per mesh, transparent clear, aligned readback
+stride, the software warm-up, compositing a landed readback, teardown, and
+surviving a device that starts throwing).
+
+**Still not covered:** parity was measured on a software Vulkan implementation.
+A discrete GPU could differ in float precision or rasterisation fill rules, so
+the exact-equality assertion may need a tolerance on real silicon. Treat a
+mismatch there as new information about hardware, not as a regression.
+
+Worth recording: one hardware-only defect was caught by review before any of
+this ran. An `"auto"` pipeline layout infers the uniform binding *without* a
+dynamic offset, which would have failed every `setBindGroup` call on a device
+while passing every runnable test. The layout is explicit, and its
+`hasDynamicOffset` and `minBindingSize` are pinned by test.
 
 ### 5.2 Asset storage breaks at the PS1 tier, not the 360 tier
 
@@ -401,7 +412,8 @@ any real machine.
    `BUILD_PLAN.md` scoping its TIC-80 principle to Classic.
 2. ~~**Gate the tab list on the model.**~~ **Done** — `editorTabs.ts` (§3).
 3. ~~**Give the player a GPU triangle path**~~ **Done** — `packages/player/src/render/`
-   (§5.1). Not verified on real hardware: see §5.1a.
+   (§5.1), and verified byte-identical to the software path on a real WebGPU
+   device (§5.1a).
 4. ~~**Widen `ConsoleModel` with `RenderCaps`.**~~ **Done** (§4), and every cap
    is now enforced (§4a) — the scene-level pair above the backend, the
    rasterisation-level four inside it, with the backend chosen by what the
