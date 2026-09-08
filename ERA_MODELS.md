@@ -399,6 +399,37 @@ asset store, versioned and deduplicated, with the cartridge row pointing at it.
 This is the largest single piece of work in the plan, and it arrives with the
 *first* 3D era model rather than the last. Budget for it accordingly.
 
+**Shipped — the foundation, not yet the wiring:**
+
+- `cartAssetStore.ts` — the pure format. Assets are addressed by SHA-256, so
+  dedup is global and free (a tileset shared by fifty remixes is stored once,
+  which is the difference between storage growing with forks and growing with
+  originals), assets are immutable and cache forever, and re-saving a cart
+  re-uploads nothing.
+- `cartAssetStorage.ts` — R2 and Postgres, writing **blob, then row, then
+  manifest**. Every failure between those steps leaves orphaned bytes, which is
+  a bill; the reverse order would leave a dangling reference, which is a missing
+  texture the player sees.
+- `ConsoleModel.assetBudgetBytes` — the allowance is **per model**, same
+  doctrine as every other limit here. An era model picks a budget that evokes
+  its generation rather than reproducing a disc, and a cartridge-only model
+  cannot silently acquire an asset store. Every shipping model is `0`, pinned by
+  test: **the first non-zero budget is the first era model.**
+- `POST/GET /api/carts/[cartId]/assets`, and migration `0024_cart_assets.sql`.
+
+**Deliberately not done yet:** the editor does not upload to it, the player does
+not read from it, and no garbage collection reclaims unreferenced blobs. The
+last is a real decision rather than an omission — assets are shared by hash, so
+"this cart dropped it" never means "nobody wants it", and deleting on
+dereference would let one creator's edit break another's published cart. It
+wants an offline mark-and-sweep with a grace period, not a request-path delete.
+
+One thing this surfaced: `apps/web` resolves `@cartbox/player` to a **tracked,
+prebuilt `dist/`** that had gone stale — stale enough that nothing in the web app
+could see `RenderCaps` at all. It is rebuilt here, but the arrangement is a trap
+worth removing: the web app should compile against the package's source, or the
+build should be enforced, rather than silently type-checking against a snapshot.
+
 An era model may still choose a deliberate ceiling far below historical fidelity
 (a "PS1-era" model capped at 32 MB rather than a 660 MB disc) — that is a design
 choice available at every tier, and consistent with TIC-80 not literally being

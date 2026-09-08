@@ -83,6 +83,19 @@ export interface ConsoleModel {
   /** Editor-enforced creative limits (informational at runtime). */
   paletteSize: number;
   cartSizeBytes: number;
+  /**
+   * Bytes of content-addressed assets a cart on this model may reference,
+   * beyond its cartridge. 0 means none: the cartridge is the whole cart.
+   *
+   * This is the constraint that lets a 3D era model exist at all. A textured
+   * scene does not fit in a cartridge at any resolution, so an era model stores
+   * its bulk beside the cart and references it by hash (see
+   * `cartAssetStore.ts`). Keeping the allowance *per model* rather than global
+   * is the same doctrine as every other limit here: an era model should pick a
+   * budget that evokes its generation rather than reproducing a disc, and a
+   * cartridge-only model should not silently acquire an asset store.
+   */
+  assetBudgetBytes: number;
   /** Default runtime URL for this model; overridable per player instance. */
   engineUrl: string;
   inputs: Array<"gamepad" | "mouse" | "keyboard">;
@@ -106,6 +119,7 @@ export const MODELS: Record<ModelId, ConsoleModel> = {
     engineUrl: "/engine/classic/tic80.js",
     inputs: ["gamepad", "mouse", "keyboard"],
     renderCaps: SOFTWARE_RASTER_CAPS,
+    assetBudgetBytes: 0,
   },
   pro: {
     id: "pro",
@@ -130,6 +144,7 @@ export const MODELS: Record<ModelId, ConsoleModel> = {
     engineUrl: "/engine/pro/engine.js",
     inputs: ["gamepad", "mouse", "keyboard"],
     renderCaps: SOFTWARE_RASTER_CAPS,
+    assetBudgetBytes: 0,
   },
   portrait: {
     id: "portrait",
@@ -151,6 +166,7 @@ export const MODELS: Record<ModelId, ConsoleModel> = {
     engineUrl: "/engine/portrait/engine.js",
     inputs: ["gamepad", "mouse", "keyboard"],
     renderCaps: SOFTWARE_RASTER_CAPS,
+    assetBudgetBytes: 0,
   },
   voxel: {
     id: "voxel",
@@ -167,6 +183,7 @@ export const MODELS: Record<ModelId, ConsoleModel> = {
     engineUrl: "/engine/voxel/engine.js",
     inputs: ["gamepad", "mouse"],
     renderCaps: SOFTWARE_RASTER_CAPS,
+    assetBudgetBytes: 0,
   },
 };
 

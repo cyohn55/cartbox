@@ -40,14 +40,13 @@ export interface AssetVault {
   clear(titleId: string): Promise<void>;
 }
 
-/** Lowercase hex SHA-256 of the given bytes, via the platform's WebCrypto. */
-export async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const source = new Uint8Array(bytes);
-  const digest = await crypto.subtle.digest("SHA-256", source);
-  return [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
+/**
+ * Lowercase hex SHA-256. Re-exported from its own module so this file and the
+ * server-side cart asset store share one implementation without importing each
+ * other — see sha256.ts. Kept exported here because callers already import it
+ * from this module.
+ */
+export { sha256Hex } from "./sha256";
 
 /**
  * Thrown when the browser refuses to store more data. Surfaced distinctly from
