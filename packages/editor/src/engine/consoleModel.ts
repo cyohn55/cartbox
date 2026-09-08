@@ -10,8 +10,8 @@
  * live in @cartbox/player's model registry, which these mirror.
  */
 
-export type ConsoleModelId = "classic" | "pro" | "portrait" | "voxel";
-export type RasterKind = "raster2d" | "voxel3d";
+export type ConsoleModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1";
+export type RasterKind = "raster2d" | "voxel3d" | "poly3d";
 
 export interface ConsoleModelSpec {
   id: ConsoleModelId;
@@ -149,9 +149,45 @@ export const VOXEL_MODEL: ConsoleModelSpec = {
   screenHeight: 22,
 };
 
+/**
+ * PS1 — the first era model: a 320x240 4:3 frame whose games are textured
+ * triangle scenes.
+ *
+ * The 2D geometry here is the *authoring* surface, not the game: sprites are
+ * for HUD, UI and billboards, and the map is a 2D layer under the 3D. The
+ * scene itself is meshes and a world grid, authored in the spatial tabs and
+ * stored in the cart's asset manifest rather than in the cartridge — which is
+ * why `kind` is `poly3d`, and why those tabs are shown for this model and
+ * hidden for the 2D ones.
+ *
+ * Provisional in the same sense the Voxel spec is: finalised when the core is
+ * built (packages/engine/scripts/build-ps1-wasm.sh).
+ */
+export const PS1_MODEL: ConsoleModelSpec = {
+  id: "ps1",
+  label: "PS1",
+  kind: "poly3d",
+  width: 320,
+  height: 240,
+  tileSize: 8,
+  // 8bpp tiles, as Pro uses: PS1-era 2D art is CLUT-indexed, and 256 colours is
+  // what an 8-bit CLUT holds.
+  tilePixelBits: 8,
+  paletteSize: 256,
+  tilesPerPage: 256,
+  spritePages: 2,
+  sheetCols: 16,
+  mapWidth: 320,
+  mapHeight: 240,
+  // 320/8 x 240/8: both dimensions divide the tile grid exactly.
+  screenWidth: 40,
+  screenHeight: 30,
+};
+
 export const CONSOLE_MODELS: Record<ConsoleModelId, ConsoleModelSpec> = {
   classic: CLASSIC_MODEL,
   pro: PRO_MODEL,
   portrait: PORTRAIT_MODEL,
   voxel: VOXEL_MODEL,
+  ps1: PS1_MODEL,
 };

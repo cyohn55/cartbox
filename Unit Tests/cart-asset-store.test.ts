@@ -254,11 +254,16 @@ describe("withAsset / withoutAsset", () => {
 });
 
 describe("shipping models", () => {
-  it("are cartridge-only", () => {
-    // Every model that exists today holds everything in its cartridge. The
-    // first non-zero budget here is the first era model, and this test is what
-    // makes that a deliberate decision rather than a default.
+  it("are cartridge-only, except the era model that cannot be", () => {
+    // This test existed to make the first non-zero budget a deliberate decision
+    // rather than a default. It fired when PS1 arrived, which is the point:
+    // geometry and textures do not fit in a cartridge at any resolution, so a
+    // 3D era model is exactly the case that has to break the rule.
     for (const model of Object.values(MODELS)) {
+      if (model.id === "ps1") {
+        expect(model.assetBudgetBytes).toBeGreaterThan(0);
+        continue;
+      }
       expect(model.assetBudgetBytes, model.id).toBe(0);
     }
   });

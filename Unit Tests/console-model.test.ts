@@ -32,8 +32,8 @@ describe("console model registry", () => {
     });
   });
 
-  it("registers classic, pro, portrait, and voxel", () => {
-    expect(Object.keys(CONSOLE_MODELS).sort()).toEqual(["classic", "portrait", "pro", "voxel"]);
+  it("registers every model the family declares", () => {
+    expect(Object.keys(CONSOLE_MODELS).sort()).toEqual(["classic", "portrait", "pro", "ps1", "voxel"]);
     expect(CONSOLE_MODELS.pro.paletteSize).toBeGreaterThan(CLASSIC_MODEL.paletteSize);
   });
 

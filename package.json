@@ -18,6 +18,7 @@
     "engine:build:native": "bash packages/engine/scripts/build-native.sh",
     "engine:build:portrait": "bash packages/engine/scripts/build-portrait-wasm.sh",
     "engine:build:pro": "bash packages/engine/scripts/build-pro-wasm.sh",
+    "engine:build:ps1": "bash packages/engine/scripts/build-ps1-wasm.sh",
     "engine:build:wasm": "bash packages/engine/scripts/build-wasm.sh",
     "lint": "eslint .",
     "serve:demo": "node packages/player/examples/serve.mjs",

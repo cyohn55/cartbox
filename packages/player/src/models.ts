@@ -9,7 +9,7 @@
  * assumptions the platform layer depends on.
  */
 
-export type ModelId = "classic" | "pro" | "portrait" | "voxel";
+export type ModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1";
 
 /**
  * How a model rasterises triangles.
@@ -64,14 +64,46 @@ export const SOFTWARE_RASTER_CAPS: RenderCaps = {
   programmableShaders: false,
 };
 
+/**
+ * The PS1 era, expressed as rasterisation rules.
+ *
+ * Every field here is an artefact people remember rather than a limitation to
+ * be apologised for: no depth buffer means whole triangles sort back-to-front
+ * and interpenetrating surfaces resolve wrongly; affine interpolation makes a
+ * texture swim across a wall as the camera slides past it; integer vertices
+ * give the wobble of a transform unit with no subpixel precision; and
+ * unfiltered texels stay crunchy.
+ *
+ * The two budgets model the *cause* of the era's look rather than its
+ * symptoms. A 64KB texture cache is one 256x256 8-bit page — the reason the
+ * generation's textures are tiny and reused. The poly budget is roughly what
+ * the hardware pushed per frame, and it is also why those games ran at 30fps;
+ * this model stays at 60 and constrains the geometry instead, because the
+ * frame rate was a consequence of the budget, not a design goal.
+ */
+export const PS1_RASTER_CAPS: RenderCaps = {
+  zBuffer: false,
+  perspectiveCorrect: false,
+  vertexPrecision: "integer",
+  textureFiltering: "none",
+  textureCacheBytes: 64 * 1024,
+  polyBudget: 3000,
+  programmableShaders: false,
+};
+
 export interface ConsoleModel {
   id: ModelId;
   label: string;
   /**
-   * Rasterizer family. Even a voxel3d model presents a 2D RGBA framebuffer for
-   * display, so the player's blit path stays model-agnostic.
+   * Rasterizer family. Every model presents a 2D RGBA framebuffer for display,
+   * whatever it draws into it, so the player's blit path stays model-agnostic.
+   *
+   * `poly3d` is a model whose games are textured triangle scenes: the core
+   * still supplies the 2D frame, script and sound, and the mesh/world overlays
+   * composite the 3D over it. The editor uses this to decide whether the
+   * spatial authoring tabs apply.
    */
-  kind: "raster2d" | "voxel3d";
+  kind: "raster2d" | "voxel3d" | "poly3d";
   width: number;
   height: number;
   /** Bytes per framebuffer pixel (RGBA = 4). */
@@ -184,6 +216,36 @@ export const MODELS: Record<ModelId, ConsoleModel> = {
     inputs: ["gamepad", "mouse"],
     renderCaps: SOFTWARE_RASTER_CAPS,
     assetBudgetBytes: 0,
+  },
+  ps1: {
+    id: "ps1",
+    label: "PS1",
+    kind: "poly3d",
+    // 320x240, the era's NTSC frame. 4:3 rather than the 16:9 the Pro models
+    // use, because the aspect ratio is as much a period signal as the pixels:
+    // a 16:9 PS1 game would read as a remaster.
+    width: 320,
+    height: 240,
+    pixelBytes: 4,
+    fps: 60,
+    audioChannels: 8,
+    sampleRate: 44100,
+    // 8-bit CLUT textures were the era's workhorse (4-bit for the rest), so 256
+    // is authentic rather than a compromise.
+    paletteSize: 256,
+    // The cartridge carries code, 2D art and sound. Geometry and textures do
+    // not live here — they go to the content-addressed asset store, which is
+    // the whole reason a 3D era model is possible at all.
+    cartSizeBytes: 2 * 1024 * 1024,
+    engineUrl: "/engine/ps1/engine.js",
+    inputs: ["gamepad", "keyboard"],
+    renderCaps: PS1_RASTER_CAPS,
+    // A disc held ~660MB, which is not a constraint worth reproducing: it is
+    // large enough to stop shaping the work, and it would make every cart a
+    // hosting liability. 32MB evokes the era the way TIC-80 evokes the 8-bit
+    // one — enough for a real textured world, small enough that an artist has
+    // to reuse a texture rather than author a new one.
+    assetBudgetBytes: 32 * 1024 * 1024,
   },
 };
 

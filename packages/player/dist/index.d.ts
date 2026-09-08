@@ -10,7 +10,7 @@ import { MeshSceneInstance, MeshAsset, Mat4, DecodedTexture, RasterStyle } from 
  * toggles: that would dissolve the aesthetic and break the fixed-spec
  * assumptions the platform layer depends on.
  */
-type ModelId = "classic" | "pro" | "portrait" | "voxel";
+type ModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1";
 /**
  * How a model rasterises triangles.
  *
@@ -58,10 +58,15 @@ interface ConsoleModel {
     id: ModelId;
     label: string;
     /**
-     * Rasterizer family. Even a voxel3d model presents a 2D RGBA framebuffer for
-     * display, so the player's blit path stays model-agnostic.
+     * Rasterizer family. Every model presents a 2D RGBA framebuffer for display,
+     * whatever it draws into it, so the player's blit path stays model-agnostic.
+     *
+     * `poly3d` is a model whose games are textured triangle scenes: the core
+     * still supplies the 2D frame, script and sound, and the mesh/world overlays
+     * composite the 3D over it. The editor uses this to decide whether the
+     * spatial authoring tabs apply.
      */
-    kind: "raster2d" | "voxel3d";
+    kind: "raster2d" | "voxel3d" | "poly3d";
     width: number;
     height: number;
     /** Bytes per framebuffer pixel (RGBA = 4). */
