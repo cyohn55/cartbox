@@ -31,6 +31,7 @@ const MODEL_BADGES: Record<ConsoleModelId, string> = {
   pro: "PRO",
   portrait: "PORTRAIT",
   voxel: "VOXEL",
+  ps1: "PS1",
 };
 
 export function modelBadge(value: string | null | undefined): string {
@@ -52,4 +53,9 @@ export const ENGINE_URL_BY_MODEL: Record<ConsoleModelId, string> = {
   ),
   // No voxel engine yet; falls back to classic so the type stays total.
   voxel: withBasePath(process.env.NEXT_PUBLIC_ENGINE_URL ?? "/engine/tic80.js"),
+  // The PS1 core is a 320x240 8bpp build of the same engine family
+  // (packages/engine/scripts/build-ps1-wasm.sh). Until it is built and
+  // deployed this falls back to classic, exactly as voxel does, so the type
+  // stays total and a mis-set model degrades instead of failing to load.
+  ps1: withBasePath(process.env.NEXT_PUBLIC_PS1_ENGINE_URL ?? "/engine/tic80.js"),
 };

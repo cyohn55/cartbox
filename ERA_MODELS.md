@@ -468,9 +468,9 @@ any real machine.
    is now enforced (§4a) — the scene-level pair above the backend, the
    rasterisation-level four inside it, with the backend chosen by what the
    model's era needs. **The renderer can now express a PS1-era look.**
-5. **Build the PS1-era model.** Best first 3D era: cheapest constraints to
-   enforce, highest aesthetic payoff. The existing 3D sidecars become its native
-   format (§3), and the asset store lands here (§5.2).
+5. **Build the PS1-era model.** *Started.* The spec, its `RenderCaps`, its
+   asset budget and its core build script are in; what remains is building the
+   core binary and letting creators select it. See §9.
 6. **N64-era model.** Mostly a `RenderCaps` variation on PS1 plus mipmapping and
    the texture-cache limit. Cheap once PS1 exists.
 7. **Creator-uploaded `wasm-app` titles.** Gated on serving player pages from a
@@ -579,3 +579,80 @@ demonstrates the cost of a defined-but-unbuilt model.
   Each new sidecar column and each new 3D tab bolted onto Classic drifts toward
   that outcome without anyone deciding it. Deciding deliberately is cheaper than
   discovering you already decided.
+
+
+---
+
+## 9. PS1 — the first era model
+
+Declared in `MODELS.ps1` / `PS1_MODEL`, with `build-ps1-wasm.sh` to produce its
+core. It is **defined but not yet selectable**, exactly as `voxel` is: the model
+resolves, the editor knows its geometry, and `ENGINE_URL_BY_MODEL` falls back to
+the Classic core until the PS1 one is built and deployed.
+
+### The spec, and why each number
+
+| | | |
+|---|---|---|
+| Frame | 320×240 | The era's NTSC frame, and 4:3 rather than the Pro models' 16:9 — the aspect ratio is as much a period signal as the pixels, and a widescreen PS1 game reads as a remaster |
+| `fps` | 60 | See below |
+| Palette | 256 | 8-bit CLUT textures were the era's workhorse; authentic rather than a compromise |
+| `cartSizeBytes` | 2 MB | Code, HUD art and sound. **Not** geometry |
+| `assetBudgetBytes` | 660 MB | A CD-ROM. The disc is the defining physical fact about this generation — it is why its games have full-motion video, streamed audio and textured worlds where the cartridge eras did not. Picking a smaller figure to keep pressure on the artist would invent a constraint the hardware did not have |
+| `kind` | `poly3d` | A new rasteriser family — games are textured triangle scenes. The editor's spatial tabs key off this |
+
+`RenderCaps`: no depth buffer, affine interpolation, integer vertices,
+unfiltered texels, a **64KB texture cache** (one 256×256 8-bit page) and a
+**3,000-triangle** frame budget.
+
+**On the frame rate.** Those games ran at 30fps, and it is tempting to encode
+that. But 30fps was a *consequence* of the polygon budget, not a design goal —
+so the model constrains the geometry and stays at 60. Modelling the cause rather
+than the symptom means a cart that stays within budget feels good to play, while
+one that does not is over budget rather than merely slow.
+
+**On the disc.** The budget is a real CD-ROM rather than a smaller figure chosen
+to keep pressure on the artist, and that follows the same rule as every other
+number here: the frame is 320×240 because that is the frame, and the texture
+cache is 64KB because that is the page. Inventing a storage limit the hardware
+did not have would be the one arbitrary figure in the spec.
+
+The era's *look* does not come from storage in any case. It comes from the 64KB
+texture page and the 3,000-triangle frame — caps that bind on every frame, where
+the disc only ever bound on the whole game. A creator with a disc to fill still
+cannot put a large texture on screen.
+
+The practical consequence is a hosting one, not an aesthetic one: a cart may
+reference up to 660MB of R2 storage. Content addressing takes most of the sting
+out of that — a texture shared across fifty remixes is stored once — but the
+garbage collection in §5.2 stops being a nice-to-have at this budget, and the
+per-asset cap (16MB) is what still bounds any single upload.
+
+### What this turned out to be
+
+Less than expected, and worth recording. **A PS1 model is not a new engine.**
+The 3D comes from the player's mesh and world overlay surfaces, which already
+composite textured triangles over whatever frame the core produces; the core
+only supplies the 2D framebuffer, the script VM, sound and the cartridge memory
+map. So the core is a *parameterised rebuild* of the same TIC-80-derived engine
+— `build-ps1-wasm.sh` is the Pro script with a different fixed spec, structurally
+identical on purpose.
+
+Everything else the tier needs already landed: the renderer honours the era caps
+(§4a), the software path takes models WebGPU declines, and the asset store holds
+what the cartridge cannot (§5.2).
+
+### What is left
+
+1. **Build the core** — needs the Emscripten SDK, which no CI here has:
+   `npm run engine:build:ps1`, then deploy `engine.js` + `engine.wasm` and point
+   `NEXT_PUBLIC_PS1_ENGINE_URL` at them.
+2. **Make it selectable** — add `ps1` to `SELECTABLE_MODEL_IDS` once the core is
+   deployed. It is deliberately excluded until then, so nobody can author a cart
+   that cannot boot.
+3. **An editor upload path for textures**, so a creator can spend the budget
+   directly rather than only through a mesh's embedded images.
+4. **Verify the look on real content.** Every era trait is unit-tested as a
+   descriptor and as rasteriser behaviour, but nobody has yet looked at a PS1
+   cart and judged whether it reads as the era. That is the test that matters
+   and it cannot be automated.

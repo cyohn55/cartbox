@@ -11,6 +11,7 @@ export {
   type RasterKind,
   CLASSIC_MODEL,
   PRO_MODEL,
+  PS1_MODEL,
   VOXEL_MODEL,
   CONSOLE_MODELS,
 } from "./engine/consoleModel";

@@ -2412,6 +2412,15 @@ var SOFTWARE_RASTER_CAPS = {
   polyBudget: 0,
   programmableShaders: false
 };
+var PS1_RASTER_CAPS = {
+  zBuffer: false,
+  perspectiveCorrect: false,
+  vertexPrecision: "integer",
+  textureFiltering: "none",
+  textureCacheBytes: 64 * 1024,
+  polyBudget: 3e3,
+  programmableShaders: false
+};
 var MODELS = {
   classic: {
     id: "classic",
@@ -2493,6 +2502,45 @@ var MODELS = {
     inputs: ["gamepad", "mouse"],
     renderCaps: SOFTWARE_RASTER_CAPS,
     assetBudgetBytes: 0
+  },
+  ps1: {
+    id: "ps1",
+    label: "PS1",
+    kind: "poly3d",
+    // 320x240, the era's NTSC frame. 4:3 rather than the 16:9 the Pro models
+    // use, because the aspect ratio is as much a period signal as the pixels:
+    // a 16:9 PS1 game would read as a remaster.
+    width: 320,
+    height: 240,
+    pixelBytes: 4,
+    fps: 60,
+    audioChannels: 8,
+    sampleRate: 44100,
+    // 8-bit CLUT textures were the era's workhorse (4-bit for the rest), so 256
+    // is authentic rather than a compromise.
+    paletteSize: 256,
+    // The cartridge carries code, 2D art and sound. Geometry and textures do
+    // not live here — they go to the content-addressed asset store, which is
+    // the whole reason a 3D era model is possible at all.
+    cartSizeBytes: 2 * 1024 * 1024,
+    engineUrl: "/engine/ps1/engine.js",
+    inputs: ["gamepad", "keyboard"],
+    renderCaps: PS1_RASTER_CAPS,
+    // A CD-ROM, because that is what the era's games shipped on. The disc is
+    // the defining physical fact about this generation — it is why its games
+    // have full-motion video, streamed audio and textured worlds at all, where
+    // the cartridge eras did not.
+    //
+    // The alternative was a smaller figure chosen to keep pressure on the
+    // artist. That would be inventing a constraint the hardware did not have,
+    // which is the opposite of how every other number in this file was picked:
+    // the frame is 320x240 because that is the frame, and the texture cache is
+    // 64KB because that is the page. The budget follows the same rule.
+    //
+    // The pressure that shaped the era's art comes from the caps above — a
+    // 64KB texture page and a 3,000-triangle frame — not from disc capacity.
+    // Those bind on every frame; the disc only ever bound on the whole game.
+    assetBudgetBytes: 660 * 1024 * 1024
   }
 };
 var DEFAULT_MODEL_ID = "classic";

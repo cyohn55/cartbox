@@ -35,10 +35,15 @@ describe("RenderCaps", () => {
   });
 
   it("describes what the shared software rasteriser actually does today", () => {
-    // The four shipping models rasterise triangles through the same overlay
-    // surfaces, so identical caps are correct rather than lazy. This fails the
-    // day a model's renderer diverges without its descriptor following.
-    for (const model of models) {
+    // The 2D models rasterise triangles through the same overlay surfaces, so
+    // identical caps are correct rather than lazy. This fails the day one of
+    // their renderers diverges without its descriptor following.
+    //
+    // PS1 is the deliberate exception, and the exclusion is what makes it one:
+    // an era model that quietly matched these caps would render like every
+    // other model while claiming a period. Its own spec test pins the
+    // difference (see ps1-model-spec.test.ts).
+    for (const model of models.filter((m) => m.id !== "ps1")) {
       expect(model.renderCaps, `${model.id}`).toEqual(SOFTWARE_RASTER_CAPS);
     }
     expect(SOFTWARE_RASTER_CAPS.zBuffer).toBe(true);
@@ -48,10 +53,14 @@ describe("RenderCaps", () => {
 
   it("treats zero budgets as unbounded rather than as a ban", () => {
     // 0 means "no ceiling", so a model that enforces nothing must not read as a
-    // model that forbids everything. An era model sets a real number here.
-    for (const model of models) {
+    // model that forbids everything.
+    for (const model of models.filter((m) => m.id !== "ps1")) {
       expect(model.renderCaps.textureCacheBytes).toBe(0);
       expect(model.renderCaps.polyBudget).toBe(0);
     }
+    // And an era model sets real numbers, which is the case the zero is
+    // distinguished from.
+    expect(MODELS.ps1.renderCaps.textureCacheBytes).toBeGreaterThan(0);
+    expect(MODELS.ps1.renderCaps.polyBudget).toBeGreaterThan(0);
   });
 });
