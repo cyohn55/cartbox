@@ -117,13 +117,23 @@ describe("the PS1 asset budget", () => {
     }
   });
 
-  it("evokes a disc rather than reproducing one", () => {
-    // A real disc held ~660MB, which is large enough to stop shaping the work
-    // and would make every cart a hosting liability. The budget should be
-    // generous enough for a textured world and small enough that an artist
-    // reuses a texture rather than authoring a new one.
-    expect(ps1.assetBudgetBytes).toBeGreaterThanOrEqual(16 * 1024 * 1024);
-    expect(ps1.assetBudgetBytes).toBeLessThan(64 * 1024 * 1024);
+  it("is a CD-ROM, because that is what the era shipped on", () => {
+    // The disc is the defining physical fact about this generation: it is why
+    // its games have full-motion video, streamed audio and textured worlds
+    // where the cartridge eras did not. Picking a smaller number to keep
+    // pressure on the artist would be inventing a constraint the hardware did
+    // not have, which is the opposite of how every other figure in this spec
+    // was chosen.
+    expect(ps1.assetBudgetBytes).toBe(660 * 1024 * 1024);
+  });
+
+  it("keeps its creative pressure in the per-frame caps, not the disc", () => {
+    // With a disc-sized budget, nothing about the *look* of the era comes from
+    // storage. It comes from the texture page and the triangle budget, which
+    // bind on every frame where the disc only ever bound on the whole game.
+    // If these ever went unbounded, a PS1 cart could look like anything.
+    expect(ps1.renderCaps.textureCacheBytes).toBeGreaterThan(0);
+    expect(ps1.renderCaps.polyBudget).toBeGreaterThan(0);
   });
 
   it("keeps its cartridge small, because the cartridge is not where the game is", () => {

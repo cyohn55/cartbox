@@ -2526,12 +2526,21 @@ var MODELS = {
     engineUrl: "/engine/ps1/engine.js",
     inputs: ["gamepad", "keyboard"],
     renderCaps: PS1_RASTER_CAPS,
-    // A disc held ~660MB, which is not a constraint worth reproducing: it is
-    // large enough to stop shaping the work, and it would make every cart a
-    // hosting liability. 32MB evokes the era the way TIC-80 evokes the 8-bit
-    // one — enough for a real textured world, small enough that an artist has
-    // to reuse a texture rather than author a new one.
-    assetBudgetBytes: 32 * 1024 * 1024
+    // A CD-ROM, because that is what the era's games shipped on. The disc is
+    // the defining physical fact about this generation — it is why its games
+    // have full-motion video, streamed audio and textured worlds at all, where
+    // the cartridge eras did not.
+    //
+    // The alternative was a smaller figure chosen to keep pressure on the
+    // artist. That would be inventing a constraint the hardware did not have,
+    // which is the opposite of how every other number in this file was picked:
+    // the frame is 320x240 because that is the frame, and the texture cache is
+    // 64KB because that is the page. The budget follows the same rule.
+    //
+    // The pressure that shaped the era's art comes from the caps above — a
+    // 64KB texture page and a 3,000-triangle frame — not from disc capacity.
+    // Those bind on every frame; the disc only ever bound on the whole game.
+    assetBudgetBytes: 660 * 1024 * 1024
   }
 };
 var DEFAULT_MODEL_ID = "classic";

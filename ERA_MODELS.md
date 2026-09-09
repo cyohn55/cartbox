@@ -598,7 +598,7 @@ the Classic core until the PS1 one is built and deployed.
 | `fps` | 60 | See below |
 | Palette | 256 | 8-bit CLUT textures were the era's workhorse; authentic rather than a compromise |
 | `cartSizeBytes` | 2 MB | Code, HUD art and sound. **Not** geometry |
-| `assetBudgetBytes` | 32 MB | A disc held ~660MB, which is large enough to stop shaping the work and would make every cart a hosting liability. 32MB evokes the era the way TIC-80 evokes the 8-bit one: enough for a real textured world, small enough that an artist reuses a texture rather than authoring a new one |
+| `assetBudgetBytes` | 660 MB | A CD-ROM. The disc is the defining physical fact about this generation — it is why its games have full-motion video, streamed audio and textured worlds where the cartridge eras did not. Picking a smaller figure to keep pressure on the artist would invent a constraint the hardware did not have |
 | `kind` | `poly3d` | A new rasteriser family — games are textured triangle scenes. The editor's spatial tabs key off this |
 
 `RenderCaps`: no depth buffer, affine interpolation, integer vertices,
@@ -610,6 +610,23 @@ that. But 30fps was a *consequence* of the polygon budget, not a design goal —
 so the model constrains the geometry and stays at 60. Modelling the cause rather
 than the symptom means a cart that stays within budget feels good to play, while
 one that does not is over budget rather than merely slow.
+
+**On the disc.** The budget is a real CD-ROM rather than a smaller figure chosen
+to keep pressure on the artist, and that follows the same rule as every other
+number here: the frame is 320×240 because that is the frame, and the texture
+cache is 64KB because that is the page. Inventing a storage limit the hardware
+did not have would be the one arbitrary figure in the spec.
+
+The era's *look* does not come from storage in any case. It comes from the 64KB
+texture page and the 3,000-triangle frame — caps that bind on every frame, where
+the disc only ever bound on the whole game. A creator with a disc to fill still
+cannot put a large texture on screen.
+
+The practical consequence is a hosting one, not an aesthetic one: a cart may
+reference up to 660MB of R2 storage. Content addressing takes most of the sting
+out of that — a texture shared across fifty remixes is stored once — but the
+garbage collection in §5.2 stops being a nice-to-have at this budget, and the
+per-asset cap (16MB) is what still bounds any single upload.
 
 ### What this turned out to be
 
