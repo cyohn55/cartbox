@@ -2678,3 +2678,118 @@
     gap: 4px;
   }
 }
+
+/* --- Files tab: uploads that live beside the cart ------------------------- */
+
+.filesPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 720px;
+  padding: 14px;
+}
+
+.filesIntro {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+
+/* Budget meter. The bar is the point of the tab — an asset store with a limit
+   you cannot see is one you discover by hitting it. */
+.filesMeter {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+
+.filesMeterFill {
+  height: 100%;
+  background: var(--accent, #7c6cf0);
+  transition: width 160ms ease-out;
+}
+
+.filesActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.filesInput {
+  font: inherit;
+  font-size: 12px;
+  color: inherit;
+}
+
+.filesOutcomes {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--faint);
+}
+
+.filesOutcomeFailed {
+  color: #ffb4a2;
+}
+
+.filesList {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  background: var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+/* Name takes the slack; type, size and the button stay their own width. On a
+   narrow screen the row wraps rather than crushing the name to nothing. */
+.filesRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  background: var(--panel);
+  font-size: 12px;
+}
+
+.filesName {
+  flex: 1 1 12ch;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.filesRemove {
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: inherit;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.filesRemove:hover:not(:disabled) {
+  border-color: #ffb4a2;
+  color: #ffb4a2;
+}
+
+.filesRemove:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.filesFootnote {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--faint);
+}

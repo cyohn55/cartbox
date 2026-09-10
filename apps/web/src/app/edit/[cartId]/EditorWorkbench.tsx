@@ -22,7 +22,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { defaultPostFxSettings, parseMeshScene, parseWorldScene, type AnimSpec, type MeshScene, type ParticleSpec, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
+import { defaultPostFxSettings, getModel, parseMeshScene, parseWorldScene, type AnimSpec, type MeshScene, type ParticleSpec, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
 import {
   BANK_COUNT,
   CartEngine,
@@ -68,6 +68,7 @@ import { AnimEditor } from "./AnimEditor";
 import { ParticlesEditor } from "./ParticlesEditor";
 import { ShaderEditor } from "./ShaderEditor";
 import { AssetsEditor } from "./AssetsEditor";
+import { FilesEditor } from "./FilesEditor";
 import { MeshEditor } from "./MeshEditor";
 import { WorldEditor } from "./WorldEditor";
 import { useEditorHistory, hashBytes, snapshotsEqual, type CartSnapshot } from "./useEditorHistory";
@@ -117,6 +118,8 @@ interface EditorWorkbenchProps {
   initialDescription: string;
   /** Persisted marketplace tags, or empty when none. */
   initialTags: string[];
+  /** Whether the cart already references uploaded assets; see the editor page. */
+  initialHasAssets: boolean;
 }
 
 export function EditorWorkbench({
@@ -128,6 +131,7 @@ export function EditorWorkbench({
   initialSidecars,
   initialDescription,
   initialTags,
+  initialHasAssets,
 }: EditorWorkbenchProps) {
   const [engine, setEngine] = useState<CartEngine | null>(null);
   const [mode, setMode] = useState<EngineMode>("wasm");
@@ -227,6 +231,7 @@ export function EditorWorkbench({
       initialSidecars={seeded}
       initialDescription={initialDescription}
       initialTags={initialTags}
+      initialHasAssets={initialHasAssets}
     />
   );
 }
@@ -241,6 +246,7 @@ function WorkbenchBody({
   initialSidecars,
   initialDescription,
   initialTags,
+  initialHasAssets,
 }: {
   engine: CartEngine;
   cartId: string;
@@ -251,6 +257,7 @@ function WorkbenchBody({
   initialSidecars: Sidecars;
   initialDescription: string;
   initialTags: string[];
+  initialHasAssets: boolean;
 }) {
   // requestedModel is what the URL/DB asked for; activeModel is what the loaded
   // engine actually provides (every editor surface reads geometry from this one).
@@ -454,9 +461,29 @@ function WorkbenchBody({
 
   // The 3D tabs are hidden on a 2D model unless this cart already has data in
   // them, so an older cart never loses access to content it saved.
+  // Whether this cart is storing uploaded assets.
+  //
+  // Seeded from the server because the Files panel cannot answer this for the
+  // case that needs it: a cart whose model has no asset budget shows the tab
+  // only when it is already storing something, and the panel only mounts once
+  // that tab is open. The panel still reports back, so uploading the first file
+  // or removing the last one keeps the tab honest without a reload.
+  const [hasStoredAssets, setHasStoredAssets] = useState(initialHasAssets);
+
+  // The asset budget comes from the cart's own model id, not from activeModel:
+  // when an engine fails to load the workbench falls back to another model to
+  // keep editing, and that must not change what this cart is allowed to store.
+  // The server reads the budget from the same `console_model` column.
+  const assetBudgetBytes = getModel(modelId).assetBudgetBytes;
+
   const tabs = useMemo(
-    () => visibleTabs(activeModel.kind, (sidecar) => sidecars[sidecar] !== null),
-    [activeModel.kind, sidecars],
+    () =>
+      visibleTabs(
+        activeModel.kind,
+        (content) => (content === "assets" ? hasStoredAssets : sidecars[content] !== null),
+        assetBudgetBytes,
+      ),
+    [activeModel.kind, assetBudgetBytes, hasStoredAssets, sidecars],
   );
   const moreActive = tabs.more.includes(activeTab);
 
@@ -1058,6 +1085,14 @@ function WorkbenchBody({
         />
       )}
       {activeTab === "Mesh" && <MeshEditor key="mesh" sidecar={mesh} onSidecarChange={setMesh} />}
+      {activeTab === "Files" && (
+        <FilesEditor
+          key="files"
+          cartId={cartId}
+          budgetBytes={assetBudgetBytes}
+          onHasAssetsChange={setHasStoredAssets}
+        />
+      )}
       {activeTab === "World" && (
         <WorldEditor
           key="world"

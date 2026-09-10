@@ -12,10 +12,14 @@
  * model while claiming to be a period machine, and nothing else would notice.
  */
 
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import { PS1_MODEL, type ConsoleModelSpec } from "@cartbox/editor";
 import { MODELS, SOFTWARE_RASTER_CAPS, framebufferBytes, getModel } from "@cartbox/player";
+
+import { SELECTABLE_MODEL_IDS } from "../apps/web/src/lib/consoleModel";
 
 const ps1 = MODELS.ps1;
 
@@ -160,5 +164,30 @@ describe("the PS1 model's place in the family", () => {
     expect(MODELS.classic.renderCaps).toEqual(SOFTWARE_RASTER_CAPS);
     expect(MODELS.classic.width).toBe(240);
     expect(MODELS.classic.height).toBe(136);
+  });
+});
+
+describe("the PS1 model as the home page announces it", () => {
+  // The home page names PS1 in the same list as the models you can create,
+  // but as plain text rather than a link. That is the whole point: the model
+  // is specified, its caps are enforced, and its core is not built — so the
+  // page says so instead of offering a cartridge that could not boot.
+  //
+  // These two facts have to move together. The failure they guard is a page
+  // that keeps saying "in development" after the core ships, or an offer to
+  // author in a console that cannot run.
+  const homePage = readFileSync(
+    new URL("../apps/web/src/app/page.tsx", import.meta.url),
+    "utf8",
+  );
+
+  it("is announced on the home page", () => {
+    expect(homePage).toContain('<AnnouncedModel id="ps1" />');
+  });
+
+  it("is not selectable while it is announced as unfinished", () => {
+    // If PS1 ever joins this list, the announcement above is a lie and should
+    // be deleted in the same change that adds it.
+    expect(SELECTABLE_MODEL_IDS).not.toContain("ps1");
   });
 });
