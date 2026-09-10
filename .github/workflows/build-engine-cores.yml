@@ -1,0 +1,101 @@
+# Build the console cores from the vendored TIC-80.
+#
+# Every era model compiles from one patched TIC-80 tree, selected by `-D` defines
+# (see packages/engine/patches/README.md). The built cores are committed, so this
+# workflow is not what ships them — it is what proves they can still be built.
+#
+# That matters because the inputs rot silently. A change to shim.c, to either
+# patch, or to a build script can leave the committed binaries working while the
+# recipe that produced them no longer runs, and nobody finds out until the next
+# time someone needs a core. This builds on every change to those inputs.
+#
+# It deliberately does not commit or deploy anything. The core is uploaded as an
+# artifact; promoting one is a human decision, because a new core changes what
+# every cart on that model runs on.
+#
+# (The path filters are duplicated between push and pull_request on purpose:
+# GitHub Actions does not support YAML anchors, so a `&`/`*` pair here would fail
+# to parse as a workflow even though it is valid YAML.)
+
+name: Build engine cores
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Which core to build
+        type: choice
+        default: ps1
+        options: [ps1, pro, portrait, wasm]
+  push:
+    branches: [main]
+    paths:
+      - packages/engine/shim.c
+      - packages/engine/patches/**
+      - packages/engine/scripts/**
+      - scripts/prepare-tic80.mjs
+      - .github/workflows/build-engine-cores.yml
+  pull_request:
+    paths:
+      - packages/engine/shim.c
+      - packages/engine/patches/**
+      - packages/engine/scripts/**
+      - scripts/prepare-tic80.mjs
+      - .github/workflows/build-engine-cores.yml
+
+concurrency:
+  group: engine-cores-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      MODEL: ${{ inputs.model || 'ps1' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # The TIC-80 tree is a pinned commit plus two patches, so it is fully
+      # determined by the pin and the patch contents — which is exactly what
+      # makes it cacheable. A patch edit changes the key and forces a re-clone.
+      - name: Cache the patched TIC-80 tree
+        uses: actions/cache@v4
+        with:
+          path: packages/engine/tic80
+          key: tic80-${{ hashFiles('scripts/prepare-tic80.mjs', 'packages/engine/patches/*.patch') }}
+
+      # Idempotent: a restored cache hit is detected and left alone.
+      - name: Fetch and patch TIC-80
+        run: npm run engine:prepare
+
+      # Pinned for the same reason the game-engine builds pin theirs: a core is a
+      # binary artefact, and the toolchain that produced it is part of its spec.
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.2
+          actions-cache-folder: emsdk-cache-engine
+
+      - name: Build the core
+        run: npm run engine:build:$MODEL
+
+      # The cores this compares against (pro, classic) are committed, so a
+      # freshly built ps1 is all it needs to prove the -D spec actually reached
+      # the binary rather than producing a differently-named Classic.
+      - name: Check the built core matches its model spec
+        if: env.MODEL == 'ps1'
+        run: npx vitest run "Unit Tests/ps1-core-build.test.ts"
+
+      - name: Upload the core
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-core-${{ inputs.model || 'ps1' }}
+          path: packages/engine/dist/
+          if-no-files-found: error

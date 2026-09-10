@@ -54,8 +54,8 @@ export const ENGINE_URL_BY_MODEL: Record<ConsoleModelId, string> = {
   // No voxel engine yet; falls back to classic so the type stays total.
   voxel: withBasePath(process.env.NEXT_PUBLIC_ENGINE_URL ?? "/engine/tic80.js"),
   // The PS1 core is a 320x240 8bpp build of the same engine family
-  // (packages/engine/scripts/build-ps1-wasm.sh). Until it is built and
-  // deployed this falls back to classic, exactly as voxel does, so the type
-  // stays total and a mis-set model degrades instead of failing to load.
-  ps1: withBasePath(process.env.NEXT_PUBLIC_PS1_ENGINE_URL ?? "/engine/tic80.js"),
+  // (packages/engine/scripts/build-ps1-wasm.sh), now built and served. Unlike
+  // voxel this no longer falls back to classic: falling back would silently run
+  // a PS1 cart on a 240x136 4bpp machine, which is worse than not loading.
+  ps1: withBasePath(process.env.NEXT_PUBLIC_PS1_ENGINE_URL ?? "/engine/ps1/engine.js"),
 };

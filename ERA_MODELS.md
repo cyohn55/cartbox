@@ -642,20 +642,61 @@ Everything else the tier needs already landed: the renderer honours the era caps
 (§4a), the software path takes models WebGPU declines, and the asset store holds
 what the cartridge cannot (§5.2).
 
+### Building a core, and a correction
+
+An earlier revision of this section said the core "needs the Emscripten SDK,
+which no CI here has". **That was wrong**, and it is worth recording why, because
+the mistake cost this model a release: `deploy-pages.yml` has installed
+Emscripten via `mymindstorm/setup-emsdk` for as long as the game engines have
+been built — five times over, with caching, for Doom, ScummVM, SuperTux,
+OpenTyrian, OpenTTD and Cave Story. The toolchain was never the blocker.
+
+The real gap was smaller and much less visible. `packages/engine/README.md`
+describes TIC-80 as a git submodule at `packages/engine/tic80`, but the
+repository has no `.gitmodules`, that path is gitignored, and the documented
+`git submodule update --init` therefore does nothing at all. The source simply
+was not there, and no script fetched it — so the build failed at its
+precondition check and the failure read as "no toolchain".
+
+`scripts/prepare-tic80.mjs` is that missing step: it clones TIC-80 at the pinned
+commit the patches were authored against and applies both of them. A plain clone
+rather than a submodule, deliberately — the patches carry `index` lines naming
+the blobs they expect, so they apply at that commit and nowhere else, and
+"whatever HEAD is today" is not a valid input to a reproducible build.
+
+```bash
+npm run engine:prepare      # fetch + patch TIC-80 at the pinned commit
+npm run engine:build:ps1    # -> packages/engine/dist/ps1/engine.{js,wasm}
+```
+
+`.github/workflows/build-engine-cores.yml` runs exactly that on any change to
+`shim.c`, the patches, the build scripts or the prepare script. It uploads the
+core as an artifact and deliberately neither commits nor deploys one: promoting
+a core changes what every cart on that model runs on, which is a human decision.
+
 ### What is left
 
-1. **Build the core** — needs the Emscripten SDK, which no CI here has:
-   `npm run engine:build:ps1`, then deploy `engine.js` + `engine.wasm` and point
-   `NEXT_PUBLIC_PS1_ENGINE_URL` at them.
-2. **Make it selectable** — add `ps1` to `SELECTABLE_MODEL_IDS` once the core is
-   deployed. It is deliberately excluded until then, so nobody can author a cart
-   that cannot boot.
+1. ~~**Build the core**~~ — done. `packages/engine/dist/ps1/` and
+   `apps/web/public/engine/ps1/` hold the built core, and
+   `ENGINE_URL_BY_MODEL.ps1` points at it rather than falling back to Classic —
+   a fallback would silently run a PS1 cart on a 240x136 4bpp machine, which is
+   worse than not loading. `ps1-core-build.test.ts` proves the binary was
+   compiled at the PS1 spec rather than being Classic under another name: the
+   three cores report three different cartridge memory maps, PS1's sits between
+   Classic's and Pro's as its resolution implies, and its music-track packing is
+   the eight-channel one.
+2. **Make it selectable** — add `ps1` to `SELECTABLE_MODEL_IDS`. This is now the
+   only thing standing between the model and a creator, and it is held back on
+   purpose: item 4 below has not been done, and until someone has looked at a
+   PS1 cart and judged it, shipping the model would be shipping an untested
+   aesthetic. `ps1-model-spec.test.ts` pins the coupling — the change that adds
+   it here must also delete the home page's "in development" notice.
 3. ~~**An editor upload path for textures**~~ — done. The editor's **Files** tab
    uploads, lists and removes assets against the model's budget. It is gated on
-   `assetBudgetBytes > 0`, so it appears on no model shipping today: it lights up
-   with the PS1 core, and until then the panel is written but dark. The tab also
-   shows for any cart already storing assets whatever its model, so nothing a
-   cart is paying for can become unreachable.
+   `assetBudgetBytes > 0`, which today means PS1 alone, so it stays dark until
+   item 2 makes that model selectable. The tab also shows for any cart already
+   storing assets whatever its model, so nothing a cart is paying for can become
+   unreachable.
 4. **Verify the look on real content.** Every era trait is unit-tested as a
    descriptor and as rasteriser behaviour, but nobody has yet looked at a PS1
    cart and judged whether it reads as the era. That is the test that matters
