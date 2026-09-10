@@ -650,8 +650,12 @@ what the cartridge cannot (§5.2).
 2. **Make it selectable** — add `ps1` to `SELECTABLE_MODEL_IDS` once the core is
    deployed. It is deliberately excluded until then, so nobody can author a cart
    that cannot boot.
-3. **An editor upload path for textures**, so a creator can spend the budget
-   directly rather than only through a mesh's embedded images.
+3. ~~**An editor upload path for textures**~~ — done. The editor's **Files** tab
+   uploads, lists and removes assets against the model's budget. It is gated on
+   `assetBudgetBytes > 0`, so it appears on no model shipping today: it lights up
+   with the PS1 core, and until then the panel is written but dark. The tab also
+   shows for any cart already storing assets whatever its model, so nothing a
+   cart is paying for can become unreachable.
 4. **Verify the look on real content.** Every era trait is unit-tested as a
    descriptor and as rasteriser behaviour, but nobody has yet looked at a PS1
    cart and judged whether it reads as the era. That is the test that matters

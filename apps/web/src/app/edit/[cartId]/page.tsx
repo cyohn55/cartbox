@@ -13,6 +13,7 @@
 import { serviceClient } from "@/lib/supabase";
 import { publicUrl } from "@/lib/storage";
 import { loadSidecars } from "@/lib/sidecarStorage";
+import { parseCartAssets } from "@/lib/cartAssetStore";
 import { emptySidecars, type Sidecars } from "@/lib/sidecars";
 import { resolveModelId } from "@/lib/consoleModel";
 import { resolveStarterId } from "@/lib/starter";
@@ -48,6 +49,16 @@ interface CartTarget {
   description: string;
   /** Persisted marketplace tags, or empty when none. */
   tags: string[];
+  /**
+   * Whether the cart references any uploaded assets.
+   *
+   * Answered here rather than by the Files panel, because the panel only mounts
+   * when its tab is open and that tab is what this answer decides. A cart whose
+   * model has no asset budget shows the tab only when it is already storing
+   * something, so asking the panel would be circular and the tab would never
+   * appear for exactly the carts that need it.
+   */
+  hasAssets: boolean;
 }
 
 /** A cart that has no row yet, or whose row could not be read. */
@@ -59,18 +70,43 @@ function blankCart(): CartTarget {
     sidecars: emptySidecars(),
     description: "",
     tags: [],
+    hasAssets: false,
   };
+}
+
+/**
+ * Whether this cart references any stored asset.
+ *
+ * Its own query, deliberately: `assets` arrived in migration 0024, and folding
+ * it into the main select would make an environment without that migration fail
+ * the whole read and open every cart blank. This is the same per-column
+ * tolerance `loadSidecars` applies, for the same reason — a missing column
+ * costs one answer, not the page.
+ */
+async function loadHasAssets(cartId: string): Promise<boolean> {
+  try {
+    const { data } = await serviceClient()
+      .from("carts")
+      .select("assets")
+      .eq("id", cartId)
+      .maybeSingle();
+    const parsed = parseCartAssets(data?.assets);
+    return parsed !== null && Object.keys(parsed.entries).length > 0;
+  } catch {
+    return false;
+  }
 }
 
 async function resolveCart(cartId: string): Promise<CartTarget> {
   try {
-    const [{ data }, sidecars] = await Promise.all([
+    const [{ data }, sidecars, hasAssets] = await Promise.all([
       serviceClient()
         .from("carts")
         .select("title, description, tags, r2_key, console_model")
         .eq("id", cartId)
         .maybeSingle(),
       loadSidecars(cartId),
+      loadHasAssets(cartId),
     ]);
     return {
       name: data?.title ?? "Untitled cartridge",
@@ -79,6 +115,7 @@ async function resolveCart(cartId: string): Promise<CartTarget> {
       sidecars,
       description: typeof data?.description === "string" ? data.description : "",
       tags: Array.isArray(data?.tags) ? (data.tags as string[]) : [],
+      hasAssets,
     };
   } catch {
     // An unreachable database opens the editor on a fresh cart rather than
@@ -95,7 +132,9 @@ export default async function EditorPage({ params, searchParams }: EditorPagePro
     return <StaticCartEditor cartId={params.cartId} />;
   }
 
-  const { name, cartUrl, storedModel, sidecars, description, tags } = await resolveCart(params.cartId);
+  const { name, cartUrl, storedModel, sidecars, description, tags, hasAssets } = await resolveCart(
+    params.cartId,
+  );
   // A saved cart's persisted model is authoritative; a brand-new cart (no row)
   // takes the model from the ?model= param carried in from /edit/new.
   const modelId = resolveModelId(storedModel ?? searchParams.model);
@@ -112,6 +151,7 @@ export default async function EditorPage({ params, searchParams }: EditorPagePro
       initialSidecars={sidecars}
       initialDescription={description}
       initialTags={tags}
+      initialHasAssets={hasAssets}
     />
   );
 }

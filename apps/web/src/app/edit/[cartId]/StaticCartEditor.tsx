@@ -96,6 +96,9 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
       initialSidecars={resolved.sidecars}
       initialDescription={resolved.description}
       initialTags={resolved.tags}
+      // The static export has no database and no API routes, so a cart here can
+      // reference no stored assets and the Files tab has nothing to talk to.
+      initialHasAssets={false}
     />
   );
 }
