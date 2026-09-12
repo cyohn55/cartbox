@@ -15,6 +15,7 @@
     "check:dist": "node scripts/check-player-dist.mjs",
     "desktop:dev": "npm run tauri:dev --workspace apps/desktop",
     "dev": "npm run dev --workspace apps/web",
+    "engine:prepare": "node scripts/prepare-tic80.mjs",
     "engine:build:native": "bash packages/engine/scripts/build-native.sh",
     "engine:build:portrait": "bash packages/engine/scripts/build-portrait-wasm.sh",
     "engine:build:pro": "bash packages/engine/scripts/build-pro-wasm.sh",

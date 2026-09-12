@@ -3,7 +3,7 @@
 The vendored TIC-80 lives at `../tic80` and is **gitignored**, so local edits to
 its source are captured here as patches (see `../README.md` "Upstream hygiene").
 The shipped runtime is the built `../dist` artifacts; these patches let anyone
-reproduce them from a fresh submodule checkout.
+reproduce them from a fresh checkout.
 
 ## cartbox-material-gbuffer.patch
 
@@ -30,12 +30,18 @@ possible at all: upstream derives the overscan buffer's height from its width at
 that line — not a build error, just a frame that stops two-thirds of the way
 down.
 
-Apply both after fetching the submodule, then rebuild:
+## Applying them
+
+`npm run engine:prepare` fetches TIC-80 at the pinned commit and applies both, in
+the order above (`scripts/prepare-tic80.mjs`). The pin matters: each patch carries
+`index` lines naming the blobs it expects, so both apply at that commit and are
+not guaranteed to apply at any other. Moving the pin means re-rolling the patches
+and rebuilding every core.
 
 ```bash
-git -C packages/engine/tic80 apply packages/engine/patches/cartbox-model-specs.patch
-git -C packages/engine/tic80 apply packages/engine/patches/cartbox-material-gbuffer.patch
+npm run engine:prepare           # fetch + patch
 npm run engine:build:wasm        # classic  -> dist/tic80.{js,wasm}
 npm run engine:build:pro         # pro      -> dist/pro/engine.{js,wasm}
 npm run engine:build:portrait    # portrait -> dist/portrait/engine.{js,wasm}
+npm run engine:build:ps1         # ps1      -> dist/ps1/engine.{js,wasm}
 ```

@@ -14,8 +14,17 @@ import { withBasePath } from "./staticSite";
  * Models a user can actually author in today. "voxel" is a defined spec but has
  * no built engine, so it is deliberately excluded — an unknown or unsupported
  * value resolves to "classic".
+ *
+ * A model belongs here once its core is built and served (see
+ * `ENGINE_URL_BY_MODEL`); adding one before then would let someone author a
+ * cartridge that cannot boot.
  */
-export const SELECTABLE_MODEL_IDS: readonly ConsoleModelId[] = ["classic", "pro", "portrait"];
+export const SELECTABLE_MODEL_IDS: readonly ConsoleModelId[] = [
+  "classic",
+  "pro",
+  "portrait",
+  "ps1",
+];
 
 export function resolveModelId(value: string | null | undefined): ConsoleModelId {
   return SELECTABLE_MODEL_IDS.includes(value as ConsoleModelId) ? (value as ConsoleModelId) : "classic";
@@ -54,8 +63,8 @@ export const ENGINE_URL_BY_MODEL: Record<ConsoleModelId, string> = {
   // No voxel engine yet; falls back to classic so the type stays total.
   voxel: withBasePath(process.env.NEXT_PUBLIC_ENGINE_URL ?? "/engine/tic80.js"),
   // The PS1 core is a 320x240 8bpp build of the same engine family
-  // (packages/engine/scripts/build-ps1-wasm.sh). Until it is built and
-  // deployed this falls back to classic, exactly as voxel does, so the type
-  // stays total and a mis-set model degrades instead of failing to load.
-  ps1: withBasePath(process.env.NEXT_PUBLIC_PS1_ENGINE_URL ?? "/engine/tic80.js"),
+  // (packages/engine/scripts/build-ps1-wasm.sh), now built and served. Unlike
+  // voxel this no longer falls back to classic: falling back would silently run
+  // a PS1 cart on a 240x136 4bpp machine, which is worse than not loading.
+  ps1: withBasePath(process.env.NEXT_PUBLIC_PS1_ENGINE_URL ?? "/engine/ps1/engine.js"),
 };

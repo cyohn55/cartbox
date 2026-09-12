@@ -41,6 +41,13 @@ export default tseslint.config(
       "apps/web/public/**",
       "packages/engine/dist/**",
       "packages/engine/third_party/**",
+      // The vendored TIC-80 checkout (npm run engine:prepare) and the CMake
+      // build trees it produces. Upstream C with JavaScript tooling alongside
+      // it, plus Emscripten output — 1.8k findings, none of them ours, and the
+      // whole tree is gitignored. Without this, preparing the engine makes
+      // `npm run lint` fail on code the repository does not contain.
+      "packages/engine/tic80/**",
+      "packages/engine/build-*/**",
       // Ported game sources: BananaBread/Cube2, WebQuake, js-dos and friends.
       // Vendored upstream JavaScript, much of it Emscripten output — 15k of the
       // 16.4k findings on the first run came from here. Not ours to fix, and
