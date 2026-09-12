@@ -14,8 +14,17 @@ import { withBasePath } from "./staticSite";
  * Models a user can actually author in today. "voxel" is a defined spec but has
  * no built engine, so it is deliberately excluded — an unknown or unsupported
  * value resolves to "classic".
+ *
+ * A model belongs here once its core is built and served (see
+ * `ENGINE_URL_BY_MODEL`); adding one before then would let someone author a
+ * cartridge that cannot boot.
  */
-export const SELECTABLE_MODEL_IDS: readonly ConsoleModelId[] = ["classic", "pro", "portrait"];
+export const SELECTABLE_MODEL_IDS: readonly ConsoleModelId[] = [
+  "classic",
+  "pro",
+  "portrait",
+  "ps1",
+];
 
 export function resolveModelId(value: string | null | undefined): ConsoleModelId {
   return SELECTABLE_MODEL_IDS.includes(value as ConsoleModelId) ? (value as ConsoleModelId) : "classic";

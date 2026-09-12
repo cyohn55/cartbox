@@ -19,7 +19,11 @@ import { describe, expect, it } from "vitest";
 import { PS1_MODEL, type ConsoleModelSpec } from "@cartbox/editor";
 import { MODELS, SOFTWARE_RASTER_CAPS, framebufferBytes, getModel } from "@cartbox/player";
 
-import { SELECTABLE_MODEL_IDS } from "../apps/web/src/lib/consoleModel";
+import {
+  ENGINE_URL_BY_MODEL,
+  SELECTABLE_MODEL_IDS,
+  resolveModelId,
+} from "../apps/web/src/lib/consoleModel";
 
 const ps1 = MODELS.ps1;
 
@@ -167,27 +171,41 @@ describe("the PS1 model's place in the family", () => {
   });
 });
 
-describe("the PS1 model as the home page announces it", () => {
-  // The home page names PS1 in the same list as the models you can create,
-  // but as plain text rather than a link. That is the whole point: the model
-  // is specified, its caps are enforced, and its core is not built — so the
-  // page says so instead of offering a cartridge that could not boot.
+describe("the PS1 model as the home page offers it", () => {
+  // The home page listed PS1 as plain "in development" text for as long as its
+  // core did not exist, because offering it then would have let someone author
+  // a cartridge that could not boot. The core is built and served now, so the
+  // line is a link like every other model's.
   //
-  // These two facts have to move together. The failure they guard is a page
-  // that keeps saying "in development" after the core ships, or an offer to
-  // author in a console that cannot run.
+  // These two facts still have to move together, just in the other direction:
+  // what they guard now is a page still calling the model unfinished after it
+  // shipped, or an offer to author in a console with no core behind it.
   const homePage = readFileSync(
     new URL("../apps/web/src/app/page.tsx", import.meta.url),
     "utf8",
   );
 
-  it("is announced on the home page", () => {
-    expect(homePage).toContain('<AnnouncedModel id="ps1" />');
+  it("is offered on the home page", () => {
+    expect(homePage).toContain('href="/edit/new?model=ps1"');
   });
 
-  it("is not selectable while it is announced as unfinished", () => {
-    // If PS1 ever joins this list, the announcement above is a lie and should
-    // be deleted in the same change that adds it.
-    expect(SELECTABLE_MODEL_IDS).not.toContain("ps1");
+  it("no longer calls itself unfinished", () => {
+    // The stale-notice case: a link and an "in development" label at once.
+    expect(homePage).not.toContain("in development");
+    expect(homePage).not.toContain("AnnouncedModel");
+  });
+
+  it("is selectable, which is what makes that link work", () => {
+    // `resolveModelId` maps anything outside this list to "classic", so without
+    // it the link above would quietly open a Classic cartridge instead.
+    expect(SELECTABLE_MODEL_IDS).toContain("ps1");
+    expect(resolveModelId("ps1")).toBe("ps1");
+  });
+
+  it("has a core of its own to boot, not a fallback", () => {
+    // The reason the model was held back. If this ever resolved to the Classic
+    // core again, every PS1 cart would silently run on a 240x136 4bpp machine.
+    expect(ENGINE_URL_BY_MODEL.ps1).toContain("/engine/ps1/");
+    expect(ENGINE_URL_BY_MODEL.ps1).not.toBe(ENGINE_URL_BY_MODEL.classic);
   });
 });

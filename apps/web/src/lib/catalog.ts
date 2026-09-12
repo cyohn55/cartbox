@@ -75,6 +75,7 @@ export function runtimeForConsoleModel(consoleModel: string): RuntimeId {
   const RUNTIME_BY_MODEL: Record<string, RuntimeId> = {
     pro: "cartbox-pro",
     portrait: "cartbox-portrait",
+    ps1: "cartbox-ps1",
   };
   return RUNTIME_BY_MODEL[consoleModel] ?? "cartbox-classic";
 }

@@ -69,11 +69,11 @@ const migrationSql = readFileSync(MIGRATION_PATH, "utf8");
  * The migration that owns the current `titles.runtime` whitelist. Each addition
  * restates the whole constraint, so this points at the latest one — 0011 fixed
  * it at the runtimes of the time, 0013 caught up the three iframe runtimes, 0015
- * added the portrait core, and 0016 added the OpenTyrian/OpenTTD/Cave Story
- * engines.
+ * added the portrait core, 0016 added the OpenTyrian/OpenTTD/Cave Story engines,
+ * and 0025 added the PS1 core.
  */
 const runtimeMigrationSql = readFileSync(
-  fileURLToPath(new URL("../supabase/migrations/0016_web_engine_runtimes.sql", import.meta.url)),
+  fileURLToPath(new URL("../supabase/migrations/0025_ps1_runtime.sql", import.meta.url)),
   "utf8",
 );
 
@@ -289,6 +289,7 @@ describe("runtime registry", () => {
       "cartbox-classic",
       "cartbox-pro",
       "cartbox-portrait",
+      "cartbox-ps1",
       "wasm-app",
       "scummvm",
       "supertux",

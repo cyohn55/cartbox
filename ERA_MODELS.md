@@ -685,19 +685,28 @@ a core changes what every cart on that model runs on, which is a human decision.
    three cores report three different cartridge memory maps, PS1's sits between
    Classic's and Pro's as its resolution implies, and its music-track packing is
    the eight-channel one.
-2. **Make it selectable** — add `ps1` to `SELECTABLE_MODEL_IDS`. This is now the
-   only thing standing between the model and a creator, and it is held back on
-   purpose: item 4 below has not been done, and until someone has looked at a
-   PS1 cart and judged it, shipping the model would be shipping an untested
-   aesthetic. `ps1-model-spec.test.ts` pins the coupling — the change that adds
-   it here must also delete the home page's "in development" notice.
+2. ~~**Make it selectable**~~ — done. `ps1` is in `SELECTABLE_MODEL_IDS`, the home
+   page offers it as a link rather than a notice, and `cartbox-ps1` is a
+   registered runtime. That last part needed a migration: `titles.runtime` is
+   constrained to a whitelist, and a catalog row naming a runtime missing from it
+   is rejected on insert with no visible error — the omission that once hid
+   SuperTux, Quake and Cube 2 from Browse. **0025 has to be applied to
+   production** (`supabase/migrations/apply-0025-to-prod.sql`); until it is, PS1
+   carts author and play, and only publishing one to the catalog fails.
+
+   Shipping it before item 4 is a deliberate trade: the model cannot be judged
+   without being usable, so it goes out to be looked at rather than waiting to be
+   perfect.
 3. ~~**An editor upload path for textures**~~ — done. The editor's **Files** tab
    uploads, lists and removes assets against the model's budget. It is gated on
-   `assetBudgetBytes > 0`, which today means PS1 alone, so it stays dark until
-   item 2 makes that model selectable. The tab also shows for any cart already
-   storing assets whatever its model, so nothing a cart is paying for can become
-   unreachable.
-4. **Verify the look on real content.** Every era trait is unit-tested as a
-   descriptor and as rasteriser behaviour, but nobody has yet looked at a PS1
-   cart and judged whether it reads as the era. That is the test that matters
-   and it cannot be automated.
+   `assetBudgetBytes > 0`, which today means PS1 alone — so with item 2 done it is
+   now reachable: open a PS1 cart and the More menu carries **Files**, showing
+   `0 B of 660 MB`. The tab also shows for any cart already storing assets
+   whatever its model, so nothing a cart is paying for can become unreachable.
+4. **Verify the look on real content.** The only item left, and now the only one
+   that matters. Every era trait is unit-tested as a descriptor and as rasteriser
+   behaviour, and the core is proven to be compiled at the PS1 spec rather than
+   Classic under another name — but none of that is evidence about how a PS1 cart
+   *looks*. Nobody has built one and judged whether it reads as the era. That
+   test cannot be automated, and the model is selectable now precisely so it can
+   be taken.
