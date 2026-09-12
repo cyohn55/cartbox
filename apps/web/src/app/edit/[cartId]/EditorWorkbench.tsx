@@ -210,14 +210,16 @@ export function EditorWorkbench({
     );
   }
 
-  // A brand-new cart (no stored bytes) opened on a starter that ships a collision
-  // layer — the Platformer — gets that layer as its initial collision, so its
-  // cartbox.solid physics works the moment it opens. A saved cart keeps its own
-  // (which is null here for a starter that authors none).
-  const starterCollision = cartUrl ? null : resolveStarter(starterId).collision ?? null;
+  // A brand-new cart (no stored bytes) opened on a starter that ships a sidecar
+  // gets it as that cart's initial content, so the starter works the moment it
+  // opens: the Platformer's cartbox.solid physics needs its collision layer, and
+  // the PS1 test scene *is* its mesh — without this it would open on an empty 3D
+  // stage. A saved cart keeps its own (null here for a starter that ships none).
+  const starter = cartUrl ? null : resolveStarter(starterId);
   const seeded: Sidecars = {
     ...initialSidecars,
-    collision: initialSidecars.collision ?? starterCollision,
+    collision: initialSidecars.collision ?? starter?.collision ?? null,
+    mesh: initialSidecars.mesh ?? starter?.mesh ?? null,
   };
 
   return (
@@ -1144,6 +1146,7 @@ function WorkbenchBody({
         <RunOverlay
           bytes={runBytes}
           engineUrl={engineUrl}
+          modelId={modelId}
           cartName={details.title || cartName}
           postFx={fx}
           scene={scene ?? undefined}

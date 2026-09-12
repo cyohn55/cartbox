@@ -35,6 +35,12 @@ export {
   type ParallaxLayer,
 } from "./model/parallaxSeed";
 export {
+  seedPs1Cart,
+  PS1_CODE,
+  PS1_MESH_SIDECAR,
+  PS1_SCENE_TRIANGLES,
+} from "./model/ps1Seed";
+export {
   CART_STARTERS,
   DEFAULT_STARTER_ID,
   STARTER_IDS,
