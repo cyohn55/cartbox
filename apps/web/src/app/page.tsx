@@ -24,13 +24,14 @@ export default function HomePage() {
         </Link>
       </p>
       <p>
+        {/*
+          One link per model, like every other row. It carries no ?starter=
+          because the model now chooses its own (see defaultStarterForModel) —
+          two adjacent PS1 links, one of which quietly opened Classic's 2D ring
+          demo, is what made this row confusing in the first place.
+        */}
         <Link href="/edit/new?model=ps1">
-          Create a PS1 cartridge — 320×240, 256 colors, textured 3D →
-        </Link>
-      </p>
-      <p>
-        <Link href="/edit/new?model=ps1&starter=ps1">
-          Open the PS1 test scene — textured 3D, swimming floor, jittering edges →
+          Create a PS1 cartridge — 320×240 textured 3D, swimming floor, jittering edges →
         </Link>
       </p>
       <p>

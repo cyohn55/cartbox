@@ -27,6 +27,12 @@ import {
 } from "@cartbox/editor";
 import { MODELS, parseMeshScene } from "@cartbox/player";
 
+import {
+  DEFAULT_STARTER_ID,
+  defaultStarterForModel,
+  resolveStarterId,
+} from "../apps/web/src/lib/starter";
+
 const ps1 = MODELS.ps1;
 
 describe("the PS1 starter", () => {
@@ -107,5 +113,52 @@ describe("the editor's playtest", () => {
     // Both halves matter: a prop the overlay accepts and nobody passes is the
     // same bug with an extra step.
     expect(workbench).toContain("modelId={modelId}");
+  });
+});
+
+describe("what a fresh PS1 cart opens on", () => {
+  /**
+   * The bug this closes: the home page offered "Create a PS1 cartridge —
+   * textured 3D" at `?model=ps1`, and a cart with no `?starter=` fell back to
+   * DEFAULT_STARTER_ID — the ring-runner demo, which is *Classic's* starter. So
+   * the link promising textured 3D opened a spinning 2D ring, on the right core
+   * and with the right caps, but with nothing 3D in it. A blank cart has no
+   * geometry, and the only starter carrying any is the PS1 one.
+   */
+  it("is the PS1 scene, not Classic's ring demo", () => {
+    expect(defaultStarterForModel("ps1")).toBe("ps1");
+    expect(defaultStarterForModel("ps1")).not.toBe(DEFAULT_STARTER_ID);
+  });
+
+  it("leaves every other model on the shared default", () => {
+    // The rule is per-model, not "3D models get something else": Classic, Pro
+    // and Portrait all still open on the demo they always did.
+    for (const model of ["classic", "pro", "portrait", "voxel"]) {
+      expect(defaultStarterForModel(model), model).toBe(DEFAULT_STARTER_ID);
+    }
+  });
+
+  it("names a starter that actually exists", () => {
+    // A default pointing at an unregistered id would resolve straight back to
+    // the demo, reintroducing the bug silently.
+    for (const model of ["classic", "pro", "portrait", "voxel", "ps1"]) {
+      const id = defaultStarterForModel(model);
+      expect(resolveStarter(id).id, model).toBe(id);
+    }
+  });
+
+  it("still lets a creator ask for an empty PS1 cart", () => {
+    // The default is a default, not a lock: ?starter=demo must survive.
+    expect(resolveStarterId("demo")).toBe("demo");
+  });
+
+  it("is offered by the home page as a single link", () => {
+    // Two adjacent PS1 links — one with the starter, one without — is what sent
+    // a creator to the ring. One row per model, like every other model.
+    const homePage = readFileSync(
+      new URL("../apps/web/src/app/page.tsx", import.meta.url),
+      "utf8",
+    );
+    expect([...homePage.matchAll(/href="\/edit\/new\?model=ps1[^"]*"/g)]).toHaveLength(1);
   });
 });
