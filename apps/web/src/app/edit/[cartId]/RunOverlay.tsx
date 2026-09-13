@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { mount, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ParticleSpec, type PlayerHandle, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
+import { mount, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
 
 import styles from "./editor.module.css";
 import { errorLineFrom } from "./codeTools";
@@ -17,6 +17,17 @@ import { errorLineFrom } from "./codeTools";
 interface RunOverlayProps {
   bytes: Uint8Array;
   engineUrl: string;
+  /**
+   * The cart's console model.
+   *
+   * Not optional, and not derivable from `engineUrl`. The player reads its
+   * frame geometry, palette size and render caps from the model, and defaults
+   * to Classic when given none — so omitting this loaded the right *core* and
+   * then read its output at 240x136 with Classic's caps. A Pro, Portrait or PS1
+   * cart playtested that way is garbled: the frame is sampled at the wrong
+   * stride, and the era caps that make a model look like itself never apply.
+   */
+  modelId: ModelId;
   cartName: string;
   /** The cart's post-processing stack, applied live during the playtest. */
   postFx?: PostFxSettings;
@@ -43,7 +54,7 @@ interface RunOverlayProps {
   onClose: () => void;
 }
 
-export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, particles, collision, flags, mesh, world, onGoToLine, onClose }: RunOverlayProps) {
+export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene, anim, particles, collision, flags, mesh, world, onGoToLine, onClose }: RunOverlayProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<PlayerHandle | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
@@ -87,6 +98,8 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
     const handle = mount(stage, {
       cartUrl: url,
       engineUrl,
+      // Playtest at the cart's own geometry and caps, not Classic's.
+      modelId,
       autostart: true,
       record: false,
       controls: "auto",
@@ -129,7 +142,7 @@ export function RunOverlay({ bytes, engineUrl, cartName, postFx, scene, anim, pa
       handle.destroy();
       URL.revokeObjectURL(url);
     };
-  }, [bytes, engineUrl, postFx, scene, anim, particles, collision, flags, mesh, world]);
+  }, [bytes, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, world]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {

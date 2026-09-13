@@ -29,6 +29,11 @@ export default function HomePage() {
         </Link>
       </p>
       <p>
+        <Link href="/edit/new?model=ps1&starter=ps1">
+          Open the PS1 test scene — textured 3D, swimming floor, jittering edges →
+        </Link>
+      </p>
+      <p>
         <Link href="/edit/new?starter=parallax">Create a parallax scene — three scrolling map layers →</Link>
       </p>
       <p>

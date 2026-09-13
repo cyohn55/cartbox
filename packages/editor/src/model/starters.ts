@@ -11,6 +11,7 @@ import type { CollisionData } from "./CollisionMap";
 import { seedDemoCart } from "./seed";
 import { seedParallaxDemoCart } from "./parallaxSeed";
 import { seedPlatformerCart, PLATFORMER_COLLISION } from "./platformerSeed";
+import { seedPs1Cart, PS1_MESH_SIDECAR } from "./ps1Seed";
 
 /** Applies starter content to a cart's engine, in place. */
 type SeedFunction = (engine: CartEngine) => void;
@@ -30,6 +31,16 @@ interface CartStarter {
    * it). Absent for starters that author no collision.
    */
   readonly collision?: CollisionData;
+  /**
+   * A mesh sidecar the editor loads for a brand-new cart of this starter, for
+   * the same reason `collision` exists: the starter's content is not all inside
+   * the cartridge. The PS1 test scene is geometry, which lives beside the cart —
+   * so without this a fresh PS1 cart would open on an empty 3D stage.
+   *
+   * Stored already-serialised (the `meshSidecar.ts` envelope) because that is
+   * what the sidecar column holds and what the runtime parses.
+   */
+  readonly mesh?: string;
 }
 
 // Typed as a non-empty tuple so index 0 (the default) is statically known to
@@ -53,6 +64,13 @@ export const CART_STARTERS: readonly [CartStarter, ...CartStarter[]] = [
     description: "Run and jump on a collision layer — a worked cartbox.solid example.",
     seed: seedPlatformerCart,
     collision: PLATFORMER_COLLISION,
+  },
+  {
+    id: "ps1",
+    label: "PS1 test scene",
+    description: "Textured 3D on the PS1 core — swimming floor, jittering edges, no depth buffer.",
+    seed: seedPs1Cart,
+    mesh: PS1_MESH_SIDECAR,
   },
 ];
 
