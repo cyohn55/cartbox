@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
 import { redirect } from "next/navigation";
 
 import { resolveModelId } from "@/lib/consoleModel";
-import { resolveStarterId, DEFAULT_STARTER_ID } from "@/lib/starter";
+import { resolveStarterId, defaultStarterForModel, DEFAULT_STARTER_ID } from "@/lib/starter";
 import { isStaticExport } from "@/lib/staticSite";
 import { StaticNewCartRedirect } from "./StaticNewCartRedirect";
 
@@ -33,7 +33,9 @@ export default function NewCartPage({ searchParams }: NewCartPageProps) {
 
 function mintCartAndRedirect(searchParams: NewCartPageProps["searchParams"]): never {
   const modelId = resolveModelId(searchParams.model);
-  const starterId = resolveStarterId(searchParams.starter);
+  // An explicit ?starter= wins; otherwise the model picks its own, so a PS1 cart
+  // does not open on Classic's 2D ring demo.
+  const starterId = resolveStarterId(searchParams.starter ?? defaultStarterForModel(modelId));
   // Carry only non-default choices onto the fresh cart's URL, so the common
   // case (classic model, demo starter) stays a clean, param-free URL.
   const params = new URLSearchParams();
