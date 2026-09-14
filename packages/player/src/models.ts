@@ -148,7 +148,12 @@ export const MODELS: Record<ModelId, ConsoleModel> = {
     sampleRate: 44100,
     paletteSize: 16,
     cartSizeBytes: 64 * 1024,
-    engineUrl: "/engine/classic/tic80.js",
+    // The classic core ships at /engine/tic80.js (not a /classic/ subdirectory
+    // like the later models). The web app already loads it from here via
+    // ENGINE_URL_BY_MODEL; this default was pointing at a path that has never
+    // existed, so any caller that mounted a classic cart without an explicit
+    // engineUrl override got a 404.
+    engineUrl: "/engine/tic80.js",
     inputs: ["gamepad", "mouse", "keyboard"],
     renderCaps: SOFTWARE_RASTER_CAPS,
     assetBudgetBytes: 0,
@@ -212,7 +217,11 @@ export const MODELS: Record<ModelId, ConsoleModel> = {
     sampleRate: 44100,
     paletteSize: 256,
     cartSizeBytes: 2 * 1024 * 1024,
-    engineUrl: "/engine/voxel/engine.js",
+    // No voxel core is built yet, so /engine/voxel/engine.js does not exist —
+    // pointing here would 404. Fall back to the classic core, matching the web
+    // app's ENGINE_URL_BY_MODEL, which is why voxel is not offered as a
+    // selectable model. Replace this with the real core once it is built.
+    engineUrl: "/engine/tic80.js",
     inputs: ["gamepad", "mouse"],
     renderCaps: SOFTWARE_RASTER_CAPS,
     assetBudgetBytes: 0,
