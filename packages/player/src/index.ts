@@ -23,6 +23,7 @@ export type {
 } from "./types.js";
 export { ConsoleButton } from "./types.js";
 export { CartridgeLoadError } from "./cartridge.js";
+export { EngineLoadError } from "./engine.js";
 
 // Keyboard binding table. Exposed so hosts that render their own physical
 // controls (e.g. the handheld console shell) can synthesize key events that

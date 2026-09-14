@@ -2566,6 +2566,13 @@ function readCString(heap, ptr) {
   return new TextDecoder().decode(heap.subarray(ptr, end));
 }
 var moduleCache = /* @__PURE__ */ new Map();
+var EngineLoadError = class extends Error {
+  constructor(message, cause) {
+    super(message);
+    this.cause = cause;
+    this.name = "EngineLoadError";
+  }
+};
 async function loadEngineModule(engineUrl) {
   const cached = moduleCache.get(engineUrl);
   if (cached) {
@@ -2577,7 +2584,7 @@ async function loadEngineModule(engineUrl) {
     engineUrl
   ).then((glue) => glue.default()).catch((error) => {
     moduleCache.delete(engineUrl);
-    throw error;
+    throw new EngineLoadError(`Failed to load the engine module at ${engineUrl}`, error);
   });
   moduleCache.set(engineUrl, pending);
   return pending;
@@ -6000,6 +6007,7 @@ export {
   DEFAULT_LIGHT,
   DEFAULT_MODEL_ID,
   EVENT_CAPACITY,
+  EngineLoadError,
   HEIGHT_WORLD,
   LIGHTS_BASE,
   LIGHTS_CAPACITY,
