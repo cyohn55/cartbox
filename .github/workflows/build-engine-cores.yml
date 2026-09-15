@@ -80,7 +80,13 @@ jobs:
       - name: Set up Emscripten
         uses: mymindstorm/setup-emsdk@v14
         with:
-          version: 6.0.2
+          # 3.1.64, not the latest: Emscripten 4.x/6.x MODULARIZE+EXPORT_ES6
+          # output uses a bare top-level `async function` factory and an
+          # `import("node:module")` scheme import that older WebKit (iPad Safari)
+          # cannot load — a PS1 cart built with 6.0.2 failed with a bare
+          # "Type error" on load, while the classic/pro/portrait cores (all
+          # built on 3.1.x) loaded fine. 3.1.64 reproduces their glue shape.
+          version: 3.1.64
           actions-cache-folder: emsdk-cache-engine
 
       - name: Build the core

@@ -16,6 +16,12 @@
 # overscan buffer, the smallest power of two that contains 320 with margin.
 #
 # Prerequisites: Emscripten SDK on PATH (emcc, emcmake); TIC-80 submodule present.
+#
+# Use Emscripten 3.1.x (the repo pins 3.1.64), NOT 4.x/6.x. The newer toolchain's
+# MODULARIZE+EXPORT_ES6 output — a bare `async function` factory plus an
+# `import("node:module")` scheme import — fails to load on older WebKit (iPad
+# Safari) with a bare "Type error". The shipped classic/pro/portrait cores are
+# all 3.1.x; a PS1 core must match so it loads everywhere they do.
 set -euo pipefail
 
 ENGINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
