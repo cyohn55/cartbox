@@ -100,6 +100,20 @@ function readCString(heap: Uint8Array, ptr: number): string {
  */
 const moduleCache = new Map<string, Promise<EmscriptenModule>>();
 
+/**
+ * An engine module that could not be fetched or instantiated.
+ *
+ * Mirrors {@link CartridgeLoadError}: a named error carrying the URL that
+ * failed, so a load failure reads as "which engine, and where" rather than as
+ * whatever bare message the platform happened to throw.
+ */
+export class EngineLoadError extends Error {
+  constructor(message: string, readonly cause?: unknown) {
+    super(message);
+    this.name = "EngineLoadError";
+  }
+}
+
 export async function loadEngineModule(engineUrl: string): Promise<EmscriptenModule> {
   const cached = moduleCache.get(engineUrl);
   if (cached) {
@@ -108,9 +122,20 @@ export async function loadEngineModule(engineUrl: string): Promise<EmscriptenMod
 
   const pending = import(/* @vite-ignore */ /* webpackIgnore: true */ engineUrl)
     .then((glue: { default: EmscriptenFactory }) => glue.default())
-    .catch((error) => {
+    .catch((error: unknown) => {
       moduleCache.delete(engineUrl); // let a later attempt retry a failed load
-      throw error;
+      // Rethrowing raw loses the one fact that matters. A dynamic import that
+      // cannot fetch its module rejects with the platform's bare network error —
+      // WebKit's is literally `TypeError: Type error` — so the player surfaced
+      // "Failed to load: Type error" with no hint that an *engine* was missing,
+      // let alone which one. That cost a real debugging session: the message was
+      // indistinguishable from a dozen other failures, on a device whose console
+      // was not reachable.
+      //
+      // `fetchCartridge` already wraps its network failures with the URL for
+      // exactly this reason; this is the same treatment for the other half of
+      // the load. The original is kept as `cause`.
+      throw new EngineLoadError(`Failed to load the engine module at ${engineUrl}`, error);
     });
 
   moduleCache.set(engineUrl, pending);

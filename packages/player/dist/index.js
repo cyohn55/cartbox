@@ -2434,7 +2434,12 @@ var MODELS = {
     sampleRate: 44100,
     paletteSize: 16,
     cartSizeBytes: 64 * 1024,
-    engineUrl: "/engine/classic/tic80.js",
+    // The classic core ships at /engine/tic80.js (not a /classic/ subdirectory
+    // like the later models). The web app already loads it from here via
+    // ENGINE_URL_BY_MODEL; this default was pointing at a path that has never
+    // existed, so any caller that mounted a classic cart without an explicit
+    // engineUrl override got a 404.
+    engineUrl: "/engine/tic80.js",
     inputs: ["gamepad", "mouse", "keyboard"],
     renderCaps: SOFTWARE_RASTER_CAPS,
     assetBudgetBytes: 0
@@ -2498,7 +2503,11 @@ var MODELS = {
     sampleRate: 44100,
     paletteSize: 256,
     cartSizeBytes: 2 * 1024 * 1024,
-    engineUrl: "/engine/voxel/engine.js",
+    // No voxel core is built yet, so /engine/voxel/engine.js does not exist —
+    // pointing here would 404. Fall back to the classic core, matching the web
+    // app's ENGINE_URL_BY_MODEL, which is why voxel is not offered as a
+    // selectable model. Replace this with the real core once it is built.
+    engineUrl: "/engine/tic80.js",
     inputs: ["gamepad", "mouse"],
     renderCaps: SOFTWARE_RASTER_CAPS,
     assetBudgetBytes: 0
@@ -2566,6 +2575,13 @@ function readCString(heap, ptr) {
   return new TextDecoder().decode(heap.subarray(ptr, end));
 }
 var moduleCache = /* @__PURE__ */ new Map();
+var EngineLoadError = class extends Error {
+  constructor(message, cause) {
+    super(message);
+    this.cause = cause;
+    this.name = "EngineLoadError";
+  }
+};
 async function loadEngineModule(engineUrl) {
   const cached = moduleCache.get(engineUrl);
   if (cached) {
@@ -2577,7 +2593,7 @@ async function loadEngineModule(engineUrl) {
     engineUrl
   ).then((glue) => glue.default()).catch((error) => {
     moduleCache.delete(engineUrl);
-    throw error;
+    throw new EngineLoadError(`Failed to load the engine module at ${engineUrl}`, error);
   });
   moduleCache.set(engineUrl, pending);
   return pending;
@@ -6000,6 +6016,7 @@ export {
   DEFAULT_LIGHT,
   DEFAULT_MODEL_ID,
   EVENT_CAPACITY,
+  EngineLoadError,
   HEIGHT_WORLD,
   LIGHTS_BASE,
   LIGHTS_CAPACITY,
