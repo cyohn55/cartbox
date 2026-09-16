@@ -73,7 +73,7 @@ const migrationSql = readFileSync(MIGRATION_PATH, "utf8");
  * and 0025 added the PS1 core.
  */
 const runtimeMigrationSql = readFileSync(
-  fileURLToPath(new URL("../supabase/migrations/0025_ps1_runtime.sql", import.meta.url)),
+  fileURLToPath(new URL("../supabase/migrations/0026_n64_xbox360_runtimes.sql", import.meta.url)),
   "utf8",
 );
 
@@ -290,6 +290,8 @@ describe("runtime registry", () => {
       "cartbox-pro",
       "cartbox-portrait",
       "cartbox-ps1",
+      "cartbox-n64",
+      "cartbox-xbox360",
       "wasm-app",
       "scummvm",
       "supertux",

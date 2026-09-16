@@ -33,7 +33,15 @@ describe("console model registry", () => {
   });
 
   it("registers every model the family declares", () => {
-    expect(Object.keys(CONSOLE_MODELS).sort()).toEqual(["classic", "portrait", "pro", "ps1", "voxel"]);
+    expect(Object.keys(CONSOLE_MODELS).sort()).toEqual([
+      "classic",
+      "n64",
+      "portrait",
+      "pro",
+      "ps1",
+      "voxel",
+      "xbox360",
+    ]);
     expect(CONSOLE_MODELS.pro.paletteSize).toBeGreaterThan(CLASSIC_MODEL.paletteSize);
   });
 

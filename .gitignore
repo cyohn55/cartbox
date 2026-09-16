@@ -24,6 +24,8 @@ packages/engine/build-wasm/
 packages/engine/build-wasm-pro/
 packages/engine/build-wasm-portrait/
 packages/engine/build-wasm-ps1/
+packages/engine/build-wasm-n64/
+packages/engine/build-wasm-xbox360/
 packages/engine/build-native/
 packages/engine/dist.bak/
 

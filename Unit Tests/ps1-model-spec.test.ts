@@ -119,8 +119,14 @@ describe("the PS1 asset budget", () => {
     // The whole reason a 3D era model is possible: geometry and textures do not
     // fit in a cartridge at any resolution, so they live in the asset store.
     expect(ps1.assetBudgetBytes).toBeGreaterThan(0);
+    // The budget belongs to the 3D era models, whose geometry and textures
+    // cannot fit in a cartridge; every 2D/cartridge model stays at 0.
+    const BUDGETED = new Set(["ps1", "n64", "xbox360"]);
     for (const model of Object.values(MODELS)) {
-      if (model.id === "ps1") continue;
+      if (BUDGETED.has(model.id)) {
+        expect(model.assetBudgetBytes, `${model.id}`).toBeGreaterThan(0);
+        continue;
+      }
       expect(model.assetBudgetBytes, `${model.id} should still be cartridge-only`).toBe(0);
     }
   });
@@ -157,8 +163,11 @@ describe("the PS1 model's place in the family", () => {
     expect(ps1.kind).toBe("poly3d");
     // And it is the only one: adding a second without noticing would mean two
     // eras sharing one spec by accident.
+    // PS1 was the first triangle-scene model; N64 and Xbox 360 joined it. They
+    // share the kind because they share the rendering *path* (the mesh/world
+    // overlays); what separates the eras is renderCaps, not kind.
     const poly = Object.values(MODELS).filter((m) => m.kind === "poly3d");
-    expect(poly.map((m) => m.id)).toEqual(["ps1"]);
+    expect(poly.map((m) => m.id).sort()).toEqual(["n64", "ps1", "xbox360"]);
   });
 
   it("keeps the 8-bit model untouched", () => {

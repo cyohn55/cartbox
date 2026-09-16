@@ -10,7 +10,7 @@
  * live in @cartbox/player's model registry, which these mirror.
  */
 
-export type ConsoleModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1";
+export type ConsoleModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1" | "n64" | "xbox360";
 export type RasterKind = "raster2d" | "voxel3d" | "poly3d";
 
 export interface ConsoleModelSpec {
@@ -184,10 +184,55 @@ export const PS1_MODEL: ConsoleModelSpec = {
   screenHeight: 30,
 };
 
+// The N64 shares the PS1's 320x240 authoring frame — the generations differed in
+// how they rendered, not in pixels, and that difference lives in the player's
+// renderCaps (a z-buffer, perspective correction, a 4KB texture cache), not in
+// the editor's 2D authoring surface. So the 2D spec here is deliberately the
+// PS1's; the era's character is elsewhere.
+export const N64_MODEL: ConsoleModelSpec = {
+  id: "n64",
+  label: "N64",
+  kind: "poly3d",
+  width: 320,
+  height: 240,
+  tileSize: 8,
+  tilePixelBits: 8,
+  paletteSize: 256,
+  tilesPerPage: 256,
+  spritePages: 2,
+  sheetCols: 16,
+  mapWidth: 320,
+  mapHeight: 240,
+  screenWidth: 40,
+  screenHeight: 30,
+};
+
+// 1280x720, the 360's HD frame. Divides the 8px tile grid exactly (160x90), so
+// the map editor's last row and column stay addressable.
+export const XBOX360_MODEL: ConsoleModelSpec = {
+  id: "xbox360",
+  label: "Xbox 360",
+  kind: "poly3d",
+  width: 1280,
+  height: 720,
+  tileSize: 8,
+  tilePixelBits: 8,
+  paletteSize: 256,
+  tilesPerPage: 256,
+  spritePages: 2,
+  sheetCols: 16,
+  mapWidth: 1280,
+  mapHeight: 720,
+  screenWidth: 160,
+  screenHeight: 90,
+};
+
 export const CONSOLE_MODELS: Record<ConsoleModelId, ConsoleModelSpec> = {
   classic: CLASSIC_MODEL,
   pro: PRO_MODEL,
   portrait: PORTRAIT_MODEL,
   voxel: VOXEL_MODEL,
   ps1: PS1_MODEL,
+  n64: N64_MODEL,
+  xbox360: XBOX360_MODEL,
 };

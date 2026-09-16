@@ -35,6 +35,16 @@ export default function HomePage() {
         </Link>
       </p>
       <p>
+        <Link href="/edit/new?model=n64">
+          Create an N64 cartridge — 320×240 filtered 3D, z-buffer, 4KB textures →
+        </Link>
+      </p>
+      <p>
+        <Link href="/edit/new?model=xbox360">
+          Create an Xbox 360 cartridge — 1280×720 HD, the modern render tier →
+        </Link>
+      </p>
+      <p>
         <Link href="/edit/new?starter=parallax">Create a parallax scene — three scrolling map layers →</Link>
       </p>
       <p>

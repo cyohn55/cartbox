@@ -39,11 +39,12 @@ describe("RenderCaps", () => {
     // identical caps are correct rather than lazy. This fails the day one of
     // their renderers diverges without its descriptor following.
     //
-    // PS1 is the deliberate exception, and the exclusion is what makes it one:
-    // an era model that quietly matched these caps would render like every
-    // other model while claiming a period. Its own spec test pins the
-    // difference (see ps1-model-spec.test.ts).
-    for (const model of models.filter((m) => m.id !== "ps1")) {
+    // The era models (kind "poly3d": PS1, N64, Xbox 360) are the deliberate
+    // exceptions, and the exclusion is what makes them ones: an era model that
+    // quietly matched these caps would render like every other model while
+    // claiming a period. Their own spec tests pin the differences (see
+    // ps1-model-spec.test.ts and n64-xbox360-models.test.ts).
+    for (const model of models.filter((m) => m.kind !== "poly3d")) {
       expect(model.renderCaps, `${model.id}`).toEqual(SOFTWARE_RASTER_CAPS);
     }
     expect(SOFTWARE_RASTER_CAPS.zBuffer).toBe(true);
@@ -54,7 +55,7 @@ describe("RenderCaps", () => {
   it("treats zero budgets as unbounded rather than as a ban", () => {
     // 0 means "no ceiling", so a model that enforces nothing must not read as a
     // model that forbids everything.
-    for (const model of models.filter((m) => m.id !== "ps1")) {
+    for (const model of models.filter((m) => m.kind !== "poly3d")) {
       expect(model.renderCaps.textureCacheBytes).toBe(0);
       expect(model.renderCaps.polyBudget).toBe(0);
     }

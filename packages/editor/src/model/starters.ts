@@ -11,7 +11,7 @@ import type { CollisionData } from "./CollisionMap";
 import { seedDemoCart } from "./seed";
 import { seedParallaxDemoCart } from "./parallaxSeed";
 import { seedPlatformerCart, PLATFORMER_COLLISION } from "./platformerSeed";
-import { seedPs1Cart, PS1_MESH_SIDECAR } from "./ps1Seed";
+import { seedPs1Cart, seedN64Cart, seedXbox360Cart, PS1_MESH_SIDECAR } from "./ps1Seed";
 
 /** Applies starter content to a cart's engine, in place. */
 type SeedFunction = (engine: CartEngine) => void;
@@ -70,6 +70,22 @@ export const CART_STARTERS: readonly [CartStarter, ...CartStarter[]] = [
     label: "PS1 test scene",
     description: "Textured 3D on the PS1 core — swimming floor, jittering edges, no depth buffer.",
     seed: seedPs1Cart,
+    mesh: PS1_MESH_SIDECAR,
+  },
+  {
+    id: "n64",
+    label: "N64 test scene",
+    description: "The same scene on the N64 core — depth-buffered, perspective-correct, filtered, 4KB textures.",
+    seed: seedN64Cart,
+    // Deliberately the same geometry as the PS1 scene, so the era's rendering
+    // rules are the only difference a creator sees.
+    mesh: PS1_MESH_SIDECAR,
+  },
+  {
+    id: "xbox360",
+    label: "Xbox 360 test scene",
+    description: "The same scene at 720p on the modern render path — the general-engine tier.",
+    seed: seedXbox360Cart,
     mesh: PS1_MESH_SIDECAR,
   },
 ];

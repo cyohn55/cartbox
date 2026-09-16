@@ -7,7 +7,7 @@
  */
 
 /** Starter ids a fresh cart can open on. Must stay in sync with CART_STARTERS. */
-const SELECTABLE_STARTER_IDS = ["demo", "parallax", "platformer", "ps1"] as const;
+const SELECTABLE_STARTER_IDS = ["demo", "parallax", "platformer", "ps1", "n64", "xbox360"] as const;
 
 export type StarterId = (typeof SELECTABLE_STARTER_IDS)[number];
 
@@ -34,5 +34,15 @@ export function resolveStarterId(value: string | null | undefined): StarterId {
  * with `?starter=demo`.
  */
 export function defaultStarterForModel(modelId: string): StarterId {
-  return modelId === "ps1" ? "ps1" : DEFAULT_STARTER_ID;
+  // Each 3D era model opens on its own test scene, not the ring-runner demo
+  // (which is Classic's 2D starter). A fresh cart carries no geometry, so
+  // without this a 320x240/720p textured console would open on a 2D sprite —
+  // the exact mismatch the PS1 default fixed, now generalised to every poly3d
+  // model. The ids match the starter ids in @cartbox/editor's CART_STARTERS.
+  const perModel: Record<string, StarterId> = {
+    ps1: "ps1",
+    n64: "n64",
+    xbox360: "xbox360",
+  };
+  return perModel[modelId] ?? DEFAULT_STARTER_ID;
 }

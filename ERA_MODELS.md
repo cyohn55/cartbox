@@ -76,6 +76,17 @@ hardware generations.
 
 Neither needs free-form toggles. Both fit the doctrine in §1 exactly.
 
+> **Status — shipped.** Both are built, selectable, and served. N64 is
+> `MODELS.n64` (320x240, `N64_RASTER_CAPS`: z-buffer, perspective-correct,
+> trilinear, the **4KB texture cache** enforced by `fitTextureToBudget`, float
+> vertices, a 64MB cartridge budget). Its caps make `webgpuCanHonour` true, so
+> it renders on the GPU where present and the software rasteriser otherwise —
+> the tier renderCaps.ts always said the GPU was for. Its core is a 3.1.x
+> Emscripten build sharing the PS1's 320x240 spec (`build-n64-wasm.sh`); the era
+> is entirely in the caps. **Still fixed-function-only:** fog — the era's other
+> signature, for hiding draw distance — has no cap field yet and is not
+> modelled, the one N64 row above the runtime does not yet honour.
+
 ### Xbox 360 — not console-shaped
 
 The 360's defining feature is **programmable shaders** — unified shader
@@ -102,6 +113,21 @@ Note that the ladder stops at the last *era*, and an era is by definition a
 historical ceiling. A model that targets the best the web can do today is not an
 era model at all; it is a different kind of tier, and it needs stating
 separately — see §7.
+
+> **Status — shipped, with its defining feature still to build.** `MODELS.xbox360`
+> exists (1280x720, `XBOX360_RASTER_CAPS`), is selectable, and has its own 720p
+> 3.1.x core (`build-xbox360-wasm.sh`). It lifts both per-frame budgets — the
+> costume this section warns about, worn deliberately. **Its defining trait,
+> programmable shaders, is deliberately not claimed yet:** `programmableShaders`
+> stays `false` because there is no shader-authoring surface to consume it, so
+> today a 360 cart renders on the same modern path as a high-end N64 one, and the
+> platform's fixed-spec guarantee (§4) still holds for every shipping model.
+> Setting the flag before the pipeline exists would claim a capability nothing
+> honours and dissolve that guarantee for no gain; it flips the day the pipeline
+> lands. That authoring pipeline — a shader editor and a sandboxed WGSL/HLSL
+> compile path — is the tier's real remaining work, and it is exactly the
+> "general engine" build this section predicted, not an era model's finishing
+> touches.
 
 ---
 

@@ -26,7 +26,7 @@ on:
         description: Which core to build
         type: choice
         default: ps1
-        options: [ps1, pro, portrait, wasm]
+        options: [ps1, n64, xbox360, pro, portrait, wasm]
   push:
     branches: [main]
     paths:
