@@ -332,10 +332,11 @@ export function seedPs1Cart(engine: CartEngine): void {
 }
 
 /**
- * The dusk palette every era test scene shares: the geometry's colour comes from
- * its texture, so a cart needs only a sky, a horizon band and legible caption
- * ink. Shared by the PS1/N64/360 seeds because the scene is deliberately the
- * same across eras — only the rendering rules differ.
+ * The PS1 scene's dusk palette: the geometry's colour comes from its texture, so
+ * the cart needs only a sky, a horizon band and legible caption ink. The N64 and
+ * 360 starters set their own, brighter and hazier palettes — see n64Seed.ts and
+ * xbox360Seed.ts — because those carts represent their eras rather than A/B-test
+ * this one's geometry.
  */
 function applyDuskPalette(engine: CartEngine): void {
   const entries: ReadonlyArray<readonly [number, string]> = [
@@ -350,77 +351,4 @@ function applyDuskPalette(engine: CartEngine): void {
     const b = parseInt(hex.slice(5, 7), 16);
     engine.setPaletteColor(index, r, g, b);
   }
-}
-
-/**
- * The N64 test scene: the *same* geometry as the PS1 one, on the same 320x240
- * frame, so the two carts differ only in how the player rasterises them. Where
- * the PS1 caption says to watch the floor swim, this one says to watch it hold
- * still and blur — the N64 has the depth buffer, perspective correction and
- * filtering the PS1 lacked, and pays for it with a 4KB texture cache. Placing
- * the two side by side is the clearest way to see what renderCaps actually do.
- */
-export const N64_CODE = `-- title:  N64 test scene
--- author: you
--- desc:   an era check -- watch the floor hold still and blur
--- script: lua
-
--- Same mesh sidecar as the PS1 scene; only the model's renderCaps differ. This
--- code owns the sky, the caption and the camera.
-
-local t = 0
-local PITCH = 0.42
-local DIST  = 11.0
-
-function TIC()
- t = t + 1
- cls(1)
- rect(0, 104, 320, 136, 2)
- cartbox.meshcam(t / 260, PITCH, DIST, 0)
- print("N64 -- 320x240, filtered 3D", 6, 6, 12)
- print("z-buffer . perspective . 4KB textures", 6, 16, 13)
- print("watch: stable, filtered -- textures blur", 6, 92, 13)
-end
-`;
-
-export function seedN64Cart(engine: CartEngine): void {
-  engine.setLanguage("lua");
-  engine.setCode(N64_CODE);
-  applyDuskPalette(engine);
-}
-
-/**
- * The Xbox 360 test scene: the same geometry again, on the 1280x720 HD frame,
- * with the 2D overlay coordinates scaled to match. Its caption is honest about
- * what the tier is — the modern render path with no era artefacts to point at,
- * because the 360's defining feature (programmable shaders) is not a limitation
- * to reproduce. See ERA_MODELS.md.
- */
-export const XBOX360_CODE = `-- title:  Xbox 360 test scene
--- author: you
--- desc:   the modern tier -- 720p, no era artefacts
--- script: lua
-
--- Same mesh sidecar as the PS1 and N64 scenes, on the 1280x720 frame. This code
--- owns the sky, the caption and the camera.
-
-local t = 0
-local PITCH = 0.42
-local DIST  = 11.0
-
-function TIC()
- t = t + 1
- cls(1)
- rect(0, 432, 1280, 288, 2)
- cartbox.meshcam(t / 260, PITCH, DIST, 0)
- print("Xbox 360 -- 1280x720", 24, 24, 12)
- print("z-buffer . perspective . filtered . shaders", 24, 44, 13)
- print("the modern path -- no fixed-function era look", 24, 372, 13)
-end
-`;
-
-export function seedXbox360Cart(engine: CartEngine): void {
-  engine.setLanguage("lua");
-  engine.setCode(XBOX360_CODE);
-  applyDuskPalette(engine);
 }

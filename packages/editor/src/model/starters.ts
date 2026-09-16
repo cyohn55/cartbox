@@ -11,7 +11,9 @@ import type { CollisionData } from "./CollisionMap";
 import { seedDemoCart } from "./seed";
 import { seedParallaxDemoCart } from "./parallaxSeed";
 import { seedPlatformerCart, PLATFORMER_COLLISION } from "./platformerSeed";
-import { seedPs1Cart, seedN64Cart, seedXbox360Cart, PS1_MESH_SIDECAR } from "./ps1Seed";
+import { seedPs1Cart, PS1_MESH_SIDECAR } from "./ps1Seed";
+import { seedN64Cart, N64_MESH_SIDECAR } from "./n64Seed";
+import { seedXbox360Cart, XBOX360_MESH_SIDECAR } from "./xbox360Seed";
 
 /** Applies starter content to a cart's engine, in place. */
 type SeedFunction = (engine: CartEngine) => void;
@@ -74,19 +76,17 @@ export const CART_STARTERS: readonly [CartStarter, ...CartStarter[]] = [
   },
   {
     id: "n64",
-    label: "N64 test scene",
-    description: "The same scene on the N64 core — depth-buffered, perspective-correct, filtered, 4KB textures.",
+    label: "N64 courtyard",
+    description: "An N64-era scene — rolling hills, smooth-shaded trees, filtered grass and a gold gem.",
     seed: seedN64Cart,
-    // Deliberately the same geometry as the PS1 scene, so the era's rendering
-    // rules are the only difference a creator sees.
-    mesh: PS1_MESH_SIDECAR,
+    mesh: N64_MESH_SIDECAR,
   },
   {
     id: "xbox360",
-    label: "Xbox 360 test scene",
-    description: "The same scene at 720p on the modern render path — the general-engine tier.",
+    label: "Xbox 360 foundry",
+    description: "An Xbox 360-era scene — a gritty 720p concrete-and-steel foundry, dense and desaturated.",
     seed: seedXbox360Cart,
-    mesh: PS1_MESH_SIDECAR,
+    mesh: XBOX360_MESH_SIDECAR,
   },
 ];
 
