@@ -10,7 +10,7 @@ import { MeshSceneInstance, MeshAsset, Mat4, DecodedTexture, RasterStyle } from 
  * toggles: that would dissolve the aesthetic and break the fixed-spec
  * assumptions the platform layer depends on.
  */
-type ModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1";
+type ModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1" | "n64" | "xbox360";
 /**
  * How a model rasterises triangles.
  *

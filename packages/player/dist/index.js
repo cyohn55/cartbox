@@ -2421,6 +2421,24 @@ var PS1_RASTER_CAPS = {
   polyBudget: 3e3,
   programmableShaders: false
 };
+var N64_RASTER_CAPS = {
+  zBuffer: true,
+  perspectiveCorrect: true,
+  vertexPrecision: "float",
+  textureFiltering: "trilinear",
+  textureCacheBytes: 4 * 1024,
+  polyBudget: 7e3,
+  programmableShaders: false
+};
+var XBOX360_RASTER_CAPS = {
+  zBuffer: true,
+  perspectiveCorrect: true,
+  vertexPrecision: "float",
+  textureFiltering: "trilinear",
+  textureCacheBytes: 0,
+  polyBudget: 0,
+  programmableShaders: false
+};
 var MODELS = {
   classic: {
     id: "classic",
@@ -2550,6 +2568,60 @@ var MODELS = {
     // 64KB texture page and a 3,000-triangle frame — not from disc capacity.
     // Those bind on every frame; the disc only ever bound on the whole game.
     assetBudgetBytes: 660 * 1024 * 1024
+  },
+  n64: {
+    id: "n64",
+    label: "N64",
+    kind: "poly3d",
+    // 320x240, the era's common output. The N64 shared the PS1's resolution;
+    // what separated the generations was rendering, not pixels, so the
+    // difference lives entirely in renderCaps below — a z-buffer, perspective
+    // correction, filtering, and the 4KB texture cache — not in this number.
+    width: 320,
+    height: 240,
+    pixelBytes: 4,
+    fps: 60,
+    audioChannels: 8,
+    sampleRate: 44100,
+    paletteSize: 256,
+    // Code, 2D HUD art and sound. Geometry and textures live in the asset store.
+    cartSizeBytes: 4 * 1024 * 1024,
+    engineUrl: "/engine/n64/engine.js",
+    inputs: ["gamepad", "keyboard"],
+    renderCaps: N64_RASTER_CAPS,
+    // A cartridge, not a disc — 64MB, the largest the generation shipped. This
+    // is the era-true inverse of the PS1: better rendering, an order of
+    // magnitude *less* storage. The tiny cartridge and the 4KB texture cache
+    // pull the same direction — small, heavily-reused textures — from storage
+    // and from fill respectively.
+    assetBudgetBytes: 64 * 1024 * 1024
+  },
+  xbox360: {
+    id: "xbox360",
+    label: "Xbox 360",
+    kind: "poly3d",
+    // 1280x720 — the generation's signature output, and the first in this family
+    // that is HD. This is why it needs its own core binary: the framebuffer and
+    // the core's per-frame draw buffers are sized from these compile-time
+    // constants (see build-xbox360-wasm.sh).
+    width: 1280,
+    height: 720,
+    pixelBytes: 4,
+    fps: 60,
+    audioChannels: 8,
+    sampleRate: 44100,
+    paletteSize: 256,
+    cartSizeBytes: 8 * 1024 * 1024,
+    engineUrl: "/engine/xbox360/engine.js",
+    inputs: ["gamepad", "keyboard"],
+    renderCaps: XBOX360_RASTER_CAPS,
+    // 2GB — Xbox Live Arcade's final size ceiling, the closest thing the 360 had
+    // to a fixed content budget (the doctrine wants a number that evokes the era,
+    // and a 360 disc's ~7.9GB is neither web-sane nor how most of this content
+    // shipped). Large, because this is the tier where storage genuinely stops
+    // being the constraint — which is the whole point ERA_MODELS.md makes about
+    // it not being console-shaped.
+    assetBudgetBytes: 2 * 1024 * 1024 * 1024
   }
 };
 var DEFAULT_MODEL_ID = "classic";

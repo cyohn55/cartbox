@@ -9,7 +9,7 @@
  * assumptions the platform layer depends on.
  */
 
-export type ModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1";
+export type ModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1" | "n64" | "xbox360";
 
 /**
  * How a model rasterises triangles.
@@ -88,6 +88,66 @@ export const PS1_RASTER_CAPS: RenderCaps = {
   textureFiltering: "none",
   textureCacheBytes: 64 * 1024,
   polyBudget: 3000,
+  programmableShaders: false,
+};
+
+/**
+ * The N64 era, expressed as rasterisation rules.
+ *
+ * Where the PS1 is defined by what it lacked, the N64 is defined by what it
+ * added and then starved: it has the depth buffer, perspective-correct texturing
+ * and floating-point vertices the PS1 lacked — so its geometry is stable and its
+ * surfaces resolve correctly — but it drew every texel through a **4KB texture
+ * cache**. That one number is the whole era's look. It is why N64 textures are
+ * so small, so heavily tiled, and so soft: there was almost no room to hold
+ * them, and what did fit was trilinear-filtered into the blur the generation is
+ * remembered for. See ERA_MODELS.md's PS1/N64 table.
+ *
+ * The 4KB cache is enforced for real (see `fitTextureToBudget`, whose box-filter
+ * halving is exactly what a too-small cache did to a texture). Trilinear maps to
+ * bilinear until a mip chain exists on both backends; `rasterStyleFor` documents
+ * why that mapping is deliberate rather than a shortcut. Fog — the era's other
+ * signature, used to hide a short draw distance — is not modelled yet; it is a
+ * rasteriser feature with no cap field, noted in ERA_MODELS.md rather than
+ * pretended here.
+ */
+export const N64_RASTER_CAPS: RenderCaps = {
+  zBuffer: true,
+  perspectiveCorrect: true,
+  vertexPrecision: "float",
+  textureFiltering: "trilinear",
+  textureCacheBytes: 4 * 1024,
+  polyBudget: 7000,
+  programmableShaders: false,
+};
+
+/**
+ * The Xbox 360 tier — the generation where the spec stopped constraining the
+ * look.
+ *
+ * This is the honest outlier in the family, and ERA_MODELS.md says so plainly:
+ * the 360's defining feature is **programmable shaders**, so there is no
+ * fixed-function ceiling to enforce and therefore no era artefact to reproduce.
+ * It is a general engine wearing a console costume. What its caps encode is not
+ * a set of limitations but their absence: a depth buffer, perspective-correct
+ * filtered texturing, float vertices, and both budgets unbounded.
+ *
+ * `programmableShaders` stays `false` on purpose. The trait is the tier's whole
+ * point, but no shader-authoring surface exists yet, so today a 360 cart renders
+ * on the same fixed modern path as a high-end N64 one — and the platform's
+ * fixed-spec guarantee (replays, verification, thumbnails) still holds for every
+ * shipping model. Setting the flag now would claim a capability nothing consumes
+ * and dissolve that guarantee for no gain. The flag flips the day the shader
+ * pipeline lands; until then it is the tier's real remaining work, tracked in
+ * ERA_MODELS.md rather than pretended here.
+ */
+export const XBOX360_RASTER_CAPS: RenderCaps = {
+  zBuffer: true,
+  perspectiveCorrect: true,
+  vertexPrecision: "float",
+  textureFiltering: "trilinear",
+  textureCacheBytes: 0,
+  polyBudget: 0,
   programmableShaders: false,
 };
 
@@ -264,6 +324,60 @@ export const MODELS: Record<ModelId, ConsoleModel> = {
     // 64KB texture page and a 3,000-triangle frame — not from disc capacity.
     // Those bind on every frame; the disc only ever bound on the whole game.
     assetBudgetBytes: 660 * 1024 * 1024,
+  },
+  n64: {
+    id: "n64",
+    label: "N64",
+    kind: "poly3d",
+    // 320x240, the era's common output. The N64 shared the PS1's resolution;
+    // what separated the generations was rendering, not pixels, so the
+    // difference lives entirely in renderCaps below — a z-buffer, perspective
+    // correction, filtering, and the 4KB texture cache — not in this number.
+    width: 320,
+    height: 240,
+    pixelBytes: 4,
+    fps: 60,
+    audioChannels: 8,
+    sampleRate: 44100,
+    paletteSize: 256,
+    // Code, 2D HUD art and sound. Geometry and textures live in the asset store.
+    cartSizeBytes: 4 * 1024 * 1024,
+    engineUrl: "/engine/n64/engine.js",
+    inputs: ["gamepad", "keyboard"],
+    renderCaps: N64_RASTER_CAPS,
+    // A cartridge, not a disc — 64MB, the largest the generation shipped. This
+    // is the era-true inverse of the PS1: better rendering, an order of
+    // magnitude *less* storage. The tiny cartridge and the 4KB texture cache
+    // pull the same direction — small, heavily-reused textures — from storage
+    // and from fill respectively.
+    assetBudgetBytes: 64 * 1024 * 1024,
+  },
+  xbox360: {
+    id: "xbox360",
+    label: "Xbox 360",
+    kind: "poly3d",
+    // 1280x720 — the generation's signature output, and the first in this family
+    // that is HD. This is why it needs its own core binary: the framebuffer and
+    // the core's per-frame draw buffers are sized from these compile-time
+    // constants (see build-xbox360-wasm.sh).
+    width: 1280,
+    height: 720,
+    pixelBytes: 4,
+    fps: 60,
+    audioChannels: 8,
+    sampleRate: 44100,
+    paletteSize: 256,
+    cartSizeBytes: 8 * 1024 * 1024,
+    engineUrl: "/engine/xbox360/engine.js",
+    inputs: ["gamepad", "keyboard"],
+    renderCaps: XBOX360_RASTER_CAPS,
+    // 2GB — Xbox Live Arcade's final size ceiling, the closest thing the 360 had
+    // to a fixed content budget (the doctrine wants a number that evokes the era,
+    // and a 360 disc's ~7.9GB is neither web-sane nor how most of this content
+    // shipped). Large, because this is the tier where storage genuinely stops
+    // being the constraint — which is the whole point ERA_MODELS.md makes about
+    // it not being console-shaped.
+    assetBudgetBytes: 2 * 1024 * 1024 * 1024,
   },
 };
 

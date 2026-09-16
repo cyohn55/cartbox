@@ -12,6 +12,8 @@ export {
   CLASSIC_MODEL,
   PRO_MODEL,
   PS1_MODEL,
+  N64_MODEL,
+  XBOX360_MODEL,
   VOXEL_MODEL,
   CONSOLE_MODELS,
 } from "./engine/consoleModel";
@@ -40,6 +42,18 @@ export {
   PS1_MESH_SIDECAR,
   PS1_SCENE_TRIANGLES,
 } from "./model/ps1Seed";
+export {
+  seedN64Cart,
+  N64_CODE,
+  N64_MESH_SIDECAR,
+  N64_SCENE_TRIANGLES,
+} from "./model/n64Seed";
+export {
+  seedXbox360Cart,
+  XBOX360_CODE,
+  XBOX360_MESH_SIDECAR,
+  XBOX360_SCENE_TRIANGLES,
+} from "./model/xbox360Seed";
 export {
   CART_STARTERS,
   DEFAULT_STARTER_ID,

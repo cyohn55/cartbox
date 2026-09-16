@@ -328,9 +328,17 @@ end
 export function seedPs1Cart(engine: CartEngine): void {
   engine.setLanguage("lua");
   engine.setCode(PS1_CODE);
+  applyDuskPalette(engine);
+}
 
-  // A dusk palette: the scene's colour comes from its texture, so the cart's own
-  // entries only need a sky, a horizon and legible caption text.
+/**
+ * The PS1 scene's dusk palette: the geometry's colour comes from its texture, so
+ * the cart needs only a sky, a horizon band and legible caption ink. The N64 and
+ * 360 starters set their own, brighter and hazier palettes — see n64Seed.ts and
+ * xbox360Seed.ts — because those carts represent their eras rather than A/B-test
+ * this one's geometry.
+ */
+function applyDuskPalette(engine: CartEngine): void {
   const entries: ReadonlyArray<readonly [number, string]> = [
     [1, "#161a2c"],
     [2, "#242a44"],

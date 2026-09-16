@@ -11,8 +11,8 @@ import type { ConsoleModelId } from "@cartbox/editor";
 import { withBasePath } from "./staticSite";
 
 /**
- * Models a user can actually author in today. "voxel" is a defined spec but has
- * no built engine, so it is deliberately excluded — an unknown or unsupported
+ * Models a user can actually author in today. "voxel" is a defined spec with no
+ * built engine, so it is deliberately excluded — an unknown or unsupported
  * value resolves to "classic".
  *
  * A model belongs here once its core is built and served (see
@@ -24,6 +24,8 @@ export const SELECTABLE_MODEL_IDS: readonly ConsoleModelId[] = [
   "pro",
   "portrait",
   "ps1",
+  "n64",
+  "xbox360",
 ];
 
 export function resolveModelId(value: string | null | undefined): ConsoleModelId {
@@ -41,6 +43,8 @@ const MODEL_BADGES: Record<ConsoleModelId, string> = {
   portrait: "PORTRAIT",
   voxel: "VOXEL",
   ps1: "PS1",
+  n64: "N64",
+  xbox360: "XBOX 360",
 };
 
 export function modelBadge(value: string | null | undefined): string {
@@ -67,4 +71,12 @@ export const ENGINE_URL_BY_MODEL: Record<ConsoleModelId, string> = {
   // voxel this no longer falls back to classic: falling back would silently run
   // a PS1 cart on a 240x136 4bpp machine, which is worse than not loading.
   ps1: withBasePath(process.env.NEXT_PUBLIC_PS1_ENGINE_URL ?? "/engine/ps1/engine.js"),
+  // Same engine family at each era's fixed resolution — n64 shares the PS1's
+  // 320x240 core spec (the era difference is renderCaps, not the core), and
+  // xbox360 is a 1280x720 build. Both are built and served, so like ps1 they
+  // do not fall back to classic: a wrong-resolution core is worse than none.
+  n64: withBasePath(process.env.NEXT_PUBLIC_N64_ENGINE_URL ?? "/engine/n64/engine.js"),
+  xbox360: withBasePath(
+    process.env.NEXT_PUBLIC_XBOX360_ENGINE_URL ?? "/engine/xbox360/engine.js",
+  ),
 };
