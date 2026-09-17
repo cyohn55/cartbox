@@ -77,6 +77,7 @@ import { SPATIAL_TABS, TAB_META, visibleTabs, type Tab } from "./editorTabs";
 import { ShortcutHelp } from "./ShortcutHelp";
 import { useShortcuts, WORKBENCH_SHORTCUTS, type Shortcut } from "./shortcuts";
 import { decodeMeshSidecar, encodeMeshSidecar, addMesh, type MeshSidecar } from "@/lib/meshSidecar";
+import { rebakeMeshSidecar } from "@/lib/meshTextureBake";
 import type { MeshAsset } from "@cartbox/editor";
 
 // Which tabs a cart gets depends on its console model and what it already
@@ -223,6 +224,9 @@ export function EditorWorkbench({
     ...initialSidecars,
     collision: initialSidecars.collision ?? starter?.collision ?? null,
     mesh: initialSidecars.mesh ?? starter?.mesh ?? null,
+    // The era scenes seed their editable texture as a named sprite-block asset in
+    // the voxel/assets sidecar, so a fresh cart opens with it in the Assets tab.
+    voxel: initialSidecars.voxel ?? starter?.voxel ?? null,
   };
 
   return (
@@ -519,19 +523,34 @@ function WorkbenchBody({
   // ---- saving -------------------------------------------------------------
 
   const buildRequest = useCallback(
-    (publish: boolean) => {
+    (publish: boolean, meshOverride?: string | null) => {
       if (!runnable) return null;
+      // `meshOverride` carries a freshly rebaked mesh sidecar (see `rebakeMesh`)
+      // so a save reflects the latest texture-sprite edits even before the state
+      // update that also stores them has flushed.
+      const finalSidecars =
+        meshOverride === undefined ? sidecars : { ...sidecars, mesh: meshOverride };
       return {
         cartId,
         modelId,
         bytes: runnable.saveTic(),
-        sidecars,
+        sidecars: finalSidecars,
         meta: details,
         publish,
       };
     },
     [cartId, details, modelId, runnable, sidecars],
   );
+
+  /**
+   * Regenerate any sprite-backed mesh texture from the live sheet + palette, so a
+   * creator's edits in the Assets tab show in the 3D scene. Returns the sidecar
+   * string to use (unchanged when nothing is sprite-backed). Cheap on the common
+   * path — {@link rebakeMeshSidecar} no-ops when no mesh references a sprite.
+   */
+  const rebakeMesh = useCallback(async (): Promise<string | null | undefined> => {
+    return rebakeMeshSidecar(sidecars.mesh, sheet, editEngine.getPalette());
+  }, [sidecars.mesh, sheet, editEngine]);
 
   /**
    * Record what the server (or this browser) just accepted.
@@ -565,7 +584,12 @@ function WorkbenchBody({
 
   const persist = useCallback(
     async (publish: boolean) => {
-      const request = buildRequest(publish);
+      // Rebake sprite-backed textures first, store the result so the editor and
+      // the saved copy agree (no phantom "dirty"), and save it directly rather
+      // than waiting for that state update to flush.
+      const baked = await rebakeMesh();
+      if (baked !== sidecars.mesh) setSidecar("mesh", baked ?? null);
+      const request = buildRequest(publish, baked);
       if (!request) return;
       // Exactly what is going up, so the saved mark matches the upload rather
       // than whatever the timeline had last committed.
@@ -588,7 +612,7 @@ function WorkbenchBody({
       // lost afternoon.
       saveCartLocally({ ...request, saved: outcome.ok });
     },
-    [applyOutcome, bank, buildRequest],
+    [applyOutcome, bank, buildRequest, rebakeMesh, setSidecar, sidecars.mesh],
   );
 
   /**
@@ -720,8 +744,16 @@ function WorkbenchBody({
     // A new playtest starts from a clean slate: last run's error line should not
     // still be marked in the gutter while this one is running.
     setRuntimeErrorLine(null);
-    if (runnable) setRunBytes(runnable.saveTic());
-  }, [runnable]);
+    if (!runnable) return;
+    // Rebake any sprite-backed mesh texture from the live sheet first, so a
+    // texture edited in the Assets tab shows in this playtest. Storing the
+    // result updates meshScene for the overlay in the same render as runBytes.
+    void (async () => {
+      const baked = await rebakeMesh();
+      if (baked !== sidecars.mesh) setSidecar("mesh", baked ?? null);
+      setRunBytes(runnable.saveTic());
+    })();
+  }, [runnable, rebakeMesh, sidecars.mesh, setSidecar]);
 
   // ---- shortcuts ----------------------------------------------------------
 

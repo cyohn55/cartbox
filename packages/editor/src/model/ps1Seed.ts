@@ -39,64 +39,97 @@
  */
 
 import type { CartEngine } from "../engine/CartEngine";
-import { base64ToBytes } from "./base64";
 import {
   serializeMeshAsset,
-  type EncodedImage,
   type MeshAsset,
   type MeshPrimitive,
 } from "./MeshAsset";
+import {
+  assetsSidecarForTexture,
+  bakeIndexedTextureImage,
+  indexedTextureSpriteRef,
+  paintIndexedTexture,
+  type IndexedTexture,
+} from "./eraTexture";
 
 /**
- * The shared surface texture: a 64x64, 32-entry-CLUT PNG of riveted metal plates
- * with diagonal hazard stripes.
+ * The plate texture — riveted metal plates with diagonal hazard stripes — as
+ * palette-indexed pixels rather than a committed PNG.
  *
- * Committed as base64 rather than as a binary asset because a material stores
- * its texture as compressed bytes, and a starter has to carry its own. Regenerate
- * with `node scripts/make-ps1-texture.mjs`, which documents every choice in it —
- * chiefly that the stripes exist to give affine interpolation a straight line to
- * bend.
+ * It is indexed on purpose: the texture is now an editable cart asset. These
+ * pixels are painted into the cart's sprite sheet (a named "PS1 plate" block) and
+ * the mesh is rebaked from them on Run/Save, so a creator edits the plate in the
+ * Assets tab and the 3D floor changes. Indexed art is also exactly what a PS1
+ * held. The pattern is the TypeScript twin of `scripts/make-ps1-texture.mjs`,
+ * which documents each choice — chiefly that the stripes give affine
+ * interpolation a straight line to bend.
  */
-const TEXTURE_PNG_BASE64 =
-  "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" +
-  "56m9f7aDNM7/L5eIcARkDZ0AAAAASUVORK5CYII=";
+const PLATE_SIZE = 64;
+/** The sprite page the plate occupies; page 0 so it is the first thing in Assets. */
+const PLATE_PAGE = 0 as const;
+const PLATE_SURFACES: ReadonlyArray<readonly [number, number, number]> = [
+  [96, 100, 116], // plate
+  [42, 44, 54], // seam
+  [148, 152, 160], // rivet
+  [188, 150, 44], // hazard stripe
+];
+const PLATE_GRAIN_STEPS = 8;
 
-function texture(): EncodedImage {
-  return { mime: "image/png", bytes: base64ToBytes(TEXTURE_PNG_BASE64) };
+/** Deterministic value noise, matching the make-ps1-texture generator. */
+function plateHash(x: number, y: number): number {
+  const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return n - Math.floor(n);
 }
+
+/** Which of the four surfaces a texel belongs to. */
+function plateSurface(x: number, y: number): number {
+  const gx = x % 32;
+  const gy = y % 32;
+  // A diagonal hazard stripe across one plate in four — the straight edge affine
+  // interpolation visibly bends.
+  if ((Math.floor(x / 32) + Math.floor(y / 32)) % 2 === 0 && (x + y) % 16 < 5) return 3;
+  // Rivets near each plate's corners.
+  const rx = Math.min(gx, 32 - gx);
+  const ry = Math.min(gy, 32 - gy);
+  if (rx > 3 && rx < 7 && ry > 3 && ry < 7) return 2;
+  // Panel grid: 32px plates with a recessed 2px seam.
+  if (gx < 2 || gy < 2) return 1;
+  return 0;
+}
+
+function buildPlateTexture(): IndexedTexture {
+  const clut: [number, number, number][] = [];
+  for (const [r, g, b] of PLATE_SURFACES) {
+    for (let step = 0; step < PLATE_GRAIN_STEPS; step += 1) {
+      const shift = (step - (PLATE_GRAIN_STEPS - 1) / 2) * 7;
+      const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v + shift)));
+      clut.push([clamp(r), clamp(g), clamp(b)]);
+    }
+  }
+  const indices = new Uint8Array(PLATE_SIZE * PLATE_SIZE);
+  for (let y = 0; y < PLATE_SIZE; y += 1) {
+    for (let x = 0; x < PLATE_SIZE; x += 1) {
+      indices[y * PLATE_SIZE + x] =
+        plateSurface(x, y) * PLATE_GRAIN_STEPS + Math.floor(plateHash(x, y) * PLATE_GRAIN_STEPS);
+    }
+  }
+  return { size: PLATE_SIZE, indices, clut };
+}
+
+/** Built once: the sheet paint, the mesh bake and the named asset all derive from it. */
+const PLATE_TEXTURE: IndexedTexture = buildPlateTexture();
+
+/**
+ * The cart's assets sidecar, carrying the editable "PS1 plate" sprite block. A
+ * fresh PS1 cart opens with it in the Assets tab; the starter seeds it (see
+ * starters.ts) the same way it seeds the mesh.
+ */
+export const PS1_ASSETS_SIDECAR: string = assetsSidecarForTexture(
+  "ps1-plate",
+  "PS1 plate",
+  PLATE_SIZE,
+  PLATE_PAGE,
+);
 
 /** The six faces of an axis-aligned box, as corner offsets and a face normal. */
 const FACES: ReadonlyArray<{
@@ -245,7 +278,10 @@ function buildMesh(): MeshAsset {
       // Left white: the texture carries the colour, and tinting it would make
       // the palette the cart's rather than the texture's.
       baseColorFactor: [1, 1, 1, 1],
-      baseColorImage: texture(),
+      // Initial bake from the plate pixels; the editor rebakes it from the sprite
+      // sheet on Run/Save so a creator's edits in the Assets tab show here.
+      baseColorImage: bakeIndexedTextureImage(PLATE_TEXTURE),
+      textureSprite: indexedTextureSpriteRef(PLATE_SIZE, PLATE_PAGE),
     },
   };
   return { name: "PS1 test scene", primitives: [primitive] };
@@ -319,16 +355,18 @@ end
 `;
 
 /**
- * Seed a fresh cart with the PS1 test scene's code and palette.
+ * Seed a fresh cart with the PS1 test scene's code, palette, and plate texture.
  *
- * The geometry is not seeded here — it rides along as the starter's mesh
- * sidecar, the same way the Platformer's collision layer does, because a mesh
- * lives beside the cartridge rather than inside it.
+ * The geometry is not seeded here — it rides along as the starter's mesh sidecar,
+ * the same way the Platformer's collision layer does. The *texture*, though, is
+ * painted into the sprite sheet so it is an editable cart asset (the named "PS1
+ * plate" block, seeded via PS1_ASSETS_SIDECAR); the mesh is rebaked from it.
  */
 export function seedPs1Cart(engine: CartEngine): void {
   engine.setLanguage("lua");
   engine.setCode(PS1_CODE);
   applyDuskPalette(engine);
+  paintIndexedTexture(engine, PLATE_TEXTURE, PLATE_PAGE);
 }
 
 /**
