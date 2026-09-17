@@ -1509,8 +1509,10 @@
 /* Compact 16-direction picker: two rows of eight, same chips as the palette. */
 .directionGrid {
   display: grid;
-  grid-template-columns: repeat(8, 1fr);
-  gap: 5px;
+  /* Match the palette swatch size so the normal-direction picker reads as the
+     same kind of grid. */
+  grid-template-columns: repeat(auto-fill, var(--swatch-size, 60px));
+  gap: 4px;
 }
 
 /* --- Map stage: a scrollable tile grid, screens marked out ---------------- */
