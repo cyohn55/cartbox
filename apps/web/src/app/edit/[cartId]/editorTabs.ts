@@ -43,6 +43,33 @@ export const ALL_TABS = [
 export type Tab = (typeof ALL_TABS)[number];
 
 /**
+ * Display metadata for a tab: the label a creator reads, and a small glyph that
+ * gives an otherwise all-text strip a visual anchor.
+ *
+ * This is deliberately separate from the tab *id* (the ALL_TABS string), which
+ * is what every bit of logic keys off — the gating above, the canonical order,
+ * the Ctrl+1..9 shortcuts, and the editor-tabs tests. So the wording can be made
+ * friendlier without touching any of that: the five spatially adjacent concepts
+ * a newcomer cannot tell apart — Map, Scene, World, Mesh — are the ones that earn
+ * a clearer name (`Scene` reads as "Backdrop"; `World` as "3D World") as well as
+ * a glyph.
+ */
+export const TAB_META: Record<Tab, { label: string; icon: string }> = {
+  Code: { label: "Code", icon: "⌨" },
+  Assets: { label: "Assets", icon: "▧" },
+  Map: { label: "Map", icon: "▦" },
+  World: { label: "3D World", icon: "⬢" },
+  Scene: { label: "Backdrop", icon: "▤" },
+  Mesh: { label: "Mesh", icon: "◈" },
+  Anim: { label: "Anim", icon: "▷" },
+  Weather: { label: "Weather", icon: "☁" },
+  FX: { label: "FX", icon: "✦" },
+  Files: { label: "Files", icon: "⭳" },
+  SFX: { label: "SFX", icon: "♪" },
+  Music: { label: "Music", icon: "♫" },
+};
+
+/**
  * The everyday five sit on the bar; the cinematic/3D set — reached rarely, and
  * never before there is art to dress — tucks into a "More" menu so a cart opens
  * looking like a fantasy-console editor, not a flight deck.
