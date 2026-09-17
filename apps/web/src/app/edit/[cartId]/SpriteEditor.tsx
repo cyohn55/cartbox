@@ -242,7 +242,7 @@ export function SpriteEditor({
   const [fillShape, setFillShape] = useState(false); // rect/ellipse: fill interior vs outline
   const [version, setVersion] = useState(0);
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
-  const [layer, setLayer] = useState<Layer>("albedo");
+  const [layer, setLayer] = useState<Layer>("material");
   const [direction, setDirection] = useState(1);
   const [level, setLevel] = useState(8); // brush value for material (height/spec/rough) layers
   const [sortPalette, setSortPalette] = useState(true); // show palette as a gradient
