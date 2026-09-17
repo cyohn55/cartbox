@@ -464,6 +464,19 @@ export function SpriteEditor({
       ? Array.from({ length: normals.directionCount }, (_unused, index) => normals.colorHex(index))
       : Array.from({ length: MATERIAL_LEVELS }, (_unused, index) => materialMap.colorHex(index));
 
+  // Blank palette slots — an empty (uninitialised) entry reads as pure black, and
+  // the seeded palettes never use pure black — are hidden so a 256-colour model's
+  // long tail of empty swatches does not fill the picker. Only for real palettes;
+  // the normal/material pickers have no blanks.
+  const blankIndices = paintsPalette
+    ? new Set(
+        paletteColors.reduce<number[]>((acc, css, index) => {
+          if (css.toLowerCase() === "#000000") acc.push(index);
+          return acc;
+        }, []),
+      )
+    : undefined;
+
   // Display the albedo palette as a gradient (grays, then hue→lightness) without
   // touching the underlying indices. Normal-direction swatches are left as-is.
   const paletteOrder = paintsPalette && sortPalette ? gradientSortOrder(paletteColors) : undefined;
@@ -689,14 +702,12 @@ export function SpriteEditor({
     ),
 
     layer: (
-      <RailGroup label="Layer">
-        <SegmentedControl options={LAYER_OPTIONS} selected={layer} onSelect={setLayer} wrap ariaLabel="Layer" />
+      <RailGroup label="Coverage">
         <SegmentedControl
           options={COVERAGE_OPTIONS}
           selected={showCoverage ? "on" : "off"}
           onSelect={(id) => setShowCoverage(id === "on")}
           ariaLabel="Show other-layer coverage"
-          spaced
         />
         <RailHint>
           {coverage.channels.length === 0
@@ -878,7 +889,28 @@ export function SpriteEditor({
     ),
 
     palette: (
-      <PalettePicker
+      <>
+        {/* The layer selector sits right above the palette, as a dropdown, so
+            switching what you paint (colour, normal, height, …) is next to where
+            you pick the value. */}
+        <div className={styles.layerSelectRow}>
+          <label className={styles.layerSelectLabel} htmlFor="sprite-layer-select">
+            Layer
+          </label>
+          <select
+            id="sprite-layer-select"
+            className={styles.layerSelect}
+            value={layer}
+            onChange={(event) => setLayer(event.target.value as Layer)}
+          >
+            {LAYER_OPTIONS.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <PalettePicker
         colors={paletteColors}
         selected={activeValue}
         onSelect={setActiveValue}
@@ -901,7 +933,9 @@ export function SpriteEditor({
         usage={paletteUsage}
         usedOnly={usedColorsOnly}
         onToggleUsedOnly={paintsPalette ? () => setUsedColorsOnly((value) => !value) : undefined}
-      />
+        blank={blankIndices}
+        />
+      </>
     ),
 
     material: (
