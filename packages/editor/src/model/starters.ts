@@ -12,8 +12,8 @@ import { seedDemoCart } from "./seed";
 import { seedParallaxDemoCart } from "./parallaxSeed";
 import { seedPlatformerCart, PLATFORMER_COLLISION } from "./platformerSeed";
 import { seedPs1Cart, PS1_MESH_SIDECAR, PS1_ASSETS_SIDECAR } from "./ps1Seed";
-import { seedN64Cart, N64_MESH_SIDECAR } from "./n64Seed";
-import { seedXbox360Cart, XBOX360_MESH_SIDECAR } from "./xbox360Seed";
+import { seedN64Cart, N64_MESH_SIDECAR, N64_ASSETS_SIDECAR } from "./n64Seed";
+import { seedXbox360Cart, XBOX360_MESH_SIDECAR, XBOX360_ASSETS_SIDECAR } from "./xbox360Seed";
 
 /** Applies starter content to a cart's engine, in place. */
 type SeedFunction = (engine: CartEngine) => void;
@@ -89,6 +89,7 @@ export const CART_STARTERS: readonly [CartStarter, ...CartStarter[]] = [
     description: "An N64-era scene — rolling hills, smooth-shaded trees, filtered grass and a gold gem.",
     seed: seedN64Cart,
     mesh: N64_MESH_SIDECAR,
+    voxel: N64_ASSETS_SIDECAR,
   },
   {
     id: "xbox360",
@@ -96,6 +97,7 @@ export const CART_STARTERS: readonly [CartStarter, ...CartStarter[]] = [
     description: "An Xbox 360-era scene — a gritty 720p concrete-and-steel foundry, dense and desaturated.",
     seed: seedXbox360Cart,
     mesh: XBOX360_MESH_SIDECAR,
+    voxel: XBOX360_ASSETS_SIDECAR,
   },
 ];
 

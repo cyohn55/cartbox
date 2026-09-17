@@ -26,13 +26,18 @@
  */
 
 import type { CartEngine } from "../engine/CartEngine";
-import { base64ToBytes } from "./base64";
 import {
   serializeMeshAsset,
-  type EncodedImage,
   type MeshAsset,
   type MeshPrimitive,
 } from "./MeshAsset";
+import {
+  assetsSidecarForTexture,
+  bakeIndexedTextureImage,
+  indexedTextureSpriteRef,
+  paintIndexedTexture,
+  type IndexedTexture,
+} from "./eraTexture";
 import {
   newStreams,
   pushCone,
@@ -44,35 +49,77 @@ import {
 } from "./seedGeometry";
 
 /**
- * The ground's grass/dirt texture: a 64x64, 24-entry-CLUT PNG. Soft and low
- * contrast on purpose — the N64's 4KB cache halves it until it fits, and a busy
- * texture would blur into mush where a soft one blurs into the era's look.
- * Regenerate with `node scripts/make-n64-texture.mjs`.
+ * The ground's grass/dirt texture, as palette-indexed pixels so it is an editable
+ * cart asset — the named "N64 grass" block a creator edits in the Assets tab; the
+ * ground is rebaked from it. Soft and low contrast on purpose: the era look is a
+ * texture blurred by filtering, and a busy source blurs into mush. The pattern is
+ * the TypeScript twin of `scripts/make-n64-texture.mjs`.
  */
-const GRASS_PNG_BASE64 =
-  "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";
+const GRASS_SIZE = 64;
+/** The sprite page the grass occupies; page 0 so it is the first thing in Assets. */
+const GRASS_PAGE = 0 as const;
+const GRASS_SURFACES: ReadonlyArray<readonly [number, number, number]> = [
+  [86, 138, 66], // grass
+  [120, 96, 60], // dirt
+  [176, 166, 122], // sand
+];
+const GRASS_GRAIN_STEPS = 8;
 
-function grassTexture(): EncodedImage {
-  return { mime: "image/png", bytes: base64ToBytes(GRASS_PNG_BASE64) };
+function grassHash(x: number, y: number): number {
+  const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return n - Math.floor(n);
 }
+
+/** Smooth 2D value noise (bilerp of the integer lattice), for soft blobs. */
+function grassSmoothNoise(x: number, y: number): number {
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const xf = x - xi;
+  const yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf);
+  const v = yf * yf * (3 - 2 * yf);
+  const a = grassHash(xi, yi);
+  const b = grassHash(xi + 1, yi);
+  const c = grassHash(xi, yi + 1);
+  const d = grassHash(xi + 1, yi + 1);
+  return a * (1 - u) * (1 - v) + b * u * (1 - v) + c * (1 - u) * v + d * u * v;
+}
+
+function grassSurface(x: number, y: number): number {
+  const dirt = grassSmoothNoise(x / 22, y / 22);
+  if (dirt > 0.62) return 1;
+  if (dirt > 0.74 && grassSmoothNoise((x + 40) / 14, (y + 40) / 14) > 0.5) return 2;
+  return 0;
+}
+
+function buildGrassTexture(): IndexedTexture {
+  const clut: [number, number, number][] = [];
+  for (const [r, g, b] of GRASS_SURFACES) {
+    for (let step = 0; step < GRASS_GRAIN_STEPS; step += 1) {
+      const shift = (step - (GRASS_GRAIN_STEPS - 1) / 2) * 3;
+      const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v + shift)));
+      clut.push([clamp(r), clamp(g), clamp(b)]);
+    }
+  }
+  const indices = new Uint8Array(GRASS_SIZE * GRASS_SIZE);
+  for (let y = 0; y < GRASS_SIZE; y += 1) {
+    for (let x = 0; x < GRASS_SIZE; x += 1) {
+      const grain = Math.floor(grassSmoothNoise(x / 3.5, y / 3.5) * GRASS_GRAIN_STEPS);
+      indices[y * GRASS_SIZE + x] = grassSurface(x, y) * GRASS_GRAIN_STEPS + Math.min(GRASS_GRAIN_STEPS - 1, grain);
+    }
+  }
+  return { size: GRASS_SIZE, indices, clut };
+}
+
+const GRASS_TEXTURE: IndexedTexture = buildGrassTexture();
+
+/** The cart's assets sidecar carrying the editable "N64 grass" sprite block. */
+export const N64_ASSETS_SIDECAR: string = assetsSidecarForTexture(
+  "n64-grass",
+  "N64 grass",
+  GRASS_SIZE,
+  GRASS_PAGE,
+);
 
 const GROUND_CELLS = 12;
 const GROUND_HALF = 6;
@@ -111,7 +158,8 @@ function buildMesh(): MeshAsset {
     toPrimitive(ground, {
       name: "grass",
       baseColorFactor: [1, 1, 1, 1],
-      baseColorImage: grassTexture(),
+      baseColorImage: bakeIndexedTextureImage(GRASS_TEXTURE),
+      textureSprite: indexedTextureSpriteRef(GRASS_SIZE, GRASS_PAGE),
     }),
   );
 
@@ -230,6 +278,7 @@ export function seedN64Cart(engine: CartEngine): void {
   engine.setLanguage("lua");
   engine.setCode(N64_CODE);
   applyCourtyardPalette(engine);
+  paintIndexedTexture(engine, GRASS_TEXTURE, GRASS_PAGE);
 }
 
 /**

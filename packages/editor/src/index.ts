@@ -47,12 +47,14 @@ export {
   seedN64Cart,
   N64_CODE,
   N64_MESH_SIDECAR,
+  N64_ASSETS_SIDECAR,
   N64_SCENE_TRIANGLES,
 } from "./model/n64Seed";
 export {
   seedXbox360Cart,
   XBOX360_CODE,
   XBOX360_MESH_SIDECAR,
+  XBOX360_ASSETS_SIDECAR,
   XBOX360_SCENE_TRIANGLES,
 } from "./model/xbox360Seed";
 export {

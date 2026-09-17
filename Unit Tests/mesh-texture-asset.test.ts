@@ -14,6 +14,10 @@ import { describe, expect, it } from "vitest";
 import {
   PS1_MESH_SIDECAR,
   PS1_ASSETS_SIDECAR,
+  N64_MESH_SIDECAR,
+  N64_ASSETS_SIDECAR,
+  XBOX360_MESH_SIDECAR,
+  XBOX360_ASSETS_SIDECAR,
   serializeMeshAsset,
   deserializeMeshAsset,
   bakeIndexedTextureImage,
@@ -143,6 +147,38 @@ describe("the PS1 plate is a sprite-backed, editable asset", () => {
       expect(block.bank).toBe(0);
     }
   });
+});
+
+describe("every era scene ships an editable, sprite-backed texture", () => {
+  const cases = [
+    { era: "N64 grass", mesh: N64_MESH_SIDECAR, assets: N64_ASSETS_SIDECAR, size: 64, tiles: 8 },
+    { era: "360 grunge", mesh: XBOX360_MESH_SIDECAR, assets: XBOX360_ASSETS_SIDECAR, size: 128, tiles: 16 },
+  ] as const;
+
+  for (const { era, mesh, assets, size, tiles } of cases) {
+    it(`${era}: the textured primitive is bound to a sprite region`, () => {
+      const asset = firstMesh(mesh);
+      const textured = asset.primitives.find((p) => p.material.textureSprite);
+      expect(textured, "a primitive carries textureSprite").toBeTruthy();
+      expect(textured!.material.textureSprite).toEqual({ page: 0, x: 0, y: 0, width: size, height: size });
+      expect(textured!.material.baseColorImage?.mime).toBe("image/png");
+    });
+
+    it(`${era}: seeds a named sprite block the web app decodes`, () => {
+      const list = decodeVoxelSidecar(assets).assets;
+      expect(list).toHaveLength(1);
+      const block = list[0]!;
+      expect(isSpriteBlockAsset(block)).toBe(true);
+      expect(block.name).toBe(era);
+      if (isSpriteBlockAsset(block)) expect(block.tilesPerSide).toBe(tiles);
+    });
+
+    it(`${era}: still parses into a drawable scene`, () => {
+      const scene = parseMeshScene(mesh)!;
+      expect(scene).not.toBeNull();
+      expect(scene.instances).toHaveLength(1);
+    });
+  }
 });
 
 describe("spriteRegionToRgba", () => {
