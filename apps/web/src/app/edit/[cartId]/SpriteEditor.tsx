@@ -99,12 +99,16 @@ const LAYER_OPTIONS: ReadonlyArray<{ id: Layer; label: string; hint?: string }> 
   ...MATERIAL_LAYERS,
 ];
 
-/** Sprite sizes offered, as tiles-per-side. A base tile is 8px, so 1/2/4 tiles
- *  per side are 8×8, 16×16, and 32×32 sprites (blocks of adjacent tiles). */
+/** Sprite sizes offered, as tiles-per-side. A base tile is 8px, so 1/2/4/8/16
+ *  tiles per side are 8×8, 16×16, 32×32, 64×64 and a full 128×128 page (blocks of
+ *  adjacent tiles). 16 is the ceiling — a page is 16×16 tiles — so 128×128 edits
+ *  the whole sheet at once. */
 const SPRITE_SIZES = [
   { id: 1, label: "8×8" },
   { id: 2, label: "16×16" },
   { id: 4, label: "32×32" },
+  { id: 8, label: "64×64" },
+  { id: 16, label: "128×128" },
 ] as const;
 
 /** The sprite sheet's two pages, as the rail names them. */
@@ -207,8 +211,28 @@ export function SpriteEditor({
 }: SpriteEditorProps) {
   const { page, tile, tilesPerSide: spriteSize } = selection;
   const setPage = (next: SpritePage) => onSelectionChange({ ...selection, page: next });
-  const setTile = (next: number) => onSelectionChange({ ...selection, tile: next });
-  const setSpriteSize = (next: number) => onSelectionChange({ ...selection, tilesPerSide: next });
+  // Picking a tile snaps to the block grid for the current size, so the block
+  // always sits inside the page (a no-op at 1× where every tile is a valid origin).
+  const setTile = (next: number) => {
+    const cols = sheet.sheetCols;
+    const maxOrigin = Math.max(0, cols - spriteSize);
+    const snap = (value: number) => Math.min(maxOrigin, Math.floor(value / spriteSize) * spriteSize);
+    const col = snap(next % cols);
+    const row = snap(Math.floor(next / cols));
+    onSelectionChange({ ...selection, tile: row * cols + col });
+  };
+  // Changing the block size snaps the top-left tile to a valid block origin so
+  // the whole N×N block stays inside the page — otherwise a bigger block anchored
+  // at an arbitrary tile would run off the sheet (and 128×128 must sit at tile 0,
+  // which is what lets it edit the entire sprite sheet).
+  const setSpriteSize = (next: number) => {
+    const cols = sheet.sheetCols;
+    const maxOrigin = Math.max(0, cols - next);
+    const snap = (value: number) => Math.min(maxOrigin, Math.floor(value / next) * next);
+    const col = snap(tile % cols);
+    const row = snap(Math.floor(tile / cols));
+    onSelectionChange({ ...selection, tilesPerSide: next, tile: row * cols + col });
+  };
   const setColor = onColorChange;
   const [tool, setTool] = useState<Tool>("pencil");
   const [zoom, setZoom] = useState(1); // on-screen scale of the pixel canvas
