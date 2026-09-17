@@ -73,7 +73,7 @@ import { MeshEditor } from "./MeshEditor";
 import { WorldEditor } from "./WorldEditor";
 import { useEditorHistory, hashBytes, snapshotsEqual, type CartSnapshot } from "./useEditorHistory";
 import { saveCartLocally, saveCartToAccount, type SaveOutcome } from "./persistCart";
-import { SPATIAL_TABS, visibleTabs, type Tab } from "./editorTabs";
+import { SPATIAL_TABS, TAB_META, visibleTabs, type Tab } from "./editorTabs";
 import { ShortcutHelp } from "./ShortcutHelp";
 import { useShortcuts, WORKBENCH_SHORTCUTS, type Shortcut } from "./shortcuts";
 import { decodeMeshSidecar, encodeMeshSidecar, addMesh, type MeshSidecar } from "@/lib/meshSidecar";
@@ -87,6 +87,9 @@ import type { MeshAsset } from "@cartbox/editor";
 // controls. They have no phone layout — a pinch-zoom orbit camera inside a
 // scrolling page fights the page — so on a small screen they say so rather than
 // rendering something unusable. See `smallScreenNotice` in editor.module.css.
+
+/** Per-browser flag that the first-run guidance has been seen and dismissed. */
+const FIRST_RUN_KEY = "cartbox:editor:first-run-v1";
 
 /** How long after the last edit the crash-recovery draft is written. */
 const LOCAL_AUTOSAVE_MS = 1_500;
@@ -450,6 +453,26 @@ function WorkbenchBody({
   const [runtimeErrorLine, setRuntimeErrorLine] = useState<number | null>(null);
   const [showDetails, setShowDetails] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  // First-run guidance: a dismissible card naming the handful of tabs that
+  // matter, for a 12-tab tool that otherwise opens on a demo seed with no "start
+  // here". Persisted per-browser so a returning creator never sees it again;
+  // reads/writes are wrapped because storage can throw in a private window.
+  const [showFirstRun, setShowFirstRun] = useState(false);
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(FIRST_RUN_KEY) !== "done") setShowFirstRun(true);
+    } catch {
+      /* storage blocked: skip the overlay rather than break the editor */
+    }
+  }, []);
+  const dismissFirstRun = useCallback(() => {
+    setShowFirstRun(false);
+    try {
+      window.localStorage.setItem(FIRST_RUN_KEY, "done");
+    } catch {
+      /* ignore: dismissal just won't persist */
+    }
+  }, []);
   // Collapse either side panel to give the stage more width. Workbench-level
   // flags (via data attributes) so one chevron each hides whichever tab's rail /
   // inspector is showing, without threading a prop to every editor.
@@ -460,6 +483,10 @@ function WorkbenchBody({
   // whether the "More" tab menu is open. Both are chrome state, not cart content.
   const [density, setDensity] = useDensityPreference();
   const [moreOpen, setMoreOpen] = useState(false);
+  // The File ("⋯") menu holds the low-frequency actions (Details, Download,
+  // shortcuts, the advanced-controls toggle) so the bar keeps only the three
+  // verbs a creator repeats — Run, Save, Publish — always visible.
+  const [fileOpen, setFileOpen] = useState(false);
 
   // The 3D tabs are hidden on a 2D model unless this cart already has data in
   // them, so an older cart never loses access to content it saved.
@@ -778,8 +805,16 @@ function WorkbenchBody({
             ✎
           </span>
         </button>
-        <span className={styles.engineBadge} data-mode={mode}>
-          {activeModel.label} · {mode === "wasm" ? "engine" : "offline stub"}
+        <span
+          className={styles.engineBadge}
+          data-mode={mode}
+          title={
+            mode === "wasm"
+              ? "The engine is loaded — Run, Save and Download all work."
+              : "The engine could not load. You can keep editing, but Run, Save and Download stay off until it does."
+          }
+        >
+          {activeModel.label} · {mode === "wasm" ? "ready" : "limited"}
         </span>
         {modelDowngraded && (
           <span
@@ -789,29 +824,6 @@ function WorkbenchBody({
             ⚠ {requestedModel.label} unavailable — using {activeModel.label}
           </span>
         )}
-
-        <div className={styles.bankStepper}>
-          <span className={styles.bankLabel}>Bank</span>
-          <button
-            type="button"
-            className={styles.bankArrow}
-            onClick={() => selectBank(bank - 1)}
-            disabled={bank === 0}
-            aria-label="Previous bank"
-          >
-            ◂
-          </button>
-          <span className={`${styles.bankValue} data`}>{bank}</span>
-          <button
-            type="button"
-            className={styles.bankArrow}
-            onClick={() => selectBank(bank + 1)}
-            disabled={bank === BANK_COUNT - 1}
-            aria-label="Next bank"
-          >
-            ▸
-          </button>
-        </div>
 
         <nav className={styles.tabs} aria-label="Editors">
           {tabs.primary.map((tab) => {
@@ -824,7 +836,10 @@ function WorkbenchBody({
                 aria-current={active ? "page" : undefined}
                 onClick={() => setActiveTab(tab)}
               >
-                {tab}
+                <span className={styles.tabIcon} aria-hidden>
+                  {TAB_META[tab].icon}
+                </span>
+                {TAB_META[tab].label}
               </button>
             );
           })}
@@ -841,7 +856,7 @@ function WorkbenchBody({
               onClick={() => setMoreOpen((open) => !open)}
               onBlur={() => setMoreOpen(false)}
             >
-              {moreActive ? `More · ${activeTab}` : "More"} ▾
+              {moreActive ? `More · ${TAB_META[activeTab].label}` : "More"} ▾
             </button>
             {moreOpen && moreMenuPos && (
               <div
@@ -862,7 +877,10 @@ function WorkbenchBody({
                       setMoreOpen(false);
                     }}
                   >
-                    {tab}
+                    <span className={styles.tabIcon} aria-hidden>
+                      {TAB_META[tab].icon}
+                    </span>
+                    {TAB_META[tab].label}
                   </button>
                 ))}
               </div>
@@ -871,21 +889,36 @@ function WorkbenchBody({
         </nav>
 
         <div className={styles.actions}>
-          {/* One lever over every tab's advanced controls: Simple folds them to a
-              heading each, Full opens them. Persists across sessions. */}
-          <button
-            type="button"
-            className="cbx-btn"
-            onClick={() => setDensity(density === "simple" ? "full" : "simple")}
-            aria-pressed={density === "full"}
-            title={
-              density === "simple"
-                ? "Simple: advanced controls are folded away. Switch to Full to show them all."
-                : "Full: every control is shown. Switch to Simple to fold the advanced ones away."
-            }
-          >
-            {density === "simple" ? "Simple" : "Full"}
-          </button>
+          {/* Bank is an advanced concept that matters only inside the Assets and
+              Map editors, so it is out of the bar's prime real estate: it appears
+              here, beside the actions, only when one of those tabs is open in
+              advanced (Full) density. Everyone else never sees it. */}
+          {(activeTab === "Assets" || activeTab === "Map") && density === "full" && (
+            <div className={styles.bankStepper}>
+              <span className={styles.bankLabel}>Bank</span>
+              <button
+                type="button"
+                className={styles.bankArrow}
+                onClick={() => selectBank(bank - 1)}
+                disabled={bank === 0}
+                aria-label="Previous bank"
+              >
+                ◂
+              </button>
+              <span className={`${styles.bankValue} data`}>{bank}</span>
+              <button
+                type="button"
+                className={styles.bankArrow}
+                onClick={() => selectBank(bank + 1)}
+                disabled={bank === BANK_COUNT - 1}
+                aria-label="Next bank"
+              >
+                ▸
+              </button>
+            </div>
+          )}
+          {/* Undo/redo are Ctrl+Z-bound and echoed in the panel, so they stay a
+              compact icon pair set apart from the three verbs. */}
           <div className={styles.historyGroup}>
             <button
               type="button"
@@ -908,23 +941,7 @@ function WorkbenchBody({
               ↷
             </button>
           </div>
-          <button
-            type="button"
-            className="cbx-btn"
-            onClick={() => setShowHelp(true)}
-            title="Keyboard shortcuts (?)"
-            aria-label="Keyboard shortcuts"
-          >
-            ?
-          </button>
-          <button
-            type="button"
-            className="cbx-btn"
-            onClick={() => setShowDetails(true)}
-            title="Edit title, description and tags (Ctrl+I)"
-          >
-            Details
-          </button>
+          {/* The three verbs a creator repeats, always visible. */}
           <button
             type="button"
             className="cbx-btn"
@@ -933,15 +950,6 @@ function WorkbenchBody({
             title={runnable ? "Run this cartridge (Ctrl+Enter)" : "Run needs the TIC-80 engine"}
           >
             Run
-          </button>
-          <button
-            type="button"
-            className="cbx-btn"
-            onClick={downloadCart}
-            disabled={!runnable}
-            title={runnable ? "Download this cartridge as a .tic file" : "Download needs the TIC-80 engine"}
-          >
-            Download
           </button>
           <button
             type="button"
@@ -962,6 +970,75 @@ function WorkbenchBody({
           >
             Publish
           </button>
+          {/* Everything else — the advanced-controls toggle, Details, Download,
+              shortcuts — folds into one overflow menu so nine buttons become four. */}
+          <div className={styles.fileMenu}>
+            <button
+              type="button"
+              className="cbx-btn"
+              aria-haspopup="menu"
+              aria-expanded={fileOpen}
+              onClick={() => setFileOpen((open) => !open)}
+              onBlur={() => setFileOpen(false)}
+              title="More actions"
+              aria-label="More actions"
+            >
+              ⋯
+            </button>
+            {fileOpen && (
+              <div className={styles.fileMenuList} role="menu">
+                {/* The single headline lever over every tab's advanced controls.
+                    Named for what it does rather than a mode ("Simple"/"Full"). */}
+                <button
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={density === "full"}
+                  className={styles.fileMenuItem}
+                  onMouseDown={() => {
+                    setDensity(density === "simple" ? "full" : "simple");
+                    setFileOpen(false);
+                  }}
+                >
+                  {density === "full" ? "Hide advanced controls" : "Show advanced controls"}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={styles.fileMenuItem}
+                  onMouseDown={() => {
+                    setShowDetails(true);
+                    setFileOpen(false);
+                  }}
+                >
+                  Details… <span className={styles.fileMenuHint}>Ctrl+I</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={styles.fileMenuItem}
+                  disabled={!runnable}
+                  onMouseDown={() => {
+                    if (!runnable) return;
+                    downloadCart();
+                    setFileOpen(false);
+                  }}
+                >
+                  Download .tic
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={styles.fileMenuItem}
+                  onMouseDown={() => {
+                    setShowHelp(true);
+                    setFileOpen(false);
+                  }}
+                >
+                  Keyboard shortcuts <span className={styles.fileMenuHint}>?</span>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -1141,6 +1218,62 @@ function WorkbenchBody({
       )}
 
       {showHelp && <ShortcutHelp tabs={tabs.order.slice(0, 9)} onClose={() => setShowHelp(false)} />}
+
+      {/* First-run guidance: for a 12-tab tool that opens on a demo seed, name the
+          three tabs that matter and where to go when done. Dismissed for good on
+          this browser (see FIRST_RUN_KEY). */}
+      {showFirstRun && (
+        <div
+          className={styles.firstRunOverlay}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="firstRunTitle"
+        >
+          <div className={styles.firstRunCard}>
+            <h2 id="firstRunTitle" className={styles.firstRunTitle}>
+              Welcome to the editor
+            </h2>
+            <p className={styles.firstRunLede}>
+              It has a lot of tabs, but only a few to start with. The usual path:
+            </p>
+            <ol className={styles.firstRunSteps}>
+              <li>
+                <span className={styles.firstRunIcon} aria-hidden>
+                  {TAB_META.Assets.icon}
+                </span>
+                <span>
+                  <b>{TAB_META.Assets.label}</b> — draw the sprites and art your cart uses.
+                </span>
+              </li>
+              <li>
+                <span className={styles.firstRunIcon} aria-hidden>
+                  {TAB_META.Code.icon}
+                </span>
+                <span>
+                  <b>{TAB_META.Code.label}</b> — write the game in Lua.
+                </span>
+              </li>
+              <li>
+                <span className={styles.firstRunIcon} aria-hidden>
+                  ▶
+                </span>
+                <span>
+                  <b>Run</b> — play it live, right here in the editor.
+                </span>
+              </li>
+            </ol>
+            <p className={styles.firstRunLede}>
+              Happy with it? <b>Publish</b> lists it in the marketplace. The rest of the
+              tools stay out of the way under <b>⋯ → Show advanced controls</b>.
+            </p>
+            <div className={styles.firstRunActions}>
+              <button type="button" className="cbx-btn cbx-btn-accent" onClick={dismissFirstRun}>
+                Start creating
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {runBytes && (
         <RunOverlay

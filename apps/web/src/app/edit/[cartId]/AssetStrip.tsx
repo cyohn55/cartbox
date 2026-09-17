@@ -49,7 +49,8 @@ interface AssetStripProps {
   /** Open the asset library to insert a ready-made asset; omitted when the active
    *  medium has no library insert path yet, which hides the control. */
   onBrowseLibrary?: () => void;
-  onRename: (id: string) => void;
+  /** Commit a new name for an asset. Editing happens inline in the strip. */
+  onRename: (id: string, name: string) => void;
   onDelete: (id: string) => void;
   onDuplicate: (id: string) => void;
   /** Move `id` to sit before `beforeId`, or to the end when that is null. */
@@ -91,6 +92,26 @@ export function AssetStrip({
     setDropBefore(null);
   };
 
+  // Inline rename: the chip being renamed and the draft text. Committing an empty
+  // or unchanged name is a no-op, so a mis-fired rename never clears a name.
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [draftName, setDraftName] = useState("");
+
+  const startRename = (id: string) => {
+    const asset = assets.find((entry) => entry.id === id);
+    if (!asset) return;
+    setRenamingId(id);
+    setDraftName(asset.name);
+  };
+  const commitRename = () => {
+    if (!renamingId) return;
+    const trimmed = draftName.trim();
+    const original = assets.find((entry) => entry.id === renamingId)?.name;
+    if (trimmed && trimmed !== original) onRename(renamingId, trimmed);
+    setRenamingId(null);
+  };
+  const cancelRename = () => setRenamingId(null);
+
   return (
     <div className={styles.assetStrip}>
       <SegmentedControl
@@ -121,50 +142,80 @@ export function AssetStrip({
         {assets.length === 0 ? (
           <span className={styles.assetEmpty}>{emptyHint}</span>
         ) : (
-          assets.map((asset) => (
-            <button
-              key={asset.id}
-              type="button"
-              role="tab"
-              draggable
-              data-asset={asset.id}
-              className={[
-                styles.assetChip,
-                asset.id === activeId ? styles.assetChipActive : "",
-                asset.id === dragging ? styles.assetChipDragging : "",
-                dropBefore === asset.id && dragging !== asset.id ? styles.assetChipDropBefore : "",
-              ]
-                .filter(Boolean)
-                .join(" ")}
-              aria-selected={asset.id === activeId}
-              onClick={() => onSelect(asset.id)}
-              onDoubleClick={() => onRename(asset.id)}
-              onDragStart={(event) => {
-                setDragging(asset.id);
-                event.dataTransfer.effectAllowed = "move";
-                // Firefox ignores a drag that carries no data at all.
-                event.dataTransfer.setData("text/plain", asset.id);
-              }}
-              onDragEnd={endDrag}
-              onDragOver={(event) => {
-                if (!dragging) return;
-                event.preventDefault();
-                event.stopPropagation();
-                setDropBefore(asset.id);
-              }}
-              onDrop={(event) => {
-                if (!dragging) return;
-                event.preventDefault();
-                event.stopPropagation();
-                onReorder(dragging, asset.id);
-                endDrag();
-              }}
-              title={`${asset.name} — double-click to rename, drag to reorder`}
-            >
-              <AssetThumb asset={asset} sheet={sheet} version={version} />
-              {asset.name}
-            </button>
-          ))
+          assets.map((asset) =>
+            asset.id === renamingId ? (
+              // Inline rename: a chip-shaped field over the thumbnail. Enter or
+              // blur commits, Escape cancels — no OS dialog.
+              <span
+                key={asset.id}
+                className={`${styles.assetChip} ${styles.assetChipEditing}`}
+                data-asset={asset.id}
+              >
+                <AssetThumb asset={asset} sheet={sheet} version={version} />
+                <input
+                  className={styles.assetRenameInput}
+                  value={draftName}
+                  autoFocus
+                  aria-label={`Rename ${asset.name}`}
+                  onFocus={(event) => event.target.select()}
+                  onChange={(event) => setDraftName(event.target.value)}
+                  onBlur={commitRename}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      commitRename();
+                    } else if (event.key === "Escape") {
+                      event.preventDefault();
+                      cancelRename();
+                    }
+                  }}
+                />
+              </span>
+            ) : (
+              <button
+                key={asset.id}
+                type="button"
+                role="tab"
+                draggable
+                data-asset={asset.id}
+                className={[
+                  styles.assetChip,
+                  asset.id === activeId ? styles.assetChipActive : "",
+                  asset.id === dragging ? styles.assetChipDragging : "",
+                  dropBefore === asset.id && dragging !== asset.id ? styles.assetChipDropBefore : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                aria-selected={asset.id === activeId}
+                onClick={() => onSelect(asset.id)}
+                onDoubleClick={() => startRename(asset.id)}
+                onDragStart={(event) => {
+                  setDragging(asset.id);
+                  event.dataTransfer.effectAllowed = "move";
+                  // Firefox ignores a drag that carries no data at all.
+                  event.dataTransfer.setData("text/plain", asset.id);
+                }}
+                onDragEnd={endDrag}
+                onDragOver={(event) => {
+                  if (!dragging) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setDropBefore(asset.id);
+                }}
+                onDrop={(event) => {
+                  if (!dragging) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onReorder(dragging, asset.id);
+                  endDrag();
+                }}
+                title={`${asset.name} — double-click to rename, drag to reorder`}
+              >
+                <AssetThumb asset={asset} sheet={sheet} version={version} />
+                {asset.name}
+              </button>
+            ),
+          )
         )}
       </div>
 
@@ -185,7 +236,7 @@ export function AssetStrip({
         <button
           type="button"
           className="cbx-btn"
-          onClick={() => active && onRename(active.id)}
+          onClick={() => active && startRename(active.id)}
           disabled={!active}
           title={active ? `Rename “${active.name}”` : "Select an asset to rename it"}
         >

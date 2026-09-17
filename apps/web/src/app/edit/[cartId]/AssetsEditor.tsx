@@ -261,23 +261,30 @@ export function AssetsEditor({
     setLibraryOpen(false);
   };
 
-  const promptRename = (id: string) => {
-    const asset = assets.find((entry) => entry.id === id);
-    if (!asset) return;
-    const name = window.prompt(`Rename “${asset.name}”`, asset.name);
-    if (name === null) return;
+  // Rename is committed inline by the strip (double-click the chip name), so this
+  // is a plain commit rather than a window.prompt. An empty name is dropped by
+  // the strip before it reaches here.
+  const rename = (id: string, name: string) => {
     commitAssets(renameAsset(assets, id, name));
   };
 
-  const confirmDelete = (id: string) => {
+  // Delete goes through a styled in-app confirm instead of window.confirm: the OS
+  // dialog reads as broken in an otherwise custom UI and is easy to mis-click.
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; message: string } | null>(null);
+  const requestDelete = (id: string) => {
     const asset = assets.find((entry) => entry.id === id);
     if (!asset) return;
-    const warning = isSpriteBlockAsset(asset)
+    const message = isSpriteBlockAsset(asset)
       ? `Forget “${asset.name}”? The pixels stay on the sheet — only the name goes.`
       : `Delete “${asset.name}”? The sculpt is deleted with it.`;
-    if (!window.confirm(warning)) return;
+    setPendingDelete({ id, message });
+  };
+  const performDelete = () => {
+    if (!pendingDelete) return;
+    const { id } = pendingDelete;
     if (activeVoxelId === id) setActiveVoxelId(null);
     commitAssets(removeAsset(assets, id));
+    setPendingDelete(null);
   };
 
   const duplicate = (id: string) => {
@@ -310,8 +317,8 @@ export function AssetsEditor({
         onSelect={selectAsset}
         onCreate={createAsset}
         onBrowseLibrary={() => setLibraryOpen(true)}
-        onRename={promptRename}
-        onDelete={confirmDelete}
+        onRename={rename}
+        onDelete={requestDelete}
         onDuplicate={duplicate}
         onReorder={reorder}
         emptyHint={EMPTY_HINT[medium]}
@@ -359,6 +366,36 @@ export function AssetsEditor({
         kinds={medium === "pixels" ? INSERTABLE_SPRITE_KINDS : ["voxel"]}
         onInsert={medium === "pixels" ? insertSpriteFromLibrary : insertVoxelFromLibrary}
       />
+
+      {/* Styled delete confirm, in place of window.confirm. Rendered inside the
+          pane (position: fixed) so the tab stays one grid item. */}
+      {pendingDelete && (
+        <div
+          className={styles.confirmOverlay}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="assetDeleteMessage"
+        >
+          <div className={styles.confirmCard}>
+            <p id="assetDeleteMessage" className={styles.confirmMessage}>
+              {pendingDelete.message}
+            </p>
+            <div className={styles.confirmActions}>
+              <button type="button" className="cbx-btn" onClick={() => setPendingDelete(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className={`cbx-btn ${styles.confirmDelete}`}
+                onClick={performDelete}
+                autoFocus
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
