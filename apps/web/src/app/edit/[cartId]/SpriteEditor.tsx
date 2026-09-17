@@ -19,6 +19,7 @@ import {
   gradientSortOrder,
   isMaterialSwatchEnabled,
   materialProfileAt,
+  paletteForModel,
   MATERIAL_LEVELS,
   type SpriteSheet,
   type SpritePage,
@@ -464,14 +465,17 @@ export function SpriteEditor({
       ? Array.from({ length: normals.directionCount }, (_unused, index) => normals.colorHex(index))
       : Array.from({ length: MATERIAL_LEVELS }, (_unused, index) => materialMap.colorHex(index));
 
-  // Blank palette slots — an empty (uninitialised) entry reads as pure black, and
-  // the seeded palettes never use pure black — are hidden so a 256-colour model's
-  // long tail of empty swatches does not fill the picker. Only for real palettes;
-  // the normal/material pickers have no blanks.
+  // Hide *uninitialised* palette slots, not black ones. A fresh cart's palette is
+  // seeded only up to `seededCount` (16 or 64); a 256-colour model leaves the rest
+  // unwritten, and an unwritten slot reads as pure black. So a slot counts as
+  // uninitialised only when it is above the seeded range AND still that empty
+  // black — every seeded colour (blacks included) and anything a later seed wrote
+  // there (e.g. a texture CLUT) stays. Used/selected slots are kept by the picker.
+  const seededCount = paintsPalette ? paletteForModel({ paletteSize: sheet.paletteSize }).length : 0;
   const blankIndices = paintsPalette
     ? new Set(
         paletteColors.reduce<number[]>((acc, css, index) => {
-          if (css.toLowerCase() === "#000000") acc.push(index);
+          if (index >= seededCount && css.toLowerCase() === "#000000") acc.push(index);
           return acc;
         }, []),
       )
