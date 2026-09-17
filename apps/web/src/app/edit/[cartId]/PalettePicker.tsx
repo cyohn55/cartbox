@@ -40,6 +40,13 @@ interface PalettePickerProps {
   /** Whether the filter is on. Only meaningful alongside `usage`. */
   usedOnly?: boolean;
   onToggleUsedOnly?: () => void;
+  /**
+   * Indices that are blank (an empty/uninitialised palette slot) and so are
+   * always hidden — they are dead space, not colours. The selected index and any
+   * index the block actually paints are kept even if blank, so a slot you are
+   * working in never vanishes.
+   */
+  blank?: ReadonlySet<number>;
 }
 
 export function PalettePicker({
@@ -55,17 +62,24 @@ export function PalettePicker({
   usage,
   usedOnly = false,
   onToggleUsedOnly,
+  blank,
 }: PalettePickerProps) {
   const current = colors[selected] ?? "#000000";
   const naturalOrder = order ?? colors.map((_unused, index) => index);
 
-  // The active colour always survives the filter. Hiding the chip you are
-  // painting with — which happens the moment you pick an unused colour to start
-  // using it — would read as the palette losing your selection.
-  const displayOrder =
-    usedOnly && usage
-      ? naturalOrder.filter((index) => index === selected || (usage.get(index) ?? 0) > 0)
-      : naturalOrder;
+  // The active colour, and any colour the block actually uses, always survive
+  // the filters. Hiding the chip you are painting with — which happens the moment
+  // you pick a colour to start using it — would read as the palette losing your
+  // selection. Blank (empty) slots are always dropped; the "in use" filter
+  // additionally drops colours this block does not paint.
+  const displayOrder = naturalOrder.filter((index) => {
+    if (index === selected) return true;
+    const used = (usage?.get(index) ?? 0) > 0;
+    if (used) return true;
+    if (blank?.has(index)) return false;
+    if (usedOnly && usage) return false;
+    return true;
+  });
 
   const hiddenCount = naturalOrder.length - displayOrder.length;
 
@@ -146,7 +160,7 @@ export function PalettePicker({
       </div>
       {hiddenCount > 0 && (
         <p className={styles.inspectorHint} style={{ marginTop: 8 }}>
-          {hiddenCount} unused {hiddenCount === 1 ? "colour" : "colours"} hidden.
+          {hiddenCount} blank or unused {hiddenCount === 1 ? "colour" : "colours"} hidden.
         </p>
       )}
     </div>

@@ -1338,6 +1338,45 @@
   margin-bottom: 10px;
 }
 
+/* The layer dropdown that sits above the palette. */
+.layerSelectRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.layerSelectLabel {
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+
+.layerSelect {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--text);
+  background: var(--well);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.layerSelect:hover {
+  border-color: var(--accent);
+}
+
+.layerSelect:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .panelTitle {
   font-size: 13px;
   font-weight: 650;
