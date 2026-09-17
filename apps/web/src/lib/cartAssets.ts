@@ -35,10 +35,15 @@ export const SPRITE_BLOCK_KIND = "spriteBlock";
 export const VOXEL_GRID_KIND = "voxelGrid";
 
 /**
- * Sprite sizes an asset can name, as tiles per side — the same 8×8 / 16×16 /
- * 32×32 blocks the sprite editor authors.
+ * Sprite sizes an asset can name, as tiles per side — the blocks the sprite
+ * editor authors: 8×8, 16×16, 32×32, 64×64 and a full 128×128 page.
+ *
+ * The larger two (8 and 16 tiles) exist so a 3D scene's texture can be a single
+ * named, editable asset: an era model's mesh texture is 64×64 (PS1/N64) or a
+ * full 128×128 page (Xbox 360), and it is rebaked into the mesh from these
+ * pixels. 16 tiles is the ceiling because a sprite page is 16×16 tiles.
  */
-export const SPRITE_BLOCK_SIZES: readonly number[] = [1, 2, 4];
+export const SPRITE_BLOCK_SIZES: readonly number[] = [1, 2, 4, 8, 16];
 
 /**
  * Sanity ceiling on a tile index. The real bound is the live sheet's

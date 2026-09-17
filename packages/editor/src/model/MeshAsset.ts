@@ -41,6 +41,25 @@ export interface EncodedImage {
   readonly bytes: Uint8Array;
 }
 
+/**
+ * A rectangle of the cart's sprite sheet (page + pixel bounds) that a mesh
+ * texture is authored in. When set, the editor treats the scene's texture as an
+ * editable cart asset: it rebakes {@link MeshMaterial.baseColorImage} from these
+ * sprite pixels (through the cart palette) whenever the cart is playtested or
+ * saved, so editing the sprite in the Assets tab changes the 3D scene.
+ *
+ * It is purely an editor authoring link. The runtime never reads it — it samples
+ * the already-baked `baseColorImage` — so a published cart renders identically
+ * whether or not it carries this reference.
+ */
+export interface SpriteTextureRef {
+  readonly page: number;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
 /** A primitive's surface appearance: a base colour, optionally textured. */
 export interface MeshMaterial {
   readonly name: string;
@@ -48,6 +67,13 @@ export interface MeshMaterial {
   readonly baseColorFactor: readonly [number, number, number, number];
   /** The base-colour (albedo) texture, or null for a flat-coloured surface. */
   readonly baseColorImage: EncodedImage | null;
+  /**
+   * The sprite-sheet region this texture is authored from, or null/absent for a
+   * texture that is not sprite-backed (an imported mesh, a flat colour). Optional
+   * so the many materials that never carry one — codecs, world tiles, flat
+   * primitives — need not spell it out. See {@link SpriteTextureRef}.
+   */
+  readonly textureSprite?: SpriteTextureRef | null;
 }
 
 /** One triangle list with a single material. */
@@ -71,7 +97,7 @@ export interface MeshAsset {
 
 /** A neutral, fully-opaque white material — the default when a source names none. */
 export function defaultMaterial(name = "default"): MeshMaterial {
-  return { name, baseColorFactor: [1, 1, 1, 1], baseColorImage: null };
+  return { name, baseColorFactor: [1, 1, 1, 1], baseColorImage: null, textureSprite: null };
 }
 
 /** Total vertices across every primitive. */
@@ -181,6 +207,7 @@ interface SerializedMaterial {
   name: string;
   baseColorFactor: [number, number, number, number];
   image: { mime: string; bytes: string } | null;
+  textureSprite?: SpriteTextureRef | null;
 }
 interface SerializedPrimitive {
   positions: string;
@@ -214,6 +241,7 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
               bytes: bytesToBase64(primitive.material.baseColorImage.bytes),
             }
           : null,
+        textureSprite: primitive.material.textureSprite ?? null,
       },
     })),
   };
@@ -227,6 +255,22 @@ function toColor(value: unknown): [number, number, number, number] {
     return [value[0], value[1], value[2], value[3]] as [number, number, number, number];
   }
   return [1, 1, 1, 1];
+}
+
+/** Validate an untrusted sprite-texture reference, dropping anything malformed. */
+function toTextureSprite(value: unknown): SpriteTextureRef | null {
+  if (!value || typeof value !== "object") return null;
+  const ref = value as Record<string, unknown>;
+  const nums = [ref.page, ref.x, ref.y, ref.width, ref.height];
+  if (!nums.every((n) => typeof n === "number" && Number.isFinite(n) && n >= 0)) return null;
+  if ((ref.width as number) <= 0 || (ref.height as number) <= 0) return null;
+  return {
+    page: ref.page as number,
+    x: ref.x as number,
+    y: ref.y as number,
+    width: ref.width as number,
+    height: ref.height as number,
+  };
 }
 
 /**
@@ -272,6 +316,7 @@ export function deserializeMeshAsset(json: string): MeshAsset {
         baseColorImage: material.image
           ? { mime: String(material.image.mime), bytes: base64ToBytes(material.image.bytes) }
           : null,
+        textureSprite: toTextureSprite(material.textureSprite),
       },
     };
   });

@@ -11,7 +11,7 @@ import type { CollisionData } from "./CollisionMap";
 import { seedDemoCart } from "./seed";
 import { seedParallaxDemoCart } from "./parallaxSeed";
 import { seedPlatformerCart, PLATFORMER_COLLISION } from "./platformerSeed";
-import { seedPs1Cart, PS1_MESH_SIDECAR } from "./ps1Seed";
+import { seedPs1Cart, PS1_MESH_SIDECAR, PS1_ASSETS_SIDECAR } from "./ps1Seed";
 import { seedN64Cart, N64_MESH_SIDECAR } from "./n64Seed";
 import { seedXbox360Cart, XBOX360_MESH_SIDECAR } from "./xbox360Seed";
 
@@ -43,6 +43,14 @@ interface CartStarter {
    * what the sidecar column holds and what the runtime parses.
    */
   readonly mesh?: string;
+  /**
+   * A voxel/assets sidecar (the `voxelSidecar.ts` v2 envelope) a brand-new cart
+   * of this starter opens with, for the same reason `mesh` exists: some starter
+   * content lives beside the cartridge. The era scenes seed a named, editable
+   * sprite-block asset here — the scene's texture — so it appears in the Assets
+   * tab and the mesh can be rebaked from it.
+   */
+  readonly voxel?: string;
 }
 
 // Typed as a non-empty tuple so index 0 (the default) is statically known to
@@ -73,6 +81,7 @@ export const CART_STARTERS: readonly [CartStarter, ...CartStarter[]] = [
     description: "Textured 3D on the PS1 core — swimming floor, jittering edges, no depth buffer.",
     seed: seedPs1Cart,
     mesh: PS1_MESH_SIDECAR,
+    voxel: PS1_ASSETS_SIDECAR,
   },
   {
     id: "n64",

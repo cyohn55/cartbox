@@ -32,7 +32,9 @@ describe("blockSizeForImage", () => {
   });
 
   it("clamps oversized images to the largest block rather than refusing them", () => {
-    expect(blockSizeForImage(1000, 1000, TILE)).toBe(4);
+    // The largest block is now a full 128×128 page (16 tiles) — added so an era
+    // scene's texture is a single editable asset. See SPRITE_BLOCK_SIZES.
+    expect(blockSizeForImage(1000, 1000, TILE)).toBe(16);
   });
 });
 
