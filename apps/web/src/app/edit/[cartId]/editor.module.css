@@ -1429,7 +1429,7 @@
   /* Small fixed cells that pack as many per row as fit, so the palette is a
      compact strip rather than an eight-column block — roughly a tenth of its
      former footprint. */
-  grid-template-columns: repeat(auto-fill, var(--swatch-size, 40px));
+  grid-template-columns: repeat(auto-fill, var(--swatch-size, 60px));
   gap: 4px;
 }
 
