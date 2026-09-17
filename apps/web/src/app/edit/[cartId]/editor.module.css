@@ -1429,8 +1429,8 @@
   /* Small fixed cells that pack as many per row as fit, so the palette is a
      compact strip rather than an eight-column block — roughly a tenth of its
      former footprint. */
-  grid-template-columns: repeat(auto-fill, var(--swatch-size, 8px));
-  gap: 2px;
+  grid-template-columns: repeat(auto-fill, var(--swatch-size, 20px));
+  gap: 4px;
 }
 
 .swatch {
@@ -1457,10 +1457,10 @@
   position: absolute;
   top: 0;
   right: 0;
-  border-width: 0 4px 4px 0;
+  border-width: 0 6px 6px 0;
   border-style: solid;
   border-color: transparent var(--accent) transparent transparent;
-  border-top-right-radius: 2px;
+  border-top-right-radius: 3px;
   /* The notch is drawn in the accent colour, which is also the active-chip ring:
      the dark halo keeps it legible on a pale swatch and separates it from that
      ring when the material colour is the one selected. */
