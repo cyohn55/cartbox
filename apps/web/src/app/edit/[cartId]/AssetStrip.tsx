@@ -96,6 +96,7 @@ export function AssetStrip({
   // or unchanged name is a no-op, so a mis-fired rename never clears a name.
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
+  const [actionsOpen, setActionsOpen] = useState(false);
 
   const startRename = (id: string) => {
     const asset = assets.find((entry) => entry.id === id);
@@ -220,46 +221,89 @@ export function AssetStrip({
       </div>
 
       <div className={styles.assetActions}>
-        <button type="button" className="cbx-btn" onClick={onCreate} title="Create a new asset in this medium">
-          New
-        </button>
-        {onBrowseLibrary && (
+        {/* The asset verbs fold into one overflow menu so the strip stays a strip:
+            New, Library, Rename, Duplicate, Delete. */}
+        <div className={styles.fileMenu}>
           <button
             type="button"
             className="cbx-btn"
-            onClick={onBrowseLibrary}
-            title="Insert a ready-made asset from the library"
+            aria-haspopup="menu"
+            aria-expanded={actionsOpen}
+            onClick={() => setActionsOpen((open) => !open)}
+            onBlur={() => setActionsOpen(false)}
+            title="Asset actions"
+            aria-label="Asset actions"
           >
-            Library
+            ⋯
           </button>
-        )}
-        <button
-          type="button"
-          className="cbx-btn"
-          onClick={() => active && startRename(active.id)}
-          disabled={!active}
-          title={active ? `Rename “${active.name}”` : "Select an asset to rename it"}
-        >
-          Rename
-        </button>
-        <button
-          type="button"
-          className="cbx-btn"
-          onClick={() => active && onDuplicate(active.id)}
-          disabled={!active}
-          title={active ? `Duplicate “${active.name}”` : "Select an asset to duplicate it"}
-        >
-          Duplicate
-        </button>
-        <button
-          type="button"
-          className="cbx-btn"
-          onClick={() => active && onDelete(active.id)}
-          disabled={!active}
-          title={active ? `Delete “${active.name}”` : "Select an asset to delete it"}
-        >
-          Delete
-        </button>
+          {actionsOpen && (
+            <div className={styles.fileMenuList} role="menu">
+              <button
+                type="button"
+                role="menuitem"
+                className={styles.fileMenuItem}
+                onMouseDown={() => {
+                  onCreate();
+                  setActionsOpen(false);
+                }}
+              >
+                New
+              </button>
+              {onBrowseLibrary && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={styles.fileMenuItem}
+                  onMouseDown={() => {
+                    onBrowseLibrary();
+                    setActionsOpen(false);
+                  }}
+                >
+                  Library…
+                </button>
+              )}
+              <button
+                type="button"
+                role="menuitem"
+                className={styles.fileMenuItem}
+                disabled={!active}
+                onMouseDown={() => {
+                  if (!active) return;
+                  startRename(active.id);
+                  setActionsOpen(false);
+                }}
+              >
+                Rename
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className={styles.fileMenuItem}
+                disabled={!active}
+                onMouseDown={() => {
+                  if (!active) return;
+                  onDuplicate(active.id);
+                  setActionsOpen(false);
+                }}
+              >
+                Duplicate
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className={styles.fileMenuItem}
+                disabled={!active}
+                onMouseDown={() => {
+                  if (!active) return;
+                  onDelete(active.id);
+                  setActionsOpen(false);
+                }}
+              >
+                Delete
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
