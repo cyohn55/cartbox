@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   parsePaletteFile,
   parseAseprite,
@@ -53,16 +54,9 @@ import { MaterialSurface, NormalSurface, type PaintSurface } from "./paintSurfac
 import { MaterialBrushSurface } from "./materialBrushSurface";
 import { SpriteBlockSurface } from "./spriteBlockSurface";
 import { measureCoverage, sampleChannels, valueUsage } from "./layerCoverage";
-import { RailGroup, RailHint, RangeControl, SegmentedControl, ToolRail } from "./railControls";
+import { RailGroup, RangeControl, SegmentedControl, ToolRail } from "./railControls";
 import { SurfaceToolsPanel } from "./SurfaceToolsPanel";
-import {
-  InspectorHint,
-  InspectorPanel,
-  WorkbenchInspector,
-  WorkbenchRail,
-  type InspectorSlots,
-  type RailSlots,
-} from "./workbenchPanels";
+import { InspectorHint, InspectorPanel } from "./workbenchPanels";
 import { capabilitiesOf } from "./toolCapabilities";
 import { SPRITE_TOOL_SHORTCUTS, TOOLS, MAX_BRUSH_WEIGHT, MAX_TOLERANCE, type Tool } from "./tools";
 import { MAX_ZOOM, MIN_ZOOM } from "./PixelCanvas";
@@ -191,6 +185,17 @@ interface SpriteEditorProps {
    */
   color: number;
   onColorChange: (index: number) => void;
+  /**
+   * Where the compact Page/Size/Coverage/Zoom/Brush controls render — a slot the
+   * Assets strip provides so they sit on the medium toggle's line rather than in
+   * the editor's own rail. Null until the strip has mounted it.
+   */
+  controlsSlot?: HTMLElement | null;
+  /**
+   * Where the sprite-sheet import/export actions render — the asset "…" overflow
+   * menu, so every low-frequency file action lives under one button.
+   */
+  menuSlot?: HTMLElement | null;
 }
 
 export function SpriteEditor({
@@ -209,6 +214,8 @@ export function SpriteEditor({
   onSelectionChange,
   color,
   onColorChange,
+  controlsSlot,
+  menuSlot,
 }: SpriteEditorProps) {
   const { page, tile, tilesPerSide: spriteSize } = selection;
   const setPage = (next: SpritePage) => onSelectionChange({ ...selection, page: next });
@@ -685,72 +692,16 @@ export function SpriteEditor({
     }
   };
 
-  // Every rail control and inspector panel is handed to the shared containers by
-  // slot; they decide the order, identically for every tab. See workbenchLayout.
-  const rail: RailSlots = {
-    view: (
-      <>
-        <SegmentedControl
-          label="Page"
-          options={PAGE_OPTIONS}
-          selected={page}
-          onSelect={(id) => setPage(id === 1 ? 1 : 0)}
-        />
-        <SegmentedControl
-          label="Sprite size"
-          options={SPRITE_SIZES}
-          selected={spriteSize}
-          onSelect={setSpriteSize}
-        />
-      </>
-    ),
-
-    layer: (
-      <RailGroup label="Coverage">
-        <SegmentedControl
-          options={COVERAGE_OPTIONS}
-          selected={showCoverage ? "on" : "off"}
-          onSelect={(id) => setShowCoverage(id === "on")}
-          ariaLabel="Show other-layer coverage"
-        />
-        <RailHint>
-          {coverage.channels.length === 0
-            ? "Nothing painted on the other layers yet."
-            : showCoverage
-              ? `Ticked pixels carry ${coverage.channels.map((id) => LAYER_LABEL[id]).join(", ").toLowerCase()} data.`
-              : `This block also uses ${coverage.channels.map((id) => LAYER_LABEL[id]).join(", ").toLowerCase()}.`}
-        </RailHint>
-      </RailGroup>
-    ),
-
-    tool: <ToolRail label="Tool" tools={TOOLS} selected={tool} onSelect={setTool} />,
-
-    toolOptions: (
-      <>
-        <RangeControl
-          label="Zoom"
-          min={MIN_ZOOM * 100}
-          max={MAX_ZOOM * 100}
-          step={25}
-          value={Math.round(zoom * 100)}
-          onChange={(next) => setZoom(next / 100)}
-          ariaLabel="Canvas zoom"
-          display={`${Math.round(zoom * 100)}%`}
-        />
-        {toolControls.weighted && (
+  // --- Pinned tool bar ------------------------------------------------------
+  // The drawing tools and their contextual options ride above the canvas on
+  // every width, so they are always in reach; the rail no longer owns them.
+  const toolbar = (
+    <div className={styles.spriteToolbar}>
+      <ToolRail label="Tool" tools={TOOLS} selected={tool} onSelect={setTool} />
+      {toolControls.tolerant && (
+        <label className={styles.stripField}>
+          <span className={styles.stripFieldLabel}>Tolerance</span>
           <RangeControl
-            label="Brush size"
-            min={1}
-            max={MAX_BRUSH_WEIGHT}
-            value={weight}
-            onChange={setWeight}
-            ariaLabel="Brush size in pixels"
-            display={`${weight}px`}
-          />
-        )}
-        {toolControls.tolerant && (
-          <RangeControl
-            label="Tolerance"
             min={0}
             max={MAX_TOLERANCE}
             value={tolerance}
@@ -758,13 +709,15 @@ export function SpriteEditor({
             ariaLabel="Fill and magic-wand tolerance"
             display={`${tolerance}%`}
           />
-        )}
-        {/* Rectangle/ellipse can draw a hollow outline or a solid fill — the fill
-            is the fast path for blocking in shapes (previously only flood-fill
-            could fill an area, which needs an already-closed boundary). */}
-        {(tool === "rect" || tool === "ellipse") && (
+        </label>
+      )}
+      {/* Rectangle/ellipse can draw a hollow outline or a solid fill — the fill
+          is the fast path for blocking in shapes (previously only flood-fill
+          could fill an area, which needs an already-closed boundary). */}
+      {(tool === "rect" || tool === "ellipse") && (
+        <div className={styles.stripField}>
+          <span className={styles.stripFieldLabel}>Shape</span>
           <SegmentedControl
-            label="Shape"
             options={[
               { id: "outline", label: "Outline" },
               { id: "fill", label: "Fill" },
@@ -773,97 +726,132 @@ export function SpriteEditor({
             onSelect={(id) => setFillShape(id === "fill")}
             ariaLabel="Shape fill mode"
           />
-        )}
-      </>
-    ),
+        </div>
+      )}
+    </div>
+  );
 
-    io: (
-      <>
-        <RailGroup label="Image">
-          <div className={styles.toolGroup}>
-            <button type="button" className={styles.toolBtn} onClick={() => fileRef.current?.click()}>
-              <span className={styles.toolGlyph} aria-hidden>
-                ⭳
-              </span>
-              Import PNG
-            </button>
-            <button type="button" className={styles.toolBtn} onClick={exportPng}>
-              <span className={styles.toolGlyph} aria-hidden>
-                ⭱
-              </span>
-              Export PNG
-            </button>
-          </div>
-          <input ref={fileRef} type="file" accept="image/png,image/*" onChange={importPng} hidden />
-        </RailGroup>
-
-        {/* "Palette file", not "Palette": the inspector's colour picker is the
-            Palette, and two groups by that name on opposite sides of the screen
-            is precisely the kind of collision this tab had too much of. This one
-            loads a palette *file*. */}
-        <RailGroup label="Palette file">
-          <div className={styles.toolGroup}>
-            <button
-              type="button"
-              className={styles.toolBtn}
-              onClick={() => paletteFileRef.current?.click()}
-              title="Import a palette file (Lospec .hex / .gpl / .pal / .txt / .json)"
-            >
-              <span className={styles.toolGlyph} aria-hidden>
-                ⭳
-              </span>
-              Import palette
-            </button>
-          </div>
-          <input
-            ref={paletteFileRef}
-            type="file"
-            accept=".hex,.gpl,.pal,.txt,.json,text/plain,application/json"
-            onChange={importPalette}
-            hidden
+  // --- Compact strip controls -----------------------------------------------
+  // Page, sprite size, coverage, zoom and brush size portal up onto the medium
+  // toggle's line (the Assets strip), so they read as the sprite's top-level
+  // settings rather than one more rail stack.
+  const compactControls = (
+    <div className={styles.stripControls}>
+      <div className={styles.stripField}>
+        <span className={styles.stripFieldLabel}>Page</span>
+        <SegmentedControl
+          options={PAGE_OPTIONS}
+          selected={page}
+          onSelect={(id) => setPage(id === 1 ? 1 : 0)}
+          ariaLabel="Sprite page"
+        />
+      </div>
+      <div className={styles.stripField}>
+        <span className={styles.stripFieldLabel}>Sprite size</span>
+        <SegmentedControl
+          options={SPRITE_SIZES}
+          selected={spriteSize}
+          onSelect={setSpriteSize}
+          ariaLabel="Sprite size"
+        />
+      </div>
+      <div className={styles.stripField}>
+        <span className={styles.stripFieldLabel}>Coverage</span>
+        <SegmentedControl
+          options={COVERAGE_OPTIONS}
+          selected={showCoverage ? "on" : "off"}
+          onSelect={(id) => setShowCoverage(id === "on")}
+          ariaLabel="Show other-layer coverage"
+        />
+      </div>
+      <label className={styles.stripField}>
+        <span className={styles.stripFieldLabel}>Zoom</span>
+        <RangeControl
+          min={MIN_ZOOM * 100}
+          max={MAX_ZOOM * 100}
+          step={25}
+          value={Math.round(zoom * 100)}
+          onChange={(next) => setZoom(next / 100)}
+          ariaLabel="Canvas zoom"
+          display={`${Math.round(zoom * 100)}%`}
+        />
+      </label>
+      {toolControls.weighted && (
+        <label className={styles.stripField}>
+          <span className={styles.stripFieldLabel}>Brush size</span>
+          <RangeControl
+            min={1}
+            max={MAX_BRUSH_WEIGHT}
+            value={weight}
+            onChange={setWeight}
+            ariaLabel="Brush size in pixels"
+            display={`${weight}px`}
           />
-          {paletteNote && <RailHint>{paletteNote}</RailHint>}
-        </RailGroup>
+        </label>
+      )}
+    </div>
+  );
 
-        <RailGroup label="Aseprite">
-          <div className={styles.toolGroup}>
-            <button
-              type="button"
-              className={styles.toolBtn}
-              onClick={() => asepriteFileRef.current?.click()}
-              title="Import an Aseprite sprite (.aseprite / .ase): adopts its palette and lays every animation frame across the page's tiles"
-            >
-              <span className={styles.toolGlyph} aria-hidden>
-                ⭳
-              </span>
-              Import Aseprite
-            </button>
-            <button
-              type="button"
-              className={styles.toolBtn}
-              onClick={exportAseprite}
-              title="Export this page as an indexed .aseprite you can edit in Aseprite"
-            >
-              <span className={styles.toolGlyph} aria-hidden>
-                ⭱
-              </span>
-              Export Aseprite
-            </button>
-          </div>
-          <input
-            ref={asepriteFileRef}
-            type="file"
-            accept=".aseprite,.ase"
-            onChange={importAseprite}
-            hidden
-          />
-          {asepriteNote && <RailHint>{asepriteNote}</RailHint>}
-        </RailGroup>
-      </>
-    ),
-  };
+  // --- Sheet import/export --------------------------------------------------
+  // These fold into the asset "…" overflow menu (via a portal) so every
+  // low-frequency file action lives under one button. The hidden file inputs
+  // travel with them, refs and handlers intact.
+  const ioMenuItems = (
+    <>
+      <button
+        type="button"
+        role="menuitem"
+        className={styles.fileMenuItem}
+        onMouseDown={() => fileRef.current?.click()}
+      >
+        Import PNG
+      </button>
+      <button type="button" role="menuitem" className={styles.fileMenuItem} onMouseDown={exportPng}>
+        Export PNG
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        className={styles.fileMenuItem}
+        onMouseDown={() => paletteFileRef.current?.click()}
+        title="Import a palette file (Lospec .hex / .gpl / .pal / .txt / .json)"
+      >
+        Import palette…
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        className={styles.fileMenuItem}
+        onMouseDown={() => asepriteFileRef.current?.click()}
+        title="Import an Aseprite sprite (.aseprite / .ase): adopts its palette and lays every animation frame across the page's tiles"
+      >
+        Import Aseprite…
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        className={styles.fileMenuItem}
+        onMouseDown={() => void exportAseprite()}
+        title="Export this page as an indexed .aseprite you can edit in Aseprite"
+      >
+        Export Aseprite
+      </button>
+      {(paletteNote || asepriteNote) && (
+        <p className={styles.fileMenuHint}>{paletteNote || asepriteNote}</p>
+      )}
+      <input ref={fileRef} type="file" accept="image/png,image/*" onChange={importPng} hidden />
+      <input
+        ref={paletteFileRef}
+        type="file"
+        accept=".hex,.gpl,.pal,.txt,.json,text/plain,application/json"
+        onChange={importPalette}
+        hidden
+      />
+      <input ref={asepriteFileRef} type="file" accept=".aseprite,.ase" onChange={importAseprite} hidden />
+    </>
+  );
 
-  const inspector: InspectorSlots = {
+  const inspector = {
     // The generative tools (derive materials, pixelate, texture fill, LUT grade)
     // are procedural fills, so they live in the inspector's `generate` slot — which
     // folds them behind one "Generate" disclosure — rather than padding the rail's
@@ -1080,8 +1068,9 @@ export function SpriteEditor({
   };
 
   return (
-    <div className={styles.body}>
-      <WorkbenchRail slots={rail} />
+    <div className={styles.spriteEditor}>
+      {/* Tools pinned above the canvas, on every width. */}
+      {toolbar}
 
       <section className={styles.stage}>
         <PixelCanvas
@@ -1121,7 +1110,27 @@ export function SpriteEditor({
         </div>
       </section>
 
-      <WorkbenchInspector slots={inspector} />
+      {/* Side panels. On portrait they stack directly beneath the canvas, so the
+          layer selector, palette and material swatch — the things you reach for
+          between strokes — come first, then the navigator and the rest. */}
+      <aside className={styles.spritePanels}>
+        {inspector.palette}
+        {inspector.material}
+        {inspector.source}
+        {/* The generative fills keep their "Generate" disclosure, folded away by
+            default, exactly as the shared inspector rendered them. */}
+        <RailGroup label="Generate" collapsible>
+          {inspector.generate}
+        </RailGroup>
+        {inspector.preview}
+        {inspector.extras}
+        {inspector.hint}
+      </aside>
+
+      {/* The compact controls and the sheet I/O actions live in slots the Assets
+          strip owns, so they share its top line and its "…" menu. */}
+      {controlsSlot && createPortal(compactControls, controlsSlot)}
+      {menuSlot && createPortal(ioMenuItems, menuSlot)}
     </div>
   );
 }

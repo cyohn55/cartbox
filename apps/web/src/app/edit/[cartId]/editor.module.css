@@ -801,14 +801,151 @@
   min-height: 0;
 }
 
+/* --- Sprite editor: bespoke responsive layout -------------------------------
+ * The pixel editor does not use the shared rail/inspector grid. Its tools ride
+ * pinned above the canvas on every width, and on portrait the whole tab stacks
+ * into one column — tools, canvas, then the layer selector, palette and material
+ * swatch directly beneath it — so the controls you reach for between strokes are
+ * always the closest ones. Only this tab is affected; every 3D tab keeps the
+ * shared layout. */
+.spriteEditor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas:
+    "tools tools"
+    "stage panels";
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Scoped so the shared .stage class is untouched on other tabs. */
+.spriteEditor .stage {
+  grid-area: stage;
+}
+
+/* Pinned tool bar above the canvas — sticky so it stays in reach while the
+   panels (or the whole page, on portrait) scroll. */
+.spriteToolbar {
+  grid-area: tools;
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px 18px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+/* Tools lay out in a row in the pinned bar rather than the rail's column. */
+.spriteToolbar .toolGroup {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
+.spriteToolbar .groupLabel {
+  margin-bottom: 4px;
+}
+
+.spritePanels {
+  grid-area: panels;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  overflow-y: auto;
+}
+
+/* The side-panel collapse chevrons hide the panels and hand their width to the
+   canvas; the pinned tools stay, being the always-reachable set. */
+.workbench[data-inspector="hidden"] .spriteEditor,
+.workbench[data-rail="hidden"] .spriteEditor {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    "tools"
+    "stage";
+}
+
+.workbench[data-inspector="hidden"] .spritePanels,
+.workbench[data-rail="hidden"] .spritePanels {
+  display: none;
+}
+
+/* Portrait / tablet: one column, canvas-led, everything scrolls together. */
+@media (max-width: 900px) {
+  .spriteEditor {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "tools"
+      "stage"
+      "panels";
+    grid-auto-rows: min-content;
+    overflow-y: auto;
+  }
+
+  .spritePanels {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+}
+
 .assetStrip {
   display: flex;
   align-items: center;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 10px 16px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
   min-width: 0;
+}
+
+/* The pixel editor portals its compact controls into this slot, so page / size /
+   coverage / zoom / brush share the medium toggle's line. It sizes to content
+   and lets the asset list take the slack; on a narrow strip the row wraps. */
+.assetStripExtras {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.stripControls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 14px;
+  min-width: 0;
+}
+
+/* One compact control in the strip or the pinned tool bar: a small caps label
+   over its segmented / slider control. */
+.stripField {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.stripField .rangeRow {
+  min-width: 116px;
+}
+
+.stripFieldLabel {
+  font-size: 10px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+
+/* Portal target for the sheet import/export actions inside the "…" menu; its
+   children flow as ordinary menu items. */
+.fileMenuExtras {
+  display: contents;
 }
 
 /* The medium switch sizes to its content here rather than filling a 200px rail,

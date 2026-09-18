@@ -61,6 +61,17 @@ interface AssetStripProps {
   sheet: SpriteSheet;
   /** Bumped when the sheet changes, so sprite thumbnails stay current. */
   version: number;
+  /**
+   * Callback ref for the slot that hosts the pixel editor's compact controls
+   * (page, size, coverage, zoom, brush) — rendered here, on the medium toggle's
+   * line, via a portal from the editor. Only mounted for the pixels medium.
+   */
+  controlsRef?: (node: HTMLDivElement | null) => void;
+  /**
+   * Callback ref for the slot inside the "…" menu that hosts the pixel editor's
+   * import/export actions, so every file action shares one overflow button.
+   */
+  menuExtrasRef?: (node: HTMLDivElement | null) => void;
 }
 
 export function AssetStrip({
@@ -78,6 +89,8 @@ export function AssetStrip({
   emptyHint,
   sheet,
   version,
+  controlsRef,
+  menuExtrasRef,
 }: AssetStripProps) {
   const active = assets.find((asset) => asset.id === activeId) ?? null;
 
@@ -121,6 +134,10 @@ export function AssetStrip({
         onSelect={onMediumChange}
         ariaLabel="Asset medium"
       />
+
+      {/* The pixel editor portals its compact controls in here, so page / size /
+          coverage / zoom / brush sit on the medium toggle's line. */}
+      {medium === "pixels" && <div ref={controlsRef} className={styles.assetStripExtras} />}
 
       <div
         className={styles.assetList}
@@ -222,7 +239,9 @@ export function AssetStrip({
 
       <div className={styles.assetActions}>
         {/* The asset verbs fold into one overflow menu so the strip stays a strip:
-            New, Library, Rename, Duplicate, Delete. */}
+            New, Library, Rename, Duplicate, Delete, and the pixel editor's
+            import/export (portaled into the extras slot below). The list is kept
+            mounted and merely hidden so that portal target is always present. */}
         <div className={styles.fileMenu}>
           <button
             type="button"
@@ -236,73 +255,72 @@ export function AssetStrip({
           >
             ⋯
           </button>
-          {actionsOpen && (
-            <div className={styles.fileMenuList} role="menu">
+          <div className={styles.fileMenuList} role="menu" hidden={!actionsOpen}>
+            <button
+              type="button"
+              role="menuitem"
+              className={styles.fileMenuItem}
+              onMouseDown={() => {
+                onCreate();
+                setActionsOpen(false);
+              }}
+            >
+              New
+            </button>
+            {onBrowseLibrary && (
               <button
                 type="button"
                 role="menuitem"
                 className={styles.fileMenuItem}
                 onMouseDown={() => {
-                  onCreate();
+                  onBrowseLibrary();
                   setActionsOpen(false);
                 }}
               >
-                New
+                Library…
               </button>
-              {onBrowseLibrary && (
-                <button
-                  type="button"
-                  role="menuitem"
-                  className={styles.fileMenuItem}
-                  onMouseDown={() => {
-                    onBrowseLibrary();
-                    setActionsOpen(false);
-                  }}
-                >
-                  Library…
-                </button>
-              )}
-              <button
-                type="button"
-                role="menuitem"
-                className={styles.fileMenuItem}
-                disabled={!active}
-                onMouseDown={() => {
-                  if (!active) return;
-                  startRename(active.id);
-                  setActionsOpen(false);
-                }}
-              >
-                Rename
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                className={styles.fileMenuItem}
-                disabled={!active}
-                onMouseDown={() => {
-                  if (!active) return;
-                  onDuplicate(active.id);
-                  setActionsOpen(false);
-                }}
-              >
-                Duplicate
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                className={styles.fileMenuItem}
-                disabled={!active}
-                onMouseDown={() => {
-                  if (!active) return;
-                  onDelete(active.id);
-                  setActionsOpen(false);
-                }}
-              >
-                Delete
-              </button>
-            </div>
-          )}
+            )}
+            <button
+              type="button"
+              role="menuitem"
+              className={styles.fileMenuItem}
+              disabled={!active}
+              onMouseDown={() => {
+                if (!active) return;
+                startRename(active.id);
+                setActionsOpen(false);
+              }}
+            >
+              Rename
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className={styles.fileMenuItem}
+              disabled={!active}
+              onMouseDown={() => {
+                if (!active) return;
+                onDuplicate(active.id);
+                setActionsOpen(false);
+              }}
+            >
+              Duplicate
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className={styles.fileMenuItem}
+              disabled={!active}
+              onMouseDown={() => {
+                if (!active) return;
+                onDelete(active.id);
+                setActionsOpen(false);
+              }}
+            >
+              Delete
+            </button>
+            {medium === "pixels" && <div ref={menuExtrasRef} className={styles.fileMenuExtras} />}
+          </div>
         </div>
       </div>
     </div>
