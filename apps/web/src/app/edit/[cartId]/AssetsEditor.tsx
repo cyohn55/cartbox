@@ -140,6 +140,10 @@ export function AssetsEditor({
   const [color, setColor] = useState(1);
   const [activeVoxelId, setActiveVoxelId] = useState<string | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  // Slots the strip provides for the sprite editor to portal into: its compact
+  // controls sit on the medium toggle's line, its file actions in the "…" menu.
+  const [spriteControlsSlot, setSpriteControlsSlot] = useState<HTMLDivElement | null>(null);
+  const [spriteMenuSlot, setSpriteMenuSlot] = useState<HTMLDivElement | null>(null);
 
   const shape = shapeForMedium(medium);
   const sculptsOfShape = useMemo(() => sculptsForMedium(assets, medium), [assets, medium]);
@@ -324,6 +328,8 @@ export function AssetsEditor({
         emptyHint={EMPTY_HINT[medium]}
         sheet={sheet}
         version={revision}
+        controlsRef={setSpriteControlsSlot}
+        menuExtrasRef={setSpriteMenuSlot}
       />
 
       {medium === "pixels" ? (
@@ -343,6 +349,8 @@ export function AssetsEditor({
           onSelectionChange={setSelection}
           color={color}
           onColorChange={setColor}
+          controlsSlot={spriteControlsSlot}
+          menuSlot={spriteMenuSlot}
         />
       ) : (
         // Keyed on the sculpt and the lattice: the sculptor seeds its grid once on
