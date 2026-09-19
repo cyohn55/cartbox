@@ -8,9 +8,12 @@
 import { describe, expect, it } from "vitest";
 import {
   NORMAL_BANK,
+  NORMAL_DIRECTION_COUNT,
   NormalMap,
   StubCartEngine,
   nearestDirection,
+  normalColorHex,
+  normalDirectionRgb,
   normalVector,
   renderLitRgba,
   shade,
@@ -54,6 +57,21 @@ describe("normal directions", () => {
     expect(nearestDirection([0, 0, 1])).toBe(0);
     expect(nearestDirection([0, -1, 0.4])).toBe(1); // up (north)
     expect(nearestDirection([1, 0, 0.4])).toBe(3); // right (east)
+  });
+
+  it("encodes a direction as tangent-space normal-map RGB bytes", () => {
+    // Flat normal (0,0,1) -> (128,128,255): the neutral normal-map colour.
+    expect(normalDirectionRgb(0)).toEqual([128, 128, 255]);
+    // Every channel stays a valid byte, and the hex helper agrees with the bytes.
+    for (let d = 0; d < NORMAL_DIRECTION_COUNT; d += 1) {
+      const [r, g, b] = normalDirectionRgb(d);
+      for (const c of [r, g, b]) {
+        expect(c).toBeGreaterThanOrEqual(0);
+        expect(c).toBeLessThanOrEqual(255);
+      }
+      const hex = (v: number) => v.toString(16).padStart(2, "0");
+      expect(normalColorHex(d)).toBe(`#${hex(r)}${hex(g)}${hex(b)}`);
+    }
   });
 });
 
