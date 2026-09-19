@@ -55,6 +55,7 @@ import { MaterialBrushSurface } from "./materialBrushSurface";
 import { SpriteBlockSurface } from "./spriteBlockSurface";
 import { measureCoverage, sampleChannels, valueUsage } from "./layerCoverage";
 import { FloatingToolbar, type ToolbarDock } from "./FloatingToolbar";
+import { ToolbarColorButton } from "./ToolbarColorButton";
 import { RailGroup, RangeControl, SegmentedControl, ToolRail } from "./railControls";
 import { SurfaceToolsPanel } from "./SurfaceToolsPanel";
 import { InspectorHint, InspectorPanel } from "./workbenchPanels";
@@ -718,6 +719,24 @@ export function SpriteEditor({
   const toolbar = (
     <FloatingToolbar boundsRef={bodyRef} storageKey="cbx.spriteToolbar" onDockLayout={handleToolbarLayout}>
       <ToolRail label="Tool" tools={TOOLS} selected={tool} onSelect={setTool} />
+      {/* The armed colour, right in the palette: click it to pick another. */}
+      <ToolbarColorButton
+        label={
+          layer === "albedo"
+            ? "Colour"
+            : layer === "material"
+              ? "Material"
+              : layer === "normal"
+                ? "Direction"
+                : LAYER_LABEL[layer]
+        }
+        colors={paletteColors}
+        order={paletteOrder}
+        selected={activeValue}
+        onSelect={setActiveValue}
+        blank={blankIndices}
+        materials={paintsPalette ? materialColors : undefined}
+      />
       <label className={styles.stripField}>
         <span className={styles.stripFieldLabel}>Zoom</span>
         <RangeControl
