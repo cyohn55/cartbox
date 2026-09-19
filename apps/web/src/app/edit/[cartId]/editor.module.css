@@ -328,6 +328,14 @@
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
 
+/* The menu is kept mounted (its portal target must persist) and toggled with the
+   `hidden` attribute. `display: flex` above would otherwise override the browser's
+   default `[hidden] { display: none }`, leaving the menu permanently open — so the
+   closed state is spelled out explicitly here. */
+.fileMenuList[hidden] {
+  display: none;
+}
+
 .fileMenuItem {
   display: flex;
   align-items: center;
@@ -930,6 +938,29 @@
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--faint);
+}
+
+/* Compact dropdown in the strip (sprite size), matching the segmented controls'
+   height so the row stays level. */
+.stripSelect {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.stripSelect:hover {
+  border-color: var(--accent);
+}
+
+.stripSelect:focus-visible {
+  outline: none;
+  border-color: var(--accent);
 }
 
 /* Portal target for the sheet import/export actions inside the "…" menu; its
