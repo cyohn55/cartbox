@@ -16,6 +16,7 @@ import {
   N64_MESH_SIDECAR,
   N64_SCENE_TRIANGLES,
   PS1_MESH_SIDECAR,
+  XBOX360_ASSETS_SIDECAR,
   XBOX360_CODE,
   XBOX360_MESH_SIDECAR,
   XBOX360_SCENE_TRIANGLES,
@@ -23,7 +24,9 @@ import {
 } from "@cartbox/editor";
 import { MODELS, parseMeshScene } from "@cartbox/player";
 
+import { isSpriteBlockAsset } from "../apps/web/src/lib/cartAssets";
 import { defaultStarterForModel } from "../apps/web/src/lib/starter";
+import { decodeVoxelSidecar } from "../apps/web/src/lib/voxelSidecar";
 
 /** Read a PNG's [width, height] from its IHDR. */
 function pngSize(bytes: Uint8Array): [number, number] {
@@ -119,5 +122,24 @@ describe("the Xbox 360 foundry starter", () => {
   it("drives its own camera at HD framing", () => {
     expect(XBOX360_CODE).toContain("cartbox.meshcam");
     expect(XBOX360_CODE).toContain("1280x720");
+  });
+
+  it("emits lights and draws the relit badge each frame", () => {
+    // Option 1: a fresh 360 cart shows material reacting to light out of the box.
+    expect(XBOX360_CODE).toContain("cartbox.clearlights()");
+    expect(XBOX360_CODE).toContain("cartbox.sun(");
+    expect(XBOX360_CODE).toContain("cartbox.light(");
+    // Draws sprite 256 (page 1, tile 0) — the badge the engine relights.
+    expect(XBOX360_CODE).toMatch(/spr\(\s*(BADGE|256)/);
+  });
+
+  it("ships the Lit badge as an editable named asset", () => {
+    const list = decodeVoxelSidecar(XBOX360_ASSETS_SIDECAR).assets;
+    const badge = list.find((asset) => isSpriteBlockAsset(asset) && asset.name === "Lit badge");
+    expect(badge, "a \"Lit badge\" sprite block").toBeTruthy();
+    if (badge && isSpriteBlockAsset(badge)) {
+      expect(badge.page).toBe(1);
+      expect(badge.tilesPerSide).toBe(4); // 32px / 8px tiles
+    }
   });
 });
