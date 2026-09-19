@@ -845,6 +845,9 @@
   grid-template-areas: "stage panels";
   min-height: 0;
   overflow: hidden;
+  /* A docked palette reserves space via padding on its edge (set inline); keep it
+     inside the element so the grid shrinks rather than overflowing the tab. */
+  box-sizing: border-box;
 }
 
 /* Scoped so the shared .stage class is untouched on other tabs. */
