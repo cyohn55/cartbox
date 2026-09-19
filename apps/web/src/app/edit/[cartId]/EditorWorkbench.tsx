@@ -49,6 +49,7 @@ import {
 } from "@cartbox/editor";
 
 import { EditorDensityProvider, useDensityPreference } from "./editorDensity";
+import { OverflowMenuContext } from "./overflowMenu";
 import type { CartMeta } from "@/lib/cartMeta";
 import { DetailsPanel } from "./DetailsPanel";
 import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
@@ -487,10 +488,17 @@ function WorkbenchBody({
   // whether the "More" tab menu is open. Both are chrome state, not cart content.
   const [density, setDensity] = useDensityPreference();
   const [moreOpen, setMoreOpen] = useState(false);
-  // The File ("⋯") menu holds the low-frequency actions (Details, Download,
-  // shortcuts, the advanced-controls toggle) so the bar keeps only the three
-  // verbs a creator repeats — Run, Save, Publish — always visible.
+  // The one "⋯" menu holds Save, Publish and the low-frequency actions (Details,
+  // Download, shortcuts, the advanced-controls toggle), plus whatever the active
+  // tab folds in through the slot below. That leaves the bar with just Run and
+  // this one overflow button — no editor grows a second "⋯" of its own.
   const [fileOpen, setFileOpen] = useState(false);
+  // Portal target for the active tab's own overflow actions (the Assets strip is
+  // the one that uses it). Handed to that tab through OverflowMenuContext, it is
+  // what makes the strip's actions share this single button instead of adding a
+  // second one. The list is kept mounted (toggled with `hidden`) so this target,
+  // and anything portaled into it, is always present.
+  const [assetMenuSlot, setAssetMenuSlot] = useState<HTMLDivElement | null>(null);
 
   // The 3D tabs are hidden on a 2D model unless this cart already has data in
   // them, so an older cart never loses access to content it saved.
@@ -814,8 +822,49 @@ function WorkbenchBody({
     };
   }, [measureMore, moreOpen]);
 
+  // ---- the "⋯" overflow menu ----------------------------------------------
+
+  // Closed by an outside click, Escape, or choosing any item — the same robust
+  // handling the Assets strip settled on. onBlur is deliberately not used: it
+  // fires before the toggle button's own click (so a click while open would
+  // close then reopen) and it cannot see the actions the active tab portals in.
+  const fileMenuRef = useRef<HTMLDivElement>(null);
+  const fileListRef = useRef<HTMLDivElement>(null);
+  const closeFileMenu = useCallback(() => setFileOpen(false), []);
+  useEffect(() => {
+    if (!fileOpen) return undefined;
+    const onPointerDown = (event: PointerEvent) => {
+      if (fileMenuRef.current && !fileMenuRef.current.contains(event.target as Node)) setFileOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFileOpen(false);
+    };
+    // Any button inside the list closes the menu, including the import/export
+    // actions the sprite editor portals in — they run their own work on
+    // mousedown and cannot reach this state, so their native click bubbling to
+    // the list node is what dismisses the menu behind them.
+    const list = fileListRef.current;
+    const onListClick = (event: MouseEvent) => {
+      if ((event.target as HTMLElement).closest("button")) setFileOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    list?.addEventListener("click", onListClick);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+      list?.removeEventListener("click", onListClick);
+    };
+  }, [fileOpen]);
+
+  const overflowSlot = useMemo(
+    () => ({ node: assetMenuSlot, close: closeFileMenu }),
+    [assetMenuSlot, closeFileMenu],
+  );
+
   return (
     <EditorDensityProvider value={density}>
+    <OverflowMenuContext.Provider value={overflowSlot}>
     <div
       className={styles.workbench}
       data-inspector={inspectorHidden ? "hidden" : undefined}
@@ -973,7 +1022,8 @@ function WorkbenchBody({
               ↷
             </button>
           </div>
-          {/* The three verbs a creator repeats, always visible. */}
+          {/* Run stays on the bar — the verb a creator hits over and over while
+              iterating. Save and Publish moved into the "⋯" menu below. */}
           <button
             type="button"
             className="cbx-btn"
@@ -983,93 +1033,109 @@ function WorkbenchBody({
           >
             Run
           </button>
-          <button
-            type="button"
-            className="cbx-btn"
-            data-dirty={dirty ? "true" : undefined}
-            onClick={() => void persist(false)}
-            disabled={!runnable || saveState === "saving"}
-            title={runnable ? "Save to your account (Ctrl+S)" : "Save needs the TIC-80 engine"}
-          >
-            {saveLabel}
-          </button>
-          <button
-            type="button"
-            className="cbx-btn cbx-btn-accent"
-            onClick={() => void persist(true)}
-            disabled={!runnable || saveState === "saving"}
-            title="Save and list in the marketplace"
-          >
-            Publish
-          </button>
-          {/* Everything else — the advanced-controls toggle, Details, Download,
-              shortcuts — folds into one overflow menu so nine buttons become four. */}
-          <div className={styles.fileMenu}>
+          {/* The one overflow menu. It carries Save and Publish, the active tab's
+              own actions (portaled into the slot), and the low-frequency file
+              actions — so the bar never shows a second "⋯". The list is kept
+              mounted and toggled with `hidden` so its portal slot always exists;
+              the unsaved-work dot rides the button (see data-dirty in the CSS). */}
+          <div className={styles.fileMenu} ref={fileMenuRef}>
             <button
               type="button"
               className="cbx-btn"
+              data-dirty={dirty ? "true" : undefined}
               aria-haspopup="menu"
               aria-expanded={fileOpen}
               onClick={() => setFileOpen((open) => !open)}
-              onBlur={() => setFileOpen(false)}
-              title="More actions"
-              aria-label="More actions"
+              title={dirty ? "More actions — unsaved changes" : "More actions"}
+              aria-label={dirty ? "More actions — unsaved changes" : "More actions"}
             >
               ⋯
             </button>
-            {fileOpen && (
-              <div className={styles.fileMenuList} role="menu">
-                {/* The single headline lever over every tab's advanced controls.
-                    Named for what it does rather than a mode ("Simple"/"Full"). */}
-                <button
-                  type="button"
-                  role="menuitemcheckbox"
-                  aria-checked={density === "full"}
-                  className={styles.fileMenuItem}
-                  onMouseDown={() => {
-                    setDensity(density === "simple" ? "full" : "simple");
-                    setFileOpen(false);
-                  }}
-                >
-                  {density === "full" ? "Hide advanced controls" : "Show advanced controls"}
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  className={styles.fileMenuItem}
-                  onMouseDown={() => {
-                    setShowDetails(true);
-                    setFileOpen(false);
-                  }}
-                >
-                  Details… <span className={styles.fileMenuHint}>Ctrl+I</span>
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  className={styles.fileMenuItem}
-                  disabled={!runnable}
-                  onMouseDown={() => {
-                    if (!runnable) return;
-                    downloadCart();
-                    setFileOpen(false);
-                  }}
-                >
-                  Download .tic
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  className={styles.fileMenuItem}
-                  onMouseDown={() => {
-                    setShowHelp(true);
-                    setFileOpen(false);
-                  }}
-                >
-                  Keyboard shortcuts <span className={styles.fileMenuHint}>?</span>
-                </button>
-              </div>
-            )}
+            <div className={styles.fileMenuList} role="menu" hidden={!fileOpen} ref={fileListRef}>
+              {/* The two save verbs, first so they are the fastest to reach. */}
+              <button
+                type="button"
+                role="menuitem"
+                className={styles.fileMenuItem}
+                disabled={!runnable || saveState === "saving"}
+                onMouseDown={() => {
+                  if (!runnable || saveState === "saving") return;
+                  void persist(false);
+                  setFileOpen(false);
+                }}
+                title={runnable ? "Save to your account (Ctrl+S)" : "Save needs the TIC-80 engine"}
+              >
+                {saveLabel} <span className={styles.fileMenuHint}>Ctrl+S</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className={`${styles.fileMenuItem} ${styles.fileMenuItemAccent}`}
+                disabled={!runnable || saveState === "saving"}
+                onMouseDown={() => {
+                  if (!runnable || saveState === "saving") return;
+                  void persist(true);
+                  setFileOpen(false);
+                }}
+                title="Save and list in the marketplace"
+              >
+                Publish
+              </button>
+              <div className={styles.fileMenuSep} role="separator" />
+              {/* The active tab folds its own actions in here (the Assets strip
+                  does). Empty on every other tab, so nothing extra shows. It
+                  brings its own trailing divider when it has content. */}
+              <div ref={setAssetMenuSlot} className={styles.fileMenuExtras} />
+              {/* The single headline lever over every tab's advanced controls.
+                  Named for what it does rather than a mode ("Simple"/"Full"). */}
+              <button
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={density === "full"}
+                className={styles.fileMenuItem}
+                onMouseDown={() => {
+                  setDensity(density === "simple" ? "full" : "simple");
+                  setFileOpen(false);
+                }}
+              >
+                {density === "full" ? "Hide advanced controls" : "Show advanced controls"}
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className={styles.fileMenuItem}
+                onMouseDown={() => {
+                  setShowDetails(true);
+                  setFileOpen(false);
+                }}
+              >
+                Details… <span className={styles.fileMenuHint}>Ctrl+I</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className={styles.fileMenuItem}
+                disabled={!runnable}
+                onMouseDown={() => {
+                  if (!runnable) return;
+                  downloadCart();
+                  setFileOpen(false);
+                }}
+              >
+                Download .tic
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className={styles.fileMenuItem}
+                onMouseDown={() => {
+                  setShowHelp(true);
+                  setFileOpen(false);
+                }}
+              >
+                Keyboard shortcuts <span className={styles.fileMenuHint}>?</span>
+              </button>
+            </div>
           </div>
         </div>
       </header>
@@ -1330,6 +1396,7 @@ function WorkbenchBody({
         />
       )}
     </div>
+    </OverflowMenuContext.Provider>
     </EditorDensityProvider>
   );
 }

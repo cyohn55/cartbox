@@ -364,6 +364,27 @@
   cursor: not-allowed;
 }
 
+/* Publish keeps its accent identity in the menu — the one listed action that
+   ships the cart to the marketplace, so it reads apart from Save above it. */
+.fileMenuItemAccent {
+  color: var(--accent);
+  font-weight: 650;
+}
+
+.fileMenuItemAccent:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--well);
+}
+
+/* Hairline between menu groups (Save/Publish · the tab's actions · file actions).
+   `display: contents` on the extras slot means the slot itself adds no line, so
+   a group that folds in brings its own separator only when it has content. */
+.fileMenuSep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+
 .fileMenuHint {
   font-size: 11px;
   font-weight: 650;
@@ -824,6 +845,9 @@
   grid-template-areas: "stage panels";
   min-height: 0;
   overflow: hidden;
+  /* A docked palette reserves space via padding on its edge (set inline); keep it
+     inside the element so the grid shrinks rather than overflowing the tab. */
+  box-sizing: border-box;
 }
 
 /* Scoped so the shared .stage class is untouched on other tabs. */

@@ -77,9 +77,16 @@ interface FloatingToolbarProps {
   storageKey: string;
   title?: string;
   children: ReactNode;
+  /**
+   * Reports the space the palette should reserve so the editor can pad that side
+   * instead of letting the palette overlay it. `size` is 0 when free-floating (it
+   * overlays), otherwise the palette's thickness along the docked edge. Must be a
+   * stable reference (memoize it) so the reporting effect doesn't churn.
+   */
+  onDockLayout?: (dock: ToolbarDock, size: number) => void;
 }
 
-export function FloatingToolbar({ boundsRef, storageKey, title = "Tools", children }: FloatingToolbarProps) {
+export function FloatingToolbar({ boundsRef, storageKey, title = "Tools", children, onDockLayout }: FloatingToolbarProps) {
   const [dock, setDock] = useState<ToolbarDock>("top");
   const [pos, setPos] = useState({ x: 24, y: 24 });
   const [collapsed, setCollapsed] = useState(false);
@@ -105,6 +112,27 @@ export function FloatingToolbar({ boundsRef, storageKey, title = "Tools", childr
     if (!hydrated) return;
     saveState(storageKey, { dock, x: pos.x, y: pos.y, collapsed });
   }, [hydrated, storageKey, dock, pos, collapsed]);
+
+  // Report how much space the editor should reserve on the docked edge. Free
+  // floating reserves nothing (it overlays); a docked edge reserves the palette's
+  // thickness along it. Re-measured whenever the palette resizes (wrapping,
+  // collapsing, more tool options) or the dock changes.
+  useEffect(() => {
+    const el = barRef.current;
+    if (!el || !onDockLayout) return;
+    const report = () => {
+      if (dock === "free") {
+        onDockLayout("free", 0);
+        return;
+      }
+      const size = dock === "top" || dock === "bottom" ? el.offsetHeight : el.offsetWidth;
+      onDockLayout(dock, size);
+    };
+    report();
+    const observer = new ResizeObserver(report);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [dock, collapsed, onDockLayout]);
 
   // Edge-anchored docks are positioned from the bounds rect, so re-measure when
   // the window resizes or the editor region scrolls under the palette.

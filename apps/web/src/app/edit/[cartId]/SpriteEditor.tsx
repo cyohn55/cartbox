@@ -11,7 +11,7 @@
  * block and so a colour picked here is still the colour in the voxel sculptor.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import {
   parsePaletteFile,
@@ -54,7 +54,7 @@ import { MaterialSurface, NormalSurface, type PaintSurface } from "./paintSurfac
 import { MaterialBrushSurface } from "./materialBrushSurface";
 import { SpriteBlockSurface } from "./spriteBlockSurface";
 import { measureCoverage, sampleChannels, valueUsage } from "./layerCoverage";
-import { FloatingToolbar } from "./FloatingToolbar";
+import { FloatingToolbar, type ToolbarDock } from "./FloatingToolbar";
 import { RailGroup, RangeControl, SegmentedControl, ToolRail } from "./railControls";
 import { SurfaceToolsPanel } from "./SurfaceToolsPanel";
 import { InspectorHint, InspectorPanel } from "./workbenchPanels";
@@ -265,6 +265,22 @@ export function SpriteEditor({
   const asepriteFileRef = useRef<HTMLInputElement>(null);
   // The editor body, which the floating tool palette docks to and stays within.
   const bodyRef = useRef<HTMLDivElement>(null);
+  // How much space a docked palette reserves, so it pads the canvas aside rather
+  // than overlaying it. Free-floating reserves nothing. The callback is memoised
+  // so the palette's reporting effect stays stable.
+  const [toolbarLayout, setToolbarLayout] = useState<{ dock: ToolbarDock; size: number }>({ dock: "top", size: 0 });
+  const handleToolbarLayout = useCallback(
+    (dock: ToolbarDock, size: number) => setToolbarLayout({ dock, size }),
+    [],
+  );
+  const reserveStyle: CSSProperties = (() => {
+    const { dock, size } = toolbarLayout;
+    if (dock === "top") return { paddingTop: size };
+    if (dock === "bottom") return { paddingBottom: size };
+    if (dock === "left") return { paddingLeft: size };
+    if (dock === "right") return { paddingRight: size };
+    return {};
+  })();
 
   const bump = () => setVersion((current) => current + 1);
 
@@ -700,7 +716,7 @@ export function SpriteEditor({
   // creator can drag, dock to any edge, or collapse — so they are always in reach
   // without pinning them to one spot. The rail no longer owns them.
   const toolbar = (
-    <FloatingToolbar boundsRef={bodyRef} storageKey="cbx.spriteToolbar">
+    <FloatingToolbar boundsRef={bodyRef} storageKey="cbx.spriteToolbar" onDockLayout={handleToolbarLayout}>
       <ToolRail label="Tool" tools={TOOLS} selected={tool} onSelect={setTool} />
       <label className={styles.stripField}>
         <span className={styles.stripFieldLabel}>Zoom</span>
@@ -1078,8 +1094,9 @@ export function SpriteEditor({
   };
 
   return (
-    <div className={styles.spriteEditor} ref={bodyRef}>
-      {/* The tools ride in a floating palette that docks, moves and collapses. */}
+    <div className={styles.spriteEditor} ref={bodyRef} style={reserveStyle}>
+      {/* The tools ride in a floating palette that docks, moves and collapses.
+          When docked it reserves space via reserveStyle padding; free, it overlays. */}
       {toolbar}
 
       <section className={styles.stage}>

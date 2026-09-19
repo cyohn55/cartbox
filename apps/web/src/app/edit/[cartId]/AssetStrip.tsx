@@ -16,12 +16,14 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { SpriteSheet } from "@cartbox/editor";
 
 import type { CartAsset } from "@/lib/cartAssets";
 
 import { AssetThumb } from "./AssetThumb";
 import styles from "./editor.module.css";
+import { useOverflowMenuSlot } from "./overflowMenu";
 import { SegmentedControl } from "./railControls";
 
 /**
@@ -111,6 +113,14 @@ export function AssetStrip({
   const [draftName, setDraftName] = useState("");
   const [actionsOpen, setActionsOpen] = useState(false);
 
+  // The workbench top bar offers its single "⋯" menu as a portal target. When
+  // present, the strip's actions go *there* rather than growing a second "⋯" —
+  // the whole editor keeps one overflow button. With no provider (the strip
+  // rendered on its own), it falls back to its own menu below.
+  const overflowSlot = useOverflowMenuSlot();
+  const portalTarget = overflowSlot?.node ?? null;
+  const closeMenu = overflowSlot ? overflowSlot.close : () => setActionsOpen(false);
+
   // Close the "…" menu on an outside click or Escape. The toggle button used to
   // close it with onBlur, but that fires *before* the button's own onClick — so
   // clicking the button while open closed then immediately reopened it, and it
@@ -157,6 +167,113 @@ export function AssetStrip({
     setRenamingId(null);
   };
   const cancelRename = () => setRenamingId(null);
+
+  // The asset verbs, shared by both homes: the workbench's single "⋯" menu when
+  // it offers one, or the strip's own menu when it doesn't. New, Library, Rename,
+  // Duplicate, Delete, and the pixel editor's import/export (portaled into the
+  // extras slot). Each closes whichever menu it happens to live in.
+  const actionItems = (
+    <>
+      <button
+        type="button"
+        role="menuitem"
+        className={styles.fileMenuItem}
+        onMouseDown={() => {
+          onCreate();
+          closeMenu();
+        }}
+      >
+        New
+      </button>
+      {onBrowseLibrary && (
+        <button
+          type="button"
+          role="menuitem"
+          className={styles.fileMenuItem}
+          onMouseDown={() => {
+            onBrowseLibrary();
+            closeMenu();
+          }}
+        >
+          Library…
+        </button>
+      )}
+      <button
+        type="button"
+        role="menuitem"
+        className={styles.fileMenuItem}
+        disabled={!active}
+        onMouseDown={() => {
+          if (!active) return;
+          startRename(active.id);
+          closeMenu();
+        }}
+      >
+        Rename
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        className={styles.fileMenuItem}
+        disabled={!active}
+        onMouseDown={() => {
+          if (!active) return;
+          onDuplicate(active.id);
+          closeMenu();
+        }}
+      >
+        Duplicate
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        className={styles.fileMenuItem}
+        disabled={!active}
+        onMouseDown={() => {
+          if (!active) return;
+          onDelete(active.id);
+          closeMenu();
+        }}
+      >
+        Delete
+      </button>
+      {medium === "pixels" && <div ref={menuExtrasRef} className={styles.fileMenuExtras} />}
+    </>
+  );
+
+  // With a provider (the workbench), the strip owns no button of its own — just
+  // its items, portaled into the shared menu, plus a trailing divider so the file
+  // actions below read as a separate group. The portal waits for the slot node,
+  // so the strip never flashes its own button first. Standalone (no provider), it
+  // keeps its original self-contained "⋯" menu.
+  const ownMenu = (
+    <div className={styles.fileMenu} ref={menuRef}>
+      <button
+        type="button"
+        className="cbx-btn"
+        aria-haspopup="menu"
+        aria-expanded={actionsOpen}
+        onClick={() => setActionsOpen((open) => !open)}
+        title="Asset actions"
+        aria-label="Asset actions"
+      >
+        ⋯
+      </button>
+      <div className={styles.fileMenuList} role="menu" hidden={!actionsOpen} ref={listRef}>
+        {actionItems}
+      </div>
+    </div>
+  );
+  const assetActions = overflowSlot
+    ? portalTarget &&
+      createPortal(
+        <>
+          {actionItems}
+          <div className={styles.fileMenuSep} role="separator" />
+        </>,
+        portalTarget,
+      )
+    : ownMenu;
 
   return (
     <div className={styles.assetStrip}>
@@ -269,91 +386,11 @@ export function AssetStrip({
         )}
       </div>
 
-      <div className={styles.assetActions}>
-        {/* The asset verbs fold into one overflow menu so the strip stays a strip:
-            New, Library, Rename, Duplicate, Delete, and the pixel editor's
-            import/export (portaled into the extras slot below). The list is kept
-            mounted and merely hidden so that portal target is always present. */}
-        <div className={styles.fileMenu} ref={menuRef}>
-          <button
-            type="button"
-            className="cbx-btn"
-            aria-haspopup="menu"
-            aria-expanded={actionsOpen}
-            onClick={() => setActionsOpen((open) => !open)}
-            title="Asset actions"
-            aria-label="Asset actions"
-          >
-            ⋯
-          </button>
-          <div className={styles.fileMenuList} role="menu" hidden={!actionsOpen} ref={listRef}>
-            <button
-              type="button"
-              role="menuitem"
-              className={styles.fileMenuItem}
-              onMouseDown={() => {
-                onCreate();
-                setActionsOpen(false);
-              }}
-            >
-              New
-            </button>
-            {onBrowseLibrary && (
-              <button
-                type="button"
-                role="menuitem"
-                className={styles.fileMenuItem}
-                onMouseDown={() => {
-                  onBrowseLibrary();
-                  setActionsOpen(false);
-                }}
-              >
-                Library…
-              </button>
-            )}
-            <button
-              type="button"
-              role="menuitem"
-              className={styles.fileMenuItem}
-              disabled={!active}
-              onMouseDown={() => {
-                if (!active) return;
-                startRename(active.id);
-                setActionsOpen(false);
-              }}
-            >
-              Rename
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              className={styles.fileMenuItem}
-              disabled={!active}
-              onMouseDown={() => {
-                if (!active) return;
-                onDuplicate(active.id);
-                setActionsOpen(false);
-              }}
-            >
-              Duplicate
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              className={styles.fileMenuItem}
-              disabled={!active}
-              onMouseDown={() => {
-                if (!active) return;
-                onDelete(active.id);
-                setActionsOpen(false);
-              }}
-            >
-              Delete
-            </button>
-            {medium === "pixels" && <div ref={menuExtrasRef} className={styles.fileMenuExtras} />}
-          </div>
-        </div>
-      </div>
+      {/* With a provider the actions portal into the workbench menu, so nothing
+          lands here — the wrapper (and its gap in the strip) would only be an
+          empty box, so the portal is rendered on its own instead. The wrapper
+          stays for the standalone menu. */}
+      {overflowSlot ? assetActions : <div className={styles.assetActions}>{assetActions}</div>}
     </div>
   );
 }
