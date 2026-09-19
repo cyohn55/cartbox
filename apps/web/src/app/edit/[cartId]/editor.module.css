@@ -850,9 +850,15 @@
   box-sizing: border-box;
 }
 
-/* Scoped so the shared .stage class is untouched on other tabs. */
+/* Scoped so the shared .stage class is untouched on other tabs. A sprite larger
+   than the viewport (e.g. 128×128) must stay fully reachable: the stage scrolls,
+   and `safe` centering keeps the canvas centred when it fits but never clips its
+   top/left off-screen when it doesn't (plain centring makes those unreachable). */
 .spriteEditor .stage {
   grid-area: stage;
+  overflow: auto;
+  align-items: safe center;
+  justify-content: safe center;
 }
 
 .spritePanels {
