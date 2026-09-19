@@ -64,7 +64,12 @@ import { SHAPE_TOOLS, WEIGHTED_TOOLS, type Tool } from "./tools";
 // as the surface grows (8×8 → 45px cells, 32×32 → ~11px), keeping the stage
 // stable. Zoom multiplies it, so a 32×32 block can be worked on at any size.
 const TARGET_CANVAS_PX = 360;
-const MIN_CELL_PX = 6;
+// Floor on the per-pixel cell so a large block never renders sub-pixel. Kept
+// small enough that a full 128×128 block still meets the target (128 × 3 =
+// 384px ≈ the target) and so fits the stage; a bigger floor forced 128×128 to
+// 768px, past the viewport, so its bottom/right were unreachable. Zoom in for
+// finer cells.
+const MIN_CELL_PX = 3;
 export const MIN_ZOOM = 0.5;
 export const MAX_ZOOM = 4;
 const SELECTION_STROKE = "rgba(140, 200, 255, 0.95)";
