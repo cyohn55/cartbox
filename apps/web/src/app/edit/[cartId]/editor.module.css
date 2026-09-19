@@ -317,7 +317,8 @@
   position: absolute;
   top: calc(100% + 4px);
   right: 0;
-  z-index: 20;
+  /* Above the floating tool palette (z 30) so the menu is never covered by it. */
+  z-index: 40;
   display: flex;
   flex-direction: column;
   min-width: 220px;
@@ -810,19 +811,17 @@
 }
 
 /* --- Sprite editor: bespoke responsive layout -------------------------------
- * The pixel editor does not use the shared rail/inspector grid. Its tools ride
- * pinned above the canvas on every width, and on portrait the whole tab stacks
- * into one column — tools, canvas, then the layer selector, palette and material
- * swatch directly beneath it — so the controls you reach for between strokes are
- * always the closest ones. Only this tab is affected; every 3D tab keeps the
- * shared layout. */
+ * The pixel editor does not use the shared rail/inspector grid. The canvas and
+ * its panels fill the tab; the drawing tools ride in a floating palette that
+ * overlays the workspace and can be docked to any edge. On portrait the canvas
+ * and panels stack into one column. Only this tab is affected; every 3D tab
+ * keeps the shared layout. */
 .spriteEditor {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 320px;
-  grid-template-rows: auto minmax(0, 1fr);
-  grid-template-areas:
-    "tools tools"
-    "stage panels";
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-areas: "stage panels";
   min-height: 0;
   overflow: hidden;
 }
@@ -830,32 +829,6 @@
 /* Scoped so the shared .stage class is untouched on other tabs. */
 .spriteEditor .stage {
   grid-area: stage;
-}
-
-/* Pinned tool bar above the canvas — sticky so it stays in reach while the
-   panels (or the whole page, on portrait) scroll. */
-.spriteToolbar {
-  grid-area: tools;
-  position: sticky;
-  top: 0;
-  z-index: 6;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 10px 18px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
-}
-
-/* Tools lay out in a row in the pinned bar rather than the rail's column. */
-.spriteToolbar .toolGroup {
-  flex-direction: row;
-  flex-wrap: wrap;
-}
-
-.spriteToolbar .groupLabel {
-  margin-bottom: 4px;
 }
 
 .spritePanels {
@@ -873,13 +846,8 @@
 @media (max-width: 900px) {
   .spriteEditor {
     grid-template-columns: 1fr;
-    /* Reset the two-column row template: without this the stage keeps its
-       minmax(0, 1fr) track, which collapses to 0 once the stacked toolbar and
-       palette fill the height — dropping the canvas onto the palette. Here every
-       row sizes to its content and the column scrolls as one. */
     grid-template-rows: none;
     grid-template-areas:
-      "tools"
       "stage"
       "panels";
     grid-auto-rows: min-content;
@@ -890,6 +858,121 @@
     border-left: 0;
     border-top: 1px solid var(--border);
   }
+}
+
+/* --- Floating tool palette --------------------------------------------------
+ * A movable, dockable, collapsible palette holding the drawing tools. Fixed to
+ * the viewport but positioned from the editor body's rect, so it stays within
+ * the workspace. Orientation flips to a column when docked left/right. */
+.floatBar {
+  position: fixed;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  max-width: 100vw;
+  max-height: 100vh;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.floatBarHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--surface-raised);
+  border-bottom: 1px solid var(--border);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.floatBarHead:active {
+  cursor: grabbing;
+}
+
+.floatBarGrip {
+  font-size: 14px;
+  line-height: 1;
+  color: var(--faint);
+}
+
+.floatBarTitle {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.floatBarDocks {
+  display: flex;
+  gap: 2px;
+}
+
+.floatBarDockBtn,
+.floatBarToggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.floatBarDockBtn:hover,
+.floatBarToggle:hover {
+  color: var(--text);
+  background: var(--well);
+}
+
+.floatBarDockBtn[data-active] {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.floatBarBody {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px 18px;
+  padding: 10px 12px;
+  overflow: auto;
+}
+
+/* Docked left/right: stand the palette up into a scrolling column. */
+.floatBar[data-orient="vertical"] .floatBarBody {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+}
+
+/* Tools lay out in a row when the palette is horizontal; a column when vertical
+   (which is the toolGroup's natural direction, so only the row case overrides). */
+.floatBar[data-orient="horizontal"] .toolGroup {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
+.floatBar .groupLabel {
+  margin-bottom: 4px;
 }
 
 .assetStrip {
