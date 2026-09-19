@@ -84,7 +84,16 @@ export class MeshOverlaySurface implements DisplaySurface {
             : Promise.resolve(null),
         ),
       );
-      instances.push({ mesh: instance.mesh, model: instance.model, textures });
+      // Decode any authored normal map too, so the rasteriser can light the
+      // surface per-pixel (option 2). A failed decode falls back to null (flat).
+      const normalTextures = await Promise.all(
+        instance.mesh.primitives.map((primitive) =>
+          primitive.material.normalImage
+            ? decodeTexture(primitive.material.normalImage.mime, primitive.material.normalImage.bytes)
+            : Promise.resolve(null),
+        ),
+      );
+      instances.push({ mesh: instance.mesh, model: instance.model, textures, normalTextures });
     }
     return new MeshOverlaySurface(inner, width, height, scene, instances, renderer);
   }
@@ -158,7 +167,12 @@ export class MeshOverlaySurface implements DisplaySurface {
         [pose.rotation[0] * RAD_TO_DEG, pose.rotation[1] * RAD_TO_DEG, pose.rotation[2] * RAD_TO_DEG],
         [pose.scale, pose.scale, pose.scale],
       );
-      result.push({ mesh: authored.mesh, model: multiplyMat4(authored.model, local), textures: authored.textures });
+      result.push({
+        mesh: authored.mesh,
+        model: multiplyMat4(authored.model, local),
+        textures: authored.textures,
+        normalTextures: authored.normalTextures,
+      });
     }
     return result;
   }

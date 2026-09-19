@@ -169,6 +169,30 @@ describe("capTextures", () => {
     expect(capped[0]).toBe(scene[0]);
     expect(capped[1]).toBe(scene[1]);
   });
+
+  it("carries the normal map through, fit to the same budget", () => {
+    // A normal-map-only instance must survive capping — the cap once dropped
+    // normalTextures on rebuild, silently disabling 3D lighting under a budget.
+    const geometry = mesh(1, 1);
+    const scene: MeshSceneInstance[] = [
+      { ...instance(geometry, [texture(64)]), normalTextures: [texture(64)] },
+    ];
+    const capped = capTextures(scene, 4096, createTextureBudgetCache());
+    expect(capped[0]!.normalTextures).toBeDefined();
+    expect(capped[0]!.normalTextures![0]!.width).toBe(32); // fit like base colour
+  });
+
+  it("rebuilds when only the normal map needs shrinking", () => {
+    // The base colour already fits; the normal map does not — the instance must
+    // still be rebuilt so the fitted normal map reaches the renderer.
+    const scene: MeshSceneInstance[] = [
+      { ...instance(mesh(1, 1), [texture(8)]), normalTextures: [texture(64)] },
+    ];
+    const capped = capTextures(scene, 4096, createTextureBudgetCache());
+    expect(capped[0]).not.toBe(scene[0]);
+    expect(capped[0]!.textures![0]).toBe(scene[0]!.textures![0]); // colour untouched
+    expect(capped[0]!.normalTextures![0]!.width).toBe(32);
+  });
 });
 
 describe("capsConstrainScene", () => {

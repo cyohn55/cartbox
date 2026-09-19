@@ -140,27 +140,39 @@ export function capTextures(
   if (budgetBytes <= 0) return instances;
 
   let changed = false;
-  const capped = instances.map((instance) => {
-    const textures = instance.textures;
-    if (!textures) return instance;
-
-    let instanceChanged = false;
-    const fitted = textures.map((texture) => {
+  const fitList = (
+    list: readonly (DecodedTexture | null)[] | undefined,
+    onChange: () => void,
+  ): readonly (DecodedTexture | null)[] | undefined => {
+    if (!list) return list;
+    return list.map((texture) => {
       if (!texture) return texture;
       const memo = cache.get(texture);
       if (memo) {
-        if (memo !== texture) instanceChanged = true;
+        if (memo !== texture) onChange();
         return memo;
       }
       const result = fitTextureToBudget(texture, budgetBytes);
       cache.set(texture, result);
-      if (result !== texture) instanceChanged = true;
+      if (result !== texture) onChange();
       return result;
     });
+  };
+
+  const capped = instances.map((instance) => {
+    if (!instance.textures && !instance.normalTextures) return instance;
+    let instanceChanged = false;
+    const mark = () => {
+      instanceChanged = true;
+    };
+    // Normal maps are textures too — fit them to the same budget so a capped
+    // model's memory accounting (and its era softness) covers them as well.
+    const fitted = fitList(instance.textures, mark);
+    const fittedNormals = fitList(instance.normalTextures, mark);
 
     if (!instanceChanged) return instance;
     changed = true;
-    return { mesh: instance.mesh, model: instance.model, textures: fitted };
+    return { mesh: instance.mesh, model: instance.model, textures: fitted, normalTextures: fittedNormals };
   });
 
   return changed ? capped : instances;
