@@ -4158,25 +4158,32 @@ function halve(source) {
 function capTextures(instances, budgetBytes, cache) {
   if (budgetBytes <= 0) return instances;
   let changed = false;
-  const capped = instances.map((instance) => {
-    const textures = instance.textures;
-    if (!textures) return instance;
-    let instanceChanged = false;
-    const fitted = textures.map((texture) => {
+  const fitList = (list, onChange) => {
+    if (!list) return list;
+    return list.map((texture) => {
       if (!texture) return texture;
       const memo = cache.get(texture);
       if (memo) {
-        if (memo !== texture) instanceChanged = true;
+        if (memo !== texture) onChange();
         return memo;
       }
       const result = fitTextureToBudget(texture, budgetBytes);
       cache.set(texture, result);
-      if (result !== texture) instanceChanged = true;
+      if (result !== texture) onChange();
       return result;
     });
+  };
+  const capped = instances.map((instance) => {
+    if (!instance.textures && !instance.normalTextures) return instance;
+    let instanceChanged = false;
+    const mark = () => {
+      instanceChanged = true;
+    };
+    const fitted = fitList(instance.textures, mark);
+    const fittedNormals = fitList(instance.normalTextures, mark);
     if (!instanceChanged) return instance;
     changed = true;
-    return { mesh: instance.mesh, model: instance.model, textures: fitted };
+    return { mesh: instance.mesh, model: instance.model, textures: fitted, normalTextures: fittedNormals };
   });
   return changed ? capped : instances;
 }
@@ -4378,7 +4385,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
           (primitive) => primitive.material.baseColorImage ? decodeTexture(primitive.material.baseColorImage.mime, primitive.material.baseColorImage.bytes) : Promise.resolve(null)
         )
       );
-      instances.push({ mesh: instance.mesh, model: instance.model, textures });
+      const normalTextures = await Promise.all(
+        instance.mesh.primitives.map(
+          (primitive) => primitive.material.normalImage ? decodeTexture(primitive.material.normalImage.mime, primitive.material.normalImage.bytes) : Promise.resolve(null)
+        )
+      );
+      instances.push({ mesh: instance.mesh, model: instance.model, textures, normalTextures });
     }
     return new _MeshOverlaySurface(inner, width, height, scene, instances, renderer);
   }
@@ -4442,7 +4454,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         [pose.rotation[0] * RAD_TO_DEG, pose.rotation[1] * RAD_TO_DEG, pose.rotation[2] * RAD_TO_DEG],
         [pose.scale, pose.scale, pose.scale]
       );
-      result.push({ mesh: authored.mesh, model: multiplyMat4(authored.model, local), textures: authored.textures });
+      result.push({
+        mesh: authored.mesh,
+        model: multiplyMat4(authored.model, local),
+        textures: authored.textures,
+        normalTextures: authored.normalTextures
+      });
     }
     return result;
   }
