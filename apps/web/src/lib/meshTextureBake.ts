@@ -16,13 +16,25 @@
  * next runs somewhere that can encode.
  */
 
-import { deserializeMeshAsset, serializeMeshAsset, encodeRgbaPng, type MeshAsset } from "@cartbox/editor";
+import {
+  deserializeMeshAsset,
+  serializeMeshAsset,
+  encodeRgbaPng,
+  normalDirectionRgb,
+  type MeshAsset,
+} from "@cartbox/editor";
 
 /** The slice of a sprite sheet this module reads. `SpriteSheet` satisfies it. */
 export interface SheetLike {
   readonly sheetCols: number;
   readonly tileSize: number;
   getPixel(page: number, tile: number, x: number, y: number): number;
+}
+
+/** The normal directions this module reads to bake a normal map. `NormalMap`
+ *  satisfies it (its `getDirection`), so a test can pass a stub. */
+export interface NormalLike {
+  getDirection(page: number, tile: number, x: number, y: number): number;
 }
 
 /** Encodes tightly-packed RGBA into image bytes (PNG). */
@@ -68,6 +80,52 @@ export function spriteRegionToRgba(
     }
   }
   return out;
+}
+
+/**
+ * Read a `width`×`height` region of a sprite page's Normal layer as a tangent-space
+ * normal map (RGBA). Each pixel's authored direction is encoded with the shared
+ * `(n·0.5+0.5)·255` mapping, so an unpainted (flat) pixel is (128,128,255). Pure,
+ * mirroring {@link spriteRegionToRgba}'s tiling so a test can pass stubs.
+ */
+export function spriteNormalRegionToRgba(
+  normals: NormalLike,
+  sheet: Pick<SheetLike, "sheetCols" | "tileSize">,
+  page: number,
+  originX: number,
+  originY: number,
+  width: number,
+  height: number,
+): Uint8ClampedArray {
+  const out = new Uint8ClampedArray(width * height * 4);
+  const { sheetCols, tileSize } = sheet;
+  let o = 0;
+  for (let py = 0; py < height; py += 1) {
+    const gy = originY + py;
+    const tileRow = Math.floor(gy / tileSize);
+    const inY = gy % tileSize;
+    for (let px = 0; px < width; px += 1) {
+      const gx = originX + px;
+      const tile = tileRow * sheetCols + Math.floor(gx / tileSize);
+      const direction = normals.getDirection(page, tile, gx % tileSize, inY);
+      const [r, g, b] = normalDirectionRgb(direction);
+      out[o] = r;
+      out[o + 1] = g;
+      out[o + 2] = b;
+      out[o + 3] = 255;
+      o += 4;
+    }
+  }
+  return out;
+}
+
+/** Whether a normal-map RGBA buffer is entirely the flat normal (128,128,255) —
+ *  i.e. nothing was painted, so no normal map is worth carrying. */
+export function isFlatNormalRgba(rgba: Uint8ClampedArray): boolean {
+  for (let i = 0; i < rgba.length; i += 4) {
+    if (rgba[i] !== 128 || rgba[i + 1] !== 128 || rgba[i + 2] !== 255) return false;
+  }
+  return true;
 }
 
 /**
@@ -119,6 +177,7 @@ export async function rebakeMeshSidecar(
   rawSidecar: string | null | undefined,
   sheet: SheetLike,
   palette: Uint8Array,
+  normals?: NormalLike,
   encode: PngEncoder = encodePng,
 ): Promise<string | null | undefined> {
   if (!rawSidecar || !sidecarHasSpriteTexture(rawSidecar)) return rawSidecar;
@@ -154,9 +213,27 @@ export async function rebakeMeshSidecar(
           } catch {
             return primitive; // keep the last-baked image if encoding isn't possible here
           }
+
+          // Bake the Normal layer too (option 2), when we were handed the normals.
+          // A region with no painted normals reads as flat, so it carries no map —
+          // matching a seed that ships none, so a fresh cart is not marked dirty.
+          let normalImage = primitive.material.normalImage ?? null;
+          if (normals) {
+            const nrgba = spriteNormalRegionToRgba(normals, sheet, ref.page, ref.x, ref.y, ref.width, ref.height);
+            if (isFlatNormalRgba(nrgba)) {
+              normalImage = null;
+            } else {
+              try {
+                normalImage = { mime: "image/png", bytes: await encode(nrgba, ref.width, ref.height) };
+              } catch {
+                /* keep the last-baked normal map if encoding isn't possible here */
+              }
+            }
+          }
+
           return {
             ...primitive,
-            material: { ...primitive.material, baseColorImage: { mime: "image/png", bytes } },
+            material: { ...primitive.material, baseColorImage: { mime: "image/png", bytes }, normalImage },
           };
         }),
       );
