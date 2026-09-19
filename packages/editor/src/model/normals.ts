@@ -53,12 +53,21 @@ export function nearestDirection(vec: Vec3): number {
   return best;
 }
 
+/**
+ * Tangent-space normal-map RGB bytes for a direction: the standard
+ * `(n · 0.5 + 0.5) · 255` encoding, so a flat normal (0,0,1) is (128,128,255).
+ * Shared by the authoring swatches, the mesh normal-map bake, and the rasteriser
+ * that decodes it back (option 2).
+ */
+export function normalDirectionRgb(direction: number): [number, number, number] {
+  const [x, y, z] = normalVector(direction);
+  const channel = (value: number) => Math.round((value * 0.5 + 0.5) * 255);
+  return [channel(x), channel(y), channel(z)];
+}
+
 /** Tangent-space normal-map colour for a direction, for authoring swatches. */
 export function normalColorHex(direction: number): string {
-  const [x, y, z] = normalVector(direction);
-  const channel = (value: number) =>
-    Math.round((value * 0.5 + 0.5) * 255)
-      .toString(16)
-      .padStart(2, "0");
-  return `#${channel(x)}${channel(y)}${channel(z)}`;
+  const hex = (value: number) => value.toString(16).padStart(2, "0");
+  const [r, g, b] = normalDirectionRgb(direction);
+  return `#${hex(r)}${hex(g)}${hex(b)}`;
 }

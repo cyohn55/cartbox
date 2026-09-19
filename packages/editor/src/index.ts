@@ -111,6 +111,7 @@ export {
   normalVector,
   nearestDirection,
   normalColorHex,
+  normalDirectionRgb,
   type Vec3,
 } from "./model/normals";
 export { shade, type Rgb } from "./model/lighting";
