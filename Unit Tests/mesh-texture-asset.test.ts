@@ -33,6 +33,7 @@ import {
   rebakeMeshSidecar,
   sidecarHasSpriteTexture,
   spriteRegionToRgba,
+  type NormalLike,
   type SheetLike,
 } from "../apps/web/src/lib/meshTextureBake";
 
@@ -53,6 +54,17 @@ function stubSheet(indices: Uint8Array, size: number): SheetLike {
       const gx = col * 8 + x;
       const gy = row * 8 + y;
       return indices[gy * size + gx] ?? 0;
+    },
+  };
+}
+
+/** A normals source over a flat direction array, mirroring {@link stubSheet}. */
+function stubNormals(directions: Uint8Array, size: number): NormalLike {
+  return {
+    getDirection: (_page, tile, x, y) => {
+      const gx = (tile % 16) * 8 + x;
+      const gy = Math.floor(tile / 16) * 8 + y;
+      return directions[gy * size + gx] ?? 0;
     },
   };
 }
@@ -248,6 +260,28 @@ describe("rebakeMeshSidecar", () => {
     const before = firstMesh(sidecar).primitives[0]!.material.baseColorImage!.bytes;
     const after = firstMesh(rebaked!).primitives[0]!.material.baseColorImage!.bytes;
     expect(after).not.toEqual(before);
+  });
+
+  it("bakes a normal map when the region's Normal layer is painted", async () => {
+    const sidecar = sidecarWithTexture();
+    const sheet = stubSheet(Uint8Array.from(indices, (i) => TEXTURE_CLUT_BASE + i), size);
+    const directions = new Uint8Array(size * size); // flat…
+    directions[0] = 3; // …except one painted texel (a non-flat direction)
+    const rebaked = await rebakeMeshSidecar(sidecar, sheet, paletteWithClut(clut), stubNormals(directions, size));
+    const normalImage = firstMesh(rebaked!).primitives[0]!.material.normalImage;
+    expect(normalImage, "a normal map was baked").toBeTruthy();
+    expect(normalImage!.mime).toBe("image/png");
+  });
+
+  it("adds no normal map for a flat (unpainted) region — no phantom dirty", async () => {
+    const sidecar = sidecarWithTexture();
+    const sheet = stubSheet(Uint8Array.from(indices, (i) => TEXTURE_CLUT_BASE + i), size);
+    const flat = new Uint8Array(size * size); // every pixel direction 0 = flat
+    const rebaked = await rebakeMeshSidecar(sidecar, sheet, paletteWithClut(clut), stubNormals(flat, size));
+    // The albedo is untouched and no normal map is carried, so the sidecar is
+    // byte-identical to the seed — a fresh cart is never dirtied by the normal path.
+    expect(rebaked).toBe(sidecar);
+    expect(firstMesh(rebaked!).primitives[0]!.material.normalImage ?? null).toBeNull();
   });
 
   it("returns a sidecar with no sprite-backed texture unchanged", async () => {
