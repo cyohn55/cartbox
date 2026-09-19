@@ -865,6 +865,11 @@
 @media (max-width: 900px) {
   .spriteEditor {
     grid-template-columns: 1fr;
+    /* Reset the two-column row template: without this the stage keeps its
+       minmax(0, 1fr) track, which collapses to 0 once the stacked toolbar and
+       palette fill the height — dropping the canvas onto the palette. Here every
+       row sizes to its content and the column scrolls as one. */
+    grid-template-rows: none;
     grid-template-areas:
       "tools"
       "stage"
