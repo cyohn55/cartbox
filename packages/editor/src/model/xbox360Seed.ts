@@ -22,14 +22,14 @@
  * relief — the blocky, high-contrast readability the generation's shooters favoured.
  */
 
-import type { CartEngine } from "../engine/CartEngine";
+import { MATERIAL_LEVELS, type CartEngine } from "../engine/CartEngine";
+import { nearestDirection } from "./normals";
 import {
   serializeMeshAsset,
   type MeshAsset,
   type MeshPrimitive,
 } from "./MeshAsset";
 import {
-  assetsSidecarForTexture,
   bakeIndexedTextureImage,
   indexedTextureSpriteRef,
   paintIndexedTexture,
@@ -133,12 +133,47 @@ function buildGrungeTexture(): IndexedTexture {
 const GRUNGE_TEXTURE: IndexedTexture = buildGrungeTexture();
 
 /** The cart's assets sidecar carrying the editable "360 grunge" sprite block (a full page). */
-export const XBOX360_ASSETS_SIDECAR: string = assetsSidecarForTexture(
-  "xbox360-grunge",
-  "360 grunge",
-  GRUNGE_SIZE,
-  GRUNGE_PAGE,
-);
+/** The lit demo badge — a normal-mapped glossy disc on page 1, drawn over the
+ *  scene and relit each frame so a fresh 360 cart shows material reacting to
+ *  light out of the box. 32×32 (4 tiles per side). */
+const BADGE_PAGE = 1 as const;
+const BADGE_SIZE = 32;
+const BADGE_TILES = BADGE_SIZE / 8;
+/** Palette index the badge's albedo uses — a steel blue-grey, below the texture
+ *  CLUT base so it never collides with the grunge ramp. */
+const BADGE_METAL_INDEX = 10;
+
+/**
+ * Two named, editable sprite-block assets: the "360 grunge" texture the foundry
+ * is skinned from, and the "Lit badge" the cart draws relit over the scene.
+ * Written directly as the voxel sidecar's v2 JSON — the shape must match
+ * `apps/web/src/lib/voxelSidecar.ts` and `cartAssets.ts` (a round-trip test
+ * guards it), the same contract {@link assetsSidecarForTexture} emits.
+ */
+export const XBOX360_ASSETS_SIDECAR: string = JSON.stringify({
+  kind: "cartbox.voxel",
+  version: 2,
+  assets: [
+    {
+      kind: "spriteBlock",
+      id: "xbox360-grunge",
+      name: "360 grunge",
+      bank: 0,
+      page: GRUNGE_PAGE,
+      tile: 0,
+      tilesPerSide: GRUNGE_SIZE / 8,
+    },
+    {
+      kind: "spriteBlock",
+      id: "xbox360-badge",
+      name: "Lit badge",
+      bank: 0,
+      page: BADGE_PAGE,
+      tile: 0,
+      tilesPerSide: BADGE_TILES,
+    },
+  ],
+});
 
 /** Cargo crates and blocks, as [x, y, z, halfX, halfY, halfZ]. */
 const CRATES: ReadonlyArray<readonly [number, number, number, number, number, number]> = [
@@ -252,9 +287,16 @@ export const XBOX360_CODE = `-- title:  Xbox 360 foundry
 -- to point at here -- the 360 is the modern render path -- so this is about the
 -- look: desaturated realism, dense geometry, sharp full-detail textures.
 
+-- The "Lit badge" (Assets tab, page 2) is a normal-mapped glossy disc. Each
+-- frame we emit lights and draw it with spr(); the runtime relights its authored
+-- Normal + Material layers, so the highlight sweeps as the light orbits. Paint
+-- those layers to change how it catches the light -- that is the 360's signature.
 local t = 0
 local PITCH = 0.36
 local DIST  = 19.0
+local BADGE = 256            -- page 2, tile 0 (id = page*256 + tile)
+local BX, BY = 1064, 452     -- where the 128px badge sits (4x scale of 32px)
+local CX, CY = BX + 64, BY + 64
 
 function TIC()
  t = t + 1
@@ -262,9 +304,18 @@ function TIC()
  rect(0, 240, 1280, 200, 2)    -- haze band
  rect(0, 440, 1280, 280, 3)    -- ground-glow / smog near the horizon (bloom-ish)
  cartbox.meshcam(t / 380, PITCH, DIST, 0)
+
+ -- Lighting: a cool key from the upper-left, plus a warm point light that orbits
+ -- the badge so its specular highlight moves -- proof the material is lit.
+ cartbox.clearlights()
+ cartbox.sun(-0.5, -0.4, 0.75, 150, 175, 230, 0.7)
+ local a = t / 42
+ cartbox.light(CX + math.cos(a) * 96, CY + math.sin(a) * 96, 130, 255, 236, 206, 40, 1.7)
+ spr(BADGE, BX, BY, 0, 4, 0, 0, 4, 4)   -- draw the badge, relit by the engine
+
  print("Xbox 360 -- 1280x720 HD", 24, 24, 12)
  print("z-buffer . perspective . filtered . full-detail textures", 24, 48, 13)
- print("desaturated realism -- the modern render tier", 24, 684, 12)
+ print("Lit badge -> paint its Normal + Material layers to relight it", 24, 684, 12)
 end
 `;
 
@@ -277,6 +328,39 @@ export function seedXbox360Cart(engine: CartEngine): void {
   engine.setCode(XBOX360_CODE);
   applyFoundryPalette(engine);
   paintIndexedTexture(engine, GRUNGE_TEXTURE, GRUNGE_PAGE);
+  seedLitBadge(engine);
+}
+
+/**
+ * Paint the "Lit badge": a glossy steel disc on page 1 whose Normal layer is a
+ * dome (surface normals bulging out from the centre) and whose Material layer is
+ * shiny (high specular, low roughness, a height dome). Drawn relit by the cart,
+ * it makes the era's normal-mapped-under-dynamic-light look visible immediately,
+ * and gives the creator a ready surface to repaint.
+ */
+function seedLitBadge(engine: CartEngine): void {
+  // Steel albedo for the disc — one palette entry, distinct from the sky ramp.
+  engine.setPaletteColor(BADGE_METAL_INDEX, 0x8b, 0x93, 0xa2);
+  const sheetCols = 16; // a sprite page is 16×16 tiles
+  const radius = BADGE_SIZE / 2;
+  for (let gy = 0; gy < BADGE_SIZE; gy += 1) {
+    for (let gx = 0; gx < BADGE_SIZE; gx += 1) {
+      const u = (gx + 0.5 - radius) / radius;
+      const v = (gy + 0.5 - radius) / radius;
+      const d2 = u * u + v * v;
+      if (d2 > 1) continue; // outside the disc stays transparent (colour 0)
+      const tile = (gy >> 3) * sheetCols + (gx >> 3);
+      const lx = gx & 7;
+      const ly = gy & 7;
+      const nz = Math.sqrt(Math.max(0, 1 - d2));
+      engine.setPixel(BADGE_PAGE, tile, lx, ly, BADGE_METAL_INDEX);
+      // Screen y runs downward, so flip v to make the dome read as lit-from-above.
+      engine.setNormal(BADGE_PAGE, tile, lx, ly, nearestDirection([u, -v, nz]));
+      engine.setMaterial("specular", BADGE_PAGE, tile, lx, ly, MATERIAL_LEVELS - 1);
+      engine.setMaterial("roughness", BADGE_PAGE, tile, lx, ly, 3);
+      engine.setMaterial("height", BADGE_PAGE, tile, lx, ly, Math.round(nz * (MATERIAL_LEVELS - 1)));
+    }
+  }
 }
 
 /**

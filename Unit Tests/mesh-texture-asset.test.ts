@@ -165,12 +165,13 @@ describe("every era scene ships an editable, sprite-backed texture", () => {
     });
 
     it(`${era}: seeds a named sprite block the web app decodes`, () => {
+      // The texture asset is named after the era. A scene may ship extra assets
+      // alongside it (the 360 also seeds a "Lit badge"), so find it by name
+      // rather than assuming it is the only one.
       const list = decodeVoxelSidecar(assets).assets;
-      expect(list).toHaveLength(1);
-      const block = list[0]!;
-      expect(isSpriteBlockAsset(block)).toBe(true);
-      expect(block.name).toBe(era);
-      if (isSpriteBlockAsset(block)) expect(block.tilesPerSide).toBe(tiles);
+      const block = list.find((asset) => isSpriteBlockAsset(asset) && asset.name === era);
+      expect(block, `a "${era}" sprite block`).toBeTruthy();
+      if (block && isSpriteBlockAsset(block)) expect(block.tilesPerSide).toBe(tiles);
     });
 
     it(`${era}: still parses into a drawable scene`, () => {
