@@ -57,6 +57,9 @@ export interface RenderMeshOptions {
   readonly textures?: readonly (DecodedTexture | null)[];
   /** Decoded tangent-space normal map per primitive (index-aligned), or null. */
   readonly normalTextures?: readonly (DecodedTexture | null)[];
+  /** Decoded material map per primitive (RGBA: R=height, G=specular, B=roughness,
+   *  A=emissive), or null entries. Drives the specular highlight + emissive floor. */
+  readonly materialTextures?: readonly (DecodedTexture | null)[];
   /** Background clear colour RGBA (default transparent). */
   readonly background?: readonly [number, number, number, number];
 }
@@ -191,6 +194,12 @@ const IDENTITY_3X3: readonly number[] = [1, 0, 0, 0, 1, 0, 0, 0, 1];
  */
 function normalMatrix3x3(model: Mat4): readonly number[] {
   return [model[0]!, model[1]!, model[2]!, model[4]!, model[5]!, model[6]!, model[8]!, model[9]!, model[10]!];
+}
+
+/** Normalise a 3-vector, returning a unit +Z when it is degenerate. */
+function normalizeVec3(x: number, y: number, z: number): [number, number, number] {
+  const len = Math.hypot(x, y, z);
+  return len < 1e-8 ? [0, 0, 1] : [x / len, y / len, z / len];
 }
 
 /** A vertex after transforms: view-space z (for clipping) + clip-space + attributes. */
@@ -336,9 +345,28 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
   const ll = Math.hypot(lx, ly, lz) || 1;
   const light: [number, number, number] = [lx / ll, ly / ll, lz / ll];
 
+  // World-space direction towards the viewer (see renderMeshScene): the third
+  // row of the view rotation, treated as directional.
+  const viewDir = normalizeVec3(view[2]!, view[6]!, view[10]!);
+
   // The single mesh has no model transform, so model-view is the plain view and
   // normals need no re-basing: reuse the scene path with an identity model.
-  drawMesh(mesh, viewProj, view, IDENTITY_3X3, size, size, out, depth, options.textures ?? null, options.normalTextures ?? null, light, ambient);
+  drawMesh(
+    mesh,
+    viewProj,
+    view,
+    IDENTITY_3X3,
+    size,
+    size,
+    out,
+    depth,
+    options.textures ?? null,
+    options.normalTextures ?? null,
+    options.materialTextures ?? null,
+    light,
+    viewDir,
+    ambient,
+  );
 }
 
 // --- Scene rendering: many placed meshes through one camera -----------------
@@ -356,6 +384,14 @@ export interface MeshSceneInstance {
    * where null, shading falls back to the geometric normal, unchanged.
    */
   readonly normalTextures?: readonly (DecodedTexture | null)[];
+  /**
+   * Decoded material map per primitive (index-aligned): RGBA where R = height,
+   * G = specular strength, B = roughness, A = emissive. Where present, the
+   * rasteriser adds a view-dependent specular highlight and lifts the surface to
+   * at least its emissive floor (option 2, slice 5); where null, shading is the
+   * plain diffuse path, unchanged.
+   */
+  readonly materialTextures?: readonly (DecodedTexture | null)[];
 }
 
 /**
@@ -462,6 +498,12 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
   const ll = Math.hypot(lx, ly, lz) || 1;
   const light: [number, number, number] = [lx / ll, ly / ll, lz / ll];
 
+  // World-space direction from the surface *towards* the viewer, for the specular
+  // half-vector. A look-at view maps this world direction to view +Z, so it is the
+  // third row of the view rotation (V^T·(0,0,1)); treated as directional (camera
+  // at infinity), which is what the flat 2D lit path assumes too.
+  const viewDir = normalizeVec3(view[2]!, view[6]!, view[10]!);
+
   // With a depth buffer, order does not matter: rasterise as we project, which
   // allocates nothing. Without one, every triangle in the *whole scene* has to
   // be collected and sorted back-to-front before any of it is drawn — an
@@ -475,10 +517,11 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const normalBasis = normalMatrix3x3(instance.model);
     const textures = instance.textures ?? null;
     const normalTextures = instance.normalTextures ?? null;
+    const materialTextures = instance.materialTextures ?? null;
     if (style.zBuffer) {
-      drawMesh(instance.mesh, mvp, modelView, normalBasis, width, height, out, depth, textures, normalTextures, light, ambient, style);
+      drawMesh(instance.mesh, mvp, modelView, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, light, viewDir, ambient, style);
     } else {
-      eachTriangle(instance.mesh, mvp, modelView, normalBasis, textures, normalTextures, (triangle) => queue.push(triangle));
+      eachTriangle(instance.mesh, mvp, modelView, normalBasis, textures, normalTextures, materialTextures, (triangle) => queue.push(triangle));
     }
   }
 
@@ -497,8 +540,10 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
         triangle.texture,
         triangle.normalTexture,
         triangle.tangent,
+        triangle.materialTexture,
         triangle.base,
         light,
+        viewDir,
         ambient,
         style,
       );
@@ -523,6 +568,8 @@ interface PendingTriangle {
   /** World-space surface tangent (constant per triangle), for the TBN frame, or
    *  null when there is no normal map or the UVs are degenerate. */
   readonly tangent: readonly [number, number, number] | null;
+  /** Packed material map (specular/roughness/emissive), or null for plain diffuse. */
+  readonly materialTexture: DecodedTexture | null;
   readonly base: readonly [number, number, number, number];
   /**
    * Mean view-space z, for back-to-front ordering when there is no depth
@@ -547,6 +594,7 @@ function eachTriangle(
   normalBasis: readonly number[],
   textures: readonly (DecodedTexture | null)[] | null,
   normalTextures: readonly (DecodedTexture | null)[] | null,
+  materialTextures: readonly (DecodedTexture | null)[] | null,
   emit: (triangle: PendingTriangle) => void,
 ): void {
   mesh.primitives.forEach((primitive, primitiveIndex) => {
@@ -556,6 +604,7 @@ function eachTriangle(
     const indices = primitive.indices;
     const texture = textures?.[primitiveIndex] ?? null;
     const normalTexture = normalTextures?.[primitiveIndex] ?? null;
+    const materialTexture = materialTextures?.[primitiveIndex] ?? null;
     const [baseR, baseG, baseB, baseA] = primitive.material.baseColorFactor;
 
     // The world-space surface tangent for one triangle, from its positions and
@@ -628,7 +677,7 @@ function eachTriangle(
         const a = clipped[c]!;
         const b = clipped[c + 1]!;
         const cc = clipped[c + 2]!;
-        emit({ a, b, c: cc, texture, normalTexture, tangent, base, viewDepth: (a.viewZ + b.viewZ + cc.viewZ) / 3 });
+        emit({ a, b, c: cc, texture, normalTexture, tangent, materialTexture, base, viewDepth: (a.viewZ + b.viewZ + cc.viewZ) / 3 });
       }
     }
   });
@@ -646,11 +695,13 @@ function drawMesh(
   depth: Float32Array,
   textures: readonly (DecodedTexture | null)[] | null,
   normalTextures: readonly (DecodedTexture | null)[] | null,
+  materialTextures: readonly (DecodedTexture | null)[] | null,
   light: readonly [number, number, number],
+  viewDir: readonly [number, number, number],
   ambient: number,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
 ): void {
-  eachTriangle(mesh, mvp, modelView, normalBasis, textures, normalTextures, (triangle) => {
+  eachTriangle(mesh, mvp, modelView, normalBasis, textures, normalTextures, materialTextures, (triangle) => {
     rasterizeTriangle(
       triangle.a,
       triangle.b,
@@ -662,8 +713,10 @@ function drawMesh(
       triangle.texture,
       triangle.normalTexture,
       triangle.tangent,
+      triangle.materialTexture,
       triangle.base,
       light,
+      viewDir,
       ambient,
       style,
     );
@@ -682,8 +735,10 @@ function rasterizeTriangle(
   texture: DecodedTexture | null,
   normalTexture: DecodedTexture | null,
   tangent: readonly [number, number, number] | null,
+  materialTexture: DecodedTexture | null,
   base: readonly [number, number, number, number],
   light: readonly [number, number, number],
+  viewDir: readonly [number, number, number],
   ambient: number,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
 ): void {
@@ -814,10 +869,47 @@ function rasterizeTriangle(
       }
       if (al < 1) continue; // skip fully-transparent texels rather than blend (opaque preview)
 
+      // Material map (option 2, slice 5): a view-dependent Blinn-Phong glint plus
+      // an emissive floor, the same model the 2D lit renderer uses so a material
+      // reads the same in the sprite preview and in the 3D scene. Absent a
+      // material map this is skipped entirely — the diffuse path is unchanged.
+      let glint = 0;
+      let emissive = 0;
+      if (materialTexture) {
+        const u = pw0 * a.u + pw1 * b.u + pw2 * c.u;
+        const v = pw0 * a.v + pw1 * b.v + pw2 * c.v;
+        const [, spec, rough, emis] = sampleTexture(materialTexture, u, v, style.textureFiltering);
+        const specStrength = spec / 255;
+        emissive = emis / 255;
+        if (specStrength > 0) {
+          // Normalise the shading normal (the geometric path leaves it un-unit).
+          const nlen = Math.hypot(nx, ny, nz) || 1;
+          const Nx = nx / nlen;
+          const Ny = ny / nlen;
+          const Nz = nz / nlen;
+          // Half-vector of the (directional) light and view directions. As the
+          // camera orbits, viewDir turns and the highlight slides across the
+          // surface — this is the view-dependent part.
+          let hx = light[0] + viewDir[0];
+          let hy = light[1] + viewDir[1];
+          let hz = light[2] + viewDir[2];
+          const hlen = Math.hypot(hx, hy, hz) || 1;
+          hx /= hlen;
+          hy /= hlen;
+          hz /= hlen;
+          const nh = Math.max(0, Nx * hx + Ny * hy + Nz * hz);
+          const roughness = rough / 255;
+          const shininess = 6 + (120 - 6) * (1 - roughness);
+          glint = 255 * Math.pow(nh, shininess) * specStrength;
+        }
+      }
+
       if (style.zBuffer) depth[di] = zNdc;
-      out[di * 4] = r * shade;
-      out[di * 4 + 1] = g * shade;
-      out[di * 4 + 2] = bl * shade;
+      // A self-illuminated texel never drops below its own colour scaled by the
+      // emissive level, so it stays bright when the light turns away.
+      out[di * 4] = Math.max(r * shade + glint, r * emissive);
+      out[di * 4 + 1] = Math.max(g * shade + glint, g * emissive);
+      out[di * 4 + 2] = Math.max(bl * shade + glint, bl * emissive);
       out[di * 4 + 3] = al;
     }
   }

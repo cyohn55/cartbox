@@ -96,6 +96,28 @@ describe("MeshAsset serialization", () => {
     expect(plain.primitives[0]!.material.normalImage ?? null).toBeNull();
   });
 
+  it("round-trips a packed material map (option 2, slice 5)", () => {
+    const primitive = trianglePrimitive(true);
+    const mesh: MeshAsset = {
+      name: "mm",
+      primitives: [
+        {
+          ...primitive,
+          material: {
+            ...primitive.material,
+            materialImage: { mime: "image/png", bytes: Uint8Array.from([137, 80, 78, 71, 5, 6, 7, 8]) },
+          },
+        },
+      ],
+    };
+    const restored = deserializeMeshAsset(serializeMeshAsset(mesh));
+    expect(restored.primitives[0]!.material.materialImage!.mime).toBe("image/png");
+    expect(Array.from(restored.primitives[0]!.material.materialImage!.bytes)).toEqual([137, 80, 78, 71, 5, 6, 7, 8]);
+    // Absent by default — materials without a material map stay null.
+    const plain = deserializeMeshAsset(serializeMeshAsset({ name: "p", primitives: [trianglePrimitive()] }));
+    expect(plain.primitives[0]!.material.materialImage ?? null).toBeNull();
+  });
+
   it("rejects a payload whose normals do not match the vertex count", () => {
     const mesh: MeshAsset = { name: "bad", primitives: [trianglePrimitive()] };
     const json = JSON.parse(serializeMeshAsset(mesh));

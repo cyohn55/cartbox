@@ -76,6 +76,16 @@ export interface MeshMaterial {
    */
   readonly normalImage?: EncodedImage | null;
   /**
+   * A packed surface-material map (RGBA: R = height, G = specular strength,
+   * B = roughness, A = emissive; each 0..255), or null/absent for a plain
+   * diffuse surface. Baked from the source sprite's Material layer alongside
+   * {@link baseColorImage}; the rasteriser reads specular/roughness for a
+   * view-dependent Blinn-Phong highlight and emissive for a self-illumination
+   * floor (option 2, slice 5). Optional so the many materials without one — flat
+   * primitives, imported meshes, world tiles — need not spell it out.
+   */
+  readonly materialImage?: EncodedImage | null;
+  /**
    * The sprite-sheet region this texture is authored from, or null/absent for a
    * texture that is not sprite-backed (an imported mesh, a flat colour). Optional
    * so the many materials that never carry one — codecs, world tiles, flat
@@ -216,6 +226,7 @@ interface SerializedMaterial {
   baseColorFactor: [number, number, number, number];
   image: { mime: string; bytes: string } | null;
   normalImage?: { mime: string; bytes: string } | null;
+  materialImage?: { mime: string; bytes: string } | null;
   textureSprite?: SpriteTextureRef | null;
 }
 interface SerializedPrimitive {
@@ -254,6 +265,12 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
           ? {
               mime: primitive.material.normalImage.mime,
               bytes: bytesToBase64(primitive.material.normalImage.bytes),
+            }
+          : null,
+        materialImage: primitive.material.materialImage
+          ? {
+              mime: primitive.material.materialImage.mime,
+              bytes: bytesToBase64(primitive.material.materialImage.bytes),
             }
           : null,
         textureSprite: primitive.material.textureSprite ?? null,
@@ -333,6 +350,9 @@ export function deserializeMeshAsset(json: string): MeshAsset {
           : null,
         normalImage: material.normalImage
           ? { mime: String(material.normalImage.mime), bytes: base64ToBytes(material.normalImage.bytes) }
+          : null,
+        materialImage: material.materialImage
+          ? { mime: String(material.materialImage.mime), bytes: base64ToBytes(material.materialImage.bytes) }
           : null,
         textureSprite: toTextureSprite(material.textureSprite),
       },

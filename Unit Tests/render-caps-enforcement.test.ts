@@ -193,6 +193,17 @@ describe("capTextures", () => {
     expect(capped[0]!.textures![0]).toBe(scene[0]!.textures![0]); // colour untouched
     expect(capped[0]!.normalTextures![0]!.width).toBe(32);
   });
+
+  it("carries the material map through, fit to the same budget", () => {
+    // Same guarantee as the normal map: a material-only instance must survive
+    // capping so a budgeted era model keeps its specular/emissive lighting.
+    const scene: MeshSceneInstance[] = [
+      { ...instance(mesh(1, 1), [texture(8)]), materialTextures: [texture(64)] },
+    ];
+    const capped = capTextures(scene, 4096, createTextureBudgetCache());
+    expect(capped[0]).not.toBe(scene[0]);
+    expect(capped[0]!.materialTextures![0]!.width).toBe(32);
+  });
 });
 
 describe("capsConstrainScene", () => {

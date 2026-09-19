@@ -33,6 +33,8 @@ import {
   rebakeMeshSidecar,
   sidecarHasSpriteTexture,
   spriteRegionToRgba,
+  type ChannelLike,
+  type MaterialLike,
   type NormalLike,
   type SheetLike,
 } from "../apps/web/src/lib/meshTextureBake";
@@ -66,6 +68,26 @@ function stubNormals(directions: Uint8Array, size: number): NormalLike {
       const gy = Math.floor(tile / 16) * 8 + y;
       return directions[gy * size + gx] ?? 0;
     },
+  };
+}
+
+/** A material source over per-channel level arrays, mirroring {@link stubSheet}. */
+function stubMaterial(
+  levels: { height?: Uint8Array; specular?: Uint8Array; roughness?: Uint8Array; emissive?: Uint8Array },
+  size: number,
+): MaterialLike {
+  const channel = (arr?: Uint8Array): ChannelLike => ({
+    getValue: (_page, tile, x, y) => {
+      const gx = (tile % 16) * 8 + x;
+      const gy = Math.floor(tile / 16) * 8 + y;
+      return arr?.[gy * size + gx] ?? 0;
+    },
+  });
+  return {
+    height: channel(levels.height),
+    specular: channel(levels.specular),
+    roughness: channel(levels.roughness),
+    emissive: channel(levels.emissive),
   };
 }
 
@@ -282,6 +304,38 @@ describe("rebakeMeshSidecar", () => {
     // byte-identical to the seed — a fresh cart is never dirtied by the normal path.
     expect(rebaked).toBe(sidecar);
     expect(firstMesh(rebaked!).primitives[0]!.material.normalImage ?? null).toBeNull();
+  });
+
+  it("bakes a material map when the region's Material layer has specular", async () => {
+    const sidecar = sidecarWithTexture();
+    const sheet = stubSheet(Uint8Array.from(indices, (i) => TEXTURE_CLUT_BASE + i), size);
+    const specular = new Uint8Array(size * size); // no specular…
+    specular[0] = 12; // …except one glossy texel
+    const rebaked = await rebakeMeshSidecar(sidecar, sheet, paletteWithClut(clut), undefined, stubMaterial({ specular }, size));
+    const materialImage = firstMesh(rebaked!).primitives[0]!.material.materialImage;
+    expect(materialImage, "a material map was baked").toBeTruthy();
+    expect(materialImage!.mime).toBe("image/png");
+  });
+
+  it("bakes a material map when the region has emissive but no specular", async () => {
+    const sidecar = sidecarWithTexture();
+    const sheet = stubSheet(Uint8Array.from(indices, (i) => TEXTURE_CLUT_BASE + i), size);
+    const emissive = new Uint8Array(size * size);
+    emissive[0] = 15; // a self-illuminated texel
+    const rebaked = await rebakeMeshSidecar(sidecar, sheet, paletteWithClut(clut), undefined, stubMaterial({ emissive }, size));
+    expect(firstMesh(rebaked!).primitives[0]!.material.materialImage, "an emissive map was baked").toBeTruthy();
+  });
+
+  it("adds no material map when only height/roughness are painted — no phantom dirty", async () => {
+    // Height and roughness alone change nothing the 3D rasteriser acts on (a
+    // highlight needs specular), so the sidecar stays byte-identical to the seed.
+    const sidecar = sidecarWithTexture();
+    const sheet = stubSheet(Uint8Array.from(indices, (i) => TEXTURE_CLUT_BASE + i), size);
+    const height = new Uint8Array(size * size).fill(9);
+    const roughness = new Uint8Array(size * size).fill(4);
+    const rebaked = await rebakeMeshSidecar(sidecar, sheet, paletteWithClut(clut), undefined, stubMaterial({ height, roughness }, size));
+    expect(rebaked).toBe(sidecar);
+    expect(firstMesh(rebaked!).primitives[0]!.material.materialImage ?? null).toBeNull();
   });
 
   it("returns a sidecar with no sprite-backed texture unchanged", async () => {
