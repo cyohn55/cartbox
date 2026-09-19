@@ -55,6 +55,8 @@ export interface RenderMeshOptions {
   readonly ambient?: number;
   /** Decoded base-colour texture per primitive (index-aligned), or null entries. */
   readonly textures?: readonly (DecodedTexture | null)[];
+  /** Decoded tangent-space normal map per primitive (index-aligned), or null. */
+  readonly normalTextures?: readonly (DecodedTexture | null)[];
   /** Background clear colour RGBA (default transparent). */
   readonly background?: readonly [number, number, number, number];
 }
@@ -336,7 +338,7 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
 
   // The single mesh has no model transform, so model-view is the plain view and
   // normals need no re-basing: reuse the scene path with an identity model.
-  drawMesh(mesh, viewProj, view, IDENTITY_3X3, size, size, out, depth, options.textures ?? null, light, ambient);
+  drawMesh(mesh, viewProj, view, IDENTITY_3X3, size, size, out, depth, options.textures ?? null, options.normalTextures ?? null, light, ambient);
 }
 
 // --- Scene rendering: many placed meshes through one camera -----------------
@@ -348,6 +350,12 @@ export interface MeshSceneInstance {
   readonly model: Mat4;
   /** Decoded base-colour texture per primitive (index-aligned), or null entries. */
   readonly textures?: readonly (DecodedTexture | null)[];
+  /**
+   * Decoded tangent-space normal map per primitive (index-aligned), or null
+   * entries. Where present, the fragment normal is perturbed by it (option 2);
+   * where null, shading falls back to the geometric normal, unchanged.
+   */
+  readonly normalTextures?: readonly (DecodedTexture | null)[];
 }
 
 /**
@@ -466,10 +474,11 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const modelView = multiply(view, instance.model);
     const normalBasis = normalMatrix3x3(instance.model);
     const textures = instance.textures ?? null;
+    const normalTextures = instance.normalTextures ?? null;
     if (style.zBuffer) {
-      drawMesh(instance.mesh, mvp, modelView, normalBasis, width, height, out, depth, textures, light, ambient, style);
+      drawMesh(instance.mesh, mvp, modelView, normalBasis, width, height, out, depth, textures, normalTextures, light, ambient, style);
     } else {
-      eachTriangle(instance.mesh, mvp, modelView, normalBasis, textures, (triangle) => queue.push(triangle));
+      eachTriangle(instance.mesh, mvp, modelView, normalBasis, textures, normalTextures, (triangle) => queue.push(triangle));
     }
   }
 
@@ -486,6 +495,8 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
         out,
         depth,
         triangle.texture,
+        triangle.normalTexture,
+        triangle.tangent,
         triangle.base,
         light,
         ambient,
@@ -507,6 +518,11 @@ interface PendingTriangle {
   readonly b: Vertex;
   readonly c: Vertex;
   readonly texture: DecodedTexture | null;
+  /** Tangent-space normal map, or null to shade by the geometric normal. */
+  readonly normalTexture: DecodedTexture | null;
+  /** World-space surface tangent (constant per triangle), for the TBN frame, or
+   *  null when there is no normal map or the UVs are degenerate. */
+  readonly tangent: readonly [number, number, number] | null;
   readonly base: readonly [number, number, number, number];
   /**
    * Mean view-space z, for back-to-front ordering when there is no depth
@@ -530,6 +546,7 @@ function eachTriangle(
   modelView: Mat4,
   normalBasis: readonly number[],
   textures: readonly (DecodedTexture | null)[] | null,
+  normalTextures: readonly (DecodedTexture | null)[] | null,
   emit: (triangle: PendingTriangle) => void,
 ): void {
   mesh.primitives.forEach((primitive, primitiveIndex) => {
@@ -538,7 +555,39 @@ function eachTriangle(
     const uvs = primitive.uvs;
     const indices = primitive.indices;
     const texture = textures?.[primitiveIndex] ?? null;
+    const normalTexture = normalTextures?.[primitiveIndex] ?? null;
     const [baseR, baseG, baseB, baseA] = primitive.material.baseColorFactor;
+
+    // The world-space surface tangent for one triangle, from its positions and
+    // UVs (Lengyel's method), for the TBN frame a normal map is applied in. Only
+    // needed when a normal map is present; null for degenerate UVs so shading
+    // falls back to the geometric normal.
+    const worldTangent = (i0: number, i1: number, i2: number): readonly [number, number, number] | null => {
+      if (!uvs) return null;
+      const e1x = positions[i1 * 3]! - positions[i0 * 3]!;
+      const e1y = positions[i1 * 3 + 1]! - positions[i0 * 3 + 1]!;
+      const e1z = positions[i1 * 3 + 2]! - positions[i0 * 3 + 2]!;
+      const e2x = positions[i2 * 3]! - positions[i0 * 3]!;
+      const e2y = positions[i2 * 3 + 1]! - positions[i0 * 3 + 1]!;
+      const e2z = positions[i2 * 3 + 2]! - positions[i0 * 3 + 2]!;
+      const du1 = uvs[i1 * 2]! - uvs[i0 * 2]!;
+      const dv1 = uvs[i1 * 2 + 1]! - uvs[i0 * 2 + 1]!;
+      const du2 = uvs[i2 * 2]! - uvs[i0 * 2]!;
+      const dv2 = uvs[i2 * 2 + 1]! - uvs[i0 * 2 + 1]!;
+      const denom = du1 * dv2 - du2 * dv1;
+      if (Math.abs(denom) < 1e-12) return null;
+      const r = 1 / denom;
+      const tox = (e1x * dv2 - e2x * dv1) * r;
+      const toy = (e1y * dv2 - e2y * dv1) * r;
+      const toz = (e1z * dv2 - e2z * dv1) * r;
+      // Re-base into world space with the same basis as the normals.
+      const tx = normalBasis[0]! * tox + normalBasis[3]! * toy + normalBasis[6]! * toz;
+      const ty = normalBasis[1]! * tox + normalBasis[4]! * toy + normalBasis[7]! * toz;
+      const tz = normalBasis[2]! * tox + normalBasis[5]! * toy + normalBasis[8]! * toz;
+      const len = Math.hypot(tx, ty, tz);
+      if (len < 1e-8) return null;
+      return [tx / len, ty / len, tz / len];
+    };
 
     const project = (i: number): Vertex => {
       const x = positions[i * 3]!;
@@ -568,12 +617,18 @@ function eachTriangle(
     const base: readonly [number, number, number, number] = [baseR, baseG, baseB, baseA];
 
     for (let t = 0; t < indices.length; t += 3) {
-      const clipped = clipNear([project(indices[t]!), project(indices[t + 1]!), project(indices[t + 2]!)]);
+      const i0 = indices[t]!;
+      const i1 = indices[t + 1]!;
+      const i2 = indices[t + 2]!;
+      // The tangent is constant across the triangle, so compute it once (before
+      // clipping) and share it with every clipped piece.
+      const tangent = normalTexture ? worldTangent(i0, i1, i2) : null;
+      const clipped = clipNear([project(i0), project(i1), project(i2)]);
       for (let c = 0; c < clipped.length; c += 3) {
         const a = clipped[c]!;
         const b = clipped[c + 1]!;
         const cc = clipped[c + 2]!;
-        emit({ a, b, c: cc, texture, base, viewDepth: (a.viewZ + b.viewZ + cc.viewZ) / 3 });
+        emit({ a, b, c: cc, texture, normalTexture, tangent, base, viewDepth: (a.viewZ + b.viewZ + cc.viewZ) / 3 });
       }
     }
   });
@@ -590,11 +645,12 @@ function drawMesh(
   out: Uint8ClampedArray,
   depth: Float32Array,
   textures: readonly (DecodedTexture | null)[] | null,
+  normalTextures: readonly (DecodedTexture | null)[] | null,
   light: readonly [number, number, number],
   ambient: number,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
 ): void {
-  eachTriangle(mesh, mvp, modelView, normalBasis, textures, (triangle) => {
+  eachTriangle(mesh, mvp, modelView, normalBasis, textures, normalTextures, (triangle) => {
     rasterizeTriangle(
       triangle.a,
       triangle.b,
@@ -604,6 +660,8 @@ function drawMesh(
       out,
       depth,
       triangle.texture,
+      triangle.normalTexture,
+      triangle.tangent,
       triangle.base,
       light,
       ambient,
@@ -622,6 +680,8 @@ function rasterizeTriangle(
   out: Uint8ClampedArray,
   depth: Float32Array,
   texture: DecodedTexture | null,
+  normalTexture: DecodedTexture | null,
+  tangent: readonly [number, number, number] | null,
   base: readonly [number, number, number, number],
   light: readonly [number, number, number],
   ambient: number,
@@ -689,10 +749,53 @@ function rasterizeTriangle(
         pw2 = (w2 * sc.invW) / iw;
       }
 
+      // Interpolate the geometric normal.
+      let nx = pw0 * a.nx + pw1 * b.nx + pw2 * c.nx;
+      let ny = pw0 * a.ny + pw1 * b.ny + pw2 * c.ny;
+      let nz = pw0 * a.nz + pw1 * b.nz + pw2 * c.nz;
+
+      // Normal mapping (option 2): perturb the geometric normal by the sampled
+      // tangent-space normal, in the TBN frame built from the surface tangent.
+      // Absent a normal map or a valid tangent, this is skipped and shading is
+      // exactly the geometric-normal path.
+      if (normalTexture && tangent) {
+        const u = pw0 * a.u + pw1 * b.u + pw2 * c.u;
+        const v = pw0 * a.v + pw1 * b.v + pw2 * c.v;
+        const [snr, sng, snb] = sampleTexture(normalTexture, u, v, style.textureFiltering);
+        // Decode RGB -> tangent-space normal in [-1, 1].
+        const tnx = (snr / 255) * 2 - 1;
+        const tny = (sng / 255) * 2 - 1;
+        const tnz = (snb / 255) * 2 - 1;
+        // Normalise the interpolated geometric normal (N) for the frame.
+        const nlen = Math.hypot(nx, ny, nz) || 1;
+        const Nx = nx / nlen;
+        const Ny = ny / nlen;
+        const Nz = nz / nlen;
+        // Gram-Schmidt the tangent (T) against N, then bitangent B = N × T.
+        const td = tangent[0] * Nx + tangent[1] * Ny + tangent[2] * Nz;
+        let Tx = tangent[0] - Nx * td;
+        let Ty = tangent[1] - Ny * td;
+        let Tz = tangent[2] - Nz * td;
+        const tlen = Math.hypot(Tx, Ty, Tz);
+        if (tlen > 1e-6) {
+          Tx /= tlen;
+          Ty /= tlen;
+          Tz /= tlen;
+          const Bx = Ny * Tz - Nz * Ty;
+          const By = Nz * Tx - Nx * Tz;
+          const Bz = Nx * Ty - Ny * Tx;
+          // World normal = T*tnx + B*tny + N*tnz.
+          const px2 = Tx * tnx + Bx * tny + Nx * tnz;
+          const py2 = Ty * tnx + By * tny + Ny * tnz;
+          const pz2 = Tz * tnx + Bz * tny + Nz * tnz;
+          const plen = Math.hypot(px2, py2, pz2) || 1;
+          nx = px2 / plen;
+          ny = py2 / plen;
+          nz = pz2 / plen;
+        }
+      }
+
       // Two-sided Lambert: |N·L| so inconsistent winding still lights.
-      const nx = pw0 * a.nx + pw1 * b.nx + pw2 * c.nx;
-      const ny = pw0 * a.ny + pw1 * b.ny + pw2 * c.ny;
-      const nz = pw0 * a.nz + pw1 * b.nz + pw2 * c.nz;
       const nl = Math.abs(nx * light[0] + ny * light[1] + nz * light[2]);
       const shade = ambient + (1 - ambient) * nl;
 
