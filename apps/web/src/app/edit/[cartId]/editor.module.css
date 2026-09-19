@@ -999,6 +999,68 @@
   margin-bottom: 4px;
 }
 
+/* --- Active-colour button in the tool palette ------------------------------- */
+.colorButtonWrap {
+  position: relative;
+}
+
+.colorButton {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: inherit;
+  padding: 5px 8px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.colorButton:hover {
+  border-color: var(--accent);
+}
+
+.colorButtonSwatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  flex-shrink: 0;
+}
+
+.colorButtonHex {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.colorButtonCaret {
+  font-size: 10px;
+  color: var(--faint);
+}
+
+/* The colour grid the button opens. Anchored under the button, above the canvas
+   and the palette panel; caps its height and scrolls for big palettes. */
+.colorPopover {
+  position: fixed;
+  z-index: 60;
+  padding: 8px;
+  /* An explicit width (not just max-width) so the auto-fill grid can lay out
+     several columns rather than collapsing to one when shrink-to-fit. */
+  width: min(320px, 86vw);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+
+.colorPopoverGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 24px);
+  gap: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
 .assetStrip {
   display: flex;
   align-items: center;
