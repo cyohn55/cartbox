@@ -15,7 +15,7 @@
  * cart's payload.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { SpriteSheet } from "@cartbox/editor";
 
 import type { CartAsset } from "@/lib/cartAssets";
@@ -110,6 +110,38 @@ export function AssetStrip({
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
   const [actionsOpen, setActionsOpen] = useState(false);
+
+  // Close the "…" menu on an outside click or Escape. The toggle button used to
+  // close it with onBlur, but that fires *before* the button's own onClick — so
+  // clicking the button while open closed then immediately reopened it, and it
+  // never toggled shut. A document listener sidesteps that race entirely.
+  const menuRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!actionsOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) setActionsOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setActionsOpen(false);
+    };
+    // Choosing any item (including the portaled import/export actions, which
+    // cannot reach this state themselves) closes the menu. Native bubbling from
+    // the portaled children reaches the list node even though React routes their
+    // synthetic events elsewhere.
+    const list = listRef.current;
+    const onListClick = (event: MouseEvent) => {
+      if ((event.target as HTMLElement).closest("button")) setActionsOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    list?.addEventListener("click", onListClick);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+      list?.removeEventListener("click", onListClick);
+    };
+  }, [actionsOpen]);
 
   const startRename = (id: string) => {
     const asset = assets.find((entry) => entry.id === id);
@@ -242,20 +274,19 @@ export function AssetStrip({
             New, Library, Rename, Duplicate, Delete, and the pixel editor's
             import/export (portaled into the extras slot below). The list is kept
             mounted and merely hidden so that portal target is always present. */}
-        <div className={styles.fileMenu}>
+        <div className={styles.fileMenu} ref={menuRef}>
           <button
             type="button"
             className="cbx-btn"
             aria-haspopup="menu"
             aria-expanded={actionsOpen}
             onClick={() => setActionsOpen((open) => !open)}
-            onBlur={() => setActionsOpen(false)}
             title="Asset actions"
             aria-label="Asset actions"
           >
             ⋯
           </button>
-          <div className={styles.fileMenuList} role="menu" hidden={!actionsOpen}>
+          <div className={styles.fileMenuList} role="menu" hidden={!actionsOpen} ref={listRef}>
             <button
               type="button"
               role="menuitem"

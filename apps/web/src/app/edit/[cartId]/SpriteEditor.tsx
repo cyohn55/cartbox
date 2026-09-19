@@ -698,6 +698,31 @@ export function SpriteEditor({
   const toolbar = (
     <div className={styles.spriteToolbar}>
       <ToolRail label="Tool" tools={TOOLS} selected={tool} onSelect={setTool} />
+      <label className={styles.stripField}>
+        <span className={styles.stripFieldLabel}>Zoom</span>
+        <RangeControl
+          min={MIN_ZOOM * 100}
+          max={MAX_ZOOM * 100}
+          step={25}
+          value={Math.round(zoom * 100)}
+          onChange={(next) => setZoom(next / 100)}
+          ariaLabel="Canvas zoom"
+          display={`${Math.round(zoom * 100)}%`}
+        />
+      </label>
+      {toolControls.weighted && (
+        <label className={styles.stripField}>
+          <span className={styles.stripFieldLabel}>Brush size</span>
+          <RangeControl
+            min={1}
+            max={MAX_BRUSH_WEIGHT}
+            value={weight}
+            onChange={setWeight}
+            ariaLabel="Brush size in pixels"
+            display={`${weight}px`}
+          />
+        </label>
+      )}
       {toolControls.tolerant && (
         <label className={styles.stripField}>
           <span className={styles.stripFieldLabel}>Tolerance</span>
@@ -732,9 +757,9 @@ export function SpriteEditor({
   );
 
   // --- Compact strip controls -----------------------------------------------
-  // Page, sprite size, coverage, zoom and brush size portal up onto the medium
-  // toggle's line (the Assets strip), so they read as the sprite's top-level
-  // settings rather than one more rail stack.
+  // Page, sprite size and coverage portal up onto the medium toggle's line (the
+  // Assets strip), so they read as the sprite's top-level settings. The tool
+  // sliders (zoom, brush size, …) live in the pinned tool bar with the tools.
   const compactControls = (
     <div className={styles.stripControls}>
       <div className={styles.stripField}>
@@ -746,15 +771,21 @@ export function SpriteEditor({
           ariaLabel="Sprite page"
         />
       </div>
-      <div className={styles.stripField}>
+      <label className={styles.stripField}>
         <span className={styles.stripFieldLabel}>Sprite size</span>
-        <SegmentedControl
-          options={SPRITE_SIZES}
-          selected={spriteSize}
-          onSelect={setSpriteSize}
-          ariaLabel="Sprite size"
-        />
-      </div>
+        <select
+          className={styles.stripSelect}
+          value={spriteSize}
+          onChange={(event) => setSpriteSize(Number(event.target.value))}
+          aria-label="Sprite size"
+        >
+          {SPRITE_SIZES.map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
       <div className={styles.stripField}>
         <span className={styles.stripFieldLabel}>Coverage</span>
         <SegmentedControl
@@ -764,31 +795,6 @@ export function SpriteEditor({
           ariaLabel="Show other-layer coverage"
         />
       </div>
-      <label className={styles.stripField}>
-        <span className={styles.stripFieldLabel}>Zoom</span>
-        <RangeControl
-          min={MIN_ZOOM * 100}
-          max={MAX_ZOOM * 100}
-          step={25}
-          value={Math.round(zoom * 100)}
-          onChange={(next) => setZoom(next / 100)}
-          ariaLabel="Canvas zoom"
-          display={`${Math.round(zoom * 100)}%`}
-        />
-      </label>
-      {toolControls.weighted && (
-        <label className={styles.stripField}>
-          <span className={styles.stripFieldLabel}>Brush size</span>
-          <RangeControl
-            min={1}
-            max={MAX_BRUSH_WEIGHT}
-            value={weight}
-            onChange={setWeight}
-            ariaLabel="Brush size in pixels"
-            display={`${weight}px`}
-          />
-        </label>
-      )}
     </div>
   );
 
