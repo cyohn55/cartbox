@@ -21,8 +21,12 @@ import {
   serializeMeshAsset,
   encodeRgbaPng,
   normalDirectionRgb,
+  MATERIAL_LEVELS,
   type MeshAsset,
 } from "@cartbox/editor";
+
+/** Scales a material level (0..MATERIAL_LEVELS-1) to a 0..255 byte. */
+const LEVEL_TO_BYTE = 255 / (MATERIAL_LEVELS - 1);
 
 /** The slice of a sprite sheet this module reads. `SpriteSheet` satisfies it. */
 export interface SheetLike {
@@ -35,6 +39,21 @@ export interface SheetLike {
  *  satisfies it (its `getDirection`), so a test can pass a stub. */
 export interface NormalLike {
   getDirection(page: number, tile: number, x: number, y: number): number;
+}
+
+/** One scalar material channel this module reads. `MaterialMap` satisfies it. */
+export interface ChannelLike {
+  getValue(page: number, tile: number, x: number, y: number): number;
+}
+
+/** The four scalar material channels a material map is baked from. The four
+ *  {@link MaterialMap}s the editor already holds satisfy this, and a test can
+ *  pass stubs. */
+export interface MaterialLike {
+  readonly height: ChannelLike;
+  readonly specular: ChannelLike;
+  readonly roughness: ChannelLike;
+  readonly emissive: ChannelLike;
 }
 
 /** Encodes tightly-packed RGBA into image bytes (PNG). */
@@ -129,6 +148,58 @@ export function isFlatNormalRgba(rgba: Uint8ClampedArray): boolean {
 }
 
 /**
+ * Read a `width`×`height` region of a sprite page's Material layer as a packed
+ * material map (RGBA: R = height, G = specular, B = roughness, A = emissive,
+ * each level scaled to a byte) — the same channel layout the 2D lit renderer
+ * reads. Pure, mirroring {@link spriteRegionToRgba}'s tiling so a test can pass
+ * stubs.
+ */
+export function spriteMaterialRegionToRgba(
+  material: MaterialLike,
+  sheet: Pick<SheetLike, "sheetCols" | "tileSize">,
+  page: number,
+  originX: number,
+  originY: number,
+  width: number,
+  height: number,
+): Uint8ClampedArray {
+  const out = new Uint8ClampedArray(width * height * 4);
+  const { sheetCols, tileSize } = sheet;
+  let o = 0;
+  for (let py = 0; py < height; py += 1) {
+    const gy = originY + py;
+    const tileRow = Math.floor(gy / tileSize);
+    const inY = gy % tileSize;
+    for (let px = 0; px < width; px += 1) {
+      const gx = originX + px;
+      const tile = tileRow * sheetCols + Math.floor(gx / tileSize);
+      const lx = gx % tileSize;
+      out[o] = material.height.getValue(page, tile, lx, inY) * LEVEL_TO_BYTE;
+      out[o + 1] = material.specular.getValue(page, tile, lx, inY) * LEVEL_TO_BYTE;
+      out[o + 2] = material.roughness.getValue(page, tile, lx, inY) * LEVEL_TO_BYTE;
+      out[o + 3] = material.emissive.getValue(page, tile, lx, inY) * LEVEL_TO_BYTE;
+      o += 4;
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether a material-map RGBA buffer carries nothing the 3D rasteriser would
+ * act on. It reads specular (G) for the highlight and emissive (A) for the
+ * self-illumination floor; height (R) and roughness (B) only shape a highlight
+ * that specular=0 suppresses entirely. So a buffer with no specular and no
+ * emissive renders identically to having no material map at all — carrying one
+ * would just bloat the sidecar and mark a seed's fresh cart dirty.
+ */
+export function isTrivialMaterialRgba(rgba: Uint8ClampedArray): boolean {
+  for (let i = 0; i < rgba.length; i += 4) {
+    if (rgba[i + 1] !== 0 || rgba[i + 3] !== 0) return false;
+  }
+  return true;
+}
+
+/**
  * The default encoder: the pure, deterministic PNG writer shared with the seeds'
  * initial bake. Determinism is the point — an unchanged texture rebakes to the
  * exact bytes the seed produced, so a freshly opened cart is not marked dirty the
@@ -178,6 +249,7 @@ export async function rebakeMeshSidecar(
   sheet: SheetLike,
   palette: Uint8Array,
   normals?: NormalLike,
+  material?: MaterialLike,
   encode: PngEncoder = encodePng,
 ): Promise<string | null | undefined> {
   if (!rawSidecar || !sidecarHasSpriteTexture(rawSidecar)) return rawSidecar;
@@ -231,9 +303,31 @@ export async function rebakeMeshSidecar(
             }
           }
 
+          // Bake the Material layer (option 2, slice 5) for specular/emissive.
+          // A region with no specular and no emissive renders identically to
+          // none, so it carries no map — same no-phantom-dirty reasoning.
+          let materialImage = primitive.material.materialImage ?? null;
+          if (material) {
+            const mrgba = spriteMaterialRegionToRgba(material, sheet, ref.page, ref.x, ref.y, ref.width, ref.height);
+            if (isTrivialMaterialRgba(mrgba)) {
+              materialImage = null;
+            } else {
+              try {
+                materialImage = { mime: "image/png", bytes: await encode(mrgba, ref.width, ref.height) };
+              } catch {
+                /* keep the last-baked material map if encoding isn't possible here */
+              }
+            }
+          }
+
           return {
             ...primitive,
-            material: { ...primitive.material, baseColorImage: { mime: "image/png", bytes }, normalImage },
+            material: {
+              ...primitive.material,
+              baseColorImage: { mime: "image/png", bytes },
+              normalImage,
+              materialImage,
+            },
           };
         }),
       );

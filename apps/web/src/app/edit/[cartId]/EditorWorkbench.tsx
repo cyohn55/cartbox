@@ -557,8 +557,13 @@ function WorkbenchBody({
    * path — {@link rebakeMeshSidecar} no-ops when no mesh references a sprite.
    */
   const rebakeMesh = useCallback(async (): Promise<string | null | undefined> => {
-    return rebakeMeshSidecar(sidecars.mesh, sheet, editEngine.getPalette(), normals);
-  }, [sidecars.mesh, sheet, editEngine, normals]);
+    return rebakeMeshSidecar(sidecars.mesh, sheet, editEngine.getPalette(), normals, {
+      height: heightMap,
+      specular: specularMap,
+      roughness: roughnessMap,
+      emissive: emissiveMap,
+    });
+  }, [sidecars.mesh, sheet, editEngine, normals, heightMap, specularMap, roughnessMap, emissiveMap]);
 
   /**
    * Record what the server (or this browser) just accepted.

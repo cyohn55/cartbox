@@ -4174,16 +4174,23 @@ function capTextures(instances, budgetBytes, cache) {
     });
   };
   const capped = instances.map((instance) => {
-    if (!instance.textures && !instance.normalTextures) return instance;
+    if (!instance.textures && !instance.normalTextures && !instance.materialTextures) return instance;
     let instanceChanged = false;
     const mark = () => {
       instanceChanged = true;
     };
     const fitted = fitList(instance.textures, mark);
     const fittedNormals = fitList(instance.normalTextures, mark);
+    const fittedMaterials = fitList(instance.materialTextures, mark);
     if (!instanceChanged) return instance;
     changed = true;
-    return { mesh: instance.mesh, model: instance.model, textures: fitted, normalTextures: fittedNormals };
+    return {
+      mesh: instance.mesh,
+      model: instance.model,
+      textures: fitted,
+      normalTextures: fittedNormals,
+      materialTextures: fittedMaterials
+    };
   });
   return changed ? capped : instances;
 }
@@ -4390,7 +4397,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
           (primitive) => primitive.material.normalImage ? decodeTexture(primitive.material.normalImage.mime, primitive.material.normalImage.bytes) : Promise.resolve(null)
         )
       );
-      instances.push({ mesh: instance.mesh, model: instance.model, textures, normalTextures });
+      const materialTextures = await Promise.all(
+        instance.mesh.primitives.map(
+          (primitive) => primitive.material.materialImage ? decodeTexture(primitive.material.materialImage.mime, primitive.material.materialImage.bytes) : Promise.resolve(null)
+        )
+      );
+      instances.push({ mesh: instance.mesh, model: instance.model, textures, normalTextures, materialTextures });
     }
     return new _MeshOverlaySurface(inner, width, height, scene, instances, renderer);
   }
@@ -4458,7 +4470,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         mesh: authored.mesh,
         model: multiplyMat4(authored.model, local),
         textures: authored.textures,
-        normalTextures: authored.normalTextures
+        normalTextures: authored.normalTextures,
+        materialTextures: authored.materialTextures
       });
     }
     return result;

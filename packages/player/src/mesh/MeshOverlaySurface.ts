@@ -93,7 +93,16 @@ export class MeshOverlaySurface implements DisplaySurface {
             : Promise.resolve(null),
         ),
       );
-      instances.push({ mesh: instance.mesh, model: instance.model, textures, normalTextures });
+      // And the packed material map (specular/roughness/emissive), for the
+      // view-dependent highlight + emissive floor (option 2, slice 5).
+      const materialTextures = await Promise.all(
+        instance.mesh.primitives.map((primitive) =>
+          primitive.material.materialImage
+            ? decodeTexture(primitive.material.materialImage.mime, primitive.material.materialImage.bytes)
+            : Promise.resolve(null),
+        ),
+      );
+      instances.push({ mesh: instance.mesh, model: instance.model, textures, normalTextures, materialTextures });
     }
     return new MeshOverlaySurface(inner, width, height, scene, instances, renderer);
   }
@@ -172,6 +181,7 @@ export class MeshOverlaySurface implements DisplaySurface {
         model: multiplyMat4(authored.model, local),
         textures: authored.textures,
         normalTextures: authored.normalTextures,
+        materialTextures: authored.materialTextures,
       });
     }
     return result;
