@@ -861,21 +861,6 @@
   overflow-y: auto;
 }
 
-/* The side-panel collapse chevrons hide the panels and hand their width to the
-   canvas; the pinned tools stay, being the always-reachable set. */
-.workbench[data-inspector="hidden"] .spriteEditor,
-.workbench[data-rail="hidden"] .spriteEditor {
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-areas:
-    "tools"
-    "stage";
-}
-
-.workbench[data-inspector="hidden"] .spritePanels,
-.workbench[data-rail="hidden"] .spritePanels {
-  display: none;
-}
-
 /* Portrait / tablet: one column, canvas-led, everything scrolls together. */
 @media (max-width: 900px) {
   .spriteEditor {
@@ -1176,6 +1161,16 @@
 .inspectorToggle:hover {
   color: var(--text);
   background: var(--bg, #0c0a14);
+}
+
+/* The pixel editor lays itself out (pinned tools, self-stacking panels) rather
+   than the 200px rail / 300px inspector grid, so the workbench's collapse
+   chevrons have no edges to pin to — they would float over the canvas and
+   palette. Hide them whenever that editor is on screen; every other tab keeps
+   them. */
+.workbench:has(.spriteEditor) .railToggle,
+.workbench:has(.spriteEditor) .inspectorToggle {
+  display: none;
 }
 
 /* Right inspector handle: pinned to its left edge (300px in), rounded left. */
