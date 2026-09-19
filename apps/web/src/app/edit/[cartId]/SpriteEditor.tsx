@@ -54,6 +54,7 @@ import { MaterialSurface, NormalSurface, type PaintSurface } from "./paintSurfac
 import { MaterialBrushSurface } from "./materialBrushSurface";
 import { SpriteBlockSurface } from "./spriteBlockSurface";
 import { measureCoverage, sampleChannels, valueUsage } from "./layerCoverage";
+import { FloatingToolbar } from "./FloatingToolbar";
 import { RailGroup, RangeControl, SegmentedControl, ToolRail } from "./railControls";
 import { SurfaceToolsPanel } from "./SurfaceToolsPanel";
 import { InspectorHint, InspectorPanel } from "./workbenchPanels";
@@ -262,6 +263,8 @@ export function SpriteEditor({
   const fileRef = useRef<HTMLInputElement>(null);
   const paletteFileRef = useRef<HTMLInputElement>(null);
   const asepriteFileRef = useRef<HTMLInputElement>(null);
+  // The editor body, which the floating tool palette docks to and stays within.
+  const bodyRef = useRef<HTMLDivElement>(null);
 
   const bump = () => setVersion((current) => current + 1);
 
@@ -692,11 +695,12 @@ export function SpriteEditor({
     }
   };
 
-  // --- Pinned tool bar ------------------------------------------------------
-  // The drawing tools and their contextual options ride above the canvas on
-  // every width, so they are always in reach; the rail no longer owns them.
+  // --- Floating tool palette ------------------------------------------------
+  // The drawing tools and their contextual options ride in a movable palette the
+  // creator can drag, dock to any edge, or collapse — so they are always in reach
+  // without pinning them to one spot. The rail no longer owns them.
   const toolbar = (
-    <div className={styles.spriteToolbar}>
+    <FloatingToolbar boundsRef={bodyRef} storageKey="cbx.spriteToolbar">
       <ToolRail label="Tool" tools={TOOLS} selected={tool} onSelect={setTool} />
       <label className={styles.stripField}>
         <span className={styles.stripFieldLabel}>Zoom</span>
@@ -753,7 +757,7 @@ export function SpriteEditor({
           />
         </div>
       )}
-    </div>
+    </FloatingToolbar>
   );
 
   // --- Compact strip controls -----------------------------------------------
@@ -1074,8 +1078,8 @@ export function SpriteEditor({
   };
 
   return (
-    <div className={styles.spriteEditor}>
-      {/* Tools pinned above the canvas, on every width. */}
+    <div className={styles.spriteEditor} ref={bodyRef}>
+      {/* The tools ride in a floating palette that docks, moves and collapses. */}
       {toolbar}
 
       <section className={styles.stage}>
