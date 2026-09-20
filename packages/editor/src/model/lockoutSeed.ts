@@ -157,76 +157,101 @@ function material1x1(h: number, spec: number, rough: number, emis: number): Enco
 // Coordinates: X right, Y up, Z forward. Symmetric in X/Z so the scene centre is
 // exactly (0, CENTER_Y, 0).
 
-const FLOOR_HALF = 12;
-const DECK_TOP = 2.5;
-const DECK_HY = DECK_TOP / 2;
-const TOWER_TOP = 7;
+// Lockout is an ASYMMETRIC, vertical Forerunner structure: a tall Sniper tower
+// on one side, a two-storey BR structure diagonally opposite, a raised central
+// walkway spanning a lower "bottom mid" where the Sword sits, and an enclosed
+// Shotgun room off to one side, all over a recover floor. This is a homage to
+// that massing (axis-aligned, so approximate), not a survey-accurate rip.
 
-/** Descending steps from a deck edge down to the floor (with the code's step-up). */
-function stairs(sign: 1 | -1, edgeZ: number): Box[] {
-  const steps = 5;
-  const rise = DECK_TOP / steps;
-  const run = 0.7;
+/** A flight of steps connecting two heights along one axis (the code's step-up
+ *  lets the player and bots climb the ~0.5u risers). */
+function steps(axis: "x" | "z", fixed: number, halfFixed: number, start: number, sign: 1 | -1, topFrom: number, topTo: number): Box[] {
+  const n = Math.max(1, Math.round(Math.abs(topFrom - topTo) / 0.5));
+  const rise = (topFrom - topTo) / n;
+  const run = 0.85;
   const out: Box[] = [];
-  for (let i = 0; i < steps; i += 1) {
-    const top = DECK_TOP - rise * (i + 1);
-    const z = edgeZ + sign * (i + 0.5) * run;
-    out.push([0, top / 2, z, 2, Math.max(0.02, top / 2), run / 2]);
+  for (let i = 0; i < n; i += 1) {
+    const top = topFrom - rise * (i + 1);
+    const pos = start + sign * (i + 0.5) * run;
+    const hy = Math.max(0.05, top / 2);
+    out.push(axis === "z" ? [fixed, top / 2, pos, halfFixed, hy, run / 2] : [pos, top / 2, fixed, run / 2, hy, halfFixed]);
   }
   return out;
 }
 
 /** Structural (solid, Forerunner-textured) boxes. */
 const STRUCT: Box[] = [
-  [0, -0.5, 0, FLOOR_HALF, 0.5, FLOOR_HALF], // floor
-  [0, DECK_HY, 0, 3, DECK_HY, 3], // centre
-  [0, DECK_HY, -8, 3, DECK_HY, 3], // north (BR tower)
-  [0, DECK_HY, 8, 3, DECK_HY, 3], // south (Sniper tower)
-  [-8, DECK_HY, 0, 3, DECK_HY, 3], // west elbow
-  [8, DECK_HY, 0, 3, DECK_HY, 3], // east elbow
-  [0, DECK_HY, -4.5, 1.2, DECK_HY, 1.5], // north bridge
-  [0, DECK_HY, 4.5, 1.2, DECK_HY, 1.5], // south bridge
-  [-4.5, DECK_HY, 0, 1.5, DECK_HY, 1.2], // west bridge
-  [4.5, DECK_HY, 0, 1.5, DECK_HY, 1.2], // east bridge
-  [0, (DECK_TOP + TOWER_TOP) / 2, 0, 1.6, (TOWER_TOP - DECK_TOP) / 2, 1.6], // central tower
-  ...stairs(-1, -11),
-  ...stairs(1, 11),
-  // Low guard walls on the outer corners of the arms.
-  [0, DECK_TOP + 0.45, -11, 3, 0.45, 0.2],
-  [0, DECK_TOP + 0.45, 11, 3, 0.45, 0.2],
-  [-11, DECK_TOP + 0.45, 0, 0.2, 0.45, 3],
-  [11, DECK_TOP + 0.45, 0, 0.2, 0.45, 3],
+  [-1, -0.5, 0, 15, 0.5, 13], // recover floor
+
+  // --- Sniper tower (north-west): three stacked, shrinking tiers ---
+  [-8, 1.0, -8, 3.4, 1.0, 3.0], // T1 base (top 2.0)
+  [-8, 3.25, -8, 2.7, 1.25, 2.4], // T2 mid (top 4.5)
+  [-8, 5.75, -8, 2.2, 1.25, 2.2], // T3 sniper deck (top 7.0)
+  ...steps("z", -8, 2.6, -4.5, 1, 2.0, 0), // floor -> T1 (ramp toward mid)
+  ...steps("x", -10.9, 1.8, -8, -1, 4.5, 2.0), // T1 -> T2 (west side)
+  ...steps("x", -5.1, 1.6, -8, 1, 7.0, 4.5), // T2 -> T3 (east side)
+  // rails around the open sniper deck
+  [-8, 7.3, -9.9, 2.2, 0.3, 0.15],
+  [-9.9, 7.3, -8, 0.15, 0.3, 2.2],
+
+  // --- BR structure (south-east): two storeys ---
+  [8, 0.9, 7, 3.2, 0.9, 3.0], // B1 lower (top 1.8)
+  [8, 2.9, 7, 2.4, 1.1, 2.4], // B2 upper (top 4.0)
+  ...steps("z", 8, 2.6, 4.5, -1, 1.8, 0), // floor -> B1
+  ...steps("x", 10.9, 1.7, 7, -1, 4.0, 1.8), // B1 -> B2
+  [8, 4.3, 9.4, 2.4, 0.3, 0.15], // B2 rail
+
+  // --- Central raised walkway (the "bridge") over the bottom mid ---
+  [0, 3.4, 0, 1.6, 0.25, 6.5], // main span (top 3.65) running along Z
+  [3.5, 3.4, -3, 3.5, 0.25, 1.4], // spur toward the sniper tower
+  [3.5, 3.4, 5, 3.5, 0.25, 1.4], // spur toward BR
+  ...steps("z", 0, 1.4, -7.0, -1, 3.65, 0), // ends drop to the floor
+  ...steps("z", 0, 1.4, 7.0, 1, 3.65, 0),
+
+  // --- Bottom mid (the Sword pit): a low sunken platform with lips ---
+  [0, 0.35, 0, 3.2, 0.35, 2.6], // top 0.7
+  [0, 1.1, -2.7, 3.2, 0.5, 0.2], // low walls framing the pit
+  [0, 1.1, 2.7, 3.2, 0.5, 0.2],
+
+  // --- Shotgun room (south-west): a covered nook ---
+  [-9, 1.1, 6, 2.6, 1.1, 2.4], // floor (top 2.2)
+  [-9, 3.5, 6, 2.7, 0.2, 2.6], // roof
+  [-9, 2.6, 8.2, 2.7, 1.4, 0.2], // back wall
+  ...steps("x", -6.4, 2.0, 6, 1, 2.2, 0), // floor -> shotgun room
 ];
 
-/** Emissive cyan trim (non-solid decoration): light strips along the decks + tower. */
+/** Emissive cyan trim (non-solid): thin Forerunner light strips + tower vents. */
 const TRIM: Box[] = [
-  [0, DECK_TOP + 0.05, -3, 3, 0.05, 0.1], // deck-edge light strips
-  [0, DECK_TOP + 0.05, 3, 3, 0.05, 0.1],
-  [-3, DECK_TOP + 0.05, 0, 0.1, 0.05, 3],
-  [3, DECK_TOP + 0.05, 0, 0.1, 0.05, 3],
-  [1.62, (DECK_TOP + TOWER_TOP) / 2, 0, 0.03, (TOWER_TOP - DECK_TOP) / 2, 0.5], // tower vents
-  [-1.62, (DECK_TOP + TOWER_TOP) / 2, 0, 0.03, (TOWER_TOP - DECK_TOP) / 2, 0.5],
+  [-8, 5.0, -5.85, 2.0, 1.6, 0.04], // sniper-tower vent (a tall thin slit up the front)
+  [8, 2.9, 4.55, 1.8, 0.8, 0.04], // BR-tower vent
+  // walkway edge lights: a thin strip down each long side
+  [1.55, 3.67, 0, 0.05, 0.02, 6.3],
+  [-1.55, 3.67, 0, 0.05, 0.02, 6.3],
+  // sword-pit rim: a thin strip along each long edge
+  [0, 0.72, 2.55, 3.1, 0.02, 0.05],
+  [0, 0.72, -2.55, 3.1, 0.02, 0.05],
+  [-9, 2.22, 3.65, 2.4, 0.02, 0.05], // shotgun-room threshold strip
 ];
 
-/** Weapon-spawn markers (non-solid), cyan-lit cubes. */
+/** Weapon-spawn markers (non-solid), cyan-lit cubes, at the sandbox spots. */
 const MARKERS: Box[] = [
-  [0, DECK_TOP + 0.4, -8, 0.28, 0.4, 0.28], // BR
-  [0, DECK_TOP + 0.4, 8, 0.28, 0.4, 0.28], // Sniper
-  [-8, DECK_TOP + 0.4, 0, 0.28, 0.4, 0.28], // Shotgun
-  [8, DECK_TOP + 0.4, 0, 0.28, 0.4, 0.28], // Sword
-  [0, 0.4, 0, 0.28, 0.4, 0.28], // SMG (floor)
+  [-8, 7.4, -8, 0.28, 0.4, 0.28], // Sniper — atop the tower
+  [8, 4.4, 7, 0.28, 0.4, 0.28], // BR — atop the BR structure
+  [-9, 2.6, 6, 0.28, 0.4, 0.28], // Shotgun — in the nook
+  [0, 1.1, 0, 0.28, 0.4, 0.28], // Sword — the bottom-mid pit
+  [0, 4.05, 0, 0.28, 0.4, 0.28], // SMG — on the central walkway
 ];
-const MARKER_WEAPONS = ["br", "sniper", "shotgun", "sword", "smg"] as const;
+const MARKER_WEAPONS = ["sniper", "br", "shotgun", "sword", "smg"] as const;
 
 const SPAWNS: ReadonlyArray<readonly [number, number, number]> = [
-  [0, DECK_TOP, -8],
-  [0, DECK_TOP, 8],
-  [-8, DECK_TOP, 0],
-  [8, DECK_TOP, 0],
-  [6, DECK_TOP, -6],
-  [-6, DECK_TOP, 6],
-  [7, 0, -7],
-  [-7, 0, 7],
+  [-8, 2.0, -8], // sniper T1
+  [-8, 4.5, -8], // sniper mid
+  [8, 1.8, 7], // BR lower
+  [8, 4.0, 7], // BR upper
+  [0, 3.65, 0], // central walkway
+  [0, 0.7, 0], // sword pit
+  [-9, 2.2, 6], // shotgun room
+  [6, 0, -6], // floor
 ];
 
 const BOT_COUNT = 7;
@@ -294,17 +319,23 @@ function botMesh(): MeshAsset {
   };
 }
 
-function yExtent(): { min: number; max: number } {
-  let min = Infinity;
-  let max = -Infinity;
-  for (const [, cy, , , hy] of [...STRUCT, ...TRIM, ...MARKERS]) {
-    min = Math.min(min, cy - hy);
-    max = Math.max(max, cy + hy);
+/** The scene's bounding-box centre over every authored box (the bots are
+ *  authored at the origin, which sits inside this footprint, so they never
+ *  extend it). The camera's target offset is relative to this, so it must match
+ *  the runtime's own `parseMeshScene` bounds — a test pins all three axes. */
+function sceneCenter(): [number, number, number] {
+  let mnx = Infinity, mny = Infinity, mnz = Infinity;
+  let mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+  for (const [cx, cy, cz, hx, hy, hz] of [...STRUCT, ...TRIM, ...MARKERS]) {
+    mnx = Math.min(mnx, cx - hx); mny = Math.min(mny, cy - hy); mnz = Math.min(mnz, cz - hz);
+    mxx = Math.max(mxx, cx + hx); mxy = Math.max(mxy, cy + hy); mxz = Math.max(mxz, cz + hz);
   }
-  return { min, max };
+  return [(mnx + mxx) / 2, (mny + mxy) / 2, (mnz + mxz) / 2];
 }
-const Y_EXTENT = yExtent();
-export const LOCKOUT_CENTER_Y = (Y_EXTENT.min + Y_EXTENT.max) / 2;
+const CENTER = sceneCenter();
+export const LOCKOUT_CENTER_X = CENTER[0];
+export const LOCKOUT_CENTER_Y = CENTER[1];
+export const LOCKOUT_CENTER_Z = CENTER[2];
 
 export const LOCKOUT_MESH_SIDECAR: string = (() => {
   const identity = { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] };
@@ -350,7 +381,9 @@ export const LOCKOUT_CODE = `-- title:  Lockout arena
 --   Up/Down move . Left/Right turn . hold A(keyboard A) to strafe
 --   Z fire . X jump . S swap weapon . (menu: Up/Down pick, Z start)
 
+local CENTER_X = ${LOCKOUT_CENTER_X.toFixed(4)}
 local CENTER_Y = ${LOCKOUT_CENTER_Y.toFixed(4)}
+local CENTER_Z = ${LOCKOUT_CENTER_Z.toFixed(4)}
 local COL = {${collidersLua()}}
 local SPN = {${spawnsLua()}}
 local MRK = {${markersLua()}}
@@ -445,7 +478,7 @@ local function drive_camera()
   local tx,ty,tz = ex+fx*d, ey+fy*d, ez+fz*d
   local oy = math.atan(-fx, -fz)
   local op = math.asin(math.max(-0.999, math.min(0.999, -fy)))
-  cartbox.worldcam(oy, op, d, p.zoom and 0.5 or 1.15, tx, ty-CENTER_Y, tz)
+  cartbox.worldcam(oy, op, d, p.zoom and 0.5 or 1.15, tx-CENTER_X, ty-CENTER_Y, tz-CENTER_Z)
 end
 
 local function enemy_of(a, o) if not MODE.teams then return true end return a.team ~= o.team end
@@ -474,7 +507,7 @@ local function player_fire()
   if p.cool>0 or p.dead then return end
   local w = W[p.slot==1 and p.g1 or p.g2]
   local ammo = p.slot==1 and p.a1 or p.a2
-  if ammo<=0 then return end
+  if ammo<=0 then p.slot = (p.slot==1) and 2 or 1; return end  -- auto-fall back to the magnum
   p.cool = w.cool; flash = 4
   if p.slot==1 then p.a1=p.a1-1 else p.a2=p.a2-1 end
   local ex,ey,ez = p.x, p.y+EYE, p.z
@@ -641,8 +674,9 @@ function TIC()
       if i==sel then rect(500, 288+(i-1)*46, 300, 34, 1) end
       print(mo.name, 520, 298+(i-1)*46, (i==sel) and 12 or 13, false, 2, true)
     end
-    print("Up/Down choose . Z start", 500, 520, 13, false, 1, true)
-    print("Up/Down move . Left/Right turn . hold A strafe . Z fire . X jump . S swap", 300, 660, 13, false, 1, true)
+    print("Up/Down choose . Z (or A) start", 480, 520, 13, false, 1, true)
+    print("Touch: on-screen pad + A fire + B jump (auto-aim + auto weapon)", 360, 636, 13, false, 1, true)
+    print("Keyboard: arrows move/turn . hold A strafe . Z fire . X jump . S swap", 340, 664, 13, false, 1, true)
     return
   end
 

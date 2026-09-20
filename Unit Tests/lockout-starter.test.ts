@@ -16,7 +16,9 @@ import {
   LOCKOUT_CODE,
   LOCKOUT_MESH_SIDECAR,
   LOCKOUT_SCENE_TRIANGLES,
+  LOCKOUT_CENTER_X,
   LOCKOUT_CENTER_Y,
+  LOCKOUT_CENTER_Z,
   deserializeMeshAsset,
   resolveStarter,
 } from "@cartbox/editor";
@@ -40,12 +42,13 @@ describe("the Lockout arena starter", () => {
   });
 
   it("has a scene centre the first-person camera math can rely on", () => {
-    // The cart's camera offsets are relative to (0, CENTER_Y, 0); if the runtime
-    // disagreed, the eye would not land on the player. Symmetry pins X/Z to 0.
+    // The cart's camera offsets are relative to (CENTER_X, CENTER_Y, CENTER_Z);
+    // if the runtime's own bounds disagreed, the eye would not land on the player.
+    // The map is asymmetric, so all three axes are pinned against the runtime.
     const { center } = parseMeshScene(LOCKOUT_MESH_SIDECAR)!.bounds;
-    expect(Math.abs(center[0])).toBeLessThan(1e-6);
-    expect(Math.abs(center[2])).toBeLessThan(1e-6);
+    expect(Math.abs(center[0] - LOCKOUT_CENTER_X)).toBeLessThan(1e-6);
     expect(Math.abs(center[1] - LOCKOUT_CENTER_Y)).toBeLessThan(1e-6);
+    expect(Math.abs(center[2] - LOCKOUT_CENTER_Z)).toBeLessThan(1e-6);
   });
 
   it("fits the Xbox 360 tier (unbounded budget) with a modest triangle count", () => {
@@ -65,6 +68,9 @@ describe("the Lockout arena starter", () => {
     expect(LOCKOUT_CODE).toContain("btn(0)"); // move forward
     expect(LOCKOUT_CODE).toContain("btn(4)"); // Z = fire
     expect(LOCKOUT_CODE).toContain("auto_target"); // vertical auto-aim
+    // Touch only exposes the D-pad + A + B (no X/Y), so the core loop must not
+    // require a manual weapon swap: an empty gun auto-falls back to the magnum.
+    expect(LOCKOUT_CODE).toContain("auto-fall back to the magnum");
   });
 
   it("shows off the editor's 3D features: normal + material maps + emissive energy", () => {
