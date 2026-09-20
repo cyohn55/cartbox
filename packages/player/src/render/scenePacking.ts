@@ -29,14 +29,16 @@ import type { EnvironmentLight, Mat4 } from "@cartbox/editor";
  * 240  envGround  vec4<f32>    16   xyz = ground colour
  * 256  lightMvp   mat4x4<f32>  64   world→light-clip for this draw (shadow mapping)
  * 320  shadow     vec4<f32>    16   x = 1 when shadowed, y = map size, z = bias, w = strength
+ * 336  envMeta    vec4<f32>    16   xyz = env-map mean radiance, w = 1 when an env map is bound
  * ```
  *
- * 336 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
+ * 352 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
  * dynamic uniform offset can address), so one buffer still holds every draw in a
  * frame. The metallic-roughness inputs and the environment carry the Modern
  * (AAA) tier's shading; a fantasy draw leaves `pbr.z` at 0 and the shader takes
  * the byte-identical Lambert path, `envSky.w` at 0 falls back to flat ambient,
- * and `shadow.x` at 0 skips the shadow test.
+ * `envMeta.w` at 0 uses the analytic gradient instead of a panorama, and
+ * `shadow.x` at 0 skips the shadow test.
  */
 export const UNIFORM_STRIDE = 512;
 /**
@@ -44,7 +46,7 @@ export const UNIFORM_STRIDE = 512;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 336;
+export const UNIFORM_BYTES_USED = 352;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -62,6 +64,7 @@ const OFFSET_ENV_HORIZON = 56;
 const OFFSET_ENV_GROUND = 60;
 const OFFSET_LIGHT_MVP = 64;
 const OFFSET_SHADOW = 80;
+const OFFSET_ENV_META = 84;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -274,6 +277,15 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_SHADOW + 1] = shadow ? shadow.size : 0;
   target[base + OFFSET_SHADOW + 2] = shadow ? shadow.bias : 0;
   target[base + OFFSET_SHADOW + 3] = shadow ? shadow.strength : 0;
+
+  // Env-map mean radiance + flag. The map texture itself is bound separately; the
+  // shader samples it when envMeta.w is 1, else uses the analytic gradient.
+  const envMap = env && env.map ? env : null;
+  const avg = envMap?.average ?? null;
+  target[base + OFFSET_ENV_META] = avg ? avg[0]! : 0;
+  target[base + OFFSET_ENV_META + 1] = avg ? avg[1]! : 0;
+  target[base + OFFSET_ENV_META + 2] = avg ? avg[2]! : 0;
+  target[base + OFFSET_ENV_META + 3] = envMap && avg ? 1 : 0; // hasEnvMap
 }
 
 /** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2). */

@@ -201,6 +201,8 @@ export {
   type RasterStyle,
   environmentColor,
   environmentAverage,
+  sampleEnvironmentDir,
+  computeEnvironmentAverage,
   type EnvironmentLight,
   renderShadowMap,
   orthographicMatrix,
