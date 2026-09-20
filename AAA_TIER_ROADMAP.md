@@ -111,8 +111,22 @@ validated in-browser / on a real device). Shading is in the engine's non-linear
 byte space for now — a linear/gamma-correct HDR pipeline is Phase 4.
 
 ### Phase 3 — Environment lighting + shadows
-- [ ] Image-based lighting (HDRI environment cubemap): realistic ambient + reflections
+- [x] **Image-based lighting — software reference path.** An analytic
+      environment (`EnvironmentLight`: a sky/horizon/ground vertical gradient +
+      intensity) replaces the flat ambient term in the PBR branch with a diffuse
+      irradiance sampled along N and a specular reflection sampled along R
+      (blurred toward the environment average as roughness rises). Gated so a
+      material with no environment is byte-identical to Phase 2. Threaded through
+      `renderMeshScene` → `drawMesh`/`rasterizeTriangle` and the runtime
+      `SceneDraw`. Verified with headless renders + `meshRasterizerIbl.test.ts`.
+- [ ] **IBL — WebGPU** (sample the same gradient in WGSL; validate in-browser),
+      then a real **HDRI cubemap** with a prefiltered mip chain + a BRDF LUT
+      (the analytic gradient is the stand-in until then). **← next.**
 - [ ] Directional (sun) cascaded shadow maps
+
+**Status:** IBL software reference path landed — PBR surfaces now take directional
+ambient from an environment and metals reflect it, on the verifiable path. The
+WebGPU variant, an HDRI cubemap, and shadows remain.
 
 ### Phase 4 — HDR pipeline + more lights
 - [ ] HDR + ACES tonemapping + exposure
