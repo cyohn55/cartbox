@@ -199,6 +199,9 @@ export {
   type RenderMeshOptions,
   DEFAULT_RASTER_STYLE,
   type RasterStyle,
+  environmentColor,
+  environmentAverage,
+  type EnvironmentLight,
 } from "./render/meshRasterizer";
 export {
   MapVoxelLayer,

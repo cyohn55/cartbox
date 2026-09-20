@@ -4271,6 +4271,7 @@ var SoftwareSceneRenderer = class {
       background: draw.background,
       lightDirection: draw.lightDirection,
       ambient: draw.ambient,
+      environment: draw.environment,
       style: this.style
     });
   }

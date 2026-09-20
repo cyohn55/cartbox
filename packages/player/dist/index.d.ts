@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, DecodedTexture, RasterStyle } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, DecodedTexture, EnvironmentLight, RasterStyle } from '@cartbox/editor';
 
 /**
  * Console models. A model is a fixed hardware spec plus the WASM runtime that
@@ -1696,6 +1696,12 @@ interface SceneDraw {
     readonly lightDirection?: readonly [number, number, number];
     /** Ambient floor, or omitted for the rasteriser's default (0.35). */
     readonly ambient?: number;
+    /**
+     * Image-based lighting environment for PBR (Modern-tier) materials, or omitted
+     * for the flat ambient stand-in. When present it replaces the flat ambient with
+     * directional irradiance + a specular reflection. See {@link EnvironmentLight}.
+     */
+    readonly environment?: EnvironmentLight | null;
 }
 /** Draws placed 3D instances into a framebuffer. */
 interface SceneRenderer {

@@ -65,6 +65,9 @@ export interface RenderMeshOptions {
   readonly mrTextures?: readonly (DecodedTexture | null)[];
   readonly occlusionTextures?: readonly (DecodedTexture | null)[];
   readonly emissiveTextures?: readonly (DecodedTexture | null)[];
+  /** Image-based lighting environment for PBR materials (Modern tier); when set,
+   *  it replaces the flat ambient term. See {@link EnvironmentLight}. */
+  readonly environment?: EnvironmentLight | null;
   /** Background clear colour RGBA (default transparent). */
   readonly background?: readonly [number, number, number, number];
 }
@@ -205,6 +208,51 @@ function normalMatrix3x3(model: Mat4): readonly number[] {
 function normalizeVec3(x: number, y: number, z: number): [number, number, number] {
   const len = Math.hypot(x, y, z);
   return len < 1e-8 ? [0, 0, 1] : [x / len, y / len, z / len];
+}
+
+/**
+ * An analytic environment for image-based lighting (Phase 3): a three-stop
+ * vertical gradient — `sky` overhead, `horizon` at the equator, `ground` below —
+ * scaled by `intensity`. It stands in for an HDRI cubemap: cheap, deterministic
+ * (so the software path is verifiable), and enough to give PBR surfaces
+ * directional ambient and metals a legible reflection of their surroundings,
+ * replacing the flat ambient term. Colours are in the engine's non-linear byte
+ * space (0..1), like the rest of the shading until the Phase 4 HDR pipeline.
+ */
+export interface EnvironmentLight {
+  readonly sky: readonly [number, number, number];
+  readonly horizon: readonly [number, number, number];
+  readonly ground: readonly [number, number, number];
+  /** Overall multiplier on the gradient (default 1). */
+  readonly intensity: number;
+}
+
+/**
+ * Sample the environment gradient along a world-space direction's Y component:
+ * `y = +1` is straight up (sky), `0` the horizon, `-1` straight down (ground).
+ * This is an analytic approximation of the environment radiance — not a
+ * cosine-convolved irradiance — chosen so both backends compute it identically
+ * and the result is testable without a GPU.
+ */
+export function environmentColor(env: EnvironmentLight, y: number): [number, number, number] {
+  const t = Math.max(-1, Math.min(1, y));
+  const mix = (a: number, b: number, k: number): number => a + (b - a) * k;
+  const pick = (i: number): number =>
+    (t >= 0 ? mix(env.horizon[i]!, env.sky[i]!, t) : mix(env.horizon[i]!, env.ground[i]!, -t)) * env.intensity;
+  return [pick(0), pick(1), pick(2)];
+}
+
+/**
+ * The environment's mean radiance — the limit a fully-rough reflection converges
+ * to, blurring the whole gradient into one colour. Used to blend the mirror
+ * reflection toward the average as roughness rises.
+ */
+export function environmentAverage(env: EnvironmentLight): [number, number, number] {
+  return [
+    ((env.sky[0]! + env.horizon[0]! + env.ground[0]!) / 3) * env.intensity,
+    ((env.sky[1]! + env.horizon[1]! + env.ground[1]!) / 3) * env.intensity,
+    ((env.sky[2]! + env.horizon[2]! + env.ground[2]!) / 3) * env.intensity,
+  ];
 }
 
 /**
@@ -406,6 +454,7 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
     light,
     viewDir,
     ambient,
+    options.environment ?? null,
   );
 }
 
@@ -511,6 +560,9 @@ export interface RenderMeshSceneOptions {
   readonly ambient?: number;
   /** Background clear colour RGBA (default transparent); pass null to composite over existing `out`. */
   readonly background?: readonly [number, number, number, number] | null;
+  /** Image-based lighting environment for PBR materials (Modern tier); when set,
+   *  it replaces the flat ambient term. See {@link EnvironmentLight}. */
+  readonly environment?: EnvironmentLight | null;
   /** Per-pixel rasterisation behaviour; defaults to {@link DEFAULT_RASTER_STYLE}. */
   readonly style?: RasterStyle;
 }
@@ -530,6 +582,7 @@ export interface RenderMeshSceneOptions {
 export function renderMeshScene(instances: readonly MeshSceneInstance[], options: RenderMeshSceneOptions): void {
   const { width, height, out, depth, view, projection } = options;
   const ambient = options.ambient ?? 0.35;
+  const environment = options.environment ?? null;
   const style = options.style ?? DEFAULT_RASTER_STYLE;
   const viewProj = multiply(projection, view);
 
@@ -572,7 +625,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const occlusionTextures = instance.occlusionTextures ?? null;
     const emissiveTextures = instance.emissiveTextures ?? null;
     if (style.zBuffer) {
-      drawMesh(instance.mesh, mvp, modelView, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, light, viewDir, ambient, style);
+      drawMesh(instance.mesh, mvp, modelView, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, light, viewDir, ambient, environment, style);
     } else {
       eachTriangle(instance.mesh, mvp, modelView, normalBasis, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, (triangle) => queue.push(triangle));
     }
@@ -599,6 +652,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
         light,
         viewDir,
         ambient,
+        environment,
         style,
       );
     }
@@ -785,6 +839,7 @@ function drawMesh(
   light: readonly [number, number, number],
   viewDir: readonly [number, number, number],
   ambient: number,
+  environment: EnvironmentLight | null,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
 ): void {
   eachTriangle(
@@ -816,6 +871,7 @@ function drawMesh(
         light,
         viewDir,
         ambient,
+        environment,
         style,
       );
     },
@@ -840,6 +896,7 @@ function rasterizeTriangle(
   light: readonly [number, number, number],
   viewDir: readonly [number, number, number],
   ambient: number,
+  environment: EnvironmentLight | null,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
 ): void {
   // Perspective divide to NDC, then to screen pixels. NDC spans the full extent
@@ -1037,9 +1094,35 @@ function rasterizeTriangle(
           eg = pbr.emissive[1] * (es[1]! / 255);
           eb = pbr.emissive[2] * (es[2]! / 255);
         }
-        out[di * 4] = ((kdm * (1 - Fr) * ar + Fr * specD) * ndl + ambient * ar * ao + er) * 255;
-        out[di * 4 + 1] = ((kdm * (1 - Fg) * ag + Fg * specD) * ndl + ambient * ag * ao + eg) * 255;
-        out[di * 4 + 2] = ((kdm * (1 - Fb) * ab + Fb * specD) * ndl + ambient * ab * ao + eb) * 255;
+        // Ambient / image-based lighting. With no environment this is the flat
+        // ambient stand-in (byte-identical to Phase 2). With one, it becomes
+        // directional: a diffuse irradiance sampled along N, plus a specular
+        // reflection sampled along R and blurred toward the environment's average
+        // as roughness rises — so metals mirror their surroundings and every
+        // surface's fill light takes the colour of the sky it faces.
+        let ambR: number;
+        let ambG: number;
+        let ambB: number;
+        if (environment) {
+          const [ir, ig, ib] = environmentColor(environment, Ny);
+          // Reflection of the view direction about N (N already faces the viewer).
+          const rY = 2 * ndv * Ny - viewDir[1];
+          const [pr, pg, pb] = environmentColor(environment, rY);
+          const [avr, avg, avb] = environmentAverage(environment);
+          const specR = pr + (avr - pr) * rough;
+          const specG = pg + (avg - pg) * rough;
+          const specB = pb + (avb - pb) * rough;
+          ambR = (ir * ar * kdm + specR * f0r) * ao;
+          ambG = (ig * ag * kdm + specG * f0g) * ao;
+          ambB = (ib * ab * kdm + specB * f0b) * ao;
+        } else {
+          ambR = ambient * ar * ao;
+          ambG = ambient * ag * ao;
+          ambB = ambient * ab * ao;
+        }
+        out[di * 4] = ((kdm * (1 - Fr) * ar + Fr * specD) * ndl + ambR + er) * 255;
+        out[di * 4 + 1] = ((kdm * (1 - Fg) * ag + Fg * specD) * ndl + ambG + eg) * 255;
+        out[di * 4 + 2] = ((kdm * (1 - Fb) * ab + Fb * specD) * ndl + ambB + eb) * 255;
         out[di * 4 + 3] = al;
       } else {
         // --- Fantasy path (unchanged) ---

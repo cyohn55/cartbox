@@ -21,7 +21,7 @@
  */
 
 import { DEFAULT_RASTER_STYLE, renderMeshScene, type MeshSceneInstance } from "@cartbox/editor";
-import type { Mat4, RasterStyle } from "@cartbox/editor";
+import type { EnvironmentLight, Mat4, RasterStyle } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
 import { applyRenderCaps, createTextureBudgetCache } from "./renderCaps.js";
@@ -55,6 +55,12 @@ export interface SceneDraw {
   readonly lightDirection?: readonly [number, number, number];
   /** Ambient floor, or omitted for the rasteriser's default (0.35). */
   readonly ambient?: number;
+  /**
+   * Image-based lighting environment for PBR (Modern-tier) materials, or omitted
+   * for the flat ambient stand-in. When present it replaces the flat ambient with
+   * directional irradiance + a specular reflection. See {@link EnvironmentLight}.
+   */
+  readonly environment?: EnvironmentLight | null;
 }
 
 /** Draws placed 3D instances into a framebuffer. */
@@ -91,6 +97,7 @@ export class SoftwareSceneRenderer implements SceneRenderer {
       background: draw.background,
       lightDirection: draw.lightDirection,
       ambient: draw.ambient,
+      environment: draw.environment,
       style: this.style,
     });
   }
