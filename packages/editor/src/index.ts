@@ -58,6 +58,13 @@ export {
   XBOX360_SCENE_TRIANGLES,
 } from "./model/xbox360Seed";
 export {
+  seedLockoutCart,
+  LOCKOUT_CODE,
+  LOCKOUT_MESH_SIDECAR,
+  LOCKOUT_SCENE_TRIANGLES,
+  LOCKOUT_CENTER_Y,
+} from "./model/lockoutSeed";
+export {
   CART_STARTERS,
   DEFAULT_STARTER_ID,
   STARTER_IDS,
