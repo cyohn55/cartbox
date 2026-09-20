@@ -21,7 +21,7 @@
  */
 
 import { DEFAULT_RASTER_STYLE, renderMeshScene, type MeshSceneInstance } from "@cartbox/editor";
-import type { EnvironmentLight, Mat4, RasterStyle } from "@cartbox/editor";
+import type { EnvironmentLight, Mat4, RasterStyle, ShadowInput } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
 import { applyRenderCaps, createTextureBudgetCache } from "./renderCaps.js";
@@ -61,6 +61,12 @@ export interface SceneDraw {
    * directional irradiance + a specular reflection. See {@link EnvironmentLight}.
    */
   readonly environment?: EnvironmentLight | null;
+  /**
+   * Directional shadow map for PBR (Modern-tier) materials, or omitted for no
+   * shadows. The caller fills it with `renderShadowMap` before this call; the
+   * renderer samples it to occlude the direct light. See {@link ShadowInput}.
+   */
+  readonly shadow?: ShadowInput | null;
 }
 
 /** Draws placed 3D instances into a framebuffer. */
@@ -98,6 +104,7 @@ export class SoftwareSceneRenderer implements SceneRenderer {
       lightDirection: draw.lightDirection,
       ambient: draw.ambient,
       environment: draw.environment,
+      shadow: draw.shadow,
       style: this.style,
     });
   }

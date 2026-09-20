@@ -287,6 +287,27 @@ function buildPbrFrag(
   };
 }
 
+/**
+ * A directional-light shadow map (Phase 3): a depth buffer rendered from the
+ * sun's orthographic view, plus that view's world→light-clip transform, so the
+ * main pass can project each fragment into the light's frame and test whether
+ * something nearer the sun already occupies it (a shadow). Fill it with
+ * {@link renderShadowMap}; pass it to {@link renderMeshScene} to cast shadows.
+ * Directional only — an orthographic light, which is what a sun is.
+ */
+export interface ShadowInput {
+  /** Column-major world→light-clip (`lightProjection · lightView`). */
+  readonly lightViewProj: Mat4;
+  /** Depth map, `size × size`, light-NDC z, nearest-wins (from renderShadowMap). */
+  readonly depth: Float32Array;
+  /** Edge length of the square shadow map. */
+  readonly size: number;
+  /** Depth bias to suppress self-shadow acne (default 0.003, in light-NDC z). */
+  readonly bias?: number;
+  /** How dark a shadow is, 0 (none) .. 1 (black); default 1. */
+  readonly strength?: number;
+}
+
 /** A vertex after transforms: view-space z (for clipping) + clip-space + attributes. */
 interface Vertex {
   clip: [number, number, number, number]; // clip-space position
@@ -296,6 +317,12 @@ interface Vertex {
   nx: number;
   ny: number;
   nz: number;
+  // Light-space clip position (world→light-clip), for shadow mapping. Zero when
+  // no shadow pass is active. The light is orthographic, so w = 1 and these are
+  // already NDC — world-linear, so they interpolate with the same weights as UVs.
+  lx: number;
+  ly: number;
+  lz: number;
 }
 
 const NEAR = 0.05;
@@ -311,6 +338,9 @@ function lerpVertex(a: Vertex, b: Vertex, t: number): Vertex {
     nx: mix(a.nx, b.nx),
     ny: mix(a.ny, b.ny),
     nz: mix(a.nz, b.nz),
+    lx: mix(a.lx, b.lx),
+    ly: mix(a.ly, b.ly),
+    lz: mix(a.lz, b.lz),
   };
 }
 
@@ -455,6 +485,8 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
     viewDir,
     ambient,
     options.environment ?? null,
+    null,
+    null,
   );
 }
 
@@ -563,6 +595,10 @@ export interface RenderMeshSceneOptions {
   /** Image-based lighting environment for PBR materials (Modern tier); when set,
    *  it replaces the flat ambient term. See {@link EnvironmentLight}. */
   readonly environment?: EnvironmentLight | null;
+  /** Directional shadow map (Modern tier); when set, the direct light is occluded
+   *  where the light cannot see a fragment. Fill it first with
+   *  {@link renderShadowMap}. See {@link ShadowInput}. */
+  readonly shadow?: ShadowInput | null;
   /** Per-pixel rasterisation behaviour; defaults to {@link DEFAULT_RASTER_STYLE}. */
   readonly style?: RasterStyle;
 }
@@ -583,6 +619,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
   const { width, height, out, depth, view, projection } = options;
   const ambient = options.ambient ?? 0.35;
   const environment = options.environment ?? null;
+  const shadow = options.shadow ?? null;
   const style = options.style ?? DEFAULT_RASTER_STYLE;
   const viewProj = multiply(projection, view);
 
@@ -624,10 +661,11 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const mrTextures = instance.mrTextures ?? null;
     const occlusionTextures = instance.occlusionTextures ?? null;
     const emissiveTextures = instance.emissiveTextures ?? null;
+    const lightMvp = shadow ? multiply(shadow.lightViewProj, instance.model) : null;
     if (style.zBuffer) {
-      drawMesh(instance.mesh, mvp, modelView, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, light, viewDir, ambient, environment, style);
+      drawMesh(instance.mesh, mvp, modelView, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, light, viewDir, ambient, environment, lightMvp, shadow, style);
     } else {
-      eachTriangle(instance.mesh, mvp, modelView, normalBasis, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, (triangle) => queue.push(triangle));
+      eachTriangle(instance.mesh, mvp, modelView, normalBasis, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightMvp, (triangle) => queue.push(triangle));
     }
   }
 
@@ -653,8 +691,130 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
         viewDir,
         ambient,
         environment,
+        shadow,
         style,
       );
+    }
+  }
+}
+
+/**
+ * A right-handed orthographic projection mapping the box
+ * `[left,right] × [bottom,top] × [near,far]` to NDC `[-1,1]³`. This is the
+ * projection a directional light (a sun) casts shadows through: parallel rays,
+ * no perspective, so the whole scene fits one depth map at a uniform scale.
+ */
+export function orthographicMatrix(
+  left: number,
+  right: number,
+  bottom: number,
+  top: number,
+  near: number,
+  far: number,
+): Mat4 {
+  const rl = 1 / (right - left);
+  const tb = 1 / (top - bottom);
+  const fn = 1 / (far - near);
+  return Float64Array.from([
+    2 * rl, 0, 0, 0,
+    0, 2 * tb, 0, 0,
+    0, 0, -2 * fn, 0,
+    -(right + left) * rl, -(top + bottom) * tb, -(far + near) * fn, 1,
+  ]);
+}
+
+/** How to render a directional-light depth map — the light's view + projection. */
+export interface RenderShadowMapOptions {
+  /** Column-major light view matrix (see {@link viewMatrix}). */
+  readonly lightView: Mat4;
+  /** Column-major light projection — orthographic (see {@link orthographicMatrix}). */
+  readonly lightProjection: Mat4;
+  /** Edge length of the square depth map. */
+  readonly size: number;
+  /** Depth output, `size × size`; reset to +Infinity each call. Reuse across frames. */
+  readonly depth: Float32Array;
+}
+
+/**
+ * Render the scene's depth from a directional light into `depth`, the first pass
+ * of shadow mapping. Only depth is written — no shading, no colour — so it is
+ * cheap. The stored value is light-NDC z (nearest-to-the-light wins), which
+ * {@link renderMeshScene} then compares each fragment against via {@link ShadowInput}.
+ *
+ * Returns a {@link ShadowInput} wrapping the filled map and the light's
+ * view-projection, ready to hand straight to `renderMeshScene`.
+ */
+export function renderShadowMap(
+  instances: readonly MeshSceneInstance[],
+  options: RenderShadowMapOptions,
+): ShadowInput {
+  const { lightView, lightProjection, size, depth } = options;
+  const lightViewProj = multiply(lightProjection, lightView);
+  depth.fill(Infinity);
+
+  for (const instance of instances) {
+    const mvp = multiply(lightViewProj, instance.model);
+    const modelView = multiply(lightView, instance.model);
+    // The light is the camera for this pass, so project through its mvp and write
+    // depth only. No textures, normals or shadow recursion — pass nulls.
+    eachTriangle(
+      instance.mesh,
+      mvp,
+      modelView,
+      IDENTITY_3X3,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      (triangle) => rasterizeDepthOnly(triangle.a, triangle.b, triangle.c, size, depth),
+    );
+  }
+
+  return { lightViewProj, depth, size };
+}
+
+/**
+ * Rasterise one clipped triangle writing only NDC depth, nearest-wins — the
+ * shadow map's inner loop. A stripped {@link rasterizeTriangle}: no attributes,
+ * no shading, no perspective-correct interpolation (only z is needed, and NDC z
+ * is linear in screen space).
+ */
+function rasterizeDepthOnly(a: Vertex, b: Vertex, c: Vertex, size: number, depth: Float32Array): void {
+  const toScreen = (v: Vertex): { x: number; y: number; z: number } => {
+    const invW = 1 / v.clip[3];
+    return {
+      x: (v.clip[0] * invW * 0.5 + 0.5) * size,
+      y: (1 - (v.clip[1] * invW * 0.5 + 0.5)) * size,
+      z: v.clip[2] * invW,
+    };
+  };
+  const sa = toScreen(a);
+  const sb = toScreen(b);
+  const sc = toScreen(c);
+
+  const area = (sb.x - sa.x) * (sc.y - sa.y) - (sb.y - sa.y) * (sc.x - sa.x);
+  if (Math.abs(area) < 1e-9) return;
+  const invArea = 1 / area;
+
+  const minX = Math.max(0, Math.floor(Math.min(sa.x, sb.x, sc.x)));
+  const maxX = Math.min(size - 1, Math.ceil(Math.max(sa.x, sb.x, sc.x)));
+  const minY = Math.max(0, Math.floor(Math.min(sa.y, sb.y, sc.y)));
+  const maxY = Math.min(size - 1, Math.ceil(Math.max(sa.y, sb.y, sc.y)));
+
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      const px = x + 0.5;
+      const py = y + 0.5;
+      const w0 = ((sb.x - px) * (sc.y - py) - (sb.y - py) * (sc.x - px)) * invArea;
+      const w1 = ((sc.x - px) * (sa.y - py) - (sc.y - py) * (sa.x - px)) * invArea;
+      const w2 = ((sa.x - px) * (sb.y - py) - (sa.y - py) * (sb.x - px)) * invArea;
+      if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+      const z = w0 * sa.z + w1 * sb.z + w2 * sc.z;
+      const di = y * size + x;
+      if (z < depth[di]!) depth[di] = z; // nearest to the light wins
     }
   }
 }
@@ -726,6 +886,8 @@ function eachTriangle(
   mrTextures: readonly (DecodedTexture | null)[] | null,
   occlusionTextures: readonly (DecodedTexture | null)[] | null,
   emissiveTextures: readonly (DecodedTexture | null)[] | null,
+  /** World→light-clip for shadow mapping, or null when no shadow pass is active. */
+  lightMvp: Mat4 | null,
   emit: (triangle: PendingTriangle) => void,
 ): void {
   mesh.primitives.forEach((primitive, primitiveIndex) => {
@@ -789,6 +951,16 @@ function eachTriangle(
       const onx = objectNormals[i * 3]!;
       const ony = objectNormals[i * 3 + 1]!;
       const onz = objectNormals[i * 3 + 2]!;
+      // Light-space clip for shadow mapping. The light is orthographic, so w = 1
+      // and these are already NDC; world-linear, so they interpolate like UVs.
+      let lx = 0;
+      let ly = 0;
+      let lz = 0;
+      if (lightMvp) {
+        lx = lightMvp[0]! * x + lightMvp[4]! * y + lightMvp[8]! * z + lightMvp[12]!;
+        ly = lightMvp[1]! * x + lightMvp[5]! * y + lightMvp[9]! * z + lightMvp[13]!;
+        lz = lightMvp[2]! * x + lightMvp[6]! * y + lightMvp[10]! * z + lightMvp[14]!;
+      }
       return {
         clip: [cx, cy, cz, cw],
         viewZ,
@@ -797,6 +969,9 @@ function eachTriangle(
         nx: normalBasis[0]! * onx + normalBasis[3]! * ony + normalBasis[6]! * onz,
         ny: normalBasis[1]! * onx + normalBasis[4]! * ony + normalBasis[7]! * onz,
         nz: normalBasis[2]! * onx + normalBasis[5]! * ony + normalBasis[8]! * onz,
+        lx,
+        ly,
+        lz,
       };
     };
 
@@ -840,6 +1015,8 @@ function drawMesh(
   viewDir: readonly [number, number, number],
   ambient: number,
   environment: EnvironmentLight | null,
+  lightMvp: Mat4 | null,
+  shadow: ShadowInput | null,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
 ): void {
   eachTriangle(
@@ -853,6 +1030,7 @@ function drawMesh(
     mrTextures,
     occlusionTextures,
     emissiveTextures,
+    lightMvp,
     (triangle) => {
       rasterizeTriangle(
         triangle.a,
@@ -872,6 +1050,7 @@ function drawMesh(
         viewDir,
         ambient,
         environment,
+        shadow,
         style,
       );
     },
@@ -897,6 +1076,7 @@ function rasterizeTriangle(
   viewDir: readonly [number, number, number],
   ambient: number,
   environment: EnvironmentLight | null,
+  shadow: ShadowInput | null,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
 ): void {
   // Perspective divide to NDC, then to screen pixels. NDC spans the full extent
@@ -1007,9 +1187,30 @@ function rasterizeTriangle(
         }
       }
 
+      // Directional shadow map (Phase 3): project this fragment into the light's
+      // orthographic frame and compare its depth against the nearest surface the
+      // light sees there. `shadowLit` is 1 when lit, `1 − strength` when occluded;
+      // it scales the *direct* light only (ambient/IBL still fills a shadow).
+      // Absent a shadow input it stays 1, so non-Modern renders are unchanged.
+      let shadowLit = 1;
+      if (shadow) {
+        const lxi = pw0 * a.lx + pw1 * b.lx + pw2 * c.lx;
+        const lyi = pw0 * a.ly + pw1 * b.ly + pw2 * c.ly;
+        const lzi = pw0 * a.lz + pw1 * b.lz + pw2 * c.lz;
+        const sx = (lxi * 0.5 + 0.5) * shadow.size;
+        const sy = (1 - (lyi * 0.5 + 0.5)) * shadow.size;
+        if (sx >= 0 && sx < shadow.size && sy >= 0 && sy < shadow.size && lzi >= -1 && lzi <= 1) {
+          const tx = Math.min(shadow.size - 1, Math.max(0, Math.floor(sx)));
+          const ty = Math.min(shadow.size - 1, Math.max(0, Math.floor(sy)));
+          const stored = shadow.depth[ty * shadow.size + tx]!;
+          const bias = shadow.bias ?? 0.003;
+          if (lzi - bias > stored) shadowLit = 1 - (shadow.strength ?? 1);
+        }
+      }
+
       // Two-sided Lambert: |N·L| so inconsistent winding still lights.
       const nl = Math.abs(nx * light[0] + ny * light[1] + nz * light[2]);
-      const shade = ambient + (1 - ambient) * nl;
+      const shade = ambient + (1 - ambient) * nl * shadowLit;
 
       let r = base[0] * 255;
       let g = base[1] * 255;
@@ -1120,9 +1321,10 @@ function rasterizeTriangle(
           ambG = ambient * ag * ao;
           ambB = ambient * ab * ao;
         }
-        out[di * 4] = ((kdm * (1 - Fr) * ar + Fr * specD) * ndl + ambR + er) * 255;
-        out[di * 4 + 1] = ((kdm * (1 - Fg) * ag + Fg * specD) * ndl + ambG + eg) * 255;
-        out[di * 4 + 2] = ((kdm * (1 - Fb) * ab + Fb * specD) * ndl + ambB + eb) * 255;
+        // The direct light is what a shadow occludes; ambient/IBL still fills it.
+        out[di * 4] = ((kdm * (1 - Fr) * ar + Fr * specD) * ndl * shadowLit + ambR + er) * 255;
+        out[di * 4 + 1] = ((kdm * (1 - Fg) * ag + Fg * specD) * ndl * shadowLit + ambG + eg) * 255;
+        out[di * 4 + 2] = ((kdm * (1 - Fb) * ab + Fb * specD) * ndl * shadowLit + ambB + eb) * 255;
         out[di * 4 + 3] = al;
       } else {
         // --- Fantasy path (unchanged) ---

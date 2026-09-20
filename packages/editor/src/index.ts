@@ -202,6 +202,10 @@ export {
   environmentColor,
   environmentAverage,
   type EnvironmentLight,
+  renderShadowMap,
+  orthographicMatrix,
+  type ShadowInput,
+  type RenderShadowMapOptions,
 } from "./render/meshRasterizer";
 export {
   MapVoxelLayer,

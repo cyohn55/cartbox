@@ -119,14 +119,25 @@ byte space for now — a linear/gamma-correct HDR pipeline is Phase 4.
       material with no environment is byte-identical to Phase 2. Threaded through
       `renderMeshScene` → `drawMesh`/`rasterizeTriangle` and the runtime
       `SceneDraw`. Verified with headless renders + `meshRasterizerIbl.test.ts`.
-- [ ] **IBL — WebGPU** (sample the same gradient in WGSL; validate in-browser),
-      then a real **HDRI cubemap** with a prefiltered mip chain + a BRDF LUT
-      (the analytic gradient is the stand-in until then). **← next.**
-- [ ] Directional (sun) cascaded shadow maps
+- [x] **IBL — WebGPU.** The same analytic gradient sampled in WGSL
+      (`envColor`/`envAverage`), matching the software branch; validated
+      in-browser / on a real device (tolerant `webgpu-parity.test.ts` case).
+- [ ] A real **HDRI cubemap** with a prefiltered mip chain + a BRDF LUT (the
+      analytic gradient is the stand-in until then).
+- [x] **Directional shadow maps — software reference path.** A two-pass shadow
+      map: `renderShadowMap` records scene depth from the sun's orthographic view
+      (`orthographicMatrix`), then `renderMeshScene` projects each fragment into
+      that view (light-space coords threaded through the vertex/clip pipeline) and
+      darkens the *direct* light where the light cannot see it — ambient/IBL still
+      fills the shadow. Gated (`ShadowInput`): no shadow input → unchanged.
+      Verified with headless renders + `meshRasterizerShadow.test.ts`.
+- [ ] **Shadows — WebGPU** (a depth pre-pass + shadow sample in WGSL; validate
+      in-browser), and cascaded splits for large scenes. **← next.**
 
-**Status:** IBL software reference path landed — PBR surfaces now take directional
-ambient from an environment and metals reflect it, on the verifiable path. The
-WebGPU variant, an HDRI cubemap, and shadows remain.
+**Status:** IBL (software + WebGPU) and directional shadow maps (software
+reference path) landed — PBR surfaces take directional ambient, metals reflect
+the environment, and occluders cast shadows on the verifiable path. A real HDRI
+cubemap, WebGPU shadows, and cascades remain.
 
 ### Phase 4 — HDR pipeline + more lights
 - [ ] HDR + ACES tonemapping + exposure
