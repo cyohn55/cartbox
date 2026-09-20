@@ -17,6 +17,7 @@ import {
   LOCKOUT_MESH_SIDECAR,
   LOCKOUT_SCENE_TRIANGLES,
   LOCKOUT_CENTER_Y,
+  deserializeMeshAsset,
   resolveStarter,
 } from "@cartbox/editor";
 import { MODELS, parseMeshScene } from "@cartbox/player";
@@ -53,12 +54,33 @@ describe("the Lockout arena starter", () => {
     expect(LOCKOUT_SCENE_TRIANGLES).toBeLessThan(5000);
   });
 
-  it("drives a first-person camera, poses the bots, and reads FPS input", () => {
+  it("drives a first-person camera, poses the bots, and uses the 8-button gamepad", () => {
     expect(LOCKOUT_CODE).toContain("cartbox.worldcam"); // moves the orbit target = FP camera
     expect(LOCKOUT_CODE).toContain("cartbox.meshpose"); // repositions the 7 bots
     expect(LOCKOUT_CODE).toContain("function TIC");
-    expect(LOCKOUT_CODE).toMatch(/key\(23\)/); // WASD movement
-    expect(LOCKOUT_CODE).toContain("mouse()"); // mouse look
+    // The web player only forwards 8 gamepad buttons — no key()/mouse() — so the
+    // controls must be btn()-only: tank move/turn + face buttons + auto-aim.
+    expect(LOCKOUT_CODE).not.toMatch(/\bkey\(/);
+    expect(LOCKOUT_CODE).not.toContain("mouse()");
+    expect(LOCKOUT_CODE).toContain("btn(0)"); // move forward
+    expect(LOCKOUT_CODE).toContain("btn(4)"); // Z = fire
+    expect(LOCKOUT_CODE).toContain("auto_target"); // vertical auto-aim
+  });
+
+  it("shows off the editor's 3D features: normal + material maps + emissive energy", () => {
+    // The map ships baked normal + material maps (the cutting-edge lighting), and
+    // an emissive cyan material for the Forerunner light strips.
+    const map = deserializeMeshAsset(
+      (JSON.parse(LOCKOUT_MESH_SIDECAR) as { meshes: { mesh: string }[] }).meshes[0]!.mesh,
+    );
+    const forerunner = map.primitives.find((p) => p.material.baseColorImage)!;
+    expect(forerunner.material.baseColorImage?.mime).toBe("image/png");
+    expect(forerunner.material.normalImage?.mime).toBe("image/png"); // normal-mapped panels
+    expect(forerunner.material.materialImage?.mime).toBe("image/png"); // specular + emissive
+    // A dedicated emissive material carries the cyan energy (material map, no albedo texture).
+    const energy = map.primitives.find((p) => !p.material.baseColorImage && p.material.materialImage);
+    expect(energy, "an emissive energy material").toBeTruthy();
+    expect(LOCKOUT_CODE).toContain("draw_viewmodel"); // first-person weapon viewmodel
   });
 
   it("ships the four game types with their rules and a mode-select menu", () => {
@@ -78,7 +100,7 @@ describe("the Lockout arena starter", () => {
     }
     expect(LOCKOUT_CODE).toContain("try_pickups"); // walk-over weapon spawns
     expect(LOCKOUT_CODE).toContain("player_fire"); // per-weapon hitscan
-    expect(LOCKOUT_CODE).toContain("headshot"); // headshot multiplier
+    expect(LOCKOUT_CODE).toMatch(/dmg\s*=\s*dmg\s*\*\s*w\.hs/); // headshot multiplier
     expect(LOCKOUT_CODE).toContain("p.zoom"); // sniper zoom
     expect(LOCKOUT_CODE).toMatch(/swap/); // weapon switch
   });
