@@ -1875,12 +1875,23 @@ declare function createSceneRenderer(width: number, height: number, caps: Render
  * author, and it is the reason no era console model beyond a 2D one was
  * possible (ERA_MODELS.md §5.1).
  *
- * This draws the same instances in hardware and matches the software
- * rasteriser's shading *exactly* — two-sided Lambert with an ambient floor,
- * nearest-sampled wrapped textures, glTF's flipped V, and the same
- * alpha-discard threshold. Parity is the contract: the fallback must be
- * indistinguishable, not merely similar, or a cart looks different depending on
- * the viewer's browser.
+ * This draws the same instances in hardware. For the fantasy tiers it matches
+ * the software rasteriser's shading *exactly* — two-sided Lambert with an
+ * ambient floor, nearest-sampled wrapped textures, glTF's flipped V, and the
+ * same alpha-discard threshold. Parity is the contract there: the fallback must
+ * be indistinguishable, not merely similar, or a cart looks different depending
+ * on the viewer's browser.
+ *
+ * The Modern (AAA) tier adds a metallic-roughness Cook-Torrance BRDF, gated on
+ * `pbr.z` and mirroring the software rasteriser's PBR branch term for term (see
+ * `meshRasterizer.ts`). That branch cannot be *byte*-identical — GGX and `pow`
+ * differ slightly between the GPU's float32 and the CPU's float64 — so the
+ * contract there is a visual match, validated in-browser (and on a real device
+ * by `webgpu-parity.test.ts`), not the zero-tolerance fantasy parity. Both the
+ * gate and the maths that decide byte placement live in the pure, tested
+ * `scenePacking.ts`. (Tangent-space normal maps and the fantasy material-map
+ * specular are not yet on this GPU path — a known follow-up; the software
+ * rasteriser remains the reference for those.)
  *
  * ## Why the readback, and why it lags
  *
@@ -1945,7 +1956,7 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private ensureUniformCapacity;
     /** Upload (once) a mesh's primitives as interleaved vertex + index buffers. */
     private uploadMesh;
-    /** The bind group for one primitive, rebuilt if its texture changed. */
+    /** The bind group for one primitive, rebuilt if any of its textures changed. */
     private bindGroupFor;
     /** Upload (once) a decoded texture. */
     private uploadTexture;
@@ -1968,15 +1979,20 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  * WGSL uniform layout, in bytes:
  *
  * ```
- *   0  mvp    mat4x4<f32>   64
- *  64  nrm    mat3x3<f32>   48   (three vec3 columns, each padded to 16)
- * 112  base   vec4<f32>     16
- * 128  light  vec4<f32>     16   xyz = direction, w = ambient
- * 144  flags  vec4<f32>     16   x = 1 when a texture is bound
+ *   0  mvp      mat4x4<f32>  64
+ *  64  nrm      mat3x3<f32>  48   (three vec3 columns, each padded to 16)
+ * 112  base     vec4<f32>    16
+ * 128  light    vec4<f32>    16   xyz = direction, w = ambient
+ * 144  view     vec4<f32>    16   xyz = direction towards the viewer (Modern PBR)
+ * 160  pbr      vec4<f32>    16   x = metallic, y = roughness, z = 1 when PBR
+ * 176  emissive vec4<f32>    16   xyz = emissive factor
+ * 192  texflags vec4<f32>    16   x = base, y = mr, z = occlusion, w = emissive
  * ```
  *
- * 160 bytes used, padded to the 256-byte minimum alignment a dynamic uniform
- * offset requires, so one buffer holds every draw in a frame.
+ * 208 bytes used, padded to the 256-byte minimum alignment a dynamic uniform
+ * offset requires, so one buffer holds every draw in a frame. The last four
+ * vec4s carry the Modern (AAA) tier's metallic-roughness inputs; a fantasy draw
+ * leaves `pbr.z` at 0 and the shader takes the byte-identical Lambert path.
  */
 declare const UNIFORM_STRIDE = 256;
 /**
@@ -1984,7 +2000,7 @@ declare const UNIFORM_STRIDE = 256;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 160;
+declare const UNIFORM_BYTES_USED = 208;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
@@ -2017,6 +2033,41 @@ declare function alignBytesPerRow(width: number): number;
  * precisely the geometry most likely to be imported.
  */
 declare function normalBasis3x3(model: Mat4): readonly number[];
+/**
+ * The Modern (AAA) tier's metallic-roughness inputs for one draw, mirroring the
+ * software rasteriser's `buildPbrFrag` gate exactly (see `meshRasterizer.ts`): a
+ * material is PBR when it carries any metallic-roughness signal — a map, or an
+ * explicit metallic/roughness/emissive factor — and otherwise the fantasy path
+ * runs. Keeping the gate here, pure and tested, is what keeps the two backends
+ * from disagreeing about which materials light with the BRDF.
+ */
+interface ResolvedPbr {
+    readonly isPbr: boolean;
+    readonly metallic: number;
+    readonly roughness: number;
+    readonly emissive: readonly [number, number, number];
+}
+/** Just the material fields the PBR gate reads. */
+interface PbrMaterial {
+    readonly metallicFactor?: number;
+    readonly roughnessFactor?: number;
+    readonly emissiveFactor?: readonly [number, number, number];
+}
+/**
+ * Resolve a draw's PBR inputs, matching `buildPbrFrag`. `hasMr`/`hasOcc`/`hasEmis`
+ * say whether the instance bound each map for this primitive. The factor defaults
+ * (metallic 1, roughness 1, emissive 0) are the glTF defaults the software path
+ * uses too.
+ */
+declare function resolvePbr(material: PbrMaterial, hasMr: boolean, hasOcc: boolean, hasEmis: boolean): ResolvedPbr;
+/**
+ * The world-space direction *towards* the viewer, matching the software path
+ * (`normalizeVec3(view[2], view[6], view[10])`): a look-at view maps this world
+ * direction to view +Z, so it is the third row of the view rotation, treated as
+ * directional (camera at infinity). The degenerate guard returns +Z, as the
+ * rasteriser's `normalizeVec3` does.
+ */
+declare function viewDirection(view: Mat4): readonly [number, number, number];
 interface InstanceUniform {
     readonly mvp: Mat4;
     /** Column-major 3x3 from {@link normalBasis3x3}. */
@@ -2025,6 +2076,14 @@ interface InstanceUniform {
     readonly hasTexture: boolean;
     /** This frame's light, from {@link resolveLight}. */
     readonly light: ResolvedLight;
+    /** This frame's view direction, from {@link viewDirection} (Modern PBR). */
+    readonly viewDir: readonly [number, number, number];
+    /** This draw's PBR inputs, from {@link resolvePbr}. */
+    readonly pbr: ResolvedPbr;
+    /** Whether each PBR map is bound for this primitive. */
+    readonly hasMrMap: boolean;
+    readonly hasOcclusionMap: boolean;
+    readonly hasEmissiveMap: boolean;
 }
 /**
  * Write one draw's uniforms into the shared staging array at `index`.
@@ -3290,4 +3349,4 @@ declare class WorldOverlaySurface implements DisplaySurface {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, EngineLoadError, type FlagsField, type GeneratedTrack, HEIGHT_WORLD, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera as MeshSceneCamera, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, PARTICLE_KINDS, POST_FX_EFFECTS, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPlacement, type Rgb, SOFTWARE_RASTER_CAPS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera$1 as SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, SoftwareSceneRenderer, type SpriteRegion, type SpriteRegionSource, TILT_SHIFT_FEATHER, type TextureLookup, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3, type VerificationResult, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, alignBytesPerRow, animClipsSdkLua, anyPostFxEnabled, applyRenderCaps, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, collisionSdkLua, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interleaveVertices, interpolateNormal, loadEngineModule, makeShadowTexture, mount, nearestDirection, normalBasis3x3, normalVector, paramKey, parseAnim, parseCollisionField, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveLight, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, sway, tiltShiftBlur, uniformsFromSettings, unpadRows, verifyReplayScore, webgpuCanHonour, worldCenter, writeInstanceUniform };
+export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, EngineLoadError, type FlagsField, type GeneratedTrack, HEIGHT_WORLD, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera as MeshSceneCamera, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, PARTICLE_KINDS, POST_FX_EFFECTS, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PbrMaterial, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, SOFTWARE_RASTER_CAPS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera$1 as SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, SoftwareSceneRenderer, type SpriteRegion, type SpriteRegionSource, TILT_SHIFT_FEATHER, type TextureLookup, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3, type VerificationResult, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, alignBytesPerRow, animClipsSdkLua, anyPostFxEnabled, applyRenderCaps, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, collisionSdkLua, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interleaveVertices, interpolateNormal, loadEngineModule, makeShadowTexture, mount, nearestDirection, normalBasis3x3, normalVector, paramKey, parseAnim, parseCollisionField, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, sway, tiltShiftBlur, uniformsFromSettings, unpadRows, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeInstanceUniform };

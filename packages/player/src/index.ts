@@ -129,9 +129,12 @@ export {
   interleaveVertices,
   normalBasis3x3,
   resolveLight,
+  resolvePbr,
   unpadRows,
+  viewDirection,
   writeInstanceUniform,
 } from "./render/scenePacking.js";
+export type { PbrMaterial, ResolvedPbr } from "./render/scenePacking.js";
 export { createConsole, loadEngineModule } from "./engine.js";
 export type { ConsoleInstance } from "./engine.js";
 
