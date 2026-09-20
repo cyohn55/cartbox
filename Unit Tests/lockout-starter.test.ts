@@ -61,12 +61,25 @@ describe("the Lockout arena starter", () => {
     expect(LOCKOUT_CODE).toContain("mouse()"); // mouse look
   });
 
-  it("scaffolds the four game types and the Lockout weapon sandbox", () => {
+  it("ships the four game types with their rules and a mode-select menu", () => {
     for (const label of ["Free for All", "Team Slayer", "SWAT", "Team Snipers"]) {
       expect(LOCKOUT_CODE).toContain(label);
     }
-    for (const weapon of ["br", "sniper", "shotgun", "sword", "magnum"]) {
+    expect(LOCKOUT_CODE).toContain('MODE_KEYS = {"ffa","slayer","swat","snipe"}');
+    expect(LOCKOUT_CODE).toContain('phase = "menu"'); // start screen
+    expect(LOCKOUT_CODE).toContain("start_match"); // each mode is start-able
+    expect(LOCKOUT_CODE).toContain("teams=true"); // team modes
+    expect(LOCKOUT_CODE).toContain("shields=false"); // SWAT drops shields
+  });
+
+  it("implements the Lockout weapon sandbox with pickups, swap, headshots and zoom", () => {
+    for (const weapon of ["br", "smg", "shotgun", "sniper", "magnum", "sword"]) {
       expect(LOCKOUT_CODE).toContain(`"${weapon}"`);
     }
+    expect(LOCKOUT_CODE).toContain("try_pickups"); // walk-over weapon spawns
+    expect(LOCKOUT_CODE).toContain("player_fire"); // per-weapon hitscan
+    expect(LOCKOUT_CODE).toContain("headshot"); // headshot multiplier
+    expect(LOCKOUT_CODE).toContain("p.zoom"); // sniper zoom
+    expect(LOCKOUT_CODE).toMatch(/swap/); // weapon switch
   });
 });
