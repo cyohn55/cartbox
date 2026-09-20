@@ -102,7 +102,41 @@ export class MeshOverlaySurface implements DisplaySurface {
             : Promise.resolve(null),
         ),
       );
-      instances.push({ mesh: instance.mesh, model: instance.model, textures, normalTextures, materialTextures });
+      // PBR (metallic-roughness) maps for the Modern tier: packed
+      // metallic-roughness, ambient occlusion, and emissive. Absent on fantasy
+      // materials, so the rasteriser stays byte-identical there. A failed decode
+      // falls back to null, and the BRDF uses the material's scalar factors.
+      const mrTextures = await Promise.all(
+        instance.mesh.primitives.map((primitive) =>
+          primitive.material.metallicRoughnessImage
+            ? decodeTexture(primitive.material.metallicRoughnessImage.mime, primitive.material.metallicRoughnessImage.bytes)
+            : Promise.resolve(null),
+        ),
+      );
+      const occlusionTextures = await Promise.all(
+        instance.mesh.primitives.map((primitive) =>
+          primitive.material.occlusionImage
+            ? decodeTexture(primitive.material.occlusionImage.mime, primitive.material.occlusionImage.bytes)
+            : Promise.resolve(null),
+        ),
+      );
+      const emissiveTextures = await Promise.all(
+        instance.mesh.primitives.map((primitive) =>
+          primitive.material.emissiveImage
+            ? decodeTexture(primitive.material.emissiveImage.mime, primitive.material.emissiveImage.bytes)
+            : Promise.resolve(null),
+        ),
+      );
+      instances.push({
+        mesh: instance.mesh,
+        model: instance.model,
+        textures,
+        normalTextures,
+        materialTextures,
+        mrTextures,
+        occlusionTextures,
+        emissiveTextures,
+      });
     }
     return new MeshOverlaySurface(inner, width, height, scene, instances, renderer);
   }
@@ -182,6 +216,9 @@ export class MeshOverlaySurface implements DisplaySurface {
         textures: authored.textures,
         normalTextures: authored.normalTextures,
         materialTextures: authored.materialTextures,
+        mrTextures: authored.mrTextures,
+        occlusionTextures: authored.occlusionTextures,
+        emissiveTextures: authored.emissiveTextures,
       });
     }
     return result;

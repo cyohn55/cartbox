@@ -60,6 +60,11 @@ export interface RenderMeshOptions {
   /** Decoded material map per primitive (RGBA: R=height, G=specular, B=roughness,
    *  A=emissive), or null entries. Drives the specular highlight + emissive floor. */
   readonly materialTextures?: readonly (DecodedTexture | null)[];
+  /** PBR (metallic-roughness) maps per primitive, for the Modern tier — see
+   *  {@link MeshSceneInstance}. */
+  readonly mrTextures?: readonly (DecodedTexture | null)[];
+  readonly occlusionTextures?: readonly (DecodedTexture | null)[];
+  readonly emissiveTextures?: readonly (DecodedTexture | null)[];
   /** Background clear colour RGBA (default transparent). */
   readonly background?: readonly [number, number, number, number];
 }
@@ -200,6 +205,38 @@ function normalMatrix3x3(model: Mat4): readonly number[] {
 function normalizeVec3(x: number, y: number, z: number): [number, number, number] {
   const len = Math.hypot(x, y, z);
   return len < 1e-8 ? [0, 0, 1] : [x / len, y / len, z / len];
+}
+
+/**
+ * Build the PBR fragment inputs for a primitive, or null when the material is
+ * not PBR — in which case the rasteriser stays on the fantasy Blinn-Phong/diffuse
+ * path and is byte-identical to before. A material is PBR when it carries any
+ * metallic-roughness signal: a map, or an explicit metallic/roughness/emissive
+ * factor (glTF import sets these; fantasy carts set none).
+ */
+function buildPbrFrag(
+  material: MeshAsset["primitives"][number]["material"],
+  mr: DecodedTexture | null,
+  occ: DecodedTexture | null,
+  emis: DecodedTexture | null,
+): PbrFrag | null {
+  const emissiveFactor = material.emissiveFactor;
+  const isPbr =
+    mr !== null ||
+    occ !== null ||
+    emis !== null ||
+    material.metallicFactor !== undefined ||
+    material.roughnessFactor !== undefined ||
+    (emissiveFactor !== undefined && (emissiveFactor[0] > 0 || emissiveFactor[1] > 0 || emissiveFactor[2] > 0));
+  if (!isPbr) return null;
+  return {
+    mr,
+    occ,
+    emis,
+    metallic: material.metallicFactor ?? 1,
+    roughness: material.roughnessFactor ?? 1,
+    emissive: emissiveFactor ?? [0, 0, 0],
+  };
 }
 
 /** A vertex after transforms: view-space z (for clipping) + clip-space + attributes. */
@@ -363,6 +400,9 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
     options.textures ?? null,
     options.normalTextures ?? null,
     options.materialTextures ?? null,
+    options.mrTextures ?? null,
+    options.occlusionTextures ?? null,
+    options.emissiveTextures ?? null,
     light,
     viewDir,
     ambient,
@@ -392,6 +432,16 @@ export interface MeshSceneInstance {
    * plain diffuse path, unchanged.
    */
   readonly materialTextures?: readonly (DecodedTexture | null)[];
+  /**
+   * PBR (metallic-roughness) maps per primitive (index-aligned), for the Modern
+   * tier. `mrTextures` is glTF's packed metallic-roughness (G = roughness,
+   * B = metallic); `occlusionTextures` is R = AO; `emissiveTextures` is RGB.
+   * When any PBR input is present the fragment is shaded with a metallic-roughness
+   * BRDF; absent them, shading is byte-identical to the fantasy path.
+   */
+  readonly mrTextures?: readonly (DecodedTexture | null)[];
+  readonly occlusionTextures?: readonly (DecodedTexture | null)[];
+  readonly emissiveTextures?: readonly (DecodedTexture | null)[];
 }
 
 /**
@@ -518,10 +568,13 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const textures = instance.textures ?? null;
     const normalTextures = instance.normalTextures ?? null;
     const materialTextures = instance.materialTextures ?? null;
+    const mrTextures = instance.mrTextures ?? null;
+    const occlusionTextures = instance.occlusionTextures ?? null;
+    const emissiveTextures = instance.emissiveTextures ?? null;
     if (style.zBuffer) {
-      drawMesh(instance.mesh, mvp, modelView, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, light, viewDir, ambient, style);
+      drawMesh(instance.mesh, mvp, modelView, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, light, viewDir, ambient, style);
     } else {
-      eachTriangle(instance.mesh, mvp, modelView, normalBasis, textures, normalTextures, materialTextures, (triangle) => queue.push(triangle));
+      eachTriangle(instance.mesh, mvp, modelView, normalBasis, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, (triangle) => queue.push(triangle));
     }
   }
 
@@ -541,6 +594,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
         triangle.normalTexture,
         triangle.tangent,
         triangle.materialTexture,
+        triangle.pbr,
         triangle.base,
         light,
         viewDir,
@@ -557,6 +611,24 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
  * normals into world space by `normalBasis`. Shared by the single-mesh preview
  * and the scene renderer so the projection + clip + raster path is written once.
  */
+/**
+ * Per-fragment PBR (metallic-roughness) inputs for a primitive, or null when the
+ * material is not PBR (the fantasy-console path). Present only for Modern-tier
+ * materials; when set, {@link rasterizeTriangle} shades with a metallic-roughness
+ * BRDF instead of the Blinn-Phong/diffuse path.
+ */
+interface PbrFrag {
+  /** glTF packed metallic-roughness (G = roughness, B = metallic), or null. */
+  readonly mr: DecodedTexture | null;
+  /** Ambient-occlusion map (R = AO), or null. */
+  readonly occ: DecodedTexture | null;
+  /** Emissive map (RGB), or null. */
+  readonly emis: DecodedTexture | null;
+  readonly metallic: number; // factor (default 1)
+  readonly roughness: number; // factor (default 1)
+  readonly emissive: readonly [number, number, number]; // factor (default 0,0,0)
+}
+
 /** One projected, clipped triangle ready to rasterise. */
 interface PendingTriangle {
   readonly a: Vertex;
@@ -570,6 +642,8 @@ interface PendingTriangle {
   readonly tangent: readonly [number, number, number] | null;
   /** Packed material map (specular/roughness/emissive), or null for plain diffuse. */
   readonly materialTexture: DecodedTexture | null;
+  /** PBR metallic-roughness inputs (Modern tier), or null for the fantasy path. */
+  readonly pbr: PbrFrag | null;
   readonly base: readonly [number, number, number, number];
   /**
    * Mean view-space z, for back-to-front ordering when there is no depth
@@ -595,6 +669,9 @@ function eachTriangle(
   textures: readonly (DecodedTexture | null)[] | null,
   normalTextures: readonly (DecodedTexture | null)[] | null,
   materialTextures: readonly (DecodedTexture | null)[] | null,
+  mrTextures: readonly (DecodedTexture | null)[] | null,
+  occlusionTextures: readonly (DecodedTexture | null)[] | null,
+  emissiveTextures: readonly (DecodedTexture | null)[] | null,
   emit: (triangle: PendingTriangle) => void,
 ): void {
   mesh.primitives.forEach((primitive, primitiveIndex) => {
@@ -605,6 +682,12 @@ function eachTriangle(
     const texture = textures?.[primitiveIndex] ?? null;
     const normalTexture = normalTextures?.[primitiveIndex] ?? null;
     const materialTexture = materialTextures?.[primitiveIndex] ?? null;
+    const pbr = buildPbrFrag(
+      primitive.material,
+      mrTextures?.[primitiveIndex] ?? null,
+      occlusionTextures?.[primitiveIndex] ?? null,
+      emissiveTextures?.[primitiveIndex] ?? null,
+    );
     const [baseR, baseG, baseB, baseA] = primitive.material.baseColorFactor;
 
     // The world-space surface tangent for one triangle, from its positions and
@@ -677,7 +760,7 @@ function eachTriangle(
         const a = clipped[c]!;
         const b = clipped[c + 1]!;
         const cc = clipped[c + 2]!;
-        emit({ a, b, c: cc, texture, normalTexture, tangent, materialTexture, base, viewDepth: (a.viewZ + b.viewZ + cc.viewZ) / 3 });
+        emit({ a, b, c: cc, texture, normalTexture, tangent, materialTexture, pbr, base, viewDepth: (a.viewZ + b.viewZ + cc.viewZ) / 3 });
       }
     }
   });
@@ -696,31 +779,47 @@ function drawMesh(
   textures: readonly (DecodedTexture | null)[] | null,
   normalTextures: readonly (DecodedTexture | null)[] | null,
   materialTextures: readonly (DecodedTexture | null)[] | null,
+  mrTextures: readonly (DecodedTexture | null)[] | null,
+  occlusionTextures: readonly (DecodedTexture | null)[] | null,
+  emissiveTextures: readonly (DecodedTexture | null)[] | null,
   light: readonly [number, number, number],
   viewDir: readonly [number, number, number],
   ambient: number,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
 ): void {
-  eachTriangle(mesh, mvp, modelView, normalBasis, textures, normalTextures, materialTextures, (triangle) => {
-    rasterizeTriangle(
-      triangle.a,
-      triangle.b,
-      triangle.c,
-      width,
-      height,
-      out,
-      depth,
-      triangle.texture,
-      triangle.normalTexture,
-      triangle.tangent,
-      triangle.materialTexture,
-      triangle.base,
-      light,
-      viewDir,
-      ambient,
-      style,
-    );
-  });
+  eachTriangle(
+    mesh,
+    mvp,
+    modelView,
+    normalBasis,
+    textures,
+    normalTextures,
+    materialTextures,
+    mrTextures,
+    occlusionTextures,
+    emissiveTextures,
+    (triangle) => {
+      rasterizeTriangle(
+        triangle.a,
+        triangle.b,
+        triangle.c,
+        width,
+        height,
+        out,
+        depth,
+        triangle.texture,
+        triangle.normalTexture,
+        triangle.tangent,
+        triangle.materialTexture,
+        triangle.pbr,
+        triangle.base,
+        light,
+        viewDir,
+        ambient,
+        style,
+      );
+    },
+  );
 }
 
 /** Rasterise one clipped triangle with perspective-correct attributes + depth test. */
@@ -736,6 +835,7 @@ function rasterizeTriangle(
   normalTexture: DecodedTexture | null,
   tangent: readonly [number, number, number] | null,
   materialTexture: DecodedTexture | null,
+  pbr: PbrFrag | null,
   base: readonly [number, number, number, number],
   light: readonly [number, number, number],
   viewDir: readonly [number, number, number],
@@ -869,48 +969,115 @@ function rasterizeTriangle(
       }
       if (al < 1) continue; // skip fully-transparent texels rather than blend (opaque preview)
 
-      // Material map (option 2, slice 5): a view-dependent Blinn-Phong glint plus
-      // an emissive floor, the same model the 2D lit renderer uses so a material
-      // reads the same in the sprite preview and in the 3D scene. Absent a
-      // material map this is skipped entirely — the diffuse path is unchanged.
-      let glint = 0;
-      let emissive = 0;
-      if (materialTexture) {
+      if (style.zBuffer) depth[di] = zNdc;
+
+      if (pbr) {
+        // --- Modern tier: metallic-roughness BRDF (Cook-Torrance) ---
+        // Shaded in the engine's non-linear byte space for now; a linear/gamma-
+        // correct HDR pipeline is a later phase (AAA_TIER_ROADMAP.md 2b/4). The
+        // ambient term is a flat IBL stand-in until real image-based lighting
+        // lands in Phase 3.
         const u = pw0 * a.u + pw1 * b.u + pw2 * c.u;
         const v = pw0 * a.v + pw1 * b.v + pw2 * c.v;
-        const [, spec, rough, emis] = sampleTexture(materialTexture, u, v, style.textureFiltering);
-        const specStrength = spec / 255;
-        emissive = emis / 255;
-        if (specStrength > 0) {
-          // Normalise the shading normal (the geometric path leaves it un-unit).
-          const nlen = Math.hypot(nx, ny, nz) || 1;
-          const Nx = nx / nlen;
-          const Ny = ny / nlen;
-          const Nz = nz / nlen;
-          // Half-vector of the (directional) light and view directions. As the
-          // camera orbits, viewDir turns and the highlight slides across the
-          // surface — this is the view-dependent part.
-          let hx = light[0] + viewDir[0];
-          let hy = light[1] + viewDir[1];
-          let hz = light[2] + viewDir[2];
-          const hlen = Math.hypot(hx, hy, hz) || 1;
-          hx /= hlen;
-          hy /= hlen;
-          hz /= hlen;
-          const nh = Math.max(0, Nx * hx + Ny * hy + Nz * hz);
-          const roughness = rough / 255;
-          const shininess = 6 + (120 - 6) * (1 - roughness);
-          glint = 255 * Math.pow(nh, shininess) * specStrength;
+        // Normalise N and flip it toward the viewer, so imported geometry of
+        // either winding lights correctly (two-sided).
+        const nlen = Math.hypot(nx, ny, nz) || 1;
+        let Nx = nx / nlen;
+        let Ny = ny / nlen;
+        let Nz = nz / nlen;
+        if (Nx * viewDir[0] + Ny * viewDir[1] + Nz * viewDir[2] < 0) {
+          Nx = -Nx;
+          Ny = -Ny;
+          Nz = -Nz;
         }
+        let metallic = pbr.metallic;
+        let rough = pbr.roughness;
+        if (pbr.mr) {
+          const [, mg, mb] = sampleTexture(pbr.mr, u, v, style.textureFiltering);
+          rough *= mg / 255;
+          metallic *= mb / 255;
+        }
+        rough = Math.min(1, Math.max(0.045, rough)); // clamp: perfectly-smooth NDF blows up
+        const ao = pbr.occ ? sampleTexture(pbr.occ, u, v, style.textureFiltering)[0] / 255 : 1;
+        const ar = r / 255;
+        const ag = g / 255;
+        const ab = bl / 255;
+        // Half-vector of the directional light + view (camera-at-infinity).
+        let hx = light[0] + viewDir[0];
+        let hy = light[1] + viewDir[1];
+        let hz = light[2] + viewDir[2];
+        const hl = Math.hypot(hx, hy, hz) || 1;
+        hx /= hl;
+        hy /= hl;
+        hz /= hl;
+        const ndl = Math.max(0, Nx * light[0] + Ny * light[1] + Nz * light[2]);
+        const ndv = Math.max(1e-4, Nx * viewDir[0] + Ny * viewDir[1] + Nz * viewDir[2]);
+        const ndh = Math.max(0, Nx * hx + Ny * hy + Nz * hz);
+        const vdh = Math.max(0, viewDir[0] * hx + viewDir[1] * hy + viewDir[2] * hz);
+        const a2 = rough * rough * rough * rough; // (rough^2)^2 for the GGX NDF
+        const dd = ndh * ndh * (a2 - 1) + 1;
+        const D = a2 / (Math.PI * dd * dd + 1e-7);
+        const k = ((rough + 1) * (rough + 1)) / 8; // Schlick-GGX (direct lighting)
+        const G = (ndv / (ndv * (1 - k) + k)) * (ndl / (ndl * (1 - k) + k));
+        const fp = Math.pow(1 - vdh, 5); // Fresnel-Schlick
+        const specD = (D * G) / (4 * ndl * ndv + 1e-4);
+        const f0r = 0.04 + (ar - 0.04) * metallic;
+        const f0g = 0.04 + (ag - 0.04) * metallic;
+        const f0b = 0.04 + (ab - 0.04) * metallic;
+        const Fr = f0r + (1 - f0r) * fp;
+        const Fg = f0g + (1 - f0g) * fp;
+        const Fb = f0b + (1 - f0b) * fp;
+        const kdm = 1 - metallic; // metals have no diffuse
+        let er = 0;
+        let eg = 0;
+        let eb = 0;
+        if (pbr.emissive[0] > 0 || pbr.emissive[1] > 0 || pbr.emissive[2] > 0) {
+          const es = pbr.emis ? sampleTexture(pbr.emis, u, v, style.textureFiltering) : [255, 255, 255, 255];
+          er = pbr.emissive[0] * (es[0]! / 255);
+          eg = pbr.emissive[1] * (es[1]! / 255);
+          eb = pbr.emissive[2] * (es[2]! / 255);
+        }
+        out[di * 4] = ((kdm * (1 - Fr) * ar + Fr * specD) * ndl + ambient * ar * ao + er) * 255;
+        out[di * 4 + 1] = ((kdm * (1 - Fg) * ag + Fg * specD) * ndl + ambient * ag * ao + eg) * 255;
+        out[di * 4 + 2] = ((kdm * (1 - Fb) * ab + Fb * specD) * ndl + ambient * ab * ao + eb) * 255;
+        out[di * 4 + 3] = al;
+      } else {
+        // --- Fantasy path (unchanged) ---
+        // Material map (option 2, slice 5): a view-dependent Blinn-Phong glint
+        // plus an emissive floor, the same model the 2D lit renderer uses.
+        let glint = 0;
+        let emissive = 0;
+        if (materialTexture) {
+          const u = pw0 * a.u + pw1 * b.u + pw2 * c.u;
+          const v = pw0 * a.v + pw1 * b.v + pw2 * c.v;
+          const [, spec, rough, emis] = sampleTexture(materialTexture, u, v, style.textureFiltering);
+          const specStrength = spec / 255;
+          emissive = emis / 255;
+          if (specStrength > 0) {
+            const nlen = Math.hypot(nx, ny, nz) || 1;
+            const Nx = nx / nlen;
+            const Ny = ny / nlen;
+            const Nz = nz / nlen;
+            let hx = light[0] + viewDir[0];
+            let hy = light[1] + viewDir[1];
+            let hz = light[2] + viewDir[2];
+            const hlen = Math.hypot(hx, hy, hz) || 1;
+            hx /= hlen;
+            hy /= hlen;
+            hz /= hlen;
+            const nh = Math.max(0, Nx * hx + Ny * hy + Nz * hz);
+            const roughness = rough / 255;
+            const shininess = 6 + (120 - 6) * (1 - roughness);
+            glint = 255 * Math.pow(nh, shininess) * specStrength;
+          }
+        }
+        // A self-illuminated texel never drops below its own colour scaled by the
+        // emissive level, so it stays bright when the light turns away.
+        out[di * 4] = Math.max(r * shade + glint, r * emissive);
+        out[di * 4 + 1] = Math.max(g * shade + glint, g * emissive);
+        out[di * 4 + 2] = Math.max(bl * shade + glint, bl * emissive);
+        out[di * 4 + 3] = al;
       }
-
-      if (style.zBuffer) depth[di] = zNdc;
-      // A self-illuminated texel never drops below its own colour scaled by the
-      // emissive level, so it stays bright when the light turns away.
-      out[di * 4] = Math.max(r * shade + glint, r * emissive);
-      out[di * 4 + 1] = Math.max(g * shade + glint, g * emissive);
-      out[di * 4 + 2] = Math.max(bl * shade + glint, bl * emissive);
-      out[di * 4 + 3] = al;
     }
   }
 }
