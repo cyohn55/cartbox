@@ -44,6 +44,7 @@ const NON_PBR = {
   environment: null,
   lightMvp: null,
   shadow: null,
+  tonemap: null,
 };
 
 describe("uniform layout", () => {
@@ -122,6 +123,7 @@ describe("uniform layout", () => {
       environment: null,
       lightMvp: null,
       shadow: null,
+      tonemap: null,
     });
     // view (36..40): xyz direction, w unused.
     expect(Array.from(data.subarray(36, 40))).toEqual([0, 0, 1, 0]);
@@ -151,6 +153,7 @@ describe("uniform layout", () => {
       environment: { sky: [0.2, 0.4, 0.9], horizon: [0.6, 0.6, 0.6], ground: [0.3, 0.2, 0.1], intensity: 1.5 },
       lightMvp: null,
       shadow: null,
+      tonemap: null,
     });
     // envSky (52..56): xyz sky, w = hasEnvironment flag.
     expect(Array.from(data.subarray(52, 56))).toEqual([Math.fround(0.2), Math.fround(0.4), Math.fround(0.9), 1]);
@@ -179,9 +182,43 @@ describe("uniform layout", () => {
       environment: { sky: [0, 0, 0], horizon: [0, 0, 0], ground: [0, 0, 0], intensity: 1, map, average: [0.5, 0.25, 0.1] },
       lightMvp: null,
       shadow: null,
+      tonemap: null,
     });
     // envMeta (84..88): mean radiance rgb + hasEnvMap flag.
     expect(Array.from(data.subarray(84, 88))).toEqual([Math.fround(0.5), Math.fround(0.25), Math.fround(0.1), 1]);
+  });
+
+  it("packs tone-map exposure and flags it off when absent", () => {
+    const on = new Float32Array(UNIFORM_FLOATS);
+    writeInstanceUniform(on, 0, {
+      mvp: COUNTING_MAT4,
+      normalBasis: [0, 0, 0, 0, 0, 0, 0, 0, 0],
+      baseColor: [0, 0, 0, 1],
+      hasTexture: false,
+      light,
+      viewDir: [0, 0, 1],
+      pbr: { isPbr: true, metallic: 0, roughness: 1, emissive: [0, 0, 0] },
+      hasMrMap: false,
+      hasOcclusionMap: false,
+      hasEmissiveMap: false,
+      environment: null,
+      lightMvp: null,
+      shadow: null,
+      tonemap: { exposure: 1.5 },
+    });
+    // tonemap (88..92): hasTonemap flag + exposure.
+    expect(Array.from(on.subarray(88, 92))).toEqual([1, Math.fround(1.5), 0, 0]);
+
+    const off = new Float32Array(UNIFORM_FLOATS);
+    writeInstanceUniform(off, 0, {
+      mvp: COUNTING_MAT4,
+      normalBasis: [0, 0, 0, 0, 0, 0, 0, 0, 0],
+      baseColor: [0, 0, 0, 1],
+      hasTexture: false,
+      light,
+      ...NON_PBR, // tonemap: null
+    });
+    expect(off[88]).toBe(0);
   });
 
   it("packs the light matrix and shadow params, and flags them off when absent", () => {
@@ -200,6 +237,7 @@ describe("uniform layout", () => {
       environment: null,
       lightMvp: COUNTING_MAT4,
       shadow: { size: 1024, bias: 0.003, strength: 0.8 },
+      tonemap: null,
     });
     // lightMvp (64..80): the counting matrix, contiguous.
     expect(Array.from(withShadow.subarray(64, 80))).toEqual(Array.from({ length: 16 }, (_, i) => i));
@@ -222,6 +260,7 @@ describe("uniform layout", () => {
       environment: null,
       lightMvp: null,
       shadow: null,
+      tonemap: null,
     });
     expect(none[80]).toBe(0); // hasShadow flag off
     expect(Array.from(none.subarray(64, 80)).every((v) => v === 0)).toBe(true);

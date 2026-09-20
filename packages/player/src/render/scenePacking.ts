@@ -30,9 +30,10 @@ import type { EnvironmentLight, Mat4 } from "@cartbox/editor";
  * 256  lightMvp   mat4x4<f32>  64   world→light-clip for this draw (shadow mapping)
  * 320  shadow     vec4<f32>    16   x = 1 when shadowed, y = map size, z = bias, w = strength
  * 336  envMeta    vec4<f32>    16   xyz = env-map mean radiance, w = 1 when an env map is bound
+ * 352  tonemap    vec4<f32>    16   x = 1 when tone-mapping, y = exposure
  * ```
  *
- * 352 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
+ * 368 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
  * dynamic uniform offset can address), so one buffer still holds every draw in a
  * frame. The metallic-roughness inputs and the environment carry the Modern
  * (AAA) tier's shading; a fantasy draw leaves `pbr.z` at 0 and the shader takes
@@ -46,7 +47,7 @@ export const UNIFORM_STRIDE = 512;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 352;
+export const UNIFORM_BYTES_USED = 368;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -65,6 +66,7 @@ const OFFSET_ENV_GROUND = 60;
 const OFFSET_LIGHT_MVP = 64;
 const OFFSET_SHADOW = 80;
 const OFFSET_ENV_META = 84;
+const OFFSET_TONEMAP = 88;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -202,6 +204,8 @@ export interface InstanceUniform {
   readonly lightMvp: Mat4 | null;
   /** Shadow-map sampling parameters, or null when no shadow map is bound. */
   readonly shadow: { readonly size: number; readonly bias: number; readonly strength: number } | null;
+  /** HDR tone-map exposure, or null to write the shaded colour straight through. */
+  readonly tonemap: { readonly exposure: number } | null;
 }
 
 /**
@@ -286,6 +290,12 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_ENV_META + 1] = avg ? avg[1]! : 0;
   target[base + OFFSET_ENV_META + 2] = avg ? avg[2]! : 0;
   target[base + OFFSET_ENV_META + 3] = envMap && avg ? 1 : 0; // hasEnvMap
+
+  const tonemap = uniform.tonemap;
+  target[base + OFFSET_TONEMAP] = tonemap ? 1 : 0; // hasTonemap
+  target[base + OFFSET_TONEMAP + 1] = tonemap ? tonemap.exposure : 0;
+  target[base + OFFSET_TONEMAP + 2] = 0;
+  target[base + OFFSET_TONEMAP + 3] = 0;
 }
 
 /** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2). */

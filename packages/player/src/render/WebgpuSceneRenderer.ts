@@ -99,6 +99,7 @@ struct Uniforms {
   lightMvp: mat4x4<f32>,// world→light-clip for shadow mapping
   shadow: vec4<f32>,    // x = 1 when shadowed, y = map size, z = bias, w = strength
   envMeta: vec4<f32>,   // xyz = env-map mean radiance, w = 1 when an env map is bound
+  tonemap: vec4<f32>,   // x = 1 when tone-mapping, y = exposure
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
@@ -169,6 +170,12 @@ fn envColorDir(dir: vec3<f32>) -> vec3<f32> {
 fn envAverage() -> vec3<f32> {
   if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
   return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
+}
+// ACES filmic tone map (Narkowicz), per channel, mirroring acesFilmic in
+// meshRasterizer.ts. Applied only to the Modern-tier PBR radiance.
+fn aces(x: f32) -> f32 {
+  let v = max(0.0, x);
+  return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), 0.0, 1.0);
 }
 
 @vertex
@@ -256,6 +263,11 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     // The direct light is what a shadow occludes; ambient/IBL still fills it.
     let sf = shadowFactor(in.lightClip);
     let lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
+    // HDR: expose + ACES roll-off, or write the linear colour straight through.
+    if (u.tonemap.x > 0.5) {
+      let e = u.tonemap.y;
+      return vec4<f32>(aces(lit.r * e), aces(lit.g * e), aces(lit.b * e), colour.a);
+    }
     return vec4<f32>(lit, colour.a);
   }
 
@@ -678,6 +690,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         environment: draw.environment ?? null,
         lightMvp: shadow ? multiplyMat4(shadow.lightViewProj, entry.model) : null,
         shadow: shadowParams,
+        tonemap: draw.tonemap ?? null,
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);

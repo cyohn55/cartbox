@@ -156,7 +156,15 @@ environment, and occluders cast shadows on both backends. A real HDRI cubemap,
 a GPU-side shadow depth pass, and cascades remain.
 
 ### Phase 4 — HDR pipeline + more lights
-- [ ] HDR + ACES tonemapping + exposure
+- [x] **HDR tone mapping + exposure (software + WebGPU).** The PBR branch now
+      accumulates linear radiance (which can exceed 1) and, when a `ToneMap` is
+      set, multiplies by `exposure` and applies the ACES filmic curve
+      (`acesFilmic`) so highlights roll off instead of clipping flat to white.
+      Gated: no `ToneMap` → byte-identical, and the fantasy path never tone-maps.
+      WGSL mirrors the curve; threaded through `renderMeshScene` → `rasterizeTriangle`
+      and the runtime `SceneDraw`. Verified with `meshRasterizerTonemap.test.ts`.
+      *Refinement:* full sRGB-linear input decode (shading is still in the
+      engine's existing colour space) pairs with the equirect map's HDR upgrade.
 - [ ] SSAO
 - [ ] Clustered / forward+ lighting to lift the 6-light mailbox cap
 
