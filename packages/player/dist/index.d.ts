@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, DecodedTexture, EnvironmentLight, RasterStyle } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, DecodedTexture, EnvironmentLight, ShadowInput, RasterStyle } from '@cartbox/editor';
 
 /**
  * Console models. A model is a fixed hardware spec plus the WASM runtime that
@@ -1702,6 +1702,12 @@ interface SceneDraw {
      * directional irradiance + a specular reflection. See {@link EnvironmentLight}.
      */
     readonly environment?: EnvironmentLight | null;
+    /**
+     * Directional shadow map for PBR (Modern-tier) materials, or omitted for no
+     * shadows. The caller fills it with `renderShadowMap` before this call; the
+     * renderer samples it to occlude the direct light. See {@link ShadowInput}.
+     */
+    readonly shadow?: ShadowInput | null;
 }
 /** Draws placed 3D instances into a framebuffer. */
 interface SceneRenderer {
