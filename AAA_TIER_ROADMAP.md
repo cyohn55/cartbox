@@ -92,15 +92,23 @@ existing path; a dedicated core + catalog polish remain.
       `drawMesh`/`eachTriangle` → `rasterizeTriangle`) + `MeshOverlaySurface`
       decode + `renderCaps.capTextures`. Verified with headless renders +
       `meshRasterizerPbr.test.ts`.
-- [ ] **Phase 2b — WebGPU PBR shader:** Cook-Torrance in WGSL on
-      `WebgpuSceneRenderer`, linear/gamma correct. *Deferred:* WGSL can't be
-      verified in this environment; validate in-browser. **← next.**
+- [x] **Phase 2b — WebGPU PBR shader:** Cook-Torrance in WGSL on
+      `WebgpuSceneRenderer`, gated on a `pbr` flag and mirroring the software
+      branch term for term. Threads the metallic-roughness/occlusion/emissive
+      maps + factors through the uniform layout (`scenePacking.ts`, pure + tested)
+      and three new texture bindings. The fantasy Lambert path stays
+      byte-identical; the PBR path can't be *byte*-identical (float32-vs-float64
+      GGX/`pow`), so a tolerant device-only case in `webgpu-parity.test.ts` is the
+      on-hardware gate. *Still non-linear byte space* (HDR is Phase 4). **Known
+      follow-up:** tangent-space normal maps + the fantasy material-map specular
+      are not yet on the GPU path — the software rasteriser remains the reference
+      for those.
 
-**Status:** data model + software shading reference path landed. An imported
-glTF's PBR maps now light through the metallic-roughness BRDF on the software
-renderer (the verifiable path); the WebGPU WGSL variant is the next increment,
-validated in-browser. Shading is done in the engine's non-linear byte space for
-now — a linear/gamma-correct HDR pipeline is Phase 4.
+**Status:** Phase 2 complete — data model, software reference path, and the
+WebGPU WGSL shader all landed. An imported glTF's PBR maps now light through the
+metallic-roughness BRDF on both backends (software verified in CI; WebGPU
+validated in-browser / on a real device). Shading is in the engine's non-linear
+byte space for now — a linear/gamma-correct HDR pipeline is Phase 4.
 
 ### Phase 3 — Environment lighting + shadows
 - [ ] Image-based lighting (HDRI environment cubemap): realistic ambient + reflections
