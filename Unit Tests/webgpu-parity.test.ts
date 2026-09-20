@@ -209,4 +209,42 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
 
     renderer.dispose();
   });
+
+  it("matches the software rasteriser on image-based lighting (within float tolerance)", async () => {
+    // The environment replaces flat ambient with directional irradiance +
+    // reflection; the WGSL envColor/envAverage must match meshRasterizer.ts. As
+    // with the BRDF this is tolerant, not byte-identical (transcendental-free but
+    // still float32 vs float64). Validates the WGSL IBL branch on hardware.
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+    const instances = pbrScene();
+    const environment = {
+      sky: [0.3, 0.5, 0.95] as const,
+      horizon: [0.7, 0.7, 0.68] as const,
+      ground: [0.3, 0.22, 0.12] as const,
+      intensity: 1,
+    };
+    const withEnv = (): SceneDraw => ({ ...draw(), environment });
+
+    renderer.render(instances, withEnv());
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.tick?.();
+    }
+    const gpu = withEnv();
+    renderer.render(instances, gpu);
+
+    const software = withEnv();
+    new SoftwareSceneRenderer().render(instances, software);
+
+    const drawn = Array.from(software.out).filter((_, i) => i % 4 === 3 && software.out[i] !== 0).length;
+    expect(drawn).toBeGreaterThan(100);
+
+    let maxDelta = 0;
+    for (let i = 0; i < W * H * 4; i += 1) {
+      maxDelta = Math.max(maxDelta, Math.abs(gpu.out[i]! - software.out[i]!));
+    }
+    expect(maxDelta).toBeLessThanOrEqual(4);
+
+    renderer.dispose();
+  });
 });

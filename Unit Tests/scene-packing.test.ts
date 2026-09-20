@@ -41,6 +41,7 @@ const NON_PBR = {
   hasMrMap: false,
   hasOcclusionMap: false,
   hasEmissiveMap: false,
+  environment: null,
 };
 
 describe("uniform layout", () => {
@@ -116,6 +117,7 @@ describe("uniform layout", () => {
       hasMrMap: true,
       hasOcclusionMap: false,
       hasEmissiveMap: true,
+      environment: null,
     });
     // view (36..40): xyz direction, w unused.
     expect(Array.from(data.subarray(36, 40))).toEqual([0, 0, 1, 0]);
@@ -125,6 +127,31 @@ describe("uniform layout", () => {
     expect(Array.from(data.subarray(44, 48))).toEqual([1, 0, 0, 0]);
     // texflags (48..52): base, mr, occlusion, emissive.
     expect(Array.from(data.subarray(48, 52))).toEqual([1, 1, 0, 1]);
+    // no environment: sky.w (the hasEnvironment flag) is 0.
+    expect(data[55]).toBe(0);
+  });
+
+  it("packs the environment gradient and sets its flag", () => {
+    const data = new Float32Array(UNIFORM_FLOATS);
+    writeInstanceUniform(data, 0, {
+      mvp: COUNTING_MAT4,
+      normalBasis: [0, 0, 0, 0, 0, 0, 0, 0, 0],
+      baseColor: [0, 0, 0, 1],
+      hasTexture: false,
+      light,
+      viewDir: [0, 0, 1],
+      pbr: { isPbr: true, metallic: 0, roughness: 1, emissive: [0, 0, 0] },
+      hasMrMap: false,
+      hasOcclusionMap: false,
+      hasEmissiveMap: false,
+      environment: { sky: [0.2, 0.4, 0.9], horizon: [0.6, 0.6, 0.6], ground: [0.3, 0.2, 0.1], intensity: 1.5 },
+    });
+    // envSky (52..56): xyz sky, w = hasEnvironment flag.
+    expect(Array.from(data.subarray(52, 56))).toEqual([Math.fround(0.2), Math.fround(0.4), Math.fround(0.9), 1]);
+    // envHorizon (56..60): xyz horizon, w = intensity.
+    expect(Array.from(data.subarray(56, 60))).toEqual([Math.fround(0.6), Math.fround(0.6), Math.fround(0.6), Math.fround(1.5)]);
+    // envGround (60..64): xyz ground, w unused.
+    expect(Array.from(data.subarray(60, 64))).toEqual([Math.fround(0.3), Math.fround(0.2), Math.fround(0.1), 0]);
   });
 
   it("addresses each draw at its own stride", () => {

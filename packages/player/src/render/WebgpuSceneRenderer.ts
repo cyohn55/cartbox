@@ -93,6 +93,9 @@ struct Uniforms {
   pbr: vec4<f32>,       // x = metallic, y = roughness, z = 1 when PBR
   emissive: vec4<f32>,  // xyz = emissive factor
   texflags: vec4<f32>,  // x = base, y = mr, z = occlusion, w = emissive
+  envSky: vec4<f32>,    // xyz = sky colour, w = 1 when an environment is set
+  envHorizon: vec4<f32>,// xyz = horizon colour, w = intensity
+  envGround: vec4<f32>, // xyz = ground colour
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
@@ -106,6 +109,21 @@ struct VSOut {
   @location(0) normal: vec3<f32>,
   @location(1) uv: vec2<f32>,
 };
+
+// Analytic environment (Phase 3 IBL), mirroring environmentColor /
+// environmentAverage in meshRasterizer.ts: a sky/horizon/ground vertical
+// gradient sampled by a direction's Y. WGSL mix(a,b,k) = a+(b-a)*k, matching the
+// software helper exactly.
+fn envColor(y: f32) -> vec3<f32> {
+  let t = clamp(y, -1.0, 1.0);
+  var c: vec3<f32>;
+  if (t >= 0.0) { c = mix(u.envHorizon.xyz, u.envSky.xyz, t); }
+  else { c = mix(u.envHorizon.xyz, u.envGround.xyz, -t); }
+  return c * u.envHorizon.w; // .w = intensity
+}
+fn envAverage() -> vec3<f32> {
+  return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
+}
 
 @vertex
 fn vs(
@@ -176,8 +194,19 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
       if (u.texflags.w > 0.5) { es = textureSample(emisTex, samp, uv).rgb; }
       emis = ef * es;
     }
-    let lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl
-      + u.light.w * albedo * ao + emis;
+    // Ambient / image-based lighting, mirroring the software rasteriser: with an
+    // environment, a diffuse irradiance along N + a specular reflection along R
+    // blurred toward the average by roughness; without one, the flat ambient.
+    var amb: vec3<f32>;
+    if (u.envSky.w > 0.5) {
+      let irr = envColor(N.y);
+      let rY = 2.0 * ndv * N.y - V.y;
+      let pref = mix(envColor(rY), envAverage(), rough);
+      amb = (irr * albedo * kdm + pref * f0) * ao;
+    } else {
+      amb = vec3<f32>(u.light.w) * albedo * ao;
+    }
+    let lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl + amb + emis;
     return vec4<f32>(lit, colour.a);
   }
 
@@ -487,6 +516,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         hasMrMap: entry.textures.mr !== null,
         hasOcclusionMap: entry.textures.occ !== null,
         hasEmissiveMap: entry.textures.emis !== null,
+        environment: draw.environment ?? null,
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
