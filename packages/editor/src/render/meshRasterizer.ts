@@ -68,6 +68,9 @@ export interface RenderMeshOptions {
   /** Image-based lighting environment for PBR materials (Modern tier); when set,
    *  it replaces the flat ambient term. See {@link EnvironmentLight}. */
   readonly environment?: EnvironmentLight | null;
+  /** HDR tone mapping for PBR materials (Modern tier); when set, highlights roll
+   *  off instead of clipping. See {@link ToneMap}. */
+  readonly tonemap?: ToneMap | null;
   /** Background clear colour RGBA (default transparent). */
   readonly background?: readonly [number, number, number, number];
 }
@@ -299,6 +302,30 @@ export function environmentAverage(env: EnvironmentLight): [number, number, numb
     ((env.sky[1]! + env.horizon[1]! + env.ground[1]!) / 3) * env.intensity,
     ((env.sky[2]! + env.horizon[2]! + env.ground[2]!) / 3) * env.intensity,
   ];
+}
+
+/**
+ * HDR tone mapping for the Modern (AAA) tier (Phase 4). PBR shading accumulates
+ * radiance that can exceed 1 (bright specular, emissive, a lit environment);
+ * without tone mapping those channels clip flat to white. When a `ToneMap` is
+ * set, the PBR branch multiplies by `exposure` and applies the ACES filmic curve,
+ * so highlights roll off smoothly into the 8-bit framebuffer. Gated: absent one,
+ * output is byte-identical (the fantasy tiers never tone-map).
+ */
+export interface ToneMap {
+  /** Linear exposure multiplier applied before the curve (default 1). */
+  readonly exposure: number;
+}
+
+/**
+ * The ACES filmic tone-map curve (Narkowicz's fit), per channel, clamped to
+ * [0,1]. A cheap, widely-used approximation of the film response — the same
+ * closed form on both backends, so it is testable without a GPU.
+ */
+export function acesFilmic(x: number): number {
+  const v = Math.max(0, x);
+  const mapped = (v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14);
+  return Math.min(1, Math.max(0, mapped));
 }
 
 /** The mean RGB (0..1) of an equirectangular map, for {@link EnvironmentLight.average}. */
@@ -548,6 +575,7 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
     options.environment ?? null,
     null,
     null,
+    options.tonemap ?? null,
   );
 }
 
@@ -660,6 +688,8 @@ export interface RenderMeshSceneOptions {
    *  where the light cannot see a fragment. Fill it first with
    *  {@link renderShadowMap}. See {@link ShadowInput}. */
   readonly shadow?: ShadowInput | null;
+  /** HDR tone mapping for PBR materials (Modern tier). See {@link ToneMap}. */
+  readonly tonemap?: ToneMap | null;
   /** Per-pixel rasterisation behaviour; defaults to {@link DEFAULT_RASTER_STYLE}. */
   readonly style?: RasterStyle;
 }
@@ -681,6 +711,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
   const ambient = options.ambient ?? 0.35;
   const environment = options.environment ?? null;
   const shadow = options.shadow ?? null;
+  const tonemap = options.tonemap ?? null;
   const style = options.style ?? DEFAULT_RASTER_STYLE;
   const viewProj = multiply(projection, view);
 
@@ -724,7 +755,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const emissiveTextures = instance.emissiveTextures ?? null;
     const lightMvp = shadow ? multiply(shadow.lightViewProj, instance.model) : null;
     if (style.zBuffer) {
-      drawMesh(instance.mesh, mvp, modelView, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, light, viewDir, ambient, environment, lightMvp, shadow, style);
+      drawMesh(instance.mesh, mvp, modelView, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, style);
     } else {
       eachTriangle(instance.mesh, mvp, modelView, normalBasis, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightMvp, (triangle) => queue.push(triangle));
     }
@@ -753,6 +784,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
         ambient,
         environment,
         shadow,
+        tonemap,
         style,
       );
     }
@@ -1078,6 +1110,7 @@ function drawMesh(
   environment: EnvironmentLight | null,
   lightMvp: Mat4 | null,
   shadow: ShadowInput | null,
+  tonemap: ToneMap | null,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
 ): void {
   eachTriangle(
@@ -1112,6 +1145,7 @@ function drawMesh(
         ambient,
         environment,
         shadow,
+        tonemap,
         style,
       );
     },
@@ -1138,6 +1172,7 @@ function rasterizeTriangle(
   ambient: number,
   environment: EnvironmentLight | null,
   shadow: ShadowInput | null,
+  tonemap: ToneMap | null,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
 ): void {
   // Perspective divide to NDC, then to screen pixels. NDC spans the full extent
@@ -1385,9 +1420,23 @@ function rasterizeTriangle(
           ambB = ambient * ab * ao;
         }
         // The direct light is what a shadow occludes; ambient/IBL still fills it.
-        out[di * 4] = ((kdm * (1 - Fr) * ar + Fr * specD) * ndl * shadowLit + ambR + er) * 255;
-        out[di * 4 + 1] = ((kdm * (1 - Fg) * ag + Fg * specD) * ndl * shadowLit + ambG + eg) * 255;
-        out[di * 4 + 2] = ((kdm * (1 - Fb) * ab + Fb * specD) * ndl * shadowLit + ambB + eb) * 255;
+        // This is the linear radiance, which can exceed 1 (bright spec/emissive/
+        // environment).
+        const lr = (kdm * (1 - Fr) * ar + Fr * specD) * ndl * shadowLit + ambR + er;
+        const lg = (kdm * (1 - Fg) * ag + Fg * specD) * ndl * shadowLit + ambG + eg;
+        const lb = (kdm * (1 - Fb) * ab + Fb * specD) * ndl * shadowLit + ambB + eb;
+        if (tonemap) {
+          // HDR: expose, then roll highlights off with the ACES curve instead of
+          // clipping flat to white.
+          const e = tonemap.exposure;
+          out[di * 4] = acesFilmic(lr * e) * 255;
+          out[di * 4 + 1] = acesFilmic(lg * e) * 255;
+          out[di * 4 + 2] = acesFilmic(lb * e) * 255;
+        } else {
+          out[di * 4] = lr * 255;
+          out[di * 4 + 1] = lg * 255;
+          out[di * 4 + 2] = lb * 255;
+        }
         out[di * 4 + 3] = al;
       } else {
         // --- Fantasy path (unchanged) ---

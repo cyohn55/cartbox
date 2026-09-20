@@ -21,7 +21,7 @@
  */
 
 import { DEFAULT_RASTER_STYLE, renderMeshScene, type MeshSceneInstance } from "@cartbox/editor";
-import type { EnvironmentLight, Mat4, RasterStyle, ShadowInput } from "@cartbox/editor";
+import type { EnvironmentLight, Mat4, RasterStyle, ShadowInput, ToneMap } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
 import { applyRenderCaps, createTextureBudgetCache } from "./renderCaps.js";
@@ -67,6 +67,11 @@ export interface SceneDraw {
    * renderer samples it to occlude the direct light. See {@link ShadowInput}.
    */
   readonly shadow?: ShadowInput | null;
+  /**
+   * HDR tone mapping for PBR (Modern-tier) materials, or omitted to write the
+   * shaded colour straight to the framebuffer. See {@link ToneMap}.
+   */
+  readonly tonemap?: ToneMap | null;
 }
 
 /** Draws placed 3D instances into a framebuffer. */
@@ -105,6 +110,7 @@ export class SoftwareSceneRenderer implements SceneRenderer {
       ambient: draw.ambient,
       environment: draw.environment,
       shadow: draw.shadow,
+      tonemap: draw.tonemap,
       style: this.style,
     });
   }

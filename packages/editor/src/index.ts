@@ -208,6 +208,8 @@ export {
   orthographicMatrix,
   type ShadowInput,
   type RenderShadowMapOptions,
+  acesFilmic,
+  type ToneMap,
 } from "./render/meshRasterizer";
 export {
   MapVoxelLayer,

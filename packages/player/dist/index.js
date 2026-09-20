@@ -4273,6 +4273,7 @@ var SoftwareSceneRenderer = class {
       ambient: draw.ambient,
       environment: draw.environment,
       shadow: draw.shadow,
+      tonemap: draw.tonemap,
       style: this.style
     });
   }
@@ -4960,7 +4961,7 @@ import {
 
 // src/render/scenePacking.ts
 var UNIFORM_STRIDE = 512;
-var UNIFORM_BYTES_USED = 352;
+var UNIFORM_BYTES_USED = 368;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var OFFSET_MVP = 0;
 var OFFSET_NRM = 16;
@@ -4976,6 +4977,7 @@ var OFFSET_ENV_GROUND = 60;
 var OFFSET_LIGHT_MVP = 64;
 var OFFSET_SHADOW = 80;
 var OFFSET_ENV_META = 84;
+var OFFSET_TONEMAP = 88;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -5067,6 +5069,11 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_ENV_META + 1] = avg ? avg[1] : 0;
   target[base + OFFSET_ENV_META + 2] = avg ? avg[2] : 0;
   target[base + OFFSET_ENV_META + 3] = envMap && avg ? 1 : 0;
+  const tonemap = uniform.tonemap;
+  target[base + OFFSET_TONEMAP] = tonemap ? 1 : 0;
+  target[base + OFFSET_TONEMAP + 1] = tonemap ? tonemap.exposure : 0;
+  target[base + OFFSET_TONEMAP + 2] = 0;
+  target[base + OFFSET_TONEMAP + 3] = 0;
 }
 var VERTEX_FLOATS = 8;
 function interleaveVertices(positions, normals, uvs) {
@@ -5116,6 +5123,7 @@ struct Uniforms {
   lightMvp: mat4x4<f32>,// world\u2192light-clip for shadow mapping
   shadow: vec4<f32>,    // x = 1 when shadowed, y = map size, z = bias, w = strength
   envMeta: vec4<f32>,   // xyz = env-map mean radiance, w = 1 when an env map is bound
+  tonemap: vec4<f32>,   // x = 1 when tone-mapping, y = exposure
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
@@ -5186,6 +5194,12 @@ fn envColorDir(dir: vec3<f32>) -> vec3<f32> {
 fn envAverage() -> vec3<f32> {
   if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
   return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
+}
+// ACES filmic tone map (Narkowicz), per channel, mirroring acesFilmic in
+// meshRasterizer.ts. Applied only to the Modern-tier PBR radiance.
+fn aces(x: f32) -> f32 {
+  let v = max(0.0, x);
+  return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), 0.0, 1.0);
 }
 
 @vertex
@@ -5273,6 +5287,11 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     // The direct light is what a shadow occludes; ambient/IBL still fills it.
     let sf = shadowFactor(in.lightClip);
     let lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
+    // HDR: expose + ACES roll-off, or write the linear colour straight through.
+    if (u.tonemap.x > 0.5) {
+      let e = u.tonemap.y;
+      return vec4<f32>(aces(lit.r * e), aces(lit.g * e), aces(lit.b * e), colour.a);
+    }
     return vec4<f32>(lit, colour.a);
   }
 
@@ -5592,7 +5611,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         hasEmissiveMap: entry.textures.emis !== null,
         environment: draw.environment ?? null,
         lightMvp: shadow ? multiplyMat42(shadow.lightViewProj, entry.model) : null,
-        shadow: shadowParams
+        shadow: shadowParams,
+        tonemap: draw.tonemap ?? null
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
