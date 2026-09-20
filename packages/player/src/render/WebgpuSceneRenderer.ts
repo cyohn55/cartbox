@@ -96,6 +96,8 @@ struct Uniforms {
   envSky: vec4<f32>,    // xyz = sky colour, w = 1 when an environment is set
   envHorizon: vec4<f32>,// xyz = horizon colour, w = intensity
   envGround: vec4<f32>, // xyz = ground colour
+  lightMvp: mat4x4<f32>,// world→light-clip for shadow mapping
+  shadow: vec4<f32>,    // x = 1 when shadowed, y = map size, z = bias, w = strength
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
@@ -103,12 +105,37 @@ struct Uniforms {
 @group(0) @binding(3) var mrTex: texture_2d<f32>;
 @group(0) @binding(4) var occTex: texture_2d<f32>;
 @group(0) @binding(5) var emisTex: texture_2d<f32>;
+// The shadow map: light-NDC depth in R, generated on the CPU by renderShadowMap
+// and uploaded as r32float, so the GPU samples the *same* map the software path
+// tests against. Unfilterable, read via textureLoad (nearest) — matching the
+// software compare exactly.
+@group(0) @binding(6) var shadowMap: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) normal: vec3<f32>,
   @location(1) uv: vec2<f32>,
+  @location(2) lightClip: vec4<f32>,
 };
+
+// Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
+// project into the light's frame, look up the nearest depth the light sees, and
+// return 1 (lit) or 1−strength (occluded). The light is orthographic (w = 1).
+fn shadowFactor(lightClip: vec4<f32>) -> f32 {
+  if (u.shadow.x < 0.5) { return 1.0; }
+  let ndc = lightClip.xyz / lightClip.w;
+  if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < -1.0 || ndc.z > 1.0) {
+    return 1.0;
+  }
+  let size = u.shadow.y;
+  let sx = (ndc.x * 0.5 + 0.5) * size;
+  let sy = (1.0 - (ndc.y * 0.5 + 0.5)) * size;
+  let tx = i32(clamp(floor(sx), 0.0, size - 1.0));
+  let ty = i32(clamp(floor(sy), 0.0, size - 1.0));
+  let stored = textureLoad(shadowMap, vec2<i32>(tx, ty), 0).r;
+  if (ndc.z - u.shadow.z > stored) { return 1.0 - u.shadow.w; }
+  return 1.0;
+}
 
 // Analytic environment (Phase 3 IBL), mirroring environmentColor /
 // environmentAverage in meshRasterizer.ts: a sky/horizon/ground vertical
@@ -135,6 +162,7 @@ fn vs(
   out.pos = u.mvp * vec4<f32>(position, 1.0);
   out.normal = u.nrm * normal;
   out.uv = uv;
+  out.lightClip = u.lightMvp * vec4<f32>(position, 1.0);
   return out;
 }
 
@@ -206,17 +234,19 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     } else {
       amb = vec3<f32>(u.light.w) * albedo * ao;
     }
-    let lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl + amb + emis;
+    // The direct light is what a shadow occludes; ambient/IBL still fills it.
+    let sf = shadowFactor(in.lightClip);
+    let lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
     return vec4<f32>(lit, colour.a);
   }
 
-  // --- Fantasy path (unchanged, byte-identical) ---
+  // --- Fantasy path (byte-identical when no shadow; shadow scales the direct term) ---
   // Two-sided Lambert: abs(N·L) so inconsistent winding still lights. The normal
   // is deliberately NOT renormalised — the software rasteriser interpolates and
   // dots without normalising, and parity with it is the contract here. Both
   // therefore skew identically under non-uniform scale.
   let nl = abs(dot(in.normal, u.light.xyz));
-  let shade = u.light.w + (1.0 - u.light.w) * nl;
+  let shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(in.lightClip);
   return vec4<f32>(colour.rgb * shade, colour.a);
 }
 `;
@@ -265,6 +295,14 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private uniformData = new Float32Array(0);
   private destroyed = false;
 
+  /**
+   * The bound shadow map — the 1x1 blank when no shadow this frame, else an
+   * r32float sized to the shadow input and uploaded from the CPU-generated map.
+   * Its identity only changes on a size change, so the bind-group cache holds.
+   */
+  private shadowTexture: any;
+  private shadowMapSize = 0;
+
   private constructor(
     private readonly device: any,
     private readonly width: number,
@@ -275,12 +313,15 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     private readonly depthTexture: any,
     private readonly sampler: any,
     private readonly blankTexture: any,
+    /** 1x1 r32float, bound to the shadow slot when no shadow map is active. */
+    private readonly blankShadow: any,
     private readonly readback: { buffer: any; busy: boolean }[],
     private readonly bytesPerRow: number,
     style: RasterStyle,
   ) {
     // The warm-up rasteriser must draw the same era as the GPU it stands in for.
     this.software = new SoftwareSceneRenderer(style);
+    this.shadowTexture = blankShadow;
   }
 
   /**
@@ -323,6 +364,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 3, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           { binding: 5, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // The shadow map is r32float — not filterable — and read via textureLoad,
+          // so it declares unfilterable-float and needs no sampler.
+          { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
         ],
       });
 
@@ -392,6 +436,20 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { width: 1, height: 1 },
       );
 
+      // A 1x1 r32float stands in for "no shadow map", so binding 6 always has a
+      // resource. A single 0 depth is never read: the uniform's shadow flag is 0.
+      const blankShadow = device.createTexture({
+        size: { width: 1, height: 1 },
+        format: "r32float",
+        usage: 0x04 | 0x02, // TEXTURE_BINDING | COPY_DST
+      });
+      device.queue.writeTexture(
+        { texture: blankShadow },
+        new Float32Array([0]),
+        { bytesPerRow: 4 },
+        { width: 1, height: 1 },
+      );
+
       const bytesPerRow = alignBytesPerRow(width);
       const readback = Array.from({ length: READBACK_BUFFERS }, () => ({
         buffer: device.createBuffer({
@@ -411,6 +469,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         depthTexture,
         sampler,
         blankTexture,
+        blankShadow,
         readback,
         bytesPerRow,
         style,
@@ -418,6 +477,27 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Point the shadow slot at an r32float sized to `size`, (re)creating it on a
+   * size change and invalidating cached bind groups (binding 6 identity moved).
+   * `size` 0 restores the 1x1 blank for a frame with no shadow.
+   */
+  private ensureShadowTexture(size: number): void {
+    if (size === this.shadowMapSize) return;
+    if (size === 0) {
+      if (this.shadowTexture !== this.blankShadow) this.shadowTexture = this.blankShadow;
+    } else {
+      destroySafely(this.shadowMapSize > 0 ? this.shadowTexture : null);
+      this.shadowTexture = this.device.createTexture({
+        size: { width: size, height: size },
+        format: "r32float",
+        usage: 0x04 | 0x02, // TEXTURE_BINDING | COPY_DST
+      });
+    }
+    this.shadowMapSize = size;
+    this.bindGroups = new WeakMap(); // binding 6 changed identity
   }
 
   render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
@@ -498,6 +578,24 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // normalising them per primitive would be the same answer computed many times.
     const light = resolveLight(draw.lightDirection, draw.ambient);
     const viewDir = viewDirection(draw.view);
+
+    // Shadow map: the CPU-generated map (renderShadowMap) uploaded as r32float so
+    // the GPU samples the *same* depths the software path tests against. `size` 0
+    // restores the blank when this frame casts no shadow.
+    const shadow = draw.shadow ?? null;
+    this.ensureShadowTexture(shadow ? shadow.size : 0);
+    if (shadow) {
+      this.device.queue.writeTexture(
+        { texture: this.shadowTexture },
+        shadow.depth,
+        { bytesPerRow: shadow.size * 4, rowsPerImage: shadow.size },
+        { width: shadow.size, height: shadow.size },
+      );
+    }
+    const shadowParams = shadow
+      ? { size: shadow.size, bias: shadow.bias ?? 0.003, strength: shadow.strength ?? 1 }
+      : null;
+
     draws.forEach((entry, index) => {
       const pbr = resolvePbr(
         entry.primitive.material,
@@ -517,6 +615,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         hasOcclusionMap: entry.textures.occ !== null,
         hasEmissiveMap: entry.textures.emis !== null,
         environment: draw.environment ?? null,
+        lightMvp: shadow ? multiplyMat4(shadow.lightViewProj, entry.model) : null,
+        shadow: shadowParams,
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
@@ -647,6 +747,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 3, resource: view(textures.mr) },
         { binding: 4, resource: view(textures.occ) },
         { binding: 5, resource: view(textures.emis) },
+        // The active shadow map (or the 1x1 blank). Its identity only moves on a
+        // size change, which invalidates this whole cache, so a cached group
+        // always references the current one.
+        { binding: 6, resource: this.shadowTexture.createView() },
       ],
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });
@@ -681,6 +785,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     destroySafely(this.colourTexture);
     destroySafely(this.depthTexture);
     destroySafely(this.blankTexture);
+    destroySafely(this.blankShadow);
+    if (this.shadowTexture !== this.blankShadow) destroySafely(this.shadowTexture);
     destroySafely(this.uniformBuffer);
     for (const slot of this.readback) destroySafely(slot.buffer);
   }

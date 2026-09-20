@@ -42,13 +42,15 @@ const NON_PBR = {
   hasOcclusionMap: false,
   hasEmissiveMap: false,
   environment: null,
+  lightMvp: null,
+  shadow: null,
 };
 
 describe("uniform layout", () => {
   it("uses a stride WebGPU can address with a dynamic offset", () => {
-    // 256 is the minimum alignment for a dynamic uniform offset. A smaller
-    // stride packs tighter and is rejected at bind time on real hardware.
-    expect(UNIFORM_STRIDE).toBe(256);
+    // A dynamic uniform offset must be a multiple of 256; the struct grew past
+    // 256 bytes (the shadow light matrix), so the stride is the next multiple, 512.
+    expect(UNIFORM_STRIDE).toBe(512);
     expect(UNIFORM_STRIDE % 256).toBe(0);
     expect(UNIFORM_FLOATS).toBe(UNIFORM_STRIDE / 4);
   });
@@ -118,6 +120,8 @@ describe("uniform layout", () => {
       hasOcclusionMap: false,
       hasEmissiveMap: true,
       environment: null,
+      lightMvp: null,
+      shadow: null,
     });
     // view (36..40): xyz direction, w unused.
     expect(Array.from(data.subarray(36, 40))).toEqual([0, 0, 1, 0]);
@@ -145,6 +149,8 @@ describe("uniform layout", () => {
       hasOcclusionMap: false,
       hasEmissiveMap: false,
       environment: { sky: [0.2, 0.4, 0.9], horizon: [0.6, 0.6, 0.6], ground: [0.3, 0.2, 0.1], intensity: 1.5 },
+      lightMvp: null,
+      shadow: null,
     });
     // envSky (52..56): xyz sky, w = hasEnvironment flag.
     expect(Array.from(data.subarray(52, 56))).toEqual([Math.fround(0.2), Math.fround(0.4), Math.fround(0.9), 1]);
@@ -152,6 +158,49 @@ describe("uniform layout", () => {
     expect(Array.from(data.subarray(56, 60))).toEqual([Math.fround(0.6), Math.fround(0.6), Math.fround(0.6), Math.fround(1.5)]);
     // envGround (60..64): xyz ground, w unused.
     expect(Array.from(data.subarray(60, 64))).toEqual([Math.fround(0.3), Math.fround(0.2), Math.fround(0.1), 0]);
+  });
+
+  it("packs the light matrix and shadow params, and flags them off when absent", () => {
+    const withShadow = new Float32Array(UNIFORM_FLOATS);
+    writeInstanceUniform(withShadow, 0, {
+      mvp: COUNTING_MAT4,
+      normalBasis: [0, 0, 0, 0, 0, 0, 0, 0, 0],
+      baseColor: [0, 0, 0, 1],
+      hasTexture: false,
+      light,
+      viewDir: [0, 0, 1],
+      pbr: { isPbr: true, metallic: 0, roughness: 1, emissive: [0, 0, 0] },
+      hasMrMap: false,
+      hasOcclusionMap: false,
+      hasEmissiveMap: false,
+      environment: null,
+      lightMvp: COUNTING_MAT4,
+      shadow: { size: 1024, bias: 0.003, strength: 0.8 },
+    });
+    // lightMvp (64..80): the counting matrix, contiguous.
+    expect(Array.from(withShadow.subarray(64, 80))).toEqual(Array.from({ length: 16 }, (_, i) => i));
+    // shadow (80..84): hasShadow, size, bias, strength.
+    expect(Array.from(withShadow.subarray(80, 84))).toEqual([1, 1024, Math.fround(0.003), Math.fround(0.8)]);
+
+    // With no shadow: the flag is 0 and the matrix stays zeroed.
+    const none = new Float32Array(UNIFORM_FLOATS);
+    writeInstanceUniform(none, 0, {
+      mvp: COUNTING_MAT4,
+      normalBasis: [0, 0, 0, 0, 0, 0, 0, 0, 0],
+      baseColor: [0, 0, 0, 1],
+      hasTexture: false,
+      light,
+      viewDir: [0, 0, 1],
+      pbr: { isPbr: true, metallic: 0, roughness: 1, emissive: [0, 0, 0] },
+      hasMrMap: false,
+      hasOcclusionMap: false,
+      hasEmissiveMap: false,
+      environment: null,
+      lightMvp: null,
+      shadow: null,
+    });
+    expect(none[80]).toBe(0); // hasShadow flag off
+    expect(Array.from(none.subarray(64, 80)).every((v) => v === 0)).toBe(true);
   });
 
   it("addresses each draw at its own stride", () => {
