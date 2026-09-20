@@ -4960,7 +4960,7 @@ import {
 
 // src/render/scenePacking.ts
 var UNIFORM_STRIDE = 512;
-var UNIFORM_BYTES_USED = 336;
+var UNIFORM_BYTES_USED = 352;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var OFFSET_MVP = 0;
 var OFFSET_NRM = 16;
@@ -4975,6 +4975,7 @@ var OFFSET_ENV_HORIZON = 56;
 var OFFSET_ENV_GROUND = 60;
 var OFFSET_LIGHT_MVP = 64;
 var OFFSET_SHADOW = 80;
+var OFFSET_ENV_META = 84;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -5060,6 +5061,12 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_SHADOW + 1] = shadow ? shadow.size : 0;
   target[base + OFFSET_SHADOW + 2] = shadow ? shadow.bias : 0;
   target[base + OFFSET_SHADOW + 3] = shadow ? shadow.strength : 0;
+  const envMap = env && env.map ? env : null;
+  const avg = envMap?.average ?? null;
+  target[base + OFFSET_ENV_META] = avg ? avg[0] : 0;
+  target[base + OFFSET_ENV_META + 1] = avg ? avg[1] : 0;
+  target[base + OFFSET_ENV_META + 2] = avg ? avg[2] : 0;
+  target[base + OFFSET_ENV_META + 3] = envMap && avg ? 1 : 0;
 }
 var VERTEX_FLOATS = 8;
 function interleaveVertices(positions, normals, uvs) {
@@ -5108,6 +5115,7 @@ struct Uniforms {
   envGround: vec4<f32>, // xyz = ground colour
   lightMvp: mat4x4<f32>,// world\u2192light-clip for shadow mapping
   shadow: vec4<f32>,    // x = 1 when shadowed, y = map size, z = bias, w = strength
+  envMeta: vec4<f32>,   // xyz = env-map mean radiance, w = 1 when an env map is bound
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
@@ -5120,6 +5128,9 @@ struct Uniforms {
 // tests against. Unfilterable, read via textureLoad (nearest) \u2014 matching the
 // software compare exactly.
 @group(0) @binding(6) var shadowMap: texture_2d<f32>;
+// The equirectangular environment map, read via textureLoad (nearest) to match
+// sampleEquirectRgb in meshRasterizer.ts. Bound to a 1x1 blank when unused.
+@group(0) @binding(7) var envMap: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
@@ -5151,14 +5162,29 @@ fn shadowFactor(lightClip: vec4<f32>) -> f32 {
 // environmentAverage in meshRasterizer.ts: a sky/horizon/ground vertical
 // gradient sampled by a direction's Y. WGSL mix(a,b,k) = a+(b-a)*k, matching the
 // software helper exactly.
-fn envColor(y: f32) -> vec3<f32> {
+fn envGradient(y: f32) -> vec3<f32> {
   let t = clamp(y, -1.0, 1.0);
   var c: vec3<f32>;
   if (t >= 0.0) { c = mix(u.envHorizon.xyz, u.envSky.xyz, t); }
   else { c = mix(u.envHorizon.xyz, u.envGround.xyz, -t); }
   return c * u.envHorizon.w; // .w = intensity
 }
+// Sample the environment along a full direction: an equirectangular map when one
+// is bound (envMeta.w), else the analytic gradient (Y only). Mirrors
+// sampleEnvironmentDir in meshRasterizer.ts \u2014 nearest via textureLoad.
+fn envColorDir(dir: vec3<f32>) -> vec3<f32> {
+  if (u.envMeta.w < 0.5) { return envGradient(dir.y); }
+  let d = normalize(dir);
+  let uCoord = atan2(d.z, d.x) / (2.0 * 3.14159265) + 0.5;
+  let vCoord = acos(clamp(d.y, -1.0, 1.0)) / 3.14159265;
+  let dims = vec2<f32>(textureDimensions(envMap, 0));
+  let wx = uCoord - floor(uCoord);
+  let tx = i32(clamp(floor(wx * dims.x), 0.0, dims.x - 1.0));
+  let ty = i32(clamp(floor(vCoord * dims.y), 0.0, dims.y - 1.0));
+  return textureLoad(envMap, vec2<i32>(tx, ty), 0).rgb * u.envHorizon.w;
+}
 fn envAverage() -> vec3<f32> {
+  if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
   return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
 }
 
@@ -5237,9 +5263,9 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     // blurred toward the average by roughness; without one, the flat ambient.
     var amb: vec3<f32>;
     if (u.envSky.w > 0.5) {
-      let irr = envColor(N.y);
-      let rY = 2.0 * ndv * N.y - V.y;
-      let pref = mix(envColor(rY), envAverage(), rough);
+      let irr = envColorDir(N);
+      let R = 2.0 * ndv * N - V;
+      let pref = mix(envColorDir(R), envAverage(), rough);
       amb = (irr * albedo * kdm + pref * f0) * ao;
     } else {
       amb = vec3<f32>(u.light.w) * albedo * ao;
@@ -5288,8 +5314,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.uniformData = new Float32Array(0);
     this.destroyed = false;
     this.shadowMapSize = 0;
+    this.envMapSource = null;
     this.software = new SoftwareSceneRenderer(style);
     this.shadowTexture = blankShadow;
+    this.envTexture = blankTexture;
   }
   /**
    * Build the renderer for one framebuffer size. Returns null on any failure, so
@@ -5317,7 +5345,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 5, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           // The shadow map is r32float — not filterable — and read via textureLoad,
           // so it declares unfilterable-float and needs no sampler.
-          { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } }
+          { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+          // The equirectangular environment map (rgba8unorm), read via textureLoad.
+          { binding: 7, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } }
         ]
       });
       const pipeline = device.createRenderPipeline({
@@ -5442,6 +5472,33 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.shadowMapSize = size;
     this.bindGroups = /* @__PURE__ */ new WeakMap();
   }
+  /**
+   * Point the env-map slot at an rgba8unorm upload of `map`, once per distinct
+   * source object; null restores the 1x1 blank. A change invalidates cached bind
+   * groups (binding 7 moved).
+   */
+  ensureEnvTexture(map) {
+    if (map === this.envMapSource) return;
+    if (this.envMapSource) destroySafely(this.envTexture);
+    if (!map) {
+      this.envTexture = this.blankTexture;
+    } else {
+      this.envTexture = this.device.createTexture({
+        size: { width: map.width, height: map.height },
+        format: "rgba8unorm",
+        usage: 4 | 2
+        // TEXTURE_BINDING | COPY_DST
+      });
+      this.device.queue.writeTexture(
+        { texture: this.envTexture },
+        map.data,
+        { bytesPerRow: map.width * 4, rowsPerImage: map.height },
+        { width: map.width, height: map.height }
+      );
+    }
+    this.envMapSource = map;
+    this.bindGroups = /* @__PURE__ */ new WeakMap();
+  }
   render(instances, draw) {
     if (this.destroyed) return;
     if (this.latest) {
@@ -5514,6 +5571,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       );
     }
     const shadowParams = shadow ? { size: shadow.size, bias: shadow.bias ?? 3e-3, strength: shadow.strength ?? 1 } : null;
+    this.ensureEnvTexture(draw.environment?.map ?? null);
     draws.forEach((entry, index) => {
       const pbr = resolvePbr(
         entry.primitive.material,
@@ -5648,7 +5706,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // The active shadow map (or the 1x1 blank). Its identity only moves on a
         // size change, which invalidates this whole cache, so a cached group
         // always references the current one.
-        { binding: 6, resource: this.shadowTexture.createView() }
+        { binding: 6, resource: this.shadowTexture.createView() },
+        // The active env map (or the 1x1 white blank); likewise cache-invalidated.
+        { binding: 7, resource: this.envTexture.createView() }
       ]
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });
@@ -5683,6 +5743,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     destroySafely(this.blankTexture);
     destroySafely(this.blankShadow);
     if (this.shadowTexture !== this.blankShadow) destroySafely(this.shadowTexture);
+    if (this.envTexture !== this.blankTexture) destroySafely(this.envTexture);
     destroySafely(this.uniformBuffer);
     for (const slot of this.readback) destroySafely(slot.buffer);
   }

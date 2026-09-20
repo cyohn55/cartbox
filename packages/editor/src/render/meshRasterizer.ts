@@ -211,28 +211,36 @@ function normalizeVec3(x: number, y: number, z: number): [number, number, number
 }
 
 /**
- * An analytic environment for image-based lighting (Phase 3): a three-stop
- * vertical gradient — `sky` overhead, `horizon` at the equator, `ground` below —
- * scaled by `intensity`. It stands in for an HDRI cubemap: cheap, deterministic
- * (so the software path is verifiable), and enough to give PBR surfaces
- * directional ambient and metals a legible reflection of their surroundings,
- * replacing the flat ambient term. Colours are in the engine's non-linear byte
- * space (0..1), like the rest of the shading until the Phase 4 HDR pipeline.
+ * An environment for image-based lighting (Phase 3). Two forms, one type:
+ *
+ * - **Analytic gradient** — a three-stop vertical gradient (`sky` overhead,
+ *   `horizon` at the equator, `ground` below). Cheap, deterministic, the default.
+ * - **Equirectangular map** — an optional decoded panorama (`map`) sampled by the
+ *   full 3D direction, so metals mirror a real scene rather than a gradient. Give
+ *   its mean radiance in `average` (see {@link computeEnvironmentAverage}) for the
+ *   rough-reflection fall-off; the gradient stops are then ignored.
+ *
+ * Both are scaled by `intensity`. Colours are in the engine's non-linear byte
+ * space (0..1); a true HDR (>1) environment waits for the Phase 4 HDR pipeline,
+ * so today an equirectangular `map` is an LDR panorama.
  */
 export interface EnvironmentLight {
   readonly sky: readonly [number, number, number];
   readonly horizon: readonly [number, number, number];
   readonly ground: readonly [number, number, number];
-  /** Overall multiplier on the gradient (default 1). */
+  /** Overall multiplier on the environment (default 1). */
   readonly intensity: number;
+  /** Optional equirectangular panorama; when set, sampling uses it, not the stops. */
+  readonly map?: DecodedTexture | null;
+  /** The map's mean radiance (0..1, pre-intensity); required with `map`. */
+  readonly average?: readonly [number, number, number] | null;
 }
 
 /**
- * Sample the environment gradient along a world-space direction's Y component:
+ * Sample the analytic gradient along a world-space direction's Y component:
  * `y = +1` is straight up (sky), `0` the horizon, `-1` straight down (ground).
- * This is an analytic approximation of the environment radiance — not a
- * cosine-convolved irradiance — chosen so both backends compute it identically
- * and the result is testable without a GPU.
+ * An analytic approximation of the environment radiance — not a cosine-convolved
+ * irradiance — computed identically on both backends and testable without a GPU.
  */
 export function environmentColor(env: EnvironmentLight, y: number): [number, number, number] {
   const t = Math.max(-1, Math.min(1, y));
@@ -242,17 +250,70 @@ export function environmentColor(env: EnvironmentLight, y: number): [number, num
   return [pick(0), pick(1), pick(2)];
 }
 
+/** Nearest-sample an equirectangular map's RGB (0..1), wrapping longitude. */
+function sampleEquirectRgb(map: DecodedTexture, u: number, v: number): [number, number, number] {
+  const wu = u - Math.floor(u); // wrap longitude
+  const cv = Math.min(1, Math.max(0, v)); // clamp latitude
+  const tx = Math.min(map.width - 1, Math.floor(wu * map.width));
+  const ty = Math.min(map.height - 1, Math.floor(cv * map.height));
+  const at = (ty * map.width + tx) * 4;
+  return [map.data[at]! / 255, map.data[at + 1]! / 255, map.data[at + 2]! / 255];
+}
+
+/**
+ * Sample the environment along a full world-space direction. With a `map`, this
+ * projects the direction to equirectangular UV (longitude = atan2(z, x),
+ * latitude = acos(y)) and samples the panorama; without one, it falls back to the
+ * gradient (which uses only Y), so a gradient environment is unchanged.
+ */
+export function sampleEnvironmentDir(
+  env: EnvironmentLight,
+  dx: number,
+  dy: number,
+  dz: number,
+): [number, number, number] {
+  if (env.map) {
+    const len = Math.hypot(dx, dy, dz) || 1;
+    const nx = dx / len;
+    const ny = dy / len;
+    const nz = dz / len;
+    const u = Math.atan2(nz, nx) / (2 * Math.PI) + 0.5;
+    const v = Math.acos(Math.min(1, Math.max(-1, ny))) / Math.PI; // 0 at top, 1 at bottom
+    const [r, g, b] = sampleEquirectRgb(env.map, u, v);
+    return [r * env.intensity, g * env.intensity, b * env.intensity];
+  }
+  return environmentColor(env, dy);
+}
+
 /**
  * The environment's mean radiance — the limit a fully-rough reflection converges
- * to, blurring the whole gradient into one colour. Used to blend the mirror
- * reflection toward the average as roughness rises.
+ * to. For a `map` it is the supplied `average`; for the gradient it is the mean
+ * of the three stops.
  */
 export function environmentAverage(env: EnvironmentLight): [number, number, number] {
+  if (env.map && env.average) {
+    return [env.average[0]! * env.intensity, env.average[1]! * env.intensity, env.average[2]! * env.intensity];
+  }
   return [
     ((env.sky[0]! + env.horizon[0]! + env.ground[0]!) / 3) * env.intensity,
     ((env.sky[1]! + env.horizon[1]! + env.ground[1]!) / 3) * env.intensity,
     ((env.sky[2]! + env.horizon[2]! + env.ground[2]!) / 3) * env.intensity,
   ];
+}
+
+/** The mean RGB (0..1) of an equirectangular map, for {@link EnvironmentLight.average}. */
+export function computeEnvironmentAverage(map: DecodedTexture): [number, number, number] {
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  const count = map.width * map.height;
+  for (let i = 0; i < count; i += 1) {
+    r += map.data[i * 4]!;
+    g += map.data[i * 4 + 1]!;
+    b += map.data[i * 4 + 2]!;
+  }
+  const denom = (count || 1) * 255;
+  return [r / denom, g / denom, b / denom];
 }
 
 /**
@@ -1305,10 +1366,12 @@ function rasterizeTriangle(
         let ambG: number;
         let ambB: number;
         if (environment) {
-          const [ir, ig, ib] = environmentColor(environment, Ny);
+          const [ir, ig, ib] = sampleEnvironmentDir(environment, Nx, Ny, Nz);
           // Reflection of the view direction about N (N already faces the viewer).
-          const rY = 2 * ndv * Ny - viewDir[1];
-          const [pr, pg, pb] = environmentColor(environment, rY);
+          const rx = 2 * ndv * Nx - viewDir[0];
+          const ry = 2 * ndv * Ny - viewDir[1];
+          const rz = 2 * ndv * Nz - viewDir[2];
+          const [pr, pg, pb] = sampleEnvironmentDir(environment, rx, ry, rz);
           const [avr, avg, avb] = environmentAverage(environment);
           const specR = pr + (avr - pr) * rough;
           const specG = pg + (avg - pg) * rough;

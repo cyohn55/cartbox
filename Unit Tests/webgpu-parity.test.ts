@@ -37,6 +37,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   composeModelMatrix,
+  computeEnvironmentAverage,
   orthographicMatrix,
   projectionMatrix,
   renderShadowMap,
@@ -248,6 +249,54 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
       horizon: [0.7, 0.7, 0.68] as const,
       ground: [0.3, 0.22, 0.12] as const,
       intensity: 1,
+    };
+    const withEnv = (): SceneDraw => ({ ...draw(), environment });
+
+    renderer.render(instances, withEnv());
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.tick?.();
+    }
+    const gpu = withEnv();
+    renderer.render(instances, gpu);
+
+    const software = withEnv();
+    new SoftwareSceneRenderer().render(instances, software);
+
+    const drawn = Array.from(software.out).filter((_, i) => i % 4 === 3 && software.out[i] !== 0).length;
+    expect(drawn).toBeGreaterThan(100);
+
+    let maxDelta = 0;
+    for (let i = 0; i < W * H * 4; i += 1) {
+      maxDelta = Math.max(maxDelta, Math.abs(gpu.out[i]! - software.out[i]!));
+    }
+    expect(maxDelta).toBeLessThanOrEqual(4);
+
+    renderer.dispose();
+  });
+
+  it("matches the software rasteriser on an equirectangular env map (within float tolerance)", async () => {
+    // The GPU samples the *same* uploaded panorama with the same nearest
+    // projection (atan2/acos → texel) as sampleEnvironmentDir, so only the base
+    // PBR shading differs by a few float bits.
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+    const instances = pbrScene();
+    // A 4x2 panorama with distinct columns, so the reflection is direction-varying.
+    const data = new Uint8ClampedArray(4 * 2 * 4);
+    for (let i = 0; i < 8; i += 1) {
+      data[i * 4] = (i * 30) & 255;
+      data[i * 4 + 1] = (255 - i * 20) & 255;
+      data[i * 4 + 2] = (i * 45) & 255;
+      data[i * 4 + 3] = 255;
+    }
+    const map: DecodedTexture = { width: 4, height: 2, data };
+    const environment = {
+      sky: [0, 0, 0] as const,
+      horizon: [0, 0, 0] as const,
+      ground: [0, 0, 0] as const,
+      intensity: 1,
+      map,
+      average: computeEnvironmentAverage(map),
     };
     const withEnv = (): SceneDraw => ({ ...draw(), environment });
 

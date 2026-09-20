@@ -1959,6 +1959,13 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      */
     private shadowTexture;
     private shadowMapSize;
+    /**
+     * The bound equirectangular environment map — the 1x1 blank (reusing the white
+     * texture) when the frame has none, else an rgba8unorm upload of the decoded
+     * panorama. Keyed by the source object so it uploads once per distinct map.
+     */
+    private envTexture;
+    private envMapSource;
     private constructor();
     /**
      * Build the renderer for one framebuffer size. Returns null on any failure, so
@@ -1972,6 +1979,12 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * `size` 0 restores the 1x1 blank for a frame with no shadow.
      */
     private ensureShadowTexture;
+    /**
+     * Point the env-map slot at an rgba8unorm upload of `map`, once per distinct
+     * source object; null restores the 1x1 blank. A change invalidates cached bind
+     * groups (binding 7 moved).
+     */
+    private ensureEnvTexture;
     render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
     /** Paint the last completed GPU frame over the cart's own pixels. */
     private composite;
@@ -2019,14 +2032,16 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  * 240  envGround  vec4<f32>    16   xyz = ground colour
  * 256  lightMvp   mat4x4<f32>  64   world→light-clip for this draw (shadow mapping)
  * 320  shadow     vec4<f32>    16   x = 1 when shadowed, y = map size, z = bias, w = strength
+ * 336  envMeta    vec4<f32>    16   xyz = env-map mean radiance, w = 1 when an env map is bound
  * ```
  *
- * 336 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
+ * 352 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
  * dynamic uniform offset can address), so one buffer still holds every draw in a
  * frame. The metallic-roughness inputs and the environment carry the Modern
  * (AAA) tier's shading; a fantasy draw leaves `pbr.z` at 0 and the shader takes
  * the byte-identical Lambert path, `envSky.w` at 0 falls back to flat ambient,
- * and `shadow.x` at 0 skips the shadow test.
+ * `envMeta.w` at 0 uses the analytic gradient instead of a panorama, and
+ * `shadow.x` at 0 skips the shadow test.
  */
 declare const UNIFORM_STRIDE = 512;
 /**
@@ -2034,7 +2049,7 @@ declare const UNIFORM_STRIDE = 512;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 336;
+declare const UNIFORM_BYTES_USED = 352;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */

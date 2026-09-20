@@ -158,6 +158,30 @@ describe("uniform layout", () => {
     expect(Array.from(data.subarray(56, 60))).toEqual([Math.fround(0.6), Math.fround(0.6), Math.fround(0.6), Math.fround(1.5)]);
     // envGround (60..64): xyz ground, w unused.
     expect(Array.from(data.subarray(60, 64))).toEqual([Math.fround(0.3), Math.fround(0.2), Math.fround(0.1), 0]);
+    // envMeta (84..88): no map here, so the flag (w) is 0.
+    expect(data[87]).toBe(0);
+  });
+
+  it("packs the env-map mean radiance and flag when a panorama is bound", () => {
+    const data = new Float32Array(UNIFORM_FLOATS);
+    const map = { width: 1, height: 1, data: new Uint8ClampedArray([0, 0, 0, 255]) };
+    writeInstanceUniform(data, 0, {
+      mvp: COUNTING_MAT4,
+      normalBasis: [0, 0, 0, 0, 0, 0, 0, 0, 0],
+      baseColor: [0, 0, 0, 1],
+      hasTexture: false,
+      light,
+      viewDir: [0, 0, 1],
+      pbr: { isPbr: true, metallic: 0, roughness: 1, emissive: [0, 0, 0] },
+      hasMrMap: false,
+      hasOcclusionMap: false,
+      hasEmissiveMap: false,
+      environment: { sky: [0, 0, 0], horizon: [0, 0, 0], ground: [0, 0, 0], intensity: 1, map, average: [0.5, 0.25, 0.1] },
+      lightMvp: null,
+      shadow: null,
+    });
+    // envMeta (84..88): mean radiance rgb + hasEnvMap flag.
+    expect(Array.from(data.subarray(84, 88))).toEqual([Math.fround(0.5), Math.fround(0.25), Math.fround(0.1), 1]);
   });
 
   it("packs the light matrix and shadow params, and flags them off when absent", () => {

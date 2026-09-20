@@ -122,8 +122,18 @@ byte space for now — a linear/gamma-correct HDR pipeline is Phase 4.
 - [x] **IBL — WebGPU.** The same analytic gradient sampled in WGSL
       (`envColor`/`envAverage`), matching the software branch; validated
       in-browser / on a real device (tolerant `webgpu-parity.test.ts` case).
-- [ ] A real **HDRI cubemap** with a prefiltered mip chain + a BRDF LUT (the
-      analytic gradient is the stand-in until then).
+- [x] **Equirectangular environment map (software + WebGPU).** Beyond the
+      gradient, `EnvironmentLight` carries an optional decoded panorama (`map` +
+      its mean `average` from `computeEnvironmentAverage`), sampled by the full 3D
+      direction (`sampleEnvironmentDir`: longitude = atan2(z,x), latitude =
+      acos(y)) for both diffuse and reflection, so metals mirror a real scene. The
+      WebGPU path uploads the same panorama and samples it in WGSL by textureLoad
+      (matching nearest), gated by `envMeta.w`. Verified with
+      `meshRasterizerEnvMap.test.ts` + a tolerant device parity case.
+- [ ] **True HDR environment** (>1 radiance) with a **prefiltered mip chain** +
+      a **split-sum BRDF LUT** — the current map is LDR (byte-space) and roughness
+      just blends toward the map average; real prefiltering waits on the Phase 4
+      HDR pipeline.
 - [x] **Directional shadow maps — software reference path.** A two-pass shadow
       map: `renderShadowMap` records scene depth from the sun's orthographic view
       (`orthographicMatrix`), then `renderMeshScene` projects each fragment into
