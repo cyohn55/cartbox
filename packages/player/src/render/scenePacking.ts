@@ -10,26 +10,30 @@
  * are the parts covered by tests.
  */
 
-import type { Mat4 } from "@cartbox/editor";
+import type { EnvironmentLight, Mat4 } from "@cartbox/editor";
 
 /**
  * WGSL uniform layout, in bytes:
  *
  * ```
- *   0  mvp      mat4x4<f32>  64
- *  64  nrm      mat3x3<f32>  48   (three vec3 columns, each padded to 16)
- * 112  base     vec4<f32>    16
- * 128  light    vec4<f32>    16   xyz = direction, w = ambient
- * 144  view     vec4<f32>    16   xyz = direction towards the viewer (Modern PBR)
- * 160  pbr      vec4<f32>    16   x = metallic, y = roughness, z = 1 when PBR
- * 176  emissive vec4<f32>    16   xyz = emissive factor
- * 192  texflags vec4<f32>    16   x = base, y = mr, z = occlusion, w = emissive
+ *   0  mvp        mat4x4<f32>  64
+ *  64  nrm        mat3x3<f32>  48   (three vec3 columns, each padded to 16)
+ * 112  base       vec4<f32>    16
+ * 128  light      vec4<f32>    16   xyz = direction, w = ambient
+ * 144  view       vec4<f32>    16   xyz = direction towards the viewer (Modern PBR)
+ * 160  pbr        vec4<f32>    16   x = metallic, y = roughness, z = 1 when PBR
+ * 176  emissive   vec4<f32>    16   xyz = emissive factor
+ * 192  texflags   vec4<f32>    16   x = base, y = mr, z = occlusion, w = emissive
+ * 208  envSky     vec4<f32>    16   xyz = sky colour, w = 1 when an environment is set
+ * 224  envHorizon vec4<f32>    16   xyz = horizon colour, w = intensity
+ * 240  envGround  vec4<f32>    16   xyz = ground colour
  * ```
  *
- * 208 bytes used, padded to the 256-byte minimum alignment a dynamic uniform
- * offset requires, so one buffer holds every draw in a frame. The last four
- * vec4s carry the Modern (AAA) tier's metallic-roughness inputs; a fantasy draw
- * leaves `pbr.z` at 0 and the shader takes the byte-identical Lambert path.
+ * 256 bytes used, which is exactly the 256-byte minimum alignment a dynamic
+ * uniform offset requires, so one buffer holds every draw in a frame. The
+ * metallic-roughness inputs and the environment carry the Modern (AAA) tier's
+ * shading; a fantasy draw leaves `pbr.z` at 0 and the shader takes the
+ * byte-identical Lambert path, and `envSky.w` at 0 falls back to flat ambient.
  */
 export const UNIFORM_STRIDE = 256;
 /**
@@ -37,7 +41,7 @@ export const UNIFORM_STRIDE = 256;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 208;
+export const UNIFORM_BYTES_USED = 256;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -50,6 +54,9 @@ const OFFSET_VIEW = 36;
 const OFFSET_PBR = 40;
 const OFFSET_EMISSIVE = 44;
 const OFFSET_TEXFLAGS = 48;
+const OFFSET_ENV_SKY = 52;
+const OFFSET_ENV_HORIZON = 56;
+const OFFSET_ENV_GROUND = 60;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -181,6 +188,8 @@ export interface InstanceUniform {
   readonly hasMrMap: boolean;
   readonly hasOcclusionMap: boolean;
   readonly hasEmissiveMap: boolean;
+  /** This frame's image-based lighting environment, or null for flat ambient. */
+  readonly environment: EnvironmentLight | null;
 }
 
 /**
@@ -231,6 +240,20 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_TEXFLAGS + 1] = uniform.hasMrMap ? 1 : 0;
   target[base + OFFSET_TEXFLAGS + 2] = uniform.hasOcclusionMap ? 1 : 0;
   target[base + OFFSET_TEXFLAGS + 3] = uniform.hasEmissiveMap ? 1 : 0;
+
+  const env = uniform.environment;
+  target[base + OFFSET_ENV_SKY] = env ? env.sky[0]! : 0;
+  target[base + OFFSET_ENV_SKY + 1] = env ? env.sky[1]! : 0;
+  target[base + OFFSET_ENV_SKY + 2] = env ? env.sky[2]! : 0;
+  target[base + OFFSET_ENV_SKY + 3] = env ? 1 : 0; // hasEnvironment
+  target[base + OFFSET_ENV_HORIZON] = env ? env.horizon[0]! : 0;
+  target[base + OFFSET_ENV_HORIZON + 1] = env ? env.horizon[1]! : 0;
+  target[base + OFFSET_ENV_HORIZON + 2] = env ? env.horizon[2]! : 0;
+  target[base + OFFSET_ENV_HORIZON + 3] = env ? env.intensity : 0;
+  target[base + OFFSET_ENV_GROUND] = env ? env.ground[0]! : 0;
+  target[base + OFFSET_ENV_GROUND + 1] = env ? env.ground[1]! : 0;
+  target[base + OFFSET_ENV_GROUND + 2] = env ? env.ground[2]! : 0;
+  target[base + OFFSET_ENV_GROUND + 3] = 0;
 }
 
 /** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2). */

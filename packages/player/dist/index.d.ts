@@ -1985,20 +1985,24 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  * WGSL uniform layout, in bytes:
  *
  * ```
- *   0  mvp      mat4x4<f32>  64
- *  64  nrm      mat3x3<f32>  48   (three vec3 columns, each padded to 16)
- * 112  base     vec4<f32>    16
- * 128  light    vec4<f32>    16   xyz = direction, w = ambient
- * 144  view     vec4<f32>    16   xyz = direction towards the viewer (Modern PBR)
- * 160  pbr      vec4<f32>    16   x = metallic, y = roughness, z = 1 when PBR
- * 176  emissive vec4<f32>    16   xyz = emissive factor
- * 192  texflags vec4<f32>    16   x = base, y = mr, z = occlusion, w = emissive
+ *   0  mvp        mat4x4<f32>  64
+ *  64  nrm        mat3x3<f32>  48   (three vec3 columns, each padded to 16)
+ * 112  base       vec4<f32>    16
+ * 128  light      vec4<f32>    16   xyz = direction, w = ambient
+ * 144  view       vec4<f32>    16   xyz = direction towards the viewer (Modern PBR)
+ * 160  pbr        vec4<f32>    16   x = metallic, y = roughness, z = 1 when PBR
+ * 176  emissive   vec4<f32>    16   xyz = emissive factor
+ * 192  texflags   vec4<f32>    16   x = base, y = mr, z = occlusion, w = emissive
+ * 208  envSky     vec4<f32>    16   xyz = sky colour, w = 1 when an environment is set
+ * 224  envHorizon vec4<f32>    16   xyz = horizon colour, w = intensity
+ * 240  envGround  vec4<f32>    16   xyz = ground colour
  * ```
  *
- * 208 bytes used, padded to the 256-byte minimum alignment a dynamic uniform
- * offset requires, so one buffer holds every draw in a frame. The last four
- * vec4s carry the Modern (AAA) tier's metallic-roughness inputs; a fantasy draw
- * leaves `pbr.z` at 0 and the shader takes the byte-identical Lambert path.
+ * 256 bytes used, which is exactly the 256-byte minimum alignment a dynamic
+ * uniform offset requires, so one buffer holds every draw in a frame. The
+ * metallic-roughness inputs and the environment carry the Modern (AAA) tier's
+ * shading; a fantasy draw leaves `pbr.z` at 0 and the shader takes the
+ * byte-identical Lambert path, and `envSky.w` at 0 falls back to flat ambient.
  */
 declare const UNIFORM_STRIDE = 256;
 /**
@@ -2006,7 +2010,7 @@ declare const UNIFORM_STRIDE = 256;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 208;
+declare const UNIFORM_BYTES_USED = 256;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
@@ -2090,6 +2094,8 @@ interface InstanceUniform {
     readonly hasMrMap: boolean;
     readonly hasOcclusionMap: boolean;
     readonly hasEmissiveMap: boolean;
+    /** This frame's image-based lighting environment, or null for flat ambient. */
+    readonly environment: EnvironmentLight | null;
 }
 /**
  * Write one draw's uniforms into the shared staging array at `index`.
