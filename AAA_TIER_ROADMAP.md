@@ -84,18 +84,23 @@ existing path; a dedicated core + catalog polish remain.
       `metallicFactor`, `roughnessFactor`, `emissiveFactor`) + serialize/deserialize.
       With Phase 0 this means an imported glTF **retains its PBR maps end-to-end**
       through the sidecar today, even before the shading lights them.
-- [ ] **Software rasteriser reference path:** metallic-roughness BRDF
-      (Cook-Torrance-style) with a constant ambient/IBL term, gated so non-PBR
-      materials are byte-identical. Threads the new maps through the rasteriser +
-      `MeshOverlaySurface` decode + `renderCaps`. Verify with headless renders.
-      **← next.**
+- [x] **Software rasteriser reference path:** metallic-roughness BRDF
+      (Cook-Torrance: GGX NDF, Schlick-GGX geometry, Fresnel-Schlick, F0 =
+      mix(0.04, albedo, metallic)) with a constant ambient/IBL stand-in term and
+      an AO + emissive term, gated so non-PBR materials are byte-identical.
+      Threads the new maps through the rasteriser (`renderMeshScene` →
+      `drawMesh`/`eachTriangle` → `rasterizeTriangle`) + `MeshOverlaySurface`
+      decode + `renderCaps.capTextures`. Verified with headless renders +
+      `meshRasterizerPbr.test.ts`.
 - [ ] **Phase 2b — WebGPU PBR shader:** Cook-Torrance in WGSL on
       `WebgpuSceneRenderer`, linear/gamma correct. *Deferred:* WGSL can't be
-      verified in this environment; validate in-browser.
+      verified in this environment; validate in-browser. **← next.**
 
-**Status:** data model landed (PBR maps now survive import → serialize →
-deserialize). The shading (software reference path, then WebGPU WGSL) is the
-next increment.
+**Status:** data model + software shading reference path landed. An imported
+glTF's PBR maps now light through the metallic-roughness BRDF on the software
+renderer (the verifiable path); the WebGPU WGSL variant is the next increment,
+validated in-browser. Shading is done in the engine's non-linear byte space for
+now — a linear/gamma-correct HDR pipeline is Phase 4.
 
 ### Phase 3 — Environment lighting + shadows
 - [ ] Image-based lighting (HDRI environment cubemap): realistic ambient + reflections

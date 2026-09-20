@@ -160,16 +160,30 @@ export function capTextures(
   };
 
   const capped = instances.map((instance) => {
-    if (!instance.textures && !instance.normalTextures && !instance.materialTextures) return instance;
+    if (
+      !instance.textures &&
+      !instance.normalTextures &&
+      !instance.materialTextures &&
+      !instance.mrTextures &&
+      !instance.occlusionTextures &&
+      !instance.emissiveTextures
+    ) {
+      return instance;
+    }
     let instanceChanged = false;
     const mark = () => {
       instanceChanged = true;
     };
     // Normal and material maps are textures too — fit them to the same budget so
-    // a capped model's memory accounting (and its era softness) covers them as well.
+    // a capped model's memory accounting (and its era softness) covers them as
+    // well. The PBR (metallic-roughness/occlusion/emissive) maps likewise, so a
+    // budgeted rebuild never silently drops them.
     const fitted = fitList(instance.textures, mark);
     const fittedNormals = fitList(instance.normalTextures, mark);
     const fittedMaterials = fitList(instance.materialTextures, mark);
+    const fittedMr = fitList(instance.mrTextures, mark);
+    const fittedOcclusion = fitList(instance.occlusionTextures, mark);
+    const fittedEmissive = fitList(instance.emissiveTextures, mark);
 
     if (!instanceChanged) return instance;
     changed = true;
@@ -179,6 +193,9 @@ export function capTextures(
       textures: fitted,
       normalTextures: fittedNormals,
       materialTextures: fittedMaterials,
+      mrTextures: fittedMr,
+      occlusionTextures: fittedOcclusion,
+      emissiveTextures: fittedEmissive,
     };
   });
 
