@@ -23,9 +23,11 @@
  */
 
 import { MATERIAL_LEVELS, type CartEngine } from "../engine/CartEngine";
-import { nearestDirection } from "./normals";
+import { nearestDirection, normalDirectionRgb } from "./normals";
+import { encodeRgbaPng } from "./png";
 import {
   serializeMeshAsset,
+  type EncodedImage,
   type MeshAsset,
   type MeshPrimitive,
 } from "./MeshAsset";
@@ -132,6 +134,104 @@ function buildGrungeTexture(): IndexedTexture {
 
 const GRUNGE_TEXTURE: IndexedTexture = buildGrungeTexture();
 
+// --- Grunge surface relief: a Normal + Material layer so the foundry itself is
+// lit out of the box (option 2), not just the 2D badge. The steel and bolts read
+// glossy (high specular, low roughness) and catch a highlight that sweeps as the
+// camera orbits; the rust keeps a faint warm glow (emissive) so it stays visible
+// when the key light turns away; the panel grout and bolts get real relief from a
+// height field. A creator repaints these Material/Normal layers to restyle it.
+
+/** Scales a material level (0..MATERIAL_LEVELS-1) to a 0..255 byte. Exact: 255/15 = 17. */
+const GRUNGE_LEVEL_TO_BYTE = 255 / (MATERIAL_LEVELS - 1);
+
+/** Surface relief height (0..1) driving both the height channel and the normal
+ *  gradient: grout is recessed, steel and bolts stand proud, with fine grain. */
+function grungeReliefHeight(x: number, y: number): number {
+  const surface = grungeSurface(x, y);
+  const base = surface === 1 ? 0.15 : surface === 3 ? 0.4 : surface === 2 ? 0.6 : 0.55;
+  const grain = (grungeFbm(x / 2.2, y / 2.2) - 0.5) * 0.15;
+  return Math.max(0, Math.min(1, base + grain));
+}
+
+/** The per-pixel Normal (quantised direction) + Material (specular/roughness/
+ *  height/emissive levels) of the grunge, the single source both the seeded
+ *  banks and the baked mesh maps read, so a rebake reproduces them byte-for-byte
+ *  and a fresh cart is never marked dirty. */
+function grungeDetail(x: number, y: number): {
+  dir: number;
+  specular: number;
+  roughness: number;
+  height: number;
+  emissive: number;
+} {
+  const surface = grungeSurface(x, y);
+  // Tangent-space normal from the height gradient (central differences).
+  const dhx = grungeReliefHeight(x + 1, y) - grungeReliefHeight(x - 1, y);
+  const dhy = grungeReliefHeight(x, y + 1) - grungeReliefHeight(x, y - 1);
+  const strength = 2.2;
+  const dir = nearestDirection([-dhx * strength, -dhy * strength, 1]);
+  const specular = surface === 2 ? MATERIAL_LEVELS - 1 : surface === 3 ? 6 : surface === 1 ? 2 : 3;
+  const roughness = surface === 2 ? 3 : surface === 3 ? 9 : surface === 1 ? 13 : 12;
+  const height = Math.round(grungeReliefHeight(x, y) * (MATERIAL_LEVELS - 1));
+  const emissive = surface === 3 ? 5 : 0; // rust keeps a faint warm glow
+  return { dir, specular, roughness, height, emissive };
+}
+
+/** Bake the grunge Normal layer to a tangent-space normal-map PNG — byte-identical
+ *  to what {@link rebakeMeshSidecar} produces from the seeded Normal bank. */
+function bakeGrungeNormalImage(): EncodedImage {
+  const rgba = new Uint8ClampedArray(GRUNGE_SIZE * GRUNGE_SIZE * 4);
+  let o = 0;
+  for (let y = 0; y < GRUNGE_SIZE; y += 1) {
+    for (let x = 0; x < GRUNGE_SIZE; x += 1) {
+      const [r, g, b] = normalDirectionRgb(grungeDetail(x, y).dir);
+      rgba[o] = r;
+      rgba[o + 1] = g;
+      rgba[o + 2] = b;
+      rgba[o + 3] = 255;
+      o += 4;
+    }
+  }
+  return { mime: "image/png", bytes: encodeRgbaPng(rgba, GRUNGE_SIZE, GRUNGE_SIZE) };
+}
+
+/** Bake the grunge Material layer (R=height, G=specular, B=roughness, A=emissive)
+ *  to a PNG — byte-identical to a rebake from the seeded Material banks. */
+function bakeGrungeMaterialImage(): EncodedImage {
+  const rgba = new Uint8ClampedArray(GRUNGE_SIZE * GRUNGE_SIZE * 4);
+  let o = 0;
+  for (let y = 0; y < GRUNGE_SIZE; y += 1) {
+    for (let x = 0; x < GRUNGE_SIZE; x += 1) {
+      const d = grungeDetail(x, y);
+      rgba[o] = d.height * GRUNGE_LEVEL_TO_BYTE;
+      rgba[o + 1] = d.specular * GRUNGE_LEVEL_TO_BYTE;
+      rgba[o + 2] = d.roughness * GRUNGE_LEVEL_TO_BYTE;
+      rgba[o + 3] = d.emissive * GRUNGE_LEVEL_TO_BYTE;
+      o += 4;
+    }
+  }
+  return { mime: "image/png", bytes: encodeRgbaPng(rgba, GRUNGE_SIZE, GRUNGE_SIZE) };
+}
+
+/** Paint the grunge's Normal + Material banks (page 0) so the editable layers
+ *  match the seeded mesh maps — the source a rebake reads on Run/Save. */
+function seedGrungeDetail(engine: CartEngine): void {
+  const sheetCols = 16; // a sprite page is 16×16 tiles
+  for (let gy = 0; gy < GRUNGE_SIZE; gy += 1) {
+    for (let gx = 0; gx < GRUNGE_SIZE; gx += 1) {
+      const tile = (gy >> 3) * sheetCols + (gx >> 3);
+      const lx = gx & 7;
+      const ly = gy & 7;
+      const d = grungeDetail(gx, gy);
+      engine.setNormal(GRUNGE_PAGE, tile, lx, ly, d.dir);
+      engine.setMaterial("specular", GRUNGE_PAGE, tile, lx, ly, d.specular);
+      engine.setMaterial("roughness", GRUNGE_PAGE, tile, lx, ly, d.roughness);
+      engine.setMaterial("height", GRUNGE_PAGE, tile, lx, ly, d.height);
+      engine.setMaterial("emissive", GRUNGE_PAGE, tile, lx, ly, d.emissive);
+    }
+  }
+}
+
 /** The cart's assets sidecar carrying the editable "360 grunge" sprite block (a full page). */
 /** The lit demo badge — a normal-mapped glossy disc on page 1, drawn over the
  *  scene and relit each frame so a fresh 360 cart shows material reacting to
@@ -232,6 +332,10 @@ function buildMesh(): MeshAsset {
       name: "grunge",
       baseColorFactor: [1, 1, 1, 1],
       baseColorImage: bakeIndexedTextureImage(GRUNGE_TEXTURE),
+      // Ship the lit surface baked in, so the foundry catches light before any
+      // rebake; the seeded Normal/Material banks reproduce these on Run/Save.
+      normalImage: bakeGrungeNormalImage(),
+      materialImage: bakeGrungeMaterialImage(),
       textureSprite: indexedTextureSpriteRef(GRUNGE_SIZE, GRUNGE_PAGE),
     }),
   );
@@ -328,6 +432,7 @@ export function seedXbox360Cart(engine: CartEngine): void {
   engine.setCode(XBOX360_CODE);
   applyFoundryPalette(engine);
   paintIndexedTexture(engine, GRUNGE_TEXTURE, GRUNGE_PAGE);
+  seedGrungeDetail(engine);
   seedLitBadge(engine);
 }
 

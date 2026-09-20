@@ -12,19 +12,26 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  MaterialMap,
   N64_CODE,
   N64_MESH_SIDECAR,
   N64_SCENE_TRIANGLES,
+  NormalMap,
   PS1_MESH_SIDECAR,
+  SpriteSheet,
+  StubCartEngine,
   XBOX360_ASSETS_SIDECAR,
   XBOX360_CODE,
   XBOX360_MESH_SIDECAR,
   XBOX360_SCENE_TRIANGLES,
+  deserializeMeshAsset,
   resolveStarter,
+  seedXbox360Cart,
 } from "@cartbox/editor";
 import { MODELS, parseMeshScene } from "@cartbox/player";
 
 import { isSpriteBlockAsset } from "../apps/web/src/lib/cartAssets";
+import { rebakeMeshSidecar } from "../apps/web/src/lib/meshTextureBake";
 import { defaultStarterForModel } from "../apps/web/src/lib/starter";
 import { decodeVoxelSidecar } from "../apps/web/src/lib/voxelSidecar";
 
@@ -141,5 +148,47 @@ describe("the Xbox 360 foundry starter", () => {
       expect(badge.page).toBe(1);
       expect(badge.tilesPerSide).toBe(4); // 32px / 8px tiles
     }
+  });
+
+  it("ships the foundry with a lit surface baked in (normal + material maps)", () => {
+    // Option 2, slice 5: the 3D foundry itself catches light out of the box, not
+    // just the 2D badge — the grunge primitive carries both a normal map and a
+    // packed material map (specular/roughness/emissive).
+    const grunge = deserializeMeshAsset(
+      (JSON.parse(XBOX360_MESH_SIDECAR) as { meshes: { mesh: string }[] }).meshes[0]!.mesh,
+    ).primitives.find((p) => p.material.textureSprite)!;
+    expect(grunge.material.normalImage?.mime).toBe("image/png");
+    expect(grunge.material.materialImage?.mime).toBe("image/png");
+    expect(pngSize(grunge.material.normalImage!.bytes)).toEqual([128, 128]);
+    expect(pngSize(grunge.material.materialImage!.bytes)).toEqual([128, 128]);
+  });
+
+  it("reproduces the baked normal + material maps from the seeded banks — no phantom dirty", async () => {
+    // The phantom-dirty guard for slice 5: the seeded Normal/Material banks must
+    // rebake to the exact bytes the mesh already ships, or opening and running
+    // the starter would mark it dirty with no edit. Seed a real engine and rebake
+    // through the same path the workbench uses on Run, then compare the two maps
+    // the seed introduced. (baseColor round-trips through the real 256-colour
+    // palette, an invariant older than this change; StubCartEngine's palette is
+    // too small to hold the era CLUT, so it is not asserted here.)
+    const engine = new StubCartEngine();
+    seedXbox360Cart(engine);
+    const sheet = new SpriteSheet(engine);
+    const normals = new NormalMap(engine);
+    const material = {
+      height: new MaterialMap(engine, "height"),
+      specular: new MaterialMap(engine, "specular"),
+      roughness: new MaterialMap(engine, "roughness"),
+      emissive: new MaterialMap(engine, "emissive"),
+    };
+    const rebaked = (await rebakeMeshSidecar(XBOX360_MESH_SIDECAR, sheet, engine.getPalette(), normals, material))!;
+    const grungeOf = (sidecar: string) =>
+      deserializeMeshAsset((JSON.parse(sidecar) as { meshes: { mesh: string }[] }).meshes[0]!.mesh).primitives.find(
+        (p) => p.material.textureSprite,
+      )!;
+    const seeded = grungeOf(XBOX360_MESH_SIDECAR);
+    const round = grungeOf(rebaked);
+    expect(round.material.normalImage!.bytes).toEqual(seeded.material.normalImage!.bytes);
+    expect(round.material.materialImage!.bytes).toEqual(seeded.material.materialImage!.bytes);
   });
 });
