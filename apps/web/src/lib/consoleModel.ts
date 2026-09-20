@@ -26,6 +26,10 @@ export const SELECTABLE_MODEL_IDS: readonly ConsoleModelId[] = [
   "ps1",
   "n64",
   "xbox360",
+  // The Modern (AAA) tier — PBR/WebGPU path (AAA_TIER_ROADMAP.md). Selectable as
+  // a stub today: it runs on the 360 core binary until a dedicated Modern core
+  // lands, so authoring a cart on it always boots.
+  "modern",
 ];
 
 export function resolveModelId(value: string | null | undefined): ConsoleModelId {
@@ -45,6 +49,7 @@ const MODEL_BADGES: Record<ConsoleModelId, string> = {
   ps1: "PS1",
   n64: "N64",
   xbox360: "XBOX 360",
+  modern: "MODERN",
 };
 
 export function modelBadge(value: string | null | undefined): string {
@@ -78,5 +83,10 @@ export const ENGINE_URL_BY_MODEL: Record<ConsoleModelId, string> = {
   n64: withBasePath(process.env.NEXT_PUBLIC_N64_ENGINE_URL ?? "/engine/n64/engine.js"),
   xbox360: withBasePath(
     process.env.NEXT_PUBLIC_XBOX360_ENGINE_URL ?? "/engine/xbox360/engine.js",
+  ),
+  // Modern (AAA) tier stub: reuse the 360 core (its framebuffer scales) until a
+  // dedicated Modern core with the PBR/WebGPU path lands. See AAA_TIER_ROADMAP.md.
+  modern: withBasePath(
+    process.env.NEXT_PUBLIC_MODERN_ENGINE_URL ?? "/engine/xbox360/engine.js",
   ),
 };

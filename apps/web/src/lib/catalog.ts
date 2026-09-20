@@ -78,6 +78,7 @@ export function runtimeForConsoleModel(consoleModel: string): RuntimeId {
     ps1: "cartbox-ps1",
     n64: "cartbox-n64",
     xbox360: "cartbox-xbox360",
+    modern: "cartbox-modern",
   };
   return RUNTIME_BY_MODEL[consoleModel] ?? "cartbox-classic";
 }

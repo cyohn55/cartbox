@@ -259,7 +259,7 @@ describe("shipping models", () => {
     // rather than a default. It fired when PS1 arrived, which is the point:
     // geometry and textures do not fit in a cartridge at any resolution, so a
     // 3D era model is exactly the case that has to break the rule.
-    const BUDGETED = new Set(["ps1", "n64", "xbox360"]);
+    const BUDGETED = new Set(["ps1", "n64", "xbox360", "modern"]);
     for (const model of Object.values(MODELS)) {
       if (BUDGETED.has(model.id)) {
         expect(model.assetBudgetBytes, model.id).toBeGreaterThan(0);

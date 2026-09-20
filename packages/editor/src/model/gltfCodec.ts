@@ -65,7 +65,14 @@ interface GltfMaterial {
   pbrMetallicRoughness?: {
     baseColorFactor?: number[];
     baseColorTexture?: { index: number };
+    metallicFactor?: number;
+    roughnessFactor?: number;
+    metallicRoughnessTexture?: { index: number };
   };
+  normalTexture?: { index: number };
+  occlusionTexture?: { index: number };
+  emissiveTexture?: { index: number };
+  emissiveFactor?: number[];
 }
 interface GltfPrimitive {
   attributes: { POSITION?: number; NORMAL?: number; TEXCOORD_0?: number };
@@ -325,14 +332,32 @@ function readMaterial(json: GltfJson, buffers: (Uint8Array | null)[], materialIn
   const baseColorFactor: [number, number, number, number] =
     factor && factor.length === 4 ? [factor[0]!, factor[1]!, factor[2]!, factor[3]!] : [1, 1, 1, 1];
 
-  let baseColorImage: EncodedImage | null = null;
-  const textureIndex = pbr?.baseColorTexture?.index;
-  if (textureIndex !== undefined) {
-    const source = json.textures?.[textureIndex]?.source;
+  // Resolve a texture reference (by material-slot index) to its embedded image.
+  const imageAt = (ref: { index: number } | undefined): EncodedImage | null => {
+    if (ref?.index === undefined) return null;
+    const source = json.textures?.[ref.index]?.source;
     const image = source !== undefined ? json.images?.[source] : undefined;
-    if (image) baseColorImage = readImage(json, buffers, image);
-  }
-  return { name: material?.name ?? `material_${materialIndex ?? 0}`, baseColorFactor, baseColorImage };
+    return image ? readImage(json, buffers, image) : null;
+  };
+
+  const baseColorImage = imageAt(pbr?.baseColorTexture);
+  // PBR (metallic-roughness) passthrough for the Modern tier (Phase 0). These are
+  // optional and left undefined when the source omits them, so a fantasy-console
+  // material is unaffected. See AAA_TIER_ROADMAP.md.
+  const emissive = material?.emissiveFactor;
+  return {
+    name: material?.name ?? `material_${materialIndex ?? 0}`,
+    baseColorFactor,
+    baseColorImage,
+    normalImage: imageAt(material?.normalTexture),
+    metallicRoughnessImage: imageAt(pbr?.metallicRoughnessTexture),
+    occlusionImage: imageAt(material?.occlusionTexture),
+    emissiveImage: imageAt(material?.emissiveTexture),
+    metallicFactor: typeof pbr?.metallicFactor === "number" ? pbr.metallicFactor : undefined,
+    roughnessFactor: typeof pbr?.roughnessFactor === "number" ? pbr.roughnessFactor : undefined,
+    emissiveFactor:
+      emissive && emissive.length === 3 ? [emissive[0]!, emissive[1]!, emissive[2]!] : undefined,
+  };
 }
 
 /** Extract an image's compressed bytes — from an embedded bufferView or a data URI. */

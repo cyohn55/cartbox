@@ -2439,6 +2439,15 @@ var XBOX360_RASTER_CAPS = {
   polyBudget: 0,
   programmableShaders: false
 };
+var MODERN_RASTER_CAPS = {
+  zBuffer: true,
+  perspectiveCorrect: true,
+  vertexPrecision: "float",
+  textureFiltering: "trilinear",
+  textureCacheBytes: 0,
+  polyBudget: 0,
+  programmableShaders: true
+};
 var MODELS = {
   classic: {
     id: "classic",
@@ -2622,6 +2631,29 @@ var MODELS = {
     // being the constraint — which is the whole point ERA_MODELS.md makes about
     // it not being console-shaped.
     assetBudgetBytes: 2 * 1024 * 1024 * 1024
+  },
+  modern: {
+    id: "modern",
+    label: "Modern (AAA)",
+    kind: "poly3d",
+    // 1080p output — the target for a modern, PBR-lit web title. The stub reuses
+    // the 360 core binary (its framebuffer scales), so a dedicated core is not
+    // required to prototype the tier; see AAA_TIER_ROADMAP.md Phase 1.
+    width: 1920,
+    height: 1080,
+    pixelBytes: 4,
+    fps: 60,
+    audioChannels: 8,
+    sampleRate: 48e3,
+    paletteSize: 256,
+    cartSizeBytes: 8 * 1024 * 1024,
+    // Stub: reuse the 360 core until a dedicated Modern core lands (Phase 1).
+    engineUrl: "/engine/xbox360/engine.js",
+    inputs: ["gamepad", "keyboard", "mouse"],
+    renderCaps: MODERN_RASTER_CAPS,
+    // 8GB — this tier's whole premise is that storage is no longer the constraint;
+    // real photoreal scenes need room for compressed meshes + PBR texture sets.
+    assetBudgetBytes: 8 * 1024 * 1024 * 1024
   }
 };
 var DEFAULT_MODEL_ID = "classic";

@@ -9,7 +9,7 @@
  * assumptions the platform layer depends on.
  */
 
-export type ModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1" | "n64" | "xbox360";
+export type ModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1" | "n64" | "xbox360" | "modern";
 
 /**
  * How a model rasterises triangles.
@@ -149,6 +149,28 @@ export const XBOX360_RASTER_CAPS: RenderCaps = {
   textureCacheBytes: 0,
   polyBudget: 0,
   programmableShaders: false,
+};
+
+/**
+ * The Modern (AAA) tier — the top of the family, where the goal flips from
+ * *reproducing* era limits to *removing* them: an uncapped, physically-based,
+ * WebGPU-lit path for photoreal-leaning web games, alongside (never replacing)
+ * the fantasy-console tiers. See AAA_TIER_ROADMAP.md.
+ *
+ * `programmableShaders` is `true` here — unlike the 360 tier, which keeps it
+ * `false` because it renders on the fixed path. The Modern tier's whole premise
+ * is a programmable PBR pipeline, so the flag asserts the capability the tier
+ * exists to provide. Everything else is unbounded: no poly budget, no texture
+ * cache, float vertices, perspective-correct filtered texturing.
+ */
+export const MODERN_RASTER_CAPS: RenderCaps = {
+  zBuffer: true,
+  perspectiveCorrect: true,
+  vertexPrecision: "float",
+  textureFiltering: "trilinear",
+  textureCacheBytes: 0,
+  polyBudget: 0,
+  programmableShaders: true,
 };
 
 export interface ConsoleModel {
@@ -378,6 +400,29 @@ export const MODELS: Record<ModelId, ConsoleModel> = {
     // being the constraint — which is the whole point ERA_MODELS.md makes about
     // it not being console-shaped.
     assetBudgetBytes: 2 * 1024 * 1024 * 1024,
+  },
+  modern: {
+    id: "modern",
+    label: "Modern (AAA)",
+    kind: "poly3d",
+    // 1080p output — the target for a modern, PBR-lit web title. The stub reuses
+    // the 360 core binary (its framebuffer scales), so a dedicated core is not
+    // required to prototype the tier; see AAA_TIER_ROADMAP.md Phase 1.
+    width: 1920,
+    height: 1080,
+    pixelBytes: 4,
+    fps: 60,
+    audioChannels: 8,
+    sampleRate: 48000,
+    paletteSize: 256,
+    cartSizeBytes: 8 * 1024 * 1024,
+    // Stub: reuse the 360 core until a dedicated Modern core lands (Phase 1).
+    engineUrl: "/engine/xbox360/engine.js",
+    inputs: ["gamepad", "keyboard", "mouse"],
+    renderCaps: MODERN_RASTER_CAPS,
+    // 8GB — this tier's whole premise is that storage is no longer the constraint;
+    // real photoreal scenes need room for compressed meshes + PBR texture sets.
+    assetBudgetBytes: 8 * 1024 * 1024 * 1024,
   },
 };
 

@@ -17,7 +17,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { beforeAll, describe, expect, it } from "vitest";
 
-import { N64_MODEL, XBOX360_MODEL, type ConsoleModelSpec } from "@cartbox/editor";
+import { N64_MODEL, XBOX360_MODEL, MODERN_MODEL, type ConsoleModelSpec } from "@cartbox/editor";
 import {
   MODELS,
   SOFTWARE_RASTER_CAPS,
@@ -94,8 +94,11 @@ describe("the Xbox 360 model", () => {
     // fixed-spec guarantee (see render-caps.test.ts) for no gain. It flips the
     // day the shader pipeline lands; until then no shipping model grants it.
     expect(xbox360.renderCaps.programmableShaders).toBe(false);
+    // The Modern (AAA) tier is the one model that grants programmable shaders —
+    // its whole premise is a PBR/WebGPU pipeline (AAA_TIER_ROADMAP.md). No
+    // fantasy/era model does.
     const withShaders = Object.values(MODELS).filter((m) => m.renderCaps.programmableShaders);
-    expect(withShaders.map((m) => m.id)).toEqual([]);
+    expect(withShaders.map((m) => m.id)).toEqual(["modern"]);
   });
 
   it("lifts the per-frame budgets the era models enforce", () => {
@@ -119,13 +122,34 @@ describe("the Xbox 360 model", () => {
   });
 });
 
+describe("the Modern (AAA) tier", () => {
+  const modern = MODELS.modern;
+
+  it("is a 1080p poly3d tier with unbounded budgets and programmable shaders", () => {
+    expect(getModel("modern")).toBe(modern);
+    expect(modern.kind).toBe("poly3d");
+    expect([modern.width, modern.height]).toEqual([1920, 1080]);
+    expect(modern.renderCaps.polyBudget).toBe(0);
+    expect(modern.renderCaps.textureCacheBytes).toBe(0);
+    expect(modern.renderCaps.programmableShaders).toBe(true);
+    expect(webgpuCanHonour(rasterStyleFor(modern.renderCaps))).toBe(true);
+  });
+
+  it("agrees between runtime and authoring specs", () => {
+    const authoring: ConsoleModelSpec = MODERN_MODEL;
+    expect([authoring.width, authoring.height]).toEqual([modern.width, modern.height]);
+    expect(authoring.id).toBe(modern.id);
+    expect(authoring.kind).toBe(modern.kind);
+  });
+});
+
 describe("the era models as a family", () => {
-  it("are the three triangle-scene models", () => {
+  it("are the triangle-scene models (three fantasy eras + the Modern tier)", () => {
     const poly = Object.values(MODELS)
       .filter((m) => m.kind === "poly3d")
       .map((m) => m.id)
       .sort();
-    expect(poly).toEqual(["n64", "ps1", "xbox360"]);
+    expect(poly).toEqual(["modern", "n64", "ps1", "xbox360"]);
   });
 
   it("leave the 2D models on the stock software caps", () => {

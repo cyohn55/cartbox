@@ -118,6 +118,40 @@ describe("MeshAsset serialization", () => {
     expect(plain.primitives[0]!.material.materialImage ?? null).toBeNull();
   });
 
+  it("round-trips the PBR (metallic-roughness) channels for the Modern tier", () => {
+    const primitive = trianglePrimitive(true);
+    const img = (tag: number) => ({ mime: "image/png", bytes: Uint8Array.from([137, 80, 78, 71, tag]) });
+    const mesh: MeshAsset = {
+      name: "pbr",
+      primitives: [
+        {
+          ...primitive,
+          material: {
+            ...primitive.material,
+            metallicRoughnessImage: img(1),
+            occlusionImage: img(2),
+            emissiveImage: img(3),
+            metallicFactor: 1,
+            roughnessFactor: 0.4,
+            emissiveFactor: [0.1, 0.2, 0.3],
+          },
+        },
+      ],
+    };
+    const m = deserializeMeshAsset(serializeMeshAsset(mesh)).primitives[0]!.material;
+    expect(Array.from(m.metallicRoughnessImage!.bytes)).toEqual([137, 80, 78, 71, 1]);
+    expect(Array.from(m.occlusionImage!.bytes)).toEqual([137, 80, 78, 71, 2]);
+    expect(Array.from(m.emissiveImage!.bytes)).toEqual([137, 80, 78, 71, 3]);
+    expect(m.metallicFactor).toBe(1);
+    expect(m.roughnessFactor).toBe(0.4);
+    expect(m.emissiveFactor).toEqual([0.1, 0.2, 0.3]);
+    // Absent by default — a fantasy-console material carries none of these.
+    const plain = deserializeMeshAsset(serializeMeshAsset({ name: "p", primitives: [trianglePrimitive()] }));
+    const pm = plain.primitives[0]!.material;
+    expect(pm.metallicRoughnessImage ?? null).toBeNull();
+    expect(pm.emissiveFactor ?? null).toBeNull();
+  });
+
   it("rejects a payload whose normals do not match the vertex count", () => {
     const mesh: MeshAsset = { name: "bad", primitives: [trianglePrimitive()] };
     const json = JSON.parse(serializeMeshAsset(mesh));
