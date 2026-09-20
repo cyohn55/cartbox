@@ -131,13 +131,19 @@ byte space for now — a linear/gamma-correct HDR pipeline is Phase 4.
       darkens the *direct* light where the light cannot see it — ambient/IBL still
       fills the shadow. Gated (`ShadowInput`): no shadow input → unchanged.
       Verified with headless renders + `meshRasterizerShadow.test.ts`.
-- [ ] **Shadows — WebGPU** (a depth pre-pass + shadow sample in WGSL; validate
-      in-browser), and cascaded splits for large scenes. **← next.**
+- [x] **Shadows — WebGPU.** The CPU-generated shadow map (`renderShadowMap`) is
+      uploaded as an `r32float` texture and sampled in WGSL with the same nearest
+      compare + bias, so the GPU tests against the *same* depths as the software
+      path (a per-draw `lightMvp` + shadow params ride the uniform, stride grown
+      to 512). Validated in-browser / on a real device (tolerant
+      `webgpu-parity.test.ts` case). *Follow-up:* generate the shadow depth on the
+      GPU (a depth pre-pass) so the CPU shadow rasterise can be dropped, and add
+      cascaded splits for large scenes.
 
-**Status:** IBL (software + WebGPU) and directional shadow maps (software
-reference path) landed — PBR surfaces take directional ambient, metals reflect
-the environment, and occluders cast shadows on the verifiable path. A real HDRI
-cubemap, WebGPU shadows, and cascades remain.
+**Status:** IBL (software + WebGPU) and directional shadow maps (software +
+WebGPU) landed — PBR surfaces take directional ambient, metals reflect the
+environment, and occluders cast shadows on both backends. A real HDRI cubemap,
+a GPU-side shadow depth pass, and cascades remain.
 
 ### Phase 4 — HDR pipeline + more lights
 - [ ] HDR + ACES tonemapping + exposure

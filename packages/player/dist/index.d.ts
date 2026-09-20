@@ -1936,6 +1936,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private readonly depthTexture;
     private readonly sampler;
     private readonly blankTexture;
+    /** 1x1 r32float, bound to the shadow slot when no shadow map is active. */
+    private readonly blankShadow;
     private readonly readback;
     private readonly bytesPerRow;
     readonly backend: "webgpu";
@@ -1950,6 +1952,13 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private uniformBuffer;
     private uniformData;
     private destroyed;
+    /**
+     * The bound shadow map — the 1x1 blank when no shadow this frame, else an
+     * r32float sized to the shadow input and uploaded from the CPU-generated map.
+     * Its identity only changes on a size change, so the bind-group cache holds.
+     */
+    private shadowTexture;
+    private shadowMapSize;
     private constructor();
     /**
      * Build the renderer for one framebuffer size. Returns null on any failure, so
@@ -1957,6 +1966,12 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * exception mid-frame.
      */
     static create(device: any, width: number, height: number, style?: RasterStyle): Promise<WebgpuSceneRenderer | null>;
+    /**
+     * Point the shadow slot at an r32float sized to `size`, (re)creating it on a
+     * size change and invalidating cached bind groups (binding 6 identity moved).
+     * `size` 0 restores the 1x1 blank for a frame with no shadow.
+     */
+    private ensureShadowTexture;
     render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
     /** Paint the last completed GPU frame over the cart's own pixels. */
     private composite;
@@ -2002,21 +2017,24 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  * 208  envSky     vec4<f32>    16   xyz = sky colour, w = 1 when an environment is set
  * 224  envHorizon vec4<f32>    16   xyz = horizon colour, w = intensity
  * 240  envGround  vec4<f32>    16   xyz = ground colour
+ * 256  lightMvp   mat4x4<f32>  64   world→light-clip for this draw (shadow mapping)
+ * 320  shadow     vec4<f32>    16   x = 1 when shadowed, y = map size, z = bias, w = strength
  * ```
  *
- * 256 bytes used, which is exactly the 256-byte minimum alignment a dynamic
- * uniform offset requires, so one buffer holds every draw in a frame. The
- * metallic-roughness inputs and the environment carry the Modern (AAA) tier's
- * shading; a fantasy draw leaves `pbr.z` at 0 and the shader takes the
- * byte-identical Lambert path, and `envSky.w` at 0 falls back to flat ambient.
+ * 336 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
+ * dynamic uniform offset can address), so one buffer still holds every draw in a
+ * frame. The metallic-roughness inputs and the environment carry the Modern
+ * (AAA) tier's shading; a fantasy draw leaves `pbr.z` at 0 and the shader takes
+ * the byte-identical Lambert path, `envSky.w` at 0 falls back to flat ambient,
+ * and `shadow.x` at 0 skips the shadow test.
  */
-declare const UNIFORM_STRIDE = 256;
+declare const UNIFORM_STRIDE = 512;
 /**
  * Bytes the struct actually occupies, before the stride padding. This is what a
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 256;
+declare const UNIFORM_BYTES_USED = 336;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
@@ -2102,6 +2120,14 @@ interface InstanceUniform {
     readonly hasEmissiveMap: boolean;
     /** This frame's image-based lighting environment, or null for flat ambient. */
     readonly environment: EnvironmentLight | null;
+    /** World→light-clip for this draw (`shadow.lightViewProj · model`), or null. */
+    readonly lightMvp: Mat4 | null;
+    /** Shadow-map sampling parameters, or null when no shadow map is bound. */
+    readonly shadow: {
+        readonly size: number;
+        readonly bias: number;
+        readonly strength: number;
+    } | null;
 }
 /**
  * Write one draw's uniforms into the shared staging array at `index`.

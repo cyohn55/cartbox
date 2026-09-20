@@ -4959,8 +4959,8 @@ import {
 } from "@cartbox/editor";
 
 // src/render/scenePacking.ts
-var UNIFORM_STRIDE = 256;
-var UNIFORM_BYTES_USED = 256;
+var UNIFORM_STRIDE = 512;
+var UNIFORM_BYTES_USED = 336;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var OFFSET_MVP = 0;
 var OFFSET_NRM = 16;
@@ -4973,6 +4973,8 @@ var OFFSET_TEXFLAGS = 48;
 var OFFSET_ENV_SKY = 52;
 var OFFSET_ENV_HORIZON = 56;
 var OFFSET_ENV_GROUND = 60;
+var OFFSET_LIGHT_MVP = 64;
+var OFFSET_SHADOW = 80;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -5051,6 +5053,13 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_ENV_GROUND + 1] = env ? env.ground[1] : 0;
   target[base + OFFSET_ENV_GROUND + 2] = env ? env.ground[2] : 0;
   target[base + OFFSET_ENV_GROUND + 3] = 0;
+  const lightMvp = uniform.lightMvp;
+  for (let i = 0; i < 16; i += 1) target[base + OFFSET_LIGHT_MVP + i] = lightMvp ? lightMvp[i] : 0;
+  const shadow = uniform.shadow;
+  target[base + OFFSET_SHADOW] = shadow ? 1 : 0;
+  target[base + OFFSET_SHADOW + 1] = shadow ? shadow.size : 0;
+  target[base + OFFSET_SHADOW + 2] = shadow ? shadow.bias : 0;
+  target[base + OFFSET_SHADOW + 3] = shadow ? shadow.strength : 0;
 }
 var VERTEX_FLOATS = 8;
 function interleaveVertices(positions, normals, uvs) {
@@ -5097,6 +5106,8 @@ struct Uniforms {
   envSky: vec4<f32>,    // xyz = sky colour, w = 1 when an environment is set
   envHorizon: vec4<f32>,// xyz = horizon colour, w = intensity
   envGround: vec4<f32>, // xyz = ground colour
+  lightMvp: mat4x4<f32>,// world\u2192light-clip for shadow mapping
+  shadow: vec4<f32>,    // x = 1 when shadowed, y = map size, z = bias, w = strength
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
@@ -5104,12 +5115,37 @@ struct Uniforms {
 @group(0) @binding(3) var mrTex: texture_2d<f32>;
 @group(0) @binding(4) var occTex: texture_2d<f32>;
 @group(0) @binding(5) var emisTex: texture_2d<f32>;
+// The shadow map: light-NDC depth in R, generated on the CPU by renderShadowMap
+// and uploaded as r32float, so the GPU samples the *same* map the software path
+// tests against. Unfilterable, read via textureLoad (nearest) \u2014 matching the
+// software compare exactly.
+@group(0) @binding(6) var shadowMap: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) normal: vec3<f32>,
   @location(1) uv: vec2<f32>,
+  @location(2) lightClip: vec4<f32>,
 };
+
+// Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
+// project into the light's frame, look up the nearest depth the light sees, and
+// return 1 (lit) or 1\u2212strength (occluded). The light is orthographic (w = 1).
+fn shadowFactor(lightClip: vec4<f32>) -> f32 {
+  if (u.shadow.x < 0.5) { return 1.0; }
+  let ndc = lightClip.xyz / lightClip.w;
+  if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < -1.0 || ndc.z > 1.0) {
+    return 1.0;
+  }
+  let size = u.shadow.y;
+  let sx = (ndc.x * 0.5 + 0.5) * size;
+  let sy = (1.0 - (ndc.y * 0.5 + 0.5)) * size;
+  let tx = i32(clamp(floor(sx), 0.0, size - 1.0));
+  let ty = i32(clamp(floor(sy), 0.0, size - 1.0));
+  let stored = textureLoad(shadowMap, vec2<i32>(tx, ty), 0).r;
+  if (ndc.z - u.shadow.z > stored) { return 1.0 - u.shadow.w; }
+  return 1.0;
+}
 
 // Analytic environment (Phase 3 IBL), mirroring environmentColor /
 // environmentAverage in meshRasterizer.ts: a sky/horizon/ground vertical
@@ -5136,6 +5172,7 @@ fn vs(
   out.pos = u.mvp * vec4<f32>(position, 1.0);
   out.normal = u.nrm * normal;
   out.uv = uv;
+  out.lightClip = u.lightMvp * vec4<f32>(position, 1.0);
   return out;
 }
 
@@ -5207,23 +5244,25 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     } else {
       amb = vec3<f32>(u.light.w) * albedo * ao;
     }
-    let lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl + amb + emis;
+    // The direct light is what a shadow occludes; ambient/IBL still fills it.
+    let sf = shadowFactor(in.lightClip);
+    let lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
     return vec4<f32>(lit, colour.a);
   }
 
-  // --- Fantasy path (unchanged, byte-identical) ---
+  // --- Fantasy path (byte-identical when no shadow; shadow scales the direct term) ---
   // Two-sided Lambert: abs(N\xB7L) so inconsistent winding still lights. The normal
   // is deliberately NOT renormalised \u2014 the software rasteriser interpolates and
   // dots without normalising, and parity with it is the contract here. Both
   // therefore skew identically under non-uniform scale.
   let nl = abs(dot(in.normal, u.light.xyz));
-  let shade = u.light.w + (1.0 - u.light.w) * nl;
+  let shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(in.lightClip);
   return vec4<f32>(colour.rgb * shade, colour.a);
 }
 `
 );
 var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
-  constructor(device, width, height, pipeline, bindGroupLayout, colourTexture, depthTexture, sampler, blankTexture, readback, bytesPerRow, style) {
+  constructor(device, width, height, pipeline, bindGroupLayout, colourTexture, depthTexture, sampler, blankTexture, blankShadow, readback, bytesPerRow, style) {
     this.device = device;
     this.width = width;
     this.height = height;
@@ -5233,6 +5272,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.depthTexture = depthTexture;
     this.sampler = sampler;
     this.blankTexture = blankTexture;
+    this.blankShadow = blankShadow;
     this.readback = readback;
     this.bytesPerRow = bytesPerRow;
     this.backend = "webgpu";
@@ -5247,7 +5287,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.uniformBuffer = null;
     this.uniformData = new Float32Array(0);
     this.destroyed = false;
+    this.shadowMapSize = 0;
     this.software = new SoftwareSceneRenderer(style);
+    this.shadowTexture = blankShadow;
   }
   /**
    * Build the renderer for one framebuffer size. Returns null on any failure, so
@@ -5272,7 +5314,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           // layout is one shape for every draw.
           { binding: 3, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
-          { binding: 5, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } }
+          { binding: 5, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // The shadow map is r32float — not filterable — and read via textureLoad,
+          // so it declares unfilterable-float and needs no sampler.
+          { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } }
         ]
       });
       const pipeline = device.createRenderPipeline({
@@ -5336,6 +5381,18 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { bytesPerRow: 4 },
         { width: 1, height: 1 }
       );
+      const blankShadow = device.createTexture({
+        size: { width: 1, height: 1 },
+        format: "r32float",
+        usage: 4 | 2
+        // TEXTURE_BINDING | COPY_DST
+      });
+      device.queue.writeTexture(
+        { texture: blankShadow },
+        new Float32Array([0]),
+        { bytesPerRow: 4 },
+        { width: 1, height: 1 }
+      );
       const bytesPerRow = alignBytesPerRow(width);
       const readback = Array.from({ length: READBACK_BUFFERS }, () => ({
         buffer: device.createBuffer({
@@ -5355,6 +5412,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         depthTexture,
         sampler,
         blankTexture,
+        blankShadow,
         readback,
         bytesPerRow,
         style
@@ -5362,6 +5420,27 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     } catch {
       return null;
     }
+  }
+  /**
+   * Point the shadow slot at an r32float sized to `size`, (re)creating it on a
+   * size change and invalidating cached bind groups (binding 6 identity moved).
+   * `size` 0 restores the 1x1 blank for a frame with no shadow.
+   */
+  ensureShadowTexture(size) {
+    if (size === this.shadowMapSize) return;
+    if (size === 0) {
+      if (this.shadowTexture !== this.blankShadow) this.shadowTexture = this.blankShadow;
+    } else {
+      destroySafely(this.shadowMapSize > 0 ? this.shadowTexture : null);
+      this.shadowTexture = this.device.createTexture({
+        size: { width: size, height: size },
+        format: "r32float",
+        usage: 4 | 2
+        // TEXTURE_BINDING | COPY_DST
+      });
+    }
+    this.shadowMapSize = size;
+    this.bindGroups = /* @__PURE__ */ new WeakMap();
   }
   render(instances, draw) {
     if (this.destroyed) return;
@@ -5424,6 +5503,17 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.ensureUniformCapacity(draws.length);
     const light = resolveLight(draw.lightDirection, draw.ambient);
     const viewDir = viewDirection(draw.view);
+    const shadow = draw.shadow ?? null;
+    this.ensureShadowTexture(shadow ? shadow.size : 0);
+    if (shadow) {
+      this.device.queue.writeTexture(
+        { texture: this.shadowTexture },
+        shadow.depth,
+        { bytesPerRow: shadow.size * 4, rowsPerImage: shadow.size },
+        { width: shadow.size, height: shadow.size }
+      );
+    }
+    const shadowParams = shadow ? { size: shadow.size, bias: shadow.bias ?? 3e-3, strength: shadow.strength ?? 1 } : null;
     draws.forEach((entry, index) => {
       const pbr = resolvePbr(
         entry.primitive.material,
@@ -5442,7 +5532,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         hasMrMap: entry.textures.mr !== null,
         hasOcclusionMap: entry.textures.occ !== null,
         hasEmissiveMap: entry.textures.emis !== null,
-        environment: draw.environment ?? null
+        environment: draw.environment ?? null,
+        lightMvp: shadow ? multiplyMat42(shadow.lightViewProj, entry.model) : null,
+        shadow: shadowParams
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
@@ -5552,7 +5644,11 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { binding: 2, resource: view(textures.base) },
         { binding: 3, resource: view(textures.mr) },
         { binding: 4, resource: view(textures.occ) },
-        { binding: 5, resource: view(textures.emis) }
+        { binding: 5, resource: view(textures.emis) },
+        // The active shadow map (or the 1x1 blank). Its identity only moves on a
+        // size change, which invalidates this whole cache, so a cached group
+        // always references the current one.
+        { binding: 6, resource: this.shadowTexture.createView() }
       ]
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });
@@ -5585,6 +5681,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     destroySafely(this.colourTexture);
     destroySafely(this.depthTexture);
     destroySafely(this.blankTexture);
+    destroySafely(this.blankShadow);
+    if (this.shadowTexture !== this.blankShadow) destroySafely(this.shadowTexture);
     destroySafely(this.uniformBuffer);
     for (const slot of this.readback) destroySafely(slot.buffer);
   }

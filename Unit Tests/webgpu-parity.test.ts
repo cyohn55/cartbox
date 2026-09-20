@@ -37,7 +37,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   composeModelMatrix,
+  orthographicMatrix,
   projectionMatrix,
+  renderShadowMap,
   viewMatrix,
   type DecodedTexture,
   type MeshAsset,
@@ -116,6 +118,30 @@ function pbrScene(): MeshSceneInstance[] {
   return [
     { mesh: pbrQuad(1, 0.15), model: composeModelMatrix([-0.9, 0, 0], [0, 15, 0], [1.1, 1.1, 1.1]) },
     { mesh: pbrQuad(0, 0.8), model: composeModelMatrix([0.9, 0, 0], [0, -15, 0], [1.1, 1.1, 1.1]) },
+  ];
+}
+
+/** A horizontal PBR floor (normal +Y) of half-extent `h` at height `y`. */
+function pbrFloor(h: number, y: number): MeshAsset {
+  return {
+    name: "floor",
+    primitives: [
+      {
+        positions: Float32Array.from([-h, y, -h, h, y, -h, h, y, h, -h, y, h]),
+        normals: Float32Array.from([0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0]),
+        uvs: Float32Array.from([0, 0, 1, 0, 1, 1, 0, 1]),
+        indices: Uint32Array.from([0, 1, 2, 0, 2, 3]),
+        material: { name: "m", baseColorFactor: [0.8, 0.8, 0.8, 1], baseColorImage: null, metallicFactor: 0, roughnessFactor: 1 },
+      },
+    ],
+  };
+}
+
+/** A floor with an occluder above it, so a directional shadow is cast. */
+function shadowScene(): MeshSceneInstance[] {
+  return [
+    { mesh: pbrFloor(5, 0), model: composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]) },
+    { mesh: pbrFloor(1.2, 3), model: composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]) },
   ];
 }
 
@@ -234,6 +260,49 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     renderer.render(instances, gpu);
 
     const software = withEnv();
+    new SoftwareSceneRenderer().render(instances, software);
+
+    const drawn = Array.from(software.out).filter((_, i) => i % 4 === 3 && software.out[i] !== 0).length;
+    expect(drawn).toBeGreaterThan(100);
+
+    let maxDelta = 0;
+    for (let i = 0; i < W * H * 4; i += 1) {
+      maxDelta = Math.max(maxDelta, Math.abs(gpu.out[i]! - software.out[i]!));
+    }
+    expect(maxDelta).toBeLessThanOrEqual(4);
+
+    renderer.dispose();
+  });
+
+  it("matches the software rasteriser on directional shadows (within float tolerance)", async () => {
+    // The GPU samples the *same* CPU-generated shadow map (uploaded as r32float)
+    // with the same nearest compare + bias, so the shadow decision is identical;
+    // only the base PBR shading differs by a few float bits. A large delta means
+    // the WGSL shadow projection or the upload diverged.
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+    const instances = shadowScene();
+    const shadow = renderShadowMap(instances, {
+      lightView: viewMatrix([0, 10, 0], [0, 0, 0], [0, 0, -1]),
+      lightProjection: orthographicMatrix(-6, 6, -6, 6, 0.1, 20),
+      size: 256,
+      depth: new Float32Array(256 * 256),
+    });
+    const withShadow = (): SceneDraw => ({
+      ...draw(),
+      view: viewMatrix([0, 7, 8], [0, 0, 0]),
+      lightDirection: [0, 1, 0],
+      shadow,
+    });
+
+    renderer.render(instances, withShadow());
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.tick?.();
+    }
+    const gpu = withShadow();
+    renderer.render(instances, gpu);
+
+    const software = withShadow();
     new SoftwareSceneRenderer().render(instances, software);
 
     const drawn = Array.from(software.out).filter((_, i) => i % 4 === 3 && software.out[i] !== 0).length;
