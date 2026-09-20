@@ -70,10 +70,11 @@ const migrationSql = readFileSync(MIGRATION_PATH, "utf8");
  * restates the whole constraint, so this points at the latest one — 0011 fixed
  * it at the runtimes of the time, 0013 caught up the three iframe runtimes, 0015
  * added the portrait core, 0016 added the OpenTyrian/OpenTTD/Cave Story engines,
- * and 0025 added the PS1 core.
+ * 0025 added the PS1 core, 0026 added the N64/Xbox 360 cores, and 0027 added the
+ * Modern (AAA) tier.
  */
 const runtimeMigrationSql = readFileSync(
-  fileURLToPath(new URL("../supabase/migrations/0026_n64_xbox360_runtimes.sql", import.meta.url)),
+  fileURLToPath(new URL("../supabase/migrations/0027_modern_runtime.sql", import.meta.url)),
   "utf8",
 );
 
@@ -292,6 +293,7 @@ describe("runtime registry", () => {
       "cartbox-ps1",
       "cartbox-n64",
       "cartbox-xbox360",
+      "cartbox-modern",
       "wasm-app",
       "scummvm",
       "supertux",

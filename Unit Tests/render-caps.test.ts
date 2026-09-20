@@ -25,12 +25,14 @@ describe("RenderCaps", () => {
     }
   });
 
-  it("grants programmable shaders to no shipping model", () => {
-    // A model that lets creators supply shaders is not a fixed spec, and the
-    // platform layer (replays, verification, thumbnails) assumes a fixed spec.
-    // Only a deliberately unconstrained tier could set this, and none exists.
+  it("grants programmable shaders only to the Modern (AAA) tier", () => {
+    // A model that lets creators supply shaders is not a fixed spec. Every
+    // fantasy/era model keeps this false so the platform layer (replays,
+    // verification, thumbnails) can assume a fixed spec. The deliberately
+    // unconstrained Modern tier is the sole exception (AAA_TIER_ROADMAP.md).
     for (const model of models) {
-      expect(model.renderCaps.programmableShaders, `${model.id}`).toBe(false);
+      const expected = model.id === "modern";
+      expect(model.renderCaps.programmableShaders, `${model.id}`).toBe(expected);
     }
   });
 

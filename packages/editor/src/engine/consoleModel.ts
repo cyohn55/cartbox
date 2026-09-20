@@ -10,7 +10,7 @@
  * live in @cartbox/player's model registry, which these mirror.
  */
 
-export type ConsoleModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1" | "n64" | "xbox360";
+export type ConsoleModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1" | "n64" | "xbox360" | "modern";
 export type RasterKind = "raster2d" | "voxel3d" | "poly3d";
 
 export interface ConsoleModelSpec {
@@ -227,6 +227,28 @@ export const XBOX360_MODEL: ConsoleModelSpec = {
   screenHeight: 90,
 };
 
+/**
+ * The Modern (AAA) tier's editor spec — 1080p, PBR/WebGPU path. A stub today
+ * (reuses the 360 core), but a full authoring tier per AAA_TIER_ROADMAP.md.
+ */
+export const MODERN_MODEL: ConsoleModelSpec = {
+  id: "modern",
+  label: "Modern (AAA)",
+  kind: "poly3d",
+  width: 1920,
+  height: 1080,
+  tileSize: 8,
+  tilePixelBits: 8,
+  paletteSize: 256,
+  tilesPerPage: 256,
+  spritePages: 2,
+  sheetCols: 16,
+  mapWidth: 1920,
+  mapHeight: 1080,
+  screenWidth: 240,
+  screenHeight: 135,
+};
+
 export const CONSOLE_MODELS: Record<ConsoleModelId, ConsoleModelSpec> = {
   classic: CLASSIC_MODEL,
   pro: PRO_MODEL,
@@ -235,4 +257,5 @@ export const CONSOLE_MODELS: Record<ConsoleModelId, ConsoleModelSpec> = {
   ps1: PS1_MODEL,
   n64: N64_MODEL,
   xbox360: XBOX360_MODEL,
+  modern: MODERN_MODEL,
 };

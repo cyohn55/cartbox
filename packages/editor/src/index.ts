@@ -14,6 +14,7 @@ export {
   PS1_MODEL,
   N64_MODEL,
   XBOX360_MODEL,
+  MODERN_MODEL,
   VOXEL_MODEL,
   CONSOLE_MODELS,
 } from "./engine/consoleModel";

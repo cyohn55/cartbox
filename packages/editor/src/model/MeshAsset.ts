@@ -86,6 +86,27 @@ export interface MeshMaterial {
    */
   readonly materialImage?: EncodedImage | null;
   /**
+   * --- PBR (metallic-roughness) channels, for the "Modern" render tier ---
+   * These mirror glTF 2.0's metallic-roughness model so an imported asset keeps
+   * its authored surface response. All optional and defaulting to a plain diffuse
+   * surface, so a fantasy-console material that sets none renders exactly as
+   * before — the AAA tier is purely additive (see AAA_TIER_ROADMAP.md).
+   *
+   * A packed metallic-roughness map, glTF's `metallicRoughnessTexture`
+   * (G = roughness, B = metallic), or null/absent.
+   */
+  readonly metallicRoughnessImage?: EncodedImage | null;
+  /** An ambient-occlusion map, glTF's `occlusionTexture` (R = AO), or null/absent. */
+  readonly occlusionImage?: EncodedImage | null;
+  /** An emissive map, glTF's `emissiveTexture` (RGB), or null/absent. */
+  readonly emissiveImage?: EncodedImage | null;
+  /** Scalar metalness multiplier, glTF's `metallicFactor` (default 1). */
+  readonly metallicFactor?: number;
+  /** Scalar roughness multiplier, glTF's `roughnessFactor` (default 1). */
+  readonly roughnessFactor?: number;
+  /** RGB emissive multiplier, glTF's `emissiveFactor` (default [0,0,0]). */
+  readonly emissiveFactor?: readonly [number, number, number];
+  /**
    * The sprite-sheet region this texture is authored from, or null/absent for a
    * texture that is not sprite-backed (an imported mesh, a flat colour). Optional
    * so the many materials that never carry one — codecs, world tiles, flat
@@ -221,12 +242,22 @@ function base64ToU32(base64: string): Uint32Array {
   return new Uint32Array(bytes.slice().buffer);
 }
 
+interface SerializedImage {
+  mime: string;
+  bytes: string;
+}
 interface SerializedMaterial {
   name: string;
   baseColorFactor: [number, number, number, number];
-  image: { mime: string; bytes: string } | null;
-  normalImage?: { mime: string; bytes: string } | null;
-  materialImage?: { mime: string; bytes: string } | null;
+  image: SerializedImage | null;
+  normalImage?: SerializedImage | null;
+  materialImage?: SerializedImage | null;
+  metallicRoughnessImage?: SerializedImage | null;
+  occlusionImage?: SerializedImage | null;
+  emissiveImage?: SerializedImage | null;
+  metallicFactor?: number;
+  roughnessFactor?: number;
+  emissiveFactor?: [number, number, number];
   textureSprite?: SpriteTextureRef | null;
 }
 interface SerializedPrimitive {
@@ -273,11 +304,26 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
               bytes: bytesToBase64(primitive.material.materialImage.bytes),
             }
           : null,
+        metallicRoughnessImage: serializeImage(primitive.material.metallicRoughnessImage),
+        occlusionImage: serializeImage(primitive.material.occlusionImage),
+        emissiveImage: serializeImage(primitive.material.emissiveImage),
+        metallicFactor: primitive.material.metallicFactor,
+        roughnessFactor: primitive.material.roughnessFactor,
+        emissiveFactor: primitive.material.emissiveFactor ? [...primitive.material.emissiveFactor] : undefined,
         textureSprite: primitive.material.textureSprite ?? null,
       },
     })),
   };
   return JSON.stringify(payload);
+}
+
+/** Encode an optional image to the serialized form (null when absent). */
+function serializeImage(image: EncodedImage | null | undefined): SerializedImage | null {
+  return image ? { mime: image.mime, bytes: bytesToBase64(image.bytes) } : null;
+}
+/** Decode an optional serialized image back to bytes (null when absent). */
+function deserializeImage(image: SerializedImage | null | undefined): EncodedImage | null {
+  return image ? { mime: String(image.mime), bytes: base64ToBytes(image.bytes) } : null;
 }
 
 const MALFORMED = "Mesh asset payload is malformed";
@@ -287,6 +333,14 @@ function toColor(value: unknown): [number, number, number, number] {
     return [value[0], value[1], value[2], value[3]] as [number, number, number, number];
   }
   return [1, 1, 1, 1];
+}
+
+/** Validate an optional emissive factor triple, dropping anything malformed. */
+function toEmissiveFactor(value: unknown): [number, number, number] | undefined {
+  if (Array.isArray(value) && value.length === 3 && value.every((n) => typeof n === "number" && Number.isFinite(n))) {
+    return [value[0], value[1], value[2]] as [number, number, number];
+  }
+  return undefined;
 }
 
 /** Validate an untrusted sprite-texture reference, dropping anything malformed. */
@@ -354,6 +408,12 @@ export function deserializeMeshAsset(json: string): MeshAsset {
         materialImage: material.materialImage
           ? { mime: String(material.materialImage.mime), bytes: base64ToBytes(material.materialImage.bytes) }
           : null,
+        metallicRoughnessImage: deserializeImage(material.metallicRoughnessImage),
+        occlusionImage: deserializeImage(material.occlusionImage),
+        emissiveImage: deserializeImage(material.emissiveImage),
+        metallicFactor: typeof material.metallicFactor === "number" ? material.metallicFactor : undefined,
+        roughnessFactor: typeof material.roughnessFactor === "number" ? material.roughnessFactor : undefined,
+        emissiveFactor: toEmissiveFactor(material.emissiveFactor),
         textureSprite: toTextureSprite(material.textureSprite),
       },
     };
