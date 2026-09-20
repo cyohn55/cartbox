@@ -101,6 +101,24 @@ function scene(): MeshSceneInstance[] {
   ];
 }
 
+/** A metallic-roughness quad — carries a metallic + roughness factor so the
+ *  Modern-tier BRDF branch runs on both backends. */
+function pbrQuad(metallic: number, roughness: number): MeshAsset {
+  const mesh = quad();
+  return {
+    ...mesh,
+    primitives: [{ ...mesh.primitives[0]!, material: { ...mesh.primitives[0]!.material, metallicFactor: metallic, roughnessFactor: roughness } }],
+  };
+}
+
+/** A scene of PBR spheres-as-quads spanning the metallic/roughness space. */
+function pbrScene(): MeshSceneInstance[] {
+  return [
+    { mesh: pbrQuad(1, 0.15), model: composeModelMatrix([-0.9, 0, 0], [0, 15, 0], [1.1, 1.1, 1.1]) },
+    { mesh: pbrQuad(0, 0.8), model: composeModelMatrix([0.9, 0, 0], [0, -15, 0], [1.1, 1.1, 1.1]) },
+  ];
+}
+
 function draw(): SceneDraw {
   return {
     width: W,
@@ -154,6 +172,40 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
       }
     }
     expect({ differing, maxDelta }).toEqual({ differing: 0, maxDelta: 0 });
+
+    renderer.dispose();
+  });
+
+  it("matches the software rasteriser on the metallic-roughness path (within float tolerance)", async () => {
+    // The Modern-tier BRDF cannot be byte-identical — GGX and pow differ between
+    // the GPU's float32 and the CPU's float64 — so this is the tolerant twin of
+    // the parity test above: same shading, off by at most a few least-significant
+    // bits. A large delta means the WGSL diverged from meshRasterizer.ts, not
+    // rounding. This is the gate that validates the WGSL PBR branch on hardware.
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+    const instances = pbrScene();
+
+    renderer.render(instances, draw());
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.tick?.();
+    }
+    const gpu = draw();
+    renderer.render(instances, gpu);
+
+    const software = draw();
+    new SoftwareSceneRenderer().render(instances, software);
+
+    const drawn = Array.from(software.out).filter((_, i) => i % 4 === 3 && software.out[i] !== 0).length;
+    expect(drawn).toBeGreaterThan(100);
+
+    let maxDelta = 0;
+    for (let i = 0; i < W * H * 4; i += 1) {
+      maxDelta = Math.max(maxDelta, Math.abs(gpu.out[i]! - software.out[i]!));
+    }
+    // A few 8-bit levels of rounding is expected; anything larger is a real
+    // divergence in the shading maths.
+    expect(maxDelta).toBeLessThanOrEqual(4);
 
     renderer.dispose();
   });

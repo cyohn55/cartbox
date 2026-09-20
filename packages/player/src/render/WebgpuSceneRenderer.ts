@@ -7,12 +7,23 @@
  * author, and it is the reason no era console model beyond a 2D one was
  * possible (ERA_MODELS.md §5.1).
  *
- * This draws the same instances in hardware and matches the software
- * rasteriser's shading *exactly* — two-sided Lambert with an ambient floor,
- * nearest-sampled wrapped textures, glTF's flipped V, and the same
- * alpha-discard threshold. Parity is the contract: the fallback must be
- * indistinguishable, not merely similar, or a cart looks different depending on
- * the viewer's browser.
+ * This draws the same instances in hardware. For the fantasy tiers it matches
+ * the software rasteriser's shading *exactly* — two-sided Lambert with an
+ * ambient floor, nearest-sampled wrapped textures, glTF's flipped V, and the
+ * same alpha-discard threshold. Parity is the contract there: the fallback must
+ * be indistinguishable, not merely similar, or a cart looks different depending
+ * on the viewer's browser.
+ *
+ * The Modern (AAA) tier adds a metallic-roughness Cook-Torrance BRDF, gated on
+ * `pbr.z` and mirroring the software rasteriser's PBR branch term for term (see
+ * `meshRasterizer.ts`). That branch cannot be *byte*-identical — GGX and `pow`
+ * differ slightly between the GPU's float32 and the CPU's float64 — so the
+ * contract there is a visual match, validated in-browser (and on a real device
+ * by `webgpu-parity.test.ts`), not the zero-tolerance fantasy parity. Both the
+ * gate and the maths that decide byte placement live in the pure, tested
+ * `scenePacking.ts`. (Tangent-space normal maps and the fantasy material-map
+ * specular are not yet on this GPU path — a known follow-up; the software
+ * rasteriser remains the reference for those.)
  *
  * ## Why the readback, and why it lags
  *
@@ -59,7 +70,9 @@ import {
   interleaveVertices,
   normalBasis3x3,
   resolveLight,
+  resolvePbr,
   unpadRows,
+  viewDirection,
   writeInstanceUniform,
 } from "./scenePacking.js";
 
@@ -75,12 +88,18 @@ struct Uniforms {
   mvp: mat4x4<f32>,
   nrm: mat3x3<f32>,
   base: vec4<f32>,
-  light: vec4<f32>,  // xyz = normalised direction, w = ambient floor
-  flags: vec4<f32>,  // x = 1 when a base-colour texture is bound
+  light: vec4<f32>,     // xyz = normalised direction, w = ambient floor
+  view: vec4<f32>,      // xyz = direction towards the viewer (Modern PBR)
+  pbr: vec4<f32>,       // x = metallic, y = roughness, z = 1 when PBR
+  emissive: vec4<f32>,  // xyz = emissive factor
+  texflags: vec4<f32>,  // x = base, y = mr, z = occlusion, w = emissive
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var tex: texture_2d<f32>;
+@group(0) @binding(3) var mrTex: texture_2d<f32>;
+@group(0) @binding(4) var occTex: texture_2d<f32>;
+@group(0) @binding(5) var emisTex: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
@@ -103,22 +122,72 @@ fn vs(
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4<f32> {
+  // glTF's V origin is top-left, so flip; the sampler wraps and (per era) filters.
+  let uv = vec2<f32>(in.uv.x, 1.0 - in.uv.y);
+
+  var colour = u.base;
+  if (u.texflags.x > 0.5) {
+    colour = colour * textureSample(tex, samp, uv);
+  }
+  // The CPU path skips a texel whose combined alpha is below 1/255 rather than
+  // blending it, so this is a discard and not an alpha-blend state.
+  if (colour.a * 255.0 < 1.0) { discard; }
+
+  if (u.pbr.z > 0.5) {
+    // --- Modern tier: metallic-roughness BRDF (Cook-Torrance) ---
+    // Mirrors the software rasteriser's PBR branch (meshRasterizer.ts) term for
+    // term, in the engine's non-linear byte space (a linear/HDR pipeline is a
+    // later phase). Small float32-vs-float64 differences from pow/GGX are
+    // expected; the fantasy path below stays byte-identical.
+    var N = normalize(in.normal);
+    if (dot(N, u.view.xyz) < 0.0) { N = -N; } // two-sided: flip toward the viewer
+    var metallic = u.pbr.x;
+    var rough = u.pbr.y;
+    if (u.texflags.y > 0.5) {
+      let mr = textureSample(mrTex, samp, uv);
+      rough = rough * mr.g;   // glTF packs roughness in G,
+      metallic = metallic * mr.b; // metallic in B
+    }
+    rough = clamp(rough, 0.045, 1.0); // a perfectly-smooth NDF blows up
+    var ao = 1.0;
+    if (u.texflags.z > 0.5) { ao = textureSample(occTex, samp, uv).r; }
+    let albedo = colour.rgb;
+    let L = u.light.xyz;
+    let V = u.view.xyz;
+    let H = normalize(L + V);
+    let ndl = max(0.0, dot(N, L));
+    let ndv = max(1e-4, dot(N, V));
+    let ndh = max(0.0, dot(N, H));
+    let vdh = max(0.0, dot(V, H));
+    let a2 = rough * rough * rough * rough;   // (rough^2)^2 for the GGX NDF
+    let dd = ndh * ndh * (a2 - 1.0) + 1.0;
+    let D = a2 / (3.14159265 * dd * dd + 1e-7);
+    let k = ((rough + 1.0) * (rough + 1.0)) / 8.0; // Schlick-GGX (direct)
+    let G = (ndv / (ndv * (1.0 - k) + k)) * (ndl / (ndl * (1.0 - k) + k));
+    let fp = pow(1.0 - vdh, 5.0);              // Fresnel-Schlick
+    let specD = (D * G) / (4.0 * ndl * ndv + 1e-4);
+    let f0 = vec3<f32>(0.04) + (albedo - vec3<f32>(0.04)) * metallic;
+    let F = f0 + (vec3<f32>(1.0) - f0) * fp;
+    let kdm = 1.0 - metallic;                  // metals have no diffuse
+    var emis = vec3<f32>(0.0);
+    let ef = u.emissive.xyz;
+    if (ef.r > 0.0 || ef.g > 0.0 || ef.b > 0.0) {
+      var es = vec3<f32>(1.0);
+      if (u.texflags.w > 0.5) { es = textureSample(emisTex, samp, uv).rgb; }
+      emis = ef * es;
+    }
+    let lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl
+      + u.light.w * albedo * ao + emis;
+    return vec4<f32>(lit, colour.a);
+  }
+
+  // --- Fantasy path (unchanged, byte-identical) ---
   // Two-sided Lambert: abs(N·L) so inconsistent winding still lights. The normal
   // is deliberately NOT renormalised — the software rasteriser interpolates and
   // dots without normalising, and parity with it is the contract here. Both
   // therefore skew identically under non-uniform scale.
   let nl = abs(dot(in.normal, u.light.xyz));
   let shade = u.light.w + (1.0 - u.light.w) * nl;
-
-  var colour = u.base;
-  if (u.flags.x > 0.5) {
-    // glTF's V origin is top-left, so flip; the sampler wraps and nearest-samples.
-    colour = colour * textureSample(tex, samp, vec2<f32>(in.uv.x, 1.0 - in.uv.y));
-  }
-  // The CPU path skips a texel whose combined alpha is below 1/255 rather than
-  // blending it, so this is a discard and not an alpha-blend state.
-  if (colour.a * 255.0 < 1.0) { discard; }
-
   return vec4<f32>(colour.rgb * shade, colour.a);
 }
 `;
@@ -131,8 +200,21 @@ interface GpuPrimitive {
 
 interface CachedBindGroup {
   group: any;
-  /** The decoded texture this group was built against, so a swap rebuilds it. */
-  source: DecodedTexture | null;
+  /** The decoded textures this group was built against, so a swap rebuilds it. */
+  source: {
+    base: DecodedTexture | null;
+    mr: DecodedTexture | null;
+    occ: DecodedTexture | null;
+    emis: DecodedTexture | null;
+  };
+}
+
+/** The four material maps a primitive's bind group binds. */
+interface PrimitiveTextures {
+  base: DecodedTexture | null;
+  mr: DecodedTexture | null;
+  occ: DecodedTexture | null;
+  emis: DecodedTexture | null;
 }
 
 export class WebgpuSceneRenderer implements SceneRenderer {
@@ -206,6 +288,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           },
           { binding: 1, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "filtering" } },
           { binding: 2, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // Modern-tier metallic-roughness maps. A non-PBR draw binds the 1x1
+          // blank for all three and the shader ignores them (pbr.z = 0), so the
+          // layout is one shape for every draw.
+          { binding: 3, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          { binding: 5, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
         ],
       });
 
@@ -355,28 +443,50 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
     // Flatten to one draw per primitive so the uniform buffer can be written in
     // a single upload and each draw addressed by a dynamic offset.
-    const draws: { primitive: MeshPrimitive; geometry: GpuPrimitive; texture: DecodedTexture | null; model: Mat4 }[] = [];
+    const draws: { primitive: MeshPrimitive; geometry: GpuPrimitive; textures: PrimitiveTextures; model: Mat4 }[] = [];
     for (const instance of instances) {
       const geometries = this.uploadMesh(instance.mesh);
       instance.mesh.primitives.forEach((primitive, index) => {
         const geometry = geometries[index];
         if (!geometry || geometry.indexCount === 0) return;
-        draws.push({ primitive, geometry, texture: instance.textures?.[index] ?? null, model: instance.model });
+        draws.push({
+          primitive,
+          geometry,
+          textures: {
+            base: instance.textures?.[index] ?? null,
+            mr: instance.mrTextures?.[index] ?? null,
+            occ: instance.occlusionTextures?.[index] ?? null,
+            emis: instance.emissiveTextures?.[index] ?? null,
+          },
+          model: instance.model,
+        });
       });
     }
     if (draws.length === 0) return;
 
     this.ensureUniformCapacity(draws.length);
-    // Resolved once: the light is per frame, not per draw, and normalising it
-    // per primitive would be the same answer computed hundreds of times.
+    // Resolved once: the light and view direction are per frame, not per draw, and
+    // normalising them per primitive would be the same answer computed many times.
     const light = resolveLight(draw.lightDirection, draw.ambient);
+    const viewDir = viewDirection(draw.view);
     draws.forEach((entry, index) => {
+      const pbr = resolvePbr(
+        entry.primitive.material,
+        entry.textures.mr !== null,
+        entry.textures.occ !== null,
+        entry.textures.emis !== null,
+      );
       writeInstanceUniform(this.uniformData, index, {
         mvp: multiplyMat4(viewProj, entry.model),
         normalBasis: normalBasis3x3(entry.model),
         baseColor: entry.primitive.material.baseColorFactor,
-        hasTexture: entry.texture !== null,
+        hasTexture: entry.textures.base !== null,
         light,
+        viewDir,
+        pbr,
+        hasMrMap: entry.textures.mr !== null,
+        hasOcclusionMap: entry.textures.occ !== null,
+        hasEmissiveMap: entry.textures.emis !== null,
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
@@ -402,7 +512,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     });
     pass.setPipeline(this.pipeline);
     draws.forEach((entry, index) => {
-      pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.texture), [index * UNIFORM_STRIDE]);
+      pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.textures), [index * UNIFORM_STRIDE]);
       pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
       pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
       pass.drawIndexed(entry.geometry.indexCount);
@@ -483,20 +593,33 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     return uploaded;
   }
 
-  /** The bind group for one primitive, rebuilt if its texture changed. */
-  private bindGroupFor(primitive: MeshPrimitive, texture: DecodedTexture | null): any {
+  /** The bind group for one primitive, rebuilt if any of its textures changed. */
+  private bindGroupFor(primitive: MeshPrimitive, textures: PrimitiveTextures): any {
     const cached = this.bindGroups.get(primitive);
-    if (cached && cached.source === texture) return cached.group;
+    if (
+      cached &&
+      cached.source.base === textures.base &&
+      cached.source.mr === textures.mr &&
+      cached.source.occ === textures.occ &&
+      cached.source.emis === textures.emis
+    ) {
+      return cached.group;
+    }
 
+    const view = (texture: DecodedTexture | null): any =>
+      (texture ? this.uploadTexture(texture) : this.blankTexture).createView();
     const group = this.device.createBindGroup({
       layout: this.bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: this.uniformBuffer, offset: 0, size: UNIFORM_STRIDE } },
         { binding: 1, resource: this.sampler },
-        { binding: 2, resource: (texture ? this.uploadTexture(texture) : this.blankTexture).createView() },
+        { binding: 2, resource: view(textures.base) },
+        { binding: 3, resource: view(textures.mr) },
+        { binding: 4, resource: view(textures.occ) },
+        { binding: 5, resource: view(textures.emis) },
       ],
     });
-    this.bindGroups.set(primitive, { group, source: texture });
+    this.bindGroups.set(primitive, { group, source: { ...textures } });
     return group;
   }
 

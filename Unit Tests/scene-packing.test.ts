@@ -22,15 +22,26 @@ import {
   interleaveVertices,
   normalBasis3x3,
   resolveLight,
+  resolvePbr,
   unpadRows,
+  viewDirection,
   writeInstanceUniform,
 } from "@cartbox/player";
-import type { Mat4 } from "@cartbox/editor";
+import { viewMatrix, type Mat4 } from "@cartbox/editor";
 
 /** A matrix whose every entry is its own index, so misplacement is visible. */
 const COUNTING_MAT4 = Array.from({ length: 16 }, (_, i) => i) as unknown as Mat4;
 
 const light = { direction: [0, 1, 0] as const, ambient: 0.25 };
+
+/** A non-PBR draw's extra fields (the fantasy path leaves pbr.z at 0). */
+const NON_PBR = {
+  viewDir: [0, 0, 1] as const,
+  pbr: { isPbr: false, metallic: 1, roughness: 1, emissive: [0, 0, 0] as const },
+  hasMrMap: false,
+  hasOcclusionMap: false,
+  hasEmissiveMap: false,
+};
 
 describe("uniform layout", () => {
   it("uses a stride WebGPU can address with a dynamic offset", () => {
@@ -49,6 +60,7 @@ describe("uniform layout", () => {
       baseColor: [0, 0, 0, 0],
       hasTexture: false,
       light,
+      ...NON_PBR,
     });
     expect(Array.from(data.subarray(0, 16))).toEqual(Array.from({ length: 16 }, (_, i) => i));
   });
@@ -64,12 +76,13 @@ describe("uniform layout", () => {
       baseColor: [0, 0, 0, 0],
       hasTexture: false,
       light,
+      ...NON_PBR,
     });
     const nrm = Array.from(data.subarray(16, 28));
     expect(nrm).toEqual([1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0]);
   });
 
-  it("places base colour, light and flags after the padded matrix", () => {
+  it("places base colour, light and the base-texture flag after the padded matrix", () => {
     const data = new Float32Array(UNIFORM_FLOATS);
     writeInstanceUniform(data, 0, {
       mvp: COUNTING_MAT4,
@@ -77,6 +90,7 @@ describe("uniform layout", () => {
       baseColor: [0.1, 0.2, 0.3, 0.4],
       hasTexture: true,
       light,
+      ...NON_PBR,
     });
     expect(Array.from(data.subarray(28, 32))).toEqual([
       Math.fround(0.1),
@@ -85,7 +99,32 @@ describe("uniform layout", () => {
       Math.fround(0.4),
     ]);
     expect(Array.from(data.subarray(32, 36))).toEqual([0, 1, 0, 0.25]);
-    expect(data[36]).toBe(1); // hasTexture
+    // texflags now lives at float 48; x = base texture bound.
+    expect(data[48]).toBe(1);
+  });
+
+  it("packs the Modern-tier view, pbr, emissive and texture-flag vec4s", () => {
+    const data = new Float32Array(UNIFORM_FLOATS);
+    writeInstanceUniform(data, 0, {
+      mvp: COUNTING_MAT4,
+      normalBasis: [0, 0, 0, 0, 0, 0, 0, 0, 0],
+      baseColor: [0, 0, 0, 1],
+      hasTexture: true,
+      light,
+      viewDir: [0, 0, 1],
+      pbr: { isPbr: true, metallic: 1, roughness: 0.3, emissive: [1, 0, 0] },
+      hasMrMap: true,
+      hasOcclusionMap: false,
+      hasEmissiveMap: true,
+    });
+    // view (36..40): xyz direction, w unused.
+    expect(Array.from(data.subarray(36, 40))).toEqual([0, 0, 1, 0]);
+    // pbr (40..44): metallic, roughness, isPbr flag, unused.
+    expect(Array.from(data.subarray(40, 44))).toEqual([1, Math.fround(0.3), 1, 0]);
+    // emissive factor (44..48): rgb, unused.
+    expect(Array.from(data.subarray(44, 48))).toEqual([1, 0, 0, 0]);
+    // texflags (48..52): base, mr, occlusion, emissive.
+    expect(Array.from(data.subarray(48, 52))).toEqual([1, 1, 0, 1]);
   });
 
   it("addresses each draw at its own stride", () => {
@@ -96,6 +135,7 @@ describe("uniform layout", () => {
       baseColor: [1, 1, 1, 1],
       hasTexture: false,
       light,
+      ...NON_PBR,
     });
     // The third draw's mvp starts exactly two strides in, and the first two
     // slots are untouched — the property the dynamic offsets rely on.
@@ -130,6 +170,54 @@ describe("resolveLight", () => {
     // renderMeshScene guards with `|| 1`; a NaN light would blank every pixel.
     const resolved = resolveLight([0, 0, 0], 0.3);
     expect(resolved.direction.every((v) => Number.isFinite(v))).toBe(true);
+  });
+});
+
+describe("resolvePbr", () => {
+  it("treats a material with no metallic-roughness signal as non-PBR", () => {
+    // Matches buildPbrFrag's gate: a fantasy material lights on the Lambert path.
+    const resolved = resolvePbr({}, false, false, false);
+    expect(resolved.isPbr).toBe(false);
+  });
+
+  it("is PBR when any map is bound", () => {
+    expect(resolvePbr({}, true, false, false).isPbr).toBe(true);
+    expect(resolvePbr({}, false, true, false).isPbr).toBe(true);
+    expect(resolvePbr({}, false, false, true).isPbr).toBe(true);
+  });
+
+  it("is PBR when a metallic or roughness factor is set, even to zero", () => {
+    expect(resolvePbr({ metallicFactor: 0 }, false, false, false).isPbr).toBe(true);
+    expect(resolvePbr({ roughnessFactor: 0 }, false, false, false).isPbr).toBe(true);
+  });
+
+  it("treats an all-zero emissive factor as no signal, a positive one as PBR", () => {
+    expect(resolvePbr({ emissiveFactor: [0, 0, 0] }, false, false, false).isPbr).toBe(false);
+    expect(resolvePbr({ emissiveFactor: [0, 0, 0.2] }, false, false, false).isPbr).toBe(true);
+  });
+
+  it("defaults the factors to glTF's own (metallic 1, roughness 1, emissive 0)", () => {
+    const resolved = resolvePbr({}, true, false, false);
+    expect(resolved.metallic).toBe(1);
+    expect(resolved.roughness).toBe(1);
+    expect(resolved.emissive).toEqual([0, 0, 0]);
+  });
+});
+
+describe("viewDirection", () => {
+  it("is the third row of the view rotation (direction towards the viewer)", () => {
+    // A camera looking down -Z from +Z: the view's third row is world +Z.
+    const view = viewMatrix([0, 0, 5], [0, 0, 0]);
+    const dir = viewDirection(view);
+    expect(dir[0]).toBeCloseTo(0, 10);
+    expect(dir[1]).toBeCloseTo(0, 10);
+    expect(dir[2]).toBeCloseTo(1, 10);
+  });
+
+  it("is unit length so the shader can dot against it directly", () => {
+    const view = viewMatrix([3, 2, 4], [0, 0, 0]);
+    const dir = viewDirection(view);
+    expect(Math.hypot(dir[0], dir[1], dir[2])).toBeCloseTo(1, 10);
   });
 });
 
