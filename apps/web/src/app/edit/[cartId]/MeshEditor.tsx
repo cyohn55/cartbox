@@ -30,6 +30,7 @@ import {
   addMesh,
   removeMesh,
   renameMesh,
+  setMeshAsset,
   setMeshTransform,
   readMeshEntry,
   type MeshSidecar,
@@ -41,6 +42,7 @@ import type { LibraryAsset } from "@/lib/libraryManifest";
 import styles from "./editor.module.css";
 import { RailGroup, RailHint } from "./railControls";
 import { LibraryBrowser } from "./LibraryBrowser";
+import { MaterialEditor } from "./MaterialEditor";
 
 const VIEWPORT = 512; // preview canvas edge in device pixels
 const ORBIT_SPEED = 0.01; // radians per pixel dragged
@@ -217,6 +219,13 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
     onSidecarChange(setMeshTransform(sidecar, selectedEntry.id, { ...selectedEntry.transform, ...patch }));
   };
 
+  // Persist an edited mesh (a material change) back into its sidecar entry; the
+  // updated sidecar flows back down as props and re-derives the preview.
+  const applyMeshEdit = (next: MeshAsset) => {
+    if (!selectedEntry) return;
+    onSidecarChange(setMeshAsset(sidecar, selectedEntry.id, next));
+  };
+
   const exportObj = () => {
     if (!meshAsset || !selectedEntry) return;
     const safe = (selectedEntry.name || "mesh").replace(/[^a-z0-9_-]+/gi, "_");
@@ -346,6 +355,8 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
             </RailGroup>
 
             <TransformControls transform={selectedEntry.transform} onChange={updateTransform} />
+
+            {meshAsset && <MaterialEditor mesh={meshAsset} onChange={applyMeshEdit} />}
 
             <RailGroup label="Export">
               <div className={styles.toolGroup}>

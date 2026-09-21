@@ -139,6 +139,27 @@ export function defaultMaterial(name = "default"): MeshMaterial {
   return { name, baseColorFactor: [1, 1, 1, 1], baseColorImage: null, textureSprite: null };
 }
 
+/**
+ * Return a copy of `mesh` with one primitive's material patched — the pure edit
+ * behind the material editor (Phase 6). Only the named fields change; the rest of
+ * the material (its textures, sprite ref) and every other primitive are shared by
+ * reference, so an edit allocates only the changed primitive. An out-of-range
+ * index returns the mesh unchanged.
+ */
+export function updateMeshMaterial(
+  mesh: MeshAsset,
+  primitiveIndex: number,
+  patch: Partial<MeshMaterial>,
+): MeshAsset {
+  if (primitiveIndex < 0 || primitiveIndex >= mesh.primitives.length) return mesh;
+  return {
+    ...mesh,
+    primitives: mesh.primitives.map((primitive, i) =>
+      i === primitiveIndex ? { ...primitive, material: { ...primitive.material, ...patch } } : primitive,
+    ),
+  };
+}
+
 /** Total vertices across every primitive. */
 export function meshVertexCount(mesh: MeshAsset): number {
   return mesh.primitives.reduce((sum, primitive) => sum + primitive.positions.length / 3, 0);

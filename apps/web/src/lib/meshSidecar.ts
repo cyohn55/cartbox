@@ -137,6 +137,20 @@ export function setMeshTransform(sidecar: MeshSidecar, id: string, transform: Me
   };
 }
 
+/**
+ * Replace one entry's geometry, re-serializing an edited {@link MeshAsset} back
+ * into its envelope — the persistence half of the material editor (Phase 6).
+ * Leaves the entry's id, name, and transform untouched; only the mesh payload
+ * changes. An unknown id returns the sidecar unchanged.
+ */
+export function setMeshAsset(sidecar: MeshSidecar, id: string, mesh: MeshAsset): MeshSidecar {
+  const serialized = serializeMeshAsset(mesh);
+  return {
+    version: MESH_SIDECAR_VERSION,
+    meshes: sidecar.meshes.map((entry) => (entry.id === id ? { ...entry, mesh: serialized } : entry)),
+  };
+}
+
 /** Rename one entry. */
 export function renameMesh(sidecar: MeshSidecar, id: string, name: string): MeshSidecar {
   return {
