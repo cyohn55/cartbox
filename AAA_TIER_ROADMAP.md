@@ -208,7 +208,14 @@ tiled/clustered light binning.
       the instance origin; `cameraPositionFromView` recovers the eye). Applied
       before culling on both backends via `SceneDraw.lod`. Verified with
       `meshRasterizerLod.test.ts`.
-- [ ] Occlusion culling, GPU instancing
+- [x] **Occlusion culling** — `occlusionCull` drops instances whose screen
+      footprint is entirely behind nearer geometry, tested against a CPU depth
+      pre-pass (`renderGeometryBuffers`). Conservative (never removes visible
+      geometry): a footprint over any background pixel or any surface at/behind
+      the instance is kept. Opt-in via `SceneDraw.occlude` (it costs the pre-pass);
+      runs last, on the post-cull set. Verified with `meshRasterizerOcclusion.test.ts`.
+- [ ] GPU instancing — batch repeated-mesh draws (WebGPU-only; a uniform-binding
+      refactor, validated in-browser). Deferred.
 - [ ] Streaming for large scenes
 
 ### Phase 6 — 3D authoring UX (largest scope)
