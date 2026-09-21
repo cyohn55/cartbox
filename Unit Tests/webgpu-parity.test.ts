@@ -363,6 +363,41 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     renderer.dispose();
   });
 
+  it("matches the software rasteriser on multi-light forward shading (within float tolerance)", async () => {
+    // Several directional + point lights: the GPU loops the same packed list and
+    // the same BRDF as meshRasterizer.ts, so only float rounding differs.
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+    const instances = pbrScene();
+    const lights = [
+      { kind: "directional" as const, direction: [0.3, 0.6, 1] as const, color: [1, 0.9, 0.8] as const, intensity: 1 },
+      { kind: "point" as const, position: [1.5, 1, 2] as const, color: [0.2, 0.4, 1] as const, intensity: 3, range: 6 },
+      { kind: "point" as const, position: [-1.5, -0.5, 2] as const, color: [1, 0.3, 0.1] as const, intensity: 3, range: 6 },
+    ];
+    const withLights = (): SceneDraw => ({ ...draw(), lights });
+
+    renderer.render(instances, withLights());
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.tick?.();
+    }
+    const gpu = withLights();
+    renderer.render(instances, gpu);
+
+    const software = withLights();
+    new SoftwareSceneRenderer().render(instances, software);
+
+    const drawn = Array.from(software.out).filter((_, i) => i % 4 === 3 && software.out[i] !== 0).length;
+    expect(drawn).toBeGreaterThan(100);
+
+    let maxDelta = 0;
+    for (let i = 0; i < W * H * 4; i += 1) {
+      maxDelta = Math.max(maxDelta, Math.abs(gpu.out[i]! - software.out[i]!));
+    }
+    expect(maxDelta).toBeLessThanOrEqual(4);
+
+    renderer.dispose();
+  });
+
   it("matches the software rasteriser on directional shadows (within float tolerance)", async () => {
     // The GPU samples the *same* CPU-generated shadow map (uploaded as r32float)
     // with the same nearest compare + bias, so the shadow decision is identical;

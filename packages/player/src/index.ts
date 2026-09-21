@@ -128,13 +128,15 @@ export {
   alignBytesPerRow,
   interleaveVertices,
   normalBasis3x3,
+  packLights,
+  LIGHT_FLOATS,
   resolveLight,
   resolvePbr,
   unpadRows,
   viewDirection,
   writeInstanceUniform,
 } from "./render/scenePacking.js";
-export type { PbrMaterial, ResolvedPbr } from "./render/scenePacking.js";
+export type { PackableLight, PbrMaterial, ResolvedPbr } from "./render/scenePacking.js";
 export { createConsole, loadEngineModule } from "./engine.js";
 export type { ConsoleInstance } from "./engine.js";
 

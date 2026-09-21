@@ -31,10 +31,11 @@ import type { EnvironmentLight, Mat4 } from "@cartbox/editor";
  * 320  shadow     vec4<f32>    16   x = 1 when shadowed, y = map size, z = bias, w = strength
  * 336  envMeta    vec4<f32>    16   xyz = env-map mean radiance, w = 1 when an env map is bound
  * 352  tonemap    vec4<f32>    16   x = 1 when tone-mapping, y = exposure
- * 368  ssao       vec4<f32>    16   x = 1 when an SSAO buffer is bound
+ * 368  ssao       vec4<f32>    16   x = 1 when an SSAO buffer is bound, y = light count
+ * 384  model      mat4x4<f32>  64   this draw's world matrix (point-light world pos)
  * ```
  *
- * 384 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
+ * 448 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
  * dynamic uniform offset can address), so one buffer still holds every draw in a
  * frame. The metallic-roughness inputs and the environment carry the Modern
  * (AAA) tier's shading; a fantasy draw leaves `pbr.z` at 0 and the shader takes
@@ -48,9 +49,52 @@ export const UNIFORM_STRIDE = 512;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 384;
+export const UNIFORM_BYTES_USED = 448;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
+
+/**
+ * Floats per light in the storage buffer: three vec4s —
+ *   d0: xyz = direction (directional) or world position (point), w = kind (0/1)
+ *   d1: rgb = colour, w = intensity
+ *   d2: x = point range (0 = no falloff)
+ * Matches the `Light` struct in WebgpuSceneRenderer's WGSL.
+ */
+export const LIGHT_FLOATS = 12;
+
+/** A minimal light for {@link packLights} (mirrors editor's SceneLight). */
+export interface PackableLight {
+  readonly kind: "directional" | "point";
+  readonly direction?: readonly [number, number, number];
+  readonly position?: readonly [number, number, number];
+  readonly color: readonly [number, number, number];
+  readonly intensity: number;
+  readonly range?: number;
+}
+
+/**
+ * Pack a light list into the storage-buffer layout the WGSL loop reads. Always
+ * returns at least one (zeroed) light so the binding is never empty; the draw's
+ * `lightCount` uniform, not the buffer length, bounds the loop.
+ */
+export function packLights(lights: readonly PackableLight[]): Float32Array {
+  const out = new Float32Array(Math.max(1, lights.length) * LIGHT_FLOATS);
+  lights.forEach((light, i) => {
+    const base = i * LIGHT_FLOATS;
+    const point = light.kind === "point";
+    const v = point ? light.position ?? [0, 0, 0] : light.direction ?? [0, 1, 0];
+    out[base] = v[0]!;
+    out[base + 1] = v[1]!;
+    out[base + 2] = v[2]!;
+    out[base + 3] = point ? 1 : 0;
+    out[base + 4] = light.color[0]!;
+    out[base + 5] = light.color[1]!;
+    out[base + 6] = light.color[2]!;
+    out[base + 7] = light.intensity;
+    out[base + 8] = light.range ?? 0;
+  });
+  return out;
+}
 
 /** Float indices of each field within one stride. */
 const OFFSET_MVP = 0;
@@ -69,6 +113,7 @@ const OFFSET_SHADOW = 80;
 const OFFSET_ENV_META = 84;
 const OFFSET_TONEMAP = 88;
 const OFFSET_SSAO = 92;
+const OFFSET_MODEL = 96;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -210,6 +255,10 @@ export interface InstanceUniform {
   readonly tonemap: { readonly exposure: number } | null;
   /** Whether a screen-space AO buffer is bound (sampled per fragment on the GPU). */
   readonly hasSsao: boolean;
+  /** This draw's world matrix, for point-light world position in the shader. */
+  readonly model: Mat4 | null;
+  /** Number of lights in the shared storage buffer, or 0 for the single key light. */
+  readonly lightCount: number;
 }
 
 /**
@@ -302,9 +351,12 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_TONEMAP + 3] = 0;
 
   target[base + OFFSET_SSAO] = uniform.hasSsao ? 1 : 0;
-  target[base + OFFSET_SSAO + 1] = 0;
+  target[base + OFFSET_SSAO + 1] = uniform.lightCount; // light count for the storage-buffer loop
   target[base + OFFSET_SSAO + 2] = 0;
   target[base + OFFSET_SSAO + 3] = 0;
+
+  const model = uniform.model;
+  for (let i = 0; i < 16; i += 1) target[base + OFFSET_MODEL + i] = model ? model[i]! : (i % 5 === 0 ? 1 : 0);
 }
 
 /** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2). */
