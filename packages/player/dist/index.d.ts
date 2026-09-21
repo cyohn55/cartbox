@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, DecodedTexture, EnvironmentLight, ShadowInput, ToneMap, SceneLight, RasterStyle } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, SceneLighting, DecodedTexture, EnvironmentLight, ShadowInput, ToneMap, SceneLight, RasterStyle } from '@cartbox/editor';
 
 /**
  * Console models. A model is a fixed hardware spec plus the WASM runtime that
@@ -984,10 +984,12 @@ interface SceneBounds {
     /** Half the bounding sphere's diameter — the radius the camera frames. */
     readonly radius: number;
 }
-/** The parsed runtime scene: every placed mesh and their shared world bounds. */
+/** The parsed runtime scene: every placed mesh, their shared world bounds, and the lighting rig. */
 interface MeshScene {
     readonly instances: readonly MeshInstance[];
     readonly bounds: SceneBounds;
+    /** The authored Modern-tier lighting rig, or null when the cart set none. */
+    readonly lighting: SceneLighting | null;
 }
 /** A view + projection pair ready to hand to `renderMeshScene`. */
 interface SceneCamera {
@@ -3349,6 +3351,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private readonly output;
     private readonly presented;
     private readonly depth;
+    /** Shadow-map depth scratch, allocated once the first shadowed frame needs it. */
+    private shadowDepth;
     private constructor();
     /**
      * Decode every instance's base-colour textures, then build the surface. Any
@@ -3378,6 +3382,12 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * so a cart spins/moves an object relative to where the editor placed it.
      */
     private posedInstances;
+    /**
+     * Render the scene's directional shadow map for this frame, or null when the
+     * rig has shadows off / no directional light. The depth scratch is allocated
+     * once and reused, since the map size is fixed.
+     */
+    private buildShadow;
     destroy(): void;
 }
 

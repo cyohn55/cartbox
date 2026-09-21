@@ -235,6 +235,22 @@ export {
 export type { LodChain } from "./render/meshRasterizer";
 export { aabbOccluded, occlusionCull, type OcclusionInput } from "./render/occlusion";
 export {
+  SCENE_LIGHTING_VERSION,
+  defaultSceneLighting,
+  parseSceneLighting,
+  patchSceneLighting,
+  updateSceneEnvironment,
+  addSceneLight,
+  updateSceneLight,
+  removeSceneLight,
+  sceneLightingEnvironment,
+  sceneLightingTonemap,
+  sceneLightingKeyDirection,
+  buildSceneShadow,
+  type SceneLighting,
+  type SceneEnvironment,
+} from "./model/SceneLighting";
+export {
   MapVoxelLayer,
   mapLayerToVoxelGrid,
   serializeMapVoxelLayer,

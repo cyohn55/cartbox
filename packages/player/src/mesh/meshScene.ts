@@ -15,11 +15,13 @@ import {
   composeModelMatrix,
   deserializeMeshAsset,
   meshBounds,
+  parseSceneLighting,
   projectionMatrix,
   viewMatrix,
   type Mat4,
   type MeshAsset,
   type MeshSceneInstance,
+  type SceneLighting,
 } from "@cartbox/editor";
 
 /** One placed mesh ready to rasterise: decoded geometry + its baked world matrix. */
@@ -37,10 +39,12 @@ export interface SceneBounds {
   readonly radius: number;
 }
 
-/** The parsed runtime scene: every placed mesh and their shared world bounds. */
+/** The parsed runtime scene: every placed mesh, their shared world bounds, and the lighting rig. */
 export interface MeshScene {
   readonly instances: readonly MeshInstance[];
   readonly bounds: SceneBounds;
+  /** The authored Modern-tier lighting rig, or null when the cart set none. */
+  readonly lighting: SceneLighting | null;
 }
 
 /** A view + projection pair ready to hand to `renderMeshScene`. */
@@ -139,7 +143,8 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
   }
 
   if (instances.length === 0) return null;
-  return { instances, bounds: sceneBounds(instances) };
+  const lighting = parseSceneLighting((parsed as { lighting?: unknown }).lighting);
+  return { instances, bounds: sceneBounds(instances), lighting };
 }
 
 /** Optional overrides a cart supplies via `cartbox.meshcam(...)` (see the mailbox). */

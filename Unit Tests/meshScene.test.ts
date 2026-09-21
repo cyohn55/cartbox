@@ -43,6 +43,20 @@ describe("parseMeshScene", () => {
     expect(parseMeshScene(sidecar([]))).toBeNull();
   });
 
+  it("reads the lighting rig, or null when absent", () => {
+    const plain = parseMeshScene(sidecar([{ mesh: serializedQuad(), transform: undefined }]));
+    expect(plain!.lighting).toBeNull();
+
+    const withRig = JSON.stringify({
+      version: 2,
+      meshes: [{ mesh: serializedQuad(), transform: undefined }],
+      lighting: { ambient: 0.5, shadows: true },
+    });
+    const lit = parseMeshScene(withRig);
+    expect(lit!.lighting?.ambient).toBe(0.5);
+    expect(lit!.lighting?.shadows).toBe(true);
+  });
+
   it("decodes a valid entry into a placed instance with bounds", () => {
     const scene = parseMeshScene(sidecar([{ id: "a", name: "Quad", mesh: serializedQuad(), transform: undefined }]));
     expect(scene).not.toBeNull();

@@ -22,14 +22,27 @@
  * `create`, mirroring `LitCanvasSurface.create`.
  */
 
-import { composeModelMatrix, multiplyMat4, type DecodedTexture, type MeshSceneInstance } from "@cartbox/editor";
+import {
+  buildSceneShadow,
+  composeModelMatrix,
+  multiplyMat4,
+  sceneLightingEnvironment,
+  sceneLightingKeyDirection,
+  sceneLightingTonemap,
+  type DecodedTexture,
+  type MeshSceneInstance,
+} from "@cartbox/editor";
 import type { DisplaySurface } from "../display.js";
 import { SoftwareSceneRenderer, type SceneRenderer } from "../render/sceneRenderer.js";
 import type { MailboxMeshCamera, MailboxMeshPose } from "../mailbox.js";
+import type { ShadowInput, SceneLighting } from "@cartbox/editor";
 import type { MeshScene } from "./meshScene.js";
 import { buildOrbitCamera } from "./meshScene.js";
 
 const RAD_TO_DEG = 180 / Math.PI;
+
+/** Edge length of the directional shadow map — a fixed, self-contained cost. */
+const SHADOW_MAP_SIZE = 1024;
 
 /** Radians of yaw per presented frame — one full turn every ~12s at 60Hz. */
 const AUTO_ORBIT_YAW_PER_FRAME = (2 * Math.PI) / 720;
@@ -43,6 +56,8 @@ export class MeshOverlaySurface implements DisplaySurface {
   private readonly output: Uint8ClampedArray;
   private readonly presented: Uint8Array;
   private readonly depth: Float32Array;
+  /** Shadow-map depth scratch, allocated once the first shadowed frame needs it. */
+  private shadowDepth: Float32Array | null = null;
 
   private constructor(
     private readonly inner: DisplaySurface,
@@ -174,7 +189,13 @@ export class MeshOverlaySurface implements DisplaySurface {
           targetOffset: cart.target,
         })
       : buildOrbitCamera(this.scene.bounds, this.frame * AUTO_ORBIT_YAW_PER_FRAME, AUTO_ORBIT_PITCH, this.width / this.height);
-    this.renderer.render(this.posedInstances(), {
+    const instances = this.posedInstances();
+    // Apply the authored Modern-tier lighting rig, if any. Absent (every cart
+    // that never opted in) leaves these omitted, so the draw is exactly as before
+    // and the fantasy tiers render byte-identically.
+    const lighting = this.scene.lighting;
+    const shadow = lighting ? this.buildShadow(instances, lighting) : null;
+    this.renderer.render(instances, {
       width: this.width,
       height: this.height,
       out: this.output,
@@ -182,6 +203,16 @@ export class MeshOverlaySurface implements DisplaySurface {
       view: camera.view,
       projection: camera.projection,
       background: null,
+      ...(lighting
+        ? {
+            ambient: lighting.ambient,
+            lightDirection: sceneLightingKeyDirection(lighting),
+            environment: sceneLightingEnvironment(lighting),
+            tonemap: sceneLightingTonemap(lighting),
+            lights: lighting.lights,
+            shadow,
+          }
+        : {}),
     });
     this.frame += 1; // advance in lockstep with the run loop's present cadence
     this.inner.blit(this.presented);
@@ -222,6 +253,18 @@ export class MeshOverlaySurface implements DisplaySurface {
       });
     }
     return result;
+  }
+
+  /**
+   * Render the scene's directional shadow map for this frame, or null when the
+   * rig has shadows off / no directional light. The depth scratch is allocated
+   * once and reused, since the map size is fixed.
+   */
+  private buildShadow(instances: readonly MeshSceneInstance[], lighting: SceneLighting): ShadowInput | null {
+    if (!lighting.shadows) return null;
+    if (!this.shadowDepth) this.shadowDepth = new Float32Array(SHADOW_MAP_SIZE * SHADOW_MAP_SIZE);
+    const { center, radius } = this.scene.bounds;
+    return buildSceneShadow(instances, lighting, center, radius, { size: SHADOW_MAP_SIZE, depth: this.shadowDepth });
   }
 
   destroy(): void {

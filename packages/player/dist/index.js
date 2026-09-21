@@ -4131,7 +4131,14 @@ var ParticleOverlaySurface = class {
 var lerp3 = (a, b, t) => a + (b - a) * t;
 
 // src/mesh/MeshOverlaySurface.ts
-import { composeModelMatrix as composeModelMatrix2, multiplyMat4 } from "@cartbox/editor";
+import {
+  buildSceneShadow,
+  composeModelMatrix as composeModelMatrix2,
+  multiplyMat4,
+  sceneLightingEnvironment,
+  sceneLightingKeyDirection,
+  sceneLightingTonemap
+} from "@cartbox/editor";
 
 // src/render/sceneRenderer.ts
 import {
@@ -4329,6 +4336,7 @@ import {
   composeModelMatrix,
   deserializeMeshAsset,
   meshBounds,
+  parseSceneLighting,
   projectionMatrix,
   viewMatrix
 } from "@cartbox/editor";
@@ -4404,7 +4412,8 @@ function parseMeshScene(raw) {
     instances.push({ mesh, model: composeModelMatrix(t.position, t.rotation, t.scale) });
   }
   if (instances.length === 0) return null;
-  return { instances, bounds: sceneBounds(instances) };
+  const lighting = parseSceneLighting(parsed.lighting);
+  return { instances, bounds: sceneBounds(instances), lighting };
 }
 function buildOrbitCamera(bounds, yaw, pitch, aspect, options = {}) {
   const { radius } = bounds;
@@ -4429,6 +4438,7 @@ function buildOrbitCamera(bounds, yaw, pitch, aspect, options = {}) {
 
 // src/mesh/MeshOverlaySurface.ts
 var RAD_TO_DEG = 180 / Math.PI;
+var SHADOW_MAP_SIZE = 1024;
 var AUTO_ORBIT_YAW_PER_FRAME = 2 * Math.PI / 720;
 var AUTO_ORBIT_PITCH = 0.35;
 var MeshOverlaySurface = class _MeshOverlaySurface {
@@ -4442,6 +4452,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.frame = 0;
     this.cartCamera = null;
     this.poses = [];
+    /** Shadow-map depth scratch, allocated once the first shadowed frame needs it. */
+    this.shadowDepth = null;
     this.output = new Uint8ClampedArray(width * height * 4);
     this.presented = new Uint8Array(this.output.buffer);
     this.depth = new Float32Array(width * height);
@@ -4522,14 +4534,25 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       distance: cart.distance,
       targetOffset: cart.target
     }) : buildOrbitCamera(this.scene.bounds, this.frame * AUTO_ORBIT_YAW_PER_FRAME, AUTO_ORBIT_PITCH, this.width / this.height);
-    this.renderer.render(this.posedInstances(), {
+    const instances = this.posedInstances();
+    const lighting = this.scene.lighting;
+    const shadow = lighting ? this.buildShadow(instances, lighting) : null;
+    this.renderer.render(instances, {
       width: this.width,
       height: this.height,
       out: this.output,
       depth: this.depth,
       view: camera.view,
       projection: camera.projection,
-      background: null
+      background: null,
+      ...lighting ? {
+        ambient: lighting.ambient,
+        lightDirection: sceneLightingKeyDirection(lighting),
+        environment: sceneLightingEnvironment(lighting),
+        tonemap: sceneLightingTonemap(lighting),
+        lights: lighting.lights,
+        shadow
+      } : {}
     });
     this.frame += 1;
     this.inner.blit(this.presented);
@@ -4569,6 +4592,17 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       });
     }
     return result;
+  }
+  /**
+   * Render the scene's directional shadow map for this frame, or null when the
+   * rig has shadows off / no directional light. The depth scratch is allocated
+   * once and reused, since the map size is fixed.
+   */
+  buildShadow(instances, lighting) {
+    if (!lighting.shadows) return null;
+    if (!this.shadowDepth) this.shadowDepth = new Float32Array(SHADOW_MAP_SIZE * SHADOW_MAP_SIZE);
+    const { center, radius } = this.scene.bounds;
+    return buildSceneShadow(instances, lighting, center, radius, { size: SHADOW_MAP_SIZE, depth: this.shadowDepth });
   }
   destroy() {
     this.inner.destroy();
