@@ -21,6 +21,8 @@ import {
   alignBytesPerRow,
   interleaveVertices,
   normalBasis3x3,
+  packLights,
+  LIGHT_FLOATS,
   resolveLight,
   resolvePbr,
   unpadRows,
@@ -46,6 +48,8 @@ const NON_PBR = {
   shadow: null,
   tonemap: null,
   hasSsao: false,
+  model: null,
+  lightCount: 0,
 };
 
 describe("uniform layout", () => {
@@ -126,6 +130,8 @@ describe("uniform layout", () => {
       shadow: null,
       tonemap: null,
       hasSsao: false,
+      model: null,
+      lightCount: 0,
     });
     // view (36..40): xyz direction, w unused.
     expect(Array.from(data.subarray(36, 40))).toEqual([0, 0, 1, 0]);
@@ -157,6 +163,8 @@ describe("uniform layout", () => {
       shadow: null,
       tonemap: null,
       hasSsao: false,
+      model: null,
+      lightCount: 0,
     });
     // envSky (52..56): xyz sky, w = hasEnvironment flag.
     expect(Array.from(data.subarray(52, 56))).toEqual([Math.fround(0.2), Math.fround(0.4), Math.fround(0.9), 1]);
@@ -187,6 +195,8 @@ describe("uniform layout", () => {
       shadow: null,
       tonemap: null,
       hasSsao: false,
+      model: null,
+      lightCount: 0,
     });
     // envMeta (84..88): mean radiance rgb + hasEnvMap flag.
     expect(Array.from(data.subarray(84, 88))).toEqual([Math.fround(0.5), Math.fround(0.25), Math.fround(0.1), 1]);
@@ -210,6 +220,8 @@ describe("uniform layout", () => {
       shadow: null,
       tonemap: { exposure: 1.5 },
       hasSsao: false,
+      model: null,
+      lightCount: 0,
     });
     // tonemap (88..92): hasTonemap flag + exposure.
     expect(Array.from(on.subarray(88, 92))).toEqual([1, Math.fround(1.5), 0, 0]);
@@ -244,6 +256,8 @@ describe("uniform layout", () => {
       shadow: { size: 1024, bias: 0.003, strength: 0.8 },
       tonemap: null,
       hasSsao: false,
+      model: null,
+      lightCount: 0,
     });
     // lightMvp (64..80): the counting matrix, contiguous.
     expect(Array.from(withShadow.subarray(64, 80))).toEqual(Array.from({ length: 16 }, (_, i) => i));
@@ -268,9 +282,29 @@ describe("uniform layout", () => {
       shadow: null,
       tonemap: null,
       hasSsao: false,
+      model: null,
+      lightCount: 0,
     });
     expect(none[80]).toBe(0); // hasShadow flag off
     expect(Array.from(none.subarray(64, 80)).every((v) => v === 0)).toBe(true);
+  });
+
+  it("packs the world matrix and light count", () => {
+    const data = new Float32Array(UNIFORM_FLOATS);
+    writeInstanceUniform(data, 0, {
+      mvp: COUNTING_MAT4,
+      normalBasis: [0, 0, 0, 0, 0, 0, 0, 0, 0],
+      baseColor: [0, 0, 0, 1],
+      hasTexture: false,
+      light,
+      ...NON_PBR,
+      model: COUNTING_MAT4,
+      lightCount: 5,
+    });
+    // ssao.y (float 93) carries the light count.
+    expect(data[93]).toBe(5);
+    // model (96..112): the counting matrix, contiguous.
+    expect(Array.from(data.subarray(96, 112))).toEqual(Array.from({ length: 16 }, (_, i) => i));
   });
 
   it("flags SSAO on and off at float 92", () => {
@@ -371,6 +405,29 @@ describe("resolvePbr", () => {
     expect(resolved.metallic).toBe(1);
     expect(resolved.roughness).toBe(1);
     expect(resolved.emissive).toEqual([0, 0, 0]);
+  });
+});
+
+describe("packLights", () => {
+  it("packs a directional and a point light into three vec4s each", () => {
+    const packed = packLights([
+      { kind: "directional", direction: [0, 1, 0], color: [1, 0.5, 0.25], intensity: 2 },
+      { kind: "point", position: [3, 4, 5], color: [0, 0, 1], intensity: 1.5, range: 8 },
+    ]);
+    expect(packed.length).toBe(2 * LIGHT_FLOATS);
+    // Directional: d0 = dir + kind 0; d1 = colour + intensity; d2.x = range 0.
+    expect(Array.from(packed.subarray(0, 8))).toEqual([0, 1, 0, 0, 1, Math.fround(0.5), Math.fround(0.25), 2]);
+    expect(packed[8]).toBe(0);
+    // Point: d0 = position + kind 1; d2.x = range.
+    expect(Array.from(packed.subarray(12, 16))).toEqual([3, 4, 5, 1]);
+    expect(packed[19]).toBe(Math.fround(1.5)); // intensity
+    expect(packed[20]).toBe(8); // range
+  });
+
+  it("returns at least one (zeroed) light so the binding is never empty", () => {
+    const packed = packLights([]);
+    expect(packed.length).toBe(LIGHT_FLOATS);
+    expect(packed.every((v) => v === 0)).toBe(true);
   });
 });
 

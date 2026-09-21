@@ -69,6 +69,7 @@ import {
   UNIFORM_BYTES_USED,
   interleaveVertices,
   normalBasis3x3,
+  packLights,
   resolveLight,
   resolvePbr,
   unpadRows,
@@ -100,7 +101,16 @@ struct Uniforms {
   shadow: vec4<f32>,    // x = 1 when shadowed, y = map size, z = bias, w = strength
   envMeta: vec4<f32>,   // xyz = env-map mean radiance, w = 1 when an env map is bound
   tonemap: vec4<f32>,   // x = 1 when tone-mapping, y = exposure
-  ssaoMeta: vec4<f32>,  // x = 1 when an SSAO buffer is bound
+  ssaoMeta: vec4<f32>,  // x = 1 when an SSAO buffer is bound, y = light count
+  model: mat4x4<f32>,   // this draw's world matrix (point-light world position)
+};
+
+// A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
+// intensity, d2.x = point range. Read from a shared storage buffer.
+struct Light {
+  d0: vec4<f32>,
+  d1: vec4<f32>,
+  d2: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
@@ -120,12 +130,16 @@ struct Uniforms {
 // sampled per fragment by its framebuffer pixel — the same buffer the software
 // path multiplies its ambient by. Bound to a 1x1 blank when unused.
 @group(0) @binding(8) var ssaoMap: texture_2d<f32>;
+// The Modern-tier light list (packLights); the uniform's ssaoMeta.y bounds the
+// loop, so a spare 1-light buffer is bound when there are none.
+@group(0) @binding(9) var<storage, read> lights: array<Light>;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) normal: vec3<f32>,
   @location(1) uv: vec2<f32>,
   @location(2) lightClip: vec4<f32>,
+  @location(3) worldPos: vec3<f32>,
 };
 
 // Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
@@ -194,6 +208,7 @@ fn vs(
   out.normal = u.nrm * normal;
   out.uv = uv;
   out.lightClip = u.lightMvp * vec4<f32>(position, 1.0);
+  out.worldPos = (u.model * vec4<f32>(position, 1.0)).xyz;
   return out;
 }
 
@@ -272,7 +287,46 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     }
     // The direct light is what a shadow occludes; ambient/IBL still fills it.
     let sf = shadowFactor(in.lightClip);
-    let lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
+    let lc = i32(u.ssaoMeta.y + 0.5);
+    var lit: vec3<f32>;
+    if (lc > 0) {
+      // --- Multi-light forward accumulation (Modern tier) ---
+      // Mirrors meshRasterizer.ts: each light re-evaluates the direct term with
+      // shared N/ndv/f0/kdm/a2/k; point lights fall off to nothing at their range.
+      var direct = vec3<f32>(0.0);
+      for (var i = 0; i < lc; i = i + 1) {
+        let lgt = lights[i];
+        var Ld: vec3<f32>;
+        var atten = 1.0;
+        if (lgt.d0.w > 0.5) { // point
+          let toL = lgt.d0.xyz - in.worldPos;
+          let dist = max(length(toL), 1e-4);
+          Ld = toL / dist;
+          let range = lgt.d2.x;
+          if (range > 0.0) { let t = max(0.0, 1.0 - dist / range); atten = t * t; }
+        } else {
+          Ld = normalize(lgt.d0.xyz);
+        }
+        let ndlL = max(0.0, dot(N, Ld));
+        if (ndlL <= 0.0 || atten <= 0.0) { continue; }
+        let Hl = normalize(Ld + V);
+        let ndhL = max(0.0, dot(N, Hl));
+        let vdhL = max(0.0, dot(V, Hl));
+        let ddL = ndhL * ndhL * (a2 - 1.0) + 1.0;
+        let DL = a2 / (3.14159265 * ddL * ddL + 1e-7);
+        let GL = (ndv / (ndv * (1.0 - k) + k)) * (ndlL / (ndlL * (1.0 - k) + k));
+        let fpL = pow(1.0 - vdhL, 5.0);
+        let specL = (DL * GL) / (4.0 * ndlL * ndv + 1e-4);
+        let FL = f0 + (vec3<f32>(1.0) - f0) * fpL;
+        var occl = 1.0;
+        if (lgt.d0.w < 0.5) { occl = sf; } // directional lights honour the sun shadow
+        let w = lgt.d1.w * atten * ndlL * occl;
+        direct = direct + (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
+      }
+      lit = direct + amb + emis;
+    } else {
+      lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
+    }
     // HDR: expose + ACES roll-off, or write the linear colour straight through.
     if (u.tonemap.x > 0.5) {
       let e = u.tonemap.y;
@@ -357,6 +411,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private ssaoTexture: any = null;
   private ssaoBound: any;
 
+  /** The Modern-tier light storage buffer, grown as needed; always ≥ 1 light. */
+  private lightBuffer: any = null;
+  private lightBufferFloats = 0;
+
   private constructor(
     private readonly device: any,
     private readonly width: number,
@@ -411,6 +469,24 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   }
 
   /**
+   * Upload the packed light list, growing the storage buffer when it needs more
+   * room (a grow changes identity, so invalidate cached bind groups). The buffer
+   * always holds at least one light so binding 9 is never empty.
+   */
+  private uploadLights(packed: Float32Array): void {
+    if (!this.lightBuffer || packed.length > this.lightBufferFloats) {
+      destroySafely(this.lightBuffer);
+      this.lightBufferFloats = Math.max(packed.length, this.lightBufferFloats * 2, 12);
+      this.lightBuffer = this.device.createBuffer({
+        size: this.lightBufferFloats * 4,
+        usage: 0x80 | 0x08, // STORAGE | COPY_DST
+      });
+      this.bindGroups = new WeakMap();
+    }
+    this.device.queue.writeBuffer(this.lightBuffer, 0, packed, 0, packed.length);
+  }
+
+  /**
    * Build the renderer for one framebuffer size. Returns null on any failure, so
    * the factory falls back to software rather than the caller seeing an
    * exception mid-frame.
@@ -457,6 +533,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 7, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           // The SSAO buffer (r32float), read per fragment via textureLoad.
           { binding: 8, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+          // The Modern-tier light list, read-only storage.
+          { binding: 9, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         ],
       });
 
@@ -722,6 +800,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const ssao = draw.ssao ?? null;
     this.bindSsao(ssao);
 
+    // Modern-tier lights: pack the list into the storage buffer for the WGSL loop.
+    const sceneLights = draw.lights ?? null;
+    this.uploadLights(packLights(sceneLights ?? []));
+    const lightCount = sceneLights?.length ?? 0;
+
     draws.forEach((entry, index) => {
       const pbr = resolvePbr(
         entry.primitive.material,
@@ -745,6 +828,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
+        model: entry.model,
+        lightCount,
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
@@ -883,6 +968,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 7, resource: this.envTexture.createView() },
         // The active SSAO buffer (or the 1x1 blank); likewise cache-invalidated.
         { binding: 8, resource: this.ssaoBound.createView() },
+        // The light storage buffer; a grow changes identity and invalidates the cache.
+        { binding: 9, resource: { buffer: this.lightBuffer } },
       ],
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });
@@ -921,6 +1008,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     if (this.shadowTexture !== this.blankShadow) destroySafely(this.shadowTexture);
     if (this.envTexture !== this.blankTexture) destroySafely(this.envTexture);
     destroySafely(this.ssaoTexture);
+    destroySafely(this.lightBuffer);
     destroySafely(this.uniformBuffer);
     for (const slot of this.readback) destroySafely(slot.buffer);
   }

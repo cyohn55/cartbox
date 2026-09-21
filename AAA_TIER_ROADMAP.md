@@ -174,8 +174,26 @@ a GPU-side shadow depth pass, and cascades remain.
       buffer → unchanged. Verified with `meshRasterizerSsao.test.ts` + a tolerant
       device parity case. *Refinements:* random-rotation noise to break kernel
       banding, and a blur pass, are follow-ups.
-- [ ] Clustered / forward+ lighting to lift the 6-light mailbox cap
-      **(← next; involves a cart-facing mailbox-protocol change).**
+- [x] **Multi-light forward shading (software + WebGPU) — the 6-light cap lifted.**
+      The Modern tier takes an unbounded list of directional + point lights
+      (`SceneLight`) through a dedicated scene channel and accumulates each one's
+      Cook-Torrance term; point lights fall off at their `range`. The WebGPU path
+      reads a packed light **storage buffer** (`packLights`) and loops in WGSL,
+      with the draw's world matrix in the uniform for point-light world position.
+      Gated: no `lights` → the single key light, byte-identical.
+      **Why not the cart mailbox:** the 6-slot 2D pmem light block is out of room
+      (its pmem runs to word 256, the hard ceiling), so the cap is lifted via
+      scene data, not by growing the cart-facing protocol — that would need a new
+      memory region (a separate design). Verified with
+      `meshRasterizerLights.test.ts`, `packLights` packing tests, and a tolerant
+      device parity case.
+- [ ] **Tiled / clustered light binning** — a perf optimisation for *hundreds* of
+      lights (the forward loop above already lifts the cap functionally). Deferred.
+
+**Status:** Phase 4's capabilities are complete on both backends — HDR ACES tone
+mapping + exposure, SSAO, and unbounded multi-light forward shading. Remaining
+are refinements/perf: full sRGB-linear + true-HDR colour, SSAO noise/blur, and
+tiled/clustered light binning.
 
 ### Phase 5 — "Runs well on the web" asset pipeline
 - [ ] glTF import with Draco / meshopt geometry compression
