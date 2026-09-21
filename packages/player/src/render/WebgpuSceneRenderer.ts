@@ -58,10 +58,9 @@ import {
   type MeshAsset,
   type MeshSceneInstance,
   type RasterStyle,
-  cullInstances,
 } from "@cartbox/editor";
 
-import { SoftwareSceneRenderer, type SceneDraw, type SceneRenderer } from "./sceneRenderer.js";
+import { SoftwareSceneRenderer, applyScenePasses, type SceneDraw, type SceneRenderer } from "./sceneRenderer.js";
 import { webgpuCanHonour } from "./renderCaps.js";
 import {
   UNIFORM_FLOATS,
@@ -699,9 +698,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
     if (this.destroyed) return;
 
-    // Frustum-cull once, so both the CPU warm-up and the GPU submit draw the same
-    // visible set. A correct cull is output-identical.
-    const visible = draw.cull ? cullInstances(instances, draw.view, draw.projection) : instances;
+    // LOD-select + frustum-cull once, so both the CPU warm-up and the GPU submit
+    // draw the same visible set. A correct cull is output-identical.
+    const visible = applyScenePasses(instances, draw);
 
     // Composite the newest completed GPU frame, or rasterise this one on the CPU
     // while the pipeline fills. Either way `out` is correct when this returns.

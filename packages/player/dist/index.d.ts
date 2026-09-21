@@ -1730,8 +1730,9 @@ interface SceneDraw {
      * correct cull is output-identical, so it is a pure perf win; default off.
      */
     readonly cull?: boolean;
+    /** Swap LOD-carrying instances to the mesh their camera distance selects. */
+    readonly lod?: boolean;
 }
-/** Draws placed 3D instances into a framebuffer. */
 interface SceneRenderer {
     /** Human-readable backend name, for diagnostics and tests. */
     readonly backend: "software" | "webgpu";

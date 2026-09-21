@@ -20,7 +20,14 @@
  * rasteriser is a hardcoded call. See ERA_MODELS.md §5.1.
  */
 
-import { DEFAULT_RASTER_STYLE, cullInstances, renderMeshScene, type MeshSceneInstance } from "@cartbox/editor";
+import {
+  DEFAULT_RASTER_STYLE,
+  applyLods,
+  cameraPositionFromView,
+  cullInstances,
+  renderMeshScene,
+  type MeshSceneInstance,
+} from "@cartbox/editor";
 import type { EnvironmentLight, Mat4, RasterStyle, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
@@ -89,9 +96,25 @@ export interface SceneDraw {
    * correct cull is output-identical, so it is a pure perf win; default off.
    */
   readonly cull?: boolean;
+  /** Swap LOD-carrying instances to the mesh their camera distance selects. */
+  readonly lod?: boolean;
 }
 
 /** Draws placed 3D instances into a framebuffer. */
+
+/** Apply the scene-level selection passes a draw requests (LOD, then cull). */
+export function applyScenePasses(
+  instances: readonly MeshSceneInstance[],
+  draw: { readonly view: Mat4; readonly projection: Mat4; readonly cull?: boolean; readonly lod?: boolean },
+): readonly MeshSceneInstance[] {
+  let out = instances;
+  if (draw.lod) {
+    const [cx, cy, cz] = cameraPositionFromView(draw.view);
+    out = applyLods(out, cx, cy, cz);
+  }
+  if (draw.cull) out = cullInstances(out, draw.view, draw.projection);
+  return out;
+}
 export interface SceneRenderer {
   /** Human-readable backend name, for diagnostics and tests. */
   readonly backend: "software" | "webgpu";
@@ -115,7 +138,7 @@ export class SoftwareSceneRenderer implements SceneRenderer {
   constructor(private readonly style: RasterStyle = DEFAULT_RASTER_STYLE) {}
 
   render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
-    const visible = draw.cull ? cullInstances(instances, draw.view, draw.projection) : instances;
+    const visible = applyScenePasses(instances, draw);
     renderMeshScene(visible, {
       width: draw.width,
       height: draw.height,

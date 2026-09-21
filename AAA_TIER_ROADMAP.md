@@ -203,7 +203,12 @@ tiled/clustered light binning.
       view-projection, positive-vertex AABB test). Output-identical, so it is a
       pure perf win applied on both backends via `SceneDraw.cull`. Verified with
       `meshRasterizerFrustum.test.ts` (including the render-identical invariant).
-- [ ] LODs, occlusion culling, instancing
+- [x] **LODs** — `applyLods` swaps a LOD-carrying instance's mesh for the level
+      its camera distance selects (`LodChain` on `MeshSceneInstance`; distance to
+      the instance origin; `cameraPositionFromView` recovers the eye). Applied
+      before culling on both backends via `SceneDraw.lod`. Verified with
+      `meshRasterizerLod.test.ts`.
+- [ ] Occlusion culling, GPU instancing
 - [ ] Streaming for large scenes
 
 ### Phase 6 — 3D authoring UX (largest scope)
