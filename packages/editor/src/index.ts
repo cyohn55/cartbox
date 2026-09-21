@@ -232,6 +232,7 @@ export {
   applyLods,
 } from "./render/lod";
 export type { LodChain } from "./render/meshRasterizer";
+export { aabbOccluded, occlusionCull, type OcclusionInput } from "./render/occlusion";
 export {
   MapVoxelLayer,
   mapLayerToVoxelGrid,

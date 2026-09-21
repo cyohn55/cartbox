@@ -25,6 +25,8 @@ import {
   applyLods,
   cameraPositionFromView,
   cullInstances,
+  occlusionCull,
+  renderGeometryBuffers,
   renderMeshScene,
   type MeshSceneInstance,
 } from "@cartbox/editor";
@@ -98,14 +100,27 @@ export interface SceneDraw {
   readonly cull?: boolean;
   /** Swap LOD-carrying instances to the mesh their camera distance selects. */
   readonly lod?: boolean;
+  /**
+   * Drop instances hidden behind nearer geometry. Costs a CPU depth pre-pass, so
+   * it is opt-in; conservative, so it never removes visible geometry.
+   */
+  readonly occlude?: boolean;
 }
 
 /** Draws placed 3D instances into a framebuffer. */
 
-/** Apply the scene-level selection passes a draw requests (LOD, then cull). */
+/** Apply the scene-level selection passes a draw requests (LOD, cull, occlusion). */
 export function applyScenePasses(
   instances: readonly MeshSceneInstance[],
-  draw: { readonly view: Mat4; readonly projection: Mat4; readonly cull?: boolean; readonly lod?: boolean },
+  draw: {
+    readonly view: Mat4;
+    readonly projection: Mat4;
+    readonly width: number;
+    readonly height: number;
+    readonly cull?: boolean;
+    readonly lod?: boolean;
+    readonly occlude?: boolean;
+  },
 ): readonly MeshSceneInstance[] {
   let out = instances;
   if (draw.lod) {
@@ -113,6 +128,12 @@ export function applyScenePasses(
     out = applyLods(out, cx, cy, cz);
   }
   if (draw.cull) out = cullInstances(out, draw.view, draw.projection);
+  // Occlusion is last (most expensive) and on the smallest set: a CPU depth
+  // pre-pass of the survivors, then drop the ones it fully hides.
+  if (draw.occlude && out.length > 1) {
+    const geo = renderGeometryBuffers(out, { width: draw.width, height: draw.height, view: draw.view, projection: draw.projection });
+    out = occlusionCull(out, { view: draw.view, projection: draw.projection, depth: geo.depth, width: draw.width, height: draw.height });
+  }
   return out;
 }
 export interface SceneRenderer {

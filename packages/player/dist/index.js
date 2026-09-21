@@ -4139,6 +4139,8 @@ import {
   applyLods,
   cameraPositionFromView,
   cullInstances,
+  occlusionCull,
+  renderGeometryBuffers,
   renderMeshScene
 } from "@cartbox/editor";
 
@@ -4263,6 +4265,10 @@ function applyScenePasses(instances, draw) {
     out = applyLods(out, cx, cy, cz);
   }
   if (draw.cull) out = cullInstances(out, draw.view, draw.projection);
+  if (draw.occlude && out.length > 1) {
+    const geo = renderGeometryBuffers(out, { width: draw.width, height: draw.height, view: draw.view, projection: draw.projection });
+    out = occlusionCull(out, { view: draw.view, projection: draw.projection, depth: geo.depth, width: draw.width, height: draw.height });
+  }
   return out;
 }
 var SoftwareSceneRenderer = class {

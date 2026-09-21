@@ -1732,6 +1732,11 @@ interface SceneDraw {
     readonly cull?: boolean;
     /** Swap LOD-carrying instances to the mesh their camera distance selects. */
     readonly lod?: boolean;
+    /**
+     * Drop instances hidden behind nearer geometry. Costs a CPU depth pre-pass, so
+     * it is opt-in; conservative, so it never removes visible geometry.
+     */
+    readonly occlude?: boolean;
 }
 interface SceneRenderer {
     /** Human-readable backend name, for diagnostics and tests. */
