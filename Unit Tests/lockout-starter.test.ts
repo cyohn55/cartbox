@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import {
   LOCKOUT_CODE,
   LOCKOUT_MESH_SIDECAR,
+  LOCKOUT_LIGHTING,
   LOCKOUT_SCENE_TRIANGLES,
   LOCKOUT_CENTER_X,
   LOCKOUT_CENTER_Y,
@@ -73,20 +74,38 @@ describe("the Lockout arena starter", () => {
     expect(LOCKOUT_CODE).toContain("auto-fall back to the magnum");
   });
 
-  it("shows off the editor's 3D features: normal + material maps + emissive energy", () => {
-    // The map ships baked normal + material maps (the cutting-edge lighting), and
-    // an emissive cyan material for the Forerunner light strips.
+  it("shows off the editor's newest 3D features: PBR materials + normal maps + emissive energy", () => {
+    // The map ships glTF-style PBR maps — albedo, normal, and metallic-roughness —
+    // plus a baked emissive map for the Forerunner light strips, so the panels
+    // read as glossy metal that reflects the skybox.
     const map = deserializeMeshAsset(
       (JSON.parse(LOCKOUT_MESH_SIDECAR) as { meshes: { mesh: string }[] }).meshes[0]!.mesh,
     );
     const forerunner = map.primitives.find((p) => p.material.baseColorImage)!;
     expect(forerunner.material.baseColorImage?.mime).toBe("image/png");
     expect(forerunner.material.normalImage?.mime).toBe("image/png"); // normal-mapped panels
-    expect(forerunner.material.materialImage?.mime).toBe("image/png"); // specular + emissive
-    // A dedicated emissive material carries the cyan energy (material map, no albedo texture).
-    const energy = map.primitives.find((p) => !p.material.baseColorImage && p.material.materialImage);
+    expect(forerunner.material.metallicRoughnessImage?.mime).toBe("image/png"); // PBR metal
+    expect(forerunner.material.emissiveImage?.mime).toBe("image/png"); // cyan energy channel
+    // A dedicated PBR emitter carries the cyan energy trim (emissive factor, no albedo texture).
+    const energy = map.primitives.find(
+      (p) => !p.material.baseColorImage && (p.material.emissiveFactor?.some((c) => c > 0) ?? false),
+    );
     expect(energy, "an emissive energy material").toBeTruthy();
     expect(LOCKOUT_CODE).toContain("draw_viewmodel"); // first-person weapon viewmodel
+  });
+
+  it("carries an authored scene lighting rig: skybox IBL, multiple lights, tone mapping and shadows", () => {
+    // The newest editor feature: a lighting rig on the mesh sidecar the runtime
+    // replays over the scene.
+    expect(LOCKOUT_LIGHTING.shadows).toBe(true);
+    expect(LOCKOUT_LIGHTING.tonemap).toBe(true);
+    expect(LOCKOUT_LIGHTING.lights.length).toBeGreaterThanOrEqual(2);
+    expect(LOCKOUT_LIGHTING.lights.some((l) => l.kind === "point")).toBe(true);
+    // It round-trips through the runtime parse the player uses.
+    const scene = parseMeshScene(LOCKOUT_MESH_SIDECAR)!;
+    expect(scene.lighting?.shadows).toBe(true);
+    expect(scene.lighting?.lights.length).toBe(LOCKOUT_LIGHTING.lights.length);
+    expect(scene.lighting?.environment.sky).toEqual(LOCKOUT_LIGHTING.environment.sky);
   });
 
   it("ships the four game types with their rules and a mode-select menu", () => {

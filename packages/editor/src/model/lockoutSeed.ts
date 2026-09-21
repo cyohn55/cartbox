@@ -1,9 +1,13 @@
 /**
  * The "Lockout arena" starter — a Halo 2 Lockout-inspired first-person arena for
  * the Xbox 360 model, and the cart that shows off the editor's newest 3D features:
- * sprite-textured surfaces with **normal maps**, **specular** metal and
- * **emissive** cyan energy — the Forerunner look — lit per-pixel by the software
- * rasteriser (option 2 in this codebase).
+ * **PBR metallic-roughness** surfaces (glossy Forerunner metal, cyan **emissive**
+ * energy) **normal-mapped** for panel relief, lit by an authored **scene lighting
+ * rig** — a cool image-based-lighting skybox, a directional key + fill, a cyan
+ * point light in the Sword pit, ACES tone mapping and directional **shadows**.
+ * This is the Modern (AAA) tier: the metals reflect the sky and the energy glows
+ * and rolls off through the tone-map curve, rather than the flat option-2 shading
+ * the cart shipped with before.
  *
  * Hard truths this cart is built around:
  *  - Cartbox has no networking, so "8 players" is you + 7 AI bots, one local match.
@@ -24,17 +28,19 @@
 import type { CartEngine } from "../engine/CartEngine";
 import { encodeRgbaPng } from "./png";
 import { serializeMeshAsset, type EncodedImage, type MeshAsset, type MeshPrimitive } from "./MeshAsset";
+import type { SceneLighting } from "./SceneLighting";
 import { newStreams, pushBox, toPrimitive, type Streams } from "./seedGeometry";
 
 /** An axis-aligned box: centre (cx,cy,cz) and half-extents (hx,hy,hz). */
 type Box = readonly [number, number, number, number, number, number];
 
 // --- The Forerunner texture set -------------------------------------------
-// One 128x128 texture, painted procedurally, baked into three maps the rasteriser
-// reads together: albedo (panels), a tangent-space normal map (beveled panel
-// edges + a recessed grout grid = greebles), and a packed material map
-// (R=height, G=specular, B=roughness, A=emissive) that makes the metal glossy and
-// the horizontal channel glow cyan.
+// One 128x128 texture, painted procedurally, baked into the glTF-style PBR maps
+// the Modern-tier rasteriser reads together: albedo (panels), a tangent-space
+// normal map (beveled panel edges + a recessed grout grid = greebles), a packed
+// metallic-roughness map (G=roughness, B=metallic) that makes the panels glossy
+// metal and the grout matte, and an emissive map that lights the cyan energy
+// channel. The BRDF then reflects the skybox in the metal and glows the channel.
 
 const TEX = 128;
 const PANEL = 32; // panel grid pitch
@@ -106,11 +112,17 @@ function forerunnerSurface(x: number, y: number): Surf {
   return { r, g, b, h, spec, rough, emis };
 }
 
-/** Bake the albedo, normal and material PNGs of the Forerunner texture. */
-function bakeForerunner(): { albedo: EncodedImage; normal: EncodedImage; material: EncodedImage } {
+/** Bake the albedo, normal, metallic-roughness and emissive PNGs (glTF PBR). */
+function bakeForerunner(): {
+  albedo: EncodedImage;
+  normal: EncodedImage;
+  metallicRoughness: EncodedImage;
+  emissive: EncodedImage;
+} {
   const albedo = new Uint8ClampedArray(TEX * TEX * 4);
   const normal = new Uint8ClampedArray(TEX * TEX * 4);
-  const material = new Uint8ClampedArray(TEX * TEX * 4);
+  const mr = new Uint8ClampedArray(TEX * TEX * 4); // glTF metallic-roughness: G=rough, B=metal
+  const emissive = new Uint8ClampedArray(TEX * TEX * 4);
   const hAt = (x: number, y: number) => forerunnerSurface(x, y).h;
   let o = 0;
   for (let y = 0; y < TEX; y += 1) {
@@ -135,23 +147,29 @@ function bakeForerunner(): { albedo: EncodedImage; normal: EncodedImage; materia
       normal[o + 1] = Math.round((ny * 0.5 + 0.5) * 255);
       normal[o + 2] = Math.round((nz * 0.5 + 0.5) * 255);
       normal[o + 3] = 255;
-      material[o] = Math.round(s.h * 255);
-      material[o + 1] = s.spec * 17;
-      material[o + 2] = s.rough * 17;
-      material[o + 3] = s.emis * 17;
+      // Roughness from the authored rough channel; metallic from the surface kind:
+      // energy strips are non-metal emitters, grout is matte non-metal, panels and
+      // their bevels are near-pure metal so they mirror the skybox.
+      const roughness = Math.min(255, Math.max(16, s.rough * 17));
+      const metallic = s.emis > 0 ? 0 : s.spec <= 3 ? 50 : 230;
+      mr[o] = 0;
+      mr[o + 1] = roughness;
+      mr[o + 2] = metallic;
+      mr[o + 3] = 255;
+      // Emissive: the cyan channel glows, everything else is dark.
+      const e = s.emis / 15;
+      emissive[o] = Math.round(s.r * e);
+      emissive[o + 1] = Math.round(s.g * e);
+      emissive[o + 2] = Math.round(s.b * e);
+      emissive[o + 3] = 255;
       o += 4;
     }
   }
   const png = (rgba: Uint8ClampedArray): EncodedImage => ({ mime: "image/png", bytes: encodeRgbaPng(rgba, TEX, TEX) });
-  return { albedo: png(albedo), normal: png(normal), material: png(material) };
+  return { albedo: png(albedo), normal: png(normal), metallicRoughness: png(mr), emissive: png(emissive) };
 }
 
 const FORE = bakeForerunner();
-
-/** A 1x1 packed material map (R=height,G=spec,B=rough,A=emissive) for flat mats. */
-function material1x1(h: number, spec: number, rough: number, emis: number): EncodedImage {
-  return { mime: "image/png", bytes: encodeRgbaPng(Uint8ClampedArray.from([h, spec, rough, emis]), 1, 1) };
-}
 
 // --- Map geometry ---------------------------------------------------------
 // Coordinates: X right, Y up, Z forward. Symmetric in X/Z so the scene centre is
@@ -271,18 +289,28 @@ function boxesPrimitive(boxes: Box[], material: MeshPrimitive["material"], fixed
 }
 
 function mapMesh(): MeshAsset {
+  // PBR metallic-roughness: the panels are near-pure metal that mirrors the skybox,
+  // normal-mapped for relief, with a baked emissive map for the cyan channel.
   const structMat: MeshPrimitive["material"] = {
     name: "forerunner",
     baseColorFactor: [1, 1, 1, 1],
     baseColorImage: FORE.albedo,
     normalImage: FORE.normal,
-    materialImage: FORE.material,
+    metallicRoughnessImage: FORE.metallicRoughness,
+    emissiveImage: FORE.emissive,
+    metallicFactor: 1,
+    roughnessFactor: 1,
+    emissiveFactor: [1.5, 1.5, 1.5], // push the baked glow above 1 so it blooms through the tone-map
   };
+  // The energy trim + weapon markers: a flat, non-metal cyan emitter (HDR emissive
+  // > 1 so it rolls off through ACES rather than clipping).
   const cyanMat: MeshPrimitive["material"] = {
     name: "energy",
     baseColorFactor: [0.28, 0.95, 1, 1],
     baseColorImage: null,
-    materialImage: material1x1(140, 40, 120, 255), // full emissive glow
+    metallicFactor: 0,
+    roughnessFactor: 0.5,
+    emissiveFactor: [0.5, 1.7, 1.9],
   };
   return {
     name: "Lockout arena",
@@ -307,13 +335,16 @@ function botMesh(): MeshAsset {
         name: "armor",
         baseColorFactor: [0.5, 0.55, 0.62, 1],
         baseColorImage: null,
-        materialImage: material1x1(140, 200, 60, 0), // glossy metal
+        metallicFactor: 0.85, // brushed metal that catches the key light + skybox
+        roughnessFactor: 0.35,
       }),
       toPrimitive(visor, {
         name: "visor",
         baseColorFactor: [0.9, 0.55, 0.15, 1],
         baseColorImage: null,
-        materialImage: material1x1(140, 60, 120, 255), // emissive amber visor
+        metallicFactor: 0,
+        roughnessFactor: 0.4,
+        emissiveFactor: [1.3, 0.75, 0.2], // glowing amber visor
       }),
     ],
   };
@@ -337,6 +368,34 @@ export const LOCKOUT_CENTER_X = CENTER[0];
 export const LOCKOUT_CENTER_Y = CENTER[1];
 export const LOCKOUT_CENTER_Z = CENTER[2];
 
+/**
+ * The authored Modern-tier lighting rig: a cool Forerunner skybox (image-based
+ * lighting the metals reflect), a warm-white directional key with a cooler fill,
+ * a cyan point light down in the Sword pit, ACES tone mapping so the emissive
+ * energy and specular highlights roll off instead of clipping, and directional
+ * shadows the towers and bridge cast onto the floor.
+ */
+export const LOCKOUT_LIGHTING: SceneLighting = {
+  environment: {
+    sky: [0.12, 0.2, 0.34],
+    horizon: [0.24, 0.34, 0.42],
+    ground: [0.05, 0.08, 0.12],
+    intensity: 1,
+  },
+  ambient: 0.28,
+  exposure: 1.15,
+  tonemap: true,
+  shadows: true,
+  lights: [
+    // Key: high warm-white sun (direction points *towards* the light).
+    { kind: "directional", direction: [0.4, 0.8, -0.45], color: [0.85, 0.9, 1], intensity: 1.5 },
+    // Fill: a low, cool bounce from the opposite side so shadows aren't black.
+    { kind: "directional", direction: [-0.5, 0.35, 0.55], color: [0.32, 0.5, 0.68], intensity: 0.5 },
+    // The Sword pit's cyan glow, at the bottom-mid centre.
+    { kind: "point", position: [0, 1, 0], color: [0.35, 0.95, 1], intensity: 3, range: 9 },
+  ],
+};
+
 export const LOCKOUT_MESH_SIDECAR: string = (() => {
   const identity = { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] };
   const bot = serializeMeshAsset(botMesh());
@@ -344,7 +403,7 @@ export const LOCKOUT_MESH_SIDECAR: string = (() => {
     { id: "lockout-map", name: "Lockout arena", mesh: serializeMeshAsset(mapMesh()), transform: identity },
   ];
   for (let i = 0; i < BOT_COUNT; i += 1) meshes.push({ id: `bot-${i}`, name: `bot ${i}`, mesh: bot, transform: identity });
-  return JSON.stringify({ version: 1, meshes });
+  return JSON.stringify({ version: 2, meshes, lighting: LOCKOUT_LIGHTING });
 })();
 
 export const LOCKOUT_SCENE_TRIANGLES = (() => {
