@@ -72,6 +72,12 @@ export interface SceneDraw {
    * shaded colour straight to the framebuffer. See {@link ToneMap}.
    */
   readonly tonemap?: ToneMap | null;
+  /**
+   * Screen-space ambient-occlusion buffer (`width×height`, 0..1), or omitted. The
+   * caller builds it from a geometry pre-pass; the renderer multiplies the PBR
+   * ambient term by it. The GPU path uploads it and samples per fragment.
+   */
+  readonly ssao?: Float32Array | null;
 }
 
 /** Draws placed 3D instances into a framebuffer. */
@@ -111,6 +117,7 @@ export class SoftwareSceneRenderer implements SceneRenderer {
       environment: draw.environment,
       shadow: draw.shadow,
       tonemap: draw.tonemap,
+      ssao: draw.ssao,
       style: this.style,
     });
   }

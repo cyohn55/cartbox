@@ -210,6 +210,12 @@ export {
   type RenderShadowMapOptions,
   acesFilmic,
   type ToneMap,
+  renderGeometryBuffers,
+  computeSsao,
+  DEFAULT_SSAO,
+  type SsaoOptions,
+  type GeometryBuffers,
+  type RenderGeometryOptions,
 } from "./render/meshRasterizer";
 export {
   MapVoxelLayer,

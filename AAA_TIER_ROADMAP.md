@@ -165,8 +165,17 @@ a GPU-side shadow depth pass, and cascades remain.
       and the runtime `SceneDraw`. Verified with `meshRasterizerTonemap.test.ts`.
       *Refinement:* full sRGB-linear input decode (shading is still in the
       engine's existing colour space) pairs with the equirect map's HDR upgrade.
-- [ ] SSAO
+- [x] **SSAO (software + WebGPU).** A camera-space geometry pre-pass
+      (`renderGeometryBuffers`: view depth + view normals) feeds `computeSsao`, a
+      hemisphere-kernel occlusion pass, producing a screen-space AO buffer that
+      modulates **only** the PBR ambient/IBL term (never the direct light). The
+      WebGPU path uploads the same CPU AO buffer as `r32float` and samples it per
+      fragment, so both backends darken by the identical buffer. Gated: no `ssao`
+      buffer → unchanged. Verified with `meshRasterizerSsao.test.ts` + a tolerant
+      device parity case. *Refinements:* random-rotation noise to break kernel
+      banding, and a blur pass, are follow-ups.
 - [ ] Clustered / forward+ lighting to lift the 6-light mailbox cap
+      **(← next; involves a cart-facing mailbox-protocol change).**
 
 ### Phase 5 — "Runs well on the web" asset pipeline
 - [ ] glTF import with Draco / meshopt geometry compression

@@ -1713,6 +1713,12 @@ interface SceneDraw {
      * shaded colour straight to the framebuffer. See {@link ToneMap}.
      */
     readonly tonemap?: ToneMap | null;
+    /**
+     * Screen-space ambient-occlusion buffer (`width×height`, 0..1), or omitted. The
+     * caller builds it from a geometry pre-pass; the renderer multiplies the PBR
+     * ambient term by it. The GPU path uploads it and samples per fragment.
+     */
+    readonly ssao?: Float32Array | null;
 }
 /** Draws placed 3D instances into a framebuffer. */
 interface SceneRenderer {
@@ -1971,7 +1977,17 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      */
     private envTexture;
     private envMapSource;
+    /** The SSAO buffer: a lazily-created width×height r32float upload target, and
+     *  what binding 8 currently references (that upload, or the 1x1 blank). */
+    private ssaoTexture;
+    private ssaoBound;
     private constructor();
+    /**
+     * Point the SSAO slot at a width×height r32float upload of `ao` (created once,
+     * lazily), or the 1x1 blank when there is none; a change invalidates cached
+     * bind groups (binding 8 moved).
+     */
+    private bindSsao;
     /**
      * Build the renderer for one framebuffer size. Returns null on any failure, so
      * the factory falls back to software rather than the caller seeing an
@@ -2039,9 +2055,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  * 320  shadow     vec4<f32>    16   x = 1 when shadowed, y = map size, z = bias, w = strength
  * 336  envMeta    vec4<f32>    16   xyz = env-map mean radiance, w = 1 when an env map is bound
  * 352  tonemap    vec4<f32>    16   x = 1 when tone-mapping, y = exposure
+ * 368  ssao       vec4<f32>    16   x = 1 when an SSAO buffer is bound
  * ```
  *
- * 368 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
+ * 384 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
  * dynamic uniform offset can address), so one buffer still holds every draw in a
  * frame. The metallic-roughness inputs and the environment carry the Modern
  * (AAA) tier's shading; a fantasy draw leaves `pbr.z` at 0 and the shader takes
@@ -2055,7 +2072,7 @@ declare const UNIFORM_STRIDE = 512;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 368;
+declare const UNIFORM_BYTES_USED = 384;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
@@ -2153,6 +2170,8 @@ interface InstanceUniform {
     readonly tonemap: {
         readonly exposure: number;
     } | null;
+    /** Whether a screen-space AO buffer is bound (sampled per fragment on the GPU). */
+    readonly hasSsao: boolean;
 }
 /**
  * Write one draw's uniforms into the shared staging array at `index`.

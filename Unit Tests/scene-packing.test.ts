@@ -45,6 +45,7 @@ const NON_PBR = {
   lightMvp: null,
   shadow: null,
   tonemap: null,
+  hasSsao: false,
 };
 
 describe("uniform layout", () => {
@@ -124,6 +125,7 @@ describe("uniform layout", () => {
       lightMvp: null,
       shadow: null,
       tonemap: null,
+      hasSsao: false,
     });
     // view (36..40): xyz direction, w unused.
     expect(Array.from(data.subarray(36, 40))).toEqual([0, 0, 1, 0]);
@@ -154,6 +156,7 @@ describe("uniform layout", () => {
       lightMvp: null,
       shadow: null,
       tonemap: null,
+      hasSsao: false,
     });
     // envSky (52..56): xyz sky, w = hasEnvironment flag.
     expect(Array.from(data.subarray(52, 56))).toEqual([Math.fround(0.2), Math.fround(0.4), Math.fround(0.9), 1]);
@@ -183,6 +186,7 @@ describe("uniform layout", () => {
       lightMvp: null,
       shadow: null,
       tonemap: null,
+      hasSsao: false,
     });
     // envMeta (84..88): mean radiance rgb + hasEnvMap flag.
     expect(Array.from(data.subarray(84, 88))).toEqual([Math.fround(0.5), Math.fround(0.25), Math.fround(0.1), 1]);
@@ -205,6 +209,7 @@ describe("uniform layout", () => {
       lightMvp: null,
       shadow: null,
       tonemap: { exposure: 1.5 },
+      hasSsao: false,
     });
     // tonemap (88..92): hasTonemap flag + exposure.
     expect(Array.from(on.subarray(88, 92))).toEqual([1, Math.fround(1.5), 0, 0]);
@@ -238,6 +243,7 @@ describe("uniform layout", () => {
       lightMvp: COUNTING_MAT4,
       shadow: { size: 1024, bias: 0.003, strength: 0.8 },
       tonemap: null,
+      hasSsao: false,
     });
     // lightMvp (64..80): the counting matrix, contiguous.
     expect(Array.from(withShadow.subarray(64, 80))).toEqual(Array.from({ length: 16 }, (_, i) => i));
@@ -261,9 +267,34 @@ describe("uniform layout", () => {
       lightMvp: null,
       shadow: null,
       tonemap: null,
+      hasSsao: false,
     });
     expect(none[80]).toBe(0); // hasShadow flag off
     expect(Array.from(none.subarray(64, 80)).every((v) => v === 0)).toBe(true);
+  });
+
+  it("flags SSAO on and off at float 92", () => {
+    const on = new Float32Array(UNIFORM_FLOATS);
+    writeInstanceUniform(on, 0, {
+      mvp: COUNTING_MAT4,
+      normalBasis: [0, 0, 0, 0, 0, 0, 0, 0, 0],
+      baseColor: [0, 0, 0, 1],
+      hasTexture: false,
+      light,
+      ...NON_PBR,
+      hasSsao: true,
+    });
+    expect(on[92]).toBe(1);
+    const off = new Float32Array(UNIFORM_FLOATS);
+    writeInstanceUniform(off, 0, {
+      mvp: COUNTING_MAT4,
+      normalBasis: [0, 0, 0, 0, 0, 0, 0, 0, 0],
+      baseColor: [0, 0, 0, 1],
+      hasTexture: false,
+      light,
+      ...NON_PBR,
+    });
+    expect(off[92]).toBe(0);
   });
 
   it("addresses each draw at its own stride", () => {

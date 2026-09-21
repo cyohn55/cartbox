@@ -38,8 +38,10 @@ import { describe, expect, it } from "vitest";
 import {
   composeModelMatrix,
   computeEnvironmentAverage,
+  computeSsao,
   orthographicMatrix,
   projectionMatrix,
+  renderGeometryBuffers,
   renderShadowMap,
   viewMatrix,
   type DecodedTexture,
@@ -309,6 +311,44 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     renderer.render(instances, gpu);
 
     const software = withEnv();
+    new SoftwareSceneRenderer().render(instances, software);
+
+    const drawn = Array.from(software.out).filter((_, i) => i % 4 === 3 && software.out[i] !== 0).length;
+    expect(drawn).toBeGreaterThan(100);
+
+    let maxDelta = 0;
+    for (let i = 0; i < W * H * 4; i += 1) {
+      maxDelta = Math.max(maxDelta, Math.abs(gpu.out[i]! - software.out[i]!));
+    }
+    expect(maxDelta).toBeLessThanOrEqual(4);
+
+    renderer.dispose();
+  });
+
+  it("matches the software rasteriser on SSAO (within float tolerance)", async () => {
+    // The GPU samples the *same* CPU-generated AO buffer (uploaded r32float) per
+    // fragment, so the ambient it removes is identical; only the base PBR shading
+    // differs by a few float bits.
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+    const instances = shadowScene(); // a floor + occluder gives a concave crease
+    const geo = renderGeometryBuffers(instances, {
+      width: W,
+      height: H,
+      view: viewMatrix([0, 7, 8], [0, 0, 0]),
+      projection: projectionMatrix((60 * Math.PI) / 180, W / H, 0.1, 100),
+    });
+    const ssao = computeSsao(geo, projectionMatrix((60 * Math.PI) / 180, W / H, 0.1, 100), { radius: 0.6, intensity: 1, bias: 0.025 });
+    const withSsao = (): SceneDraw => ({ ...draw(), view: viewMatrix([0, 7, 8], [0, 0, 0]), ambient: 0.6, ssao });
+
+    renderer.render(instances, withSsao());
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.tick?.();
+    }
+    const gpu = withSsao();
+    renderer.render(instances, gpu);
+
+    const software = withSsao();
     new SoftwareSceneRenderer().render(instances, software);
 
     const drawn = Array.from(software.out).filter((_, i) => i % 4 === 3 && software.out[i] !== 0).length;

@@ -576,6 +576,7 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
     null,
     null,
     options.tonemap ?? null,
+    null,
   );
 }
 
@@ -690,6 +691,10 @@ export interface RenderMeshSceneOptions {
   readonly shadow?: ShadowInput | null;
   /** HDR tone mapping for PBR materials (Modern tier). See {@link ToneMap}. */
   readonly tonemap?: ToneMap | null;
+  /** Screen-space ambient-occlusion buffer (`width×height`, 0..1), or null. When
+   *  set, it modulates the PBR ambient/IBL term. Build it with
+   *  {@link renderGeometryBuffers} + {@link computeSsao}. */
+  readonly ssao?: Float32Array | null;
   /** Per-pixel rasterisation behaviour; defaults to {@link DEFAULT_RASTER_STYLE}. */
   readonly style?: RasterStyle;
 }
@@ -712,6 +717,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
   const environment = options.environment ?? null;
   const shadow = options.shadow ?? null;
   const tonemap = options.tonemap ?? null;
+  const ssao = options.ssao ?? null;
   const style = options.style ?? DEFAULT_RASTER_STYLE;
   const viewProj = multiply(projection, view);
 
@@ -755,7 +761,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const emissiveTextures = instance.emissiveTextures ?? null;
     const lightMvp = shadow ? multiply(shadow.lightViewProj, instance.model) : null;
     if (style.zBuffer) {
-      drawMesh(instance.mesh, mvp, modelView, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, style);
+      drawMesh(instance.mesh, mvp, modelView, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, style);
     } else {
       eachTriangle(instance.mesh, mvp, modelView, normalBasis, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightMvp, (triangle) => queue.push(triangle));
     }
@@ -785,6 +791,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
         environment,
         shadow,
         tonemap,
+        ssao,
         style,
       );
     }
@@ -910,6 +917,235 @@ function rasterizeDepthOnly(a: Vertex, b: Vertex, c: Vertex, size: number, depth
       if (z < depth[di]!) depth[di] = z; // nearest to the light wins
     }
   }
+}
+
+// --- Screen-space ambient occlusion (Phase 4) ------------------------------
+
+/** How to compute SSAO. All in view space (units of the scene). */
+export interface SsaoOptions {
+  /** Hemisphere sample radius, in view-space units (default 0.5). */
+  readonly radius: number;
+  /** Occlusion strength, 0 (off) .. ~2 (default 1). */
+  readonly intensity: number;
+  /** Depth bias to suppress self-occlusion (default 0.025). */
+  readonly bias: number;
+}
+
+export const DEFAULT_SSAO: SsaoOptions = { radius: 0.5, intensity: 1, bias: 0.025 };
+
+/** The camera-space geometry buffers SSAO reads: linear depth + view normals. */
+export interface GeometryBuffers {
+  /** View-space linear depth (eye distance, +ve; +Infinity where nothing drew), `width×height`. */
+  readonly depth: Float32Array;
+  /** View-space unit normals, 3 floats per pixel, `width×height×3`. */
+  readonly normals: Float32Array;
+  readonly width: number;
+  readonly height: number;
+}
+
+export interface RenderGeometryOptions {
+  readonly width: number;
+  readonly height: number;
+  readonly view: Mat4;
+  readonly projection: Mat4;
+}
+
+/**
+ * Render the scene's camera-space geometry — linear view depth + view-space
+ * normals — the input SSAO needs. A stripped main pass (no shading, no textures):
+ * the same projection + clip path, writing depth and normal instead of colour.
+ */
+export function renderGeometryBuffers(
+  instances: readonly MeshSceneInstance[],
+  options: RenderGeometryOptions,
+): GeometryBuffers {
+  const { width, height, view, projection } = options;
+  const depth = new Float32Array(width * height).fill(Infinity);
+  const normals = new Float32Array(width * height * 3);
+  const viewProj = multiply(projection, view);
+
+  for (const instance of instances) {
+    const mvp = multiply(viewProj, instance.model);
+    const modelView = multiply(view, instance.model);
+    const normalBasis = normalMatrix3x3(instance.model);
+    eachTriangle(instance.mesh, mvp, modelView, normalBasis, null, null, null, null, null, null, null, (triangle) =>
+      rasterizeGeometry(triangle.a, triangle.b, triangle.c, width, height, depth, normals, view),
+    );
+  }
+  return { depth, normals, width, height };
+}
+
+/** Rasterise one triangle into the geometry buffers (view depth + view normal). */
+function rasterizeGeometry(
+  a: Vertex,
+  b: Vertex,
+  c: Vertex,
+  width: number,
+  height: number,
+  depth: Float32Array,
+  normals: Float32Array,
+  view: Mat4,
+): void {
+  const toScreen = (v: Vertex): { x: number; y: number; invW: number } => {
+    const invW = 1 / v.clip[3];
+    return { x: (v.clip[0] * invW * 0.5 + 0.5) * width, y: (1 - (v.clip[1] * invW * 0.5 + 0.5)) * height, invW };
+  };
+  const sa = toScreen(a);
+  const sb = toScreen(b);
+  const sc = toScreen(c);
+  const area = (sb.x - sa.x) * (sc.y - sa.y) - (sb.y - sa.y) * (sc.x - sa.x);
+  if (Math.abs(area) < 1e-9) return;
+  const invArea = 1 / area;
+
+  const minX = Math.max(0, Math.floor(Math.min(sa.x, sb.x, sc.x)));
+  const maxX = Math.min(width - 1, Math.ceil(Math.max(sa.x, sb.x, sc.x)));
+  const minY = Math.max(0, Math.floor(Math.min(sa.y, sb.y, sc.y)));
+  const maxY = Math.min(height - 1, Math.ceil(Math.max(sa.y, sb.y, sc.y)));
+
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      const px = x + 0.5;
+      const py = y + 0.5;
+      const w0 = ((sb.x - px) * (sc.y - py) - (sb.y - py) * (sc.x - px)) * invArea;
+      const w1 = ((sc.x - px) * (sa.y - py) - (sc.y - py) * (sa.x - px)) * invArea;
+      const w2 = ((sa.x - px) * (sb.y - py) - (sa.y - py) * (sb.x - px)) * invArea;
+      if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+
+      // Perspective-correct interpolation for view-space quantities.
+      const iw = w0 * sa.invW + w1 * sb.invW + w2 * sc.invW;
+      const pw0 = (w0 * sa.invW) / iw;
+      const pw1 = (w1 * sb.invW) / iw;
+      const pw2 = (w2 * sc.invW) / iw;
+      const viewZ = pw0 * a.viewZ + pw1 * b.viewZ + pw2 * c.viewZ; // negative in front
+      const d = -viewZ; // eye distance, positive
+      const di = y * width + x;
+      if (d >= depth[di]!) continue;
+      depth[di] = d;
+
+      // World normal → view space (view rotation is the upper-left 3x3).
+      const wx = pw0 * a.nx + pw1 * b.nx + pw2 * c.nx;
+      const wy = pw0 * a.ny + pw1 * b.ny + pw2 * c.ny;
+      const wz = pw0 * a.nz + pw1 * b.nz + pw2 * c.nz;
+      let vx = view[0]! * wx + view[4]! * wy + view[8]! * wz;
+      let vy = view[1]! * wx + view[5]! * wy + view[9]! * wz;
+      let vz = view[2]! * wx + view[6]! * wy + view[10]! * wz;
+      const len = Math.hypot(vx, vy, vz) || 1;
+      vx /= len;
+      vy /= len;
+      vz /= len;
+      normals[di * 3] = vx;
+      normals[di * 3 + 1] = vy;
+      normals[di * 3 + 2] = vz;
+    }
+  }
+}
+
+/**
+ * A fixed hemisphere kernel (tangent space, +Z up), lengths weighted toward the
+ * origin so nearby occluders count more. Fixed (not randomly rotated) so the
+ * result is deterministic and testable; the cost is faint banding, which a real
+ * random-rotation noise texture would break up — a documented refinement.
+ */
+const SSAO_KERNEL: readonly (readonly [number, number, number])[] = (() => {
+  const k: [number, number, number][] = [];
+  const n = 16;
+  for (let i = 0; i < n; i += 1) {
+    // A deterministic spiral over the hemisphere.
+    const a = i * 2.399963; // golden angle
+    const r = Math.sqrt((i + 0.5) / n);
+    const x = Math.cos(a) * r;
+    const y = Math.sin(a) * r;
+    const z = Math.sqrt(Math.max(0, 1 - r * r));
+    let scale = i / n;
+    scale = 0.1 + 0.9 * scale * scale; // cluster near the origin
+    k.push([x * scale, y * scale, z * scale]);
+  }
+  return k;
+})();
+
+/**
+ * Compute a screen-space ambient-occlusion buffer (0 = fully occluded .. 1 = open)
+ * from camera-space geometry buffers. For each pixel it reconstructs the view
+ * position, orients the {@link SSAO_KERNEL} to the pixel normal, and counts how
+ * many samples are hidden behind nearer geometry — the standard hemisphere SSAO.
+ * Pure and DOM-free, so it is verifiable without a GPU.
+ */
+export function computeSsao(
+  buffers: GeometryBuffers,
+  projection: Mat4,
+  options: SsaoOptions = DEFAULT_SSAO,
+): Float32Array {
+  const { depth, normals, width, height } = buffers;
+  const ao = new Float32Array(width * height).fill(1);
+  const tanHalfFovX = 1 / projection[0]!;
+  const tanHalfFovY = 1 / projection[5]!;
+  const { radius, intensity, bias } = options;
+
+  // Reconstruct a view-space position from a pixel + its stored depth.
+  const viewPos = (x: number, y: number, d: number): [number, number, number] => {
+    const ndcX = ((x + 0.5) / width) * 2 - 1;
+    const ndcY = 1 - ((y + 0.5) / height) * 2;
+    return [ndcX * d * tanHalfFovX, ndcY * d * tanHalfFovY, -d];
+  };
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const di = y * width + x;
+      const d = depth[di]!;
+      if (!Number.isFinite(d)) continue; // background stays fully open
+      const p = viewPos(x, y, d);
+      const nx = normals[di * 3]!;
+      const ny = normals[di * 3 + 1]!;
+      const nz = normals[di * 3 + 2]!;
+
+      // A TBN frame around the normal, T = normalize(up × N) with a deterministic
+      // `up` that is never parallel to N, then B = N × T.
+      const upZ = Math.abs(nz) < 0.999 ? 1 : 0;
+      const upX = Math.abs(nz) < 0.999 ? 0 : 1;
+      let txx = -upZ * ny;
+      let tyy = upZ * nx - upX * nz;
+      let tzz = upX * ny;
+      const tl = Math.hypot(txx, tyy, tzz) || 1;
+      txx /= tl;
+      tyy /= tl;
+      tzz /= tl;
+      const bxx = ny * tzz - nz * tyy;
+      const byy = nz * txx - nx * tzz;
+      const bzz = nx * tyy - ny * txx;
+
+      let occlusion = 0;
+      for (const k of SSAO_KERNEL) {
+        // Kernel sample into view space via the TBN frame.
+        const sxv = txx * k[0] + bxx * k[1] + nx * k[2];
+        const syv = tyy * k[0] + byy * k[1] + ny * k[2];
+        const szv = tzz * k[0] + bzz * k[1] + nz * k[2];
+        const spx = p[0] + sxv * radius;
+        const spy = p[1] + syv * radius;
+        const spz = p[2] + szv * radius;
+        // Project the sample to screen.
+        const clipX = projection[0]! * spx;
+        const clipY = projection[5]! * spy;
+        const clipW = -spz; // = proj[11]*spz, proj[11] = -1
+        if (clipW <= 1e-6) continue;
+        const sndcX = clipX / clipW;
+        const sndcY = clipY / clipW;
+        const ssx = Math.floor((sndcX * 0.5 + 0.5) * width);
+        const ssy = Math.floor((1 - (sndcY * 0.5 + 0.5)) * height);
+        if (ssx < 0 || ssx >= width || ssy < 0 || ssy >= height) continue;
+        const storedD = depth[ssy * width + ssx]!;
+        if (!Number.isFinite(storedD)) continue;
+        const sampleD = -spz; // the sample's own eye distance
+        // Occluded when the stored surface is nearer than the sample by > bias,
+        // range-checked so distant geometry through a gap does not over-darken.
+        if (storedD <= sampleD - bias) {
+          const rangeCheck = radius / (Math.abs(d - storedD) + 1e-4);
+          occlusion += Math.min(1, rangeCheck);
+        }
+      }
+      ao[di] = Math.max(0, Math.min(1, 1 - (occlusion / SSAO_KERNEL.length) * intensity));
+    }
+  }
+  return ao;
 }
 
 /**
@@ -1111,6 +1347,7 @@ function drawMesh(
   lightMvp: Mat4 | null,
   shadow: ShadowInput | null,
   tonemap: ToneMap | null,
+  ssao: Float32Array | null,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
 ): void {
   eachTriangle(
@@ -1146,6 +1383,7 @@ function drawMesh(
         environment,
         shadow,
         tonemap,
+        ssao,
         style,
       );
     },
@@ -1173,6 +1411,7 @@ function rasterizeTriangle(
   environment: EnvironmentLight | null,
   shadow: ShadowInput | null,
   tonemap: ToneMap | null,
+  ssao: Float32Array | null,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
 ): void {
   // Perspective divide to NDC, then to screen pixels. NDC spans the full extent
@@ -1418,6 +1657,14 @@ function rasterizeTriangle(
           ambR = ambient * ar * ao;
           ambG = ambient * ag * ao;
           ambB = ambient * ab * ao;
+        }
+        // Screen-space ambient occlusion darkens only the ambient/IBL fill (never
+        // the direct light), matching where AO physically applies.
+        if (ssao) {
+          const s = ssao[di]!;
+          ambR *= s;
+          ambG *= s;
+          ambB *= s;
         }
         // The direct light is what a shadow occludes; ambient/IBL still fills it.
         // This is the linear radiance, which can exceed 1 (bright spec/emissive/
