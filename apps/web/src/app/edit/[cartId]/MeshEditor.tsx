@@ -44,10 +44,11 @@ import { importMeshFile, decodeMeshTextures } from "@/lib/meshImport";
 import { fetchLibraryMesh } from "@/lib/libraryClient";
 import type { LibraryAsset } from "@/lib/libraryManifest";
 import styles from "./editor.module.css";
-import { RailGroup, RailHint } from "./railControls";
+import { RailGroup, RailHint, SegmentedControl } from "./railControls";
 import { LibraryBrowser } from "./LibraryBrowser";
 import { MaterialEditor } from "./MaterialEditor";
 import { LightingEditor } from "./LightingEditor";
+import { SceneViewport } from "./SceneViewport";
 
 const VIEWPORT = 512; // preview canvas edge in device pixels
 const ORBIT_SPEED = 0.01; // radians per pixel dragged
@@ -92,6 +93,8 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
   const [note, setNote] = useState<string | null>(null);
   const [textures, setTextures] = useState<(DecodedTexture | null)[] | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  /** "solo" previews the selected mesh alone; "scene" composes every instance. */
+  const [view, setView] = useState<"solo" | "scene">("solo");
 
   // Keep the selection valid as the list changes (import selects the new mesh;
   // deleting the selected one falls back to the first remaining).
@@ -261,6 +264,16 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
     <div className={styles.body}>
       {/* Left rail: import + mesh list */}
       <aside style={{ width: 240, padding: 12, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
+        <SegmentedControl
+          label="View"
+          ariaLabel="Preview mode"
+          selected={view}
+          onSelect={setView}
+          options={[
+            { id: "solo", label: "Solo mesh", hint: "Preview the selected mesh alone" },
+            { id: "scene", label: "Scene", hint: "Compose every placed mesh together" },
+          ]}
+        />
         <RailGroup label="Import">
           <div className={styles.toolGroup}>
             <button type="button" className={styles.toolBtn} onClick={() => fileRef.current?.click()}>
@@ -320,7 +333,15 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
         </RailGroup>
       </aside>
 
-      {/* Centre: preview */}
+      {/* Centre: preview — the selected mesh alone, or the whole composed scene */}
+      {view === "scene" ? (
+        <SceneViewport
+          sidecar={sidecar}
+          onSidecarChange={onSidecarChange}
+          selectedId={selectedId}
+          onSelectId={setSelectedId}
+        />
+      ) : (
       <section className={styles.mapStage}>
         <canvas
           ref={canvasRef}
@@ -357,6 +378,7 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
           </span>
         </div>
       </section>
+      )}
 
       {/* Right: transform, rename, export */}
       <aside style={{ width: 260, padding: 12, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
