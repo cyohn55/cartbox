@@ -195,6 +195,9 @@ export function projectionMatrix(fovY: number, aspect: number, near: number, far
 /** The identity basis, used when a mesh has no model transform (normals pass through). */
 const IDENTITY_3X3: readonly number[] = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
+/** A 4×4 identity, for passes with no per-instance model transform (world = object). */
+const IDENTITY_MAT4: Mat4 = Float64Array.from([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+
 /**
  * The 3×3 basis that carries an object normal into world space: the model
  * matrix's upper-left block, kept in the same column-major layout so `drawMesh`
@@ -318,6 +321,26 @@ export interface ToneMap {
 }
 
 /**
+ * A light for the Modern (AAA) tier's multi-light forward path (Phase 4). The
+ * fantasy tiers' lights ride the cart's 6-slot 2D mailbox, which is full (its
+ * pmem block ends at the 256-word ceiling), so the Modern tier takes its lights
+ * here instead — a dedicated scene channel with no fixed cap. A `directional`
+ * light is the sun (parallel rays); a `point` light falls off to nothing at
+ * `range`. Colours are 0..1 in the engine's byte space; `intensity` scales them.
+ */
+export interface SceneLight {
+  readonly kind: "directional" | "point";
+  /** Directional: unit direction *towards* the light. */
+  readonly direction?: readonly [number, number, number];
+  /** Point: world-space position. */
+  readonly position?: readonly [number, number, number];
+  readonly color: readonly [number, number, number];
+  readonly intensity: number;
+  /** Point falloff radius in world units; ≤ 0 means no distance falloff. */
+  readonly range?: number;
+}
+
+/**
  * The ACES filmic tone-map curve (Narkowicz's fit), per channel, clamped to
  * [0,1]. A cheap, widely-used approximation of the film response — the same
  * closed form on both backends, so it is testable without a GPU.
@@ -411,6 +434,11 @@ interface Vertex {
   lx: number;
   ly: number;
   lz: number;
+  // World-space position, for point-light attenuation in the multi-light path.
+  // Zero when no model matrix is threaded (the passes that don't need it).
+  wx: number;
+  wy: number;
+  wz: number;
 }
 
 const NEAR = 0.05;
@@ -429,6 +457,9 @@ function lerpVertex(a: Vertex, b: Vertex, t: number): Vertex {
     lx: mix(a.lx, b.lx),
     ly: mix(a.ly, b.ly),
     lz: mix(a.lz, b.lz),
+    wx: mix(a.wx, b.wx),
+    wy: mix(a.wy, b.wy),
+    wz: mix(a.wz, b.wz),
   };
 }
 
@@ -558,6 +589,7 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
     mesh,
     viewProj,
     view,
+    IDENTITY_MAT4,
     IDENTITY_3X3,
     size,
     size,
@@ -576,6 +608,7 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
     null,
     null,
     options.tonemap ?? null,
+    null,
     null,
   );
 }
@@ -695,6 +728,10 @@ export interface RenderMeshSceneOptions {
    *  set, it modulates the PBR ambient/IBL term. Build it with
    *  {@link renderGeometryBuffers} + {@link computeSsao}. */
   readonly ssao?: Float32Array | null;
+  /** Multiple lights for PBR materials (Modern tier), replacing the single
+   *  `lightDirection` key light. Directional + point; no fixed cap. See
+   *  {@link SceneLight}. When omitted the single key light is used (unchanged). */
+  readonly lights?: readonly SceneLight[] | null;
   /** Per-pixel rasterisation behaviour; defaults to {@link DEFAULT_RASTER_STYLE}. */
   readonly style?: RasterStyle;
 }
@@ -718,6 +755,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
   const shadow = options.shadow ?? null;
   const tonemap = options.tonemap ?? null;
   const ssao = options.ssao ?? null;
+  const lights = options.lights ?? null;
   const style = options.style ?? DEFAULT_RASTER_STYLE;
   const viewProj = multiply(projection, view);
 
@@ -761,9 +799,9 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const emissiveTextures = instance.emissiveTextures ?? null;
     const lightMvp = shadow ? multiply(shadow.lightViewProj, instance.model) : null;
     if (style.zBuffer) {
-      drawMesh(instance.mesh, mvp, modelView, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, style);
+      drawMesh(instance.mesh, mvp, modelView, instance.model, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, lights, style);
     } else {
-      eachTriangle(instance.mesh, mvp, modelView, normalBasis, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightMvp, (triangle) => queue.push(triangle));
+      eachTriangle(instance.mesh, mvp, modelView, instance.model, normalBasis, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightMvp, (triangle) => queue.push(triangle));
     }
   }
 
@@ -792,6 +830,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
         shadow,
         tonemap,
         ssao,
+        lights,
         style,
       );
     }
@@ -861,6 +900,7 @@ export function renderShadowMap(
       instance.mesh,
       mvp,
       modelView,
+      instance.model,
       IDENTITY_3X3,
       null,
       null,
@@ -968,7 +1008,7 @@ export function renderGeometryBuffers(
     const mvp = multiply(viewProj, instance.model);
     const modelView = multiply(view, instance.model);
     const normalBasis = normalMatrix3x3(instance.model);
-    eachTriangle(instance.mesh, mvp, modelView, normalBasis, null, null, null, null, null, null, null, (triangle) =>
+    eachTriangle(instance.mesh, mvp, modelView, instance.model, normalBasis, null, null, null, null, null, null, null, (triangle) =>
       rasterizeGeometry(triangle.a, triangle.b, triangle.c, width, height, depth, normals, view),
     );
   }
@@ -1208,6 +1248,7 @@ function eachTriangle(
   mesh: MeshAsset,
   mvp: Mat4,
   modelView: Mat4,
+  model: Mat4,
   normalBasis: readonly number[],
   textures: readonly (DecodedTexture | null)[] | null,
   normalTextures: readonly (DecodedTexture | null)[] | null,
@@ -1301,6 +1342,10 @@ function eachTriangle(
         lx,
         ly,
         lz,
+        // World-space position (model · objectPos), for point-light attenuation.
+        wx: model[0]! * x + model[4]! * y + model[8]! * z + model[12]!,
+        wy: model[1]! * x + model[5]! * y + model[9]! * z + model[13]!,
+        wz: model[2]! * x + model[6]! * y + model[10]! * z + model[14]!,
       };
     };
 
@@ -1329,6 +1374,7 @@ function drawMesh(
   mesh: MeshAsset,
   mvp: Mat4,
   modelView: Mat4,
+  model: Mat4,
   normalBasis: readonly number[],
   width: number,
   height: number,
@@ -1348,12 +1394,14 @@ function drawMesh(
   shadow: ShadowInput | null,
   tonemap: ToneMap | null,
   ssao: Float32Array | null,
+  lights: readonly SceneLight[] | null,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
 ): void {
   eachTriangle(
     mesh,
     mvp,
     modelView,
+    model,
     normalBasis,
     textures,
     normalTextures,
@@ -1384,6 +1432,7 @@ function drawMesh(
         shadow,
         tonemap,
         ssao,
+        lights,
         style,
       );
     },
@@ -1412,6 +1461,7 @@ function rasterizeTriangle(
   shadow: ShadowInput | null,
   tonemap: ToneMap | null,
   ssao: Float32Array | null,
+  lights: readonly SceneLight[] | null,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
 ): void {
   // Perspective divide to NDC, then to screen pixels. NDC spans the full extent
@@ -1669,9 +1719,80 @@ function rasterizeTriangle(
         // The direct light is what a shadow occludes; ambient/IBL still fills it.
         // This is the linear radiance, which can exceed 1 (bright spec/emissive/
         // environment).
-        const lr = (kdm * (1 - Fr) * ar + Fr * specD) * ndl * shadowLit + ambR + er;
-        const lg = (kdm * (1 - Fg) * ag + Fg * specD) * ndl * shadowLit + ambG + eg;
-        const lb = (kdm * (1 - Fb) * ab + Fb * specD) * ndl * shadowLit + ambB + eb;
+        let lr: number;
+        let lg: number;
+        let lb: number;
+        if (lights && lights.length > 0) {
+          // --- Multi-light forward accumulation (Modern tier) ---
+          // Each light re-evaluates the Cook-Torrance direct term with its own
+          // direction + radiance; the light-independent factors (N, ndv, f0, kdm,
+          // a2, k) are shared. Point lights fall off to nothing at their range.
+          const wx = pw0 * a.wx + pw1 * b.wx + pw2 * c.wx;
+          const wy = pw0 * a.wy + pw1 * b.wy + pw2 * c.wy;
+          const wz = pw0 * a.wz + pw1 * b.wz + pw2 * c.wz;
+          let dR = 0;
+          let dG = 0;
+          let dB = 0;
+          for (const lgt of lights) {
+            let Lx: number;
+            let Ly: number;
+            let Lz: number;
+            let atten = 1;
+            if (lgt.kind === "point") {
+              const px = (lgt.position?.[0] ?? 0) - wx;
+              const py = (lgt.position?.[1] ?? 0) - wy;
+              const pz = (lgt.position?.[2] ?? 0) - wz;
+              const dist = Math.hypot(px, py, pz) || 1e-4;
+              Lx = px / dist;
+              Ly = py / dist;
+              Lz = pz / dist;
+              const range = lgt.range ?? 0;
+              if (range > 0) {
+                const t = Math.max(0, 1 - dist / range);
+                atten = t * t;
+              }
+            } else {
+              const dir = lgt.direction ?? [0, 1, 0];
+              const dl = Math.hypot(dir[0]!, dir[1]!, dir[2]!) || 1;
+              Lx = dir[0]! / dl;
+              Ly = dir[1]! / dl;
+              Lz = dir[2]! / dl;
+            }
+            const ndlL = Math.max(0, Nx * Lx + Ny * Ly + Nz * Lz);
+            if (ndlL <= 0 || atten <= 0) continue;
+            let hxL = Lx + viewDir[0];
+            let hyL = Ly + viewDir[1];
+            let hzL = Lz + viewDir[2];
+            const hlL = Math.hypot(hxL, hyL, hzL) || 1;
+            hxL /= hlL;
+            hyL /= hlL;
+            hzL /= hlL;
+            const ndhL = Math.max(0, Nx * hxL + Ny * hyL + Nz * hzL);
+            const vdhL = Math.max(0, viewDir[0] * hxL + viewDir[1] * hyL + viewDir[2] * hzL);
+            const ddL = ndhL * ndhL * (a2 - 1) + 1;
+            const DL = a2 / (Math.PI * ddL * ddL + 1e-7);
+            const GL = (ndv / (ndv * (1 - k) + k)) * (ndlL / (ndlL * (1 - k) + k));
+            const fpL = Math.pow(1 - vdhL, 5);
+            const specL = (DL * GL) / (4 * ndlL * ndv + 1e-4);
+            const FrL = f0r + (1 - f0r) * fpL;
+            const FgL = f0g + (1 - f0g) * fpL;
+            const FbL = f0b + (1 - f0b) * fpL;
+            // Directional lights are the ones the sun shadow map occludes; a point
+            // light is unshadowed here (its own shadow map would be a follow-up).
+            const occl = lgt.kind === "directional" ? shadowLit : 1;
+            const w = lgt.intensity * atten * ndlL * occl;
+            dR += (kdm * (1 - FrL) * ar + FrL * specL) * lgt.color[0]! * w;
+            dG += (kdm * (1 - FgL) * ag + FgL * specL) * lgt.color[1]! * w;
+            dB += (kdm * (1 - FbL) * ab + FbL * specL) * lgt.color[2]! * w;
+          }
+          lr = dR + ambR + er;
+          lg = dG + ambG + eg;
+          lb = dB + ambB + eb;
+        } else {
+          lr = (kdm * (1 - Fr) * ar + Fr * specD) * ndl * shadowLit + ambR + er;
+          lg = (kdm * (1 - Fg) * ag + Fg * specD) * ndl * shadowLit + ambG + eg;
+          lb = (kdm * (1 - Fb) * ab + Fb * specD) * ndl * shadowLit + ambB + eb;
+        }
         if (tonemap) {
           // HDR: expose, then roll highlights off with the ACES curve instead of
           // clipping flat to white.
