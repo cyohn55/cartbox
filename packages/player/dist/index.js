@@ -4134,7 +4134,7 @@ var lerp3 = (a, b, t) => a + (b - a) * t;
 import { composeModelMatrix as composeModelMatrix2, multiplyMat4 } from "@cartbox/editor";
 
 // src/render/sceneRenderer.ts
-import { DEFAULT_RASTER_STYLE, renderMeshScene } from "@cartbox/editor";
+import { DEFAULT_RASTER_STYLE, cullInstances, renderMeshScene } from "@cartbox/editor";
 
 // src/render/renderCaps.ts
 function createTextureBudgetCache() {
@@ -4261,7 +4261,8 @@ var SoftwareSceneRenderer = class {
     this.backend = "software";
   }
   render(instances, draw) {
-    renderMeshScene(instances, {
+    const visible = draw.cull ? cullInstances(instances, draw.view, draw.projection) : instances;
+    renderMeshScene(visible, {
       width: draw.width,
       height: draw.height,
       out: draw.out,
@@ -4958,7 +4959,8 @@ var WorldOverlaySurface = class {
 import {
   DEFAULT_RASTER_STYLE as DEFAULT_RASTER_STYLE2,
   computeSmoothNormals,
-  multiplyMat4 as multiplyMat42
+  multiplyMat4 as multiplyMat42,
+  cullInstances as cullInstances2
 } from "@cartbox/editor";
 
 // src/render/scenePacking.ts
@@ -5671,13 +5673,14 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   }
   render(instances, draw) {
     if (this.destroyed) return;
+    const visible = draw.cull ? cullInstances2(instances, draw.view, draw.projection) : instances;
     if (this.latest) {
       this.composite(draw);
     } else {
-      this.software.render(instances, draw);
+      this.software.render(visible, draw);
     }
     try {
-      this.submit(instances, draw);
+      this.submit(visible, draw);
     } catch {
       this.latest = null;
     }

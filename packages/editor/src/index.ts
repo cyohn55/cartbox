@@ -219,6 +219,13 @@ export {
   type RenderGeometryOptions,
 } from "./render/meshRasterizer";
 export {
+  frustumPlanes,
+  aabbOutsideFrustum,
+  worldAabb,
+  cullInstances,
+  type FrustumPlane,
+} from "./render/frustum";
+export {
   MapVoxelLayer,
   mapLayerToVoxelGrid,
   serializeMapVoxelLayer,

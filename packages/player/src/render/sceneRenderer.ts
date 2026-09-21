@@ -20,7 +20,7 @@
  * rasteriser is a hardcoded call. See ERA_MODELS.md §5.1.
  */
 
-import { DEFAULT_RASTER_STYLE, renderMeshScene, type MeshSceneInstance } from "@cartbox/editor";
+import { DEFAULT_RASTER_STYLE, cullInstances, renderMeshScene, type MeshSceneInstance } from "@cartbox/editor";
 import type { EnvironmentLight, Mat4, RasterStyle, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
@@ -84,6 +84,11 @@ export interface SceneDraw {
    * {@link SceneLight}.
    */
   readonly lights?: readonly SceneLight[] | null;
+  /**
+   * Skip instances whose world AABB is entirely outside the camera frustum. A
+   * correct cull is output-identical, so it is a pure perf win; default off.
+   */
+  readonly cull?: boolean;
 }
 
 /** Draws placed 3D instances into a framebuffer. */
@@ -110,7 +115,8 @@ export class SoftwareSceneRenderer implements SceneRenderer {
   constructor(private readonly style: RasterStyle = DEFAULT_RASTER_STYLE) {}
 
   render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
-    renderMeshScene(instances, {
+    const visible = draw.cull ? cullInstances(instances, draw.view, draw.projection) : instances;
+    renderMeshScene(visible, {
       width: draw.width,
       height: draw.height,
       out: draw.out,

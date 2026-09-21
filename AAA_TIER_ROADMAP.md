@@ -198,7 +198,12 @@ tiled/clustered light binning.
 ### Phase 5 — "Runs well on the web" asset pipeline
 - [ ] glTF import with Draco / meshopt geometry compression
 - [ ] KTX2 / Basis texture compression + mipmaps
-- [ ] LODs, frustum + occlusion culling, instancing
+- [x] **Frustum culling** — `cullInstances` drops instances whose world AABB is
+      entirely outside the camera frustum (Gribb–Hartmann planes from the
+      view-projection, positive-vertex AABB test). Output-identical, so it is a
+      pure perf win applied on both backends via `SceneDraw.cull`. Verified with
+      `meshRasterizerFrustum.test.ts` (including the render-identical invariant).
+- [ ] LODs, occlusion culling, instancing
 - [ ] Streaming for large scenes
 
 ### Phase 6 — 3D authoring UX (largest scope)
