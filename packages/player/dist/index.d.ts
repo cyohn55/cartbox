@@ -1725,6 +1725,11 @@ interface SceneDraw {
      * {@link SceneLight}.
      */
     readonly lights?: readonly SceneLight[] | null;
+    /**
+     * Skip instances whose world AABB is entirely outside the camera frustum. A
+     * correct cull is output-identical, so it is a pure perf win; default off.
+     */
+    readonly cull?: boolean;
 }
 /** Draws placed 3D instances into a framebuffer. */
 interface SceneRenderer {

@@ -58,6 +58,7 @@ import {
   type MeshAsset,
   type MeshSceneInstance,
   type RasterStyle,
+  cullInstances,
 } from "@cartbox/editor";
 
 import { SoftwareSceneRenderer, type SceneDraw, type SceneRenderer } from "./sceneRenderer.js";
@@ -698,16 +699,20 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
     if (this.destroyed) return;
 
+    // Frustum-cull once, so both the CPU warm-up and the GPU submit draw the same
+    // visible set. A correct cull is output-identical.
+    const visible = draw.cull ? cullInstances(instances, draw.view, draw.projection) : instances;
+
     // Composite the newest completed GPU frame, or rasterise this one on the CPU
     // while the pipeline fills. Either way `out` is correct when this returns.
     if (this.latest) {
       this.composite(draw);
     } else {
-      this.software.render(instances, draw);
+      this.software.render(visible, draw);
     }
 
     try {
-      this.submit(instances, draw);
+      this.submit(visible, draw);
     } catch {
       // A lost device or an unbuildable buffer must not take the cart down: drop
       // back to software permanently by forgetting the last GPU frame.
