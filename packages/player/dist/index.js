@@ -4134,7 +4134,13 @@ var lerp3 = (a, b, t) => a + (b - a) * t;
 import { composeModelMatrix as composeModelMatrix2, multiplyMat4 } from "@cartbox/editor";
 
 // src/render/sceneRenderer.ts
-import { DEFAULT_RASTER_STYLE, cullInstances, renderMeshScene } from "@cartbox/editor";
+import {
+  DEFAULT_RASTER_STYLE,
+  applyLods,
+  cameraPositionFromView,
+  cullInstances,
+  renderMeshScene
+} from "@cartbox/editor";
 
 // src/render/renderCaps.ts
 function createTextureBudgetCache() {
@@ -4250,6 +4256,15 @@ function webgpuCanHonour(style) {
 }
 
 // src/render/sceneRenderer.ts
+function applyScenePasses(instances, draw) {
+  let out = instances;
+  if (draw.lod) {
+    const [cx, cy, cz] = cameraPositionFromView(draw.view);
+    out = applyLods(out, cx, cy, cz);
+  }
+  if (draw.cull) out = cullInstances(out, draw.view, draw.projection);
+  return out;
+}
 var SoftwareSceneRenderer = class {
   /**
    * @param style How to rasterise — the era behaviour a console model asks for.
@@ -4261,7 +4276,7 @@ var SoftwareSceneRenderer = class {
     this.backend = "software";
   }
   render(instances, draw) {
-    const visible = draw.cull ? cullInstances(instances, draw.view, draw.projection) : instances;
+    const visible = applyScenePasses(instances, draw);
     renderMeshScene(visible, {
       width: draw.width,
       height: draw.height,
@@ -4959,8 +4974,7 @@ var WorldOverlaySurface = class {
 import {
   DEFAULT_RASTER_STYLE as DEFAULT_RASTER_STYLE2,
   computeSmoothNormals,
-  multiplyMat4 as multiplyMat42,
-  cullInstances as cullInstances2
+  multiplyMat4 as multiplyMat42
 } from "@cartbox/editor";
 
 // src/render/scenePacking.ts
@@ -5673,7 +5687,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   }
   render(instances, draw) {
     if (this.destroyed) return;
-    const visible = draw.cull ? cullInstances2(instances, draw.view, draw.projection) : instances;
+    const visible = applyScenePasses(instances, draw);
     if (this.latest) {
       this.composite(draw);
     } else {

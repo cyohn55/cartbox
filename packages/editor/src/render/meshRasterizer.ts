@@ -616,10 +616,23 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
 // --- Scene rendering: many placed meshes through one camera -----------------
 
 /** A mesh placed in a shared world by a model matrix, with its own textures. */
+/**
+ * A level-of-detail chain for an instance (Phase 5): progressively cheaper meshes
+ * chosen by camera distance. `meshes[0]` is the highest detail; `distances` are
+ * ascending switch points, one fewer than `meshes` (past the last switch point
+ * the coarsest mesh is used). Applied by `applyLods`; absent, `mesh` is drawn.
+ */
+export interface LodChain {
+  readonly meshes: readonly MeshAsset[];
+  readonly distances: readonly number[];
+}
+
 export interface MeshSceneInstance {
   readonly mesh: MeshAsset;
   /** Column-major world transform (see {@link composeModelMatrix}). */
   readonly model: Mat4;
+  /** Optional level-of-detail chain; when set, `applyLods` swaps `mesh` by distance. */
+  readonly lod?: LodChain | null;
   /** Decoded base-colour texture per primitive (index-aligned), or null entries. */
   readonly textures?: readonly (DecodedTexture | null)[];
   /**

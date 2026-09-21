@@ -226,6 +226,13 @@ export {
   type FrustumPlane,
 } from "./render/frustum";
 export {
+  selectLodIndex,
+  cameraPositionFromView,
+  resolveLodMesh,
+  applyLods,
+} from "./render/lod";
+export type { LodChain } from "./render/meshRasterizer";
+export {
   MapVoxelLayer,
   mapLayerToVoxelGrid,
   serializeMapVoxelLayer,
