@@ -168,6 +168,7 @@ export {
   serializeMeshAsset,
   deserializeMeshAsset,
   defaultMaterial,
+  updateMeshMaterial,
   meshVertexCount,
   meshTriangleCount,
   meshBounds,

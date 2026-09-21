@@ -16,6 +16,7 @@ import {
   readMeshEntry,
   removeMesh,
   renameMesh,
+  setMeshAsset,
   setMeshTransform,
   defaultMeshTransform,
 } from "@/lib/meshSidecar";
@@ -67,6 +68,31 @@ describe("mesh sidecar", () => {
 
     const removed = removeMesh(renamed, id);
     expect(removed.meshes).toHaveLength(0);
+  });
+
+  it("replaces one entry's geometry while keeping id, name, and transform", () => {
+    const { sidecar, id } = addMesh(emptyMeshSidecar(), triangle(), "A");
+    const moved = setMeshTransform(sidecar, id, { position: [1, 2, 3], rotation: [0, 90, 0], scale: [2, 2, 2] });
+
+    const edited = readMeshEntry(moved.meshes[0]!);
+    const recoloured: MeshAsset = {
+      ...edited,
+      primitives: edited.primitives.map((p) => ({ ...p, material: { ...p.material, baseColorFactor: [0.1, 0.2, 0.3, 1] } })),
+    };
+
+    const next = setMeshAsset(moved, id, recoloured);
+    expect(next.meshes[0]!.id).toBe(id);
+    expect(next.meshes[0]!.name).toBe("A");
+    expect(next.meshes[0]!.transform.position).toEqual([1, 2, 3]);
+    expect(readMeshEntry(next.meshes[0]!).primitives[0]!.material.baseColorFactor).toEqual([0.1, 0.2, 0.3, 1]);
+    // The source sidecar is untouched.
+    expect(readMeshEntry(moved.meshes[0]!).primitives[0]!.material.baseColorFactor).toEqual([1, 0.5, 0, 1]);
+  });
+
+  it("returns the sidecar unchanged geometry for an unknown id", () => {
+    const { sidecar } = addMesh(emptyMeshSidecar(), triangle(), "A");
+    const next = setMeshAsset(sidecar, "nope", triangle());
+    expect(next.meshes[0]!.mesh).toBe(sidecar.meshes[0]!.mesh);
   });
 
   it("drops a corrupt entry instead of throwing", () => {
