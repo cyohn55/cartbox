@@ -4275,6 +4275,7 @@ var SoftwareSceneRenderer = class {
       shadow: draw.shadow,
       tonemap: draw.tonemap,
       ssao: draw.ssao,
+      lights: draw.lights,
       style: this.style
     });
   }

@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, DecodedTexture, EnvironmentLight, ShadowInput, ToneMap, RasterStyle } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, DecodedTexture, EnvironmentLight, ShadowInput, ToneMap, SceneLight, RasterStyle } from '@cartbox/editor';
 
 /**
  * Console models. A model is a fixed hardware spec plus the WASM runtime that
@@ -1719,6 +1719,12 @@ interface SceneDraw {
      * ambient term by it. The GPU path uploads it and samples per fragment.
      */
     readonly ssao?: Float32Array | null;
+    /**
+     * Multiple lights for PBR (Modern-tier) materials, replacing the single
+     * `lightDirection`. Decoupled from the full 6-slot 2D mailbox. See
+     * {@link SceneLight}.
+     */
+    readonly lights?: readonly SceneLight[] | null;
 }
 /** Draws placed 3D instances into a framebuffer. */
 interface SceneRenderer {

@@ -21,7 +21,7 @@
  */
 
 import { DEFAULT_RASTER_STYLE, renderMeshScene, type MeshSceneInstance } from "@cartbox/editor";
-import type { EnvironmentLight, Mat4, RasterStyle, ShadowInput, ToneMap } from "@cartbox/editor";
+import type { EnvironmentLight, Mat4, RasterStyle, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
 import { applyRenderCaps, createTextureBudgetCache } from "./renderCaps.js";
@@ -78,6 +78,12 @@ export interface SceneDraw {
    * ambient term by it. The GPU path uploads it and samples per fragment.
    */
   readonly ssao?: Float32Array | null;
+  /**
+   * Multiple lights for PBR (Modern-tier) materials, replacing the single
+   * `lightDirection`. Decoupled from the full 6-slot 2D mailbox. See
+   * {@link SceneLight}.
+   */
+  readonly lights?: readonly SceneLight[] | null;
 }
 
 /** Draws placed 3D instances into a framebuffer. */
@@ -118,6 +124,7 @@ export class SoftwareSceneRenderer implements SceneRenderer {
       shadow: draw.shadow,
       tonemap: draw.tonemap,
       ssao: draw.ssao,
+      lights: draw.lights,
       style: this.style,
     });
   }
