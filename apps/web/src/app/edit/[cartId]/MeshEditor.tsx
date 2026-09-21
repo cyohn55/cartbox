@@ -22,6 +22,9 @@ import {
   meshBounds,
   meshVertexCount,
   meshTriangleCount,
+  sceneLightingEnvironment,
+  sceneLightingKeyDirection,
+  sceneLightingTonemap,
   type MeshAsset,
   type DecodedTexture,
 } from "@cartbox/editor";
@@ -31,6 +34,7 @@ import {
   removeMesh,
   renameMesh,
   setMeshAsset,
+  setMeshLighting,
   setMeshTransform,
   readMeshEntry,
   type MeshSidecar,
@@ -43,6 +47,7 @@ import styles from "./editor.module.css";
 import { RailGroup, RailHint } from "./railControls";
 import { LibraryBrowser } from "./LibraryBrowser";
 import { MaterialEditor } from "./MaterialEditor";
+import { LightingEditor } from "./LightingEditor";
 
 const VIEWPORT = 512; // preview canvas edge in device pixels
 const ORBIT_SPEED = 0.01; // radians per pixel dragged
@@ -140,6 +145,11 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
     context.clearRect(0, 0, VIEWPORT, VIEWPORT);
     if (!meshAsset) return;
 
+    // Preview the authored lighting rig, if any. The single-mesh preview supports
+    // the skybox environment, ambient, key-light direction, and tone mapping;
+    // multi-light and shadows come with the scene viewport. Absent (no rig) the
+    // preview renders exactly as before.
+    const lighting = sidecar.lighting;
     renderMesh(meshAsset, {
       camera: { yaw, pitch, distance: fitDistance(meshAsset) * zoom },
       size: VIEWPORT,
@@ -147,11 +157,19 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
       depth: buffers.depth,
       textures: textures ?? undefined,
       background: [14, 16, 26, 255],
+      ...(lighting
+        ? {
+            ambient: lighting.ambient,
+            lightDirection: sceneLightingKeyDirection(lighting),
+            environment: sceneLightingEnvironment(lighting),
+            tonemap: sceneLightingTonemap(lighting),
+          }
+        : {}),
     });
     const image = context.createImageData(VIEWPORT, VIEWPORT);
     image.data.set(buffers.out);
     context.putImageData(image, 0, 0);
-  }, [meshAsset, textures, yaw, pitch, zoom, buffers]);
+  }, [meshAsset, textures, yaw, pitch, zoom, buffers, sidecar.lighting]);
 
   // Orbit + zoom.
   const drag = useRef<{ x: number; y: number } | null>(null);
@@ -395,6 +413,10 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
         ) : (
           <RailHint>Import a 3D model to preview and place it.</RailHint>
         )}
+
+        {/* Scene-wide lighting: authored once for the whole 3D scene, so it lives
+            outside the per-mesh selection. */}
+        <LightingEditor lighting={sidecar.lighting} onChange={(lighting) => onSidecarChange(setMeshLighting(sidecar, lighting))} />
       </aside>
 
       <LibraryBrowser

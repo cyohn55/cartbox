@@ -16,10 +16,16 @@
  * them together would couple two unrelated schemas.
  */
 
-import { deserializeMeshAsset, serializeMeshAsset, type MeshAsset } from "@cartbox/editor";
+import {
+  deserializeMeshAsset,
+  parseSceneLighting,
+  serializeMeshAsset,
+  type MeshAsset,
+  type SceneLighting,
+} from "@cartbox/editor";
 
-/** The envelope version; bumped on any schema change. */
-export const MESH_SIDECAR_VERSION = 1;
+/** The envelope version; bumped on any schema change (2 added the lighting rig). */
+export const MESH_SIDECAR_VERSION = 2;
 
 /** Placement of a mesh instance: translation, Euler rotation (degrees), scale. */
 export interface MeshTransform {
@@ -38,10 +44,16 @@ export interface MeshSidecarEntry {
   readonly transform: MeshTransform;
 }
 
-/** The whole mesh sidecar: every placed mesh on the cart. */
+/** The whole mesh sidecar: every placed mesh on the cart, plus its lighting rig. */
 export interface MeshSidecar {
   readonly version: number;
   readonly meshes: readonly MeshSidecarEntry[];
+  /**
+   * The authored Modern-tier lighting rig for the 3D scene, or null when the
+   * creator has set none. Absent on every cart until they opt in, so a scene
+   * without a rig renders exactly as before. See {@link SceneLighting}.
+   */
+  readonly lighting: SceneLighting | null;
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -49,9 +61,9 @@ export function defaultMeshTransform(): MeshTransform {
   return { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] };
 }
 
-/** An empty sidecar — a cart with no meshes. */
+/** An empty sidecar — a cart with no meshes and no lighting rig. */
 export function emptyMeshSidecar(): MeshSidecar {
-  return { version: MESH_SIDECAR_VERSION, meshes: [] };
+  return { version: MESH_SIDECAR_VERSION, meshes: [], lighting: null };
 }
 
 /** A stable-ish unique id for a new mesh entry. */
@@ -59,10 +71,14 @@ function newMeshId(): string {
   return `mesh-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`}`;
 }
 
-/** Serialize the sidecar for storage. Returns null when there are no meshes, so an empty cart stores nothing. */
+/**
+ * Serialize the sidecar for storage. Returns null when there is nothing to keep —
+ * no meshes and no lighting rig — so an empty cart stores nothing. A lighting rig
+ * alone (meshes removed but the scene still lit) is kept.
+ */
 export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
-  if (sidecar.meshes.length === 0) return null;
-  return JSON.stringify({ version: MESH_SIDECAR_VERSION, meshes: sidecar.meshes });
+  if (sidecar.meshes.length === 0 && !sidecar.lighting) return null;
+  return JSON.stringify({ version: MESH_SIDECAR_VERSION, meshes: sidecar.meshes, lighting: sidecar.lighting ?? null });
 }
 
 function isFiniteTriple(value: unknown): value is [number, number, number] {
@@ -112,7 +128,8 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
       transform: readTransform(record.transform),
     });
   }
-  return { version: MESH_SIDECAR_VERSION, meshes };
+  const lighting = parseSceneLighting((parsed as { lighting?: unknown }).lighting);
+  return { version: MESH_SIDECAR_VERSION, meshes, lighting };
 }
 
 // --- Immutable list operations (the editor edits through these) ------------
@@ -126,15 +143,21 @@ export function addMesh(sidecar: MeshSidecar, mesh: MeshAsset, name: string): { 
     mesh: serializeMeshAsset(mesh),
     transform: defaultMeshTransform(),
   };
-  return { sidecar: { version: MESH_SIDECAR_VERSION, meshes: [...sidecar.meshes, entry] }, id };
+  return { sidecar: { ...sidecar, version: MESH_SIDECAR_VERSION, meshes: [...sidecar.meshes, entry] }, id };
 }
 
 /** Replace one entry's transform. */
 export function setMeshTransform(sidecar: MeshSidecar, id: string, transform: MeshTransform): MeshSidecar {
   return {
+    ...sidecar,
     version: MESH_SIDECAR_VERSION,
     meshes: sidecar.meshes.map((entry) => (entry.id === id ? { ...entry, transform } : entry)),
   };
+}
+
+/** Replace the scene's lighting rig (null clears it). */
+export function setMeshLighting(sidecar: MeshSidecar, lighting: SceneLighting | null): MeshSidecar {
+  return { ...sidecar, version: MESH_SIDECAR_VERSION, lighting };
 }
 
 /**
@@ -146,6 +169,7 @@ export function setMeshTransform(sidecar: MeshSidecar, id: string, transform: Me
 export function setMeshAsset(sidecar: MeshSidecar, id: string, mesh: MeshAsset): MeshSidecar {
   const serialized = serializeMeshAsset(mesh);
   return {
+    ...sidecar,
     version: MESH_SIDECAR_VERSION,
     meshes: sidecar.meshes.map((entry) => (entry.id === id ? { ...entry, mesh: serialized } : entry)),
   };
@@ -154,6 +178,7 @@ export function setMeshAsset(sidecar: MeshSidecar, id: string, mesh: MeshAsset):
 /** Rename one entry. */
 export function renameMesh(sidecar: MeshSidecar, id: string, name: string): MeshSidecar {
   return {
+    ...sidecar,
     version: MESH_SIDECAR_VERSION,
     meshes: sidecar.meshes.map((entry) => (entry.id === id ? { ...entry, name } : entry)),
   };
@@ -161,7 +186,7 @@ export function renameMesh(sidecar: MeshSidecar, id: string, name: string): Mesh
 
 /** Drop one entry. */
 export function removeMesh(sidecar: MeshSidecar, id: string): MeshSidecar {
-  return { version: MESH_SIDECAR_VERSION, meshes: sidecar.meshes.filter((entry) => entry.id !== id) };
+  return { ...sidecar, version: MESH_SIDECAR_VERSION, meshes: sidecar.meshes.filter((entry) => entry.id !== id) };
 }
 
 /** Decode one entry's geometry back into a {@link MeshAsset}. */

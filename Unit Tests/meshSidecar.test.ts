@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { type MeshAsset } from "@cartbox/editor";
+import { defaultSceneLighting, patchSceneLighting, type MeshAsset } from "@cartbox/editor";
 import {
   addMesh,
   decodeMeshSidecar,
@@ -17,6 +17,7 @@ import {
   removeMesh,
   renameMesh,
   setMeshAsset,
+  setMeshLighting,
   setMeshTransform,
   defaultMeshTransform,
 } from "@/lib/meshSidecar";
@@ -102,6 +103,35 @@ describe("mesh sidecar", () => {
     const decoded = decodeMeshSidecar(JSON.stringify(payload));
     expect(decoded.meshes).toHaveLength(1); // only the good one survives
     expect(decoded.meshes[0]!.name).toBe("good");
+  });
+
+  it("round-trips a lighting rig and preserves it across list edits", () => {
+    const { sidecar, id } = addMesh(emptyMeshSidecar(), triangle(), "A");
+    const lit = setMeshLighting(sidecar, patchSceneLighting(defaultSceneLighting(), { ambient: 0.2, shadows: true }));
+    const decoded = decodeMeshSidecar(encodeMeshSidecar(lit));
+    expect(decoded.lighting?.ambient).toBe(0.2);
+    expect(decoded.lighting?.shadows).toBe(true);
+
+    // List edits keep the rig.
+    const renamed = renameMesh(lit, id, "B");
+    expect(renamed.lighting?.ambient).toBe(0.2);
+    const moved = setMeshTransform(lit, id, { position: [1, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] });
+    expect(moved.lighting?.ambient).toBe(0.2);
+  });
+
+  it("persists a lighting rig even when the last mesh is removed", () => {
+    const { sidecar, id } = addMesh(emptyMeshSidecar(), triangle(), "A");
+    const lit = removeMesh(setMeshLighting(sidecar, defaultSceneLighting()), id);
+    expect(lit.meshes).toHaveLength(0);
+    const encoded = encodeMeshSidecar(lit);
+    expect(encoded).not.toBeNull(); // lighting alone is worth storing
+    expect(decodeMeshSidecar(encoded).lighting).not.toBeNull();
+  });
+
+  it("clears the rig with setMeshLighting(null)", () => {
+    const { sidecar } = addMesh(emptyMeshSidecar(), triangle(), "A");
+    const lit = setMeshLighting(sidecar, defaultSceneLighting());
+    expect(setMeshLighting(lit, null).lighting).toBeNull();
   });
 
   it("returns an empty sidecar for null or unparseable input", () => {
