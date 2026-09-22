@@ -70,8 +70,8 @@ describe("the Lockout arena starter", () => {
     expect(LOCKOUT_CODE).toContain("btn(4)"); // Z = fire
     expect(LOCKOUT_CODE).toContain("auto_target"); // vertical auto-aim
     // Touch only exposes the D-pad + A + B (no X/Y), so the core loop must not
-    // require a manual weapon swap: an empty gun auto-falls back to the magnum.
-    expect(LOCKOUT_CODE).toContain("auto-fall back to the magnum");
+    // require a manual weapon swap: an empty gun reloads, then falls back to the magnum.
+    expect(LOCKOUT_CODE).toContain("fall back to the magnum");
   });
 
   it("shows off the editor's newest 3D features: PBR materials + normal maps + emissive energy", () => {
@@ -108,18 +108,27 @@ describe("the Lockout arena starter", () => {
     expect(scene.lighting?.environment.sky).toEqual(LOCKOUT_LIGHTING.environment.sky);
   });
 
-  it("ships the four game types with their rules and a mode-select menu", () => {
-    for (const label of ["Free for All", "Team Slayer", "SWAT", "Team Snipers"]) {
+  it("ships seven game types with their rules and a mode-select menu", () => {
+    for (const label of [
+      "Free for All",
+      "Team Slayer",
+      "SWAT",
+      "Team Snipers",
+      "Oddball",
+      "King of the Hill",
+      "Juggernaut",
+    ]) {
       expect(LOCKOUT_CODE).toContain(label);
     }
-    expect(LOCKOUT_CODE).toContain('MODE_KEYS = {"ffa","slayer","swat","snipe"}');
+    expect(LOCKOUT_CODE).toContain('MODE_KEYS = {"ffa","slayer","swat","snipe","ball","koth","jugg"}');
     expect(LOCKOUT_CODE).toContain('phase = "menu"'); // start screen
     expect(LOCKOUT_CODE).toContain("start_match"); // each mode is start-able
     expect(LOCKOUT_CODE).toContain("teams=true"); // team modes
     expect(LOCKOUT_CODE).toContain("shields=false"); // SWAT drops shields
+    expect(LOCKOUT_CODE).toContain("update_objective"); // objective scoring (ball/hill/jugg)
   });
 
-  it("implements the Lockout weapon sandbox with pickups, swap, headshots and zoom", () => {
+  it("implements the weapon sandbox with pickups, reload, swap, headshots and zoom", () => {
     for (const weapon of ["br", "smg", "shotgun", "sniper", "magnum", "sword"]) {
       expect(LOCKOUT_CODE).toContain(`"${weapon}"`);
     }
@@ -127,6 +136,15 @@ describe("the Lockout arena starter", () => {
     expect(LOCKOUT_CODE).toContain("player_fire"); // per-weapon hitscan
     expect(LOCKOUT_CODE).toMatch(/dmg\s*=\s*dmg\s*\*\s*w\.hs/); // headshot multiplier
     expect(LOCKOUT_CODE).toContain("p.zoom"); // sniper zoom
+    expect(LOCKOUT_CODE).toContain("fall back to the magnum"); // empty gun auto-falls back
     expect(LOCKOUT_CODE).toMatch(/swap/); // weapon switch
+  });
+
+  it("adds the deeper sandbox: grenades, melee, wall-occluded shots, motion tracker and medals", () => {
+    expect(LOCKOUT_CODE).toContain("throw_grenade"); // double-tap-A frag grenades
+    expect(LOCKOUT_CODE).toContain("seg_blocked"); // shots can't pass through walls
+    expect(LOCKOUT_CODE).toContain("auto-melee"); // point-blank melee
+    expect(LOCKOUT_CODE).toContain("draw_tracker"); // radar / motion tracker
+    expect(LOCKOUT_CODE).toContain("register_kill"); // sprees + multikills + kill feed
   });
 });

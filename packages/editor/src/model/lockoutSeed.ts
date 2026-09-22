@@ -431,14 +431,15 @@ function markerWeaponsLua(): string {
 
 export const LOCKOUT_CODE = `-- title:  Lockout arena
 -- author: you
--- desc:   Halo 2 Lockout homage -- first-person arena vs 7 bots, Xbox 360 core
+-- desc:   A vertical Forerunner-arena FPS homage -- you + 7 bots, 7 game types, Xbox 360 core
 -- script: lua
 
--- No netcode on Cartbox, so "8 players" is you + 7 AI bots, one local match.
--- The web player only forwards 8 buttons (arrows + Z X A S), so this is a
+-- Cartbox has no netcode, so "8 players" is you + 7 AI bots in one local match.
+-- The web player forwards only 8 buttons (arrows + Z X A S), so this is a
 -- single-stick console FPS with vertical auto-aim:
---   Up/Down move . Left/Right turn . hold A(keyboard A) to strafe
---   Z fire . X jump . S swap weapon . (menu: Up/Down pick, Z start)
+--   Up/Down move . Left/Right turn . hold A strafe . double-tap A = grenade
+--   Z fire (auto-melee point-blank) . X jump . S swap weapon
+--   menu: Up/Down pick . Z start   |   sniper: hold A still to zoom
 
 local CENTER_X = ${LOCKOUT_CENTER_X.toFixed(4)}
 local CENTER_Y = ${LOCKOUT_CENTER_Y.toFixed(4)}
@@ -449,21 +450,34 @@ local MRK = {${markersLua()}}
 local MW  = {${markerWeaponsLua()}}
 local NBOT = ${BOT_COUNT}
 
+-- ---------------------------------------------------------------------------
+-- Weapon sandbox. dmg per shot, cool = frames between shots, rng world units,
+-- hs = headshot multiplier, mag/pel/spr = clip/pellets/spread, auto = hold to
+-- fire, reserve = spare rounds. A Forerunner homage sandbox, not Halo's numbers.
 local W = {
-  br      = { name="Battle Rifle",  dmg=18, cool=9,  rng=44, hs=1.7, mag=36, pel=1, spr=0.02 },
-  smg     = { name="SMG",           dmg=8,  cool=3,  rng=24, hs=1.2, mag=60, pel=1, spr=0.05 },
-  shotgun = { name="Shotgun",       dmg=13, cool=20, rng=11, hs=1.0, mag=6,  pel=6, spr=0.12 },
-  sniper  = { name="Sniper Rifle",  dmg=80, cool=42, rng=130,hs=3.0, mag=4,  pel=1, spr=0.0, zoom=true },
-  magnum  = { name="Magnum",        dmg=22, cool=13, rng=36, hs=2.2, mag=8,  pel=1, spr=0.01 },
-  sword   = { name="Energy Sword",  dmg=200,cool=22, rng=3.0,hs=1.0, mag=99, pel=1, spr=0.0, melee=true },
+  br      = { name="Battle Rifle",  dmg=17, cool=9,  rng=64, hs=1.7, mag=36, pel=1, spr=0.02, auto=false, reserve=108 },
+  smg     = { name="SMG",           dmg=7,  cool=3,  rng=26, hs=1.2, mag=60, pel=1, spr=0.05, auto=true,  reserve=180 },
+  shotgun = { name="Shotgun",       dmg=12, cool=22, rng=12, hs=1.0, mag=6,  pel=8, spr=0.14, auto=false, reserve=24 },
+  sniper  = { name="Sniper Rifle",  dmg=80, cool=44, rng=150,hs=3.0, mag=4,  pel=1, spr=0.0,  auto=false, reserve=12, zoom=true },
+  magnum  = { name="Magnum",        dmg=20, cool=13, rng=42, hs=2.0, mag=12, pel=1, spr=0.012,auto=false, reserve=48 },
+  sword   = { name="Energy Sword",  dmg=220,cool=20, rng=3.2,hs=1.0, mag=99, pel=1, spr=0.0,  auto=false, reserve=0, melee=true },
 }
+
+-- Game types. teams/shields/radar toggle the rules; obj names the objective
+-- ("slayer" = kills); target is the score that ends the match.
 local MODES = {
-  ffa    = { name="Free for All", teams=false, shields=true,  radar=true,  start="br",     target=15, weapons={br=true,smg=true,shotgun=true,sniper=true,sword=true} },
-  slayer = { name="Team Slayer",  teams=true,  shields=true,  radar=true,  start="br",     target=40, weapons={br=true,smg=true,shotgun=true,sniper=true,sword=true} },
-  swat   = { name="SWAT",         teams=true,  shields=false, radar=false, start="br",     target=40, weapons={} },
-  snipe  = { name="Team Snipers", teams=true,  shields=true,  radar=false, start="sniper", target=25, weapons={} },
+  ffa    = { name="Free for All",  obj="slayer", teams=false, shields=true,  radar=true,  start="br",     target=15, weapons={br=true,smg=true,shotgun=true,sniper=true,sword=true} },
+  slayer = { name="Team Slayer",   obj="slayer", teams=true,  shields=true,  radar=true,  start="br",     target=40, weapons={br=true,smg=true,shotgun=true,sniper=true,sword=true} },
+  swat   = { name="SWAT",          obj="slayer", teams=true,  shields=false, radar=false, start="br",     target=40, weapons={} },
+  snipe  = { name="Team Snipers",  obj="slayer", teams=true,  shields=true,  radar=false, start="sniper", target=25, weapons={} },
+  ball   = { name="Oddball",       obj="ball",   teams=false, shields=true,  radar=true,  start="magnum", target=100,weapons={br=true,smg=true,shotgun=true,sniper=true,sword=true} },
+  koth   = { name="King of the Hill",obj="hill", teams=false, shields=true,  radar=true,  start="br",     target=100,weapons={br=true,smg=true,shotgun=true,sniper=true,sword=true} },
+  jugg   = { name="Juggernaut",    obj="jugg",   teams=false, shields=true,  radar=true,  start="magnum", target=15, weapons={br=true,shotgun=true,sniper=true,sword=true} },
 }
-local MODE_KEYS = {"ffa","slayer","swat","snipe"}
+local MODE_KEYS = {"ffa","slayer","swat","snipe","ball","koth","jugg"}
+
+-- Hill locations King-of-the-Hill rotates through (the named power positions).
+local HILLS = { {0,3.65,0}, {-8,7.0,-8}, {8,4.0,7}, {0,0.7,0}, {-9,2.2,6} }
 
 local PR,PH,EYE,STEP = 0.55,1.7,1.5,0.6
 local GRAV,MOVE,JUMP,TURN = 0.028,0.15,0.5,0.045
@@ -475,13 +489,52 @@ local p = nil
 local bots = {}
 local team = { blue=0, red=0 }
 local mtimer = {}
+local grenades = {}
+local feed = {}          -- kill feed: {text,color,t}
+local announce = {t=0, text="", color=12}
 local winner = ""
 local prev = {}
 local bob = 0
 local flash = 0
+local tick = 0
+local ball = { x=0,y=0,z=0, carrier=nil, live=false }
+local hill = { x=0,y=0,z=0, next=0, idx=1 }
+local shot = {t=0, x=0, y=0, z=0}   -- last shot tracer for a beam flash
 
+-- ---------------------------------------------------------------------------
 local function ncol() return #COL // 6 end
 local function edge(k, held) local was = prev[k]; prev[k] = held; return held and not was end
+local function clamp(v,a,b) if v<a then return a elseif v>b then return b else return v end end
+local function d3(ax,ay,az,bx,by,bz) return math.sqrt((ax-bx)^2+(ay-by)^2+(az-bz)^2) end
+
+-- Segment vs every solid collider: true if the shot from A to B hits a wall
+-- before maxt (world units). Slab test per box, nearest hit kept -- this is
+-- what stops shots (yours and the bots') passing through the Forerunner walls.
+function seg_blocked(x0,y0,z0, x1,y1,z1, maxt)
+  local dx,dy,dz = x1-x0, y1-y0, z1-z0
+  for i=0,ncol()-1 do
+    local b=i*6
+    local tmin,tmax = 0.0, 1.0
+    local ok = true
+    local lo,hi
+    for a=1,3 do
+      local o = (a==1) and x0 or (a==2) and y0 or z0
+      local d = (a==1) and dx or (a==2) and dy or dz
+      lo = COL[b+a]; hi = COL[b+a+3]
+      if math.abs(d) < 1e-6 then
+        if o < lo or o > hi then ok=false break end
+      else
+        local t1=(lo-o)/d; local t2=(hi-o)/d
+        if t1>t2 then t1,t2=t2,t1 end
+        if t1>tmin then tmin=t1 end
+        if t2<tmax then tmax=t2 end
+        if tmin>tmax then ok=false break end
+      end
+    end
+    if ok and tmin>0.02 and tmin*1.0 < (maxt or 1) then return true end
+  end
+  return false
+end
 
 local function move_axis(ax, d)
   if ax == "x" then p.x = p.x + d else p.z = p.z + d end
@@ -512,7 +565,7 @@ local function move_vertical()
       elseif p.vy>0 and head>y0 and feet<y0 then p.y=y0-PH; p.vy=0 end
     end
   end
-  if p.y < -6 then respawn(p) end
+  if p.y < -6 then p.hp=0; p.dead=true; p.respawn=90; p.deaths=p.deaths+1 end
 end
 
 function respawn(who)
@@ -522,9 +575,15 @@ function respawn(who)
   who.dead=false; who.respawn=0
 end
 
-local function give(who, slot, id) who["g"..slot]=id; who["a"..slot]=W[id].mag end
+local function give(who, slot, id) who["g"..slot]=id; who["a"..slot]=W[id].mag; who["r"..slot]=W[id].reserve or 0 end
 
--- Forward from yaw + auto-aim pitch p.ap.
+function enemy_of(a, o)
+  if MODE.obj=="jugg" then return a.jugg ~= o.jugg end  -- everyone vs the juggernaut
+  if not MODE.teams then return true end
+  return a.team ~= o.team
+end
+
+-- Forward vector from yaw + auto-aim pitch.
 local function forward()
   local cp = math.cos(p.ap)
   return cp*math.sin(p.ay), math.sin(p.ap), cp*math.cos(p.ay)
@@ -536,17 +595,15 @@ local function drive_camera()
   local d = 0.5
   local tx,ty,tz = ex+fx*d, ey+fy*d, ez+fz*d
   local oy = math.atan(-fx, -fz)
-  local op = math.asin(math.max(-0.999, math.min(0.999, -fy)))
+  local op = math.asin(clamp(-fy,-0.999,0.999))
   cartbox.worldcam(oy, op, d, p.zoom and 0.5 or 1.15, tx-CENTER_X, ty-CENTER_Y, tz-CENTER_Z)
 end
 
-local function enemy_of(a, o) if not MODE.teams then return true end return a.team ~= o.team end
-local function score_kill(k) if MODE.teams then team[k.team]=team[k.team]+1 else k.score=(k.score or 0)+1 end end
-
--- The nearest live enemy bot inside a yaw cone of where the player faces, for
--- auto-aim (no manual pitch on an 8-button pad). Returns bot + distance.
+-- Nearest live enemy inside the player's forward yaw cone AND with clear line of
+-- sight, for auto-aim (no manual pitch on an 8-button pad). Returns bot,distance.
 local function auto_target()
   local best, bd = nil, 1e9
+  local ex,ey,ez = p.x, p.y+EYE, p.z
   for _, o in ipairs(bots) do
     if not o.dead and enemy_of(p, o) then
       local dx,dz = o.x-p.x, o.z-p.z
@@ -555,46 +612,154 @@ local function auto_target()
         local ang = math.atan(dx, dz) - p.ay
         while ang > math.pi do ang = ang - 2*math.pi end
         while ang < -math.pi do ang = ang + 2*math.pi end
-        if math.abs(ang) < 0.25 and m < bd then best, bd = o, m end
+        if math.abs(ang) < 0.28 and m < bd and not seg_blocked(ex,ey,ez, o.x,o.y+1.2,o.z, 1) then
+          best, bd = o, m
+        end
       end
     end
   end
   return best, bd
 end
 
+function add_feed(txt, color)
+  table.insert(feed, 1, {text=txt, color=color, t=180})
+  if #feed > 5 then table.remove(feed) end
+end
+
+function say(txt, color)
+  announce.text=txt; announce.color=color or 12; announce.t=110
+end
+
+-- Register a kill: scoring, sprees, multikills, feed, and juggernaut handover.
+function register_kill(killer, victim, hs)
+  victim.dead=true; victim.respawn = MODE.obj=="jugg" and 70 or 100
+  victim.deaths=(victim.deaths or 0)+1
+  victim.streak=0
+  if killer and killer~=victim then
+    if MODE.obj=="ball" or MODE.obj=="hill" then
+      -- objective modes: kills don't score, holding does
+    elseif MODE.obj=="jugg" then
+      if victim.jugg then killer.jugg=true; victim.jugg=false; killer.score=(killer.score or 0)+1; if killer==p then say("JUGGERNAUT",9) elseif victim==p then say("YOU ARE THE HUNTED",6) end end
+    elseif MODE.teams then
+      team[killer.team]=team[killer.team]+1
+    else
+      killer.score=(killer.score or 0)+1
+    end
+    killer.streak=(killer.streak or 0)+1
+    -- multikill window (~4s)
+    if tick-(killer.lastkill or -999) < 240 then killer.multi=(killer.multi or 1)+1 else killer.multi=1 end
+    killer.lastkill=tick
+    if killer==p then
+      local m = {"","","Double Kill!","Triple Kill!","Overkill!","Killtacular!"}
+      if killer.multi>=2 then say(m[math.min(6,killer.multi)] or "Killtacular!",9) end
+      local sp = {[5]="Killing Spree!",[10]="Killing Frenzy!",[15]="Running Riot!"}
+      if sp[killer.streak] then say(sp[killer.streak],6) end
+    end
+    add_feed((killer.tag or "?").." > "..(victim.tag or "?")..(hs and "  (headshot)" or ""), killer==p and 6 or 13)
+  end
+  if MODE.obj=="ball" and ball.carrier==victim then ball.live=true; ball.carrier=nil; ball.x=victim.x; ball.y=victim.y+0.6; ball.z=victim.z end
+end
+
+function score_of(who)
+  if MODE.teams and MODE.obj=="slayer" then return team[who.team] end
+  return who.score or 0
+end
+
+-- ---------------------------------------------------------------------------
+-- Grenades: a thrown frag arcs under gravity, bounces off floor level, and
+-- detonates on a fuse, dealing splash to everyone in range.
+function throw_grenade(who, fx,fy,fz)
+  if (who.nade or 0) <= 0 then return end
+  who.nade = who.nade - 1
+  table.insert(grenades, { x=who.x, y=who.y+EYE, z=who.z, vx=fx*0.5, vy=fy*0.5+0.12, vz=fz*0.5, t=90, owner=who })
+end
+
+local function explode(g)
+  flash = math.max(flash, 3)
+  local function splash(o)
+    if not o or o.dead then return end
+    local m = d3(g.x,g.y,g.z, o.x,o.y+1,o.z)
+    if m < 4.5 then
+      local dmg = (1 - m/4.5) * 90
+      if o.sh>0 then o.sh=o.sh-dmg; if o.sh<0 then o.hp=o.hp+o.sh; o.sh=0 end else o.hp=o.hp-dmg end
+      if o.hp<=0 then register_kill(g.owner, o, false) end
+    end
+  end
+  splash(p)
+  for _,o in ipairs(bots) do splash(o) end
+end
+
+local function update_grenades()
+  for i=#grenades,1,-1 do
+    local g=grenades[i]
+    g.vy = g.vy - GRAV*0.7
+    g.x=g.x+g.vx; g.y=g.y+g.vy; g.z=g.z+g.vz
+    -- crude floor / ledge bounce
+    for j=0,ncol()-1 do local b=j*6
+      if g.x>COL[b+1] and g.x<COL[b+4] and g.z>COL[b+3] and g.z<COL[b+6] and g.y<COL[b+5] and g.y>COL[b+5]-0.6 and g.vy<0 then
+        g.y=COL[b+5]; g.vy=-g.vy*0.4; g.vx=g.vx*0.6; g.vz=g.vz*0.6
+      end
+    end
+    g.t=g.t-1
+    if g.t<=0 or g.y<-8 then explode(g); table.remove(grenades,i) end
+  end
+end
+
 local function player_fire()
   if p.cool>0 or p.dead then return end
-  local w = W[p.slot==1 and p.g1 or p.g2]
+  local wid = p.slot==1 and p.g1 or p.g2
+  local w = W[wid]
   local ammo = p.slot==1 and p.a1 or p.a2
-  if ammo<=0 then p.slot = (p.slot==1) and 2 or 1; return end  -- auto-fall back to the magnum
+  -- auto-melee when an enemy is right in front
+  local aim,ad = auto_target()
+  if aim and ad < 2.4 then
+    p.cool=18; flash=3
+    if not aim.dead then
+      if aim.sh>0 then aim.sh=0 end
+      aim.hp = aim.hp - 90
+      if aim.hp<=0 then register_kill(p, aim, false) end
+    end
+    return
+  end
+  if ammo<=0 then
+    -- reload from reserve, else fall back to the magnum
+    local res = p.slot==1 and p.r1 or p.r2
+    if res>0 then
+      local take=math.min(w.mag,res)
+      if p.slot==1 then p.a1=take; p.r1=res-take else p.a2=take; p.r2=res-take end
+      p.cool=40; return
+    end
+    p.slot=(p.slot==1) and 2 or 1; return
+  end
   p.cool = w.cool; flash = 4
   if p.slot==1 then p.a1=p.a1-1 else p.a2=p.a2-1 end
   local ex,ey,ez = p.x, p.y+EYE, p.z
-  local aim = auto_target()
+  shot.t=3; shot.x=ex; shot.y=ey; shot.z=ez
   for _=1,w.pel do
     local fx,fy,fz
     if aim then
       fx,fy,fz = aim.x-ex, (aim.y+1.2)-ey, aim.z-ez
-      local m = math.sqrt(fx*fx+fy*fy+fz*fz); fx,fy,fz = fx/m,fy/m,fz/m
+      local m=math.sqrt(fx*fx+fy*fy+fz*fz); fx,fy,fz=fx/m,fy/m,fz/m
     else fx,fy,fz = forward() end
     if w.spr>0 then fx=fx+(math.random()-0.5)*w.spr; fz=fz+(math.random()-0.5)*w.spr end
-    local best,bt = nil,1e9
+    local best,bt=nil,1e9
     for _,o in ipairs(bots) do
       if not o.dead and enemy_of(p,o) then
-        local t = (o.x-ex)*fx+(o.y+1.2-ey)*fy+(o.z-ez)*fz
+        local t=(o.x-ex)*fx+(o.y+1.2-ey)*fy+(o.z-ez)*fz
         if t>0.4 and t<w.rng then
-          local hx,hy,hz = ex+fx*t, ey+fy*t, ez+fz*t
-          local m = math.sqrt((o.x-hx)^2+(o.y+1.2-hy)^2+(o.z-hz)^2)
-          if m<0.9 and t<bt then best,bt=o,t; o._hy=hy end
+          local hx,hy,hz=ex+fx*t, ey+fy*t, ez+fz*t
+          local m=math.sqrt((o.x-hx)^2+(o.y+1.2-hy)^2+(o.z-hz)^2)
+          if m<0.9 and t<bt and not seg_blocked(ex,ey,ez, hx,hy,hz, 1) then best,bt=o,t; o._hy=hy end
         end
       end
     end
     if best then
-      local dmg = w.dmg
-      if best._hy and best._hy>best.y+1.5 then dmg=dmg*w.hs end
+      local dmg=w.dmg
+      local head = best._hy and best._hy>best.y+1.5
+      if head then dmg=dmg*w.hs end
       if best.sh>0 then best.sh=best.sh-dmg; if best.sh<0 then best.hp=best.hp+best.sh; best.sh=0 end
       else best.hp=best.hp-dmg end
-      if best.hp<=0 then best.dead=true; best.respawn=100; score_kill(p) end
+      if best.hp<=0 then register_kill(p, best, head) end
     end
   end
 end
@@ -604,145 +769,313 @@ local function try_pickups()
     local id=MW[i+1]; local legal=MODE.weapons[id]
     mtimer[i+1]=math.max(0,(mtimer[i+1] or 0)-1)
     if legal and mtimer[i+1]==0 then
-      local mx,my,mz = MRK[i*3+1],MRK[i*3+2],MRK[i*3+3]
+      local mx,my,mz=MRK[i*3+1],MRK[i*3+2],MRK[i*3+3]
       if math.abs(p.x-mx)<1.4 and math.abs(p.z-mz)<1.6 and math.abs((p.y+1)-my)<2.0 then
-        give(p,1,id); p.slot=1; mtimer[i+1]=540
+        give(p,1,id); p.slot=1; mtimer[i+1]=540; say("Picked up "..W[id].name,12)
       end
     end
   end
+  -- ammo/grenade top-up when standing on a marker (light resupply)
+end
+
+-- ---------------------------------------------------------------------------
+-- Bot AI: navigate toward an objective-aware goal, engage enemies in LOS, and
+-- use the arena's heights via the same step-up the player uses.
+local function bot_goal(o)
+  if MODE.obj=="ball" then
+    if ball.carrier==o then return SPN[1],SPN[3]              -- carrier roams a safe spot
+    elseif ball.live then return ball.x, ball.z end
+  elseif MODE.obj=="hill" then return hill.x, hill.z
+  elseif MODE.obj=="jugg" then
+    if o.jugg then return SPN[13] or 0, SPN[15] or 0          -- jugg holds high ground
+    else return p.jugg and p.x or (bots[1] and bots[1].x or 0), p.jugg and p.z or 0 end
+  end
+  return o.tx, o.tz
 end
 
 local function think_bot(o)
   if o.dead then o.respawn=o.respawn-1; if o.respawn<=0 then respawn(o) end return end
-  local dx,dz = o.tx-o.x, o.tz-o.z
+  o.moving=false
+  -- target enemy: player if in LOS+range, else keep wandering
+  local pdx,pdz = p.x-o.x, p.z-o.z
+  local pm = math.sqrt(pdx*pdx+pdz*pdz)
+  local seesP = (not p.dead) and enemy_of(o,p) and pm<40 and not seg_blocked(o.x,o.y+1.4,o.z, p.x,p.y+EYE,p.z, 1)
+  local gx,gz
+  if seesP then
+    gx,gz = p.x, p.z
+    o.face = math.atan(pdx,pdz)
+    -- shoot the player
+    local wid = o.g1 or "br"; local w=W[wid]
+    o.cool=(o.cool or 0)-1
+    if pm < (w.rng or 40) and (o.cool or 0)<=0 then
+      o.cool = (w.cool or 10) + math.random(0,6)
+      local acc = MODE.shields and 0.30 or 0.5   -- SWAT bots hit harder
+      if math.random() < acc then
+        local dmg = (w.dmg or 12) * (w.pel or 1) * 0.6
+        if math.random()<0.12 then dmg=dmg*(w.hs or 1.5) end   -- occasional headshot
+        if p.sh>0 then p.sh=p.sh-dmg; if p.sh<0 then p.hp=p.hp+p.sh; p.sh=0 end else p.hp=p.hp-dmg end
+        if p.hp<=0 and not p.dead then p.dead=true; p.respawn=90; p.deaths=p.deaths+1; register_kill(o,p,false) end
+      end
+    end
+    -- strafe a little at fighting range
+    if pm<14 then gx=o.x + math.cos(o.face)*(o.strafe or 1)*0.4; gz=o.z - math.sin(o.face)*(o.strafe or 1)*0.4
+      if math.random()<0.03 then o.strafe=-(o.strafe or 1) end
+    end
+  else
+    gx,gz = bot_goal(o)
+    if gx==nil then gx,gz=o.tx,o.tz end
+  end
+  local dx,dz = (gx or o.x)-o.x, (gz or o.z)-o.z
   local m = math.sqrt(dx*dx+dz*dz)
-  if m<1.0 then local s=math.random(0,NBOT)*3; o.tx,o.tz=SPN[s+1],SPN[s+3]
-  else o.x=o.x+(dx/m)*0.06; o.z=o.z+(dz/m)*0.06; o.face=math.atan(dx,dz) end
+  if m<1.0 then
+    local s=math.random(0,NBOT)*3; o.tx,o.tz=SPN[s+1],SPN[s+3]
+  else
+    o.x=o.x+(dx/m)*0.07; o.z=o.z+(dz/m)*0.07; o.moving=true
+    if not seesP then o.face=math.atan(dx,dz) end
+  end
+  -- rest on the tallest platform under the bot (cheap vertical solve)
   local top=0
   for i=0,ncol()-1 do local b=i*6
     if o.x>COL[b+1] and o.x<COL[b+4] and o.z>COL[b+3] and o.z<COL[b+6] then
-      if COL[b+5]<=2.6 and COL[b+5]>top then top=COL[b+5] end end end
+      if COL[b+5]<=2.7 and COL[b+5]>top then top=COL[b+5] end end end
   o.y=top
-  local pdx,pdz = p.x-o.x, p.z-o.z
-  local pm = math.sqrt(pdx*pdx+pdz*pdz)
-  if enemy_of(o,p) and not p.dead and pm<15 and math.random()<0.02 then
-    local dmg = MODE.shields and 8 or 30
-    if p.sh>0 then p.sh=p.sh-6 else p.hp=p.hp-dmg end
-    if p.hp<=0 then p.dead=true; p.respawn=90; p.deaths=p.deaths+1; score_kill(o) end
-  end
-  if math.random()<0.004 then
+  -- objective interactions
+  if MODE.obj=="ball" and ball.live and d3(o.x,o.y,o.z, ball.x,ball.y,ball.z)<1.3 then ball.carrier=o; ball.live=false end
+  -- bots occasionally trade kills among themselves so scores move
+  if math.random()<0.003 then
     local v=bots[math.random(1,NBOT)]
-    if v and not v.dead and v~=o and enemy_of(o,v) then v.dead=true; v.respawn=100; score_kill(o) end
+    if v and not v.dead and v~=o and enemy_of(o,v) then register_kill(o,v,false) end
   end
 end
 
-local function reached_target()
-  if MODE.teams then
+-- ---------------------------------------------------------------------------
+local function update_objective()
+  if MODE.obj=="ball" then
+    if ball.carrier and not ball.carrier.dead then
+      ball.x,ball.y,ball.z = ball.carrier.x, ball.carrier.y+1.6, ball.carrier.z
+      ball.carrier.score=(ball.carrier.score or 0)+1
+    end
+    if ball.carrier==p and not p.dead then p.score=(p.score or 0) end
+    -- player grabs the ball
+    if ball.live and not p.dead and d3(p.x,p.y,p.z, ball.x,ball.y,ball.z)<1.5 then ball.carrier=p; ball.live=false; say("You have the ball",9) end
+  elseif MODE.obj=="hill" then
+    if tick>=hill.next then
+      hill.idx = hill.idx % #HILLS + 1
+      local h=HILLS[hill.idx]; hill.x,hill.y,hill.z=h[1],h[2],h[3]; hill.next=tick+900
+      if tick>1 then say("Hill moved",12) end
+    end
+    local function inhill(o) return (not o.dead) and math.abs(o.x-hill.x)<3 and math.abs(o.z-hill.z)<3 end
+    if inhill(p) then p.score=(p.score or 0)+1 end
+    for _,o in ipairs(bots) do if inhill(o) then o.score=(o.score or 0)+1 end end
+  elseif MODE.obj=="jugg" then
+    -- the juggernaut earns points just for surviving as the hunted
+    local jg=nil
+    if p.jugg then jg=p else for _,o in ipairs(bots) do if o.jugg then jg=o break end end end
+    if jg and not jg.dead and tick%30==0 then jg.score=(jg.score or 0)+1 end
+  end
+end
+
+function reached_target()
+  if MODE.teams and MODE.obj=="slayer" then
     if team.blue>=MODE.target then return "BLUE TEAM WINS" end
     if team.red>=MODE.target then return "RED TEAM WINS" end
   else
     if (p.score or 0)>=MODE.target then return "YOU WIN" end
-    for _,o in ipairs(bots) do if (o.score or 0)>=MODE.target then return "A BOT WINS" end end
+    for _,o in ipairs(bots) do if (o.score or 0)>=MODE.target then return (o.tag or "A bot").." WINS" end end
   end
 end
 
 local function start_match(key)
   MODE = MODES[key]; team.blue,team.red,winner = 0,0,""
+  tick=0; feed={}; grenades={}; announce.t=0
   for i=1,(#MRK//3) do mtimer[i]=0 end
-  p = { ay=0, ap=0, vy=0, cool=0, score=0, deaths=0, slot=1, team="blue", dead=false, respawn=0 }
+  p = { ay=0, ap=0, vy=0, cool=0, score=0, deaths=0, slot=1, team="blue", dead=false, respawn=0, nade=2, tag="You", streak=0 }
   respawn(p); give(p,1,MODE.start); give(p,2,"magnum")
   bots = {}
   for i=1,NBOT do
-    local o = { tx=0, tz=0, face=0, score=0, team=(i<=3) and "blue" or "red", g1=MODE.start }
+    local o = { tx=0, tz=0, face=0, score=0, deaths=0, team=(i<=3) and "blue" or "red", g1=MODE.start, cool=0, strafe=1, tag="Bot "..i, streak=0 }
     respawn(o); o.tx,o.tz = o.x,o.z; bots[i]=o
   end
+  if MODE.obj=="ball" then ball={x=0,y=1.1,z=0,carrier=nil,live=true} end
+  if MODE.obj=="hill" then hill={x=HILLS[1][1],y=HILLS[1][2],z=HILLS[1][3],next=999999,idx=1} end
+  if MODE.obj=="jugg" then bots[1].jugg=true; bots[1].sh=200 end
   phase = "play"
 end
 
--- 8-button controls: tank move + turn, hold X-button(=A key, btn 6) to strafe.
+-- 8-button controls: tank move + turn, hold A to strafe, double-tap A grenade.
 local function play_input()
-  local strafe = btn(6)
+  local aheld = btn(6)
+  if edge("a", aheld) then
+    if tick-(p.lastA or -99) < 14 and not p.dead then local fx,fy,fz=forward(); throw_grenade(p,fx,fy,fz) end
+    p.lastA=tick
+  end
   local sy,cy = math.sin(p.ay), math.cos(p.ay)
   local mvx,mvz = 0,0
-  local moving = false
+  local moving=false
   if not p.dead then
     if btn(0) then mvx=mvx+sy; mvz=mvz+cy; moving=true end
     if btn(1) then mvx=mvx-sy; mvz=mvz-cy; moving=true end
-    if strafe then
+    if aheld then
       if btn(2) then mvx=mvx-cy; mvz=mvz+sy; moving=true end
       if btn(3) then mvx=mvx+cy; mvz=mvz-sy; moving=true end
     else
       if btn(2) then p.ay=p.ay-TURN end
       if btn(3) then p.ay=p.ay+TURN end
     end
-    local mm = math.sqrt(mvx*mvx+mvz*mvz)
+    local mm=math.sqrt(mvx*mvx+mvz*mvz)
     if mm>0 then move_axis("x",mvx/mm*MOVE); move_axis("z",mvz/mm*MOVE) end
   end
-  if moving then bob = bob + 0.28 end
-  -- Ease auto-aim pitch toward the locked enemy so the view tips at them.
-  local aim = auto_target()
-  local want = 0
-  if aim then want = math.asin(math.max(-0.9, math.min(0.9, ((aim.y+1.2)-(p.y+EYE))/math.max(1,aim.x==aim.x and math.sqrt((aim.x-p.x)^2+(aim.z-p.z)^2) or 1)))) end
-  p.ap = p.ap + (want - p.ap)*0.2
-  if btn(5) and p.grounded and not p.dead then p.vy=JUMP; p.grounded=false end -- X = jump
-  if edge("swap", btn(7)) then p.slot = (p.slot==1) and 2 or 1 end             -- S = swap
-  local cur = W[p.slot==1 and p.g1 or p.g2]
-  p.zoom = cur.zoom and btn(6) and not (btn(0) or btn(1) or btn(2) or btn(3))  -- hold strafe-btn still to zoom a sniper
+  if moving then bob=bob+0.28 end
+  -- auto-aim pitch eases toward the locked enemy
+  local aim=auto_target()
+  local want=0
+  if aim then
+    local hd=math.sqrt((aim.x-p.x)^2+(aim.z-p.z)^2)
+    want=math.asin(clamp(((aim.y+1.2)-(p.y+EYE))/math.max(1,hd),-0.9,0.9))
+  end
+  p.ap=p.ap+(want-p.ap)*0.2
+  if btn(5) and p.grounded and not p.dead then p.vy=JUMP; p.grounded=false end
+  if edge("swap", btn(7)) then p.slot=(p.slot==1) and 2 or 1 end
+  local cur=W[p.slot==1 and p.g1 or p.g2]
+  p.zoom = cur.zoom and aheld and not (btn(0) or btn(1) or btn(2) or btn(3))
   if p.cool>0 then p.cool=p.cool-1 end
-  if btn(4) then player_fire() end                                            -- Z = fire
+  local firing = cur.auto and btn(4) or edge("fire", btn(4))
+  if firing then player_fire() end
 end
 
+-- ---------------------------------------------------------------------------
+-- Presentation.
 local function sky()
   for i=0,8 do rect(0, i*40, 1280, 40, i<3 and 1 or (i<5 and 2 or 3)) end
   rect(0, 360, 1280, 360, 3)
+  -- a few Forerunner stars up high
+  for i=1,40 do local sx=(i*131)%1280; local sy=(i*71)%180; pix(sx,sy,12) end
 end
 
--- A first-person weapon viewmodel drawn in 2D at the bottom, with view-bob and a
--- muzzle flash, so it reads unmistakably as an FPS.
 local function draw_viewmodel(cur)
-  local bx = 720 + math.sin(bob)*10
-  local by = 720 + math.abs(math.cos(bob))*8
+  local bx=720+math.sin(bob)*10
+  local by=720+math.abs(math.cos(bob))*8
   if cur.melee then
-    tri(bx-30,by, bx+70,by-160, bx+40,by-150, 9)      -- energy sword blade
+    tri(bx-30,by, bx+70,by-160, bx+40,by-150, 9)
     tri(bx-30,by, bx+40,by-150, bx-40,by-120, 9)
     rect(bx-46,by-40,40,44,13)
   elseif cur.zoom then
-    rect(bx-120,by-40,240,34,0); rect(bx-30,by-96,60,60,0) -- sniper body + scope
+    rect(bx-120,by-40,240,34,0); rect(bx-30,by-96,60,60,0)
     rect(bx-150,by-24,300,14,13)
   else
-    rect(bx-40,by-150,80,150,0)                        -- rifle body
+    rect(bx-40,by-150,80,150,0)
     rect(bx-24,by-186,48,44,13)
-    rect(bx-14,by-210,28,30,0)                         -- barrel
-    rect(bx-70,by-40,150,40,13)                        -- stock/grip
+    rect(bx-14,by-210,28,30,0)
+    rect(bx-70,by-40,150,40,13)
   end
-  if flash>0 then circ(bx, by-210, 12+flash*3, 9); circ(bx, by-210, 6+flash*2, 12) end
+  if flash>0 then circ(bx,by-210,12+flash*3,9); circ(bx,by-210,6+flash*2,12) end
 end
 
+-- Circular motion tracker (bottom-left): allies yellow, moving/firing enemies
+-- red, rotated so the player faces "up". Classic radar -- it only sees motion.
+local function draw_tracker()
+  local rx,ry,rr=140,560,96
+  circ(rx,ry,rr,1); circb(rx,ry,rr,13); circb(rx,ry,rr//2,2)
+  -- sweep
+  local sw=(tick*0.05)%(2*math.pi)
+  line(rx,ry, rx+math.sin(sw)*rr, ry-math.cos(sw)*rr, 2)
+  local function blip(o,col)
+    local dx,dz=o.x-p.x, o.z-p.z
+    local m=math.sqrt(dx*dx+dz*dz)
+    if m>28 then return end
+    local ang=math.atan(dx,dz)-p.ay
+    local px=rx+math.sin(ang)*(m/28)*rr
+    local py=ry-math.cos(ang)*(m/28)*rr
+    circ(px,py,3,col)
+  end
+  for _,o in ipairs(bots) do
+    if not o.dead and enemy_of(p,o) then if o.moving or MODE.obj=="jugg" and o.jugg then blip(o,6) end
+    elseif not o.dead then blip(o,9) end
+  end
+  tri(rx,ry-7, rx-5,ry+5, rx+5,ry+5, 12)  -- player
+  print("MOTION",rx-34,ry+rr+6,13,false,1,true)
+end
+
+local function draw_hud()
+  -- shield (top) + health (under), segmented
+  rect(40,40,300,20,0)
+  local sc = p.sh>0 and 9 or 6
+  rect(42,42,math.max(0,2.96*(MODE.shields and p.sh or p.hp)),16,sc)
+  if MODE.shields then rect(40,66,300,12,0); rect(42,68,math.max(0,2.96*p.hp),8,6) end
+  -- weapon + ammo (top-right)
+  local cur=W[p.slot==1 and p.g1 or p.g2]
+  local ammo=p.slot==1 and p.a1 or p.a2
+  local res=p.slot==1 and p.r1 or p.r2
+  print(cur.name,900,40,12,false,2,true)
+  print(ammo.." / "..res,1040,74,cur.melee and 13 or 12,false,2,true)
+  -- grenades
+  for i=1,(p.nade or 0) do circ(1150+i*22,120,8,6); circb(1150+i*22,120,8,12) end
+  print("FRAG",1150,96,13,false,1,true)
+  -- objective / score readout (top center)
+  local st
+  if MODE.obj=="slayer" and MODE.teams then st="BLUE "..team.blue.."   RED "..team.red.."   /"..MODE.target
+  elseif MODE.obj=="ball" then st=(ball.carrier==p and "YOU HOLD THE BALL  " or "").."Ball "..(p.score or 0).." /"..MODE.target
+  elseif MODE.obj=="hill" then st="Hill "..(p.score or 0).." /"..MODE.target
+  elseif MODE.obj=="jugg" then st=(p.jugg and "YOU ARE THE JUGGERNAUT  " or "Hunt the Juggernaut  ")..(p.score or 0).." /"..MODE.target
+  else st="Score "..(p.score or 0).."   Deaths "..p.deaths.."   /"..MODE.target end
+  print(MODE.name,540,40,13,false,1,true)
+  print(st,540,58,12,false,2,true)
+  -- kill feed (right, under ammo)
+  for i,f in ipairs(feed) do print(f.text,880,150+i*22,f.color,false,1,true); f.t=f.t-1 end
+  for i=#feed,1,-1 do if feed[i].t<=0 then table.remove(feed,i) end end
+  -- announcer / medal (center)
+  if announce.t>0 then announce.t=announce.t-1; print(announce.text,540,150,announce.color,false,3,true) end
+  if MODE.radar then draw_tracker() end
+end
+
+local function draw_reticle()
+  local cx,cy=640,360
+  local cur=W[p.slot==1 and p.g1 or p.g2]
+  local locked=auto_target()~=nil
+  local rc=locked and 6 or 12
+  if p.zoom then circb(cx,cy,210,0); line(cx-240,cy,cx+240,cy,0); line(cx,cy-240,cx,cy+240,0) end
+  if cur.melee then
+    line(cx-14,cy-14,cx+14,cy+14,rc); line(cx-14,cy+14,cx+14,cy-14,rc)
+  elseif cur.pel>1 then
+    circb(cx,cy,18,rc); circb(cx,cy,4,rc)
+  else
+    circb(cx,cy,10,rc); line(cx-16,cy,cx-6,cy,rc); line(cx+6,cy,cx+16,cy,rc)
+    line(cx,cy-16,cx,cy-6,rc); line(cx,cy+6,cx,cy+16,rc)
+  end
+end
+
+-- ---------------------------------------------------------------------------
 function TIC()
   cls(0)
+  tick=tick+1
 
-  if phase == "menu" then
-    if edge("up", btn(0)) then sel=(sel-2)%4+1 end
-    if edge("down", btn(1)) then sel=sel%4+1 end
+  if phase=="menu" then
+    local n=#MODE_KEYS
+    if edge("up", btn(0)) then sel=(sel-2)%n+1 end
+    if edge("down", btn(1)) then sel=sel%n+1 end
     if edge("go", btn(4)) then start_match(MODE_KEYS[sel]) end
     sky()
-    print("LOCKOUT ARENA", 452, 150, 12, false, 3, true)
-    print("you + 7 bots  --  a Forerunner homage on the Xbox 360 core", 396, 214, 13, false, 1, true)
-    for i=1,4 do
-      local mo = MODES[MODE_KEYS[i]]
-      if i==sel then rect(500, 288+(i-1)*46, 300, 34, 1) end
-      print(mo.name, 520, 298+(i-1)*46, (i==sel) and 12 or 13, false, 2, true)
+    print("LOCKOUT ARENA",452,96,12,false,3,true)
+    print("you + 7 bots  --  a Forerunner-style homage on the Xbox 360 core",396,150,13,false,1,true)
+    for i=1,n do
+      local mo=MODES[MODE_KEYS[i]]
+      local y=210+(i-1)*44
+      if i==sel then rect(470,y-6,360,36,1) end
+      print(mo.name,492,y,(i==sel) and 12 or 13,false,2,true)
     end
-    print("Up/Down choose . Z (or A) start", 480, 520, 13, false, 1, true)
-    print("Touch: on-screen pad + A fire + B jump (auto-aim + auto weapon)", 360, 636, 13, false, 1, true)
-    print("Keyboard: arrows move/turn . hold A strafe . Z fire . X jump . S swap", 340, 664, 13, false, 1, true)
+    print("Up/Down choose . Z (or A) start",470,540,13,false,1,true)
+    print("Move Up/Down . Turn Left/Right . hold A strafe . dbl-tap A grenade",300,584,13,false,1,true)
+    print("Z fire (auto-melee close) . X jump . S swap . sniper: hold A to zoom",300,612,13,false,1,true)
     return
   end
 
-  if phase == "over" then
+  if phase=="over" then
     sky()
-    print(winner, 520, 300, 12, false, 3, true)
-    print("Z -> back to game types", 520, 380, 13, false, 1, true)
+    print(winner,520,260,12,false,3,true)
+    -- simple scoreboard
+    print("You: "..(p.score or 0).." kills, "..p.deaths.." deaths",520,340,6,false,2,true)
+    if MODE.teams then print("BLUE "..team.blue.."   RED "..team.red,520,380,9,false,2,true) end
+    print("Z -> back to game types",520,460,13,false,1,true)
     if edge("go", btn(4)) then phase="menu" end
     return
   end
@@ -751,50 +1084,30 @@ function TIC()
   if p.dead then p.respawn=p.respawn-1; if p.respawn<=0 then respawn(p) end
   else move_vertical(); try_pickups() end
   for _,o in ipairs(bots) do think_bot(o) end
-  local w = reached_target(); if w then winner=w; phase="over" end
+  update_grenades()
+  update_objective()
+  local w=reached_target(); if w then winner=w; phase="over" end
   if flash>0 then flash=flash-1 end
+  if shot.t>0 then shot.t=shot.t-1 end
 
   sky()
   cartbox.clearlights()
-  cartbox.sun(-0.4, -0.8, 0.45, 205, 216, 240, 0.9)
-  cartbox.light(p.x, p.z, 8, 90, 200, 235, p.y+4, 0.6)   -- a soft cyan fill near the player
+  cartbox.sun(-0.4,-0.8,0.45, 205,216,240, 0.9)
+  cartbox.light(p.x, p.z, 8, 90,200,235, p.y+4, 0.6)
+  if MODE.obj=="ball" then cartbox.light(ball.x, ball.z, 6, 90,220,255, ball.y+1, 0.8) end
+  if MODE.obj=="hill" then cartbox.light(hill.x, hill.z, 7, 120,255,150, hill.y+2, 0.7) end
 
   cartbox.clearposes()
   for i=1,NBOT do local o=bots[i]
     if o.dead then cartbox.meshpose(i,0,-50,0,0,0,0,0)
-    else cartbox.meshpose(i,o.x,o.y,o.z,o.face,0,0,1) end
+    else cartbox.meshpose(i,o.x,o.y,o.z,o.face,0,0, o.jugg and 1.25 or 1) end
   end
   drive_camera()
 
-  -- Reticle (red when auto-aim is locked) + optional scope.
-  local cx,cy2 = 640,360
-  local locked = auto_target() ~= nil
-  local rc = locked and 6 or 12
-  if p.zoom then circb(cx,cy2,210,0); line(cx-240,cy2,cx+240,cy2,0); line(cx,cy2-240,cx,cy2+240,0) end
-  circb(cx,cy2,10,rc); line(cx-16,cy2,cx-6,cy2,rc); line(cx+6,cy2,cx+16,cy2,rc)
-  line(cx,cy2-16,cx,cy2-6,rc); line(cx,cy2+6,cx,cy2+16,rc)
-
-  local cur = W[p.slot==1 and p.g1 or p.g2]
-  draw_viewmodel(cur)
-
-  -- HUD.
-  rect(40,40,300,18,0); rect(40,40,math.max(0,3*p.hp),18,6)
-  if MODE.shields then rect(40,64,300,12,0); rect(40,64,math.max(0,3*p.sh),12,9) end
-  local ammo = p.slot==1 and p.a1 or p.a2
-  print(MODE.name.."  --  "..cur.name.."  ["..ammo.."]", 40,92,12,false,1,true)
-  if MODE.teams then print("BLUE "..team.blue.."   RED "..team.red.."   / "..MODE.target, 40,690,12,false,1,true)
-  else print("Score "..(p.score or 0).."   Deaths "..p.deaths.."   / "..MODE.target, 40,690,12,false,1,true) end
-  if MODE.radar then
-    local rx,ry,rr = 1180,600,70
-    circb(rx,ry,rr,13)
-    for _,o in ipairs(bots) do
-      if not o.dead and enemy_of(p,o) then
-        local dx,dz = o.x-p.x, o.z-p.z
-        if math.abs(dx)<30 and math.abs(dz)<30 then circ(rx+dx*rr/30, ry+dz*rr/30, 2, 6) end
-      end
-    end
-  end
-end
+  draw_reticle()
+  draw_viewmodel(W[p.slot==1 and p.g1 or p.g2])
+  draw_hud()
+  if p.dead then print("RESPAWNING...",520,330,6,false,3,true) end
 `;
 
 /** Seed a fresh cart with the Lockout arena code and a cool Forerunner palette. */
