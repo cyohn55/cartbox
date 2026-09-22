@@ -3134,6 +3134,16 @@ cartbox = {
   -- Start a fresh frame's mesh-pose list. Call once before any meshpose() calls;
   -- instances you don't pose keep their authored transform.
   clearposes = function() _mn = 0 pmem(_MPB, 0) end,
+  -- First-person mode: composite the cart's 2D frame as a HUD OVER the 3D scene,
+  -- rather than drawing the meshes over the 2D (the default third-person showcase
+  -- compositing). Call each frame AFTER the camera call with a truthy value to
+  -- enable; near-black (index 0) pixels the cart leaves are the transparent "world"
+  -- and everything else the cart draws is the HUD. Rides a spare bit of the
+  -- mesh-camera flag word, so it costs no mailbox space.
+  hud = function(on)
+    local f = pmem(_MCB)
+    if on and on ~= 0 then pmem(_MCB, f | 2) else pmem(_MCB, f & 0xfffffffd) end
+  end,
   -- Move/rotate/scale one mesh instance (by its sidecar index) this frame, on top
   -- of its authored placement. x,y,z are world units; yaw,pitch,roll radians;
   -- scale defaults to 1 (pass 0 to hide). math.floor keeps every value integer so
@@ -3416,6 +3426,7 @@ var MESH_CAM_STRIDE = 8;
 var MESH_CAM_ANGLE_SCALE = 1024;
 var MESH_CAM_DIST_SCALE = 256;
 var MESH_CAM_ACTIVE = 1;
+var MESH_CAM_HUD = 2;
 var MESH_POSE_BASE = MESH_CAM_BASE + MESH_CAM_STRIDE;
 var MESH_POSE_CAPACITY = 8;
 var MESH_POSE_STRIDE = 8;
@@ -3524,7 +3535,8 @@ function decodeMeshCamera(words) {
     pitch: angle(words[MESH_CAM_BASE + 2] ?? 0),
     distance: distanceWord > 0 ? dist(distanceWord) : null,
     target: [dist(words[MESH_CAM_BASE + 4] ?? 0), dist(words[MESH_CAM_BASE + 5] ?? 0), dist(words[MESH_CAM_BASE + 6] ?? 0)],
-    fov: fovWord > 0 ? angle(fovWord) : null
+    fov: fovWord > 0 ? angle(fovWord) : null,
+    hud: (flags & MESH_CAM_HUD) !== 0
   };
 }
 function decodeMeshPoses(words) {
@@ -4439,6 +4451,22 @@ function buildOrbitCamera(bounds, yaw, pitch, aspect, options = {}) {
 // src/mesh/MeshOverlaySurface.ts
 var RAD_TO_DEG = 180 / Math.PI;
 var SHADOW_MAP_SIZE = 1024;
+var HUD_TRANSPARENT_SUM = 30;
+var HUD_SKY = [70, 104, 152, 255];
+function compositeHudOverScene(scene, hud, count) {
+  for (let i = 0; i < count; i += 1) {
+    const o = i * 4;
+    const r = hud[o];
+    const g = hud[o + 1];
+    const b = hud[o + 2];
+    if (r + g + b > HUD_TRANSPARENT_SUM) {
+      scene[o] = r;
+      scene[o + 1] = g;
+      scene[o + 2] = b;
+      scene[o + 3] = 255;
+    }
+  }
+}
 var AUTO_ORBIT_YAW_PER_FRAME = 2 * Math.PI / 720;
 var AUTO_ORBIT_PITCH = 0.35;
 var MeshOverlaySurface = class _MeshOverlaySurface {
@@ -4454,6 +4482,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.poses = [];
     /** Shadow-map depth scratch, allocated once the first shadowed frame needs it. */
     this.shadowDepth = null;
+    /** First-person mode: draw the meshes first, then the cart's 2D frame as a HUD on top. */
+    this.hud = false;
+    /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
+    this.hudFrame = null;
     this.output = new Uint8ClampedArray(width * height * 4);
     this.presented = new Uint8Array(this.output.buffer);
     this.depth = new Float32Array(width * height);
@@ -4518,6 +4550,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.cartCamera = camera;
   }
   /**
+   * First-person mode: when true, the cart's 2D frame is composited as a HUD over
+   * the 3D scene instead of the meshes being drawn over the 2D. The player sets it
+   * each frame from the decoded mesh-camera HUD flag.
+   */
+  setHudMode(on) {
+    this.hud = on;
+  }
+  /**
    * Set the per-instance poses a cart published this frame (empty to leave every
    * instance at its authored transform). The player calls this each frame from the
    * decoded mesh-pose mailbox; a pose composes on top of the instance's authored
@@ -4527,7 +4567,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.poses = poses;
   }
   blit(rgba) {
-    this.output.set(rgba);
+    if (this.hud) {
+      if (!this.hudFrame) this.hudFrame = new Uint8ClampedArray(this.width * this.height * 4);
+      this.hudFrame.set(rgba);
+    } else {
+      this.output.set(rgba);
+    }
     const cart = this.cartCamera;
     const camera = cart ? buildOrbitCamera(this.scene.bounds, cart.yaw, cart.pitch, this.width / this.height, {
       fov: cart.fov ?? void 0,
@@ -4544,7 +4589,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       depth: this.depth,
       view: camera.view,
       projection: camera.projection,
-      background: null,
+      // HUD mode fills the frame with a sky so the 3D scene is opaque before the
+      // HUD lands on top; third-person keeps the cart frame behind the meshes.
+      background: this.hud ? HUD_SKY : null,
       ...lighting ? {
         ambient: lighting.ambient,
         lightDirection: sceneLightingKeyDirection(lighting),
@@ -4554,6 +4601,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         shadow
       } : {}
     });
+    if (this.hud && this.hudFrame) compositeHudOverScene(this.output, this.hudFrame, this.width * this.height);
     this.frame += 1;
     this.inner.blit(this.presented);
   }
@@ -6272,7 +6320,9 @@ var Player = class {
       }
       if (this.meshSurface && this.console) {
         const mailbox = this.console.readMailbox();
-        this.meshSurface.setCameraOverride(decodeMeshCamera(mailbox));
+        const meshCamera = decodeMeshCamera(mailbox);
+        this.meshSurface.setCameraOverride(meshCamera);
+        this.meshSurface.setHudMode(meshCamera?.hud ?? false);
         this.meshSurface.setPoseOverrides(decodeMeshPoses(mailbox));
       }
       if (this.worldSurface && this.console) {

@@ -298,7 +298,7 @@ function mapMesh(): MeshAsset {
     normalImage: FORE.normal,
     metallicRoughnessImage: FORE.metallicRoughness,
     emissiveImage: FORE.emissive,
-    metallicFactor: 1,
+    metallicFactor: 0.5, // half-metal: still catches the sky, but keeps the albedo legible
     roughnessFactor: 1,
     emissiveFactor: [1.5, 1.5, 1.5], // push the baked glow above 1 so it blooms through the tone-map
   };
@@ -335,8 +335,8 @@ function botMesh(): MeshAsset {
         name: "armor",
         baseColorFactor: [0.5, 0.55, 0.62, 1],
         baseColorImage: null,
-        metallicFactor: 0.85, // brushed metal that catches the key light + skybox
-        roughnessFactor: 0.35,
+        metallicFactor: 0.5, // brushed metal that still reads its base colour when lit
+        roughnessFactor: 0.4,
       }),
       toPrimitive(visor, {
         name: "visor",
@@ -377,22 +377,22 @@ export const LOCKOUT_CENTER_Z = CENTER[2];
  */
 export const LOCKOUT_LIGHTING: SceneLighting = {
   environment: {
-    sky: [0.12, 0.2, 0.34],
-    horizon: [0.24, 0.34, 0.42],
-    ground: [0.05, 0.08, 0.12],
-    intensity: 1,
+    sky: [0.42, 0.56, 0.8],
+    horizon: [0.55, 0.66, 0.74],
+    ground: [0.2, 0.22, 0.26],
+    intensity: 1.5,
   },
-  ambient: 0.28,
-  exposure: 1.15,
+  ambient: 0.6,
+  exposure: 1.5,
   tonemap: true,
   shadows: true,
   lights: [
     // Key: high warm-white sun (direction points *towards* the light).
-    { kind: "directional", direction: [0.4, 0.8, -0.45], color: [0.85, 0.9, 1], intensity: 1.5 },
+    { kind: "directional", direction: [0.4, 0.8, -0.45], color: [1, 0.97, 0.9], intensity: 2.2 },
     // Fill: a low, cool bounce from the opposite side so shadows aren't black.
-    { kind: "directional", direction: [-0.5, 0.35, 0.55], color: [0.32, 0.5, 0.68], intensity: 0.5 },
+    { kind: "directional", direction: [-0.5, 0.35, 0.55], color: [0.45, 0.58, 0.72], intensity: 0.9 },
     // The Sword pit's cyan glow, at the bottom-mid centre.
-    { kind: "point", position: [0, 1, 0], color: [0.35, 0.95, 1], intensity: 3, range: 9 },
+    { kind: "point", position: [0, 1, 0], color: [0.4, 0.95, 1], intensity: 3.5, range: 10 },
   ],
 };
 
@@ -960,12 +960,12 @@ local function draw_viewmodel(cur)
     tri(bx-30,by, bx+40,by-150, bx-40,by-120, 9)
     rect(bx-46,by-40,40,44,13)
   elseif cur.zoom then
-    rect(bx-120,by-40,240,34,0); rect(bx-30,by-96,60,60,0)
+    rect(bx-120,by-40,240,34,5); rect(bx-30,by-96,60,60,5)
     rect(bx-150,by-24,300,14,13)
   else
-    rect(bx-40,by-150,80,150,0)
+    rect(bx-40,by-150,80,150,5)
     rect(bx-24,by-186,48,44,13)
-    rect(bx-14,by-210,28,30,0)
+    rect(bx-14,by-210,28,30,5)
     rect(bx-70,by-40,150,40,13)
   end
   if flash>0 then circ(bx,by-210,12+flash*3,9); circ(bx,by-210,6+flash*2,12) end
@@ -997,11 +997,12 @@ local function draw_tracker()
 end
 
 local function draw_hud()
-  -- shield (top) + health (under), segmented
-  rect(40,40,300,20,0)
+  -- shield (top) + health (under), segmented. Backgrounds use index 5 (a dark
+  -- slate), never 0: in HUD mode index 0 is the transparent "world" key.
+  rect(40,40,300,20,5)
   local sc = p.sh>0 and 9 or 6
   rect(42,42,math.max(0,2.96*(MODE.shields and p.sh or p.hp)),16,sc)
-  if MODE.shields then rect(40,66,300,12,0); rect(42,68,math.max(0,2.96*p.hp),8,6) end
+  if MODE.shields then rect(40,66,300,12,5); rect(42,68,math.max(0,2.96*p.hp),8,6) end
   -- weapon + ammo (top-right)
   local cur=W[p.slot==1 and p.g1 or p.g2]
   local ammo=p.slot==1 and p.a1 or p.a2
@@ -1033,7 +1034,7 @@ local function draw_reticle()
   local cur=W[p.slot==1 and p.g1 or p.g2]
   local locked=auto_target()~=nil
   local rc=locked and 6 or 12
-  if p.zoom then circb(cx,cy,210,0); line(cx-240,cy,cx+240,cy,0); line(cx,cy-240,cx,cy+240,0) end
+  if p.zoom then circb(cx,cy,210,13); line(cx-240,cy,cx+240,cy,13); line(cx,cy-240,cx,cy+240,13) end
   if cur.melee then
     line(cx-14,cy-14,cx+14,cy+14,rc); line(cx-14,cy+14,cx+14,cy-14,rc)
   elseif cur.pel>1 then
@@ -1060,6 +1061,7 @@ function TIC()
 
   if phase=="menu" then
     hide_scene()
+    cartbox.hud(0)  -- 2D-only screen: draw the menu normally, not as a HUD over meshes
     local n=#MODE_KEYS
     if edge("up", btn(0)) then sel=(sel-2)%n+1 end
     if edge("down", btn(1)) then sel=sel%n+1 end
@@ -1081,6 +1083,7 @@ function TIC()
 
   if phase=="over" then
     hide_scene()
+    cartbox.hud(0)
     sky()
     print(winner,520,260,12,false,3,true)
     -- simple scoreboard
@@ -1101,7 +1104,9 @@ function TIC()
   if flash>0 then flash=flash-1 end
   if shot.t>0 then shot.t=shot.t-1 end
 
-  sky()
+  -- No 2D sky in play: HUD mode composites this frame OVER the 3D scene, so the
+  -- cls(0) void is transparent (the arena + engine sky show through) and only the
+  -- HUD we draw below lands on top.
   cartbox.clearlights()
   cartbox.sun(-0.4,-0.8,0.45, 205,216,240, 0.9)
   cartbox.light(p.x, p.z, 8, 90,200,235, p.y+4, 0.6)
@@ -1114,6 +1119,7 @@ function TIC()
     else cartbox.meshpose(i,o.x,o.y,o.z,o.face,0,0, o.jugg and 1.25 or 1) end
   end
   drive_camera()
+  cartbox.hud(1)  -- composite this 2D frame as a HUD over the 3D arena
 
   draw_reticle()
   draw_viewmodel(W[p.slot==1 and p.g1 or p.g2])
@@ -1127,10 +1133,11 @@ export function seedLockoutCart(engine: CartEngine): void {
   engine.setLanguage("lua");
   engine.setCode(LOCKOUT_CODE);
   const entries: ReadonlyArray<readonly [number, string]> = [
-    [0, "#05070c"], // void
+    [0, "#000000"], // void — pure black so HUD mode keys it transparent (the 3D shows through)
     [1, "#1a2740"], // upper sky
     [2, "#2b3f5e"], // mid sky
     [3, "#3f5a72"], // horizon haze (greenish-grey Lockout mood)
+    [5, "#202838"], // HUD dark slate (bright enough to survive the HUD transparent key)
     [6, "#37e0a0"], // health / hit green
     [9, "#5cd0ff"], // shield / energy cyan
     [12, "#eaf2ff"], // ink

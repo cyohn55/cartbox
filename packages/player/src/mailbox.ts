@@ -75,6 +75,15 @@ export const MESH_CAM_DIST_SCALE = 256;
 /** Bit 0 of the flags word: the cart is driving the mesh camera this frame. */
 export const MESH_CAM_ACTIVE = 1;
 
+/**
+ * Bit 1 of the mesh-camera flag word: the cart wants its 2D frame composited as a
+ * HUD *over* the 3D scene (first-person games), rather than the meshes drawn over
+ * the 2D (the default, for third-person model showcases). Rides a spare bit of the
+ * existing flag word, so it costs no mailbox space (the block already ends at the
+ * 256-word ceiling). Set by `cartbox.hud(1)`; only meaningful with MESH_CAM_ACTIVE.
+ */
+export const MESH_CAM_HUD = 2;
+
 /** Word index of the mesh-pose block's count header, just past the mesh camera. */
 export const MESH_POSE_BASE = MESH_CAM_BASE + MESH_CAM_STRIDE;
 /** Maximum mesh instances a cart can pose per frame. */
@@ -268,6 +277,8 @@ export interface MailboxMeshCamera {
   target: [number, number, number];
   /** Vertical field of view, radians; null means the player's default. */
   fov: number | null;
+  /** Composite the cart's 2D frame as a HUD over the 3D scene (first-person mode). */
+  hud: boolean;
 }
 
 /**
@@ -298,6 +309,7 @@ export function decodeMeshCamera(words: Uint32Array): MailboxMeshCamera | null {
     distance: distanceWord > 0 ? dist(distanceWord) : null,
     target: [dist(words[MESH_CAM_BASE + 4] ?? 0), dist(words[MESH_CAM_BASE + 5] ?? 0), dist(words[MESH_CAM_BASE + 6] ?? 0)],
     fov: fovWord > 0 ? angle(fovWord) : null,
+    hud: (flags & MESH_CAM_HUD) !== 0,
   };
 }
 

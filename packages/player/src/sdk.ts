@@ -103,6 +103,16 @@ cartbox = {
   -- Start a fresh frame's mesh-pose list. Call once before any meshpose() calls;
   -- instances you don't pose keep their authored transform.
   clearposes = function() _mn = 0 pmem(_MPB, 0) end,
+  -- First-person mode: composite the cart's 2D frame as a HUD OVER the 3D scene,
+  -- rather than drawing the meshes over the 2D (the default third-person showcase
+  -- compositing). Call each frame AFTER the camera call with a truthy value to
+  -- enable; near-black (index 0) pixels the cart leaves are the transparent "world"
+  -- and everything else the cart draws is the HUD. Rides a spare bit of the
+  -- mesh-camera flag word, so it costs no mailbox space.
+  hud = function(on)
+    local f = pmem(_MCB)
+    if on and on ~= 0 then pmem(_MCB, f | 2) else pmem(_MCB, f & 0xfffffffd) end
+  end,
   -- Move/rotate/scale one mesh instance (by its sidecar index) this frame, on top
   -- of its authored placement. x,y,z are world units; yaw,pitch,roll radians;
   -- scale defaults to 1 (pass 0 to hide). math.floor keeps every value integer so
