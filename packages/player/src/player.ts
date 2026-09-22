@@ -428,7 +428,11 @@ export class Player {
       // per-instance poses (cartbox.meshpose) ride the same mailbox read.
       if (this.meshSurface && this.console) {
         const mailbox = this.console.readMailbox();
-        this.meshSurface.setCameraOverride(decodeMeshCamera(mailbox));
+        const meshCamera = decodeMeshCamera(mailbox);
+        this.meshSurface.setCameraOverride(meshCamera);
+        // First-person carts ask (via cartbox.hud) for their 2D frame to composite
+        // over the meshes instead of behind them.
+        this.meshSurface.setHudMode(meshCamera?.hud ?? false);
         this.meshSurface.setPoseOverrides(decodeMeshPoses(mailbox));
       }
       // The HD-2D world reuses the same channels: cartbox.worldcam drives its

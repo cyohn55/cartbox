@@ -44,6 +44,42 @@ const RAD_TO_DEG = 180 / Math.PI;
 /** Edge length of the directional shadow map — a fixed, self-contained cost. */
 const SHADOW_MAP_SIZE = 1024;
 
+/**
+ * In HUD mode a cart 2D pixel this dark (channel sum ≤ this) is the transparent
+ * "world" and the 3D shows through; anything brighter is HUD and draws on top.
+ * The default void colour (index 0) sums well under this; HUD elements are drawn
+ * brighter, so the split is clean.
+ */
+const HUD_TRANSPARENT_SUM = 30;
+
+/** Flat sky the 3D scene is rendered over in HUD mode (a cool Forerunner tone). */
+const HUD_SKY: readonly [number, number, number, number] = [70, 104, 152, 255];
+
+/**
+ * Composite a cart's 2D frame as a HUD *over* an already-rendered 3D scene: every
+ * cart pixel brighter than {@link HUD_TRANSPARENT_SUM} overwrites the scene, the
+ * near-black rest lets the 3D show through. Pure and in-place on `scene`, so it is
+ * unit-testable without a surface. `count` is the pixel count (width × height).
+ */
+export function compositeHudOverScene(
+  scene: Uint8ClampedArray,
+  hud: Uint8Array | Uint8ClampedArray,
+  count: number,
+): void {
+  for (let i = 0; i < count; i += 1) {
+    const o = i * 4;
+    const r = hud[o]!;
+    const g = hud[o + 1]!;
+    const b = hud[o + 2]!;
+    if (r + g + b > HUD_TRANSPARENT_SUM) {
+      scene[o] = r;
+      scene[o + 1] = g;
+      scene[o + 2] = b;
+      scene[o + 3] = 255;
+    }
+  }
+}
+
 /** Radians of yaw per presented frame — one full turn every ~12s at 60Hz. */
 const AUTO_ORBIT_YAW_PER_FRAME = (2 * Math.PI) / 720;
 /** Fixed downward tilt so the scene reads as a 3D object, not a flat silhouette. */
@@ -58,6 +94,10 @@ export class MeshOverlaySurface implements DisplaySurface {
   private readonly depth: Float32Array;
   /** Shadow-map depth scratch, allocated once the first shadowed frame needs it. */
   private shadowDepth: Float32Array | null = null;
+  /** First-person mode: draw the meshes first, then the cart's 2D frame as a HUD on top. */
+  private hud = false;
+  /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
+  private hudFrame: Uint8ClampedArray | null = null;
 
   private constructor(
     private readonly inner: DisplaySurface,
@@ -166,6 +206,15 @@ export class MeshOverlaySurface implements DisplaySurface {
   }
 
   /**
+   * First-person mode: when true, the cart's 2D frame is composited as a HUD over
+   * the 3D scene instead of the meshes being drawn over the 2D. The player sets it
+   * each frame from the decoded mesh-camera HUD flag.
+   */
+  setHudMode(on: boolean): void {
+    this.hud = on;
+  }
+
+  /**
    * Set the per-instance poses a cart published this frame (empty to leave every
    * instance at its authored transform). The player calls this each frame from the
    * decoded mesh-pose mailbox; a pose composes on top of the instance's authored
@@ -176,10 +225,15 @@ export class MeshOverlaySurface implements DisplaySurface {
   }
 
   blit(rgba: Uint8Array): void {
-    // Copy the cart frame in, then composite the meshes on top (background: null
-    // leaves untouched pixels showing the cart). The depth buffer is reset inside
-    // renderMeshScene, so the instances form one consistent 3D layer each frame.
-    this.output.set(rgba);
+    // Default (third-person): copy the cart frame in, then composite the meshes on
+    // top (background null shows the cart where no mesh drew). HUD mode inverts it:
+    // render the 3D over an opaque sky, then lay the cart's 2D frame on top as a HUD.
+    if (this.hud) {
+      if (!this.hudFrame) this.hudFrame = new Uint8ClampedArray(this.width * this.height * 4);
+      this.hudFrame.set(rgba);
+    } else {
+      this.output.set(rgba);
+    }
     // A cart-driven camera wins for this frame; otherwise the scene auto-orbits.
     const cart = this.cartCamera;
     const camera = cart
@@ -202,7 +256,9 @@ export class MeshOverlaySurface implements DisplaySurface {
       depth: this.depth,
       view: camera.view,
       projection: camera.projection,
-      background: null,
+      // HUD mode fills the frame with a sky so the 3D scene is opaque before the
+      // HUD lands on top; third-person keeps the cart frame behind the meshes.
+      background: this.hud ? HUD_SKY : null,
       ...(lighting
         ? {
             ambient: lighting.ambient,
@@ -214,6 +270,8 @@ export class MeshOverlaySurface implements DisplaySurface {
           }
         : {}),
     });
+    // Lay the cart's 2D frame over the rendered scene as a HUD (first-person).
+    if (this.hud && this.hudFrame) compositeHudOverScene(this.output, this.hudFrame, this.width * this.height);
     this.frame += 1; // advance in lockstep with the run loop's present cadence
     this.inner.blit(this.presented);
   }
