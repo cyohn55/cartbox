@@ -40,8 +40,10 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/luaparse": "^0.2.12",
     "eslint": "^10.10.0",
     "eslint-config-next": "^16.3.4",
+    "luaparse": "^0.3.1",
     "playwright": "^1.62.1",
     "typescript-eslint": "^8.70.0",
     "vitest": "^4.1.11"
