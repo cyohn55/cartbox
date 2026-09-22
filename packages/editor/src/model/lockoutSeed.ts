@@ -1108,6 +1108,7 @@ function TIC()
   draw_viewmodel(W[p.slot==1 and p.g1 or p.g2])
   draw_hud()
   if p.dead then print("RESPAWNING...",520,330,6,false,3,true) end
+end
 `;
 
 /** Seed a fresh cart with the Lockout arena code and a cool Forerunner palette. */
