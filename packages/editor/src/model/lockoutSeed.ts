@@ -1044,16 +1044,26 @@ local function draw_reticle()
   end
 end
 
+-- The mesh overlay always composites the 3D scene ON TOP of the cart's 2D frame,
+-- so on the 2D-only screens (menu, results) every instance must be pushed off
+-- screen -- otherwise the engine's default auto-orbit spins the arena over the
+-- menu text (index 0 is the map; 1..NBOT are the bots; scale 0 hides).
+function hide_scene()
+  cartbox.clearposes()
+  for i=0,NBOT do cartbox.meshpose(i,0,-999,0,0,0,0,0) end
+end
+
 -- ---------------------------------------------------------------------------
 function TIC()
   cls(0)
   tick=tick+1
 
   if phase=="menu" then
+    hide_scene()
     local n=#MODE_KEYS
     if edge("up", btn(0)) then sel=(sel-2)%n+1 end
     if edge("down", btn(1)) then sel=sel%n+1 end
-    if edge("go", btn(4)) then start_match(MODE_KEYS[sel]) end
+    if edge("go", btn(4)) or edge("go2", btn(5)) then start_match(MODE_KEYS[sel]) end
     sky()
     print("LOCKOUT ARENA",452,96,12,false,3,true)
     print("you + 7 bots  --  a Forerunner-style homage on the Xbox 360 core",396,150,13,false,1,true)
@@ -1070,6 +1080,7 @@ function TIC()
   end
 
   if phase=="over" then
+    hide_scene()
     sky()
     print(winner,520,260,12,false,3,true)
     -- simple scoreboard
