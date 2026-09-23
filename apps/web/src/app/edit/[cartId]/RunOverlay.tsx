@@ -244,7 +244,8 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
 
         <p className={styles.runHint}>
           <span className="data">← ↑ ↓ →</span> move · <span className="data">Z</span> /{" "}
-          <span className="data">X</span> action · <span className="data">Esc</span> to stop
+          <span className="data">X</span> action · <span className="data">Esc</span> to stop · on a touchscreen, use
+          the on-screen pad (A/B/X/Y = Z/X/A/S)
         </p>
       </div>
     </div>

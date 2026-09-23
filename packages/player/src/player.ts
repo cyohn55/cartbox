@@ -11,7 +11,7 @@ import { LitCanvasSurface } from "./lighting/LitCanvasSurface.js";
 import { PostFxSurface } from "./fx/PostFxSurface.js";
 import { anyPostFxEnabled, type PostFxSettings } from "./fx/postfx.js";
 import { createConsole, loadEngineModule, type ConsoleInstance } from "./engine.js";
-import { GamepadState, KeyboardInput, TouchInput } from "./input.js";
+import { GamepadState, KeyboardInput, TouchInput, hasTouchSupport } from "./input.js";
 import { frameDurationMs, getModel, type ConsoleModel } from "./models.js";
 import { ReplayRecorder, ReplaySource, hashCart, randomSeed, type Replay } from "./replay.js";
 import { seedCartridge, prependLuaCode } from "./cartseed.js";
@@ -36,13 +36,17 @@ import { type DecodedTexture } from "@cartbox/editor";
 import type { ControlScheme, PlayerOptions } from "./types.js";
 
 /**
- * Decides which input sources to attach. "auto" uses touch when the primary
- * pointer is coarse (phones/tablets) and keyboard otherwise.
+ * Decides whether to show the on-screen gamepad. "auto" shows it on any device
+ * that can take touch at all -- not just ones whose *primary* pointer is coarse,
+ * because an iPad in a keyboard/trackpad case reports a fine pointer but is still
+ * a touchscreen with no gamepad. The keyboard is attached alongside it (see
+ * attachInput), so a touch laptop or keyboard-case tablet can use either.
  */
 function shouldUseTouch(scheme: ControlScheme, view: Window): boolean {
   if (scheme === "touch") return true;
   if (scheme === "keyboard") return false;
-  return view.matchMedia?.("(pointer: coarse)").matches ?? false;
+  const coarse = view.matchMedia?.("(pointer: coarse)").matches ?? false;
+  return hasTouchSupport(view.navigator?.maxTouchPoints ?? 0, coarse);
 }
 
 export class Player {
@@ -284,10 +288,14 @@ export class Player {
   }
 
   private attachInput(): void {
-    if (shouldUseTouch(this.options.controls ?? "auto", this.view)) {
-      this.touch = new TouchInput(this.container, this.gamepad);
-    } else {
+    const scheme = this.options.controls ?? "auto";
+    // Keyboard unless the host forced touch-only; the on-screen pad whenever the
+    // device can take touch. Both write the same GamepadState.
+    if (scheme !== "touch") {
       this.keyboard = new KeyboardInput(this.view, this.gamepad);
+    }
+    if (shouldUseTouch(scheme, this.view)) {
+      this.touch = new TouchInput(this.container, this.gamepad);
     }
   }
 
