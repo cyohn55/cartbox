@@ -276,3 +276,115 @@ export function toPrimitive(streams: Streams, material: MeshMaterial): MeshPrimi
     material,
   };
 }
+
+/** Newell-style normal of a (possibly non-planar) polygon, normalised. */
+function polygonNormal(points: ReadonlyArray<Vec3>): [number, number, number] {
+  let nx = 0;
+  let ny = 0;
+  let nz = 0;
+  for (let i = 0; i < points.length; i += 1) {
+    const a = points[i]!;
+    const b = points[(i + 1) % points.length]!;
+    nx += (a[1] - b[1]) * (a[2] + b[2]);
+    ny += (a[2] - b[2]) * (a[0] + b[0]);
+    nz += (a[0] - b[0]) * (a[1] + b[1]);
+  }
+  const len = Math.hypot(nx, ny, nz);
+  return len < 1e-9 ? [0, 0, 0] : [nx / len, ny / len, nz / len];
+}
+
+/**
+ * Push one flat-shaded convex face, oriented so its normal points away from
+ * `inside`, with world-planar UVs (the two axes across its dominant normal
+ * axis, times `uvScale`) — so textures keep a consistent world size on sloped
+ * and angled faces instead of stretching per face. Degenerate faces are skipped.
+ */
+function pushFace(streams: Streams, points: Vec3[], inside: Vec3, uvScale: number): void {
+  // Drop repeated corners (a collapsed edge turns a quad into a triangle).
+  const pts = points.filter((p, i) => {
+    const q = points[(i + points.length - 1) % points.length]!;
+    return Math.abs(p[0] - q[0]) + Math.abs(p[1] - q[1]) + Math.abs(p[2] - q[2]) > 1e-6;
+  });
+  if (pts.length < 3) return;
+  let n = polygonNormal(pts);
+  if (n[0] === 0 && n[1] === 0 && n[2] === 0) return;
+  let cx = 0;
+  let cy = 0;
+  let cz = 0;
+  for (const p of pts) {
+    cx += p[0];
+    cy += p[1];
+    cz += p[2];
+  }
+  cx /= pts.length;
+  cy /= pts.length;
+  cz /= pts.length;
+  if (n[0] * (cx - inside[0]) + n[1] * (cy - inside[1]) + n[2] * (cz - inside[2]) < 0) {
+    pts.reverse();
+    n = [-n[0], -n[1], -n[2]];
+  }
+  const ax = Math.abs(n[0]);
+  const ay = Math.abs(n[1]);
+  const az = Math.abs(n[2]);
+  const base = streams.positions.length / 3;
+  for (const p of pts) {
+    streams.positions.push(p[0], p[1], p[2]);
+    streams.normals.push(n[0], n[1], n[2]);
+    if (ay >= ax && ay >= az) streams.uvs.push(p[0] * uvScale, p[2] * uvScale);
+    else if (ax >= az) streams.uvs.push(p[2] * uvScale, p[1] * uvScale);
+    else streams.uvs.push(p[0] * uvScale, p[1] * uvScale);
+  }
+  for (let i = 1; i < pts.length - 1; i += 1) streams.indices.push(base, base + i, base + i + 1);
+}
+
+/**
+ * A flat-shaded solid lofted between two rings of corners — `bottom[i]` joins
+ * `top[i]` — so one builder makes frustums (a battered tower wall), wedges and
+ * ramps (a top edge dropped to the ground), chamfered prisms (octagonal rings)
+ * and leaning fins (a top ring offset sideways). The rings must be convex and
+ * list corners in the same rotational order; each face's normal is oriented
+ * outward from the solid's centre, and UVs are world-planar (see `pushFace`), so
+ * the result needs no per-shape texture fitting.
+ */
+export function pushLoft(
+  streams: Streams,
+  bottom: ReadonlyArray<Vec3>,
+  top: ReadonlyArray<Vec3>,
+  uvScale: number,
+  caps: { readonly top?: boolean; readonly bottom?: boolean } = {},
+): void {
+  const n = Math.min(bottom.length, top.length);
+  let cx = 0;
+  let cy = 0;
+  let cz = 0;
+  for (let i = 0; i < n; i += 1) {
+    cx += bottom[i]![0] + top[i]![0];
+    cy += bottom[i]![1] + top[i]![1];
+    cz += bottom[i]![2] + top[i]![2];
+  }
+  const centre: Vec3 = [cx / (2 * n), cy / (2 * n), cz / (2 * n)];
+  for (let i = 0; i < n; i += 1) {
+    const j = (i + 1) % n;
+    pushFace(streams, [bottom[i]!, bottom[j]!, top[j]!, top[i]!], centre, uvScale);
+  }
+  if (caps.top ?? true) pushFace(streams, top.slice(0, n) as Vec3[], centre, uvScale);
+  if (caps.bottom ?? true) pushFace(streams, bottom.slice(0, n) as Vec3[], centre, uvScale);
+}
+
+/**
+ * The corners of an axis-aligned rectangle with its four corners cut at 45° by
+ * `chamfer` (clamped to fit) — an octagonal footprint, listed in rotational
+ * order at height `y`. `chamfer` 0 gives the plain four-corner rectangle.
+ */
+export function chamferedRect(cx: number, cz: number, hx: number, hz: number, chamfer: number, y: number): Vec3[] {
+  const c = Math.max(0, Math.min(chamfer, hx * 0.95, hz * 0.95));
+  if (c === 0) {
+    return [[cx - hx, y, cz - hz], [cx + hx, y, cz - hz], [cx + hx, y, cz + hz], [cx - hx, y, cz + hz]];
+  }
+  return [
+    [cx - hx + c, y, cz - hz], [cx + hx - c, y, cz - hz],
+    [cx + hx, y, cz - hz + c], [cx + hx, y, cz + hz - c],
+    [cx + hx - c, y, cz + hz], [cx - hx + c, y, cz + hz],
+    [cx - hx, y, cz + hz - c], [cx - hx, y, cz - hz + c],
+  ];
+}

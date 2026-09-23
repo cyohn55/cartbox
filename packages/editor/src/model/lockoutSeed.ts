@@ -29,7 +29,7 @@ import type { CartEngine } from "../engine/CartEngine";
 import { encodeRgbaPng } from "./png";
 import { serializeMeshAsset, type EncodedImage, type MeshAsset, type MeshPrimitive } from "./MeshAsset";
 import type { SceneLighting } from "./SceneLighting";
-import { newStreams, pushBox, toPrimitive, type Streams } from "./seedGeometry";
+import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, type Streams } from "./seedGeometry";
 
 /** An axis-aligned box: centre (cx,cy,cz) and half-extents (hx,hy,hz). */
 type Box = readonly [number, number, number, number, number, number];
@@ -197,51 +197,89 @@ function steps(axis: "x" | "z", fixed: number, halfFixed: number, start: number,
   return out;
 }
 
-/** Structural (solid, Forerunner-textured) boxes. */
-const STRUCT: Box[] = [
-  [-1, -0.5, 0, 15, 0.5, 13], // recover floor
-
-  // --- Sniper tower (north-west): three stacked, shrinking tiers ---
-  [-8, 1.0, -8, 3.4, 1.0, 3.0], // T1 base (top 2.0)
-  [-8, 3.25, -8, 2.7, 1.25, 2.4], // T2 mid (top 4.5)
-  [-8, 5.75, -8, 2.2, 1.25, 2.2], // T3 sniper deck (top 7.0)
-  ...steps("z", -8, 2.6, -4.5, 1, 2.0, 0), // floor -> T1 (ramp toward mid)
-  ...steps("x", -10.9, 1.8, -8, -1, 4.5, 2.0), // T1 -> T2 (west side)
-  ...steps("x", -5.1, 1.6, -8, 1, 7.0, 4.5), // T2 -> T3 (east side)
-  // rails around the open sniper deck
+// Named collider boxes. The physics uses these boxes exactly; the *visual* shell
+// (see "The visual layer" below) is built from the same numbers but drawn as
+// chamfered, battered and sloped Forerunner forms, so what you see and what you
+// collide with stay within a few centimetres of each other.
+const FLOOR: Box = [-1, -0.5, 0, 15, 0.5, 13]; // the arena deck (falling off it kills)
+// Sniper tower (north-west): three stacked, shrinking tiers.
+const T1: Box = [-8, 1.0, -8, 3.4, 1.0, 3.0]; // base (top 2.0)
+const T2: Box = [-8, 3.25, -8, 2.7, 1.25, 2.4]; // mid (top 4.5)
+const T3: Box = [-8, 5.75, -8, 2.2, 1.25, 2.2]; // sniper deck (top 7.0)
+// BR structure (south-east): two storeys.
+const B1: Box = [8, 0.9, 7, 3.2, 0.9, 3.0]; // lower (top 1.8)
+const B2: Box = [8, 2.9, 7, 2.4, 1.1, 2.4]; // upper (top 4.0)
+// Central raised walkway (the "bridge") over the bottom mid, with two spurs.
+const SPAN: Box = [0, 3.4, 0, 1.6, 0.25, 6.5]; // top 3.65, running along Z
+const SPUR_N: Box = [3.5, 3.4, -3, 3.5, 0.25, 1.4]; // toward the sniper tower
+const SPUR_S: Box = [3.5, 3.4, 5, 3.5, 0.25, 1.4]; // toward BR
+const BRIDGE_PYLONS: Box[] = [
+  [0, 1.575, -5.2, 0.45, 1.575, 0.45], // the span rests on two pylons
+  [0, 1.575, 5.2, 0.45, 1.575, 0.45],
+];
+// Bottom mid (the Sword pit): a low sunken platform with lips.
+const PIT: Box = [0, 0.35, 0, 3.2, 0.35, 2.6]; // top 0.7
+const PIT_WALLS: Box[] = [
+  [0, 1.1, -2.7, 3.2, 0.5, 0.2],
+  [0, 1.1, 2.7, 3.2, 0.5, 0.2],
+];
+// Shotgun room (south-west): a covered nook with a roof high enough to stand
+// under (floor top 2.2, roof underside 4.1 — the player is 1.7 tall).
+const SG_FLOOR: Box = [-9, 1.1, 6, 2.6, 1.1, 2.4];
+const SG_ROOF: Box = [-9, 4.3, 6, 2.7, 0.2, 2.6];
+const SG_BACK: Box = [-9, 3.15, 8.2, 2.7, 0.95, 0.2];
+const SG_SIDE: Box = [-11.5, 3.15, 6, 0.2, 0.95, 2.6];
+// Guard rails around the open sniper deck and the BR upper storey.
+const RAILS: Box[] = [
   [-8, 7.3, -9.9, 2.2, 0.3, 0.15],
   [-9.9, 7.3, -8, 0.15, 0.3, 2.2],
+  [8, 4.3, 9.4, 2.4, 0.3, 0.15],
+];
 
-  // --- BR structure (south-east): two storeys ---
-  [8, 0.9, 7, 3.2, 0.9, 3.0], // B1 lower (top 1.8)
-  [8, 2.9, 7, 2.4, 1.1, 2.4], // B2 upper (top 4.0)
-  ...steps("z", 8, 2.6, 4.5, -1, 1.8, 0), // floor -> B1
-  ...steps("x", 10.9, 1.7, 7, -1, 4.0, 1.8), // B1 -> B2
-  [8, 4.3, 9.4, 2.4, 0.3, 0.15], // B2 rail
+/** A flight of steps (collision) that the visual layer draws as a smooth ramp. */
+interface Flight {
+  readonly axis: "x" | "z";
+  readonly fixed: number;
+  readonly halfFixed: number;
+  readonly start: number;
+  readonly sign: 1 | -1;
+  readonly topFrom: number;
+  readonly topTo: number;
+}
+const flight = (axis: "x" | "z", fixed: number, halfFixed: number, start: number, sign: 1 | -1, topFrom: number, topTo: number): Flight => ({
+  axis, fixed, halfFixed, start, sign, topFrom, topTo,
+});
+const FLIGHTS: Flight[] = [
+  flight("z", -8, 2.6, -4.5, 1, 2.0, 0), // floor -> T1 (ramp toward mid)
+  flight("x", -10.9, 1.8, -8, -1, 4.5, 2.0), // T1 -> T2 (west side)
+  flight("x", -5.1, 1.6, -8, 1, 7.0, 4.5), // T2 -> T3 (east side)
+  flight("z", 8, 2.6, 4.5, -1, 1.8, 0), // floor -> B1
+  flight("x", 10.9, 1.7, 7, -1, 4.0, 1.8), // B1 -> B2
+  flight("z", 0, 1.4, -7.0, -1, 3.65, 0), // walkway ends drop to the floor
+  flight("z", 0, 1.4, 7.0, 1, 3.65, 0),
+  flight("x", 6, 2.0, -6.4, 1, 2.2, 0), // floor -> shotgun room (climbs west into its open east side)
+];
+const flightSteps = (f: Flight): Box[] => steps(f.axis, f.fixed, f.halfFixed, f.start, f.sign, f.topFrom, f.topTo);
 
-  // --- Central raised walkway (the "bridge") over the bottom mid ---
-  [0, 3.4, 0, 1.6, 0.25, 6.5], // main span (top 3.65) running along Z
-  [3.5, 3.4, -3, 3.5, 0.25, 1.4], // spur toward the sniper tower
-  [3.5, 3.4, 5, 3.5, 0.25, 1.4], // spur toward BR
-  ...steps("z", 0, 1.4, -7.0, -1, 3.65, 0), // ends drop to the floor
-  ...steps("z", 0, 1.4, 7.0, 1, 3.65, 0),
-
-  // --- Bottom mid (the Sword pit): a low sunken platform with lips ---
-  [0, 0.35, 0, 3.2, 0.35, 2.6], // top 0.7
-  [0, 1.1, -2.7, 3.2, 0.5, 0.2], // low walls framing the pit
-  [0, 1.1, 2.7, 3.2, 0.5, 0.2],
-
-  // --- Shotgun room (south-west): a covered nook ---
-  [-9, 1.1, 6, 2.6, 1.1, 2.4], // floor (top 2.2)
-  [-9, 3.5, 6, 2.7, 0.2, 2.6], // roof
-  [-9, 2.6, 8.2, 2.7, 1.4, 0.2], // back wall
-  ...steps("x", -6.4, 2.0, 6, 1, 2.2, 0), // floor -> shotgun room
+/** Every solid collider the cart's physics and shot occlusion test against. */
+const STRUCT: Box[] = [
+  FLOOR,
+  T1, T2, T3,
+  B1, B2,
+  SPAN, SPUR_N, SPUR_S, ...BRIDGE_PYLONS,
+  PIT, ...PIT_WALLS,
+  SG_FLOOR, SG_ROOF, SG_BACK, SG_SIDE,
+  ...RAILS,
+  ...FLIGHTS.flatMap(flightSteps),
 ];
 
 /** Emissive cyan trim (non-solid): thin Forerunner light strips + tower vents. */
 const TRIM: Box[] = [
-  [-8, 5.0, -5.85, 2.0, 1.6, 0.04], // sniper-tower vent (a tall thin slit up the front)
-  [8, 2.9, 4.55, 1.8, 0.8, 0.04], // BR-tower vent
+  // Tower vents: tall, thin glowing slits standing just proud of the wall.
+  [-8.6, 5.3, -5.74, 0.07, 1.0, 0.04], // sniper-tower slits (T3, facing +Z)
+  [-7.4, 5.3, -5.74, 0.07, 1.0, 0.04],
+  [7.4, 2.8, 4.54, 0.07, 0.75, 0.04], // BR-tower slits (B2, facing -Z)
+  [8.6, 2.8, 4.54, 0.07, 0.75, 0.04],
   // walkway edge lights: a thin strip down each long side
   [1.55, 3.67, 0, 0.05, 0.02, 6.3],
   [-1.55, 3.67, 0, 0.05, 0.02, 6.3],
@@ -266,7 +304,7 @@ const MARKER_WEAPONS = ["sniper", "br", "shotgun", "sword", "smg"] as const;
 const SPAWNS: ReadonlyArray<readonly [number, number, number]> = [
   [-4, 0, -9.5], // floor beside the sniper tower
   [-8.8, 7.0, -8.8], // sniper deck
-  [3.5, 0, 10], // floor beside the BR structure
+  [2.3, 0, 8.3], // floor beside the BR structure
   [8, 4.0, 7], // BR upper
   [0, 3.65, 0], // central walkway
   [0, 0.7, 0], // sword pit
@@ -279,8 +317,12 @@ const BOT_COUNT = 7;
 // --- Mesh assembly --------------------------------------------------------
 
 /** One full texture tile (its four panels) spans about `TILE_WORLD` units on any
- *  box face, so panels read at a consistent, readable size across the map. */
-const TILE_WORLD = 12;
+ *  face, so panels read at a consistent size across the map. */
+const TILE_WORLD = 7;
+const UV = 1 / TILE_WORLD;
+
+type V3 = readonly [number, number, number];
+
 function boxesPrimitive(boxes: Box[], material: MeshPrimitive["material"], fixedRepeat?: number): MeshPrimitive {
   const s: Streams = newStreams();
   for (const [cx, cy, cz, hx, hy, hz] of boxes) {
@@ -288,6 +330,276 @@ function boxesPrimitive(boxes: Box[], material: MeshPrimitive["material"], fixed
     pushBox(s, [cx, cy, cz], [hx, hy, hz], r);
   }
   return toPrimitive(s, material);
+}
+
+// --- The visual layer -------------------------------------------------------
+// Lockout's look is its massing: battered (sloped) walls, chamfered corners,
+// overhanging cornices, leaning blade-like fins and ramps instead of stairs, on
+// a deck perched over a drop, with snow gathered on every ledge. These builders
+// draw that over the collider boxes above, which stay the physics.
+
+/** A chamfered prism over a box's footprint, from y0 to y1 (sides only by default). */
+function prism(s: Streams, [cx, , cz, hx, , hz]: Box, y0: number, y1: number, chamfer: number, caps = { top: false, bottom: false }): void {
+  pushLoft(s, chamferedRect(cx, cz, hx, hz, chamfer, y0), chamferedRect(cx, cz, hx, hz, chamfer, y1), UV, caps);
+}
+
+/**
+ * A Forerunner tier: chamfered walls, a battered foot flaring out at the base
+ * (it stays inside the player's collision radius, so feet never clip it), and an
+ * overhanging cornice whose top face is the walkable roof.
+ */
+function tier(s: Streams, box: Box, opts: { batter?: number; cornice?: number; chamfer?: number } = {}): void {
+  const [cx, cy, cz, hx, hy, hz] = box;
+  const c = opts.chamfer ?? 0.55;
+  const bottom = cy - hy;
+  const top = cy + hy;
+  const batter = opts.batter ?? 0;
+  const lip = opts.cornice ?? 0.2;
+  const footH = batter > 0 ? Math.min(0.9, (top - bottom) * 0.45) : 0;
+  if (batter > 0) {
+    pushLoft(s, chamferedRect(cx, cz, hx + batter, hz + batter, c + batter * 0.6, bottom), chamferedRect(cx, cz, hx, hz, c, bottom + footH), UV, { top: false, bottom: false });
+  }
+  const corniceH = 0.32;
+  prism(s, box, bottom + footH, top - corniceH, c);
+  // The cornice flares out to its lip, then its cap is the roof.
+  pushLoft(s, chamferedRect(cx, cz, hx, hz, c, top - corniceH), chamferedRect(cx, cz, hx + lip, hz + lip, c + lip * 0.4, top), UV, { top: true, bottom: false });
+}
+
+/** A smooth ramp drawn over a flight of steps, level with each step's centre. */
+function ramp(s: Streams, f: Flight): void {
+  const n = Math.max(1, Math.round(Math.abs(f.topFrom - f.topTo) / 0.5));
+  const rise = (f.topFrom - f.topTo) / n;
+  const run = 0.85;
+  const end = f.start + f.sign * n * run;
+  const h0 = Math.max(0.02, f.topFrom - rise / 2);
+  const h1 = Math.max(0.02, f.topTo + rise / 2 - rise); // one run past the last step centre
+  const at = (along: number, across: number, y: number): V3 =>
+    f.axis === "z" ? [f.fixed + across, y, along] : [along, y, f.fixed + across];
+  const w = f.halfFixed;
+  const bottom = [at(f.start, -w, 0), at(f.start, w, 0), at(end, w, 0), at(end, -w, 0)];
+  const top = [at(f.start, -w, h0), at(f.start, w, h0), at(end, w, Math.max(0.02, h1)), at(end, -w, Math.max(0.02, h1))];
+  pushLoft(s, bottom, top, UV, { top: true, bottom: false });
+  // Low angled side skirts so the ramp reads as a machined piece, not a slab.
+  for (const side of [-1, 1]) {
+    // The skirt's inner face sits just inside the ramp, never coplanar with its
+    // side (coplanar faces z-fight into a sawtooth).
+    const xi = side * (w - 0.03);
+    const x0 = side * (w + 0.12);
+    pushLoft(
+      s,
+      [at(f.start, xi, 0), at(f.start, x0, 0), at(end, x0, 0), at(end, xi, 0)],
+      [at(f.start, xi, h0 + 0.18), at(f.start, x0, h0 + 0.1), at(end, x0, 0.1), at(end, xi, 0.18)],
+      UV,
+      { top: true, bottom: false },
+    );
+  }
+}
+
+/**
+ * A blade-like Forerunner fin rising from (x, y0, z) along direction (dx, dz):
+ * thin, tapering to a point at y1, and leaning outward by `lean` — the silhouette
+ * that makes a Forerunner tower read from across the map.
+ */
+function fin(s: Streams, x: number, z: number, dx: number, dz: number, y0: number, y1: number, length: number, lean: number): void {
+  const l = Math.hypot(dx, dz) || 1;
+  const ux = dx / l;
+  const uz = dz / l;
+  const px = -uz * 0.16; // half thickness, perpendicular to the blade
+  const pz = ux * 0.16;
+  const base: V3[] = [
+    [x - px, y0, z - pz],
+    [x + ux * length - px, y0, z + uz * length - pz],
+    [x + ux * length + px, y0, z + uz * length + pz],
+    [x + px, y0, z + pz],
+  ];
+  const tx = x + ux * (lean + length * 0.25);
+  const tz = z + uz * (lean + length * 0.25);
+  const tipLen = length * 0.3;
+  const tip: V3[] = [
+    [tx - px * 0.5, y1, tz - pz * 0.5],
+    [tx + ux * tipLen - px * 0.5, y1, tz + uz * tipLen - pz * 0.5],
+    [tx + ux * tipLen + px * 0.5, y1, tz + uz * tipLen + pz * 0.5],
+    [tx + px * 0.5, y1, tz + pz * 0.5],
+  ];
+  pushLoft(s, base, tip, UV);
+}
+
+/** A tapering octagonal column between two heights (pylons, canopy struts). */
+function column(s: Streams, x0: number, z0: number, y0: number, r0: number, x1: number, z1: number, y1: number, r1: number): void {
+  pushLoft(s, chamferedRect(x0, z0, r0, r0, r0 * 0.42, y0), chamferedRect(x1, z1, r1, r1, r1 * 0.42, y1), UV);
+}
+
+/** Forerunner metal: the arena's walls, ramps, fins and walkway. */
+function structureStreams(): Streams {
+  const s = newStreams();
+  // The deck: a chamfered slab whose top is the arena floor.
+  const [fx, , fz, fhx, , fhz] = FLOOR;
+  pushLoft(s, chamferedRect(fx, fz, fhx, fhz, 1.2, -1), chamferedRect(fx, fz, fhx, fhz, 1.2, 0), UV, { top: true, bottom: false });
+
+  // Sniper tower: three battered, corniced tiers and a crown of blades.
+  tier(s, T1, { batter: 0.35, cornice: 0.22 });
+  tier(s, T2, { cornice: 0.2 });
+  tier(s, T3, { cornice: 0.25 });
+  fin(s, -10.4, -10.4, -1, -1, 4.5, 11.4, 2.2, 1.0);
+  fin(s, -6.2, -10.4, 0.3, -1, 4.5, 10.0, 1.8, 0.8);
+  fin(s, -10.4, -6.2, -1, 0.3, 4.5, 10.0, 1.8, 0.8);
+
+  // BR structure: two tiers under a slanted canopy on raked struts.
+  tier(s, B1, { batter: 0.35, cornice: 0.22 });
+  tier(s, B2, { cornice: 0.2 });
+  const [bx, , bz, bhx, , bhz] = B2;
+  column(s, bx - bhx + 0.3, bz + bhz - 0.3, 4.0, 0.2, bx - bhx + 0.1, bz + bhz - 0.1, 6.3, 0.14);
+  column(s, bx + bhx - 0.3, bz + bhz - 0.3, 4.0, 0.2, bx + bhx - 0.1, bz + bhz - 0.1, 6.3, 0.14);
+  pushLoft(
+    s,
+    [[bx - bhx - 0.3, 6.25, bz + bhz + 0.3], [bx + bhx + 0.3, 6.25, bz + bhz + 0.3], [bx + bhx + 0.3, 5.75, bz - bhz - 0.6], [bx - bhx - 0.3, 5.75, bz - bhz - 0.6]],
+    [[bx - bhx - 0.3, 6.5, bz + bhz + 0.3], [bx + bhx + 0.3, 6.5, bz + bhz + 0.3], [bx + bhx + 0.3, 5.95, bz - bhz - 0.6], [bx - bhx - 0.3, 5.95, bz - bhz - 0.6]],
+    UV,
+  );
+  fin(s, bx + bhx + 0.1, bz + bhz + 0.1, 1, 1, 1.8, 7.8, 1.9, 0.7);
+
+  // The walkway: slabs with a tapered underside, on two flared pylons.
+  for (const [cx, cy, cz, hx, hy, hz] of [SPAN, SPUR_N, SPUR_S]) {
+    const top = cy + hy;
+    const narrowX = hx < hz;
+    const ix = narrowX ? Math.min(0.6, hx * 0.4) : 0.1;
+    const iz = narrowX ? 0.1 : Math.min(0.6, hz * 0.4);
+    pushLoft(s, chamferedRect(cx, cz, hx - ix, hz - iz, 0.2, top - 0.8), chamferedRect(cx, cz, hx, hz, 0.25, top), UV);
+  }
+  for (const [x, , z] of BRIDGE_PYLONS) {
+    column(s, x, z, 0, 0.62, x, z, 2.2, 0.45);
+    column(s, x, z, 2.2, 0.45, x, z, 2.85, 0.7); // flared capital under the deck
+  }
+  // Leaning blade rails along both walkway edges.
+  const [, sy, , shx, shy, shz] = SPAN;
+  for (const side of [-1, 1]) {
+    const x = side * shx;
+    pushLoft(
+      s,
+      [[x, sy + shy, -shz + 0.4], [x, sy + shy, shz - 0.4], [x + side * 0.1, sy + shy, shz - 0.4], [x + side * 0.1, sy + shy, -shz + 0.4]],
+      [[x + side * 0.12, sy + shy + 0.45, -shz + 0.9], [x + side * 0.12, sy + shy + 0.45, shz - 0.9], [x + side * 0.2, sy + shy + 0.45, shz - 0.9], [x + side * 0.2, sy + shy + 0.45, -shz + 0.9]],
+      UV,
+    );
+  }
+
+  // The Sword pit and its lips.
+  tier(s, PIT, { cornice: 0.12, chamfer: 0.4 });
+  for (const wall of PIT_WALLS) tier(s, wall, { cornice: 0.06, chamfer: 0.12 });
+
+  // Shotgun room: floor tier, walls, and a roof whose front edge overhangs, sloped.
+  tier(s, SG_FLOOR, { batter: 0.3, cornice: 0.15 });
+  prism(s, SG_BACK, SG_BACK[1] - SG_BACK[4], SG_BACK[1] + SG_BACK[4], 0.08, { top: true, bottom: false });
+  prism(s, SG_SIDE, SG_SIDE[1] - SG_SIDE[4], SG_SIDE[1] + SG_SIDE[4], 0.08, { top: true, bottom: false });
+  const [rx, ry, rz, rhx, rhy, rhz] = SG_ROOF;
+  pushLoft(
+    s,
+    chamferedRect(rx, rz, rhx, rhz, 0.3, ry - rhy),
+    [[rx - rhx - 0.2, ry + rhy, rz - rhz - 0.7], [rx + rhx + 0.2, ry + rhy, rz - rhz - 0.7], [rx + rhx + 0.2, ry + rhy + 0.25, rz + rhz], [rx - rhx - 0.2, ry + rhy + 0.25, rz + rhz]],
+    UV,
+  );
+
+  // Rails as low angled parapets.
+  for (const rail of RAILS) prism(s, rail, rail[1] - rail[4], rail[1] + rail[4], 0.05, { top: true, bottom: false });
+
+  // Ramps over every flight of steps.
+  for (const f of FLIGHTS) ramp(s, f);
+  return s;
+}
+
+/** Darker structural metal: the deck's underside and the pylons into the mist. */
+function undersideStreams(): Streams {
+  const s = newStreams();
+  const [fx, , fz, fhx, , fhz] = FLOOR;
+  // An angled skirt under the deck edge…
+  pushLoft(s, chamferedRect(fx, fz, fhx, fhz, 1.2, -1), chamferedRect(fx, fz, fhx - 3, fhz - 3, 2.4, -3.6), UV, { top: false, bottom: true });
+  // …resting on four great tapered pylons that drop away into the valley mist.
+  for (const [x, z] of [[-8, -7], [6, -7], [-8, 7], [6, 7]] as const) {
+    column(s, x, z, -3.6, 1.6, x * 0.92, z * 0.92, -13, 0.7);
+  }
+  return s;
+}
+
+/** Deterministic 0..1 noise for the snow shapes. */
+function snowRand(i: number): number {
+  const x = Math.sin(i * 127.1 + 311.7) * 43758.5453;
+  return x - Math.floor(x);
+}
+
+/** An irregular, softly domed snow patch lying on a surface at height y. */
+function snowPatch(s: Streams, x: number, z: number, radius: number, y: number, seed: number): void {
+  const sides = 9;
+  const outer: V3[] = [];
+  const inner: V3[] = [];
+  for (let i = 0; i < sides; i += 1) {
+    const a = (i / sides) * Math.PI * 2;
+    const r = radius * (0.7 + 0.45 * snowRand(seed * 13 + i));
+    outer.push([x + Math.cos(a) * r, y + 0.015, z + Math.sin(a) * r]);
+    inner.push([x + Math.cos(a) * r * 0.55, y + 0.07, z + Math.sin(a) * r * 0.55]);
+  }
+  pushLoft(s, outer, inner, UV, { top: true, bottom: false });
+}
+
+/** A drift banked against a wall: `along` the wall from a to b, sloping out by `depth`. */
+function drift(s: Streams, ax: number, az: number, bx: number, bz: number, outX: number, outZ: number, y: number, height: number, depth: number): void {
+  const bottom: V3[] = [
+    [ax, y, az],
+    [bx, y, bz],
+    [bx + outX * depth, y, bz + outZ * depth],
+    [ax + outX * depth, y, az + outZ * depth],
+  ];
+  const top: V3[] = [
+    [ax + (bx - ax) * 0.08, y + height, az + (bz - az) * 0.08],
+    [bx - (bx - ax) * 0.08, y + height, bz - (bz - az) * 0.08],
+    [bx + outX * depth * 0.95, y + 0.01, bz + outZ * depth * 0.95],
+    [ax + outX * depth * 0.95, y + 0.01, az + outZ * depth * 0.95],
+  ];
+  pushLoft(s, bottom, top, UV, { top: true, bottom: false });
+}
+
+/** Snow: caps on the roofs and fins, drifts against walls, patches on the deck. */
+function snowStreams(): Streams {
+  const s = newStreams();
+  // Roof caps (surfaces nobody walks on) — mounded, inset from the edges.
+  const cap = (cx: number, cz: number, hx: number, hz: number, y: number) =>
+    pushLoft(s, chamferedRect(cx, cz, hx, hz, 0.3, y + 0.01), chamferedRect(cx, cz, hx * 0.85, hz * 0.8, 0.5, y + 0.14), UV, { top: true, bottom: false });
+  const [rx, ry, rz, rhx, rhy, rhz] = SG_ROOF;
+  cap(rx, rz - 0.3, rhx, rhz, ry + rhy + 0.12);
+  const [bx, , bz, bhx, , bhz] = B2;
+  cap(bx, bz, bhx, bhz * 0.9, 6.35);
+
+  // Drifts banked against the tower bases on the deck, on their weather sides.
+  const base = (box: Box, side: "-x" | "+x" | "-z" | "+z", y: number, height: number, depth: number, trim = 0.6) => {
+    const [cx, , cz, hx, , hz] = box;
+    const b = 0.35; // past the battered foot
+    if (side === "-x") drift(s, cx - hx - b, cz - hz + trim, cx - hx - b, cz + hz - trim, -1, 0, y, height, depth);
+    if (side === "+x") drift(s, cx + hx + b, cz - hz + trim, cx + hx + b, cz + hz - trim, 1, 0, y, height, depth);
+    if (side === "-z") drift(s, cx - hx + trim, cz - hz - b, cx + hx - trim, cz - hz - b, 0, -1, y, height, depth);
+    if (side === "+z") drift(s, cx - hx + trim, cz + hz + b, cx + hx - trim, cz + hz + b, 0, 1, y, height, depth);
+  };
+  base(T1, "-x", 0, 0.45, 1.1);
+  base(T1, "-z", 0, 0.5, 1.2);
+  base(B1, "+x", 0, 0.45, 1.1);
+  base(B1, "+z", 0, 0.5, 1.2);
+  base(SG_FLOOR, "-x", 0, 0.4, 0.9);
+  // Snow gathered on the tower ledges, against the tier above.
+  base(T2, "-z", 2.0, 0.22, 0.5, 0.5);
+  base(T3, "-x", 4.5, 0.2, 0.45, 0.5);
+  base(B2, "+x", 1.8, 0.2, 0.5, 0.5);
+  // Patches scattered across the deck, thickest toward the exposed edges.
+  const [fx, , fz, fhx, , fhz] = FLOOR;
+  const patches: ReadonlyArray<readonly [number, number, number]> = [
+    [fx - fhx + 1.6, fz - fhz + 1.8, 1.3], [fx + fhx - 1.8, fz - fhz + 1.6, 1.1],
+    [fx - fhx + 1.5, fz + fhz - 1.7, 1.2], [fx + fhx - 1.6, fz + fhz - 1.9, 1.4],
+    [fx - fhx + 1.2, fz - 1.5, 0.9], [fx + fhx - 1.1, fz + 2.5, 1.0],
+    [fx + 3, fz - fhz + 1.1, 0.8], [fx - 4, fz + fhz - 1.0, 0.9],
+    [5.5, -9.5, 0.7], [-3.5, 10.5, 0.6], [11.5, -1.5, 0.8],
+  ];
+  patches.forEach(([x, z, r], i) => snowPatch(s, x, z, r, 0, i + 1));
+  // Rims of snow along the top of every fin-tipped roof edge are left to the
+  // cornices' pale tops; the sniper deck's corners hold a little each.
+  snowPatch(s, -9.6, -9.6, 0.45, 7.0, 40);
+  snowPatch(s, -6.5, -9.6, 0.35, 7.0, 41);
+  return s;
 }
 
 function mapMesh(): MeshAsset {
@@ -304,6 +616,24 @@ function mapMesh(): MeshAsset {
     roughnessFactor: 1,
     emissiveFactor: [1.5, 1.5, 1.5], // push the baked glow above 1 so it blooms through the tone-map
   };
+  // The same metal, darker and without the glowing channel, for the underside.
+  const underMat: MeshPrimitive["material"] = {
+    ...structMat,
+    name: "forerunner-underside",
+    baseColorFactor: [0.55, 0.6, 0.68, 1],
+    emissiveImage: null,
+    emissiveFactor: [0, 0, 0],
+  };
+  // Packed snow: rough, non-metal and cold. Its albedo is held well below white
+  // because the rig's exposure lifts it — a white albedo blows out to flat paper.
+  const snowMat: MeshPrimitive["material"] = {
+    name: "snow",
+    baseColorFactor: [0.72, 0.77, 0.84, 1],
+    baseColorImage: null,
+    metallicFactor: 0,
+    roughnessFactor: 0.9,
+    emissiveFactor: [0.01, 0.015, 0.025],
+  };
   // The energy trim + weapon markers: a flat, non-metal cyan emitter (HDR emissive
   // > 1 so it rolls off through ACES rather than clipping).
   const cyanMat: MeshPrimitive["material"] = {
@@ -316,7 +646,12 @@ function mapMesh(): MeshAsset {
   };
   return {
     name: "Lockout arena",
-    primitives: [boxesPrimitive(STRUCT, structMat), boxesPrimitive([...TRIM, ...MARKERS], cyanMat, 1)],
+    primitives: [
+      toPrimitive(structureStreams(), structMat),
+      toPrimitive(undersideStreams(), underMat),
+      toPrimitive(snowStreams(), snowMat),
+      boxesPrimitive([...TRIM, ...MARKERS], cyanMat, 1),
+    ],
   };
 }
 
@@ -352,16 +687,22 @@ function botMesh(): MeshAsset {
   };
 }
 
-/** The scene's bounding-box centre over every authored box (the bots are
- *  authored at the origin, which sits inside this footprint, so they never
- *  extend it). The camera's target offset is relative to this, so it must match
- *  the runtime's own `parseMeshScene` bounds — a test pins all three axes. */
+/** The built arena mesh, shared by the sidecar and the camera-centre constant. */
+const MAP_MESH = mapMesh();
+
+/** The scene's bounding-box centre over every vertex of the arena mesh (the bots
+ *  are authored at the origin, inside this footprint, so they never extend it).
+ *  The camera's target offset is relative to this, so it must match the runtime's
+ *  own `parseMeshScene` bounds — a test pins all three axes. */
 function sceneCenter(): [number, number, number] {
   let mnx = Infinity, mny = Infinity, mnz = Infinity;
   let mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
-  for (const [cx, cy, cz, hx, hy, hz] of [...STRUCT, ...TRIM, ...MARKERS]) {
-    mnx = Math.min(mnx, cx - hx); mny = Math.min(mny, cy - hy); mnz = Math.min(mnz, cz - hz);
-    mxx = Math.max(mxx, cx + hx); mxy = Math.max(mxy, cy + hy); mxz = Math.max(mxz, cz + hz);
+  for (const primitive of MAP_MESH.primitives) {
+    const p = primitive.positions;
+    for (let i = 0; i < p.length; i += 3) {
+      mnx = Math.min(mnx, p[i]!); mny = Math.min(mny, p[i + 1]!); mnz = Math.min(mnz, p[i + 2]!);
+      mxx = Math.max(mxx, p[i]!); mxy = Math.max(mxy, p[i + 1]!); mxz = Math.max(mxz, p[i + 2]!);
+    }
   }
   return [(mnx + mxx) / 2, (mny + mxy) / 2, (mnz + mxz) / 2];
 }
@@ -382,7 +723,9 @@ export const LOCKOUT_LIGHTING: SceneLighting = {
     sky: [0.42, 0.56, 0.8],
     horizon: [0.55, 0.66, 0.74],
     ground: [0.2, 0.22, 0.26],
-    intensity: 1.5,
+    // The baked sky dome (below) is the environment map, and it is far brighter
+    // than the gradient it replaced, so its intensity sits under 1.
+    intensity: 0.85,
   },
   ambient: 0.6,
   exposure: 1.5,
@@ -441,14 +784,14 @@ export const LOCKOUT_MESH_SIDECAR: string = (() => {
   const identity = { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] };
   const bot = serializeMeshAsset(botMesh());
   const meshes: unknown[] = [
-    { id: "lockout-map", name: "Lockout arena", mesh: serializeMeshAsset(mapMesh()), transform: identity },
+    { id: "lockout-map", name: "Lockout arena", mesh: serializeMeshAsset(MAP_MESH), transform: identity },
   ];
   for (let i = 0; i < BOT_COUNT; i += 1) meshes.push({ id: `bot-${i}`, name: `bot ${i}`, mesh: bot, transform: identity });
   return JSON.stringify({ version: 2, meshes, lighting: LOCKOUT_LIGHTING });
 })();
 
 export const LOCKOUT_SCENE_TRIANGLES = (() => {
-  const map = mapMesh().primitives.reduce((n, p) => n + p.indices.length / 3, 0);
+  const map = MAP_MESH.primitives.reduce((n, p) => n + p.indices.length / 3, 0);
   const bot = botMesh().primitives.reduce((n, p) => n + p.indices.length / 3, 0);
   return map + bot * BOT_COUNT;
 })();
