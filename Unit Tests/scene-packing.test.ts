@@ -18,6 +18,7 @@ import {
   UNIFORM_FLOATS,
   UNIFORM_STRIDE,
   VERTEX_FLOATS,
+  UNIFORM_BYTES_USED,
   alignBytesPerRow,
   interleaveVertices,
   normalBasis3x3,
@@ -59,6 +60,18 @@ describe("uniform layout", () => {
     expect(UNIFORM_STRIDE).toBe(512);
     expect(UNIFORM_STRIDE % 256).toBe(0);
     expect(UNIFORM_FLOATS).toBe(UNIFORM_STRIDE / 4);
+  });
+
+  it("writes distance fog after the model matrix (fog, fogParams) and zeroes it when absent", () => {
+    // WGSL: fog vec4 at byte 448 (float 112), fogParams at 464 (float 116).
+    const data = new Float32Array(UNIFORM_FLOATS);
+    const base = { mvp: COUNTING_MAT4, normalBasis: [0, 0, 0, 0, 0, 0, 0, 0, 0], baseColor: [0, 0, 0, 0] as const, hasTexture: false, light };
+    writeInstanceUniform(data, 0, { ...base, ...NON_PBR, fog: { color: [0.5, 0.25, 0.75], density: 0.125, start: 3, max: 0.5 } });
+    expect(Array.from(data.subarray(112, 120))).toEqual([0.5, 0.25, 0.75, 0.125, 1, 3, 0.5, 0]);
+    writeInstanceUniform(data, 0, { ...base, ...NON_PBR });
+    expect(Array.from(data.subarray(112, 120))).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+    expect(UNIFORM_BYTES_USED).toBe(480);
+    expect(UNIFORM_BYTES_USED).toBeLessThanOrEqual(UNIFORM_STRIDE);
   });
 
   it("writes the mvp as a contiguous column-major mat4", () => {

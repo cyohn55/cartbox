@@ -30,7 +30,7 @@ import {
   renderMeshScene,
   type MeshSceneInstance,
 } from "@cartbox/editor";
-import type { EnvironmentLight, Mat4, RasterStyle, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
+import type { EnvironmentLight, Mat4, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
 import { applyRenderCaps, createTextureBudgetCache } from "./renderCaps.js";
@@ -93,6 +93,12 @@ export interface SceneDraw {
    * {@link SceneLight}.
    */
   readonly lights?: readonly SceneLight[] | null;
+  /**
+   * Distance fog for PBR (Modern-tier) materials, applied after tone mapping, or
+   * omitted for none. Both backends fade by the fragment's eye depth. See
+   * {@link SceneFog}.
+   */
+  readonly fog?: SceneFog | null;
   /**
    * Skip instances whose world AABB is entirely outside the camera frustum. A
    * correct cull is output-identical, so it is a pure perf win; default off.
@@ -175,6 +181,7 @@ export class SoftwareSceneRenderer implements SceneRenderer {
       tonemap: draw.tonemap,
       ssao: draw.ssao,
       lights: draw.lights,
+      fog: draw.fog,
       style: this.style,
     });
   }

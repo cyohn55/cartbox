@@ -261,14 +261,16 @@ const MARKERS: Box[] = [
 ];
 const MARKER_WEAPONS = ["sniper", "br", "shotgun", "sword", "smg"] as const;
 
+// Every spawn stands in open space: the player's collider (radius 0.55, height
+// 1.7) must not start inside a tower tier, or the view opens inside a wall.
 const SPAWNS: ReadonlyArray<readonly [number, number, number]> = [
-  [-8, 2.0, -8], // sniper T1
-  [-8, 4.5, -8], // sniper mid
-  [8, 1.8, 7], // BR lower
+  [-4, 0, -9.5], // floor beside the sniper tower
+  [-8.8, 7.0, -8.8], // sniper deck
+  [3.5, 0, 10], // floor beside the BR structure
   [8, 4.0, 7], // BR upper
   [0, 3.65, 0], // central walkway
   [0, 0.7, 0], // sword pit
-  [-9, 2.2, 6], // shotgun room
+  [-9, 0, 1.5], // outside the shotgun room
   [6, 0, -6], // floor
 ];
 
@@ -394,7 +396,46 @@ export const LOCKOUT_LIGHTING: SceneLighting = {
     // The Sword pit's cyan glow, at the bottom-mid centre.
     { kind: "point", position: [0, 1, 0], color: [0.4, 0.95, 1], intensity: 3.5, range: 10 },
   ],
+  // A procedural alpine dome (original art, baked at load): a cold overcast sky
+  // over two rings of snow-capped peaks, with a misty glacier valley far below —
+  // the arena reads as a facility perched high in the mountains. The same bake
+  // is the image-based light, so the metal panels reflect these clouds.
+  sky: {
+    zenith: [0.3, 0.41, 0.58],
+    horizon: [0.78, 0.83, 0.89],
+    below: [0.66, 0.72, 0.8],
+    sunDirection: [0.4, 0.8, -0.45],
+    sunColor: [1, 0.95, 0.85],
+    clouds: 0.62,
+    cloudColor: [0.9, 0.93, 0.97],
+    mountains: [
+      { height: 8, peaks: 11, rock: [0.44, 0.49, 0.57], snow: [0.88, 0.92, 0.97], snowLine: 0.25, haze: 0.55, seed: 11 },
+      { height: 15, peaks: 7, rock: [0.24, 0.27, 0.32], snow: [0.93, 0.95, 0.98], snowLine: 0.42, haze: 0.18, seed: 29 },
+    ],
+    seed: 7,
+  },
+  // Cold haze that thickens across the arena, tinted to the horizon.
+  fog: { color: [0.74, 0.8, 0.87], density: 0.035, start: 7, max: 0.5 },
 };
+
+/**
+ * The arena's post-FX stack: bloom so the cyan energy trim and the sun-lit snow
+ * glow past their edges, and a gentle cool grade (a touch more contrast, a
+ * touch less saturation) for the cold Forerunner mood. The player's
+ * `PostFxSettings` shape as plain JSON; every effect not named stays off.
+ */
+export const LOCKOUT_FX = {
+  enabled: { bloom: true, grade: true },
+  values: {
+    "bloom.strength": 0.45,
+    "bloom.threshold": 0.72,
+    "bloom.radius": 0.55,
+    "grade.brightness": 1,
+    "grade.contrast": 1.08,
+    "grade.saturation": 0.9,
+  },
+  colors: {},
+} as const;
 
 export const LOCKOUT_MESH_SIDECAR: string = (() => {
   const identity = { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] };
@@ -571,6 +612,7 @@ end
 function respawn(who)
   local s = (math.random(0, NBOT)) * 3
   who.x,who.y,who.z = SPN[s+1],SPN[s+2],SPN[s+3]
+  who.ay = math.atan(-who.x, -who.z)  -- face into the arena, not the spawn wall
   who.vy=0; who.hp=100; who.sh = MODE.shields and 100 or 0
   who.dead=false; who.respawn=0
 end

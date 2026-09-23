@@ -14,7 +14,7 @@ import { seedPlatformerCart, PLATFORMER_COLLISION } from "./platformerSeed";
 import { seedPs1Cart, PS1_MESH_SIDECAR, PS1_ASSETS_SIDECAR } from "./ps1Seed";
 import { seedN64Cart, N64_MESH_SIDECAR, N64_ASSETS_SIDECAR } from "./n64Seed";
 import { seedXbox360Cart, XBOX360_MESH_SIDECAR, XBOX360_ASSETS_SIDECAR } from "./xbox360Seed";
-import { seedLockoutCart, LOCKOUT_MESH_SIDECAR } from "./lockoutSeed";
+import { seedLockoutCart, LOCKOUT_MESH_SIDECAR, LOCKOUT_FX } from "./lockoutSeed";
 
 /** Applies starter content to a cart's engine, in place. */
 type SeedFunction = (engine: CartEngine) => void;
@@ -52,6 +52,13 @@ interface CartStarter {
    * tab and the mesh can be rebaked from it.
    */
   readonly voxel?: string;
+  /**
+   * A post-FX stack (the player's `PostFxSettings` shape, as plain JSON) a
+   * brand-new cart of this starter opens with — e.g. the Lockout arena's bloom
+   * on its energy trim. Untyped here because the FX model lives in the player;
+   * the workbench validates it with `parsePostFxSettings`.
+   */
+  readonly fx?: unknown;
 }
 
 // Typed as a non-empty tuple so index 0 (the default) is statically known to
@@ -106,6 +113,7 @@ export const CART_STARTERS: readonly [CartStarter, ...CartStarter[]] = [
     description: "A Halo 2 Lockout homage on the Xbox 360 core — first-person arena vs 7 bots.",
     seed: seedLockoutCart,
     mesh: LOCKOUT_MESH_SIDECAR,
+    fx: LOCKOUT_FX,
   },
 ];
 

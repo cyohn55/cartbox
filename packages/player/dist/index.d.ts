@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, SceneLighting, DecodedTexture, EnvironmentLight, ShadowInput, ToneMap, SceneLight, RasterStyle } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, SceneLighting, DecodedTexture, EnvironmentLight, ShadowInput, ToneMap, SceneLight, SceneFog, RasterStyle } from '@cartbox/editor';
 
 /**
  * Console models. A model is a fixed hardware spec plus the WASM runtime that
@@ -1730,6 +1730,12 @@ interface SceneDraw {
      */
     readonly lights?: readonly SceneLight[] | null;
     /**
+     * Distance fog for PBR (Modern-tier) materials, applied after tone mapping, or
+     * omitted for none. Both backends fade by the fragment's eye depth. See
+     * {@link SceneFog}.
+     */
+    readonly fog?: SceneFog | null;
+    /**
      * Skip instances whose world AABB is entirely outside the camera frustum. A
      * correct cull is output-identical, so it is a pure perf win; default off.
      */
@@ -2087,9 +2093,11 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  * 352  tonemap    vec4<f32>    16   x = 1 when tone-mapping, y = exposure
  * 368  ssao       vec4<f32>    16   x = 1 when an SSAO buffer is bound, y = light count
  * 384  model      mat4x4<f32>  64   this draw's world matrix (point-light world pos)
+ * 448  fog        vec4<f32>    16   rgb = fog colour, w = density
+ * 464  fogParams  vec4<f32>    16   x = 1 when fogged, y = start distance, z = max amount
  * ```
  *
- * 448 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
+ * 480 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
  * dynamic uniform offset can address), so one buffer still holds every draw in a
  * frame. The metallic-roughness inputs and the environment carry the Modern
  * (AAA) tier's shading; a fantasy draw leaves `pbr.z` at 0 and the shader takes
@@ -2103,7 +2111,7 @@ declare const UNIFORM_STRIDE = 512;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 448;
+declare const UNIFORM_BYTES_USED = 480;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
@@ -2230,6 +2238,13 @@ interface InstanceUniform {
     readonly model: Mat4 | null;
     /** Number of lights in the shared storage buffer, or 0 for the single key light. */
     readonly lightCount: number;
+    /** Distance fog for PBR draws, or null/omitted for none. */
+    readonly fog?: {
+        readonly color: readonly [number, number, number];
+        readonly density: number;
+        readonly start: number;
+        readonly max: number;
+    } | null;
 }
 /**
  * Write one draw's uniforms into the shared staging array at `index`.
@@ -3347,6 +3362,10 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * not dispose it. The default software renderer holds no resources.
      */
     private readonly renderer;
+    /** The baked sky-dome panorama drawn behind a first-person view, or null. */
+    private readonly skyMap;
+    /** The environment the PBR shading samples (with the dome as its map), or null. */
+    private readonly environment;
     private frame;
     private cartCamera;
     private poses;

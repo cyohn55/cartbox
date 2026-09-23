@@ -62,6 +62,7 @@ export {
   seedLockoutCart,
   LOCKOUT_CODE,
   LOCKOUT_MESH_SIDECAR,
+  LOCKOUT_FX,
   LOCKOUT_LIGHTING,
   LOCKOUT_SCENE_TRIANGLES,
   LOCKOUT_CENTER_X,
@@ -248,9 +249,24 @@ export {
   sceneLightingTonemap,
   sceneLightingKeyDirection,
   buildSceneShadow,
+  defaultProceduralSky,
+  defaultSceneFog,
+  parseSky,
+  parseFog,
+  setSceneSky,
+  setSceneFog,
   type SceneLighting,
   type SceneEnvironment,
 } from "./model/SceneLighting";
+export {
+  bakeSkyPanorama,
+  downsamplePanorama,
+  renderSkyBackground,
+  fogFactor,
+  type ProceduralSky,
+  type SkyMountainRange,
+  type SceneFog,
+} from "./render/skyDome";
 export {
   MapVoxelLayer,
   mapLayerToVoxelGrid,

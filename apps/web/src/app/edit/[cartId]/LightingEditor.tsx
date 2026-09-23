@@ -14,11 +14,17 @@
 
 import {
   addSceneLight,
+  defaultProceduralSky,
+  defaultSceneFog,
   defaultSceneLighting,
   patchSceneLighting,
   removeSceneLight,
+  setSceneFog,
+  setSceneSky,
   updateSceneEnvironment,
   updateSceneLight,
+  type ProceduralSky,
+  type SceneFog,
   type SceneLight,
   type SceneLighting,
 } from "@cartbox/editor";
@@ -129,6 +135,9 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
         display={`${env.intensity.toFixed(2)}×`}
         onChange={(intensity) => onChange(updateSceneEnvironment(lighting, { intensity }))}
       />
+
+      <SkyDomeControls lighting={lighting} onChange={onChange} />
+      <FogControls lighting={lighting} onChange={onChange} />
 
       <RangeControl
         label="Ambient fill"
@@ -286,6 +295,155 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
       </button>
       <RailHint>Lights and the skybox shade Modern-tier (PBR) materials. Capped tiers ignore them.</RailHint>
     </RailGroup>
+  );
+}
+
+/**
+ * The procedural sky dome: a baked panorama (clouds + mountain rings) drawn
+ * behind a first-person view and used as the image-based light. The rig stores
+ * only these parameters; the runtime bakes the pixels at load.
+ */
+function SkyDomeControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
+  const sky = lighting.sky ?? null;
+  const patch = (next: Partial<ProceduralSky>) => sky && onChange(setSceneSky(lighting, { ...sky, ...next }));
+  const tallest = sky?.mountains.reduce((m, r) => Math.max(m, r.height), 0) ?? 0;
+  return (
+    <>
+      <SegmentedControl
+        label="Sky dome"
+        ariaLabel="Sky dome"
+        selected={sky ? "on" : "off"}
+        onSelect={(id) => onChange(setSceneSky(lighting, id === "on" ? (sky ?? defaultProceduralSky()) : null))}
+        options={[
+          { id: "off", label: "Gradient" },
+          { id: "on", label: "Mountains" },
+        ]}
+      />
+      {sky && (
+        <>
+          <ColorRow label="Zenith" value={sky.zenith} onChange={(zenith) => patch({ zenith })} />
+          <ColorRow label="Sky horizon" value={sky.horizon} onChange={(horizon) => patch({ horizon })} />
+          <ColorRow label="Valley mist" value={sky.below} onChange={(below) => patch({ below })} />
+          <RangeControl
+            label="Cloud cover"
+            nested
+            min={0}
+            max={1}
+            step={0.01}
+            value={sky.clouds}
+            ariaLabel="Cloud cover"
+            display={`${Math.round(sky.clouds * 100)}%`}
+            onChange={(clouds) => patch({ clouds })}
+          />
+          <RangeControl
+            label="Peak height"
+            nested
+            min={0}
+            max={40}
+            step={1}
+            value={tallest}
+            ariaLabel="Peak height"
+            display={`${tallest.toFixed(0)}°`}
+            onChange={(height) =>
+              // Scale every ring together, keeping their relative heights.
+              patch({
+                mountains: sky.mountains.map((range) => ({
+                  ...range,
+                  height: tallest > 0 ? (range.height / tallest) * height : height,
+                })),
+              })
+            }
+          />
+          <RangeControl
+            label="Snow line"
+            nested
+            min={0}
+            max={1}
+            step={0.01}
+            value={sky.mountains[0]?.snowLine ?? 0.4}
+            ariaLabel="Snow line"
+            display={(sky.mountains[0]?.snowLine ?? 0.4).toFixed(2)}
+            onChange={(snowLine) => patch({ mountains: sky.mountains.map((range) => ({ ...range, snowLine })) })}
+          />
+          <RangeControl
+            label="Variation"
+            nested
+            min={0}
+            max={99}
+            step={1}
+            value={sky.seed}
+            ariaLabel="Sky variation seed"
+            display={`#${sky.seed}`}
+            onChange={(seed) => patch({ seed: Math.round(seed) })}
+          />
+        </>
+      )}
+    </>
+  );
+}
+
+/** Distance fog over PBR geometry, faded in display space after tone mapping. */
+function FogControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
+  const fog = lighting.fog ?? null;
+  const patch = (next: Partial<SceneFog>) => fog && onChange(setSceneFog(lighting, { ...fog, ...next }));
+  return (
+    <>
+      <SegmentedControl
+        label="Distance fog"
+        ariaLabel="Distance fog"
+        selected={fog ? "on" : "off"}
+        onSelect={(id) =>
+          onChange(
+            setSceneFog(
+              lighting,
+              id === "on" ? (fog ?? { ...defaultSceneFog(), color: lighting.sky?.horizon ?? defaultSceneFog().color }) : null,
+            ),
+          )
+        }
+        options={[
+          { id: "off", label: "Off" },
+          { id: "on", label: "On" },
+        ]}
+      />
+      {fog && (
+        <>
+          <ColorRow label="Fog colour" value={fog.color} onChange={(color) => patch({ color })} />
+          <RangeControl
+            label="Density"
+            nested
+            min={0}
+            max={0.2}
+            step={0.005}
+            value={fog.density}
+            ariaLabel="Fog density"
+            display={fog.density.toFixed(3)}
+            onChange={(density) => patch({ density })}
+          />
+          <RangeControl
+            label="Start"
+            nested
+            min={0}
+            max={50}
+            step={0.5}
+            value={fog.start}
+            ariaLabel="Fog start distance"
+            display={fog.start.toFixed(1)}
+            onChange={(start) => patch({ start })}
+          />
+          <RangeControl
+            label="Max"
+            nested
+            min={0}
+            max={1}
+            step={0.01}
+            value={fog.max}
+            ariaLabel="Fog maximum"
+            display={`${Math.round(fog.max * 100)}%`}
+            onChange={(max) => patch({ max })}
+          />
+        </>
+      )}
+    </>
   );
 }
 

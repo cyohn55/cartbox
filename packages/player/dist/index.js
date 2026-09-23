@@ -4226,7 +4226,11 @@ var lerp3 = (a, b, t) => a + (b - a) * t;
 
 // src/mesh/MeshOverlaySurface.ts
 import {
+  bakeSkyPanorama,
   buildSceneShadow,
+  computeEnvironmentAverage,
+  downsamplePanorama,
+  renderSkyBackground,
   composeModelMatrix as composeModelMatrix2,
   multiplyMat4,
   sceneLightingEnvironment,
@@ -4399,6 +4403,7 @@ var SoftwareSceneRenderer = class {
       tonemap: draw.tonemap,
       ssao: draw.ssao,
       lights: draw.lights,
+      fog: draw.fog,
       style: this.style
     });
   }
@@ -4549,16 +4554,21 @@ function compositeHudOverScene(scene, hud, count) {
     }
   }
 }
+var SKY_PANORAMA_WIDTH = 1536;
+var SKY_PANORAMA_HEIGHT = 768;
+var SKY_IBL_DOWNSAMPLE = 8;
 var AUTO_ORBIT_YAW_PER_FRAME = 2 * Math.PI / 720;
 var AUTO_ORBIT_PITCH = 0.35;
 var MeshOverlaySurface = class _MeshOverlaySurface {
-  constructor(inner, width, height, scene, instances, renderer) {
+  constructor(inner, width, height, scene, instances, renderer, skyMap, environment) {
     this.inner = inner;
     this.width = width;
     this.height = height;
     this.scene = scene;
     this.instances = instances;
     this.renderer = renderer;
+    this.skyMap = skyMap;
+    this.environment = environment;
     this.frame = 0;
     this.cartCamera = null;
     this.poses = [];
@@ -4621,7 +4631,15 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         emissiveTextures
       });
     }
-    return new _MeshOverlaySurface(inner, width, height, scene, instances, renderer);
+    const lighting = scene.lighting;
+    let skyMap = null;
+    let environment = lighting ? sceneLightingEnvironment(lighting) : null;
+    if (lighting?.sky && environment) {
+      skyMap = bakeSkyPanorama(lighting.sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT);
+      const ibl = downsamplePanorama(skyMap, SKY_IBL_DOWNSAMPLE);
+      environment = { ...environment, map: ibl, average: computeEnvironmentAverage(ibl) };
+    }
+    return new _MeshOverlaySurface(inner, width, height, scene, instances, renderer, skyMap, environment);
   }
   /**
    * Set the cart-driven camera for the next frame(s), or null to auto-orbit. The
@@ -4664,6 +4682,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const instances = this.posedInstances();
     const lighting = this.scene.lighting;
     const shadow = lighting ? this.buildShadow(instances, lighting) : null;
+    const skyBackdrop = this.hud && this.skyMap !== null;
+    if (skyBackdrop) renderSkyBackground(this.output, this.width, this.height, camera.view, camera.projection, this.skyMap);
     this.renderer.render(instances, {
       width: this.width,
       height: this.height,
@@ -4673,14 +4693,15 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       projection: camera.projection,
       // HUD mode fills the frame with a sky so the 3D scene is opaque before the
       // HUD lands on top; third-person keeps the cart frame behind the meshes.
-      background: this.hud ? HUD_SKY : null,
+      background: this.hud && !skyBackdrop ? HUD_SKY : null,
       ...lighting ? {
         ambient: lighting.ambient,
         lightDirection: sceneLightingKeyDirection(lighting),
-        environment: sceneLightingEnvironment(lighting),
+        environment: this.environment,
         tonemap: sceneLightingTonemap(lighting),
         lights: lighting.lights,
-        shadow
+        shadow,
+        fog: lighting.fog ?? null
       } : {}
     });
     if (this.hud && this.hudFrame) compositeHudOverScene(this.output, this.hudFrame, this.width * this.height);
@@ -5149,7 +5170,7 @@ import {
 
 // src/render/scenePacking.ts
 var UNIFORM_STRIDE = 512;
-var UNIFORM_BYTES_USED = 448;
+var UNIFORM_BYTES_USED = 480;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var LIGHT_FLOATS = 12;
 function packLights(lights) {
@@ -5187,6 +5208,8 @@ var OFFSET_ENV_META = 84;
 var OFFSET_TONEMAP = 88;
 var OFFSET_SSAO = 92;
 var OFFSET_MODEL = 96;
+var OFFSET_FOG = 112;
+var OFFSET_FOG_PARAMS = 116;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -5289,6 +5312,15 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_SSAO + 3] = 0;
   const model = uniform.model;
   for (let i = 0; i < 16; i += 1) target[base + OFFSET_MODEL + i] = model ? model[i] : i % 5 === 0 ? 1 : 0;
+  const fog = uniform.fog ?? null;
+  target[base + OFFSET_FOG] = fog ? fog.color[0] : 0;
+  target[base + OFFSET_FOG + 1] = fog ? fog.color[1] : 0;
+  target[base + OFFSET_FOG + 2] = fog ? fog.color[2] : 0;
+  target[base + OFFSET_FOG + 3] = fog ? fog.density : 0;
+  target[base + OFFSET_FOG_PARAMS] = fog ? 1 : 0;
+  target[base + OFFSET_FOG_PARAMS + 1] = fog ? fog.start : 0;
+  target[base + OFFSET_FOG_PARAMS + 2] = fog ? fog.max : 0;
+  target[base + OFFSET_FOG_PARAMS + 3] = 0;
 }
 var VERTEX_FLOATS = 8;
 function interleaveVertices(positions, normals, uvs) {
@@ -5341,6 +5373,8 @@ struct Uniforms {
   tonemap: vec4<f32>,   // x = 1 when tone-mapping, y = exposure
   ssaoMeta: vec4<f32>,  // x = 1 when an SSAO buffer is bound, y = light count
   model: mat4x4<f32>,   // this draw's world matrix (point-light world position)
+  fog: vec4<f32>,       // rgb = fog colour, w = density
+  fogParams: vec4<f32>, // x = 1 when fogged, y = start distance, z = max amount
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -5378,6 +5412,7 @@ struct VSOut {
   @location(1) uv: vec2<f32>,
   @location(2) lightClip: vec4<f32>,
   @location(3) worldPos: vec3<f32>,
+  @location(4) eyeDepth: f32,
 };
 
 // Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
@@ -5447,6 +5482,7 @@ fn vs(
   out.uv = uv;
   out.lightClip = u.lightMvp * vec4<f32>(position, 1.0);
   out.worldPos = (u.model * vec4<f32>(position, 1.0)).xyz;
+  out.eyeDepth = out.pos.w; // clip w = view depth, for distance fog
   return out;
 }
 
@@ -5566,11 +5602,18 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
       lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
     }
     // HDR: expose + ACES roll-off, or write the linear colour straight through.
+    var shaded = lit;
     if (u.tonemap.x > 0.5) {
       let e = u.tonemap.y;
-      return vec4<f32>(aces(lit.r * e), aces(lit.g * e), aces(lit.b * e), colour.a);
+      shaded = vec3<f32>(aces(lit.r * e), aces(lit.g * e), aces(lit.b * e));
     }
-    return vec4<f32>(lit, colour.a);
+    // Distance fog in display space, mirroring fogFactor in skyDome.ts.
+    if (u.fogParams.x > 0.5) {
+      let d = max(0.0, in.eyeDepth - u.fogParams.y);
+      let f = min(u.fogParams.z, 1.0 - exp(-d * u.fog.w));
+      shaded = mix(clamp(shaded, vec3<f32>(0.0), vec3<f32>(1.0)), u.fog.rgb, f);
+    }
+    return vec4<f32>(shaded, colour.a);
   }
 
   // --- Fantasy path (byte-identical when no shadow; shadow scales the direct term) ---
@@ -5958,7 +6001,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
         model: entry.model,
-        lightCount
+        lightCount,
+        fog: draw.fog ?? null
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);

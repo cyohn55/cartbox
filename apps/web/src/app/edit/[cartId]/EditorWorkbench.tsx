@@ -22,7 +22,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { defaultPostFxSettings, getModel, parseMeshScene, parseWorldScene, type AnimSpec, type MeshScene, type ParticleSpec, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
+import { defaultPostFxSettings, getModel, parsePostFxSettings, parseMeshScene, parseWorldScene, type AnimSpec, type MeshScene, type ParticleSpec, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
 import {
   BANK_COUNT,
   CartEngine,
@@ -228,6 +228,8 @@ export function EditorWorkbench({
     // The era scenes seed their editable texture as a named sprite-block asset in
     // the voxel/assets sidecar, so a fresh cart opens with it in the Assets tab.
     voxel: initialSidecars.voxel ?? starter?.voxel ?? null,
+    // A starter's look (Lockout's bloom + grade) arrives as its FX stack.
+    fx: initialSidecars.fx ?? parsePostFxSettings(starter?.fx) ?? null,
   };
 
   return (
