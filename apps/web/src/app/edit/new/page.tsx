@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
 import { redirect } from "next/navigation";
 
 import { resolveModelId } from "@/lib/consoleModel";
-import { resolveStarterId, defaultStarterForModel, DEFAULT_STARTER_ID } from "@/lib/starter";
+import { resolveStarterId, defaultStarterForModel, modelForStarter, DEFAULT_STARTER_ID } from "@/lib/starter";
 import { isStaticExport } from "@/lib/staticSite";
 import { StaticNewCartRedirect } from "./StaticNewCartRedirect";
 
@@ -32,7 +32,9 @@ export default function NewCartPage({ searchParams }: NewCartPageProps) {
 }
 
 function mintCartAndRedirect(searchParams: NewCartPageProps["searchParams"]): never {
-  const modelId = resolveModelId(searchParams.model);
+  // An explicit ?model= wins; otherwise a starter built for a console (Lockout →
+  // Xbox 360) brings its own, so it never opens on the Classic 240x136 core.
+  const modelId = resolveModelId(searchParams.model ?? modelForStarter(searchParams.starter));
   // An explicit ?starter= wins; otherwise the model picks its own, so a PS1 cart
   // does not open on Classic's 2D ring demo.
   const starterId = resolveStarterId(searchParams.starter ?? defaultStarterForModel(modelId));

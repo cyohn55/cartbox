@@ -16,7 +16,7 @@ import { loadSidecars } from "@/lib/sidecarStorage";
 import { parseCartAssets } from "@/lib/cartAssetStore";
 import { emptySidecars, type Sidecars } from "@/lib/sidecars";
 import { resolveModelId } from "@/lib/consoleModel";
-import { resolveStarterId } from "@/lib/starter";
+import { modelForStarter, resolveStarterId } from "@/lib/starter";
 import { isStaticExport } from "@/lib/staticSite";
 import { DEMO_CARTS, DEMO_DRAFT_CART_ID } from "@/lib/demoCatalog";
 import { EditorWorkbench } from "./EditorWorkbench";
@@ -137,7 +137,9 @@ export default async function EditorPage({ params, searchParams }: EditorPagePro
   );
   // A saved cart's persisted model is authoritative; a brand-new cart (no row)
   // takes the model from the ?model= param carried in from /edit/new.
-  const modelId = resolveModelId(storedModel ?? searchParams.model);
+  // …and a starter built for a console (Lockout → Xbox 360) brings its own model
+  // when the URL names none, so it never opens on the Classic 240x136 core.
+  const modelId = resolveModelId(storedModel ?? searchParams.model ?? modelForStarter(searchParams.starter));
   // The starter only seeds a brand-new cart (one with no stored bytes); the
   // workbench ignores it once real cart bytes load.
   const starterId = resolveStarterId(searchParams.starter);

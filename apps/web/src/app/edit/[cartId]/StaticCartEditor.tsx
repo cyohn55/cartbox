@@ -26,7 +26,7 @@ import { useEffect, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 
 import { resolveModelId } from "@/lib/consoleModel";
-import { resolveStarterId, defaultStarterForModel } from "@/lib/starter";
+import { resolveStarterId, defaultStarterForModel, modelForStarter } from "@/lib/starter";
 import { draftBytes, loadCartDraft } from "@/lib/localCartStore";
 import { findDemoCart, demoCartUrl } from "@/lib/demoCatalog";
 import { emptySidecars, type Sidecars } from "@/lib/sidecars";
@@ -83,7 +83,9 @@ function StaticCartEditorInner({ cartId }: StaticCartEditorProps) {
 
   // A saved model is authoritative; a brand-new draft takes ?model= from the
   // URL, mirroring how the server build resolves /edit/new hand-offs.
-  const modelId = resolveModelId(resolved.storedModel ?? searchParams.get("model"));
+  const modelId = resolveModelId(
+    resolved.storedModel ?? searchParams.get("model") ?? modelForStarter(searchParams.get("starter")),
+  );
   // Same per-model default as the server path (see defaultStarterForModel).
   const starterId = resolveStarterId(searchParams.get("starter") ?? defaultStarterForModel(modelId));
 
