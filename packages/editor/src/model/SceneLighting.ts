@@ -26,6 +26,7 @@ import {
   type ShadowInput,
   type ToneMap,
 } from "../render/meshRasterizer";
+import type { ProceduralSky, SceneFog, SkyMountainRange } from "../render/skyDome";
 
 /** Serialized-format version, bumped on any schema change. */
 export const SCENE_LIGHTING_VERSION = 1;
@@ -51,6 +52,14 @@ export interface SceneLighting {
   /** Cast a directional shadow from the first directional (key) light. */
   readonly shadows: boolean;
   readonly lights: readonly SceneLight[];
+  /**
+   * An optional procedural sky dome. When set, the runtime bakes it into a
+   * panorama that is both drawn behind a first-person scene and used as the
+   * image-based light (so metals reflect it). Null keeps the flat gradient.
+   */
+  readonly sky?: ProceduralSky | null;
+  /** Optional distance fog over PBR geometry. Null = no fog. */
+  readonly fog?: SceneFog | null;
 }
 
 const clamp01 = (n: number): number => Math.max(0, Math.min(1, n));
@@ -109,6 +118,10 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
   const base = defaultSceneLighting();
   const env = (record.environment ?? {}) as Record<string, unknown>;
 
+  // Only present when authored, so a rig without a dome/fog round-trips unchanged.
+  const sky = parseSky(record.sky);
+  const fog = parseFog(record.fog);
+
   const lights = Array.isArray(record.lights)
     ? record.lights.map(parseLight).filter((l): l is SceneLight => l !== null)
     : base.lights;
@@ -125,6 +138,87 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     tonemap: typeof record.tonemap === "boolean" ? record.tonemap : base.tonemap,
     shadows: typeof record.shadows === "boolean" ? record.shadows : base.shadows,
     lights,
+    ...(sky ? { sky } : {}),
+    ...(fog ? { fog } : {}),
+  };
+}
+
+const finiteOr = (value: unknown, fallback: number): number =>
+  typeof value === "number" && Number.isFinite(value) ? value : fallback;
+const tripleOr = (value: unknown, fallback: readonly [number, number, number]): [number, number, number] =>
+  isFiniteTriple(value) ? clampTriple(value) : [fallback[0], fallback[1], fallback[2]];
+
+/** A clear alpine sky — the starting point when a creator turns the sky dome on. */
+export function defaultProceduralSky(): ProceduralSky {
+  return {
+    zenith: [0.3, 0.42, 0.6],
+    horizon: [0.8, 0.85, 0.9],
+    below: [0.7, 0.76, 0.83],
+    sunDirection: [0.4, 0.8, 0.6],
+    sunColor: [1, 0.95, 0.85],
+    clouds: 0.5,
+    cloudColor: [0.93, 0.95, 0.98],
+    mountains: [
+      { height: 9, peaks: 9, rock: [0.42, 0.47, 0.55], snow: [0.9, 0.93, 0.97], snowLine: 0.3, haze: 0.5, seed: 11 },
+      { height: 16, peaks: 6, rock: [0.25, 0.28, 0.33], snow: [0.93, 0.95, 0.98], snowLine: 0.45, haze: 0.15, seed: 29 },
+    ],
+    seed: 7,
+  };
+}
+
+/** Light distance haze tinted to the default sky's horizon. */
+export function defaultSceneFog(): SceneFog {
+  return { color: [0.8, 0.85, 0.9], density: 0.03, start: 6, max: 0.6 };
+}
+
+/** At most this many mountain rings — each costs a pass over the panorama. */
+const MAX_SKY_MOUNTAINS = 4;
+
+function parseMountain(value: unknown): SkyMountainRange | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  return {
+    height: Math.max(0, Math.min(60, finiteOr(raw.height, 10))),
+    peaks: Math.max(1, Math.min(64, finiteOr(raw.peaks, 8))),
+    rock: tripleOr(raw.rock, [0.35, 0.38, 0.44]),
+    snow: tripleOr(raw.snow, [0.92, 0.94, 0.97]),
+    snowLine: clamp01(finiteOr(raw.snowLine, 0.4)),
+    haze: clamp01(finiteOr(raw.haze, 0.3)),
+    seed: Math.floor(finiteOr(raw.seed, 1)),
+  };
+}
+
+/** Read a stored sky dome defensively; anything absent or malformed is null (no dome). */
+export function parseSky(value: unknown): ProceduralSky | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const base = defaultProceduralSky();
+  const mountains = Array.isArray(raw.mountains)
+    ? raw.mountains.map(parseMountain).filter((m): m is SkyMountainRange => m !== null).slice(0, MAX_SKY_MOUNTAINS)
+    : base.mountains;
+  return {
+    zenith: tripleOr(raw.zenith, base.zenith),
+    horizon: tripleOr(raw.horizon, base.horizon),
+    below: tripleOr(raw.below, base.below),
+    sunDirection: isFiniteTriple(raw.sunDirection) ? raw.sunDirection : base.sunDirection,
+    sunColor: tripleOr(raw.sunColor, base.sunColor),
+    clouds: clamp01(finiteOr(raw.clouds, base.clouds)),
+    cloudColor: tripleOr(raw.cloudColor, base.cloudColor),
+    mountains,
+    seed: Math.floor(finiteOr(raw.seed, base.seed)),
+  };
+}
+
+/** Read stored fog defensively; absent or malformed is null (no fog). */
+export function parseFog(value: unknown): SceneFog | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const base = defaultSceneFog();
+  return {
+    color: tripleOr(raw.color, base.color),
+    density: Math.max(0, Math.min(1, finiteOr(raw.density, base.density))),
+    start: Math.max(0, finiteOr(raw.start, base.start)),
+    max: clamp01(finiteOr(raw.max, base.max)),
   };
 }
 
@@ -136,6 +230,16 @@ export function patchSceneLighting(
   patch: Partial<Pick<SceneLighting, "ambient" | "exposure" | "tonemap" | "shadows">>,
 ): SceneLighting {
   return { ...lighting, ...patch };
+}
+
+/** Set or clear the procedural sky dome. */
+export function setSceneSky(lighting: SceneLighting, sky: ProceduralSky | null): SceneLighting {
+  return { ...lighting, sky };
+}
+
+/** Set or clear the distance fog. */
+export function setSceneFog(lighting: SceneLighting, fog: SceneFog | null): SceneLighting {
+  return { ...lighting, fog };
 }
 
 /** Patch the environment (skybox) gradient. */

@@ -23,13 +23,18 @@
  */
 
 import {
+  bakeSkyPanorama,
   buildSceneShadow,
+  computeEnvironmentAverage,
+  downsamplePanorama,
+  renderSkyBackground,
   composeModelMatrix,
   multiplyMat4,
   sceneLightingEnvironment,
   sceneLightingKeyDirection,
   sceneLightingTonemap,
   type DecodedTexture,
+  type EnvironmentLight,
   type MeshSceneInstance,
 } from "@cartbox/editor";
 import type { DisplaySurface } from "../display.js";
@@ -80,6 +85,16 @@ export function compositeHudOverScene(
   }
 }
 
+/**
+ * Size of the baked sky-dome panorama. Wide enough that a 720p first-person view
+ * shows ~3 screen pixels per texel (bilinear keeps that smooth), small enough to
+ * bake in well under a second at load.
+ */
+const SKY_PANORAMA_WIDTH = 1536;
+const SKY_PANORAMA_HEIGHT = 768;
+/** The image-based-light copy is this much smaller — reflections are blurry anyway. */
+const SKY_IBL_DOWNSAMPLE = 8;
+
 /** Radians of yaw per presented frame — one full turn every ~12s at 60Hz. */
 const AUTO_ORBIT_YAW_PER_FRAME = (2 * Math.PI) / 720;
 /** Fixed downward tilt so the scene reads as a 3D object, not a flat silhouette. */
@@ -112,6 +127,10 @@ export class MeshOverlaySurface implements DisplaySurface {
      * not dispose it. The default software renderer holds no resources.
      */
     private readonly renderer: SceneRenderer,
+    /** The baked sky-dome panorama drawn behind a first-person view, or null. */
+    private readonly skyMap: DecodedTexture | null,
+    /** The environment the PBR shading samples (with the dome as its map), or null. */
+    private readonly environment: EnvironmentLight | null,
   ) {
     this.output = new Uint8ClampedArray(width * height * 4);
     this.presented = new Uint8Array(this.output.buffer);
@@ -193,7 +212,17 @@ export class MeshOverlaySurface implements DisplaySurface {
         emissiveTextures,
       });
     }
-    return new MeshOverlaySurface(inner, width, height, scene, instances, renderer);
+    // Bake the procedural sky dome once, if the rig authors one: the full map is
+    // the backdrop, a small copy is the image-based light metals reflect.
+    const lighting = scene.lighting;
+    let skyMap: DecodedTexture | null = null;
+    let environment: EnvironmentLight | null = lighting ? sceneLightingEnvironment(lighting) : null;
+    if (lighting?.sky && environment) {
+      skyMap = bakeSkyPanorama(lighting.sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT);
+      const ibl = downsamplePanorama(skyMap, SKY_IBL_DOWNSAMPLE);
+      environment = { ...environment, map: ibl, average: computeEnvironmentAverage(ibl) };
+    }
+    return new MeshOverlaySurface(inner, width, height, scene, instances, renderer, skyMap, environment);
   }
 
   /**
@@ -249,6 +278,11 @@ export class MeshOverlaySurface implements DisplaySurface {
     // and the fantasy tiers render byte-identically.
     const lighting = this.scene.lighting;
     const shadow = lighting ? this.buildShadow(instances, lighting) : null;
+    // First-person with a sky dome: paint the panorama through the camera, then
+    // composite the meshes over it (background null) — backend-agnostic, since
+    // both renderers leave untouched pixels alone.
+    const skyBackdrop = this.hud && this.skyMap !== null;
+    if (skyBackdrop) renderSkyBackground(this.output, this.width, this.height, camera.view, camera.projection, this.skyMap!);
     this.renderer.render(instances, {
       width: this.width,
       height: this.height,
@@ -258,15 +292,16 @@ export class MeshOverlaySurface implements DisplaySurface {
       projection: camera.projection,
       // HUD mode fills the frame with a sky so the 3D scene is opaque before the
       // HUD lands on top; third-person keeps the cart frame behind the meshes.
-      background: this.hud ? HUD_SKY : null,
+      background: this.hud && !skyBackdrop ? HUD_SKY : null,
       ...(lighting
         ? {
             ambient: lighting.ambient,
             lightDirection: sceneLightingKeyDirection(lighting),
-            environment: sceneLightingEnvironment(lighting),
+            environment: this.environment,
             tonemap: sceneLightingTonemap(lighting),
             lights: lighting.lights,
             shadow,
+            fog: lighting.fog ?? null,
           }
         : {}),
     });

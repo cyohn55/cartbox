@@ -23,7 +23,7 @@ import {
   deserializeMeshAsset,
   resolveStarter,
 } from "@cartbox/editor";
-import { MODELS, parseMeshScene } from "@cartbox/player";
+import { MODELS, parseMeshScene, parsePostFxSettings } from "@cartbox/player";
 
 import { modelForStarter, resolveStarterId } from "../apps/web/src/lib/starter";
 
@@ -116,6 +116,22 @@ describe("the Lockout arena starter", () => {
     expect(scene.lighting?.shadows).toBe(true);
     expect(scene.lighting?.lights.length).toBe(LOCKOUT_LIGHTING.lights.length);
     expect(scene.lighting?.environment.sky).toEqual(LOCKOUT_LIGHTING.environment.sky);
+  });
+
+  it("paints a procedural alpine sky dome, cold distance fog and bloom", () => {
+    // The dome is parameters, not pixels: the runtime bakes it at load.
+    expect(LOCKOUT_LIGHTING.sky?.mountains.length).toBeGreaterThanOrEqual(2);
+    expect(LOCKOUT_LIGHTING.sky?.clouds).toBeGreaterThan(0.3);
+    expect(LOCKOUT_LIGHTING.fog?.density).toBeGreaterThan(0);
+    const scene = parseMeshScene(LOCKOUT_MESH_SIDECAR)!;
+    expect(scene.lighting?.sky).toEqual(LOCKOUT_LIGHTING.sky);
+    expect(scene.lighting?.fog).toEqual(LOCKOUT_LIGHTING.fog);
+    // The sidecar stays small — no baked panorama inside it.
+    expect(LOCKOUT_MESH_SIDECAR.length).toBeLessThan(1_000_000);
+    // Bloom on the energy trim, via the starter's post-FX stack.
+    const fx = parsePostFxSettings(resolveStarter("lockout").fx)!;
+    expect(fx.enabled.bloom).toBe(true);
+    expect(fx.enabled.grade).toBe(true);
   });
 
   it("ships seven game types with their rules and a mode-select menu", () => {

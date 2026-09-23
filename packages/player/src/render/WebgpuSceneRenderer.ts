@@ -103,6 +103,8 @@ struct Uniforms {
   tonemap: vec4<f32>,   // x = 1 when tone-mapping, y = exposure
   ssaoMeta: vec4<f32>,  // x = 1 when an SSAO buffer is bound, y = light count
   model: mat4x4<f32>,   // this draw's world matrix (point-light world position)
+  fog: vec4<f32>,       // rgb = fog colour, w = density
+  fogParams: vec4<f32>, // x = 1 when fogged, y = start distance, z = max amount
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -140,6 +142,7 @@ struct VSOut {
   @location(1) uv: vec2<f32>,
   @location(2) lightClip: vec4<f32>,
   @location(3) worldPos: vec3<f32>,
+  @location(4) eyeDepth: f32,
 };
 
 // Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
@@ -209,6 +212,7 @@ fn vs(
   out.uv = uv;
   out.lightClip = u.lightMvp * vec4<f32>(position, 1.0);
   out.worldPos = (u.model * vec4<f32>(position, 1.0)).xyz;
+  out.eyeDepth = out.pos.w; // clip w = view depth, for distance fog
   return out;
 }
 
@@ -328,11 +332,18 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
       lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
     }
     // HDR: expose + ACES roll-off, or write the linear colour straight through.
+    var shaded = lit;
     if (u.tonemap.x > 0.5) {
       let e = u.tonemap.y;
-      return vec4<f32>(aces(lit.r * e), aces(lit.g * e), aces(lit.b * e), colour.a);
+      shaded = vec3<f32>(aces(lit.r * e), aces(lit.g * e), aces(lit.b * e));
     }
-    return vec4<f32>(lit, colour.a);
+    // Distance fog in display space, mirroring fogFactor in skyDome.ts.
+    if (u.fogParams.x > 0.5) {
+      let d = max(0.0, in.eyeDepth - u.fogParams.y);
+      let f = min(u.fogParams.z, 1.0 - exp(-d * u.fog.w));
+      shaded = mix(clamp(shaded, vec3<f32>(0.0), vec3<f32>(1.0)), u.fog.rgb, f);
+    }
+    return vec4<f32>(shaded, colour.a);
   }
 
   // --- Fantasy path (byte-identical when no shadow; shadow scales the direct term) ---
@@ -834,6 +845,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         hasSsao: ssao !== null,
         model: entry.model,
         lightCount,
+        fog: draw.fog ?? null,
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);

@@ -22,6 +22,7 @@
  * rasteriser stay pure and testable. DOM-free.
  */
 
+import { fogFactor, type SceneFog } from "./skyDome";
 import { type MeshAsset, computeSmoothNormals, meshBounds } from "../model/MeshAsset";
 
 /** A decoded texture: tightly-packed RGBA rows, `width × height`. */
@@ -747,6 +748,9 @@ export interface RenderMeshSceneOptions {
   readonly lights?: readonly SceneLight[] | null;
   /** Per-pixel rasterisation behaviour; defaults to {@link DEFAULT_RASTER_STYLE}. */
   readonly style?: RasterStyle;
+  /** Distance fog over PBR materials (Modern tier), applied after tone mapping.
+   *  Absent, output is byte-identical. See {@link SceneFog}. */
+  readonly fog?: SceneFog | null;
 }
 
 /**
@@ -769,6 +773,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
   const tonemap = options.tonemap ?? null;
   const ssao = options.ssao ?? null;
   const lights = options.lights ?? null;
+  const fog = options.fog ?? null;
   const style = options.style ?? DEFAULT_RASTER_STYLE;
   const viewProj = multiply(projection, view);
 
@@ -812,7 +817,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const emissiveTextures = instance.emissiveTextures ?? null;
     const lightMvp = shadow ? multiply(shadow.lightViewProj, instance.model) : null;
     if (style.zBuffer) {
-      drawMesh(instance.mesh, mvp, modelView, instance.model, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, lights, style);
+      drawMesh(instance.mesh, mvp, modelView, instance.model, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, lights, style, fog);
     } else {
       eachTriangle(instance.mesh, mvp, modelView, instance.model, normalBasis, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightMvp, (triangle) => queue.push(triangle));
     }
@@ -845,6 +850,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
         ssao,
         lights,
         style,
+        fog,
       );
     }
   }
@@ -1409,6 +1415,7 @@ function drawMesh(
   ssao: Float32Array | null,
   lights: readonly SceneLight[] | null,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
+  fog: SceneFog | null = null,
 ): void {
   eachTriangle(
     mesh,
@@ -1447,6 +1454,7 @@ function drawMesh(
         ssao,
         lights,
         style,
+        fog,
       );
     },
   );
@@ -1476,6 +1484,7 @@ function rasterizeTriangle(
   ssao: Float32Array | null,
   lights: readonly SceneLight[] | null,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
+  fog: SceneFog | null = null,
 ): void {
   // Perspective divide to NDC, then to screen pixels. NDC spans the full extent
   // of each axis independently, so x maps by width and y by height — a mesh drawn
@@ -1817,6 +1826,17 @@ function rasterizeTriangle(
           out[di * 4] = lr * 255;
           out[di * 4 + 1] = lg * 255;
           out[di * 4 + 2] = lb * 255;
+        }
+        if (fog) {
+          // Distance fog by eye depth (clip w, perspective-interpolated), mixed
+          // in display space toward the fog colour — the WGSL path matches.
+          const eyeDepth = pw0 * a.clip[3] + pw1 * b.clip[3] + pw2 * c.clip[3];
+          const f = fogFactor(fog, eyeDepth);
+          if (f > 0) {
+            out[di * 4] = out[di * 4]! + (fog.color[0] * 255 - out[di * 4]!) * f;
+            out[di * 4 + 1] = out[di * 4 + 1]! + (fog.color[1] * 255 - out[di * 4 + 1]!) * f;
+            out[di * 4 + 2] = out[di * 4 + 2]! + (fog.color[2] * 255 - out[di * 4 + 2]!) * f;
+          }
         }
         out[di * 4 + 3] = al;
       } else {
