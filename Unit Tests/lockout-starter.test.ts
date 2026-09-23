@@ -25,7 +25,7 @@ import {
 } from "@cartbox/editor";
 import { MODELS, parseMeshScene } from "@cartbox/player";
 
-import { resolveStarterId } from "../apps/web/src/lib/starter";
+import { modelForStarter, resolveStarterId } from "../apps/web/src/lib/starter";
 
 describe("the Lockout arena starter", () => {
   it("is registered and reachable by id", () => {
@@ -33,6 +33,16 @@ describe("the Lockout arena starter", () => {
     expect(resolveStarter("lockout").mesh).toBe(LOCKOUT_MESH_SIDECAR);
     // A fresh cart can select it from the /edit/new URL.
     expect(resolveStarterId("lockout")).toBe("lockout");
+  });
+
+  it("brings the Xbox 360 model when the URL names only the starter", () => {
+    // The cart draws at 1280x720; opened on the default Classic core (240x136) it
+    // rendered as four stray sky pixels. ?starter=lockout alone must pick xbox360.
+    expect(modelForStarter("lockout")).toBe("xbox360");
+    expect(MODELS.xbox360.width).toBe(1280);
+    // Model-agnostic starters leave the model to ?model= / the default.
+    expect(modelForStarter("demo")).toBeNull();
+    expect(modelForStarter(null)).toBeNull();
   });
 
   it("parses into a drawable scene: the map plus 7 bot instances", () => {

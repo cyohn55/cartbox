@@ -21,6 +21,26 @@ export function resolveStarterId(value: string | null | undefined): StarterId {
 }
 
 /**
+ * The console model a starter is built for, or null when it runs on any model.
+ *
+ * The inverse of {@link defaultStarterForModel}, and just as necessary: a 3D
+ * era starter's code draws at its model's resolution, so opening it on the
+ * default Classic core (240x136) puts nearly everything off-screen. That is
+ * exactly how `/edit/new?starter=lockout` rendered — four stray sky pixels of a
+ * 1280x720 menu. A URL that names a starter but no model now gets the starter's
+ * own model; an explicit ?model= still wins.
+ */
+export function modelForStarter(starterId: string | null | undefined): string | null {
+  const perStarter: Record<string, string> = {
+    ps1: "ps1",
+    n64: "n64",
+    xbox360: "xbox360",
+    lockout: "xbox360",
+  };
+  return starterId ? (perStarter[starterId] ?? null) : null;
+}
+
+/**
  * The starter a fresh cart of this model opens on when the URL names none.
  *
  * `DEFAULT_STARTER_ID` is the ring-runner demo, which is *Classic's* starter: a
