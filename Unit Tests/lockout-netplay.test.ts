@@ -138,7 +138,13 @@ describe.skipIf(!existsSync(ENGINE))("Lockout over netplay (two engines, one roo
       both(0, f % 240 < 150 ? 0x01 : 0x08);
       if (f % 400 === 399) samples.push([host.net()[117]!, guest.net()[117]!]);
     }
-    for (const [a, b] of samples) expect(b).toBe(a);
+    // Scores reach the guest within one score update (3 a second), so a sample
+    // can catch the host a point ahead — never more.
+    const unpack = (w: number) => [w & 255, (w >>> 8) & 255, (w >>> 16) & 255, w >>> 24];
+    for (const [a, b] of samples) {
+      const host = unpack(a);
+      unpack(b).forEach((score, slot) => expect(Math.abs(score - host[slot]!)).toBeLessThanOrEqual(1));
+    }
     // Someone has scored by holding the ball, and the carrier matches.
     expect(samples.at(-1)![0]).toBeGreaterThan(0);
     expect(guest.net()[118]! >>> 16).toBe(host.net()[118]! >>> 16);

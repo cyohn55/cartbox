@@ -427,6 +427,13 @@ export interface ShadowInput {
   /** Average a 2×2 texel neighbourhood (percentage-closer filtering) for soft
    *  shadow edges instead of one hard texel. Default false. */
   readonly pcf?: boolean;
+  /**
+   * The texels of `depth` that changed since the previous frame's map in this
+   * same array (movers' shadows, old and new). A GPU renderer that uploaded the
+   * array before re-uploads just this; absent or null means all of it may have
+   * changed. The software rasteriser reads the array directly and ignores it.
+   */
+  readonly dirty?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | null;
 }
 
 /**

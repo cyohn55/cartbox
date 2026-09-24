@@ -12,6 +12,7 @@ import {
   NET_MODE_HOST,
   NET_WORDS,
   NetSession,
+  netSendInterval,
   takeNetOutbox,
   type NetMessage,
   type NetTransport,
@@ -175,6 +176,45 @@ describe("NetSession over a memory room", () => {
     expect(sent[1]!.s).toEqual([[0, 7, 0, 0]]); // the latest state
     expect(sent[1]!.e).toEqual([[1, 4], [2, 4], [1, 5], [2, 5], [1, 6], [2, 6], [1, 7], [2, 7]]); // every event since
     expect(sent[1]!.m).toBe(0); // the host's match word rides along
+  });
+
+  it("stays quiet when nothing changed, bar a keepalive once a second", async () => {
+    const sent: NetMessage[] = [];
+    const transport: NetTransport = {
+      selfId: "me",
+      connect: async () => {},
+      send: (message) => sent.push(message),
+      onMessage: () => {},
+      onPeers: (handler) => queueMicrotask(() => handler([{ id: "me", joinedAt: 0 }, { id: "you", joinedAt: 1 }])),
+      close: () => {},
+    };
+    const session = new NetSession(transport);
+    await session.connect();
+    await Promise.resolve();
+    const words = new Uint32Array(NET_WORDS);
+    const tick = (state: [number, number, number], event = false) => {
+      session.beforeTick(words);
+      publish(words, 0, state);
+      if (event) send(words, 1, 2);
+      session.afterTick(words);
+    };
+    for (let t = 0; t < 120; t += 1) tick([5, 5, 5]); // standing still for two seconds
+    expect(sent.length).toBe(2); // the first snapshot, then one keepalive
+    tick([5, 5, 5], true); // an event always goes out (on the next send tick)
+    for (let t = 0; t < 3; t += 1) tick([5, 5, 5]);
+    expect(sent.at(-1)!.e).toEqual([[1, 2]]);
+    const before = sent.length;
+    for (let t = 0; t < 8; t += 1) tick([6 + t, 5, 5]); // moving again: sends resume
+    expect(sent.length - before).toBe(2);
+  });
+
+  it("slows each player's rate as the room fills", () => {
+    expect(netSendInterval(2)).toBe(4); // 15 Hz
+    expect(netSendInterval(4)).toBe(6); // 10 Hz
+    expect(netSendInterval(8)).toBe(8); // 7.5 Hz
+    // Messages a room receives per second stay bounded as it fills.
+    const load = (n: number) => (n * (n - 1) * 60) / netSendInterval(n);
+    expect(load(8)).toBeLessThan(load(2) * 16);
   });
 
   it("writes an offline inbox before connecting", () => {

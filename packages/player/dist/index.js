@@ -3121,21 +3121,54 @@ function parseReplay(json) {
 
 // src/cartseed.ts
 var CHUNK_CODE = 5;
-var MAX_CHUNK_SIZE = 65535;
-function locateCodeChunk(bytes) {
+var CHUNK_BINARY = 19;
+var CODE_BANK_SIZE = 65536;
+var CODE_BANKS = 8;
+var MAX_CODE_BYTES = CODE_BANK_SIZE * CODE_BANKS - 1;
+function chunks(bytes) {
+  const out = [];
   let offset = 0;
   while (offset + 4 <= bytes.length) {
-    const headerByte0 = bytes[offset] ?? 0;
-    const type = headerByte0 & 31;
-    const size = (bytes[offset + 1] ?? 0) | (bytes[offset + 2] ?? 0) << 8;
+    const byte0 = bytes[offset] ?? 0;
+    const type = byte0 & 31;
+    const field = (bytes[offset + 1] ?? 0) | (bytes[offset + 2] ?? 0) << 8;
+    const size = field === 0 && (type === CHUNK_CODE || type === CHUNK_BINARY) ? CODE_BANK_SIZE : field;
     const dataStart = offset + 4;
-    const dataEnd = dataStart + size;
-    if (type === CHUNK_CODE && size > 0 && dataEnd <= bytes.length) {
-      return { headerStart: offset, dataStart, dataEnd, headerByte0, reserved: bytes[offset + 3] ?? 0 };
-    }
-    offset = dataEnd;
+    const dataEnd = Math.min(dataStart + size, bytes.length);
+    out.push({ headerStart: offset, dataStart, dataEnd, type, bank: byte0 >> 5 });
+    offset = dataStart + size;
   }
-  return null;
+  return out;
+}
+function joinedCode(bytes) {
+  const all = chunks(bytes);
+  const byBank = /* @__PURE__ */ new Map();
+  for (const chunk of all) if (chunk.type === CHUNK_CODE) byBank.set(chunk.bank, chunk);
+  const banks = [...byBank.keys()].sort((a, b) => b - a);
+  const parts = banks.map((bank) => bytes.subarray(byBank.get(bank).dataStart, byBank.get(bank).dataEnd));
+  const length = parts.reduce((n, part) => n + part.length, 0);
+  if (length === 0) return null;
+  const code = new Uint8Array(length);
+  let at = 0;
+  for (const part of parts) {
+    code.set(part, at);
+    at += part.length;
+  }
+  const nul = code.indexOf(0);
+  return { code: nul >= 0 ? code.subarray(0, nul) : code, chunks: all.filter((chunk) => chunk.type === CHUNK_CODE) };
+}
+function codeChunks(code) {
+  const count = Math.max(1, Math.ceil(code.length / CODE_BANK_SIZE));
+  const out = new Uint8Array(code.length + count * 4);
+  let at = 0;
+  for (let k = 0; k < count; k += 1) {
+    const slice = code.subarray(k * CODE_BANK_SIZE, (k + 1) * CODE_BANK_SIZE);
+    const bank = count - 1 - k;
+    out.set([CHUNK_CODE | bank << 5, slice.length & 255, slice.length >> 8 & 255, 0], at);
+    out.set(slice, at + 4);
+    at += 4 + slice.length;
+  }
+  return out;
 }
 function detectLanguage(code) {
   const firstLine = code.split("\n", 1)[0] ?? "";
@@ -3143,40 +3176,39 @@ function detectLanguage(code) {
   return match?.[1]?.toLowerCase() ?? "lua";
 }
 function readCartCode(bytes) {
-  const chunk = locateCodeChunk(bytes);
-  if (!chunk) {
-    return null;
-  }
-  return new TextDecoder().decode(bytes.subarray(chunk.dataStart, chunk.dataEnd));
+  const joined = joinedCode(bytes);
+  return joined ? new TextDecoder().decode(joined.code) : null;
 }
 function prependLuaCode(bytes, prelude) {
-  const chunk = locateCodeChunk(bytes);
-  if (!chunk) {
+  const joined = joinedCode(bytes);
+  if (!joined) {
     return bytes;
   }
-  const code = new TextDecoder().decode(bytes.subarray(chunk.dataStart, chunk.dataEnd));
+  const code = new TextDecoder().decode(joined.code);
   if (detectLanguage(code) !== "lua") {
     return bytes;
   }
-  const merged = `${prelude}
-${code}`;
-  const mergedData = new TextEncoder().encode(merged);
-  if (mergedData.length > MAX_CHUNK_SIZE) {
+  const merged = new TextEncoder().encode(`${prelude}
+${code}`);
+  if (merged.length > MAX_CODE_BYTES) {
     return bytes;
   }
-  const before = bytes.subarray(0, chunk.headerStart);
-  const after = bytes.subarray(chunk.dataEnd);
-  const header = new Uint8Array([
-    chunk.headerByte0,
-    mergedData.length & 255,
-    mergedData.length >> 8 & 255,
-    chunk.reserved
-  ]);
-  const out = new Uint8Array(before.length + header.length + mergedData.length + after.length);
-  out.set(before, 0);
-  out.set(header, before.length);
-  out.set(mergedData, before.length + header.length);
-  out.set(after, before.length + header.length + mergedData.length);
+  const replacement = codeChunks(merged);
+  const first = joined.chunks[0];
+  const kept = [];
+  let cursor = 0;
+  for (const chunk of joined.chunks) {
+    kept.push(bytes.subarray(cursor, chunk.headerStart));
+    if (chunk === first) kept.push(replacement);
+    cursor = chunk.dataEnd;
+  }
+  kept.push(bytes.subarray(cursor));
+  const out = new Uint8Array(kept.reduce((n, part) => n + part.length, 0));
+  let at = 0;
+  for (const part of kept) {
+    out.set(part, at);
+    at += part.length;
+  }
   return out;
 }
 function seedCartridge(bytes, seed) {
@@ -3249,6 +3281,12 @@ cartbox = {
   sun = function(dx, dy, dz, r, g, b, intensity)
     local nx, ny = _norm(dx or 0, dy or 0, dz or 1)
     _light(1, 0, 0, 0, 0, r, g, b, intensity, _byte(nx), _byte(ny), 0)
+  end,
+  -- light3d(x, y, z, radius, r, g, b, intensity): a point light in a 3D scene's
+  -- world units (signed, fractional), lighting a first-person mesh view -- the
+  -- 2D relight ignores it. E.g. a glow over an objective.
+  light3d = function(x, y, z, radius, r, g, b, intensity)
+    _light(3, (x or 0) * 64, (y or 0) * 64, (z or 0) * 64, (radius or 4) * 64, r, g, b, intensity, 0, 0, 0)
   end,
   spot = function(x, y, z, dx, dy, dz, radius, angle, r, g, b, intensity)
     local nx, ny = _norm(dx or 0, dy or 0, dz or 1)
@@ -3628,6 +3666,8 @@ var MESH_POSE_TINT_MASK = 15;
 var MESH_POSE_FRONT = 1 << 20;
 var LIGHT_KIND_POINT = 0;
 var LIGHT_KIND_SPOT = 2;
+var LIGHT_KIND_WORLD = 3;
+var WORLD_LIGHT_SCALE = 64;
 var LIGHT_DIR_SCALE = 127;
 var LIGHT_CONE_SCALE = 63;
 var KIND_BY_CODE = ["point", "directional", "spot"];
@@ -3690,6 +3730,7 @@ function decodeLights(words) {
       ]
     };
     const kindCode = packed >>> 24 & 3;
+    if (kindCode === LIGHT_KIND_WORLD) continue;
     if (kindCode !== LIGHT_KIND_POINT) {
       light.kind = KIND_BY_CODE[kindCode] ?? "point";
       const dirX = signedByte(intensityWord >>> 16 & 255) / LIGHT_DIR_SCALE;
@@ -3703,6 +3744,28 @@ function decodeLights(words) {
     lights.push(light);
   }
   return lights;
+}
+function decodeWorldLights(words) {
+  if (words.length <= LIGHTS_BASE) return [];
+  const count = Math.min(words[LIGHTS_BASE] ?? 0, LIGHTS_CAPACITY);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const base = LIGHTS_BASE + 1 + i * LIGHT_STRIDE;
+    const packed = words[base + 4] ?? 0;
+    if ((packed >>> 24 & 3) !== LIGHT_KIND_WORLD) continue;
+    const intensity = ((words[base + 5] ?? LIGHT_INTENSITY_SCALE) & 65535) / LIGHT_INTENSITY_SCALE;
+    const signed = (k) => ((words[base + k] ?? 0) | 0) / WORLD_LIGHT_SCALE;
+    out.push({
+      position: [signed(0), signed(1), signed(2)],
+      range: signed(3),
+      color: [
+        (packed >>> 16 & 255) / 255 * intensity,
+        (packed >>> 8 & 255) / 255 * intensity,
+        (packed & 255) / 255 * intensity
+      ]
+    });
+  }
+  return out;
 }
 function decodeCamera(words) {
   if (words.length <= CAMERA_BASE + 1) {
@@ -4677,9 +4740,23 @@ function buildOrbitCamera(bounds, yaw, pitch, aspect, options = {}) {
 var RAD_TO_DEG = 180 / Math.PI;
 var FIRST_PERSON_NEAR = 0.05;
 var SHADOW_MAP_SIZE = 1024;
+var SKY_BACKDROP_SCALE = 3;
+var SOFTWARE_SCALES = [1, 0.75, 0.5, 0.35, 0.25];
+var SLOW_FRAME_MS = 40;
+var FAST_FRAME_MS = 15;
 var HUD_TRANSPARENT_SUM = 30;
 var HUD_SKY = [70, 104, 152, 255];
 function compositeHudOverScene(scene, hud, count) {
+  if (scene.byteOffset % 4 === 0 && hud.byteOffset % 4 === 0) {
+    const out = new Uint32Array(scene.buffer, scene.byteOffset, count);
+    const src = new Uint32Array(hud.buffer, hud.byteOffset, count);
+    for (let i = 0; i < count; i += 1) {
+      const word = src[i];
+      if ((word & 16777215) === 0) continue;
+      if ((word & 255) + (word >>> 8 & 255) + (word >>> 16 & 255) > HUD_TRANSPARENT_SUM) out[i] = (word | 4278190080) >>> 0;
+    }
+    return;
+  }
   for (let i = 0; i < count; i += 1) {
     const o = i * 4;
     const r = hud[o];
@@ -4706,7 +4783,7 @@ function poseLocalMatrix(pose) {
 var AUTO_ORBIT_YAW_PER_FRAME = 2 * Math.PI / 720;
 var AUTO_ORBIT_PITCH = 0.35;
 var MeshOverlaySurface = class _MeshOverlaySurface {
-  constructor(inner, width, height, scene, instances, frames, renderer, skyMap, environment) {
+  constructor(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options = {}) {
     this.inner = inner;
     this.width = width;
     this.height = height;
@@ -4716,6 +4793,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.renderer = renderer;
     this.skyMap = skyMap;
     this.environment = environment;
+    this.options = options;
     this.frame = 0;
     this.cartCamera = null;
     this.poses = [];
@@ -4725,6 +4803,24 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.staticShadow = null;
     this.staticShadowKey = "";
     this.staticShadowLighting = null;
+    /** The light's world→clip matrix of the cached static map (movers' footprints are projected with it). */
+    this.staticShadowMatrix = null;
+    /** Shadow-map rects last frame's movers drew into (restored from the static map next frame). */
+    this.shadowRects = [];
+    /** Instances ever posed on the front layer (a held weapon): never part of the static shadow. */
+    this.everFront = /* @__PURE__ */ new Set();
+    /** Each mesh's local bounding box, for projecting shadow footprints. */
+    this.meshBounds = /* @__PURE__ */ new WeakMap();
+    /** Software-path resolution governor (see SOFTWARE_SCALES): current step and smoothed frame ms. */
+    this.scaleStep = 2;
+    this.frameMs = 0;
+    this.framesAtStep = 0;
+    this.low = null;
+    /** The last sky backdrop and the view it was painted for (it depends only on
+     *  where the camera points, so walking without turning reuses it). */
+    this.skyCache = null;
+    /** The cart's world lights this frame (cartbox.light3d), added to the rig's in first person. */
+    this.cartLights = [];
     /** Tinted mesh copies, per source mesh and tint index. */
     this.tintCache = /* @__PURE__ */ new Map();
     /** Draws the front layer (a held weapon) over the finished scene. */
@@ -4742,7 +4838,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * texture that fails to decode falls back to null (flat base colour), so a
    * bad image never blocks the cart — the mesh still renders, just untextured.
    */
-  static async create(inner, width, height, scene, renderer = new SoftwareSceneRenderer()) {
+  static async create(inner, width, height, scene, renderer = new SoftwareSceneRenderer(), options = {}) {
     const decoded = /* @__PURE__ */ new Map();
     const texture = (mesh) => {
       let entry = decoded.get(mesh);
@@ -4766,7 +4862,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const ibl = downsamplePanorama(skyMap, SKY_IBL_DOWNSAMPLE);
       environment = { ...environment, map: ibl, average: computeEnvironmentAverage(ibl) };
     }
-    return new _MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment);
+    return new _MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
   }
   /**
    * Set the cart-driven camera for the next frame(s), or null to auto-orbit. The
@@ -4793,13 +4889,28 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   setPoseOverrides(poses) {
     this.poses = poses;
   }
+  /**
+   * The world-space point lights the cart published this frame (`cartbox.light3d`
+   * — an objective's glow, a muzzle flash). They light a first-person view on
+   * top of the authored rig's lights.
+   */
+  setCartLights(lights) {
+    this.cartLights = lights.map((light) => ({ kind: "point", position: light.position, color: light.color, intensity: 1, range: light.range }));
+  }
   blit(rgba) {
+    const started = performance.now();
     if (this.hud) {
       if (!this.hudFrame) this.hudFrame = new Uint8ClampedArray(this.width * this.height * 4);
       this.hudFrame.set(rgba);
     } else {
       this.output.set(rgba);
     }
+    const scale = this.renderScale();
+    const target = scale === 1 ? null : this.lowTarget(scale);
+    const width = target ? target.width : this.width;
+    const height = target ? target.height : this.height;
+    const out = target ? target.out : this.output;
+    const depth = target ? target.depth : this.depth;
     const cart = this.cartCamera;
     const camera = cart ? buildOrbitCamera(this.scene.bounds, cart.yaw, cart.pitch, this.width / this.height, {
       fov: cart.fov ?? void 0,
@@ -4812,13 +4923,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const { main: instances, front, moved } = this.posedInstances();
     const lighting = this.scene.lighting;
     const shadow = lighting ? this.buildShadow(instances, moved, lighting) : null;
+    const lights = this.hud && this.cartLights.length > 0 ? [...lighting?.lights ?? [], ...this.cartLights] : lighting?.lights;
     const skyBackdrop = this.hud && this.skyMap !== null;
-    if (skyBackdrop) renderSkyBackground(this.output, this.width, this.height, camera.view, camera.projection, this.skyMap);
+    if (skyBackdrop) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : SKY_BACKDROP_SCALE);
     this.renderer.render(instances, {
-      width: this.width,
-      height: this.height,
-      out: this.output,
-      depth: this.depth,
+      width,
+      height,
+      out,
+      depth,
       view: camera.view,
       projection: camera.projection,
       // HUD mode fills the frame with a sky so the 3D scene is opaque before the
@@ -4829,17 +4941,17 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         lightDirection: sceneLightingKeyDirection(lighting),
         environment: this.environment,
         tonemap: sceneLightingTonemap(lighting),
-        lights: lighting.lights,
+        lights,
         shadow,
         fog: lighting.fog ?? null
       } : {}
     });
     if (front.length > 0) {
       this.frontRenderer.render(front, {
-        width: this.width,
-        height: this.height,
-        out: this.output,
-        depth: this.depth,
+        width,
+        height,
+        out,
+        depth,
         view: camera.view,
         projection: camera.projection,
         background: null,
@@ -4848,13 +4960,59 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
           lightDirection: sceneLightingKeyDirection(lighting),
           environment: this.environment,
           tonemap: sceneLightingTonemap(lighting),
-          lights: lighting.lights
+          lights
         } : {}
       });
     }
+    if (target) expandNearest(target.out, target.width, target.height, this.output, this.width, this.height);
     if (this.hud && this.hudFrame) compositeHudOverScene(this.output, this.hudFrame, this.width * this.height);
     this.frame += 1;
     this.inner.blit(this.presented);
+    this.pace(performance.now() - started);
+  }
+  /** Paint the sky backdrop, or copy it from last frame when the view direction hasn't changed. */
+  paintSky(out, width, height, view, projection, scale) {
+    const key = [width, height, scale, view[0], view[1], view[2], view[4], view[5], view[6], view[8], view[9], view[10], projection[0], projection[5]].map((n) => Math.round(n * 1e5)).join(",");
+    const cache = this.skyCache;
+    if (cache && cache.key === key && cache.pixels.length === width * height * 4) {
+      out.set(cache.pixels);
+      return;
+    }
+    renderSkyBackground(out, width, height, view, projection, this.skyMap, 8, scale);
+    const pixels = cache && cache.pixels.length === width * height * 4 ? cache.pixels : new Uint8ClampedArray(width * height * 4);
+    pixels.set(out.subarray(0, width * height * 4));
+    this.skyCache = { key, pixels };
+  }
+  /** The 3D render scale this frame: 1, unless the software governor has stepped down. */
+  renderScale() {
+    if (!this.governed()) return 1;
+    return SOFTWARE_SCALES[this.scaleStep];
+  }
+  /** Whether the resolution governor applies: a large first-person view on the CPU rasteriser. */
+  governed() {
+    return this.options.adaptiveResolution !== false && this.hud && this.renderer.backend === "software" && this.width * this.height >= 640 * 360;
+  }
+  /** Step the software render scale by how long frames are taking. */
+  pace(ms) {
+    if (!this.governed()) return;
+    this.frameMs = this.framesAtStep === 0 ? ms : this.frameMs * 0.9 + ms * 0.1;
+    this.framesAtStep += 1;
+    if (this.frameMs > SLOW_FRAME_MS && this.framesAtStep >= 4 && this.scaleStep < SOFTWARE_SCALES.length - 1) {
+      this.scaleStep += 1;
+      this.framesAtStep = 0;
+    } else if (this.frameMs < FAST_FRAME_MS && this.framesAtStep >= 120 && this.scaleStep > 0) {
+      this.scaleStep -= 1;
+      this.framesAtStep = 0;
+    }
+  }
+  /** Scratch buffers for a reduced-size render. */
+  lowTarget(scale) {
+    const width = Math.max(1, Math.round(this.width * scale));
+    const height = Math.max(1, Math.round(this.height * scale));
+    if (!this.low || this.low.width !== width || this.low.height !== height) {
+      this.low = { width, height, out: new Uint8ClampedArray(width * height * 4), depth: new Float32Array(width * height) };
+    }
+    return this.low;
   }
   /**
    * The instances to draw this frame. With no poses, the authored set (the fast,
@@ -4923,24 +5081,96 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   buildShadow(instances, moved, lighting) {
     if (!lighting.shadows) return null;
     const size = SHADOW_MAP_SIZE;
-    if (!this.shadowDepth) this.shadowDepth = new Float32Array(size * size);
     const { center, radius } = this.scene.bounds;
-    const movedSet = new Set(moved);
-    const key = this.poses.filter((p) => !p.hidden && !p.front).map((p) => p.index).sort((a, b) => a - b).join(",");
+    for (const pose of this.poses) if (pose.front) this.everFront.add(pose.index);
+    const key = `${this.poses.filter((p) => !p.front).map((p) => p.index).sort((a, b) => a - b).join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}`;
+    let full = false;
     if (!this.staticShadow || this.staticShadowKey !== key || this.staticShadowLighting !== lighting) {
       this.staticShadow ?? (this.staticShadow = new Float32Array(size * size));
-      buildSceneShadow(
-        instances.filter((instance) => !movedSet.has(instance)),
-        lighting,
-        center,
-        radius,
-        { size, depth: this.staticShadow }
-      );
+      const posed = new Set(this.poses.map((p) => p.index));
+      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i));
+      const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow });
+      if (!built) return null;
+      this.staticShadowMatrix = built.lightViewProj;
       this.staticShadowKey = key;
       this.staticShadowLighting = lighting;
+      full = true;
     }
-    this.shadowDepth.set(this.staticShadow);
-    return buildSceneShadow(moved, lighting, center, radius, { size, depth: this.shadowDepth, clear: false });
+    const base = this.staticShadow;
+    if (full || !this.shadowDepth) {
+      this.shadowDepth ?? (this.shadowDepth = new Float32Array(size * size));
+      this.shadowDepth.set(base);
+      full = true;
+    } else {
+      for (const r of this.shadowRects) {
+        for (let y = r.y0; y < r.y1; y += 1) this.shadowDepth.set(base.subarray(y * size + r.x0, y * size + r.x1), y * size + r.x0);
+      }
+    }
+    const rects = moved.map((instance) => this.shadowFootprint(instance, size)).filter((r) => r !== null);
+    const result = buildSceneShadow(moved, lighting, center, radius, { size, depth: this.shadowDepth, clear: false });
+    if (!result) return null;
+    let dirty = null;
+    if (!full) {
+      const all = [...this.shadowRects, ...rects];
+      if (all.length === 0) dirty = { x: 0, y: 0, width: 0, height: 0 };
+      else {
+        const x0 = Math.min(...all.map((r) => r.x0));
+        const y0 = Math.min(...all.map((r) => r.y0));
+        dirty = { x: x0, y: y0, width: Math.max(...all.map((r) => r.x1)) - x0, height: Math.max(...all.map((r) => r.y1)) - y0 };
+      }
+    }
+    this.shadowRects = rects;
+    return { ...result, dirty };
+  }
+  /**
+   * The shadow-map texels an instance can cover: its bounding box through the
+   * light's (orthographic) projection, padded for filtering and rounding.
+   */
+  shadowFootprint(instance, size) {
+    const m = this.staticShadowMatrix;
+    if (!m) return null;
+    let b = this.meshBounds.get(instance.mesh);
+    if (!b) {
+      let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+      for (const primitive of instance.mesh.primitives) {
+        const p = primitive.positions;
+        for (let i = 0; i < p.length; i += 3) {
+          x0 = Math.min(x0, p[i]);
+          x1 = Math.max(x1, p[i]);
+          y0 = Math.min(y0, p[i + 1]);
+          y1 = Math.max(y1, p[i + 1]);
+          z0 = Math.min(z0, p[i + 2]);
+          z1 = Math.max(z1, p[i + 2]);
+        }
+      }
+      b = [x0, y0, z0, x1, y1, z1];
+      this.meshBounds.set(instance.mesh, b);
+    }
+    if (!Number.isFinite(b[0])) return null;
+    const mm = multiplyMat4(m, instance.model);
+    let sx0 = Infinity, sy0 = Infinity, sx1 = -Infinity, sy1 = -Infinity;
+    for (let c = 0; c < 8; c += 1) {
+      const x = c & 1 ? b[3] : b[0];
+      const y = c & 2 ? b[4] : b[1];
+      const z = c & 4 ? b[5] : b[2];
+      const w = mm[3] * x + mm[7] * y + mm[11] * z + mm[15];
+      const nx = (mm[0] * x + mm[4] * y + mm[8] * z + mm[12]) / w;
+      const ny = (mm[1] * x + mm[5] * y + mm[9] * z + mm[13]) / w;
+      const tx = (nx * 0.5 + 0.5) * size;
+      const ty = (1 - (ny * 0.5 + 0.5)) * size;
+      sx0 = Math.min(sx0, tx);
+      sx1 = Math.max(sx1, tx);
+      sy0 = Math.min(sy0, ty);
+      sy1 = Math.max(sy1, ty);
+    }
+    const pad = 2;
+    const rect = {
+      x0: Math.max(0, Math.floor(sx0) - pad),
+      y0: Math.max(0, Math.floor(sy0) - pad),
+      x1: Math.min(size, Math.ceil(sx1) + pad),
+      y1: Math.min(size, Math.ceil(sy1) + pad)
+    };
+    return rect.x1 > rect.x0 && rect.y1 > rect.y0 ? rect : null;
   }
   destroy() {
     this.inner.destroy();
@@ -5034,6 +5264,24 @@ async function decodeTexture(mime, bytes) {
     return { width: image.width, height: image.height, data: image.data };
   } catch {
     return null;
+  }
+}
+function expandNearest(src, sw, sh, dst, dw, dh) {
+  const from = new Uint32Array(src.buffer, src.byteOffset, sw * sh);
+  const to = new Uint32Array(dst.buffer, dst.byteOffset, dw * dh);
+  const xs = new Int32Array(dw);
+  for (let x = 0; x < dw; x += 1) xs[x] = Math.min(sw - 1, Math.floor(x * sw / dw));
+  let lastRow = -1;
+  for (let y = 0; y < dh; y += 1) {
+    const sy = Math.min(sh - 1, Math.floor(y * sh / dh));
+    const row = y * dw;
+    if (sy === lastRow) {
+      to.copyWithin(row, row - dw, row);
+      continue;
+    }
+    const srow = sy * sw;
+    for (let x = 0; x < dw; x += 1) to[row + x] = from[srow + xs[x]];
+    lastRow = sy;
   }
 }
 
@@ -5613,6 +5861,21 @@ function unpadRows(padded, width, height, bytesPerRow, reuse = null) {
 }
 
 // src/render/WebgpuSceneRenderer.ts
+var SOFTWARE_WARMUP_TRIANGLES = 2e4;
+var SOFTWARE_WARMUP_PIXELS = 640 * 360;
+var triangleCounts = /* @__PURE__ */ new WeakMap();
+function trianglesIn(instances) {
+  let total = 0;
+  for (const instance of instances) {
+    let count = triangleCounts.get(instance.mesh);
+    if (count === void 0) {
+      count = instance.mesh.primitives.reduce((n, primitive) => n + primitive.indices.length / 3, 0);
+      triangleCounts.set(instance.mesh, count);
+    }
+    total += count;
+  }
+  return total;
+}
 var READBACK_BUFFERS = 3;
 var SHADER_STAGE_VERTEX = 1;
 var SHADER_STAGE_FRAGMENT = 2;
@@ -5932,6 +6195,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.bindGroups = /* @__PURE__ */ new WeakMap();
     /** Most recent completed readback, or null before the first one lands. */
     this.latest = null;
+    /** The shadow depth array last uploaded in full, so a frame that changed only
+     *  a region of it (its `dirty` rect) uploads just that region. */
+    this.shadowUploaded = null;
     this.uniformCapacity = 0;
     this.uniformBuffer = null;
     this.uniformData = new Float32Array(0);
@@ -6140,6 +6406,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
    */
   ensureShadowTexture(size) {
     if (size === this.shadowMapSize) return;
+    this.shadowUploaded = null;
     if (size === 0) {
       if (this.shadowTexture !== this.blankShadow) this.shadowTexture = this.blankShadow;
     } else {
@@ -6186,8 +6453,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const visible = applyScenePasses(instances, draw);
     if (this.latest) {
       this.composite(draw);
-    } else {
+    } else if (draw.width * draw.height <= SOFTWARE_WARMUP_PIXELS && trianglesIn(visible) <= SOFTWARE_WARMUP_TRIANGLES) {
       this.software.render(visible, draw);
+    } else if (draw.background !== null) {
+      new Uint32Array(draw.out.buffer, draw.out.byteOffset, draw.width * draw.height).fill(packRgba(draw.background));
     }
     try {
       this.submit(visible, draw);
@@ -6197,24 +6466,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   }
   /** Paint the last completed GPU frame over the cart's own pixels. */
   composite(draw) {
-    const source = this.latest;
-    const out = draw.out;
-    if (draw.background !== null) {
-      const [br, bg, bb, ba] = draw.background;
-      for (let i = 0; i < draw.width * draw.height; i += 1) {
-        out[i * 4] = br;
-        out[i * 4 + 1] = bg;
-        out[i * 4 + 2] = bb;
-        out[i * 4 + 3] = ba;
-      }
-    }
-    for (let i = 0; i < draw.width * draw.height; i += 1) {
-      const alpha = source[i * 4 + 3];
-      if (alpha === 0) continue;
-      out[i * 4] = source[i * 4];
-      out[i * 4 + 1] = source[i * 4 + 1];
-      out[i * 4 + 2] = source[i * 4 + 2];
-      out[i * 4 + 3] = alpha;
+    const count = draw.width * draw.height;
+    const source = new Uint32Array(this.latest.buffer, this.latest.byteOffset, count);
+    const out = new Uint32Array(draw.out.buffer, draw.out.byteOffset, count);
+    if (draw.background !== null) out.fill(packRgba(draw.background));
+    for (let i = 0; i < count; i += 1) {
+      const word = source[i];
+      if (word >>> 24 !== 0) out[i] = word;
     }
   }
   /** Encode and submit one frame, and start a readback if a buffer is free. */
@@ -6246,12 +6504,25 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const shadow = draw.shadow ?? null;
     this.ensureShadowTexture(shadow ? shadow.size : 0);
     if (shadow) {
-      this.device.queue.writeTexture(
-        { texture: this.shadowTexture },
-        shadow.depth,
-        { bytesPerRow: shadow.size * 4, rowsPerImage: shadow.size },
-        { width: shadow.size, height: shadow.size }
-      );
+      const dirty = shadow.dirty;
+      if (dirty && this.shadowUploaded === shadow.depth) {
+        if (dirty.width > 0 && dirty.height > 0) {
+          this.device.queue.writeTexture(
+            { texture: this.shadowTexture, origin: { x: dirty.x, y: dirty.y } },
+            shadow.depth,
+            { offset: (dirty.y * shadow.size + dirty.x) * 4, bytesPerRow: shadow.size * 4, rowsPerImage: dirty.height },
+            { width: dirty.width, height: dirty.height }
+          );
+        }
+      } else {
+        this.device.queue.writeTexture(
+          { texture: this.shadowTexture },
+          shadow.depth,
+          { bytesPerRow: shadow.size * 4, rowsPerImage: shadow.size },
+          { width: shadow.size, height: shadow.size }
+        );
+        this.shadowUploaded = shadow.depth;
+      }
     }
     const shadowParams = shadow ? { size: shadow.size, bias: shadow.bias ?? 3e-3, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false } : null;
     this.ensureEnvTexture(draw.environment?.map ?? null);
@@ -6452,6 +6723,9 @@ function destroySafely(resource) {
     resource?.destroy?.();
   } catch {
   }
+}
+function packRgba([r, g, b, a]) {
+  return (a << 24 | b << 16 | g << 8 | r) >>> 0;
 }
 
 // src/render/createSceneRenderer.ts
@@ -6745,6 +7019,7 @@ var Player = class {
         this.meshSurface.setCameraOverride(meshCamera);
         this.meshSurface.setHudMode(meshCamera?.hud ?? false);
         this.meshSurface.setPoseOverrides(decodeMeshPoses(mailbox));
+        this.meshSurface.setCartLights(decodeWorldLights(mailbox));
       }
       if (this.worldSurface && this.console) {
         const mailbox = this.console.readMailbox();
@@ -7197,7 +7472,10 @@ function parseParticles(raw) {
 }
 
 // src/net/NetSession.ts
-var STATE_EVERY = 4;
+function netSendInterval(players) {
+  return players <= 2 ? 4 : players <= 4 ? 6 : 8;
+}
+var KEEPALIVE_TICKS = 60;
 var STALE_MS = 3e3;
 var NetSession = class {
   constructor(transport, now = () => Date.now()) {
@@ -7212,6 +7490,9 @@ var NetSession = class {
     this.tick = 0;
     this.outEvents = [];
     this.outStates = /* @__PURE__ */ new Map();
+    /** What the last message carried (states + match), and when — to skip repeats. */
+    this.lastSent = "";
+    this.lastSentTick = -Infinity;
     this.listeners = /* @__PURE__ */ new Set();
     transport.onPeers((peers) => {
       this.peers = [...peers].sort((a, b) => a.joinedAt - b.joinedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -7289,13 +7570,19 @@ var NetSession = class {
     for (const event of out.events) if (this.outEvents.length < 200) this.outEvents.push(event);
     for (const [slot, state] of out.states) this.outStates.set(slot, state);
     if (this.isHost) this.hostMatch = out.match;
-    if (this.tick % STATE_EVERY !== 0) return;
+    if (this.tick % netSendInterval(this.peers.length) !== 0) return;
     const message = {};
     if (this.outStates.size > 0) message.s = [...this.outStates].map(([slot, w]) => [slot, w[0], w[1], w[2]]);
-    if (this.outEvents.length > 0) message.e = this.outEvents.splice(0);
     if (this.isHost) message.m = this.hostMatch;
     this.outStates = /* @__PURE__ */ new Map();
-    if (message.s || message.e || message.m !== void 0) this.transport.send(message);
+    const signature = JSON.stringify([message.s ?? null, message.m ?? null]);
+    if (this.outEvents.length === 0 && signature === this.lastSent && this.tick - this.lastSentTick < KEEPALIVE_TICKS) return;
+    if (this.outEvents.length > 0) message.e = this.outEvents.splice(0);
+    if (message.s || message.e || message.m !== void 0) {
+      this.transport.send(message);
+      this.lastSent = signature;
+      this.lastSentTick = this.tick;
+    }
   }
   receive(message) {
     const now = this.now();
@@ -7542,6 +7829,7 @@ export {
   capsConstrainScene,
   cellAt,
   clipFrameIndex,
+  codeChunks,
   collisionSdkLua,
   composeParallax,
   compositeOverBackdrop,
@@ -7556,6 +7844,7 @@ export {
   decodeMailbox,
   decodeMeshCamera,
   decodeMeshPoses,
+  decodeWorldLights,
   defaultPostFxSettings,
   drift,
   emitterPreset,
@@ -7580,6 +7869,7 @@ export {
   makeShadowTexture,
   mount,
   nearestDirection,
+  netSendInterval,
   normalBasis3x3,
   normalVector,
   packLights,

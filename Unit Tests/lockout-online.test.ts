@@ -10,7 +10,7 @@ import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { LOCKOUT_CODE, lockoutCartridge } from "@cartbox/editor";
-import { CARTBOX_SDK_LUA, decodeMeshPoses, injectSdk, type NetMessage, type NetPeer } from "@cartbox/player";
+import { CARTBOX_SDK_LUA, decodeMeshPoses, injectSdk, readCartCode, type NetMessage, type NetPeer } from "@cartbox/player";
 import { SupabaseNetTransport, newRoomCode, parseRoomCode } from "../apps/web/src/lib/netplayTransport";
 
 const ENGINE = path.resolve(__dirname, "../packages/engine/dist/xbox360/engine.js");
@@ -27,12 +27,12 @@ describe("lockoutCartridge", () => {
     expect(new TextDecoder().decode(bytes.subarray(code + 4, code + 4 + size))).toBe(LOCKOUT_CODE);
   });
 
-  it("leaves room for the SDK in its one code chunk", () => {
-    // The player prepends the SDK to the code chunk — and silently skips it if
-    // the result would pass 65535 bytes, which would break every cartbox.* call.
-    const merged = new TextEncoder().encode(`${CARTBOX_SDK_LUA}\n${LOCKOUT_CODE}`).length;
-    expect(merged).toBeLessThan(0xffff - 1024);
-    expect(injectSdk(lockoutCartridge()).length).toBeGreaterThan(lockoutCartridge().length);
+  it("gets the SDK injected ahead of its code", () => {
+    // The player prepends the SDK to the cart's code (splitting it across code
+    // banks as needed); every cartbox.* call depends on it being there.
+    const code = readCartCode(injectSdk(lockoutCartridge()))!;
+    expect(code.startsWith(CARTBOX_SDK_LUA)).toBe(true);
+    expect(code.endsWith(LOCKOUT_CODE)).toBe(true);
   });
 
   it.skipIf(!existsSync(ENGINE))("boots on the Xbox 360 core and starts a match from its menu", async () => {

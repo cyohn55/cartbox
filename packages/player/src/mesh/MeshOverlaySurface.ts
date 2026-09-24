@@ -42,8 +42,8 @@ import {
 } from "@cartbox/editor";
 import type { DisplaySurface } from "../display.js";
 import { SoftwareSceneRenderer, type SceneRenderer } from "../render/sceneRenderer.js";
-import type { MailboxMeshCamera, MailboxMeshPose } from "../mailbox.js";
-import type { ShadowInput, SceneLighting } from "@cartbox/editor";
+import type { MailboxMeshCamera, MailboxMeshPose, WorldLight } from "../mailbox.js";
+import type { ShadowInput, SceneLight, SceneLighting } from "@cartbox/editor";
 import type { MeshScene } from "./meshScene.js";
 import { buildOrbitCamera } from "./meshScene.js";
 
@@ -54,6 +54,40 @@ const FIRST_PERSON_NEAR = 0.05;
 
 /** Edge length of the directional shadow map — a fixed, self-contained cost. */
 const SHADOW_MAP_SIZE = 1024;
+
+/**
+ * The sky backdrop is shaded on a grid this many pixels across, then expanded:
+ * the panorama holds ~3 screen pixels per texel at 720p anyway, so a coarser
+ * grid costs nothing visible and saves most of the per-frame work.
+ */
+const SKY_BACKDROP_SCALE = 3;
+
+/**
+ * Render scales the software rasteriser steps through for a large first-person
+ * view (a 720p arena costs it seconds per frame at full size — a device without
+ * WebGPU gets a softer image rather than a slideshow). The HUD stays full size.
+ */
+const SOFTWARE_SCALES = [1, 0.75, 0.5, 0.35, 0.25] as const;
+/** Frame time (ms, smoothed) above which the scale steps down, and below which it steps back up. */
+const SLOW_FRAME_MS = 40;
+const FAST_FRAME_MS = 15;
+
+/** Options for {@link MeshOverlaySurface.create}. */
+export interface MeshOverlayOptions {
+  /**
+   * Let a software-rendered first-person view drop its 3D resolution to keep
+   * the frame rate up (default true). Off renders every frame at full size.
+   */
+  readonly adaptiveResolution?: boolean;
+}
+
+/** A rectangle of shadow-map texels. */
+interface TexelRect {
+  x0: number;
+  y0: number;
+  x1: number; // exclusive
+  y1: number;
+}
 
 /**
  * In HUD mode a cart 2D pixel this dark (channel sum ≤ this) is the transparent
@@ -77,6 +111,18 @@ export function compositeHudOverScene(
   hud: Uint8Array | Uint8ClampedArray,
   count: number,
 ): void {
+  if (scene.byteOffset % 4 === 0 && hud.byteOffset % 4 === 0) {
+    // Whole pixels as words: most of a HUD frame is the black void, which one
+    // test skips.
+    const out = new Uint32Array(scene.buffer, scene.byteOffset, count);
+    const src = new Uint32Array(hud.buffer, hud.byteOffset, count);
+    for (let i = 0; i < count; i += 1) {
+      const word = src[i]!;
+      if ((word & 0xffffff) === 0) continue;
+      if ((word & 0xff) + ((word >>> 8) & 0xff) + ((word >>> 16) & 0xff) > HUD_TRANSPARENT_SUM) out[i] = (word | 0xff000000) >>> 0;
+    }
+    return;
+  }
   for (let i = 0; i < count; i += 1) {
     const o = i * 4;
     const r = hud[o]!;
@@ -134,6 +180,24 @@ export class MeshOverlaySurface implements DisplaySurface {
   private staticShadow: Float32Array | null = null;
   private staticShadowKey = "";
   private staticShadowLighting: SceneLighting | null = null;
+  /** The light's world→clip matrix of the cached static map (movers' footprints are projected with it). */
+  private staticShadowMatrix: Mat4 | null = null;
+  /** Shadow-map rects last frame's movers drew into (restored from the static map next frame). */
+  private shadowRects: TexelRect[] = [];
+  /** Instances ever posed on the front layer (a held weapon): never part of the static shadow. */
+  private readonly everFront = new Set<number>();
+  /** Each mesh's local bounding box, for projecting shadow footprints. */
+  private readonly meshBounds = new WeakMap<MeshAsset, readonly [number, number, number, number, number, number]>();
+  /** Software-path resolution governor (see SOFTWARE_SCALES): current step and smoothed frame ms. */
+  private scaleStep = 2;
+  private frameMs = 0;
+  private framesAtStep = 0;
+  private low: { width: number; height: number; out: Uint8ClampedArray; depth: Float32Array } | null = null;
+  /** The last sky backdrop and the view it was painted for (it depends only on
+   *  where the camera points, so walking without turning reuses it). */
+  private skyCache: { key: string; pixels: Uint8ClampedArray } | null = null;
+  /** The cart's world lights this frame (cartbox.light3d), added to the rig's in first person. */
+  private cartLights: readonly SceneLight[] = [];
   /** Tinted mesh copies, per source mesh and tint index. */
   private readonly tintCache = new Map<MeshAsset, Map<number, MeshAsset>>();
   /** Draws the front layer (a held weapon) over the finished scene. */
@@ -162,6 +226,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     private readonly skyMap: DecodedTexture | null,
     /** The environment the PBR shading samples (with the dome as its map), or null. */
     private readonly environment: EnvironmentLight | null,
+    private readonly options: MeshOverlayOptions = {},
   ) {
     this.output = new Uint8ClampedArray(width * height * 4);
     this.presented = new Uint8Array(this.output.buffer);
@@ -179,6 +244,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     height: number,
     scene: MeshScene,
     renderer: SceneRenderer = new SoftwareSceneRenderer(),
+    options: MeshOverlayOptions = {},
   ): Promise<MeshOverlaySurface> {
     // Decode each distinct mesh's textures once: instances (and animation
     // frames) that share a model share its MeshAsset, so they share its maps.
@@ -207,7 +273,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       const ibl = downsamplePanorama(skyMap, SKY_IBL_DOWNSAMPLE);
       environment = { ...environment, map: ibl, average: computeEnvironmentAverage(ibl) };
     }
-    return new MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment);
+    return new MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
   }
 
   /**
@@ -238,7 +304,17 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.poses = poses;
   }
 
+  /**
+   * The world-space point lights the cart published this frame (`cartbox.light3d`
+   * — an objective's glow, a muzzle flash). They light a first-person view on
+   * top of the authored rig's lights.
+   */
+  setCartLights(lights: readonly WorldLight[]): void {
+    this.cartLights = lights.map((light) => ({ kind: "point", position: light.position, color: light.color, intensity: 1, range: light.range }));
+  }
+
   blit(rgba: Uint8Array): void {
+    const started = performance.now();
     // Default (third-person): copy the cart frame in, then composite the meshes on
     // top (background null shows the cart where no mesh drew). HUD mode inverts it:
     // render the 3D over an opaque sky, then lay the cart's 2D frame on top as a HUD.
@@ -248,6 +324,14 @@ export class MeshOverlaySurface implements DisplaySurface {
     } else {
       this.output.set(rgba);
     }
+    // A first-person view on the software rasteriser may render its 3D smaller
+    // (see SOFTWARE_SCALES) and be expanded under the full-size HUD.
+    const scale = this.renderScale();
+    const target = scale === 1 ? null : this.lowTarget(scale);
+    const width = target ? target.width : this.width;
+    const height = target ? target.height : this.height;
+    const out = target ? target.out : this.output;
+    const depth = target ? target.depth : this.depth;
     // A cart-driven camera wins for this frame; otherwise the scene auto-orbits.
     const cart = this.cartCamera;
     const camera = cart
@@ -266,16 +350,17 @@ export class MeshOverlaySurface implements DisplaySurface {
     // and the fantasy tiers render byte-identically.
     const lighting = this.scene.lighting;
     const shadow = lighting ? this.buildShadow(instances, moved, lighting) : null;
+    const lights = this.hud && this.cartLights.length > 0 ? [...(lighting?.lights ?? []), ...this.cartLights] : lighting?.lights;
     // First-person with a sky dome: paint the panorama through the camera, then
     // composite the meshes over it (background null) — backend-agnostic, since
     // both renderers leave untouched pixels alone.
     const skyBackdrop = this.hud && this.skyMap !== null;
-    if (skyBackdrop) renderSkyBackground(this.output, this.width, this.height, camera.view, camera.projection, this.skyMap!);
+    if (skyBackdrop) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : SKY_BACKDROP_SCALE);
     this.renderer.render(instances, {
-      width: this.width,
-      height: this.height,
-      out: this.output,
-      depth: this.depth,
+      width,
+      height,
+      out,
+      depth,
       view: camera.view,
       projection: camera.projection,
       // HUD mode fills the frame with a sky so the 3D scene is opaque before the
@@ -287,7 +372,7 @@ export class MeshOverlaySurface implements DisplaySurface {
             lightDirection: sceneLightingKeyDirection(lighting),
             environment: this.environment,
             tonemap: sceneLightingTonemap(lighting),
-            lights: lighting.lights,
+            lights,
             shadow,
             fog: lighting.fog ?? null,
           }
@@ -298,10 +383,10 @@ export class MeshOverlaySurface implements DisplaySurface {
     // handful of triangles, so the software rasteriser draws it on any backend.
     if (front.length > 0) {
       this.frontRenderer.render(front, {
-        width: this.width,
-        height: this.height,
-        out: this.output,
-        depth: this.depth,
+        width,
+        height,
+        out,
+        depth,
         view: camera.view,
         projection: camera.projection,
         background: null,
@@ -311,15 +396,73 @@ export class MeshOverlaySurface implements DisplaySurface {
               lightDirection: sceneLightingKeyDirection(lighting),
               environment: this.environment,
               tonemap: sceneLightingTonemap(lighting),
-              lights: lighting.lights,
+              lights,
             }
           : {}),
       });
     }
+    if (target) expandNearest(target.out, target.width, target.height, this.output, this.width, this.height);
     // Lay the cart's 2D frame over the rendered scene as a HUD (first-person).
     if (this.hud && this.hudFrame) compositeHudOverScene(this.output, this.hudFrame, this.width * this.height);
     this.frame += 1; // advance in lockstep with the run loop's present cadence
     this.inner.blit(this.presented);
+    this.pace(performance.now() - started);
+  }
+
+  /** Paint the sky backdrop, or copy it from last frame when the view direction hasn't changed. */
+  private paintSky(out: Uint8ClampedArray, width: number, height: number, view: Mat4, projection: Mat4, scale: number): void {
+    const key = [width, height, scale, view[0], view[1], view[2], view[4], view[5], view[6], view[8], view[9], view[10], projection[0], projection[5]]
+      .map((n) => Math.round(n! * 1e5))
+      .join(",");
+    const cache = this.skyCache;
+    if (cache && cache.key === key && cache.pixels.length === width * height * 4) {
+      out.set(cache.pixels);
+      return;
+    }
+    renderSkyBackground(out, width, height, view, projection, this.skyMap!, 8, scale);
+    const pixels = cache && cache.pixels.length === width * height * 4 ? cache.pixels : new Uint8ClampedArray(width * height * 4);
+    pixels.set(out.subarray(0, width * height * 4));
+    this.skyCache = { key, pixels };
+  }
+
+  /** The 3D render scale this frame: 1, unless the software governor has stepped down. */
+  private renderScale(): number {
+    if (!this.governed()) return 1;
+    return SOFTWARE_SCALES[this.scaleStep]!;
+  }
+
+  /** Whether the resolution governor applies: a large first-person view on the CPU rasteriser. */
+  private governed(): boolean {
+    return (
+      this.options.adaptiveResolution !== false &&
+      this.hud &&
+      this.renderer.backend === "software" &&
+      this.width * this.height >= 640 * 360
+    );
+  }
+
+  /** Step the software render scale by how long frames are taking. */
+  private pace(ms: number): void {
+    if (!this.governed()) return;
+    this.frameMs = this.framesAtStep === 0 ? ms : this.frameMs * 0.9 + ms * 0.1;
+    this.framesAtStep += 1;
+    if (this.frameMs > SLOW_FRAME_MS && this.framesAtStep >= 4 && this.scaleStep < SOFTWARE_SCALES.length - 1) {
+      this.scaleStep += 1;
+      this.framesAtStep = 0;
+    } else if (this.frameMs < FAST_FRAME_MS && this.framesAtStep >= 120 && this.scaleStep > 0) {
+      this.scaleStep -= 1;
+      this.framesAtStep = 0;
+    }
+  }
+
+  /** Scratch buffers for a reduced-size render. */
+  private lowTarget(scale: number): { width: number; height: number; out: Uint8ClampedArray; depth: Float32Array } {
+    const width = Math.max(1, Math.round(this.width * scale));
+    const height = Math.max(1, Math.round(this.height * scale));
+    if (!this.low || this.low.width !== width || this.low.height !== height) {
+      this.low = { width, height, out: new Uint8ClampedArray(width * height * 4), depth: new Float32Array(width * height) };
+    }
+    return this.low;
   }
 
   /**
@@ -399,28 +542,101 @@ export class MeshOverlaySurface implements DisplaySurface {
   ): ShadowInput | null {
     if (!lighting.shadows) return null;
     const size = SHADOW_MAP_SIZE;
-    if (!this.shadowDepth) this.shadowDepth = new Float32Array(size * size);
     const { center, radius } = this.scene.bounds;
-    const movedSet = new Set(moved);
-    const key = this.poses
-      .filter((p) => !p.hidden && !p.front)
+    // The static map holds every instance the cart never poses. It depends only
+    // on *which* instances are posed (not whether a posed one is hidden this
+    // frame — a character dying must not re-render the whole arena's shadow),
+    // and a held weapon never casts, so anything ever posed in front is out too.
+    for (const pose of this.poses) if (pose.front) this.everFront.add(pose.index);
+    const key = `${this.poses
+      .filter((p) => !p.front)
       .map((p) => p.index)
       .sort((a, b) => a - b)
-      .join(",");
+      .join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}`;
+    let full = false;
     if (!this.staticShadow || this.staticShadowKey !== key || this.staticShadowLighting !== lighting) {
       this.staticShadow ??= new Float32Array(size * size);
-      buildSceneShadow(
-        instances.filter((instance) => !movedSet.has(instance)),
-        lighting,
-        center,
-        radius,
-        { size, depth: this.staticShadow },
-      );
+      const posed = new Set(this.poses.map((p) => p.index));
+      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i));
+      const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow });
+      if (!built) return null;
+      this.staticShadowMatrix = built.lightViewProj;
       this.staticShadowKey = key;
       this.staticShadowLighting = lighting;
+      full = true;
     }
-    this.shadowDepth.set(this.staticShadow);
-    return buildSceneShadow(moved, lighting, center, radius, { size, depth: this.shadowDepth, clear: false });
+    const base = this.staticShadow;
+    if (full || !this.shadowDepth) {
+      this.shadowDepth ??= new Float32Array(size * size);
+      this.shadowDepth.set(base);
+      full = true;
+    } else {
+      // Undo last frame's movers: restore just their rects from the static map.
+      for (const r of this.shadowRects) {
+        for (let y = r.y0; y < r.y1; y += 1) this.shadowDepth.set(base.subarray(y * size + r.x0, y * size + r.x1), y * size + r.x0);
+      }
+    }
+    const rects = moved.map((instance) => this.shadowFootprint(instance, size)).filter((r): r is TexelRect => r !== null);
+    const result = buildSceneShadow(moved, lighting, center, radius, { size, depth: this.shadowDepth, clear: false });
+    if (!result) return null;
+    let dirty: ShadowInput["dirty"] = null;
+    if (!full) {
+      const all = [...this.shadowRects, ...rects];
+      if (all.length === 0) dirty = { x: 0, y: 0, width: 0, height: 0 };
+      else {
+        const x0 = Math.min(...all.map((r) => r.x0));
+        const y0 = Math.min(...all.map((r) => r.y0));
+        dirty = { x: x0, y: y0, width: Math.max(...all.map((r) => r.x1)) - x0, height: Math.max(...all.map((r) => r.y1)) - y0 };
+      }
+    }
+    this.shadowRects = rects;
+    return { ...result, dirty };
+  }
+
+  /**
+   * The shadow-map texels an instance can cover: its bounding box through the
+   * light's (orthographic) projection, padded for filtering and rounding.
+   */
+  private shadowFootprint(instance: MeshSceneInstance, size: number): TexelRect | null {
+    const m = this.staticShadowMatrix;
+    if (!m) return null;
+    let b = this.meshBounds.get(instance.mesh);
+    if (!b) {
+      let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+      for (const primitive of instance.mesh.primitives) {
+        const p = primitive.positions;
+        for (let i = 0; i < p.length; i += 3) {
+          x0 = Math.min(x0, p[i]!); x1 = Math.max(x1, p[i]!);
+          y0 = Math.min(y0, p[i + 1]!); y1 = Math.max(y1, p[i + 1]!);
+          z0 = Math.min(z0, p[i + 2]!); z1 = Math.max(z1, p[i + 2]!);
+        }
+      }
+      b = [x0, y0, z0, x1, y1, z1];
+      this.meshBounds.set(instance.mesh, b);
+    }
+    if (!Number.isFinite(b[0])) return null;
+    const mm = multiplyMat4(m, instance.model);
+    let sx0 = Infinity, sy0 = Infinity, sx1 = -Infinity, sy1 = -Infinity;
+    for (let c = 0; c < 8; c += 1) {
+      const x = c & 1 ? b[3] : b[0];
+      const y = c & 2 ? b[4] : b[1];
+      const z = c & 4 ? b[5] : b[2];
+      const w = mm[3]! * x + mm[7]! * y + mm[11]! * z + mm[15]!;
+      const nx = (mm[0]! * x + mm[4]! * y + mm[8]! * z + mm[12]!) / w;
+      const ny = (mm[1]! * x + mm[5]! * y + mm[9]! * z + mm[13]!) / w;
+      const tx = (nx * 0.5 + 0.5) * size;
+      const ty = (1 - (ny * 0.5 + 0.5)) * size;
+      sx0 = Math.min(sx0, tx); sx1 = Math.max(sx1, tx);
+      sy0 = Math.min(sy0, ty); sy1 = Math.max(sy1, ty);
+    }
+    const pad = 2;
+    const rect = {
+      x0: Math.max(0, Math.floor(sx0) - pad),
+      y0: Math.max(0, Math.floor(sy0) - pad),
+      x1: Math.min(size, Math.ceil(sx1) + pad),
+      y1: Math.min(size, Math.ceil(sy1) + pad),
+    };
+    return rect.x1 > rect.x0 && rect.y1 > rect.y0 ? rect : null;
   }
 
   destroy(): void {
@@ -520,5 +736,25 @@ async function decodeTexture(mime: string, bytes: Uint8Array): Promise<DecodedTe
     return { width: image.width, height: image.height, data: image.data };
   } catch {
     return null;
+  }
+}
+
+/** Expand a small RGBA frame to a larger one, nearest-neighbour, a word per pixel. */
+function expandNearest(src: Uint8ClampedArray, sw: number, sh: number, dst: Uint8ClampedArray, dw: number, dh: number): void {
+  const from = new Uint32Array(src.buffer, src.byteOffset, sw * sh);
+  const to = new Uint32Array(dst.buffer, dst.byteOffset, dw * dh);
+  const xs = new Int32Array(dw);
+  for (let x = 0; x < dw; x += 1) xs[x] = Math.min(sw - 1, Math.floor((x * sw) / dw));
+  let lastRow = -1;
+  for (let y = 0; y < dh; y += 1) {
+    const sy = Math.min(sh - 1, Math.floor((y * sh) / dh));
+    const row = y * dw;
+    if (sy === lastRow) {
+      to.copyWithin(row, row - dw, row);
+      continue;
+    }
+    const srow = sy * sw;
+    for (let x = 0; x < dw; x += 1) to[row + x] = from[srow + xs[x]!]!;
+    lastRow = sy;
   }
 }

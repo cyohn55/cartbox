@@ -84,6 +84,12 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
         doc: "A cone light from (x,y,z) along dx,dy,dz; angle is the inner half-angle in degrees.",
         snippet: "cartbox.spot(200, 20, 40, 0.2, 1, 0.3, 140, 22, 255, 210, 150)",
       },
+      {
+        name: "cartbox.light3d",
+        signature: "cartbox.light3d(x, y, z, radius, r, g, b, intensity)",
+        doc: "A point light in a first-person 3D scene's world units (not the 2D relight): an objective's glow, a flash.",
+        snippet: "cartbox.light3d(0, 1, 0, 5, 120, 255, 150, 2)",
+      },
     ],
   },
   {

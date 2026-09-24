@@ -64,8 +64,17 @@ export interface NetRoomStatus {
   readonly isHost: boolean;
 }
 
-/** Ticks between state snapshots (60 Hz / 4 = 15 Hz). */
-const STATE_EVERY = 4;
+/**
+ * Ticks between messages, by room size: 15 Hz for two players, 10 Hz up to
+ * four, 7.5 Hz beyond. A room's traffic grows with players × listeners, so the
+ * per-player rate falls as the room fills to keep the total inside a hosted
+ * broadcast service's message budget; clients interpolate between snapshots.
+ */
+export function netSendInterval(players: number): number {
+  return players <= 2 ? 4 : players <= 4 ? 6 : 8;
+}
+/** An unchanged player still says it's there this often (ticks), well inside STALE_MS. */
+const KEEPALIVE_TICKS = 60;
 /** Remote state older than this is treated as gone (the peer dropped). */
 const STALE_MS = 3000;
 
@@ -79,6 +88,9 @@ export class NetSession {
   private tick = 0;
   private readonly outEvents: NetEvent[] = [];
   private outStates = new Map<number, NetState>();
+  /** What the last message carried (states + match), and when — to skip repeats. */
+  private lastSent = "";
+  private lastSentTick = -Infinity;
   private readonly listeners = new Set<(status: NetRoomStatus) => void>();
 
   constructor(
@@ -169,13 +181,21 @@ export class NetSession {
     for (const event of out.events) if (this.outEvents.length < 200) this.outEvents.push(event);
     for (const [slot, state] of out.states) this.outStates.set(slot, state);
     if (this.isHost) this.hostMatch = out.match;
-    if (this.tick % STATE_EVERY !== 0) return;
+    if (this.tick % netSendInterval(this.peers.length) !== 0) return;
     const message: { s?: [number, number, number, number][]; e?: NetEvent[]; m?: number } = {};
     if (this.outStates.size > 0) message.s = [...this.outStates].map(([slot, w]) => [slot, w[0], w[1], w[2]]);
-    if (this.outEvents.length > 0) message.e = this.outEvents.splice(0);
     if (this.isHost) message.m = this.hostMatch;
     this.outStates = new Map();
-    if (message.s || message.e || message.m !== undefined) this.transport.send(message);
+    // Nothing new (standing still, waiting in the lobby): stay quiet, bar a
+    // keepalive so the others don't time this player out.
+    const signature = JSON.stringify([message.s ?? null, message.m ?? null]);
+    if (this.outEvents.length === 0 && signature === this.lastSent && this.tick - this.lastSentTick < KEEPALIVE_TICKS) return;
+    if (this.outEvents.length > 0) message.e = this.outEvents.splice(0);
+    if (message.s || message.e || message.m !== undefined) {
+      this.transport.send(message);
+      this.lastSent = signature;
+      this.lastSentTick = this.tick;
+    }
   }
 
   private receive(message: NetMessage): void {

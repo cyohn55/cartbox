@@ -19,7 +19,7 @@ import { injectSdk } from "./sdk.js";
 import { collisionSdkLua } from "./collisionSdk.js";
 import { flagsSdkLua } from "./flagsSdk.js";
 import { animClipsSdkLua } from "./anim/animClipsSdk.js";
-import { decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses } from "./mailbox.js";
+import { decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights } from "./mailbox.js";
 import { createCartSpriteSource, type CartSpriteSource } from "./scene/cartSpriteSource.js";
 import { resolveSceneLayers } from "./scene/sceneRender.js";
 import { SceneBackdropSurface } from "./scene/SceneBackdropSurface.js";
@@ -451,6 +451,7 @@ export class Player {
         // over the meshes instead of behind them.
         this.meshSurface.setHudMode(meshCamera?.hud ?? false);
         this.meshSurface.setPoseOverrides(decodeMeshPoses(mailbox));
+        this.meshSurface.setCartLights(decodeWorldLights(mailbox));
       }
       // The HD-2D world reuses the same channels: cartbox.worldcam drives its
       // camera (decoded as a mesh camera) and cartbox.billboard places its 2D

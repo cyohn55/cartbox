@@ -433,17 +433,21 @@ function steps(axis: "x" | "z", fixed: number, halfFixed: number, start: number,
 // chamfered, battered and sloped Forerunner forms, so what you see and what you
 // collide with stay within a few centimetres of each other.
 const FLOOR: Box = [-1, -0.5, 0, 15, 0.5, 13]; // the arena deck (falling off it kills)
-// Sniper tower (north-west): three stacked, shrinking tiers.
-const T1: Box = [-8, 1.0, -8, 3.4, 1.0, 3.0]; // base (top 2.0)
-const T2: Box = [-8, 3.25, -8, 2.7, 1.25, 2.4]; // mid (top 4.5)
-const T3: Box = [-8, 5.75, -8, 2.2, 1.25, 2.2]; // sniper deck (top 7.0)
-// BR structure (south-east): two storeys.
-const B1: Box = [8, 0.9, 7, 3.2, 0.9, 3.0]; // lower (top 1.8)
-const B2: Box = [8, 2.9, 7, 2.4, 1.1, 2.4]; // upper (top 4.0)
+// Sniper tower (north-west): a stepped block climbed by straight, wide ramps —
+// floor → the landing (T1) → west along its ramp to the mid tier (T2) → east up
+// the next ramp onto the sniper deck (T3). Every ramp is 2.2-2.4 wide with room
+// to turn at each end, so nobody (player or bot) edges along a ledge.
+const T1: Box = [-7.85, 1.0, -5.0, 3.25, 1.0, 1.2]; // landing band (top 2.0)
+const T2: Box = [-10.925, 2.25, -8.6, 2.125, 2.25, 2.4]; // mid tier (top 4.5)
+const T3: Box = [-6.7, 3.5, -8.6, 2.1, 3.5, 2.4]; // sniper deck (top 7.0)
+// BR structure (south-east): a lower deck (B1) and the BR top (B2) on its east
+// half, joined by a straight ramp; the walkway's south spur meets the BR top.
+const B1: Box = [7.8, 0.9, 8.3, 3.4, 0.9, 1.7]; // lower deck (top 1.8)
+const B2: Box = [9.6, 2.0, 6.8, 1.6, 2.0, 3.2]; // BR top (top 4.0)
 // Central raised walkway (the "bridge") over the bottom mid, with two spurs.
 const SPAN: Box = [0, 3.4, 0, 1.6, 0.25, 6.5]; // top 3.65, running along Z
 const SPUR_N: Box = [3.5, 3.4, -3, 3.5, 0.25, 1.4]; // toward the sniper tower
-const SPUR_S: Box = [3.5, 3.4, 5, 3.5, 0.25, 1.4]; // toward BR
+const SPUR_S: Box = [4, 3.4, 5, 4, 0.25, 1.4]; // on to the BR top
 const BRIDGE_PYLONS: Box[] = [
   [0, 1.575, -5.2, 0.45, 1.575, 0.45], // the span rests on two pylons
   [0, 1.575, 5.2, 0.45, 1.575, 0.45],
@@ -462,9 +466,9 @@ const SG_BACK: Box = [-9, 3.15, 8.2, 2.7, 0.95, 0.2];
 const SG_SIDE: Box = [-11.5, 3.15, 6, 0.2, 0.95, 2.6];
 // Guard rails around the open sniper deck and the BR upper storey.
 const RAILS: Box[] = [
-  [-8, 7.3, -9.9, 2.2, 0.3, 0.15],
-  [-9.9, 7.3, -8, 0.15, 0.3, 2.2],
-  [8, 4.3, 9.4, 2.4, 0.3, 0.15],
+  [-6.7, 7.3, -10.85, 2.1, 0.3, 0.15],
+  [-4.75, 7.3, -8.6, 0.15, 0.3, 2.4],
+  [9.6, 4.3, 9.85, 1.6, 0.3, 0.15],
 ];
 
 /** A flight of steps (collision) that the visual layer draws as a smooth ramp. */
@@ -481,11 +485,11 @@ const flight = (axis: "x" | "z", fixed: number, halfFixed: number, start: number
   axis, fixed, halfFixed, start, sign, topFrom, topTo,
 });
 const FLIGHTS: Flight[] = [
-  flight("z", -8, 2.6, -4.5, 1, 2.0, 0), // floor -> T1 (ramp toward mid)
-  flight("x", -10.9, 1.8, -8, -1, 4.5, 2.0), // T1 -> T2 (west side)
-  flight("x", -5.1, 1.6, -8, 1, 7.0, 4.5), // T2 -> T3 (east side)
-  flight("z", 8, 2.6, 4.5, -1, 1.8, 0), // floor -> B1
-  flight("x", 10.9, 1.7, 7, -1, 4.0, 1.8), // B1 -> B2
+  flight("z", -5.7, 1.1, -3.8, 1, 2.0, 0), // floor -> the sniper tower's landing
+  flight("x", -5.0, 1.2, -11.1, 1, 4.5, 2.0), // landing -> mid tier (climbs west)
+  flight("x", -9.8, 1.2, -8.8, -1, 7.0, 4.5), // mid tier -> sniper deck (climbs east)
+  flight("z", 6.0, 1.4, 6.6, -1, 1.8, 0), // floor -> the BR lower deck (under the spur)
+  flight("x", 8.95, 1.05, 8.0, -1, 4.0, 1.8), // lower deck -> BR top (climbs east)
   flight("z", 0, 1.4, -7.0, -1, 3.65, 0), // walkway ends drop to the floor
   flight("z", 0, 1.4, 7.0, 1, 3.65, 0),
   flight("x", 6, 2.0, -6.4, 1, 2.2, 0), // floor -> shotgun room (climbs west into its open east side)
@@ -507,10 +511,10 @@ const STRUCT: Box[] = [
 /** Emissive cyan trim (non-solid): thin Forerunner light strips + tower vents. */
 const TRIM: Box[] = [
   // Tower vents: tall, thin glowing slits standing just proud of the wall.
-  [-8.6, 5.3, -5.74, 0.07, 1.0, 0.04], // sniper-tower slits (T3, facing +Z)
-  [-7.4, 5.3, -5.74, 0.07, 1.0, 0.04],
-  [7.4, 2.8, 4.54, 0.07, 0.75, 0.04], // BR-tower slits (B2, facing -Z)
-  [8.6, 2.8, 4.54, 0.07, 0.75, 0.04],
+  [-7.3, 5.3, -6.16, 0.07, 1.0, 0.04], // sniper-tower slits (T3, facing +Z)
+  [-6.1, 5.3, -6.16, 0.07, 1.0, 0.04],
+  [8.9, 2.8, 3.56, 0.07, 0.75, 0.04], // BR-tower slits (B2, facing -Z)
+  [10.3, 2.8, 3.56, 0.07, 0.75, 0.04],
   // walkway edge lights: a thin strip down each long side
   [1.55, 3.67, 0, 0.05, 0.02, 6.3],
   [-1.55, 3.67, 0, 0.05, 0.02, 6.3],
@@ -522,8 +526,8 @@ const TRIM: Box[] = [
 
 /** Weapon-spawn markers (non-solid), cyan-lit cubes, at the sandbox spots. */
 const MARKERS: Box[] = [
-  [-8, 7.4, -8, 0.28, 0.4, 0.28], // Sniper — atop the tower
-  [8, 4.4, 7, 0.28, 0.4, 0.28], // BR — atop the BR structure
+  [-6.7, 7.4, -8.6, 0.28, 0.4, 0.28], // Sniper — atop the tower
+  [9.6, 4.4, 7.4, 0.28, 0.4, 0.28], // BR — atop the BR structure
   [-9, 2.6, 6, 0.28, 0.4, 0.28], // Shotgun — in the nook
   [0, 1.1, 0, 0.28, 0.4, 0.28], // Sword — the bottom-mid pit
   [0, 4.05, 0, 0.28, 0.4, 0.28], // SMG — on the central walkway
@@ -534,9 +538,9 @@ const MARKER_WEAPONS = ["sniper", "br", "shotgun", "sword", "smg"] as const;
 // 1.7) must not start inside a tower tier, or the view opens inside a wall.
 const SPAWNS: ReadonlyArray<readonly [number, number, number]> = [
   [-4, 0, -9.5], // floor beside the sniper tower
-  [-8.8, 7.0, -8.8], // sniper deck
+  [-6.2, 7.0, -9.4], // sniper deck
   [2.3, 0, 8.3], // floor beside the BR structure
-  [8, 4.0, 7], // BR upper
+  [9.9, 4.0, 8.4], // BR top
   [0, 3.65, 0], // central walkway
   [0, 0.7, 0], // sword pit
   [-9, 0, 1.5], // outside the shotgun room
@@ -563,18 +567,20 @@ const NAV_NODES: ReadonlyArray<readonly [number, number, number]> = [
   [-4.4, 0, 0], [4.4, 0, 0], [-9.2, 0, -0.4], [8, 0, 0.4], [-2.2, 0, 5.8], [4.4, 0, -7.5], [3, 0, 6.8],
   [-3.2, 0, -8], [-4.2, 0, 3],
   // 22-28: the walkway (feet of its ramps, ends, centre, spurs)
-  [0, 0.1, -12.5], [0, 3.65, -6.2], [0, 3.65, 0], [0, 3.65, 6.2], [0, 0.1, 12.5], [6.4, 3.65, -3], [5, 3.65, 5],
+  [0, 0.1, -12.5], [0, 3.65, -6.2], [0, 3.65, 0], [0, 3.65, 6.2], [0, 0.1, 12.5], [6.4, 3.65, -3], [7, 3.65, 5],
   // 29-30: the Sword pit
   [-2.4, 0.7, 0], [2.4, 0.7, 0],
-  // 31-42: the sniper tower, from the T1 ramp up to the deck
-  [-9.3, 2, -5.2], [-11.05, 2, -5.3], [-11.05, 2.5, -10.9], [-10.1, 3, -11.4], [-8.4, 4, -11.4], [-8.4, 4.5, -10.6],
-  [-5.35, 4.5, -10.6], [-5.35, 4.5, -7], [-5, 5, -5.6], [-7.6, 6.5, -5], [-8, 7, -6.6], [-9, 7, -9],
-  // 43-49: the BR tower
-  [8, 1.8, 4.3], [10.8, 1.8, 4.3], [10.8, 1.8, 9.7], [7.6, 1.8, 9.7], [6.6, 3.45, 10.5], [6.8, 4, 8.9], [8, 4, 7],
+  // 31-42: the sniper tower: its floor ramp, landing, the two ramps, the deck
+  [-5.7, 0, -0.9], [-5.7, 2, -5.0], [-7.3, 2, -5.0], [-10.7, 4, -5.0], [-10.7, 4.5, -7.4], [-12.4, 4.5, -7.4],
+  [-12.4, 4.5, -9.8], [-9.2, 6.5, -9.8], [-7.6, 7, -9.8], [-6.7, 7, -6.9], [-5.4, 7, -10.2], [-6.4, 7, -8.4],
+  // 43-49: the BR tower: floor ramp, lower deck, its ramp, the BR top
+  [6, 0, 2.6], [6, 1.8, 7.2], [5, 1.8, 7.25], [5, 1.8, 8.95], [7.6, 3.45, 8.95], [9.6, 4, 8.9], [9.6, 4, 7],
   // 50-51: the shotgun room
   [-6.9, 2.2, 6], [-9.2, 2.2, 5.6],
   // 52-55: walkway junctions, a spur drop landing, the pass east of the tower
   [0, 3.65, -3], [0, 3.65, 5], [7.8, 0, -3], [-3.5, 0, -3],
+  // 56: the middle of the Sword pit (the sword, and the ball's spawn)
+  [0, 0.7, 0],
 ];
 
 /** Two-way walkable links (node index pairs). */
@@ -587,11 +593,12 @@ const NAV_LINKS: ReadonlyArray<readonly [number, number]> = [
   // walkway
   [22, 23], [23, 52], [52, 24], [24, 53], [53, 25], [25, 26], [52, 27], [53, 28],
   // pit
-  [13, 29], [14, 30], [29, 30],
+  [13, 29], [14, 30], [29, 30], [29, 56], [56, 30],
   // sniper tower
-  [15, 31], [31, 32], [32, 33], [33, 34], [34, 35], [35, 36], [36, 37], [37, 38], [38, 39], [39, 40], [40, 41], [41, 42],
+  [15, 31], [13, 31], [31, 32], [32, 33], [33, 34], [34, 35], [35, 36], [36, 37], [37, 38], [38, 39], [39, 42],
+  [42, 40], [39, 41], [41, 42],
   // BR tower
-  [16, 43], [43, 44], [44, 45], [45, 46], [48, 49], [49, 28],
+  [16, 43], [43, 44], [44, 45], [45, 46], [46, 47], [47, 48], [48, 49], [49, 28],
   // shotgun room
   [17, 50], [50, 51],
 ];
@@ -601,8 +608,8 @@ const NAV_LINKS: ReadonlyArray<readonly [number, number]> = [
  * jump, which the bots take on an arc. [lower, upper].
  */
 const NAV_JUMPS: ReadonlyArray<readonly [number, number]> = [
-  [46, 47], // BR: from B1's north ledge up onto the top of its stair
-  [47, 48], // …and over the guard rail onto the BR top
+  // None: every level is on foot since the towers' ramps were rebuilt. Kept so
+  // a future map can mark a gap bots should jump.
 ];
 
 /** Power positions bots like to hold: the sniper deck, the BR top, the walkway centre, the shotgun room. */
@@ -612,7 +619,7 @@ const NAV_POWER: readonly number[] = [42, 41, 49, 48, 24, 51];
 const NAV_DROPS: ReadonlyArray<readonly [number, number]> = [
   [27, 54], // off the end of the north spur
   [24, 30], // off the walkway into the pit
-  [32, 1], // off the sniper tower's first tier
+  [36, 1], // off the sniper tower's mid tier
   [49, 8], // off the BR tower
   [51, 2], // out of the shotgun room
 ];
@@ -749,16 +756,17 @@ function structureStreams(): { wall: Streams; floor: Streams } {
   tier(s, T1, { batter: 0.35, cornice: 0.22 });
   tier(s, T2, { cornice: 0.2 });
   tier(s, T3, { cornice: 0.25 });
-  fin(s, -10.4, -10.4, -1, -1, 4.5, 11.4, 2.2, 1.0);
-  fin(s, -6.2, -10.4, 0.3, -1, 4.5, 10.0, 1.8, 0.8);
-  fin(s, -10.4, -6.2, -1, 0.3, 4.5, 10.0, 1.8, 0.8);
+  fin(s, -12.7, -10.7, -1, -1, 4.5, 11.4, 2.2, 1.0);
+  fin(s, -4.9, -10.7, 0.3, -1, 7.0, 10.4, 1.8, 0.8);
+  fin(s, -12.7, -6.5, -1, 0.3, 4.5, 10.0, 1.8, 0.8);
 
   // BR structure: two tiers under a slanted canopy on raked struts.
   tier(s, B1, { batter: 0.35, cornice: 0.22 });
   tier(s, B2, { cornice: 0.2 });
   const [bx, , bz, bhx, , bhz] = B2;
-  column(s, bx - bhx + 0.3, bz + bhz - 0.3, 4.0, 0.2, bx - bhx + 0.1, bz + bhz - 0.1, 6.3, 0.14);
+  // Struts on the east edge, clear of the ramp arriving on the west.
   column(s, bx + bhx - 0.3, bz + bhz - 0.3, 4.0, 0.2, bx + bhx - 0.1, bz + bhz - 0.1, 6.3, 0.14);
+  column(s, bx + bhx - 0.3, bz - bhz + 0.3, 4.0, 0.2, bx + bhx - 0.1, bz - bhz + 0.1, 5.8, 0.14);
   pushLoft(
     s,
     [[bx - bhx - 0.3, 6.25, bz + bhz + 0.3], [bx + bhx + 0.3, 6.25, bz + bhz + 0.3], [bx + bhx + 0.3, 5.75, bz - bhz - 0.6], [bx - bhx - 0.3, 5.75, bz - bhz - 0.6]],
@@ -773,7 +781,10 @@ function structureStreams(): { wall: Streams; floor: Streams } {
     const narrowX = hx < hz;
     const ix = narrowX ? Math.min(0.6, hx * 0.4) : 0.1;
     const iz = narrowX ? 0.1 : Math.min(0.6, hz * 0.4);
-    pushLoft(f, chamferedRect(cx, cz, hx - ix, hz - iz, 0.2, top - 0.8), chamferedRect(cx, cz, hx, hz, 0.25, top), UV);
+    // The south spur roofs the BR ramp, so its underside stays flat at the
+    // collider's (a player climbing beneath must not see through it).
+    const depth = cx === SPUR_S[0] && cz === SPUR_S[2] ? 2 * hy : 0.8;
+    pushLoft(f, chamferedRect(cx, cz, hx - ix, hz - iz, 0.2, top - depth), chamferedRect(cx, cz, hx, hz, 0.25, top), UV);
   }
   for (const [x, , z] of BRIDGE_PYLONS) {
     column(s, x, z, 0, 0.62, x, z, 2.2, 0.45);
@@ -885,15 +896,15 @@ function snowStreams(): Streams {
     if (side === "-z") drift(s, cx - hx + trim, cz - hz - b, cx + hx - trim, cz - hz - b, 0, -1, y, height, depth);
     if (side === "+z") drift(s, cx - hx + trim, cz + hz + b, cx + hx - trim, cz + hz + b, 0, 1, y, height, depth);
   };
-  base(T1, "-x", 0, 0.45, 1.1);
-  base(T1, "-z", 0, 0.5, 1.2);
-  base(B1, "+x", 0, 0.45, 1.1);
+  base(T2, "-x", 0, 0.45, 1.1);
+  base(T2, "-z", 0, 0.5, 1.2);
+  base(T3, "-z", 0, 0.5, 1.2);
+  base(B2, "+x", 0, 0.45, 1.1);
   base(B1, "+z", 0, 0.5, 1.2);
   base(SG_FLOOR, "-x", 0, 0.4, 0.9);
-  // Snow gathered on the tower ledges, against the tier above.
-  base(T2, "-z", 2.0, 0.22, 0.5, 0.5);
-  base(T3, "-x", 4.5, 0.2, 0.45, 0.5);
-  base(B2, "+x", 1.8, 0.2, 0.5, 0.5);
+  // Snow gathered on the tower landings, against the tier above.
+  drift(s, -6.7, -6.2, -4.9, -6.2, 0, 1, 2.0, 0.22, 0.5);
+  drift(s, 8.0, 6.75, 8.0, 7.75, -1, 0, 1.8, 0.2, 0.45);
   // Patches scattered across the deck, thickest toward the exposed edges.
   const [fx, , fz, fhx, , fhz] = FLOOR;
   const patches: ReadonlyArray<readonly [number, number, number]> = [
@@ -1400,10 +1411,13 @@ export const LOCKOUT_LIGHTING: SceneLighting = {
 export const LOCKOUT_FX = {
   enabled: { bloom: true, grade: true, splittone: true, vignette: true },
   values: {
-    "bloom.strength": 0.45,
-    "bloom.threshold": 0.72,
+    // Calibrated against the player's real bloom pyramid (HDR, multi-scale):
+    // just the brightest glow — cyan trim, sun-lit snow — past threshold, and a
+    // hair of brightness back, so the frame sits where the grade was designed.
+    "bloom.strength": 0.2,
+    "bloom.threshold": 0.9,
     "bloom.radius": 0.55,
-    "grade.brightness": 1,
+    "grade.brightness": 0.95,
     "grade.contrast": 1.12,
     "grade.saturation": 0.85,
     "splittone.strength": 0.28,
@@ -1532,7 +1546,7 @@ local MODE_KEYS = {"ffa","slayer","swat","snipe","ball","koth","jugg"}
 
 -- Hill locations King-of-the-Hill rotates through (the named power positions).
 local HILL_MOVE = 1800   -- the hill moves every 30s
-local HILLS = { {0,3.65,0}, {-8,7.0,-8}, {8,4.0,7}, {0,0.7,0}, {-9,2.2,6} }
+local HILLS = { {0,3.65,0}, {-6.7,7.0,-8.6}, {9.6,4.0,7.2}, {0,0.7,0}, {-9,2.2,6} }
 
 local PR,PH,EYE,STEP = 0.55,1.7,1.5,0.6
 local GRAV,MOVE,JUMP,TURN = 0.028,0.15,0.5,0.045
@@ -2040,7 +2054,7 @@ end
 function nav_place(o)
   o.na = nav_nearest(o.x, o.y, o.z)
   o.x, o.y, o.z = nav_pos(o.na)
-  o.nb, o.nt, o.goal = nil, 0, o.na
+  o.nb, o.nt, o.goal, o.offgraph = nil, 0, o.na, false
 end
 
 local function nav_goto(o, g)
@@ -2050,6 +2064,15 @@ end
 
 -- Advance a bot along its current edge; true while it is moving.
 local function nav_step(o, speed)
+  if o.offgraph then
+    -- Walked off the graph (to a loose ball): head back to the waypoint first.
+    local nx,ny,nz = nav_pos(o.na)
+    local dx,dz = nx-o.x, nz-o.z
+    local m = math.sqrt(dx*dx+dz*dz)
+    if m <= speed then o.x,o.y,o.z = nx,ny,nz; o.offgraph = false
+    else o.x, o.z = o.x+dx/m*speed, o.z+dz/m*speed; o.mface = math.atan(dx,dz) end
+    return true
+  end
   if not o.nb then return false end
   local ax,ay,az = nav_pos(o.na); local bx,by,bz = nav_pos(o.nb)
   local kind = nav_kind[o.na][o.nb] or 0
@@ -2163,7 +2186,14 @@ local function think_bot(o)
         if MODE.weapons[MW[k]] then nav_goto(o, MRK_NODE[k]) else nav_goto(o, bot_goal(o)) end
       else nav_goto(o, bot_goal(o)) end
     end
-    if nav_step(o, 0.075) then o.moving=true end
+    -- The last few metres to a loose ball are off the graph: walk straight at it.
+    local bx, bz = ball.x - o.x, ball.z - o.z
+    local bm = math.sqrt(bx*bx + bz*bz)
+    if MODE.obj=="ball" and ball.live and not o.nb and bm < 5 and bm > 0.2 and math.abs(o.y - (ball.y-0.5)) < 0.8
+      and not seg_blocked(o.x,o.y+0.5,o.z, ball.x,ball.y,ball.z, 1) then
+      o.x, o.z = o.x+bx/bm*0.075, o.z+bz/bm*0.075
+      o.offgraph, o.moving, o.mface = true, true, math.atan(bx,bz)
+    elseif nav_step(o, 0.075) then o.moving=true end
     o.face = o.mface or o.face
   end
   bot_pickups(o)
@@ -2542,11 +2572,11 @@ function TIC()
   -- No 2D sky in play: HUD mode composites this frame OVER the 3D scene, so the
   -- cls(0) void is transparent (the arena + engine sky show through) and only the
   -- HUD we draw below lands on top.
+  -- The arena's own rig lights the world; the objectives glow in it, so you can
+  -- see the ball and the hill from across the map.
   cartbox.clearlights()
-  cartbox.sun(-0.4,-0.8,0.45, 205,216,240, 0.9)
-  cartbox.light(p.x, p.z, 8, 90,200,235, p.y+4, 0.6)
-  if MODE.obj=="ball" then cartbox.light(ball.x, ball.z, 6, 90,220,255, ball.y+1, 0.8) end
-  if MODE.obj=="hill" then cartbox.light(hill.x, hill.z, 7, 120,255,150, hill.y+2, 0.7) end
+  if MODE.obj=="ball" then cartbox.light3d(ball.x, ball.y+0.6, ball.z, 5, 90,220,255, 3.2) end
+  if MODE.obj=="hill" then cartbox.light3d(hill.x, hill.y+1.2, hill.z, 5.5, 120,255,150, 3.4) end
 
   cartbox.clearposes()
   for i=1,NBOT do local o=bots[i]
@@ -2603,11 +2633,10 @@ export function seedLockoutCart(engine: CartEngine): void {
 /**
  * The Lockout cartridge as .tic bytes — its code and palette, exactly what the
  * starter seeds — for playing it outside the editor (the /lockout page). The
- * cart has no sprites, map or sound, so those two chunks are the whole cart.
+ * cart has no sprites, map or sound, so its palette and code are the whole cart.
  */
 export function lockoutCartridge(): Uint8Array {
   const code = new TextEncoder().encode(LOCKOUT_CODE);
-  if (code.length > 0xffff) throw new Error("Lockout code no longer fits one .tic chunk");
   const palette = new Uint8Array(16 * 3);
   SWEETIE_16.forEach((hex, i) => palette.set(hexRgb(hex), i * 3));
   for (const [index, hex] of LOCKOUT_PALETTE) palette.set(hexRgb(hex), index * 3);
@@ -2617,7 +2646,11 @@ export function lockoutCartridge(): Uint8Array {
     out.set(data, 4);
     return out;
   };
-  const parts = [chunk(12, palette), chunk(5, code)]; // CHUNK_PALETTE, CHUNK_CODE (bank 0)
+  // Code over 64 KB spans banks: the engine joins them from the highest bank
+  // down, so the start of the code goes in the highest bank used.
+  const banks = Math.max(1, Math.ceil(code.length / 0x10000));
+  const parts = [chunk(12, palette)]; // CHUNK_PALETTE
+  for (let k = 0; k < banks; k += 1) parts.push(chunk(5 | ((banks - 1 - k) << 5), code.subarray(k * 0x10000, (k + 1) * 0x10000)));
   const out = new Uint8Array(parts.reduce((n, part) => n + part.length, 0));
   let at = 0;
   for (const part of parts) {
