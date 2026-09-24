@@ -17,6 +17,7 @@
  *   void cbx_delete(int handle)                     -> free the console
  */
 
+import { NET_WORDS } from "./net/netplay.js";
 import { framebufferBytes, type ConsoleModel } from "./models.js";
 
 /** Minimal view of the Emscripten module we depend on. */
@@ -58,6 +59,12 @@ export interface ConsoleInstance {
   readAudioSamples(): Int16Array;
   /** Returns a copy of the event-mailbox words (word[0] = sequence counter). */
   readMailbox(): Uint32Array;
+  /**
+   * A LIVE view of pmem words 0..118 — the netplay channel just below the
+   * mailbox (see net/netplay.ts). Writes land in the cart's pmem. Re-fetch it
+   * each tick: WASM memory growth detaches old views. Null when unavailable.
+   */
+  netWords(): Uint32Array | null;
   /** Enables/disables per-pixel material capture (off by default; unlit carts pay nothing). */
   setMaterialCapture(enabled: boolean): void;
   /**
@@ -185,6 +192,13 @@ export function createConsole(
       const start = ptr / Int16Array.BYTES_PER_ELEMENT;
       // Copy out: the engine reuses this buffer on the next tick.
       return module.HEAP16.slice(start, start + count);
+    },
+
+    netWords(): Uint32Array | null {
+      const ptr = module._cbx_mailbox_ptr(handle);
+      if (ptr === 0) return null;
+      // The mailbox starts at pmem word 119, so pmem word 0 is 119 words below.
+      return new Uint32Array(module.HEAPU8.buffer, ptr - NET_WORDS * 4, NET_WORDS);
     },
 
     readMailbox(): Uint32Array {

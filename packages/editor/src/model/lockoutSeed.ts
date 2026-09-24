@@ -31,6 +31,7 @@ import { serializeMeshAsset, type EncodedImage, type MeshAsset, type MeshPrimiti
 import type { SceneLighting } from "./SceneLighting";
 import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, type Streams } from "./seedGeometry";
 import { packMeshLibrary } from "./meshLibrary";
+import { SWEETIE_16 } from "./palette";
 
 /** An axis-aligned box: centre (cx,cy,cz) and half-extents (hx,hy,hz). */
 type Box = readonly [number, number, number, number, number, number];
@@ -1530,6 +1531,7 @@ local MODES = {
 local MODE_KEYS = {"ffa","slayer","swat","snipe","ball","koth","jugg"}
 
 -- Hill locations King-of-the-Hill rotates through (the named power positions).
+local HILL_MOVE = 1800   -- the hill moves every 30s
 local HILLS = { {0,3.65,0}, {-8,7.0,-8}, {8,4.0,7}, {0,0.7,0}, {-9,2.2,6} }
 
 local PR,PH,EYE,STEP = 0.55,1.7,1.5,0.6
@@ -1618,7 +1620,7 @@ local function move_vertical()
       elseif p.vy>0 and head>y0 and feet<y0 then p.y=y0-PH; p.vy=0 end
     end
   end
-  if p.y < -6 then p.hp=0; p.dead=true; p.respawn=90; p.deaths=p.deaths+1 end
+  if p.y < -6 then p.hp=0; kill_ent(p, p, false) end   -- fell off the arena
 end
 
 function respawn(who)
@@ -1635,6 +1637,171 @@ function enemy_of(a, o)
   if MODE.obj=="jugg" then return a.jugg ~= o.jugg end  -- everyone vs the juggernaut
   if not MODE.teams then return true end
   return a.team ~= o.team
+end
+
+-- ---------------------------------------------------------------------------
+-- Online multiplayer. The page relays state + events between browsers through
+-- the SDK's cartbox.net* channel (pmem 0..118, so this cart keeps no save data
+-- there). Each of the 8 slots is a player: this browser's own (p), another
+-- human, or a bot -- simulated by the room's host and mirrored to everyone
+-- else. Each client is authoritative for its own player; a hit on someone else
+-- is sent to them as an event, and a victim announces its own death.
+local NETMODE, MYSLOT, HUMANS = 0, 0, 0     -- 0 offline / 1 client / 2 host
+local WLIST = {"br","smg","shotgun","sniper","magnum","sword"}
+local WIDX_OF = {}; for i,id in ipairs(WLIST) do WIDX_OF[id]=i-1 end
+local EV_HIT, EV_KILL, EV_OBJ, EV_SCORE = 1, 2, 3, 4
+local net_match_id, net_seen_match = 0, -1
+
+local function s16(v) v = v & 0xffff; if v >= 32768 then v = v - 65536 end; return v end
+local function u16(v) return math.floor(v + 0.5) & 0xffff end
+local function wrap_angle(a) while a > math.pi do a = a - 2*math.pi end; while a < -math.pi do a = a + 2*math.pi end; return a end
+
+-- Pack a player into 3 words: position (cm), yaw, and the bits others need
+-- to draw and fight it (health, shields, weapon, dead/moving, team).
+local function net_pack(e)
+  local wid = (e == p) and (p.slot==1 and p.g1 or p.g2) or (e.g1 or "br")
+  local w0 = u16(e.x*100) | (u16(e.z*100) << 16)
+  local w1 = u16(e.y*100) | (u16(wrap_angle(e == p and e.ay or (e.face or 0))*10000) << 16)
+  local hp = math.max(0, math.min(127, math.floor(e.hp or 0)))
+  local sh = math.max(0, math.min(127, math.floor((e.sh or 0)/2)))
+  local w2 = hp | (sh << 7) | ((WIDX_OF[wid] or 0) << 14) | ((e.dead and 1 or 0) << 17)
+    | ((e.moving and 1 or 0) << 18) | ((e.team=="red" and 1 or 0) << 19)
+  return w0, w1, w2
+end
+
+-- Apply a remote player's state to its local stand-in, smoothing the motion.
+local function net_apply(e, w0, w1, w2)
+  local tx, tz, ty = s16(w0)/100, s16(w0 >> 16)/100, s16(w1)/100
+  local far = math.abs(tx-e.x) + math.abs(tz-e.z) + math.abs(ty-e.y) > 4
+  local k = far and 1 or 0.35                              -- snap on respawn, else ease
+  e.x, e.y, e.z = e.x+(tx-e.x)*k, e.y+(ty-e.y)*k, e.z+(tz-e.z)*k
+  e.face = s16(w1 >> 16)/10000
+  e.hp, e.sh = w2 & 127, ((w2 >> 7) & 127)*2
+  e.g1 = WLIST[((w2 >> 14) & 7) + 1] or "br"
+  e.dead = ((w2 >> 17) & 1) == 1
+  e.moving = ((w2 >> 18) & 1) == 1
+end
+
+-- The local stand-in for a slot (p for my own).
+function ent_by_slot(ns)
+  if ns == MYSLOT then return p end
+  for _,o in ipairs(bots) do if o.ns == ns then return o end end
+  return nil
+end
+
+local function ev_word(kind, from, to, head, value)
+  return kind | ((from & 7) << 4) | ((to & 7) << 7) | ((head and 1 or 0) << 10) | ((math.floor(value) & 0xffff) << 16)
+end
+
+-- A kill of a player this browser owns: score it here, and tell everyone.
+function kill_ent(killer, victim, head)
+  if victim.dead then return end
+  register_kill(killer, victim, head)
+  if NETMODE ~= 0 then cartbox.netsend(ev_word(EV_KILL, (killer or victim).ns, victim.ns, head, 0), 0) end
+end
+
+-- Every hit in the game lands here: shields soak first, then health. A player
+-- another browser owns gets the hit as an event instead -- it applies it and
+-- announces the kill if it dies.
+function damage(target, dmg, attacker, head)
+  if not target or target.dead then return end
+  if target.remote then
+    cartbox.netsend(ev_word(EV_HIT, (attacker or target).ns, target.ns, head, dmg), 0)
+    return
+  end
+  if (target.sh or 0) > 0 then
+    target.sh = target.sh - dmg
+    if target.sh < 0 then target.hp = target.hp + target.sh; target.sh = 0 end
+  else
+    target.hp = target.hp - dmg
+  end
+  target.lasthit = attacker
+  if target.hp <= 0 then kill_ent(attacker, target, head) end
+end
+
+-- Read the room: mode, my slot, and who is human; (re)assign every slot's role.
+local function net_roles()
+  local mode, myslot, humans = cartbox.net()
+  if NETMODE == 1 and mode == 2 then net_match_id = net_seen_match end   -- took over as host
+  NETMODE, HUMANS = mode, humans
+  if mode ~= 0 then MYSLOT = myslot else MYSLOT = 0; HUMANS = 1 end
+  if p then p.ns = MYSLOT; p.team = (MYSLOT % 2 == 0) and "blue" or "red" end
+  for i,o in ipairs(bots) do
+    o.ns = (i-1 < MYSLOT) and (i-1) or i
+    o.team = (o.ns % 2 == 0) and "blue" or "red"
+    local human = (HUMANS >> o.ns) & 1 == 1
+    local remote = NETMODE ~= 0 and (human or NETMODE == 1)
+    if o.remote and not remote then respawn(o); nav_place(o) end   -- the host takes over an empty slot
+    o.remote, o.human = remote, human
+    o.tag = human and ("Player "..(o.ns+1)) or ("Bot "..o.ns)
+  end
+end
+
+-- Per tick in a match: mirror remote players, then apply incoming hits/kills.
+local function net_receive()
+  if NETMODE == 0 then return end
+  for _,o in ipairs(bots) do
+    if o.remote then
+      local a, b, c, live = cartbox.netpeer(o.ns)
+      if live then net_apply(o, a, b, c) else o.dead = true end
+    end
+  end
+  for _,ev in ipairs(cartbox.netevents()) do
+    local a = ev[1]
+    local kind, from, to, head, value = a & 15, (a >> 4) & 7, (a >> 7) & 7, ((a >> 10) & 1) == 1, (a >> 16) & 0xffff
+    local src, dst = ent_by_slot(from), ent_by_slot(to)
+    if kind == EV_HIT and dst and not dst.remote then damage(dst, value, src, head)
+    elseif kind == EV_KILL and dst then register_kill(src, dst, head)
+    elseif NETMODE == 1 and kind == EV_SCORE and dst then dst.score = value
+    elseif NETMODE == 1 and kind == EV_OBJ then net_objective(from == 1 and dst or nil, head, value, ev[2]) end
+  end
+end
+
+-- A guest applies the host's objective state: who holds the ball / is the
+-- juggernaut, where a loose ball lies, which hill is live.
+function net_objective(holder, live, value, b)
+  if MODE.obj == "ball" then
+    if holder == p and ball.carrier ~= p then say("You have the ball",9) end
+    ball.carrier, ball.live = holder, live
+    if not holder then ball.x, ball.z, ball.y = s16(b)/100, s16(b >> 16)/100, s16(value)/100 end
+  elseif MODE.obj == "hill" and value ~= hill.idx and HILLS[value] then
+    hill.idx = value
+    local h = HILLS[value]; hill.x,hill.y,hill.z = h[1],h[2],h[3]
+    say("Hill moved",12)
+  elseif MODE.obj == "jugg" and holder and not holder.jugg then
+    for _,o in ipairs(all_players()) do o.jugg = false end
+    holder.jugg = true
+  end
+end
+
+-- The host sends the objective (4 Hz) and any changed scores (3 Hz).
+local sent_score = {}
+local function net_objective_publish()
+  if NETMODE ~= 2 or MODE.obj == "slayer" then return end
+  if tick % 15 == 5 then
+    local holder, value, b = nil, 0, 0
+    if MODE.obj == "ball" then
+      holder = ball.carrier
+      value = u16(ball.y*100); b = u16(ball.x*100) | (u16(ball.z*100) << 16)
+    elseif MODE.obj == "hill" then value = hill.idx
+    else for _,o in ipairs(all_players()) do if o.jugg then holder = o end end end
+    cartbox.netsend(ev_word(EV_OBJ, holder and 1 or 0, holder and holder.ns or 0, MODE.obj == "ball" and ball.live, value), b)
+  end
+  if tick % 20 == 0 then
+    for _,o in ipairs(all_players()) do
+      local sc = math.floor(o.score or 0)
+      if sent_score[o.ns] ~= sc then sent_score[o.ns] = sc; cartbox.netsend(ev_word(EV_SCORE, 0, o.ns, false, sc), 0) end
+    end
+  end
+end
+
+-- Per tick: publish my player (and, as host, my bots) for everyone else.
+local function net_publish()
+  if NETMODE == 0 or not p then return end
+  cartbox.netpublish(MYSLOT, net_pack(p))
+  if NETMODE == 2 then
+    for _,o in ipairs(bots) do if not o.remote then cartbox.netpublish(o.ns, net_pack(o)) end end
+  end
 end
 
 -- Forward vector from yaw + auto-aim pitch.
@@ -1693,7 +1860,8 @@ function register_kill(killer, victim, hs)
     if MODE.obj=="ball" or MODE.obj=="hill" then
       -- objective modes: kills don't score, holding does
     elseif MODE.obj=="jugg" then
-      if victim.jugg then killer.jugg=true; victim.jugg=false; killer.score=(killer.score or 0)+1; if killer==p then say("JUGGERNAUT",9) elseif victim==p then say("YOU ARE THE HUNTED",6) end end
+      if victim.jugg then killer.jugg=true; victim.jugg=false; killer.score=(killer.score or 0)+1; if killer==p then say("JUGGERNAUT",9) elseif victim==p then say("YOU ARE THE HUNTED",6) end
+      elseif killer.jugg then killer.score=(killer.score or 0)+1 end   -- the juggernaut scores its kills
     elseif MODE.teams then
       team[killer.team]=team[killer.team]+1
     else
@@ -1733,11 +1901,7 @@ local function explode(g)
   local function splash(o)
     if not o or o.dead then return end
     local m = d3(g.x,g.y,g.z, o.x,o.y+1,o.z)
-    if m < 4.5 then
-      local dmg = (1 - m/4.5) * 90
-      if o.sh>0 then o.sh=o.sh-dmg; if o.sh<0 then o.hp=o.hp+o.sh; o.sh=0 end else o.hp=o.hp-dmg end
-      if o.hp<=0 then register_kill(g.owner, o, false) end
-    end
+    if m < 4.5 then damage(o, (1 - m/4.5) * 90, g.owner, false) end
   end
   splash(p)
   for _,o in ipairs(bots) do splash(o) end
@@ -1768,11 +1932,7 @@ local function player_fire()
   local aim,ad = auto_target()
   if aim and ad < 2.4 then
     p.cool=18; flash=3
-    if not aim.dead then
-      if aim.sh>0 then aim.sh=0 end
-      aim.hp = aim.hp - 90
-      if aim.hp<=0 then register_kill(p, aim, false) end
-    end
+    if not aim.dead then damage(aim, (aim.sh or 0) + 90, p, false) end   -- melee strips shields
     return
   end
   if ammo<=0 then
@@ -1811,9 +1971,7 @@ local function player_fire()
       local dmg=w.dmg
       local head = best._hy and best._hy>best.y+1.5
       if head then dmg=dmg*w.hs end
-      if best.sh>0 then best.sh=best.sh-dmg; if best.sh<0 then best.hp=best.hp+best.sh; best.sh=0 end
-      else best.hp=best.hp-dmg end
-      if best.hp<=0 then register_kill(p, best, head) end
+      damage(best, dmg, p, head)
     end
   end
 end
@@ -1879,7 +2037,7 @@ local function nav_nearest(x, y, z)
 end
 
 -- Stand a (re)spawned bot on the waypoint nearest its spawn.
-local function nav_place(o)
+function nav_place(o)
   o.na = nav_nearest(o.x, o.y, o.z)
   o.x, o.y, o.z = nav_pos(o.na)
   o.nb, o.nt, o.goal = nil, 0, o.na
@@ -1925,75 +2083,131 @@ local function bot_goal(o)
     if j then return nav_nearest(j.x, j.y, j.z) end
   end
   local r = math.random()
-  if r < 0.45 and not p.dead and enemy_of(o,p) then return nav_nearest(p.x, p.y, p.z) end -- hunt the player
+  if r < 0.45 then                                                                      -- hunt someone
+    local prey = (math.random() < 0.5) and p or bots[math.random(1, #bots)]
+    if prey and prey ~= o and not prey.dead and enemy_of(o, prey) then return nav_nearest(prey.x, prey.y, prey.z) end
+  end
   if r < 0.75 then return POWER[math.random(1,#POWER)] end                             -- take a power position
   return math.random(1, NN)                                                             -- roam
 end
 
+-- Every player a bot could be fighting: the local player and all the others.
+function all_players()
+  local list = { p }
+  for _,o in ipairs(bots) do list[#list+1] = o end
+  return list
+end
+
+-- Weapon markers as waypoints, so bots can go and pick them up.
+local MRK_NODE = {}
+for i=0,(#MRK//3)-1 do MRK_NODE[i+1] = nav_nearest(MRK[i*3+1], MRK[i*3+2]-0.4, MRK[i*3+3]) end
+
+-- A bot that walks over a live weapon marker takes the weapon.
+local function bot_pickups(o)
+  for i=0,(#MRK//3)-1 do
+    local id=MW[i+1]
+    if MODE.weapons[id] and (mtimer[i+1] or 0)==0 and o.g1 ~= id then
+      local mx,my,mz=MRK[i*3+1],MRK[i*3+2],MRK[i*3+3]
+      if math.abs(o.x-mx)<1.4 and math.abs(o.z-mz)<1.6 and math.abs((o.y+1)-my)<2.0 then
+        o.g1=id; mtimer[i+1]=540
+      end
+    end
+  end
+end
+
 local function think_bot(o)
+  if o.remote then return end        -- another browser (or the host) drives it
   if o.dead then o.respawn=o.respawn-1; if o.respawn<=0 then respawn(o); nav_place(o) end return end
   o.moving=false
-  -- target enemy: the player if in line of sight and range
-  local pdx,pdz = p.x-o.x, p.z-o.z
-  local pm = math.sqrt(pdx*pdx+pdz*pdz)
-  local seesP = (not p.dead) and enemy_of(o,p) and pm<40 and not seg_blocked(o.x,o.y+1.4,o.z, p.x,p.y+EYE,p.z, 1)
-  local wid = o.g1 or "br"; local w=W[wid]
-  if seesP then
-    o.face = math.atan(pdx,pdz)
+  -- Pick a target a few times a second: the nearest enemy in line of sight --
+  -- the player, another human, or another bot. Bots fight each other now.
+  if (tick + (o.id or 0)*7) % 10 == 0 then
+    o.target = nil
+    local bd = 40
+    for _,e in ipairs(all_players()) do
+      if e ~= o and e and not e.dead and enemy_of(o, e) then
+        local m = d3(o.x,o.y,o.z, e.x,e.y,e.z)
+        if m < bd and not seg_blocked(o.x,o.y+1.4,o.z, e.x,e.y+1.4,e.z, 1) then o.target, bd = e, m end
+      end
+    end
+  end
+  local tg = o.target
+  if tg and tg.dead then tg = nil; o.target = nil end
+  local w = W[o.g1 or "br"]
+  if tg then
+    local dx,dz = tg.x-o.x, tg.z-o.z
+    local m = math.sqrt(dx*dx+dz*dz)
+    o.face = math.atan(dx,dz)
     o.cool=(o.cool or 0)-1
-    if pm < (w.rng or 40) and (o.cool or 0)<=0 then
+    if m < (w.rng or 40) and o.cool<=0 then
       o.cool = (w.cool or 10) + math.random(0,6)
-      local acc = MODE.shields and 0.30 or 0.5   -- SWAT bots hit harder
+      local acc = MODE.shields and 0.30 or 0.5    -- SWAT bots hit harder
+      if w.melee then acc = (m < 3) and 0.9 or 0 end
       if math.random() < acc then
         local dmg = (w.dmg or 12) * (w.pel or 1) * 0.6
-        if math.random()<0.12 then dmg=dmg*(w.hs or 1.5) end   -- occasional headshot
-        if p.sh>0 then p.sh=p.sh-dmg; if p.sh<0 then p.hp=p.hp+p.sh; p.sh=0 end else p.hp=p.hp-dmg end
-        if p.hp<=0 and not p.dead then p.dead=true; p.respawn=90; p.deaths=p.deaths+1; register_kill(o,p,false) end
+        local head = math.random() < 0.12
+        if head then dmg = dmg*(w.hs or 1.5) end
+        damage(tg, dmg, o, head)
       end
     end
     -- close the distance if out of range, otherwise keep walking the route
     -- (slowly) so a fight isn't two statues trading shots
-    if pm > (w.rng or 40)*0.7 then nav_goto(o, nav_nearest(p.x,p.y,p.z)) end
+    if m > (w.rng or 40)*0.7 then nav_goto(o, nav_nearest(tg.x,tg.y,tg.z)) end
     if nav_step(o, 0.035) then o.moving=true end
   else
-    -- pick a new destination when idle, and re-think every couple of seconds
-    if not o.nb or (tick + (o.id or 0)*23) % 150 == 0 then nav_goto(o, bot_goal(o)) end
+    -- pick a new destination when idle, and re-think every couple of seconds;
+    -- now and then go and grab a weapon from a marker
+    if not o.nb or (tick + (o.id or 0)*23) % 150 == 0 then
+      if math.random() < 0.2 then
+        local k = math.random(1, #MRK_NODE)
+        if MODE.weapons[MW[k]] then nav_goto(o, MRK_NODE[k]) else nav_goto(o, bot_goal(o)) end
+      else nav_goto(o, bot_goal(o)) end
+    end
     if nav_step(o, 0.075) then o.moving=true end
     o.face = o.mface or o.face
   end
-  -- objective interactions
-  if MODE.obj=="ball" and ball.live and d3(o.x,o.y,o.z, ball.x,ball.y,ball.z)<1.3 then ball.carrier=o; ball.live=false end
-  -- bots occasionally trade kills among themselves so scores move
-  if math.random()<0.003 then
-    local v=bots[math.random(1,NBOT)]
-    if v and not v.dead and v~=o and enemy_of(o,v) then register_kill(o,v,false) end
-  end
+  bot_pickups(o)
 end
 
 -- ---------------------------------------------------------------------------
 local function update_objective()
+  -- Online, the host owns the objective and every score; a guest only draws it
+  -- (net_objective applies what the host sends).
+  if NETMODE == 1 then
+    if MODE.obj=="ball" and ball.carrier and not ball.carrier.dead then
+      ball.x,ball.y,ball.z = ball.carrier.x, ball.carrier.y+1.6, ball.carrier.z
+    end
+    return
+  end
   if MODE.obj=="ball" then
     if ball.carrier and not ball.carrier.dead then
       ball.x,ball.y,ball.z = ball.carrier.x, ball.carrier.y+1.6, ball.carrier.z
-      ball.carrier.score=(ball.carrier.score or 0)+1
+      if tick%60==0 then ball.carrier.score=(ball.carrier.score or 0)+1 end   -- a point a second held
     end
-    if ball.carrier==p and not p.dead then p.score=(p.score or 0) end
-    -- player grabs the ball
-    if ball.live and not p.dead and d3(p.x,p.y,p.z, ball.x,ball.y,ball.z)<1.5 then ball.carrier=p; ball.live=false; say("You have the ball",9) end
+    -- anyone (me, a bot, another player's stand-in) grabs a loose ball
+    if ball.live then
+      for _,o in ipairs(all_players()) do
+        if not o.dead and d3(o.x,o.y,o.z, ball.x,ball.y,ball.z) < ((o==p) and 1.5 or 1.3) then
+          ball.carrier=o; ball.live=false
+          if o==p then say("You have the ball",9) end
+          break
+        end
+      end
+    end
   elseif MODE.obj=="hill" then
     if tick>=hill.next then
       hill.idx = hill.idx % #HILLS + 1
-      local h=HILLS[hill.idx]; hill.x,hill.y,hill.z=h[1],h[2],h[3]; hill.next=tick+900
+      local h=HILLS[hill.idx]; hill.x,hill.y,hill.z=h[1],h[2],h[3]; hill.next=tick+HILL_MOVE
       if tick>1 then say("Hill moved",12) end
     end
     local function inhill(o) return (not o.dead) and math.abs(o.x-hill.x)<3 and math.abs(o.z-hill.z)<3 end
-    if inhill(p) then p.score=(p.score or 0)+1 end
-    for _,o in ipairs(bots) do if inhill(o) then o.score=(o.score or 0)+1 end end
+    -- a point for every second in the hill
+    if tick%60==0 then for _,o in ipairs(all_players()) do if inhill(o) then o.score=(o.score or 0)+1 end end end
   elseif MODE.obj=="jugg" then
     -- the juggernaut earns points just for surviving as the hunted
     local jg=nil
     if p.jugg then jg=p else for _,o in ipairs(bots) do if o.jugg then jg=o break end end end
-    if jg and not jg.dead and tick%30==0 then jg.score=(jg.score or 0)+1 end
+    if jg and not jg.dead and tick%600==0 then jg.score=(jg.score or 0)+1 end
   end
 end
 
@@ -2015,13 +2229,18 @@ local function start_match(key)
   respawn(p); give(p,1,MODE.start); give(p,2,"magnum")
   bots = {}
   for i=1,NBOT do
-    local o = { id=i, face=0, score=0, deaths=0, team=(i<=3) and "blue" or "red", g1=MODE.start, cool=0, tag="Bot "..i, streak=0 }
+    -- Teams alternate by slot (even slots blue, odd red), so a room of any
+    -- size splits evenly; net_roles below fills in slots, owners and names.
+    local o = { id=i, face=0, score=0, deaths=0, team=(i%2==0) and "blue" or "red", g1=MODE.start, cool=0, tag="Bot "..i, streak=0 }
     respawn(o); nav_place(o); bots[i]=o
   end
+  net_roles()
   if MODE.obj=="ball" then ball={x=0,y=1.1,z=0,carrier=nil,live=true} end
-  if MODE.obj=="hill" then hill={x=HILLS[1][1],y=HILLS[1][2],z=HILLS[1][3],next=999999,idx=1} end
-  if MODE.obj=="jugg" then bots[1].jugg=true; bots[1].sh=200 end
+  if MODE.obj=="hill" then hill={x=HILLS[1][1],y=HILLS[1][2],z=HILLS[1][3],next=HILL_MOVE,idx=1} end
+  if MODE.obj=="jugg" then local j = ent_by_slot(1) or bots[1]; j.jugg=true; j.sh=200 end
+  for k in pairs(sent_score) do sent_score[k] = nil end
   phase = "play"
+  if NETMODE == 2 then net_match_id = net_match_id + 1 end
 end
 
 -- 8-button controls: tank move + turn, hold A to strafe, double-tap A grenade.
@@ -2200,23 +2419,85 @@ function hide_scene()
   for i=0,NBOT do cartbox.meshpose(i,0,-999,0,0,0,0,0) end
 end
 
+-- The game types that work online (the objective modes need a shared ball,
+-- hill or juggernaut, which stay single-player for now).
+ONLINE_KEYS = {"ffa","slayer","swat","snipe","ball","koth","jugg"}
+
+-- The host's shared match word: bit 0 a match is on, bits 1-3 the game type,
+-- bits 4+ a match number (so guests join each new match exactly once).
+function net_match_word()
+  local idx = 0
+  for i,k in ipairs(ONLINE_KEYS) do if MODES[k] == MODE then idx = i-1 end end
+  return ((phase=="play") and 1 or 0) | (idx << 1) | ((net_match_id & 0xffff) << 4)
+end
+
+-- In a match, a guest follows the host: the host's next match starts here too,
+-- and the host's end of this one ends it here.
+local function net_follow_host()
+  if NETMODE ~= 1 then return end
+  local _, _, _, word = cartbox.net()
+  local id = word >> 4
+  if (word & 1) == 1 and id ~= net_seen_match then
+    net_seen_match = id
+    start_match(ONLINE_KEYS[((word >> 1) & 7) + 1] or "ffa")
+  elseif (word & 1) == 0 and id == net_seen_match then
+    winner = reached_target() or "MATCH OVER"; phase = "over"
+  end
+end
+
+-- Outside a match: keep the room roles fresh, publish that we're not in play,
+-- and (as a guest) join the host's match when it starts.
+function net_menu_sync()
+  local was = NETMODE
+  local mode, myslot, humans, word = cartbox.net()
+  NETMODE, HUMANS = mode, humans
+  MYSLOT = (mode ~= 0) and myslot or 0
+  if was == 1 and NETMODE == 2 then net_match_id = net_seen_match end   -- took over as host
+  if NETMODE == 2 then cartbox.netmatch(net_match_word()) end
+  if NETMODE == 1 and (word & 1) == 1 and (word >> 4) ~= net_seen_match then
+    net_seen_match = word >> 4
+    start_match(ONLINE_KEYS[((word >> 1) & 7) + 1] or "ffa")
+  end
+  if p then p.dead = true; net_publish() end   -- in the lobby: don't draw me in anyone's arena
+end
+
 -- ---------------------------------------------------------------------------
 function TIC()
   cls(0)
   tick=tick+1
 
+  if phase=="menu" or phase=="over" then net_menu_sync() end
+
   if phase=="menu" then
     hide_scene()
     cartbox.hud(0)  -- 2D-only screen: draw the menu normally, not as a HUD over meshes
-    local n=#MODE_KEYS
-    if edge("up", btn(0)) then sel=(sel-2)%n+1 end
-    if edge("down", btn(1)) then sel=sel%n+1 end
-    if edge("go", btn(4)) or edge("go2", btn(5)) then start_match(MODE_KEYS[sel]) end
     sky()
     print("LOCKOUT ARENA",452,96,12,false,3,true)
-    print("you + 7 bots  --  a Forerunner-style homage on the Xbox 360 core",396,150,13,false,1,true)
+    if NETMODE == 1 then
+      -- An online guest: the host picks the game type.
+      print("ONLINE  --  you are Player "..(MYSLOT+1),470,170,9,false,2,true)
+      print("Waiting for the host to start a match...",430,240,12,false,2,true)
+      local y = 300
+      for ns=0,7 do if (HUMANS >> ns) & 1 == 1 then
+        print("Player "..(ns+1)..(ns==0 and "  (host)" or "")..(ns==MYSLOT and "  <- you" or ""),470,y,13,false,2,true); y=y+34
+      end end
+      return
+    end
+    local keys = (NETMODE == 2) and ONLINE_KEYS or MODE_KEYS
+    local n=#keys
+    if sel > n then sel = 1 end
+    if edge("up", btn(0)) then sel=(sel-2)%n+1 end
+    if edge("down", btn(1)) then sel=sel%n+1 end
+    if edge("go", btn(4)) or edge("go2", btn(5)) then start_match(keys[sel]) end
+    if NETMODE == 2 then
+      local humans = 0
+      for ns=0,7 do if (HUMANS >> ns) & 1 == 1 then humans = humans + 1 end end
+      print("ONLINE  --  you are the host  --  "..humans.." player"..(humans==1 and "" or "s").." + "..(8-humans).." bots",360,150,9,false,1,true)
+    else
+      print("you + 7 bots  --  a Forerunner-style homage on the Xbox 360 core",396,150,13,false,1,true)
+    end
     for i=1,n do
-      local mo=MODES[MODE_KEYS[i]]
+      local mo=MODES[keys[i]]
       local y=210+(i-1)*44
       if i==sel then rect(470,y-6,360,36,1) end
       print(mo.name,492,y,(i==sel) and 12 or 13,false,2,true)
@@ -2235,11 +2516,16 @@ function TIC()
     -- simple scoreboard
     print("You: "..(p.score or 0).." kills, "..p.deaths.." deaths",520,340,6,false,2,true)
     if MODE.teams then print("BLUE "..team.blue.."   RED "..team.red,520,380,9,false,2,true) end
-    print("Z -> back to game types",520,460,13,false,1,true)
+    print(NETMODE == 1 and "Z -> back to the lobby" or "Z -> back to game types",520,460,13,false,1,true)
     if edge("go", btn(4)) then phase="menu" end
+    net_publish()
     return
   end
 
+  net_follow_host()
+  if phase ~= "play" then return end
+  net_roles()
+  net_receive()
   play_input()
   if p.dead then p.respawn=p.respawn-1; if p.respawn<=0 then respawn(p) end
   else move_vertical(); try_pickups() end
@@ -2247,6 +2533,9 @@ function TIC()
   update_grenades()
   update_objective()
   local w=reached_target(); if w then winner=w; phase="over" end
+  net_publish()
+  net_objective_publish()
+  if NETMODE == 2 then cartbox.netmatch(net_match_word()) end
   if flash>0 then flash=flash-1 end
   if shot.t>0 then shot.t=shot.t-1 end
 
@@ -2286,26 +2575,54 @@ end
 `;
 
 /** Seed a fresh cart with the Lockout arena code and a cool Forerunner palette. */
+/** Lockout's palette over the default Sweetie-16: index → hex. */
+const LOCKOUT_PALETTE: ReadonlyArray<readonly [number, string]> = [
+  [0, "#000000"], // void — pure black so HUD mode keys it transparent (the 3D shows through)
+  [1, "#1a2740"], // upper sky
+  [2, "#2b3f5e"], // mid sky
+  [3, "#3f5a72"], // horizon haze (greenish-grey Lockout mood)
+  [5, "#202838"], // HUD dark slate (bright enough to survive the HUD transparent key)
+  [6, "#37e0a0"], // health / hit green
+  [9, "#5cd0ff"], // shield / energy cyan
+  [12, "#eaf2ff"], // ink
+  [13, "#a7bad4"], // dim ink
+];
+
+const hexRgb = (hex: string): [number, number, number] => [
+  parseInt(hex.slice(1, 3), 16),
+  parseInt(hex.slice(3, 5), 16),
+  parseInt(hex.slice(5, 7), 16),
+];
+
 export function seedLockoutCart(engine: CartEngine): void {
   engine.setLanguage("lua");
   engine.setCode(LOCKOUT_CODE);
-  const entries: ReadonlyArray<readonly [number, string]> = [
-    [0, "#000000"], // void — pure black so HUD mode keys it transparent (the 3D shows through)
-    [1, "#1a2740"], // upper sky
-    [2, "#2b3f5e"], // mid sky
-    [3, "#3f5a72"], // horizon haze (greenish-grey Lockout mood)
-    [5, "#202838"], // HUD dark slate (bright enough to survive the HUD transparent key)
-    [6, "#37e0a0"], // health / hit green
-    [9, "#5cd0ff"], // shield / energy cyan
-    [12, "#eaf2ff"], // ink
-    [13, "#a7bad4"], // dim ink
-  ];
-  for (const [index, hex] of entries) {
-    engine.setPaletteColor(
-      index,
-      parseInt(hex.slice(1, 3), 16),
-      parseInt(hex.slice(3, 5), 16),
-      parseInt(hex.slice(5, 7), 16),
-    );
+  for (const [index, hex] of LOCKOUT_PALETTE) engine.setPaletteColor(index, ...hexRgb(hex));
+}
+
+/**
+ * The Lockout cartridge as .tic bytes — its code and palette, exactly what the
+ * starter seeds — for playing it outside the editor (the /lockout page). The
+ * cart has no sprites, map or sound, so those two chunks are the whole cart.
+ */
+export function lockoutCartridge(): Uint8Array {
+  const code = new TextEncoder().encode(LOCKOUT_CODE);
+  if (code.length > 0xffff) throw new Error("Lockout code no longer fits one .tic chunk");
+  const palette = new Uint8Array(16 * 3);
+  SWEETIE_16.forEach((hex, i) => palette.set(hexRgb(hex), i * 3));
+  for (const [index, hex] of LOCKOUT_PALETTE) palette.set(hexRgb(hex), index * 3);
+  const chunk = (type: number, data: Uint8Array) => {
+    const out = new Uint8Array(4 + data.length);
+    out.set([type, data.length & 0xff, (data.length >> 8) & 0xff, 0], 0);
+    out.set(data, 4);
+    return out;
+  };
+  const parts = [chunk(12, palette), chunk(5, code)]; // CHUNK_PALETTE, CHUNK_CODE (bank 0)
+  const out = new Uint8Array(parts.reduce((n, part) => n + part.length, 0));
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
   }
+  return out;
 }

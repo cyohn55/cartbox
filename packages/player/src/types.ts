@@ -5,6 +5,7 @@
  * pulling in browser or WASM dependencies.
  */
 
+import type { NetSession } from "./net/NetSession.js";
 import type { ModelId } from "./models.js";
 import type { Replay } from "./replay.js";
 import type { MailboxEvent } from "./mailbox.js";
@@ -85,6 +86,12 @@ export interface PlayerOptions {
    * new error; no-op on engines built before runtime-error capture.
    */
   onRuntimeError?: (message: string) => void;
+  /**
+   * Online multiplayer: a joined {@link NetSession} the player feeds before and
+   * after every tick (the cart talks to it through pmem 0..118 via the SDK's
+   * cartbox.net* functions). Omitted: the cart plays offline.
+   */
+  netplay?: NetSession;
   /**
    * Relight the cart's frames with dynamic point lights. When set, the player
    * renders through a WebGL lighting layer (falling back to plain 2D if WebGL is

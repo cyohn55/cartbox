@@ -382,7 +382,16 @@ export class Player {
   private tickOnce(): void {
     // In playback the mask comes from the replay; otherwise from live input.
     const mask = this.replaySource ? this.replaySource.maskForFrame(this.tickFrame) : this.gamepad.value;
+    const net = this.options.netplay;
+    if (net && this.console) {
+      const words = this.console.netWords();
+      if (words) net.beforeTick(words);
+    }
     this.console?.tick(mask);
+    if (net && this.console) {
+      const words = this.console.netWords();
+      if (words) net.afterTick(words);
+    }
     this.recorder?.record(mask);
     this.tickFrame++;
     // Surface a Lua runtime error raised during this tick (once per new error).

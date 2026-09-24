@@ -159,6 +159,48 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
     ],
   },
   {
+    label: "cartbox · netplay",
+    open: false,
+    entries: [
+      {
+        name: "cartbox.net",
+        signature: "cartbox.net() -> mode, slot, humans, match",
+        doc: "Online multiplayer (a page opened with netplay relays it; uses pmem 0..118). mode 0 offline / 1 guest / 2 host, your slot 0-7, a bitmask of slots held by people, and the host's match word.",
+        snippet: "local mode, slot, humans, match = cartbox.net()",
+      },
+      {
+        name: "cartbox.netpeer",
+        signature: "cartbox.netpeer(slot) -> a, b, c, live",
+        doc: "Another slot's 3 state words as its owner last published them, and whether they are fresh.",
+        snippet: "local a, b, c, live = cartbox.netpeer(1)",
+      },
+      {
+        name: "cartbox.netpublish",
+        signature: "cartbox.netpublish(slot, a, b, c)",
+        doc: "Publish a slot's state this tick: your own, or (as host) the bots you simulate. Sent ~15 times a second.",
+        snippet: "cartbox.netpublish(slot, x, y, hp)",
+      },
+      {
+        name: "cartbox.netsend",
+        signature: "cartbox.netsend(a, b) -> ok",
+        doc: "Broadcast a 2-word event (a hit, a kill) to every other player at once; up to 10 a tick.",
+        snippet: "cartbox.netsend(1, 0)",
+      },
+      {
+        name: "cartbox.netevents",
+        signature: "cartbox.netevents() -> { {a, b}, ... }",
+        doc: "This tick's events from the other players.",
+        snippet: "for _, ev in ipairs(cartbox.netevents()) do\n  \nend",
+      },
+      {
+        name: "cartbox.netmatch",
+        signature: "cartbox.netmatch(word)",
+        doc: "As host, set the shared match word (game type, phase) the guests read from net().",
+        snippet: "cartbox.netmatch(0)",
+      },
+    ],
+  },
+  {
     label: "TIC-80 · loop",
     open: false,
     entries: [

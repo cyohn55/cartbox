@@ -328,6 +328,21 @@ export type {
   TextureLookup,
 } from "./world/index.js";
 
+// Netplay (online multiplayer): a host-page relay between browsers, reached by
+// the cart through pmem 0..118 (the SDK's cartbox.net* functions).
+export {
+  NET_WORDS,
+  NET_SLOTS,
+  NET_MODE_OFFLINE,
+  NET_MODE_CLIENT,
+  NET_MODE_HOST,
+  writeNetInbox,
+  takeNetOutbox,
+} from "./net/netplay.js";
+export type { NetInbox, NetOutbox, NetState, NetEvent } from "./net/netplay.js";
+export { NetSession, MemoryNetHub, BroadcastChannelTransport } from "./net/NetSession.js";
+export type { NetMessage, NetPeer, NetRoomStatus, NetTransport } from "./net/NetSession.js";
+
 /**
  * Mounts a cartridge player into a container element and begins loading.
  *
