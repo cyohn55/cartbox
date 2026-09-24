@@ -544,6 +544,79 @@ const SPAWNS: ReadonlyArray<readonly [number, number, number]> = [
 
 const BOT_COUNT = 7;
 
+// --- Bot navigation graph ---------------------------------------------------
+// Bots walk a hand-authored waypoint graph rather than colliding their way
+// across the map: every node stands on a real walkable surface (floor, ramp
+// centreline, tower ledge, walkway), every two-way link is walkable in a
+// straight line, and one-way links are drops off a ledge. The cart finds routes
+// over it (all-pairs next hop, precomputed at load) so bots climb the ramps to
+// the sniper deck, the BR tower and the walkway instead of snapping to the
+// nearest low platform. A test checks every node against the colliders.
+
+/** Waypoints: [x, y (feet height), z]. */
+const NAV_NODES: ReadonlyArray<readonly [number, number, number]> = [
+  // 0-12: the floor ring
+  [-14, 0, -11.8], [-14, 0, -4], [-14, 0, 2.5], [-14, 0, 11], [-8.5, 0, 11.2], [-3, 0, 11.5], [2.8, 0, 11.8],
+  [12.6, 0, 11.5], [12.6, 0, 2.5], [12.6, 0, -5], [12.6, 0, -11.8], [5, 0, -11.5], [-3, 0, -11.5],
+  // 13-21: the inner floor
+  [-4.4, 0, 0], [4.4, 0, 0], [-9.2, 0, -0.4], [8, 0, 0.4], [-2.2, 0, 5.8], [4.4, 0, -7.5], [3, 0, 6.8],
+  [-3.2, 0, -8], [-4.2, 0, 3],
+  // 22-28: the walkway (feet of its ramps, ends, centre, spurs)
+  [0, 0.1, -12.5], [0, 3.65, -6.2], [0, 3.65, 0], [0, 3.65, 6.2], [0, 0.1, 12.5], [6.4, 3.65, -3], [5, 3.65, 5],
+  // 29-30: the Sword pit
+  [-2.4, 0.7, 0], [2.4, 0.7, 0],
+  // 31-42: the sniper tower, from the T1 ramp up to the deck
+  [-9.3, 2, -5.2], [-11.05, 2, -5.3], [-11.05, 2.5, -10.9], [-10.1, 3, -11.4], [-8.4, 4, -11.4], [-8.4, 4.5, -10.6],
+  [-5.35, 4.5, -10.6], [-5.35, 4.5, -7], [-5, 5, -5.6], [-7.6, 6.5, -5], [-8, 7, -6.6], [-9, 7, -9],
+  // 43-49: the BR tower
+  [8, 1.8, 4.3], [10.8, 1.8, 4.3], [10.8, 1.8, 9.7], [7.6, 1.8, 9.7], [6.6, 3.45, 10.5], [6.8, 4, 8.9], [8, 4, 7],
+  // 50-51: the shotgun room
+  [-6.9, 2.2, 6], [-9.2, 2.2, 5.6],
+  // 52-55: walkway junctions, a spur drop landing, the pass east of the tower
+  [0, 3.65, -3], [0, 3.65, 5], [7.8, 0, -3], [-3.5, 0, -3],
+];
+
+/** Two-way walkable links (node index pairs). */
+const NAV_LINKS: ReadonlyArray<readonly [number, number]> = [
+  // floor ring + inner floor
+  [0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 26], [26, 6], [7, 8], [8, 9], [9, 10], [10, 11],
+  [11, 12], [12, 20], [11, 22], [12, 22], [2, 15], [2, 21], [15, 13], [13, 21], [13, 55], [55, 20],
+  [14, 16], [14, 19], [14, 18], [16, 8], [16, 9], [18, 11], [18, 9], [19, 6], [19, 17], [17, 5],
+  [54, 16], [54, 9], [54, 14],
+  // walkway
+  [22, 23], [23, 52], [52, 24], [24, 53], [53, 25], [25, 26], [52, 27], [53, 28],
+  // pit
+  [13, 29], [14, 30], [29, 30],
+  // sniper tower
+  [15, 31], [31, 32], [32, 33], [33, 34], [34, 35], [35, 36], [36, 37], [37, 38], [38, 39], [39, 40], [40, 41], [41, 42],
+  // BR tower
+  [16, 43], [43, 44], [44, 45], [45, 46], [48, 49], [49, 28],
+  // shotgun room
+  [17, 50], [50, 51],
+];
+
+/**
+ * Jumps (two-way: up is a jump, back down a hop): gaps a player clears with a
+ * jump, which the bots take on an arc. [lower, upper].
+ */
+const NAV_JUMPS: ReadonlyArray<readonly [number, number]> = [
+  [46, 47], // BR: from B1's north ledge up onto the top of its stair
+  [47, 48], // …and over the guard rail onto the BR top
+];
+
+/** Power positions bots like to hold: the sniper deck, the BR top, the walkway centre, the shotgun room. */
+const NAV_POWER: readonly number[] = [42, 41, 49, 48, 24, 51];
+
+/** One-way drops off a ledge: [from, to]. */
+const NAV_DROPS: ReadonlyArray<readonly [number, number]> = [
+  [27, 54], // off the end of the north spur
+  [24, 30], // off the walkway into the pit
+  [32, 1], // off the sniper tower's first tier
+  [49, 8], // off the BR tower
+  [51, 2], // out of the shotgun room
+];
+
+
 // --- Mesh assembly --------------------------------------------------------
 
 /** One full texture tile (its four panels) spans about `TILE_WORLD` units on any
@@ -1393,6 +1466,14 @@ function collidersLua(): string {
 function spawnsLua(): string {
   return SPAWNS.flat().map((n) => n.toFixed(2)).join(",");
 }
+function navLua(): string {
+  const nodes = NAV_NODES.flat().map((n) => n.toFixed(2)).join(",");
+  const links = NAV_LINKS.flat().map((n) => n + 1).join(","); // Lua is 1-based
+  const drops = NAV_DROPS.flat().map((n) => n + 1).join(",");
+  const jumps = NAV_JUMPS.flat().map((n) => n + 1).join(",");
+  const power = NAV_POWER.map((n) => n + 1).join(",");
+  return `local NAVN = {${nodes}}\nlocal NAVL = {${links}}\nlocal NAVD = {${drops}}\nlocal NAVJ = {${jumps}}\nlocal POWER = {${power}}`;
+}
 function markersLua(): string {
   return MARKERS.map(([cx, cy, cz]) => `${cx.toFixed(2)},${cy.toFixed(2)},${cz.toFixed(2)}`).join(",");
 }
@@ -1420,6 +1501,7 @@ local SPN = {${spawnsLua()}}
 local MRK = {${markersLua()}}
 local MW  = {${markerWeaponsLua()}}
 local NBOT = ${BOT_COUNT}
+${navLua()}
 
 -- ---------------------------------------------------------------------------
 -- Weapon sandbox. dmg per shot, cool = frames between shots, rng world units,
@@ -1751,33 +1833,113 @@ local function try_pickups()
 end
 
 -- ---------------------------------------------------------------------------
--- Bot AI: navigate toward an objective-aware goal, engage enemies in LOS, and
--- use the arena's heights via the same step-up the player uses.
+-- Bot navigation. Bots walk the waypoint graph (NAVN nodes; NAVL two-way
+-- walks, NAVD one-way drops, NAVJ jumps) rather than sliding in a straight line
+-- through walls: an all-pairs next-hop table is built once at load, and each
+-- bot moves along one edge at a time -- up the ramps to the sniper deck, onto
+-- the walkway, over the BR rail -- arcing on jumps and falling on drops.
+local NN = #NAVN // 3
+local nav_kind, nav_next = {}, {}
+local function nav_pos(i) return NAVN[i*3-2], NAVN[i*3-1], NAVN[i*3] end
+local function nav_len(a, b)
+  local ax,ay,az = nav_pos(a); local bx,by,bz = nav_pos(b)
+  return math.sqrt((ax-bx)^2 + (ay-by)^2 + (az-bz)^2)
+end
+local function nav_build()
+  local INF = 1e9
+  local d = {}
+  for i=1,NN do d[i]={}; nav_next[i]={}; nav_kind[i]={}; for j=1,NN do d[i][j] = (i==j) and 0 or INF end end
+  local function link(a,b,k)
+    nav_kind[a][b] = k
+    local w = nav_len(a,b) * (k==2 and 1.5 or 1)   -- jumps cost a little more
+    if w < d[a][b] then d[a][b]=w; nav_next[a][b]=b end
+  end
+  for i=1,#NAVL,2 do link(NAVL[i],NAVL[i+1],0); link(NAVL[i+1],NAVL[i],0) end
+  for i=1,#NAVD,2 do link(NAVD[i],NAVD[i+1],1) end
+  for i=1,#NAVJ,2 do link(NAVJ[i],NAVJ[i+1],2); link(NAVJ[i+1],NAVJ[i],2) end
+  for k=1,NN do local dk=d[k]
+    for i=1,NN do local di=d[i]; local dik=di[k]
+      if dik<INF then local ni=nav_next[i]; local nik=ni[k]
+        for j=1,NN do local v=dik+dk[j]; if v<di[j] then di[j]=v; ni[j]=nik end end
+      end
+    end
+  end
+end
+nav_build()
+
+-- The node nearest a point (height counts triple: a bot under the walkway is
+-- not "at" the walkway).
+local function nav_nearest(x, y, z)
+  local best, bd = 1, 1e9
+  for i=1,NN do local nx,ny,nz = nav_pos(i)
+    local dd = (nx-x)^2 + ((ny-y)*3)^2 + (nz-z)^2
+    if dd < bd then best, bd = i, dd end
+  end
+  return best
+end
+
+-- Stand a (re)spawned bot on the waypoint nearest its spawn.
+local function nav_place(o)
+  o.na = nav_nearest(o.x, o.y, o.z)
+  o.x, o.y, o.z = nav_pos(o.na)
+  o.nb, o.nt, o.goal = nil, 0, o.na
+end
+
+local function nav_goto(o, g)
+  o.goal = g
+  if not o.nb and g ~= o.na then o.nb = nav_next[o.na][g] end
+end
+
+-- Advance a bot along its current edge; true while it is moving.
+local function nav_step(o, speed)
+  if not o.nb then return false end
+  local ax,ay,az = nav_pos(o.na); local bx,by,bz = nav_pos(o.nb)
+  local kind = nav_kind[o.na][o.nb] or 0
+  o.nt = o.nt + speed / math.max(0.1, nav_len(o.na, o.nb))
+  if o.nt >= 1 then
+    o.na, o.nt = o.nb, 0
+    o.x, o.y, o.z = bx, by, bz
+    o.nb = (o.na ~= o.goal) and nav_next[o.na][o.goal] or nil
+    return true
+  end
+  local t = o.nt
+  o.x, o.z = ax+(bx-ax)*t, az+(bz-az)*t
+  if kind==2 then o.y = ay+(by-ay)*t + math.sin(t*math.pi)*1.1      -- jump arc
+  elseif kind==1 then o.y = ay+(by-ay)*t*t                          -- fall off the ledge
+  else o.y = ay+(by-ay)*t end                                        -- walk (ramps included)
+  o.mface = math.atan(bx-ax, bz-az)
+  return true
+end
+
+-- Where a bot wants to be, as a waypoint, by game type.
 local function bot_goal(o)
   if MODE.obj=="ball" then
-    if ball.carrier==o then return SPN[1],SPN[3]              -- carrier roams a safe spot
-    elseif ball.live then return ball.x, ball.z end
-  elseif MODE.obj=="hill" then return hill.x, hill.z
+    if ball.carrier==o then return POWER[math.random(1,#POWER)] end      -- run it somewhere high
+    if ball.live then return nav_nearest(ball.x, ball.y, ball.z) end
+    local c = ball.carrier; if c then return nav_nearest(c.x, c.y, c.z) end
+  elseif MODE.obj=="hill" then return nav_nearest(hill.x, hill.y, hill.z)
   elseif MODE.obj=="jugg" then
-    if o.jugg then return SPN[13] or 0, SPN[15] or 0          -- jugg holds high ground
-    else return p.jugg and p.x or (bots[1] and bots[1].x or 0), p.jugg and p.z or 0 end
+    if o.jugg then return POWER[1] end                                   -- the juggernaut holds the deck
+    local j = p.jugg and p or nil
+    for _,b in ipairs(bots) do if b.jugg then j=b end end
+    if j then return nav_nearest(j.x, j.y, j.z) end
   end
-  return o.tx, o.tz
+  local r = math.random()
+  if r < 0.45 and not p.dead and enemy_of(o,p) then return nav_nearest(p.x, p.y, p.z) end -- hunt the player
+  if r < 0.75 then return POWER[math.random(1,#POWER)] end                             -- take a power position
+  return math.random(1, NN)                                                             -- roam
 end
 
 local function think_bot(o)
-  if o.dead then o.respawn=o.respawn-1; if o.respawn<=0 then respawn(o) end return end
+  if o.dead then o.respawn=o.respawn-1; if o.respawn<=0 then respawn(o); nav_place(o) end return end
   o.moving=false
-  -- target enemy: player if in LOS+range, else keep wandering
+  -- target enemy: the player if in line of sight and range
   local pdx,pdz = p.x-o.x, p.z-o.z
   local pm = math.sqrt(pdx*pdx+pdz*pdz)
   local seesP = (not p.dead) and enemy_of(o,p) and pm<40 and not seg_blocked(o.x,o.y+1.4,o.z, p.x,p.y+EYE,p.z, 1)
-  local gx,gz
+  local wid = o.g1 or "br"; local w=W[wid]
   if seesP then
-    gx,gz = p.x, p.z
     o.face = math.atan(pdx,pdz)
-    -- shoot the player
-    local wid = o.g1 or "br"; local w=W[wid]
     o.cool=(o.cool or 0)-1
     if pm < (w.rng or 40) and (o.cool or 0)<=0 then
       o.cool = (w.cool or 10) + math.random(0,6)
@@ -1789,28 +1951,16 @@ local function think_bot(o)
         if p.hp<=0 and not p.dead then p.dead=true; p.respawn=90; p.deaths=p.deaths+1; register_kill(o,p,false) end
       end
     end
-    -- strafe a little at fighting range
-    if pm<14 then gx=o.x + math.cos(o.face)*(o.strafe or 1)*0.4; gz=o.z - math.sin(o.face)*(o.strafe or 1)*0.4
-      if math.random()<0.03 then o.strafe=-(o.strafe or 1) end
-    end
+    -- close the distance if out of range, otherwise keep walking the route
+    -- (slowly) so a fight isn't two statues trading shots
+    if pm > (w.rng or 40)*0.7 then nav_goto(o, nav_nearest(p.x,p.y,p.z)) end
+    if nav_step(o, 0.035) then o.moving=true end
   else
-    gx,gz = bot_goal(o)
-    if gx==nil then gx,gz=o.tx,o.tz end
+    -- pick a new destination when idle, and re-think every couple of seconds
+    if not o.nb or (tick + (o.id or 0)*23) % 150 == 0 then nav_goto(o, bot_goal(o)) end
+    if nav_step(o, 0.075) then o.moving=true end
+    o.face = o.mface or o.face
   end
-  local dx,dz = (gx or o.x)-o.x, (gz or o.z)-o.z
-  local m = math.sqrt(dx*dx+dz*dz)
-  if m<1.0 then
-    local s=math.random(0,NBOT)*3; o.tx,o.tz=SPN[s+1],SPN[s+3]
-  else
-    o.x=o.x+(dx/m)*0.07; o.z=o.z+(dz/m)*0.07; o.moving=true
-    if not seesP then o.face=math.atan(dx,dz) end
-  end
-  -- rest on the tallest platform under the bot (cheap vertical solve)
-  local top=0
-  for i=0,ncol()-1 do local b=i*6
-    if o.x>COL[b+1] and o.x<COL[b+4] and o.z>COL[b+3] and o.z<COL[b+6] then
-      if COL[b+5]<=2.7 and COL[b+5]>top then top=COL[b+5] end end end
-  o.y=top
   -- objective interactions
   if MODE.obj=="ball" and ball.live and d3(o.x,o.y,o.z, ball.x,ball.y,ball.z)<1.3 then ball.carrier=o; ball.live=false end
   -- bots occasionally trade kills among themselves so scores move
@@ -1865,8 +2015,8 @@ local function start_match(key)
   respawn(p); give(p,1,MODE.start); give(p,2,"magnum")
   bots = {}
   for i=1,NBOT do
-    local o = { tx=0, tz=0, face=0, score=0, deaths=0, team=(i<=3) and "blue" or "red", g1=MODE.start, cool=0, strafe=1, tag="Bot "..i, streak=0 }
-    respawn(o); o.tx,o.tz = o.x,o.z; bots[i]=o
+    local o = { id=i, face=0, score=0, deaths=0, team=(i<=3) and "blue" or "red", g1=MODE.start, cool=0, tag="Bot "..i, streak=0 }
+    respawn(o); nav_place(o); bots[i]=o
   end
   if MODE.obj=="ball" then ball={x=0,y=1.1,z=0,carrier=nil,live=true} end
   if MODE.obj=="hill" then hill={x=HILLS[1][1],y=HILLS[1][2],z=HILLS[1][3],next=999999,idx=1} end
