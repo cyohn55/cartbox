@@ -1,6 +1,195 @@
 import { MeshSceneInstance, MeshAsset, Mat4, SceneLighting, DecodedTexture, EnvironmentLight, ShadowInput, ToneMap, SceneLight, SceneFog, RasterStyle } from '@cartbox/editor';
 
 /**
+ * Netplay — online multiplayer for carts, relayed by the host page.
+ *
+ * TIC-80 has no networking, so the browser does it: each player's page runs its
+ * own copy of the cart, and a {@link NetSession} relays compact player state and
+ * events between them over a {@link NetTransport} (Supabase Realtime broadcast
+ * online, BroadcastChannel between tabs, an in-memory hub in tests).
+ *
+ * The cart and its host page exchange that data through the low 119 words of
+ * persistent memory (pmem 0..118) — the words just below the event mailbox,
+ * which a netplay cart must therefore not use for save data. The host writes the
+ * INBOX before every tick and reads the OUTBOX after it:
+ *
+ * ```
+ * INBOX  (host → cart)
+ *   0      header   bits 0-1 mode (0 offline, 1 client, 2 host) · 2-4 my slot ·
+ *                   8-15 slots held by a human · 16-23 slots with live remote state
+ *   1      the host's match word (opaque to the relay: the host cart's game state)
+ *   2      tick sequence
+ *   3..26  8 slots × 3 words of remote player state (opaque to the relay)
+ *   27     event count (≤ 20)
+ *   28..67 20 events × 2 words
+ * OUTBOX (cart → host)
+ *   70     mask of slots the cart published this tick
+ *   71     match word (only the host's is relayed)
+ *   72..95 8 slots × 3 words: this player's state (and, on the host, its bots')
+ *   96     event count (≤ 10)
+ *   97..116 10 events × 2 words
+ * ```
+ *
+ * The relay never interprets state or event words — a cart defines them — so the
+ * same channel serves any game: every client is authoritative for its own slot,
+ * the lowest slot is the host (it simulates anything no human controls), and
+ * events (a hit, a kill) are broadcast to everyone.
+ */
+/** Words of pmem the netplay channel uses (0..118, just below the mailbox). */
+declare const NET_WORDS = 119;
+/** Player slots per room. */
+declare const NET_SLOTS = 8;
+declare const NET_MODE_OFFLINE = 0;
+declare const NET_MODE_CLIENT = 1;
+declare const NET_MODE_HOST = 2;
+/** One slot's opaque state. */
+type NetState = readonly [number, number, number];
+/** One opaque event. */
+type NetEvent = readonly [number, number];
+/** What the host page tells the cart before a tick. */
+interface NetInbox {
+    readonly mode: number;
+    readonly mySlot: number;
+    /** Bitmask of slots held by a human (including mine). */
+    readonly humans: number;
+    /** Bitmask of remote slots with live state this tick. */
+    readonly live: number;
+    readonly match: number;
+    readonly seq: number;
+    /** Remote state per slot (null when there is none). */
+    readonly slots: readonly (NetState | null)[];
+    readonly events: readonly NetEvent[];
+}
+/** What the cart told the host page during a tick. */
+interface NetOutbox {
+    /** Slot → state for every slot the cart published this tick. */
+    readonly states: ReadonlyMap<number, NetState>;
+    readonly match: number;
+    readonly events: readonly NetEvent[];
+}
+/** Write an inbox into the net words (a live view of pmem 0..118). */
+declare function writeNetInbox(words: Uint32Array, inbox: NetInbox): number;
+/** Read what the cart published this tick, then clear the outbox for the next. */
+declare function takeNetOutbox(words: Uint32Array): NetOutbox;
+
+/**
+ * The host-page side of netplay: joins a room over a {@link NetTransport},
+ * assigns player slots, and relays the cart's published state and events to the
+ * other players — and theirs into this cart. See netplay.ts for the pmem layout.
+ *
+ * Slots are assigned deterministically from the room's membership (ordered by
+ * join time, then id), so every browser agrees who is in which slot without a
+ * server; the lowest slot is the host. State is sent at ~15 Hz (it is a
+ * snapshot — a lost one is replaced by the next), events are sent the tick they
+ * happen (they are the things that must not be missed: a hit, a kill).
+ */
+
+/** A room member as the transport's presence reports it. */
+interface NetPeer {
+    readonly id: string;
+    /** When the peer joined (ms since epoch) — orders the slots. */
+    readonly joinedAt: number;
+    readonly name?: string;
+}
+/** Messages the session sends. Kept tiny: they ride a hosted broadcast service. */
+type NetMessage = {
+    readonly t: "s";
+    readonly s: readonly (readonly [number, number, number, number])[];
+} | {
+    readonly t: "e";
+    readonly e: readonly NetEvent[];
+} | {
+    readonly t: "m";
+    readonly m: number;
+};
+/** A room-scoped broadcast channel with presence. */
+interface NetTransport {
+    /** This browser's peer id. */
+    readonly selfId: string;
+    /** Join the room, announcing when we joined. Resolves once subscribed. */
+    connect(joinedAt: number, name?: string): Promise<void>;
+    /** Broadcast to every other peer (never echoed back to the sender). */
+    send(message: NetMessage): void;
+    onMessage(handler: (message: NetMessage, from: string) => void): void;
+    /** The full membership, each time it changes (including us). */
+    onPeers(handler: (peers: readonly NetPeer[]) => void): void;
+    close(): void;
+}
+/** The session's view of the room, for a lobby UI. */
+interface NetRoomStatus {
+    readonly connected: boolean;
+    readonly peers: readonly NetPeer[];
+    readonly mySlot: number;
+    readonly isHost: boolean;
+}
+declare class NetSession {
+    private readonly transport;
+    private readonly now;
+    private peers;
+    private connected;
+    private readonly joinedAt;
+    private readonly remote;
+    private readonly pendingEvents;
+    private hostMatch;
+    private lastSentMatch;
+    private tick;
+    private readonly listeners;
+    constructor(transport: NetTransport, now?: () => number);
+    /** Join the room. */
+    connect(name?: string): Promise<void>;
+    close(): void;
+    /** This browser's slot (0..7), or -1 while the room is full/unknown. */
+    get mySlot(): number;
+    get isHost(): boolean;
+    status(): NetRoomStatus;
+    /** Subscribe to room changes (membership, connection). */
+    onStatus(listener: (status: NetRoomStatus) => void): () => void;
+    /** Fill the cart's inbox before a tick. `words` is a live view of pmem 0..118. */
+    beforeTick(words: Uint32Array): void;
+    /** Relay what the cart published during the tick, and clear its outbox. */
+    afterTick(words: Uint32Array): void;
+    private receive;
+    private emit;
+}
+/**
+ * An in-process room: every transport created from one hub hears the others.
+ * For tests, and for simulating a match between two players on one machine.
+ */
+declare class MemoryNetHub {
+    private readonly members;
+    transport(id: string): NetTransport;
+    /** @internal */
+    join(id: string, peer: NetPeer): void;
+    /** @internal */
+    leave(id: string): void;
+    /** @internal */
+    deliver(from: string, message: NetMessage): void;
+    private announce;
+}
+/**
+ * A room shared by the tabs of one browser (BroadcastChannel), with presence
+ * from heartbeats. Handy for trying multiplayer on one machine, and the
+ * fallback when no online service is configured.
+ */
+declare class BroadcastChannelTransport implements NetTransport {
+    private readonly room;
+    readonly selfId: string;
+    private channel;
+    private messageHandler;
+    private peersHandler;
+    private readonly seen;
+    private heartbeat;
+    private self;
+    constructor(room: string);
+    connect(joinedAt: number, name?: string): Promise<void>;
+    send(message: NetMessage): void;
+    onMessage(handler: (message: NetMessage, from: string) => void): void;
+    onPeers(handler: (peers: readonly NetPeer[]) => void): void;
+    close(): void;
+    private publishPeers;
+}
+
+/**
  * Console models. A model is a fixed hardware spec plus the WASM runtime that
  * runs it. Threading a model through the player/engine/replay/thumbnail paths
  * (instead of hard-coding 240x136 / 60fps) is what makes additional models —
@@ -1339,6 +1528,12 @@ interface PlayerOptions {
      */
     onRuntimeError?: (message: string) => void;
     /**
+     * Online multiplayer: a joined {@link NetSession} the player feeds before and
+     * after every tick (the cart talks to it through pmem 0..118 via the SDK's
+     * cartbox.net* functions). Omitted: the cart plays offline.
+     */
+    netplay?: NetSession;
+    /**
      * Relight the cart's frames with dynamic point lights. When set, the player
      * renders through a WebGL lighting layer (falling back to plain 2D if WebGL is
      * unavailable). See {@link LightingOptions}.
@@ -1502,6 +1697,12 @@ interface ConsoleInstance {
     readAudioSamples(): Int16Array;
     /** Returns a copy of the event-mailbox words (word[0] = sequence counter). */
     readMailbox(): Uint32Array;
+    /**
+     * A LIVE view of pmem words 0..118 — the netplay channel just below the
+     * mailbox (see net/netplay.ts). Writes land in the cart's pmem. Re-fetch it
+     * each tick: WASM memory growth detaches old views. Null when unavailable.
+     */
+    netWords(): Uint32Array | null;
     /** Enables/disables per-pixel material capture (off by default; unlit carts pay nothing). */
     setMaterialCapture(enabled: boolean): void;
     /**
@@ -1599,7 +1800,7 @@ declare function seedCartridge(bytes: Uint8Array, seed: number): Uint8Array;
  * 183, mesh-pose block at 191, event types 1/2/3, FNV-1a id hash).
  */
 /** Lua source of the cartbox SDK. */
-declare const CARTBOX_SDK_LUA = "local _MB = 119\nlocal _CAP = 8\nlocal _LB = _MB + 25\nlocal _LCAP = 6\nlocal _CB = _LB + 1 + _LCAP * 6\nlocal _MCB = _CB + 2\nlocal _MPB = _MCB + 8\nlocal _MPCAP = 8\nlocal _ln = 0\nlocal _mn = 0\nlocal function _emit(kind, id, value)\n  local seq = pmem(_MB)\n  local slot = seq % _CAP\n  local base = _MB + 1 + slot * 3\n  pmem(base, kind)\n  pmem(base + 1, id)\n  pmem(base + 2, value)\n  pmem(_MB, seq + 1)\nend\nlocal function _hash(s)\n  local h = 2166136261\n  for i = 1, #s do\n    h = ((h ~ string.byte(s, i)) * 16777619) & 0xffffffff\n  end\n  return h\nend\nlocal function _norm(x, y, z)\n  local m = math.sqrt(x * x + y * y + z * z)\n  if m < 1e-6 then return 0, 0, 1 end\n  return x / m, y / m, z / m\nend\nlocal function _byte(v)\n  local b = math.floor((v or 0) * 127 + 0.5)\n  if b < -127 then b = -127 elseif b > 127 then b = 127 end\n  if b < 0 then b = b + 256 end\n  return b\nend\nlocal function _light(kind, x, y, z, radius, r, g, b, intensity, dx, dy, cone)\n  if _ln >= _LCAP then return end\n  local base = _LB + 1 + _ln * 6\n  pmem(base, x // 1)\n  pmem(base + 1, y // 1)\n  pmem(base + 2, z // 1)\n  pmem(base + 3, radius // 1)\n  local rgb = (math.floor(r or 255) & 0xff) << 16\n  rgb = rgb | ((math.floor(g or 255) & 0xff) << 8)\n  rgb = rgb | (math.floor(b or 255) & 0xff)\n  pmem(base + 4, rgb | (kind << 24) | (cone << 26))\n  local inten = math.floor((intensity or 1) * 256)\n  if inten < 0 then inten = 0 elseif inten > 0xffff then inten = 0xffff end\n  pmem(base + 5, inten | (dx << 16) | (dy << 24))\n  _ln = _ln + 1\n  pmem(_LB, _ln)\nend\ncartbox = {\n  unlock = function(id) _emit(1, _hash(id), 0) end,\n  score = function(v) _emit(2, 0, v // 1) end,\n  progress = function(id, v) _emit(3, _hash(id), v // 1) end,\n  clearlights = function() _ln = 0 pmem(_LB, 0) end,\n  light = function(x, y, radius, r, g, b, z, intensity)\n    _light(0, x, y, z or 12, radius, r, g, b, intensity, 0, 0, 0)\n  end,\n  sun = function(dx, dy, dz, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    _light(1, 0, 0, 0, 0, r, g, b, intensity, _byte(nx), _byte(ny), 0)\n  end,\n  spot = function(x, y, z, dx, dy, dz, radius, angle, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    local cone = math.floor(math.cos(math.rad(angle or 30)) * 63 + 0.5)\n    if cone < 0 then cone = 0 elseif cone > 63 then cone = 63 end\n    _light(2, x, y, z or 12, radius, r, g, b, intensity, _byte(nx), _byte(ny), cone)\n  end,\n  camera = function(x, y)\n    pmem(_CB, math.floor((x or 0) * 16 + 0.5) & 0xffffffff)\n    pmem(_CB + 1, math.floor((y or 0) * 16 + 0.5) & 0xffffffff)\n  end,\n  -- Drive the 3D mesh orbit camera this frame: yaw/pitch (radians), distance in\n  -- world units (0 = auto-fit the scene), fov (radians, 0 = default). Call every\n  -- frame; not calling leaves the player's gentle auto-orbit in charge.\n  meshcam = function(yaw, pitch, dist, fov)\n    pmem(_MCB, 1)\n    pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 4, 0)\n    pmem(_MCB + 5, 0)\n    pmem(_MCB + 6, 0)\n    pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)\n  end,\n  -- Start a fresh frame's mesh-pose list. Call once before any meshpose() calls;\n  -- instances you don't pose keep their authored transform.\n  clearposes = function() _mn = 0 pmem(_MPB, 0) end,\n  -- First-person mode: composite the cart's 2D frame as a HUD OVER the 3D scene,\n  -- rather than drawing the meshes over the 2D (the default third-person showcase\n  -- compositing). Call each frame AFTER the camera call with a truthy value to\n  -- enable; near-black (index 0) pixels the cart leaves are the transparent \"world\"\n  -- and everything else the cart draws is the HUD. Rides a spare bit of the\n  -- mesh-camera flag word, so it costs no mailbox space.\n  hud = function(on)\n    local f = pmem(_MCB)\n    if on and on ~= 0 then pmem(_MCB, f | 2) else pmem(_MCB, f & 0xfffffffd) end\n  end,\n  -- Move/rotate/scale one mesh instance (by its sidecar index) this frame, on top\n  -- of its authored placement. x,y,z are world units; yaw (about Y), pitch (about\n  -- X), roll (about Z) radians;\n  -- scale defaults to 1 (pass 0 to hide). math.floor keeps every value integer so\n  -- the bitwise mask never sees a float (the Pro core's Lua throws on that). Must\n  -- match decodeMeshPoses() on the host.\n  -- Optional extras: frame picks one of the instance's animation frames (0 = its\n  -- base mesh, up to 127), tint recolours its tintable materials from the\n  -- 15-colour tint palette (0 = none), and front (true/1) draws it over the\n  -- whole scene \u2014 a held weapon that must never clip into a wall.\n  meshpose = function(index, x, y, z, yaw, pitch, roll, scale, frame, tint, front)\n    if _mn >= _MPCAP then return end\n    local base = _MPB + 1 + _mn * 8\n    local word = math.floor(index or 0) & 0xff\n    word = word | ((math.floor(frame or 0) & 0x7f) << 9) | ((math.floor(tint or 0) & 0xf) << 16)\n    if front and front ~= 0 then word = word | 0x100000 end\n    pmem(base, word)\n    pmem(base + 1, math.floor((x or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 2, math.floor((y or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 3, math.floor((z or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 4, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(base + 5, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(base + 6, math.floor((roll or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(base + 7, math.floor((scale or 1) * 256 + 0.5) & 0xffffffff)\n    _mn = _mn + 1\n    pmem(_MPB, _mn)\n  end,\n  -- HD-2D world (optional): a cart with a world sidecar draws a 3D tile terrain\n  -- and stands its 2D character sprites in it as depth-sorted billboards. The\n  -- world camera and billboards reuse the mesh camera/pose mailbox channels, so\n  -- no engine change is needed \u2014 these are thin aliases with the world's naming.\n  --\n  -- Drive the world camera this frame: yaw/pitch (radians), distance (world units,\n  -- 0 = auto-fit), fov (radians, 0 = default). Optional tx,ty,tz make the camera\n  -- LOOK AT that point (grid x/z units, height units for y) so it follows the\n  -- player; omit them (or pass 0,0,0) to frame the whole terrain. Same mailbox\n  -- layout as meshcam (target rides at _MCB+4..6).\n  worldcam = function(yaw, pitch, dist, fov, tx, ty, tz)\n    pmem(_MCB, 1)\n    pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 4, math.floor((tx or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 5, math.floor((ty or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 6, math.floor((tz or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)\n  end,\n  -- Start a fresh frame's billboard list. Call once before billboard() calls each\n  -- frame (an alias of clearposes \u2014 they share the mesh-pose channel).\n  clearbillboards = function() _mn = 0 pmem(_MPB, 0) end,\n  -- Place billboard index (declared in the world sidecar) at world position\n  -- (x,z grid units, y height units) this frame; scale defaults to 1 (0 hides).\n  -- math.floor keeps every value integer so the bitwise mask never sees a float.\n  billboard = function(index, x, y, z, scale)\n    if _mn >= _MPCAP then return end\n    local base = _MPB + 1 + _mn * 8\n    pmem(base, math.floor(index or 0) & 0xff)\n    pmem(base + 1, math.floor((x or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 2, math.floor((y or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 3, math.floor((z or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 4, 0)\n    pmem(base + 5, 0)\n    pmem(base + 6, 0)\n    pmem(base + 7, math.floor((scale or 1) * 256 + 0.5) & 0xffffffff)\n    _mn = _mn + 1\n    pmem(_MPB, _mn)\n  end,\n  -- Collision defaults: overridden by the injected layer when the cart has one,\n  -- so cartbox.solid/mapsize are always safe to call (a cart with no collision\n  -- layer simply sees every cell as non-solid).\n  solid = function() return false end,\n  mapsize = function() return 0, 0 end,\n  -- Tile-flags default: overridden by the injected layer when the cart has one.\n  flag = function() return false end,\n}";
+declare const CARTBOX_SDK_LUA = "local _MB = 119\nlocal _CAP = 8\nlocal _LB = _MB + 25\nlocal _LCAP = 6\nlocal _CB = _LB + 1 + _LCAP * 6\nlocal _MCB = _CB + 2\nlocal _MPB = _MCB + 8\nlocal _MPCAP = 8\nlocal _ln = 0\nlocal _mn = 0\nlocal function _emit(kind, id, value)\n  local seq = pmem(_MB)\n  local slot = seq % _CAP\n  local base = _MB + 1 + slot * 3\n  pmem(base, kind)\n  pmem(base + 1, id)\n  pmem(base + 2, value)\n  pmem(_MB, seq + 1)\nend\nlocal function _hash(s)\n  local h = 2166136261\n  for i = 1, #s do\n    h = ((h ~ string.byte(s, i)) * 16777619) & 0xffffffff\n  end\n  return h\nend\nlocal function _norm(x, y, z)\n  local m = math.sqrt(x * x + y * y + z * z)\n  if m < 1e-6 then return 0, 0, 1 end\n  return x / m, y / m, z / m\nend\nlocal function _byte(v)\n  local b = math.floor((v or 0) * 127 + 0.5)\n  if b < -127 then b = -127 elseif b > 127 then b = 127 end\n  if b < 0 then b = b + 256 end\n  return b\nend\nlocal function _light(kind, x, y, z, radius, r, g, b, intensity, dx, dy, cone)\n  if _ln >= _LCAP then return end\n  local base = _LB + 1 + _ln * 6\n  pmem(base, x // 1)\n  pmem(base + 1, y // 1)\n  pmem(base + 2, z // 1)\n  pmem(base + 3, radius // 1)\n  local rgb = (math.floor(r or 255) & 0xff) << 16\n  rgb = rgb | ((math.floor(g or 255) & 0xff) << 8)\n  rgb = rgb | (math.floor(b or 255) & 0xff)\n  pmem(base + 4, rgb | (kind << 24) | (cone << 26))\n  local inten = math.floor((intensity or 1) * 256)\n  if inten < 0 then inten = 0 elseif inten > 0xffff then inten = 0xffff end\n  pmem(base + 5, inten | (dx << 16) | (dy << 24))\n  _ln = _ln + 1\n  pmem(_LB, _ln)\nend\ncartbox = {\n  unlock = function(id) _emit(1, _hash(id), 0) end,\n  score = function(v) _emit(2, 0, v // 1) end,\n  progress = function(id, v) _emit(3, _hash(id), v // 1) end,\n  clearlights = function() _ln = 0 pmem(_LB, 0) end,\n  light = function(x, y, radius, r, g, b, z, intensity)\n    _light(0, x, y, z or 12, radius, r, g, b, intensity, 0, 0, 0)\n  end,\n  sun = function(dx, dy, dz, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    _light(1, 0, 0, 0, 0, r, g, b, intensity, _byte(nx), _byte(ny), 0)\n  end,\n  spot = function(x, y, z, dx, dy, dz, radius, angle, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    local cone = math.floor(math.cos(math.rad(angle or 30)) * 63 + 0.5)\n    if cone < 0 then cone = 0 elseif cone > 63 then cone = 63 end\n    _light(2, x, y, z or 12, radius, r, g, b, intensity, _byte(nx), _byte(ny), cone)\n  end,\n  camera = function(x, y)\n    pmem(_CB, math.floor((x or 0) * 16 + 0.5) & 0xffffffff)\n    pmem(_CB + 1, math.floor((y or 0) * 16 + 0.5) & 0xffffffff)\n  end,\n  -- Drive the 3D mesh orbit camera this frame: yaw/pitch (radians), distance in\n  -- world units (0 = auto-fit the scene), fov (radians, 0 = default). Call every\n  -- frame; not calling leaves the player's gentle auto-orbit in charge.\n  meshcam = function(yaw, pitch, dist, fov)\n    pmem(_MCB, 1)\n    pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 4, 0)\n    pmem(_MCB + 5, 0)\n    pmem(_MCB + 6, 0)\n    pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)\n  end,\n  -- Start a fresh frame's mesh-pose list. Call once before any meshpose() calls;\n  -- instances you don't pose keep their authored transform.\n  clearposes = function() _mn = 0 pmem(_MPB, 0) end,\n  -- First-person mode: composite the cart's 2D frame as a HUD OVER the 3D scene,\n  -- rather than drawing the meshes over the 2D (the default third-person showcase\n  -- compositing). Call each frame AFTER the camera call with a truthy value to\n  -- enable; near-black (index 0) pixels the cart leaves are the transparent \"world\"\n  -- and everything else the cart draws is the HUD. Rides a spare bit of the\n  -- mesh-camera flag word, so it costs no mailbox space.\n  hud = function(on)\n    local f = pmem(_MCB)\n    if on and on ~= 0 then pmem(_MCB, f | 2) else pmem(_MCB, f & 0xfffffffd) end\n  end,\n  -- Move/rotate/scale one mesh instance (by its sidecar index) this frame, on top\n  -- of its authored placement. x,y,z are world units; yaw (about Y), pitch (about\n  -- X), roll (about Z) radians;\n  -- scale defaults to 1 (pass 0 to hide). math.floor keeps every value integer so\n  -- the bitwise mask never sees a float (the Pro core's Lua throws on that). Must\n  -- match decodeMeshPoses() on the host.\n  -- Optional extras: frame picks one of the instance's animation frames (0 = its\n  -- base mesh, up to 127), tint recolours its tintable materials from the\n  -- 15-colour tint palette (0 = none), and front (true/1) draws it over the\n  -- whole scene \u2014 a held weapon that must never clip into a wall.\n  meshpose = function(index, x, y, z, yaw, pitch, roll, scale, frame, tint, front)\n    if _mn >= _MPCAP then return end\n    local base = _MPB + 1 + _mn * 8\n    local word = math.floor(index or 0) & 0xff\n    word = word | ((math.floor(frame or 0) & 0x7f) << 9) | ((math.floor(tint or 0) & 0xf) << 16)\n    if front and front ~= 0 then word = word | 0x100000 end\n    pmem(base, word)\n    pmem(base + 1, math.floor((x or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 2, math.floor((y or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 3, math.floor((z or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 4, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(base + 5, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(base + 6, math.floor((roll or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(base + 7, math.floor((scale or 1) * 256 + 0.5) & 0xffffffff)\n    _mn = _mn + 1\n    pmem(_MPB, _mn)\n  end,\n  -- HD-2D world (optional): a cart with a world sidecar draws a 3D tile terrain\n  -- and stands its 2D character sprites in it as depth-sorted billboards. The\n  -- world camera and billboards reuse the mesh camera/pose mailbox channels, so\n  -- no engine change is needed \u2014 these are thin aliases with the world's naming.\n  --\n  -- Drive the world camera this frame: yaw/pitch (radians), distance (world units,\n  -- 0 = auto-fit), fov (radians, 0 = default). Optional tx,ty,tz make the camera\n  -- LOOK AT that point (grid x/z units, height units for y) so it follows the\n  -- player; omit them (or pass 0,0,0) to frame the whole terrain. Same mailbox\n  -- layout as meshcam (target rides at _MCB+4..6).\n  worldcam = function(yaw, pitch, dist, fov, tx, ty, tz)\n    pmem(_MCB, 1)\n    pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 4, math.floor((tx or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 5, math.floor((ty or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 6, math.floor((tz or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)\n  end,\n  -- Start a fresh frame's billboard list. Call once before billboard() calls each\n  -- frame (an alias of clearposes \u2014 they share the mesh-pose channel).\n  clearbillboards = function() _mn = 0 pmem(_MPB, 0) end,\n  -- Place billboard index (declared in the world sidecar) at world position\n  -- (x,z grid units, y height units) this frame; scale defaults to 1 (0 hides).\n  -- math.floor keeps every value integer so the bitwise mask never sees a float.\n  billboard = function(index, x, y, z, scale)\n    if _mn >= _MPCAP then return end\n    local base = _MPB + 1 + _mn * 8\n    pmem(base, math.floor(index or 0) & 0xff)\n    pmem(base + 1, math.floor((x or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 2, math.floor((y or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 3, math.floor((z or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 4, 0)\n    pmem(base + 5, 0)\n    pmem(base + 6, 0)\n    pmem(base + 7, math.floor((scale or 1) * 256 + 0.5) & 0xffffffff)\n    _mn = _mn + 1\n    pmem(_MPB, _mn)\n  end,\n  -- Netplay (online multiplayer). The host page relays player state + events\n  -- between browsers through pmem words 0..118 (so a netplay cart must not keep\n  -- save data there); see packages/player/src/net/netplay.ts for the layout.\n  -- net() -> mode (0 offline, 1 client, 2 host), my slot, humans mask, match word\n  net = function()\n    local h = pmem(0)\n    return h & 3, (h >> 2) & 7, (h >> 8) & 0xff, pmem(1)\n  end,\n  -- netpeer(slot) -> the slot's 3 state words, and whether they are live\n  netpeer = function(slot)\n    local b = 3 + slot * 3\n    return pmem(b), pmem(b + 1), pmem(b + 2), ((pmem(0) >> 16) & (1 << slot)) ~= 0\n  end,\n  -- netpublish(slot, a, b, c): publish a slot's state this tick (your own, or a\n  -- bot's when you are the host)\n  netpublish = function(slot, a, b, c)\n    local base = 72 + slot * 3\n    pmem(base, math.floor(a or 0) & 0xffffffff)\n    pmem(base + 1, math.floor(b or 0) & 0xffffffff)\n    pmem(base + 2, math.floor(c or 0) & 0xffffffff)\n    pmem(70, pmem(70) | (1 << slot))\n  end,\n  -- netmatch(word): the host's shared game-state word (clients read it via net())\n  netmatch = function(w) pmem(71, math.floor(w or 0) & 0xffffffff) end,\n  -- netsend(a, b): broadcast a 2-word event to every other player (\u2264 10/tick)\n  netsend = function(a, b)\n    local n = pmem(96)\n    if n >= 10 then return false end\n    pmem(97 + n * 2, math.floor(a or 0) & 0xffffffff)\n    pmem(98 + n * 2, math.floor(b or 0) & 0xffffffff)\n    pmem(96, n + 1)\n    return true\n  end,\n  -- netevents() -> this tick's incoming events, as a list of {a, b}\n  netevents = function()\n    local n = pmem(27)\n    local out = {}\n    for i = 0, n - 1 do out[#out + 1] = { pmem(28 + i * 2), pmem(29 + i * 2) } end\n    return out\n  end,\n  -- Collision defaults: overridden by the injected layer when the cart has one,\n  -- so cartbox.solid/mapsize are always safe to call (a cart with no collision\n  -- layer simply sees every cell as non-solid).\n  solid = function() return false end,\n  mapsize = function() return 0, 0 end,\n  -- Tile-flags default: overridden by the injected layer when the cart has one.\n  flag = function() return false end,\n}";
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */
 declare function injectSdk(bytes: Uint8Array): Uint8Array;
 
@@ -3576,4 +3777,4 @@ declare class WorldOverlaySurface implements DisplaySurface {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, EngineLoadError, type FlagsField, type GeneratedTrack, HEIGHT_WORLD, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera as MeshSceneCamera, type ModelId, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, PARTICLE_KINDS, POST_FX_EFFECTS, type PackableLight, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PbrMaterial, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, SOFTWARE_RASTER_CAPS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera$1 as SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, SoftwareSceneRenderer, type SpriteRegion, type SpriteRegionSource, TILT_SHIFT_FEATHER, type TextureLookup, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3, type VerificationResult, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, alignBytesPerRow, animClipsSdkLua, anyPostFxEnabled, applyRenderCaps, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, collisionSdkLua, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interleaveVertices, interpolateNormal, loadEngineModule, makeShadowTexture, mount, nearestDirection, normalBasis3x3, normalVector, packLights, paramKey, parseAnim, parseCollisionField, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, sway, tiltShiftBlur, uniformsFromSettings, unpadRows, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeInstanceUniform };
+export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, type DeviceProvider, EVENT_CAPACITY, type Ease, EngineLoadError, type FlagsField, type GeneratedTrack, HEIGHT_WORLD, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetState, type NetTransport, PARTICLE_KINDS, POST_FX_EFFECTS, type PackableLight, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PbrMaterial, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, REPLAY_VERSION, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, SOFTWARE_RASTER_CAPS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera$1 as SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, SoftwareSceneRenderer, type SpriteRegion, type SpriteRegionSource, TILT_SHIFT_FEATHER, type TextureLookup, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3, type VerificationResult, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, alignBytesPerRow, animClipsSdkLua, anyPostFxEnabled, applyRenderCaps, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, collisionSdkLua, composeParallax, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interleaveVertices, interpolateNormal, loadEngineModule, makeShadowTexture, mount, nearestDirection, normalBasis3x3, normalVector, packLights, paramKey, parseAnim, parseCollisionField, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, sway, takeNetOutbox, tiltShiftBlur, uniformsFromSettings, unpadRows, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeInstanceUniform, writeNetInbox };

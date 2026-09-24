@@ -2402,6 +2402,61 @@ var PostFxSurface = class _PostFxSurface {
   }
 };
 
+// src/net/netplay.ts
+var NET_WORDS = 119;
+var NET_SLOTS = 8;
+var NET_STATE_WORDS = 3;
+var NET_IN_HEADER = 0;
+var NET_IN_MATCH = 1;
+var NET_IN_SEQ = 2;
+var NET_IN_SLOTS = 3;
+var NET_IN_EVENT_COUNT = 27;
+var NET_IN_EVENTS = 28;
+var NET_IN_EVENT_CAPACITY = 20;
+var NET_OUT_MASK = 70;
+var NET_OUT_MATCH = 71;
+var NET_OUT_SLOTS = 72;
+var NET_OUT_EVENT_COUNT = 96;
+var NET_OUT_EVENTS = 97;
+var NET_OUT_EVENT_CAPACITY = 10;
+var NET_MODE_OFFLINE = 0;
+var NET_MODE_CLIENT = 1;
+var NET_MODE_HOST = 2;
+function writeNetInbox(words, inbox) {
+  words[NET_IN_HEADER] = (inbox.mode & 3 | (inbox.mySlot & 7) << 2 | (inbox.humans & 255) << 8 | (inbox.live & 255) << 16) >>> 0;
+  words[NET_IN_MATCH] = inbox.match >>> 0;
+  words[NET_IN_SEQ] = inbox.seq >>> 0;
+  for (let slot = 0; slot < NET_SLOTS; slot += 1) {
+    const state = inbox.slots[slot] ?? null;
+    for (let k = 0; k < NET_STATE_WORDS; k += 1) {
+      words[NET_IN_SLOTS + slot * NET_STATE_WORDS + k] = state ? state[k] >>> 0 : 0;
+    }
+  }
+  const count = Math.min(inbox.events.length, NET_IN_EVENT_CAPACITY);
+  words[NET_IN_EVENT_COUNT] = count;
+  for (let i = 0; i < count; i += 1) {
+    words[NET_IN_EVENTS + i * 2] = inbox.events[i][0] >>> 0;
+    words[NET_IN_EVENTS + i * 2 + 1] = inbox.events[i][1] >>> 0;
+  }
+  return count;
+}
+function takeNetOutbox(words) {
+  const mask = words[NET_OUT_MASK] & 255;
+  const states = /* @__PURE__ */ new Map();
+  for (let slot = 0; slot < NET_SLOTS; slot += 1) {
+    if (!(mask & 1 << slot)) continue;
+    const base = NET_OUT_SLOTS + slot * NET_STATE_WORDS;
+    states.set(slot, [words[base], words[base + 1], words[base + 2]]);
+  }
+  const count = Math.min(words[NET_OUT_EVENT_COUNT], NET_OUT_EVENT_CAPACITY);
+  const events = [];
+  for (let i = 0; i < count; i += 1) events.push([words[NET_OUT_EVENTS + i * 2], words[NET_OUT_EVENTS + i * 2 + 1]]);
+  const match = words[NET_OUT_MATCH];
+  words[NET_OUT_MASK] = 0;
+  words[NET_OUT_EVENT_COUNT] = 0;
+  return { states, match, events };
+}
+
 // src/models.ts
 var SOFTWARE_RASTER_CAPS = {
   zBuffer: true,
@@ -2733,6 +2788,11 @@ function createConsole(module, model, sampleRate = model.sampleRate) {
       const ptr = module._cbx_samples_ptr(handle);
       const start = ptr / Int16Array.BYTES_PER_ELEMENT;
       return module.HEAP16.slice(start, start + count);
+    },
+    netWords() {
+      const ptr = module._cbx_mailbox_ptr(handle);
+      if (ptr === 0) return null;
+      return new Uint32Array(module.HEAPU8.buffer, ptr - NET_WORDS * 4, NET_WORDS);
     },
     readMailbox() {
       const ptr = module._cbx_mailbox_ptr(handle);
@@ -3292,6 +3352,46 @@ cartbox = {
     pmem(base + 7, math.floor((scale or 1) * 256 + 0.5) & 0xffffffff)
     _mn = _mn + 1
     pmem(_MPB, _mn)
+  end,
+  -- Netplay (online multiplayer). The host page relays player state + events
+  -- between browsers through pmem words 0..118 (so a netplay cart must not keep
+  -- save data there); see packages/player/src/net/netplay.ts for the layout.
+  -- net() -> mode (0 offline, 1 client, 2 host), my slot, humans mask, match word
+  net = function()
+    local h = pmem(0)
+    return h & 3, (h >> 2) & 7, (h >> 8) & 0xff, pmem(1)
+  end,
+  -- netpeer(slot) -> the slot's 3 state words, and whether they are live
+  netpeer = function(slot)
+    local b = 3 + slot * 3
+    return pmem(b), pmem(b + 1), pmem(b + 2), ((pmem(0) >> 16) & (1 << slot)) ~= 0
+  end,
+  -- netpublish(slot, a, b, c): publish a slot's state this tick (your own, or a
+  -- bot's when you are the host)
+  netpublish = function(slot, a, b, c)
+    local base = 72 + slot * 3
+    pmem(base, math.floor(a or 0) & 0xffffffff)
+    pmem(base + 1, math.floor(b or 0) & 0xffffffff)
+    pmem(base + 2, math.floor(c or 0) & 0xffffffff)
+    pmem(70, pmem(70) | (1 << slot))
+  end,
+  -- netmatch(word): the host's shared game-state word (clients read it via net())
+  netmatch = function(w) pmem(71, math.floor(w or 0) & 0xffffffff) end,
+  -- netsend(a, b): broadcast a 2-word event to every other player (\u2264 10/tick)
+  netsend = function(a, b)
+    local n = pmem(96)
+    if n >= 10 then return false end
+    pmem(97 + n * 2, math.floor(a or 0) & 0xffffffff)
+    pmem(98 + n * 2, math.floor(b or 0) & 0xffffffff)
+    pmem(96, n + 1)
+    return true
+  end,
+  -- netevents() -> this tick's incoming events, as a list of {a, b}
+  netevents = function()
+    local n = pmem(27)
+    local out = {}
+    for i = 0, n - 1 do out[#out + 1] = { pmem(28 + i * 2), pmem(29 + i * 2) } end
+    return out
   end,
   -- Collision defaults: overridden by the injected layer when the cart has one,
   -- so cartbox.solid/mapsize are always safe to call (a cart with no collision
@@ -6591,7 +6691,16 @@ var Player = class {
   }
   tickOnce() {
     const mask = this.replaySource ? this.replaySource.maskForFrame(this.tickFrame) : this.gamepad.value;
+    const net = this.options.netplay;
+    if (net && this.console) {
+      const words = this.console.netWords();
+      if (words) net.beforeTick(words);
+    }
     this.console?.tick(mask);
+    if (net && this.console) {
+      const words = this.console.netWords();
+      if (words) net.afterTick(words);
+    }
     this.recorder?.record(mask);
     this.tickFrame++;
     if (this.console && this.options.onRuntimeError) {
@@ -7087,6 +7196,251 @@ function parseParticles(raw) {
   return emitters.length > 0 ? { emitters } : null;
 }
 
+// src/net/NetSession.ts
+var STATE_EVERY = 4;
+var STALE_MS = 3e3;
+var NetSession = class {
+  constructor(transport, now = () => Date.now()) {
+    this.transport = transport;
+    this.now = now;
+    this.peers = [];
+    this.connected = false;
+    this.joinedAt = Date.now();
+    this.remote = /* @__PURE__ */ new Map();
+    this.pendingEvents = [];
+    this.hostMatch = 0;
+    this.lastSentMatch = -1;
+    this.tick = 0;
+    this.listeners = /* @__PURE__ */ new Set();
+    transport.onPeers((peers) => {
+      this.peers = [...peers].sort((a, b) => a.joinedAt - b.joinedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      this.emit();
+    });
+    transport.onMessage((message) => this.receive(message));
+  }
+  /** Join the room. */
+  async connect(name) {
+    await this.transport.connect(this.joinedAt, name);
+    this.connected = true;
+    this.emit();
+  }
+  close() {
+    this.connected = false;
+    this.transport.close();
+    this.emit();
+  }
+  /** This browser's slot (0..7), or -1 while the room is full/unknown. */
+  get mySlot() {
+    const index = this.peers.findIndex((p) => p.id === this.transport.selfId);
+    return index >= 0 && index < NET_SLOTS ? index : -1;
+  }
+  get isHost() {
+    return this.mySlot === 0;
+  }
+  status() {
+    return { connected: this.connected, peers: this.peers, mySlot: this.mySlot, isHost: this.isHost };
+  }
+  /** Subscribe to room changes (membership, connection). */
+  onStatus(listener) {
+    this.listeners.add(listener);
+    listener(this.status());
+    return () => this.listeners.delete(listener);
+  }
+  /** Fill the cart's inbox before a tick. `words` is a live view of pmem 0..118. */
+  beforeTick(words) {
+    const mySlot = this.mySlot;
+    if (!this.connected || mySlot < 0) {
+      writeNetInbox(words, { mode: 0, mySlot: 0, humans: 0, live: 0, match: 0, seq: this.tick, slots: [], events: [] });
+      return;
+    }
+    const now = this.now();
+    let humans = 0;
+    for (let slot = 0; slot < Math.min(NET_SLOTS, this.peers.length); slot += 1) humans |= 1 << slot;
+    let live = 0;
+    const slots = [];
+    for (let slot = 0; slot < NET_SLOTS; slot += 1) {
+      const entry = slot === mySlot ? void 0 : this.remote.get(slot);
+      if (entry && now - entry.at < STALE_MS) {
+        slots.push(entry.state);
+        live |= 1 << slot;
+      } else {
+        slots.push(null);
+      }
+    }
+    const events = this.pendingEvents.slice(0, NET_IN_EVENT_CAPACITY);
+    const delivered = writeNetInbox(words, {
+      mode: this.isHost ? NET_MODE_HOST : NET_MODE_CLIENT,
+      mySlot,
+      humans,
+      live,
+      match: this.hostMatch,
+      seq: this.tick,
+      slots,
+      events
+    });
+    this.pendingEvents.splice(0, delivered);
+  }
+  /** Relay what the cart published during the tick, and clear its outbox. */
+  afterTick(words) {
+    const out = takeNetOutbox(words);
+    this.tick += 1;
+    if (!this.connected || this.mySlot < 0) return;
+    if (out.events.length > 0) this.transport.send({ t: "e", e: out.events });
+    if (out.states.size > 0 && this.tick % STATE_EVERY === 0) {
+      this.transport.send({ t: "s", s: [...out.states].map(([slot, w]) => [slot, w[0], w[1], w[2]]) });
+    }
+    if (this.isHost) {
+      this.hostMatch = out.match;
+      if (out.match !== this.lastSentMatch || this.tick % 60 === 0) {
+        this.transport.send({ t: "m", m: out.match });
+        this.lastSentMatch = out.match;
+      }
+    }
+  }
+  receive(message) {
+    const now = this.now();
+    if (message.t === "s") {
+      for (const [slot, a, b, c] of message.s) {
+        if (slot >= 0 && slot < NET_SLOTS && slot !== this.mySlot) this.remote.set(slot, { state: [a, b, c], at: now });
+      }
+    } else if (message.t === "e") {
+      for (const event of message.e) if (this.pendingEvents.length < 200) this.pendingEvents.push(event);
+    } else if (message.t === "m" && !this.isHost) {
+      this.hostMatch = message.m;
+    }
+  }
+  emit() {
+    const status = this.status();
+    for (const listener of this.listeners) listener(status);
+  }
+};
+var MemoryNetHub = class {
+  constructor() {
+    this.members = /* @__PURE__ */ new Map();
+  }
+  transport(id) {
+    const transport = new MemoryTransport(id, this);
+    this.members.set(id, { peer: null, transport });
+    return transport;
+  }
+  /** @internal */
+  join(id, peer) {
+    const member = this.members.get(id);
+    if (member) member.peer = peer;
+    this.announce();
+  }
+  /** @internal */
+  leave(id) {
+    this.members.delete(id);
+    this.announce();
+  }
+  /** @internal */
+  deliver(from, message) {
+    const wire = JSON.stringify(message);
+    for (const [id, member] of this.members) if (id !== from && member.peer) member.transport.receive(JSON.parse(wire), from);
+  }
+  announce() {
+    const peers = [...this.members.values()].flatMap((m) => m.peer ? [m.peer] : []);
+    for (const member of this.members.values()) if (member.peer) member.transport.peers(peers);
+  }
+};
+var MemoryTransport = class {
+  constructor(selfId, hub) {
+    this.selfId = selfId;
+    this.hub = hub;
+    this.messageHandler = null;
+    this.peersHandler = null;
+  }
+  async connect(joinedAt, name) {
+    this.hub.join(this.selfId, { id: this.selfId, joinedAt, name });
+  }
+  send(message) {
+    this.hub.deliver(this.selfId, message);
+  }
+  onMessage(handler) {
+    this.messageHandler = handler;
+  }
+  onPeers(handler) {
+    this.peersHandler = handler;
+  }
+  close() {
+    this.hub.leave(this.selfId);
+  }
+  /** @internal */
+  receive(message, from) {
+    this.messageHandler?.(message, from);
+  }
+  /** @internal */
+  peers(peers) {
+    this.peersHandler?.(peers);
+  }
+};
+var BroadcastChannelTransport = class {
+  constructor(room) {
+    this.room = room;
+    this.channel = null;
+    this.messageHandler = null;
+    this.peersHandler = null;
+    this.seen = /* @__PURE__ */ new Map();
+    this.heartbeat = null;
+    this.self = null;
+    this.selfId = `tab-${Math.random().toString(36).slice(2, 10)}`;
+  }
+  async connect(joinedAt, name) {
+    this.self = { id: this.selfId, joinedAt, name };
+    this.channel = new BroadcastChannel(`cartbox-net:${this.room}`);
+    this.channel.onmessage = (event) => {
+      const data = event.data;
+      if (data.from === this.selfId) return;
+      if (data.kind === "hello" && data.peer) {
+        const known = this.seen.has(data.from);
+        this.seen.set(data.from, { peer: data.peer, at: Date.now() });
+        if (!known) this.publishPeers();
+      } else if (data.kind === "bye") {
+        this.seen.delete(data.from);
+        this.publishPeers();
+      } else if (data.kind === "msg" && data.message) {
+        this.messageHandler?.(data.message, data.from);
+      }
+    };
+    const hello = () => {
+      this.channel?.postMessage({ kind: "hello", from: this.selfId, peer: this.self });
+      const now = Date.now();
+      let changed = false;
+      for (const [id, entry] of this.seen) {
+        if (now - entry.at > 3500) {
+          this.seen.delete(id);
+          changed = true;
+        }
+      }
+      if (changed) this.publishPeers();
+    };
+    hello();
+    this.heartbeat = setInterval(hello, 1e3);
+    this.publishPeers();
+  }
+  send(message) {
+    this.channel?.postMessage({ kind: "msg", from: this.selfId, message });
+  }
+  onMessage(handler) {
+    this.messageHandler = handler;
+  }
+  onPeers(handler) {
+    this.peersHandler = handler;
+  }
+  close() {
+    this.channel?.postMessage({ kind: "bye", from: this.selfId });
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.channel?.close();
+    this.channel = null;
+  }
+  publishPeers() {
+    const peers = [...this.seen.values()].map((entry) => entry.peer);
+    if (this.self) peers.push(this.self);
+    this.peersHandler?.(peers);
+  }
+};
+
 // src/index.ts
 function mount(container, options) {
   const player = new Player(container, options);
@@ -7105,6 +7459,7 @@ export {
   AnimatedForegroundSurface,
   BLOOM_KNEE,
   BloomPyramid,
+  BroadcastChannelTransport,
   CAMERA_BASE,
   CAMERA_SCALE,
   CARTBOX_SDK_LUA,
@@ -7143,9 +7498,16 @@ export {
   MESH_POSE_STRIDE,
   MIN_PYRAMID_DIMENSION,
   MODELS,
+  MemoryNetHub,
   MeshOverlaySurface,
+  NET_MODE_CLIENT,
+  NET_MODE_HOST,
+  NET_MODE_OFFLINE,
+  NET_SLOTS,
+  NET_WORDS,
   NORMAL_DIRECTION_COUNT,
   NORMAL_VECTORS,
+  NetSession,
   PARTICLE_KINDS,
   POST_FX_EFFECTS,
   ParticleOverlaySurface,
@@ -7262,6 +7624,7 @@ export {
   simulateEmitter,
   softKneePrefilter,
   sway,
+  takeNetOutbox,
   tiltShiftBlur,
   uniformsFromSettings,
   unpadRows,
@@ -7269,5 +7632,6 @@ export {
   viewDirection,
   webgpuCanHonour,
   worldCenter,
-  writeInstanceUniform
+  writeInstanceUniform,
+  writeNetInbox
 };

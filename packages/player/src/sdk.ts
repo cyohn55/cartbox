@@ -180,6 +180,46 @@ cartbox = {
     _mn = _mn + 1
     pmem(_MPB, _mn)
   end,
+  -- Netplay (online multiplayer). The host page relays player state + events
+  -- between browsers through pmem words 0..118 (so a netplay cart must not keep
+  -- save data there); see packages/player/src/net/netplay.ts for the layout.
+  -- net() -> mode (0 offline, 1 client, 2 host), my slot, humans mask, match word
+  net = function()
+    local h = pmem(0)
+    return h & 3, (h >> 2) & 7, (h >> 8) & 0xff, pmem(1)
+  end,
+  -- netpeer(slot) -> the slot's 3 state words, and whether they are live
+  netpeer = function(slot)
+    local b = 3 + slot * 3
+    return pmem(b), pmem(b + 1), pmem(b + 2), ((pmem(0) >> 16) & (1 << slot)) ~= 0
+  end,
+  -- netpublish(slot, a, b, c): publish a slot's state this tick (your own, or a
+  -- bot's when you are the host)
+  netpublish = function(slot, a, b, c)
+    local base = 72 + slot * 3
+    pmem(base, math.floor(a or 0) & 0xffffffff)
+    pmem(base + 1, math.floor(b or 0) & 0xffffffff)
+    pmem(base + 2, math.floor(c or 0) & 0xffffffff)
+    pmem(70, pmem(70) | (1 << slot))
+  end,
+  -- netmatch(word): the host's shared game-state word (clients read it via net())
+  netmatch = function(w) pmem(71, math.floor(w or 0) & 0xffffffff) end,
+  -- netsend(a, b): broadcast a 2-word event to every other player (≤ 10/tick)
+  netsend = function(a, b)
+    local n = pmem(96)
+    if n >= 10 then return false end
+    pmem(97 + n * 2, math.floor(a or 0) & 0xffffffff)
+    pmem(98 + n * 2, math.floor(b or 0) & 0xffffffff)
+    pmem(96, n + 1)
+    return true
+  end,
+  -- netevents() -> this tick's incoming events, as a list of {a, b}
+  netevents = function()
+    local n = pmem(27)
+    local out = {}
+    for i = 0, n - 1 do out[#out + 1] = { pmem(28 + i * 2), pmem(29 + i * 2) } end
+    return out
+  end,
   -- Collision defaults: overridden by the injected layer when the cart has one,
   -- so cartbox.solid/mapsize are always safe to call (a cart with no collision
   -- layer simply sees every cell as non-solid).

@@ -102,7 +102,7 @@ describe("the Lockout soldiers and weapons", () => {
     expect(LOCKOUT_CODE).toContain("function armor_tint(o)");
     expect(LOCKOUT_CODE).toContain('if MODE.teams then return o.team=="blue" and TINT_BLUE or TINT_RED end');
     expect(LOCKOUT_CODE).toMatch(/FFA_TINTS = \{ (\d+, ){6}\d+ \}/);
-    expect(LOCKOUT_CODE).toContain('team=(i<=3) and "blue" or "red"');
+    expect(LOCKOUT_CODE).toContain('team=(i%2==0) and "blue" or "red"');
     expect(LOCKOUT_CODE).toContain("frame, armor_tint(o))"); // bots pose a walk frame + tint
   });
 
