@@ -4531,12 +4531,18 @@ function buildOrbitCamera(bounds, yaw, pitch, aspect, options = {}) {
   ];
   return {
     view: viewMatrix(eye, target),
-    projection: projectionMatrix(fovY, aspect, Math.max(0.01, radius * 0.05), distance + radius * 4)
+    projection: projectionMatrix(
+      fovY,
+      aspect,
+      options.near && options.near > 0 ? options.near : Math.max(0.01, radius * 0.05),
+      distance + radius * 4
+    )
   };
 }
 
 // src/mesh/MeshOverlaySurface.ts
 var RAD_TO_DEG = 180 / Math.PI;
+var FIRST_PERSON_NEAR = 0.05;
 var SHADOW_MAP_SIZE = 1024;
 var HUD_TRANSPARENT_SUM = 30;
 var HUD_SKY = [70, 104, 152, 255];
@@ -4557,6 +4563,13 @@ function compositeHudOverScene(scene, hud, count) {
 var SKY_PANORAMA_WIDTH = 1536;
 var SKY_PANORAMA_HEIGHT = 768;
 var SKY_IBL_DOWNSAMPLE = 8;
+function poseLocalMatrix(pose) {
+  return composeModelMatrix2(
+    pose.position,
+    [pose.rotation[1] * RAD_TO_DEG, pose.rotation[0] * RAD_TO_DEG, pose.rotation[2] * RAD_TO_DEG],
+    [pose.scale, pose.scale, pose.scale]
+  );
+}
 var AUTO_ORBIT_YAW_PER_FRAME = 2 * Math.PI / 720;
 var AUTO_ORBIT_PITCH = 0.35;
 var MeshOverlaySurface = class _MeshOverlaySurface {
@@ -4677,7 +4690,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const camera = cart ? buildOrbitCamera(this.scene.bounds, cart.yaw, cart.pitch, this.width / this.height, {
       fov: cart.fov ?? void 0,
       distance: cart.distance,
-      targetOffset: cart.target
+      targetOffset: cart.target,
+      // First-person (HUD) views put the eye inside the scene: a tight near
+      // plane keeps the held weapon and adjacent walls from being clipped.
+      near: this.hud ? FIRST_PERSON_NEAR : void 0
     }) : buildOrbitCamera(this.scene.bounds, this.frame * AUTO_ORBIT_YAW_PER_FRAME, AUTO_ORBIT_PITCH, this.width / this.height);
     const instances = this.posedInstances();
     const lighting = this.scene.lighting;
@@ -4726,11 +4742,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         continue;
       }
       if (pose.hidden) continue;
-      const local = composeModelMatrix2(
-        pose.position,
-        [pose.rotation[0] * RAD_TO_DEG, pose.rotation[1] * RAD_TO_DEG, pose.rotation[2] * RAD_TO_DEG],
-        [pose.scale, pose.scale, pose.scale]
-      );
+      const local = poseLocalMatrix(pose);
       result.push({
         mesh: authored.mesh,
         model: multiplyMat4(authored.model, local),

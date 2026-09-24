@@ -155,6 +155,13 @@ export interface OrbitCameraOptions {
   readonly distance?: number | null;
   /** Offset added to the scene centre to aim the camera, world units. */
   readonly targetOffset?: readonly [number, number, number];
+  /**
+   * Near clip distance, world units; omitted scales it with the scene (5% of the
+   * radius — right for an orbit framing the whole scene, but a first-person eye
+   * inside the scene would clip everything within a metre, its own weapon and
+   * any wall it stands beside included).
+   */
+  readonly near?: number;
 }
 
 /**
@@ -190,6 +197,11 @@ export function buildOrbitCamera(
   ];
   return {
     view: viewMatrix(eye, target),
-    projection: projectionMatrix(fovY, aspect, Math.max(0.01, radius * 0.05), distance + radius * 4),
+    projection: projectionMatrix(
+      fovY,
+      aspect,
+      options.near && options.near > 0 ? options.near : Math.max(0.01, radius * 0.05),
+      distance + radius * 4,
+    ),
   };
 }
