@@ -30,6 +30,7 @@ import { encodeRgbaPng } from "./png";
 import { serializeMeshAsset, type EncodedImage, type MeshAsset, type MeshPrimitive } from "./MeshAsset";
 import type { SceneLighting } from "./SceneLighting";
 import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, type Streams } from "./seedGeometry";
+import { packMeshLibrary } from "./meshLibrary";
 
 /** An axis-aligned box: centre (cx,cy,cz) and half-extents (hx,hy,hz). */
 type Box = readonly [number, number, number, number, number, number];
@@ -973,30 +974,67 @@ function block(s: Streams, cx: number, cy: number, cz: number, hx: number, hy: n
   );
 }
 
-const TEAM_PAINT: Record<"blue" | "red", readonly [number, number, number, number]> = {
-  blue: [0.22, 0.34, 0.6, 1],
-  red: [0.62, 0.17, 0.15, 1],
-};
+/**
+ * Default armour paint. Every soldier (and the player's sleeves) shares one
+ * mesh whose paint is `tintable`, so the cart recolours it per bot at runtime
+ * through the pose tint — team colours in team modes, a colour per player in
+ * Free for All — instead of storing a mesh per colour.
+ */
+const ARMOR_PAINT: readonly [number, number, number, number] = [0.45, 0.5, 0.56, 1];
 
 /**
- * An armoured soldier: team-painted plates (helmet, chest, shoulders, thighs,
+ * Drop texture coordinates from primitives that have no texture — the soldiers
+ * and weapons are flat PBR colours, and UVs are a quarter of every vertex.
+ */
+function withoutUnusedUvs(mesh: MeshAsset): MeshAsset {
+  return {
+    name: mesh.name,
+    primitives: mesh.primitives.map((p) =>
+      p.material.baseColorImage || p.material.normalImage || p.material.metallicRoughnessImage || p.material.emissiveImage
+        ? p
+        : { ...p, uvs: null },
+    ),
+  };
+}
+
+/** Number of walk-cycle frames each soldier carries (pose frames 1..N). */
+export const LOCKOUT_WALK_FRAMES = 4;
+
+/** A point `length` down from `from`, swung forward by `angle` about the X axis. */
+function swing(from: P3, length: number, angle: number): P3 {
+  return [from[0], from[1] - length * Math.cos(angle), from[2] + length * Math.sin(angle)];
+}
+
+/**
+ * An armoured soldier: team-paintable plates (helmet, chest, shoulders, thighs,
  * shins) over a dark undersuit, a mirrored gold visor, a backpack and a rifle
  * held at the ready. Feet at y = 0, facing +Z; roughly 1.85 tall so the cart's
  * eye height (1.5) sits at the visor.
+ *
+ * `phase` is the walk cycle (radians); null is the idle stance. Walking swings
+ * each leg from the hip (opposite legs, opposite phase) and bends the knee of
+ * the leg coming through, so a sequence of phases reads as a stride.
  */
-function soldierMesh(team: "blue" | "red"): MeshAsset {
+function soldierMesh(phase: number | null): MeshAsset {
   const paint = newStreams();
   const suit = newStreams();
   const visor = newStreams();
   const gun = newStreams();
   for (const side of [-1, 1]) {
     const x = side * 0.13;
-    block(suit, x, 0.06, 0.03, 0.085, 0.06, 0.15); // boot
-    limb(suit, [x, 0.12, 0], [x, 0.5, 0.01], 0.075, 0.085); // shin (undersuit)
-    block(paint, x, 0.3, 0.07, 0.07, 0.15, 0.035); // shin guard
-    block(paint, x, 0.52, 0.09, 0.06, 0.05, 0.03); // knee pad
-    limb(suit, [x, 0.5, 0.01], [x * 1.05, 0.9, 0], 0.1, 0.12); // thigh
-    block(paint, x * 1.05, 0.72, 0.08, 0.075, 0.13, 0.035); // thigh plate
+    const s = phase === null ? 0 : Math.sin(phase + (side > 0 ? Math.PI : 0));
+    const c = phase === null ? 0 : Math.cos(phase + (side > 0 ? Math.PI : 0));
+    const thigh = 0.42 * s; // hip swing, forward positive
+    const knee = phase === null ? 0.05 : 0.12 + 0.45 * Math.max(0, c); // bend while the leg comes through
+    const hip: P3 = [x * 1.05, 0.92, 0];
+    const kneeAt = swing(hip, 0.42, thigh);
+    const ankle = swing(kneeAt, 0.4, thigh - knee);
+    limb(suit, hip, kneeAt, 0.12, 0.1); // thigh
+    limb(paint, swing([hip[0], hip[1], hip[2] + 0.07], 0.12, thigh), swing([hip[0], hip[1], hip[2] + 0.07], 0.34, thigh), 0.075, 0.06, 0.5); // thigh plate
+    block(paint, kneeAt[0], kneeAt[1], kneeAt[2] + 0.08, 0.06, 0.05, 0.03); // knee pad
+    limb(suit, kneeAt, ankle, 0.085, 0.075); // shin
+    limb(paint, swing([kneeAt[0], kneeAt[1], kneeAt[2] + 0.06], 0.08, thigh - knee), swing([kneeAt[0], kneeAt[1], kneeAt[2] + 0.06], 0.34, thigh - knee), 0.07, 0.06, 0.5); // shin guard
+    block(suit, ankle[0], Math.max(0.06, ankle[1] - 0.02), ankle[2] + 0.03, 0.085, 0.06, 0.15); // boot
     // Shoulder pad, upper arm, and a forearm reaching forward to the rifle.
     block(paint, side * 0.31, 1.46, -0.01, 0.1, 0.075, 0.12, 0.05, 0.35);
     limb(suit, [side * 0.33, 1.42, 0], [side * 0.3, 1.12, 0.05], 0.065);
@@ -1018,16 +1056,16 @@ function soldierMesh(team: "blue" | "red"): MeshAsset {
   limb(gun, [0.06, 1.16, 0.0], [0.06, 1.16, 0.55], 0.035, 0.03, 1.6);
   limb(gun, [0.06, 1.18, 0.55], [0.06, 1.18, 0.78], 0.013);
   block(gun, 0.06, 1.24, 0.22, 0.02, 0.025, 0.1);
-  const paintMat: Mat = { name: "armor", baseColorFactor: TEAM_PAINT[team], baseColorImage: null, metallicFactor: 0.45, roughnessFactor: 0.4 };
-  return {
-    name: `soldier-${team}`,
+  const paintMat: Mat = { name: "armor", baseColorFactor: ARMOR_PAINT, baseColorImage: null, metallicFactor: 0.45, roughnessFactor: 0.4, tintable: true };
+  return withoutUnusedUvs({
+    name: phase === null ? "soldier" : `soldier-walk-${phase.toFixed(2)}`,
     primitives: [
       toPrimitive(paint, paintMat),
       toPrimitive(suit, { name: "undersuit", baseColorFactor: [0.2, 0.21, 0.24, 1], baseColorImage: null, metallicFactor: 0.3, roughnessFactor: 0.6 }),
       toPrimitive(visor, { name: "visor", baseColorFactor: [0.95, 0.7, 0.28, 1], baseColorImage: null, metallicFactor: 0.9, roughnessFactor: 0.12, emissiveFactor: [0.35, 0.22, 0.05] }),
       toPrimitive(gun, { name: "rifle", baseColorFactor: [0.2, 0.21, 0.23, 1], baseColorImage: null, metallicFactor: 0.7, roughnessFactor: 0.4 }),
     ],
-  };
+  });
 }
 
 /** Weapon ids, in the order their viewmodel instances follow the bots in the sidecar. */
@@ -1045,62 +1083,127 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
   const glow = newStreams();
   const glove = newStreams();
   const sleeve = newStreams();
-  // The right hand on the grip, its sleeve running back out of frame.
+  const dark = newStreams();
+  // A gloved hand wrapped round a grip: palm, three finger segments and a
+  // thumb, with an armoured sleeve running back out of frame.
   const rightHand = (x: number, y: number, z: number) => {
-    block(glove, x, y, z, 0.035, 0.045, 0.045, 0.015);
-    limb(sleeve, [x, y - 0.02, z - 0.03], [x + 0.14, y - 0.2, z - 0.42], 0.045, 0.06);
+    block(glove, x + 0.012, y, z - 0.01, 0.028, 0.045, 0.04, 0.012); // palm
+    for (let f = 0; f < 3; f += 1) block(glove, x - 0.022, y + 0.025 - f * 0.026, z + 0.022, 0.014, 0.011, 0.02); // fingers
+    limb(glove, [x + 0.03, y + 0.04, z - 0.02], [x + 0.005, y + 0.06, z + 0.04], 0.012); // thumb
+    limb(sleeve, [x + 0.01, y - 0.03, z - 0.04], [x + 0.14, y - 0.2, z - 0.42], 0.045, 0.06);
+    block(sleeve, x + 0.03, y - 0.06, z - 0.1, 0.05, 0.02, 0.05, 0.015); // wrist plate
   };
   const leftHand = (x: number, y: number, z: number) => {
-    block(glove, x, y, z, 0.04, 0.03, 0.05, 0.015);
-    limb(sleeve, [x - 0.02, y - 0.02, z - 0.03], [x - 0.3, y - 0.22, z - 0.34], 0.045, 0.06);
+    block(glove, x, y, z, 0.038, 0.028, 0.05, 0.012); // palm under the handguard
+    for (let f = 0; f < 3; f += 1) block(glove, x + 0.035, y + 0.01, z - 0.03 + f * 0.028, 0.01, 0.022, 0.012); // fingers over the top
+    limb(sleeve, [x - 0.02, y - 0.02, z - 0.04], [x - 0.3, y - 0.22, z - 0.34], 0.045, 0.06);
+  };
+  /** A trigger guard: a thin loop under the receiver ahead of the grip. */
+  const triggerGuard = (y: number, z0: number, z1: number) => {
+    limb(metal, [0, y, z0], [0, y - 0.035, z0], 0.005);
+    limb(metal, [0, y - 0.035, z0], [0, y - 0.035, z1], 0.005);
+    limb(metal, [0, y - 0.035, z1], [0, y, z1], 0.005);
+    limb(dark, [0, y - 0.005, z0 + 0.012], [0, y - 0.026, z0 + 0.016], 0.004); // trigger
+  };
+  /** Ridges down a magazine (or a grip) so it reads as moulded, not a slab. */
+  const ridges = (x: number, y0: number, z: number, count: number, step: number) => {
+    for (let r = 0; r < count; r += 1) block(accent, x, y0 - r * step, z, 0.004, 0.005, 0.02);
   };
   if (id === "br") {
     limb(poly, [0, 0, -0.18], [0, 0.005, 0.24], 0.04, 0.035, 1.5); // bullpup body
-    limb(metal, [0, 0.03, 0.24], [0, 0.03, 0.56], 0.013); // barrel
-    limb(accent, [0, 0.015, 0.2], [0, 0.015, 0.38], 0.03, 0.028, 1.3); // handguard
-    block(metal, 0, 0.085, 0.06, 0.018, 0.018, 0.11, 0.006); // scope tube
-    block(glow, 0, 0.085, 0.172, 0.012, 0.012, 0.004); // scope lens
+    block(metal, 0, 0.05, 0.02, 0.028, 0.012, 0.19); // top rail
+    for (let r = 0; r < 8; r += 1) block(dark, 0, 0.064, -0.13 + r * 0.045, 0.024, 0.003, 0.008); // rail teeth
+    limb(accent, [0, 0.015, 0.2], [0, 0.015, 0.38], 0.032, 0.03, 1.3); // handguard
+    for (let v = 0; v < 4; v += 1) block(dark, 0.031, 0.015, 0.23 + v * 0.04, 0.003, 0.012, 0.012); // vents
+    limb(metal, [0, 0.03, 0.38], [0, 0.03, 0.56], 0.012); // barrel
+    block(metal, 0, 0.03, 0.57, 0.018, 0.018, 0.02, 0.006); // muzzle brake
+    block(dark, 0.02, 0.03, 0.57, 0.002, 0.006, 0.012);
+    block(metal, 0, 0.09, 0.05, 0.018, 0.018, 0.1, 0.006); // scope tube
+    block(metal, 0, 0.068, -0.01, 0.012, 0.012, 0.012); // scope rings
+    block(metal, 0, 0.068, 0.11, 0.012, 0.012, 0.012);
+    block(glow, 0, 0.09, 0.152, 0.012, 0.012, 0.003); // objective lens
+    block(dark, 0, 0.09, -0.052, 0.01, 0.01, 0.003); // eyepiece (dark: it faces the eye)
+    block(dark, 0.041, 0.01, 0.02, 0.002, 0.014, 0.05); // ejection port
     limb(poly, [0, -0.04, -0.07], [0, -0.14, -0.1], 0.022, 0.024, 1.4); // magazine (behind the grip)
+    ridges(0.024, -0.07, -0.085, 4, 0.02);
     limb(poly, [0, -0.03, 0.05], [0, -0.11, 0.03], 0.018, 0.02, 1.3); // grip
+    triggerGuard(-0.03, 0.08, 0.14);
+    block(poly, 0, -0.005, -0.19, 0.036, 0.045, 0.012, 0.01); // butt plate
     rightHand(0.0, -0.08, 0.04);
     leftHand(-0.01, -0.01, 0.3);
   } else if (id === "smg") {
     block(poly, 0, 0, 0.05, 0.035, 0.045, 0.14, 0.012);
-    limb(metal, [0, 0.015, 0.19], [0, 0.015, 0.29], 0.014);
-    block(accent, 0, 0.055, 0.04, 0.012, 0.01, 0.11); // top rail
+    block(metal, 0, 0.05, 0.05, 0.03, 0.008, 0.14); // top cover
+    block(accent, 0, 0.062, 0.04, 0.012, 0.01, 0.11); // sight rail
+    block(metal, 0, 0.085, -0.06, 0.01, 0.015, 0.006); // rear sight
+    block(metal, 0, 0.08, 0.15, 0.006, 0.012, 0.006); // front post
+    limb(metal, [0, 0.015, 0.19], [0, 0.015, 0.3], 0.016); // barrel
+    block(dark, 0, 0.015, 0.305, 0.008, 0.008, 0.004); // bore
+    block(dark, 0.036, 0.015, 0.06, 0.002, 0.012, 0.035); // ejection port
     limb(poly, [0, -0.04, 0.13], [0, -0.22, 0.17], 0.018, 0.02, 1.8); // long magazine
+    ridges(0.02, -0.07, 0.14, 6, 0.022);
     limb(poly, [0, -0.04, -0.02], [0, -0.12, -0.04], 0.018, 0.02, 1.3); // grip
-    block(glow, 0, 0.07, 0.0, 0.006, 0.006, 0.006);
+    triggerGuard(-0.04, 0.0, 0.06);
+    limb(metal, [0, 0.0, -0.09], [0, -0.03, -0.2], 0.008); // folded stock strut
+    block(glow, 0, 0.07, 0.0, 0.006, 0.006, 0.006); // ammo counter
     rightHand(0, -0.08, -0.03);
     leftHand(-0.005, -0.15, 0.16);
   } else if (id === "shotgun") {
     limb(metal, [0, 0.02, 0.0], [0, 0.02, 0.6], 0.024); // barrel
-    limb(metal, [0, -0.025, 0.05], [0, -0.025, 0.5], 0.018); // magazine tube
+    block(dark, 0, 0.02, 0.602, 0.016, 0.016, 0.003); // bore
+    limb(metal, [0, -0.025, 0.05], [0, -0.025, 0.52], 0.018); // magazine tube
+    block(metal, 0, -0.002, 0.5, 0.02, 0.03, 0.012); // barrel band
     limb(accent, [0, -0.02, 0.25], [0, -0.02, 0.42], 0.036, 0.034); // pump
+    for (let g = 0; g < 5; g += 1) block(dark, 0, -0.056, 0.27 + g * 0.03, 0.02, 0.003, 0.006); // pump grooves
     block(poly, 0, 0, -0.04, 0.035, 0.05, 0.1, 0.012); // receiver
+    block(dark, 0.036, 0.01, -0.03, 0.002, 0.015, 0.04); // loading port
+    block(metal, 0, 0.048, 0.58, 0.004, 0.01, 0.006); // bead sight
     limb(poly, [0, -0.02, -0.14], [0, -0.07, -0.34], 0.03, 0.04, 1.6); // stock
+    block(accent, 0, -0.075, -0.345, 0.03, 0.045, 0.012); // recoil pad
+    triggerGuard(-0.05, -0.06, 0.0);
     rightHand(0, -0.07, -0.08);
     leftHand(-0.01, -0.05, 0.33);
   } else if (id === "sniper") {
     block(poly, 0, 0, 0.0, 0.034, 0.045, 0.2, 0.012);
+    block(accent, 0, 0.05, 0.0, 0.028, 0.008, 0.18); // receiver top
     limb(metal, [0, 0.02, 0.2], [0, 0.02, 0.78], 0.016, 0.013); // long barrel
+    for (let f = 0; f < 5; f += 1) block(dark, 0.014, 0.02, 0.3 + f * 0.08, 0.002, 0.004, 0.025); // barrel fluting
     block(metal, 0, 0.02, 0.8, 0.022, 0.022, 0.03, 0.008); // muzzle brake
+    block(dark, 0.022, 0.02, 0.8, 0.002, 0.012, 0.018);
     limb(metal, [0, 0.1, -0.08], [0, 0.1, 0.2], 0.03, 0.034); // big scope
-    block(glow, 0, 0.1, 0.206, 0.024, 0.024, 0.004);
+    block(metal, 0, 0.1, 0.02, 0.018, 0.018, 0.02); // turret
+    block(metal, 0, 0.066, -0.04, 0.014, 0.02, 0.012); // scope mounts
+    block(metal, 0, 0.066, 0.14, 0.014, 0.02, 0.012);
+    block(glow, 0, 0.1, 0.206, 0.024, 0.024, 0.004); // objective lens
+    block(dark, 0, 0.1, -0.084, 0.02, 0.02, 0.003); // eyepiece (dark: it faces the eye)
+    limb(metal, [0.02, -0.03, 0.38], [0.03, -0.1, 0.46], 0.006); // folded bipod legs
+    limb(metal, [-0.02, -0.03, 0.38], [-0.03, -0.1, 0.46], 0.006);
     limb(poly, [0, -0.03, -0.2], [0, -0.07, -0.36], 0.03, 0.038, 1.6); // stock
+    block(accent, 0, -0.02, -0.28, 0.032, 0.014, 0.05); // cheek rest
     limb(poly, [0, -0.04, 0.1], [0, -0.13, 0.08], 0.018, 0.02, 1.3); // grip
+    triggerGuard(-0.045, 0.12, 0.18);
     rightHand(0, -0.1, 0.08);
     leftHand(-0.01, -0.03, 0.34);
   } else if (id === "magnum") {
     block(metal, 0, 0.03, 0.08, 0.02, 0.028, 0.12, 0.008); // slide
+    for (let g = 0; g < 5; g += 1) block(dark, 0.021, 0.035, -0.02 + g * 0.012, 0.002, 0.018, 0.003); // slide serrations
+    block(dark, 0.021, 0.04, 0.1, 0.002, 0.01, 0.025); // ejection port
     limb(metal, [0, 0.025, 0.2], [0, 0.025, 0.24], 0.011); // muzzle
+    block(dark, 0, 0.025, 0.242, 0.006, 0.006, 0.002);
+    block(poly, 0, -0.005, 0.1, 0.018, 0.012, 0.09); // frame + dust-cover
     limb(poly, [0, 0.0, 0.0], [0, -0.1, -0.04], 0.02, 0.022, 1.3); // grip
+    ridges(0.021, -0.02, -0.02, 4, 0.02);
     block(accent, 0, 0.065, 0.05, 0.006, 0.006, 0.06); // sight rail
+    block(glow, 0, 0.07, 0.19, 0.003, 0.004, 0.003); // front sight dot
+    triggerGuard(-0.02, 0.02, 0.07);
     rightHand(0, -0.05, -0.01);
   } else {
     // An original energy blade: a curved hilt and two glowing, tapering prongs.
     limb(metal, [0, -0.1, -0.02], [0, 0.02, 0.02], 0.03, 0.028, 1.4); // hilt
+    for (let g = 0; g < 4; g += 1) block(dark, 0.029, -0.08 + g * 0.028, -0.01 + g * 0.009, 0.003, 0.008, 0.02); // grip bands
     limb(accent, [-0.05, 0.02, 0.02], [0.05, 0.02, 0.02], 0.02); // guard
+    block(accent, 0, 0.035, 0.03, 0.04, 0.012, 0.03, 0.01); // emitter housing
+    block(glow, 0, 0.05, 0.03, 0.03, 0.004, 0.02); // emitter glow
     for (const side of [-1, 1]) {
       limb(glow, [side * 0.04, 0.03, 0.03], [side * 0.03, 0.2, 0.34], 0.012, 0.018, 0.35);
       limb(glow, [side * 0.03, 0.2, 0.34], [side * 0.005, 0.3, 0.62], 0.018, 0.001, 0.35);
@@ -1113,7 +1216,8 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
     toPrimitive(poly, { name: "polymer", baseColorFactor: [0.2, 0.21, 0.23, 1], baseColorImage: null, metallicFactor: 0.15, roughnessFactor: 0.5 }),
     toPrimitive(accent, { name: "accent", baseColorFactor: [0.42, 0.46, 0.38, 1], baseColorImage: null, metallicFactor: 0.5, roughnessFactor: 0.42 }),
     toPrimitive(glove, { name: "glove", baseColorFactor: [0.12, 0.12, 0.13, 1], baseColorImage: null, metallicFactor: 0.05, roughnessFactor: 0.8 }),
-    toPrimitive(sleeve, { name: "sleeve", baseColorFactor: TEAM_PAINT.blue, baseColorImage: null, metallicFactor: 0.45, roughnessFactor: 0.4 }),
+    toPrimitive(sleeve, { name: "sleeve", baseColorFactor: ARMOR_PAINT, baseColorImage: null, metallicFactor: 0.45, roughnessFactor: 0.4, tintable: true }),
+    toPrimitive(dark, { name: "recess", baseColorFactor: [0.05, 0.05, 0.06, 1], baseColorImage: null, metallicFactor: 0.3, roughnessFactor: 0.7 }),
   ];
   if (glow.indices.length > 0) {
     primitives.push(
@@ -1127,13 +1231,9 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
       }),
     );
   }
-  return { name: `viewmodel-${id}`, primitives: primitives.filter((p) => p.indices.length > 0) };
+  return withoutUnusedUvs({ name: `viewmodel-${id}`, primitives: primitives.filter((p) => p.indices.length > 0) });
 }
 
-/** Bots 1–3 fight for blue (the player's side in team modes), 4–7 for red. */
-function botTeam(i: number): "blue" | "red" {
-  return i <= 3 ? "blue" : "red";
-}
 
 /**
  * Viewmodels are authored at 1/1000 scale at the origin — invisible (and inside
@@ -1252,19 +1352,25 @@ export function lockoutMeshSidecar(): string {
   if (meshSidecar === null) {
     const identity = { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] };
     const rest = { position: [0, 0, 0], rotation: [0, 0, 0], scale: [VIEWMODEL_REST_SCALE, VIEWMODEL_REST_SCALE, VIEWMODEL_REST_SCALE] };
-    const soldiers = { blue: serializeMeshAsset(soldierMesh("blue")), red: serializeMeshAsset(soldierMesh("red")) };
-    const meshes: unknown[] = [
+    // One soldier mesh (tinted per bot at runtime) plus its walk-cycle frames,
+    // stored once in the sidecar's shared library however many bots use it.
+    const soldier = serializeMeshAsset(soldierMesh(null));
+    const walk = Array.from({ length: LOCKOUT_WALK_FRAMES }, (_, k) =>
+      serializeMeshAsset(soldierMesh((k / LOCKOUT_WALK_FRAMES) * Math.PI * 2)),
+    );
+    const meshes: { id: string; name: string; mesh: string; frames?: string[]; transform: unknown }[] = [
       { id: "lockout-map", name: "Lockout arena", mesh: serializeMeshAsset(mapMesh()), transform: identity },
     ];
-    // Instances 1..7: the bots, painted by team.
+    // Instances 1..7: the bots.
     for (let i = 1; i <= BOT_COUNT; i += 1) {
-      meshes.push({ id: `bot-${i}`, name: `bot ${i} (${botTeam(i)})`, mesh: soldiers[botTeam(i)], transform: identity });
+      meshes.push({ id: `bot-${i}`, name: `bot ${i}`, mesh: soldier, frames: walk, transform: identity });
     }
     // Instances 8..13: one first-person viewmodel per weapon, at rest scale.
     for (const id of LOCKOUT_VIEWMODELS) {
       meshes.push({ id: `viewmodel-${id}`, name: `viewmodel ${id}`, mesh: serializeMeshAsset(viewmodelMesh(id)), transform: rest });
     }
-    meshSidecar = JSON.stringify({ version: 2, meshes, lighting: LOCKOUT_LIGHTING });
+    const packed = packMeshLibrary(meshes);
+    meshSidecar = JSON.stringify({ version: 2, meshes: packed.entries, library: packed.library, lighting: LOCKOUT_LIGHTING });
   }
   return meshSidecar;
 }
@@ -1273,7 +1379,7 @@ export const LOCKOUT_SCENE_TRIANGLES = (() => {
   const g = MAP_GEOMETRY;
   const map =
     [g.wall, g.floor, g.under, g.snow].reduce((n, st) => n + st.indices.length / 3, 0) + g.trim.indices.length / 3;
-  const bot = soldierMesh("blue").primitives.reduce((n, p) => n + p.indices.length / 3, 0);
+  const bot = soldierMesh(null).primitives.reduce((n, p) => n + p.indices.length / 3, 0);
   return map + bot * BOT_COUNT;
 })();
 
@@ -1823,6 +1929,16 @@ end
 -- each frame only the weapon in hand is posed just in front of the eye (scaled
 -- back up by WS), bobbing with the walk and kicking back when it fires.
 local WIDX = { br=8, smg=9, shotgun=10, sniper=11, magnum=12, sword=13 }
+-- Armour tints (the runtime's 15-colour tint palette): red/blue by team in team
+-- modes; in Free for All every player wears their own colour.
+local TINT_RED, TINT_BLUE, TINT_GREEN = 1, 2, 3
+local FFA_TINTS = { 1, 4, 5, 6, 8, 12, 9 }
+function armor_tint(o)
+  if MODE.teams then return o.team=="blue" and TINT_BLUE or TINT_RED end
+  if o == p then return TINT_GREEN end
+  for i=1,NBOT do if bots[i]==o then return FFA_TINTS[i] end end
+  return TINT_GREEN
+end
 local WS = 1000
 local function pose_viewmodel(wid)
   local idx = WIDX[wid]
@@ -1840,7 +1956,8 @@ local function pose_viewmodel(wid)
   local px = ex + fx*fwd + rx*rgt + ux*up
   local py = ey + fy*fwd + uy*up
   local pz = ez + fz*fwd + rz*rgt + uz*up
-  cartbox.meshpose(idx, px*WS, py*WS, pz*WS, p.ay, -p.ap - flash*0.03, 0, WS)
+  -- Front layer: drawn over the finished scene, so it never clips into a wall.
+  cartbox.meshpose(idx, px*WS, py*WS, pz*WS, p.ay, -p.ap - flash*0.03, 0, WS, 0, armor_tint(p), true)
 end
 
 -- The muzzle flash stays a 2D HUD flare, drawn where the barrel sits on screen.
@@ -1996,12 +2113,14 @@ function TIC()
   for i=1,NBOT do local o=bots[i]
     if o.dead then cartbox.meshpose(i,0,-50,0,0,0,0,0)
     else
-      -- Walk cycle on a rigid body: a stride bob and a side-to-side sway.
-      if o.moving then o.walk=(o.walk or 0)+0.3 end
+      -- Walk cycle: step through the soldier's 4 stride frames (frame 0 is the
+      -- idle stance), with a small bob and sway, and paint it by team.
+      if o.moving then o.walk=(o.walk or 0)+0.31 end
       local wk = o.walk or 0
-      local lift = o.moving and math.abs(math.sin(wk))*0.05 or 0
-      local sway = o.moving and math.sin(wk)*0.04 or 0
-      cartbox.meshpose(i,o.x,o.y+lift,o.z,o.face,0,sway, o.jugg and 1.25 or 1)
+      local frame = o.moving and (1 + math.floor(wk / (math.pi/2)) % 4) or 0
+      local lift = o.moving and math.abs(math.sin(wk))*0.03 or 0
+      local sway = o.moving and math.sin(wk)*0.03 or 0
+      cartbox.meshpose(i,o.x,o.y+lift,o.z,o.face,0,sway, o.jugg and 1.25 or 1, frame, armor_tint(o))
     end
   end
   local cur_id = p.slot==1 and p.g1 or p.g2

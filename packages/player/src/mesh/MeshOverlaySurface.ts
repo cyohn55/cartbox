@@ -34,8 +34,10 @@ import {
   sceneLightingKeyDirection,
   sceneLightingTonemap,
   type DecodedTexture,
+  type EncodedImage,
   type EnvironmentLight,
   type Mat4,
+  type MeshAsset,
   type MeshSceneInstance,
 } from "@cartbox/editor";
 import type { DisplaySurface } from "../display.js";
@@ -128,6 +130,14 @@ export class MeshOverlaySurface implements DisplaySurface {
   private readonly depth: Float32Array;
   /** Shadow-map depth scratch, allocated once the first shadowed frame needs it. */
   private shadowDepth: Float32Array | null = null;
+  /** Cached shadow depth of everything not posed (see buildShadow), and what it was built for. */
+  private staticShadow: Float32Array | null = null;
+  private staticShadowKey = "";
+  private staticShadowLighting: SceneLighting | null = null;
+  /** Tinted mesh copies, per source mesh and tint index. */
+  private readonly tintCache = new Map<MeshAsset, Map<number, MeshAsset>>();
+  /** Draws the front layer (a held weapon) over the finished scene. */
+  private readonly frontRenderer = new SoftwareSceneRenderer();
   /** First-person mode: draw the meshes first, then the cart's 2D frame as a HUD on top. */
   private hud = false;
   /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
@@ -140,6 +150,8 @@ export class MeshOverlaySurface implements DisplaySurface {
     private readonly scene: MeshScene,
     /** The authored instances (baked placement); per-frame poses compose on top. */
     private readonly instances: readonly MeshSceneInstance[],
+    /** Each instance's animation frames (textured), or null when it has none. */
+    private readonly frames: readonly (readonly TexturedMesh[] | null)[],
     /**
      * What actually draws the triangles. Owned by whoever passed it — a renderer
      * is typically shared with the world overlay, so destroying this surface must
@@ -168,68 +180,22 @@ export class MeshOverlaySurface implements DisplaySurface {
     scene: MeshScene,
     renderer: SceneRenderer = new SoftwareSceneRenderer(),
   ): Promise<MeshOverlaySurface> {
+    // Decode each distinct mesh's textures once: instances (and animation
+    // frames) that share a model share its MeshAsset, so they share its maps.
+    const decoded = new Map<MeshAsset, Promise<TexturedMesh>>();
+    const texture = (mesh: MeshAsset): Promise<TexturedMesh> => {
+      let entry = decoded.get(mesh);
+      if (!entry) {
+        entry = decodeMeshTextures(mesh);
+        decoded.set(mesh, entry);
+      }
+      return entry;
+    };
     const instances: MeshSceneInstance[] = [];
+    const frames: (readonly TexturedMesh[] | null)[] = [];
     for (const instance of scene.instances) {
-      const textures = await Promise.all(
-        instance.mesh.primitives.map((primitive) =>
-          primitive.material.baseColorImage
-            ? decodeTexture(primitive.material.baseColorImage.mime, primitive.material.baseColorImage.bytes)
-            : Promise.resolve(null),
-        ),
-      );
-      // Decode any authored normal map too, so the rasteriser can light the
-      // surface per-pixel (option 2). A failed decode falls back to null (flat).
-      const normalTextures = await Promise.all(
-        instance.mesh.primitives.map((primitive) =>
-          primitive.material.normalImage
-            ? decodeTexture(primitive.material.normalImage.mime, primitive.material.normalImage.bytes)
-            : Promise.resolve(null),
-        ),
-      );
-      // And the packed material map (specular/roughness/emissive), for the
-      // view-dependent highlight + emissive floor (option 2, slice 5).
-      const materialTextures = await Promise.all(
-        instance.mesh.primitives.map((primitive) =>
-          primitive.material.materialImage
-            ? decodeTexture(primitive.material.materialImage.mime, primitive.material.materialImage.bytes)
-            : Promise.resolve(null),
-        ),
-      );
-      // PBR (metallic-roughness) maps for the Modern tier: packed
-      // metallic-roughness, ambient occlusion, and emissive. Absent on fantasy
-      // materials, so the rasteriser stays byte-identical there. A failed decode
-      // falls back to null, and the BRDF uses the material's scalar factors.
-      const mrTextures = await Promise.all(
-        instance.mesh.primitives.map((primitive) =>
-          primitive.material.metallicRoughnessImage
-            ? decodeTexture(primitive.material.metallicRoughnessImage.mime, primitive.material.metallicRoughnessImage.bytes)
-            : Promise.resolve(null),
-        ),
-      );
-      const occlusionTextures = await Promise.all(
-        instance.mesh.primitives.map((primitive) =>
-          primitive.material.occlusionImage
-            ? decodeTexture(primitive.material.occlusionImage.mime, primitive.material.occlusionImage.bytes)
-            : Promise.resolve(null),
-        ),
-      );
-      const emissiveTextures = await Promise.all(
-        instance.mesh.primitives.map((primitive) =>
-          primitive.material.emissiveImage
-            ? decodeTexture(primitive.material.emissiveImage.mime, primitive.material.emissiveImage.bytes)
-            : Promise.resolve(null),
-        ),
-      );
-      instances.push({
-        mesh: instance.mesh,
-        model: instance.model,
-        textures,
-        normalTextures,
-        materialTextures,
-        mrTextures,
-        occlusionTextures,
-        emissiveTextures,
-      });
+      instances.push({ ...(await texture(instance.mesh)), model: instance.model });
+      frames.push(instance.frames && instance.frames.length > 0 ? await Promise.all(instance.frames.map(texture)) : null);
     }
     // Bake the procedural sky dome once, if the rig authors one: the full map is
     // the backdrop, a small copy is the image-based light metals reflect.
@@ -241,7 +207,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       const ibl = downsamplePanorama(skyMap, SKY_IBL_DOWNSAMPLE);
       environment = { ...environment, map: ibl, average: computeEnvironmentAverage(ibl) };
     }
-    return new MeshOverlaySurface(inner, width, height, scene, instances, renderer, skyMap, environment);
+    return new MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment);
   }
 
   /**
@@ -294,12 +260,12 @@ export class MeshOverlaySurface implements DisplaySurface {
           near: this.hud ? FIRST_PERSON_NEAR : undefined,
         })
       : buildOrbitCamera(this.scene.bounds, this.frame * AUTO_ORBIT_YAW_PER_FRAME, AUTO_ORBIT_PITCH, this.width / this.height);
-    const instances = this.posedInstances();
+    const { main: instances, front, moved } = this.posedInstances();
     // Apply the authored Modern-tier lighting rig, if any. Absent (every cart
     // that never opted in) leaves these omitted, so the draw is exactly as before
     // and the fantasy tiers render byte-identically.
     const lighting = this.scene.lighting;
-    const shadow = lighting ? this.buildShadow(instances, lighting) : null;
+    const shadow = lighting ? this.buildShadow(instances, moved, lighting) : null;
     // First-person with a sky dome: paint the panorama through the camera, then
     // composite the meshes over it (background null) — backend-agnostic, since
     // both renderers leave untouched pixels alone.
@@ -327,6 +293,29 @@ export class MeshOverlaySurface implements DisplaySurface {
           }
         : {}),
     });
+    // The front layer (a held weapon): drawn after the scene with a fresh depth
+    // buffer, so it sits over everything and never clips into a wall. It is a
+    // handful of triangles, so the software rasteriser draws it on any backend.
+    if (front.length > 0) {
+      this.frontRenderer.render(front, {
+        width: this.width,
+        height: this.height,
+        out: this.output,
+        depth: this.depth,
+        view: camera.view,
+        projection: camera.projection,
+        background: null,
+        ...(lighting
+          ? {
+              ambient: lighting.ambient,
+              lightDirection: sceneLightingKeyDirection(lighting),
+              environment: this.environment,
+              tonemap: sceneLightingTonemap(lighting),
+              lights: lighting.lights,
+            }
+          : {}),
+      });
+    }
     // Lay the cart's 2D frame over the rendered scene as a HUD (first-person).
     if (this.hud && this.hudFrame) compositeHudOverScene(this.output, this.hudFrame, this.width * this.height);
     this.frame += 1; // advance in lockstep with the run loop's present cadence
@@ -334,53 +323,177 @@ export class MeshOverlaySurface implements DisplaySurface {
   }
 
   /**
-   * The instances to draw this frame: the authored set when the cart posed none
-   * (the fast, allocation-free path), otherwise each authored instance with any
-   * matching pose composed on top — a hidden pose drops the instance entirely.
-   * A pose's transform is applied in the instance's LOCAL space (authored · pose),
-   * so a cart spins/moves an object relative to where the editor placed it.
+   * The instances to draw this frame. With no poses, the authored set (the fast,
+   * allocation-free path). Otherwise each authored instance with any matching
+   * pose composed on top — a hidden pose drops it; a pose's `frame` swaps in one
+   * of its animation frames, `tint` recolours its tintable materials, and `front`
+   * moves it to the front layer. A pose's transform is applied in the instance's
+   * LOCAL space (authored · pose), so a cart moves an object relative to where
+   * the editor placed it. `moved` lists the posed main-layer instances — the
+   * only part of the shadow map that has to be redrawn each frame.
    */
-  private posedInstances(): readonly MeshSceneInstance[] {
-    if (this.poses.length === 0) return this.instances;
-    const result: MeshSceneInstance[] = [];
+  private posedInstances(): {
+    main: readonly MeshSceneInstance[];
+    front: readonly MeshSceneInstance[];
+    moved: readonly MeshSceneInstance[];
+  } {
+    if (this.poses.length === 0) return { main: this.instances, front: [], moved: [] };
+    const main: MeshSceneInstance[] = [];
+    const front: MeshSceneInstance[] = [];
+    const moved: MeshSceneInstance[] = [];
     for (let i = 0; i < this.instances.length; i += 1) {
       const authored = this.instances[i]!;
       const pose = this.poses.find((p) => p.index === i);
       if (!pose) {
-        result.push(authored);
+        main.push(authored);
         continue;
       }
       if (pose.hidden) continue; // dropped from the frame this tick
-      const local = poseLocalMatrix(pose);
-      result.push({
-        mesh: authored.mesh,
-        model: multiplyMat4(authored.model, local),
-        textures: authored.textures,
-        normalTextures: authored.normalTextures,
-        materialTextures: authored.materialTextures,
-        mrTextures: authored.mrTextures,
-        occlusionTextures: authored.occlusionTextures,
-        emissiveTextures: authored.emissiveTextures,
-      });
+      const frames = this.frames[i];
+      const frame = pose.frame ?? 0;
+      const source: TexturedMesh = frame > 0 && frames && frames.length > 0 ? frames[(frame - 1) % frames.length]! : authored;
+      const instance: MeshSceneInstance = {
+        ...source,
+        mesh: pose.tint ? this.tinted(source.mesh, pose.tint) : source.mesh,
+        model: multiplyMat4(authored.model, poseLocalMatrix(pose)),
+      };
+      if (pose.front) {
+        front.push(instance);
+      } else {
+        main.push(instance);
+        moved.push(instance);
+      }
     }
-    return result;
+    return { main, front, moved };
+  }
+
+  /** A tinted copy of `mesh`, cached so its identity (and any GPU upload) is stable. */
+  private tinted(mesh: MeshAsset, tint: number): MeshAsset {
+    let byTint = this.tintCache.get(mesh);
+    if (!byTint) {
+      byTint = new Map();
+      this.tintCache.set(mesh, byTint);
+    }
+    let out = byTint.get(tint);
+    if (!out) {
+      out = tintMesh(mesh, tint);
+      byTint.set(tint, out);
+    }
+    return out;
   }
 
   /**
    * Render the scene's directional shadow map for this frame, or null when the
-   * rig has shadows off / no directional light. The depth scratch is allocated
-   * once and reused, since the map size is fixed.
+   * rig has shadows off / no directional light.
+   *
+   * Everything the cart did not pose this frame is static, so its depth is
+   * rendered once and cached; each frame copies that cache and rasterises only
+   * the posed (`moved`) instances over it. The cache is rebuilt when the set of
+   * posed instances changes. For an arena whose map never moves, this turns a
+   * full-scene shadow pass per frame into a memcpy plus a few characters.
    */
-  private buildShadow(instances: readonly MeshSceneInstance[], lighting: SceneLighting): ShadowInput | null {
+  private buildShadow(
+    instances: readonly MeshSceneInstance[],
+    moved: readonly MeshSceneInstance[],
+    lighting: SceneLighting,
+  ): ShadowInput | null {
     if (!lighting.shadows) return null;
-    if (!this.shadowDepth) this.shadowDepth = new Float32Array(SHADOW_MAP_SIZE * SHADOW_MAP_SIZE);
+    const size = SHADOW_MAP_SIZE;
+    if (!this.shadowDepth) this.shadowDepth = new Float32Array(size * size);
     const { center, radius } = this.scene.bounds;
-    return buildSceneShadow(instances, lighting, center, radius, { size: SHADOW_MAP_SIZE, depth: this.shadowDepth });
+    const movedSet = new Set(moved);
+    const key = this.poses
+      .filter((p) => !p.hidden && !p.front)
+      .map((p) => p.index)
+      .sort((a, b) => a - b)
+      .join(",");
+    if (!this.staticShadow || this.staticShadowKey !== key || this.staticShadowLighting !== lighting) {
+      this.staticShadow ??= new Float32Array(size * size);
+      buildSceneShadow(
+        instances.filter((instance) => !movedSet.has(instance)),
+        lighting,
+        center,
+        radius,
+        { size, depth: this.staticShadow },
+      );
+      this.staticShadowKey = key;
+      this.staticShadowLighting = lighting;
+    }
+    this.shadowDepth.set(this.staticShadow);
+    return buildSceneShadow(moved, lighting, center, radius, { size, depth: this.shadowDepth, clear: false });
   }
 
   destroy(): void {
     this.inner.destroy();
   }
+}
+
+/** A mesh with every material map decoded — what an instance (or a frame) draws with. */
+type TexturedMesh = Omit<MeshSceneInstance, "model">;
+
+/** Decode all of one mesh's material maps; a failed decode falls back to null (flat). */
+async function decodeMeshTextures(mesh: MeshAsset): Promise<TexturedMesh> {
+  const each = (pick: (m: MeshAsset["primitives"][number]["material"]) => EncodedImage | null | undefined) =>
+    Promise.all(
+      mesh.primitives.map((primitive) => {
+        const image = pick(primitive.material);
+        return image ? decodeTexture(image.mime, image.bytes) : Promise.resolve(null);
+      }),
+    );
+  const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures] = await Promise.all([
+    each((m) => m.baseColorImage), // base colour
+    each((m) => m.normalImage), // per-pixel normals (option 2)
+    each((m) => m.materialImage), // packed specular/roughness/emissive (option 2, slice 5)
+    // PBR maps for the Modern tier — absent on fantasy materials, so the
+    // rasteriser stays byte-identical there.
+    each((m) => m.metallicRoughnessImage),
+    each((m) => m.occlusionImage),
+    each((m) => m.emissiveImage),
+  ]);
+  return { mesh, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures };
+}
+
+/**
+ * The 15 armour colours a pose's `tint` picks from (index 0 = no tint). Applied
+ * to a mesh's `tintable` materials only, replacing their base colour's RGB.
+ */
+export const TINT_PALETTE: readonly (readonly [number, number, number])[] = [
+  [1, 1, 1], // 0: unused (no tint)
+  [0.62, 0.15, 0.13], // 1 red
+  [0.2, 0.33, 0.62], // 2 blue
+  [0.26, 0.45, 0.2], // 3 green
+  [0.8, 0.42, 0.12], // 4 orange
+  [0.42, 0.22, 0.58], // 5 purple
+  [0.78, 0.62, 0.2], // 6 gold
+  [0.4, 0.27, 0.16], // 7 brown
+  [0.85, 0.45, 0.6], // 8 pink
+  [0.85, 0.86, 0.88], // 9 white
+  [0.14, 0.14, 0.15], // 10 black
+  [0.45, 0.5, 0.56], // 11 steel
+  [0.15, 0.5, 0.52], // 12 teal
+  [0.38, 0.4, 0.2], // 13 olive
+  [0.45, 0.06, 0.1], // 14 crimson
+  [0.5, 0.6, 0.45], // 15 sage
+];
+
+/** A copy of `mesh` with its tintable materials recoloured (geometry arrays shared). */
+export function tintMesh(mesh: MeshAsset, tint: number): MeshAsset {
+  const color = TINT_PALETTE[tint];
+  if (!color || tint === 0) return mesh;
+  return {
+    name: mesh.name,
+    primitives: mesh.primitives.map((primitive) =>
+      primitive.material.tintable
+        ? {
+            ...primitive,
+            material: {
+              ...primitive.material,
+              baseColorFactor: [color[0], color[1], color[2], primitive.material.baseColorFactor[3]],
+            },
+          }
+        : primitive,
+    ),
+  };
 }
 
 /**

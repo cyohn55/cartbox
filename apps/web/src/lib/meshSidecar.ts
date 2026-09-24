@@ -18,7 +18,11 @@
 
 import {
   deserializeMeshAsset,
+  packMeshLibrary,
   parseSceneLighting,
+  readMeshLibrary,
+  resolveMeshFrames,
+  resolveMeshRef,
   serializeMeshAsset,
   type MeshAsset,
   type SceneLighting,
@@ -42,6 +46,11 @@ export interface MeshSidecarEntry {
   /** The mesh geometry as a {@link serializeMeshAsset} string. */
   readonly mesh: string;
   readonly transform: MeshTransform;
+  /**
+   * Optional animation frames: alternate meshes (serialized) a cart can switch
+   * this instance to per frame through `cartbox.meshpose(..., frame)`.
+   */
+  readonly frames?: readonly string[];
 }
 
 /** The whole mesh sidecar: every placed mesh on the cart, plus its lighting rig. */
@@ -78,7 +87,14 @@ function newMeshId(): string {
  */
 export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
   if (sidecar.meshes.length === 0 && !sidecar.lighting) return null;
-  return JSON.stringify({ version: MESH_SIDECAR_VERSION, meshes: sidecar.meshes, lighting: sidecar.lighting ?? null });
+  // Repeated meshes (and animation frames) are stored once in a shared library.
+  const { entries, library } = packMeshLibrary(sidecar.meshes);
+  return JSON.stringify({
+    version: MESH_SIDECAR_VERSION,
+    meshes: entries,
+    ...(Object.keys(library).length > 0 ? { library } : {}),
+    lighting: sidecar.lighting ?? null,
+  });
 }
 
 function isFiniteTriple(value: unknown): value is [number, number, number] {
@@ -112,20 +128,35 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
   const entries = (parsed as { meshes?: unknown }).meshes;
   if (!Array.isArray(entries)) return emptyMeshSidecar();
 
+  const library = readMeshLibrary((parsed as { library?: unknown }).library);
+  // Each distinct mesh string is validated once, however many entries share it.
+  const valid = new Map<string, boolean>();
+  const isValid = (mesh: string): boolean => {
+    let ok = valid.get(mesh);
+    if (ok === undefined) {
+      try {
+        deserializeMeshAsset(mesh);
+        ok = true;
+      } catch {
+        ok = false;
+      }
+      valid.set(mesh, ok);
+    }
+    return ok;
+  };
   const meshes: MeshSidecarEntry[] = [];
   for (const entry of entries) {
-    const record = entry as Partial<MeshSidecarEntry>;
+    const record = entry as Partial<MeshSidecarEntry> & { frames?: unknown };
     if (typeof record.mesh !== "string") continue;
-    try {
-      deserializeMeshAsset(record.mesh); // validate the geometry; drop the entry if it throws
-    } catch {
-      continue;
-    }
+    const mesh = resolveMeshRef(record.mesh, library);
+    if (!mesh || !isValid(mesh)) continue; // drop an entry whose geometry is missing or invalid
+    const frames = resolveMeshFrames(record.frames, library).filter(isValid);
     meshes.push({
       id: typeof record.id === "string" ? record.id : newMeshId(),
       name: typeof record.name === "string" ? record.name : "Mesh",
-      mesh: record.mesh,
+      mesh,
       transform: readTransform(record.transform),
+      ...(frames.length > 0 ? { frames } : {}),
     });
   }
   const lighting = parseSceneLighting((parsed as { lighting?: unknown }).lighting);

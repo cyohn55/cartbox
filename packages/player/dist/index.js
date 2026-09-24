@@ -3227,14 +3227,22 @@ cartbox = {
     if on and on ~= 0 then pmem(_MCB, f | 2) else pmem(_MCB, f & 0xfffffffd) end
   end,
   -- Move/rotate/scale one mesh instance (by its sidecar index) this frame, on top
-  -- of its authored placement. x,y,z are world units; yaw,pitch,roll radians;
+  -- of its authored placement. x,y,z are world units; yaw (about Y), pitch (about
+  -- X), roll (about Z) radians;
   -- scale defaults to 1 (pass 0 to hide). math.floor keeps every value integer so
   -- the bitwise mask never sees a float (the Pro core's Lua throws on that). Must
   -- match decodeMeshPoses() on the host.
-  meshpose = function(index, x, y, z, yaw, pitch, roll, scale)
+  -- Optional extras: frame picks one of the instance's animation frames (0 = its
+  -- base mesh, up to 127), tint recolours its tintable materials from the
+  -- 15-colour tint palette (0 = none), and front (true/1) draws it over the
+  -- whole scene \u2014 a held weapon that must never clip into a wall.
+  meshpose = function(index, x, y, z, yaw, pitch, roll, scale, frame, tint, front)
     if _mn >= _MPCAP then return end
     local base = _MPB + 1 + _mn * 8
-    pmem(base, math.floor(index or 0) & 0xff)
+    local word = math.floor(index or 0) & 0xff
+    word = word | ((math.floor(frame or 0) & 0x7f) << 9) | ((math.floor(tint or 0) & 0xf) << 16)
+    if front and front ~= 0 then word = word | 0x100000 end
+    pmem(base, word)
     pmem(base + 1, math.floor((x or 0) * 256 + 0.5) & 0xffffffff)
     pmem(base + 2, math.floor((y or 0) * 256 + 0.5) & 0xffffffff)
     pmem(base + 3, math.floor((z or 0) * 256 + 0.5) & 0xffffffff)
@@ -3513,6 +3521,11 @@ var MESH_POSE_BASE = MESH_CAM_BASE + MESH_CAM_STRIDE;
 var MESH_POSE_CAPACITY = 8;
 var MESH_POSE_STRIDE = 8;
 var MESH_POSE_HIDDEN = 1 << 8;
+var MESH_POSE_FRAME_SHIFT = 9;
+var MESH_POSE_FRAME_MASK = 127;
+var MESH_POSE_TINT_SHIFT = 16;
+var MESH_POSE_TINT_MASK = 15;
+var MESH_POSE_FRONT = 1 << 20;
 var LIGHT_KIND_POINT = 0;
 var LIGHT_KIND_SPOT = 2;
 var LIGHT_DIR_SCALE = 127;
@@ -3635,6 +3648,9 @@ function decodeMeshPoses(words) {
     poses.push({
       index: indexWord & 255,
       hidden: (indexWord & MESH_POSE_HIDDEN) !== 0,
+      frame: indexWord >>> MESH_POSE_FRAME_SHIFT & MESH_POSE_FRAME_MASK,
+      tint: indexWord >>> MESH_POSE_TINT_SHIFT & MESH_POSE_TINT_MASK,
+      front: (indexWord & MESH_POSE_FRONT) !== 0,
       position: [pos(words[base + 1] ?? 0), pos(words[base + 2] ?? 0), pos(words[base + 3] ?? 0)],
       rotation: [angle(words[base + 4] ?? 0), angle(words[base + 5] ?? 0), angle(words[base + 6] ?? 0)],
       scale: (words[base + 7] ?? 0) / MESH_CAM_DIST_SCALE
@@ -4437,6 +4453,9 @@ import {
   meshBounds,
   parseSceneLighting,
   projectionMatrix,
+  readMeshLibrary,
+  resolveMeshFrames,
+  resolveMeshRef,
   viewMatrix
 } from "@cartbox/editor";
 function isFiniteTriple(value) {
@@ -4497,18 +4516,32 @@ function parseMeshScene(raw) {
   }
   const entries = parsed.meshes;
   if (!Array.isArray(entries)) return null;
+  const library = readMeshLibrary(parsed.library);
+  const cache = /* @__PURE__ */ new Map();
+  const load = (serialized) => {
+    if (!cache.has(serialized)) {
+      try {
+        cache.set(serialized, deserializeMeshAsset(serialized));
+      } catch {
+        cache.set(serialized, null);
+      }
+    }
+    return cache.get(serialized) ?? null;
+  };
   const instances = [];
   for (const entry of entries) {
     const record = entry;
     if (typeof record.mesh !== "string") continue;
-    let mesh;
-    try {
-      mesh = deserializeMeshAsset(record.mesh);
-    } catch {
-      continue;
-    }
+    const resolved = resolveMeshRef(record.mesh, library);
+    const mesh = resolved ? load(resolved) : null;
+    if (!mesh) continue;
+    const frames = resolveMeshFrames(record.frames, library).map(load).filter((frame) => frame !== null);
     const t = readTransform(record.transform);
-    instances.push({ mesh, model: composeModelMatrix(t.position, t.rotation, t.scale) });
+    instances.push({
+      mesh,
+      model: composeModelMatrix(t.position, t.rotation, t.scale),
+      ...frames.length > 0 ? { frames } : {}
+    });
   }
   if (instances.length === 0) return null;
   const lighting = parseSceneLighting(parsed.lighting);
@@ -4573,12 +4606,13 @@ function poseLocalMatrix(pose) {
 var AUTO_ORBIT_YAW_PER_FRAME = 2 * Math.PI / 720;
 var AUTO_ORBIT_PITCH = 0.35;
 var MeshOverlaySurface = class _MeshOverlaySurface {
-  constructor(inner, width, height, scene, instances, renderer, skyMap, environment) {
+  constructor(inner, width, height, scene, instances, frames, renderer, skyMap, environment) {
     this.inner = inner;
     this.width = width;
     this.height = height;
     this.scene = scene;
     this.instances = instances;
+    this.frames = frames;
     this.renderer = renderer;
     this.skyMap = skyMap;
     this.environment = environment;
@@ -4587,6 +4621,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.poses = [];
     /** Shadow-map depth scratch, allocated once the first shadowed frame needs it. */
     this.shadowDepth = null;
+    /** Cached shadow depth of everything not posed (see buildShadow), and what it was built for. */
+    this.staticShadow = null;
+    this.staticShadowKey = "";
+    this.staticShadowLighting = null;
+    /** Tinted mesh copies, per source mesh and tint index. */
+    this.tintCache = /* @__PURE__ */ new Map();
+    /** Draws the front layer (a held weapon) over the finished scene. */
+    this.frontRenderer = new SoftwareSceneRenderer();
     /** First-person mode: draw the meshes first, then the cart's 2D frame as a HUD on top. */
     this.hud = false;
     /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
@@ -4601,48 +4643,20 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * bad image never blocks the cart — the mesh still renders, just untextured.
    */
   static async create(inner, width, height, scene, renderer = new SoftwareSceneRenderer()) {
+    const decoded = /* @__PURE__ */ new Map();
+    const texture = (mesh) => {
+      let entry = decoded.get(mesh);
+      if (!entry) {
+        entry = decodeMeshTextures(mesh);
+        decoded.set(mesh, entry);
+      }
+      return entry;
+    };
     const instances = [];
+    const frames = [];
     for (const instance of scene.instances) {
-      const textures = await Promise.all(
-        instance.mesh.primitives.map(
-          (primitive) => primitive.material.baseColorImage ? decodeTexture(primitive.material.baseColorImage.mime, primitive.material.baseColorImage.bytes) : Promise.resolve(null)
-        )
-      );
-      const normalTextures = await Promise.all(
-        instance.mesh.primitives.map(
-          (primitive) => primitive.material.normalImage ? decodeTexture(primitive.material.normalImage.mime, primitive.material.normalImage.bytes) : Promise.resolve(null)
-        )
-      );
-      const materialTextures = await Promise.all(
-        instance.mesh.primitives.map(
-          (primitive) => primitive.material.materialImage ? decodeTexture(primitive.material.materialImage.mime, primitive.material.materialImage.bytes) : Promise.resolve(null)
-        )
-      );
-      const mrTextures = await Promise.all(
-        instance.mesh.primitives.map(
-          (primitive) => primitive.material.metallicRoughnessImage ? decodeTexture(primitive.material.metallicRoughnessImage.mime, primitive.material.metallicRoughnessImage.bytes) : Promise.resolve(null)
-        )
-      );
-      const occlusionTextures = await Promise.all(
-        instance.mesh.primitives.map(
-          (primitive) => primitive.material.occlusionImage ? decodeTexture(primitive.material.occlusionImage.mime, primitive.material.occlusionImage.bytes) : Promise.resolve(null)
-        )
-      );
-      const emissiveTextures = await Promise.all(
-        instance.mesh.primitives.map(
-          (primitive) => primitive.material.emissiveImage ? decodeTexture(primitive.material.emissiveImage.mime, primitive.material.emissiveImage.bytes) : Promise.resolve(null)
-        )
-      );
-      instances.push({
-        mesh: instance.mesh,
-        model: instance.model,
-        textures,
-        normalTextures,
-        materialTextures,
-        mrTextures,
-        occlusionTextures,
-        emissiveTextures
-      });
+      instances.push({ ...await texture(instance.mesh), model: instance.model });
+      frames.push(instance.frames && instance.frames.length > 0 ? await Promise.all(instance.frames.map(texture)) : null);
     }
     const lighting = scene.lighting;
     let skyMap = null;
@@ -4652,7 +4666,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const ibl = downsamplePanorama(skyMap, SKY_IBL_DOWNSAMPLE);
       environment = { ...environment, map: ibl, average: computeEnvironmentAverage(ibl) };
     }
-    return new _MeshOverlaySurface(inner, width, height, scene, instances, renderer, skyMap, environment);
+    return new _MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment);
   }
   /**
    * Set the cart-driven camera for the next frame(s), or null to auto-orbit. The
@@ -4695,9 +4709,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       // plane keeps the held weapon and adjacent walls from being clipped.
       near: this.hud ? FIRST_PERSON_NEAR : void 0
     }) : buildOrbitCamera(this.scene.bounds, this.frame * AUTO_ORBIT_YAW_PER_FRAME, AUTO_ORBIT_PITCH, this.width / this.height);
-    const instances = this.posedInstances();
+    const { main: instances, front, moved } = this.posedInstances();
     const lighting = this.scene.lighting;
-    const shadow = lighting ? this.buildShadow(instances, lighting) : null;
+    const shadow = lighting ? this.buildShadow(instances, moved, lighting) : null;
     const skyBackdrop = this.hud && this.skyMap !== null;
     if (skyBackdrop) renderSkyBackground(this.output, this.width, this.height, camera.view, camera.projection, this.skyMap);
     this.renderer.render(instances, {
@@ -4720,57 +4734,190 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         fog: lighting.fog ?? null
       } : {}
     });
+    if (front.length > 0) {
+      this.frontRenderer.render(front, {
+        width: this.width,
+        height: this.height,
+        out: this.output,
+        depth: this.depth,
+        view: camera.view,
+        projection: camera.projection,
+        background: null,
+        ...lighting ? {
+          ambient: lighting.ambient,
+          lightDirection: sceneLightingKeyDirection(lighting),
+          environment: this.environment,
+          tonemap: sceneLightingTonemap(lighting),
+          lights: lighting.lights
+        } : {}
+      });
+    }
     if (this.hud && this.hudFrame) compositeHudOverScene(this.output, this.hudFrame, this.width * this.height);
     this.frame += 1;
     this.inner.blit(this.presented);
   }
   /**
-   * The instances to draw this frame: the authored set when the cart posed none
-   * (the fast, allocation-free path), otherwise each authored instance with any
-   * matching pose composed on top — a hidden pose drops the instance entirely.
-   * A pose's transform is applied in the instance's LOCAL space (authored · pose),
-   * so a cart spins/moves an object relative to where the editor placed it.
+   * The instances to draw this frame. With no poses, the authored set (the fast,
+   * allocation-free path). Otherwise each authored instance with any matching
+   * pose composed on top — a hidden pose drops it; a pose's `frame` swaps in one
+   * of its animation frames, `tint` recolours its tintable materials, and `front`
+   * moves it to the front layer. A pose's transform is applied in the instance's
+   * LOCAL space (authored · pose), so a cart moves an object relative to where
+   * the editor placed it. `moved` lists the posed main-layer instances — the
+   * only part of the shadow map that has to be redrawn each frame.
    */
   posedInstances() {
-    if (this.poses.length === 0) return this.instances;
-    const result = [];
+    if (this.poses.length === 0) return { main: this.instances, front: [], moved: [] };
+    const main = [];
+    const front = [];
+    const moved = [];
     for (let i = 0; i < this.instances.length; i += 1) {
       const authored = this.instances[i];
       const pose = this.poses.find((p) => p.index === i);
       if (!pose) {
-        result.push(authored);
+        main.push(authored);
         continue;
       }
       if (pose.hidden) continue;
-      const local = poseLocalMatrix(pose);
-      result.push({
-        mesh: authored.mesh,
-        model: multiplyMat4(authored.model, local),
-        textures: authored.textures,
-        normalTextures: authored.normalTextures,
-        materialTextures: authored.materialTextures,
-        mrTextures: authored.mrTextures,
-        occlusionTextures: authored.occlusionTextures,
-        emissiveTextures: authored.emissiveTextures
-      });
+      const frames = this.frames[i];
+      const frame = pose.frame ?? 0;
+      const source = frame > 0 && frames && frames.length > 0 ? frames[(frame - 1) % frames.length] : authored;
+      const instance = {
+        ...source,
+        mesh: pose.tint ? this.tinted(source.mesh, pose.tint) : source.mesh,
+        model: multiplyMat4(authored.model, poseLocalMatrix(pose))
+      };
+      if (pose.front) {
+        front.push(instance);
+      } else {
+        main.push(instance);
+        moved.push(instance);
+      }
     }
-    return result;
+    return { main, front, moved };
+  }
+  /** A tinted copy of `mesh`, cached so its identity (and any GPU upload) is stable. */
+  tinted(mesh, tint) {
+    let byTint = this.tintCache.get(mesh);
+    if (!byTint) {
+      byTint = /* @__PURE__ */ new Map();
+      this.tintCache.set(mesh, byTint);
+    }
+    let out = byTint.get(tint);
+    if (!out) {
+      out = tintMesh(mesh, tint);
+      byTint.set(tint, out);
+    }
+    return out;
   }
   /**
    * Render the scene's directional shadow map for this frame, or null when the
-   * rig has shadows off / no directional light. The depth scratch is allocated
-   * once and reused, since the map size is fixed.
+   * rig has shadows off / no directional light.
+   *
+   * Everything the cart did not pose this frame is static, so its depth is
+   * rendered once and cached; each frame copies that cache and rasterises only
+   * the posed (`moved`) instances over it. The cache is rebuilt when the set of
+   * posed instances changes. For an arena whose map never moves, this turns a
+   * full-scene shadow pass per frame into a memcpy plus a few characters.
    */
-  buildShadow(instances, lighting) {
+  buildShadow(instances, moved, lighting) {
     if (!lighting.shadows) return null;
-    if (!this.shadowDepth) this.shadowDepth = new Float32Array(SHADOW_MAP_SIZE * SHADOW_MAP_SIZE);
+    const size = SHADOW_MAP_SIZE;
+    if (!this.shadowDepth) this.shadowDepth = new Float32Array(size * size);
     const { center, radius } = this.scene.bounds;
-    return buildSceneShadow(instances, lighting, center, radius, { size: SHADOW_MAP_SIZE, depth: this.shadowDepth });
+    const movedSet = new Set(moved);
+    const key = this.poses.filter((p) => !p.hidden && !p.front).map((p) => p.index).sort((a, b) => a - b).join(",");
+    if (!this.staticShadow || this.staticShadowKey !== key || this.staticShadowLighting !== lighting) {
+      this.staticShadow ?? (this.staticShadow = new Float32Array(size * size));
+      buildSceneShadow(
+        instances.filter((instance) => !movedSet.has(instance)),
+        lighting,
+        center,
+        radius,
+        { size, depth: this.staticShadow }
+      );
+      this.staticShadowKey = key;
+      this.staticShadowLighting = lighting;
+    }
+    this.shadowDepth.set(this.staticShadow);
+    return buildSceneShadow(moved, lighting, center, radius, { size, depth: this.shadowDepth, clear: false });
   }
   destroy() {
     this.inner.destroy();
   }
 };
+async function decodeMeshTextures(mesh) {
+  const each = (pick) => Promise.all(
+    mesh.primitives.map((primitive) => {
+      const image = pick(primitive.material);
+      return image ? decodeTexture(image.mime, image.bytes) : Promise.resolve(null);
+    })
+  );
+  const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures] = await Promise.all([
+    each((m) => m.baseColorImage),
+    // base colour
+    each((m) => m.normalImage),
+    // per-pixel normals (option 2)
+    each((m) => m.materialImage),
+    // packed specular/roughness/emissive (option 2, slice 5)
+    // PBR maps for the Modern tier — absent on fantasy materials, so the
+    // rasteriser stays byte-identical there.
+    each((m) => m.metallicRoughnessImage),
+    each((m) => m.occlusionImage),
+    each((m) => m.emissiveImage)
+  ]);
+  return { mesh, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures };
+}
+var TINT_PALETTE = [
+  [1, 1, 1],
+  // 0: unused (no tint)
+  [0.62, 0.15, 0.13],
+  // 1 red
+  [0.2, 0.33, 0.62],
+  // 2 blue
+  [0.26, 0.45, 0.2],
+  // 3 green
+  [0.8, 0.42, 0.12],
+  // 4 orange
+  [0.42, 0.22, 0.58],
+  // 5 purple
+  [0.78, 0.62, 0.2],
+  // 6 gold
+  [0.4, 0.27, 0.16],
+  // 7 brown
+  [0.85, 0.45, 0.6],
+  // 8 pink
+  [0.85, 0.86, 0.88],
+  // 9 white
+  [0.14, 0.14, 0.15],
+  // 10 black
+  [0.45, 0.5, 0.56],
+  // 11 steel
+  [0.15, 0.5, 0.52],
+  // 12 teal
+  [0.38, 0.4, 0.2],
+  // 13 olive
+  [0.45, 0.06, 0.1],
+  // 14 crimson
+  [0.5, 0.6, 0.45]
+  // 15 sage
+];
+function tintMesh(mesh, tint) {
+  const color = TINT_PALETTE[tint];
+  if (!color || tint === 0) return mesh;
+  return {
+    name: mesh.name,
+    primitives: mesh.primitives.map(
+      (primitive) => primitive.material.tintable ? {
+        ...primitive,
+        material: {
+          ...primitive.material,
+          baseColorFactor: [color[0], color[1], color[2], primitive.material.baseColorFactor[3]]
+        }
+      } : primitive
+    )
+  };
+}
 async function decodeTexture(mime, bytes) {
   if (typeof createImageBitmap !== "function" || typeof OffscreenCanvas !== "function") return null;
   try {

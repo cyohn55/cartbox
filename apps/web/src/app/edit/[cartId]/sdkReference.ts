@@ -128,8 +128,8 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
       },
       {
         name: "cartbox.meshpose",
-        signature: "cartbox.meshpose(index, x, y, z, yaw, pitch, roll, scale)",
-        doc: "Move/rotate/scale one mesh instance by its sidecar index, on top of its authored placement (up to 8/frame; scale 0 hides).",
+        signature: "cartbox.meshpose(index, x, y, z, yaw, pitch, roll, scale, frame, tint, front)",
+        doc: "Move/rotate/scale one mesh instance by its sidecar index, on top of its authored placement (up to 8/frame; scale 0 hides). Yaw turns about Y, pitch about X, roll about Z. Optional: frame picks an animation frame (0 = base mesh), tint (1-15) recolours its tintable materials, front draws it over the whole scene (a held weapon).",
         snippet: "cartbox.meshpose(0, 0, 0, 0, t / 30, 0, 0)",
       },
       {

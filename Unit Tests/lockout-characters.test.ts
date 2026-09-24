@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { LOCKOUT_CODE, LOCKOUT_VIEWMODELS, deserializeMeshAsset, lockoutMeshSidecar } from "@cartbox/editor";
+import { LOCKOUT_CODE, LOCKOUT_VIEWMODELS, LOCKOUT_WALK_FRAMES, deserializeMeshAsset, lockoutMeshSidecar, type MeshAsset } from "@cartbox/editor";
 import { buildOrbitCamera, parseMeshScene } from "@cartbox/player";
 import { poseLocalMatrix } from "../packages/player/src/mesh/MeshOverlaySurface";
 
@@ -65,22 +65,49 @@ describe("the Lockout soldiers and weapons", () => {
 
   it("orders instances as map, 7 bots, then one viewmodel per weapon", () => {
     const ids = sidecar.meshes.map((m) => m.id);
+    expect(ids).toHaveLength(14);
     expect(ids[0]).toBe("lockout-map");
     expect(ids.slice(1, 8)).toEqual([1, 2, 3, 4, 5, 6, 7].map((i) => `bot-${i}`));
     expect(ids.slice(8)).toEqual(LOCKOUT_VIEWMODELS.map((w) => `viewmodel-${w}`));
     expect(parseMeshScene(lockoutMeshSidecar())!.instances).toHaveLength(14);
   });
 
-  it("paints bots 1-3 blue and 4-7 red, matching the cart's team split", () => {
-    const paint = (i: number) =>
-      deserializeMeshAsset(sidecar.meshes[i]!.mesh).primitives.find((p) => p.material.name === "armor")!.material.baseColorFactor;
-    for (const i of [1, 2, 3]) expect(paint(i)[2]).toBeGreaterThan(paint(i)[0]); // blue
-    for (const i of [4, 5, 6, 7]) expect(paint(i)[0]).toBeGreaterThan(paint(i)[2]); // red
+  it("shares one tintable soldier + walk frames across all 7 bots, stored once", () => {
+    const raw = JSON.parse(lockoutMeshSidecar()) as { meshes: { mesh: string; frames?: string[] }[]; library: Record<string, string> };
+    const bots = raw.meshes.slice(1, 8);
+    expect(new Set(bots.map((b) => b.mesh)).size).toBe(1); // one library reference
+    expect(bots[0]!.mesh.startsWith("@lib:")).toBe(true);
+    expect(bots[0]!.frames).toHaveLength(LOCKOUT_WALK_FRAMES);
+    const scene = parseMeshScene(lockoutMeshSidecar())!;
+    expect(scene.instances[1]!.mesh).toBe(scene.instances[7]!.mesh); // shared at runtime too
+    const armor = scene.instances[1]!.mesh.primitives.find((p) => p.material.name === "armor")!;
+    expect(armor.material.tintable).toBe(true);
+    // The walk frames swing the legs: a frame's boots sit apart from the idle stance's.
+    const zSpan = (m: MeshAsset) => {
+      const suit = m.primitives.find((p) => p.material.name === "undersuit")!;
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let i = 0; i < suit.positions.length; i += 3) {
+        if (suit.positions[i + 1]! > 0.15) continue; // boots only
+        lo = Math.min(lo, suit.positions[i + 2]!);
+        hi = Math.max(hi, suit.positions[i + 2]!);
+      }
+      return hi - lo;
+    };
+    const stride = Math.max(...scene.instances[1]!.frames!.map(zSpan));
+    expect(stride).toBeGreaterThan(zSpan(scene.instances[1]!.mesh) + 0.2);
+  });
+
+  it("tints by team in team modes and gives every player their own colour in FFA", () => {
+    expect(LOCKOUT_CODE).toContain("function armor_tint(o)");
+    expect(LOCKOUT_CODE).toContain('if MODE.teams then return o.team=="blue" and TINT_BLUE or TINT_RED end');
+    expect(LOCKOUT_CODE).toMatch(/FFA_TINTS = \{ (\d+, ){6}\d+ \}/);
     expect(LOCKOUT_CODE).toContain('team=(i<=3) and "blue" or "red"');
+    expect(LOCKOUT_CODE).toContain("frame, armor_tint(o))"); // bots pose a walk frame + tint
   });
 
   it("builds soldiers facing +Z, with the visor at the eye height the camera uses", () => {
-    const soldier = deserializeMeshAsset(sidecar.meshes[1]!.mesh);
+    const soldier = parseMeshScene(lockoutMeshSidecar())!.instances[1]!.mesh;
     const visor = soldier.primitives.find((p) => p.material.name === "visor")!;
     let minZ = Infinity;
     let maxY = 0;
@@ -99,6 +126,8 @@ describe("the Lockout soldiers and weapons", () => {
     LOCKOUT_VIEWMODELS.forEach((w, k) => expect(LOCKOUT_CODE).toMatch(new RegExp(`${w}=${8 + k}\\b`)));
     expect(LOCKOUT_CODE).toContain("local WS = 1000");
     expect(LOCKOUT_CODE).toContain("pose_viewmodel(cur_id)");
+    // The held weapon rides the front layer, so it never clips into a wall.
+    expect(LOCKOUT_CODE).toContain("0, armor_tint(p), true)");
     // Every weapon has hands on it except where it's one-handed, and the sword glows.
     const sword = deserializeMeshAsset(sidecar.meshes[8 + LOCKOUT_VIEWMODELS.indexOf("sword")]!.mesh);
     expect(sword.primitives.find((p) => p.material.name === "glow")?.material.emissiveFactor?.[2]).toBeGreaterThan(1);

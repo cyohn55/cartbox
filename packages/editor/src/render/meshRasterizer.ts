@@ -928,6 +928,12 @@ export interface RenderShadowMapOptions {
   readonly size: number;
   /** Depth output, `size × size`; reset to +Infinity each call. Reuse across frames. */
   readonly depth: Float32Array;
+  /**
+   * Leave `depth` as it is and draw these instances over it (nearest still
+   * wins), instead of resetting it first. Lets a caller cache the static part
+   * of a scene's shadow map and add only what moved each frame. Default true.
+   */
+  readonly clear?: boolean;
 }
 
 /**
@@ -945,7 +951,7 @@ export function renderShadowMap(
 ): ShadowInput {
   const { lightView, lightProjection, size, depth } = options;
   const lightViewProj = multiply(lightProjection, lightView);
-  depth.fill(Infinity);
+  if (options.clear ?? true) depth.fill(Infinity);
 
   for (const instance of instances) {
     const mvp = multiply(lightViewProj, instance.model);
