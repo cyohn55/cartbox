@@ -14,7 +14,7 @@ import { seedPlatformerCart, PLATFORMER_COLLISION } from "./platformerSeed";
 import { seedPs1Cart, PS1_MESH_SIDECAR, PS1_ASSETS_SIDECAR } from "./ps1Seed";
 import { seedN64Cart, N64_MESH_SIDECAR, N64_ASSETS_SIDECAR } from "./n64Seed";
 import { seedXbox360Cart, XBOX360_MESH_SIDECAR, XBOX360_ASSETS_SIDECAR } from "./xbox360Seed";
-import { seedLockoutCart, LOCKOUT_MESH_SIDECAR, LOCKOUT_FX } from "./lockoutSeed";
+import { seedLockoutCart, lockoutMeshSidecar, LOCKOUT_FX } from "./lockoutSeed";
 
 /** Applies starter content to a cart's engine, in place. */
 type SeedFunction = (engine: CartEngine) => void;
@@ -112,7 +112,11 @@ export const CART_STARTERS: readonly [CartStarter, ...CartStarter[]] = [
     label: "Lockout arena",
     description: "A Halo 2 Lockout homage on the Xbox 360 core — first-person arena vs 7 bots.",
     seed: seedLockoutCart,
-    mesh: LOCKOUT_MESH_SIDECAR,
+    // A getter: the sidecar carries baked textures, built only when a Lockout
+    // cart is actually opened (see lockoutMeshSidecar).
+    get mesh() {
+      return lockoutMeshSidecar();
+    },
     fx: LOCKOUT_FX,
   },
 ];

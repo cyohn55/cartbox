@@ -418,6 +418,43 @@ export interface ShadowInput {
   readonly bias?: number;
   /** How dark a shadow is, 0 (none) .. 1 (black); default 1. */
   readonly strength?: number;
+  /**
+   * Extra bias per unit of surface slope to the light (× tan of the angle
+   * between the geometric normal and the key light, capped at 10), so faces the
+   * light grazes don't self-shadow into acne. Default 0 (constant bias only).
+   */
+  readonly slopeBias?: number;
+  /** Average a 2×2 texel neighbourhood (percentage-closer filtering) for soft
+   *  shadow edges instead of one hard texel. Default false. */
+  readonly pcf?: boolean;
+}
+
+/**
+ * The shadow test shared by every fragment path: 1 when lit, `1 − strength` when
+ * occluded, fractional under PCF. `(lx, ly, lz)` is the fragment's light-NDC
+ * position; `cosToLight` is |N·L| of the geometric normal against the key light
+ * (drives the slope-scaled bias). Mirrors `shadowFactor` in the WGSL renderer.
+ */
+export function shadowVisibility(shadow: ShadowInput, lx: number, ly: number, lz: number, cosToLight: number): number {
+  const size = shadow.size;
+  const sx = (lx * 0.5 + 0.5) * size;
+  const sy = (1 - (ly * 0.5 + 0.5)) * size;
+  if (!(sx >= 0 && sx < size && sy >= 0 && sy < size && lz >= -1 && lz <= 1)) return 1;
+  let bias = shadow.bias ?? 0.003;
+  const slope = shadow.slopeBias ?? 0;
+  if (slope > 0) {
+    const c = Math.min(1, Math.max(0.05, cosToLight));
+    bias += slope * Math.min(10, Math.sqrt(1 - c * c) / c);
+  }
+  const strength = shadow.strength ?? 1;
+  const test = (fx: number, fy: number): number => {
+    const tx = Math.min(size - 1, Math.max(0, Math.floor(fx)));
+    const ty = Math.min(size - 1, Math.max(0, Math.floor(fy)));
+    return lz - bias > shadow.depth[ty * size + tx]! ? 0 : 1;
+  };
+  if (!shadow.pcf) return test(sx, sy) ? 1 : 1 - strength;
+  const lit = (test(sx - 0.5, sy - 0.5) + test(sx + 0.5, sy - 0.5) + test(sx - 0.5, sy + 0.5) + test(sx + 0.5, sy + 0.5)) / 4;
+  return 1 - strength * (1 - lit);
 }
 
 /** A vertex after transforms: view-space z (for clipping) + clip-space + attributes. */
@@ -1552,6 +1589,11 @@ function rasterizeTriangle(
       let nx = pw0 * a.nx + pw1 * b.nx + pw2 * c.nx;
       let ny = pw0 * a.ny + pw1 * b.ny + pw2 * c.ny;
       let nz = pw0 * a.nz + pw1 * b.nz + pw2 * c.nz;
+      // |N·L| of the *geometric* normal (before any normal map), for the shadow
+      // test's slope bias — the GPU path has no normal maps, so this keeps parity.
+      const geoCosL = shadow
+        ? Math.abs(nx * light[0] + ny * light[1] + nz * light[2]) / (Math.hypot(nx, ny, nz) || 1)
+        : 1;
 
       // Normal mapping (option 2): perturb the geometric normal by the sampled
       // tangent-space normal, in the TBN frame built from the surface tangent.
@@ -1604,15 +1646,7 @@ function rasterizeTriangle(
         const lxi = pw0 * a.lx + pw1 * b.lx + pw2 * c.lx;
         const lyi = pw0 * a.ly + pw1 * b.ly + pw2 * c.ly;
         const lzi = pw0 * a.lz + pw1 * b.lz + pw2 * c.lz;
-        const sx = (lxi * 0.5 + 0.5) * shadow.size;
-        const sy = (1 - (lyi * 0.5 + 0.5)) * shadow.size;
-        if (sx >= 0 && sx < shadow.size && sy >= 0 && sy < shadow.size && lzi >= -1 && lzi <= 1) {
-          const tx = Math.min(shadow.size - 1, Math.max(0, Math.floor(sx)));
-          const ty = Math.min(shadow.size - 1, Math.max(0, Math.floor(sy)));
-          const stored = shadow.depth[ty * shadow.size + tx]!;
-          const bias = shadow.bias ?? 0.003;
-          if (lzi - bias > stored) shadowLit = 1 - (shadow.strength ?? 1);
-        }
+        shadowLit = shadowVisibility(shadow, lxi, lyi, lzi, geoCosL);
       }
 
       // Two-sided Lambert: |N·L| so inconsistent winding still lights.

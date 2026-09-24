@@ -105,6 +105,7 @@ struct Uniforms {
   model: mat4x4<f32>,   // this draw's world matrix (point-light world position)
   fog: vec4<f32>,       // rgb = fog colour, w = density
   fogParams: vec4<f32>, // x = 1 when fogged, y = start distance, z = max amount
+  shadow2: vec4<f32>,   // x = slope-scaled bias, y = 1 for 2x2 PCF
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -148,7 +149,17 @@ struct VSOut {
 // Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
 // project into the light's frame, look up the nearest depth the light sees, and
 // return 1 (lit) or 1−strength (occluded). The light is orthographic (w = 1).
-fn shadowFactor(lightClip: vec4<f32>) -> f32 {
+fn shadowTap(fx: f32, fy: f32, z: f32) -> f32 {
+  let size = u.shadow.y;
+  let tx = i32(clamp(floor(fx), 0.0, size - 1.0));
+  let ty = i32(clamp(floor(fy), 0.0, size - 1.0));
+  let stored = textureLoad(shadowMap, vec2<i32>(tx, ty), 0).r;
+  if (z > stored) { return 0.0; }
+  return 1.0;
+}
+// cosL = |N.L| of the geometric normal against the key light, for the slope bias.
+// Mirrors shadowVisibility in meshRasterizer.ts.
+fn shadowFactor(lightClip: vec4<f32>, cosL: f32) -> f32 {
   if (u.shadow.x < 0.5) { return 1.0; }
   let ndc = lightClip.xyz / lightClip.w;
   if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < -1.0 || ndc.z > 1.0) {
@@ -157,11 +168,19 @@ fn shadowFactor(lightClip: vec4<f32>) -> f32 {
   let size = u.shadow.y;
   let sx = (ndc.x * 0.5 + 0.5) * size;
   let sy = (1.0 - (ndc.y * 0.5 + 0.5)) * size;
-  let tx = i32(clamp(floor(sx), 0.0, size - 1.0));
-  let ty = i32(clamp(floor(sy), 0.0, size - 1.0));
-  let stored = textureLoad(shadowMap, vec2<i32>(tx, ty), 0).r;
-  if (ndc.z - u.shadow.z > stored) { return 1.0 - u.shadow.w; }
-  return 1.0;
+  var bias = u.shadow.z;
+  if (u.shadow2.x > 0.0) {
+    let c = clamp(cosL, 0.05, 1.0);
+    bias = bias + u.shadow2.x * min(10.0, sqrt(1.0 - c * c) / c);
+  }
+  let z = ndc.z - bias;
+  if (u.shadow2.y < 0.5) {
+    if (shadowTap(sx, sy, z) < 0.5) { return 1.0 - u.shadow.w; }
+    return 1.0;
+  }
+  let lit = (shadowTap(sx - 0.5, sy - 0.5, z) + shadowTap(sx + 0.5, sy - 0.5, z)
+           + shadowTap(sx - 0.5, sy + 0.5, z) + shadowTap(sx + 0.5, sy + 0.5, z)) * 0.25;
+  return 1.0 - u.shadow.w * (1.0 - lit);
 }
 
 // Analytic environment (Phase 3 IBL), mirroring environmentColor /
@@ -290,7 +309,7 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
       amb = amb * textureLoad(ssaoMap, vec2<i32>(in.pos.xy), 0).r;
     }
     // The direct light is what a shadow occludes; ambient/IBL still fills it.
-    let sf = shadowFactor(in.lightClip);
+    let sf = shadowFactor(in.lightClip, abs(dot(normalize(in.normal), u.light.xyz)));
     let lc = i32(u.ssaoMeta.y + 0.5);
     var lit: vec3<f32>;
     if (lc > 0) {
@@ -352,7 +371,7 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   // dots without normalising, and parity with it is the contract here. Both
   // therefore skew identically under non-uniform scale.
   let nl = abs(dot(in.normal, u.light.xyz));
-  let shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(in.lightClip);
+  let shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(in.lightClip, abs(dot(normalize(in.normal), u.light.xyz)));
   return vec4<f32>(colour.rgb * shade, colour.a);
 }
 `;
@@ -803,7 +822,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       );
     }
     const shadowParams = shadow
-      ? { size: shadow.size, bias: shadow.bias ?? 0.003, strength: shadow.strength ?? 1 }
+      ? { size: shadow.size, bias: shadow.bias ?? 0.003, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false }
       : null;
 
     // Env map: uploaded once per distinct decoded panorama; the uniform's

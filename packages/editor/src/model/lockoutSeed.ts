@@ -35,141 +35,370 @@ import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, type Streams
 type Box = readonly [number, number, number, number, number, number];
 
 // --- The Forerunner texture set -------------------------------------------
-// One 128x128 texture, painted procedurally, baked into the glTF-style PBR maps
-// the Modern-tier rasteriser reads together: albedo (panels), a tangent-space
-// normal map (beveled panel edges + a recessed grout grid = greebles), a packed
-// metallic-roughness map (G=roughness, B=metallic) that makes the panels glossy
-// metal and the grout matte, and an emissive map that lights the cyan energy
-// channel. The BRDF then reflects the skybox in the metal and glows the channel.
+// Three original, procedurally painted, seamlessly tiling surfaces, each baked
+// into the glTF-style PBR maps the Modern-tier rasteriser reads together:
+// albedo, a tangent-space normal map (from a painted height field), a packed
+// metallic-roughness map (G = roughness, B = metallic) and an emissive map.
+//
+//  - WALL: staggered bands of machined panels with angular recessed inlays and
+//    a sparse cyan light line, weathered — grime streaking down from every
+//    seam, frost packed into the grooves, bright wear on the bevels.
+//  - FLOOR: broad, darker deck plates with engraved borders and a chevron
+//    inlay, scuffed, with frost in the joints and tiny cyan studs.
+//  - SNOW: soft wind-packed snow with a faint sparkle.
+//
+// 256² with PNG filtering + DEFLATE (see png.ts), so the higher resolution
+// costs a fraction of what the old stored 128² maps did.
 
-const TEX = 128;
-const PANEL = 32; // panel grid pitch
+const TEX = 256;
 
+/** A painted surface sample: colour 0..255, height 0..1, PBR terms 0..1. */
 interface Surf {
   r: number;
   g: number;
   b: number;
-  h: number; // height 0..1 (relief)
-  spec: number; // 0..15
-  rough: number; // 0..15
-  emis: number; // 0..15
+  h: number;
+  rough: number;
+  metal: number;
+  emis: number; // 0..1, the cyan energy channel
 }
 
-function forerunnerSurface(x: number, y: number): Surf {
-  const px = ((x % PANEL) + PANEL) % PANEL;
-  const py = ((y % PANEL) + PANEL) % PANEL;
-  // Brushed blue-grey metal with a faint horizontal brush streak.
-  const streak = Math.round((Math.sin(y * 0.8) + Math.sin(y * 2.3)) * 2.5);
-  let r = 66 + streak;
-  let g = 80 + streak;
-  let b = 102 + streak;
-  let h = 0.55;
-  let spec = 12;
-  let rough = 4;
+/** Integer hash → 0..1, wrapped to a period so the noise tiles seamlessly. */
+function thash(x: number, y: number, seed: number, period: number): number {
+  const xi = ((x % period) + period) % period;
+  const yi = ((y % period) + period) % period;
+  let h = (Math.imul(xi, 374761393) + Math.imul(yi, 668265263) + Math.imul(seed, 1442695041)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+}
+
+/** Tileable value noise with `cells` lattice cells across the texture. */
+function tnoise(px: number, py: number, cells: number, seed: number): number {
+  const x = (px / TEX) * cells;
+  const y = (py / TEX) * cells;
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const fx = x - xi;
+  const fy = y - yi;
+  const sx = fx * fx * (3 - 2 * fx);
+  const sy = fy * fy * (3 - 2 * fy);
+  const a = thash(xi, yi, seed, cells);
+  const b = thash(xi + 1, yi, seed, cells);
+  const c = thash(xi, yi + 1, seed, cells);
+  const d = thash(xi + 1, yi + 1, seed, cells);
+  return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
+}
+
+function tfbm(px: number, py: number, cells: number, seed: number, octaves = 4): number {
+  let sum = 0;
+  let amp = 0.5;
+  let norm = 0;
+  for (let i = 0; i < octaves; i += 1) {
+    sum += tnoise(px, py, cells << i, seed + i * 7) * amp;
+    norm += amp;
+    amp *= 0.5;
+  }
+  return sum / norm;
+}
+
+const wrap = (v: number): number => ((v % TEX) + TEX) % TEX;
+const clampByte = (v: number): number => Math.max(0, Math.min(255, Math.round(v)));
+
+/** Distance (px) from `v` to the nearest of `lines` on a wrapped axis. */
+function seamDistance(v: number, lines: readonly number[]): number {
+  let best = Infinity;
+  for (const l of lines) {
+    const d = Math.abs(wrap(v - l));
+    best = Math.min(best, d, TEX - d);
+  }
+  return best;
+}
+
+/** How far `v` sits *below* the nearest seam above it (for streaks that run down). */
+function belowSeam(v: number, lines: readonly number[]): number {
+  let best = Infinity;
+  for (const l of lines) best = Math.min(best, wrap(v - l));
+  return best;
+}
+
+const WALL_ROWS = [0, 88, 168];
+
+function wallSurface(x: number, y: number): Surf {
+  // Staggered vertical seams per band.
+  const band = y < 88 ? 0 : y < 168 ? 1 : 2;
+  const cols = band === 1 ? [64, 192] : [0, 128];
+  const dRow = seamDistance(y, WALL_ROWS);
+  const dCol = seamDistance(x, cols);
+  const edge = Math.min(dRow, dCol);
+
+  const mottle = tfbm(x, y, 8, 11) - 0.5;
+  let r = 150;
+  let g = 158;
+  let b = 171;
+  if (band === 1) {
+    r = 124;
+    g = 132;
+    b = 146;
+  }
+  let h = 0.6;
+  let rough = 0.32;
+  let metal = 0.85;
   let emis = 0;
 
-  const edge = Math.min(px, PANEL - 1 - px, py, PANEL - 1 - py);
-  if (edge < 1) {
-    // recessed grout between panels
-    r = 22;
-    g = 27;
-    b = 36;
-    h = 0.12;
-    spec = 3;
-    rough = 13;
-  } else if (edge < 3) {
-    // lit bevel around each panel (kept restrained so it reads as metal, not neon)
-    r = 92;
-    g = 104;
-    b = 124;
-    h = 0.9;
-    spec = 14;
-    rough = 3;
+  // Machined inlay in the middle band: an angular, chamfered recessed plate.
+  if (band === 1) {
+    const px = wrap(x - 64) % 128; // 0..127 within this band's panel
+    const py = y - 88; // 0..79
+    const ix = Math.min(px, 127 - px);
+    const iy = Math.min(py, 79 - py);
+    const chamfer = ix + iy;
+    if (ix > 14 && iy > 12 && chamfer > 40) {
+      r = 100;
+      g = 108;
+      b = 123;
+      h = 0.42;
+      rough = 0.22;
+      // A thin light line along the inlay's lower edge — on one panel per tile.
+      if (wrap(x) >= 64 && wrap(x) < 192 && py >= 64 && py <= 65 && ix > 20) {
+        r = 90;
+        g = 214;
+        b = 236;
+        emis = 1;
+        metal = 0;
+        rough = 0.5;
+      }
+    } else if (ix > 12 && iy > 10 && chamfer > 36) {
+      h = 0.78; // bright chamfered lip around the inlay
+      r += 18;
+      g += 18;
+      b += 18;
+    }
+  } else {
+    // Top/bottom bands: a raised sub-panel with three vertical flutes.
+    const px = wrap(x) % 128;
+    const inPanel = px > 18 && px < 110 && dRow > 16;
+    if (inPanel) {
+      h = 0.68;
+      const flute = Math.abs(((px - 18) % 23) - 11.5);
+      if (flute < 1.2) {
+        h = 0.55;
+        r -= 12;
+        g -= 12;
+        b -= 10;
+      }
+    }
   }
 
-  // Inner sub-panel frame — a little machined detail inside each panel.
-  const ipx = Math.min(px, PANEL - 1 - px);
-  const ipy = Math.min(py, PANEL - 1 - py);
-  if (edge >= 3 && ((ipx > 7 && ipx < 9) || (ipy > 7 && ipy < 9))) {
-    r -= 14;
-    g -= 14;
-    b -= 10;
-    h = 0.42;
+  // Seams: a dark groove with a lit bevel either side.
+  if (edge < 2) {
+    r = 30;
+    g = 35;
+    b = 44;
+    h = 0.1;
+    rough = 0.8;
+    metal = 0.2;
+    // Frost packed into the groove's bottom.
+    if (dRow < 2 && tnoise(x, y, 32, 5) > 0.45) {
+      r = 196;
+      g = 208;
+      b = 222;
+      h = 0.18;
+      rough = 0.9;
+      metal = 0;
+    }
+  } else if (edge < 4) {
+    h = 0.92;
+    r += 22;
+    g += 22;
+    b += 24;
+    rough = 0.25;
+    // Wear: bright scratches chipped into the bevel.
+    if (tnoise(x, y, 64, 9) > 0.72) {
+      r += 28;
+      g += 28;
+      b += 28;
+    }
   }
 
-  // A thin cyan energy channel — only on every other panel row, so it reads as a
-  // Forerunner light strip, not a Tron grid.
-  const panelRow = Math.floor(y / PANEL);
-  if (panelRow % 2 === 0 && py >= 15 && py <= 16) {
-    r = 66;
-    g = 196;
-    b = 220;
-    h = 0.5;
-    spec = 6;
-    rough = 8;
-    emis = 12;
+  // Grime streaking down from each horizontal seam, broken up per column.
+  const streakCol = tnoise(x, 0, 64, 21) * tnoise(x, 7, 16, 23);
+  const down = belowSeam(y, WALL_ROWS);
+  const streak = streakCol > 0.35 ? Math.max(0, 1 - down / (20 + streakCol * 60)) * (streakCol - 0.35) * 2.2 : 0;
+  const grime = Math.min(0.55, streak + Math.max(0, mottle) * 0.25);
+  if (emis === 0) {
+    r = r * (1 - grime * 0.45) + mottle * 14;
+    g = g * (1 - grime * 0.45) + mottle * 14;
+    b = b * (1 - grime * 0.4) + mottle * 12;
+    rough = Math.min(1, rough + grime * 0.6);
+    metal = Math.max(0, metal - grime * 0.4);
   }
-  return { r, g, b, h, spec, rough, emis };
+  return { r: clampByte(r), g: clampByte(g), b: clampByte(b), h, rough, metal, emis };
 }
 
-/** Bake the albedo, normal, metallic-roughness and emissive PNGs (glTF PBR). */
-function bakeForerunner(): {
+function floorSurface(x: number, y: number): Surf {
+  const d = Math.min(seamDistance(x, [0, 128]), seamDistance(y, [0, 128]));
+  const px = wrap(x) % 128;
+  const py = wrap(y) % 128;
+  const plate = (wrap(x) >= 128 ? 1 : 0) + (wrap(y) >= 128 ? 2 : 0);
+  const mottle = tfbm(x, y, 8, 31) - 0.5;
+  let r = 104;
+  let g = 110;
+  let b = 122;
+  let h = 0.6;
+  let rough = 0.5;
+  let metal = 0.7;
+  let emis = 0;
+
+  // Engraved border line inset on every plate.
+  const inset = Math.min(px, 127 - px, py, 127 - py);
+  if (inset >= 10 && inset <= 11) {
+    r -= 26;
+    g -= 26;
+    b -= 22;
+    h = 0.45;
+  }
+  // A chevron inlay on one plate per tile.
+  if (plate === 1 && inset > 22) {
+    const cx = px - 64;
+    const cy = py - 64;
+    const chev = Math.abs(Math.abs(cx) * 0.8 + cy * 0.9 - 6);
+    if (chev < 3) {
+      r -= 20;
+      g -= 20;
+      b -= 16;
+      h = 0.46;
+    }
+  }
+  // Faint horizontal grip striation on the other plates (kept low-contrast and
+  // widely spaced, or it aliases into a grate at a distance).
+  if (plate !== 1 && inset > 14 && py % 12 === 0) {
+    r -= 5;
+    g -= 5;
+    b -= 5;
+    h = 0.57;
+  }
+
+  if (d < 2.5) {
+    r = 34;
+    g = 38;
+    b = 47;
+    h = 0.1;
+    rough = 0.85;
+    metal = 0.2;
+    if (tnoise(x, y, 32, 41) > 0.4) {
+      // frost in the joints
+      r = 200;
+      g = 212;
+      b = 226;
+      h = 0.2;
+      rough = 0.9;
+      metal = 0;
+    }
+  } else if (d < 4.5) {
+    h = 0.85;
+    r += 16;
+    g += 16;
+    b += 18;
+  }
+  // Tiny cyan studs where the joints cross.
+  const sx = seamDistance(x, [0, 128]);
+  const sy = seamDistance(y, [0, 128]);
+  if (Math.hypot(sx, sy) < 3.2) {
+    r = 96;
+    g = 220;
+    b = 240;
+    h = 0.5;
+    emis = 1;
+    metal = 0;
+    rough = 0.4;
+  }
+
+  // Scuffs and wear: lighter smears, rougher.
+  const scuff = tfbm(x * 1.0, y * 3.0, 16, 51);
+  if (emis === 0) {
+    const wear = Math.max(0, scuff - 0.6) * 2.5;
+    r = r + wear * 26 + mottle * 16;
+    g = g + wear * 26 + mottle * 16;
+    b = b + wear * 24 + mottle * 14;
+    rough = Math.min(1, rough + wear * 0.3 + Math.max(0, mottle) * 0.3);
+  }
+  return { r: clampByte(r), g: clampByte(g), b: clampByte(b), h, rough, metal, emis };
+}
+
+function snowSurface(x: number, y: number): Surf {
+  const n = tfbm(x, y, 8, 61, 5);
+  const fine = tnoise(x, y, 64, 67);
+  const sparkle = thash(x, y, 71, TEX) > 0.996 ? 30 : 0;
+  const v = 226 + (n - 0.5) * 30 + (fine - 0.5) * 10 + sparkle;
+  return { r: clampByte(v - 8), g: clampByte(v - 3), b: clampByte(v + 6), h: n * 0.8 + fine * 0.2, rough: 0.88, metal: 0, emis: 0 };
+}
+
+interface BakedSurface {
   albedo: EncodedImage;
   normal: EncodedImage;
   metallicRoughness: EncodedImage;
   emissive: EncodedImage;
-} {
+}
+
+/** Bake one painted surface into its albedo, normal, metallic-roughness and emissive PNGs. */
+function bakeSurface(surface: (x: number, y: number) => Surf, strength: number): BakedSurface {
+  const samples: Surf[] = new Array(TEX * TEX);
+  for (let y = 0; y < TEX; y += 1) for (let x = 0; x < TEX; x += 1) samples[y * TEX + x] = surface(x, y);
+  const at = (x: number, y: number): Surf => samples[wrap(y) * TEX + wrap(x)]!;
   const albedo = new Uint8ClampedArray(TEX * TEX * 4);
   const normal = new Uint8ClampedArray(TEX * TEX * 4);
-  const mr = new Uint8ClampedArray(TEX * TEX * 4); // glTF metallic-roughness: G=rough, B=metal
+  const mr = new Uint8ClampedArray(TEX * TEX * 4);
   const emissive = new Uint8ClampedArray(TEX * TEX * 4);
-  const hAt = (x: number, y: number) => forerunnerSurface(x, y).h;
-  let o = 0;
   for (let y = 0; y < TEX; y += 1) {
     for (let x = 0; x < TEX; x += 1) {
-      const s = forerunnerSurface(x, y);
+      const o = (y * TEX + x) * 4;
+      const s = at(x, y);
       albedo[o] = s.r;
       albedo[o + 1] = s.g;
       albedo[o + 2] = s.b;
       albedo[o + 3] = 255;
-      // Normal from the height gradient (tangent space, z up out of the surface).
-      const dhx = hAt(x + 1, y) - hAt(x - 1, y);
-      const dhy = hAt(x, y + 1) - hAt(x, y - 1);
-      const st = 2.4;
-      let nx = -dhx * st;
-      let ny = -dhy * st;
-      let nz = 1;
-      const len = Math.hypot(nx, ny, nz) || 1;
-      nx /= len;
-      ny /= len;
-      nz /= len;
-      normal[o] = Math.round((nx * 0.5 + 0.5) * 255);
-      normal[o + 1] = Math.round((ny * 0.5 + 0.5) * 255);
-      normal[o + 2] = Math.round((nz * 0.5 + 0.5) * 255);
+      // Tangent-space normal from the (wrapped) height gradient, z out of the surface.
+      const nx0 = -(at(x + 1, y).h - at(x - 1, y).h) * strength;
+      const ny0 = -(at(x, y + 1).h - at(x, y - 1).h) * strength;
+      const len = Math.hypot(nx0, ny0, 1);
+      normal[o] = Math.round((nx0 / len) * 127.5 + 127.5);
+      normal[o + 1] = Math.round((ny0 / len) * 127.5 + 127.5);
+      normal[o + 2] = Math.round((1 / len) * 127.5 + 127.5);
       normal[o + 3] = 255;
-      // Roughness from the authored rough channel; metallic from the surface kind:
-      // energy strips are non-metal emitters, grout is matte non-metal, panels and
-      // their bevels are near-pure metal so they mirror the skybox.
-      const roughness = Math.min(255, Math.max(16, s.rough * 17));
-      const metallic = s.emis > 0 ? 0 : s.spec <= 3 ? 50 : 230;
       mr[o] = 0;
-      mr[o + 1] = roughness;
-      mr[o + 2] = metallic;
+      mr[o + 1] = clampByte(Math.max(0.06, s.rough) * 255);
+      mr[o + 2] = clampByte(s.metal * 255);
       mr[o + 3] = 255;
-      // Emissive: the cyan channel glows, everything else is dark.
-      const e = s.emis / 15;
-      emissive[o] = Math.round(s.r * e);
-      emissive[o + 1] = Math.round(s.g * e);
-      emissive[o + 2] = Math.round(s.b * e);
+      emissive[o] = Math.round(s.r * s.emis);
+      emissive[o + 1] = Math.round(s.g * s.emis);
+      emissive[o + 2] = Math.round(s.b * s.emis);
       emissive[o + 3] = 255;
-      o += 4;
     }
   }
-  const png = (rgba: Uint8ClampedArray): EncodedImage => ({ mime: "image/png", bytes: encodeRgbaPng(rgba, TEX, TEX) });
+  const png = (rgba: Uint8ClampedArray): EncodedImage => ({ mime: "image/png", bytes: encodeRgbaPng(rgba, TEX, TEX, { compress: true }) });
   return { albedo: png(albedo), normal: png(normal), metallicRoughness: png(mr), emissive: png(emissive) };
 }
 
-const FORE = bakeForerunner();
+interface LockoutTextures {
+  readonly wall: BakedSurface;
+  readonly floor: BakedSurface;
+  readonly snow: BakedSurface;
+}
+let bakedTextures: LockoutTextures | null = null;
+
+/**
+ * The arena's texture sets, baked on first use. Baking three 256² PBR sets costs
+ * a few hundred milliseconds, and this module loads with the whole editor
+ * package — so nothing pays for it until a Lockout cart actually needs its mesh.
+ */
+function lockoutTextures(): LockoutTextures {
+  bakedTextures ??= {
+    wall: bakeSurface(wallSurface, 2.6),
+    floor: bakeSurface(floorSurface, 2.2),
+    snow: bakeSurface(snowSurface, 1.2),
+  };
+  return bakedTextures;
+}
 
 // --- Map geometry ---------------------------------------------------------
 // Coordinates: X right, Y up, Z forward. Symmetric in X/Z so the scene centre is
@@ -429,12 +658,17 @@ function column(s: Streams, x0: number, z0: number, y0: number, r0: number, x1: 
   pushLoft(s, chamferedRect(x0, z0, r0, r0, r0 * 0.42, y0), chamferedRect(x1, z1, r1, r1, r1 * 0.42, y1), UV);
 }
 
-/** Forerunner metal: the arena's walls, ramps, fins and walkway. */
-function structureStreams(): Streams {
+/**
+ * Forerunner metal: the arena's walls, fins and canopy (`wall`), and everything
+ * underfoot — the deck, ramps and walkway decks (`floor`) — which take the
+ * darker deck-plate texture so walkable surfaces read apart from the walls.
+ */
+function structureStreams(): { wall: Streams; floor: Streams } {
   const s = newStreams();
+  const f = newStreams();
   // The deck: a chamfered slab whose top is the arena floor.
   const [fx, , fz, fhx, , fhz] = FLOOR;
-  pushLoft(s, chamferedRect(fx, fz, fhx, fhz, 1.2, -1), chamferedRect(fx, fz, fhx, fhz, 1.2, 0), UV, { top: true, bottom: false });
+  pushLoft(f, chamferedRect(fx, fz, fhx, fhz, 1.2, -1), chamferedRect(fx, fz, fhx, fhz, 1.2, 0), UV, { top: true, bottom: false });
 
   // Sniper tower: three battered, corniced tiers and a crown of blades.
   tier(s, T1, { batter: 0.35, cornice: 0.22 });
@@ -464,7 +698,7 @@ function structureStreams(): Streams {
     const narrowX = hx < hz;
     const ix = narrowX ? Math.min(0.6, hx * 0.4) : 0.1;
     const iz = narrowX ? 0.1 : Math.min(0.6, hz * 0.4);
-    pushLoft(s, chamferedRect(cx, cz, hx - ix, hz - iz, 0.2, top - 0.8), chamferedRect(cx, cz, hx, hz, 0.25, top), UV);
+    pushLoft(f, chamferedRect(cx, cz, hx - ix, hz - iz, 0.2, top - 0.8), chamferedRect(cx, cz, hx, hz, 0.25, top), UV);
   }
   for (const [x, , z] of BRIDGE_PYLONS) {
     column(s, x, z, 0, 0.62, x, z, 2.2, 0.45);
@@ -502,8 +736,8 @@ function structureStreams(): Streams {
   for (const rail of RAILS) prism(s, rail, rail[1] - rail[4], rail[1] + rail[4], 0.05, { top: true, bottom: false });
 
   // Ramps over every flight of steps.
-  for (const f of FLIGHTS) ramp(s, f);
-  return s;
+  for (const flightOfSteps of FLIGHTS) ramp(f, flightOfSteps);
+  return { wall: s, floor: f };
 }
 
 /** Darker structural metal: the deck's underside and the pylons into the mist. */
@@ -533,8 +767,8 @@ function snowPatch(s: Streams, x: number, z: number, radius: number, y: number, 
   for (let i = 0; i < sides; i += 1) {
     const a = (i / sides) * Math.PI * 2;
     const r = radius * (0.7 + 0.45 * snowRand(seed * 13 + i));
-    outer.push([x + Math.cos(a) * r, y + 0.015, z + Math.sin(a) * r]);
-    inner.push([x + Math.cos(a) * r * 0.55, y + 0.07, z + Math.sin(a) * r * 0.55]);
+    outer.push([x + Math.cos(a) * r, y + 0.03, z + Math.sin(a) * r]); // clear of the deck: no z-fight
+    inner.push([x + Math.cos(a) * r * 0.55, y + 0.09, z + Math.sin(a) * r * 0.55]);
   }
   pushLoft(s, outer, inner, UV, { top: true, bottom: false });
 }
@@ -602,37 +836,73 @@ function snowStreams(): Streams {
   return s;
 }
 
+/** The arena's geometry, one stream set per material — cheap, so built eagerly. */
+interface MapGeometry {
+  readonly wall: Streams;
+  readonly floor: Streams;
+  readonly under: Streams;
+  readonly snow: Streams;
+  readonly trim: MeshPrimitive;
+}
+function mapGeometry(): MapGeometry {
+  const structure = structureStreams();
+  return {
+    wall: structure.wall,
+    floor: structure.floor,
+    under: undersideStreams(),
+    snow: snowStreams(),
+    trim: boxesPrimitive([...TRIM, ...MARKERS], { name: "energy", baseColorFactor: [1, 1, 1, 1], baseColorImage: null }, 1),
+  };
+}
+const MAP_GEOMETRY = mapGeometry();
+
 function mapMesh(): MeshAsset {
+  const tex = lockoutTextures();
+  const WALL_TEX = tex.wall;
+  const FLOOR_TEX = tex.floor;
+  const SNOW_TEX = tex.snow;
   // PBR metallic-roughness: the panels are near-pure metal that mirrors the skybox,
   // normal-mapped for relief, with a baked emissive map for the cyan channel.
   const structMat: MeshPrimitive["material"] = {
     name: "forerunner",
     baseColorFactor: [1, 1, 1, 1],
-    baseColorImage: FORE.albedo,
-    normalImage: FORE.normal,
-    metallicRoughnessImage: FORE.metallicRoughness,
-    emissiveImage: FORE.emissive,
-    metallicFactor: 0.5, // half-metal: still catches the sky, but keeps the albedo legible
+    baseColorImage: WALL_TEX.albedo,
+    normalImage: WALL_TEX.normal,
+    metallicRoughnessImage: WALL_TEX.metallicRoughness,
+    emissiveImage: WALL_TEX.emissive,
+    metallicFactor: 0.6, // the map carries per-texel metal; this keeps albedo legible
     roughnessFactor: 1,
-    emissiveFactor: [1.5, 1.5, 1.5], // push the baked glow above 1 so it blooms through the tone-map
+    emissiveFactor: [1.6, 1.6, 1.6], // push the baked glow above 1 so it blooms through the tone-map
   };
-  // The same metal, darker and without the glowing channel, for the underside.
+  const floorMat: MeshPrimitive["material"] = {
+    name: "forerunner-deck",
+    baseColorFactor: [1, 1, 1, 1],
+    baseColorImage: FLOOR_TEX.albedo,
+    normalImage: FLOOR_TEX.normal,
+    metallicRoughnessImage: FLOOR_TEX.metallicRoughness,
+    emissiveImage: FLOOR_TEX.emissive,
+    metallicFactor: 0.4, // a deck is worn, not a mirror
+    roughnessFactor: 1,
+    emissiveFactor: [1.4, 1.4, 1.4],
+  };
+  // The wall metal, darker and without the glowing channel, for the underside.
   const underMat: MeshPrimitive["material"] = {
     ...structMat,
     name: "forerunner-underside",
-    baseColorFactor: [0.55, 0.6, 0.68, 1],
+    baseColorFactor: [0.5, 0.55, 0.62, 1],
     emissiveImage: null,
     emissiveFactor: [0, 0, 0],
   };
-  // Packed snow: rough, non-metal and cold. Its albedo is held well below white
+  // Packed snow: rough, non-metal and cold. Its albedo is held below white
   // because the rig's exposure lifts it — a white albedo blows out to flat paper.
   const snowMat: MeshPrimitive["material"] = {
     name: "snow",
-    baseColorFactor: [0.72, 0.77, 0.84, 1],
-    baseColorImage: null,
+    baseColorFactor: [0.7, 0.74, 0.8, 1],
+    baseColorImage: SNOW_TEX.albedo,
+    normalImage: SNOW_TEX.normal,
+    metallicRoughnessImage: SNOW_TEX.metallicRoughness,
     metallicFactor: 0,
-    roughnessFactor: 0.9,
-    emissiveFactor: [0.01, 0.015, 0.025],
+    roughnessFactor: 1,
   };
   // The energy trim + weapon markers: a flat, non-metal cyan emitter (HDR emissive
   // > 1 so it rolls off through ACES rather than clipping).
@@ -644,13 +914,15 @@ function mapMesh(): MeshAsset {
     roughnessFactor: 0.5,
     emissiveFactor: [0.5, 1.7, 1.9],
   };
+  const g = MAP_GEOMETRY;
   return {
     name: "Lockout arena",
     primitives: [
-      toPrimitive(structureStreams(), structMat),
-      toPrimitive(undersideStreams(), underMat),
-      toPrimitive(snowStreams(), snowMat),
-      boxesPrimitive([...TRIM, ...MARKERS], cyanMat, 1),
+      toPrimitive(g.wall, structMat),
+      toPrimitive(g.floor, floorMat),
+      toPrimitive(g.under, underMat),
+      toPrimitive(g.snow, snowMat),
+      { ...g.trim, material: cyanMat },
     ],
   };
 }
@@ -687,8 +959,6 @@ function botMesh(): MeshAsset {
   };
 }
 
-/** The built arena mesh, shared by the sidecar and the camera-centre constant. */
-const MAP_MESH = mapMesh();
 
 /** The scene's bounding-box centre over every vertex of the arena mesh (the bots
  *  are authored at the origin, inside this footprint, so they never extend it).
@@ -697,8 +967,8 @@ const MAP_MESH = mapMesh();
 function sceneCenter(): [number, number, number] {
   let mnx = Infinity, mny = Infinity, mnz = Infinity;
   let mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
-  for (const primitive of MAP_MESH.primitives) {
-    const p = primitive.positions;
+  const g = MAP_GEOMETRY;
+  for (const p of [g.wall.positions, g.floor.positions, g.under.positions, g.snow.positions, g.trim.positions]) {
     for (let i = 0; i < p.length; i += 3) {
       mnx = Math.min(mnx, p[i]!); mny = Math.min(mny, p[i + 1]!); mnz = Math.min(mnz, p[i + 2]!);
       mxx = Math.max(mxx, p[i]!); mxy = Math.max(mxy, p[i + 1]!); mxz = Math.max(mxz, p[i + 2]!);
@@ -724,20 +994,22 @@ export const LOCKOUT_LIGHTING: SceneLighting = {
     horizon: [0.55, 0.66, 0.74],
     ground: [0.2, 0.22, 0.26],
     // The baked sky dome (below) is the environment map, and it is far brighter
-    // than the gradient it replaced, so its intensity sits under 1.
-    intensity: 0.85,
+    // than the gradient it replaced, so its intensity sits well under 1: the sky
+    // fills the shadows with cold blue, and the sun does the modelling.
+    intensity: 0.6,
   },
-  ambient: 0.6,
-  exposure: 1.5,
+  ambient: 0.45,
+  exposure: 1.0,
   tonemap: true,
   shadows: true,
   lights: [
-    // Key: high warm-white sun (direction points *towards* the light).
-    { kind: "directional", direction: [0.4, 0.8, -0.45], color: [1, 0.97, 0.9], intensity: 2.2 },
-    // Fill: a low, cool bounce from the opposite side so shadows aren't black.
-    { kind: "directional", direction: [-0.5, 0.35, 0.55], color: [0.45, 0.58, 0.72], intensity: 0.9 },
+    // Key: a low-ish, warm-white sun, strong enough that shadows read clearly
+    // (direction points *towards* the light).
+    { kind: "directional", direction: [0.45, 0.62, -0.5], color: [1, 0.95, 0.86], intensity: 2.3 },
+    // Fill: a faint cold bounce from the opposite side so shadows aren't black.
+    { kind: "directional", direction: [-0.5, 0.35, 0.55], color: [0.5, 0.62, 0.8], intensity: 0.35 },
     // The Sword pit's cyan glow, at the bottom-mid centre.
-    { kind: "point", position: [0, 1, 0], color: [0.4, 0.95, 1], intensity: 3.5, range: 10 },
+    { kind: "point", position: [0, 0.9, 0], color: [0.4, 0.95, 1], intensity: 2.4, range: 4.5 }, // kept in the pit, off the walkway above
   ],
   // A procedural alpine dome (original art, baked at load): a cold overcast sky
   // over two rings of snow-capped peaks, with a misty glacier valley far below —
@@ -747,7 +1019,7 @@ export const LOCKOUT_LIGHTING: SceneLighting = {
     zenith: [0.3, 0.41, 0.58],
     horizon: [0.78, 0.83, 0.89],
     below: [0.66, 0.72, 0.8],
-    sunDirection: [0.4, 0.8, -0.45],
+    sunDirection: [0.45, 0.62, -0.5], // matches the key light
     sunColor: [1, 0.95, 0.85],
     clouds: 0.62,
     cloudColor: [0.9, 0.93, 0.97],
@@ -758,40 +1030,59 @@ export const LOCKOUT_LIGHTING: SceneLighting = {
     seed: 7,
   },
   // Cold haze that thickens across the arena, tinted to the horizon.
-  fog: { color: [0.74, 0.8, 0.87], density: 0.035, start: 7, max: 0.5 },
+  // Kept light: the arena is only ~30 units across, so heavy fog just washes it out.
+  fog: { color: [0.74, 0.8, 0.87], density: 0.02, start: 12, max: 0.35 },
 };
 
 /**
- * The arena's post-FX stack: bloom so the cyan energy trim and the sun-lit snow
- * glow past their edges, and a gentle cool grade (a touch more contrast, a
- * touch less saturation) for the cold Forerunner mood. The player's
+ * The arena's post-FX stack — the cold Halo-era grade: bloom so the cyan energy
+ * and sun-lit snow glow past their edges, a touch more contrast and a touch less
+ * saturation, a split tone that pushes shadows toward steel blue while keeping
+ * highlights a pale, slightly warm white, and a faint vignette. The player's
  * `PostFxSettings` shape as plain JSON; every effect not named stays off.
  */
 export const LOCKOUT_FX = {
-  enabled: { bloom: true, grade: true },
+  enabled: { bloom: true, grade: true, splittone: true, vignette: true },
   values: {
     "bloom.strength": 0.45,
     "bloom.threshold": 0.72,
     "bloom.radius": 0.55,
     "grade.brightness": 1,
-    "grade.contrast": 1.08,
-    "grade.saturation": 0.9,
+    "grade.contrast": 1.12,
+    "grade.saturation": 0.85,
+    "splittone.strength": 0.28,
+    "splittone.balance": 0.45,
+    "vignette.strength": 0.18,
   },
-  colors: {},
+  colors: {
+    "splittone.shadows": "#5a6c8e", // ×2 in the shader: mid-grey is neutral, so this cools shadows
+    "splittone.highlights": "#86827a", // …and this warms highlights only slightly
+  },
 } as const;
 
-export const LOCKOUT_MESH_SIDECAR: string = (() => {
-  const identity = { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] };
-  const bot = serializeMeshAsset(botMesh());
-  const meshes: unknown[] = [
-    { id: "lockout-map", name: "Lockout arena", mesh: serializeMeshAsset(MAP_MESH), transform: identity },
-  ];
-  for (let i = 0; i < BOT_COUNT; i += 1) meshes.push({ id: `bot-${i}`, name: `bot ${i}`, mesh: bot, transform: identity });
-  return JSON.stringify({ version: 2, meshes, lighting: LOCKOUT_LIGHTING });
-})();
+let meshSidecar: string | null = null;
+
+/**
+ * The arena's mesh sidecar (map + 7 bots + the lighting rig), built on first
+ * call and memoised — it carries the baked textures, see {@link lockoutTextures}.
+ */
+export function lockoutMeshSidecar(): string {
+  if (meshSidecar === null) {
+    const identity = { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] };
+    const bot = serializeMeshAsset(botMesh());
+    const meshes: unknown[] = [
+      { id: "lockout-map", name: "Lockout arena", mesh: serializeMeshAsset(mapMesh()), transform: identity },
+    ];
+    for (let i = 0; i < BOT_COUNT; i += 1) meshes.push({ id: `bot-${i}`, name: `bot ${i}`, mesh: bot, transform: identity });
+    meshSidecar = JSON.stringify({ version: 2, meshes, lighting: LOCKOUT_LIGHTING });
+  }
+  return meshSidecar;
+}
 
 export const LOCKOUT_SCENE_TRIANGLES = (() => {
-  const map = MAP_MESH.primitives.reduce((n, p) => n + p.indices.length / 3, 0);
+  const g = MAP_GEOMETRY;
+  const map =
+    [g.wall, g.floor, g.under, g.snow].reduce((n, st) => n + st.indices.length / 3, 0) + g.trim.indices.length / 3;
   const bot = botMesh().primitives.reduce((n, p) => n + p.indices.length / 3, 0);
   return map + bot * BOT_COUNT;
 })();

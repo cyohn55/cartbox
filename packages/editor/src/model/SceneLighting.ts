@@ -294,6 +294,9 @@ export function sceneLightingKeyDirection(lighting: SceneLighting): readonly [nu
   return key?.direction;
 }
 
+/** Light-NDC bias added per unit of tan(angle to the sun) — about a texel of depth. */
+const SHADOW_SLOPE_BIAS = 0.0012;
+
 /**
  * Build a directional shadow map for the scene from the key light, fitting an
  * orthographic light view to the scene's bounding sphere. Returns null when
@@ -323,5 +326,8 @@ export function buildSceneShadow(
   ];
   const lightView = viewMatrix(eye, center);
   const lightProjection = orthographicMatrix(-radius, radius, -radius, radius, 0.01, dist + radius * 2);
-  return renderShadowMap(instances, { lightView, lightProjection, size: options.size, depth: options.depth });
+  const map = renderShadowMap(instances, { lightView, lightProjection, size: options.size, depth: options.depth });
+  // Authored rigs get slope-scaled bias (no acne on faces the sun grazes — the
+  // sloped Forerunner walls) and soft 2x2-filtered edges.
+  return { ...map, slopeBias: SHADOW_SLOPE_BIAS, pcf: true };
 }

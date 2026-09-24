@@ -61,7 +61,7 @@ export {
 export {
   seedLockoutCart,
   LOCKOUT_CODE,
-  LOCKOUT_MESH_SIDECAR,
+  lockoutMeshSidecar,
   LOCKOUT_FX,
   LOCKOUT_LIGHTING,
   LOCKOUT_SCENE_TRIANGLES,
@@ -210,6 +210,7 @@ export {
   renderShadowMap,
   orthographicMatrix,
   type ShadowInput,
+  shadowVisibility,
   type RenderShadowMapOptions,
   acesFilmic,
   type ToneMap,
