@@ -77,6 +77,31 @@ import {
   writeInstanceUniform,
 } from "./scenePacking.js";
 
+/**
+ * The largest job the software rasteriser takes on while the GPU pipeline
+ * fills. Warming up avoids pop-in on small scenes, but a lit arena at 720p costs
+ * the CPU seconds per frame (it is fill-bound as much as triangle-bound) — a
+ * freeze on a tablet — so past either limit the opening frame or two simply
+ * show what is behind the scene (the sky, or the cart's own frame).
+ */
+const SOFTWARE_WARMUP_TRIANGLES = 20000;
+const SOFTWARE_WARMUP_PIXELS = 640 * 360;
+
+/** Triangles per mesh, counted once. */
+const triangleCounts = new WeakMap<MeshAsset, number>();
+function trianglesIn(instances: readonly MeshSceneInstance[]): number {
+  let total = 0;
+  for (const instance of instances) {
+    let count = triangleCounts.get(instance.mesh);
+    if (count === undefined) {
+      count = instance.mesh.primitives.reduce((n, primitive) => n + primitive.indices.length / 3, 0);
+      triangleCounts.set(instance.mesh, count);
+    }
+    total += count;
+  }
+  return total;
+}
+
 /** Staging buffers in flight. Three lets a readback land while two more queue. */
 const READBACK_BUFFERS = 3;
 
@@ -415,6 +440,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
   /** Most recent completed readback, or null before the first one lands. */
   private latest: Uint8Array | null = null;
+  /** The shadow depth array last uploaded in full, so a frame that changed only
+   *  a region of it (its `dirty` rect) uploads just that region. */
+  private shadowUploaded: Float32Array | null = null;
   private uniformCapacity = 0;
   private uniformBuffer: any = null;
   private uniformData = new Float32Array(0);
@@ -684,6 +712,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    */
   private ensureShadowTexture(size: number): void {
     if (size === this.shadowMapSize) return;
+    this.shadowUploaded = null; // a new texture needs a full upload
     if (size === 0) {
       if (this.shadowTexture !== this.blankShadow) this.shadowTexture = this.blankShadow;
     } else {
@@ -736,8 +765,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // while the pipeline fills. Either way `out` is correct when this returns.
     if (this.latest) {
       this.composite(draw);
-    } else {
+    } else if (draw.width * draw.height <= SOFTWARE_WARMUP_PIXELS && trianglesIn(visible) <= SOFTWARE_WARMUP_TRIANGLES) {
       this.software.render(visible, draw);
+    } else if (draw.background !== null) {
+      new Uint32Array(draw.out.buffer, draw.out.byteOffset, draw.width * draw.height).fill(packRgba(draw.background));
     }
 
     try {
@@ -751,27 +782,18 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
   /** Paint the last completed GPU frame over the cart's own pixels. */
   private composite(draw: SceneDraw): void {
-    const source = this.latest!;
-    const out = draw.out;
-    if (draw.background !== null) {
-      const [br, bg, bb, ba] = draw.background;
-      for (let i = 0; i < draw.width * draw.height; i += 1) {
-        out[i * 4] = br;
-        out[i * 4 + 1] = bg;
-        out[i * 4 + 2] = bb;
-        out[i * 4 + 3] = ba;
-      }
-    }
+    const count = draw.width * draw.height;
+    // Whole pixels as little-endian RGBA words: a quarter of the work of
+    // copying channels, which matters at 720p every frame.
+    const source = new Uint32Array(this.latest!.buffer, this.latest!.byteOffset, count);
+    const out = new Uint32Array(draw.out.buffer, draw.out.byteOffset, count);
+    if (draw.background !== null) out.fill(packRgba(draw.background));
     // The shader discards anything below the alpha threshold, so a zero alpha
     // means "nothing drawn here" and the cart's pixel survives — the same result
     // as the software path's `background: null`.
-    for (let i = 0; i < draw.width * draw.height; i += 1) {
-      const alpha = source[i * 4 + 3]!;
-      if (alpha === 0) continue;
-      out[i * 4] = source[i * 4]!;
-      out[i * 4 + 1] = source[i * 4 + 1]!;
-      out[i * 4 + 2] = source[i * 4 + 2]!;
-      out[i * 4 + 3] = alpha;
+    for (let i = 0; i < count; i += 1) {
+      const word = source[i]!;
+      if (word >>> 24 !== 0) out[i] = word;
     }
   }
 
@@ -814,12 +836,27 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const shadow = draw.shadow ?? null;
     this.ensureShadowTexture(shadow ? shadow.size : 0);
     if (shadow) {
-      this.device.queue.writeTexture(
-        { texture: this.shadowTexture },
-        shadow.depth,
-        { bytesPerRow: shadow.size * 4, rowsPerImage: shadow.size },
-        { width: shadow.size, height: shadow.size },
-      );
+      const dirty = shadow.dirty;
+      if (dirty && this.shadowUploaded === shadow.depth) {
+        // Only the region that changed since the last frame (the movers'
+        // shadows, old and new): a few KB instead of the whole map.
+        if (dirty.width > 0 && dirty.height > 0) {
+          this.device.queue.writeTexture(
+            { texture: this.shadowTexture, origin: { x: dirty.x, y: dirty.y } },
+            shadow.depth,
+            { offset: (dirty.y * shadow.size + dirty.x) * 4, bytesPerRow: shadow.size * 4, rowsPerImage: dirty.height },
+            { width: dirty.width, height: dirty.height },
+          );
+        }
+      } else {
+        this.device.queue.writeTexture(
+          { texture: this.shadowTexture },
+          shadow.depth,
+          { bytesPerRow: shadow.size * 4, rowsPerImage: shadow.size },
+          { width: shadow.size, height: shadow.size },
+        );
+        this.shadowUploaded = shadow.depth;
+      }
     }
     const shadowParams = shadow
       ? { size: shadow.size, bias: shadow.bias ?? 0.003, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false }
@@ -1056,4 +1093,9 @@ function destroySafely(resource: any): void {
   } catch {
     // Already released, or a device that has gone away. Nothing to do.
   }
+}
+
+/** An RGBA colour as one little-endian pixel word. */
+function packRgba([r, g, b, a]: readonly [number, number, number, number]): number {
+  return ((a << 24) | (b << 16) | (g << 8) | r) >>> 0;
 }

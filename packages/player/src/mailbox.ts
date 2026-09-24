@@ -120,6 +120,10 @@ export const MESH_POSE_FRONT = 1 << 20;
 export const LIGHT_KIND_POINT = 0;
 export const LIGHT_KIND_DIRECTIONAL = 1;
 export const LIGHT_KIND_SPOT = 2;
+/** A 3D world-space point light (cartbox.light3d): signed ×{@link WORLD_LIGHT_SCALE} coordinates. */
+export const LIGHT_KIND_WORLD = 3;
+/** Fixed-point scale of a world light's position and radius. */
+export const WORLD_LIGHT_SCALE = 64;
 /** Fixed-point scale for a direction component packed as a signed byte. */
 export const LIGHT_DIR_SCALE = 127;
 /** Fixed-point scale for a spot's inner-cone cosine packed in 6 bits. */
@@ -231,6 +235,7 @@ export function decodeLights(words: Uint32Array): Light[] {
     // A point light leaves all the extra bits zero, so decode them only when a
     // producer set the kind — keeping the common case byte-for-byte unchanged.
     const kindCode = (packed >>> 24) & 0x3;
+    if (kindCode === LIGHT_KIND_WORLD) continue; // a 3D scene's light (decodeWorldLights), not the 2D relight's
     if (kindCode !== LIGHT_KIND_POINT) {
       light.kind = KIND_BY_CODE[kindCode] ?? "point";
       const dirX = signedByte((intensityWord >>> 16) & 0xff) / LIGHT_DIR_SCALE;
@@ -244,6 +249,39 @@ export function decodeLights(words: Uint32Array): Light[] {
     lights.push(light);
   }
   return lights;
+}
+
+/** A point light in a 3D scene's world units, published with `cartbox.light3d`. */
+export interface WorldLight {
+  readonly position: readonly [number, number, number];
+  /** Falloff radius in world units. */
+  readonly range: number;
+  /** Colour with the intensity folded in. */
+  readonly color: readonly [number, number, number];
+}
+
+/** Decodes the world-space point lights a cart published this frame (`cartbox.light3d`). */
+export function decodeWorldLights(words: Uint32Array): WorldLight[] {
+  if (words.length <= LIGHTS_BASE) return [];
+  const count = Math.min(words[LIGHTS_BASE] ?? 0, LIGHTS_CAPACITY);
+  const out: WorldLight[] = [];
+  for (let i = 0; i < count; i++) {
+    const base = LIGHTS_BASE + 1 + i * LIGHT_STRIDE;
+    const packed = words[base + 4] ?? 0;
+    if (((packed >>> 24) & 0x3) !== LIGHT_KIND_WORLD) continue;
+    const intensity = ((words[base + 5] ?? LIGHT_INTENSITY_SCALE) & 0xffff) / LIGHT_INTENSITY_SCALE;
+    const signed = (k: number) => ((words[base + k] ?? 0) | 0) / WORLD_LIGHT_SCALE;
+    out.push({
+      position: [signed(0), signed(1), signed(2)],
+      range: signed(3),
+      color: [
+        (((packed >>> 16) & 0xff) / 255) * intensity,
+        (((packed >>> 8) & 0xff) / 255) * intensity,
+        ((packed & 0xff) / 255) * intensity,
+      ],
+    });
+  }
+  return out;
 }
 
 /** A backdrop camera position in cart pixels. */

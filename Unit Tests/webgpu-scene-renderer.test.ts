@@ -42,6 +42,7 @@ interface Recorded {
   writeBuffer: any[][];
   copies: any[];
   passCalls: { op: string; args: any[] }[];
+  textureWrites: any[][];
   submits: number;
 }
 
@@ -56,6 +57,7 @@ function fakeDevice(fillReadback?: (bytes: Uint8Array) => void) {
     writeBuffer: [],
     copies: [],
     passCalls: [],
+    textureWrites: [],
     submits: 0,
   };
 
@@ -118,7 +120,9 @@ function fakeDevice(fillReadback?: (bytes: Uint8Array) => void) {
     }),
     queue: {
       writeBuffer: (...args: any[]) => log.writeBuffer.push(args),
-      writeTexture: () => undefined,
+      writeTexture: (...args: any[]) => {
+        log.textureWrites.push(args);
+      },
       submit: () => {
         log.submits += 1;
       },
@@ -309,6 +313,55 @@ describe("WebgpuSceneRenderer frames", () => {
       throw new Error("device lost");
     };
     expect(() => renderer.render(instances(quad()), drawOptions())).not.toThrow();
+  });
+});
+
+describe("WebgpuSceneRenderer on heavy scenes", () => {
+  /** A mesh of `count` triangles (one quad repeated). */
+  function heavy(count: number): MeshAsset {
+    const base = quad();
+    const primitive = base.primitives[0]!;
+    const indices = new Uint32Array(count * 3);
+    for (let i = 0; i < count; i += 1) indices.set(primitive.indices.subarray((i % 2) * 3, (i % 2) * 3 + 3), i * 3);
+    return { ...base, primitives: [{ ...primitive, indices }] };
+  }
+
+  it("skips the CPU warm-up for a scene too big to rasterise in a frame", async () => {
+    const { device } = fakeDevice();
+    const renderer = (await WebgpuSceneRenderer.create(device, WIDTH, HEIGHT))!;
+    const draw = { ...drawOptions(), background: [1, 2, 3, 255] as [number, number, number, number] };
+    renderer.render(instances(heavy(30000)), draw);
+    // Just the background: a 30k-triangle warm-up would freeze a tablet for seconds.
+    expect(Array.from(draw.out.subarray(0, 4))).toEqual([1, 2, 3, 255]);
+    expect(new Set(draw.out).size).toBeLessThanOrEqual(4);
+  });
+
+  it("skips the CPU warm-up for a frame too large to fill in software", async () => {
+    const { device } = fakeDevice();
+    const renderer = (await WebgpuSceneRenderer.create(device, 1280, 720))!;
+    const out = new Uint8ClampedArray(1280 * 720 * 4).fill(7);
+    renderer.render(instances(quad()), { ...drawOptions(), width: 1280, height: 720, out, depth: new Float32Array(1280 * 720) });
+    expect(out.every((byte) => byte === 7)).toBe(true); // the cart's frame, untouched
+  });
+
+  it("uploads only the changed region of a shadow map it has already uploaded", async () => {
+    const { device, log } = fakeDevice();
+    const renderer = (await WebgpuSceneRenderer.create(device, WIDTH, HEIGHT))!;
+    const depth = new Float32Array(64 * 64).fill(1);
+    const shadow = { lightViewProj: viewMatrix([0, 5, 0], [0, 0, 0]), depth, size: 64 };
+    renderer.render(instances(quad()), { ...drawOptions(), shadow });
+    renderer.render(instances(quad()), { ...drawOptions(), shadow: { ...shadow, dirty: { x: 8, y: 4, width: 5, height: 3 } } });
+    renderer.render(instances(quad()), { ...drawOptions(), shadow: { ...shadow, dirty: { x: 0, y: 0, width: 0, height: 0 } } });
+    const writes = log.textureWrites.filter((args) => args[3]?.width === 64 || args[3]?.width === 5);
+    expect(writes).toHaveLength(2); // one full upload, one 5x3 region, nothing when nothing changed
+    expect(writes[0]![3]).toEqual({ width: 64, height: 64 });
+    expect(writes[1]![0].origin).toEqual({ x: 8, y: 4 });
+    expect(writes[1]![2]).toEqual({ offset: (4 * 64 + 8) * 4, bytesPerRow: 64 * 4, rowsPerImage: 3 });
+    expect(writes[1]![3]).toEqual({ width: 5, height: 3 });
+
+    // A different array (or no previous upload) always goes up whole.
+    renderer.render(instances(quad()), { ...drawOptions(), shadow: { ...shadow, depth: new Float32Array(64 * 64), dirty: { x: 1, y: 1, width: 1, height: 1 } } });
+    expect(log.textureWrites.at(-1)![3]).toEqual({ width: 64, height: 64 });
   });
 });
 

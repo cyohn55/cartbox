@@ -43,7 +43,7 @@ export {
   serializeReplay,
 } from "./replay.js";
 export type { InputChange, Replay } from "./replay.js";
-export { readCartCode, seedCartridge } from "./cartseed.js";
+export { codeChunks, readCartCode, seedCartridge } from "./cartseed.js";
 
 // Platform event mailbox (P2) + the cartbox SDK.
 export {
@@ -70,9 +70,10 @@ export {
   decodeMailbox,
   decodeMeshCamera,
   decodeMeshPoses,
+  decodeWorldLights,
   hashEventId,
 } from "./mailbox.js";
-export type { MailboxCamera, MailboxEvent, MailboxEventKind, MailboxMeshCamera, MailboxMeshPose, MailboxRead } from "./mailbox.js";
+export type { MailboxCamera, MailboxEvent, MailboxEventKind, MailboxMeshCamera, MailboxMeshPose, MailboxRead, WorldLight } from "./mailbox.js";
 export { CARTBOX_SDK_LUA, injectSdk } from "./sdk.js";
 // Collision: a cart's authored solidity layer, exposed to its own Lua as
 // cartbox.solid(x, y) / cartbox.mapsize(). Injected as static cart data.
@@ -340,7 +341,7 @@ export {
   takeNetOutbox,
 } from "./net/netplay.js";
 export type { NetInbox, NetOutbox, NetState, NetEvent } from "./net/netplay.js";
-export { NetSession, MemoryNetHub, BroadcastChannelTransport } from "./net/NetSession.js";
+export { NetSession, MemoryNetHub, BroadcastChannelTransport, netSendInterval } from "./net/NetSession.js";
 export type { NetMessage, NetPeer, NetRoomStatus, NetTransport } from "./net/NetSession.js";
 
 /**

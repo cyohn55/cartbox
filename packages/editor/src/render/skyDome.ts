@@ -335,6 +335,8 @@ export function downsamplePanorama(map: DecodedTexture, factor: number): Decoded
 
 /** Reused half-resolution scratch for {@link renderSkyBackground}. */
 let skyScratch: Uint32Array | null = null;
+let gridU: Float32Array | null = null;
+let gridV: Float32Array | null = null;
 
 /**
  * Paint a panorama behind the camera into `out` (RGBA, `width × height`): every
@@ -373,8 +375,13 @@ export function renderSkyBackground(
   const gstep = Math.max(1, Math.floor(step / k));
   const gw = Math.ceil(sw / gstep) + 1;
   const gh = Math.ceil(sh / gstep) + 1;
-  const gu = new Float32Array(gw * gh);
-  const gv = new Float32Array(gw * gh);
+  // Reused between frames: this runs every frame, so no per-call garbage.
+  if (!gridU || gridU.length < gw * gh) {
+    gridU = new Float32Array(gw * gh);
+    gridV = new Float32Array(gw * gh);
+  }
+  const gu = gridU;
+  const gv = gridV!;
   const TWO_PI = 2 * Math.PI;
   for (let j = 0; j < gh; j += 1) {
     const ndcY = 1 - ((j * gstep * k) / height) * 2;

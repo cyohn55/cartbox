@@ -85,7 +85,9 @@ export function LockoutGame() {
           record: false,
           controls: "auto",
           scale: "fit",
-          lighting: { autoDetect: true },
+          // No 2D relight: the arena's 3D rig lights it (and its objectives glow
+          // through cartbox.light3d), and skipping the 2D lighting layer spares
+          // every frame a material capture and a full-screen relight pass.
           postFx: parsePostFxSettings(LOCKOUT_FX) ?? undefined,
           mesh: parseMeshScene(lockoutMeshSidecar()) ?? undefined,
           netplay: session ?? undefined,

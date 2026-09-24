@@ -77,6 +77,12 @@ cartbox = {
     local nx, ny = _norm(dx or 0, dy or 0, dz or 1)
     _light(1, 0, 0, 0, 0, r, g, b, intensity, _byte(nx), _byte(ny), 0)
   end,
+  -- light3d(x, y, z, radius, r, g, b, intensity): a point light in a 3D scene's
+  -- world units (signed, fractional), lighting a first-person mesh view -- the
+  -- 2D relight ignores it. E.g. a glow over an objective.
+  light3d = function(x, y, z, radius, r, g, b, intensity)
+    _light(3, (x or 0) * 64, (y or 0) * 64, (z or 0) * 64, (radius or 4) * 64, r, g, b, intensity, 0, 0, 0)
+  end,
   spot = function(x, y, z, dx, dy, dz, radius, angle, r, g, b, intensity)
     local nx, ny = _norm(dx or 0, dy or 0, dz or 1)
     local cone = math.floor(math.cos(math.rad(angle or 30)) * 63 + 0.5)
