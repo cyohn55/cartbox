@@ -186,6 +186,18 @@ cartbox = {
     _mn = _mn + 1
     pmem(_MPB, _mn)
   end,
+  -- stick(n) -> x, y: analog stick n (0 left, 1 right), each -1..1, y down-
+  -- positive. Reads 0,0 with no sticks (keyboard); on a touchscreen the pad
+  -- shows its right stick once a cart calls this. Uses pmem 68..69.
+  stick = function(n)
+    if pmem(69) ~= 0x53544b31 then pmem(69, 0x53544b31) end
+    local w = pmem(68)
+    local sh = (n == 1) and 16 or 0
+    local x, y = (w >> sh) & 0xff, (w >> (sh + 8)) & 0xff
+    if x >= 128 then x = x - 256 end
+    if y >= 128 then y = y - 256 end
+    return x / 127, y / 127
+  end,
   -- Netplay (online multiplayer). The host page relays player state + events
   -- between browsers through pmem words 0..118 (so a netplay cart must not keep
   -- save data there); see packages/player/src/net/netplay.ts for the layout.

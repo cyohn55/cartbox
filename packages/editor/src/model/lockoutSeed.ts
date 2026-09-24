@@ -2283,18 +2283,28 @@ local function play_input()
   local sy,cy = math.sin(p.ay), math.cos(p.ay)
   local mvx,mvz = 0,0
   local moving=false
+  -- Dual sticks (the touch pad): the left one walks and strafes at its lean,
+  -- the right one turns. Without sticks (a keyboard), the 8-button scheme.
+  local lx, ly = cartbox.stick(0)
+  local rx = cartbox.stick(1)
+  local lstick = math.abs(lx) + math.abs(ly) > 0.05
   if not p.dead then
-    if btn(0) then mvx=mvx+sy; mvz=mvz+cy; moving=true end
-    if btn(1) then mvx=mvx-sy; mvz=mvz-cy; moving=true end
-    if aheld then
-      if btn(2) then mvx=mvx-cy; mvz=mvz+sy; moving=true end
-      if btn(3) then mvx=mvx+cy; mvz=mvz-sy; moving=true end
+    if lstick then
+      mvx = -ly*sy + lx*cy; mvz = -ly*cy - lx*sy; moving=true
     else
-      if btn(2) then p.ay=p.ay-TURN end
-      if btn(3) then p.ay=p.ay+TURN end
+      if btn(0) then mvx=mvx+sy; mvz=mvz+cy; moving=true end
+      if btn(1) then mvx=mvx-sy; mvz=mvz-cy; moving=true end
+      if aheld then
+        if btn(2) then mvx=mvx-cy; mvz=mvz+sy; moving=true end
+        if btn(3) then mvx=mvx+cy; mvz=mvz-sy; moving=true end
+      else
+        if btn(2) then p.ay=p.ay-TURN end
+        if btn(3) then p.ay=p.ay+TURN end
+      end
     end
+    if rx ~= 0 then p.ay = p.ay + rx*math.abs(rx)*TURN*2.2 end   -- eased: fine aim near centre, fast at full lean
     local mm=math.sqrt(mvx*mvx+mvz*mvz)
-    if mm>0 then move_axis("x",mvx/mm*MOVE); move_axis("z",mvz/mm*MOVE) end
+    if mm>0 then local sp=MOVE*math.min(1,mm); move_axis("x",mvx/mm*sp); move_axis("z",mvz/mm*sp) end
   end
   if moving then bob=bob+0.28 end
   -- auto-aim pitch eases toward the locked enemy
@@ -2308,7 +2318,7 @@ local function play_input()
   if btn(5) and p.grounded and not p.dead then p.vy=JUMP; p.grounded=false end
   if edge("swap", btn(7)) then p.slot=(p.slot==1) and 2 or 1 end
   local cur=W[p.slot==1 and p.g1 or p.g2]
-  p.zoom = cur.zoom and aheld and not (btn(0) or btn(1) or btn(2) or btn(3))
+  p.zoom = cur.zoom and aheld and not lstick and not (btn(0) or btn(1) or btn(2) or btn(3))
   if p.cool>0 then p.cool=p.cool-1 end
   local firing = cur.auto and btn(4) or edge("fire", btn(4))
   if firing then player_fire() end
@@ -2535,6 +2545,7 @@ function TIC()
     print("Up/Down choose . Z (or A) start",470,540,13,false,1,true)
     print("Move Up/Down . Turn Left/Right . hold A strafe . dbl-tap A grenade",300,584,13,false,1,true)
     print("Z fire (auto-melee close) . X jump . S swap . sniper: hold A to zoom",300,612,13,false,1,true)
+    print("Touch: left stick moves . right stick turns . A fire . B jump . X zoom/grenade . Y swap",300,640,13,false,1,true)
     return
   end
 

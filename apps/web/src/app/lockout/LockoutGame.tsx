@@ -226,8 +226,9 @@ export function LockoutGame() {
       />
       {inGame && (
         <p style={{ color: "var(--faint)", fontSize: 13 }}>
-          Up/Down move · Left/Right turn · hold A to strafe · Z fire · X jump · S swap weapons · double-tap A to throw a
-          grenade · on a touchscreen use the on-screen pad
+          Keyboard: Up/Down move · Left/Right turn · hold A to strafe · Z fire · X jump · S swap weapons · double-tap A
+          to throw a grenade. Touch: left stick moves and strafes · right stick turns · A fire · B jump · X zoom (double-tap:
+          grenade) · Y swap
         </p>
       )}
     </section>

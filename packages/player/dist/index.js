@@ -2840,6 +2840,24 @@ var ConsoleButton = /* @__PURE__ */ ((ConsoleButton2) => {
   return ConsoleButton2;
 })(ConsoleButton || {});
 
+// src/sticks.ts
+var STICK_WORD = 68;
+var STICK_OPTIN_WORD = 69;
+var STICK_OPTIN_MAGIC = 1398033201;
+var STICK_DPAD_THRESHOLD = 0.4;
+var byte = (v) => Math.round(Math.max(-1, Math.min(1, v || 0)) * 127) & 255;
+function packSticks(axes) {
+  return (byte(axes[0]) | byte(axes[1]) << 8 | byte(axes[2]) << 16 | byte(axes[3]) << 24) >>> 0;
+}
+function stickDirections(x, y, threshold = STICK_DPAD_THRESHOLD) {
+  let bits = 0;
+  if (y < -threshold) bits |= 1 << 0 /* Up */;
+  if (y > threshold) bits |= 1 << 1 /* Down */;
+  if (x < -threshold) bits |= 1 << 2 /* Left */;
+  if (x > threshold) bits |= 1 << 3 /* Right */;
+  return bits;
+}
+
 // src/input.ts
 var DEFAULT_KEY_BINDINGS = {
   ArrowUp: 0 /* Up */,
@@ -2857,6 +2875,10 @@ function resolveButton(keyCode, bindings = DEFAULT_KEY_BINDINGS) {
 var GamepadState = class {
   constructor() {
     this.mask = 0;
+    /** D-pad bits the left stick is pressing (kept apart so a key release can't clear them). */
+    this.stickMask = 0;
+    /** Analog sticks: left x, left y, right x, right y, each −1..1 (y down-positive). */
+    this.axes = [0, 0, 0, 0];
   }
   press(button) {
     this.mask |= 1 << button;
@@ -2864,12 +2886,23 @@ var GamepadState = class {
   release(button) {
     this.mask &= ~(1 << button);
   }
+  /**
+   * Set a stick's position (0 = left, 1 = right). The left stick also presses
+   * the D-pad directions it leans toward, so button-only carts steer with it.
+   */
+  setStick(index, x, y) {
+    this.axes[index * 2] = x;
+    this.axes[index * 2 + 1] = y;
+    if (index === 0) this.stickMask = stickDirections(x, y);
+  }
   /** The engine-facing bitmask for player one. */
   get value() {
-    return this.mask;
+    return this.mask | this.stickMask;
   }
   reset() {
     this.mask = 0;
+    this.stickMask = 0;
+    this.axes.fill(0);
   }
 };
 var KeyboardInput = class {
@@ -2897,10 +2930,6 @@ var KeyboardInput = class {
   }
 };
 var TOUCH_LAYOUT = [
-  { button: 0 /* Up */, label: "\u25B2", hint: "", cluster: "dpad", col: 2, row: 1 },
-  { button: 2 /* Left */, label: "\u25C0", hint: "", cluster: "dpad", col: 1, row: 2 },
-  { button: 3 /* Right */, label: "\u25B6", hint: "", cluster: "dpad", col: 3, row: 2 },
-  { button: 1 /* Down */, label: "\u25BC", hint: "", cluster: "dpad", col: 2, row: 3 },
   { button: 7 /* Y */, label: "Y", hint: "S", cluster: "face", col: 2, row: 1 },
   { button: 6 /* X */, label: "X", hint: "A", cluster: "face", col: 1, row: 2 },
   { button: 5 /* B */, label: "B", hint: "X", cluster: "face", col: 3, row: 2 },
@@ -2908,6 +2937,21 @@ var TOUCH_LAYOUT = [
 ];
 function hasTouchSupport(maxTouchPoints, coarsePointer) {
   return maxTouchPoints > 0 || coarsePointer;
+}
+var FACE_SIZE = "clamp(40px, 8vmin, 68px)";
+var STICK_SIZE = "clamp(110px, 24vmin, 190px)";
+function stickVector(dx, dy, radius, deadZone = 0.12) {
+  const r = Math.max(1, radius);
+  let x = dx / r;
+  let y = dy / r;
+  const m = Math.hypot(x, y);
+  if (m > 1) {
+    x /= m;
+    y /= m;
+  }
+  if (m < deadZone) return { x: 0, y: 0 };
+  const k = (Math.min(1, m) - deadZone) / (1 - deadZone) / Math.min(1, m);
+  return { x: x * k, y: y * k };
 }
 var TouchInput = class {
   constructor(container, state) {
@@ -2932,33 +2976,101 @@ var TouchInput = class {
       userSelect: "none",
       webkitUserSelect: "none"
     });
-    const cluster = (side) => {
-      const el = doc.createElement("div");
-      Object.assign(el.style, {
-        position: "absolute",
-        bottom: "4%",
-        [side]: "3%",
-        display: "grid",
-        gridTemplateColumns: "repeat(3, clamp(40px, 8vmin, 68px))",
-        gridTemplateRows: "repeat(3, clamp(40px, 8vmin, 68px))",
-        gap: "4px"
-      });
-      this.root.appendChild(el);
-      return el;
-    };
-    const dpad = cluster("left");
-    const face = cluster("right");
-    for (const control of TOUCH_LAYOUT) {
-      (control.cluster === "dpad" ? dpad : face).appendChild(this.createButton(doc, control, state));
-    }
+    const face = doc.createElement("div");
+    Object.assign(face.style, {
+      position: "absolute",
+      bottom: "4%",
+      right: "3%",
+      display: "grid",
+      gridTemplateColumns: `repeat(3, ${FACE_SIZE})`,
+      gridTemplateRows: `repeat(3, ${FACE_SIZE})`,
+      gap: "4px"
+    });
+    this.root.appendChild(face);
+    for (const control of TOUCH_LAYOUT) face.appendChild(this.createButton(doc, control, state));
+    this.createStick(doc, state, 0, { left: "4%", bottom: "6%" });
+    this.rightStick = this.createStick(doc, state, 1, { right: `calc(3% + 3 * ${FACE_SIZE} + 8px + 3vmin)`, bottom: "6%" });
+    this.rightStick.style.display = "none";
     container.appendChild(this.root);
+  }
+  /** Show the right stick: the cart reads analog sticks. */
+  setAnalog(on) {
+    this.rightStick.style.display = on ? "block" : "none";
+  }
+  /** A virtual thumbstick: a ring you press anywhere in, and a knob that follows the thumb. */
+  createStick(doc, state, index, place) {
+    const base = doc.createElement("div");
+    base.setAttribute("data-cbx-stick", index === 0 ? "left" : "right");
+    base.setAttribute("aria-label", index === 0 ? "Left stick" : "Right stick");
+    Object.assign(base.style, {
+      position: "absolute",
+      width: STICK_SIZE,
+      height: STICK_SIZE,
+      borderRadius: "50%",
+      border: "2px solid rgba(255,255,255,0.4)",
+      background: "radial-gradient(circle, rgba(20,26,40,0.25) 0%, rgba(20,26,40,0.5) 70%)",
+      pointerEvents: "auto",
+      touchAction: "none",
+      webkitTouchCallout: "none",
+      webkitTapHighlightColor: "transparent",
+      ...place
+    });
+    const knob = doc.createElement("div");
+    Object.assign(knob.style, {
+      position: "absolute",
+      left: "30%",
+      top: "30%",
+      width: "40%",
+      height: "40%",
+      borderRadius: "50%",
+      border: "2px solid rgba(255,255,255,0.6)",
+      background: "rgba(92,208,255,0.35)",
+      pointerEvents: "none",
+      transform: "translate(0px, 0px)"
+    });
+    base.appendChild(knob);
+    let pointer = null;
+    const move = (event) => {
+      const rect = base.getBoundingClientRect();
+      const radius = rect.width / 2 || 1;
+      const { x, y } = stickVector(event.clientX - (rect.left + radius), event.clientY - (rect.top + radius), radius);
+      state.setStick(index, x, y);
+      knob.style.transform = `translate(${(x * radius * 0.6).toFixed(1)}px, ${(y * radius * 0.6).toFixed(1)}px)`;
+      knob.style.background = "rgba(92,208,255,0.6)";
+    };
+    const end = (event) => {
+      if (event.pointerId !== pointer) return;
+      pointer = null;
+      state.setStick(index, 0, 0);
+      knob.style.transform = "translate(0px, 0px)";
+      knob.style.background = "rgba(92,208,255,0.35)";
+    };
+    base.addEventListener("pointerdown", (event) => {
+      if (pointer !== null) return;
+      event.preventDefault();
+      pointer = event.pointerId;
+      try {
+        base.setPointerCapture(event.pointerId);
+      } catch {
+      }
+      move(event);
+    });
+    base.addEventListener("pointermove", (event) => {
+      if (event.pointerId === pointer) move(event);
+    });
+    base.addEventListener("pointerup", end);
+    base.addEventListener("pointercancel", end);
+    base.addEventListener("lostpointercapture", end);
+    base.addEventListener("contextmenu", (event) => event.preventDefault());
+    this.root.appendChild(base);
+    return base;
   }
   createButton(doc, control, state) {
     const element = doc.createElement("button");
     element.type = "button";
     element.setAttribute("data-cbx-button", ConsoleButton[control.button]);
     element.setAttribute("aria-label", `${ConsoleButton[control.button]} button`);
-    const round = control.cluster === "face";
+    const round = true;
     Object.assign(element.style, {
       gridColumn: String(control.col),
       gridRow: String(control.row),
@@ -3391,6 +3503,18 @@ cartbox = {
     _mn = _mn + 1
     pmem(_MPB, _mn)
   end,
+  -- stick(n) -> x, y: analog stick n (0 left, 1 right), each -1..1, y down-
+  -- positive. Reads 0,0 with no sticks (keyboard); on a touchscreen the pad
+  -- shows its right stick once a cart calls this. Uses pmem 68..69.
+  stick = function(n)
+    if pmem(69) ~= 0x53544b31 then pmem(69, 0x53544b31) end
+    local w = pmem(68)
+    local sh = (n == 1) and 16 or 0
+    local x, y = (w >> sh) & 0xff, (w >> (sh + 8)) & 0xff
+    if x >= 128 then x = x - 256 end
+    if y >= 128 then y = y - 256 end
+    return x / 127, y / 127
+  end,
   -- Netplay (online multiplayer). The host page relays player state + events
   -- between browsers through pmem words 0..118 (so a netplay cart must not keep
   -- save data there); see packages/player/src/net/netplay.ts for the layout.
@@ -3671,8 +3795,8 @@ var WORLD_LIGHT_SCALE = 64;
 var LIGHT_DIR_SCALE = 127;
 var LIGHT_CONE_SCALE = 63;
 var KIND_BY_CODE = ["point", "directional", "spot"];
-function signedByte(byte) {
-  return byte < 128 ? byte : byte - 256;
+function signedByte(byte2) {
+  return byte2 < 128 ? byte2 : byte2 - 256;
 }
 function kindOf(type) {
   switch (type) {
@@ -3836,8 +3960,8 @@ var PIXELS_PER_TILE = TILE_SIZE * TILE_SIZE;
 var SHEET_COLS = 16;
 function readPixel(heap, tileBase, pixelIndex, bits) {
   if (bits === 8) return heap[tileBase + pixelIndex] ?? 0;
-  const byte = heap[tileBase + (pixelIndex >> 1)] ?? 0;
-  return pixelIndex & 1 ? byte >> 4 & 15 : byte & 15;
+  const byte2 = heap[tileBase + (pixelIndex >> 1)] ?? 0;
+  return pixelIndex & 1 ? byte2 >> 4 & 15 : byte2 & 15;
 }
 function createCartSpriteSource(module, bytes, paletteSize) {
   if (typeof module._cbx_cart_create !== "function") return null;
@@ -6752,6 +6876,8 @@ var Player = class {
     this.gamepad = new GamepadState();
     /** Presented-frame clock for animation, kept in lockstep with the scene backdrop. */
     this.presentFrame = 0;
+    /** The cart reads analog sticks (it opted in via cartbox.stick). */
+    this.analogCart = false;
     this.tickFrame = 0;
     this.lastMailboxSeq = 0;
     /** Error-generation counter last seen from the engine; a rise means a new error. */
@@ -6970,6 +7096,7 @@ var Player = class {
       const words = this.console.netWords();
       if (words) net.beforeTick(words);
     }
+    this.feedSticks();
     this.console?.tick(mask);
     if (net && this.console) {
       const words = this.console.netWords();
@@ -7058,6 +7185,22 @@ var Player = class {
   renderSingleFrame() {
     this.tickOnce();
     this.present();
+  }
+  /**
+   * Analog sticks (see sticks.ts): once the cart has read a stick — the SDK marks
+   * pmem with its opt-in — write the sticks before every tick, and show the
+   * touch pad's right stick. Until then nothing is written, so a cart's own use
+   * of those pmem words is left alone.
+   */
+  feedSticks() {
+    const words = this.console?.netWords();
+    if (!words) return;
+    if (!this.analogCart) {
+      if (words[STICK_OPTIN_WORD] !== STICK_OPTIN_MAGIC) return;
+      this.analogCart = true;
+      this.touch?.setAnalog(true);
+    }
+    words[STICK_WORD] = this.replaySource ? 0 : packSticks(this.gamepad.axes);
   }
   fail(error) {
     const normalized = error instanceof Error ? error : new Error(String(error));
