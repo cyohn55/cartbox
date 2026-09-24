@@ -35,6 +35,7 @@ import {
   sceneLightingTonemap,
   type DecodedTexture,
   type EnvironmentLight,
+  type Mat4,
   type MeshSceneInstance,
 } from "@cartbox/editor";
 import type { DisplaySurface } from "../display.js";
@@ -45,6 +46,9 @@ import type { MeshScene } from "./meshScene.js";
 import { buildOrbitCamera } from "./meshScene.js";
 
 const RAD_TO_DEG = 180 / Math.PI;
+
+/** Near clip plane for first-person (HUD) views, world units. */
+const FIRST_PERSON_NEAR = 0.05;
 
 /** Edge length of the directional shadow map — a fixed, self-contained cost. */
 const SHADOW_MAP_SIZE = 1024;
@@ -94,6 +98,21 @@ const SKY_PANORAMA_WIDTH = 1536;
 const SKY_PANORAMA_HEIGHT = 768;
 /** The image-based-light copy is this much smaller — reflections are blurry anyway. */
 const SKY_IBL_DOWNSAMPLE = 8;
+
+/**
+ * A cart pose's local transform. The SDK's rotation is (yaw, pitch, roll): yaw
+ * turns about Y, pitch about X, roll about Z. composeModelMatrix takes (x, y, z)
+ * degrees and applies X, then Y, then Z — i.e. pitch, then yaw, then roll — so
+ * the angles are reordered here. (Passing them straight through made "yaw" tip
+ * an object over about X.)
+ */
+export function poseLocalMatrix(pose: MailboxMeshPose): Mat4 {
+  return composeModelMatrix(
+    pose.position,
+    [pose.rotation[1] * RAD_TO_DEG, pose.rotation[0] * RAD_TO_DEG, pose.rotation[2] * RAD_TO_DEG],
+    [pose.scale, pose.scale, pose.scale],
+  );
+}
 
 /** Radians of yaw per presented frame — one full turn every ~12s at 60Hz. */
 const AUTO_ORBIT_YAW_PER_FRAME = (2 * Math.PI) / 720;
@@ -270,6 +289,9 @@ export class MeshOverlaySurface implements DisplaySurface {
           fov: cart.fov ?? undefined,
           distance: cart.distance,
           targetOffset: cart.target,
+          // First-person (HUD) views put the eye inside the scene: a tight near
+          // plane keeps the held weapon and adjacent walls from being clipped.
+          near: this.hud ? FIRST_PERSON_NEAR : undefined,
         })
       : buildOrbitCamera(this.scene.bounds, this.frame * AUTO_ORBIT_YAW_PER_FRAME, AUTO_ORBIT_PITCH, this.width / this.height);
     const instances = this.posedInstances();
@@ -329,11 +351,7 @@ export class MeshOverlaySurface implements DisplaySurface {
         continue;
       }
       if (pose.hidden) continue; // dropped from the frame this tick
-      const local = composeModelMatrix(
-        pose.position,
-        [pose.rotation[0] * RAD_TO_DEG, pose.rotation[1] * RAD_TO_DEG, pose.rotation[2] * RAD_TO_DEG],
-        [pose.scale, pose.scale, pose.scale],
-      );
+      const local = poseLocalMatrix(pose);
       result.push({
         mesh: authored.mesh,
         model: multiplyMat4(authored.model, local),

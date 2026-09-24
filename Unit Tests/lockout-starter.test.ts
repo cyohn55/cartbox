@@ -48,7 +48,7 @@ describe("the Lockout arena starter", () => {
   it("parses into a drawable scene: the map plus 7 bot instances", () => {
     const scene = parseMeshScene(lockoutMeshSidecar())!;
     expect(scene).not.toBeNull();
-    expect(scene.instances).toHaveLength(1 + 7); // map + 7 bots
+    expect(scene.instances).toHaveLength(1 + 7 + 6); // map + 7 bots + 6 weapon viewmodels
     expect(scene.bounds.radius).toBeGreaterThan(0);
   });
 
@@ -65,7 +65,7 @@ describe("the Lockout arena starter", () => {
   it("fits the Xbox 360 tier (unbounded budget) with a modest triangle count", () => {
     expect(MODELS.xbox360.renderCaps.polyBudget).toBe(0); // unbounded
     expect(LOCKOUT_SCENE_TRIANGLES).toBeGreaterThan(200);
-    expect(LOCKOUT_SCENE_TRIANGLES).toBeLessThan(5000);
+    expect(LOCKOUT_SCENE_TRIANGLES).toBeLessThan(8000); // arena + 7 armoured soldiers
   });
 
   it("drives a first-person camera, poses the bots, and uses the 8-button gamepad", () => {
@@ -101,7 +101,7 @@ describe("the Lockout arena starter", () => {
       (p) => !p.material.baseColorImage && (p.material.emissiveFactor?.some((c) => c > 0) ?? false),
     );
     expect(energy, "an emissive energy material").toBeTruthy();
-    expect(LOCKOUT_CODE).toContain("draw_viewmodel"); // first-person weapon viewmodel
+    expect(LOCKOUT_CODE).toContain("pose_viewmodel"); // 3D first-person weapon viewmodel
   });
 
   it("carries an authored scene lighting rig: skybox IBL, multiple lights, tone mapping and shadows", () => {
@@ -127,7 +127,7 @@ describe("the Lockout arena starter", () => {
     expect(scene.lighting?.sky).toEqual(LOCKOUT_LIGHTING.sky);
     expect(scene.lighting?.fog).toEqual(LOCKOUT_LIGHTING.fog);
     // The sidecar stays small — no baked panorama inside it.
-    expect(lockoutMeshSidecar().length).toBeLessThan(1_000_000);
+    expect(lockoutMeshSidecar().length).toBeLessThan(1_200_000);
     // Bloom on the energy trim, via the starter's post-FX stack.
     const fx = parsePostFxSettings(resolveStarter("lockout").fx)!;
     expect(fx.enabled.bloom).toBe(true);

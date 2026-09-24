@@ -147,8 +147,10 @@ describe("the Lockout materials", () => {
     expect(distinct.size).toBeGreaterThan(12);
   });
 
-  it("stays compact: the whole sidecar (arena + bots + textures) is well under a megabyte", () => {
-    expect(lockoutMeshSidecar().length).toBeLessThan(900_000);
+  it("stays compact: the whole sidecar (arena + 7 soldiers + 6 weapons + textures) under ~1.2 MB", () => {
+    // The sidecar format has no mesh sharing, so each of the 7 soldiers is its
+    // own copy; this bound keeps a cart save well inside a request body limit.
+    expect(lockoutMeshSidecar().length).toBeLessThan(1_200_000);
   });
 
   it("ships a cold grade: bloom, contrast, cool split tone, vignette", () => {
