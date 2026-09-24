@@ -2280,41 +2280,55 @@ local function play_input()
     if tick-(p.lastA or -99) < 14 and not p.dead then local fx,fy,fz=forward(); throw_grenade(p,fx,fy,fz) end
     p.lastA=tick
   end
+  -- Facing yaw ay looks along (sin ay, cos ay); the screen's right is then
+  -- (-cos ay, sin ay) — the same right the held weapon is placed with — so
+  -- turning right *decreases* ay.
   local sy,cy = math.sin(p.ay), math.cos(p.ay)
+  local rtx, rtz = -cy, sy
   local mvx,mvz = 0,0
   local moving=false
   -- Dual sticks (the touch pad): the left one walks and strafes at its lean,
-  -- the right one turns. Without sticks (a keyboard), the 8-button scheme.
+  -- the right one aims (x turns, y pitches). Without sticks (a keyboard), the
+  -- 8-button scheme.
   local lx, ly = cartbox.stick(0)
-  local rx = cartbox.stick(1)
+  local rx, ry = cartbox.stick(1)
   local lstick = math.abs(lx) + math.abs(ly) > 0.05
   if not p.dead then
     if lstick then
-      mvx = -ly*sy + lx*cy; mvz = -ly*cy - lx*sy; moving=true
+      mvx = -ly*sy + lx*rtx; mvz = -ly*cy + lx*rtz; moving=true
     else
       if btn(0) then mvx=mvx+sy; mvz=mvz+cy; moving=true end
       if btn(1) then mvx=mvx-sy; mvz=mvz-cy; moving=true end
       if aheld then
-        if btn(2) then mvx=mvx-cy; mvz=mvz+sy; moving=true end
-        if btn(3) then mvx=mvx+cy; mvz=mvz-sy; moving=true end
+        if btn(2) then mvx=mvx-rtx; mvz=mvz-rtz; moving=true end
+        if btn(3) then mvx=mvx+rtx; mvz=mvz+rtz; moving=true end
       else
-        if btn(2) then p.ay=p.ay-TURN end
-        if btn(3) then p.ay=p.ay+TURN end
+        if btn(2) then p.ay=p.ay+TURN end
+        if btn(3) then p.ay=p.ay-TURN end
       end
     end
-    if rx ~= 0 then p.ay = p.ay + rx*math.abs(rx)*TURN*2.2 end   -- eased: fine aim near centre, fast at full lean
+    if rx ~= 0 then p.ay = p.ay - rx*math.abs(rx)*TURN*2.2 end   -- eased: fine aim near centre, fast at full lean
     local mm=math.sqrt(mvx*mvx+mvz*mvz)
     if mm>0 then local sp=MOVE*math.min(1,mm); move_axis("x",mvx/mm*sp); move_axis("z",mvz/mm*sp) end
   end
   if moving then bob=bob+0.28 end
-  -- auto-aim pitch eases toward the locked enemy
+  -- Pitch: the right stick aims up and down (up is up). Without it, auto-aim
+  -- eases the pitch toward the locked enemy (the 8-button scheme has no pitch);
+  -- once you have aimed by hand, the view stays where you leave it and auto-aim
+  -- only nudges toward a locked enemy.
   local aim=auto_target()
   local want=0
   if aim then
     local hd=math.sqrt((aim.x-p.x)^2+(aim.z-p.z)^2)
     want=math.asin(clamp(((aim.y+1.2)-(p.y+EYE))/math.max(1,hd),-0.9,0.9))
   end
-  p.ap=p.ap+(want-p.ap)*0.2
+  if ry ~= 0 then
+    p.ap = clamp(p.ap - ry*math.abs(ry)*0.045, -1.1, 1.1); p.manualpitch = true
+  elseif p.manualpitch then
+    if aim then p.ap = p.ap + (want-p.ap)*0.06 end
+  else
+    p.ap=p.ap+(want-p.ap)*0.2
+  end
   if btn(5) and p.grounded and not p.dead then p.vy=JUMP; p.grounded=false end
   if edge("swap", btn(7)) then p.slot=(p.slot==1) and 2 or 1 end
   local cur=W[p.slot==1 and p.g1 or p.g2]
@@ -2389,7 +2403,7 @@ local function draw_tracker()
     local m=math.sqrt(dx*dx+dz*dz)
     if m>28 then return end
     local ang=math.atan(dx,dz)-p.ay
-    local px=rx+math.sin(ang)*(m/28)*rr
+    local px=rx-math.sin(ang)*(m/28)*rr   -- screen-right is -sin of the relative bearing
     local py=ry-math.cos(ang)*(m/28)*rr
     circ(px,py,3,col)
   end
@@ -2545,7 +2559,7 @@ function TIC()
     print("Up/Down choose . Z (or A) start",470,540,13,false,1,true)
     print("Move Up/Down . Turn Left/Right . hold A strafe . dbl-tap A grenade",300,584,13,false,1,true)
     print("Z fire (auto-melee close) . X jump . S swap . sniper: hold A to zoom",300,612,13,false,1,true)
-    print("Touch: left stick moves . right stick turns . A fire . B jump . X zoom/grenade . Y swap",300,640,13,false,1,true)
+    print("Touch: left stick moves . right stick aims . A fire . B jump . X zoom/grenade . Y swap",300,640,13,false,1,true)
     return
   end
 
