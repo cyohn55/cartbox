@@ -5,9 +5,10 @@
  *
  * Slots are assigned deterministically from the room's membership (ordered by
  * join time, then id), so every browser agrees who is in which slot without a
- * server; the lowest slot is the host. State is sent at ~15 Hz (it is a
- * snapshot — a lost one is replaced by the next), events are sent the tick they
- * happen (they are the things that must not be missed: a hit, a kill).
+ * server; the lowest slot is the host. Everything is sent in one message every
+ * 4 ticks (~15 Hz): the latest state (a snapshot — a lost one is replaced by the
+ * next), every event raised since (a hit, a kill: at most 50 ms late), and the
+ * host's match word.
  */
 
 import {
@@ -29,11 +30,17 @@ export interface NetPeer {
   readonly name?: string;
 }
 
-/** Messages the session sends. Kept tiny: they ride a hosted broadcast service. */
-export type NetMessage =
-  | { readonly t: "s"; readonly s: readonly (readonly [number, number, number, number])[] } // [slot, w0, w1, w2]
-  | { readonly t: "e"; readonly e: readonly NetEvent[] }
-  | { readonly t: "m"; readonly m: number };
+/**
+ * The one message the session sends, ~15 times a second: the slots this player
+ * published ([slot, w0, w1, w2]), the events raised since the last one, and (from
+ * the host) the match word. One batched message per player keeps a room well
+ * inside a hosted broadcast service's message-rate limits.
+ */
+export interface NetMessage {
+  readonly s?: readonly (readonly [number, number, number, number])[];
+  readonly e?: readonly NetEvent[];
+  readonly m?: number;
+}
 
 /** A room-scoped broadcast channel with presence. */
 export interface NetTransport {
@@ -69,8 +76,9 @@ export class NetSession {
   private readonly remote = new Map<number, { state: NetState; at: number }>();
   private readonly pendingEvents: NetEvent[] = [];
   private hostMatch = 0;
-  private lastSentMatch = -1;
   private tick = 0;
+  private readonly outEvents: NetEvent[] = [];
+  private outStates = new Map<number, NetState>();
   private readonly listeners = new Set<(status: NetRoomStatus) => void>();
 
   constructor(
@@ -158,32 +166,26 @@ export class NetSession {
     const out = takeNetOutbox(words);
     this.tick += 1;
     if (!this.connected || this.mySlot < 0) return;
-    if (out.events.length > 0) this.transport.send({ t: "e", e: out.events });
-    if (out.states.size > 0 && this.tick % STATE_EVERY === 0) {
-      this.transport.send({ t: "s", s: [...out.states].map(([slot, w]) => [slot, w[0], w[1], w[2]] as const) });
-    }
-    if (this.isHost) {
-      this.hostMatch = out.match;
-      // The match word changes rarely; send it on change and once a second.
-      if (out.match !== this.lastSentMatch || this.tick % 60 === 0) {
-        this.transport.send({ t: "m", m: out.match });
-        this.lastSentMatch = out.match;
-      }
-    }
+    for (const event of out.events) if (this.outEvents.length < 200) this.outEvents.push(event);
+    for (const [slot, state] of out.states) this.outStates.set(slot, state);
+    if (this.isHost) this.hostMatch = out.match;
+    if (this.tick % STATE_EVERY !== 0) return;
+    const message: { s?: [number, number, number, number][]; e?: NetEvent[]; m?: number } = {};
+    if (this.outStates.size > 0) message.s = [...this.outStates].map(([slot, w]) => [slot, w[0], w[1], w[2]]);
+    if (this.outEvents.length > 0) message.e = this.outEvents.splice(0);
+    if (this.isHost) message.m = this.hostMatch;
+    this.outStates = new Map();
+    if (message.s || message.e || message.m !== undefined) this.transport.send(message);
   }
 
   private receive(message: NetMessage): void {
     const now = this.now();
-    if (message.t === "s") {
-      for (const [slot, a, b, c] of message.s) {
-        if (slot >= 0 && slot < NET_SLOTS && slot !== this.mySlot) this.remote.set(slot, { state: [a, b, c], at: now });
-      }
-    } else if (message.t === "e") {
-      // Cap the backlog: a burst beyond this is stale by the time it would land.
-      for (const event of message.e) if (this.pendingEvents.length < 200) this.pendingEvents.push(event);
-    } else if (message.t === "m" && !this.isHost) {
-      this.hostMatch = message.m;
+    for (const [slot, a, b, c] of message.s ?? []) {
+      if (slot >= 0 && slot < NET_SLOTS && slot !== this.mySlot) this.remote.set(slot, { state: [a, b, c], at: now });
     }
+    // Cap the backlog: a burst beyond this is stale by the time it would land.
+    for (const event of message.e ?? []) if (this.pendingEvents.length < 200) this.pendingEvents.push(event);
+    if (message.m !== undefined && !this.isHost) this.hostMatch = message.m;
   }
 
   private emit(): void {

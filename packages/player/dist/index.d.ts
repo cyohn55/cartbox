@@ -79,9 +79,10 @@ declare function takeNetOutbox(words: Uint32Array): NetOutbox;
  *
  * Slots are assigned deterministically from the room's membership (ordered by
  * join time, then id), so every browser agrees who is in which slot without a
- * server; the lowest slot is the host. State is sent at ~15 Hz (it is a
- * snapshot — a lost one is replaced by the next), events are sent the tick they
- * happen (they are the things that must not be missed: a hit, a kill).
+ * server; the lowest slot is the host. Everything is sent in one message every
+ * 4 ticks (~15 Hz): the latest state (a snapshot — a lost one is replaced by the
+ * next), every event raised since (a hit, a kill: at most 50 ms late), and the
+ * host's match word.
  */
 
 /** A room member as the transport's presence reports it. */
@@ -91,17 +92,17 @@ interface NetPeer {
     readonly joinedAt: number;
     readonly name?: string;
 }
-/** Messages the session sends. Kept tiny: they ride a hosted broadcast service. */
-type NetMessage = {
-    readonly t: "s";
-    readonly s: readonly (readonly [number, number, number, number])[];
-} | {
-    readonly t: "e";
-    readonly e: readonly NetEvent[];
-} | {
-    readonly t: "m";
-    readonly m: number;
-};
+/**
+ * The one message the session sends, ~15 times a second: the slots this player
+ * published ([slot, w0, w1, w2]), the events raised since the last one, and (from
+ * the host) the match word. One batched message per player keeps a room well
+ * inside a hosted broadcast service's message-rate limits.
+ */
+interface NetMessage {
+    readonly s?: readonly (readonly [number, number, number, number])[];
+    readonly e?: readonly NetEvent[];
+    readonly m?: number;
+}
 /** A room-scoped broadcast channel with presence. */
 interface NetTransport {
     /** This browser's peer id. */
@@ -131,8 +132,9 @@ declare class NetSession {
     private readonly remote;
     private readonly pendingEvents;
     private hostMatch;
-    private lastSentMatch;
     private tick;
+    private readonly outEvents;
+    private outStates;
     private readonly listeners;
     constructor(transport: NetTransport, now?: () => number);
     /** Join the room. */

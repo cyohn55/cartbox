@@ -31,6 +31,7 @@ import { serializeMeshAsset, type EncodedImage, type MeshAsset, type MeshPrimiti
 import type { SceneLighting } from "./SceneLighting";
 import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, type Streams } from "./seedGeometry";
 import { packMeshLibrary } from "./meshLibrary";
+import { SWEETIE_16 } from "./palette";
 
 /** An axis-aligned box: centre (cx,cy,cz) and half-extents (hx,hy,hz). */
 type Box = readonly [number, number, number, number, number, number];
@@ -2478,7 +2479,7 @@ function TIC()
       print("Waiting for the host to start a match...",430,240,12,false,2,true)
       local y = 300
       for ns=0,7 do if (HUMANS >> ns) & 1 == 1 then
-        print("Player "..(ns+1)..(ns==0 and "  (host)" or "")..(ns==MYSLOT and "  <- you" or ""),500,y,13,false,1,true); y=y+24
+        print("Player "..(ns+1)..(ns==0 and "  (host)" or "")..(ns==MYSLOT and "  <- you" or ""),470,y,13,false,2,true); y=y+34
       end end
       return
     end
@@ -2574,26 +2575,54 @@ end
 `;
 
 /** Seed a fresh cart with the Lockout arena code and a cool Forerunner palette. */
+/** Lockout's palette over the default Sweetie-16: index → hex. */
+const LOCKOUT_PALETTE: ReadonlyArray<readonly [number, string]> = [
+  [0, "#000000"], // void — pure black so HUD mode keys it transparent (the 3D shows through)
+  [1, "#1a2740"], // upper sky
+  [2, "#2b3f5e"], // mid sky
+  [3, "#3f5a72"], // horizon haze (greenish-grey Lockout mood)
+  [5, "#202838"], // HUD dark slate (bright enough to survive the HUD transparent key)
+  [6, "#37e0a0"], // health / hit green
+  [9, "#5cd0ff"], // shield / energy cyan
+  [12, "#eaf2ff"], // ink
+  [13, "#a7bad4"], // dim ink
+];
+
+const hexRgb = (hex: string): [number, number, number] => [
+  parseInt(hex.slice(1, 3), 16),
+  parseInt(hex.slice(3, 5), 16),
+  parseInt(hex.slice(5, 7), 16),
+];
+
 export function seedLockoutCart(engine: CartEngine): void {
   engine.setLanguage("lua");
   engine.setCode(LOCKOUT_CODE);
-  const entries: ReadonlyArray<readonly [number, string]> = [
-    [0, "#000000"], // void — pure black so HUD mode keys it transparent (the 3D shows through)
-    [1, "#1a2740"], // upper sky
-    [2, "#2b3f5e"], // mid sky
-    [3, "#3f5a72"], // horizon haze (greenish-grey Lockout mood)
-    [5, "#202838"], // HUD dark slate (bright enough to survive the HUD transparent key)
-    [6, "#37e0a0"], // health / hit green
-    [9, "#5cd0ff"], // shield / energy cyan
-    [12, "#eaf2ff"], // ink
-    [13, "#a7bad4"], // dim ink
-  ];
-  for (const [index, hex] of entries) {
-    engine.setPaletteColor(
-      index,
-      parseInt(hex.slice(1, 3), 16),
-      parseInt(hex.slice(3, 5), 16),
-      parseInt(hex.slice(5, 7), 16),
-    );
+  for (const [index, hex] of LOCKOUT_PALETTE) engine.setPaletteColor(index, ...hexRgb(hex));
+}
+
+/**
+ * The Lockout cartridge as .tic bytes — its code and palette, exactly what the
+ * starter seeds — for playing it outside the editor (the /lockout page). The
+ * cart has no sprites, map or sound, so those two chunks are the whole cart.
+ */
+export function lockoutCartridge(): Uint8Array {
+  const code = new TextEncoder().encode(LOCKOUT_CODE);
+  if (code.length > 0xffff) throw new Error("Lockout code no longer fits one .tic chunk");
+  const palette = new Uint8Array(16 * 3);
+  SWEETIE_16.forEach((hex, i) => palette.set(hexRgb(hex), i * 3));
+  for (const [index, hex] of LOCKOUT_PALETTE) palette.set(hexRgb(hex), index * 3);
+  const chunk = (type: number, data: Uint8Array) => {
+    const out = new Uint8Array(4 + data.length);
+    out.set([type, data.length & 0xff, (data.length >> 8) & 0xff, 0], 0);
+    out.set(data, 4);
+    return out;
+  };
+  const parts = [chunk(12, palette), chunk(5, code)]; // CHUNK_PALETTE, CHUNK_CODE (bank 0)
+  const out = new Uint8Array(parts.reduce((n, part) => n + part.length, 0));
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
   }
+  return out;
 }

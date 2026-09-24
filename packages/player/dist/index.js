@@ -7209,8 +7209,9 @@ var NetSession = class {
     this.remote = /* @__PURE__ */ new Map();
     this.pendingEvents = [];
     this.hostMatch = 0;
-    this.lastSentMatch = -1;
     this.tick = 0;
+    this.outEvents = [];
+    this.outStates = /* @__PURE__ */ new Map();
     this.listeners = /* @__PURE__ */ new Set();
     transport.onPeers((peers) => {
       this.peers = [...peers].sort((a, b) => a.joinedAt - b.joinedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -7285,29 +7286,24 @@ var NetSession = class {
     const out = takeNetOutbox(words);
     this.tick += 1;
     if (!this.connected || this.mySlot < 0) return;
-    if (out.events.length > 0) this.transport.send({ t: "e", e: out.events });
-    if (out.states.size > 0 && this.tick % STATE_EVERY === 0) {
-      this.transport.send({ t: "s", s: [...out.states].map(([slot, w]) => [slot, w[0], w[1], w[2]]) });
-    }
-    if (this.isHost) {
-      this.hostMatch = out.match;
-      if (out.match !== this.lastSentMatch || this.tick % 60 === 0) {
-        this.transport.send({ t: "m", m: out.match });
-        this.lastSentMatch = out.match;
-      }
-    }
+    for (const event of out.events) if (this.outEvents.length < 200) this.outEvents.push(event);
+    for (const [slot, state] of out.states) this.outStates.set(slot, state);
+    if (this.isHost) this.hostMatch = out.match;
+    if (this.tick % STATE_EVERY !== 0) return;
+    const message = {};
+    if (this.outStates.size > 0) message.s = [...this.outStates].map(([slot, w]) => [slot, w[0], w[1], w[2]]);
+    if (this.outEvents.length > 0) message.e = this.outEvents.splice(0);
+    if (this.isHost) message.m = this.hostMatch;
+    this.outStates = /* @__PURE__ */ new Map();
+    if (message.s || message.e || message.m !== void 0) this.transport.send(message);
   }
   receive(message) {
     const now = this.now();
-    if (message.t === "s") {
-      for (const [slot, a, b, c] of message.s) {
-        if (slot >= 0 && slot < NET_SLOTS && slot !== this.mySlot) this.remote.set(slot, { state: [a, b, c], at: now });
-      }
-    } else if (message.t === "e") {
-      for (const event of message.e) if (this.pendingEvents.length < 200) this.pendingEvents.push(event);
-    } else if (message.t === "m" && !this.isHost) {
-      this.hostMatch = message.m;
+    for (const [slot, a, b, c] of message.s ?? []) {
+      if (slot >= 0 && slot < NET_SLOTS && slot !== this.mySlot) this.remote.set(slot, { state: [a, b, c], at: now });
     }
+    for (const event of message.e ?? []) if (this.pendingEvents.length < 200) this.pendingEvents.push(event);
+    if (message.m !== void 0 && !this.isHost) this.hostMatch = message.m;
   }
   emit() {
     const status = this.status();

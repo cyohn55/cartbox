@@ -13,6 +13,8 @@ import {
   NET_WORDS,
   NetSession,
   takeNetOutbox,
+  type NetMessage,
+  type NetTransport,
   writeNetInbox,
 } from "@cartbox/player";
 
@@ -96,7 +98,7 @@ describe("NetSession over a memory room", () => {
     expect(guest.status().peers).toHaveLength(2);
   });
 
-  it("relays state at 15 Hz, events at once, and the host's match word", async () => {
+  it("relays state, events and the host's match word in one ~15 Hz message", async () => {
     const { host, guest, advance } = await room();
     const hw = new Uint32Array(NET_WORDS);
     const gw = new Uint32Array(NET_WORDS);
@@ -146,6 +148,33 @@ describe("NetSession over a memory room", () => {
     host.close();
     expect(guest.mySlot).toBe(0);
     expect(guest.isHost).toBe(true);
+  });
+
+  it("sends one batched message per 4 ticks however busy the tick is", async () => {
+    const sent: NetMessage[] = [];
+    const transport: NetTransport = {
+      selfId: "me",
+      connect: async () => {},
+      send: (message) => sent.push(message),
+      onMessage: () => {},
+      onPeers: (handler) => queueMicrotask(() => handler([{ id: "me", joinedAt: 0 }])),
+      close: () => {},
+    };
+    const session = new NetSession(transport);
+    await session.connect();
+    await Promise.resolve();
+    const words = new Uint32Array(NET_WORDS);
+    for (let t = 0; t < 8; t += 1) {
+      session.beforeTick(words);
+      publish(words, 0, [t, 0, 0]);
+      send(words, 1, t);
+      send(words, 2, t);
+      session.afterTick(words);
+    }
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.s).toEqual([[0, 7, 0, 0]]); // the latest state
+    expect(sent[1]!.e).toEqual([[1, 4], [2, 4], [1, 5], [2, 5], [1, 6], [2, 6], [1, 7], [2, 7]]); // every event since
+    expect(sent[1]!.m).toBe(0); // the host's match word rides along
   });
 
   it("writes an offline inbox before connecting", () => {

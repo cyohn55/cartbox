@@ -60,6 +60,7 @@ export {
 } from "./model/xbox360Seed";
 export {
   seedLockoutCart,
+  lockoutCartridge,
   LOCKOUT_CODE,
   lockoutMeshSidecar,
   LOCKOUT_FX,

@@ -45,8 +45,11 @@ export default function HomePage() {
         </Link>
       </p>
       <p>
+        <Link href="/lockout">Play Lockout — a first-person arena, solo vs bots or online with friends (Xbox 360) →</Link>
+      </p>
+      <p>
         <Link href="/edit/new?model=xbox360&starter=lockout">
-          Play the Lockout arena — first-person arena FPS vs 7 bots (Xbox 360) →
+          Open the Lockout arena in the editor — remix its code and scene →
         </Link>
       </p>
       <p>
