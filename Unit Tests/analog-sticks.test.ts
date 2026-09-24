@@ -56,17 +56,76 @@ end`;
     expect(pmem()[STICK_WORD]).toBe(1234);
   });
 
-  it("drives Lockout: the left stick walks, the right stick turns", async () => {
-    const { tick, mailbox } = await boot(injectSdk(lockoutCartridge()));
-    for (const b of [0, 0, 0, 0x10, 0x10, 0, 0]) tick(b); // start Free for All
-    const cam = () => decodeMeshCamera(mailbox())!;
-    const yaw0 = cam().yaw;
-    for (let i = 0; i < 20; i += 1) tick(0, [0, 0, 1, 0]); // right stick hard right
-    expect(Math.abs(cam().yaw - yaw0)).toBeGreaterThan(0.3);
+  /**
+   * Directions as the player sees them. The camera looks along `forward`; the
+   * screen's right is forward rotated a quarter turn clockwise seen from above:
+   * (-forward.z, forward.x) in Lockout's world (+x shows on the screen's left
+   * when looking down +z).
+   */
+  async function lockout() {
+    const game = await boot(injectSdk(lockoutCartridge()));
+    for (const b of [0, 0, 0, 0x10, 0x10, 0, 0]) game.tick(b); // start Free for All
+    const cam = () => decodeMeshCamera(game.mailbox())!;
+    // drive_camera sets yaw = atan2(-fx, -fz), so forward = (-sin yaw, -cos yaw).
+    const forward = () => [-Math.sin(cam().yaw), -Math.cos(cam().yaw)] as const;
+    const right = () => {
+      const [fx, fz] = forward();
+      return [-fz, fx] as const;
+    };
+    return { ...game, cam, forward, right };
+  }
 
-    const t0 = cam().target;
-    for (let i = 0; i < 30; i += 1) tick(0, [0, -1, 0, 0]); // left stick forward
-    const t1 = cam().target;
-    expect(Math.hypot(t1[0] - t0[0], t1[2] - t0[2])).toBeGreaterThan(0.5);
+  it("turns the view right with the right stick pushed right (and with the Right key)", async () => {
+    const g = await lockout();
+    let r0 = g.right();
+    for (let i = 0; i < 8; i += 1) g.tick(0, [0, 0, 1, 0]);
+    let f1 = g.forward();
+    expect(f1[0] * r0[0] + f1[1] * r0[1]).toBeGreaterThan(0.1); // swung toward the old screen-right
+
+    r0 = g.right();
+    for (let i = 0; i < 8; i += 1) g.tick(1 << 3); // Right on the D-pad / arrow key
+    f1 = g.forward();
+    expect(f1[0] * r0[0] + f1[1] * r0[1]).toBeGreaterThan(0.1);
+  });
+
+  it("strafes toward the screen's right with the left stick pushed right, and walks forward on up", async () => {
+    const g = await lockout();
+    const r = g.right();
+    const f = g.forward();
+    // Strafe right, then left (the random spawn may put a wall on one side, so
+    // compare the two rather than demanding free movement one way).
+    const along = (from: readonly number[], to: readonly number[]) => (to[0]! - from[0]!) * r[0] + (to[2]! - from[2]!) * r[1];
+    const t0 = g.cam().target;
+    for (let i = 0; i < 12; i += 1) g.tick(0, [1, 0, 0, 0]);
+    const t1 = g.cam().target;
+    for (let i = 0; i < 12; i += 1) g.tick(0, [-1, 0, 0, 0]);
+    const t2l = g.cam().target;
+    const rightward = along(t0, t1);
+    const leftward = along(t1, t2l);
+    expect(rightward).toBeGreaterThan(-0.05); // never toward the screen's left
+    expect(leftward).toBeLessThan(0.05); // never toward the screen's right
+    expect(rightward - leftward).toBeGreaterThan(0.3);
+    void f;
+
+    const t2 = g.cam().target;
+    for (let i = 0; i < 12; i += 1) g.tick(0, [0, -1, 0, 0]);
+    const t3 = g.cam().target;
+    const f2 = g.forward();
+    expect((t3[0] - t2[0]) * f2[0] + (t3[2] - t2[2]) * f2[1]).toBeGreaterThan(0.3);
+  });
+
+  it("aims up with the right stick pushed up, and down with it pulled down", async () => {
+    const g = await lockout();
+    const level = g.cam().pitch;
+    for (let i = 0; i < 15; i += 1) g.tick(0, [0, 0, 0, -1]); // up
+    const up = g.cam().pitch;
+    // drive_camera's pitch is asin(-forward.y): looking up is a smaller pitch.
+    expect(up).toBeLessThan(level - 0.2);
+    for (let i = 0; i < 30; i += 1) g.tick(0, [0, 0, 0, 1]); // down
+    expect(g.cam().pitch).toBeGreaterThan(up + 0.4);
+    // …and it stays where it was left (no drift back to level without a target).
+    const held = g.cam().pitch;
+    for (let i = 0; i < 20; i += 1) g.tick(0);
+    expect(Math.abs(g.cam().pitch - held)).toBeLessThan(0.15);
   });
 });
