@@ -6,6 +6,7 @@
  */
 
 import { ConsoleButton } from "./types.js";
+import { stickDirections } from "./sticks.js";
 
 /**
  * Default keyboard layout, matching TIC-80 conventions: arrows for the D-pad,
@@ -39,6 +40,10 @@ export function resolveButton(
  */
 export class GamepadState {
   private mask = 0;
+  /** D-pad bits the left stick is pressing (kept apart so a key release can't clear them). */
+  private stickMask = 0;
+  /** Analog sticks: left x, left y, right x, right y, each −1..1 (y down-positive). */
+  readonly axes: [number, number, number, number] = [0, 0, 0, 0];
 
   press(button: ConsoleButton): void {
     this.mask |= 1 << button;
@@ -48,13 +53,25 @@ export class GamepadState {
     this.mask &= ~(1 << button);
   }
 
+  /**
+   * Set a stick's position (0 = left, 1 = right). The left stick also presses
+   * the D-pad directions it leans toward, so button-only carts steer with it.
+   */
+  setStick(index: 0 | 1, x: number, y: number): void {
+    this.axes[index * 2] = x;
+    this.axes[index * 2 + 1] = y;
+    if (index === 0) this.stickMask = stickDirections(x, y);
+  }
+
   /** The engine-facing bitmask for player one. */
   get value(): number {
-    return this.mask;
+    return this.mask | this.stickMask;
   }
 
   reset(): void {
     this.mask = 0;
+    this.stickMask = 0;
+    this.axes.fill(0);
   }
 }
 
@@ -99,23 +116,19 @@ export interface TouchControl {
   readonly label: string;
   /** Small keyboard-equivalent hint under the glyph (empty for the D-pad). */
   readonly hint: string;
-  readonly cluster: "dpad" | "face";
+  readonly cluster: "face";
   /** Grid cell inside its cluster's 3x3 grid (1-based column/row). */
   readonly col: number;
   readonly row: number;
 }
 
 /**
- * The on-screen gamepad layout: a D-pad bottom-left and an Xbox-style diamond of
- * face buttons bottom-right. All eight console buttons are present, so a cart
- * that uses X/Y (strafe, swap, ...) is fully playable on a phone or tablet.
- * Pure data so it can be unit-tested without a DOM.
+ * The on-screen face buttons: an Xbox-style diamond bottom-right. The D-pad
+ * directions come from the left stick (see {@link TouchInput}), so all eight
+ * console buttons stay reachable on a phone or tablet. Pure data so it can be
+ * unit-tested without a DOM.
  */
 export const TOUCH_LAYOUT: readonly TouchControl[] = [
-  { button: ConsoleButton.Up, label: "\u25B2", hint: "", cluster: "dpad", col: 2, row: 1 },
-  { button: ConsoleButton.Left, label: "\u25C0", hint: "", cluster: "dpad", col: 1, row: 2 },
-  { button: ConsoleButton.Right, label: "\u25B6", hint: "", cluster: "dpad", col: 3, row: 2 },
-  { button: ConsoleButton.Down, label: "\u25BC", hint: "", cluster: "dpad", col: 2, row: 3 },
   { button: ConsoleButton.Y, label: "Y", hint: "S", cluster: "face", col: 2, row: 1 },
   { button: ConsoleButton.X, label: "X", hint: "A", cluster: "face", col: 1, row: 2 },
   { button: ConsoleButton.B, label: "B", hint: "X", cluster: "face", col: 3, row: 2 },
@@ -132,8 +145,31 @@ export function hasTouchSupport(maxTouchPoints: number, coarsePointer: boolean):
   return maxTouchPoints > 0 || coarsePointer;
 }
 
+/** Edge length of a face button, and of a thumbstick's ring. */
+const FACE_SIZE = "clamp(40px, 8vmin, 68px)";
+const STICK_SIZE = "clamp(110px, 24vmin, 190px)";
+
 /**
- * Renders an on-screen gamepad (D-pad + A/B/X/Y) over the player and maps presses
+ * A thumb's offset from a stick's centre as a stick position: −1..1 per axis,
+ * clamped to the ring, with a small dead zone so a resting thumb reads 0.
+ */
+export function stickVector(dx: number, dy: number, radius: number, deadZone = 0.12): { x: number; y: number } {
+  const r = Math.max(1, radius);
+  let x = dx / r;
+  let y = dy / r;
+  const m = Math.hypot(x, y);
+  if (m > 1) {
+    x /= m;
+    y /= m;
+  }
+  if (m < deadZone) return { x: 0, y: 0 };
+  // Rescale past the dead zone so the stick still reaches full deflection.
+  const k = (Math.min(1, m) - deadZone) / (1 - deadZone) / Math.min(1, m);
+  return { x: x * k, y: y * k };
+}
+
+/**
+ * Renders an on-screen gamepad (two thumbsticks + A/B/X/Y) over the player and maps presses
  * to {@link GamepadState}. Styled inline so it works in any host page without a
  * stylesheet, and driven by pointer events so fingers, pens, trackpad taps and
  * mouse clicks all work; each control tracks its own pointers, so multi-touch
@@ -142,6 +178,7 @@ export function hasTouchSupport(maxTouchPoints: number, coarsePointer: boolean):
  */
 export class TouchInput {
   private readonly root: HTMLElement;
+  private readonly rightStick: HTMLElement;
   private readonly restorePosition: (() => void) | null = null;
 
   constructor(container: HTMLElement, state: GamepadState) {
@@ -169,27 +206,103 @@ export class TouchInput {
       webkitUserSelect: "none",
     } satisfies Partial<CSSStyleDeclaration>);
 
-    const cluster = (side: "left" | "right"): HTMLElement => {
-      const el = doc.createElement("div");
-      Object.assign(el.style, {
-        position: "absolute",
-        bottom: "4%",
-        [side]: "3%",
-        display: "grid",
-        gridTemplateColumns: "repeat(3, clamp(40px, 8vmin, 68px))",
-        gridTemplateRows: "repeat(3, clamp(40px, 8vmin, 68px))",
-        gap: "4px",
-      });
-      this.root.appendChild(el);
-      return el;
-    };
-    const dpad = cluster("left");
-    const face = cluster("right");
+    // Face buttons: an Xbox-style diamond, bottom-right.
+    const face = doc.createElement("div");
+    Object.assign(face.style, {
+      position: "absolute",
+      bottom: "4%",
+      right: "3%",
+      display: "grid",
+      gridTemplateColumns: `repeat(3, ${FACE_SIZE})`,
+      gridTemplateRows: `repeat(3, ${FACE_SIZE})`,
+      gap: "4px",
+    });
+    this.root.appendChild(face);
+    for (const control of TOUCH_LAYOUT) face.appendChild(this.createButton(doc, control, state));
 
-    for (const control of TOUCH_LAYOUT) {
-      (control.cluster === "dpad" ? dpad : face).appendChild(this.createButton(doc, control, state));
-    }
+    // Two sticks: the left one moves (and drives the D-pad for button-only
+    // carts); the right one, beside the face buttons, aims — shown once the cart
+    // reads sticks (cartbox.stick), since a button-only cart has no use for it.
+    this.createStick(doc, state, 0, { left: "4%", bottom: "6%" });
+    this.rightStick = this.createStick(doc, state, 1, { right: `calc(3% + 3 * ${FACE_SIZE} + 8px + 3vmin)`, bottom: "6%" });
+    this.rightStick.style.display = "none";
     container.appendChild(this.root);
+  }
+
+  /** Show the right stick: the cart reads analog sticks. */
+  setAnalog(on: boolean): void {
+    this.rightStick.style.display = on ? "block" : "none";
+  }
+
+  /** A virtual thumbstick: a ring you press anywhere in, and a knob that follows the thumb. */
+  private createStick(doc: Document, state: GamepadState, index: 0 | 1, place: Partial<CSSStyleDeclaration>): HTMLElement {
+    const base = doc.createElement("div");
+    base.setAttribute("data-cbx-stick", index === 0 ? "left" : "right");
+    base.setAttribute("aria-label", index === 0 ? "Left stick" : "Right stick");
+    Object.assign(base.style, {
+      position: "absolute",
+      width: STICK_SIZE,
+      height: STICK_SIZE,
+      borderRadius: "50%",
+      border: "2px solid rgba(255,255,255,0.4)",
+      background: "radial-gradient(circle, rgba(20,26,40,0.25) 0%, rgba(20,26,40,0.5) 70%)",
+      pointerEvents: "auto",
+      touchAction: "none",
+      webkitTouchCallout: "none",
+      webkitTapHighlightColor: "transparent",
+      ...place,
+    } as Partial<CSSStyleDeclaration>);
+    const knob = doc.createElement("div");
+    Object.assign(knob.style, {
+      position: "absolute",
+      left: "30%",
+      top: "30%",
+      width: "40%",
+      height: "40%",
+      borderRadius: "50%",
+      border: "2px solid rgba(255,255,255,0.6)",
+      background: "rgba(92,208,255,0.35)",
+      pointerEvents: "none",
+      transform: "translate(0px, 0px)",
+    } as Partial<CSSStyleDeclaration>);
+    base.appendChild(knob);
+
+    let pointer: number | null = null;
+    const move = (event: PointerEvent) => {
+      const rect = base.getBoundingClientRect();
+      const radius = rect.width / 2 || 1;
+      const { x, y } = stickVector(event.clientX - (rect.left + radius), event.clientY - (rect.top + radius), radius);
+      state.setStick(index, x, y);
+      knob.style.transform = `translate(${(x * radius * 0.6).toFixed(1)}px, ${(y * radius * 0.6).toFixed(1)}px)`;
+      knob.style.background = "rgba(92,208,255,0.6)";
+    };
+    const end = (event: PointerEvent) => {
+      if (event.pointerId !== pointer) return;
+      pointer = null;
+      state.setStick(index, 0, 0);
+      knob.style.transform = "translate(0px, 0px)";
+      knob.style.background = "rgba(92,208,255,0.35)";
+    };
+    base.addEventListener("pointerdown", (event) => {
+      if (pointer !== null) return; // one thumb per stick
+      event.preventDefault();
+      pointer = event.pointerId;
+      try {
+        base.setPointerCapture(event.pointerId); // keep tracking when the thumb leaves the ring
+      } catch {
+        // Synthetic/unsupported pointers: tracking still works while inside.
+      }
+      move(event);
+    });
+    base.addEventListener("pointermove", (event) => {
+      if (event.pointerId === pointer) move(event);
+    });
+    base.addEventListener("pointerup", end);
+    base.addEventListener("pointercancel", end);
+    base.addEventListener("lostpointercapture", end);
+    base.addEventListener("contextmenu", (event) => event.preventDefault());
+    this.root.appendChild(base);
+    return base;
   }
 
   private createButton(doc: Document, control: TouchControl, state: GamepadState): HTMLButtonElement {
@@ -197,7 +310,7 @@ export class TouchInput {
     element.type = "button";
     element.setAttribute("data-cbx-button", ConsoleButton[control.button]);
     element.setAttribute("aria-label", `${ConsoleButton[control.button]} button`);
-    const round = control.cluster === "face";
+    const round = true;
     Object.assign(element.style, {
       gridColumn: String(control.col),
       gridRow: String(control.row),

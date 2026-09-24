@@ -97,6 +97,12 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
     open: true,
     entries: [
       {
+        name: "cartbox.stick",
+        signature: "cartbox.stick(n) -> x, y",
+        doc: "Analog stick n (0 left, 1 right) as -1..1 each (y down-positive). The touch pad's sticks; 0,0 on a keyboard, so keep a button fallback.",
+        snippet: "local lx, ly = cartbox.stick(0)",
+      },
+      {
         name: "cartbox.score",
         signature: "cartbox.score(value)",
         doc: "Post a score to the leaderboard (best of the run is kept).",

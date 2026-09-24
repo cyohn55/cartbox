@@ -15,6 +15,7 @@ import { GamepadState, KeyboardInput, TouchInput, hasTouchSupport } from "./inpu
 import { frameDurationMs, getModel, type ConsoleModel } from "./models.js";
 import { ReplayRecorder, ReplaySource, hashCart, randomSeed, type Replay } from "./replay.js";
 import { seedCartridge, prependLuaCode } from "./cartseed.js";
+import { STICK_OPTIN_MAGIC, STICK_OPTIN_WORD, STICK_WORD, packSticks } from "./sticks.js";
 import { injectSdk } from "./sdk.js";
 import { collisionSdkLua } from "./collisionSdk.js";
 import { flagsSdkLua } from "./flagsSdk.js";
@@ -73,6 +74,8 @@ export class Player {
   private audio?: AudioController;
   private keyboard?: KeyboardInput;
   private touch?: TouchInput;
+  /** The cart reads analog sticks (it opted in via cartbox.stick). */
+  private analogCart = false;
   private console?: ConsoleInstance;
   private cartSource?: CartSpriteSource;
   private readonly model: ConsoleModel;
@@ -387,6 +390,7 @@ export class Player {
       const words = this.console.netWords();
       if (words) net.beforeTick(words);
     }
+    this.feedSticks();
     this.console?.tick(mask);
     if (net && this.console) {
       const words = this.console.netWords();
@@ -501,6 +505,23 @@ export class Player {
   private renderSingleFrame(): void {
     this.tickOnce();
     this.present();
+  }
+
+  /**
+   * Analog sticks (see sticks.ts): once the cart has read a stick — the SDK marks
+   * pmem with its opt-in — write the sticks before every tick, and show the
+   * touch pad's right stick. Until then nothing is written, so a cart's own use
+   * of those pmem words is left alone.
+   */
+  private feedSticks(): void {
+    const words = this.console?.netWords();
+    if (!words) return;
+    if (!this.analogCart) {
+      if (words[STICK_OPTIN_WORD] !== STICK_OPTIN_MAGIC) return;
+      this.analogCart = true;
+      this.touch?.setAnalog(true);
+    }
+    words[STICK_WORD] = this.replaySource ? 0 : packSticks(this.gamepad.axes);
   }
 
   private fail(error: unknown): void {
