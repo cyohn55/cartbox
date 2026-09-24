@@ -308,9 +308,12 @@ export function buildSceneShadow(
   lighting: SceneLighting,
   center: readonly [number, number, number],
   radius: number,
-  options: { readonly size: number; readonly depth: Float32Array },
+  options: { readonly size: number; readonly depth: Float32Array; readonly clear?: boolean },
 ): ShadowInput | null {
-  if (!lighting.shadows || instances.length === 0 || radius <= 0) return null;
+  // An empty instance list still yields a (cleared) map, so a caller can layer
+  // cached static depth + this frame's moving instances; only a rig without
+  // shadows, or a degenerate scene, gets null.
+  if (!lighting.shadows || radius <= 0) return null;
   const direction = sceneLightingKeyDirection(lighting);
   if (!direction) return null;
 
@@ -326,7 +329,7 @@ export function buildSceneShadow(
   ];
   const lightView = viewMatrix(eye, center);
   const lightProjection = orthographicMatrix(-radius, radius, -radius, radius, 0.01, dist + radius * 2);
-  const map = renderShadowMap(instances, { lightView, lightProjection, size: options.size, depth: options.depth });
+  const map = renderShadowMap(instances, { lightView, lightProjection, size: options.size, depth: options.depth, clear: options.clear });
   // Authored rigs get slope-scaled bias (no acne on faces the sun grazes — the
   // sloped Forerunner walls) and soft 2x2-filtered edges.
   return { ...map, slopeBias: SHADOW_SLOPE_BIAS, pcf: true };

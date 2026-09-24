@@ -113,6 +113,12 @@ export interface MeshMaterial {
    * primitives — need not spell it out. See {@link SpriteTextureRef}.
    */
   readonly textureSprite?: SpriteTextureRef | null;
+  /**
+   * Whether a cart may recolour this material at runtime through a pose's tint
+   * (`cartbox.meshpose(..., tint)`) — e.g. a character's armour paint, so one
+   * mesh serves every team colour. Absent/false: tints never touch it.
+   */
+  readonly tintable?: boolean;
 }
 
 /** One triangle list with a single material. */
@@ -280,6 +286,7 @@ interface SerializedMaterial {
   roughnessFactor?: number;
   emissiveFactor?: [number, number, number];
   textureSprite?: SpriteTextureRef | null;
+  tintable?: boolean;
 }
 interface SerializedPrimitive {
   positions: string;
@@ -332,6 +339,7 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
         roughnessFactor: primitive.material.roughnessFactor,
         emissiveFactor: primitive.material.emissiveFactor ? [...primitive.material.emissiveFactor] : undefined,
         textureSprite: primitive.material.textureSprite ?? null,
+        ...(primitive.material.tintable ? { tintable: true } : {}),
       },
     })),
   };
@@ -436,6 +444,7 @@ export function deserializeMeshAsset(json: string): MeshAsset {
         roughnessFactor: typeof material.roughnessFactor === "number" ? material.roughnessFactor : undefined,
         emissiveFactor: toEmissiveFactor(material.emissiveFactor),
         textureSprite: toTextureSprite(material.textureSprite),
+        ...(material.tintable === true ? { tintable: true } : {}),
       },
     };
   });

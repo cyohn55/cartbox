@@ -114,14 +114,22 @@ cartbox = {
     if on and on ~= 0 then pmem(_MCB, f | 2) else pmem(_MCB, f & 0xfffffffd) end
   end,
   -- Move/rotate/scale one mesh instance (by its sidecar index) this frame, on top
-  -- of its authored placement. x,y,z are world units; yaw,pitch,roll radians;
+  -- of its authored placement. x,y,z are world units; yaw (about Y), pitch (about
+  -- X), roll (about Z) radians;
   -- scale defaults to 1 (pass 0 to hide). math.floor keeps every value integer so
   -- the bitwise mask never sees a float (the Pro core's Lua throws on that). Must
   -- match decodeMeshPoses() on the host.
-  meshpose = function(index, x, y, z, yaw, pitch, roll, scale)
+  -- Optional extras: frame picks one of the instance's animation frames (0 = its
+  -- base mesh, up to 127), tint recolours its tintable materials from the
+  -- 15-colour tint palette (0 = none), and front (true/1) draws it over the
+  -- whole scene — a held weapon that must never clip into a wall.
+  meshpose = function(index, x, y, z, yaw, pitch, roll, scale, frame, tint, front)
     if _mn >= _MPCAP then return end
     local base = _MPB + 1 + _mn * 8
-    pmem(base, math.floor(index or 0) & 0xff)
+    local word = math.floor(index or 0) & 0xff
+    word = word | ((math.floor(frame or 0) & 0x7f) << 9) | ((math.floor(tint or 0) & 0xf) << 16)
+    if front and front ~= 0 then word = word | 0x100000 end
+    pmem(base, word)
     pmem(base + 1, math.floor((x or 0) * 256 + 0.5) & 0xffffffff)
     pmem(base + 2, math.floor((y or 0) * 256 + 0.5) & 0xffffffff)
     pmem(base + 3, math.floor((z or 0) * 256 + 0.5) & 0xffffffff)

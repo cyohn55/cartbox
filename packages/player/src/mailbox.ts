@@ -92,6 +92,14 @@ export const MESH_POSE_CAPACITY = 8;
 export const MESH_POSE_STRIDE = 8;
 /** Bit 8 of a pose record's index word: hide this instance this frame. */
 export const MESH_POSE_HIDDEN = 1 << 8;
+/** Bits 9–15 of the index word: the animation frame to show (0 = the base mesh). */
+export const MESH_POSE_FRAME_SHIFT = 9;
+export const MESH_POSE_FRAME_MASK = 0x7f;
+/** Bits 16–19: a tint-palette index for the instance's tintable materials (0 = none). */
+export const MESH_POSE_TINT_SHIFT = 16;
+export const MESH_POSE_TINT_MASK = 0xf;
+/** Bit 20: draw this instance on the front layer, over the whole scene (a held weapon). */
+export const MESH_POSE_FRONT = 1 << 20;
 
 /**
  * Directional and spot lights ride in the bits that a point light leaves zero,
@@ -321,10 +329,16 @@ export interface MailboxMeshPose {
   hidden: boolean;
   /** Local translation, world units. */
   position: [number, number, number];
-  /** Local Euler rotation, radians, applied X→Y→Z. */
+  /** Local rotation as (yaw about Y, pitch about X, roll about Z), radians. */
   rotation: [number, number, number];
   /** Local uniform-ish scale; 1 when the cart omits it. */
   scale: number;
+  /** Animation frame (0 = the base mesh, k = the instance's frame k). Optional for old callers. */
+  frame?: number;
+  /** Tint-palette index for tintable materials (0 = none). */
+  tint?: number;
+  /** Draw on the front layer, over everything else, so it never clips into walls. */
+  front?: boolean;
 }
 
 /**
@@ -354,6 +368,9 @@ export function decodeMeshPoses(words: Uint32Array): MailboxMeshPose[] {
     poses.push({
       index: indexWord & 0xff,
       hidden: (indexWord & MESH_POSE_HIDDEN) !== 0,
+      frame: (indexWord >>> MESH_POSE_FRAME_SHIFT) & MESH_POSE_FRAME_MASK,
+      tint: (indexWord >>> MESH_POSE_TINT_SHIFT) & MESH_POSE_TINT_MASK,
+      front: (indexWord & MESH_POSE_FRONT) !== 0,
       position: [pos(words[base + 1] ?? 0), pos(words[base + 2] ?? 0), pos(words[base + 3] ?? 0)],
       rotation: [angle(words[base + 4] ?? 0), angle(words[base + 5] ?? 0), angle(words[base + 6] ?? 0)],
       scale: (words[base + 7] ?? 0) / MESH_CAM_DIST_SCALE,

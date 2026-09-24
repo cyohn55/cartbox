@@ -17,6 +17,9 @@ import {
   meshBounds,
   parseSceneLighting,
   projectionMatrix,
+  readMeshLibrary,
+  resolveMeshFrames,
+  resolveMeshRef,
   viewMatrix,
   type Mat4,
   type MeshAsset,
@@ -28,6 +31,12 @@ import {
 export interface MeshInstance extends MeshSceneInstance {
   readonly mesh: MeshAsset;
   readonly model: Mat4;
+  /**
+   * Optional animation frames: alternate meshes a cart selects per frame through
+   * a pose's `frame` (1 = frames[0], …; 0 keeps the base mesh). Instances that
+   * share frames share the MeshAsset objects.
+   */
+  readonly frames?: readonly MeshAsset[];
 }
 
 /** A world-space axis-aligned bounding box with a framing centre + radius. */
@@ -128,18 +137,36 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
   const entries = (parsed as { meshes?: unknown }).meshes;
   if (!Array.isArray(entries)) return null;
 
+  const library = readMeshLibrary((parsed as { library?: unknown }).library);
+  // Deserialize each distinct mesh string once: instances that share a model
+  // share one MeshAsset (and so one texture decode and one GPU upload).
+  const cache = new Map<string, MeshAsset | null>();
+  const load = (serialized: string): MeshAsset | null => {
+    if (!cache.has(serialized)) {
+      try {
+        cache.set(serialized, deserializeMeshAsset(serialized));
+      } catch {
+        cache.set(serialized, null); // invalid geometry drops the entry
+      }
+    }
+    return cache.get(serialized) ?? null;
+  };
   const instances: MeshInstance[] = [];
   for (const entry of entries) {
-    const record = entry as { mesh?: unknown; transform?: unknown };
+    const record = entry as { mesh?: unknown; transform?: unknown; frames?: unknown };
     if (typeof record.mesh !== "string") continue;
-    let mesh: MeshAsset;
-    try {
-      mesh = deserializeMeshAsset(record.mesh); // drops the entry if geometry is invalid
-    } catch {
-      continue;
-    }
+    const resolved = resolveMeshRef(record.mesh, library);
+    const mesh = resolved ? load(resolved) : null;
+    if (!mesh) continue;
+    const frames = resolveMeshFrames(record.frames, library)
+      .map(load)
+      .filter((frame): frame is MeshAsset => frame !== null);
     const t = readTransform(record.transform);
-    instances.push({ mesh, model: composeModelMatrix(t.position, t.rotation, t.scale) });
+    instances.push({
+      mesh,
+      model: composeModelMatrix(t.position, t.rotation, t.scale),
+      ...(frames.length > 0 ? { frames } : {}),
+    });
   }
 
   if (instances.length === 0) return null;

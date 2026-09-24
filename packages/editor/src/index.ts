@@ -64,6 +64,7 @@ export {
   lockoutMeshSidecar,
   LOCKOUT_FX,
   LOCKOUT_VIEWMODELS,
+  LOCKOUT_WALK_FRAMES,
   LOCKOUT_LIGHTING,
   LOCKOUT_SCENE_TRIANGLES,
   LOCKOUT_CENTER_X,
@@ -402,6 +403,15 @@ export {
 } from "./render/voxelMesh";
 export { voxelGridToMeshAsset, type VoxelToMeshOptions } from "./model/voxelToMesh";
 export { encodeRgbaPng } from "./model/png";
+export {
+  MESH_LIBRARY_REF,
+  packMeshLibrary,
+  readMeshLibrary,
+  resolveMeshFrames,
+  resolveMeshRef,
+  type MeshBearingEntry,
+  type MeshLibrary,
+} from "./model/meshLibrary";
 export {
   paintIndexedTexture,
   bakeIndexedTextureImage,
