@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { LOCKOUT_CODE, LOCKOUT_MESH_SIDECAR, deserializeMeshAsset } from "@cartbox/editor";
+import { LOCKOUT_CODE, lockoutMeshSidecar, deserializeMeshAsset } from "@cartbox/editor";
 import { chamferedRect, newStreams, pushLoft } from "../packages/editor/src/model/seedGeometry";
 
 /** Read a `local NAME = {…}` numeric table out of the shipped cart code. */
@@ -87,7 +87,7 @@ describe("the Lockout architecture", () => {
   });
 
   it("draws the arena as sloped Forerunner forms plus snow, not just boxes", () => {
-    const map = deserializeMeshAsset((JSON.parse(LOCKOUT_MESH_SIDECAR) as { meshes: { mesh: string }[] }).meshes[0]!.mesh);
+    const map = deserializeMeshAsset((JSON.parse(lockoutMeshSidecar()) as { meshes: { mesh: string }[] }).meshes[0]!.mesh);
     const names = map.primitives.map((p) => p.material.name);
     expect(names).toEqual(expect.arrayContaining(["forerunner", "forerunner-underside", "snow", "energy"]));
     // Sloped faces: some structure normals are neither axis-aligned nor flat.

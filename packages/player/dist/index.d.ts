@@ -2095,9 +2095,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  * 384  model      mat4x4<f32>  64   this draw's world matrix (point-light world pos)
  * 448  fog        vec4<f32>    16   rgb = fog colour, w = density
  * 464  fogParams  vec4<f32>    16   x = 1 when fogged, y = start distance, z = max amount
+ * 480  shadow2    vec4<f32>    16   x = slope-scaled shadow bias, y = 1 for 2x2 PCF
  * ```
  *
- * 480 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
+ * 496 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
  * dynamic uniform offset can address), so one buffer still holds every draw in a
  * frame. The metallic-roughness inputs and the environment carry the Modern
  * (AAA) tier's shading; a fantasy draw leaves `pbr.z` at 0 and the shader takes
@@ -2111,7 +2112,7 @@ declare const UNIFORM_STRIDE = 512;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 480;
+declare const UNIFORM_BYTES_USED = 496;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
@@ -2227,6 +2228,10 @@ interface InstanceUniform {
         readonly size: number;
         readonly bias: number;
         readonly strength: number;
+        /** Slope-scaled bias (0 = constant bias only). */
+        readonly slopeBias?: number;
+        /** 2x2 percentage-closer filtering. */
+        readonly pcf?: boolean;
     } | null;
     /** HDR tone-map exposure, or null to write the shaded colour straight through. */
     readonly tonemap: {

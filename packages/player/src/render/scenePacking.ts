@@ -35,9 +35,10 @@ import type { EnvironmentLight, Mat4 } from "@cartbox/editor";
  * 384  model      mat4x4<f32>  64   this draw's world matrix (point-light world pos)
  * 448  fog        vec4<f32>    16   rgb = fog colour, w = density
  * 464  fogParams  vec4<f32>    16   x = 1 when fogged, y = start distance, z = max amount
+ * 480  shadow2    vec4<f32>    16   x = slope-scaled shadow bias, y = 1 for 2x2 PCF
  * ```
  *
- * 480 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
+ * 496 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
  * dynamic uniform offset can address), so one buffer still holds every draw in a
  * frame. The metallic-roughness inputs and the environment carry the Modern
  * (AAA) tier's shading; a fantasy draw leaves `pbr.z` at 0 and the shader takes
@@ -51,7 +52,7 @@ export const UNIFORM_STRIDE = 512;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 480;
+export const UNIFORM_BYTES_USED = 496;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -118,6 +119,7 @@ const OFFSET_SSAO = 92;
 const OFFSET_MODEL = 96;
 const OFFSET_FOG = 112;
 const OFFSET_FOG_PARAMS = 116;
+const OFFSET_SHADOW2 = 120;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -254,7 +256,15 @@ export interface InstanceUniform {
   /** World→light-clip for this draw (`shadow.lightViewProj · model`), or null. */
   readonly lightMvp: Mat4 | null;
   /** Shadow-map sampling parameters, or null when no shadow map is bound. */
-  readonly shadow: { readonly size: number; readonly bias: number; readonly strength: number } | null;
+  readonly shadow: {
+    readonly size: number;
+    readonly bias: number;
+    readonly strength: number;
+    /** Slope-scaled bias (0 = constant bias only). */
+    readonly slopeBias?: number;
+    /** 2x2 percentage-closer filtering. */
+    readonly pcf?: boolean;
+  } | null;
   /** HDR tone-map exposure, or null to write the shaded colour straight through. */
   readonly tonemap: { readonly exposure: number } | null;
   /** Whether a screen-space AO buffer is bound (sampled per fragment on the GPU). */
@@ -378,6 +388,11 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_FOG_PARAMS + 1] = fog ? fog.start : 0;
   target[base + OFFSET_FOG_PARAMS + 2] = fog ? fog.max : 0;
   target[base + OFFSET_FOG_PARAMS + 3] = 0;
+
+  target[base + OFFSET_SHADOW2] = shadow ? shadow.slopeBias ?? 0 : 0;
+  target[base + OFFSET_SHADOW2 + 1] = shadow && shadow.pcf ? 1 : 0;
+  target[base + OFFSET_SHADOW2 + 2] = 0;
+  target[base + OFFSET_SHADOW2 + 3] = 0;
 }
 
 /** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2). */

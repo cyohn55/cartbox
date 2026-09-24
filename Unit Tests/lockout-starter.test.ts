@@ -14,7 +14,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   LOCKOUT_CODE,
-  LOCKOUT_MESH_SIDECAR,
+  lockoutMeshSidecar,
   LOCKOUT_LIGHTING,
   LOCKOUT_SCENE_TRIANGLES,
   LOCKOUT_CENTER_X,
@@ -30,7 +30,7 @@ import { modelForStarter, resolveStarterId } from "../apps/web/src/lib/starter";
 describe("the Lockout arena starter", () => {
   it("is registered and reachable by id", () => {
     expect(resolveStarter("lockout").id).toBe("lockout");
-    expect(resolveStarter("lockout").mesh).toBe(LOCKOUT_MESH_SIDECAR);
+    expect(resolveStarter("lockout").mesh).toBe(lockoutMeshSidecar());
     // A fresh cart can select it from the /edit/new URL.
     expect(resolveStarterId("lockout")).toBe("lockout");
   });
@@ -46,7 +46,7 @@ describe("the Lockout arena starter", () => {
   });
 
   it("parses into a drawable scene: the map plus 7 bot instances", () => {
-    const scene = parseMeshScene(LOCKOUT_MESH_SIDECAR)!;
+    const scene = parseMeshScene(lockoutMeshSidecar())!;
     expect(scene).not.toBeNull();
     expect(scene.instances).toHaveLength(1 + 7); // map + 7 bots
     expect(scene.bounds.radius).toBeGreaterThan(0);
@@ -56,7 +56,7 @@ describe("the Lockout arena starter", () => {
     // The cart's camera offsets are relative to (CENTER_X, CENTER_Y, CENTER_Z);
     // if the runtime's own bounds disagreed, the eye would not land on the player.
     // The map is asymmetric, so all three axes are pinned against the runtime.
-    const { center } = parseMeshScene(LOCKOUT_MESH_SIDECAR)!.bounds;
+    const { center } = parseMeshScene(lockoutMeshSidecar())!.bounds;
     expect(Math.abs(center[0] - LOCKOUT_CENTER_X)).toBeLessThan(1e-6);
     expect(Math.abs(center[1] - LOCKOUT_CENTER_Y)).toBeLessThan(1e-6);
     expect(Math.abs(center[2] - LOCKOUT_CENTER_Z)).toBeLessThan(1e-6);
@@ -89,7 +89,7 @@ describe("the Lockout arena starter", () => {
     // plus a baked emissive map for the Forerunner light strips, so the panels
     // read as glossy metal that reflects the skybox.
     const map = deserializeMeshAsset(
-      (JSON.parse(LOCKOUT_MESH_SIDECAR) as { meshes: { mesh: string }[] }).meshes[0]!.mesh,
+      (JSON.parse(lockoutMeshSidecar()) as { meshes: { mesh: string }[] }).meshes[0]!.mesh,
     );
     const forerunner = map.primitives.find((p) => p.material.baseColorImage)!;
     expect(forerunner.material.baseColorImage?.mime).toBe("image/png");
@@ -112,7 +112,7 @@ describe("the Lockout arena starter", () => {
     expect(LOCKOUT_LIGHTING.lights.length).toBeGreaterThanOrEqual(2);
     expect(LOCKOUT_LIGHTING.lights.some((l) => l.kind === "point")).toBe(true);
     // It round-trips through the runtime parse the player uses.
-    const scene = parseMeshScene(LOCKOUT_MESH_SIDECAR)!;
+    const scene = parseMeshScene(lockoutMeshSidecar())!;
     expect(scene.lighting?.shadows).toBe(true);
     expect(scene.lighting?.lights.length).toBe(LOCKOUT_LIGHTING.lights.length);
     expect(scene.lighting?.environment.sky).toEqual(LOCKOUT_LIGHTING.environment.sky);
@@ -123,11 +123,11 @@ describe("the Lockout arena starter", () => {
     expect(LOCKOUT_LIGHTING.sky?.mountains.length).toBeGreaterThanOrEqual(2);
     expect(LOCKOUT_LIGHTING.sky?.clouds).toBeGreaterThan(0.3);
     expect(LOCKOUT_LIGHTING.fog?.density).toBeGreaterThan(0);
-    const scene = parseMeshScene(LOCKOUT_MESH_SIDECAR)!;
+    const scene = parseMeshScene(lockoutMeshSidecar())!;
     expect(scene.lighting?.sky).toEqual(LOCKOUT_LIGHTING.sky);
     expect(scene.lighting?.fog).toEqual(LOCKOUT_LIGHTING.fog);
     // The sidecar stays small — no baked panorama inside it.
-    expect(LOCKOUT_MESH_SIDECAR.length).toBeLessThan(1_000_000);
+    expect(lockoutMeshSidecar().length).toBeLessThan(1_000_000);
     // Bloom on the energy trim, via the starter's post-FX stack.
     const fx = parsePostFxSettings(resolveStarter("lockout").fx)!;
     expect(fx.enabled.bloom).toBe(true);

@@ -70,7 +70,7 @@ describe("uniform layout", () => {
     expect(Array.from(data.subarray(112, 120))).toEqual([0.5, 0.25, 0.75, 0.125, 1, 3, 0.5, 0]);
     writeInstanceUniform(data, 0, { ...base, ...NON_PBR });
     expect(Array.from(data.subarray(112, 120))).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
-    expect(UNIFORM_BYTES_USED).toBe(480);
+    expect(UNIFORM_BYTES_USED).toBe(496);
     expect(UNIFORM_BYTES_USED).toBeLessThanOrEqual(UNIFORM_STRIDE);
   });
 
