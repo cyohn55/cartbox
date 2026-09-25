@@ -23,16 +23,21 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
+            flexWrap: "wrap",
+            gap: 8,
             padding: "12px 20px",
             borderBottom: "1px solid var(--border)",
           }}
         >
-          <nav style={{ display: "flex", gap: 18, alignItems: "center" }}>
+          <nav style={{ display: "flex", flexWrap: "wrap", columnGap: 18, rowGap: 6, alignItems: "center" }}>
             <Link href="/" style={{ fontWeight: 700, letterSpacing: "-0.02em" }}>
               Cartbox
             </Link>
             <Link href="/browse" style={{ color: "var(--muted)" }}>
               Browse
+            </Link>
+            <Link href="/lockout" style={{ color: "var(--muted)" }}>
+              Lockout
             </Link>
             <Link href="/jams" style={{ color: "var(--muted)" }}>
               Jams
@@ -43,7 +48,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           </nav>
           {isStaticExport ? (
             <span
-              style={{ color: "var(--muted)", fontSize: 13 }}
+              style={{ color: "var(--muted)", fontSize: 13, whiteSpace: "nowrap" }}
               title="Static demo build — accounts, publishing, and the community server are unavailable. Your work saves to this browser."
             >
               Demo build · saves locally

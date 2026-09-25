@@ -27,6 +27,7 @@ import {
 } from "@/lib/catalog";
 import { runtimeDescriptors } from "@/lib/titleRuntime";
 import { CatalogGrid } from "./CatalogGrid";
+import { FeaturedLockout } from "./FeaturedLockout";
 import { StaticCatalogBrowser } from "./StaticCatalogBrowser";
 
 interface BrowseProps {
@@ -78,6 +79,7 @@ export default async function BrowsePage({ searchParams }: BrowseProps) {
     return (
       <main>
         <h1>Browse</h1>
+        <FeaturedLockout />
         <StaticCatalogBrowser />
       </main>
     );
@@ -123,6 +125,7 @@ export default async function BrowsePage({ searchParams }: BrowseProps) {
   return (
     <main>
       <h1>Browse{searchParams.tag ? ` · #${searchParams.tag}` : ""}</h1>
+      {!searchParams.tag && !searchParams.runtime && <FeaturedLockout />}
       <RuntimeFilter active={searchParams.runtime} tag={searchParams.tag} />
       <CatalogGrid entries={entries} />
     </main>
