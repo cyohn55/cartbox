@@ -41,6 +41,8 @@ import type { Light, LightKind } from "./lighting/types.js";
 export const MAILBOX_TYPE_ACHIEVEMENT = 1;
 export const MAILBOX_TYPE_SCORE = 2;
 export const MAILBOX_TYPE_PROGRESS = 3;
+/** A cart asking its host page to do something (cartbox.request): `id` is the request, `value` its argument. */
+export const MAILBOX_TYPE_REQUEST = 4;
 
 /** Total reserved pmem words (mirrors CBX_MAILBOX_WORDS in the engine shim). */
 export const MAILBOX_WORDS = 137;
@@ -136,7 +138,7 @@ function signedByte(byte: number): number {
   return byte < 128 ? byte : byte - 256;
 }
 
-export type MailboxEventKind = "achievement" | "score" | "progress" | "unknown";
+export type MailboxEventKind = "achievement" | "score" | "progress" | "request" | "unknown";
 
 export interface MailboxEvent {
   kind: MailboxEventKind;
@@ -162,6 +164,8 @@ function kindOf(type: number): MailboxEventKind {
       return "score";
     case MAILBOX_TYPE_PROGRESS:
       return "progress";
+    case MAILBOX_TYPE_REQUEST:
+      return "request";
     default:
       return "unknown";
   }

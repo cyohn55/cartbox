@@ -11,11 +11,12 @@ import { LitCanvasSurface } from "./lighting/LitCanvasSurface.js";
 import { PostFxSurface } from "./fx/PostFxSurface.js";
 import { anyPostFxEnabled, type PostFxSettings } from "./fx/postfx.js";
 import { createConsole, loadEngineModule, type ConsoleInstance } from "./engine.js";
-import { GamepadState, KeyboardInput, TouchInput, hasTouchSupport } from "./input.js";
+import { GamepadInput, GamepadState, KeyboardInput, TouchInput, hasTouchSupport } from "./input.js";
 import { frameDurationMs, getModel, type ConsoleModel } from "./models.js";
 import { ReplayRecorder, ReplaySource, hashCart, randomSeed, type Replay } from "./replay.js";
 import { seedCartridge, prependLuaCode } from "./cartseed.js";
 import { STICK_OPTIN_MAGIC, STICK_OPTIN_WORD, STICK_WORD, packSticks } from "./sticks.js";
+import { DEFAULT_CONTROL_SETTINGS, applyLookSettings, type ControlSettings } from "./controls.js";
 import { injectSdk } from "./sdk.js";
 import { collisionSdkLua } from "./collisionSdk.js";
 import { flagsSdkLua } from "./flagsSdk.js";
@@ -76,6 +77,11 @@ export class Player {
   private touch?: TouchInput;
   /** The cart reads analog sticks (it opted in via cartbox.stick). */
   private analogCart = false;
+  private controllerInput?: GamepadInput;
+  private controlSettings: ControlSettings = DEFAULT_CONTROL_SETTINGS;
+  private volume = 1;
+  /** False while a host menu is open: the game keeps running but sees no input. */
+  private inputEnabled = true;
   private console?: ConsoleInstance;
   private cartSource?: CartSpriteSource;
   private readonly model: ConsoleModel;
@@ -105,6 +111,24 @@ export class Player {
     }
     this.view = view;
     this.model = getModel(options.modelId);
+    if (options.controlSettings) this.controlSettings = options.controlSettings;
+  }
+
+  /** Apply new control settings at once (see PlayerHandle.setControlSettings). */
+  setControlSettings(settings: ControlSettings): void {
+    this.controlSettings = settings;
+    this.touch?.applySettings(settings);
+  }
+
+  /** Let the game see input (true) or hold it neutral (false) — e.g. under a menu. */
+  setInputEnabled(enabled: boolean): void {
+    this.inputEnabled = enabled;
+  }
+
+  /** Master volume, 0..1. */
+  setVolume(volume: number): void {
+    this.volume = volume;
+    this.audio?.setVolume(volume);
   }
 
   /** Loads the cartridge and engine, then starts (or arms) playback. */
@@ -273,6 +297,8 @@ export class Player {
         return;
       }
       this.audio = new AudioController(sampleRate);
+      this.audio.setVolume(this.options.volume ?? this.volume);
+      if (this.options.volume !== undefined) this.volume = this.options.volume;
       this.setupReplay(bytes, seed);
 
       this.renderSingleFrame(); // show frame 0 immediately, even before play
@@ -294,11 +320,15 @@ export class Player {
     const scheme = this.options.controls ?? "auto";
     // Keyboard unless the host forced touch-only; the on-screen pad whenever the
     // device can take touch. Both write the same GamepadState.
+    const onStart = this.options.onStart;
     if (scheme !== "touch") {
-      this.keyboard = new KeyboardInput(this.view, this.gamepad);
+      this.keyboard = new KeyboardInput(this.view, this.gamepad, () => this.controlSettings.keyBindings, onStart);
+      // A physical controller (Xbox 360 / any standard-mapping gamepad), read each frame.
+      this.controllerInput = new GamepadInput(this.view.navigator, this.gamepad, () => this.controlSettings, onStart);
     }
     if (shouldUseTouch(scheme, this.view)) {
-      this.touch = new TouchInput(this.container, this.gamepad);
+      this.touch = new TouchInput(this.container, this.gamepad, onStart);
+      this.touch.applySettings(this.controlSettings);
     }
   }
 
@@ -365,6 +395,7 @@ export class Player {
 
     this.frameAccumulatorMs += now - this.lastFrameTime;
     this.lastFrameTime = now;
+    this.controllerInput?.poll();
 
     // Cap catch-up so a long stall doesn't trigger a burst of frames.
     const maxFramesPerRender = 4;
@@ -384,7 +415,7 @@ export class Player {
 
   private tickOnce(): void {
     // In playback the mask comes from the replay; otherwise from live input.
-    const mask = this.replaySource ? this.replaySource.maskForFrame(this.tickFrame) : this.gamepad.value;
+    const mask = this.replaySource ? this.replaySource.maskForFrame(this.tickFrame) : this.inputEnabled ? this.gamepad.value : 0;
     const net = this.options.netplay;
     if (net && this.console) {
       const words = this.console.netWords();
@@ -521,7 +552,7 @@ export class Player {
       this.analogCart = true;
       this.touch?.setAnalog(true);
     }
-    words[STICK_WORD] = this.replaySource ? 0 : packSticks(this.gamepad.axes);
+    words[STICK_WORD] = this.replaySource || !this.inputEnabled ? 0 : packSticks(applyLookSettings(this.gamepad.axes, this.controlSettings));
   }
 
   private fail(error: unknown): void {

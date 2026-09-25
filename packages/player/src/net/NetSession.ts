@@ -85,6 +85,7 @@ export class NetSession {
   private readonly remote = new Map<number, { state: NetState; at: number }>();
   private readonly pendingEvents: NetEvent[] = [];
   private hostMatch = 0;
+  private statusCode = 0;
   private tick = 0;
   private readonly outEvents: NetEvent[] = [];
   private outStates = new Map<number, NetState>();
@@ -102,6 +103,22 @@ export class NetSession {
       this.emit();
     });
     transport.onMessage((message) => this.receive(message));
+  }
+
+  /** Forget the current room's state (remote players, queued events, the host's
+   *  match word) — for moving to another room without carrying anything over. */
+  resetRoom(): void {
+    this.remote.clear();
+    this.pendingEvents.length = 0;
+    this.outEvents.length = 0;
+    this.outStates = new Map();
+    this.hostMatch = 0;
+    this.lastSent = "";
+  }
+
+  /** A status for the cart (0..7, read as net()'s fifth value) — e.g. matchmaking progress. */
+  setStatus(code: number): void {
+    this.statusCode = code & 7;
   }
 
   /** Join the room. */
@@ -142,7 +159,7 @@ export class NetSession {
   beforeTick(words: Uint32Array): void {
     const mySlot = this.mySlot;
     if (!this.connected || mySlot < 0) {
-      writeNetInbox(words, { mode: 0, mySlot: 0, humans: 0, live: 0, match: 0, seq: this.tick, slots: [], events: [] });
+      writeNetInbox(words, { mode: 0, mySlot: 0, status: this.statusCode, humans: 0, live: 0, match: 0, seq: this.tick, slots: [], events: [] });
       return;
     }
     const now = this.now();
@@ -162,6 +179,7 @@ export class NetSession {
     const events = this.pendingEvents.slice(0, NET_IN_EVENT_CAPACITY);
     const delivered = writeNetInbox(words, {
       mode: this.isHost ? NET_MODE_HOST : NET_MODE_CLIENT,
+      status: this.statusCode,
       mySlot,
       humans,
       live,
@@ -360,5 +378,64 @@ export class BroadcastChannelTransport implements NetTransport {
     const peers = [...this.seen.values()].map((entry) => entry.peer);
     if (this.self) peers.push(this.self);
     this.peersHandler?.(peers);
+  }
+}
+
+/**
+ * A transport that can be pointed at a different room (or none) while the
+ * session using it keeps running — how a game moves from its title screen into
+ * a matchmade room, and back out. With no room it reports no peers, so the
+ * session plays offline. Each room is joined with a fresh join time, so slot
+ * order in the new room is by when you arrived *there*.
+ */
+export class SwitchableTransport implements NetTransport {
+  private inner: NetTransport | null = null;
+  private readonly idle = `idle-${Math.random().toString(36).slice(2, 10)}`;
+  private name: string | undefined;
+  private messageHandler: ((message: NetMessage, from: string) => void) | null = null;
+  private peersHandler: ((peers: readonly NetPeer[]) => void) | null = null;
+
+  get selfId(): string {
+    return this.inner?.selfId ?? this.idle;
+  }
+
+  /** The room transport in use, or null. */
+  get current(): NetTransport | null {
+    return this.inner;
+  }
+
+  async connect(_joinedAt: number, name?: string): Promise<void> {
+    this.name = name;
+    this.peersHandler?.([]);
+  }
+
+  /** Leave the current room (if any) and join `next` (or stay out when null). */
+  async use(next: NetTransport | null): Promise<void> {
+    const previous = this.inner;
+    this.inner = null;
+    previous?.close();
+    this.peersHandler?.([]);
+    if (!next) return;
+    this.inner = next;
+    next.onMessage((message, from) => {
+      if (this.inner === next) this.messageHandler?.(message, from);
+    });
+    next.onPeers((peers) => {
+      if (this.inner === next) this.peersHandler?.(peers);
+    });
+    await next.connect(Date.now(), this.name);
+  }
+
+  send(message: NetMessage): void {
+    this.inner?.send(message);
+  }
+  onMessage(handler: (message: NetMessage, from: string) => void): void {
+    this.messageHandler = handler;
+  }
+  onPeers(handler: (peers: readonly NetPeer[]) => void): void {
+    this.peersHandler = handler;
+  }
+  close(): void {
+    void this.use(null);
   }
 }

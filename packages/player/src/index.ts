@@ -341,7 +341,7 @@ export {
   takeNetOutbox,
 } from "./net/netplay.js";
 export type { NetInbox, NetOutbox, NetState, NetEvent } from "./net/netplay.js";
-export { NetSession, MemoryNetHub, BroadcastChannelTransport, netSendInterval } from "./net/NetSession.js";
+export { NetSession, MemoryNetHub, BroadcastChannelTransport, SwitchableTransport, netSendInterval } from "./net/NetSession.js";
 export type { NetMessage, NetPeer, NetRoomStatus, NetTransport } from "./net/NetSession.js";
 
 /**
@@ -368,5 +368,23 @@ export function mount(container: HTMLElement, options: PlayerOptions): PlayerHan
     get running(): boolean {
       return player.running;
     },
+    setControlSettings: (settings) => player.setControlSettings(settings),
+    setVolume: (volume) => player.setVolume(volume),
+    setInputEnabled: (enabled) => player.setInputEnabled(enabled),
   };
 }
+
+// Controls: controller / keyboard bindings, aim inversion, look sensitivity, the
+// touch pad's size and opacity — what a game's Start menu edits.
+export {
+  DEFAULT_CONTROL_SETTINGS,
+  DEFAULT_PAD_BINDINGS,
+  PAD_BUTTONS,
+  START_KEYS,
+  applyLookSettings,
+  deadZoned,
+  parseControlSettings,
+  readPad,
+} from "./controls.js";
+export type { ControlSettings, ControlTarget, PadButton, PadSnapshot } from "./controls.js";
+export { GamepadInput } from "./input.js";

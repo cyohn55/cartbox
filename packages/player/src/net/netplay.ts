@@ -14,7 +14,8 @@
  * ```
  * INBOX  (host → cart)
  *   0      header   bits 0-1 mode (0 offline, 1 client, 2 host) · 2-4 my slot ·
- *                   8-15 slots held by a human · 16-23 slots with live remote state
+ *                   5-7 page status (e.g. matchmaking) · 8-15 slots held by a human ·
+ *                   16-23 slots with live remote state
  *   1      the host's match word (opaque to the relay: the host cart's game state)
  *   2      tick sequence
  *   3..26  8 slots × 3 words of remote player state (opaque to the relay)
@@ -26,6 +27,7 @@
  *   72..95 8 slots × 3 words: this player's state (and, on the host, its bots')
  *   96     event count (≤ 10)
  *   97..116 10 events × 2 words
+ * (68..69 are the analog sticks' words — see sticks.ts.)
  * ```
  *
  * The relay never interprets state or event words — a cart defines them — so the
@@ -69,6 +71,8 @@ export type NetEvent = readonly [number, number];
 export interface NetInbox {
   readonly mode: number;
   readonly mySlot: number;
+  /** The page's status for the cart (0 idle; e.g. matchmaking progress), bits 5-7. */
+  readonly status?: number;
   /** Bitmask of slots held by a human (including mine). */
   readonly humans: number;
   /** Bitmask of remote slots with live state this tick. */
@@ -91,7 +95,12 @@ export interface NetOutbox {
 /** Write an inbox into the net words (a live view of pmem 0..118). */
 export function writeNetInbox(words: Uint32Array, inbox: NetInbox): number {
   words[NET_IN_HEADER] =
-    ((inbox.mode & 3) | ((inbox.mySlot & 7) << 2) | ((inbox.humans & 0xff) << 8) | ((inbox.live & 0xff) << 16)) >>> 0;
+    ((inbox.mode & 3) |
+      ((inbox.mySlot & 7) << 2) |
+      (((inbox.status ?? 0) & 7) << 5) |
+      ((inbox.humans & 0xff) << 8) |
+      ((inbox.live & 0xff) << 16)) >>>
+    0;
   words[NET_IN_MATCH] = inbox.match >>> 0;
   words[NET_IN_SEQ] = inbox.seq >>> 0;
   for (let slot = 0; slot < NET_SLOTS; slot += 1) {

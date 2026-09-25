@@ -7,21 +7,13 @@
 
 import { ConsoleButton } from "./types.js";
 import { stickDirections } from "./sticks.js";
+import { DEFAULT_KEY_BINDINGS, START_KEYS, readPad, type ControlSettings, type PadSnapshot } from "./controls.js";
 
 /**
  * Default keyboard layout, matching TIC-80 conventions: arrows for the D-pad,
  * Z/X for A/B, A/S for X/Y. Keyed by `KeyboardEvent.code` so it is layout-independent.
  */
-export const DEFAULT_KEY_BINDINGS: Readonly<Record<string, ConsoleButton>> = {
-  ArrowUp: ConsoleButton.Up,
-  ArrowDown: ConsoleButton.Down,
-  ArrowLeft: ConsoleButton.Left,
-  ArrowRight: ConsoleButton.Right,
-  KeyZ: ConsoleButton.A,
-  KeyX: ConsoleButton.B,
-  KeyA: ConsoleButton.X,
-  KeyS: ConsoleButton.Y,
-};
+export { DEFAULT_KEY_BINDINGS };
 
 /**
  * Resolves a physical key to a console button, or undefined if unbound.
@@ -42,8 +34,31 @@ export class GamepadState {
   private mask = 0;
   /** D-pad bits the left stick is pressing (kept apart so a key release can't clear them). */
   private stickMask = 0;
-  /** Analog sticks: left x, left y, right x, right y, each −1..1 (y down-positive). */
-  readonly axes: [number, number, number, number] = [0, 0, 0, 0];
+  /** What a physical controller is pressing, replaced wholesale each poll. */
+  private padMask = 0;
+  /** The on-screen sticks and a controller's sticks, kept apart and merged on read. */
+  private readonly touchAxes: [number, number, number, number] = [0, 0, 0, 0];
+  private readonly padAxes: [number, number, number, number] = [0, 0, 0, 0];
+
+  /** Analog sticks: left x, left y, right x, right y, each −1..1 (y down-positive) —
+   *  per stick, whichever source (touch or controller) is leaning further. */
+  get axes(): [number, number, number, number] {
+    const out: [number, number, number, number] = [0, 0, 0, 0];
+    for (const i of [0, 2]) {
+      const t = Math.hypot(this.touchAxes[i]!, this.touchAxes[i + 1]!);
+      const p = Math.hypot(this.padAxes[i]!, this.padAxes[i + 1]!);
+      const src = p > t ? this.padAxes : this.touchAxes;
+      out[i] = src[i]!;
+      out[i + 1] = src[i + 1]!;
+    }
+    return out;
+  }
+
+  /** A controller's state this frame: its pressed console buttons and sticks. */
+  setPad(mask: number, axes: readonly number[]): void {
+    this.padMask = mask;
+    for (let i = 0; i < 4; i += 1) this.padAxes[i] = axes[i] ?? 0;
+  }
 
   press(button: ConsoleButton): void {
     this.mask |= 1 << button;
@@ -58,20 +73,23 @@ export class GamepadState {
    * the D-pad directions it leans toward, so button-only carts steer with it.
    */
   setStick(index: 0 | 1, x: number, y: number): void {
-    this.axes[index * 2] = x;
-    this.axes[index * 2 + 1] = y;
+    this.touchAxes[index * 2] = x;
+    this.touchAxes[index * 2 + 1] = y;
     if (index === 0) this.stickMask = stickDirections(x, y);
   }
 
-  /** The engine-facing bitmask for player one. */
+  /** The engine-facing bitmask for player one. A controller's left stick also
+   *  presses the D-pad directions it leans toward, like the on-screen one. */
   get value(): number {
-    return this.mask | this.stickMask;
+    return this.mask | this.stickMask | this.padMask | stickDirections(this.padAxes[0], this.padAxes[1]);
   }
 
   reset(): void {
     this.mask = 0;
     this.stickMask = 0;
-    this.axes.fill(0);
+    this.padMask = 0;
+    this.touchAxes.fill(0);
+    this.padAxes.fill(0);
   }
 }
 
@@ -80,20 +98,37 @@ export class KeyboardInput {
   private readonly onKeyDown: (event: KeyboardEvent) => void;
   private readonly onKeyUp: (event: KeyboardEvent) => void;
 
+  /**
+   * @param bindings The key map, or a getter for it (read on every key, so a
+   *   rebind from a settings menu applies at once).
+   * @param onStart Called for a Start key (Enter / P) that isn't bound to a button.
+   */
   constructor(
     private readonly target: Window,
     state: GamepadState,
-    bindings: Readonly<Record<string, ConsoleButton>> = DEFAULT_KEY_BINDINGS,
+    bindings: Readonly<Record<string, ConsoleButton>> | (() => Readonly<Record<string, ConsoleButton>>) = DEFAULT_KEY_BINDINGS,
+    onStart?: () => void,
   ) {
+    const current = typeof bindings === "function" ? bindings : () => bindings;
+    // Remember which button each held key pressed, so a rebind while it is held
+    // still releases the right one.
+    const held = new Map<string, ConsoleButton>();
     this.onKeyDown = (event) => {
-      const button = resolveButton(event.code, bindings);
+      const button = resolveButton(event.code, current());
       if (button !== undefined) {
+        held.set(event.code, button);
         state.press(button);
         event.preventDefault(); // stop arrow keys from scrolling the page
+      } else if (onStart && START_KEYS.includes(event.code) && !event.repeat) {
+        const tag = (event.target as { tagName?: string } | null)?.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON") return;
+        event.preventDefault();
+        onStart();
       }
     };
     this.onKeyUp = (event) => {
-      const button = resolveButton(event.code, bindings);
+      const button = held.get(event.code) ?? resolveButton(event.code, current());
+      held.delete(event.code);
       if (button !== undefined) {
         state.release(button);
       }
@@ -179,9 +214,10 @@ export function stickVector(dx: number, dy: number, radius: number, deadZone = 0
 export class TouchInput {
   private readonly root: HTMLElement;
   private readonly rightStick: HTMLElement;
+  private readonly pad: HTMLElement;
   private readonly restorePosition: (() => void) | null = null;
 
-  constructor(container: HTMLElement, state: GamepadState) {
+  constructor(container: HTMLElement, state: GamepadState, onStart?: () => void) {
     const doc = container.ownerDocument;
     const view = doc.defaultView;
 
@@ -206,6 +242,11 @@ export class TouchInput {
       webkitUserSelect: "none",
     } satisfies Partial<CSSStyleDeclaration>);
 
+    // Everything that scales and fades with the touch settings lives in `pad`.
+    this.pad = doc.createElement("div");
+    Object.assign(this.pad.style, { position: "absolute", inset: "0", pointerEvents: "none", transformOrigin: "50% 100%" });
+    this.root.appendChild(this.pad);
+
     // Face buttons: an Xbox-style diamond, bottom-right.
     const face = doc.createElement("div");
     Object.assign(face.style, {
@@ -217,7 +258,7 @@ export class TouchInput {
       gridTemplateRows: `repeat(3, ${FACE_SIZE})`,
       gap: "4px",
     });
-    this.root.appendChild(face);
+    this.pad.appendChild(face);
     for (const control of TOUCH_LAYOUT) face.appendChild(this.createButton(doc, control, state));
 
     // Two sticks: the left one moves (and drives the D-pad for button-only
@@ -226,7 +267,47 @@ export class TouchInput {
     this.createStick(doc, state, 0, { left: "4%", bottom: "6%" });
     this.rightStick = this.createStick(doc, state, 1, { right: `calc(3% + 3 * ${FACE_SIZE} + 8px + 3vmin)`, bottom: "6%" });
     this.rightStick.style.display = "none";
+
+    // Start: opens the game's menu (settings, leave). Top centre, out of the thumbs' way.
+    if (onStart) {
+      const start = doc.createElement("button");
+      start.type = "button";
+      start.setAttribute("data-cbx-button", "Start");
+      start.setAttribute("aria-label", "Start (menu)");
+      start.textContent = "\u2261 START";
+      Object.assign(start.style, {
+        position: "absolute",
+        top: "2%",
+        left: "50%",
+        transform: "translateX(-50%)",
+        pointerEvents: "auto",
+        touchAction: "none",
+        padding: "6px 14px",
+        borderRadius: "999px",
+        border: "2px solid rgba(255,255,255,0.45)",
+        background: "rgba(20,26,40,0.55)",
+        color: "rgba(255,255,255,0.92)",
+        font: "700 12px/1 system-ui, sans-serif",
+        letterSpacing: "1px",
+        cursor: "pointer",
+      } as Partial<CSSStyleDeclaration>);
+      start.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        onStart();
+      });
+      this.pad.appendChild(start);
+    }
     container.appendChild(this.root);
+  }
+
+  /** Apply the player's touch settings: overall opacity and size of the pad. */
+  applySettings(settings: Pick<ControlSettings, "touchOpacity" | "touchScale">): void {
+    this.pad.style.opacity = String(settings.touchOpacity);
+    for (const child of Array.from(this.pad.children) as HTMLElement[]) {
+      if (child.getAttribute("data-cbx-button") === "Start") continue;
+      child.style.scale = String(settings.touchScale);
+      child.style.transformOrigin = child.style.left ? "0% 100%" : "100% 100%"; // grow from its own corner
+    }
   }
 
   /** Show the right stick: the cart reads analog sticks. */
@@ -301,7 +382,7 @@ export class TouchInput {
     base.addEventListener("pointercancel", end);
     base.addEventListener("lostpointercapture", end);
     base.addEventListener("contextmenu", (event) => event.preventDefault());
-    this.root.appendChild(base);
+    this.pad.appendChild(base);
     return base;
   }
 
@@ -374,5 +455,56 @@ export class TouchInput {
   destroy(): void {
     this.root.remove();
     this.restorePosition?.();
+  }
+}
+
+/**
+ * Reads a physical controller (an Xbox 360 or any standard-mapping gamepad)
+ * through the Gamepad API once per frame: its bindings press console buttons,
+ * its sticks feed the analog channel, and a control bound to "start" opens the
+ * Start menu (on press, not while held).
+ */
+export class GamepadInput {
+  private startHeld = false;
+  /** The pad index in use, so a second controller plugged in later doesn't take over mid-game. */
+  private index: number | null = null;
+
+  constructor(
+    private readonly nav: { getGamepads?: () => ArrayLike<(PadSnapshot & { mapping?: string; connected?: boolean; index?: number }) | null> },
+    private readonly state: GamepadState,
+    private readonly settings: () => ControlSettings,
+    private readonly onStart?: () => void,
+  ) {}
+
+  poll(): void {
+    const pads = this.nav.getGamepads?.() ?? [];
+    let pad: (PadSnapshot & { connected?: boolean; index?: number }) | null = null;
+    if (this.index !== null) pad = pads[this.index] ?? null;
+    if (!pad || pad.connected === false) {
+      pad = null;
+      this.index = null;
+      for (let i = 0; i < pads.length; i += 1) {
+        const candidate = pads[i];
+        if (candidate && candidate.connected !== false) {
+          pad = candidate;
+          this.index = i;
+          break;
+        }
+      }
+    }
+    if (!pad) {
+      this.state.setPad(0, [0, 0, 0, 0]);
+      this.startHeld = false;
+      return;
+    }
+    const { mask, axes, start } = readPad(pad, this.settings().padBindings);
+    this.state.setPad(mask, axes);
+    if (start && !this.startHeld) this.onStart?.();
+    this.startHeld = start;
+  }
+
+  /** Whether a controller is connected (for hints like "press Start"). */
+  get connected(): boolean {
+    return this.index !== null;
   }
 }

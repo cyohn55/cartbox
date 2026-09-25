@@ -1665,6 +1665,8 @@ local WLIST = {"br","smg","shotgun","sniper","magnum","sword"}
 local WIDX_OF = {}; for i,id in ipairs(WLIST) do WIDX_OF[id]=i-1 end
 local EV_HIT, EV_KILL, EV_OBJ, EV_SCORE = 1, 2, 3, 4
 local net_match_id, net_seen_match = 0, -1
+-- Called when the room goes away mid-match; the title screen resets the rest.
+function leave_room_state() MM_RESET = true end
 
 local function s16(v) v = v & 0xffff; if v >= 32768 then v = v - 65536 end; return v end
 local function u16(v) return math.floor(v + 0.5) & 0xffff end
@@ -1736,6 +1738,12 @@ end
 -- Read the room: mode, my slot, and who is human; (re)assign every slot's role.
 local function net_roles()
   local mode, myslot, humans = cartbox.net()
+  if NETMODE ~= 0 and mode == 0 and phase == "play" then
+    -- Left the room (or lost it) mid-match: back to the title screen.
+    NETMODE, MYSLOT, HUMANS = 0, 0, 1
+    phase = "menu"; leave_room_state()
+    return
+  end
   if NETMODE == 1 and mode == 2 then net_match_id = net_seen_match end   -- took over as host
   NETMODE, HUMANS = mode, humans
   if mode ~= 0 then MYSLOT = myslot else MYSLOT = 0; HUMANS = 1 end
@@ -2516,6 +2524,130 @@ function net_menu_sync()
 end
 
 -- ---------------------------------------------------------------------------
+-- The title screen: Matchmaking (online, through the page) above the game types
+-- you can play against bots; a playlist pick; the search; and, in a matchmade
+-- room, a lobby that starts the next match on its own.
+local REQ_MATCHMAKE, REQ_CANCEL = 1, 2           -- cartbox.request kinds the page answers
+local MM_FAILED = 3                             -- net() status: the page couldn't matchmake
+local mm_mode, mm_page, mm_pick, mm_start_at = nil, nil, 1, nil
+local MM_LOBBY_TICKS = 900                      -- a matchmade lobby waits 15s for players
+
+local function humans_in_room()
+  local n = 0
+  for ns=0,7 do if (HUMANS >> ns) & 1 == 1 then n = n + 1 end end
+  return n
+end
+
+local function menu_list(items, y0, selected)
+  for i,label in ipairs(items) do
+    local y = y0+(i-1)*40
+    if i==selected then rect(470,y-6,360,34,1) end
+    print(label,492,y,(i==selected) and 12 or 13,false,2,true)
+  end
+end
+
+local function leave_matchmaking()
+  cartbox.request(REQ_CANCEL, 0)
+  mm_mode, mm_page, mm_start_at = nil, nil, nil
+end
+
+local function player_list(y)
+  for ns=0,7 do if (HUMANS >> ns) & 1 == 1 then
+    print("Player "..(ns+1)..(ns==0 and "  (host)" or "")..(ns==MYSLOT and "  <- you" or ""),470,y,13,false,2,true); y=y+34
+  end end
+end
+
+function title_screen()
+  local _, _, _, _, status = cartbox.net()
+  if MM_RESET then MM_RESET = false; mm_mode, mm_page, mm_start_at = nil, nil, nil end
+  if NETMODE == 1 then
+    -- An online guest: the host picks the game type (or its lobby timer does).
+    print("ONLINE  --  you are Player "..(MYSLOT+1),470,170,9,false,2,true)
+    print(mm_mode and "Matchmaking lobby -- the match starts soon..." or "Waiting for the host to start a match...",430,240,12,false,2,true)
+    player_list(300)
+    if mm_mode then
+      print("X (or B) leave",470,600,13,false,1,true)
+      if edge("back", btn(5)) then leave_matchmaking() end
+    end
+    return
+  end
+  if NETMODE == 2 and mm_mode then
+    -- Hosting a matchmade room: count down, then start the playlist's game type.
+    local key = (mm_mode == "any") and "ffa" or mm_mode
+    mm_start_at = mm_start_at or (tick + MM_LOBBY_TICKS)
+    local n = humans_in_room()
+    local left = math.max(0, (mm_start_at - tick) // 60)
+    print("MATCHMAKING  --  "..MODES[key].name,470,170,9,false,2,true)
+    print(n.." player"..(n==1 and "" or "s").." + "..(8-n).." bots  --  starting in "..left.."s",430,220,12,false,2,true)
+    player_list(290)
+    print("Z (or A) start now . X (or B) leave",470,600,13,false,1,true)
+    if edge("back", btn(5)) then leave_matchmaking() return end
+    if n >= 8 or tick >= mm_start_at or edge("go", btn(4)) then
+      mm_start_at = nil
+      start_match(key)
+    end
+    return
+  end
+  if NETMODE == 0 and mm_mode then
+    -- Searching: the page looks for a room (or opens one) and joins it.
+    local name = (mm_mode == "any") and "any game type" or MODES[mm_mode].name
+    if status == MM_FAILED then
+      print("Matchmaking isn't available right now.",430,240,6,false,2,true)
+      print("X (or B) back",470,320,13,false,1,true)
+    else
+      local dots = string.rep(".", (tick // 20) % 4)
+      print("MATCHMAKING",530,170,9,false,2,true)
+      print("Searching for players -- "..name..dots,430,240,12,false,2,true)
+      print("X (or B) cancel",470,320,13,false,1,true)
+    end
+    if edge("back", btn(5)) then leave_matchmaking() end
+    return
+  end
+  if NETMODE == 0 and mm_page == "playlist" then
+    -- Pick a playlist to matchmake into.
+    print("MATCHMAKING  --  choose a playlist",430,150,9,false,2,true)
+    local items = {"Any game type"}
+    for _,k in ipairs(ONLINE_KEYS) do items[#items+1] = MODES[k].name end
+    local n = #items
+    if edge("up", btn(0)) then mm_pick=(mm_pick-2)%n+1 end
+    if edge("down", btn(1)) then mm_pick=mm_pick%n+1 end
+    menu_list(items, 210, mm_pick)
+    print("Up/Down choose . Z (or A) search . X (or B) back",430,540,13,false,1,true)
+    if edge("back", btn(5)) then mm_page = nil return end
+    if edge("go", btn(4)) then
+      mm_mode = (mm_pick == 1) and "any" or ONLINE_KEYS[mm_pick-1]
+      mm_page = nil
+      cartbox.request(REQ_MATCHMAKE, mm_pick-1)   -- 0 any, else the game type (1-based)
+    end
+    return
+  end
+  -- The game types (and, offline, Matchmaking after them).
+  local keys = (NETMODE == 2) and ONLINE_KEYS or MODE_KEYS
+  local items = {}
+  for _,k in ipairs(keys) do items[#items+1] = MODES[k].name end
+  if NETMODE == 0 then items[#items+1] = "Matchmaking (online)" end
+  local n=#items
+  if sel > n then sel = 1 end
+  if edge("up", btn(0)) then sel=(sel-2)%n+1 end
+  if edge("down", btn(1)) then sel=sel%n+1 end
+  if NETMODE == 2 then
+    local humans = humans_in_room()
+    print("ONLINE  --  you are the host  --  "..humans.." player"..(humans==1 and "" or "s").." + "..(8-humans).." bots",360,150,9,false,1,true)
+  else
+    print("Matchmaking finds players online . or play the game types below vs 7 bots",330,150,13,false,1,true)
+  end
+  menu_list(items, 196, sel)
+  if NETMODE == 0 then rect(470, 196+(n-1)*40-12, 360, 2, 5) end   -- a rule above Matchmaking
+  if edge("go", btn(4)) or edge("go2", btn(5)) then
+    if NETMODE == 0 and sel == n then mm_page, mm_pick = "playlist", 1
+    else start_match(keys[sel]) end
+  end
+  print("Up/Down choose . Z (or A) select . Start: controls, audio & more",430,540,13,false,1,true)
+  print("Move Up/Down . Turn Left/Right . hold A strafe . dbl-tap A grenade",300,584,13,false,1,true)
+  print("Z fire (auto-melee close) . X jump . S swap . sniper: hold A to zoom",300,612,13,false,1,true)
+  print("Touch/controller: left stick moves . right stick aims . A fire . B jump . X zoom/grenade . Y swap",260,640,13,false,1,true)
+end
+
 function TIC()
   cls(0)
   tick=tick+1
@@ -2527,39 +2659,7 @@ function TIC()
     cartbox.hud(0)  -- 2D-only screen: draw the menu normally, not as a HUD over meshes
     sky()
     print("LOCKOUT ARENA",452,96,12,false,3,true)
-    if NETMODE == 1 then
-      -- An online guest: the host picks the game type.
-      print("ONLINE  --  you are Player "..(MYSLOT+1),470,170,9,false,2,true)
-      print("Waiting for the host to start a match...",430,240,12,false,2,true)
-      local y = 300
-      for ns=0,7 do if (HUMANS >> ns) & 1 == 1 then
-        print("Player "..(ns+1)..(ns==0 and "  (host)" or "")..(ns==MYSLOT and "  <- you" or ""),470,y,13,false,2,true); y=y+34
-      end end
-      return
-    end
-    local keys = (NETMODE == 2) and ONLINE_KEYS or MODE_KEYS
-    local n=#keys
-    if sel > n then sel = 1 end
-    if edge("up", btn(0)) then sel=(sel-2)%n+1 end
-    if edge("down", btn(1)) then sel=sel%n+1 end
-    if edge("go", btn(4)) or edge("go2", btn(5)) then start_match(keys[sel]) end
-    if NETMODE == 2 then
-      local humans = 0
-      for ns=0,7 do if (HUMANS >> ns) & 1 == 1 then humans = humans + 1 end end
-      print("ONLINE  --  you are the host  --  "..humans.." player"..(humans==1 and "" or "s").." + "..(8-humans).." bots",360,150,9,false,1,true)
-    else
-      print("you + 7 bots  --  a Forerunner-style homage on the Xbox 360 core",396,150,13,false,1,true)
-    end
-    for i=1,n do
-      local mo=MODES[keys[i]]
-      local y=210+(i-1)*44
-      if i==sel then rect(470,y-6,360,36,1) end
-      print(mo.name,492,y,(i==sel) and 12 or 13,false,2,true)
-    end
-    print("Up/Down choose . Z (or A) start",470,540,13,false,1,true)
-    print("Move Up/Down . Turn Left/Right . hold A strafe . dbl-tap A grenade",300,584,13,false,1,true)
-    print("Z fire (auto-melee close) . X jump . S swap . sniper: hold A to zoom",300,612,13,false,1,true)
-    print("Touch: left stick moves . right stick aims . A fire . B jump . X zoom/grenade . Y swap",300,640,13,false,1,true)
+    title_screen()
     return
   end
 

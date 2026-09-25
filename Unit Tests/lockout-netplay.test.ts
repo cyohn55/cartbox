@@ -12,7 +12,7 @@ import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { LOCKOUT_CODE } from "@cartbox/editor";
-import { CARTBOX_SDK_LUA, MemoryNetHub, NET_WORDS, NetSession, decodeMeshPoses } from "@cartbox/player";
+import { CARTBOX_SDK_LUA, MemoryNetHub, NET_WORDS, NetSession, codeChunks, decodeMeshPoses } from "@cartbox/player";
 
 const ENGINE = path.resolve(__dirname, "../packages/engine/dist/xbox360/engine.js");
 
@@ -34,11 +34,8 @@ function TIC()
 end`;
 
 function cart(): Uint8Array {
-  const data = new TextEncoder().encode(`${CARTBOX_SDK_LUA}\n${LOCKOUT_CODE}\n${PROBE}`);
-  const tic = new Uint8Array(4 + data.length);
-  tic.set([5, data.length & 0xff, (data.length >> 8) & 0xff, 0], 0);
-  tic.set(data, 4);
-  return tic;
+  // Split across code banks as needed (the code with the SDK and probe runs past 64 KB).
+  return codeChunks(new TextEncoder().encode(`${CARTBOX_SDK_LUA}\n${LOCKOUT_CODE}\n${PROBE}`));
 }
 
 interface Engine {
