@@ -18,6 +18,7 @@ import {
   applyLookSettings,
   parseControlSettings,
   readPad,
+  standardizePad,
   type ControlSettings,
   type PadSnapshot,
 } from "@cartbox/player";
@@ -158,13 +159,67 @@ describe("KeyboardInput", () => {
     win.key("keydown", "Enter");
     expect(onStart).toHaveBeenCalledTimes(1);
   });
+
+  it("opens Start on Escape and P too", () => {
+    const win = fakeWindow();
+    const onStart = vi.fn();
+    new KeyboardInput(win as unknown as Window, new GamepadState(), () => ({}), onStart);
+    win.key("keydown", "Escape");
+    win.key("keydown", "KeyP");
+    expect(onStart).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("controllers that don't report the standard layout", () => {
+  /** An Xbox 360 pad as Firefox on Linux reports it: evdev button order, triggers and D-pad as axes. */
+  function rawXbox(held: number[] = [], axes: Partial<Record<number, number>> = {}) {
+    const base = [0, 0, -1, 0, 0, -1, 0, 0]; // triggers rest at -1
+    return {
+      id: "045e-028e-Microsoft X-Box 360 pad",
+      mapping: "",
+      axes: base.map((v, i) => axes[i] ?? v),
+      buttons: Array.from({ length: 11 }, (_, i) => ({ pressed: held.includes(i), value: held.includes(i) ? 1 : 0 })),
+    };
+  }
+
+  it("reads Start (raw button 7) as Start, not the right trigger", () => {
+    const read = readPad(rawXbox([7]), DEFAULT_PAD_BINDINGS);
+    expect(read.start).toBe(true);
+    expect(read.mask).toBe(0);
+    expect(readPad(rawXbox([6]), DEFAULT_PAD_BINDINGS).start).toBe(true); // Back
+    expect(readPad(rawXbox([8]), DEFAULT_PAD_BINDINGS).start).toBe(true); // Guide
+  });
+
+  it("maps its triggers, D-pad and right stick", () => {
+    expect(readPad(rawXbox([], { 5: 1 }), DEFAULT_PAD_BINDINGS).mask).toBe(1 << ConsoleButton.A); // RT fires
+    expect(readPad(rawXbox([], { 7: 1 }), DEFAULT_PAD_BINDINGS).mask).toBe(1 << ConsoleButton.Down); // D-pad down
+    const read = readPad(rawXbox([], { 3: 1, 4: -1 }), DEFAULT_PAD_BINDINGS);
+    expect(read.axes[2]).toBeCloseTo(0.71, 1);
+    expect(read.axes[3]).toBeCloseTo(-0.71, 1);
+  });
+
+  it("leaves standard and unknown pads alone", () => {
+    const standard = pad([9]);
+    expect(standardizePad({ ...standard, mapping: "standard" })).toEqual({ ...standard, mapping: "standard" });
+    const unknown = { id: "Some Joystick", mapping: "", axes: [0, 0], buttons: pad([7]).buttons };
+    expect(standardizePad(unknown)).toBe(unknown);
+  });
+
+  it("still opens the menu on Start when the mapping bound nothing to it", () => {
+    const none = { ...DEFAULT_PAD_BINDINGS, Back: null, Start: null, Guide: null };
+    expect(readPad(pad([9]), none).start).toBe(true);
+    // Start rebound to fire just fires.
+    const fire = { ...none, Start: ConsoleButton.A };
+    expect(readPad(pad([9]), fire)).toMatchObject({ mask: 1 << ConsoleButton.A, start: false });
+  });
 });
 
 describe("SwitchableTransport", () => {
   it("moves a running session between rooms, offline in between", async () => {
     const hubA = new MemoryNetHub();
     const hubB = new MemoryNetHub();
-    const other = new NetSession(hubB.transport("them"));
+    // Slots go by join time, then id: "a-them" also wins a same-millisecond tie with "me2".
+    const other = new NetSession(hubB.transport("a-them"));
     await other.connect();
     const switcher = new SwitchableTransport();
     const me = new NetSession(switcher);

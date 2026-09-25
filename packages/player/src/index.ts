@@ -385,6 +385,7 @@ export {
   deadZoned,
   parseControlSettings,
   readPad,
+  standardizePad,
 } from "./controls.js";
 export type { ControlSettings, ControlTarget, PadButton, PadSnapshot } from "./controls.js";
 export { GamepadInput } from "./input.js";

@@ -2879,7 +2879,8 @@ var PAD_BUTTONS = [
   "Up",
   "Down",
   "Left",
-  "Right"
+  "Right",
+  "Guide"
 ];
 var DEFAULT_PAD_BINDINGS = {
   A: 4 /* A */,
@@ -2897,7 +2898,8 @@ var DEFAULT_PAD_BINDINGS = {
   Up: 0 /* Up */,
   Down: 1 /* Down */,
   Left: 2 /* Left */,
-  Right: 3 /* Right */
+  Right: 3 /* Right */,
+  Guide: "start"
 };
 var DEFAULT_KEY_BINDINGS = {
   ArrowUp: 0 /* Up */,
@@ -2909,7 +2911,7 @@ var DEFAULT_KEY_BINDINGS = {
   KeyA: 6 /* X */,
   KeyS: 7 /* Y */
 };
-var START_KEYS = ["Enter", "KeyP"];
+var START_KEYS = ["Escape", "Enter", "KeyP"];
 var DEFAULT_CONTROL_SETTINGS = {
   invertY: false,
   lookSensitivity: 1,
@@ -2959,7 +2961,42 @@ function deadZoned(x, y, deadZone = 0.18) {
   const k = Math.min(1, (m - deadZone) / (1 - deadZone)) / m;
   return [x * k, y * k];
 }
-function readPad(pad, bindings) {
+function standardizePad(pad) {
+  if (pad.mapping === "standard" || pad.mapping === void 0) return pad;
+  const xbox = /x-?box|xinput|045e|360/i.test(pad.id ?? "");
+  if (!xbox || pad.buttons.length < 11 || pad.axes.length < 8) return pad;
+  const b = (i) => pad.buttons[i] ?? { pressed: false, value: 0 };
+  const axis = (i) => pad.axes[i] ?? 0;
+  const synth = (down, value = down ? 1 : 0) => ({ pressed: down, value });
+  const trigger = (i) => {
+    const value = (axis(i) + 1) / 2;
+    return synth(value > 0.5, value);
+  };
+  return {
+    axes: [axis(0), axis(1), axis(3), axis(4)],
+    buttons: [
+      b(0),
+      b(1),
+      b(2),
+      b(3),
+      b(4),
+      b(5),
+      trigger(2),
+      trigger(5),
+      b(6),
+      b(7),
+      b(9),
+      b(10),
+      synth(axis(7) < -0.5),
+      synth(axis(7) > 0.5),
+      synth(axis(6) < -0.5),
+      synth(axis(6) > 0.5),
+      b(8)
+    ]
+  };
+}
+function readPad(raw, bindings) {
+  const pad = standardizePad(raw);
   let mask = 0;
   let start = false;
   PAD_BUTTONS.forEach((name, index) => {
@@ -2970,6 +3007,7 @@ function readPad(pad, bindings) {
     if (target === "start") start = true;
     else if (target !== null && target !== void 0) mask |= 1 << target;
   });
+  if (bindings.Start === null && !Object.values(bindings).includes("start") && pad.buttons[9]?.pressed) start = true;
   const [lx, ly] = deadZoned(pad.axes[0] ?? 0, pad.axes[1] ?? 0);
   const [rx, ry] = deadZoned(pad.axes[2] ?? 0, pad.axes[3] ?? 0);
   return { mask, axes: [lx, ly, rx, ry], start };
@@ -8386,6 +8424,7 @@ export {
   shade,
   simulateEmitter,
   softKneePrefilter,
+  standardizePad,
   sway,
   takeNetOutbox,
   tiltShiftBlur,

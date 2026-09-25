@@ -7,9 +7,12 @@
 
 import { ConsoleButton } from "./types.js";
 
-/** A standard-mapping gamepad's buttons (an Xbox 360 / Xbox controller), in Gamepad API index order. */
+/**
+ * A standard-mapping gamepad's buttons (an Xbox 360 / Xbox controller), in Gamepad API index order.
+ * Guide (the big Xbox button) is reported by some browsers only.
+ */
 export const PAD_BUTTONS = [
-  "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "Back", "Start", "LS", "RS", "Up", "Down", "Left", "Right",
+  "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "Back", "Start", "LS", "RS", "Up", "Down", "Left", "Right", "Guide",
 ] as const;
 export type PadButton = (typeof PAD_BUTTONS)[number];
 
@@ -49,6 +52,7 @@ export const DEFAULT_PAD_BINDINGS: Readonly<Record<PadButton, ControlTarget>> = 
   Down: ConsoleButton.Down,
   Left: ConsoleButton.Left,
   Right: ConsoleButton.Right,
+  Guide: "start",
 };
 
 export const DEFAULT_KEY_BINDINGS: Readonly<Record<string, ConsoleButton>> = {
@@ -63,7 +67,7 @@ export const DEFAULT_KEY_BINDINGS: Readonly<Record<string, ConsoleButton>> = {
 };
 
 /** Keys that open the Start menu (unless rebound to a console button). */
-export const START_KEYS: readonly string[] = ["Enter", "KeyP"];
+export const START_KEYS: readonly string[] = ["Escape", "Enter", "KeyP"];
 
 export const DEFAULT_CONTROL_SETTINGS: ControlSettings = {
   invertY: false,
@@ -140,13 +144,45 @@ export interface PadSnapshot {
 }
 
 /**
+ * A gamepad in the standard layout. Browsers remap most controllers to it
+ * (`mapping: "standard"`), but some report a raw layout instead — Firefox on
+ * Linux gives an Xbox 360 pad in evdev order (Back 6, Start 7, Guide 8, the
+ * triggers and D-pad as axes), where Start would otherwise read as a trigger.
+ * Known raw Xbox layouts are translated; anything else passes through as is.
+ */
+export function standardizePad<T extends PadSnapshot & { readonly mapping?: string; readonly id?: string }>(pad: T): PadSnapshot {
+  if (pad.mapping === "standard" || pad.mapping === undefined) return pad;
+  const xbox = /x-?box|xinput|045e|360/i.test(pad.id ?? "");
+  if (!xbox || pad.buttons.length < 11 || pad.axes.length < 8) return pad;
+  const b = (i: number) => pad.buttons[i] ?? { pressed: false, value: 0 };
+  const axis = (i: number) => pad.axes[i] ?? 0;
+  const synth = (down: boolean, value = down ? 1 : 0) => ({ pressed: down, value });
+  // Triggers rest at -1 and reach 1 fully pulled.
+  const trigger = (i: number) => {
+    const value = (axis(i) + 1) / 2;
+    return synth(value > 0.5, value);
+  };
+  return {
+    axes: [axis(0), axis(1), axis(3), axis(4)],
+    buttons: [
+      b(0), b(1), b(2), b(3), b(4), b(5),
+      trigger(2), trigger(5),
+      b(6), b(7), b(9), b(10),
+      synth(axis(7) < -0.5), synth(axis(7) > 0.5), synth(axis(6) < -0.5), synth(axis(6) > 0.5),
+      b(8),
+    ],
+  };
+}
+
+/**
  * What a gamepad is doing: the console-button mask its bindings press, both
  * sticks (dead-zoned), and whether a control bound to "start" is held.
  */
 export function readPad(
-  pad: PadSnapshot,
+  raw: PadSnapshot & { readonly mapping?: string; readonly id?: string },
   bindings: Readonly<Record<PadButton, ControlTarget>>,
 ): { mask: number; axes: [number, number, number, number]; start: boolean } {
+  const pad = standardizePad(raw);
   let mask = 0;
   let start = false;
   PAD_BUTTONS.forEach((name, index) => {
@@ -158,6 +194,8 @@ export function readPad(
     if (target === "start") start = true;
     else if (target !== null && target !== undefined) mask |= 1 << target;
   });
+  // An unbound Start still opens the menu when the mapping left nothing else on it.
+  if (bindings.Start === null && !Object.values(bindings).includes("start") && pad.buttons[9]?.pressed) start = true;
   const [lx, ly] = deadZoned(pad.axes[0] ?? 0, pad.axes[1] ?? 0);
   const [rx, ry] = deadZoned(pad.axes[2] ?? 0, pad.axes[3] ?? 0);
   return { mask, axes: [lx, ly, rx, ry], start };

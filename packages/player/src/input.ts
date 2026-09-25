@@ -470,7 +470,7 @@ export class GamepadInput {
   private index: number | null = null;
 
   constructor(
-    private readonly nav: { getGamepads?: () => ArrayLike<(PadSnapshot & { mapping?: string; connected?: boolean; index?: number }) | null> },
+    private readonly nav: { getGamepads?: () => ArrayLike<(PadSnapshot & { mapping?: string; id?: string; connected?: boolean; index?: number }) | null> },
     private readonly state: GamepadState,
     private readonly settings: () => ControlSettings,
     private readonly onStart?: () => void,
