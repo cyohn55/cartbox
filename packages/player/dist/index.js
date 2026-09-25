@@ -42,6 +42,10 @@ var AudioController = class {
     source.start(startAt);
     this.nextStartTime = startAt + buffer.duration;
   }
+  /** Master volume, 0 (silent) .. 1 (full). */
+  setVolume(volume) {
+    this.gain.gain.value = Math.max(0, Math.min(1, Number.isFinite(volume) ? volume : 1));
+  }
   destroy() {
     this.gain.disconnect();
     void this.context.close();
@@ -234,8 +238,8 @@ function shade(albedo, normal, toLight, ambient) {
   const l = normalize(toLight);
   const diffuse = Math.max(0, n[0] * l[0] + n[1] * l[1] + n[2] * l[2]);
   const intensity = ambient + (1 - ambient) * diffuse;
-  const clamp4 = (value) => Math.max(0, Math.min(255, Math.round(value * intensity)));
-  return [clamp4(albedo[0]), clamp4(albedo[1]), clamp4(albedo[2])];
+  const clamp5 = (value) => Math.max(0, Math.min(255, Math.round(value * intensity)));
+  return [clamp5(albedo[0]), clamp5(albedo[1]), clamp5(albedo[2])];
 }
 
 // src/lighting/LightingRenderer.ts
@@ -2423,7 +2427,7 @@ var NET_MODE_OFFLINE = 0;
 var NET_MODE_CLIENT = 1;
 var NET_MODE_HOST = 2;
 function writeNetInbox(words, inbox) {
-  words[NET_IN_HEADER] = (inbox.mode & 3 | (inbox.mySlot & 7) << 2 | (inbox.humans & 255) << 8 | (inbox.live & 255) << 16) >>> 0;
+  words[NET_IN_HEADER] = (inbox.mode & 3 | (inbox.mySlot & 7) << 2 | ((inbox.status ?? 0) & 7) << 5 | (inbox.humans & 255) << 8 | (inbox.live & 255) << 16) >>> 0;
   words[NET_IN_MATCH] = inbox.match >>> 0;
   words[NET_IN_SEQ] = inbox.seq >>> 0;
   for (let slot = 0; slot < NET_SLOTS; slot += 1) {
@@ -2858,7 +2862,43 @@ function stickDirections(x, y, threshold = STICK_DPAD_THRESHOLD) {
   return bits;
 }
 
-// src/input.ts
+// src/controls.ts
+var PAD_BUTTONS = [
+  "A",
+  "B",
+  "X",
+  "Y",
+  "LB",
+  "RB",
+  "LT",
+  "RT",
+  "Back",
+  "Start",
+  "LS",
+  "RS",
+  "Up",
+  "Down",
+  "Left",
+  "Right"
+];
+var DEFAULT_PAD_BINDINGS = {
+  A: 4 /* A */,
+  B: 5 /* B */,
+  X: 6 /* X */,
+  Y: 7 /* Y */,
+  LB: 6 /* X */,
+  RB: 7 /* Y */,
+  LT: 6 /* X */,
+  RT: 4 /* A */,
+  Back: "start",
+  Start: "start",
+  LS: null,
+  RS: 6 /* X */,
+  Up: 0 /* Up */,
+  Down: 1 /* Down */,
+  Left: 2 /* Left */,
+  Right: 3 /* Right */
+};
 var DEFAULT_KEY_BINDINGS = {
   ArrowUp: 0 /* Up */,
   ArrowDown: 1 /* Down */,
@@ -2869,6 +2909,73 @@ var DEFAULT_KEY_BINDINGS = {
   KeyA: 6 /* X */,
   KeyS: 7 /* Y */
 };
+var START_KEYS = ["Enter", "KeyP"];
+var DEFAULT_CONTROL_SETTINGS = {
+  invertY: false,
+  lookSensitivity: 1,
+  padBindings: DEFAULT_PAD_BINDINGS,
+  keyBindings: DEFAULT_KEY_BINDINGS,
+  touchOpacity: 0.85,
+  touchScale: 1
+};
+var clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+var isConsoleButton = (v) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 7;
+function parseControlSettings(value, defaults = DEFAULT_CONTROL_SETTINGS) {
+  if (typeof value !== "object" || value === null) return defaults;
+  const raw = value;
+  const num3 = (v, lo, hi, fallback) => typeof v === "number" && Number.isFinite(v) ? clamp(v, lo, hi) : fallback;
+  const padBindings = { ...defaults.padBindings };
+  if (typeof raw.padBindings === "object" && raw.padBindings !== null) {
+    for (const [name, target] of Object.entries(raw.padBindings)) {
+      if (!PAD_BUTTONS.includes(name)) continue;
+      if (target === null || target === "start" || isConsoleButton(target)) padBindings[name] = target;
+    }
+  }
+  let keyBindings = { ...defaults.keyBindings };
+  if (typeof raw.keyBindings === "object" && raw.keyBindings !== null) {
+    const entries = Object.entries(raw.keyBindings).filter(
+      (entry) => /^[A-Za-z0-9]{1,24}$/.test(entry[0]) && isConsoleButton(entry[1])
+    );
+    if (entries.length > 0) keyBindings = Object.fromEntries(entries);
+  }
+  return {
+    invertY: typeof raw.invertY === "boolean" ? raw.invertY : defaults.invertY,
+    lookSensitivity: num3(raw.lookSensitivity, 0.25, 3, defaults.lookSensitivity),
+    padBindings,
+    keyBindings,
+    touchOpacity: num3(raw.touchOpacity, 0.2, 1, defaults.touchOpacity),
+    touchScale: num3(raw.touchScale, 0.7, 1.4, defaults.touchScale)
+  };
+}
+function applyLookSettings(axes, settings) {
+  const s = settings.lookSensitivity;
+  const rx = clamp((axes[2] ?? 0) * s, -1, 1);
+  const ry = clamp((axes[3] ?? 0) * s * (settings.invertY ? -1 : 1), -1, 1);
+  return [axes[0] ?? 0, axes[1] ?? 0, rx, ry];
+}
+function deadZoned(x, y, deadZone = 0.18) {
+  const m = Math.hypot(x, y);
+  if (m < deadZone) return [0, 0];
+  const k = Math.min(1, (m - deadZone) / (1 - deadZone)) / m;
+  return [x * k, y * k];
+}
+function readPad(pad, bindings) {
+  let mask = 0;
+  let start = false;
+  PAD_BUTTONS.forEach((name, index) => {
+    const button = pad.buttons[index];
+    const down = button ? button.pressed || button.value > 0.5 : false;
+    if (!down) return;
+    const target = bindings[name];
+    if (target === "start") start = true;
+    else if (target !== null && target !== void 0) mask |= 1 << target;
+  });
+  const [lx, ly] = deadZoned(pad.axes[0] ?? 0, pad.axes[1] ?? 0);
+  const [rx, ry] = deadZoned(pad.axes[2] ?? 0, pad.axes[3] ?? 0);
+  return { mask, axes: [lx, ly, rx, ry], start };
+}
+
+// src/input.ts
 function resolveButton(keyCode, bindings = DEFAULT_KEY_BINDINGS) {
   return bindings[keyCode];
 }
@@ -2877,8 +2984,29 @@ var GamepadState = class {
     this.mask = 0;
     /** D-pad bits the left stick is pressing (kept apart so a key release can't clear them). */
     this.stickMask = 0;
-    /** Analog sticks: left x, left y, right x, right y, each −1..1 (y down-positive). */
-    this.axes = [0, 0, 0, 0];
+    /** What a physical controller is pressing, replaced wholesale each poll. */
+    this.padMask = 0;
+    /** The on-screen sticks and a controller's sticks, kept apart and merged on read. */
+    this.touchAxes = [0, 0, 0, 0];
+    this.padAxes = [0, 0, 0, 0];
+  }
+  /** Analog sticks: left x, left y, right x, right y, each −1..1 (y down-positive) —
+   *  per stick, whichever source (touch or controller) is leaning further. */
+  get axes() {
+    const out = [0, 0, 0, 0];
+    for (const i of [0, 2]) {
+      const t = Math.hypot(this.touchAxes[i], this.touchAxes[i + 1]);
+      const p = Math.hypot(this.padAxes[i], this.padAxes[i + 1]);
+      const src = p > t ? this.padAxes : this.touchAxes;
+      out[i] = src[i];
+      out[i + 1] = src[i + 1];
+    }
+    return out;
+  }
+  /** A controller's state this frame: its pressed console buttons and sticks. */
+  setPad(mask, axes) {
+    this.padMask = mask;
+    for (let i = 0; i < 4; i += 1) this.padAxes[i] = axes[i] ?? 0;
   }
   press(button) {
     this.mask |= 1 << button;
@@ -2891,32 +3019,49 @@ var GamepadState = class {
    * the D-pad directions it leans toward, so button-only carts steer with it.
    */
   setStick(index, x, y) {
-    this.axes[index * 2] = x;
-    this.axes[index * 2 + 1] = y;
+    this.touchAxes[index * 2] = x;
+    this.touchAxes[index * 2 + 1] = y;
     if (index === 0) this.stickMask = stickDirections(x, y);
   }
-  /** The engine-facing bitmask for player one. */
+  /** The engine-facing bitmask for player one. A controller's left stick also
+   *  presses the D-pad directions it leans toward, like the on-screen one. */
   get value() {
-    return this.mask | this.stickMask;
+    return this.mask | this.stickMask | this.padMask | stickDirections(this.padAxes[0], this.padAxes[1]);
   }
   reset() {
     this.mask = 0;
     this.stickMask = 0;
-    this.axes.fill(0);
+    this.padMask = 0;
+    this.touchAxes.fill(0);
+    this.padAxes.fill(0);
   }
 };
 var KeyboardInput = class {
-  constructor(target, state, bindings = DEFAULT_KEY_BINDINGS) {
+  /**
+   * @param bindings The key map, or a getter for it (read on every key, so a
+   *   rebind from a settings menu applies at once).
+   * @param onStart Called for a Start key (Enter / P) that isn't bound to a button.
+   */
+  constructor(target, state, bindings = DEFAULT_KEY_BINDINGS, onStart) {
     this.target = target;
+    const current = typeof bindings === "function" ? bindings : () => bindings;
+    const held = /* @__PURE__ */ new Map();
     this.onKeyDown = (event) => {
-      const button = resolveButton(event.code, bindings);
+      const button = resolveButton(event.code, current());
       if (button !== void 0) {
+        held.set(event.code, button);
         state.press(button);
         event.preventDefault();
+      } else if (onStart && START_KEYS.includes(event.code) && !event.repeat) {
+        const tag = event.target?.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON") return;
+        event.preventDefault();
+        onStart();
       }
     };
     this.onKeyUp = (event) => {
-      const button = resolveButton(event.code, bindings);
+      const button = held.get(event.code) ?? resolveButton(event.code, current());
+      held.delete(event.code);
       if (button !== void 0) {
         state.release(button);
       }
@@ -2954,7 +3099,7 @@ function stickVector(dx, dy, radius, deadZone = 0.12) {
   return { x: x * k, y: y * k };
 }
 var TouchInput = class {
-  constructor(container, state) {
+  constructor(container, state, onStart) {
     this.restorePosition = null;
     const doc = container.ownerDocument;
     const view = doc.defaultView;
@@ -2976,6 +3121,9 @@ var TouchInput = class {
       userSelect: "none",
       webkitUserSelect: "none"
     });
+    this.pad = doc.createElement("div");
+    Object.assign(this.pad.style, { position: "absolute", inset: "0", pointerEvents: "none", transformOrigin: "50% 100%" });
+    this.root.appendChild(this.pad);
     const face = doc.createElement("div");
     Object.assign(face.style, {
       position: "absolute",
@@ -2986,12 +3134,49 @@ var TouchInput = class {
       gridTemplateRows: `repeat(3, ${FACE_SIZE})`,
       gap: "4px"
     });
-    this.root.appendChild(face);
+    this.pad.appendChild(face);
     for (const control of TOUCH_LAYOUT) face.appendChild(this.createButton(doc, control, state));
     this.createStick(doc, state, 0, { left: "4%", bottom: "6%" });
     this.rightStick = this.createStick(doc, state, 1, { right: `calc(3% + 3 * ${FACE_SIZE} + 8px + 3vmin)`, bottom: "6%" });
     this.rightStick.style.display = "none";
+    if (onStart) {
+      const start = doc.createElement("button");
+      start.type = "button";
+      start.setAttribute("data-cbx-button", "Start");
+      start.setAttribute("aria-label", "Start (menu)");
+      start.textContent = "\u2261 START";
+      Object.assign(start.style, {
+        position: "absolute",
+        top: "2%",
+        left: "50%",
+        transform: "translateX(-50%)",
+        pointerEvents: "auto",
+        touchAction: "none",
+        padding: "6px 14px",
+        borderRadius: "999px",
+        border: "2px solid rgba(255,255,255,0.45)",
+        background: "rgba(20,26,40,0.55)",
+        color: "rgba(255,255,255,0.92)",
+        font: "700 12px/1 system-ui, sans-serif",
+        letterSpacing: "1px",
+        cursor: "pointer"
+      });
+      start.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        onStart();
+      });
+      this.pad.appendChild(start);
+    }
     container.appendChild(this.root);
+  }
+  /** Apply the player's touch settings: overall opacity and size of the pad. */
+  applySettings(settings) {
+    this.pad.style.opacity = String(settings.touchOpacity);
+    for (const child of Array.from(this.pad.children)) {
+      if (child.getAttribute("data-cbx-button") === "Start") continue;
+      child.style.scale = String(settings.touchScale);
+      child.style.transformOrigin = child.style.left ? "0% 100%" : "100% 100%";
+    }
   }
   /** Show the right stick: the cart reads analog sticks. */
   setAnalog(on) {
@@ -3062,7 +3247,7 @@ var TouchInput = class {
     base.addEventListener("pointercancel", end);
     base.addEventListener("lostpointercapture", end);
     base.addEventListener("contextmenu", (event) => event.preventDefault());
-    this.root.appendChild(base);
+    this.pad.appendChild(base);
     return base;
   }
   createButton(doc, control, state) {
@@ -3130,6 +3315,47 @@ var TouchInput = class {
   destroy() {
     this.root.remove();
     this.restorePosition?.();
+  }
+};
+var GamepadInput = class {
+  constructor(nav, state, settings, onStart) {
+    this.nav = nav;
+    this.state = state;
+    this.settings = settings;
+    this.onStart = onStart;
+    this.startHeld = false;
+    /** The pad index in use, so a second controller plugged in later doesn't take over mid-game. */
+    this.index = null;
+  }
+  poll() {
+    const pads = this.nav.getGamepads?.() ?? [];
+    let pad = null;
+    if (this.index !== null) pad = pads[this.index] ?? null;
+    if (!pad || pad.connected === false) {
+      pad = null;
+      this.index = null;
+      for (let i = 0; i < pads.length; i += 1) {
+        const candidate = pads[i];
+        if (candidate && candidate.connected !== false) {
+          pad = candidate;
+          this.index = i;
+          break;
+        }
+      }
+    }
+    if (!pad) {
+      this.state.setPad(0, [0, 0, 0, 0]);
+      this.startHeld = false;
+      return;
+    }
+    const { mask, axes, start } = readPad(pad, this.settings().padBindings);
+    this.state.setPad(mask, axes);
+    if (start && !this.startHeld) this.onStart?.();
+    this.startHeld = start;
+  }
+  /** Whether a controller is connected (for hints like "press Start"). */
+  get connected() {
+    return this.index !== null;
   }
 };
 
@@ -3386,6 +3612,9 @@ cartbox = {
   unlock = function(id) _emit(1, _hash(id), 0) end,
   score = function(v) _emit(2, 0, v // 1) end,
   progress = function(id, v) _emit(3, _hash(id), v // 1) end,
+  -- request(kind, value): ask the host page for something it provides (e.g. a
+  -- page's matchmaking); kind and value are numbers the page defines.
+  request = function(kind, value) _emit(4, (kind or 0) // 1, (value or 0) // 1) end,
   clearlights = function() _ln = 0 pmem(_LB, 0) end,
   light = function(x, y, radius, r, g, b, z, intensity)
     _light(0, x, y, z or 12, radius, r, g, b, intensity, 0, 0, 0)
@@ -3518,10 +3747,11 @@ cartbox = {
   -- Netplay (online multiplayer). The host page relays player state + events
   -- between browsers through pmem words 0..118 (so a netplay cart must not keep
   -- save data there); see packages/player/src/net/netplay.ts for the layout.
-  -- net() -> mode (0 offline, 1 client, 2 host), my slot, humans mask, match word
+  -- net() -> mode (0 offline, 1 client, 2 host), my slot, humans mask, match word,
+  -- and the page's status code (0 idle; the page defines the rest, e.g. searching)
   net = function()
     local h = pmem(0)
-    return h & 3, (h >> 2) & 7, (h >> 8) & 0xff, pmem(1)
+    return h & 3, (h >> 2) & 7, (h >> 8) & 0xff, pmem(1), (h >> 5) & 7
   end,
   -- netpeer(slot) -> the slot's 3 state words, and whether they are live
   netpeer = function(slot)
@@ -3765,6 +3995,7 @@ end`;
 var MAILBOX_TYPE_ACHIEVEMENT = 1;
 var MAILBOX_TYPE_SCORE = 2;
 var MAILBOX_TYPE_PROGRESS = 3;
+var MAILBOX_TYPE_REQUEST = 4;
 var MAILBOX_WORDS = 137;
 var EVENT_CAPACITY = 8;
 var LIGHTS_BASE = 1 + EVENT_CAPACITY * 3;
@@ -3806,6 +4037,8 @@ function kindOf(type) {
       return "score";
     case MAILBOX_TYPE_PROGRESS:
       return "progress";
+    case MAILBOX_TYPE_REQUEST:
+      return "request";
     default:
       return "unknown";
   }
@@ -6878,6 +7111,10 @@ var Player = class {
     this.presentFrame = 0;
     /** The cart reads analog sticks (it opted in via cartbox.stick). */
     this.analogCart = false;
+    this.controlSettings = DEFAULT_CONTROL_SETTINGS;
+    this.volume = 1;
+    /** False while a host menu is open: the game keeps running but sees no input. */
+    this.inputEnabled = true;
     this.tickFrame = 0;
     this.lastMailboxSeq = 0;
     /** Error-generation counter last seen from the engine; a rise means a new error. */
@@ -6897,6 +7134,7 @@ var Player = class {
       if (!this.running) return;
       this.frameAccumulatorMs += now - this.lastFrameTime;
       this.lastFrameTime = now;
+      this.controllerInput?.poll();
       const maxFramesPerRender = 4;
       const frameMs = frameDurationMs(this.model);
       let advanced = 0;
@@ -6916,6 +7154,21 @@ var Player = class {
     }
     this.view = view;
     this.model = getModel(options.modelId);
+    if (options.controlSettings) this.controlSettings = options.controlSettings;
+  }
+  /** Apply new control settings at once (see PlayerHandle.setControlSettings). */
+  setControlSettings(settings) {
+    this.controlSettings = settings;
+    this.touch?.applySettings(settings);
+  }
+  /** Let the game see input (true) or hold it neutral (false) — e.g. under a menu. */
+  setInputEnabled(enabled) {
+    this.inputEnabled = enabled;
+  }
+  /** Master volume, 0..1. */
+  setVolume(volume) {
+    this.volume = volume;
+    this.audio?.setVolume(volume);
   }
   /** Loads the cartridge and engine, then starts (or arms) playback. */
   async start() {
@@ -7026,6 +7279,8 @@ var Player = class {
         return;
       }
       this.audio = new AudioController(sampleRate);
+      this.audio.setVolume(this.options.volume ?? this.volume);
+      if (this.options.volume !== void 0) this.volume = this.options.volume;
       this.setupReplay(bytes, seed);
       this.renderSingleFrame();
       this.options.onReady?.();
@@ -7039,11 +7294,14 @@ var Player = class {
   }
   attachInput() {
     const scheme = this.options.controls ?? "auto";
+    const onStart = this.options.onStart;
     if (scheme !== "touch") {
-      this.keyboard = new KeyboardInput(this.view, this.gamepad);
+      this.keyboard = new KeyboardInput(this.view, this.gamepad, () => this.controlSettings.keyBindings, onStart);
+      this.controllerInput = new GamepadInput(this.view.navigator, this.gamepad, () => this.controlSettings, onStart);
     }
     if (shouldUseTouch(scheme, this.view)) {
-      this.touch = new TouchInput(this.container, this.gamepad);
+      this.touch = new TouchInput(this.container, this.gamepad, onStart);
+      this.touch.applySettings(this.controlSettings);
     }
   }
   /**
@@ -7090,7 +7348,7 @@ var Player = class {
     void this.audio?.pause();
   }
   tickOnce() {
-    const mask = this.replaySource ? this.replaySource.maskForFrame(this.tickFrame) : this.gamepad.value;
+    const mask = this.replaySource ? this.replaySource.maskForFrame(this.tickFrame) : this.inputEnabled ? this.gamepad.value : 0;
     const net = this.options.netplay;
     if (net && this.console) {
       const words = this.console.netWords();
@@ -7200,7 +7458,7 @@ var Player = class {
       this.analogCart = true;
       this.touch?.setAnalog(true);
     }
-    words[STICK_WORD] = this.replaySource ? 0 : packSticks(this.gamepad.axes);
+    words[STICK_WORD] = this.replaySource || !this.inputEnabled ? 0 : packSticks(applyLookSettings(this.gamepad.axes, this.controlSettings));
   }
   fail(error) {
     const normalized = error instanceof Error ? error : new Error(String(error));
@@ -7307,8 +7565,8 @@ var MAX_TILE = 255;
 var MAX_TILES_PER_SIDE = 32;
 var isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var num = (v, fallback) => typeof v === "number" && Number.isFinite(v) ? v : fallback;
-var clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-var clampInt = (v, lo, hi) => Math.round(clamp(v, lo, hi));
+var clamp2 = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+var clampInt = (v, lo, hi) => Math.round(clamp2(v, lo, hi));
 function parseRgb(raw, fallback) {
   if (!Array.isArray(raw) || raw.length < 3) return fallback;
   return [
@@ -7338,12 +7596,12 @@ function parseLayer(raw) {
   if (!source) return null;
   const layer = {
     source,
-    depth: clamp(num(raw.depth, 0.5), 0, 1),
+    depth: clamp2(num(raw.depth, 0.5), 0, 1),
     wrapX: raw.wrapX === void 0 ? true : Boolean(raw.wrapX),
     offsetY: Math.round(num(raw.offsetY, 0))
   };
   if (typeof raw.parallax === "number" && Number.isFinite(raw.parallax)) {
-    layer.parallax = clamp(raw.parallax, 0, 4);
+    layer.parallax = clamp2(raw.parallax, 0, 4);
   }
   return layer;
 }
@@ -7360,9 +7618,9 @@ function parseScene(raw) {
   const atmoRaw = isObject(raw.atmosphere) ? raw.atmosphere : {};
   const atmosphere = {
     fog: parseRgb(atmoRaw.fog, DEFAULT_ATMOSPHERE.fog),
-    density: clamp(num(atmoRaw.density, DEFAULT_ATMOSPHERE.density), 0, 1),
-    desaturate: clamp(num(atmoRaw.desaturate, DEFAULT_ATMOSPHERE.desaturate), 0, 1),
-    lift: clamp(num(atmoRaw.lift, DEFAULT_ATMOSPHERE.lift), 0, 1)
+    density: clamp2(num(atmoRaw.density, DEFAULT_ATMOSPHERE.density), 0, 1),
+    desaturate: clamp2(num(atmoRaw.desaturate, DEFAULT_ATMOSPHERE.desaturate), 0, 1),
+    lift: clamp2(num(atmoRaw.lift, DEFAULT_ATMOSPHERE.lift), 0, 1)
   };
   const camRaw = isObject(raw.camera) ? raw.camera : {};
   const camera = {
@@ -7385,8 +7643,8 @@ var MAX_LAYER_INDEX = 7;
 var MAX_FRAME_TICKS = 600;
 var isObject2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var num2 = (v, fallback) => typeof v === "number" && Number.isFinite(v) ? v : fallback;
-var clamp2 = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-var clampInt2 = (v, lo, hi) => Math.round(clamp2(v, lo, hi));
+var clamp3 = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+var clampInt2 = (v, lo, hi) => Math.round(clamp3(v, lo, hi));
 var ANIM_MODES = /* @__PURE__ */ new Set(["loop", "pingpong", "once"]);
 var TRACK_MODES = /* @__PURE__ */ new Set(["loop", "pingpong", "hold"]);
 var EASES = /* @__PURE__ */ new Set(["linear", "step", "smooth"]);
@@ -7472,8 +7730,8 @@ function parsePlacement(raw, clipNames) {
     clip: raw.clip,
     x: num2(raw.x, 0),
     y: num2(raw.y, 0),
-    depth: clamp2(num2(raw.depth, 0), 0, 1),
-    opacity: clamp2(num2(raw.opacity, 1), 0, 1),
+    depth: clamp3(num2(raw.depth, 0), 0, 1),
+    opacity: clamp3(num2(raw.opacity, 1), 0, 1),
     scale: Math.max(0.01, num2(raw.scale, 1))
   };
 }
@@ -7572,15 +7830,15 @@ var PRESETS = {
 function emitterPreset(kind, seed) {
   return { kind, seed, ...PRESETS[kind] };
 }
-function clamp3(value, min, max) {
+function clamp4(value, min, max) {
   return value < min ? min : value > max ? max : value;
 }
 function readNumber(raw, min, max, fallback) {
-  return typeof raw === "number" && Number.isFinite(raw) ? clamp3(raw, min, max) : fallback;
+  return typeof raw === "number" && Number.isFinite(raw) ? clamp4(raw, min, max) : fallback;
 }
 function readColor(raw, fallback) {
   if (!Array.isArray(raw) || raw.length !== 3) return [...fallback];
-  const channels = raw.map((c) => typeof c === "number" && Number.isFinite(c) ? clamp3(Math.round(c), 0, 255) : null);
+  const channels = raw.map((c) => typeof c === "number" && Number.isFinite(c) ? clamp4(Math.round(c), 0, 255) : null);
   if (channels.some((c) => c === null)) return [...fallback];
   return channels;
 }
@@ -7630,6 +7888,7 @@ var NetSession = class {
     this.remote = /* @__PURE__ */ new Map();
     this.pendingEvents = [];
     this.hostMatch = 0;
+    this.statusCode = 0;
     this.tick = 0;
     this.outEvents = [];
     this.outStates = /* @__PURE__ */ new Map();
@@ -7642,6 +7901,20 @@ var NetSession = class {
       this.emit();
     });
     transport.onMessage((message) => this.receive(message));
+  }
+  /** Forget the current room's state (remote players, queued events, the host's
+   *  match word) — for moving to another room without carrying anything over. */
+  resetRoom() {
+    this.remote.clear();
+    this.pendingEvents.length = 0;
+    this.outEvents.length = 0;
+    this.outStates = /* @__PURE__ */ new Map();
+    this.hostMatch = 0;
+    this.lastSent = "";
+  }
+  /** A status for the cart (0..7, read as net()'s fifth value) — e.g. matchmaking progress. */
+  setStatus(code) {
+    this.statusCode = code & 7;
   }
   /** Join the room. */
   async connect(name) {
@@ -7675,7 +7948,7 @@ var NetSession = class {
   beforeTick(words) {
     const mySlot = this.mySlot;
     if (!this.connected || mySlot < 0) {
-      writeNetInbox(words, { mode: 0, mySlot: 0, humans: 0, live: 0, match: 0, seq: this.tick, slots: [], events: [] });
+      writeNetInbox(words, { mode: 0, mySlot: 0, status: this.statusCode, humans: 0, live: 0, match: 0, seq: this.tick, slots: [], events: [] });
       return;
     }
     const now = this.now();
@@ -7695,6 +7968,7 @@ var NetSession = class {
     const events = this.pendingEvents.slice(0, NET_IN_EVENT_CAPACITY);
     const delivered = writeNetInbox(words, {
       mode: this.isHost ? NET_MODE_HOST : NET_MODE_CLIENT,
+      status: this.statusCode,
       mySlot,
       humans,
       live,
@@ -7866,6 +8140,53 @@ var BroadcastChannelTransport = class {
     this.peersHandler?.(peers);
   }
 };
+var SwitchableTransport = class {
+  constructor() {
+    this.inner = null;
+    this.idle = `idle-${Math.random().toString(36).slice(2, 10)}`;
+    this.messageHandler = null;
+    this.peersHandler = null;
+  }
+  get selfId() {
+    return this.inner?.selfId ?? this.idle;
+  }
+  /** The room transport in use, or null. */
+  get current() {
+    return this.inner;
+  }
+  async connect(_joinedAt, name) {
+    this.name = name;
+    this.peersHandler?.([]);
+  }
+  /** Leave the current room (if any) and join `next` (or stay out when null). */
+  async use(next) {
+    const previous = this.inner;
+    this.inner = null;
+    previous?.close();
+    this.peersHandler?.([]);
+    if (!next) return;
+    this.inner = next;
+    next.onMessage((message, from) => {
+      if (this.inner === next) this.messageHandler?.(message, from);
+    });
+    next.onPeers((peers) => {
+      if (this.inner === next) this.peersHandler?.(peers);
+    });
+    await next.connect(Date.now(), this.name);
+  }
+  send(message) {
+    this.inner?.send(message);
+  }
+  onMessage(handler) {
+    this.messageHandler = handler;
+  }
+  onPeers(handler) {
+    this.peersHandler = handler;
+  }
+  close() {
+    void this.use(null);
+  }
+};
 
 // src/index.ts
 function mount(container, options) {
@@ -7878,7 +8199,10 @@ function mount(container, options) {
     getReplay: () => player.getReplay(),
     get running() {
       return player.running;
-    }
+    },
+    setControlSettings: (settings) => player.setControlSettings(settings),
+    setVolume: (volume) => player.setVolume(volume),
+    setInputEnabled: (enabled) => player.setInputEnabled(enabled)
   };
 }
 export {
@@ -7895,11 +8219,14 @@ export {
   ConsoleButton,
   DEFAULT_AMBIENT2 as DEFAULT_AMBIENT,
   DEFAULT_ATMOSPHERE,
+  DEFAULT_CONTROL_SETTINGS,
   DEFAULT_KEY_BINDINGS,
   DEFAULT_LIGHT,
   DEFAULT_MODEL_ID,
+  DEFAULT_PAD_BINDINGS,
   EVENT_CAPACITY,
   EngineLoadError,
+  GamepadInput,
   HEIGHT_WORLD,
   LIGHTS_BASE,
   LIGHTS_CAPACITY,
@@ -7934,6 +8261,7 @@ export {
   NORMAL_DIRECTION_COUNT,
   NORMAL_VECTORS,
   NetSession,
+  PAD_BUTTONS,
   PARTICLE_KINDS,
   POST_FX_EFFECTS,
   ParticleOverlaySurface,
@@ -7944,8 +8272,10 @@ export {
   ReplayRecorder,
   ReplaySource,
   SOFTWARE_RASTER_CAPS,
+  START_KEYS,
   SceneBackdropSurface,
   SoftwareSceneRenderer,
+  SwitchableTransport,
   TILT_SHIFT_FEATHER,
   UNIFORM_BYTES_USED,
   UNIFORM_FLOATS,
@@ -7959,6 +8289,7 @@ export {
   alignBytesPerRow,
   animClipsSdkLua,
   anyPostFxEnabled,
+  applyLookSettings,
   applyRenderCaps,
   buildBillboardInstance,
   buildClipTable,
@@ -7982,6 +8313,7 @@ export {
   createLightingLayer,
   createSceneRenderer,
   createTextureBudgetCache,
+  deadZoned,
   decodeCamera,
   decodeLights,
   decodeMailbox,
@@ -8019,6 +8351,7 @@ export {
   paramKey,
   parseAnim,
   parseCollisionField,
+  parseControlSettings,
   parseFlagsField,
   parseMeshScene,
   parseParticles,
@@ -8033,6 +8366,7 @@ export {
   randomSeed,
   rasterStyleFor,
   readCartCode,
+  readPad,
   reflectionFade,
   reflectionSampleY,
   renderSceneBackdrop,

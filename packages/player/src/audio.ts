@@ -62,6 +62,11 @@ export class AudioController {
     this.nextStartTime = startAt + buffer.duration;
   }
 
+  /** Master volume, 0 (silent) .. 1 (full). */
+  setVolume(volume: number): void {
+    this.gain.gain.value = Math.max(0, Math.min(1, Number.isFinite(volume) ? volume : 1));
+  }
+
   destroy(): void {
     this.gain.disconnect();
     void this.context.close();

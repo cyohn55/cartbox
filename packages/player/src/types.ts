@@ -6,6 +6,7 @@
  */
 
 import type { NetSession } from "./net/NetSession.js";
+import type { ControlSettings } from "./controls.js";
 import type { ModelId } from "./models.js";
 import type { Replay } from "./replay.js";
 import type { MailboxEvent } from "./mailbox.js";
@@ -92,6 +93,19 @@ export interface PlayerOptions {
    * cartbox.net* functions). Omitted: the cart plays offline.
    */
   netplay?: NetSession;
+  /**
+   * Control settings (aim inversion, look sensitivity, controller and keyboard
+   * bindings, touch pad size/opacity). Change them live with
+   * {@link PlayerHandle.setControlSettings}. Defaults: DEFAULT_CONTROL_SETTINGS.
+   */
+  controlSettings?: ControlSettings;
+  /**
+   * The player pressed Start (a controller's Start/Back, the touch pad's Start,
+   * or Enter / P): the host opens its menu. Without it there is no Start button.
+   */
+  onStart?: () => void;
+  /** Master volume, 0..1 (default 1). */
+  volume?: number;
   /**
    * Relight the cart's frames with dynamic point lights. When set, the player
    * renders through a WebGL lighting layer (falling back to plain 2D if WebGL is
@@ -190,4 +204,10 @@ export interface PlayerHandle {
   getReplay(): Replay | null;
   /** Whether the run loop is currently advancing frames. */
   readonly running: boolean;
+  /** Apply new control settings at once (bindings, inversion, sensitivity, touch pad). */
+  setControlSettings(settings: ControlSettings): void;
+  /** Master volume, 0..1. */
+  setVolume(volume: number): void;
+  /** Hold the game's input neutral (false) while a host menu is open over it, or restore it. */
+  setInputEnabled(enabled: boolean): void;
 }

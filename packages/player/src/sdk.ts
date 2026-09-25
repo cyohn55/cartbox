@@ -69,6 +69,9 @@ cartbox = {
   unlock = function(id) _emit(1, _hash(id), 0) end,
   score = function(v) _emit(2, 0, v // 1) end,
   progress = function(id, v) _emit(3, _hash(id), v // 1) end,
+  -- request(kind, value): ask the host page for something it provides (e.g. a
+  -- page's matchmaking); kind and value are numbers the page defines.
+  request = function(kind, value) _emit(4, (kind or 0) // 1, (value or 0) // 1) end,
   clearlights = function() _ln = 0 pmem(_LB, 0) end,
   light = function(x, y, radius, r, g, b, z, intensity)
     _light(0, x, y, z or 12, radius, r, g, b, intensity, 0, 0, 0)
@@ -201,10 +204,11 @@ cartbox = {
   -- Netplay (online multiplayer). The host page relays player state + events
   -- between browsers through pmem words 0..118 (so a netplay cart must not keep
   -- save data there); see packages/player/src/net/netplay.ts for the layout.
-  -- net() -> mode (0 offline, 1 client, 2 host), my slot, humans mask, match word
+  -- net() -> mode (0 offline, 1 client, 2 host), my slot, humans mask, match word,
+  -- and the page's status code (0 idle; the page defines the rest, e.g. searching)
   net = function()
     local h = pmem(0)
-    return h & 3, (h >> 2) & 7, (h >> 8) & 0xff, pmem(1)
+    return h & 3, (h >> 2) & 7, (h >> 8) & 0xff, pmem(1), (h >> 5) & 7
   end,
   -- netpeer(slot) -> the slot's 3 state words, and whether they are live
   netpeer = function(slot)
