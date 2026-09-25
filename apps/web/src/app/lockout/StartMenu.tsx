@@ -10,7 +10,7 @@
  */
 
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { ConsoleButton, DEFAULT_CONTROL_SETTINGS, PAD_BUTTONS, type ControlTarget, type PadButton } from "@cartbox/player";
+import { ConsoleButton, DEFAULT_CONTROL_SETTINGS, PAD_BUTTONS, standardizePad, type ControlTarget, type PadButton } from "@cartbox/player";
 
 import {
   DEFAULT_GAME_SETTINGS,
@@ -42,7 +42,7 @@ export interface StartMenuProps {
 const PAD_LABELS: Record<PadButton, string> = {
   A: "A", B: "B", X: "X", Y: "Y", LB: "LB", RB: "RB", LT: "LT (trigger)", RT: "RT (trigger)",
   Back: "Back", Start: "Start", LS: "Left stick click", RS: "Right stick click",
-  Up: "D-pad up", Down: "D-pad down", Left: "D-pad left", Right: "D-pad right",
+  Up: "D-pad up", Down: "D-pad down", Left: "D-pad left", Right: "D-pad right", Guide: "Xbox (guide) button",
 };
 
 export function StartMenu(props: StartMenuProps) {
@@ -73,10 +73,10 @@ export function StartMenu(props: StartMenuProps) {
     return () => window.removeEventListener("keydown", onKey, true);
   });
 
-  // Escape closes the menu (when not rebinding).
+  // Escape or P closes the menu (when not rebinding).
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.code === "Escape" && listening === null) props.onClose();
+      if ((event.code === "Escape" || event.code === "KeyP") && listening === null) props.onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -322,12 +322,13 @@ function useGamepadNavigation(rootRef: React.RefObject<HTMLDivElement | null>, o
     };
     const loop = (now: number) => {
       frame = requestAnimationFrame(loop);
-      const pad = Array.from(navigator.getGamepads?.() ?? []).find((p) => p && p.connected);
-      if (!pad) return;
+      const raw = Array.from(navigator.getGamepads?.() ?? []).find((p) => p && p.connected);
+      if (!raw) return;
+      const pad = standardizePad(raw);
       const b = (i: number) => Boolean(pad.buttons[i]?.pressed);
       const ly = pad.axes[1] ?? 0;
       const lx = pad.axes[0] ?? 0;
-      const state = [b(0), b(1), b(9), b(12) || ly < -0.6, b(13) || ly > 0.6, b(14) || lx < -0.6, b(15) || lx > 0.6];
+      const state = [b(0), b(1), b(9) || b(8) || b(16), b(12) || ly < -0.6, b(13) || ly > 0.6, b(14) || lx < -0.6, b(15) || lx > 0.6];
       if (!prev) {
         prev = state; // ignore whatever was held when the menu opened
         return;

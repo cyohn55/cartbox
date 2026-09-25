@@ -7,9 +7,10 @@
  * Matchmaking, which asks this page (cartbox.request) to find people online:
  * the page's Matchmaker joins or opens a public room and moves the running
  * game's netplay session into it. A private room (create / join a code) works
- * as before. Start — a controller's Start, the touch pad's Start button, or
- * Enter / P — opens the Start menu (controls, button mapping, audio, display);
- * offline it pauses the game, online the match keeps going underneath.
+ * as before. Start — a controller's Start (or Back / Guide), the touch pad's
+ * Start button, the ≡ Menu button, or Esc / Enter / P — opens the Start menu
+ * (controls, button mapping, audio, display); offline it pauses the game,
+ * online the match keeps going underneath.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -57,6 +58,8 @@ export function LockoutGame() {
   settingsRef.current = settings;
   const [fps, setFps] = useState<number | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  /** How to open the menu, shown for a few seconds when a game starts. */
+  const [menuHint, setMenuHint] = useState(false);
   const online = onlineRoomsAvailable();
 
   // Stored settings (after hydration), and a shared link (?room=CODE) pre-filling the join box.
@@ -101,6 +104,13 @@ export function LockoutGame() {
     };
   }, [phase.kind]);
 
+  useEffect(() => {
+    if (phase.kind !== "playing") return;
+    setMenuHint(true);
+    const timer = window.setTimeout(() => setMenuHint(false), 8000);
+    return () => window.clearTimeout(timer);
+  }, [phase.kind]);
+
   // Frame-rate readout.
   useEffect(() => {
     if (!settings.showFps || phase.kind !== "playing") {
@@ -117,6 +127,7 @@ export function LockoutGame() {
   const openMenu = useCallback((open: boolean) => {
     const handle = handleRef.current;
     setMenuOpen(open);
+    if (open) setMenuHint(false);
     if (!handle) return;
     if (inRoom()) handle.setInputEnabled(!open);
     else if (open) handle.pause();
@@ -288,7 +299,7 @@ export function LockoutGame() {
           </div>
           <p style={{ margin: 0, color: "var(--faint)", fontSize: 13 }}>
             Plays full screen. Xbox 360 / Xbox controllers work (left stick moves, right stick aims, Start for the menu), as
-            do touch and the keyboard (Enter or P for the menu).{" "}
+            do touch and the keyboard (Esc, Enter or P for the menu).{" "}
             {online
               ? "Matchmaking and rooms are online."
               : "This build has no online relay, so matchmaking and rooms connect the tabs of this browser only."}
@@ -320,7 +331,17 @@ export function LockoutGame() {
               </button>
             )}
             {fps !== null && <span style={chip}>{fps} fps</span>}
-            <button type="button" aria-label="Menu" style={{ ...chip, cursor: "pointer", marginLeft: "auto", pointerEvents: "auto" }} onClick={() => openMenu(true)}>
+            {menuHint && !menuOpen && (
+              <span role="status" style={{ ...chip, marginLeft: "auto", background: "rgba(10,12,20,0.8)" }}>
+                Menu: Start on a controller · Esc or P · or tap ≡ Menu
+              </span>
+            )}
+            <button
+              type="button"
+              aria-label="Menu"
+              style={{ ...chip, cursor: "pointer", marginLeft: menuHint && !menuOpen ? 0 : "auto", pointerEvents: "auto", fontSize: 14, padding: "6px 14px" }}
+              onClick={() => openMenu(true)}
+            >
               ≡ Menu
             </button>
           </div>
@@ -383,6 +404,10 @@ function roomLink(room: string): string {
   return url.toString();
 }
 
+/** Chrome's Keyboard Lock: in full screen, Escape reaches the page (to open the menu) and exiting takes a long press. */
+type KeyboardLock = { lock?: (codes?: string[]) => Promise<void>; unlock?: () => void };
+const keyboardLock = (): KeyboardLock | undefined => (navigator as Navigator & { keyboard?: KeyboardLock }).keyboard;
+
 type FullscreenDocument = Document & { webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => Promise<void> };
 type FullscreenElement = HTMLElement & { webkitRequestFullscreen?: () => Promise<void> };
 
@@ -397,6 +422,7 @@ async function enterFullscreen(element: HTMLElement | null): Promise<void> {
   try {
     if (el.requestFullscreen) await el.requestFullscreen({ navigationUI: "hide" });
     else await el.webkitRequestFullscreen?.();
+    await keyboardLock()?.lock?.(["Escape"]).catch(() => {});
     // Landscape where the platform allows locking it (Android, in full screen).
     await (screen.orientation as ScreenOrientation & { lock?: (o: string) => Promise<void> }).lock?.("landscape").catch(() => {});
   } catch {
@@ -406,6 +432,7 @@ async function enterFullscreen(element: HTMLElement | null): Promise<void> {
 
 async function exitFullscreen(): Promise<void> {
   const doc = document as FullscreenDocument;
+  keyboardLock()?.unlock?.();
   if (!fullscreenElement()) return;
   try {
     if (doc.exitFullscreen) await doc.exitFullscreen();
