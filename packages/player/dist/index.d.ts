@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, SceneLighting, PhysicsWorldSettings, SceneTimeline, JointKind, JointSpec, DecodedTexture, EncodedImage, EnvironmentLight, ShadowInput, ToneMap, SceneLight, SceneFog, RasterStyle, AnimatorOp, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, JointKind, JointSpec, DecodedTexture, EncodedImage, EnvironmentLight, ShadowInput, ToneMap, SceneLight, SceneFog, RasterStyle, AnimatorOp, AnimationCue } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -47,6 +47,8 @@ interface MeshInstance extends MeshSceneInstance {
         readonly copy: number;
         readonly root: number;
     };
+    /** The level this object belongs to (an index into the scene's `levels`); absent = always loaded. */
+    readonly level?: number;
 }
 /** A prefab's reserve of spawnable copies: each copy's root object index. */
 interface PrefabPool {
@@ -73,6 +75,8 @@ interface MeshScene {
     readonly physicsWorld?: PhysicsWorldSettings;
     /** Cutscenes and scripted camera moves (objects referred to by instance `id`). */
     readonly timelines?: readonly SceneTimeline[];
+    /** Named levels, one loaded at a time (the first at start); see levels.ts in @cartbox/editor. */
+    readonly levels?: readonly SceneLevel[];
 }
 /** A view + projection pair ready to hand to `renderMeshScene`. */
 interface SceneCamera$1 {
@@ -479,6 +483,11 @@ declare class PhysicsSession {
     beforeTick(block: DataView): void;
     /** Apply the cart's commands, step the world, and cast the rays it asked for. */
     afterTick(block: DataView): void;
+    /**
+     * Take the bodies of objects in unloaded levels out of the world, and bring the
+     * rest back (see levels.ts in @cartbox/editor). Prefab copies aren't in levels.
+     */
+    setInactive(objects: ReadonlySet<number>): void;
     /**
      * Bring a spawned prefab copy's bodies into the world, placed where the copy's
      * objects now are (`world` gives each object's world matrix), or take them out.
@@ -2060,6 +2069,18 @@ interface PlayerOptions {
      * The web app passes one that fetches the transcoder on demand.
      */
     ktx2?: () => Promise<(bytes: Uint8Array) => DecodedTexture | null>;
+    /**
+     * Loads a level's assets before a switch to it (`cartbox.level`), reporting
+     * progress 0..1; the switch happens when it settles. Without it, switches are
+     * immediate. The web app streams the level's textures.
+     */
+    levelAssets?: (level: SceneLevel, onProgress: (progress: number) => void) => Promise<void>;
+    /** Called as the current level changes and while one loads (loading is null once it's in). */
+    onLevel?: (state: {
+        level: string;
+        loading: string | null;
+        progress: number;
+    }) => void;
     /**
      * Graphics quality: "low" | "medium" | "high", or "auto" (the default) to pick
      * from the device — see quality.ts. High is everything as authored.
@@ -4479,7 +4500,10 @@ declare class MeshOverlaySurface implements DisplaySurface {
     /** Each object's reserve-copy root (-1 when it isn't part of a prefab reserve). */
     private readonly pooledRoot;
     /** The authored instances without the reserve copies (drawn when nothing moves). */
-    private readonly unpooled;
+    private unpooled;
+    /** Objects in a level that isn't the current one: not drawn, not in the static shadow (see setInactive). */
+    private inactive;
+    private inactiveKey;
     /** Each object's world matrix as last drawn (null = hidden), or null when nothing moved. */
     private lastPlacement;
     /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
@@ -4505,6 +4529,11 @@ declare class MeshOverlaySurface implements DisplaySurface {
     setSkinning(skinning: ReadonlyMap<number, Float32Array>): void;
     /** Apply a graphics quality preset (takes effect on the next frame). */
     setQuality(quality: QualitySettings): void;
+    /**
+     * The objects of levels that aren't loaded (see levels.ts in @cartbox/editor):
+     * they're hidden, and left out of the shadow, until the set changes again.
+     */
+    setInactive(objects: ReadonlySet<number>): void;
     /** Posed instances plus, in a hierarchy, everything below them: what moves this frame. */
     private withChildren;
     /**
@@ -5029,6 +5058,9 @@ declare class RuntimeChannel {
     private readonly requests;
     /** A pole for the next IK request on (object, joint). */
     private readonly poles;
+    /** Levels: the current one, the one loading (-1), its progress, and a switch the cart asked for. */
+    private level;
+    private levelRequest;
     /** Joints whose world position the cart asked for, and where they were when last skinned. */
     private readonly watched;
     constructor(scene: MeshScene, physics: PhysicsSession | null);
@@ -5036,6 +5068,14 @@ declare class RuntimeChannel {
     beforeTick(block: DataView): void;
     /** Take the cart's commands: scene ops here, the rest to physics (which then steps). */
     afterTick(block: DataView): void;
+    /** A level switch the cart asked for since the last call (-1 for none); the player loads and activates it. */
+    takeLevelRequest(): number;
+    /** The level loading, and how far along (0..1), as the cart reads it. */
+    setLevelLoading(level: number, progress: number): void;
+    /** Make `level` the current one (the loading state clears). */
+    setLevel(level: number): void;
+    /** The current level (-1 when the scene has none). */
+    currentLevel(): number;
     /**
      * Skinning matrices for the animated objects being drawn (object → matrices);
      * reserve prefab copies not spawned are skipped. IK and look-at requests are

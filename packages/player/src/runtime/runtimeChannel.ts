@@ -38,12 +38,14 @@ import {
   PHYS_OP_PLAY,
   PHYS_OP_SPAWN,
   PHYS_OP_TIMELINE,
+  PHYS_OP_LEVEL,
   PHYS_OP_WATCH,
   takePhysicsCommands,
   writeAnimationState,
   writeJointPositions,
   writePhysicsState,
   writeTimelineState,
+  writeLevelState,
 } from "../physics/protocol.js";
 
 const DEG = 180 / Math.PI;
@@ -80,6 +82,9 @@ export class RuntimeChannel {
   private readonly requests = new Map<number, Map<number, PoseRequest>>();
   /** A pole for the next IK request on (object, joint). */
   private readonly poles = new Map<string, Vec3>();
+  /** Levels: the current one, the one loading (-1), its progress, and a switch the cart asked for. */
+  private level = { current: -1, loading: -1, progress: 0 };
+  private levelRequest = -1;
   /** Joints whose world position the cart asked for, and where they were when last skinned. */
   private readonly watched = new Map<string, { object: number; joint: number; position: [number, number, number] | null }>();
 
@@ -89,6 +94,7 @@ export class RuntimeChannel {
   ) {
     this.animation = sceneHasAnimation(scene) ? new AnimationSession(scene) : null;
     this.timeline = (scene.timelines?.length ?? 0) > 0 ? new TimelineSession(scene) : null;
+    if ((scene.levels?.length ?? 0) > 0) this.level.current = 0;
     scene.instances.forEach((inst, i) => {
       if (!inst.pooled) return;
       const list = this.copyObjects.get(inst.pooled.root) ?? [];
@@ -104,6 +110,7 @@ export class RuntimeChannel {
     else writePhysicsState(block, 0, [], []);
     writeAnimationState(block, this.animation?.state() ?? [], this.animation?.events() ?? []);
     writeTimelineState(block, this.timeline?.state() ?? { index: -1, time: 0, playing: false }, this.timeline?.events() ?? []);
+    writeLevelState(block, this.level);
     writeJointPositions(
       block,
       [...this.watched.values()].flatMap((w) => (w.position ? [{ object: w.object, joint: w.joint, position: w.position }] : [])),
@@ -125,7 +132,10 @@ export class RuntimeChannel {
       else if (cmd.op === PHYS_OP_IK_POLE) this.poles.set(`${cmd.a}:${Math.round(cmd.v[0])}`, [cmd.v[1], cmd.v[2], cmd.v[3]]);
       else if (cmd.op === PHYS_OP_IK || cmd.op === PHYS_OP_LOOKAT) this.request(cmd.op, cmd.a, cmd.v);
       else if (cmd.op === PHYS_OP_WATCH) this.watch(cmd.a, Math.round(cmd.v[0]));
-      else if (cmd.op === PHYS_OP_TIMELINE) {
+      else if (cmd.op === PHYS_OP_LEVEL) {
+        const n = this.scene.levels?.length ?? 0;
+        if (cmd.a >= 0 && cmd.a < n && cmd.a !== this.level.current && cmd.a !== this.level.loading) this.levelRequest = cmd.a;
+      } else if (cmd.op === PHYS_OP_TIMELINE) {
         if (cmd.a < 0) this.timeline?.stop();
         else this.timeline?.play(cmd.a, cmd.v[0], cmd.v[1]);
       }
@@ -134,6 +144,28 @@ export class RuntimeChannel {
     for (const { object, cue } of this.timeline?.step(PHYSICS_DT) ?? []) this.cue(object, cue.clip, cue.fade, cue.loop);
     this.physics?.run(commands.filter((c) => c.op < PHYS_OP_SPAWN || (c.op > PHYS_OP_DESPAWN && c.op < PHYS_OP_PLAY)));
     this.animation?.step(PHYSICS_DT);
+  }
+
+  /** A level switch the cart asked for since the last call (-1 for none); the player loads and activates it. */
+  takeLevelRequest(): number {
+    const request = this.levelRequest;
+    this.levelRequest = -1;
+    return request;
+  }
+
+  /** The level loading, and how far along (0..1), as the cart reads it. */
+  setLevelLoading(level: number, progress: number): void {
+    this.level = { ...this.level, loading: level, progress };
+  }
+
+  /** Make `level` the current one (the loading state clears). */
+  setLevel(level: number): void {
+    this.level = { current: level, loading: -1, progress: 0 };
+  }
+
+  /** The current level (-1 when the scene has none). */
+  currentLevel(): number {
+    return this.level.current;
   }
 
   /**

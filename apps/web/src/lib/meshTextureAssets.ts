@@ -39,6 +39,8 @@
  * Pure and isomorphic: hashing and fetching are injected.
  */
 
+import { effectiveLevels, readLevels } from "@cartbox/editor";
+
 import { serializeCartAssets, type AssetRef, type CartAssets } from "./cartAssetStore";
 
 /** The deterministic manifest name an offloaded mesh texture is filed under. */
@@ -297,4 +299,53 @@ export function meshTextureRefs(encoded: string | null): { hash: string; mime: s
     if (typeof image.asset === "string" && !seen.has(image.asset)) seen.set(image.asset, typeof image.mime === "string" ? image.mime : "image/png");
   }
   return [...seen].map(([hash, mime]) => ({ hash, mime }));
+}
+
+/**
+ * Which levels need each asset-backed texture (see levels.ts in @cartbox/editor):
+ * hash → the level ids of the objects that use it, or null when something
+ * always loaded (or in the start level) does — those stream at start, the rest
+ * when their level is switched to.
+ */
+export function meshTextureLevels(encoded: string | null): Map<string, readonly string[] | null> {
+  const out = new Map<string, string[] | null>();
+  if (!encoded) return out;
+  let root: { meshes?: { id?: unknown; mesh?: unknown; frames?: unknown; parent?: unknown; level?: unknown }[]; library?: Record<string, unknown>; levels?: unknown; prefabs?: { nodes?: { mesh?: unknown; frames?: unknown }[] }[] };
+  try {
+    root = JSON.parse(encoded);
+  } catch {
+    return out;
+  }
+  if (!root || !Array.isArray(root.meshes)) return out;
+  const levels = readLevels(root.levels);
+  const library = root.library ?? {};
+  const resolve = (value: unknown): string | null => {
+    if (typeof value !== "string") return null;
+    if (value.startsWith("@lib:")) return typeof library[value.slice(5)] === "string" ? (library[value.slice(5)] as string) : null;
+    return value;
+  };
+  const hashesOf = (holder: { mesh?: unknown; frames?: unknown }): string[] => {
+    const serialized = [holder.mesh, ...(Array.isArray(holder.frames) ? holder.frames : [])].map(resolve).filter((m): m is string => m !== null);
+    return serialized.flatMap((m) => meshTextureRefs(m).map((r) => r.hash));
+  };
+  const note = (hash: string, level: string | null) => {
+    const seen = out.get(hash);
+    if (level === null || seen === null) out.set(hash, null);
+    else out.set(hash, seen ? (seen.includes(level) ? seen : [...seen, level]) : [level]);
+  };
+  const ids = root.meshes.map((m) => (typeof m.id === "string" ? m.id : ""));
+  const parents = root.meshes.map((m) => (typeof m.parent === "string" ? ids.indexOf(m.parent) : -1));
+  const effective = effectiveLevels(
+    root.meshes.map((m) => (typeof m.level === "string" ? m.level : undefined)),
+    parents,
+    levels,
+  );
+  root.meshes.forEach((entry, i) => {
+    const level = effective[i]!;
+    // Always loaded, or in the level the cart starts in: needed at start.
+    const tag = level <= 0 ? null : levels[level]!.id;
+    for (const hash of hashesOf(entry)) note(hash, tag);
+  });
+  for (const prefab of root.prefabs ?? []) for (const node of prefab.nodes ?? []) for (const hash of hashesOf(node)) note(hash, null);
+  return out;
 }

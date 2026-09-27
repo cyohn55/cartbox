@@ -32,6 +32,8 @@ import {
   readPhysicsWorld,
   readSceneProps,
   readTimelines,
+  readLevels,
+  MAX_LEVELS,
   readSceneTags,
   SCENE_PROP_MAX,
   SCENE_STRING_MAX,
@@ -46,6 +48,7 @@ import {
   type PhysicsWorldSettings,
   type SceneLighting,
   type SceneTimeline,
+  type SceneLevel,
   type ScenePropValue,
 } from "@cartbox/editor";
 
@@ -87,6 +90,8 @@ export interface MeshSidecarEntry {
   readonly physics?: PhysicsSpec;
   /** Animation state machine for a skinned mesh (ENGINE_ROADMAP.md, Phase 3); absent = plays its first clip. */
   readonly animator?: AnimatorSpec;
+  /** The level this object belongs to (a level id); absent = always loaded (see levels.ts in @cartbox/editor). */
+  readonly level?: string;
 }
 
 /**
@@ -140,6 +145,8 @@ export interface MeshSidecar {
   readonly physicsWorld?: PhysicsWorldSettings;
   /** Cutscenes and scripted camera moves (ENGINE_ROADMAP.md, Phase 3); absent or empty = none. */
   readonly timelines?: readonly SceneTimeline[];
+  /** Named levels, one loaded at a time (the first at start); see levels.ts in @cartbox/editor. */
+  readonly levels?: readonly SceneLevel[];
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -164,7 +171,7 @@ function newMeshId(): string {
  */
 export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
   const prefabs = sidecar.prefabs ?? [];
-  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0) return null;
+  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0) return null;
   // Repeated meshes (and animation frames) are stored once in a shared library,
   // shared between placed entries and prefab nodes (a prefab's copies repeat its meshes).
   const nodes = prefabs.flatMap((prefab) => prefab.nodes);
@@ -184,6 +191,7 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(packedPrefabs.length > 0 ? { prefabs: packedPrefabs } : {}),
     ...(sidecar.physicsWorld?.deterministic ? { physicsWorld: sidecar.physicsWorld } : {}),
     ...(sidecar.timelines && sidecar.timelines.length > 0 ? { timelines: sidecar.timelines } : {}),
+    ...(sidecar.levels && sidecar.levels.length > 0 ? { levels: sidecar.levels } : {}),
   });
 }
 
@@ -255,6 +263,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
       ...(readPrefabLink(record.prefab) ? { prefab: readPrefabLink(record.prefab)! } : {}),
       ...(readPhysicsSpec(record.physics) ? { physics: readPhysicsSpec(record.physics)! } : {}),
       ...(readAnimatorSpec(record.animator) ? { animator: readAnimatorSpec(record.animator)! } : {}),
+      ...(typeof record.level === "string" && record.level ? { level: record.level } : {}),
     });
   }
   const lighting = parseSceneLighting((parsed as { lighting?: unknown }).lighting);
@@ -266,14 +275,24 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
   );
   const physicsWorld = readPhysicsWorld((parsed as { physicsWorld?: unknown }).physicsWorld);
   const timelines = readTimelines((parsed as { timelines?: unknown }).timelines);
+  // An object in a level that no longer exists is always loaded.
+  const levels = readLevels((parsed as { levels?: unknown }).levels);
+  const levelIds = new Set(levels.map((l) => l.id));
+  const placed = linked.map((entry) => (entry.level && !levelIds.has(entry.level) ? withoutLevel(entry) : entry));
   return {
     version: MESH_SIDECAR_VERSION,
-    meshes: linked,
+    meshes: placed,
     lighting,
     ...(prefabs.length > 0 ? { prefabs } : {}),
     ...(physicsWorld ? { physicsWorld } : {}),
     ...(timelines.length > 0 ? { timelines } : {}),
+    ...(levels.length > 0 ? { levels } : {}),
   };
+}
+
+function withoutLevel(entry: MeshSidecarEntry): MeshSidecarEntry {
+  const { level: _drop, ...rest } = entry;
+  return rest;
 }
 
 function withoutLink(entry: MeshSidecarEntry): MeshSidecarEntry {
@@ -358,6 +377,44 @@ export function setMeshTimelines(sidecar: MeshSidecar, timelines: readonly Scene
 }
 
 /** Set the scene-wide physics settings (null restores the defaults). */
+/** Add a level (named "Level n" unless given a name); returns the sidecar and the new level's id. */
+export function addLevel(sidecar: MeshSidecar, name?: string): { sidecar: MeshSidecar; id: string } {
+  const levels = sidecar.levels ?? [];
+  if (levels.length >= MAX_LEVELS) return { sidecar, id: levels[levels.length - 1]!.id };
+  const id = `level-${Math.random().toString(36).slice(2, 10)}`;
+  return { sidecar: { ...sidecar, levels: [...levels, { id, name: name?.trim().slice(0, 40) || `Level ${levels.length + 1}` }] }, id };
+}
+
+export function renameLevel(sidecar: MeshSidecar, id: string, name: string): MeshSidecar {
+  const trimmed = name.trim().slice(0, 40);
+  if (!trimmed) return sidecar;
+  return { ...sidecar, levels: (sidecar.levels ?? []).map((l) => (l.id === id ? { ...l, name: trimmed } : l)) };
+}
+
+/** Remove a level; its objects become always loaded. */
+export function removeLevel(sidecar: MeshSidecar, id: string): MeshSidecar {
+  const levels = (sidecar.levels ?? []).filter((l) => l.id !== id);
+  const meshes = sidecar.meshes.map((m) => (m.level === id ? withoutLevel(m) : m));
+  const { levels: _old, ...rest } = sidecar;
+  return { ...rest, meshes, ...(levels.length > 0 ? { levels } : {}) };
+}
+
+/** Make a level the one the cart starts in (the first). */
+export function setStartLevel(sidecar: MeshSidecar, id: string): MeshSidecar {
+  const levels = sidecar.levels ?? [];
+  const level = levels.find((l) => l.id === id);
+  return level ? { ...sidecar, levels: [level, ...levels.filter((l) => l.id !== id)] } : sidecar;
+}
+
+/** Put an object in a level, or (null) make it always loaded. */
+export function setMeshLevel(sidecar: MeshSidecar, id: string, level: string | null): MeshSidecar {
+  if (level !== null && !(sidecar.levels ?? []).some((l) => l.id === level)) return sidecar;
+  return {
+    ...sidecar,
+    meshes: sidecar.meshes.map((m) => (m.id !== id ? m : level ? { ...m, level } : withoutLevel(m))),
+  };
+}
+
 export function setMeshPhysicsWorld(sidecar: MeshSidecar, world: PhysicsWorldSettings | null): MeshSidecar {
   const { physicsWorld: _drop, ...rest } = sidecar;
   const next = world ? readPhysicsWorld(world) : null;

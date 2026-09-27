@@ -81,6 +81,10 @@ import {
   PHYS_EVENTS,
   PHYS_FIX,
   PHYS_HDR_HASH,
+  PHYS_HDR_LEVEL,
+  PHYS_HDR_LEVEL_LOADING,
+  PHYS_HDR_LEVEL_PROGRESS,
+  PHYS_OP_LEVEL,
   PHYS_MAGIC,
   PHYS_MAX_CMDS,
   PHYS_MAX_RAYS,
@@ -132,7 +136,8 @@ export function sceneNeedsRuntime(scene: MeshScene | null | undefined, { physics
       ((physics && sceneHasPhysics(scene)) ||
         (scene.pools?.length ?? 0) > 0 ||
         animatedObjects(scene).length > 0 ||
-        (scene.timelines?.length ?? 0) > 0),
+        (scene.timelines?.length ?? 0) > 0 ||
+        (scene.levels?.length ?? 0) > 0),
   );
 }
 
@@ -190,7 +195,7 @@ export function runtimeSdkLua(
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}end`;
 }
 
 /** The physics calls (inside the runtime block's do … end, after its helpers). */
@@ -327,6 +332,37 @@ function SPAWN_CALLS(pools: readonly string[]): string {
   cartbox.alive = function(o)
     local i = _obj(o)
     return i ~= nil and _alive[i] == true
+  end
+`;
+}
+
+/**
+ * The level calls: `cartbox.level()` → the current level's name, the one loading
+ * (or nil) and its progress 0..1; `cartbox.level(name)` switches (a published cart
+ * loads its textures first; the switch happens once they're in).
+ */
+function LEVEL_CALLS(scene: MeshScene): string {
+  const levels = scene.levels ?? [];
+  if (levels.length === 0) return "";
+  return `  local _lv = {${levels.map((l) => luaString(l.name)).join(",")}}
+  cartbox.level = function(name)
+    if name == nil then
+      if not _live() then return _lv[1], nil, 0 end
+      local l = _rd(_B + ${PHYS_HDR_LEVEL_LOADING})
+      return _lv[_rd(_B + ${PHYS_HDR_LEVEL}) + 1], l >= 0 and _lv[l + 1] or nil, _rd(_B + ${PHYS_HDR_LEVEL_PROGRESS}) / ${PHYS_FIX}
+    end
+    for k, n in ipairs(_lv) do
+      if n == name or k - 1 == name then
+        _cmd(${PHYS_OP_LEVEL}, k - 1)
+        return true
+      end
+    end
+    return false
+  end
+  cartbox.levels = function()
+    local out = {}
+    for k, n in ipairs(_lv) do out[k] = n end
+    return out
   end
 `;
 }

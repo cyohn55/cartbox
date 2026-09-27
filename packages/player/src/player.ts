@@ -292,6 +292,8 @@ export class Player {
             this.options.ktx2 ? { ktx2: this.options.ktx2 } : {},
           );
           this.meshSurface.setQuality(this.qualitySettings);
+          // A scene with levels starts in its first; the others wait, hidden.
+          if ((mesh.levels?.length ?? 0) > 0) this.activateLevel(0);
         }
         // The HD-2D world composites a 3D tile terrain plus the cart's 2D character
         // billboards over the frame, textured from the cart's sprite sheet and
@@ -474,7 +476,10 @@ export class Player {
     if (runtimeBlock) this.runtime!.channel.beforeTick(runtimeBlock);
     this.console?.tick(mask);
     const afterBlock = runtimeBlock ? this.runtimeBlock() : null;
-    if (afterBlock) this.runtime!.channel.afterTick(afterBlock);
+    if (afterBlock) {
+      this.runtime!.channel.afterTick(afterBlock);
+      this.pollLevelRequest();
+    }
     if (net && this.console) {
       const words = this.console.netWords();
       if (words) net.afterTick(words);
@@ -521,6 +526,51 @@ export class Player {
   async supplyTextures(images: ReadonlyMap<string, EncodedImage>): Promise<number> {
     if (!this.meshSurface) return 0;
     return this.meshSurface.supplyImages(images);
+  }
+
+  /** Counts level loads, so a load overtaken by a newer switch doesn't activate. */
+  private levelLoads = 0;
+
+  /**
+   * Start a level switch the cart asked for: load the level's assets through the
+   * host (a published cart fetches its textures), then make it current.
+   */
+  private pollLevelRequest(): void {
+    const channel = this.runtime?.channel;
+    const scene = this.options.mesh;
+    const request = channel?.takeLevelRequest() ?? -1;
+    if (!channel || !scene?.levels || request < 0) return;
+    const level = scene.levels[request]!;
+    const load = this.options.levelAssets;
+    if (!load) {
+      this.activateLevel(request);
+      return;
+    }
+    const token = ++this.levelLoads;
+    const progress = (p: number) => {
+      if (token !== this.levelLoads || this.destroyed) return;
+      channel.setLevelLoading(request, p);
+      this.options.onLevel?.({ level: scene.levels![channel.currentLevel()]?.name ?? "", loading: level.name, progress: p });
+    };
+    progress(0);
+    const done = () => {
+      if (token === this.levelLoads && !this.destroyed) this.activateLevel(request);
+    };
+    load(level, progress).then(done, done);
+  }
+
+  /** Make a level current: its objects (and the always-loaded ones) show and simulate; the rest are hidden. */
+  private activateLevel(level: number): void {
+    const scene = this.options.mesh;
+    if (!scene?.levels) return;
+    const inactive = new Set<number>();
+    scene.instances.forEach((inst, i) => {
+      if (inst.level !== undefined && inst.level !== level) inactive.add(i);
+    });
+    this.meshSurface?.setInactive(inactive);
+    this.runtime?.physics?.setInactive(inactive);
+    this.runtime?.channel.setLevel(level);
+    this.options.onLevel?.({ level: scene.levels[level]?.name ?? "", loading: null, progress: 1 });
   }
 
   /** The graphics preset in effect. */

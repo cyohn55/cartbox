@@ -246,7 +246,10 @@ export class MeshOverlaySurface implements DisplaySurface {
   /** Each object's reserve-copy root (-1 when it isn't part of a prefab reserve). */
   private readonly pooledRoot: readonly number[];
   /** The authored instances without the reserve copies (drawn when nothing moves). */
-  private readonly unpooled: readonly MeshSceneInstance[];
+  private unpooled: readonly MeshSceneInstance[];
+  /** Objects in a level that isn't the current one: not drawn, not in the static shadow (see setInactive). */
+  private inactive: ReadonlySet<number> = new Set();
+  private inactiveKey = "";
   /** Each object's world matrix as last drawn (null = hidden), or null when nothing moved. */
   private lastPlacement: (Mat4 | null)[] | null = null;
   /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
@@ -331,6 +334,19 @@ export class MeshOverlaySurface implements DisplaySurface {
       this.shadowRects = [];
     }
     this.quality = quality;
+  }
+
+  /**
+   * The objects of levels that aren't loaded (see levels.ts in @cartbox/editor):
+   * they're hidden, and left out of the shadow, until the set changes again.
+   */
+  setInactive(objects: ReadonlySet<number>): void {
+    this.inactive = objects;
+    this.inactiveKey = [...objects].sort((a, b) => a - b).join(",");
+    // Nothing hidden and nothing pooled keeps the fast path (the full list, by identity).
+    this.unpooled =
+      objects.size === 0 && !this.pooledRoot.some((r) => r >= 0) ? this.instances : this.instances.filter((_, i) => this.pooledRoot[i]! < 0 && !objects.has(i));
+    this.lastPlacement = null;
   }
 
   /** Posed instances plus, in a hierarchy, everything below them: what moves this frame. */
@@ -726,7 +742,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       const out = {
         model,
         moved,
-        hidden: reserved || Boolean(pose?.hidden) || Boolean(up?.hidden),
+        hidden: reserved || this.inactive.has(i) || Boolean(pose?.hidden) || Boolean(up?.hidden),
         front: Boolean(pose?.front) || Boolean(up?.front),
       };
       states[i] = out;
@@ -779,7 +795,7 @@ export class MeshOverlaySurface implements DisplaySurface {
   }
 
   placements(): readonly (Mat4 | null)[] {
-    return this.lastPlacement ?? this.instances.map((instance, i) => (this.pooledRoot[i]! >= 0 ? null : instance.model));
+    return this.lastPlacement ?? this.instances.map((instance, i) => (this.pooledRoot[i]! >= 0 || this.inactive.has(i) ? null : instance.model));
   }
 
   /** A tinted copy of `mesh`, cached so its identity (and any GPU upload) is stable. */
@@ -824,7 +840,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       .filter((p) => !p.front)
       .map((p) => p.index)
       .sort((a, b) => a - b)
-      .join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}|${[...this.bodies.keys()].join(",")}|${[...this.live.keys()].join(",")}`;
+      .join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}|${[...this.bodies.keys()].join(",")}|${[...this.live.keys()].join(",")}|${this.inactiveKey}`;
     let full = false;
     if (!this.staticShadow || this.staticShadowKey !== key || this.staticShadowLighting !== lighting) {
       this.staticShadow ??= new Float32Array(size * size);
@@ -834,7 +850,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       this.pooledRoot.forEach((root, i) => {
         if (root >= 0) posed.add(i);
       });
-      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i));
+      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i));
       const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow });
       if (!built) return null;
       this.staticShadowMatrix = built.lightViewProj;

@@ -18,7 +18,7 @@ import { publicUrl } from "@/lib/storage";
 import { resolveMeshSidecar } from "@/lib/meshStorage";
 import { cartAssetUrl, readCartAsset } from "@/lib/cartAssetStorage";
 import { parseCartAssets } from "@/lib/cartAssetStore";
-import { inlineMeshTextures, meshTextureName, meshTextureRefs } from "@/lib/meshTextureAssets";
+import { inlineMeshTextures, meshTextureLevels, meshTextureName, meshTextureRefs } from "@/lib/meshTextureAssets";
 import type { StreamedTexture } from "@/lib/textureStream";
 import { getServerUserId } from "@/lib/supabase-server";
 import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
@@ -260,9 +260,12 @@ export default async function CartridgePage({ params }: PageProps) {
     try {
       const { data } = await db.from("carts").select("assets").eq("id", cart.id).maybeSingle();
       const manifest = parseCartAssets(data?.assets);
+      // Textures only later levels use wait for those levels (cartbox.level).
+      const needs = meshTextureLevels(meshRaw);
       meshTextures = textureRefs.map(({ hash, mime }) => {
         const bytes = manifest?.entries[meshTextureName(hash)]?.bytes ?? 0;
-        return { hash, mime, bytes, url: cartAssetUrl({ hash, bytes, contentType: mime }) };
+        const levels = needs.get(hash);
+        return { hash, mime, bytes, url: cartAssetUrl({ hash, bytes, contentType: mime }), ...(levels ? { levels } : {}) };
       });
     } catch {
       meshTextures = [];

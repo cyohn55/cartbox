@@ -53,6 +53,10 @@ export const PHYS_HDR_BODIES = 4;
 export const PHYS_HDR_TICK = 8;
 /** A digest of every moving body's exact state after the last step (see physicsStateHash). */
 export const PHYS_HDR_HASH = 12;
+/** Levels (see levels.ts in @cartbox/editor): the current level (-1 for none), the one loading (-1), its progress (fixed point, 0..1). */
+export const PHYS_HDR_LEVEL = 16;
+export const PHYS_HDR_LEVEL_LOADING = 20;
+export const PHYS_HDR_LEVEL_PROGRESS = 24;
 export const PHYS_BODIES = 64;
 export const PHYS_BODY_BYTES = 32; // object, x, y, z, vx, vy, vz, flags
 export const PHYS_MAX_BODIES = 64;
@@ -89,6 +93,12 @@ export const PHYS_TIMELINE_EVENTS = PHYS_TIMELINE + 12; // 8044
 export const PHYS_MAX_TIMELINE_EVENTS = 8;
 
 /** Write the timeline's playback and the events it just passed (host → Lua). */
+export function writeLevelState(block: DataView, level: { readonly current: number; readonly loading: number; readonly progress: number }): void {
+  block.setInt32(PHYS_HDR_LEVEL, level.current, true);
+  block.setInt32(PHYS_HDR_LEVEL_LOADING, level.loading, true);
+  block.setInt32(PHYS_HDR_LEVEL_PROGRESS, toFix(Math.max(0, Math.min(1, level.progress))), true);
+}
+
 export function writeTimelineState(
   block: DataView,
   playback: { readonly index: number; readonly time: number; readonly playing: boolean },
@@ -171,6 +181,8 @@ export const PHYS_OP_LOOKAT = 17;
 export const PHYS_OP_WATCH = 18;
 /** Timelines: a = timeline index (-1 stops), v0 = start time, v1 = speed. */
 export const PHYS_OP_TIMELINE = 19;
+/** Levels: a = the level index to switch to. */
+export const PHYS_OP_LEVEL = 20;
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {

@@ -190,6 +190,7 @@ export {
 } from "./model/MeshAsset";
 export { parseObj, encodeObj, type ParseObjOptions, type ObjFiles } from "./model/objCodec";
 export { parseGlb, parseGltf, parseGltfText, encodeGlb, isKtx2, readGlb } from "./model/gltfCodec";
+export { MAX_LEVELS, effectiveLevels, readLevels, type SceneLevel } from "./model/levels";
 export { decompressGltf, gltfCompression, type DracoAttributeRequest, type DracoDecoded, type GltfDecoders } from "./model/gltfCompression";
 export {
   ANIMATOR_LIMITS,

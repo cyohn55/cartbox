@@ -105,6 +105,21 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       pendingTextures.clear();
     };
     const streaming = new AbortController();
+    // Each texture is fetched once: at start if the start level (or something
+    // always loaded) needs it, else when a level that needs it is switched to.
+    const fetched = new Set<string>();
+    const stream = (list: readonly StreamedTexture[], onProgress: (loaded: number, total: number) => void) => {
+      const todo = list.filter((t) => !fetched.has(t.hash));
+      for (const t of todo) fetched.add(t.hash);
+      return streamTextures(todo, {
+        signal: streaming.signal,
+        onProgress,
+        onTexture: (hash, image) => {
+          pendingTextures.set(hash, image);
+          flushTextures();
+        },
+      });
+    };
 
     const handle = mount(stage, {
       cartUrl,
@@ -139,6 +154,18 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       physics: rapierPhysics(),
       // KTX2 textures: the transcoder is fetched only if the scene has one.
       ktx2: loadKtx2Decoder,
+      // A level's textures load when code switches to it (cartbox.level).
+      levelAssets: (level, onProgress) => {
+        const list = (meshTextures ?? []).filter((t) => t.levels?.includes(level.id));
+        if (list.length === 0) return Promise.resolve();
+        setTextureProgress({ loaded: 0, total: 1 });
+        return stream(list, (loaded, total) => {
+          onProgress(total > 0 ? loaded / total : 1);
+          setTextureProgress({ loaded, total: Math.max(1, total) });
+        }).then(() => {
+          if (!streaming.signal.aborted) setTextureProgress(null);
+        });
+      },
       // The cart's authored HD-2D world: 3D terrain with the cart's 2D character
       // sprites composited into it as depth-sorted billboards.
       world: world ?? undefined,
@@ -160,16 +187,10 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
     });
     handleRef.current = handle;
 
-    if (mesh && meshTextures && meshTextures.length > 0) {
+    const atStart = (meshTextures ?? []).filter((t) => !t.levels);
+    if (mesh && atStart.length > 0) {
       setTextureProgress({ loaded: 0, total: 1 });
-      void streamTextures(meshTextures, {
-        signal: streaming.signal,
-        onProgress: (loaded, total) => setTextureProgress({ loaded, total: Math.max(1, total) }),
-        onTexture: (hash, image) => {
-          pendingTextures.set(hash, image);
-          flushTextures();
-        },
-      }).then(() => {
+      void stream(atStart, (loaded, total) => setTextureProgress({ loaded, total: Math.max(1, total) })).then(() => {
         if (!streaming.signal.aborted) setTextureProgress(null);
       });
     }
