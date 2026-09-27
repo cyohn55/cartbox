@@ -8,14 +8,21 @@
  *   `debug.traceback` — which the core calls on every runtime error — with one
  *   that names cart lines rather than lines of the merged, SDK-prefixed source
  *   and fits the core's 256-byte error buffer.
- * - The host writes a magic word and the cart's line offset before every tick,
- *   and drains the ring after it.
+ * - Debugger: with the cart's code instrumented (see instrument.ts), `TIC` runs
+ *   in a coroutine and the statement hooks yield at a breakpoint or a step. The
+ *   Lua then writes where it stopped — the call stack, the paused function's
+ *   locals and upvalues, and the watch expressions' values — and the host
+ *   stops ticking until it writes a command (continue, step into/over/out).
+ * - The host writes a magic word, the cart's line offset and line count, the
+ *   breakpoints and the watch expressions before every tick, and reads the
+ *   traces and any pause after it.
  *
  * Only the editor's playtest adds this prelude; a published cart never has it.
  * All words are little-endian int32.
  */
 
 import { PHYS_BLOCK_BYTES, type RamLayout } from "../physics/protocol.js";
+import { BREAK_HOOK } from "./instrument.js";
 
 export const DEBUG_BLOCK_BYTES = 4096;
 export const DEBUG_MAGIC = 0x47444243; // "CBDG"
@@ -24,17 +31,48 @@ export const DEBUG_MAGIC = 0x47444243; // "CBDG"
 export const DBG_MAGIC = 0;
 /** Lines of injected code above the cart's own (see codeLineOffset). */
 export const DBG_LINE_OFFSET = 4;
+/** 1 while the cart is stopped at a breakpoint (Lua sets it; resuming clears it). */
+export const DBG_STATE = 8;
+/** The host's command to a stopped cart: see {@link DebugCommand}. Lua zeroes it once taken. */
+export const DBG_COMMAND = 12;
 // Lua → host.
 /** Bytes of the trace ring in use; the host drains and zeroes it after each tick. */
 export const DBG_TRACE_USED = 16;
 /** Traces that didn't fit this tick. */
 export const DBG_TRACE_DROPPED = 20;
+/** The cart line the cart is stopped at. */
+export const DBG_PAUSED_LINE = 24;
+// Host → Lua.
+/** Bumped by the host whenever the breakpoint list changes. */
+export const DBG_BP_VERSION = 28;
+export const DBG_BP_COUNT = 32;
+/** Lines in the cart's own code: positions past it are the injected code after it. */
+export const DBG_LINE_COUNT = 36;
+// Lua → host.
+/** Bytes of pause information written. */
+export const DBG_INFO_LENGTH = 40;
+// Host → Lua.
+/** Bytes of watch expressions written. */
+export const DBG_WATCH_LENGTH = 44;
 
+/** Breakpoint lines, int32 each. */
+export const DBG_BPS_AT = 64;
+export const DBG_BPS_MAX = 240;
 /** The trace ring: entries of [length lo, length hi, colour, ...UTF-8 bytes]. */
 export const DBG_TRACE_AT = 1024;
-export const DBG_TRACE_BYTES = 1536;
+export const DBG_TRACE_BYTES = 1024;
 /** Longest single trace kept (longer ones are cut). */
 export const DBG_TRACE_MAX = 240;
+/** Watch expressions, one per line (UTF-8). */
+export const DBG_WATCH_AT = 2048;
+export const DBG_WATCH_BYTES = 512;
+/** Where the cart stopped, as lines: `S name:line`, `L name=value`, `U name=value`, `W index=value` (or `W index!error`). */
+export const DBG_INFO_AT = 2560;
+export const DBG_INFO_BYTES = 1536;
+
+/** Commands to a stopped cart. 5 re-reads the pause information (after the watches change) without moving on. */
+export const DebugCommand = { continue: 1, into: 2, over: 3, out: 4, refresh: 5 } as const;
+export type DebugStep = Exclude<keyof typeof DebugCommand, "refresh">;
 
 /** Where the debug block sits in Lua's RAM address space. */
 export function debugBlockAddress(layout: RamLayout): number {
@@ -43,13 +81,16 @@ export function debugBlockAddress(layout: RamLayout): number {
 
 /**
  * Lines of code above the cart's own in the source the engine runs: `final` is
- * the cart's code with preludes stacked on top (see prependLuaCode), so error
- * line N in the merged source is cart line N − offset. 0 when `final` doesn't end
- * with the cart's code (nothing was added, or it isn't Lua).
+ * the cart's code with preludes stacked on top (see prependLuaCode) and perhaps
+ * a postlude after it, so error line N in the merged source is cart line
+ * N − offset. 0 when `final` doesn't contain the cart's code past its start
+ * (nothing was added, or it isn't Lua).
  */
 export function codeLineOffset(original: string | null, final: string | null): number {
-  if (original === null || final === null || final.length <= original.length || !final.endsWith(original)) return 0;
-  const head = final.slice(0, final.length - original.length);
+  if (!original || final === null || final.length <= original.length) return 0;
+  const at = final.lastIndexOf(original);
+  if (at <= 0) return 0;
+  const head = final.slice(0, at);
   let lines = 0;
   for (let i = 0; i < head.length; i += 1) if (head.charCodeAt(i) === 10) lines += 1;
   return lines;
@@ -88,9 +129,14 @@ export function errorStack(message: string): ErrorFrame[] {
   return frames;
 }
 
-/** The prelude for the playtest: trace capture and cart-line tracebacks, over the block at `address`. */
-export function debugSdkLua(address: number): string {
-  return `do
+/**
+ * The prelude for the playtest, over the block at `address`: trace capture and
+ * cart-line tracebacks, and with `debugger` the breakpoint machinery the
+ * instrumented code calls (pair it with {@link debugPostlude}).
+ */
+export function debugSdkLua(address: number, options: { debugger?: boolean } = {}): string {
+  const dbg = options.debugger === true;
+  return `${dbg ? `local ${BREAK_HOOK}, __cbx_run\n` : ""}do
   local _B = ${address}
   local function _rd(a)
     local v = peek(a) | (peek(a + 1) << 8) | (peek(a + 2) << 16) | (peek(a + 3) << 24)
@@ -118,44 +164,258 @@ export function debugSdkLua(address: number): string {
     for i = 1, #s do poke(a + 2 + i, s:byte(i)) end
     _wr(_B + ${DBG_TRACE_USED}, used + 3 + #s)
   end
-  -- The core passes every runtime error through debug.traceback. Name cart
-  -- lines, and keep it short: the core keeps only 256 bytes of it.
   local _src = debug.getinfo(1, "S").source
-  local _tb = debug.traceback
-  debug.traceback = function(msg, ...)
-    if type(msg) ~= "string" and msg ~= nil then return _tb(msg, ...) end
+  -- A cart line for a line of the merged source, or nil inside the injected code.
+  local function _cart(n)
     local off = _live() and _rd(_B + ${DBG_LINE_OFFSET}) or 0
-    local function cart(n)
-      n = tonumber(n) - off
-      return n > 0 and n or nil
+    local count = _live() and _rd(_B + ${DBG_LINE_COUNT}) or 0
+    n = tonumber(n) - off
+    if n < 1 or (count > 0 and n > count) then return nil end
+    return n
+  end
+  local _tic = nil -- the cart's own TIC, once the debugger wraps it
+  -- A function the core calls (TIC, BDR ...) has no name Lua can see: look it up.
+  local function _name(info)
+    if info.name then return info.name end
+    if info.what == "main" then return "main" end
+    if _tic and info.func == _tic then return "TIC" end
+    for k, v in pairs(_G) do
+      if v == info.func and type(k) == "string" then return k end
     end
-    msg = tostring(msg or ""):gsub('^%[string "[^"]*"%]:(%d+):', function(n)
-      local l = cart(n)
-      return l and ("line " .. l .. ":") or "cartbox:"
-    end)
-    -- A function the core calls (TIC, BDR ...) has no name Lua can see: look it up.
-    local function name(info)
-      if info.name then return info.name end
-      if info.what == "main" then return "main" end
-      for k, v in pairs(_G) do
-        if v == info.func and type(k) == "string" then return k end
-      end
-      return "?"
-    end
-    local frames = {}
-    for level = 2, 40 do
-      local info = debug.getinfo(level, "Slnf")
+    return "?"
+  end
+  -- The cart frames of a stack, innermost first: {name, line, level}.
+  local function _frames(co, max)
+    local out = {}
+    for level = co and 0 or 2, 60 do
+      local info
+      if co then info = debug.getinfo(co, level, "Slnf") else info = debug.getinfo(level, "Slnf") end
       if not info then break end
       if info.source == _src and info.currentline and info.currentline > 0 then
-        local l = cart(info.currentline)
-        if l then frames[#frames + 1] = name(info) .. ":" .. l end
+        local l = _cart(info.currentline)
+        if l then out[#out + 1] = { name = _name(info), line = l, level = level, func = info.func } end
       end
-      if #frames >= 6 then break end
+      if #out >= max then break end
     end
-    if #frames > 0 then msg = msg .. "\\nat " .. table.concat(frames, " < ") end
+    return out
+  end
+  -- The core passes every runtime error through debug.traceback. Name cart
+  -- lines, and keep it short: the core keeps only 256 bytes of it.
+  local _tb = debug.traceback
+  local function _traceback(co, msg)
+    msg = tostring(msg or ""):gsub('^%[string "[^"]*"%]:(%d+):', function(n)
+      local l = _cart(n)
+      return l and ("line " .. l .. ":") or "cartbox:"
+    end)
+    local parts = {}
+    for _, f in ipairs(_frames(co, 6)) do parts[#parts + 1] = f.name .. ":" .. f.line end
+    if #parts > 0 then msg = msg .. "\\nat " .. table.concat(parts, " < ") end
     return msg
   end
+  debug.traceback = function(msg, ...)
+    if type(msg) ~= "string" and msg ~= nil then return _tb(msg, ...) end
+    return _traceback(nil, msg)
+  end${dbg ? debuggerLua() : ""}
 end`;
+}
+
+/** The debugger half of the prelude (inside its do-block, after the shared helpers). */
+function debuggerLua(): string {
+  return `
+  local _bps, _bpver, _armed = {}, -1, false
+  local _step, _depth = 0, 0 -- step: 1 into, 2 over, 3 out
+  local _co = nil
+  local function _stackdepth()
+    local d = 0
+    for level = 2, 250 do
+      local info = debug.getinfo(level, "S")
+      if not info then break end
+      if info.source == _src then d = d + 1 end
+    end
+    return d
+  end
+  local function _loadbps()
+    local v = _rd(_B + ${DBG_BP_VERSION})
+    if v == _bpver then return end
+    _bpver = v
+    _bps = {}
+    for i = 0, math.min(_rd(_B + ${DBG_BP_COUNT}), ${DBG_BPS_MAX}) - 1 do _bps[_rd(_B + ${DBG_BPS_AT} + i * 4)] = true end
+  end
+  ${BREAK_HOOK} = function(line)
+    if not _armed then return end
+    local stop = _bps[line]
+    if not stop then
+      if _step == 1 then stop = true
+      elseif _step == 2 then stop = _stackdepth() <= _depth
+      elseif _step == 3 then stop = _stackdepth() < _depth end
+    end
+    if not stop or not coroutine.isyieldable() then return end
+    _depth = _stackdepth()
+    _step = 0
+    _wr(_B + ${DBG_PAUSED_LINE}, line)
+    _wr(_B + ${DBG_STATE}, 1)
+    coroutine.yield()
+    local cmd = _rd(_B + ${DBG_COMMAND})
+    _wr(_B + ${DBG_COMMAND}, 0)
+    _wr(_B + ${DBG_STATE}, 0)
+    _step = (cmd == ${DebugCommand.into} and 1) or (cmd == ${DebugCommand.over} and 2) or (cmd == ${DebugCommand.out} and 3) or 0
+    _armed = _step ~= 0 or next(_bps) ~= nil
+  end
+  local function _fmt(v, deep)
+    local t = type(v)
+    if t == "string" then
+      if #v > 40 then v = v:sub(1, 40) .. "..." end
+      return (string.format("%q", v):gsub("\\n", "n"))
+    elseif t == "number" then
+      return math.type(v) == "integer" and tostring(v) or string.format("%.4g", v)
+    elseif t == "table" then
+      if deep then return "{...}" end
+      local parts, n = {}, 0
+      for k, x in pairs(v) do
+        n = n + 1
+        if n <= 4 then parts[#parts + 1] = (type(k) == "string" and k or ("[" .. tostring(k) .. "]")) .. "=" .. _fmt(x, true) end
+      end
+      return "{" .. table.concat(parts, ", ") .. (n > 4 and (", ... " .. n .. " in all") or "") .. "}"
+    elseif t == "function" then
+      return "function"
+    end
+    return tostring(v)
+  end
+  local function _show(v)
+    local ok, s = pcall(_fmt, v)
+    s = ok and s or "?"
+    return #s > 90 and (s:sub(1, 90) .. "...") or s
+  end
+  -- Write where the cart stopped: its stack, the stopped function's locals and
+  -- upvalues, and each watch expression's value there.
+  local function _writeinfo(co)
+    local lines = {}
+    local frames = _frames(co, 8)
+    for _, f in ipairs(frames) do lines[#lines + 1] = "S " .. f.name .. ":" .. f.line end
+    local top = frames[1]
+    local scope = {}
+    if top then
+      for i = 1, 200 do
+        local k, v = debug.getlocal(co, top.level, i)
+        if not k then break end
+        if k:sub(1, 1) ~= "(" then scope[k] = { v }; lines[#lines + 1] = "L " .. k .. "=" .. _show(v) end
+      end
+      for i = 1, 60 do
+        local k, v = debug.getupvalue(top.func, i)
+        if not k then break end
+        if k ~= "_ENV" and k ~= "${BREAK_HOOK}" and not scope[k] then scope[k] = { v }; lines[#lines + 1] = "U " .. k .. "=" .. _show(v) end
+      end
+    end
+    local env = setmetatable({}, { __index = function(_, k)
+      local s = scope[k]
+      if s then return s[1] end
+      return _G[k]
+    end })
+    local n = _rd(_B + ${DBG_WATCH_LENGTH})
+    local text = {}
+    for i = 0, math.min(n, ${DBG_WATCH_BYTES}) - 1 do text[#text + 1] = string.char(peek(_B + ${DBG_WATCH_AT} + i)) end
+    local index = 0
+    for expr in (table.concat(text) .. "\\n"):gmatch("([^\\n]*)\\n") do
+      index = index + 1
+      if expr:match("%S") then
+        local f, err = load("return " .. expr, "=watch", "t", env)
+        local ok, v = false, err
+        if f then ok, v = pcall(f) end
+        lines[#lines + 1] = "W " .. index .. (ok and ("=" .. _show(v)) or ("!" .. tostring(v):gsub("^watch:1: ", ""))):sub(1, 120)
+      end
+    end
+    local out = table.concat(lines, "\\n")
+    if #out > ${DBG_INFO_BYTES} then out = out:sub(1, ${DBG_INFO_BYTES}) end
+    for i = 1, #out do poke(_B + ${DBG_INFO_AT} + i - 1, out:byte(i)) end
+    _wr(_B + ${DBG_INFO_LENGTH}, #out)
+  end
+  -- Run one frame of the cart's TIC: straight through when nothing can stop it,
+  -- else in a coroutine the hooks can yield from, carrying on from a stop.
+  __cbx_run = function(tic)
+    _tic = tic
+    if not _live() then return tic() end
+    _loadbps()
+    if _co then
+      if _rd(_B + ${DBG_STATE}) == 1 then
+        local cmd = _rd(_B + ${DBG_COMMAND})
+        if cmd == ${DebugCommand.refresh} then
+          _wr(_B + ${DBG_COMMAND}, 0)
+          _writeinfo(_co)
+        end
+        if cmd < ${DebugCommand.continue} or cmd > ${DebugCommand.out} then return end
+      end
+    else
+      _armed = _step ~= 0 or next(_bps) ~= nil
+      if not _armed then return tic() end
+      _co = coroutine.create(tic)
+    end
+    local ok, err = coroutine.resume(_co)
+    if not ok then
+      local co = _co
+      _co = nil
+      _step = 0
+      _wr(_B + ${DBG_STATE}, 0)
+      error(_traceback(co, err), 0)
+    end
+    if coroutine.status(_co) == "dead" then
+      _co = nil
+    else
+      _writeinfo(_co)
+    end
+  end`;
+}
+
+/** Appended after the cart's code (so its lines don't move): runs TIC through the debugger. */
+export function debugPostlude(): string {
+  return `do local _t = TIC if type(_t) == "function" then TIC = function() __cbx_run(_t) end end end`;
+}
+
+/** Where the cart stopped, as the debugger reads it. */
+export interface PauseInfo {
+  readonly line: number;
+  /** Innermost first. */
+  readonly stack: readonly ErrorFrame[];
+  readonly locals: readonly { readonly name: string; readonly value: string }[];
+  readonly upvalues: readonly { readonly name: string; readonly value: string }[];
+  /** One per watch expression, in order; null value for a blank one. */
+  readonly watches: readonly { readonly value: string; readonly error: boolean }[];
+}
+
+/** Parse the pause information the Lua wrote (see {@link DBG_INFO_AT}); `watchCount` sizes the result's watches. */
+export function parsePauseInfo(line: number, text: string, watchCount: number): PauseInfo {
+  const stack: ErrorFrame[] = [];
+  const locals: { name: string; value: string }[] = [];
+  const upvalues: { name: string; value: string }[] = [];
+  const watches: { value: string; error: boolean }[] = Array.from({ length: watchCount }, () => ({ value: "", error: false }));
+  for (const row of text.split("\n")) {
+    const kind = row.slice(0, 2);
+    const body = row.slice(2);
+    if (kind === "S ") {
+      const m = /^(.*):(\d+)$/.exec(body);
+      if (m) stack.push({ name: m[1]!, line: Number(m[2]) });
+    } else if (kind === "L " || kind === "U ") {
+      const eq = body.indexOf("=");
+      if (eq > 0) (kind === "L " ? locals : upvalues).push({ name: body.slice(0, eq), value: body.slice(eq + 1) });
+    } else if (kind === "W ") {
+      const m = /^(\d+)([=!])(.*)$/s.exec(body);
+      const index = m ? Number(m[1]) - 1 : -1;
+      if (m && index >= 0 && index < watchCount) watches[index] = { value: m[3]!, error: m[2] === "!" };
+    }
+  }
+  return { line, stack, locals, upvalues, watches };
+}
+
+/** Read a pause from the block, or null while the cart runs. */
+export function readPause(block: DataView, watchCount: number): PauseInfo | null {
+  if (block.getInt32(DBG_STATE, true) !== 1) return null;
+  const length = Math.max(0, Math.min(block.getInt32(DBG_INFO_LENGTH, true), DBG_INFO_BYTES));
+  const text = new TextDecoder().decode(new Uint8Array(block.buffer, block.byteOffset + DBG_INFO_AT, length));
+  return parsePauseInfo(block.getInt32(DBG_PAUSED_LINE, true), text, watchCount);
+}
+
+/** Tell a stopped cart how to go on. */
+export function sendDebugCommand(block: DataView, command: number): void {
+  block.setInt32(DBG_COMMAND, command, true);
 }
 
 /** A trace the cart printed. */
@@ -189,8 +449,36 @@ export function drainTraces(block: DataView): { traces: TraceLine[]; dropped: nu
   return { traces, dropped: Math.max(0, dropped) };
 }
 
-/** Arm the block for the next tick: magic and the cart's line offset. */
-export function armDebugBlock(block: DataView, lineOffset: number): void {
+/** Arm the block for the next tick: magic, and where the cart's lines are in the merged source. */
+export function armDebugBlock(block: DataView, lineOffset: number, lineCount = 0): void {
   block.setUint32(DBG_MAGIC, DEBUG_MAGIC, true);
   block.setInt32(DBG_LINE_OFFSET, lineOffset, true);
+  block.setInt32(DBG_LINE_COUNT, lineCount, true);
+}
+
+/** Write the breakpoint lines (at most {@link DBG_BPS_MAX}) and bump the version so the Lua reloads them. */
+export function writeBreakpoints(block: DataView, lines: readonly number[]): void {
+  const list = lines.slice(0, DBG_BPS_MAX);
+  list.forEach((line, i) => block.setInt32(DBG_BPS_AT + i * 4, line, true));
+  block.setInt32(DBG_BP_COUNT, list.length, true);
+  block.setInt32(DBG_BP_VERSION, (block.getInt32(DBG_BP_VERSION, true) + 1) | 0, true);
+}
+
+/** Write the watch expressions, one per line; returns how many fit. */
+export function writeWatches(block: DataView, expressions: readonly string[]): number {
+  const encoder = new TextEncoder();
+  let bytes = new Uint8Array(0);
+  let fitted = 0;
+  for (const expr of expressions) {
+    const next = encoder.encode((fitted > 0 ? "\n" : "") + expr.replace(/\n/g, " "));
+    if (bytes.length + next.length > DBG_WATCH_BYTES) break;
+    const joined = new Uint8Array(bytes.length + next.length);
+    joined.set(bytes);
+    joined.set(next, bytes.length);
+    bytes = joined;
+    fitted += 1;
+  }
+  new Uint8Array(block.buffer, block.byteOffset + DBG_WATCH_AT, bytes.length).set(bytes);
+  block.setInt32(DBG_WATCH_LENGTH, bytes.length, true);
+  return fitted;
 }

@@ -166,7 +166,17 @@ trades state and commands with the cart through an 8 KB block at the end of RAM
 
 ## Phase 5 — Debugging and profiling
 
-- [ ] Lua debugger: breakpoints, stepping, variable watches, call stack.
+- [x] Lua debugger: breakpoints, stepping, variable watches, call stack.
+      Click a line number in the Code tab to set a breakpoint; the playtest
+      stops there mid-frame, showing the code around the stop, the call stack,
+      the stopped function's locals and upvalues, and watch expressions
+      evaluated in that scope. Continue (F8), step over (F10), into (F11) and
+      out (Shift+F11). Lua can't pause from a debug hook, so the playtest adds
+      a hook call at the start of each statement line (on the same line, so
+      line numbers don't move) and runs `TIC` in a coroutine the hooks can
+      yield from. It costs about 20 ns per statement, so the debugger is on
+      only when a run starts with breakpoints, or when switched on (which
+      restarts the cart).
 - [x] Pause, step one frame, and time scale while playing in the editor. The
       playtest has Step (while paused) and a 0.25×–2× speed control, with a frame
       counter; sound mutes away from 1×.

@@ -16,6 +16,7 @@ import type { MailboxEvent } from "./mailbox.js";
 import type { LightingOptions } from "./lighting/types.js";
 import type { PostFxSettings } from "./fx/postfx.js";
 import type { ProfileSnapshot } from "./debug/profiler.js";
+import type { DebugStep, PauseInfo } from "./debug/debugBlock.js";
 import type { SceneSpec } from "./scene/sceneModel.js";
 import type { AnimSpec } from "./anim/animModel.js";
 import type { ParticleSpec } from "./particles/particleModel.js";
@@ -229,6 +230,18 @@ export interface PlayerOptions {
    * editor's playtest; a published cart leaves it unset.
    */
   onTrace?: (text: string, color: number, frame: number) => void;
+  /**
+   * The editor's Lua debugger (see debug/instrument.ts and debug/debugBlock.ts):
+   * the cart's statement lines get breakpoint hooks and TIC runs so it can stop
+   * mid-frame. `onPause` is called with where it stopped, and with null when it
+   * carries on. Costs a function call per statement while on; for the editor's
+   * playtest only.
+   */
+  debug?: {
+    readonly breakpoints?: readonly number[];
+    readonly watches?: readonly string[];
+    readonly onPause?: (pause: PauseInfo | null) => void;
+  };
 }
 
 /** Handle returned by {@link mount} for controlling a live player instance. */
@@ -280,6 +293,16 @@ export interface PlayerHandle {
   stepFrame(): void;
   /** Frames the cart has run so far. */
   frame(): number;
+  /** The debugger: the cart lines to stop at (a line with no statement stops at the next one that has one). */
+  setBreakpoints(lines: readonly number[]): void;
+  /** The debugger: expressions to evaluate wherever the cart stops (re-evaluated at once while it's stopped). */
+  setWatches(expressions: readonly string[]): void;
+  /** The debugger: carry on from a stop, to the next breakpoint ("continue") or by one statement. */
+  debugContinue(step?: DebugStep): void;
+  /** Where the cart is stopped at a breakpoint, or null. */
+  debugPaused(): PauseInfo | null;
+  /** The cart lines the debugger can stop at (ascending); empty without the debugger. */
+  breakableLines(): readonly number[];
   /** Turn the profiler on or off (off by default; it costs a few clock reads per frame). */
   setProfiling(on: boolean): void;
   /** Where recent frames spent their time, what the 3D scene drew, memory and network use; null while profiling is off. */

@@ -44,10 +44,25 @@ export {
   serializeReplay,
 } from "./replay.js";
 export type { InputChange, Replay } from "./replay.js";
-export { codeChunks, readCartCode, seedCartridge } from "./cartseed.js";
+export { appendLuaCode, codeChunks, prependLuaCode, readCartCode, rewriteLuaCode, seedCartridge } from "./cartseed.js";
 // The playtest console (ENGINE_ROADMAP.md, Phase 5): trace capture and cart-line errors.
-export { codeLineOffset, debugBlockAddress, debugSdkLua, errorStack, remapErrorLines } from "./debug/debugBlock.js";
-export type { ErrorFrame, TraceLine } from "./debug/debugBlock.js";
+export {
+  DebugCommand,
+  armDebugBlock,
+  codeLineOffset,
+  debugBlockAddress,
+  debugPostlude,
+  debugSdkLua,
+  errorStack,
+  parsePauseInfo,
+  readPause,
+  remapErrorLines,
+  sendDebugCommand,
+  writeBreakpoints,
+  writeWatches,
+} from "./debug/debugBlock.js";
+export type { DebugStep, ErrorFrame, PauseInfo, TraceLine } from "./debug/debugBlock.js";
+export { breakableLine, effectiveBreakpoints, instrumentLua, tokenizeLua } from "./debug/instrument.js";
 export { PROFILE_SECTIONS, PROFILE_WINDOW, Profiler, estimateSceneBytes } from "./debug/profiler.js";
 export type { ProfileSection, ProfileSnapshot, RenderStats, SectionStats } from "./debug/profiler.js";
 
@@ -387,6 +402,11 @@ export function mount(container: HTMLElement, options: PlayerOptions): PlayerHan
     timeScale: () => player.timeScale(),
     stepFrame: () => player.stepFrame(),
     frame: () => player.frame(),
+    setBreakpoints: (lines) => player.setBreakpoints(lines),
+    setWatches: (expressions) => player.setWatches(expressions),
+    debugContinue: (step) => player.debugContinue(step),
+    debugPaused: () => player.debugPaused(),
+    breakableLines: () => player.breakableLines(),
     setProfiling: (on) => player.setProfiling(on),
     profile: () => player.profile(),
     quality: () => player.quality(),

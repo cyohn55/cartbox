@@ -71,9 +71,13 @@ interface CodeEditorProps {
    * focus and scrolling to a stale error for the rest of the session.
    */
   onErrorLineHandled?: () => void;
+  /** Lines with a breakpoint (the playtest's debugger stops there), marked in the gutter. */
+  breakpoints?: readonly number[];
+  /** Clicking a line number sets or clears its breakpoint. */
+  onToggleBreakpoint?: (line: number) => void;
 }
 
-export function CodeEditor({ doc, revision, errorLine, onErrorLineHandled }: CodeEditorProps) {
+export function CodeEditor({ doc, revision, errorLine, onErrorLineHandled, breakpoints, onToggleBreakpoint }: CodeEditorProps) {
   const [text, setText] = useState(() => doc.getText());
   const [language, setLanguage] = useState(() => doc.language);
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
@@ -364,11 +368,22 @@ export function CodeEditor({ doc, revision, errorLine, onErrorLineHandled }: Cod
 
         <div className={styles.codePane}>
           <div ref={gutterRef} className={`${styles.gutter} ${styles.codeMetrics}`} aria-hidden>
-            {lines.map((_line, index) => (
-              <div key={index} className={index + 1 === errorLine ? styles.gutterError : undefined}>
-                {index + 1}
-              </div>
-            ))}
+            {lines.map((_line, index) => {
+              const line = index + 1;
+              const marked = breakpoints?.includes(line) ?? false;
+              return (
+                <div
+                  key={index}
+                  data-line={line}
+                  className={[line === errorLine ? styles.gutterError : "", marked ? styles.gutterBreakpoint : ""].filter(Boolean).join(" ") || undefined}
+                  onClick={onToggleBreakpoint ? () => onToggleBreakpoint(line) : undefined}
+                  title={onToggleBreakpoint ? (marked ? "Remove breakpoint" : "Set a breakpoint: the playtest stops here") : undefined}
+                  style={onToggleBreakpoint ? { cursor: "pointer" } : undefined}
+                >
+                  {line}
+                </div>
+              );
+            })}
           </div>
           <div className={styles.codeScroll}>
             <pre ref={highlightRef} className={`${styles.codeLayer} ${styles.highlight} ${styles.codeMetrics}`} aria-hidden>
