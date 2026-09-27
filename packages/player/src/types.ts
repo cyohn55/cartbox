@@ -1,4 +1,5 @@
 import type { PhysicsBackend } from "./physics/physicsSession.js";
+import type { QualityChoice, QualityLevel } from "./quality.js";
 /**
  * Public and shared types for @cartbox/player.
  *
@@ -105,6 +106,11 @@ export interface PlayerOptions {
    * platform (the player rounds its own inputs to match).
    */
   physics?: (options: { deterministic: boolean }) => Promise<PhysicsBackend>;
+  /**
+   * Graphics quality: "low" | "medium" | "high", or "auto" (the default) to pick
+   * from the device — see quality.ts. High is everything as authored.
+   */
+  quality?: QualityChoice;
   /**
    * Control settings (aim inversion, look sensitivity, controller and keyboard
    * bindings, touch pad size/opacity). Change them live with
@@ -228,6 +234,10 @@ export interface PlayerHandle {
    * Empty when the cart has no 3D scene.
    */
   inspect(): InspectedObject[];
+  /** Change the graphics preset live: "low" | "medium" | "high" | "auto" (see quality.ts). */
+  setQuality(choice: QualityChoice): void;
+  /** The graphics preset in effect. */
+  quality(): QualityLevel;
 }
 
 /** One scene object in a live inspection snapshot. */

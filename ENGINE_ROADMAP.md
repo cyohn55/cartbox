@@ -133,7 +133,12 @@ trades state and commands with the cart through an 8 KB block at the end of RAM
       animation, heaviest meshes named), physics engine when bodies need it, other data
       and uploads — gzipped as sent — with load times on slow 4G / 4G / broadband and
       tips on what would shrink it.
-- [ ] Quality presets (resolution scale, shadows, effects) chosen per device.
+- [x] Quality presets (low / medium / high) chosen per device: "auto" picks from core
+      count, memory, phone/tablet and whether the GPU renderer came up. Presets set
+      shadows and their map size, the first-person 3D resolution cap, and switch off
+      bloom and chromatic aberration on low. Players choose in the Start menu; the
+      playtest has a quality switch to preview a weak device; carts' hosts use the
+      `quality` option and `setQuality()`.
 
 ## Phase 5 — Debugging and profiling
 

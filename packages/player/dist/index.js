@@ -2406,6 +2406,40 @@ var PostFxSurface = class _PostFxSurface {
   }
 };
 
+// src/quality.ts
+var QUALITY_LEVELS = ["low", "medium", "high"];
+var QUALITY_PRESETS = {
+  high: { level: "high", shadows: true, shadowMapSize: 1024, maxRenderScale: 1, disabledEffects: [] },
+  medium: { level: "medium", shadows: true, shadowMapSize: 512, maxRenderScale: 0.75, disabledEffects: [] },
+  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"] }
+};
+function detectQuality(hints) {
+  if (hints.cores !== void 0 && hints.cores <= 2 || hints.memoryGB !== void 0 && hints.memoryGB <= 2) return "low";
+  if (hints.mobile || hints.webgpu === false) return "medium";
+  return "high";
+}
+function resolveQuality(choice, hints) {
+  const level = !choice || choice === "auto" ? detectQuality(hints) : choice;
+  return QUALITY_PRESETS[QUALITY_LEVELS.includes(level) ? level : "high"];
+}
+function browserDeviceHints(webgpu) {
+  const nav = typeof navigator === "undefined" ? void 0 : navigator;
+  if (!nav) return webgpu === void 0 ? {} : { webgpu };
+  const mobile = nav.userAgentData?.mobile ?? /Android|iPhone|iPad|iPod|Mobile/i.test(nav.userAgent ?? "");
+  return {
+    ...typeof nav.hardwareConcurrency === "number" ? { cores: nav.hardwareConcurrency } : {},
+    ...typeof nav.deviceMemory === "number" ? { memoryGB: nav.deviceMemory } : {},
+    mobile,
+    ...webgpu === void 0 ? {} : { webgpu }
+  };
+}
+function applyQualityToPostFx(settings, quality) {
+  if (!quality.disabledEffects.some((id) => settings.enabled[id])) return settings;
+  const enabled = { ...settings.enabled };
+  for (const id of quality.disabledEffects) if (id in enabled) enabled[id] = false;
+  return { ...settings, enabled };
+}
+
 // src/net/netplay.ts
 var NET_WORDS = 119;
 var NET_SLOTS = 8;
@@ -7126,6 +7160,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.bodies = /* @__PURE__ */ new Map();
     /** Spawned prefab copies: root object index → the root's world matrix (see setSpawned). */
     this.spawned = /* @__PURE__ */ new Map();
+    /** Graphics quality (see quality.ts): shadows on/off and their map size, the first-person scale cap. */
+    this.quality = QUALITY_PRESETS.high;
     /** Skinned instances' live meshes (their buffers are rewritten for each pose). */
     this.live = /* @__PURE__ */ new Map();
     /** The skinning matrices each live mesh was last posed with (skip re-skinning the same pose). */
@@ -7177,6 +7213,16 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.lastSkin.set(i, matrices);
     }
     this.animated = new Set([...skinning.keys()].filter((i) => this.live.has(i)));
+  }
+  /** Apply a graphics quality preset (takes effect on the next frame). */
+  setQuality(quality) {
+    if (quality.shadowMapSize !== this.quality.shadowMapSize) {
+      this.staticShadow = null;
+      this.shadowDepth = null;
+      this.staticShadowKey = "";
+      this.shadowRects = [];
+    }
+    this.quality = quality;
   }
   /** Posed instances plus, in a hierarchy, everything below them: what moves this frame. */
   withChildren(indices) {
@@ -7341,7 +7387,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   /** The 3D render scale this frame: 1, unless the software governor has stepped down. */
   renderScale() {
     if (!this.governed()) return 1;
-    return SOFTWARE_SCALES[this.scaleStep];
+    return Math.min(SOFTWARE_SCALES[this.scaleStep], this.quality.maxRenderScale);
   }
   /** Whether the resolution governor applies: a large first-person view on the CPU rasteriser. */
   governed() {
@@ -7530,8 +7576,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * full-scene shadow pass per frame into a memcpy plus a few characters.
    */
   buildShadow(instances, moved, lighting) {
-    if (!lighting.shadows) return null;
-    const size = SHADOW_MAP_SIZE;
+    if (!lighting.shadows || !this.quality.shadows) return null;
+    const size = this.quality.shadowMapSize || SHADOW_MAP_SIZE;
     const { center, radius } = this.scene.bounds;
     for (const i of this.withChildren(this.poses.filter((p) => p.front).map((p) => p.index))) this.everFront.add(i);
     const key = `${this.poses.filter((p) => !p.front).map((p) => p.index).sort((a, b) => a - b).join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}|${[...this.bodies.keys()].join(",")}|${[...this.live.keys()].join(",")}`;
@@ -9223,6 +9269,8 @@ var Player = class {
     this.container = container;
     this.options = options;
     this.gamepad = new GamepadState();
+    /** The graphics preset in effect (resolved from the quality option once the renderer is known). */
+    this.qualitySettings = QUALITY_PRESETS.high;
     /** Presented-frame clock for animation, kept in lockstep with the scene backdrop. */
     this.presentFrame = 0;
     /** The cart reads analog sticks (it opted in via cartbox.stick). */
@@ -9370,6 +9418,7 @@ var Player = class {
             this.model.renderCaps
           );
         }
+        this.qualitySettings = resolveQuality(this.options.quality, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend === "webgpu" : void 0));
         if (mesh2) {
           surface = this.meshSurface = await MeshOverlaySurface.create(
             surface,
@@ -9378,6 +9427,7 @@ var Player = class {
             mesh2,
             this.sceneRenderer
           );
+          this.meshSurface.setQuality(this.qualitySettings);
         }
         if (world && this.cartSource) {
           surface = this.worldSurface = new WorldOverlaySurface(
@@ -9411,8 +9461,9 @@ var Player = class {
       };
       const postFx = this.options.postFx;
       this.basePostFx = postFx;
-      if (postFx && anyPostFxEnabled(postFx)) {
-        const fx = await PostFxSurface.create(this.container, scale, this.model, postFx, makeBaseSurface);
+      const shownFx = postFx ? applyQualityToPostFx(postFx, this.qualitySettings) : void 0;
+      if (shownFx && anyPostFxEnabled(shownFx)) {
+        const fx = await PostFxSurface.create(this.container, scale, this.model, shownFx, makeBaseSurface);
         if (fx) this.postFxSurface = fx;
         this.surface = fx ?? await makeBaseSurface(this.container);
       } else {
@@ -9523,6 +9574,21 @@ var Player = class {
       this.audio?.enqueue(samples);
     }
   }
+  /**
+   * Change the graphics preset live ("auto" re-detects). Shadows and the 3D
+   * resolution follow at once; effects the preset turns off go off now, and ones
+   * it turns back on need the post-effect stage to have been started with some
+   * effect on.
+   */
+  setQuality(choice) {
+    this.qualitySettings = resolveQuality(choice, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend === "webgpu" : void 0));
+    this.meshSurface?.setQuality(this.qualitySettings);
+    if (this.postFxSurface && this.basePostFx) this.postFxSurface.setSettings(applyQualityToPostFx(this.basePostFx, this.qualitySettings));
+  }
+  /** The graphics preset in effect. */
+  quality() {
+    return this.qualitySettings.level;
+  }
   /** Live inspection: every scene object's placement and state this frame. */
   inspect() {
     const scene = this.options.mesh;
@@ -9624,10 +9690,9 @@ var Player = class {
     }
     this.foregroundSurface?.setPlacements(state.placements);
     if (this.postFxSurface && this.basePostFx && Object.keys(state.postfx).length > 0) {
-      this.postFxSurface.setSettings({
-        ...this.basePostFx,
-        values: { ...this.basePostFx.values, ...state.postfx }
-      });
+      this.postFxSurface.setSettings(
+        applyQualityToPostFx({ ...this.basePostFx, values: { ...this.basePostFx.values, ...state.postfx } }, this.qualitySettings)
+      );
     }
   }
   renderSingleFrame() {
@@ -10395,7 +10460,9 @@ function mount(container, options) {
     setControlSettings: (settings) => player.setControlSettings(settings),
     setVolume: (volume) => player.setVolume(volume),
     setInputEnabled: (enabled) => player.setInputEnabled(enabled),
-    inspect: () => player.inspect()
+    inspect: () => player.inspect(),
+    setQuality: (choice) => player.setQuality(choice),
+    quality: () => player.quality()
   };
 }
 export {
@@ -10465,6 +10532,8 @@ export {
   PhysicsSession,
   PostFxPass,
   PostFxSurface,
+  QUALITY_LEVELS,
+  QUALITY_PRESETS,
   RAM_LAYOUTS,
   REPLAY_VERSION,
   ReplayError,
@@ -10491,7 +10560,9 @@ export {
   animatedObjects,
   anyPostFxEnabled,
   applyLookSettings,
+  applyQualityToPostFx,
   applyRenderCaps,
+  browserDeviceHints,
   buildBillboardInstance,
   buildClipTable,
   buildOrbitCamera,
@@ -10524,6 +10595,7 @@ export {
   decodeMeshPoses,
   decodeWorldLights,
   defaultPostFxSettings,
+  detectQuality,
   deterministicBackend,
   drift,
   emitterPreset,
@@ -10583,6 +10655,7 @@ export {
   resolveButton,
   resolveLight,
   resolvePbr,
+  resolveQuality,
   resolveSceneLayers,
   resolveSupersample,
   resolveUnlockedAchievements,

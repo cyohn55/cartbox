@@ -50,6 +50,7 @@ import { SoftwareSceneRenderer, type SceneRenderer } from "../render/sceneRender
 import type { MailboxMeshCamera, MailboxMeshPose, WorldLight } from "../mailbox.js";
 import type { ShadowInput, SceneLight, SceneLighting } from "@cartbox/editor";
 import type { MeshScene } from "./meshScene.js";
+import { QUALITY_PRESETS, type QualitySettings } from "../quality.js";
 import { buildOrbitCamera } from "./meshScene.js";
 
 const RAD_TO_DEG = 180 / Math.PI;
@@ -58,7 +59,7 @@ const RAD_TO_DEG = 180 / Math.PI;
 const FIRST_PERSON_NEAR = 0.05;
 
 /** Edge length of the directional shadow map — a fixed, self-contained cost. */
-const SHADOW_MAP_SIZE = 1024;
+const SHADOW_MAP_SIZE = 1024; // the high preset's; see setQuality
 
 /**
  * The sky backdrop is shaded on a grid this many pixels across, then expanded:
@@ -225,6 +226,8 @@ export class MeshOverlaySurface implements DisplaySurface {
   private bodies: ReadonlyMap<number, Mat4> = new Map();
   /** Spawned prefab copies: root object index → the root's world matrix (see setSpawned). */
   private spawned: ReadonlyMap<number, Mat4> = new Map();
+  /** Graphics quality (see quality.ts): shadows on/off and their map size, the first-person scale cap. */
+  private quality: QualitySettings = QUALITY_PRESETS.high;
   /** Skinned instances' live meshes (their buffers are rewritten for each pose). */
   private readonly live = new Map<number, LiveSkinnedMesh>();
   /** The skinning matrices each live mesh was last posed with (skip re-skinning the same pose). */
@@ -307,6 +310,18 @@ export class MeshOverlaySurface implements DisplaySurface {
       this.lastSkin.set(i, matrices);
     }
     this.animated = new Set([...skinning.keys()].filter((i) => this.live.has(i)));
+  }
+
+  /** Apply a graphics quality preset (takes effect on the next frame). */
+  setQuality(quality: QualitySettings): void {
+    if (quality.shadowMapSize !== this.quality.shadowMapSize) {
+      // A new map size: the cached maps are rebuilt at it.
+      this.staticShadow = null;
+      this.shadowDepth = null;
+      this.staticShadowKey = "";
+      this.shadowRects = [];
+    }
+    this.quality = quality;
   }
 
   /** Posed instances plus, in a hierarchy, everything below them: what moves this frame. */
@@ -516,7 +531,7 @@ export class MeshOverlaySurface implements DisplaySurface {
   /** The 3D render scale this frame: 1, unless the software governor has stepped down. */
   private renderScale(): number {
     if (!this.governed()) return 1;
-    return SOFTWARE_SCALES[this.scaleStep]!;
+    return Math.min(SOFTWARE_SCALES[this.scaleStep]!, this.quality.maxRenderScale);
   }
 
   /** Whether the resolution governor applies: a large first-person view on the CPU rasteriser. */
@@ -735,8 +750,8 @@ export class MeshOverlaySurface implements DisplaySurface {
     moved: readonly MeshSceneInstance[],
     lighting: SceneLighting,
   ): ShadowInput | null {
-    if (!lighting.shadows) return null;
-    const size = SHADOW_MAP_SIZE;
+    if (!lighting.shadows || !this.quality.shadows) return null;
+    const size = this.quality.shadowMapSize || SHADOW_MAP_SIZE;
     const { center, radius } = this.scene.bounds;
     // The static map holds every instance the cart never poses. It depends only
     // on *which* instances are posed (not whether a posed one is hidden this
