@@ -218,4 +218,27 @@ export interface PlayerHandle {
   setVolume(volume: number): void;
   /** Hold the game's input neutral (false) while a host menu is open over it, or restore it. */
   setInputEnabled(enabled: boolean): void;
+  /**
+   * A snapshot of the cart's scene objects as they are this frame (live
+   * inspection): where each one is, whether it's shown, and its physics state.
+   * Empty when the cart has no 3D scene.
+   */
+  inspect(): InspectedObject[];
+}
+
+/** One scene object in a live inspection snapshot. */
+export interface InspectedObject {
+  readonly index: number;
+  readonly name: string;
+  readonly parent: number;
+  /** World position this frame. */
+  readonly position: readonly [number, number, number];
+  /** Drawn this frame (false for hidden objects and prefab copies in reserve). */
+  readonly visible: boolean;
+  readonly tags: readonly string[];
+  readonly props: Readonly<Record<string, number | string | boolean>>;
+  /** The object's physics body, when it has one that moves. */
+  readonly body?: { readonly kind: string; readonly velocity: readonly [number, number, number]; readonly grounded: boolean; readonly active: boolean };
+  /** For a prefab copy: its prefab and whether it's spawned. */
+  readonly prefab?: { readonly name: string; readonly spawned: boolean };
 }

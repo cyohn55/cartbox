@@ -217,6 +217,24 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
         snippet: 'for _, c in ipairs(cartbox.children("tower")) do\n  \nend',
       },
       {
+        name: "cartbox.spawn",
+        signature: "cartbox.spawn(prefab, x, y, z, yaw, pitch, roll) -> obj",
+        doc: "Place a copy of a prefab in the world (angles in radians) and get its root object, or nil when all its reserve copies are out. Set how many copies a prefab keeps in the Prefabs list.",
+        snippet: 'local crate = cartbox.spawn("Crate", x, 5, z)',
+      },
+      {
+        name: "cartbox.despawn",
+        signature: "cartbox.despawn(obj)",
+        doc: "Take a spawned copy out of the world and back into reserve.",
+        snippet: "cartbox.despawn(crate)",
+      },
+      {
+        name: "cartbox.alive",
+        signature: "cartbox.alive(obj) -> bool",
+        doc: "Whether a prefab copy is currently spawned.",
+        snippet: "if cartbox.alive(crate) then\n  \nend",
+      },
+      {
         name: "cartbox.objects",
         signature: "cartbox.objects() -> count",
         doc: "How many placed objects the cart has (indices run 0 .. count - 1).",

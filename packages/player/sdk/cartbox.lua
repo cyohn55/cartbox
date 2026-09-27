@@ -270,6 +270,10 @@ cartbox = {
   --   cartbox.move(obj, dx, dy, dz)    walk a character (slides, climbs, steps)
   --   cartbox.ray(slot, x, y, z, dx, dy, dz, max)   cast a ray; read it next tick
   --   cartbox.hit(slot)                -> hit, obj, x, y, z, nx, ny, nz, distance
+  -- Prefabs. Each prefab keeps copies in reserve (set how many in the editor):
+  --   cartbox.spawn(prefab, x, y, z, yaw, pitch, roll) -> the copy's root object, or nil
+  --   cartbox.despawn(obj)             put a spawned copy back in reserve
+  --   cartbox.alive(obj)               -> whether a copy is spawned
   -- Physics (bodies on scene objects): overridden by the injected physics calls
   -- when the cart has bodies.
   physics = function() return false end,
@@ -280,4 +284,8 @@ cartbox = {
   move = function() end,
   ray = function() end,
   hit = function() return false end,
+  -- Spawning prefab copies: overridden when the cart has prefabs.
+  spawn = function() return nil end,
+  despawn = function() end,
+  alive = function() return false end,
 }

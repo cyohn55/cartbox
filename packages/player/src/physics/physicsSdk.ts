@@ -12,8 +12,14 @@
  *   cartbox.ray(slot, x, y, z, dx, dy, dz, max)   cast a ray (slot 0-15); read next tick
  *   cartbox.hit(slot)                 -> hit, obj, x, y, z, nx, ny, nz, distance
  *
+ * Spawning prefab copies (when the cart has prefabs) rides the same block:
+ *
+ *   cartbox.spawn(prefab, x, y, z, yaw, pitch, roll) -> the copy's root object, or nil
+ *   cartbox.despawn(obj)              put a spawned copy back in reserve
+ *   cartbox.alive(obj)                -> whether a copy is spawned
+ *
  * `obj` is an object index or its name (as cartbox.find). The SDK's defaults
- * (sdk.ts) make every call a safe no-op for carts without bodies.
+ * (sdk.ts) make every call a safe no-op for carts without bodies or prefabs.
  */
 
 import type { MeshScene } from "../mesh/meshScene.js";
@@ -26,9 +32,11 @@ import {
   PHYS_MAGIC,
   PHYS_MAX_CMDS,
   PHYS_MAX_RAYS,
+  PHYS_OP_DESPAWN,
   PHYS_OP_IMPULSE,
   PHYS_OP_MOVE,
   PHYS_OP_RAY,
+  PHYS_OP_SPAWN,
   PHYS_OP_TELEPORT,
   PHYS_OP_VELOCITY,
   PHYS_RAY_BYTES,
@@ -38,10 +46,30 @@ import {
 } from "./protocol.js";
 import { physicsSlots, sceneHasPhysics } from "./physicsSession.js";
 
-/** The Lua for a cart's physics calls, or "" when the scene has no bodies. */
-export function physicsSdkLua(scene: MeshScene | null | undefined, layout: RamLayout): string {
-  if (!scene || !sceneHasPhysics(scene)) return "";
+/**
+ * Whether a scene needs the runtime block at all: bodies (when a physics engine
+ * will run them), or prefabs to spawn.
+ */
+export function sceneNeedsRuntime(scene: MeshScene | null | undefined, { physics = true }: { physics?: boolean } = {}): boolean {
+  return Boolean(scene && ((physics && sceneHasPhysics(scene)) || (scene.pools?.length ?? 0) > 0));
+}
+
+const luaString = (s: string) => JSON.stringify(s);
+
+/**
+ * The Lua for a cart's runtime calls — physics (when it has bodies) and spawning
+ * (when it has prefabs) — or "" when it needs neither.
+ */
+export function runtimeSdkLua(
+  scene: MeshScene | null | undefined,
+  layout: RamLayout,
+  { physics: engine = true }: { physics?: boolean } = {},
+): string {
+  if (!scene || !sceneNeedsRuntime(scene, { physics: engine })) return "";
+  // Without an engine to run them, bodies keep the SDK's no-op physics calls.
+  const physics = engine && sceneHasPhysics(scene);
   const slots = physicsSlots(scene).map((object, slot) => `[${object}]=${slot}`);
+  const pools = (scene.pools ?? []).map((pool) => `[${luaString(pool.prefab)}]={${pool.roots.join(",")}}`);
   const B = physicsBlockAddress(layout);
   return `do
   cartbox = cartbox or {}
@@ -77,7 +105,13 @@ export function physicsSdkLua(scene: MeshScene | null | undefined, layout: RamLa
     _wr(at + 20, (v4 or 0) * ${PHYS_FIX}) _wr(at + 24, (v5 or 0) * ${PHYS_FIX}) _wr(at + 28, (v6 or 0) * ${PHYS_FIX})
     _wr(_B + ${PHYS_CMDS}, n + 1)
   end
-  cartbox.physics = function() return _live() end
+${physics ? PHYSICS_CALLS() : ""}
+${pools.length > 0 ? SPAWN_CALLS(pools) : ""}end`;
+}
+
+/** The physics calls (inside the runtime block's do … end, after its helpers). */
+function PHYSICS_CALLS(): string {
+  return `  cartbox.physics = function() return _live() end
   cartbox.body = function(o)
     local i = _obj(o)
     local s = i and _slot[i]
@@ -116,5 +150,38 @@ export function physicsSdkLua(scene: MeshScene | null | undefined, layout: RamLa
     return true, obj, _rd(at + 4) / ${PHYS_FIX}, _rd(at + 8) / ${PHYS_FIX}, _rd(at + 12) / ${PHYS_FIX},
       _rd(at + 16) / ${PHYS_FIX}, _rd(at + 20) / ${PHYS_FIX}, _rd(at + 24) / ${PHYS_FIX}, _rd(at + 28) / ${PHYS_FIX}
   end
-end`;
+`;
 }
+
+/** The spawn calls: the cart itself hands out reserve copies, so spawn returns at once. */
+function SPAWN_CALLS(pools: readonly string[]): string {
+  return `  local _pools = {${pools.join(",")}}
+  local _alive = {}
+  cartbox.spawn = function(name, x, y, z, yaw, pitch, roll)
+    local roots = _pools[name]
+    if roots == nil or not _live() then return nil end
+    for _, r in ipairs(roots) do
+      if not _alive[r] then
+        _alive[r] = true
+        _cmd(${PHYS_OP_SPAWN}, r, x or 0, y or 0, z or 0, yaw or 0, pitch or 0, roll or 0)
+        return r
+      end
+    end
+    return nil
+  end
+  cartbox.despawn = function(o)
+    local i = _obj(o)
+    if i ~= nil and _alive[i] then
+      _alive[i] = nil
+      _cmd(${PHYS_OP_DESPAWN}, i)
+    end
+  end
+  cartbox.alive = function(o)
+    local i = _obj(o)
+    return i ~= nil and _alive[i] == true
+  end
+`;
+}
+
+/** @deprecated Kept for callers of the physics-only name: the same as runtimeSdkLua. */
+export const physicsSdkLua = runtimeSdkLua;

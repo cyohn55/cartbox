@@ -38,6 +38,7 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
   const bodies: Body[] = [];
   const colliders: Collider[] = [];
   const objectOf = new Map<number, number>(); // collider handle → scene object
+  const characters = new Set<number>(); // body handles of characters
   const controller = world.createCharacterController(0.02);
   controller.enableSnapToGround(0.3);
   controller.setMaxSlopeClimbAngle((50 * Math.PI) / 180);
@@ -74,6 +75,7 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
       objectOf.set(collider.handle, desc.object);
       bodies.push(body);
       colliders.push(collider);
+      if (desc.kind === "character") characters.add(bodies.length - 1);
       return bodies.length - 1;
     },
 
@@ -144,6 +146,23 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
         normal: [hit.normal.x, hit.normal.y, hit.normal.z] as PhysicsVec3,
         distance: toi,
       };
+    },
+
+    setEnabled(handle: number, enabled: boolean): void {
+      bodies[handle]?.setEnabled(enabled);
+    },
+
+    setPose(handle: number, position: PhysicsVec3, rotation: PhysicsQuat): void {
+      const body = bodies[handle];
+      if (!body) return;
+      body.setTranslation(v3(position), true);
+      // Characters stay upright (see addBody).
+      if (!characters.has(handle)) body.setRotation({ x: rotation[0], y: rotation[1], z: rotation[2], w: rotation[3] }, true);
+      if (body.isKinematic()) body.setNextKinematicTranslation(v3(position));
+      else if (body.isDynamic()) {
+        body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+        body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      }
     },
 
     destroy(): void {

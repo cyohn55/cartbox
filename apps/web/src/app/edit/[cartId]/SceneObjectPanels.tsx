@@ -42,6 +42,7 @@ import {
   placePrefab,
   prefabInstances,
   revertToPrefab,
+  setPrefabPool,
   unlinkPrefab,
 } from "@/lib/meshPrefabs";
 import styles from "./editor.module.css";
@@ -375,6 +376,7 @@ export function PrefabLibrary({
       {prefabs.length === 0 ? (
         <RailHint>Select an object and choose Save as prefab to reuse it.</RailHint>
       ) : (
+        <>
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           {prefabs.map((prefab) => (
             <div key={prefab.id} style={{ display: "flex", gap: 4, alignItems: "center" }}>
@@ -395,6 +397,16 @@ export function PrefabLibrary({
               >
                 Place
               </button>
+              <input
+                type="number"
+                min={0}
+                max={32}
+                aria-label={`Copies of ${prefab.name} code can spawn`}
+                title="Copies code can spawn at run time (cartbox.spawn)"
+                value={prefab.pool ?? 8}
+                onChange={(event) => onChange(setPrefabPool(sidecar, prefab.id, Number(event.target.value)))}
+                style={{ ...inputStyle, width: 48 }}
+              />
               <button
                 type="button"
                 aria-label={`Delete prefab ${prefab.name}`}
@@ -407,6 +419,10 @@ export function PrefabLibrary({
             </div>
           ))}
         </div>
+        <RailHint>
+          The number is how many copies code can spawn while the game runs: cartbox.spawn(&quot;{prefabs[0]!.name}&quot;, x, y, z).
+        </RailHint>
+        </>
       )}
     </RailGroup>
   );

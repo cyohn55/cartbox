@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { mount, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
+import { mount, type InspectedObject, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
 
 import styles from "./editor.module.css";
 import { errorLineFrom } from "./codeTools";
@@ -72,6 +72,11 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
   // the 60Hz onFrame handler never triggers a React render — the interval below
   // reads and resets it once a second.
   const frameCountRef = useRef(0);
+  // Live inspection: the scene objects as they are this moment, refreshed a few
+  // times a second while the panel is open.
+  const [inspecting, setInspecting] = useState(false);
+  const [objects, setObjects] = useState<InspectedObject[]>([]);
+  const [filter, setFilter] = useState("");
 
   // The sidecars the player is actually applying this playtest, so a creator can
   // confirm at a glance what is (and isn't) in effect.
@@ -164,6 +169,14 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
     return () => window.clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    if (!inspecting) return;
+    const read = () => setObjects(handleRef.current?.inspect() ?? []);
+    read();
+    const timer = window.setInterval(read, 250);
+    return () => window.clearInterval(timer);
+  }, [inspecting]);
+
   const togglePlayback = () => {
     const handle = handleRef.current;
     if (!handle) return;
@@ -183,6 +196,11 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
           <span className={styles.runDot} aria-hidden />
           <span className={styles.runTitle}>Playtest · {cartName}</span>
           <div className={styles.runBarActions}>
+            {mesh && (
+              <button type="button" className="cbx-btn" aria-pressed={inspecting} onClick={() => setInspecting((v) => !v)} disabled={status !== "ready"}>
+                {inspecting ? "Hide objects" : "Objects"}
+              </button>
+            )}
             <button type="button" className="cbx-btn" onClick={togglePlayback} disabled={status !== "ready"}>
               {running ? "Pause" : "Resume"}
             </button>
@@ -192,7 +210,10 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
           </div>
         </div>
 
-        <div ref={stageRef} className={styles.runStage} />
+        <div style={{ display: "flex", gap: 12, alignItems: "stretch", minHeight: 0 }}>
+          <div ref={stageRef} className={styles.runStage} style={{ flex: 1, minWidth: 0 }} />
+          {inspecting && <ObjectsPanel objects={objects} filter={filter} onFilter={setFilter} />}
+        </div>
 
         <div className={styles.runDebug}>
           <span className={styles.runDebugItem}>
@@ -252,5 +273,60 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
         </p>
       </div>
     </div>
+  );
+}
+
+const fmt = (v: number) => (Math.abs(v) < 0.005 ? "0" : v.toFixed(2));
+
+/**
+ * Live inspection: every scene object's position and state while the cart runs
+ * (refreshed ~4×/s). Pause to read values at a moment.
+ */
+function ObjectsPanel({ objects, filter, onFilter }: { objects: InspectedObject[]; filter: string; onFilter: (value: string) => void }) {
+  const needle = filter.trim().toLowerCase();
+  const shown = objects.filter(
+    (o) => !needle || o.name.toLowerCase().includes(needle) || o.tags.some((t) => t.toLowerCase().includes(needle)),
+  );
+  return (
+    <aside aria-label="Live objects" style={{ width: 300, maxHeight: 460, overflowY: "auto", fontSize: 12, display: "grid", gap: 6, alignContent: "start" }}>
+      <input
+        aria-label="Filter objects"
+        placeholder="Filter by name or tag"
+        value={filter}
+        onChange={(event) => onFilter(event.target.value)}
+        style={{ padding: "4px 6px", borderRadius: 6 }}
+      />
+      {shown.map((o) => (
+        <div key={o.index} data-object={o.name} style={{ padding: "4px 6px", borderRadius: 6, background: "rgba(255,255,255,0.04)", opacity: o.visible ? 1 : 0.55 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}>
+            <strong style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{o.name}</strong>
+            <span className="data" style={{ opacity: 0.7 }}>
+              #{o.index}
+            </span>
+          </div>
+          <div className="data">
+            {fmt(o.position[0])}, {fmt(o.position[1])}, {fmt(o.position[2])}
+          </div>
+          <div style={{ opacity: 0.75 }}>
+            {[
+              o.prefab ? (o.prefab.spawned ? `spawned ${o.prefab.name}` : `${o.prefab.name} reserve`) : null,
+              o.visible ? null : "hidden",
+              o.body
+                ? `${o.body.kind}${o.body.active ? "" : " (off)"} · v ${fmt(o.body.velocity[0])}, ${fmt(o.body.velocity[1])}, ${fmt(o.body.velocity[2])}${o.body.kind === "character" ? (o.body.grounded ? " · grounded" : " · airborne") : ""}`
+                : null,
+              o.tags.length > 0 ? o.tags.map((t) => `#${t}`).join(" ") : null,
+              Object.keys(o.props).length > 0
+                ? Object.entries(o.props)
+                    .map(([k, v]) => `${k}=${String(v)}`)
+                    .join(" ")
+                : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </div>
+        </div>
+      ))}
+      {shown.length === 0 && <span style={{ opacity: 0.7 }}>No objects match.</span>}
+    </aside>
   );
 }

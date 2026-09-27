@@ -286,6 +286,12 @@ export function deletePrefab(sidecar: MeshSidecar, id: string): MeshSidecar {
   };
 }
 
+/** Set how many copies of prefab `id` code can spawn at run time (0..32). */
+export function setPrefabPool(sidecar: MeshSidecar, id: string, pool: number): MeshSidecar {
+  const n = Number.isFinite(pool) ? Math.max(0, Math.min(32, Math.floor(pool))) : 8;
+  return { ...sidecar, prefabs: (sidecar.prefabs ?? []).map((p) => (p.id === id ? { ...p, pool: n } : p)) };
+}
+
 /** Rename prefab `id`. */
 export function renamePrefab(sidecar: MeshSidecar, id: string, name: string): MeshSidecar {
   return { ...sidecar, prefabs: (sidecar.prefabs ?? []).map((p) => (p.id === id ? { ...p, name } : p)) };

@@ -58,16 +58,16 @@ Actors. Today a mesh instance has an id, a name and a transform.
       transform, tags and properties.
 - [x] **Prefabs.** Save an object and its children as a reusable asset; place
       copies; edits to the prefab flow to every copy unless overridden.
-- [ ] **Play-in-editor inspection.** While the cart runs in the editor, select an
-      object to see its live transform and properties.
+- [x] **Spawning at run time.** Each prefab keeps a reserve of copies (set per
+      prefab); `cartbox.spawn(prefab, x, y, z, …)` places one — physics bodies
+      included — and `cartbox.despawn` puts it back.
+- [x] **Play-in-editor inspection.** The playtest's Objects panel shows every
+      object's live position, visibility, body state (velocity, grounded) and
+      spawn state, filterable by name or tag.
 
-**Status:** in progress. Landed: the data model, runtime hierarchy, Lua API
-(`cartbox.find / prop / tagged / hastag / parent / children / objname / objects`),
-the Mesh tab's Hierarchy tree plus Parent, Tags and Properties in the Inspector,
-re-parenting that keeps an object where it is in the world, and prefabs (save,
-place, apply to all copies keeping each copy's own changes, revert, unlink).
-Next: live inspection while playing, and spawning prefab copies from Lua at run
-time.
+**Status:** done for this phase: data model, runtime hierarchy, Lua API, the
+Hierarchy and Inspector, keep-in-place re-parenting, prefabs, run-time spawning
+and live inspection. Later: nested prefabs, picking objects in the game view.
 
 ## Phase 2 — Physics
 

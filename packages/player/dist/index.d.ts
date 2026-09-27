@@ -36,6 +36,20 @@ interface MeshInstance extends MeshSceneInstance {
     readonly props: Readonly<Record<string, ScenePropValue>>;
     /** The object's physics body, or null (ENGINE_ROADMAP.md, Phase 2). */
     readonly physics: PhysicsSpec | null;
+    /**
+     * Set on the objects of a prefab copy held in reserve for `cartbox.spawn`: which
+     * prefab, which copy, and the copy's root index. Hidden until spawned.
+     */
+    readonly pooled?: {
+        readonly prefab: string;
+        readonly copy: number;
+        readonly root: number;
+    };
+}
+/** A prefab's reserve of spawnable copies: each copy's root object index. */
+interface PrefabPool {
+    readonly prefab: string;
+    readonly roots: readonly number[];
 }
 /** A world-space axis-aligned bounding box with a framing centre + radius. */
 interface SceneBounds {
@@ -48,6 +62,8 @@ interface SceneBounds {
 /** The parsed runtime scene: every placed mesh, their shared world bounds, and the lighting rig. */
 interface MeshScene {
     readonly instances: readonly MeshInstance[];
+    /** Prefabs code can spawn copies of (their copies are hidden instances at the end). */
+    readonly pools?: readonly PrefabPool[];
     readonly bounds: SceneBounds;
     /** The authored Modern-tier lighting rig, or null when the cart set none. */
     readonly lighting: SceneLighting | null;
@@ -87,6 +103,172 @@ interface OrbitCameraOptions {
  * auto-orbit); a cart drives it explicitly through `options` via the mesh camera.
  */
 declare function buildOrbitCamera(bounds: SceneBounds, yaw: number, pitch: number, aspect: number, options?: OrbitCameraOptions): SceneCamera$1;
+
+/**
+ * Console models. A model is a fixed hardware spec plus the WASM runtime that
+ * runs it. Threading a model through the player/engine/replay/thumbnail paths
+ * (instead of hard-coding 240x136 / 60fps) is what makes additional models —
+ * Pro, Voxel — additive rather than a rewrite.
+ *
+ * Constraints stay fixed *per model*. There are deliberately no free-form
+ * toggles: that would dissolve the aesthetic and break the fixed-spec
+ * assumptions the platform layer depends on.
+ */
+type ModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1" | "n64" | "xbox360" | "modern";
+/**
+ * How a model rasterises triangles.
+ *
+ * Display specs (width, palette, channels) distinguish the 2D models from each
+ * other. They cannot distinguish the *era* models on the roadmap, which differ
+ * almost entirely in rendering semantics: a PS1-era model is defined by having
+ * no depth buffer and affine texture mapping, an N64-era model by trilinear
+ * filtering and a 4KB texture cache. Those are the traits that make era content
+ * look like its era, so they belong in the model descriptor beside the
+ * resolution rather than inside a renderer.
+ *
+ * Every model carries these today because the mesh and world overlay surfaces
+ * rasterise triangles over any model's framebuffer, whatever its `kind`. The
+ * four shipping models therefore declare identical caps — they all run the same
+ * software rasteriser. That is the point: the field exists so that adding an era
+ * model is a descriptor change plus a renderer that honours it, not a fork of
+ * the rendering path. See ERA_MODELS.md.
+ */
+interface RenderCaps {
+    /** False means painter's-algorithm sorting, so surfaces interpenetrate. */
+    zBuffer: boolean;
+    /** False means affine texture mapping — the PS1 texture warp. */
+    perspectiveCorrect: boolean;
+    textureFiltering: "none" | "bilinear" | "trilinear";
+    /** Integer vertex coordinates produce the PS1 wobble. */
+    vertexPrecision: "integer" | "float";
+    /** Texture memory a frame may draw from; 0 means unbounded. */
+    textureCacheBytes: number;
+    /** Triangles submitted per frame; 0 means unbounded. */
+    polyBudget: number;
+    /**
+     * Whether creators may supply their own shaders. True dissolves the
+     * fixed-spec guarantee the platform layer relies on, so it stays false for
+     * every fantasy-console model.
+     */
+    programmableShaders: boolean;
+}
+/**
+ * What the shared software rasteriser behind the mesh/world overlays actually
+ * does today: depth-buffered, perspective-correct, unfiltered, float vertices,
+ * and unbounded because nothing enforces a ceiling. Era models override this.
+ */
+declare const SOFTWARE_RASTER_CAPS: RenderCaps;
+interface ConsoleModel {
+    id: ModelId;
+    label: string;
+    /**
+     * Rasterizer family. Every model presents a 2D RGBA framebuffer for display,
+     * whatever it draws into it, so the player's blit path stays model-agnostic.
+     *
+     * `poly3d` is a model whose games are textured triangle scenes: the core
+     * still supplies the 2D frame, script and sound, and the mesh/world overlays
+     * composite the 3D over it. The editor uses this to decide whether the
+     * spatial authoring tabs apply.
+     */
+    kind: "raster2d" | "voxel3d" | "poly3d";
+    width: number;
+    height: number;
+    /** Bytes per framebuffer pixel (RGBA = 4). */
+    pixelBytes: number;
+    /** Fixed frame rate (fixed-timestep loop). */
+    fps: number;
+    audioChannels: number;
+    sampleRate: number;
+    /** Editor-enforced creative limits (informational at runtime). */
+    paletteSize: number;
+    cartSizeBytes: number;
+    /**
+     * Bytes of content-addressed assets a cart on this model may reference,
+     * beyond its cartridge. 0 means none: the cartridge is the whole cart.
+     *
+     * This is the constraint that lets a 3D era model exist at all. A textured
+     * scene does not fit in a cartridge at any resolution, so an era model stores
+     * its bulk beside the cart and references it by hash (see
+     * `cartAssetStore.ts`). Keeping the allowance *per model* rather than global
+     * is the same doctrine as every other limit here: an era model should pick a
+     * budget that evokes its generation rather than reproducing a disc, and a
+     * cartridge-only model should not silently acquire an asset store.
+     */
+    assetBudgetBytes: number;
+    /** Default runtime URL for this model; overridable per player instance. */
+    engineUrl: string;
+    inputs: Array<"gamepad" | "mouse" | "keyboard">;
+    /** Triangle-rasterisation semantics. See {@link RenderCaps}. */
+    renderCaps: RenderCaps;
+}
+declare const MODELS: Record<ModelId, ConsoleModel>;
+/** Model used when a cart or caller does not specify one. */
+declare const DEFAULT_MODEL_ID: ModelId;
+/**
+ * Resolves a model by id. Accepts a plain string (e.g. a `console_model` value
+ * from the database) and validates it.
+ */
+declare function getModel(id?: string): ConsoleModel;
+/** Size of one framebuffer, in bytes, for a model. */
+declare function framebufferBytes(model: ConsoleModel): number;
+/** Duration of one frame, in milliseconds, for a model. */
+declare function frameDurationMs(model: ConsoleModel): number;
+
+/**
+ * The physics channel between the host (which runs the physics world) and the
+ * cart's Lua (ENGINE_ROADMAP.md, Phase 2).
+ *
+ * pmem is too small for body state, so physics uses an 8 KB block at the very end
+ * of the console's RAM — inside TIC-80's free RAM on every core, where Lua reads
+ * and writes it with peek/poke and the host with a view of the WASM heap. Only a
+ * cart that has physics bodies uses it.
+ *
+ * Each core has its own RAM layout (the era models enlarge VRAM and the map), so
+ * the block's address comes from a per-model table, measured against the real
+ * engine builds by a test (physics.test.ts) that fails if a rebuild moves them.
+ * The host writes a magic word at load and the cart's first tick checks it, so a
+ * mismatch disables physics rather than corrupting memory.
+ *
+ * All values are little-endian int32; positions, velocities and distances are
+ * fixed point with 1/1024 precision (±2 million units of range).
+ */
+
+/** Where pmem word 0 sits in Lua's RAM address space, and how big RAM is, per core. */
+interface RamLayout {
+    readonly pmemAddress: number;
+    readonly ramSize: number;
+}
+/** RAM layout by console model (models sharing a core share its layout). */
+declare const RAM_LAYOUTS: Readonly<Record<ModelId, RamLayout>>;
+declare const PHYS_BLOCK_BYTES = 8192;
+declare const PHYS_MAGIC = 1213219395;
+/** Where the physics block starts in Lua's RAM space for a model. */
+declare function physicsBlockAddress(layout: RamLayout): number;
+/** A command the cart wrote this tick. */
+interface PhysicsCommand {
+    readonly op: number;
+    readonly a: number;
+    readonly v: readonly [number, number, number, number, number, number];
+}
+/** One body's state as the cart reads it. */
+interface PhysicsBodyState {
+    readonly object: number;
+    readonly position: readonly [number, number, number];
+    readonly velocity: readonly [number, number, number];
+    readonly grounded: boolean;
+    readonly sleeping: boolean;
+}
+/** One ray result (slot order), or null for a miss / no request. */
+interface PhysicsRayHit {
+    readonly object: number;
+    readonly point: readonly [number, number, number];
+    readonly normal: readonly [number, number, number];
+    readonly distance: number;
+}
+/** Write the host → Lua half of the block. */
+declare function writePhysicsState(block: DataView, tick: number, bodies: readonly PhysicsBodyState[], rays: readonly (PhysicsRayHit | null)[]): void;
+/** Read (and clear) the commands the cart wrote this tick. */
+declare function takePhysicsCommands(block: DataView): PhysicsCommand[];
 
 /**
  * Runs a cart's physics (ENGINE_ROADMAP.md, Phase 2): builds bodies for the scene
@@ -160,6 +342,10 @@ interface PhysicsBackend {
         normal: Vec3$1;
         distance: number;
     } | null;
+    /** Take a body out of (or back into) the world — a spawnable copy waiting in reserve. */
+    setEnabled(handle: number, enabled: boolean): void;
+    /** Place a body at a position and rotation at once, at rest. */
+    setPose(handle: number, position: Vec3$1, rotation: Quat): void;
     destroy(): void;
 }
 declare const PHYSICS_DT: number;
@@ -181,6 +367,8 @@ declare class PhysicsSession {
     private readonly backend;
     private readonly tracked;
     private readonly byObject;
+    /** Bodies of reserve prefab copies (static ones too), by object index. */
+    private readonly pooledBodies;
     private rayRequests;
     private rayResults;
     private tick;
@@ -189,6 +377,20 @@ declare class PhysicsSession {
     beforeTick(block: DataView): void;
     /** Apply the cart's commands, step the world, and cast the rays it asked for. */
     afterTick(block: DataView): void;
+    /**
+     * Bring a spawned prefab copy's bodies into the world, placed where the copy's
+     * objects now are (`world` gives each object's world matrix), or take them out.
+     */
+    setCopyActive(objects: readonly number[], world: (object: number) => Mat4 | null, active: boolean): void;
+    /** Apply a tick's commands (already taken from the block), step, and cast rays. */
+    run(commands: readonly PhysicsCommand[]): void;
+    /** Each moving body's live state, by object index (live inspection). */
+    inspect(): Map<number, {
+        kind: string;
+        velocity: Vec3$1;
+        grounded: boolean;
+        active: boolean;
+    }>;
     /** World matrices for every moving body this frame (scene object index → matrix). */
     overrides(): Map<number, Mat4>;
     destroy(): void;
@@ -508,116 +710,6 @@ declare function readPad(raw: PadSnapshot & {
     axes: [number, number, number, number];
     start: boolean;
 };
-
-/**
- * Console models. A model is a fixed hardware spec plus the WASM runtime that
- * runs it. Threading a model through the player/engine/replay/thumbnail paths
- * (instead of hard-coding 240x136 / 60fps) is what makes additional models —
- * Pro, Voxel — additive rather than a rewrite.
- *
- * Constraints stay fixed *per model*. There are deliberately no free-form
- * toggles: that would dissolve the aesthetic and break the fixed-spec
- * assumptions the platform layer depends on.
- */
-type ModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1" | "n64" | "xbox360" | "modern";
-/**
- * How a model rasterises triangles.
- *
- * Display specs (width, palette, channels) distinguish the 2D models from each
- * other. They cannot distinguish the *era* models on the roadmap, which differ
- * almost entirely in rendering semantics: a PS1-era model is defined by having
- * no depth buffer and affine texture mapping, an N64-era model by trilinear
- * filtering and a 4KB texture cache. Those are the traits that make era content
- * look like its era, so they belong in the model descriptor beside the
- * resolution rather than inside a renderer.
- *
- * Every model carries these today because the mesh and world overlay surfaces
- * rasterise triangles over any model's framebuffer, whatever its `kind`. The
- * four shipping models therefore declare identical caps — they all run the same
- * software rasteriser. That is the point: the field exists so that adding an era
- * model is a descriptor change plus a renderer that honours it, not a fork of
- * the rendering path. See ERA_MODELS.md.
- */
-interface RenderCaps {
-    /** False means painter's-algorithm sorting, so surfaces interpenetrate. */
-    zBuffer: boolean;
-    /** False means affine texture mapping — the PS1 texture warp. */
-    perspectiveCorrect: boolean;
-    textureFiltering: "none" | "bilinear" | "trilinear";
-    /** Integer vertex coordinates produce the PS1 wobble. */
-    vertexPrecision: "integer" | "float";
-    /** Texture memory a frame may draw from; 0 means unbounded. */
-    textureCacheBytes: number;
-    /** Triangles submitted per frame; 0 means unbounded. */
-    polyBudget: number;
-    /**
-     * Whether creators may supply their own shaders. True dissolves the
-     * fixed-spec guarantee the platform layer relies on, so it stays false for
-     * every fantasy-console model.
-     */
-    programmableShaders: boolean;
-}
-/**
- * What the shared software rasteriser behind the mesh/world overlays actually
- * does today: depth-buffered, perspective-correct, unfiltered, float vertices,
- * and unbounded because nothing enforces a ceiling. Era models override this.
- */
-declare const SOFTWARE_RASTER_CAPS: RenderCaps;
-interface ConsoleModel {
-    id: ModelId;
-    label: string;
-    /**
-     * Rasterizer family. Every model presents a 2D RGBA framebuffer for display,
-     * whatever it draws into it, so the player's blit path stays model-agnostic.
-     *
-     * `poly3d` is a model whose games are textured triangle scenes: the core
-     * still supplies the 2D frame, script and sound, and the mesh/world overlays
-     * composite the 3D over it. The editor uses this to decide whether the
-     * spatial authoring tabs apply.
-     */
-    kind: "raster2d" | "voxel3d" | "poly3d";
-    width: number;
-    height: number;
-    /** Bytes per framebuffer pixel (RGBA = 4). */
-    pixelBytes: number;
-    /** Fixed frame rate (fixed-timestep loop). */
-    fps: number;
-    audioChannels: number;
-    sampleRate: number;
-    /** Editor-enforced creative limits (informational at runtime). */
-    paletteSize: number;
-    cartSizeBytes: number;
-    /**
-     * Bytes of content-addressed assets a cart on this model may reference,
-     * beyond its cartridge. 0 means none: the cartridge is the whole cart.
-     *
-     * This is the constraint that lets a 3D era model exist at all. A textured
-     * scene does not fit in a cartridge at any resolution, so an era model stores
-     * its bulk beside the cart and references it by hash (see
-     * `cartAssetStore.ts`). Keeping the allowance *per model* rather than global
-     * is the same doctrine as every other limit here: an era model should pick a
-     * budget that evokes its generation rather than reproducing a disc, and a
-     * cartridge-only model should not silently acquire an asset store.
-     */
-    assetBudgetBytes: number;
-    /** Default runtime URL for this model; overridable per player instance. */
-    engineUrl: string;
-    inputs: Array<"gamepad" | "mouse" | "keyboard">;
-    /** Triangle-rasterisation semantics. See {@link RenderCaps}. */
-    renderCaps: RenderCaps;
-}
-declare const MODELS: Record<ModelId, ConsoleModel>;
-/** Model used when a cart or caller does not specify one. */
-declare const DEFAULT_MODEL_ID: ModelId;
-/**
- * Resolves a model by id. Accepts a plain string (e.g. a `console_model` value
- * from the database) and validates it.
- */
-declare function getModel(id?: string): ConsoleModel;
-/** Size of one framebuffer, in bytes, for a model. */
-declare function framebufferBytes(model: ConsoleModel): number;
-/** Duration of one frame, in milliseconds, for a model. */
-declare function frameDurationMs(model: ConsoleModel): number;
 
 /**
  * Deterministic replays.
@@ -1904,6 +1996,36 @@ interface PlayerHandle {
     setVolume(volume: number): void;
     /** Hold the game's input neutral (false) while a host menu is open over it, or restore it. */
     setInputEnabled(enabled: boolean): void;
+    /**
+     * A snapshot of the cart's scene objects as they are this frame (live
+     * inspection): where each one is, whether it's shown, and its physics state.
+     * Empty when the cart has no 3D scene.
+     */
+    inspect(): InspectedObject[];
+}
+/** One scene object in a live inspection snapshot. */
+interface InspectedObject {
+    readonly index: number;
+    readonly name: string;
+    readonly parent: number;
+    /** World position this frame. */
+    readonly position: readonly [number, number, number];
+    /** Drawn this frame (false for hidden objects and prefab copies in reserve). */
+    readonly visible: boolean;
+    readonly tags: readonly string[];
+    readonly props: Readonly<Record<string, number | string | boolean>>;
+    /** The object's physics body, when it has one that moves. */
+    readonly body?: {
+        readonly kind: string;
+        readonly velocity: readonly [number, number, number];
+        readonly grounded: boolean;
+        readonly active: boolean;
+    };
+    /** For a prefab copy: its prefab and whether it's spawned. */
+    readonly prefab?: {
+        readonly name: string;
+        readonly spawned: boolean;
+    };
 }
 
 /**
@@ -2137,7 +2259,7 @@ declare function seedCartridge(bytes: Uint8Array, seed: number): Uint8Array;
  * 183, mesh-pose block at 191, event types 1/2/3, FNV-1a id hash).
  */
 /** Lua source of the cartbox SDK. */
-declare const CARTBOX_SDK_LUA = "local _MB = 119\nlocal _CAP = 8\nlocal _LB = _MB + 25\nlocal _LCAP = 6\nlocal _CB = _LB + 1 + _LCAP * 6\nlocal _MCB = _CB + 2\nlocal _MPB = _MCB + 8\nlocal _MPCAP = 8\nlocal _ln = 0\nlocal _mn = 0\nlocal function _emit(kind, id, value)\n  local seq = pmem(_MB)\n  local slot = seq % _CAP\n  local base = _MB + 1 + slot * 3\n  pmem(base, kind)\n  pmem(base + 1, id)\n  pmem(base + 2, value)\n  pmem(_MB, seq + 1)\nend\nlocal function _hash(s)\n  local h = 2166136261\n  for i = 1, #s do\n    h = ((h ~ string.byte(s, i)) * 16777619) & 0xffffffff\n  end\n  return h\nend\nlocal function _norm(x, y, z)\n  local m = math.sqrt(x * x + y * y + z * z)\n  if m < 1e-6 then return 0, 0, 1 end\n  return x / m, y / m, z / m\nend\nlocal function _byte(v)\n  local b = math.floor((v or 0) * 127 + 0.5)\n  if b < -127 then b = -127 elseif b > 127 then b = 127 end\n  if b < 0 then b = b + 256 end\n  return b\nend\nlocal function _light(kind, x, y, z, radius, r, g, b, intensity, dx, dy, cone)\n  if _ln >= _LCAP then return end\n  local base = _LB + 1 + _ln * 6\n  pmem(base, x // 1)\n  pmem(base + 1, y // 1)\n  pmem(base + 2, z // 1)\n  pmem(base + 3, radius // 1)\n  local rgb = (math.floor(r or 255) & 0xff) << 16\n  rgb = rgb | ((math.floor(g or 255) & 0xff) << 8)\n  rgb = rgb | (math.floor(b or 255) & 0xff)\n  pmem(base + 4, rgb | (kind << 24) | (cone << 26))\n  local inten = math.floor((intensity or 1) * 256)\n  if inten < 0 then inten = 0 elseif inten > 0xffff then inten = 0xffff end\n  pmem(base + 5, inten | (dx << 16) | (dy << 24))\n  _ln = _ln + 1\n  pmem(_LB, _ln)\nend\ncartbox = {\n  unlock = function(id) _emit(1, _hash(id), 0) end,\n  score = function(v) _emit(2, 0, v // 1) end,\n  progress = function(id, v) _emit(3, _hash(id), v // 1) end,\n  -- request(kind, value): ask the host page for something it provides (e.g. a\n  -- page's matchmaking); kind and value are numbers the page defines.\n  request = function(kind, value) _emit(4, (kind or 0) // 1, (value or 0) // 1) end,\n  clearlights = function() _ln = 0 pmem(_LB, 0) end,\n  light = function(x, y, radius, r, g, b, z, intensity)\n    _light(0, x, y, z or 12, radius, r, g, b, intensity, 0, 0, 0)\n  end,\n  sun = function(dx, dy, dz, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    _light(1, 0, 0, 0, 0, r, g, b, intensity, _byte(nx), _byte(ny), 0)\n  end,\n  -- light3d(x, y, z, radius, r, g, b, intensity): a point light in a 3D scene's\n  -- world units (signed, fractional), lighting a first-person mesh view -- the\n  -- 2D relight ignores it. E.g. a glow over an objective.\n  light3d = function(x, y, z, radius, r, g, b, intensity)\n    _light(3, (x or 0) * 64, (y or 0) * 64, (z or 0) * 64, (radius or 4) * 64, r, g, b, intensity, 0, 0, 0)\n  end,\n  spot = function(x, y, z, dx, dy, dz, radius, angle, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    local cone = math.floor(math.cos(math.rad(angle or 30)) * 63 + 0.5)\n    if cone < 0 then cone = 0 elseif cone > 63 then cone = 63 end\n    _light(2, x, y, z or 12, radius, r, g, b, intensity, _byte(nx), _byte(ny), cone)\n  end,\n  camera = function(x, y)\n    pmem(_CB, math.floor((x or 0) * 16 + 0.5) & 0xffffffff)\n    pmem(_CB + 1, math.floor((y or 0) * 16 + 0.5) & 0xffffffff)\n  end,\n  -- Drive the 3D mesh orbit camera this frame: yaw/pitch (radians), distance in\n  -- world units (0 = auto-fit the scene), fov (radians, 0 = default). Call every\n  -- frame; not calling leaves the player's gentle auto-orbit in charge.\n  meshcam = function(yaw, pitch, dist, fov)\n    pmem(_MCB, 1)\n    pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 4, 0)\n    pmem(_MCB + 5, 0)\n    pmem(_MCB + 6, 0)\n    pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)\n  end,\n  -- Start a fresh frame's mesh-pose list. Call once before any meshpose() calls;\n  -- instances you don't pose keep their authored transform.\n  clearposes = function() _mn = 0 pmem(_MPB, 0) end,\n  -- First-person mode: composite the cart's 2D frame as a HUD OVER the 3D scene,\n  -- rather than drawing the meshes over the 2D (the default third-person showcase\n  -- compositing). Call each frame AFTER the camera call with a truthy value to\n  -- enable; near-black (index 0) pixels the cart leaves are the transparent \"world\"\n  -- and everything else the cart draws is the HUD. Rides a spare bit of the\n  -- mesh-camera flag word, so it costs no mailbox space.\n  hud = function(on)\n    local f = pmem(_MCB)\n    if on and on ~= 0 then pmem(_MCB, f | 2) else pmem(_MCB, f & 0xfffffffd) end\n  end,\n  -- Move/rotate/scale one mesh instance (by its sidecar index) this frame, on top\n  -- of its authored placement. x,y,z are world units; yaw (about Y), pitch (about\n  -- X), roll (about Z) radians;\n  -- scale defaults to 1 (pass 0 to hide). math.floor keeps every value integer so\n  -- the bitwise mask never sees a float (the Pro core's Lua throws on that). Must\n  -- match decodeMeshPoses() on the host.\n  -- Optional extras: frame picks one of the instance's animation frames (0 = its\n  -- base mesh, up to 127), tint recolours its tintable materials from the\n  -- 15-colour tint palette (0 = none), and front (true/1) draws it over the\n  -- whole scene \u2014 a held weapon that must never clip into a wall.\n  meshpose = function(index, x, y, z, yaw, pitch, roll, scale, frame, tint, front)\n    if _mn >= _MPCAP then return end\n    local base = _MPB + 1 + _mn * 8\n    local word = math.floor(index or 0) & 0xff\n    word = word | ((math.floor(frame or 0) & 0x7f) << 9) | ((math.floor(tint or 0) & 0xf) << 16)\n    if front and front ~= 0 then word = word | 0x100000 end\n    pmem(base, word)\n    pmem(base + 1, math.floor((x or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 2, math.floor((y or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 3, math.floor((z or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 4, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(base + 5, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(base + 6, math.floor((roll or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(base + 7, math.floor((scale or 1) * 256 + 0.5) & 0xffffffff)\n    _mn = _mn + 1\n    pmem(_MPB, _mn)\n  end,\n  -- HD-2D world (optional): a cart with a world sidecar draws a 3D tile terrain\n  -- and stands its 2D character sprites in it as depth-sorted billboards. The\n  -- world camera and billboards reuse the mesh camera/pose mailbox channels, so\n  -- no engine change is needed \u2014 these are thin aliases with the world's naming.\n  --\n  -- Drive the world camera this frame: yaw/pitch (radians), distance (world units,\n  -- 0 = auto-fit), fov (radians, 0 = default). Optional tx,ty,tz make the camera\n  -- LOOK AT that point (grid x/z units, height units for y) so it follows the\n  -- player; omit them (or pass 0,0,0) to frame the whole terrain. Same mailbox\n  -- layout as meshcam (target rides at _MCB+4..6).\n  worldcam = function(yaw, pitch, dist, fov, tx, ty, tz)\n    pmem(_MCB, 1)\n    pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 4, math.floor((tx or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 5, math.floor((ty or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 6, math.floor((tz or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)\n  end,\n  -- Start a fresh frame's billboard list. Call once before billboard() calls each\n  -- frame (an alias of clearposes \u2014 they share the mesh-pose channel).\n  clearbillboards = function() _mn = 0 pmem(_MPB, 0) end,\n  -- Place billboard index (declared in the world sidecar) at world position\n  -- (x,z grid units, y height units) this frame; scale defaults to 1 (0 hides).\n  -- math.floor keeps every value integer so the bitwise mask never sees a float.\n  billboard = function(index, x, y, z, scale)\n    if _mn >= _MPCAP then return end\n    local base = _MPB + 1 + _mn * 8\n    pmem(base, math.floor(index or 0) & 0xff)\n    pmem(base + 1, math.floor((x or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 2, math.floor((y or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 3, math.floor((z or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 4, 0)\n    pmem(base + 5, 0)\n    pmem(base + 6, 0)\n    pmem(base + 7, math.floor((scale or 1) * 256 + 0.5) & 0xffffffff)\n    _mn = _mn + 1\n    pmem(_MPB, _mn)\n  end,\n  -- stick(n) -> x, y: analog stick n (0 left, 1 right), each -1..1, y down-\n  -- positive. Reads 0,0 with no sticks (keyboard); on a touchscreen the pad\n  -- shows its right stick once a cart calls this. Uses pmem 68..69.\n  stick = function(n)\n    if pmem(69) ~= 0x53544b31 then pmem(69, 0x53544b31) end\n    local w = pmem(68)\n    local sh = (n == 1) and 16 or 0\n    local x, y = (w >> sh) & 0xff, (w >> (sh + 8)) & 0xff\n    if x >= 128 then x = x - 256 end\n    if y >= 128 then y = y - 256 end\n    return x / 127, y / 127\n  end,\n  -- Netplay (online multiplayer). The host page relays player state + events\n  -- between browsers through pmem words 0..118 (so a netplay cart must not keep\n  -- save data there); see packages/player/src/net/netplay.ts for the layout.\n  -- net() -> mode (0 offline, 1 client, 2 host), my slot, humans mask, match word,\n  -- and the page's status code (0 idle; the page defines the rest, e.g. searching)\n  net = function()\n    local h = pmem(0)\n    return h & 3, (h >> 2) & 7, (h >> 8) & 0xff, pmem(1), (h >> 5) & 7\n  end,\n  -- netpeer(slot) -> the slot's 3 state words, and whether they are live\n  netpeer = function(slot)\n    local b = 3 + slot * 3\n    return pmem(b), pmem(b + 1), pmem(b + 2), ((pmem(0) >> 16) & (1 << slot)) ~= 0\n  end,\n  -- netpublish(slot, a, b, c): publish a slot's state this tick (your own, or a\n  -- bot's when you are the host)\n  netpublish = function(slot, a, b, c)\n    local base = 72 + slot * 3\n    pmem(base, math.floor(a or 0) & 0xffffffff)\n    pmem(base + 1, math.floor(b or 0) & 0xffffffff)\n    pmem(base + 2, math.floor(c or 0) & 0xffffffff)\n    pmem(70, pmem(70) | (1 << slot))\n  end,\n  -- netmatch(word): the host's shared game-state word (clients read it via net())\n  netmatch = function(w) pmem(71, math.floor(w or 0) & 0xffffffff) end,\n  -- netsend(a, b): broadcast a 2-word event to every other player (\u2264 10/tick)\n  netsend = function(a, b)\n    local n = pmem(96)\n    if n >= 10 then return false end\n    pmem(97 + n * 2, math.floor(a or 0) & 0xffffffff)\n    pmem(98 + n * 2, math.floor(b or 0) & 0xffffffff)\n    pmem(96, n + 1)\n    return true\n  end,\n  -- netevents() -> this tick's incoming events, as a list of {a, b}\n  netevents = function()\n    local n = pmem(27)\n    local out = {}\n    for i = 0, n - 1 do out[#out + 1] = { pmem(28 + i * 2), pmem(29 + i * 2) } end\n    return out\n  end,\n  -- Collision defaults: overridden by the injected layer when the cart has one,\n  -- so cartbox.solid/mapsize are always safe to call (a cart with no collision\n  -- layer simply sees every cell as non-solid).\n  solid = function() return false end,\n  mapsize = function() return 0, 0 end,\n  -- Tile-flags default: overridden by the injected layer when the cart has one.\n  flag = function() return false end,\n  -- Scene objects (the cart's placed meshes by name, with parents, tags and\n  -- properties): overridden by the injected scene table when the cart has meshes.\n  -- An object is the 0-based index cartbox.meshpose takes, or its name.\n  objects = function() return 0 end,\n  find = function() return nil end,\n  objname = function() return nil end,\n  parent = function() return nil end,\n  children = function() return {} end,\n  prop = function(_, _, default) return default end,\n  hastag = function() return false end,\n  tagged = function() return {} end,\n  -- Physics (bodies on scene objects): overridden by the injected physics calls\n  -- when the cart has bodies.\n  physics = function() return false end,\n  body = function() return nil end,\n  impulse = function() end,\n  velocity = function() end,\n  teleport = function() end,\n  move = function() end,\n  ray = function() end,\n  hit = function() return false end,\n}";
+declare const CARTBOX_SDK_LUA = "local _MB = 119\nlocal _CAP = 8\nlocal _LB = _MB + 25\nlocal _LCAP = 6\nlocal _CB = _LB + 1 + _LCAP * 6\nlocal _MCB = _CB + 2\nlocal _MPB = _MCB + 8\nlocal _MPCAP = 8\nlocal _ln = 0\nlocal _mn = 0\nlocal function _emit(kind, id, value)\n  local seq = pmem(_MB)\n  local slot = seq % _CAP\n  local base = _MB + 1 + slot * 3\n  pmem(base, kind)\n  pmem(base + 1, id)\n  pmem(base + 2, value)\n  pmem(_MB, seq + 1)\nend\nlocal function _hash(s)\n  local h = 2166136261\n  for i = 1, #s do\n    h = ((h ~ string.byte(s, i)) * 16777619) & 0xffffffff\n  end\n  return h\nend\nlocal function _norm(x, y, z)\n  local m = math.sqrt(x * x + y * y + z * z)\n  if m < 1e-6 then return 0, 0, 1 end\n  return x / m, y / m, z / m\nend\nlocal function _byte(v)\n  local b = math.floor((v or 0) * 127 + 0.5)\n  if b < -127 then b = -127 elseif b > 127 then b = 127 end\n  if b < 0 then b = b + 256 end\n  return b\nend\nlocal function _light(kind, x, y, z, radius, r, g, b, intensity, dx, dy, cone)\n  if _ln >= _LCAP then return end\n  local base = _LB + 1 + _ln * 6\n  pmem(base, x // 1)\n  pmem(base + 1, y // 1)\n  pmem(base + 2, z // 1)\n  pmem(base + 3, radius // 1)\n  local rgb = (math.floor(r or 255) & 0xff) << 16\n  rgb = rgb | ((math.floor(g or 255) & 0xff) << 8)\n  rgb = rgb | (math.floor(b or 255) & 0xff)\n  pmem(base + 4, rgb | (kind << 24) | (cone << 26))\n  local inten = math.floor((intensity or 1) * 256)\n  if inten < 0 then inten = 0 elseif inten > 0xffff then inten = 0xffff end\n  pmem(base + 5, inten | (dx << 16) | (dy << 24))\n  _ln = _ln + 1\n  pmem(_LB, _ln)\nend\ncartbox = {\n  unlock = function(id) _emit(1, _hash(id), 0) end,\n  score = function(v) _emit(2, 0, v // 1) end,\n  progress = function(id, v) _emit(3, _hash(id), v // 1) end,\n  -- request(kind, value): ask the host page for something it provides (e.g. a\n  -- page's matchmaking); kind and value are numbers the page defines.\n  request = function(kind, value) _emit(4, (kind or 0) // 1, (value or 0) // 1) end,\n  clearlights = function() _ln = 0 pmem(_LB, 0) end,\n  light = function(x, y, radius, r, g, b, z, intensity)\n    _light(0, x, y, z or 12, radius, r, g, b, intensity, 0, 0, 0)\n  end,\n  sun = function(dx, dy, dz, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    _light(1, 0, 0, 0, 0, r, g, b, intensity, _byte(nx), _byte(ny), 0)\n  end,\n  -- light3d(x, y, z, radius, r, g, b, intensity): a point light in a 3D scene's\n  -- world units (signed, fractional), lighting a first-person mesh view -- the\n  -- 2D relight ignores it. E.g. a glow over an objective.\n  light3d = function(x, y, z, radius, r, g, b, intensity)\n    _light(3, (x or 0) * 64, (y or 0) * 64, (z or 0) * 64, (radius or 4) * 64, r, g, b, intensity, 0, 0, 0)\n  end,\n  spot = function(x, y, z, dx, dy, dz, radius, angle, r, g, b, intensity)\n    local nx, ny = _norm(dx or 0, dy or 0, dz or 1)\n    local cone = math.floor(math.cos(math.rad(angle or 30)) * 63 + 0.5)\n    if cone < 0 then cone = 0 elseif cone > 63 then cone = 63 end\n    _light(2, x, y, z or 12, radius, r, g, b, intensity, _byte(nx), _byte(ny), cone)\n  end,\n  camera = function(x, y)\n    pmem(_CB, math.floor((x or 0) * 16 + 0.5) & 0xffffffff)\n    pmem(_CB + 1, math.floor((y or 0) * 16 + 0.5) & 0xffffffff)\n  end,\n  -- Drive the 3D mesh orbit camera this frame: yaw/pitch (radians), distance in\n  -- world units (0 = auto-fit the scene), fov (radians, 0 = default). Call every\n  -- frame; not calling leaves the player's gentle auto-orbit in charge.\n  meshcam = function(yaw, pitch, dist, fov)\n    pmem(_MCB, 1)\n    pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 4, 0)\n    pmem(_MCB + 5, 0)\n    pmem(_MCB + 6, 0)\n    pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)\n  end,\n  -- Start a fresh frame's mesh-pose list. Call once before any meshpose() calls;\n  -- instances you don't pose keep their authored transform.\n  clearposes = function() _mn = 0 pmem(_MPB, 0) end,\n  -- First-person mode: composite the cart's 2D frame as a HUD OVER the 3D scene,\n  -- rather than drawing the meshes over the 2D (the default third-person showcase\n  -- compositing). Call each frame AFTER the camera call with a truthy value to\n  -- enable; near-black (index 0) pixels the cart leaves are the transparent \"world\"\n  -- and everything else the cart draws is the HUD. Rides a spare bit of the\n  -- mesh-camera flag word, so it costs no mailbox space.\n  hud = function(on)\n    local f = pmem(_MCB)\n    if on and on ~= 0 then pmem(_MCB, f | 2) else pmem(_MCB, f & 0xfffffffd) end\n  end,\n  -- Move/rotate/scale one mesh instance (by its sidecar index) this frame, on top\n  -- of its authored placement. x,y,z are world units; yaw (about Y), pitch (about\n  -- X), roll (about Z) radians;\n  -- scale defaults to 1 (pass 0 to hide). math.floor keeps every value integer so\n  -- the bitwise mask never sees a float (the Pro core's Lua throws on that). Must\n  -- match decodeMeshPoses() on the host.\n  -- Optional extras: frame picks one of the instance's animation frames (0 = its\n  -- base mesh, up to 127), tint recolours its tintable materials from the\n  -- 15-colour tint palette (0 = none), and front (true/1) draws it over the\n  -- whole scene \u2014 a held weapon that must never clip into a wall.\n  meshpose = function(index, x, y, z, yaw, pitch, roll, scale, frame, tint, front)\n    if _mn >= _MPCAP then return end\n    local base = _MPB + 1 + _mn * 8\n    local word = math.floor(index or 0) & 0xff\n    word = word | ((math.floor(frame or 0) & 0x7f) << 9) | ((math.floor(tint or 0) & 0xf) << 16)\n    if front and front ~= 0 then word = word | 0x100000 end\n    pmem(base, word)\n    pmem(base + 1, math.floor((x or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 2, math.floor((y or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 3, math.floor((z or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 4, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(base + 5, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(base + 6, math.floor((roll or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(base + 7, math.floor((scale or 1) * 256 + 0.5) & 0xffffffff)\n    _mn = _mn + 1\n    pmem(_MPB, _mn)\n  end,\n  -- HD-2D world (optional): a cart with a world sidecar draws a 3D tile terrain\n  -- and stands its 2D character sprites in it as depth-sorted billboards. The\n  -- world camera and billboards reuse the mesh camera/pose mailbox channels, so\n  -- no engine change is needed \u2014 these are thin aliases with the world's naming.\n  --\n  -- Drive the world camera this frame: yaw/pitch (radians), distance (world units,\n  -- 0 = auto-fit), fov (radians, 0 = default). Optional tx,ty,tz make the camera\n  -- LOOK AT that point (grid x/z units, height units for y) so it follows the\n  -- player; omit them (or pass 0,0,0) to frame the whole terrain. Same mailbox\n  -- layout as meshcam (target rides at _MCB+4..6).\n  worldcam = function(yaw, pitch, dist, fov, tx, ty, tz)\n    pmem(_MCB, 1)\n    pmem(_MCB + 1, math.floor((yaw or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 2, math.floor((pitch or 0) * 1024 + 0.5) & 0xffffffff)\n    pmem(_MCB + 3, math.floor((dist or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 4, math.floor((tx or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 5, math.floor((ty or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 6, math.floor((tz or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(_MCB + 7, math.floor((fov or 0) * 1024 + 0.5) & 0xffffffff)\n  end,\n  -- Start a fresh frame's billboard list. Call once before billboard() calls each\n  -- frame (an alias of clearposes \u2014 they share the mesh-pose channel).\n  clearbillboards = function() _mn = 0 pmem(_MPB, 0) end,\n  -- Place billboard index (declared in the world sidecar) at world position\n  -- (x,z grid units, y height units) this frame; scale defaults to 1 (0 hides).\n  -- math.floor keeps every value integer so the bitwise mask never sees a float.\n  billboard = function(index, x, y, z, scale)\n    if _mn >= _MPCAP then return end\n    local base = _MPB + 1 + _mn * 8\n    pmem(base, math.floor(index or 0) & 0xff)\n    pmem(base + 1, math.floor((x or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 2, math.floor((y or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 3, math.floor((z or 0) * 256 + 0.5) & 0xffffffff)\n    pmem(base + 4, 0)\n    pmem(base + 5, 0)\n    pmem(base + 6, 0)\n    pmem(base + 7, math.floor((scale or 1) * 256 + 0.5) & 0xffffffff)\n    _mn = _mn + 1\n    pmem(_MPB, _mn)\n  end,\n  -- stick(n) -> x, y: analog stick n (0 left, 1 right), each -1..1, y down-\n  -- positive. Reads 0,0 with no sticks (keyboard); on a touchscreen the pad\n  -- shows its right stick once a cart calls this. Uses pmem 68..69.\n  stick = function(n)\n    if pmem(69) ~= 0x53544b31 then pmem(69, 0x53544b31) end\n    local w = pmem(68)\n    local sh = (n == 1) and 16 or 0\n    local x, y = (w >> sh) & 0xff, (w >> (sh + 8)) & 0xff\n    if x >= 128 then x = x - 256 end\n    if y >= 128 then y = y - 256 end\n    return x / 127, y / 127\n  end,\n  -- Netplay (online multiplayer). The host page relays player state + events\n  -- between browsers through pmem words 0..118 (so a netplay cart must not keep\n  -- save data there); see packages/player/src/net/netplay.ts for the layout.\n  -- net() -> mode (0 offline, 1 client, 2 host), my slot, humans mask, match word,\n  -- and the page's status code (0 idle; the page defines the rest, e.g. searching)\n  net = function()\n    local h = pmem(0)\n    return h & 3, (h >> 2) & 7, (h >> 8) & 0xff, pmem(1), (h >> 5) & 7\n  end,\n  -- netpeer(slot) -> the slot's 3 state words, and whether they are live\n  netpeer = function(slot)\n    local b = 3 + slot * 3\n    return pmem(b), pmem(b + 1), pmem(b + 2), ((pmem(0) >> 16) & (1 << slot)) ~= 0\n  end,\n  -- netpublish(slot, a, b, c): publish a slot's state this tick (your own, or a\n  -- bot's when you are the host)\n  netpublish = function(slot, a, b, c)\n    local base = 72 + slot * 3\n    pmem(base, math.floor(a or 0) & 0xffffffff)\n    pmem(base + 1, math.floor(b or 0) & 0xffffffff)\n    pmem(base + 2, math.floor(c or 0) & 0xffffffff)\n    pmem(70, pmem(70) | (1 << slot))\n  end,\n  -- netmatch(word): the host's shared game-state word (clients read it via net())\n  netmatch = function(w) pmem(71, math.floor(w or 0) & 0xffffffff) end,\n  -- netsend(a, b): broadcast a 2-word event to every other player (\u2264 10/tick)\n  netsend = function(a, b)\n    local n = pmem(96)\n    if n >= 10 then return false end\n    pmem(97 + n * 2, math.floor(a or 0) & 0xffffffff)\n    pmem(98 + n * 2, math.floor(b or 0) & 0xffffffff)\n    pmem(96, n + 1)\n    return true\n  end,\n  -- netevents() -> this tick's incoming events, as a list of {a, b}\n  netevents = function()\n    local n = pmem(27)\n    local out = {}\n    for i = 0, n - 1 do out[#out + 1] = { pmem(28 + i * 2), pmem(29 + i * 2) } end\n    return out\n  end,\n  -- Collision defaults: overridden by the injected layer when the cart has one,\n  -- so cartbox.solid/mapsize are always safe to call (a cart with no collision\n  -- layer simply sees every cell as non-solid).\n  solid = function() return false end,\n  mapsize = function() return 0, 0 end,\n  -- Tile-flags default: overridden by the injected layer when the cart has one.\n  flag = function() return false end,\n  -- Scene objects (the cart's placed meshes by name, with parents, tags and\n  -- properties): overridden by the injected scene table when the cart has meshes.\n  -- An object is the 0-based index cartbox.meshpose takes, or its name.\n  objects = function() return 0 end,\n  find = function() return nil end,\n  objname = function() return nil end,\n  parent = function() return nil end,\n  children = function() return {} end,\n  prop = function(_, _, default) return default end,\n  hastag = function() return false end,\n  tagged = function() return {} end,\n  -- Physics (bodies on scene objects): overridden by the injected physics calls\n  -- when the cart has bodies.\n  physics = function() return false end,\n  body = function() return nil end,\n  impulse = function() end,\n  velocity = function() end,\n  teleport = function() end,\n  move = function() end,\n  ray = function() end,\n  hit = function() return false end,\n  -- Spawning prefab copies: overridden when the cart has prefabs.\n  spawn = function() return nil end,\n  despawn = function() end,\n  alive = function() return false end,\n}";
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */
 declare function injectSdk(bytes: Uint8Array): Uint8Array;
 
@@ -3988,6 +4110,14 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private flat;
     /** World matrices of the objects physics moved this frame (see setBodyOverrides). */
     private bodies;
+    /** Spawned prefab copies: root object index → the root's world matrix (see setSpawned). */
+    private spawned;
+    /** Each object's reserve-copy root (-1 when it isn't part of a prefab reserve). */
+    private readonly pooledRoot;
+    /** The authored instances without the reserve copies (drawn when nothing moves). */
+    private readonly unpooled;
+    /** Each object's world matrix as last drawn (null = hidden), or null when nothing moved. */
+    private lastPlacement;
     /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
     private hudFrame;
     private constructor();
@@ -3997,6 +4127,12 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * still composes on top. The player calls this each frame from the physics session.
      */
     setBodyOverrides(bodies: ReadonlyMap<number, Mat4>): void;
+    /**
+     * Set the prefab copies the cart has spawned (root object index → world matrix).
+     * Reserve copies not in the map stay hidden; a spawned copy's children follow
+     * its root, and its physics bodies (if any) take over from there.
+     */
+    setSpawned(spawned: ReadonlyMap<number, Mat4>): void;
     /** Posed instances plus, in a hierarchy, everything below them: what moves this frame. */
     private withChildren;
     /**
@@ -4061,6 +4197,11 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * their baked world matrix.
      */
     private posedHierarchy;
+    /**
+     * Each object's world matrix as last drawn, null where it was hidden (live
+     * inspection). Before anything has moved, the authored placement.
+     */
+    placements(): readonly (Mat4 | null)[];
     /** A tinted copy of `mesh`, cached so its identity (and any GPU upload) is stable. */
     private tinted;
     /**
@@ -4183,62 +4324,6 @@ declare class WorldOverlaySurface implements DisplaySurface {
 }
 
 /**
- * The physics channel between the host (which runs the physics world) and the
- * cart's Lua (ENGINE_ROADMAP.md, Phase 2).
- *
- * pmem is too small for body state, so physics uses an 8 KB block at the very end
- * of the console's RAM — inside TIC-80's free RAM on every core, where Lua reads
- * and writes it with peek/poke and the host with a view of the WASM heap. Only a
- * cart that has physics bodies uses it.
- *
- * Each core has its own RAM layout (the era models enlarge VRAM and the map), so
- * the block's address comes from a per-model table, measured against the real
- * engine builds by a test (physics.test.ts) that fails if a rebuild moves them.
- * The host writes a magic word at load and the cart's first tick checks it, so a
- * mismatch disables physics rather than corrupting memory.
- *
- * All values are little-endian int32; positions, velocities and distances are
- * fixed point with 1/1024 precision (±2 million units of range).
- */
-
-/** Where pmem word 0 sits in Lua's RAM address space, and how big RAM is, per core. */
-interface RamLayout {
-    readonly pmemAddress: number;
-    readonly ramSize: number;
-}
-/** RAM layout by console model (models sharing a core share its layout). */
-declare const RAM_LAYOUTS: Readonly<Record<ModelId, RamLayout>>;
-declare const PHYS_BLOCK_BYTES = 8192;
-declare const PHYS_MAGIC = 1213219395;
-/** Where the physics block starts in Lua's RAM space for a model. */
-declare function physicsBlockAddress(layout: RamLayout): number;
-/** A command the cart wrote this tick. */
-interface PhysicsCommand {
-    readonly op: number;
-    readonly a: number;
-    readonly v: readonly [number, number, number, number, number, number];
-}
-/** One body's state as the cart reads it. */
-interface PhysicsBodyState {
-    readonly object: number;
-    readonly position: readonly [number, number, number];
-    readonly velocity: readonly [number, number, number];
-    readonly grounded: boolean;
-    readonly sleeping: boolean;
-}
-/** One ray result (slot order), or null for a miss / no request. */
-interface PhysicsRayHit {
-    readonly object: number;
-    readonly point: readonly [number, number, number];
-    readonly normal: readonly [number, number, number];
-    readonly distance: number;
-}
-/** Write the host → Lua half of the block. */
-declare function writePhysicsState(block: DataView, tick: number, bodies: readonly PhysicsBodyState[], rays: readonly (PhysicsRayHit | null)[]): void;
-/** Read (and clear) the commands the cart wrote this tick. */
-declare function takePhysicsCommands(block: DataView): PhysicsCommand[];
-
-/**
  * The cart-facing physics calls (ENGINE_ROADMAP.md, Phase 2), generated for a
  * cart that has physics bodies: they read body state from, and write commands
  * to, the shared block at the end of RAM (see protocol.ts) with peek/poke.
@@ -4252,12 +4337,60 @@ declare function takePhysicsCommands(block: DataView): PhysicsCommand[];
  *   cartbox.ray(slot, x, y, z, dx, dy, dz, max)   cast a ray (slot 0-15); read next tick
  *   cartbox.hit(slot)                 -> hit, obj, x, y, z, nx, ny, nz, distance
  *
+ * Spawning prefab copies (when the cart has prefabs) rides the same block:
+ *
+ *   cartbox.spawn(prefab, x, y, z, yaw, pitch, roll) -> the copy's root object, or nil
+ *   cartbox.despawn(obj)              put a spawned copy back in reserve
+ *   cartbox.alive(obj)                -> whether a copy is spawned
+ *
  * `obj` is an object index or its name (as cartbox.find). The SDK's defaults
- * (sdk.ts) make every call a safe no-op for carts without bodies.
+ * (sdk.ts) make every call a safe no-op for carts without bodies or prefabs.
  */
 
-/** The Lua for a cart's physics calls, or "" when the scene has no bodies. */
-declare function physicsSdkLua(scene: MeshScene | null | undefined, layout: RamLayout): string;
+/**
+ * Whether a scene needs the runtime block at all: bodies (when a physics engine
+ * will run them), or prefabs to spawn.
+ */
+declare function sceneNeedsRuntime(scene: MeshScene | null | undefined, { physics }?: {
+    physics?: boolean;
+}): boolean;
+/**
+ * The Lua for a cart's runtime calls — physics (when it has bodies) and spawning
+ * (when it has prefabs) — or "" when it needs neither.
+ */
+declare function runtimeSdkLua(scene: MeshScene | null | undefined, layout: RamLayout, { physics: engine }?: {
+    physics?: boolean;
+}): string;
+/** @deprecated Kept for callers of the physics-only name: the same as runtimeSdkLua. */
+declare const physicsSdkLua: typeof runtimeSdkLua;
+
+/**
+ * The per-tick exchange between the host and a cart's Lua through the shared
+ * block at the end of RAM (physics/protocol.ts): physics state out, and the
+ * cart's commands in — physics ones for the {@link PhysicsSession}, scene ones
+ * (spawning and despawning prefab copies) handled here.
+ *
+ * A cart gets a channel when its scene has physics bodies or spawnable prefabs.
+ */
+
+declare class RuntimeChannel {
+    private readonly scene;
+    private readonly physics;
+    /** Spawned copies: root object index → the root's world matrix. */
+    private readonly active;
+    /** Each reserve root's objects (itself first, then its descendants). */
+    private readonly copyObjects;
+    constructor(scene: MeshScene, physics: PhysicsSession | null);
+    /** Write what the cart reads this tick (and the handshake word). */
+    beforeTick(block: DataView): void;
+    /** Take the cart's commands: scene ops here, the rest to physics (which then steps). */
+    afterTick(block: DataView): void;
+    /** Spawned copies' root world matrices (root object index → matrix). */
+    spawned(): ReadonlyMap<number, Mat4>;
+    private spawn;
+    private despawn;
+    destroy(): void;
+}
 
 /**
  * @cartbox/player — public entry point.
@@ -4287,4 +4420,4 @@ declare function physicsSdkLua(scene: MeshScene | null | undefined, layout: RamL
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_PAD_BINDINGS, type DeviceProvider, EVENT_CAPACITY, type Ease, EngineLoadError, type FlagsField, GamepadInput, type GeneratedTrack, HEIGHT_WORLD, type InnerSurfaceFactory, type InputChange, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetState, type NetTransport, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POST_FX_EFFECTS, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$1 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, RAM_LAYOUTS, REPLAY_VERSION, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, SOFTWARE_RASTER_CAPS, START_KEYS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, SoftwareSceneRenderer, type SpriteRegion, type SpriteRegionSource, SwitchableTransport, TILT_SHIFT_FEATHER, type TextureLookup, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3, type VerificationResult, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, alignBytesPerRow, animClipsSdkLua, anyPostFxEnabled, applyLookSettings, applyRenderCaps, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, collisionSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interleaveVertices, interpolateNormal, loadEngineModule, makeShadowTexture, mount, nearestDirection, netSendInterval, normalBasis3x3, normalVector, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, runReplayEvents, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, sceneHasPhysics, sceneObjectsSdkLua, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, splitWorldMatrix, standardizePad, sway, takeNetOutbox, takePhysicsCommands, tiltShiftBlur, uniformsFromSettings, unpadRows, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeInstanceUniform, writeNetInbox, writePhysicsState };
+export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_PAD_BINDINGS, type DeviceProvider, EVENT_CAPACITY, type Ease, EngineLoadError, type FlagsField, GamepadInput, type GeneratedTrack, HEIGHT_WORLD, type InnerSurfaceFactory, type InputChange, type InspectedObject, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetState, type NetTransport, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POST_FX_EFFECTS, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$1 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, RAM_LAYOUTS, REPLAY_VERSION, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, RuntimeChannel, SOFTWARE_RASTER_CAPS, START_KEYS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, SoftwareSceneRenderer, type SpriteRegion, type SpriteRegionSource, SwitchableTransport, TILT_SHIFT_FEATHER, type TextureLookup, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3, type VerificationResult, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, alignBytesPerRow, animClipsSdkLua, anyPostFxEnabled, applyLookSettings, applyRenderCaps, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, collisionSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights, defaultPostFxSettings, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interleaveVertices, interpolateNormal, loadEngineModule, makeShadowTexture, mount, nearestDirection, netSendInterval, normalBasis3x3, normalVector, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, splitWorldMatrix, standardizePad, sway, takeNetOutbox, takePhysicsCommands, tiltShiftBlur, uniformsFromSettings, unpadRows, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeInstanceUniform, writeNetInbox, writePhysicsState };
