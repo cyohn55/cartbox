@@ -128,7 +128,11 @@ trades state and commands with the cart through an 8 KB block at the end of RAM
 - [ ] Asset bundles and streaming: load a level's assets on demand, with a loading
       screen and progress.
 - [ ] WebGL2 fallback renderer for browsers without WebGPU.
-- [ ] Download-size and load-time budget shown in the editor per cart.
+- [x] Download-size and load-time budget shown in the editor per cart (⋯ → Download
+      size): engine core, cartridge, 3D scene (split into geometry / textures /
+      animation, heaviest meshes named), physics engine when bodies need it, other data
+      and uploads — gzipped as sent — with load times on slow 4G / 4G / broadband and
+      tips on what would shrink it.
 - [ ] Quality presets (resolution scale, shadows, effects) chosen per device.
 
 ## Phase 5 — Debugging and profiling

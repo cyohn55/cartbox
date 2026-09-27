@@ -76,6 +76,7 @@ import { useEditorHistory, hashBytes, snapshotsEqual, type CartSnapshot } from "
 import { saveCartLocally, saveCartToAccount, type SaveOutcome } from "./persistCart";
 import { SPATIAL_TABS, TAB_META, visibleTabs, type Tab } from "./editorTabs";
 import { ShortcutHelp } from "./ShortcutHelp";
+import { DownloadBudget } from "./DownloadBudget";
 import { useShortcuts, WORKBENCH_SHORTCUTS, type Shortcut } from "./shortcuts";
 import { decodeMeshSidecar, encodeMeshSidecar, addMesh, type MeshSidecar } from "@/lib/meshSidecar";
 import { rebakeMeshSidecar } from "@/lib/meshTextureBake";
@@ -396,6 +397,11 @@ function WorkbenchBody({
     [sidecars.mesh, setSidecar],
   );
   const meshScene = useMemo<MeshScene | null>(() => parseMeshScene(sidecars.mesh), [sidecars.mesh]);
+  // Every sidecar but the mesh one (measured separately), for the download budget.
+  const budgetOtherData = useMemo(
+    () => (Object.entries(sidecars) as [string, unknown][]).filter(([key]) => key !== "mesh").map(([, value]) => value),
+    [sidecars],
+  );
   const world = useMemo<WorldScene | null>(() => parseWorldScene(sidecars.world), [sidecars.world]);
   const setWorld = useCallback(
     (next: WorldScene | null) => setSidecar("world", next ? JSON.stringify(next) : null),
@@ -460,6 +466,9 @@ function WorkbenchBody({
   const [runtimeErrorLine, setRuntimeErrorLine] = useState<number | null>(null);
   const [showDetails, setShowDetails] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  /** The download-size dialog, with the cartridge bytes captured when it opened. */
+  const [budgetCart, setBudgetCart] = useState<Uint8Array | null | undefined>(undefined);
+  const closeBudget = useCallback(() => setBudgetCart(undefined), []);
   // First-run guidance: a dismissible card naming the handful of tabs that
   // matter, for a 12-tab tool that otherwise opens on a demo seed with no "start
   // here". Persisted per-browser so a returning creator never sees it again;
@@ -1136,6 +1145,17 @@ function WorkbenchBody({
                 role="menuitem"
                 className={styles.fileMenuItem}
                 onMouseDown={() => {
+                  setBudgetCart(runnable ? runnable.saveTic() : null);
+                  setFileOpen(false);
+                }}
+              >
+                Download size…
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className={styles.fileMenuItem}
+                onMouseDown={() => {
                   setShowHelp(true);
                   setFileOpen(false);
                 }}
@@ -1323,6 +1343,17 @@ function WorkbenchBody({
       )}
 
       {showHelp && <ShortcutHelp tabs={tabs.order.slice(0, 9)} onClose={() => setShowHelp(false)} />}
+      {budgetCart !== undefined && (
+        <DownloadBudget
+          modelId={modelId}
+          cartridge={budgetCart}
+          meshSidecar={sidecars.mesh}
+          otherData={budgetOtherData}
+          cartId={cartId}
+          hasUploads={hasStoredAssets}
+          onClose={closeBudget}
+        />
+      )}
 
       {/* First-run guidance: for a 12-tab tool that opens on a demo seed, name the
           three tabs that matter and where to go when done. Dismissed for good on
