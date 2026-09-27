@@ -56,17 +56,18 @@ Actors. Today a mesh instance has an id, a name and a transform.
 - [x] **Editor: Hierarchy and Inspector.** A tree of the scene's objects (rename,
       re-parent, select) and an inspector for the selected object's name, parent,
       transform, tags and properties.
-- [ ] **Prefabs.** Save an object and its children as a reusable asset; place
+- [x] **Prefabs.** Save an object and its children as a reusable asset; place
       copies; edits to the prefab flow to every copy unless overridden.
 - [ ] **Play-in-editor inspection.** While the cart runs in the editor, select an
       object to see its live transform and properties.
 
 **Status:** in progress. Landed: the data model, runtime hierarchy, Lua API
-(`cartbox.find / prop / tagged / hastag / parent / children / objname / objects`)
-and the Mesh tab's Hierarchy tree plus Parent, Tags and Properties in the
-Inspector. Re-parenting keeps the object's local transform (it moves to sit under
-its new parent); keeping its world position instead is a follow-up. Next: prefabs,
-then live inspection while playing.
+(`cartbox.find / prop / tagged / hastag / parent / children / objname / objects`),
+the Mesh tab's Hierarchy tree plus Parent, Tags and Properties in the Inspector,
+re-parenting that keeps an object where it is in the world, and prefabs (save,
+place, apply to all copies keeping each copy's own changes, revert, unlink).
+Next: live inspection while playing, and spawning prefab copies from Lua at run
+time.
 
 ## Phase 2 — Physics
 

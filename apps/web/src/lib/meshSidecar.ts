@@ -17,7 +17,11 @@
  */
 
 import {
+  composeModelMatrix,
+  decomposeModelMatrix,
   deserializeMeshAsset,
+  invertAffine,
+  multiplyMat4,
   isSceneKey,
   packMeshLibrary,
   parentIndices,
@@ -31,6 +35,7 @@ import {
   resolveMeshFrames,
   resolveMeshRef,
   serializeMeshAsset,
+  worldMatrices,
   type MeshAsset,
   type SceneLighting,
   type ScenePropValue,
@@ -68,6 +73,39 @@ export interface MeshSidecarEntry {
   readonly parent?: string;
   readonly tags?: readonly string[];
   readonly props?: Readonly<Record<string, ScenePropValue>>;
+  /** Set when this entry is part of a placed prefab (see meshPrefabs.ts). */
+  readonly prefab?: PrefabLink;
+}
+
+/**
+ * An entry's link to the prefab it was placed from: which prefab, which of its
+ * nodes this entry is, and which placed copy (the id of that copy's root entry).
+ */
+export interface PrefabLink {
+  readonly id: string;
+  readonly node: string;
+  readonly instance: string;
+}
+
+/** One object inside a prefab: an entry's content, keyed within the prefab. */
+export interface PrefabNode {
+  readonly key: string;
+  readonly name: string;
+  readonly mesh: string;
+  readonly frames?: readonly string[];
+  /** Relative to the parent node; ignored for the root (each copy has its own placement). */
+  readonly transform: MeshTransform;
+  /** The parent node's key; absent for the root (exactly one node). */
+  readonly parent?: string;
+  readonly tags?: readonly string[];
+  readonly props?: Readonly<Record<string, ScenePropValue>>;
+}
+
+/** A reusable group of objects: a root node and everything under it. */
+export interface MeshPrefab {
+  readonly id: string;
+  readonly name: string;
+  readonly nodes: readonly PrefabNode[];
 }
 
 /** The whole mesh sidecar: every placed mesh on the cart, plus its lighting rig. */
@@ -80,6 +118,8 @@ export interface MeshSidecar {
    * without a rig renders exactly as before. See {@link SceneLighting}.
    */
   readonly lighting: SceneLighting | null;
+  /** Reusable object groups the creator saved (absent or empty when there are none). */
+  readonly prefabs?: readonly MeshPrefab[];
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -103,14 +143,25 @@ function newMeshId(): string {
  * alone (meshes removed but the scene still lit) is kept.
  */
 export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
-  if (sidecar.meshes.length === 0 && !sidecar.lighting) return null;
-  // Repeated meshes (and animation frames) are stored once in a shared library.
-  const { entries, library } = packMeshLibrary(sidecar.meshes);
+  const prefabs = sidecar.prefabs ?? [];
+  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0) return null;
+  // Repeated meshes (and animation frames) are stored once in a shared library,
+  // shared between placed entries and prefab nodes (a prefab's copies repeat its meshes).
+  const nodes = prefabs.flatMap((prefab) => prefab.nodes);
+  const { entries, library } = packMeshLibrary<MeshSidecarEntry | PrefabNode>([...sidecar.meshes, ...nodes]);
+  const packedNodes = entries.slice(sidecar.meshes.length) as PrefabNode[];
+  let at = 0;
+  const packedPrefabs = prefabs.map((prefab) => {
+    const out = { ...prefab, nodes: packedNodes.slice(at, at + prefab.nodes.length) };
+    at += prefab.nodes.length;
+    return out;
+  });
   return JSON.stringify({
     version: MESH_SIDECAR_VERSION,
-    meshes: entries,
+    meshes: entries.slice(0, sidecar.meshes.length),
     ...(Object.keys(library).length > 0 ? { library } : {}),
     lighting: sidecar.lighting ?? null,
+    ...(packedPrefabs.length > 0 ? { prefabs: packedPrefabs } : {}),
   });
 }
 
@@ -179,10 +230,64 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
       ...(typeof record.parent === "string" && record.parent ? { parent: record.parent } : {}),
       ...(tags.length > 0 ? { tags } : {}),
       ...(Object.keys(props).length > 0 ? { props } : {}),
+      ...(readPrefabLink(record.prefab) ? { prefab: readPrefabLink(record.prefab)! } : {}),
     });
   }
   const lighting = parseSceneLighting((parsed as { lighting?: unknown }).lighting);
-  return { version: MESH_SIDECAR_VERSION, meshes, lighting };
+  const prefabs = readPrefabs((parsed as { prefabs?: unknown }).prefabs, library, isValid);
+  // A link to a prefab (or node) that didn't survive decoding is dropped.
+  const known = new Map(prefabs.map((p) => [p.id, new Set(p.nodes.map((n) => n.key))]));
+  const linked = meshes.map((entry) =>
+    entry.prefab && !known.get(entry.prefab.id)?.has(entry.prefab.node) ? withoutLink(entry) : entry,
+  );
+  return { version: MESH_SIDECAR_VERSION, meshes: linked, lighting, ...(prefabs.length > 0 ? { prefabs } : {}) };
+}
+
+function withoutLink(entry: MeshSidecarEntry): MeshSidecarEntry {
+  const { prefab: _drop, ...rest } = entry;
+  return rest;
+}
+
+function readPrefabLink(value: unknown): PrefabLink | null {
+  const raw = value as Partial<PrefabLink> | null | undefined;
+  if (!raw || typeof raw.id !== "string" || typeof raw.node !== "string" || typeof raw.instance !== "string") return null;
+  return { id: raw.id, node: raw.node, instance: raw.instance };
+}
+
+/** Read stored prefabs, dropping invalid nodes and any prefab left without exactly one root. */
+function readPrefabs(value: unknown, library: ReturnType<typeof readMeshLibrary>, isValid: (mesh: string) => boolean): MeshPrefab[] {
+  if (!Array.isArray(value)) return [];
+  const out: MeshPrefab[] = [];
+  for (const item of value) {
+    const raw = item as { id?: unknown; name?: unknown; nodes?: unknown };
+    if (typeof raw.id !== "string" || !Array.isArray(raw.nodes)) continue;
+    const nodes: PrefabNode[] = [];
+    for (const n of raw.nodes) {
+      const node = n as Partial<PrefabNode> & { frames?: unknown; tags?: unknown; props?: unknown };
+      if (typeof node.key !== "string" || typeof node.mesh !== "string") continue;
+      const mesh = resolveMeshRef(node.mesh, library);
+      if (!mesh || !isValid(mesh)) continue;
+      const frames = resolveMeshFrames(node.frames, library).filter(isValid);
+      const tags = readSceneTags(node.tags);
+      const props = readSceneProps(node.props);
+      nodes.push({
+        key: node.key,
+        name: typeof node.name === "string" ? node.name : "Mesh",
+        mesh,
+        transform: readTransform(node.transform),
+        ...(frames.length > 0 ? { frames } : {}),
+        ...(typeof node.parent === "string" && node.parent ? { parent: node.parent } : {}),
+        ...(tags.length > 0 ? { tags } : {}),
+        ...(Object.keys(props).length > 0 ? { props } : {}),
+      });
+    }
+    const keys = new Set(nodes.map((n) => n.key));
+    // Orphaned nodes (parent missing) are dropped; the prefab needs exactly one root.
+    const kept = nodes.filter((n) => !n.parent || keys.has(n.parent));
+    if (kept.filter((n) => !n.parent).length !== 1) continue;
+    out.push({ id: raw.id, name: typeof raw.name === "string" ? raw.name : "Prefab", nodes: kept });
+  }
+  return out;
 }
 
 // --- Immutable list operations (the editor edits through these) ------------
@@ -266,18 +371,46 @@ export function parentCandidates(sidecar: MeshSidecar, id: string): MeshSidecarE
   });
 }
 
+/** Every entry's world matrix, index-aligned with `sidecar.meshes`. */
+export function meshWorldMatrices(sidecar: MeshSidecar) {
+  return worldMatrices(
+    sidecar.meshes.map(({ transform: t }) => composeModelMatrix(t.position, t.rotation, t.scale)),
+    parentIndices(sidecar.meshes),
+  );
+}
+
 /**
- * Parent `id` to `parentId` (null makes it a root). Its transform is kept as its
- * local transform, now relative to the new parent. A parent that would create a
- * cycle (itself or one of its descendants) or doesn't exist is refused: the
- * sidecar comes back unchanged.
+ * Parent `id` to `parentId` (null makes it a root). By default the object stays
+ * where it is in the world: its transform is rewritten relative to the new parent.
+ * With `keepWorld` false the transform is kept as-is, so the object moves to sit
+ * under its new parent. A parent that would create a cycle (itself or one of its
+ * descendants) or doesn't exist is refused: the sidecar comes back unchanged.
  */
-export function setMeshParent(sidecar: MeshSidecar, id: string, parentId: string | null): MeshSidecar {
+export function setMeshParent(
+  sidecar: MeshSidecar,
+  id: string,
+  parentId: string | null,
+  { keepWorld = true }: { keepWorld?: boolean } = {},
+): MeshSidecar {
   if (parentId !== null && !parentCandidates(sidecar, id).some((entry) => entry.id === parentId)) return sidecar;
+  let transform: MeshTransform | null = null;
+  if (keepWorld) {
+    const world = meshWorldMatrices(sidecar);
+    const self = sidecar.meshes.findIndex((entry) => entry.id === id);
+    const parent = parentId === null ? -1 : sidecar.meshes.findIndex((entry) => entry.id === parentId);
+    if (self >= 0) {
+      const inverse = parent >= 0 ? invertAffine(world[parent]!) : null;
+      if (parent < 0 || inverse) transform = decomposeModelMatrix(inverse ? multiplyMat4(inverse, world[self]!) : world[self]!);
+    }
+  }
   return {
     ...sidecar,
     version: MESH_SIDECAR_VERSION,
-    meshes: sidecar.meshes.map((entry) => (entry.id === id ? withParent(entry, parentId) : entry)),
+    meshes: sidecar.meshes.map((entry) => {
+      if (entry.id !== id) return entry;
+      const next = withParent(entry, parentId);
+      return transform ? { ...next, transform } : next;
+    }),
   };
 }
 

@@ -175,3 +175,72 @@ export function localDirection(parentWorld: Mat4, v: readonly [number, number, n
     inv[6]! * v[0] + inv[7]! * v[1] + inv[8]! * v[2],
   ];
 }
+
+/** Inverse of an affine (rotation · scale · translation) column-major matrix, or null if singular. */
+export function invertAffine(m: Mat4): Mat4 | null {
+  const a = m[0]!, b = m[4]!, c = m[8]!;
+  const d = m[1]!, e = m[5]!, f = m[9]!;
+  const g = m[2]!, h = m[6]!, k = m[10]!;
+  const A = e * k - f * h;
+  const B = -(d * k - f * g);
+  const C = d * h - e * g;
+  const det = a * A + b * B + c * C;
+  if (Math.abs(det) < 1e-12) return null;
+  // Rows of the 3×3 inverse.
+  const i00 = A / det, i01 = -(b * k - c * h) / det, i02 = (b * f - c * e) / det;
+  const i10 = B / det, i11 = (a * k - c * g) / det, i12 = -(a * f - c * d) / det;
+  const i20 = C / det, i21 = -(a * h - b * g) / det, i22 = (a * e - b * d) / det;
+  const tx = m[12]!, ty = m[13]!, tz = m[14]!;
+  const out = new Float64Array(16);
+  out[0] = i00; out[4] = i01; out[8] = i02;
+  out[1] = i10; out[5] = i11; out[9] = i12;
+  out[2] = i20; out[6] = i21; out[10] = i22;
+  out[12] = -(i00 * tx + i01 * ty + i02 * tz);
+  out[13] = -(i10 * tx + i11 * ty + i12 * tz);
+  out[14] = -(i20 * tx + i21 * ty + i22 * tz);
+  out[15] = 1;
+  return out;
+}
+
+/**
+ * Split a model matrix back into the editor's transform: position, Euler angles
+ * in degrees (the X→Y→Z order `composeModelMatrix` uses, R = Rz·Ry·Rx) and scale.
+ * Exact for rotation · scale matrices; a matrix with shear (a non-uniformly scaled
+ * parent that is also rotated) comes back as the nearest such transform.
+ */
+export function decomposeModelMatrix(m: Mat4): {
+  position: [number, number, number];
+  rotation: [number, number, number];
+  scale: [number, number, number];
+} {
+  const len = (x: number, y: number, z: number) => Math.hypot(x, y, z);
+  let sx = len(m[0]!, m[1]!, m[2]!);
+  const sy = len(m[4]!, m[5]!, m[6]!);
+  const sz = len(m[8]!, m[9]!, m[10]!);
+  // A mirrored matrix (negative determinant) keeps the flip on X.
+  const det =
+    m[0]! * (m[5]! * m[10]! - m[9]! * m[6]!) - m[4]! * (m[1]! * m[10]! - m[9]! * m[2]!) + m[8]! * (m[1]! * m[6]! - m[5]! * m[2]!);
+  if (det < 0) sx = -sx;
+  const safe = (s: number) => (Math.abs(s) < 1e-12 ? 1 : s);
+  const r00 = m[0]! / safe(sx), r10 = m[1]! / safe(sx), r20 = m[2]! / safe(sx);
+  const r21 = m[6]! / safe(sy), r22 = m[10]! / safe(sz);
+  const r01 = m[4]! / safe(sy), r11 = m[5]! / safe(sy);
+  const deg = 180 / Math.PI;
+  let rx: number, rz: number;
+  const sinY = Math.max(-1, Math.min(1, -r20));
+  const ry = Math.asin(sinY);
+  if (Math.abs(sinY) < 0.999999) {
+    rx = Math.atan2(r21, r22);
+    rz = Math.atan2(r10, r00);
+  } else {
+    // Gimbal lock: X and Z turn about the same axis; put it all on Z.
+    rx = 0;
+    rz = Math.atan2(-r01, r11);
+  }
+  const clean = (v: number) => (Math.abs(v) < 1e-9 ? 0 : Number(v.toFixed(6)));
+  return {
+    position: [clean(m[12]!), clean(m[13]!), clean(m[14]!)],
+    rotation: [clean(rx * deg), clean(ry * deg), clean(rz * deg)],
+    scale: [clean(sx), clean(sy), clean(sz)],
+  };
+}

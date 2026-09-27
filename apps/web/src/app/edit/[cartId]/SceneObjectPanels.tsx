@@ -21,6 +21,17 @@ import {
   type MeshSidecar,
   type MeshSidecarEntry,
 } from "@/lib/meshSidecar";
+import {
+  applyToPrefab,
+  createPrefab,
+  deletePrefab,
+  findPrefab,
+  overrideCount,
+  placePrefab,
+  prefabInstances,
+  revertToPrefab,
+  unlinkPrefab,
+} from "@/lib/meshPrefabs";
 import styles from "./editor.module.css";
 import { RailGroup, RailHint } from "./railControls";
 
@@ -62,6 +73,11 @@ export function HierarchyPanel({
               <span aria-hidden style={{ opacity: 0.55, width: 12, flex: "none" }}>
                 {hasChildren ? "▾" : depth > 0 ? "·" : ""}
               </span>
+              {entry.prefab && (
+                <span aria-hidden title="Part of a prefab copy" style={{ color: "#7db8fc", marginRight: 4, flex: "none" }}>
+                  ◆
+                </span>
+              )}
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 170 - depth * 14 }}>
                 {entry.name}
               </span>
@@ -107,7 +123,7 @@ export function ParentPicker({
       <RailHint>
         {entry.parent
           ? "Its transform is relative to the parent, and it moves with it in the game."
-          : "Pick a parent to group this object under another one."}
+          : "Pick a parent to group this object under another one. It stays where it is."}
       </RailHint>
     </RailGroup>
   );
@@ -259,6 +275,127 @@ export function CodeHint({ entry }: { entry: MeshSidecarEntry }) {
         {`local o = cartbox.find(${JSON.stringify(entry.name)})\ncartbox.meshpose(o, x, y, z, yaw)`}
       </code>
       <RailHint>Names are how code finds objects; keep them unique.</RailHint>
+    </RailGroup>
+  );
+}
+
+/**
+ * The selected object's prefab: save it (and everything under it) as a prefab,
+ * or — for part of a placed copy — apply its edits to every copy, revert, unlink.
+ */
+export function PrefabPanel({
+  sidecar,
+  entry,
+  onChange,
+}: {
+  sidecar: MeshSidecar;
+  entry: MeshSidecarEntry;
+  onChange: (next: MeshSidecar) => void;
+}) {
+  const [name, setName] = useState("");
+  const link = entry.prefab;
+  const prefab = link ? findPrefab(sidecar, link.id) : undefined;
+  if (!link || !prefab) {
+    return (
+      <RailGroup label="Prefab">
+        <form
+          style={{ display: "flex", gap: 4 }}
+          onSubmit={(event) => {
+            event.preventDefault();
+            onChange(createPrefab(sidecar, entry.id, name || entry.name).sidecar);
+            setName("");
+          }}
+        >
+          <input aria-label="Prefab name" placeholder={entry.name} value={name} onChange={(event) => setName(event.target.value)} style={inputStyle} />
+          <button type="submit" className={styles.toolBtn} style={{ width: "auto", whiteSpace: "nowrap" }}>
+            Save as prefab
+          </button>
+        </form>
+        <RailHint>Saves this object and everything under it as a reusable group you can place again.</RailHint>
+      </RailGroup>
+    );
+  }
+  const instanceId = link.instance;
+  const rootName = sidecar.meshes.find((m) => m.id === instanceId)?.name ?? prefab.name;
+  const overrides = overrideCount(sidecar, instanceId);
+  const copies = prefabInstances(sidecar, prefab.id).length;
+  return (
+    <RailGroup label="Prefab">
+      <RailHint>
+        {instanceId === entry.id ? "A copy of " : `Part of ${rootName}, a copy of `}
+        <strong>{prefab.name}</strong> ({copies} {copies === 1 ? "copy" : "copies"}).{" "}
+        {overrides === 0 ? "Matches the prefab." : `${overrides} ${overrides === 1 ? "change" : "changes"} from the prefab.`}
+      </RailHint>
+      <div className={styles.toolGroup}>
+        <button
+          type="button"
+          className={styles.toolBtn}
+          disabled={overrides === 0}
+          onClick={() => onChange(applyToPrefab(sidecar, instanceId))}
+          title="Make this copy the prefab, and update every other copy (their own changes stay)"
+        >
+          Apply to all copies
+        </button>
+        <button type="button" className={styles.toolBtn} disabled={overrides === 0} onClick={() => onChange(revertToPrefab(sidecar, instanceId))}>
+          Revert changes
+        </button>
+        <button type="button" className={styles.toolBtn} onClick={() => onChange(unlinkPrefab(sidecar, instanceId))} title="Keep the objects, stop following the prefab">
+          Unlink
+        </button>
+      </div>
+    </RailGroup>
+  );
+}
+
+/** Every prefab on the cart, with Place (a new copy at the origin) and Delete. */
+export function PrefabLibrary({
+  sidecar,
+  onChange,
+  onPlaced,
+}: {
+  sidecar: MeshSidecar;
+  onChange: (next: MeshSidecar) => void;
+  onPlaced: (rootId: string) => void;
+}) {
+  const prefabs = sidecar.prefabs ?? [];
+  return (
+    <RailGroup label={`Prefabs · ${prefabs.length}`}>
+      {prefabs.length === 0 ? (
+        <RailHint>Select an object and choose Save as prefab to reuse it.</RailHint>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          {prefabs.map((prefab) => (
+            <div key={prefab.id} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={prefab.name}>
+                <span aria-hidden style={{ color: "#7db8fc" }}>◆ </span>
+                {prefab.name}
+              </span>
+              <button
+                type="button"
+                className={styles.toolBtn}
+                style={{ width: "auto" }}
+                aria-label={`Place ${prefab.name}`}
+                onClick={() => {
+                  const placed = placePrefab(sidecar, prefab.id);
+                  onChange(placed.sidecar);
+                  onPlaced(placed.rootId);
+                }}
+              >
+                Place
+              </button>
+              <button
+                type="button"
+                aria-label={`Delete prefab ${prefab.name}`}
+                title="Delete the prefab (its copies stay as plain objects)"
+                onClick={() => onChange(deletePrefab(sidecar, prefab.id))}
+                style={{ background: "none", border: 0, color: "inherit", cursor: "pointer" }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </RailGroup>
   );
 }
