@@ -453,6 +453,24 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
     ],
   },
   {
+    label: "cartbox · levels",
+    open: false,
+    entries: [
+      {
+        name: "cartbox.level",
+        signature: "cartbox.level(name) / cartbox.level() -> current, loading, progress",
+        doc: "Switch to a level made in the Mesh tab: its objects appear (the old level's are hidden and leave physics). A published cart fetches the level's textures first and switches once they're in. With no argument: the current level's name, the level loading (or nil) and its progress 0..1.",
+        snippet: 'if reachedDoor then cartbox.level("cave") end\nlocal now, loading, p = cartbox.level()\nif loading then print("Loading "..math.floor(p * 100).."%", 90, 60) end',
+      },
+      {
+        name: "cartbox.levels",
+        signature: "cartbox.levels() -> { name, ... }",
+        doc: "The scene's level names, in order (the first is where the cart starts).",
+        snippet: "for i, name in ipairs(cartbox.levels()) do trace(name) end",
+      },
+    ],
+  },
+  {
     label: "cartbox · netplay",
     open: false,
     entries: [

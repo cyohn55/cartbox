@@ -4022,6 +4022,9 @@ var PHYS_HDR_MAGIC = 0;
 var PHYS_HDR_BODIES = 4;
 var PHYS_HDR_TICK = 8;
 var PHYS_HDR_HASH = 12;
+var PHYS_HDR_LEVEL = 16;
+var PHYS_HDR_LEVEL_LOADING = 20;
+var PHYS_HDR_LEVEL_PROGRESS = 24;
 var PHYS_BODIES = 64;
 var PHYS_BODY_BYTES = 32;
 var PHYS_MAX_BODIES = 64;
@@ -4048,6 +4051,11 @@ var PHYS_MAX_JOINTS = 16;
 var PHYS_TIMELINE = 8032;
 var PHYS_TIMELINE_EVENTS = PHYS_TIMELINE + 12;
 var PHYS_MAX_TIMELINE_EVENTS = 8;
+function writeLevelState(block, level) {
+  block.setInt32(PHYS_HDR_LEVEL, level.current, true);
+  block.setInt32(PHYS_HDR_LEVEL_LOADING, level.loading, true);
+  block.setInt32(PHYS_HDR_LEVEL_PROGRESS, toFix(Math.max(0, Math.min(1, level.progress))), true);
+}
 function writeTimelineState(block, playback, events = []) {
   block.setInt32(PHYS_TIMELINE, playback.index, true);
   block.setInt32(PHYS_TIMELINE + 4, toFix(playback.time), true);
@@ -4094,6 +4102,7 @@ var PHYS_OP_IK_POLE = 16;
 var PHYS_OP_LOOKAT = 17;
 var PHYS_OP_WATCH = 18;
 var PHYS_OP_TIMELINE = 19;
+var PHYS_OP_LEVEL = 20;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -4526,6 +4535,20 @@ var PhysicsSession = class {
   /** Apply the cart's commands, step the world, and cast the rays it asked for. */
   afterTick(block) {
     this.run(takePhysicsCommands(block));
+  }
+  /**
+   * Take the bodies of objects in unloaded levels out of the world, and bring the
+   * rest back (see levels.ts in @cartbox/editor). Prefab copies aren't in levels.
+   */
+  setInactive(objects) {
+    for (const t of this.byObject.values()) {
+      if (this.pooledBodies.has(t.object)) continue;
+      const active = !objects.has(t.object);
+      if (t.enabled === active) continue;
+      this.backend.setEnabled(t.handle, active);
+      t.enabled = active;
+      t.grounded = false;
+    }
   }
   /**
    * Bring a spawned prefab copy's bodies into the world, placed where the copy's
@@ -5058,7 +5081,7 @@ var TimelineSession = class {
 // src/physics/physicsSdk.ts
 function sceneNeedsRuntime(scene, { physics = true } = {}) {
   return Boolean(
-    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0)
+    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0)
   );
 }
 var luaString = (s) => JSON.stringify(s);
@@ -5105,7 +5128,7 @@ function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}end`;
 }
 function PHYSICS_CALLS() {
   return `  cartbox.physics = function() return _live() end
@@ -5238,6 +5261,31 @@ function SPAWN_CALLS(pools) {
   cartbox.alive = function(o)
     local i = _obj(o)
     return i ~= nil and _alive[i] == true
+  end
+`;
+}
+function LEVEL_CALLS(scene) {
+  const levels = scene.levels ?? [];
+  if (levels.length === 0) return "";
+  return `  local _lv = {${levels.map((l) => luaString(l.name)).join(",")}}
+  cartbox.level = function(name)
+    if name == nil then
+      if not _live() then return _lv[1], nil, 0 end
+      local l = _rd(_B + ${PHYS_HDR_LEVEL_LOADING})
+      return _lv[_rd(_B + ${PHYS_HDR_LEVEL}) + 1], l >= 0 and _lv[l + 1] or nil, _rd(_B + ${PHYS_HDR_LEVEL_PROGRESS}) / ${PHYS_FIX}
+    end
+    for k, n in ipairs(_lv) do
+      if n == name or k - 1 == name then
+        _cmd(${PHYS_OP_LEVEL}, k - 1)
+        return true
+      end
+    end
+    return false
+  end
+  cartbox.levels = function()
+    local out = {}
+    for k, n in ipairs(_lv) do out[k] = n end
+    return out
   end
 `;
 }
@@ -5479,10 +5527,14 @@ var RuntimeChannel = class {
     this.requests = /* @__PURE__ */ new Map();
     /** A pole for the next IK request on (object, joint). */
     this.poles = /* @__PURE__ */ new Map();
+    /** Levels: the current one, the one loading (-1), its progress, and a switch the cart asked for. */
+    this.level = { current: -1, loading: -1, progress: 0 };
+    this.levelRequest = -1;
     /** Joints whose world position the cart asked for, and where they were when last skinned. */
     this.watched = /* @__PURE__ */ new Map();
     this.animation = sceneHasAnimation(scene) ? new AnimationSession(scene) : null;
     this.timeline = (scene.timelines?.length ?? 0) > 0 ? new TimelineSession(scene) : null;
+    if ((scene.levels?.length ?? 0) > 0) this.level.current = 0;
     scene.instances.forEach((inst, i) => {
       if (!inst.pooled) return;
       const list = this.copyObjects.get(inst.pooled.root) ?? [];
@@ -5497,6 +5549,7 @@ var RuntimeChannel = class {
     else writePhysicsState(block, 0, [], []);
     writeAnimationState(block, this.animation?.state() ?? [], this.animation?.events() ?? []);
     writeTimelineState(block, this.timeline?.state() ?? { index: -1, time: 0, playing: false }, this.timeline?.events() ?? []);
+    writeLevelState(block, this.level);
     writeJointPositions(
       block,
       [...this.watched.values()].flatMap((w) => w.position ? [{ object: w.object, joint: w.joint, position: w.position }] : [])
@@ -5517,7 +5570,10 @@ var RuntimeChannel = class {
       else if (cmd.op === PHYS_OP_IK_POLE) this.poles.set(`${cmd.a}:${Math.round(cmd.v[0])}`, [cmd.v[1], cmd.v[2], cmd.v[3]]);
       else if (cmd.op === PHYS_OP_IK || cmd.op === PHYS_OP_LOOKAT) this.request(cmd.op, cmd.a, cmd.v);
       else if (cmd.op === PHYS_OP_WATCH) this.watch(cmd.a, Math.round(cmd.v[0]));
-      else if (cmd.op === PHYS_OP_TIMELINE) {
+      else if (cmd.op === PHYS_OP_LEVEL) {
+        const n = this.scene.levels?.length ?? 0;
+        if (cmd.a >= 0 && cmd.a < n && cmd.a !== this.level.current && cmd.a !== this.level.loading) this.levelRequest = cmd.a;
+      } else if (cmd.op === PHYS_OP_TIMELINE) {
         if (cmd.a < 0) this.timeline?.stop();
         else this.timeline?.play(cmd.a, cmd.v[0], cmd.v[1]);
       }
@@ -5525,6 +5581,24 @@ var RuntimeChannel = class {
     for (const { object, cue } of this.timeline?.step(PHYSICS_DT) ?? []) this.cue(object, cue.clip, cue.fade, cue.loop);
     this.physics?.run(commands.filter((c) => c.op < PHYS_OP_SPAWN || c.op > PHYS_OP_DESPAWN && c.op < PHYS_OP_PLAY));
     this.animation?.step(PHYSICS_DT);
+  }
+  /** A level switch the cart asked for since the last call (-1 for none); the player loads and activates it. */
+  takeLevelRequest() {
+    const request = this.levelRequest;
+    this.levelRequest = -1;
+    return request;
+  }
+  /** The level loading, and how far along (0..1), as the cart reads it. */
+  setLevelLoading(level, progress) {
+    this.level = { ...this.level, loading: level, progress };
+  }
+  /** Make `level` the current one (the loading state clears). */
+  setLevel(level) {
+    this.level = { current: level, loading: -1, progress: 0 };
+  }
+  /** The current level (-1 when the scene has none). */
+  currentLevel() {
+    return this.level.current;
   }
   /**
    * Skinning matrices for the animated objects being drawn (object → matrices);
@@ -6874,6 +6948,8 @@ import {
   readPhysicsSpec,
   readPhysicsWorld,
   readTimelines,
+  readLevels,
+  effectiveLevels,
   readSceneProps,
   readSceneTags,
   worldMatrices,
@@ -6970,6 +7046,7 @@ function parseMeshScene(raw) {
       props: readSceneProps(record.props),
       physics: readPhysicsSpec(record.physics),
       ...readAnimatorSpec(record.animator) ? { animator: readAnimatorSpec(record.animator) } : {},
+      ...typeof record.level === "string" && record.level ? { levelId: record.level } : {},
       parentId
     };
   };
@@ -7016,16 +7093,23 @@ function parseMeshScene(raw) {
     parents
   );
   const indexOf = new Map(parsedInstances.map((p, i) => [p.id, i]));
-  const instances = parsedInstances.map(({ parentId: _parentId, pool, ...rest }, i) => ({
+  const levels = readLevels(parsed.levels);
+  const levelOf = effectiveLevels(
+    parsedInstances.map((p) => p.pool ? void 0 : p.levelId),
+    parents,
+    levels
+  );
+  const instances = parsedInstances.map(({ parentId: _parentId, pool, levelId: _levelId, ...rest }, i) => ({
     ...rest,
     model: world[i],
     parent: parents[i],
-    ...pool ? { pooled: { prefab: pool.prefab, copy: pool.copy, root: indexOf.get(pool.rootId) } } : {}
+    ...pool ? { pooled: { prefab: pool.prefab, copy: pool.copy, root: indexOf.get(pool.rootId) } } : {},
+    ...levelOf[i] >= 0 ? { level: levelOf[i] } : {}
   }));
   if (instances.length === 0) return null;
   const lighting = parseSceneLighting(parsed.lighting);
   const pools = [...poolRoots.entries()].map(([prefab, ids]) => ({ prefab, roots: ids.map((id) => indexOf.get(id)) }));
-  const placed = instances.filter((instance) => !instance.pooled);
+  const placed = instances.filter((instance) => !instance.pooled && (instance.level === void 0 || instance.level === 0));
   const physicsWorld = readPhysicsWorld(parsed.physicsWorld);
   const timelines = readTimelines(parsed.timelines);
   return {
@@ -7034,7 +7118,8 @@ function parseMeshScene(raw) {
     lighting,
     ...pools.length > 0 ? { pools } : {},
     ...physicsWorld ? { physicsWorld } : {},
-    ...timelines.length > 0 ? { timelines } : {}
+    ...timelines.length > 0 ? { timelines } : {},
+    ...levels.length > 0 ? { levels } : {}
   };
 }
 function buildOrbitCamera(bounds, yaw, pitch, aspect, options = {}) {
@@ -7168,6 +7253,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.lastSkin = /* @__PURE__ */ new Map();
     /** Instances animated this frame: they move for the shadow cache. */
     this.animated = /* @__PURE__ */ new Set();
+    /** Objects in a level that isn't the current one: not drawn, not in the static shadow (see setInactive). */
+    this.inactive = /* @__PURE__ */ new Set();
+    this.inactiveKey = "";
     /** Each object's world matrix as last drawn (null = hidden), or null when nothing moved. */
     this.lastPlacement = null;
     /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
@@ -7225,6 +7313,16 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.shadowRects = [];
     }
     this.quality = quality;
+  }
+  /**
+   * The objects of levels that aren't loaded (see levels.ts in @cartbox/editor):
+   * they're hidden, and left out of the shadow, until the set changes again.
+   */
+  setInactive(objects) {
+    this.inactive = objects;
+    this.inactiveKey = [...objects].sort((a, b) => a - b).join(",");
+    this.unpooled = objects.size === 0 && !this.pooledRoot.some((r) => r >= 0) ? this.instances : this.instances.filter((_, i) => this.pooledRoot[i] < 0 && !objects.has(i));
+    this.lastPlacement = null;
   }
   /** Posed instances plus, in a hierarchy, everything below them: what moves this frame. */
   withChildren(indices) {
@@ -7547,7 +7645,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const out = {
         model,
         moved: moved2,
-        hidden: reserved || Boolean(pose?.hidden) || Boolean(up?.hidden),
+        hidden: reserved || this.inactive.has(i) || Boolean(pose?.hidden) || Boolean(up?.hidden),
         front: Boolean(pose?.front) || Boolean(up?.front)
       };
       states[i] = out;
@@ -7598,7 +7696,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     return this.placements();
   }
   placements() {
-    return this.lastPlacement ?? this.instances.map((instance, i) => this.pooledRoot[i] >= 0 ? null : instance.model);
+    return this.lastPlacement ?? this.instances.map((instance, i) => this.pooledRoot[i] >= 0 || this.inactive.has(i) ? null : instance.model);
   }
   /** A tinted copy of `mesh`, cached so its identity (and any GPU upload) is stable. */
   tinted(mesh, tint) {
@@ -7629,7 +7727,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const size = this.quality.shadowMapSize || SHADOW_MAP_SIZE;
     const { center, radius } = this.scene.bounds;
     for (const i of this.withChildren(this.poses.filter((p) => p.front).map((p) => p.index))) this.everFront.add(i);
-    const key = `${this.poses.filter((p) => !p.front).map((p) => p.index).sort((a, b) => a - b).join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}|${[...this.bodies.keys()].join(",")}|${[...this.live.keys()].join(",")}`;
+    const key = `${this.poses.filter((p) => !p.front).map((p) => p.index).sort((a, b) => a - b).join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}|${[...this.bodies.keys()].join(",")}|${[...this.live.keys()].join(",")}|${this.inactiveKey}`;
     let full = false;
     if (!this.staticShadow || this.staticShadowKey !== key || this.staticShadowLighting !== lighting) {
       this.staticShadow ?? (this.staticShadow = new Float32Array(size * size));
@@ -7637,7 +7735,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.pooledRoot.forEach((root, i) => {
         if (root >= 0) posed.add(i);
       });
-      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i));
+      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i));
       const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow });
       if (!built) return null;
       this.staticShadowMatrix = built.lightViewProj;
@@ -10187,6 +10285,8 @@ var Player = class {
       }
       this.frameHandle = this.view.requestAnimationFrame(this.loop);
     };
+    /** Counts level loads, so a load overtaken by a newer switch doesn't activate. */
+    this.levelLoads = 0;
     const view = container.ownerDocument.defaultView;
     if (!view) {
       throw new Error("Container is not attached to a window");
@@ -10299,6 +10399,7 @@ var Player = class {
             this.options.ktx2 ? { ktx2: this.options.ktx2 } : {}
           );
           this.meshSurface.setQuality(this.qualitySettings);
+          if ((mesh2.levels?.length ?? 0) > 0) this.activateLevel(0);
         }
         if (world && this.cartSource) {
           surface = this.worldSurface = new WorldOverlaySurface(
@@ -10425,7 +10526,10 @@ var Player = class {
     if (runtimeBlock) this.runtime.channel.beforeTick(runtimeBlock);
     this.console?.tick(mask);
     const afterBlock = runtimeBlock ? this.runtimeBlock() : null;
-    if (afterBlock) this.runtime.channel.afterTick(afterBlock);
+    if (afterBlock) {
+      this.runtime.channel.afterTick(afterBlock);
+      this.pollLevelRequest();
+    }
     if (net && this.console) {
       const words = this.console.netWords();
       if (words) net.afterTick(words);
@@ -10465,6 +10569,46 @@ var Player = class {
   async supplyTextures(images) {
     if (!this.meshSurface) return 0;
     return this.meshSurface.supplyImages(images);
+  }
+  /**
+   * Start a level switch the cart asked for: load the level's assets through the
+   * host (a published cart fetches its textures), then make it current.
+   */
+  pollLevelRequest() {
+    const channel = this.runtime?.channel;
+    const scene = this.options.mesh;
+    const request = channel?.takeLevelRequest() ?? -1;
+    if (!channel || !scene?.levels || request < 0) return;
+    const level = scene.levels[request];
+    const load = this.options.levelAssets;
+    if (!load) {
+      this.activateLevel(request);
+      return;
+    }
+    const token = ++this.levelLoads;
+    const progress = (p) => {
+      if (token !== this.levelLoads || this.destroyed) return;
+      channel.setLevelLoading(request, p);
+      this.options.onLevel?.({ level: scene.levels[channel.currentLevel()]?.name ?? "", loading: level.name, progress: p });
+    };
+    progress(0);
+    const done = () => {
+      if (token === this.levelLoads && !this.destroyed) this.activateLevel(request);
+    };
+    load(level, progress).then(done, done);
+  }
+  /** Make a level current: its objects (and the always-loaded ones) show and simulate; the rest are hidden. */
+  activateLevel(level) {
+    const scene = this.options.mesh;
+    if (!scene?.levels) return;
+    const inactive = /* @__PURE__ */ new Set();
+    scene.instances.forEach((inst, i) => {
+      if (inst.level !== void 0 && inst.level !== level) inactive.add(i);
+    });
+    this.meshSurface?.setInactive(inactive);
+    this.runtime?.physics?.setInactive(inactive);
+    this.runtime?.channel.setLevel(level);
+    this.options.onLevel?.({ level: scene.levels[level]?.name ?? "", loading: null, progress: 1 });
   }
   /** The graphics preset in effect. */
   quality() {

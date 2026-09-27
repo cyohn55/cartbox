@@ -58,6 +58,7 @@ import { LightingEditor } from "./LightingEditor";
 import { TimelinePanel, type TimelinePreview } from "./TimelinePanel";
 import type { ViewpointKey } from "./SceneViewport";
 import { SceneViewport } from "./SceneViewport";
+import { LevelPicker, LevelsPanel } from "./LevelsPanel";
 import { formatBytes } from "./assetUploads";
 import { AnimationPanel, CodeHint, HierarchyPanel, ParentPicker, PhysicsPanel, PhysicsWorldPanel, PrefabLibrary, PrefabPanel, PropertyEditor, TagEditor } from "./SceneObjectPanels";
 
@@ -436,6 +437,8 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
 
             <ParentPicker sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
 
+            <LevelPicker sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
+
             <TransformControls transform={selectedEntry.transform} onChange={updateTransform} relative={Boolean(selectedEntry.parent)} />
 
             <TagEditor sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
@@ -498,6 +501,7 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
             outside the per-mesh selection. */}
         <LightingEditor lighting={sidecar.lighting} onChange={(lighting) => onSidecarChange(setMeshLighting(sidecar, lighting))} />
         <PhysicsWorldPanel sidecar={sidecar} onChange={onSidecarChange} />
+        <LevelsPanel sidecar={sidecar} onChange={onSidecarChange} />
         <TimelinePanel sidecar={sidecar} onChange={onSidecarChange} view={view === "scene" ? sceneView : null} onPreview={onTimelinePreview} />
       </aside>
 

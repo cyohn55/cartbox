@@ -436,6 +436,21 @@ export class PhysicsSession {
   }
 
   /**
+   * Take the bodies of objects in unloaded levels out of the world, and bring the
+   * rest back (see levels.ts in @cartbox/editor). Prefab copies aren't in levels.
+   */
+  setInactive(objects: ReadonlySet<number>): void {
+    for (const t of this.byObject.values()) {
+      if (this.pooledBodies.has(t.object)) continue;
+      const active = !objects.has(t.object);
+      if (t.enabled === active) continue;
+      this.backend.setEnabled(t.handle, active);
+      t.enabled = active;
+      t.grounded = false;
+    }
+  }
+
+  /**
    * Bring a spawned prefab copy's bodies into the world, placed where the copy's
    * objects now are (`world` gives each object's world matrix), or take them out.
    */

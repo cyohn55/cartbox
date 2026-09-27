@@ -18,6 +18,8 @@ export interface StreamedTexture {
   /** Size in bytes, if known (for progress before the response says). */
   readonly bytes: number;
   readonly mime: string;
+  /** The levels that need it (see meshTextureLevels); absent = needed at start. */
+  readonly levels?: readonly string[];
 }
 
 export interface StreamOptions {

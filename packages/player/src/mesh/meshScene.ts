@@ -23,6 +23,8 @@ import {
   readPhysicsSpec,
   readPhysicsWorld,
   readTimelines,
+  readLevels,
+  effectiveLevels,
   readSceneProps,
   readSceneTags,
   worldMatrices,
@@ -38,6 +40,7 @@ import {
   type SceneTimeline,
   type SceneLighting,
   type ScenePropValue,
+  type SceneLevel,
 } from "@cartbox/editor";
 
 /** One placed mesh ready to rasterise: decoded geometry + its baked world matrix. */
@@ -70,6 +73,8 @@ export interface MeshInstance extends MeshSceneInstance {
    * prefab, which copy, and the copy's root index. Hidden until spawned.
    */
   readonly pooled?: { readonly prefab: string; readonly copy: number; readonly root: number };
+  /** The level this object belongs to (an index into the scene's `levels`); absent = always loaded. */
+  readonly level?: number;
 }
 
 /** A prefab's reserve of spawnable copies: each copy's root object index. */
@@ -103,6 +108,8 @@ export interface MeshScene {
   readonly physicsWorld?: PhysicsWorldSettings;
   /** Cutscenes and scripted camera moves (objects referred to by instance `id`). */
   readonly timelines?: readonly SceneTimeline[];
+  /** Named levels, one loaded at a time (the first at start); see levels.ts in @cartbox/editor. */
+  readonly levels?: readonly SceneLevel[];
 }
 
 /** A view + projection pair ready to hand to `renderMeshScene`. */
@@ -200,11 +207,12 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     }
     return cache.get(serialized) ?? null;
   };
-  type Parsed = Omit<MeshInstance, "model" | "parent" | "pooled"> & {
+  type Parsed = Omit<MeshInstance, "model" | "parent" | "pooled" | "level"> & {
     parentId: string | null;
     pool?: { prefab: string; copy: number; rootId: string };
+    levelId?: string;
   };
-  type Record_ = { mesh?: unknown; transform?: unknown; frames?: unknown; id?: unknown; name?: unknown; parent?: unknown; tags?: unknown; props?: unknown; physics?: unknown; animator?: unknown };
+  type Record_ = { mesh?: unknown; transform?: unknown; frames?: unknown; id?: unknown; name?: unknown; parent?: unknown; tags?: unknown; props?: unknown; physics?: unknown; animator?: unknown; level?: unknown };
   const readEntry = (record: Record_, id: string, parentId: string | null, identity = false): Parsed | null => {
     if (typeof record.mesh !== "string") return null;
     const resolved = resolveMeshRef(record.mesh, library);
@@ -224,6 +232,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
       props: readSceneProps(record.props),
       physics: readPhysicsSpec(record.physics),
       ...(readAnimatorSpec(record.animator) ? { animator: readAnimatorSpec(record.animator)! } : {}),
+      ...(typeof record.level === "string" && record.level ? { levelId: record.level } : {}),
       parentId,
     };
   };
@@ -277,18 +286,27 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     parents,
   );
   const indexOf = new Map(parsedInstances.map((p, i) => [p.id, i]));
-  const instances: MeshInstance[] = parsedInstances.map(({ parentId: _parentId, pool, ...rest }, i) => ({
+  // Levels: an object's own, else its parent's; prefab copies are always loaded.
+  const levels = readLevels((parsed as { levels?: unknown }).levels);
+  const levelOf = effectiveLevels(
+    parsedInstances.map((p) => (p.pool ? undefined : p.levelId)),
+    parents,
+    levels,
+  );
+  const instances: MeshInstance[] = parsedInstances.map(({ parentId: _parentId, pool, levelId: _levelId, ...rest }, i) => ({
     ...rest,
     model: world[i]!,
     parent: parents[i]!,
     ...(pool ? { pooled: { prefab: pool.prefab, copy: pool.copy, root: indexOf.get(pool.rootId)! } } : {}),
+    ...(levelOf[i]! >= 0 ? { level: levelOf[i]! } : {}),
   }));
 
   if (instances.length === 0) return null;
   const lighting = parseSceneLighting((parsed as { lighting?: unknown }).lighting);
   const pools: PrefabPool[] = [...poolRoots.entries()].map(([prefab, ids]) => ({ prefab, roots: ids.map((id) => indexOf.get(id)!) }));
-  // Reserve copies sit hidden at the origin: they don't count toward the framing bounds.
-  const placed = instances.filter((instance) => !instance.pooled);
+  // Reserve copies sit hidden at the origin, and later levels aren't loaded yet:
+  // neither counts toward the framing bounds.
+  const placed = instances.filter((instance) => !instance.pooled && (instance.level === undefined || instance.level === 0));
   const physicsWorld = readPhysicsWorld((parsed as { physicsWorld?: unknown }).physicsWorld);
   const timelines = readTimelines((parsed as { timelines?: unknown }).timelines);
   return {
@@ -298,6 +316,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     ...(pools.length > 0 ? { pools } : {}),
     ...(physicsWorld ? { physicsWorld } : {}),
     ...(timelines.length > 0 ? { timelines } : {}),
+    ...(levels.length > 0 ? { levels } : {}),
   };
 }
 

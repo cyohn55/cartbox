@@ -1,4 +1,4 @@
-import type { DecodedTexture, EncodedImage } from "@cartbox/editor";
+import type { DecodedTexture, EncodedImage, SceneLevel } from "@cartbox/editor";
 import type { PhysicsBackend } from "./physics/physicsSession.js";
 import type { QualityChoice, QualityLevel } from "./quality.js";
 /**
@@ -113,6 +113,14 @@ export interface PlayerOptions {
    * The web app passes one that fetches the transcoder on demand.
    */
   ktx2?: () => Promise<(bytes: Uint8Array) => DecodedTexture | null>;
+  /**
+   * Loads a level's assets before a switch to it (`cartbox.level`), reporting
+   * progress 0..1; the switch happens when it settles. Without it, switches are
+   * immediate. The web app streams the level's textures.
+   */
+  levelAssets?: (level: SceneLevel, onProgress: (progress: number) => void) => Promise<void>;
+  /** Called as the current level changes and while one loads (loading is null once it's in). */
+  onLevel?: (state: { level: string; loading: string | null; progress: number }) => void;
   /**
    * Graphics quality: "low" | "medium" | "high", or "auto" (the default) to pick
    * from the device — see quality.ts. High is everything as authored.
