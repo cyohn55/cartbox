@@ -16,6 +16,9 @@ import type { MeshScene } from "../mesh/meshScene.js";
 import type { PhysicsSession } from "../physics/physicsSession.js";
 import { PHYSICS_DT } from "../physics/physicsSession.js";
 import {
+  PHYS_OP_ANIM_GOTO,
+  PHYS_OP_ANIM_SET,
+  PHYS_OP_ANIM_TRIGGER,
   PHYS_OP_DESPAWN,
   PHYS_OP_PLAY,
   PHYS_OP_SPAWN,
@@ -52,7 +55,7 @@ export class RuntimeChannel {
   beforeTick(block: DataView): void {
     if (this.physics) this.physics.beforeTick(block);
     else writePhysicsState(block, 0, [], []);
-    writeAnimationState(block, this.animation?.state() ?? []);
+    writeAnimationState(block, this.animation?.state() ?? [], this.animation?.events() ?? []);
   }
 
   /** Take the cart's commands: scene ops here, the rest to physics (which then steps). */
@@ -64,9 +67,11 @@ export class RuntimeChannel {
       else if (cmd.op === PHYS_OP_PLAY) {
         const [clip, fade, speed, loop, start] = cmd.v;
         this.animation?.play(cmd.a, Math.round(clip!), fade!, speed!, loop! >= 0.5, start!);
-      }
+      } else if (cmd.op === PHYS_OP_ANIM_SET) this.animation?.setParam(cmd.a, Math.round(cmd.v[0]), cmd.v[1]);
+      else if (cmd.op === PHYS_OP_ANIM_TRIGGER) this.animation?.setParam(cmd.a, Math.round(cmd.v[0]), 1);
+      else if (cmd.op === PHYS_OP_ANIM_GOTO) this.animation?.goto(cmd.a, Math.round(cmd.v[0]), cmd.v[1]);
     }
-    this.physics?.run(commands.filter((c) => c.op !== PHYS_OP_SPAWN && c.op !== PHYS_OP_DESPAWN && c.op !== PHYS_OP_PLAY));
+    this.physics?.run(commands.filter((c) => c.op < PHYS_OP_SPAWN || (c.op > PHYS_OP_DESPAWN && c.op < PHYS_OP_PLAY)));
     this.animation?.step(PHYSICS_DT);
   }
 

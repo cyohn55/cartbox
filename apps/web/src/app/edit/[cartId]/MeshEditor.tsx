@@ -51,6 +51,7 @@ import styles from "./editor.module.css";
 import { RailGroup, RailHint, SegmentedControl } from "./railControls";
 import { LibraryBrowser } from "./LibraryBrowser";
 import { MaterialEditor } from "./MaterialEditor";
+import { AnimatorPanel } from "./AnimatorPanel";
 import { LightingEditor } from "./LightingEditor";
 import { SceneViewport } from "./SceneViewport";
 import { AnimationPanel, CodeHint, HierarchyPanel, ParentPicker, PhysicsPanel, PhysicsWorldPanel, PrefabLibrary, PrefabPanel, PropertyEditor, TagEditor } from "./SceneObjectPanels";
@@ -414,6 +415,9 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
 
             {meshAsset && isSkinned(meshAsset) && (
               <AnimationPanel mesh={meshAsset} name={selectedEntry.name} playing={previewClip} onPlay={setPreviewClip} />
+            )}
+            {meshAsset && isSkinned(meshAsset) && (
+              <AnimatorPanel sidecar={sidecar} entry={selectedEntry} mesh={meshAsset} onChange={onSidecarChange} />
             )}
             <PhysicsPanel sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
 

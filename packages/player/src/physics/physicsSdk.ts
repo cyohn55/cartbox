@@ -37,6 +37,14 @@
  *   cartbox.anim(obj)                 -> clip name (nil at rest), seconds into it, finished
  *   cartbox.clips(obj)                -> { name, ... } the object's clips
  *
+ * With a state machine (set up in the editor) the cart drives it instead:
+ *
+ *   cartbox.set(obj, param, value)    set a number or bool parameter
+ *   cartbox.trigger(obj, param)       fire a trigger (used up by the transition it starts)
+ *   cartbox.state(obj)                -> the current state's name (nil while cartbox.play has control)
+ *   cartbox.setstate(obj, state, fade) jump to a state (and hand control back to the machine)
+ *   cartbox.events(obj)               -> { name, ... } clip events that fired on the last tick
+ *
  * `obj` is an object index or its name (as cartbox.find). The SDK's defaults
  * (sdk.ts) make every call a safe no-op for carts without bodies or prefabs.
  */
@@ -61,7 +69,12 @@ import {
   PHYS_OVERLAP_BYTES,
   PHYS_OVERLAPS,
   PHYS_ANIM_BYTES,
+  PHYS_ANIM_EVENT_BYTES,
+  PHYS_ANIM_EVENTS,
   PHYS_ANIMS,
+  PHYS_OP_ANIM_GOTO,
+  PHYS_OP_ANIM_SET,
+  PHYS_OP_ANIM_TRIGGER,
   PHYS_OP_CAST,
   PHYS_OP_DESPAWN,
   PHYS_OP_IMPULSE,
@@ -291,6 +304,15 @@ function ANIM_CALLS(scene: MeshScene): string {
   if (animated.length === 0) return "";
   const names = animated.map((i) => `[${i}]={${(scene.instances[i]!.mesh.clips ?? []).map((c) => luaString(c.name)).join(",")}}`);
   const durations = animated.map((i) => `[${i}]={${(scene.instances[i]!.mesh.clips ?? []).map((c) => c.duration).join(",")}}`);
+  const machines = animated
+    .filter((i) => scene.instances[i]!.animator)
+    .map((i) => {
+      const a = scene.instances[i]!.animator!;
+      const params = a.params.map((p, k) => `[${luaString(p.name)}]=${k}`).join(",");
+      const states = a.states.map((st) => luaString(st.name)).join(",");
+      const events = a.events.map((e) => luaString(e.name)).join(",");
+      return `[${i}]={p={${params}},s={${states}},e={${events}}}`;
+    });
   return `  local _clips = {${names.join(",")}}
   local _dur = {${durations.join(",")}}
   local _loops = {}
@@ -330,6 +352,60 @@ function ANIM_CALLS(scene: MeshScene): string {
       end
     end
     return nil, 0, false
+  end
+  local _sm = {${machines.join(",")}}
+  cartbox.set = function(o, name, value)
+    local i = _obj(o)
+    local m = i and _sm[i]
+    local k = m and m.p[name]
+    if k == nil then return end
+    if value == true then value = 1 elseif value == false or value == nil then value = 0 end
+    _cmd(${PHYS_OP_ANIM_SET}, i, k, value)
+  end
+  cartbox.trigger = function(o, name)
+    local i = _obj(o)
+    local m = i and _sm[i]
+    local k = m and m.p[name]
+    if k ~= nil then _cmd(${PHYS_OP_ANIM_TRIGGER}, i, k) end
+  end
+  cartbox.setstate = function(o, name, fade)
+    local i = _obj(o)
+    local m = i and _sm[i]
+    if m == nil then return end
+    for k, n in ipairs(m.s) do
+      if n == name then
+        _loops[i] = nil
+        _cmd(${PHYS_OP_ANIM_GOTO}, i, k - 1, fade or 0.2)
+        return
+      end
+    end
+  end
+  cartbox.state = function(o)
+    local i = _obj(o)
+    local m = i and _sm[i]
+    if m == nil or not _live() then return nil end
+    local n = _rd(_B + ${PHYS_ANIMS})
+    for k = 0, n - 1 do
+      local at = _B + ${PHYS_ANIMS + 4} + k * ${PHYS_ANIM_BYTES}
+      if _rd(at) == i then
+        local st = _rd(at + 12)
+        if st < 0 then return nil end
+        return m.s[st + 1]
+      end
+    end
+    return nil
+  end
+  cartbox.events = function(o)
+    local i = _obj(o)
+    local m = i and _sm[i]
+    local out = {}
+    if m == nil or not _live() then return out end
+    local n = _rd(_B + ${PHYS_ANIM_EVENTS})
+    for k = 0, n - 1 do
+      local at = _B + ${PHYS_ANIM_EVENTS + 4} + k * ${PHYS_ANIM_EVENT_BYTES}
+      if _rd(at) == i then out[#out + 1] = m.e[_rd(at + 4) + 1] end
+    end
+    return out
   end
 `;
 }

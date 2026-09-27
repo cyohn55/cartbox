@@ -286,6 +286,11 @@ cartbox = {
   play = function() end,
   anim = function() return nil, 0, false end,
   clips = function() return {} end,
+  set = function() end,
+  trigger = function() end,
+  state = function() return nil end,
+  setstate = function() end,
+  events = function() return {} end,
 }`;
 
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */

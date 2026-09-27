@@ -366,6 +366,36 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
         doc: "The names of a skinned object's animation clips, in order (index 0 first).",
         snippet: 'for i, name in ipairs(cartbox.clips("hero")) do\n  \nend',
       },
+      {
+        name: "cartbox.set",
+        signature: "cartbox.set(obj, param, value)",
+        doc: "Set a number or bool parameter of a skinned object's state machine (Mesh tab → State machine); transitions whose conditions now hold fire on this tick.",
+        snippet: 'cartbox.set("hero", "speed", math.abs(vx))',
+      },
+      {
+        name: "cartbox.trigger",
+        signature: "cartbox.trigger(obj, param)",
+        doc: "Fire a trigger parameter: it stays set until a transition that tests it fires (and uses it up).",
+        snippet: 'if btnp(4) then cartbox.trigger("hero", "shoot") end',
+      },
+      {
+        name: "cartbox.state",
+        signature: "cartbox.state(obj) -> name",
+        doc: "The state machine's current state (nil while cartbox.play has taken direct control).",
+        snippet: 'if cartbox.state("hero") == "shoot" then\n  \nend',
+      },
+      {
+        name: "cartbox.setstate",
+        signature: "cartbox.setstate(obj, state, fade)",
+        doc: "Jump to a state (crossfading over fade seconds, default 0.2) — also hands control back to the machine after cartbox.play.",
+        snippet: 'cartbox.setstate("hero", "idle")',
+      },
+      {
+        name: "cartbox.events",
+        signature: "cartbox.events(obj) -> { name, ... }",
+        doc: "Clip events (named moments set up in the state machine, e.g. a footstep) that the playhead passed on the last tick.",
+        snippet: 'for _, e in ipairs(cartbox.events("hero")) do\n  if e == "step" then sfx(1) end\nend',
+      },
     ],
   },
   {

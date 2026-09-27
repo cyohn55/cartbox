@@ -416,6 +416,7 @@ export {
 export { physicsSdkLua, runtimeSdkLua, sceneNeedsRuntime } from "./physics/physicsSdk.js";
 export { deterministicBackend, physicsStateHash } from "./physics/deterministic.js";
 export { RuntimeChannel } from "./runtime/runtimeChannel.js";
+export { AnimationSession, animatedObjects, compileAnimator, sceneHasAnimation } from "./anim/animationSession.js";
 export {
   PHYS_BLOCK_BYTES,
   PHYS_MAGIC,

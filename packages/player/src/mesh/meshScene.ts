@@ -19,6 +19,7 @@ import {
   parseSceneLighting,
   projectionMatrix,
   readMeshLibrary,
+  readAnimatorSpec,
   readPhysicsSpec,
   readPhysicsWorld,
   readSceneProps,
@@ -30,6 +31,7 @@ import {
   type Mat4,
   type MeshAsset,
   type MeshSceneInstance,
+  type AnimatorSpec,
   type PhysicsSpec,
   type PhysicsWorldSettings,
   type SceneLighting,
@@ -59,6 +61,8 @@ export interface MeshInstance extends MeshSceneInstance {
   readonly props: Readonly<Record<string, ScenePropValue>>;
   /** The object's physics body, or null (ENGINE_ROADMAP.md, Phase 2). */
   readonly physics: PhysicsSpec | null;
+  /** A skinned object's animation state machine (ENGINE_ROADMAP.md, Phase 3), or absent. */
+  readonly animator?: AnimatorSpec;
   /**
    * Set on the objects of a prefab copy held in reserve for `cartbox.spawn`: which
    * prefab, which copy, and the copy's root index. Hidden until spawned.
@@ -196,7 +200,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     parentId: string | null;
     pool?: { prefab: string; copy: number; rootId: string };
   };
-  type Record_ = { mesh?: unknown; transform?: unknown; frames?: unknown; id?: unknown; name?: unknown; parent?: unknown; tags?: unknown; props?: unknown; physics?: unknown };
+  type Record_ = { mesh?: unknown; transform?: unknown; frames?: unknown; id?: unknown; name?: unknown; parent?: unknown; tags?: unknown; props?: unknown; physics?: unknown; animator?: unknown };
   const readEntry = (record: Record_, id: string, parentId: string | null, identity = false): Parsed | null => {
     if (typeof record.mesh !== "string") return null;
     const resolved = resolveMeshRef(record.mesh, library);
@@ -215,6 +219,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
       tags: readSceneTags(record.tags),
       props: readSceneProps(record.props),
       physics: readPhysicsSpec(record.physics),
+      ...(readAnimatorSpec(record.animator) ? { animator: readAnimatorSpec(record.animator)! } : {}),
       parentId,
     };
   };
