@@ -7,7 +7,7 @@
  * body keeps the scene object index it was built for, which raycasts report.
  */
 
-import type { CastShape, PhysicsBackend, PhysicsBodyDesc, PhysicsQuat, PhysicsVec3 } from "@cartbox/player";
+import type { CastShape, PhysicsBackend, PhysicsBodyDesc, PhysicsJointDesc, PhysicsQuat, PhysicsVec3 } from "@cartbox/player";
 
 type Rapier = typeof import("@dimforge/rapier3d-compat");
 
@@ -29,6 +29,7 @@ export function rapierPhysics(): () => Promise<PhysicsBackend> {
 }
 
 const v3 = (v: PhysicsVec3) => ({ x: v[0], y: v[1], z: v[2] });
+const quat = (q: PhysicsQuat) => ({ x: q[0], y: q[1], z: q[2], w: q[3] });
 
 export function createRapierBackend(R: Rapier): PhysicsBackend {
   const world = new R.World({ x: 0, y: -9.81, z: 0 });
@@ -42,6 +43,11 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
   const characters = new Set<number>(); // body handles of characters
   const events = new R.EventQueue(true);
   const sensors: Collider[] = [];
+  type Joint = InstanceType<Rapier["ImpulseJoint"]>;
+  const joints = new Map<number, Joint>();
+  let nextJoint = 0;
+  // Joints to "the world" hang from one fixed body at the origin.
+  let ground: Body | null = null;
   const controller = world.createCharacterController(0.02);
   controller.enableSnapToGround(0.3);
   controller.setMaxSlopeClimbAngle((50 * Math.PI) / 180);
@@ -222,6 +228,53 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
         normal: [hit.normal1.x, hit.normal1.y, hit.normal1.z] as PhysicsVec3,
         distance: hit.time_of_impact,
       };
+    },
+
+    addJoint(desc: PhysicsJointDesc): number {
+      const body = bodies[desc.body];
+      ground ??= world.createRigidBody(R.RigidBodyDesc.fixed());
+      const other = desc.target === null ? ground : bodies[desc.target];
+      if (!body || !other) return -1;
+      const a1 = v3(desc.anchor1);
+      const a2 = v3(desc.anchor2);
+      const data =
+        desc.kind === "hinge"
+          ? R.JointData.revolute(a1, a2, { x: 1, y: 0, z: 0 })
+          : desc.kind === "ball"
+            ? R.JointData.spherical(a1, a2)
+            : desc.kind === "fixed"
+              ? R.JointData.fixed(a1, quat(desc.frame1), a2, quat(desc.frame2))
+              : desc.kind === "spring"
+                ? R.JointData.spring(desc.length, desc.stiffness, desc.damping, a1, a2)
+                : R.JointData.rope(desc.length, a1, a2);
+      const joint = world.createImpulseJoint(data, body, other, true);
+      // The frames say which way the hinge turns and where its zero angle is.
+      if (desc.kind === "hinge") {
+        joint.setLocalFrame1(a1, quat(desc.frame1));
+        joint.setLocalFrame2(a2, quat(desc.frame2));
+        if (desc.limits) (joint as InstanceType<Rapier["RevoluteImpulseJoint"]>).setLimits(desc.limits[0], desc.limits[1]);
+      }
+      // Jointed bodies overlap where they meet (a door in its frame): don't collide them.
+      joint.setContactsEnabled(false);
+      const id = nextJoint++;
+      joints.set(id, joint);
+      return id;
+    },
+
+    removeJoint(id: number): void {
+      const joint = joints.get(id);
+      if (!joint) return;
+      world.removeImpulseJoint(joint, true);
+      joints.delete(id);
+    },
+
+    setMotor(id: number, speed: number, force: number): void {
+      const joint = joints.get(id) as InstanceType<Rapier["RevoluteImpulseJoint"]> | undefined;
+      if (!joint) return;
+      joint.configureMotorVelocity(speed, force > 0 ? 1 : 0);
+      joint.setMotorMaxForce(force);
+      joint.body1().wakeUp();
+      joint.body2().wakeUp();
     },
 
     setEnabled(handle: number, enabled: boolean): void {

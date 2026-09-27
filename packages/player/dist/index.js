@@ -3863,6 +3863,8 @@ cartbox = {
   entered = function() return {} end,
   exited = function() return {} end,
   inside = function() return {} end,
+  motor = function() end,
+  unjoin = function() end,
   -- Spawning prefab copies: overridden when the cart has prefabs.
   spawn = function() return nil end,
   despawn = function() end,
@@ -3998,6 +4000,8 @@ var PHYS_CAST_RAY = 0;
 var PHYS_CAST_SPHERE = 1;
 var PHYS_CAST_BOX = 2;
 var PHYS_CAST_CAPSULE = 3;
+var PHYS_OP_MOTOR = 9;
+var PHYS_OP_UNJOIN = 10;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -4061,7 +4065,7 @@ function takePhysicsCommands(block) {
 }
 
 // src/physics/physicsSession.ts
-import { meshBounds } from "@cartbox/editor";
+import { DEFAULT_SPRING_DAMPING, DEFAULT_SPRING_STIFFNESS, meshBounds } from "@cartbox/editor";
 var PHYSICS_DT = 1 / 60;
 function splitWorldMatrix(m) {
   const sx = Math.hypot(m[0], m[1], m[2]) || 1;
@@ -4117,6 +4121,42 @@ function composeWorldMatrix(p, q, s) {
   m[14] = p[2];
   m[15] = 1;
   return m;
+}
+var qmul = (a, b) => [
+  a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+  a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+  a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+  a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]
+];
+var qconj = (q) => [-q[0], -q[1], -q[2], q[3]];
+function qrot(q, v) {
+  const r = qmul(qmul(q, [v[0], v[1], v[2], 0]), qconj(q));
+  return [r[0], r[1], r[2]];
+}
+var S = Math.SQRT1_2;
+var HINGE_FRAME = { x: [0, 0, 0, 1], y: [0, 0, S, S], z: [0, -S, 0, S] };
+function jointFrames(spec, self, target) {
+  const a = splitWorldMatrix(self);
+  const b = target ? splitWorldMatrix(target) : { position: [0, 0, 0], rotation: [0, 0, 0, 1] };
+  const local = [spec.anchor[0] * a.scale[0], spec.anchor[1] * a.scale[1], spec.anchor[2] * a.scale[2]];
+  const offset = qrot(a.rotation, local);
+  const world = [a.position[0] + offset[0], a.position[1] + offset[1], a.position[2] + offset[2]];
+  const inB = qconj(b.rotation);
+  const anchor2 = qrot(inB, [world[0] - b.position[0], world[1] - b.position[1], world[2] - b.position[2]]);
+  const pulls = spec.kind === "spring" || spec.kind === "rope";
+  const frame1 = spec.kind === "hinge" ? HINGE_FRAME[spec.axis ?? "y"] : [0, 0, 0, 1];
+  const deg = Math.PI / 180;
+  return {
+    kind: spec.kind,
+    anchor1: pulls ? [0, 0, 0] : local,
+    frame1,
+    anchor2,
+    frame2: qmul(qmul(inB, a.rotation), frame1),
+    ...spec.kind === "hinge" && spec.limits ? { limits: [spec.limits[0] * deg, spec.limits[1] * deg] } : {},
+    length: spec.length ?? Math.hypot(local[0], local[1], local[2]),
+    stiffness: spec.stiffness ?? DEFAULT_SPRING_STIFFNESS,
+    damping: spec.damping ?? DEFAULT_SPRING_DAMPING
+  };
 }
 function fitShape(spec, mesh, scale) {
   const b = meshBounds(mesh) ?? { min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] };
@@ -4183,6 +4223,10 @@ var PhysicsSession = class {
     this.byObject = /* @__PURE__ */ new Map();
     /** Bodies of reserve prefab copies (static ones too), by object index. */
     this.pooledBodies = /* @__PURE__ */ new Map();
+    /** Every body's handle, by object index. */
+    this.handleOf = /* @__PURE__ */ new Map();
+    /** Jointed objects: what they're tied to (object, or null for the world) and the live joint. */
+    this.joints = /* @__PURE__ */ new Map();
     this.rayRequests = [];
     this.rayResults = [];
     this.events = [];
@@ -4207,6 +4251,7 @@ var PhysicsSession = class {
         ...spec.damping !== void 0 ? { damping: spec.damping } : {},
         object: i
       });
+      this.handleOf.set(i, handle);
       if (pooled) {
         backend.setEnabled(handle, false);
         this.pooledBodies.set(i, { handle, enabled: false });
@@ -4216,6 +4261,41 @@ var PhysicsSession = class {
       this.tracked.push(t);
       this.byObject.set(i, t);
     });
+    scene.instances.forEach((inst, i) => {
+      const spec = inst.physics?.joint;
+      if (!spec || !this.handleOf.has(i)) return;
+      let target = null;
+      for (let p = inst.parent; p >= 0; p = scene.instances[p].parent) {
+        if (this.handleOf.has(p)) {
+          target = p;
+          break;
+        }
+      }
+      this.joints.set(i, { spec, target, handle: null, pooled: Boolean(inst.pooled) });
+    });
+    const model = (object) => scene.instances[object]?.model ?? null;
+    for (const [object, joint] of this.joints) if (!joint.pooled) this.join(object, model);
+  }
+  /** Create `object`'s joint from where it and its target are now (`world` gives world matrices). */
+  join(object, world) {
+    const joint = this.joints.get(object);
+    const handle = this.handleOf.get(object);
+    const self = world(object);
+    if (!joint || handle === void 0 || !self || !this.backend.addJoint) return;
+    this.unjoin(object);
+    const target = joint.target === null ? null : world(joint.target);
+    if (joint.target !== null && !target) return;
+    joint.handle = this.backend.addJoint({
+      ...jointFrames(joint.spec, self, target),
+      body: handle,
+      target: joint.target === null ? null : this.handleOf.get(joint.target)
+    });
+  }
+  unjoin(object) {
+    const joint = this.joints.get(object);
+    if (joint?.handle == null) return;
+    this.backend.removeJoint?.(joint.handle);
+    joint.handle = null;
   }
   /** Write body state and last tick's ray results for the cart to read. */
   beforeTick(block) {
@@ -4253,6 +4333,18 @@ var PhysicsSession = class {
         t.grounded = false;
       }
     }
+    for (const object of objects) {
+      if (!this.joints.has(object)) continue;
+      if (active) this.join(object, (o) => objects.includes(o) ? world(o) : this.currentWorld(o));
+      else this.unjoin(object);
+    }
+  }
+  /** A body's world matrix now (position and rotation from physics; unit scale). */
+  currentWorld(object) {
+    const handle = this.handleOf.get(object);
+    if (handle === void 0) return null;
+    const s = this.backend.bodyState(handle);
+    return composeWorldMatrix(s.position, s.rotation, this.byObject.get(object)?.scale ?? [1, 1, 1]);
   }
   /** Apply a tick's commands (already taken from the block), step, and cast rays. */
   run(commands) {
@@ -4279,6 +4371,13 @@ var PhysicsSession = class {
       }
       const t = this.byObject.get(cmd.a);
       if (!t || !t.enabled) continue;
+      if (cmd.op === PHYS_OP_MOTOR || cmd.op === PHYS_OP_UNJOIN) {
+        const joint = this.joints.get(cmd.a);
+        if (joint?.handle == null) continue;
+        if (cmd.op === PHYS_OP_UNJOIN) this.unjoin(cmd.a);
+        else if (joint.spec.kind === "hinge") this.backend.setMotor?.(joint.handle, a, Math.max(0, b));
+        continue;
+      }
       if (cmd.op === PHYS_OP_IMPULSE && t.kind === "dynamic") this.backend.applyImpulse(t.handle, [a, b, c]);
       else if (cmd.op === PHYS_OP_VELOCITY && t.kind !== "character") this.backend.setVelocity(t.handle, [a, b, c]);
       else if (cmd.op === PHYS_OP_TELEPORT) this.backend.teleport(t.handle, [a, b, c]);
@@ -4399,6 +4498,15 @@ function PHYSICS_CALLS() {
   cartbox.velocity = _each(${PHYS_OP_VELOCITY})
   cartbox.teleport = _each(${PHYS_OP_TELEPORT})
   cartbox.move = _each(${PHYS_OP_MOVE})
+  cartbox.motor = function(o, speed, force)
+    local i = _obj(o)
+    if i == nil or not _slot[i] then return end
+    if speed == nil then _cmd(${PHYS_OP_MOTOR}, i, 0, 0) else _cmd(${PHYS_OP_MOTOR}, i, speed, force or 1000) end
+  end
+  cartbox.unjoin = function(o)
+    local i = _obj(o)
+    if i and _slot[i] then _cmd(${PHYS_OP_UNJOIN}, i) end
+  end
   -- A ray, or (kind > 0) a swept shape, from a slot: options first, then the ray.
   local function _cast(slot, kind, a, b, c, x, y, z, dx, dy, dz, max, ignore)
     slot = math.floor(slot or 0)
@@ -9377,6 +9485,7 @@ export {
   injectSdk,
   interleaveVertices,
   interpolateNormal,
+  jointFrames,
   loadEngineModule,
   makeShadowTexture,
   mount,

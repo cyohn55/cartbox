@@ -319,6 +319,18 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
         snippet: "for _, c in ipairs(cartbox.contacts()) do\n  if c.started then\n    \n  end\nend",
       },
       {
+        name: "cartbox.motor",
+        signature: "cartbox.motor(obj, speed, force)",
+        doc: "Drive an object's hinge joint (set on its Physics in the Inspector) at speed radians per second, pushing with at most force (default 1000). Speed 0 holds it still; cartbox.motor(obj) turns the motor off so it swings freely.",
+        snippet: 'cartbox.motor("wheel", 6)',
+      },
+      {
+        name: "cartbox.unjoin",
+        signature: "cartbox.unjoin(obj)",
+        doc: "Break an object's joint: a hinged door comes off, a hanging lamp falls. A prefab copy gets its joints back when it's spawned again.",
+        snippet: 'cartbox.unjoin("lamp")',
+      },
+      {
         name: "cartbox.physics",
         signature: "cartbox.physics() -> bool",
         doc: "Whether the cart's physics is running (false in carts without bodies).",
