@@ -281,7 +281,7 @@ export class Player {
           );
         }
         // "auto" quality weighs the device, including whether the GPU renderer came up.
-        this.qualitySettings = resolveQuality(this.options.quality, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend === "webgpu" : undefined));
+        this.qualitySettings = resolveQuality(this.options.quality, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend !== "software" : undefined));
         if (mesh) {
           surface = this.meshSurface = await MeshOverlaySurface.create(
             surface,
@@ -506,7 +506,7 @@ export class Player {
    * effect on.
    */
   setQuality(choice: QualityChoice): void {
-    this.qualitySettings = resolveQuality(choice, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend === "webgpu" : undefined));
+    this.qualitySettings = resolveQuality(choice, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend !== "software" : undefined));
     this.meshSurface?.setQuality(this.qualitySettings);
     if (this.postFxSurface && this.basePostFx) this.postFxSurface.setSettings(applyQualityToPostFx(this.basePostFx, this.qualitySettings));
   }

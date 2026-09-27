@@ -299,9 +299,12 @@ export interface InstanceTransform {
   readonly normalBasis: readonly number[];
 }
 
-/** Write one instance's transforms into the staging array at `index` (see {@link INSTANCE_FLOATS}). */
-export function writeInstanceTransform(target: Float32Array, index: number, transform: InstanceTransform): void {
-  const base = index * INSTANCE_FLOATS;
+/**
+ * Write one instance's transforms into the staging array at `index` (see
+ * {@link INSTANCE_FLOATS}), or at float offset `base` when the caller lays
+ * instances out itself (WebGL2 aligns each block's start).
+ */
+export function writeInstanceTransform(target: Float32Array, index: number, transform: InstanceTransform, base = index * INSTANCE_FLOATS): void {
   for (let i = 0; i < 16; i += 1) {
     target[base + i] = transform.mvp[i]!;
     target[base + 16 + i] = transform.lightMvp ? transform.lightMvp[i]! : 0;
