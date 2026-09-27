@@ -45,6 +45,9 @@ export {
 } from "./replay.js";
 export type { InputChange, Replay } from "./replay.js";
 export { codeChunks, readCartCode, seedCartridge } from "./cartseed.js";
+// The playtest console (ENGINE_ROADMAP.md, Phase 5): trace capture and cart-line errors.
+export { codeLineOffset, debugBlockAddress, debugSdkLua, errorStack, remapErrorLines } from "./debug/debugBlock.js";
+export type { ErrorFrame, TraceLine } from "./debug/debugBlock.js";
 
 // Platform event mailbox (P2) + the cartbox SDK.
 export {
@@ -378,6 +381,10 @@ export function mount(container: HTMLElement, options: PlayerOptions): PlayerHan
     inspect: () => player.inspect(),
     setQuality: (choice) => player.setQuality(choice),
     supplyTextures: (textures) => player.supplyTextures(textures),
+    setTimeScale: (scale) => player.setTimeScale(scale),
+    timeScale: () => player.timeScale(),
+    stepFrame: () => player.stepFrame(),
+    frame: () => player.frame(),
     quality: () => player.quality(),
   };
 }

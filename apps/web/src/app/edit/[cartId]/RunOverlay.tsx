@@ -13,6 +13,7 @@ import { mount, type InspectedObject, type AnimSpec, type CollisionField, type F
 
 import styles from "./editor.module.css";
 import { errorLineFrom } from "./codeTools";
+import { appendConsole, traceColor, type ConsoleEntry } from "./consoleLog";
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 import { rapierPhysics } from "@/lib/physicsRapier";
 
@@ -81,6 +82,16 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
   const [inspecting, setInspecting] = useState(false);
   const [objects, setObjects] = useState<InspectedObject[]>([]);
   const [filter, setFilter] = useState("");
+  // Speed (1 is normal), read at mount like the quality preset.
+  const [speed, setSpeed] = useState(1);
+  const speedRef = useRef(1);
+  const [frame, setFrame] = useState(0);
+  // The console: traces and errors land in a ref at frame rate and are shown a
+  // few times a second, so a cart tracing every frame doesn't render React at 60Hz.
+  const [consoleOpen, setConsoleOpen] = useState(true);
+  const [log, setLog] = useState<ConsoleEntry[]>([]);
+  const logRef = useRef<ConsoleEntry[]>([]);
+  const logDirtyRef = useRef(false);
 
   // The sidecars the player is actually applying this playtest, so a creator can
   // confirm at a glance what is (and isn't) in effect.
@@ -100,6 +111,12 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
     if (!stage) return;
     // A fresh run clears any error from the previous cart bytes.
     setRuntimeError(null);
+    logRef.current = [];
+    setLog([]);
+    const record = (kind: ConsoleEntry["kind"], text: string, frame: number, color?: number) => {
+      logRef.current = appendConsole(logRef.current, kind, text, frame, color);
+      logDirtyRef.current = true;
+    };
 
     // saveTic() returns an exact-length buffer, so its ArrayBuffer is the cart
     // bytes verbatim. The cast sidesteps the DOM lib's SharedArrayBuffer union.
@@ -149,9 +166,15 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
       },
       // A Lua runtime error mid-frame: the cart keeps running, so show it as a
       // dismissible banner rather than tearing the playtest down.
-      onRuntimeError: (message) => setRuntimeError(message),
+      onRuntimeError: (message) => {
+        setRuntimeError(message);
+        record("error", message, handleRef.current?.frame() ?? 0);
+      },
+      // The console: the cart's trace() output.
+      onTrace: (text, color, at) => record("trace", text, at, color),
     });
     handleRef.current = handle;
+    handle.setTimeScale(speedRef.current);
 
     return () => {
       handle.destroy();
@@ -175,6 +198,30 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
     }, 1000);
     return () => window.clearInterval(timer);
   }, []);
+
+  // Show new console lines and the frame counter a few times a second.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (logDirtyRef.current) {
+        logDirtyRef.current = false;
+        setLog(logRef.current);
+      }
+      setFrame(handleRef.current?.frame() ?? 0);
+    }, 200);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  /** While paused: run one frame and show what it did. */
+  const stepFrame = () => {
+    const handle = handleRef.current;
+    if (!handle || handle.running) return;
+    handle.stepFrame();
+    setFrame(handle.frame());
+    if (logDirtyRef.current) {
+      logDirtyRef.current = false;
+      setLog(logRef.current);
+    }
+  };
 
   useEffect(() => {
     if (!inspecting) return;
@@ -228,8 +275,32 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
                 {inspecting ? "Hide objects" : "Objects"}
               </button>
             )}
+            <select
+              aria-label="Speed"
+              title="Game speed — slow it down to watch a bug happen (sound is muted away from 1×)"
+              value={speed}
+              disabled={status !== "ready"}
+              onChange={(e) => {
+                const next = Number(e.target.value);
+                setSpeed(next);
+                speedRef.current = next;
+                handleRef.current?.setTimeScale(next);
+              }}
+              style={{ font: "inherit", padding: "4px 8px", borderRadius: 6 }}
+            >
+              <option value={0.25}>0.25×</option>
+              <option value={0.5}>0.5×</option>
+              <option value={1}>1×</option>
+              <option value={2}>2×</option>
+            </select>
             <button type="button" className="cbx-btn" onClick={togglePlayback} disabled={status !== "ready"}>
               {running ? "Pause" : "Resume"}
+            </button>
+            <button type="button" className="cbx-btn" onClick={stepFrame} disabled={status !== "ready" || running} title="Run one frame (while paused)">
+              Step
+            </button>
+            <button type="button" className="cbx-btn" aria-pressed={consoleOpen} onClick={() => setConsoleOpen((v) => !v)}>
+              Console{log.length > 0 ? ` · ${log.length}` : ""}
             </button>
             <button type="button" className="cbx-btn cbx-btn-accent" onClick={onClose}>
               Stop
@@ -250,6 +321,10 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
             </span>
           </span>
           <span className={styles.runDebugItem}>
+            <span className={styles.runDebugLabel}>Frame</span>
+            <span className={`${styles.runDebugValue} data`}>{status === "ready" ? frame : "—"}</span>
+          </span>
+          <span className={styles.runDebugItem}>
             <span className={styles.runDebugLabel}>FPS</span>
             <span className={`${styles.runDebugValue} data`}>{status === "ready" && fps !== null ? fps : "—"}</span>
           </span>
@@ -260,6 +335,17 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
             </span>
           </span>
         </div>
+
+        {consoleOpen && (
+          <ConsolePanel
+            log={log}
+            onGoToLine={onGoToLine}
+            onClear={() => {
+              logRef.current = [];
+              setLog([]);
+            }}
+          />
+        )}
 
         {status === "error" && (
           <p className={styles.runError}>
@@ -300,6 +386,64 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
         </p>
       </div>
     </div>
+  );
+}
+
+/**
+ * The console: what the cart traced and the errors it raised, each tagged with
+ * its frame; an error's line and the lines of its call stack open the code.
+ */
+function ConsolePanel({ log, onGoToLine, onClear }: { log: ConsoleEntry[]; onGoToLine?: (line: number) => void; onClear: () => void }) {
+  const listRef = useRef<HTMLDivElement>(null);
+  // Follow new lines, unless the creator has scrolled up to read.
+  useEffect(() => {
+    const list = listRef.current;
+    if (list && list.scrollHeight - list.scrollTop - list.clientHeight < 40) list.scrollTop = list.scrollHeight;
+  }, [log]);
+  const lineLink = (line: number, label: string) =>
+    onGoToLine ? (
+      <button type="button" className={styles.rendererToggle} onClick={() => onGoToLine(line)} style={{ padding: "0 4px" }}>
+        {label}
+      </button>
+    ) : (
+      <span>{label}</span>
+    );
+  return (
+    <section aria-label="Console" style={{ border: "1px solid var(--border)", borderRadius: 8, background: "var(--surface)", fontSize: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 8px", borderBottom: "1px solid var(--border)" }}>
+        <strong>Console</strong>
+        <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <span style={{ opacity: 0.7 }}>trace(&quot;…&quot;) prints here</span>
+          <button type="button" className={styles.rendererToggle} onClick={onClear} disabled={log.length === 0}>
+            Clear
+          </button>
+        </span>
+      </div>
+      <div ref={listRef} role="log" className="data" style={{ maxHeight: 150, overflowY: "auto", padding: "4px 8px", display: "grid", gap: 2 }}>
+        {log.length === 0 && <span style={{ opacity: 0.6 }}>Nothing yet.</span>}
+        {log.map((entry) => (
+          <div key={entry.id} data-kind={entry.kind} style={{ display: "flex", gap: 8, alignItems: "baseline", color: entry.kind === "error" ? "#ff8a8a" : traceColor(entry.color) }}>
+            <span style={{ opacity: 0.5, minWidth: 48, textAlign: "right" }}>{entry.frame}</span>
+            <span style={{ flex: 1, minWidth: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+              {entry.kind === "error" ? entry.text.split("\n", 1)[0] : entry.text}
+              {entry.kind === "error" && entry.line !== null && <> {lineLink(entry.line, `line ${entry.line}`)}</>}
+              {entry.stack.length > 1 && (
+                <span style={{ opacity: 0.8 }}>
+                  {" "}
+                  ← {entry.stack.slice(1).map((f, i) => (
+                    <span key={i}>
+                      {i > 0 && " ← "}
+                      {f.name} {lineLink(f.line, String(f.line))}
+                    </span>
+                  ))}
+                </span>
+              )}
+            </span>
+            {entry.count > 1 && <span style={{ opacity: 0.7 }}>×{entry.count}</span>}
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 

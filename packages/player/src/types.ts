@@ -220,6 +220,14 @@ export interface PlayerOptions {
    * frame.
    */
   onFrame?: () => void;
+  /**
+   * The editor's console: called with each `trace()` the cart prints, its
+   * colour, and the frame it came in. Setting it adds the debug prelude (see
+   * debug/debugBlock.ts), which also makes runtime errors name cart lines with
+   * a short call stack (`line 12: …` then `at update:12 < TIC:40`). For the
+   * editor's playtest; a published cart leaves it unset.
+   */
+  onTrace?: (text: string, color: number, frame: number) => void;
 }
 
 /** Handle returned by {@link mount} for controlling a live player instance. */
@@ -260,6 +268,17 @@ export interface PlayerHandle {
   supplyTextures(images: ReadonlyMap<string, EncodedImage>): Promise<number>;
   /** The graphics preset in effect. */
   quality(): QualityLevel;
+  /**
+   * Run at a fraction or multiple of normal speed (0.25 … 4; 1 is normal). Sound
+   * is muted away from 1×, where it would stretch or pile up.
+   */
+  setTimeScale(scale: number): void;
+  /** The speed set by {@link setTimeScale}. */
+  timeScale(): number;
+  /** While paused: advance exactly one frame and show it. No-op while running. */
+  stepFrame(): void;
+  /** Frames the cart has run so far. */
+  frame(): number;
 }
 
 /** One scene object in a live inspection snapshot. */
