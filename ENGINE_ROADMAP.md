@@ -110,7 +110,10 @@ trades state and commands with the cart through an 8 KB block at the end of RAM
       a 1D blend (clips kept in step), transitions with conditions, exit times and
       crossfades, and named clip events — authored in the Mesh tab, driven with
       `cartbox.set` / `trigger` / `setstate`, read with `cartbox.state` / `events`.
-- [ ] Two-bone IK and look-at (feet on slopes, aiming).
+- [x] Two-bone IK and look-at (feet on slopes, aiming): `cartbox.ik` bends the chain
+      ending at a joint to a world-space target (toward an optional pole),
+      `cartbox.lookat` turns a joint toward a point within a limit, and `cartbox.joint`
+      reads a joint's world position — layered on whatever clip or state is playing.
 - [ ] Timeline / sequencer for cutscenes and scripted camera moves.
 
 ## Phase 4 — Web asset pipeline and reach

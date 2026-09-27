@@ -295,6 +295,11 @@ cartbox = {
   --   cartbox.state(obj)               -> the current state's name
   --   cartbox.setstate(obj, state, fade) jump to a state
   --   cartbox.events(obj)              -> { name, ... } clip events from the last tick
+  -- Inverse kinematics (world-space points; a call stands until repeated, weight 0 lets go):
+  --   cartbox.ik(obj, joint, x, y, z, weight, px, py, pz)  reach with the chain ending at joint
+  --   cartbox.lookat(obj, joint, x, y, z, weight, maxdeg)  turn a joint toward a point
+  --   cartbox.joint(obj, joint)        -> x, y, z of a joint in the world
+  --   cartbox.joints(obj)              -> { name, ... }
   -- Physics (bodies on scene objects): overridden by the injected physics calls
   -- when the cart has bodies.
   physics = function() return false end,
@@ -326,4 +331,8 @@ cartbox = {
   state = function() return nil end,
   setstate = function() end,
   events = function() return {} end,
+  ik = function() end,
+  lookat = function() end,
+  joint = function() return nil end,
+  joints = function() return {} end,
 }

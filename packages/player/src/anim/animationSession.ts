@@ -161,6 +161,8 @@ export class AnimationSession {
   private readonly playback = new Map<number, Playback>();
   private tick = 0;
   private cache: { tick: number; matrices: Map<number, Float32Array> } | null = null;
+  /** Each object's final pose (after any adjustment, e.g. IK) as last skinned. */
+  private readonly lastPose = new Map<number, Float32Array>();
 
   constructor(private readonly scene: MeshScene) {
     for (const i of animatedObjects(scene)) this.playback.set(i, this.fresh(i));
@@ -338,19 +340,35 @@ export class AnimationSession {
   /**
    * The skinning matrices for every animated object now (object → matrices),
    * computed once per tick. `visible` skips objects not being drawn (a reserve
-   * prefab copy), which then keep their last pose.
+   * prefab copy), which then keep their last pose; `adjust` may rewrite a pose
+   * before it's skinned (inverse kinematics).
    */
-  matrices(visible: (object: number) => boolean = () => true): Map<number, Float32Array> {
+  matrices(
+    visible: (object: number) => boolean = () => true,
+    adjust?: (object: number, mesh: MeshAsset, pose: Float32Array) => void,
+  ): Map<number, Float32Array> {
     if (this.cache?.tick === this.tick) return this.cache.matrices;
     const out = new Map<number, Float32Array>();
     for (const [object, p] of this.playback) {
       if (!visible(object)) continue;
       const pose = this.pose(p, p.current);
       const faded = p.from && p.fade > 0 ? blendPoses(this.pose(p, p.from), pose, Math.min(1, p.fadeElapsed / p.fade)) : pose;
+      adjust?.(object, p.mesh, faded);
+      this.lastPose.set(object, faded);
       out.set(object, skinMatrices(p.mesh.skin!, faded));
     }
     this.cache = { tick: this.tick, matrices: out };
     return out;
+  }
+
+  /** Recompute the matrices on the next request (something that shapes the pose changed). */
+  invalidate(): void {
+    this.cache = null;
+  }
+
+  /** An object's final pose as last skinned (null before its first). */
+  finalPose(object: number): Float32Array | null {
+    return this.lastPose.get(object) ?? null;
   }
 
   private pose(p: Playback, track: Track): Float32Array {
