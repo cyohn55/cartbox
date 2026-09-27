@@ -30,6 +30,8 @@ import { authHeaders } from "@/lib/supabase-browser";
 import { isStaticExport } from "@/lib/staticSite";
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 import { rapierPhysics } from "@/lib/physicsRapier";
+import { streamTextures, type StreamedTexture } from "@/lib/textureStream";
+import type { EncodedImage } from "@cartbox/editor";
 
 interface CartridgePlayerProps {
   cartId: string;
@@ -56,11 +58,16 @@ interface CartridgePlayerProps {
   meshRaw: string | null;
   /** The cart's raw HD-2D world sidecar JSON, or null when none is saved. */
   worldRaw: string | null;
+  /**
+   * The scene's textures kept in the cart asset store, streamed in after the
+   * cart starts (the scene itself carries only their placeholders).
+   */
+  meshTextures?: readonly StreamedTexture[];
 }
 
 type SubmitState = "idle" | "working" | "submitted" | "error";
 
-export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, meshRaw, worldRaw }: CartridgePlayerProps) {
+export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, meshRaw, worldRaw, meshTextures }: CartridgePlayerProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   // Decode the mesh sidecar once per cart: parsing deserialises geometry, so it
   // must not rerun on every render (and a malformed payload yields null → no meshes).
@@ -79,12 +86,25 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
   const [bestScore, setBestScore] = useState<number | null>(null);
   const [hasUnlocks, setHasUnlocks] = useState(false);
   const [submitState, setSubmitState] = useState<SubmitState>("idle");
+  // Streamed textures: bytes arrived of the total, until they're all in.
+  const [textureProgress, setTextureProgress] = useState<{ loaded: number; total: number } | null>(null);
 
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) {
       return;
     }
+
+    // Textures stream in once the cart is running; ones that land before the
+    // scene is up wait here and are handed over together when it is.
+    const pendingTextures = new Map<string, EncodedImage>();
+    let sceneReady = false;
+    const flushTextures = () => {
+      if (!sceneReady || pendingTextures.size === 0) return;
+      void handleRef.current?.supplyTextures(new Map(pendingTextures));
+      pendingTextures.clear();
+    };
+    const streaming = new AbortController();
 
     const handle = mount(stage, {
       cartUrl,
@@ -122,7 +142,11 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       // The cart's authored HD-2D world: 3D terrain with the cart's 2D character
       // sprites composited into it as depth-sorted billboards.
       world: world ?? undefined,
-      onReady: () => setStatus("ready"),
+      onReady: () => {
+        setStatus("ready");
+        sceneReady = true;
+        flushTextures();
+      },
       onError: () => setStatus("error"),
       onEvent: (event: MailboxEvent) => {
         if (event.kind === "score" && event.value > (bestScoreRef.current ?? -1)) {
@@ -136,8 +160,25 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
     });
     handleRef.current = handle;
 
-    return () => handle.destroy();
-  }, [cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, world]);
+    if (mesh && meshTextures && meshTextures.length > 0) {
+      setTextureProgress({ loaded: 0, total: 1 });
+      void streamTextures(meshTextures, {
+        signal: streaming.signal,
+        onProgress: (loaded, total) => setTextureProgress({ loaded, total: Math.max(1, total) }),
+        onTexture: (hash, image) => {
+          pendingTextures.set(hash, image);
+          flushTextures();
+        },
+      }).then(() => {
+        if (!streaming.signal.aborted) setTextureProgress(null);
+      });
+    }
+
+    return () => {
+      streaming.abort();
+      handle.destroy();
+    };
+  }, [cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, world, meshTextures]);
 
   const togglePlayback = () => {
     const handle = handleRef.current;
@@ -200,7 +241,26 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
 
   return (
     <div>
-      <div ref={stageRef} style={{ width: "100%", aspectRatio: `${model.width} / ${model.height}`, background: "#0c0a14" }} />
+      <div style={{ position: "relative" }}>
+        <div ref={stageRef} style={{ width: "100%", aspectRatio: `${model.width} / ${model.height}`, background: "#0c0a14" }} />
+        {textureProgress && (
+          <div
+            role="progressbar"
+            aria-label="Loading textures"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round((textureProgress.loaded / textureProgress.total) * 100)}
+            style={{ position: "absolute", left: 8, right: 8, bottom: 8, pointerEvents: "none", fontSize: 12, color: "#cbd5e1", textShadow: "0 1px 2px #000" }}
+          >
+            <div>
+              Loading textures · {(textureProgress.loaded / 1048576).toFixed(1)} / {(textureProgress.total / 1048576).toFixed(1)} MB
+            </div>
+            <div style={{ height: 4, borderRadius: 2, background: "rgba(255,255,255,0.15)", marginTop: 4 }}>
+              <div style={{ height: 4, borderRadius: 2, width: `${(textureProgress.loaded / textureProgress.total) * 100}%`, background: "#8b93ff" }} />
+            </div>
+          </div>
+        )}
+      </div>
       <div>
         <button type="button" onClick={togglePlayback} disabled={status !== "ready"}>
           {running ? "⏸ Pause" : "▶ Play"}

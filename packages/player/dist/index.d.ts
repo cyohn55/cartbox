@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, SceneLighting, PhysicsWorldSettings, SceneTimeline, JointKind, JointSpec, DecodedTexture, EnvironmentLight, ShadowInput, ToneMap, SceneLight, SceneFog, RasterStyle, AnimatorOp, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, SceneLighting, PhysicsWorldSettings, SceneTimeline, JointKind, JointSpec, DecodedTexture, EncodedImage, EnvironmentLight, ShadowInput, ToneMap, SceneLight, SceneFog, RasterStyle, AnimatorOp, AnimationCue } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -2189,6 +2189,13 @@ interface PlayerHandle {
     inspect(): InspectedObject[];
     /** Change the graphics preset live: "low" | "medium" | "high" | "auto" (see quality.ts). */
     setQuality(choice: QualityChoice): void;
+    /**
+     * Hand the running scene streamed textures, keyed by the `ref` of the
+     * placeholder each fills (an asset-backed texture's content hash). Safe to
+     * call before the scene is up (nothing changes then); resolves with how many
+     * objects changed.
+     */
+    supplyTextures(images: ReadonlyMap<string, EncodedImage>): Promise<number>;
     /** The graphics preset in effect. */
     quality(): QualityLevel;
 }
@@ -4506,6 +4513,15 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * bad image never blocks the cart — the mesh still renders, just untextured.
      */
     static create(inner: DisplaySurface, width: number, height: number, scene: MeshScene, renderer?: SceneRenderer, options?: MeshOverlayOptions): Promise<MeshOverlaySurface>;
+    /** Decodes a KTX2 texture (loading the decoder on first use); set by create. */
+    private decodeKtx2;
+    /**
+     * Swap streamed textures in (see sceneStreaming.ts in @cartbox/editor): every
+     * texture placeholder whose `ref` is in `images` is decoded and takes the
+     * place of the flat colour it stood in for, from the next frame. Returns how
+     * many objects changed.
+     */
+    supplyImages(images: ReadonlyMap<string, EncodedImage>): Promise<number>;
     /**
      * Set the cart-driven camera for the next frame(s), or null to auto-orbit. The
      * player calls this each frame from the decoded mesh-camera mailbox, so a cart

@@ -48,6 +48,11 @@ export interface EncodedImage {
   /** MIME type, e.g. `"image/png"` — governs how a consumer decodes `bytes`. */
   readonly mime: string;
   readonly bytes: Uint8Array;
+  /**
+   * A streamed texture's placeholder: `bytes` is empty until the player is
+   * handed the image for this ref (an asset-backed texture's content hash).
+   */
+  readonly ref?: string;
 }
 
 /**
@@ -297,6 +302,9 @@ function base64ToU32(base64: string): Uint32Array {
 interface SerializedImage {
   mime: string;
   bytes: string;
+  ref?: string;
+  /** An asset-store reference (content hash) in place of `bytes` (see meshTextureAssets.ts in the web app). */
+  asset?: string;
 }
 interface SerializedMaterial {
   name: string;
@@ -460,24 +468,9 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
       material: {
         name: primitive.material.name,
         baseColorFactor: [...primitive.material.baseColorFactor],
-        image: primitive.material.baseColorImage
-          ? {
-              mime: primitive.material.baseColorImage.mime,
-              bytes: bytesToBase64(primitive.material.baseColorImage.bytes),
-            }
-          : null,
-        normalImage: primitive.material.normalImage
-          ? {
-              mime: primitive.material.normalImage.mime,
-              bytes: bytesToBase64(primitive.material.normalImage.bytes),
-            }
-          : null,
-        materialImage: primitive.material.materialImage
-          ? {
-              mime: primitive.material.materialImage.mime,
-              bytes: bytesToBase64(primitive.material.materialImage.bytes),
-            }
-          : null,
+        image: serializeImage(primitive.material.baseColorImage),
+        normalImage: serializeImage(primitive.material.normalImage),
+        materialImage: serializeImage(primitive.material.materialImage),
         metallicRoughnessImage: serializeImage(primitive.material.metallicRoughnessImage),
         occlusionImage: serializeImage(primitive.material.occlusionImage),
         emissiveImage: serializeImage(primitive.material.emissiveImage),
@@ -499,11 +492,16 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
 
 /** Encode an optional image to the serialized form (null when absent). */
 function serializeImage(image: EncodedImage | null | undefined): SerializedImage | null {
-  return image ? { mime: image.mime, bytes: bytesToBase64(image.bytes) } : null;
+  return image ? { mime: image.mime, bytes: bytesToBase64(image.bytes), ...(image.ref ? { ref: image.ref } : {}) } : null;
 }
 /** Decode an optional serialized image back to bytes (null when absent). */
 function deserializeImage(image: SerializedImage | null | undefined): EncodedImage | null {
-  return image ? { mime: String(image.mime), bytes: base64ToBytes(image.bytes) } : null;
+  if (!image) return null;
+  // A texture whose bytes live elsewhere — a streamed placeholder (`ref`) or an
+  // asset-store reference (`asset`, its content hash) — decodes to a
+  // placeholder the player fills in when the bytes arrive.
+  const ref = typeof image.ref === "string" ? image.ref : typeof image.asset === "string" ? image.asset : undefined;
+  return { mime: String(image.mime ?? "image/png"), bytes: base64ToBytes(image.bytes ?? ""), ...(ref ? { ref } : {}) };
 }
 
 const MALFORMED = "Mesh asset payload is malformed";
@@ -591,15 +589,9 @@ export function deserializeMeshAsset(json: string): MeshAsset {
       material: {
         name: typeof material.name === "string" ? material.name : "default",
         baseColorFactor: toColor(material.baseColorFactor),
-        baseColorImage: material.image
-          ? { mime: String(material.image.mime), bytes: base64ToBytes(material.image.bytes) }
-          : null,
-        normalImage: material.normalImage
-          ? { mime: String(material.normalImage.mime), bytes: base64ToBytes(material.normalImage.bytes) }
-          : null,
-        materialImage: material.materialImage
-          ? { mime: String(material.materialImage.mime), bytes: base64ToBytes(material.materialImage.bytes) }
-          : null,
+        baseColorImage: deserializeImage(material.image),
+        normalImage: deserializeImage(material.normalImage),
+        materialImage: deserializeImage(material.materialImage),
         metallicRoughnessImage: deserializeImage(material.metallicRoughnessImage),
         occlusionImage: deserializeImage(material.occlusionImage),
         emissiveImage: deserializeImage(material.emissiveImage),

@@ -93,6 +93,11 @@ export function DownloadBudget({
                 {formatBytes(budget.total)}
               </div>
               <div style={{ color: RATING_COLOR[budget.rating] }}>{RATING_TEXT[budget.rating]}</div>
+              {budget.playable < budget.total && (
+                <div style={{ fontSize: 13, opacity: 0.8 }} aria-label="Playable after">
+                  Playable after {formatBytes(budget.playable)} — the textures ({formatBytes(budget.total - budget.playable)}) stream in once the cart is running.
+                </div>
+              )}
             </div>
             <div style={{ display: "grid", gap: 6 }} aria-label="What the player downloads">
               {budget.items.map((item) => (

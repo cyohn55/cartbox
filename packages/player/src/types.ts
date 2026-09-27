@@ -1,4 +1,4 @@
-import type { DecodedTexture } from "@cartbox/editor";
+import type { DecodedTexture, EncodedImage } from "@cartbox/editor";
 import type { PhysicsBackend } from "./physics/physicsSession.js";
 import type { QualityChoice, QualityLevel } from "./quality.js";
 /**
@@ -243,6 +243,13 @@ export interface PlayerHandle {
   inspect(): InspectedObject[];
   /** Change the graphics preset live: "low" | "medium" | "high" | "auto" (see quality.ts). */
   setQuality(choice: QualityChoice): void;
+  /**
+   * Hand the running scene streamed textures, keyed by the `ref` of the
+   * placeholder each fills (an asset-backed texture's content hash). Safe to
+   * call before the scene is up (nothing changes then); resolves with how many
+   * objects changed.
+   */
+  supplyTextures(images: ReadonlyMap<string, EncodedImage>): Promise<number>;
   /** The graphics preset in effect. */
   quality(): QualityLevel;
 }

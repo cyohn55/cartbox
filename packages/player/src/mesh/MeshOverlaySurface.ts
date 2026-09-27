@@ -258,9 +258,9 @@ export class MeshOverlaySurface implements DisplaySurface {
     private readonly height: number,
     private readonly scene: MeshScene,
     /** The authored instances (baked placement); per-frame poses compose on top. */
-    private readonly instances: readonly MeshSceneInstance[],
+    private readonly instances: MeshSceneInstance[],
     /** Each instance's animation frames (textured), or null when it has none. */
-    private readonly frames: readonly (readonly TexturedMesh[] | null)[],
+    private readonly frames: (readonly TexturedMesh[] | null)[],
     /**
      * What actually draws the triangles. Owned by whoever passed it — a renderer
      * is typically shared with the world overlay, so destroying this surface must
@@ -391,7 +391,54 @@ export class MeshOverlaySurface implements DisplaySurface {
     }
     const surface = new MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
     for (const [i, mesh] of live) surface.live.set(i, mesh);
+    surface.decodeKtx2 = decodeKtx2;
     return surface;
+  }
+
+  /** Decodes a KTX2 texture (loading the decoder on first use); set by create. */
+  private decodeKtx2: (bytes: Uint8Array) => Promise<DecodedTexture | null> = async () => null;
+
+  /**
+   * Swap streamed textures in (see sceneStreaming.ts in @cartbox/editor): every
+   * texture placeholder whose `ref` is in `images` is decoded and takes the
+   * place of the flat colour it stood in for, from the next frame. Returns how
+   * many objects changed.
+   */
+  async supplyImages(images: ReadonlyMap<string, EncodedImage>): Promise<number> {
+    const resolved = new Map<MeshAsset, MeshAsset>();
+    const resolve = (mesh: MeshAsset): MeshAsset => {
+      let hit = resolved.get(mesh);
+      if (!hit) {
+        hit = fillPlaceholders(mesh, images);
+        resolved.set(mesh, hit);
+      }
+      return hit;
+    };
+    const decoded = new Map<MeshAsset, Promise<TexturedMesh>>();
+    const texture = (mesh: MeshAsset): Promise<TexturedMesh> => {
+      let entry = decoded.get(mesh);
+      if (!entry) {
+        entry = decodeMeshTextures(mesh, this.decodeKtx2);
+        decoded.set(mesh, entry);
+      }
+      return entry;
+    };
+    let changed = 0;
+    for (const [i, instance] of this.scene.instances.entries()) {
+      const mesh = resolve(instance.mesh);
+      const frames = instance.frames?.map(resolve);
+      const framesChanged = frames?.some((f, k) => f !== instance.frames![k]) ?? false;
+      if (mesh === instance.mesh && !framesChanged) continue;
+      if (mesh !== instance.mesh) {
+        const { mesh: _decodedMesh, ...maps } = await texture(mesh);
+        void _decodedMesh;
+        // Keep what the instance draws (its live skinned copy, if any); only the maps change.
+        this.instances[i] = { ...this.instances[i]!, ...maps };
+      }
+      if (frames && framesChanged) this.frames[i] = await Promise.all(frames.map(texture));
+      changed += 1;
+    }
+    return changed;
   }
 
   /**
@@ -875,6 +922,25 @@ export class MeshOverlaySurface implements DisplaySurface {
   }
 }
 
+/** The mesh with each placeholder image whose ref is in `images` filled in (the same mesh when none is). */
+function fillPlaceholders(mesh: MeshAsset, images: ReadonlyMap<string, EncodedImage>): MeshAsset {
+  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage"] as const;
+  let touched = false;
+  const primitives = mesh.primitives.map((primitive) => {
+    let material = primitive.material;
+    for (const slot of slots) {
+      const image = material[slot];
+      const supplied = image?.ref ? images.get(image.ref) : undefined;
+      if (supplied) {
+        material = { ...material, [slot]: supplied };
+        touched = true;
+      }
+    }
+    return material === primitive.material ? primitive : { ...primitive, material };
+  });
+  return touched ? { ...mesh, primitives } : mesh;
+}
+
 /** A mesh with every material map decoded — what an instance (or a frame) draws with. */
 type TexturedMesh = Omit<MeshSceneInstance, "model">;
 
@@ -884,7 +950,8 @@ async function decodeMeshTextures(mesh: MeshAsset, decodeKtx2: (bytes: Uint8Arra
     Promise.all(
       mesh.primitives.map((primitive) => {
         const image = pick(primitive.material);
-        if (!image) return Promise.resolve(null);
+        // No image, or a streamed placeholder whose bytes haven't arrived: flat colour for now.
+        if (!image || image.bytes.length === 0) return Promise.resolve(null);
         return image.mime === "image/ktx2" ? decodeKtx2(image.bytes) : decodeTexture(image.mime, image.bytes);
       }),
     );

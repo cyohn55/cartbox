@@ -377,6 +377,7 @@ export function mount(container: HTMLElement, options: PlayerOptions): PlayerHan
     setInputEnabled: (enabled) => player.setInputEnabled(enabled),
     inspect: () => player.inspect(),
     setQuality: (choice) => player.setQuality(choice),
+    supplyTextures: (textures) => player.supplyTextures(textures),
     quality: () => player.quality(),
   };
 }

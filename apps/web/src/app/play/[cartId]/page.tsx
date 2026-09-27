@@ -16,6 +16,10 @@ import { notFound } from "next/navigation";
 import { serviceClient } from "@/lib/supabase";
 import { publicUrl } from "@/lib/storage";
 import { resolveMeshSidecar } from "@/lib/meshStorage";
+import { cartAssetUrl, readCartAsset } from "@/lib/cartAssetStorage";
+import { parseCartAssets } from "@/lib/cartAssetStore";
+import { inlineMeshTextures, meshTextureName, meshTextureRefs } from "@/lib/meshTextureAssets";
+import type { StreamedTexture } from "@/lib/textureStream";
 import { getServerUserId } from "@/lib/supabase-server";
 import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
 import { isStaticExport } from "@/lib/staticSite";
@@ -247,6 +251,24 @@ export default async function CartridgePage({ params }: PageProps) {
   } catch {
     meshRaw = null;
   }
+  // Textures kept in the cart asset store stream in after the cart starts: the
+  // client gets their URLs (immutable, CDN-cached) rather than their bytes. If
+  // the URLs can't be made (no public storage URL), they're inlined here instead.
+  let meshTextures: StreamedTexture[] = [];
+  const textureRefs = meshTextureRefs(meshRaw);
+  if (textureRefs.length > 0) {
+    try {
+      const { data } = await db.from("carts").select("assets").eq("id", cart.id).maybeSingle();
+      const manifest = parseCartAssets(data?.assets);
+      meshTextures = textureRefs.map(({ hash, mime }) => {
+        const bytes = manifest?.entries[meshTextureName(hash)]?.bytes ?? 0;
+        return { hash, mime, bytes, url: cartAssetUrl({ hash, bytes, contentType: mime }) };
+      });
+    } catch {
+      meshTextures = [];
+      meshRaw = meshRaw ? await inlineMeshTextures(meshRaw, readCartAsset).catch(() => meshRaw) : meshRaw;
+    }
+  }
   // The HD-2D world sidecar (migration 0023), fetched raw and parsed client-side
   // like the mesh one; a not-yet-migrated deployment simply plays without a world.
   let worldRaw: string | null = null;
@@ -273,6 +295,7 @@ export default async function CartridgePage({ params }: PageProps) {
           collision={collision}
           flags={flags}
           meshRaw={meshRaw}
+          meshTextures={meshTextures}
           worldRaw={worldRaw}
         />
       ) : (

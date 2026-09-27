@@ -137,6 +137,12 @@ trades state and commands with the cart through an 8 KB block at the end of RAM
       (checked on a real device by `webgpu-parity.test.ts`).
 - [ ] Asset bundles and streaming: load a level's assets on demand, with a loading
       screen and progress.
+  - [x] Textures stream after the cart starts: saved scenes keep every texture in
+        the content-addressed cart asset store, and the play page starts the cart on
+        geometry alone, fetching the textures from their immutable URLs with a progress
+        bar and swapping each one in as it lands. The download budget shows
+        "playable after".
+  - [ ] Levels: named levels whose assets load on demand (`cartbox.level`).
 - [x] WebGL2 fallback renderer for browsers without WebGPU: the same shading, instanced
       batching and asynchronous readback as the WebGPU path, chosen when WebGPU isn't
       available (before the software rasteriser). It is byte-identical to the software
