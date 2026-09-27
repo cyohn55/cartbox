@@ -8,13 +8,15 @@
  * returns to editing.
  */
 
-import { useEffect, useRef, useState } from "react";
-import { frameDurationMs, getModel, mount, type InspectedObject, type ProfileSnapshot, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type QualityChoice, type SceneSpec, type WorldScene } from "@cartbox/player";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { frameDurationMs, getModel, mount, readCartCode, type DebugStep, type InspectedObject, type PauseInfo, type ProfileSnapshot, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type QualityChoice, type SceneSpec, type WorldScene } from "@cartbox/player";
 
 import styles from "./editor.module.css";
 import { errorLineFrom } from "./codeTools";
 import { appendConsole, traceColor, type ConsoleEntry } from "./consoleLog";
 import { ProfilerPanel } from "./ProfilerPanel";
+import { DebuggerPanel } from "./DebuggerPanel";
+import { toggleBreakpoint } from "./debuggerView";
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 import { rapierPhysics } from "@/lib/physicsRapier";
 
@@ -55,10 +57,37 @@ interface RunOverlayProps {
    * was shown and the creator had to find the line themselves.
    */
   onGoToLine?: (line: number) => void;
+  /** The debugger's breakpoints (cart lines) and watch expressions, owned by the editor. */
+  breakpoints?: readonly number[];
+  onBreakpointsChange?: (lines: number[]) => void;
+  watches?: readonly string[];
+  onWatchesChange?: (watches: string[]) => void;
   onClose: () => void;
 }
 
-export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene, anim, particles, collision, flags, mesh, world, onGoToLine, onClose }: RunOverlayProps) {
+const NO_LINES: readonly number[] = [];
+const NO_WATCHES: readonly string[] = [];
+
+export function RunOverlay({
+  bytes,
+  engineUrl,
+  modelId,
+  cartName,
+  postFx,
+  scene,
+  anim,
+  particles,
+  collision,
+  flags,
+  mesh,
+  world,
+  onGoToLine,
+  breakpoints = NO_LINES,
+  onBreakpointsChange,
+  watches = NO_WATCHES,
+  onWatchesChange,
+  onClose,
+}: RunOverlayProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<PlayerHandle | null>(null);
   const [quality, setQuality] = useState<QualityChoice>("auto");
@@ -87,6 +116,15 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
   const [profiling, setProfiling] = useState(false);
   const profilingRef = useRef(false);
   const [profile, setProfile] = useState<ProfileSnapshot | null>(null);
+  // The debugger: on from the start when there are breakpoints (it costs a
+  // call per statement, so otherwise it's switched on by hand, which restarts).
+  const [debugOn, setDebugOn] = useState(() => breakpoints.length > 0);
+  const [pause, setPause] = useState<PauseInfo | null>(null);
+  const breakpointsRef = useRef(breakpoints);
+  breakpointsRef.current = breakpoints;
+  const watchesRef = useRef(watches);
+  watchesRef.current = watches;
+  const code = useMemo(() => readCartCode(bytes) ?? "", [bytes]);
   // Speed (1 is normal), read at mount like the quality preset.
   const [speed, setSpeed] = useState(1);
   const speedRef = useRef(1);
@@ -177,6 +215,16 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
       },
       // The console: the cart's trace() output.
       onTrace: (text, color, at) => record("trace", text, at, color),
+      debug: debugOn
+        ? {
+            breakpoints: breakpointsRef.current,
+            watches: watchesRef.current,
+            onPause: (p) => {
+              setPause(p);
+              if (p) setRunning(false);
+            },
+          }
+        : undefined,
     });
     handleRef.current = handle;
     handle.setTimeScale(speedRef.current);
@@ -186,11 +234,35 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
       handle.destroy();
       URL.revokeObjectURL(url);
     };
-  }, [bytes, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, world]);
+  }, [bytes, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, world, debugOn]);
+
+  // Breakpoints and watches edited during the run reach the player at once.
+  useEffect(() => {
+    handleRef.current?.setBreakpoints(breakpoints);
+  }, [breakpoints]);
+  useEffect(() => {
+    handleRef.current?.setWatches(watches);
+  }, [watches]);
+
+  /** Carry on from a breakpoint. */
+  const debugStep = (step: DebugStep) => {
+    const handle = handleRef.current;
+    if (!handle?.debugPaused()) return;
+    handle.debugContinue(step);
+    setRunning(true);
+  };
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
+      // Debugger keys, as in most IDEs: F8 continue, F10 over, F11 into, Shift+F11 out.
+      const steps: Record<string, DebugStep> = { F8: "continue", F10: "over", F11: event.shiftKey ? "out" : "into" };
+      const step = steps[event.key];
+      if (step && handleRef.current?.debugPaused()) {
+        event.preventDefault();
+        handleRef.current.debugContinue(step);
+        setRunning(true);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -311,11 +383,24 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
               <option value={1}>1×</option>
               <option value={2}>2×</option>
             </select>
-            <button type="button" className="cbx-btn" onClick={togglePlayback} disabled={status !== "ready"}>
+            <button type="button" className="cbx-btn" onClick={togglePlayback} disabled={status !== "ready" || pause !== null}>
               {running ? "Pause" : "Resume"}
             </button>
-            <button type="button" className="cbx-btn" onClick={stepFrame} disabled={status !== "ready" || running} title="Run one frame (while paused)">
+            <button type="button" className="cbx-btn" onClick={stepFrame} disabled={status !== "ready" || running || pause !== null} title="Run one frame (while paused)">
               Step
+            </button>
+            <button
+              type="button"
+              className="cbx-btn"
+              aria-pressed={debugOn}
+              onClick={() => {
+                setPause(null);
+                setRunning(true);
+                setDebugOn((v) => !v);
+              }}
+              title={debugOn ? "Turn the Lua debugger off (restarts the cart)" : "Turn the Lua debugger on: breakpoints, stepping, variables (restarts the cart)"}
+            >
+              Debugger
             </button>
             <button type="button" className="cbx-btn" aria-pressed={profiling} onClick={() => setProfiling((v) => !v)} disabled={status !== "ready"}>
               Profiler
@@ -333,13 +418,24 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
           <div ref={stageRef} className={styles.runStage} style={{ flex: 1, minWidth: 0 }} />
           {inspecting && <ObjectsPanel objects={objects} filter={filter} onFilter={setFilter} />}
           {profiling && <ProfilerPanel profile={profile} budgetMs={frameDurationMs(getModel(modelId))} />}
+          {debugOn && (
+            <DebuggerPanel
+              pause={pause}
+              code={code}
+              breakpoints={breakpoints}
+              onToggleBreakpoint={(line) => onBreakpointsChange?.(toggleBreakpoint(breakpoints, line))}
+              watches={watches}
+              onWatchesChange={(next) => onWatchesChange?.(next)}
+              onStep={debugStep}
+            />
+          )}
         </div>
 
         <div className={styles.runDebug}>
           <span className={styles.runDebugItem}>
             <span className={styles.runDebugLabel}>Status</span>
             <span className={`${styles.runDebugValue} data`}>
-              {status === "loading" ? "building…" : status === "error" ? "error" : running ? "running" : "paused"}
+              {status === "loading" ? "building…" : status === "error" ? "error" : pause ? `stopped at line ${pause.line}` : running ? "running" : "paused"}
             </span>
           </span>
           <span className={styles.runDebugItem}>

@@ -15,7 +15,7 @@ import { createConsole, loadEngineModule, type ConsoleInstance } from "./engine.
 import { GamepadInput, GamepadState, KeyboardInput, TouchInput, hasTouchSupport } from "./input.js";
 import { frameDurationMs, getModel, type ConsoleModel } from "./models.js";
 import { ReplayRecorder, ReplaySource, hashCart, randomSeed, type Replay } from "./replay.js";
-import { seedCartridge, prependLuaCode, readCartCode } from "./cartseed.js";
+import { seedCartridge, prependLuaCode, readCartCode, appendLuaCode, rewriteLuaCode } from "./cartseed.js";
 import { STICK_OPTIN_MAGIC, STICK_OPTIN_WORD, STICK_WORD, packSticks } from "./sticks.js";
 import { DEFAULT_CONTROL_SETTINGS, applyLookSettings, type ControlSettings } from "./controls.js";
 import { injectSdk } from "./sdk.js";
@@ -26,7 +26,24 @@ import { RuntimeChannel } from "./runtime/runtimeChannel.js";
 import { PHYS_BLOCK_BYTES, RAM_LAYOUTS, physicsBlockAddress } from "./physics/protocol.js";
 import { collisionSdkLua } from "./collisionSdk.js";
 import { Profiler, type ProfileSnapshot } from "./debug/profiler.js";
-import { DEBUG_BLOCK_BYTES, armDebugBlock, codeLineOffset, debugBlockAddress, debugSdkLua, drainTraces, remapErrorLines } from "./debug/debugBlock.js";
+import {
+  DEBUG_BLOCK_BYTES,
+  DebugCommand,
+  armDebugBlock,
+  codeLineOffset,
+  debugBlockAddress,
+  debugPostlude,
+  debugSdkLua,
+  drainTraces,
+  readPause,
+  remapErrorLines,
+  sendDebugCommand,
+  writeBreakpoints,
+  writeWatches,
+  type DebugStep,
+  type PauseInfo,
+} from "./debug/debugBlock.js";
+import { effectiveBreakpoints, instrumentLua } from "./debug/instrument.js";
 import { flagsSdkLua } from "./flagsSdk.js";
 import { animClipsSdkLua } from "./anim/animClipsSdk.js";
 import { decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights } from "./mailbox.js";
@@ -114,6 +131,16 @@ export class Player {
   private lineOffset = 0;
   /** The debug block (bytes after pmem word 0), when the editor's console is on. */
   private debugOffset: number | null = null;
+  /** Lines in the cart's own code (for telling its lines from the injected code after it). */
+  private lineCount = 0;
+  /** The debugger (options.debug): breakpoints and watches still to write, lines that can break, and where the cart is stopped. */
+  private debugState: {
+    breakpoints: readonly number[];
+    watches: readonly string[];
+    dirty: boolean;
+    breakable: readonly number[];
+    paused: PauseInfo | null;
+  } | null = null;
   private speed = 1;
   /** The playtest profiler, while it's on (see setProfiling). */
   private profiler: Profiler | null = null;
@@ -185,10 +212,29 @@ export class Player {
       // SDK so the SDK sits above them and defines `cartbox` first; each then
       // overrides its no-op stub. Empty layers contribute nothing.
       let prepared = seeded;
-      // The editor's console: trace capture and cart-line tracebacks (debugBlock.ts).
+      // The editor's console and debugger (debugBlock.ts): trace capture and
+      // cart-line tracebacks, and with the debugger, breakpoint hooks on the
+      // cart's statement lines (instrument.ts) with TIC run through them.
       const layout = RAM_LAYOUTS[this.model.id];
-      if (this.options.onTrace && layout) {
-        prepared = prependLuaCode(prepared, debugSdkLua(debugBlockAddress(layout)));
+      const debug = this.options.debug;
+      const cartCode = readCartCode(bytes);
+      let ownCode = cartCode;
+      if ((this.options.onTrace || debug) && layout) {
+        if (debug && cartCode !== null) {
+          const instrumented = instrumentLua(cartCode);
+          if (instrumented.lines.length > 0) {
+            prepared = appendLuaCode(rewriteLuaCode(prepared, (code) => code.slice(0, code.length - cartCode.length) + instrumented.code), debugPostlude());
+            ownCode = instrumented.code;
+            this.debugState = {
+              breakpoints: effectiveBreakpoints(debug.breakpoints ?? [], instrumented.lines),
+              watches: debug.watches ?? [],
+              dirty: true,
+              breakable: instrumented.lines,
+              paused: null,
+            };
+          }
+        }
+        prepared = prependLuaCode(prepared, debugSdkLua(debugBlockAddress(layout), { debugger: this.debugState !== null }));
         this.debugOffset = debugBlockAddress(layout) - layout.pmemAddress;
       }
       const collisionLua = collisionSdkLua(this.options.collision);
@@ -227,7 +273,8 @@ export class Player {
         };
       }
       const preparedBytes = injectSdk(prepared);
-      this.lineOffset = codeLineOffset(readCartCode(bytes), readCartCode(preparedBytes));
+      this.lineOffset = codeLineOffset(ownCode, readCartCode(preparedBytes));
+      this.lineCount = cartCode === null ? 0 : cartCode.split("\n").length;
 
       this.console = createConsole(module, this.model, sampleRate);
       if (!this.console.loadCartridge(preparedBytes)) {
@@ -454,9 +501,9 @@ export class Player {
     return this.speed;
   }
 
-  /** While paused, advance one frame and show it. */
+  /** While paused, advance one frame and show it (not while stopped at a breakpoint: use debugContinue). */
   stepFrame(): void {
-    if (this.running || this.destroyed || !this.console) return;
+    if (this.running || this.destroyed || !this.console || this.debugState?.paused) return;
     this.tickOnce(false);
     this.present();
   }
@@ -489,7 +536,8 @@ export class Player {
     const maxFramesPerRender = 4;
     const frameMs = frameDurationMs(this.model);
     let advanced = 0;
-    while (this.frameAccumulatorMs >= frameMs && advanced < maxFramesPerRender) {
+    // (A breakpoint stops the loop mid-burst: running goes false.)
+    while (this.frameAccumulatorMs >= frameMs && advanced < maxFramesPerRender && this.running) {
       this.tickOnce(this.speed === 1);
       this.frameAccumulatorMs -= frameMs;
       advanced++;
@@ -570,12 +618,15 @@ export class Player {
     const runtimeBlock = this.runtimeBlock();
     if (runtimeBlock) this.runtime!.channel.beforeTick(runtimeBlock);
     const debugBlock = this.debugBlock();
-    if (debugBlock) armDebugBlock(debugBlock, this.lineOffset);
+    if (debugBlock) this.armDebug(debugBlock);
     lap("runtime");
     const frame = this.tickFrame + 1; // this tick's number, counting from 1 (as frame() will after it)
     this.console?.tick(mask);
     lap("cart");
-    if (debugBlock) this.drainDebug(frame);
+    if (debugBlock) {
+      this.drainDebug(frame);
+      this.checkPause();
+    }
     const afterBlock = runtimeBlock ? this.runtimeBlock() : null;
     if (afterBlock) {
       this.runtime!.channel.afterTick(afterBlock);
@@ -721,6 +772,78 @@ export class Player {
     if (this.debugOffset === null || !this.console) return null;
     const bytes = this.console.ramView(this.debugOffset, DEBUG_BLOCK_BYTES);
     return bytes ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
+  }
+
+  /** Before a tick: the magic and line numbers, and any new breakpoints or watches. */
+  private armDebug(block: DataView): void {
+    armDebugBlock(block, this.lineOffset, this.lineCount);
+    const state = this.debugState;
+    if (state?.dirty) {
+      writeBreakpoints(block, state.breakpoints);
+      writeWatches(block, state.watches);
+      state.dirty = false;
+    }
+  }
+
+  /** After a tick: if the cart stopped at a breakpoint, stop the loop and say where. */
+  private checkPause(): void {
+    const state = this.debugState;
+    const block = this.debugBlock();
+    if (!state || !block) return;
+    const pause = readPause(block, state.watches.length);
+    state.paused = pause;
+    if (!pause) return;
+    this.pause();
+    this.options.debug?.onPause?.(pause);
+  }
+
+  /** The debugger: which lines to stop at (moved on to the next line that can break, by the caller's choice). */
+  setBreakpoints(lines: readonly number[]): void {
+    if (!this.debugState) return;
+    this.debugState.breakpoints = effectiveBreakpoints(lines, this.debugState.breakable);
+    this.debugState.dirty = true;
+    const block = this.debugBlock();
+    if (block) this.armDebug(block);
+  }
+
+  /** The debugger: expressions to evaluate wherever the cart stops (re-evaluated now if it's stopped). */
+  setWatches(expressions: readonly string[]): void {
+    const state = this.debugState;
+    if (!state) return;
+    state.watches = [...expressions];
+    state.dirty = true;
+    const block = this.debugBlock();
+    if (!block || !this.console) return;
+    this.armDebug(block);
+    if (state.paused) {
+      // Re-read the stop without moving on: the Lua takes command 5 in place.
+      sendDebugCommand(block, DebugCommand.refresh);
+      this.console.tick(0);
+      const pause = readPause(this.debugBlock()!, state.watches.length);
+      state.paused = pause;
+      if (pause) this.options.debug?.onPause?.(pause);
+    }
+  }
+
+  /** The debugger: carry on from a stop — to the next breakpoint, or one statement (into, over, out). */
+  debugContinue(step: DebugStep = "continue"): void {
+    const state = this.debugState;
+    const block = this.debugBlock();
+    if (!state?.paused || !block) return;
+    sendDebugCommand(block, DebugCommand[step]);
+    state.paused = null;
+    this.options.debug?.onPause?.(null);
+    void this.resume();
+  }
+
+  /** Where the cart is stopped, or null. */
+  debugPaused(): PauseInfo | null {
+    return this.debugState?.paused ?? null;
+  }
+
+  /** Lines the debugger can stop at (ascending); empty without the debugger. */
+  breakableLines(): readonly number[] {
+    return this.debugState?.breakable ?? [];
   }
 
   /** Hand the console the traces the cart printed during `frame`. */

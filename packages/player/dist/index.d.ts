@@ -1548,6 +1548,111 @@ declare function estimateSceneBytes(instances: readonly {
 }[], width: number, height: number): number;
 
 /**
+ * The editor's debug channel (ENGINE_ROADMAP.md, Phase 5): a 4 KB block in the
+ * console's free RAM, just below the runtime block (see physics/protocol.ts),
+ * shared by the cart's Lua and the host.
+ *
+ * - Console: a prelude replaces `trace()` so each message lands in a ring here
+ *   (the engine's own trace callback goes nowhere), and replaces
+ *   `debug.traceback` — which the core calls on every runtime error — with one
+ *   that names cart lines rather than lines of the merged, SDK-prefixed source
+ *   and fits the core's 256-byte error buffer.
+ * - Debugger: with the cart's code instrumented (see instrument.ts), `TIC` runs
+ *   in a coroutine and the statement hooks yield at a breakpoint or a step. The
+ *   Lua then writes where it stopped — the call stack, the paused function's
+ *   locals and upvalues, and the watch expressions' values — and the host
+ *   stops ticking until it writes a command (continue, step into/over/out).
+ * - The host writes a magic word, the cart's line offset and line count, the
+ *   breakpoints and the watch expressions before every tick, and reads the
+ *   traces and any pause after it.
+ *
+ * Only the editor's playtest adds this prelude; a published cart never has it.
+ * All words are little-endian int32.
+ */
+
+/** Commands to a stopped cart. 5 re-reads the pause information (after the watches change) without moving on. */
+declare const DebugCommand: {
+    readonly continue: 1;
+    readonly into: 2;
+    readonly over: 3;
+    readonly out: 4;
+    readonly refresh: 5;
+};
+type DebugStep = Exclude<keyof typeof DebugCommand, "refresh">;
+/** Where the debug block sits in Lua's RAM address space. */
+declare function debugBlockAddress(layout: RamLayout): number;
+/**
+ * Lines of code above the cart's own in the source the engine runs: `final` is
+ * the cart's code with preludes stacked on top (see prependLuaCode) and perhaps
+ * a postlude after it, so error line N in the merged source is cart line
+ * N − offset. 0 when `final` doesn't contain the cart's code past its start
+ * (nothing was added, or it isn't Lua).
+ */
+declare function codeLineOffset(original: string | null, final: string | null): number;
+/**
+ * Rewrite the core's `[string "…"]:N:` positions to cart lines (`line N:`); a
+ * position inside the injected code (N ≤ offset) becomes `cartbox:`, since it
+ * has no cart line. Positions the debug prelude already rewrote are left alone.
+ */
+declare function remapErrorLines(message: string, offset: number): string;
+/** One frame of a runtime error's call stack, innermost first. */
+interface ErrorFrame {
+    readonly name: string;
+    readonly line: number;
+}
+/**
+ * The call stack the debug prelude appends to an error (`at update:12 < TIC:40`),
+ * innermost first; empty when the message carries none.
+ */
+declare function errorStack(message: string): ErrorFrame[];
+/**
+ * The prelude for the playtest, over the block at `address`: trace capture and
+ * cart-line tracebacks, and with `debugger` the breakpoint machinery the
+ * instrumented code calls (pair it with {@link debugPostlude}).
+ */
+declare function debugSdkLua(address: number, options?: {
+    debugger?: boolean;
+}): string;
+/** Appended after the cart's code (so its lines don't move): runs TIC through the debugger. */
+declare function debugPostlude(): string;
+/** Where the cart stopped, as the debugger reads it. */
+interface PauseInfo {
+    readonly line: number;
+    /** Innermost first. */
+    readonly stack: readonly ErrorFrame[];
+    readonly locals: readonly {
+        readonly name: string;
+        readonly value: string;
+    }[];
+    readonly upvalues: readonly {
+        readonly name: string;
+        readonly value: string;
+    }[];
+    /** One per watch expression, in order; null value for a blank one. */
+    readonly watches: readonly {
+        readonly value: string;
+        readonly error: boolean;
+    }[];
+}
+/** Parse the pause information the Lua wrote (see {@link DBG_INFO_AT}); `watchCount` sizes the result's watches. */
+declare function parsePauseInfo(line: number, text: string, watchCount: number): PauseInfo;
+/** Read a pause from the block, or null while the cart runs. */
+declare function readPause(block: DataView, watchCount: number): PauseInfo | null;
+/** Tell a stopped cart how to go on. */
+declare function sendDebugCommand(block: DataView, command: number): void;
+/** A trace the cart printed. */
+interface TraceLine {
+    readonly text: string;
+    readonly color: number;
+}
+/** Arm the block for the next tick: magic, and where the cart's lines are in the merged source. */
+declare function armDebugBlock(block: DataView, lineOffset: number, lineCount?: number): void;
+/** Write the breakpoint lines (at most {@link DBG_BPS_MAX}) and bump the version so the Lua reloads them. */
+declare function writeBreakpoints(block: DataView, lines: readonly number[]): void;
+/** Write the watch expressions, one per line; returns how many fit. */
+declare function writeWatches(block: DataView, expressions: readonly string[]): number;
+
+/**
  * Gap #3 — a runtime parallax + atmosphere compositor.
  *
  * The editor already has a preview-only layered-scene compositor
@@ -2294,6 +2399,18 @@ interface PlayerOptions {
      * editor's playtest; a published cart leaves it unset.
      */
     onTrace?: (text: string, color: number, frame: number) => void;
+    /**
+     * The editor's Lua debugger (see debug/instrument.ts and debug/debugBlock.ts):
+     * the cart's statement lines get breakpoint hooks and TIC runs so it can stop
+     * mid-frame. `onPause` is called with where it stopped, and with null when it
+     * carries on. Costs a function call per statement while on; for the editor's
+     * playtest only.
+     */
+    debug?: {
+        readonly breakpoints?: readonly number[];
+        readonly watches?: readonly string[];
+        readonly onPause?: (pause: PauseInfo | null) => void;
+    };
 }
 /** Handle returned by {@link mount} for controlling a live player instance. */
 interface PlayerHandle {
@@ -2344,6 +2461,16 @@ interface PlayerHandle {
     stepFrame(): void;
     /** Frames the cart has run so far. */
     frame(): number;
+    /** The debugger: the cart lines to stop at (a line with no statement stops at the next one that has one). */
+    setBreakpoints(lines: readonly number[]): void;
+    /** The debugger: expressions to evaluate wherever the cart stops (re-evaluated at once while it's stopped). */
+    setWatches(expressions: readonly string[]): void;
+    /** The debugger: carry on from a stop, to the next breakpoint ("continue") or by one statement. */
+    debugContinue(step?: DebugStep): void;
+    /** Where the cart is stopped at a breakpoint, or null. */
+    debugPaused(): PauseInfo | null;
+    /** The cart lines the debugger can stop at (ascending); empty without the debugger. */
+    breakableLines(): readonly number[];
     /** Turn the profiler on or off (off by default; it costs a few clock reads per frame). */
     setProfiling(on: boolean): void;
     /** Where recent frames spent their time, what the 3D scene drew, memory and network use; null while profiling is off. */
@@ -2594,6 +2721,23 @@ declare function codeChunks(code: Uint8Array): Uint8Array;
 /** Returns the cart's source code (all its code banks, joined), or null if absent. */
 declare function readCartCode(bytes: Uint8Array): string | null;
 /**
+ * Returns a copy of the cartridge with `prelude` (plus a newline) prepended to
+ * its Lua code. The code is re-split across as many 64 KB banks as it needs, so
+ * a large cart still gets its prelude. Non-Lua carts, carts without code, or
+ * code that would outgrow the engine's 512 KB are returned unchanged.
+ *
+ * Shared by RNG seeding and SDK injection.
+ */
+declare function prependLuaCode(bytes: Uint8Array, prelude: string): Uint8Array;
+/**
+ * Returns a copy of the cartridge with `postlude` appended to its Lua code, on a
+ * line of its own (so the cart's line numbers don't move). Unchanged like
+ * {@link prependLuaCode}.
+ */
+declare function appendLuaCode(bytes: Uint8Array, postlude: string): Uint8Array;
+/** Returns a copy of the cartridge with its Lua code replaced by `rewrite(code)`. Unchanged like {@link prependLuaCode}. */
+declare function rewriteLuaCode(bytes: Uint8Array, rewrite: (code: string) => string): Uint8Array;
+/**
  * Returns a copy of the cartridge with a deterministic RNG seed injected into
  * its Lua code, so a replay reusing the same seed reproduces the randomness.
  *
@@ -2603,54 +2747,48 @@ declare function readCartCode(bytes: Uint8Array): string | null;
 declare function seedCartridge(bytes: Uint8Array, seed: number): Uint8Array;
 
 /**
- * The editor's debug channel (ENGINE_ROADMAP.md, Phase 5): a 4 KB block in the
- * console's free RAM, just below the runtime block (see physics/protocol.ts),
- * shared by the cart's Lua and the host.
+ * Breakpoint hooks for the playtest's Lua debugger (ENGINE_ROADMAP.md, Phase 5).
  *
- * - Console: a prelude replaces `trace()` so each message lands in a ring here
- *   (the engine's own trace callback goes nowhere), and replaces
- *   `debug.traceback` — which the core calls on every runtime error — with one
- *   that names cart lines rather than lines of the merged, SDK-prefixed source
- *   and fits the core's 256-byte error buffer.
- * - The host writes a magic word and the cart's line offset before every tick,
- *   and drains the ring after it.
+ * Lua can't pause from a debug hook (a `debug.sethook` function can't yield),
+ * so the debugger runs `TIC` in a coroutine and the cart's code calls a hook at
+ * the start of each statement line: `__bp(12) x = x + 1`. The hook yields when
+ * line 12 has a breakpoint (or a step lands there), which hands control back to
+ * the host with the frame half-run. Hooks go on the same line, so every line
+ * number stays the cart's own.
  *
- * Only the editor's playtest adds this prelude; a published cart never has it.
- * All words are little-endian int32.
+ * Where a statement starts is decided from tokens, conservatively: a line gets
+ * a hook only when its first token starts a statement, it sits directly in a
+ * block (not inside brackets or a loop header), and the line before ends in a
+ * way that can end a statement. A line it can't be sure of gets no hook — a
+ * breakpoint there moves to the next line that has one. Code it can't tokenize
+ * is left alone. Pure.
  */
-
-/** Where the debug block sits in Lua's RAM address space. */
-declare function debugBlockAddress(layout: RamLayout): number;
-/**
- * Lines of code above the cart's own in the source the engine runs: `final` is
- * the cart's code with preludes stacked on top (see prependLuaCode), so error
- * line N in the merged source is cart line N − offset. 0 when `final` doesn't end
- * with the cart's code (nothing was added, or it isn't Lua).
- */
-declare function codeLineOffset(original: string | null, final: string | null): number;
-/**
- * Rewrite the core's `[string "…"]:N:` positions to cart lines (`line N:`); a
- * position inside the injected code (N ≤ offset) becomes `cartbox:`, since it
- * has no cart line. Positions the debug prelude already rewrote are left alone.
- */
-declare function remapErrorLines(message: string, offset: number): string;
-/** One frame of a runtime error's call stack, innermost first. */
-interface ErrorFrame {
-    readonly name: string;
+type TokenType = "name" | "keyword" | "number" | "string" | "symbol";
+interface Token {
+    readonly type: TokenType;
+    readonly value: string;
     readonly line: number;
+    readonly start: number;
 }
+/** Split Lua source into tokens (comments and whitespace dropped); null when it can't. */
+declare function tokenizeLua(code: string): Token[] | null;
 /**
- * The call stack the debug prelude appends to an error (`at update:12 < TIC:40`),
- * innermost first; empty when the message carries none.
+ * The cart's code with a breakpoint hook at the start of each statement line,
+ * and the lines that got one (ascending). Unchanged, with no lines, when the
+ * code can't be tokenized or its blocks don't balance.
  */
-declare function errorStack(message: string): ErrorFrame[];
-/** The prelude for the playtest: trace capture and cart-line tracebacks, over the block at `address`. */
-declare function debugSdkLua(address: number): string;
-/** A trace the cart printed. */
-interface TraceLine {
-    readonly text: string;
-    readonly color: number;
-}
+declare function instrumentLua(code: string): {
+    code: string;
+    lines: number[];
+};
+/** The line a breakpoint on `line` actually stops at: it, or the next line with a hook (null past the last). */
+declare function breakableLine(line: number, lines: readonly number[]): number | null;
+/**
+ * The lines to stop at for a list of breakpoints: each on the first line at or
+ * after it that has a hook (a breakpoint on a blank line, a comment or an `end`
+ * stops at the next statement); ones past the last hook are dropped. Sorted.
+ */
+declare function effectiveBreakpoints(list: readonly number[], lines: readonly number[]): number[];
 
 /**
  * The cartbox SDK as an injectable string.
@@ -5324,4 +5462,4 @@ declare class RuntimeChannel {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_PAD_BINDINGS, type DeviceHints, type DeviceProvider, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, type FlagsField, GamepadInput, type GeneratedTrack, type GlContextProvider, HEIGHT_WORLD, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetState, type NetTransport, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$1 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type ProfileSection, type ProfileSnapshot, Profiler, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, RuntimeChannel, SOFTWARE_RASTER_CAPS, START_KEYS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, type SectionStats, SoftwareSceneRenderer, type SpriteRegion, type SpriteRegionSource, SwitchableTransport, TILT_SHIFT_FEATHER, type TextureLookup, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, applyLookSettings, applyQualityToPostFx, applyRenderCaps, browserDeviceHints, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, compileAnimator, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugSdkLua, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, drift, emitterPreset, errorStack, estimateSceneBytes, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interleaveVertices, interpolateNormal, jointFrames, loadEngineModule, makeShadowTexture, mount, nearestDirection, netSendInterval, normalBasis3x3, normalVector, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, splitWorldMatrix, standardizePad, sway, takeNetOutbox, takePhysicsCommands, tiltShiftBlur, uniformsFromSettings, unpadRows, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState };
+export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_PAD_BINDINGS, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, type FlagsField, GamepadInput, type GeneratedTrack, type GlContextProvider, HEIGHT_WORLD, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetState, type NetTransport, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$1 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type ProfileSection, type ProfileSnapshot, Profiler, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, RuntimeChannel, SOFTWARE_RASTER_CAPS, START_KEYS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, type SectionStats, SoftwareSceneRenderer, type SpriteRegion, type SpriteRegionSource, SwitchableTransport, TILT_SHIFT_FEATHER, type TextureLookup, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyLookSettings, applyQualityToPostFx, applyRenderCaps, armDebugBlock, breakableLine, browserDeviceHints, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, compileAnimator, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, drift, effectiveBreakpoints, emitterPreset, errorStack, estimateSceneBytes, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, instrumentLua, interleaveVertices, interpolateNormal, jointFrames, loadEngineModule, makeShadowTexture, mount, nearestDirection, netSendInterval, normalBasis3x3, normalVector, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, rewriteLuaCode, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, sendDebugCommand, serializeReplay, shade, simulateEmitter, softKneePrefilter, splitWorldMatrix, standardizePad, sway, takeNetOutbox, takePhysicsCommands, tiltShiftBlur, tokenizeLua, uniformsFromSettings, unpadRows, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeBreakpoints, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writeWatches };

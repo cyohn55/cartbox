@@ -3177,6 +3177,12 @@
   font-weight: 700;
 }
 
+/* A line the playtest's debugger stops at: a red dot before the number. */
+.gutterBreakpoint {
+  color: var(--text);
+  background: radial-gradient(circle at 5px 50%, #e5484d 4px, transparent 4.5px);
+}
+
 /* ── Shortcut overlay ─────────────────────────────────────────────────────
    Opened with ?. Rendered from the same tables the keyboard obeys. */
 .helpOverlay {

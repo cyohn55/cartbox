@@ -81,6 +81,7 @@ import { useShortcuts, WORKBENCH_SHORTCUTS, type Shortcut } from "./shortcuts";
 import { decodeMeshSidecar, encodeMeshSidecar, addMesh, type MeshSidecar } from "@/lib/meshSidecar";
 import { rebakeMeshSidecar } from "@/lib/meshTextureBake";
 import type { MeshAsset } from "@cartbox/editor";
+import { toggleBreakpoint } from "./debuggerView";
 
 // Which tabs a cart gets depends on its console model and what it already
 // carries — a 2D model hides the 3D authoring tabs unless the cart has content
@@ -464,6 +465,10 @@ function WorkbenchBody({
   // The line a Lua runtime error blamed, carried from the playtest to the Code
   // tab so "it crashed" and "here is where" are one click apart.
   const [runtimeErrorLine, setRuntimeErrorLine] = useState<number | null>(null);
+  // The playtest debugger: breakpoints (set in the Code tab's gutter) and watch
+  // expressions, kept across runs for this editing session.
+  const [breakpoints, setBreakpoints] = useState<number[]>([]);
+  const [watches, setWatches] = useState<string[]>([]);
   const [showDetails, setShowDetails] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   /** The download-size dialog, with the cartridge bytes captured when it opened. */
@@ -1238,7 +1243,15 @@ function WorkbenchBody({
         </p>
       )}
 
-      {activeTab === "Code" && <CodeEditor doc={doc} revision={revision} errorLine={runtimeErrorLine} />}
+      {activeTab === "Code" && (
+        <CodeEditor
+          doc={doc}
+          revision={revision}
+          errorLine={runtimeErrorLine}
+          breakpoints={breakpoints}
+          onToggleBreakpoint={(line) => setBreakpoints((list) => toggleBreakpoint(list, line))}
+        />
+      )}
       {activeTab === "Assets" && (
         <AssetsEditor
           sheet={sheet}
@@ -1425,6 +1438,10 @@ function WorkbenchBody({
           flags={flags ?? undefined}
           mesh={meshScene ?? undefined}
           world={world ?? undefined}
+          breakpoints={breakpoints}
+          onBreakpointsChange={setBreakpoints}
+          watches={watches}
+          onWatchesChange={setWatches}
           onGoToLine={(line) => {
             setRuntimeErrorLine(line);
             setRunBytes(null);

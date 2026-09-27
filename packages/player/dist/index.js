@@ -3601,6 +3601,14 @@ function readCartCode(bytes) {
   return joined ? new TextDecoder().decode(joined.code) : null;
 }
 function prependLuaCode(bytes, prelude) {
+  return rewriteLuaCode(bytes, (code) => `${prelude}
+${code}`);
+}
+function appendLuaCode(bytes, postlude) {
+  return rewriteLuaCode(bytes, (code) => `${code}
+${postlude}`);
+}
+function rewriteLuaCode(bytes, rewrite) {
   const joined = joinedCode(bytes);
   if (!joined) {
     return bytes;
@@ -3609,8 +3617,7 @@ function prependLuaCode(bytes, prelude) {
   if (detectLanguage(code) !== "lua") {
     return bytes;
   }
-  const merged = new TextEncoder().encode(`${prelude}
-${code}`);
+  const merged = new TextEncoder().encode(rewrite(code));
   if (merged.length > MAX_CODE_BYTES) {
     return bytes;
   }
@@ -5895,22 +5902,226 @@ function estimateSceneBytes(instances, width, height) {
   return bytes;
 }
 
+// src/debug/instrument.ts
+var KEYWORDS = /* @__PURE__ */ new Set([
+  "and",
+  "break",
+  "do",
+  "else",
+  "elseif",
+  "end",
+  "false",
+  "for",
+  "function",
+  "goto",
+  "if",
+  "in",
+  "local",
+  "nil",
+  "not",
+  "or",
+  "repeat",
+  "return",
+  "then",
+  "true",
+  "until",
+  "while"
+]);
+var SYMBOLS = ["...", "..", "::", "==", "~=", "<=", ">=", "//", "<<", ">>"];
+function tokenizeLua(code) {
+  const out = [];
+  let i = 0;
+  let line = 1;
+  const n = code.length;
+  const longOpen = (at) => {
+    if (code[at] !== "[") return 0;
+    let j = at + 1;
+    while (code[j] === "=") j += 1;
+    return code[j] === "[" ? j - at + 1 : 0;
+  };
+  const skipLong = (level) => {
+    const close = `]${"=".repeat(level)}]`;
+    const end = code.indexOf(close, i);
+    if (end < 0) return false;
+    for (let k = i; k < end; k += 1) if (code.charCodeAt(k) === 10) line += 1;
+    i = end + close.length;
+    return true;
+  };
+  while (i < n) {
+    const c = code[i];
+    if (c === "\n") {
+      line += 1;
+      i += 1;
+      continue;
+    }
+    if (c === " " || c === "	" || c === "\r" || c === "\f" || c === "\v") {
+      i += 1;
+      continue;
+    }
+    const start = i;
+    const startLine = line;
+    if (c === "-" && code[i + 1] === "-") {
+      i += 2;
+      const open2 = longOpen(i);
+      if (open2 > 0) {
+        i += open2;
+        if (!skipLong(open2 - 2)) return null;
+      } else {
+        while (i < n && code[i] !== "\n") i += 1;
+      }
+      continue;
+    }
+    const open = longOpen(i);
+    if (open > 0) {
+      i += open;
+      if (!skipLong(open - 2)) return null;
+      out.push({ type: "string", value: code.slice(start, i), line: startLine, start });
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      i += 1;
+      while (i < n && code[i] !== c) {
+        if (code[i] === "\\") {
+          i += 1;
+          if (code[i] === "\n") line += 1;
+          else if (code[i] === "z") {
+            i += 1;
+            while (i < n && /\s/.test(code[i])) {
+              if (code[i] === "\n") line += 1;
+              i += 1;
+            }
+            continue;
+          }
+        } else if (code[i] === "\n") return null;
+        i += 1;
+      }
+      if (i >= n) return null;
+      i += 1;
+      out.push({ type: "string", value: code.slice(start, i), line: startLine, start });
+      continue;
+    }
+    if (/[0-9]/.test(c) || c === "." && /[0-9]/.test(code[i + 1] ?? "")) {
+      if (c === "0" && (code[i + 1] === "x" || code[i + 1] === "X")) {
+        i += 2;
+        while (i < n && /[0-9a-fA-F.pP]/.test(code[i])) {
+          if ((code[i] === "p" || code[i] === "P") && (code[i + 1] === "+" || code[i + 1] === "-")) i += 1;
+          i += 1;
+        }
+      } else {
+        while (i < n && /[0-9.eE]/.test(code[i])) {
+          if ((code[i] === "e" || code[i] === "E") && (code[i + 1] === "+" || code[i + 1] === "-")) i += 1;
+          i += 1;
+        }
+      }
+      out.push({ type: "number", value: code.slice(start, i), line: startLine, start });
+      continue;
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      while (i < n && /[A-Za-z0-9_]/.test(code[i])) i += 1;
+      const value = code.slice(start, i);
+      out.push({ type: KEYWORDS.has(value) ? "keyword" : "name", value, line: startLine, start });
+      continue;
+    }
+    const symbol = SYMBOLS.find((s) => code.startsWith(s, i)) ?? c;
+    if (!/[+\-*/%^#&~|<>=(){}[\];:,.]/.test(symbol[0])) return null;
+    i += symbol.length;
+    out.push({ type: "symbol", value: symbol, line: startLine, start });
+  }
+  return out;
+}
+var STATEMENT_KEYWORDS = /* @__PURE__ */ new Set(["local", "if", "for", "while", "repeat", "do", "return", "break", "goto", "function"]);
+var ENDS_STATEMENT = /* @__PURE__ */ new Set(["end", "then", "do", "else", "repeat", "break", ")", "]", "}", ";", "true", "false", "nil", "..."]);
+var BREAK_HOOK = "__bp";
+function instrumentLua(code) {
+  const tokens = tokenizeLua(code);
+  if (!tokens) return { code, lines: [] };
+  const stack = ["root"];
+  const inserts = [];
+  let prev = null;
+  for (const token of tokens) {
+    const top = stack[stack.length - 1];
+    const firstOnLine = !prev || prev.line !== token.line;
+    if (firstOnLine && (top === "root" || top === "block" || top === "function")) {
+      const starts = token.type === "name" || token.type === "keyword" && STATEMENT_KEYWORDS.has(token.value) || token.value === "::";
+      const after = !prev || prev.type === "name" || prev.type === "number" || prev.type === "string" || ENDS_STATEMENT.has(prev.value);
+      if (starts && after) inserts.push({ at: token.start, line: token.line });
+    }
+    const v = token.value;
+    if (token.type === "symbol") {
+      if (v === "(" || v === "[" || v === "{") stack.push("bracket");
+      else if (v === ")" || v === "]" || v === "}") {
+        if (stack.pop() !== "bracket") return { code, lines: [] };
+      }
+    } else if (token.type === "keyword") {
+      if (v === "function") stack.push("function");
+      else if (v === "if" || v === "repeat") stack.push("block");
+      else if (v === "while" || v === "for") stack.push("head");
+      else if (v === "do") {
+        if (top === "head") stack[stack.length - 1] = "block";
+        else stack.push("block");
+      } else if (v === "end" || v === "until") {
+        const popped = stack.pop();
+        if (popped !== "block" && popped !== "function") return { code, lines: [] };
+      }
+    }
+    prev = token;
+  }
+  if (stack.length !== 1) return { code, lines: [] };
+  let out = "";
+  let cursor = 0;
+  for (const insert of inserts) {
+    out += code.slice(cursor, insert.at) + `${BREAK_HOOK}(${insert.line}) `;
+    cursor = insert.at;
+  }
+  out += code.slice(cursor);
+  return { code: out, lines: inserts.map((i) => i.line) };
+}
+function breakableLine(line, lines) {
+  for (const l of lines) if (l >= line) return l;
+  return null;
+}
+function effectiveBreakpoints(list, lines) {
+  const out = /* @__PURE__ */ new Set();
+  for (const line of list) {
+    const at = breakableLine(line, lines);
+    if (at !== null) out.add(at);
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
 // src/debug/debugBlock.ts
 var DEBUG_BLOCK_BYTES = 4096;
 var DEBUG_MAGIC = 1195655747;
 var DBG_MAGIC = 0;
 var DBG_LINE_OFFSET = 4;
+var DBG_STATE = 8;
+var DBG_COMMAND = 12;
 var DBG_TRACE_USED = 16;
 var DBG_TRACE_DROPPED = 20;
+var DBG_PAUSED_LINE = 24;
+var DBG_BP_VERSION = 28;
+var DBG_BP_COUNT = 32;
+var DBG_LINE_COUNT = 36;
+var DBG_INFO_LENGTH = 40;
+var DBG_WATCH_LENGTH = 44;
+var DBG_BPS_AT = 64;
+var DBG_BPS_MAX = 240;
 var DBG_TRACE_AT = 1024;
-var DBG_TRACE_BYTES = 1536;
+var DBG_TRACE_BYTES = 1024;
 var DBG_TRACE_MAX = 240;
+var DBG_WATCH_AT = 2048;
+var DBG_WATCH_BYTES = 512;
+var DBG_INFO_AT = 2560;
+var DBG_INFO_BYTES = 1536;
+var DebugCommand = { continue: 1, into: 2, over: 3, out: 4, refresh: 5 };
 function debugBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES - DEBUG_BLOCK_BYTES;
 }
 function codeLineOffset(original, final) {
-  if (original === null || final === null || final.length <= original.length || !final.endsWith(original)) return 0;
-  const head = final.slice(0, final.length - original.length);
+  if (!original || final === null || final.length <= original.length) return 0;
+  const at = final.lastIndexOf(original);
+  if (at <= 0) return 0;
+  const head = final.slice(0, at);
   let lines = 0;
   for (let i = 0; i < head.length; i += 1) if (head.charCodeAt(i) === 10) lines += 1;
   return lines;
@@ -5931,8 +6142,10 @@ function errorStack(message) {
   }
   return frames;
 }
-function debugSdkLua(address) {
-  return `do
+function debugSdkLua(address, options = {}) {
+  const dbg = options.debugger === true;
+  return `${dbg ? `local ${BREAK_HOOK}, __cbx_run
+` : ""}do
   local _B = ${address}
   local function _rd(a)
     local v = peek(a) | (peek(a + 1) << 8) | (peek(a + 2) << 16) | (peek(a + 3) << 24)
@@ -5960,44 +6173,237 @@ function debugSdkLua(address) {
     for i = 1, #s do poke(a + 2 + i, s:byte(i)) end
     _wr(_B + ${DBG_TRACE_USED}, used + 3 + #s)
   end
-  -- The core passes every runtime error through debug.traceback. Name cart
-  -- lines, and keep it short: the core keeps only 256 bytes of it.
   local _src = debug.getinfo(1, "S").source
-  local _tb = debug.traceback
-  debug.traceback = function(msg, ...)
-    if type(msg) ~= "string" and msg ~= nil then return _tb(msg, ...) end
+  -- A cart line for a line of the merged source, or nil inside the injected code.
+  local function _cart(n)
     local off = _live() and _rd(_B + ${DBG_LINE_OFFSET}) or 0
-    local function cart(n)
-      n = tonumber(n) - off
-      return n > 0 and n or nil
+    local count = _live() and _rd(_B + ${DBG_LINE_COUNT}) or 0
+    n = tonumber(n) - off
+    if n < 1 or (count > 0 and n > count) then return nil end
+    return n
+  end
+  local _tic = nil -- the cart's own TIC, once the debugger wraps it
+  -- A function the core calls (TIC, BDR ...) has no name Lua can see: look it up.
+  local function _name(info)
+    if info.name then return info.name end
+    if info.what == "main" then return "main" end
+    if _tic and info.func == _tic then return "TIC" end
+    for k, v in pairs(_G) do
+      if v == info.func and type(k) == "string" then return k end
     end
-    msg = tostring(msg or ""):gsub('^%[string "[^"]*"%]:(%d+):', function(n)
-      local l = cart(n)
-      return l and ("line " .. l .. ":") or "cartbox:"
-    end)
-    -- A function the core calls (TIC, BDR ...) has no name Lua can see: look it up.
-    local function name(info)
-      if info.name then return info.name end
-      if info.what == "main" then return "main" end
-      for k, v in pairs(_G) do
-        if v == info.func and type(k) == "string" then return k end
-      end
-      return "?"
-    end
-    local frames = {}
-    for level = 2, 40 do
-      local info = debug.getinfo(level, "Slnf")
+    return "?"
+  end
+  -- The cart frames of a stack, innermost first: {name, line, level}.
+  local function _frames(co, max)
+    local out = {}
+    for level = co and 0 or 2, 60 do
+      local info
+      if co then info = debug.getinfo(co, level, "Slnf") else info = debug.getinfo(level, "Slnf") end
       if not info then break end
       if info.source == _src and info.currentline and info.currentline > 0 then
-        local l = cart(info.currentline)
-        if l then frames[#frames + 1] = name(info) .. ":" .. l end
+        local l = _cart(info.currentline)
+        if l then out[#out + 1] = { name = _name(info), line = l, level = level, func = info.func } end
       end
-      if #frames >= 6 then break end
+      if #out >= max then break end
     end
-    if #frames > 0 then msg = msg .. "\\nat " .. table.concat(frames, " < ") end
+    return out
+  end
+  -- The core passes every runtime error through debug.traceback. Name cart
+  -- lines, and keep it short: the core keeps only 256 bytes of it.
+  local _tb = debug.traceback
+  local function _traceback(co, msg)
+    msg = tostring(msg or ""):gsub('^%[string "[^"]*"%]:(%d+):', function(n)
+      local l = _cart(n)
+      return l and ("line " .. l .. ":") or "cartbox:"
+    end)
+    local parts = {}
+    for _, f in ipairs(_frames(co, 6)) do parts[#parts + 1] = f.name .. ":" .. f.line end
+    if #parts > 0 then msg = msg .. "\\nat " .. table.concat(parts, " < ") end
     return msg
   end
+  debug.traceback = function(msg, ...)
+    if type(msg) ~= "string" and msg ~= nil then return _tb(msg, ...) end
+    return _traceback(nil, msg)
+  end${dbg ? debuggerLua() : ""}
 end`;
+}
+function debuggerLua() {
+  return `
+  local _bps, _bpver, _armed = {}, -1, false
+  local _step, _depth = 0, 0 -- step: 1 into, 2 over, 3 out
+  local _co = nil
+  local function _stackdepth()
+    local d = 0
+    for level = 2, 250 do
+      local info = debug.getinfo(level, "S")
+      if not info then break end
+      if info.source == _src then d = d + 1 end
+    end
+    return d
+  end
+  local function _loadbps()
+    local v = _rd(_B + ${DBG_BP_VERSION})
+    if v == _bpver then return end
+    _bpver = v
+    _bps = {}
+    for i = 0, math.min(_rd(_B + ${DBG_BP_COUNT}), ${DBG_BPS_MAX}) - 1 do _bps[_rd(_B + ${DBG_BPS_AT} + i * 4)] = true end
+  end
+  ${BREAK_HOOK} = function(line)
+    if not _armed then return end
+    local stop = _bps[line]
+    if not stop then
+      if _step == 1 then stop = true
+      elseif _step == 2 then stop = _stackdepth() <= _depth
+      elseif _step == 3 then stop = _stackdepth() < _depth end
+    end
+    if not stop or not coroutine.isyieldable() then return end
+    _depth = _stackdepth()
+    _step = 0
+    _wr(_B + ${DBG_PAUSED_LINE}, line)
+    _wr(_B + ${DBG_STATE}, 1)
+    coroutine.yield()
+    local cmd = _rd(_B + ${DBG_COMMAND})
+    _wr(_B + ${DBG_COMMAND}, 0)
+    _wr(_B + ${DBG_STATE}, 0)
+    _step = (cmd == ${DebugCommand.into} and 1) or (cmd == ${DebugCommand.over} and 2) or (cmd == ${DebugCommand.out} and 3) or 0
+    _armed = _step ~= 0 or next(_bps) ~= nil
+  end
+  local function _fmt(v, deep)
+    local t = type(v)
+    if t == "string" then
+      if #v > 40 then v = v:sub(1, 40) .. "..." end
+      return (string.format("%q", v):gsub("\\n", "n"))
+    elseif t == "number" then
+      return math.type(v) == "integer" and tostring(v) or string.format("%.4g", v)
+    elseif t == "table" then
+      if deep then return "{...}" end
+      local parts, n = {}, 0
+      for k, x in pairs(v) do
+        n = n + 1
+        if n <= 4 then parts[#parts + 1] = (type(k) == "string" and k or ("[" .. tostring(k) .. "]")) .. "=" .. _fmt(x, true) end
+      end
+      return "{" .. table.concat(parts, ", ") .. (n > 4 and (", ... " .. n .. " in all") or "") .. "}"
+    elseif t == "function" then
+      return "function"
+    end
+    return tostring(v)
+  end
+  local function _show(v)
+    local ok, s = pcall(_fmt, v)
+    s = ok and s or "?"
+    return #s > 90 and (s:sub(1, 90) .. "...") or s
+  end
+  -- Write where the cart stopped: its stack, the stopped function's locals and
+  -- upvalues, and each watch expression's value there.
+  local function _writeinfo(co)
+    local lines = {}
+    local frames = _frames(co, 8)
+    for _, f in ipairs(frames) do lines[#lines + 1] = "S " .. f.name .. ":" .. f.line end
+    local top = frames[1]
+    local scope = {}
+    if top then
+      for i = 1, 200 do
+        local k, v = debug.getlocal(co, top.level, i)
+        if not k then break end
+        if k:sub(1, 1) ~= "(" then scope[k] = { v }; lines[#lines + 1] = "L " .. k .. "=" .. _show(v) end
+      end
+      for i = 1, 60 do
+        local k, v = debug.getupvalue(top.func, i)
+        if not k then break end
+        if k ~= "_ENV" and k ~= "${BREAK_HOOK}" and not scope[k] then scope[k] = { v }; lines[#lines + 1] = "U " .. k .. "=" .. _show(v) end
+      end
+    end
+    local env = setmetatable({}, { __index = function(_, k)
+      local s = scope[k]
+      if s then return s[1] end
+      return _G[k]
+    end })
+    local n = _rd(_B + ${DBG_WATCH_LENGTH})
+    local text = {}
+    for i = 0, math.min(n, ${DBG_WATCH_BYTES}) - 1 do text[#text + 1] = string.char(peek(_B + ${DBG_WATCH_AT} + i)) end
+    local index = 0
+    for expr in (table.concat(text) .. "\\n"):gmatch("([^\\n]*)\\n") do
+      index = index + 1
+      if expr:match("%S") then
+        local f, err = load("return " .. expr, "=watch", "t", env)
+        local ok, v = false, err
+        if f then ok, v = pcall(f) end
+        lines[#lines + 1] = "W " .. index .. (ok and ("=" .. _show(v)) or ("!" .. tostring(v):gsub("^watch:1: ", ""))):sub(1, 120)
+      end
+    end
+    local out = table.concat(lines, "\\n")
+    if #out > ${DBG_INFO_BYTES} then out = out:sub(1, ${DBG_INFO_BYTES}) end
+    for i = 1, #out do poke(_B + ${DBG_INFO_AT} + i - 1, out:byte(i)) end
+    _wr(_B + ${DBG_INFO_LENGTH}, #out)
+  end
+  -- Run one frame of the cart's TIC: straight through when nothing can stop it,
+  -- else in a coroutine the hooks can yield from, carrying on from a stop.
+  __cbx_run = function(tic)
+    _tic = tic
+    if not _live() then return tic() end
+    _loadbps()
+    if _co then
+      if _rd(_B + ${DBG_STATE}) == 1 then
+        local cmd = _rd(_B + ${DBG_COMMAND})
+        if cmd == ${DebugCommand.refresh} then
+          _wr(_B + ${DBG_COMMAND}, 0)
+          _writeinfo(_co)
+        end
+        if cmd < ${DebugCommand.continue} or cmd > ${DebugCommand.out} then return end
+      end
+    else
+      _armed = _step ~= 0 or next(_bps) ~= nil
+      if not _armed then return tic() end
+      _co = coroutine.create(tic)
+    end
+    local ok, err = coroutine.resume(_co)
+    if not ok then
+      local co = _co
+      _co = nil
+      _step = 0
+      _wr(_B + ${DBG_STATE}, 0)
+      error(_traceback(co, err), 0)
+    end
+    if coroutine.status(_co) == "dead" then
+      _co = nil
+    else
+      _writeinfo(_co)
+    end
+  end`;
+}
+function debugPostlude() {
+  return `do local _t = TIC if type(_t) == "function" then TIC = function() __cbx_run(_t) end end end`;
+}
+function parsePauseInfo(line, text, watchCount) {
+  const stack = [];
+  const locals = [];
+  const upvalues = [];
+  const watches = Array.from({ length: watchCount }, () => ({ value: "", error: false }));
+  for (const row of text.split("\n")) {
+    const kind = row.slice(0, 2);
+    const body = row.slice(2);
+    if (kind === "S ") {
+      const m = /^(.*):(\d+)$/.exec(body);
+      if (m) stack.push({ name: m[1], line: Number(m[2]) });
+    } else if (kind === "L " || kind === "U ") {
+      const eq = body.indexOf("=");
+      if (eq > 0) (kind === "L " ? locals : upvalues).push({ name: body.slice(0, eq), value: body.slice(eq + 1) });
+    } else if (kind === "W ") {
+      const m = /^(\d+)([=!])(.*)$/s.exec(body);
+      const index = m ? Number(m[1]) - 1 : -1;
+      if (m && index >= 0 && index < watchCount) watches[index] = { value: m[3], error: m[2] === "!" };
+    }
+  }
+  return { line, stack, locals, upvalues, watches };
+}
+function readPause(block, watchCount) {
+  if (block.getInt32(DBG_STATE, true) !== 1) return null;
+  const length = Math.max(0, Math.min(block.getInt32(DBG_INFO_LENGTH, true), DBG_INFO_BYTES));
+  const text = new TextDecoder().decode(new Uint8Array(block.buffer, block.byteOffset + DBG_INFO_AT, length));
+  return parsePauseInfo(block.getInt32(DBG_PAUSED_LINE, true), text, watchCount);
+}
+function sendDebugCommand(block, command) {
+  block.setInt32(DBG_COMMAND, command, true);
 }
 function drainTraces(block) {
   const used = Math.min(block.getInt32(DBG_TRACE_USED, true), DBG_TRACE_BYTES);
@@ -6019,9 +6425,33 @@ function drainTraces(block) {
   if (dropped !== 0) block.setInt32(DBG_TRACE_DROPPED, 0, true);
   return { traces, dropped: Math.max(0, dropped) };
 }
-function armDebugBlock(block, lineOffset) {
+function armDebugBlock(block, lineOffset, lineCount = 0) {
   block.setUint32(DBG_MAGIC, DEBUG_MAGIC, true);
   block.setInt32(DBG_LINE_OFFSET, lineOffset, true);
+  block.setInt32(DBG_LINE_COUNT, lineCount, true);
+}
+function writeBreakpoints(block, lines) {
+  const list = lines.slice(0, DBG_BPS_MAX);
+  list.forEach((line, i) => block.setInt32(DBG_BPS_AT + i * 4, line, true));
+  block.setInt32(DBG_BP_COUNT, list.length, true);
+  block.setInt32(DBG_BP_VERSION, block.getInt32(DBG_BP_VERSION, true) + 1 | 0, true);
+}
+function writeWatches(block, expressions) {
+  const encoder = new TextEncoder();
+  let bytes = new Uint8Array(0);
+  let fitted = 0;
+  for (const expr of expressions) {
+    const next = encoder.encode((fitted > 0 ? "\n" : "") + expr.replace(/\n/g, " "));
+    if (bytes.length + next.length > DBG_WATCH_BYTES) break;
+    const joined = new Uint8Array(bytes.length + next.length);
+    joined.set(bytes);
+    joined.set(next, bytes.length);
+    bytes = joined;
+    fitted += 1;
+  }
+  new Uint8Array(block.buffer, block.byteOffset + DBG_WATCH_AT, bytes.length).set(bytes);
+  block.setInt32(DBG_WATCH_LENGTH, bytes.length, true);
+  return fitted;
 }
 
 // src/flagsSdk.ts
@@ -10620,6 +11050,10 @@ var Player = class {
     this.lineOffset = 0;
     /** The debug block (bytes after pmem word 0), when the editor's console is on. */
     this.debugOffset = null;
+    /** Lines in the cart's own code (for telling its lines from the injected code after it). */
+    this.lineCount = 0;
+    /** The debugger (options.debug): breakpoints and watches still to write, lines that can break, and where the cart is stopped. */
+    this.debugState = null;
     this.speed = 1;
     /** The playtest profiler, while it's on (see setProfiling). */
     this.profiler = null;
@@ -10644,7 +11078,7 @@ var Player = class {
       const maxFramesPerRender = 4;
       const frameMs = frameDurationMs(this.model);
       let advanced = 0;
-      while (this.frameAccumulatorMs >= frameMs && advanced < maxFramesPerRender) {
+      while (this.frameAccumulatorMs >= frameMs && advanced < maxFramesPerRender && this.running) {
         this.tickOnce(this.speed === 1);
         this.frameAccumulatorMs -= frameMs;
         advanced++;
@@ -10692,8 +11126,25 @@ var Player = class {
       const seeded = seedCartridge(bytes, seed);
       let prepared = seeded;
       const layout = RAM_LAYOUTS[this.model.id];
-      if (this.options.onTrace && layout) {
-        prepared = prependLuaCode(prepared, debugSdkLua(debugBlockAddress(layout)));
+      const debug = this.options.debug;
+      const cartCode = readCartCode(bytes);
+      let ownCode = cartCode;
+      if ((this.options.onTrace || debug) && layout) {
+        if (debug && cartCode !== null) {
+          const instrumented = instrumentLua(cartCode);
+          if (instrumented.lines.length > 0) {
+            prepared = appendLuaCode(rewriteLuaCode(prepared, (code) => code.slice(0, code.length - cartCode.length) + instrumented.code), debugPostlude());
+            ownCode = instrumented.code;
+            this.debugState = {
+              breakpoints: effectiveBreakpoints(debug.breakpoints ?? [], instrumented.lines),
+              watches: debug.watches ?? [],
+              dirty: true,
+              breakable: instrumented.lines,
+              paused: null
+            };
+          }
+        }
+        prepared = prependLuaCode(prepared, debugSdkLua(debugBlockAddress(layout), { debugger: this.debugState !== null }));
         this.debugOffset = debugBlockAddress(layout) - layout.pmemAddress;
       }
       const collisionLua = collisionSdkLua(this.options.collision);
@@ -10725,7 +11176,8 @@ var Player = class {
         };
       }
       const preparedBytes = injectSdk(prepared);
-      this.lineOffset = codeLineOffset(readCartCode(bytes), readCartCode(preparedBytes));
+      this.lineOffset = codeLineOffset(ownCode, readCartCode(preparedBytes));
+      this.lineCount = cartCode === null ? 0 : cartCode.split("\n").length;
       this.console = createConsole(module, this.model, sampleRate);
       if (!this.console.loadCartridge(preparedBytes)) {
         throw new Error("Engine rejected the cartridge");
@@ -10889,9 +11341,9 @@ var Player = class {
   timeScale() {
     return this.speed;
   }
-  /** While paused, advance one frame and show it. */
+  /** While paused, advance one frame and show it (not while stopped at a breakpoint: use debugContinue). */
   stepFrame() {
-    if (this.running || this.destroyed || !this.console) return;
+    if (this.running || this.destroyed || !this.console || this.debugState?.paused) return;
     this.tickOnce(false);
     this.present();
   }
@@ -10970,12 +11422,15 @@ var Player = class {
     const runtimeBlock = this.runtimeBlock();
     if (runtimeBlock) this.runtime.channel.beforeTick(runtimeBlock);
     const debugBlock = this.debugBlock();
-    if (debugBlock) armDebugBlock(debugBlock, this.lineOffset);
+    if (debugBlock) this.armDebug(debugBlock);
     lap("runtime");
     const frame = this.tickFrame + 1;
     this.console?.tick(mask);
     lap("cart");
-    if (debugBlock) this.drainDebug(frame);
+    if (debugBlock) {
+      this.drainDebug(frame);
+      this.checkPause();
+    }
     const afterBlock = runtimeBlock ? this.runtimeBlock() : null;
     if (afterBlock) {
       this.runtime.channel.afterTick(afterBlock);
@@ -11105,6 +11560,70 @@ var Player = class {
     if (this.debugOffset === null || !this.console) return null;
     const bytes = this.console.ramView(this.debugOffset, DEBUG_BLOCK_BYTES);
     return bytes ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
+  }
+  /** Before a tick: the magic and line numbers, and any new breakpoints or watches. */
+  armDebug(block) {
+    armDebugBlock(block, this.lineOffset, this.lineCount);
+    const state = this.debugState;
+    if (state?.dirty) {
+      writeBreakpoints(block, state.breakpoints);
+      writeWatches(block, state.watches);
+      state.dirty = false;
+    }
+  }
+  /** After a tick: if the cart stopped at a breakpoint, stop the loop and say where. */
+  checkPause() {
+    const state = this.debugState;
+    const block = this.debugBlock();
+    if (!state || !block) return;
+    const pause = readPause(block, state.watches.length);
+    state.paused = pause;
+    if (!pause) return;
+    this.pause();
+    this.options.debug?.onPause?.(pause);
+  }
+  /** The debugger: which lines to stop at (moved on to the next line that can break, by the caller's choice). */
+  setBreakpoints(lines) {
+    if (!this.debugState) return;
+    this.debugState.breakpoints = effectiveBreakpoints(lines, this.debugState.breakable);
+    this.debugState.dirty = true;
+    const block = this.debugBlock();
+    if (block) this.armDebug(block);
+  }
+  /** The debugger: expressions to evaluate wherever the cart stops (re-evaluated now if it's stopped). */
+  setWatches(expressions) {
+    const state = this.debugState;
+    if (!state) return;
+    state.watches = [...expressions];
+    state.dirty = true;
+    const block = this.debugBlock();
+    if (!block || !this.console) return;
+    this.armDebug(block);
+    if (state.paused) {
+      sendDebugCommand(block, DebugCommand.refresh);
+      this.console.tick(0);
+      const pause = readPause(this.debugBlock(), state.watches.length);
+      state.paused = pause;
+      if (pause) this.options.debug?.onPause?.(pause);
+    }
+  }
+  /** The debugger: carry on from a stop — to the next breakpoint, or one statement (into, over, out). */
+  debugContinue(step = "continue") {
+    const state = this.debugState;
+    const block = this.debugBlock();
+    if (!state?.paused || !block) return;
+    sendDebugCommand(block, DebugCommand[step]);
+    state.paused = null;
+    this.options.debug?.onPause?.(null);
+    void this.resume();
+  }
+  /** Where the cart is stopped, or null. */
+  debugPaused() {
+    return this.debugState?.paused ?? null;
+  }
+  /** Lines the debugger can stop at (ascending); empty without the debugger. */
+  breakableLines() {
+    return this.debugState?.breakable ?? [];
   }
   /** Hand the console the traces the cart printed during `frame`. */
   drainDebug(frame) {
@@ -11975,6 +12494,11 @@ function mount(container, options) {
     timeScale: () => player.timeScale(),
     stepFrame: () => player.stepFrame(),
     frame: () => player.frame(),
+    setBreakpoints: (lines) => player.setBreakpoints(lines),
+    setWatches: (expressions) => player.setWatches(expressions),
+    debugContinue: (step) => player.debugContinue(step),
+    debugPaused: () => player.debugPaused(),
+    breakableLines: () => player.breakableLines(),
     setProfiling: (on) => player.setProfiling(on),
     profile: () => player.profile(),
     quality: () => player.quality()
@@ -12000,6 +12524,7 @@ export {
   DEFAULT_LIGHT,
   DEFAULT_MODEL_ID,
   DEFAULT_PAD_BINDINGS,
+  DebugCommand,
   EVENT_CAPACITY,
   EngineLoadError,
   GamepadInput,
@@ -12081,9 +12606,12 @@ export {
   animClipsSdkLua,
   animatedObjects,
   anyPostFxEnabled,
+  appendLuaCode,
   applyLookSettings,
   applyQualityToPostFx,
   applyRenderCaps,
+  armDebugBlock,
+  breakableLine,
   browserDeviceHints,
   buildBillboardInstance,
   buildClipTable,
@@ -12112,6 +12640,7 @@ export {
   createTextureBudgetCache,
   deadZoned,
   debugBlockAddress,
+  debugPostlude,
   debugSdkLua,
   decodeCamera,
   decodeLights,
@@ -12123,6 +12652,7 @@ export {
   detectQuality,
   deterministicBackend,
   drift,
+  effectiveBreakpoints,
   emitterPreset,
   errorStack,
   estimateSceneBytes,
@@ -12142,6 +12672,7 @@ export {
   hashEventId,
   hexToRgb01,
   injectSdk,
+  instrumentLua,
   interleaveVertices,
   interpolateNormal,
   jointFrames,
@@ -12160,6 +12691,7 @@ export {
   parseFlagsField,
   parseMeshScene,
   parseParticles,
+  parsePauseInfo,
   parsePostFxSettings,
   parseReplay,
   parseScene,
@@ -12169,6 +12701,7 @@ export {
   physicsSlots,
   physicsStateHash,
   prehazeLayers,
+  prependLuaCode,
   pulse,
   pyramidLevelCount,
   pyramidLevelSize,
@@ -12176,6 +12709,7 @@ export {
   rasterStyleFor,
   readCartCode,
   readPad,
+  readPause,
   reflectionFade,
   reflectionSampleY,
   remapErrorLines,
@@ -12187,6 +12721,7 @@ export {
   resolveSceneLayers,
   resolveSupersample,
   resolveUnlockedAchievements,
+  rewriteLuaCode,
   runReplayEvents,
   runtimeSdkLua,
   sampleClipFrame,
@@ -12198,6 +12733,7 @@ export {
   sceneNeedsRuntime,
   sceneObjectsSdkLua,
   seedCartridge,
+  sendDebugCommand,
   serializeReplay,
   shade,
   simulateEmitter,
@@ -12208,14 +12744,17 @@ export {
   takeNetOutbox,
   takePhysicsCommands,
   tiltShiftBlur,
+  tokenizeLua,
   uniformsFromSettings,
   unpadRows,
   verifyReplayScore,
   viewDirection,
   webgpuCanHonour,
   worldCenter,
+  writeBreakpoints,
   writeInstanceTransform,
   writeInstanceUniform,
   writeNetInbox,
-  writePhysicsState
+  writePhysicsState,
+  writeWatches
 };

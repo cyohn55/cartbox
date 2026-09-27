@@ -114,6 +114,20 @@ export function readCartCode(bytes: Uint8Array): string | null {
  * Shared by RNG seeding and SDK injection.
  */
 export function prependLuaCode(bytes: Uint8Array, prelude: string): Uint8Array {
+  return rewriteLuaCode(bytes, (code) => `${prelude}\n${code}`);
+}
+
+/**
+ * Returns a copy of the cartridge with `postlude` appended to its Lua code, on a
+ * line of its own (so the cart's line numbers don't move). Unchanged like
+ * {@link prependLuaCode}.
+ */
+export function appendLuaCode(bytes: Uint8Array, postlude: string): Uint8Array {
+  return rewriteLuaCode(bytes, (code) => `${code}\n${postlude}`);
+}
+
+/** Returns a copy of the cartridge with its Lua code replaced by `rewrite(code)`. Unchanged like {@link prependLuaCode}. */
+export function rewriteLuaCode(bytes: Uint8Array, rewrite: (code: string) => string): Uint8Array {
   const joined = joinedCode(bytes);
   if (!joined) {
     return bytes;
@@ -124,7 +138,7 @@ export function prependLuaCode(bytes: Uint8Array, prelude: string): Uint8Array {
     return bytes;
   }
 
-  const merged = new TextEncoder().encode(`${prelude}\n${code}`);
+  const merged = new TextEncoder().encode(rewrite(code));
   if (merged.length > MAX_CODE_BYTES) {
     return bytes;
   }
