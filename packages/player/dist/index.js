@@ -3830,9 +3830,94 @@ cartbox = {
   mapsize = function() return 0, 0 end,
   -- Tile-flags default: overridden by the injected layer when the cart has one.
   flag = function() return false end,
+  -- Scene objects (the cart's placed meshes by name, with parents, tags and
+  -- properties): overridden by the injected scene table when the cart has meshes.
+  -- An object is the 0-based index cartbox.meshpose takes, or its name.
+  objects = function() return 0 end,
+  find = function() return nil end,
+  objname = function() return nil end,
+  parent = function() return nil end,
+  children = function() return {} end,
+  prop = function(_, _, default) return default end,
+  hastag = function() return false end,
+  tagged = function() return {} end,
 }`;
 function injectSdk(bytes) {
   return prependLuaCode(bytes, CARTBOX_SDK_LUA);
+}
+
+// src/mesh/sceneObjectsSdk.ts
+function luaQuote(value) {
+  let out = '"';
+  for (const ch of value) {
+    const code = ch.codePointAt(0);
+    if (ch === "\\") out += "\\\\";
+    else if (ch === '"') out += '\\"';
+    else if (code < 32 || code === 127) out += `\\${String(code).padStart(3, "0")}`;
+    else out += ch;
+  }
+  return `${out}"`;
+}
+function luaValue(value) {
+  if (typeof value === "string") return luaQuote(value);
+  if (typeof value === "boolean") return value ? "true" : "false";
+  return Number.isFinite(value) ? String(value) : "0";
+}
+function sceneObjectsSdkLua(scene) {
+  if (!scene || scene.instances.length === 0) return "";
+  const names = [];
+  const parents = [];
+  const tags = [];
+  const props = [];
+  scene.instances.forEach((instance, i) => {
+    names.push(`[${i}]=${luaQuote(instance.name ?? "")}`);
+    if ((instance.parent ?? -1) >= 0) parents.push(`[${i}]=${instance.parent}`);
+    const t = instance.tags ?? [];
+    if (t.length > 0) tags.push(`[${i}]={${t.map((tag) => `[${luaQuote(tag)}]=true`).join(",")}}`);
+    const entries = Object.entries(instance.props ?? {});
+    if (entries.length > 0) props.push(`[${i}]={${entries.map(([k, v]) => `[${luaQuote(k)}]=${luaValue(v)}`).join(",")}}`);
+  });
+  return `do
+  cartbox = cartbox or {}
+  local _n = {${names.join(",")}}
+  local _p = {${parents.join(",")}}
+  local _t = {${tags.join(",")}}
+  local _pr = {${props.join(",")}}
+  local _count = ${scene.instances.length}
+  local _byname = {}
+  for i = _count - 1, 0, -1 do _byname[_n[i]] = i end
+  local function _obj(o)
+    if type(o) == "string" then return _byname[o] end
+    if type(o) == "number" and o >= 0 and o < _count then return math.floor(o) end
+    return nil
+  end
+  cartbox.objects = function() return _count end
+  cartbox.find = function(name) return _byname[name] end
+  cartbox.objname = function(o) local i = _obj(o) return i and _n[i] end
+  cartbox.parent = function(o) local i = _obj(o) return i and _p[i] end
+  cartbox.children = function(o)
+    local i = _obj(o)
+    local out = {}
+    if i == nil then return out end
+    for c = 0, _count - 1 do if _p[c] == i then out[#out + 1] = c end end
+    return out
+  end
+  cartbox.prop = function(o, key, default)
+    local i = _obj(o)
+    local v = i and _pr[i] and _pr[i][key]
+    if v == nil then return default end
+    return v
+  end
+  cartbox.hastag = function(o, tag)
+    local i = _obj(o)
+    return (i and _t[i] and _t[i][tag]) == true
+  end
+  cartbox.tagged = function(tag)
+    local out = {}
+    for i = 0, _count - 1 do if _t[i] and _t[i][tag] then out[#out + 1] = i end end
+    return out
+  end
+end`;
 }
 
 // src/collisionSdk.ts
@@ -4802,6 +4887,7 @@ var lerp3 = (a, b, t) => a + (b - a) * t;
 import {
   bakeSkyPanorama,
   buildSceneShadow,
+  childIndices,
   computeEnvironmentAverage,
   downsamplePanorama,
   renderSkyBackground,
@@ -4809,7 +4895,8 @@ import {
   multiplyMat4,
   sceneLightingEnvironment,
   sceneLightingKeyDirection,
-  sceneLightingTonemap
+  sceneLightingTonemap,
+  withDescendants
 } from "@cartbox/editor";
 
 // src/render/sceneRenderer.ts
@@ -5009,9 +5096,13 @@ import {
   composeModelMatrix,
   deserializeMeshAsset,
   meshBounds,
+  parentIndices,
   parseSceneLighting,
   projectionMatrix,
   readMeshLibrary,
+  readSceneProps,
+  readSceneTags,
+  worldMatrices,
   resolveMeshFrames,
   resolveMeshRef,
   viewMatrix
@@ -5086,7 +5177,7 @@ function parseMeshScene(raw) {
     }
     return cache.get(serialized) ?? null;
   };
-  const instances = [];
+  const parsedInstances = [];
   for (const entry of entries) {
     const record = entry;
     if (typeof record.mesh !== "string") continue;
@@ -5095,12 +5186,27 @@ function parseMeshScene(raw) {
     if (!mesh) continue;
     const frames = resolveMeshFrames(record.frames, library).map(load).filter((frame) => frame !== null);
     const t = readTransform(record.transform);
-    instances.push({
+    parsedInstances.push({
       mesh,
-      model: composeModelMatrix(t.position, t.rotation, t.scale),
-      ...frames.length > 0 ? { frames } : {}
+      local: composeModelMatrix(t.position, t.rotation, t.scale),
+      ...frames.length > 0 ? { frames } : {},
+      id: typeof record.id === "string" ? record.id : `mesh-${parsedInstances.length}`,
+      name: typeof record.name === "string" ? record.name : "Mesh",
+      tags: readSceneTags(record.tags),
+      props: readSceneProps(record.props),
+      parentId: typeof record.parent === "string" && record.parent ? record.parent : null
     });
   }
+  const parents = parentIndices(parsedInstances.map((p) => ({ id: p.id, parent: p.parentId })));
+  const world = worldMatrices(
+    parsedInstances.map((p) => p.local),
+    parents
+  );
+  const instances = parsedInstances.map(({ parentId: _parentId, ...rest }, i) => ({
+    ...rest,
+    model: world[i],
+    parent: parents[i]
+  }));
   if (instances.length === 0) return null;
   const lighting = parseSceneLighting(parsed.lighting);
   return { instances, bounds: sceneBounds(instances), lighting };
@@ -5227,6 +5333,16 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.output = new Uint8ClampedArray(width * height * 4);
     this.presented = new Uint8Array(this.output.buffer);
     this.depth = new Float32Array(width * height);
+    const parents = scene.instances.map((instance) => instance.parent ?? -1);
+    this.hierarchy = parents.some((p) => p >= 0) ? {
+      parents,
+      children: childIndices(parents),
+      locals: scene.instances.map((instance) => instance.local ?? instance.model)
+    } : null;
+  }
+  /** Posed instances plus, in a hierarchy, everything below them: what moves this frame. */
+  withChildren(indices) {
+    return this.hierarchy ? withDescendants(indices, this.hierarchy.children) : new Set(indices);
   }
   /**
    * Decode every instance's base-colour textures, then build the surface. Any
@@ -5421,6 +5537,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    */
   posedInstances() {
     if (this.poses.length === 0) return { main: this.instances, front: [], moved: [] };
+    if (this.hierarchy) return this.posedHierarchy(this.hierarchy);
     const main = [];
     const front = [];
     const moved = [];
@@ -5443,6 +5560,62 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       if (pose.front) {
         front.push(instance);
       } else {
+        main.push(instance);
+        moved.push(instance);
+      }
+    }
+    return { main, front, moved };
+  }
+  /**
+   * {@link posedInstances} for a scene with parents. A child follows its parent:
+   * its world matrix is the parent's (posed) world matrix times its own local
+   * transform, then its own pose. Hiding a parent hides its children and putting
+   * it on the front layer brings them along; anything under a posed object counts
+   * as moved for the shadow cache. Unposed objects under unposed parents keep
+   * their baked world matrix.
+   */
+  posedHierarchy(h) {
+    const byIndex = /* @__PURE__ */ new Map();
+    for (const pose of this.poses) if (!byIndex.has(pose.index)) byIndex.set(pose.index, pose);
+    const states = new Array(this.instances.length);
+    const state = (i) => {
+      const done = states[i];
+      if (done) return done;
+      const p = h.parents[i] ?? -1;
+      const up = p >= 0 ? state(p) : null;
+      const pose = byIndex.get(i);
+      const moved2 = Boolean(pose) || Boolean(up?.moved);
+      let model = this.instances[i].model;
+      if (moved2) {
+        const base = up ? multiplyMat4(up.model, h.locals[i]) : h.locals[i];
+        model = pose ? multiplyMat4(base, poseLocalMatrix(pose)) : base;
+      }
+      const out = { model, moved: moved2, hidden: Boolean(pose?.hidden) || Boolean(up?.hidden), front: Boolean(pose?.front) || Boolean(up?.front) };
+      states[i] = out;
+      return out;
+    };
+    const main = [];
+    const front = [];
+    const moved = [];
+    for (let i = 0; i < this.instances.length; i += 1) {
+      const authored = this.instances[i];
+      const s = state(i);
+      if (s.hidden) continue;
+      if (!s.moved) {
+        main.push(authored);
+        continue;
+      }
+      const pose = byIndex.get(i);
+      const frames = this.frames[i];
+      const frame = pose?.frame ?? 0;
+      const source = frame > 0 && frames && frames.length > 0 ? frames[(frame - 1) % frames.length] : authored;
+      const instance = {
+        ...source,
+        mesh: pose?.tint ? this.tinted(source.mesh, pose.tint) : source.mesh,
+        model: s.model
+      };
+      if (s.front) front.push(instance);
+      else {
         main.push(instance);
         moved.push(instance);
       }
@@ -5477,12 +5650,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (!lighting.shadows) return null;
     const size = SHADOW_MAP_SIZE;
     const { center, radius } = this.scene.bounds;
-    for (const pose of this.poses) if (pose.front) this.everFront.add(pose.index);
+    for (const i of this.withChildren(this.poses.filter((p) => p.front).map((p) => p.index))) this.everFront.add(i);
     const key = `${this.poses.filter((p) => !p.front).map((p) => p.index).sort((a, b) => a - b).join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}`;
     let full = false;
     if (!this.staticShadow || this.staticShadowKey !== key || this.staticShadowLighting !== lighting) {
       this.staticShadow ?? (this.staticShadow = new Float32Array(size * size));
-      const posed = new Set(this.poses.map((p) => p.index));
+      const posed = this.withChildren(this.poses.map((p) => p.index));
       const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i));
       const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow });
       if (!built) return null;
@@ -7227,6 +7400,8 @@ var Player = class {
       if (flagsLua) prepared = prependLuaCode(prepared, flagsLua);
       const animClipsLua = animClipsSdkLua(this.options.anim);
       if (animClipsLua) prepared = prependLuaCode(prepared, animClipsLua);
+      const sceneLua = sceneObjectsSdkLua(this.options.mesh);
+      if (sceneLua) prepared = prependLuaCode(prepared, sceneLua);
       const preparedBytes = injectSdk(prepared);
       this.console = createConsole(module, this.model, sampleRate);
       if (!this.console.loadCartridge(preparedBytes)) {
@@ -8419,6 +8594,7 @@ export {
   sampleNormalBilinear,
   sampleScalarBilinear,
   sampleTrack,
+  sceneObjectsSdkLua,
   seedCartridge,
   serializeReplay,
   shade,

@@ -238,4 +238,25 @@ cartbox = {
   solid = function() return false end,
   mapsize = function() return 0, 0 end,
   flag = function() return false end,
+
+  -- Scene objects. When the cart has placed meshes the platform injects real
+  -- implementations: an object is the 0-based index cartbox.meshpose takes, or
+  -- its name as set in the editor's Hierarchy.
+  --   cartbox.find(name)            -> index, or nil
+  --   cartbox.objname(obj)          -> name
+  --   cartbox.parent(obj)           -> parent index, or nil for a root
+  --   cartbox.children(obj)         -> { index, ... }
+  --   cartbox.prop(obj, key, def)   -> the object's authored property, or def
+  --   cartbox.hastag(obj, tag)      -> true / false
+  --   cartbox.tagged(tag)           -> { index, ... }
+  --   cartbox.objects()             -> how many objects there are
+  -- Moving a parent with meshpose moves its children with it.
+  objects = function() return 0 end,
+  find = function() return nil end,
+  objname = function() return nil end,
+  parent = function() return nil end,
+  children = function() return {} end,
+  prop = function(_, _, default) return default end,
+  hastag = function() return false end,
+  tagged = function() return {} end,
 }

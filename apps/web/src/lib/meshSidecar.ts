@@ -18,14 +18,22 @@
 
 import {
   deserializeMeshAsset,
+  isSceneKey,
   packMeshLibrary,
+  parentIndices,
   parseSceneLighting,
   readMeshLibrary,
+  readSceneProps,
+  readSceneTags,
+  SCENE_PROP_MAX,
+  SCENE_STRING_MAX,
+  SCENE_TAG_MAX,
   resolveMeshFrames,
   resolveMeshRef,
   serializeMeshAsset,
   type MeshAsset,
   type SceneLighting,
+  type ScenePropValue,
 } from "@cartbox/editor";
 
 /** The envelope version; bumped on any schema change (2 added the lighting rig). */
@@ -51,6 +59,15 @@ export interface MeshSidecarEntry {
    * this instance to per frame through `cartbox.meshpose(..., frame)`.
    */
   readonly frames?: readonly string[];
+  /**
+   * Scene objects (ENGINE_ROADMAP.md, Phase 1), all optional. `parent` is another
+   * entry's id: this entry's transform is then relative to it. `tags` group
+   * objects (`cartbox.tagged`) and `props` hold data the cart reads
+   * (`cartbox.prop`).
+   */
+  readonly parent?: string;
+  readonly tags?: readonly string[];
+  readonly props?: Readonly<Record<string, ScenePropValue>>;
 }
 
 /** The whole mesh sidecar: every placed mesh on the cart, plus its lighting rig. */
@@ -151,12 +168,17 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     const mesh = resolveMeshRef(record.mesh, library);
     if (!mesh || !isValid(mesh)) continue; // drop an entry whose geometry is missing or invalid
     const frames = resolveMeshFrames(record.frames, library).filter(isValid);
+    const tags = readSceneTags(record.tags);
+    const props = readSceneProps(record.props);
     meshes.push({
       id: typeof record.id === "string" ? record.id : newMeshId(),
       name: typeof record.name === "string" ? record.name : "Mesh",
       mesh,
       transform: readTransform(record.transform),
       ...(frames.length > 0 ? { frames } : {}),
+      ...(typeof record.parent === "string" && record.parent ? { parent: record.parent } : {}),
+      ...(tags.length > 0 ? { tags } : {}),
+      ...(Object.keys(props).length > 0 ? { props } : {}),
     });
   }
   const lighting = parseSceneLighting((parsed as { lighting?: unknown }).lighting);
@@ -215,12 +237,118 @@ export function renameMesh(sidecar: MeshSidecar, id: string, name: string): Mesh
   };
 }
 
-/** Drop one entry. */
+/**
+ * Drop one entry. Its children move up to its own parent (or become roots),
+ * keeping their local transforms, so removing a group never removes its contents.
+ */
 export function removeMesh(sidecar: MeshSidecar, id: string): MeshSidecar {
-  return { ...sidecar, version: MESH_SIDECAR_VERSION, meshes: sidecar.meshes.filter((entry) => entry.id !== id) };
+  const removed = sidecar.meshes.find((entry) => entry.id === id);
+  const meshes = sidecar.meshes
+    .filter((entry) => entry.id !== id)
+    .map((entry) => (entry.parent === id ? withParent(entry, removed?.parent ?? null) : entry));
+  return { ...sidecar, version: MESH_SIDECAR_VERSION, meshes };
+}
+
+// --- Scene objects: hierarchy, tags, properties ------------------------------
+
+function withParent(entry: MeshSidecarEntry, parent: string | null): MeshSidecarEntry {
+  const { parent: _drop, ...rest } = entry;
+  return parent ? { ...rest, parent } : rest;
+}
+
+/** The ids `id` may be parented to: every entry except itself and its descendants. */
+export function parentCandidates(sidecar: MeshSidecar, id: string): MeshSidecarEntry[] {
+  const parents = parentIndices(sidecar.meshes);
+  const self = sidecar.meshes.findIndex((entry) => entry.id === id);
+  return sidecar.meshes.filter((_, i) => {
+    for (let at = i; at >= 0; at = parents[at] ?? -1) if (at === self) return false;
+    return true;
+  });
+}
+
+/**
+ * Parent `id` to `parentId` (null makes it a root). Its transform is kept as its
+ * local transform, now relative to the new parent. A parent that would create a
+ * cycle (itself or one of its descendants) or doesn't exist is refused: the
+ * sidecar comes back unchanged.
+ */
+export function setMeshParent(sidecar: MeshSidecar, id: string, parentId: string | null): MeshSidecar {
+  if (parentId !== null && !parentCandidates(sidecar, id).some((entry) => entry.id === parentId)) return sidecar;
+  return {
+    ...sidecar,
+    version: MESH_SIDECAR_VERSION,
+    meshes: sidecar.meshes.map((entry) => (entry.id === id ? withParent(entry, parentId) : entry)),
+  };
+}
+
+/** Replace one entry's tags (invalid names and duplicates dropped, capped at 16). */
+export function setMeshTags(sidecar: MeshSidecar, id: string, tags: readonly string[]): MeshSidecar {
+  const clean = readSceneTags(tags).slice(0, SCENE_TAG_MAX);
+  return {
+    ...sidecar,
+    version: MESH_SIDECAR_VERSION,
+    meshes: sidecar.meshes.map((entry) => {
+      if (entry.id !== id) return entry;
+      const { tags: _drop, ...rest } = entry;
+      return clean.length > 0 ? { ...rest, tags: clean } : rest;
+    }),
+  };
+}
+
+/**
+ * Set (or with `value` null, remove) one custom property. An invalid key, a
+ * non-finite number, or a new key past the 32-property cap is refused.
+ */
+export function setMeshProp(sidecar: MeshSidecar, id: string, key: string, value: ScenePropValue | null): MeshSidecar {
+  if (!isSceneKey(key)) return sidecar;
+  if (typeof value === "number" && !Number.isFinite(value)) return sidecar;
+  return {
+    ...sidecar,
+    version: MESH_SIDECAR_VERSION,
+    meshes: sidecar.meshes.map((entry) => {
+      if (entry.id !== id) return entry;
+      const props: Record<string, ScenePropValue> = { ...(entry.props ?? {}) };
+      if (value === null) delete props[key];
+      else {
+        if (!(key in props) && Object.keys(props).length >= SCENE_PROP_MAX) return entry;
+        props[key] = typeof value === "string" ? value.slice(0, SCENE_STRING_MAX) : value;
+      }
+      const { props: _drop, ...rest } = entry;
+      return Object.keys(props).length > 0 ? { ...rest, props } : rest;
+    }),
+  };
 }
 
 /** Decode one entry's geometry back into a {@link MeshAsset}. */
 export function readMeshEntry(entry: MeshSidecarEntry): MeshAsset {
   return deserializeMeshAsset(entry.mesh);
+}
+
+/** One row of the Hierarchy panel: an entry and how deep it sits. */
+export interface HierarchyRow {
+  readonly entry: MeshSidecarEntry;
+  readonly depth: number;
+  readonly hasChildren: boolean;
+}
+
+/**
+ * The entries in Hierarchy order: each root followed by its children (depth-first,
+ * keeping sidecar order among siblings). Entries whose parent is missing or loops
+ * show as roots, matching how the runtime places them.
+ */
+export function hierarchyRows(sidecar: MeshSidecar): HierarchyRow[] {
+  const parents = parentIndices(sidecar.meshes);
+  const children = sidecar.meshes.map(() => [] as number[]);
+  parents.forEach((p, i) => {
+    if (p >= 0) children[p]!.push(i);
+  });
+  const rows: HierarchyRow[] = [];
+  const visit = (i: number, depth: number) => {
+    rows.push({ entry: sidecar.meshes[i]!, depth, hasChildren: children[i]!.length > 0 });
+    for (const c of children[i]!) visit(c, depth + 1);
+  };
+  parents.forEach((p, i) => {
+    if (p < 0) visit(i, 0);
+  });
+  return rows;
 }

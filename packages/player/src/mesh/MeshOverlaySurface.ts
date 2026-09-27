@@ -25,6 +25,7 @@
 import {
   bakeSkyPanorama,
   buildSceneShadow,
+  childIndices,
   computeEnvironmentAverage,
   downsamplePanorama,
   renderSkyBackground,
@@ -33,6 +34,7 @@ import {
   sceneLightingEnvironment,
   sceneLightingKeyDirection,
   sceneLightingTonemap,
+  withDescendants,
   type DecodedTexture,
   type EncodedImage,
   type EnvironmentLight,
@@ -204,6 +206,16 @@ export class MeshOverlaySurface implements DisplaySurface {
   private readonly frontRenderer = new SoftwareSceneRenderer();
   /** First-person mode: draw the meshes first, then the cart's 2D frame as a HUD on top. */
   private hud = false;
+  /**
+   * The scene-object hierarchy: each instance's parent index (-1 for a root), its
+   * children, and its authored local transform. Null when no instance has a parent,
+   * which keeps the flat scene on its original code path.
+   */
+  private readonly hierarchy: {
+    readonly parents: readonly number[];
+    readonly children: readonly (readonly number[])[];
+    readonly locals: readonly Mat4[];
+  } | null;
   /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
   private hudFrame: Uint8ClampedArray | null = null;
 
@@ -231,6 +243,19 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.output = new Uint8ClampedArray(width * height * 4);
     this.presented = new Uint8Array(this.output.buffer);
     this.depth = new Float32Array(width * height);
+    const parents = scene.instances.map((instance) => instance.parent ?? -1);
+    this.hierarchy = parents.some((p) => p >= 0)
+      ? {
+          parents,
+          children: childIndices(parents),
+          locals: scene.instances.map((instance) => instance.local ?? instance.model),
+        }
+      : null;
+  }
+
+  /** Posed instances plus, in a hierarchy, everything below them: what moves this frame. */
+  private withChildren(indices: Iterable<number>): Set<number> {
+    return this.hierarchy ? withDescendants(indices, this.hierarchy.children) : new Set(indices);
   }
 
   /**
@@ -481,6 +506,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     moved: readonly MeshSceneInstance[];
   } {
     if (this.poses.length === 0) return { main: this.instances, front: [], moved: [] };
+    if (this.hierarchy) return this.posedHierarchy(this.hierarchy);
     const main: MeshSceneInstance[] = [];
     const front: MeshSceneInstance[] = [];
     const moved: MeshSceneInstance[] = [];
@@ -503,6 +529,68 @@ export class MeshOverlaySurface implements DisplaySurface {
       if (pose.front) {
         front.push(instance);
       } else {
+        main.push(instance);
+        moved.push(instance);
+      }
+    }
+    return { main, front, moved };
+  }
+
+  /**
+   * {@link posedInstances} for a scene with parents. A child follows its parent:
+   * its world matrix is the parent's (posed) world matrix times its own local
+   * transform, then its own pose. Hiding a parent hides its children and putting
+   * it on the front layer brings them along; anything under a posed object counts
+   * as moved for the shadow cache. Unposed objects under unposed parents keep
+   * their baked world matrix.
+   */
+  private posedHierarchy(h: NonNullable<MeshOverlaySurface["hierarchy"]>): {
+    main: readonly MeshSceneInstance[];
+    front: readonly MeshSceneInstance[];
+    moved: readonly MeshSceneInstance[];
+  } {
+    const byIndex = new Map<number, MailboxMeshPose>();
+    for (const pose of this.poses) if (!byIndex.has(pose.index)) byIndex.set(pose.index, pose);
+    type State = { model: Mat4; hidden: boolean; front: boolean; moved: boolean };
+    const states: (State | undefined)[] = new Array(this.instances.length);
+    const state = (i: number): State => {
+      const done = states[i];
+      if (done) return done;
+      const p = h.parents[i] ?? -1;
+      const up = p >= 0 ? state(p) : null;
+      const pose = byIndex.get(i);
+      const moved = Boolean(pose) || Boolean(up?.moved);
+      let model = this.instances[i]!.model;
+      if (moved) {
+        const base = up ? multiplyMat4(up.model, h.locals[i]!) : h.locals[i]!;
+        model = pose ? multiplyMat4(base, poseLocalMatrix(pose)) : base;
+      }
+      const out = { model, moved, hidden: Boolean(pose?.hidden) || Boolean(up?.hidden), front: Boolean(pose?.front) || Boolean(up?.front) };
+      states[i] = out;
+      return out;
+    };
+    const main: MeshSceneInstance[] = [];
+    const front: MeshSceneInstance[] = [];
+    const moved: MeshSceneInstance[] = [];
+    for (let i = 0; i < this.instances.length; i += 1) {
+      const authored = this.instances[i]!;
+      const s = state(i);
+      if (s.hidden) continue;
+      if (!s.moved) {
+        main.push(authored);
+        continue;
+      }
+      const pose = byIndex.get(i);
+      const frames = this.frames[i];
+      const frame = pose?.frame ?? 0;
+      const source: TexturedMesh = frame > 0 && frames && frames.length > 0 ? frames[(frame - 1) % frames.length]! : authored;
+      const instance: MeshSceneInstance = {
+        ...source,
+        mesh: pose?.tint ? this.tinted(source.mesh, pose.tint) : source.mesh,
+        model: s.model,
+      };
+      if (s.front) front.push(instance);
+      else {
         main.push(instance);
         moved.push(instance);
       }
@@ -547,7 +635,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     // on *which* instances are posed (not whether a posed one is hidden this
     // frame — a character dying must not re-render the whole arena's shadow),
     // and a held weapon never casts, so anything ever posed in front is out too.
-    for (const pose of this.poses) if (pose.front) this.everFront.add(pose.index);
+    for (const i of this.withChildren(this.poses.filter((p) => p.front).map((p) => p.index))) this.everFront.add(i);
     const key = `${this.poses
       .filter((p) => !p.front)
       .map((p) => p.index)
@@ -556,7 +644,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     let full = false;
     if (!this.staticShadow || this.staticShadowKey !== key || this.staticShadowLighting !== lighting) {
       this.staticShadow ??= new Float32Array(size * size);
-      const posed = new Set(this.poses.map((p) => p.index));
+      const posed = this.withChildren(this.poses.map((p) => p.index));
       const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i));
       const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow });
       if (!built) return null;

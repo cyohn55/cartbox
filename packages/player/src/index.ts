@@ -298,7 +298,7 @@ export type {
 // geometry with placement transforms); the player rasterises it over each frame
 // with a pure software rasteriser — the runtime has no GPU triangle path — no cart
 // code needed. Phase 2 of the mesh asset feature.
-export { MeshOverlaySurface, parseMeshScene, buildOrbitCamera } from "./mesh/index.js";
+export { MeshOverlaySurface, parseMeshScene, buildOrbitCamera, sceneObjectsSdkLua } from "./mesh/index.js";
 export type { MeshScene, MeshInstance, SceneBounds, MeshSceneCamera } from "./mesh/index.js";
 
 // Runtime HD-2D world (optional): a cart declares a height-mapped 3D tile world

@@ -49,6 +49,7 @@ import { LibraryBrowser } from "./LibraryBrowser";
 import { MaterialEditor } from "./MaterialEditor";
 import { LightingEditor } from "./LightingEditor";
 import { SceneViewport } from "./SceneViewport";
+import { CodeHint, HierarchyPanel, ParentPicker, PropertyEditor, TagEditor } from "./SceneObjectPanels";
 
 const VIEWPORT = 512; // preview canvas edge in device pixels
 const ORBIT_SPEED = 0.01; // radians per pixel dragged
@@ -304,33 +305,7 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
           {note && <RailHint>{note}</RailHint>}
         </RailGroup>
 
-        <RailGroup label={`Meshes · ${sidecar.meshes.length}`}>
-          {sidecar.meshes.length === 0 ? (
-            <RailHint>No meshes yet. Import one above.</RailHint>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              {sidecar.meshes.map((entry) => (
-                <button
-                  key={entry.id}
-                  type="button"
-                  className={styles.toolBtn}
-                  onClick={() => setSelectedId(entry.id)}
-                  style={{
-                    justifyContent: "flex-start",
-                    outline: entry.id === selectedId ? "2px solid #7db8fc" : "none",
-                  }}
-                  title={entry.name}
-                >
-                  <span
-                    style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 190 }}
-                  >
-                    {entry.name}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-        </RailGroup>
+        <HierarchyPanel sidecar={sidecar} selectedId={selectedId} onSelect={setSelectedId} />
       </aside>
 
       {/* Centre: preview — the selected mesh alone, or the whole composed scene */}
@@ -394,7 +369,15 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
               />
             </RailGroup>
 
-            <TransformControls transform={selectedEntry.transform} onChange={updateTransform} />
+            <ParentPicker sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
+
+            <TransformControls transform={selectedEntry.transform} onChange={updateTransform} relative={Boolean(selectedEntry.parent)} />
+
+            <TagEditor sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
+
+            <PropertyEditor sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
+
+            <CodeHint entry={selectedEntry} />
 
             {meshAsset && <MaterialEditor mesh={meshAsset} onChange={applyMeshEdit} />}
 
@@ -455,9 +438,12 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
 function TransformControls({
   transform,
   onChange,
+  relative = false,
 }: {
   transform: MeshTransform;
   onChange: (patch: Partial<MeshTransform>) => void;
+  /** The object has a parent: the transform is relative to it. */
+  relative?: boolean;
 }) {
   const rows: { label: string; key: keyof MeshTransform; step: number }[] = [
     { label: "Position", key: "position", step: 0.1 },
@@ -491,7 +477,11 @@ function TransformControls({
           </div>
         </div>
       ))}
-      <RailHint>Placement in the cart world — applied when the mesh renders at runtime.</RailHint>
+      <RailHint>
+        {relative
+          ? "Relative to the parent — the object moves, turns and scales with it."
+          : "Placement in the cart world — applied when the mesh renders at runtime."}
+      </RailHint>
     </RailGroup>
   );
 }

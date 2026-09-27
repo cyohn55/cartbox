@@ -19,7 +19,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   buildSceneShadow,
   composeModelMatrix,
+  localDirection,
   multiplyMat4,
+  parentIndices,
   projectionMatrix,
   renderMeshScene,
   sceneLightingEnvironment,
@@ -27,6 +29,7 @@ import {
   sceneLightingTonemap,
   viewMatrix,
   worldAabb,
+  worldMatrices,
   type DecodedTexture,
   type Mat4,
   type MeshAsset,
@@ -117,18 +120,30 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [geometrySignature]);
 
+  // Every entry's world matrix (a child sits relative to its parent) and its
+  // parent's, for placing instances and for turning a drag into a local move.
+  const placement = useMemo(() => {
+    const parents = parentIndices(sidecar.meshes);
+    const world = worldMatrices(
+      sidecar.meshes.map(({ transform: t }) => composeModelMatrix(t.position, t.rotation, t.scale)),
+      parents,
+    );
+    return new Map(
+      sidecar.meshes.map((m, i) => [m.id, { world: world[i]!, parentWorld: parents[i]! >= 0 ? world[parents[i]!]! : null }]),
+    );
+  }, [sidecar.meshes]);
+
   // Build render instances from the decoded geometry + current transforms. Cheap,
   // so it runs every render — a transform edit is reflected without re-decoding.
   const instances = useMemo<SceneInstance[]>(() => {
     const out: SceneInstance[] = [];
     for (const d of decoded) {
-      const entry = sidecar.meshes.find((m) => m.id === d.id);
-      if (!entry) continue;
-      const t = entry.transform;
-      out.push({ id: d.id, mesh: d.mesh, textures: d.textures, model: composeModelMatrix(t.position, t.rotation, t.scale) });
+      const placed = placement.get(d.id);
+      if (!placed) continue;
+      out.push({ id: d.id, mesh: d.mesh, textures: d.textures, model: placed.world });
     }
     return out;
-  }, [decoded, sidecar.meshes]);
+  }, [decoded, placement]);
 
   // Scene bounds (centre + radius) from the union of every instance's world AABB.
   const bounds = useMemo(() => {
@@ -240,10 +255,18 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
       const ndx = dx * factor;
       const ndy = -dy * factor;
       const pos = entry.transform.position;
+      const worldDelta: [number, number, number] = [
+        right[0] * ndx + up[0] * ndy,
+        right[1] * ndx + up[1] * ndy,
+        right[2] * ndx + up[2] * ndy,
+      ];
+      // A child's position is in its parent's space: move it by the same world amount.
+      const parentWorld = placement.get(entry.id)?.parentWorld;
+      const delta = parentWorld ? localDirection(parentWorld, worldDelta) : worldDelta;
       onSidecarChange(
         setMeshTransform(sidecar, entry.id, {
           ...entry.transform,
-          position: [pos[0] + right[0] * ndx + up[0] * ndy, pos[1] + right[1] * ndx + up[1] * ndy, pos[2] + right[2] * ndx + up[2] * ndy],
+          position: [pos[0] + delta[0], pos[1] + delta[1], pos[2] + delta[2]],
         }),
       );
     } else if (mode === "rotate") {

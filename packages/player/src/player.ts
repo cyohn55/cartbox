@@ -18,6 +18,7 @@ import { seedCartridge, prependLuaCode } from "./cartseed.js";
 import { STICK_OPTIN_MAGIC, STICK_OPTIN_WORD, STICK_WORD, packSticks } from "./sticks.js";
 import { DEFAULT_CONTROL_SETTINGS, applyLookSettings, type ControlSettings } from "./controls.js";
 import { injectSdk } from "./sdk.js";
+import { sceneObjectsSdkLua } from "./mesh/sceneObjectsSdk.js";
 import { collisionSdkLua } from "./collisionSdk.js";
 import { flagsSdkLua } from "./flagsSdk.js";
 import { animClipsSdkLua } from "./anim/animClipsSdk.js";
@@ -167,6 +168,9 @@ export class Player {
       // sprite ids by hand. Injected like collision/flags: after the base SDK.
       const animClipsLua = animClipsSdkLua(this.options.anim);
       if (animClipsLua) prepared = prependLuaCode(prepared, animClipsLua);
+      // The placed meshes as scene objects (cartbox.find / prop / tagged ...).
+      const sceneLua = sceneObjectsSdkLua(this.options.mesh);
+      if (sceneLua) prepared = prependLuaCode(prepared, sceneLua);
       const preparedBytes = injectSdk(prepared);
 
       this.console = createConsole(module, this.model, sampleRate);
