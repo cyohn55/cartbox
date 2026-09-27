@@ -73,6 +73,11 @@ export interface SceneBreakdown {
 export interface DownloadBudget {
   readonly items: readonly BudgetItem[];
   readonly total: number;
+  /**
+   * Bytes before the cart can start: everything but the 3D scene's textures,
+   * which a published cart streams in once it's running (see textureStream.ts).
+   */
+  readonly playable: number;
   readonly scene: SceneBreakdown | null;
   readonly loadSeconds: readonly { readonly name: string; readonly seconds: number }[];
   readonly rating: "light" | "medium" | "heavy";
@@ -216,9 +221,13 @@ export async function measureDownload(input: BudgetInput): Promise<DownloadBudge
   }
   if (physics.bodies && total > BUDGET_LIGHT_BYTES) tips.push("The physics engine alone is about 1.6 MB — it's only fetched because objects have bodies.");
   if (input.uploadedBytes > 2 * 1024 * 1024) tips.push("Uploaded files are large: compress audio and images before uploading.");
+  // The textures' share of the scene as sent, estimated from their share of it raw.
+  const sceneRaw = scene ? scene.geometry + scene.textures + scene.animation + scene.other : 0;
+  const streamed = sceneItem && scene && sceneRaw > 0 ? Math.round(sceneItem.bytes * (scene.textures / sceneRaw)) : 0;
   return {
     items,
     total,
+    playable: total - streamed,
     scene,
     loadSeconds: CONNECTIONS.map((c) => ({ name: c.name, seconds: loadSeconds(total, c, items.length) })),
     rating,

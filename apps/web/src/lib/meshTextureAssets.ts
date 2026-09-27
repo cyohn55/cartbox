@@ -80,27 +80,94 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-type Payload = { primitives?: { material?: { image?: unknown } }[] };
+/** The material fields that hold an image in a serialized mesh. */
+const IMAGE_FIELDS = ["image", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage"] as const;
+
+type Payload = { primitives?: { material?: Record<string, unknown> }[] };
+
+type SidecarRoot = {
+  meshes?: { mesh?: unknown; frames?: unknown }[];
+  library?: Record<string, unknown>;
+  prefabs?: { nodes?: { mesh?: unknown; frames?: unknown }[] }[];
+};
+
+/** One image in place: the object itself and where it sits, so it can be rewritten or dropped. */
+interface ImageSlot {
+  readonly image: Record<string, unknown>;
+  readonly material: Record<string, unknown>;
+  readonly field: (typeof IMAGE_FIELDS)[number];
+}
+
+/** A parsed payload's images, and a way to serialize the payload back once they're rewritten. */
+interface Walked {
+  readonly images: ImageSlot[];
+  serialize(): string;
+}
+
+function imagesOfMesh(payload: Payload, into: ImageSlot[]): void {
+  for (const primitive of payload.primitives ?? []) {
+    const material = primitive?.material;
+    if (!material || typeof material !== "object") continue;
+    for (const field of IMAGE_FIELDS) {
+      const image = material[field];
+      if (image && typeof image === "object") into.push({ image: image as Record<string, unknown>, material, field });
+    }
+  }
+}
 
 /**
- * Walk a serialized mesh's images. Returns the parsed payload and the image
- * objects in place, so a caller can rewrite them without re-walking.
+ * Walk a payload's images: either one serialized mesh, or a whole mesh sidecar
+ * (`{version, meshes, library?, prefabs?}`), whose meshes are serialized strings
+ * inside it — in `meshes[].mesh`/`frames`, the shared `library`, and prefab
+ * nodes (`@lib:` references are skipped; the library holds the mesh itself).
  */
-function imagesIn(encoded: string): { payload: Payload; images: Record<string, unknown>[] } | null {
-  let payload: Payload;
+function imagesIn(encoded: string): Walked | null {
+  let parsed: unknown;
   try {
-    payload = JSON.parse(encoded) as Payload;
+    parsed = JSON.parse(encoded);
   } catch {
     return null;
   }
-  if (!payload || !Array.isArray(payload.primitives)) return null;
-
-  const images: Record<string, unknown>[] = [];
-  for (const primitive of payload.primitives) {
-    const image = primitive?.material?.image;
-    if (image && typeof image === "object") images.push(image as Record<string, unknown>);
+  if (!parsed || typeof parsed !== "object") return null;
+  const images: ImageSlot[] = [];
+  if (Array.isArray((parsed as Payload).primitives)) {
+    const payload = parsed as Payload;
+    imagesOfMesh(payload, images);
+    return { images, serialize: () => JSON.stringify(payload) };
   }
-  return { payload, images };
+  const root = parsed as SidecarRoot;
+  if (!Array.isArray(root.meshes)) return null;
+  // Each mesh string is parsed once; `serialize` writes every one back.
+  const meshes: { payload: Payload; write: (value: string) => void }[] = [];
+  const visit = (value: unknown, write: (value: string) => void) => {
+    if (typeof value !== "string" || value.startsWith("@lib:")) return;
+    try {
+      const payload = JSON.parse(value) as Payload;
+      if (!payload || !Array.isArray(payload.primitives)) return;
+      imagesOfMesh(payload, images);
+      meshes.push({ payload, write });
+    } catch {
+      // An unreadable mesh is left exactly as it is.
+    }
+  };
+  const holder = (h: { mesh?: unknown; frames?: unknown }) => {
+    visit(h.mesh, (v) => (h.mesh = v));
+    if (Array.isArray(h.frames)) {
+      const frames = h.frames as unknown[];
+      frames.forEach((f, i) => visit(f, (v) => (frames[i] = v)));
+    }
+  };
+  for (const entry of root.meshes) holder(entry);
+  const library = root.library;
+  if (library && typeof library === "object") for (const key of Object.keys(library)) visit(library[key], (v) => (library[key] = v));
+  for (const prefab of root.prefabs ?? []) for (const node of prefab.nodes ?? []) holder(node);
+  return {
+    images,
+    serialize: () => {
+      for (const mesh of meshes) mesh.write(JSON.stringify(mesh.payload));
+      return JSON.stringify(root);
+    },
+  };
 }
 
 /**
@@ -121,7 +188,7 @@ export async function extractMeshTextures(
   const seen = new Set<string>();
   let changed = false;
 
-  for (const image of walked.images) {
+  for (const { image } of walked.images) {
     if (typeof image.bytes !== "string" || typeof image.mime !== "string") continue;
     let bytes: Uint8Array;
     try {
@@ -141,7 +208,7 @@ export async function extractMeshTextures(
     changed = true;
   }
 
-  return { encoded: changed ? JSON.stringify(walked.payload) : encoded, textures };
+  return { encoded: changed ? walked.serialize() : encoded, textures };
 }
 
 /**
@@ -162,7 +229,8 @@ export async function inlineMeshTextures(
   let changed = false;
   const cache = new Map<string, Uint8Array | null>();
 
-  for (const image of walked.images) {
+  for (const slot of walked.images) {
+    const image = slot.image;
     const reference = image.asset;
     if (typeof reference !== "string") continue;
 
@@ -190,11 +258,10 @@ export async function inlineMeshTextures(
 
   // A material whose image lost both fields becomes null, which is the shape
   // the deserializer expects for "no texture".
-  for (const primitive of walked.payload.primitives ?? []) {
-    const image = primitive?.material?.image as Record<string, unknown> | undefined;
-    if (image && image.bytes === undefined) primitive.material!.image = null;
+  for (const { image, material, field } of walked.images) {
+    if (image.bytes === undefined) material[field] = null;
   }
-  return JSON.stringify(walked.payload);
+  return walked.serialize();
 }
 
 /** Record offloaded textures in a cart's manifest, so nothing sweeps them away. */
@@ -215,4 +282,19 @@ export function manifestUpdate(
 ): string | null {
   const next = withMeshTextures(assets, textures);
   return next === assets ? null : serializeCartAssets(next);
+}
+
+/**
+ * The distinct asset-backed textures a stored payload references (a mesh or a
+ * whole sidecar), in first-seen order: what a player streams after the cart
+ * starts (see textureStream.ts).
+ */
+export function meshTextureRefs(encoded: string | null): { hash: string; mime: string }[] {
+  const walked = encoded ? imagesIn(encoded) : null;
+  if (!walked) return [];
+  const seen = new Map<string, string>();
+  for (const { image } of walked.images) {
+    if (typeof image.asset === "string" && !seen.has(image.asset)) seen.set(image.asset, typeof image.mime === "string" ? image.mime : "image/png");
+  }
+  return [...seen].map(([hash, mime]) => ({ hash, mime }));
 }

@@ -7172,6 +7172,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.lastPlacement = null;
     /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
     this.hudFrame = null;
+    /** Decodes a KTX2 texture (loading the decoder on first use); set by create. */
+    this.decodeKtx2 = async () => null;
     this.output = new Uint8ClampedArray(width * height * 4);
     this.presented = new Uint8Array(this.output.buffer);
     this.depth = new Float32Array(width * height);
@@ -7268,7 +7270,49 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     }
     const surface = new _MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
     for (const [i, mesh] of live) surface.live.set(i, mesh);
+    surface.decodeKtx2 = decodeKtx2;
     return surface;
+  }
+  /**
+   * Swap streamed textures in (see sceneStreaming.ts in @cartbox/editor): every
+   * texture placeholder whose `ref` is in `images` is decoded and takes the
+   * place of the flat colour it stood in for, from the next frame. Returns how
+   * many objects changed.
+   */
+  async supplyImages(images) {
+    const resolved = /* @__PURE__ */ new Map();
+    const resolve = (mesh) => {
+      let hit = resolved.get(mesh);
+      if (!hit) {
+        hit = fillPlaceholders(mesh, images);
+        resolved.set(mesh, hit);
+      }
+      return hit;
+    };
+    const decoded = /* @__PURE__ */ new Map();
+    const texture = (mesh) => {
+      let entry = decoded.get(mesh);
+      if (!entry) {
+        entry = decodeMeshTextures(mesh, this.decodeKtx2);
+        decoded.set(mesh, entry);
+      }
+      return entry;
+    };
+    let changed = 0;
+    for (const [i, instance] of this.scene.instances.entries()) {
+      const mesh = resolve(instance.mesh);
+      const frames = instance.frames?.map(resolve);
+      const framesChanged = frames?.some((f, k) => f !== instance.frames[k]) ?? false;
+      if (mesh === instance.mesh && !framesChanged) continue;
+      if (mesh !== instance.mesh) {
+        const { mesh: _decodedMesh, ...maps } = await texture(mesh);
+        void _decodedMesh;
+        this.instances[i] = { ...this.instances[i], ...maps };
+      }
+      if (frames && framesChanged) this.frames[i] = await Promise.all(frames.map(texture));
+      changed += 1;
+    }
+    return changed;
   }
   /**
    * Set the cart-driven camera for the next frame(s), or null to auto-orbit. The
@@ -7681,11 +7725,28 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.inner.destroy();
   }
 };
+function fillPlaceholders(mesh, images) {
+  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage"];
+  let touched = false;
+  const primitives = mesh.primitives.map((primitive) => {
+    let material = primitive.material;
+    for (const slot of slots) {
+      const image = material[slot];
+      const supplied = image?.ref ? images.get(image.ref) : void 0;
+      if (supplied) {
+        material = { ...material, [slot]: supplied };
+        touched = true;
+      }
+    }
+    return material === primitive.material ? primitive : { ...primitive, material };
+  });
+  return touched ? { ...mesh, primitives } : mesh;
+}
 async function decodeMeshTextures(mesh, decodeKtx2) {
   const each = (pick) => Promise.all(
     mesh.primitives.map((primitive) => {
       const image = pick(primitive.material);
-      if (!image) return Promise.resolve(null);
+      if (!image || image.bytes.length === 0) return Promise.resolve(null);
       return image.mime === "image/ktx2" ? decodeKtx2(image.bytes) : decodeTexture(image.mime, image.bytes);
     })
   );
@@ -10395,6 +10456,16 @@ var Player = class {
     this.meshSurface?.setQuality(this.qualitySettings);
     if (this.postFxSurface && this.basePostFx) this.postFxSurface.setSettings(applyQualityToPostFx(this.basePostFx, this.qualitySettings));
   }
+  /**
+   * Hand the running scene streamed textures, by the `ref` of the placeholder
+   * each fills (for asset-backed textures, the asset's content hash): they
+   * replace the flat colours their placeholders drew. Resolves with how many
+   * objects changed (0 before the scene is up, or for no matching placeholder).
+   */
+  async supplyTextures(images) {
+    if (!this.meshSurface) return 0;
+    return this.meshSurface.supplyImages(images);
+  }
   /** The graphics preset in effect. */
   quality() {
     return this.qualitySettings.level;
@@ -11272,6 +11343,7 @@ function mount(container, options) {
     setInputEnabled: (enabled) => player.setInputEnabled(enabled),
     inspect: () => player.inspect(),
     setQuality: (choice) => player.setQuality(choice),
+    supplyTextures: (textures) => player.supplyTextures(textures),
     quality: () => player.quality()
   };
 }

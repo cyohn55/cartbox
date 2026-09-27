@@ -40,7 +40,7 @@ import { WorldOverlaySurface } from "./world/WorldOverlaySurface.js";
 import { createSceneRenderer } from "./render/createSceneRenderer.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
-import { type DecodedTexture, type Mat4 } from "@cartbox/editor";
+import { type DecodedTexture, type EncodedImage, type Mat4 } from "@cartbox/editor";
 import type { ControlScheme, InspectedObject, PlayerOptions } from "./types.js";
 
 /**
@@ -510,6 +510,17 @@ export class Player {
     this.qualitySettings = resolveQuality(choice, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend !== "software" : undefined));
     this.meshSurface?.setQuality(this.qualitySettings);
     if (this.postFxSurface && this.basePostFx) this.postFxSurface.setSettings(applyQualityToPostFx(this.basePostFx, this.qualitySettings));
+  }
+
+  /**
+   * Hand the running scene streamed textures, by the `ref` of the placeholder
+   * each fills (for asset-backed textures, the asset's content hash): they
+   * replace the flat colours their placeholders drew. Resolves with how many
+   * objects changed (0 before the scene is up, or for no matching placeholder).
+   */
+  async supplyTextures(images: ReadonlyMap<string, EncodedImage>): Promise<number> {
+    if (!this.meshSurface) return 0;
+    return this.meshSurface.supplyImages(images);
   }
 
   /** The graphics preset in effect. */
