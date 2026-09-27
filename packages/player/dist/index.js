@@ -3865,6 +3865,7 @@ cartbox = {
   inside = function() return {} end,
   motor = function() end,
   unjoin = function() end,
+  physicshash = function() return 0 end,
   -- Spawning prefab copies: overridden when the cart has prefabs.
   spawn = function() return nil end,
   despawn = function() end,
@@ -3969,6 +3970,7 @@ var PHYS_FIX = 1024;
 var PHYS_HDR_MAGIC = 0;
 var PHYS_HDR_BODIES = 4;
 var PHYS_HDR_TICK = 8;
+var PHYS_HDR_HASH = 12;
 var PHYS_BODIES = 64;
 var PHYS_BODY_BYTES = 32;
 var PHYS_MAX_BODIES = 64;
@@ -4010,7 +4012,8 @@ var toFix = (v) => {
   return Math.max(-2147483647, Math.min(2147483647, Number.isFinite(n) ? n : 0));
 };
 var fromFix = (n) => n / PHYS_FIX;
-function writePhysicsState(block, tick, bodies, rays, events = [], overlaps = []) {
+function writePhysicsState(block, tick, bodies, rays, events = [], overlaps = [], hash = 0) {
+  block.setInt32(PHYS_HDR_HASH, hash | 0, true);
   const ne = Math.min(events.length, PHYS_MAX_EVENTS);
   block.setInt32(PHYS_EVENTS, ne, true);
   for (let i = 0; i < ne; i += 1) {
@@ -4066,6 +4069,110 @@ function takePhysicsCommands(block) {
 
 // src/physics/physicsSession.ts
 import { DEFAULT_SPRING_DAMPING, DEFAULT_SPRING_STIFFNESS, meshBounds } from "@cartbox/editor";
+
+// src/physics/deterministic.ts
+var GRID = 65536;
+var FINE = 1048576;
+var snap = (v) => Number.isFinite(v) ? Math.round(v * GRID) / GRID : 0;
+var fine = (v) => Number.isFinite(v) ? Math.round(v * FINE) / FINE : 0;
+var snap3 = (v) => [snap(v[0]), snap(v[1]), snap(v[2])];
+var fine3 = (v) => [fine(v[0]), fine(v[1]), fine(v[2])];
+var fineQ = (q) => [fine(q[0]), fine(q[1]), fine(q[2]), fine(q[3])];
+function snapShape(shape) {
+  switch (shape.kind) {
+    case "box":
+      return { kind: "box", halfExtents: snap3(shape.halfExtents), offset: snap3(shape.offset) };
+    case "sphere":
+      return { kind: "sphere", radius: snap(shape.radius), offset: snap3(shape.offset) };
+    case "capsule":
+      return { kind: "capsule", radius: snap(shape.radius), halfHeight: snap(shape.halfHeight), offset: snap3(shape.offset) };
+    case "mesh":
+      return { kind: "mesh", vertices: shape.vertices.map(snap), indices: shape.indices };
+  }
+}
+function snapCastShape(shape) {
+  switch (shape.kind) {
+    case "sphere":
+      return { kind: "sphere", radius: snap(shape.radius) };
+    case "box":
+      return { kind: "box", halfExtents: snap3(shape.halfExtents) };
+    case "capsule":
+      return { kind: "capsule", radius: snap(shape.radius), halfHeight: snap(shape.halfHeight) };
+  }
+}
+function deterministicBackend(inner) {
+  const out = {
+    addBody: (desc) => inner.addBody({
+      ...desc,
+      shape: snapShape(desc.shape),
+      position: snap3(desc.position),
+      rotation: fineQ(desc.rotation),
+      mass: snap(desc.mass),
+      friction: snap(desc.friction),
+      bounce: snap(desc.bounce),
+      ...desc.gravity !== void 0 ? { gravity: snap(desc.gravity) } : {},
+      ...desc.damping !== void 0 ? { damping: snap(desc.damping) } : {}
+    }),
+    step: (dt) => inner.step(dt),
+    bodyState: (handle) => inner.bodyState(handle),
+    applyImpulse: (handle, v) => inner.applyImpulse(handle, snap3(v)),
+    setVelocity: (handle, v) => inner.setVelocity(handle, snap3(v)),
+    teleport: (handle, p) => inner.teleport(handle, snap3(p)),
+    moveCharacter: (handle, d) => inner.moveCharacter(handle, snap3(d)),
+    raycast: (origin, direction, max, ignore) => inner.raycast(snap3(origin), fine3(direction), snap(max), ignore),
+    setEnabled: (handle, enabled) => inner.setEnabled(handle, enabled),
+    setPose: (handle, p, q) => inner.setPose(handle, snap3(p), fineQ(q)),
+    drainContacts: () => inner.drainContacts(),
+    overlaps: () => inner.overlaps(),
+    destroy: () => inner.destroy()
+  };
+  if (inner.shapecast) {
+    const cast = inner.shapecast.bind(inner);
+    out.shapecast = (shape, origin, direction, max, ignore) => cast(snapCastShape(shape), snap3(origin), fine3(direction), snap(max), ignore);
+  }
+  if (inner.addJoint) {
+    const add = inner.addJoint.bind(inner);
+    out.addJoint = (desc) => add({
+      ...desc,
+      anchor1: snap3(desc.anchor1),
+      frame1: fineQ(desc.frame1),
+      anchor2: snap3(desc.anchor2),
+      frame2: fineQ(desc.frame2),
+      ...desc.limits ? { limits: [fine(desc.limits[0]), fine(desc.limits[1])] } : {},
+      length: snap(desc.length),
+      stiffness: snap(desc.stiffness),
+      damping: snap(desc.damping)
+    });
+  }
+  if (inner.removeJoint) out.removeJoint = inner.removeJoint.bind(inner);
+  if (inner.setMotor) {
+    const motor = inner.setMotor.bind(inner);
+    out.setMotor = (joint, speed, force) => motor(joint, snap(speed), snap(force));
+  }
+  return out;
+}
+var f32 = new Float32Array(1);
+var u32 = new Uint32Array(f32.buffer);
+function physicsStateHash(states) {
+  let h = 2166136261;
+  const mix = (v) => {
+    f32[0] = v;
+    let w = u32[0];
+    for (let k = 0; k < 4; k += 1) {
+      h ^= w & 255;
+      h = Math.imul(h, 16777619);
+      w >>>= 8;
+    }
+  };
+  for (const s of states) {
+    for (const v of s.position) mix(v);
+    for (const v of s.rotation) mix(v);
+    for (const v of s.velocity) mix(v);
+  }
+  return h | 0;
+}
+
+// src/physics/physicsSession.ts
 var PHYSICS_DT = 1 / 60;
 function splitWorldMatrix(m) {
   const sx = Math.hypot(m[0], m[1], m[2]) || 1;
@@ -4217,8 +4324,7 @@ function sceneHasPhysics(scene) {
   return Boolean(scene?.instances.some((inst) => inst.physics));
 }
 var PhysicsSession = class {
-  constructor(scene, backend) {
-    this.backend = backend;
+  constructor(scene, backend, { deterministic } = {}) {
     this.tracked = [];
     this.byObject = /* @__PURE__ */ new Map();
     /** Bodies of reserve prefab copies (static ones too), by object index. */
@@ -4232,13 +4338,16 @@ var PhysicsSession = class {
     this.events = [];
     this.overlapPairs = [];
     this.tick = 0;
+    this.stateHash = 0;
+    this.deterministic = deterministic ?? scene.physicsWorld?.deterministic === true;
+    this.backend = this.deterministic ? deterministicBackend(backend) : backend;
     const slots = new Set(physicsSlots(scene));
     scene.instances.forEach((inst, i) => {
       const spec = inst.physics;
       if (!spec || spec.body !== "static" && !slots.has(i)) return;
       const pooled = Boolean(inst.pooled);
       const { position, rotation, scale } = splitWorldMatrix(inst.model);
-      const handle = backend.addBody({
+      const handle = this.backend.addBody({
         kind: spec.body,
         shape: fitShape(spec, inst.mesh, scale),
         position,
@@ -4253,7 +4362,7 @@ var PhysicsSession = class {
       });
       this.handleOf.set(i, handle);
       if (pooled) {
-        backend.setEnabled(handle, false);
+        this.backend.setEnabled(handle, false);
         this.pooledBodies.set(i, { handle, enabled: false });
       }
       if (spec.body === "static") return;
@@ -4304,7 +4413,7 @@ var PhysicsSession = class {
       const velocity = t.kind === "character" ? t.lastMove.map((v) => v / PHYSICS_DT) : s.velocity;
       return { object: t.object, position: s.position, velocity, grounded: t.grounded, sleeping: s.sleeping };
     });
-    writePhysicsState(block, this.tick, bodies, this.rayResults, this.events, this.overlapPairs);
+    writePhysicsState(block, this.tick, bodies, this.rayResults, this.events, this.overlapPairs, this.stateHash);
   }
   /** Apply the cart's commands, step the world, and cast the rays it asked for. */
   afterTick(block) {
@@ -4392,6 +4501,7 @@ var PhysicsSession = class {
     this.events = this.backend.drainContacts();
     this.overlapPairs = this.backend.overlaps();
     this.tick += 1;
+    this.stateHash = this.hash();
     this.rayResults = [];
     for (let slot = 0; slot < PHYS_MAX_RAYS; slot += 1) {
       const req = this.rayRequests[slot];
@@ -4399,6 +4509,16 @@ var PhysicsSession = class {
       else if (req.shape) this.rayResults[slot] = this.backend.shapecast?.(req.shape, req.origin, req.direction, req.max, req.ignore) ?? null;
       else this.rayResults[slot] = this.backend.raycast(req.origin, req.direction, req.max, req.ignore);
     }
+  }
+  /**
+   * A digest of every moving body's exact state (reserve copies count as absent),
+   * equal on two machines exactly when their worlds match — in deterministic mode,
+   * across browsers too.
+   */
+  hash() {
+    return physicsStateHash(
+      this.tracked.map((t) => t.enabled ? this.backend.bodyState(t.handle) : { position: [0, 0, 0], rotation: [0, 0, 0, 0], velocity: [0, 0, 0] })
+    );
   }
   /** Last step's contact events and current trigger overlaps (live inspection, tests). */
   contacts() {
@@ -4479,6 +4599,10 @@ ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}end`;
 }
 function PHYSICS_CALLS() {
   return `  cartbox.physics = function() return _live() end
+  cartbox.physicshash = function()
+    if not _live() then return 0 end
+    return _rd(_B + ${PHYS_HDR_HASH})
+  end
   cartbox.body = function(o)
     local i = _obj(o)
     local s = i and _slot[i]
@@ -5858,6 +5982,7 @@ import {
   projectionMatrix,
   readMeshLibrary,
   readPhysicsSpec,
+  readPhysicsWorld,
   readSceneProps,
   readSceneTags,
   worldMatrices,
@@ -6009,7 +6134,14 @@ function parseMeshScene(raw) {
   const lighting = parseSceneLighting(parsed.lighting);
   const pools = [...poolRoots.entries()].map(([prefab, ids]) => ({ prefab, roots: ids.map((id) => indexOf.get(id)) }));
   const placed = instances.filter((instance) => !instance.pooled);
-  return { instances, bounds: sceneBounds(placed.length > 0 ? placed : instances), lighting, ...pools.length > 0 ? { pools } : {} };
+  const physicsWorld = readPhysicsWorld(parsed.physicsWorld);
+  return {
+    instances,
+    bounds: sceneBounds(placed.length > 0 ? placed : instances),
+    lighting,
+    ...pools.length > 0 ? { pools } : {},
+    ...physicsWorld ? { physicsWorld } : {}
+  };
 }
 function buildOrbitCamera(bounds, yaw, pitch, aspect, options = {}) {
   const { radius } = bounds;
@@ -8273,12 +8405,13 @@ var Player = class {
         prepared = prependLuaCode(prepared, runtimeLua);
         let physics = null;
         if (sceneHasPhysics(mesh) && this.options.physics) {
-          const backend = await this.options.physics();
+          const deterministic = mesh.physicsWorld?.deterministic === true;
+          const backend = await this.options.physics({ deterministic });
           if (this.destroyed) {
             backend.destroy();
             return;
           }
-          physics = new PhysicsSession(mesh, backend);
+          physics = new PhysicsSession(mesh, backend, { deterministic });
         }
         this.runtime = {
           channel: new RuntimeChannel(mesh, physics),
@@ -9465,6 +9598,7 @@ export {
   decodeMeshPoses,
   decodeWorldLights,
   defaultPostFxSettings,
+  deterministicBackend,
   drift,
   emitterPreset,
   evaluate,
@@ -9508,6 +9642,7 @@ export {
   physicsBlockAddress,
   physicsSdkLua,
   physicsSlots,
+  physicsStateHash,
   prehazeLayers,
   pulse,
   pyramidLevelCount,

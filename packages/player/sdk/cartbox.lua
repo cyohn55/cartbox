@@ -278,6 +278,7 @@ cartbox = {
   --   cartbox.inside(trigger)          -> objects in it now
   --   cartbox.motor(obj, speed, force) drive a hinge joint (rad/s; no speed = off)
   --   cartbox.unjoin(obj)              break an object's joint
+  --   cartbox.physicshash()            -> a digest of the bodies' exact state (desync checks)
   -- Prefabs. Each prefab keeps copies in reserve (set how many in the editor):
   --   cartbox.spawn(prefab, x, y, z, yaw, pitch, roll) -> the copy's root object, or nil
   --   cartbox.despawn(obj)             put a spawned copy back in reserve
@@ -299,6 +300,7 @@ cartbox = {
   inside = function() return {} end,
   motor = function() end,
   unjoin = function() end,
+  physicshash = function() return 0 end,
   -- Spawning prefab copies: overridden when the cart has prefabs.
   spawn = function() return nil end,
   despawn = function() end,

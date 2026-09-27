@@ -331,6 +331,12 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
         snippet: 'cartbox.unjoin("lamp")',
       },
       {
+        name: "cartbox.physicshash",
+        signature: "cartbox.physicshash() -> n",
+        doc: "A 32-bit digest of every moving body's exact state after the last step. With Deterministic physics on (Mesh tab, Physics world) it matches on every machine running the same inputs — publish it over netplay to catch a desync.",
+        snippet: "local h = cartbox.physicshash()",
+      },
+      {
         name: "cartbox.physics",
         signature: "cartbox.physics() -> bool",
         doc: "Whether the cart's physics is running (false in carts without bodies).",

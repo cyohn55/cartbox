@@ -441,12 +441,14 @@ export {
   PHYSICS_SHAPE_KINDS,
   readJointSpec,
   readPhysicsSpec,
+  readPhysicsWorld,
   type JointAxis,
   type JointKind,
   type JointSpec,
   type PhysicsBodyKind,
   type PhysicsShapeKind,
   type PhysicsSpec,
+  type PhysicsWorldSettings,
 } from "./model/physicsSpec";
 export {
   paintIndexedTexture,

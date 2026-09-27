@@ -20,6 +20,8 @@
  *   cartbox.inside(trigger)           -> objects in it now
  *   cartbox.motor(obj, speed, force)  drive a hinge joint (rad/s, max force; no speed = off)
  *   cartbox.unjoin(obj)               break an object's joint (it's remade if the copy respawns)
+ *   cartbox.physicshash()             -> a digest of every moving body's exact state (compare
+ *                                     across players to catch a desync; see deterministic mode)
  *
  * Spawning prefab copies (when the cart has prefabs) rides the same block:
  *
@@ -44,6 +46,7 @@ import {
   PHYS_EVENT_BYTES,
   PHYS_EVENTS,
   PHYS_FIX,
+  PHYS_HDR_HASH,
   PHYS_MAGIC,
   PHYS_MAX_CMDS,
   PHYS_MAX_RAYS,
@@ -132,6 +135,10 @@ ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}end`;
 /** The physics calls (inside the runtime block's do … end, after its helpers). */
 function PHYSICS_CALLS(): string {
   return `  cartbox.physics = function() return _live() end
+  cartbox.physicshash = function()
+    if not _live() then return 0 end
+    return _rd(_B + ${PHYS_HDR_HASH})
+  end
   cartbox.body = function(o)
     local i = _obj(o)
     local s = i and _slot[i]

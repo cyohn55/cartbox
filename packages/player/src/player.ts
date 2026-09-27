@@ -190,12 +190,13 @@ export class Player {
         prepared = prependLuaCode(prepared, runtimeLua);
         let physics: PhysicsSession | null = null;
         if (sceneHasPhysics(mesh) && this.options.physics) {
-          const backend = await this.options.physics();
+          const deterministic = mesh.physicsWorld?.deterministic === true;
+          const backend = await this.options.physics({ deterministic });
           if (this.destroyed) {
             backend.destroy();
             return;
           }
-          physics = new PhysicsSession(mesh, backend);
+          physics = new PhysicsSession(mesh, backend, { deterministic });
         }
         this.runtime = {
           channel: new RuntimeChannel(mesh, physics),

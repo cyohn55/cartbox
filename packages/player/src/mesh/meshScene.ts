@@ -20,6 +20,7 @@ import {
   projectionMatrix,
   readMeshLibrary,
   readPhysicsSpec,
+  readPhysicsWorld,
   readSceneProps,
   readSceneTags,
   worldMatrices,
@@ -30,6 +31,7 @@ import {
   type MeshAsset,
   type MeshSceneInstance,
   type PhysicsSpec,
+  type PhysicsWorldSettings,
   type SceneLighting,
   type ScenePropValue,
 } from "@cartbox/editor";
@@ -91,6 +93,8 @@ export interface MeshScene {
   readonly bounds: SceneBounds;
   /** The authored Modern-tier lighting rig, or null when the cart set none. */
   readonly lighting: SceneLighting | null;
+  /** Scene-wide physics settings (absent = the defaults). */
+  readonly physicsWorld?: PhysicsWorldSettings;
 }
 
 /** A view + projection pair ready to hand to `renderMeshScene`. */
@@ -276,7 +280,14 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
   const pools: PrefabPool[] = [...poolRoots.entries()].map(([prefab, ids]) => ({ prefab, roots: ids.map((id) => indexOf.get(id)!) }));
   // Reserve copies sit hidden at the origin: they don't count toward the framing bounds.
   const placed = instances.filter((instance) => !instance.pooled);
-  return { instances, bounds: sceneBounds(placed.length > 0 ? placed : instances), lighting, ...(pools.length > 0 ? { pools } : {}) };
+  const physicsWorld = readPhysicsWorld((parsed as { physicsWorld?: unknown }).physicsWorld);
+  return {
+    instances,
+    bounds: sceneBounds(placed.length > 0 ? placed : instances),
+    lighting,
+    ...(pools.length > 0 ? { pools } : {}),
+    ...(physicsWorld ? { physicsWorld } : {}),
+  };
 }
 
 /** Optional overrides a cart supplies via `cartbox.meshcam(...)` (see the mailbox). */

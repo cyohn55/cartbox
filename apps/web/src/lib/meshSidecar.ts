@@ -28,6 +28,7 @@ import {
   parseSceneLighting,
   readMeshLibrary,
   readPhysicsSpec,
+  readPhysicsWorld,
   readSceneProps,
   readSceneTags,
   SCENE_PROP_MAX,
@@ -39,6 +40,7 @@ import {
   worldMatrices,
   type MeshAsset,
   type PhysicsSpec,
+  type PhysicsWorldSettings,
   type SceneLighting,
   type ScenePropValue,
 } from "@cartbox/editor";
@@ -127,6 +129,8 @@ export interface MeshSidecar {
   readonly lighting: SceneLighting | null;
   /** Reusable object groups the creator saved (absent or empty when there are none). */
   readonly prefabs?: readonly MeshPrefab[];
+  /** Scene-wide physics settings (absent = the defaults). */
+  readonly physicsWorld?: PhysicsWorldSettings;
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -169,6 +173,7 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(Object.keys(library).length > 0 ? { library } : {}),
     lighting: sidecar.lighting ?? null,
     ...(packedPrefabs.length > 0 ? { prefabs: packedPrefabs } : {}),
+    ...(sidecar.physicsWorld?.deterministic ? { physicsWorld: sidecar.physicsWorld } : {}),
   });
 }
 
@@ -248,7 +253,14 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
   const linked = meshes.map((entry) =>
     entry.prefab && !known.get(entry.prefab.id)?.has(entry.prefab.node) ? withoutLink(entry) : entry,
   );
-  return { version: MESH_SIDECAR_VERSION, meshes: linked, lighting, ...(prefabs.length > 0 ? { prefabs } : {}) };
+  const physicsWorld = readPhysicsWorld((parsed as { physicsWorld?: unknown }).physicsWorld);
+  return {
+    version: MESH_SIDECAR_VERSION,
+    meshes: linked,
+    lighting,
+    ...(prefabs.length > 0 ? { prefabs } : {}),
+    ...(physicsWorld ? { physicsWorld } : {}),
+  };
 }
 
 function withoutLink(entry: MeshSidecarEntry): MeshSidecarEntry {
@@ -322,6 +334,13 @@ export function setMeshTransform(sidecar: MeshSidecar, id: string, transform: Me
     version: MESH_SIDECAR_VERSION,
     meshes: sidecar.meshes.map((entry) => (entry.id === id ? { ...entry, transform } : entry)),
   };
+}
+
+/** Set the scene-wide physics settings (null restores the defaults). */
+export function setMeshPhysicsWorld(sidecar: MeshSidecar, world: PhysicsWorldSettings | null): MeshSidecar {
+  const { physicsWorld: _drop, ...rest } = sidecar;
+  const next = world ? readPhysicsWorld(world) : null;
+  return next ? { ...rest, physicsWorld: next } : rest;
 }
 
 /** Replace the scene's lighting rig (null clears it). */

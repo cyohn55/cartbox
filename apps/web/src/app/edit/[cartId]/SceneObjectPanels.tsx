@@ -34,6 +34,7 @@ import {
   parentCandidates,
   setMeshParent,
   setMeshPhysics,
+  setMeshPhysicsWorld,
   setMeshProp,
   setMeshTags,
   type MeshSidecar,
@@ -590,6 +591,35 @@ function JointEditor({
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * Scene-wide physics settings, shown once any object (or prefab node) has a body:
+ * for now, deterministic physics for replays and shared online simulations.
+ */
+export function PhysicsWorldPanel({ sidecar, onChange }: { sidecar: MeshSidecar; onChange: (next: MeshSidecar) => void }) {
+  const hasBodies =
+    sidecar.meshes.some((m) => m.physics) || (sidecar.prefabs ?? []).some((p) => p.nodes.some((n) => n.physics));
+  if (!hasBodies && !sidecar.physicsWorld) return null;
+  const deterministic = sidecar.physicsWorld?.deterministic === true;
+  return (
+    <RailGroup label="Physics world">
+      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+        <input
+          type="checkbox"
+          aria-label="Deterministic physics"
+          checked={deterministic}
+          onChange={(event) => onChange(setMeshPhysicsWorld(sidecar, event.target.checked ? { deterministic: true } : null))}
+        />
+        Deterministic — the same result in every browser
+      </label>
+      <RailHint>
+        {deterministic
+          ? "Same scene + same inputs = the same simulation everywhere, for replays and for online games that each simulate shared objects. A little slower. cartbox.physicshash() lets players compare states."
+          : "Turn on for replays or online games where every player simulates the same objects."}
+      </RailHint>
+    </RailGroup>
   );
 }
 

@@ -49,7 +49,7 @@ import { LibraryBrowser } from "./LibraryBrowser";
 import { MaterialEditor } from "./MaterialEditor";
 import { LightingEditor } from "./LightingEditor";
 import { SceneViewport } from "./SceneViewport";
-import { CodeHint, HierarchyPanel, ParentPicker, PhysicsPanel, PrefabLibrary, PrefabPanel, PropertyEditor, TagEditor } from "./SceneObjectPanels";
+import { CodeHint, HierarchyPanel, ParentPicker, PhysicsPanel, PhysicsWorldPanel, PrefabLibrary, PrefabPanel, PropertyEditor, TagEditor } from "./SceneObjectPanels";
 
 const VIEWPORT = 512; // preview canvas edge in device pixels
 const ORBIT_SPEED = 0.01; // radians per pixel dragged
@@ -428,6 +428,7 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
         {/* Scene-wide lighting: authored once for the whole 3D scene, so it lives
             outside the per-mesh selection. */}
         <LightingEditor lighting={sidecar.lighting} onChange={(lighting) => onSidecarChange(setMeshLighting(sidecar, lighting))} />
+        <PhysicsWorldPanel sidecar={sidecar} onChange={onSidecarChange} />
       </aside>
 
       <LibraryBrowser
