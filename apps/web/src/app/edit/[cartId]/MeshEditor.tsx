@@ -49,7 +49,7 @@ import { LibraryBrowser } from "./LibraryBrowser";
 import { MaterialEditor } from "./MaterialEditor";
 import { LightingEditor } from "./LightingEditor";
 import { SceneViewport } from "./SceneViewport";
-import { CodeHint, HierarchyPanel, ParentPicker, PropertyEditor, TagEditor } from "./SceneObjectPanels";
+import { CodeHint, HierarchyPanel, ParentPicker, PrefabLibrary, PrefabPanel, PropertyEditor, TagEditor } from "./SceneObjectPanels";
 
 const VIEWPORT = 512; // preview canvas edge in device pixels
 const ORBIT_SPEED = 0.01; // radians per pixel dragged
@@ -306,6 +306,8 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
         </RailGroup>
 
         <HierarchyPanel sidecar={sidecar} selectedId={selectedId} onSelect={setSelectedId} />
+
+        <PrefabLibrary sidecar={sidecar} onChange={onSidecarChange} onPlaced={setSelectedId} />
       </aside>
 
       {/* Centre: preview — the selected mesh alone, or the whole composed scene */}
@@ -376,6 +378,8 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
             <TagEditor sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
 
             <PropertyEditor sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
+
+            <PrefabPanel sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
 
             <CodeHint entry={selectedEntry} />
 

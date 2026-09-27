@@ -419,6 +419,8 @@ export {
   SCENE_STRING_MAX,
   SCENE_TAG_MAX,
   childIndices,
+  decomposeModelMatrix,
+  invertAffine,
   isAncestor,
   isSceneKey,
   localDirection,

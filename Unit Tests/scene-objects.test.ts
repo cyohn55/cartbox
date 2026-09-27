@@ -80,8 +80,9 @@ function scene(): { sidecar: MeshSidecar; ids: Record<string, string> } {
   move(ids.turret!, [0, 5, 0]);
   move(ids.lamp!, [0, 1, 0]);
   move(ids.crate!, [-3, 0, 2]);
-  sc = setMeshParent(sc, ids.turret!, ids.tower!);
-  sc = setMeshParent(sc, ids.lamp!, ids.turret!);
+  // The offsets above are authored relative to each parent.
+  sc = setMeshParent(sc, ids.turret!, ids.tower!, { keepWorld: false });
+  sc = setMeshParent(sc, ids.lamp!, ids.turret!, { keepWorld: false });
   sc = setMeshTags(sc, ids.turret!, ["enemy", "enemy", "bad tag", "armed"]);
   sc = setMeshTags(sc, ids.crate!, ["pickup"]);
   sc = setMeshProp(sc, ids.turret!, "hp", 40);
@@ -164,6 +165,31 @@ describe("mesh sidecar scene objects", () => {
     expect(parentCandidates(sidecar, ids.tower!).map((m) => m.name)).toEqual(["crate"]);
     const unparented = setMeshParent(sidecar, ids.turret!, null);
     expect(unparented.meshes.find((m) => m.id === ids.turret)!.parent).toBeUndefined();
+  });
+
+  it("re-parents in place by default: the object stays where it is in the world", () => {
+    let sc = emptyMeshSidecar();
+    const a = addMesh(sc, quad(), "base");
+    sc = a.sidecar;
+    const b = addMesh(sc, quad(), "flag");
+    sc = b.sidecar;
+    sc = setMeshTransform(sc, a.id, { position: [4, 1, -2], rotation: [0, 90, 0], scale: [2, 2, 2] });
+    sc = setMeshTransform(sc, b.id, { position: [1, 3, 5], rotation: [10, 20, 30], scale: [1, 1, 1] });
+    const worldOf = (s: MeshSidecar, id: string) => {
+      const inst = parseMeshScene(encodeMeshSidecar(s))!.instances.find((x) => x.id === id)!;
+      return Array.from(inst.model);
+    };
+    const before = worldOf(sc, b.id);
+    const parented = setMeshParent(sc, b.id, a.id);
+    const after = worldOf(parented, b.id);
+    after.forEach((v, i) => expect(v).toBeCloseTo(before[i]!, 5));
+    // Local now: halved scale, offset measured in the base's turned frame.
+    const local = parented.meshes.find((m) => m.id === b.id)!.transform;
+    expect(local.scale[0]).toBeCloseTo(0.5, 5);
+    // And back to the top level, still in place.
+    const unparented = setMeshParent(parented, b.id, null);
+    worldOf(unparented, b.id).forEach((v, i) => expect(v).toBeCloseTo(before[i]!, 5));
+    expect(unparented.meshes.find((m) => m.id === b.id)!.transform.position).toEqual([1, 3, 5]);
   });
 
   it("keeps a removed parent's children, moving them up a level", () => {
