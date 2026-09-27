@@ -4,7 +4,8 @@
  * RAM fails here), the block protocol, and a whole scene run through the real
  * Xbox 360 engine with the Rapier backend: a crate falls onto a static floor and
  * the cart reads it land, an impulse from Lua throws it up, a character walks and
- * reports the ground, and a raycast from Lua hits the floor object.
+ * reports the ground, and a raycast from Lua hits the floor object; shape sweeps
+ * and rays that ignore their caster.
  */
 
 import { existsSync } from "node:fs";
@@ -291,6 +292,75 @@ end`;
     expect(word(103)).toBeGreaterThan(20); // the crate landed (it fell ~3.5 m)
     expect(word(104) / 1000).toBeCloseTo(3, 2); // zero gravity: it floats
     expect(word(105) / 1000).toBeLessThan(6 * 0.6); // damping slowed it within half a second
+    session.destroy();
+  }, 120_000);
+
+  it("sweeps spheres, boxes and capsules, and lets rays and sweeps ignore the caster", async () => {
+    const layout = RAM_LAYOUTS.xbox360;
+    const mesh = cube();
+    const entry = (id: string, position: number[], scale: number[], physics: object) => ({
+      id,
+      name: id,
+      mesh,
+      transform: { position, rotation: [0, 0, 0], scale },
+      physics,
+    });
+    const sc = parseMeshScene(
+      JSON.stringify({
+        version: 2,
+        meshes: [
+          entry("floor", [0, -0.5, 0], [40, 1, 40], { body: "static", shape: "box" }),
+          entry("wall", [5, 2, 0], [1, 4, 8], { body: "static", shape: "box" }), // its face at x = 4.5
+          entry("hero", [0, 1, 0], [0.6, 1.6, 0.6], { body: "character" }), // its top at y = 1.8
+          entry("zone", [2, 1, 0], [1, 2, 8], { body: "static", shape: "box", trigger: true }),
+        ],
+      }),
+    )!;
+    // Each slot's result: hit, object + 1, distance, and the normal's x and y (all ×1000).
+    const code = `
+function report(slot, at)
+  local hit, obj, px, py, pz, nx, ny, nz, d = cartbox.hit(slot)
+  pmem(at, hit and 1 or 0) pmem(at + 1, (obj or -1) + 1)
+  pmem(at + 2, math.floor((d or 0) * 1000 + 0.5) & 0xffffffff)
+  pmem(at + 3, math.floor((nx or 0) * 1000 + 0.5) & 0xffffffff) pmem(at + 4, math.floor((ny or 0) * 1000 + 0.5) & 0xffffffff)
+end
+function TIC()
+  for s = 0, 5 do report(s, 60 + s * 5) end
+  cartbox.sweep(0, 0.5, 0, 1, 0, 1, 0, 0, 20, "hero")    -- a ball along +x, past the trigger, to the wall
+  cartbox.sweep(1, {0.5, 0.5, 0.5}, -4, 3, 0, 0, -1, 0, 10) -- a box dropped onto the floor
+  cartbox.sweep(2, {0.3, 0.5}, 0, 5, 0, 0, -1, 0, 10)    -- a capsule dropped onto the hero
+  cartbox.ray(3, 0, 1, 0, 1, 0, 0, 20)                   -- a ray from inside the hero hits the hero
+  cartbox.ray(4, 0, 1, 0, 1, 0, 0, 20, "hero")           -- unless told to ignore it
+  cartbox.sweep(5, 0.5, 0, 1, 0, 1, 0, 0, 3, "hero")     -- too short to reach the wall
+end`;
+    let tic = codeChunks(new TextEncoder().encode(code));
+    tic = prependLuaCode(tic, sceneObjectsSdkLua(sc));
+    tic = prependLuaCode(tic, physicsSdkLua(sc, layout));
+    tic = injectSdk(tic);
+    const e = await bootBytes("xbox360/engine.js", tic);
+    const session = new PhysicsSession(sc, createRapierBackend(RAPIER));
+    for (let i = 0; i < 3; i += 1) {
+      session.beforeTick(block(e, layout));
+      e.mod._cbx_tick(e.h, 0);
+      session.afterTick(block(e, layout));
+    }
+    const slot = (s: number) => {
+      const w = (k: number) => pmem(e)[60 + s * 5 + k]! | 0;
+      return { hit: w(0), object: w(1) - 1, distance: w(2) / 1000, nx: w(3) / 1000, ny: w(4) / 1000 };
+    };
+    // The ball's centre stops half a metre short of the wall face.
+    expect(slot(0)).toMatchObject({ hit: 1, object: 1, nx: -1, ny: 0 });
+    expect(slot(0).distance).toBeCloseTo(4, 2);
+    // The box's bottom lands on the floor top: its centre falls 3 - 0.5.
+    expect(slot(1)).toMatchObject({ hit: 1, object: 0, nx: 0, ny: 1 });
+    expect(slot(1).distance).toBeCloseTo(2.5, 2);
+    // The capsule (bottom at 5 - 0.8) meets the hero's top at 1.8.
+    expect(slot(2)).toMatchObject({ hit: 1, object: 2 });
+    expect(slot(2).distance).toBeCloseTo(2.4, 1);
+    expect(slot(3)).toMatchObject({ hit: 1, object: 2, distance: 0 });
+    expect(slot(4)).toMatchObject({ hit: 1, object: 1 });
+    expect(slot(4).distance).toBeCloseTo(4.5, 2);
+    expect(slot(5).hit).toBe(0);
     session.destroy();
   }, 120_000);
 

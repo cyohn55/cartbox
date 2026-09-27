@@ -7,7 +7,7 @@
  * body keeps the scene object index it was built for, which raycasts report.
  */
 
-import type { PhysicsBackend, PhysicsBodyDesc, PhysicsQuat, PhysicsVec3 } from "@cartbox/player";
+import type { CastShape, PhysicsBackend, PhysicsBodyDesc, PhysicsQuat, PhysicsVec3 } from "@cartbox/player";
 
 type Rapier = typeof import("@dimforge/rapier3d-compat");
 
@@ -38,6 +38,7 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
   const bodies: Body[] = [];
   const colliders: Collider[] = [];
   const objectOf = new Map<number, number>(); // collider handle → scene object
+  const bodyOfObject = new Map<number, Body>(); // scene object → its body (casts that ignore it)
   const characters = new Set<number>(); // body handles of characters
   const events = new R.EventQueue(true);
   const sensors: Collider[] = [];
@@ -86,6 +87,7 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
       const collider = world.createCollider(colliderDesc, body);
       if (desc.trigger) sensors.push(collider);
       objectOf.set(collider.handle, desc.object);
+      bodyOfObject.set(desc.object, body);
       bodies.push(body);
       colliders.push(collider);
       if (desc.kind === "character") characters.add(bodies.length - 1);
@@ -175,10 +177,11 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
       return { grounded: controller.computedGrounded() };
     },
 
-    raycast(origin: PhysicsVec3, direction: PhysicsVec3, maxDistance: number) {
+    raycast(origin: PhysicsVec3, direction: PhysicsVec3, maxDistance: number, ignore?: number) {
       const ray = new R.Ray(v3(origin), v3(direction));
-      // Rays pass through trigger zones.
-      const hit = world.castRayAndGetNormal(ray, maxDistance, true, R.QueryFilterFlags.EXCLUDE_SENSORS);
+      // Rays pass through trigger zones (and the body they were told to ignore).
+      const skip = ignore === undefined ? undefined : bodyOfObject.get(ignore);
+      const hit = world.castRayAndGetNormal(ray, maxDistance, true, R.QueryFilterFlags.EXCLUDE_SENSORS, undefined, undefined, skip);
       if (!hit) return null;
       const toi = (hit as unknown as { timeOfImpact?: number; toi?: number }).timeOfImpact ?? (hit as unknown as { toi: number }).toi;
       const point = ray.pointAt(toi);
@@ -187,6 +190,37 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
         point: [point.x, point.y, point.z] as PhysicsVec3,
         normal: [hit.normal.x, hit.normal.y, hit.normal.z] as PhysicsVec3,
         distance: toi,
+      };
+    },
+
+    shapecast(shape: CastShape, origin: PhysicsVec3, direction: PhysicsVec3, maxDistance: number, ignore?: number) {
+      const swept =
+        shape.kind === "sphere"
+          ? new R.Ball(shape.radius)
+          : shape.kind === "box"
+            ? new R.Cuboid(shape.halfExtents[0], shape.halfExtents[1], shape.halfExtents[2])
+            : new R.Capsule(shape.halfHeight, shape.radius);
+      const skip = ignore === undefined ? undefined : bodyOfObject.get(ignore);
+      // A unit velocity makes the time of impact the distance travelled.
+      const hit = world.castShape(
+        v3(origin),
+        { x: 0, y: 0, z: 0, w: 1 },
+        v3(direction),
+        swept,
+        0,
+        maxDistance,
+        true,
+        R.QueryFilterFlags.EXCLUDE_SENSORS,
+        undefined,
+        undefined,
+        skip,
+      );
+      if (!hit) return null;
+      return {
+        object: objectOf.get(hit.collider.handle) ?? -1,
+        point: [hit.witness1.x, hit.witness1.y, hit.witness1.z] as PhysicsVec3,
+        normal: [hit.normal1.x, hit.normal1.y, hit.normal1.z] as PhysicsVec3,
+        distance: hit.time_of_impact,
       };
     },
 

@@ -3857,6 +3857,7 @@ cartbox = {
   teleport = function() end,
   move = function() end,
   ray = function() end,
+  sweep = function() end,
   hit = function() return false end,
   contacts = function() return {} end,
   entered = function() return {} end,
@@ -3992,6 +3993,11 @@ var PHYS_OP_MOVE = 4;
 var PHYS_OP_RAY = 5;
 var PHYS_OP_SPAWN = 6;
 var PHYS_OP_DESPAWN = 7;
+var PHYS_OP_CAST = 8;
+var PHYS_CAST_RAY = 0;
+var PHYS_CAST_SPHERE = 1;
+var PHYS_CAST_BOX = 2;
+var PHYS_CAST_CAPSULE = 3;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -4147,6 +4153,19 @@ function fitShape(spec, mesh, scale) {
       return { kind: "box", halfExtents: half, offset };
   }
 }
+function castShape(kind, a, b, c) {
+  const size = (v) => Math.max(1e-3, Math.abs(v));
+  switch (Math.round(kind)) {
+    case PHYS_CAST_SPHERE:
+      return { kind: "sphere", radius: size(a) };
+    case PHYS_CAST_BOX:
+      return { kind: "box", halfExtents: [size(a), size(b), size(c)] };
+    case PHYS_CAST_CAPSULE:
+      return { kind: "capsule", radius: size(a), halfHeight: Math.max(0, b) };
+    default:
+      return null;
+  }
+}
 function physicsSlots(scene) {
   const out = [];
   scene.instances.forEach((inst, i) => {
@@ -4238,13 +4257,23 @@ var PhysicsSession = class {
   /** Apply a tick's commands (already taken from the block), step, and cast rays. */
   run(commands) {
     this.rayRequests = [];
+    const castOptions = /* @__PURE__ */ new Map();
     for (const t of this.tracked) if (t.kind === "character") t.lastMove = [0, 0, 0];
     for (const cmd of commands) {
       const [a, b, c, d, e, f] = cmd.v;
+      if (cmd.op === PHYS_OP_CAST) {
+        if (cmd.a >= 0 && cmd.a < PHYS_MAX_RAYS) {
+          const ignore = Math.round(e) - 1;
+          castOptions.set(cmd.a, { shape: castShape(a, b, c, d), ...ignore >= 0 ? { ignore } : {} });
+        }
+        continue;
+      }
       if (cmd.op === PHYS_OP_RAY) {
         if (cmd.a >= 0 && cmd.a < PHYS_MAX_RAYS) {
           const len = Math.hypot(d, e, f);
-          this.rayRequests[cmd.a] = len > 1e-9 ? { origin: [a, b, c], direction: [d / len, e / len, f / len], max: len } : null;
+          const options = castOptions.get(cmd.a) ?? { shape: null };
+          castOptions.delete(cmd.a);
+          this.rayRequests[cmd.a] = len > 1e-9 ? { origin: [a, b, c], direction: [d / len, e / len, f / len], max: len, ...options } : null;
         }
         continue;
       }
@@ -4267,7 +4296,9 @@ var PhysicsSession = class {
     this.rayResults = [];
     for (let slot = 0; slot < PHYS_MAX_RAYS; slot += 1) {
       const req = this.rayRequests[slot];
-      this.rayResults[slot] = req ? this.backend.raycast(req.origin, req.direction, req.max) : null;
+      if (!req) this.rayResults[slot] = null;
+      else if (req.shape) this.rayResults[slot] = this.backend.shapecast?.(req.shape, req.origin, req.direction, req.max, req.ignore) ?? null;
+      else this.rayResults[slot] = this.backend.raycast(req.origin, req.direction, req.max, req.ignore);
     }
   }
   /** Last step's contact events and current trigger overlaps (live inspection, tests). */
@@ -4368,13 +4399,29 @@ function PHYSICS_CALLS() {
   cartbox.velocity = _each(${PHYS_OP_VELOCITY})
   cartbox.teleport = _each(${PHYS_OP_TELEPORT})
   cartbox.move = _each(${PHYS_OP_MOVE})
-  cartbox.ray = function(slot, x, y, z, dx, dy, dz, max)
+  -- A ray, or (kind > 0) a swept shape, from a slot: options first, then the ray.
+  local function _cast(slot, kind, a, b, c, x, y, z, dx, dy, dz, max, ignore)
     slot = math.floor(slot or 0)
     if slot < 0 or slot >= ${PHYS_MAX_RAYS} then return end
     local m = math.sqrt((dx or 0)^2 + (dy or 0)^2 + (dz or 0)^2)
     if m < 1e-9 then return end
+    local skip = 0
+    if ignore ~= nil then skip = (_obj(ignore) or -1) + 1 end
+    if kind ~= ${PHYS_CAST_RAY} or skip > 0 then _cmd(${PHYS_OP_CAST}, slot, kind, a, b, c, skip) end
     local k = (max or 100) / m
     _cmd(${PHYS_OP_RAY}, slot, x, y, z, dx * k, dy * k, dz * k)
+  end
+  cartbox.ray = function(slot, x, y, z, dx, dy, dz, max, ignore)
+    _cast(slot, ${PHYS_CAST_RAY}, 0, 0, 0, x, y, z, dx, dy, dz, max, ignore)
+  end
+  cartbox.sweep = function(slot, shape, x, y, z, dx, dy, dz, max, ignore)
+    if type(shape) == "number" then
+      _cast(slot, ${PHYS_CAST_SPHERE}, shape, 0, 0, x, y, z, dx, dy, dz, max, ignore)
+    elseif type(shape) == "table" and #shape >= 3 then
+      _cast(slot, ${PHYS_CAST_BOX}, shape[1], shape[2], shape[3], x, y, z, dx, dy, dz, max, ignore)
+    elseif type(shape) == "table" and #shape == 2 then
+      _cast(slot, ${PHYS_CAST_CAPSULE}, shape[1], shape[2], 0, x, y, z, dx, dy, dz, max, ignore)
+    end
   end
   cartbox.hit = function(slot)
     slot = math.floor(slot or 0)

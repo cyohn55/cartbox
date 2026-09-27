@@ -278,9 +278,15 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
       },
       {
         name: "cartbox.ray",
-        signature: "cartbox.ray(slot, x, y, z, dx, dy, dz, max)",
-        doc: "Cast a ray from (x,y,z) along (dx,dy,dz) up to max units in slot 0-15. The result is ready next tick via cartbox.hit(slot).",
-        snippet: "cartbox.ray(0, x, y, z, 0, -1, 0, 50)",
+        signature: "cartbox.ray(slot, x, y, z, dx, dy, dz, max, ignore)",
+        doc: "Cast a ray from (x,y,z) along (dx,dy,dz) up to max units in slot 0-15. The result is ready next tick via cartbox.hit(slot). ignore (optional) is an object the ray passes through, such as the player casting it.",
+        snippet: 'cartbox.ray(0, x, y, z, 0, -1, 0, 50, "player")',
+      },
+      {
+        name: "cartbox.sweep",
+        signature: "cartbox.sweep(slot, shape, x, y, z, dx, dy, dz, max, ignore)",
+        doc: "Like cartbox.ray, but sweeps a solid shape: a number is a sphere's radius, {hx, hy, hz} a box's half-extents, {radius, halfheight} an upright capsule. cartbox.hit(slot) then gives the surface point touched, its normal, and how far the shape's centre travelled first. Use it for thick bullets, ledge and landing checks, or whether a body fits somewhere.",
+        snippet: 'cartbox.sweep(0, 0.4, x, y, z, 0, -1, 0, 5, "player")\nlocal hit, obj, hx, hy, hz, nx, ny, nz, d = cartbox.hit(0)',
       },
       {
         name: "cartbox.hit",
