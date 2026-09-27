@@ -21,6 +21,7 @@ import {
   SCENE_TAG_MAX,
   isSceneKey,
   type JointAxis,
+  type MeshAsset,
   type JointKind,
   type JointSpec,
   type PhysicsBodyKind,
@@ -449,6 +450,46 @@ const SHAPE_LABELS: Record<PhysicsShapeKind, string> = {
 };
 
 /** The selected object's physics body (none, or body type + collider + material). */
+/** A skinned mesh's skeleton and clips, with a preview player (the preview canvas shows the clip). */
+export function AnimationPanel({
+  mesh,
+  name,
+  playing,
+  onPlay,
+}: {
+  mesh: MeshAsset;
+  name: string;
+  playing: number | null;
+  onPlay: (clip: number | null) => void;
+}) {
+  const clips = mesh.clips ?? [];
+  return (
+    <RailGroup label="Animation">
+      <div style={{ fontSize: 12 }}>
+        Skeleton · {mesh.skin?.joints.length ?? 0} joints · {clips.length} clip{clips.length === 1 ? "" : "s"}
+      </div>
+      <div style={{ display: "grid", gap: 4, marginTop: 6 }} aria-label="Animation clips">
+        {clips.map((clip, i) => (
+          <button
+            key={`${clip.name}-${i}`}
+            type="button"
+            className={styles.toolBtn}
+            aria-pressed={playing === i}
+            onClick={() => onPlay(playing === i ? null : i)}
+          >
+            {playing === i ? "■" : "▶"} {clip.name} <span style={{ opacity: 0.7 }}>{clip.duration.toFixed(2)}s</span>
+          </button>
+        ))}
+      </div>
+      <RailHint>
+        {clips.length > 0
+          ? `In the game it plays “${clips[0]!.name}” on a loop by itself. In code: cartbox.play(${JSON.stringify(name)}, ${JSON.stringify(clips[clips.length > 1 ? 1 : 0]!.name)}) switches clip with a short crossfade.`
+          : "No clips came with this model; import a glTF with animations to play them."}
+      </RailHint>
+    </RailGroup>
+  );
+}
+
 const JOINT_LABELS: Record<JointKind, string> = {
   hinge: "Hinge — turns about one axis",
   ball: "Ball — swivels freely",

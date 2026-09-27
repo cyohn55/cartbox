@@ -3870,6 +3870,10 @@ cartbox = {
   spawn = function() return nil end,
   despawn = function() end,
   alive = function() return false end,
+  -- Skeletal animation: overridden when the scene has skinned objects.
+  play = function() end,
+  anim = function() return nil, 0, false end,
+  clips = function() return {} end,
 }`;
 function injectSdk(bytes) {
   return prependLuaCode(bytes, CARTBOX_SDK_LUA);
@@ -3985,6 +3989,9 @@ var PHYS_OVERLAP_BYTES = 8;
 var PHYS_MAX_OVERLAPS = 64;
 var PHYS_EVENT_STARTED = 1;
 var PHYS_EVENT_TRIGGER = 2;
+var PHYS_ANIMS = 6400;
+var PHYS_ANIM_BYTES = 12;
+var PHYS_MAX_ANIMS = 64;
 var PHYS_CMDS = 4096;
 var PHYS_CMD_BYTES = 32;
 var PHYS_MAX_CMDS = 64;
@@ -4004,6 +4011,7 @@ var PHYS_CAST_BOX = 2;
 var PHYS_CAST_CAPSULE = 3;
 var PHYS_OP_MOTOR = 9;
 var PHYS_OP_UNJOIN = 10;
+var PHYS_OP_PLAY = 11;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -4053,6 +4061,16 @@ function writePhysicsState(block, tick, bodies, rays, events = [], overlaps = []
     for (let k = 0; k < 3; k += 1) block.setInt32(at + 4 + k * 4, toFix(r.point[k]), true);
     for (let k = 0; k < 3; k += 1) block.setInt32(at + 16 + k * 4, toFix(r.normal[k]), true);
     block.setInt32(at + 28, toFix(r.distance), true);
+  }
+}
+function writeAnimationState(block, playback) {
+  const n = Math.min(playback.length, PHYS_MAX_ANIMS);
+  block.setInt32(PHYS_ANIMS, n, true);
+  for (let i = 0; i < n; i += 1) {
+    const at = PHYS_ANIMS + 4 + i * PHYS_ANIM_BYTES;
+    block.setInt32(at, playback[i].object, true);
+    block.setInt32(at + 4, playback[i].clip, true);
+    block.setInt32(at + 8, toFix(playback[i].time), true);
   }
 }
 function takePhysicsCommands(block) {
@@ -4549,9 +4567,111 @@ var PhysicsSession = class {
   }
 };
 
+// src/anim/animationSession.ts
+import { blendPoses, clipTime, isSkinned, restPose, sampleClip, skinMatrices } from "@cartbox/editor";
+function animatedObjects(scene) {
+  const out = [];
+  scene?.instances.forEach((inst, i) => {
+    if (isSkinned(inst.mesh)) out.push(i);
+  });
+  return out;
+}
+function sceneHasAnimation(scene) {
+  return animatedObjects(scene).length > 0;
+}
+var DEFAULT_TRACK = (mesh) => ({
+  clip: (mesh.clips?.length ?? 0) > 0 ? 0 : -1,
+  time: 0,
+  speed: 1,
+  loop: true,
+  from: null,
+  fade: 0,
+  fadeElapsed: 0
+});
+var AnimationSession = class {
+  constructor(scene) {
+    this.scene = scene;
+    this.playback = /* @__PURE__ */ new Map();
+    this.tick = 0;
+    this.cache = null;
+    for (const i of animatedObjects(scene)) this.playback.set(i, DEFAULT_TRACK(scene.instances[i].mesh));
+  }
+  /** Start `clip` on `object` (-1 = back to rest), crossfading from what was playing over `fade` seconds. */
+  play(object, clip, fade, speed, loop, start = 0) {
+    const current = this.playback.get(object);
+    if (!current) return;
+    const clips = this.scene.instances[object].mesh.clips ?? [];
+    const target = Number.isInteger(clip) && clip >= 0 && clip < clips.length ? clip : -1;
+    const fadeSeconds = Number.isFinite(fade) ? Math.max(0, Math.min(10, fade)) : 0;
+    const from = fadeSeconds > 0 ? { clip: current.clip, time: current.time, speed: current.speed, loop: current.loop } : null;
+    this.playback.set(object, {
+      clip: target,
+      time: Number.isFinite(start) ? Math.max(0, start) : 0,
+      speed: Number.isFinite(speed) ? Math.max(-10, Math.min(10, speed)) : 1,
+      loop,
+      from,
+      fade: fadeSeconds,
+      fadeElapsed: 0
+    });
+    this.cache = null;
+  }
+  /** Put an object back to its default playback (a prefab copy being spawned afresh). */
+  reset(object) {
+    if (!this.playback.has(object)) return;
+    this.playback.set(object, DEFAULT_TRACK(this.scene.instances[object].mesh));
+    this.cache = null;
+  }
+  /** Advance every playback by one tick. */
+  step(dt) {
+    for (const p of this.playback.values()) {
+      p.time += dt * p.speed;
+      if (p.from) {
+        p.from.time += dt * p.from.speed;
+        p.fadeElapsed += dt;
+        if (p.fadeElapsed >= p.fade) p.from = null;
+      }
+    }
+    this.tick += 1;
+  }
+  /** Each animated object's clip and time, as the cart reads them. */
+  state() {
+    const out = [];
+    for (const [object, p] of this.playback) {
+      const clip = p.clip >= 0 ? this.scene.instances[object].mesh.clips[p.clip] : null;
+      out.push({ object, clip: p.clip, time: clip ? clipTime(clip, p.time, p.loop) : 0 });
+    }
+    return out;
+  }
+  /**
+   * The skinning matrices for every animated object now (object → matrices),
+   * computed once per tick. `visible` skips objects not being drawn (a reserve
+   * prefab copy), which then keep their last pose.
+   */
+  matrices(visible = () => true) {
+    if (this.cache?.tick === this.tick) return this.cache.matrices;
+    const out = /* @__PURE__ */ new Map();
+    for (const [object, p] of this.playback) {
+      if (!visible(object)) continue;
+      const mesh = this.scene.instances[object].mesh;
+      const skin = mesh.skin;
+      const pose = this.pose(mesh, p);
+      const faded = p.from && p.fade > 0 ? blendPoses(this.pose(mesh, p.from), pose, Math.min(1, p.fadeElapsed / p.fade)) : pose;
+      out.set(object, skinMatrices(skin, faded));
+    }
+    this.cache = { tick: this.tick, matrices: out };
+    return out;
+  }
+  pose(mesh, track) {
+    const clip = track.clip >= 0 ? mesh.clips?.[track.clip] : void 0;
+    return clip ? sampleClip(mesh.skin, clip, track.time, track.loop) : restPose(mesh.skin);
+  }
+};
+
 // src/physics/physicsSdk.ts
 function sceneNeedsRuntime(scene, { physics = true } = {}) {
-  return Boolean(scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0));
+  return Boolean(
+    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0)
+  );
 }
 var luaString = (s) => JSON.stringify(s);
 function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
@@ -4595,7 +4715,8 @@ function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
     _wr(_B + ${PHYS_CMDS}, n + 1)
   end
 ${physics ? PHYSICS_CALLS() : ""}
-${pools.length > 0 ? SPAWN_CALLS(pools) : ""}end`;
+${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
+${ANIM_CALLS(scene)}end`;
 }
 function PHYSICS_CALLS() {
   return `  cartbox.physics = function() return _live() end
@@ -4731,6 +4852,53 @@ function SPAWN_CALLS(pools) {
   end
 `;
 }
+function ANIM_CALLS(scene) {
+  const animated = animatedObjects(scene);
+  if (animated.length === 0) return "";
+  const names = animated.map((i) => `[${i}]={${(scene.instances[i].mesh.clips ?? []).map((c) => luaString(c.name)).join(",")}}`);
+  const durations = animated.map((i) => `[${i}]={${(scene.instances[i].mesh.clips ?? []).map((c) => c.duration).join(",")}}`);
+  return `  local _clips = {${names.join(",")}}
+  local _dur = {${durations.join(",")}}
+  local _loops = {}
+  cartbox.clips = function(o)
+    local i = _obj(o)
+    local out = {}
+    for k, n in ipairs((i and _clips[i]) or {}) do out[k] = n end
+    return out
+  end
+  cartbox.play = function(o, clip, fade, speed, loop)
+    local i = _obj(o)
+    local names = i and _clips[i]
+    if names == nil then return end
+    local c = -1
+    if type(clip) == "number" then
+      if clip >= 0 and clip < #names then c = math.floor(clip) end
+    elseif type(clip) == "string" then
+      for k, n in ipairs(names) do if n == clip then c = k - 1 end end
+      if c < 0 then return end
+    end
+    if loop == nil then loop = true end
+    _loops[i] = loop
+    _cmd(${PHYS_OP_PLAY}, i, c, fade or 0.2, speed or 1, loop and 1 or 0, 0)
+  end
+  cartbox.anim = function(o)
+    local i = _obj(o)
+    if i == nil or _clips[i] == nil or not _live() then return nil, 0, false end
+    local n = _rd(_B + ${PHYS_ANIMS})
+    for k = 0, n - 1 do
+      local at = _B + ${PHYS_ANIMS + 4} + k * ${PHYS_ANIM_BYTES}
+      if _rd(at) == i then
+        local c = _rd(at + 4)
+        if c < 0 then return nil, 0, false end
+        local t = _rd(at + 8) / ${PHYS_FIX}
+        local done = _loops[i] == false and t >= (_dur[i][c + 1] or 0) - 0.0005
+        return _clips[i][c + 1], t, done
+      end
+    end
+    return nil, 0, false
+  end
+`;
+}
 var physicsSdkLua = runtimeSdkLua;
 
 // src/runtime/runtimeChannel.ts
@@ -4744,6 +4912,7 @@ var RuntimeChannel = class {
     this.active = /* @__PURE__ */ new Map();
     /** Each reserve root's objects (itself first, then its descendants). */
     this.copyObjects = /* @__PURE__ */ new Map();
+    this.animation = sceneHasAnimation(scene) ? new AnimationSession(scene) : null;
     scene.instances.forEach((inst, i) => {
       if (!inst.pooled) return;
       const list = this.copyObjects.get(inst.pooled.root) ?? [];
@@ -4756,6 +4925,7 @@ var RuntimeChannel = class {
   beforeTick(block) {
     if (this.physics) this.physics.beforeTick(block);
     else writePhysicsState(block, 0, [], []);
+    writeAnimationState(block, this.animation?.state() ?? []);
   }
   /** Take the cart's commands: scene ops here, the rest to physics (which then steps). */
   afterTick(block) {
@@ -4763,8 +4933,24 @@ var RuntimeChannel = class {
     for (const cmd of commands) {
       if (cmd.op === PHYS_OP_SPAWN) this.spawn(cmd.a, cmd.v);
       else if (cmd.op === PHYS_OP_DESPAWN) this.despawn(cmd.a);
+      else if (cmd.op === PHYS_OP_PLAY) {
+        const [clip, fade, speed, loop, start] = cmd.v;
+        this.animation?.play(cmd.a, Math.round(clip), fade, speed, loop >= 0.5, start);
+      }
     }
-    this.physics?.run(commands.filter((c) => c.op !== PHYS_OP_SPAWN && c.op !== PHYS_OP_DESPAWN));
+    this.physics?.run(commands.filter((c) => c.op !== PHYS_OP_SPAWN && c.op !== PHYS_OP_DESPAWN && c.op !== PHYS_OP_PLAY));
+    this.animation?.step(PHYSICS_DT);
+  }
+  /**
+   * Skinning matrices for the animated objects being drawn (object → matrices);
+   * reserve prefab copies not spawned are skipped.
+   */
+  skinning() {
+    if (!this.animation) return /* @__PURE__ */ new Map();
+    return this.animation.matrices((object) => {
+      const pooled = this.scene.instances[object]?.pooled;
+      return !pooled || this.active.has(pooled.root);
+    });
   }
   /** Spawned copies' root world matrices (root object index → matrix). */
   spawned() {
@@ -4776,6 +4962,7 @@ var RuntimeChannel = class {
     const [x, y, z, yaw, pitch, roll] = v;
     const world = composeModelMatrix([x, y, z], [pitch * DEG, yaw * DEG, roll * DEG], [1, 1, 1]);
     this.active.set(root, world);
+    for (const object of objects) this.animation?.reset(object);
     const placed = /* @__PURE__ */ new Map([[root, world]]);
     const worldOf = (i) => {
       const known = placed.get(i);
@@ -5770,7 +5957,9 @@ import {
   buildSceneShadow,
   childIndices,
   computeEnvironmentAverage,
+  createLiveSkinnedMesh,
   downsamplePanorama,
+  isSkinned as isSkinned2,
   renderSkyBackground,
   composeModelMatrix as composeModelMatrix3,
   multiplyMat4 as multiplyMat42,
@@ -6266,6 +6455,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.bodies = /* @__PURE__ */ new Map();
     /** Spawned prefab copies: root object index → the root's world matrix (see setSpawned). */
     this.spawned = /* @__PURE__ */ new Map();
+    /** Skinned instances' live meshes (their buffers are rewritten for each pose). */
+    this.live = /* @__PURE__ */ new Map();
+    /** The skinning matrices each live mesh was last posed with (skip re-skinning the same pose). */
+    this.lastSkin = /* @__PURE__ */ new Map();
+    /** Instances animated this frame: they move for the shadow cache. */
+    this.animated = /* @__PURE__ */ new Set();
     /** Each object's world matrix as last drawn (null = hidden), or null when nothing moved. */
     this.lastPlacement = null;
     /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
@@ -6298,6 +6493,20 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   setSpawned(spawned) {
     this.spawned = spawned;
   }
+  /**
+   * Pose the skinned objects (object index → skinning matrices, see
+   * AnimationSession). Each listed object's live mesh is re-skinned when its
+   * matrices changed, and it counts as moving this frame for the shadow cache.
+   */
+  setSkinning(skinning) {
+    for (const [i, matrices] of skinning) {
+      const live = this.live.get(i);
+      if (!live || this.lastSkin.get(i) === matrices) continue;
+      live.update(matrices);
+      this.lastSkin.set(i, matrices);
+    }
+    this.animated = new Set([...skinning.keys()].filter((i) => this.live.has(i)));
+  }
   /** Posed instances plus, in a hierarchy, everything below them: what moves this frame. */
   withChildren(indices) {
     return this.hierarchy ? withDescendants(indices, this.hierarchy.children) : new Set(indices);
@@ -6319,8 +6528,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     };
     const instances = [];
     const frames = [];
-    for (const instance of scene.instances) {
-      instances.push({ ...await texture(instance.mesh), model: instance.model });
+    const live = /* @__PURE__ */ new Map();
+    for (const [i, instance] of scene.instances.entries()) {
+      const textured = await texture(instance.mesh);
+      const skinned = isSkinned2(instance.mesh) ? createLiveSkinnedMesh(instance.mesh) : null;
+      if (skinned) live.set(i, skinned);
+      instances.push({ ...textured, ...skinned ? { mesh: skinned.mesh } : {}, model: instance.model });
       frames.push(instance.frames && instance.frames.length > 0 ? await Promise.all(instance.frames.map(texture)) : null);
     }
     const lighting = scene.lighting;
@@ -6331,7 +6544,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const ibl = downsamplePanorama(skyMap, SKY_IBL_DOWNSAMPLE);
       environment = { ...environment, map: ibl, average: computeEnvironmentAverage(ibl) };
     }
-    return new _MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
+    const surface = new _MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
+    for (const [i, mesh] of live) surface.live.set(i, mesh);
+    return surface;
   }
   /**
    * Set the cart-driven camera for the next frame(s), or null to auto-orbit. The
@@ -6494,12 +6709,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * only part of the shadow map that has to be redrawn each frame.
    */
   posedInstances() {
-    if (this.poses.length === 0 && this.bodies.size === 0 && this.spawned.size === 0) {
+    if (this.poses.length === 0 && this.bodies.size === 0 && this.spawned.size === 0 && this.animated.size === 0) {
       this.lastPlacement = null;
       return { main: this.unpooled, front: [], moved: [] };
     }
     if (this.hierarchy) return this.posedHierarchy(this.hierarchy);
-    if (this.bodies.size > 0 || this.spawned.size > 0 || this.unpooled !== this.instances) {
+    if (this.bodies.size > 0 || this.spawned.size > 0 || this.animated.size > 0 || this.unpooled !== this.instances) {
       this.flat ?? (this.flat = {
         parents: this.instances.map(() => -1),
         children: this.instances.map(() => []),
@@ -6557,7 +6772,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const poolRoot = this.pooledRoot[i] ?? -1;
       const reserved = poolRoot >= 0 && !this.spawned.has(poolRoot);
       const spawnAt = poolRoot === i ? this.spawned.get(i) : void 0;
-      const moved2 = Boolean(pose) || Boolean(up?.moved) || Boolean(body) || Boolean(spawnAt);
+      const moved2 = Boolean(pose) || Boolean(up?.moved) || Boolean(body) || Boolean(spawnAt) || this.animated.has(i);
       let model = this.instances[i].model;
       if (moved2) {
         const base = body ?? spawnAt ?? (up ? multiplyMat42(up.model, h.locals[i]) : h.locals[i]);
@@ -6639,11 +6854,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const size = SHADOW_MAP_SIZE;
     const { center, radius } = this.scene.bounds;
     for (const i of this.withChildren(this.poses.filter((p) => p.front).map((p) => p.index))) this.everFront.add(i);
-    const key = `${this.poses.filter((p) => !p.front).map((p) => p.index).sort((a, b) => a - b).join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}|${[...this.bodies.keys()].join(",")}`;
+    const key = `${this.poses.filter((p) => !p.front).map((p) => p.index).sort((a, b) => a - b).join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}|${[...this.bodies.keys()].join(",")}|${[...this.live.keys()].join(",")}`;
     let full = false;
     if (!this.staticShadow || this.staticShadowKey !== key || this.staticShadowLighting !== lighting) {
       this.staticShadow ?? (this.staticShadow = new Float32Array(size * size));
-      const posed = this.withChildren([...this.poses.map((p) => p.index), ...this.bodies.keys()]);
+      const posed = this.withChildren([...this.poses.map((p) => p.index), ...this.bodies.keys(), ...this.live.keys()]);
       this.pooledRoot.forEach((root, i) => {
         if (root >= 0) posed.add(i);
       });
@@ -6688,7 +6903,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   shadowFootprint(instance, size) {
     const m = this.staticShadowMatrix;
     if (!m) return null;
-    let b = this.meshBounds.get(instance.mesh);
+    let b = instance.mesh.primitives.some((p) => p.dynamic) ? void 0 : this.meshBounds.get(instance.mesh);
     if (!b) {
       let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
       for (const primitive of instance.mesh.primitives) {
@@ -6703,7 +6918,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         }
       }
       b = [x0, y0, z0, x1, y1, z1];
-      this.meshBounds.set(instance.mesh, b);
+      if (!instance.mesh.primitives.some((p) => p.dynamic)) this.meshBounds.set(instance.mesh, b);
     }
     if (!Number.isFinite(b[0])) return null;
     const mm = multiplyMat42(m, instance.model);
@@ -8186,10 +8401,23 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.uniformData = new Float32Array(this.uniformCapacity * UNIFORM_FLOATS);
     this.bindGroups = /* @__PURE__ */ new WeakMap();
   }
-  /** Upload (once) a mesh's primitives as interleaved vertex + index buffers. */
+  /**
+   * Upload (once) a mesh's primitives as interleaved vertex + index buffers. A
+   * live skinned primitive (`dynamic`) re-uploads its vertices into the same
+   * buffer whenever its revision moves on.
+   */
   uploadMesh(mesh) {
     const cached = this.meshes.get(mesh);
-    if (cached) return cached;
+    if (cached) {
+      mesh.primitives.forEach((primitive, i) => {
+        const gpu = cached[i];
+        if (!primitive.dynamic || !gpu || gpu.revision === primitive.dynamic.revision) return;
+        const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
+        this.device.queue.writeBuffer(gpu.vertexBuffer, 0, interleaveVertices(primitive.positions, normals, primitive.uvs));
+        gpu.revision = primitive.dynamic.revision;
+      });
+      return cached;
+    }
     const uploaded = mesh.primitives.map((primitive) => {
       const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
       const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs);
@@ -8205,7 +8433,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // INDEX | COPY_DST
       });
       this.device.queue.writeBuffer(indexBuffer, 0, primitive.indices);
-      return { vertexBuffer, indexBuffer, indexCount: primitive.indices.length };
+      return {
+        vertexBuffer,
+        indexBuffer,
+        indexCount: primitive.indices.length,
+        ...primitive.dynamic ? { revision: primitive.dynamic.revision } : {}
+      };
     });
     this.meshes.set(mesh, uploaded);
     return uploaded;
@@ -8616,9 +8849,11 @@ var Player = class {
     const placements = this.meshSurface?.placements() ?? scene.instances.map((inst) => inst.pooled ? null : inst.model);
     const bodies = this.runtime?.physics?.inspect() ?? /* @__PURE__ */ new Map();
     const spawned = this.runtime?.channel.spawned() ?? /* @__PURE__ */ new Map();
+    const playback = new Map((this.runtime?.channel.animation?.state() ?? []).map((p) => [p.object, p]));
     return scene.instances.map((inst, index) => {
       const m = placements[index] ?? inst.model;
       const body = bodies.get(index);
+      const anim = playback.get(index);
       return {
         index,
         name: inst.name,
@@ -8628,7 +8863,8 @@ var Player = class {
         tags: inst.tags,
         props: inst.props,
         ...body ? { body } : {},
-        ...inst.pooled ? { prefab: { name: inst.pooled.prefab, spawned: spawned.has(inst.pooled.root) } } : {}
+        ...inst.pooled ? { prefab: { name: inst.pooled.prefab, spawned: spawned.has(inst.pooled.root) } } : {},
+        ...anim ? { animation: { clip: anim.clip >= 0 ? inst.mesh.clips?.[anim.clip]?.name ?? null : null, time: anim.time } } : {}
       };
     });
   }
@@ -8670,6 +8906,7 @@ var Player = class {
         if (this.runtime) {
           if (this.runtime.physics) this.meshSurface.setBodyOverrides(this.runtime.physics.overrides());
           this.meshSurface.setSpawned(this.runtime.channel.spawned());
+          this.meshSurface.setSkinning(this.runtime.channel.skinning());
         }
         this.meshSurface.setCartLights(decodeWorldLights(mailbox));
       }

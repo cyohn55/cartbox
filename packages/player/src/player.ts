@@ -496,9 +496,11 @@ export class Player {
     const placements = this.meshSurface?.placements() ?? scene.instances.map((inst) => (inst.pooled ? null : inst.model));
     const bodies = this.runtime?.physics?.inspect() ?? new Map();
     const spawned = this.runtime?.channel.spawned() ?? new Map();
+    const playback = new Map((this.runtime?.channel.animation?.state() ?? []).map((p) => [p.object, p]));
     return scene.instances.map((inst, index) => {
       const m = placements[index] ?? inst.model;
       const body = bodies.get(index);
+      const anim = playback.get(index);
       return {
         index,
         name: inst.name,
@@ -509,6 +511,7 @@ export class Player {
         props: inst.props,
         ...(body ? { body } : {}),
         ...(inst.pooled ? { prefab: { name: inst.pooled.prefab, spawned: spawned.has(inst.pooled.root) } } : {}),
+        ...(anim ? { animation: { clip: anim.clip >= 0 ? (inst.mesh.clips?.[anim.clip]?.name ?? null) : null, time: anim.time } } : {}),
       };
     });
   }
@@ -561,6 +564,7 @@ export class Player {
         if (this.runtime) {
           if (this.runtime.physics) this.meshSurface.setBodyOverrides(this.runtime.physics.overrides());
           this.meshSurface.setSpawned(this.runtime.channel.spawned());
+          this.meshSurface.setSkinning(this.runtime.channel.skinning());
         }
         this.meshSurface.setCartLights(decodeWorldLights(mailbox));
       }

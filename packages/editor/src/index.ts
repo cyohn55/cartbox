@@ -191,6 +191,27 @@ export {
 export { parseObj, encodeObj, type ParseObjOptions, type ObjFiles } from "./model/objCodec";
 export { parseGlb, parseGltf, parseGltfText, encodeGlb } from "./model/gltfCodec";
 export {
+  MAX_CLIPS,
+  MAX_SKIN_JOINTS,
+  POSE_STRIDE,
+  blendPoses,
+  clipTime,
+  createLiveSkinnedMesh,
+  findClip,
+  isSkinned,
+  jointWorldMatrices,
+  restPose,
+  sampleClip,
+  skinMatrices,
+  skinVertices,
+  type AnimationClip,
+  type ClipChannel,
+  type ClipPath,
+  type LiveSkinnedMesh,
+  type MeshSkin,
+  type SkinJoint,
+} from "./model/skeleton";
+export {
   renderMesh,
   renderMeshScene,
   composeModelMatrix,

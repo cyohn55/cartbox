@@ -24,6 +24,15 @@
  */
 
 import { bytesToBase64, base64ToBytes } from "./base64";
+import {
+  MAX_CLIP_KEYS,
+  MAX_CLIPS,
+  MAX_SKIN_JOINTS,
+  type AnimationClip,
+  type ClipChannel,
+  type MeshSkin,
+  type SkinJoint,
+} from "./skeleton";
 
 /** Serialized-format version, bumped on any schema change. */
 export const MESH_ASSET_VERSION = 1;
@@ -132,12 +141,28 @@ export interface MeshPrimitive {
   /** Triangle vertex indices (three per triangle) into the attribute streams. */
   readonly indices: Uint32Array;
   readonly material: MeshMaterial;
+  /**
+   * Skinned meshes only (see skeleton.ts): four joint indices and four weights
+   * per vertex, binding it to the mesh's {@link MeshAsset.skin}.
+   */
+  readonly joints?: Uint16Array | null;
+  readonly weights?: Float32Array | null;
+  /**
+   * Set on a live skinned copy whose positions/normals are rewritten each frame:
+   * renderers that cache uploaded geometry re-upload when `revision` changes.
+   * Never serialized.
+   */
+  readonly dynamic?: { revision: number };
 }
 
 /** A named mesh: one or more primitives in a shared object space. */
 export interface MeshAsset {
   readonly name: string;
   readonly primitives: readonly MeshPrimitive[];
+  /** The skeleton skinned primitives are bound to (ENGINE_ROADMAP.md, Phase 3), if any. */
+  readonly skin?: MeshSkin | null;
+  /** Animation clips that move the skeleton. */
+  readonly clips?: readonly AnimationClip[];
 }
 
 /** A neutral, fully-opaque white material — the default when a source names none. */
@@ -294,11 +319,132 @@ interface SerializedPrimitive {
   uvs: string | null;
   indices: string;
   material: SerializedMaterial;
+  joints?: string;
+  weights?: string;
+}
+interface SerializedJoint {
+  name: string;
+  parent: number;
+  t: number[];
+  r: number[];
+  s: number[];
+  base?: number[];
+}
+interface SerializedClip {
+  name: string;
+  duration: number;
+  channels: { joint: number; path: string; interp?: string; times: string; values: string }[];
 }
 interface SerializedMesh {
   version: number;
   name: string;
   primitives: SerializedPrimitive[];
+  skin?: { joints: SerializedJoint[]; inverseBind: string };
+  clips?: SerializedClip[];
+}
+
+function u16ToBase64(array: Uint16Array): string {
+  return bytesToBase64(new Uint8Array(array.buffer, array.byteOffset, array.byteLength));
+}
+function base64ToU16(base64: string): Uint16Array {
+  const bytes = base64ToBytes(base64);
+  if (bytes.length % 2 !== 0) throw new Error("Mesh asset payload is malformed");
+  return new Uint16Array(bytes.slice().buffer);
+}
+
+function serializeSkin(skin: MeshSkin): NonNullable<SerializedMesh["skin"]> {
+  return {
+    joints: skin.joints.map((j) => ({
+      name: j.name,
+      parent: j.parent,
+      t: [...j.translation],
+      r: [...j.rotation],
+      s: [...j.scale],
+      ...(j.base ? { base: [...j.base] } : {}),
+    })),
+    inverseBind: f32ToBase64(skin.inverseBind),
+  };
+}
+
+function serializeClip(clip: AnimationClip): SerializedClip {
+  return {
+    name: clip.name,
+    duration: clip.duration,
+    channels: clip.channels.map((c) => ({
+      joint: c.joint,
+      path: c.path,
+      ...(c.interpolation === "step" ? { interp: "step" } : {}),
+      times: f32ToBase64(c.times),
+      values: f32ToBase64(c.values),
+    })),
+  };
+}
+
+const finiteList = (value: unknown, length: number): number[] | null =>
+  Array.isArray(value) && value.length === length && value.every((n) => typeof n === "number" && Number.isFinite(n)) ? (value as number[]) : null;
+
+/** Validate an untrusted skeleton: parents in range and acyclic, one inverse bind per joint. */
+function deserializeSkin(raw: unknown): MeshSkin | null {
+  if (!raw || typeof raw !== "object") return null;
+  const { joints, inverseBind } = raw as { joints?: unknown; inverseBind?: unknown };
+  if (!Array.isArray(joints) || joints.length === 0 || joints.length > MAX_SKIN_JOINTS || typeof inverseBind !== "string") {
+    throw new Error("Mesh asset payload is malformed");
+  }
+  const n = joints.length;
+  const out: SkinJoint[] = joints.map((j: SerializedJoint) => {
+    const t = finiteList(j?.t, 3);
+    const r = finiteList(j?.r, 4);
+    const sc = finiteList(j?.s, 3);
+    const parent = typeof j?.parent === "number" && Number.isInteger(j.parent) && j.parent >= -1 && j.parent < n ? j.parent : null;
+    if (!t || !r || !sc || parent === null) throw new Error("Mesh asset payload is malformed");
+    const base = finiteList(j.base, 16);
+    return {
+      name: typeof j.name === "string" ? j.name.slice(0, 64) : "joint",
+      parent,
+      translation: [t[0]!, t[1]!, t[2]!],
+      rotation: [r[0]!, r[1]!, r[2]!, r[3]!],
+      scale: [sc[0]!, sc[1]!, sc[2]!],
+      ...(base ? { base } : {}),
+    };
+  });
+  // No cycles: every chain of parents reaches a root within n steps.
+  out.forEach((_, start) => {
+    let j = start;
+    for (let steps = 0; j >= 0; steps += 1) {
+      if (steps > n) throw new Error("Mesh asset payload is malformed");
+      j = out[j]!.parent;
+    }
+  });
+  const ibm = base64ToF32(inverseBind);
+  if (ibm.length !== n * 16) throw new Error("Mesh asset payload is malformed");
+  return { joints: out, inverseBind: ibm };
+}
+
+/** Validate untrusted clips against a skeleton of `jointCount` joints. */
+function deserializeClips(raw: unknown, jointCount: number): AnimationClip[] {
+  if (!Array.isArray(raw)) return [];
+  if (raw.length > MAX_CLIPS) throw new Error("Mesh asset payload is malformed");
+  let keys = 0;
+  return raw.map((clip: SerializedClip) => {
+    if (!clip || !Array.isArray(clip.channels)) throw new Error("Mesh asset payload is malformed");
+    const channels: ClipChannel[] = clip.channels.map((c) => {
+      const path = c?.path === "translation" || c?.path === "rotation" || c?.path === "scale" ? c.path : null;
+      if (!path || !Number.isInteger(c.joint) || c.joint < 0 || c.joint >= jointCount) throw new Error("Mesh asset payload is malformed");
+      const times = base64ToF32(c.times);
+      const values = base64ToF32(c.values);
+      const width = path === "rotation" ? 4 : 3;
+      if (times.length === 0 || values.length !== times.length * width) throw new Error("Mesh asset payload is malformed");
+      for (let i = 0; i < times.length; i += 1) {
+        if (!Number.isFinite(times[i]!) || (i > 0 && times[i]! < times[i - 1]!)) throw new Error("Mesh asset payload is malformed");
+      }
+      if (!values.every(Number.isFinite)) throw new Error("Mesh asset payload is malformed");
+      keys += times.length;
+      if (keys > MAX_CLIP_KEYS) throw new Error("Mesh asset payload is malformed");
+      return { joint: c.joint, path, interpolation: c.interp === "step" ? "step" : "linear", times, values };
+    });
+    const duration = typeof clip.duration === "number" && Number.isFinite(clip.duration) ? Math.max(0, clip.duration) : 0;
+    return { name: typeof clip.name === "string" ? clip.name.slice(0, 64) : "clip", duration, channels };
+  });
 }
 
 /** Serialize a mesh to a compact JSON string for storage in a cart sidecar. */
@@ -341,7 +487,12 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
         textureSprite: primitive.material.textureSprite ?? null,
         ...(primitive.material.tintable ? { tintable: true } : {}),
       },
+      ...(primitive.joints && primitive.weights && mesh.skin
+        ? { joints: u16ToBase64(primitive.joints), weights: f32ToBase64(primitive.weights) }
+        : {}),
     })),
+    ...(mesh.skin ? { skin: serializeSkin(mesh.skin) } : {}),
+    ...(mesh.skin && mesh.clips && mesh.clips.length > 0 ? { clips: mesh.clips.map(serializeClip) } : {}),
   };
   return JSON.stringify(payload);
 }
@@ -401,6 +552,7 @@ export function deserializeMeshAsset(json: string): MeshAsset {
 
   let totalVertices = 0;
   let totalIndices = 0;
+  const skin = raw.skin ? deserializeSkin(raw.skin) : null;
   const primitives: MeshPrimitive[] = raw.primitives.map((entry) => {
     const positions = base64ToF32(entry.positions);
     if (positions.length === 0 || positions.length % 3 !== 0) throw new Error(MALFORMED);
@@ -418,6 +570,17 @@ export function deserializeMeshAsset(json: string): MeshAsset {
     totalVertices += vertexCount;
     totalIndices += indices.length;
     if (totalVertices > MAX_MESH_VERTICES || totalIndices > MAX_MESH_INDICES) throw new Error(MALFORMED);
+
+    // Skin bindings: four joints (each in range) and four weights per vertex.
+    let joints: Uint16Array | null = null;
+    let weights: Float32Array | null = null;
+    if (skin && typeof entry.joints === "string" && typeof entry.weights === "string") {
+      joints = base64ToU16(entry.joints);
+      weights = base64ToF32(entry.weights);
+      if (joints.length !== vertexCount * 4 || weights.length !== vertexCount * 4) throw new Error(MALFORMED);
+      for (let i = 0; i < joints.length; i += 1) if (joints[i]! >= skin.joints.length) throw new Error(MALFORMED);
+      if (!weights.every(Number.isFinite)) throw new Error(MALFORMED);
+    }
 
     const material = entry.material ?? { name: "default", baseColorFactor: [1, 1, 1, 1], image: null };
     return {
@@ -446,9 +609,16 @@ export function deserializeMeshAsset(json: string): MeshAsset {
         textureSprite: toTextureSprite(material.textureSprite),
         ...(material.tintable === true ? { tintable: true } : {}),
       },
+      ...(joints && weights ? { joints, weights } : {}),
     };
   });
 
   if (primitives.length === 0) throw new Error(MALFORMED);
-  return { name: typeof raw.name === "string" ? raw.name : "mesh", primitives };
+  const clips = skin ? deserializeClips(raw.clips, skin.joints.length) : [];
+  return {
+    name: typeof raw.name === "string" ? raw.name : "mesh",
+    primitives,
+    ...(skin ? { skin } : {}),
+    ...(clips.length > 0 ? { clips } : {}),
+  };
 }

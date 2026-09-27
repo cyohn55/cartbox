@@ -99,10 +99,15 @@ trades state and commands with the cart through an 8 KB block at the end of RAM
 
 ## Phase 3 — Animation
 
-- [ ] Skeletal meshes: skinning in both renderers (software reference + WebGPU).
-- [ ] glTF skin and animation-clip import.
+- [x] Skeletal meshes: skinned on the CPU into buffers both renderers draw (the
+      software reference reads them; WebGPU re-uploads a mesh when its pose changes).
+      Moving the skinning itself onto the GPU is a later optimization.
+- [x] glTF skin and animation-clip import (meshes parented to a bone ride on it);
+      clips play by themselves (the first, looping) and switch with a crossfade from
+      Lua (`cartbox.play`, `cartbox.anim`, `cartbox.clips`); the Mesh tab previews them.
 - [ ] Animation state machine with blending and events (walk ↔ run ↔ shoot), driven
       from Lua parameters.
+      (Crossfades between clips are in; the state machine, parameters and events are next.)
 - [ ] Two-bone IK and look-at (feet on slopes, aiming).
 - [ ] Timeline / sequencer for cutscenes and scripted camera moves.
 

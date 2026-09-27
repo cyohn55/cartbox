@@ -27,7 +27,9 @@ import {
   buildSceneShadow,
   childIndices,
   computeEnvironmentAverage,
+  createLiveSkinnedMesh,
   downsamplePanorama,
+  isSkinned,
   renderSkyBackground,
   composeModelMatrix,
   multiplyMat4,
@@ -38,6 +40,7 @@ import {
   type DecodedTexture,
   type EncodedImage,
   type EnvironmentLight,
+  type LiveSkinnedMesh,
   type Mat4,
   type MeshAsset,
   type MeshSceneInstance,
@@ -222,6 +225,12 @@ export class MeshOverlaySurface implements DisplaySurface {
   private bodies: ReadonlyMap<number, Mat4> = new Map();
   /** Spawned prefab copies: root object index → the root's world matrix (see setSpawned). */
   private spawned: ReadonlyMap<number, Mat4> = new Map();
+  /** Skinned instances' live meshes (their buffers are rewritten for each pose). */
+  private readonly live = new Map<number, LiveSkinnedMesh>();
+  /** The skinning matrices each live mesh was last posed with (skip re-skinning the same pose). */
+  private readonly lastSkin = new Map<number, Float32Array>();
+  /** Instances animated this frame: they move for the shadow cache. */
+  private animated: ReadonlySet<number> = new Set();
   /** Each object's reserve-copy root (-1 when it isn't part of a prefab reserve). */
   private readonly pooledRoot: readonly number[];
   /** The authored instances without the reserve copies (drawn when nothing moves). */
@@ -285,6 +294,21 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.spawned = spawned;
   }
 
+  /**
+   * Pose the skinned objects (object index → skinning matrices, see
+   * AnimationSession). Each listed object's live mesh is re-skinned when its
+   * matrices changed, and it counts as moving this frame for the shadow cache.
+   */
+  setSkinning(skinning: ReadonlyMap<number, Float32Array>): void {
+    for (const [i, matrices] of skinning) {
+      const live = this.live.get(i);
+      if (!live || this.lastSkin.get(i) === matrices) continue;
+      live.update(matrices);
+      this.lastSkin.set(i, matrices);
+    }
+    this.animated = new Set([...skinning.keys()].filter((i) => this.live.has(i)));
+  }
+
   /** Posed instances plus, in a hierarchy, everything below them: what moves this frame. */
   private withChildren(indices: Iterable<number>): Set<number> {
     return this.hierarchy ? withDescendants(indices, this.hierarchy.children) : new Set(indices);
@@ -316,8 +340,13 @@ export class MeshOverlaySurface implements DisplaySurface {
     };
     const instances: MeshSceneInstance[] = [];
     const frames: (readonly TexturedMesh[] | null)[] = [];
-    for (const instance of scene.instances) {
-      instances.push({ ...(await texture(instance.mesh)), model: instance.model });
+    const live = new Map<number, LiveSkinnedMesh>();
+    for (const [i, instance] of scene.instances.entries()) {
+      const textured = await texture(instance.mesh);
+      // A skinned object draws its own live copy of the mesh (same textures), posed each frame.
+      const skinned = isSkinned(instance.mesh) ? createLiveSkinnedMesh(instance.mesh) : null;
+      if (skinned) live.set(i, skinned);
+      instances.push({ ...textured, ...(skinned ? { mesh: skinned.mesh } : {}), model: instance.model });
       frames.push(instance.frames && instance.frames.length > 0 ? await Promise.all(instance.frames.map(texture)) : null);
     }
     // Bake the procedural sky dome once, if the rig authors one: the full map is
@@ -330,7 +359,9 @@ export class MeshOverlaySurface implements DisplaySurface {
       const ibl = downsamplePanorama(skyMap, SKY_IBL_DOWNSAMPLE);
       environment = { ...environment, map: ibl, average: computeEnvironmentAverage(ibl) };
     }
-    return new MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
+    const surface = new MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
+    for (const [i, mesh] of live) surface.live.set(i, mesh);
+    return surface;
   }
 
   /**
@@ -537,12 +568,12 @@ export class MeshOverlaySurface implements DisplaySurface {
     front: readonly MeshSceneInstance[];
     moved: readonly MeshSceneInstance[];
   } {
-    if (this.poses.length === 0 && this.bodies.size === 0 && this.spawned.size === 0) {
+    if (this.poses.length === 0 && this.bodies.size === 0 && this.spawned.size === 0 && this.animated.size === 0) {
       this.lastPlacement = null;
       return { main: this.unpooled, front: [], moved: [] };
     }
     if (this.hierarchy) return this.posedHierarchy(this.hierarchy);
-    if (this.bodies.size > 0 || this.spawned.size > 0 || this.unpooled !== this.instances) {
+    if (this.bodies.size > 0 || this.spawned.size > 0 || this.animated.size > 0 || this.unpooled !== this.instances) {
       this.flat ??= {
         parents: this.instances.map(() => -1),
         children: this.instances.map(() => []),
@@ -607,7 +638,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       const poolRoot = this.pooledRoot[i] ?? -1;
       const reserved = poolRoot >= 0 && !this.spawned.has(poolRoot);
       const spawnAt = poolRoot === i ? this.spawned.get(i) : undefined;
-      const moved = Boolean(pose) || Boolean(up?.moved) || Boolean(body) || Boolean(spawnAt);
+      const moved = Boolean(pose) || Boolean(up?.moved) || Boolean(body) || Boolean(spawnAt) || this.animated.has(i);
       let model = this.instances[i]!.model;
       if (moved) {
         // A physics body is placed in world space; a spawned root where it was
@@ -706,11 +737,12 @@ export class MeshOverlaySurface implements DisplaySurface {
       .filter((p) => !p.front)
       .map((p) => p.index)
       .sort((a, b) => a - b)
-      .join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}|${[...this.bodies.keys()].join(",")}`;
+      .join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}|${[...this.bodies.keys()].join(",")}|${[...this.live.keys()].join(",")}`;
     let full = false;
     if (!this.staticShadow || this.staticShadowKey !== key || this.staticShadowLighting !== lighting) {
       this.staticShadow ??= new Float32Array(size * size);
-      const posed = this.withChildren([...this.poses.map((p) => p.index), ...this.bodies.keys()]);
+      // Skinned objects are never still: their shape changes as they animate.
+      const posed = this.withChildren([...this.poses.map((p) => p.index), ...this.bodies.keys(), ...this.live.keys()]);
       // Reserve prefab copies are never part of the static shadow (hidden, or moving once spawned).
       this.pooledRoot.forEach((root, i) => {
         if (root >= 0) posed.add(i);
@@ -758,7 +790,8 @@ export class MeshOverlaySurface implements DisplaySurface {
   private shadowFootprint(instance: MeshSceneInstance, size: number): TexelRect | null {
     const m = this.staticShadowMatrix;
     if (!m) return null;
-    let b = this.meshBounds.get(instance.mesh);
+    // A live skinned mesh changes shape every frame: measure it afresh.
+    let b = instance.mesh.primitives.some((p) => p.dynamic) ? undefined : this.meshBounds.get(instance.mesh);
     if (!b) {
       let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
       for (const primitive of instance.mesh.primitives) {
@@ -770,7 +803,7 @@ export class MeshOverlaySurface implements DisplaySurface {
         }
       }
       b = [x0, y0, z0, x1, y1, z1];
-      this.meshBounds.set(instance.mesh, b);
+      if (!instance.mesh.primitives.some((p) => p.dynamic)) this.meshBounds.set(instance.mesh, b);
     }
     if (!Number.isFinite(b[0])) return null;
     const mm = multiplyMat4(m, instance.model);

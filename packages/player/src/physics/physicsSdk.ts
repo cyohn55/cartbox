@@ -29,6 +29,14 @@
  *   cartbox.despawn(obj)              put a spawned copy back in reserve
  *   cartbox.alive(obj)                -> whether a copy is spawned
  *
+ * Skeletal animation (when the scene has skinned objects) rides it too:
+ *
+ *   cartbox.play(obj, clip, fade, speed, loop)  play a clip (name or 0-based index; nil = rest
+ *                                     pose), crossfading over `fade` seconds (default 0.2);
+ *                                     speed 1, loop true by default
+ *   cartbox.anim(obj)                 -> clip name (nil at rest), seconds into it, finished
+ *   cartbox.clips(obj)                -> { name, ... } the object's clips
+ *
  * `obj` is an object index or its name (as cartbox.find). The SDK's defaults
  * (sdk.ts) make every call a safe no-op for carts without bodies or prefabs.
  */
@@ -52,11 +60,14 @@ import {
   PHYS_MAX_RAYS,
   PHYS_OVERLAP_BYTES,
   PHYS_OVERLAPS,
+  PHYS_ANIM_BYTES,
+  PHYS_ANIMS,
   PHYS_OP_CAST,
   PHYS_OP_DESPAWN,
   PHYS_OP_IMPULSE,
   PHYS_OP_MOTOR,
   PHYS_OP_MOVE,
+  PHYS_OP_PLAY,
   PHYS_OP_RAY,
   PHYS_OP_SPAWN,
   PHYS_OP_TELEPORT,
@@ -68,13 +79,16 @@ import {
   type RamLayout,
 } from "./protocol.js";
 import { physicsSlots, sceneHasPhysics } from "./physicsSession.js";
+import { animatedObjects } from "../anim/animationSession.js";
 
 /**
  * Whether a scene needs the runtime block at all: bodies (when a physics engine
- * will run them), or prefabs to spawn.
+ * will run them), prefabs to spawn, or skinned objects to animate.
  */
 export function sceneNeedsRuntime(scene: MeshScene | null | undefined, { physics = true }: { physics?: boolean } = {}): boolean {
-  return Boolean(scene && ((physics && sceneHasPhysics(scene)) || (scene.pools?.length ?? 0) > 0));
+  return Boolean(
+    scene && ((physics && sceneHasPhysics(scene)) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0),
+  );
 }
 
 const luaString = (s: string) => JSON.stringify(s);
@@ -129,7 +143,8 @@ export function runtimeSdkLua(
     _wr(_B + ${PHYS_CMDS}, n + 1)
   end
 ${physics ? PHYSICS_CALLS() : ""}
-${pools.length > 0 ? SPAWN_CALLS(pools) : ""}end`;
+${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
+${ANIM_CALLS(scene)}end`;
 }
 
 /** The physics calls (inside the runtime block's do … end, after its helpers). */
@@ -266,6 +281,55 @@ function SPAWN_CALLS(pools: readonly string[]): string {
   cartbox.alive = function(o)
     local i = _obj(o)
     return i ~= nil and _alive[i] == true
+  end
+`;
+}
+
+/** The animation calls: each animated object's clip names, play and read back. */
+function ANIM_CALLS(scene: MeshScene): string {
+  const animated = animatedObjects(scene);
+  if (animated.length === 0) return "";
+  const names = animated.map((i) => `[${i}]={${(scene.instances[i]!.mesh.clips ?? []).map((c) => luaString(c.name)).join(",")}}`);
+  const durations = animated.map((i) => `[${i}]={${(scene.instances[i]!.mesh.clips ?? []).map((c) => c.duration).join(",")}}`);
+  return `  local _clips = {${names.join(",")}}
+  local _dur = {${durations.join(",")}}
+  local _loops = {}
+  cartbox.clips = function(o)
+    local i = _obj(o)
+    local out = {}
+    for k, n in ipairs((i and _clips[i]) or {}) do out[k] = n end
+    return out
+  end
+  cartbox.play = function(o, clip, fade, speed, loop)
+    local i = _obj(o)
+    local names = i and _clips[i]
+    if names == nil then return end
+    local c = -1
+    if type(clip) == "number" then
+      if clip >= 0 and clip < #names then c = math.floor(clip) end
+    elseif type(clip) == "string" then
+      for k, n in ipairs(names) do if n == clip then c = k - 1 end end
+      if c < 0 then return end
+    end
+    if loop == nil then loop = true end
+    _loops[i] = loop
+    _cmd(${PHYS_OP_PLAY}, i, c, fade or 0.2, speed or 1, loop and 1 or 0, 0)
+  end
+  cartbox.anim = function(o)
+    local i = _obj(o)
+    if i == nil or _clips[i] == nil or not _live() then return nil, 0, false end
+    local n = _rd(_B + ${PHYS_ANIMS})
+    for k = 0, n - 1 do
+      local at = _B + ${PHYS_ANIMS + 4} + k * ${PHYS_ANIM_BYTES}
+      if _rd(at) == i then
+        local c = _rd(at + 4)
+        if c < 0 then return nil, 0, false end
+        local t = _rd(at + 8) / ${PHYS_FIX}
+        local done = _loops[i] == false and t >= (_dur[i][c + 1] or 0) - 0.0005
+        return _clips[i][c + 1], t, done
+      end
+    end
+    return nil, 0, false
   end
 `;
 }

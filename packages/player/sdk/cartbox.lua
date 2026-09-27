@@ -283,6 +283,12 @@ cartbox = {
   --   cartbox.spawn(prefab, x, y, z, yaw, pitch, roll) -> the copy's root object, or nil
   --   cartbox.despawn(obj)             put a spawned copy back in reserve
   --   cartbox.alive(obj)               -> whether a copy is spawned
+  -- Skeletal animation (skinned meshes imported with clips; each plays its first clip,
+  -- looping, until told otherwise):
+  --   cartbox.play(obj, clip, fade, speed, loop)  play a clip by name or 0-based index
+  --     (nil = rest pose), crossfading over fade seconds (default 0.2)
+  --   cartbox.anim(obj)                -> clip name, seconds into it, finished
+  --   cartbox.clips(obj)               -> { name, ... }
   -- Physics (bodies on scene objects): overridden by the injected physics calls
   -- when the cart has bodies.
   physics = function() return false end,
@@ -305,4 +311,8 @@ cartbox = {
   spawn = function() return nil end,
   despawn = function() end,
   alive = function() return false end,
+  -- Skeletal animation: overridden when the scene has skinned objects.
+  play = function() end,
+  anim = function() return nil, 0, false end,
+  clips = function() return {} end,
 }

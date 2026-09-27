@@ -314,6 +314,7 @@ function ObjectsPanel({ objects, filter, onFilter }: { objects: InspectedObject[
               o.body
                 ? `${o.body.kind}${o.body.active ? "" : " (off)"} · v ${fmt(o.body.velocity[0])}, ${fmt(o.body.velocity[1])}, ${fmt(o.body.velocity[2])}${o.body.kind === "character" ? (o.body.grounded ? " · grounded" : " · airborne") : ""}`
                 : null,
+              o.animation ? (o.animation.clip ? `▶ ${o.animation.clip} ${fmt(o.animation.time)}s` : "rest pose") : null,
               o.tags.length > 0 ? o.tags.map((t) => `#${t}`).join(" ") : null,
               Object.keys(o.props).length > 0
                 ? Object.entries(o.props)
