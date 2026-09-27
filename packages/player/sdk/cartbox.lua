@@ -268,7 +268,9 @@ cartbox = {
   --   cartbox.velocity(obj, x, y, z)   set a body's velocity
   --   cartbox.teleport(obj, x, y, z)   move a body at once
   --   cartbox.move(obj, dx, dy, dz)    walk a character (slides, climbs, steps)
-  --   cartbox.ray(slot, x, y, z, dx, dy, dz, max)   cast a ray; read it next tick
+  --   cartbox.ray(slot, x, y, z, dx, dy, dz, max, ignore)   cast a ray; read it next tick
+  --   cartbox.sweep(slot, shape, x, y, z, dx, dy, dz, max, ignore)   sweep a sphere
+  --     (shape = radius), box ({hx, hy, hz}) or capsule ({radius, halfheight}) instead
   --   cartbox.hit(slot)                -> hit, obj, x, y, z, nx, ny, nz, distance
   --   cartbox.contacts()               -> this tick's contacts { {a=, b=, started=, trigger=} }
   --   cartbox.entered(trigger)         -> objects that came into a trigger zone this tick
@@ -287,6 +289,7 @@ cartbox = {
   teleport = function() end,
   move = function() end,
   ray = function() end,
+  sweep = function() end,
   hit = function() return false end,
   contacts = function() return {} end,
   entered = function() return {} end,

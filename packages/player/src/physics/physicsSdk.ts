@@ -9,7 +9,10 @@
  *   cartbox.velocity(obj, x, y, z)    set a dynamic or kinematic body's velocity
  *   cartbox.teleport(obj, x, y, z)    move a body there at once
  *   cartbox.move(obj, dx, dy, dz)     walk a character this tick (slides, climbs, steps)
- *   cartbox.ray(slot, x, y, z, dx, dy, dz, max)   cast a ray (slot 0-15); read next tick
+ *   cartbox.ray(slot, x, y, z, dx, dy, dz, max, ignore)   cast a ray (slot 0-15); read next tick
+ *   cartbox.sweep(slot, shape, x, y, z, dx, dy, dz, max, ignore)   sweep a shape instead:
+ *                                     shape = radius (sphere), {hx, hy, hz} (box half-extents)
+ *                                     or {radius, halfheight} (upright capsule)
  *   cartbox.hit(slot)                 -> hit, obj, x, y, z, nx, ny, nz, distance
  *   cartbox.contacts()                -> this tick's contacts { {a=, b=, started=, trigger=}, ... }
  *   cartbox.entered(trigger)          -> objects that came into a trigger zone this tick
@@ -30,6 +33,10 @@ import type { MeshScene } from "../mesh/meshScene.js";
 import {
   PHYS_BODIES,
   PHYS_BODY_BYTES,
+  PHYS_CAST_BOX,
+  PHYS_CAST_CAPSULE,
+  PHYS_CAST_RAY,
+  PHYS_CAST_SPHERE,
   PHYS_CMD_BYTES,
   PHYS_CMDS,
   PHYS_EVENT_BYTES,
@@ -40,6 +47,7 @@ import {
   PHYS_MAX_RAYS,
   PHYS_OVERLAP_BYTES,
   PHYS_OVERLAPS,
+  PHYS_OP_CAST,
   PHYS_OP_DESPAWN,
   PHYS_OP_IMPULSE,
   PHYS_OP_MOVE,
@@ -139,13 +147,29 @@ function PHYSICS_CALLS(): string {
   cartbox.velocity = _each(${PHYS_OP_VELOCITY})
   cartbox.teleport = _each(${PHYS_OP_TELEPORT})
   cartbox.move = _each(${PHYS_OP_MOVE})
-  cartbox.ray = function(slot, x, y, z, dx, dy, dz, max)
+  -- A ray, or (kind > 0) a swept shape, from a slot: options first, then the ray.
+  local function _cast(slot, kind, a, b, c, x, y, z, dx, dy, dz, max, ignore)
     slot = math.floor(slot or 0)
     if slot < 0 or slot >= ${PHYS_MAX_RAYS} then return end
     local m = math.sqrt((dx or 0)^2 + (dy or 0)^2 + (dz or 0)^2)
     if m < 1e-9 then return end
+    local skip = 0
+    if ignore ~= nil then skip = (_obj(ignore) or -1) + 1 end
+    if kind ~= ${PHYS_CAST_RAY} or skip > 0 then _cmd(${PHYS_OP_CAST}, slot, kind, a, b, c, skip) end
     local k = (max or 100) / m
     _cmd(${PHYS_OP_RAY}, slot, x, y, z, dx * k, dy * k, dz * k)
+  end
+  cartbox.ray = function(slot, x, y, z, dx, dy, dz, max, ignore)
+    _cast(slot, ${PHYS_CAST_RAY}, 0, 0, 0, x, y, z, dx, dy, dz, max, ignore)
+  end
+  cartbox.sweep = function(slot, shape, x, y, z, dx, dy, dz, max, ignore)
+    if type(shape) == "number" then
+      _cast(slot, ${PHYS_CAST_SPHERE}, shape, 0, 0, x, y, z, dx, dy, dz, max, ignore)
+    elseif type(shape) == "table" and #shape >= 3 then
+      _cast(slot, ${PHYS_CAST_BOX}, shape[1], shape[2], shape[3], x, y, z, dx, dy, dz, max, ignore)
+    elseif type(shape) == "table" and #shape == 2 then
+      _cast(slot, ${PHYS_CAST_CAPSULE}, shape[1], shape[2], 0, x, y, z, dx, dy, dz, max, ignore)
+    end
   end
   cartbox.hit = function(slot)
     slot = math.floor(slot or 0)

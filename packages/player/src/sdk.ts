@@ -269,6 +269,7 @@ cartbox = {
   teleport = function() end,
   move = function() end,
   ray = function() end,
+  sweep = function() end,
   hit = function() return false end,
   contacts = function() return {} end,
   entered = function() return {} end,

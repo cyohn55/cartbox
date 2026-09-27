@@ -403,6 +403,8 @@ export {
   physicsSlots,
   sceneHasPhysics,
   splitWorldMatrix,
+  type CastHit,
+  type CastShape,
   type PhysicsBackend,
   type PhysicsBodyDesc,
   type PhysicsShape,

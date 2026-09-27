@@ -81,12 +81,13 @@ and live inspection. Later: nested prefabs, picking objects in the game view.
 - [x] Trigger zones (`cartbox.entered` / `exited` / `inside`) and collision events
       (`cartbox.contacts`); triggers don't block characters or rays.
 - [x] Per-body gravity multiplier and damping.
-- [ ] Shape casts.
+- [x] Shape casts: `cartbox.sweep` sweeps a sphere, box or capsule and reports
+      through the same slots as rays; rays and sweeps can ignore their caster.
 - [ ] Joints (hinges, springs).
 - [ ] Deterministic mode across browsers for netplay (Rapier's deterministic build).
 
-**Status:** bodies, character controller, raycasts, triggers, contact events and
-per-body gravity / damping landed. The host runs the world at a fixed 1/60 s step and
+**Status:** bodies, character controller, raycasts, shape casts, triggers, contact
+events and per-body gravity / damping landed. The host runs the world at a fixed 1/60 s step and
 trades state and commands with the cart through an 8 KB block at the end of RAM
 (its address per engine core is checked against the real builds by a test).
 

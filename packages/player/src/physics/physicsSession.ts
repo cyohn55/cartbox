@@ -10,7 +10,7 @@
  * Per tick: `beforeTick` writes the state after the last step (and last tick's
  * ray results) into the shared block; the cart runs, reading state and writing
  * commands; `afterTick` applies those commands, steps the world one fixed 1/60 s
- * step, and casts the requested rays for the next tick to read.
+ * step, and casts the requested rays (and shape sweeps) for the next tick to read.
  */
 
 import { meshBounds, type Mat4, type MeshAsset, type PhysicsSpec } from "@cartbox/editor";
@@ -18,7 +18,11 @@ import { meshBounds, type Mat4, type MeshAsset, type PhysicsSpec } from "@cartbo
 import type { MeshScene } from "../mesh/meshScene.js";
 import {
   PHYS_MAX_BODIES,
+  PHYS_CAST_BOX,
+  PHYS_CAST_CAPSULE,
+  PHYS_CAST_SPHERE,
   PHYS_MAX_RAYS,
+  PHYS_OP_CAST,
   PHYS_OP_IMPULSE,
   PHYS_OP_MOVE,
   PHYS_OP_RAY,
@@ -41,6 +45,20 @@ export type PhysicsShape =
   | { readonly kind: "sphere"; readonly radius: number; readonly offset: Vec3 }
   | { readonly kind: "capsule"; readonly halfHeight: number; readonly radius: number; readonly offset: Vec3 }
   | { readonly kind: "mesh"; readonly vertices: Float32Array; readonly indices: Uint32Array };
+
+/** A shape swept through the world by a shape cast (upright, unrotated). */
+export type CastShape =
+  | { readonly kind: "sphere"; readonly radius: number }
+  | { readonly kind: "box"; readonly halfExtents: Vec3 }
+  | { readonly kind: "capsule"; readonly radius: number; readonly halfHeight: number };
+
+/** What a ray or shape cast hit. */
+export interface CastHit {
+  readonly object: number;
+  readonly point: Vec3;
+  readonly normal: Vec3;
+  readonly distance: number;
+}
 
 export interface PhysicsBodyDesc {
   readonly kind: PhysicsSpec["body"];
@@ -71,8 +89,17 @@ export interface PhysicsBackend {
   teleport(handle: number, position: Vec3): void;
   /** Move a character by `delta`, sliding along what it hits. Returns whether it ended on the ground. */
   moveCharacter(handle: number, delta: Vec3): { grounded: boolean };
-  /** The nearest hit along a unit `direction` within `maxDistance`, or null. */
-  raycast(origin: Vec3, direction: Vec3, maxDistance: number): { object: number; point: Vec3; normal: Vec3; distance: number } | null;
+  /**
+   * The nearest hit along a unit `direction` within `maxDistance`, or null.
+   * `ignore` is a scene object whose body the ray passes through.
+   */
+  raycast(origin: Vec3, direction: Vec3, maxDistance: number, ignore?: number): CastHit | null;
+  /**
+   * Sweep `shape` from `origin` along a unit `direction`: the first hit within
+   * `maxDistance` (distance = how far the shape's centre travelled before touching;
+   * point and normal are on the surface hit), or null.
+   */
+  shapecast?(shape: CastShape, origin: Vec3, direction: Vec3, maxDistance: number, ignore?: number): CastHit | null;
   /** Take a body out of (or back into) the world — a spawnable copy waiting in reserve. */
   setEnabled(handle: number, enabled: boolean): void;
   /** Place a body at a position and rotation at once, at rest. */
@@ -182,6 +209,21 @@ export function fitShape(spec: PhysicsSpec, mesh: MeshAsset, scale: Vec3): Physi
   }
 }
 
+/** The shape a PHYS_OP_CAST asks to sweep (sizes at least 1 mm), or null for a plain ray. */
+function castShape(kind: number, a: number, b: number, c: number): CastShape | null {
+  const size = (v: number) => Math.max(0.001, Math.abs(v));
+  switch (Math.round(kind)) {
+    case PHYS_CAST_SPHERE:
+      return { kind: "sphere", radius: size(a) };
+    case PHYS_CAST_BOX:
+      return { kind: "box", halfExtents: [size(a), size(b), size(c)] };
+    case PHYS_CAST_CAPSULE:
+      return { kind: "capsule", radius: size(a), halfHeight: Math.max(0, b) };
+    default:
+      return null;
+  }
+}
+
 /** The scene objects with bodies the cart can read and drive (everything but static), in slot order. */
 export function physicsSlots(scene: MeshScene): number[] {
   const out: number[] = [];
@@ -213,7 +255,7 @@ export class PhysicsSession {
   private readonly byObject = new Map<number, Tracked>();
   /** Bodies of reserve prefab copies (static ones too), by object index. */
   private readonly pooledBodies = new Map<number, { handle: number; enabled: boolean }>();
-  private rayRequests: ({ origin: Vec3; direction: Vec3; max: number } | null)[] = [];
+  private rayRequests: ({ origin: Vec3; direction: Vec3; max: number; shape: CastShape | null; ignore?: number } | null)[] = [];
   private rayResults: (PhysicsRayHit | null)[] = [];
   private events: PhysicsContactEvent[] = [];
   private overlapPairs: [number, number][] = [];
@@ -296,13 +338,24 @@ export class PhysicsSession {
   /** Apply a tick's commands (already taken from the block), step, and cast rays. */
   run(commands: readonly PhysicsCommand[]): void {
     this.rayRequests = [];
+    // Shape and ignore options for the next ray in each slot (see PHYS_OP_CAST).
+    const castOptions = new Map<number, { shape: CastShape | null; ignore?: number }>();
     for (const t of this.tracked) if (t.kind === "character") t.lastMove = [0, 0, 0];
     for (const cmd of commands) {
       const [a, b, c, d, e, f] = cmd.v;
+      if (cmd.op === PHYS_OP_CAST) {
+        if (cmd.a >= 0 && cmd.a < PHYS_MAX_RAYS) {
+          const ignore = Math.round(e) - 1;
+          castOptions.set(cmd.a, { shape: castShape(a, b, c, d), ...(ignore >= 0 ? { ignore } : {}) });
+        }
+        continue;
+      }
       if (cmd.op === PHYS_OP_RAY) {
         if (cmd.a >= 0 && cmd.a < PHYS_MAX_RAYS) {
           const len = Math.hypot(d, e, f);
-          this.rayRequests[cmd.a] = len > 1e-9 ? { origin: [a, b, c], direction: [d / len, e / len, f / len], max: len } : null;
+          const options = castOptions.get(cmd.a) ?? { shape: null };
+          castOptions.delete(cmd.a);
+          this.rayRequests[cmd.a] = len > 1e-9 ? { origin: [a, b, c], direction: [d / len, e / len, f / len], max: len, ...options } : null;
         }
         continue;
       }
@@ -325,7 +378,9 @@ export class PhysicsSession {
     this.rayResults = [];
     for (let slot = 0; slot < PHYS_MAX_RAYS; slot += 1) {
       const req = this.rayRequests[slot];
-      this.rayResults[slot] = req ? this.backend.raycast(req.origin, req.direction, req.max) : null;
+      if (!req) this.rayResults[slot] = null;
+      else if (req.shape) this.rayResults[slot] = this.backend.shapecast?.(req.shape, req.origin, req.direction, req.max, req.ignore) ?? null;
+      else this.rayResults[slot] = this.backend.raycast(req.origin, req.direction, req.max, req.ignore);
     }
   }
 

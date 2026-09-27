@@ -86,6 +86,16 @@ export const PHYS_OP_RAY = 5;
 /** Scene ops (the block carries them whether or not the cart has physics). */
 export const PHYS_OP_SPAWN = 6; // a = the copy's root object, v = x, y, z, yaw, pitch, roll
 export const PHYS_OP_DESPAWN = 7; // a = the copy's root object
+/**
+ * Options for the next ray in a slot this tick (sent just before its PHYS_OP_RAY):
+ * a = slot, v0 = shape (CAST_RAY / SPHERE / BOX / CAPSULE), v1..v3 = size
+ * (radius · box half-extents · radius and half height), v4 = object to ignore + 1.
+ */
+export const PHYS_OP_CAST = 8;
+export const PHYS_CAST_RAY = 0;
+export const PHYS_CAST_SPHERE = 1;
+export const PHYS_CAST_BOX = 2;
+export const PHYS_CAST_CAPSULE = 3;
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {
