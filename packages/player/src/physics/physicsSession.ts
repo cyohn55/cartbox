@@ -13,7 +13,7 @@
  * step, and casts the requested rays (and shape sweeps) for the next tick to read.
  */
 
-import { meshBounds, type Mat4, type MeshAsset, type PhysicsSpec } from "@cartbox/editor";
+import { DEFAULT_SPRING_DAMPING, DEFAULT_SPRING_STIFFNESS, meshBounds, type JointKind, type JointSpec, type Mat4, type MeshAsset, type PhysicsSpec } from "@cartbox/editor";
 
 import type { MeshScene } from "../mesh/meshScene.js";
 import {
@@ -24,9 +24,11 @@ import {
   PHYS_MAX_RAYS,
   PHYS_OP_CAST,
   PHYS_OP_IMPULSE,
+  PHYS_OP_MOTOR,
   PHYS_OP_MOVE,
   PHYS_OP_RAY,
   PHYS_OP_TELEPORT,
+  PHYS_OP_UNJOIN,
   PHYS_OP_VELOCITY,
   takePhysicsCommands,
   writePhysicsState,
@@ -78,6 +80,27 @@ export interface PhysicsBodyDesc {
   readonly object: number;
 }
 
+/**
+ * A joint between a body and another (or the world), as local frames on each:
+ * at the start the two frames coincide in the world. A hinge turns about its
+ * frames' X axis; limits are radians from that start.
+ */
+export interface PhysicsJointDesc {
+  readonly kind: JointKind;
+  readonly body: number;
+  /** The other body's handle, or null for the world (frame2 is then in world space). */
+  readonly target: number | null;
+  readonly anchor1: Vec3;
+  readonly frame1: Quat;
+  readonly anchor2: Vec3;
+  readonly frame2: Quat;
+  readonly limits?: readonly [number, number];
+  /** Spring rest length / rope's longest reach. */
+  readonly length: number;
+  readonly stiffness: number;
+  readonly damping: number;
+}
+
 /** What a physics engine must provide. Handles are small integers the backend picks. */
 export interface PhysicsBackend {
   addBody(desc: PhysicsBodyDesc): number;
@@ -108,6 +131,11 @@ export interface PhysicsBackend {
   drainContacts(): PhysicsContactEvent[];
   /** What is inside each trigger now, as (trigger object, other object) pairs. */
   overlaps(): [number, number][];
+  /** Joints (optional: a backend without them leaves bodies unjointed). */
+  addJoint?(desc: PhysicsJointDesc): number;
+  removeJoint?(joint: number): void;
+  /** Drive a hinge at `speed` rad/s with at most `force` (0 turns the motor off). */
+  setMotor?(joint: number, speed: number, force: number): void;
   destroy(): void;
 }
 
@@ -170,6 +198,55 @@ export function composeWorldMatrix(p: Vec3, q: Quat, s: Vec3): Mat4 {
   m[14] = p[2];
   m[15] = 1;
   return m;
+}
+
+const qmul = (a: Quat, b: Quat): Quat => [
+  a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+  a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+  a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+  a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+];
+const qconj = (q: Quat): Quat => [-q[0], -q[1], -q[2], q[3]];
+/** Rotate v by unit quaternion q. */
+function qrot(q: Quat, v: Vec3): Vec3 {
+  const r = qmul(qmul(q, [v[0], v[1], v[2], 0]), qconj(q));
+  return [r[0], r[1], r[2]];
+}
+const S = Math.SQRT1_2;
+/** Rotations taking a hinge frame's X axis onto the object's own x / y / z axis. */
+const HINGE_FRAME: Readonly<Record<string, Quat>> = { x: [0, 0, 0, 1], y: [0, 0, S, S], z: [0, -S, 0, S] };
+
+/**
+ * The joint frames for a body posed by world matrix `self`, tied to a target posed
+ * by `target` (null: the world). The anchor is in the object's own coordinates, so
+ * it's scaled with the object; a spring or rope pulls the object's centre toward it.
+ */
+export function jointFrames(
+  spec: JointSpec,
+  self: Mat4,
+  target: Mat4 | null,
+): Omit<PhysicsJointDesc, "body" | "target"> {
+  const a = splitWorldMatrix(self);
+  const b = target ? splitWorldMatrix(target) : { position: [0, 0, 0] as Vec3, rotation: [0, 0, 0, 1] as Quat };
+  const local: Vec3 = [spec.anchor[0] * a.scale[0], spec.anchor[1] * a.scale[1], spec.anchor[2] * a.scale[2]];
+  const offset = qrot(a.rotation, local);
+  const world: Vec3 = [a.position[0] + offset[0], a.position[1] + offset[1], a.position[2] + offset[2]];
+  const inB = qconj(b.rotation);
+  const anchor2 = qrot(inB, [world[0] - b.position[0], world[1] - b.position[1], world[2] - b.position[2]]);
+  const pulls = spec.kind === "spring" || spec.kind === "rope";
+  const frame1 = spec.kind === "hinge" ? HINGE_FRAME[spec.axis ?? "y"]! : ([0, 0, 0, 1] as Quat);
+  const deg = Math.PI / 180;
+  return {
+    kind: spec.kind,
+    anchor1: pulls ? [0, 0, 0] : local,
+    frame1,
+    anchor2,
+    frame2: qmul(qmul(inB, a.rotation), frame1),
+    ...(spec.kind === "hinge" && spec.limits ? { limits: [spec.limits[0] * deg, spec.limits[1] * deg] as const } : {}),
+    length: spec.length ?? Math.hypot(local[0], local[1], local[2]),
+    stiffness: spec.stiffness ?? DEFAULT_SPRING_STIFFNESS,
+    damping: spec.damping ?? DEFAULT_SPRING_DAMPING,
+  };
 }
 
 /** Fit a collider of `spec.shape` to a mesh's bounds (or triangles), scaled. */
@@ -255,6 +332,10 @@ export class PhysicsSession {
   private readonly byObject = new Map<number, Tracked>();
   /** Bodies of reserve prefab copies (static ones too), by object index. */
   private readonly pooledBodies = new Map<number, { handle: number; enabled: boolean }>();
+  /** Every body's handle, by object index. */
+  private readonly handleOf = new Map<number, number>();
+  /** Jointed objects: what they're tied to (object, or null for the world) and the live joint. */
+  private readonly joints = new Map<number, { spec: JointSpec; target: number | null; handle: number | null; pooled: boolean }>();
   private rayRequests: ({ origin: Vec3; direction: Vec3; max: number; shape: CastShape | null; ignore?: number } | null)[] = [];
   private rayResults: (PhysicsRayHit | null)[] = [];
   private events: PhysicsContactEvent[] = [];
@@ -284,6 +365,7 @@ export class PhysicsSession {
         ...(spec.damping !== undefined ? { damping: spec.damping } : {}),
         object: i,
       });
+      this.handleOf.set(i, handle);
       if (pooled) {
         backend.setEnabled(handle, false);
         this.pooledBodies.set(i, { handle, enabled: false });
@@ -293,6 +375,45 @@ export class PhysicsSession {
       this.tracked.push(t);
       this.byObject.set(i, t);
     });
+    // Joints tie a body to its nearest ancestor with a body, or the world.
+    scene.instances.forEach((inst, i) => {
+      const spec = inst.physics?.joint;
+      if (!spec || !this.handleOf.has(i)) return;
+      let target: number | null = null;
+      for (let p = inst.parent; p >= 0; p = scene.instances[p]!.parent) {
+        if (this.handleOf.has(p)) {
+          target = p;
+          break;
+        }
+      }
+      this.joints.set(i, { spec, target, handle: null, pooled: Boolean(inst.pooled) });
+    });
+    // A reserve copy's joints are made when it spawns, where it's placed.
+    const model = (object: number) => scene.instances[object]?.model ?? null;
+    for (const [object, joint] of this.joints) if (!joint.pooled) this.join(object, model);
+  }
+
+  /** Create `object`'s joint from where it and its target are now (`world` gives world matrices). */
+  private join(object: number, world: (object: number) => Mat4 | null): void {
+    const joint = this.joints.get(object);
+    const handle = this.handleOf.get(object);
+    const self = world(object);
+    if (!joint || handle === undefined || !self || !this.backend.addJoint) return;
+    this.unjoin(object);
+    const target = joint.target === null ? null : world(joint.target);
+    if (joint.target !== null && !target) return;
+    joint.handle = this.backend.addJoint({
+      ...jointFrames(joint.spec, self, target),
+      body: handle,
+      target: joint.target === null ? null : this.handleOf.get(joint.target)!,
+    });
+  }
+
+  private unjoin(object: number): void {
+    const joint = this.joints.get(object);
+    if (joint?.handle == null) return;
+    this.backend.removeJoint?.(joint.handle);
+    joint.handle = null;
   }
 
   /** Write body state and last tick's ray results for the cart to read. */
@@ -333,6 +454,21 @@ export class PhysicsSession {
         t.grounded = false;
       }
     }
+    // Once every body is placed, a spawned copy's joints are made afresh (even
+    // ones the cart broke last time); a despawned copy's are removed.
+    for (const object of objects) {
+      if (!this.joints.has(object)) continue;
+      if (active) this.join(object, (o) => (objects.includes(o) ? world(o) : this.currentWorld(o)));
+      else this.unjoin(object);
+    }
+  }
+
+  /** A body's world matrix now (position and rotation from physics; unit scale). */
+  private currentWorld(object: number): Mat4 | null {
+    const handle = this.handleOf.get(object);
+    if (handle === undefined) return null;
+    const s = this.backend.bodyState(handle);
+    return composeWorldMatrix(s.position, s.rotation, this.byObject.get(object)?.scale ?? [1, 1, 1]);
   }
 
   /** Apply a tick's commands (already taken from the block), step, and cast rays. */
@@ -361,6 +497,13 @@ export class PhysicsSession {
       }
       const t = this.byObject.get(cmd.a);
       if (!t || !t.enabled) continue;
+      if (cmd.op === PHYS_OP_MOTOR || cmd.op === PHYS_OP_UNJOIN) {
+        const joint = this.joints.get(cmd.a);
+        if (joint?.handle == null) continue;
+        if (cmd.op === PHYS_OP_UNJOIN) this.unjoin(cmd.a);
+        else if (joint.spec.kind === "hinge") this.backend.setMotor?.(joint.handle, a, Math.max(0, b));
+        continue;
+      }
       if (cmd.op === PHYS_OP_IMPULSE && t.kind === "dynamic") this.backend.applyImpulse(t.handle, [a, b, c]);
       else if (cmd.op === PHYS_OP_VELOCITY && t.kind !== "character") this.backend.setVelocity(t.handle, [a, b, c]);
       else if (cmd.op === PHYS_OP_TELEPORT) this.backend.teleport(t.handle, [a, b, c]);

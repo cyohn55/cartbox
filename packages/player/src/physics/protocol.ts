@@ -96,6 +96,9 @@ export const PHYS_CAST_RAY = 0;
 export const PHYS_CAST_SPHERE = 1;
 export const PHYS_CAST_BOX = 2;
 export const PHYS_CAST_CAPSULE = 3;
+/** Joints: a = the jointed object. MOTOR: v0 = speed (rad/s about the hinge), v1 = max force (0 = off). */
+export const PHYS_OP_MOTOR = 9;
+export const PHYS_OP_UNJOIN = 10;
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {

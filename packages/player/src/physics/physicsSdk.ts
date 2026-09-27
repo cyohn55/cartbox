@@ -18,6 +18,8 @@
  *   cartbox.entered(trigger)          -> objects that came into a trigger zone this tick
  *   cartbox.exited(trigger)           -> objects that left it this tick
  *   cartbox.inside(trigger)           -> objects in it now
+ *   cartbox.motor(obj, speed, force)  drive a hinge joint (rad/s, max force; no speed = off)
+ *   cartbox.unjoin(obj)               break an object's joint (it's remade if the copy respawns)
  *
  * Spawning prefab copies (when the cart has prefabs) rides the same block:
  *
@@ -50,10 +52,12 @@ import {
   PHYS_OP_CAST,
   PHYS_OP_DESPAWN,
   PHYS_OP_IMPULSE,
+  PHYS_OP_MOTOR,
   PHYS_OP_MOVE,
   PHYS_OP_RAY,
   PHYS_OP_SPAWN,
   PHYS_OP_TELEPORT,
+  PHYS_OP_UNJOIN,
   PHYS_OP_VELOCITY,
   PHYS_RAY_BYTES,
   PHYS_RAYS,
@@ -147,6 +151,15 @@ function PHYSICS_CALLS(): string {
   cartbox.velocity = _each(${PHYS_OP_VELOCITY})
   cartbox.teleport = _each(${PHYS_OP_TELEPORT})
   cartbox.move = _each(${PHYS_OP_MOVE})
+  cartbox.motor = function(o, speed, force)
+    local i = _obj(o)
+    if i == nil or not _slot[i] then return end
+    if speed == nil then _cmd(${PHYS_OP_MOTOR}, i, 0, 0) else _cmd(${PHYS_OP_MOTOR}, i, speed, force or 1000) end
+  end
+  cartbox.unjoin = function(o)
+    local i = _obj(o)
+    if i and _slot[i] then _cmd(${PHYS_OP_UNJOIN}, i) end
+  end
   -- A ray, or (kind > 0) a swept shape, from a slot: options first, then the ray.
   local function _cast(slot, kind, a, b, c, x, y, z, dx, dy, dz, max, ignore)
     slot = math.floor(slot or 0)

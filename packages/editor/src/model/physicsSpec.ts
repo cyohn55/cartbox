@@ -11,7 +11,46 @@
  *
  * The collider is fitted to the object's mesh: a box or sphere around its bounds,
  * an upright capsule, or (static only) the mesh's own triangles.
+ *
+ * A dynamic body may also carry a joint (see {@link JointSpec}), which ties it to
+ * its nearest ancestor in the Hierarchy that has a body — or, with none, to the
+ * world. Tying to the hierarchy (rather than to an object by id) keeps joints
+ * working inside prefabs, whose copies get fresh ids.
  */
+
+export type JointKind = "hinge" | "ball" | "fixed" | "spring" | "rope";
+export type JointAxis = "x" | "y" | "z";
+
+/**
+ * How a dynamic body is attached to its ancestor's body (or the world).
+ *
+ * - `hinge`: turns about one of its own axes through `anchor` (doors, wheels,
+ *   levers); optional angle `limits`, and a motor driven by cartbox.motor.
+ * - `ball`: swivels freely about `anchor` (ragdoll joints, chains).
+ * - `fixed`: welded where it starts (breakable with cartbox.unjoin).
+ * - `spring`: its centre is pulled toward `anchor` (a point that moves with the
+ *   ancestor), resting at `length`.
+ * - `rope`: its centre stays within `length` of `anchor` (pendulums, tethers).
+ */
+export interface JointSpec {
+  readonly kind: JointKind;
+  /** The attach point in the object's own coordinates (before its scale). Default: its origin. */
+  readonly anchor: readonly [number, number, number];
+  /** Hinge: which of the object's own axes it turns about. Default y. */
+  readonly axis?: JointAxis;
+  /** Hinge: [min, max] degrees either side of where it starts (-180..180). Absent = free. */
+  readonly limits?: readonly [number, number];
+  /** Spring rest length / rope's longest reach. Absent = the distance to `anchor` at the start. */
+  readonly length?: number;
+  /** Spring stiffness (0..100000). Absent = 50. */
+  readonly stiffness?: number;
+  /** Spring damping (0..10000). Absent = 1. */
+  readonly damping?: number;
+}
+
+export const JOINT_KINDS: readonly JointKind[] = ["hinge", "ball", "fixed", "spring", "rope"];
+export const DEFAULT_SPRING_STIFFNESS = 50;
+export const DEFAULT_SPRING_DAMPING = 1;
 
 export type PhysicsBodyKind = "static" | "dynamic" | "kinematic" | "character";
 export type PhysicsShapeKind = "box" | "sphere" | "capsule" | "mesh";
@@ -34,6 +73,8 @@ export interface PhysicsSpec {
   readonly gravity?: number;
   /** Linear damping 0..10 — how quickly a dynamic body slows (air drag). Absent = 0. */
   readonly damping?: number;
+  /** Dynamic bodies: a joint to the nearest ancestor with a body, or the world. */
+  readonly joint?: JointSpec;
 }
 
 export const PHYSICS_BODY_KINDS: readonly PhysicsBodyKind[] = ["static", "dynamic", "kinematic", "character"];
@@ -44,6 +85,36 @@ export const DEFAULT_PHYSICS_SPEC: PhysicsSpec = { body: "static", shape: "box",
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 const num = (v: unknown, lo: number, hi: number, fallback: number) =>
   typeof v === "number" && Number.isFinite(v) ? clamp(v, lo, hi) : fallback;
+
+/** Read a stored joint, or null when absent or unusable; fields irrelevant to its kind are dropped. */
+export function readJointSpec(value: unknown): JointSpec | null {
+  if (typeof value !== "object" || value === null) return null;
+  const raw = value as Record<string, unknown>;
+  const kind = JOINT_KINDS.includes(raw.kind as JointKind) ? (raw.kind as JointKind) : null;
+  if (!kind) return null;
+  const a = Array.isArray(raw.anchor) ? raw.anchor : [];
+  const anchor = [0, 1, 2].map((i) => num(a[i], -1000, 1000, 0)) as unknown as JointSpec["anchor"];
+  const out: { -readonly [K in keyof JointSpec]: JointSpec[K] } = { kind, anchor };
+  if (kind === "hinge") {
+    if (raw.axis === "x" || raw.axis === "z") out.axis = raw.axis;
+    if (Array.isArray(raw.limits) && raw.limits.length === 2) {
+      const lo = num(raw.limits[0], -180, 180, NaN);
+      const hi = num(raw.limits[1], -180, 180, NaN);
+      if (Number.isFinite(lo) && Number.isFinite(hi)) out.limits = [Math.min(lo, hi), Math.max(lo, hi)];
+    }
+  }
+  if (kind === "spring" || kind === "rope") {
+    const length = num(raw.length, 0, 1000, NaN);
+    if (Number.isFinite(length)) out.length = length;
+  }
+  if (kind === "spring") {
+    const stiffness = num(raw.stiffness, 0, 100000, DEFAULT_SPRING_STIFFNESS);
+    const damping = num(raw.damping, 0, 10000, DEFAULT_SPRING_DAMPING);
+    if (stiffness !== DEFAULT_SPRING_STIFFNESS) out.stiffness = stiffness;
+    if (damping !== DEFAULT_SPRING_DAMPING) out.damping = damping;
+  }
+  return out;
+}
 
 /**
  * Read a stored physics spec, or null when absent or unusable. The shape is made
@@ -60,6 +131,8 @@ export function readPhysicsSpec(value: unknown): PhysicsSpec | null {
   else if (shape === "mesh" && body !== "static") shape = "box";
   const gravity = num(raw.gravity, -10, 10, 1);
   const damping = num(raw.damping, 0, 10, 0);
+  // Only a simulated body hangs, swings or springs.
+  const joint = body === "dynamic" ? readJointSpec(raw.joint) : null;
   return {
     body,
     shape,
@@ -70,5 +143,6 @@ export function readPhysicsSpec(value: unknown): PhysicsSpec | null {
     ...(raw.trigger === true && body !== "character" ? { trigger: true } : {}),
     ...(gravity !== 1 ? { gravity } : {}),
     ...(damping !== 0 ? { damping } : {}),
+    ...(joint ? { joint } : {}),
   };
 }

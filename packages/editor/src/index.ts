@@ -434,9 +434,16 @@ export {
 } from "./model/sceneHierarchy";
 export {
   DEFAULT_PHYSICS_SPEC,
+  DEFAULT_SPRING_DAMPING,
+  DEFAULT_SPRING_STIFFNESS,
+  JOINT_KINDS,
   PHYSICS_BODY_KINDS,
   PHYSICS_SHAPE_KINDS,
+  readJointSpec,
   readPhysicsSpec,
+  type JointAxis,
+  type JointKind,
+  type JointSpec,
   type PhysicsBodyKind,
   type PhysicsShapeKind,
   type PhysicsSpec,

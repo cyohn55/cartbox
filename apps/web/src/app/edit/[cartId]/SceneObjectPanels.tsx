@@ -12,11 +12,17 @@ import { useState } from "react";
 
 import {
   DEFAULT_PHYSICS_SPEC,
+  DEFAULT_SPRING_DAMPING,
+  DEFAULT_SPRING_STIFFNESS,
+  JOINT_KINDS,
   PHYSICS_BODY_KINDS,
   PHYSICS_SHAPE_KINDS,
   SCENE_PROP_MAX,
   SCENE_TAG_MAX,
   isSceneKey,
+  type JointAxis,
+  type JointKind,
+  type JointSpec,
   type PhysicsBodyKind,
   type PhysicsShapeKind,
   type PhysicsSpec,
@@ -442,6 +448,151 @@ const SHAPE_LABELS: Record<PhysicsShapeKind, string> = {
 };
 
 /** The selected object's physics body (none, or body type + collider + material). */
+const JOINT_LABELS: Record<JointKind, string> = {
+  hinge: "Hinge — turns about one axis",
+  ball: "Ball — swivels freely",
+  fixed: "Weld — stays put until broken",
+  spring: "Spring — pulled toward the point",
+  rope: "Rope — kept within reach",
+};
+
+/** What a joint on `entry` ties it to: its nearest ancestor with a body, or the world. */
+function jointTarget(sidecar: MeshSidecar, entry: MeshSidecarEntry): string {
+  const byId = new Map(sidecar.meshes.map((m) => [m.id, m]));
+  const seen = new Set<string>();
+  for (let p = entry.parent ? byId.get(entry.parent) : undefined; p && !seen.has(p.id); p = p.parent ? byId.get(p.parent) : undefined) {
+    seen.add(p.id);
+    if (p.physics) return `“${p.name}”`;
+  }
+  return "the world";
+}
+
+/** A dynamic body's joint: kind, attach point and the settings for its kind. */
+function JointEditor({
+  sidecar,
+  entry,
+  joint,
+  onChange,
+}: {
+  sidecar: MeshSidecar;
+  entry: MeshSidecarEntry;
+  joint: JointSpec | null;
+  onChange: (joint: JointSpec | null) => void;
+}) {
+  const row: React.CSSProperties = { display: "grid", gridTemplateColumns: "70px 1fr", gap: 6, alignItems: "center", fontSize: 12 };
+  const patch = (next: Partial<JointSpec>) => joint && onChange({ ...joint, ...next });
+  const field = (label: string, value: number | undefined, placeholder: string, apply: (v: number | undefined) => void, step = 0.1) => (
+    <label style={row}>
+      {label}
+      <input
+        type="number"
+        step={step}
+        aria-label={`Joint ${label.toLowerCase()}`}
+        placeholder={placeholder}
+        value={value ?? ""}
+        onChange={(event) => apply(event.target.value === "" ? undefined : Number(event.target.value))}
+        style={inputStyle}
+      />
+    </label>
+  );
+  const name = JSON.stringify(entry.name);
+  return (
+    <div style={{ display: "grid", gap: 6, marginTop: 4 }}>
+      <select
+        aria-label="Joint"
+        value={joint?.kind ?? ""}
+        onChange={(event) =>
+          onChange(event.target.value ? { kind: event.target.value as JointKind, anchor: joint?.anchor ?? [0, 0, 0] } : null)
+        }
+        style={inputStyle}
+      >
+        <option value="">No joint</option>
+        {JOINT_KINDS.map((kind) => (
+          <option key={kind} value={kind}>
+            {JOINT_LABELS[kind]}
+          </option>
+        ))}
+      </select>
+      {joint && (
+        <>
+          <div style={{ fontSize: 12 }}>Tied to {jointTarget(sidecar, entry)}</div>
+          <label style={row}>
+            {joint.kind === "spring" || joint.kind === "rope" ? "Tied at" : "Pivot"}
+            <span style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 4 }}>
+              {(["x", "y", "z"] as const).map((axis, i) => (
+                <input
+                  key={axis}
+                  type="number"
+                  step={0.1}
+                  aria-label={`Joint point ${axis}`}
+                  value={joint.anchor[i]}
+                  onChange={(event) => {
+                    const anchor = [...joint.anchor] as [number, number, number];
+                    anchor[i] = Number(event.target.value) || 0;
+                    patch({ anchor });
+                  }}
+                  style={inputStyle}
+                />
+              ))}
+            </span>
+          </label>
+          {joint.kind === "hinge" && (
+            <>
+              <label style={row}>
+                Axis
+                <select aria-label="Hinge axis" value={joint.axis ?? "y"} onChange={(event) => patch({ axis: event.target.value as JointAxis })} style={inputStyle}>
+                  <option value="x">Its X axis</option>
+                  <option value="y">Its Y axis (a door)</option>
+                  <option value="z">Its Z axis</option>
+                </select>
+              </label>
+              <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+                <input
+                  type="checkbox"
+                  aria-label="Hinge limits"
+                  checked={Boolean(joint.limits)}
+                  onChange={(event) => {
+                    if (event.target.checked) patch({ limits: [-90, 90] });
+                    else {
+                      const { limits: _drop, ...rest } = joint;
+                      onChange(rest);
+                    }
+                  }}
+                />
+                Limit how far it turns
+              </label>
+              {joint.limits && (
+                <>
+                  {field("Min °", joint.limits[0], "-90", (v) => patch({ limits: [v ?? 0, joint.limits![1]] }), 5)}
+                  {field("Max °", joint.limits[1], "90", (v) => patch({ limits: [joint.limits![0], v ?? 0] }), 5)}
+                </>
+              )}
+            </>
+          )}
+          {(joint.kind === "spring" || joint.kind === "rope") &&
+            field("Length", joint.length, "as placed", (v) => {
+              const { length: _drop, ...rest } = joint;
+              onChange(v === undefined ? rest : { ...rest, length: v });
+            })}
+          {joint.kind === "spring" && (
+            <>
+              {field("Stiffness", joint.stiffness, String(DEFAULT_SPRING_STIFFNESS), (v) => patch({ stiffness: v ?? DEFAULT_SPRING_STIFFNESS }), 5)}
+              {field("Spring damping", joint.damping, String(DEFAULT_SPRING_DAMPING), (v) => patch({ damping: v ?? DEFAULT_SPRING_DAMPING }))}
+            </>
+          )}
+          <RailHint>
+            {joint.kind === "spring" || joint.kind === "rope"
+              ? "The point is in the object's own coordinates; its centre hangs from it. "
+              : "The pivot is in the object's own coordinates (0,0,0 = its centre). "}
+            {joint.kind === "hinge" ? `In code: cartbox.motor(${name}, speed) turns it; ` : "In code: "}
+            {`cartbox.unjoin(${name}) breaks it. Parent the object to another body to tie it to that instead.`}
+          </RailHint>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function PhysicsPanel({
   sidecar,
   entry,
@@ -511,6 +662,18 @@ export function PhysicsPanel({
           {spec.body === "dynamic" && number("Damping", "damping", 0.1, 0, 10)}
           {!spec.trigger && number("Friction", "friction", 0.1, 0, 2)}
           {!spec.trigger && number("Bounce", "bounce", 0.05, 0, 1)}
+          {spec.body === "dynamic" && (
+            <JointEditor
+              sidecar={sidecar}
+              entry={entry}
+              joint={spec.joint ?? null}
+              onChange={(joint) => {
+                // Replace the spec outright: merging (as set does) can't remove the joint.
+                const { joint: _drop, ...rest } = spec;
+                onChange(setMeshPhysics(sidecar, entry.id, joint ? { ...rest, joint } : rest));
+              }}
+            />
+          )}
         </div>
       )}
       <RailHint>

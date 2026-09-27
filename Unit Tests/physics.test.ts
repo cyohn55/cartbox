@@ -14,7 +14,7 @@ import { pathToFileURL } from "node:url";
 import RAPIER from "@dimforge/rapier3d-compat";
 import { beforeAll, describe, expect, it } from "vitest";
 
-import { serializeMeshAsset, type MeshAsset } from "@cartbox/editor";
+import { composeModelMatrix, readPhysicsSpec, serializeMeshAsset, type MeshAsset } from "@cartbox/editor";
 import {
   NET_WORDS,
   PHYS_BLOCK_BYTES,
@@ -23,6 +23,7 @@ import {
   RAM_LAYOUTS,
   codeChunks,
   injectSdk,
+  jointFrames,
   parseMeshScene,
   physicsBlockAddress,
   physicsSdkLua,
@@ -144,6 +145,45 @@ describe("physics block protocol", () => {
     writePhysicsState(view, 1, [], [], [{ a: 2, b: 5, started: true, trigger: true }], [[2, 5], [2, 7]]);
     expect([view.getInt32(2624, true), view.getInt32(2628, true), view.getInt32(2632, true), view.getInt32(2636, true)]).toEqual([1, 2, 5, 3]);
     expect([view.getInt32(3204, true), view.getInt32(3216, true), view.getInt32(3220, true)]).toEqual([2, 2, 7]);
+  });
+});
+
+describe("joint specs", () => {
+  it("keeps joints on dynamic bodies only, with just the fields their kind uses", () => {
+    expect(readPhysicsSpec({ body: "static", joint: { kind: "hinge" } })?.joint).toBeUndefined();
+    expect(readPhysicsSpec({ body: "dynamic", joint: { kind: "twist" } })?.joint).toBeUndefined();
+    expect(readPhysicsSpec({ body: "dynamic", joint: { kind: "hinge", axis: "x", limits: [120, -500], length: 3, stiffness: 9 } })?.joint).toEqual({
+      kind: "hinge",
+      anchor: [0, 0, 0],
+      axis: "x",
+      limits: [-180, 120],
+    });
+    expect(readPhysicsSpec({ body: "dynamic", joint: { kind: "spring", anchor: [0, 2, "x"], length: 1.5, stiffness: 50, damping: 4 } })?.joint).toEqual({
+      kind: "spring",
+      anchor: [0, 2, 0],
+      length: 1.5,
+      damping: 4,
+    });
+  });
+
+  it("builds frames that coincide in the world at the start", () => {
+    // A body turned 90° about Y and scaled ×2, hinged about its own X at (0.5, 0, 0) to a
+    // target turned 30° about Z somewhere else.
+    const self = composeModelMatrix([1, 2, 3], [0, 90, 0], [2, 2, 2]);
+    const target = composeModelMatrix([-4, 0, 1], [0, 0, 30], [1, 1, 1]);
+    const f = jointFrames({ kind: "hinge", anchor: [0.5, 0, 0], axis: "x" }, self, target);
+    const toWorld = (m: Float64Array | readonly number[], v: readonly number[], w: number) => [0, 1, 2].map((r) => {
+      const n = [0, 1, 2].map((c) => m[c * 4 + r]!);
+      const len = Math.hypot(...n);
+      return (n[0]! * v[0]! + n[1]! * v[1]! + n[2]! * v[2]!) / len + w * m[12 + r]!;
+    });
+    // The pivot, seen from either body, is the same world point: 1 m along the body's x (now -z).
+    const p1 = toWorld(self, f.anchor1, 1);
+    const p2 = toWorld(target, f.anchor2, 1);
+    p1.forEach((v, i) => expect(v).toBeCloseTo(p2[i]!, 6));
+    expect(p1.map((v) => Math.round(v * 1e6) / 1e6)).toEqual([1, 2, 2]);
+    // A rope's length defaults to the distance to its point.
+    expect(jointFrames({ kind: "rope", anchor: [0, 3, 4] }, self, null).length).toBeCloseTo(10);
   });
 });
 
@@ -361,6 +401,80 @@ end`;
     expect(slot(4)).toMatchObject({ hit: 1, object: 1 });
     expect(slot(4).distance).toBeCloseTo(4.5, 2);
     expect(slot(5).hit).toBe(0);
+    session.destroy();
+  }, 120_000);
+
+  it("hangs, hinges, welds and springs bodies with joints, driven and broken from Lua", async () => {
+    const layout = RAM_LAYOUTS.xbox360;
+    const mesh = cube();
+    const T = (position: number[], scale = [1, 1, 1]) => ({ position, rotation: [0, 0, 0], scale });
+    const sc = parseMeshScene(
+      JSON.stringify({
+        version: 2,
+        meshes: [
+          { id: "floor", name: "floor", mesh, transform: T([0, -0.5, 0], [40, 1, 40]), physics: { body: "static", shape: "box" } },
+          { id: "post", name: "post", mesh, transform: T([0, 5, 0], [0.2, 0.2, 0.2]), physics: { body: "static", shape: "box" } },
+          // A bob 2 m out from the post, on a rope to it (its anchor, in its own space, is the post).
+          {
+            id: "bob", name: "bob", mesh, parent: "post", transform: T([10, 0, 0], [2.5, 2.5, 2.5]),
+            physics: { body: "dynamic", shape: "sphere", joint: { kind: "rope", anchor: [-2 / 0.5, 0, 0] } },
+          },
+          // A door hinged on its left edge to the world, opening at most 90°.
+          {
+            id: "door", name: "door", mesh, transform: T([5, 1.1, 0], [1, 2, 0.1]),
+            physics: { body: "dynamic", shape: "box", joint: { kind: "hinge", anchor: [-0.5, 0, 0], axis: "y", limits: [0, 90] } },
+          },
+          // A lamp welded in mid-air until the cart breaks it off.
+          { id: "lamp", name: "lamp", mesh, transform: T([-5, 3, 0], [0.5, 0.5, 0.5]), physics: { body: "dynamic", shape: "box", joint: { kind: "fixed", anchor: [0, 0, 0] } } },
+          // A weight on a damped spring from 1 m above it.
+          {
+            id: "weight", name: "weight", mesh, transform: T([-10, 3, 0]),
+            physics: { body: "dynamic", shape: "sphere", mass: 1, joint: { kind: "spring", anchor: [0, 1, 0], damping: 10 } },
+          },
+        ],
+      }),
+    )!;
+    const code = `
+t = 0
+function TIC()
+  t = t + 1
+  if t == 2 then cartbox.motor("door", 2) end
+  if t == 90 then cartbox.unjoin("lamp") end
+  local bx, by, bz = cartbox.body("bob")
+  pmem(100, math.max(pmem(100), math.floor(math.sqrt(bx * bx + (by - 5) ^ 2 + bz * bz) * 1000)))
+  if t == 30 then pmem(101, math.floor(by * 1000)) end
+  local dx, dy, dz = cartbox.body("door")
+  pmem(102, math.floor(dx * 1000) & 0xffffffff) pmem(103, math.floor(dz * 1000) & 0xffffffff) pmem(104, math.floor(dy * 1000) & 0xffffffff)
+  local _, ly = cartbox.body("lamp")
+  if t == 85 then pmem(105, math.floor(ly * 1000)) end
+  pmem(106, math.floor(ly * 1000) & 0xffffffff)
+  local _, wy = cartbox.body("weight")
+  pmem(107, math.floor(wy * 1000) & 0xffffffff)
+end`;
+    let tic = codeChunks(new TextEncoder().encode(code));
+    tic = prependLuaCode(tic, sceneObjectsSdkLua(sc));
+    tic = prependLuaCode(tic, physicsSdkLua(sc, layout));
+    tic = injectSdk(tic);
+    const e = await bootBytes("xbox360/engine.js", tic);
+    const session = new PhysicsSession(sc, createRapierBackend(RAPIER));
+    const word = (i: number) => (pmem(e)[i]! | 0) / 1000;
+    for (let i = 0; i < 240; i += 1) {
+      session.beforeTick(block(e, layout));
+      e.mod._cbx_tick(e.h, 0);
+      session.afterTick(block(e, layout));
+    }
+    // The bob never strays past the rope's 2 m, and swings down (a quarter swing takes ~0.7 s).
+    expect(word(100)).toBeLessThan(2.05);
+    expect(word(101)).toBeLessThan(4.2);
+    // The motor swung the door to its 90° stop: its centre is now half a metre along z from the hinge.
+    expect(word(102)).toBeCloseTo(4.5, 1);
+    expect(Math.abs(word(103))).toBeCloseTo(0.5, 1);
+    expect(word(104)).toBeCloseTo(1.1, 1); // held up by the hinge
+    // The lamp hung in the air until broken off, then fell to the floor.
+    expect(word(105)).toBeCloseTo(3, 2);
+    expect(word(106)).toBeCloseTo(0.25, 1);
+    // The spring settles about mg/k = 9.81/50 ≈ 0.2 m below its rest length.
+    expect(word(107)).toBeCloseTo(3 - 9.81 / 50, 1);
     session.destroy();
   }, 120_000);
 

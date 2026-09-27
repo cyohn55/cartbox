@@ -275,6 +275,8 @@ cartbox = {
   entered = function() return {} end,
   exited = function() return {} end,
   inside = function() return {} end,
+  motor = function() end,
+  unjoin = function() end,
   -- Spawning prefab copies: overridden when the cart has prefabs.
   spawn = function() return nil end,
   despawn = function() end,

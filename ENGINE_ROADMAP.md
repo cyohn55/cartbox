@@ -83,11 +83,14 @@ and live inspection. Later: nested prefabs, picking objects in the game view.
 - [x] Per-body gravity multiplier and damping.
 - [x] Shape casts: `cartbox.sweep` sweeps a sphere, box or capsule and reports
       through the same slots as rays; rays and sweeps can ignore their caster.
-- [ ] Joints (hinges, springs).
+- [x] Joints: hinge (angle limits, a motor via `cartbox.motor`), ball, weld, spring
+      and rope, set on a dynamic body in the Inspector. A joint ties the object to
+      its nearest ancestor with a body (or the world), so joints work inside prefabs;
+      `cartbox.unjoin` breaks one.
 - [ ] Deterministic mode across browsers for netplay (Rapier's deterministic build).
 
 **Status:** bodies, character controller, raycasts, shape casts, triggers, contact
-events and per-body gravity / damping landed. The host runs the world at a fixed 1/60 s step and
+events, per-body gravity / damping and joints landed. The host runs the world at a fixed 1/60 s step and
 trades state and commands with the cart through an 8 KB block at the end of RAM
 (its address per engine core is checked against the real builds by a test).
 

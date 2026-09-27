@@ -176,4 +176,71 @@ end`;
     expect(channel.spawned().get(1)![12]).toBeCloseTo(5);
     channel.destroy();
   }, 120_000);
+
+  it("makes a spawned copy's joints where it's placed, and remakes them on respawn", async () => {
+    const layout = RAM_LAYOUTS.xbox360;
+    const mesh = cube();
+    const T = (position: number[], scale = [1, 1, 1]) => ({ position, rotation: [0, 0, 0], scale });
+    // A "Swing": a static beam with a seat hanging 2 m below it on a rope.
+    const sc = parseMeshScene(
+      JSON.stringify({
+        version: 2,
+        meshes: [{ id: "floor", name: "floor", mesh, transform: T([0, -0.5, 0], [40, 1, 40]), physics: { body: "static", shape: "box" } }],
+        prefabs: [
+          {
+            id: "p2",
+            name: "Swing",
+            pool: 1,
+            nodes: [
+              { key: "n0", name: "beam", mesh, transform: T([0, 0, 0]), physics: { body: "static", shape: "box" } },
+              {
+                key: "n1", name: "seat", mesh, parent: "n0", transform: T([0, -2, 0], [0.5, 0.5, 0.5]),
+                physics: { body: "dynamic", shape: "box", joint: { kind: "rope", anchor: [0, 4, 0] } },
+              },
+            ],
+          },
+        ],
+      }),
+    )!;
+    const code = `
+t = 0
+function TIC()
+  t = t + 1
+  if t == 1 then s = cartbox.spawn("Swing", 0, 6, 0) end
+  if t == 100 then cartbox.despawn(s) end
+  if t == 101 then s = cartbox.spawn("Swing", 8, 6, 3) end
+  local x, y, z = cartbox.body("seat")
+  if t == 99 or t == 199 then
+    local at = t == 99 and 100 or 104
+    pmem(at, math.floor(x * 1000) & 0xffffffff) pmem(at + 1, math.floor(y * 1000) & 0xffffffff) pmem(at + 2, math.floor(z * 1000) & 0xffffffff)
+  end
+end`;
+    let tic = codeChunks(new TextEncoder().encode(code));
+    tic = prependLuaCode(tic, sceneObjectsSdkLua(sc));
+    tic = prependLuaCode(tic, runtimeSdkLua(sc, layout));
+    tic = injectSdk(tic);
+    const mod = await (await import(pathToFileURL(ENGINE).href)).default();
+    const h = mod._cbx_create(44100);
+    const ptr = mod._malloc(tic.length);
+    mod.HEAPU8.set(tic, ptr);
+    expect(mod._cbx_load(h, ptr, tic.length)).toBe(1);
+    mod._free(ptr);
+    const physics = new PhysicsSession(sc, createRapierBackend(RAPIER));
+    const channel = new RuntimeChannel(sc, physics);
+    const base = mod._cbx_mailbox_ptr(h) - NET_WORDS * 4;
+    const block = () => new DataView(mod.HEAPU8.buffer, base + physicsBlockAddress(layout) - layout.pmemAddress, PHYS_BLOCK_BYTES);
+    for (let i = 0; i < 200; i += 1) {
+      channel.beforeTick(block());
+      mod._cbx_tick(h, 0);
+      channel.afterTick(block());
+    }
+    const w = (i: number) => (new Int32Array(mod.HEAPU8.buffer, base, 256)[i]! | 0) / 1000;
+    // Hanging from the beam where it was spawned (rather than fallen to the floor)…
+    expect([w(100), w(101), w(102)].map((v) => Math.round(v * 10) / 10)).toEqual([0, 4, 0]);
+    // …and from where it was spawned the second time.
+    expect(w(104)).toBeCloseTo(8, 1);
+    expect(w(105)).toBeCloseTo(4, 1);
+    expect(w(106)).toBeCloseTo(3, 1);
+    channel.destroy();
+  }, 120_000);
 });
