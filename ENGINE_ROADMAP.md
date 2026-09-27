@@ -170,8 +170,15 @@ trades state and commands with the cart through an 8 KB block at the end of RAM
 - [x] Pause, step one frame, and time scale while playing in the editor. The
       playtest has Step (while paused) and a 0.25×–2× speed control, with a frame
       counter; sound mutes away from 1×.
-- [ ] Profiler: CPU (Lua vs render vs audio), GPU passes, draw calls, triangles,
-      memory, network bytes.
+- [x] Profiler: CPU (Lua vs render vs audio), GPU passes, draw calls, triangles,
+      memory, network bytes. The playtest's Profiler panel shows each frame's
+      main-thread time against the frame budget: the cart's tick (Lua, 2D drawing
+      and chip sound run inside the engine together), physics and runtime,
+      render (with the shadow map, sky and 3D scene passes), audio and network.
+      It also shows the renderer's draw calls, objects and triangles, the GPU
+      time of the scene pass where the browser allows timing it (WebGPU
+      timestamp queries, WebGL2 timer queries), engine, scene and page memory,
+      and multiplayer bytes per second.
 - [x] In-editor console for `trace()` output and runtime errors, linked to code lines.
       A playtest-only prelude sends `trace()` through a debug block in free RAM
       (below the runtime block) and replaces `debug.traceback` so errors name

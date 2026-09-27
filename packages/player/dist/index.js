@@ -1070,7 +1070,8 @@ async function acquireDevice() {
     if (!gpu) return null;
     const adapter = await gpu.requestAdapter();
     if (!adapter) return null;
-    return await adapter.requestDevice();
+    const timestamps = adapter.features?.has?.("timestamp-query") === true;
+    return await adapter.requestDevice(timestamps ? { requiredFeatures: ["timestamp-query"] } : void 0);
   } catch {
     return null;
   }
@@ -2865,6 +2866,9 @@ function createConsole(module, model, sampleRate = model.sampleRate) {
       const seq = module._cbx_error_seq();
       const message = readCString(module.HEAPU8, module._cbx_last_error());
       return { seq, message };
+    },
+    memoryBytes() {
+      return module.HEAPU8.byteLength;
     },
     dispose() {
       module._cbx_delete(handle);
@@ -5813,6 +5817,84 @@ function collisionSdkLua(collision) {
 end`;
 }
 
+// src/debug/profiler.ts
+var PROFILE_SECTIONS = ["cart", "runtime", "audio", "net", "render", "shadow", "sky", "scene"];
+var PROFILE_WINDOW = 60;
+var SUB_PASSES = /* @__PURE__ */ new Set(["shadow", "sky", "scene"]);
+var Profiler = class {
+  constructor() {
+    this.samples = new Map(PROFILE_SECTIONS.map((s) => [s, new Float64Array(PROFILE_WINDOW)]));
+    /** The slot being filled (the open frame). */
+    this.slot = 0;
+    this.filled = 0;
+    /** A frame has been opened (the first nextFrame opens one, closing nothing). */
+    this.open = false;
+  }
+  /** Add `ms` to the open frame's `section`. */
+  add(section, ms) {
+    const row = this.samples.get(section);
+    row[this.slot] = row[this.slot] + ms;
+  }
+  /** Close the open frame and start the next. */
+  nextFrame() {
+    this.slot = (this.slot + 1) % PROFILE_WINDOW;
+    for (const row of this.samples.values()) row[this.slot] = 0;
+    if (this.open) this.filled = Math.min(PROFILE_WINDOW - 1, this.filled + 1);
+    this.open = true;
+  }
+  /** Averages and peaks over the closed frames in the window. */
+  sections() {
+    const frames = this.filled;
+    const sections = {};
+    const totals = new Float64Array(PROFILE_WINDOW);
+    for (const section of PROFILE_SECTIONS) {
+      const row = this.samples.get(section);
+      let sum2 = 0;
+      let max2 = 0;
+      for (let k = 1; k <= frames; k += 1) {
+        const i = (this.slot - k + PROFILE_WINDOW) % PROFILE_WINDOW;
+        const v = row[i];
+        sum2 += v;
+        if (v > max2) max2 = v;
+        if (!SUB_PASSES.has(section)) totals[i] = totals[i] + v;
+      }
+      sections[section] = { avg: frames > 0 ? sum2 / frames : 0, max: max2 };
+    }
+    let sum = 0;
+    let max = 0;
+    for (let k = 1; k <= frames; k += 1) {
+      const v = totals[(this.slot - k + PROFILE_WINDOW) % PROFILE_WINDOW];
+      sum += v;
+      if (v > max) max = v;
+    }
+    return { frames, sections, total: { avg: frames > 0 ? sum / frames : 0, max } };
+  }
+  reset() {
+    for (const row of this.samples.values()) row.fill(0);
+    this.slot = 0;
+    this.filled = 0;
+    this.open = false;
+  }
+};
+function estimateSceneBytes(instances, width, height) {
+  const meshes = /* @__PURE__ */ new Set();
+  const textures = /* @__PURE__ */ new Set();
+  let bytes = width * height * 8;
+  for (const instance of instances) {
+    if (!meshes.has(instance.mesh)) {
+      meshes.add(instance.mesh);
+      for (const p of instance.mesh.primitives) bytes += p.positions.length / 3 * 32 + p.indices.length * 4;
+    }
+    for (const texture of instance.textures ?? []) {
+      if (texture && !textures.has(texture)) {
+        textures.add(texture);
+        bytes += texture.width * texture.height * 4;
+      }
+    }
+  }
+  return bytes;
+}
+
 // src/debug/debugBlock.ts
 var DEBUG_BLOCK_BYTES = 4096;
 var DEBUG_MAGIC = 1195655747;
@@ -7019,9 +7101,17 @@ var SoftwareSceneRenderer = class {
   constructor(style = DEFAULT_RASTER_STYLE) {
     this.style = style;
     this.backend = "software";
+    this.lastFrameStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
   }
   render(instances, draw) {
     const visible = applyScenePasses(instances, draw);
+    let triangles = 0;
+    let drawCalls = 0;
+    for (const instance of visible) {
+      drawCalls += instance.mesh.primitives.length;
+      for (const primitive of instance.mesh.primitives) triangles += primitive.indices.length / 3;
+    }
+    this.lastFrameStats = { drawCalls, instances: visible.length, triangles, gpuMs: null };
     renderMeshScene(visible, {
       width: draw.width,
       height: draw.height,
@@ -7052,6 +7142,9 @@ var CappedSceneRenderer = class {
   }
   get backend() {
     return this.inner.backend;
+  }
+  get lastFrameStats() {
+    return this.inner.lastFrameStats;
   }
   render(instances, draw) {
     this.inner.render(applyRenderCaps(instances, this.caps, this.cache), draw);
@@ -7389,6 +7482,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.lastPlacement = null;
     /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
     this.hudFrame = null;
+    /** The playtest profiler, when it's on: shadow, sky and scene time go to it. */
+    this.profiler = null;
     /** Decodes a KTX2 texture (loading the decoder on first use); set by create. */
     this.decodeKtx2 = async () => null;
     this.output = new Uint8ClampedArray(width * height * 4);
@@ -7574,8 +7669,21 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   setCartLights(lights) {
     this.cartLights = lights.map((light) => ({ kind: "point", position: light.position, color: light.color, intensity: 1, range: light.range }));
   }
+  /** Report per-pass times to `profiler` (null: stop). */
+  setProfiler(profiler) {
+    this.profiler = profiler;
+  }
+  /** What the renderer drew last frame. */
+  renderStats() {
+    return this.renderer.lastFrameStats ?? null;
+  }
+  /** Bytes the scene keeps for drawing (geometry, textures, targets), estimated. */
+  sceneBytes() {
+    return estimateSceneBytes(this.instances, this.width, this.height);
+  }
   blit(rgba) {
     const started = performance.now();
+    const profiler = this.profiler;
     if (this.hud) {
       if (!this.hudFrame) this.hudFrame = new Uint8ClampedArray(this.width * this.height * 4);
       this.hudFrame.set(rgba);
@@ -7599,10 +7707,21 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     }) : buildOrbitCamera(this.scene.bounds, this.frame * AUTO_ORBIT_YAW_PER_FRAME, AUTO_ORBIT_PITCH, this.width / this.height);
     const { main: instances, front, moved } = this.posedInstances();
     const lighting = this.scene.lighting;
+    let mark = profiler ? performance.now() : 0;
     const shadow = lighting ? this.buildShadow(instances, moved, lighting) : null;
+    if (profiler) {
+      const now = performance.now();
+      profiler.add("shadow", now - mark);
+      mark = now;
+    }
     const lights = this.hud && this.cartLights.length > 0 ? [...lighting?.lights ?? [], ...this.cartLights] : lighting?.lights;
     const skyBackdrop = this.hud && this.skyMap !== null;
     if (skyBackdrop) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : SKY_BACKDROP_SCALE);
+    if (profiler) {
+      const now = performance.now();
+      profiler.add("sky", now - mark);
+      mark = now;
+    }
     this.renderer.render(instances, {
       width,
       height,
@@ -7641,6 +7760,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         } : {}
       });
     }
+    if (profiler) profiler.add("scene", performance.now() - mark);
     if (target) expandNearest(target.out, target.width, target.height, this.output, this.width, this.height);
     if (this.hud && this.hudFrame) compositeHudOverScene(this.output, this.hudFrame, this.width * this.height);
     this.frame += 1;
@@ -8540,6 +8660,103 @@ function batchInstances(instances, geometryOf) {
   return { batches, instanceCount };
 }
 
+// src/render/gpuTimer.ts
+var WebgpuPassTimer = class _WebgpuPassTimer {
+  constructor(device) {
+    this.lastMs = null;
+    this.reading = false;
+    this.copied = false;
+    this.querySet = device.createQuerySet({ type: "timestamp", count: 2 });
+    this.resolveBuffer = device.createBuffer({ size: 16, usage: 512 | 4 });
+    this.readBuffer = device.createBuffer({ size: 16, usage: 8 | 1 });
+  }
+  /** A timer, when the device was created with `timestamp-query`. */
+  static create(device) {
+    try {
+      return device?.features?.has?.("timestamp-query") ? new _WebgpuPassTimer(device) : null;
+    } catch {
+      return null;
+    }
+  }
+  /** The render pass descriptor's `timestampWrites`. */
+  writes() {
+    return { querySet: this.querySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 };
+  }
+  /** After the pass ends: resolve its timestamps (and copy them out unless the last copy is still being read). */
+  resolve(encoder) {
+    encoder.resolveQuerySet(this.querySet, 0, 2, this.resolveBuffer, 0);
+    if (this.reading) return;
+    encoder.copyBufferToBuffer(this.resolveBuffer, 0, this.readBuffer, 0, 16);
+    this.copied = true;
+  }
+  /** After submitting: read the copied timestamps back. */
+  read() {
+    if (!this.copied) return;
+    this.copied = false;
+    this.reading = true;
+    this.readBuffer.mapAsync(1).then(() => {
+      const t = new BigUint64Array(this.readBuffer.getMappedRange().slice(0));
+      this.readBuffer.unmap();
+      const ns = Number(t[1] - t[0]);
+      if (ns > 0 && ns < 1e10) this.lastMs = ns / 1e6;
+    }).catch(() => {
+    }).finally(() => {
+      this.reading = false;
+    });
+  }
+  destroy() {
+    this.querySet?.destroy?.();
+    this.resolveBuffer?.destroy?.();
+    this.readBuffer?.destroy?.();
+  }
+};
+var WebglPassTimer = class _WebglPassTimer {
+  constructor(gl, ext) {
+    this.gl = gl;
+    this.ext = ext;
+    this.lastMs = null;
+    this.pending = [];
+    this.free = [];
+    this.active = false;
+  }
+  static create(gl) {
+    try {
+      const ext = gl.getExtension("EXT_disjoint_timer_query_webgl2");
+      return ext ? new _WebglPassTimer(gl, ext) : null;
+    } catch {
+      return null;
+    }
+  }
+  begin() {
+    this.poll();
+    if (this.pending.length >= 4) return;
+    const query = this.free.pop() ?? this.gl.createQuery();
+    this.gl.beginQuery(this.ext.TIME_ELAPSED_EXT, query);
+    this.pending.push(query);
+    this.active = true;
+  }
+  end() {
+    if (!this.active) return;
+    this.gl.endQuery(this.ext.TIME_ELAPSED_EXT);
+    this.active = false;
+  }
+  /** Take finished results, oldest first. */
+  poll() {
+    const gl = this.gl;
+    const disjoint = gl.getParameter(this.ext.GPU_DISJOINT_EXT);
+    while (this.pending.length > 0) {
+      const query = this.pending[0];
+      if (!gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE)) break;
+      const ns = gl.getQueryParameter(query, gl.QUERY_RESULT);
+      if (!disjoint && ns > 0) this.lastMs = ns / 1e6;
+      this.free.push(this.pending.shift());
+    }
+  }
+  destroy() {
+    for (const query of [...this.pending, ...this.free]) this.gl.deleteQuery(query);
+  }
+};
+
 // src/render/scenePacking.ts
 var UNIFORM_STRIDE = 512;
 var UNIFORM_BYTES_USED = 496;
@@ -9083,8 +9300,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.ssaoTexture = null;
     /** Readbacks in flight, oldest first. */
     this.pending = [];
-    /** Draw calls and instances in the last submitted frame (for profiling and tests). */
-    this.lastFrameStats = { drawCalls: 0, instances: 0 };
+    /** What the last submitted frame drew (for the profiler and tests); GPU time when the browser can time it. */
+    this.lastFrameStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
     this.software = new SoftwareSceneRenderer(style);
     this.uniformBuffer = gl.createBuffer();
     this.instanceBuffer = gl.createBuffer();
@@ -9098,6 +9315,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       return { buffer, fence: null };
     });
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    this.timer = WebglPassTimer.create(gl);
   }
   /**
    * Build the renderer for one framebuffer size, or null when WebGL2 is missing,
@@ -9274,8 +9492,10 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.bindTexture(UNIT_ENV, this.envTexture ?? this.blankTexture);
     this.bindTexture(UNIT_SSAO, ssao ? this.ssaoTexture : this.blankFloat);
     for (let unit = UNIT_BASE; unit <= UNIT_EMIS; unit += 1) gl.bindSampler(unit, this.sampler);
+    this.timer?.begin();
     let bound = null;
     let boundBatch = -1;
+    let triangles = 0;
     for (const chunk of chunks2) {
       const batch = batches[chunk.batch];
       if (chunk.batch !== boundBatch) {
@@ -9292,9 +9512,11 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       }
       gl.bindBufferRange(gl.UNIFORM_BUFFER, BLOCK_INSTANCES, this.instanceBuffer, chunk.offsetFloats * 4, WEBGL_INSTANCES_PER_DRAW * INSTANCE_FLOATS * 4);
       gl.drawElementsInstanced(gl.TRIANGLES, batch.geometry.indexCount, gl.UNSIGNED_INT, 0, chunk.count);
+      triangles += batch.geometry.indexCount / 3 * chunk.count;
     }
     gl.bindVertexArray(null);
-    this.lastFrameStats = { drawCalls: chunks2.length, instances: instanceCount };
+    this.timer?.end();
+    this.lastFrameStats = { drawCalls: chunks2.length, instances: instanceCount, triangles, gpuMs: this.timer?.lastMs ?? null };
     const slot = this.readback.find((s) => s.fence === null);
     if (slot) {
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.buffer);
@@ -9432,6 +9654,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       gl.deleteBuffer(this.lightBuffer);
       for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.ssaoTexture]) if (t) gl.deleteTexture(t);
       gl.deleteFramebuffer(this.framebuffer);
+      this.timer?.destroy();
       for (const rb of this.attachments) gl.deleteRenderbuffer(rb);
       gl.deleteSampler(this.sampler);
       gl.deleteProgram(this.program);
@@ -9809,12 +10032,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.instanceBuffer = null;
     this.instanceCapacity = 0;
     this.instanceData = new Float32Array(0);
-    /** Draw calls and instances in the last submitted frame (for profiling and tests). */
-    this.lastFrameStats = { drawCalls: 0, instances: 0 };
+    /** What the last submitted frame drew (for the profiler and tests); GPU time when the device can time it. */
+    this.lastFrameStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
     this.software = new SoftwareSceneRenderer(style);
     this.shadowTexture = blankShadow;
     this.envTexture = blankTexture;
     this.ssaoBound = blankShadow;
+    this.timer = WebgpuPassTimer.create(device);
   }
   /**
    * Point the SSAO slot at a width×height r32float upload of `ao` (created once,
@@ -10142,7 +10366,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
     this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, instanceCount * INSTANCE_FLOATS);
-    this.lastFrameStats = { drawCalls: draws.length, instances: instanceCount };
+    let triangles = 0;
+    for (const entry of draws) triangles += entry.geometry.indexCount / 3 * entry.models.length;
+    this.lastFrameStats = { drawCalls: draws.length, instances: instanceCount, triangles, gpuMs: this.timer?.lastMs ?? null };
     const encoder = this.device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
       colorAttachments: [
@@ -10160,7 +10386,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         depthClearValue: 1,
         depthLoadOp: "clear",
         depthStoreOp: "store"
-      }
+      },
+      ...this.timer ? { timestampWrites: this.timer.writes() } : {}
     });
     pass.setPipeline(this.pipeline);
     draws.forEach((entry, index) => {
@@ -10170,6 +10397,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
     });
     pass.end();
+    this.timer?.resolve(encoder);
     const slot = this.readback.find((entry) => !entry.busy);
     if (slot) {
       slot.busy = true;
@@ -10179,9 +10407,11 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { width: this.width, height: this.height }
       );
       this.device.queue.submit([encoder.finish()]);
+      this.timer?.read();
       void this.drain(slot);
     } else {
       this.device.queue.submit([encoder.finish()]);
+      this.timer?.read();
     }
   }
   /** Await one readback and publish it as the newest frame. */
@@ -10333,6 +10563,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     destroySafely(this.instanceBuffer);
     destroySafely(this.uniformBuffer);
     for (const slot of this.readback) destroySafely(slot.buffer);
+    this.timer?.destroy();
   }
 };
 function destroySafely(resource) {
@@ -10390,6 +10621,10 @@ var Player = class {
     /** The debug block (bytes after pmem word 0), when the editor's console is on. */
     this.debugOffset = null;
     this.speed = 1;
+    /** The playtest profiler, while it's on (see setProfiling). */
+    this.profiler = null;
+    /** Recent netplay byte totals, for traffic per second. */
+    this.netSamples = [];
     this.frameHandle = 0;
     this.lastFrameTime = 0;
     this.frameAccumulatorMs = 0;
@@ -10538,6 +10773,7 @@ var Player = class {
             this.options.ktx2 ? { ktx2: this.options.ktx2 } : {}
           );
           this.meshSurface.setQuality(this.qualitySettings);
+          this.meshSurface.setProfiler(this.profiler);
           if ((mesh2.levels?.length ?? 0) > 0) this.activateLevel(0);
         }
         if (world && this.cartSource) {
@@ -10669,31 +10905,88 @@ var Player = class {
     this.gamepad.reset();
     void this.audio?.pause();
   }
+  /** Turn the profiler on (it starts empty) or off. */
+  setProfiling(on) {
+    if (on === (this.profiler !== null)) return;
+    this.profiler = on ? new Profiler() : null;
+    this.netSamples = [];
+    this.meshSurface?.setProfiler(this.profiler);
+  }
+  /** Where the last second or so of frames spent their time, and what the scene drew; null while profiling is off. */
+  profile() {
+    const profiler = this.profiler;
+    if (!profiler) return null;
+    const { frames, sections, total } = profiler.sections();
+    const stats = this.meshSurface?.renderStats() ?? null;
+    const heap = this.view.performance.memory?.usedJSHeapSize;
+    let net = null;
+    const traffic = this.options.netplay?.traffic();
+    if (traffic) {
+      const at = this.view.performance.now();
+      this.netSamples.push({ at, ...traffic });
+      while (this.netSamples.length > 2 && at - this.netSamples[0].at > 2e3) this.netSamples.shift();
+      const first = this.netSamples[0];
+      const seconds = (at - first.at) / 1e3;
+      net = {
+        sent: traffic.sent,
+        received: traffic.received,
+        sentPerSecond: seconds > 0 ? (traffic.sent - first.sent) / seconds : 0,
+        receivedPerSecond: seconds > 0 ? (traffic.received - first.received) / seconds : 0
+      };
+    }
+    return {
+      frames,
+      sections,
+      total,
+      render: stats && this.sceneRenderer ? { ...stats, backend: this.sceneRenderer.backend } : null,
+      memory: {
+        wasm: this.console?.memoryBytes() ?? 0,
+        jsHeap: typeof heap === "number" ? heap : null,
+        scene: this.meshSurface ? this.meshSurface.sceneBytes() : null
+      },
+      net
+    };
+  }
   /** Run one console frame. `withSound` false drops its audio (stepping, or off 1× speed). */
   tickOnce(withSound = true) {
+    const profiler = this.profiler;
+    profiler?.nextFrame();
+    const clock = this.view.performance;
+    let mark = profiler ? clock.now() : 0;
+    const lap = (section) => {
+      if (!profiler) return;
+      const now = clock.now();
+      profiler.add(section, now - mark);
+      mark = now;
+    };
     const mask = this.replaySource ? this.replaySource.maskForFrame(this.tickFrame) : this.inputEnabled ? this.gamepad.value : 0;
     const net = this.options.netplay;
     if (net && this.console) {
       const words = this.console.netWords();
       if (words) net.beforeTick(words);
     }
+    lap("net");
     this.feedSticks();
     const runtimeBlock = this.runtimeBlock();
     if (runtimeBlock) this.runtime.channel.beforeTick(runtimeBlock);
     const debugBlock = this.debugBlock();
     if (debugBlock) armDebugBlock(debugBlock, this.lineOffset);
+    lap("runtime");
     const frame = this.tickFrame + 1;
     this.console?.tick(mask);
+    lap("cart");
     if (debugBlock) this.drainDebug(frame);
     const afterBlock = runtimeBlock ? this.runtimeBlock() : null;
     if (afterBlock) {
       this.runtime.channel.afterTick(afterBlock);
       this.pollLevelRequest();
     }
+    lap("runtime");
     if (net && this.console) {
       const words = this.console.netWords();
       if (words) net.afterTick(words);
     }
+    lap("net");
     this.recorder?.record(mask);
     this.tickFrame++;
     if (this.console && this.options.onRuntimeError) {
@@ -10708,6 +11001,7 @@ var Player = class {
     if (withSound && samples && samples.length > 0) {
       this.audio?.enqueue(samples);
     }
+    lap("audio");
   }
   /**
    * Change the graphics preset live ("auto" re-detects). Shadows and the 3D
@@ -10834,6 +11128,11 @@ var Player = class {
     }
   }
   present() {
+    const started = this.profiler ? this.view.performance.now() : 0;
+    this.presentFrameNow();
+    this.profiler?.add("render", this.view.performance.now() - started);
+  }
+  presentFrameNow() {
     const framebuffer = this.console?.readFramebuffer();
     if (framebuffer) {
       if (this.litSurface && this.console) {
@@ -11353,11 +11652,18 @@ var NetSession = class {
     this.lastSent = "";
     this.lastSentTick = -Infinity;
     this.listeners = /* @__PURE__ */ new Set();
+    /** Bytes sent and received so far, as JSON on the wire (for the profiler). */
+    this.sentBytes = 0;
+    this.receivedBytes = 0;
     transport.onPeers((peers) => {
       this.peers = [...peers].sort((a, b) => a.joinedAt - b.joinedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       this.emit();
     });
     transport.onMessage((message) => this.receive(message));
+  }
+  /** Bytes this session has sent and received, measured as the messages' JSON. */
+  traffic() {
+    return { sent: this.sentBytes, received: this.receivedBytes };
   }
   /** Forget the current room's state (remote players, queued events, the host's
    *  match word) — for moving to another room without carrying anything over. */
@@ -11454,11 +11760,13 @@ var NetSession = class {
     if (this.outEvents.length > 0) message.e = this.outEvents.splice(0);
     if (message.s || message.e || message.m !== void 0) {
       this.transport.send(message);
+      this.sentBytes += JSON.stringify(message).length;
       this.lastSent = signature;
       this.lastSentTick = this.tick;
     }
   }
   receive(message) {
+    this.receivedBytes += JSON.stringify(message).length;
     const now = this.now();
     for (const [slot, a, b, c] of message.s ?? []) {
       if (slot >= 0 && slot < NET_SLOTS && slot !== this.mySlot) this.remote.set(slot, { state: [a, b, c], at: now });
@@ -11667,6 +11975,8 @@ function mount(container, options) {
     timeScale: () => player.timeScale(),
     stepFrame: () => player.stepFrame(),
     frame: () => player.frame(),
+    setProfiling: (on) => player.setProfiling(on),
+    profile: () => player.profile(),
     quality: () => player.quality()
   };
 }
@@ -11734,10 +12044,13 @@ export {
   PHYS_BLOCK_BYTES,
   PHYS_MAGIC,
   POST_FX_EFFECTS,
+  PROFILE_SECTIONS,
+  PROFILE_WINDOW,
   ParticleOverlaySurface,
   PhysicsSession,
   PostFxPass,
   PostFxSurface,
+  Profiler,
   QUALITY_LEVELS,
   QUALITY_PRESETS,
   RAM_LAYOUTS,
@@ -11812,6 +12125,7 @@ export {
   drift,
   emitterPreset,
   errorStack,
+  estimateSceneBytes,
   evaluate,
   extractScore,
   extractUnlocks,

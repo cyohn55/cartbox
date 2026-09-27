@@ -93,6 +93,9 @@ export class NetSession {
   private lastSent = "";
   private lastSentTick = -Infinity;
   private readonly listeners = new Set<(status: NetRoomStatus) => void>();
+  /** Bytes sent and received so far, as JSON on the wire (for the profiler). */
+  private sentBytes = 0;
+  private receivedBytes = 0;
 
   constructor(
     private readonly transport: NetTransport,
@@ -103,6 +106,11 @@ export class NetSession {
       this.emit();
     });
     transport.onMessage((message) => this.receive(message));
+  }
+
+  /** Bytes this session has sent and received, measured as the messages' JSON. */
+  traffic(): { sent: number; received: number } {
+    return { sent: this.sentBytes, received: this.receivedBytes };
   }
 
   /** Forget the current room's state (remote players, queued events, the host's
@@ -211,12 +219,14 @@ export class NetSession {
     if (this.outEvents.length > 0) message.e = this.outEvents.splice(0);
     if (message.s || message.e || message.m !== undefined) {
       this.transport.send(message);
+      this.sentBytes += JSON.stringify(message).length;
       this.lastSent = signature;
       this.lastSentTick = this.tick;
     }
   }
 
   private receive(message: NetMessage): void {
+    this.receivedBytes += JSON.stringify(message).length;
     const now = this.now();
     for (const [slot, a, b, c] of message.s ?? []) {
       if (slot >= 0 && slot < NET_SLOTS && slot !== this.mySlot) this.remote.set(slot, { state: [a, b, c], at: now });

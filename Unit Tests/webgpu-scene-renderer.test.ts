@@ -297,7 +297,8 @@ describe("WebgpuSceneRenderer frames", () => {
       [6, 1, 0, 0, 5],
       [6, 2, 0, 0, 6],
     ]);
-    expect(renderer.lastFrameStats).toEqual({ drawCalls: 3, instances: 8 });
+    // Two triangles per copy; no GPU time without the timestamp-query feature.
+    expect(renderer.lastFrameStats).toEqual({ drawCalls: 3, instances: 8, triangles: 16, gpuMs: null });
 
     // Each copy's transforms went up in batch order: the first batch is scene 0,
     // 1, 2, 4 and 5, so instance 3 is scene[4], its model matrix at floats 32..47.

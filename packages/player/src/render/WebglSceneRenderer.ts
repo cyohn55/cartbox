@@ -42,6 +42,8 @@ import {
 } from "@cartbox/editor";
 
 import { batchInstances, presentFrame, type PrimitiveTextures } from "./gpuFrame.js";
+import { WebglPassTimer } from "./gpuTimer.js";
+import type { RenderStats } from "../debug/profiler.js";
 import { webgpuCanHonour } from "./renderCaps.js";
 import { SoftwareSceneRenderer, applyScenePasses, type SceneDraw, type SceneRenderer } from "./sceneRenderer.js";
 import {
@@ -423,8 +425,9 @@ export class WebglSceneRenderer implements SceneRenderer {
   /** Readbacks in flight, oldest first. */
   private readonly pending: ReadbackSlot[] = [];
 
-  /** Draw calls and instances in the last submitted frame (for profiling and tests). */
-  lastFrameStats = { drawCalls: 0, instances: 0 };
+  /** What the last submitted frame drew (for the profiler and tests); GPU time when the browser can time it. */
+  lastFrameStats: RenderStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
+  private readonly timer: WebglPassTimer | null;
 
   private constructor(
     private readonly gl: any,
@@ -453,6 +456,7 @@ export class WebglSceneRenderer implements SceneRenderer {
       return { buffer, fence: null };
     });
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    this.timer = WebglPassTimer.create(gl);
   }
 
   /**
@@ -652,8 +656,10 @@ export class WebglSceneRenderer implements SceneRenderer {
     this.bindTexture(UNIT_SSAO, ssao ? this.ssaoTexture : this.blankFloat);
     for (let unit = UNIT_BASE; unit <= UNIT_EMIS; unit += 1) gl.bindSampler(unit, this.sampler);
 
+    this.timer?.begin();
     let bound: PrimitiveTextures | null = null;
     let boundBatch = -1;
+    let triangles = 0;
     for (const chunk of chunks) {
       const batch = batches[chunk.batch]!;
       if (chunk.batch !== boundBatch) {
@@ -670,9 +676,11 @@ export class WebglSceneRenderer implements SceneRenderer {
       }
       gl.bindBufferRange(gl.UNIFORM_BUFFER, BLOCK_INSTANCES, this.instanceBuffer, chunk.offsetFloats * 4, WEBGL_INSTANCES_PER_DRAW * INSTANCE_FLOATS * 4);
       gl.drawElementsInstanced(gl.TRIANGLES, batch.geometry.indexCount, gl.UNSIGNED_INT, 0, chunk.count);
+      triangles += (batch.geometry.indexCount / 3) * chunk.count;
     }
     gl.bindVertexArray(null);
-    this.lastFrameStats = { drawCalls: chunks.length, instances: instanceCount };
+    this.timer?.end();
+    this.lastFrameStats = { drawCalls: chunks.length, instances: instanceCount, triangles, gpuMs: this.timer?.lastMs ?? null };
 
     // Read back into a free pixel-pack buffer; skip this frame's readback if all are in flight.
     const slot = this.readback.find((s) => s.fence === null);
@@ -822,6 +830,7 @@ export class WebglSceneRenderer implements SceneRenderer {
       gl.deleteBuffer(this.lightBuffer);
       for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.ssaoTexture]) if (t) gl.deleteTexture(t);
       gl.deleteFramebuffer(this.framebuffer);
+      this.timer?.destroy();
       for (const rb of this.attachments) gl.deleteRenderbuffer(rb);
       gl.deleteSampler(this.sampler);
       gl.deleteProgram(this.program);
