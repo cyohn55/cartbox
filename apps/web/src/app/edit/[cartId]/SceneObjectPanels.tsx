@@ -481,6 +481,12 @@ export function AnimationPanel({
           </button>
         ))}
       </div>
+      <details style={{ marginTop: 6, fontSize: 12 }}>
+        <summary>Joints (for cartbox.ik / lookat / joint)</summary>
+        <div style={{ opacity: 0.8, marginTop: 4, lineHeight: 1.5, wordBreak: "break-word" }}>
+          {(mesh.skin?.joints ?? []).map((j) => j.name).join(" · ")}
+        </div>
+      </details>
       <RailHint>
         {clips.length > 0
           ? `In the game it plays “${clips[0]!.name}” on a loop by itself. In code: cartbox.play(${JSON.stringify(name)}, ${JSON.stringify(clips[clips.length > 1 ? 1 : 0]!.name)}) switches clip with a short crossfade.`

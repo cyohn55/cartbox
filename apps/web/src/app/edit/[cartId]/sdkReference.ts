@@ -396,6 +396,30 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
         doc: "Clip events (named moments set up in the state machine, e.g. a footstep) that the playhead passed on the last tick.",
         snippet: 'for _, e in ipairs(cartbox.events("hero")) do\n  if e == "step" then sfx(1) end\nend',
       },
+      {
+        name: "cartbox.ik",
+        signature: "cartbox.ik(obj, joint, x, y, z, weight, px, py, pz)",
+        doc: "Two-bone inverse kinematics on top of the animation: bend the chain that ends at joint (e.g. a foot: foot, knee, hip) so it reaches the world point x, y, z; the middle joint bends toward the pole px, py, pz when given. weight 0..1 blends it in (default 1); the request stands until repeated, and weight 0 lets go.",
+        snippet: 'local hit, _, hx, hy, hz = cartbox.hit(0)\nif hit then cartbox.ik("hero", "foot_l", hx, hy, hz, 1) end',
+      },
+      {
+        name: "cartbox.lookat",
+        signature: "cartbox.lookat(obj, joint, x, y, z, weight, maxdeg)",
+        doc: "Turn a joint (a head, a spine) toward the world point x, y, z by at most maxdeg degrees (default 60) — the way it faced the model's front at rest swings to the target. Stands until repeated; weight 0 lets go.",
+        snippet: 'cartbox.lookat("guard", "head", px, py + 1.6, pz, 1, 70)',
+      },
+      {
+        name: "cartbox.joint",
+        signature: "cartbox.joint(obj, joint) -> x, y, z",
+        doc: "Where a joint is in the world after animation and IK — to cast a ray down from a foot, or put a muzzle flash at a hand. nil until the tick after you first ask.",
+        snippet: 'local hx, hy, hz = cartbox.joint("hero", "hand_r")',
+      },
+      {
+        name: "cartbox.joints",
+        signature: "cartbox.joints(obj) -> { name, ... }",
+        doc: "The names of a skinned object's joints, in order (a joint can also be given by its 0-based index).",
+        snippet: 'for i, name in ipairs(cartbox.joints("hero")) do\n  trace(name)\nend',
+      },
     ],
   },
   {

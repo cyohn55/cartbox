@@ -45,6 +45,17 @@
  *   cartbox.setstate(obj, state, fade) jump to a state (and hand control back to the machine)
  *   cartbox.events(obj)               -> { name, ... } clip events that fired on the last tick
  *
+ * Inverse kinematics on top of whatever plays (world-space points; each call
+ * stands until repeated with new values, or with weight 0 to let go):
+ *
+ *   cartbox.ik(obj, joint, x, y, z, weight, px, py, pz)  reach with the two-bone chain ending
+ *                                     at `joint` (e.g. a foot), its middle joint bending toward
+ *                                     the pole (px, py, pz) when given
+ *   cartbox.lookat(obj, joint, x, y, z, weight, maxdeg) turn `joint` toward a point (≤ maxdeg, 60)
+ *   cartbox.joint(obj, joint)         -> x, y, z of a joint in the world (nil until the tick after
+ *                                     the first ask)
+ *   cartbox.joints(obj)               -> { name, ... } the skeleton's joints
+ *
  * `obj` is an object index or its name (as cartbox.find). The SDK's defaults
  * (sdk.ts) make every call a safe no-op for carts without bodies or prefabs.
  */
@@ -75,6 +86,12 @@ import {
   PHYS_OP_ANIM_GOTO,
   PHYS_OP_ANIM_SET,
   PHYS_OP_ANIM_TRIGGER,
+  PHYS_JOINT_BYTES,
+  PHYS_JOINTS,
+  PHYS_OP_IK,
+  PHYS_OP_IK_POLE,
+  PHYS_OP_LOOKAT,
+  PHYS_OP_WATCH,
   PHYS_OP_CAST,
   PHYS_OP_DESPAWN,
   PHYS_OP_IMPULSE,
@@ -304,6 +321,19 @@ function ANIM_CALLS(scene: MeshScene): string {
   if (animated.length === 0) return "";
   const names = animated.map((i) => `[${i}]={${(scene.instances[i]!.mesh.clips ?? []).map((c) => luaString(c.name)).join(",")}}`);
   const durations = animated.map((i) => `[${i}]={${(scene.instances[i]!.mesh.clips ?? []).map((c) => c.duration).join(",")}}`);
+  // Joint names, one table per distinct skeleton (a crowd of one character shares it).
+  const skeletons = new Map<object, number>();
+  const skeletonTables: string[] = [];
+  const jointsOf = animated.map((i) => {
+    const skin = scene.instances[i]!.mesh.skin!;
+    let k = skeletons.get(skin);
+    if (k === undefined) {
+      k = skeletonTables.length;
+      skeletons.set(skin, k);
+      skeletonTables.push(`{${skin.joints.map((j) => luaString(j.name)).join(",")}}`);
+    }
+    return `[${i}]=_sk[${k + 1}]`;
+  });
   const machines = animated
     .filter((i) => scene.instances[i]!.animator)
     .map((i) => {
@@ -352,6 +382,61 @@ function ANIM_CALLS(scene: MeshScene): string {
       end
     end
     return nil, 0, false
+  end
+  local _sk = {${skeletonTables.join(",")}}
+  local _jt = {${jointsOf.join(",")}}
+  local _jidx = {}
+  local function _joint(i, j)
+    local names = _jt[i]
+    if names == nil then return nil end
+    if type(j) == "number" then
+      if j >= 0 and j < #names then return math.floor(j) end
+      return nil
+    end
+    local map = _jidx[names]
+    if map == nil then
+      map = {}
+      for k, n in ipairs(names) do if map[n] == nil then map[n] = k - 1 end end
+      _jidx[names] = map
+    end
+    return map[j]
+  end
+  cartbox.joints = function(o)
+    local i = _obj(o)
+    local out = {}
+    for k, n in ipairs((i and _jt[i]) or {}) do out[k] = n end
+    return out
+  end
+  cartbox.ik = function(o, joint, x, y, z, weight, px, py, pz)
+    local i = _obj(o)
+    local j = i and _joint(i, joint)
+    if j == nil then return end
+    if px ~= nil then _cmd(${PHYS_OP_IK_POLE}, i, j, px, py or 0, pz or 0) end
+    _cmd(${PHYS_OP_IK}, i, j, x or 0, y or 0, z or 0, weight or 1)
+  end
+  cartbox.lookat = function(o, joint, x, y, z, weight, maxdeg)
+    local i = _obj(o)
+    local j = i and _joint(i, joint)
+    if j ~= nil then _cmd(${PHYS_OP_LOOKAT}, i, j, x or 0, y or 0, z or 0, weight or 1, maxdeg or 60) end
+  end
+  local _watching = {}
+  cartbox.joint = function(o, joint)
+    local i = _obj(o)
+    local j = i and _joint(i, joint)
+    if j == nil or not _live() then return nil end
+    local key = i * 1024 + j
+    if not _watching[key] then
+      _watching[key] = true
+      _cmd(${PHYS_OP_WATCH}, i, j)
+    end
+    local n = _rd(_B + ${PHYS_JOINTS})
+    for k = 0, n - 1 do
+      local at = _B + ${PHYS_JOINTS + 4} + k * ${PHYS_JOINT_BYTES}
+      if _rd(at) == i and _rd(at + 4) == j then
+        return _rd(at + 8) / ${PHYS_FIX}, _rd(at + 12) / ${PHYS_FIX}, _rd(at + 16) / ${PHYS_FIX}
+      end
+    end
+    return nil
   end
   local _sm = {${machines.join(",")}}
   cartbox.set = function(o, name, value)

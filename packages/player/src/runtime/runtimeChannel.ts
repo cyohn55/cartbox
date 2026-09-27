@@ -9,7 +9,16 @@
  * skinned (animated) objects.
  */
 
-import { composeModelMatrix, multiplyMat4, type Mat4 } from "@cartbox/editor";
+import {
+  composeModelMatrix,
+  invertAffine,
+  jointPosition,
+  multiplyMat4,
+  solveLookAt,
+  solveTwoBoneIK,
+  type Mat4,
+  type MeshAsset,
+} from "@cartbox/editor";
 
 import { AnimationSession, sceneHasAnimation } from "../anim/animationSession.js";
 import type { MeshScene } from "../mesh/meshScene.js";
@@ -19,15 +28,40 @@ import {
   PHYS_OP_ANIM_GOTO,
   PHYS_OP_ANIM_SET,
   PHYS_OP_ANIM_TRIGGER,
+  PHYS_MAX_JOINTS,
   PHYS_OP_DESPAWN,
+  PHYS_OP_IK,
+  PHYS_OP_IK_POLE,
+  PHYS_OP_LOOKAT,
   PHYS_OP_PLAY,
   PHYS_OP_SPAWN,
+  PHYS_OP_WATCH,
   takePhysicsCommands,
   writeAnimationState,
+  writeJointPositions,
   writePhysicsState,
 } from "../physics/protocol.js";
 
 const DEG = 180 / Math.PI;
+
+type Vec3 = readonly [number, number, number];
+
+/** A standing IK or look-at request on one joint (world-space points). */
+interface PoseRequest {
+  readonly kind: "ik" | "look";
+  readonly target: Vec3;
+  readonly pole: Vec3 | null;
+  readonly weight: number;
+  /** Look-at limit, radians. */
+  readonly max: number;
+}
+
+/** Transform a point by a column-major matrix. */
+const transform = (m: Mat4, p: Vec3): [number, number, number] => [
+  m[0]! * p[0] + m[4]! * p[1] + m[8]! * p[2] + m[12]!,
+  m[1]! * p[0] + m[5]! * p[1] + m[9]! * p[2] + m[13]!,
+  m[2]! * p[0] + m[6]! * p[1] + m[10]! * p[2] + m[14]!,
+];
 
 export class RuntimeChannel {
   /** Spawned copies: root object index → the root's world matrix. */
@@ -36,6 +70,12 @@ export class RuntimeChannel {
   private readonly copyObjects = new Map<number, number[]>();
   /** The skeletal animation player, when the scene has skinned objects. */
   readonly animation: AnimationSession | null;
+  /** Standing IK / look-at requests: object → joint → request (IK before look-at). */
+  private readonly requests = new Map<number, Map<number, PoseRequest>>();
+  /** A pole for the next IK request on (object, joint). */
+  private readonly poles = new Map<string, Vec3>();
+  /** Joints whose world position the cart asked for, and where they were when last skinned. */
+  private readonly watched = new Map<string, { object: number; joint: number; position: [number, number, number] | null }>();
 
   constructor(
     private readonly scene: MeshScene,
@@ -56,6 +96,10 @@ export class RuntimeChannel {
     if (this.physics) this.physics.beforeTick(block);
     else writePhysicsState(block, 0, [], []);
     writeAnimationState(block, this.animation?.state() ?? [], this.animation?.events() ?? []);
+    writeJointPositions(
+      block,
+      [...this.watched.values()].flatMap((w) => (w.position ? [{ object: w.object, joint: w.joint, position: w.position }] : [])),
+    );
   }
 
   /** Take the cart's commands: scene ops here, the rest to physics (which then steps). */
@@ -70,6 +114,9 @@ export class RuntimeChannel {
       } else if (cmd.op === PHYS_OP_ANIM_SET) this.animation?.setParam(cmd.a, Math.round(cmd.v[0]), cmd.v[1]);
       else if (cmd.op === PHYS_OP_ANIM_TRIGGER) this.animation?.setParam(cmd.a, Math.round(cmd.v[0]), 1);
       else if (cmd.op === PHYS_OP_ANIM_GOTO) this.animation?.goto(cmd.a, Math.round(cmd.v[0]), cmd.v[1]);
+      else if (cmd.op === PHYS_OP_IK_POLE) this.poles.set(`${cmd.a}:${Math.round(cmd.v[0])}`, [cmd.v[1], cmd.v[2], cmd.v[3]]);
+      else if (cmd.op === PHYS_OP_IK || cmd.op === PHYS_OP_LOOKAT) this.request(cmd.op, cmd.a, cmd.v);
+      else if (cmd.op === PHYS_OP_WATCH) this.watch(cmd.a, Math.round(cmd.v[0]));
     }
     this.physics?.run(commands.filter((c) => c.op < PHYS_OP_SPAWN || (c.op > PHYS_OP_DESPAWN && c.op < PHYS_OP_PLAY)));
     this.animation?.step(PHYSICS_DT);
@@ -77,14 +124,98 @@ export class RuntimeChannel {
 
   /**
    * Skinning matrices for the animated objects being drawn (object → matrices);
-   * reserve prefab copies not spawned are skipped.
+   * reserve prefab copies not spawned are skipped. IK and look-at requests are
+   * applied first, their world-space targets taken into each object's space with
+   * `worldOf` (its world matrix this frame; by default its physics body, spawn
+   * placement or authored placement).
    */
-  skinning(): ReadonlyMap<number, Float32Array> {
+  skinning(worldOf: (object: number) => Mat4 | null = (o) => this.defaultWorld(o)): ReadonlyMap<number, Float32Array> {
     if (!this.animation) return new Map();
-    return this.animation.matrices((object) => {
-      const pooled = this.scene.instances[object]?.pooled;
-      return !pooled || this.active.has(pooled.root);
-    });
+    const matrices = this.animation.matrices(
+      (object) => {
+        const pooled = this.scene.instances[object]?.pooled;
+        return !pooled || this.active.has(pooled.root);
+      },
+      (object, mesh, pose) => this.solve(object, mesh, pose, worldOf),
+    );
+    // Watched joints: where they ended up, in the world.
+    for (const w of this.watched.values()) {
+      const pose = this.animation.finalPose(w.object);
+      const mesh = this.scene.instances[w.object]?.mesh;
+      const world = worldOf(w.object);
+      if (pose && mesh?.skin && world) w.position = transform(world, jointPosition(mesh.skin, pose, w.joint));
+    }
+    return matrices;
+  }
+
+  /** Whether IK, look-at or joint watching needs the objects' current world matrices. */
+  needsWorld(): boolean {
+    return this.requests.size > 0 || this.watched.size > 0;
+  }
+
+  private defaultWorld(object: number): Mat4 | null {
+    const inst = this.scene.instances[object];
+    if (!inst) return null;
+    const body = this.physics?.overrides().get(object);
+    if (body) return body;
+    if (inst.pooled) {
+      const root = this.active.get(inst.pooled.root);
+      if (!root) return null;
+      if (inst.pooled.root === object) return root;
+      const chain: Mat4[] = [];
+      for (let i = object; i !== inst.pooled.root && i >= 0; i = this.scene.instances[i]!.parent) chain.unshift(this.scene.instances[i]!.local);
+      return chain.reduce((m, local) => multiplyMat4(m, local), root);
+    }
+    return inst.model;
+  }
+
+  private request(op: number, object: number, v: readonly number[]): void {
+    const inst = this.scene.instances[object];
+    const joints = inst?.mesh.skin?.joints.length ?? 0;
+    const joint = Math.round(v[0]!);
+    if (!inst || joint < 0 || joint >= joints) return;
+    const byJoint = this.requests.get(object) ?? new Map<number, PoseRequest>();
+    const weight = Math.max(0, Math.min(1, v[4]!));
+    const poleKey = `${object}:${joint}`;
+    if (weight <= 0) byJoint.delete(joint);
+    else
+      byJoint.set(joint, {
+        kind: op === PHYS_OP_IK ? "ik" : "look",
+        target: [v[1]!, v[2]!, v[3]!],
+        pole: op === PHYS_OP_IK ? (this.poles.get(poleKey) ?? null) : null,
+        weight,
+        max: op === PHYS_OP_LOOKAT ? (Math.max(0, Math.min(180, v[5]! > 0 ? v[5]! : 60)) * Math.PI) / 180 : 0,
+      });
+    this.poles.delete(poleKey);
+    if (byJoint.size > 0) this.requests.set(object, byJoint);
+    else this.requests.delete(object);
+    this.animation?.invalidate();
+  }
+
+  private watch(object: number, joint: number): void {
+    const key = `${object}:${joint}`;
+    const joints = this.scene.instances[object]?.mesh.skin?.joints.length ?? 0;
+    if (this.watched.has(key) || joint < 0 || joint >= joints || this.watched.size >= PHYS_MAX_JOINTS) return;
+    this.watched.set(key, { object, joint, position: null });
+  }
+
+  /** Apply an object's standing IK (first) and look-at requests to its pose. */
+  private solve(object: number, mesh: MeshAsset, pose: Float32Array, worldOf: (object: number) => Mat4 | null): void {
+    const requests = this.requests.get(object);
+    const skin = mesh.skin;
+    if (!requests || !skin) return;
+    const world = worldOf(object);
+    if (!world) return;
+    const toMesh = invertAffine(world);
+    if (!toMesh) return;
+    const local = (p: Vec3) => transform(toMesh, p);
+    for (const kind of ["ik", "look"] as const) {
+      for (const [joint, r] of requests) {
+        if (r.kind !== kind) continue;
+        if (kind === "ik") solveTwoBoneIK(skin, pose, joint, local(r.target), r.pole ? local(r.pole) : null, r.weight);
+        else solveLookAt(skin, pose, joint, local(r.target), r.weight, r.max);
+      }
+    }
   }
 
   /** Spawned copies' root world matrices (root object index → matrix). */

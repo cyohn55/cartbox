@@ -691,6 +691,16 @@ export class MeshOverlaySurface implements DisplaySurface {
    * Each object's world matrix as last drawn, null where it was hidden (live
    * inspection). Before anything has moved, the authored placement.
    */
+  /**
+   * Each object's world matrix for the poses, bodies and spawns set so far this
+   * frame (null = hidden), worked out now rather than read from the last draw —
+   * what inverse kinematics aims with before the frame is skinned.
+   */
+  currentPlacements(): readonly (Mat4 | null)[] {
+    this.posedInstances();
+    return this.placements();
+  }
+
   placements(): readonly (Mat4 | null)[] {
     return this.lastPlacement ?? this.instances.map((instance, i) => (this.pooledRoot[i]! >= 0 ? null : instance.model));
   }

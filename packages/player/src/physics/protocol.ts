@@ -78,6 +78,25 @@ export const PHYS_MAX_ANIMS = 64;
 export const PHYS_ANIM_EVENTS = PHYS_ANIMS + 4 + PHYS_MAX_ANIMS * PHYS_ANIM_BYTES; // 7428
 export const PHYS_ANIM_EVENT_BYTES = 8;
 export const PHYS_MAX_ANIM_EVENTS = 32;
+/** Watched joints' world positions: count, then (object, joint, x, y, z). */
+export const PHYS_JOINTS = 7700;
+export const PHYS_JOINT_BYTES = 20;
+export const PHYS_MAX_JOINTS = 16;
+
+/** Write watched joints' world positions (host → Lua). */
+export function writeJointPositions(
+  block: DataView,
+  joints: readonly { readonly object: number; readonly joint: number; readonly position: readonly [number, number, number] }[],
+): void {
+  const n = Math.min(joints.length, PHYS_MAX_JOINTS);
+  block.setInt32(PHYS_JOINTS, n, true);
+  for (let i = 0; i < n; i += 1) {
+    const at = PHYS_JOINTS + 4 + i * PHYS_JOINT_BYTES;
+    block.setInt32(at, joints[i]!.object, true);
+    block.setInt32(at + 4, joints[i]!.joint, true);
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + 8 + k * 4, toFix(joints[i]!.position[k]!), true);
+  }
+}
 
 // Lua → host (written during the tick; read and cleared after it).
 export const PHYS_CMDS = 4096;
@@ -120,6 +139,17 @@ export const PHYS_OP_PLAY = 11;
 export const PHYS_OP_ANIM_SET = 12;
 export const PHYS_OP_ANIM_TRIGGER = 13;
 export const PHYS_OP_ANIM_GOTO = 14;
+/**
+ * Inverse kinematics (a = object; world-space points; each request stays until
+ * its weight is 0): IK v0 = end joint, v1..v3 = target, v4 = weight; IK_POLE
+ * (sent just before IK) v0 = end joint, v1..v3 = pole; LOOKAT v0 = joint,
+ * v1..v3 = target, v4 = weight, v5 = max angle (degrees); WATCH v0 = joint, to
+ * have its world position reported.
+ */
+export const PHYS_OP_IK = 15;
+export const PHYS_OP_IK_POLE = 16;
+export const PHYS_OP_LOOKAT = 17;
+export const PHYS_OP_WATCH = 18;
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {

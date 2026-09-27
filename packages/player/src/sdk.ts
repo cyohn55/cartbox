@@ -291,6 +291,10 @@ cartbox = {
   state = function() return nil end,
   setstate = function() end,
   events = function() return {} end,
+  ik = function() end,
+  lookat = function() end,
+  joint = function() return nil end,
+  joints = function() return {} end,
 }`;
 
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */

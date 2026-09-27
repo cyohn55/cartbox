@@ -3879,6 +3879,10 @@ cartbox = {
   state = function() return nil end,
   setstate = function() end,
   events = function() return {} end,
+  ik = function() end,
+  lookat = function() end,
+  joint = function() return nil end,
+  joints = function() return {} end,
 }`;
 function injectSdk(bytes) {
   return prependLuaCode(bytes, CARTBOX_SDK_LUA);
@@ -4000,6 +4004,19 @@ var PHYS_MAX_ANIMS = 64;
 var PHYS_ANIM_EVENTS = PHYS_ANIMS + 4 + PHYS_MAX_ANIMS * PHYS_ANIM_BYTES;
 var PHYS_ANIM_EVENT_BYTES = 8;
 var PHYS_MAX_ANIM_EVENTS = 32;
+var PHYS_JOINTS = 7700;
+var PHYS_JOINT_BYTES = 20;
+var PHYS_MAX_JOINTS = 16;
+function writeJointPositions(block, joints) {
+  const n = Math.min(joints.length, PHYS_MAX_JOINTS);
+  block.setInt32(PHYS_JOINTS, n, true);
+  for (let i = 0; i < n; i += 1) {
+    const at = PHYS_JOINTS + 4 + i * PHYS_JOINT_BYTES;
+    block.setInt32(at, joints[i].object, true);
+    block.setInt32(at + 4, joints[i].joint, true);
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + 8 + k * 4, toFix(joints[i].position[k]), true);
+  }
+}
 var PHYS_CMDS = 4096;
 var PHYS_CMD_BYTES = 32;
 var PHYS_MAX_CMDS = 64;
@@ -4023,6 +4040,10 @@ var PHYS_OP_PLAY = 11;
 var PHYS_OP_ANIM_SET = 12;
 var PHYS_OP_ANIM_TRIGGER = 13;
 var PHYS_OP_ANIM_GOTO = 14;
+var PHYS_OP_IK = 15;
+var PHYS_OP_IK_POLE = 16;
+var PHYS_OP_LOOKAT = 17;
+var PHYS_OP_WATCH = 18;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -4663,6 +4684,8 @@ var AnimationSession = class {
     this.playback = /* @__PURE__ */ new Map();
     this.tick = 0;
     this.cache = null;
+    /** Each object's final pose (after any adjustment, e.g. IK) as last skinned. */
+    this.lastPose = /* @__PURE__ */ new Map();
     for (const i of animatedObjects(scene)) this.playback.set(i, this.fresh(i));
   }
   fresh(object) {
@@ -4817,19 +4840,30 @@ var AnimationSession = class {
   /**
    * The skinning matrices for every animated object now (object → matrices),
    * computed once per tick. `visible` skips objects not being drawn (a reserve
-   * prefab copy), which then keep their last pose.
+   * prefab copy), which then keep their last pose; `adjust` may rewrite a pose
+   * before it's skinned (inverse kinematics).
    */
-  matrices(visible = () => true) {
+  matrices(visible = () => true, adjust) {
     if (this.cache?.tick === this.tick) return this.cache.matrices;
     const out = /* @__PURE__ */ new Map();
     for (const [object, p] of this.playback) {
       if (!visible(object)) continue;
       const pose = this.pose(p, p.current);
       const faded = p.from && p.fade > 0 ? blendPoses(this.pose(p, p.from), pose, Math.min(1, p.fadeElapsed / p.fade)) : pose;
+      adjust?.(object, p.mesh, faded);
+      this.lastPose.set(object, faded);
       out.set(object, skinMatrices(p.mesh.skin, faded));
     }
     this.cache = { tick: this.tick, matrices: out };
     return out;
+  }
+  /** Recompute the matrices on the next request (something that shapes the pose changed). */
+  invalidate() {
+    this.cache = null;
+  }
+  /** An object's final pose as last skinned (null before its first). */
+  finalPose(object) {
+    return this.lastPose.get(object) ?? null;
   }
   pose(p, track) {
     const skin = p.mesh.skin;
@@ -5037,6 +5071,18 @@ function ANIM_CALLS(scene) {
   if (animated.length === 0) return "";
   const names = animated.map((i) => `[${i}]={${(scene.instances[i].mesh.clips ?? []).map((c) => luaString(c.name)).join(",")}}`);
   const durations = animated.map((i) => `[${i}]={${(scene.instances[i].mesh.clips ?? []).map((c) => c.duration).join(",")}}`);
+  const skeletons = /* @__PURE__ */ new Map();
+  const skeletonTables = [];
+  const jointsOf = animated.map((i) => {
+    const skin = scene.instances[i].mesh.skin;
+    let k = skeletons.get(skin);
+    if (k === void 0) {
+      k = skeletonTables.length;
+      skeletons.set(skin, k);
+      skeletonTables.push(`{${skin.joints.map((j) => luaString(j.name)).join(",")}}`);
+    }
+    return `[${i}]=_sk[${k + 1}]`;
+  });
   const machines = animated.filter((i) => scene.instances[i].animator).map((i) => {
     const a = scene.instances[i].animator;
     const params = a.params.map((p, k) => `[${luaString(p.name)}]=${k}`).join(",");
@@ -5083,6 +5129,61 @@ function ANIM_CALLS(scene) {
       end
     end
     return nil, 0, false
+  end
+  local _sk = {${skeletonTables.join(",")}}
+  local _jt = {${jointsOf.join(",")}}
+  local _jidx = {}
+  local function _joint(i, j)
+    local names = _jt[i]
+    if names == nil then return nil end
+    if type(j) == "number" then
+      if j >= 0 and j < #names then return math.floor(j) end
+      return nil
+    end
+    local map = _jidx[names]
+    if map == nil then
+      map = {}
+      for k, n in ipairs(names) do if map[n] == nil then map[n] = k - 1 end end
+      _jidx[names] = map
+    end
+    return map[j]
+  end
+  cartbox.joints = function(o)
+    local i = _obj(o)
+    local out = {}
+    for k, n in ipairs((i and _jt[i]) or {}) do out[k] = n end
+    return out
+  end
+  cartbox.ik = function(o, joint, x, y, z, weight, px, py, pz)
+    local i = _obj(o)
+    local j = i and _joint(i, joint)
+    if j == nil then return end
+    if px ~= nil then _cmd(${PHYS_OP_IK_POLE}, i, j, px, py or 0, pz or 0) end
+    _cmd(${PHYS_OP_IK}, i, j, x or 0, y or 0, z or 0, weight or 1)
+  end
+  cartbox.lookat = function(o, joint, x, y, z, weight, maxdeg)
+    local i = _obj(o)
+    local j = i and _joint(i, joint)
+    if j ~= nil then _cmd(${PHYS_OP_LOOKAT}, i, j, x or 0, y or 0, z or 0, weight or 1, maxdeg or 60) end
+  end
+  local _watching = {}
+  cartbox.joint = function(o, joint)
+    local i = _obj(o)
+    local j = i and _joint(i, joint)
+    if j == nil or not _live() then return nil end
+    local key = i * 1024 + j
+    if not _watching[key] then
+      _watching[key] = true
+      _cmd(${PHYS_OP_WATCH}, i, j)
+    end
+    local n = _rd(_B + ${PHYS_JOINTS})
+    for k = 0, n - 1 do
+      local at = _B + ${PHYS_JOINTS + 4} + k * ${PHYS_JOINT_BYTES}
+      if _rd(at) == i and _rd(at + 4) == j then
+        return _rd(at + 8) / ${PHYS_FIX}, _rd(at + 12) / ${PHYS_FIX}, _rd(at + 16) / ${PHYS_FIX}
+      end
+    end
+    return nil
   end
   local _sm = {${machines.join(",")}}
   cartbox.set = function(o, name, value)
@@ -5143,8 +5244,20 @@ function ANIM_CALLS(scene) {
 var physicsSdkLua = runtimeSdkLua;
 
 // src/runtime/runtimeChannel.ts
-import { composeModelMatrix, multiplyMat4 } from "@cartbox/editor";
+import {
+  composeModelMatrix,
+  invertAffine,
+  jointPosition,
+  multiplyMat4,
+  solveLookAt,
+  solveTwoBoneIK
+} from "@cartbox/editor";
 var DEG = 180 / Math.PI;
+var transform = (m, p) => [
+  m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
+  m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+  m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]
+];
 var RuntimeChannel = class {
   constructor(scene, physics) {
     this.scene = scene;
@@ -5153,6 +5266,12 @@ var RuntimeChannel = class {
     this.active = /* @__PURE__ */ new Map();
     /** Each reserve root's objects (itself first, then its descendants). */
     this.copyObjects = /* @__PURE__ */ new Map();
+    /** Standing IK / look-at requests: object → joint → request (IK before look-at). */
+    this.requests = /* @__PURE__ */ new Map();
+    /** A pole for the next IK request on (object, joint). */
+    this.poles = /* @__PURE__ */ new Map();
+    /** Joints whose world position the cart asked for, and where they were when last skinned. */
+    this.watched = /* @__PURE__ */ new Map();
     this.animation = sceneHasAnimation(scene) ? new AnimationSession(scene) : null;
     scene.instances.forEach((inst, i) => {
       if (!inst.pooled) return;
@@ -5167,6 +5286,10 @@ var RuntimeChannel = class {
     if (this.physics) this.physics.beforeTick(block);
     else writePhysicsState(block, 0, [], []);
     writeAnimationState(block, this.animation?.state() ?? [], this.animation?.events() ?? []);
+    writeJointPositions(
+      block,
+      [...this.watched.values()].flatMap((w) => w.position ? [{ object: w.object, joint: w.joint, position: w.position }] : [])
+    );
   }
   /** Take the cart's commands: scene ops here, the rest to physics (which then steps). */
   afterTick(block) {
@@ -5180,20 +5303,101 @@ var RuntimeChannel = class {
       } else if (cmd.op === PHYS_OP_ANIM_SET) this.animation?.setParam(cmd.a, Math.round(cmd.v[0]), cmd.v[1]);
       else if (cmd.op === PHYS_OP_ANIM_TRIGGER) this.animation?.setParam(cmd.a, Math.round(cmd.v[0]), 1);
       else if (cmd.op === PHYS_OP_ANIM_GOTO) this.animation?.goto(cmd.a, Math.round(cmd.v[0]), cmd.v[1]);
+      else if (cmd.op === PHYS_OP_IK_POLE) this.poles.set(`${cmd.a}:${Math.round(cmd.v[0])}`, [cmd.v[1], cmd.v[2], cmd.v[3]]);
+      else if (cmd.op === PHYS_OP_IK || cmd.op === PHYS_OP_LOOKAT) this.request(cmd.op, cmd.a, cmd.v);
+      else if (cmd.op === PHYS_OP_WATCH) this.watch(cmd.a, Math.round(cmd.v[0]));
     }
     this.physics?.run(commands.filter((c) => c.op < PHYS_OP_SPAWN || c.op > PHYS_OP_DESPAWN && c.op < PHYS_OP_PLAY));
     this.animation?.step(PHYSICS_DT);
   }
   /**
    * Skinning matrices for the animated objects being drawn (object → matrices);
-   * reserve prefab copies not spawned are skipped.
+   * reserve prefab copies not spawned are skipped. IK and look-at requests are
+   * applied first, their world-space targets taken into each object's space with
+   * `worldOf` (its world matrix this frame; by default its physics body, spawn
+   * placement or authored placement).
    */
-  skinning() {
+  skinning(worldOf = (o) => this.defaultWorld(o)) {
     if (!this.animation) return /* @__PURE__ */ new Map();
-    return this.animation.matrices((object) => {
-      const pooled = this.scene.instances[object]?.pooled;
-      return !pooled || this.active.has(pooled.root);
-    });
+    const matrices = this.animation.matrices(
+      (object) => {
+        const pooled = this.scene.instances[object]?.pooled;
+        return !pooled || this.active.has(pooled.root);
+      },
+      (object, mesh, pose) => this.solve(object, mesh, pose, worldOf)
+    );
+    for (const w of this.watched.values()) {
+      const pose = this.animation.finalPose(w.object);
+      const mesh = this.scene.instances[w.object]?.mesh;
+      const world = worldOf(w.object);
+      if (pose && mesh?.skin && world) w.position = transform(world, jointPosition(mesh.skin, pose, w.joint));
+    }
+    return matrices;
+  }
+  /** Whether IK, look-at or joint watching needs the objects' current world matrices. */
+  needsWorld() {
+    return this.requests.size > 0 || this.watched.size > 0;
+  }
+  defaultWorld(object) {
+    const inst = this.scene.instances[object];
+    if (!inst) return null;
+    const body = this.physics?.overrides().get(object);
+    if (body) return body;
+    if (inst.pooled) {
+      const root = this.active.get(inst.pooled.root);
+      if (!root) return null;
+      if (inst.pooled.root === object) return root;
+      const chain = [];
+      for (let i = object; i !== inst.pooled.root && i >= 0; i = this.scene.instances[i].parent) chain.unshift(this.scene.instances[i].local);
+      return chain.reduce((m, local) => multiplyMat4(m, local), root);
+    }
+    return inst.model;
+  }
+  request(op, object, v) {
+    const inst = this.scene.instances[object];
+    const joints = inst?.mesh.skin?.joints.length ?? 0;
+    const joint = Math.round(v[0]);
+    if (!inst || joint < 0 || joint >= joints) return;
+    const byJoint = this.requests.get(object) ?? /* @__PURE__ */ new Map();
+    const weight = Math.max(0, Math.min(1, v[4]));
+    const poleKey = `${object}:${joint}`;
+    if (weight <= 0) byJoint.delete(joint);
+    else
+      byJoint.set(joint, {
+        kind: op === PHYS_OP_IK ? "ik" : "look",
+        target: [v[1], v[2], v[3]],
+        pole: op === PHYS_OP_IK ? this.poles.get(poleKey) ?? null : null,
+        weight,
+        max: op === PHYS_OP_LOOKAT ? Math.max(0, Math.min(180, v[5] > 0 ? v[5] : 60)) * Math.PI / 180 : 0
+      });
+    this.poles.delete(poleKey);
+    if (byJoint.size > 0) this.requests.set(object, byJoint);
+    else this.requests.delete(object);
+    this.animation?.invalidate();
+  }
+  watch(object, joint) {
+    const key = `${object}:${joint}`;
+    const joints = this.scene.instances[object]?.mesh.skin?.joints.length ?? 0;
+    if (this.watched.has(key) || joint < 0 || joint >= joints || this.watched.size >= PHYS_MAX_JOINTS) return;
+    this.watched.set(key, { object, joint, position: null });
+  }
+  /** Apply an object's standing IK (first) and look-at requests to its pose. */
+  solve(object, mesh, pose, worldOf) {
+    const requests = this.requests.get(object);
+    const skin = mesh.skin;
+    if (!requests || !skin) return;
+    const world = worldOf(object);
+    if (!world) return;
+    const toMesh = invertAffine(world);
+    if (!toMesh) return;
+    const local = (p) => transform(toMesh, p);
+    for (const kind of ["ik", "look"]) {
+      for (const [joint, r] of requests) {
+        if (r.kind !== kind) continue;
+        if (kind === "ik") solveTwoBoneIK(skin, pose, joint, local(r.target), r.pole ? local(r.pole) : null, r.weight);
+        else solveLookAt(skin, pose, joint, local(r.target), r.weight, r.max);
+      }
+    }
   }
   /** Spawned copies' root world matrices (root object index → matrix). */
   spawned() {
@@ -7067,6 +7271,15 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * Each object's world matrix as last drawn, null where it was hidden (live
    * inspection). Before anything has moved, the authored placement.
    */
+  /**
+   * Each object's world matrix for the poses, bodies and spawns set so far this
+   * frame (null = hidden), worked out now rather than read from the last draw —
+   * what inverse kinematics aims with before the frame is skinned.
+   */
+  currentPlacements() {
+    this.posedInstances();
+    return this.placements();
+  }
   placements() {
     return this.lastPlacement ?? this.instances.map((instance, i) => this.pooledRoot[i] >= 0 ? null : instance.model);
   }
@@ -9151,7 +9364,8 @@ var Player = class {
         if (this.runtime) {
           if (this.runtime.physics) this.meshSurface.setBodyOverrides(this.runtime.physics.overrides());
           this.meshSurface.setSpawned(this.runtime.channel.spawned());
-          this.meshSurface.setSkinning(this.runtime.channel.skinning());
+          const placed = this.runtime.channel.needsWorld() ? this.meshSurface.currentPlacements() : null;
+          this.meshSurface.setSkinning(placed ? this.runtime.channel.skinning((o) => placed[o] ?? null) : this.runtime.channel.skinning());
         }
         this.meshSurface.setCartLights(decodeWorldLights(mailbox));
       }

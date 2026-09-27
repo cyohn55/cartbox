@@ -207,6 +207,7 @@ export {
   type AnimatorState,
   type AnimatorTransition,
 } from "./model/animatorSpec";
+export { jointPosition, solveLookAt, solveTwoBoneIK } from "./model/ik";
 export {
   MAX_CLIPS,
   MAX_SKIN_JOINTS,

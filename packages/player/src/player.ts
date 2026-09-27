@@ -564,7 +564,9 @@ export class Player {
         if (this.runtime) {
           if (this.runtime.physics) this.meshSurface.setBodyOverrides(this.runtime.physics.overrides());
           this.meshSurface.setSpawned(this.runtime.channel.spawned());
-          this.meshSurface.setSkinning(this.runtime.channel.skinning());
+          // IK aims in world space: give it where each object is this frame.
+          const placed = this.runtime.channel.needsWorld() ? this.meshSurface.currentPlacements() : null;
+          this.meshSurface.setSkinning(placed ? this.runtime.channel.skinning((o) => placed[o] ?? null) : this.runtime.channel.skinning());
         }
         this.meshSurface.setCartLights(decodeWorldLights(mailbox));
       }
