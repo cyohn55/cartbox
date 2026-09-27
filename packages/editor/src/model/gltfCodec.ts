@@ -39,11 +39,12 @@ import {
   MAX_MESH_INDICES,
 } from "./MeshAsset";
 import { base64ToBytes } from "./base64";
+import { decompressGltf, type GltfDecoders, type MeshoptViewExtension } from "./gltfCompression";
 import { MAX_CLIP_KEYS, MAX_CLIPS, MAX_SKIN_JOINTS, type AnimationClip, type ClipChannel, type MeshSkin, type SkinJoint } from "./skeleton";
 
 // --- glTF JSON shape (only the fields this codec reads/writes) -------------
 
-interface GltfAccessor {
+export interface GltfAccessor {
   bufferView?: number;
   byteOffset?: number;
   componentType: number;
@@ -53,11 +54,12 @@ interface GltfAccessor {
   min?: number[];
   max?: number[];
 }
-interface GltfBufferView {
+export interface GltfBufferView {
   buffer: number;
   byteOffset?: number;
   byteLength: number;
   byteStride?: number;
+  extensions?: { EXT_meshopt_compression?: MeshoptViewExtension };
 }
 interface GltfImage {
   bufferView?: number;
@@ -81,12 +83,13 @@ interface GltfMaterial {
   emissiveTexture?: { index: number };
   emissiveFactor?: number[];
 }
-interface GltfPrimitive {
+export interface GltfPrimitive {
   attributes: { POSITION?: number; NORMAL?: number; TEXCOORD_0?: number; JOINTS_0?: number; WEIGHTS_0?: number };
   indices?: number;
   material?: number;
+  extensions?: { KHR_draco_mesh_compression?: { bufferView: number; attributes: Record<string, number> } };
 }
-interface GltfMesh {
+export interface GltfMesh {
   primitives: GltfPrimitive[];
 }
 interface GltfNode {
@@ -111,12 +114,14 @@ interface GltfAnimation {
   channels: { sampler: number; target: { node?: number; path: string } }[];
   samplers: { input: number; output: number; interpolation?: string }[];
 }
-interface GltfBuffer {
+export interface GltfBuffer {
   uri?: string;
   byteLength: number;
 }
-interface GltfJson {
+export interface GltfJson {
   asset?: { version?: string };
+  extensionsUsed?: string[];
+  extensionsRequired?: string[];
   scene?: number;
   scenes?: GltfScene[];
   nodes?: GltfNode[];
@@ -471,7 +476,9 @@ function decodeDataUri(uri: string): Uint8Array | null {
  * `buffers[i]` is the bytes of `buffers[i]` in the JSON (buffer 0 is the GLB's
  * BIN chunk); a null entry means that buffer was external and unavailable.
  */
-export function parseGltf(json: GltfJson, buffers: (Uint8Array | null)[], name = "mesh"): MeshAsset {
+export function parseGltf(sourceJson: GltfJson, sourceBuffers: (Uint8Array | null)[], name = "mesh", decoders: GltfDecoders = {}): MeshAsset {
+  // Meshopt- or Draco-compressed geometry is decoded up front into plain buffers.
+  const { json, buffers } = decompressGltf(sourceJson, sourceBuffers, decoders);
   const instances = collectMeshInstances(json);
   const rig = readRig(json, buffers);
   const primitives: MeshPrimitive[] = [];
@@ -694,7 +701,13 @@ const CHUNK_BIN = 0x004e4942; // "BIN\0"
  * Parse a binary `.glb` file. The container is a 12-byte header then length-typed
  * chunks; the JSON chunk describes the scene and the BIN chunk is buffer 0.
  */
-export function parseGlb(bytes: Uint8Array, name = "mesh"): MeshAsset {
+export function parseGlb(bytes: Uint8Array, name = "mesh", decoders: GltfDecoders = {}): MeshAsset {
+  const { json, buffers } = readGlb(bytes);
+  return parseGltf(json, buffers, name, decoders);
+}
+
+/** A `.glb`'s JSON and its resolved buffers (buffer 0 is the BIN chunk). */
+export function readGlb(bytes: Uint8Array): { json: GltfJson; buffers: (Uint8Array | null)[] } {
   if (bytes.length < 12) throw new Error("File is too short to be a .glb");
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (dv.getUint32(0, true) !== GLB_MAGIC) throw new Error("Not a glTF binary: bad magic bytes");
@@ -721,7 +734,7 @@ export function parseGlb(bytes: Uint8Array, name = "mesh"): MeshAsset {
     if (index === 0 && bin) return bin;
     return buffer.uri ? decodeDataUri(buffer.uri) : null;
   });
-  return parseGltf(json, buffers.length ? buffers : [bin], name);
+  return { json, buffers: buffers.length ? buffers : [bin] };
 }
 
 /**
@@ -730,15 +743,19 @@ export function parseGlb(bytes: Uint8Array, name = "mesh"): MeshAsset {
  * files throws, so the browser importer can resolve them and call
  * {@link parseGltf} directly with the buffers it read.
  */
-export function parseGltfText(text: string, name = "mesh"): MeshAsset {
+export function parseGltfText(text: string, name = "mesh", decoders: GltfDecoders = {}): MeshAsset {
   const json = JSON.parse(text) as GltfJson;
   const buffers = (json.buffers ?? []).map((buffer) => {
-    if (!buffer.uri) throw new Error("glTF buffer has no URI (GLB-embedded buffer in a .gltf?)");
+    // A meshopt fallback buffer may have no data at all: the compressed views carry it.
+    if (!buffer.uri) {
+      if ((buffer as { extensions?: { EXT_meshopt_compression?: { fallback?: boolean } } }).extensions?.EXT_meshopt_compression?.fallback) return null;
+      throw new Error("glTF buffer has no URI (GLB-embedded buffer in a .gltf?)");
+    }
     const bytes = decodeDataUri(buffer.uri);
     if (!bytes) throw new Error("This .gltf references external buffer files; import the .glb form instead");
     return bytes;
   });
-  return parseGltf(json, buffers, name);
+  return parseGltf(json, buffers, name, decoders);
 }
 
 // --- Encode ----------------------------------------------------------------
