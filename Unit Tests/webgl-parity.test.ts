@@ -48,7 +48,7 @@ interface Parity {
   drawn: number;
   differing: number;
   maxDelta: number;
-  stats: { drawCalls: number; instances: number };
+  stats: { drawCalls: number; instances: number; triangles: number; gpuMs: number | null };
   backend: string;
   diffs: string[];
 }
@@ -99,14 +99,15 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
 
   it("renders instanced copies byte-identically, one draw per batch", async () => {
     const result = await run("instanced");
-    expect(result.stats).toEqual({ drawCalls: 2, instances: 9 });
+    expect(result.stats).toMatchObject({ drawCalls: 2, instances: 9 });
+    expect(result.stats.triangles).toBeGreaterThan(0);
     expectMatch(result);
   });
 
   it("splits a batch larger than a uniform block into several draws", async () => {
     const result = await run("chunked");
     // 150 copies: 50 textured (one draw) and 100 untextured (two draws of ≤ 64).
-    expect(result.stats).toEqual({ drawCalls: 3, instances: 150 });
+    expect(result.stats).toMatchObject({ drawCalls: 3, instances: 150 });
     // Quads under 3 pixels across: even a hardware-precision rasteriser may
     // cover an edge pixel the software one doesn't, so allow two. A dropped
     // chunk would leave dozens of copies missing.

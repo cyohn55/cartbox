@@ -860,7 +860,15 @@ declare class NetSession {
     private lastSent;
     private lastSentTick;
     private readonly listeners;
+    /** Bytes sent and received so far, as JSON on the wire (for the profiler). */
+    private sentBytes;
+    private receivedBytes;
     constructor(transport: NetTransport, now?: () => number);
+    /** Bytes this session has sent and received, measured as the messages' JSON. */
+    traffic(): {
+        sent: number;
+        received: number;
+    };
     /** Forget the current room's state (remote players, queued events, the host's
      *  match word) — for moving to another room without carrying anything over. */
     resetRoom(): void;
@@ -1440,6 +1448,104 @@ declare function decodeMeshPoses(words: Uint32Array): MailboxMeshPose[];
  * so the platform can map a mailbox id back to the achievement/stat key.
  */
 declare function hashEventId(id: string): number;
+
+/**
+ * The playtest profiler (ENGINE_ROADMAP.md, Phase 5): where each frame's time
+ * goes, measured on the host, over the last second or so of frames.
+ *
+ * Sections (milliseconds of main-thread time per frame):
+ * - `cart`: the engine's tick — the cart's Lua, its 2D drawing and the chip
+ *   sound synthesis all run inside it, and can't be told apart from outside.
+ * - `runtime`: physics, spawning, animation and timelines (the runtime channel).
+ * - `audio`: handing the frame's samples to Web Audio.
+ * - `net`: the multiplayer session's work before and after the tick.
+ * - `render`: presenting the frame, everything included; of it, `shadow` (the
+ *   shadow map), `sky` and `scene` (drawing the 3D scene — on the GPU backends,
+ *   submitting it and compositing the newest readback) are also shown alone.
+ *
+ * A frame is one console tick; the render that follows ticks counts toward the
+ * last of them. Pure apart from the clock the caller reads.
+ */
+declare const PROFILE_SECTIONS: readonly ["cart", "runtime", "audio", "net", "render", "shadow", "sky", "scene"];
+type ProfileSection = (typeof PROFILE_SECTIONS)[number];
+/** Frames the rolling window covers. */
+declare const PROFILE_WINDOW = 60;
+/** What the 3D renderer did in its last frame. */
+interface RenderStats {
+    readonly drawCalls: number;
+    readonly instances: number;
+    readonly triangles: number;
+    /** GPU time of the scene pass, when the browser can time it (else null). */
+    readonly gpuMs: number | null;
+}
+interface SectionStats {
+    /** Average milliseconds per frame over the window. */
+    readonly avg: number;
+    /** The slowest frame's. */
+    readonly max: number;
+}
+interface ProfileSnapshot {
+    /** Frames in the window. */
+    readonly frames: number;
+    readonly sections: Readonly<Record<ProfileSection, SectionStats>>;
+    /** All sections but the render sub-passes, per frame. */
+    readonly total: SectionStats;
+    /** The 3D renderer's last frame, when the cart has a 3D scene. */
+    readonly render: (RenderStats & {
+        readonly backend: string;
+    }) | null;
+    readonly memory: {
+        /** The engine's WebAssembly memory. */
+        readonly wasm: number;
+        /** The page's JavaScript heap (Chromium only; else null). */
+        readonly jsHeap: number | null;
+        /** The 3D scene's geometry, textures and render targets (an estimate), when it has one. */
+        readonly scene: number | null;
+    };
+    /** Multiplayer traffic, bytes per second over the window, when the cart is online. */
+    readonly net: {
+        readonly sentPerSecond: number;
+        readonly receivedPerSecond: number;
+        readonly sent: number;
+        readonly received: number;
+    } | null;
+}
+declare class Profiler {
+    private readonly samples;
+    /** The slot being filled (the open frame). */
+    private slot;
+    private filled;
+    /** A frame has been opened (the first nextFrame opens one, closing nothing). */
+    private open;
+    /** Add `ms` to the open frame's `section`. */
+    add(section: ProfileSection, ms: number): void;
+    /** Close the open frame and start the next. */
+    nextFrame(): void;
+    /** Averages and peaks over the closed frames in the window. */
+    sections(): {
+        frames: number;
+        sections: Record<ProfileSection, SectionStats>;
+        total: SectionStats;
+    };
+    reset(): void;
+}
+/**
+ * Bytes a 3D scene keeps on the GPU, estimated from what it draws: each mesh's
+ * interleaved vertices (32 bytes: position, normal, UV) and 32-bit indices once,
+ * each texture's RGBA8 pixels once, and the colour + depth targets.
+ */
+declare function estimateSceneBytes(instances: readonly {
+    readonly mesh: {
+        readonly primitives: readonly {
+            readonly positions: ArrayLike<number>;
+            readonly indices: ArrayLike<number>;
+        }[];
+    };
+    readonly textures?: readonly ({
+        readonly width: number;
+        readonly height: number;
+    } | null | undefined)[];
+}[], width: number, height: number): number;
 
 /**
  * Gap #3 — a runtime parallax + atmosphere compositor.
@@ -2238,6 +2344,10 @@ interface PlayerHandle {
     stepFrame(): void;
     /** Frames the cart has run so far. */
     frame(): number;
+    /** Turn the profiler on or off (off by default; it costs a few clock reads per frame). */
+    setProfiling(on: boolean): void;
+    /** Where recent frames spent their time, what the 3D scene drew, memory and network use; null while profiling is off. */
+    profile(): ProfileSnapshot | null;
 }
 /** One scene object in a live inspection snapshot. */
 interface InspectedObject {
@@ -2371,6 +2481,8 @@ interface ConsoleInstance {
         seq: number;
         message: string;
     } | null;
+    /** Bytes of the engine's WebAssembly memory (for the profiler). */
+    memoryBytes(): number;
     /** Frees the underlying WASM console. */
     dispose(): void;
 }
@@ -2723,6 +2835,8 @@ interface SceneRenderer {
     readonly backend: "software" | "webgpu" | "webgl2";
     render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
     dispose(): void;
+    /** What the last frame drew, for the profiler (see debug/profiler.ts). */
+    readonly lastFrameStats?: RenderStats;
 }
 /**
  * The existing pure rasteriser, behind the interface. Nothing about it changes:
@@ -2738,6 +2852,7 @@ declare class SoftwareSceneRenderer implements SceneRenderer {
      *   nothing renders exactly as it always has.
      */
     constructor(style?: RasterStyle);
+    lastFrameStats: RenderStats;
     render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
     dispose(): void;
 }
@@ -2755,6 +2870,7 @@ declare class CappedSceneRenderer implements SceneRenderer {
     private readonly cache;
     constructor(inner: SceneRenderer, caps: RenderCaps);
     get backend(): SceneRenderer["backend"];
+    get lastFrameStats(): RenderStats | undefined;
     render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
     dispose(): void;
 }
@@ -2930,11 +3046,9 @@ declare class WebglSceneRenderer implements SceneRenderer {
     private readonly readback;
     /** Readbacks in flight, oldest first. */
     private readonly pending;
-    /** Draw calls and instances in the last submitted frame (for profiling and tests). */
-    lastFrameStats: {
-        drawCalls: number;
-        instances: number;
-    };
+    /** What the last submitted frame drew (for the profiler and tests); GPU time when the browser can time it. */
+    lastFrameStats: RenderStats;
+    private readonly timer;
     private constructor();
     /**
      * Build the renderer for one framebuffer size, or null when WebGL2 is missing,
@@ -3101,11 +3215,9 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private instanceBuffer;
     private instanceCapacity;
     private instanceData;
-    /** Draw calls and instances in the last submitted frame (for profiling and tests). */
-    lastFrameStats: {
-        drawCalls: number;
-        instances: number;
-    };
+    /** What the last submitted frame drew (for the profiler and tests); GPU time when the device can time it. */
+    lastFrameStats: RenderStats;
+    private readonly timer;
     private constructor();
     /**
      * Point the SSAO slot at a width×height r32float upload of `ao` (created once,
@@ -4577,6 +4689,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private lastPlacement;
     /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
     private hudFrame;
+    /** The playtest profiler, when it's on: shadow, sky and scene time go to it. */
+    private profiler;
     private constructor();
     /**
      * Set the world matrices of the objects physics moves (object index → matrix),
@@ -4645,6 +4759,12 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * top of the authored rig's lights.
      */
     setCartLights(lights: readonly WorldLight[]): void;
+    /** Report per-pass times to `profiler` (null: stop). */
+    setProfiler(profiler: Profiler | null): void;
+    /** What the renderer drew last frame. */
+    renderStats(): RenderStats | null;
+    /** Bytes the scene keeps for drawing (geometry, textures, targets), estimated. */
+    sceneBytes(): number;
     blit(rgba: Uint8Array): void;
     /** Paint the sky backdrop, or copy it from last frame when the view direction hasn't changed. */
     private paintSky;
@@ -5204,4 +5324,4 @@ declare class RuntimeChannel {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_PAD_BINDINGS, type DeviceHints, type DeviceProvider, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, type FlagsField, GamepadInput, type GeneratedTrack, type GlContextProvider, HEIGHT_WORLD, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetState, type NetTransport, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POST_FX_EFFECTS, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$1 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, RuntimeChannel, SOFTWARE_RASTER_CAPS, START_KEYS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, SoftwareSceneRenderer, type SpriteRegion, type SpriteRegionSource, SwitchableTransport, TILT_SHIFT_FEATHER, type TextureLookup, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, applyLookSettings, applyQualityToPostFx, applyRenderCaps, browserDeviceHints, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, compileAnimator, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugSdkLua, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, drift, emitterPreset, errorStack, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interleaveVertices, interpolateNormal, jointFrames, loadEngineModule, makeShadowTexture, mount, nearestDirection, netSendInterval, normalBasis3x3, normalVector, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, splitWorldMatrix, standardizePad, sway, takeNetOutbox, takePhysicsCommands, tiltShiftBlur, uniformsFromSettings, unpadRows, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState };
+export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_PAD_BINDINGS, type DeviceHints, type DeviceProvider, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, type FlagsField, GamepadInput, type GeneratedTrack, type GlContextProvider, HEIGHT_WORLD, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetState, type NetTransport, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$1 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type ProfileSection, type ProfileSnapshot, Profiler, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, RuntimeChannel, SOFTWARE_RASTER_CAPS, START_KEYS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, type SectionStats, SoftwareSceneRenderer, type SpriteRegion, type SpriteRegionSource, SwitchableTransport, TILT_SHIFT_FEATHER, type TextureLookup, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, applyLookSettings, applyQualityToPostFx, applyRenderCaps, browserDeviceHints, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, compileAnimator, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugSdkLua, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, drift, emitterPreset, errorStack, estimateSceneBytes, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interleaveVertices, interpolateNormal, jointFrames, loadEngineModule, makeShadowTexture, mount, nearestDirection, netSendInterval, normalBasis3x3, normalVector, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, splitWorldMatrix, standardizePad, sway, takeNetOutbox, takePhysicsCommands, tiltShiftBlur, uniformsFromSettings, unpadRows, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState };

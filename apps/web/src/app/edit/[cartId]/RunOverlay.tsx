@@ -9,11 +9,12 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { mount, type InspectedObject, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type QualityChoice, type SceneSpec, type WorldScene } from "@cartbox/player";
+import { frameDurationMs, getModel, mount, type InspectedObject, type ProfileSnapshot, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type QualityChoice, type SceneSpec, type WorldScene } from "@cartbox/player";
 
 import styles from "./editor.module.css";
 import { errorLineFrom } from "./codeTools";
 import { appendConsole, traceColor, type ConsoleEntry } from "./consoleLog";
+import { ProfilerPanel } from "./ProfilerPanel";
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 import { rapierPhysics } from "@/lib/physicsRapier";
 
@@ -82,6 +83,10 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
   const [inspecting, setInspecting] = useState(false);
   const [objects, setObjects] = useState<InspectedObject[]>([]);
   const [filter, setFilter] = useState("");
+  // The profiler: on while its panel is open (it costs a few clock reads per frame).
+  const [profiling, setProfiling] = useState(false);
+  const profilingRef = useRef(false);
+  const [profile, setProfile] = useState<ProfileSnapshot | null>(null);
   // Speed (1 is normal), read at mount like the quality preset.
   const [speed, setSpeed] = useState(1);
   const speedRef = useRef(1);
@@ -175,6 +180,7 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
     });
     handleRef.current = handle;
     handle.setTimeScale(speedRef.current);
+    handle.setProfiling(profilingRef.current);
 
     return () => {
       handle.destroy();
@@ -210,6 +216,18 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
     }, 200);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    profilingRef.current = profiling;
+    handleRef.current?.setProfiling(profiling);
+    if (!profiling) {
+      setProfile(null);
+      return;
+    }
+    const read = () => setProfile(handleRef.current?.profile() ?? null);
+    const timer = window.setInterval(read, 500);
+    return () => window.clearInterval(timer);
+  }, [profiling]);
 
   /** While paused: run one frame and show what it did. */
   const stepFrame = () => {
@@ -299,6 +317,9 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
             <button type="button" className="cbx-btn" onClick={stepFrame} disabled={status !== "ready" || running} title="Run one frame (while paused)">
               Step
             </button>
+            <button type="button" className="cbx-btn" aria-pressed={profiling} onClick={() => setProfiling((v) => !v)} disabled={status !== "ready"}>
+              Profiler
+            </button>
             <button type="button" className="cbx-btn" aria-pressed={consoleOpen} onClick={() => setConsoleOpen((v) => !v)}>
               Console{log.length > 0 ? ` · ${log.length}` : ""}
             </button>
@@ -311,6 +332,7 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
         <div style={{ display: "flex", gap: 12, alignItems: "stretch", minHeight: 0 }}>
           <div ref={stageRef} className={styles.runStage} style={{ flex: 1, minWidth: 0 }} />
           {inspecting && <ObjectsPanel objects={objects} filter={filter} onFilter={setFilter} />}
+          {profiling && <ProfilerPanel profile={profile} budgetMs={frameDurationMs(getModel(modelId))} />}
         </div>
 
         <div className={styles.runDebug}>

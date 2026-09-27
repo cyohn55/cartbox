@@ -20,7 +20,9 @@ async function acquireDevice(): Promise<any | null> {
     if (!gpu) return null;
     const adapter = await gpu.requestAdapter();
     if (!adapter) return null;
-    return await adapter.requestDevice();
+    // GPU timing for the playtest profiler, where the adapter offers it.
+    const timestamps = adapter.features?.has?.("timestamp-query") === true;
+    return await adapter.requestDevice(timestamps ? { requiredFeatures: ["timestamp-query"] } : undefined);
   } catch {
     return null;
   }

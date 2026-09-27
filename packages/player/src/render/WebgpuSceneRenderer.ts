@@ -75,6 +75,8 @@ import {
 import { SoftwareSceneRenderer, applyScenePasses, type SceneDraw, type SceneRenderer } from "./sceneRenderer.js";
 import { webgpuCanHonour } from "./renderCaps.js";
 import { batchInstances, presentFrame, type PrimitiveTextures } from "./gpuFrame.js";
+import { WebgpuPassTimer } from "./gpuTimer.js";
+import type { RenderStats } from "../debug/profiler.js";
 import {
   UNIFORM_FLOATS,
   UNIFORM_STRIDE,
@@ -473,8 +475,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private instanceCapacity = 0;
   private instanceData = new Float32Array(0);
 
-  /** Draw calls and instances in the last submitted frame (for profiling and tests). */
-  lastFrameStats = { drawCalls: 0, instances: 0 };
+  /** What the last submitted frame drew (for the profiler and tests); GPU time when the device can time it. */
+  lastFrameStats: RenderStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
+  private readonly timer: WebgpuPassTimer | null;
 
   private constructor(
     private readonly device: any,
@@ -497,6 +500,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.shadowTexture = blankShadow;
     this.envTexture = blankTexture; // the 1x1 white stands in until a map is bound
     this.ssaoBound = blankShadow; // the 1x1 r32float blank until an AO buffer arrives
+    this.timer = WebgpuPassTimer.create(device);
   }
 
   /**
@@ -885,7 +889,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
     this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, instanceCount * INSTANCE_FLOATS);
-    this.lastFrameStats = { drawCalls: draws.length, instances: instanceCount };
+    let triangles = 0;
+    for (const entry of draws) triangles += (entry.geometry.indexCount / 3) * entry.models.length;
+    this.lastFrameStats = { drawCalls: draws.length, instances: instanceCount, triangles, gpuMs: this.timer?.lastMs ?? null };
 
     const encoder = this.device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
@@ -905,6 +911,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         depthLoadOp: "clear",
         depthStoreOp: "store",
       },
+      ...(this.timer ? { timestampWrites: this.timer.writes() } : {}),
     });
     pass.setPipeline(this.pipeline);
     draws.forEach((entry, index) => {
@@ -914,6 +921,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
     });
     pass.end();
+    this.timer?.resolve(encoder);
 
     const slot = this.readback.find((entry) => !entry.busy);
     if (slot) {
@@ -924,11 +932,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { width: this.width, height: this.height },
       );
       this.device.queue.submit([encoder.finish()]);
+      this.timer?.read();
       void this.drain(slot);
     } else {
       // Every staging buffer is still mapped; render anyway and read back next
       // frame rather than stalling the run loop waiting for one.
       this.device.queue.submit([encoder.finish()]);
+      this.timer?.read();
     }
   }
 
@@ -1098,6 +1108,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     destroySafely(this.instanceBuffer);
     destroySafely(this.uniformBuffer);
     for (const slot of this.readback) destroySafely(slot.buffer);
+    this.timer?.destroy();
   }
 }
 

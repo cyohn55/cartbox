@@ -15,6 +15,7 @@ import type { Replay } from "./replay.js";
 import type { MailboxEvent } from "./mailbox.js";
 import type { LightingOptions } from "./lighting/types.js";
 import type { PostFxSettings } from "./fx/postfx.js";
+import type { ProfileSnapshot } from "./debug/profiler.js";
 import type { SceneSpec } from "./scene/sceneModel.js";
 import type { AnimSpec } from "./anim/animModel.js";
 import type { ParticleSpec } from "./particles/particleModel.js";
@@ -279,6 +280,10 @@ export interface PlayerHandle {
   stepFrame(): void;
   /** Frames the cart has run so far. */
   frame(): number;
+  /** Turn the profiler on or off (off by default; it costs a few clock reads per frame). */
+  setProfiling(on: boolean): void;
+  /** Where recent frames spent their time, what the 3D scene drew, memory and network use; null while profiling is off. */
+  profile(): ProfileSnapshot | null;
 }
 
 /** One scene object in a live inspection snapshot. */

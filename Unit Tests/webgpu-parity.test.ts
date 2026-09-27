@@ -231,7 +231,7 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     const gpu = draw();
     renderer.render(instances, gpu);
     // Two batches (textured and untextured) for nine copies.
-    expect(renderer.lastFrameStats).toEqual({ drawCalls: 2, instances: 9 });
+    expect(renderer.lastFrameStats).toMatchObject({ drawCalls: 2, instances: 9 });
 
     const software = draw();
     new SoftwareSceneRenderer().render(instances, software);

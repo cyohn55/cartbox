@@ -93,6 +93,8 @@ export interface ConsoleInstance {
    * surface no runtime errors rather than breaking.
    */
   readError(): { seq: number; message: string } | null;
+  /** Bytes of the engine's WebAssembly memory (for the profiler). */
+  memoryBytes(): number;
   /** Frees the underlying WASM console. */
   dispose(): void;
 }
@@ -252,6 +254,10 @@ export function createConsole(
       const seq = module._cbx_error_seq();
       const message = readCString(module.HEAPU8, module._cbx_last_error());
       return { seq, message };
+    },
+
+    memoryBytes(): number {
+      return module.HEAPU8.byteLength;
     },
 
     dispose(): void {

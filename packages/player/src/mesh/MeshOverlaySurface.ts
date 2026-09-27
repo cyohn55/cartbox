@@ -52,6 +52,7 @@ import type { ShadowInput, SceneLight, SceneLighting } from "@cartbox/editor";
 import type { MeshScene } from "./meshScene.js";
 import { QUALITY_PRESETS, type QualitySettings } from "../quality.js";
 import { buildOrbitCamera } from "./meshScene.js";
+import { estimateSceneBytes, type Profiler, type RenderStats } from "../debug/profiler.js";
 
 const RAD_TO_DEG = 180 / Math.PI;
 
@@ -254,6 +255,8 @@ export class MeshOverlaySurface implements DisplaySurface {
   private lastPlacement: (Mat4 | null)[] | null = null;
   /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
   private hudFrame: Uint8ClampedArray | null = null;
+  /** The playtest profiler, when it's on: shadow, sky and scene time go to it. */
+  private profiler: Profiler | null = null;
 
   private constructor(
     private readonly inner: DisplaySurface,
@@ -494,8 +497,24 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.cartLights = lights.map((light) => ({ kind: "point", position: light.position, color: light.color, intensity: 1, range: light.range }));
   }
 
+  /** Report per-pass times to `profiler` (null: stop). */
+  setProfiler(profiler: Profiler | null): void {
+    this.profiler = profiler;
+  }
+
+  /** What the renderer drew last frame. */
+  renderStats(): RenderStats | null {
+    return this.renderer.lastFrameStats ?? null;
+  }
+
+  /** Bytes the scene keeps for drawing (geometry, textures, targets), estimated. */
+  sceneBytes(): number {
+    return estimateSceneBytes(this.instances, this.width, this.height);
+  }
+
   blit(rgba: Uint8Array): void {
     const started = performance.now();
+    const profiler = this.profiler;
     // Default (third-person): copy the cart frame in, then composite the meshes on
     // top (background null shows the cart where no mesh drew). HUD mode inverts it:
     // render the 3D over an opaque sky, then lay the cart's 2D frame on top as a HUD.
@@ -530,13 +549,24 @@ export class MeshOverlaySurface implements DisplaySurface {
     // that never opted in) leaves these omitted, so the draw is exactly as before
     // and the fantasy tiers render byte-identically.
     const lighting = this.scene.lighting;
+    let mark = profiler ? performance.now() : 0;
     const shadow = lighting ? this.buildShadow(instances, moved, lighting) : null;
+    if (profiler) {
+      const now = performance.now();
+      profiler.add("shadow", now - mark);
+      mark = now;
+    }
     const lights = this.hud && this.cartLights.length > 0 ? [...(lighting?.lights ?? []), ...this.cartLights] : lighting?.lights;
     // First-person with a sky dome: paint the panorama through the camera, then
     // composite the meshes over it (background null) — backend-agnostic, since
     // both renderers leave untouched pixels alone.
     const skyBackdrop = this.hud && this.skyMap !== null;
     if (skyBackdrop) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : SKY_BACKDROP_SCALE);
+    if (profiler) {
+      const now = performance.now();
+      profiler.add("sky", now - mark);
+      mark = now;
+    }
     this.renderer.render(instances, {
       width,
       height,
@@ -582,6 +612,7 @@ export class MeshOverlaySurface implements DisplaySurface {
           : {}),
       });
     }
+    if (profiler) profiler.add("scene", performance.now() - mark);
     if (target) expandNearest(target.out, target.width, target.height, this.output, this.width, this.height);
     // Lay the cart's 2D frame over the rendered scene as a HUD (first-person).
     if (this.hud && this.hudFrame) compositeHudOverScene(this.output, this.hudFrame, this.width * this.height);

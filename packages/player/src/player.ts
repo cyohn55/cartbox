@@ -25,6 +25,7 @@ import { PhysicsSession, sceneHasPhysics } from "./physics/physicsSession.js";
 import { RuntimeChannel } from "./runtime/runtimeChannel.js";
 import { PHYS_BLOCK_BYTES, RAM_LAYOUTS, physicsBlockAddress } from "./physics/protocol.js";
 import { collisionSdkLua } from "./collisionSdk.js";
+import { Profiler, type ProfileSnapshot } from "./debug/profiler.js";
 import { DEBUG_BLOCK_BYTES, armDebugBlock, codeLineOffset, debugBlockAddress, debugSdkLua, drainTraces, remapErrorLines } from "./debug/debugBlock.js";
 import { flagsSdkLua } from "./flagsSdk.js";
 import { animClipsSdkLua } from "./anim/animClipsSdk.js";
@@ -114,6 +115,10 @@ export class Player {
   /** The debug block (bytes after pmem word 0), when the editor's console is on. */
   private debugOffset: number | null = null;
   private speed = 1;
+  /** The playtest profiler, while it's on (see setProfiling). */
+  private profiler: Profiler | null = null;
+  /** Recent netplay byte totals, for traffic per second. */
+  private netSamples: { at: number; sent: number; received: number }[] = [];
 
   private frameHandle = 0;
   private lastFrameTime = 0;
@@ -304,6 +309,7 @@ export class Player {
             this.options.ktx2 ? { ktx2: this.options.ktx2 } : {},
           );
           this.meshSurface.setQuality(this.qualitySettings);
+          this.meshSurface.setProfiler(this.profiler);
           // A scene with levels starts in its first; the others wait, hidden.
           if ((mesh.levels?.length ?? 0) > 0) this.activateLevel(0);
         }
@@ -495,8 +501,63 @@ export class Player {
     this.frameHandle = this.view.requestAnimationFrame(this.loop);
   };
 
+  /** Turn the profiler on (it starts empty) or off. */
+  setProfiling(on: boolean): void {
+    if (on === (this.profiler !== null)) return;
+    this.profiler = on ? new Profiler() : null;
+    this.netSamples = [];
+    this.meshSurface?.setProfiler(this.profiler);
+  }
+
+  /** Where the last second or so of frames spent their time, and what the scene drew; null while profiling is off. */
+  profile(): ProfileSnapshot | null {
+    const profiler = this.profiler;
+    if (!profiler) return null;
+    const { frames, sections, total } = profiler.sections();
+    const stats = this.meshSurface?.renderStats() ?? null;
+    const heap = (this.view.performance as unknown as { memory?: { usedJSHeapSize?: number } }).memory?.usedJSHeapSize;
+    let net: ProfileSnapshot["net"] = null;
+    const traffic = this.options.netplay?.traffic();
+    if (traffic) {
+      const at = this.view.performance.now();
+      this.netSamples.push({ at, ...traffic });
+      while (this.netSamples.length > 2 && at - this.netSamples[0]!.at > 2000) this.netSamples.shift();
+      const first = this.netSamples[0]!;
+      const seconds = (at - first.at) / 1000;
+      net = {
+        sent: traffic.sent,
+        received: traffic.received,
+        sentPerSecond: seconds > 0 ? (traffic.sent - first.sent) / seconds : 0,
+        receivedPerSecond: seconds > 0 ? (traffic.received - first.received) / seconds : 0,
+      };
+    }
+    return {
+      frames,
+      sections,
+      total,
+      render: stats && this.sceneRenderer ? { ...stats, backend: this.sceneRenderer.backend } : null,
+      memory: {
+        wasm: this.console?.memoryBytes() ?? 0,
+        jsHeap: typeof heap === "number" ? heap : null,
+        scene: this.meshSurface ? this.meshSurface.sceneBytes() : null,
+      },
+      net,
+    };
+  }
+
   /** Run one console frame. `withSound` false drops its audio (stepping, or off 1× speed). */
   private tickOnce(withSound = true): void {
+    const profiler = this.profiler;
+    profiler?.nextFrame();
+    const clock = this.view.performance;
+    let mark = profiler ? clock.now() : 0;
+    /** Charge the time since the last mark to `section`. */
+    const lap = (section: "cart" | "runtime" | "audio" | "net") => {
+      if (!profiler) return;
+      const now = clock.now();
+      profiler.add(section, now - mark);
+      mark = now;
+    };
     // In playback the mask comes from the replay; otherwise from live input.
     const mask = this.replaySource ? this.replaySource.maskForFrame(this.tickFrame) : this.inputEnabled ? this.gamepad.value : 0;
     const net = this.options.netplay;
@@ -504,23 +565,28 @@ export class Player {
       const words = this.console.netWords();
       if (words) net.beforeTick(words);
     }
+    lap("net");
     this.feedSticks();
     const runtimeBlock = this.runtimeBlock();
     if (runtimeBlock) this.runtime!.channel.beforeTick(runtimeBlock);
     const debugBlock = this.debugBlock();
     if (debugBlock) armDebugBlock(debugBlock, this.lineOffset);
+    lap("runtime");
     const frame = this.tickFrame + 1; // this tick's number, counting from 1 (as frame() will after it)
     this.console?.tick(mask);
+    lap("cart");
     if (debugBlock) this.drainDebug(frame);
     const afterBlock = runtimeBlock ? this.runtimeBlock() : null;
     if (afterBlock) {
       this.runtime!.channel.afterTick(afterBlock);
       this.pollLevelRequest();
     }
+    lap("runtime");
     if (net && this.console) {
       const words = this.console.netWords();
       if (words) net.afterTick(words);
     }
+    lap("net");
     this.recorder?.record(mask);
     this.tickFrame++;
     // Surface a Lua runtime error raised during this tick (once per new error).
@@ -540,6 +606,7 @@ export class Player {
     if (withSound && samples && samples.length > 0) {
       this.audio?.enqueue(samples);
     }
+    lap("audio");
   }
 
   /**
@@ -680,6 +747,12 @@ export class Player {
   }
 
   private present(): void {
+    const started = this.profiler ? this.view.performance.now() : 0;
+    this.presentFrameNow();
+    this.profiler?.add("render", this.view.performance.now() - started);
+  }
+
+  private presentFrameNow(): void {
     const framebuffer = this.console?.readFramebuffer();
     if (framebuffer) {
       // Relight from any lights the cart published this frame via cartbox.light(),

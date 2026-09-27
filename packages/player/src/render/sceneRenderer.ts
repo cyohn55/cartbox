@@ -33,6 +33,7 @@ import {
 import type { EnvironmentLight, Mat4, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
+import type { RenderStats } from "../debug/profiler.js";
 import { applyRenderCaps, createTextureBudgetCache } from "./renderCaps.js";
 
 /** One frame's worth of drawing parameters — mirrors `renderMeshScene`'s options. */
@@ -147,6 +148,8 @@ export interface SceneRenderer {
   readonly backend: "software" | "webgpu" | "webgl2";
   render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
   dispose(): void;
+  /** What the last frame drew, for the profiler (see debug/profiler.ts). */
+  readonly lastFrameStats?: RenderStats;
 }
 
 /**
@@ -164,8 +167,17 @@ export class SoftwareSceneRenderer implements SceneRenderer {
    */
   constructor(private readonly style: RasterStyle = DEFAULT_RASTER_STYLE) {}
 
+  lastFrameStats: RenderStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
+
   render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
     const visible = applyScenePasses(instances, draw);
+    let triangles = 0;
+    let drawCalls = 0;
+    for (const instance of visible) {
+      drawCalls += instance.mesh.primitives.length;
+      for (const primitive of instance.mesh.primitives) triangles += primitive.indices.length / 3;
+    }
+    this.lastFrameStats = { drawCalls, instances: visible.length, triangles, gpuMs: null };
     renderMeshScene(visible, {
       width: draw.width,
       height: draw.height,
@@ -209,6 +221,10 @@ export class CappedSceneRenderer implements SceneRenderer {
 
   get backend(): SceneRenderer["backend"] {
     return this.inner.backend;
+  }
+
+  get lastFrameStats(): RenderStats | undefined {
+    return this.inner.lastFrameStats;
   }
 
   render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
