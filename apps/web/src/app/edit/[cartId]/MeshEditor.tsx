@@ -45,6 +45,8 @@ import {
   type MeshTransform,
 } from "@/lib/meshSidecar";
 import { importMeshFile, decodeMeshTextures } from "@/lib/meshImport";
+import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
+import { KTX2_TRANSCODER_TRANSFER_BYTES, encodePngInBrowser, hasKtx2, sceneHasKtx2, settleKtx2Textures } from "@/lib/ktx2Policy";
 import { fetchLibraryMesh } from "@/lib/libraryClient";
 import type { LibraryAsset } from "@/lib/libraryManifest";
 import styles from "./editor.module.css";
@@ -56,6 +58,7 @@ import { LightingEditor } from "./LightingEditor";
 import { TimelinePanel, type TimelinePreview } from "./TimelinePanel";
 import type { ViewpointKey } from "./SceneViewport";
 import { SceneViewport } from "./SceneViewport";
+import { formatBytes } from "./assetUploads";
 import { AnimationPanel, CodeHint, HierarchyPanel, ParentPicker, PhysicsPanel, PhysicsWorldPanel, PrefabLibrary, PrefabPanel, PropertyEditor, TagEditor } from "./SceneObjectPanels";
 
 const VIEWPORT = 512; // preview canvas edge in device pixels
@@ -251,14 +254,28 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
     const primary = all.find((file) => /\.(obj|glb|gltf)$/i.test(file.name)) ?? all[0]!;
     setNote("Importing…");
     try {
-      const asset = await importMeshFile(primary, all.filter((file) => file !== primary));
+      const parsed = await importMeshFile(primary, all.filter((file) => file !== primary));
+      // KTX2 textures stay compressed only when that saves more than the
+      // transcoder players would then fetch; otherwise they become PNG.
+      const settled = await settleKtx2Textures(parsed, {
+        sceneHasKtx2: sceneHasKtx2([...sidecar.meshes.map((m) => m.mesh), ...(sidecar.prefabs ?? []).flatMap((p) => p.nodes.map((n) => n.mesh))]),
+        decode: await (hasKtx2(parsed) ? loadKtx2Decoder() : Promise.resolve(() => null)),
+        encodePng: encodePngInBrowser,
+      });
+      const asset = settled.mesh;
       const { sidecar: next, id } = addMesh(sidecar, asset, asset.name);
       onSidecarChange(next);
       setSelectedId(id);
+      const textures =
+        settled.outcome === "kept"
+          ? ` KTX2 textures kept (${formatBytes(settled.ktx2Bytes)}, against ${formatBytes(settled.pngBytes)} as PNG).`
+          : settled.outcome === "converted"
+            ? ` KTX2 textures converted to PNG — too small to be worth the ${formatBytes(KTX2_TRANSCODER_TRANSFER_BYTES)} transcoder.`
+            : "";
       setNote(
         `Imported “${asset.name}” — ${meshTriangleCount(asset).toLocaleString()} triangles, ${meshVertexCount(
           asset,
-        ).toLocaleString()} vertices.`,
+        ).toLocaleString()} vertices.${textures}`,
       );
     } catch (error) {
       setNote(error instanceof Error ? error.message : "Could not import that file.");

@@ -41,6 +41,8 @@ export default tseslint.config(
       "apps/web/public/**",
       "packages/engine/dist/**",
       "packages/engine/third_party/**",
+      // Vendored third-party builds (e.g. the Basis Universal transcoder).
+      "apps/web/src/vendor/**",
       // The vendored TIC-80 checkout (npm run engine:prepare) and the CMake
       // build trees it produces. Upstream C with JavaScript tooling alongside
       // it, plus Emscripten output — 1.8k findings, none of them ours, and the

@@ -13,6 +13,7 @@ import { mount, type InspectedObject, type AnimSpec, type CollisionField, type F
 
 import styles from "./editor.module.css";
 import { errorLineFrom } from "./codeTools";
+import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 import { rapierPhysics } from "@/lib/physicsRapier";
 
 interface RunOverlayProps {
@@ -129,6 +130,8 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
       // their physics bodies simulated (Rapier loads only when there are bodies).
       mesh,
       physics: rapierPhysics(),
+      // KTX2 textures: the transcoder is fetched only if the scene has one.
+      ktx2: loadKtx2Decoder,
       // Playtest the cart's HD-2D world: 3D terrain with the cart's 2D character
       // sprites standing in it as depth-composited billboards.
       world,

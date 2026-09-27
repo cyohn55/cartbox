@@ -1,3 +1,4 @@
+import type { DecodedTexture } from "@cartbox/editor";
 import type { PhysicsBackend } from "./physics/physicsSession.js";
 import type { QualityChoice, QualityLevel } from "./quality.js";
 /**
@@ -106,6 +107,12 @@ export interface PlayerOptions {
    * platform (the player rounds its own inputs to match).
    */
   physics?: (options: { deterministic: boolean }) => Promise<PhysicsBackend>;
+  /**
+   * Loads a KTX2 (Basis Universal) texture decoder. Called only for a mesh scene
+   * that has KTX2 textures; without it they render as their flat base colour.
+   * The web app passes one that fetches the transcoder on demand.
+   */
+  ktx2?: () => Promise<(bytes: Uint8Array) => DecodedTexture | null>;
   /**
    * Graphics quality: "low" | "medium" | "high", or "auto" (the default) to pick
    * from the device — see quality.ts. High is everything as authored.

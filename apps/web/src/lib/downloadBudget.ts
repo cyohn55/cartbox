@@ -10,6 +10,7 @@
  *   animation so the heavy part is obvious.
  * - The physics engine, fetched only for scenes with bodies (a larger build when
  *   deterministic physics is on).
+ * - The KTX2 texture transcoder, fetched only for scenes that keep KTX2 textures.
  * - The rest of the editor-made data (voxels, backdrops, particles…).
  * - Uploaded files, as stored (already-compressed formats don't shrink).
  *
@@ -37,6 +38,9 @@ export const ENGINE_TRANSFER_BYTES: Readonly<Record<ConsoleModelId, number>> = {
 /** Gzipped Rapier builds (the WASM is inlined in the module), checked by a test. */
 export const PHYSICS_TRANSFER_BYTES = { regular: 1_655_409, deterministic: 1_662_010 } as const;
 
+/** Gzipped size of the vendored Basis Universal transcoder (JS + WASM), checked by a test. */
+export const KTX2_TRANSCODER_TRANSFER_BYTES = 260_481;
+
 /** Typical connections: effective throughput and a round-trip for the requests. */
 export const CONNECTIONS = [
   { name: "Slow 4G", mbps: 1.6, rttMs: 400 },
@@ -49,7 +53,7 @@ export const BUDGET_LIGHT_BYTES = 3 * 1024 * 1024;
 export const BUDGET_HEAVY_BYTES = 12 * 1024 * 1024;
 
 export interface BudgetItem {
-  readonly key: "engine" | "cartridge" | "scene" | "physics" | "data" | "files";
+  readonly key: "engine" | "cartridge" | "scene" | "physics" | "transcoder" | "data" | "files";
   readonly label: string;
   /** Bytes as transferred. */
   readonly bytes: number;
@@ -194,6 +198,8 @@ export async function measureDownload(input: BudgetInput): Promise<DownloadBudge
       bytes: physics.deterministic ? PHYSICS_TRANSFER_BYTES.deterministic : PHYSICS_TRANSFER_BYTES.regular,
       note: physics.deterministic ? "deterministic build" : "only for scenes with bodies",
     });
+  if (input.meshSidecar?.includes('"mime":"image/ktx2"'))
+    items.push({ key: "transcoder", label: "Texture transcoder", bytes: KTX2_TRANSCODER_TRANSFER_BYTES, note: "for KTX2 textures" });
   if (others.length > 0) items.push({ key: "data", label: "Other editor data", bytes: await gzipSize(JSON.stringify(others)), note: "voxels, backdrops, effects…" });
   if (input.uploadedBytes > 0) items.push({ key: "files", label: "Uploaded files", bytes: input.uploadedBytes, note: "as stored" });
   const total = items.reduce((sum, item) => sum + item.bytes, 0);

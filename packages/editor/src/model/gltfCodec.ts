@@ -68,6 +68,8 @@ interface GltfImage {
 }
 interface GltfTexture {
   source?: number;
+  /** A Basis Universal (KTX2) image, used in preference to `source` (which, if present, is a PNG/JPEG fallback). */
+  extensions?: { KHR_texture_basisu?: { source?: number } };
 }
 interface GltfMaterial {
   name?: string;
@@ -418,7 +420,10 @@ function readMaterial(json: GltfJson, buffers: (Uint8Array | null)[], materialIn
   // Resolve a texture reference (by material-slot index) to its embedded image.
   const imageAt = (ref: { index: number } | undefined): EncodedImage | null => {
     if (ref?.index === undefined) return null;
-    const source = json.textures?.[ref.index]?.source;
+    const texture = json.textures?.[ref.index];
+    // KTX2 kept as-is (image/ktx2): whether it stays compressed or is converted
+    // to PNG is the editor's call (see ktx2Policy.ts), made per scene.
+    const source = texture?.extensions?.KHR_texture_basisu?.source ?? texture?.source;
     const image = source !== undefined ? json.images?.[source] : undefined;
     return image ? readImage(json, buffers, image) : null;
   };
@@ -443,6 +448,14 @@ function readMaterial(json: GltfJson, buffers: (Uint8Array | null)[], materialIn
   };
 }
 
+/** The KTX2 file identifier («KTX 20»\r\n\x1A\n). */
+const KTX2_MAGIC = [0xab, 0x4b, 0x54, 0x58, 0x20, 0x32, 0x30, 0xbb, 0x0d, 0x0a, 0x1a, 0x0a];
+
+/** Whether bytes are a KTX2 container. */
+export function isKtx2(bytes: Uint8Array): boolean {
+  return bytes.length >= 12 && KTX2_MAGIC.every((b, i) => bytes[i] === b);
+}
+
 /** Extract an image's compressed bytes — from an embedded bufferView or a data URI. */
 function readImage(json: GltfJson, buffers: (Uint8Array | null)[], image: GltfImage): EncodedImage | null {
   if (image.bufferView !== undefined) {
@@ -451,7 +464,7 @@ function readImage(json: GltfJson, buffers: (Uint8Array | null)[], image: GltfIm
     if (!buffer) return null;
     const start = view.byteOffset ?? 0;
     const bytes = buffer.slice(start, start + view.byteLength);
-    return { mime: image.mimeType ?? "image/png", bytes };
+    return { mime: image.mimeType ?? (isKtx2(bytes) ? "image/ktx2" : "image/png"), bytes };
   }
   if (image.uri && image.uri.startsWith("data:")) {
     const comma = image.uri.indexOf(",");
@@ -835,7 +848,8 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
     if (primitive.material.baseColorImage) {
       const imageView = addView(primitive.material.baseColorImage.bytes);
       images.push({ bufferView: imageView, mimeType: primitive.material.baseColorImage.mime });
-      textures.push({ source: images.length - 1 });
+      const ktx2 = primitive.material.baseColorImage.mime === "image/ktx2";
+      textures.push(ktx2 ? { extensions: { KHR_texture_basisu: { source: images.length - 1 } } } : { source: images.length - 1 });
       gltfMaterial.pbrMetallicRoughness!.baseColorTexture = { index: textures.length - 1 };
     }
     materials.push(gltfMaterial);
@@ -854,6 +868,9 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
     buffers: [{ byteLength: binLength }],
     materials,
     ...(textures.length ? { textures, images } : {}),
+    ...(textures.some((t) => t.extensions?.KHR_texture_basisu)
+      ? { extensionsUsed: ["KHR_texture_basisu"], extensionsRequired: ["KHR_texture_basisu"] }
+      : {}),
   };
 
   // Assemble the GLB: header, JSON chunk (space-padded), BIN chunk (zero-padded).

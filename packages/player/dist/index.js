@@ -7235,10 +7235,15 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    */
   static async create(inner, width, height, scene, renderer = new SoftwareSceneRenderer(), options = {}) {
     const decoded = /* @__PURE__ */ new Map();
+    let ktx2 = null;
+    const decodeKtx2 = (bytes) => {
+      ktx2 ?? (ktx2 = options.ktx2 ? options.ktx2().catch(() => null) : Promise.resolve(null));
+      return ktx2.then((decode) => decode ? decode(bytes) : null);
+    };
     const texture = (mesh) => {
       let entry = decoded.get(mesh);
       if (!entry) {
-        entry = decodeMeshTextures(mesh);
+        entry = decodeMeshTextures(mesh, decodeKtx2);
         decoded.set(mesh, entry);
       }
       return entry;
@@ -7676,11 +7681,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.inner.destroy();
   }
 };
-async function decodeMeshTextures(mesh) {
+async function decodeMeshTextures(mesh, decodeKtx2) {
   const each = (pick) => Promise.all(
     mesh.primitives.map((primitive) => {
       const image = pick(primitive.material);
-      return image ? decodeTexture(image.mime, image.bytes) : Promise.resolve(null);
+      if (!image) return Promise.resolve(null);
+      return image.mime === "image/ktx2" ? decodeKtx2(image.bytes) : decodeTexture(image.mime, image.bytes);
     })
   );
   const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures] = await Promise.all([
@@ -10228,7 +10234,8 @@ var Player = class {
             this.model.width,
             this.model.height,
             mesh2,
-            this.sceneRenderer
+            this.sceneRenderer,
+            this.options.ktx2 ? { ktx2: this.options.ktx2 } : {}
           );
           this.meshSurface.setQuality(this.qualitySettings);
         }
