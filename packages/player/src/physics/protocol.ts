@@ -70,6 +70,11 @@ export const PHYS_MAX_OVERLAPS = 64;
 export const PHYS_EVENT_STARTED = 1;
 export const PHYS_EVENT_TRIGGER = 2;
 
+/** Each animated object's playback: count, then (object, clip, time in 1/1024 s). */
+export const PHYS_ANIMS = 6400;
+export const PHYS_ANIM_BYTES = 12;
+export const PHYS_MAX_ANIMS = 64;
+
 // Lua → host (written during the tick; read and cleared after it).
 export const PHYS_CMDS = 4096;
 export const PHYS_CMD_BYTES = 32; // op, a, v0..v5
@@ -101,6 +106,12 @@ export const PHYS_CAST_CAPSULE = 3;
 /** Joints: a = the jointed object. MOTOR: v0 = speed (rad/s about the hinge), v1 = max force (0 = off). */
 export const PHYS_OP_MOTOR = 9;
 export const PHYS_OP_UNJOIN = 10;
+/**
+ * Skeletal animation (the block carries it whether or not the cart has physics):
+ * a = object, v0 = clip index (-1 = back to the rest pose), v1 = crossfade seconds,
+ * v2 = speed, v3 = loop (1) or hold the last frame (0), v4 = start time.
+ */
+export const PHYS_OP_PLAY = 11;
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {
@@ -197,6 +208,27 @@ export function writePhysicsState(
     for (let k = 0; k < 3; k += 1) block.setInt32(at + 4 + k * 4, toFix(r.point[k]!), true);
     for (let k = 0; k < 3; k += 1) block.setInt32(at + 16 + k * 4, toFix(r.normal[k]!), true);
     block.setInt32(at + 28, toFix(r.distance), true);
+  }
+}
+
+/** One animated object's playback as the cart reads it. */
+export interface AnimationPlayback {
+  readonly object: number;
+  /** Clip index, or -1 at rest. */
+  readonly clip: number;
+  /** Seconds into the clip (wrapped when looping, held at the end otherwise). */
+  readonly time: number;
+}
+
+/** Write every animated object's playback (host → Lua). */
+export function writeAnimationState(block: DataView, playback: readonly AnimationPlayback[]): void {
+  const n = Math.min(playback.length, PHYS_MAX_ANIMS);
+  block.setInt32(PHYS_ANIMS, n, true);
+  for (let i = 0; i < n; i += 1) {
+    const at = PHYS_ANIMS + 4 + i * PHYS_ANIM_BYTES;
+    block.setInt32(at, playback[i]!.object, true);
+    block.setInt32(at + 4, playback[i]!.clip, true);
+    block.setInt32(at + 8, toFix(playback[i]!.time), true);
   }
 }
 

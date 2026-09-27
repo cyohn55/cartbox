@@ -405,6 +405,8 @@ interface GpuPrimitive {
   vertexBuffer: any;
   indexBuffer: any;
   indexCount: number;
+  /** The `dynamic.revision` last uploaded (skinned meshes rewrite their vertices each frame). */
+  revision?: number;
 }
 
 interface CachedBindGroup {
@@ -981,10 +983,23 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.bindGroups = new WeakMap();
   }
 
-  /** Upload (once) a mesh's primitives as interleaved vertex + index buffers. */
+  /**
+   * Upload (once) a mesh's primitives as interleaved vertex + index buffers. A
+   * live skinned primitive (`dynamic`) re-uploads its vertices into the same
+   * buffer whenever its revision moves on.
+   */
   private uploadMesh(mesh: MeshAsset): GpuPrimitive[] {
     const cached = this.meshes.get(mesh);
-    if (cached) return cached;
+    if (cached) {
+      mesh.primitives.forEach((primitive, i) => {
+        const gpu = cached[i];
+        if (!primitive.dynamic || !gpu || gpu.revision === primitive.dynamic.revision) return;
+        const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
+        this.device.queue.writeBuffer(gpu.vertexBuffer, 0, interleaveVertices(primitive.positions, normals, primitive.uvs));
+        gpu.revision = primitive.dynamic.revision;
+      });
+      return cached;
+    }
 
     const uploaded = mesh.primitives.map((primitive) => {
       const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
@@ -1001,7 +1016,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       });
       this.device.queue.writeBuffer(indexBuffer, 0, primitive.indices);
 
-      return { vertexBuffer, indexBuffer, indexCount: primitive.indices.length };
+      return {
+        vertexBuffer,
+        indexBuffer,
+        indexCount: primitive.indices.length,
+        ...(primitive.dynamic ? { revision: primitive.dynamic.revision } : {}),
+      };
     });
 
     this.meshes.set(mesh, uploaded);

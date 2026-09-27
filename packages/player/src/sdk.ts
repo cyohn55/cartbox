@@ -282,6 +282,10 @@ cartbox = {
   spawn = function() return nil end,
   despawn = function() end,
   alive = function() return false end,
+  -- Skeletal animation: overridden when the scene has skinned objects.
+  play = function() end,
+  anim = function() return nil, 0, false end,
+  clips = function() return {} end,
 }`;
 
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */

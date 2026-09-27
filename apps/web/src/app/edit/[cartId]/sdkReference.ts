@@ -345,6 +345,30 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
     ],
   },
   {
+    label: "cartbox · animation",
+    open: false,
+    entries: [
+      {
+        name: "cartbox.play",
+        signature: "cartbox.play(obj, clip, fade, speed, loop)",
+        doc: "Play a skinned object's animation clip (a glTF imported with a skeleton and animations): clip is its name or 0-based index, nil for the rest pose. Crossfades from the current clip over fade seconds (default 0.2); speed 1 and loop true by default. Until told otherwise each skinned object loops its first clip.",
+        snippet: 'cartbox.play("hero", "run", 0.2)',
+      },
+      {
+        name: "cartbox.anim",
+        signature: "cartbox.anim(obj) -> clip, time, finished",
+        doc: "What a skinned object is playing: the clip's name (nil at rest), seconds into it, and whether a non-looping clip has reached its end.",
+        snippet: 'local clip, t, done = cartbox.anim("hero")',
+      },
+      {
+        name: "cartbox.clips",
+        signature: "cartbox.clips(obj) -> { name, ... }",
+        doc: "The names of a skinned object's animation clips, in order (index 0 first).",
+        snippet: 'for i, name in ipairs(cartbox.clips("hero")) do\n  \nend',
+      },
+    ],
+  },
+  {
     label: "cartbox · netplay",
     open: false,
     entries: [

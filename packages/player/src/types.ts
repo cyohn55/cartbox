@@ -245,4 +245,6 @@ export interface InspectedObject {
   readonly body?: { readonly kind: string; readonly velocity: readonly [number, number, number]; readonly grounded: boolean; readonly active: boolean };
   /** For a prefab copy: its prefab and whether it's spawned. */
   readonly prefab?: { readonly name: string; readonly spawned: boolean };
+  /** For a skinned object: the clip playing (null at rest) and seconds into it. */
+  readonly animation?: { readonly clip: string | null; readonly time: number };
 }

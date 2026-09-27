@@ -16,6 +16,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  createLiveSkinnedMesh,
+  isSkinned,
+  sampleClip,
+  skinMatrices,
   renderMesh,
   encodeObj,
   encodeGlb,
@@ -49,7 +53,7 @@ import { LibraryBrowser } from "./LibraryBrowser";
 import { MaterialEditor } from "./MaterialEditor";
 import { LightingEditor } from "./LightingEditor";
 import { SceneViewport } from "./SceneViewport";
-import { CodeHint, HierarchyPanel, ParentPicker, PhysicsPanel, PhysicsWorldPanel, PrefabLibrary, PrefabPanel, PropertyEditor, TagEditor } from "./SceneObjectPanels";
+import { AnimationPanel, CodeHint, HierarchyPanel, ParentPicker, PhysicsPanel, PhysicsWorldPanel, PrefabLibrary, PrefabPanel, PropertyEditor, TagEditor } from "./SceneObjectPanels";
 
 const VIEWPORT = 512; // preview canvas edge in device pixels
 const ORBIT_SPEED = 0.01; // radians per pixel dragged
@@ -96,6 +100,9 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
   const [libraryOpen, setLibraryOpen] = useState(false);
   /** "solo" previews the selected mesh alone; "scene" composes every instance. */
   const [view, setView] = useState<"solo" | "scene">("solo");
+  /** The skeletal clip the preview is playing (index), or null for the still mesh, and how far in. */
+  const [previewClip, setPreviewClip] = useState<number | null>(null);
+  const [clipTime, setClipTime] = useState(0);
 
   // Keep the selection valid as the list changes (import selects the new mesh;
   // deleting the selected one falls back to the first remaining).
@@ -115,6 +122,26 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
       return null;
     }
   }, [selectedEntry]);
+
+  // A skinned mesh previews through a live copy the clip poses; stop previewing on selection change.
+  const liveMesh = useMemo(() => (meshAsset && isSkinned(meshAsset) ? createLiveSkinnedMesh(meshAsset) : null), [meshAsset]);
+  useEffect(() => setPreviewClip(null), [meshAsset]);
+  useEffect(() => {
+    if (previewClip === null) return;
+    let raf = 0;
+    let last = 0;
+    const start = performance.now();
+    const tick = (now: number) => {
+      // ~30 fps is plenty for a software-rendered preview.
+      if (now - last >= 33) {
+        last = now;
+        setClipTime((now - start) / 1000);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [previewClip]);
 
   // Decode this mesh's textures to RGBA for the rasteriser, cancelling if the
   // selection changes before decoding finishes.
@@ -154,7 +181,13 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
     // multi-light and shadows come with the scene viewport. Absent (no rig) the
     // preview renders exactly as before.
     const lighting = sidecar.lighting;
-    renderMesh(meshAsset, {
+    const clip = previewClip !== null ? meshAsset.clips?.[previewClip] : undefined;
+    let shown = meshAsset;
+    if (liveMesh && meshAsset.skin && clip) {
+      liveMesh.update(skinMatrices(meshAsset.skin, sampleClip(meshAsset.skin, clip, clipTime)));
+      shown = liveMesh.mesh;
+    }
+    renderMesh(shown, {
       camera: { yaw, pitch, distance: fitDistance(meshAsset) * zoom },
       size: VIEWPORT,
       out: buffers.out,
@@ -173,7 +206,7 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
     const image = context.createImageData(VIEWPORT, VIEWPORT);
     image.data.set(buffers.out);
     context.putImageData(image, 0, 0);
-  }, [meshAsset, textures, yaw, pitch, zoom, buffers, sidecar.lighting]);
+  }, [meshAsset, textures, yaw, pitch, zoom, buffers, sidecar.lighting, liveMesh, previewClip, clipTime]);
 
   // Orbit + zoom.
   const drag = useRef<{ x: number; y: number } | null>(null);
@@ -379,6 +412,9 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
 
             <PropertyEditor sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
 
+            {meshAsset && isSkinned(meshAsset) && (
+              <AnimationPanel mesh={meshAsset} name={selectedEntry.name} playing={previewClip} onPlay={setPreviewClip} />
+            )}
             <PhysicsPanel sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
 
             <PrefabPanel sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />

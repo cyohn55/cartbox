@@ -20,7 +20,13 @@
  * Handles `.glb` (binary container) and `.gltf` whose buffers/images are embedded
  * as `data:` URIs. glTF referencing *external* files is rejected with a clear
  * message — the browser importer resolves those and hands buffers in. Scope: a
- * single base-colour texture per material; no skinning, morphs, or animation.
+ * single base-colour texture per material; no morph targets.
+ *
+ * Skins and animations (ENGINE_ROADMAP.md, Phase 3): the first skin a mesh node
+ * uses becomes the asset's skeleton (see skeleton.ts), with JOINTS_0/WEIGHTS_0
+ * per vertex, and every animation's translation/rotation/scale channels on its
+ * joints become clips (cubic-spline keys are read as linear). Meshes parented
+ * under a joint (a sword in a hand) are bound rigidly to it, so they move too.
  * Pure and DOM-free.
  */
 
@@ -33,6 +39,7 @@ import {
   MAX_MESH_INDICES,
 } from "./MeshAsset";
 import { base64ToBytes } from "./base64";
+import { MAX_CLIP_KEYS, MAX_CLIPS, MAX_SKIN_JOINTS, type AnimationClip, type ClipChannel, type MeshSkin, type SkinJoint } from "./skeleton";
 
 // --- glTF JSON shape (only the fields this codec reads/writes) -------------
 
@@ -75,7 +82,7 @@ interface GltfMaterial {
   emissiveFactor?: number[];
 }
 interface GltfPrimitive {
-  attributes: { POSITION?: number; NORMAL?: number; TEXCOORD_0?: number };
+  attributes: { POSITION?: number; NORMAL?: number; TEXCOORD_0?: number; JOINTS_0?: number; WEIGHTS_0?: number };
   indices?: number;
   material?: number;
 }
@@ -83,7 +90,9 @@ interface GltfMesh {
   primitives: GltfPrimitive[];
 }
 interface GltfNode {
+  name?: string;
   mesh?: number;
+  skin?: number;
   children?: number[];
   matrix?: number[];
   translation?: number[];
@@ -92,6 +101,15 @@ interface GltfNode {
 }
 interface GltfScene {
   nodes?: number[];
+}
+interface GltfSkin {
+  joints: number[];
+  inverseBindMatrices?: number;
+}
+interface GltfAnimation {
+  name?: string;
+  channels: { sampler: number; target: { node?: number; path: string } }[];
+  samplers: { input: number; output: number; interpolation?: string }[];
 }
 interface GltfBuffer {
   uri?: string;
@@ -109,6 +127,8 @@ interface GltfJson {
   materials?: GltfMaterial[];
   textures?: GltfTexture[];
   images?: GltfImage[];
+  skins?: GltfSkin[];
+  animations?: GltfAnimation[];
 }
 
 /** Component-type → (byte size, normalisation divisor). FLOAT needs no divisor. */
@@ -121,7 +141,7 @@ const COMPONENT_TYPES: Record<number, { size: number; divisor: number; float: bo
   5126: { size: 4, divisor: 1, float: true }, // FLOAT
 };
 
-const TYPE_COMPONENTS: Record<string, number> = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4 };
+const TYPE_COMPONENTS: Record<string, number> = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 };
 
 // --- 4×4 column-major matrix helpers (glTF's convention) -------------------
 
@@ -180,6 +200,64 @@ function nodeMatrix(node: GltfNode): Mat4 {
     matrix = multiply4(t, matrix);
   }
   return matrix;
+}
+
+/** Inverse of an affine column-major matrix (identity when singular). */
+function invertAffine4(m: Mat4): Mat4 {
+  const a = m[0]!, b = m[4]!, c = m[8]!;
+  const d = m[1]!, e = m[5]!, f = m[9]!;
+  const g = m[2]!, h = m[6]!, i = m[10]!;
+  const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+  if (Math.abs(det) < 1e-20) return IDENTITY4();
+  const k = 1 / det;
+  const out = IDENTITY4();
+  out[0] = (e * i - f * h) * k;
+  out[4] = (c * h - b * i) * k;
+  out[8] = (b * f - c * e) * k;
+  out[1] = (f * g - d * i) * k;
+  out[5] = (a * i - c * g) * k;
+  out[9] = (c * d - a * f) * k;
+  out[2] = (d * h - e * g) * k;
+  out[6] = (b * g - a * h) * k;
+  out[10] = (a * e - b * d) * k;
+  const tx = m[12]!, ty = m[13]!, tz = m[14]!;
+  out[12] = -(out[0]! * tx + out[4]! * ty + out[8]! * tz);
+  out[13] = -(out[1]! * tx + out[5]! * ty + out[9]! * tz);
+  out[14] = -(out[2]! * tx + out[6]! * ty + out[10]! * tz);
+  return out;
+}
+
+/** A node's local transform as translation, rotation quaternion and scale. */
+function nodeTRS(node: GltfNode): Pick<SkinJoint, "translation" | "rotation" | "scale"> {
+  if (!(node.matrix && node.matrix.length === 16)) {
+    const t = node.translation ?? [0, 0, 0];
+    const r = node.rotation ?? [0, 0, 0, 1];
+    const sc = node.scale ?? [1, 1, 1];
+    return { translation: [t[0]!, t[1]!, t[2]!], rotation: [r[0]!, r[1]!, r[2]!, r[3]!], scale: [sc[0]!, sc[1]!, sc[2]!] };
+  }
+  const m = node.matrix;
+  const sx = Math.hypot(m[0]!, m[1]!, m[2]!) || 1;
+  const sy = Math.hypot(m[4]!, m[5]!, m[6]!) || 1;
+  const sz = Math.hypot(m[8]!, m[9]!, m[10]!) || 1;
+  const r00 = m[0]! / sx, r10 = m[1]! / sx, r20 = m[2]! / sx;
+  const r01 = m[4]! / sy, r11 = m[5]! / sy, r21 = m[6]! / sy;
+  const r02 = m[8]! / sz, r12 = m[9]! / sz, r22 = m[10]! / sz;
+  const trace = r00 + r11 + r22;
+  let x: number, y: number, z: number, w: number;
+  if (trace > 0) {
+    const q = Math.sqrt(trace + 1) * 2;
+    w = q / 4; x = (r21 - r12) / q; y = (r02 - r20) / q; z = (r10 - r01) / q;
+  } else if (r00 > r11 && r00 > r22) {
+    const q = Math.sqrt(1 + r00 - r11 - r22) * 2;
+    w = (r21 - r12) / q; x = q / 4; y = (r01 + r10) / q; z = (r02 + r20) / q;
+  } else if (r11 > r22) {
+    const q = Math.sqrt(1 + r11 - r00 - r22) * 2;
+    w = (r02 - r20) / q; x = (r01 + r10) / q; y = q / 4; z = (r12 + r21) / q;
+  } else {
+    const q = Math.sqrt(1 + r22 - r00 - r11) * 2;
+    w = (r10 - r01) / q; x = (r02 + r20) / q; y = (r12 + r21) / q; z = q / 4;
+  }
+  return { translation: [m[12]!, m[13]!, m[14]!], rotation: [x, y, z, w], scale: [sx, sy, sz] };
 }
 
 /** Transform a point (w=1) by a column-major matrix. */
@@ -300,16 +378,16 @@ function readIndices(json: GltfJson, buffers: (Uint8Array | null)[], accessorInd
 
 // --- Node graph + materials -----------------------------------------------
 
-/** Collect world transforms per mesh index by walking the scene's node tree. */
-function collectMeshInstances(json: GltfJson): Map<number, Mat4[]> {
-  const instances = new Map<number, Mat4[]>();
+/** Collect world transforms (and the node) per mesh index by walking the scene's node tree. */
+function collectMeshInstances(json: GltfJson): Map<number, { world: Mat4; node: number }[]> {
+  const instances = new Map<number, { world: Mat4; node: number }[]>();
   const walk = (nodeIndex: number, parent: Mat4): void => {
     const node = json.nodes?.[nodeIndex];
     if (!node) return;
     const world = multiply4(parent, nodeMatrix(node));
     if (node.mesh !== undefined) {
       const list = instances.get(node.mesh) ?? [];
-      list.push(world);
+      list.push({ world, node: nodeIndex });
       instances.set(node.mesh, list);
     }
     for (const child of node.children ?? []) walk(child, world);
@@ -319,7 +397,7 @@ function collectMeshInstances(json: GltfJson): Map<number, Mat4[]> {
   for (const root of roots) walk(root, IDENTITY4());
   // A file may define meshes but no scene graph; render each mesh once at identity.
   if (instances.size === 0 && json.meshes) {
-    json.meshes.forEach((_mesh, index) => instances.set(index, [IDENTITY4()]));
+    json.meshes.forEach((_mesh, index) => instances.set(index, [{ world: IDENTITY4(), node: -1 }]));
   }
   return instances;
 }
@@ -395,12 +473,13 @@ function decodeDataUri(uri: string): Uint8Array | null {
  */
 export function parseGltf(json: GltfJson, buffers: (Uint8Array | null)[], name = "mesh"): MeshAsset {
   const instances = collectMeshInstances(json);
+  const rig = readRig(json, buffers);
   const primitives: MeshPrimitive[] = [];
   let totalVertices = 0;
   let totalIndices = 0;
 
   (json.meshes ?? []).forEach((mesh, meshIndex) => {
-    const worlds = instances.get(meshIndex) ?? [IDENTITY4()];
+    const worlds = instances.get(meshIndex) ?? [{ world: IDENTITY4(), node: -1 }];
     for (const primitive of mesh.primitives) {
       if (primitive.attributes.POSITION === undefined) continue;
       const rawPositions = readAccessorFloats(json, buffers, primitive.attributes.POSITION);
@@ -416,7 +495,11 @@ export function parseGltf(json: GltfJson, buffers: (Uint8Array | null)[], name =
 
       // Emit one primitive per node instance of this mesh, baking that node's
       // world transform into the positions (and inverse-transpose into normals).
-      for (const world of worlds) {
+      // A skinned node is placed by its skeleton instead (glTF ignores a skinned
+      // node's own transform); a node under a joint is bound rigidly to it.
+      for (const { world: nodeWorld, node } of worlds) {
+        const binding = rig ? rig.bindingFor(node, primitive, vertexCount) : null;
+        const world = binding ? binding.place(nodeWorld) : nodeWorld;
         const positions = new Float32Array(rawPositions.length);
         for (let v = 0; v < vertexCount; v += 1) {
           const [x, y, z] = transformPoint(world, rawPositions[v * 3]!, rawPositions[v * 3 + 1]!, rawPositions[v * 3 + 2]!);
@@ -440,13 +523,167 @@ export function parseGltf(json: GltfJson, buffers: (Uint8Array | null)[], name =
         if (totalVertices > MAX_MESH_VERTICES || totalIndices > MAX_MESH_INDICES) {
           throw new Error("glTF mesh exceeds the supported size");
         }
-        primitives.push({ positions, normals, uvs: uvs ? uvs.slice() : null, indices: indices.slice(), material });
+        primitives.push({
+          positions,
+          normals,
+          uvs: uvs ? uvs.slice() : null,
+          indices: indices.slice(),
+          material,
+          ...(binding ? { joints: binding.joints, weights: binding.weights } : {}),
+        });
       }
     }
   });
 
   if (primitives.length === 0) throw new Error("glTF file contains no triangle geometry");
-  return { name, primitives };
+  if (!rig || !primitives.some((p) => p.joints)) return { name, primitives };
+  const clips = readClips(json, buffers, rig.jointOfNode);
+  return { name, primitives, skin: rig.skin, ...(clips.length > 0 ? { clips } : {}) };
+}
+
+interface Rig {
+  readonly skin: MeshSkin;
+  readonly jointOfNode: ReadonlyMap<number, number>;
+  /** How node `node`'s primitive binds to the skeleton, or null when it doesn't. */
+  bindingFor(
+    node: number,
+    primitive: GltfPrimitive,
+    vertexCount: number,
+  ): { joints: Uint16Array; weights: Float32Array; place: (nodeWorld: Mat4) => Mat4 } | null;
+}
+
+/**
+ * The asset's skeleton: the first skin a mesh node uses. Its joints keep their
+ * rest transforms (roots also the transform of the non-joint nodes above them).
+ *
+ * Skinned vertices are stored pre-multiplied by C = G₀·IBM₀ (the first joint's
+ * rest world × inverse bind) and every inverse bind by C⁻¹, which skins exactly
+ * as the file does while the stored positions show the rest pose — so bounds,
+ * colliders and the editor's still preview see the character as it stands.
+ */
+function readRig(json: GltfJson, buffers: (Uint8Array | null)[]): Rig | null {
+  const nodes = json.nodes ?? [];
+  const skinIndex = nodes.find((n) => n.mesh !== undefined && n.skin !== undefined)?.skin;
+  const gltfSkin = skinIndex !== undefined ? json.skins?.[skinIndex] : undefined;
+  if (!gltfSkin || gltfSkin.joints.length === 0 || gltfSkin.joints.length > MAX_SKIN_JOINTS) return null;
+  const parentOf = new Map<number, number>();
+  nodes.forEach((n, i) => n.children?.forEach((c) => parentOf.set(c, i)));
+  const worldCache = new Map<number, Mat4>();
+  const worldOf = (i: number, depth = 0): Mat4 => {
+    const hit = worldCache.get(i);
+    if (hit) return hit;
+    const node = nodes[i];
+    const p = parentOf.get(i);
+    const local = node ? nodeMatrix(node) : IDENTITY4();
+    const w = p !== undefined && depth < nodes.length ? multiply4(worldOf(p, depth + 1), local) : local;
+    worldCache.set(i, w);
+    return w;
+  };
+  const jointOfNode = new Map<number, number>(gltfSkin.joints.map((node, j) => [node, j]));
+  const joints: SkinJoint[] = gltfSkin.joints.map((nodeIndex, j) => {
+    const node = nodes[nodeIndex] ?? {};
+    // The nearest joint above this one, else the (non-joint) nodes above it as a base.
+    let parent = -1;
+    for (let p = parentOf.get(nodeIndex), steps = 0; p !== undefined && steps <= nodes.length; p = parentOf.get(p), steps += 1) {
+      const pj = jointOfNode.get(p);
+      if (pj !== undefined) {
+        parent = pj;
+        break;
+      }
+    }
+    const up = parentOf.get(nodeIndex);
+    const base = parent < 0 && up !== undefined ? Array.from(worldOf(up)) : undefined;
+    return { name: node.name ?? `joint ${j}`, parent, ...nodeTRS(node), ...(base ? { base } : {}) };
+  });
+  const rawIbm = gltfSkin.inverseBindMatrices !== undefined ? readAccessorFloats(json, buffers, gltfSkin.inverseBindMatrices) : null;
+  const ibmOf = (j: number): Mat4 =>
+    rawIbm && rawIbm.length >= (j + 1) * 16 ? Float64Array.from(rawIbm.subarray(j * 16, j * 16 + 16)) : IDENTITY4();
+  const restWorld = (j: number): Mat4 => worldOf(gltfSkin.joints[j]!);
+  const c = multiply4(restWorld(0), ibmOf(0));
+  const cInv = invertAffine4(c);
+  const inverseBind = new Float32Array(joints.length * 16);
+  joints.forEach((_, j) => inverseBind.set(multiply4(ibmOf(j), cInv), j * 16));
+  const skin: MeshSkin = { joints, inverseBind };
+  return {
+    skin,
+    jointOfNode,
+    bindingFor(node, primitive, vertexCount) {
+      const n = nodes[node];
+      if (n?.skin === skinIndex && primitive.attributes.JOINTS_0 !== undefined && primitive.attributes.WEIGHTS_0 !== undefined) {
+        const rawJoints = readAccessorFloats(json, buffers, primitive.attributes.JOINTS_0);
+        const rawWeights = readAccessorFloats(json, buffers, primitive.attributes.WEIGHTS_0);
+        if (rawJoints.length !== vertexCount * 4 || rawWeights.length !== vertexCount * 4) return null;
+        const jointsOut = new Uint16Array(vertexCount * 4);
+        const weightsOut = new Float32Array(vertexCount * 4);
+        for (let v = 0; v < vertexCount; v += 1) {
+          let total = 0;
+          for (let k = 0; k < 4; k += 1) {
+            const j = Math.round(rawJoints[v * 4 + k]!);
+            const w = Math.max(0, rawWeights[v * 4 + k]!);
+            const ok = j >= 0 && j < joints.length;
+            jointsOut[v * 4 + k] = ok ? j : 0;
+            weightsOut[v * 4 + k] = ok ? w : 0;
+            if (ok) total += w;
+          }
+          if (total > 0) for (let k = 0; k < 4; k += 1) weightsOut[v * 4 + k] = weightsOut[v * 4 + k]! / total;
+        }
+        return { joints: jointsOut, weights: weightsOut, place: () => c };
+      }
+      // A mesh under a joint rides on it: stored so that joint's rest skinning
+      // matrix puts it back where the file placed it.
+      let joint = -1;
+      for (let p: number | undefined = node, steps = 0; p !== undefined && steps <= nodes.length; p = parentOf.get(p), steps += 1) {
+        const j = jointOfNode.get(p);
+        if (j !== undefined) {
+          joint = j;
+          break;
+        }
+      }
+      if (joint < 0) return null;
+      const jointsOut = new Uint16Array(vertexCount * 4).fill(0);
+      const weightsOut = new Float32Array(vertexCount * 4);
+      for (let v = 0; v < vertexCount; v += 1) {
+        jointsOut[v * 4] = joint;
+        weightsOut[v * 4] = 1;
+      }
+      const restSkin = multiply4(restWorld(joint), Float64Array.from(inverseBind.subarray(joint * 16, joint * 16 + 16)));
+      return { joints: jointsOut, weights: weightsOut, place: (nodeWorld) => multiply4(invertAffine4(restSkin), nodeWorld) };
+    },
+  };
+}
+
+/** Every animation's joint channels as clips (weights and non-joint targets skipped). */
+function readClips(json: GltfJson, buffers: (Uint8Array | null)[], jointOfNode: ReadonlyMap<number, number>): AnimationClip[] {
+  const clips: AnimationClip[] = [];
+  let keys = 0;
+  for (const [index, animation] of (json.animations ?? []).entries()) {
+    if (clips.length >= MAX_CLIPS) break;
+    const channels: ClipChannel[] = [];
+    let duration = 0;
+    for (const channel of animation.channels ?? []) {
+      const path = channel.target.path;
+      const joint = channel.target.node !== undefined ? jointOfNode.get(channel.target.node) : undefined;
+      if (joint === undefined || (path !== "translation" && path !== "rotation" && path !== "scale")) continue;
+      const sampler = animation.samplers?.[channel.sampler];
+      if (!sampler) continue;
+      const times = readAccessorFloats(json, buffers, sampler.input);
+      let values = readAccessorFloats(json, buffers, sampler.output);
+      const width = path === "rotation" ? 4 : 3;
+      if (sampler.interpolation === "CUBICSPLINE" && values.length === times.length * width * 3) {
+        // In-tangent, value, out-tangent per key: keep the values.
+        const picked = new Float32Array(times.length * width);
+        for (let k = 0; k < times.length; k += 1) picked.set(values.subarray((k * 3 + 1) * width, (k * 3 + 2) * width), k * width);
+        values = picked;
+      }
+      if (times.length === 0 || values.length !== times.length * width) continue;
+      keys += times.length;
+      if (keys > MAX_CLIP_KEYS) throw new Error("glTF animation exceeds the supported size");
+      duration = Math.max(duration, times[times.length - 1]!);
+      channels.push({ joint, path, interpolation: sampler.interpolation === "STEP" ? "step" : "linear", times, values });
+    }
+    if (channels.length > 0) clips.push({ name: animation.name?.trim() || `clip ${index + 1}`, duration, channels });
+  }
+  return clips;
 }
 
 const GLB_MAGIC = 0x46546c67; // "glTF"
