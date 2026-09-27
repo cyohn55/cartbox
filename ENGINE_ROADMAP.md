@@ -167,10 +167,17 @@ trades state and commands with the cart through an 8 KB block at the end of RAM
 ## Phase 5 — Debugging and profiling
 
 - [ ] Lua debugger: breakpoints, stepping, variable watches, call stack.
-- [ ] Pause, step one frame, and time scale while playing in the editor.
+- [x] Pause, step one frame, and time scale while playing in the editor. The
+      playtest has Step (while paused) and a 0.25×–2× speed control, with a frame
+      counter; sound mutes away from 1×.
 - [ ] Profiler: CPU (Lua vs render vs audio), GPU passes, draw calls, triangles,
       memory, network bytes.
-- [ ] In-editor console for `trace()` output and runtime errors, linked to code lines.
+- [x] In-editor console for `trace()` output and runtime errors, linked to code lines.
+      A playtest-only prelude sends `trace()` through a debug block in free RAM
+      (below the runtime block) and replaces `debug.traceback` so errors name
+      cart lines with a short call stack (`line 4: … at hit:4 < TIC:12`); each
+      line opens the Code tab there. Error line numbers everywhere now account
+      for the injected SDK code above the cart's own.
 
 ## Phase 6 — Game systems
 

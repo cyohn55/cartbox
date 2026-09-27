@@ -591,7 +591,7 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
     open: false,
     entries: [
       { name: "time", signature: "time() -> ms", doc: "Milliseconds since the cart started.", snippet: "time()" },
-      { name: "trace", signature: 'trace(message, color)', doc: "Print to the console log (debugging).", snippet: 'trace("here")' },
+      { name: "trace", signature: 'trace(message, color)', doc: "Print to the playtest's Console, tagged with the frame (color: a palette index).", snippet: 'trace("here")' },
       { name: "math.random", signature: "math.random(m, n) -> int", doc: "A random integer in [m, n] (Lua standard library).", snippet: "math.random(1, 6)" },
     ],
   },

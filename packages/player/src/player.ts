@@ -15,7 +15,7 @@ import { createConsole, loadEngineModule, type ConsoleInstance } from "./engine.
 import { GamepadInput, GamepadState, KeyboardInput, TouchInput, hasTouchSupport } from "./input.js";
 import { frameDurationMs, getModel, type ConsoleModel } from "./models.js";
 import { ReplayRecorder, ReplaySource, hashCart, randomSeed, type Replay } from "./replay.js";
-import { seedCartridge, prependLuaCode } from "./cartseed.js";
+import { seedCartridge, prependLuaCode, readCartCode } from "./cartseed.js";
 import { STICK_OPTIN_MAGIC, STICK_OPTIN_WORD, STICK_WORD, packSticks } from "./sticks.js";
 import { DEFAULT_CONTROL_SETTINGS, applyLookSettings, type ControlSettings } from "./controls.js";
 import { injectSdk } from "./sdk.js";
@@ -25,6 +25,7 @@ import { PhysicsSession, sceneHasPhysics } from "./physics/physicsSession.js";
 import { RuntimeChannel } from "./runtime/runtimeChannel.js";
 import { PHYS_BLOCK_BYTES, RAM_LAYOUTS, physicsBlockAddress } from "./physics/protocol.js";
 import { collisionSdkLua } from "./collisionSdk.js";
+import { DEBUG_BLOCK_BYTES, armDebugBlock, codeLineOffset, debugBlockAddress, debugSdkLua, drainTraces, remapErrorLines } from "./debug/debugBlock.js";
 import { flagsSdkLua } from "./flagsSdk.js";
 import { animClipsSdkLua } from "./anim/animClipsSdk.js";
 import { decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights } from "./mailbox.js";
@@ -108,6 +109,11 @@ export class Player {
   private lastMailboxSeq = 0;
   /** Error-generation counter last seen from the engine; a rise means a new error. */
   private lastErrorSeq = 0;
+  /** Lines of injected code above the cart's own: error line N is cart line N − this. */
+  private lineOffset = 0;
+  /** The debug block (bytes after pmem word 0), when the editor's console is on. */
+  private debugOffset: number | null = null;
+  private speed = 1;
 
   private frameHandle = 0;
   private lastFrameTime = 0;
@@ -174,6 +180,12 @@ export class Player {
       // SDK so the SDK sits above them and defines `cartbox` first; each then
       // overrides its no-op stub. Empty layers contribute nothing.
       let prepared = seeded;
+      // The editor's console: trace capture and cart-line tracebacks (debugBlock.ts).
+      const layout = RAM_LAYOUTS[this.model.id];
+      if (this.options.onTrace && layout) {
+        prepared = prependLuaCode(prepared, debugSdkLua(debugBlockAddress(layout)));
+        this.debugOffset = debugBlockAddress(layout) - layout.pmemAddress;
+      }
       const collisionLua = collisionSdkLua(this.options.collision);
       if (collisionLua) prepared = prependLuaCode(prepared, collisionLua);
       const flagsLua = flagsSdkLua(this.options.flags);
@@ -189,7 +201,6 @@ export class Player {
       // Physics bodies on those objects (cartbox.body / impulse / move / ray ...),
       // simulated by the host's engine, and spawnable prefab copies
       // (cartbox.spawn), both through a block at the end of RAM.
-      const layout = RAM_LAYOUTS[this.model.id];
       const mesh = this.options.mesh;
       const runtimeLua = layout && mesh ? runtimeSdkLua(mesh, layout, { physics: Boolean(this.options.physics) }) : "";
       if (runtimeLua && mesh && layout) {
@@ -211,6 +222,7 @@ export class Player {
         };
       }
       const preparedBytes = injectSdk(prepared);
+      this.lineOffset = codeLineOffset(readCartCode(bytes), readCartCode(preparedBytes));
 
       this.console = createConsole(module, this.model, sampleRate);
       if (!this.console.loadCartridge(preparedBytes)) {
@@ -427,6 +439,26 @@ export class Player {
     }
   }
 
+  /** Run at `scale` × normal speed (clamped to 0.25 … 4). */
+  setTimeScale(scale: number): void {
+    this.speed = Number.isFinite(scale) ? Math.min(4, Math.max(0.25, scale)) : 1;
+  }
+
+  timeScale(): number {
+    return this.speed;
+  }
+
+  /** While paused, advance one frame and show it. */
+  stepFrame(): void {
+    if (this.running || this.destroyed || !this.console) return;
+    this.tickOnce(false);
+    this.present();
+  }
+
+  frame(): number {
+    return this.tickFrame;
+  }
+
   pause(): void {
     if (!this.running) return;
     this.running = false;
@@ -443,7 +475,7 @@ export class Player {
   private readonly loop = (now: number): void => {
     if (!this.running) return;
 
-    this.frameAccumulatorMs += now - this.lastFrameTime;
+    this.frameAccumulatorMs += (now - this.lastFrameTime) * this.speed;
     this.lastFrameTime = now;
     this.controllerInput?.poll();
 
@@ -452,7 +484,7 @@ export class Player {
     const frameMs = frameDurationMs(this.model);
     let advanced = 0;
     while (this.frameAccumulatorMs >= frameMs && advanced < maxFramesPerRender) {
-      this.tickOnce();
+      this.tickOnce(this.speed === 1);
       this.frameAccumulatorMs -= frameMs;
       advanced++;
     }
@@ -463,7 +495,8 @@ export class Player {
     this.frameHandle = this.view.requestAnimationFrame(this.loop);
   };
 
-  private tickOnce(): void {
+  /** Run one console frame. `withSound` false drops its audio (stepping, or off 1× speed). */
+  private tickOnce(withSound = true): void {
     // In playback the mask comes from the replay; otherwise from live input.
     const mask = this.replaySource ? this.replaySource.maskForFrame(this.tickFrame) : this.inputEnabled ? this.gamepad.value : 0;
     const net = this.options.netplay;
@@ -474,7 +507,11 @@ export class Player {
     this.feedSticks();
     const runtimeBlock = this.runtimeBlock();
     if (runtimeBlock) this.runtime!.channel.beforeTick(runtimeBlock);
+    const debugBlock = this.debugBlock();
+    if (debugBlock) armDebugBlock(debugBlock, this.lineOffset);
+    const frame = this.tickFrame + 1; // this tick's number, counting from 1 (as frame() will after it)
     this.console?.tick(mask);
+    if (debugBlock) this.drainDebug(frame);
     const afterBlock = runtimeBlock ? this.runtimeBlock() : null;
     if (afterBlock) {
       this.runtime!.channel.afterTick(afterBlock);
@@ -493,14 +530,14 @@ export class Player {
       const error = this.console.readError();
       if (error && error.seq > this.lastErrorSeq) {
         this.lastErrorSeq = error.seq;
-        if (error.message) this.options.onRuntimeError(error.message);
+        if (error.message) this.options.onRuntimeError(remapErrorLines(error.message, this.lineOffset));
       }
     }
 
     this.pollEvents();
 
     const samples = this.console?.readAudioSamples();
-    if (samples && samples.length > 0) {
+    if (withSound && samples && samples.length > 0) {
       this.audio?.enqueue(samples);
     }
   }
@@ -610,6 +647,23 @@ export class Player {
     if (!this.runtime || !this.console) return null;
     const bytes = this.console.ramView(this.runtime.offset, PHYS_BLOCK_BYTES);
     return bytes ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
+  }
+
+  /** A DataView over the debug block, when the console is on (re-fetched, like runtimeBlock). */
+  private debugBlock(): DataView | null {
+    if (this.debugOffset === null || !this.console) return null;
+    const bytes = this.console.ramView(this.debugOffset, DEBUG_BLOCK_BYTES);
+    return bytes ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
+  }
+
+  /** Hand the console the traces the cart printed during `frame`. */
+  private drainDebug(frame: number): void {
+    const block = this.debugBlock();
+    const onTrace = this.options.onTrace;
+    if (!block || !onTrace) return;
+    const { traces, dropped } = drainTraces(block);
+    for (const trace of traces) onTrace(trace.text, trace.color, frame);
+    if (dropped > 0) onTrace(`(${dropped} more trace${dropped === 1 ? "" : "s"} this frame didn't fit)`, 15, frame);
   }
 
   /** Reads any platform events the cart emitted this frame and dispatches them. */

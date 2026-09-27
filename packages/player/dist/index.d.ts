@@ -2180,6 +2180,14 @@ interface PlayerOptions {
      * frame.
      */
     onFrame?: () => void;
+    /**
+     * The editor's console: called with each `trace()` the cart prints, its
+     * colour, and the frame it came in. Setting it adds the debug prelude (see
+     * debug/debugBlock.ts), which also makes runtime errors name cart lines with
+     * a short call stack (`line 12: …` then `at update:12 < TIC:40`). For the
+     * editor's playtest; a published cart leaves it unset.
+     */
+    onTrace?: (text: string, color: number, frame: number) => void;
 }
 /** Handle returned by {@link mount} for controlling a live player instance. */
 interface PlayerHandle {
@@ -2219,6 +2227,17 @@ interface PlayerHandle {
     supplyTextures(images: ReadonlyMap<string, EncodedImage>): Promise<number>;
     /** The graphics preset in effect. */
     quality(): QualityLevel;
+    /**
+     * Run at a fraction or multiple of normal speed (0.25 … 4; 1 is normal). Sound
+     * is muted away from 1×, where it would stretch or pile up.
+     */
+    setTimeScale(scale: number): void;
+    /** The speed set by {@link setTimeScale}. */
+    timeScale(): number;
+    /** While paused: advance exactly one frame and show it. No-op while running. */
+    stepFrame(): void;
+    /** Frames the cart has run so far. */
+    frame(): number;
 }
 /** One scene object in a live inspection snapshot. */
 interface InspectedObject {
@@ -2470,6 +2489,56 @@ declare function readCartCode(bytes: Uint8Array): string | null;
  * @param seed Seed to make the language RNG reproducible.
  */
 declare function seedCartridge(bytes: Uint8Array, seed: number): Uint8Array;
+
+/**
+ * The editor's debug channel (ENGINE_ROADMAP.md, Phase 5): a 4 KB block in the
+ * console's free RAM, just below the runtime block (see physics/protocol.ts),
+ * shared by the cart's Lua and the host.
+ *
+ * - Console: a prelude replaces `trace()` so each message lands in a ring here
+ *   (the engine's own trace callback goes nowhere), and replaces
+ *   `debug.traceback` — which the core calls on every runtime error — with one
+ *   that names cart lines rather than lines of the merged, SDK-prefixed source
+ *   and fits the core's 256-byte error buffer.
+ * - The host writes a magic word and the cart's line offset before every tick,
+ *   and drains the ring after it.
+ *
+ * Only the editor's playtest adds this prelude; a published cart never has it.
+ * All words are little-endian int32.
+ */
+
+/** Where the debug block sits in Lua's RAM address space. */
+declare function debugBlockAddress(layout: RamLayout): number;
+/**
+ * Lines of code above the cart's own in the source the engine runs: `final` is
+ * the cart's code with preludes stacked on top (see prependLuaCode), so error
+ * line N in the merged source is cart line N − offset. 0 when `final` doesn't end
+ * with the cart's code (nothing was added, or it isn't Lua).
+ */
+declare function codeLineOffset(original: string | null, final: string | null): number;
+/**
+ * Rewrite the core's `[string "…"]:N:` positions to cart lines (`line N:`); a
+ * position inside the injected code (N ≤ offset) becomes `cartbox:`, since it
+ * has no cart line. Positions the debug prelude already rewrote are left alone.
+ */
+declare function remapErrorLines(message: string, offset: number): string;
+/** One frame of a runtime error's call stack, innermost first. */
+interface ErrorFrame {
+    readonly name: string;
+    readonly line: number;
+}
+/**
+ * The call stack the debug prelude appends to an error (`at update:12 < TIC:40`),
+ * innermost first; empty when the message carries none.
+ */
+declare function errorStack(message: string): ErrorFrame[];
+/** The prelude for the playtest: trace capture and cart-line tracebacks, over the block at `address`. */
+declare function debugSdkLua(address: number): string;
+/** A trace the cart printed. */
+interface TraceLine {
+    readonly text: string;
+    readonly color: number;
+}
 
 /**
  * The cartbox SDK as an injectable string.
@@ -5135,4 +5204,4 @@ declare class RuntimeChannel {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_PAD_BINDINGS, type DeviceHints, type DeviceProvider, EVENT_CAPACITY, type Ease, EngineLoadError, type FlagsField, GamepadInput, type GeneratedTrack, type GlContextProvider, HEIGHT_WORLD, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetState, type NetTransport, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POST_FX_EFFECTS, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$1 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, RuntimeChannel, SOFTWARE_RASTER_CAPS, START_KEYS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, SoftwareSceneRenderer, type SpriteRegion, type SpriteRegionSource, SwitchableTransport, TILT_SHIFT_FEATHER, type TextureLookup, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, applyLookSettings, applyQualityToPostFx, applyRenderCaps, browserDeviceHints, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, collisionSdkLua, compileAnimator, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interleaveVertices, interpolateNormal, jointFrames, loadEngineModule, makeShadowTexture, mount, nearestDirection, netSendInterval, normalBasis3x3, normalVector, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, splitWorldMatrix, standardizePad, sway, takeNetOutbox, takePhysicsCommands, tiltShiftBlur, uniformsFromSettings, unpadRows, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState };
+export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_PAD_BINDINGS, type DeviceHints, type DeviceProvider, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, type FlagsField, GamepadInput, type GeneratedTrack, type GlContextProvider, HEIGHT_WORLD, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetState, type NetTransport, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POST_FX_EFFECTS, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$1 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, RuntimeChannel, SOFTWARE_RASTER_CAPS, START_KEYS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, SoftwareSceneRenderer, type SpriteRegion, type SpriteRegionSource, SwitchableTransport, TILT_SHIFT_FEATHER, type TextureLookup, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, applyLookSettings, applyQualityToPostFx, applyRenderCaps, browserDeviceHints, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, compileAnimator, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugSdkLua, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, drift, emitterPreset, errorStack, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interleaveVertices, interpolateNormal, jointFrames, loadEngineModule, makeShadowTexture, mount, nearestDirection, netSendInterval, normalBasis3x3, normalVector, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, splitWorldMatrix, standardizePad, sway, takeNetOutbox, takePhysicsCommands, tiltShiftBlur, uniformsFromSettings, unpadRows, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState };

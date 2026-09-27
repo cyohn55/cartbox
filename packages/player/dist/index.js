@@ -5813,6 +5813,135 @@ function collisionSdkLua(collision) {
 end`;
 }
 
+// src/debug/debugBlock.ts
+var DEBUG_BLOCK_BYTES = 4096;
+var DEBUG_MAGIC = 1195655747;
+var DBG_MAGIC = 0;
+var DBG_LINE_OFFSET = 4;
+var DBG_TRACE_USED = 16;
+var DBG_TRACE_DROPPED = 20;
+var DBG_TRACE_AT = 1024;
+var DBG_TRACE_BYTES = 1536;
+var DBG_TRACE_MAX = 240;
+function debugBlockAddress(layout) {
+  return layout.ramSize - PHYS_BLOCK_BYTES - DEBUG_BLOCK_BYTES;
+}
+function codeLineOffset(original, final) {
+  if (original === null || final === null || final.length <= original.length || !final.endsWith(original)) return 0;
+  const head = final.slice(0, final.length - original.length);
+  let lines = 0;
+  for (let i = 0; i < head.length; i += 1) if (head.charCodeAt(i) === 10) lines += 1;
+  return lines;
+}
+function remapErrorLines(message, offset) {
+  return message.replace(/\[string "[^"]*"\]:(\d+):/g, (_all, n) => {
+    const line = Number(n) - offset;
+    return line > 0 ? `line ${line}:` : "cartbox:";
+  });
+}
+function errorStack(message) {
+  const at = /\nat (.*)$/m.exec(message);
+  if (!at) return [];
+  const frames = [];
+  for (const part of at[1].split(" < ")) {
+    const m = /^(.*):(\d+)$/.exec(part.trim());
+    if (m) frames.push({ name: m[1], line: Number(m[2]) });
+  }
+  return frames;
+}
+function debugSdkLua(address) {
+  return `do
+  local _B = ${address}
+  local function _rd(a)
+    local v = peek(a) | (peek(a + 1) << 8) | (peek(a + 2) << 16) | (peek(a + 3) << 24)
+    if v >= 0x80000000 then v = v - 0x100000000 end
+    return v
+  end
+  local function _wr(a, v)
+    v = math.floor(v) & 0xffffffff
+    poke(a, v & 0xff) poke(a + 1, (v >> 8) & 0xff) poke(a + 2, (v >> 16) & 0xff) poke(a + 3, (v >> 24) & 0xff)
+  end
+  local function _live() return _rd(_B + ${DBG_MAGIC}) == ${DEBUG_MAGIC} end
+  local _trace = trace
+  trace = function(msg, color)
+    if _trace then _trace(msg, color) end
+    if not _live() then return end
+    local s = tostring(msg)
+    if #s > ${DBG_TRACE_MAX} then s = s:sub(1, ${DBG_TRACE_MAX}) end
+    local used = _rd(_B + ${DBG_TRACE_USED})
+    if used < 0 or used + 3 + #s > ${DBG_TRACE_BYTES} then
+      _wr(_B + ${DBG_TRACE_DROPPED}, _rd(_B + ${DBG_TRACE_DROPPED}) + 1)
+      return
+    end
+    local a = _B + ${DBG_TRACE_AT} + used
+    poke(a, #s & 0xff) poke(a + 1, #s >> 8) poke(a + 2, (math.tointeger(color) or 15) & 0xff)
+    for i = 1, #s do poke(a + 2 + i, s:byte(i)) end
+    _wr(_B + ${DBG_TRACE_USED}, used + 3 + #s)
+  end
+  -- The core passes every runtime error through debug.traceback. Name cart
+  -- lines, and keep it short: the core keeps only 256 bytes of it.
+  local _src = debug.getinfo(1, "S").source
+  local _tb = debug.traceback
+  debug.traceback = function(msg, ...)
+    if type(msg) ~= "string" and msg ~= nil then return _tb(msg, ...) end
+    local off = _live() and _rd(_B + ${DBG_LINE_OFFSET}) or 0
+    local function cart(n)
+      n = tonumber(n) - off
+      return n > 0 and n or nil
+    end
+    msg = tostring(msg or ""):gsub('^%[string "[^"]*"%]:(%d+):', function(n)
+      local l = cart(n)
+      return l and ("line " .. l .. ":") or "cartbox:"
+    end)
+    -- A function the core calls (TIC, BDR ...) has no name Lua can see: look it up.
+    local function name(info)
+      if info.name then return info.name end
+      if info.what == "main" then return "main" end
+      for k, v in pairs(_G) do
+        if v == info.func and type(k) == "string" then return k end
+      end
+      return "?"
+    end
+    local frames = {}
+    for level = 2, 40 do
+      local info = debug.getinfo(level, "Slnf")
+      if not info then break end
+      if info.source == _src and info.currentline and info.currentline > 0 then
+        local l = cart(info.currentline)
+        if l then frames[#frames + 1] = name(info) .. ":" .. l end
+      end
+      if #frames >= 6 then break end
+    end
+    if #frames > 0 then msg = msg .. "\\nat " .. table.concat(frames, " < ") end
+    return msg
+  end
+end`;
+}
+function drainTraces(block) {
+  const used = Math.min(block.getInt32(DBG_TRACE_USED, true), DBG_TRACE_BYTES);
+  const dropped = block.getInt32(DBG_TRACE_DROPPED, true);
+  const traces = [];
+  if (used > 0) {
+    const decoder = new TextDecoder();
+    let at = 0;
+    while (at + 3 <= used) {
+      const length = block.getUint16(DBG_TRACE_AT + at, true);
+      const color = block.getUint8(DBG_TRACE_AT + at + 2);
+      const start = DBG_TRACE_AT + at + 3;
+      if (at + 3 + length > used) break;
+      traces.push({ text: decoder.decode(new Uint8Array(block.buffer, block.byteOffset + start, length)), color });
+      at += 3 + length;
+    }
+  }
+  if (used !== 0) block.setInt32(DBG_TRACE_USED, 0, true);
+  if (dropped !== 0) block.setInt32(DBG_TRACE_DROPPED, 0, true);
+  return { traces, dropped: Math.max(0, dropped) };
+}
+function armDebugBlock(block, lineOffset) {
+  block.setUint32(DBG_MAGIC, DEBUG_MAGIC, true);
+  block.setInt32(DBG_LINE_OFFSET, lineOffset, true);
+}
+
 // src/flagsSdk.ts
 function parseFlagsField(value) {
   if (typeof value !== "object" || value === null) return null;
@@ -10256,6 +10385,11 @@ var Player = class {
     this.lastMailboxSeq = 0;
     /** Error-generation counter last seen from the engine; a rise means a new error. */
     this.lastErrorSeq = 0;
+    /** Lines of injected code above the cart's own: error line N is cart line N − this. */
+    this.lineOffset = 0;
+    /** The debug block (bytes after pmem word 0), when the editor's console is on. */
+    this.debugOffset = null;
+    this.speed = 1;
     this.frameHandle = 0;
     this.lastFrameTime = 0;
     this.frameAccumulatorMs = 0;
@@ -10269,14 +10403,14 @@ var Player = class {
      */
     this.loop = (now) => {
       if (!this.running) return;
-      this.frameAccumulatorMs += now - this.lastFrameTime;
+      this.frameAccumulatorMs += (now - this.lastFrameTime) * this.speed;
       this.lastFrameTime = now;
       this.controllerInput?.poll();
       const maxFramesPerRender = 4;
       const frameMs = frameDurationMs(this.model);
       let advanced = 0;
       while (this.frameAccumulatorMs >= frameMs && advanced < maxFramesPerRender) {
-        this.tickOnce();
+        this.tickOnce(this.speed === 1);
         this.frameAccumulatorMs -= frameMs;
         advanced++;
       }
@@ -10322,6 +10456,11 @@ var Player = class {
       const seed = this.options.replay ? this.options.replay.seed : randomSeed();
       const seeded = seedCartridge(bytes, seed);
       let prepared = seeded;
+      const layout = RAM_LAYOUTS[this.model.id];
+      if (this.options.onTrace && layout) {
+        prepared = prependLuaCode(prepared, debugSdkLua(debugBlockAddress(layout)));
+        this.debugOffset = debugBlockAddress(layout) - layout.pmemAddress;
+      }
       const collisionLua = collisionSdkLua(this.options.collision);
       if (collisionLua) prepared = prependLuaCode(prepared, collisionLua);
       const flagsLua = flagsSdkLua(this.options.flags);
@@ -10330,7 +10469,6 @@ var Player = class {
       if (animClipsLua) prepared = prependLuaCode(prepared, animClipsLua);
       const sceneLua = sceneObjectsSdkLua(this.options.mesh);
       if (sceneLua) prepared = prependLuaCode(prepared, sceneLua);
-      const layout = RAM_LAYOUTS[this.model.id];
       const mesh = this.options.mesh;
       const runtimeLua = layout && mesh ? runtimeSdkLua(mesh, layout, { physics: Boolean(this.options.physics) }) : "";
       if (runtimeLua && mesh && layout) {
@@ -10352,6 +10490,7 @@ var Player = class {
         };
       }
       const preparedBytes = injectSdk(prepared);
+      this.lineOffset = codeLineOffset(readCartCode(bytes), readCartCode(preparedBytes));
       this.console = createConsole(module, this.model, sampleRate);
       if (!this.console.loadCartridge(preparedBytes)) {
         throw new Error("Engine rejected the cartridge");
@@ -10507,6 +10646,22 @@ var Player = class {
     } catch {
     }
   }
+  /** Run at `scale` × normal speed (clamped to 0.25 … 4). */
+  setTimeScale(scale) {
+    this.speed = Number.isFinite(scale) ? Math.min(4, Math.max(0.25, scale)) : 1;
+  }
+  timeScale() {
+    return this.speed;
+  }
+  /** While paused, advance one frame and show it. */
+  stepFrame() {
+    if (this.running || this.destroyed || !this.console) return;
+    this.tickOnce(false);
+    this.present();
+  }
+  frame() {
+    return this.tickFrame;
+  }
   pause() {
     if (!this.running) return;
     this.running = false;
@@ -10514,7 +10669,8 @@ var Player = class {
     this.gamepad.reset();
     void this.audio?.pause();
   }
-  tickOnce() {
+  /** Run one console frame. `withSound` false drops its audio (stepping, or off 1× speed). */
+  tickOnce(withSound = true) {
     const mask = this.replaySource ? this.replaySource.maskForFrame(this.tickFrame) : this.inputEnabled ? this.gamepad.value : 0;
     const net = this.options.netplay;
     if (net && this.console) {
@@ -10524,7 +10680,11 @@ var Player = class {
     this.feedSticks();
     const runtimeBlock = this.runtimeBlock();
     if (runtimeBlock) this.runtime.channel.beforeTick(runtimeBlock);
+    const debugBlock = this.debugBlock();
+    if (debugBlock) armDebugBlock(debugBlock, this.lineOffset);
+    const frame = this.tickFrame + 1;
     this.console?.tick(mask);
+    if (debugBlock) this.drainDebug(frame);
     const afterBlock = runtimeBlock ? this.runtimeBlock() : null;
     if (afterBlock) {
       this.runtime.channel.afterTick(afterBlock);
@@ -10540,12 +10700,12 @@ var Player = class {
       const error = this.console.readError();
       if (error && error.seq > this.lastErrorSeq) {
         this.lastErrorSeq = error.seq;
-        if (error.message) this.options.onRuntimeError(error.message);
+        if (error.message) this.options.onRuntimeError(remapErrorLines(error.message, this.lineOffset));
       }
     }
     this.pollEvents();
     const samples = this.console?.readAudioSamples();
-    if (samples && samples.length > 0) {
+    if (withSound && samples && samples.length > 0) {
       this.audio?.enqueue(samples);
     }
   }
@@ -10645,6 +10805,21 @@ var Player = class {
     if (!this.runtime || !this.console) return null;
     const bytes = this.console.ramView(this.runtime.offset, PHYS_BLOCK_BYTES);
     return bytes ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
+  }
+  /** A DataView over the debug block, when the console is on (re-fetched, like runtimeBlock). */
+  debugBlock() {
+    if (this.debugOffset === null || !this.console) return null;
+    const bytes = this.console.ramView(this.debugOffset, DEBUG_BLOCK_BYTES);
+    return bytes ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
+  }
+  /** Hand the console the traces the cart printed during `frame`. */
+  drainDebug(frame) {
+    const block = this.debugBlock();
+    const onTrace = this.options.onTrace;
+    if (!block || !onTrace) return;
+    const { traces, dropped } = drainTraces(block);
+    for (const trace of traces) onTrace(trace.text, trace.color, frame);
+    if (dropped > 0) onTrace(`(${dropped} more trace${dropped === 1 ? "" : "s"} this frame didn't fit)`, 15, frame);
   }
   /** Reads any platform events the cart emitted this frame and dispatches them. */
   pollEvents() {
@@ -11488,6 +11663,10 @@ function mount(container, options) {
     inspect: () => player.inspect(),
     setQuality: (choice) => player.setQuality(choice),
     supplyTextures: (textures) => player.supplyTextures(textures),
+    setTimeScale: (scale) => player.setTimeScale(scale),
+    timeScale: () => player.timeScale(),
+    stepFrame: () => player.stepFrame(),
+    frame: () => player.frame(),
     quality: () => player.quality()
   };
 }
@@ -11606,6 +11785,7 @@ export {
   cellAt,
   clipFrameIndex,
   codeChunks,
+  codeLineOffset,
   collisionSdkLua,
   compileAnimator,
   composeParallax,
@@ -11618,6 +11798,8 @@ export {
   createSceneRenderer,
   createTextureBudgetCache,
   deadZoned,
+  debugBlockAddress,
+  debugSdkLua,
   decodeCamera,
   decodeLights,
   decodeMailbox,
@@ -11629,6 +11811,7 @@ export {
   deterministicBackend,
   drift,
   emitterPreset,
+  errorStack,
   evaluate,
   extractScore,
   extractUnlocks,
@@ -11681,6 +11864,7 @@ export {
   readPad,
   reflectionFade,
   reflectionSampleY,
+  remapErrorLines,
   renderSceneBackdrop,
   resolveButton,
   resolveLight,
