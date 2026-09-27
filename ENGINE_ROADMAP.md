@@ -105,9 +105,11 @@ trades state and commands with the cart through an 8 KB block at the end of RAM
 - [x] glTF skin and animation-clip import (meshes parented to a bone ride on it);
       clips play by themselves (the first, looping) and switch with a crossfade from
       Lua (`cartbox.play`, `cartbox.anim`, `cartbox.clips`); the Mesh tab previews them.
-- [ ] Animation state machine with blending and events (walk ↔ run ↔ shoot), driven
-      from Lua parameters.
-      (Crossfades between clips are in; the state machine, parameters and events are next.)
+- [x] Animation state machine with blending and events (walk ↔ run ↔ shoot), driven
+      from Lua parameters: number / bool / trigger parameters, states playing a clip or
+      a 1D blend (clips kept in step), transitions with conditions, exit times and
+      crossfades, and named clip events — authored in the Mesh tab, driven with
+      `cartbox.set` / `trigger` / `setstate`, read with `cartbox.state` / `events`.
 - [ ] Two-bone IK and look-at (feet on slopes, aiming).
 - [ ] Timeline / sequencer for cutscenes and scripted camera moves.
 

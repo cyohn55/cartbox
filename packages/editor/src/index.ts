@@ -191,6 +191,23 @@ export {
 export { parseObj, encodeObj, type ParseObjOptions, type ObjFiles } from "./model/objCodec";
 export { parseGlb, parseGltf, parseGltfText, encodeGlb } from "./model/gltfCodec";
 export {
+  ANIMATOR_LIMITS,
+  ANIMATOR_OPS,
+  DEFAULT_ANIMATOR_FADE,
+  conditionHolds,
+  defaultAnimator,
+  readAnimatorSpec,
+  type AnimatorBlend,
+  type AnimatorCondition,
+  type AnimatorEvent,
+  type AnimatorOp,
+  type AnimatorParam,
+  type AnimatorParamKind,
+  type AnimatorSpec,
+  type AnimatorState,
+  type AnimatorTransition,
+} from "./model/animatorSpec";
+export {
   MAX_CLIPS,
   MAX_SKIN_JOINTS,
   POSE_STRIDE,

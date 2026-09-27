@@ -70,10 +70,14 @@ export const PHYS_MAX_OVERLAPS = 64;
 export const PHYS_EVENT_STARTED = 1;
 export const PHYS_EVENT_TRIGGER = 2;
 
-/** Each animated object's playback: count, then (object, clip, time in 1/1024 s). */
+/** Each animated object's playback: count, then (object, clip, time in 1/1024 s, state machine state or -1). */
 export const PHYS_ANIMS = 6400;
-export const PHYS_ANIM_BYTES = 12;
+export const PHYS_ANIM_BYTES = 16;
 export const PHYS_MAX_ANIMS = 64;
+/** Clip events that fired on the last step: count, then (object, event index). */
+export const PHYS_ANIM_EVENTS = PHYS_ANIMS + 4 + PHYS_MAX_ANIMS * PHYS_ANIM_BYTES; // 7428
+export const PHYS_ANIM_EVENT_BYTES = 8;
+export const PHYS_MAX_ANIM_EVENTS = 32;
 
 // Lua → host (written during the tick; read and cleared after it).
 export const PHYS_CMDS = 4096;
@@ -112,6 +116,10 @@ export const PHYS_OP_UNJOIN = 10;
  * v2 = speed, v3 = loop (1) or hold the last frame (0), v4 = start time.
  */
 export const PHYS_OP_PLAY = 11;
+/** State machines: a = object. SET: v0 = parameter index, v1 = value. TRIGGER: v0 = parameter. GOTO: v0 = state, v1 = fade. */
+export const PHYS_OP_ANIM_SET = 12;
+export const PHYS_OP_ANIM_TRIGGER = 13;
+export const PHYS_OP_ANIM_GOTO = 14;
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {
@@ -218,10 +226,16 @@ export interface AnimationPlayback {
   readonly clip: number;
   /** Seconds into the clip (wrapped when looping, held at the end otherwise). */
   readonly time: number;
+  /** The state machine's current state, or -1 (no machine, or the cart is playing a clip directly). */
+  readonly state?: number;
 }
 
-/** Write every animated object's playback (host → Lua). */
-export function writeAnimationState(block: DataView, playback: readonly AnimationPlayback[]): void {
+/** Write every animated object's playback, and the clip events that just fired (host → Lua). */
+export function writeAnimationState(
+  block: DataView,
+  playback: readonly AnimationPlayback[],
+  events: readonly { readonly object: number; readonly event: number }[] = [],
+): void {
   const n = Math.min(playback.length, PHYS_MAX_ANIMS);
   block.setInt32(PHYS_ANIMS, n, true);
   for (let i = 0; i < n; i += 1) {
@@ -229,6 +243,14 @@ export function writeAnimationState(block: DataView, playback: readonly Animatio
     block.setInt32(at, playback[i]!.object, true);
     block.setInt32(at + 4, playback[i]!.clip, true);
     block.setInt32(at + 8, toFix(playback[i]!.time), true);
+    block.setInt32(at + 12, playback[i]!.state ?? -1, true);
+  }
+  const ne = Math.min(events.length, PHYS_MAX_ANIM_EVENTS);
+  block.setInt32(PHYS_ANIM_EVENTS, ne, true);
+  for (let i = 0; i < ne; i += 1) {
+    const at = PHYS_ANIM_EVENTS + 4 + i * PHYS_ANIM_EVENT_BYTES;
+    block.setInt32(at, events[i]!.object, true);
+    block.setInt32(at + 4, events[i]!.event, true);
   }
 }
 

@@ -27,6 +27,7 @@ import {
   parentIndices,
   parseSceneLighting,
   readMeshLibrary,
+  readAnimatorSpec,
   readPhysicsSpec,
   readPhysicsWorld,
   readSceneProps,
@@ -39,6 +40,7 @@ import {
   serializeMeshAsset,
   worldMatrices,
   type MeshAsset,
+  type AnimatorSpec,
   type PhysicsSpec,
   type PhysicsWorldSettings,
   type SceneLighting,
@@ -81,6 +83,8 @@ export interface MeshSidecarEntry {
   readonly prefab?: PrefabLink;
   /** Physics body (ENGINE_ROADMAP.md, Phase 2); absent = not simulated. */
   readonly physics?: PhysicsSpec;
+  /** Animation state machine for a skinned mesh (ENGINE_ROADMAP.md, Phase 3); absent = plays its first clip. */
+  readonly animator?: AnimatorSpec;
 }
 
 /**
@@ -106,6 +110,7 @@ export interface PrefabNode {
   readonly tags?: readonly string[];
   readonly props?: Readonly<Record<string, ScenePropValue>>;
   readonly physics?: PhysicsSpec;
+  readonly animator?: AnimatorSpec;
 }
 
 /** A reusable group of objects: a root node and everything under it. */
@@ -244,6 +249,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
       ...(Object.keys(props).length > 0 ? { props } : {}),
       ...(readPrefabLink(record.prefab) ? { prefab: readPrefabLink(record.prefab)! } : {}),
       ...(readPhysicsSpec(record.physics) ? { physics: readPhysicsSpec(record.physics)! } : {}),
+      ...(readAnimatorSpec(record.animator) ? { animator: readAnimatorSpec(record.animator)! } : {}),
     });
   }
   const lighting = parseSceneLighting((parsed as { lighting?: unknown }).lighting);
@@ -300,6 +306,7 @@ function readPrefabs(value: unknown, library: ReturnType<typeof readMeshLibrary>
         ...(tags.length > 0 ? { tags } : {}),
         ...(Object.keys(props).length > 0 ? { props } : {}),
         ...(readPhysicsSpec(node.physics) ? { physics: readPhysicsSpec(node.physics)! } : {}),
+        ...(readAnimatorSpec(node.animator) ? { animator: readAnimatorSpec(node.animator)! } : {}),
       });
     }
     const keys = new Set(nodes.map((n) => n.key));
@@ -360,6 +367,19 @@ export function setMeshAsset(sidecar: MeshSidecar, id: string, mesh: MeshAsset):
     ...sidecar,
     version: MESH_SIDECAR_VERSION,
     meshes: sidecar.meshes.map((entry) => (entry.id === id ? { ...entry, mesh: serialized } : entry)),
+  };
+}
+
+/** Set (or with null, remove) one entry's animation state machine. */
+export function setMeshAnimator(sidecar: MeshSidecar, id: string, animator: AnimatorSpec | null): MeshSidecar {
+  const spec = animator ? readAnimatorSpec(animator) : null;
+  return {
+    ...sidecar,
+    meshes: sidecar.meshes.map((entry) => {
+      if (entry.id !== id) return entry;
+      const { animator: _drop, ...rest } = entry;
+      return spec ? { ...rest, animator: spec } : rest;
+    }),
   };
 }
 

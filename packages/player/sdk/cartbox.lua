@@ -289,6 +289,12 @@ cartbox = {
   --     (nil = rest pose), crossfading over fade seconds (default 0.2)
   --   cartbox.anim(obj)                -> clip name, seconds into it, finished
   --   cartbox.clips(obj)               -> { name, ... }
+  -- With a state machine (set up in the editor's Animation section):
+  --   cartbox.set(obj, param, value)   set a number or bool parameter
+  --   cartbox.trigger(obj, param)      fire a trigger
+  --   cartbox.state(obj)               -> the current state's name
+  --   cartbox.setstate(obj, state, fade) jump to a state
+  --   cartbox.events(obj)              -> { name, ... } clip events from the last tick
   -- Physics (bodies on scene objects): overridden by the injected physics calls
   -- when the cart has bodies.
   physics = function() return false end,
@@ -315,4 +321,9 @@ cartbox = {
   play = function() end,
   anim = function() return nil, 0, false end,
   clips = function() return {} end,
+  set = function() end,
+  trigger = function() end,
+  state = function() return nil end,
+  setstate = function() end,
+  events = function() return {} end,
 }
