@@ -270,6 +270,10 @@ cartbox = {
   move = function() end,
   ray = function() end,
   hit = function() return false end,
+  contacts = function() return {} end,
+  entered = function() return {} end,
+  exited = function() return {} end,
+  inside = function() return {} end,
   -- Spawning prefab copies: overridden when the cart has prefabs.
   spawn = function() return nil end,
   despawn = function() end,

@@ -270,6 +270,10 @@ cartbox = {
   --   cartbox.move(obj, dx, dy, dz)    walk a character (slides, climbs, steps)
   --   cartbox.ray(slot, x, y, z, dx, dy, dz, max)   cast a ray; read it next tick
   --   cartbox.hit(slot)                -> hit, obj, x, y, z, nx, ny, nz, distance
+  --   cartbox.contacts()               -> this tick's contacts { {a=, b=, started=, trigger=} }
+  --   cartbox.entered(trigger)         -> objects that came into a trigger zone this tick
+  --   cartbox.exited(trigger)          -> objects that left it this tick
+  --   cartbox.inside(trigger)          -> objects in it now
   -- Prefabs. Each prefab keeps copies in reserve (set how many in the editor):
   --   cartbox.spawn(prefab, x, y, z, yaw, pitch, roll) -> the copy's root object, or nil
   --   cartbox.despawn(obj)             put a spawned copy back in reserve
@@ -284,6 +288,10 @@ cartbox = {
   move = function() end,
   ray = function() end,
   hit = function() return false end,
+  contacts = function() return {} end,
+  entered = function() return {} end,
+  exited = function() return {} end,
+  inside = function() return {} end,
   -- Spawning prefab copies: overridden when the cart has prefabs.
   spawn = function() return nil end,
   despawn = function() end,

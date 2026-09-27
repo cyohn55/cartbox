@@ -25,6 +25,15 @@ export interface PhysicsSpec {
   readonly friction: number;
   /** Restitution 0..1 (0 = no bounce). */
   readonly bounce: number;
+  /**
+   * A trigger zone: detects what enters and leaves it (cartbox.entered /
+   * exited / inside) without blocking anything. Optional; absent = solid.
+   */
+  readonly trigger?: boolean;
+  /** Gravity multiplier for a dynamic body (-10..10; 0 floats, negative rises). Absent = 1. */
+  readonly gravity?: number;
+  /** Linear damping 0..10 — how quickly a dynamic body slows (air drag). Absent = 0. */
+  readonly damping?: number;
 }
 
 export const PHYSICS_BODY_KINDS: readonly PhysicsBodyKind[] = ["static", "dynamic", "kinematic", "character"];
@@ -49,11 +58,17 @@ export function readPhysicsSpec(value: unknown): PhysicsSpec | null {
   let shape = PHYSICS_SHAPE_KINDS.includes(raw.shape as PhysicsShapeKind) ? (raw.shape as PhysicsShapeKind) : "box";
   if (body === "character") shape = "capsule";
   else if (shape === "mesh" && body !== "static") shape = "box";
+  const gravity = num(raw.gravity, -10, 10, 1);
+  const damping = num(raw.damping, 0, 10, 0);
   return {
     body,
     shape,
     mass: num(raw.mass, 0.01, 10000, DEFAULT_PHYSICS_SPEC.mass),
     friction: num(raw.friction, 0, 2, DEFAULT_PHYSICS_SPEC.friction),
     bounce: num(raw.bounce, 0, 1, DEFAULT_PHYSICS_SPEC.bounce),
+    // Characters walk into triggers but aren't one; optional fields are kept only when set.
+    ...(raw.trigger === true && body !== "character" ? { trigger: true } : {}),
+    ...(gravity !== 1 ? { gravity } : {}),
+    ...(damping !== 0 ? { damping } : {}),
   };
 }

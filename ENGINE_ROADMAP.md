@@ -78,11 +78,15 @@ and live inspection. Later: nested prefabs, picking objects in the game view.
       the ground, reports grounded) via `cartbox.move`.
 - [x] Raycasts from Lua (`cartbox.ray` / `cartbox.hit`, one tick later), plus
       `cartbox.body`, `impulse`, `velocity`, `teleport`.
-- [ ] Trigger volumes, shape casts and collision events.
-- [ ] Joints (hinges, springs) and per-body gravity / damping settings.
+- [x] Trigger zones (`cartbox.entered` / `exited` / `inside`) and collision events
+      (`cartbox.contacts`); triggers don't block characters or rays.
+- [x] Per-body gravity multiplier and damping.
+- [ ] Shape casts.
+- [ ] Joints (hinges, springs).
 - [ ] Deterministic mode across browsers for netplay (Rapier's deterministic build).
 
-**Status:** foundation landed. The host runs the world at a fixed 1/60 s step and
+**Status:** bodies, character controller, raycasts, triggers, contact events and
+per-body gravity / damping landed. The host runs the world at a fixed 1/60 s step and
 trades state and commands with the cart through an 8 KB block at the end of RAM
 (its address per engine core is checked against the real builds by a test).
 
