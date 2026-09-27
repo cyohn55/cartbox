@@ -3883,6 +3883,10 @@ cartbox = {
   lookat = function() end,
   joint = function() return nil end,
   joints = function() return {} end,
+  playtimeline = function() end,
+  stoptimeline = function() end,
+  timeline = function() return nil, 0, false end,
+  timelineevents = function() return {} end,
 }`;
 function injectSdk(bytes) {
   return prependLuaCode(bytes, CARTBOX_SDK_LUA);
@@ -4007,6 +4011,17 @@ var PHYS_MAX_ANIM_EVENTS = 32;
 var PHYS_JOINTS = 7700;
 var PHYS_JOINT_BYTES = 20;
 var PHYS_MAX_JOINTS = 16;
+var PHYS_TIMELINE = 8032;
+var PHYS_TIMELINE_EVENTS = PHYS_TIMELINE + 12;
+var PHYS_MAX_TIMELINE_EVENTS = 8;
+function writeTimelineState(block, playback, events = []) {
+  block.setInt32(PHYS_TIMELINE, playback.index, true);
+  block.setInt32(PHYS_TIMELINE + 4, toFix(playback.time), true);
+  block.setInt32(PHYS_TIMELINE + 8, playback.playing ? 1 : 0, true);
+  const n = Math.min(events.length, PHYS_MAX_TIMELINE_EVENTS);
+  block.setInt32(PHYS_TIMELINE_EVENTS, n, true);
+  for (let i = 0; i < n; i += 1) block.setInt32(PHYS_TIMELINE_EVENTS + 4 + i * 4, events[i], true);
+}
 function writeJointPositions(block, joints) {
   const n = Math.min(joints.length, PHYS_MAX_JOINTS);
   block.setInt32(PHYS_JOINTS, n, true);
@@ -4044,6 +4059,7 @@ var PHYS_OP_IK = 15;
 var PHYS_OP_IK_POLE = 16;
 var PHYS_OP_LOOKAT = 17;
 var PHYS_OP_WATCH = 18;
+var PHYS_OP_TIMELINE = 19;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -4881,10 +4897,134 @@ var AnimationSession = class {
   }
 };
 
+// src/anim/timelineSession.ts
+import { composeModelMatrix, crossedMarks, multiplyMat4, sampleCamera, sampleObjects } from "@cartbox/editor";
+function timelineEventNames(timeline) {
+  const names = [];
+  for (const track of timeline.tracks) {
+    if (track.kind !== "events") continue;
+    for (const e of track.events) if (!names.includes(e.name)) names.push(e.name);
+  }
+  return names;
+}
+var TimelineSession = class {
+  constructor(scene) {
+    this.scene = scene;
+    this.objectIndex = /* @__PURE__ */ new Map();
+    this.current = null;
+    this.fired = [];
+    this.timelines = scene.timelines ?? [];
+    scene.instances.forEach((inst, i) => {
+      if (!this.objectIndex.has(inst.id)) this.objectIndex.set(inst.id, i);
+    });
+    const auto = this.timelines.findIndex((t) => t.autoplay);
+    if (auto >= 0) this.play(auto);
+  }
+  /** Play timeline `index` from `from` seconds (an invalid index stops). */
+  play(index, from = 0, speed = 1) {
+    const timeline = this.timelines[index];
+    if (!timeline) {
+      this.stop();
+      return;
+    }
+    this.current = {
+      index,
+      time: Math.max(0, Math.min(timeline.duration, Number.isFinite(from) ? from : 0)),
+      speed: Number.isFinite(speed) ? Math.max(0, Math.min(10, speed)) : 1,
+      playing: true,
+      fresh: true
+    };
+  }
+  stop() {
+    this.current = null;
+  }
+  /**
+   * Advance one tick. Returns the animation cues passed (object index + cue) for
+   * the caller to apply; the events passed are kept for {@link events}.
+   */
+  step(dt) {
+    this.fired = [];
+    const c = this.current;
+    if (!c || !c.playing) return [];
+    const timeline = this.timelines[c.index];
+    const names = timelineEventNames(timeline);
+    const cues = [];
+    const collect = (t02, t12) => {
+      const marks = crossedMarks(timeline, t02, t12);
+      for (const { object, cue } of marks.cues) {
+        const i = this.objectIndex.get(object);
+        if (i !== void 0) cues.push({ object: i, cue });
+      }
+      for (const e of marks.events) this.fired.push(names.indexOf(e));
+    };
+    const t0 = c.fresh ? c.time - 1e-9 : c.time;
+    c.fresh = false;
+    let t1 = c.time + dt * c.speed;
+    if (t1 >= timeline.duration) {
+      collect(t0, timeline.duration);
+      if (timeline.loop && timeline.duration > 0) {
+        t1 -= timeline.duration;
+        collect(-1e-9, t1);
+        c.time = t1;
+      } else if (timeline.hold) {
+        c.time = timeline.duration;
+        c.playing = false;
+      } else {
+        this.current = null;
+      }
+      return cues;
+    }
+    collect(t0, t1);
+    c.time = t1;
+    return cues;
+  }
+  /** What plays (or holds) now. */
+  state() {
+    return this.current ? { index: this.current.index, time: this.current.time, playing: this.current.playing } : { index: -1, time: 0, playing: false };
+  }
+  /** Indices (into the playing timeline's event names) of the events passed on the last step. */
+  events() {
+    return this.fired;
+  }
+  /** The timeline camera now (world eye, target, fov in degrees), or null. */
+  camera() {
+    const c = this.current;
+    return c ? sampleCamera(this.timelines[c.index], c.time) : null;
+  }
+  /**
+   * World matrices of the objects the timeline places (object index → matrix):
+   * each key is relative to the object's parent, which may itself be placed by
+   * the timeline.
+   */
+  placements() {
+    const out = /* @__PURE__ */ new Map();
+    const c = this.current;
+    if (!c) return out;
+    const locals = /* @__PURE__ */ new Map();
+    for (const [id, t] of sampleObjects(this.timelines[c.index], c.time)) {
+      const i = this.objectIndex.get(id);
+      if (i !== void 0) locals.set(i, composeModelMatrix(t.position, t.rotation, t.scale));
+    }
+    const worldOf = (i, depth = 0) => {
+      const known = out.get(i);
+      if (known) return known;
+      const inst = this.scene.instances[i];
+      const local = locals.get(i);
+      if (!local) return inst.model;
+      const parent = inst.parent >= 0 && depth < this.scene.instances.length ? worldOf(inst.parent, depth + 1) : null;
+      const world = parent ? multiplyMat4(parent, local) : local;
+      out.set(i, world);
+      return world;
+    };
+    for (const i of locals.keys()) worldOf(i);
+    return out;
+  }
+};
+
 // src/physics/physicsSdk.ts
 function sceneNeedsRuntime(scene, { physics = true } = {}) {
   return Boolean(
-    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0)
+    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0)
   );
 }
 var luaString = (s) => JSON.stringify(s);
@@ -4930,7 +5070,8 @@ function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
   end
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
-${ANIM_CALLS(scene)}end`;
+${ANIM_CALLS(scene)}
+${TIMELINE_CALLS(scene)}end`;
 }
 function PHYSICS_CALLS() {
   return `  cartbox.physics = function() return _live() end
@@ -5063,6 +5204,40 @@ function SPAWN_CALLS(pools) {
   cartbox.alive = function(o)
     local i = _obj(o)
     return i ~= nil and _alive[i] == true
+  end
+`;
+}
+function TIMELINE_CALLS(scene) {
+  const timelines = scene.timelines ?? [];
+  if (timelines.length === 0) return "";
+  const names = timelines.map((t) => luaString(t.name)).join(",");
+  const events = timelines.map((t) => `{${timelineEventNames(t).map(luaString).join(",")}}`).join(",");
+  return `  local _tl = {${names}}
+  local _tlev = {${events}}
+  cartbox.playtimeline = function(name, from, speed)
+    for k, n in ipairs(_tl) do
+      if n == name or k - 1 == name then
+        _cmd(${PHYS_OP_TIMELINE}, k - 1, from or 0, speed or 1)
+        return
+      end
+    end
+  end
+  cartbox.stoptimeline = function() _cmd(${PHYS_OP_TIMELINE}, -1) end
+  cartbox.timeline = function()
+    if not _live() then return nil, 0, false end
+    local i = _rd(_B + ${PHYS_TIMELINE})
+    if i < 0 then return nil, 0, false end
+    return _tl[i + 1], _rd(_B + ${PHYS_TIMELINE + 4}) / ${PHYS_FIX}, _rd(_B + ${PHYS_TIMELINE + 8}) == 1
+  end
+  cartbox.timelineevents = function()
+    local out = {}
+    if not _live() then return out end
+    local i = _rd(_B + ${PHYS_TIMELINE})
+    local names = _tlev[i + 1]
+    if names == nil then return out end
+    local n = _rd(_B + ${PHYS_TIMELINE_EVENTS})
+    for k = 0, n - 1 do out[#out + 1] = names[_rd(_B + ${PHYS_TIMELINE_EVENTS + 4} + k * 4) + 1] end
+    return out
   end
 `;
 }
@@ -5245,10 +5420,10 @@ var physicsSdkLua = runtimeSdkLua;
 
 // src/runtime/runtimeChannel.ts
 import {
-  composeModelMatrix,
+  composeModelMatrix as composeModelMatrix2,
   invertAffine,
   jointPosition,
-  multiplyMat4,
+  multiplyMat4 as multiplyMat42,
   solveLookAt,
   solveTwoBoneIK
 } from "@cartbox/editor";
@@ -5273,6 +5448,7 @@ var RuntimeChannel = class {
     /** Joints whose world position the cart asked for, and where they were when last skinned. */
     this.watched = /* @__PURE__ */ new Map();
     this.animation = sceneHasAnimation(scene) ? new AnimationSession(scene) : null;
+    this.timeline = (scene.timelines?.length ?? 0) > 0 ? new TimelineSession(scene) : null;
     scene.instances.forEach((inst, i) => {
       if (!inst.pooled) return;
       const list = this.copyObjects.get(inst.pooled.root) ?? [];
@@ -5286,6 +5462,7 @@ var RuntimeChannel = class {
     if (this.physics) this.physics.beforeTick(block);
     else writePhysicsState(block, 0, [], []);
     writeAnimationState(block, this.animation?.state() ?? [], this.animation?.events() ?? []);
+    writeTimelineState(block, this.timeline?.state() ?? { index: -1, time: 0, playing: false }, this.timeline?.events() ?? []);
     writeJointPositions(
       block,
       [...this.watched.values()].flatMap((w) => w.position ? [{ object: w.object, joint: w.joint, position: w.position }] : [])
@@ -5306,7 +5483,12 @@ var RuntimeChannel = class {
       else if (cmd.op === PHYS_OP_IK_POLE) this.poles.set(`${cmd.a}:${Math.round(cmd.v[0])}`, [cmd.v[1], cmd.v[2], cmd.v[3]]);
       else if (cmd.op === PHYS_OP_IK || cmd.op === PHYS_OP_LOOKAT) this.request(cmd.op, cmd.a, cmd.v);
       else if (cmd.op === PHYS_OP_WATCH) this.watch(cmd.a, Math.round(cmd.v[0]));
+      else if (cmd.op === PHYS_OP_TIMELINE) {
+        if (cmd.a < 0) this.timeline?.stop();
+        else this.timeline?.play(cmd.a, cmd.v[0], cmd.v[1]);
+      }
     }
+    for (const { object, cue } of this.timeline?.step(PHYSICS_DT) ?? []) this.cue(object, cue.clip, cue.fade, cue.loop);
     this.physics?.run(commands.filter((c) => c.op < PHYS_OP_SPAWN || c.op > PHYS_OP_DESPAWN && c.op < PHYS_OP_PLAY));
     this.animation?.step(PHYSICS_DT);
   }
@@ -5334,6 +5516,43 @@ var RuntimeChannel = class {
     }
     return matrices;
   }
+  /** Start a timeline cue on an object: a state of its state machine by that name, else a clip. */
+  cue(object, name, fade, loop) {
+    const inst = this.scene.instances[object];
+    if (!inst || !this.animation) return;
+    const state = inst.animator?.states.findIndex((s) => s.name === name) ?? -1;
+    if (state >= 0) {
+      this.animation.goto(object, state, fade);
+      return;
+    }
+    const clip = inst.mesh.clips?.findIndex((c) => c.name === name) ?? -1;
+    if (clip >= 0) this.animation.play(object, clip, fade, 1, loop);
+  }
+  /**
+   * The camera a playing (or holding) timeline sets, as a mesh-camera override
+   * (orbit about the scene centre, reproducing its eye and target), or null.
+   */
+  timelineCamera(hud = false) {
+    const cam = this.timeline?.camera();
+    if (!cam) return null;
+    const c = this.scene.bounds.center;
+    const dx = cam.eye[0] - cam.target[0];
+    const dy = cam.eye[1] - cam.target[1];
+    const dz = cam.eye[2] - cam.target[2];
+    const distance = Math.max(1e-3, Math.hypot(dx, dy, dz));
+    return {
+      yaw: Math.atan2(dx, dz),
+      pitch: Math.asin(Math.max(-1, Math.min(1, dy / distance))),
+      distance,
+      target: [cam.target[0] - c[0], cam.target[1] - c[1], cam.target[2] - c[2]],
+      fov: cam.fov * Math.PI / 180,
+      hud
+    };
+  }
+  /** World matrices of the objects a timeline is placing (object index → matrix). */
+  timelinePlacements() {
+    return this.timeline?.placements() ?? /* @__PURE__ */ new Map();
+  }
   /** Whether IK, look-at or joint watching needs the objects' current world matrices. */
   needsWorld() {
     return this.requests.size > 0 || this.watched.size > 0;
@@ -5349,7 +5568,7 @@ var RuntimeChannel = class {
       if (inst.pooled.root === object) return root;
       const chain = [];
       for (let i = object; i !== inst.pooled.root && i >= 0; i = this.scene.instances[i].parent) chain.unshift(this.scene.instances[i].local);
-      return chain.reduce((m, local) => multiplyMat4(m, local), root);
+      return chain.reduce((m, local) => multiplyMat42(m, local), root);
     }
     return inst.model;
   }
@@ -5407,7 +5626,7 @@ var RuntimeChannel = class {
     const objects = this.copyObjects.get(root);
     if (!objects) return;
     const [x, y, z, yaw, pitch, roll] = v;
-    const world = composeModelMatrix([x, y, z], [pitch * DEG, yaw * DEG, roll * DEG], [1, 1, 1]);
+    const world = composeModelMatrix2([x, y, z], [pitch * DEG, yaw * DEG, roll * DEG], [1, 1, 1]);
     this.active.set(root, world);
     for (const object of objects) this.animation?.reset(object);
     const placed = /* @__PURE__ */ new Map([[root, world]]);
@@ -5418,7 +5637,7 @@ var RuntimeChannel = class {
       if (!inst || inst.parent < 0) return null;
       const parent = worldOf(inst.parent);
       if (!parent) return null;
-      const m = multiplyMat4(parent, inst.local);
+      const m = multiplyMat42(parent, inst.local);
       placed.set(i, m);
       return m;
     };
@@ -6408,8 +6627,8 @@ import {
   downsamplePanorama,
   isSkinned as isSkinned2,
   renderSkyBackground,
-  composeModelMatrix as composeModelMatrix3,
-  multiplyMat4 as multiplyMat42,
+  composeModelMatrix as composeModelMatrix4,
+  multiplyMat4 as multiplyMat43,
   sceneLightingEnvironment,
   sceneLightingKeyDirection,
   sceneLightingTonemap,
@@ -6610,7 +6829,7 @@ function capsConstrainScene(caps) {
 
 // src/mesh/meshScene.ts
 import {
-  composeModelMatrix as composeModelMatrix2,
+  composeModelMatrix as composeModelMatrix3,
   deserializeMeshAsset,
   meshBounds as meshBounds2,
   parentIndices,
@@ -6620,6 +6839,7 @@ import {
   readAnimatorSpec,
   readPhysicsSpec,
   readPhysicsWorld,
+  readTimelines,
   readSceneProps,
   readSceneTags,
   worldMatrices,
@@ -6708,7 +6928,7 @@ function parseMeshScene(raw) {
     const t = identity ? { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } : readTransform(record.transform);
     return {
       mesh,
-      local: composeModelMatrix2(t.position, t.rotation, t.scale),
+      local: composeModelMatrix3(t.position, t.rotation, t.scale),
       ...frames.length > 0 ? { frames } : {},
       id,
       name: typeof record.name === "string" ? record.name : "Mesh",
@@ -6773,12 +6993,14 @@ function parseMeshScene(raw) {
   const pools = [...poolRoots.entries()].map(([prefab, ids]) => ({ prefab, roots: ids.map((id) => indexOf.get(id)) }));
   const placed = instances.filter((instance) => !instance.pooled);
   const physicsWorld = readPhysicsWorld(parsed.physicsWorld);
+  const timelines = readTimelines(parsed.timelines);
   return {
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
     lighting,
     ...pools.length > 0 ? { pools } : {},
-    ...physicsWorld ? { physicsWorld } : {}
+    ...physicsWorld ? { physicsWorld } : {},
+    ...timelines.length > 0 ? { timelines } : {}
   };
 }
 function buildOrbitCamera(bounds, yaw, pitch, aspect, options = {}) {
@@ -6845,7 +7067,7 @@ var SKY_PANORAMA_WIDTH = 1536;
 var SKY_PANORAMA_HEIGHT = 768;
 var SKY_IBL_DOWNSAMPLE = 8;
 function poseLocalMatrix(pose) {
-  return composeModelMatrix3(
+  return composeModelMatrix4(
     pose.position,
     [pose.rotation[1] * RAD_TO_DEG, pose.rotation[0] * RAD_TO_DEG, pose.rotation[2] * RAD_TO_DEG],
     [pose.scale, pose.scale, pose.scale]
@@ -7188,7 +7410,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const instance = {
         ...source,
         mesh: pose.tint ? this.tinted(source.mesh, pose.tint) : source.mesh,
-        model: multiplyMat42(authored.model, poseLocalMatrix(pose))
+        model: multiplyMat43(authored.model, poseLocalMatrix(pose))
       };
       if (pose.front) {
         front.push(instance);
@@ -7224,8 +7446,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const moved2 = Boolean(pose) || Boolean(up?.moved) || Boolean(body) || Boolean(spawnAt) || this.animated.has(i);
       let model = this.instances[i].model;
       if (moved2) {
-        const base = body ?? spawnAt ?? (up ? multiplyMat42(up.model, h.locals[i]) : h.locals[i]);
-        model = pose ? multiplyMat42(base, poseLocalMatrix(pose)) : base;
+        const base = body ?? spawnAt ?? (up ? multiplyMat43(up.model, h.locals[i]) : h.locals[i]);
+        model = pose ? multiplyMat43(base, poseLocalMatrix(pose)) : base;
       }
       const out = {
         model,
@@ -7379,7 +7601,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       if (!instance.mesh.primitives.some((p) => p.dynamic)) this.meshBounds.set(instance.mesh, b);
     }
     if (!Number.isFinite(b[0])) return null;
-    const mm = multiplyMat42(m, instance.model);
+    const mm = multiplyMat43(m, instance.model);
     let sx0 = Infinity, sy0 = Infinity, sx1 = -Infinity, sy1 = -Infinity;
     for (let c = 0; c < 8; c += 1) {
       const x = c & 1 ? b[3] : b[0];
@@ -7904,7 +8126,7 @@ var WorldOverlaySurface = class {
 import {
   DEFAULT_RASTER_STYLE as DEFAULT_RASTER_STYLE2,
   computeSmoothNormals,
-  multiplyMat4 as multiplyMat43
+  multiplyMat4 as multiplyMat44
 } from "@cartbox/editor";
 
 // src/render/scenePacking.ts
@@ -8709,7 +8931,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   }
   /** Encode and submit one frame, and start a readback if a buffer is free. */
   submit(instances, draw) {
-    const viewProj = multiplyMat43(draw.projection, draw.view);
+    const viewProj = multiplyMat44(draw.projection, draw.view);
     const draws = [];
     for (const instance of instances) {
       const geometries = this.uploadMesh(instance.mesh);
@@ -8771,7 +8993,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         entry.textures.emis !== null
       );
       writeInstanceUniform(this.uniformData, index, {
-        mvp: multiplyMat43(viewProj, entry.model),
+        mvp: multiplyMat44(viewProj, entry.model),
         normalBasis: normalBasis3x3(entry.model),
         baseColor: entry.primitive.material.baseColorFactor,
         hasTexture: entry.textures.base !== null,
@@ -8782,7 +9004,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         hasOcclusionMap: entry.textures.occ !== null,
         hasEmissiveMap: entry.textures.emis !== null,
         environment: draw.environment ?? null,
-        lightMvp: shadow ? multiplyMat43(shadow.lightViewProj, entry.model) : null,
+        lightMvp: shadow ? multiplyMat44(shadow.lightViewProj, entry.model) : null,
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
@@ -8995,6 +9217,7 @@ function shouldUseTouch(scheme, view) {
   const coarse = view.matchMedia?.("(pointer: coarse)").matches ?? false;
   return hasTouchSupport(view.navigator?.maxTouchPoints ?? 0, coarse);
 }
+var NO_OVERRIDES = /* @__PURE__ */ new Map();
 var Player = class {
   constructor(container, options) {
     this.container = container;
@@ -9362,7 +9585,11 @@ var Player = class {
         this.meshSurface.setHudMode(meshCamera?.hud ?? false);
         this.meshSurface.setPoseOverrides(decodeMeshPoses(mailbox));
         if (this.runtime) {
-          if (this.runtime.physics) this.meshSurface.setBodyOverrides(this.runtime.physics.overrides());
+          const cutscene = this.runtime.channel.timelineCamera(meshCamera?.hud ?? false);
+          if (cutscene) this.meshSurface.setCameraOverride(cutscene);
+          const scripted = this.runtime.channel.timelinePlacements();
+          const bodies = this.runtime.physics?.overrides();
+          this.meshSurface.setBodyOverrides(scripted.size > 0 ? new Map([...bodies ?? [], ...scripted]) : bodies ?? NO_OVERRIDES);
           this.meshSurface.setSpawned(this.runtime.channel.spawned());
           const placed = this.runtime.channel.needsWorld() ? this.meshSurface.currentPlacements() : null;
           this.meshSurface.setSkinning(placed ? this.runtime.channel.skinning((o) => placed[o] ?? null) : this.runtime.channel.skinning());

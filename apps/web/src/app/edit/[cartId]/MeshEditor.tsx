@@ -13,7 +13,7 @@
  * mesh sidecar, handed up through {@link onSidecarChange} to persist with the cart.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   createLiveSkinnedMesh,
@@ -53,6 +53,8 @@ import { LibraryBrowser } from "./LibraryBrowser";
 import { MaterialEditor } from "./MaterialEditor";
 import { AnimatorPanel } from "./AnimatorPanel";
 import { LightingEditor } from "./LightingEditor";
+import { TimelinePanel, type TimelinePreview } from "./TimelinePanel";
+import type { ViewpointKey } from "./SceneViewport";
 import { SceneViewport } from "./SceneViewport";
 import { AnimationPanel, CodeHint, HierarchyPanel, ParentPicker, PhysicsPanel, PhysicsWorldPanel, PrefabLibrary, PrefabPanel, PropertyEditor, TagEditor } from "./SceneObjectPanels";
 
@@ -104,6 +106,13 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
   /** The skeletal clip the preview is playing (index), or null for the still mesh, and how far in. */
   const [previewClip, setPreviewClip] = useState<number | null>(null);
   const [clipTime, setClipTime] = useState(0);
+  /** The Scene view's viewpoint (to key a timeline camera from), and a timeline moment previewed in it. */
+  const [sceneView, setSceneView] = useState<ViewpointKey | null>(null);
+  const [timelinePreview, setTimelinePreview] = useState<TimelinePreview | null>(null);
+  const onTimelinePreview = useCallback((preview: TimelinePreview | null) => {
+    setTimelinePreview(preview);
+    if (preview) setView("scene");
+  }, []);
 
   // Keep the selection valid as the list changes (import selects the new mesh;
   // deleting the selected one falls back to the first remaining).
@@ -351,6 +360,9 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
           onSidecarChange={onSidecarChange}
           selectedId={selectedId}
           onSelectId={setSelectedId}
+          previewCamera={timelinePreview?.camera ?? null}
+          previewLocals={timelinePreview?.locals ?? null}
+          onView={setSceneView}
         />
       ) : (
       <section className={styles.mapStage}>
@@ -469,6 +481,7 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
             outside the per-mesh selection. */}
         <LightingEditor lighting={sidecar.lighting} onChange={(lighting) => onSidecarChange(setMeshLighting(sidecar, lighting))} />
         <PhysicsWorldPanel sidecar={sidecar} onChange={onSidecarChange} />
+        <TimelinePanel sidecar={sidecar} onChange={onSidecarChange} view={view === "scene" ? sceneView : null} onPreview={onTimelinePreview} />
       </aside>
 
       <LibraryBrowser

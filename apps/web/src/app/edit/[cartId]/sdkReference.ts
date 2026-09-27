@@ -423,6 +423,36 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
     ],
   },
   {
+    label: "cartbox · timelines",
+    open: false,
+    entries: [
+      {
+        name: "cartbox.playtimeline",
+        signature: "cartbox.playtimeline(name, from, speed)",
+        doc: "Play a timeline made in the Mesh tab (a cutscene or camera move) from `from` seconds (default 0) at `speed` (default 1). While it plays it has the camera and places the objects it moves; its animation cues start clips or states.",
+        snippet: 'cartbox.playtimeline("intro")',
+      },
+      {
+        name: "cartbox.stoptimeline",
+        signature: "cartbox.stoptimeline()",
+        doc: "Stop the timeline: the camera and objects go back to the game (use it to skip a cutscene, or to let go of one that holds its last frame).",
+        snippet: "if btnp(4) then cartbox.stoptimeline() end",
+      },
+      {
+        name: "cartbox.timeline",
+        signature: "cartbox.timeline() -> name, time, playing",
+        doc: "The timeline playing (nil when none), seconds into it, and whether it is still playing (false once one that holds has ended).",
+        snippet: "local name, t, playing = cartbox.timeline()",
+      },
+      {
+        name: "cartbox.timelineevents",
+        signature: "cartbox.timelineevents() -> { name, ... }",
+        doc: "The playing timeline's events that passed on the last tick — cue a line of dialogue, a sound, or the game starting.",
+        snippet: 'for _, e in ipairs(cartbox.timelineevents()) do\n  if e == "done" then state = "play" end\nend',
+      },
+    ],
+  },
+  {
     label: "cartbox · netplay",
     open: false,
     entries: [

@@ -39,7 +39,7 @@ import { WorldOverlaySurface } from "./world/WorldOverlaySurface.js";
 import { createSceneRenderer } from "./render/createSceneRenderer.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
-import { type DecodedTexture } from "@cartbox/editor";
+import { type DecodedTexture, type Mat4 } from "@cartbox/editor";
 import type { ControlScheme, InspectedObject, PlayerOptions } from "./types.js";
 
 /**
@@ -55,6 +55,9 @@ function shouldUseTouch(scheme: ControlScheme, view: Window): boolean {
   const coarse = view.matchMedia?.("(pointer: coarse)").matches ?? false;
   return hasTouchSupport(view.navigator?.maxTouchPoints ?? 0, coarse);
 }
+
+/** No objects placed by physics or a timeline (shared, so it allocates nothing per frame). */
+const NO_OVERRIDES: ReadonlyMap<number, Mat4> = new Map();
 
 export class Player {
   private readonly gamepad = new GamepadState();
@@ -562,7 +565,12 @@ export class Player {
         this.meshSurface.setHudMode(meshCamera?.hud ?? false);
         this.meshSurface.setPoseOverrides(decodeMeshPoses(mailbox));
         if (this.runtime) {
-          if (this.runtime.physics) this.meshSurface.setBodyOverrides(this.runtime.physics.overrides());
+          // A playing timeline takes the camera, and places the objects it animates (over physics).
+          const cutscene = this.runtime.channel.timelineCamera(meshCamera?.hud ?? false);
+          if (cutscene) this.meshSurface.setCameraOverride(cutscene);
+          const scripted = this.runtime.channel.timelinePlacements();
+          const bodies = this.runtime.physics?.overrides();
+          this.meshSurface.setBodyOverrides(scripted.size > 0 ? new Map([...(bodies ?? []), ...scripted]) : (bodies ?? NO_OVERRIDES));
           this.meshSurface.setSpawned(this.runtime.channel.spawned());
           // IK aims in world space: give it where each object is this frame.
           const placed = this.runtime.channel.needsWorld() ? this.meshSurface.currentPlacements() : null;

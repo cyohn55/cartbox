@@ -52,11 +52,24 @@ const SHADOW_SIZE = 1024;
 
 type Mode = "orbit" | "move" | "rotate" | "scale";
 
+/** A camera as a timeline keys it: world eye, look-at target, vertical FOV in degrees. */
+export interface ViewpointKey {
+  readonly eye: Vec3;
+  readonly target: Vec3;
+  readonly fov: number;
+}
+
 interface SceneViewportProps {
   sidecar: MeshSidecar;
   onSidecarChange: (sidecar: MeshSidecar) => void;
   selectedId: string | null;
   onSelectId: (id: string | null) => void;
+  /** Preview a timeline: look through this camera instead of the orbit… */
+  previewCamera?: ViewpointKey | null;
+  /** …and place these objects (entry id → transform relative to its parent). */
+  previewLocals?: ReadonlyMap<string, Mat4> | null;
+  /** Told the orbit camera's viewpoint whenever it changes (to key it into a timeline). */
+  onView?: (view: ViewpointKey) => void;
 }
 
 /** A decoded mesh + its base-colour textures, rebuilt only when the geometry set changes. */
@@ -81,7 +94,7 @@ function project(viewProj: Mat4, p: Vec3): [number, number] | null {
   return [(cx / cw * 0.5 + 0.5) * VIEWPORT, (1 - (cy / cw * 0.5 + 0.5)) * VIEWPORT];
 }
 
-export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId }: SceneViewportProps) {
+export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId, previewCamera, previewLocals, onView }: SceneViewportProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [yaw, setYaw] = useState(0.6);
   const [pitch, setPitch] = useState(0.4);
@@ -125,13 +138,13 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
   const placement = useMemo(() => {
     const parents = parentIndices(sidecar.meshes);
     const world = worldMatrices(
-      sidecar.meshes.map(({ transform: t }) => composeModelMatrix(t.position, t.rotation, t.scale)),
+      sidecar.meshes.map(({ id, transform: t }) => previewLocals?.get(id) ?? composeModelMatrix(t.position, t.rotation, t.scale)),
       parents,
     );
     return new Map(
       sidecar.meshes.map((m, i) => [m.id, { world: world[i]!, parentWorld: parents[i]! >= 0 ? world[parents[i]!]! : null }]),
     );
-  }, [sidecar.meshes]);
+  }, [sidecar.meshes, previewLocals]);
 
   // Build render instances from the decoded geometry + current transforms. Cheap,
   // so it runs every render — a transform edit is reflected without re-decoding.
@@ -172,10 +185,21 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
       center[1] + distance * Math.sin(pitch),
       center[2] + distance * cosPitch * Math.cos(yaw),
     ];
+    if (previewCamera) {
+      // Looking through a timeline's camera.
+      const d = Math.hypot(...([0, 1, 2] as const).map((k) => previewCamera.eye[k] - previewCamera.target[k])) || 1;
+      const view = viewMatrix(previewCamera.eye, previewCamera.target);
+      const projection = projectionMatrix((previewCamera.fov * Math.PI) / 180, 1, Math.max(0.01, radius * 0.05), d + radius * 4);
+      return { eye: previewCamera.eye, target: previewCamera.target, view, projection, viewProj: multiplyMat4(projection, view), distance: d };
+    }
     const view = viewMatrix(eye, center);
     const projection = projectionMatrix(FOV, 1, Math.max(0.01, radius * 0.05), distance + radius * 4);
     return { eye, target: center, view, projection, viewProj: multiplyMat4(projection, view), distance };
-  }, [bounds, yaw, pitch, zoom]);
+  }, [bounds, yaw, pitch, zoom, previewCamera]);
+
+  useEffect(() => {
+    if (!previewCamera) onView?.({ eye: camera.eye, target: camera.target, fov: (FOV * 180) / Math.PI });
+  }, [camera, previewCamera, onView]);
 
   // Render the scene, then overlay the selection box + gizmo axes.
   useEffect(() => {

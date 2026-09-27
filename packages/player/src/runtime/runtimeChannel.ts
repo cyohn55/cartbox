@@ -21,6 +21,8 @@ import {
 } from "@cartbox/editor";
 
 import { AnimationSession, sceneHasAnimation } from "../anim/animationSession.js";
+import { TimelineSession } from "../anim/timelineSession.js";
+import type { MailboxMeshCamera } from "../mailbox.js";
 import type { MeshScene } from "../mesh/meshScene.js";
 import type { PhysicsSession } from "../physics/physicsSession.js";
 import { PHYSICS_DT } from "../physics/physicsSession.js";
@@ -35,11 +37,13 @@ import {
   PHYS_OP_LOOKAT,
   PHYS_OP_PLAY,
   PHYS_OP_SPAWN,
+  PHYS_OP_TIMELINE,
   PHYS_OP_WATCH,
   takePhysicsCommands,
   writeAnimationState,
   writeJointPositions,
   writePhysicsState,
+  writeTimelineState,
 } from "../physics/protocol.js";
 
 const DEG = 180 / Math.PI;
@@ -70,6 +74,8 @@ export class RuntimeChannel {
   private readonly copyObjects = new Map<number, number[]>();
   /** The skeletal animation player, when the scene has skinned objects. */
   readonly animation: AnimationSession | null;
+  /** The timeline player, when the scene has timelines. */
+  readonly timeline: TimelineSession | null;
   /** Standing IK / look-at requests: object → joint → request (IK before look-at). */
   private readonly requests = new Map<number, Map<number, PoseRequest>>();
   /** A pole for the next IK request on (object, joint). */
@@ -82,6 +88,7 @@ export class RuntimeChannel {
     private readonly physics: PhysicsSession | null,
   ) {
     this.animation = sceneHasAnimation(scene) ? new AnimationSession(scene) : null;
+    this.timeline = (scene.timelines?.length ?? 0) > 0 ? new TimelineSession(scene) : null;
     scene.instances.forEach((inst, i) => {
       if (!inst.pooled) return;
       const list = this.copyObjects.get(inst.pooled.root) ?? [];
@@ -96,6 +103,7 @@ export class RuntimeChannel {
     if (this.physics) this.physics.beforeTick(block);
     else writePhysicsState(block, 0, [], []);
     writeAnimationState(block, this.animation?.state() ?? [], this.animation?.events() ?? []);
+    writeTimelineState(block, this.timeline?.state() ?? { index: -1, time: 0, playing: false }, this.timeline?.events() ?? []);
     writeJointPositions(
       block,
       [...this.watched.values()].flatMap((w) => (w.position ? [{ object: w.object, joint: w.joint, position: w.position }] : [])),
@@ -117,7 +125,13 @@ export class RuntimeChannel {
       else if (cmd.op === PHYS_OP_IK_POLE) this.poles.set(`${cmd.a}:${Math.round(cmd.v[0])}`, [cmd.v[1], cmd.v[2], cmd.v[3]]);
       else if (cmd.op === PHYS_OP_IK || cmd.op === PHYS_OP_LOOKAT) this.request(cmd.op, cmd.a, cmd.v);
       else if (cmd.op === PHYS_OP_WATCH) this.watch(cmd.a, Math.round(cmd.v[0]));
+      else if (cmd.op === PHYS_OP_TIMELINE) {
+        if (cmd.a < 0) this.timeline?.stop();
+        else this.timeline?.play(cmd.a, cmd.v[0], cmd.v[1]);
+      }
     }
+    // The timeline's cues start clips (or state machine states) before animation steps.
+    for (const { object, cue } of this.timeline?.step(PHYSICS_DT) ?? []) this.cue(object, cue.clip, cue.fade, cue.loop);
     this.physics?.run(commands.filter((c) => c.op < PHYS_OP_SPAWN || (c.op > PHYS_OP_DESPAWN && c.op < PHYS_OP_PLAY)));
     this.animation?.step(PHYSICS_DT);
   }
@@ -146,6 +160,46 @@ export class RuntimeChannel {
       if (pose && mesh?.skin && world) w.position = transform(world, jointPosition(mesh.skin, pose, w.joint));
     }
     return matrices;
+  }
+
+  /** Start a timeline cue on an object: a state of its state machine by that name, else a clip. */
+  private cue(object: number, name: string, fade: number, loop: boolean): void {
+    const inst = this.scene.instances[object];
+    if (!inst || !this.animation) return;
+    const state = inst.animator?.states.findIndex((s) => s.name === name) ?? -1;
+    if (state >= 0) {
+      this.animation.goto(object, state, fade);
+      return;
+    }
+    const clip = inst.mesh.clips?.findIndex((c) => c.name === name) ?? -1;
+    if (clip >= 0) this.animation.play(object, clip, fade, 1, loop);
+  }
+
+  /**
+   * The camera a playing (or holding) timeline sets, as a mesh-camera override
+   * (orbit about the scene centre, reproducing its eye and target), or null.
+   */
+  timelineCamera(hud = false): MailboxMeshCamera | null {
+    const cam = this.timeline?.camera();
+    if (!cam) return null;
+    const c = this.scene.bounds.center;
+    const dx = cam.eye[0] - cam.target[0];
+    const dy = cam.eye[1] - cam.target[1];
+    const dz = cam.eye[2] - cam.target[2];
+    const distance = Math.max(1e-3, Math.hypot(dx, dy, dz));
+    return {
+      yaw: Math.atan2(dx, dz),
+      pitch: Math.asin(Math.max(-1, Math.min(1, dy / distance))),
+      distance,
+      target: [cam.target[0] - c[0], cam.target[1] - c[1], cam.target[2] - c[2]],
+      fov: (cam.fov * Math.PI) / 180,
+      hud,
+    };
+  }
+
+  /** World matrices of the objects a timeline is placing (object index → matrix). */
+  timelinePlacements(): ReadonlyMap<number, Mat4> {
+    return this.timeline?.placements() ?? new Map();
   }
 
   /** Whether IK, look-at or joint watching needs the objects' current world matrices. */

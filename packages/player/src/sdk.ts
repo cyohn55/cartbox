@@ -295,6 +295,10 @@ cartbox = {
   lookat = function() end,
   joint = function() return nil end,
   joints = function() return {} end,
+  playtimeline = function() end,
+  stoptimeline = function() end,
+  timeline = function() return nil, 0, false end,
+  timelineevents = function() return {} end,
 }`;
 
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */
