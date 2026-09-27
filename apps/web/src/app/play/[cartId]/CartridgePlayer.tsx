@@ -28,6 +28,7 @@ import {
 
 import { authHeaders } from "@/lib/supabase-browser";
 import { isStaticExport } from "@/lib/staticSite";
+import { rapierPhysics } from "@/lib/physicsRapier";
 
 interface CartridgePlayerProps {
   cartId: string;
@@ -112,6 +113,9 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       // The cart's authored 3D mesh scene, rasterised over each frame by the
       // player's software rasteriser (Phase 2 of the mesh asset feature).
       mesh: mesh ?? undefined,
+      // Physics bodies on those meshes, simulated by Rapier (fetched only when a
+      // cart actually has bodies).
+      physics: rapierPhysics(),
       // The cart's authored HD-2D world: 3D terrain with the cart's 2D character
       // sprites composited into it as depth-sorted billboards.
       world: world ?? undefined,

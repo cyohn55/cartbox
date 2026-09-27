@@ -1,3 +1,4 @@
+import type { PhysicsBackend } from "./physics/physicsSession.js";
 /**
  * Public and shared types for @cartbox/player.
  *
@@ -93,6 +94,13 @@ export interface PlayerOptions {
    * cartbox.net* functions). Omitted: the cart plays offline.
    */
   netplay?: NetSession;
+  /**
+   * Creates the physics engine for a cart whose scene objects have bodies
+   * (ENGINE_ROADMAP.md, Phase 2). Supplied by the host so the engine (Rapier in
+   * the web app) is only downloaded for carts that use it. Omitted, bodies stay
+   * where they were placed and the cart's physics calls are no-ops.
+   */
+  physics?: () => Promise<PhysicsBackend>;
   /**
    * Control settings (aim inversion, look sensitivity, controller and keyboard
    * bindings, touch pad size/opacity). Change them live with

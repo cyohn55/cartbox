@@ -19,6 +19,7 @@ import {
   parseSceneLighting,
   projectionMatrix,
   readMeshLibrary,
+  readPhysicsSpec,
   readSceneProps,
   readSceneTags,
   worldMatrices,
@@ -28,6 +29,7 @@ import {
   type Mat4,
   type MeshAsset,
   type MeshSceneInstance,
+  type PhysicsSpec,
   type SceneLighting,
   type ScenePropValue,
 } from "@cartbox/editor";
@@ -53,6 +55,8 @@ export interface MeshInstance extends MeshSceneInstance {
   readonly name: string;
   readonly tags: readonly string[];
   readonly props: Readonly<Record<string, ScenePropValue>>;
+  /** The object's physics body, or null (ENGINE_ROADMAP.md, Phase 2). */
+  readonly physics: PhysicsSpec | null;
 }
 
 /** A world-space axis-aligned bounding box with a framing centre + radius. */
@@ -170,7 +174,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
   type Parsed = Omit<MeshInstance, "model" | "parent"> & { parentId: string | null };
   const parsedInstances: Parsed[] = [];
   for (const entry of entries) {
-    const record = entry as { mesh?: unknown; transform?: unknown; frames?: unknown; id?: unknown; name?: unknown; parent?: unknown; tags?: unknown; props?: unknown };
+    const record = entry as { mesh?: unknown; transform?: unknown; frames?: unknown; id?: unknown; name?: unknown; parent?: unknown; tags?: unknown; props?: unknown; physics?: unknown };
     if (typeof record.mesh !== "string") continue;
     const resolved = resolveMeshRef(record.mesh, library);
     const mesh = resolved ? load(resolved) : null;
@@ -187,6 +191,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
       name: typeof record.name === "string" ? record.name : "Mesh",
       tags: readSceneTags(record.tags),
       props: readSceneProps(record.props),
+      physics: readPhysicsSpec(record.physics),
       parentId: typeof record.parent === "string" && record.parent ? record.parent : null,
     });
   }

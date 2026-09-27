@@ -259,4 +259,25 @@ cartbox = {
   prop = function(_, _, default) return default end,
   hastag = function() return false end,
   tagged = function() return {} end,
+
+  -- Physics. When scene objects have bodies (set in the editor's Inspector) the
+  -- platform injects real implementations; obj is an index or a name.
+  --   cartbox.physics()                -> true once physics is running
+  --   cartbox.body(obj)                -> x, y, z, vx, vy, vz, grounded
+  --   cartbox.impulse(obj, x, y, z)    push a dynamic body
+  --   cartbox.velocity(obj, x, y, z)   set a body's velocity
+  --   cartbox.teleport(obj, x, y, z)   move a body at once
+  --   cartbox.move(obj, dx, dy, dz)    walk a character (slides, climbs, steps)
+  --   cartbox.ray(slot, x, y, z, dx, dy, dz, max)   cast a ray; read it next tick
+  --   cartbox.hit(slot)                -> hit, obj, x, y, z, nx, ny, nz, distance
+  -- Physics (bodies on scene objects): overridden by the injected physics calls
+  -- when the cart has bodies.
+  physics = function() return false end,
+  body = function() return nil end,
+  impulse = function() end,
+  velocity = function() end,
+  teleport = function() end,
+  move = function() end,
+  ray = function() end,
+  hit = function() return false end,
 }

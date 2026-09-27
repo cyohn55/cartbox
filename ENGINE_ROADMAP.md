@@ -71,14 +71,20 @@ time.
 
 ## Phase 2 — Physics
 
-- [ ] Rigid bodies (dynamic, kinematic, static) and colliders (box, sphere, capsule,
-      convex hull, triangle mesh) as object components, using a WebAssembly physics
-      engine (Rapier or Jolt), loaded only by carts that use it.
-- [ ] Character controller (slopes, steps, ground snapping) to replace hand-written
-      movement like Lockout's.
-- [ ] Raycasts, shape casts and trigger volumes from Lua (`cartbox.raycast`,
-      `cartbox.overlaps`), plus collision events.
-- [ ] Deterministic fixed-step mode for netplay and replays.
+- [x] Rigid bodies (static, dynamic, kinematic) and colliders (box, sphere, capsule,
+      static triangle mesh) set per object in the Inspector, simulated by Rapier
+      (WebAssembly) — downloaded only for carts that have bodies.
+- [x] Character controller (slides along walls, climbs slopes and steps, snaps to
+      the ground, reports grounded) via `cartbox.move`.
+- [x] Raycasts from Lua (`cartbox.ray` / `cartbox.hit`, one tick later), plus
+      `cartbox.body`, `impulse`, `velocity`, `teleport`.
+- [ ] Trigger volumes, shape casts and collision events.
+- [ ] Joints (hinges, springs) and per-body gravity / damping settings.
+- [ ] Deterministic mode across browsers for netplay (Rapier's deterministic build).
+
+**Status:** foundation landed. The host runs the world at a fixed 1/60 s step and
+trades state and commands with the cart through an 8 KB block at the end of RAM
+(its address per engine core is checked against the real builds by a test).
 
 ## Phase 3 — Animation
 

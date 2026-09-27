@@ -10,12 +10,24 @@
 
 import { useState } from "react";
 
-import { SCENE_PROP_MAX, SCENE_TAG_MAX, isSceneKey, type ScenePropValue } from "@cartbox/editor";
+import {
+  DEFAULT_PHYSICS_SPEC,
+  PHYSICS_BODY_KINDS,
+  PHYSICS_SHAPE_KINDS,
+  SCENE_PROP_MAX,
+  SCENE_TAG_MAX,
+  isSceneKey,
+  type PhysicsBodyKind,
+  type PhysicsShapeKind,
+  type PhysicsSpec,
+  type ScenePropValue,
+} from "@cartbox/editor";
 
 import {
   hierarchyRows,
   parentCandidates,
   setMeshParent,
+  setMeshPhysics,
   setMeshProp,
   setMeshTags,
   type MeshSidecar,
@@ -396,6 +408,89 @@ export function PrefabLibrary({
           ))}
         </div>
       )}
+    </RailGroup>
+  );
+}
+
+const BODY_LABELS: Record<PhysicsBodyKind, string> = {
+  static: "Static — never moves (floors, walls)",
+  dynamic: "Dynamic — falls and bounces",
+  kinematic: "Kinematic — moved by code, pushes others",
+  character: "Character — walks with cartbox.move",
+};
+const SHAPE_LABELS: Record<PhysicsShapeKind, string> = {
+  box: "Box",
+  sphere: "Sphere",
+  capsule: "Capsule",
+  mesh: "Mesh triangles (static only)",
+};
+
+/** The selected object's physics body (none, or body type + collider + material). */
+export function PhysicsPanel({
+  sidecar,
+  entry,
+  onChange,
+}: {
+  sidecar: MeshSidecar;
+  entry: MeshSidecarEntry;
+  onChange: (next: MeshSidecar) => void;
+}) {
+  const spec = entry.physics ?? null;
+  const set = (patch: Partial<PhysicsSpec> | null) =>
+    onChange(setMeshPhysics(sidecar, entry.id, patch === null ? null : { ...(spec ?? DEFAULT_PHYSICS_SPEC), ...patch }));
+  const number = (label: string, key: "mass" | "friction" | "bounce", step: number, min: number, max: number) => (
+    <label style={{ display: "grid", gridTemplateColumns: "70px 1fr", gap: 6, alignItems: "center", fontSize: 12 }}>
+      {label}
+      <input
+        type="number"
+        step={step}
+        min={min}
+        max={max}
+        aria-label={`Physics ${key}`}
+        value={spec?.[key] ?? DEFAULT_PHYSICS_SPEC[key]}
+        onChange={(event) => set({ [key]: Number(event.target.value) } as Partial<PhysicsSpec>)}
+        style={inputStyle}
+      />
+    </label>
+  );
+  return (
+    <RailGroup label="Physics">
+      <select
+        aria-label="Physics body"
+        value={spec?.body ?? ""}
+        onChange={(event) => set(event.target.value ? { body: event.target.value as PhysicsBodyKind } : null)}
+        style={inputStyle}
+      >
+        <option value="">None</option>
+        {PHYSICS_BODY_KINDS.map((kind) => (
+          <option key={kind} value={kind}>
+            {BODY_LABELS[kind]}
+          </option>
+        ))}
+      </select>
+      {spec && (
+        <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
+          {spec.body !== "character" && (
+            <select aria-label="Physics shape" value={spec.shape} onChange={(event) => set({ shape: event.target.value as PhysicsShapeKind })} style={inputStyle}>
+              {PHYSICS_SHAPE_KINDS.filter((s) => s !== "mesh" || spec.body === "static").map((shape) => (
+                <option key={shape} value={shape}>
+                  {SHAPE_LABELS[shape]}
+                </option>
+              ))}
+            </select>
+          )}
+          {spec.body === "dynamic" && number("Mass kg", "mass", 0.1, 0.01, 10000)}
+          {number("Friction", "friction", 0.1, 0, 2)}
+          {number("Bounce", "bounce", 0.05, 0, 1)}
+        </div>
+      )}
+      <RailHint>
+        {spec
+          ? spec.body === "character"
+            ? `An upright capsule fitted to the mesh. In code: cartbox.move(${JSON.stringify(entry.name)}, dx, dy, dz).`
+            : `The collider is fitted to the mesh. In code: cartbox.body(${JSON.stringify(entry.name)}).`
+          : "Give the object a body to have it collide, fall or be pushed when the cart runs."}
+      </RailHint>
     </RailGroup>
   );
 }

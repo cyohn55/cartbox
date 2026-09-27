@@ -65,6 +65,12 @@ export interface ConsoleInstance {
    * each tick: WASM memory growth detaches old views. Null when unavailable.
    */
   netWords(): Uint32Array | null;
+  /**
+   * A LIVE view of `length` bytes of the console's RAM, starting `offsetFromPmem`
+   * bytes after pmem word 0 (the physics block, see physics/protocol.ts). Re-fetch
+   * it each tick: WASM memory growth detaches old views. Null when out of range.
+   */
+  ramView(offsetFromPmem: number, length: number): Uint8Array | null;
   /** Enables/disables per-pixel material capture (off by default; unlit carts pay nothing). */
   setMaterialCapture(enabled: boolean): void;
   /**
@@ -199,6 +205,14 @@ export function createConsole(
       if (ptr === 0) return null;
       // The mailbox starts at pmem word 119, so pmem word 0 is 119 words below.
       return new Uint32Array(module.HEAPU8.buffer, ptr - NET_WORDS * 4, NET_WORDS);
+    },
+
+    ramView(offsetFromPmem: number, length: number): Uint8Array | null {
+      const ptr = module._cbx_mailbox_ptr(handle);
+      if (ptr === 0) return null;
+      const start = ptr - NET_WORDS * 4 + offsetFromPmem;
+      if (start < 0 || start + length > module.HEAPU8.length) return null;
+      return module.HEAPU8.subarray(start, start + length);
     },
 
     readMailbox(): Uint32Array {

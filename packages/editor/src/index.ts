@@ -433,6 +433,15 @@ export {
   type ScenePropValue,
 } from "./model/sceneHierarchy";
 export {
+  DEFAULT_PHYSICS_SPEC,
+  PHYSICS_BODY_KINDS,
+  PHYSICS_SHAPE_KINDS,
+  readPhysicsSpec,
+  type PhysicsBodyKind,
+  type PhysicsShapeKind,
+  type PhysicsSpec,
+} from "./model/physicsSpec";
+export {
   paintIndexedTexture,
   bakeIndexedTextureImage,
   indexedTextureSpriteRef,

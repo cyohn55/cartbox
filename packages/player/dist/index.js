@@ -2798,6 +2798,13 @@ function createConsole(module, model, sampleRate = model.sampleRate) {
       if (ptr === 0) return null;
       return new Uint32Array(module.HEAPU8.buffer, ptr - NET_WORDS * 4, NET_WORDS);
     },
+    ramView(offsetFromPmem, length) {
+      const ptr = module._cbx_mailbox_ptr(handle);
+      if (ptr === 0) return null;
+      const start = ptr - NET_WORDS * 4 + offsetFromPmem;
+      if (start < 0 || start + length > module.HEAPU8.length) return null;
+      return module.HEAPU8.subarray(start, start + length);
+    },
     readMailbox() {
       const ptr = module._cbx_mailbox_ptr(handle);
       const words = module._cbx_mailbox_words(handle);
@@ -3841,6 +3848,16 @@ cartbox = {
   prop = function(_, _, default) return default end,
   hastag = function() return false end,
   tagged = function() return {} end,
+  -- Physics (bodies on scene objects): overridden by the injected physics calls
+  -- when the cart has bodies.
+  physics = function() return false end,
+  body = function() return nil end,
+  impulse = function() end,
+  velocity = function() end,
+  teleport = function() end,
+  move = function() end,
+  ray = function() end,
+  hit = function() return false end,
 }`;
 function injectSdk(bytes) {
   return prependLuaCode(bytes, CARTBOX_SDK_LUA);
@@ -3916,6 +3933,358 @@ function sceneObjectsSdkLua(scene) {
     local out = {}
     for i = 0, _count - 1 do if _t[i] and _t[i][tag] then out[#out + 1] = i end end
     return out
+  end
+end`;
+}
+
+// src/physics/protocol.ts
+var CLASSIC = { pmemAddress: 81924, ramSize: 98304 };
+var PRO = { pmemAddress: 542304, ramSize: 786432 };
+var ERA = { pmemAddress: 257632, ramSize: 393216 };
+var HD = { pmemAddress: 3068512, ramSize: 8388608 };
+var RAM_LAYOUTS = {
+  classic: CLASSIC,
+  voxel: CLASSIC,
+  pro: PRO,
+  portrait: PRO,
+  ps1: ERA,
+  n64: ERA,
+  xbox360: HD,
+  modern: HD
+};
+var PHYS_BLOCK_BYTES = 8192;
+var PHYS_MAGIC = 1213219395;
+var PHYS_FIX = 1024;
+var PHYS_HDR_MAGIC = 0;
+var PHYS_HDR_BODIES = 4;
+var PHYS_HDR_TICK = 8;
+var PHYS_BODIES = 64;
+var PHYS_BODY_BYTES = 32;
+var PHYS_MAX_BODIES = 64;
+var PHYS_RAYS = PHYS_BODIES + PHYS_MAX_BODIES * PHYS_BODY_BYTES;
+var PHYS_RAY_BYTES = 32;
+var PHYS_MAX_RAYS = 16;
+var PHYS_CMDS = 4096;
+var PHYS_CMD_BYTES = 32;
+var PHYS_MAX_CMDS = 64;
+var PHYS_FLAG_GROUNDED = 1;
+var PHYS_FLAG_SLEEPING = 2;
+var PHYS_OP_IMPULSE = 1;
+var PHYS_OP_VELOCITY = 2;
+var PHYS_OP_TELEPORT = 3;
+var PHYS_OP_MOVE = 4;
+var PHYS_OP_RAY = 5;
+function physicsBlockAddress(layout) {
+  return layout.ramSize - PHYS_BLOCK_BYTES;
+}
+var toFix = (v) => {
+  const n = Math.round(v * PHYS_FIX);
+  return Math.max(-2147483647, Math.min(2147483647, Number.isFinite(n) ? n : 0));
+};
+var fromFix = (n) => n / PHYS_FIX;
+function writePhysicsState(block, tick, bodies, rays) {
+  block.setInt32(PHYS_HDR_MAGIC, PHYS_MAGIC, true);
+  const n = Math.min(bodies.length, PHYS_MAX_BODIES);
+  block.setInt32(PHYS_HDR_BODIES, n, true);
+  block.setInt32(PHYS_HDR_TICK, tick | 0, true);
+  for (let i = 0; i < n; i += 1) {
+    const b = bodies[i];
+    const at = PHYS_BODIES + i * PHYS_BODY_BYTES;
+    block.setInt32(at, b.object, true);
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + 4 + k * 4, toFix(b.position[k]), true);
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + 16 + k * 4, toFix(b.velocity[k]), true);
+    block.setInt32(at + 28, (b.grounded ? PHYS_FLAG_GROUNDED : 0) | (b.sleeping ? PHYS_FLAG_SLEEPING : 0), true);
+  }
+  for (let i = 0; i < PHYS_MAX_RAYS; i += 1) {
+    const r = rays[i] ?? null;
+    const at = PHYS_RAYS + i * PHYS_RAY_BYTES;
+    if (!r) {
+      block.setInt32(at, 0, true);
+      continue;
+    }
+    block.setInt32(at, r.object >= 0 ? r.object + 2 : 1, true);
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + 4 + k * 4, toFix(r.point[k]), true);
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + 16 + k * 4, toFix(r.normal[k]), true);
+    block.setInt32(at + 28, toFix(r.distance), true);
+  }
+}
+function takePhysicsCommands(block) {
+  const n = Math.max(0, Math.min(PHYS_MAX_CMDS, block.getInt32(PHYS_CMDS, true)));
+  const out = [];
+  for (let i = 0; i < n; i += 1) {
+    const at = PHYS_CMDS + 4 + i * PHYS_CMD_BYTES;
+    const v = [0, 0, 0, 0, 0, 0].map((_, k) => fromFix(block.getInt32(at + 8 + k * 4, true)));
+    out.push({ op: block.getInt32(at, true), a: block.getInt32(at + 4, true), v });
+  }
+  block.setInt32(PHYS_CMDS, 0, true);
+  return out;
+}
+
+// src/physics/physicsSession.ts
+import { meshBounds } from "@cartbox/editor";
+var PHYSICS_DT = 1 / 60;
+function splitWorldMatrix(m) {
+  const sx = Math.hypot(m[0], m[1], m[2]) || 1;
+  const sy = Math.hypot(m[4], m[5], m[6]) || 1;
+  const sz = Math.hypot(m[8], m[9], m[10]) || 1;
+  const r00 = m[0] / sx, r10 = m[1] / sx, r20 = m[2] / sx;
+  const r01 = m[4] / sy, r11 = m[5] / sy, r21 = m[6] / sy;
+  const r02 = m[8] / sz, r12 = m[9] / sz, r22 = m[10] / sz;
+  const trace = r00 + r11 + r22;
+  let x, y, z, w;
+  if (trace > 0) {
+    const s = Math.sqrt(trace + 1) * 2;
+    w = s / 4;
+    x = (r21 - r12) / s;
+    y = (r02 - r20) / s;
+    z = (r10 - r01) / s;
+  } else if (r00 > r11 && r00 > r22) {
+    const s = Math.sqrt(1 + r00 - r11 - r22) * 2;
+    w = (r21 - r12) / s;
+    x = s / 4;
+    y = (r01 + r10) / s;
+    z = (r02 + r20) / s;
+  } else if (r11 > r22) {
+    const s = Math.sqrt(1 + r11 - r00 - r22) * 2;
+    w = (r02 - r20) / s;
+    x = (r01 + r10) / s;
+    y = s / 4;
+    z = (r12 + r21) / s;
+  } else {
+    const s = Math.sqrt(1 + r22 - r00 - r11) * 2;
+    w = (r10 - r01) / s;
+    x = (r02 + r20) / s;
+    y = (r12 + r21) / s;
+    z = s / 4;
+  }
+  const n = Math.hypot(x, y, z, w) || 1;
+  return { position: [m[12], m[13], m[14]], rotation: [x / n, y / n, z / n, w / n], scale: [sx, sy, sz] };
+}
+function composeWorldMatrix(p, q, s) {
+  const [x, y, z, w] = q;
+  const m = new Float64Array(16);
+  m[0] = (1 - 2 * (y * y + z * z)) * s[0];
+  m[1] = 2 * (x * y + z * w) * s[0];
+  m[2] = 2 * (x * z - y * w) * s[0];
+  m[4] = 2 * (x * y - z * w) * s[1];
+  m[5] = (1 - 2 * (x * x + z * z)) * s[1];
+  m[6] = 2 * (y * z + x * w) * s[1];
+  m[8] = 2 * (x * z + y * w) * s[2];
+  m[9] = 2 * (y * z - x * w) * s[2];
+  m[10] = (1 - 2 * (x * x + y * y)) * s[2];
+  m[12] = p[0];
+  m[13] = p[1];
+  m[14] = p[2];
+  m[15] = 1;
+  return m;
+}
+function fitShape(spec, mesh, scale) {
+  const b = meshBounds(mesh) ?? { min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] };
+  const half = [
+    Math.max(5e-3, (b.max[0] - b.min[0]) / 2 * scale[0]),
+    Math.max(5e-3, (b.max[1] - b.min[1]) / 2 * scale[1]),
+    Math.max(5e-3, (b.max[2] - b.min[2]) / 2 * scale[2])
+  ];
+  const offset = [
+    (b.max[0] + b.min[0]) / 2 * scale[0],
+    (b.max[1] + b.min[1]) / 2 * scale[1],
+    (b.max[2] + b.min[2]) / 2 * scale[2]
+  ];
+  switch (spec.shape) {
+    case "sphere":
+      return { kind: "sphere", radius: Math.max(half[0], half[1], half[2]), offset };
+    case "capsule": {
+      const radius = Math.max(0.01, Math.min(half[0], half[2]));
+      return { kind: "capsule", radius, halfHeight: Math.max(0, half[1] - radius), offset };
+    }
+    case "mesh": {
+      const positions = [];
+      const indices = [];
+      for (const prim of mesh.primitives) {
+        const base = positions.length / 3;
+        for (let i = 0; i < prim.positions.length; i += 3) {
+          positions.push(prim.positions[i] * scale[0], prim.positions[i + 1] * scale[1], prim.positions[i + 2] * scale[2]);
+        }
+        for (const idx of prim.indices) indices.push(base + idx);
+      }
+      return { kind: "mesh", vertices: Float32Array.from(positions), indices: Uint32Array.from(indices) };
+    }
+    default:
+      return { kind: "box", halfExtents: half, offset };
+  }
+}
+function physicsSlots(scene) {
+  const out = [];
+  scene.instances.forEach((inst, i) => {
+    if (inst.physics && inst.physics.body !== "static" && out.length < PHYS_MAX_BODIES) out.push(i);
+  });
+  return out;
+}
+function sceneHasPhysics(scene) {
+  return Boolean(scene?.instances.some((inst) => inst.physics));
+}
+var PhysicsSession = class {
+  constructor(scene, backend) {
+    this.backend = backend;
+    this.tracked = [];
+    this.byObject = /* @__PURE__ */ new Map();
+    this.rayRequests = [];
+    this.rayResults = [];
+    this.tick = 0;
+    const slots = new Set(physicsSlots(scene));
+    scene.instances.forEach((inst, i) => {
+      const spec = inst.physics;
+      if (!spec || spec.body !== "static" && !slots.has(i)) return;
+      const { position, rotation, scale } = splitWorldMatrix(inst.model);
+      const handle = backend.addBody({
+        kind: spec.body,
+        shape: fitShape(spec, inst.mesh, scale),
+        position,
+        rotation,
+        mass: spec.mass,
+        friction: spec.friction,
+        bounce: spec.bounce,
+        object: i
+      });
+      if (spec.body === "static") return;
+      const t = { object: i, handle, kind: spec.body, scale, grounded: false, lastMove: [0, 0, 0] };
+      this.tracked.push(t);
+      this.byObject.set(i, t);
+    });
+  }
+  /** Write body state and last tick's ray results for the cart to read. */
+  beforeTick(block) {
+    const bodies = this.tracked.map((t) => {
+      const s = this.backend.bodyState(t.handle);
+      const velocity = t.kind === "character" ? t.lastMove.map((v) => v / PHYSICS_DT) : s.velocity;
+      return { object: t.object, position: s.position, velocity, grounded: t.grounded, sleeping: s.sleeping };
+    });
+    writePhysicsState(block, this.tick, bodies, this.rayResults);
+  }
+  /** Apply the cart's commands, step the world, and cast the rays it asked for. */
+  afterTick(block) {
+    this.rayRequests = [];
+    for (const t of this.tracked) if (t.kind === "character") t.lastMove = [0, 0, 0];
+    for (const cmd of takePhysicsCommands(block)) {
+      const [a, b, c, d, e, f] = cmd.v;
+      if (cmd.op === PHYS_OP_RAY) {
+        if (cmd.a >= 0 && cmd.a < PHYS_MAX_RAYS) {
+          const len = Math.hypot(d, e, f);
+          this.rayRequests[cmd.a] = len > 1e-9 ? { origin: [a, b, c], direction: [d / len, e / len, f / len], max: len } : null;
+        }
+        continue;
+      }
+      const t = this.byObject.get(cmd.a);
+      if (!t) continue;
+      if (cmd.op === PHYS_OP_IMPULSE && t.kind === "dynamic") this.backend.applyImpulse(t.handle, [a, b, c]);
+      else if (cmd.op === PHYS_OP_VELOCITY && t.kind !== "character") this.backend.setVelocity(t.handle, [a, b, c]);
+      else if (cmd.op === PHYS_OP_TELEPORT) this.backend.teleport(t.handle, [a, b, c]);
+      else if (cmd.op === PHYS_OP_MOVE && t.kind === "character") {
+        const before = this.backend.bodyState(t.handle).position;
+        t.grounded = this.backend.moveCharacter(t.handle, [a, b, c]).grounded;
+        const after = this.backend.bodyState(t.handle).position;
+        t.lastMove = [after[0] - before[0], after[1] - before[1], after[2] - before[2]];
+      }
+    }
+    this.backend.step(PHYSICS_DT);
+    this.tick += 1;
+    this.rayResults = [];
+    for (let slot = 0; slot < PHYS_MAX_RAYS; slot += 1) {
+      const req = this.rayRequests[slot];
+      this.rayResults[slot] = req ? this.backend.raycast(req.origin, req.direction, req.max) : null;
+    }
+  }
+  /** World matrices for every moving body this frame (scene object index → matrix). */
+  overrides() {
+    const out = /* @__PURE__ */ new Map();
+    for (const t of this.tracked) {
+      const s = this.backend.bodyState(t.handle);
+      out.set(t.object, composeWorldMatrix(s.position, s.rotation, t.scale));
+    }
+    return out;
+  }
+  destroy() {
+    this.backend.destroy();
+  }
+};
+
+// src/physics/physicsSdk.ts
+function physicsSdkLua(scene, layout) {
+  if (!scene || !sceneHasPhysics(scene)) return "";
+  const slots = physicsSlots(scene).map((object, slot) => `[${object}]=${slot}`);
+  const B = physicsBlockAddress(layout);
+  return `do
+  cartbox = cartbox or {}
+  local _B = ${B}
+  local _slot = {${slots.join(",")}}
+  local _ok = false
+  local function _rd(a)
+    local v = peek(a) | (peek(a + 1) << 8) | (peek(a + 2) << 16) | (peek(a + 3) << 24)
+    if v >= 0x80000000 then v = v - 0x100000000 end
+    return v
+  end
+  local function _wr(a, v)
+    v = math.floor(v) & 0xffffffff
+    poke(a, v & 0xff) poke(a + 1, (v >> 8) & 0xff) poke(a + 2, (v >> 16) & 0xff) poke(a + 3, (v >> 24) & 0xff)
+  end
+  -- The host writes a magic word before every tick; until it has (code run at
+  -- load time) or if the block isn't where this build expects, physics is off.
+  local function _live()
+    if not _ok then _ok = _rd(_B) == ${PHYS_MAGIC} end
+    return _ok
+  end
+  local function _obj(o)
+    if type(o) == "string" then return cartbox.find(o) end
+    return o
+  end
+  local function _cmd(op, a, v1, v2, v3, v4, v5, v6)
+    if not _live() then return end
+    local n = _rd(_B + ${PHYS_CMDS})
+    if n < 0 or n >= ${PHYS_MAX_CMDS} then return end
+    local at = _B + ${PHYS_CMDS + 4} + n * ${PHYS_CMD_BYTES}
+    _wr(at, op) _wr(at + 4, a)
+    _wr(at + 8, (v1 or 0) * ${PHYS_FIX}) _wr(at + 12, (v2 or 0) * ${PHYS_FIX}) _wr(at + 16, (v3 or 0) * ${PHYS_FIX})
+    _wr(at + 20, (v4 or 0) * ${PHYS_FIX}) _wr(at + 24, (v5 or 0) * ${PHYS_FIX}) _wr(at + 28, (v6 or 0) * ${PHYS_FIX})
+    _wr(_B + ${PHYS_CMDS}, n + 1)
+  end
+  cartbox.physics = function() return _live() end
+  cartbox.body = function(o)
+    local i = _obj(o)
+    local s = i and _slot[i]
+    if s == nil or not _live() then return nil end
+    local at = _B + ${PHYS_BODIES} + s * ${PHYS_BODY_BYTES}
+    return _rd(at + 4) / ${PHYS_FIX}, _rd(at + 8) / ${PHYS_FIX}, _rd(at + 12) / ${PHYS_FIX},
+      _rd(at + 16) / ${PHYS_FIX}, _rd(at + 20) / ${PHYS_FIX}, _rd(at + 24) / ${PHYS_FIX},
+      (_rd(at + 28) & 1) == 1
+  end
+  local function _each(op)
+    return function(o, x, y, z)
+      local i = _obj(o)
+      if i and _slot[i] then _cmd(op, i, x, y, z) end
+    end
+  end
+  cartbox.impulse = _each(${PHYS_OP_IMPULSE})
+  cartbox.velocity = _each(${PHYS_OP_VELOCITY})
+  cartbox.teleport = _each(${PHYS_OP_TELEPORT})
+  cartbox.move = _each(${PHYS_OP_MOVE})
+  cartbox.ray = function(slot, x, y, z, dx, dy, dz, max)
+    slot = math.floor(slot or 0)
+    if slot < 0 or slot >= ${PHYS_MAX_RAYS} then return end
+    local m = math.sqrt((dx or 0)^2 + (dy or 0)^2 + (dz or 0)^2)
+    if m < 1e-9 then return end
+    local k = (max or 100) / m
+    _cmd(${PHYS_OP_RAY}, slot, x, y, z, dx * k, dy * k, dz * k)
+  end
+  cartbox.hit = function(slot)
+    slot = math.floor(slot or 0)
+    if slot < 0 or slot >= ${PHYS_MAX_RAYS} or not _live() then return false end
+    local at = _B + ${PHYS_RAYS} + slot * ${PHYS_RAY_BYTES}
+    local w = _rd(at)
+    if w == 0 then return false end
+    local obj = nil
+    if w >= 2 then obj = w - 2 end
+    return true, obj, _rd(at + 4) / ${PHYS_FIX}, _rd(at + 8) / ${PHYS_FIX}, _rd(at + 12) / ${PHYS_FIX},
+      _rd(at + 16) / ${PHYS_FIX}, _rd(at + 20) / ${PHYS_FIX}, _rd(at + 24) / ${PHYS_FIX}, _rd(at + 28) / ${PHYS_FIX}
   end
 end`;
 }
@@ -5095,11 +5464,12 @@ function capsConstrainScene(caps) {
 import {
   composeModelMatrix,
   deserializeMeshAsset,
-  meshBounds,
+  meshBounds as meshBounds2,
   parentIndices,
   parseSceneLighting,
   projectionMatrix,
   readMeshLibrary,
+  readPhysicsSpec,
   readSceneProps,
   readSceneTags,
   worldMatrices,
@@ -5133,7 +5503,7 @@ function sceneBounds(instances) {
   let maxY = -Infinity;
   let maxZ = -Infinity;
   for (const instance of instances) {
-    const local = meshBounds(instance.mesh);
+    const local = meshBounds2(instance.mesh);
     if (!local) continue;
     for (let corner = 0; corner < 8; corner += 1) {
       const cx = corner & 1 ? local.max[0] : local.min[0];
@@ -5194,6 +5564,7 @@ function parseMeshScene(raw) {
       name: typeof record.name === "string" ? record.name : "Mesh",
       tags: readSceneTags(record.tags),
       props: readSceneProps(record.props),
+      physics: readPhysicsSpec(record.physics),
       parentId: typeof record.parent === "string" && record.parent ? record.parent : null
     });
   }
@@ -5328,6 +5699,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.frontRenderer = new SoftwareSceneRenderer();
     /** First-person mode: draw the meshes first, then the cart's 2D frame as a HUD on top. */
     this.hud = false;
+    /** The same shape for a flat scene, built on first use when physics bodies move it. */
+    this.flat = null;
+    /** World matrices of the objects physics moved this frame (see setBodyOverrides). */
+    this.bodies = /* @__PURE__ */ new Map();
     /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
     this.hudFrame = null;
     this.output = new Uint8ClampedArray(width * height * 4);
@@ -5339,6 +5714,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       children: childIndices(parents),
       locals: scene.instances.map((instance) => instance.local ?? instance.model)
     } : null;
+  }
+  /**
+   * Set the world matrices of the objects physics moves (object index → matrix),
+   * replacing their authored placement; their children follow, and a cart pose
+   * still composes on top. The player calls this each frame from the physics session.
+   */
+  setBodyOverrides(bodies) {
+    this.bodies = bodies;
   }
   /** Posed instances plus, in a hierarchy, everything below them: what moves this frame. */
   withChildren(indices) {
@@ -5536,8 +5919,16 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * only part of the shadow map that has to be redrawn each frame.
    */
   posedInstances() {
-    if (this.poses.length === 0) return { main: this.instances, front: [], moved: [] };
+    if (this.poses.length === 0 && this.bodies.size === 0) return { main: this.instances, front: [], moved: [] };
     if (this.hierarchy) return this.posedHierarchy(this.hierarchy);
+    if (this.bodies.size > 0) {
+      this.flat ?? (this.flat = {
+        parents: this.instances.map(() => -1),
+        children: this.instances.map(() => []),
+        locals: this.instances.map((instance) => instance.model)
+      });
+      return this.posedHierarchy(this.flat);
+    }
     const main = [];
     const front = [];
     const moved = [];
@@ -5584,10 +5975,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const p = h.parents[i] ?? -1;
       const up = p >= 0 ? state(p) : null;
       const pose = byIndex.get(i);
-      const moved2 = Boolean(pose) || Boolean(up?.moved);
+      const body = this.bodies.get(i);
+      const moved2 = Boolean(pose) || Boolean(up?.moved) || Boolean(body);
       let model = this.instances[i].model;
       if (moved2) {
-        const base = up ? multiplyMat4(up.model, h.locals[i]) : h.locals[i];
+        const base = body ?? (up ? multiplyMat4(up.model, h.locals[i]) : h.locals[i]);
         model = pose ? multiplyMat4(base, poseLocalMatrix(pose)) : base;
       }
       const out = { model, moved: moved2, hidden: Boolean(pose?.hidden) || Boolean(up?.hidden), front: Boolean(pose?.front) || Boolean(up?.front) };
@@ -5651,11 +6043,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const size = SHADOW_MAP_SIZE;
     const { center, radius } = this.scene.bounds;
     for (const i of this.withChildren(this.poses.filter((p) => p.front).map((p) => p.index))) this.everFront.add(i);
-    const key = `${this.poses.filter((p) => !p.front).map((p) => p.index).sort((a, b) => a - b).join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}`;
+    const key = `${this.poses.filter((p) => !p.front).map((p) => p.index).sort((a, b) => a - b).join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}|${[...this.bodies.keys()].join(",")}`;
     let full = false;
     if (!this.staticShadow || this.staticShadowKey !== key || this.staticShadowLighting !== lighting) {
       this.staticShadow ?? (this.staticShadow = new Float32Array(size * size));
-      const posed = this.withChildren(this.poses.map((p) => p.index));
+      const posed = this.withChildren([...this.poses.map((p) => p.index), ...this.bodies.keys()]);
       const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i));
       const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow });
       if (!built) return null;
@@ -7326,6 +7718,8 @@ var Player = class {
     this.volume = 1;
     /** False while a host menu is open: the game keeps running but sees no input. */
     this.inputEnabled = true;
+    /** The cart's physics world and where its shared block sits (bytes after pmem word 0). */
+    this.physics = null;
     this.tickFrame = 0;
     this.lastMailboxSeq = 0;
     /** Error-generation counter last seen from the engine; a rise means a new error. */
@@ -7402,6 +7796,17 @@ var Player = class {
       if (animClipsLua) prepared = prependLuaCode(prepared, animClipsLua);
       const sceneLua = sceneObjectsSdkLua(this.options.mesh);
       if (sceneLua) prepared = prependLuaCode(prepared, sceneLua);
+      const layout = RAM_LAYOUTS[this.model.id];
+      const physicsLua = this.options.physics && layout ? physicsSdkLua(this.options.mesh, layout) : "";
+      if (physicsLua && this.options.mesh && this.options.physics) {
+        prepared = prependLuaCode(prepared, physicsLua);
+        const backend = await this.options.physics();
+        if (this.destroyed) {
+          backend.destroy();
+          return;
+        }
+        this.physics = { session: new PhysicsSession(this.options.mesh, backend), offset: physicsBlockAddress(layout) - layout.pmemAddress };
+      }
       const preparedBytes = injectSdk(prepared);
       this.console = createConsole(module, this.model, sampleRate);
       if (!this.console.loadCartridge(preparedBytes)) {
@@ -7568,7 +7973,11 @@ var Player = class {
       if (words) net.beforeTick(words);
     }
     this.feedSticks();
+    const physicsBlock = this.physicsBlock();
+    if (physicsBlock) this.physics.session.beforeTick(physicsBlock);
     this.console?.tick(mask);
+    const afterBlock = physicsBlock ? this.physicsBlock() : null;
+    if (afterBlock) this.physics.session.afterTick(afterBlock);
     if (net && this.console) {
       const words = this.console.netWords();
       if (words) net.afterTick(words);
@@ -7587,6 +7996,12 @@ var Player = class {
     if (samples && samples.length > 0) {
       this.audio?.enqueue(samples);
     }
+  }
+  /** A DataView over the physics block (re-fetched: WASM memory growth detaches views). */
+  physicsBlock() {
+    if (!this.physics || !this.console) return null;
+    const bytes = this.console.ramView(this.physics.offset, PHYS_BLOCK_BYTES);
+    return bytes ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
   }
   /** Reads any platform events the cart emitted this frame and dispatches them. */
   pollEvents() {
@@ -7617,6 +8032,7 @@ var Player = class {
         this.meshSurface.setCameraOverride(meshCamera);
         this.meshSurface.setHudMode(meshCamera?.hud ?? false);
         this.meshSurface.setPoseOverrides(decodeMeshPoses(mailbox));
+        if (this.physics) this.meshSurface.setBodyOverrides(this.physics.session.overrides());
         this.meshSurface.setCartLights(decodeWorldLights(mailbox));
       }
       if (this.worldSurface && this.console) {
@@ -7686,6 +8102,8 @@ var Player = class {
     this.view.cancelAnimationFrame(this.frameHandle);
     this.keyboard?.destroy();
     this.touch?.destroy();
+    this.physics?.session.destroy();
+    this.physics = null;
     this.audio?.destroy();
     this.surface?.destroy();
     this.sceneRenderer?.dispose();
@@ -8476,10 +8894,15 @@ export {
   NetSession,
   PAD_BUTTONS,
   PARTICLE_KINDS,
+  PHYSICS_DT,
+  PHYS_BLOCK_BYTES,
+  PHYS_MAGIC,
   POST_FX_EFFECTS,
   ParticleOverlaySurface,
+  PhysicsSession,
   PostFxPass,
   PostFxSurface,
+  RAM_LAYOUTS,
   REPLAY_VERSION,
   ReplayError,
   ReplayRecorder,
@@ -8519,6 +8942,7 @@ export {
   codeChunks,
   collisionSdkLua,
   composeParallax,
+  composeWorldMatrix,
   compositeOverBackdrop,
   createCartSpriteSource,
   createConsole,
@@ -8540,6 +8964,7 @@ export {
   extractScore,
   extractUnlocks,
   fillSky,
+  fitShape,
   fitTextureToBudget,
   flagsSdkLua,
   flicker,
@@ -8572,6 +8997,9 @@ export {
   parseReplay,
   parseScene,
   parseWorldScene,
+  physicsBlockAddress,
+  physicsSdkLua,
+  physicsSlots,
   prehazeLayers,
   pulse,
   pyramidLevelCount,
@@ -8594,15 +9022,18 @@ export {
   sampleNormalBilinear,
   sampleScalarBilinear,
   sampleTrack,
+  sceneHasPhysics,
   sceneObjectsSdkLua,
   seedCartridge,
   serializeReplay,
   shade,
   simulateEmitter,
   softKneePrefilter,
+  splitWorldMatrix,
   standardizePad,
   sway,
   takeNetOutbox,
+  takePhysicsCommands,
   tiltShiftBlur,
   uniformsFromSettings,
   unpadRows,
@@ -8611,5 +9042,6 @@ export {
   webgpuCanHonour,
   worldCenter,
   writeInstanceUniform,
-  writeNetInbox
+  writeNetInbox,
+  writePhysicsState
 };

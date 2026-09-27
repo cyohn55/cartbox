@@ -260,6 +260,16 @@ cartbox = {
   prop = function(_, _, default) return default end,
   hastag = function() return false end,
   tagged = function() return {} end,
+  -- Physics (bodies on scene objects): overridden by the injected physics calls
+  -- when the cart has bodies.
+  physics = function() return false end,
+  body = function() return nil end,
+  impulse = function() end,
+  velocity = function() end,
+  teleport = function() end,
+  move = function() end,
+  ray = function() end,
+  hit = function() return false end,
 }`;
 
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */
