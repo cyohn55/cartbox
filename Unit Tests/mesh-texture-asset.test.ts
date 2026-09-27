@@ -265,6 +265,35 @@ describe("rebakeMeshSidecar", () => {
     });
   }
 
+  it("keeps shared meshes, the lighting rig and prefabs when a texture changes", async () => {
+    // Two objects share the textured mesh (stored once in the library), with a
+    // lighting rig and a prefab: a rebake used to rewrite only {version, meshes},
+    // dropping all three — and every object that pointed into the library.
+    const one = JSON.parse(sidecarWithTexture()) as { meshes: { id: string; name: string; mesh: string; transform: unknown }[] };
+    const entry = one.meshes[0]!;
+    const library = { m0: entry.mesh };
+    const raw = JSON.stringify({
+      version: 2,
+      meshes: [
+        { ...entry, id: "a", name: "a", mesh: "@lib:m0" },
+        { ...entry, id: "b", name: "b", mesh: "@lib:m0" },
+      ],
+      library,
+      lighting: { ambient: 0.4 },
+      prefabs: [{ id: "p", name: "P", nodes: [{ key: "n0", name: "a", mesh: "@lib:m0", transform: entry.transform }] }],
+    });
+    const edited = Uint8Array.from(indices, (i) => TEXTURE_CLUT_BASE + i);
+    edited[1] = TEXTURE_CLUT_BASE + 1; // paint a second texel red
+    const rebaked = (await rebakeMeshSidecar(raw, stubSheet(edited, size), paletteWithClut(clut)))!;
+    expect(rebaked).not.toBe(raw);
+    const scene = parseMeshScene(rebaked)!;
+    expect(scene.instances.map((i) => i.name)).toEqual(["a", "b"]);
+    expect(scene.lighting?.ambient).toBe(0.4);
+    const stored = JSON.parse(rebaked) as { prefabs?: unknown[]; library?: Record<string, string> };
+    expect(stored.prefabs).toHaveLength(1);
+    expect(Object.keys(stored.library ?? {})).toHaveLength(1); // still shared, rebaked once
+  });
+
   it("leaves an untouched texture byte-identical, so a fresh cart is not dirtied", async () => {
     const sidecar = sidecarWithTexture();
     const sheet = stubSheet(Uint8Array.from(indices, (i) => TEXTURE_CLUT_BASE + i), size);

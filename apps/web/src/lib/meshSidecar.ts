@@ -27,6 +27,7 @@ import {
   parentIndices,
   parseSceneLighting,
   readMeshLibrary,
+  readPhysicsSpec,
   readSceneProps,
   readSceneTags,
   SCENE_PROP_MAX,
@@ -37,6 +38,7 @@ import {
   serializeMeshAsset,
   worldMatrices,
   type MeshAsset,
+  type PhysicsSpec,
   type SceneLighting,
   type ScenePropValue,
 } from "@cartbox/editor";
@@ -75,6 +77,8 @@ export interface MeshSidecarEntry {
   readonly props?: Readonly<Record<string, ScenePropValue>>;
   /** Set when this entry is part of a placed prefab (see meshPrefabs.ts). */
   readonly prefab?: PrefabLink;
+  /** Physics body (ENGINE_ROADMAP.md, Phase 2); absent = not simulated. */
+  readonly physics?: PhysicsSpec;
 }
 
 /**
@@ -99,6 +103,7 @@ export interface PrefabNode {
   readonly parent?: string;
   readonly tags?: readonly string[];
   readonly props?: Readonly<Record<string, ScenePropValue>>;
+  readonly physics?: PhysicsSpec;
 }
 
 /** A reusable group of objects: a root node and everything under it. */
@@ -231,6 +236,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
       ...(tags.length > 0 ? { tags } : {}),
       ...(Object.keys(props).length > 0 ? { props } : {}),
       ...(readPrefabLink(record.prefab) ? { prefab: readPrefabLink(record.prefab)! } : {}),
+      ...(readPhysicsSpec(record.physics) ? { physics: readPhysicsSpec(record.physics)! } : {}),
     });
   }
   const lighting = parseSceneLighting((parsed as { lighting?: unknown }).lighting);
@@ -279,6 +285,7 @@ function readPrefabs(value: unknown, library: ReturnType<typeof readMeshLibrary>
         ...(typeof node.parent === "string" && node.parent ? { parent: node.parent } : {}),
         ...(tags.length > 0 ? { tags } : {}),
         ...(Object.keys(props).length > 0 ? { props } : {}),
+        ...(readPhysicsSpec(node.physics) ? { physics: readPhysicsSpec(node.physics)! } : {}),
       });
     }
     const keys = new Set(nodes.map((n) => n.key));
@@ -330,6 +337,20 @@ export function setMeshAsset(sidecar: MeshSidecar, id: string, mesh: MeshAsset):
     ...sidecar,
     version: MESH_SIDECAR_VERSION,
     meshes: sidecar.meshes.map((entry) => (entry.id === id ? { ...entry, mesh: serialized } : entry)),
+  };
+}
+
+/** Set (or with null, remove) one entry's physics body. */
+export function setMeshPhysics(sidecar: MeshSidecar, id: string, physics: PhysicsSpec | null): MeshSidecar {
+  const spec = physics ? readPhysicsSpec(physics) : null;
+  return {
+    ...sidecar,
+    version: MESH_SIDECAR_VERSION,
+    meshes: sidecar.meshes.map((entry) => {
+      if (entry.id !== id) return entry;
+      const { physics: _drop, ...rest } = entry;
+      return spec ? { ...rest, physics: spec } : rest;
+    }),
   };
 }
 

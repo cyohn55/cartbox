@@ -216,6 +216,10 @@ export class MeshOverlaySurface implements DisplaySurface {
     readonly children: readonly (readonly number[])[];
     readonly locals: readonly Mat4[];
   } | null;
+  /** The same shape for a flat scene, built on first use when physics bodies move it. */
+  private flat: NonNullable<MeshOverlaySurface["hierarchy"]> | null = null;
+  /** World matrices of the objects physics moved this frame (see setBodyOverrides). */
+  private bodies: ReadonlyMap<number, Mat4> = new Map();
   /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
   private hudFrame: Uint8ClampedArray | null = null;
 
@@ -251,6 +255,15 @@ export class MeshOverlaySurface implements DisplaySurface {
           locals: scene.instances.map((instance) => instance.local ?? instance.model),
         }
       : null;
+  }
+
+  /**
+   * Set the world matrices of the objects physics moves (object index → matrix),
+   * replacing their authored placement; their children follow, and a cart pose
+   * still composes on top. The player calls this each frame from the physics session.
+   */
+  setBodyOverrides(bodies: ReadonlyMap<number, Mat4>): void {
+    this.bodies = bodies;
   }
 
   /** Posed instances plus, in a hierarchy, everything below them: what moves this frame. */
@@ -505,8 +518,16 @@ export class MeshOverlaySurface implements DisplaySurface {
     front: readonly MeshSceneInstance[];
     moved: readonly MeshSceneInstance[];
   } {
-    if (this.poses.length === 0) return { main: this.instances, front: [], moved: [] };
+    if (this.poses.length === 0 && this.bodies.size === 0) return { main: this.instances, front: [], moved: [] };
     if (this.hierarchy) return this.posedHierarchy(this.hierarchy);
+    if (this.bodies.size > 0) {
+      this.flat ??= {
+        parents: this.instances.map(() => -1),
+        children: this.instances.map(() => []),
+        locals: this.instances.map((instance) => instance.model),
+      };
+      return this.posedHierarchy(this.flat);
+    }
     const main: MeshSceneInstance[] = [];
     const front: MeshSceneInstance[] = [];
     const moved: MeshSceneInstance[] = [];
@@ -559,10 +580,12 @@ export class MeshOverlaySurface implements DisplaySurface {
       const p = h.parents[i] ?? -1;
       const up = p >= 0 ? state(p) : null;
       const pose = byIndex.get(i);
-      const moved = Boolean(pose) || Boolean(up?.moved);
+      const body = this.bodies.get(i);
+      const moved = Boolean(pose) || Boolean(up?.moved) || Boolean(body);
       let model = this.instances[i]!.model;
       if (moved) {
-        const base = up ? multiplyMat4(up.model, h.locals[i]!) : h.locals[i]!;
+        // A physics body is placed in world space; otherwise follow the parent.
+        const base = body ?? (up ? multiplyMat4(up.model, h.locals[i]!) : h.locals[i]!);
         model = pose ? multiplyMat4(base, poseLocalMatrix(pose)) : base;
       }
       const out = { model, moved, hidden: Boolean(pose?.hidden) || Boolean(up?.hidden), front: Boolean(pose?.front) || Boolean(up?.front) };
@@ -640,11 +663,11 @@ export class MeshOverlaySurface implements DisplaySurface {
       .filter((p) => !p.front)
       .map((p) => p.index)
       .sort((a, b) => a - b)
-      .join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}`;
+      .join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}|${[...this.bodies.keys()].join(",")}`;
     let full = false;
     if (!this.staticShadow || this.staticShadowKey !== key || this.staticShadowLighting !== lighting) {
       this.staticShadow ??= new Float32Array(size * size);
-      const posed = this.withChildren(this.poses.map((p) => p.index));
+      const posed = this.withChildren([...this.poses.map((p) => p.index), ...this.bodies.keys()]);
       const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i));
       const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow });
       if (!built) return null;

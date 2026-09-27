@@ -18,12 +18,16 @@
 
 import {
   deserializeMeshAsset,
+  readMeshLibrary,
+  resolveMeshRef,
   serializeMeshAsset,
   encodeRgbaPng,
   normalDirectionRgb,
   MATERIAL_LEVELS,
   type MeshAsset,
 } from "@cartbox/editor";
+
+import { decodeMeshSidecar, encodeMeshSidecar } from "./meshSidecar";
 
 /** Scales a material level (0..MATERIAL_LEVELS-1) to a 0..255 byte. */
 const LEVEL_TO_BYTE = 255 / (MATERIAL_LEVELS - 1);
@@ -226,9 +230,14 @@ export function sidecarHasSpriteTexture(rawSidecar: string | null | undefined): 
   }
   const meshes = (parsed as { meshes?: unknown }).meshes;
   if (!Array.isArray(meshes)) return false;
+  // Repeated meshes are stored once in the sidecar's library; entries point at it.
+  const library = readMeshLibrary((parsed as { library?: unknown }).library);
+  const seen = new Set<string>();
   for (const entry of meshes) {
-    const raw = (entry as { mesh?: unknown }).mesh;
-    if (typeof raw !== "string") continue;
+    const ref = (entry as { mesh?: unknown }).mesh;
+    const raw = typeof ref === "string" ? resolveMeshRef(ref, library) : null;
+    if (!raw || seen.has(raw)) continue;
+    seen.add(raw);
     try {
       if (deserializeMeshAsset(raw).primitives.some((p) => p.material.textureSprite)) return true;
     } catch {
@@ -254,25 +263,27 @@ export async function rebakeMeshSidecar(
 ): Promise<string | null | undefined> {
   if (!rawSidecar || !sidecarHasSpriteTexture(rawSidecar)) return rawSidecar;
 
-  let parsed: { version?: number; meshes?: unknown[] };
-  try {
-    parsed = JSON.parse(rawSidecar) as { version?: number; meshes?: unknown[] };
-  } catch {
-    return rawSidecar;
-  }
-  if (!Array.isArray(parsed.meshes)) return rawSidecar;
-
-  const meshes = await Promise.all(
-    parsed.meshes.map(async (entry) => {
-      const record = entry as { mesh?: unknown };
-      if (typeof record.mesh !== "string") return entry;
+  // Work on the decoded sidecar and write it back with the normal encoder, so the
+  // shared mesh library, the lighting rig and prefabs all survive the rebake.
+  // Each distinct mesh is rebaked once, however many objects share it.
+  const sidecar = decodeMeshSidecar(rawSidecar);
+  const cache = new Map<string, Promise<string>>();
+  const rebake = (meshString: string): Promise<string> => {
+    let out = cache.get(meshString);
+    if (!out) {
+      out = rebakeOne(meshString);
+      cache.set(meshString, out);
+    }
+    return out;
+  };
+  const rebakeOne = async (meshString: string): Promise<string> => {
       let asset: MeshAsset;
       try {
-        asset = deserializeMeshAsset(record.mesh);
+        asset = deserializeMeshAsset(meshString);
       } catch {
-        return entry;
+        return meshString;
       }
-      if (!asset.primitives.some((p) => p.material.textureSprite)) return entry;
+      if (!asset.primitives.some((p) => p.material.textureSprite)) return meshString;
 
       const primitives = await Promise.all(
         asset.primitives.map(async (primitive) => {
@@ -331,9 +342,23 @@ export async function rebakeMeshSidecar(
           };
         }),
       );
-      return { ...(entry as object), mesh: serializeMeshAsset({ name: asset.name, primitives }) };
-    }),
-  );
-
-  return JSON.stringify({ version: parsed.version ?? 1, meshes });
+      return serializeMeshAsset({ name: asset.name, primitives });
+  };
+  const withFrames = async <T extends { mesh: string; frames?: readonly string[] }>(item: T): Promise<T> => ({
+    ...item,
+    mesh: await rebake(item.mesh),
+    ...(item.frames ? { frames: await Promise.all(item.frames.map(rebake)) } : {}),
+  });
+  const meshes = await Promise.all(sidecar.meshes.map(withFrames));
+  const prefabs = sidecar.prefabs
+    ? await Promise.all(sidecar.prefabs.map(async (prefab) => ({ ...prefab, nodes: await Promise.all(prefab.nodes.map(withFrames)) })))
+    : undefined;
+  // Nothing re-encoded differently: hand back the original string, so a fresh
+  // cart whose textures are untouched isn't marked as having unsaved changes.
+  let changed = false;
+  for (const [before, after] of await Promise.all([...cache.entries()].map(async ([k, v]) => [k, await v] as const))) {
+    if (before !== after) changed = true;
+  }
+  if (!changed) return rawSidecar;
+  return encodeMeshSidecar({ ...sidecar, meshes, ...(prefabs ? { prefabs } : {}) });
 }

@@ -389,3 +389,31 @@ export {
 } from "./controls.js";
 export type { ControlSettings, ControlTarget, PadButton, PadSnapshot } from "./controls.js";
 export { GamepadInput } from "./input.js";
+
+// Physics (ENGINE_ROADMAP.md, Phase 2): the session that runs a cart's bodies,
+// the backend interface a host implements (the web app's is Rapier), and the
+// shared-block protocol the cart's Lua reads and writes.
+export {
+  PHYSICS_DT,
+  PhysicsSession,
+  composeWorldMatrix,
+  fitShape,
+  physicsSlots,
+  sceneHasPhysics,
+  splitWorldMatrix,
+  type PhysicsBackend,
+  type PhysicsBodyDesc,
+  type PhysicsShape,
+  type Quat as PhysicsQuat,
+  type Vec3 as PhysicsVec3,
+} from "./physics/physicsSession.js";
+export { physicsSdkLua } from "./physics/physicsSdk.js";
+export {
+  PHYS_BLOCK_BYTES,
+  PHYS_MAGIC,
+  RAM_LAYOUTS,
+  physicsBlockAddress,
+  takePhysicsCommands,
+  writePhysicsState,
+  type RamLayout,
+} from "./physics/protocol.js";

@@ -19,6 +19,9 @@ import { STICK_OPTIN_MAGIC, STICK_OPTIN_WORD, STICK_WORD, packSticks } from "./s
 import { DEFAULT_CONTROL_SETTINGS, applyLookSettings, type ControlSettings } from "./controls.js";
 import { injectSdk } from "./sdk.js";
 import { sceneObjectsSdkLua } from "./mesh/sceneObjectsSdk.js";
+import { physicsSdkLua } from "./physics/physicsSdk.js";
+import { PhysicsSession } from "./physics/physicsSession.js";
+import { PHYS_BLOCK_BYTES, RAM_LAYOUTS, physicsBlockAddress } from "./physics/protocol.js";
 import { collisionSdkLua } from "./collisionSdk.js";
 import { flagsSdkLua } from "./flagsSdk.js";
 import { animClipsSdkLua } from "./anim/animClipsSdk.js";
@@ -84,6 +87,8 @@ export class Player {
   /** False while a host menu is open: the game keeps running but sees no input. */
   private inputEnabled = true;
   private console?: ConsoleInstance;
+  /** The cart's physics world and where its shared block sits (bytes after pmem word 0). */
+  private physics: { session: PhysicsSession; offset: number } | null = null;
   private cartSource?: CartSpriteSource;
   private readonly model: ConsoleModel;
 
@@ -171,6 +176,19 @@ export class Player {
       // The placed meshes as scene objects (cartbox.find / prop / tagged ...).
       const sceneLua = sceneObjectsSdkLua(this.options.mesh);
       if (sceneLua) prepared = prependLuaCode(prepared, sceneLua);
+      // Physics bodies on those objects (cartbox.body / impulse / move / ray ...),
+      // simulated by the host's engine through a block at the end of RAM.
+      const layout = RAM_LAYOUTS[this.model.id];
+      const physicsLua = this.options.physics && layout ? physicsSdkLua(this.options.mesh, layout) : "";
+      if (physicsLua && this.options.mesh && this.options.physics) {
+        prepared = prependLuaCode(prepared, physicsLua);
+        const backend = await this.options.physics();
+        if (this.destroyed) {
+          backend.destroy();
+          return;
+        }
+        this.physics = { session: new PhysicsSession(this.options.mesh, backend), offset: physicsBlockAddress(layout) - layout.pmemAddress };
+      }
       const preparedBytes = injectSdk(prepared);
 
       this.console = createConsole(module, this.model, sampleRate);
@@ -426,7 +444,11 @@ export class Player {
       if (words) net.beforeTick(words);
     }
     this.feedSticks();
+    const physicsBlock = this.physicsBlock();
+    if (physicsBlock) this.physics!.session.beforeTick(physicsBlock);
     this.console?.tick(mask);
+    const afterBlock = physicsBlock ? this.physicsBlock() : null;
+    if (afterBlock) this.physics!.session.afterTick(afterBlock);
     if (net && this.console) {
       const words = this.console.netWords();
       if (words) net.afterTick(words);
@@ -450,6 +472,13 @@ export class Player {
     if (samples && samples.length > 0) {
       this.audio?.enqueue(samples);
     }
+  }
+
+  /** A DataView over the physics block (re-fetched: WASM memory growth detaches views). */
+  private physicsBlock(): DataView | null {
+    if (!this.physics || !this.console) return null;
+    const bytes = this.console.ramView(this.physics.offset, PHYS_BLOCK_BYTES);
+    return bytes ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
   }
 
   /** Reads any platform events the cart emitted this frame and dispatches them. */
@@ -490,6 +519,7 @@ export class Player {
         // over the meshes instead of behind them.
         this.meshSurface.setHudMode(meshCamera?.hud ?? false);
         this.meshSurface.setPoseOverrides(decodeMeshPoses(mailbox));
+        if (this.physics) this.meshSurface.setBodyOverrides(this.physics.session.overrides());
         this.meshSurface.setCartLights(decodeWorldLights(mailbox));
       }
       // The HD-2D world reuses the same channels: cartbox.worldcam drives its
@@ -573,6 +603,8 @@ export class Player {
     this.view.cancelAnimationFrame(this.frameHandle);
     this.keyboard?.destroy();
     this.touch?.destroy();
+    this.physics?.session.destroy();
+    this.physics = null;
     this.audio?.destroy();
     this.surface?.destroy();
     // After the surfaces: they draw through it, and the decorator chain's

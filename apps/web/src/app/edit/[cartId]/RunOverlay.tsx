@@ -13,6 +13,7 @@ import { mount, type AnimSpec, type CollisionField, type FlagsField, type MeshSc
 
 import styles from "./editor.module.css";
 import { errorLineFrom } from "./codeTools";
+import { rapierPhysics } from "@/lib/physicsRapier";
 
 interface RunOverlayProps {
   bytes: Uint8Array;
@@ -116,8 +117,10 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
       // Playtest with the cart's collision + flags layers available to its own Lua.
       collision,
       flags,
-      // Playtest the cart's imported 3D meshes, rasterised over each frame.
+      // Playtest the cart's imported 3D meshes, rasterised over each frame, with
+      // their physics bodies simulated (Rapier loads only when there are bodies).
       mesh,
+      physics: rapierPhysics(),
       // Playtest the cart's HD-2D world: 3D terrain with the cart's 2D character
       // sprites standing in it as depth-composited billboards.
       world,

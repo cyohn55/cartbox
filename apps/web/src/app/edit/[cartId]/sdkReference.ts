@@ -225,6 +225,60 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
     ],
   },
   {
+    label: "cartbox · physics",
+    open: false,
+    entries: [
+      {
+        name: "cartbox.body",
+        signature: "cartbox.body(obj) -> x, y, z, vx, vy, vz, grounded",
+        doc: "A physics body's position and velocity after the last step (set a body on the object in the Inspector). grounded is for characters.",
+        snippet: 'local x, y, z, vx, vy, vz, grounded = cartbox.body("crate")',
+      },
+      {
+        name: "cartbox.impulse",
+        signature: "cartbox.impulse(obj, x, y, z)",
+        doc: "Push a dynamic body: an instant change of momentum (heavier bodies move less).",
+        snippet: 'cartbox.impulse("ball", 0, 5, 0)',
+      },
+      {
+        name: "cartbox.velocity",
+        signature: "cartbox.velocity(obj, x, y, z)",
+        doc: "Set a dynamic or kinematic body's velocity (units per second). Kinematic bodies push dynamic ones.",
+        snippet: 'cartbox.velocity("lift", 0, 1, 0)',
+      },
+      {
+        name: "cartbox.teleport",
+        signature: "cartbox.teleport(obj, x, y, z)",
+        doc: "Move a body to a position at once.",
+        snippet: 'cartbox.teleport("player", 0, 2, 0)',
+      },
+      {
+        name: "cartbox.move",
+        signature: "cartbox.move(obj, dx, dy, dz)",
+        doc: "Walk a character body this tick: slides along walls, climbs slopes and steps. Add your own gravity to dy; cartbox.body reports grounded.",
+        snippet: 'vy = grounded and 0 or vy - 0.01\ncartbox.move("player", dx, vy, dz)',
+      },
+      {
+        name: "cartbox.ray",
+        signature: "cartbox.ray(slot, x, y, z, dx, dy, dz, max)",
+        doc: "Cast a ray from (x,y,z) along (dx,dy,dz) up to max units in slot 0-15. The result is ready next tick via cartbox.hit(slot).",
+        snippet: "cartbox.ray(0, x, y, z, 0, -1, 0, 50)",
+      },
+      {
+        name: "cartbox.hit",
+        signature: "cartbox.hit(slot) -> hit, obj, x, y, z, nx, ny, nz, distance",
+        doc: "Last tick's result for a ray slot: whether it hit, the object it hit (nil if not a scene object), the point, the surface normal and the distance.",
+        snippet: "local hit, obj, hx, hy, hz = cartbox.hit(0)",
+      },
+      {
+        name: "cartbox.physics",
+        signature: "cartbox.physics() -> bool",
+        doc: "Whether the cart's physics is running (false in carts without bodies).",
+        snippet: "if cartbox.physics() then\n  \nend",
+      },
+    ],
+  },
+  {
     label: "cartbox · netplay",
     open: false,
     entries: [
