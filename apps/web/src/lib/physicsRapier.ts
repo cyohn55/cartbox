@@ -3,7 +3,9 @@
  * PhysicsBackend interface (ENGINE_ROADMAP.md, Phase 2).
  *
  * Imported dynamically by `rapierPhysics()`, so the ~2 MB engine is only fetched
- * for carts whose scene objects have physics bodies. Gravity is -9.81 on Y; each
+ * for carts whose scene objects have physics bodies — and a scene set to
+ * deterministic physics gets Rapier's cross-platform deterministic build instead
+ * (same API; bit-identical results on every platform, a little slower). Gravity is -9.81 on Y; each
  * body keeps the scene object index it was built for, which raycasts report.
  */
 
@@ -11,21 +13,29 @@ import type { CastShape, PhysicsBackend, PhysicsBodyDesc, PhysicsJointDesc, Phys
 
 type Rapier = typeof import("@dimforge/rapier3d-compat");
 
-let loading: Promise<Rapier> | null = null;
+const loading = new Map<boolean, Promise<Rapier>>();
 
-/** Load (once) and initialise Rapier. */
-function loadRapier(): Promise<Rapier> {
-  loading ??= import("@dimforge/rapier3d-compat").then(async (mod) => {
-    const rapier = ((mod as unknown as { default?: Rapier }).default ?? mod) as Rapier;
-    await rapier.init();
-    return rapier;
-  });
-  return loading;
+async function init(mod: unknown): Promise<Rapier> {
+  const rapier = ((mod as { default?: Rapier }).default ?? mod) as Rapier;
+  await rapier.init();
+  return rapier;
+}
+
+/** Load (once) and initialise Rapier: its deterministic build when asked. */
+function loadRapier(deterministic: boolean): Promise<Rapier> {
+  let promise = loading.get(deterministic);
+  if (!promise) {
+    promise = deterministic
+      ? import("@dimforge/rapier3d-deterministic-compat").then((mod) => init(mod))
+      : import("@dimforge/rapier3d-compat").then((mod) => init(mod));
+    loading.set(deterministic, promise);
+  }
+  return promise;
 }
 
 /** A PhysicsBackend factory for the player's `physics` option. */
-export function rapierPhysics(): () => Promise<PhysicsBackend> {
-  return async () => createRapierBackend(await loadRapier());
+export function rapierPhysics(): (options?: { deterministic?: boolean }) => Promise<PhysicsBackend> {
+  return async (options) => createRapierBackend(await loadRapier(options?.deterministic === true));
 }
 
 const v3 = (v: PhysicsVec3) => ({ x: v[0], y: v[1], z: v[2] });

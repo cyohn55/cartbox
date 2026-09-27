@@ -146,3 +146,21 @@ export function readPhysicsSpec(value: unknown): PhysicsSpec | null {
     ...(joint ? { joint } : {}),
   };
 }
+
+/**
+ * Scene-wide physics settings (the sidecar's `physicsWorld`), absent by default.
+ *
+ * `deterministic`: run Rapier's cross-platform deterministic build and round every
+ * number the host computes before it reaches the physics world, so a scene plays
+ * out bit for bit the same in every browser — for replays and for netplay carts
+ * that simulate shared objects on each player's machine. A little slower.
+ */
+export interface PhysicsWorldSettings {
+  readonly deterministic?: boolean;
+}
+
+/** Read stored world settings, or null when none are set. */
+export function readPhysicsWorld(value: unknown): PhysicsWorldSettings | null {
+  if (typeof value !== "object" || value === null) return null;
+  return (value as Record<string, unknown>).deterministic === true ? { deterministic: true } : null;
+}

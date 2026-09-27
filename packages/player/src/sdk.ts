@@ -277,6 +277,7 @@ cartbox = {
   inside = function() return {} end,
   motor = function() end,
   unjoin = function() end,
+  physicshash = function() return 0 end,
   -- Spawning prefab copies: overridden when the cart has prefabs.
   spawn = function() return nil end,
   despawn = function() end,

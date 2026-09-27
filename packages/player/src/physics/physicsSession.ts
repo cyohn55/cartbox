@@ -16,6 +16,7 @@
 import { DEFAULT_SPRING_DAMPING, DEFAULT_SPRING_STIFFNESS, meshBounds, type JointKind, type JointSpec, type Mat4, type MeshAsset, type PhysicsSpec } from "@cartbox/editor";
 
 import type { MeshScene } from "../mesh/meshScene.js";
+import { deterministicBackend, physicsStateHash } from "./deterministic.js";
 import {
   PHYS_MAX_BODIES,
   PHYS_CAST_BOX,
@@ -341,18 +342,21 @@ export class PhysicsSession {
   private events: PhysicsContactEvent[] = [];
   private overlapPairs: [number, number][] = [];
   private tick = 0;
+  private stateHash = 0;
+  private readonly backend: PhysicsBackend;
+  /** Whether inputs are rounded for cross-browser determinism (the scene's setting unless overridden). */
+  readonly deterministic: boolean;
 
-  constructor(
-    scene: MeshScene,
-    private readonly backend: PhysicsBackend,
-  ) {
+  constructor(scene: MeshScene, backend: PhysicsBackend, { deterministic }: { deterministic?: boolean } = {}) {
+    this.deterministic = deterministic ?? scene.physicsWorld?.deterministic === true;
+    this.backend = this.deterministic ? deterministicBackend(backend) : backend;
     const slots = new Set(physicsSlots(scene));
     scene.instances.forEach((inst, i) => {
       const spec = inst.physics;
       if (!spec || (spec.body !== "static" && !slots.has(i))) return;
       const pooled = Boolean(inst.pooled);
       const { position, rotation, scale } = splitWorldMatrix(inst.model);
-      const handle = backend.addBody({
+      const handle = this.backend.addBody({
         kind: spec.body,
         shape: fitShape(spec, inst.mesh, scale),
         position,
@@ -367,7 +371,7 @@ export class PhysicsSession {
       });
       this.handleOf.set(i, handle);
       if (pooled) {
-        backend.setEnabled(handle, false);
+        this.backend.setEnabled(handle, false);
         this.pooledBodies.set(i, { handle, enabled: false });
       }
       if (spec.body === "static") return;
@@ -423,7 +427,7 @@ export class PhysicsSession {
       const velocity: Vec3 = t.kind === "character" ? (t.lastMove.map((v) => v / PHYSICS_DT) as unknown as Vec3) : s.velocity;
       return { object: t.object, position: s.position, velocity, grounded: t.grounded, sleeping: s.sleeping };
     });
-    writePhysicsState(block, this.tick, bodies, this.rayResults, this.events, this.overlapPairs);
+    writePhysicsState(block, this.tick, bodies, this.rayResults, this.events, this.overlapPairs, this.stateHash);
   }
 
   /** Apply the cart's commands, step the world, and cast the rays it asked for. */
@@ -518,6 +522,7 @@ export class PhysicsSession {
     this.events = this.backend.drainContacts();
     this.overlapPairs = this.backend.overlaps();
     this.tick += 1;
+    this.stateHash = this.hash();
     this.rayResults = [];
     for (let slot = 0; slot < PHYS_MAX_RAYS; slot += 1) {
       const req = this.rayRequests[slot];
@@ -525,6 +530,17 @@ export class PhysicsSession {
       else if (req.shape) this.rayResults[slot] = this.backend.shapecast?.(req.shape, req.origin, req.direction, req.max, req.ignore) ?? null;
       else this.rayResults[slot] = this.backend.raycast(req.origin, req.direction, req.max, req.ignore);
     }
+  }
+
+  /**
+   * A digest of every moving body's exact state (reserve copies count as absent),
+   * equal on two machines exactly when their worlds match — in deterministic mode,
+   * across browsers too.
+   */
+  hash(): number {
+    return physicsStateHash(
+      this.tracked.map((t) => (t.enabled ? this.backend.bodyState(t.handle) : { position: [0, 0, 0], rotation: [0, 0, 0, 0], velocity: [0, 0, 0] })),
+    );
   }
 
   /** Last step's contact events and current trigger overlaps (live inspection, tests). */

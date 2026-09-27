@@ -51,6 +51,8 @@ export const PHYS_FIX = 1024;
 export const PHYS_HDR_MAGIC = 0;
 export const PHYS_HDR_BODIES = 4;
 export const PHYS_HDR_TICK = 8;
+/** A digest of every moving body's exact state after the last step (see physicsStateHash). */
+export const PHYS_HDR_HASH = 12;
 export const PHYS_BODIES = 64;
 export const PHYS_BODY_BYTES = 32; // object, x, y, z, vx, vy, vz, flags
 export const PHYS_MAX_BODIES = 64;
@@ -152,7 +154,9 @@ export function writePhysicsState(
   rays: readonly (PhysicsRayHit | null)[],
   events: readonly PhysicsContactEvent[] = [],
   overlaps: readonly (readonly [number, number])[] = [],
+  hash = 0,
 ): void {
+  block.setInt32(PHYS_HDR_HASH, hash | 0, true);
   const ne = Math.min(events.length, PHYS_MAX_EVENTS);
   block.setInt32(PHYS_EVENTS, ne, true);
   for (let i = 0; i < ne; i += 1) {

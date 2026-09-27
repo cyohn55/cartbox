@@ -87,10 +87,13 @@ and live inspection. Later: nested prefabs, picking objects in the game view.
       and rope, set on a dynamic body in the Inspector. A joint ties the object to
       its nearest ancestor with a body (or the world), so joints work inside prefabs;
       `cartbox.unjoin` breaks one.
-- [ ] Deterministic mode across browsers for netplay (Rapier's deterministic build).
+- [x] Deterministic mode (Mesh tab → Physics world): Rapier's cross-platform
+      deterministic build, with every host-computed input rounded onto a fixed grid,
+      and `cartbox.physicshash()` so players can compare states and catch a desync.
 
 **Status:** bodies, character controller, raycasts, shape casts, triggers, contact
-events, per-body gravity / damping and joints landed. The host runs the world at a fixed 1/60 s step and
+events, per-body gravity / damping, joints and a deterministic mode landed — Phase 2
+is complete. The host runs the world at a fixed 1/60 s step and
 trades state and commands with the cart through an 8 KB block at the end of RAM
 (its address per engine core is checked against the real builds by a test).
 

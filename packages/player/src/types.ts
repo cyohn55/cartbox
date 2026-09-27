@@ -99,8 +99,12 @@ export interface PlayerOptions {
    * (ENGINE_ROADMAP.md, Phase 2). Supplied by the host so the engine (Rapier in
    * the web app) is only downloaded for carts that use it. Omitted, bodies stay
    * where they were placed and the cart's physics calls are no-ops.
+   *
+   * `deterministic` is set when the scene asks for deterministic physics: the
+   * host should then supply an engine that computes the same result on every
+   * platform (the player rounds its own inputs to match).
    */
-  physics?: () => Promise<PhysicsBackend>;
+  physics?: (options: { deterministic: boolean }) => Promise<PhysicsBackend>;
   /**
    * Control settings (aim inversion, look sensitivity, controller and keyboard
    * bindings, touch pad size/opacity). Change them live with

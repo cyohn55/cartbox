@@ -414,6 +414,7 @@ export {
   type Vec3 as PhysicsVec3,
 } from "./physics/physicsSession.js";
 export { physicsSdkLua, runtimeSdkLua, sceneNeedsRuntime } from "./physics/physicsSdk.js";
+export { deterministicBackend, physicsStateHash } from "./physics/deterministic.js";
 export { RuntimeChannel } from "./runtime/runtimeChannel.js";
 export {
   PHYS_BLOCK_BYTES,
