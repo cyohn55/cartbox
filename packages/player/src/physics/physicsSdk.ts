@@ -11,6 +11,10 @@
  *   cartbox.move(obj, dx, dy, dz)     walk a character this tick (slides, climbs, steps)
  *   cartbox.ray(slot, x, y, z, dx, dy, dz, max)   cast a ray (slot 0-15); read next tick
  *   cartbox.hit(slot)                 -> hit, obj, x, y, z, nx, ny, nz, distance
+ *   cartbox.contacts()                -> this tick's contacts { {a=, b=, started=, trigger=}, ... }
+ *   cartbox.entered(trigger)          -> objects that came into a trigger zone this tick
+ *   cartbox.exited(trigger)           -> objects that left it this tick
+ *   cartbox.inside(trigger)           -> objects in it now
  *
  * Spawning prefab copies (when the cart has prefabs) rides the same block:
  *
@@ -28,10 +32,14 @@ import {
   PHYS_BODY_BYTES,
   PHYS_CMD_BYTES,
   PHYS_CMDS,
+  PHYS_EVENT_BYTES,
+  PHYS_EVENTS,
   PHYS_FIX,
   PHYS_MAGIC,
   PHYS_MAX_CMDS,
   PHYS_MAX_RAYS,
+  PHYS_OVERLAP_BYTES,
+  PHYS_OVERLAPS,
   PHYS_OP_DESPAWN,
   PHYS_OP_IMPULSE,
   PHYS_OP_MOVE,
@@ -149,6 +157,41 @@ function PHYSICS_CALLS(): string {
     if w >= 2 then obj = w - 2 end
     return true, obj, _rd(at + 4) / ${PHYS_FIX}, _rd(at + 8) / ${PHYS_FIX}, _rd(at + 12) / ${PHYS_FIX},
       _rd(at + 16) / ${PHYS_FIX}, _rd(at + 20) / ${PHYS_FIX}, _rd(at + 24) / ${PHYS_FIX}, _rd(at + 28) / ${PHYS_FIX}
+  end
+  cartbox.contacts = function()
+    local out = {}
+    if not _live() then return out end
+    local n = _rd(_B + ${PHYS_EVENTS})
+    for k = 0, n - 1 do
+      local at = _B + ${PHYS_EVENTS + 4} + k * ${PHYS_EVENT_BYTES}
+      local f = _rd(at + 8)
+      out[#out + 1] = { a = _rd(at), b = _rd(at + 4), started = (f & 1) == 1, trigger = (f & 2) == 2 }
+    end
+    return out
+  end
+  local function _crossed(o, started)
+    local t = _obj(o)
+    local out = {}
+    if t == nil then return out end
+    for _, e in ipairs(cartbox.contacts()) do
+      if e.trigger and e.started == started then
+        if e.a == t then out[#out + 1] = e.b elseif e.b == t then out[#out + 1] = e.a end
+      end
+    end
+    return out
+  end
+  cartbox.entered = function(o) return _crossed(o, true) end
+  cartbox.exited = function(o) return _crossed(o, false) end
+  cartbox.inside = function(o)
+    local t = _obj(o)
+    local out = {}
+    if t == nil or not _live() then return out end
+    local n = _rd(_B + ${PHYS_OVERLAPS})
+    for k = 0, n - 1 do
+      local at = _B + ${PHYS_OVERLAPS + 4} + k * ${PHYS_OVERLAP_BYTES}
+      if _rd(at) == t then out[#out + 1] = _rd(at + 4) end
+    end
+    return out
   end
 `;
 }

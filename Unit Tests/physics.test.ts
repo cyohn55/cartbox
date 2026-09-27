@@ -137,6 +137,13 @@ describe("physics block protocol", () => {
     expect(takePhysicsCommands(view)).toEqual([{ op: 1, a: 3, v: [0, 5, 0, 0, 0, 0] }]);
     expect(takePhysicsCommands(view)).toEqual([]);
   });
+
+  it("writes contact events and trigger overlaps", () => {
+    const view = new DataView(new ArrayBuffer(PHYS_BLOCK_BYTES));
+    writePhysicsState(view, 1, [], [], [{ a: 2, b: 5, started: true, trigger: true }], [[2, 5], [2, 7]]);
+    expect([view.getInt32(2624, true), view.getInt32(2628, true), view.getInt32(2632, true), view.getInt32(2636, true)]).toEqual([1, 2, 5, 3]);
+    expect([view.getInt32(3204, true), view.getInt32(3216, true), view.getInt32(3220, true)]).toEqual([2, 2, 7]);
+  });
 });
 
 describe.skipIf(!existsSync(path.join(DIST, "xbox360/engine.js")))("physics through the real engine (Rapier)", () => {
@@ -218,6 +225,72 @@ end`;
     expect(word(104)).toBe(1);
     expect(word(105)).toBe(1); // object 0
     expect(word(106) / 1000).toBeCloseTo(10, 1);
+    session.destroy();
+  }, 120_000);
+
+  it("reports trigger zones, contacts, zero gravity and damping to Lua", async () => {
+    const layout = RAM_LAYOUTS.xbox360;
+    const mesh = cube();
+    const entry = (id: string, position: number[], scale: number[], physics: object) => ({
+      id,
+      name: id,
+      mesh,
+      transform: { position, rotation: [0, 0, 0], scale },
+      physics,
+    });
+    const sc = parseMeshScene(
+      JSON.stringify({
+        version: 2,
+        meshes: [
+          entry("floor", [0, -0.5, 0], [40, 1, 40], { body: "static", shape: "box" }),
+          entry("goal", [4, 1, 0], [2, 2, 2], { body: "static", shape: "box", trigger: true }),
+          entry("hero", [0, 1, 0], [0.6, 1.6, 0.6], { body: "character" }),
+          entry("floater", [-4, 3, 0], [1, 1, 1], { body: "dynamic", shape: "sphere", gravity: 0 }),
+          entry("slider", [-8, 0.5, 6], [1, 1, 1], { body: "dynamic", shape: "sphere", damping: 3 }),
+          entry("crate", [-8, 4, -6], [1, 1, 1], { body: "dynamic", shape: "box" }),
+        ],
+      }),
+    )!;
+    const code = `
+t = 0
+function TIC()
+  t = t + 1
+  if t == 5 then cartbox.velocity("slider", 6, 0, 0) end
+  cartbox.move("hero", 0.05, -0.1, 0)
+  for _, o in ipairs(cartbox.entered("goal")) do if o == cartbox.find("hero") and pmem(100) == 0 then pmem(100, t) end end
+  for _, o in ipairs(cartbox.exited("goal")) do if o == cartbox.find("hero") and pmem(101) == 0 then pmem(101, t) end end
+  pmem(102, math.max(pmem(102), #cartbox.inside("goal")))
+  for _, c in ipairs(cartbox.contacts()) do
+    local crate, floor = cartbox.find("crate"), cartbox.find("floor")
+    if c.started and not c.trigger and ((c.a == crate and c.b == floor) or (c.a == floor and c.b == crate)) and pmem(103) == 0 then pmem(103, t) end
+  end
+  local _, fy = cartbox.body("floater")
+  pmem(104, math.floor(fy * 1000))
+  local _, _, _, svx = cartbox.body("slider")
+  if t == 30 then pmem(105, math.floor(svx * 1000)) end
+end`;
+    let tic = codeChunks(new TextEncoder().encode(code));
+    tic = prependLuaCode(tic, sceneObjectsSdkLua(sc));
+    tic = prependLuaCode(tic, physicsSdkLua(sc, layout));
+    tic = injectSdk(tic);
+    const e = await bootBytes("xbox360/engine.js", tic);
+    const session = new PhysicsSession(sc, createRapierBackend(RAPIER));
+    const word = (i: number) => pmem(e)[i]! | 0;
+    for (let i = 0; i < 200; i += 1) {
+      session.beforeTick(block(e, layout));
+      e.mod._cbx_tick(e.h, 0);
+      session.afterTick(block(e, layout));
+    }
+    // The hero walks +x at 3 m/s: into the 2 m goal zone (edge at x = 3) and out past x = 5.
+    const entered = word(100);
+    const exited = word(101);
+    expect(entered).toBeGreaterThan(40);
+    expect(entered).toBeLessThan(70);
+    expect(exited).toBeGreaterThan(entered + 20);
+    expect(word(102)).toBe(1);
+    expect(word(103)).toBeGreaterThan(20); // the crate landed (it fell ~3.5 m)
+    expect(word(104) / 1000).toBeCloseTo(3, 2); // zero gravity: it floats
+    expect(word(105) / 1000).toBeLessThan(6 * 0.6); // damping slowed it within half a second
     session.destroy();
   }, 120_000);
 

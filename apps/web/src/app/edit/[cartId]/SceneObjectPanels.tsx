@@ -454,7 +454,7 @@ export function PhysicsPanel({
   const spec = entry.physics ?? null;
   const set = (patch: Partial<PhysicsSpec> | null) =>
     onChange(setMeshPhysics(sidecar, entry.id, patch === null ? null : { ...(spec ?? DEFAULT_PHYSICS_SPEC), ...patch }));
-  const number = (label: string, key: "mass" | "friction" | "bounce", step: number, min: number, max: number) => (
+  const number = (label: string, key: "mass" | "friction" | "bounce" | "gravity" | "damping", step: number, min: number, max: number, fallback?: number) => (
     <label style={{ display: "grid", gridTemplateColumns: "70px 1fr", gap: 6, alignItems: "center", fontSize: 12 }}>
       {label}
       <input
@@ -463,7 +463,7 @@ export function PhysicsPanel({
         min={min}
         max={max}
         aria-label={`Physics ${key}`}
-        value={spec?.[key] ?? DEFAULT_PHYSICS_SPEC[key]}
+        value={spec?.[key] ?? fallback ?? (key === "gravity" ? 1 : key === "damping" ? 0 : DEFAULT_PHYSICS_SPEC[key])}
         onChange={(event) => set({ [key]: Number(event.target.value) } as Partial<PhysicsSpec>)}
         style={inputStyle}
       />
@@ -495,14 +495,29 @@ export function PhysicsPanel({
               ))}
             </select>
           )}
+          {spec.body !== "character" && (
+            <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+              <input
+                type="checkbox"
+                aria-label="Trigger zone"
+                checked={spec.trigger === true}
+                onChange={(event) => set({ trigger: event.target.checked })}
+              />
+              Trigger zone — detects what enters, blocks nothing
+            </label>
+          )}
           {spec.body === "dynamic" && number("Mass kg", "mass", 0.1, 0.01, 10000)}
-          {number("Friction", "friction", 0.1, 0, 2)}
-          {number("Bounce", "bounce", 0.05, 0, 1)}
+          {spec.body === "dynamic" && number("Gravity ×", "gravity", 0.1, -10, 10)}
+          {spec.body === "dynamic" && number("Damping", "damping", 0.1, 0, 10)}
+          {!spec.trigger && number("Friction", "friction", 0.1, 0, 2)}
+          {!spec.trigger && number("Bounce", "bounce", 0.05, 0, 1)}
         </div>
       )}
       <RailHint>
         {spec
-          ? spec.body === "character"
+          ? spec.trigger
+            ? `In code: cartbox.entered(${JSON.stringify(entry.name)}), cartbox.exited(…), cartbox.inside(…).`
+            : spec.body === "character"
             ? `An upright capsule fitted to the mesh. In code: cartbox.move(${JSON.stringify(entry.name)}, dx, dy, dz).`
             : `The collider is fitted to the mesh. In code: cartbox.body(${JSON.stringify(entry.name)}).`
           : "Give the object a body to have it collide, fall or be pushed when the cart runs."}

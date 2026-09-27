@@ -57,6 +57,16 @@ export const PHYS_MAX_BODIES = 64;
 export const PHYS_RAYS = PHYS_BODIES + PHYS_MAX_BODIES * PHYS_BODY_BYTES; // 2112
 export const PHYS_RAY_BYTES = 32; // hit word (0 miss, 1 non-object, n+2 object n), x, y, z, nx, ny, nz, distance
 export const PHYS_MAX_RAYS = 16;
+/** This tick's contact events: count, then (a, b, flags) — bit 0 started, bit 1 a trigger. */
+export const PHYS_EVENTS = PHYS_RAYS + PHYS_MAX_RAYS * PHYS_RAY_BYTES; // 2624
+export const PHYS_EVENT_BYTES = 12;
+export const PHYS_MAX_EVENTS = 48;
+/** What is inside each trigger now: count, then (trigger, object) pairs. */
+export const PHYS_OVERLAPS = PHYS_EVENTS + 4 + PHYS_MAX_EVENTS * PHYS_EVENT_BYTES; // 3204
+export const PHYS_OVERLAP_BYTES = 8;
+export const PHYS_MAX_OVERLAPS = 64;
+export const PHYS_EVENT_STARTED = 1;
+export const PHYS_EVENT_TRIGGER = 2;
 
 // Lua → host (written during the tick; read and cleared after it).
 export const PHYS_CMDS = 4096;
@@ -112,13 +122,40 @@ export interface PhysicsRayHit {
   readonly distance: number;
 }
 
+/** A contact that began or ended during the last step, between two scene objects. */
+export interface PhysicsContactEvent {
+  readonly a: number;
+  readonly b: number;
+  readonly started: boolean;
+  /** One of the two is a trigger zone (an overlap, not a collision). */
+  readonly trigger: boolean;
+}
+
 /** Write the host → Lua half of the block. */
 export function writePhysicsState(
   block: DataView,
   tick: number,
   bodies: readonly PhysicsBodyState[],
   rays: readonly (PhysicsRayHit | null)[],
+  events: readonly PhysicsContactEvent[] = [],
+  overlaps: readonly (readonly [number, number])[] = [],
 ): void {
+  const ne = Math.min(events.length, PHYS_MAX_EVENTS);
+  block.setInt32(PHYS_EVENTS, ne, true);
+  for (let i = 0; i < ne; i += 1) {
+    const e = events[i]!;
+    const at = PHYS_EVENTS + 4 + i * PHYS_EVENT_BYTES;
+    block.setInt32(at, e.a, true);
+    block.setInt32(at + 4, e.b, true);
+    block.setInt32(at + 8, (e.started ? PHYS_EVENT_STARTED : 0) | (e.trigger ? PHYS_EVENT_TRIGGER : 0), true);
+  }
+  const no = Math.min(overlaps.length, PHYS_MAX_OVERLAPS);
+  block.setInt32(PHYS_OVERLAPS, no, true);
+  for (let i = 0; i < no; i += 1) {
+    const at = PHYS_OVERLAPS + 4 + i * PHYS_OVERLAP_BYTES;
+    block.setInt32(at, overlaps[i]![0], true);
+    block.setInt32(at + 4, overlaps[i]![1], true);
+  }
   block.setInt32(PHYS_HDR_MAGIC, PHYS_MAGIC, true);
   const n = Math.min(bodies.length, PHYS_MAX_BODIES);
   block.setInt32(PHYS_HDR_BODIES, n, true);

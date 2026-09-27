@@ -3858,6 +3858,10 @@ cartbox = {
   move = function() end,
   ray = function() end,
   hit = function() return false end,
+  contacts = function() return {} end,
+  entered = function() return {} end,
+  exited = function() return {} end,
+  inside = function() return {} end,
   -- Spawning prefab copies: overridden when the cart has prefabs.
   spawn = function() return nil end,
   despawn = function() end,
@@ -3968,6 +3972,14 @@ var PHYS_MAX_BODIES = 64;
 var PHYS_RAYS = PHYS_BODIES + PHYS_MAX_BODIES * PHYS_BODY_BYTES;
 var PHYS_RAY_BYTES = 32;
 var PHYS_MAX_RAYS = 16;
+var PHYS_EVENTS = PHYS_RAYS + PHYS_MAX_RAYS * PHYS_RAY_BYTES;
+var PHYS_EVENT_BYTES = 12;
+var PHYS_MAX_EVENTS = 48;
+var PHYS_OVERLAPS = PHYS_EVENTS + 4 + PHYS_MAX_EVENTS * PHYS_EVENT_BYTES;
+var PHYS_OVERLAP_BYTES = 8;
+var PHYS_MAX_OVERLAPS = 64;
+var PHYS_EVENT_STARTED = 1;
+var PHYS_EVENT_TRIGGER = 2;
 var PHYS_CMDS = 4096;
 var PHYS_CMD_BYTES = 32;
 var PHYS_MAX_CMDS = 64;
@@ -3988,7 +4000,23 @@ var toFix = (v) => {
   return Math.max(-2147483647, Math.min(2147483647, Number.isFinite(n) ? n : 0));
 };
 var fromFix = (n) => n / PHYS_FIX;
-function writePhysicsState(block, tick, bodies, rays) {
+function writePhysicsState(block, tick, bodies, rays, events = [], overlaps = []) {
+  const ne = Math.min(events.length, PHYS_MAX_EVENTS);
+  block.setInt32(PHYS_EVENTS, ne, true);
+  for (let i = 0; i < ne; i += 1) {
+    const e = events[i];
+    const at = PHYS_EVENTS + 4 + i * PHYS_EVENT_BYTES;
+    block.setInt32(at, e.a, true);
+    block.setInt32(at + 4, e.b, true);
+    block.setInt32(at + 8, (e.started ? PHYS_EVENT_STARTED : 0) | (e.trigger ? PHYS_EVENT_TRIGGER : 0), true);
+  }
+  const no = Math.min(overlaps.length, PHYS_MAX_OVERLAPS);
+  block.setInt32(PHYS_OVERLAPS, no, true);
+  for (let i = 0; i < no; i += 1) {
+    const at = PHYS_OVERLAPS + 4 + i * PHYS_OVERLAP_BYTES;
+    block.setInt32(at, overlaps[i][0], true);
+    block.setInt32(at + 4, overlaps[i][1], true);
+  }
   block.setInt32(PHYS_HDR_MAGIC, PHYS_MAGIC, true);
   const n = Math.min(bodies.length, PHYS_MAX_BODIES);
   block.setInt32(PHYS_HDR_BODIES, n, true);
@@ -4138,6 +4166,8 @@ var PhysicsSession = class {
     this.pooledBodies = /* @__PURE__ */ new Map();
     this.rayRequests = [];
     this.rayResults = [];
+    this.events = [];
+    this.overlapPairs = [];
     this.tick = 0;
     const slots = new Set(physicsSlots(scene));
     scene.instances.forEach((inst, i) => {
@@ -4153,6 +4183,9 @@ var PhysicsSession = class {
         mass: spec.mass,
         friction: spec.friction,
         bounce: spec.bounce,
+        ...spec.trigger ? { trigger: true } : {},
+        ...spec.gravity !== void 0 ? { gravity: spec.gravity } : {},
+        ...spec.damping !== void 0 ? { damping: spec.damping } : {},
         object: i
       });
       if (pooled) {
@@ -4172,7 +4205,7 @@ var PhysicsSession = class {
       const velocity = t.kind === "character" ? t.lastMove.map((v) => v / PHYSICS_DT) : s.velocity;
       return { object: t.object, position: s.position, velocity, grounded: t.grounded, sleeping: s.sleeping };
     });
-    writePhysicsState(block, this.tick, bodies, this.rayResults);
+    writePhysicsState(block, this.tick, bodies, this.rayResults, this.events, this.overlapPairs);
   }
   /** Apply the cart's commands, step the world, and cast the rays it asked for. */
   afterTick(block) {
@@ -4228,12 +4261,18 @@ var PhysicsSession = class {
       }
     }
     this.backend.step(PHYSICS_DT);
+    this.events = this.backend.drainContacts();
+    this.overlapPairs = this.backend.overlaps();
     this.tick += 1;
     this.rayResults = [];
     for (let slot = 0; slot < PHYS_MAX_RAYS; slot += 1) {
       const req = this.rayRequests[slot];
       this.rayResults[slot] = req ? this.backend.raycast(req.origin, req.direction, req.max) : null;
     }
+  }
+  /** Last step's contact events and current trigger overlaps (live inspection, tests). */
+  contacts() {
+    return { events: this.events, overlaps: this.overlapPairs };
   }
   /** Each moving body's live state, by object index (live inspection). */
   inspect() {
@@ -4347,6 +4386,41 @@ function PHYSICS_CALLS() {
     if w >= 2 then obj = w - 2 end
     return true, obj, _rd(at + 4) / ${PHYS_FIX}, _rd(at + 8) / ${PHYS_FIX}, _rd(at + 12) / ${PHYS_FIX},
       _rd(at + 16) / ${PHYS_FIX}, _rd(at + 20) / ${PHYS_FIX}, _rd(at + 24) / ${PHYS_FIX}, _rd(at + 28) / ${PHYS_FIX}
+  end
+  cartbox.contacts = function()
+    local out = {}
+    if not _live() then return out end
+    local n = _rd(_B + ${PHYS_EVENTS})
+    for k = 0, n - 1 do
+      local at = _B + ${PHYS_EVENTS + 4} + k * ${PHYS_EVENT_BYTES}
+      local f = _rd(at + 8)
+      out[#out + 1] = { a = _rd(at), b = _rd(at + 4), started = (f & 1) == 1, trigger = (f & 2) == 2 }
+    end
+    return out
+  end
+  local function _crossed(o, started)
+    local t = _obj(o)
+    local out = {}
+    if t == nil then return out end
+    for _, e in ipairs(cartbox.contacts()) do
+      if e.trigger and e.started == started then
+        if e.a == t then out[#out + 1] = e.b elseif e.b == t then out[#out + 1] = e.a end
+      end
+    end
+    return out
+  end
+  cartbox.entered = function(o) return _crossed(o, true) end
+  cartbox.exited = function(o) return _crossed(o, false) end
+  cartbox.inside = function(o)
+    local t = _obj(o)
+    local out = {}
+    if t == nil or not _live() then return out end
+    local n = _rd(_B + ${PHYS_OVERLAPS})
+    for k = 0, n - 1 do
+      local at = _B + ${PHYS_OVERLAPS + 4} + k * ${PHYS_OVERLAP_BYTES}
+      if _rd(at) == t then out[#out + 1] = _rd(at + 4) end
+    end
+    return out
   end
 `;
 }

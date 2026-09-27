@@ -289,6 +289,30 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
         snippet: "local hit, obj, hx, hy, hz = cartbox.hit(0)",
       },
       {
+        name: "cartbox.entered",
+        signature: "cartbox.entered(trigger) -> { obj, ... }",
+        doc: "Objects that came into a trigger zone this tick (tick Trigger on the object's Physics in the Inspector).",
+        snippet: 'for _, o in ipairs(cartbox.entered("goal")) do\n  \nend',
+      },
+      {
+        name: "cartbox.exited",
+        signature: "cartbox.exited(trigger) -> { obj, ... }",
+        doc: "Objects that left a trigger zone this tick.",
+        snippet: 'for _, o in ipairs(cartbox.exited("goal")) do\n  \nend',
+      },
+      {
+        name: "cartbox.inside",
+        signature: "cartbox.inside(trigger) -> { obj, ... }",
+        doc: "Every object in a trigger zone right now.",
+        snippet: 'local n = #cartbox.inside("zone")',
+      },
+      {
+        name: "cartbox.contacts",
+        signature: "cartbox.contacts() -> { {a=, b=, started=, trigger=}, ... }",
+        doc: "Every contact that began (started = true) or ended this tick between two objects; trigger is true for trigger-zone overlaps.",
+        snippet: "for _, c in ipairs(cartbox.contacts()) do\n  if c.started then\n    \n  end\nend",
+      },
+      {
         name: "cartbox.physics",
         signature: "cartbox.physics() -> bool",
         doc: "Whether the cart's physics is running (false in carts without bodies).",

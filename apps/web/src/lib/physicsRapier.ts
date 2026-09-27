@@ -39,6 +39,8 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
   const colliders: Collider[] = [];
   const objectOf = new Map<number, number>(); // collider handle → scene object
   const characters = new Set<number>(); // body handles of characters
+  const events = new R.EventQueue(true);
+  const sensors: Collider[] = [];
   const controller = world.createCharacterController(0.02);
   controller.enableSnapToGround(0.3);
   controller.setMaxSlopeClimbAngle((50 * Math.PI) / 180);
@@ -59,6 +61,10 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
       // A character stays upright: rotation is the cart's to show, not physics'.
       if (desc.kind !== "character") bodyDesc.setRotation({ x: q[0], y: q[1], z: q[2], w: q[3] });
       if (desc.kind === "kinematic") bodyDesc.setCanSleep(false);
+      if (desc.kind === "dynamic") {
+        if (desc.gravity !== undefined) bodyDesc.setGravityScale(desc.gravity);
+        if (desc.damping !== undefined) bodyDesc.setLinearDamping(desc.damping);
+      }
       const body = world.createRigidBody(bodyDesc);
       const s = desc.shape;
       const colliderDesc =
@@ -71,7 +77,14 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
               : R.ColliderDesc.trimesh(s.vertices, s.indices);
       colliderDesc.setFriction(desc.friction).setRestitution(desc.bounce);
       if (desc.kind === "dynamic") colliderDesc.setMass(desc.mass);
+      colliderDesc.setActiveEvents(R.ActiveEvents.COLLISION_EVENTS);
+      if (desc.trigger) {
+        // A trigger overlaps everything (static, kinematic and character bodies
+        // included), blocks nothing, and reports who's inside.
+        colliderDesc.setSensor(true).setActiveCollisionTypes(R.ActiveCollisionTypes.ALL);
+      }
       const collider = world.createCollider(colliderDesc, body);
+      if (desc.trigger) sensors.push(collider);
       objectOf.set(collider.handle, desc.object);
       bodies.push(body);
       colliders.push(collider);
@@ -81,7 +94,34 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
 
     step(dt: number): void {
       world.timestep = dt;
-      world.step();
+      world.step(events);
+    },
+
+    drainContacts() {
+      const out: { a: number; b: number; started: boolean; trigger: boolean }[] = [];
+      events.drainCollisionEvents((h1, h2, started) => {
+        const c1 = world.getCollider(h1);
+        const c2 = world.getCollider(h2);
+        out.push({
+          a: objectOf.get(h1) ?? -1,
+          b: objectOf.get(h2) ?? -1,
+          started,
+          trigger: Boolean(c1?.isSensor() || c2?.isSensor()),
+        });
+      });
+      return out;
+    },
+
+    overlaps() {
+      const out: [number, number][] = [];
+      for (const sensor of sensors) {
+        if (!sensor.isEnabled() || !sensor.parent()?.isEnabled()) continue;
+        const trigger = objectOf.get(sensor.handle) ?? -1;
+        world.intersectionPairsWith(sensor, (other) => {
+          out.push([trigger, objectOf.get(other.handle) ?? -1]);
+        });
+      }
+      return out;
     },
 
     bodyState(handle: number) {
@@ -123,7 +163,8 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
       const body = bodies[handle];
       const collider = colliders[handle];
       if (!body || !collider) return { grounded: false };
-      controller.computeColliderMovement(collider, v3(delta));
+      // Trigger zones don't block a character (it walks into them).
+      controller.computeColliderMovement(collider, v3(delta), R.QueryFilterFlags.EXCLUDE_SENSORS);
       const m = controller.computedMovement();
       const t = body.translation();
       const next = { x: t.x + m.x, y: t.y + m.y, z: t.z + m.z };
@@ -136,7 +177,8 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
 
     raycast(origin: PhysicsVec3, direction: PhysicsVec3, maxDistance: number) {
       const ray = new R.Ray(v3(origin), v3(direction));
-      const hit = world.castRayAndGetNormal(ray, maxDistance, true);
+      // Rays pass through trigger zones.
+      const hit = world.castRayAndGetNormal(ray, maxDistance, true, R.QueryFilterFlags.EXCLUDE_SENSORS);
       if (!hit) return null;
       const toi = (hit as unknown as { timeOfImpact?: number; toi?: number }).timeOfImpact ?? (hit as unknown as { toi: number }).toi;
       const point = ray.pointAt(toi);
@@ -166,6 +208,7 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
     },
 
     destroy(): void {
+      events.free();
       world.removeCharacterController(controller);
       world.free();
     },

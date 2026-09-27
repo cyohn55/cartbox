@@ -28,6 +28,7 @@ import {
   writePhysicsState,
   type PhysicsBodyState,
   type PhysicsCommand,
+  type PhysicsContactEvent,
   type PhysicsRayHit,
 } from "./protocol.js";
 
@@ -49,6 +50,12 @@ export interface PhysicsBodyDesc {
   readonly mass: number;
   readonly friction: number;
   readonly bounce: number;
+  /** A trigger zone: reports overlaps, blocks nothing. */
+  readonly trigger?: boolean;
+  /** Gravity multiplier (dynamic bodies). */
+  readonly gravity?: number;
+  /** Linear damping (dynamic bodies). */
+  readonly damping?: number;
   /** The scene object this body belongs to (reported back by raycasts). */
   readonly object: number;
 }
@@ -70,6 +77,10 @@ export interface PhysicsBackend {
   setEnabled(handle: number, enabled: boolean): void;
   /** Place a body at a position and rotation at once, at rest. */
   setPose(handle: number, position: Vec3, rotation: Quat): void;
+  /** Contacts that began or ended during the last step (scene object indices). */
+  drainContacts(): PhysicsContactEvent[];
+  /** What is inside each trigger now, as (trigger object, other object) pairs. */
+  overlaps(): [number, number][];
   destroy(): void;
 }
 
@@ -204,6 +215,8 @@ export class PhysicsSession {
   private readonly pooledBodies = new Map<number, { handle: number; enabled: boolean }>();
   private rayRequests: ({ origin: Vec3; direction: Vec3; max: number } | null)[] = [];
   private rayResults: (PhysicsRayHit | null)[] = [];
+  private events: PhysicsContactEvent[] = [];
+  private overlapPairs: [number, number][] = [];
   private tick = 0;
 
   constructor(
@@ -224,6 +237,9 @@ export class PhysicsSession {
         mass: spec.mass,
         friction: spec.friction,
         bounce: spec.bounce,
+        ...(spec.trigger ? { trigger: true } : {}),
+        ...(spec.gravity !== undefined ? { gravity: spec.gravity } : {}),
+        ...(spec.damping !== undefined ? { damping: spec.damping } : {}),
         object: i,
       });
       if (pooled) {
@@ -244,7 +260,7 @@ export class PhysicsSession {
       const velocity: Vec3 = t.kind === "character" ? (t.lastMove.map((v) => v / PHYSICS_DT) as unknown as Vec3) : s.velocity;
       return { object: t.object, position: s.position, velocity, grounded: t.grounded, sleeping: s.sleeping };
     });
-    writePhysicsState(block, this.tick, bodies, this.rayResults);
+    writePhysicsState(block, this.tick, bodies, this.rayResults, this.events, this.overlapPairs);
   }
 
   /** Apply the cart's commands, step the world, and cast the rays it asked for. */
@@ -303,12 +319,19 @@ export class PhysicsSession {
       }
     }
     this.backend.step(PHYSICS_DT);
+    this.events = this.backend.drainContacts();
+    this.overlapPairs = this.backend.overlaps();
     this.tick += 1;
     this.rayResults = [];
     for (let slot = 0; slot < PHYS_MAX_RAYS; slot += 1) {
       const req = this.rayRequests[slot];
       this.rayResults[slot] = req ? this.backend.raycast(req.origin, req.direction, req.max) : null;
     }
+  }
+
+  /** Last step's contact events and current trigger overlaps (live inspection, tests). */
+  contacts(): { events: readonly PhysicsContactEvent[]; overlaps: readonly (readonly [number, number])[] } {
+    return { events: this.events, overlaps: this.overlapPairs };
   }
 
   /** Each moving body's live state, by object index (live inspection). */
