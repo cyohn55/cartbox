@@ -8251,6 +8251,19 @@ function viewDirection(view) {
   const length = Math.hypot(x, y, z);
   return length < 1e-8 ? [0, 0, 1] : [x / length, y / length, z / length];
 }
+var INSTANCE_FLOATS = 60;
+function writeInstanceTransform(target, index, transform2) {
+  const base = index * INSTANCE_FLOATS;
+  for (let i = 0; i < 16; i += 1) {
+    target[base + i] = transform2.mvp[i];
+    target[base + 16 + i] = transform2.lightMvp ? transform2.lightMvp[i] : 0;
+    target[base + 32 + i] = transform2.model[i];
+  }
+  for (let column = 0; column < 3; column += 1) {
+    for (let row = 0; row < 3; row += 1) target[base + 48 + column * 4 + row] = transform2.normalBasis[column * 3 + row];
+    target[base + 48 + column * 4 + 3] = 0;
+  }
+}
 function writeInstanceUniform(target, index, uniform) {
   const base = index * UNIFORM_FLOATS;
   for (let i = 0; i < 16; i += 1) target[base + OFFSET_MVP + i] = uniform.mvp[i];
@@ -8433,6 +8446,15 @@ struct Light {
 // The Modern-tier light list (packLights); the uniform's ssaoMeta.y bounds the
 // loop, so a spare 1-light buffer is bound when there are none.
 @group(0) @binding(9) var<storage, read> lights: array<Light>;
+// Per-instance transforms (see "Instancing" above), indexed by instance_index \u2014
+// which counts from the draw's firstInstance, so each batch reads its own run.
+struct InstanceXf {
+  mvp: mat4x4<f32>,
+  lightMvp: mat4x4<f32>,
+  model: mat4x4<f32>,
+  nrm: mat3x3<f32>,
+};
+@group(0) @binding(10) var<storage, read> xf: array<InstanceXf>;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
@@ -8521,13 +8543,15 @@ fn vs(
   @location(0) position: vec3<f32>,
   @location(1) normal: vec3<f32>,
   @location(2) uv: vec2<f32>,
+  @builtin(instance_index) instance: u32,
 ) -> VSOut {
   var out: VSOut;
-  out.pos = u.mvp * vec4<f32>(position, 1.0);
-  out.normal = u.nrm * normal;
+  let t = xf[instance];
+  out.pos = t.mvp * vec4<f32>(position, 1.0);
+  out.normal = t.nrm * normal;
   out.uv = uv;
-  out.lightClip = u.lightMvp * vec4<f32>(position, 1.0);
-  out.worldPos = (u.model * vec4<f32>(position, 1.0)).xyz;
+  out.lightClip = t.lightMvp * vec4<f32>(position, 1.0);
+  out.worldPos = (t.model * vec4<f32>(position, 1.0)).xyz;
   out.eyeDepth = out.pos.w; // clip w = view depth, for distance fog
   return out;
 }
@@ -8673,6 +8697,9 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
 }
 `
 );
+function sameTextures(a, b) {
+  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis;
+}
 var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   constructor(device, width, height, pipeline, bindGroupLayout, colourTexture, depthTexture, sampler, blankTexture, blankShadow, readback, bytesPerRow, style) {
     this.device = device;
@@ -8710,6 +8737,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     /** The Modern-tier light storage buffer, grown as needed; always ≥ 1 light. */
     this.lightBuffer = null;
     this.lightBufferFloats = 0;
+    /** Per-instance transforms (binding 10), grown as needed. */
+    this.instanceBuffer = null;
+    this.instanceCapacity = 0;
+    this.instanceData = new Float32Array(0);
+    /** Draw calls and instances in the last submitted frame (for profiling and tests). */
+    this.lastFrameStats = { drawCalls: 0, instances: 0 };
     this.software = new SoftwareSceneRenderer(style);
     this.shadowTexture = blankShadow;
     this.envTexture = blankTexture;
@@ -8795,7 +8828,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           // The SSAO buffer (r32float), read per fragment via textureLoad.
           { binding: 8, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
           // The Modern-tier light list, read-only storage.
-          { binding: 9, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } }
+          { binding: 9, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
+          // Per-instance transforms, read by the vertex stage.
+          { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } }
         ]
       });
       const pipeline = device.createRenderPipeline({
@@ -8979,26 +9014,34 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   submit(instances, draw) {
     const viewProj = multiplyMat44(draw.projection, draw.view);
     const draws = [];
+    const byPrimitive = /* @__PURE__ */ new Map();
+    let instanceCount = 0;
     for (const instance of instances) {
       const geometries = this.uploadMesh(instance.mesh);
       instance.mesh.primitives.forEach((primitive, index) => {
         const geometry = geometries[index];
         if (!geometry || geometry.indexCount === 0) return;
-        draws.push({
-          primitive,
-          geometry,
-          textures: {
-            base: instance.textures?.[index] ?? null,
-            mr: instance.mrTextures?.[index] ?? null,
-            occ: instance.occlusionTextures?.[index] ?? null,
-            emis: instance.emissiveTextures?.[index] ?? null
-          },
-          model: instance.model
-        });
+        const textures = {
+          base: instance.textures?.[index] ?? null,
+          mr: instance.mrTextures?.[index] ?? null,
+          occ: instance.occlusionTextures?.[index] ?? null,
+          emis: instance.emissiveTextures?.[index] ?? null
+        };
+        let batches = byPrimitive.get(primitive);
+        if (!batches) byPrimitive.set(primitive, batches = []);
+        let batch = batches.find((b) => sameTextures(b.textures, textures));
+        if (!batch) {
+          batch = { primitive, geometry, textures, models: [], first: 0 };
+          batches.push(batch);
+          draws.push(batch);
+        }
+        batch.models.push(instance.model);
+        instanceCount += 1;
       });
     }
     if (draws.length === 0) return;
     this.ensureUniformCapacity(draws.length);
+    this.ensureInstanceCapacity(instanceCount);
     const light = resolveLight(draw.lightDirection, draw.ambient);
     const viewDir = viewDirection(draw.view);
     const shadow = draw.shadow ?? null;
@@ -9031,7 +9074,19 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const sceneLights = draw.lights ?? null;
     this.uploadLights(packLights(sceneLights ?? []));
     const lightCount = sceneLights?.length ?? 0;
+    let next = 0;
     draws.forEach((entry, index) => {
+      entry.first = next;
+      for (const model2 of entry.models) {
+        writeInstanceTransform(this.instanceData, next, {
+          mvp: multiplyMat44(viewProj, model2),
+          lightMvp: shadow ? multiplyMat44(shadow.lightViewProj, model2) : null,
+          model: model2,
+          normalBasis: normalBasis3x3(model2)
+        });
+        next += 1;
+      }
+      const model = entry.models[0];
       const pbr = resolvePbr(
         entry.primitive.material,
         entry.textures.mr !== null,
@@ -9039,8 +9094,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         entry.textures.emis !== null
       );
       writeInstanceUniform(this.uniformData, index, {
-        mvp: multiplyMat44(viewProj, entry.model),
-        normalBasis: normalBasis3x3(entry.model),
+        mvp: multiplyMat44(viewProj, model),
+        normalBasis: normalBasis3x3(model),
         baseColor: entry.primitive.material.baseColorFactor,
         hasTexture: entry.textures.base !== null,
         light,
@@ -9050,16 +9105,18 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         hasOcclusionMap: entry.textures.occ !== null,
         hasEmissiveMap: entry.textures.emis !== null,
         environment: draw.environment ?? null,
-        lightMvp: shadow ? multiplyMat44(shadow.lightViewProj, entry.model) : null,
+        lightMvp: shadow ? multiplyMat44(shadow.lightViewProj, model) : null,
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
-        model: entry.model,
+        model,
         lightCount,
         fog: draw.fog ?? null
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
+    this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, instanceCount * INSTANCE_FLOATS);
+    this.lastFrameStats = { drawCalls: draws.length, instances: instanceCount };
     const encoder = this.device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
       colorAttachments: [
@@ -9084,7 +9141,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.textures), [index * UNIFORM_STRIDE]);
       pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
       pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-      pass.drawIndexed(entry.geometry.indexCount);
+      pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
     });
     pass.end();
     const slot = this.readback.find((entry) => !entry.busy);
@@ -9125,6 +9182,19 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       // UNIFORM | COPY_DST
     });
     this.uniformData = new Float32Array(this.uniformCapacity * UNIFORM_FLOATS);
+    this.bindGroups = /* @__PURE__ */ new WeakMap();
+  }
+  /** Grow the per-instance transform buffer to hold at least `count` instances. */
+  ensureInstanceCapacity(count) {
+    if (count <= this.instanceCapacity) return;
+    destroySafely(this.instanceBuffer);
+    this.instanceCapacity = Math.max(count, this.instanceCapacity * 2, 16);
+    this.instanceBuffer = this.device.createBuffer({
+      size: this.instanceCapacity * INSTANCE_FLOATS * 4,
+      usage: 128 | 8
+      // STORAGE | COPY_DST
+    });
+    this.instanceData = new Float32Array(this.instanceCapacity * INSTANCE_FLOATS);
     this.bindGroups = /* @__PURE__ */ new WeakMap();
   }
   /**
@@ -9194,7 +9264,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // The active SSAO buffer (or the 1x1 blank); likewise cache-invalidated.
         { binding: 8, resource: this.ssaoBound.createView() },
         // The light storage buffer; a grow changes identity and invalidates the cache.
-        { binding: 9, resource: { buffer: this.lightBuffer } }
+        { binding: 9, resource: { buffer: this.lightBuffer } },
+        // The instance transforms; a grow changes identity and invalidates the cache.
+        { binding: 10, resource: { buffer: this.instanceBuffer } }
       ]
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });
@@ -9232,6 +9304,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     if (this.envTexture !== this.blankTexture) destroySafely(this.envTexture);
     destroySafely(this.ssaoTexture);
     destroySafely(this.lightBuffer);
+    destroySafely(this.instanceBuffer);
     destroySafely(this.uniformBuffer);
     for (const slot of this.readback) destroySafely(slot.buffer);
   }
@@ -10489,6 +10562,7 @@ export {
   EngineLoadError,
   GamepadInput,
   HEIGHT_WORLD,
+  INSTANCE_FLOATS,
   LIGHTS_BASE,
   LIGHTS_CAPACITY,
   LIGHT_FLOATS,
@@ -10686,6 +10760,7 @@ export {
   viewDirection,
   webgpuCanHonour,
   worldCenter,
+  writeInstanceTransform,
   writeInstanceUniform,
   writeNetInbox,
   writePhysicsState

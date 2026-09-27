@@ -137,8 +137,10 @@ export {
   unpadRows,
   viewDirection,
   writeInstanceUniform,
+  INSTANCE_FLOATS,
+  writeInstanceTransform,
 } from "./render/scenePacking.js";
-export type { PackableLight, PbrMaterial, ResolvedPbr } from "./render/scenePacking.js";
+export type { InstanceTransform, PackableLight, PbrMaterial, ResolvedPbr } from "./render/scenePacking.js";
 export { createConsole, loadEngineModule } from "./engine.js";
 export type { ConsoleInstance } from "./engine.js";
 

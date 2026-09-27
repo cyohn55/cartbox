@@ -40,6 +40,19 @@
  * on `mapAsync` inside `blit` would convert a GPU win into a pipeline bubble
  * worse than the CPU path it replaces.
  *
+ * ## Instancing
+ *
+ * Every copy of a primitive that binds the same textures goes out as one
+ * instanced draw: a forest of one tree mesh, a pool of spawned crates or a
+ * level's repeated pillars costs one draw call per primitive rather than one per
+ * copy. The material uniforms are shared by the batch; each copy's transforms
+ * (mvp, light mvp, model, normal basis) live in a storage buffer indexed by
+ * `instance_index`. They are still composed on the CPU in float64 and handed
+ * over as the same float32s the per-draw uniforms carried, so batching changes
+ * nothing on screen. The one ordering it does change is between exactly
+ * coplanar copies (which one wins the depth tie), where draw order was already
+ * an accident.
+ *
  * WebGPU is not in this project's TS DOM lib and we do not want the
  * @webgpu/types dependency, so the handles are loosely typed — the same
  * convention the editor's GPU renderers use. Everything with real logic in it
@@ -75,6 +88,8 @@ import {
   unpadRows,
   viewDirection,
   writeInstanceUniform,
+  INSTANCE_FLOATS,
+  writeInstanceTransform,
 } from "./scenePacking.js";
 
 /**
@@ -161,6 +176,15 @@ struct Light {
 // The Modern-tier light list (packLights); the uniform's ssaoMeta.y bounds the
 // loop, so a spare 1-light buffer is bound when there are none.
 @group(0) @binding(9) var<storage, read> lights: array<Light>;
+// Per-instance transforms (see "Instancing" above), indexed by instance_index —
+// which counts from the draw's firstInstance, so each batch reads its own run.
+struct InstanceXf {
+  mvp: mat4x4<f32>,
+  lightMvp: mat4x4<f32>,
+  model: mat4x4<f32>,
+  nrm: mat3x3<f32>,
+};
+@group(0) @binding(10) var<storage, read> xf: array<InstanceXf>;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
@@ -249,13 +273,15 @@ fn vs(
   @location(0) position: vec3<f32>,
   @location(1) normal: vec3<f32>,
   @location(2) uv: vec2<f32>,
+  @builtin(instance_index) instance: u32,
 ) -> VSOut {
   var out: VSOut;
-  out.pos = u.mvp * vec4<f32>(position, 1.0);
-  out.normal = u.nrm * normal;
+  let t = xf[instance];
+  out.pos = t.mvp * vec4<f32>(position, 1.0);
+  out.normal = t.nrm * normal;
   out.uv = uv;
-  out.lightClip = u.lightMvp * vec4<f32>(position, 1.0);
-  out.worldPos = (u.model * vec4<f32>(position, 1.0)).xyz;
+  out.lightClip = t.lightMvp * vec4<f32>(position, 1.0);
+  out.worldPos = (t.model * vec4<f32>(position, 1.0)).xyz;
   out.eyeDepth = out.pos.w; // clip w = view depth, for distance fog
   return out;
 }
@@ -428,6 +454,20 @@ interface PrimitiveTextures {
   emis: DecodedTexture | null;
 }
 
+function sameTextures(a: PrimitiveTextures, b: PrimitiveTextures): boolean {
+  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis;
+}
+
+/** The copies of one primitive drawn together (see "Instancing" above). */
+interface Batch {
+  primitive: MeshPrimitive;
+  geometry: GpuPrimitive;
+  textures: PrimitiveTextures;
+  models: Mat4[];
+  /** Index of the batch's first copy in the instance buffer. */
+  first: number;
+}
+
 export class WebgpuSceneRenderer implements SceneRenderer {
   readonly backend = "webgpu" as const;
 
@@ -474,6 +514,14 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   /** The Modern-tier light storage buffer, grown as needed; always ≥ 1 light. */
   private lightBuffer: any = null;
   private lightBufferFloats = 0;
+
+  /** Per-instance transforms (binding 10), grown as needed. */
+  private instanceBuffer: any = null;
+  private instanceCapacity = 0;
+  private instanceData = new Float32Array(0);
+
+  /** Draw calls and instances in the last submitted frame (for profiling and tests). */
+  lastFrameStats = { drawCalls: 0, instances: 0 };
 
   private constructor(
     private readonly device: any,
@@ -595,6 +643,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 8, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
           // The Modern-tier light list, read-only storage.
           { binding: 9, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
+          // Per-instance transforms, read by the vertex stage.
+          { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
         ],
       });
 
@@ -803,30 +853,39 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private submit(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
     const viewProj = multiplyMat4(draw.projection, draw.view);
 
-    // Flatten to one draw per primitive so the uniform buffer can be written in
-    // a single upload and each draw addressed by a dynamic offset.
-    const draws: { primitive: MeshPrimitive; geometry: GpuPrimitive; textures: PrimitiveTextures; model: Mat4 }[] = [];
+    // Batch the copies of each primitive that bind the same textures: one
+    // uniform (addressed by a dynamic offset) and one instanced draw per batch,
+    // in the order each batch first appears.
+    const draws: Batch[] = [];
+    const byPrimitive = new Map<MeshPrimitive, Batch[]>();
+    let instanceCount = 0;
     for (const instance of instances) {
       const geometries = this.uploadMesh(instance.mesh);
       instance.mesh.primitives.forEach((primitive, index) => {
         const geometry = geometries[index];
         if (!geometry || geometry.indexCount === 0) return;
-        draws.push({
-          primitive,
-          geometry,
-          textures: {
-            base: instance.textures?.[index] ?? null,
-            mr: instance.mrTextures?.[index] ?? null,
-            occ: instance.occlusionTextures?.[index] ?? null,
-            emis: instance.emissiveTextures?.[index] ?? null,
-          },
-          model: instance.model,
-        });
+        const textures: PrimitiveTextures = {
+          base: instance.textures?.[index] ?? null,
+          mr: instance.mrTextures?.[index] ?? null,
+          occ: instance.occlusionTextures?.[index] ?? null,
+          emis: instance.emissiveTextures?.[index] ?? null,
+        };
+        let batches = byPrimitive.get(primitive);
+        if (!batches) byPrimitive.set(primitive, (batches = []));
+        let batch = batches.find((b) => sameTextures(b.textures, textures));
+        if (!batch) {
+          batch = { primitive, geometry, textures, models: [], first: 0 };
+          batches.push(batch);
+          draws.push(batch);
+        }
+        batch.models.push(instance.model);
+        instanceCount += 1;
       });
     }
     if (draws.length === 0) return;
 
     this.ensureUniformCapacity(draws.length);
+    this.ensureInstanceCapacity(instanceCount);
     // Resolved once: the light and view direction are per frame, not per draw, and
     // normalising them per primitive would be the same answer computed many times.
     const light = resolveLight(draw.lightDirection, draw.ambient);
@@ -878,7 +937,21 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.uploadLights(packLights(sceneLights ?? []));
     const lightCount = sceneLights?.length ?? 0;
 
+    let next = 0;
     draws.forEach((entry, index) => {
+      entry.first = next;
+      for (const model of entry.models) {
+        writeInstanceTransform(this.instanceData, next, {
+          mvp: multiplyMat4(viewProj, model),
+          lightMvp: shadow ? multiplyMat4(shadow.lightViewProj, model) : null,
+          model,
+          normalBasis: normalBasis3x3(model),
+        });
+        next += 1;
+      }
+      // The batch's material uniforms. The transform fields are the first
+      // copy's; the shader reads every copy's own from the instance buffer.
+      const model = entry.models[0]!;
       const pbr = resolvePbr(
         entry.primitive.material,
         entry.textures.mr !== null,
@@ -886,8 +959,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         entry.textures.emis !== null,
       );
       writeInstanceUniform(this.uniformData, index, {
-        mvp: multiplyMat4(viewProj, entry.model),
-        normalBasis: normalBasis3x3(entry.model),
+        mvp: multiplyMat4(viewProj, model),
+        normalBasis: normalBasis3x3(model),
         baseColor: entry.primitive.material.baseColorFactor,
         hasTexture: entry.textures.base !== null,
         light,
@@ -897,16 +970,18 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         hasOcclusionMap: entry.textures.occ !== null,
         hasEmissiveMap: entry.textures.emis !== null,
         environment: draw.environment ?? null,
-        lightMvp: shadow ? multiplyMat4(shadow.lightViewProj, entry.model) : null,
+        lightMvp: shadow ? multiplyMat4(shadow.lightViewProj, model) : null,
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
-        model: entry.model,
+        model,
         lightCount,
         fog: draw.fog ?? null,
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
+    this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, instanceCount * INSTANCE_FLOATS);
+    this.lastFrameStats = { drawCalls: draws.length, instances: instanceCount };
 
     const encoder = this.device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
@@ -932,7 +1007,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.textures), [index * UNIFORM_STRIDE]);
       pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
       pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-      pass.drawIndexed(entry.geometry.indexCount);
+      pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
     });
     pass.end();
 
@@ -981,6 +1056,19 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // The buffer changed identity, so every cached bind group referencing the
     // old one is stale.
     this.bindGroups = new WeakMap();
+  }
+
+  /** Grow the per-instance transform buffer to hold at least `count` instances. */
+  private ensureInstanceCapacity(count: number): void {
+    if (count <= this.instanceCapacity) return;
+    destroySafely(this.instanceBuffer);
+    this.instanceCapacity = Math.max(count, this.instanceCapacity * 2, 16);
+    this.instanceBuffer = this.device.createBuffer({
+      size: this.instanceCapacity * INSTANCE_FLOATS * 4,
+      usage: 0x80 | 0x08, // STORAGE | COPY_DST
+    });
+    this.instanceData = new Float32Array(this.instanceCapacity * INSTANCE_FLOATS);
+    this.bindGroups = new WeakMap(); // binding 10 changed identity
   }
 
   /**
@@ -1062,6 +1150,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 8, resource: this.ssaoBound.createView() },
         // The light storage buffer; a grow changes identity and invalidates the cache.
         { binding: 9, resource: { buffer: this.lightBuffer } },
+        // The instance transforms; a grow changes identity and invalidates the cache.
+        { binding: 10, resource: { buffer: this.instanceBuffer } },
       ],
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });
@@ -1101,6 +1191,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     if (this.envTexture !== this.blankTexture) destroySafely(this.envTexture);
     destroySafely(this.ssaoTexture);
     destroySafely(this.lightBuffer);
+    destroySafely(this.instanceBuffer);
     destroySafely(this.uniformBuffer);
     for (const slot of this.readback) destroySafely(slot.buffer);
   }

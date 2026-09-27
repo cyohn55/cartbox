@@ -124,7 +124,10 @@ trades state and commands with the cart through an 8 KB block at the end of RAM
 
 - [ ] Meshopt / Draco geometry compression on glTF import.
 - [ ] KTX2 / Basis texture compression with mipmaps.
-- [ ] GPU instancing for repeated meshes (WebGPU).
+- [x] GPU instancing for repeated meshes (WebGPU): every copy of a primitive that
+      binds the same textures is one instanced draw, with each copy's transforms in a
+      storage buffer. The picture stays byte-identical to the software rasteriser
+      (checked on a real device by `webgpu-parity.test.ts`).
 - [ ] Asset bundles and streaming: load a level's assets on demand, with a loading
       screen and progress.
 - [ ] WebGL2 fallback renderer for browsers without WebGPU.
