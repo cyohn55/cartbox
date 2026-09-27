@@ -10,6 +10,7 @@ import { CanvasSurface, type DisplaySurface } from "./display.js";
 import { LitCanvasSurface } from "./lighting/LitCanvasSurface.js";
 import { PostFxSurface } from "./fx/PostFxSurface.js";
 import { anyPostFxEnabled, type PostFxSettings } from "./fx/postfx.js";
+import { QUALITY_PRESETS, applyQualityToPostFx, browserDeviceHints, resolveQuality, type QualityChoice, type QualityLevel, type QualitySettings } from "./quality.js";
 import { createConsole, loadEngineModule, type ConsoleInstance } from "./engine.js";
 import { GamepadInput, GamepadState, KeyboardInput, TouchInput, hasTouchSupport } from "./input.js";
 import { frameDurationMs, getModel, type ConsoleModel } from "./models.js";
@@ -76,6 +77,8 @@ export class Player {
   private sceneRenderer?: SceneRenderer;
   private foregroundSurface?: AnimatedForegroundSurface;
   private postFxSurface?: PostFxSurface;
+  /** The graphics preset in effect (resolved from the quality option once the renderer is known). */
+  private qualitySettings: QualitySettings = QUALITY_PRESETS.high;
   private basePostFx?: PostFxSettings;
   private anim?: AnimSpec;
   /** Presented-frame clock for animation, kept in lockstep with the scene backdrop. */
@@ -277,6 +280,8 @@ export class Player {
             this.model.renderCaps,
           );
         }
+        // "auto" quality weighs the device, including whether the GPU renderer came up.
+        this.qualitySettings = resolveQuality(this.options.quality, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend === "webgpu" : undefined));
         if (mesh) {
           surface = this.meshSurface = await MeshOverlaySurface.create(
             surface,
@@ -285,6 +290,7 @@ export class Player {
             mesh,
             this.sceneRenderer,
           );
+          this.meshSurface.setQuality(this.qualitySettings);
         }
         // The HD-2D world composites a 3D tile terrain plus the cart's 2D character
         // billboards over the frame, textured from the cart's sprite sheet and
@@ -325,8 +331,9 @@ export class Player {
       };
       const postFx = this.options.postFx;
       this.basePostFx = postFx;
-      if (postFx && anyPostFxEnabled(postFx)) {
-        const fx = await PostFxSurface.create(this.container, scale, this.model, postFx, makeBaseSurface);
+      const shownFx = postFx ? applyQualityToPostFx(postFx, this.qualitySettings) : undefined;
+      if (shownFx && anyPostFxEnabled(shownFx)) {
+        const fx = await PostFxSurface.create(this.container, scale, this.model, shownFx, makeBaseSurface);
         if (fx) this.postFxSurface = fx;
         this.surface = fx ?? (await makeBaseSurface(this.container));
       } else {
@@ -492,6 +499,23 @@ export class Player {
     }
   }
 
+  /**
+   * Change the graphics preset live ("auto" re-detects). Shadows and the 3D
+   * resolution follow at once; effects the preset turns off go off now, and ones
+   * it turns back on need the post-effect stage to have been started with some
+   * effect on.
+   */
+  setQuality(choice: QualityChoice): void {
+    this.qualitySettings = resolveQuality(choice, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend === "webgpu" : undefined));
+    this.meshSurface?.setQuality(this.qualitySettings);
+    if (this.postFxSurface && this.basePostFx) this.postFxSurface.setSettings(applyQualityToPostFx(this.basePostFx, this.qualitySettings));
+  }
+
+  /** The graphics preset in effect. */
+  quality(): QualityLevel {
+    return this.qualitySettings.level;
+  }
+
   /** Live inspection: every scene object's placement and state this frame. */
   inspect(): InspectedObject[] {
     const scene = this.options.mesh;
@@ -616,10 +640,9 @@ export class Player {
     this.foregroundSurface?.setPlacements(state.placements);
 
     if (this.postFxSurface && this.basePostFx && Object.keys(state.postfx).length > 0) {
-      this.postFxSurface.setSettings({
-        ...this.basePostFx,
-        values: { ...this.basePostFx.values, ...state.postfx },
-      });
+      this.postFxSurface.setSettings(
+        applyQualityToPostFx({ ...this.basePostFx, values: { ...this.basePostFx.values, ...state.postfx } }, this.qualitySettings),
+      );
     }
   }
 

@@ -141,6 +141,7 @@ export function LockoutGame() {
     saveGameSettings("lockout", next);
     handleRef.current?.setControlSettings(next.controls);
     handleRef.current?.setVolume(next.muted ? 0 : next.volume);
+    handleRef.current?.setQuality(next.quality);
   };
 
   const onCartRequest = useCallback((event: MailboxEvent) => {
@@ -195,6 +196,7 @@ export function LockoutGame() {
           netplay: session,
           controlSettings: current.controls,
           volume: current.muted ? 0 : current.volume,
+          quality: current.quality,
           onStart: () => openMenu(!menuOpenRef.current),
           onEvent: onCartRequest,
           onFrame: () => {
@@ -357,6 +359,7 @@ export function LockoutGame() {
             onClose={() => openMenu(false)}
             onLeave={() => void leaveRoom()}
             onQuit={quit}
+            quality={handleRef.current?.quality()}
           />
         )}
       </div>

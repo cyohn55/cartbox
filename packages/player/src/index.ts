@@ -373,6 +373,8 @@ export function mount(container: HTMLElement, options: PlayerOptions): PlayerHan
     setVolume: (volume) => player.setVolume(volume),
     setInputEnabled: (enabled) => player.setInputEnabled(enabled),
     inspect: () => player.inspect(),
+    setQuality: (choice) => player.setQuality(choice),
+    quality: () => player.quality(),
   };
 }
 
@@ -416,6 +418,18 @@ export {
 export { physicsSdkLua, runtimeSdkLua, sceneNeedsRuntime } from "./physics/physicsSdk.js";
 export { deterministicBackend, physicsStateHash } from "./physics/deterministic.js";
 export { RuntimeChannel } from "./runtime/runtimeChannel.js";
+export {
+  QUALITY_LEVELS,
+  QUALITY_PRESETS,
+  applyQualityToPostFx,
+  browserDeviceHints,
+  detectQuality,
+  resolveQuality,
+  type DeviceHints,
+  type QualityChoice,
+  type QualityLevel,
+  type QualitySettings,
+} from "./quality.js";
 export { AnimationSession, animatedObjects, compileAnimator, sceneHasAnimation } from "./anim/animationSession.js";
 export {
   PHYS_BLOCK_BYTES,

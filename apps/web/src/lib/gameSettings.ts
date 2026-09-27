@@ -22,6 +22,8 @@ export interface GameSettings {
   readonly showFps: boolean;
   /** Enter full screen when a game starts. */
   readonly fullscreen: boolean;
+  /** Graphics quality preset, or "auto" to pick from the device. */
+  readonly quality: "auto" | "low" | "medium" | "high";
 }
 
 export const DEFAULT_GAME_SETTINGS: GameSettings = {
@@ -30,6 +32,7 @@ export const DEFAULT_GAME_SETTINGS: GameSettings = {
   muted: false,
   showFps: false,
   fullscreen: true,
+  quality: "auto",
 };
 
 export function parseGameSettings(value: unknown): GameSettings {
@@ -42,6 +45,7 @@ export function parseGameSettings(value: unknown): GameSettings {
     muted: bool(raw.muted, DEFAULT_GAME_SETTINGS.muted),
     showFps: bool(raw.showFps, DEFAULT_GAME_SETTINGS.showFps),
     fullscreen: bool(raw.fullscreen, DEFAULT_GAME_SETTINGS.fullscreen),
+    quality: raw.quality === "low" || raw.quality === "medium" || raw.quality === "high" ? raw.quality : "auto",
   };
 }
 

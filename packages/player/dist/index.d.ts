@@ -512,6 +512,194 @@ declare class PhysicsSession {
 }
 
 /**
+ * Data-driven post-processing effect model, shared by the editor's FX tab and
+ * the runtime player. Each effect declares its parameters (with ranges and
+ * defaults); UIs render them generically and `uniformsFromSettings` folds the
+ * whole stack into the flat uniform block the shader consumes — a disabled
+ * effect collapses to its neutral value, so the shader needs no per-effect
+ * branching and never recompiles.
+ *
+ * DOM-free so server code (the save API validates with `parsePostFxSettings`)
+ * and tests consume it without a browser.
+ *
+ * The stack divides into two halves. The first seven effects are the console's
+ * own signal path — the grade, the tube, the lens. The rest are screen-space
+ * looks ported from the Shade Studio shader library, chosen for being
+ * single-pass (the no-recompile design has no room for a second target) and for
+ * suiting pixel art rather than fighting it: ordered dithering and halftone are
+ * how a small palette fakes a gradient, and light shafts and streaks are how a
+ * flat 2D scene suggests a light source it cannot actually cast.
+ */
+type PostFxEffectId = "grade" | "fog" | "bloom" | "tonemap" | "crt" | "chroma" | "vignette" | "posterize" | "dither" | "halftone" | "godrays" | "streaks" | "splittone" | "reflection" | "tiltshift" | "kaleidoscope" | "grain";
+interface PostFxParamDef {
+    id: string;
+    label: string;
+    min: number;
+    max: number;
+    step: number;
+    defaultValue: number;
+}
+/** A colour an effect exposes, e.g. the fog tint or a split-tone end. */
+interface PostFxColorDef {
+    id: string;
+    label: string;
+    /** #rrggbb. */
+    defaultValue: string;
+}
+interface PostFxEffectDef {
+    id: PostFxEffectId;
+    label: string;
+    description: string;
+    params: PostFxParamDef[];
+    /** Colour pickers this effect exposes, if any. */
+    colors?: PostFxColorDef[];
+}
+declare const POST_FX_EFFECTS: PostFxEffectDef[];
+/** Key for one parameter's (or colour's) value in the settings map. */
+declare function paramKey(effect: PostFxEffectId, param: string): string;
+interface PostFxSettings {
+    enabled: Record<PostFxEffectId, boolean>;
+    values: Record<string, number>;
+    /** Effect colours as #rrggbb, keyed by {@link paramKey}. */
+    colors: Record<string, string>;
+}
+declare function defaultPostFxSettings(): PostFxSettings;
+/** Whether any effect in the stack is switched on. */
+declare function anyPostFxEnabled(settings: PostFxSettings): boolean;
+/**
+ * Validate untrusted JSON (a PUT body or a jsonb column) into PostFxSettings,
+ * or null when malformed. Lenient about omissions — unknown effects/params are
+ * dropped and missing ones take their defaults, so the wire format survives
+ * adding effects later — but strict about types and ranges, clamping values
+ * into each parameter's declared bounds.
+ *
+ * A top-level `fogColor` string is still honoured: rows written before effects
+ * could declare their own colours carry the fog tint there, and silently losing
+ * an artist's fog colour on the next save would be a worse outcome than one
+ * branch here.
+ */
+declare function parsePostFxSettings(value: unknown): PostFxSettings | null;
+/** The flat uniform block the post-process shader consumes. */
+interface PostFxUniforms {
+    brightness: number;
+    contrast: number;
+    saturation: number;
+    fogDensity: number;
+    fogHorizon: number;
+    fogColor: [number, number, number];
+    bloomStrength: number;
+    bloomThreshold: number;
+    /** Pyramid spread, 0..1: how much the coarse blur levels contribute. */
+    bloomRadius: number;
+    /** 0 leaves the frame in gamma space; 1 applies the ACES filmic rolloff. */
+    toneMap: number;
+    /** Pre-tonemap exposure multiplier (only read when {@link toneMap} is on). */
+    exposure: number;
+    curvature: number;
+    scanlines: number;
+    aberration: number;
+    vignette: number;
+    /** 0 disables posterisation; otherwise the level count. */
+    posterize: number;
+    ditherAmount: number;
+    ditherScale: number;
+    halftoneStrength: number;
+    halftoneScale: number;
+    /** Screen angle in radians. */
+    halftoneAngle: number;
+    godrayStrength: number;
+    godrayDensity: number;
+    godrayDecay: number;
+    godrayOrigin: [number, number];
+    streakStrength: number;
+    streakLength: number;
+    splitStrength: number;
+    splitBalance: number;
+    splitShadows: [number, number, number];
+    splitHighlights: [number, number, number];
+    /** Wet-floor reflection strength (0 disables the mirror). */
+    reflectionStrength: number;
+    /** Screen row of the reflective surface's near edge, 0..1. */
+    reflectionHorizon: number;
+    /** How far below the horizon the reflection persists, in screen-height units. */
+    reflectionFalloff: number;
+    /** Sideways ripple amplitude of the reflection. */
+    reflectionWobble: number;
+    /** Tilt-shift max blur (0 disables the depth of field). */
+    tiltStrength: number;
+    /** Centre row of the in-focus band, 0..1. */
+    tiltFocus: number;
+    /** Half-height of the fully-sharp band, in screen-height units. */
+    tiltRange: number;
+    /** Below 2 the shader leaves the frame alone. */
+    kaleidoSegments: number;
+    /** Rotation in radians. */
+    kaleidoAngle: number;
+    grainAmount: number;
+    grainSize: number;
+}
+/** Parse #rrggbb into a 0..1 RGB triplet. */
+declare function hexToRgb01(hex: string): [number, number, number];
+/**
+ * Fold the settings into shader uniforms. Disabled effects map to their
+ * neutral values (identity grade, zero density/strength), so toggling an
+ * effect never needs a shader recompile.
+ */
+declare function uniformsFromSettings(settings: PostFxSettings): PostFxUniforms;
+
+/**
+ * Graphics quality presets (ENGINE_ROADMAP.md, Phase 4): what the player spends
+ * on a frame, chosen per device.
+ *
+ * - **high**: everything as authored — full-resolution shadow maps, every
+ *   post-effect, the 3D at full size (a software-rendered first-person view may
+ *   still step itself down to hold the frame rate). This is the player's
+ *   behaviour before presets existed.
+ * - **medium**: half-resolution shadow maps; the first-person software view
+ *   starts at three-quarter size.
+ * - **low**: no shadows, no bloom or chromatic aberration (the multi-pass
+ *   effects; cheap per-pixel looks like grading, CRT or dithering stay), and the
+ *   first-person software view capped at half size.
+ *
+ * "auto" picks one from what the browser says about the device: weak hardware
+ * (≤ 2 cores or ≤ 2 GB of memory) → low; a phone or tablet, or any device without
+ * WebGPU (so rendering on the CPU) → medium; otherwise high.
+ */
+
+type QualityLevel = "low" | "medium" | "high";
+type QualityChoice = QualityLevel | "auto";
+declare const QUALITY_LEVELS: readonly QualityLevel[];
+interface QualitySettings {
+    readonly level: QualityLevel;
+    /** Draw shadows at all. */
+    readonly shadows: boolean;
+    /** Shadow map edge in texels. */
+    readonly shadowMapSize: number;
+    /** The largest 3D render scale for a software first-person view (the governor works below it). */
+    readonly maxRenderScale: number;
+    /** Post-effects this preset turns off (the costly multi-pass ones). */
+    readonly disabledEffects: readonly string[];
+}
+declare const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualitySettings>>;
+/** What the browser reveals about the device (all optional: browsers differ). */
+interface DeviceHints {
+    readonly cores?: number;
+    /** navigator.deviceMemory, in GB (Chromium only; rounded down to a power of two). */
+    readonly memoryGB?: number;
+    readonly mobile?: boolean;
+    /** Whether the GPU renderer is available (else the CPU rasteriser draws). */
+    readonly webgpu?: boolean;
+}
+/** The preset "auto" picks for a device. */
+declare function detectQuality(hints: DeviceHints): QualityLevel;
+/** Resolve a choice ("auto" included) to its preset's settings. */
+declare function resolveQuality(choice: QualityChoice | undefined, hints: DeviceHints): QualitySettings;
+/** This browser's hints (in a browser; empty elsewhere). */
+declare function browserDeviceHints(webgpu?: boolean): DeviceHints;
+/** Post-effect settings with a preset's costly effects switched off (the same object when none apply). */
+declare function applyQualityToPostFx(settings: PostFxSettings, quality: QualitySettings): PostFxSettings;
+
+/**
  * Netplay — online multiplayer for carts, relayed by the host page.
  *
  * TIC-80 has no networking, so the browser does it: each player's page runs its
@@ -1244,142 +1432,6 @@ declare function decodeMeshPoses(words: Uint32Array): MailboxMeshPose[];
 declare function hashEventId(id: string): number;
 
 /**
- * Data-driven post-processing effect model, shared by the editor's FX tab and
- * the runtime player. Each effect declares its parameters (with ranges and
- * defaults); UIs render them generically and `uniformsFromSettings` folds the
- * whole stack into the flat uniform block the shader consumes — a disabled
- * effect collapses to its neutral value, so the shader needs no per-effect
- * branching and never recompiles.
- *
- * DOM-free so server code (the save API validates with `parsePostFxSettings`)
- * and tests consume it without a browser.
- *
- * The stack divides into two halves. The first seven effects are the console's
- * own signal path — the grade, the tube, the lens. The rest are screen-space
- * looks ported from the Shade Studio shader library, chosen for being
- * single-pass (the no-recompile design has no room for a second target) and for
- * suiting pixel art rather than fighting it: ordered dithering and halftone are
- * how a small palette fakes a gradient, and light shafts and streaks are how a
- * flat 2D scene suggests a light source it cannot actually cast.
- */
-type PostFxEffectId = "grade" | "fog" | "bloom" | "tonemap" | "crt" | "chroma" | "vignette" | "posterize" | "dither" | "halftone" | "godrays" | "streaks" | "splittone" | "reflection" | "tiltshift" | "kaleidoscope" | "grain";
-interface PostFxParamDef {
-    id: string;
-    label: string;
-    min: number;
-    max: number;
-    step: number;
-    defaultValue: number;
-}
-/** A colour an effect exposes, e.g. the fog tint or a split-tone end. */
-interface PostFxColorDef {
-    id: string;
-    label: string;
-    /** #rrggbb. */
-    defaultValue: string;
-}
-interface PostFxEffectDef {
-    id: PostFxEffectId;
-    label: string;
-    description: string;
-    params: PostFxParamDef[];
-    /** Colour pickers this effect exposes, if any. */
-    colors?: PostFxColorDef[];
-}
-declare const POST_FX_EFFECTS: PostFxEffectDef[];
-/** Key for one parameter's (or colour's) value in the settings map. */
-declare function paramKey(effect: PostFxEffectId, param: string): string;
-interface PostFxSettings {
-    enabled: Record<PostFxEffectId, boolean>;
-    values: Record<string, number>;
-    /** Effect colours as #rrggbb, keyed by {@link paramKey}. */
-    colors: Record<string, string>;
-}
-declare function defaultPostFxSettings(): PostFxSettings;
-/** Whether any effect in the stack is switched on. */
-declare function anyPostFxEnabled(settings: PostFxSettings): boolean;
-/**
- * Validate untrusted JSON (a PUT body or a jsonb column) into PostFxSettings,
- * or null when malformed. Lenient about omissions — unknown effects/params are
- * dropped and missing ones take their defaults, so the wire format survives
- * adding effects later — but strict about types and ranges, clamping values
- * into each parameter's declared bounds.
- *
- * A top-level `fogColor` string is still honoured: rows written before effects
- * could declare their own colours carry the fog tint there, and silently losing
- * an artist's fog colour on the next save would be a worse outcome than one
- * branch here.
- */
-declare function parsePostFxSettings(value: unknown): PostFxSettings | null;
-/** The flat uniform block the post-process shader consumes. */
-interface PostFxUniforms {
-    brightness: number;
-    contrast: number;
-    saturation: number;
-    fogDensity: number;
-    fogHorizon: number;
-    fogColor: [number, number, number];
-    bloomStrength: number;
-    bloomThreshold: number;
-    /** Pyramid spread, 0..1: how much the coarse blur levels contribute. */
-    bloomRadius: number;
-    /** 0 leaves the frame in gamma space; 1 applies the ACES filmic rolloff. */
-    toneMap: number;
-    /** Pre-tonemap exposure multiplier (only read when {@link toneMap} is on). */
-    exposure: number;
-    curvature: number;
-    scanlines: number;
-    aberration: number;
-    vignette: number;
-    /** 0 disables posterisation; otherwise the level count. */
-    posterize: number;
-    ditherAmount: number;
-    ditherScale: number;
-    halftoneStrength: number;
-    halftoneScale: number;
-    /** Screen angle in radians. */
-    halftoneAngle: number;
-    godrayStrength: number;
-    godrayDensity: number;
-    godrayDecay: number;
-    godrayOrigin: [number, number];
-    streakStrength: number;
-    streakLength: number;
-    splitStrength: number;
-    splitBalance: number;
-    splitShadows: [number, number, number];
-    splitHighlights: [number, number, number];
-    /** Wet-floor reflection strength (0 disables the mirror). */
-    reflectionStrength: number;
-    /** Screen row of the reflective surface's near edge, 0..1. */
-    reflectionHorizon: number;
-    /** How far below the horizon the reflection persists, in screen-height units. */
-    reflectionFalloff: number;
-    /** Sideways ripple amplitude of the reflection. */
-    reflectionWobble: number;
-    /** Tilt-shift max blur (0 disables the depth of field). */
-    tiltStrength: number;
-    /** Centre row of the in-focus band, 0..1. */
-    tiltFocus: number;
-    /** Half-height of the fully-sharp band, in screen-height units. */
-    tiltRange: number;
-    /** Below 2 the shader leaves the frame alone. */
-    kaleidoSegments: number;
-    /** Rotation in radians. */
-    kaleidoAngle: number;
-    grainAmount: number;
-    grainSize: number;
-}
-/** Parse #rrggbb into a 0..1 RGB triplet. */
-declare function hexToRgb01(hex: string): [number, number, number];
-/**
- * Fold the settings into shader uniforms. Disabled effects map to their
- * neutral values (identity grade, zero density/strength), so toggling an
- * effect never needs a shader recompile.
- */
-declare function uniformsFromSettings(settings: PostFxSettings): PostFxUniforms;
-
-/**
  * Gap #3 — a runtime parallax + atmosphere compositor.
  *
  * The editor already has a preview-only layered-scene compositor
@@ -2002,6 +2054,11 @@ interface PlayerOptions {
         deterministic: boolean;
     }) => Promise<PhysicsBackend>;
     /**
+     * Graphics quality: "low" | "medium" | "high", or "auto" (the default) to pick
+     * from the device — see quality.ts. High is everything as authored.
+     */
+    quality?: QualityChoice;
+    /**
      * Control settings (aim inversion, look sensitivity, controller and keyboard
      * bindings, touch pad size/opacity). Change them live with
      * {@link PlayerHandle.setControlSettings}. Defaults: DEFAULT_CONTROL_SETTINGS.
@@ -2123,6 +2180,10 @@ interface PlayerHandle {
      * Empty when the cart has no 3D scene.
      */
     inspect(): InspectedObject[];
+    /** Change the graphics preset live: "low" | "medium" | "high" | "auto" (see quality.ts). */
+    setQuality(choice: QualityChoice): void;
+    /** The graphics preset in effect. */
+    quality(): QualityLevel;
 }
 /** One scene object in a live inspection snapshot. */
 interface InspectedObject {
@@ -4242,6 +4303,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private bodies;
     /** Spawned prefab copies: root object index → the root's world matrix (see setSpawned). */
     private spawned;
+    /** Graphics quality (see quality.ts): shadows on/off and their map size, the first-person scale cap. */
+    private quality;
     /** Skinned instances' live meshes (their buffers are rewritten for each pose). */
     private readonly live;
     /** The skinning matrices each live mesh was last posed with (skip re-skinning the same pose). */
@@ -4275,6 +4338,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * matrices changed, and it counts as moving this frame for the shadow cache.
      */
     setSkinning(skinning: ReadonlyMap<number, Float32Array>): void;
+    /** Apply a graphics quality preset (takes effect on the next frame). */
+    setQuality(quality: QualitySettings): void;
     /** Posed instances plus, in a hierarchy, everything below them: what moves this frame. */
     private withChildren;
     /**
@@ -4856,4 +4921,4 @@ declare class RuntimeChannel {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_PAD_BINDINGS, type DeviceProvider, EVENT_CAPACITY, type Ease, EngineLoadError, type FlagsField, GamepadInput, type GeneratedTrack, HEIGHT_WORLD, type InnerSurfaceFactory, type InputChange, type InspectedObject, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetState, type NetTransport, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POST_FX_EFFECTS, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$1 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, RAM_LAYOUTS, REPLAY_VERSION, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, RuntimeChannel, SOFTWARE_RASTER_CAPS, START_KEYS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, SoftwareSceneRenderer, type SpriteRegion, type SpriteRegionSource, SwitchableTransport, TILT_SHIFT_FEATHER, type TextureLookup, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3, type VerificationResult, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, applyLookSettings, applyRenderCaps, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, collisionSdkLua, compileAnimator, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights, defaultPostFxSettings, deterministicBackend, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interleaveVertices, interpolateNormal, jointFrames, loadEngineModule, makeShadowTexture, mount, nearestDirection, netSendInterval, normalBasis3x3, normalVector, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, splitWorldMatrix, standardizePad, sway, takeNetOutbox, takePhysicsCommands, tiltShiftBlur, uniformsFromSettings, unpadRows, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeInstanceUniform, writeNetInbox, writePhysicsState };
+export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_PAD_BINDINGS, type DeviceHints, type DeviceProvider, EVENT_CAPACITY, type Ease, EngineLoadError, type FlagsField, GamepadInput, type GeneratedTrack, HEIGHT_WORLD, type InnerSurfaceFactory, type InputChange, type InspectedObject, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetState, type NetTransport, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POST_FX_EFFECTS, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$1 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, RuntimeChannel, SOFTWARE_RASTER_CAPS, START_KEYS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, SoftwareSceneRenderer, type SpriteRegion, type SpriteRegionSource, SwitchableTransport, TILT_SHIFT_FEATHER, type TextureLookup, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3, type VerificationResult, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, applyLookSettings, applyQualityToPostFx, applyRenderCaps, browserDeviceHints, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, collisionSdkLua, compileAnimator, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interleaveVertices, interpolateNormal, jointFrames, loadEngineModule, makeShadowTexture, mount, nearestDirection, netSendInterval, normalBasis3x3, normalVector, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, splitWorldMatrix, standardizePad, sway, takeNetOutbox, takePhysicsCommands, tiltShiftBlur, uniformsFromSettings, unpadRows, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeInstanceUniform, writeNetInbox, writePhysicsState };

@@ -37,6 +37,8 @@ export interface StartMenuProps {
   onLeave: () => void;
   /** Back to the page's lobby. */
   onQuit: () => void;
+  /** The preset "auto" picked on this device, when a game is running. */
+  quality?: string;
 }
 
 const PAD_LABELS: Record<PadButton, string> = {
@@ -214,6 +216,19 @@ export function StartMenu(props: StartMenuProps) {
               </Row>
               <Row label="Start games in full screen">
                 <Toggle on={settings.fullscreen} onChange={(fullscreen) => onChange({ ...settings, fullscreen })} />
+              </Row>
+              <Row label="Graphics quality">
+                <select
+                  aria-label="Graphics quality"
+                  value={settings.quality}
+                  onChange={(e) => onChange({ ...settings, quality: e.target.value as typeof settings.quality })}
+                  style={{ font: "inherit", padding: "6px 10px", borderRadius: "var(--radius-sm)" }}
+                >
+                  <option value="auto">Auto{props.quality ? ` (${props.quality})` : ""}</option>
+                  <option value="low">Low — no shadows, lighter effects</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                </select>
               </Row>
               <Row label="Show frame rate">
                 <Toggle on={settings.showFps} onChange={(showFps) => onChange({ ...settings, showFps })} />

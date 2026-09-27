@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { mount, type InspectedObject, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
+import { mount, type InspectedObject, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type QualityChoice, type SceneSpec, type WorldScene } from "@cartbox/player";
 
 import styles from "./editor.module.css";
 import { errorLineFrom } from "./codeTools";
@@ -58,6 +58,9 @@ interface RunOverlayProps {
 export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene, anim, particles, collision, flags, mesh, world, onGoToLine, onClose }: RunOverlayProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<PlayerHandle | null>(null);
+  const [quality, setQuality] = useState<QualityChoice>("auto");
+  // Read at mount so a remount (the cart's data changed) keeps the chosen preset.
+  const qualityRef = useRef<QualityChoice>("auto");
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [running, setRunning] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -129,6 +132,7 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
       // Playtest the cart's HD-2D world: 3D terrain with the cart's 2D character
       // sprites standing in it as depth-composited billboards.
       world,
+      quality: qualityRef.current,
       onReady: () => setStatus("ready"),
       // Surface the real load-error message instead of a generic failure line.
       // (A runtime Lua error renders on the cart's own screen — the core does not
@@ -196,6 +200,26 @@ export function RunOverlay({ bytes, engineUrl, modelId, cartName, postFx, scene,
           <span className={styles.runDot} aria-hidden />
           <span className={styles.runTitle}>Playtest · {cartName}</span>
           <div className={styles.runBarActions}>
+            {mesh && (
+              <select
+                aria-label="Graphics quality"
+                title="Graphics quality — try Low to see the cart as a weak phone would"
+                value={quality}
+                disabled={status !== "ready"}
+                onChange={(e) => {
+                  const next = e.target.value as QualityChoice;
+                  setQuality(next);
+                  qualityRef.current = next;
+                  handleRef.current?.setQuality(next);
+                }}
+                style={{ font: "inherit", padding: "4px 8px", borderRadius: 6 }}
+              >
+                <option value="auto">Quality: auto{status === "ready" && handleRef.current ? ` (${handleRef.current.quality()})` : ""}</option>
+                <option value="low">Quality: low</option>
+                <option value="medium">Quality: medium</option>
+                <option value="high">Quality: high</option>
+              </select>
+            )}
             {mesh && (
               <button type="button" className="cbx-btn" aria-pressed={inspecting} onClick={() => setInspecting((v) => !v)} disabled={status !== "ready"}>
                 {inspecting ? "Hide objects" : "Objects"}
