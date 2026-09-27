@@ -249,6 +249,17 @@ cartbox = {
   mapsize = function() return 0, 0 end,
   -- Tile-flags default: overridden by the injected layer when the cart has one.
   flag = function() return false end,
+  -- Scene objects (the cart's placed meshes by name, with parents, tags and
+  -- properties): overridden by the injected scene table when the cart has meshes.
+  -- An object is the 0-based index cartbox.meshpose takes, or its name.
+  objects = function() return 0 end,
+  find = function() return nil end,
+  objname = function() return nil end,
+  parent = function() return nil end,
+  children = function() return {} end,
+  prop = function(_, _, default) return default end,
+  hastag = function() return false end,
+  tagged = function() return {} end,
 }`;
 
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */

@@ -15,9 +15,13 @@ import {
   composeModelMatrix,
   deserializeMeshAsset,
   meshBounds,
+  parentIndices,
   parseSceneLighting,
   projectionMatrix,
   readMeshLibrary,
+  readSceneProps,
+  readSceneTags,
+  worldMatrices,
   resolveMeshFrames,
   resolveMeshRef,
   viewMatrix,
@@ -25,6 +29,7 @@ import {
   type MeshAsset,
   type MeshSceneInstance,
   type SceneLighting,
+  type ScenePropValue,
 } from "@cartbox/editor";
 
 /** One placed mesh ready to rasterise: decoded geometry + its baked world matrix. */
@@ -37,6 +42,17 @@ export interface MeshInstance extends MeshSceneInstance {
    * share frames share the MeshAsset objects.
    */
   readonly frames?: readonly MeshAsset[];
+  /**
+   * Scene-object data (ENGINE_ROADMAP.md, Phase 1). `model` is the world matrix;
+   * `local` is the authored transform relative to `parent` (an index into the
+   * scene's instances, -1 for a root). For a root, `local === model`.
+   */
+  readonly local: Mat4;
+  readonly parent: number;
+  readonly id: string;
+  readonly name: string;
+  readonly tags: readonly string[];
+  readonly props: Readonly<Record<string, ScenePropValue>>;
 }
 
 /** A world-space axis-aligned bounding box with a framing centre + radius. */
@@ -151,9 +167,10 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     }
     return cache.get(serialized) ?? null;
   };
-  const instances: MeshInstance[] = [];
+  type Parsed = Omit<MeshInstance, "model" | "parent"> & { parentId: string | null };
+  const parsedInstances: Parsed[] = [];
   for (const entry of entries) {
-    const record = entry as { mesh?: unknown; transform?: unknown; frames?: unknown };
+    const record = entry as { mesh?: unknown; transform?: unknown; frames?: unknown; id?: unknown; name?: unknown; parent?: unknown; tags?: unknown; props?: unknown };
     if (typeof record.mesh !== "string") continue;
     const resolved = resolveMeshRef(record.mesh, library);
     const mesh = resolved ? load(resolved) : null;
@@ -162,12 +179,29 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
       .map(load)
       .filter((frame): frame is MeshAsset => frame !== null);
     const t = readTransform(record.transform);
-    instances.push({
+    parsedInstances.push({
       mesh,
-      model: composeModelMatrix(t.position, t.rotation, t.scale),
+      local: composeModelMatrix(t.position, t.rotation, t.scale),
       ...(frames.length > 0 ? { frames } : {}),
+      id: typeof record.id === "string" ? record.id : `mesh-${parsedInstances.length}`,
+      name: typeof record.name === "string" ? record.name : "Mesh",
+      tags: readSceneTags(record.tags),
+      props: readSceneProps(record.props),
+      parentId: typeof record.parent === "string" && record.parent ? record.parent : null,
     });
   }
+  // Children sit relative to their parent: world = parent world · local. A parent
+  // that was dropped (or never existed, or loops) leaves the child a root.
+  const parents = parentIndices(parsedInstances.map((p) => ({ id: p.id, parent: p.parentId })));
+  const world = worldMatrices(
+    parsedInstances.map((p) => p.local),
+    parents,
+  );
+  const instances: MeshInstance[] = parsedInstances.map(({ parentId: _parentId, ...rest }, i) => ({
+    ...rest,
+    model: world[i]!,
+    parent: parents[i]!,
+  }));
 
   if (instances.length === 0) return null;
   const lighting = parseSceneLighting((parsed as { lighting?: unknown }).lighting);

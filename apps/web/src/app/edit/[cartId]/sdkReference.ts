@@ -171,6 +171,60 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
     ],
   },
   {
+    label: "cartbox · scene objects",
+    open: false,
+    entries: [
+      {
+        name: "cartbox.find",
+        signature: "cartbox.find(name) -> index",
+        doc: "The placed mesh named `name` in the Hierarchy, as the index cartbox.meshpose takes (nil if none). Moving a parent moves its children too.",
+        snippet: 'local door = cartbox.find("door")\ncartbox.meshpose(door, 0, 0, 0, t / 60)',
+      },
+      {
+        name: "cartbox.prop",
+        signature: "cartbox.prop(obj, key, default) -> value",
+        doc: "A custom property set on an object in the Inspector (number, text or true/false), or `default`. `obj` is an index or a name.",
+        snippet: 'local hp = cartbox.prop("crate", "hp", 10)',
+      },
+      {
+        name: "cartbox.tagged",
+        signature: "cartbox.tagged(tag) -> { index, ... }",
+        doc: "Every object carrying `tag`, in Hierarchy order.",
+        snippet: 'for _, i in ipairs(cartbox.tagged("pickup")) do\n  \nend',
+      },
+      {
+        name: "cartbox.hastag",
+        signature: "cartbox.hastag(obj, tag) -> bool",
+        doc: "Whether an object carries `tag`.",
+        snippet: 'if cartbox.hastag(i, "enemy") then\n  \nend',
+      },
+      {
+        name: "cartbox.objname",
+        signature: "cartbox.objname(obj) -> name",
+        doc: "An object's name.",
+        snippet: "local name = cartbox.objname(i)",
+      },
+      {
+        name: "cartbox.parent",
+        signature: "cartbox.parent(obj) -> index",
+        doc: "An object's parent index, or nil for a top-level object.",
+        snippet: "local p = cartbox.parent(i)",
+      },
+      {
+        name: "cartbox.children",
+        signature: "cartbox.children(obj) -> { index, ... }",
+        doc: "An object's direct children.",
+        snippet: 'for _, c in ipairs(cartbox.children("tower")) do\n  \nend',
+      },
+      {
+        name: "cartbox.objects",
+        signature: "cartbox.objects() -> count",
+        doc: "How many placed objects the cart has (indices run 0 .. count - 1).",
+        snippet: "for i = 0, cartbox.objects() - 1 do\n  \nend",
+      },
+    ],
+  },
+  {
     label: "cartbox · netplay",
     open: false,
     entries: [

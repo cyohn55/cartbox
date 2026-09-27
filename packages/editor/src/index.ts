@@ -414,6 +414,23 @@ export {
   type MeshLibrary,
 } from "./model/meshLibrary";
 export {
+  SCENE_KEY_MAX,
+  SCENE_PROP_MAX,
+  SCENE_STRING_MAX,
+  SCENE_TAG_MAX,
+  childIndices,
+  isAncestor,
+  isSceneKey,
+  localDirection,
+  parentIndices,
+  readSceneProps,
+  readSceneTags,
+  withDescendants,
+  worldMatrices,
+  type HierarchyNode,
+  type ScenePropValue,
+} from "./model/sceneHierarchy";
+export {
   paintIndexedTexture,
   bakeIndexedTextureImage,
   indexedTextureSpriteRef,
