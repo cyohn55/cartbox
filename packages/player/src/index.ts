@@ -120,6 +120,7 @@ export {
 export type { SceneDraw, SceneRenderer } from "./render/sceneRenderer.js";
 export { createSceneRenderer } from "./render/createSceneRenderer.js";
 export { WebgpuSceneRenderer } from "./render/WebgpuSceneRenderer.js";
+export { WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, type GlContextProvider } from "./render/WebglSceneRenderer.js";
 export {
   DEFAULT_AMBIENT,
   DEFAULT_LIGHT,

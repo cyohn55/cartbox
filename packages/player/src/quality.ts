@@ -13,8 +13,9 @@
  *   first-person software view capped at half size.
  *
  * "auto" picks one from what the browser says about the device: weak hardware
- * (≤ 2 cores or ≤ 2 GB of memory) → low; a phone or tablet, or any device without
- * WebGPU (so rendering on the CPU) → medium; otherwise high.
+ * (≤ 2 cores or ≤ 2 GB of memory) → low; a phone or tablet, or any device with
+ * no GPU renderer (WebGPU or WebGL2, so rendering on the CPU) → medium; otherwise
+ * high.
  */
 
 import type { PostFxSettings } from "./fx/postfx.js";
@@ -47,7 +48,7 @@ export interface DeviceHints {
   /** navigator.deviceMemory, in GB (Chromium only; rounded down to a power of two). */
   readonly memoryGB?: number;
   readonly mobile?: boolean;
-  /** Whether the GPU renderer is available (else the CPU rasteriser draws). */
+  /** Whether a GPU renderer (WebGPU or WebGL2) came up (else the CPU rasteriser draws). */
   readonly webgpu?: boolean;
 }
 

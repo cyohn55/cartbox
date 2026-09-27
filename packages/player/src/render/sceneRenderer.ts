@@ -144,7 +144,7 @@ export function applyScenePasses(
 }
 export interface SceneRenderer {
   /** Human-readable backend name, for diagnostics and tests. */
-  readonly backend: "software" | "webgpu";
+  readonly backend: "software" | "webgpu" | "webgl2";
   render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
   dispose(): void;
 }

@@ -20,6 +20,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  DEFAULT_RASTER_STYLE,
   composeModelMatrix,
   projectionMatrix,
   renderMeshScene,
@@ -30,8 +31,10 @@ import {
 } from "@cartbox/editor";
 import {
   SOFTWARE_RASTER_CAPS,
+  WebglSceneRenderer,
   SoftwareSceneRenderer,
   createSceneRenderer,
+  getModel,
   type SceneDraw,
   type SceneRenderer,
 } from "@cartbox/player";
@@ -96,6 +99,33 @@ describe("createSceneRenderer", () => {
     };
     const renderer = await createSceneRenderer(WIDTH, HEIGHT, SOFTWARE_RASTER_CAPS, async () => brokenDevice);
     expect(renderer.backend).toBe("software");
+  });
+
+  it("tries WebGL2 when there is no WebGPU device, and falls back to software when it can't build", async () => {
+    const provider = vi.fn(() => ({
+      getParameter() {
+        throw new Error("context lost");
+      },
+    }));
+    const renderer = await createSceneRenderer(WIDTH, HEIGHT, SOFTWARE_RASTER_CAPS, async () => null, provider);
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(renderer.backend).toBe("software");
+    expect((await createSceneRenderer(WIDTH, HEIGHT, SOFTWARE_RASTER_CAPS, async () => null, () => null)).backend).toBe("software");
+  });
+
+  it("keeps an era only the software rasteriser reproduces off WebGL2 too", async () => {
+    // PS1: no depth buffer, affine texturing — the GPU paths decline it before touching a context.
+    const provider = vi.fn(() => null);
+    expect(WebglSceneRenderer.create(WIDTH, HEIGHT, { ...DEFAULT_RASTER_STYLE, zBuffer: false }, provider)).toBeNull();
+    expect(provider).not.toHaveBeenCalled();
+    const renderer = await createSceneRenderer(WIDTH, HEIGHT, getModel("ps1").renderCaps, async () => null, provider);
+    expect(provider).not.toHaveBeenCalled();
+    expect(renderer.backend).toBe("software");
+  });
+
+  it("refuses a WebGL2 context whose uniform offsets can't address the per-draw stride", () => {
+    const gl = { UNIFORM_BUFFER_OFFSET_ALIGNMENT: 1, MAX_UNIFORM_BLOCK_SIZE: 2, getParameter: (p: number) => (p === 1 ? 768 : 65536) };
+    expect(WebglSceneRenderer.create(WIDTH, HEIGHT, DEFAULT_RASTER_STYLE, () => gl)).toBeNull();
   });
 
   it("never resolves to null, so no caller needs a third branch", async () => {

@@ -662,8 +662,9 @@ declare function uniformsFromSettings(settings: PostFxSettings): PostFxUniforms;
  *   first-person software view capped at half size.
  *
  * "auto" picks one from what the browser says about the device: weak hardware
- * (≤ 2 cores or ≤ 2 GB of memory) → low; a phone or tablet, or any device without
- * WebGPU (so rendering on the CPU) → medium; otherwise high.
+ * (≤ 2 cores or ≤ 2 GB of memory) → low; a phone or tablet, or any device with
+ * no GPU renderer (WebGPU or WebGL2, so rendering on the CPU) → medium; otherwise
+ * high.
  */
 
 type QualityLevel = "low" | "medium" | "high";
@@ -687,7 +688,7 @@ interface DeviceHints {
     /** navigator.deviceMemory, in GB (Chromium only; rounded down to a power of two). */
     readonly memoryGB?: number;
     readonly mobile?: boolean;
-    /** Whether the GPU renderer is available (else the CPU rasteriser draws). */
+    /** Whether a GPU renderer (WebGPU or WebGL2) came up (else the CPU rasteriser draws). */
     readonly webgpu?: boolean;
 }
 /** The preset "auto" picks for a device. */
@@ -2616,7 +2617,7 @@ interface SceneDraw {
 }
 interface SceneRenderer {
     /** Human-readable backend name, for diagnostics and tests. */
-    readonly backend: "software" | "webgpu";
+    readonly backend: "software" | "webgpu" | "webgl2";
     render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
     dispose(): void;
 }
@@ -2754,8 +2755,108 @@ declare function rasterStyleFor(caps: RenderCaps): RasterStyle;
 declare function webgpuCanHonour(style: RasterStyle): boolean;
 
 /**
+ * The player's WebGL2 triangle path (ENGINE_ROADMAP.md, Phase 4): the GPU
+ * renderer for browsers without WebGPU, so they no longer drop to the software
+ * rasteriser — Safari before 26, Firefox on most platforms, older Android.
+ *
+ * It is a port of {@link WebgpuSceneRenderer} and keeps its contract: the same
+ * shading, term for term (byte-identical to the software rasteriser on the
+ * fantasy tiers, a visual match on the Modern PBR branch), the same instanced
+ * batching, and the same asynchronous readback — the frame composited is the
+ * newest one the GPU has finished, one or two behind, with the software
+ * rasteriser drawing until the first lands.
+ *
+ * What differs is only how WebGL2 spells it:
+ *
+ * - The per-draw uniforms and per-instance transforms are the very buffers the
+ *   WebGPU path fills (`writeInstanceUniform`, `writeInstanceTransform`): the
+ *   WGSL layouts are std140, so they bind as uniform blocks unchanged. A block
+ *   holds 64 instances (16 KB is WebGL2's guaranteed block size), so a larger
+ *   batch goes out as several instanced draws.
+ * - The shadow map, SSAO buffer and environment map are read with `texelFetch`
+ *   (nearest, like `textureLoad`); the material maps through one sampler whose
+ *   filter follows the era.
+ * - WebGL's window origin is bottom-left, so the vertex stage flips Y: the
+ *   framebuffer then holds the image top row first — what `readPixels` returns
+ *   and what the SSAO lookup by `gl_FragCoord` expects — with no CPU flip.
+ * - The readback is a pixel-pack buffer guarded by a fence, polled at the start
+ *   of each frame, so `readPixels` never stalls the run loop.
+ * - The projection is GL's own clip convention, so near-plane clipping matches
+ *   the software rasteriser's.
+ */
+
+/** Instances per uniform block (and so per draw call): 64 × 240 bytes fits WebGL2's guaranteed 16 KB. */
+declare const WEBGL_INSTANCES_PER_DRAW = 64;
+/** Modern-tier lights the shader loops over at most. */
+declare const WEBGL_MAX_LIGHTS = 64;
+/** Makes the WebGL2 context the renderer draws with (injectable for tests); null when there is none. */
+type GlContextProvider = () => any | null;
+declare class WebglSceneRenderer implements SceneRenderer {
+    private readonly gl;
+    private readonly width;
+    private readonly height;
+    private readonly program;
+    private readonly framebuffer;
+    private readonly attachments;
+    private readonly sampler;
+    private readonly blankTexture;
+    private readonly blankFloat;
+    /** Floats between instance-block starts (the block offset alignment, in floats). */
+    private readonly instanceAlignFloats;
+    readonly backend: "webgl2";
+    private readonly software;
+    private readonly meshes;
+    private readonly textures;
+    private latest;
+    private destroyed;
+    /** The context was lost: the software rasteriser draws from here on. */
+    private lost;
+    private uniformBuffer;
+    private uniformCapacity;
+    private uniformData;
+    private instanceBuffer;
+    private instanceFloats;
+    private instanceData;
+    private readonly lightBuffer;
+    private shadowTexture;
+    private shadowSize;
+    private shadowUploaded;
+    private envTexture;
+    private envSource;
+    private ssaoTexture;
+    private readonly readback;
+    /** Readbacks in flight, oldest first. */
+    private readonly pending;
+    /** Draw calls and instances in the last submitted frame (for profiling and tests). */
+    lastFrameStats: {
+        drawCalls: number;
+        instances: number;
+    };
+    private constructor();
+    /**
+     * Build the renderer for one framebuffer size, or null when WebGL2 is missing,
+     * the era's style needs the software rasteriser, or anything fails to build.
+     */
+    static create(width: number, height: number, style?: RasterStyle, contextProvider?: GlContextProvider): WebglSceneRenderer | null;
+    render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
+    /** Take the newest finished readback, if any (never waits). */
+    private collect;
+    private submit;
+    private ensureCapacity;
+    private bindTexture;
+    private textureFor;
+    private uploadShadow;
+    private uploadEnv;
+    private uploadSsao;
+    /** Upload (once) a mesh's primitives; a live skinned primitive re-uploads when its revision moves on. */
+    private uploadMesh;
+    dispose(): void;
+}
+
+/**
  * Chooses and builds the 3D scene renderer: WebGPU when a device is available,
- * the software rasteriser otherwise.
+ * else WebGL2 (the GPU path for browsers without WebGPU), else the software
+ * rasteriser.
  *
  * The same shape as `createLightingLayer`, deliberately — one memoised adapter
  * probe per page, a provider that returns null rather than throwing, and a
@@ -2776,11 +2877,11 @@ type DeviceProvider$1 = () => Promise<any | null>;
  * silently rendering with another era's rules. The caps wrapper is only applied
  * when it would do something, so an unbounded model pays nothing for it.
  *
- * Pass a provider returning null to force the software path — which is how the
+ * Pass providers returning null to force the software path — which is how the
  * fallback stays tested rather than becoming code nobody runs until a browser
- * without WebGPU finds the bug.
+ * without a GPU finds the bug.
  */
-declare function createSceneRenderer(width: number, height: number, caps: RenderCaps, deviceProvider?: DeviceProvider$1): Promise<SceneRenderer>;
+declare function createSceneRenderer(width: number, height: number, caps: RenderCaps, deviceProvider?: DeviceProvider$1, glProvider?: GlContextProvider): Promise<SceneRenderer>;
 
 /**
  * The player's WebGPU triangle path.
@@ -2934,8 +3035,6 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      */
     private ensureEnvTexture;
     render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
-    /** Paint the last completed GPU frame over the cart's own pixels. */
-    private composite;
     /** Encode and submit one frame, and start a readback if a buffer is free. */
     private submit;
     /** Await one readback and publish it as the newest frame. */
@@ -3163,8 +3262,12 @@ interface InstanceTransform {
     readonly model: Mat4;
     readonly normalBasis: readonly number[];
 }
-/** Write one instance's transforms into the staging array at `index` (see {@link INSTANCE_FLOATS}). */
-declare function writeInstanceTransform(target: Float32Array, index: number, transform: InstanceTransform): void;
+/**
+ * Write one instance's transforms into the staging array at `index` (see
+ * {@link INSTANCE_FLOATS}), or at float offset `base` when the caller lays
+ * instances out itself (WebGL2 aligns each block's start).
+ */
+declare function writeInstanceTransform(target: Float32Array, index: number, transform: InstanceTransform, base?: number): void;
 /**
  * Write one draw's uniforms into the shared staging array at `index`.
  *
@@ -4962,4 +5065,4 @@ declare class RuntimeChannel {
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_PAD_BINDINGS, type DeviceHints, type DeviceProvider, EVENT_CAPACITY, type Ease, EngineLoadError, type FlagsField, GamepadInput, type GeneratedTrack, HEIGHT_WORLD, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetState, type NetTransport, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POST_FX_EFFECTS, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$1 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, RuntimeChannel, SOFTWARE_RASTER_CAPS, START_KEYS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, SoftwareSceneRenderer, type SpriteRegion, type SpriteRegionSource, SwitchableTransport, TILT_SHIFT_FEATHER, type TextureLookup, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3, type VerificationResult, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, applyLookSettings, applyQualityToPostFx, applyRenderCaps, browserDeviceHints, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, collisionSdkLua, compileAnimator, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interleaveVertices, interpolateNormal, jointFrames, loadEngineModule, makeShadowTexture, mount, nearestDirection, netSendInterval, normalBasis3x3, normalVector, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, splitWorldMatrix, standardizePad, sway, takeNetOutbox, takePhysicsCommands, tiltShiftBlur, uniformsFromSettings, unpadRows, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState };
+export { type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_PAD_BINDINGS, type DeviceHints, type DeviceProvider, EVENT_CAPACITY, type Ease, EngineLoadError, type FlagsField, GamepadInput, type GeneratedTrack, type GlContextProvider, HEIGHT_WORLD, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetState, type NetTransport, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POST_FX_EFFECTS, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$1 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, RuntimeChannel, SOFTWARE_RASTER_CAPS, START_KEYS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, SoftwareSceneRenderer, type SpriteRegion, type SpriteRegionSource, SwitchableTransport, TILT_SHIFT_FEATHER, type TextureLookup, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, applyLookSettings, applyQualityToPostFx, applyRenderCaps, browserDeviceHints, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, collisionSdkLua, compileAnimator, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, drift, emitterPreset, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hashCart, hashEventId, hexToRgb01, injectSdk, interleaveVertices, interpolateNormal, jointFrames, loadEngineModule, makeShadowTexture, mount, nearestDirection, netSendInterval, normalBasis3x3, normalVector, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseFlagsField, parseMeshScene, parseParticles, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, prehazeLayers, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, reflectionFade, reflectionSampleY, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, serializeReplay, shade, simulateEmitter, softKneePrefilter, splitWorldMatrix, standardizePad, sway, takeNetOutbox, takePhysicsCommands, tiltShiftBlur, uniformsFromSettings, unpadRows, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState };

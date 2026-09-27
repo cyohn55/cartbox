@@ -133,7 +133,11 @@ trades state and commands with the cart through an 8 KB block at the end of RAM
       (checked on a real device by `webgpu-parity.test.ts`).
 - [ ] Asset bundles and streaming: load a level's assets on demand, with a loading
       screen and progress.
-- [ ] WebGL2 fallback renderer for browsers without WebGPU.
+- [x] WebGL2 fallback renderer for browsers without WebGPU: the same shading, instanced
+      batching and asynchronous readback as the WebGPU path, chosen when WebGPU isn't
+      available (before the software rasteriser). It is byte-identical to the software
+      rasteriser on the fantasy tiers in Chromium on a hardware-precision rasteriser,
+      checked by `webgl-parity.test.ts`.
 - [x] Download-size and load-time budget shown in the editor per cart (⋯ → Download
       size): engine core, cartridge, 3D scene (split into geometry / textures /
       animation, heaviest meshes named), physics engine when bodies need it, other data

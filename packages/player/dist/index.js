@@ -646,7 +646,7 @@ var LightingLayer = class {
   }
 };
 function linkProgram(gl, vsSrc, fsSrc) {
-  const compile = (type, src) => {
+  const compile2 = (type, src) => {
     const shader = gl.createShader(type);
     gl.shaderSource(shader, src);
     gl.compileShader(shader);
@@ -656,8 +656,8 @@ function linkProgram(gl, vsSrc, fsSrc) {
     return shader;
   };
   const program = gl.createProgram();
-  gl.attachShader(program, compile(gl.VERTEX_SHADER, vsSrc));
-  gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fsSrc));
+  gl.attachShader(program, compile2(gl.VERTEX_SHADER, vsSrc));
+  gl.attachShader(program, compile2(gl.FRAGMENT_SHADER, fsSrc));
   gl.linkProgram(program);
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
     throw new Error("Lighting program link failed: " + gl.getProgramInfoLog(program));
@@ -1516,7 +1516,7 @@ var BloomPyramid = class _BloomPyramid {
   }
 };
 function buildProgram(gl, fragmentSource, uniformNames) {
-  const compile = (type, source) => {
+  const compile2 = (type, source) => {
     const shader = gl.createShader(type);
     if (!shader) return null;
     gl.shaderSource(shader, source);
@@ -1528,8 +1528,8 @@ function buildProgram(gl, fragmentSource, uniformNames) {
     }
     return shader;
   };
-  const vertex = compile(gl.VERTEX_SHADER, VERTEX_SOURCE);
-  const fragment = compile(gl.FRAGMENT_SHADER, fragmentSource);
+  const vertex = compile2(gl.VERTEX_SHADER, VERTEX_SOURCE);
+  const fragment = compile2(gl.FRAGMENT_SHADER, fragmentSource);
   const program = gl.createProgram();
   if (!vertex || !fragment || !program) return null;
   gl.attachShader(program, vertex);
@@ -1900,7 +1900,7 @@ var PostFxPass = class _PostFxPass {
   static create(canvas) {
     const gl = canvas.getContext("webgl", { antialias: false, preserveDrawingBuffer: true });
     if (!gl) return null;
-    const compile = (type, source) => {
+    const compile2 = (type, source) => {
       const shader = gl.createShader(type);
       if (!shader) return null;
       gl.shaderSource(shader, source);
@@ -1912,8 +1912,8 @@ var PostFxPass = class _PostFxPass {
       }
       return shader;
     };
-    const vertex = compile(gl.VERTEX_SHADER, VERTEX_SOURCE2);
-    const fragment = compile(gl.FRAGMENT_SHADER, FRAGMENT_SOURCE);
+    const vertex = compile2(gl.VERTEX_SHADER, VERTEX_SOURCE2);
+    const fragment = compile2(gl.FRAGMENT_SHADER, FRAGMENT_SOURCE);
     const program = gl.createProgram();
     if (!vertex || !fragment || !program) return null;
     gl.attachShader(program, vertex);
@@ -2356,14 +2356,14 @@ var PostFxSurface = class _PostFxSurface {
    * factory is only invoked once the FX pass itself is viable.
    */
   static async create(container, scaleMode, model, settings, makeInner) {
-    const document = container.ownerDocument;
-    const canvas = document.createElement("canvas");
+    const document2 = container.ownerDocument;
+    const canvas = document2.createElement("canvas");
     const renderScale = Math.max(1, Math.min(MAX_RENDER_SCALE, Math.floor(MAX_RENDER_WIDTH / model.width)));
     canvas.width = model.width * renderScale;
     canvas.height = model.height * renderScale;
     const pass = PostFxPass.create(canvas);
     if (!pass) return null;
-    const innerContainer = document.createElement("div");
+    const innerContainer = document2.createElement("div");
     const inner = await makeInner(innerContainer);
     const innerCanvas = innerContainer.querySelector("canvas");
     if (!innerCanvas) {
@@ -8168,12 +8168,83 @@ var WorldOverlaySurface = class {
   }
 };
 
-// src/render/WebgpuSceneRenderer.ts
+// src/render/WebglSceneRenderer.ts
 import {
   DEFAULT_RASTER_STYLE as DEFAULT_RASTER_STYLE2,
   computeSmoothNormals,
   multiplyMat4 as multiplyMat44
 } from "@cartbox/editor";
+
+// src/render/gpuFrame.ts
+var SOFTWARE_WARMUP_TRIANGLES = 2e4;
+var SOFTWARE_WARMUP_PIXELS = 640 * 360;
+var triangleCounts = /* @__PURE__ */ new WeakMap();
+function trianglesIn(instances) {
+  let total = 0;
+  for (const instance of instances) {
+    let count = triangleCounts.get(instance.mesh);
+    if (count === void 0) {
+      count = instance.mesh.primitives.reduce((n, primitive) => n + primitive.indices.length / 3, 0);
+      triangleCounts.set(instance.mesh, count);
+    }
+    total += count;
+  }
+  return total;
+}
+function presentFrame(latest, visible, draw, software) {
+  if (latest) {
+    compositeFrame(latest, draw);
+  } else if (draw.width * draw.height <= SOFTWARE_WARMUP_PIXELS && trianglesIn(visible) <= SOFTWARE_WARMUP_TRIANGLES) {
+    software.render(visible, draw);
+  } else if (draw.background !== null) {
+    new Uint32Array(draw.out.buffer, draw.out.byteOffset, draw.width * draw.height).fill(packRgba(draw.background));
+  }
+}
+function compositeFrame(latest, draw) {
+  const count = draw.width * draw.height;
+  const source = new Uint32Array(latest.buffer, latest.byteOffset, count);
+  const out = new Uint32Array(draw.out.buffer, draw.out.byteOffset, count);
+  if (draw.background !== null) out.fill(packRgba(draw.background));
+  for (let i = 0; i < count; i += 1) {
+    const word = source[i];
+    if (word >>> 24 !== 0) out[i] = word;
+  }
+}
+function packRgba([r, g, b, a]) {
+  return (a << 24 | b << 16 | g << 8 | r) >>> 0;
+}
+function sameTextures(a, b) {
+  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis;
+}
+function batchInstances(instances, geometryOf) {
+  const batches = [];
+  const byPrimitive = /* @__PURE__ */ new Map();
+  let instanceCount = 0;
+  for (const instance of instances) {
+    const geometries = geometryOf(instance.mesh);
+    instance.mesh.primitives.forEach((primitive, index) => {
+      const geometry = geometries[index];
+      if (!geometry || geometry.indexCount === 0) return;
+      const textures = {
+        base: instance.textures?.[index] ?? null,
+        mr: instance.mrTextures?.[index] ?? null,
+        occ: instance.occlusionTextures?.[index] ?? null,
+        emis: instance.emissiveTextures?.[index] ?? null
+      };
+      let list = byPrimitive.get(primitive);
+      if (!list) byPrimitive.set(primitive, list = []);
+      let batch = list.find((b) => sameTextures(b.textures, textures));
+      if (!batch) {
+        batch = { primitive, geometry, textures, models: [], first: 0 };
+        list.push(batch);
+        batches.push(batch);
+      }
+      batch.models.push(instance.model);
+      instanceCount += 1;
+    });
+  }
+  return { batches, instanceCount };
+}
 
 // src/render/scenePacking.ts
 var UNIFORM_STRIDE = 512;
@@ -8252,8 +8323,7 @@ function viewDirection(view) {
   return length < 1e-8 ? [0, 0, 1] : [x / length, y / length, z / length];
 }
 var INSTANCE_FLOATS = 60;
-function writeInstanceTransform(target, index, transform2) {
-  const base = index * INSTANCE_FLOATS;
+function writeInstanceTransform(target, index, transform2, base = index * INSTANCE_FLOATS) {
   for (let i = 0; i < 16; i += 1) {
     target[base + i] = transform2.mvp[i];
     target[base + 16 + i] = transform2.lightMvp ? transform2.lightMvp[i] : 0;
@@ -8373,23 +8443,730 @@ function unpadRows(padded, width, height, bytesPerRow, reuse = null) {
   return out;
 }
 
-// src/render/WebgpuSceneRenderer.ts
-var SOFTWARE_WARMUP_TRIANGLES = 2e4;
-var SOFTWARE_WARMUP_PIXELS = 640 * 360;
-var triangleCounts = /* @__PURE__ */ new WeakMap();
-function trianglesIn(instances) {
-  let total = 0;
-  for (const instance of instances) {
-    let count = triangleCounts.get(instance.mesh);
-    if (count === void 0) {
-      count = instance.mesh.primitives.reduce((n, primitive) => n + primitive.indices.length / 3, 0);
-      triangleCounts.set(instance.mesh, count);
-    }
-    total += count;
-  }
-  return total;
-}
+// src/render/WebglSceneRenderer.ts
+var WEBGL_INSTANCES_PER_DRAW = 64;
+var WEBGL_MAX_LIGHTS = 64;
 var READBACK_BUFFERS = 3;
+var UNIT_BASE = 0;
+var UNIT_MR = 1;
+var UNIT_OCC = 2;
+var UNIT_EMIS = 3;
+var UNIT_SHADOW = 4;
+var UNIT_ENV = 5;
+var UNIT_SSAO = 6;
+var BLOCK_UNIFORMS = 0;
+var BLOCK_INSTANCES = 1;
+var BLOCK_LIGHTS = 2;
+var UNIFORM_BLOCK = (
+  /* glsl */
+  `
+layout(std140) uniform Uniforms {
+  mat4 mvp;
+  mat3 nrm;
+  vec4 base;
+  vec4 light;
+  vec4 view;
+  vec4 pbr;
+  vec4 emissive;
+  vec4 texflags;
+  vec4 envSky;
+  vec4 envHorizon;
+  vec4 envGround;
+  mat4 lightMvp;
+  vec4 shadow;
+  vec4 envMeta;
+  vec4 tonemap;
+  vec4 ssaoMeta;
+  mat4 model;
+  vec4 fog;
+  vec4 fogParams;
+  vec4 shadow2;
+} u;
+`
+);
+var VERTEX_SHADER = (
+  /* glsl */
+  `#version 300 es
+precision highp float;
+precision highp int;
+${UNIFORM_BLOCK}
+struct InstanceXf {
+  mat4 mvp;
+  mat4 lightMvp;
+  mat4 model;
+  mat3 nrm;
+};
+layout(std140) uniform Instances {
+  InstanceXf xf[${WEBGL_INSTANCES_PER_DRAW}];
+};
+layout(location = 0) in vec3 position;
+layout(location = 1) in vec3 normal;
+layout(location = 2) in vec2 uv;
+out vec3 vNormal;
+out vec2 vUv;
+out vec4 vLightClip;
+out vec3 vWorldPos;
+out float vEyeDepth;
+void main() {
+  InstanceXf t = xf[gl_InstanceID];
+  vec4 p = t.mvp * vec4(position, 1.0);
+  vNormal = t.nrm * normal;
+  vUv = uv;
+  vLightClip = t.lightMvp * vec4(position, 1.0);
+  vWorldPos = (t.model * vec4(position, 1.0)).xyz;
+  vEyeDepth = p.w;
+  // Flip Y so the framebuffer's first row is the image's top row (see the file comment).
+  gl_Position = vec4(p.x, -p.y, p.z, p.w);
+}
+`
+);
+var fragmentShader = (nearest) => (
+  /* glsl */
+  `#version 300 es
+precision highp float;
+precision highp int;
+#define NEAREST ${nearest ? 1 : 0}
+${UNIFORM_BLOCK}
+struct Light {
+  vec4 d0;
+  vec4 d1;
+  vec4 d2;
+};
+layout(std140) uniform Lights {
+  Light lights[${WEBGL_MAX_LIGHTS}];
+};
+uniform sampler2D tex;
+uniform sampler2D mrTex;
+uniform sampler2D occTex;
+uniform sampler2D emisTex;
+uniform highp sampler2D shadowMap;
+uniform sampler2D envMap;
+uniform highp sampler2D ssaoMap;
+in vec3 vNormal;
+in vec2 vUv;
+in vec4 vLightClip;
+in vec3 vWorldPos;
+in float vEyeDepth;
+out vec4 outColor;
+
+// A material map at uv (already V-flipped). An era without filtering picks the
+// texel exactly as the software rasteriser does \u2014 floor(wrap(u) \xB7 size) \u2014
+// rather than trusting a driver's subtexel precision at texel boundaries.
+vec4 sampleMap(sampler2D s, vec2 uv) {
+#if NEAREST
+  ivec2 size = textureSize(s, 0);
+  vec2 f = (uv - floor(uv)) * vec2(size);
+  return texelFetch(s, min(size - 1, ivec2(floor(f))), 0);
+#else
+  return texture(s, uv);
+#endif
+}
+
+float shadowTap(float fx, float fy, float z) {
+  float size = u.shadow.y;
+  int tx = int(clamp(floor(fx), 0.0, size - 1.0));
+  int ty = int(clamp(floor(fy), 0.0, size - 1.0));
+  float stored = texelFetch(shadowMap, ivec2(tx, ty), 0).r;
+  if (z > stored) { return 0.0; }
+  return 1.0;
+}
+float shadowFactor(vec4 lightClip, float cosL) {
+  if (u.shadow.x < 0.5) { return 1.0; }
+  vec3 ndc = lightClip.xyz / lightClip.w;
+  if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < -1.0 || ndc.z > 1.0) {
+    return 1.0;
+  }
+  float size = u.shadow.y;
+  float sx = (ndc.x * 0.5 + 0.5) * size;
+  float sy = (1.0 - (ndc.y * 0.5 + 0.5)) * size;
+  float bias = u.shadow.z;
+  if (u.shadow2.x > 0.0) {
+    float c = clamp(cosL, 0.05, 1.0);
+    bias = bias + u.shadow2.x * min(10.0, sqrt(1.0 - c * c) / c);
+  }
+  float z = ndc.z - bias;
+  if (u.shadow2.y < 0.5) {
+    if (shadowTap(sx, sy, z) < 0.5) { return 1.0 - u.shadow.w; }
+    return 1.0;
+  }
+  float lit = (shadowTap(sx - 0.5, sy - 0.5, z) + shadowTap(sx + 0.5, sy - 0.5, z)
+             + shadowTap(sx - 0.5, sy + 0.5, z) + shadowTap(sx + 0.5, sy + 0.5, z)) * 0.25;
+  return 1.0 - u.shadow.w * (1.0 - lit);
+}
+vec3 envGradient(float y) {
+  float t = clamp(y, -1.0, 1.0);
+  vec3 c;
+  if (t >= 0.0) { c = mix(u.envHorizon.xyz, u.envSky.xyz, t); }
+  else { c = mix(u.envHorizon.xyz, u.envGround.xyz, -t); }
+  return c * u.envHorizon.w;
+}
+vec3 envColorDir(vec3 dir) {
+  if (u.envMeta.w < 0.5) { return envGradient(dir.y); }
+  vec3 d = normalize(dir);
+  float uCoord = atan(d.z, d.x) / (2.0 * 3.14159265) + 0.5;
+  float vCoord = acos(clamp(d.y, -1.0, 1.0)) / 3.14159265;
+  vec2 dims = vec2(textureSize(envMap, 0));
+  float wx = uCoord - floor(uCoord);
+  int tx = int(clamp(floor(wx * dims.x), 0.0, dims.x - 1.0));
+  int ty = int(clamp(floor(vCoord * dims.y), 0.0, dims.y - 1.0));
+  return texelFetch(envMap, ivec2(tx, ty), 0).rgb * u.envHorizon.w;
+}
+vec3 envAverage() {
+  if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
+  return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
+}
+float aces(float x) {
+  float v = max(0.0, x);
+  return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), 0.0, 1.0);
+}
+
+void main() {
+  vec2 uv = vec2(vUv.x, 1.0 - vUv.y);
+  vec4 colour = u.base;
+  if (u.texflags.x > 0.5) {
+    colour = colour * sampleMap(tex, uv);
+  }
+  if (colour.a * 255.0 < 1.0) { discard; }
+
+  if (u.pbr.z > 0.5) {
+    vec3 N = normalize(vNormal);
+    if (dot(N, u.view.xyz) < 0.0) { N = -N; }
+    float metallic = u.pbr.x;
+    float rough = u.pbr.y;
+    if (u.texflags.y > 0.5) {
+      vec4 mr = sampleMap(mrTex, uv);
+      rough = rough * mr.g;
+      metallic = metallic * mr.b;
+    }
+    rough = clamp(rough, 0.045, 1.0);
+    float ao = 1.0;
+    if (u.texflags.z > 0.5) { ao = sampleMap(occTex, uv).r; }
+    vec3 albedo = colour.rgb;
+    vec3 L = u.light.xyz;
+    vec3 V = u.view.xyz;
+    vec3 H = normalize(L + V);
+    float ndl = max(0.0, dot(N, L));
+    float ndv = max(1e-4, dot(N, V));
+    float ndh = max(0.0, dot(N, H));
+    float vdh = max(0.0, dot(V, H));
+    float a2 = rough * rough * rough * rough;
+    float dd = ndh * ndh * (a2 - 1.0) + 1.0;
+    float D = a2 / (3.14159265 * dd * dd + 1e-7);
+    float k = ((rough + 1.0) * (rough + 1.0)) / 8.0;
+    float G = (ndv / (ndv * (1.0 - k) + k)) * (ndl / (ndl * (1.0 - k) + k));
+    float fp = pow(1.0 - vdh, 5.0);
+    float specD = (D * G) / (4.0 * ndl * ndv + 1e-4);
+    vec3 f0 = vec3(0.04) + (albedo - vec3(0.04)) * metallic;
+    vec3 F = f0 + (vec3(1.0) - f0) * fp;
+    float kdm = 1.0 - metallic;
+    vec3 emis = vec3(0.0);
+    vec3 ef = u.emissive.xyz;
+    if (ef.r > 0.0 || ef.g > 0.0 || ef.b > 0.0) {
+      vec3 es = vec3(1.0);
+      if (u.texflags.w > 0.5) { es = sampleMap(emisTex, uv).rgb; }
+      emis = ef * es;
+    }
+    vec3 amb;
+    if (u.envSky.w > 0.5) {
+      vec3 irr = envColorDir(N);
+      vec3 R = 2.0 * ndv * N - V;
+      vec3 pref = mix(envColorDir(R), envAverage(), rough);
+      amb = (irr * albedo * kdm + pref * f0) * ao;
+    } else {
+      amb = vec3(u.light.w) * albedo * ao;
+    }
+    if (u.ssaoMeta.x > 0.5) {
+      amb = amb * texelFetch(ssaoMap, ivec2(gl_FragCoord.xy), 0).r;
+    }
+    float sf = shadowFactor(vLightClip, abs(dot(normalize(vNormal), u.light.xyz)));
+    int lc = int(u.ssaoMeta.y + 0.5);
+    vec3 lit;
+    if (lc > 0) {
+      vec3 direct = vec3(0.0);
+      for (int i = 0; i < ${WEBGL_MAX_LIGHTS}; i = i + 1) {
+        if (i >= lc) { break; }
+        Light lgt = lights[i];
+        vec3 Ld;
+        float atten = 1.0;
+        if (lgt.d0.w > 0.5) {
+          vec3 toL = lgt.d0.xyz - vWorldPos;
+          float dist = max(length(toL), 1e-4);
+          Ld = toL / dist;
+          float range = lgt.d2.x;
+          if (range > 0.0) { float t = max(0.0, 1.0 - dist / range); atten = t * t; }
+        } else {
+          Ld = normalize(lgt.d0.xyz);
+        }
+        float ndlL = max(0.0, dot(N, Ld));
+        if (ndlL <= 0.0 || atten <= 0.0) { continue; }
+        vec3 Hl = normalize(Ld + V);
+        float ndhL = max(0.0, dot(N, Hl));
+        float vdhL = max(0.0, dot(V, Hl));
+        float ddL = ndhL * ndhL * (a2 - 1.0) + 1.0;
+        float DL = a2 / (3.14159265 * ddL * ddL + 1e-7);
+        float GL = (ndv / (ndv * (1.0 - k) + k)) * (ndlL / (ndlL * (1.0 - k) + k));
+        float fpL = pow(1.0 - vdhL, 5.0);
+        float specL = (DL * GL) / (4.0 * ndlL * ndv + 1e-4);
+        vec3 FL = f0 + (vec3(1.0) - f0) * fpL;
+        float occl = 1.0;
+        if (lgt.d0.w < 0.5) { occl = sf; }
+        float w = lgt.d1.w * atten * ndlL * occl;
+        direct = direct + (kdm * (vec3(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
+      }
+      lit = direct + amb + emis;
+    } else {
+      lit = (kdm * (vec3(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
+    }
+    vec3 shaded = lit;
+    if (u.tonemap.x > 0.5) {
+      float e = u.tonemap.y;
+      shaded = vec3(aces(lit.r * e), aces(lit.g * e), aces(lit.b * e));
+    }
+    if (u.fogParams.x > 0.5) {
+      float d = max(0.0, vEyeDepth - u.fogParams.y);
+      float f = min(u.fogParams.z, 1.0 - exp(-d * u.fog.w));
+      shaded = mix(clamp(shaded, vec3(0.0), vec3(1.0)), u.fog.rgb, f);
+    }
+    outColor = vec4(shaded, colour.a);
+    return;
+  }
+
+  // Fantasy path: two-sided Lambert on the un-renormalised normal, as the software rasteriser does.
+  float nl = abs(dot(vNormal, u.light.xyz));
+  float shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(vLightClip, abs(dot(normalize(vNormal), u.light.xyz)));
+  outColor = vec4(colour.rgb * shade, colour.a);
+}
+`
+);
+function defaultContext() {
+  try {
+    const options = { alpha: true, antialias: false, depth: false, stencil: false, premultipliedAlpha: false, preserveDrawingBuffer: false };
+    if (typeof OffscreenCanvas !== "undefined") return new OffscreenCanvas(1, 1).getContext("webgl2", options);
+    if (typeof document !== "undefined") return document.createElement("canvas").getContext("webgl2", options);
+  } catch {
+  }
+  return null;
+}
+function compile(gl, type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(shader);
+    gl.deleteShader(shader);
+    throw new Error(`WebGL2 shader failed to compile: ${log}`);
+  }
+  return shader;
+}
+var WebglSceneRenderer = class _WebglSceneRenderer {
+  constructor(gl, width, height, program, framebuffer, attachments, sampler, blankTexture, blankFloat, instanceAlignFloats, style) {
+    this.gl = gl;
+    this.width = width;
+    this.height = height;
+    this.program = program;
+    this.framebuffer = framebuffer;
+    this.attachments = attachments;
+    this.sampler = sampler;
+    this.blankTexture = blankTexture;
+    this.blankFloat = blankFloat;
+    this.instanceAlignFloats = instanceAlignFloats;
+    this.backend = "webgl2";
+    this.meshes = /* @__PURE__ */ new WeakMap();
+    this.textures = /* @__PURE__ */ new WeakMap();
+    this.latest = null;
+    this.destroyed = false;
+    /** The context was lost: the software rasteriser draws from here on. */
+    this.lost = false;
+    this.uniformCapacity = 0;
+    this.uniformData = new Float32Array(0);
+    this.instanceFloats = 0;
+    this.instanceData = new Float32Array(0);
+    this.shadowTexture = null;
+    this.shadowSize = 0;
+    this.shadowUploaded = null;
+    this.envTexture = null;
+    this.envSource = null;
+    this.ssaoTexture = null;
+    /** Readbacks in flight, oldest first. */
+    this.pending = [];
+    /** Draw calls and instances in the last submitted frame (for profiling and tests). */
+    this.lastFrameStats = { drawCalls: 0, instances: 0 };
+    this.software = new SoftwareSceneRenderer(style);
+    this.uniformBuffer = gl.createBuffer();
+    this.instanceBuffer = gl.createBuffer();
+    this.lightBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.UNIFORM_BUFFER, this.lightBuffer);
+    gl.bufferData(gl.UNIFORM_BUFFER, WEBGL_MAX_LIGHTS * LIGHT_FLOATS * 4, gl.DYNAMIC_DRAW);
+    this.readback = Array.from({ length: READBACK_BUFFERS }, () => {
+      const buffer = gl.createBuffer();
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer);
+      gl.bufferData(gl.PIXEL_PACK_BUFFER, width * height * 4, gl.STREAM_READ);
+      return { buffer, fence: null };
+    });
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+  }
+  /**
+   * Build the renderer for one framebuffer size, or null when WebGL2 is missing,
+   * the era's style needs the software rasteriser, or anything fails to build.
+   */
+  static create(width, height, style = DEFAULT_RASTER_STYLE2, contextProvider = defaultContext) {
+    if (!webgpuCanHonour(style)) return null;
+    const gl = contextProvider();
+    if (!gl) return null;
+    try {
+      const align = gl.getParameter(gl.UNIFORM_BUFFER_OFFSET_ALIGNMENT);
+      if (!(align > 0) || UNIFORM_STRIDE % align !== 0) return null;
+      if (gl.getParameter(gl.MAX_UNIFORM_BLOCK_SIZE) < WEBGL_INSTANCES_PER_DRAW * INSTANCE_FLOATS * 4) return null;
+      const program = gl.createProgram();
+      gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, VERTEX_SHADER));
+      gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, fragmentShader(style.textureFiltering === "none")));
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(`WebGL2 program failed to link: ${gl.getProgramInfoLog(program)}`);
+      gl.uniformBlockBinding(program, gl.getUniformBlockIndex(program, "Uniforms"), BLOCK_UNIFORMS);
+      gl.uniformBlockBinding(program, gl.getUniformBlockIndex(program, "Instances"), BLOCK_INSTANCES);
+      gl.uniformBlockBinding(program, gl.getUniformBlockIndex(program, "Lights"), BLOCK_LIGHTS);
+      gl.useProgram(program);
+      const units = [
+        ["tex", UNIT_BASE],
+        ["mrTex", UNIT_MR],
+        ["occTex", UNIT_OCC],
+        ["emisTex", UNIT_EMIS],
+        ["shadowMap", UNIT_SHADOW],
+        ["envMap", UNIT_ENV],
+        ["ssaoMap", UNIT_SSAO]
+      ];
+      for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
+      const colour = gl.createRenderbuffer();
+      gl.bindRenderbuffer(gl.RENDERBUFFER, colour);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, width, height);
+      const depth = gl.createRenderbuffer();
+      gl.bindRenderbuffer(gl.RENDERBUFFER, depth);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, width, height);
+      const framebuffer = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, colour);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error("WebGL2 framebuffer incomplete");
+      const filter = style.textureFiltering === "none" ? gl.NEAREST : gl.LINEAR;
+      const sampler = gl.createSampler();
+      gl.samplerParameteri(sampler, gl.TEXTURE_MIN_FILTER, filter);
+      gl.samplerParameteri(sampler, gl.TEXTURE_MAG_FILTER, filter);
+      gl.samplerParameteri(sampler, gl.TEXTURE_WRAP_S, gl.REPEAT);
+      gl.samplerParameteri(sampler, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      const blankTexture = createTexture(gl, 1, 1, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255, 255, 255, 255]));
+      const blankFloat = createTexture(gl, 1, 1, gl.R32F, gl.RED, gl.FLOAT, new Float32Array([0]));
+      gl.pixelStorei(gl.PACK_ALIGNMENT, 4);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return new _WebglSceneRenderer(gl, width, height, program, framebuffer, [colour, depth], sampler, blankTexture, blankFloat, Math.max(4, align / 4), style);
+    } catch {
+      return null;
+    }
+  }
+  render(instances, draw) {
+    if (this.destroyed) return;
+    const visible = applyScenePasses(instances, draw);
+    if (this.lost) {
+      this.software.render(visible, draw);
+      return;
+    }
+    this.collect();
+    presentFrame(this.latest, visible, draw, this.software);
+    try {
+      this.submit(visible, draw);
+    } catch {
+      this.latest = null;
+      if (this.gl.isContextLost?.()) this.lost = true;
+    }
+  }
+  /** Take the newest finished readback, if any (never waits). */
+  collect() {
+    const gl = this.gl;
+    while (this.pending.length > 0) {
+      const slot = this.pending[0];
+      const status = gl.clientWaitSync(slot.fence, 0, 0);
+      if (status !== gl.ALREADY_SIGNALED && status !== gl.CONDITION_SATISFIED) break;
+      this.pending.shift();
+      gl.deleteSync(slot.fence);
+      slot.fence = null;
+      const bytes = this.latest && this.latest.length === this.width * this.height * 4 ? this.latest : new Uint8Array(this.width * this.height * 4);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.buffer);
+      gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, bytes);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      this.latest = bytes;
+    }
+  }
+  submit(instances, draw) {
+    const gl = this.gl;
+    const viewProj = multiplyMat44(draw.projection, draw.view);
+    const { batches, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh));
+    if (batches.length === 0) return;
+    const chunks2 = [];
+    let cursor = 0;
+    batches.forEach((batch, index) => {
+      for (let start = 0; start < batch.models.length; start += WEBGL_INSTANCES_PER_DRAW) {
+        const count = Math.min(WEBGL_INSTANCES_PER_DRAW, batch.models.length - start);
+        chunks2.push({ batch: index, start, count, offsetFloats: cursor });
+        cursor += Math.ceil(count * INSTANCE_FLOATS / this.instanceAlignFloats) * this.instanceAlignFloats;
+      }
+    });
+    this.ensureCapacity(batches.length, cursor + WEBGL_INSTANCES_PER_DRAW * INSTANCE_FLOATS);
+    const light = resolveLight(draw.lightDirection, draw.ambient);
+    const viewDir = viewDirection(draw.view);
+    const shadow = draw.shadow ?? null;
+    this.uploadShadow(shadow);
+    const shadowParams = shadow ? { size: shadow.size, bias: shadow.bias ?? 3e-3, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false } : null;
+    this.uploadEnv(draw.environment?.map ?? null);
+    const ssao = draw.ssao ?? null;
+    this.uploadSsao(ssao);
+    const sceneLights = (draw.lights ?? []).slice(0, WEBGL_MAX_LIGHTS);
+    const packed = packLights(sceneLights);
+    gl.bindBuffer(gl.UNIFORM_BUFFER, this.lightBuffer);
+    gl.bufferSubData(gl.UNIFORM_BUFFER, 0, packed);
+    batches.forEach((batch, index) => {
+      const model = batch.models[0];
+      writeInstanceUniform(this.uniformData, index, {
+        mvp: multiplyMat44(viewProj, model),
+        normalBasis: normalBasis3x3(model),
+        baseColor: batch.primitive.material.baseColorFactor,
+        hasTexture: batch.textures.base !== null,
+        light,
+        viewDir,
+        pbr: resolvePbr(batch.primitive.material, batch.textures.mr !== null, batch.textures.occ !== null, batch.textures.emis !== null),
+        hasMrMap: batch.textures.mr !== null,
+        hasOcclusionMap: batch.textures.occ !== null,
+        hasEmissiveMap: batch.textures.emis !== null,
+        environment: draw.environment ?? null,
+        lightMvp: shadow ? multiplyMat44(shadow.lightViewProj, model) : null,
+        shadow: shadowParams,
+        tonemap: draw.tonemap ?? null,
+        hasSsao: ssao !== null,
+        model,
+        lightCount: sceneLights.length,
+        fog: draw.fog ?? null
+      });
+    });
+    for (const chunk of chunks2) {
+      const batch = batches[chunk.batch];
+      for (let j = 0; j < chunk.count; j += 1) {
+        const model = batch.models[chunk.start + j];
+        writeInstanceTransform(
+          this.instanceData,
+          j,
+          { mvp: multiplyMat44(viewProj, model), lightMvp: shadow ? multiplyMat44(shadow.lightViewProj, model) : null, model, normalBasis: normalBasis3x3(model) },
+          chunk.offsetFloats + j * INSTANCE_FLOATS
+        );
+      }
+    }
+    gl.bindBuffer(gl.UNIFORM_BUFFER, this.uniformBuffer);
+    gl.bufferSubData(gl.UNIFORM_BUFFER, 0, this.uniformData, 0, batches.length * UNIFORM_FLOATS);
+    gl.bindBuffer(gl.UNIFORM_BUFFER, this.instanceBuffer);
+    gl.bufferSubData(gl.UNIFORM_BUFFER, 0, this.instanceData, 0, cursor);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.disable(gl.BLEND);
+    gl.disable(gl.CULL_FACE);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LESS);
+    gl.depthMask(true);
+    gl.colorMask(true, true, true, true);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clearDepth(1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.useProgram(this.program);
+    gl.bindBufferBase(gl.UNIFORM_BUFFER, BLOCK_LIGHTS, this.lightBuffer);
+    this.bindTexture(UNIT_SHADOW, this.shadowTexture ?? this.blankFloat);
+    this.bindTexture(UNIT_ENV, this.envTexture ?? this.blankTexture);
+    this.bindTexture(UNIT_SSAO, ssao ? this.ssaoTexture : this.blankFloat);
+    for (let unit = UNIT_BASE; unit <= UNIT_EMIS; unit += 1) gl.bindSampler(unit, this.sampler);
+    let bound = null;
+    let boundBatch = -1;
+    for (const chunk of chunks2) {
+      const batch = batches[chunk.batch];
+      if (chunk.batch !== boundBatch) {
+        gl.bindBufferRange(gl.UNIFORM_BUFFER, BLOCK_UNIFORMS, this.uniformBuffer, chunk.batch * UNIFORM_STRIDE, UNIFORM_BYTES_USED);
+        if (bound !== batch.textures) {
+          this.bindTexture(UNIT_BASE, this.textureFor(batch.textures.base));
+          this.bindTexture(UNIT_MR, this.textureFor(batch.textures.mr));
+          this.bindTexture(UNIT_OCC, this.textureFor(batch.textures.occ));
+          this.bindTexture(UNIT_EMIS, this.textureFor(batch.textures.emis));
+          bound = batch.textures;
+        }
+        gl.bindVertexArray(batch.geometry.vao);
+        boundBatch = chunk.batch;
+      }
+      gl.bindBufferRange(gl.UNIFORM_BUFFER, BLOCK_INSTANCES, this.instanceBuffer, chunk.offsetFloats * 4, WEBGL_INSTANCES_PER_DRAW * INSTANCE_FLOATS * 4);
+      gl.drawElementsInstanced(gl.TRIANGLES, batch.geometry.indexCount, gl.UNSIGNED_INT, 0, chunk.count);
+    }
+    gl.bindVertexArray(null);
+    this.lastFrameStats = { drawCalls: chunks2.length, instances: instanceCount };
+    const slot = this.readback.find((s) => s.fence === null);
+    if (slot) {
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.buffer);
+      gl.readPixels(0, 0, this.width, this.height, gl.RGBA, gl.UNSIGNED_BYTE, 0);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      slot.fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+      this.pending.push(slot);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.flush();
+  }
+  ensureCapacity(draws, instanceFloats) {
+    const gl = this.gl;
+    if (draws > this.uniformCapacity) {
+      this.uniformCapacity = Math.max(draws, this.uniformCapacity * 2, 8);
+      this.uniformData = new Float32Array(this.uniformCapacity * UNIFORM_FLOATS);
+      gl.bindBuffer(gl.UNIFORM_BUFFER, this.uniformBuffer);
+      gl.bufferData(gl.UNIFORM_BUFFER, this.uniformData.byteLength, gl.DYNAMIC_DRAW);
+    }
+    if (instanceFloats > this.instanceFloats) {
+      this.instanceFloats = Math.max(instanceFloats, this.instanceFloats * 2);
+      this.instanceData = new Float32Array(this.instanceFloats);
+      gl.bindBuffer(gl.UNIFORM_BUFFER, this.instanceBuffer);
+      gl.bufferData(gl.UNIFORM_BUFFER, this.instanceData.byteLength, gl.DYNAMIC_DRAW);
+    }
+  }
+  bindTexture(unit, texture) {
+    this.gl.activeTexture(this.gl.TEXTURE0 + unit);
+    this.gl.bindTexture(this.gl.TEXTURE_2D, texture);
+  }
+  textureFor(source) {
+    if (!source) return this.blankTexture;
+    let texture = this.textures.get(source);
+    if (!texture) {
+      texture = createTexture(this.gl, source.width, source.height, this.gl.RGBA8, this.gl.RGBA, this.gl.UNSIGNED_BYTE, toBytes(source.data));
+      this.textures.set(source, texture);
+    }
+    return texture;
+  }
+  uploadShadow(shadow) {
+    const gl = this.gl;
+    if (!shadow) return;
+    if (shadow.size !== this.shadowSize || !this.shadowTexture) {
+      if (this.shadowTexture) gl.deleteTexture(this.shadowTexture);
+      this.shadowTexture = createTexture(gl, shadow.size, shadow.size, gl.R32F, gl.RED, gl.FLOAT, null);
+      this.shadowSize = shadow.size;
+      this.shadowUploaded = null;
+    }
+    gl.bindTexture(gl.TEXTURE_2D, this.shadowTexture);
+    const dirty = shadow.dirty;
+    if (dirty && this.shadowUploaded === shadow.depth) {
+      if (dirty.width > 0 && dirty.height > 0) {
+        gl.pixelStorei(gl.UNPACK_ROW_LENGTH, shadow.size);
+        gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, dirty.x);
+        gl.pixelStorei(gl.UNPACK_SKIP_ROWS, dirty.y);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, dirty.x, dirty.y, dirty.width, dirty.height, gl.RED, gl.FLOAT, shadow.depth);
+        gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+        gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
+        gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
+      }
+    } else {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, shadow.size, shadow.size, gl.RED, gl.FLOAT, shadow.depth);
+      this.shadowUploaded = shadow.depth;
+    }
+  }
+  uploadEnv(map) {
+    if (map === this.envSource) return;
+    if (this.envTexture) this.gl.deleteTexture(this.envTexture);
+    this.envTexture = map ? createTexture(this.gl, map.width, map.height, this.gl.RGBA8, this.gl.RGBA, this.gl.UNSIGNED_BYTE, toBytes(map.data)) : null;
+    this.envSource = map;
+  }
+  uploadSsao(ao) {
+    if (!ao) return;
+    const gl = this.gl;
+    if (!this.ssaoTexture) this.ssaoTexture = createTexture(gl, this.width, this.height, gl.R32F, gl.RED, gl.FLOAT, null);
+    gl.bindTexture(gl.TEXTURE_2D, this.ssaoTexture);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.width, this.height, gl.RED, gl.FLOAT, ao);
+  }
+  /** Upload (once) a mesh's primitives; a live skinned primitive re-uploads when its revision moves on. */
+  uploadMesh(mesh) {
+    const gl = this.gl;
+    const cached = this.meshes.get(mesh);
+    if (cached) {
+      mesh.primitives.forEach((primitive, i) => {
+        const g = cached[i];
+        if (!primitive.dynamic || !g || g.revision === primitive.dynamic.revision) return;
+        const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
+        gl.bindBuffer(gl.ARRAY_BUFFER, g.vertexBuffer);
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, interleaveVertices(primitive.positions, normals, primitive.uvs));
+        g.revision = primitive.dynamic.revision;
+      });
+      return cached;
+    }
+    const uploaded = mesh.primitives.map((primitive) => {
+      const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
+      const vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+      const vertexBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, interleaveVertices(primitive.positions, normals, primitive.uvs), primitive.dynamic ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 32, 0);
+      gl.enableVertexAttribArray(1);
+      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 32, 12);
+      gl.enableVertexAttribArray(2);
+      gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 32, 24);
+      const indexBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, primitive.indices, gl.STATIC_DRAW);
+      gl.bindVertexArray(null);
+      return {
+        vao,
+        vertexBuffer,
+        indexBuffer,
+        indexCount: primitive.indices.length,
+        ...primitive.dynamic ? { revision: primitive.dynamic.revision } : {}
+      };
+    });
+    this.meshes.set(mesh, uploaded);
+    return uploaded;
+  }
+  dispose() {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.latest = null;
+    this.software.dispose();
+    const gl = this.gl;
+    try {
+      for (const slot of this.readback) {
+        if (slot.fence) gl.deleteSync(slot.fence);
+        gl.deleteBuffer(slot.buffer);
+      }
+      gl.deleteBuffer(this.uniformBuffer);
+      gl.deleteBuffer(this.instanceBuffer);
+      gl.deleteBuffer(this.lightBuffer);
+      for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.ssaoTexture]) if (t) gl.deleteTexture(t);
+      gl.deleteFramebuffer(this.framebuffer);
+      for (const rb of this.attachments) gl.deleteRenderbuffer(rb);
+      gl.deleteSampler(this.sampler);
+      gl.deleteProgram(this.program);
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
+    } catch {
+    }
+  }
+};
+function createTexture(gl, width, height, internal, format, type, data) {
+  const texture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, internal, width, height, 0, format, type, data);
+  return texture;
+}
+function toBytes(data) {
+  return data instanceof Uint8Array ? data : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+}
+
+// src/render/WebgpuSceneRenderer.ts
+import {
+  DEFAULT_RASTER_STYLE as DEFAULT_RASTER_STYLE3,
+  computeSmoothNormals as computeSmoothNormals2,
+  multiplyMat4 as multiplyMat45
+} from "@cartbox/editor";
+var READBACK_BUFFERS2 = 3;
 var SHADER_STAGE_VERTEX = 1;
 var SHADER_STAGE_FRAGMENT = 2;
 var SHADER = (
@@ -8697,9 +9474,6 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
 }
 `
 );
-function sameTextures(a, b) {
-  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis;
-}
 var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   constructor(device, width, height, pipeline, bindGroupLayout, colourTexture, depthTexture, sampler, blankTexture, blankShadow, readback, bytesPerRow, style) {
     this.device = device;
@@ -8801,7 +9575,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
    * the factory falls back to software rather than the caller seeing an
    * exception mid-frame.
    */
-  static async create(device, width, height, style = DEFAULT_RASTER_STYLE2) {
+  static async create(device, width, height, style = DEFAULT_RASTER_STYLE3) {
     if (!webgpuCanHonour(style)) return null;
     try {
       const module = device.createShaderModule({ code: SHADER });
@@ -8907,7 +9681,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { width: 1, height: 1 }
       );
       const bytesPerRow = alignBytesPerRow(width);
-      const readback = Array.from({ length: READBACK_BUFFERS }, () => ({
+      const readback = Array.from({ length: READBACK_BUFFERS2 }, () => ({
         buffer: device.createBuffer({
           size: bytesPerRow * height,
           usage: 8 | 1
@@ -8986,59 +9760,17 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   render(instances, draw) {
     if (this.destroyed) return;
     const visible = applyScenePasses(instances, draw);
-    if (this.latest) {
-      this.composite(draw);
-    } else if (draw.width * draw.height <= SOFTWARE_WARMUP_PIXELS && trianglesIn(visible) <= SOFTWARE_WARMUP_TRIANGLES) {
-      this.software.render(visible, draw);
-    } else if (draw.background !== null) {
-      new Uint32Array(draw.out.buffer, draw.out.byteOffset, draw.width * draw.height).fill(packRgba(draw.background));
-    }
+    presentFrame(this.latest, visible, draw, this.software);
     try {
       this.submit(visible, draw);
     } catch {
       this.latest = null;
     }
   }
-  /** Paint the last completed GPU frame over the cart's own pixels. */
-  composite(draw) {
-    const count = draw.width * draw.height;
-    const source = new Uint32Array(this.latest.buffer, this.latest.byteOffset, count);
-    const out = new Uint32Array(draw.out.buffer, draw.out.byteOffset, count);
-    if (draw.background !== null) out.fill(packRgba(draw.background));
-    for (let i = 0; i < count; i += 1) {
-      const word = source[i];
-      if (word >>> 24 !== 0) out[i] = word;
-    }
-  }
   /** Encode and submit one frame, and start a readback if a buffer is free. */
   submit(instances, draw) {
-    const viewProj = multiplyMat44(draw.projection, draw.view);
-    const draws = [];
-    const byPrimitive = /* @__PURE__ */ new Map();
-    let instanceCount = 0;
-    for (const instance of instances) {
-      const geometries = this.uploadMesh(instance.mesh);
-      instance.mesh.primitives.forEach((primitive, index) => {
-        const geometry = geometries[index];
-        if (!geometry || geometry.indexCount === 0) return;
-        const textures = {
-          base: instance.textures?.[index] ?? null,
-          mr: instance.mrTextures?.[index] ?? null,
-          occ: instance.occlusionTextures?.[index] ?? null,
-          emis: instance.emissiveTextures?.[index] ?? null
-        };
-        let batches = byPrimitive.get(primitive);
-        if (!batches) byPrimitive.set(primitive, batches = []);
-        let batch = batches.find((b) => sameTextures(b.textures, textures));
-        if (!batch) {
-          batch = { primitive, geometry, textures, models: [], first: 0 };
-          batches.push(batch);
-          draws.push(batch);
-        }
-        batch.models.push(instance.model);
-        instanceCount += 1;
-      });
-    }
+    const viewProj = multiplyMat45(draw.projection, draw.view);
+    const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh));
     if (draws.length === 0) return;
     this.ensureUniformCapacity(draws.length);
     this.ensureInstanceCapacity(instanceCount);
@@ -9079,8 +9811,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       entry.first = next;
       for (const model2 of entry.models) {
         writeInstanceTransform(this.instanceData, next, {
-          mvp: multiplyMat44(viewProj, model2),
-          lightMvp: shadow ? multiplyMat44(shadow.lightViewProj, model2) : null,
+          mvp: multiplyMat45(viewProj, model2),
+          lightMvp: shadow ? multiplyMat45(shadow.lightViewProj, model2) : null,
           model: model2,
           normalBasis: normalBasis3x3(model2)
         });
@@ -9094,7 +9826,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         entry.textures.emis !== null
       );
       writeInstanceUniform(this.uniformData, index, {
-        mvp: multiplyMat44(viewProj, model),
+        mvp: multiplyMat45(viewProj, model),
         normalBasis: normalBasis3x3(model),
         baseColor: entry.primitive.material.baseColorFactor,
         hasTexture: entry.textures.base !== null,
@@ -9105,7 +9837,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         hasOcclusionMap: entry.textures.occ !== null,
         hasEmissiveMap: entry.textures.emis !== null,
         environment: draw.environment ?? null,
-        lightMvp: shadow ? multiplyMat44(shadow.lightViewProj, model) : null,
+        lightMvp: shadow ? multiplyMat45(shadow.lightViewProj, model) : null,
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
@@ -9208,14 +9940,14 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       mesh.primitives.forEach((primitive, i) => {
         const gpu = cached[i];
         if (!primitive.dynamic || !gpu || gpu.revision === primitive.dynamic.revision) return;
-        const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
+        const normals = primitive.normals ?? computeSmoothNormals2(primitive.positions, primitive.indices);
         this.device.queue.writeBuffer(gpu.vertexBuffer, 0, interleaveVertices(primitive.positions, normals, primitive.uvs));
         gpu.revision = primitive.dynamic.revision;
       });
       return cached;
     }
     const uploaded = mesh.primitives.map((primitive) => {
-      const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
+      const normals = primitive.normals ?? computeSmoothNormals2(primitive.positions, primitive.indices);
       const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs);
       const vertexBuffer = this.device.createBuffer({
         size: Math.max(32, vertices.byteLength),
@@ -9315,16 +10047,14 @@ function destroySafely(resource) {
   } catch {
   }
 }
-function packRgba([r, g, b, a]) {
-  return (a << 24 | b << 16 | g << 8 | r) >>> 0;
-}
 
 // src/render/createSceneRenderer.ts
-async function createSceneRenderer(width, height, caps, deviceProvider = getWebgpuDevice) {
+async function createSceneRenderer(width, height, caps, deviceProvider = getWebgpuDevice, glProvider) {
   const style = rasterStyleFor(caps);
   const device = await deviceProvider();
   let renderer = null;
   if (device) renderer = await WebgpuSceneRenderer.create(device, width, height, style);
+  renderer ?? (renderer = WebglSceneRenderer.create(width, height, style, glProvider));
   renderer ?? (renderer = new SoftwareSceneRenderer(style));
   return capsConstrainScene(caps) ? new CappedSceneRenderer(renderer, caps) : renderer;
 }
@@ -9491,7 +10221,7 @@ var Player = class {
             this.model.renderCaps
           );
         }
-        this.qualitySettings = resolveQuality(this.options.quality, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend === "webgpu" : void 0));
+        this.qualitySettings = resolveQuality(this.options.quality, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend !== "software" : void 0));
         if (mesh2) {
           surface = this.meshSurface = await MeshOverlaySurface.create(
             surface,
@@ -9654,7 +10384,7 @@ var Player = class {
    * effect on.
    */
   setQuality(choice) {
-    this.qualitySettings = resolveQuality(choice, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend === "webgpu" : void 0));
+    this.qualitySettings = resolveQuality(choice, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend !== "software" : void 0));
     this.meshSurface?.setQuality(this.qualitySettings);
     if (this.postFxSurface && this.basePostFx) this.postFxSurface.setSettings(applyQualityToPostFx(this.basePostFx, this.qualitySettings));
   }
@@ -10624,6 +11354,9 @@ export {
   UNIFORM_FLOATS,
   UNIFORM_STRIDE,
   VERTEX_FLOATS,
+  WEBGL_INSTANCES_PER_DRAW,
+  WEBGL_MAX_LIGHTS,
+  WebglSceneRenderer,
   WebgpuLightingLayer,
   WebgpuSceneRenderer,
   WorldOverlaySurface,
