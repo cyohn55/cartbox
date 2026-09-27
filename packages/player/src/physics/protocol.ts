@@ -83,6 +83,25 @@ export const PHYS_JOINTS = 7700;
 export const PHYS_JOINT_BYTES = 20;
 export const PHYS_MAX_JOINTS = 16;
 
+/** The timeline playing: index (-1 none), time in 1/1024 s, flags (1 = playing). Then the events it passed: count + name indices. */
+export const PHYS_TIMELINE = 8032;
+export const PHYS_TIMELINE_EVENTS = PHYS_TIMELINE + 12; // 8044
+export const PHYS_MAX_TIMELINE_EVENTS = 8;
+
+/** Write the timeline's playback and the events it just passed (host → Lua). */
+export function writeTimelineState(
+  block: DataView,
+  playback: { readonly index: number; readonly time: number; readonly playing: boolean },
+  events: readonly number[] = [],
+): void {
+  block.setInt32(PHYS_TIMELINE, playback.index, true);
+  block.setInt32(PHYS_TIMELINE + 4, toFix(playback.time), true);
+  block.setInt32(PHYS_TIMELINE + 8, playback.playing ? 1 : 0, true);
+  const n = Math.min(events.length, PHYS_MAX_TIMELINE_EVENTS);
+  block.setInt32(PHYS_TIMELINE_EVENTS, n, true);
+  for (let i = 0; i < n; i += 1) block.setInt32(PHYS_TIMELINE_EVENTS + 4 + i * 4, events[i]!, true);
+}
+
 /** Write watched joints' world positions (host → Lua). */
 export function writeJointPositions(
   block: DataView,
@@ -150,6 +169,8 @@ export const PHYS_OP_IK = 15;
 export const PHYS_OP_IK_POLE = 16;
 export const PHYS_OP_LOOKAT = 17;
 export const PHYS_OP_WATCH = 18;
+/** Timelines: a = timeline index (-1 stops), v0 = start time, v1 = speed. */
+export const PHYS_OP_TIMELINE = 19;
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {

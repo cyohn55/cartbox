@@ -209,6 +209,22 @@ export {
 } from "./model/animatorSpec";
 export { jointPosition, solveLookAt, solveTwoBoneIK } from "./model/ik";
 export {
+  DEFAULT_TIMELINE_FOV,
+  TIMELINE_EASES,
+  TIMELINE_LIMITS,
+  crossedMarks,
+  newTimeline,
+  readTimelines,
+  sampleCamera,
+  sampleObjects,
+  type AnimationCue,
+  type CameraKey,
+  type SceneTimeline,
+  type TimelineEase,
+  type TimelineTrack,
+  type TransformKey,
+} from "./model/timeline";
+export {
   MAX_CLIPS,
   MAX_SKIN_JOINTS,
   POSE_STRIDE,

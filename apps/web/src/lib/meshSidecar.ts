@@ -31,6 +31,7 @@ import {
   readPhysicsSpec,
   readPhysicsWorld,
   readSceneProps,
+  readTimelines,
   readSceneTags,
   SCENE_PROP_MAX,
   SCENE_STRING_MAX,
@@ -44,6 +45,7 @@ import {
   type PhysicsSpec,
   type PhysicsWorldSettings,
   type SceneLighting,
+  type SceneTimeline,
   type ScenePropValue,
 } from "@cartbox/editor";
 
@@ -136,6 +138,8 @@ export interface MeshSidecar {
   readonly prefabs?: readonly MeshPrefab[];
   /** Scene-wide physics settings (absent = the defaults). */
   readonly physicsWorld?: PhysicsWorldSettings;
+  /** Cutscenes and scripted camera moves (ENGINE_ROADMAP.md, Phase 3); absent or empty = none. */
+  readonly timelines?: readonly SceneTimeline[];
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -160,7 +164,7 @@ function newMeshId(): string {
  */
 export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
   const prefabs = sidecar.prefabs ?? [];
-  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0) return null;
+  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0) return null;
   // Repeated meshes (and animation frames) are stored once in a shared library,
   // shared between placed entries and prefab nodes (a prefab's copies repeat its meshes).
   const nodes = prefabs.flatMap((prefab) => prefab.nodes);
@@ -179,6 +183,7 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     lighting: sidecar.lighting ?? null,
     ...(packedPrefabs.length > 0 ? { prefabs: packedPrefabs } : {}),
     ...(sidecar.physicsWorld?.deterministic ? { physicsWorld: sidecar.physicsWorld } : {}),
+    ...(sidecar.timelines && sidecar.timelines.length > 0 ? { timelines: sidecar.timelines } : {}),
   });
 }
 
@@ -260,12 +265,14 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     entry.prefab && !known.get(entry.prefab.id)?.has(entry.prefab.node) ? withoutLink(entry) : entry,
   );
   const physicsWorld = readPhysicsWorld((parsed as { physicsWorld?: unknown }).physicsWorld);
+  const timelines = readTimelines((parsed as { timelines?: unknown }).timelines);
   return {
     version: MESH_SIDECAR_VERSION,
     meshes: linked,
     lighting,
     ...(prefabs.length > 0 ? { prefabs } : {}),
     ...(physicsWorld ? { physicsWorld } : {}),
+    ...(timelines.length > 0 ? { timelines } : {}),
   };
 }
 
@@ -341,6 +348,13 @@ export function setMeshTransform(sidecar: MeshSidecar, id: string, transform: Me
     version: MESH_SIDECAR_VERSION,
     meshes: sidecar.meshes.map((entry) => (entry.id === id ? { ...entry, transform } : entry)),
   };
+}
+
+/** Replace the scene's timelines (validated; an empty list removes them). */
+export function setMeshTimelines(sidecar: MeshSidecar, timelines: readonly SceneTimeline[]): MeshSidecar {
+  const { timelines: _drop, ...rest } = sidecar;
+  const next = readTimelines(timelines);
+  return next.length > 0 ? { ...rest, timelines: next } : rest;
 }
 
 /** Set the scene-wide physics settings (null restores the defaults). */

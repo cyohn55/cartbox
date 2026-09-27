@@ -114,7 +114,11 @@ trades state and commands with the cart through an 8 KB block at the end of RAM
       ending at a joint to a world-space target (toward an optional pole),
       `cartbox.lookat` turns a joint toward a point within a limit, and `cartbox.joint`
       reads a joint's world position — layered on whatever clip or state is playing.
-- [ ] Timeline / sequencer for cutscenes and scripted camera moves.
+- [x] Timeline / sequencer for cutscenes and scripted camera moves: camera, object,
+      animation-cue and event tracks with linear / smooth (spline) / step easing,
+      authored in the Mesh tab (camera keyed from the Scene view, scrubbed and
+      previewed there), played with `cartbox.playtimeline` or on autoplay, looping or
+      holding their last frame. Phase 3 is complete.
 
 ## Phase 4 — Web asset pipeline and reach
 

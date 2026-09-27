@@ -56,6 +56,13 @@
  *                                     the first ask)
  *   cartbox.joints(obj)               -> { name, ... } the skeleton's joints
  *
+ * Timelines (cutscenes and camera moves, when the scene has any):
+ *
+ *   cartbox.playtimeline(name, from, speed)  play a timeline (from seconds; speed 1)
+ *   cartbox.stoptimeline()            stop it: the camera and objects go back to the cart
+ *   cartbox.timeline()                -> name (nil when none), seconds in, still playing
+ *   cartbox.timelineevents()          -> { name, ... } its events passed on the last tick
+ *
  * `obj` is an object index or its name (as cartbox.find). The SDK's defaults
  * (sdk.ts) make every call a safe no-op for carts without bodies or prefabs.
  */
@@ -92,6 +99,9 @@ import {
   PHYS_OP_IK_POLE,
   PHYS_OP_LOOKAT,
   PHYS_OP_WATCH,
+  PHYS_OP_TIMELINE,
+  PHYS_TIMELINE,
+  PHYS_TIMELINE_EVENTS,
   PHYS_OP_CAST,
   PHYS_OP_DESPAWN,
   PHYS_OP_IMPULSE,
@@ -110,6 +120,7 @@ import {
 } from "./protocol.js";
 import { physicsSlots, sceneHasPhysics } from "./physicsSession.js";
 import { animatedObjects } from "../anim/animationSession.js";
+import { timelineEventNames } from "../anim/timelineSession.js";
 
 /**
  * Whether a scene needs the runtime block at all: bodies (when a physics engine
@@ -117,7 +128,11 @@ import { animatedObjects } from "../anim/animationSession.js";
  */
 export function sceneNeedsRuntime(scene: MeshScene | null | undefined, { physics = true }: { physics?: boolean } = {}): boolean {
   return Boolean(
-    scene && ((physics && sceneHasPhysics(scene)) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0),
+    scene &&
+      ((physics && sceneHasPhysics(scene)) ||
+        (scene.pools?.length ?? 0) > 0 ||
+        animatedObjects(scene).length > 0 ||
+        (scene.timelines?.length ?? 0) > 0),
   );
 }
 
@@ -174,7 +189,8 @@ export function runtimeSdkLua(
   end
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
-${ANIM_CALLS(scene)}end`;
+${ANIM_CALLS(scene)}
+${TIMELINE_CALLS(scene)}end`;
 }
 
 /** The physics calls (inside the runtime block's do … end, after its helpers). */
@@ -311,6 +327,42 @@ function SPAWN_CALLS(pools: readonly string[]): string {
   cartbox.alive = function(o)
     local i = _obj(o)
     return i ~= nil and _alive[i] == true
+  end
+`;
+}
+
+/** The timeline calls: play / stop by name, and read back what plays and its events. */
+function TIMELINE_CALLS(scene: MeshScene): string {
+  const timelines = scene.timelines ?? [];
+  if (timelines.length === 0) return "";
+  const names = timelines.map((t) => luaString(t.name)).join(",");
+  const events = timelines.map((t) => `{${timelineEventNames(t).map(luaString).join(",")}}`).join(",");
+  return `  local _tl = {${names}}
+  local _tlev = {${events}}
+  cartbox.playtimeline = function(name, from, speed)
+    for k, n in ipairs(_tl) do
+      if n == name or k - 1 == name then
+        _cmd(${PHYS_OP_TIMELINE}, k - 1, from or 0, speed or 1)
+        return
+      end
+    end
+  end
+  cartbox.stoptimeline = function() _cmd(${PHYS_OP_TIMELINE}, -1) end
+  cartbox.timeline = function()
+    if not _live() then return nil, 0, false end
+    local i = _rd(_B + ${PHYS_TIMELINE})
+    if i < 0 then return nil, 0, false end
+    return _tl[i + 1], _rd(_B + ${PHYS_TIMELINE + 4}) / ${PHYS_FIX}, _rd(_B + ${PHYS_TIMELINE + 8}) == 1
+  end
+  cartbox.timelineevents = function()
+    local out = {}
+    if not _live() then return out end
+    local i = _rd(_B + ${PHYS_TIMELINE})
+    local names = _tlev[i + 1]
+    if names == nil then return out end
+    local n = _rd(_B + ${PHYS_TIMELINE_EVENTS})
+    for k = 0, n - 1 do out[#out + 1] = names[_rd(_B + ${PHYS_TIMELINE_EVENTS + 4} + k * 4) + 1] end
+    return out
   end
 `;
 }

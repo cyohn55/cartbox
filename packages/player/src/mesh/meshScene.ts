@@ -22,6 +22,7 @@ import {
   readAnimatorSpec,
   readPhysicsSpec,
   readPhysicsWorld,
+  readTimelines,
   readSceneProps,
   readSceneTags,
   worldMatrices,
@@ -34,6 +35,7 @@ import {
   type AnimatorSpec,
   type PhysicsSpec,
   type PhysicsWorldSettings,
+  type SceneTimeline,
   type SceneLighting,
   type ScenePropValue,
 } from "@cartbox/editor";
@@ -99,6 +101,8 @@ export interface MeshScene {
   readonly lighting: SceneLighting | null;
   /** Scene-wide physics settings (absent = the defaults). */
   readonly physicsWorld?: PhysicsWorldSettings;
+  /** Cutscenes and scripted camera moves (objects referred to by instance `id`). */
+  readonly timelines?: readonly SceneTimeline[];
 }
 
 /** A view + projection pair ready to hand to `renderMeshScene`. */
@@ -286,12 +290,14 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
   // Reserve copies sit hidden at the origin: they don't count toward the framing bounds.
   const placed = instances.filter((instance) => !instance.pooled);
   const physicsWorld = readPhysicsWorld((parsed as { physicsWorld?: unknown }).physicsWorld);
+  const timelines = readTimelines((parsed as { timelines?: unknown }).timelines);
   return {
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
     lighting,
     ...(pools.length > 0 ? { pools } : {}),
     ...(physicsWorld ? { physicsWorld } : {}),
+    ...(timelines.length > 0 ? { timelines } : {}),
   };
 }
 

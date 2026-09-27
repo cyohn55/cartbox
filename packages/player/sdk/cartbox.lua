@@ -300,6 +300,11 @@ cartbox = {
   --   cartbox.lookat(obj, joint, x, y, z, weight, maxdeg)  turn a joint toward a point
   --   cartbox.joint(obj, joint)        -> x, y, z of a joint in the world
   --   cartbox.joints(obj)              -> { name, ... }
+  -- Timelines (cutscenes and camera moves, set up in the Mesh tab):
+  --   cartbox.playtimeline(name, from, speed)  play one
+  --   cartbox.stoptimeline()           stop it (the camera goes back to the cart)
+  --   cartbox.timeline()               -> name, seconds in, still playing
+  --   cartbox.timelineevents()         -> { name, ... } its events from the last tick
   -- Physics (bodies on scene objects): overridden by the injected physics calls
   -- when the cart has bodies.
   physics = function() return false end,
@@ -335,4 +340,8 @@ cartbox = {
   lookat = function() end,
   joint = function() return nil end,
   joints = function() return {} end,
+  playtimeline = function() end,
+  stoptimeline = function() end,
+  timeline = function() return nil, 0, false end,
+  timelineevents = function() return {} end,
 }
