@@ -126,7 +126,11 @@ trades state and commands with the cart through an 8 KB block at the end of RAM
       and `KHR_draco_mesh_compression` files (gltfpack, gltf-transform, exporters'
       "compress" options) decode on import, in the Mesh tab and from the library. The
       WebAssembly decoders load only when a file needs one.
-- [ ] KTX2 / Basis texture compression with mipmaps.
+- [x] KTX2 / Basis textures: glTF `KHR_texture_basisu` textures import and are
+      transcoded to RGBA by the official Basis Universal transcoder. A scene keeps them
+      compressed only when that saves more than the transcoder costs players (~254 KB
+      gzipped); otherwise they become PNG on import, and players never fetch it. Mipmaps
+      aren't used: every renderer samples the top level, as it does for PNG/JPEG.
 - [x] GPU instancing for repeated meshes (WebGPU): every copy of a primitive that
       binds the same textures is one instanced draw, with each copy's transforms in a
       storage buffer. The picture stays byte-identical to the software rasteriser

@@ -289,6 +289,7 @@ export class Player {
             this.model.height,
             mesh,
             this.sceneRenderer,
+            this.options.ktx2 ? { ktx2: this.options.ktx2 } : {},
           );
           this.meshSurface.setQuality(this.qualitySettings);
         }

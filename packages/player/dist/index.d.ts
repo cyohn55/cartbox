@@ -2055,6 +2055,12 @@ interface PlayerOptions {
         deterministic: boolean;
     }) => Promise<PhysicsBackend>;
     /**
+     * Loads a KTX2 (Basis Universal) texture decoder. Called only for a mesh scene
+     * that has KTX2 textures; without it they render as their flat base colour.
+     * The web app passes one that fetches the transcoder on demand.
+     */
+    ktx2?: () => Promise<(bytes: Uint8Array) => DecodedTexture | null>;
+    /**
      * Graphics quality: "low" | "medium" | "high", or "auto" (the default) to pick
      * from the device — see quality.ts. High is everything as authored.
      */
@@ -4378,7 +4384,15 @@ interface MeshOverlayOptions {
      * the frame rate up (default true). Off renders every frame at full size.
      */
     readonly adaptiveResolution?: boolean;
+    /**
+     * Loads a decoder for KTX2 (Basis Universal) textures, which browsers can't
+     * decode natively. Called only when the scene has one; without it such
+     * textures render as their flat base colour.
+     */
+    readonly ktx2?: Ktx2DecoderLoader;
 }
+/** Loads a KTX2 → RGBA decoder (see {@link MeshOverlayOptions.ktx2}). */
+type Ktx2DecoderLoader = () => Promise<(bytes: Uint8Array) => DecodedTexture | null>;
 declare class MeshOverlaySurface implements DisplaySurface {
     private readonly inner;
     private readonly width;

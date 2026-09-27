@@ -17,6 +17,7 @@
 import { parseObj, type MeshAsset, type DecodedTexture } from "@cartbox/editor";
 
 import { parseGlbDecoded, parseGltfTextDecoded } from "./gltfDecoders";
+import { loadKtx2Decoder } from "./ktx2Decoder";
 
 /** Strip the extension and directory to a friendly asset name. */
 function assetNameFromFile(fileName: string): string {
@@ -75,6 +76,12 @@ export async function decodeMeshTextures(mesh: MeshAsset): Promise<(DecodedTextu
 
 /** Decode compressed image bytes into an RGBA {@link DecodedTexture}. */
 async function decodeImage(bytes: Uint8Array, mime: string): Promise<DecodedTexture> {
+  if (mime === "image/ktx2") {
+    // Browsers can't decode KTX2; the Basis transcoder (fetched on first use) can.
+    const decoded = (await loadKtx2Decoder())(bytes);
+    if (!decoded) throw new Error("Could not transcode a KTX2 texture");
+    return decoded;
+  }
   // Copy into a standalone ArrayBuffer so Blob never sees a shared/offset view.
   const blob = new Blob([bytes.slice().buffer], { type: mime || "image/png" });
   const bitmap = await createImageBitmap(blob);

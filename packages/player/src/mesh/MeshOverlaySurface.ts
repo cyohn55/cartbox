@@ -85,7 +85,16 @@ export interface MeshOverlayOptions {
    * the frame rate up (default true). Off renders every frame at full size.
    */
   readonly adaptiveResolution?: boolean;
+  /**
+   * Loads a decoder for KTX2 (Basis Universal) textures, which browsers can't
+   * decode natively. Called only when the scene has one; without it such
+   * textures render as their flat base colour.
+   */
+  readonly ktx2?: Ktx2DecoderLoader;
 }
+
+/** Loads a KTX2 → RGBA decoder (see {@link MeshOverlayOptions.ktx2}). */
+export type Ktx2DecoderLoader = () => Promise<(bytes: Uint8Array) => DecodedTexture | null>;
 
 /** A rectangle of shadow-map texels. */
 interface TexelRect {
@@ -345,10 +354,16 @@ export class MeshOverlaySurface implements DisplaySurface {
     // Decode each distinct mesh's textures once: instances (and animation
     // frames) that share a model share its MeshAsset, so they share its maps.
     const decoded = new Map<MeshAsset, Promise<TexturedMesh>>();
+    // The KTX2 decoder is fetched at most once, and only if some texture needs it.
+    let ktx2: Promise<((bytes: Uint8Array) => DecodedTexture | null) | null> | null = null;
+    const decodeKtx2 = (bytes: Uint8Array) => {
+      ktx2 ??= options.ktx2 ? options.ktx2().catch(() => null) : Promise.resolve(null);
+      return ktx2.then((decode) => (decode ? decode(bytes) : null));
+    };
     const texture = (mesh: MeshAsset): Promise<TexturedMesh> => {
       let entry = decoded.get(mesh);
       if (!entry) {
-        entry = decodeMeshTextures(mesh);
+        entry = decodeMeshTextures(mesh, decodeKtx2);
         decoded.set(mesh, entry);
       }
       return entry;
@@ -864,12 +879,13 @@ export class MeshOverlaySurface implements DisplaySurface {
 type TexturedMesh = Omit<MeshSceneInstance, "model">;
 
 /** Decode all of one mesh's material maps; a failed decode falls back to null (flat). */
-async function decodeMeshTextures(mesh: MeshAsset): Promise<TexturedMesh> {
+async function decodeMeshTextures(mesh: MeshAsset, decodeKtx2: (bytes: Uint8Array) => Promise<DecodedTexture | null>): Promise<TexturedMesh> {
   const each = (pick: (m: MeshAsset["primitives"][number]["material"]) => EncodedImage | null | undefined) =>
     Promise.all(
       mesh.primitives.map((primitive) => {
         const image = pick(primitive.material);
-        return image ? decodeTexture(image.mime, image.bytes) : Promise.resolve(null);
+        if (!image) return Promise.resolve(null);
+        return image.mime === "image/ktx2" ? decodeKtx2(image.bytes) : decodeTexture(image.mime, image.bytes);
       }),
     );
   const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures] = await Promise.all([

@@ -189,7 +189,7 @@ export {
   type MeshBounds,
 } from "./model/MeshAsset";
 export { parseObj, encodeObj, type ParseObjOptions, type ObjFiles } from "./model/objCodec";
-export { parseGlb, parseGltf, parseGltfText, encodeGlb, readGlb } from "./model/gltfCodec";
+export { parseGlb, parseGltf, parseGltfText, encodeGlb, isKtx2, readGlb } from "./model/gltfCodec";
 export { decompressGltf, gltfCompression, type DracoAttributeRequest, type DracoDecoded, type GltfDecoders } from "./model/gltfCompression";
 export {
   ANIMATOR_LIMITS,

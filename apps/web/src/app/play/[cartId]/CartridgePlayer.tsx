@@ -28,6 +28,7 @@ import {
 
 import { authHeaders } from "@/lib/supabase-browser";
 import { isStaticExport } from "@/lib/staticSite";
+import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 import { rapierPhysics } from "@/lib/physicsRapier";
 
 interface CartridgePlayerProps {
@@ -116,6 +117,8 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       // Physics bodies on those meshes, simulated by Rapier (fetched only when a
       // cart actually has bodies).
       physics: rapierPhysics(),
+      // KTX2 textures: the transcoder is fetched only if the scene has one.
+      ktx2: loadKtx2Decoder,
       // The cart's authored HD-2D world: 3D terrain with the cart's 2D character
       // sprites composited into it as depth-sorted billboards.
       world: world ?? undefined,
