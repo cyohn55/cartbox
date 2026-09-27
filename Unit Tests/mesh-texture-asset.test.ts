@@ -287,7 +287,8 @@ describe("rebakeMeshSidecar", () => {
     const rebaked = (await rebakeMeshSidecar(raw, stubSheet(edited, size), paletteWithClut(clut)))!;
     expect(rebaked).not.toBe(raw);
     const scene = parseMeshScene(rebaked)!;
-    expect(scene.instances.map((i) => i.name)).toEqual(["a", "b"]);
+    // The placed objects (prefab reserve copies follow them in the runtime scene).
+    expect(scene.instances.filter((i) => !i.pooled).map((i) => i.name)).toEqual(["a", "b"]);
     expect(scene.lighting?.ambient).toBe(0.4);
     const stored = JSON.parse(rebaked) as { prefabs?: unknown[]; library?: Record<string, string> };
     expect(stored.prefabs).toHaveLength(1);

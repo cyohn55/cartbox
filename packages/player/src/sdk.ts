@@ -270,6 +270,10 @@ cartbox = {
   move = function() end,
   ray = function() end,
   hit = function() return false end,
+  -- Spawning prefab copies: overridden when the cart has prefabs.
+  spawn = function() return nil end,
+  despawn = function() end,
+  alive = function() return false end,
 }`;
 
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */

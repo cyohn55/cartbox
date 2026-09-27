@@ -27,6 +27,7 @@ import {
   takePhysicsCommands,
   writePhysicsState,
   type PhysicsBodyState,
+  type PhysicsCommand,
   type PhysicsRayHit,
 } from "./protocol.js";
 
@@ -65,6 +66,10 @@ export interface PhysicsBackend {
   moveCharacter(handle: number, delta: Vec3): { grounded: boolean };
   /** The nearest hit along a unit `direction` within `maxDistance`, or null. */
   raycast(origin: Vec3, direction: Vec3, maxDistance: number): { object: number; point: Vec3; normal: Vec3; distance: number } | null;
+  /** Take a body out of (or back into) the world — a spawnable copy waiting in reserve. */
+  setEnabled(handle: number, enabled: boolean): void;
+  /** Place a body at a position and rotation at once, at rest. */
+  setPose(handle: number, position: Vec3, rotation: Quat): void;
   destroy(): void;
 }
 
@@ -188,11 +193,15 @@ interface Tracked {
   grounded: boolean;
   /** Characters: last move, for the velocity the cart reads. */
   lastMove: Vec3;
+  /** Part of a prefab copy in reserve: out of the world until spawned. */
+  enabled: boolean;
 }
 
 export class PhysicsSession {
   private readonly tracked: Tracked[] = [];
   private readonly byObject = new Map<number, Tracked>();
+  /** Bodies of reserve prefab copies (static ones too), by object index. */
+  private readonly pooledBodies = new Map<number, { handle: number; enabled: boolean }>();
   private rayRequests: ({ origin: Vec3; direction: Vec3; max: number } | null)[] = [];
   private rayResults: (PhysicsRayHit | null)[] = [];
   private tick = 0;
@@ -205,6 +214,7 @@ export class PhysicsSession {
     scene.instances.forEach((inst, i) => {
       const spec = inst.physics;
       if (!spec || (spec.body !== "static" && !slots.has(i))) return;
+      const pooled = Boolean(inst.pooled);
       const { position, rotation, scale } = splitWorldMatrix(inst.model);
       const handle = backend.addBody({
         kind: spec.body,
@@ -216,8 +226,12 @@ export class PhysicsSession {
         bounce: spec.bounce,
         object: i,
       });
+      if (pooled) {
+        backend.setEnabled(handle, false);
+        this.pooledBodies.set(i, { handle, enabled: false });
+      }
       if (spec.body === "static") return;
-      const t: Tracked = { object: i, handle, kind: spec.body, scale, grounded: false, lastMove: [0, 0, 0] };
+      const t: Tracked = { object: i, handle, kind: spec.body, scale, grounded: false, lastMove: [0, 0, 0], enabled: !pooled };
       this.tracked.push(t);
       this.byObject.set(i, t);
     });
@@ -235,9 +249,39 @@ export class PhysicsSession {
 
   /** Apply the cart's commands, step the world, and cast the rays it asked for. */
   afterTick(block: DataView): void {
+    this.run(takePhysicsCommands(block));
+  }
+
+  /**
+   * Bring a spawned prefab copy's bodies into the world, placed where the copy's
+   * objects now are (`world` gives each object's world matrix), or take them out.
+   */
+  setCopyActive(objects: readonly number[], world: (object: number) => Mat4 | null, active: boolean): void {
+    for (const object of objects) {
+      const body = this.pooledBodies.get(object);
+      if (!body) continue;
+      if (active) {
+        const m = world(object);
+        if (m) {
+          const { position, rotation } = splitWorldMatrix(m);
+          this.backend.setPose(body.handle, position, rotation);
+        }
+      }
+      if (body.enabled !== active) this.backend.setEnabled(body.handle, active);
+      body.enabled = active;
+      const t = this.byObject.get(object);
+      if (t) {
+        t.enabled = active;
+        t.grounded = false;
+      }
+    }
+  }
+
+  /** Apply a tick's commands (already taken from the block), step, and cast rays. */
+  run(commands: readonly PhysicsCommand[]): void {
     this.rayRequests = [];
     for (const t of this.tracked) if (t.kind === "character") t.lastMove = [0, 0, 0];
-    for (const cmd of takePhysicsCommands(block)) {
+    for (const cmd of commands) {
       const [a, b, c, d, e, f] = cmd.v;
       if (cmd.op === PHYS_OP_RAY) {
         if (cmd.a >= 0 && cmd.a < PHYS_MAX_RAYS) {
@@ -247,7 +291,7 @@ export class PhysicsSession {
         continue;
       }
       const t = this.byObject.get(cmd.a);
-      if (!t) continue;
+      if (!t || !t.enabled) continue;
       if (cmd.op === PHYS_OP_IMPULSE && t.kind === "dynamic") this.backend.applyImpulse(t.handle, [a, b, c]);
       else if (cmd.op === PHYS_OP_VELOCITY && t.kind !== "character") this.backend.setVelocity(t.handle, [a, b, c]);
       else if (cmd.op === PHYS_OP_TELEPORT) this.backend.teleport(t.handle, [a, b, c]);
@@ -267,10 +311,22 @@ export class PhysicsSession {
     }
   }
 
+  /** Each moving body's live state, by object index (live inspection). */
+  inspect(): Map<number, { kind: string; velocity: Vec3; grounded: boolean; active: boolean }> {
+    const out = new Map<number, { kind: string; velocity: Vec3; grounded: boolean; active: boolean }>();
+    for (const t of this.tracked) {
+      const s = this.backend.bodyState(t.handle);
+      const velocity = t.kind === "character" ? (t.lastMove.map((v) => v / PHYSICS_DT) as unknown as Vec3) : s.velocity;
+      out.set(t.object, { kind: t.kind, velocity, grounded: t.grounded, active: t.enabled });
+    }
+    return out;
+  }
+
   /** World matrices for every moving body this frame (scene object index → matrix). */
   overrides(): Map<number, Mat4> {
     const out = new Map<number, Mat4>();
     for (const t of this.tracked) {
+      if (!t.enabled) continue;
       const s = this.backend.bodyState(t.handle);
       out.set(t.object, composeWorldMatrix(s.position, s.rotation, t.scale));
     }

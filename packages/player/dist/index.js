@@ -3858,6 +3858,10 @@ cartbox = {
   move = function() end,
   ray = function() end,
   hit = function() return false end,
+  -- Spawning prefab copies: overridden when the cart has prefabs.
+  spawn = function() return nil end,
+  despawn = function() end,
+  alive = function() return false end,
 }`;
 function injectSdk(bytes) {
   return prependLuaCode(bytes, CARTBOX_SDK_LUA);
@@ -3974,6 +3978,8 @@ var PHYS_OP_VELOCITY = 2;
 var PHYS_OP_TELEPORT = 3;
 var PHYS_OP_MOVE = 4;
 var PHYS_OP_RAY = 5;
+var PHYS_OP_SPAWN = 6;
+var PHYS_OP_DESPAWN = 7;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -4128,6 +4134,8 @@ var PhysicsSession = class {
     this.backend = backend;
     this.tracked = [];
     this.byObject = /* @__PURE__ */ new Map();
+    /** Bodies of reserve prefab copies (static ones too), by object index. */
+    this.pooledBodies = /* @__PURE__ */ new Map();
     this.rayRequests = [];
     this.rayResults = [];
     this.tick = 0;
@@ -4135,6 +4143,7 @@ var PhysicsSession = class {
     scene.instances.forEach((inst, i) => {
       const spec = inst.physics;
       if (!spec || spec.body !== "static" && !slots.has(i)) return;
+      const pooled = Boolean(inst.pooled);
       const { position, rotation, scale } = splitWorldMatrix(inst.model);
       const handle = backend.addBody({
         kind: spec.body,
@@ -4146,8 +4155,12 @@ var PhysicsSession = class {
         bounce: spec.bounce,
         object: i
       });
+      if (pooled) {
+        backend.setEnabled(handle, false);
+        this.pooledBodies.set(i, { handle, enabled: false });
+      }
       if (spec.body === "static") return;
-      const t = { object: i, handle, kind: spec.body, scale, grounded: false, lastMove: [0, 0, 0] };
+      const t = { object: i, handle, kind: spec.body, scale, grounded: false, lastMove: [0, 0, 0], enabled: !pooled };
       this.tracked.push(t);
       this.byObject.set(i, t);
     });
@@ -4163,9 +4176,37 @@ var PhysicsSession = class {
   }
   /** Apply the cart's commands, step the world, and cast the rays it asked for. */
   afterTick(block) {
+    this.run(takePhysicsCommands(block));
+  }
+  /**
+   * Bring a spawned prefab copy's bodies into the world, placed where the copy's
+   * objects now are (`world` gives each object's world matrix), or take them out.
+   */
+  setCopyActive(objects, world, active) {
+    for (const object of objects) {
+      const body = this.pooledBodies.get(object);
+      if (!body) continue;
+      if (active) {
+        const m = world(object);
+        if (m) {
+          const { position, rotation } = splitWorldMatrix(m);
+          this.backend.setPose(body.handle, position, rotation);
+        }
+      }
+      if (body.enabled !== active) this.backend.setEnabled(body.handle, active);
+      body.enabled = active;
+      const t = this.byObject.get(object);
+      if (t) {
+        t.enabled = active;
+        t.grounded = false;
+      }
+    }
+  }
+  /** Apply a tick's commands (already taken from the block), step, and cast rays. */
+  run(commands) {
     this.rayRequests = [];
     for (const t of this.tracked) if (t.kind === "character") t.lastMove = [0, 0, 0];
-    for (const cmd of takePhysicsCommands(block)) {
+    for (const cmd of commands) {
       const [a, b, c, d, e, f] = cmd.v;
       if (cmd.op === PHYS_OP_RAY) {
         if (cmd.a >= 0 && cmd.a < PHYS_MAX_RAYS) {
@@ -4175,7 +4216,7 @@ var PhysicsSession = class {
         continue;
       }
       const t = this.byObject.get(cmd.a);
-      if (!t) continue;
+      if (!t || !t.enabled) continue;
       if (cmd.op === PHYS_OP_IMPULSE && t.kind === "dynamic") this.backend.applyImpulse(t.handle, [a, b, c]);
       else if (cmd.op === PHYS_OP_VELOCITY && t.kind !== "character") this.backend.setVelocity(t.handle, [a, b, c]);
       else if (cmd.op === PHYS_OP_TELEPORT) this.backend.teleport(t.handle, [a, b, c]);
@@ -4194,10 +4235,21 @@ var PhysicsSession = class {
       this.rayResults[slot] = req ? this.backend.raycast(req.origin, req.direction, req.max) : null;
     }
   }
+  /** Each moving body's live state, by object index (live inspection). */
+  inspect() {
+    const out = /* @__PURE__ */ new Map();
+    for (const t of this.tracked) {
+      const s = this.backend.bodyState(t.handle);
+      const velocity = t.kind === "character" ? t.lastMove.map((v) => v / PHYSICS_DT) : s.velocity;
+      out.set(t.object, { kind: t.kind, velocity, grounded: t.grounded, active: t.enabled });
+    }
+    return out;
+  }
   /** World matrices for every moving body this frame (scene object index → matrix). */
   overrides() {
     const out = /* @__PURE__ */ new Map();
     for (const t of this.tracked) {
+      if (!t.enabled) continue;
       const s = this.backend.bodyState(t.handle);
       out.set(t.object, composeWorldMatrix(s.position, s.rotation, t.scale));
     }
@@ -4209,9 +4261,15 @@ var PhysicsSession = class {
 };
 
 // src/physics/physicsSdk.ts
-function physicsSdkLua(scene, layout) {
-  if (!scene || !sceneHasPhysics(scene)) return "";
+function sceneNeedsRuntime(scene, { physics = true } = {}) {
+  return Boolean(scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0));
+}
+var luaString = (s) => JSON.stringify(s);
+function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
+  if (!scene || !sceneNeedsRuntime(scene, { physics: engine })) return "";
+  const physics = engine && sceneHasPhysics(scene);
   const slots = physicsSlots(scene).map((object, slot) => `[${object}]=${slot}`);
+  const pools = (scene.pools ?? []).map((pool) => `[${luaString(pool.prefab)}]={${pool.roots.join(",")}}`);
   const B = physicsBlockAddress(layout);
   return `do
   cartbox = cartbox or {}
@@ -4247,7 +4305,11 @@ function physicsSdkLua(scene, layout) {
     _wr(at + 20, (v4 or 0) * ${PHYS_FIX}) _wr(at + 24, (v5 or 0) * ${PHYS_FIX}) _wr(at + 28, (v6 or 0) * ${PHYS_FIX})
     _wr(_B + ${PHYS_CMDS}, n + 1)
   end
-  cartbox.physics = function() return _live() end
+${physics ? PHYSICS_CALLS() : ""}
+${pools.length > 0 ? SPAWN_CALLS(pools) : ""}end`;
+}
+function PHYSICS_CALLS() {
+  return `  cartbox.physics = function() return _live() end
   cartbox.body = function(o)
     local i = _obj(o)
     local s = i and _slot[i]
@@ -4286,8 +4348,105 @@ function physicsSdkLua(scene, layout) {
     return true, obj, _rd(at + 4) / ${PHYS_FIX}, _rd(at + 8) / ${PHYS_FIX}, _rd(at + 12) / ${PHYS_FIX},
       _rd(at + 16) / ${PHYS_FIX}, _rd(at + 20) / ${PHYS_FIX}, _rd(at + 24) / ${PHYS_FIX}, _rd(at + 28) / ${PHYS_FIX}
   end
-end`;
+`;
 }
+function SPAWN_CALLS(pools) {
+  return `  local _pools = {${pools.join(",")}}
+  local _alive = {}
+  cartbox.spawn = function(name, x, y, z, yaw, pitch, roll)
+    local roots = _pools[name]
+    if roots == nil or not _live() then return nil end
+    for _, r in ipairs(roots) do
+      if not _alive[r] then
+        _alive[r] = true
+        _cmd(${PHYS_OP_SPAWN}, r, x or 0, y or 0, z or 0, yaw or 0, pitch or 0, roll or 0)
+        return r
+      end
+    end
+    return nil
+  end
+  cartbox.despawn = function(o)
+    local i = _obj(o)
+    if i ~= nil and _alive[i] then
+      _alive[i] = nil
+      _cmd(${PHYS_OP_DESPAWN}, i)
+    end
+  end
+  cartbox.alive = function(o)
+    local i = _obj(o)
+    return i ~= nil and _alive[i] == true
+  end
+`;
+}
+var physicsSdkLua = runtimeSdkLua;
+
+// src/runtime/runtimeChannel.ts
+import { composeModelMatrix, multiplyMat4 } from "@cartbox/editor";
+var DEG = 180 / Math.PI;
+var RuntimeChannel = class {
+  constructor(scene, physics) {
+    this.scene = scene;
+    this.physics = physics;
+    /** Spawned copies: root object index → the root's world matrix. */
+    this.active = /* @__PURE__ */ new Map();
+    /** Each reserve root's objects (itself first, then its descendants). */
+    this.copyObjects = /* @__PURE__ */ new Map();
+    scene.instances.forEach((inst, i) => {
+      if (!inst.pooled) return;
+      const list = this.copyObjects.get(inst.pooled.root) ?? [];
+      if (inst.pooled.root === i) list.unshift(i);
+      else list.push(i);
+      this.copyObjects.set(inst.pooled.root, list);
+    });
+  }
+  /** Write what the cart reads this tick (and the handshake word). */
+  beforeTick(block) {
+    if (this.physics) this.physics.beforeTick(block);
+    else writePhysicsState(block, 0, [], []);
+  }
+  /** Take the cart's commands: scene ops here, the rest to physics (which then steps). */
+  afterTick(block) {
+    const commands = takePhysicsCommands(block);
+    for (const cmd of commands) {
+      if (cmd.op === PHYS_OP_SPAWN) this.spawn(cmd.a, cmd.v);
+      else if (cmd.op === PHYS_OP_DESPAWN) this.despawn(cmd.a);
+    }
+    this.physics?.run(commands.filter((c) => c.op !== PHYS_OP_SPAWN && c.op !== PHYS_OP_DESPAWN));
+  }
+  /** Spawned copies' root world matrices (root object index → matrix). */
+  spawned() {
+    return this.active;
+  }
+  spawn(root, v) {
+    const objects = this.copyObjects.get(root);
+    if (!objects) return;
+    const [x, y, z, yaw, pitch, roll] = v;
+    const world = composeModelMatrix([x, y, z], [pitch * DEG, yaw * DEG, roll * DEG], [1, 1, 1]);
+    this.active.set(root, world);
+    const placed = /* @__PURE__ */ new Map([[root, world]]);
+    const worldOf = (i) => {
+      const known = placed.get(i);
+      if (known) return known;
+      const inst = this.scene.instances[i];
+      if (!inst || inst.parent < 0) return null;
+      const parent = worldOf(inst.parent);
+      if (!parent) return null;
+      const m = multiplyMat4(parent, inst.local);
+      placed.set(i, m);
+      return m;
+    };
+    this.physics?.setCopyActive(objects, worldOf, true);
+  }
+  despawn(root) {
+    const objects = this.copyObjects.get(root);
+    if (!objects || !this.active.has(root)) return;
+    this.active.delete(root);
+    this.physics?.setCopyActive(objects, () => null, false);
+  }
+  destroy() {
+    this.physics?.destroy();
+  }
+};
 
 // src/collisionSdk.ts
 function parseCollisionField(value) {
@@ -4442,14 +4601,14 @@ function clipFrameIndex(entry, tick) {
   }
   return entry.cum.length;
 }
-function luaString(value) {
+function luaString2(value) {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "");
 }
 function animClipsSdkLua(anim) {
   const table = buildClipTable(anim);
   if (table.length === 0) return "";
   const entries = table.map(
-    (entry) => `  ["${luaString(entry.name)}"] = { total = ${entry.total}, once = ${entry.once}, tile = {${entry.tile.join(",")}}, w = {${entry.w.join(",")}}, h = {${entry.h.join(",")}}, cum = {${entry.cum.join(",")}} }`
+    (entry) => `  ["${luaString2(entry.name)}"] = { total = ${entry.total}, once = ${entry.once}, tile = {${entry.tile.join(",")}}, w = {${entry.w.join(",")}}, h = {${entry.h.join(",")}}, cum = {${entry.cum.join(",")}} }`
   );
   return `do
   cartbox = cartbox or {}
@@ -5260,8 +5419,8 @@ import {
   computeEnvironmentAverage,
   downsamplePanorama,
   renderSkyBackground,
-  composeModelMatrix as composeModelMatrix2,
-  multiplyMat4,
+  composeModelMatrix as composeModelMatrix3,
+  multiplyMat4 as multiplyMat42,
   sceneLightingEnvironment,
   sceneLightingKeyDirection,
   sceneLightingTonemap,
@@ -5462,7 +5621,7 @@ function capsConstrainScene(caps) {
 
 // src/mesh/meshScene.ts
 import {
-  composeModelMatrix,
+  composeModelMatrix as composeModelMatrix2,
   deserializeMeshAsset,
   meshBounds as meshBounds2,
   parentIndices,
@@ -5477,6 +5636,8 @@ import {
   resolveMeshRef,
   viewMatrix
 } from "@cartbox/editor";
+var DEFAULT_PREFAB_POOL = 8;
+var MAX_PREFAB_POOL = 32;
 function isFiniteTriple(value) {
   return Array.isArray(value) && value.length === 3 && value.every((n) => typeof n === "number" && Number.isFinite(n));
 }
@@ -5547,40 +5708,79 @@ function parseMeshScene(raw) {
     }
     return cache.get(serialized) ?? null;
   };
-  const parsedInstances = [];
-  for (const entry of entries) {
-    const record = entry;
-    if (typeof record.mesh !== "string") continue;
+  const readEntry = (record, id, parentId, identity = false) => {
+    if (typeof record.mesh !== "string") return null;
     const resolved = resolveMeshRef(record.mesh, library);
     const mesh = resolved ? load(resolved) : null;
-    if (!mesh) continue;
+    if (!mesh) return null;
     const frames = resolveMeshFrames(record.frames, library).map(load).filter((frame) => frame !== null);
-    const t = readTransform(record.transform);
-    parsedInstances.push({
+    const t = identity ? { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } : readTransform(record.transform);
+    return {
       mesh,
-      local: composeModelMatrix(t.position, t.rotation, t.scale),
+      local: composeModelMatrix2(t.position, t.rotation, t.scale),
       ...frames.length > 0 ? { frames } : {},
-      id: typeof record.id === "string" ? record.id : `mesh-${parsedInstances.length}`,
+      id,
       name: typeof record.name === "string" ? record.name : "Mesh",
       tags: readSceneTags(record.tags),
       props: readSceneProps(record.props),
       physics: readPhysicsSpec(record.physics),
-      parentId: typeof record.parent === "string" && record.parent ? record.parent : null
-    });
+      parentId
+    };
+  };
+  const parsedInstances = [];
+  for (const entry of entries) {
+    const record = entry;
+    const parsedEntry = readEntry(
+      record,
+      typeof record.id === "string" ? record.id : `mesh-${parsedInstances.length}`,
+      typeof record.parent === "string" && record.parent ? record.parent : null
+    );
+    if (parsedEntry) parsedInstances.push(parsedEntry);
+  }
+  const poolRoots = /* @__PURE__ */ new Map();
+  const prefabs = parsed.prefabs;
+  if (Array.isArray(prefabs)) {
+    for (const item of prefabs) {
+      const prefab = item;
+      if (typeof prefab.id !== "string" || !Array.isArray(prefab.nodes)) continue;
+      const name = typeof prefab.name === "string" ? prefab.name : "Prefab";
+      const size = typeof prefab.pool === "number" && Number.isFinite(prefab.pool) ? Math.max(0, Math.min(MAX_PREFAB_POOL, Math.floor(prefab.pool))) : DEFAULT_PREFAB_POOL;
+      const nodes = prefab.nodes.filter((n) => typeof n.key === "string");
+      const root = nodes.find((n) => typeof n.parent !== "string" || !n.parent);
+      if (!root || size === 0) continue;
+      for (let copy = 0; copy < size; copy += 1) {
+        const idOf = (key) => `${prefab.id}#${copy}:${String(key)}`;
+        const rootId = idOf(root.key);
+        const made = [];
+        for (const node of nodes) {
+          const isRoot = node === root;
+          const entry = readEntry(node, idOf(node.key), isRoot ? null : idOf(node.parent), isRoot);
+          if (!entry) continue;
+          made.push({ ...entry, ...isRoot ? { name: `${name} ${copy + 1}` } : {}, pool: { prefab: name, copy, rootId } });
+        }
+        if (!made.some((m) => m.id === rootId)) continue;
+        parsedInstances.push(...made);
+        poolRoots.set(name, [...poolRoots.get(name) ?? [], rootId]);
+      }
+    }
   }
   const parents = parentIndices(parsedInstances.map((p) => ({ id: p.id, parent: p.parentId })));
   const world = worldMatrices(
     parsedInstances.map((p) => p.local),
     parents
   );
-  const instances = parsedInstances.map(({ parentId: _parentId, ...rest }, i) => ({
+  const indexOf = new Map(parsedInstances.map((p, i) => [p.id, i]));
+  const instances = parsedInstances.map(({ parentId: _parentId, pool, ...rest }, i) => ({
     ...rest,
     model: world[i],
-    parent: parents[i]
+    parent: parents[i],
+    ...pool ? { pooled: { prefab: pool.prefab, copy: pool.copy, root: indexOf.get(pool.rootId) } } : {}
   }));
   if (instances.length === 0) return null;
   const lighting = parseSceneLighting(parsed.lighting);
-  return { instances, bounds: sceneBounds(instances), lighting };
+  const pools = [...poolRoots.entries()].map(([prefab, ids]) => ({ prefab, roots: ids.map((id) => indexOf.get(id)) }));
+  const placed = instances.filter((instance) => !instance.pooled);
+  return { instances, bounds: sceneBounds(placed.length > 0 ? placed : instances), lighting, ...pools.length > 0 ? { pools } : {} };
 }
 function buildOrbitCamera(bounds, yaw, pitch, aspect, options = {}) {
   const { radius } = bounds;
@@ -5646,7 +5846,7 @@ var SKY_PANORAMA_WIDTH = 1536;
 var SKY_PANORAMA_HEIGHT = 768;
 var SKY_IBL_DOWNSAMPLE = 8;
 function poseLocalMatrix(pose) {
-  return composeModelMatrix2(
+  return composeModelMatrix3(
     pose.position,
     [pose.rotation[1] * RAD_TO_DEG, pose.rotation[0] * RAD_TO_DEG, pose.rotation[2] * RAD_TO_DEG],
     [pose.scale, pose.scale, pose.scale]
@@ -5703,11 +5903,17 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.flat = null;
     /** World matrices of the objects physics moved this frame (see setBodyOverrides). */
     this.bodies = /* @__PURE__ */ new Map();
+    /** Spawned prefab copies: root object index → the root's world matrix (see setSpawned). */
+    this.spawned = /* @__PURE__ */ new Map();
+    /** Each object's world matrix as last drawn (null = hidden), or null when nothing moved. */
+    this.lastPlacement = null;
     /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
     this.hudFrame = null;
     this.output = new Uint8ClampedArray(width * height * 4);
     this.presented = new Uint8Array(this.output.buffer);
     this.depth = new Float32Array(width * height);
+    this.pooledRoot = scene.instances.map((instance) => instance.pooled?.root ?? -1);
+    this.unpooled = this.pooledRoot.some((r) => r >= 0) ? instances.filter((_, i) => this.pooledRoot[i] < 0) : instances;
     const parents = scene.instances.map((instance) => instance.parent ?? -1);
     this.hierarchy = parents.some((p) => p >= 0) ? {
       parents,
@@ -5722,6 +5928,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    */
   setBodyOverrides(bodies) {
     this.bodies = bodies;
+  }
+  /**
+   * Set the prefab copies the cart has spawned (root object index → world matrix).
+   * Reserve copies not in the map stay hidden; a spawned copy's children follow
+   * its root, and its physics bodies (if any) take over from there.
+   */
+  setSpawned(spawned) {
+    this.spawned = spawned;
   }
   /** Posed instances plus, in a hierarchy, everything below them: what moves this frame. */
   withChildren(indices) {
@@ -5919,9 +6133,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * only part of the shadow map that has to be redrawn each frame.
    */
   posedInstances() {
-    if (this.poses.length === 0 && this.bodies.size === 0) return { main: this.instances, front: [], moved: [] };
+    if (this.poses.length === 0 && this.bodies.size === 0 && this.spawned.size === 0) {
+      this.lastPlacement = null;
+      return { main: this.unpooled, front: [], moved: [] };
+    }
     if (this.hierarchy) return this.posedHierarchy(this.hierarchy);
-    if (this.bodies.size > 0) {
+    if (this.bodies.size > 0 || this.spawned.size > 0 || this.unpooled !== this.instances) {
       this.flat ?? (this.flat = {
         parents: this.instances.map(() => -1),
         children: this.instances.map(() => []),
@@ -5946,7 +6163,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const instance = {
         ...source,
         mesh: pose.tint ? this.tinted(source.mesh, pose.tint) : source.mesh,
-        model: multiplyMat4(authored.model, poseLocalMatrix(pose))
+        model: multiplyMat42(authored.model, poseLocalMatrix(pose))
       };
       if (pose.front) {
         front.push(instance);
@@ -5976,22 +6193,32 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const up = p >= 0 ? state(p) : null;
       const pose = byIndex.get(i);
       const body = this.bodies.get(i);
-      const moved2 = Boolean(pose) || Boolean(up?.moved) || Boolean(body);
+      const poolRoot = this.pooledRoot[i] ?? -1;
+      const reserved = poolRoot >= 0 && !this.spawned.has(poolRoot);
+      const spawnAt = poolRoot === i ? this.spawned.get(i) : void 0;
+      const moved2 = Boolean(pose) || Boolean(up?.moved) || Boolean(body) || Boolean(spawnAt);
       let model = this.instances[i].model;
       if (moved2) {
-        const base = body ?? (up ? multiplyMat4(up.model, h.locals[i]) : h.locals[i]);
-        model = pose ? multiplyMat4(base, poseLocalMatrix(pose)) : base;
+        const base = body ?? spawnAt ?? (up ? multiplyMat42(up.model, h.locals[i]) : h.locals[i]);
+        model = pose ? multiplyMat42(base, poseLocalMatrix(pose)) : base;
       }
-      const out = { model, moved: moved2, hidden: Boolean(pose?.hidden) || Boolean(up?.hidden), front: Boolean(pose?.front) || Boolean(up?.front) };
+      const out = {
+        model,
+        moved: moved2,
+        hidden: reserved || Boolean(pose?.hidden) || Boolean(up?.hidden),
+        front: Boolean(pose?.front) || Boolean(up?.front)
+      };
       states[i] = out;
       return out;
     };
     const main = [];
     const front = [];
     const moved = [];
+    const placement = new Array(this.instances.length);
     for (let i = 0; i < this.instances.length; i += 1) {
       const authored = this.instances[i];
       const s = state(i);
+      placement[i] = s.hidden ? null : s.model;
       if (s.hidden) continue;
       if (!s.moved) {
         main.push(authored);
@@ -6012,7 +6239,15 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         moved.push(instance);
       }
     }
+    this.lastPlacement = placement;
     return { main, front, moved };
+  }
+  /**
+   * Each object's world matrix as last drawn, null where it was hidden (live
+   * inspection). Before anything has moved, the authored placement.
+   */
+  placements() {
+    return this.lastPlacement ?? this.instances.map((instance, i) => this.pooledRoot[i] >= 0 ? null : instance.model);
   }
   /** A tinted copy of `mesh`, cached so its identity (and any GPU upload) is stable. */
   tinted(mesh, tint) {
@@ -6048,6 +6283,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (!this.staticShadow || this.staticShadowKey !== key || this.staticShadowLighting !== lighting) {
       this.staticShadow ?? (this.staticShadow = new Float32Array(size * size));
       const posed = this.withChildren([...this.poses.map((p) => p.index), ...this.bodies.keys()]);
+      this.pooledRoot.forEach((root, i) => {
+        if (root >= 0) posed.add(i);
+      });
       const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i));
       const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow });
       if (!built) return null;
@@ -6107,7 +6345,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.meshBounds.set(instance.mesh, b);
     }
     if (!Number.isFinite(b[0])) return null;
-    const mm = multiplyMat4(m, instance.model);
+    const mm = multiplyMat42(m, instance.model);
     let sx0 = Infinity, sy0 = Infinity, sx1 = -Infinity, sy1 = -Infinity;
     for (let c = 0; c < 8; c += 1) {
       const x = c & 1 ? b[3] : b[0];
@@ -6632,7 +6870,7 @@ var WorldOverlaySurface = class {
 import {
   DEFAULT_RASTER_STYLE as DEFAULT_RASTER_STYLE2,
   computeSmoothNormals,
-  multiplyMat4 as multiplyMat42
+  multiplyMat4 as multiplyMat43
 } from "@cartbox/editor";
 
 // src/render/scenePacking.ts
@@ -7437,7 +7675,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   }
   /** Encode and submit one frame, and start a readback if a buffer is free. */
   submit(instances, draw) {
-    const viewProj = multiplyMat42(draw.projection, draw.view);
+    const viewProj = multiplyMat43(draw.projection, draw.view);
     const draws = [];
     for (const instance of instances) {
       const geometries = this.uploadMesh(instance.mesh);
@@ -7499,7 +7737,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         entry.textures.emis !== null
       );
       writeInstanceUniform(this.uniformData, index, {
-        mvp: multiplyMat42(viewProj, entry.model),
+        mvp: multiplyMat43(viewProj, entry.model),
         normalBasis: normalBasis3x3(entry.model),
         baseColor: entry.primitive.material.baseColorFactor,
         hasTexture: entry.textures.base !== null,
@@ -7510,7 +7748,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         hasOcclusionMap: entry.textures.occ !== null,
         hasEmissiveMap: entry.textures.emis !== null,
         environment: draw.environment ?? null,
-        lightMvp: shadow ? multiplyMat42(shadow.lightViewProj, entry.model) : null,
+        lightMvp: shadow ? multiplyMat43(shadow.lightViewProj, entry.model) : null,
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
@@ -7718,8 +7956,11 @@ var Player = class {
     this.volume = 1;
     /** False while a host menu is open: the game keeps running but sees no input. */
     this.inputEnabled = true;
-    /** The cart's physics world and where its shared block sits (bytes after pmem word 0). */
-    this.physics = null;
+    /**
+     * The cart's runtime channel (physics bodies and/or spawnable prefabs), its
+     * physics world if any, and where the shared block sits (bytes after pmem word 0).
+     */
+    this.runtime = null;
     this.tickFrame = 0;
     this.lastMailboxSeq = 0;
     /** Error-generation counter last seen from the engine; a rise means a new error. */
@@ -7797,15 +8038,24 @@ var Player = class {
       const sceneLua = sceneObjectsSdkLua(this.options.mesh);
       if (sceneLua) prepared = prependLuaCode(prepared, sceneLua);
       const layout = RAM_LAYOUTS[this.model.id];
-      const physicsLua = this.options.physics && layout ? physicsSdkLua(this.options.mesh, layout) : "";
-      if (physicsLua && this.options.mesh && this.options.physics) {
-        prepared = prependLuaCode(prepared, physicsLua);
-        const backend = await this.options.physics();
-        if (this.destroyed) {
-          backend.destroy();
-          return;
+      const mesh = this.options.mesh;
+      const runtimeLua = layout && mesh ? runtimeSdkLua(mesh, layout, { physics: Boolean(this.options.physics) }) : "";
+      if (runtimeLua && mesh && layout) {
+        prepared = prependLuaCode(prepared, runtimeLua);
+        let physics = null;
+        if (sceneHasPhysics(mesh) && this.options.physics) {
+          const backend = await this.options.physics();
+          if (this.destroyed) {
+            backend.destroy();
+            return;
+          }
+          physics = new PhysicsSession(mesh, backend);
         }
-        this.physics = { session: new PhysicsSession(this.options.mesh, backend), offset: physicsBlockAddress(layout) - layout.pmemAddress };
+        this.runtime = {
+          channel: new RuntimeChannel(mesh, physics),
+          physics,
+          offset: physicsBlockAddress(layout) - layout.pmemAddress
+        };
       }
       const preparedBytes = injectSdk(prepared);
       this.console = createConsole(module, this.model, sampleRate);
@@ -7836,20 +8086,20 @@ var Player = class {
         if (particles && particles.emitters.length > 0) {
           surface = new ParticleOverlaySurface(surface, this.model.width, this.model.height, particles);
         }
-        const mesh = this.options.mesh;
-        if (mesh || world && this.cartSource) {
+        const mesh2 = this.options.mesh;
+        if (mesh2 || world && this.cartSource) {
           this.sceneRenderer = await createSceneRenderer(
             this.model.width,
             this.model.height,
             this.model.renderCaps
           );
         }
-        if (mesh) {
+        if (mesh2) {
           surface = this.meshSurface = await MeshOverlaySurface.create(
             surface,
             this.model.width,
             this.model.height,
-            mesh,
+            mesh2,
             this.sceneRenderer
           );
         }
@@ -7973,11 +8223,11 @@ var Player = class {
       if (words) net.beforeTick(words);
     }
     this.feedSticks();
-    const physicsBlock = this.physicsBlock();
-    if (physicsBlock) this.physics.session.beforeTick(physicsBlock);
+    const runtimeBlock = this.runtimeBlock();
+    if (runtimeBlock) this.runtime.channel.beforeTick(runtimeBlock);
     this.console?.tick(mask);
-    const afterBlock = physicsBlock ? this.physicsBlock() : null;
-    if (afterBlock) this.physics.session.afterTick(afterBlock);
+    const afterBlock = runtimeBlock ? this.runtimeBlock() : null;
+    if (afterBlock) this.runtime.channel.afterTick(afterBlock);
     if (net && this.console) {
       const words = this.console.netWords();
       if (words) net.afterTick(words);
@@ -7997,10 +8247,33 @@ var Player = class {
       this.audio?.enqueue(samples);
     }
   }
-  /** A DataView over the physics block (re-fetched: WASM memory growth detaches views). */
-  physicsBlock() {
-    if (!this.physics || !this.console) return null;
-    const bytes = this.console.ramView(this.physics.offset, PHYS_BLOCK_BYTES);
+  /** Live inspection: every scene object's placement and state this frame. */
+  inspect() {
+    const scene = this.options.mesh;
+    if (!scene) return [];
+    const placements = this.meshSurface?.placements() ?? scene.instances.map((inst) => inst.pooled ? null : inst.model);
+    const bodies = this.runtime?.physics?.inspect() ?? /* @__PURE__ */ new Map();
+    const spawned = this.runtime?.channel.spawned() ?? /* @__PURE__ */ new Map();
+    return scene.instances.map((inst, index) => {
+      const m = placements[index] ?? inst.model;
+      const body = bodies.get(index);
+      return {
+        index,
+        name: inst.name,
+        parent: inst.parent,
+        position: [m[12], m[13], m[14]],
+        visible: placements[index] !== null && placements[index] !== void 0,
+        tags: inst.tags,
+        props: inst.props,
+        ...body ? { body } : {},
+        ...inst.pooled ? { prefab: { name: inst.pooled.prefab, spawned: spawned.has(inst.pooled.root) } } : {}
+      };
+    });
+  }
+  /** A DataView over the runtime block (re-fetched: WASM memory growth detaches views). */
+  runtimeBlock() {
+    if (!this.runtime || !this.console) return null;
+    const bytes = this.console.ramView(this.runtime.offset, PHYS_BLOCK_BYTES);
     return bytes ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
   }
   /** Reads any platform events the cart emitted this frame and dispatches them. */
@@ -8032,7 +8305,10 @@ var Player = class {
         this.meshSurface.setCameraOverride(meshCamera);
         this.meshSurface.setHudMode(meshCamera?.hud ?? false);
         this.meshSurface.setPoseOverrides(decodeMeshPoses(mailbox));
-        if (this.physics) this.meshSurface.setBodyOverrides(this.physics.session.overrides());
+        if (this.runtime) {
+          if (this.runtime.physics) this.meshSurface.setBodyOverrides(this.runtime.physics.overrides());
+          this.meshSurface.setSpawned(this.runtime.channel.spawned());
+        }
         this.meshSurface.setCartLights(decodeWorldLights(mailbox));
       }
       if (this.worldSurface && this.console) {
@@ -8102,8 +8378,8 @@ var Player = class {
     this.view.cancelAnimationFrame(this.frameHandle);
     this.keyboard?.destroy();
     this.touch?.destroy();
-    this.physics?.session.destroy();
-    this.physics = null;
+    this.runtime?.channel.destroy();
+    this.runtime = null;
     this.audio?.destroy();
     this.surface?.destroy();
     this.sceneRenderer?.dispose();
@@ -8833,7 +9109,8 @@ function mount(container, options) {
     },
     setControlSettings: (settings) => player.setControlSettings(settings),
     setVolume: (volume) => player.setVolume(volume),
-    setInputEnabled: (enabled) => player.setInputEnabled(enabled)
+    setInputEnabled: (enabled) => player.setInputEnabled(enabled),
+    inspect: () => player.inspect()
   };
 }
 export {
@@ -8907,6 +9184,7 @@ export {
   ReplayError,
   ReplayRecorder,
   ReplaySource,
+  RuntimeChannel,
   SOFTWARE_RASTER_CAPS,
   START_KEYS,
   SceneBackdropSurface,
@@ -9018,11 +9296,13 @@ export {
   resolveSupersample,
   resolveUnlockedAchievements,
   runReplayEvents,
+  runtimeSdkLua,
   sampleClipFrame,
   sampleNormalBilinear,
   sampleScalarBilinear,
   sampleTrack,
   sceneHasPhysics,
+  sceneNeedsRuntime,
   sceneObjectsSdkLua,
   seedCartridge,
   serializeReplay,

@@ -220,6 +220,14 @@ export class MeshOverlaySurface implements DisplaySurface {
   private flat: NonNullable<MeshOverlaySurface["hierarchy"]> | null = null;
   /** World matrices of the objects physics moved this frame (see setBodyOverrides). */
   private bodies: ReadonlyMap<number, Mat4> = new Map();
+  /** Spawned prefab copies: root object index → the root's world matrix (see setSpawned). */
+  private spawned: ReadonlyMap<number, Mat4> = new Map();
+  /** Each object's reserve-copy root (-1 when it isn't part of a prefab reserve). */
+  private readonly pooledRoot: readonly number[];
+  /** The authored instances without the reserve copies (drawn when nothing moves). */
+  private readonly unpooled: readonly MeshSceneInstance[];
+  /** Each object's world matrix as last drawn (null = hidden), or null when nothing moved. */
+  private lastPlacement: (Mat4 | null)[] | null = null;
   /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
   private hudFrame: Uint8ClampedArray | null = null;
 
@@ -247,6 +255,8 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.output = new Uint8ClampedArray(width * height * 4);
     this.presented = new Uint8Array(this.output.buffer);
     this.depth = new Float32Array(width * height);
+    this.pooledRoot = scene.instances.map((instance) => instance.pooled?.root ?? -1);
+    this.unpooled = this.pooledRoot.some((r) => r >= 0) ? instances.filter((_, i) => this.pooledRoot[i]! < 0) : instances;
     const parents = scene.instances.map((instance) => instance.parent ?? -1);
     this.hierarchy = parents.some((p) => p >= 0)
       ? {
@@ -264,6 +274,15 @@ export class MeshOverlaySurface implements DisplaySurface {
    */
   setBodyOverrides(bodies: ReadonlyMap<number, Mat4>): void {
     this.bodies = bodies;
+  }
+
+  /**
+   * Set the prefab copies the cart has spawned (root object index → world matrix).
+   * Reserve copies not in the map stay hidden; a spawned copy's children follow
+   * its root, and its physics bodies (if any) take over from there.
+   */
+  setSpawned(spawned: ReadonlyMap<number, Mat4>): void {
+    this.spawned = spawned;
   }
 
   /** Posed instances plus, in a hierarchy, everything below them: what moves this frame. */
@@ -518,9 +537,12 @@ export class MeshOverlaySurface implements DisplaySurface {
     front: readonly MeshSceneInstance[];
     moved: readonly MeshSceneInstance[];
   } {
-    if (this.poses.length === 0 && this.bodies.size === 0) return { main: this.instances, front: [], moved: [] };
+    if (this.poses.length === 0 && this.bodies.size === 0 && this.spawned.size === 0) {
+      this.lastPlacement = null;
+      return { main: this.unpooled, front: [], moved: [] };
+    }
     if (this.hierarchy) return this.posedHierarchy(this.hierarchy);
-    if (this.bodies.size > 0) {
+    if (this.bodies.size > 0 || this.spawned.size > 0 || this.unpooled !== this.instances) {
       this.flat ??= {
         parents: this.instances.map(() => -1),
         children: this.instances.map(() => []),
@@ -581,23 +603,35 @@ export class MeshOverlaySurface implements DisplaySurface {
       const up = p >= 0 ? state(p) : null;
       const pose = byIndex.get(i);
       const body = this.bodies.get(i);
-      const moved = Boolean(pose) || Boolean(up?.moved) || Boolean(body);
+      // A reserve prefab copy is hidden until spawned, then placed where it was spawned.
+      const poolRoot = this.pooledRoot[i] ?? -1;
+      const reserved = poolRoot >= 0 && !this.spawned.has(poolRoot);
+      const spawnAt = poolRoot === i ? this.spawned.get(i) : undefined;
+      const moved = Boolean(pose) || Boolean(up?.moved) || Boolean(body) || Boolean(spawnAt);
       let model = this.instances[i]!.model;
       if (moved) {
-        // A physics body is placed in world space; otherwise follow the parent.
-        const base = body ?? (up ? multiplyMat4(up.model, h.locals[i]!) : h.locals[i]!);
+        // A physics body is placed in world space; a spawned root where it was
+        // spawned; otherwise follow the parent.
+        const base = body ?? spawnAt ?? (up ? multiplyMat4(up.model, h.locals[i]!) : h.locals[i]!);
         model = pose ? multiplyMat4(base, poseLocalMatrix(pose)) : base;
       }
-      const out = { model, moved, hidden: Boolean(pose?.hidden) || Boolean(up?.hidden), front: Boolean(pose?.front) || Boolean(up?.front) };
+      const out = {
+        model,
+        moved,
+        hidden: reserved || Boolean(pose?.hidden) || Boolean(up?.hidden),
+        front: Boolean(pose?.front) || Boolean(up?.front),
+      };
       states[i] = out;
       return out;
     };
     const main: MeshSceneInstance[] = [];
     const front: MeshSceneInstance[] = [];
     const moved: MeshSceneInstance[] = [];
+    const placement: (Mat4 | null)[] = new Array(this.instances.length);
     for (let i = 0; i < this.instances.length; i += 1) {
       const authored = this.instances[i]!;
       const s = state(i);
+      placement[i] = s.hidden ? null : s.model;
       if (s.hidden) continue;
       if (!s.moved) {
         main.push(authored);
@@ -618,7 +652,16 @@ export class MeshOverlaySurface implements DisplaySurface {
         moved.push(instance);
       }
     }
+    this.lastPlacement = placement;
     return { main, front, moved };
+  }
+
+  /**
+   * Each object's world matrix as last drawn, null where it was hidden (live
+   * inspection). Before anything has moved, the authored placement.
+   */
+  placements(): readonly (Mat4 | null)[] {
+    return this.lastPlacement ?? this.instances.map((instance, i) => (this.pooledRoot[i]! >= 0 ? null : instance.model));
   }
 
   /** A tinted copy of `mesh`, cached so its identity (and any GPU upload) is stable. */
@@ -668,6 +711,10 @@ export class MeshOverlaySurface implements DisplaySurface {
     if (!this.staticShadow || this.staticShadowKey !== key || this.staticShadowLighting !== lighting) {
       this.staticShadow ??= new Float32Array(size * size);
       const posed = this.withChildren([...this.poses.map((p) => p.index), ...this.bodies.keys()]);
+      // Reserve prefab copies are never part of the static shadow (hidden, or moving once spawned).
+      this.pooledRoot.forEach((root, i) => {
+        if (root >= 0) posed.add(i);
+      });
       const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i));
       const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow });
       if (!built) return null;

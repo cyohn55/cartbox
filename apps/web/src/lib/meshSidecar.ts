@@ -111,6 +111,8 @@ export interface MeshPrefab {
   readonly id: string;
   readonly name: string;
   readonly nodes: readonly PrefabNode[];
+  /** Copies held in reserve for cartbox.spawn at run time (0..32; absent = 8). */
+  readonly pool?: number;
 }
 
 /** The whole mesh sidecar: every placed mesh on the cart, plus its lighting rig. */
@@ -292,7 +294,9 @@ function readPrefabs(value: unknown, library: ReturnType<typeof readMeshLibrary>
     // Orphaned nodes (parent missing) are dropped; the prefab needs exactly one root.
     const kept = nodes.filter((n) => !n.parent || keys.has(n.parent));
     if (kept.filter((n) => !n.parent).length !== 1) continue;
-    out.push({ id: raw.id, name: typeof raw.name === "string" ? raw.name : "Prefab", nodes: kept });
+    const poolRaw = (item as { pool?: unknown }).pool;
+    const pool = typeof poolRaw === "number" && Number.isFinite(poolRaw) ? Math.max(0, Math.min(32, Math.floor(poolRaw))) : undefined;
+    out.push({ id: raw.id, name: typeof raw.name === "string" ? raw.name : "Prefab", nodes: kept, ...(pool !== undefined ? { pool } : {}) });
   }
   return out;
 }

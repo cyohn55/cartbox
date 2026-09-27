@@ -73,6 +73,9 @@ export const PHYS_OP_VELOCITY = 2;
 export const PHYS_OP_TELEPORT = 3;
 export const PHYS_OP_MOVE = 4;
 export const PHYS_OP_RAY = 5;
+/** Scene ops (the block carries them whether or not the cart has physics). */
+export const PHYS_OP_SPAWN = 6; // a = the copy's root object, v = x, y, z, yaw, pitch, roll
+export const PHYS_OP_DESPAWN = 7; // a = the copy's root object
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {

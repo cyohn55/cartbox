@@ -19,8 +19,9 @@ import { STICK_OPTIN_MAGIC, STICK_OPTIN_WORD, STICK_WORD, packSticks } from "./s
 import { DEFAULT_CONTROL_SETTINGS, applyLookSettings, type ControlSettings } from "./controls.js";
 import { injectSdk } from "./sdk.js";
 import { sceneObjectsSdkLua } from "./mesh/sceneObjectsSdk.js";
-import { physicsSdkLua } from "./physics/physicsSdk.js";
-import { PhysicsSession } from "./physics/physicsSession.js";
+import { runtimeSdkLua } from "./physics/physicsSdk.js";
+import { PhysicsSession, sceneHasPhysics } from "./physics/physicsSession.js";
+import { RuntimeChannel } from "./runtime/runtimeChannel.js";
 import { PHYS_BLOCK_BYTES, RAM_LAYOUTS, physicsBlockAddress } from "./physics/protocol.js";
 import { collisionSdkLua } from "./collisionSdk.js";
 import { flagsSdkLua } from "./flagsSdk.js";
@@ -39,7 +40,7 @@ import { createSceneRenderer } from "./render/createSceneRenderer.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
 import { type DecodedTexture } from "@cartbox/editor";
-import type { ControlScheme, PlayerOptions } from "./types.js";
+import type { ControlScheme, InspectedObject, PlayerOptions } from "./types.js";
 
 /**
  * Decides whether to show the on-screen gamepad. "auto" shows it on any device
@@ -87,8 +88,11 @@ export class Player {
   /** False while a host menu is open: the game keeps running but sees no input. */
   private inputEnabled = true;
   private console?: ConsoleInstance;
-  /** The cart's physics world and where its shared block sits (bytes after pmem word 0). */
-  private physics: { session: PhysicsSession; offset: number } | null = null;
+  /**
+   * The cart's runtime channel (physics bodies and/or spawnable prefabs), its
+   * physics world if any, and where the shared block sits (bytes after pmem word 0).
+   */
+  private runtime: { channel: RuntimeChannel; physics: PhysicsSession | null; offset: number } | null = null;
   private cartSource?: CartSpriteSource;
   private readonly model: ConsoleModel;
 
@@ -177,17 +181,27 @@ export class Player {
       const sceneLua = sceneObjectsSdkLua(this.options.mesh);
       if (sceneLua) prepared = prependLuaCode(prepared, sceneLua);
       // Physics bodies on those objects (cartbox.body / impulse / move / ray ...),
-      // simulated by the host's engine through a block at the end of RAM.
+      // simulated by the host's engine, and spawnable prefab copies
+      // (cartbox.spawn), both through a block at the end of RAM.
       const layout = RAM_LAYOUTS[this.model.id];
-      const physicsLua = this.options.physics && layout ? physicsSdkLua(this.options.mesh, layout) : "";
-      if (physicsLua && this.options.mesh && this.options.physics) {
-        prepared = prependLuaCode(prepared, physicsLua);
-        const backend = await this.options.physics();
-        if (this.destroyed) {
-          backend.destroy();
-          return;
+      const mesh = this.options.mesh;
+      const runtimeLua = layout && mesh ? runtimeSdkLua(mesh, layout, { physics: Boolean(this.options.physics) }) : "";
+      if (runtimeLua && mesh && layout) {
+        prepared = prependLuaCode(prepared, runtimeLua);
+        let physics: PhysicsSession | null = null;
+        if (sceneHasPhysics(mesh) && this.options.physics) {
+          const backend = await this.options.physics();
+          if (this.destroyed) {
+            backend.destroy();
+            return;
+          }
+          physics = new PhysicsSession(mesh, backend);
         }
-        this.physics = { session: new PhysicsSession(this.options.mesh, backend), offset: physicsBlockAddress(layout) - layout.pmemAddress };
+        this.runtime = {
+          channel: new RuntimeChannel(mesh, physics),
+          physics,
+          offset: physicsBlockAddress(layout) - layout.pmemAddress,
+        };
       }
       const preparedBytes = injectSdk(prepared);
 
@@ -444,11 +458,11 @@ export class Player {
       if (words) net.beforeTick(words);
     }
     this.feedSticks();
-    const physicsBlock = this.physicsBlock();
-    if (physicsBlock) this.physics!.session.beforeTick(physicsBlock);
+    const runtimeBlock = this.runtimeBlock();
+    if (runtimeBlock) this.runtime!.channel.beforeTick(runtimeBlock);
     this.console?.tick(mask);
-    const afterBlock = physicsBlock ? this.physicsBlock() : null;
-    if (afterBlock) this.physics!.session.afterTick(afterBlock);
+    const afterBlock = runtimeBlock ? this.runtimeBlock() : null;
+    if (afterBlock) this.runtime!.channel.afterTick(afterBlock);
     if (net && this.console) {
       const words = this.console.netWords();
       if (words) net.afterTick(words);
@@ -474,10 +488,34 @@ export class Player {
     }
   }
 
-  /** A DataView over the physics block (re-fetched: WASM memory growth detaches views). */
-  private physicsBlock(): DataView | null {
-    if (!this.physics || !this.console) return null;
-    const bytes = this.console.ramView(this.physics.offset, PHYS_BLOCK_BYTES);
+  /** Live inspection: every scene object's placement and state this frame. */
+  inspect(): InspectedObject[] {
+    const scene = this.options.mesh;
+    if (!scene) return [];
+    const placements = this.meshSurface?.placements() ?? scene.instances.map((inst) => (inst.pooled ? null : inst.model));
+    const bodies = this.runtime?.physics?.inspect() ?? new Map();
+    const spawned = this.runtime?.channel.spawned() ?? new Map();
+    return scene.instances.map((inst, index) => {
+      const m = placements[index] ?? inst.model;
+      const body = bodies.get(index);
+      return {
+        index,
+        name: inst.name,
+        parent: inst.parent,
+        position: [m[12]!, m[13]!, m[14]!] as const,
+        visible: placements[index] !== null && placements[index] !== undefined,
+        tags: inst.tags,
+        props: inst.props,
+        ...(body ? { body } : {}),
+        ...(inst.pooled ? { prefab: { name: inst.pooled.prefab, spawned: spawned.has(inst.pooled.root) } } : {}),
+      };
+    });
+  }
+
+  /** A DataView over the runtime block (re-fetched: WASM memory growth detaches views). */
+  private runtimeBlock(): DataView | null {
+    if (!this.runtime || !this.console) return null;
+    const bytes = this.console.ramView(this.runtime.offset, PHYS_BLOCK_BYTES);
     return bytes ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
   }
 
@@ -519,7 +557,10 @@ export class Player {
         // over the meshes instead of behind them.
         this.meshSurface.setHudMode(meshCamera?.hud ?? false);
         this.meshSurface.setPoseOverrides(decodeMeshPoses(mailbox));
-        if (this.physics) this.meshSurface.setBodyOverrides(this.physics.session.overrides());
+        if (this.runtime) {
+          if (this.runtime.physics) this.meshSurface.setBodyOverrides(this.runtime.physics.overrides());
+          this.meshSurface.setSpawned(this.runtime.channel.spawned());
+        }
         this.meshSurface.setCartLights(decodeWorldLights(mailbox));
       }
       // The HD-2D world reuses the same channels: cartbox.worldcam drives its
@@ -603,8 +644,8 @@ export class Player {
     this.view.cancelAnimationFrame(this.frameHandle);
     this.keyboard?.destroy();
     this.touch?.destroy();
-    this.physics?.session.destroy();
-    this.physics = null;
+    this.runtime?.channel.destroy();
+    this.runtime = null;
     this.audio?.destroy();
     this.surface?.destroy();
     // After the surfaces: they draw through it, and the decorator chain's

@@ -17,6 +17,7 @@ import type { PlayerHandle, PlayerOptions } from "./types.js";
 
 export type {
   ControlScheme,
+  InspectedObject,
   PlayerHandle,
   PlayerOptions,
   ScaleMode,
@@ -371,6 +372,7 @@ export function mount(container: HTMLElement, options: PlayerOptions): PlayerHan
     setControlSettings: (settings) => player.setControlSettings(settings),
     setVolume: (volume) => player.setVolume(volume),
     setInputEnabled: (enabled) => player.setInputEnabled(enabled),
+    inspect: () => player.inspect(),
   };
 }
 
@@ -407,7 +409,8 @@ export {
   type Quat as PhysicsQuat,
   type Vec3 as PhysicsVec3,
 } from "./physics/physicsSession.js";
-export { physicsSdkLua } from "./physics/physicsSdk.js";
+export { physicsSdkLua, runtimeSdkLua, sceneNeedsRuntime } from "./physics/physicsSdk.js";
+export { RuntimeChannel } from "./runtime/runtimeChannel.js";
 export {
   PHYS_BLOCK_BYTES,
   PHYS_MAGIC,
