@@ -122,7 +122,10 @@ trades state and commands with the cart through an 8 KB block at the end of RAM
 
 ## Phase 4 — Web asset pipeline and reach
 
-- [ ] Meshopt / Draco geometry compression on glTF import.
+- [x] Meshopt / Draco geometry compression on glTF import: `EXT_meshopt_compression`
+      and `KHR_draco_mesh_compression` files (gltfpack, gltf-transform, exporters'
+      "compress" options) decode on import, in the Mesh tab and from the library. The
+      WebAssembly decoders load only when a file needs one.
 - [ ] KTX2 / Basis texture compression with mipmaps.
 - [x] GPU instancing for repeated meshes (WebGPU): every copy of a primitive that
       binds the same textures is one instanced draw, with each copy's transforms in a

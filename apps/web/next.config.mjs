@@ -49,6 +49,13 @@ const nextConfig = {
   // @cartbox/editor is consumed as TypeScript source for fast iteration, so Next
   // transpiles it here.
   transpilePackages: ["@cartbox/editor"],
+  // draco3d's decoder glue (loaded on demand to import Draco-compressed glTF)
+  // keeps its Node-only `fs`/`path` requires behind an environment check; in the
+  // browser it is handed the WASM directly, so those modules are stubbed out.
+  webpack(config, { isServer }) {
+    if (!isServer) config.resolve.fallback = { ...config.resolve.fallback, fs: false, path: false };
+    return config;
+  },
   // No ESLint config is wired up yet; TypeScript still fails the build on type errors.
   eslint: { ignoreDuringBuilds: true },
   // Serve the large game bundles from R2 when GAME_CDN_URL is configured. Static

@@ -344,7 +344,7 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
               event.target.value = "";
             }}
           />
-          <RailHint>OBJ, glTF, or GLB. For OBJ, select its .mtl alongside to keep colours.</RailHint>
+          <RailHint>OBJ, glTF, or GLB (meshopt- and Draco-compressed too). For OBJ, select its .mtl alongside to keep colours.</RailHint>
           {note && <RailHint>{note}</RailHint>}
         </RailGroup>
 

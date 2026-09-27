@@ -10,16 +10,13 @@
  * OBJ import accepts a companion `.mtl` (and, in principle, texture files) picked
  * alongside the `.obj`; glTF import prefers the self-contained `.glb`, with
  * embedded-`data:` `.gltf` also handled. A glTF pointing at external files is
- * surfaced as a clear error rather than a silently untextured import.
+ * surfaced as a clear error rather than a silently untextured import. Meshopt-
+ * or Draco-compressed glTF geometry is decoded on import (see gltfDecoders.ts).
  */
 
-import {
-  parseObj,
-  parseGlb,
-  parseGltfText,
-  type MeshAsset,
-  type DecodedTexture,
-} from "@cartbox/editor";
+import { parseObj, type MeshAsset, type DecodedTexture } from "@cartbox/editor";
+
+import { parseGlbDecoded, parseGltfTextDecoded } from "./gltfDecoders";
 
 /** Strip the extension and directory to a friendly asset name. */
 function assetNameFromFile(fileName: string): string {
@@ -43,10 +40,10 @@ export async function importMeshFile(file: File, companions: readonly File[] = [
   const extension = extensionOf(file.name);
 
   if (extension === "glb") {
-    return parseGlb(new Uint8Array(await file.arrayBuffer()), name);
+    return parseGlbDecoded(new Uint8Array(await file.arrayBuffer()), name);
   }
   if (extension === "gltf") {
-    return parseGltfText(await file.text(), name);
+    return parseGltfTextDecoded(await file.text(), name);
   }
   if (extension === "obj") {
     const mtlFile = companions.find((candidate) => extensionOf(candidate.name) === "mtl");

@@ -10,7 +10,9 @@
  * mesh and an uploaded mesh land in the cart through identical code.
  */
 
-import { parseGlb, parseGltfText, parseVox, type MeshAsset, type VoxelGrid } from "@cartbox/editor";
+import { parseVox, type MeshAsset, type VoxelGrid } from "@cartbox/editor";
+
+import { parseGlbDecoded, parseGltfTextDecoded } from "./gltfDecoders";
 
 import type { LibraryAssetKind } from "./libraryManifest";
 import type { LibraryQuery } from "./librarySearch";
@@ -70,10 +72,10 @@ export async function fetchLibraryMesh(payloadUrl: string, name: string): Promis
   }
   const extension = extensionOf(payloadUrl);
   if (extension === "glb") {
-    return parseGlb(new Uint8Array(await response.arrayBuffer()), name);
+    return parseGlbDecoded(new Uint8Array(await response.arrayBuffer()), name);
   }
   if (extension === "gltf") {
-    return parseGltfText(await response.text(), name);
+    return parseGltfTextDecoded(await response.text(), name);
   }
   throw new Error(`Library mesh “${name}” has an unsupported format ".${extension}".`);
 }
