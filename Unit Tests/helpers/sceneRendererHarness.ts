@@ -8,6 +8,7 @@
 
 export { projectionMatrix, viewMatrix } from "@cartbox/editor";
 export {
+  INSTANCE_FLOATS,
   UNIFORM_BYTES_USED,
   UNIFORM_STRIDE,
   WebgpuSceneRenderer,

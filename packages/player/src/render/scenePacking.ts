@@ -283,6 +283,37 @@ export interface InstanceUniform {
 }
 
 /**
+ * Floats per instance in the transform storage buffer (GPU instancing): the WGSL
+ * `InstanceXf` struct — mvp, lightMvp and model (mat4x4 each) then the normal
+ * basis (mat3x3, columns padded to vec4) — is 240 bytes, which is also its array
+ * stride (a multiple of its 16-byte alignment).
+ */
+export const INSTANCE_FLOATS = 60;
+
+/** One instance's transforms, computed on the CPU so the GPU sees the same float32s the uniform path did. */
+export interface InstanceTransform {
+  readonly mvp: Mat4;
+  /** World→light-clip for this instance, or null when the frame casts no shadow. */
+  readonly lightMvp: Mat4 | null;
+  readonly model: Mat4;
+  readonly normalBasis: readonly number[];
+}
+
+/** Write one instance's transforms into the staging array at `index` (see {@link INSTANCE_FLOATS}). */
+export function writeInstanceTransform(target: Float32Array, index: number, transform: InstanceTransform): void {
+  const base = index * INSTANCE_FLOATS;
+  for (let i = 0; i < 16; i += 1) {
+    target[base + i] = transform.mvp[i]!;
+    target[base + 16 + i] = transform.lightMvp ? transform.lightMvp[i]! : 0;
+    target[base + 32 + i] = transform.model[i]!;
+  }
+  for (let column = 0; column < 3; column += 1) {
+    for (let row = 0; row < 3; row += 1) target[base + 48 + column * 4 + row] = transform.normalBasis[column * 3 + row]!;
+    target[base + 48 + column * 4 + 3] = 0;
+  }
+}
+
+/**
  * Write one draw's uniforms into the shared staging array at `index`.
  *
  * The mat3x3 is the fiddly part: WGSL pads each column to 16 bytes, so the nine

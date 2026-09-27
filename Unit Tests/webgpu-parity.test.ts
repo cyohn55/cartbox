@@ -205,6 +205,46 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     renderer.dispose();
   });
 
+  it("renders instanced copies byte-identically to the software rasteriser", async () => {
+    // Many copies of one mesh, some sharing a texture: the GPU batches them into
+    // instanced draws (each copy's transforms from the instance buffer), and the
+    // picture must not change for it.
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+    const shared = quad();
+    const texture = testTexture();
+    const instances: MeshSceneInstance[] = [];
+    for (let i = 0; i < 9; i += 1) {
+      const x = ((i % 3) - 1) * 1.1;
+      const y = (Math.floor(i / 3) - 1) * 0.8;
+      instances.push({
+        mesh: shared,
+        model: composeModelMatrix([x, y, -0.3 * (i % 4)], [10 * i, 20 * (i % 3) - 20, 5 * i], [0.45, 0.45, 0.45]),
+        textures: i % 2 === 0 ? [texture] : null,
+      });
+    }
+
+    renderer.render(instances, draw());
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.tick?.();
+    }
+    const gpu = draw();
+    renderer.render(instances, gpu);
+    // Two batches (textured and untextured) for nine copies.
+    expect(renderer.lastFrameStats).toEqual({ drawCalls: 2, instances: 9 });
+
+    const software = draw();
+    new SoftwareSceneRenderer().render(instances, software);
+    const drawn = Array.from(software.out).filter((_, i) => i % 4 === 3 && software.out[i] !== 0).length;
+    expect(drawn).toBeGreaterThan(100);
+
+    let differing = 0;
+    for (let i = 0; i < W * H * 4; i += 1) if (gpu.out[i] !== software.out[i]) differing += 1;
+    expect(differing).toBe(0);
+
+    renderer.dispose();
+  });
+
   it("matches the software rasteriser on the metallic-roughness path (within float tolerance)", async () => {
     // The Modern-tier BRDF cannot be byte-identical — GGX and pow differ between
     // the GPU's float32 and the CPU's float64 — so this is the tolerant twin of

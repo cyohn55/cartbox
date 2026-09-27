@@ -21,6 +21,7 @@ import { describe, expect, it } from "vitest";
 
 import { composeModelMatrix, type MeshAsset, type MeshSceneInstance } from "@cartbox/editor";
 import {
+  INSTANCE_FLOATS,
   UNIFORM_BYTES_USED,
   UNIFORM_STRIDE,
   WebgpuSceneRenderer,
@@ -267,11 +268,55 @@ describe("WebgpuSceneRenderer frames", () => {
   it("addresses each draw by its own dynamic offset", async () => {
     const { device, log } = fakeDevice();
     const renderer = (await WebgpuSceneRenderer.create(device, WIDTH, HEIGHT))!;
-    renderer.render(instances(quad(), 3), drawOptions());
+    // Three different meshes: three batches, three uniforms.
+    renderer.render([...instances(quad()), ...instances(quad()), ...instances(quad())], drawOptions());
 
     const offsets = log.passCalls.filter((c) => c.op === "setBindGroup").map((c) => c.args[2]);
     expect(offsets).toEqual([[0], [UNIFORM_STRIDE], [UNIFORM_STRIDE * 2]]);
     expect(log.passCalls.filter((c) => c.op === "drawIndexed")).toHaveLength(3);
+  });
+
+  it("draws the copies of one primitive as a single instanced draw", async () => {
+    const { device, log } = fakeDevice();
+    const renderer = (await WebgpuSceneRenderer.create(device, WIDTH, HEIGHT))!;
+    const mesh = quad();
+    const texture = { width: 1, height: 1, data: new Uint8ClampedArray([1, 2, 3, 255]) };
+    // Five untextured copies, two textured ones, and another mesh in between.
+    const scene = [
+      ...instances(mesh, 3),
+      ...instances(quad()),
+      ...instances(mesh, 2),
+      ...instances(mesh, 2).map((inst) => ({ ...inst, textures: [texture] })),
+    ].map((inst, i) => ({ ...inst, model: composeModelMatrix([i, i * 0.5, 0], [0, 0, 0], [5, 5, 5]) }));
+    renderer.render(scene, drawOptions());
+
+    const draws = log.passCalls.filter((c) => c.op === "drawIndexed").map((c) => c.args);
+    // [indexCount, instanceCount, firstIndex, baseVertex, firstInstance], in first-seen order.
+    expect(draws).toEqual([
+      [6, 5, 0, 0, 0],
+      [6, 1, 0, 0, 5],
+      [6, 2, 0, 0, 6],
+    ]);
+    expect(renderer.lastFrameStats).toEqual({ drawCalls: 3, instances: 8 });
+
+    // Each copy's transforms went up in batch order: the first batch is scene 0,
+    // 1, 2, 4 and 5, so instance 3 is scene[4], its model matrix at floats 32..47.
+    const storage = log.bindGroups.at(-1).entries.find((e: any) => e.binding === 10).resource.buffer;
+    const upload = log.writeBuffer.find((args) => args[0] === storage)!;
+    expect(upload[4]).toBe(8 * INSTANCE_FLOATS);
+    const data = upload[2] as Float32Array;
+    const at = (instance: number) => Array.from(data.subarray(instance * INSTANCE_FLOATS + 32, instance * INSTANCE_FLOATS + 48));
+    expect(at(3)).toEqual(Array.from(Float32Array.from(scene[4]!.model)));
+    expect(at(5)).toEqual(Array.from(Float32Array.from(scene[3]!.model)));
+    expect(at(7)).toEqual(Array.from(Float32Array.from(scene[7]!.model)));
+  });
+
+  it("declares the instance transforms as vertex-stage storage", async () => {
+    const { device, log } = fakeDevice();
+    await WebgpuSceneRenderer.create(device, WIDTH, HEIGHT);
+    const entry = log.bindGroupLayouts[0].entries.find((e: any) => e.binding === 10);
+    expect(entry.buffer.type).toBe("read-only-storage");
+    expect(entry.visibility & 0x1).toBe(0x1);
   });
 
   it("uploads a mesh's geometry once, not once per frame", async () => {
