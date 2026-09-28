@@ -118,6 +118,22 @@ describe("spatially loaded groups", () => {
     expect(at(150).approached).toEqual([2]); // the tower, 49.5 away: fetch its assets
   });
 
+  it("measures a moving object where it is now", async () => {
+    const scene = parseMeshScene(sidecar())!;
+    const loader = new SpatialLoader(streamGroups(scene), scene.streaming!);
+    loader.update([0, 0, 0]);
+    expect(loader.isLoaded(2)).toBe(false); // the tower, placed at 200
+    // The cart walks the tower over to x = 20 (a pose moves it 180 back).
+    const surface = await MeshOverlaySurface.create({ blit() {}, destroy() {} }, 16, 16, scene, { backend: "software", render: () => {}, dispose: () => {} } as SceneRenderer);
+    const tower = scene.instances.findIndex((i) => i.name === "tower");
+    expect(surface.movedModel(tower)).toBeNull();
+    surface.setPoseOverrides([{ index: tower, hidden: false, position: [-180, 0, 0], rotation: [0, 0, 0], scale: 1 }]);
+    const now = surface.movedModel(tower)!;
+    expect(now[12]).toBeCloseTo(20);
+    loader.update([0, 0, 0], (g) => (g === 2 ? [now[12]! - 200, 0, 0] : null));
+    expect(loader.isLoaded(2)).toBe(true);
+  });
+
   it("hides unloaded objects in the renderer", async () => {
     const scene = parseMeshScene(sidecar())!;
     const loader = new SpatialLoader(streamGroups(scene), scene.streaming!);

@@ -64,7 +64,7 @@ end`;
    */
   async function lockout() {
     const game = await boot(injectSdk(lockoutCartridge()));
-    for (const b of [0, 0, 0, 0x10, 0x10, 0, 0]) game.tick(b); // start Free for All
+    for (const b of [0, 0, 0, 0x10, 0x10, 0, 0, 0x10, 0]) game.tick(b); // start Free for All, then skip the intro (Z)
     const cam = () => decodeMeshCamera(game.mailbox())!;
     // drive_camera sets yaw = atan2(-fx, -fz), so forward = (-sin yaw, -cos yaw).
     const forward = () => [-Math.sin(cam().yaw), -Math.cos(cam().yaw)] as const;

@@ -2410,9 +2410,9 @@ var PostFxSurface = class _PostFxSurface {
 // src/quality.ts
 var QUALITY_LEVELS = ["low", "medium", "high"];
 var QUALITY_PRESETS = {
-  high: { level: "high", shadows: true, shadowMapSize: 1024, maxRenderScale: 1, disabledEffects: [] },
-  medium: { level: "medium", shadows: true, shadowMapSize: 512, maxRenderScale: 0.75, disabledEffects: [] },
-  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"] }
+  high: { level: "high", shadows: true, shadowMapSize: 1024, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1 },
+  medium: { level: "medium", shadows: true, shadowMapSize: 512, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6 },
+  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3 }
 };
 function detectQuality(hints) {
   if (hints.cores !== void 0 && hints.cores <= 2 || hints.memoryGB !== void 0 && hints.memoryGB <= 2) return "low";
@@ -8526,6 +8526,22 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.poses = poses;
   }
   /**
+   * Where a top-level object has been moved to this frame — by its physics
+   * body, by being spawned, or by the cart posing it — whether or not it's
+   * drawn; null when it's where it was placed (or its pose hides it).
+   * Spatial loading measures a moving object here rather than where it began.
+   */
+  movedModel(i) {
+    const body = this.bodies.get(i);
+    if (body) return body;
+    const spawnAt = this.pooledRoot[i] === i ? this.spawned.get(i) : void 0;
+    const pose = this.poses.find((p) => p.index === i);
+    if (pose?.hidden) return spawnAt ?? null;
+    const base = spawnAt ?? this.instances[i]?.model;
+    if (!base) return null;
+    return pose ? multiplyMat43(base, poseLocalMatrix(pose)) : spawnAt ?? null;
+  }
+  /**
    * The world-space point lights the cart published this frame (`cartbox.light3d`
    * — an objective's glow, a muzzle flash). They light a first-person view on
    * top of the authored rig's lights.
@@ -8864,7 +8880,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     }
     const [ex, ey, ez] = this.eye;
     const d = Math.hypot(Math.max(b[0] - ex, 0, ex - b[3]), Math.max(b[1] - ey, 0, ey - b[4]), Math.max(b[2] - ez, 0, ez - b[5]));
-    const level = d < detail ? 0 : d < detail * 2 ? 1 : 2;
+    const reach = detail * this.quality.terrainDetail;
+    const level = d < reach ? 0 : d < reach * 2 ? 1 : 2;
     if (level === 0) return authored;
     return { ...lods[Math.min(level, lods.length) - 1], model: authored.model };
   }
@@ -12022,7 +12039,15 @@ var Player = class {
     const scene = this.options.mesh;
     if (!spatial || !scene) return;
     const focus = this.runtime?.channel.streamFocus() ?? this.meshSurface?.eyePosition() ?? scene.bounds.center;
-    const { changed, approached } = spatial.loader.update(focus);
+    const surface = this.meshSurface;
+    const moved = (g) => {
+      const root = spatial.loader.groups[g].members[0];
+      const now = surface?.movedModel(root);
+      if (!now) return null;
+      const placed = scene.instances[root].model;
+      return [now[12] - placed[12], now[13] - placed[13], now[14] - placed[14]];
+    };
+    const { changed, approached } = spatial.loader.update(focus, moved);
     if (changed) {
       spatial.unloaded = spatial.loader.unloaded();
       this.applyInactive();

@@ -490,6 +490,23 @@ export class MeshOverlaySurface implements DisplaySurface {
   }
 
   /**
+   * Where a top-level object has been moved to this frame — by its physics
+   * body, by being spawned, or by the cart posing it — whether or not it's
+   * drawn; null when it's where it was placed (or its pose hides it).
+   * Spatial loading measures a moving object here rather than where it began.
+   */
+  movedModel(i: number): Mat4 | null {
+    const body = this.bodies.get(i);
+    if (body) return body;
+    const spawnAt = this.pooledRoot[i] === i ? this.spawned.get(i) : undefined;
+    const pose = this.poses.find((p) => p.index === i);
+    if (pose?.hidden) return spawnAt ?? null;
+    const base = spawnAt ?? this.instances[i]?.model;
+    if (!base) return null;
+    return pose ? multiplyMat4(base, poseLocalMatrix(pose)) : (spawnAt ?? null);
+  }
+
+  /**
    * The world-space point lights the cart published this frame (`cartbox.light3d`
    * — an objective's glow, a muzzle flash). They light a first-person view on
    * top of the authored rig's lights.
@@ -886,7 +903,9 @@ export class MeshOverlaySurface implements DisplaySurface {
     }
     const [ex, ey, ez] = this.eye;
     const d = Math.hypot(Math.max(b[0]! - ex, 0, ex - b[3]!), Math.max(b[1]! - ey, 0, ey - b[4]!), Math.max(b[2]! - ez, 0, ez - b[5]!));
-    const level = d < detail ? 0 : d < detail * 2 ? 1 : 2;
+    // Lower quality presets drop to coarser blocks sooner.
+    const reach = detail * this.quality.terrainDetail;
+    const level = d < reach ? 0 : d < reach * 2 ? 1 : 2;
     if (level === 0) return authored;
     return { ...lods[Math.min(level, lods.length) - 1]!, model: authored.model };
   }

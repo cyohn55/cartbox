@@ -23,10 +23,13 @@ import {
   multiplyMat4,
   parentIndices,
   projectionMatrix,
+  readTerrain,
   renderMeshScene,
   sceneLightingEnvironment,
   sceneLightingKeyDirection,
   sceneLightingTonemap,
+  terrainHeight,
+  terrainMesh,
   viewMatrix,
   worldAabb,
   worldMatrices,
@@ -34,6 +37,7 @@ import {
   type Mat4,
   type MeshAsset,
   type MeshSceneInstance,
+  type Terrain,
 } from "@cartbox/editor";
 
 import { readMeshEntry, setMeshTransform, type MeshSidecar } from "@/lib/meshSidecar";
@@ -49,6 +53,15 @@ const ZOOM_MIN = 0.35;
 const ZOOM_MAX = 4;
 const DRAG_THRESHOLD = 3; // px before a press counts as a drag rather than a click
 const SHADOW_SIZE = 1024;
+/** Cells per side the viewport draws a terrain at, at most (it's CPU-rendered). */
+const TERRAIN_PREVIEW_CELLS = 48;
+
+/** A terrain built for the viewport: its data, coarse geometry and decoded textures. */
+interface PreviewTerrain {
+  readonly terrain: Terrain;
+  readonly mesh: MeshAsset;
+  readonly textures: (DecodedTexture | null)[];
+}
 
 type Mode = "orbit" | "move" | "rotate" | "scale";
 
@@ -133,6 +146,30 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [geometrySignature]);
 
+  // Terrains, built coarse for the software viewport: landscape to compose
+  // against, never picked, framed on, or casting into the preview's shadow.
+  const [showTerrain, setShowTerrain] = useState(true);
+  const [terrains, setTerrains] = useState<PreviewTerrain[]>([]);
+  const terrainSignature = (sidecar.terrains ?? []).map((t) => `${t.id}:${t.samples}:${t.heights.length}:${t.parent ?? ""}`).join("|");
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const next: PreviewTerrain[] = [];
+      for (const stored of sidecar.terrains ?? []) {
+        const terrain = readTerrain(stored);
+        if (!terrain) continue;
+        const mesh = terrainMesh(terrain, Math.max(1, Math.ceil((terrain.samples - 1) / TERRAIN_PREVIEW_CELLS)));
+        if (mesh.primitives.length === 0) continue;
+        next.push({ terrain, mesh, textures: await decodeMeshTextures(mesh) });
+      }
+      if (!cancelled) setTerrains(next);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [terrainSignature]);
+
   // Every entry's world matrix (a child sits relative to its parent) and its
   // parent's, for placing instances and for turning a drag into a local move.
   const placement = useMemo(() => {
@@ -158,6 +195,32 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
     return out;
   }, [decoded, placement]);
 
+  // The terrains, placed on their parents (heights are in the parent's space).
+  const terrainInstances = useMemo<MeshSceneInstance[]>(() => {
+    if (!showTerrain) return [];
+    const identity = composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]);
+    return terrains.map(({ terrain, mesh, textures }) => ({
+      mesh,
+      textures,
+      model: (terrain.parent ? placement.get(terrain.parent)?.world : undefined) ?? identity,
+    }));
+  }, [terrains, placement, showTerrain]);
+
+  // How far the terrain spreads: the far plane has to reach past it.
+  const terrainReach = useMemo(() => {
+    let min: Vec3 = [Infinity, Infinity, Infinity];
+    let max: Vec3 = [-Infinity, -Infinity, -Infinity];
+    for (const inst of terrainInstances) {
+      const box = worldAabb(inst.mesh, inst.model);
+      if (!box) continue;
+      min = [Math.min(min[0], box.min[0]), Math.min(min[1], box.min[1]), Math.min(min[2], box.min[2])];
+      max = [Math.max(max[0], box.max[0]), Math.max(max[1], box.max[1]), Math.max(max[2], box.max[2])];
+    }
+    if (!Number.isFinite(min[0])) return null;
+    const center: Vec3 = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
+    return { center, radius: 0.5 * Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) };
+  }, [terrainInstances]);
+
   // Scene bounds (centre + radius) from the union of every instance's world AABB.
   const bounds = useMemo(() => {
     let min: Vec3 = [Infinity, Infinity, Infinity];
@@ -179,23 +242,39 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
   const camera = useMemo(() => {
     const { center, radius } = bounds;
     const distance = (radius / Math.sin(FOV / 2) + radius) * zoom;
-    const cosPitch = Math.cos(pitch);
-    const eye: Vec3 = [
-      center[0] + distance * cosPitch * Math.sin(yaw),
-      center[1] + distance * Math.sin(pitch),
-      center[2] + distance * cosPitch * Math.cos(yaw),
+    const eyeAt = (p: number): Vec3 => [
+      center[0] + distance * Math.cos(p) * Math.sin(yaw),
+      center[1] + distance * Math.sin(p),
+      center[2] + distance * Math.cos(p) * Math.cos(yaw),
     ];
+    // A scene set in a valley would otherwise orbit inside its own mountains:
+    // tilt up (toward overhead) until the eye clears the terrain beneath it.
+    const buried = (e: Vec3) =>
+      terrainInstances.some((inst, k) => {
+        const t = terrains[k]?.terrain;
+        if (!t) return false;
+        const ground = terrainHeight(t, e[0] - inst.model[12]!, e[2] - inst.model[14]!);
+        return ground !== null && ground + inst.model[13]! + 4 > e[1];
+      });
+    let lifted = pitch;
+    while (lifted < 1.45 && buried(eyeAt(lifted))) lifted += 0.05;
+    const eye = eyeAt(lifted);
+    // The far plane reaches past any terrain, however far it spreads.
+    const far = (from: Vec3, base: number) =>
+      terrainReach
+        ? Math.max(base, Math.hypot(from[0] - terrainReach.center[0], from[1] - terrainReach.center[1], from[2] - terrainReach.center[2]) + terrainReach.radius)
+        : base;
     if (previewCamera) {
       // Looking through a timeline's camera.
       const d = Math.hypot(...([0, 1, 2] as const).map((k) => previewCamera.eye[k] - previewCamera.target[k])) || 1;
       const view = viewMatrix(previewCamera.eye, previewCamera.target);
-      const projection = projectionMatrix((previewCamera.fov * Math.PI) / 180, 1, Math.max(0.01, radius * 0.05), d + radius * 4);
+      const projection = projectionMatrix((previewCamera.fov * Math.PI) / 180, 1, Math.max(0.01, radius * 0.05), far(previewCamera.eye, d + radius * 4));
       return { eye: previewCamera.eye, target: previewCamera.target, view, projection, viewProj: multiplyMat4(projection, view), distance: d };
     }
     const view = viewMatrix(eye, center);
-    const projection = projectionMatrix(FOV, 1, Math.max(0.01, radius * 0.05), distance + radius * 4);
+    const projection = projectionMatrix(FOV, 1, Math.max(0.01, radius * 0.05), far(eye, distance + radius * 4));
     return { eye, target: center, view, projection, viewProj: multiplyMat4(projection, view), distance };
-  }, [bounds, yaw, pitch, zoom, previewCamera]);
+  }, [bounds, yaw, pitch, zoom, previewCamera, terrainReach, terrainInstances, terrains]);
 
   useEffect(() => {
     if (!previewCamera) onView?.({ eye: camera.eye, target: camera.target, fov: (FOV * 180) / Math.PI });
@@ -217,7 +296,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
       shadow = buildSceneShadow(instances, lighting, bounds.center, bounds.radius, { size: SHADOW_SIZE, depth: shadowDepth.current });
     }
 
-    renderMeshScene(instances, {
+    renderMeshScene(terrainInstances.length > 0 ? [...instances, ...terrainInstances] : instances, {
       width: VIEWPORT,
       height: VIEWPORT,
       out: buffers.out,
@@ -243,7 +322,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
     // Overlay: selection AABB + a translate gizmo at the selected instance origin.
     const selected = instances.find((i) => i.id === selectedId);
     if (selected) drawSelection(context, camera.viewProj, selected, bounds.radius);
-  }, [instances, camera, buffers, sidecar.lighting, selectedId, bounds]);
+  }, [instances, terrainInstances, camera, buffers, sidecar.lighting, selectedId, bounds]);
 
   // --- Pointer interaction: orbit / pick / transform -------------------------
   const drag = useRef<{ x: number; y: number; moved: boolean } | null>(null);
@@ -373,6 +452,12 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
           <span className={styles.hudLabel}>Instances</span>
           <span className={`${styles.hudValue} data`}>{instances.length}</span>
         </span>
+        {terrains.length > 0 && (
+          <label className={styles.hudItem} style={{ cursor: "pointer" }}>
+            <input type="checkbox" aria-label="Show terrain" checked={showTerrain} onChange={(event) => setShowTerrain(event.target.checked)} />
+            <span className={styles.hudLabel}>Terrain</span>
+          </label>
+        )}
         <span className={styles.hudItem}>
           <span className={styles.hudLabel}>Selected</span>
           <span className={`${styles.hudValue} data`}>

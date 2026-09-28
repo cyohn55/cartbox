@@ -67,6 +67,7 @@ export {
   LOCKOUT_VIEWMODELS,
   LOCKOUT_SOLDIER_ANIMATOR,
   LOCKOUT_NAV_AGENT,
+  LOCKOUT_INTRO,
   lockoutNavMesh,
   lockoutTerrain,
   lockoutTerrainTriangles,

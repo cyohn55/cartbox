@@ -12,6 +12,9 @@
  *   effects; cheap per-pixel looks like grading, CRT or dithering stay), and the
  *   first-person software view capped at half size.
  *
+ * Terrain keeps full detail less far on the lower presets (60% and 30% of the
+ * authored distance), so distant ground costs fewer triangles.
+ *
  * "auto" picks one from what the browser says about the device: weak hardware
  * (≤ 2 cores or ≤ 2 GB of memory) → low; a phone or tablet, or any device with
  * no GPU renderer (WebGPU or WebGL2, so rendering on the CPU) → medium; otherwise
@@ -34,12 +37,17 @@ export interface QualitySettings {
   readonly maxRenderScale: number;
   /** Post-effects this preset turns off (the costly multi-pass ones). */
   readonly disabledEffects: readonly string[];
+  /**
+   * How far terrain keeps its detail, as a share of each block's authored
+   * distance: lower presets drop to the coarser blocks sooner.
+   */
+  readonly terrainDetail: number;
 }
 
 export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualitySettings>> = {
-  high: { level: "high", shadows: true, shadowMapSize: 1024, maxRenderScale: 1, disabledEffects: [] },
-  medium: { level: "medium", shadows: true, shadowMapSize: 512, maxRenderScale: 0.75, disabledEffects: [] },
-  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"] },
+  high: { level: "high", shadows: true, shadowMapSize: 1024, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1 },
+  medium: { level: "medium", shadows: true, shadowMapSize: 512, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6 },
+  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3 },
 };
 
 /** What the browser reveals about the device (all optional: browsers differ). */
