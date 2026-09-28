@@ -13,6 +13,7 @@ import {
   readTerrains,
   serializeMeshAsset,
   serializeTerrain,
+  terrainChunks,
   terrainHeight,
   terrainMesh,
   type MeshAsset,
@@ -81,6 +82,47 @@ describe("terrain model", () => {
     expect(triangles(terrainMesh(sample(), 1, [0, 0, 4, 4]))).toBe(2 * 4 * 4);
   });
 
+  it("hangs outward-facing skirts from a block's edges", () => {
+    const t = sample();
+    const plain = triangles(terrainMesh(t, 1, [0, 0, 4, 4]));
+    const skirted = terrainMesh(t, 1, [0, 0, 4, 4], 3);
+    // Four edges of four cells each, a quad (two triangles) per edge cell.
+    expect(triangles(skirted) - plain).toBe(4 * 4 * 2);
+    // Every skirt triangle faces away from the block's centre.
+    const cx = -8 + 4, cz = -8 + 4;
+    let skirts = 0;
+    for (const p of skirted.primitives) {
+      const pos = p.positions;
+      for (let k = 0; k < p.indices.length; k += 3) {
+        const [a, b, c] = [p.indices[k]!, p.indices[k + 1]!, p.indices[k + 2]!];
+        const ys = [pos[a * 3 + 1]!, pos[b * 3 + 1]!, pos[c * 3 + 1]!];
+        if (Math.max(...ys) - Math.min(...ys) < 2.9) continue; // a ground triangle (this block is flat)
+        skirts += 1;
+        const ux = pos[b * 3]! - pos[a * 3]!, uy = pos[b * 3 + 1]! - pos[a * 3 + 1]!, uz = pos[b * 3 + 2]! - pos[a * 3 + 2]!;
+        const vx = pos[c * 3]! - pos[a * 3]!, vy = pos[c * 3 + 1]! - pos[a * 3 + 1]!, vz = pos[c * 3 + 2]! - pos[a * 3 + 2]!;
+        const nx = uy * vz - uz * vy, nz = ux * vy - uy * vx;
+        const mx = (pos[a * 3]! + pos[b * 3]! + pos[c * 3]!) / 3 - cx, mz = (pos[a * 3 + 2]! + pos[b * 3 + 2]! + pos[c * 3 + 2]!) / 3 - cz;
+        expect(nx * mx + nz * mz).toBeGreaterThan(0);
+      }
+    }
+    expect(skirts).toBe(4 * 4 * 2);
+  });
+
+  it("cuts into blocks, each with coarser versions for distance", () => {
+    const n = 33;
+    const t = sample({ samples: n, heights: new Float32Array(n * n).map((_, k) => Math.sin(k) * 2) });
+    const chunks = terrainChunks(t, 16);
+    expect(chunks.map((c) => c.cells)).toEqual([[0, 0, 16, 16], [16, 0, 32, 16], [0, 16, 16, 32], [16, 16, 32, 32]]);
+    for (const c of chunks) {
+      expect(c.lods).toHaveLength(2);
+      expect(triangles(c.lods[0]!)).toBeLessThan(triangles(c.mesh) / 2);
+      expect(triangles(c.lods[1]!)).toBeLessThan(triangles(c.lods[0]!) / 2);
+      expect(c.detail).toBeGreaterThan(0);
+    }
+    // A block that's all hole is left out.
+    expect(terrainChunks(sample({ samples: n, heights: new Float32Array(n * n).fill(-50), floor: -10 }), 16)).toHaveLength(0);
+  });
+
   it("layers by height too, and the last layer takes the rest", () => {
     const t = sample({ layers: [{ material: mat("high"), height: [20, 100] }, { material: mat("low") }] });
     const names = terrainMesh(t).primitives.map((p) => p.material.name);
@@ -141,10 +183,12 @@ describe("terrain in the runtime scene", () => {
   it("adds the terrain as an instance that doesn't frame the camera but extends how far it sees", () => {
     const plain = parseMeshScene(sidecar(null))!;
     const scene = parseMeshScene(sidecar(sample({ origin: [-100, 0, -100], size: [200, 200] })))!;
-    expect(scene.instances).toHaveLength(2);
+    expect(scene.instances).toHaveLength(2); // a 9×9 grid is one block
     const terrain = scene.instances[1]!;
     expect(terrain.terrain).toBe(true);
     expect(terrain.name).toBe("Hills");
+    expect(terrain.detail).toBeGreaterThan(0);
+    expect(terrain.frames).toHaveLength(2); // half and quarter detail
     expect(scene.bounds).toEqual(plain.bounds);
     expect(scene.extent!.radius).toBeGreaterThan(100);
     // The far plane reaches the far edge of the terrain.

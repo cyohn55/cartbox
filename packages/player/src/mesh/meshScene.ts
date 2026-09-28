@@ -26,8 +26,8 @@ import {
   readLevels,
   readNavMesh,
   readTerrains,
+  terrainChunks,
   terrainHeight,
-  terrainMesh,
   type NavMesh,
   type Terrain,
   effectiveLevels,
@@ -87,6 +87,12 @@ export interface MeshInstance extends MeshSceneInstance {
    * the shadow map (which frames the play space), and the far plane reaches it.
    */
   readonly terrain?: true;
+  /**
+   * On a terrain block: how far from it full detail holds (world units). Its
+   * `frames` are the half- and quarter-detail versions the renderer swaps to
+   * with distance.
+   */
+  readonly detail?: number;
 }
 
 /** A prefab's reserve of spawnable copies: each copy's root object index. */
@@ -319,16 +325,30 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     ...(levelOf[i]! >= 0 ? { level: levelOf[i]! } : {}),
   }));
 
-  // Terrain: built into geometry here, one instance per terrain, after the objects.
+  // Terrain: built into geometry here, after the objects — in blocks, each with
+  // coarser versions (as frames) for distance.
   const terrains = readTerrains((parsed as { terrains?: unknown }).terrains);
+  const identity = composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]);
   for (const t of terrains) {
-    const mesh = terrainMesh(t);
-    if (mesh.primitives.length === 0) continue;
-    const identity = composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]);
     // Riding on a parent: the heights are in its space (a missing parent leaves it a root).
     const parent = t.parent !== undefined ? (indexOf.get(t.parent) ?? -1) : -1;
     const model = parent >= 0 ? instances[parent]!.model : identity;
-    instances.push({ mesh, model, local: identity, parent, id: `terrain:${t.id}`, name: t.name, tags: [], props: {}, physics: null, terrain: true });
+    for (const chunk of terrainChunks(t)) {
+      instances.push({
+        mesh: chunk.mesh,
+        ...(chunk.lods.length > 0 ? { frames: chunk.lods } : {}),
+        model,
+        local: identity,
+        parent,
+        id: `terrain:${t.id}:${chunk.cells[0]},${chunk.cells[1]}`,
+        name: t.name,
+        tags: [],
+        props: {},
+        physics: null,
+        terrain: true,
+        detail: chunk.detail,
+      });
+    }
   }
 
   if (instances.length === 0) return null;

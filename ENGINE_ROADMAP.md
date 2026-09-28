@@ -231,7 +231,9 @@ completeness.
       (a few kilobytes where a mesh would take megabytes) and built into geometry when
       the scene loads. Each triangle takes the first layer whose slope and height rule
       it meets (snow on the gentle ground, rock on the cliffs), cells below a floor are
-      left out, and a terrain can ride on a parent object. It doesn't frame the camera
+      left out, and a terrain can ride on a parent object. It's drawn in blocks of 16
+      cells, each at full, half or quarter detail by its distance from the camera, with
+      skirts hiding the seams between detail levels. It doesn't frame the camera
       or cast into the play area's shadow map, the far plane reaches it, and the
       auto-orbit stays above it. Lockout's gorge and mountains are one.
 - [ ] Foliage, decals, volumetric fog.

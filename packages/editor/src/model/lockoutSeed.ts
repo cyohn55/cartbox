@@ -1121,7 +1121,7 @@ export function lockoutTerrain(): Terrain {
   const snow: MeshPrimitive["material"] = { name: "terrain-snow", baseColorFactor: [0.8, 0.84, 0.9, 1], baseColorImage: null, metallicFactor: 0, roughnessFactor: 0.85 };
   rockTexture ??= bakeLandscape(rockSurface, 3, 128);
   const stone = { baseColorImage: rockTexture.albedo, normalImage: rockTexture.normal, metallicFactor: 0 };
-  const rock: MeshPrimitive["material"] = { name: "terrain-rock", baseColorFactor: [0.3, 0.32, 0.36, 1], ...stone, roughnessFactor: 0.9 };
+  const rock: MeshPrimitive["material"] = { name: "terrain-rock", baseColorFactor: [0.26, 0.28, 0.32, 1], ...stone, roughnessFactor: 0.9 };
   terrain = {
     id: "lockout-range",
     name: "Mountains",

@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { LOCKOUT_CODE, lockoutMeshSidecar, deserializeMeshAsset, lockoutTerrain, lockoutTerrainTriangles, terrainHeight, terrainMesh } from "@cartbox/editor";
+import { LOCKOUT_CODE, lockoutMeshSidecar, deserializeMeshAsset, lockoutTerrain, lockoutTerrainTriangles, terrainChunks, terrainHeight, terrainMesh } from "@cartbox/editor";
 import { chamferedRect, newStreams, pushLoft } from "../packages/editor/src/model/seedGeometry";
 
 /** Read a `local NAME = {…}` numeric table out of the shipped cart code. */
@@ -130,6 +130,17 @@ describe("the Lockout mountains", () => {
     expect(rock!.material.normalImage).toBeTruthy();
     expect(snow!.indices.length).toBeGreaterThan(rock!.indices.length * 0.3);
     expect(lockoutTerrainTriangles()).toBeLessThan(20000);
+    // Drawn in blocks: from the arena the far range is coarser, so it costs far less.
+    const tris = (m: { primitives: { indices: Uint32Array }[] }) => m.primitives.reduce((n, p) => n + p.indices.length / 3, 0);
+    const fromArena = terrainChunks(t).reduce((sum, c) => {
+      const cell = t.size[0] / (t.samples - 1);
+      const x0 = t.origin[0] + c.cells[0] * cell, x1 = t.origin[0] + c.cells[2] * cell;
+      const z0 = t.origin[2] + c.cells[1] * cell, z1 = t.origin[2] + c.cells[3] * cell;
+      const d = Math.hypot(Math.max(x0, 0, -x1), Math.max(z0, 0, -z1));
+      const level = d < c.detail ? 0 : d < c.detail * 2 ? 1 : 2;
+      return sum + tris(level === 0 ? c.mesh : c.lods[level - 1]!);
+    }, 0);
+    expect(fromArena).toBeLessThan(lockoutTerrainTriangles() * 0.75);
   });
 
   it("ships on the sidecar, riding on the map so the menus' hiding the map hides it too", () => {

@@ -55,6 +55,12 @@ interface MeshInstance extends MeshSceneInstance {
      * the shadow map (which frames the play space), and the far plane reaches it.
      */
     readonly terrain?: true;
+    /**
+     * On a terrain block: how far from it full detail holds (world units). Its
+     * `frames` are the half- and quarter-detail versions the renderer swaps to
+     * with distance.
+     */
+    readonly detail?: number;
 }
 /** A prefab's reserve of spawnable copies: each copy's root object index. */
 interface PrefabPool {
@@ -4974,6 +4980,16 @@ declare class MeshOverlaySurface implements DisplaySurface {
     placements(): readonly (Mat4 | null)[];
     /** A tinted copy of `mesh`, cached so its identity (and any GPU upload) is stable. */
     private tinted;
+    /** The camera's eye this frame (terrain blocks pick their detail by distance from it). */
+    private eye;
+    /** Each terrain block's world bounds, measured on first use. */
+    private readonly blockBounds;
+    /**
+     * A terrain block at the detail its distance from the eye calls for: full
+     * within its `detail` range, half out to twice that, quarter beyond. Anything
+     * else is returned as it is.
+     */
+    private atDetail;
     /** The engine's gentle auto-orbit round the scene, kept above any terrain. */
     private autoOrbitCamera;
     /**

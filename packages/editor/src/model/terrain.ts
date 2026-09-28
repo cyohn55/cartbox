@@ -90,8 +90,11 @@ function layerFor(layers: readonly TerrainLayer[], up: number, height: number): 
  * Build the terrain's geometry: one primitive per layer that any triangle uses.
  * `stride` samples every stride-th height (1 = full detail; 2, 4… for distance)
  * and `cells` limits it to a block of the grid, [x0, z0, x1, z1) in cells.
+ * `skirt` hangs a strip that far down from the block's edges, so where a
+ * neighbouring block is drawn at another detail the seam between them shows
+ * ground, not a crack through to the sky.
  */
-export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, number, number, number]): MeshAsset {
+export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, number, number, number], skirt = 0): MeshAsset {
   const n = t.samples;
   const s = Math.max(1, Math.floor(stride));
   const [cx0, cz0, cx1, cz1] = cells ?? [0, 0, n - 1, n - 1];
@@ -137,6 +140,30 @@ export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, nu
     const len = Math.hypot(uy * vz - uz * vy, ny, ux * vy - uy * vx) || 1;
     const layer = layerFor(t.layers, ny / len, t.origin[1] + (pa[1]! + pb[1]! + pc[1]!) / 3);
     out[layer]!.indices.push(vertex(layer, a[0], a[1]), vertex(layer, b[0], b[1]), vertex(layer, c[0], c[1]));
+    if (skirt > 0) {
+      for (const [p, q, r] of [[a, b, c], [b, c, a], [c, a, b]] as const) if (onEdge(p, q)) hang(layer, p, q, r);
+    }
+  };
+  // An edge of the block: both ends on the same side of it.
+  const onEdge = (p: readonly [number, number], q: readonly [number, number]) =>
+    (p[0] === q[0] && (p[0] === cx0 || p[0] === cx1)) || (p[1] === q[1] && (p[1] === cz0 || p[1] === cz1));
+  /** A skirt below edge p–q, facing away from r (the triangle's far corner). */
+  const hang = (layer: number, p: readonly [number, number], q: readonly [number, number], r: readonly [number, number]) => {
+    const o = out[layer]!;
+    const top = [vertex(layer, p[0], p[1]), vertex(layer, q[0], q[1])];
+    const base = o.positions.length / 3;
+    for (const v of top) {
+      o.positions.push(o.positions[v * 3]!, o.positions[v * 3 + 1]! - skirt, o.positions[v * 3 + 2]!);
+      o.normals.push(o.normals[v * 3]!, o.normals[v * 3 + 1]!, o.normals[v * 3 + 2]!);
+      o.uvs.push(o.uvs[v * 2]!, o.uvs[v * 2 + 1]! + skirt / tile);
+    }
+    // Wind it to face outward: away from the triangle's far corner.
+    const ex = (q[0] - p[0]) * dx, ez = (q[1] - p[1]) * dz;
+    const outX = ((p[0] + q[0]) / 2 - r[0]) * dx, outZ = ((p[1] + q[1]) / 2 - r[1]) * dz;
+    // Normal of (p, q, q-down) is along (−ez, 0, ex) · −1 for a downward second edge.
+    const facing = ez * outX - ex * outZ;
+    if (facing >= 0) o.indices.push(top[0]!, top[1]!, base + 1, top[0]!, base + 1, base);
+    else o.indices.push(top[0]!, base + 1, top[1]!, top[0]!, base, base + 1);
   };
   for (let j = cz0; j < cz1; j += s) {
     for (let i = cx0; i < cx1; i += s) {
@@ -167,6 +194,44 @@ export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, nu
     });
   });
   return { name: t.name, primitives };
+}
+
+/** Cells per side of the blocks a terrain is drawn in (see {@link terrainChunks}). */
+export const TERRAIN_CHUNK = 16;
+
+/** One block of a terrain: its full-detail mesh and coarser ones for distance. */
+export interface TerrainChunk {
+  /** The block's cells, [x0, z0, x1, z1). */
+  readonly cells: readonly [number, number, number, number];
+  readonly mesh: MeshAsset;
+  /** Half and quarter detail, in that order. */
+  readonly lods: readonly MeshAsset[];
+  /** How far from the block full detail holds (world units); half detail to twice that, quarter beyond. */
+  readonly detail: number;
+}
+
+/**
+ * The terrain cut into square blocks of `chunk` cells, each with coarser
+ * versions for distance and skirts to hide the seams between detail levels —
+ * so the ground near the camera is drawn in full and the far range in a
+ * fraction of the triangles. Blocks with nothing to draw (all hole) are left out.
+ */
+export function terrainChunks(t: Terrain, chunk = TERRAIN_CHUNK): TerrainChunk[] {
+  const cellsPerSide = t.samples - 1;
+  const cell = Math.max(t.size[0], t.size[1]) / cellsPerSide;
+  const skirt = cell * 4;
+  const out: TerrainChunk[] = [];
+  for (let z0 = 0; z0 < cellsPerSide; z0 += chunk) {
+    for (let x0 = 0; x0 < cellsPerSide; x0 += chunk) {
+      const cells = [x0, z0, Math.min(cellsPerSide, x0 + chunk), Math.min(cellsPerSide, z0 + chunk)] as const;
+      const mesh = terrainMesh(t, 1, cells, skirt);
+      if (mesh.primitives.length === 0) continue;
+      const span = Math.min(cells[2] - x0, cells[3] - z0);
+      const lods = [2, 4].filter((s) => span >= s * 2).map((s) => terrainMesh(t, s, cells, skirt));
+      out.push({ cells, mesh, lods, detail: chunk * cell * 1.2 });
+    }
+  }
+  return out;
 }
 
 /** The terrain as stored on the mesh sidecar. */
