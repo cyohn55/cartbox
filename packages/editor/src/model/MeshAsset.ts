@@ -24,6 +24,7 @@
  */
 
 import { bytesToBase64, base64ToBytes } from "./base64";
+import { readSurfaceEffects, writeSurfaceEffects } from "./materialEffects";
 import {
   MAX_CLIP_KEYS,
   MAX_CLIPS,
@@ -140,6 +141,26 @@ export interface MeshMaterial {
    * mesh serves every team colour. Absent/false: tints never touch it.
    */
   readonly tintable?: boolean;
+  // --- Surface effects (HALO2_STYLE_ROADMAP.md, H3; see materialEffects.ts) ---
+  /**
+   * A finely tiled detail map blended into the albedo up close (it fades out
+   * with distance): mid-grey changes nothing, lighter brightens, darker grimes.
+   */
+  readonly detailImage?: EncodedImage | null;
+  /** Detail tiles per base UV unit (default 8). */
+  readonly detailScale?: number;
+  /** How strongly the detail map shows, 0..1 (default 0.5). */
+  readonly detailStrength?: number;
+  /** Scroll the emissive map, UV units per second, so energy lines flow. */
+  readonly emissiveScroll?: readonly [number, number];
+  /** Pulse the emissive glow: `rate` cycles per second, dipping by `depth` (0..1) at the trough. */
+  readonly emissivePulse?: { readonly rate: number; readonly depth: number };
+  /** A fresnel rim: light of `color` × `strength` at grazing angles, tightening as `power` rises. */
+  readonly rim?: { readonly color: readonly [number, number, number]; readonly power: number; readonly strength: number };
+  /** Scales reflections of the sky and probes (default 1). */
+  readonly reflectivity?: number;
+  /** Mask reflections per texel by the metallic-roughness map's alpha (opaque = full). */
+  readonly reflectionMask?: boolean;
 }
 
 /** One triangle list with a single material. */
@@ -340,6 +361,14 @@ export interface SerializedMaterial {
   emissiveFactor?: [number, number, number];
   textureSprite?: SpriteTextureRef | null;
   tintable?: boolean;
+  detailImage?: SerializedImage | null;
+  detailScale?: number;
+  detailStrength?: number;
+  emissiveScroll?: [number, number];
+  emissivePulse?: { rate: number; depth: number };
+  rim?: { color: [number, number, number]; power: number; strength: number };
+  reflectivity?: number;
+  reflectionMask?: boolean;
 }
 interface SerializedPrimitive {
   positions: string;
@@ -586,6 +615,8 @@ export function serializeMaterial(material: MeshMaterial, table?: ImageTable): S
     emissiveFactor: material.emissiveFactor ? [...material.emissiveFactor] : undefined,
     textureSprite: material.textureSprite ?? null,
     ...(material.tintable ? { tintable: true } : {}),
+    ...(material.detailImage ? { detailImage: serializeImage(material.detailImage, "detailImage", table) } : {}),
+    ...writeSurfaceEffects(material),
   };
 }
 
@@ -607,6 +638,8 @@ export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMat
     emissiveFactor: toEmissiveFactor(material.emissiveFactor),
     textureSprite: toTextureSprite(material.textureSprite),
     ...(material.tintable === true ? { tintable: true } : {}),
+    ...(material.detailImage ? { detailImage: deserializeImage(material.detailImage, "detailImage", table) } : {}),
+    ...readSurfaceEffects(material),
   };
 }
 

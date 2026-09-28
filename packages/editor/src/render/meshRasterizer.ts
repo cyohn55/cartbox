@@ -25,6 +25,7 @@
 import { boxProject, pickProbe, sampleProbe, type ReflectionProbeSet } from "./probeSampling";
 import { fogFactor, type SceneFog } from "./skyDome";
 import { LIGHTMAP_RANGE } from "../model/lightmap";
+import { DEFAULT_DETAIL_SCALE, DEFAULT_DETAIL_STRENGTH, detailFade, emissiveAnimation } from "../model/materialEffects";
 import { type MeshAsset, computeSmoothNormals, meshBounds } from "../model/MeshAsset";
 
 /** A decoded texture: tightly-packed RGBA rows, `width × height`. */
@@ -70,6 +71,10 @@ export interface RenderMeshOptions {
   readonly emissiveTextures?: readonly (DecodedTexture | null)[];
   /** Baked light maps per primitive (see {@link MeshSceneInstance.lightmapTextures}). */
   readonly lightmapTextures?: readonly (DecodedTexture | null)[];
+  /** Detail maps per primitive (see {@link MeshSceneInstance.detailTextures}). */
+  readonly detailTextures?: readonly (DecodedTexture | null)[];
+  /** Seconds, for animated emissive (see {@link RenderMeshSceneOptions.time}). */
+  readonly time?: number;
   /** Image-based lighting environment for PBR materials (Modern tier); when set,
    *  it replaces the flat ambient term. See {@link EnvironmentLight}. */
   readonly environment?: EnvironmentLight | null;
@@ -390,6 +395,8 @@ function buildPbrFrag(
   occ: DecodedTexture | null,
   emis: DecodedTexture | null,
   lm: DecodedTexture | null = null,
+  detail: DecodedTexture | null = null,
+  time = 0,
 ): PbrFrag | null {
   const emissiveFactor = material.emissiveFactor;
   const isPbr =
@@ -400,6 +407,9 @@ function buildPbrFrag(
     material.roughnessFactor !== undefined ||
     (emissiveFactor !== undefined && (emissiveFactor[0] > 0 || emissiveFactor[1] > 0 || emissiveFactor[2] > 0));
   if (!isPbr) return null;
+  const { offset, gain } = emissiveAnimation(material, time);
+  const e = emissiveFactor ?? [0, 0, 0];
+  const rim = material.rim;
   return {
     mr,
     occ,
@@ -407,7 +417,15 @@ function buildPbrFrag(
     lm,
     metallic: material.metallicFactor ?? 1,
     roughness: material.roughnessFactor ?? 1,
-    emissive: emissiveFactor ?? [0, 0, 0],
+    emissive: gain === 1 ? e : [e[0] * gain, e[1] * gain, e[2] * gain],
+    detail,
+    detailScale: material.detailScale ?? DEFAULT_DETAIL_SCALE,
+    detailStrength: detail ? (material.detailStrength ?? DEFAULT_DETAIL_STRENGTH) : 0,
+    emisOffset: offset,
+    rim: rim && rim.strength > 0 ? [rim.color[0] * rim.strength, rim.color[1] * rim.strength, rim.color[2] * rim.strength] : null,
+    rimPower: rim?.power ?? 1,
+    reflect: material.reflectivity ?? 1,
+    reflectMask: material.reflectionMask === true && mr !== null,
   };
 }
 
@@ -663,7 +681,7 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
     options.mrTextures ?? null,
     options.occlusionTextures ?? null,
     options.emissiveTextures ?? null,
-    options.lightmapTextures ?? null,
+    { lightmap: options.lightmapTextures ?? null, detail: options.detailTextures ?? null, time: options.time ?? 0 },
     light,
     viewDir,
     ambient,
@@ -728,6 +746,8 @@ export interface MeshSceneInstance {
    * (see lightBake.ts). Null entries (or no `uvs2`) leave it unscaled.
    */
   readonly lightmapTextures?: readonly (DecodedTexture | null)[];
+  /** Decoded detail maps per primitive ({@link MeshMaterial.detailImage}), or null entries. */
+  readonly detailTextures?: readonly (DecodedTexture | null)[];
 }
 
 /**
@@ -816,6 +836,8 @@ export interface RenderMeshSceneOptions {
   readonly lights?: readonly SceneLight[] | null;
   /** Per-pixel rasterisation behaviour; defaults to {@link DEFAULT_RASTER_STYLE}. */
   readonly style?: RasterStyle;
+  /** Seconds since the scene started, for animated emissive (scroll and pulse); default 0. */
+  readonly time?: number;
   /** Distance fog over PBR materials (Modern tier), applied after tone mapping.
    *  Absent, output is byte-identical. See {@link SceneFog}. */
   readonly fog?: SceneFog | null;
@@ -843,6 +865,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
   const lights = options.lights ?? null;
   const fog = options.fog ?? null;
   const style = options.style ?? DEFAULT_RASTER_STYLE;
+  const time = options.time ?? 0;
   const viewProj = multiply(projection, view);
 
   depth.fill(Infinity);
@@ -883,12 +906,12 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const mrTextures = instance.mrTextures ?? null;
     const occlusionTextures = instance.occlusionTextures ?? null;
     const emissiveTextures = instance.emissiveTextures ?? null;
-    const lightmapTextures = instance.lightmapTextures ?? null;
+    const extras: PrimitiveExtras = { lightmap: instance.lightmapTextures ?? null, detail: instance.detailTextures ?? null, time };
     const lightMvp = shadow ? multiply(shadow.lightViewProj, instance.model) : null;
     if (style.zBuffer) {
-      drawMesh(instance.mesh, mvp, modelView, instance.model, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightmapTextures, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, lights, style, fog);
+      drawMesh(instance.mesh, mvp, modelView, instance.model, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, extras, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, lights, style, fog);
     } else {
-      eachTriangle(instance.mesh, mvp, modelView, instance.model, normalBasis, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightmapTextures, lightMvp, (triangle) => queue.push(triangle));
+      eachTriangle(instance.mesh, mvp, modelView, instance.model, normalBasis, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, extras, lightMvp, (triangle) => queue.push(triangle));
     }
   }
 
@@ -1306,7 +1329,27 @@ interface PbrFrag {
   readonly lm: DecodedTexture | null;
   readonly metallic: number; // factor (default 1)
   readonly roughness: number; // factor (default 1)
-  readonly emissive: readonly [number, number, number]; // factor (default 0,0,0)
+  readonly emissive: readonly [number, number, number]; // factor × pulse gain (default 0,0,0)
+  // Surface effects (materialEffects.ts):
+  /** Detail map, tiled `detailScale` times per UV unit, blended at `detailStrength`; or null. */
+  readonly detail: DecodedTexture | null;
+  readonly detailScale: number;
+  readonly detailStrength: number;
+  /** Where the emissive map is sampled this frame (its scroll). */
+  readonly emisOffset: readonly [number, number];
+  /** Rim colour × strength, or null for no rim; and its power. */
+  readonly rim: readonly [number, number, number] | null;
+  readonly rimPower: number;
+  /** Reflection scale, and whether the MR map's alpha masks it. */
+  readonly reflect: number;
+  readonly reflectMask: boolean;
+}
+
+/** The per-primitive extras a draw may carry beyond the core maps. */
+interface PrimitiveExtras {
+  readonly lightmap?: readonly (DecodedTexture | null)[] | null;
+  readonly detail?: readonly (DecodedTexture | null)[] | null;
+  readonly time?: number;
 }
 
 /** One projected, clipped triangle ready to rasterise. */
@@ -1353,8 +1396,8 @@ function eachTriangle(
   mrTextures: readonly (DecodedTexture | null)[] | null,
   occlusionTextures: readonly (DecodedTexture | null)[] | null,
   emissiveTextures: readonly (DecodedTexture | null)[] | null,
-  /** Baked light maps per primitive (sampled with the second UV set), or null. */
-  lightmapTextures: readonly (DecodedTexture | null)[] | null,
+  /** Light maps and detail maps per primitive, and the time; or null. */
+  extras: PrimitiveExtras | null,
   /** World→light-clip for shadow mapping, or null when no shadow pass is active. */
   lightMvp: Mat4 | null,
   emit: (triangle: PendingTriangle) => void,
@@ -1364,7 +1407,7 @@ function eachTriangle(
     const objectNormals = primitive.normals ?? computeSmoothNormals(positions, primitive.indices);
     const uvs = primitive.uvs;
     const indices = primitive.indices;
-    const lightmap = primitive.uvs2 ? (lightmapTextures?.[primitiveIndex] ?? null) : null;
+    const lightmap = primitive.uvs2 ? (extras?.lightmap?.[primitiveIndex] ?? null) : null;
     const uvs2 = lightmap ? primitive.uvs2! : null;
     const texture = textures?.[primitiveIndex] ?? null;
     const normalTexture = normalTextures?.[primitiveIndex] ?? null;
@@ -1375,6 +1418,8 @@ function eachTriangle(
       occlusionTextures?.[primitiveIndex] ?? null,
       emissiveTextures?.[primitiveIndex] ?? null,
       lightmap,
+      extras?.detail?.[primitiveIndex] ?? null,
+      extras?.time ?? 0,
     );
     const [baseR, baseG, baseB, baseA] = primitive.material.baseColorFactor;
 
@@ -1490,7 +1535,7 @@ function drawMesh(
   mrTextures: readonly (DecodedTexture | null)[] | null,
   occlusionTextures: readonly (DecodedTexture | null)[] | null,
   emissiveTextures: readonly (DecodedTexture | null)[] | null,
-  lightmapTextures: readonly (DecodedTexture | null)[] | null,
+  extras: PrimitiveExtras | null,
   light: readonly [number, number, number],
   viewDir: readonly [number, number, number],
   ambient: number,
@@ -1515,7 +1560,7 @@ function drawMesh(
     mrTextures,
     occlusionTextures,
     emissiveTextures,
-    lightmapTextures,
+    extras,
     lightMvp,
     (triangle) => {
       rasterizeTriangle(
@@ -1741,16 +1786,29 @@ function rasterizeTriangle(
         }
         let metallic = pbr.metallic;
         let rough = pbr.roughness;
+        let reflect = pbr.reflect;
         if (pbr.mr) {
-          const [, mg, mb] = sampleTexture(pbr.mr, u, v, style.textureFiltering);
+          const [, mg, mb, ma] = sampleTexture(pbr.mr, u, v, style.textureFiltering);
           rough *= mg / 255;
           metallic *= mb / 255;
+          if (pbr.reflectMask) reflect *= ma / 255;
         }
         rough = Math.min(1, Math.max(0.045, rough)); // clamp: perfectly-smooth NDF blows up
         const ao = pbr.occ ? sampleTexture(pbr.occ, u, v, style.textureFiltering)[0] / 255 : 1;
-        const ar = r / 255;
-        const ag = g / 255;
-        const ab = bl / 255;
+        let ar = r / 255;
+        let ag = g / 255;
+        let ab = bl / 255;
+        // A detail map, tiled finely and blended into the albedo up close
+        // (mid-grey is neutral); it fades out with view depth.
+        if (pbr.detail) {
+          const k = pbr.detailStrength * detailFade(pw0 * a.clip[3] + pw1 * b.clip[3] + pw2 * c.clip[3]);
+          if (k > 0) {
+            const [dr, dg, db] = sampleTexture(pbr.detail, u * pbr.detailScale, v * pbr.detailScale, style.textureFiltering);
+            ar *= 1 + k * ((2 * dr) / 255 - 1);
+            ag *= 1 + k * ((2 * dg) / 255 - 1);
+            ab *= 1 + k * ((2 * db) / 255 - 1);
+          }
+        }
         // Half-vector of the directional light + view (camera-at-infinity).
         let hx = light[0] + viewDir[0];
         let hy = light[1] + viewDir[1];
@@ -1781,7 +1839,7 @@ function rasterizeTriangle(
         let eg = 0;
         let eb = 0;
         if (pbr.emissive[0] > 0 || pbr.emissive[1] > 0 || pbr.emissive[2] > 0) {
-          const es = pbr.emis ? sampleTexture(pbr.emis, u, v, style.textureFiltering) : [255, 255, 255, 255];
+          const es = pbr.emis ? sampleTexture(pbr.emis, u + pbr.emisOffset[0], v + pbr.emisOffset[1], style.textureFiltering) : [255, 255, 255, 255];
           er = pbr.emissive[0] * (es[0]! / 255);
           eg = pbr.emissive[1] * (es[1]! / 255);
           eb = pbr.emissive[2] * (es[2]! / 255);
@@ -1827,9 +1885,9 @@ function rasterizeTriangle(
           const specR = pr + (avr - pr) * rough;
           const specG = pg + (avg - pg) * rough;
           const specB = pb + (avb - pb) * rough;
-          ambR = (ir * ar * kdm + specR * f0r) * ao;
-          ambG = (ig * ag * kdm + specG * f0g) * ao;
-          ambB = (ib * ab * kdm + specB * f0b) * ao;
+          ambR = (ir * ar * kdm + specR * f0r * reflect) * ao;
+          ambG = (ig * ag * kdm + specG * f0g * reflect) * ao;
+          ambB = (ib * ab * kdm + specB * f0b * reflect) * ao;
         } else {
           ambR = ambient * ar * ao;
           ambG = ambient * ag * ao;
@@ -1929,6 +1987,13 @@ function rasterizeTriangle(
           lr = (kdm * (1 - Fr) * ar + Fr * specD) * ndl * shadowLit + ambR + er;
           lg = (kdm * (1 - Fg) * ag + Fg * specD) * ndl * shadowLit + ambG + eg;
           lb = (kdm * (1 - Fb) * ab + Fb * specD) * ndl * shadowLit + ambB + eb;
+        }
+        // A fresnel rim: light at grazing angles, tightening with its power.
+        if (pbr.rim) {
+          const rimK = Math.pow(1 - ndv, pbr.rimPower);
+          lr += pbr.rim[0] * rimK;
+          lg += pbr.rim[1] * rimK;
+          lb += pbr.rim[2] * rimK;
         }
         if (tonemap) {
           // HDR: expose, then roll highlights off with the ACES curve instead of

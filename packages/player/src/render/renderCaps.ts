@@ -167,7 +167,8 @@ export function capTextures(
       !instance.mrTextures &&
       !instance.occlusionTextures &&
       !instance.emissiveTextures &&
-      !instance.lightmapTextures
+      !instance.lightmapTextures &&
+      !instance.detailTextures
     ) {
       return instance;
     }
@@ -186,6 +187,7 @@ export function capTextures(
     const fittedOcclusion = fitList(instance.occlusionTextures, mark);
     const fittedEmissive = fitList(instance.emissiveTextures, mark);
     const fittedLightmaps = fitList(instance.lightmapTextures, mark);
+    const fittedDetail = fitList(instance.detailTextures, mark);
 
     if (!instanceChanged) return instance;
     changed = true;
@@ -199,6 +201,7 @@ export function capTextures(
       occlusionTextures: fittedOcclusion,
       emissiveTextures: fittedEmissive,
       ...(fittedLightmaps ? { lightmapTextures: fittedLightmaps } : {}),
+      ...(fittedDetail ? { detailTextures: fittedDetail } : {}),
     };
   });
 

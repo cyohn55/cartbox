@@ -3013,6 +3013,8 @@ interface SceneDraw {
      * {@link SceneFog}.
      */
     readonly fog?: SceneFog | null;
+    /** Seconds since the scene started, for animated emissive (scroll and pulse). */
+    readonly time?: number;
     /**
      * Skip instances whose world AABB is entirely outside the camera frustum. A
      * correct cull is output-identical, so it is a pure perf win; default off.
@@ -3518,23 +3520,28 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  * 448  fog        vec4<f32>    16   rgb = fog colour, w = density
  * 464  fogParams  vec4<f32>    16   x = 1 when fogged, y = start distance, z = max amount
  * 480  shadow2    vec4<f32>    16   x = slope-scaled shadow bias, y = 1 for 2x2 PCF
+ * 496  surface0   vec4<f32>    16   x = detail scale, y = detail strength (0 = none),
+ *                                    z = reflectivity, w = 1 when the MR alpha masks it
+ * 512  surface1   vec4<f32>    16   xy = emissive UV offset (its scroll this frame)
+ * 528  surface2   vec4<f32>    16   rgb = rim colour × strength, w = rim power
  * ```
  *
- * 496 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
- * dynamic uniform offset can address), so one buffer still holds every draw in a
- * frame. The metallic-roughness inputs and the environment carry the Modern
+ * 544 bytes used, padded to a 768-byte stride (a 256-byte multiple a dynamic
+ * uniform offset can address), so one buffer still holds every draw in a
+ * frame — uniforms are written per batch, not per copy, so the stride costs
+ * little. The metallic-roughness inputs and the environment carry the Modern
  * (AAA) tier's shading; a fantasy draw leaves `pbr.z` at 0 and the shader takes
  * the byte-identical Lambert path, `envSky.w` at 0 falls back to flat ambient,
  * `envMeta.w` at 0 uses the analytic gradient instead of a panorama, and
  * `shadow.x` at 0 skips the shadow test.
  */
-declare const UNIFORM_STRIDE = 512;
+declare const UNIFORM_STRIDE = 768;
 /**
  * Bytes the struct actually occupies, before the stride padding. This is what a
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 496;
+declare const UNIFORM_BYTES_USED = 544;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
@@ -3625,6 +3632,24 @@ declare function resolvePbr(material: PbrMaterial, hasMr: boolean, hasOcc: boole
  * rasteriser's `normalizeVec3` does.
  */
 declare function viewDirection(view: Mat4): readonly [number, number, number];
+/**
+ * A draw's surface effects (HALO2_STYLE_ROADMAP.md H3; materialEffects.ts in
+ * @cartbox/editor), resolved for this frame exactly as the software
+ * rasteriser's `buildPbrFrag` does.
+ */
+interface ResolvedSurface {
+    readonly detailScale: number;
+    /** 0 when no detail map is bound. */
+    readonly detailStrength: number;
+    readonly reflect: number;
+    readonly reflectMask: boolean;
+    readonly emisOffset: readonly [number, number];
+    /** Multiplies the emissive factor (the pulse). */
+    readonly emisGain: number;
+    /** Rim colour × strength (zeros for none) and power. */
+    readonly rim: readonly [number, number, number];
+    readonly rimPower: number;
+}
 interface InstanceUniform {
     readonly mvp: Mat4;
     /** Column-major 3x3 from {@link normalBasis3x3}. */
@@ -3667,6 +3692,8 @@ interface InstanceUniform {
     readonly model: Mat4 | null;
     /** Number of lights in the shared storage buffer, or 0 for the single key light. */
     readonly lightCount: number;
+    /** This draw's surface effects, or omitted for none. */
+    readonly surface?: ResolvedSurface;
     /** Distance fog for PBR draws, or null/omitted for none. */
     readonly fog?: {
         readonly color: readonly [number, number, number];

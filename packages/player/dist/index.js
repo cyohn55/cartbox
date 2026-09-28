@@ -8108,7 +8108,7 @@ function capTextures(instances, budgetBytes, cache) {
     });
   };
   const capped = instances.map((instance) => {
-    if (!instance.textures && !instance.normalTextures && !instance.materialTextures && !instance.mrTextures && !instance.occlusionTextures && !instance.emissiveTextures && !instance.lightmapTextures) {
+    if (!instance.textures && !instance.normalTextures && !instance.materialTextures && !instance.mrTextures && !instance.occlusionTextures && !instance.emissiveTextures && !instance.lightmapTextures && !instance.detailTextures) {
       return instance;
     }
     let instanceChanged = false;
@@ -8122,6 +8122,7 @@ function capTextures(instances, budgetBytes, cache) {
     const fittedOcclusion = fitList(instance.occlusionTextures, mark);
     const fittedEmissive = fitList(instance.emissiveTextures, mark);
     const fittedLightmaps = fitList(instance.lightmapTextures, mark);
+    const fittedDetail = fitList(instance.detailTextures, mark);
     if (!instanceChanged) return instance;
     changed = true;
     return {
@@ -8133,7 +8134,8 @@ function capTextures(instances, budgetBytes, cache) {
       mrTextures: fittedMr,
       occlusionTextures: fittedOcclusion,
       emissiveTextures: fittedEmissive,
-      ...fittedLightmaps ? { lightmapTextures: fittedLightmaps } : {}
+      ...fittedLightmaps ? { lightmapTextures: fittedLightmaps } : {},
+      ...fittedDetail ? { detailTextures: fittedDetail } : {}
     };
   });
   return changed ? capped : instances;
@@ -8203,6 +8205,7 @@ var SoftwareSceneRenderer = class {
       ssao: draw.ssao,
       lights: draw.lights,
       fog: draw.fog,
+      time: draw.time,
       style: this.style
     });
   }
@@ -8645,7 +8648,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         lights,
         shadow,
         fog: lighting.fog ?? null
-      } : {}
+      } : {},
+      // Animated emissive runs on the frame clock (60 per second), so it
+      // steps with the game rather than the wall clock.
+      time: this.frame / 60
     });
     if (front.length > 0) {
       this.frontRenderer.render(front, {
@@ -8662,7 +8668,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
           environment: this.environment,
           tonemap: sceneLightingTonemap(lighting),
           lights
-        } : {}
+        } : {},
+        time: this.frame / 60
       });
     }
     if (profiler) profiler.add("scene", performance.now() - mark);
@@ -9026,7 +9033,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   }
 };
 function fillPlaceholders(mesh, images) {
-  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage"];
+  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage"];
   let touched = false;
   const primitives = mesh.primitives.map((primitive) => {
     let material = primitive.material;
@@ -9057,7 +9064,7 @@ async function decodeMeshTextures(mesh, decodeKtx2, cache) {
       return entry;
     })
   );
-  const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightmapTextures] = await Promise.all([
+  const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightmapTextures, detailTextures] = await Promise.all([
     each((m) => m.baseColorImage),
     // base colour
     each((m) => m.normalImage),
@@ -9070,7 +9077,9 @@ async function decodeMeshTextures(mesh, decodeKtx2, cache) {
     each((m) => m.occlusionImage),
     each((m) => m.emissiveImage),
     // A baked light map (sampled with the second UV set).
-    each((m) => m.lightmapImage)
+    each((m) => m.lightmapImage),
+    // A finely tiled detail map (materialEffects.ts).
+    each((m) => m.detailImage)
   ]);
   return {
     mesh,
@@ -9080,7 +9089,8 @@ async function decodeMeshTextures(mesh, decodeKtx2, cache) {
     mrTextures,
     occlusionTextures,
     emissiveTextures,
-    ...lightmapTextures.some((t) => t !== null) ? { lightmapTextures } : {}
+    ...lightmapTextures.some((t) => t !== null) ? { lightmapTextures } : {},
+    ...detailTextures.some((t) => t !== null) ? { detailTextures } : {}
   };
 }
 var TINT_PALETTE = [
@@ -9556,6 +9566,8 @@ var WorldOverlaySurface = class {
 // src/render/WebglSceneRenderer.ts
 import {
   DEFAULT_RASTER_STYLE as DEFAULT_RASTER_STYLE2,
+  DETAIL_FAR,
+  DETAIL_NEAR,
   LIGHTMAP_RANGE,
   MAX_REFLECTION_PROBES as MAX_REFLECTION_PROBES2,
   PROBE_FADE,
@@ -9603,7 +9615,7 @@ function packRgba([r, g, b, a]) {
   return (a << 24 | b << 16 | g << 8 | r) >>> 0;
 }
 function sameTextures(a, b) {
-  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm;
+  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.detail === b.detail;
 }
 function batchInstances(instances, geometryOf) {
   const batches = [];
@@ -9619,7 +9631,8 @@ function batchInstances(instances, geometryOf) {
         mr: instance.mrTextures?.[index] ?? null,
         occ: instance.occlusionTextures?.[index] ?? null,
         emis: instance.emissiveTextures?.[index] ?? null,
-        lm: primitive.uvs2 ? instance.lightmapTextures?.[index] ?? null : null
+        lm: primitive.uvs2 ? instance.lightmapTextures?.[index] ?? null : null,
+        detail: instance.detailTextures?.[index] ?? null
       };
       let list = byPrimitive.get(primitive);
       if (!list) byPrimitive.set(primitive, list = []);
@@ -9734,9 +9747,14 @@ var WebglPassTimer = class _WebglPassTimer {
 };
 
 // src/render/scenePacking.ts
-import { MAX_REFLECTION_PROBES } from "@cartbox/editor";
-var UNIFORM_STRIDE = 512;
-var UNIFORM_BYTES_USED = 496;
+import {
+  DEFAULT_DETAIL_SCALE,
+  DEFAULT_DETAIL_STRENGTH,
+  MAX_REFLECTION_PROBES,
+  emissiveAnimation
+} from "@cartbox/editor";
+var UNIFORM_STRIDE = 768;
+var UNIFORM_BYTES_USED = 544;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var LIGHT_FLOATS = 12;
 var PROBE_FLOATS = 16;
@@ -9790,6 +9808,9 @@ var OFFSET_MODEL = 96;
 var OFFSET_FOG = 112;
 var OFFSET_FOG_PARAMS = 116;
 var OFFSET_SHADOW2 = 120;
+var OFFSET_SURFACE0 = 124;
+var OFFSET_SURFACE1 = 128;
+var OFFSET_SURFACE2 = 132;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -9822,6 +9843,21 @@ function viewDirection(view) {
   const z = view[10];
   const length = Math.hypot(x, y, z);
   return length < 1e-8 ? [0, 0, 1] : [x / length, y / length, z / length];
+}
+var NO_SURFACE = { detailScale: DEFAULT_DETAIL_SCALE, detailStrength: 0, reflect: 1, reflectMask: false, emisOffset: [0, 0], emisGain: 1, rim: [0, 0, 0], rimPower: 1 };
+function resolveSurface(material, time, hasDetail, hasMr) {
+  const { offset, gain } = emissiveAnimation(material, time);
+  const rim = material.rim && material.rim.strength > 0 ? material.rim : null;
+  return {
+    detailScale: material.detailScale ?? DEFAULT_DETAIL_SCALE,
+    detailStrength: hasDetail ? material.detailStrength ?? DEFAULT_DETAIL_STRENGTH : 0,
+    reflect: material.reflectivity ?? 1,
+    reflectMask: material.reflectionMask === true && hasMr,
+    emisOffset: offset,
+    emisGain: gain,
+    rim: rim ? [rim.color[0] * rim.strength, rim.color[1] * rim.strength, rim.color[2] * rim.strength] : [0, 0, 0],
+    rimPower: rim?.power ?? 1
+  };
 }
 var INSTANCE_FLOATS = 60;
 function writeInstanceTransform(target, index, transform2, base = index * INSTANCE_FLOATS) {
@@ -9859,9 +9895,10 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_PBR + 1] = uniform.pbr.roughness;
   target[base + OFFSET_PBR + 2] = uniform.pbr.isPbr ? 1 : 0;
   target[base + OFFSET_PBR + 3] = 0;
-  target[base + OFFSET_EMISSIVE] = uniform.pbr.emissive[0];
-  target[base + OFFSET_EMISSIVE + 1] = uniform.pbr.emissive[1];
-  target[base + OFFSET_EMISSIVE + 2] = uniform.pbr.emissive[2];
+  const surface = uniform.surface ?? NO_SURFACE;
+  target[base + OFFSET_EMISSIVE] = uniform.pbr.emissive[0] * surface.emisGain;
+  target[base + OFFSET_EMISSIVE + 1] = uniform.pbr.emissive[1] * surface.emisGain;
+  target[base + OFFSET_EMISSIVE + 2] = uniform.pbr.emissive[2] * surface.emisGain;
   target[base + OFFSET_EMISSIVE + 3] = 0;
   target[base + OFFSET_TEXFLAGS] = uniform.hasTexture ? 1 : 0;
   target[base + OFFSET_TEXFLAGS + 1] = uniform.hasMrMap ? 1 : 0;
@@ -9917,6 +9954,18 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_SHADOW2 + 1] = shadow && shadow.pcf ? 1 : 0;
   target[base + OFFSET_SHADOW2 + 2] = 0;
   target[base + OFFSET_SHADOW2 + 3] = 0;
+  target[base + OFFSET_SURFACE0] = surface.detailScale;
+  target[base + OFFSET_SURFACE0 + 1] = surface.detailStrength;
+  target[base + OFFSET_SURFACE0 + 2] = surface.reflect;
+  target[base + OFFSET_SURFACE0 + 3] = surface.reflectMask ? 1 : 0;
+  target[base + OFFSET_SURFACE1] = surface.emisOffset[0];
+  target[base + OFFSET_SURFACE1 + 1] = surface.emisOffset[1];
+  target[base + OFFSET_SURFACE1 + 2] = 0;
+  target[base + OFFSET_SURFACE1 + 3] = 0;
+  target[base + OFFSET_SURFACE2] = surface.rim[0];
+  target[base + OFFSET_SURFACE2 + 1] = surface.rim[1];
+  target[base + OFFSET_SURFACE2 + 2] = surface.rim[2];
+  target[base + OFFSET_SURFACE2 + 3] = surface.rimPower;
 }
 var VERTEX_FLOATS = 10;
 function interleaveVertices(positions, normals, uvs, uvs2 = null) {
@@ -9959,6 +10008,7 @@ var UNIT_ENV = 5;
 var UNIT_SSAO = 6;
 var UNIT_LM = 7;
 var UNIT_PROBES = 8;
+var UNIT_DETAIL = 9;
 var BLOCK_UNIFORMS = 0;
 var BLOCK_INSTANCES = 1;
 var BLOCK_LIGHTS = 2;
@@ -9986,6 +10036,9 @@ layout(std140) uniform Uniforms {
   vec4 fog;
   vec4 fogParams;
   vec4 shadow2;
+  vec4 surface0;
+  vec4 surface1;
+  vec4 surface2;
 } u;
 `
 );
@@ -10055,6 +10108,7 @@ uniform sampler2D lmTex;
 // and, per probe, box min / box max / capture point / mean colour; u.ssaoMeta.w
 // counts them.
 uniform sampler2D probeAtlas;
+uniform sampler2D detailTex;
 uniform vec4 probeData[${MAX_REFLECTION_PROBES2 * 4}];
 in vec3 vNormal;
 in vec2 vUv;
@@ -10158,15 +10212,22 @@ void main() {
     if (dot(N, u.view.xyz) < 0.0) { N = -N; }
     float metallic = u.pbr.x;
     float rough = u.pbr.y;
+    float reflectK = u.surface0.z;
     if (u.texflags.y > 0.5) {
       vec4 mr = sampleMap(mrTex, uv);
       rough = rough * mr.g;
       metallic = metallic * mr.b;
+      if (u.surface0.w > 0.5) { reflectK = reflectK * mr.a; }
     }
     rough = clamp(rough, 0.045, 1.0);
     float ao = 1.0;
     if (u.texflags.z > 0.5) { ao = sampleMap(occTex, uv).r; }
     vec3 albedo = colour.rgb;
+    float dk = u.surface0.y * clamp((${DETAIL_FAR.toFixed(4)} - vEyeDepth) / ${(DETAIL_FAR - DETAIL_NEAR).toFixed(4)}, 0.0, 1.0);
+    if (dk > 0.0) {
+      vec3 detail = sampleMap(detailTex, vec2(vUv.x * u.surface0.x, 1.0 - vUv.y * u.surface0.x)).rgb;
+      albedo = albedo * (vec3(1.0) + dk * (2.0 * detail - vec3(1.0)));
+    }
     vec3 L = u.light.xyz;
     vec3 V = u.view.xyz;
     vec3 H = normalize(L + V);
@@ -10188,7 +10249,7 @@ void main() {
     vec3 ef = u.emissive.xyz;
     if (ef.r > 0.0 || ef.g > 0.0 || ef.b > 0.0) {
       vec3 es = vec3(1.0);
-      if (u.texflags.w > 0.5) { es = sampleMap(emisTex, uv).rgb; }
+      if (u.texflags.w > 0.5) { es = sampleMap(emisTex, vec2(vUv.x + u.surface1.x, 1.0 - (vUv.y + u.surface1.y))).rgb; }
       emis = ef * es;
     }
     vec3 amb;
@@ -10216,7 +10277,7 @@ void main() {
         }
       }
       vec3 pref = mix(spec, specAvg, rough);
-      amb = (irr * albedo * kdm + pref * f0) * ao;
+      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;
     } else {
       amb = vec3(u.light.w) * albedo * ao;
     }
@@ -10267,6 +10328,7 @@ void main() {
     } else {
       lit = (kdm * (vec3(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
     }
+    lit = lit + u.surface2.rgb * pow(1.0 - ndv, u.surface2.w);
     vec3 shaded = lit;
     if (u.tonemap.x > 0.5) {
       float e = u.tonemap.y;
@@ -10389,7 +10451,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         ["envMap", UNIT_ENV],
         ["ssaoMap", UNIT_SSAO],
         ["lmTex", UNIT_LM],
-        ["probeAtlas", UNIT_PROBES]
+        ["probeAtlas", UNIT_PROBES],
+        ["detailTex", UNIT_DETAIL]
       ];
       for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
       const colour = gl.createRenderbuffer();
@@ -10501,7 +10564,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         hasLightmap: batch.textures.lm !== null,
         model,
         lightCount: sceneLights.length,
-        fog: draw.fog ?? null
+        fog: draw.fog ?? null,
+        surface: resolveSurface(batch.primitive.material, draw.time ?? 0, batch.textures.detail !== null, batch.textures.mr !== null)
       });
     });
     for (const chunk of chunks2) {
@@ -10541,6 +10605,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.bindTexture(UNIT_SSAO, ssao ? this.ssaoTexture : this.blankFloat);
     for (let unit = UNIT_BASE; unit <= UNIT_EMIS; unit += 1) gl.bindSampler(unit, this.sampler);
     gl.bindSampler(UNIT_LM, this.sampler);
+    gl.bindSampler(UNIT_DETAIL, this.sampler);
     this.timer?.begin();
     let bound = null;
     let boundBatch = -1;
@@ -10555,6 +10620,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
           this.bindTexture(UNIT_OCC, this.textureFor(batch.textures.occ));
           this.bindTexture(UNIT_EMIS, this.textureFor(batch.textures.emis));
           this.bindTexture(UNIT_LM, this.textureFor(batch.textures.lm));
+          this.bindTexture(UNIT_DETAIL, this.textureFor(batch.textures.detail));
           bound = batch.textures;
         }
         gl.bindVertexArray(batch.geometry.vao);
@@ -10741,6 +10807,8 @@ function toBytes(data) {
 // src/render/WebgpuSceneRenderer.ts
 import {
   DEFAULT_RASTER_STYLE as DEFAULT_RASTER_STYLE3,
+  DETAIL_FAR as DETAIL_FAR2,
+  DETAIL_NEAR as DETAIL_NEAR2,
   LIGHTMAP_RANGE as LIGHTMAP_RANGE2,
   MAX_REFLECTION_PROBES as MAX_REFLECTION_PROBES3,
   PROBE_FADE as PROBE_FADE2,
@@ -10775,6 +10843,9 @@ struct Uniforms {
   fog: vec4<f32>,       // rgb = fog colour, w = density
   fogParams: vec4<f32>, // x = 1 when fogged, y = start distance, z = max amount
   shadow2: vec4<f32>,   // x = slope-scaled bias, y = 1 for 2x2 PCF
+  surface0: vec4<f32>,  // x = detail scale, y = detail strength, z = reflectivity, w = 1 when MR alpha masks it
+  surface1: vec4<f32>,  // xy = emissive UV offset
+  surface2: vec4<f32>,  // rgb = rim colour \xD7 strength, w = rim power
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -10827,6 +10898,9 @@ struct Probe {
 };
 @group(0) @binding(12) var probeAtlas: texture_2d<f32>;
 @group(0) @binding(13) var<storage, read> probes: array<Probe>;
+// A finely tiled detail map (materialEffects.ts; 1x1 white when none \u2014 the
+// uniform's surface0.y gates it).
+@group(0) @binding(14) var detailTex: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
@@ -10965,15 +11039,22 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     if (dot(N, u.view.xyz) < 0.0) { N = -N; } // two-sided: flip toward the viewer
     var metallic = u.pbr.x;
     var rough = u.pbr.y;
+    var reflectK = u.surface0.z;
     if (u.texflags.y > 0.5) {
       let mr = textureSample(mrTex, samp, uv);
       rough = rough * mr.g;   // glTF packs roughness in G,
       metallic = metallic * mr.b; // metallic in B
+      if (u.surface0.w > 0.5) { reflectK = reflectK * mr.a; } // the reflection mask
     }
     rough = clamp(rough, 0.045, 1.0); // a perfectly-smooth NDF blows up
     var ao = 1.0;
     if (u.texflags.z > 0.5) { ao = textureSample(occTex, samp, uv).r; }
-    let albedo = colour.rgb;
+    var albedo = colour.rgb;
+    // A detail map, tiled finely and blended in up close (mid-grey neutral),
+    // fading with eye depth \u2014 mirrors the software path.
+    let dk = u.surface0.y * clamp((${DETAIL_FAR2.toFixed(4)} - in.eyeDepth) / ${(DETAIL_FAR2 - DETAIL_NEAR2).toFixed(4)}, 0.0, 1.0);
+    let detail = textureSample(detailTex, samp, vec2<f32>(in.uv.x * u.surface0.x, 1.0 - in.uv.y * u.surface0.x)).rgb;
+    if (dk > 0.0) { albedo = albedo * (vec3<f32>(1.0) + dk * (2.0 * detail - vec3<f32>(1.0))); }
     let L = u.light.xyz;
     let V = u.view.xyz;
     let H = normalize(L + V);
@@ -10995,7 +11076,7 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     let ef = u.emissive.xyz;
     if (ef.r > 0.0 || ef.g > 0.0 || ef.b > 0.0) {
       var es = vec3<f32>(1.0);
-      if (u.texflags.w > 0.5) { es = textureSample(emisTex, samp, uv).rgb; }
+      if (u.texflags.w > 0.5) { es = textureSample(emisTex, samp, vec2<f32>(in.uv.x + u.surface1.x, 1.0 - (in.uv.y + u.surface1.y))).rgb; }
       emis = ef * es;
     }
     // Ambient / image-based lighting, mirroring the software rasteriser: with an
@@ -11026,7 +11107,7 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
         }
       }
       let pref = mix(spec, specAvg, rough);
-      amb = (irr * albedo * kdm + pref * f0) * ao;
+      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;
     } else {
       amb = vec3<f32>(u.light.w) * albedo * ao;
     }
@@ -11083,6 +11164,8 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     } else {
       lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
     }
+    // A fresnel rim, light at grazing angles (zero when the material has none).
+    lit = lit + u.surface2.rgb * pow(1.0 - ndv, u.surface2.w);
     // HDR: expose + ACES roll-off, or write the linear colour straight through.
     var shaded = lit;
     if (u.tonemap.x > 0.5) {
@@ -11248,7 +11331,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 11, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           // Reflection probes: the panorama atlas (read via textureLoad) and their boxes.
           { binding: 12, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
-          { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } }
+          { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
+          // The detail map.
+          { binding: 14, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } }
         ]
       });
       const pipeline = device.createRenderPipeline({
@@ -11501,7 +11586,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         hasLightmap: entry.textures.lm !== null,
         model,
         lightCount,
-        fog: draw.fog ?? null
+        fog: draw.fog ?? null,
+        surface: resolveSurface(entry.primitive.material, draw.time ?? 0, entry.textures.detail !== null, entry.textures.mr !== null)
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
@@ -11638,7 +11724,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   /** The bind group for one primitive, rebuilt if any of its textures changed. */
   bindGroupFor(primitive, textures) {
     const cached = this.bindGroups.get(primitive);
-    if (cached && cached.source.base === textures.base && cached.source.mr === textures.mr && cached.source.occ === textures.occ && cached.source.emis === textures.emis && cached.source.lm === textures.lm) {
+    if (cached && cached.source.base === textures.base && cached.source.mr === textures.mr && cached.source.occ === textures.occ && cached.source.emis === textures.emis && cached.source.lm === textures.lm && cached.source.detail === textures.detail) {
       return cached.group;
     }
     const view = (texture) => (texture ? this.uploadTexture(texture) : this.blankTexture).createView();
@@ -11667,7 +11753,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { binding: 11, resource: view(textures.lm) },
         // The probe atlas (or the blank) and boxes; a change invalidates the cache.
         { binding: 12, resource: this.probeTexture.createView() },
-        { binding: 13, resource: { buffer: this.probeBuffer } }
+        { binding: 13, resource: { buffer: this.probeBuffer } },
+        // The detail map (or the 1x1 white blank; the uniform gates it).
+        { binding: 14, resource: view(textures.detail) }
       ]
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });

@@ -10,7 +10,16 @@
  * are the parts covered by tests.
  */
 
-import { MAX_REFLECTION_PROBES, type EnvironmentLight, type Mat4, type ReflectionProbeSet } from "@cartbox/editor";
+import {
+  DEFAULT_DETAIL_SCALE,
+  DEFAULT_DETAIL_STRENGTH,
+  MAX_REFLECTION_PROBES,
+  emissiveAnimation,
+  type EnvironmentLight,
+  type Mat4,
+  type MeshMaterial,
+  type ReflectionProbeSet,
+} from "@cartbox/editor";
 
 /**
  * WGSL uniform layout, in bytes:
@@ -38,23 +47,28 @@ import { MAX_REFLECTION_PROBES, type EnvironmentLight, type Mat4, type Reflectio
  * 448  fog        vec4<f32>    16   rgb = fog colour, w = density
  * 464  fogParams  vec4<f32>    16   x = 1 when fogged, y = start distance, z = max amount
  * 480  shadow2    vec4<f32>    16   x = slope-scaled shadow bias, y = 1 for 2x2 PCF
+ * 496  surface0   vec4<f32>    16   x = detail scale, y = detail strength (0 = none),
+ *                                    z = reflectivity, w = 1 when the MR alpha masks it
+ * 512  surface1   vec4<f32>    16   xy = emissive UV offset (its scroll this frame)
+ * 528  surface2   vec4<f32>    16   rgb = rim colour × strength, w = rim power
  * ```
  *
- * 496 bytes used, padded to a 512-byte stride (the next 256-byte multiple a
- * dynamic uniform offset can address), so one buffer still holds every draw in a
- * frame. The metallic-roughness inputs and the environment carry the Modern
+ * 544 bytes used, padded to a 768-byte stride (a 256-byte multiple a dynamic
+ * uniform offset can address), so one buffer still holds every draw in a
+ * frame — uniforms are written per batch, not per copy, so the stride costs
+ * little. The metallic-roughness inputs and the environment carry the Modern
  * (AAA) tier's shading; a fantasy draw leaves `pbr.z` at 0 and the shader takes
  * the byte-identical Lambert path, `envSky.w` at 0 falls back to flat ambient,
  * `envMeta.w` at 0 uses the analytic gradient instead of a panorama, and
  * `shadow.x` at 0 skips the shadow test.
  */
-export const UNIFORM_STRIDE = 512;
+export const UNIFORM_STRIDE = 768;
 /**
  * Bytes the struct actually occupies, before the stride padding. This is what a
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 496;
+export const UNIFORM_BYTES_USED = 544;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -143,6 +157,9 @@ const OFFSET_MODEL = 96;
 const OFFSET_FOG = 112;
 const OFFSET_FOG_PARAMS = 116;
 const OFFSET_SHADOW2 = 120;
+const OFFSET_SURFACE0 = 124;
+const OFFSET_SURFACE1 = 128;
+const OFFSET_SURFACE2 = 132;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -258,6 +275,44 @@ export function viewDirection(view: Mat4): readonly [number, number, number] {
   return length < 1e-8 ? [0, 0, 1] : [x / length, y / length, z / length];
 }
 
+/**
+ * A draw's surface effects (HALO2_STYLE_ROADMAP.md H3; materialEffects.ts in
+ * @cartbox/editor), resolved for this frame exactly as the software
+ * rasteriser's `buildPbrFrag` does.
+ */
+export interface ResolvedSurface {
+  readonly detailScale: number;
+  /** 0 when no detail map is bound. */
+  readonly detailStrength: number;
+  readonly reflect: number;
+  readonly reflectMask: boolean;
+  readonly emisOffset: readonly [number, number];
+  /** Multiplies the emissive factor (the pulse). */
+  readonly emisGain: number;
+  /** Rim colour × strength (zeros for none) and power. */
+  readonly rim: readonly [number, number, number];
+  readonly rimPower: number;
+}
+
+/** No effects: what a material without any gets. */
+export const NO_SURFACE: ResolvedSurface = { detailScale: DEFAULT_DETAIL_SCALE, detailStrength: 0, reflect: 1, reflectMask: false, emisOffset: [0, 0], emisGain: 1, rim: [0, 0, 0], rimPower: 1 };
+
+/** Resolve a material's surface effects at `time` seconds, given which maps are bound. */
+export function resolveSurface(material: MeshMaterial, time: number, hasDetail: boolean, hasMr: boolean): ResolvedSurface {
+  const { offset, gain } = emissiveAnimation(material, time);
+  const rim = material.rim && material.rim.strength > 0 ? material.rim : null;
+  return {
+    detailScale: material.detailScale ?? DEFAULT_DETAIL_SCALE,
+    detailStrength: hasDetail ? (material.detailStrength ?? DEFAULT_DETAIL_STRENGTH) : 0,
+    reflect: material.reflectivity ?? 1,
+    reflectMask: material.reflectionMask === true && hasMr,
+    emisOffset: offset,
+    emisGain: gain,
+    rim: rim ? [rim.color[0] * rim.strength, rim.color[1] * rim.strength, rim.color[2] * rim.strength] : [0, 0, 0],
+    rimPower: rim?.power ?? 1,
+  };
+}
+
 export interface InstanceUniform {
   readonly mvp: Mat4;
   /** Column-major 3x3 from {@link normalBasis3x3}. */
@@ -298,6 +353,8 @@ export interface InstanceUniform {
   readonly model: Mat4 | null;
   /** Number of lights in the shared storage buffer, or 0 for the single key light. */
   readonly lightCount: number;
+  /** This draw's surface effects, or omitted for none. */
+  readonly surface?: ResolvedSurface;
   /** Distance fog for PBR draws, or null/omitted for none. */
   readonly fog?: {
     readonly color: readonly [number, number, number];
@@ -380,9 +437,10 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_PBR + 2] = uniform.pbr.isPbr ? 1 : 0;
   target[base + OFFSET_PBR + 3] = 0;
 
-  target[base + OFFSET_EMISSIVE] = uniform.pbr.emissive[0]!;
-  target[base + OFFSET_EMISSIVE + 1] = uniform.pbr.emissive[1]!;
-  target[base + OFFSET_EMISSIVE + 2] = uniform.pbr.emissive[2]!;
+  const surface = uniform.surface ?? NO_SURFACE;
+  target[base + OFFSET_EMISSIVE] = uniform.pbr.emissive[0]! * surface.emisGain;
+  target[base + OFFSET_EMISSIVE + 1] = uniform.pbr.emissive[1]! * surface.emisGain;
+  target[base + OFFSET_EMISSIVE + 2] = uniform.pbr.emissive[2]! * surface.emisGain;
   target[base + OFFSET_EMISSIVE + 3] = 0;
 
   target[base + OFFSET_TEXFLAGS] = uniform.hasTexture ? 1 : 0;
@@ -452,6 +510,19 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_SHADOW2 + 1] = shadow && shadow.pcf ? 1 : 0;
   target[base + OFFSET_SHADOW2 + 2] = 0;
   target[base + OFFSET_SHADOW2 + 3] = 0;
+
+  target[base + OFFSET_SURFACE0] = surface.detailScale;
+  target[base + OFFSET_SURFACE0 + 1] = surface.detailStrength;
+  target[base + OFFSET_SURFACE0 + 2] = surface.reflect;
+  target[base + OFFSET_SURFACE0 + 3] = surface.reflectMask ? 1 : 0;
+  target[base + OFFSET_SURFACE1] = surface.emisOffset[0];
+  target[base + OFFSET_SURFACE1 + 1] = surface.emisOffset[1];
+  target[base + OFFSET_SURFACE1 + 2] = 0;
+  target[base + OFFSET_SURFACE1 + 3] = 0;
+  target[base + OFFSET_SURFACE2] = surface.rim[0];
+  target[base + OFFSET_SURFACE2 + 1] = surface.rim[1];
+  target[base + OFFSET_SURFACE2 + 2] = surface.rim[2];
+  target[base + OFFSET_SURFACE2 + 3] = surface.rimPower;
 }
 
 /** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2) + light-map uv(2). */
