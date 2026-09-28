@@ -3238,6 +3238,9 @@ declare class WebglSceneRenderer implements SceneRenderer {
     private shadowUploaded;
     private envTexture;
     private envSource;
+    private probeTexture;
+    private probeSource;
+    private probeData;
     private ssaoTexture;
     private readonly readback;
     /** Readbacks in flight, oldest first. */
@@ -3260,6 +3263,7 @@ declare class WebglSceneRenderer implements SceneRenderer {
     private textureFor;
     private uploadShadow;
     private uploadEnv;
+    private uploadProbes;
     private uploadSsao;
     /** Upload (once) a mesh's primitives; a live skinned primitive re-uploads when its revision moves on. */
     private uploadMesh;
@@ -3407,6 +3411,11 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     /** The Modern-tier light storage buffer, grown as needed; always ≥ 1 light. */
     private lightBuffer;
     private lightBufferFloats;
+    /** The reflection-probe atlas (binding 12, the 1x1 blank when none) and its source. */
+    private probeTexture;
+    private probeSource;
+    /** The probe boxes (binding 13): room for every probe a scene may carry. */
+    private probeBuffer;
     /** Per-instance transforms (binding 10), grown as needed. */
     private instanceBuffer;
     private instanceCapacity;
@@ -3445,6 +3454,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * groups (binding 7 moved).
      */
     private ensureEnvTexture;
+    /** The same for the reflection-probe atlas (binding 12), plus the boxes (binding 13). */
+    private ensureProbes;
+    /** A one-off rgba8unorm upload of a decoded image. */
+    private uploadRgba;
     render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
     /** Encode and submit one frame, and start a readback if a buffer is free. */
     private submit;
@@ -3499,7 +3512,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  * 336  envMeta    vec4<f32>    16   xyz = env-map mean radiance, w = 1 when an env map is bound
  * 352  tonemap    vec4<f32>    16   x = 1 when tone-mapping, y = exposure
  * 368  ssao       vec4<f32>    16   x = 1 when an SSAO buffer is bound, y = light count,
- *                                    z = 1 when a baked light map is bound
+ *                                    z = 1 when a baked light map is bound,
+ *                                    w = reflection-probe count
  * 384  model      mat4x4<f32>  64   this draw's world matrix (point-light world pos)
  * 448  fog        vec4<f32>    16   rgb = fog colour, w = density
  * 464  fogParams  vec4<f32>    16   x = 1 when fogged, y = start distance, z = max amount
@@ -4819,7 +4833,7 @@ declare class MeshOverlaySurface implements DisplaySurface {
     /** The baked sky-dome panorama drawn behind a first-person view, or null. */
     private readonly skyMap;
     /** The environment the PBR shading samples (with the dome as its map), or null. */
-    private readonly environment;
+    private environment;
     private readonly options;
     private frame;
     private cartCamera;
@@ -5046,6 +5060,9 @@ declare class MeshOverlaySurface implements DisplaySurface {
      */
     private shadowFootprint;
     destroy(): void;
+    private destroyed;
+    /** Settles once the scene's reflection probes are baked and in use (tests await it). */
+    probesReady: Promise<void>;
 }
 
 /**

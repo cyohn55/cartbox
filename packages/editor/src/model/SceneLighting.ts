@@ -27,6 +27,7 @@ import {
   type ToneMap,
 } from "../render/meshRasterizer";
 import type { ProceduralSky, SceneFog, SkyMountainRange } from "../render/skyDome";
+import { parseReflectionProbes, type ReflectionProbe } from "./reflectionProbes";
 
 /** Serialized-format version, bumped on any schema change. */
 export const SCENE_LIGHTING_VERSION = 1;
@@ -60,6 +61,11 @@ export interface SceneLighting {
   readonly sky?: ProceduralSky | null;
   /** Optional distance fog over PBR geometry. Null = no fog. */
   readonly fog?: SceneFog | null;
+  /**
+   * Reflection probes (see reflectionProbes.ts): shiny surfaces inside a
+   * probe's box reflect the scene around it rather than the sky.
+   */
+  readonly probes?: readonly ReflectionProbe[];
 }
 
 const clamp01 = (n: number): number => Math.max(0, Math.min(1, n));
@@ -121,6 +127,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
   // Only present when authored, so a rig without a dome/fog round-trips unchanged.
   const sky = parseSky(record.sky);
   const fog = parseFog(record.fog);
+  const probes = parseReflectionProbes(record.probes);
 
   const lights = Array.isArray(record.lights)
     ? record.lights.map(parseLight).filter((l): l is SceneLight => l !== null)
@@ -140,6 +147,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     lights,
     ...(sky ? { sky } : {}),
     ...(fog ? { fog } : {}),
+    ...(probes.length > 0 ? { probes } : {}),
   };
 }
 
@@ -240,6 +248,12 @@ export function setSceneSky(lighting: SceneLighting, sky: ProceduralSky | null):
 /** Set or clear the distance fog. */
 export function setSceneFog(lighting: SceneLighting, fog: SceneFog | null): SceneLighting {
   return { ...lighting, fog };
+}
+
+/** Replace the reflection probes (an empty list removes them). */
+export function setSceneProbes(lighting: SceneLighting, probes: readonly ReflectionProbe[]): SceneLighting {
+  const { probes: _old, ...rest } = lighting;
+  return probes.length > 0 ? { ...rest, probes } : rest;
 }
 
 /** Patch the environment (skybox) gradient. */

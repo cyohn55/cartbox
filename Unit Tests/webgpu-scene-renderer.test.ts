@@ -422,9 +422,13 @@ describe("WebgpuSceneRenderer teardown", () => {
     // Colour, depth and the 1x1 blank all released.
     expect(log.textures.every((t: any) => t.destroyed)).toBe(true);
     // Every readback staging buffer released.
-    const staging = log.buffers.filter((b: any) => b.size === alignBytesPerRow(WIDTH) * HEIGHT);
+    const staging = log.buffers.filter((b: any) => b.size === alignBytesPerRow(WIDTH) * HEIGHT && b.usage & 0x01); // MAP_READ
     expect(staging.length).toBe(3);
     expect(staging.every((b: any) => b.destroyed)).toBe(true);
+    // And the reflection-probe boxes (8 probes × 16 floats, storage).
+    const probes = log.buffers.filter((b: any) => b.size === 8 * 16 * 4 && b.usage & 0x80);
+    expect(probes.length).toBe(1);
+    expect(probes[0].destroyed).toBe(true);
   });
 
   it("is idempotent and stops rendering afterwards", async () => {

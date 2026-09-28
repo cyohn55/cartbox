@@ -1800,6 +1800,18 @@ export const LOCKOUT_LIGHTING: SceneLighting = {
   // Cold haze that thickens across the arena, tinted to the horizon.
   // Kept light: the arena is only ~30 units across, so heavy fog just washes it out.
   fog: { color: [0.74, 0.8, 0.87], density: 0.015, start: 16, max: 0.4 },
+  // Reflection probes (HALO2_STYLE_ROADMAP.md H2): the Forerunner metal
+  // reflects the room it stands in — the pit under the walkway, the walkway
+  // itself, each tower — rather than open sky; the arena-wide probe catches
+  // the deck, which reflects the towers around it. Boxes follow the collider
+  // layout above; the smallest box wins where they overlap.
+  probes: [
+    { name: "bottom mid", position: [2.2, 1.6, 0], min: [-5, -0.2, -6.5], max: [5, 3.15, 6.5] },
+    { name: "walkway", position: [0, 5.3, 0], min: [-2, 3.15, -6.5], max: [8, 7.5, 6.5] },
+    { name: "sniper tower", position: [-6.7, 8.6, -8.6], min: [-13.2, 0, -11.2], max: [-4.4, 11, -3.6] },
+    { name: "BR tower", position: [9.6, 5.5, 6.8], min: [4.2, 0, 3.4], max: [11.4, 7.5, 10.2] },
+    { name: "arena", position: [4, 2.5, -8], min: [-16, -1, -13], max: [14, 14, 13] },
+  ],
 };
 
 /**

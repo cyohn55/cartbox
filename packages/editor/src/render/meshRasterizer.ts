@@ -22,6 +22,7 @@
  * rasteriser stay pure and testable. DOM-free.
  */
 
+import { boxProject, pickProbe, sampleProbe, type ReflectionProbeSet } from "./probeSampling";
 import { fogFactor, type SceneFog } from "./skyDome";
 import { LIGHTMAP_RANGE } from "../model/lightmap";
 import { type MeshAsset, computeSmoothNormals, meshBounds } from "../model/MeshAsset";
@@ -244,6 +245,12 @@ export interface EnvironmentLight {
   readonly map?: DecodedTexture | null;
   /** The map's mean radiance (0..1, pre-intensity); required with `map`. */
   readonly average?: readonly [number, number, number] | null;
+  /**
+   * Baked reflection probes (HALO2_STYLE_ROADMAP.md, H2): inside a probe's box,
+   * specular reflections come from its box-projected panorama instead of the
+   * sky. Diffuse light still comes from the environment.
+   */
+  readonly probes?: ReflectionProbeSet | null;
 }
 
 /**
@@ -1794,8 +1801,29 @@ function rasterizeTriangle(
           const rx = 2 * ndv * Nx - viewDir[0];
           const ry = 2 * ndv * Ny - viewDir[1];
           const rz = 2 * ndv * Nz - viewDir[2];
-          const [pr, pg, pb] = sampleEnvironmentDir(environment, rx, ry, rz);
-          const [avr, avg, avb] = environmentAverage(environment);
+          let [pr, pg, pb] = sampleEnvironmentDir(environment, rx, ry, rz);
+          let [avr, avg, avb] = environmentAverage(environment);
+          // Inside a reflection probe's box, the reflection is the room around
+          // it (box-projected from this point), fading to the sky at the box's faces.
+          const probes = environment.probes;
+          if (probes) {
+            const px = pw0 * a.wx + pw1 * b.wx + pw2 * c.wx;
+            const py = pw0 * a.wy + pw1 * b.wy + pw2 * c.wy;
+            const pz = pw0 * a.wz + pw1 * b.wz + pw2 * c.wz;
+            const hit = pickProbe(probes, px, py, pz);
+            if (hit) {
+              const box = probes.probes[hit.index]!;
+              const [dx, dy, dz] = boxProject(box, px, py, pz, rx, ry, rz);
+              const [qr, qg, qb] = sampleProbe(probes, hit.index, dx, dy, dz);
+              const k = hit.weight;
+              pr += (qr - pr) * k;
+              pg += (qg - pg) * k;
+              pb += (qb - pb) * k;
+              avr += (box.average[0] - avr) * k;
+              avg += (box.average[1] - avg) * k;
+              avb += (box.average[2] - avb) * k;
+            }
+          }
           const specR = pr + (avr - pr) * rough;
           const specG = pg + (avg - pg) * rough;
           const specB = pb + (avb - pb) * rough;

@@ -233,6 +233,8 @@ completeness.
 
 - [ ] Clustered lighting for many lights; cascaded shadow maps.
 - [ ] True HDR environments with prefiltered mips; reflection and light probes.
+      (Box-projected reflection probes are in — see [`HALO2_STYLE_ROADMAP.md`](HALO2_STYLE_ROADMAP.md)
+      H2; HDR environments, prefiltered mips and light probes are still to come.)
 - [x] Baked lightmaps: sky visibility and one sun bounce, traced in the editor into a
       second UV set it lays out itself and multiplied into the ambient light by every
       renderer. See [`HALO2_STYLE_ROADMAP.md`](HALO2_STYLE_ROADMAP.md) H1.

@@ -34,12 +34,16 @@
 import {
   DEFAULT_RASTER_STYLE,
   LIGHTMAP_RANGE,
+  MAX_REFLECTION_PROBES,
+  PROBE_FADE,
+  PROBE_RANGE,
   computeSmoothNormals,
   multiplyMat4,
   type DecodedTexture,
   type MeshAsset,
   type MeshSceneInstance,
   type RasterStyle,
+  type ReflectionProbeSet,
 } from "@cartbox/editor";
 
 import { batchInstances, presentFrame, type PrimitiveTextures } from "./gpuFrame.js";
@@ -56,6 +60,8 @@ import {
   interleaveVertices,
   normalBasis3x3,
   packLights,
+  packProbes,
+  PROBE_FLOATS,
   resolveLight,
   resolvePbr,
   viewDirection,
@@ -78,6 +84,7 @@ const UNIT_SHADOW = 4;
 const UNIT_ENV = 5;
 const UNIT_SSAO = 6;
 const UNIT_LM = 7;
+const UNIT_PROBES = 8;
 
 const BLOCK_UNIFORMS = 0;
 const BLOCK_INSTANCES = 1;
@@ -166,6 +173,11 @@ uniform highp sampler2D shadowMap;
 uniform sampler2D envMap;
 uniform highp sampler2D ssaoMap;
 uniform sampler2D lmTex;
+// Reflection probes (probeSampling.ts in @cartbox/editor): the panorama atlas
+// and, per probe, box min / box max / capture point / mean colour; u.ssaoMeta.w
+// counts them.
+uniform sampler2D probeAtlas;
+uniform vec4 probeData[${MAX_REFLECTION_PROBES * 4}];
 in vec3 vNormal;
 in vec2 vUv;
 in vec2 vUv2;
@@ -236,6 +248,16 @@ vec3 envColorDir(vec3 dir) {
   int ty = int(clamp(floor(vCoord * dims.y), 0.0, dims.y - 1.0));
   return texelFetch(envMap, ivec2(tx, ty), 0).rgb * u.envHorizon.w;
 }
+vec3 probeSample(int i, vec3 dir) {
+  vec3 d = normalize(dir);
+  float uCoord = atan(d.z, d.x) / (2.0 * 3.14159265) + 0.5;
+  float vCoord = acos(clamp(d.y, -1.0, 1.0)) / 3.14159265;
+  vec2 dims = vec2(textureSize(probeAtlas, 0));
+  float h = floor(dims.x * 0.5);
+  int tx = int(clamp(floor((uCoord - floor(uCoord)) * dims.x), 0.0, dims.x - 1.0));
+  int ty = int(clamp(floor(vCoord * h), 0.0, h - 1.0) + float(i) * h);
+  return texelFetch(probeAtlas, ivec2(tx, ty), 0).rgb * ${PROBE_RANGE.toFixed(4)};
+}
 vec3 envAverage() {
   if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
   return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
@@ -295,7 +317,27 @@ void main() {
     if (u.envSky.w > 0.5) {
       vec3 irr = envColorDir(N);
       vec3 R = 2.0 * ndv * N - V;
-      vec3 pref = mix(envColorDir(R), envAverage(), rough);
+      vec3 spec = envColorDir(R);
+      vec3 specAvg = envAverage();
+      // Inside a reflection probe's box, reflect the room around it, box-projected
+      // (mirrors the software path and the WGSL).
+      int pc = int(u.ssaoMeta.w + 0.5);
+      vec3 P = vWorldPos;
+      for (int i = 0; i < pc; i++) {
+        vec3 mn = probeData[i * 4].xyz;
+        vec3 mx = probeData[i * 4 + 1].xyz;
+        float inside = min(min(min(P.x - mn.x, mx.x - P.x), min(P.y - mn.y, mx.y - P.y)), min(P.z - mn.z, mx.z - P.z));
+        float wgt = clamp(inside / ${PROBE_FADE.toFixed(4)}, 0.0, 1.0);
+        if (wgt > 0.0) {
+          vec3 Rs = mix(R, vec3(1e-6), lessThan(abs(R), vec3(1e-6)));
+          vec3 tf = max((mx - P) / Rs, (mn - P) / Rs);
+          float t = max(0.0, min(min(tf.x, tf.y), tf.z));
+          spec = mix(spec, probeSample(i, P + R * t - probeData[i * 4 + 2].xyz), wgt);
+          specAvg = mix(specAvg, probeData[i * 4 + 3].xyz, wgt);
+          break;
+        }
+      }
+      vec3 pref = mix(spec, specAvg, rough);
       amb = (irr * albedo * kdm + pref * f0) * ao;
     } else {
       amb = vec3(u.light.w) * albedo * ao;
@@ -431,6 +473,9 @@ export class WebglSceneRenderer implements SceneRenderer {
   private shadowUploaded: Float32Array | null = null;
   private envTexture: any = null;
   private envSource: DecodedTexture | null = null;
+  private probeTexture: any = null;
+  private probeSource: DecodedTexture | null = null;
+  private probeData = new Float32Array(MAX_REFLECTION_PROBES * PROBE_FLOATS);
   private ssaoTexture: any = null;
 
   private readonly readback: ReadbackSlot[];
@@ -504,6 +549,7 @@ export class WebglSceneRenderer implements SceneRenderer {
         ["envMap", UNIT_ENV],
         ["ssaoMap", UNIT_SSAO],
         ["lmTex", UNIT_LM],
+        ["probeAtlas", UNIT_PROBES],
       ];
       for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
 
@@ -602,6 +648,7 @@ export class WebglSceneRenderer implements SceneRenderer {
       ? { size: shadow.size, bias: shadow.bias ?? 0.003, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false }
       : null;
     this.uploadEnv(draw.environment?.map ?? null);
+    this.uploadProbes(draw.environment?.probes ?? null);
     const ssao = draw.ssao ?? null;
     this.uploadSsao(ssao);
     const sceneLights = (draw.lights ?? []).slice(0, WEBGL_MAX_LIGHTS);
@@ -667,6 +714,8 @@ export class WebglSceneRenderer implements SceneRenderer {
     gl.bindBufferBase(gl.UNIFORM_BUFFER, BLOCK_LIGHTS, this.lightBuffer);
     this.bindTexture(UNIT_SHADOW, this.shadowTexture ?? this.blankFloat);
     this.bindTexture(UNIT_ENV, this.envTexture ?? this.blankTexture);
+    this.bindTexture(UNIT_PROBES, this.probeTexture ?? this.blankTexture);
+    gl.uniform4fv(gl.getUniformLocation(this.program, "probeData"), this.probeData);
     this.bindTexture(UNIT_SSAO, ssao ? this.ssaoTexture : this.blankFloat);
     for (let unit = UNIT_BASE; unit <= UNIT_EMIS; unit += 1) gl.bindSampler(unit, this.sampler);
     gl.bindSampler(UNIT_LM, this.sampler);
@@ -777,6 +826,16 @@ export class WebglSceneRenderer implements SceneRenderer {
     this.envSource = map;
   }
 
+  private uploadProbes(set: ReflectionProbeSet | null): void {
+    const atlas = set?.atlas ?? null;
+    if (atlas === this.probeSource) return;
+    if (this.probeTexture) this.gl.deleteTexture(this.probeTexture);
+    this.probeTexture = atlas ? createTexture(this.gl, atlas.width, atlas.height, this.gl.RGBA8, this.gl.RGBA, this.gl.UNSIGNED_BYTE, toBytes(atlas.data)) : null;
+    this.probeSource = atlas;
+    this.probeData.fill(0);
+    this.probeData.set(packProbes(set).subarray(0, this.probeData.length));
+  }
+
   private uploadSsao(ao: Float32Array | null): void {
     if (!ao) return;
     const gl = this.gl;
@@ -846,7 +905,7 @@ export class WebglSceneRenderer implements SceneRenderer {
       gl.deleteBuffer(this.uniformBuffer);
       gl.deleteBuffer(this.instanceBuffer);
       gl.deleteBuffer(this.lightBuffer);
-      for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.ssaoTexture]) if (t) gl.deleteTexture(t);
+      for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.probeTexture, this.ssaoTexture]) if (t) gl.deleteTexture(t);
       gl.deleteFramebuffer(this.framebuffer);
       this.timer?.destroy();
       for (const rb of this.attachments) gl.deleteRenderbuffer(rb);
