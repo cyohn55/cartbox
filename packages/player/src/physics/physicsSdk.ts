@@ -85,6 +85,17 @@ import {
   PHYS_HDR_LEVEL_LOADING,
   PHYS_HDR_LEVEL_PROGRESS,
   PHYS_OP_LEVEL,
+  PHYS_OP_AGENT,
+  PHYS_OP_AGENT_GOTO,
+  PHYS_OP_AGENT_STOP,
+  PHYS_OP_AGENT_REMOVE,
+  PHYS_AGENTS,
+  PHYS_AGENT_BYTES,
+  PHYS_MAX_AGENTS,
+  NAV_FLAG_MOVING,
+  NAV_FLAG_AIR,
+  NAV_FLAG_ARRIVED,
+  NAV_FLAG_NO_PATH,
   PHYS_MAGIC,
   PHYS_MAX_CMDS,
   PHYS_MAX_RAYS,
@@ -137,7 +148,8 @@ export function sceneNeedsRuntime(scene: MeshScene | null | undefined, { physics
         (scene.pools?.length ?? 0) > 0 ||
         animatedObjects(scene).length > 0 ||
         (scene.timelines?.length ?? 0) > 0 ||
-        (scene.levels?.length ?? 0) > 0),
+        (scene.levels?.length ?? 0) > 0 ||
+        Boolean(scene.navmesh)),
   );
 }
 
@@ -195,7 +207,7 @@ export function runtimeSdkLua(
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}end`;
 }
 
 /** The physics calls (inside the runtime block's do … end, after its helpers). */
@@ -332,6 +344,65 @@ function SPAWN_CALLS(pools: readonly string[]): string {
   cartbox.alive = function(o)
     local i = _obj(o)
     return i ~= nil and _alive[i] == true
+  end
+`;
+}
+
+/**
+ * The navigation calls (agents the host walks over the baked surface; a key
+ * is any number 0..1023, or an object's name or index):
+ *
+ *   cartbox.agent(key, x, y, z, speed, radius)  place an agent (creating it), speed in units/s
+ *   cartbox.moveto(key, x, y, z, speed)         send it toward a point (it finds its own way)
+ *   cartbox.stopagent(key)                      stop it where it is
+ *   cartbox.removeagent(key)                    take it away
+ *   cartbox.obstacle(key, x, y, z, radius)      something the cart moves itself (the player):
+ *                                               agents keep clear of it; call it every tick
+ *   cartbox.agentpos(key) -> x, y, z, facing, moving, air, arrived, nopath  (as of the last tick)
+ *   cartbox.navigable()   -> true (the scene has a walkable surface)
+ */
+function NAV_CALLS(): string {
+  return `  local function _akey(k)
+    if type(k) == "number" then return math.floor(k) end
+    return _obj(k)
+  end
+  cartbox.navigable = function() return true end
+  cartbox.agent = function(k, x, y, z, speed, radius)
+    local key = _akey(k)
+    if key ~= nil then _cmd(${PHYS_OP_AGENT}, key, x or 0, y or 0, z or 0, speed or 0, radius or 0, 0) end
+  end
+  cartbox.obstacle = function(k, x, y, z, radius)
+    local key = _akey(k)
+    if key ~= nil then _cmd(${PHYS_OP_AGENT}, key, x or 0, y or 0, z or 0, 0, radius or 0.4, 1) end
+  end
+  cartbox.moveto = function(k, x, y, z, speed)
+    local key = _akey(k)
+    if key ~= nil then _cmd(${PHYS_OP_AGENT_GOTO}, key, x or 0, y or 0, z or 0, speed or 0) end
+  end
+  cartbox.stopagent = function(k)
+    local key = _akey(k)
+    if key ~= nil then _cmd(${PHYS_OP_AGENT_STOP}, key) end
+  end
+  cartbox.removeagent = function(k)
+    local key = _akey(k)
+    if key ~= nil then _cmd(${PHYS_OP_AGENT_REMOVE}, key) end
+  end
+  cartbox.agentpos = function(k)
+    local key = _akey(k)
+    if key == nil or not _live() then return nil end
+    local n = _rd(_B + ${PHYS_AGENTS})
+    for i = 0, math.min(n, ${PHYS_MAX_AGENTS}) - 1 do
+      local at = _B + ${PHYS_AGENTS + 4} + i * ${PHYS_AGENT_BYTES}
+      local w = _rd(at + 12) & 0xffffffff
+      if (w & 1023) == key then
+        local fl = (w >> 10) & 63
+        local fa = (w >> 16) & 0xffff
+        if fa >= 32768 then fa = fa - 65536 end
+        return _rd(at) / ${PHYS_FIX}, _rd(at + 4) / ${PHYS_FIX}, _rd(at + 8) / ${PHYS_FIX}, fa / 10000,
+          (fl & ${NAV_FLAG_MOVING}) ~= 0, (fl & ${NAV_FLAG_AIR}) ~= 0, (fl & ${NAV_FLAG_ARRIVED}) ~= 0, (fl & ${NAV_FLAG_NO_PATH}) ~= 0
+      end
+    end
+    return nil
   end
 `;
 }

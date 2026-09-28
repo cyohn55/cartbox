@@ -21,6 +21,7 @@ import {
 } from "@cartbox/editor";
 
 import { AnimationSession, sceneHasAnimation } from "../anim/animationSession.js";
+import { AgentCrowd } from "../nav/agentCrowd.js";
 import { TimelineSession } from "../anim/timelineSession.js";
 import type { MailboxMeshCamera } from "../mailbox.js";
 import type { MeshScene } from "../mesh/meshScene.js";
@@ -40,7 +41,13 @@ import {
   PHYS_OP_TIMELINE,
   PHYS_OP_LEVEL,
   PHYS_OP_WATCH,
+  PHYS_OP_AGENT,
+  PHYS_OP_AGENT_GOTO,
+  PHYS_OP_AGENT_STOP,
+  PHYS_OP_AGENT_REMOVE,
+  PHYS_MAX_AGENTS,
   takePhysicsCommands,
+  writeAgents,
   writeAnimationState,
   writeJointPositions,
   writePhysicsState,
@@ -78,6 +85,8 @@ export class RuntimeChannel {
   readonly animation: AnimationSession | null;
   /** The timeline player, when the scene has timelines. */
   readonly timeline: TimelineSession | null;
+  /** Navigation agents, when the scene has a baked walkable surface. */
+  readonly crowd: AgentCrowd | null;
   /** Standing IK / look-at requests: object → joint → request (IK before look-at). */
   private readonly requests = new Map<number, Map<number, PoseRequest>>();
   /** A pole for the next IK request on (object, joint). */
@@ -94,6 +103,7 @@ export class RuntimeChannel {
   ) {
     this.animation = sceneHasAnimation(scene) ? new AnimationSession(scene) : null;
     this.timeline = (scene.timelines?.length ?? 0) > 0 ? new TimelineSession(scene) : null;
+    this.crowd = scene.navmesh ? new AgentCrowd(scene.navmesh) : null;
     if ((scene.levels?.length ?? 0) > 0) this.level.current = 0;
     scene.instances.forEach((inst, i) => {
       if (!inst.pooled) return;
@@ -111,6 +121,7 @@ export class RuntimeChannel {
     writeAnimationState(block, this.animation?.state() ?? [], this.animation?.events() ?? []);
     writeTimelineState(block, this.timeline?.state() ?? { index: -1, time: 0, playing: false }, this.timeline?.events() ?? []);
     writeLevelState(block, this.level);
+    writeAgents(block, this.crowd?.state() ?? []);
     writeJointPositions(
       block,
       [...this.watched.values()].flatMap((w) => (w.position ? [{ object: w.object, joint: w.joint, position: w.position }] : [])),
@@ -135,7 +146,8 @@ export class RuntimeChannel {
       else if (cmd.op === PHYS_OP_LEVEL) {
         const n = this.scene.levels?.length ?? 0;
         if (cmd.a >= 0 && cmd.a < n && cmd.a !== this.level.current && cmd.a !== this.level.loading) this.levelRequest = cmd.a;
-      } else if (cmd.op === PHYS_OP_TIMELINE) {
+      } else if (cmd.op >= PHYS_OP_AGENT && cmd.op <= PHYS_OP_AGENT_REMOVE) this.agentCommand(cmd.op, cmd.a, cmd.v);
+      else if (cmd.op === PHYS_OP_TIMELINE) {
         if (cmd.a < 0) this.timeline?.stop();
         else this.timeline?.play(cmd.a, cmd.v[0], cmd.v[1]);
       }
@@ -144,6 +156,20 @@ export class RuntimeChannel {
     for (const { object, cue } of this.timeline?.step(PHYSICS_DT) ?? []) this.cue(object, cue.clip, cue.fade, cue.loop);
     this.physics?.run(commands.filter((c) => c.op < PHYS_OP_SPAWN || (c.op > PHYS_OP_DESPAWN && c.op < PHYS_OP_PLAY)));
     this.animation?.step(PHYSICS_DT);
+    this.crowd?.step(PHYSICS_DT);
+  }
+
+  /** A navigation agent command (see PHYS_OP_AGENT). */
+  private agentCommand(op: number, key: number, v: readonly number[]): void {
+    const crowd = this.crowd;
+    if (!crowd || key < 0 || key > 1023) return;
+    const at: [number, number, number] = [v[0]!, v[1]!, v[2]!];
+    if (op === PHYS_OP_AGENT) {
+      if (crowd.state().length >= PHYS_MAX_AGENTS && !crowd.state().some((a) => a.key === key)) return;
+      crowd.place(key, at, v[3]! > 0 ? v[3]! : 3, v[4]! > 0 ? v[4]! : crowd.graph.mesh.agent.radius, v[5]! >= 0.5);
+    } else if (op === PHYS_OP_AGENT_GOTO) crowd.goto(key, at, v[3]!);
+    else if (op === PHYS_OP_AGENT_STOP) crowd.stop(key);
+    else crowd.remove(key);
   }
 
   /** A level switch the cart asked for since the last call (-1 for none); the player loads and activates it. */

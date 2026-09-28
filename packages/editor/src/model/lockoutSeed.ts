@@ -32,6 +32,7 @@ import type { AnimationClip, ClipChannel, SkinJoint } from "./skeleton";
 import type { SceneLighting } from "./SceneLighting";
 import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, type Streams } from "./seedGeometry";
 import { packMeshLibrary } from "./meshLibrary";
+import { bakeNavMesh, boxTriangles, serializeNavMesh, type NavMesh } from "./navmesh";
 import { SWEETIE_16 } from "./palette";
 
 /** An axis-aligned box: centre (cx,cy,cz) and half-extents (hx,hy,hz). */
@@ -489,10 +490,10 @@ const FLIGHTS: Flight[] = [
   flight("z", -5.7, 1.1, -3.8, 1, 2.0, 0), // floor -> the sniper tower's landing
   flight("x", -5.0, 1.2, -11.1, 1, 4.5, 2.0), // landing -> mid tier (climbs west)
   flight("x", -9.8, 1.2, -8.8, -1, 7.0, 4.5), // mid tier -> sniper deck (climbs east)
-  flight("z", 6.0, 1.4, 6.6, -1, 1.8, 0), // floor -> the BR lower deck (under the spur)
+  flight("x", 8.3, 0.9, 4.4, -1, 1.8, 0), // floor -> the BR lower deck (climbs east onto its open west side, clear of the spur's underside)
   flight("x", 8.95, 1.05, 8.0, -1, 4.0, 1.8), // lower deck -> BR top (climbs east)
-  flight("z", 0, 1.4, -7.0, -1, 3.65, 0), // walkway ends drop to the floor
-  flight("z", 0, 1.4, 7.0, 1, 3.65, 0),
+  flight("z", 0, 1.4, -6.5, -1, 3.65, 0), // walkway ends: ramps down to the floor, meeting the walkway without a gap
+  flight("z", 0, 1.4, 6.5, 1, 3.65, 0),
   flight("x", 6, 2.0, -6.4, 1, 2.2, 0), // floor -> shotgun room (climbs west into its open east side)
 ];
 const flightSteps = (f: Flight): Box[] => steps(f.axis, f.fixed, f.halfFixed, f.start, f.sign, f.topFrom, f.topTo);
@@ -508,6 +509,19 @@ const STRUCT: Box[] = [
   ...RAILS,
   ...FLIGHTS.flatMap(flightSteps),
 ];
+
+/**
+ * The bots' walkable surface, baked from the same collider boxes the cart
+ * collides with (see navmesh.ts): a soldier's radius from every wall and edge,
+ * up every flight of steps, with drops off the ledges. The bots find their own
+ * routes over it instead of walking a hand-placed waypoint graph.
+ */
+export const LOCKOUT_NAV_AGENT = { radius: 0.45, height: 1.7, climb: 0.6, maxSlope: 45, maxDrop: 5 } as const;
+let navMesh: NavMesh | null = null;
+export function lockoutNavMesh(): NavMesh {
+  navMesh ??= bakeNavMesh(boxTriangles(STRUCT), { cell: 0.25, agent: LOCKOUT_NAV_AGENT });
+  return navMesh;
+}
 
 /** Emissive cyan trim (non-solid): thin Forerunner light strips + tower vents. */
 const TRIM: Box[] = [
@@ -540,7 +554,7 @@ const MARKER_WEAPONS = ["sniper", "br", "shotgun", "sword", "smg"] as const;
 const SPAWNS: ReadonlyArray<readonly [number, number, number]> = [
   [-4, 0, -9.5], // floor beside the sniper tower
   [-6.2, 7.0, -9.4], // sniper deck
-  [2.3, 0, 8.3], // floor beside the BR structure
+  [2.6, 0, 11.2], // floor beside the BR structure (south of its ramp)
   [9.9, 4.0, 8.4], // BR top
   [0, 3.65, 0], // central walkway
   [0, 0.7, 0], // sword pit
@@ -550,16 +564,13 @@ const SPAWNS: ReadonlyArray<readonly [number, number, number]> = [
 
 const BOT_COUNT = 7;
 
-// --- Bot navigation graph ---------------------------------------------------
-// Bots walk a hand-authored waypoint graph rather than colliding their way
-// across the map: every node stands on a real walkable surface (floor, ramp
-// centreline, tower ledge, walkway), every two-way link is walkable in a
-// straight line, and one-way links are drops off a ledge. The cart finds routes
-// over it (all-pairs next hop, precomputed at load) so bots climb the ramps to
-// the sniper deck, the BR tower and the walkway instead of snapping to the
-// nearest low platform. A test checks every node against the colliders.
+// --- Bot destinations ---------------------------------------------------------
+// The bots find their own routes over the arena's baked navmesh (see
+// lockoutNavMesh); these are only the places worth going: spots all over the
+// floor, the ramps, the tower decks, the walkway and the pit (a test checks each
+// stands on the walkable surface and can be reached from every spawn).
 
-/** Waypoints: [x, y (feet height), z]. */
+/** Places bots roam between: [x, y (feet height), z]. */
 const NAV_NODES: ReadonlyArray<readonly [number, number, number]> = [
   // 0-12: the floor ring
   [-14, 0, -11.8], [-14, 0, -4], [-14, 0, 2.5], [-14, 0, 11], [-8.5, 0, 11.2], [-3, 0, 11.5], [2.8, 0, 11.8],
@@ -584,46 +595,8 @@ const NAV_NODES: ReadonlyArray<readonly [number, number, number]> = [
   [0, 0.7, 0],
 ];
 
-/** Two-way walkable links (node index pairs). */
-const NAV_LINKS: ReadonlyArray<readonly [number, number]> = [
-  // floor ring + inner floor
-  [0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 26], [26, 6], [7, 8], [8, 9], [9, 10], [10, 11],
-  [11, 12], [12, 20], [11, 22], [12, 22], [2, 15], [2, 21], [15, 13], [13, 21], [13, 55], [55, 20],
-  [14, 16], [14, 19], [14, 18], [16, 8], [16, 9], [18, 11], [18, 9], [19, 6], [19, 17], [17, 5],
-  [54, 16], [54, 9], [54, 14],
-  // walkway
-  [22, 23], [23, 52], [52, 24], [24, 53], [53, 25], [25, 26], [52, 27], [53, 28],
-  // pit
-  [13, 29], [14, 30], [29, 30], [29, 56], [56, 30],
-  // sniper tower
-  [15, 31], [13, 31], [31, 32], [32, 33], [33, 34], [34, 35], [35, 36], [36, 37], [37, 38], [38, 39], [39, 42],
-  [42, 40], [39, 41], [41, 42],
-  // BR tower
-  [16, 43], [43, 44], [44, 45], [45, 46], [46, 47], [47, 48], [48, 49], [49, 28],
-  // shotgun room
-  [17, 50], [50, 51],
-];
-
-/**
- * Jumps (two-way: up is a jump, back down a hop): gaps a player clears with a
- * jump, which the bots take on an arc. [lower, upper].
- */
-const NAV_JUMPS: ReadonlyArray<readonly [number, number]> = [
-  // None: every level is on foot since the towers' ramps were rebuilt. Kept so
-  // a future map can mark a gap bots should jump.
-];
-
-/** Power positions bots like to hold: the sniper deck, the BR top, the walkway centre, the shotgun room. */
+/** Power positions bots like to hold (indices into NAV_NODES): the sniper deck, the BR top, the walkway centre, the shotgun room. */
 const NAV_POWER: readonly number[] = [42, 41, 49, 48, 24, 51];
-
-/** One-way drops off a ledge: [from, to]. */
-const NAV_DROPS: ReadonlyArray<readonly [number, number]> = [
-  [27, 54], // off the end of the north spur
-  [24, 30], // off the walkway into the pit
-  [36, 1], // off the sniper tower's mid tier
-  [49, 8], // off the BR tower
-  [51, 2], // out of the shotgun room
-];
 
 
 // --- Mesh assembly --------------------------------------------------------
@@ -1687,7 +1660,13 @@ export function lockoutMeshSidecar(): string {
       meshes.push({ id: `viewmodel-${id}`, name: `viewmodel ${id}`, mesh: serializeMeshAsset(viewmodelMesh(id)), transform: rest });
     }
     const packed = packMeshLibrary(meshes);
-    meshSidecar = JSON.stringify({ version: 2, meshes: packed.entries, library: packed.library, lighting: LOCKOUT_LIGHTING });
+    meshSidecar = JSON.stringify({
+      version: 2,
+      meshes: packed.entries,
+      library: packed.library,
+      lighting: LOCKOUT_LIGHTING,
+      navmesh: serializeNavMesh(lockoutNavMesh()),
+    });
   }
   return meshSidecar;
 }
@@ -1711,12 +1690,9 @@ function spawnsLua(): string {
   return SPAWNS.flat().map((n) => n.toFixed(2)).join(",");
 }
 function navLua(): string {
-  const nodes = NAV_NODES.flat().map((n) => n.toFixed(2)).join(",");
-  const links = NAV_LINKS.flat().map((n) => n + 1).join(","); // Lua is 1-based
-  const drops = NAV_DROPS.flat().map((n) => n + 1).join(",");
-  const jumps = NAV_JUMPS.flat().map((n) => n + 1).join(",");
-  const power = NAV_POWER.map((n) => n + 1).join(",");
-  return `local NAVN = {${nodes}}\nlocal NAVL = {${links}}\nlocal NAVD = {${drops}}\nlocal NAVJ = {${jumps}}\nlocal POWER = {${power}}`;
+  const roam = NAV_NODES.flat().map((n) => n.toFixed(2)).join(",");
+  const power = NAV_POWER.flatMap((i) => NAV_NODES[i]!).map((n) => n.toFixed(2)).join(",");
+  return `local ROAM = {${roam}}\nlocal POWER = {${power}}`;
 }
 function markersLua(): string {
   return MARKERS.map(([cx, cy, cz]) => `${cx.toFixed(2)},${cy.toFixed(2)},${cz.toFixed(2)}`).join(",");
@@ -1983,6 +1959,7 @@ local function net_roles()
     local human = (HUMANS >> o.ns) & 1 == 1
     local remote = NETMODE ~= 0 and (human or NETMODE == 1)
     if o.remote and not remote then respawn(o); nav_place(o) end   -- the host takes over an empty slot
+    if remote and not o.remote then nav_drop(o) end                  -- another browser drives it now
     o.remote, o.human = remote, human
     o.tag = human and ("Player "..(o.ns+1)) or ("Bot "..o.ns)
   end
@@ -2242,114 +2219,79 @@ local function try_pickups()
 end
 
 -- ---------------------------------------------------------------------------
--- Bot navigation. Bots walk the waypoint graph (NAVN nodes; NAVL two-way
--- walks, NAVD one-way drops, NAVJ jumps) rather than sliding in a straight line
--- through walls: an all-pairs next-hop table is built once at load, and each
--- bot moves along one edge at a time -- up the ramps to the sniper deck, onto
--- the walkway, over the BR rail -- arcing on jumps and falling on drops.
-local NN = #NAVN // 3
-local nav_kind, nav_next = {}, {}
-local function nav_pos(i) return NAVN[i*3-2], NAVN[i*3-1], NAVN[i*3] end
-local function nav_len(a, b)
-  local ax,ay,az = nav_pos(a); local bx,by,bz = nav_pos(b)
-  return math.sqrt((ax-bx)^2 + (ay-by)^2 + (az-bz)^2)
-end
-local function nav_build()
-  local INF = 1e9
-  local d = {}
-  for i=1,NN do d[i]={}; nav_next[i]={}; nav_kind[i]={}; for j=1,NN do d[i][j] = (i==j) and 0 or INF end end
-  local function link(a,b,k)
-    nav_kind[a][b] = k
-    local w = nav_len(a,b) * (k==2 and 1.5 or 1)   -- jumps cost a little more
-    if w < d[a][b] then d[a][b]=w; nav_next[a][b]=b end
-  end
-  for i=1,#NAVL,2 do link(NAVL[i],NAVL[i+1],0); link(NAVL[i+1],NAVL[i],0) end
-  for i=1,#NAVD,2 do link(NAVD[i],NAVD[i+1],1) end
-  for i=1,#NAVJ,2 do link(NAVJ[i],NAVJ[i+1],2); link(NAVJ[i+1],NAVJ[i],2) end
-  for k=1,NN do local dk=d[k]
-    for i=1,NN do local di=d[i]; local dik=di[k]
-      if dik<INF then local ni=nav_next[i]; local nik=ni[k]
-        for j=1,NN do local v=dik+dk[j]; if v<di[j] then di[j]=v; ni[j]=nik end end
-      end
-    end
-  end
-end
-nav_build()
+-- Bot navigation. The arena's walkable surface is baked from its colliders
+-- (the scene's navmesh), and the host walks every bot over it as an agent: each
+-- finds its own route (up the ramps, off the ledges), keeps clear of the other
+-- bots and of the players, and reports where it got to each tick. The cart only
+-- says where each bot should go.
+local BOT_R, BOT_RUN, BOT_FIGHT = 0.45, 4.5, 2.6
+local NROAM, NPOWER = #ROAM // 3, #POWER // 3
+local function roam_pos(i) return ROAM[i*3-2], ROAM[i*3-1], ROAM[i*3] end
+local function power_pos(i) return POWER[i*3-2], POWER[i*3-1], POWER[i*3] end
 
--- The node nearest a point (height counts triple: a bot under the walkway is
--- not "at" the walkway).
-local function nav_nearest(x, y, z)
-  local best, bd = 1, 1e9
-  for i=1,NN do local nx,ny,nz = nav_pos(i)
-    local dd = (nx-x)^2 + ((ny-y)*3)^2 + (nz-z)^2
-    if dd < bd then best, bd = i, dd end
-  end
-  return best
-end
-
--- Stand a (re)spawned bot on the waypoint nearest its spawn.
+-- (Re)place a bot's agent where it stands (at a spawn, after a respawn).
 function nav_place(o)
-  o.na = nav_nearest(o.x, o.y, o.z)
-  o.x, o.y, o.z = nav_pos(o.na)
-  o.nb, o.nt, o.goal, o.offgraph = nil, 0, o.na, false
+  o.gx, o.gy, o.gz, o.arrived, o.goal_t = nil, nil, nil, true, 0
+  cartbox.agent(o.id, o.x, o.y, o.z, BOT_RUN, BOT_R)
+  o.agent = true
 end
 
-local function nav_goto(o, g)
-  o.goal = g
-  if not o.nb and g ~= o.na then o.nb = nav_next[o.na][g] end
+-- Take a bot's agent away (dead, or another browser drives it now).
+function nav_drop(o)
+  if o.agent then cartbox.removeagent(o.id); o.agent = false end
 end
 
--- Advance a bot along its current edge; true while it is moving.
-local function nav_step(o, speed)
-  if o.offgraph then
-    -- Walked off the graph (to a loose ball): head back to the waypoint first.
-    local nx,ny,nz = nav_pos(o.na)
-    local dx,dz = nx-o.x, nz-o.z
-    local m = math.sqrt(dx*dx+dz*dz)
-    if m <= speed then o.x,o.y,o.z = nx,ny,nz; o.offgraph = false
-    else o.x, o.z = o.x+dx/m*speed, o.z+dz/m*speed; o.mface = math.atan(dx,dz) end
-    return true
+-- Send a bot somewhere (repeats of the same goal aren't sent again).
+local function nav_goto(o, x, y, z, speed)
+  if not x then return end
+  speed = speed or BOT_RUN
+  if o.gx and math.abs(o.gx-x) + math.abs(o.gz-z) + math.abs(o.gy-y) < 0.6 and o.gspeed == speed then return end
+  o.gx, o.gy, o.gz, o.gspeed, o.arrived = x, y, z, speed, false
+  cartbox.moveto(o.id, x, y, z, speed)
+end
+
+-- Read back where the host walked a bot; true while it is moving.
+local function nav_follow(o)
+  local x, y, z, face, moving, air, arrived, nopath = cartbox.agentpos(o.id)
+  if not x then return false end
+  o.x, o.y, o.z, o.air = x, y, z, air
+  if moving then o.mface = face end
+  o.arrived = arrived or nopath
+  return moving
+end
+
+-- The players the bots (and each other) must keep out of: this browser's
+-- player and, online, the other humans' stand-ins. Obstacles the host's agents
+-- steer around and push away from.
+local function nav_obstacles()
+  if NETMODE == 1 then return end
+  if p.dead then cartbox.removeagent(100) else cartbox.obstacle(100, p.x, p.y, p.z, PR*0.8) end
+  for i,o in ipairs(bots) do
+    if o.remote and not o.dead then cartbox.obstacle(200+i, o.x, o.y, o.z, BOT_R)
+    else cartbox.removeagent(200+i) end
   end
-  if not o.nb then return false end
-  local ax,ay,az = nav_pos(o.na); local bx,by,bz = nav_pos(o.nb)
-  local kind = nav_kind[o.na][o.nb] or 0
-  o.nt = o.nt + speed / math.max(0.1, nav_len(o.na, o.nb))
-  if o.nt >= 1 then
-    o.na, o.nt = o.nb, 0
-    o.x, o.y, o.z = bx, by, bz
-    o.nb = (o.na ~= o.goal) and nav_next[o.na][o.goal] or nil
-    return true
-  end
-  local t = o.nt
-  o.air = kind ~= 0 and t > 0.08 and t < 0.92
-  o.x, o.z = ax+(bx-ax)*t, az+(bz-az)*t
-  if kind==2 then o.y = ay+(by-ay)*t + math.sin(t*math.pi)*1.1      -- jump arc
-  elseif kind==1 then o.y = ay+(by-ay)*t*t                          -- fall off the ledge
-  else o.y = ay+(by-ay)*t end                                        -- walk (ramps included)
-  o.mface = math.atan(bx-ax, bz-az)
-  return true
 end
 
--- Where a bot wants to be, as a waypoint, by game type.
+-- Where a bot wants to be, by game type (a point; the agent finds the way).
 local function bot_goal(o)
   if MODE.obj=="ball" then
-    if ball.carrier==o then return POWER[math.random(1,#POWER)] end      -- run it somewhere high
-    if ball.live then return nav_nearest(ball.x, ball.y, ball.z) end
-    local c = ball.carrier; if c then return nav_nearest(c.x, c.y, c.z) end
-  elseif MODE.obj=="hill" then return nav_nearest(hill.x, hill.y, hill.z)
+    if ball.carrier==o then return power_pos(math.random(1,NPOWER)) end    -- run it somewhere high
+    if ball.live then return ball.x, ball.y-0.4, ball.z end
+    local c = ball.carrier; if c then return c.x, c.y, c.z end
+  elseif MODE.obj=="hill" then return hill.x + math.random()*2-1, hill.y, hill.z + math.random()*2-1
   elseif MODE.obj=="jugg" then
-    if o.jugg then return POWER[1] end                                   -- the juggernaut holds the deck
+    if o.jugg then return power_pos(1) end                                  -- the juggernaut holds the deck
     local j = p.jugg and p or nil
     for _,b in ipairs(bots) do if b.jugg then j=b end end
-    if j then return nav_nearest(j.x, j.y, j.z) end
+    if j then return j.x, j.y, j.z end
   end
   local r = math.random()
   if r < 0.45 then                                                                      -- hunt someone
     local prey = (math.random() < 0.5) and p or bots[math.random(1, #bots)]
-    if prey and prey ~= o and not prey.dead and enemy_of(o, prey) then return nav_nearest(prey.x, prey.y, prey.z) end
+    if prey and prey ~= o and not prey.dead and enemy_of(o, prey) then return prey.x, prey.y, prey.z end
   end
-  if r < 0.75 then return POWER[math.random(1,#POWER)] end                             -- take a power position
-  return math.random(1, NN)                                                             -- roam
+  if r < 0.75 then return power_pos(math.random(1,NPOWER)) end                          -- take a power position
+  return roam_pos(math.random(1, NROAM))                                                -- roam
 end
 
 -- Every player a bot could be fighting: the local player and all the others.
@@ -2358,10 +2300,6 @@ function all_players()
   for _,o in ipairs(bots) do list[#list+1] = o end
   return list
 end
-
--- Weapon markers as waypoints, so bots can go and pick them up.
-local MRK_NODE = {}
-for i=0,(#MRK//3)-1 do MRK_NODE[i+1] = nav_nearest(MRK[i*3+1], MRK[i*3+2]-0.4, MRK[i*3+3]) end
 
 -- A bot that walks over a live weapon marker takes the weapon.
 local function bot_pickups(o)
@@ -2378,8 +2316,14 @@ end
 
 local function think_bot(o)
   if o.remote then return end        -- another browser (or the host) drives it
-  if o.dead then o.respawn=o.respawn-1; if o.respawn<=0 then respawn(o); nav_place(o) end return end
-  o.moving=false
+  if o.dead then
+    nav_drop(o)                      -- a corpse doesn't block the way
+    o.respawn=o.respawn-1
+    if o.respawn<=0 then respawn(o); nav_place(o) end
+    return
+  end
+  if not o.agent then nav_place(o) end
+  o.moving = nav_follow(o)
   -- Pick a target a few times a second: the nearest enemy in line of sight --
   -- the player, another human, or another bot. Bots fight each other now.
   if (tick + (o.id or 0)*7) % 10 == 0 then
@@ -2411,30 +2355,53 @@ local function think_bot(o)
         damage(tg, dmg, o, head)
       end
     end
-    -- close the distance if out of range, otherwise keep walking the route
-    -- (slowly) so a fight isn't two statues trading shots
-    if m > (w.rng or 40)*0.7 then nav_goto(o, nav_nearest(tg.x,tg.y,tg.z)) end
-    if nav_step(o, 0.035) then o.moving=true end
-  else
-    -- pick a new destination when idle, and re-think every couple of seconds;
-    -- now and then go and grab a weapon from a marker
-    if not o.nb or (tick + (o.id or 0)*23) % 150 == 0 then
-      if math.random() < 0.2 then
-        local k = math.random(1, #MRK_NODE)
-        if MODE.weapons[MW[k]] then nav_goto(o, MRK_NODE[k]) else nav_goto(o, bot_goal(o)) end
-      else nav_goto(o, bot_goal(o)) end
+    -- Close the distance when out of range; in range, strafe -- a step to one
+    -- side of the line to the target every second or so -- so a fight isn't two
+    -- statues trading shots.
+    if m > (w.rng or 40)*0.7 or w.melee then
+      if (tick + o.id*5) % 15 == 0 then nav_goto(o, tg.x, tg.y, tg.z, BOT_FIGHT) end
+    elseif (tick + o.id*11) % 60 == 0 or o.arrived then
+      local side = (math.random() < 0.5) and -1 or 1
+      local ux, uz = dz/math.max(0.01,m), -dx/math.max(0.01,m)
+      local step = 1.5 + math.random()*1.5
+      nav_goto(o, o.x + ux*side*step, o.y, o.z + uz*side*step, BOT_FIGHT)
     end
-    -- The last few metres to a loose ball are off the graph: walk straight at it.
-    local bx, bz = ball.x - o.x, ball.z - o.z
-    local bm = math.sqrt(bx*bx + bz*bz)
-    if MODE.obj=="ball" and ball.live and not o.nb and bm < 5 and bm > 0.2 and math.abs(o.y - (ball.y-0.5)) < 0.8
-      and not seg_blocked(o.x,o.y+0.5,o.z, ball.x,ball.y,ball.z, 1) then
-      o.x, o.z = o.x+bx/bm*0.075, o.z+bz/bm*0.075
-      o.offgraph, o.moving, o.mface = true, true, math.atan(bx,bz)
-    elseif nav_step(o, 0.075) then o.moving=true end
+  else
+    -- Pick a new destination when there, and re-think every couple of seconds;
+    -- now and then go and grab a weapon from a marker.
+    if o.arrived or (tick + (o.id or 0)*23) % 150 == 0 then
+      local k = math.random(1, #MRK // 3)
+      if math.random() < 0.2 and MODE.weapons[MW[k]] then
+        nav_goto(o, MRK[k*3-2], MRK[k*3-1]-0.4, MRK[k*3])
+      else
+        nav_goto(o, bot_goal(o))
+      end
+    end
+    -- A loose ball close by: straight for it.
+    if MODE.obj=="ball" and ball.live and d3(o.x,o.y,o.z, ball.x,ball.y,ball.z) < 6 then
+      nav_goto(o, ball.x, ball.y-0.4, ball.z)
+    end
     o.face = o.mface or o.face
   end
   bot_pickups(o)
+end
+
+-- Players can't walk through the bots (or the other humans' stand-ins): push
+-- the local player back out of any body it overlaps, respecting the walls.
+local function push_from_bots()
+  if p.dead then return end
+  for _,o in ipairs(bots) do
+    if not o.dead and math.abs(o.y - p.y) < 1.5 then
+      local dx, dz = p.x - o.x, p.z - o.z
+      local d = math.sqrt(dx*dx + dz*dz)
+      local min = PR*0.8 + BOT_R
+      if d < min then
+        if d < 0.001 then dx, dz, d = 1, 0, 1 end
+        local k = (min - d) / d
+        move_axis("x", dx*k); move_axis("z", dz*k)
+      end
+    end
+  end
 end
 
 -- ---------------------------------------------------------------------------
@@ -2932,6 +2899,8 @@ function TIC()
   play_input()
   if p.dead then p.respawn=p.respawn-1; if p.respawn<=0 then respawn(p) end
   else move_vertical(); try_pickups() end
+  push_from_bots()
+  nav_obstacles()
   for _,o in ipairs(bots) do think_bot(o) end
   update_grenades()
   update_objective()

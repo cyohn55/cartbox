@@ -66,6 +66,8 @@ export {
   LOCKOUT_FX,
   LOCKOUT_VIEWMODELS,
   LOCKOUT_SOLDIER_ANIMATOR,
+  LOCKOUT_NAV_AGENT,
+  lockoutNavMesh,
   LOCKOUT_LIGHTING,
   LOCKOUT_SCENE_TRIANGLES,
   LOCKOUT_CENTER_X,
@@ -191,6 +193,19 @@ export {
 export { parseObj, encodeObj, type ParseObjOptions, type ObjFiles } from "./model/objCodec";
 export { parseGlb, parseGltf, parseGltfText, encodeGlb, isKtx2, readGlb } from "./model/gltfCodec";
 export { MAX_LEVELS, effectiveLevels, readLevels, type SceneLevel } from "./model/levels";
+export {
+  DEFAULT_NAV_AGENT,
+  NAV_MAX_COLUMNS,
+  NAV_MAX_FLOORS,
+  NavGraph,
+  bakeNavMesh,
+  boxTriangles,
+  readNavMesh,
+  serializeNavMesh,
+  type NavAgent,
+  type NavMesh,
+  type SerializedNavMesh,
+} from "./model/navmesh";
 export { decompressGltf, gltfCompression, type DracoAttributeRequest, type DracoDecoded, type GltfDecoders } from "./model/gltfCompression";
 export {
   ANIMATOR_LIMITS,
