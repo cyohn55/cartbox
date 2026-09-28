@@ -73,9 +73,19 @@ general Unity/UE5 gap); items here that close a line there tick it off too.
       "Particle effects" panel previews each one looping. Lockout sparks off
       walls and shields, blasts grenades with smoke, trails the sword swipe
       and blows snow off its high ledges.
-- [ ] **H6. Decals.** Projected marks that fade: bullet pocks, plasma scorch,
+- [x] **H6. Decals.** Projected marks that fade: bullet pocks, plasma scorch,
       grenade burns, plus authored glyphs and frost streaks.
       *Lockout:* impact marks where shots land.
+      *Done:* decals (five presets: pock, scorch, burn, glyph, frost) live on
+      the mesh sidecar with size, life, tint and glow. `cartbox.decal(name, x,
+      y, z, nx, ny, nz, scale)` lays a mark flat on a surface; it fades over the
+      end of its life and the oldest is recycled past a cap. The scene can also
+      carry permanent marks placed in the Mesh tab's "Decals" panel, which
+      previews each decal on a wall. Marks are quads just off the surface,
+      drawn in the scene (depth-tested, glowing ones emissive) on every
+      backend. Lockout leaves pocks where shots hit walls and burns where
+      grenades go off, and carries Forerunner glyphs on the towers and frost
+      streaks on the high ledges.
 - [ ] **H7. Volumetric fog and light shafts.** Height fog and fog volumes;
       sun shafts through gaps. *Lockout:* mist pooling in the chasm.
 - [ ] **H8. Sun glare and lens flare** in the post-effects stack.

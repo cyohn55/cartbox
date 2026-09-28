@@ -38,6 +38,10 @@ import {
   readStreaming,
   parseParticleEffects,
   type ParticleEffect,
+  parseDecalDefs,
+  parseDecalMarks,
+  type DecalDef,
+  type DecalMark,
   type SceneStreaming,
   type SerializedTerrain,
   type SerializedNavMesh,
@@ -165,6 +169,9 @@ export interface MeshSidecar {
   readonly streaming?: SceneStreaming;
   /** 3D particle effects the cart fires with cartbox.burst (see particleEffects.ts in @cartbox/editor). */
   readonly effects?: readonly ParticleEffect[];
+  /** Decals the cart lays with cartbox.decal, and permanent marks placed here (see decals.ts in @cartbox/editor). */
+  readonly decals?: readonly DecalDef[];
+  readonly decalMarks?: readonly DecalMark[];
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -214,6 +221,8 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(sidecar.terrains && sidecar.terrains.length > 0 ? { terrains: sidecar.terrains } : {}),
     ...(sidecar.streaming ? { streaming: sidecar.streaming } : {}),
     ...(sidecar.effects && sidecar.effects.length > 0 ? { effects: sidecar.effects } : {}),
+    ...(sidecar.decals && sidecar.decals.length > 0 ? { decals: sidecar.decals } : {}),
+    ...(sidecar.decalMarks && sidecar.decalMarks.length > 0 ? { decalMarks: sidecar.decalMarks } : {}),
   });
 }
 
@@ -305,6 +314,8 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
   const terrains = Array.isArray(storedTerrains) ? (storedTerrains.filter((t) => readTerrain(t) !== null) as SerializedTerrain[]) : [];
   const levelIds = new Set(levels.map((l) => l.id));
   const effects = parseParticleEffects((parsed as { effects?: unknown }).effects);
+  const decals = parseDecalDefs((parsed as { decals?: unknown }).decals);
+  const decalMarks = parseDecalMarks((parsed as { decalMarks?: unknown }).decalMarks, decals);
   const placed = linked.map((entry) => (entry.level && !levelIds.has(entry.level) ? withoutLevel(entry) : entry));
   return {
     version: MESH_SIDECAR_VERSION,
@@ -319,7 +330,20 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     ...(terrains.length > 0 ? { terrains } : {}),
     ...(readStreaming((parsed as { streaming?: unknown }).streaming) ? { streaming: readStreaming((parsed as { streaming?: unknown }).streaming)! } : {}),
     ...(effects.length > 0 ? { effects } : {}),
+    ...(decals.length > 0 ? { decals } : {}),
+    ...(decalMarks.length > 0 ? { decalMarks } : {}),
   };
+}
+
+/**
+ * Replace the scene's decals and permanent marks (marks naming a decal that's
+ * gone are dropped; empty lists remove the fields).
+ */
+export function setMeshDecals(sidecar: MeshSidecar, decals: readonly DecalDef[], marks: readonly DecalMark[] = sidecar.decalMarks ?? []): MeshSidecar {
+  const { decals: _d, decalMarks: _m, ...rest } = sidecar;
+  const defs = parseDecalDefs(decals);
+  const kept = parseDecalMarks(marks, defs);
+  return { ...rest, ...(defs.length > 0 ? { decals: defs } : {}), ...(kept.length > 0 ? { decalMarks: kept } : {}) };
 }
 
 /** Replace the scene's particle effects (an empty list removes them). */

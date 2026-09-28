@@ -310,6 +310,8 @@ cartbox = {
   -- Spatial loading's focus: overridden when the scene streams by distance.
   streamfocus = function() end,
   burst = function() end,
+  decal = function() end,
+  decals = function() return {} end,
   effects = function() return {} end,
 }`;
 

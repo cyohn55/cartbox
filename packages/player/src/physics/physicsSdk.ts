@@ -91,6 +91,7 @@ import {
   PHYS_OP_AGENT_REMOVE,
   PHYS_OP_STREAM_FOCUS,
   PHYS_OP_BURST,
+  PHYS_OP_DECAL,
   PHYS_AGENTS,
   PHYS_AGENT_BYTES,
   PHYS_MAX_AGENTS,
@@ -153,7 +154,8 @@ export function sceneNeedsRuntime(scene: MeshScene | null | undefined, { physics
         (scene.levels?.length ?? 0) > 0 ||
         Boolean(scene.navmesh) ||
         Boolean(scene.streaming) ||
-        (scene.effects?.length ?? 0) > 0),
+        (scene.effects?.length ?? 0) > 0 ||
+        (scene.decals?.length ?? 0) > 0),
   );
 }
 
@@ -211,7 +213,7 @@ export function runtimeSdkLua(
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}end`;
 }
 
 /** The physics calls (inside the runtime block's do … end, after its helpers). */
@@ -390,6 +392,35 @@ function BURST_CALLS(scene: MeshScene): string {
   cartbox.effects = function()
     local out = {}
     for k, n in ipairs(_fxn) do out[k] = n end
+    return out
+  end
+`;
+}
+
+/**
+ * Decals (when the scene defines them):
+ *
+ *   cartbox.decal(decal, x, y, z, nx, ny, nz, scale)  lay a mark (by name or 1-based index)
+ *                                     at a point on a surface facing (nx, ny, nz); scale
+ *                                     (default 1, up to 4) multiplies its size; it fades
+ *                                     after the decal's life
+ *   cartbox.decals()                  -> { name, ... } the scene's decals
+ */
+function DECAL_CALLS(scene: MeshScene): string {
+  const decals = scene.decals ?? [];
+  if (decals.length === 0) return "";
+  return `  local _dc = {${decals.map((d, i) => `[${luaString(d.name)}]=${i}`).join(",")}}
+  local _dcn = {${decals.map((d) => luaString(d.name)).join(",")}}
+  cartbox.decal = function(d, x, y, z, nx, ny, nz, scale)
+    local i = d
+    if type(d) == "string" then i = _dc[d] elseif type(d) == "number" then i = d - 1 end
+    if i == nil or i < 0 or i >= ${decals.length} then return end
+    local s = math.floor(math.max(0, math.min(4, scale or 1)) * 16 + 0.5)
+    _cmd(${PHYS_OP_DECAL}, i | (s << 8), x or 0, y or 0, z or 0, nx or 0, ny or 1, nz or 0)
+  end
+  cartbox.decals = function()
+    local out = {}
+    for k, n in ipairs(_dcn) do out[k] = n end
     return out
   end
 `;

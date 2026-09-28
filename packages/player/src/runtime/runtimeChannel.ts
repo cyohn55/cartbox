@@ -42,6 +42,7 @@ import {
   PHYS_OP_LEVEL,
   PHYS_OP_STREAM_FOCUS,
   PHYS_OP_BURST,
+  PHYS_OP_DECAL,
   PHYS_OP_WATCH,
   PHYS_OP_AGENT,
   PHYS_OP_AGENT_GOTO,
@@ -67,7 +68,15 @@ export interface ParticleBurst {
   readonly scale: number;
 }
 
-/** Most bursts kept between frames (the rest of a flood is dropped). */
+/** One `cartbox.decal`: the decal's index, where, the surface's normal, and its scale. */
+export interface DecalLaid {
+  readonly decal: number;
+  readonly at: readonly [number, number, number];
+  readonly normal: readonly [number, number, number];
+  readonly scale: number;
+}
+
+/** Most bursts (and, separately, decals) kept between frames (the rest of a flood is dropped). */
 const MAX_BURSTS_QUEUED = 64;
 
 type Vec3 = readonly [number, number, number];
@@ -111,6 +120,8 @@ export class RuntimeChannel {
   private focus: [number, number, number] | null = null;
   /** Particle bursts the cart fired since the renderer last took them. */
   private bursts: ParticleBurst[] = [];
+  /** Decals the cart laid since the renderer last took them. */
+  private decals: DecalLaid[] = [];
   /** Joints whose world position the cart asked for, and where they were when last skinned. */
   private readonly watched = new Map<string, { object: number; joint: number; position: [number, number, number] | null }>();
 
@@ -169,6 +180,9 @@ export class RuntimeChannel {
         // A cart can't flood the renderer: a tick's bursts are bounded.
         if (this.bursts.length < MAX_BURSTS_QUEUED)
           this.bursts.push({ effect: cmd.a & 0xff, at: [cmd.v[0]!, cmd.v[1]!, cmd.v[2]!], dir: [cmd.v[3]!, cmd.v[4]!, cmd.v[5]!], scale: ((cmd.a >>> 8) & 0xffff) / 16 });
+      } else if (cmd.op === PHYS_OP_DECAL) {
+        if (this.decals.length < MAX_BURSTS_QUEUED)
+          this.decals.push({ decal: cmd.a & 0xff, at: [cmd.v[0]!, cmd.v[1]!, cmd.v[2]!], normal: [cmd.v[3]!, cmd.v[4]!, cmd.v[5]!], scale: ((cmd.a >>> 8) & 0xffff) / 16 });
       }
       else if (cmd.op === PHYS_OP_TIMELINE) {
         if (cmd.a < 0) this.timeline?.stop();
@@ -210,6 +224,13 @@ export class RuntimeChannel {
   /** Make `level` the current one (the loading state clears). */
   setLevel(level: number): void {
     this.level = { current: level, loading: -1, progress: 0 };
+  }
+
+  /** The decals laid since the last call (the renderer draws them). */
+  takeDecals(): DecalLaid[] {
+    const out = this.decals;
+    this.decals = [];
+    return out;
   }
 
   /** The particle bursts fired since the last call (the renderer draws them). */

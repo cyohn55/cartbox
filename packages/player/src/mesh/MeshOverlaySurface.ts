@@ -25,6 +25,7 @@
 import {
   bakeReflectionProbesAsync,
   ParticleSystem,
+  DecalSystem,
   bakeSkyPanorama,
   buildSceneShadow,
   childIndices,
@@ -416,6 +417,8 @@ export class MeshOverlaySurface implements DisplaySurface {
     surface.decodeKtx2 = decodeKtx2;
     // 3D particle effects the cart fires with cartbox.burst.
     if (scene.effects && scene.effects.length > 0) surface.particles = new ParticleSystem(scene.effects);
+    // Decals: the cart's marks and the scene's permanent ones.
+    if (scene.decals && scene.decals.length > 0) surface.decals = new DecalSystem(scene.decals, scene.decalMarks ?? []);
     // Reflection probes: each captures the scene's still objects from its point
     // and shiny surfaces in its box reflect that instead of the sky. Baked after
     // the scene is up, a probe per tick, so loading isn't held back; until then
@@ -617,10 +620,15 @@ export class MeshOverlaySurface implements DisplaySurface {
     }
     // Particles: stepped on the frame clock and drawn as billboards facing this camera.
     let drawn: readonly MeshSceneInstance[] = instances;
+    if (this.decals) {
+      this.decals.step(1 / 60);
+      const marks = this.decals.sceneInstance();
+      if (marks) drawn = [...drawn, marks];
+    }
     if (this.particles) {
       this.particles.step(1 / 60);
       const particles = this.particles.instanceFor([-v[2]!, -v[6]!, -v[10]!], [v[1]!, v[5]!, v[9]!]);
-      if (particles) drawn = [...instances, particles];
+      if (particles) drawn = [...drawn, particles];
     }
     this.renderer.render(drawn, {
       width,
@@ -1087,6 +1095,13 @@ export class MeshOverlaySurface implements DisplaySurface {
   private destroyed = false;
   /** The scene's 3D particle effects in flight, or null when it defines none. */
   private particles: ParticleSystem | null = null;
+  /** The scene's decals on its surfaces, or null when it defines none. */
+  private decals: DecalSystem | null = null;
+
+  /** Lay decal `decal` on a surface (see cartbox.decal). */
+  decal(decal: number, at: readonly [number, number, number], normal: readonly [number, number, number], scale: number): void {
+    this.decals?.lay(decal, at, normal, scale);
+  }
 
   /** Fire particle effect `effect` (see cartbox.burst). */
   burst(effect: number, at: readonly [number, number, number], dir: readonly [number, number, number], scale: number): void {
