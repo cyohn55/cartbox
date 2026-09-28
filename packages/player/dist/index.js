@@ -3943,6 +3943,8 @@ cartbox = {
   -- Spatial loading's focus: overridden when the scene streams by distance.
   streamfocus = function() end,
   burst = function() end,
+  decal = function() end,
+  decals = function() return {} end,
   effects = function() return {} end,
 }`;
 function injectSdk(bytes) {
@@ -4049,7 +4051,9 @@ import {
   resolveMeshFrames,
   resolveMeshRef,
   viewMatrix,
-  parseParticleEffects
+  parseParticleEffects,
+  parseDecalDefs,
+  parseDecalMarks
 } from "@cartbox/editor";
 var DEFAULT_PREFAB_POOL = 8;
 var MAX_PREFAB_POOL = 32;
@@ -4232,12 +4236,16 @@ function parseMeshScene(raw) {
   const timelines = readTimelines(parsed.timelines);
   const navmesh = readNavMesh(parsed.navmesh);
   const effects = parseParticleEffects(parsed.effects);
+  const decals = parseDecalDefs(parsed.decals);
+  const decalMarks = parseDecalMarks(parsed.decalMarks, decals);
   return {
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
     ...terrains.length > 0 ? { terrains, extent: sceneBounds(instances.filter((instance) => !instance.pooled)) } : {},
     ...readStreaming(parsed.streaming) ? { streaming: readStreaming(parsed.streaming) } : {},
     ...effects.length > 0 ? { effects } : {},
+    ...decals.length > 0 ? { decals } : {},
+    ...decalMarks.length > 0 ? { decalMarks } : {},
     lighting,
     ...pools.length > 0 ? { pools } : {},
     ...physicsWorld ? { physicsWorld } : {},
@@ -4451,6 +4459,7 @@ var PHYS_OP_AGENT_STOP = 23;
 var PHYS_OP_AGENT_REMOVE = 24;
 var PHYS_OP_STREAM_FOCUS = 25;
 var PHYS_OP_BURST = 26;
+var PHYS_OP_DECAL = 27;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -5429,7 +5438,7 @@ var TimelineSession = class {
 // src/physics/physicsSdk.ts
 function sceneNeedsRuntime(scene, { physics = true } = {}) {
   return Boolean(
-    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0 || Boolean(scene.navmesh) || Boolean(scene.streaming) || (scene.effects?.length ?? 0) > 0)
+    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0 || Boolean(scene.navmesh) || Boolean(scene.streaming) || (scene.effects?.length ?? 0) > 0 || (scene.decals?.length ?? 0) > 0)
   );
 }
 var luaString = (s) => JSON.stringify(s);
@@ -5476,7 +5485,7 @@ function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}end`;
 }
 function PHYSICS_CALLS() {
   return `  cartbox.physics = function() return _live() end
@@ -5627,6 +5636,25 @@ function BURST_CALLS(scene) {
   cartbox.effects = function()
     local out = {}
     for k, n in ipairs(_fxn) do out[k] = n end
+    return out
+  end
+`;
+}
+function DECAL_CALLS(scene) {
+  const decals = scene.decals ?? [];
+  if (decals.length === 0) return "";
+  return `  local _dc = {${decals.map((d, i) => `[${luaString(d.name)}]=${i}`).join(",")}}
+  local _dcn = {${decals.map((d) => luaString(d.name)).join(",")}}
+  cartbox.decal = function(d, x, y, z, nx, ny, nz, scale)
+    local i = d
+    if type(d) == "string" then i = _dc[d] elseif type(d) == "number" then i = d - 1 end
+    if i == nil or i < 0 or i >= ${decals.length} then return end
+    local s = math.floor(math.max(0, math.min(4, scale or 1)) * 16 + 0.5)
+    _cmd(${PHYS_OP_DECAL}, i | (s << 8), x or 0, y or 0, z or 0, nx or 0, ny or 1, nz or 0)
+  end
+  cartbox.decals = function()
+    local out = {}
+    for k, n in ipairs(_dcn) do out[k] = n end
     return out
   end
 `;
@@ -6191,6 +6219,8 @@ var RuntimeChannel = class {
     this.focus = null;
     /** Particle bursts the cart fired since the renderer last took them. */
     this.bursts = [];
+    /** Decals the cart laid since the renderer last took them. */
+    this.decals = [];
     /** Joints whose world position the cart asked for, and where they were when last skinned. */
     this.watched = /* @__PURE__ */ new Map();
     this.animation = sceneHasAnimation(scene) ? new AnimationSession(scene) : null;
@@ -6241,6 +6271,9 @@ var RuntimeChannel = class {
       else if (cmd.op === PHYS_OP_BURST) {
         if (this.bursts.length < MAX_BURSTS_QUEUED)
           this.bursts.push({ effect: cmd.a & 255, at: [cmd.v[0], cmd.v[1], cmd.v[2]], dir: [cmd.v[3], cmd.v[4], cmd.v[5]], scale: (cmd.a >>> 8 & 65535) / 16 });
+      } else if (cmd.op === PHYS_OP_DECAL) {
+        if (this.decals.length < MAX_BURSTS_QUEUED)
+          this.decals.push({ decal: cmd.a & 255, at: [cmd.v[0], cmd.v[1], cmd.v[2]], normal: [cmd.v[3], cmd.v[4], cmd.v[5]], scale: (cmd.a >>> 8 & 65535) / 16 });
       } else if (cmd.op === PHYS_OP_TIMELINE) {
         if (cmd.a < 0) this.timeline?.stop();
         else this.timeline?.play(cmd.a, cmd.v[0], cmd.v[1]);
@@ -6276,6 +6309,12 @@ var RuntimeChannel = class {
   /** Make `level` the current one (the loading state clears). */
   setLevel(level) {
     this.level = { current: level, loading: -1, progress: 0 };
+  }
+  /** The decals laid since the last call (the renderer draws them). */
+  takeDecals() {
+    const out = this.decals;
+    this.decals = [];
+    return out;
   }
   /** The particle bursts fired since the last call (the renderer draws them). */
   takeBursts() {
@@ -8050,6 +8089,7 @@ var lerp3 = (a, b, t) => a + (b - a) * t;
 import {
   bakeReflectionProbesAsync,
   ParticleSystem,
+  DecalSystem,
   bakeSkyPanorama,
   buildSceneShadow,
   childIndices,
@@ -8399,6 +8439,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.destroyed = false;
     /** The scene's 3D particle effects in flight, or null when it defines none. */
     this.particles = null;
+    /** The scene's decals on its surfaces, or null when it defines none. */
+    this.decals = null;
     /** Settles once the scene's reflection probes are baked and in use (tests await it). */
     this.probesReady = Promise.resolve();
     this.output = new Uint8ClampedArray(width * height * 4);
@@ -8510,6 +8552,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     for (const [i, mesh] of live) surface.live.set(i, mesh);
     surface.decodeKtx2 = decodeKtx2;
     if (scene.effects && scene.effects.length > 0) surface.particles = new ParticleSystem(scene.effects);
+    if (scene.decals && scene.decals.length > 0) surface.decals = new DecalSystem(scene.decals, scene.decalMarks ?? []);
     if (lighting?.probes && lighting.probes.length > 0 && environment) {
       const sky = environment;
       const still = scene.instances.flatMap((inst, i) => {
@@ -8675,10 +8718,15 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       mark = now;
     }
     let drawn = instances;
+    if (this.decals) {
+      this.decals.step(1 / 60);
+      const marks = this.decals.sceneInstance();
+      if (marks) drawn = [...drawn, marks];
+    }
     if (this.particles) {
       this.particles.step(1 / 60);
       const particles = this.particles.instanceFor([-v[2], -v[6], -v[10]], [v[1], v[5], v[9]]);
-      if (particles) drawn = [...instances, particles];
+      if (particles) drawn = [...drawn, particles];
     }
     this.renderer.render(drawn, {
       width,
@@ -9083,6 +9131,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   destroy() {
     this.destroyed = true;
     this.inner.destroy();
+  }
+  /** Lay decal `decal` on a surface (see cartbox.decal). */
+  decal(decal, at, normal, scale) {
+    this.decals?.lay(decal, at, normal, scale);
   }
   /** Fire particle effect `effect` (see cartbox.burst). */
   burst(effect, at, dir, scale) {
@@ -12361,6 +12413,7 @@ var Player = class {
       this.runtime.channel.afterTick(afterBlock);
       this.pollLevelRequest();
       for (const b of this.runtime.channel.takeBursts()) this.meshSurface?.burst(b.effect, b.at, b.dir, b.scale);
+      for (const d of this.runtime.channel.takeDecals()) this.meshSurface?.decal(d.decal, d.at, d.normal, d.scale);
     }
     this.updateSpatialLoading();
     lap("runtime");

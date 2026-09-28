@@ -62,6 +62,7 @@ import { LevelPicker, LevelsPanel } from "./LevelsPanel";
 import { NavigationPanel } from "./NavigationPanel";
 import { LightingBakePanel } from "./LightingBakePanel";
 import { ParticleEffectsPanel } from "./ParticleEffectsPanel";
+import { DecalsPanel } from "./DecalsPanel";
 import { StreamingPanel, StreamingPicker } from "./StreamingPanel";
 import { formatBytes } from "./assetUploads";
 import { AnimationPanel, CodeHint, HierarchyPanel, ParentPicker, PhysicsPanel, PhysicsWorldPanel, PrefabLibrary, PrefabPanel, PropertyEditor, TagEditor } from "./SceneObjectPanels";
@@ -512,6 +513,7 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
         <NavigationPanel sidecar={sidecar} onChange={onSidecarChange} />
         <LightingBakePanel sidecar={sidecar} onChange={onSidecarChange} />
         <ParticleEffectsPanel sidecar={sidecar} onChange={onSidecarChange} />
+        <DecalsPanel sidecar={sidecar} onChange={onSidecarChange} />
         <TimelinePanel sidecar={sidecar} onChange={onSidecarChange} view={view === "scene" ? sceneView : null} onPreview={onTimelinePreview} />
       </aside>
 

@@ -37,6 +37,7 @@ import { serializeTerrain, terrainMesh, type Terrain } from "./terrain";
 import type { SceneTimeline } from "./timeline";
 import { builtinDetailGrain } from "./materialEffects";
 import { particlePreset, type ParticleEffect } from "./particleEffects";
+import { decalPreset, type DecalDef, type DecalMark } from "./decals";
 import { applyLightmapImage, bakeLightmap, layoutFingerprint, layoutLightmap, type LightmapLayout } from "./lightmap";
 import { base64ToBytes } from "./base64";
 import { LOCKOUT_LIGHTMAP } from "./lockoutLightmap.generated";
@@ -979,6 +980,30 @@ export const LOCKOUT_EFFECTS: readonly ParticleEffect[] = [
   { ...particlePreset("smoke", "smoke"), count: 12, color: [0.3, 0.3, 0.32], colorEnd: [0.55, 0.56, 0.6] },
   { ...particlePreset("trail", "slash"), count: 28, color: [0.75, 0.92, 1], colorEnd: [0.25, 0.45, 1] },
   { ...particlePreset("snow", "drift"), count: 16, speed: 1.8, spread: 0.5, gravity: 0.8, life: 2 },
+];
+
+/**
+ * The arena's decals (HALO2_STYLE_ROADMAP.md H6): pocks where rounds strike
+ * and soot burns under grenades (laid by the cart, fading), and — placed for
+ * good — cyan Forerunner glyphs on the towers and frost streaked down their
+ * weather sides.
+ */
+export const LOCKOUT_DECALS: readonly DecalDef[] = [
+  decalPreset("pock"),
+  decalPreset("burn"),
+  { ...decalPreset("glyph"), size: 0.9 },
+  decalPreset("frost"),
+];
+export const LOCKOUT_DECAL_MARKS: readonly DecalMark[] = [
+  // Glyphs facing the arena: the sniper tower's deck face, the BR tower's west face.
+  { decal: "glyph", position: [-4.55, 5.3, -8.6], normal: [1, 0, 0], size: 0, spin: 0 },
+  { decal: "glyph", position: [-4.55, 5.3, -10.1], normal: [1, 0, 0], size: 0.6, spin: 90 },
+  { decal: "glyph", position: [7.95, 2.7, 6.8], normal: [-1, 0, 0], size: 0, spin: 0 },
+  { decal: "glyph", position: [7.95, 2.7, 8.6], normal: [-1, 0, 0], size: 0.6, spin: 270 },
+  // Frost streaked down the towers from their tops.
+  { decal: "frost", position: [-6.7, 6.1, -6.15], normal: [0, 0, 1], size: 1.8, spin: 0 },
+  { decal: "frost", position: [9.6, 3.2, 3.55], normal: [0, 0, -1], size: 1.6, spin: 0 },
+  { decal: "frost", position: [-8.4, 6.1, -6.15], normal: [0, 0, 1], size: 1.2, spin: 0 },
 ];
 
 /** The energy's slow breath (cycles per second, dip at the trough); the panels' glow follows it, gentler. */
@@ -1953,6 +1978,8 @@ export function lockoutMeshSidecar(): string {
       terrains: [serializeTerrain(lockoutTerrain())],
       timelines: [LOCKOUT_INTRO],
       effects: LOCKOUT_EFFECTS,
+      decals: LOCKOUT_DECALS,
+      decalMarks: LOCKOUT_DECAL_MARKS,
     });
   }
   return meshSidecar;
@@ -2131,7 +2158,11 @@ end
 -- Sparks where a shot from (x0,y0,z0) along (fx,fy,fz) strikes a wall within rng.
 local function wall_sparks(x0,y0,z0, fx,fy,fz, rng)
   local t,nx,ny,nz = seg_first(x0,y0,z0, x0+fx*rng, y0+fy*rng, z0+fz*rng)
-  if t then cartbox.burst("spark", x0+fx*rng*t+nx*0.03, y0+fy*rng*t+ny*0.03, z0+fz*rng*t+nz*0.03, nx,ny,nz) end
+  if t then
+    local hx,hy,hz = x0+fx*rng*t, y0+fy*rng*t, z0+fz*rng*t
+    cartbox.burst("spark", hx+nx*0.03, hy+ny*0.03, hz+nz*0.03, nx,ny,nz)
+    cartbox.decal("pock", hx, hy, hz, nx,ny,nz)
+  end
 end
 
 -- Now and then the wind lifts snow off a high ledge near the player.
@@ -2470,6 +2501,9 @@ local function explode(g)
   flash = math.max(flash, 3)
   cartbox.burst("blast", g.x, g.y+0.2, g.z, 0,1,0)
   cartbox.burst("smoke", g.x, g.y+0.3, g.z, 0,1,0)
+  -- A soot burn on whatever it went off over.
+  local t,nx,ny,nz = seg_first(g.x, g.y+0.3, g.z, g.x, g.y-3, g.z)
+  if t then cartbox.decal("burn", g.x, g.y+0.3-3.3*t, g.z, nx,ny,nz) end
   local function splash(o)
     if not o or o.dead then return end
     local m = d3(g.x,g.y,g.z, o.x,o.y+1,o.z)

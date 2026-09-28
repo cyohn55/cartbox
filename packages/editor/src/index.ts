@@ -69,6 +69,8 @@ export {
   LOCKOUT_NAV_AGENT,
   LOCKOUT_INTRO,
   LOCKOUT_EFFECTS,
+  LOCKOUT_DECALS,
+  LOCKOUT_DECAL_MARKS,
   lockoutNavMesh,
   lockoutTerrain,
   lockoutMapLayout,
@@ -405,6 +407,19 @@ export {
   type ParticlePreset,
 } from "./model/particleEffects";
 export { PARTICLE_FRAMES, ParticleSystem, particleAtlas } from "./render/particleSystem";
+export {
+  DECAL_PRESETS,
+  MAX_DECAL_DEFS,
+  MAX_DECAL_MARKS,
+  MAX_MARKS_PER_DECAL,
+  decalPreset,
+  parseDecalDefs,
+  parseDecalMarks,
+  type DecalDef,
+  type DecalMark,
+  type DecalPreset,
+} from "./model/decals";
+export { DECAL_FRAMES, DECAL_OFFSET, DecalSystem, decalAtlas } from "./render/decalSystem";
 export { MAX_REFLECTION_PROBES, parseReflectionProbes, reflectionProbeAt, type ReflectionProbe } from "./model/reflectionProbes";
 export { PROBE_FADE, PROBE_RANGE, boxProject, pickProbe, probeWeight, sampleProbe, type ProbeBox, type ReflectionProbeSet } from "./render/probeSampling";
 export { PROBE_PANORAMA_WIDTH, bakePanorama, bakeReflectionProbes, bakeReflectionProbesAsync, type ProbeBakeLighting } from "./render/probeBake";
