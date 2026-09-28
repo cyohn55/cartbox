@@ -34,6 +34,8 @@ import {
   readTimelines,
   readLevels,
   readNavMesh,
+  readTerrain,
+  type SerializedTerrain,
   type SerializedNavMesh,
   MAX_LEVELS,
   readSceneTags,
@@ -151,6 +153,8 @@ export interface MeshSidecar {
   readonly levels?: readonly SceneLevel[];
   /** The baked walkable surface agents find paths over (see navmesh.ts in @cartbox/editor), as stored. */
   readonly navmesh?: SerializedNavMesh;
+  /** Heightfield landscapes (see terrain.ts in @cartbox/editor), as stored; absent or empty = none. */
+  readonly terrains?: readonly SerializedTerrain[];
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -197,6 +201,7 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(sidecar.timelines && sidecar.timelines.length > 0 ? { timelines: sidecar.timelines } : {}),
     ...(sidecar.levels && sidecar.levels.length > 0 ? { levels: sidecar.levels } : {}),
     ...(sidecar.navmesh ? { navmesh: sidecar.navmesh } : {}),
+    ...(sidecar.terrains && sidecar.terrains.length > 0 ? { terrains: sidecar.terrains } : {}),
   });
 }
 
@@ -282,6 +287,9 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
   const timelines = readTimelines((parsed as { timelines?: unknown }).timelines);
   // An object in a level that no longer exists is always loaded.
   const levels = readLevels((parsed as { levels?: unknown }).levels);
+  // Terrains are kept as stored, each once it reads back as a valid heightfield.
+  const storedTerrains = (parsed as { terrains?: unknown }).terrains;
+  const terrains = Array.isArray(storedTerrains) ? (storedTerrains.filter((t) => readTerrain(t) !== null) as SerializedTerrain[]) : [];
   const levelIds = new Set(levels.map((l) => l.id));
   const placed = linked.map((entry) => (entry.level && !levelIds.has(entry.level) ? withoutLevel(entry) : entry));
   return {
@@ -294,6 +302,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     ...(levels.length > 0 ? { levels } : {}),
     // Kept as stored, once it reads back as a valid surface.
     ...(readNavMesh((parsed as { navmesh?: unknown }).navmesh) ? { navmesh: (parsed as { navmesh: SerializedNavMesh }).navmesh } : {}),
+    ...(terrains.length > 0 ? { terrains } : {}),
   };
 }
 

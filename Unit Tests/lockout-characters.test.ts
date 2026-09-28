@@ -69,7 +69,7 @@ describe("the Lockout soldiers and weapons", () => {
     expect(ids[0]).toBe("lockout-map");
     expect(ids.slice(1, 8)).toEqual([1, 2, 3, 4, 5, 6, 7].map((i) => `bot-${i}`));
     expect(ids.slice(8)).toEqual(LOCKOUT_VIEWMODELS.map((w) => `viewmodel-${w}`));
-    expect(parseMeshScene(lockoutMeshSidecar())!.instances).toHaveLength(14);
+    expect(parseMeshScene(lockoutMeshSidecar())!.instances.findIndex((i) => i.terrain)).toBe(14); // …and the mountains last
   });
 
   it("shares one tintable, skinned soldier across all 7 bots, stored once, each with the state machine", () => {

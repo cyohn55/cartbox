@@ -51,7 +51,7 @@ import type { MailboxMeshCamera, MailboxMeshPose, WorldLight } from "../mailbox.
 import type { ShadowInput, SceneLight, SceneLighting } from "@cartbox/editor";
 import type { MeshScene } from "./meshScene.js";
 import { QUALITY_PRESETS, type QualitySettings } from "../quality.js";
-import { buildOrbitCamera } from "./meshScene.js";
+import { buildOrbitCamera, orbitPitchAboveTerrain } from "./meshScene.js";
 import { estimateSceneBytes, type Profiler, type RenderStats } from "../debug/profiler.js";
 
 const RAD_TO_DEG = 180 / Math.PI;
@@ -379,10 +379,11 @@ export class MeshOverlaySurface implements DisplaySurface {
       ktx2 ??= options.ktx2 ? options.ktx2().catch(() => null) : Promise.resolve(null);
       return ktx2.then((decode) => (decode ? decode(bytes) : null));
     };
+    const images = new Map<EncodedImage, Promise<DecodedTexture | null>>();
     const texture = (mesh: MeshAsset): Promise<TexturedMesh> => {
       let entry = decoded.get(mesh);
       if (!entry) {
-        entry = decodeMeshTextures(mesh, decodeKtx2);
+        entry = decodeMeshTextures(mesh, decodeKtx2, images);
         decoded.set(mesh, entry);
       }
       return entry;
@@ -542,8 +543,12 @@ export class MeshOverlaySurface implements DisplaySurface {
           // First-person (HUD) views put the eye inside the scene: a tight near
           // plane keeps the held weapon and adjacent walls from being clipped.
           near: this.hud ? FIRST_PERSON_NEAR : undefined,
+          extent: this.scene.extent,
         })
-      : buildOrbitCamera(this.scene.bounds, this.frame * AUTO_ORBIT_YAW_PER_FRAME, AUTO_ORBIT_PITCH, this.width / this.height);
+      : this.autoOrbitCamera();
+    // The eye, from the view matrix (eye = −Rᵀt): terrain detail follows it.
+    const v = camera.view;
+    this.eye = [-(v[0]! * v[12]! + v[1]! * v[13]! + v[2]! * v[14]!), -(v[4]! * v[12]! + v[5]! * v[13]! + v[6]! * v[14]!), -(v[8]! * v[12]! + v[9]! * v[13]! + v[10]! * v[14]!)];
     const { main: instances, front, moved } = this.posedInstances();
     // Apply the authored Modern-tier lighting rig, if any. Absent (every cart
     // that never opted in) leaves these omitted, so the draw is exactly as before
@@ -712,7 +717,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       const authored = this.instances[i]!;
       const pose = this.poses.find((p) => p.index === i);
       if (!pose) {
-        main.push(authored);
+        main.push(this.atDetail(i, authored));
         continue;
       }
       if (pose.hidden) continue; // dropped from the frame this tick
@@ -728,7 +733,7 @@ export class MeshOverlaySurface implements DisplaySurface {
         front.push(instance);
       } else {
         main.push(instance);
-        moved.push(instance);
+        if (!this.scene.instances[i]?.terrain) moved.push(instance); // terrain casts nothing
       }
     }
     return { main, front, moved };
@@ -789,13 +794,13 @@ export class MeshOverlaySurface implements DisplaySurface {
       placement[i] = s.hidden ? null : s.model;
       if (s.hidden) continue;
       if (!s.moved) {
-        main.push(authored);
+        main.push(this.atDetail(i, authored));
         continue;
       }
       const pose = byIndex.get(i);
       const frames = this.frames[i];
       const frame = pose?.frame ?? 0;
-      const source: TexturedMesh = frame > 0 && frames && frames.length > 0 ? frames[(frame - 1) % frames.length]! : authored;
+      const source: TexturedMesh = frame > 0 && frames && frames.length > 0 ? frames[(frame - 1) % frames.length]! : this.atDetail(i, authored);
       const instance: MeshSceneInstance = {
         ...source,
         mesh: pose?.tint ? this.tinted(source.mesh, pose.tint) : source.mesh,
@@ -804,7 +809,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       if (s.front) front.push(instance);
       else {
         main.push(instance);
-        moved.push(instance);
+        if (!this.scene.instances[i]?.terrain) moved.push(instance); // terrain casts nothing
       }
     }
     this.lastPlacement = placement;
@@ -844,6 +849,50 @@ export class MeshOverlaySurface implements DisplaySurface {
     return out;
   }
 
+  /** The camera's eye this frame (terrain blocks pick their detail by distance from it). */
+  private eye: readonly [number, number, number] | null = null;
+  /** Each terrain block's world bounds, measured on first use. */
+  private readonly blockBounds = new Map<number, readonly number[]>();
+
+  /**
+   * A terrain block at the detail its distance from the eye calls for: full
+   * within its `detail` range, half out to twice that, quarter beyond. Anything
+   * else is returned as it is.
+   */
+  private atDetail(i: number, authored: MeshSceneInstance): MeshSceneInstance {
+    const detail = this.scene.instances[i]?.detail;
+    const lods = this.frames[i];
+    if (!detail || !lods || lods.length === 0 || !this.eye) return authored;
+    let b = this.blockBounds.get(i);
+    if (!b) {
+      const m = authored.model;
+      let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+      for (const primitive of authored.mesh.primitives) {
+        const p = primitive.positions;
+        for (let k = 0; k < p.length; k += 3) {
+          const x = m[0]! * p[k]! + m[4]! * p[k + 1]! + m[8]! * p[k + 2]! + m[12]!;
+          const y = m[1]! * p[k]! + m[5]! * p[k + 1]! + m[9]! * p[k + 2]! + m[13]!;
+          const z = m[2]! * p[k]! + m[6]! * p[k + 1]! + m[10]! * p[k + 2]! + m[14]!;
+          x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); z0 = Math.min(z0, z); z1 = Math.max(z1, z);
+        }
+      }
+      b = [x0, y0, z0, x1, y1, z1];
+      this.blockBounds.set(i, b);
+    }
+    const [ex, ey, ez] = this.eye;
+    const d = Math.hypot(Math.max(b[0]! - ex, 0, ex - b[3]!), Math.max(b[1]! - ey, 0, ey - b[4]!), Math.max(b[2]! - ez, 0, ez - b[5]!));
+    const level = d < detail ? 0 : d < detail * 2 ? 1 : 2;
+    if (level === 0) return authored;
+    return { ...lods[Math.min(level, lods.length) - 1]!, model: authored.model };
+  }
+
+  /** The engine's gentle auto-orbit round the scene, kept above any terrain. */
+  private autoOrbitCamera(): ReturnType<typeof buildOrbitCamera> {
+    const yaw = this.frame * AUTO_ORBIT_YAW_PER_FRAME;
+    const pitch = orbitPitchAboveTerrain(this.scene, yaw, AUTO_ORBIT_PITCH);
+    return buildOrbitCamera(this.scene.bounds, yaw, pitch, this.width / this.height, { extent: this.scene.extent });
+  }
+
   /**
    * Render the scene's directional shadow map for this frame, or null when the
    * rig has shadows off / no directional light.
@@ -881,7 +930,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       this.pooledRoot.forEach((root, i) => {
         if (root >= 0) posed.add(i);
       });
-      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i));
+      // Terrain frames nothing and casts nothing: the map is sized to the play space.
+      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && !this.scene.instances[i]?.terrain);
       const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow });
       if (!built) return null;
       this.staticShadowMatrix = built.lightViewProj;
@@ -992,14 +1042,26 @@ function fillPlaceholders(mesh: MeshAsset, images: ReadonlyMap<string, EncodedIm
 type TexturedMesh = Omit<MeshSceneInstance, "model">;
 
 /** Decode all of one mesh's material maps; a failed decode falls back to null (flat). */
-async function decodeMeshTextures(mesh: MeshAsset, decodeKtx2: (bytes: Uint8Array) => Promise<DecodedTexture | null>): Promise<TexturedMesh> {
+async function decodeMeshTextures(
+  mesh: MeshAsset,
+  decodeKtx2: (bytes: Uint8Array) => Promise<DecodedTexture | null>,
+  cache?: Map<EncodedImage, Promise<DecodedTexture | null>>,
+): Promise<TexturedMesh> {
+  const decode = (image: EncodedImage) => (image.mime === "image/ktx2" ? decodeKtx2(image.bytes) : decodeTexture(image.mime, image.bytes));
   const each = (pick: (m: MeshAsset["primitives"][number]["material"]) => EncodedImage | null | undefined) =>
     Promise.all(
       mesh.primitives.map((primitive) => {
         const image = pick(primitive.material);
         // No image, or a streamed placeholder whose bytes haven't arrived: flat colour for now.
         if (!image || image.bytes.length === 0) return Promise.resolve(null);
-        return image.mime === "image/ktx2" ? decodeKtx2(image.bytes) : decodeTexture(image.mime, image.bytes);
+        // Meshes that share an image (a terrain's blocks) share one decode.
+        if (!cache) return decode(image);
+        let entry = cache.get(image);
+        if (!entry) {
+          entry = decode(image);
+          cache.set(image, entry);
+        }
+        return entry;
       }),
     );
   const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures] = await Promise.all([

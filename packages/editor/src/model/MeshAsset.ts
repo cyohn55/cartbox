@@ -306,7 +306,7 @@ interface SerializedImage {
   /** An asset-store reference (content hash) in place of `bytes` (see meshTextureAssets.ts in the web app). */
   asset?: string;
 }
-interface SerializedMaterial {
+export interface SerializedMaterial {
   name: string;
   baseColorFactor: [number, number, number, number];
   image: SerializedImage | null;
@@ -465,21 +465,7 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
       normals: primitive.normals ? f32ToBase64(primitive.normals) : null,
       uvs: primitive.uvs ? f32ToBase64(primitive.uvs) : null,
       indices: u32ToBase64(primitive.indices),
-      material: {
-        name: primitive.material.name,
-        baseColorFactor: [...primitive.material.baseColorFactor],
-        image: serializeImage(primitive.material.baseColorImage),
-        normalImage: serializeImage(primitive.material.normalImage),
-        materialImage: serializeImage(primitive.material.materialImage),
-        metallicRoughnessImage: serializeImage(primitive.material.metallicRoughnessImage),
-        occlusionImage: serializeImage(primitive.material.occlusionImage),
-        emissiveImage: serializeImage(primitive.material.emissiveImage),
-        metallicFactor: primitive.material.metallicFactor,
-        roughnessFactor: primitive.material.roughnessFactor,
-        emissiveFactor: primitive.material.emissiveFactor ? [...primitive.material.emissiveFactor] : undefined,
-        textureSprite: primitive.material.textureSprite ?? null,
-        ...(primitive.material.tintable ? { tintable: true } : {}),
-      },
+      material: serializeMaterial(primitive.material),
       ...(primitive.joints && primitive.weights && mesh.skin
         ? { joints: u16ToBase64(primitive.joints), weights: f32ToBase64(primitive.weights) }
         : {}),
@@ -537,6 +523,45 @@ function toTextureSprite(value: unknown): SpriteTextureRef | null {
   };
 }
 
+/** Encode a material (with its images) to the stored form — shared with the terrain codec. */
+export function serializeMaterial(material: MeshMaterial): SerializedMaterial {
+  return {
+    name: material.name,
+    baseColorFactor: [...material.baseColorFactor],
+    image: serializeImage(material.baseColorImage),
+    normalImage: serializeImage(material.normalImage),
+    materialImage: serializeImage(material.materialImage),
+    metallicRoughnessImage: serializeImage(material.metallicRoughnessImage),
+    occlusionImage: serializeImage(material.occlusionImage),
+    emissiveImage: serializeImage(material.emissiveImage),
+    metallicFactor: material.metallicFactor,
+    roughnessFactor: material.roughnessFactor,
+    emissiveFactor: material.emissiveFactor ? [...material.emissiveFactor] : undefined,
+    textureSprite: material.textureSprite ?? null,
+    ...(material.tintable ? { tintable: true } : {}),
+  };
+}
+
+/** Decode a stored material defensively (anything missing falls back to the default). */
+export function deserializeMaterial(value: unknown): MeshMaterial {
+  const material = (value && typeof value === "object" ? value : { name: "default", baseColorFactor: [1, 1, 1, 1], image: null }) as SerializedMaterial;
+  return {
+    name: typeof material.name === "string" ? material.name : "default",
+    baseColorFactor: toColor(material.baseColorFactor),
+    baseColorImage: deserializeImage(material.image),
+    normalImage: deserializeImage(material.normalImage),
+    materialImage: deserializeImage(material.materialImage),
+    metallicRoughnessImage: deserializeImage(material.metallicRoughnessImage),
+    occlusionImage: deserializeImage(material.occlusionImage),
+    emissiveImage: deserializeImage(material.emissiveImage),
+    metallicFactor: typeof material.metallicFactor === "number" ? material.metallicFactor : undefined,
+    roughnessFactor: typeof material.roughnessFactor === "number" ? material.roughnessFactor : undefined,
+    emissiveFactor: toEmissiveFactor(material.emissiveFactor),
+    textureSprite: toTextureSprite(material.textureSprite),
+    ...(material.tintable === true ? { tintable: true } : {}),
+  };
+}
+
 /**
  * Parse a serialized mesh, rejecting anything malformed or oversized — the bytes
  * are untrusted (another user's cart, or an arbitrary file). Every attribute
@@ -580,27 +605,12 @@ export function deserializeMeshAsset(json: string): MeshAsset {
       if (!weights.every(Number.isFinite)) throw new Error(MALFORMED);
     }
 
-    const material = entry.material ?? { name: "default", baseColorFactor: [1, 1, 1, 1], image: null };
     return {
       positions,
       normals,
       uvs,
       indices,
-      material: {
-        name: typeof material.name === "string" ? material.name : "default",
-        baseColorFactor: toColor(material.baseColorFactor),
-        baseColorImage: deserializeImage(material.image),
-        normalImage: deserializeImage(material.normalImage),
-        materialImage: deserializeImage(material.materialImage),
-        metallicRoughnessImage: deserializeImage(material.metallicRoughnessImage),
-        occlusionImage: deserializeImage(material.occlusionImage),
-        emissiveImage: deserializeImage(material.emissiveImage),
-        metallicFactor: typeof material.metallicFactor === "number" ? material.metallicFactor : undefined,
-        roughnessFactor: typeof material.roughnessFactor === "number" ? material.roughnessFactor : undefined,
-        emissiveFactor: toEmissiveFactor(material.emissiveFactor),
-        textureSprite: toTextureSprite(material.textureSprite),
-        ...(material.tintable === true ? { tintable: true } : {}),
-      },
+      material: deserializeMaterial(entry.material),
       ...(joints && weights ? { joints, weights } : {}),
     };
   });

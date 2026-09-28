@@ -7935,6 +7935,9 @@ import {
   readTimelines,
   readLevels,
   readNavMesh,
+  readTerrains,
+  terrainChunks,
+  terrainHeight,
   effectiveLevels,
   readSceneProps,
   readSceneTags,
@@ -8015,13 +8018,13 @@ function parseMeshScene(raw) {
     }
     return cache.get(serialized) ?? null;
   };
-  const readEntry = (record, id, parentId, identity = false) => {
+  const readEntry = (record, id, parentId, identity2 = false) => {
     if (typeof record.mesh !== "string") return null;
     const resolved = resolveMeshRef(record.mesh, library);
     const mesh = resolved ? load(resolved) : null;
     if (!mesh) return null;
     const frames = resolveMeshFrames(record.frames, library).map(load).filter((frame) => frame !== null);
-    const t = identity ? { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } : readTransform(record.transform);
+    const t = identity2 ? { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } : readTransform(record.transform);
     return {
       mesh,
       local: composeModelMatrix3(t.position, t.rotation, t.scale),
@@ -8092,16 +8095,39 @@ function parseMeshScene(raw) {
     ...pool ? { pooled: { prefab: pool.prefab, copy: pool.copy, root: indexOf.get(pool.rootId) } } : {},
     ...levelOf[i] >= 0 ? { level: levelOf[i] } : {}
   }));
+  const terrains = readTerrains(parsed.terrains);
+  const identity = composeModelMatrix3([0, 0, 0], [0, 0, 0], [1, 1, 1]);
+  for (const t of terrains) {
+    const parent = t.parent !== void 0 ? indexOf.get(t.parent) ?? -1 : -1;
+    const model = parent >= 0 ? instances[parent].model : identity;
+    for (const chunk of terrainChunks(t)) {
+      instances.push({
+        mesh: chunk.mesh,
+        ...chunk.lods.length > 0 ? { frames: chunk.lods } : {},
+        model,
+        local: identity,
+        parent,
+        id: `terrain:${t.id}:${chunk.cells[0]},${chunk.cells[1]}`,
+        name: t.name,
+        tags: [],
+        props: {},
+        physics: null,
+        terrain: true,
+        detail: chunk.detail
+      });
+    }
+  }
   if (instances.length === 0) return null;
   const lighting = parseSceneLighting(parsed.lighting);
   const pools = [...poolRoots.entries()].map(([prefab, ids]) => ({ prefab, roots: ids.map((id) => indexOf.get(id)) }));
-  const placed = instances.filter((instance) => !instance.pooled && (instance.level === void 0 || instance.level === 0));
+  const placed = instances.filter((instance) => !instance.pooled && !instance.terrain && (instance.level === void 0 || instance.level === 0));
   const physicsWorld = readPhysicsWorld(parsed.physicsWorld);
   const timelines = readTimelines(parsed.timelines);
   const navmesh = readNavMesh(parsed.navmesh);
   return {
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
+    ...terrains.length > 0 ? { terrains, extent: sceneBounds(instances.filter((instance) => !instance.pooled)) } : {},
     lighting,
     ...pools.length > 0 ? { pools } : {},
     ...physicsWorld ? { physicsWorld } : {},
@@ -8109,6 +8135,19 @@ function parseMeshScene(raw) {
     ...levels.length > 0 ? { levels } : {},
     ...navmesh && navmesh.heights.length > 0 ? { navmesh } : {}
   };
+}
+function orbitPitchAboveTerrain(scene, yaw, pitch) {
+  const terrains = scene.terrains;
+  if (!terrains || terrains.length === 0) return pitch;
+  const { center, radius } = scene.bounds;
+  const distance = radius / Math.sin(25 * Math.PI / 180) + radius;
+  for (let p = pitch; p < 1.45; p += 0.05) {
+    const x = center[0] + distance * Math.cos(p) * Math.sin(yaw);
+    const y = center[1] + distance * Math.sin(p);
+    const z = center[2] + distance * Math.cos(p) * Math.cos(yaw);
+    if (terrains.every((t) => (terrainHeight(t, x, z) ?? -Infinity) + 4 < y)) return p;
+  }
+  return 1.45;
 }
 function buildOrbitCamera(bounds, yaw, pitch, aspect, options = {}) {
   const { radius } = bounds;
@@ -8125,14 +8164,15 @@ function buildOrbitCamera(bounds, yaw, pitch, aspect, options = {}) {
     target[1] + distance * Math.sin(pitch),
     target[2] + distance * cosPitch * Math.cos(yaw)
   ];
+  let far = distance + radius * 4;
+  const extent = options.extent;
+  if (extent) {
+    const reach = Math.hypot(eye[0] - extent.center[0], eye[1] - extent.center[1], eye[2] - extent.center[2]) + extent.radius;
+    far = Math.max(far, reach);
+  }
   return {
     view: viewMatrix(eye, target),
-    projection: projectionMatrix(
-      fovY,
-      aspect,
-      options.near && options.near > 0 ? options.near : Math.max(0.01, radius * 0.05),
-      distance + radius * 4
-    )
+    projection: projectionMatrix(fovY, aspect, options.near && options.near > 0 ? options.near : Math.max(0.01, radius * 0.05), far)
   };
 }
 
@@ -8252,6 +8292,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.profiler = null;
     /** Decodes a KTX2 texture (loading the decoder on first use); set by create. */
     this.decodeKtx2 = async () => null;
+    /** The camera's eye this frame (terrain blocks pick their detail by distance from it). */
+    this.eye = null;
+    /** Each terrain block's world bounds, measured on first use. */
+    this.blockBounds = /* @__PURE__ */ new Map();
     this.output = new Uint8ClampedArray(width * height * 4);
     this.presented = new Uint8Array(this.output.buffer);
     this.depth = new Float32Array(width * height);
@@ -8330,10 +8374,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       ktx2 ?? (ktx2 = options.ktx2 ? options.ktx2().catch(() => null) : Promise.resolve(null));
       return ktx2.then((decode) => decode ? decode(bytes) : null);
     };
+    const images = /* @__PURE__ */ new Map();
     const texture = (mesh) => {
       let entry = decoded.get(mesh);
       if (!entry) {
-        entry = decodeMeshTextures(mesh, decodeKtx2);
+        entry = decodeMeshTextures(mesh, decodeKtx2, images);
         decoded.set(mesh, entry);
       }
       return entry;
@@ -8469,8 +8514,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       targetOffset: cart.target,
       // First-person (HUD) views put the eye inside the scene: a tight near
       // plane keeps the held weapon and adjacent walls from being clipped.
-      near: this.hud ? FIRST_PERSON_NEAR : void 0
-    }) : buildOrbitCamera(this.scene.bounds, this.frame * AUTO_ORBIT_YAW_PER_FRAME, AUTO_ORBIT_PITCH, this.width / this.height);
+      near: this.hud ? FIRST_PERSON_NEAR : void 0,
+      extent: this.scene.extent
+    }) : this.autoOrbitCamera();
+    const v = camera.view;
+    this.eye = [-(v[0] * v[12] + v[1] * v[13] + v[2] * v[14]), -(v[4] * v[12] + v[5] * v[13] + v[6] * v[14]), -(v[8] * v[12] + v[9] * v[13] + v[10] * v[14])];
     const { main: instances, front, moved } = this.posedInstances();
     const lighting = this.scene.lighting;
     let mark = profiler ? performance.now() : 0;
@@ -8608,7 +8656,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const authored = this.instances[i];
       const pose = this.poses.find((p) => p.index === i);
       if (!pose) {
-        main.push(authored);
+        main.push(this.atDetail(i, authored));
         continue;
       }
       if (pose.hidden) continue;
@@ -8624,7 +8672,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         front.push(instance);
       } else {
         main.push(instance);
-        moved.push(instance);
+        if (!this.scene.instances[i]?.terrain) moved.push(instance);
       }
     }
     return { main, front, moved };
@@ -8676,13 +8724,13 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       placement[i] = s.hidden ? null : s.model;
       if (s.hidden) continue;
       if (!s.moved) {
-        main.push(authored);
+        main.push(this.atDetail(i, authored));
         continue;
       }
       const pose = byIndex.get(i);
       const frames = this.frames[i];
       const frame = pose?.frame ?? 0;
-      const source = frame > 0 && frames && frames.length > 0 ? frames[(frame - 1) % frames.length] : authored;
+      const source = frame > 0 && frames && frames.length > 0 ? frames[(frame - 1) % frames.length] : this.atDetail(i, authored);
       const instance = {
         ...source,
         mesh: pose?.tint ? this.tinted(source.mesh, pose.tint) : source.mesh,
@@ -8691,7 +8739,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       if (s.front) front.push(instance);
       else {
         main.push(instance);
-        moved.push(instance);
+        if (!this.scene.instances[i]?.terrain) moved.push(instance);
       }
     }
     this.lastPlacement = placement;
@@ -8728,6 +8776,48 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     return out;
   }
   /**
+   * A terrain block at the detail its distance from the eye calls for: full
+   * within its `detail` range, half out to twice that, quarter beyond. Anything
+   * else is returned as it is.
+   */
+  atDetail(i, authored) {
+    const detail = this.scene.instances[i]?.detail;
+    const lods = this.frames[i];
+    if (!detail || !lods || lods.length === 0 || !this.eye) return authored;
+    let b = this.blockBounds.get(i);
+    if (!b) {
+      const m = authored.model;
+      let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+      for (const primitive of authored.mesh.primitives) {
+        const p = primitive.positions;
+        for (let k = 0; k < p.length; k += 3) {
+          const x = m[0] * p[k] + m[4] * p[k + 1] + m[8] * p[k + 2] + m[12];
+          const y = m[1] * p[k] + m[5] * p[k + 1] + m[9] * p[k + 2] + m[13];
+          const z = m[2] * p[k] + m[6] * p[k + 1] + m[10] * p[k + 2] + m[14];
+          x0 = Math.min(x0, x);
+          x1 = Math.max(x1, x);
+          y0 = Math.min(y0, y);
+          y1 = Math.max(y1, y);
+          z0 = Math.min(z0, z);
+          z1 = Math.max(z1, z);
+        }
+      }
+      b = [x0, y0, z0, x1, y1, z1];
+      this.blockBounds.set(i, b);
+    }
+    const [ex, ey, ez] = this.eye;
+    const d = Math.hypot(Math.max(b[0] - ex, 0, ex - b[3]), Math.max(b[1] - ey, 0, ey - b[4]), Math.max(b[2] - ez, 0, ez - b[5]));
+    const level = d < detail ? 0 : d < detail * 2 ? 1 : 2;
+    if (level === 0) return authored;
+    return { ...lods[Math.min(level, lods.length) - 1], model: authored.model };
+  }
+  /** The engine's gentle auto-orbit round the scene, kept above any terrain. */
+  autoOrbitCamera() {
+    const yaw = this.frame * AUTO_ORBIT_YAW_PER_FRAME;
+    const pitch = orbitPitchAboveTerrain(this.scene, yaw, AUTO_ORBIT_PITCH);
+    return buildOrbitCamera(this.scene.bounds, yaw, pitch, this.width / this.height, { extent: this.scene.extent });
+  }
+  /**
    * Render the scene's directional shadow map for this frame, or null when the
    * rig has shadows off / no directional light.
    *
@@ -8750,7 +8840,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.pooledRoot.forEach((root, i) => {
         if (root >= 0) posed.add(i);
       });
-      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i));
+      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && !this.scene.instances[i]?.terrain);
       const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow });
       if (!built) return null;
       this.staticShadowMatrix = built.lightViewProj;
@@ -8855,12 +8945,19 @@ function fillPlaceholders(mesh, images) {
   });
   return touched ? { ...mesh, primitives } : mesh;
 }
-async function decodeMeshTextures(mesh, decodeKtx2) {
+async function decodeMeshTextures(mesh, decodeKtx2, cache) {
+  const decode = (image) => image.mime === "image/ktx2" ? decodeKtx2(image.bytes) : decodeTexture(image.mime, image.bytes);
   const each = (pick) => Promise.all(
     mesh.primitives.map((primitive) => {
       const image = pick(primitive.material);
       if (!image || image.bytes.length === 0) return Promise.resolve(null);
-      return image.mime === "image/ktx2" ? decodeKtx2(image.bytes) : decodeTexture(image.mime, image.bytes);
+      if (!cache) return decode(image);
+      let entry = cache.get(image);
+      if (!entry) {
+        entry = decode(image);
+        cache.set(image, entry);
+      }
+      return entry;
     })
   );
   const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures] = await Promise.all([
@@ -13020,6 +13117,7 @@ export {
   netSendInterval,
   normalBasis3x3,
   normalVector,
+  orbitPitchAboveTerrain,
   packLights,
   paramKey,
   parseAnim,
