@@ -21,7 +21,7 @@ import { KTX2_TRANSCODER_TRANSFER_BYTES, gzipSize } from "./downloadBudget";
 export { KTX2_TRANSCODER_TRANSFER_BYTES };
 
 /** The material slots that can hold an image. */
-const IMAGE_SLOTS = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage"] as const;
+const IMAGE_SLOTS = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage", "blendImage"] as const;
 
 /** Whether KTX2 textures that travel as `ktx2Bytes` should stay, against `pngBytes` for the same textures as PNG. */
 export function keepKtx2(input: { ktx2Bytes: number; pngBytes: number; sceneHasKtx2: boolean }): boolean {

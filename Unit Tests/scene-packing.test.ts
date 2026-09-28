@@ -70,7 +70,7 @@ describe("uniform layout", () => {
     expect(Array.from(data.subarray(112, 120))).toEqual([0.5, 0.25, 0.75, 0.125, 1, 3, 0.5, 0]);
     writeInstanceUniform(data, 0, { ...base, ...NON_PBR });
     expect(Array.from(data.subarray(112, 120))).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
-    expect(UNIFORM_BYTES_USED).toBe(544);
+    expect(UNIFORM_BYTES_USED).toBe(560);
     expect(UNIFORM_BYTES_USED).toBeLessThanOrEqual(UNIFORM_STRIDE);
   });
 
@@ -462,22 +462,23 @@ describe("viewDirection", () => {
 });
 
 describe("interleaveVertices", () => {
-  it("packs position, normal, uv and light-map uv at the pipeline's stride", () => {
+  it("packs position, normal, uv, light-map uv and blend weight at the pipeline's stride", () => {
     const out = interleaveVertices(
       new Float32Array([1, 2, 3, 4, 5, 6]),
       new Float32Array([0, 1, 0, 0, 0, 1]),
       new Float32Array([0.5, 0.25, 0.75, 1]),
       new Float32Array([0.1, 0.2, 0.3, 0.4]),
+      new Float32Array([0.25, 0.75]),
     );
-    expect(VERTEX_FLOATS).toBe(10); // arrayStride 40 in the pipeline descriptor
+    expect(VERTEX_FLOATS).toBe(11); // arrayStride 44 in the pipeline descriptor
     expect(out.length).toBe(2 * VERTEX_FLOATS);
-    expect(Array.from(out.subarray(0, 10))).toEqual([1, 2, 3, 0, 1, 0, 0.5, 0.25, Math.fround(0.1), Math.fround(0.2)]);
-    expect(Array.from(out.subarray(10, 20))).toEqual([4, 5, 6, 0, 0, 1, 0.75, 1, Math.fround(0.3), Math.fround(0.4)]);
+    expect(Array.from(out.subarray(0, 11))).toEqual([1, 2, 3, 0, 1, 0, 0.5, 0.25, Math.fround(0.1), Math.fround(0.2), 0.25]);
+    expect(Array.from(out.subarray(11, 22))).toEqual([4, 5, 6, 0, 0, 1, 0.75, 1, Math.fround(0.3), Math.fround(0.4), 0.75]);
   });
 
-  it("zero-fills uvs for an untextured primitive, and light-map uvs for an unbaked one", () => {
+  it("zero-fills uvs for an untextured primitive, and light-map uvs and blend for a plain one", () => {
     const out = interleaveVertices(new Float32Array([1, 2, 3]), new Float32Array([0, 1, 0]), null);
-    expect(Array.from(out.subarray(6, 10))).toEqual([0, 0, 0, 0]);
+    expect(Array.from(out.subarray(6, 11))).toEqual([0, 0, 0, 0, 0]);
   });
 });
 

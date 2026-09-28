@@ -90,6 +90,8 @@ export interface MeshInstance extends MeshSceneInstance {
    * the shadow map (which frames the play space), and the far plane reaches it.
    */
   readonly terrain?: true;
+  /** On a terrain block whose terrain casts shadows ({@link Terrain.castShadows}): it goes into the shadow map. */
+  readonly casts?: true;
   /**
    * On a terrain block: how far from it full detail holds (world units). Its
    * `frames` are the half- and quarter-detail versions the renderer swaps to
@@ -354,6 +356,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
         props: {},
         physics: null,
         terrain: true,
+        ...(t.castShadows ? { casts: true as const } : {}),
         detail: chunk.detail,
       });
     }

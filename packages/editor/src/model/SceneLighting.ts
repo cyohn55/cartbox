@@ -322,7 +322,7 @@ export function buildSceneShadow(
   lighting: SceneLighting,
   center: readonly [number, number, number],
   radius: number,
-  options: { readonly size: number; readonly depth: Float32Array; readonly clear?: boolean },
+  options: { readonly size: number; readonly depth: Float32Array; readonly clear?: boolean; readonly reach?: number },
 ): ShadowInput | null {
   // An empty instance list still yields a (cleared) map, so a caller can layer
   // cached static depth + this frame's moving instances; only a rig without
@@ -335,7 +335,9 @@ export function buildSceneShadow(
   const dir: [number, number, number] = [direction[0] / len, direction[1] / len, direction[2] / len];
   // Place the light's eye back along its direction, far enough to see the whole
   // sphere, and look at the scene centre.
-  const dist = radius * 2;
+  // `reach` backs the light off further, so casters beyond the framed sphere
+  // (a terrain's cliffs, towering over the play space) stay in front of it.
+  const dist = radius * 2 + Math.max(0, options.reach ?? 0);
   const eye: [number, number, number] = [
     center[0] + dir[0] * dist,
     center[1] + dir[1] * dist,
@@ -345,6 +347,9 @@ export function buildSceneShadow(
   const lightProjection = orthographicMatrix(-radius, radius, -radius, radius, 0.01, dist + radius * 2);
   const map = renderShadowMap(instances, { lightView, lightProjection, size: options.size, depth: options.depth, clear: options.clear });
   // Authored rigs get slope-scaled bias (no acne on faces the sun grazes — the
-  // sloped Forerunner walls) and soft 2x2-filtered edges.
-  return { ...map, slopeBias: SHADOW_SLOPE_BIAS, pcf: true };
+  // sloped Forerunner walls) and soft 2x2-filtered edges. Bias is in light-NDC
+  // depth, so when `reach` deepens the light's range the bias shrinks with it:
+  // the same world distance, and thin casters (the walkway) still shadow.
+  const depthScale = (radius * 4) / (dist + radius * 2);
+  return { ...map, bias: 0.003 * depthScale, slopeBias: SHADOW_SLOPE_BIAS * depthScale, pcf: true };
 }

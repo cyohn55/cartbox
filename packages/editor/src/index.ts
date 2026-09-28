@@ -250,6 +250,7 @@ export {
   serializeTerrain,
   terrainHeight,
   terrainMesh,
+  terrainLayerWeights,
   type SerializedTerrain,
   type Terrain,
   type TerrainLayer,

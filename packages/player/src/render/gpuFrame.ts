@@ -85,10 +85,12 @@ export interface PrimitiveTextures {
   lm: DecodedTexture | null;
   /** The detail map (HALO2_STYLE_ROADMAP.md H3), or null. */
   detail: DecodedTexture | null;
+  /** The blend surface's map (H4), or null. */
+  blend: DecodedTexture | null;
 }
 
 export function sameTextures(a: PrimitiveTextures, b: PrimitiveTextures): boolean {
-  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.detail === b.detail;
+  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.detail === b.detail && a.blend === b.blend;
 }
 
 /** The copies of one primitive drawn together: one instanced draw. */
@@ -125,6 +127,7 @@ export function batchInstances<G extends { indexCount: number }>(
         emis: instance.emissiveTextures?.[index] ?? null,
         lm: primitive.uvs2 ? (instance.lightmapTextures?.[index] ?? null) : null,
         detail: instance.detailTextures?.[index] ?? null,
+        blend: primitive.blend ? (instance.blendTextures?.[index] ?? null) : null,
       };
       let list = byPrimitive.get(primitive);
       if (!list) byPrimitive.set(primitive, (list = []));

@@ -51,6 +51,16 @@ export interface Terrain {
    * object's space, and hiding or moving the object carries the terrain too.
    */
   readonly parent?: string;
+  /**
+   * Blend neighbouring layers smoothly (HALO2_STYLE_ROADMAP.md H4) instead of
+   * giving each triangle one: across `up` (of the normal's up component) and
+   * `height` (world units) either side of a layer's bounds the two mix per
+   * vertex, and `noise` (0..1) wanders the edge so it reads as drifts and
+   * scoured ridges rather than a contour line. Absent = hard edges.
+   */
+  readonly blend?: { readonly up: number; readonly height: number; readonly noise?: number };
+  /** Let the terrain cast into the play space's shadow map (its cliffs shade the deck at a low sun). */
+  readonly castShadows?: boolean;
 }
 
 export const MIN_TERRAIN_SAMPLES = 2;
@@ -74,6 +84,73 @@ export function terrainHeight(t: Terrain, x: number, z: number): number | null {
   const top = h(x0, z0) * (1 - fx) + h(x0 + 1, z0) * fx;
   const bottom = h(x0, z0 + 1) * (1 - fx) + h(x0 + 1, z0 + 1) * fx;
   return t.origin[1] + top * (1 - fz) + bottom * fz;
+}
+
+/** 0 → 1 across [edge − w/2, edge + w/2] (a hard step when w is 0). */
+function ramp(v: number, edge: number, w: number): number {
+  if (w <= 0) return v >= edge ? 1 : 0;
+  const t = Math.max(0, Math.min(1, (v - edge + w / 2) / w));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * How much a value lies within [lo, hi], softened by w either side (absent
+ * range = fully). A bound at or past the value's natural limit (`limits`: an
+ * up component can't pass 0 or 1) is a hard edge nothing crosses, so it isn't
+ * softened — perfectly flat ground stays fully in a layer that reaches 1.
+ */
+function within(v: number, range: readonly [number, number] | undefined, w: number, limits: readonly [number, number] = [-Infinity, Infinity]): number {
+  if (!range) return 1;
+  const low = range[0] <= limits[0] ? 1 : ramp(v, range[0], w);
+  const high = range[1] >= limits[1] ? 1 : 1 - ramp(v, range[1], w);
+  return low * high;
+}
+
+/**
+ * Each layer's weight at a point, first match winning softly: a layer takes
+ * its membership of what the layers before it left, the last takes the rest.
+ */
+export function terrainLayerWeights(t: Terrain, up: number, height: number, jitter = 0): number[] {
+  const b = t.blend;
+  const wu = b ? Math.max(0, b.up) : 0;
+  const wh = b ? Math.max(0, b.height) : 0;
+  const u = up + jitter * wu;
+  const h = height + jitter * wh;
+  const out: number[] = [];
+  let rest = 1;
+  t.layers.forEach((l, i) => {
+    if (i === t.layers.length - 1) {
+      out.push(rest);
+      return;
+    }
+    const w = rest * within(u, l.up, wu, [0, 1]) * within(h, l.height, wh);
+    out.push(w);
+    rest -= w;
+  });
+  return out;
+}
+
+/** Smooth, tileable-enough value noise in −1..1 over world XZ (a few units per feature), for the blend edge. */
+function edgeNoise(x: number, z: number): number {
+  const cell = (i: number, j: number) => {
+    let h = (Math.imul(i, 374761393) + Math.imul(j, 668265263)) | 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+  };
+  const octave = (scale: number) => {
+    const gx = x / scale;
+    const gz = z / scale;
+    const x0 = Math.floor(gx);
+    const z0 = Math.floor(gz);
+    const fx = gx - x0;
+    const fz = gz - z0;
+    const sx = fx * fx * (3 - 2 * fx);
+    const sz = fz * fz * (3 - 2 * fz);
+    const top = cell(x0, z0) + (cell(x0 + 1, z0) - cell(x0, z0)) * sx;
+    const bottom = cell(x0, z0 + 1) + (cell(x0 + 1, z0 + 1) - cell(x0, z0 + 1)) * sx;
+    return top + (bottom - top) * sz;
+  };
+  return (octave(9) * 0.65 + octave(3.5) * 0.35) * 2 - 1;
 }
 
 function layerFor(layers: readonly TerrainLayer[], up: number, height: number): number {
@@ -102,7 +179,74 @@ export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, nu
   const dz = t.size[1] / (n - 1);
   const tile = t.tile && t.tile > 0 ? t.tile : DEFAULT_TILE;
   const h = (i: number, j: number) => t.heights[Math.min(n - 1, j) * n + Math.min(n - 1, i)]!;
-  const out = t.layers.map(() => ({ positions: [] as number[], normals: [] as number[], uvs: [] as number[], indices: [] as number[], map: new Map<number, number>() }));
+  // One bucket per layer, plus one per pair of layers blended across their edge
+  // (made as triangles need them): its vertices carry the second layer's weight.
+  interface Bucket {
+    positions: number[];
+    normals: number[];
+    uvs: number[];
+    indices: number[];
+    map: Map<number, number>;
+    material: MeshMaterial;
+    blend?: number[];
+    pair?: readonly [number, number];
+  }
+  const bucket = (material: MeshMaterial, pair?: readonly [number, number]): Bucket => ({
+    positions: [],
+    normals: [],
+    uvs: [],
+    indices: [],
+    map: new Map(),
+    material,
+    ...(pair ? { blend: [], pair } : {}),
+  });
+  const out: Bucket[] = t.layers.map((l) => bucket(l.material));
+  const pairs = new Map<string, number>();
+  const pairBucket = (a: number, b: number): number => {
+    const key = `${a},${b}`;
+    let index = pairs.get(key);
+    if (index === undefined) {
+      const A = t.layers[a]!.material;
+      const B = t.layers[b]!.material;
+      index = out.length;
+      out.push(
+        bucket(
+          {
+            ...A,
+            name: `${A.name}+${B.name}`,
+            blendImage: B.baseColorImage ?? null,
+            blendColor: [B.baseColorFactor[0], B.baseColorFactor[1], B.baseColorFactor[2]],
+            blendRoughness: B.roughnessFactor ?? 1,
+          },
+          [a, b],
+        ),
+      );
+      pairs.set(key, index);
+    }
+    return index;
+  };
+  // Per-vertex layer weights (blend mode only), cached by grid index.
+  const weightCache = new Map<number, number[]>();
+  const vertexNormalY = (i: number, j: number): number => {
+    const l = h(Math.max(0, i - s), j);
+    const r = h(Math.min(n - 1, i + s), j);
+    const d = h(i, Math.max(0, j - s));
+    const u = h(i, Math.min(n - 1, j + s));
+    const nx = -(r - l) / ((Math.min(n - 1, i + s) - Math.max(0, i - s)) * dx);
+    const nz = -(u - d) / ((Math.min(n - 1, j + s) - Math.max(0, j - s)) * dz);
+    return 1 / Math.hypot(nx, 1, nz);
+  };
+  const weightsAt = (i: number, j: number): number[] => {
+    const key = j * n + i;
+    let w = weightCache.get(key);
+    if (!w) {
+      const x = t.origin[0] + i * dx;
+      const z = t.origin[2] + j * dz;
+      w = terrainLayerWeights(t, vertexNormalY(i, j), t.origin[1] + h(i, j), (t.blend?.noise ?? 0) * edgeNoise(x, z));
+      weightCache.set(key, w);
+    }
+    return w;
+  };
   const vertex = (layer: number, i: number, j: number): number => {
     const o = out[layer]!;
     const key = j * n + i;
@@ -125,6 +269,12 @@ export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, nu
     o.positions.push(x, y, z);
     o.normals.push(nx / len, 1 / len, nz / len);
     o.uvs.push(x / tile, z / tile);
+    if (o.blend && o.pair) {
+      const w = weightsAt(i, j);
+      const wa = w[o.pair[0]]!;
+      const wb = w[o.pair[1]]!;
+      o.blend.push(wa + wb > 1e-6 ? wb / (wa + wb) : 0);
+    }
     o.map.set(key, index);
     return index;
   };
@@ -138,11 +288,23 @@ export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, nu
     const vx = pc[0]! - pa[0]!, vy = pc[1]! - pa[1]!, vz = pc[2]! - pa[2]!;
     const ny = uz * vx - ux * vz;
     const len = Math.hypot(uy * vz - uz * vy, ny, ux * vy - uy * vx) || 1;
-    const layer = layerFor(t.layers, ny / len, t.origin[1] + (pa[1]! + pb[1]! + pc[1]!) / 3);
+    const layer = t.blend ? blendBucket(a, b, c) : layerFor(t.layers, ny / len, t.origin[1] + (pa[1]! + pb[1]! + pc[1]!) / 3);
     out[layer]!.indices.push(vertex(layer, a[0], a[1]), vertex(layer, b[0], b[1]), vertex(layer, c[0], c[1]));
     if (skirt > 0) {
       for (const [p, q, r] of [[a, b, c], [b, c, a], [c, a, b]] as const) if (onEdge(p, q)) hang(layer, p, q, r);
     }
+  };
+  // Blend mode: the triangle goes to its dominant layer, or — where a second
+  // layer shows at any corner — to that pair's blended bucket.
+  const blendBucket = (a: readonly [number, number], b: readonly [number, number], c: readonly [number, number]): number => {
+    const ws = [weightsAt(a[0], a[1]), weightsAt(b[0], b[1]), weightsAt(c[0], c[1])];
+    const sum = t.layers.map((_, k) => ws[0]![k]! + ws[1]![k]! + ws[2]![k]!);
+    let first = 0;
+    for (let k = 1; k < sum.length; k += 1) if (sum[k]! > sum[first]!) first = k;
+    let second = -1;
+    for (let k = 0; k < sum.length; k += 1) if (k !== first && (second < 0 || sum[k]! > sum[second]!)) second = k;
+    if (second < 0 || Math.max(ws[0]![second]!, ws[1]![second]!, ws[2]![second]!) < 0.02) return first;
+    return pairBucket(first, second);
   };
   // An edge of the block: both ends on the same side of it.
   const onEdge = (p: readonly [number, number], q: readonly [number, number]) =>
@@ -156,6 +318,7 @@ export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, nu
       o.positions.push(o.positions[v * 3]!, o.positions[v * 3 + 1]! - skirt, o.positions[v * 3 + 2]!);
       o.normals.push(o.normals[v * 3]!, o.normals[v * 3 + 1]!, o.normals[v * 3 + 2]!);
       o.uvs.push(o.uvs[v * 2]!, o.uvs[v * 2 + 1]! + skirt / tile);
+      if (o.blend) o.blend.push(o.blend[v]!);
     }
     // Wind it to face outward: away from the triangle's far corner.
     const ex = (q[0] - p[0]) * dx, ez = (q[1] - p[1]) * dz;
@@ -183,16 +346,17 @@ export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, nu
     }
   }
   const primitives: MeshPrimitive[] = [];
-  out.forEach((o, i) => {
-    if (o.indices.length === 0) return;
+  for (const o of out) {
+    if (o.indices.length === 0) continue;
     primitives.push({
       positions: new Float32Array(o.positions),
       normals: new Float32Array(o.normals),
       uvs: new Float32Array(o.uvs),
       indices: new Uint32Array(o.indices),
-      material: t.layers[i]!.material,
+      material: o.material,
+      ...(o.blend ? { blend: new Float32Array(o.blend) } : {}),
     });
-  });
+  }
   return { name: t.name, primitives };
 }
 
@@ -247,6 +411,8 @@ export interface SerializedTerrain {
   floor?: number;
   tile?: number;
   parent?: string;
+  blend?: { up: number; height: number; noise?: number };
+  castShadows?: boolean;
 }
 
 export function serializeTerrain(t: Terrain): SerializedTerrain {
@@ -263,6 +429,8 @@ export function serializeTerrain(t: Terrain): SerializedTerrain {
     ...(t.floor !== undefined ? { floor: t.floor } : {}),
     ...(t.tile !== undefined ? { tile: t.tile } : {}),
     ...(t.parent ? { parent: t.parent } : {}),
+    ...(t.blend ? { blend: { up: t.blend.up, height: t.blend.height, ...(t.blend.noise !== undefined ? { noise: t.blend.noise } : {}) } } : {}),
+    ...(t.castShadows ? { castShadows: true } : {}),
   };
 }
 
@@ -307,6 +475,21 @@ export function readTerrain(value: unknown): Terrain | null {
     ...(finite(r.floor) ? { floor: r.floor } : {}),
     ...(finite(r.tile) && r.tile > 0 ? { tile: r.tile } : {}),
     ...(typeof r.parent === "string" && r.parent ? { parent: r.parent } : {}),
+    ...readBlend(r.blend),
+    ...(r.castShadows === true ? { castShadows: true } : {}),
+  };
+}
+
+function readBlend(value: unknown): { blend?: Terrain["blend"] } {
+  if (!value || typeof value !== "object") return {};
+  const b = value as Record<string, unknown>;
+  if (!finite(b.up) || !finite(b.height)) return {};
+  return {
+    blend: {
+      up: Math.max(0, Math.min(1, b.up)),
+      height: Math.max(0, Math.min(100, b.height)),
+      ...(finite(b.noise) ? { noise: Math.max(0, Math.min(1, b.noise)) } : {}),
+    },
   };
 }
 

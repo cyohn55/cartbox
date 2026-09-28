@@ -64,6 +64,7 @@ import {
   packLights,
   packProbes,
   resolveSurface,
+  VERTEX_FLOATS,
   PROBE_FLOATS,
   resolveLight,
   resolvePbr,
@@ -89,6 +90,7 @@ const UNIT_SSAO = 6;
 const UNIT_LM = 7;
 const UNIT_PROBES = 8;
 const UNIT_DETAIL = 9;
+const UNIT_BLEND = 10;
 
 const BLOCK_UNIFORMS = 0;
 const BLOCK_INSTANCES = 1;
@@ -119,6 +121,7 @@ layout(std140) uniform Uniforms {
   vec4 surface0;
   vec4 surface1;
   vec4 surface2;
+  vec4 surface3;
 } u;
 `;
 
@@ -139,6 +142,8 @@ layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec2 uv;
 layout(location = 3) in vec2 uv2;
+layout(location = 4) in float bw;
+out float vBw;
 out vec3 vNormal;
 out vec2 vUv;
 out vec2 vUv2;
@@ -151,6 +156,7 @@ void main() {
   vNormal = t.nrm * normal;
   vUv = uv;
   vUv2 = uv2;
+  vBw = bw;
   vLightClip = t.lightMvp * vec4(position, 1.0);
   vWorldPos = (t.model * vec4(position, 1.0)).xyz;
   vEyeDepth = p.w;
@@ -185,10 +191,12 @@ uniform sampler2D lmTex;
 // counts them.
 uniform sampler2D probeAtlas;
 uniform sampler2D detailTex;
+uniform sampler2D blendTex;
 uniform vec4 probeData[${MAX_REFLECTION_PROBES * 4}];
 in vec3 vNormal;
 in vec2 vUv;
 in vec2 vUv2;
+in float vBw;
 in vec4 vLightClip;
 in vec3 vWorldPos;
 in float vEyeDepth;
@@ -295,10 +303,16 @@ void main() {
       metallic = metallic * mr.b;
       if (u.surface0.w > 0.5) { reflectK = reflectK * mr.a; }
     }
+    if (u.surface1.z > 0.5 && u.surface3.w >= 0.0) { rough = mix(rough, u.surface3.w, vBw); }
     rough = clamp(rough, 0.045, 1.0);
     float ao = 1.0;
     if (u.texflags.z > 0.5) { ao = sampleMap(occTex, uv).r; }
     vec3 albedo = colour.rgb;
+    if (u.surface1.z > 0.5) {
+      vec3 bc = u.surface3.rgb;
+      if (u.surface1.w > 0.5) { bc = bc * sampleMap(blendTex, uv).rgb; }
+      albedo = mix(albedo, bc, vBw);
+    }
     float dk = u.surface0.y * clamp((${DETAIL_FAR.toFixed(4)} - vEyeDepth) / ${(DETAIL_FAR - DETAIL_NEAR).toFixed(4)}, 0.0, 1.0);
     if (dk > 0.0) {
       vec3 detail = sampleMap(detailTex, vec2(vUv.x * u.surface0.x, 1.0 - vUv.y * u.surface0.x)).rgb;
@@ -567,6 +581,7 @@ export class WebglSceneRenderer implements SceneRenderer {
         ["lmTex", UNIT_LM],
         ["probeAtlas", UNIT_PROBES],
         ["detailTex", UNIT_DETAIL],
+        ["blendTex", UNIT_BLEND],
       ];
       for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
 
@@ -695,7 +710,10 @@ export class WebglSceneRenderer implements SceneRenderer {
         model,
         lightCount: sceneLights.length,
         fog: draw.fog ?? null,
-        surface: resolveSurface(batch.primitive.material, draw.time ?? 0, batch.textures.detail !== null, batch.textures.mr !== null),
+        surface: resolveSurface(batch.primitive.material, draw.time ?? 0, batch.textures.detail !== null, batch.textures.mr !== null, {
+          weights: batch.primitive.blend !== undefined,
+          textured: batch.textures.blend !== null,
+        }),
       });
     });
     for (const chunk of chunks) {
@@ -738,6 +756,7 @@ export class WebglSceneRenderer implements SceneRenderer {
     for (let unit = UNIT_BASE; unit <= UNIT_EMIS; unit += 1) gl.bindSampler(unit, this.sampler);
     gl.bindSampler(UNIT_LM, this.sampler);
     gl.bindSampler(UNIT_DETAIL, this.sampler);
+    gl.bindSampler(UNIT_BLEND, this.sampler);
 
     this.timer?.begin();
     let bound: PrimitiveTextures | null = null;
@@ -754,6 +773,7 @@ export class WebglSceneRenderer implements SceneRenderer {
           this.bindTexture(UNIT_EMIS, this.textureFor(batch.textures.emis));
           this.bindTexture(UNIT_LM, this.textureFor(batch.textures.lm));
           this.bindTexture(UNIT_DETAIL, this.textureFor(batch.textures.detail));
+          this.bindTexture(UNIT_BLEND, this.textureFor(batch.textures.blend));
           bound = batch.textures;
         }
         gl.bindVertexArray(batch.geometry.vao);
@@ -874,7 +894,7 @@ export class WebglSceneRenderer implements SceneRenderer {
         if (!primitive.dynamic || !g || g.revision === primitive.dynamic.revision) return;
         const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
         gl.bindBuffer(gl.ARRAY_BUFFER, g.vertexBuffer);
-        gl.bufferSubData(gl.ARRAY_BUFFER, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null));
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null));
         g.revision = primitive.dynamic.revision;
       });
       return cached;
@@ -885,16 +905,19 @@ export class WebglSceneRenderer implements SceneRenderer {
       gl.bindVertexArray(vao);
       const vertexBuffer = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null), primitive.dynamic ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
-      // Interleaved position(3) + normal(3) + uv(2) + light-map uv(2), as the WebGPU vertex layout.
+      gl.bufferData(gl.ARRAY_BUFFER, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null), primitive.dynamic ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
+      // Interleaved position(3) + normal(3) + uv(2) + light-map uv(2) + blend weight(1), as the WebGPU vertex layout.
+      const stride = VERTEX_FLOATS * 4;
       gl.enableVertexAttribArray(0);
-      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 40, 0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
       gl.enableVertexAttribArray(1);
-      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 40, 12);
+      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, stride, 12);
       gl.enableVertexAttribArray(2);
-      gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 40, 24);
+      gl.vertexAttribPointer(2, 2, gl.FLOAT, false, stride, 24);
       gl.enableVertexAttribArray(3);
-      gl.vertexAttribPointer(3, 2, gl.FLOAT, false, 40, 32);
+      gl.vertexAttribPointer(3, 2, gl.FLOAT, false, stride, 32);
+      gl.enableVertexAttribArray(4);
+      gl.vertexAttribPointer(4, 1, gl.FLOAT, false, stride, 40);
       const indexBuffer = gl.createBuffer();
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
       gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, primitive.indices, gl.STATIC_DRAW);

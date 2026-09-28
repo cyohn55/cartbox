@@ -981,9 +981,13 @@ export class MeshOverlaySurface implements DisplaySurface {
       this.pooledRoot.forEach((root, i) => {
         if (root >= 0) posed.add(i);
       });
-      // Terrain frames nothing and casts nothing: the map is sized to the play space.
-      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && !this.scene.instances[i]?.terrain);
-      const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow });
+      // Terrain frames nothing (the map is sized to the play space) and casts
+      // only when its terrain says so — its cliffs shading the deck at a low sun.
+      const casts = (i: number) => !this.scene.instances[i]?.terrain || this.scene.instances[i]?.casts === true;
+      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && casts(i));
+      const extent = this.scene.extent;
+      const reach = extent && this.scene.instances.some((inst) => inst.casts) ? Math.max(0, extent.radius * 2 - radius * 2) : 0;
+      const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow, reach });
       if (!built) return null;
       this.staticShadowMatrix = built.lightViewProj;
       this.staticShadowKey = key;
@@ -1077,7 +1081,7 @@ export class MeshOverlaySurface implements DisplaySurface {
 
 /** The mesh with each placeholder image whose ref is in `images` filled in (the same mesh when none is). */
 function fillPlaceholders(mesh: MeshAsset, images: ReadonlyMap<string, EncodedImage>): MeshAsset {
-  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage"] as const;
+  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage", "blendImage"] as const;
   let touched = false;
   const primitives = mesh.primitives.map((primitive) => {
     let material = primitive.material;
@@ -1120,7 +1124,7 @@ async function decodeMeshTextures(
         return entry;
       }),
     );
-  const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightmapTextures, detailTextures] = await Promise.all([
+  const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightmapTextures, detailTextures, blendTextures] = await Promise.all([
     each((m) => m.baseColorImage), // base colour
     each((m) => m.normalImage), // per-pixel normals (option 2)
     each((m) => m.materialImage), // packed specular/roughness/emissive (option 2, slice 5)
@@ -1133,6 +1137,8 @@ async function decodeMeshTextures(
     each((m) => m.lightmapImage),
     // A finely tiled detail map (materialEffects.ts).
     each((m) => m.detailImage),
+    // The blend surface of a blended primitive (terrain snow over rock).
+    each((m) => m.blendImage),
   ]);
   return {
     mesh,
@@ -1144,6 +1150,7 @@ async function decodeMeshTextures(
     emissiveTextures,
     ...(lightmapTextures.some((t) => t !== null) ? { lightmapTextures } : {}),
     ...(detailTextures.some((t) => t !== null) ? { detailTextures } : {}),
+    ...(blendTextures.some((t) => t !== null) ? { blendTextures } : {}),
   };
 }
 

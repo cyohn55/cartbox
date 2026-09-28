@@ -161,6 +161,16 @@ export interface MeshMaterial {
   readonly reflectivity?: number;
   /** Mask reflections per texel by the metallic-roughness map's alpha (opaque = full). */
   readonly reflectionMask?: boolean;
+  // --- A second surface blended in per vertex (HALO2_STYLE_ROADMAP.md H4) ---
+  /**
+   * Where a primitive carries per-vertex {@link MeshPrimitive.blend} weights,
+   * its albedo and roughness mix toward this second surface by them — snow
+   * drifting over rock without a hard edge between triangles. The image is
+   * sampled with the same UVs; the colour multiplies it (or stands alone).
+   */
+  readonly blendImage?: EncodedImage | null;
+  readonly blendColor?: readonly [number, number, number];
+  readonly blendRoughness?: number;
 }
 
 /** One triangle list with a single material. */
@@ -169,6 +179,8 @@ export interface MeshPrimitive {
   readonly positions: Float32Array;
   /** Per-vertex normals (`x,y,z`), or null when the source had none. */
   readonly normals: Float32Array | null;
+  /** Per-vertex weight (0..1) of the material's blend surface ({@link MeshMaterial.blendImage}), or absent. */
+  readonly blend?: Float32Array;
   /** Per-vertex texture coordinates (`u,v`), or null when untextured. */
   readonly uvs: Float32Array | null;
   /** Triangle vertex indices (three per triangle) into the attribute streams. */
@@ -369,12 +381,16 @@ export interface SerializedMaterial {
   rim?: { color: [number, number, number]; power: number; strength: number };
   reflectivity?: number;
   reflectionMask?: boolean;
+  blendImage?: SerializedImage | null;
+  blendColor?: [number, number, number];
+  blendRoughness?: number;
 }
 interface SerializedPrimitive {
   positions: string;
   normals: string | null;
   uvs: string | null;
   uvs2?: string;
+  blend?: string;
   indices: string;
   material: SerializedMaterial;
   joints?: string;
@@ -516,6 +532,7 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
       normals: primitive.normals ? f32ToBase64(primitive.normals) : null,
       uvs: primitive.uvs ? f32ToBase64(primitive.uvs) : null,
       ...(primitive.uvs2 ? { uvs2: f32ToBase64(primitive.uvs2) } : {}),
+      ...(primitive.blend ? { blend: f32ToBase64(primitive.blend) } : {}),
       indices: u32ToBase64(primitive.indices),
       material: serializeMaterial(primitive.material, Object.assign(images, { primitive: index })),
       ...(primitive.joints && primitive.weights && mesh.skin
@@ -616,6 +633,7 @@ export function serializeMaterial(material: MeshMaterial, table?: ImageTable): S
     textureSprite: material.textureSprite ?? null,
     ...(material.tintable ? { tintable: true } : {}),
     ...(material.detailImage ? { detailImage: serializeImage(material.detailImage, "detailImage", table) } : {}),
+    ...(material.blendImage ? { blendImage: serializeImage(material.blendImage, "blendImage", table) } : {}),
     ...writeSurfaceEffects(material),
   };
 }
@@ -639,6 +657,7 @@ export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMat
     textureSprite: toTextureSprite(material.textureSprite),
     ...(material.tintable === true ? { tintable: true } : {}),
     ...(material.detailImage ? { detailImage: deserializeImage(material.detailImage, "detailImage", table) } : {}),
+    ...(material.blendImage ? { blendImage: deserializeImage(material.blendImage, "blendImage", table) } : {}),
     ...readSurfaceEffects(material),
   };
 }
@@ -669,6 +688,8 @@ export function deserializeMeshAsset(json: string): MeshAsset {
     if (uvs && uvs.length !== vertexCount * 2) throw new Error(MALFORMED);
     const uvs2 = typeof entry.uvs2 === "string" ? base64ToF32(entry.uvs2) : null;
     if (uvs2 && uvs2.length !== vertexCount * 2) throw new Error(MALFORMED);
+    const blend = typeof entry.blend === "string" ? base64ToF32(entry.blend) : null;
+    if (blend && (blend.length !== vertexCount || !blend.every((w) => w >= 0 && w <= 1))) throw new Error(MALFORMED);
 
     const indices = base64ToU32(entry.indices);
     if (indices.length === 0 || indices.length % 3 !== 0) throw new Error(MALFORMED);
@@ -696,6 +717,7 @@ export function deserializeMeshAsset(json: string): MeshAsset {
       indices,
       material: deserializeMaterial(entry.material, Object.assign(images, { primitive: index })),
       ...(uvs2 ? { uvs2 } : {}),
+      ...(blend ? { blend } : {}),
       ...(joints && weights ? { joints, weights } : {}),
     };
   });
