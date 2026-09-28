@@ -33,6 +33,7 @@
 
 import {
   DEFAULT_RASTER_STYLE,
+  LIGHTMAP_RANGE,
   computeSmoothNormals,
   multiplyMat4,
   type DecodedTexture,
@@ -76,6 +77,7 @@ const UNIT_EMIS = 3;
 const UNIT_SHADOW = 4;
 const UNIT_ENV = 5;
 const UNIT_SSAO = 6;
+const UNIT_LM = 7;
 
 const BLOCK_UNIFORMS = 0;
 const BLOCK_INSTANCES = 1;
@@ -122,8 +124,10 @@ layout(std140) uniform Instances {
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec2 uv;
+layout(location = 3) in vec2 uv2;
 out vec3 vNormal;
 out vec2 vUv;
+out vec2 vUv2;
 out vec4 vLightClip;
 out vec3 vWorldPos;
 out float vEyeDepth;
@@ -132,6 +136,7 @@ void main() {
   vec4 p = t.mvp * vec4(position, 1.0);
   vNormal = t.nrm * normal;
   vUv = uv;
+  vUv2 = uv2;
   vLightClip = t.lightMvp * vec4(position, 1.0);
   vWorldPos = (t.model * vec4(position, 1.0)).xyz;
   vEyeDepth = p.w;
@@ -160,8 +165,10 @@ uniform sampler2D emisTex;
 uniform highp sampler2D shadowMap;
 uniform sampler2D envMap;
 uniform highp sampler2D ssaoMap;
+uniform sampler2D lmTex;
 in vec3 vNormal;
 in vec2 vUv;
+in vec2 vUv2;
 in vec4 vLightClip;
 in vec3 vWorldPos;
 in float vEyeDepth;
@@ -292,6 +299,11 @@ void main() {
       amb = (irr * albedo * kdm + pref * f0) * ao;
     } else {
       amb = vec3(u.light.w) * albedo * ao;
+    }
+    // A baked light map (the second UV set) scales the sky/ambient fill,
+    // mirroring the CPU path.
+    if (u.ssaoMeta.z > 0.5) {
+      amb = amb * texture(lmTex, vec2(vUv2.x, 1.0 - vUv2.y)).rgb * ${LIGHTMAP_RANGE.toFixed(4)};
     }
     if (u.ssaoMeta.x > 0.5) {
       amb = amb * texelFetch(ssaoMap, ivec2(gl_FragCoord.xy), 0).r;
@@ -491,6 +503,7 @@ export class WebglSceneRenderer implements SceneRenderer {
         ["shadowMap", UNIT_SHADOW],
         ["envMap", UNIT_ENV],
         ["ssaoMap", UNIT_SSAO],
+        ["lmTex", UNIT_LM],
       ];
       for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
 
@@ -614,6 +627,7 @@ export class WebglSceneRenderer implements SceneRenderer {
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
+        hasLightmap: batch.textures.lm !== null,
         model,
         lightCount: sceneLights.length,
         fog: draw.fog ?? null,
@@ -655,6 +669,7 @@ export class WebglSceneRenderer implements SceneRenderer {
     this.bindTexture(UNIT_ENV, this.envTexture ?? this.blankTexture);
     this.bindTexture(UNIT_SSAO, ssao ? this.ssaoTexture : this.blankFloat);
     for (let unit = UNIT_BASE; unit <= UNIT_EMIS; unit += 1) gl.bindSampler(unit, this.sampler);
+    gl.bindSampler(UNIT_LM, this.sampler);
 
     this.timer?.begin();
     let bound: PrimitiveTextures | null = null;
@@ -669,6 +684,7 @@ export class WebglSceneRenderer implements SceneRenderer {
           this.bindTexture(UNIT_MR, this.textureFor(batch.textures.mr));
           this.bindTexture(UNIT_OCC, this.textureFor(batch.textures.occ));
           this.bindTexture(UNIT_EMIS, this.textureFor(batch.textures.emis));
+          this.bindTexture(UNIT_LM, this.textureFor(batch.textures.lm));
           bound = batch.textures;
         }
         gl.bindVertexArray(batch.geometry.vao);
@@ -779,7 +795,7 @@ export class WebglSceneRenderer implements SceneRenderer {
         if (!primitive.dynamic || !g || g.revision === primitive.dynamic.revision) return;
         const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
         gl.bindBuffer(gl.ARRAY_BUFFER, g.vertexBuffer);
-        gl.bufferSubData(gl.ARRAY_BUFFER, 0, interleaveVertices(primitive.positions, normals, primitive.uvs));
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null));
         g.revision = primitive.dynamic.revision;
       });
       return cached;
@@ -790,14 +806,16 @@ export class WebglSceneRenderer implements SceneRenderer {
       gl.bindVertexArray(vao);
       const vertexBuffer = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, interleaveVertices(primitive.positions, normals, primitive.uvs), primitive.dynamic ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
-      // Interleaved position(3) + normal(3) + uv(2), as the WebGPU vertex layout.
+      gl.bufferData(gl.ARRAY_BUFFER, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null), primitive.dynamic ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
+      // Interleaved position(3) + normal(3) + uv(2) + light-map uv(2), as the WebGPU vertex layout.
       gl.enableVertexAttribArray(0);
-      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 32, 0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 40, 0);
       gl.enableVertexAttribArray(1);
-      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 32, 12);
+      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 40, 12);
       gl.enableVertexAttribArray(2);
-      gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 32, 24);
+      gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 40, 24);
+      gl.enableVertexAttribArray(3);
+      gl.vertexAttribPointer(3, 2, gl.FLOAT, false, 40, 32);
       const indexBuffer = gl.createBuffer();
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
       gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, primitive.indices, gl.STATIC_DRAW);

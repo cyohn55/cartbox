@@ -129,8 +129,9 @@ describe("the Lockout arena starter", () => {
     const scene = parseMeshScene(lockoutMeshSidecar())!;
     expect(scene.lighting?.sky).toEqual(LOCKOUT_LIGHTING.sky);
     expect(scene.lighting?.fog).toEqual(LOCKOUT_LIGHTING.fog);
-    // The sidecar stays small — no baked panorama inside it.
-    expect(lockoutMeshSidecar().length).toBeLessThan(1_200_000);
+    // The sidecar stays small — no baked panorama inside it (the arena's light
+    // map is its one large bake).
+    expect(lockoutMeshSidecar().length).toBeLessThan(1_400_000);
     // Bloom on the energy trim, via the starter's post-FX stack.
     const fx = parsePostFxSettings(resolveStarter("lockout").fx)!;
     expect(fx.enabled.bloom).toBe(true);

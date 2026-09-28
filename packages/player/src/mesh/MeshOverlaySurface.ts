@@ -1045,7 +1045,7 @@ export class MeshOverlaySurface implements DisplaySurface {
 
 /** The mesh with each placeholder image whose ref is in `images` filled in (the same mesh when none is). */
 function fillPlaceholders(mesh: MeshAsset, images: ReadonlyMap<string, EncodedImage>): MeshAsset {
-  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage"] as const;
+  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage"] as const;
   let touched = false;
   const primitives = mesh.primitives.map((primitive) => {
     let material = primitive.material;
@@ -1088,7 +1088,7 @@ async function decodeMeshTextures(
         return entry;
       }),
     );
-  const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures] = await Promise.all([
+  const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightmapTextures] = await Promise.all([
     each((m) => m.baseColorImage), // base colour
     each((m) => m.normalImage), // per-pixel normals (option 2)
     each((m) => m.materialImage), // packed specular/roughness/emissive (option 2, slice 5)
@@ -1097,8 +1097,19 @@ async function decodeMeshTextures(
     each((m) => m.metallicRoughnessImage),
     each((m) => m.occlusionImage),
     each((m) => m.emissiveImage),
+    // A baked light map (sampled with the second UV set).
+    each((m) => m.lightmapImage),
   ]);
-  return { mesh, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures };
+  return {
+    mesh,
+    textures,
+    normalTextures,
+    materialTextures,
+    mrTextures,
+    occlusionTextures,
+    emissiveTextures,
+    ...(lightmapTextures.some((t) => t !== null) ? { lightmapTextures } : {}),
+  };
 }
 
 /**

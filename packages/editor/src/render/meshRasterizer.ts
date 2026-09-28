@@ -23,6 +23,7 @@
  */
 
 import { fogFactor, type SceneFog } from "./skyDome";
+import { LIGHTMAP_RANGE } from "../model/lightmap";
 import { type MeshAsset, computeSmoothNormals, meshBounds } from "../model/MeshAsset";
 
 /** A decoded texture: tightly-packed RGBA rows, `width × height`. */
@@ -66,6 +67,8 @@ export interface RenderMeshOptions {
   readonly mrTextures?: readonly (DecodedTexture | null)[];
   readonly occlusionTextures?: readonly (DecodedTexture | null)[];
   readonly emissiveTextures?: readonly (DecodedTexture | null)[];
+  /** Baked light maps per primitive (see {@link MeshSceneInstance.lightmapTextures}). */
+  readonly lightmapTextures?: readonly (DecodedTexture | null)[];
   /** Image-based lighting environment for PBR materials (Modern tier); when set,
    *  it replaces the flat ambient term. See {@link EnvironmentLight}. */
   readonly environment?: EnvironmentLight | null;
@@ -379,6 +382,7 @@ function buildPbrFrag(
   mr: DecodedTexture | null,
   occ: DecodedTexture | null,
   emis: DecodedTexture | null,
+  lm: DecodedTexture | null = null,
 ): PbrFrag | null {
   const emissiveFactor = material.emissiveFactor;
   const isPbr =
@@ -393,6 +397,7 @@ function buildPbrFrag(
     mr,
     occ,
     emis,
+    lm,
     metallic: material.metallicFactor ?? 1,
     roughness: material.roughnessFactor ?? 1,
     emissive: emissiveFactor ?? [0, 0, 0],
@@ -470,6 +475,9 @@ interface Vertex {
   viewZ: number; // view-space z (negative in front of camera)
   u: number;
   v: number;
+  // Light-map coordinates (the second UV set); zero without a light map.
+  lu: number;
+  lv: number;
   nx: number;
   ny: number;
   nz: number;
@@ -496,6 +504,8 @@ function lerpVertex(a: Vertex, b: Vertex, t: number): Vertex {
     viewZ: mix(a.viewZ, b.viewZ),
     u: mix(a.u, b.u),
     v: mix(a.v, b.v),
+    lu: mix(a.lu, b.lu),
+    lv: mix(a.lv, b.lv),
     nx: mix(a.nx, b.nx),
     ny: mix(a.ny, b.ny),
     nz: mix(a.nz, b.nz),
@@ -646,6 +656,7 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
     options.mrTextures ?? null,
     options.occlusionTextures ?? null,
     options.emissiveTextures ?? null,
+    options.lightmapTextures ?? null,
     light,
     viewDir,
     ambient,
@@ -704,6 +715,12 @@ export interface MeshSceneInstance {
   readonly mrTextures?: readonly (DecodedTexture | null)[];
   readonly occlusionTextures?: readonly (DecodedTexture | null)[];
   readonly emissiveTextures?: readonly (DecodedTexture | null)[];
+  /**
+   * Baked light maps per primitive (index-aligned), sampled with each
+   * primitive's second UV set; they scale the ambient / image-based light
+   * (see lightBake.ts). Null entries (or no `uvs2`) leave it unscaled.
+   */
+  readonly lightmapTextures?: readonly (DecodedTexture | null)[];
 }
 
 /**
@@ -859,11 +876,12 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const mrTextures = instance.mrTextures ?? null;
     const occlusionTextures = instance.occlusionTextures ?? null;
     const emissiveTextures = instance.emissiveTextures ?? null;
+    const lightmapTextures = instance.lightmapTextures ?? null;
     const lightMvp = shadow ? multiply(shadow.lightViewProj, instance.model) : null;
     if (style.zBuffer) {
-      drawMesh(instance.mesh, mvp, modelView, instance.model, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, lights, style, fog);
+      drawMesh(instance.mesh, mvp, modelView, instance.model, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightmapTextures, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, lights, style, fog);
     } else {
-      eachTriangle(instance.mesh, mvp, modelView, instance.model, normalBasis, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightMvp, (triangle) => queue.push(triangle));
+      eachTriangle(instance.mesh, mvp, modelView, instance.model, normalBasis, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightmapTextures, lightMvp, (triangle) => queue.push(triangle));
     }
   }
 
@@ -978,6 +996,7 @@ export function renderShadowMap(
       null,
       null,
       null,
+      null,
       (triangle) => rasterizeDepthOnly(triangle.a, triangle.b, triangle.c, size, depth),
     );
   }
@@ -1077,7 +1096,7 @@ export function renderGeometryBuffers(
     const mvp = multiply(viewProj, instance.model);
     const modelView = multiply(view, instance.model);
     const normalBasis = normalMatrix3x3(instance.model);
-    eachTriangle(instance.mesh, mvp, modelView, instance.model, normalBasis, null, null, null, null, null, null, null, (triangle) =>
+    eachTriangle(instance.mesh, mvp, modelView, instance.model, normalBasis, null, null, null, null, null, null, null, null, (triangle) =>
       rasterizeGeometry(triangle.a, triangle.b, triangle.c, width, height, depth, normals, view),
     );
   }
@@ -1276,6 +1295,8 @@ interface PbrFrag {
   readonly occ: DecodedTexture | null;
   /** Emissive map (RGB), or null. */
   readonly emis: DecodedTexture | null;
+  /** Baked light map (RGB, sampled with the second UV set), or null. */
+  readonly lm: DecodedTexture | null;
   readonly metallic: number; // factor (default 1)
   readonly roughness: number; // factor (default 1)
   readonly emissive: readonly [number, number, number]; // factor (default 0,0,0)
@@ -1325,6 +1346,8 @@ function eachTriangle(
   mrTextures: readonly (DecodedTexture | null)[] | null,
   occlusionTextures: readonly (DecodedTexture | null)[] | null,
   emissiveTextures: readonly (DecodedTexture | null)[] | null,
+  /** Baked light maps per primitive (sampled with the second UV set), or null. */
+  lightmapTextures: readonly (DecodedTexture | null)[] | null,
   /** World→light-clip for shadow mapping, or null when no shadow pass is active. */
   lightMvp: Mat4 | null,
   emit: (triangle: PendingTriangle) => void,
@@ -1334,6 +1357,8 @@ function eachTriangle(
     const objectNormals = primitive.normals ?? computeSmoothNormals(positions, primitive.indices);
     const uvs = primitive.uvs;
     const indices = primitive.indices;
+    const lightmap = primitive.uvs2 ? (lightmapTextures?.[primitiveIndex] ?? null) : null;
+    const uvs2 = lightmap ? primitive.uvs2! : null;
     const texture = textures?.[primitiveIndex] ?? null;
     const normalTexture = normalTextures?.[primitiveIndex] ?? null;
     const materialTexture = materialTextures?.[primitiveIndex] ?? null;
@@ -1342,6 +1367,7 @@ function eachTriangle(
       mrTextures?.[primitiveIndex] ?? null,
       occlusionTextures?.[primitiveIndex] ?? null,
       emissiveTextures?.[primitiveIndex] ?? null,
+      lightmap,
     );
     const [baseR, baseG, baseB, baseA] = primitive.material.baseColorFactor;
 
@@ -1405,6 +1431,8 @@ function eachTriangle(
         viewZ,
         u: uvs ? uvs[i * 2]! : 0,
         v: uvs ? uvs[i * 2 + 1]! : 0,
+        lu: uvs2 ? uvs2[i * 2]! : 0,
+        lv: uvs2 ? uvs2[i * 2 + 1]! : 0,
         nx: normalBasis[0]! * onx + normalBasis[3]! * ony + normalBasis[6]! * onz,
         ny: normalBasis[1]! * onx + normalBasis[4]! * ony + normalBasis[7]! * onz,
         nz: normalBasis[2]! * onx + normalBasis[5]! * ony + normalBasis[8]! * onz,
@@ -1455,6 +1483,7 @@ function drawMesh(
   mrTextures: readonly (DecodedTexture | null)[] | null,
   occlusionTextures: readonly (DecodedTexture | null)[] | null,
   emissiveTextures: readonly (DecodedTexture | null)[] | null,
+  lightmapTextures: readonly (DecodedTexture | null)[] | null,
   light: readonly [number, number, number],
   viewDir: readonly [number, number, number],
   ambient: number,
@@ -1479,6 +1508,7 @@ function drawMesh(
     mrTextures,
     occlusionTextures,
     emissiveTextures,
+    lightmapTextures,
     lightMvp,
     (triangle) => {
       rasterizeTriangle(
@@ -1776,6 +1806,16 @@ function rasterizeTriangle(
           ambR = ambient * ar * ao;
           ambG = ambient * ag * ao;
           ambB = ambient * ab * ao;
+        }
+        // A baked light map (sampled with the second UV set) scales the sky and
+        // ambient fill by how much of it reaches this point, bounce included.
+        if (pbr.lm) {
+          const lu = pw0 * a.lu + pw1 * b.lu + pw2 * c.lu;
+          const lv = pw0 * a.lv + pw1 * b.lv + pw2 * c.lv;
+          const [lr, lg, lb] = sampleTexture(pbr.lm, lu, lv, "bilinear");
+          ambR *= (lr / 255) * LIGHTMAP_RANGE;
+          ambG *= (lg / 255) * LIGHTMAP_RANGE;
+          ambB *= (lb / 255) * LIGHTMAP_RANGE;
         }
         // Screen-space ambient occlusion darkens only the ambient/IBL fill (never
         // the direct light), matching where AO physically applies.

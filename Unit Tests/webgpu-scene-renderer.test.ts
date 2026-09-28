@@ -195,11 +195,12 @@ describe("WebgpuSceneRenderer pipeline setup", () => {
     await WebgpuSceneRenderer.create(device, WIDTH, HEIGHT);
 
     const layout = log.pipelines[0].vertex.buffers[0];
-    expect(layout.arrayStride).toBe(32); // VERTEX_FLOATS * 4
+    expect(layout.arrayStride).toBe(40); // VERTEX_FLOATS * 4
     expect(layout.attributes.map((a: any) => [a.shaderLocation, a.offset, a.format])).toEqual([
       [0, 0, "float32x3"],
       [1, 12, "float32x3"],
       [2, 24, "float32x2"],
+      [3, 32, "float32x2"], // light-map uv
     ]);
   });
 

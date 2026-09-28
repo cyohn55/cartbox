@@ -76,16 +76,17 @@ export function packRgba([r, g, b, a]: readonly [number, number, number, number]
   return ((a << 24) | (b << 16) | (g << 8) | r) >>> 0;
 }
 
-/** The four material maps a primitive's draw binds. */
+/** The material maps a primitive's draw binds (the light map only with light-map UVs). */
 export interface PrimitiveTextures {
   base: DecodedTexture | null;
   mr: DecodedTexture | null;
   occ: DecodedTexture | null;
   emis: DecodedTexture | null;
+  lm: DecodedTexture | null;
 }
 
 export function sameTextures(a: PrimitiveTextures, b: PrimitiveTextures): boolean {
-  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis;
+  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm;
 }
 
 /** The copies of one primitive drawn together: one instanced draw. */
@@ -120,6 +121,7 @@ export function batchInstances<G extends { indexCount: number }>(
         mr: instance.mrTextures?.[index] ?? null,
         occ: instance.occlusionTextures?.[index] ?? null,
         emis: instance.emissiveTextures?.[index] ?? null,
+        lm: primitive.uvs2 ? (instance.lightmapTextures?.[index] ?? null) : null,
       };
       let list = byPrimitive.get(primitive);
       if (!list) byPrimitive.set(primitive, (list = []));

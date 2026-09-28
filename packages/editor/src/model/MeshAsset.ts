@@ -114,6 +114,13 @@ export interface MeshMaterial {
   readonly occlusionImage?: EncodedImage | null;
   /** An emissive map, glTF's `emissiveTexture` (RGB), or null/absent. */
   readonly emissiveImage?: EncodedImage | null;
+  /**
+   * A baked light map (RGB), sampled with the primitive's second UV set
+   * ({@link MeshPrimitive.uvs2}): how much sky and bounced light reaches each
+   * point, multiplying the ambient / image-based light (see lightBake.ts).
+   * Null/absent: lit only by the scene's live lighting.
+   */
+  readonly lightmapImage?: EncodedImage | null;
   /** Scalar metalness multiplier, glTF's `metallicFactor` (default 1). */
   readonly metallicFactor?: number;
   /** Scalar roughness multiplier, glTF's `roughnessFactor` (default 1). */
@@ -146,6 +153,12 @@ export interface MeshPrimitive {
   /** Triangle vertex indices (three per triangle) into the attribute streams. */
   readonly indices: Uint32Array;
   readonly material: MeshMaterial;
+  /**
+   * A second set of texture coordinates, unique per surface point, that the
+   * material's light map is sampled with (the first set tiles). Null/absent
+   * without a light map.
+   */
+  readonly uvs2?: Float32Array | null;
   /**
    * Skinned meshes only (see skeleton.ts): four joint indices and four weights
    * per vertex, binding it to the mesh's {@link MeshAsset.skin}.
@@ -301,8 +314,14 @@ function base64ToU32(base64: string): Uint32Array {
 
 interface SerializedImage {
   mime: string;
-  bytes: string;
+  bytes?: string;
   ref?: string;
+  /**
+   * The same image as an earlier slot of this mesh, named `<primitive>.<field>`
+   * (`"0.lightmapImage"`), so it is stored once — a light map shared by every
+   * primitive of a mesh, say.
+   */
+  same?: string;
   /** An asset-store reference (content hash) in place of `bytes` (see meshTextureAssets.ts in the web app). */
   asset?: string;
 }
@@ -315,6 +334,7 @@ export interface SerializedMaterial {
   metallicRoughnessImage?: SerializedImage | null;
   occlusionImage?: SerializedImage | null;
   emissiveImage?: SerializedImage | null;
+  lightmapImage?: SerializedImage | null;
   metallicFactor?: number;
   roughnessFactor?: number;
   emissiveFactor?: [number, number, number];
@@ -325,6 +345,7 @@ interface SerializedPrimitive {
   positions: string;
   normals: string | null;
   uvs: string | null;
+  uvs2?: string;
   indices: string;
   material: SerializedMaterial;
   joints?: string;
@@ -457,15 +478,17 @@ function deserializeClips(raw: unknown, jointCount: number): AnimationClip[] {
 
 /** Serialize a mesh to a compact JSON string for storage in a cart sidecar. */
 export function serializeMeshAsset(mesh: MeshAsset): string {
+  const images = newImageTable();
   const payload: SerializedMesh = {
     version: MESH_ASSET_VERSION,
     name: mesh.name,
-    primitives: mesh.primitives.map((primitive) => ({
+    primitives: mesh.primitives.map((primitive, index) => ({
       positions: f32ToBase64(primitive.positions),
       normals: primitive.normals ? f32ToBase64(primitive.normals) : null,
       uvs: primitive.uvs ? f32ToBase64(primitive.uvs) : null,
+      ...(primitive.uvs2 ? { uvs2: f32ToBase64(primitive.uvs2) } : {}),
       indices: u32ToBase64(primitive.indices),
-      material: serializeMaterial(primitive.material),
+      material: serializeMaterial(primitive.material, Object.assign(images, { primitive: index })),
       ...(primitive.joints && primitive.weights && mesh.skin
         ? { joints: u16ToBase64(primitive.joints), weights: f32ToBase64(primitive.weights) }
         : {}),
@@ -476,13 +499,36 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
   return JSON.stringify(payload);
 }
 
+/**
+ * The images of one mesh as they are written (each distinct image object once,
+ * under the slot it first fills) and read back (by slot), so an image several
+ * primitives share is stored once and comes back as one shared object.
+ */
+interface ImageTable {
+  readonly written: Map<EncodedImage, string>;
+  readonly read: Map<string, EncodedImage>;
+  /** The primitive whose material is being written or read. */
+  primitive: number;
+}
+const newImageTable = (): ImageTable => ({ written: new Map(), read: new Map(), primitive: 0 });
+
 /** Encode an optional image to the serialized form (null when absent). */
-function serializeImage(image: EncodedImage | null | undefined): SerializedImage | null {
-  return image ? { mime: image.mime, bytes: bytesToBase64(image.bytes), ...(image.ref ? { ref: image.ref } : {}) } : null;
+function serializeImage(image: EncodedImage | null | undefined, field: string, table?: ImageTable): SerializedImage | null {
+  if (!image) return null;
+  const same = table?.written.get(image);
+  if (same !== undefined) return { mime: image.mime, same };
+  table?.written.set(image, `${table.primitive}.${field}`);
+  return { mime: image.mime, bytes: bytesToBase64(image.bytes), ...(image.ref ? { ref: image.ref } : {}) };
 }
 /** Decode an optional serialized image back to bytes (null when absent). */
-function deserializeImage(image: SerializedImage | null | undefined): EncodedImage | null {
+function deserializeImage(image: SerializedImage | null | undefined, field: string, table?: ImageTable): EncodedImage | null {
   if (!image) return null;
+  if (image.same !== undefined) return (typeof image.same === "string" && table?.read.get(image.same)) || null;
+  const decoded = decodeImage(image);
+  table?.read.set(`${table.primitive}.${field}`, decoded);
+  return decoded;
+}
+function decodeImage(image: SerializedImage): EncodedImage {
   // A texture whose bytes live elsewhere — a streamed placeholder (`ref`) or an
   // asset-store reference (`asset`, its content hash) — decodes to a
   // placeholder the player fills in when the bytes arrive.
@@ -524,16 +570,17 @@ function toTextureSprite(value: unknown): SpriteTextureRef | null {
 }
 
 /** Encode a material (with its images) to the stored form — shared with the terrain codec. */
-export function serializeMaterial(material: MeshMaterial): SerializedMaterial {
+export function serializeMaterial(material: MeshMaterial, table?: ImageTable): SerializedMaterial {
   return {
     name: material.name,
     baseColorFactor: [...material.baseColorFactor],
-    image: serializeImage(material.baseColorImage),
-    normalImage: serializeImage(material.normalImage),
-    materialImage: serializeImage(material.materialImage),
-    metallicRoughnessImage: serializeImage(material.metallicRoughnessImage),
-    occlusionImage: serializeImage(material.occlusionImage),
-    emissiveImage: serializeImage(material.emissiveImage),
+    image: serializeImage(material.baseColorImage, "image", table),
+    normalImage: serializeImage(material.normalImage, "normalImage", table),
+    materialImage: serializeImage(material.materialImage, "materialImage", table),
+    metallicRoughnessImage: serializeImage(material.metallicRoughnessImage, "metallicRoughnessImage", table),
+    occlusionImage: serializeImage(material.occlusionImage, "occlusionImage", table),
+    emissiveImage: serializeImage(material.emissiveImage, "emissiveImage", table),
+    ...(material.lightmapImage ? { lightmapImage: serializeImage(material.lightmapImage, "lightmapImage", table) } : {}),
     metallicFactor: material.metallicFactor,
     roughnessFactor: material.roughnessFactor,
     emissiveFactor: material.emissiveFactor ? [...material.emissiveFactor] : undefined,
@@ -543,17 +590,18 @@ export function serializeMaterial(material: MeshMaterial): SerializedMaterial {
 }
 
 /** Decode a stored material defensively (anything missing falls back to the default). */
-export function deserializeMaterial(value: unknown): MeshMaterial {
+export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMaterial {
   const material = (value && typeof value === "object" ? value : { name: "default", baseColorFactor: [1, 1, 1, 1], image: null }) as SerializedMaterial;
   return {
     name: typeof material.name === "string" ? material.name : "default",
     baseColorFactor: toColor(material.baseColorFactor),
-    baseColorImage: deserializeImage(material.image),
-    normalImage: deserializeImage(material.normalImage),
-    materialImage: deserializeImage(material.materialImage),
-    metallicRoughnessImage: deserializeImage(material.metallicRoughnessImage),
-    occlusionImage: deserializeImage(material.occlusionImage),
-    emissiveImage: deserializeImage(material.emissiveImage),
+    baseColorImage: deserializeImage(material.image, "image", table),
+    normalImage: deserializeImage(material.normalImage, "normalImage", table),
+    materialImage: deserializeImage(material.materialImage, "materialImage", table),
+    metallicRoughnessImage: deserializeImage(material.metallicRoughnessImage, "metallicRoughnessImage", table),
+    occlusionImage: deserializeImage(material.occlusionImage, "occlusionImage", table),
+    emissiveImage: deserializeImage(material.emissiveImage, "emissiveImage", table),
+    ...(material.lightmapImage ? { lightmapImage: deserializeImage(material.lightmapImage, "lightmapImage", table) } : {}),
     metallicFactor: typeof material.metallicFactor === "number" ? material.metallicFactor : undefined,
     roughnessFactor: typeof material.roughnessFactor === "number" ? material.roughnessFactor : undefined,
     emissiveFactor: toEmissiveFactor(material.emissiveFactor),
@@ -575,8 +623,9 @@ export function deserializeMeshAsset(json: string): MeshAsset {
 
   let totalVertices = 0;
   let totalIndices = 0;
+  const images = newImageTable();
   const skin = raw.skin ? deserializeSkin(raw.skin) : null;
-  const primitives: MeshPrimitive[] = raw.primitives.map((entry) => {
+  const primitives: MeshPrimitive[] = raw.primitives.map((entry, index) => {
     const positions = base64ToF32(entry.positions);
     if (positions.length === 0 || positions.length % 3 !== 0) throw new Error(MALFORMED);
     const vertexCount = positions.length / 3;
@@ -585,6 +634,8 @@ export function deserializeMeshAsset(json: string): MeshAsset {
     if (normals && normals.length !== vertexCount * 3) throw new Error(MALFORMED);
     const uvs = entry.uvs ? base64ToF32(entry.uvs) : null;
     if (uvs && uvs.length !== vertexCount * 2) throw new Error(MALFORMED);
+    const uvs2 = typeof entry.uvs2 === "string" ? base64ToF32(entry.uvs2) : null;
+    if (uvs2 && uvs2.length !== vertexCount * 2) throw new Error(MALFORMED);
 
     const indices = base64ToU32(entry.indices);
     if (indices.length === 0 || indices.length % 3 !== 0) throw new Error(MALFORMED);
@@ -610,7 +661,8 @@ export function deserializeMeshAsset(json: string): MeshAsset {
       normals,
       uvs,
       indices,
-      material: deserializeMaterial(entry.material),
+      material: deserializeMaterial(entry.material, Object.assign(images, { primitive: index })),
+      ...(uvs2 ? { uvs2 } : {}),
       ...(joints && weights ? { joints, weights } : {}),
     };
   });

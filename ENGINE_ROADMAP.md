@@ -233,7 +233,9 @@ completeness.
 
 - [ ] Clustered lighting for many lights; cascaded shadow maps.
 - [ ] True HDR environments with prefiltered mips; reflection and light probes.
-- [ ] Baked lightmaps.
+- [x] Baked lightmaps: sky visibility and one sun bounce, traced in the editor into a
+      second UV set it lays out itself and multiplied into the ambient light by every
+      renderer. See [`HALO2_STYLE_ROADMAP.md`](HALO2_STYLE_ROADMAP.md) H1.
 - [x] Terrain: a heightfield landscape stored as a grid of heights on the mesh sidecar
       (a few kilobytes where a mesh would take megabytes) and built into geometry when
       the scene loads. Each triangle takes the first layer whose slope and height rule

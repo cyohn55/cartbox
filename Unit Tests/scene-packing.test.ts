@@ -462,22 +462,22 @@ describe("viewDirection", () => {
 });
 
 describe("interleaveVertices", () => {
-  it("packs position, normal and uv at the pipeline's stride", () => {
+  it("packs position, normal, uv and light-map uv at the pipeline's stride", () => {
     const out = interleaveVertices(
       new Float32Array([1, 2, 3, 4, 5, 6]),
       new Float32Array([0, 1, 0, 0, 0, 1]),
       new Float32Array([0.5, 0.25, 0.75, 1]),
+      new Float32Array([0.1, 0.2, 0.3, 0.4]),
     );
-    expect(VERTEX_FLOATS).toBe(8); // arrayStride 32 in the pipeline descriptor
+    expect(VERTEX_FLOATS).toBe(10); // arrayStride 40 in the pipeline descriptor
     expect(out.length).toBe(2 * VERTEX_FLOATS);
-    expect(Array.from(out.subarray(0, 8))).toEqual([1, 2, 3, 0, 1, 0, 0.5, 0.25]);
-    expect(Array.from(out.subarray(8, 16))).toEqual([4, 5, 6, 0, 0, 1, 0.75, 1]);
+    expect(Array.from(out.subarray(0, 10))).toEqual([1, 2, 3, 0, 1, 0, 0.5, 0.25, Math.fround(0.1), Math.fround(0.2)]);
+    expect(Array.from(out.subarray(10, 20))).toEqual([4, 5, 6, 0, 0, 1, 0.75, 1, Math.fround(0.3), Math.fround(0.4)]);
   });
 
-  it("zero-fills uvs for an untextured primitive", () => {
+  it("zero-fills uvs for an untextured primitive, and light-map uvs for an unbaked one", () => {
     const out = interleaveVertices(new Float32Array([1, 2, 3]), new Float32Array([0, 1, 0]), null);
-    expect(out[6]).toBe(0);
-    expect(out[7]).toBe(0);
+    expect(Array.from(out.subarray(6, 10))).toEqual([0, 0, 0, 0]);
   });
 });
 

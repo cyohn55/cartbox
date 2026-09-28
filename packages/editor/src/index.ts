@@ -70,6 +70,8 @@ export {
   LOCKOUT_INTRO,
   lockoutNavMesh,
   lockoutTerrain,
+  lockoutMapLayout,
+  bakeLockoutLightmap,
   lockoutTerrainTriangles,
   LOCKOUT_LIGHTING,
   LOCKOUT_SCENE_TRIANGLES,
@@ -224,6 +226,18 @@ export {
   type SceneStreaming,
   type StreamGroup,
 } from "./model/streaming";
+export {
+  LIGHTMAP_RANGE,
+  applyLightmapImage,
+  bakeLightmap,
+  layoutFingerprint,
+  layoutLightmap,
+  withLightmap,
+  type LightBakeOptions,
+  type LightmapLayout,
+  type LightmapLayoutOptions,
+  type Occluder,
+} from "./model/lightmap";
 export {
   MAX_TERRAIN_LAYERS,
   MAX_TERRAIN_SAMPLES,
@@ -510,6 +524,7 @@ export {
 } from "./render/voxelMesh";
 export { voxelGridToMeshAsset, type VoxelToMeshOptions } from "./model/voxelToMesh";
 export { encodeRgbaPng } from "./model/png";
+export { bytesToBase64, base64ToBytes } from "./model/base64";
 export {
   MESH_LIBRARY_REF,
   packMeshLibrary,
