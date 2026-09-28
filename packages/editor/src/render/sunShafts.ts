@@ -179,3 +179,37 @@ export function applySunShafts(
     }
   }
 }
+
+/**
+ * How much of the sun is unblocked (0..1), for the glare and lens flare
+ * (HALO2_STYLE_ROADMAP.md, H8): the share of taps over a small disc round the
+ * sun that still show the sky backdrop. Taps off the frame count as hidden, so
+ * the flare fades as the sun leaves the screen.
+ */
+export function sunVisibility(
+  frame: ArrayLike<number>,
+  sky: ArrayLike<number>,
+  width: number,
+  height: number,
+  sun: { x: number; y: number },
+): number {
+  const radius = Math.max(1.5, height * 0.012);
+  let open = 0;
+  let taps = 0;
+  const tap = (x: number, y: number) => {
+    taps += 1;
+    const xi = Math.floor(x);
+    const yi = Math.floor(y);
+    if (xi < 0 || yi < 0 || xi >= width || yi >= height) return;
+    const p = (yi * width + xi) * 4;
+    if (frame[p] === sky[p] && frame[p + 1] === sky[p + 1] && frame[p + 2] === sky[p + 2]) open += 1;
+  };
+  tap(sun.x, sun.y);
+  for (const ring of [0.5, 1]) {
+    for (let k = 0; k < 8; k += 1) {
+      const a = (k / 8) * Math.PI * 2 + ring;
+      tap(sun.x + Math.cos(a) * radius * ring, sun.y + Math.sin(a) * radius * ring);
+    }
+  }
+  return open / taps;
+}

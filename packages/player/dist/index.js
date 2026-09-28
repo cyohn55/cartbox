@@ -1564,7 +1564,53 @@ function detectTargetType(gl) {
   return complete ? type : gl.UNSIGNED_BYTE;
 }
 
+// src/fx/flareModel.ts
+var FLARE_GHOSTS = [
+  { along: 0.55, radius: 0.035, tint: [0.35, 0.6, 1] },
+  { along: 0.2, radius: 0.06, tint: [0.25, 0.5, 0.9] },
+  { along: -0.3, radius: 0.045, tint: [0.9, 0.6, 0.3] },
+  { along: -0.6, radius: 0.1, tint: [0.3, 0.45, 0.8] },
+  { along: -1.1, radius: 0.16, tint: [0.2, 0.35, 0.7] }
+];
+var FLARE_GHOST_GAIN = 0.45;
+var FLARE_SPIKE_POWER = 48;
+function smoothstep(edge0, edge1, x) {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+function lensFlareAt(uv, origin, aspect, params) {
+  if (params.visible <= 0 || params.glare <= 0 && params.ghosts <= 0) return [0, 0, 0];
+  const dx = (uv[0] - origin[0]) * aspect;
+  const dy = uv[1] - origin[1];
+  const r = Math.hypot(dx, dy);
+  const size = Math.max(0.01, params.size);
+  const glow = Math.exp(-(r * r) / (size * size));
+  const angle = Math.atan2(dy, dx);
+  const spikes = Math.pow(Math.abs(Math.cos(angle * 3)), FLARE_SPIKE_POWER) * Math.exp(-r / (size * 2.5));
+  const g = params.glare * (glow + spikes * 0.6);
+  let red = g;
+  let green = g;
+  let blue = g;
+  if (params.ghosts > 0) {
+    for (const ghost of FLARE_GHOSTS) {
+      const gx = (0.5 + (origin[0] - 0.5) * ghost.along - uv[0]) * aspect;
+      const gy = 0.5 + (origin[1] - 0.5) * ghost.along - uv[1];
+      const disc = smoothstep(ghost.radius, ghost.radius * 0.6, Math.hypot(gx, gy));
+      const k = disc * params.ghosts * FLARE_GHOST_GAIN;
+      red += ghost.tint[0] * k;
+      green += ghost.tint[1] * k;
+      blue += ghost.tint[2] * k;
+    }
+  }
+  const v = Math.min(1, params.visible);
+  return [red * v, green * v, blue * v];
+}
+
 // src/fx/PostFxPass.ts
+var f = (n) => n.toFixed(4);
+var GHOST_TERMS = FLARE_GHOSTS.map(
+  (g) => `    flare += vec3(${f(g.tint[0])}, ${f(g.tint[1])}, ${f(g.tint[2])}) * flareGhost(uv, ${f(g.along)}, ${f(g.radius)}, aspect);`
+).join("\n");
 var VERTEX_SOURCE2 = `
 attribute vec2 aPosition;
 varying vec2 vUv;
@@ -1610,6 +1656,12 @@ uniform float uGodrayDecay;
 uniform vec2 uGodrayOrigin;
 uniform float uStreakStrength;
 uniform float uStreakLength;
+uniform float uFlareGlare;
+uniform float uFlareGhosts;
+uniform float uFlareSize;
+uniform vec3 uFlareColor;
+uniform vec2 uFlareOrigin;
+uniform float uFlareVisible;
 uniform float uSplitStrength;
 uniform float uSplitBalance;
 uniform vec3 uSplitShadows;
@@ -1677,6 +1729,16 @@ float bayer8(vec2 a) {
   // Each level halves the coordinate before recursing: an 8x8 matrix is a 4x4
   // of 2x2 blocks, so the coarser level must be sampled at half the frequency.
   return bayer4(a * 0.5) * 0.25 + bayer2(a);
+}
+
+/**
+ * One lens ghost (lensFlareAt in flareModel.ts): a soft disc on the line from
+ * the light through the frame centre, \`along\` of the way from centre to light.
+ */
+float flareGhost(vec2 uv, float along, float radius, float aspect) {
+  vec2 centre = vec2(0.5) + (uFlareOrigin - vec2(0.5)) * along;
+  vec2 d = (centre - uv) * vec2(aspect, 1.0);
+  return smoothstep(radius, radius * 0.6, length(d)) * uFlareGhosts * ${FLARE_GHOST_GAIN.toFixed(4)};
 }
 
 /** A deterministic 0..1 hash of a 2D point \u2014 the grain's noise source. */
@@ -1812,6 +1874,24 @@ void main() {
       total += weight * 2.0;
     }
     color += streak * (uStreakStrength / max(total, 1.0));
+  }
+
+  // Sun glare and lens flare (lensFlareAt in flareModel.ts): a glow and a
+  // six-pointed starburst round the light, and ghosts strung across the frame
+  // from it through the centre \u2014 all scaled by how much of the light is
+  // unblocked, which a 3D scene reports each frame.
+  if ((uFlareGlare > 0.0 || uFlareGhosts > 0.0) && uFlareVisible > 0.0) {
+    float aspect = uSourceSize.x / uSourceSize.y;
+    vec2 d = (uv - uFlareOrigin) * vec2(aspect, 1.0);
+    float r = length(d);
+    float size = max(0.01, uFlareSize);
+    float glow = exp(-(r * r) / (size * size));
+    float spikes = pow(abs(cos(atan(d.y, d.x) * 3.0)), ${FLARE_SPIKE_POWER.toFixed(1)}) * exp(-r / (size * 2.5));
+    vec3 flare = vec3(uFlareGlare * (glow + spikes * 0.6));
+    if (uFlareGhosts > 0.0) {
+${GHOST_TERMS}
+    }
+    color += flare * min(uFlareVisible, 1.0) * uFlareColor;
   }
 
   // HDR tonemap: with the additive light (bloom, god rays, streaks) now summed,
@@ -2019,6 +2099,12 @@ var PostFxPass = class _PostFxPass {
     gl.uniform2f(this.location("uGodrayOrigin"), ...uniforms.godrayOrigin);
     gl.uniform1f(this.location("uStreakStrength"), uniforms.streakStrength);
     gl.uniform1f(this.location("uStreakLength"), uniforms.streakLength);
+    gl.uniform1f(this.location("uFlareGlare"), uniforms.flareGlare);
+    gl.uniform1f(this.location("uFlareGhosts"), uniforms.flareGhosts);
+    gl.uniform1f(this.location("uFlareSize"), uniforms.flareSize);
+    gl.uniform3f(this.location("uFlareColor"), ...uniforms.flareColor);
+    gl.uniform2f(this.location("uFlareOrigin"), ...uniforms.flareOrigin);
+    gl.uniform1f(this.location("uFlareVisible"), uniforms.flareVisible);
     gl.uniform1f(this.location("uSplitStrength"), uniforms.splitStrength);
     gl.uniform1f(this.location("uSplitBalance"), uniforms.splitBalance);
     gl.uniform3f(this.location("uSplitShadows"), ...uniforms.splitShadows);
@@ -2156,6 +2242,19 @@ var POST_FX_EFFECTS = [
     params: [
       { id: "strength", label: "Strength", min: 0, max: 2, step: 0.05, defaultValue: 0.6 },
       { id: "length", label: "Length", min: 0, max: 1, step: 0.01, defaultValue: 0.4 }
+    ]
+  },
+  {
+    id: "lensflare",
+    label: "Sun glare & lens flare",
+    description: "A glow and starburst round the sun, and lens ghosts strung across the frame from it. In a 3D scene with a sky dome it follows the sun and fades as geometry covers it; otherwise it sits at the source point.",
+    colors: [{ id: "tint", label: "Flare colour", defaultValue: "#fff1d6" }],
+    params: [
+      { id: "glare", label: "Glare", min: 0, max: 2, step: 0.05, defaultValue: 0.8 },
+      { id: "ghosts", label: "Ghosts", min: 0, max: 2, step: 0.05, defaultValue: 0.6 },
+      { id: "size", label: "Glare size", min: 0.03, max: 0.5, step: 0.01, defaultValue: 0.12 },
+      { id: "x", label: "Source X", min: 0, max: 1, step: 0.01, defaultValue: 0.75 },
+      { id: "y", label: "Source Y", min: 0, max: 1, step: 0.01, defaultValue: 0.2 }
     ]
   },
   {
@@ -2310,6 +2409,12 @@ function uniformsFromSettings(settings) {
     godrayOrigin: [shape("godrays", "x", 0.5), shape("godrays", "y", 0.2)],
     streakStrength: value("streaks", "strength", 0),
     streakLength: shape("streaks", "length", 0.4),
+    flareGlare: value("lensflare", "glare", 0),
+    flareGhosts: value("lensflare", "ghosts", 0),
+    flareSize: shape("lensflare", "size", 0.12),
+    flareColor: color("lensflare", "tint"),
+    flareOrigin: [shape("lensflare", "x", 0.75), shape("lensflare", "y", 0.2)],
+    flareVisible: 1,
     splitStrength: value("splittone", "strength", 0),
     splitBalance: shape("splittone", "balance", 0.5),
     splitShadows: color("splittone", "shadows"),
@@ -2342,6 +2447,8 @@ var PostFxSurface = class _PostFxSurface {
     this.pass = pass;
     /** When this surface started, so animated effects get a monotonic clock. */
     this.startedAt = performance.now();
+    /** The sun a 3D scene reports this frame; the lens flare follows it. Null = use the source point. */
+    this.sun = null;
     this.uniforms = uniformsFromSettings(settings);
     this.canvas.style.imageRendering = "pixelated";
     this.canvas.style.display = "block";
@@ -2378,13 +2485,21 @@ var PostFxSurface = class _PostFxSurface {
   setSettings(settings) {
     this.uniforms = uniformsFromSettings(settings);
   }
+  /**
+   * Follow a 3D scene's sun with the lens flare (HALO2_STYLE_ROADMAP.md, H8),
+   * or null to go back to the effect's own source point.
+   */
+  setSun(sun) {
+    this.sun = sun;
+  }
   blit(rgba) {
     this.inner.blit(rgba);
+    const sun = this.sun;
     this.pass.render(
       this.innerCanvas,
       this.model.width,
       this.model.height,
-      this.uniforms,
+      sun ? { ...this.uniforms, flareOrigin: [sun.x, sun.y], flareVisible: sun.visible } : this.uniforms,
       (performance.now() - this.startedAt) / 1e3
     );
   }
@@ -4407,10 +4522,10 @@ function writeAgents(block, agents) {
     const a = agents[i];
     const at = PHYS_AGENTS + 4 + i * PHYS_AGENT_BYTES;
     for (let k = 0; k < 3; k += 1) block.setInt32(at + k * 4, toFix(a.position[k]), true);
-    let f = a.facing;
-    while (f > Math.PI) f -= 2 * Math.PI;
-    while (f < -Math.PI) f += 2 * Math.PI;
-    const facing = Math.round(f * 1e4) & 65535;
+    let f2 = a.facing;
+    while (f2 > Math.PI) f2 -= 2 * Math.PI;
+    while (f2 < -Math.PI) f2 += 2 * Math.PI;
+    const facing = Math.round(f2 * 1e4) & 65535;
     block.setUint32(at + 12, (a.key & 1023 | (a.flags & 63) << 10 | facing << 16) >>> 0, true);
   }
 }
@@ -4949,7 +5064,7 @@ var PhysicsSession = class {
     const castOptions = /* @__PURE__ */ new Map();
     for (const t of this.tracked) if (t.kind === "character") t.lastMove = [0, 0, 0];
     for (const cmd of commands) {
-      const [a, b, c, d, e, f] = cmd.v;
+      const [a, b, c, d, e, f2] = cmd.v;
       if (cmd.op === PHYS_OP_CAST) {
         if (cmd.a >= 0 && cmd.a < PHYS_MAX_RAYS) {
           const ignore = Math.round(e) - 1;
@@ -4959,10 +5074,10 @@ var PhysicsSession = class {
       }
       if (cmd.op === PHYS_OP_RAY) {
         if (cmd.a >= 0 && cmd.a < PHYS_MAX_RAYS) {
-          const len = Math.hypot(d, e, f);
+          const len = Math.hypot(d, e, f2);
           const options = castOptions.get(cmd.a) ?? { shape: null };
           castOptions.delete(cmd.a);
-          this.rayRequests[cmd.a] = len > 1e-9 ? { origin: [a, b, c], direction: [d / len, e / len, f / len], max: len, ...options } : null;
+          this.rayRequests[cmd.a] = len > 1e-9 ? { origin: [a, b, c], direction: [d / len, e / len, f2 / len], max: len, ...options } : null;
         }
         continue;
       }
@@ -6025,12 +6140,12 @@ var AgentCrowd = class {
   /** Stand a point on the floor beneath it (or the nearest floor), unchanged when there's none. */
   settle(pos) {
     const g = this.graph;
-    let f = g.floorAt(pos[0], pos[1] + 0.25, pos[2]);
-    if (f < 0) f = g.nearest(pos[0], pos[1], pos[2], 2);
-    if (f < 0) return [...pos];
-    const fy = g.mesh.heights[f];
-    if (g.floorAt(pos[0], pos[1] + 0.25, pos[2]) === f) return [pos[0], fy, pos[2]];
-    return g.position(f);
+    let f2 = g.floorAt(pos[0], pos[1] + 0.25, pos[2]);
+    if (f2 < 0) f2 = g.nearest(pos[0], pos[1], pos[2], 2);
+    if (f2 < 0) return [...pos];
+    const fy = g.mesh.heights[f2];
+    if (g.floorAt(pos[0], pos[1] + 0.25, pos[2]) === f2) return [pos[0], fy, pos[2]];
+    return g.position(f2);
   }
   /** Advance every agent by `dt` seconds. */
   step(dt) {
@@ -6131,9 +6246,9 @@ var AgentCrowd = class {
   move(a, dx, dz, dt, climb) {
     const g = this.graph;
     const tryTo = (x, z) => {
-      const f = g.floorAt(x, a.pos[1], z, climb);
-      if (f >= 0 && a.pos[1] - g.mesh.heights[f] <= climb) {
-        a.pos = [x, a.air ? a.pos[1] : g.mesh.heights[f], z];
+      const f2 = g.floorAt(x, a.pos[1], z, climb);
+      if (f2 >= 0 && a.pos[1] - g.mesh.heights[f2] <= climb) {
+        a.pos = [x, a.air ? a.pos[1] : g.mesh.heights[f2], z];
         return true;
       }
       if (a.drops[a.corner]) {
@@ -7254,9 +7369,9 @@ function buildClipTable(anim) {
       name: clip.name,
       total,
       once,
-      tile: frames.map((f) => f.tile),
-      w: frames.map((f) => f.w),
-      h: frames.map((f) => f.h),
+      tile: frames.map((f2) => f2.tile),
+      w: frames.map((f2) => f2.w),
+      h: frames.map((f2) => f2.h),
       cum
     });
   }
@@ -8092,6 +8207,7 @@ import {
   DecalSystem,
   applySunShafts,
   sunScreenPosition,
+  sunVisibility,
   bakeSkyPanorama,
   buildSceneShadow,
   childIndices,
@@ -8320,6 +8436,7 @@ function capsConstrainScene(caps) {
 
 // src/mesh/MeshOverlaySurface.ts
 var RAD_TO_DEG = 180 / Math.PI;
+var SUN_EASE = 0.35;
 var FIRST_PERSON_NEAR = 0.05;
 var SHADOW_MAP_SIZE = 1024;
 var SKY_BACKDROP_SCALE = 3;
@@ -8401,6 +8518,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     /** The last sky backdrop and the view it was painted for (it depends only on
      *  where the camera points, so walking without turning reuses it). */
     this.skyCache = null;
+    /**
+     * Told each frame where the sky dome's sun is on screen and how much of it is
+     * unblocked, for the post-FX glare and lens flare (H8); null without a sky dome.
+     */
+    this.onSun = null;
+    /** The sun's eased visibility and last place on screen (0..1). */
+    this.sunSeen = 0;
+    this.sunAt = { x: 0.5, y: 0.5 };
     /** Reused buffers for the sun-shaft pass. */
     this.shaftScratch = null;
     /** The cart's world lights this frame (cartbox.light3d), added to the rig's in first person. */
@@ -8604,7 +8729,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     for (const [i, instance] of this.scene.instances.entries()) {
       const mesh = resolve(instance.mesh);
       const frames = instance.frames?.map(resolve);
-      const framesChanged = frames?.some((f, k) => f !== instance.frames[k]) ?? false;
+      const framesChanged = frames?.some((f2, k) => f2 !== instance.frames[k]) ?? false;
       if (mesh === instance.mesh && !framesChanged) continue;
       if (mesh !== instance.mesh) {
         const { mesh: _decodedMesh, ...maps } = await texture(mesh);
@@ -8755,6 +8880,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       // steps with the game rather than the wall clock.
       time: this.frame / 60
     });
+    if (this.onSun) this.reportSun(out, width, height, camera.view, camera.projection, skyBackdrop ? lighting?.sky ?? null : null);
     if (skyBackdrop && lighting?.shafts && lighting.sky && this.skyCache) {
       const sun = sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, width, height);
       if (sun) {
@@ -8787,6 +8913,21 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.frame += 1;
     this.inner.blit(this.presented);
     this.pace(performance.now() - started);
+  }
+  /** Report the sun to {@link onSun}: its place on screen and its eased visibility. */
+  reportSun(out, width, height, view, projection, sky) {
+    const backdrop = this.skyCache?.pixels ?? null;
+    if (!sky || !backdrop) {
+      this.sunSeen = 0;
+      this.onSun?.(null);
+      return;
+    }
+    const sun = sunScreenPosition(sky.sunDirection, view, projection, width, height);
+    const target = sun ? sunVisibility(out, backdrop, width, height, sun) : 0;
+    if (sun) this.sunAt = { x: sun.x / width, y: sun.y / height };
+    this.sunSeen += (target - this.sunSeen) * SUN_EASE;
+    if (this.sunSeen < 1e-3) this.sunSeen = 0;
+    this.onSun?.({ x: this.sunAt.x, y: this.sunAt.y, visible: this.sunSeen });
   }
   /** Paint the sky backdrop, or copy it from last frame when the view direction hasn't changed. */
   paintSky(out, width, height, view, projection, scale) {
@@ -12425,6 +12566,7 @@ var Player = class {
       if (shownFx && anyPostFxEnabled(shownFx)) {
         const fx = await PostFxSurface.create(this.container, scale, this.model, shownFx, makeBaseSurface);
         if (fx) this.postFxSurface = fx;
+        if (fx && this.meshSurface) this.meshSurface.onSun = (sun) => fx.setSun(sun);
         this.surface = fx ?? await makeBaseSurface(this.container);
       } else {
         this.surface = await makeBaseSurface(this.container);
@@ -13725,6 +13867,9 @@ export {
   DebugCommand,
   EVENT_CAPACITY,
   EngineLoadError,
+  FLARE_GHOSTS,
+  FLARE_GHOST_GAIN,
+  FLARE_SPIKE_POWER,
   GamepadInput,
   HEIGHT_WORLD,
   INSTANCE_FLOATS,
@@ -13874,6 +14019,7 @@ export {
   interleaveVertices,
   interpolateNormal,
   jointFrames,
+  lensFlareAt,
   loadEngineModule,
   makeShadowTexture,
   mount,

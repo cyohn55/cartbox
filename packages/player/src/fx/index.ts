@@ -23,7 +23,9 @@ export type {
 export { PostFxPass } from "./PostFxPass.js";
 export type { PostFxSource } from "./PostFxPass.js";
 export { PostFxSurface } from "./PostFxSurface.js";
-export type { InnerSurfaceFactory } from "./PostFxSurface.js";
+export type { InnerSurfaceFactory, ScreenSun } from "./PostFxSurface.js";
+export { FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, lensFlareAt } from "./flareModel.js";
+export type { FlareGhost, FlareParams } from "./flareModel.js";
 export { BloomPyramid } from "./BloomPyramid.js";
 export {
   BLOOM_KNEE,

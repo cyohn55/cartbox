@@ -1909,7 +1909,7 @@ export const LOCKOUT_LIGHTING: SceneLighting = {
  * `PostFxSettings` shape as plain JSON; every effect not named stays off.
  */
 export const LOCKOUT_FX = {
-  enabled: { bloom: true, grade: true, splittone: true, vignette: true },
+  enabled: { bloom: true, grade: true, splittone: true, vignette: true, lensflare: true },
   values: {
     // Calibrated against the player's real bloom pyramid (HDR, multi-scale):
     // just the brightest glow — cyan trim, sun-lit snow — past threshold, and a
@@ -1923,8 +1923,14 @@ export const LOCKOUT_FX = {
     "splittone.strength": 0.28,
     "splittone.balance": 0.45,
     "vignette.strength": 0.18,
+    // Sun glare and lens flare (HALO2_STYLE_ROADMAP.md H8): a soft starburst on
+    // the sun and a string of cold ghosts, fading as a tower covers it.
+    "lensflare.glare": 0.55,
+    "lensflare.ghosts": 0.5,
+    "lensflare.size": 0.09,
   },
   colors: {
+    "lensflare.tint": "#fff0d8",
     "splittone.shadows": "#5a6c8e", // ×2 in the shader: mid-grey is neutral, so this cools shadows
     "splittone.highlights": "#86827a", // …and this warms highlights only slightly
   },

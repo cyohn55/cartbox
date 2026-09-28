@@ -21,7 +21,14 @@
  */
 
 import { BloomPyramid } from "./BloomPyramid.js";
+import { FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER } from "./flareModel.js";
 import type { PostFxUniforms } from "./postfx.js";
+
+const f = (n: number) => n.toFixed(4);
+/** The lens ghosts, unrolled (GLSL ES 1.00 cannot index a local array by a loop counter). */
+const GHOST_TERMS = FLARE_GHOSTS.map(
+  (g) => `    flare += vec3(${f(g.tint[0])}, ${f(g.tint[1])}, ${f(g.tint[2])}) * flareGhost(uv, ${f(g.along)}, ${f(g.radius)}, aspect);`,
+).join("\n");
 
 /** A frame to post-process: raw RGBA bytes or a canvas to sample. */
 export type PostFxSource = Uint8Array | Uint8ClampedArray | TexImageSource;
@@ -72,6 +79,12 @@ uniform float uGodrayDecay;
 uniform vec2 uGodrayOrigin;
 uniform float uStreakStrength;
 uniform float uStreakLength;
+uniform float uFlareGlare;
+uniform float uFlareGhosts;
+uniform float uFlareSize;
+uniform vec3 uFlareColor;
+uniform vec2 uFlareOrigin;
+uniform float uFlareVisible;
 uniform float uSplitStrength;
 uniform float uSplitBalance;
 uniform vec3 uSplitShadows;
@@ -139,6 +152,16 @@ float bayer8(vec2 a) {
   // Each level halves the coordinate before recursing: an 8x8 matrix is a 4x4
   // of 2x2 blocks, so the coarser level must be sampled at half the frequency.
   return bayer4(a * 0.5) * 0.25 + bayer2(a);
+}
+
+/**
+ * One lens ghost (lensFlareAt in flareModel.ts): a soft disc on the line from
+ * the light through the frame centre, \`along\` of the way from centre to light.
+ */
+float flareGhost(vec2 uv, float along, float radius, float aspect) {
+  vec2 centre = vec2(0.5) + (uFlareOrigin - vec2(0.5)) * along;
+  vec2 d = (centre - uv) * vec2(aspect, 1.0);
+  return smoothstep(radius, radius * 0.6, length(d)) * uFlareGhosts * ${FLARE_GHOST_GAIN.toFixed(4)};
 }
 
 /** A deterministic 0..1 hash of a 2D point — the grain's noise source. */
@@ -274,6 +297,24 @@ void main() {
       total += weight * 2.0;
     }
     color += streak * (uStreakStrength / max(total, 1.0));
+  }
+
+  // Sun glare and lens flare (lensFlareAt in flareModel.ts): a glow and a
+  // six-pointed starburst round the light, and ghosts strung across the frame
+  // from it through the centre — all scaled by how much of the light is
+  // unblocked, which a 3D scene reports each frame.
+  if ((uFlareGlare > 0.0 || uFlareGhosts > 0.0) && uFlareVisible > 0.0) {
+    float aspect = uSourceSize.x / uSourceSize.y;
+    vec2 d = (uv - uFlareOrigin) * vec2(aspect, 1.0);
+    float r = length(d);
+    float size = max(0.01, uFlareSize);
+    float glow = exp(-(r * r) / (size * size));
+    float spikes = pow(abs(cos(atan(d.y, d.x) * 3.0)), ${FLARE_SPIKE_POWER.toFixed(1)}) * exp(-r / (size * 2.5));
+    vec3 flare = vec3(uFlareGlare * (glow + spikes * 0.6));
+    if (uFlareGhosts > 0.0) {
+${GHOST_TERMS}
+    }
+    color += flare * min(uFlareVisible, 1.0) * uFlareColor;
   }
 
   // HDR tonemap: with the additive light (bloom, god rays, streaks) now summed,
@@ -510,6 +551,12 @@ export class PostFxPass {
     gl.uniform2f(this.location("uGodrayOrigin"), ...uniforms.godrayOrigin);
     gl.uniform1f(this.location("uStreakStrength"), uniforms.streakStrength);
     gl.uniform1f(this.location("uStreakLength"), uniforms.streakLength);
+    gl.uniform1f(this.location("uFlareGlare"), uniforms.flareGlare);
+    gl.uniform1f(this.location("uFlareGhosts"), uniforms.flareGhosts);
+    gl.uniform1f(this.location("uFlareSize"), uniforms.flareSize);
+    gl.uniform3f(this.location("uFlareColor"), ...uniforms.flareColor);
+    gl.uniform2f(this.location("uFlareOrigin"), ...uniforms.flareOrigin);
+    gl.uniform1f(this.location("uFlareVisible"), uniforms.flareVisible);
     gl.uniform1f(this.location("uSplitStrength"), uniforms.splitStrength);
     gl.uniform1f(this.location("uSplitBalance"), uniforms.splitBalance);
     gl.uniform3f(this.location("uSplitShadows"), ...uniforms.splitShadows);

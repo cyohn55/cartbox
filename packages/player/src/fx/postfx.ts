@@ -31,6 +31,7 @@ export type PostFxEffectId =
   | "halftone"
   | "godrays"
   | "streaks"
+  | "lensflare"
   | "splittone"
   | "reflection"
   | "tiltshift"
@@ -173,6 +174,20 @@ export const POST_FX_EFFECTS: PostFxEffectDef[] = [
     params: [
       { id: "strength", label: "Strength", min: 0, max: 2, step: 0.05, defaultValue: 0.6 },
       { id: "length", label: "Length", min: 0, max: 1, step: 0.01, defaultValue: 0.4 },
+    ],
+  },
+  {
+    id: "lensflare",
+    label: "Sun glare & lens flare",
+    description:
+      "A glow and starburst round the sun, and lens ghosts strung across the frame from it. In a 3D scene with a sky dome it follows the sun and fades as geometry covers it; otherwise it sits at the source point.",
+    colors: [{ id: "tint", label: "Flare colour", defaultValue: "#fff1d6" }],
+    params: [
+      { id: "glare", label: "Glare", min: 0, max: 2, step: 0.05, defaultValue: 0.8 },
+      { id: "ghosts", label: "Ghosts", min: 0, max: 2, step: 0.05, defaultValue: 0.6 },
+      { id: "size", label: "Glare size", min: 0.03, max: 0.5, step: 0.01, defaultValue: 0.12 },
+      { id: "x", label: "Source X", min: 0, max: 1, step: 0.01, defaultValue: 0.75 },
+      { id: "y", label: "Source Y", min: 0, max: 1, step: 0.01, defaultValue: 0.2 },
     ],
   },
   {
@@ -352,6 +367,17 @@ export interface PostFxUniforms {
   godrayOrigin: [number, number];
   streakStrength: number;
   streakLength: number;
+  /** Sun glare strength (0 = none). */
+  flareGlare: number;
+  /** Lens-ghost strength (0 = none). */
+  flareGhosts: number;
+  /** Glare radius in screen-height units. */
+  flareSize: number;
+  flareColor: [number, number, number];
+  /** The light's screen position (0..1, y down): the source point, or the sun a 3D scene reports. */
+  flareOrigin: [number, number];
+  /** How much of the light is unblocked, 0..1 (1 unless a 3D scene reports less). */
+  flareVisible: number;
   splitStrength: number;
   splitBalance: number;
   splitShadows: [number, number, number];
@@ -436,6 +462,12 @@ export function uniformsFromSettings(settings: PostFxSettings): PostFxUniforms {
     godrayOrigin: [shape("godrays", "x", 0.5), shape("godrays", "y", 0.2)],
     streakStrength: value("streaks", "strength", 0),
     streakLength: shape("streaks", "length", 0.4),
+    flareGlare: value("lensflare", "glare", 0),
+    flareGhosts: value("lensflare", "ghosts", 0),
+    flareSize: shape("lensflare", "size", 0.12),
+    flareColor: color("lensflare", "tint"),
+    flareOrigin: [shape("lensflare", "x", 0.75), shape("lensflare", "y", 0.2)],
+    flareVisible: 1,
     splitStrength: value("splittone", "strength", 0),
     splitBalance: shape("splittone", "balance", 0.5),
     splitShadows: color("splittone", "shadows"),
