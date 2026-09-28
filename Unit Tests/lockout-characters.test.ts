@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { LOCKOUT_CODE, LOCKOUT_VIEWMODELS, LOCKOUT_WALK_FRAMES, deserializeMeshAsset, lockoutMeshSidecar, type MeshAsset } from "@cartbox/editor";
+import { LOCKOUT_CODE, LOCKOUT_VIEWMODELS, deserializeMeshAsset, isSkinned, lockoutMeshSidecar, sampleClip, skinMatrices, skinVertices } from "@cartbox/editor";
 import { buildOrbitCamera, parseMeshScene } from "@cartbox/player";
 import { poseLocalMatrix } from "../packages/player/src/mesh/MeshOverlaySurface";
 
@@ -72,30 +72,52 @@ describe("the Lockout soldiers and weapons", () => {
     expect(parseMeshScene(lockoutMeshSidecar())!.instances).toHaveLength(14);
   });
 
-  it("shares one tintable soldier + walk frames across all 7 bots, stored once", () => {
-    const raw = JSON.parse(lockoutMeshSidecar()) as { meshes: { mesh: string; frames?: string[] }[]; library: Record<string, string> };
+  it("shares one tintable, skinned soldier across all 7 bots, stored once, each with the state machine", () => {
+    const raw = JSON.parse(lockoutMeshSidecar()) as { meshes: { mesh: string; frames?: string[]; animator?: unknown }[]; library: Record<string, string> };
     const bots = raw.meshes.slice(1, 8);
     expect(new Set(bots.map((b) => b.mesh)).size).toBe(1); // one library reference
     expect(bots[0]!.mesh.startsWith("@lib:")).toBe(true);
-    expect(bots[0]!.frames).toHaveLength(LOCKOUT_WALK_FRAMES);
+    expect(bots.every((b) => b.frames === undefined)).toBe(true); // no baked stride frames any more
     const scene = parseMeshScene(lockoutMeshSidecar())!;
     expect(scene.instances[1]!.mesh).toBe(scene.instances[7]!.mesh); // shared at runtime too
-    const armor = scene.instances[1]!.mesh.primitives.find((p) => p.material.name === "armor")!;
+    const soldier = scene.instances[1]!.mesh;
+    expect(isSkinned(soldier)).toBe(true);
+    expect(soldier.clips!.map((c) => c.name)).toEqual(["idle", "run", "air", "die"]);
+    expect(scene.instances[1]!.animator?.states.map((st) => st.name)).toEqual(["move", "air", "die"]);
+    expect(scene.instances[1]!.animator?.states[0]!.blend?.param).toBe("speed");
+    const armor = soldier.primitives.find((p) => p.material.name === "armor")!;
     expect(armor.material.tintable).toBe(true);
-    // The walk frames swing the legs: a frame's boots sit apart from the idle stance's.
-    const zSpan = (m: MeshAsset) => {
-      const suit = m.primitives.find((p) => p.material.name === "undersuit")!;
+  });
+
+  it("runs on its skeleton: the stride swings the boots apart, and a kill lays it down", () => {
+    const soldier = parseMeshScene(lockoutMeshSidecar())!.instances[1]!.mesh;
+    const skin = soldier.skin!;
+    const suit = soldier.primitives.find((p) => p.material.name === "undersuit")!;
+    const posed = (clip: string, time: number) => {
+      const pose = sampleClip(skin, soldier.clips!.find((c) => c.name === clip)!, time, clip !== "die");
+      const matrices = skinMatrices(skin, pose);
+      const out = new Float32Array(suit.positions.length);
+      skinVertices(suit.joints!, suit.weights!, matrices, suit.positions, null, out, null);
+      return out;
+    };
+    const bootSpan = (positions: Float32Array) => {
       let lo = Infinity;
       let hi = -Infinity;
-      for (let i = 0; i < suit.positions.length; i += 3) {
-        if (suit.positions[i + 1]! > 0.15) continue; // boots only
-        lo = Math.min(lo, suit.positions[i + 2]!);
-        hi = Math.max(hi, suit.positions[i + 2]!);
+      for (let i = 0; i < positions.length; i += 3) {
+        if (positions[i + 1]! > 0.2) continue; // boots only
+        lo = Math.min(lo, positions[i + 2]!);
+        hi = Math.max(hi, positions[i + 2]!);
       }
       return hi - lo;
     };
-    const stride = Math.max(...scene.instances[1]!.frames!.map(zSpan));
-    expect(stride).toBeGreaterThan(zSpan(scene.instances[1]!.mesh) + 0.2);
+    const rest = bootSpan(posed("idle", 0));
+    const stride = Math.max(bootSpan(posed("run", 0.165)), bootSpan(posed("run", 0.495)));
+    expect(stride).toBeGreaterThan(rest + 0.3);
+    // Dead: everything lies low.
+    const dead = posed("die", 0.9);
+    let top = -Infinity;
+    for (let i = 1; i < dead.length; i += 3) top = Math.max(top, dead[i]!);
+    expect(top).toBeLessThan(0.7);
   });
 
   it("tints by team in team modes and gives every player their own colour in FFA", () => {
@@ -103,7 +125,8 @@ describe("the Lockout soldiers and weapons", () => {
     expect(LOCKOUT_CODE).toContain('if MODE.teams then return o.team=="blue" and TINT_BLUE or TINT_RED end');
     expect(LOCKOUT_CODE).toMatch(/FFA_TINTS = \{ (\d+, ){6}\d+ \}/);
     expect(LOCKOUT_CODE).toContain('team=(i%2==0) and "blue" or "red"');
-    expect(LOCKOUT_CODE).toContain("frame, armor_tint(o))"); // bots pose a walk frame + tint
+    expect(LOCKOUT_CODE).toContain("0, armor_tint(o))"); // bots pose + tint; the skeleton animates them
+    expect(LOCKOUT_CODE).toContain('cartbox.set(i, "speed", spd)');
   });
 
   it("builds soldiers facing +Z, with the visor at the eye height the camera uses", () => {

@@ -28,6 +28,7 @@
 import type { CartEngine } from "../engine/CartEngine";
 import { encodeRgbaPng } from "./png";
 import { serializeMeshAsset, type EncodedImage, type MeshAsset, type MeshPrimitive } from "./MeshAsset";
+import type { AnimationClip, ClipChannel, SkinJoint } from "./skeleton";
 import type { SceneLighting } from "./SceneLighting";
 import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, type Streams } from "./seedGeometry";
 import { packMeshLibrary } from "./meshLibrary";
@@ -1082,75 +1083,305 @@ function withoutUnusedUvs(mesh: MeshAsset): MeshAsset {
   };
 }
 
-/** Number of walk-cycle frames each soldier carries (pose frames 1..N). */
-export const LOCKOUT_WALK_FRAMES = 4;
+// --- The soldier's skeleton -------------------------------------------------
+// Each armour piece is bound rigidly to one bone (plates don't stretch), and the
+// clips move the bones, so the engine's skeletal animation (skeleton.ts) plays a
+// real run cycle — blended from idle by speed, a jump pose in the air, a fall
+// when killed — instead of flipping between a few baked stride frames.
+
+/** Bone indices of the soldier's skeleton. */
+const J = {
+  hips: 0, spine: 1, chest: 2, head: 3,
+  armL: 4, foreL: 5, armR: 6, foreR: 7,
+  thighL: 8, shinL: 9, footL: 10, thighR: 11, shinR: 12, footR: 13,
+} as const;
 
 /** A point `length` down from `from`, swung forward by `angle` about the X axis. */
 function swing(from: P3, length: number, angle: number): P3 {
   return [from[0], from[1] - length * Math.cos(angle), from[2] + length * Math.sin(angle)];
 }
 
+/** Where each bone sits at rest (world space, feet at y = 0), and its parent. */
+function soldierBones(): { name: string; parent: number; at: P3 }[] {
+  const hipL: P3 = [-0.13 * 1.05, 0.92, 0];
+  const hipR: P3 = [0.13 * 1.05, 0.92, 0];
+  const knee = (hip: P3) => swing(hip, 0.42, 0);
+  const ankle = (hip: P3) => swing(knee(hip), 0.4, -0.05);
+  return [
+    { name: "hips", parent: -1, at: [0, 0.94, 0] },
+    { name: "spine", parent: J.hips, at: [0, 1.07, 0] },
+    { name: "chest", parent: J.spine, at: [0, 1.27, 0] },
+    { name: "head", parent: J.chest, at: [0, 1.55, 0] },
+    { name: "upperarm_l", parent: J.chest, at: [-0.33, 1.42, 0] },
+    { name: "forearm_l", parent: J.armL, at: [-0.3, 1.12, 0.05] },
+    { name: "upperarm_r", parent: J.chest, at: [0.33, 1.42, 0] },
+    { name: "forearm_r", parent: J.armR, at: [0.3, 1.12, 0.05] },
+    { name: "thigh_l", parent: J.hips, at: hipL },
+    { name: "shin_l", parent: J.thighL, at: knee(hipL) },
+    { name: "foot_l", parent: J.shinL, at: ankle(hipL) },
+    { name: "thigh_r", parent: J.hips, at: hipR },
+    { name: "shin_r", parent: J.thighR, at: knee(hipR) },
+    { name: "foot_r", parent: J.shinR, at: ankle(hipR) },
+  ];
+}
+
+/** Geometry for one material, remembering which bone each vertex belongs to. */
+interface Bound {
+  readonly s: Streams;
+  readonly bone: number[];
+}
+const bound = (): Bound => ({ s: newStreams(), bone: [] });
+/** Draw into `b`, binding every new vertex to `joint`. */
+function on(b: Bound, joint: number, draw: (s: Streams) => void): void {
+  const before = b.s.positions.length / 3;
+  draw(b.s);
+  for (let i = before; i < b.s.positions.length / 3; i += 1) b.bone.push(joint);
+}
+function boundPrimitive(b: Bound, material: Mat): MeshPrimitive {
+  const n = b.bone.length;
+  const joints = new Uint16Array(n * 4);
+  const weights = new Float32Array(n * 4);
+  for (let i = 0; i < n; i += 1) {
+    joints[i * 4] = b.bone[i]!;
+    weights[i * 4] = 1;
+  }
+  return { ...toPrimitive(b.s, material), uvs: null, joints, weights };
+}
+
+/** A quaternion turning `angle` radians about a unit axis. */
+function quat(ax: number, ay: number, az: number, angle: number): [number, number, number, number] {
+  const h = angle / 2;
+  const s = Math.sin(h);
+  return [ax * s, ay * s, az * s, Math.cos(h)];
+}
+/** q = a then b (b applied after a). */
+function qmul(b: readonly number[], a: readonly number[]): [number, number, number, number] {
+  return [
+    b[3]! * a[0]! + b[0]! * a[3]! + b[1]! * a[2]! - b[2]! * a[1]!,
+    b[3]! * a[1]! - b[0]! * a[2]! + b[1]! * a[3]! + b[2]! * a[0]!,
+    b[3]! * a[2]! + b[0]! * a[1]! - b[1]! * a[0]! + b[2]! * a[3]!,
+    b[3]! * a[3]! - b[0]! * a[0]! - b[1]! * a[1]! - b[2]! * a[2]!,
+  ];
+}
+/** Pitch (about X: positive tips +Y toward +Z, so a leg swung by a negative pitch reaches forward), then yaw. */
+const pitchYaw = (pitch: number, yaw = 0, roll = 0) => qmul(quat(0, 0, 1, roll), qmul(quat(0, 1, 0, yaw), quat(1, 0, 0, pitch)));
+
+/**
+ * A clip from per-bone rotation curves (and a hips height/offset curve),
+ * sampled at `keys` evenly spaced moments over `duration` seconds; `at(t)` gets
+ * the phase 0..1 and returns each animated bone's rotation.
+ */
+function clipFrom(
+  name: string,
+  duration: number,
+  keys: number,
+  bones: readonly { at: P3 }[],
+  sample: (t: number) => { rot: Partial<Record<number, readonly number[]>>; hips?: P3 },
+): AnimationClip {
+  const times = new Float32Array(keys);
+  const rots = new Map<number, number[]>();
+  const hips: number[] = [];
+  for (let k = 0; k < keys; k += 1) {
+    const t = keys === 1 ? 0 : k / (keys - 1);
+    times[k] = t * duration;
+    const pose = sample(t);
+    for (const [joint, q] of Object.entries(pose.rot)) {
+      const list = rots.get(Number(joint)) ?? [];
+      list.push(...q!);
+      rots.set(Number(joint), list);
+    }
+    const h = pose.hips ?? [0, 0, 0];
+    hips.push(bones[J.hips]!.at[0] + h[0], bones[J.hips]!.at[1] + h[1], bones[J.hips]!.at[2] + h[2]);
+  }
+  const channels: ClipChannel[] = [...rots].map(([joint, values]) => ({
+    joint,
+    path: "rotation" as const,
+    interpolation: "linear" as const,
+    times,
+    values: new Float32Array(values),
+  }));
+  channels.push({ joint: J.hips, path: "translation", interpolation: "linear", times, values: new Float32Array(hips) });
+  return { name, duration, channels };
+}
+
+/** The soldier's clips: idle, run, air (a jump pose), die (topples back and lies still). */
+function soldierClips(bones: readonly { at: P3 }[]): AnimationClip[] {
+  const TAU = Math.PI * 2;
+  const idle = clipFrom("idle", 2.4, 9, bones, (t) => {
+    const breathe = Math.sin(t * TAU);
+    return {
+      rot: {
+        [J.spine]: pitchYaw(0.03 + breathe * 0.015),
+        [J.head]: pitchYaw(0, Math.sin(t * TAU) * 0.12),
+        [J.shinL]: pitchYaw(0.08),
+        [J.shinR]: pitchYaw(0.08),
+        [J.thighL]: pitchYaw(-0.05),
+        [J.thighR]: pitchYaw(-0.05),
+      },
+      hips: [0, -0.01 + breathe * 0.004, 0],
+    };
+  });
+  // A jogging stride: thighs swing opposite each other, the knee folds as the
+  // leg comes through and the foot flicks level, the body leans in, bobs twice
+  // a cycle and twists against the legs.
+  const leg = (phase: number) => {
+    const s = Math.sin(phase);
+    const c = Math.cos(phase);
+    const thigh = -0.55 * s; // negative pitch = forward
+    const knee = 0.2 + 0.85 * Math.max(0, c); // fold while the leg swings through
+    return { thigh: pitchYaw(thigh), shin: pitchYaw(knee), foot: pitchYaw(-0.3 * Math.max(0, c) + 0.15 * Math.max(0, -s)) };
+  };
+  const run = clipFrom("run", 0.66, 13, bones, (t) => {
+    const a = t * TAU;
+    const l = leg(a);
+    const r = leg(a + Math.PI);
+    return {
+      rot: {
+        [J.thighL]: l.thigh, [J.shinL]: l.shin, [J.footL]: l.foot,
+        [J.thighR]: r.thigh, [J.shinR]: r.shin, [J.footR]: r.foot,
+        [J.hips]: pitchYaw(0, Math.sin(a) * 0.12),
+        [J.spine]: pitchYaw(0.14, -Math.sin(a) * 0.16),
+        [J.chest]: pitchYaw(0.04 + Math.abs(Math.cos(a)) * 0.03),
+        [J.head]: pitchYaw(-0.16),
+      },
+      hips: [0, -0.05 + Math.abs(Math.cos(a)) * 0.05, 0],
+    };
+  });
+  const air = clipFrom("air", 0.5, 2, bones, () => ({
+    rot: {
+      [J.thighL]: pitchYaw(-0.9), [J.shinL]: pitchYaw(1.3), [J.footL]: pitchYaw(-0.3),
+      [J.thighR]: pitchYaw(-0.2), [J.shinR]: pitchYaw(0.7),
+      [J.spine]: pitchYaw(0.12),
+      [J.armL]: pitchYaw(-0.2, 0, -0.15), [J.armR]: pitchYaw(-0.2, 0, 0.15),
+    },
+    hips: [0, 0.04, 0],
+  }));
+  // Knocked back off its feet: the body tips back about the hips as it drops,
+  // the knees buckle and the arms fly out, then it lies still.
+  const die = clipFrom("die", 0.9, 10, bones, (t) => {
+    const fall = Math.min(1, t * 1.25);
+    const ease = 1 - (1 - fall) * (1 - fall);
+    return {
+      rot: {
+        [J.hips]: pitchYaw(-1.45 * ease),
+        [J.spine]: pitchYaw(-0.2 * ease),
+        [J.head]: pitchYaw(-0.3 * ease),
+        [J.thighL]: pitchYaw(-1.1 * ease), [J.shinL]: pitchYaw(1.2 * ease),
+        [J.thighR]: pitchYaw(-0.6 * ease), [J.shinR]: pitchYaw(0.5 * ease),
+        [J.armL]: pitchYaw(-1.4 * ease, 0, -0.5 * ease), [J.armR]: pitchYaw(-1.2 * ease, 0, 0.6 * ease),
+      },
+      hips: [0, -0.74 * ease, -0.35 * ease],
+    };
+  });
+  return [idle, run, air, die];
+}
+
+/**
+ * The soldier's state machine: idle ↔ run blended by `speed` (0..1), `air`
+ * while not `grounded`, `die` while `dead`.
+ */
+export const LOCKOUT_SOLDIER_ANIMATOR = {
+  params: [
+    { name: "speed", kind: "number", initial: 0 },
+    { name: "grounded", kind: "bool", initial: 1 },
+    { name: "dead", kind: "bool", initial: 0 },
+  ],
+  states: [
+    { name: "move", clip: null, speed: 1, loop: true, blend: { param: "speed", points: [{ clip: "idle", at: 0 }, { clip: "run", at: 1 }] } },
+    { name: "air", clip: "air", speed: 1, loop: true },
+    { name: "die", clip: "die", speed: 1, loop: false },
+  ],
+  transitions: [
+    { from: "move", to: "die", when: [{ param: "dead", op: "true", value: 1 }], fade: 0.08 },
+    { from: "air", to: "die", when: [{ param: "dead", op: "true", value: 1 }], fade: 0.08 },
+    { from: "die", to: "move", when: [{ param: "dead", op: "false", value: 0 }], fade: 0 },
+    { from: "move", to: "air", when: [{ param: "grounded", op: "false", value: 0 }], fade: 0.12 },
+    { from: "air", to: "move", when: [{ param: "grounded", op: "true", value: 1 }], fade: 0.1 },
+  ],
+  events: [],
+} as const;
+
 /**
  * An armoured soldier: team-paintable plates (helmet, chest, shoulders, thighs,
  * shins) over a dark undersuit, a mirrored gold visor, a backpack and a rifle
  * held at the ready. Feet at y = 0, facing +Z; roughly 1.85 tall so the cart's
- * eye height (1.5) sits at the visor.
- *
- * `phase` is the walk cycle (radians); null is the idle stance. Walking swings
- * each leg from the hip (opposite legs, opposite phase) and bends the knee of
- * the leg coming through, so a sequence of phases reads as a stride.
+ * eye height (1.5) sits at the visor. Skinned: every piece rides one bone of
+ * {@link soldierBones}, and it carries the clips of {@link soldierClips}.
  */
-function soldierMesh(phase: number | null): MeshAsset {
-  const paint = newStreams();
-  const suit = newStreams();
-  const visor = newStreams();
-  const gun = newStreams();
+function soldierMesh(): MeshAsset {
+  const paint = bound();
+  const suit = bound();
+  const visor = bound();
+  const gun = bound();
+  const bones = soldierBones();
   for (const side of [-1, 1]) {
-    const x = side * 0.13;
-    const s = phase === null ? 0 : Math.sin(phase + (side > 0 ? Math.PI : 0));
-    const c = phase === null ? 0 : Math.cos(phase + (side > 0 ? Math.PI : 0));
-    const thigh = 0.42 * s; // hip swing, forward positive
-    const knee = phase === null ? 0.05 : 0.12 + 0.45 * Math.max(0, c); // bend while the leg comes through
-    const hip: P3 = [x * 1.05, 0.92, 0];
-    const kneeAt = swing(hip, 0.42, thigh);
-    const ankle = swing(kneeAt, 0.4, thigh - knee);
-    limb(suit, hip, kneeAt, 0.12, 0.1); // thigh
-    limb(paint, swing([hip[0], hip[1], hip[2] + 0.07], 0.12, thigh), swing([hip[0], hip[1], hip[2] + 0.07], 0.34, thigh), 0.075, 0.06, 0.5); // thigh plate
-    block(paint, kneeAt[0], kneeAt[1], kneeAt[2] + 0.08, 0.06, 0.05, 0.03); // knee pad
-    limb(suit, kneeAt, ankle, 0.085, 0.075); // shin
-    limb(paint, swing([kneeAt[0], kneeAt[1], kneeAt[2] + 0.06], 0.08, thigh - knee), swing([kneeAt[0], kneeAt[1], kneeAt[2] + 0.06], 0.34, thigh - knee), 0.07, 0.06, 0.5); // shin guard
-    block(suit, ankle[0], Math.max(0.06, ankle[1] - 0.02), ankle[2] + 0.03, 0.085, 0.06, 0.15); // boot
+    const L = side < 0;
+    const thighJ = L ? J.thighL : J.thighR;
+    const shinJ = L ? J.shinL : J.shinR;
+    const footJ = L ? J.footL : J.footR;
+    const armJ = L ? J.armL : J.armR;
+    const foreJ = L ? J.foreL : J.foreR;
+    const hip = bones[thighJ]!.at;
+    const kneeAt = bones[shinJ]!.at;
+    const ankle = bones[footJ]!.at;
+    on(suit, thighJ, (s) => limb(s, hip, kneeAt, 0.12, 0.1)); // thigh
+    on(paint, thighJ, (s) => limb(s, swing([hip[0], hip[1], hip[2] + 0.07], 0.12, 0), swing([hip[0], hip[1], hip[2] + 0.07], 0.34, 0), 0.075, 0.06, 0.5)); // thigh plate
+    on(paint, shinJ, (s) => block(s, kneeAt[0], kneeAt[1], kneeAt[2] + 0.08, 0.06, 0.05, 0.03)); // knee pad
+    on(suit, shinJ, (s) => limb(s, kneeAt, ankle, 0.085, 0.075)); // shin
+    on(paint, shinJ, (s) => limb(s, swing([kneeAt[0], kneeAt[1], kneeAt[2] + 0.06], 0.08, -0.05), swing([kneeAt[0], kneeAt[1], kneeAt[2] + 0.06], 0.34, -0.05), 0.07, 0.06, 0.5)); // shin guard
+    on(suit, footJ, (s) => block(s, ankle[0], Math.max(0.06, ankle[1] - 0.02), ankle[2] + 0.03, 0.085, 0.06, 0.15)); // boot
     // Shoulder pad, upper arm, and a forearm reaching forward to the rifle.
-    block(paint, side * 0.31, 1.46, -0.01, 0.1, 0.075, 0.12, 0.05, 0.35);
-    limb(suit, [side * 0.33, 1.42, 0], [side * 0.3, 1.12, 0.05], 0.065);
-    limb(paint, [side * 0.3, 1.12, 0.05], [side * 0.1 + 0.06, 1.15, side < 0 ? 0.42 : 0.2], 0.06, 0.05);
-    block(suit, side * 0.1 + 0.06, 1.15, side < 0 ? 0.44 : 0.22, 0.045, 0.045, 0.05); // glove
+    on(paint, armJ, (s) => block(s, side * 0.31, 1.46, -0.01, 0.1, 0.075, 0.12, 0.05, 0.35));
+    on(suit, armJ, (s) => limb(s, [side * 0.33, 1.42, 0], [side * 0.3, 1.12, 0.05], 0.065));
+    on(paint, foreJ, (s) => limb(s, [side * 0.3, 1.12, 0.05], [side * 0.1 + 0.06, 1.15, L ? 0.42 : 0.2], 0.06, 0.05));
+    on(suit, foreJ, (s) => block(s, side * 0.1 + 0.06, 1.15, L ? 0.44 : 0.22, 0.045, 0.045, 0.05)); // glove
   }
-  block(suit, 0, 0.94, 0, 0.21, 0.07, 0.13, 0.05); // belt / hips
-  block(suit, 0, 1.07, 0, 0.18, 0.07, 0.12, 0.05); // abdomen
+  on(suit, J.hips, (s) => block(s, 0, 0.94, 0, 0.21, 0.07, 0.13, 0.05)); // belt / hips
+  on(suit, J.spine, (s) => block(s, 0, 1.07, 0, 0.18, 0.07, 0.12, 0.05)); // abdomen
   // Chest: a plate widening toward the shoulders, with a raised front piece.
-  pushLoft(paint, chamferedRect(0, 0, 0.23, 0.15, 0.07, 1.13), chamferedRect(0, 0.01, 0.28, 0.17, 0.09, 1.5), 1);
-  block(paint, 0, 1.32, 0.16, 0.16, 0.13, 0.03, 0.05, 0.1);
-  block(suit, 0, 1.28, -0.21, 0.17, 0.17, 0.06); // backpack
-  block(suit, 0, 1.55, 0, 0.07, 0.05, 0.07); // neck
+  on(paint, J.chest, (s) => pushLoft(s, chamferedRect(0, 0, 0.23, 0.15, 0.07, 1.13), chamferedRect(0, 0.01, 0.28, 0.17, 0.09, 1.5), 1));
+  on(paint, J.chest, (s) => block(s, 0, 1.32, 0.16, 0.16, 0.13, 0.03, 0.05, 0.1));
+  on(suit, J.chest, (s) => block(s, 0, 1.28, -0.21, 0.17, 0.17, 0.06)); // backpack
+  on(suit, J.chest, (s) => block(s, 0, 1.55, 0, 0.07, 0.05, 0.07)); // neck
   // Helmet: a rounded crown over a jaw, with the visor set into its face.
-  block(paint, 0, 1.69, 0, 0.13, 0.11, 0.15, 0.06, 0.18);
-  block(paint, 0, 1.6, 0.05, 0.11, 0.04, 0.11, 0.04);
-  pushLoft(visor, [[-0.1, 1.64, 0.145], [0.1, 1.64, 0.145], [0.1, 1.64, 0.1], [-0.1, 1.64, 0.1]], [[-0.095, 1.76, 0.13], [0.095, 1.76, 0.13], [0.095, 1.76, 0.09], [-0.095, 1.76, 0.09]], 1);
-  // The rifle, held across the body.
-  limb(gun, [0.06, 1.16, 0.0], [0.06, 1.16, 0.55], 0.035, 0.03, 1.6);
-  limb(gun, [0.06, 1.18, 0.55], [0.06, 1.18, 0.78], 0.013);
-  block(gun, 0.06, 1.24, 0.22, 0.02, 0.025, 0.1);
-  const paintMat: Mat = { name: "armor", baseColorFactor: ARMOR_PAINT, baseColorImage: null, metallicFactor: 0.45, roughnessFactor: 0.4, tintable: true };
-  return withoutUnusedUvs({
-    name: phase === null ? "soldier" : `soldier-walk-${phase.toFixed(2)}`,
-    primitives: [
-      toPrimitive(paint, paintMat),
-      toPrimitive(suit, { name: "undersuit", baseColorFactor: [0.2, 0.21, 0.24, 1], baseColorImage: null, metallicFactor: 0.3, roughnessFactor: 0.6 }),
-      toPrimitive(visor, { name: "visor", baseColorFactor: [0.95, 0.7, 0.28, 1], baseColorImage: null, metallicFactor: 0.9, roughnessFactor: 0.12, emissiveFactor: [0.35, 0.22, 0.05] }),
-      toPrimitive(gun, { name: "rifle", baseColorFactor: [0.2, 0.21, 0.23, 1], baseColorImage: null, metallicFactor: 0.7, roughnessFactor: 0.4 }),
-    ],
+  on(paint, J.head, (s) => block(s, 0, 1.69, 0, 0.13, 0.11, 0.15, 0.06, 0.18));
+  on(paint, J.head, (s) => block(s, 0, 1.6, 0.05, 0.11, 0.04, 0.11, 0.04));
+  on(visor, J.head, (s) =>
+    pushLoft(s, [[-0.1, 1.64, 0.145], [0.1, 1.64, 0.145], [0.1, 1.64, 0.1], [-0.1, 1.64, 0.1]], [[-0.095, 1.76, 0.13], [0.095, 1.76, 0.13], [0.095, 1.76, 0.09], [-0.095, 1.76, 0.09]], 1),
+  );
+  // The rifle, held across the body: it rides the right forearm, with the hands.
+  on(gun, J.foreR, (s) => limb(s, [0.06, 1.16, 0.0], [0.06, 1.16, 0.55], 0.035, 0.03, 1.6));
+  on(gun, J.foreR, (s) => limb(s, [0.06, 1.18, 0.55], [0.06, 1.18, 0.78], 0.013));
+  on(gun, J.foreR, (s) => block(s, 0.06, 1.24, 0.22, 0.02, 0.025, 0.1));
+
+  // Bones rest unrotated, so each one's rest transform is its offset from its
+  // parent and its inverse bind matrix is a plain translation back to the origin.
+  const inverseBind = new Float32Array(bones.length * 16);
+  bones.forEach((bone, j) => {
+    inverseBind.set([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -bone.at[0], -bone.at[1], -bone.at[2], 1], j * 16);
   });
+  const joints: SkinJoint[] = bones.map((bone) => {
+    const parent = bone.parent >= 0 ? bones[bone.parent]!.at : ([0, 0, 0] as P3);
+    return {
+      name: bone.name,
+      parent: bone.parent,
+      translation: [bone.at[0] - parent[0], bone.at[1] - parent[1], bone.at[2] - parent[2]],
+      rotation: [0, 0, 0, 1],
+      scale: [1, 1, 1],
+    };
+  });
+  const paintMat: Mat = { name: "armor", baseColorFactor: ARMOR_PAINT, baseColorImage: null, metallicFactor: 0.45, roughnessFactor: 0.4, tintable: true };
+  return {
+    name: "soldier",
+    primitives: [
+      boundPrimitive(paint, paintMat),
+      boundPrimitive(suit, { name: "undersuit", baseColorFactor: [0.2, 0.21, 0.24, 1], baseColorImage: null, metallicFactor: 0.3, roughnessFactor: 0.6 }),
+      boundPrimitive(visor, { name: "visor", baseColorFactor: [0.95, 0.7, 0.28, 1], baseColorImage: null, metallicFactor: 0.9, roughnessFactor: 0.12, emissiveFactor: [0.35, 0.22, 0.05] }),
+      boundPrimitive(gun, { name: "rifle", baseColorFactor: [0.2, 0.21, 0.23, 1], baseColorImage: null, metallicFactor: 0.7, roughnessFactor: 0.4 }),
+    ],
+    skin: { joints, inverseBind },
+    clips: soldierClips(bones),
+  };
 }
 
 /** Weapon ids, in the order their viewmodel instances follow the bots in the sidecar. */
@@ -1440,18 +1671,16 @@ export function lockoutMeshSidecar(): string {
   if (meshSidecar === null) {
     const identity = { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] };
     const rest = { position: [0, 0, 0], rotation: [0, 0, 0], scale: [VIEWMODEL_REST_SCALE, VIEWMODEL_REST_SCALE, VIEWMODEL_REST_SCALE] };
-    // One soldier mesh (tinted per bot at runtime) plus its walk-cycle frames,
-    // stored once in the sidecar's shared library however many bots use it.
-    const soldier = serializeMeshAsset(soldierMesh(null));
-    const walk = Array.from({ length: LOCKOUT_WALK_FRAMES }, (_, k) =>
-      serializeMeshAsset(soldierMesh((k / LOCKOUT_WALK_FRAMES) * Math.PI * 2)),
-    );
-    const meshes: { id: string; name: string; mesh: string; frames?: string[]; transform: unknown }[] = [
+    // One skinned soldier mesh (tinted per bot at runtime, animated per bot by
+    // its state machine), stored once in the sidecar's shared library however
+    // many bots use it.
+    const soldier = serializeMeshAsset(soldierMesh());
+    const meshes: { id: string; name: string; mesh: string; animator?: unknown; transform: unknown }[] = [
       { id: "lockout-map", name: "Lockout arena", mesh: serializeMeshAsset(mapMesh()), transform: identity },
     ];
     // Instances 1..7: the bots.
     for (let i = 1; i <= BOT_COUNT; i += 1) {
-      meshes.push({ id: `bot-${i}`, name: `bot ${i}`, mesh: soldier, frames: walk, transform: identity });
+      meshes.push({ id: `bot-${i}`, name: `bot ${i}`, mesh: soldier, animator: LOCKOUT_SOLDIER_ANIMATOR, transform: identity });
     }
     // Instances 8..13: one first-person viewmodel per weapon, at rest scale.
     for (const id of LOCKOUT_VIEWMODELS) {
@@ -1467,7 +1696,7 @@ export const LOCKOUT_SCENE_TRIANGLES = (() => {
   const g = MAP_GEOMETRY;
   const map =
     [g.wall, g.floor, g.under, g.snow].reduce((n, st) => n + st.indices.length / 3, 0) + g.trim.indices.length / 3;
-  const bot = soldierMesh(null).primitives.reduce((n, p) => n + p.indices.length / 3, 0);
+  const bot = soldierMesh().primitives.reduce((n, p) => n + p.indices.length / 3, 0);
   return map + bot * BOT_COUNT;
 })();
 
@@ -2092,6 +2321,7 @@ local function nav_step(o, speed)
     return true
   end
   local t = o.nt
+  o.air = kind ~= 0 and t > 0.08 and t < 0.92
   o.x, o.z = ax+(bx-ax)*t, az+(bz-az)*t
   if kind==2 then o.y = ay+(by-ay)*t + math.sin(t*math.pi)*1.1      -- jump arc
   elseif kind==1 then o.y = ay+(by-ay)*t*t                          -- fall off the ledge
@@ -2472,6 +2702,24 @@ local function draw_reticle()
   end
 end
 
+-- Soldiers are skinned: each one's state machine (idle/run blended by speed,
+-- a jump pose in the air, a fall when killed) plays on its skeleton, and the
+-- cart only feeds it parameters and places it. The speed eases toward
+-- moving/standing so the stride blends in and out rather than snapping.
+function animate_bot(i, o)
+  local target = (o.moving and not o.dead) and 1 or 0
+  o.spd = (o.spd or 0) + (target - (o.spd or 0)) * 0.25
+  -- Only changes go out: the runtime takes a limited number of commands a tick.
+  local spd = math.floor(o.spd * 50 + 0.5) / 50
+  if spd ~= o.sent_spd then o.sent_spd = spd; cartbox.set(i, "speed", spd) end
+  local air, dead = o.air and true or false, o.dead and true or false
+  if air ~= o.sent_air then o.sent_air = air; cartbox.set(i, "grounded", not air) end
+  if dead ~= o.sent_dead then o.sent_dead = dead; cartbox.set(i, "dead", dead) end
+  -- A killed soldier falls where it stood, then is taken away before it respawns.
+  if o.dead and (o.respawn or 0) < 40 then cartbox.meshpose(i,0,-50,0,0,0,0,0); return end
+  cartbox.meshpose(i, o.x, o.y, o.z, o.face or 0, 0, 0, o.jugg and 1.25 or 1, 0, armor_tint(o))
+end
+
 -- The mesh overlay always composites the 3D scene ON TOP of the cart's 2D frame,
 -- so on the 2D-only screens (menu, results) every instance must be pushed off
 -- screen -- otherwise the engine's default auto-orbit spins the arena over the
@@ -2704,19 +2952,7 @@ function TIC()
   if MODE.obj=="hill" then cartbox.light3d(hill.x, hill.y+1.2, hill.z, 5.5, 120,255,150, 3.4) end
 
   cartbox.clearposes()
-  for i=1,NBOT do local o=bots[i]
-    if o.dead then cartbox.meshpose(i,0,-50,0,0,0,0,0)
-    else
-      -- Walk cycle: step through the soldier's 4 stride frames (frame 0 is the
-      -- idle stance), with a small bob and sway, and paint it by team.
-      if o.moving then o.walk=(o.walk or 0)+0.31 end
-      local wk = o.walk or 0
-      local frame = o.moving and (1 + math.floor(wk / (math.pi/2)) % 4) or 0
-      local lift = o.moving and math.abs(math.sin(wk))*0.03 or 0
-      local sway = o.moving and math.sin(wk)*0.03 or 0
-      cartbox.meshpose(i,o.x,o.y+lift,o.z,o.face,0,sway, o.jugg and 1.25 or 1, frame, armor_tint(o))
-    end
-  end
+  for i=1,NBOT do animate_bot(i, bots[i]) end
   local cur_id = p.slot==1 and p.g1 or p.g2
   pose_viewmodel(cur_id)
   drive_camera()
