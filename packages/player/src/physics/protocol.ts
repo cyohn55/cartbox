@@ -74,6 +74,23 @@ export const PHYS_MAX_OVERLAPS = 64;
 export const PHYS_EVENT_STARTED = 1;
 export const PHYS_EVENT_TRIGGER = 2;
 
+/**
+ * Navigation agents (ENGINE_ROADMAP.md, Phase 6; host → Lua): count, then per
+ * agent x, y, z (fixed point) and a word packing its key (bits 0-9), flags
+ * (bits 10-15, see NAV_FLAG_*) and facing (bits 16-31, signed, 1/10000 rad).
+ */
+export const PHYS_AGENTS = 3720;
+export const PHYS_AGENT_BYTES = 16;
+export const PHYS_MAX_AGENTS = 16;
+export const NAV_FLAG_MOVING = 1;
+export const NAV_FLAG_AIR = 2;
+/** It has reached its goal (or has none). */
+export const NAV_FLAG_ARRIVED = 4;
+/** No way to its goal was found. */
+export const NAV_FLAG_NO_PATH = 8;
+/** An obstacle the cart moves itself (agents keep clear of it). */
+export const NAV_FLAG_OBSTACLE = 16;
+
 /** Each animated object's playback: count, then (object, clip, time in 1/1024 s, state machine state or -1). */
 export const PHYS_ANIMS = 6400;
 export const PHYS_ANIM_BYTES = 16;
@@ -110,6 +127,30 @@ export function writeTimelineState(
   const n = Math.min(events.length, PHYS_MAX_TIMELINE_EVENTS);
   block.setInt32(PHYS_TIMELINE_EVENTS, n, true);
   for (let i = 0; i < n; i += 1) block.setInt32(PHYS_TIMELINE_EVENTS + 4 + i * 4, events[i]!, true);
+}
+
+/** One agent as the cart reads it. */
+export interface AgentState {
+  readonly key: number;
+  readonly position: readonly [number, number, number];
+  readonly facing: number;
+  readonly flags: number;
+}
+
+/** Write the navigation agents (host → Lua). */
+export function writeAgents(block: DataView, agents: readonly AgentState[]): void {
+  const n = Math.min(agents.length, PHYS_MAX_AGENTS);
+  block.setInt32(PHYS_AGENTS, n, true);
+  for (let i = 0; i < n; i += 1) {
+    const a = agents[i]!;
+    const at = PHYS_AGENTS + 4 + i * PHYS_AGENT_BYTES;
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + k * 4, toFix(a.position[k]!), true);
+    let f = a.facing;
+    while (f > Math.PI) f -= 2 * Math.PI;
+    while (f < -Math.PI) f += 2 * Math.PI;
+    const facing = Math.round(f * 10000) & 0xffff;
+    block.setUint32(at + 12, ((a.key & 0x3ff) | ((a.flags & 0x3f) << 10) | (facing << 16)) >>> 0, true);
+  }
 }
 
 /** Write watched joints' world positions (host → Lua). */
@@ -183,6 +224,16 @@ export const PHYS_OP_WATCH = 18;
 export const PHYS_OP_TIMELINE = 19;
 /** Levels: a = the level index to switch to. */
 export const PHYS_OP_LEVEL = 20;
+/**
+ * Navigation agents (a = the agent's key, 0..1023): AGENT places one (creating
+ * it) at v0..v2 with speed v3 (units/s) and radius v4; v5 = 1 makes it an
+ * obstacle the cart moves itself. GOTO sends it toward v0..v2 (v3 = speed, 0 =
+ * keep); STOP halts it; REMOVE takes it away.
+ */
+export const PHYS_OP_AGENT = 21;
+export const PHYS_OP_AGENT_GOTO = 22;
+export const PHYS_OP_AGENT_STOP = 23;
+export const PHYS_OP_AGENT_REMOVE = 24;
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {

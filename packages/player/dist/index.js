@@ -3932,6 +3932,14 @@ cartbox = {
   stoptimeline = function() end,
   timeline = function() return nil, 0, false end,
   timelineevents = function() return {} end,
+  -- Navigation agents: overridden when the scene has a baked walkable surface.
+  agent = function() end,
+  obstacle = function() end,
+  moveto = function() end,
+  stopagent = function() end,
+  removeagent = function() end,
+  agentpos = function() return nil end,
+  navigable = function() return false end,
 }`;
 function injectSdk(bytes) {
   return prependLuaCode(bytes, CARTBOX_SDK_LUA);
@@ -4050,6 +4058,14 @@ var PHYS_OVERLAP_BYTES = 8;
 var PHYS_MAX_OVERLAPS = 64;
 var PHYS_EVENT_STARTED = 1;
 var PHYS_EVENT_TRIGGER = 2;
+var PHYS_AGENTS = 3720;
+var PHYS_AGENT_BYTES = 16;
+var PHYS_MAX_AGENTS = 16;
+var NAV_FLAG_MOVING = 1;
+var NAV_FLAG_AIR = 2;
+var NAV_FLAG_ARRIVED = 4;
+var NAV_FLAG_NO_PATH = 8;
+var NAV_FLAG_OBSTACLE = 16;
 var PHYS_ANIMS = 6400;
 var PHYS_ANIM_BYTES = 16;
 var PHYS_MAX_ANIMS = 64;
@@ -4074,6 +4090,20 @@ function writeTimelineState(block, playback, events = []) {
   const n = Math.min(events.length, PHYS_MAX_TIMELINE_EVENTS);
   block.setInt32(PHYS_TIMELINE_EVENTS, n, true);
   for (let i = 0; i < n; i += 1) block.setInt32(PHYS_TIMELINE_EVENTS + 4 + i * 4, events[i], true);
+}
+function writeAgents(block, agents) {
+  const n = Math.min(agents.length, PHYS_MAX_AGENTS);
+  block.setInt32(PHYS_AGENTS, n, true);
+  for (let i = 0; i < n; i += 1) {
+    const a = agents[i];
+    const at = PHYS_AGENTS + 4 + i * PHYS_AGENT_BYTES;
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + k * 4, toFix(a.position[k]), true);
+    let f = a.facing;
+    while (f > Math.PI) f -= 2 * Math.PI;
+    while (f < -Math.PI) f += 2 * Math.PI;
+    const facing = Math.round(f * 1e4) & 65535;
+    block.setUint32(at + 12, (a.key & 1023 | (a.flags & 63) << 10 | facing << 16) >>> 0, true);
+  }
 }
 function writeJointPositions(block, joints) {
   const n = Math.min(joints.length, PHYS_MAX_JOINTS);
@@ -4114,6 +4144,10 @@ var PHYS_OP_LOOKAT = 17;
 var PHYS_OP_WATCH = 18;
 var PHYS_OP_TIMELINE = 19;
 var PHYS_OP_LEVEL = 20;
+var PHYS_OP_AGENT = 21;
+var PHYS_OP_AGENT_GOTO = 22;
+var PHYS_OP_AGENT_STOP = 23;
+var PHYS_OP_AGENT_REMOVE = 24;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -5092,7 +5126,7 @@ var TimelineSession = class {
 // src/physics/physicsSdk.ts
 function sceneNeedsRuntime(scene, { physics = true } = {}) {
   return Boolean(
-    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0)
+    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0 || Boolean(scene.navmesh))
   );
 }
 var luaString = (s) => JSON.stringify(s);
@@ -5139,7 +5173,7 @@ function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}end`;
 }
 function PHYSICS_CALLS() {
   return `  cartbox.physics = function() return _live() end
@@ -5272,6 +5306,51 @@ function SPAWN_CALLS(pools) {
   cartbox.alive = function(o)
     local i = _obj(o)
     return i ~= nil and _alive[i] == true
+  end
+`;
+}
+function NAV_CALLS() {
+  return `  local function _akey(k)
+    if type(k) == "number" then return math.floor(k) end
+    return _obj(k)
+  end
+  cartbox.navigable = function() return true end
+  cartbox.agent = function(k, x, y, z, speed, radius)
+    local key = _akey(k)
+    if key ~= nil then _cmd(${PHYS_OP_AGENT}, key, x or 0, y or 0, z or 0, speed or 0, radius or 0, 0) end
+  end
+  cartbox.obstacle = function(k, x, y, z, radius)
+    local key = _akey(k)
+    if key ~= nil then _cmd(${PHYS_OP_AGENT}, key, x or 0, y or 0, z or 0, 0, radius or 0.4, 1) end
+  end
+  cartbox.moveto = function(k, x, y, z, speed)
+    local key = _akey(k)
+    if key ~= nil then _cmd(${PHYS_OP_AGENT_GOTO}, key, x or 0, y or 0, z or 0, speed or 0) end
+  end
+  cartbox.stopagent = function(k)
+    local key = _akey(k)
+    if key ~= nil then _cmd(${PHYS_OP_AGENT_STOP}, key) end
+  end
+  cartbox.removeagent = function(k)
+    local key = _akey(k)
+    if key ~= nil then _cmd(${PHYS_OP_AGENT_REMOVE}, key) end
+  end
+  cartbox.agentpos = function(k)
+    local key = _akey(k)
+    if key == nil or not _live() then return nil end
+    local n = _rd(_B + ${PHYS_AGENTS})
+    for i = 0, math.min(n, ${PHYS_MAX_AGENTS}) - 1 do
+      local at = _B + ${PHYS_AGENTS + 4} + i * ${PHYS_AGENT_BYTES}
+      local w = _rd(at + 12) & 0xffffffff
+      if (w & 1023) == key then
+        local fl = (w >> 10) & 63
+        local fa = (w >> 16) & 0xffff
+        if fa >= 32768 then fa = fa - 65536 end
+        return _rd(at) / ${PHYS_FIX}, _rd(at + 4) / ${PHYS_FIX}, _rd(at + 8) / ${PHYS_FIX}, fa / 10000,
+          (fl & ${NAV_FLAG_MOVING}) ~= 0, (fl & ${NAV_FLAG_AIR}) ~= 0, (fl & ${NAV_FLAG_ARRIVED}) ~= 0, (fl & ${NAV_FLAG_NO_PATH}) ~= 0
+      end
+    end
+    return nil
   end
 `;
 }
@@ -5520,6 +5599,244 @@ import {
   solveLookAt,
   solveTwoBoneIK
 } from "@cartbox/editor";
+
+// src/nav/agentCrowd.ts
+import { NavGraph } from "@cartbox/editor";
+var GRAVITY = 22;
+var REACH = 0.18;
+var OFF_ROUTE = 1.2;
+var BODY_HEIGHT = 1.6;
+var AgentCrowd = class {
+  constructor(mesh) {
+    this.agents = /* @__PURE__ */ new Map();
+    this.graph = new NavGraph(mesh);
+  }
+  /** Place an agent (creating it): a walker, or an obstacle the cart moves. */
+  place(key, pos, speed, radius, obstacle) {
+    const existing = this.agents.get(key);
+    const a = existing ?? {
+      key,
+      pos: [0, 0, 0],
+      radius,
+      speed,
+      obstacle,
+      goal: null,
+      path: [],
+      drops: [],
+      corner: 0,
+      repath: 0,
+      facing: 0,
+      vy: 0,
+      air: false,
+      landY: null,
+      moving: false,
+      noPath: false
+    };
+    a.radius = Math.max(0.05, radius);
+    if (speed > 0) a.speed = speed;
+    a.obstacle = obstacle;
+    a.pos = obstacle ? [...pos] : this.settle(pos);
+    a.vy = 0;
+    a.air = false;
+    if (!obstacle && existing) {
+      a.path = [];
+      a.repath = 0;
+    }
+    this.agents.set(key, a);
+  }
+  /** Send an agent toward a point (speed > 0 changes its speed). */
+  goto(key, goal, speed = 0) {
+    const a = this.agents.get(key);
+    if (!a || a.obstacle) return;
+    if (speed > 0) a.speed = speed;
+    const moved = !a.goal || Math.hypot(goal[0] - a.goal[0], goal[1] - a.goal[1], goal[2] - a.goal[2]) > 0.75;
+    a.goal = [...goal];
+    if (moved) {
+      a.repath = 0;
+      a.path = [];
+    }
+  }
+  stop(key) {
+    const a = this.agents.get(key);
+    if (!a) return;
+    a.goal = null;
+    a.path = [];
+    a.noPath = false;
+  }
+  remove(key) {
+    this.agents.delete(key);
+  }
+  /** Stand a point on the floor beneath it (or the nearest floor), unchanged when there's none. */
+  settle(pos) {
+    const g = this.graph;
+    let f = g.floorAt(pos[0], pos[1] + 0.25, pos[2]);
+    if (f < 0) f = g.nearest(pos[0], pos[1], pos[2], 2);
+    if (f < 0) return [...pos];
+    const fy = g.mesh.heights[f];
+    if (g.floorAt(pos[0], pos[1] + 0.25, pos[2]) === f) return [pos[0], fy, pos[2]];
+    return g.position(f);
+  }
+  /** Advance every agent by `dt` seconds. */
+  step(dt) {
+    const list = [...this.agents.values()].sort((a, b) => a.key - b.key);
+    const g = this.graph;
+    const climb = g.mesh.agent.climb;
+    const want = /* @__PURE__ */ new Map();
+    for (const a of list) {
+      if (a.obstacle) continue;
+      let vx = 0;
+      let vz = 0;
+      if (a.goal) {
+        if (a.repath > 0) a.repath -= 1;
+        if (a.path.length === 0 && a.repath === 0) {
+          const route = g.findRoute(a.pos, a.goal);
+          a.noPath = route === null;
+          a.path = route?.points ?? [];
+          a.drops = route?.drop ?? [];
+          a.corner = 1;
+          a.repath = 30;
+        }
+        while (a.corner < a.path.length) {
+          const c = a.path[a.corner];
+          if (Math.hypot(c[0] - a.pos[0], c[2] - a.pos[2]) > REACH) break;
+          if (a.drops[a.corner]) a.landY = c[1];
+          a.corner += 1;
+        }
+        if (a.corner < a.path.length) {
+          const c = a.path[a.corner];
+          const dx = c[0] - a.pos[0];
+          const dz = c[2] - a.pos[2];
+          const d = Math.hypot(dx, dz);
+          const s = Math.min(a.speed * dt, d);
+          vx = dx / d * s;
+          vz = dz / d * s;
+        } else if (a.path.length > 0) {
+          a.goal = null;
+          a.path = [];
+        }
+      }
+      want.set(a.key, [vx, 0, vz]);
+    }
+    for (let i = 0; i < list.length; i += 1) {
+      for (let j = i + 1; j < list.length; j += 1) {
+        const a = list[i];
+        const b = list[j];
+        if (a.obstacle && b.obstacle) continue;
+        if (Math.abs(a.pos[1] - b.pos[1]) > BODY_HEIGHT) continue;
+        let dx = a.pos[0] - b.pos[0];
+        let dz = a.pos[2] - b.pos[2];
+        let d = Math.hypot(dx, dz);
+        const overlap = a.radius + b.radius - d;
+        if (overlap <= 0) continue;
+        if (d < 1e-6) {
+          dx = 1;
+          dz = 0;
+          d = 1;
+        }
+        const ux = dx / d;
+        const uz = dz / d;
+        const share = a.obstacle ? 0 : b.obstacle ? 1 : 0.5;
+        const wa = want.get(a.key);
+        const wb = want.get(b.key);
+        if (wa) {
+          wa[0] += ux * overlap * share;
+          wa[2] += uz * overlap * share;
+        }
+        if (wb) {
+          wb[0] -= ux * overlap * (1 - share);
+          wb[2] -= uz * overlap * (1 - share);
+        }
+      }
+    }
+    for (const a of list) {
+      if (a.obstacle) continue;
+      const v = want.get(a.key);
+      const before = [...a.pos];
+      this.move(a, v[0], v[2], dt, climb);
+      const mx = a.pos[0] - before[0];
+      const mz = a.pos[2] - before[2];
+      const dist = Math.hypot(mx, mz);
+      a.moving = dist > a.speed * dt * 0.2;
+      if (a.moving) {
+        const target = Math.atan2(mx, mz);
+        let delta = target - a.facing;
+        while (delta > Math.PI) delta -= 2 * Math.PI;
+        while (delta < -Math.PI) delta += 2 * Math.PI;
+        a.facing += delta * 0.35;
+      }
+      if (a.goal && a.corner < a.path.length && a.path.length > 1) {
+        const p = a.path[a.corner - 1] ?? a.path[0];
+        const c = a.path[a.corner];
+        if (distanceToSegment(a.pos, p, c) > OFF_ROUTE && a.repath === 0) a.path = [];
+      }
+    }
+  }
+  /** Move one agent by (dx, dz), sliding along edges, stepping and falling as the floor allows. */
+  move(a, dx, dz, dt, climb) {
+    const g = this.graph;
+    const tryTo = (x, z) => {
+      const f = g.floorAt(x, a.pos[1], z, climb);
+      if (f >= 0 && a.pos[1] - g.mesh.heights[f] <= climb) {
+        a.pos = [x, a.air ? a.pos[1] : g.mesh.heights[f], z];
+        return true;
+      }
+      if (a.drops[a.corner]) {
+        a.pos = [x, a.pos[1], z];
+        a.air = true;
+        return true;
+      }
+      return false;
+    };
+    if (dx !== 0 || dz !== 0) {
+      if (!tryTo(a.pos[0] + dx, a.pos[2] + dz)) {
+        if (!tryTo(a.pos[0] + dx, a.pos[2])) tryTo(a.pos[0], a.pos[2] + dz);
+      }
+    }
+    const floor = g.floorAt(a.pos[0], a.pos[1], a.pos[2], climb);
+    if (floor < 0 && a.air && a.landY === null) return;
+    const ledge = a.path[a.corner - 1];
+    if (a.drops[a.corner] && ledge && a.pos[1] >= ledge[1] - 1e-3) return;
+    if (floor >= 0 && !a.air) a.landY = null;
+    const fy = floor >= 0 ? g.mesh.heights[floor] : a.landY ?? -Infinity;
+    if (a.air || a.pos[1] > fy + 1e-3) {
+      a.vy -= GRAVITY * dt;
+      a.pos[1] += a.vy * dt;
+      a.air = true;
+      if (a.pos[1] <= fy) {
+        a.pos[1] = fy;
+        a.vy = 0;
+        a.air = false;
+      }
+      if (fy === -Infinity && a.pos[1] < -100) {
+        a.pos = this.settle(a.pos);
+        a.air = false;
+        a.vy = 0;
+      }
+    }
+  }
+  /** Every agent as the cart reads it, in key order. */
+  state() {
+    return [...this.agents.values()].sort((a, b) => a.key - b.key).map((a) => ({
+      key: a.key,
+      position: a.pos,
+      facing: a.facing,
+      flags: (a.moving ? NAV_FLAG_MOVING : 0) | (a.air ? NAV_FLAG_AIR : 0) | (!a.goal ? NAV_FLAG_ARRIVED : 0) | (a.noPath ? NAV_FLAG_NO_PATH : 0) | (a.obstacle ? NAV_FLAG_OBSTACLE : 0)
+    }));
+  }
+  /** One agent's current path corners (for inspection and tests). */
+  path(key) {
+    return this.agents.get(key)?.path ?? [];
+  }
+};
+function distanceToSegment(p, a, b) {
+  const dx = b[0] - a[0];
+  const dz = b[2] - a[2];
+  const l2 = dx * dx + dz * dz;
+  const t = l2 > 0 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[2] - a[2]) * dz) / l2)) : 0;
+  return Math.hypot(p[0] - (a[0] + dx * t), p[2] - (a[2] + dz * t));
+}
+
+// src/runtime/runtimeChannel.ts
 var DEG = 180 / Math.PI;
 var transform = (m, p) => [
   m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
@@ -5545,6 +5862,7 @@ var RuntimeChannel = class {
     this.watched = /* @__PURE__ */ new Map();
     this.animation = sceneHasAnimation(scene) ? new AnimationSession(scene) : null;
     this.timeline = (scene.timelines?.length ?? 0) > 0 ? new TimelineSession(scene) : null;
+    this.crowd = scene.navmesh ? new AgentCrowd(scene.navmesh) : null;
     if ((scene.levels?.length ?? 0) > 0) this.level.current = 0;
     scene.instances.forEach((inst, i) => {
       if (!inst.pooled) return;
@@ -5561,6 +5879,7 @@ var RuntimeChannel = class {
     writeAnimationState(block, this.animation?.state() ?? [], this.animation?.events() ?? []);
     writeTimelineState(block, this.timeline?.state() ?? { index: -1, time: 0, playing: false }, this.timeline?.events() ?? []);
     writeLevelState(block, this.level);
+    writeAgents(block, this.crowd?.state() ?? []);
     writeJointPositions(
       block,
       [...this.watched.values()].flatMap((w) => w.position ? [{ object: w.object, joint: w.joint, position: w.position }] : [])
@@ -5584,7 +5903,8 @@ var RuntimeChannel = class {
       else if (cmd.op === PHYS_OP_LEVEL) {
         const n = this.scene.levels?.length ?? 0;
         if (cmd.a >= 0 && cmd.a < n && cmd.a !== this.level.current && cmd.a !== this.level.loading) this.levelRequest = cmd.a;
-      } else if (cmd.op === PHYS_OP_TIMELINE) {
+      } else if (cmd.op >= PHYS_OP_AGENT && cmd.op <= PHYS_OP_AGENT_REMOVE) this.agentCommand(cmd.op, cmd.a, cmd.v);
+      else if (cmd.op === PHYS_OP_TIMELINE) {
         if (cmd.a < 0) this.timeline?.stop();
         else this.timeline?.play(cmd.a, cmd.v[0], cmd.v[1]);
       }
@@ -5592,6 +5912,19 @@ var RuntimeChannel = class {
     for (const { object, cue } of this.timeline?.step(PHYSICS_DT) ?? []) this.cue(object, cue.clip, cue.fade, cue.loop);
     this.physics?.run(commands.filter((c) => c.op < PHYS_OP_SPAWN || c.op > PHYS_OP_DESPAWN && c.op < PHYS_OP_PLAY));
     this.animation?.step(PHYSICS_DT);
+    this.crowd?.step(PHYSICS_DT);
+  }
+  /** A navigation agent command (see PHYS_OP_AGENT). */
+  agentCommand(op, key, v) {
+    const crowd = this.crowd;
+    if (!crowd || key < 0 || key > 1023) return;
+    const at = [v[0], v[1], v[2]];
+    if (op === PHYS_OP_AGENT) {
+      if (crowd.state().length >= PHYS_MAX_AGENTS && !crowd.state().some((a) => a.key === key)) return;
+      crowd.place(key, at, v[3] > 0 ? v[3] : 3, v[4] > 0 ? v[4] : crowd.graph.mesh.agent.radius, v[5] >= 0.5);
+    } else if (op === PHYS_OP_AGENT_GOTO) crowd.goto(key, at, v[3]);
+    else if (op === PHYS_OP_AGENT_STOP) crowd.stop(key);
+    else crowd.remove(key);
   }
   /** A level switch the cart asked for since the last call (-1 for none); the player loads and activates it. */
   takeLevelRequest() {
@@ -7601,6 +7934,7 @@ import {
   readPhysicsWorld,
   readTimelines,
   readLevels,
+  readNavMesh,
   effectiveLevels,
   readSceneProps,
   readSceneTags,
@@ -7764,6 +8098,7 @@ function parseMeshScene(raw) {
   const placed = instances.filter((instance) => !instance.pooled && (instance.level === void 0 || instance.level === 0));
   const physicsWorld = readPhysicsWorld(parsed.physicsWorld);
   const timelines = readTimelines(parsed.timelines);
+  const navmesh = readNavMesh(parsed.navmesh);
   return {
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
@@ -7771,7 +8106,8 @@ function parseMeshScene(raw) {
     ...pools.length > 0 ? { pools } : {},
     ...physicsWorld ? { physicsWorld } : {},
     ...timelines.length > 0 ? { timelines } : {},
-    ...levels.length > 0 ? { levels } : {}
+    ...levels.length > 0 ? { levels } : {},
+    ...navmesh && navmesh.heights.length > 0 ? { navmesh } : {}
   };
 }
 function buildOrbitCamera(bounds, yaw, pitch, aspect, options = {}) {
@@ -12505,6 +12841,7 @@ function mount(container, options) {
   };
 }
 export {
+  AgentCrowd,
   AnimatedForegroundSurface,
   AnimationSession,
   BLOOM_KNEE,

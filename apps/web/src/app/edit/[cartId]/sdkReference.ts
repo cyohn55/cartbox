@@ -471,6 +471,42 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
     ],
   },
   {
+    label: "cartbox · navigation",
+    open: false,
+    entries: [
+      {
+        name: "cartbox.agent",
+        signature: "cartbox.agent(key, x, y, z, speed, radius)",
+        doc: "Place a character on the scene's baked walkable surface (bake it under Navigation in the Mesh tab), creating it if new. key is any number 0..1023 or an object's name; speed in units per second. Placing an existing agent teleports it.",
+        snippet: "cartbox.agent(1, 0, 0, 0, 4, 0.4)",
+      },
+      {
+        name: "cartbox.moveto",
+        signature: "cartbox.moveto(key, x, y, z, speed)",
+        doc: "Send an agent somewhere: it finds its own way (up stairs and ramps, off ledges), steers round the other agents, and stops there. Repeating the same goal doesn't restart it.",
+        snippet: "cartbox.moveto(1, player.x, player.y, player.z)",
+      },
+      {
+        name: "cartbox.agentpos",
+        signature: "cartbox.agentpos(key) -> x, y, z, facing, moving, air, arrived, nopath",
+        doc: "Where an agent is (as of the last tick), the way it faces, whether it's moving or falling, whether it has arrived, and whether no way to its goal was found. nil for an unknown key.",
+        snippet: "local x, y, z, face, moving = cartbox.agentpos(1)\nif x then cartbox.meshpose(1, x, y, z, face) end",
+      },
+      {
+        name: "cartbox.obstacle",
+        signature: "cartbox.obstacle(key, x, y, z, radius)",
+        doc: "Something the cart moves itself that agents must keep out of — the player, say. Call it every tick with where it is now.",
+        snippet: "cartbox.obstacle(100, player.x, player.y, player.z, 0.5)",
+      },
+      {
+        name: "cartbox.stopagent",
+        signature: "cartbox.stopagent(key) / cartbox.removeagent(key)",
+        doc: "Stop an agent where it stands, or take it away entirely.",
+        snippet: "cartbox.stopagent(1)",
+      },
+    ],
+  },
+  {
     label: "cartbox · netplay",
     open: false,
     entries: [

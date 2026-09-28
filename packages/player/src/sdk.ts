@@ -299,6 +299,14 @@ cartbox = {
   stoptimeline = function() end,
   timeline = function() return nil, 0, false end,
   timelineevents = function() return {} end,
+  -- Navigation agents: overridden when the scene has a baked walkable surface.
+  agent = function() end,
+  obstacle = function() end,
+  moveto = function() end,
+  stopagent = function() end,
+  removeagent = function() end,
+  agentpos = function() return nil end,
+  navigable = function() return false end,
 }`;
 
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */

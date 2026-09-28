@@ -198,8 +198,18 @@ trades state and commands with the cart through an 8 KB block at the end of RAM
 
 ## Phase 6 — Game systems
 
-- [ ] **Navigation:** bake a navmesh from the scene; agents with pathfinding and
+- [x] **Navigation:** bake a navmesh from the scene; agents with pathfinding and
       avoidance (`cartbox.path`, `cartbox.agent`). Replaces hand-placed waypoints.
+      The Mesh tab's Navigation panel bakes a walkable surface from the scene's
+      still objects for a body size (radius, height, step, slope, drop):
+      Recast-style column rasterisation with solid fill, headroom and clearance
+      across the body, erosion from walls and edges, and one-way drop links off
+      ledges. The host walks agents over it — A* then straightened into as few
+      straight legs as the surface allows, separation from each other and from
+      cart-moved obstacles, falling on drops — through `cartbox.agent`,
+      `cartbox.moveto`, `cartbox.agentpos`, `cartbox.obstacle`. Lockout's bots now
+      run on it (the hand-placed waypoint graph is gone) and no longer walk
+      through each other or the player.
 - [ ] **UI system:** anchored layouts, text, images, buttons, sliders and focus
       navigation for controllers, authored in the editor and driven from Lua.
       Menus like Lockout's Start menu become part of the game.

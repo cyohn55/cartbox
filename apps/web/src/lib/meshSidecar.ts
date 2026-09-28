@@ -33,6 +33,8 @@ import {
   readSceneProps,
   readTimelines,
   readLevels,
+  readNavMesh,
+  type SerializedNavMesh,
   MAX_LEVELS,
   readSceneTags,
   SCENE_PROP_MAX,
@@ -147,6 +149,8 @@ export interface MeshSidecar {
   readonly timelines?: readonly SceneTimeline[];
   /** Named levels, one loaded at a time (the first at start); see levels.ts in @cartbox/editor. */
   readonly levels?: readonly SceneLevel[];
+  /** The baked walkable surface agents find paths over (see navmesh.ts in @cartbox/editor), as stored. */
+  readonly navmesh?: SerializedNavMesh;
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -192,6 +196,7 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(sidecar.physicsWorld?.deterministic ? { physicsWorld: sidecar.physicsWorld } : {}),
     ...(sidecar.timelines && sidecar.timelines.length > 0 ? { timelines: sidecar.timelines } : {}),
     ...(sidecar.levels && sidecar.levels.length > 0 ? { levels: sidecar.levels } : {}),
+    ...(sidecar.navmesh ? { navmesh: sidecar.navmesh } : {}),
   });
 }
 
@@ -287,7 +292,15 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     ...(physicsWorld ? { physicsWorld } : {}),
     ...(timelines.length > 0 ? { timelines } : {}),
     ...(levels.length > 0 ? { levels } : {}),
+    // Kept as stored, once it reads back as a valid surface.
+    ...(readNavMesh((parsed as { navmesh?: unknown }).navmesh) ? { navmesh: (parsed as { navmesh: SerializedNavMesh }).navmesh } : {}),
   };
+}
+
+/** Set (or with null, clear) the scene's baked walkable surface. */
+export function setMeshNavMesh(sidecar: MeshSidecar, navmesh: SerializedNavMesh | null): MeshSidecar {
+  const { navmesh: _drop, ...rest } = sidecar;
+  return navmesh ? { ...rest, navmesh } : rest;
 }
 
 function withoutLevel(entry: MeshSidecarEntry): MeshSidecarEntry {

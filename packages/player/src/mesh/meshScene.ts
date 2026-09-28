@@ -24,6 +24,8 @@ import {
   readPhysicsWorld,
   readTimelines,
   readLevels,
+  readNavMesh,
+  type NavMesh,
   effectiveLevels,
   readSceneProps,
   readSceneTags,
@@ -110,6 +112,8 @@ export interface MeshScene {
   readonly timelines?: readonly SceneTimeline[];
   /** Named levels, one loaded at a time (the first at start); see levels.ts in @cartbox/editor. */
   readonly levels?: readonly SceneLevel[];
+  /** The baked walkable surface characters find paths over (see navmesh.ts in @cartbox/editor). */
+  readonly navmesh?: NavMesh;
 }
 
 /** A view + projection pair ready to hand to `renderMeshScene`. */
@@ -309,6 +313,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
   const placed = instances.filter((instance) => !instance.pooled && (instance.level === undefined || instance.level === 0));
   const physicsWorld = readPhysicsWorld((parsed as { physicsWorld?: unknown }).physicsWorld);
   const timelines = readTimelines((parsed as { timelines?: unknown }).timelines);
+  const navmesh = readNavMesh((parsed as { navmesh?: unknown }).navmesh);
   return {
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
@@ -317,6 +322,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     ...(physicsWorld ? { physicsWorld } : {}),
     ...(timelines.length > 0 ? { timelines } : {}),
     ...(levels.length > 0 ? { levels } : {}),
+    ...(navmesh && navmesh.heights.length > 0 ? { navmesh } : {}),
   };
 }
 
