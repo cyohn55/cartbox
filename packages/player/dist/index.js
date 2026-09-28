@@ -3942,6 +3942,8 @@ cartbox = {
   navigable = function() return false end,
   -- Spatial loading's focus: overridden when the scene streams by distance.
   streamfocus = function() end,
+  burst = function() end,
+  effects = function() return {} end,
 }`;
 function injectSdk(bytes) {
   return prependLuaCode(bytes, CARTBOX_SDK_LUA);
@@ -4046,7 +4048,8 @@ import {
   worldMatrices,
   resolveMeshFrames,
   resolveMeshRef,
-  viewMatrix
+  viewMatrix,
+  parseParticleEffects
 } from "@cartbox/editor";
 var DEFAULT_PREFAB_POOL = 8;
 var MAX_PREFAB_POOL = 32;
@@ -4228,11 +4231,13 @@ function parseMeshScene(raw) {
   const physicsWorld = readPhysicsWorld(parsed.physicsWorld);
   const timelines = readTimelines(parsed.timelines);
   const navmesh = readNavMesh(parsed.navmesh);
+  const effects = parseParticleEffects(parsed.effects);
   return {
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
     ...terrains.length > 0 ? { terrains, extent: sceneBounds(instances.filter((instance) => !instance.pooled)) } : {},
     ...readStreaming(parsed.streaming) ? { streaming: readStreaming(parsed.streaming) } : {},
+    ...effects.length > 0 ? { effects } : {},
     lighting,
     ...pools.length > 0 ? { pools } : {},
     ...physicsWorld ? { physicsWorld } : {},
@@ -4445,6 +4450,7 @@ var PHYS_OP_AGENT_GOTO = 22;
 var PHYS_OP_AGENT_STOP = 23;
 var PHYS_OP_AGENT_REMOVE = 24;
 var PHYS_OP_STREAM_FOCUS = 25;
+var PHYS_OP_BURST = 26;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -5423,7 +5429,7 @@ var TimelineSession = class {
 // src/physics/physicsSdk.ts
 function sceneNeedsRuntime(scene, { physics = true } = {}) {
   return Boolean(
-    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0 || Boolean(scene.navmesh) || Boolean(scene.streaming))
+    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0 || Boolean(scene.navmesh) || Boolean(scene.streaming) || (scene.effects?.length ?? 0) > 0)
   );
 }
 var luaString = (s) => JSON.stringify(s);
@@ -5470,7 +5476,7 @@ function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}end`;
 }
 function PHYSICS_CALLS() {
   return `  cartbox.physics = function() return _live() end
@@ -5603,6 +5609,25 @@ function SPAWN_CALLS(pools) {
   cartbox.alive = function(o)
     local i = _obj(o)
     return i ~= nil and _alive[i] == true
+  end
+`;
+}
+function BURST_CALLS(scene) {
+  const effects = scene.effects ?? [];
+  if (effects.length === 0) return "";
+  return `  local _fx = {${effects.map((e, i) => `[${luaString(e.name)}]=${i}`).join(",")}}
+  local _fxn = {${effects.map((e) => luaString(e.name)).join(",")}}
+  cartbox.burst = function(e, x, y, z, dx, dy, dz, scale)
+    local i = e
+    if type(e) == "string" then i = _fx[e] elseif type(e) == "number" then i = e - 1 end
+    if i == nil or i < 0 or i >= ${effects.length} then return end
+    local s = math.floor(math.max(0, math.min(4, scale or 1)) * 16 + 0.5)
+    _cmd(${PHYS_OP_BURST}, i | (s << 8), x or 0, y or 0, z or 0, dx or 0, dy or 0, dz or 0)
+  end
+  cartbox.effects = function()
+    local out = {}
+    for k, n in ipairs(_fxn) do out[k] = n end
+    return out
   end
 `;
 }
@@ -6141,6 +6166,7 @@ function distanceToSegment(p, a, b) {
 
 // src/runtime/runtimeChannel.ts
 var DEG = 180 / Math.PI;
+var MAX_BURSTS_QUEUED = 64;
 var transform = (m, p) => [
   m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
   m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
@@ -6163,6 +6189,8 @@ var RuntimeChannel = class {
     this.levelRequest = -1;
     /** Where the cart asked spatial loading to centre (null = the camera). */
     this.focus = null;
+    /** Particle bursts the cart fired since the renderer last took them. */
+    this.bursts = [];
     /** Joints whose world position the cart asked for, and where they were when last skinned. */
     this.watched = /* @__PURE__ */ new Map();
     this.animation = sceneHasAnimation(scene) ? new AnimationSession(scene) : null;
@@ -6210,7 +6238,10 @@ var RuntimeChannel = class {
         if (cmd.a >= 0 && cmd.a < n && cmd.a !== this.level.current && cmd.a !== this.level.loading) this.levelRequest = cmd.a;
       } else if (cmd.op >= PHYS_OP_AGENT && cmd.op <= PHYS_OP_AGENT_REMOVE) this.agentCommand(cmd.op, cmd.a, cmd.v);
       else if (cmd.op === PHYS_OP_STREAM_FOCUS) this.focus = cmd.a === 1 ? [cmd.v[0], cmd.v[1], cmd.v[2]] : null;
-      else if (cmd.op === PHYS_OP_TIMELINE) {
+      else if (cmd.op === PHYS_OP_BURST) {
+        if (this.bursts.length < MAX_BURSTS_QUEUED)
+          this.bursts.push({ effect: cmd.a & 255, at: [cmd.v[0], cmd.v[1], cmd.v[2]], dir: [cmd.v[3], cmd.v[4], cmd.v[5]], scale: (cmd.a >>> 8 & 65535) / 16 });
+      } else if (cmd.op === PHYS_OP_TIMELINE) {
         if (cmd.a < 0) this.timeline?.stop();
         else this.timeline?.play(cmd.a, cmd.v[0], cmd.v[1]);
       }
@@ -6245,6 +6276,12 @@ var RuntimeChannel = class {
   /** Make `level` the current one (the loading state clears). */
   setLevel(level) {
     this.level = { current: level, loading: -1, progress: 0 };
+  }
+  /** The particle bursts fired since the last call (the renderer draws them). */
+  takeBursts() {
+    const out = this.bursts;
+    this.bursts = [];
+    return out;
   }
   /** Where the cart asked spatial loading to centre, or null for the camera. */
   streamFocus() {
@@ -8012,6 +8049,7 @@ var lerp3 = (a, b, t) => a + (b - a) * t;
 // src/mesh/MeshOverlaySurface.ts
 import {
   bakeReflectionProbesAsync,
+  ParticleSystem,
   bakeSkyPanorama,
   buildSceneShadow,
   childIndices,
@@ -8359,6 +8397,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     /** Each terrain block's world bounds, measured on first use. */
     this.blockBounds = /* @__PURE__ */ new Map();
     this.destroyed = false;
+    /** The scene's 3D particle effects in flight, or null when it defines none. */
+    this.particles = null;
     /** Settles once the scene's reflection probes are baked and in use (tests await it). */
     this.probesReady = Promise.resolve();
     this.output = new Uint8ClampedArray(width * height * 4);
@@ -8469,6 +8509,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const surface = new _MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
     for (const [i, mesh] of live) surface.live.set(i, mesh);
     surface.decodeKtx2 = decodeKtx2;
+    if (scene.effects && scene.effects.length > 0) surface.particles = new ParticleSystem(scene.effects);
     if (lighting?.probes && lighting.probes.length > 0 && environment) {
       const sky = environment;
       const still = scene.instances.flatMap((inst, i) => {
@@ -8633,7 +8674,13 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       profiler.add("sky", now - mark);
       mark = now;
     }
-    this.renderer.render(instances, {
+    let drawn = instances;
+    if (this.particles) {
+      this.particles.step(1 / 60);
+      const particles = this.particles.instanceFor([-v[2], -v[6], -v[10]], [v[1], v[5], v[9]]);
+      if (particles) drawn = [...instances, particles];
+    }
+    this.renderer.render(drawn, {
       width,
       height,
       out,
@@ -9036,6 +9083,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   destroy() {
     this.destroyed = true;
     this.inner.destroy();
+  }
+  /** Fire particle effect `effect` (see cartbox.burst). */
+  burst(effect, at, dir, scale) {
+    this.particles?.burst(effect, at, dir, scale);
   }
 };
 function fillPlaceholders(mesh, images) {
@@ -12309,6 +12360,7 @@ var Player = class {
     if (afterBlock) {
       this.runtime.channel.afterTick(afterBlock);
       this.pollLevelRequest();
+      for (const b of this.runtime.channel.takeBursts()) this.meshSurface?.burst(b.effect, b.at, b.dir, b.scale);
     }
     this.updateSpatialLoading();
     lap("runtime");

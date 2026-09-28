@@ -637,6 +637,8 @@ export class Player {
     if (afterBlock) {
       this.runtime!.channel.afterTick(afterBlock);
       this.pollLevelRequest();
+      // Particle bursts the cart fired go to the 3D overlay to simulate and draw.
+      for (const b of this.runtime!.channel.takeBursts()) this.meshSurface?.burst(b.effect, b.at, b.dir, b.scale);
     }
     this.updateSpatialLoading();
     lap("runtime");

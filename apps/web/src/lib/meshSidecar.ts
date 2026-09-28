@@ -36,6 +36,8 @@ import {
   readNavMesh,
   readTerrain,
   readStreaming,
+  parseParticleEffects,
+  type ParticleEffect,
   type SceneStreaming,
   type SerializedTerrain,
   type SerializedNavMesh,
@@ -161,6 +163,8 @@ export interface MeshSidecar {
   readonly terrains?: readonly SerializedTerrain[];
   /** Spatial loading: objects load by distance (see streaming.ts in @cartbox/editor); absent = off. */
   readonly streaming?: SceneStreaming;
+  /** 3D particle effects the cart fires with cartbox.burst (see particleEffects.ts in @cartbox/editor). */
+  readonly effects?: readonly ParticleEffect[];
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -209,6 +213,7 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(sidecar.navmesh ? { navmesh: sidecar.navmesh } : {}),
     ...(sidecar.terrains && sidecar.terrains.length > 0 ? { terrains: sidecar.terrains } : {}),
     ...(sidecar.streaming ? { streaming: sidecar.streaming } : {}),
+    ...(sidecar.effects && sidecar.effects.length > 0 ? { effects: sidecar.effects } : {}),
   });
 }
 
@@ -299,6 +304,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
   const storedTerrains = (parsed as { terrains?: unknown }).terrains;
   const terrains = Array.isArray(storedTerrains) ? (storedTerrains.filter((t) => readTerrain(t) !== null) as SerializedTerrain[]) : [];
   const levelIds = new Set(levels.map((l) => l.id));
+  const effects = parseParticleEffects((parsed as { effects?: unknown }).effects);
   const placed = linked.map((entry) => (entry.level && !levelIds.has(entry.level) ? withoutLevel(entry) : entry));
   return {
     version: MESH_SIDECAR_VERSION,
@@ -312,7 +318,15 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     ...(readNavMesh((parsed as { navmesh?: unknown }).navmesh) ? { navmesh: (parsed as { navmesh: SerializedNavMesh }).navmesh } : {}),
     ...(terrains.length > 0 ? { terrains } : {}),
     ...(readStreaming((parsed as { streaming?: unknown }).streaming) ? { streaming: readStreaming((parsed as { streaming?: unknown }).streaming)! } : {}),
+    ...(effects.length > 0 ? { effects } : {}),
   };
+}
+
+/** Replace the scene's particle effects (an empty list removes them). */
+export function setMeshEffects(sidecar: MeshSidecar, effects: readonly ParticleEffect[]): MeshSidecar {
+  const { effects: _drop, ...rest } = sidecar;
+  const clean = parseParticleEffects(effects);
+  return clean.length > 0 ? { ...rest, effects: clean } : rest;
 }
 
 /** Set (or with null, clear) the scene's baked walkable surface. */

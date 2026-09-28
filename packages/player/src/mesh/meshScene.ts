@@ -50,6 +50,8 @@ import {
   type SceneLighting,
   type ScenePropValue,
   type SceneLevel,
+  parseParticleEffects,
+  type ParticleEffect,
 } from "@cartbox/editor";
 
 /** One placed mesh ready to rasterise: decoded geometry + its baked world matrix. */
@@ -143,6 +145,8 @@ export interface MeshScene {
   readonly extent?: SceneBounds;
   /** Spatial loading: objects load by distance from the streaming focus (absent = all loaded). */
   readonly streaming?: SceneStreaming;
+  /** 3D particle effects the cart fires with `cartbox.burst` (see particleEffects.ts in @cartbox/editor). */
+  readonly effects?: readonly ParticleEffect[];
 }
 
 /** A view + projection pair ready to hand to `renderMeshScene`. */
@@ -371,11 +375,13 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
   const physicsWorld = readPhysicsWorld((parsed as { physicsWorld?: unknown }).physicsWorld);
   const timelines = readTimelines((parsed as { timelines?: unknown }).timelines);
   const navmesh = readNavMesh((parsed as { navmesh?: unknown }).navmesh);
+  const effects = parseParticleEffects((parsed as { effects?: unknown }).effects);
   return {
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
     ...(terrains.length > 0 ? { terrains, extent: sceneBounds(instances.filter((instance) => !instance.pooled)) } : {}),
     ...(readStreaming((parsed as { streaming?: unknown }).streaming) ? { streaming: readStreaming((parsed as { streaming?: unknown }).streaming)! } : {}),
+    ...(effects.length > 0 ? { effects } : {}),
     lighting,
     ...(pools.length > 0 ? { pools } : {}),
     ...(physicsWorld ? { physicsWorld } : {}),

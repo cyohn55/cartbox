@@ -36,6 +36,7 @@ import { bakeNavMesh, boxTriangles, serializeNavMesh, type NavMesh } from "./nav
 import { serializeTerrain, terrainMesh, type Terrain } from "./terrain";
 import type { SceneTimeline } from "./timeline";
 import { builtinDetailGrain } from "./materialEffects";
+import { particlePreset, type ParticleEffect } from "./particleEffects";
 import { applyLightmapImage, bakeLightmap, layoutFingerprint, layoutLightmap, type LightmapLayout } from "./lightmap";
 import { base64ToBytes } from "./base64";
 import { LOCKOUT_LIGHTMAP } from "./lockoutLightmap.generated";
@@ -964,6 +965,21 @@ function mapGeometry(): MapGeometry {
   };
 }
 const MAP_GEOMETRY = mapGeometry();
+
+/**
+ * The arena's particle effects (HALO2_STYLE_ROADMAP.md H5), fired from the
+ * cart with cartbox.burst: sparks where rounds strike the metal, a cyan flare
+ * off a shield that takes a hit, a grenade's blast and its smoke, the energy
+ * sword's glowing swipe, and snow the wind lifts off the high ledges.
+ */
+export const LOCKOUT_EFFECTS: readonly ParticleEffect[] = [
+  { ...particlePreset("sparks", "spark"), count: 10 },
+  { ...particlePreset("plasma", "shield"), count: 10, color: [0.55, 0.95, 1], colorEnd: [0.15, 0.55, 1], size: 0.09, speed: 2.2, life: 0.3 },
+  { ...particlePreset("explosion", "blast"), count: 48 },
+  { ...particlePreset("smoke", "smoke"), count: 12, color: [0.3, 0.3, 0.32], colorEnd: [0.55, 0.56, 0.6] },
+  { ...particlePreset("trail", "slash"), count: 28, color: [0.75, 0.92, 1], colorEnd: [0.25, 0.45, 1] },
+  { ...particlePreset("snow", "drift"), count: 16, speed: 1.8, spread: 0.5, gravity: 0.8, life: 2 },
+];
 
 /** The energy's slow breath (cycles per second, dip at the trough); the panels' glow follows it, gentler. */
 const ENERGY_PULSE = { rate: 0.35, depth: 0.35 } as const;
@@ -1936,6 +1952,7 @@ export function lockoutMeshSidecar(): string {
       navmesh: serializeNavMesh(lockoutNavMesh()),
       terrains: [serializeTerrain(lockoutTerrain())],
       timelines: [LOCKOUT_INTRO],
+      effects: LOCKOUT_EFFECTS,
     });
   }
   return meshSidecar;
@@ -2079,6 +2096,60 @@ function seg_blocked(x0,y0,z0, x1,y1,z1, maxt)
     if ok and tmin>0.02 and tmin*1.0 < (maxt or 1) then return true end
   end
   return false
+end
+
+-- The first wall a segment from A to B strikes: t (0..1 along it) and the face's
+-- normal -- where a shot's sparks fly from (nil when it strikes nothing).
+function seg_first(x0,y0,z0, x1,y1,z1)
+  local d = {x1-x0, y1-y0, z1-z0}
+  local o = {x0, y0, z0}
+  local best, bn = nil, nil
+  for i=0,ncol()-1 do
+    local b=i*6
+    local tmin,tmax,axis = 0.0, 1.0, 0
+    local ok = true
+    for a=1,3 do
+      local lo, hi = COL[b+a], COL[b+a+3]
+      if math.abs(d[a]) < 1e-6 then
+        if o[a] < lo or o[a] > hi then ok=false break end
+      else
+        local t1=(lo-o[a])/d[a]; local t2=(hi-o[a])/d[a]
+        if t1>t2 then t1,t2=t2,t1 end
+        if t1>tmin then tmin=t1; axis=a end
+        if t2<tmax then tmax=t2 end
+        if tmin>tmax then ok=false break end
+      end
+    end
+    if ok and tmin>0.02 and axis>0 and (best==nil or tmin<best) then best=tmin; bn=axis end
+  end
+  if not best then return nil end
+  local n = {0,0,0}
+  n[bn] = d[bn] > 0 and -1 or 1
+  return best, n[1], n[2], n[3]
+end
+
+-- Sparks where a shot from (x0,y0,z0) along (fx,fy,fz) strikes a wall within rng.
+local function wall_sparks(x0,y0,z0, fx,fy,fz, rng)
+  local t,nx,ny,nz = seg_first(x0,y0,z0, x0+fx*rng, y0+fy*rng, z0+fz*rng)
+  if t then cartbox.burst("spark", x0+fx*rng*t+nx*0.03, y0+fy*rng*t+ny*0.03, z0+fz*rng*t+nz*0.03, nx,ny,nz) end
+end
+
+-- Now and then the wind lifts snow off a high ledge near the player.
+function ledge_snow()
+  if not p or tick % 23 ~= 0 then return end
+  local j = math.random(0, ncol()-1)
+  local b = j*6
+  local top = COL[b+5]
+  if top < 3 then return end
+  local x = COL[b+1] + math.random()*(COL[b+4]-COL[b+1])
+  local z = (math.random() < 0.5) and COL[b+3] or COL[b+6]
+  if d3(x,top,z, p.x,p.y,p.z) > 26 then return end
+  cartbox.burst("drift", x, top+0.05, z, 0.9, 0.15, -0.6)
+end
+
+-- A cyan flare off a soldier's shield where a round lands (toward the shooter).
+local function shield_hit(o, hy, sx,sy,sz)
+  cartbox.burst("shield", o.x, hy or o.y+1.2, o.z, sx-o.x, (sy or o.y+1.2)-(hy or o.y+1.2), sz-o.z, 0.8)
 end
 
 local function move_axis(ax, d)
@@ -2397,6 +2468,8 @@ end
 
 local function explode(g)
   flash = math.max(flash, 3)
+  cartbox.burst("blast", g.x, g.y+0.2, g.z, 0,1,0)
+  cartbox.burst("smoke", g.x, g.y+0.3, g.z, 0,1,0)
   local function splash(o)
     if not o or o.dead then return end
     local m = d3(g.x,g.y,g.z, o.x,o.y+1,o.z)
@@ -2431,6 +2504,10 @@ local function player_fire()
   local aim,ad = auto_target()
   if aim and ad < 2.4 then
     p.cool=18; flash=3
+    -- The swipe's glowing arc, right to left across the view.
+    local fx,fy,fz = forward()
+    local rx,rz = fz, -fx
+    cartbox.burst("slash", p.x+rx*0.7+fx*0.8, p.y+EYE-0.25, p.z+rz*0.7+fz*0.8, -rx*1.4+fx*0.3, 0.15, -rz*1.4+fz*0.3)
     if not aim.dead then damage(aim, (aim.sh or 0) + 90, p, false) end   -- melee strips shields
     return
   end
@@ -2471,6 +2548,9 @@ local function player_fire()
       local head = best._hy and best._hy>best.y+1.5
       if head then dmg=dmg*w.hs end
       damage(best, dmg, p, head)
+      shield_hit(best, best._hy, ex,ey,ez)
+    else
+      wall_sparks(ex,ey,ez, fx,fy,fz, w.rng)
     end
   end
 end
@@ -2624,6 +2704,13 @@ local function think_bot(o)
         local head = math.random() < 0.12
         if head then dmg = dmg*(w.hs or 1.5) end
         damage(tg, dmg, o, head)
+        if not w.melee then shield_hit(tg, tg.y + (head and 1.6 or 1.1), o.x,o.y+1.4,o.z) end
+      elseif not w.melee then
+        -- A miss: the round goes past its target and sparks off whatever is behind.
+        local ox,oy,oz = o.x, o.y+1.4, o.z
+        local fx,fy,fz = tg.x-ox+(math.random()-0.5)*1.2, tg.y+1.2-oy+(math.random()-0.5)*0.8, tg.z-oz+(math.random()-0.5)*1.2
+        local fm = math.sqrt(fx*fx+fy*fy+fz*fz)
+        if fm > 0.01 and d3(ox,oy,oz, p.x,p.y,p.z) < 30 then wall_sparks(ox,oy,oz, fx/fm,fy/fm,fz/fm, w.rng or 40) end
       end
     end
     -- Close the distance when out of range; in range, strafe -- a step to one
@@ -3222,6 +3309,7 @@ function TIC()
   nav_obstacles()
   for _,o in ipairs(bots) do think_bot(o) end
   update_grenades()
+  ledge_snow()
   update_objective()
   local w=reached_target(); if w then winner=w; phase="over" end
   net_publish()

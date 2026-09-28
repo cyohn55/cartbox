@@ -309,6 +309,8 @@ cartbox = {
   navigable = function() return false end,
   -- Spatial loading's focus: overridden when the scene streams by distance.
   streamfocus = function() end,
+  burst = function() end,
+  effects = function() return {} end,
 }`;
 
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */

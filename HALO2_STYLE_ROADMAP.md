@@ -61,10 +61,18 @@ general Unity/UE5 gap); items here that close a line there tick it off too.
 
 ## Phase B — Effects (makes a fight read as Halo)
 
-- [ ] **H5. 3D particles.** World-space emitters the cart can fire in bursts
+- [x] **H5. 3D particles.** World-space emitters the cart can fire in bursts
       (`cartbox.burst`) — sparks, plasma, explosions, blowing snow, glowing
       trails — with an editor preview. The existing screen-space weather stays.
       *Lockout:* bullet sparks, grenade blasts, sword trail, snow off ledges.
+      *Done:* effects (six presets, every field tunable) live on the mesh
+      sidecar; `cartbox.burst(name, x, y, z, dx, dy, dz, scale)` rides the
+      runtime block to the player, which simulates them and draws them as
+      camera-facing billboards in the scene — depth-tested, glowing ones
+      emissive for bloom — identically on every backend. The Mesh tab's
+      "Particle effects" panel previews each one looping. Lockout sparks off
+      walls and shields, blasts grenades with smoke, trails the sword swipe
+      and blows snow off its high ledges.
 - [ ] **H6. Decals.** Projected marks that fade: bullet pocks, plasma scorch,
       grenade burns, plus authored glyphs and frost streaks.
       *Lockout:* impact marks where shots land.
