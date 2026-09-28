@@ -68,6 +68,8 @@ export {
   LOCKOUT_SOLDIER_ANIMATOR,
   LOCKOUT_NAV_AGENT,
   lockoutNavMesh,
+  lockoutTerrain,
+  lockoutTerrainTriangles,
   LOCKOUT_LIGHTING,
   LOCKOUT_SCENE_TRIANGLES,
   LOCKOUT_CENTER_X,
@@ -174,6 +176,9 @@ export { parseVox, encodeVox, DEFAULT_VOX_PALETTE } from "./model/voxCodec";
 export {
   serializeMeshAsset,
   deserializeMeshAsset,
+  serializeMaterial,
+  deserializeMaterial,
+  type SerializedMaterial,
   defaultMaterial,
   updateMeshMaterial,
   meshVertexCount,
@@ -206,6 +211,19 @@ export {
   type NavMesh,
   type SerializedNavMesh,
 } from "./model/navmesh";
+export {
+  MAX_TERRAIN_LAYERS,
+  MAX_TERRAIN_SAMPLES,
+  MIN_TERRAIN_SAMPLES,
+  readTerrain,
+  readTerrains,
+  serializeTerrain,
+  terrainHeight,
+  terrainMesh,
+  type SerializedTerrain,
+  type Terrain,
+  type TerrainLayer,
+} from "./model/terrain";
 export { decompressGltf, gltfCompression, type DracoAttributeRequest, type DracoDecoded, type GltfDecoders } from "./model/gltfCompression";
 export {
   ANIMATOR_LIMITS,

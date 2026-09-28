@@ -33,6 +33,7 @@ import type { SceneLighting } from "./SceneLighting";
 import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, type Streams } from "./seedGeometry";
 import { packMeshLibrary } from "./meshLibrary";
 import { bakeNavMesh, boxTriangles, serializeNavMesh, type NavMesh } from "./navmesh";
+import { serializeTerrain, terrainMesh, type Terrain } from "./terrain";
 import { SWEETIE_16 } from "./palette";
 
 /** An axis-aligned box: centre (cx,cy,cz) and half-extents (hx,hy,hz). */
@@ -382,6 +383,44 @@ function bakeSurface(surface: (x: number, y: number) => Surf, strength: number):
   const png = (rgba: Uint8ClampedArray): EncodedImage => ({ mime: "image/png", bytes: encodeRgbaPng(rgba, TEX, TEX, { compress: true }) });
   return { albedo: png(albedo), normal: png(normal), metallicRoughness: png(mr), emissive: png(emissive) };
 }
+
+/**
+ * Mountain rock: dark, weathered, split by strata and frost-filled cracks. The
+ * terrain maps it flat from above, so on the cliff faces it stretches into the
+ * vertical streaks of rain- and ice-worn stone.
+ */
+function rockSurface(x: number, y: number): Surf {
+  const warp = tfbm(x, y, 4, 81, 3) * 40;
+  const strata = Math.sin(((y + warp) / TEX) * Math.PI * 2 * 9) * 0.5 + 0.5;
+  const grain = tfbm(x, y, 16, 83, 4);
+  const crack = seamDistance(wrap(y + warp * 1.7), [30, 101, 170, 222]) < 1.5 && tnoise(x, y, 8, 87) > 0.45 ? 1 : 0;
+  const v = 128 + (grain - 0.5) * 70 + (strata - 0.5) * 36 + crack * 70; // cracks hold frost
+  const h = tfbm(x, y, 8, 83, 2) * 0.5 + strata * 0.5 - crack * 0.4; // broad relief: small to store
+  return { r: clampByte(v - 4), g: clampByte(v), b: clampByte(v + 8), h, rough: 0.9, metal: 0, emis: 0 };
+}
+
+/** A small surface baked to just albedo + normal (landscape: no metal, no glow). */
+function bakeLandscape(surface: (x: number, y: number) => Surf, strength: number, size: number): { albedo: EncodedImage; normal: EncodedImage } {
+  const k = TEX / size; // sample the 256-space painters at this size, still tiling
+  const at = (x: number, y: number): Surf => surface((((x % size) + size) % size) * k, (((y % size) + size) % size) * k);
+  const albedo = new Uint8ClampedArray(size * size * 4);
+  const normal = new Uint8ClampedArray(size * size * 4);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const o = (y * size + x) * 4;
+      const s = at(x, y);
+      albedo.set([s.r, s.g, s.b, 255], o);
+      const nx0 = -(at(x + 1, y).h - at(x - 1, y).h) * strength;
+      const ny0 = -(at(x, y + 1).h - at(x, y - 1).h) * strength;
+      const len = Math.hypot(nx0, ny0, 1);
+      normal.set([Math.round((nx0 / len) * 127.5 + 127.5), Math.round((ny0 / len) * 127.5 + 127.5), Math.round((1 / len) * 127.5 + 127.5), 255], o);
+    }
+  }
+  const png = (rgba: Uint8ClampedArray): EncodedImage => ({ mime: "image/png", bytes: encodeRgbaPng(rgba, size, size, { compress: true }) });
+  return { albedo: png(albedo), normal: png(normal) };
+}
+
+let rockTexture: { albedo: EncodedImage; normal: EncodedImage } | null = null;
 
 interface LockoutTextures {
   readonly wall: BakedSurface;
@@ -925,7 +964,9 @@ function mapMesh(): MeshAsset {
   // normal-mapped for relief, with a baked emissive map for the cyan channel.
   const structMat: MeshPrimitive["material"] = {
     name: "forerunner",
-    baseColorFactor: [1, 1, 1, 1],
+    // A cool blue-steel cast over the painted panels: Forerunner metal in the
+    // snow light reads blue, never neutral grey.
+    baseColorFactor: [0.84, 0.92, 1, 1],
     baseColorImage: WALL_TEX.albedo,
     normalImage: WALL_TEX.normal,
     metallicRoughnessImage: WALL_TEX.metallicRoughness,
@@ -936,7 +977,7 @@ function mapMesh(): MeshAsset {
   };
   const floorMat: MeshPrimitive["material"] = {
     name: "forerunner-deck",
-    baseColorFactor: [1, 1, 1, 1],
+    baseColorFactor: [0.82, 0.88, 0.96, 1],
     baseColorImage: FLOOR_TEX.albedo,
     normalImage: FLOOR_TEX.normal,
     metallicRoughnessImage: FLOOR_TEX.metallicRoughness,
@@ -985,6 +1026,124 @@ function mapMesh(): MeshAsset {
       { ...g.trim, material: cyanMat },
     ],
   };
+}
+
+// --- The mountains ------------------------------------------------------------
+// Lockout hangs in a gorge high in an icy range: sheer cliffs drop from all
+// round the facility into a chasm with no visible floor, and snow-loaded peaks
+// crowd in above them. That landscape is a terrain (a heightfield the player
+// builds into geometry at load), so it costs a few kilobytes, not a mesh.
+
+/** Hashed value noise over an unbounded plane (period 2²⁰ — no visible repeat). */
+function vnoise(x: number, y: number, seed: number, periodX = 1 << 20): number {
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const fx = x - xi;
+  const fy = y - yi;
+  const sx = fx * fx * (3 - 2 * fx);
+  const sy = fy * fy * (3 - 2 * fy);
+  const a = thash(xi, yi, seed, periodX);
+  const b = thash(xi + 1, yi, seed, periodX);
+  const c = thash(xi, yi + 1, seed, periodX);
+  const d = thash(xi + 1, yi + 1, seed, periodX);
+  return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
+}
+
+/** Ridged multifractal: sharp crests where plain noise would be rounded hills. */
+function ridged(x: number, y: number, seed: number, octaves = 5): number {
+  let sum = 0;
+  let amp = 0.5;
+  let norm = 0;
+  let weight = 1;
+  for (let i = 0; i < octaves; i += 1) {
+    const f = 1 << i;
+    let n = 1 - Math.abs(vnoise(x * f, y * f, seed + i * 17) * 2 - 1);
+    n *= n * weight;
+    weight = Math.min(1, n * 1.6);
+    sum += n * amp;
+    norm += amp;
+    amp *= 0.5;
+  }
+  return sum / norm;
+}
+
+const smooth = (e0: number, e1: number, v: number): number => {
+  const t = Math.max(0, Math.min(1, (v - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+};
+
+/** How deep the chasm goes — well past where the fog swallows it. */
+const CHASM = -95;
+const TERRAIN_SIZE = 320;
+const TERRAIN_SAMPLES = 97;
+
+/** The ground height round the arena at (x, z): chasm, cliff, rim, then peaks. */
+function lockoutGround(x: number, z: number): number {
+  // An ellipse hugging the deck (wider in X), wobbling round its circumference.
+  const r = Math.hypot(x * 0.95, z * 1.12);
+  const turn = (Math.atan2(z, x) / (Math.PI * 2) + 1) % 1; // 0..1 round the arena
+  const around = (cycles: number, seed: number) => vnoise(turn * cycles, 0.5, seed, cycles);
+  const inner = 30 + 8 * around(9, 3) + 3 * around(23, 5);
+  // The rim stands tallest behind the sniper tower (north-west) and dips on the
+  // east, so the far range shows through a notch.
+  const west = Math.cos((turn - 0.62) * Math.PI * 2) * 0.5 + 0.5;
+  const rim = 3 + 20 * around(5, 7) * (0.45 + 0.55 * west) + 10 * west;
+  if (r < inner) return CHASM;
+  // Sheer walls: most of the height gained in the first few units, broken into
+  // buttresses and gullies by noise that runs down the face.
+  const wall = smooth(0, 1, (r - inner) / 11) ** 0.55;
+  const gullies = (vnoise(turn * 60, (r - inner) * 0.08, 11, 60) - 0.5) * 9;
+  const cliff = CHASM + (rim - CHASM) * wall + gullies * wall * (1 - wall) * 4;
+  // Beyond the rim, the range: ridged crests rising toward a ring of peaks.
+  const out = smooth(inner + 8, inner + 70, r);
+  const peaks = 22 + 85 * ridged(x / 70, z / 70, 21);
+  let h = cliff + (peaks - rim) * out + (vnoise(x / 9, z / 9, 31) - 0.5) * 5 * smooth(inner + 5, inner + 20, r);
+  // The edge of the grid falls away behind the crests, so it never shows.
+  h -= smooth(TERRAIN_SIZE * 0.4, TERRAIN_SIZE * 0.5, Math.max(Math.abs(x), Math.abs(z))) * 120;
+  return h;
+}
+
+let terrain: Terrain | null = null;
+
+/** Lockout's landscape: the gorge, its cliffs and the range round it. */
+export function lockoutTerrain(): Terrain {
+  if (terrain) return terrain;
+  const n = TERRAIN_SAMPLES;
+  const origin: [number, number, number] = [-TERRAIN_SIZE / 2, 0, -TERRAIN_SIZE / 2];
+  const heights = new Float32Array(n * n);
+  for (let j = 0; j < n; j += 1) {
+    for (let i = 0; i < n; i += 1) {
+      heights[j * n + i] = lockoutGround(origin[0] + (i / (n - 1)) * TERRAIN_SIZE, origin[2] + (j / (n - 1)) * TERRAIN_SIZE);
+    }
+  }
+  // Snow wherever it can lie, and dark weathered rock on the faces too steep to
+  // hold it (one texture, stored once).
+  const snow: MeshPrimitive["material"] = { name: "terrain-snow", baseColorFactor: [0.8, 0.84, 0.9, 1], baseColorImage: null, metallicFactor: 0, roughnessFactor: 0.85 };
+  rockTexture ??= bakeLandscape(rockSurface, 3, 128);
+  const stone = { baseColorImage: rockTexture.albedo, normalImage: rockTexture.normal, metallicFactor: 0 };
+  const rock: MeshPrimitive["material"] = { name: "terrain-rock", baseColorFactor: [0.3, 0.32, 0.36, 1], ...stone, roughnessFactor: 0.9 };
+  terrain = {
+    id: "lockout-range",
+    name: "Mountains",
+    origin,
+    size: [TERRAIN_SIZE, TERRAIN_SIZE],
+    samples: n,
+    heights,
+    layers: [
+      { material: snow, up: [0.7, 1] },
+      { material: rock },
+    ],
+    floor: CHASM + 25,
+    tile: 14,
+    // On the map, so the menus' hiding the map hides the mountains with it.
+    parent: "lockout-map",
+  };
+  return terrain;
+}
+
+/** Triangles the landscape draws (it isn't part of the arena's budget). */
+export function lockoutTerrainTriangles(): number {
+  return terrainMesh(lockoutTerrain()).primitives.reduce((n, p) => n + p.indices.length / 3, 0);
 }
 
 // --- Characters & weapons ----------------------------------------------------
@@ -1602,7 +1761,7 @@ export const LOCKOUT_LIGHTING: SceneLighting = {
   },
   // Cold haze that thickens across the arena, tinted to the horizon.
   // Kept light: the arena is only ~30 units across, so heavy fog just washes it out.
-  fog: { color: [0.74, 0.8, 0.87], density: 0.02, start: 12, max: 0.35 },
+  fog: { color: [0.74, 0.8, 0.87], density: 0.015, start: 16, max: 0.4 },
 };
 
 /**
@@ -1666,6 +1825,7 @@ export function lockoutMeshSidecar(): string {
       library: packed.library,
       lighting: LOCKOUT_LIGHTING,
       navmesh: serializeNavMesh(lockoutNavMesh()),
+      terrains: [serializeTerrain(lockoutTerrain())],
     });
   }
   return meshSidecar;
@@ -2690,7 +2850,8 @@ end
 -- The mesh overlay always composites the 3D scene ON TOP of the cart's 2D frame,
 -- so on the 2D-only screens (menu, results) every instance must be pushed off
 -- screen -- otherwise the engine's default auto-orbit spins the arena over the
--- menu text (index 0 is the map; 1..NBOT are the bots; scale 0 hides).
+-- menu text (index 0 is the map, which carries the mountains; 1..NBOT are the
+-- bots; scale 0 hides).
 function hide_scene()
   cartbox.clearposes()
   for i=0,NBOT do cartbox.meshpose(i,0,-999,0,0,0,0,0) end

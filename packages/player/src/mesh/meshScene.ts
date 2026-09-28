@@ -25,7 +25,11 @@ import {
   readTimelines,
   readLevels,
   readNavMesh,
+  readTerrains,
+  terrainHeight,
+  terrainMesh,
   type NavMesh,
+  type Terrain,
   effectiveLevels,
   readSceneProps,
   readSceneTags,
@@ -77,6 +81,12 @@ export interface MeshInstance extends MeshSceneInstance {
   readonly pooled?: { readonly prefab: string; readonly copy: number; readonly root: number };
   /** The level this object belongs to (an index into the scene's `levels`); absent = always loaded. */
   readonly level?: number;
+  /**
+   * Set on a terrain's geometry (see terrain.ts in @cartbox/editor): landscape
+   * round the play space, so it neither sets the framing bounds nor casts into
+   * the shadow map (which frames the play space), and the far plane reaches it.
+   */
+  readonly terrain?: true;
 }
 
 /** A prefab's reserve of spawnable copies: each copy's root object index. */
@@ -114,6 +124,10 @@ export interface MeshScene {
   readonly levels?: readonly SceneLevel[];
   /** The baked walkable surface characters find paths over (see navmesh.ts in @cartbox/editor). */
   readonly navmesh?: NavMesh;
+  /** Heightfield landscapes, as authored (their geometry is among the instances). */
+  readonly terrains?: readonly Terrain[];
+  /** Bounds of everything drawn, terrain included — how far the camera must see. */
+  readonly extent?: SceneBounds;
 }
 
 /** A view + projection pair ready to hand to `renderMeshScene`. */
@@ -305,18 +319,31 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     ...(levelOf[i]! >= 0 ? { level: levelOf[i]! } : {}),
   }));
 
+  // Terrain: built into geometry here, one instance per terrain, after the objects.
+  const terrains = readTerrains((parsed as { terrains?: unknown }).terrains);
+  for (const t of terrains) {
+    const mesh = terrainMesh(t);
+    if (mesh.primitives.length === 0) continue;
+    const identity = composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]);
+    // Riding on a parent: the heights are in its space (a missing parent leaves it a root).
+    const parent = t.parent !== undefined ? (indexOf.get(t.parent) ?? -1) : -1;
+    const model = parent >= 0 ? instances[parent]!.model : identity;
+    instances.push({ mesh, model, local: identity, parent, id: `terrain:${t.id}`, name: t.name, tags: [], props: {}, physics: null, terrain: true });
+  }
+
   if (instances.length === 0) return null;
   const lighting = parseSceneLighting((parsed as { lighting?: unknown }).lighting);
   const pools: PrefabPool[] = [...poolRoots.entries()].map(([prefab, ids]) => ({ prefab, roots: ids.map((id) => indexOf.get(id)!) }));
   // Reserve copies sit hidden at the origin, and later levels aren't loaded yet:
   // neither counts toward the framing bounds.
-  const placed = instances.filter((instance) => !instance.pooled && (instance.level === undefined || instance.level === 0));
+  const placed = instances.filter((instance) => !instance.pooled && !instance.terrain && (instance.level === undefined || instance.level === 0));
   const physicsWorld = readPhysicsWorld((parsed as { physicsWorld?: unknown }).physicsWorld);
   const timelines = readTimelines((parsed as { timelines?: unknown }).timelines);
   const navmesh = readNavMesh((parsed as { navmesh?: unknown }).navmesh);
   return {
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
+    ...(terrains.length > 0 ? { terrains, extent: sceneBounds(instances.filter((instance) => !instance.pooled)) } : {}),
     lighting,
     ...(pools.length > 0 ? { pools } : {}),
     ...(physicsWorld ? { physicsWorld } : {}),
@@ -324,6 +351,25 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     ...(levels.length > 0 ? { levels } : {}),
     ...(navmesh && navmesh.heights.length > 0 ? { navmesh } : {}),
   };
+}
+
+/**
+ * The auto-orbit's pitch, raised as far as it takes (up to nearly overhead) for
+ * the auto-fitted eye to clear any terrain beneath it by a few units — a scene
+ * set in a valley would otherwise orbit inside its own mountains.
+ */
+export function orbitPitchAboveTerrain(scene: MeshScene, yaw: number, pitch: number): number {
+  const terrains = scene.terrains;
+  if (!terrains || terrains.length === 0) return pitch;
+  const { center, radius } = scene.bounds;
+  const distance = radius / Math.sin((25 * Math.PI) / 180) + radius; // buildOrbitCamera's auto-fit
+  for (let p = pitch; p < 1.45; p += 0.05) {
+    const x = center[0] + distance * Math.cos(p) * Math.sin(yaw);
+    const y = center[1] + distance * Math.sin(p);
+    const z = center[2] + distance * Math.cos(p) * Math.cos(yaw);
+    if (terrains.every((t) => (terrainHeight(t, x, z) ?? -Infinity) + 4 < y)) return p;
+  }
+  return 1.45;
 }
 
 /** Optional overrides a cart supplies via `cartbox.meshcam(...)` (see the mailbox). */
@@ -341,6 +387,8 @@ export interface OrbitCameraOptions {
    * any wall it stands beside included).
    */
   readonly near?: number;
+  /** Everything drawn (terrain included): the far plane reaches past all of it. */
+  readonly extent?: SceneBounds;
 }
 
 /**
@@ -374,13 +422,14 @@ export function buildOrbitCamera(
     target[1] + distance * Math.sin(pitch),
     target[2] + distance * cosPitch * Math.cos(yaw),
   ];
+  let far = distance + radius * 4;
+  const extent = options.extent;
+  if (extent) {
+    const reach = Math.hypot(eye[0] - extent.center[0], eye[1] - extent.center[1], eye[2] - extent.center[2]) + extent.radius;
+    far = Math.max(far, reach);
+  }
   return {
     view: viewMatrix(eye, target),
-    projection: projectionMatrix(
-      fovY,
-      aspect,
-      options.near && options.near > 0 ? options.near : Math.max(0.01, radius * 0.05),
-      distance + radius * 4,
-    ),
+    projection: projectionMatrix(fovY, aspect, options.near && options.near > 0 ? options.near : Math.max(0.01, radius * 0.05), far),
   };
 }

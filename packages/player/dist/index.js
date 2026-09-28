@@ -7935,6 +7935,9 @@ import {
   readTimelines,
   readLevels,
   readNavMesh,
+  readTerrains,
+  terrainHeight,
+  terrainMesh,
   effectiveLevels,
   readSceneProps,
   readSceneTags,
@@ -8092,16 +8095,26 @@ function parseMeshScene(raw) {
     ...pool ? { pooled: { prefab: pool.prefab, copy: pool.copy, root: indexOf.get(pool.rootId) } } : {},
     ...levelOf[i] >= 0 ? { level: levelOf[i] } : {}
   }));
+  const terrains = readTerrains(parsed.terrains);
+  for (const t of terrains) {
+    const mesh = terrainMesh(t);
+    if (mesh.primitives.length === 0) continue;
+    const identity = composeModelMatrix3([0, 0, 0], [0, 0, 0], [1, 1, 1]);
+    const parent = t.parent !== void 0 ? indexOf.get(t.parent) ?? -1 : -1;
+    const model = parent >= 0 ? instances[parent].model : identity;
+    instances.push({ mesh, model, local: identity, parent, id: `terrain:${t.id}`, name: t.name, tags: [], props: {}, physics: null, terrain: true });
+  }
   if (instances.length === 0) return null;
   const lighting = parseSceneLighting(parsed.lighting);
   const pools = [...poolRoots.entries()].map(([prefab, ids]) => ({ prefab, roots: ids.map((id) => indexOf.get(id)) }));
-  const placed = instances.filter((instance) => !instance.pooled && (instance.level === void 0 || instance.level === 0));
+  const placed = instances.filter((instance) => !instance.pooled && !instance.terrain && (instance.level === void 0 || instance.level === 0));
   const physicsWorld = readPhysicsWorld(parsed.physicsWorld);
   const timelines = readTimelines(parsed.timelines);
   const navmesh = readNavMesh(parsed.navmesh);
   return {
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
+    ...terrains.length > 0 ? { terrains, extent: sceneBounds(instances.filter((instance) => !instance.pooled)) } : {},
     lighting,
     ...pools.length > 0 ? { pools } : {},
     ...physicsWorld ? { physicsWorld } : {},
@@ -8109,6 +8122,19 @@ function parseMeshScene(raw) {
     ...levels.length > 0 ? { levels } : {},
     ...navmesh && navmesh.heights.length > 0 ? { navmesh } : {}
   };
+}
+function orbitPitchAboveTerrain(scene, yaw, pitch) {
+  const terrains = scene.terrains;
+  if (!terrains || terrains.length === 0) return pitch;
+  const { center, radius } = scene.bounds;
+  const distance = radius / Math.sin(25 * Math.PI / 180) + radius;
+  for (let p = pitch; p < 1.45; p += 0.05) {
+    const x = center[0] + distance * Math.cos(p) * Math.sin(yaw);
+    const y = center[1] + distance * Math.sin(p);
+    const z = center[2] + distance * Math.cos(p) * Math.cos(yaw);
+    if (terrains.every((t) => (terrainHeight(t, x, z) ?? -Infinity) + 4 < y)) return p;
+  }
+  return 1.45;
 }
 function buildOrbitCamera(bounds, yaw, pitch, aspect, options = {}) {
   const { radius } = bounds;
@@ -8125,14 +8151,15 @@ function buildOrbitCamera(bounds, yaw, pitch, aspect, options = {}) {
     target[1] + distance * Math.sin(pitch),
     target[2] + distance * cosPitch * Math.cos(yaw)
   ];
+  let far = distance + radius * 4;
+  const extent = options.extent;
+  if (extent) {
+    const reach = Math.hypot(eye[0] - extent.center[0], eye[1] - extent.center[1], eye[2] - extent.center[2]) + extent.radius;
+    far = Math.max(far, reach);
+  }
   return {
     view: viewMatrix(eye, target),
-    projection: projectionMatrix(
-      fovY,
-      aspect,
-      options.near && options.near > 0 ? options.near : Math.max(0.01, radius * 0.05),
-      distance + radius * 4
-    )
+    projection: projectionMatrix(fovY, aspect, options.near && options.near > 0 ? options.near : Math.max(0.01, radius * 0.05), far)
   };
 }
 
@@ -8469,8 +8496,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       targetOffset: cart.target,
       // First-person (HUD) views put the eye inside the scene: a tight near
       // plane keeps the held weapon and adjacent walls from being clipped.
-      near: this.hud ? FIRST_PERSON_NEAR : void 0
-    }) : buildOrbitCamera(this.scene.bounds, this.frame * AUTO_ORBIT_YAW_PER_FRAME, AUTO_ORBIT_PITCH, this.width / this.height);
+      near: this.hud ? FIRST_PERSON_NEAR : void 0,
+      extent: this.scene.extent
+    }) : this.autoOrbitCamera();
     const { main: instances, front, moved } = this.posedInstances();
     const lighting = this.scene.lighting;
     let mark = profiler ? performance.now() : 0;
@@ -8624,7 +8652,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         front.push(instance);
       } else {
         main.push(instance);
-        moved.push(instance);
+        if (!this.scene.instances[i]?.terrain) moved.push(instance);
       }
     }
     return { main, front, moved };
@@ -8691,7 +8719,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       if (s.front) front.push(instance);
       else {
         main.push(instance);
-        moved.push(instance);
+        if (!this.scene.instances[i]?.terrain) moved.push(instance);
       }
     }
     this.lastPlacement = placement;
@@ -8727,6 +8755,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     }
     return out;
   }
+  /** The engine's gentle auto-orbit round the scene, kept above any terrain. */
+  autoOrbitCamera() {
+    const yaw = this.frame * AUTO_ORBIT_YAW_PER_FRAME;
+    const pitch = orbitPitchAboveTerrain(this.scene, yaw, AUTO_ORBIT_PITCH);
+    return buildOrbitCamera(this.scene.bounds, yaw, pitch, this.width / this.height, { extent: this.scene.extent });
+  }
   /**
    * Render the scene's directional shadow map for this frame, or null when the
    * rig has shadows off / no directional light.
@@ -8750,7 +8784,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.pooledRoot.forEach((root, i) => {
         if (root >= 0) posed.add(i);
       });
-      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i));
+      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && !this.scene.instances[i]?.terrain);
       const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow });
       if (!built) return null;
       this.staticShadowMatrix = built.lightViewProj;
@@ -13020,6 +13054,7 @@ export {
   netSendInterval,
   normalBasis3x3,
   normalVector,
+  orbitPitchAboveTerrain,
   packLights,
   paramKey,
   parseAnim,

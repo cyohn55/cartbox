@@ -227,7 +227,14 @@ completeness.
 - [ ] Clustered lighting for many lights; cascaded shadow maps.
 - [ ] True HDR environments with prefiltered mips; reflection and light probes.
 - [ ] Baked lightmaps.
-- [ ] Terrain, foliage, decals, volumetric fog.
+- [x] Terrain: a heightfield landscape stored as a grid of heights on the mesh sidecar
+      (a few kilobytes where a mesh would take megabytes) and built into geometry when
+      the scene loads. Each triangle takes the first layer whose slope and height rule
+      it meets (snow on the gentle ground, rock on the cliffs), cells below a floor are
+      left out, and a terrain can ride on a parent object. It doesn't frame the camera
+      or cast into the play area's shadow map, the far plane reaches it, and the
+      auto-orbit stays above it. Lockout's gorge and mountains are one.
+- [ ] Foliage, decals, volumetric fog.
 - [ ] A dedicated Modern-tier engine core (it currently reuses the Xbox 360 core).
 
 ## Phase 8 — Collaboration and shipping

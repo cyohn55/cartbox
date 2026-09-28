@@ -48,7 +48,8 @@ describe("the Lockout arena starter", () => {
   it("parses into a drawable scene: the map plus 7 bot instances", () => {
     const scene = parseMeshScene(lockoutMeshSidecar())!;
     expect(scene).not.toBeNull();
-    expect(scene.instances).toHaveLength(1 + 7 + 6); // map + 7 bots + 6 weapon viewmodels
+    expect(scene.instances).toHaveLength(1 + 7 + 6 + 1); // map + 7 bots + 6 weapon viewmodels + the mountains
+    expect(scene.instances[14]!.terrain).toBe(true);
     expect(scene.bounds.radius).toBeGreaterThan(0);
   });
 

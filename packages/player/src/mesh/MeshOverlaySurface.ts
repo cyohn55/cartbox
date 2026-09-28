@@ -51,7 +51,7 @@ import type { MailboxMeshCamera, MailboxMeshPose, WorldLight } from "../mailbox.
 import type { ShadowInput, SceneLight, SceneLighting } from "@cartbox/editor";
 import type { MeshScene } from "./meshScene.js";
 import { QUALITY_PRESETS, type QualitySettings } from "../quality.js";
-import { buildOrbitCamera } from "./meshScene.js";
+import { buildOrbitCamera, orbitPitchAboveTerrain } from "./meshScene.js";
 import { estimateSceneBytes, type Profiler, type RenderStats } from "../debug/profiler.js";
 
 const RAD_TO_DEG = 180 / Math.PI;
@@ -542,8 +542,9 @@ export class MeshOverlaySurface implements DisplaySurface {
           // First-person (HUD) views put the eye inside the scene: a tight near
           // plane keeps the held weapon and adjacent walls from being clipped.
           near: this.hud ? FIRST_PERSON_NEAR : undefined,
+          extent: this.scene.extent,
         })
-      : buildOrbitCamera(this.scene.bounds, this.frame * AUTO_ORBIT_YAW_PER_FRAME, AUTO_ORBIT_PITCH, this.width / this.height);
+      : this.autoOrbitCamera();
     const { main: instances, front, moved } = this.posedInstances();
     // Apply the authored Modern-tier lighting rig, if any. Absent (every cart
     // that never opted in) leaves these omitted, so the draw is exactly as before
@@ -728,7 +729,7 @@ export class MeshOverlaySurface implements DisplaySurface {
         front.push(instance);
       } else {
         main.push(instance);
-        moved.push(instance);
+        if (!this.scene.instances[i]?.terrain) moved.push(instance); // terrain casts nothing
       }
     }
     return { main, front, moved };
@@ -804,7 +805,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       if (s.front) front.push(instance);
       else {
         main.push(instance);
-        moved.push(instance);
+        if (!this.scene.instances[i]?.terrain) moved.push(instance); // terrain casts nothing
       }
     }
     this.lastPlacement = placement;
@@ -844,6 +845,13 @@ export class MeshOverlaySurface implements DisplaySurface {
     return out;
   }
 
+  /** The engine's gentle auto-orbit round the scene, kept above any terrain. */
+  private autoOrbitCamera(): ReturnType<typeof buildOrbitCamera> {
+    const yaw = this.frame * AUTO_ORBIT_YAW_PER_FRAME;
+    const pitch = orbitPitchAboveTerrain(this.scene, yaw, AUTO_ORBIT_PITCH);
+    return buildOrbitCamera(this.scene.bounds, yaw, pitch, this.width / this.height, { extent: this.scene.extent });
+  }
+
   /**
    * Render the scene's directional shadow map for this frame, or null when the
    * rig has shadows off / no directional light.
@@ -881,7 +889,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       this.pooledRoot.forEach((root, i) => {
         if (root >= 0) posed.add(i);
       });
-      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i));
+      // Terrain frames nothing and casts nothing: the map is sized to the play space.
+      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && !this.scene.instances[i]?.terrain);
       const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow });
       if (!built) return null;
       this.staticShadowMatrix = built.lightViewProj;
