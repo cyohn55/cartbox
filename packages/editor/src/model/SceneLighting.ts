@@ -26,7 +26,8 @@ import {
   type ShadowInput,
   type ToneMap,
 } from "../render/meshRasterizer";
-import type { ProceduralSky, SceneFog, SkyMountainRange } from "../render/skyDome";
+import { MAX_FOG_VOLUMES, type FogVolume, type ProceduralSky, type SceneFog, type SkyMountainRange } from "../render/skyDome";
+import type { SunShafts } from "../render/sunShafts";
 import { parseReflectionProbes, type ReflectionProbe } from "./reflectionProbes";
 
 /** Serialized-format version, bumped on any schema change. */
@@ -66,6 +67,12 @@ export interface SceneLighting {
    * probe's box reflect the scene around it rather than the sky.
    */
   readonly probes?: readonly ReflectionProbe[];
+  /**
+   * Sun shafts (HALO2_STYLE_ROADMAP.md, H7): light streaking from the sun
+   * through gaps in the scene. Needs the sky dome — the sun and the sky
+   * behind the geometry are what shine through. Absent = none.
+   */
+  readonly shafts?: SunShafts | null;
 }
 
 const clamp01 = (n: number): number => Math.max(0, Math.min(1, n));
@@ -128,6 +135,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
   const sky = parseSky(record.sky);
   const fog = parseFog(record.fog);
   const probes = parseReflectionProbes(record.probes);
+  const shafts = parseShafts(record.shafts);
 
   const lights = Array.isArray(record.lights)
     ? record.lights.map(parseLight).filter((l): l is SceneLight => l !== null)
@@ -148,6 +156,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     ...(sky ? { sky } : {}),
     ...(fog ? { fog } : {}),
     ...(probes.length > 0 ? { probes } : {}),
+    ...(shafts ? { shafts } : {}),
   };
 }
 
@@ -217,17 +226,63 @@ export function parseSky(value: unknown): ProceduralSky | null {
   };
 }
 
+function parseFogVolume(value: unknown): FogVolume | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  if (!isFiniteTriple(raw.min) || !isFiniteTriple(raw.max)) return null;
+  const min: [number, number, number] = [Math.min(raw.min[0], raw.max[0]), Math.min(raw.min[1], raw.max[1]), Math.min(raw.min[2], raw.max[2])];
+  const max: [number, number, number] = [Math.max(raw.min[0], raw.max[0]), Math.max(raw.min[1], raw.max[1]), Math.max(raw.min[2], raw.max[2])];
+  return {
+    min,
+    max,
+    density: Math.max(0, Math.min(4, finiteOr(raw.density, 0.3))),
+    falloff: Math.max(0, Math.min(10, finiteOr(raw.falloff, 0.5))),
+  };
+}
+
 /** Read stored fog defensively; absent or malformed is null (no fog). */
 export function parseFog(value: unknown): SceneFog | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Record<string, unknown>;
   const base = defaultSceneFog();
+  const h = raw.height && typeof raw.height === "object" ? (raw.height as Record<string, unknown>) : null;
+  const g = raw.glow && typeof raw.glow === "object" ? (raw.glow as Record<string, unknown>) : null;
+  const volumes = Array.isArray(raw.volumes)
+    ? raw.volumes.map(parseFogVolume).filter((v): v is FogVolume => v !== null).slice(0, MAX_FOG_VOLUMES)
+    : [];
   return {
     color: tripleOr(raw.color, base.color),
     density: Math.max(0, Math.min(1, finiteOr(raw.density, base.density))),
     start: Math.max(0, finiteOr(raw.start, base.start)),
     max: clamp01(finiteOr(raw.max, base.max)),
+    // The H7 layers are only present when authored, so older fog round-trips unchanged.
+    ...(h
+      ? {
+          height: {
+            base: finiteOr(h.base, 0),
+            density: Math.max(0, Math.min(4, finiteOr(h.density, 0.05))),
+            falloff: Math.max(0, Math.min(10, finiteOr(h.falloff, 0.3))),
+          },
+        }
+      : {}),
+    ...(volumes.length > 0 ? { volumes } : {}),
+    ...(g ? { glow: { color: tripleOr(g.color, [1, 0.9, 0.7]), strength: Math.max(0, Math.min(2, finiteOr(g.strength, 0.6))) } } : {}),
   };
+}
+
+/** Read stored sun shafts defensively; absent or malformed is null (none). */
+export function parseShafts(value: unknown): SunShafts | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  return {
+    strength: Math.max(0, Math.min(2, finiteOr(raw.strength, 0.6))),
+    length: Math.max(0.05, Math.min(1, finiteOr(raw.length, 0.6))),
+  };
+}
+
+/** Shafts that read in daylight without washing the frame out. */
+export function defaultSunShafts(): SunShafts {
+  return { strength: 0.6, length: 0.6 };
 }
 
 // --- Immutable edits (the lighting editor edits through these) --------------
@@ -248,6 +303,12 @@ export function setSceneSky(lighting: SceneLighting, sky: ProceduralSky | null):
 /** Set or clear the distance fog. */
 export function setSceneFog(lighting: SceneLighting, fog: SceneFog | null): SceneLighting {
   return { ...lighting, fog };
+}
+
+/** Set or clear the sun shafts. */
+export function setSceneShafts(lighting: SceneLighting, shafts: SunShafts | null): SceneLighting {
+  const { shafts: _old, ...rest } = lighting;
+  return shafts ? { ...rest, shafts } : rest;
 }
 
 /** Replace the reflection probes (an empty list removes them). */

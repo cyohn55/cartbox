@@ -68,7 +68,9 @@ import {
   LIGHTMAP_RANGE,
   MAX_REFLECTION_PROBES,
   PROBE_FADE,
+  FOG_GLOW_POWER,
   PROBE_RANGE,
+  cameraPositionFromView,
   computeSmoothNormals,
   multiplyMat4,
   type DecodedTexture,
@@ -137,6 +139,10 @@ struct Uniforms {
   surface1: vec4<f32>,  // xy = emissive UV offset
   surface2: vec4<f32>,  // rgb = rim colour × strength, w = rim power
   surface3: vec4<f32>,  // rgb = blend-surface colour, w = its roughness (< 0 keeps)
+  fogCam: vec4<f32>,    // xyz = eye (world), w = fog volume count
+  fogHeight: vec4<f32>, // x = height-fog density, y = base, z = falloff, w = glow strength
+  fogGlow: vec4<f32>,   // rgb = sun-glow colour
+  fogVol: array<vec4<f32>, 8>, // per volume: min xyz + density, max xyz + falloff
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -194,6 +200,48 @@ struct Probe {
 @group(0) @binding(14) var detailTex: texture_2d<f32>;
 // The blend surface's map (terrain snow over rock), mixed by the vertex weight.
 @group(0) @binding(15) var blendTex: texture_2d<f32>;
+
+// Optical depth of a fog layer thinning above base, along the ray from the eye
+// (height cy, rise dy, length len) over t in [t0, t1] — fogLayerDepth in skyDome.ts.
+fn fogLayer(d: f32, k: f32, base: f32, cy: f32, dy: f32, len: f32, t0: f32, t1: f32) -> f32 {
+  if (d <= 0.0 || t1 <= t0) { return 0.0; }
+  let ya = cy + dy * t0 - base;
+  let yb = cy + dy * t1 - base;
+  let y0 = min(ya, yb);
+  let y1 = max(ya, yb);
+  let span = d * len * (t1 - t0);
+  let h = y1 - y0;
+  if (h < 1e-5) { return span * exp(-k * max(0.0, y0)); }
+  var tau = 0.0;
+  if (y0 < 0.0) { tau = tau + span * (min(y1, 0.0) - y0) / h; }
+  if (y1 > 0.0) {
+    let lo = max(y0, 0.0);
+    let above = y1 - lo;
+    if (k * above < 1e-4) {
+      tau = tau + span * above * exp(-k * lo) / h;
+    } else {
+      tau = tau + span * (exp(-k * lo) - exp(-k * y1)) / (k * h);
+    }
+  }
+  return tau;
+}
+
+// Where the segment c → c + dir·t (t in [0, 1]) is inside a box: (t0, t1), or t0 >= t1 when it misses.
+fn fogBox(mn: vec3<f32>, mx: vec3<f32>, c: vec3<f32>, dir: vec3<f32>) -> vec2<f32> {
+  var t0 = 0.0;
+  var t1 = 1.0;
+  for (var a = 0; a < 3; a = a + 1) {
+    if (abs(dir[a]) < 1e-9) {
+      if (c[a] < mn[a] || c[a] > mx[a]) { return vec2<f32>(1.0, 0.0); }
+    } else {
+      let ta = (mn[a] - c[a]) / dir[a];
+      let tb = (mx[a] - c[a]) / dir[a];
+      t0 = max(t0, min(ta, tb));
+      t1 = min(t1, max(ta, tb));
+    }
+  }
+  return vec2<f32>(t0, t1);
+}
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
@@ -477,11 +525,32 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
       let e = u.tonemap.y;
       shaded = vec3<f32>(aces(lit.r * e), aces(lit.g * e), aces(lit.b * e));
     }
-    // Distance fog in display space, mirroring fogFactor in skyDome.ts.
+    // Fog in display space, mirroring applyFog in skyDome.ts: distance fog by
+    // eye depth, then height and volume fog along the ray from the eye, toward
+    // the fog colour brightened by the sun glow.
     if (u.fogParams.x > 0.5) {
       let d = max(0.0, in.eyeDepth - u.fogParams.y);
-      let f = min(u.fogParams.z, 1.0 - exp(-d * u.fog.w));
-      shaded = mix(clamp(shaded, vec3<f32>(0.0), vec3<f32>(1.0)), u.fog.rgb, f);
+      var f = min(u.fogParams.z, 1.0 - exp(-d * u.fog.w));
+      var fc = u.fog.rgb;
+      if (u.fogParams.w > 0.5) {
+        let c = u.fogCam.xyz;
+        let ray = in.worldPos - c;
+        let len = length(ray);
+        var tau = fogLayer(u.fogHeight.x, u.fogHeight.z, u.fogHeight.y, c.y, ray.y, len, 0.0, 1.0);
+        let vc = i32(u.fogCam.w + 0.5);
+        for (var i = 0; i < vc; i = i + 1) {
+          let a = u.fogVol[i * 2];
+          let b = u.fogVol[i * 2 + 1];
+          let span = fogBox(a.xyz, b.xyz, c, ray);
+          if (span.y > span.x) { tau = tau + fogLayer(a.w, b.w, a.y, c.y, ray.y, len, span.x, span.y); }
+        }
+        f = 1.0 - (1.0 - f) * exp(-tau);
+        if (u.fogHeight.w > 0.0) {
+          let cosv = max(0.0, dot(ray, u.light.xyz) / (max(len, 1e-6) * max(length(u.light.xyz), 1e-6)));
+          fc = min(vec3<f32>(1.0), fc + u.fogGlow.rgb * (u.fogHeight.w * pow(cosv, ${FOG_GLOW_POWER.toFixed(1)})));
+        }
+      }
+      shaded = mix(clamp(shaded, vec3<f32>(0.0), vec3<f32>(1.0)), fc, f);
     }
     return vec4<f32>(shaded, colour.a);
   }
@@ -923,6 +992,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // normalising them per primitive would be the same answer computed many times.
     const light = resolveLight(draw.lightDirection, draw.ambient);
     const viewDir = viewDirection(draw.view);
+    const eye = cameraPositionFromView(draw.view);
 
     // Shadow map: the CPU-generated map (renderShadowMap) uploaded as r32float so
     // the GPU samples the *same* depths the software path tests against. `size` 0
@@ -1012,6 +1082,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         model,
         lightCount,
         fog: draw.fog ?? null,
+        eye,
         surface: resolveSurface(entry.primitive.material, draw.time ?? 0, entry.textures.detail !== null, entry.textures.mr !== null, {
           weights: entry.primitive.blend !== undefined,
           textured: entry.textures.blend !== null,

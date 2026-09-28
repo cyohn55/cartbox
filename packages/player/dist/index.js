@@ -8090,6 +8090,8 @@ import {
   bakeReflectionProbesAsync,
   ParticleSystem,
   DecalSystem,
+  applySunShafts,
+  sunScreenPosition,
   bakeSkyPanorama,
   buildSceneShadow,
   childIndices,
@@ -8399,6 +8401,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     /** The last sky backdrop and the view it was painted for (it depends only on
      *  where the camera points, so walking without turning reuses it). */
     this.skyCache = null;
+    /** Reused buffers for the sun-shaft pass. */
+    this.shaftScratch = null;
     /** The cart's world lights this frame (cartbox.light3d), added to the rig's in first person. */
     this.cartLights = [];
     /** Tinted mesh copies, per source mesh and tint index. */
@@ -8751,6 +8755,13 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       // steps with the game rather than the wall clock.
       time: this.frame / 60
     });
+    if (skyBackdrop && lighting?.shafts && lighting.sky && this.skyCache) {
+      const sun = sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, width, height);
+      if (sun) {
+        this.shaftScratch ?? (this.shaftScratch = { mask: new Float32Array(0), light: new Float32Array(0) });
+        applySunShafts(out, this.skyCache.pixels, width, height, sun, lighting.sky.sunColor, lighting.shafts, this.shaftScratch);
+      }
+    }
     if (front.length > 0) {
       this.frontRenderer.render(front, {
         width,
@@ -9683,7 +9694,9 @@ import {
   LIGHTMAP_RANGE,
   MAX_REFLECTION_PROBES as MAX_REFLECTION_PROBES2,
   PROBE_FADE,
+  FOG_GLOW_POWER,
   PROBE_RANGE,
+  cameraPositionFromView as cameraPositionFromView2,
   computeSmoothNormals,
   multiplyMat4 as multiplyMat44
 } from "@cartbox/editor";
@@ -9863,11 +9876,13 @@ var WebglPassTimer = class _WebglPassTimer {
 import {
   DEFAULT_DETAIL_SCALE,
   DEFAULT_DETAIL_STRENGTH,
+  MAX_FOG_VOLUMES,
   MAX_REFLECTION_PROBES,
-  emissiveAnimation
+  emissiveAnimation,
+  fogIsVolumetric
 } from "@cartbox/editor";
 var UNIFORM_STRIDE = 768;
-var UNIFORM_BYTES_USED = 560;
+var UNIFORM_BYTES_USED = 736;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var LIGHT_FLOATS = 12;
 var PROBE_FLOATS = 16;
@@ -9925,6 +9940,10 @@ var OFFSET_SURFACE0 = 124;
 var OFFSET_SURFACE1 = 128;
 var OFFSET_SURFACE2 = 132;
 var OFFSET_SURFACE3 = 136;
+var OFFSET_FOG_CAM = 140;
+var OFFSET_FOG_HEIGHT = 144;
+var OFFSET_FOG_GLOW = 148;
+var OFFSET_FOG_VOL = 152;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -10064,7 +10083,37 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_FOG_PARAMS] = fog ? 1 : 0;
   target[base + OFFSET_FOG_PARAMS + 1] = fog ? fog.start : 0;
   target[base + OFFSET_FOG_PARAMS + 2] = fog ? fog.max : 0;
-  target[base + OFFSET_FOG_PARAMS + 3] = 0;
+  const volumetric = fog !== null && fogIsVolumetric(fog);
+  target[base + OFFSET_FOG_PARAMS + 3] = volumetric ? 1 : 0;
+  const eye = uniform.eye ?? [0, 0, 0];
+  const layered = volumetric ? fog : null;
+  const volumes = (layered?.volumes ?? []).slice(0, MAX_FOG_VOLUMES);
+  const height = layered?.height ?? null;
+  const glow = layered?.glow ?? null;
+  target[base + OFFSET_FOG_CAM] = eye[0];
+  target[base + OFFSET_FOG_CAM + 1] = eye[1];
+  target[base + OFFSET_FOG_CAM + 2] = eye[2];
+  target[base + OFFSET_FOG_CAM + 3] = volumes.length;
+  target[base + OFFSET_FOG_HEIGHT] = height ? height.density : 0;
+  target[base + OFFSET_FOG_HEIGHT + 1] = height ? height.base : 0;
+  target[base + OFFSET_FOG_HEIGHT + 2] = height ? height.falloff : 0;
+  target[base + OFFSET_FOG_HEIGHT + 3] = glow ? glow.strength : 0;
+  target[base + OFFSET_FOG_GLOW] = glow ? glow.color[0] : 0;
+  target[base + OFFSET_FOG_GLOW + 1] = glow ? glow.color[1] : 0;
+  target[base + OFFSET_FOG_GLOW + 2] = glow ? glow.color[2] : 0;
+  target[base + OFFSET_FOG_GLOW + 3] = 0;
+  for (let i = 0; i < MAX_FOG_VOLUMES; i += 1) {
+    const v = volumes[i];
+    const o = base + OFFSET_FOG_VOL + i * 8;
+    target[o] = v ? v.min[0] : 0;
+    target[o + 1] = v ? v.min[1] : 0;
+    target[o + 2] = v ? v.min[2] : 0;
+    target[o + 3] = v ? v.density : 0;
+    target[o + 4] = v ? v.max[0] : 0;
+    target[o + 5] = v ? v.max[1] : 0;
+    target[o + 6] = v ? v.max[2] : 0;
+    target[o + 7] = v ? v.falloff : 0;
+  }
   target[base + OFFSET_SHADOW2] = shadow ? shadow.slopeBias ?? 0 : 0;
   target[base + OFFSET_SHADOW2 + 1] = shadow && shadow.pcf ? 1 : 0;
   target[base + OFFSET_SHADOW2 + 2] = 0;
@@ -10161,6 +10210,10 @@ layout(std140) uniform Uniforms {
   vec4 surface1;
   vec4 surface2;
   vec4 surface3;
+  vec4 fogCam;
+  vec4 fogHeight;
+  vec4 fogGlow;
+  vec4 fogVol[8];
 } u;
 `
 );
@@ -10244,6 +10297,44 @@ in vec4 vLightClip;
 in vec3 vWorldPos;
 in float vEyeDepth;
 out vec4 outColor;
+
+// Optical depth of a fog layer thinning above base (fogLayerDepth in skyDome.ts).
+float fogLayer(float d, float k, float base, float cy, float dy, float len, float t0, float t1) {
+  if (d <= 0.0 || t1 <= t0) return 0.0;
+  float ya = cy + dy * t0 - base;
+  float yb = cy + dy * t1 - base;
+  float y0 = min(ya, yb);
+  float y1 = max(ya, yb);
+  float span = d * len * (t1 - t0);
+  float h = y1 - y0;
+  if (h < 1e-5) return span * exp(-k * max(0.0, y0));
+  float tau = 0.0;
+  if (y0 < 0.0) tau += span * (min(y1, 0.0) - y0) / h;
+  if (y1 > 0.0) {
+    float lo = max(y0, 0.0);
+    float above = y1 - lo;
+    if (k * above < 1e-4) tau += span * above * exp(-k * lo) / h;
+    else tau += span * (exp(-k * lo) - exp(-k * y1)) / (k * h);
+  }
+  return tau;
+}
+
+// Where the segment c -> c + dir*t (t in [0, 1]) is inside a box (fogBoxSpan).
+vec2 fogBox(vec3 mn, vec3 mx, vec3 c, vec3 dir) {
+  float t0 = 0.0;
+  float t1 = 1.0;
+  for (int a = 0; a < 3; a++) {
+    if (abs(dir[a]) < 1e-9) {
+      if (c[a] < mn[a] || c[a] > mx[a]) return vec2(1.0, 0.0);
+    } else {
+      float ta = (mn[a] - c[a]) / dir[a];
+      float tb = (mx[a] - c[a]) / dir[a];
+      t0 = max(t0, min(ta, tb));
+      t1 = min(t1, max(ta, tb));
+    }
+  }
+  return vec2(t0, t1);
+}
 
 // A material map at uv (already V-flipped). An era without filtering picks the
 // texel exactly as the software rasteriser does \u2014 floor(wrap(u) \xB7 size) \u2014
@@ -10470,7 +10561,27 @@ void main() {
     if (u.fogParams.x > 0.5) {
       float d = max(0.0, vEyeDepth - u.fogParams.y);
       float f = min(u.fogParams.z, 1.0 - exp(-d * u.fog.w));
-      shaded = mix(clamp(shaded, vec3(0.0), vec3(1.0)), u.fog.rgb, f);
+      vec3 fc = u.fog.rgb;
+      if (u.fogParams.w > 0.5) {
+        vec3 c = u.fogCam.xyz;
+        vec3 ray = vWorldPos - c;
+        float len = length(ray);
+        float tau = fogLayer(u.fogHeight.x, u.fogHeight.z, u.fogHeight.y, c.y, ray.y, len, 0.0, 1.0);
+        int vc = int(u.fogCam.w + 0.5);
+        for (int i = 0; i < 4; i++) {
+          if (i >= vc) break;
+          vec4 a = u.fogVol[i * 2];
+          vec4 b = u.fogVol[i * 2 + 1];
+          vec2 span = fogBox(a.xyz, b.xyz, c, ray);
+          if (span.y > span.x) tau += fogLayer(a.w, b.w, a.y, c.y, ray.y, len, span.x, span.y);
+        }
+        f = 1.0 - (1.0 - f) * exp(-tau);
+        if (u.fogHeight.w > 0.0) {
+          float cosv = max(0.0, dot(ray, u.light.xyz) / (max(len, 1e-6) * max(length(u.light.xyz), 1e-6)));
+          fc = min(vec3(1.0), fc + u.fogGlow.rgb * (u.fogHeight.w * pow(cosv, ${FOG_GLOW_POWER.toFixed(1)})));
+        }
+      }
+      shaded = mix(clamp(shaded, vec3(0.0), vec3(1.0)), fc, f);
     }
     outColor = vec4(shaded, colour.a);
     return;
@@ -10666,6 +10777,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.ensureCapacity(batches.length, cursor + WEBGL_INSTANCES_PER_DRAW * INSTANCE_FLOATS);
     const light = resolveLight(draw.lightDirection, draw.ambient);
     const viewDir = viewDirection(draw.view);
+    const eye = cameraPositionFromView2(draw.view);
     const shadow = draw.shadow ?? null;
     this.uploadShadow(shadow);
     const shadowParams = shadow ? { size: shadow.size, bias: shadow.bias ?? 3e-3, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false } : null;
@@ -10699,6 +10811,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         model,
         lightCount: sceneLights.length,
         fog: draw.fog ?? null,
+        eye,
         surface: resolveSurface(batch.primitive.material, draw.time ?? 0, batch.textures.detail !== null, batch.textures.mr !== null, {
           weights: batch.primitive.blend !== void 0,
           textured: batch.textures.blend !== null
@@ -10954,7 +11067,9 @@ import {
   LIGHTMAP_RANGE as LIGHTMAP_RANGE2,
   MAX_REFLECTION_PROBES as MAX_REFLECTION_PROBES3,
   PROBE_FADE as PROBE_FADE2,
+  FOG_GLOW_POWER as FOG_GLOW_POWER2,
   PROBE_RANGE as PROBE_RANGE2,
+  cameraPositionFromView as cameraPositionFromView3,
   computeSmoothNormals as computeSmoothNormals2,
   multiplyMat4 as multiplyMat45
 } from "@cartbox/editor";
@@ -10989,6 +11104,10 @@ struct Uniforms {
   surface1: vec4<f32>,  // xy = emissive UV offset
   surface2: vec4<f32>,  // rgb = rim colour \xD7 strength, w = rim power
   surface3: vec4<f32>,  // rgb = blend-surface colour, w = its roughness (< 0 keeps)
+  fogCam: vec4<f32>,    // xyz = eye (world), w = fog volume count
+  fogHeight: vec4<f32>, // x = height-fog density, y = base, z = falloff, w = glow strength
+  fogGlow: vec4<f32>,   // rgb = sun-glow colour
+  fogVol: array<vec4<f32>, 8>, // per volume: min xyz + density, max xyz + falloff
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -11046,6 +11165,48 @@ struct Probe {
 @group(0) @binding(14) var detailTex: texture_2d<f32>;
 // The blend surface's map (terrain snow over rock), mixed by the vertex weight.
 @group(0) @binding(15) var blendTex: texture_2d<f32>;
+
+// Optical depth of a fog layer thinning above base, along the ray from the eye
+// (height cy, rise dy, length len) over t in [t0, t1] \u2014 fogLayerDepth in skyDome.ts.
+fn fogLayer(d: f32, k: f32, base: f32, cy: f32, dy: f32, len: f32, t0: f32, t1: f32) -> f32 {
+  if (d <= 0.0 || t1 <= t0) { return 0.0; }
+  let ya = cy + dy * t0 - base;
+  let yb = cy + dy * t1 - base;
+  let y0 = min(ya, yb);
+  let y1 = max(ya, yb);
+  let span = d * len * (t1 - t0);
+  let h = y1 - y0;
+  if (h < 1e-5) { return span * exp(-k * max(0.0, y0)); }
+  var tau = 0.0;
+  if (y0 < 0.0) { tau = tau + span * (min(y1, 0.0) - y0) / h; }
+  if (y1 > 0.0) {
+    let lo = max(y0, 0.0);
+    let above = y1 - lo;
+    if (k * above < 1e-4) {
+      tau = tau + span * above * exp(-k * lo) / h;
+    } else {
+      tau = tau + span * (exp(-k * lo) - exp(-k * y1)) / (k * h);
+    }
+  }
+  return tau;
+}
+
+// Where the segment c \u2192 c + dir\xB7t (t in [0, 1]) is inside a box: (t0, t1), or t0 >= t1 when it misses.
+fn fogBox(mn: vec3<f32>, mx: vec3<f32>, c: vec3<f32>, dir: vec3<f32>) -> vec2<f32> {
+  var t0 = 0.0;
+  var t1 = 1.0;
+  for (var a = 0; a < 3; a = a + 1) {
+    if (abs(dir[a]) < 1e-9) {
+      if (c[a] < mn[a] || c[a] > mx[a]) { return vec2<f32>(1.0, 0.0); }
+    } else {
+      let ta = (mn[a] - c[a]) / dir[a];
+      let tb = (mx[a] - c[a]) / dir[a];
+      t0 = max(t0, min(ta, tb));
+      t1 = min(t1, max(ta, tb));
+    }
+  }
+  return vec2<f32>(t0, t1);
+}
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
@@ -11329,11 +11490,32 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
       let e = u.tonemap.y;
       shaded = vec3<f32>(aces(lit.r * e), aces(lit.g * e), aces(lit.b * e));
     }
-    // Distance fog in display space, mirroring fogFactor in skyDome.ts.
+    // Fog in display space, mirroring applyFog in skyDome.ts: distance fog by
+    // eye depth, then height and volume fog along the ray from the eye, toward
+    // the fog colour brightened by the sun glow.
     if (u.fogParams.x > 0.5) {
       let d = max(0.0, in.eyeDepth - u.fogParams.y);
-      let f = min(u.fogParams.z, 1.0 - exp(-d * u.fog.w));
-      shaded = mix(clamp(shaded, vec3<f32>(0.0), vec3<f32>(1.0)), u.fog.rgb, f);
+      var f = min(u.fogParams.z, 1.0 - exp(-d * u.fog.w));
+      var fc = u.fog.rgb;
+      if (u.fogParams.w > 0.5) {
+        let c = u.fogCam.xyz;
+        let ray = in.worldPos - c;
+        let len = length(ray);
+        var tau = fogLayer(u.fogHeight.x, u.fogHeight.z, u.fogHeight.y, c.y, ray.y, len, 0.0, 1.0);
+        let vc = i32(u.fogCam.w + 0.5);
+        for (var i = 0; i < vc; i = i + 1) {
+          let a = u.fogVol[i * 2];
+          let b = u.fogVol[i * 2 + 1];
+          let span = fogBox(a.xyz, b.xyz, c, ray);
+          if (span.y > span.x) { tau = tau + fogLayer(a.w, b.w, a.y, c.y, ray.y, len, span.x, span.y); }
+        }
+        f = 1.0 - (1.0 - f) * exp(-tau);
+        if (u.fogHeight.w > 0.0) {
+          let cosv = max(0.0, dot(ray, u.light.xyz) / (max(len, 1e-6) * max(length(u.light.xyz), 1e-6)));
+          fc = min(vec3<f32>(1.0), fc + u.fogGlow.rgb * (u.fogHeight.w * pow(cosv, ${FOG_GLOW_POWER2.toFixed(1)})));
+        }
+      }
+      shaded = mix(clamp(shaded, vec3<f32>(0.0), vec3<f32>(1.0)), fc, f);
     }
     return vec4<f32>(shaded, colour.a);
   }
@@ -11676,6 +11858,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.ensureInstanceCapacity(instanceCount);
     const light = resolveLight(draw.lightDirection, draw.ambient);
     const viewDir = viewDirection(draw.view);
+    const eye = cameraPositionFromView3(draw.view);
     const shadow = draw.shadow ?? null;
     this.ensureShadowTexture(shadow ? shadow.size : 0);
     if (shadow) {
@@ -11746,6 +11929,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         model,
         lightCount,
         fog: draw.fog ?? null,
+        eye,
         surface: resolveSurface(entry.primitive.material, draw.time ?? 0, entry.textures.detail !== null, entry.textures.mr !== null, {
           weights: entry.primitive.blend !== void 0,
           textured: entry.textures.blend !== null

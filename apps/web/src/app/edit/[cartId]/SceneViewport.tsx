@@ -312,6 +312,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
             tonemap: sceneLightingTonemap(lighting),
             lights: lighting.lights,
             shadow,
+            fog: lighting.fog ?? null,
           }
         : {}),
     });

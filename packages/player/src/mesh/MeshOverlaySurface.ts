@@ -26,6 +26,9 @@ import {
   bakeReflectionProbesAsync,
   ParticleSystem,
   DecalSystem,
+  applySunShafts,
+  sunScreenPosition,
+  type ShaftScratch,
   bakeSkyPanorama,
   buildSceneShadow,
   childIndices,
@@ -215,6 +218,8 @@ export class MeshOverlaySurface implements DisplaySurface {
   /** The last sky backdrop and the view it was painted for (it depends only on
    *  where the camera points, so walking without turning reuses it). */
   private skyCache: { key: string; pixels: Uint8ClampedArray } | null = null;
+  /** Reused buffers for the sun-shaft pass. */
+  private shaftScratch: ShaftScratch | null = null;
   /** The cart's world lights this frame (cartbox.light3d), added to the rig's in first person. */
   private cartLights: readonly SceneLight[] = [];
   /** Tinted mesh copies, per source mesh and tint index. */
@@ -655,6 +660,15 @@ export class MeshOverlaySurface implements DisplaySurface {
       // steps with the game rather than the wall clock.
       time: this.frame / 60,
     });
+    // Sun shafts: open sky near the sun streaks through the gaps in the scene.
+    // Drawn before the held weapon, which sits in front of the light.
+    if (skyBackdrop && lighting?.shafts && lighting.sky && this.skyCache) {
+      const sun = sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, width, height);
+      if (sun) {
+        this.shaftScratch ??= { mask: new Float32Array(0), light: new Float32Array(0) };
+        applySunShafts(out, this.skyCache.pixels, width, height, sun, lighting.sky.sunColor, lighting.shafts, this.shaftScratch);
+      }
+    }
     // The front layer (a held weapon): drawn after the scene with a fresh depth
     // buffer, so it sits over everything and never clips into a wall. It is a
     // handful of triangles, so the software rasteriser draws it on any backend.

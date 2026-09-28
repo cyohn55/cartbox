@@ -17,6 +17,10 @@ import {
   defaultProceduralSky,
   defaultSceneFog,
   defaultSceneLighting,
+  defaultSunShafts,
+  setSceneShafts,
+  MAX_FOG_VOLUMES,
+  type FogVolume,
   patchSceneLighting,
   removeSceneLight,
   setSceneFog,
@@ -142,6 +146,7 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
 
       <SkyDomeControls lighting={lighting} onChange={onChange} />
       <FogControls lighting={lighting} onChange={onChange} />
+      <ShaftControls lighting={lighting} onChange={onChange} />
       <ProbeControls lighting={lighting} onChange={onChange} />
 
       <RangeControl
@@ -446,6 +451,195 @@ function FogControls({ lighting, onChange }: LightingEditorProps & { lighting: S
             display={`${Math.round(fog.max * 100)}%`}
             onChange={(max) => patch({ max })}
           />
+          <FogLayerControls fog={fog} patch={patch} />
+        </>
+      )}
+    </>
+  );
+}
+
+/** A new fog volume: a low box of mist around the origin. */
+function fogVolume(): FogVolume {
+  return { min: [-4, -2, -4], max: [4, 1, 4], density: 0.4, falloff: 0.8 };
+}
+
+/**
+ * The volumetric fog layers (HALO2_STYLE_ROADMAP.md, H7): height fog hugging
+ * the ground, boxes of mist, and a glow toward the sun.
+ */
+function FogLayerControls({ fog, patch }: { fog: SceneFog; patch: (next: Partial<SceneFog>) => void }) {
+  const height = fog.height ?? null;
+  const glow = fog.glow ?? null;
+  const volumes = fog.volumes ?? [];
+  const setVolumes = (next: readonly FogVolume[]) => patch({ volumes: next.length > 0 ? next : undefined });
+  const patchVolume = (index: number, next: Partial<FogVolume>) => setVolumes(volumes.map((v, i) => (i === index ? { ...v, ...next } : v)));
+  return (
+    <>
+      <SegmentedControl
+        label="Height fog"
+        ariaLabel="Height fog"
+        selected={height ? "on" : "off"}
+        onSelect={(id) => patch({ height: id === "on" ? height ?? { base: 0, density: 0.08, falloff: 0.4 } : null })}
+        options={[
+          { id: "off", label: "Off" },
+          { id: "on", label: "On" },
+        ]}
+      />
+      {height && (
+        <>
+          <RangeControl
+            label="Base height"
+            nested
+            min={-40}
+            max={40}
+            step={0.5}
+            value={height.base}
+            ariaLabel="Height fog base"
+            display={height.base.toFixed(1)}
+            onChange={(base) => patch({ height: { ...height, base } })}
+          />
+          <RangeControl
+            label="Thickness"
+            nested
+            min={0}
+            max={1}
+            step={0.01}
+            value={height.density}
+            ariaLabel="Height fog density"
+            display={height.density.toFixed(2)}
+            onChange={(density) => patch({ height: { ...height, density } })}
+          />
+          <RangeControl
+            label="Thins upward"
+            nested
+            min={0}
+            max={3}
+            step={0.05}
+            value={height.falloff}
+            ariaLabel="Height fog falloff"
+            display={height.falloff.toFixed(2)}
+            onChange={(falloff) => patch({ height: { ...height, falloff } })}
+          />
+        </>
+      )}
+      <SegmentedControl
+        label="Sun glow"
+        ariaLabel="Fog sun glow"
+        selected={glow ? "on" : "off"}
+        onSelect={(id) => patch({ glow: id === "on" ? glow ?? { color: [1, 0.9, 0.7], strength: 0.6 } : null })}
+        options={[
+          { id: "off", label: "Off" },
+          { id: "on", label: "On" },
+        ]}
+      />
+      {glow && (
+        <>
+          <ColorRow label="Glow colour" value={glow.color} onChange={(color) => patch({ glow: { ...glow, color } })} />
+          <RangeControl
+            label="Glow"
+            nested
+            min={0}
+            max={2}
+            step={0.05}
+            value={glow.strength}
+            ariaLabel="Fog sun glow strength"
+            display={glow.strength.toFixed(2)}
+            onChange={(strength) => patch({ glow: { ...glow, strength } })}
+          />
+        </>
+      )}
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Fog volumes</div>
+      {volumes.map((volume, index) => (
+        <div key={index} style={{ marginBottom: 10 }}>
+          <div className={styles.rangeRow} style={{ marginBottom: 4 }}>
+            <span className={styles.hudLabel} style={{ flex: 1 }}>
+              Volume {index + 1}
+            </span>
+            <button type="button" className={styles.toolBtn} aria-label={`Remove fog volume ${index + 1}`} onClick={() => setVolumes(volumes.filter((_, i) => i !== index))}>
+              ✕
+            </button>
+          </div>
+          <VectorRow label="Box min" value={volume.min} step={0.5} onChange={(min) => patchVolume(index, { min })} />
+          <VectorRow label="Box max" value={volume.max} step={0.5} onChange={(max) => patchVolume(index, { max })} />
+          <RangeControl
+            label="Thickness"
+            nested
+            min={0}
+            max={2}
+            step={0.01}
+            value={volume.density}
+            ariaLabel={`Fog volume ${index + 1} density`}
+            display={volume.density.toFixed(2)}
+            onChange={(density) => patchVolume(index, { density })}
+          />
+          <RangeControl
+            label="Thins upward"
+            nested
+            min={0}
+            max={3}
+            step={0.05}
+            value={volume.falloff}
+            ariaLabel={`Fog volume ${index + 1} falloff`}
+            display={volume.falloff.toFixed(2)}
+            onChange={(falloff) => patchVolume(index, { falloff })}
+          />
+        </div>
+      ))}
+      <button type="button" className={styles.toolBtn} disabled={volumes.length >= MAX_FOG_VOLUMES} onClick={() => setVolumes([...volumes, fogVolume()])}>
+        <span className={styles.toolGlyph} aria-hidden>
+          ▭
+        </span>
+        Add fog volume
+      </button>
+      <RailHint>
+        Height fog is thick below its base and thins going up. A fog volume is a box of mist, densest at its floor: fit one to a chasm or a valley. Sun glow
+        brightens the fog looking toward the sun. Up to {MAX_FOG_VOLUMES} volumes.
+      </RailHint>
+    </>
+  );
+}
+
+/** Sun shafts (H7): beams from the sun through gaps in the scene. They need the sky dome. */
+function ShaftControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
+  const shafts = lighting.shafts ?? null;
+  if (!lighting.sky && !shafts) return null;
+  return (
+    <>
+      <SegmentedControl
+        label="Sun shafts"
+        ariaLabel="Sun shafts"
+        selected={shafts ? "on" : "off"}
+        onSelect={(id) => onChange(setSceneShafts(lighting, id === "on" ? shafts ?? defaultSunShafts() : null))}
+        options={[
+          { id: "off", label: "Off" },
+          { id: "on", label: "On" },
+        ]}
+      />
+      {shafts && (
+        <>
+          <RangeControl
+            label="Brightness"
+            nested
+            min={0}
+            max={2}
+            step={0.05}
+            value={shafts.strength}
+            ariaLabel="Sun shaft brightness"
+            display={shafts.strength.toFixed(2)}
+            onChange={(strength) => onChange(setSceneShafts(lighting, { ...shafts, strength }))}
+          />
+          <RangeControl
+            label="Length"
+            nested
+            min={0.05}
+            max={1}
+            step={0.05}
+            value={shafts.length}
+            ariaLabel="Sun shaft length"
+            display={`${Math.round(shafts.length * 100)}%`}
+            onChange={(length) => onChange(setSceneShafts(lighting, { ...shafts, length }))}
+          />
+          <RailHint>Beams from the sun through gaps between walls and towers, in first-person views over the sky dome.</RailHint>
         </>
       )}
     </>
