@@ -24,6 +24,7 @@
 
 import {
   bakeReflectionProbesAsync,
+  ParticleSystem,
   bakeSkyPanorama,
   buildSceneShadow,
   childIndices,
@@ -413,6 +414,8 @@ export class MeshOverlaySurface implements DisplaySurface {
     const surface = new MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
     for (const [i, mesh] of live) surface.live.set(i, mesh);
     surface.decodeKtx2 = decodeKtx2;
+    // 3D particle effects the cart fires with cartbox.burst.
+    if (scene.effects && scene.effects.length > 0) surface.particles = new ParticleSystem(scene.effects);
     // Reflection probes: each captures the scene's still objects from its point
     // and shiny surfaces in its box reflect that instead of the sky. Baked after
     // the scene is up, a probe per tick, so loading isn't held back; until then
@@ -612,7 +615,14 @@ export class MeshOverlaySurface implements DisplaySurface {
       profiler.add("sky", now - mark);
       mark = now;
     }
-    this.renderer.render(instances, {
+    // Particles: stepped on the frame clock and drawn as billboards facing this camera.
+    let drawn: readonly MeshSceneInstance[] = instances;
+    if (this.particles) {
+      this.particles.step(1 / 60);
+      const particles = this.particles.instanceFor([-v[2]!, -v[6]!, -v[10]!], [v[1]!, v[5]!, v[9]!]);
+      if (particles) drawn = [...instances, particles];
+    }
+    this.renderer.render(drawn, {
       width,
       height,
       out,
@@ -1075,6 +1085,13 @@ export class MeshOverlaySurface implements DisplaySurface {
   }
 
   private destroyed = false;
+  /** The scene's 3D particle effects in flight, or null when it defines none. */
+  private particles: ParticleSystem | null = null;
+
+  /** Fire particle effect `effect` (see cartbox.burst). */
+  burst(effect: number, at: readonly [number, number, number], dir: readonly [number, number, number], scale: number): void {
+    this.particles?.burst(effect, at, dir, scale);
+  }
   /** Settles once the scene's reflection probes are baked and in use (tests await it). */
   probesReady: Promise<void> = Promise.resolve();
 }

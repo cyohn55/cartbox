@@ -236,6 +236,11 @@ export const PHYS_OP_AGENT_STOP = 23;
 export const PHYS_OP_AGENT_REMOVE = 24;
 /** Spatial loading's focus: a = 1 loads around v0..v2 from now on, a = 0 goes back to the camera. */
 export const PHYS_OP_STREAM_FOCUS = 25;
+/**
+ * A 3D particle burst (cartbox.burst): a = the effect's index | (scale × 16) << 8;
+ * v0..v2 = where, v3..v5 = the direction (a trail's segment).
+ */
+export const PHYS_OP_BURST = 26;
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {

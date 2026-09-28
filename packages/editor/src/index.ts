@@ -68,6 +68,7 @@ export {
   LOCKOUT_SOLDIER_ANIMATOR,
   LOCKOUT_NAV_AGENT,
   LOCKOUT_INTRO,
+  LOCKOUT_EFFECTS,
   lockoutNavMesh,
   lockoutTerrain,
   lockoutMapLayout,
@@ -394,6 +395,16 @@ export {
   emissiveAnimation,
   readSurfaceEffects,
 } from "./model/materialEffects";
+export {
+  MAX_PARTICLE_EFFECTS,
+  MAX_PARTICLES_PER_EFFECT,
+  PARTICLE_PRESETS,
+  parseParticleEffects,
+  particlePreset,
+  type ParticleEffect,
+  type ParticlePreset,
+} from "./model/particleEffects";
+export { PARTICLE_FRAMES, ParticleSystem, particleAtlas } from "./render/particleSystem";
 export { MAX_REFLECTION_PROBES, parseReflectionProbes, reflectionProbeAt, type ReflectionProbe } from "./model/reflectionProbes";
 export { PROBE_FADE, PROBE_RANGE, boxProject, pickProbe, probeWeight, sampleProbe, type ProbeBox, type ReflectionProbeSet } from "./render/probeSampling";
 export { PROBE_PANORAMA_WIDTH, bakePanorama, bakeReflectionProbes, bakeReflectionProbesAsync, type ProbeBakeLighting } from "./render/probeBake";

@@ -41,6 +41,7 @@ import {
   PHYS_OP_TIMELINE,
   PHYS_OP_LEVEL,
   PHYS_OP_STREAM_FOCUS,
+  PHYS_OP_BURST,
   PHYS_OP_WATCH,
   PHYS_OP_AGENT,
   PHYS_OP_AGENT_GOTO,
@@ -57,6 +58,17 @@ import {
 } from "../physics/protocol.js";
 
 const DEG = 180 / Math.PI;
+
+/** One `cartbox.burst`: the effect's index, where, which way (or a trail's segment), and its scale. */
+export interface ParticleBurst {
+  readonly effect: number;
+  readonly at: readonly [number, number, number];
+  readonly dir: readonly [number, number, number];
+  readonly scale: number;
+}
+
+/** Most bursts kept between frames (the rest of a flood is dropped). */
+const MAX_BURSTS_QUEUED = 64;
 
 type Vec3 = readonly [number, number, number];
 
@@ -97,6 +109,8 @@ export class RuntimeChannel {
   private levelRequest = -1;
   /** Where the cart asked spatial loading to centre (null = the camera). */
   private focus: [number, number, number] | null = null;
+  /** Particle bursts the cart fired since the renderer last took them. */
+  private bursts: ParticleBurst[] = [];
   /** Joints whose world position the cart asked for, and where they were when last skinned. */
   private readonly watched = new Map<string, { object: number; joint: number; position: [number, number, number] | null }>();
 
@@ -151,6 +165,11 @@ export class RuntimeChannel {
         if (cmd.a >= 0 && cmd.a < n && cmd.a !== this.level.current && cmd.a !== this.level.loading) this.levelRequest = cmd.a;
       } else if (cmd.op >= PHYS_OP_AGENT && cmd.op <= PHYS_OP_AGENT_REMOVE) this.agentCommand(cmd.op, cmd.a, cmd.v);
       else if (cmd.op === PHYS_OP_STREAM_FOCUS) this.focus = cmd.a === 1 ? [cmd.v[0]!, cmd.v[1]!, cmd.v[2]!] : null;
+      else if (cmd.op === PHYS_OP_BURST) {
+        // A cart can't flood the renderer: a tick's bursts are bounded.
+        if (this.bursts.length < MAX_BURSTS_QUEUED)
+          this.bursts.push({ effect: cmd.a & 0xff, at: [cmd.v[0]!, cmd.v[1]!, cmd.v[2]!], dir: [cmd.v[3]!, cmd.v[4]!, cmd.v[5]!], scale: ((cmd.a >>> 8) & 0xffff) / 16 });
+      }
       else if (cmd.op === PHYS_OP_TIMELINE) {
         if (cmd.a < 0) this.timeline?.stop();
         else this.timeline?.play(cmd.a, cmd.v[0], cmd.v[1]);
@@ -191,6 +210,13 @@ export class RuntimeChannel {
   /** Make `level` the current one (the loading state clears). */
   setLevel(level: number): void {
     this.level = { current: level, loading: -1, progress: 0 };
+  }
+
+  /** The particle bursts fired since the last call (the renderer draws them). */
+  takeBursts(): ParticleBurst[] {
+    const out = this.bursts;
+    this.bursts = [];
+    return out;
   }
 
   /** Where the cart asked spatial loading to centre, or null for the camera. */
