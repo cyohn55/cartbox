@@ -34,10 +34,18 @@ general Unity/UE5 gap); items here that close a line there tick it off too.
       atlas. Every renderer picks the smallest box around a fragment, fades it
       in over a unit from the box's faces, and box-projects the reflection.
       Lockout has five: bottom mid, the walkway, both towers and the arena.
-- [ ] **H3. Material upgrades.** Detail textures (a second, finely tiled map
+- [x] **H3. Material upgrades.** Detail textures (a second, finely tiled map
       blended in up close), animated emissive (scroll and pulse, so energy
       lines flow), and a fresnel/rim term with a reflection mask.
       *Lockout:* grain on the walls up close, pulsing cyan trim.
+      *Done:* materials carry a detail map (with scale and strength; it fades
+      out between 3 and 12 units), an emissive scroll and pulse, a rim (colour,
+      power, strength), a reflectivity and a reflection mask read from the
+      metallic-roughness map's alpha — edited under "Surface effects" in the
+      Material panel, with a built-in grain for the detail map. All three
+      renderers match pixel for pixel. Lockout's walls and deck share one
+      grain, the trim breathes with the panels' glow, and the metal gets a
+      cold rim with reflections masked to its polished panels.
 - [ ] **H4. Terrain blending and shadows.** Snow and rock blend smoothly by
       slope and height instead of splitting per triangle, and cliffs can cast
       into the play area's shadow. *Lockout:* soft drifts and wind-scoured

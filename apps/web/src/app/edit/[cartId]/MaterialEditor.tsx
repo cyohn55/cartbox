@@ -19,7 +19,14 @@
 
 import { useState } from "react";
 
-import { updateMeshMaterial, type MeshAsset, type MeshMaterial } from "@cartbox/editor";
+import {
+  DEFAULT_DETAIL_SCALE,
+  DEFAULT_DETAIL_STRENGTH,
+  builtinDetailGrain,
+  updateMeshMaterial,
+  type MeshAsset,
+  type MeshMaterial,
+} from "@cartbox/editor";
 
 import styles from "./editor.module.css";
 import { RailGroup, RailHint, RangeControl, SegmentedControl } from "./railControls";
@@ -133,7 +140,109 @@ export function MaterialEditor({ mesh, onChange }: MaterialEditorProps) {
         style={{ width: 40, height: 32, padding: 0, border: "none", background: "none", borderRadius: 6 }}
       />
 
+      <SurfaceEffects material={material} patch={patch} />
+
       <RailHint>Metallic-roughness PBR — used by the Modern render tier. Capped tiers ignore these and render unchanged.</RailHint>
     </RailGroup>
+  );
+}
+
+/**
+ * Surface effects (HALO2_STYLE_ROADMAP.md H3): a detail grain up close, an
+ * emissive glow that scrolls and pulses, a fresnel rim, and how strongly the
+ * surface reflects (optionally masked by its metallic-roughness map's alpha).
+ */
+function SurfaceEffects({ material, patch }: { material: MeshMaterial; patch: (change: Partial<MeshMaterial>) => void }) {
+  const detailOn = !!material.detailImage;
+  const pulse = material.emissivePulse ?? { rate: 0, depth: 0 };
+  const scroll = material.emissiveScroll ?? [0, 0];
+  const rim = material.rim ?? { color: [0.6, 0.75, 0.9] as const, power: 4, strength: 0 };
+  const reflectivity = material.reflectivity ?? 1;
+  const setPulse = (next: { rate: number; depth: number }) => patch({ emissivePulse: next.rate > 0 && next.depth > 0 ? next : undefined });
+  const setScroll = (next: [number, number]) => patch({ emissiveScroll: next[0] !== 0 || next[1] !== 0 ? next : undefined });
+  const setRim = (next: { color: readonly [number, number, number]; power: number; strength: number }) => patch({ rim: next.strength > 0 ? next : undefined });
+  return (
+    <>
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Detail grain</div>
+      <SegmentedControl
+        label="Detail"
+        ariaLabel="Detail grain"
+        selected={detailOn ? "on" : "off"}
+        onSelect={(id) => patch({ detailImage: id === "on" ? builtinDetailGrain() : undefined })}
+        options={[
+          { id: "off", label: "Off" },
+          { id: "on", label: "Grain" },
+        ]}
+      />
+      {detailOn && (
+        <>
+          <RangeControl
+            label="Tiling"
+            nested
+            min={1}
+            max={32}
+            step={1}
+            value={material.detailScale ?? DEFAULT_DETAIL_SCALE}
+            ariaLabel="Detail tiling"
+            display={`×${material.detailScale ?? DEFAULT_DETAIL_SCALE}`}
+            onChange={(detailScale) => patch({ detailScale })}
+          />
+          <RangeControl
+            label="Strength"
+            nested
+            min={0}
+            max={1}
+            step={0.05}
+            value={material.detailStrength ?? DEFAULT_DETAIL_STRENGTH}
+            ariaLabel="Detail strength"
+            display={(material.detailStrength ?? DEFAULT_DETAIL_STRENGTH).toFixed(2)}
+            onChange={(detailStrength) => patch({ detailStrength })}
+          />
+        </>
+      )}
+
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Glow animation</div>
+      <RangeControl label="Pulse rate" nested min={0} max={3} step={0.05} value={pulse.rate} ariaLabel="Emissive pulse rate" display={`${pulse.rate.toFixed(2)} Hz`} onChange={(rate) => setPulse({ ...pulse, rate })} />
+      <RangeControl label="Pulse depth" nested min={0} max={1} step={0.05} value={pulse.depth} ariaLabel="Emissive pulse depth" display={`${Math.round(pulse.depth * 100)}%`} onChange={(depth) => setPulse({ ...pulse, depth })} />
+      <RangeControl label="Scroll U" nested min={-2} max={2} step={0.05} value={scroll[0]} ariaLabel="Emissive scroll U" display={`${scroll[0].toFixed(2)}/s`} onChange={(u) => setScroll([u, scroll[1]])} />
+      <RangeControl label="Scroll V" nested min={-2} max={2} step={0.05} value={scroll[1]} ariaLabel="Emissive scroll V" display={`${scroll[1].toFixed(2)}/s`} onChange={(v) => setScroll([scroll[0], v])} />
+
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Rim &amp; reflections</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <input
+          type="color"
+          value={toHex(rim.color as [number, number, number])}
+          aria-label="Rim colour"
+          onChange={(event) => setRim({ ...rim, color: fromHex(event.target.value), strength: rim.strength || 0.2 })}
+          style={{ width: 40, height: 32, padding: 0, border: "none", background: "none", borderRadius: 6 }}
+        />
+        <span className={styles.hudLabel}>rim</span>
+      </div>
+      <RangeControl label="Rim strength" nested min={0} max={1} step={0.01} value={rim.strength} ariaLabel="Rim strength" display={rim.strength.toFixed(2)} onChange={(strength) => setRim({ ...rim, strength })} />
+      <RangeControl label="Rim tightness" nested min={1} max={8} step={0.5} value={rim.power} ariaLabel="Rim tightness" display={rim.power.toFixed(1)} onChange={(power) => setRim({ ...rim, power })} />
+      <RangeControl
+        label="Reflectivity"
+        nested
+        min={0}
+        max={2}
+        step={0.05}
+        value={reflectivity}
+        ariaLabel="Reflectivity"
+        display={reflectivity.toFixed(2)}
+        onChange={(value) => patch({ reflectivity: value === 1 ? undefined : value })}
+      />
+      {material.metallicRoughnessImage && (
+        <SegmentedControl
+          label="Reflection mask"
+          ariaLabel="Reflection mask"
+          selected={material.reflectionMask ? "on" : "off"}
+          onSelect={(id) => patch({ reflectionMask: id === "on" ? true : undefined })}
+          options={[
+            { id: "off", label: "Off" },
+            { id: "on", label: "Map alpha" },
+          ]}
+        />
+      )}
+    </>
   );
 }

@@ -33,6 +33,8 @@
 
 import {
   DEFAULT_RASTER_STYLE,
+  DETAIL_FAR,
+  DETAIL_NEAR,
   LIGHTMAP_RANGE,
   MAX_REFLECTION_PROBES,
   PROBE_FADE,
@@ -61,6 +63,7 @@ import {
   normalBasis3x3,
   packLights,
   packProbes,
+  resolveSurface,
   PROBE_FLOATS,
   resolveLight,
   resolvePbr,
@@ -85,6 +88,7 @@ const UNIT_ENV = 5;
 const UNIT_SSAO = 6;
 const UNIT_LM = 7;
 const UNIT_PROBES = 8;
+const UNIT_DETAIL = 9;
 
 const BLOCK_UNIFORMS = 0;
 const BLOCK_INSTANCES = 1;
@@ -112,6 +116,9 @@ layout(std140) uniform Uniforms {
   vec4 fog;
   vec4 fogParams;
   vec4 shadow2;
+  vec4 surface0;
+  vec4 surface1;
+  vec4 surface2;
 } u;
 `;
 
@@ -177,6 +184,7 @@ uniform sampler2D lmTex;
 // and, per probe, box min / box max / capture point / mean colour; u.ssaoMeta.w
 // counts them.
 uniform sampler2D probeAtlas;
+uniform sampler2D detailTex;
 uniform vec4 probeData[${MAX_REFLECTION_PROBES * 4}];
 in vec3 vNormal;
 in vec2 vUv;
@@ -280,15 +288,22 @@ void main() {
     if (dot(N, u.view.xyz) < 0.0) { N = -N; }
     float metallic = u.pbr.x;
     float rough = u.pbr.y;
+    float reflectK = u.surface0.z;
     if (u.texflags.y > 0.5) {
       vec4 mr = sampleMap(mrTex, uv);
       rough = rough * mr.g;
       metallic = metallic * mr.b;
+      if (u.surface0.w > 0.5) { reflectK = reflectK * mr.a; }
     }
     rough = clamp(rough, 0.045, 1.0);
     float ao = 1.0;
     if (u.texflags.z > 0.5) { ao = sampleMap(occTex, uv).r; }
     vec3 albedo = colour.rgb;
+    float dk = u.surface0.y * clamp((${DETAIL_FAR.toFixed(4)} - vEyeDepth) / ${(DETAIL_FAR - DETAIL_NEAR).toFixed(4)}, 0.0, 1.0);
+    if (dk > 0.0) {
+      vec3 detail = sampleMap(detailTex, vec2(vUv.x * u.surface0.x, 1.0 - vUv.y * u.surface0.x)).rgb;
+      albedo = albedo * (vec3(1.0) + dk * (2.0 * detail - vec3(1.0)));
+    }
     vec3 L = u.light.xyz;
     vec3 V = u.view.xyz;
     vec3 H = normalize(L + V);
@@ -310,7 +325,7 @@ void main() {
     vec3 ef = u.emissive.xyz;
     if (ef.r > 0.0 || ef.g > 0.0 || ef.b > 0.0) {
       vec3 es = vec3(1.0);
-      if (u.texflags.w > 0.5) { es = sampleMap(emisTex, uv).rgb; }
+      if (u.texflags.w > 0.5) { es = sampleMap(emisTex, vec2(vUv.x + u.surface1.x, 1.0 - (vUv.y + u.surface1.y))).rgb; }
       emis = ef * es;
     }
     vec3 amb;
@@ -338,7 +353,7 @@ void main() {
         }
       }
       vec3 pref = mix(spec, specAvg, rough);
-      amb = (irr * albedo * kdm + pref * f0) * ao;
+      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;
     } else {
       amb = vec3(u.light.w) * albedo * ao;
     }
@@ -389,6 +404,7 @@ void main() {
     } else {
       lit = (kdm * (vec3(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
     }
+    lit = lit + u.surface2.rgb * pow(1.0 - ndv, u.surface2.w);
     vec3 shaded = lit;
     if (u.tonemap.x > 0.5) {
       float e = u.tonemap.y;
@@ -527,7 +543,7 @@ export class WebglSceneRenderer implements SceneRenderer {
     if (!gl) return null;
     try {
       const align = gl.getParameter(gl.UNIFORM_BUFFER_OFFSET_ALIGNMENT) as number;
-      // Draw uniforms sit at a 512-byte stride; an alignment that doesn't divide it can't address them.
+      // Draw uniforms sit at a 768-byte stride; an alignment that doesn't divide it can't address them.
       if (!(align > 0) || UNIFORM_STRIDE % align !== 0) return null;
       if ((gl.getParameter(gl.MAX_UNIFORM_BLOCK_SIZE) as number) < WEBGL_INSTANCES_PER_DRAW * INSTANCE_FLOATS * 4) return null;
 
@@ -550,6 +566,7 @@ export class WebglSceneRenderer implements SceneRenderer {
         ["ssaoMap", UNIT_SSAO],
         ["lmTex", UNIT_LM],
         ["probeAtlas", UNIT_PROBES],
+        ["detailTex", UNIT_DETAIL],
       ];
       for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
 
@@ -678,6 +695,7 @@ export class WebglSceneRenderer implements SceneRenderer {
         model,
         lightCount: sceneLights.length,
         fog: draw.fog ?? null,
+        surface: resolveSurface(batch.primitive.material, draw.time ?? 0, batch.textures.detail !== null, batch.textures.mr !== null),
       });
     });
     for (const chunk of chunks) {
@@ -719,6 +737,7 @@ export class WebglSceneRenderer implements SceneRenderer {
     this.bindTexture(UNIT_SSAO, ssao ? this.ssaoTexture : this.blankFloat);
     for (let unit = UNIT_BASE; unit <= UNIT_EMIS; unit += 1) gl.bindSampler(unit, this.sampler);
     gl.bindSampler(UNIT_LM, this.sampler);
+    gl.bindSampler(UNIT_DETAIL, this.sampler);
 
     this.timer?.begin();
     let bound: PrimitiveTextures | null = null;
@@ -734,6 +753,7 @@ export class WebglSceneRenderer implements SceneRenderer {
           this.bindTexture(UNIT_OCC, this.textureFor(batch.textures.occ));
           this.bindTexture(UNIT_EMIS, this.textureFor(batch.textures.emis));
           this.bindTexture(UNIT_LM, this.textureFor(batch.textures.lm));
+          this.bindTexture(UNIT_DETAIL, this.textureFor(batch.textures.detail));
           bound = batch.textures;
         }
         gl.bindVertexArray(batch.geometry.vao);

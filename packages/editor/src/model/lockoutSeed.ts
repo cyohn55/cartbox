@@ -35,6 +35,7 @@ import { packMeshLibrary } from "./meshLibrary";
 import { bakeNavMesh, boxTriangles, serializeNavMesh, type NavMesh } from "./navmesh";
 import { serializeTerrain, terrainMesh, type Terrain } from "./terrain";
 import type { SceneTimeline } from "./timeline";
+import { builtinDetailGrain } from "./materialEffects";
 import { applyLightmapImage, bakeLightmap, layoutFingerprint, layoutLightmap, type LightmapLayout } from "./lightmap";
 import { base64ToBytes } from "./base64";
 import { LOCKOUT_LIGHTMAP } from "./lockoutLightmap.generated";
@@ -377,7 +378,9 @@ function bakeSurface(surface: (x: number, y: number) => Surf, strength: number):
       mr[o] = 0;
       mr[o + 1] = clampByte(Math.max(0.06, s.rough) * 255);
       mr[o + 2] = clampByte(s.metal * 255);
-      mr[o + 3] = 255;
+      // Alpha: the reflection mask (materialEffects.ts) — polished metal
+      // mirrors fully, worn and rough patches much less.
+      mr[o + 3] = clampByte(255 * Math.min(1, 0.3 + (1 - s.rough) * 1.2));
       emissive[o] = Math.round(s.r * s.emis);
       emissive[o + 1] = Math.round(s.g * s.emis);
       emissive[o + 2] = Math.round(s.b * s.emis);
@@ -430,6 +433,8 @@ interface LockoutTextures {
   readonly wall: BakedSurface;
   readonly floor: BakedSurface;
   readonly snow: BakedSurface;
+  /** The fine grain tiled over the metal up close (a detail map; the editor's built-in one). */
+  readonly grain: EncodedImage;
 }
 let bakedTextures: LockoutTextures | null = null;
 
@@ -443,6 +448,7 @@ function lockoutTextures(): LockoutTextures {
     wall: bakeSurface(wallSurface, 2.6),
     floor: bakeSurface(floorSurface, 2.2),
     snow: bakeSurface(snowSurface, 1.2),
+    grain: builtinDetailGrain(),
   };
   return bakedTextures;
 }
@@ -959,6 +965,10 @@ function mapGeometry(): MapGeometry {
 }
 const MAP_GEOMETRY = mapGeometry();
 
+/** The energy's slow breath (cycles per second, dip at the trough); the panels' glow follows it, gentler. */
+const ENERGY_PULSE = { rate: 0.35, depth: 0.35 } as const;
+const ENERGY_PULSE_WALL = { rate: 0.35, depth: 0.2 } as const;
+
 function mapMesh(): MeshAsset {
   const tex = lockoutTextures();
   const WALL_TEX = tex.wall;
@@ -978,6 +988,16 @@ function mapMesh(): MeshAsset {
     metallicFactor: 0.6, // the map carries per-texel metal; this keeps albedo legible
     roughnessFactor: 1,
     emissiveFactor: [1.6, 1.6, 1.6], // push the baked glow above 1 so it blooms through the tone-map
+    // Surface effects (HALO2_STYLE_ROADMAP.md H3): grain up close, the glow
+    // breathing with the trim, a cold sheen at grazing angles, and reflections
+    // masked to the polished metal.
+    detailImage: tex.grain,
+    detailScale: 10,
+    detailStrength: 0.45,
+    emissivePulse: ENERGY_PULSE_WALL,
+    rim: { color: [0.55, 0.7, 0.9], power: 4, strength: 0.18 },
+    reflectivity: 1.2,
+    reflectionMask: true,
   };
   const floorMat: MeshPrimitive["material"] = {
     name: "forerunner-deck",
@@ -989,6 +1009,11 @@ function mapMesh(): MeshAsset {
     metallicFactor: 0.4, // a deck is worn, not a mirror
     roughnessFactor: 1,
     emissiveFactor: [1.4, 1.4, 1.4],
+    detailImage: tex.grain, // the same grain (stored once in the sidecar)
+    detailScale: 8,
+    detailStrength: 0.5,
+    emissivePulse: ENERGY_PULSE_WALL,
+    reflectionMask: true,
   };
   // The wall metal, darker and without the glowing channel, for the underside.
   const underMat: MeshPrimitive["material"] = {
@@ -997,6 +1022,7 @@ function mapMesh(): MeshAsset {
     baseColorFactor: [0.5, 0.55, 0.62, 1],
     emissiveImage: null,
     emissiveFactor: [0, 0, 0],
+    emissivePulse: undefined,
   };
   // Packed snow: rough, non-metal and cold. Its albedo is held below white
   // because the rig's exposure lifts it — a white albedo blows out to flat paper.
@@ -1018,6 +1044,8 @@ function mapMesh(): MeshAsset {
     metallicFactor: 0,
     roughnessFactor: 0.5,
     emissiveFactor: [0.5, 1.7, 1.9],
+    // The energy trim breathes: a slow pulse, dipping by a third.
+    emissivePulse: ENERGY_PULSE,
   };
   const g = MAP_GEOMETRY;
   return {

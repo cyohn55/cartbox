@@ -63,6 +63,8 @@
 
 import {
   DEFAULT_RASTER_STYLE,
+  DETAIL_FAR,
+  DETAIL_NEAR,
   LIGHTMAP_RANGE,
   MAX_REFLECTION_PROBES,
   PROBE_FADE,
@@ -91,6 +93,7 @@ import {
   normalBasis3x3,
   packLights,
   packProbes,
+  resolveSurface,
   PROBE_FLOATS,
   resolveLight,
   resolvePbr,
@@ -130,6 +133,9 @@ struct Uniforms {
   fog: vec4<f32>,       // rgb = fog colour, w = density
   fogParams: vec4<f32>, // x = 1 when fogged, y = start distance, z = max amount
   shadow2: vec4<f32>,   // x = slope-scaled bias, y = 1 for 2x2 PCF
+  surface0: vec4<f32>,  // x = detail scale, y = detail strength, z = reflectivity, w = 1 when MR alpha masks it
+  surface1: vec4<f32>,  // xy = emissive UV offset
+  surface2: vec4<f32>,  // rgb = rim colour × strength, w = rim power
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -182,6 +188,9 @@ struct Probe {
 };
 @group(0) @binding(12) var probeAtlas: texture_2d<f32>;
 @group(0) @binding(13) var<storage, read> probes: array<Probe>;
+// A finely tiled detail map (materialEffects.ts; 1x1 white when none — the
+// uniform's surface0.y gates it).
+@group(0) @binding(14) var detailTex: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
@@ -320,15 +329,22 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     if (dot(N, u.view.xyz) < 0.0) { N = -N; } // two-sided: flip toward the viewer
     var metallic = u.pbr.x;
     var rough = u.pbr.y;
+    var reflectK = u.surface0.z;
     if (u.texflags.y > 0.5) {
       let mr = textureSample(mrTex, samp, uv);
       rough = rough * mr.g;   // glTF packs roughness in G,
       metallic = metallic * mr.b; // metallic in B
+      if (u.surface0.w > 0.5) { reflectK = reflectK * mr.a; } // the reflection mask
     }
     rough = clamp(rough, 0.045, 1.0); // a perfectly-smooth NDF blows up
     var ao = 1.0;
     if (u.texflags.z > 0.5) { ao = textureSample(occTex, samp, uv).r; }
-    let albedo = colour.rgb;
+    var albedo = colour.rgb;
+    // A detail map, tiled finely and blended in up close (mid-grey neutral),
+    // fading with eye depth — mirrors the software path.
+    let dk = u.surface0.y * clamp((${DETAIL_FAR.toFixed(4)} - in.eyeDepth) / ${(DETAIL_FAR - DETAIL_NEAR).toFixed(4)}, 0.0, 1.0);
+    let detail = textureSample(detailTex, samp, vec2<f32>(in.uv.x * u.surface0.x, 1.0 - in.uv.y * u.surface0.x)).rgb;
+    if (dk > 0.0) { albedo = albedo * (vec3<f32>(1.0) + dk * (2.0 * detail - vec3<f32>(1.0))); }
     let L = u.light.xyz;
     let V = u.view.xyz;
     let H = normalize(L + V);
@@ -350,7 +366,7 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     let ef = u.emissive.xyz;
     if (ef.r > 0.0 || ef.g > 0.0 || ef.b > 0.0) {
       var es = vec3<f32>(1.0);
-      if (u.texflags.w > 0.5) { es = textureSample(emisTex, samp, uv).rgb; }
+      if (u.texflags.w > 0.5) { es = textureSample(emisTex, samp, vec2<f32>(in.uv.x + u.surface1.x, 1.0 - (in.uv.y + u.surface1.y))).rgb; }
       emis = ef * es;
     }
     // Ambient / image-based lighting, mirroring the software rasteriser: with an
@@ -381,7 +397,7 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
         }
       }
       let pref = mix(spec, specAvg, rough);
-      amb = (irr * albedo * kdm + pref * f0) * ao;
+      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;
     } else {
       amb = vec3<f32>(u.light.w) * albedo * ao;
     }
@@ -438,6 +454,8 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     } else {
       lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
     }
+    // A fresnel rim, light at grazing angles (zero when the material has none).
+    lit = lit + u.surface2.rgb * pow(1.0 - ndv, u.surface2.w);
     // HDR: expose + ACES roll-off, or write the linear colour straight through.
     var shaded = lit;
     if (u.tonemap.x > 0.5) {
@@ -481,6 +499,7 @@ interface CachedBindGroup {
     occ: DecodedTexture | null;
     emis: DecodedTexture | null;
     lm: DecodedTexture | null;
+    detail: DecodedTexture | null;
   };
 }
 
@@ -674,6 +693,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           // Reflection probes: the panorama atlas (read via textureLoad) and their boxes.
           { binding: 12, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
+          // The detail map.
+          { binding: 14, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
         ],
       });
 
@@ -973,6 +994,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         model,
         lightCount,
         fog: draw.fog ?? null,
+        surface: resolveSurface(entry.primitive.material, draw.time ?? 0, entry.textures.detail !== null, entry.textures.mr !== null),
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
@@ -1127,7 +1149,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       cached.source.mr === textures.mr &&
       cached.source.occ === textures.occ &&
       cached.source.emis === textures.emis &&
-      cached.source.lm === textures.lm
+      cached.source.lm === textures.lm &&
+      cached.source.detail === textures.detail
     ) {
       return cached.group;
     }
@@ -1160,6 +1183,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         // The probe atlas (or the blank) and boxes; a change invalidates the cache.
         { binding: 12, resource: this.probeTexture.createView() },
         { binding: 13, resource: { buffer: this.probeBuffer } },
+        // The detail map (or the 1x1 white blank; the uniform gates it).
+        { binding: 14, resource: view(textures.detail) },
       ],
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });

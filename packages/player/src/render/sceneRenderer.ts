@@ -100,6 +100,8 @@ export interface SceneDraw {
    * {@link SceneFog}.
    */
   readonly fog?: SceneFog | null;
+  /** Seconds since the scene started, for animated emissive (scroll and pulse). */
+  readonly time?: number;
   /**
    * Skip instances whose world AABB is entirely outside the camera frustum. A
    * correct cull is output-identical, so it is a pure perf win; default off.
@@ -194,6 +196,7 @@ export class SoftwareSceneRenderer implements SceneRenderer {
       ssao: draw.ssao,
       lights: draw.lights,
       fog: draw.fog,
+      time: draw.time,
       style: this.style,
     });
   }

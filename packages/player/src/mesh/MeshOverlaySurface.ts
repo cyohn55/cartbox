@@ -633,6 +633,9 @@ export class MeshOverlaySurface implements DisplaySurface {
             fog: lighting.fog ?? null,
           }
         : {}),
+      // Animated emissive runs on the frame clock (60 per second), so it
+      // steps with the game rather than the wall clock.
+      time: this.frame / 60,
     });
     // The front layer (a held weapon): drawn after the scene with a fresh depth
     // buffer, so it sits over everything and never clips into a wall. It is a
@@ -655,6 +658,7 @@ export class MeshOverlaySurface implements DisplaySurface {
               lights,
             }
           : {}),
+        time: this.frame / 60,
       });
     }
     if (profiler) profiler.add("scene", performance.now() - mark);
@@ -1073,7 +1077,7 @@ export class MeshOverlaySurface implements DisplaySurface {
 
 /** The mesh with each placeholder image whose ref is in `images` filled in (the same mesh when none is). */
 function fillPlaceholders(mesh: MeshAsset, images: ReadonlyMap<string, EncodedImage>): MeshAsset {
-  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage"] as const;
+  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage"] as const;
   let touched = false;
   const primitives = mesh.primitives.map((primitive) => {
     let material = primitive.material;
@@ -1116,7 +1120,7 @@ async function decodeMeshTextures(
         return entry;
       }),
     );
-  const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightmapTextures] = await Promise.all([
+  const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightmapTextures, detailTextures] = await Promise.all([
     each((m) => m.baseColorImage), // base colour
     each((m) => m.normalImage), // per-pixel normals (option 2)
     each((m) => m.materialImage), // packed specular/roughness/emissive (option 2, slice 5)
@@ -1127,6 +1131,8 @@ async function decodeMeshTextures(
     each((m) => m.emissiveImage),
     // A baked light map (sampled with the second UV set).
     each((m) => m.lightmapImage),
+    // A finely tiled detail map (materialEffects.ts).
+    each((m) => m.detailImage),
   ]);
   return {
     mesh,
@@ -1137,6 +1143,7 @@ async function decodeMeshTextures(
     occlusionTextures,
     emissiveTextures,
     ...(lightmapTextures.some((t) => t !== null) ? { lightmapTextures } : {}),
+    ...(detailTextures.some((t) => t !== null) ? { detailTextures } : {}),
   };
 }
 
