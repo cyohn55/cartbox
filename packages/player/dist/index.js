@@ -8107,7 +8107,7 @@ function capTextures(instances, budgetBytes, cache) {
     });
   };
   const capped = instances.map((instance) => {
-    if (!instance.textures && !instance.normalTextures && !instance.materialTextures && !instance.mrTextures && !instance.occlusionTextures && !instance.emissiveTextures) {
+    if (!instance.textures && !instance.normalTextures && !instance.materialTextures && !instance.mrTextures && !instance.occlusionTextures && !instance.emissiveTextures && !instance.lightmapTextures) {
       return instance;
     }
     let instanceChanged = false;
@@ -8120,6 +8120,7 @@ function capTextures(instances, budgetBytes, cache) {
     const fittedMr = fitList(instance.mrTextures, mark);
     const fittedOcclusion = fitList(instance.occlusionTextures, mark);
     const fittedEmissive = fitList(instance.emissiveTextures, mark);
+    const fittedLightmaps = fitList(instance.lightmapTextures, mark);
     if (!instanceChanged) return instance;
     changed = true;
     return {
@@ -8130,7 +8131,8 @@ function capTextures(instances, budgetBytes, cache) {
       materialTextures: fittedMaterials,
       mrTextures: fittedMr,
       occlusionTextures: fittedOcclusion,
-      emissiveTextures: fittedEmissive
+      emissiveTextures: fittedEmissive,
+      ...fittedLightmaps ? { lightmapTextures: fittedLightmaps } : {}
     };
   });
   return changed ? capped : instances;
@@ -9003,7 +9005,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   }
 };
 function fillPlaceholders(mesh, images) {
-  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage"];
+  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage"];
   let touched = false;
   const primitives = mesh.primitives.map((primitive) => {
     let material = primitive.material;
@@ -9034,7 +9036,7 @@ async function decodeMeshTextures(mesh, decodeKtx2, cache) {
       return entry;
     })
   );
-  const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures] = await Promise.all([
+  const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightmapTextures] = await Promise.all([
     each((m) => m.baseColorImage),
     // base colour
     each((m) => m.normalImage),
@@ -9045,9 +9047,20 @@ async function decodeMeshTextures(mesh, decodeKtx2, cache) {
     // rasteriser stays byte-identical there.
     each((m) => m.metallicRoughnessImage),
     each((m) => m.occlusionImage),
-    each((m) => m.emissiveImage)
+    each((m) => m.emissiveImage),
+    // A baked light map (sampled with the second UV set).
+    each((m) => m.lightmapImage)
   ]);
-  return { mesh, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures };
+  return {
+    mesh,
+    textures,
+    normalTextures,
+    materialTextures,
+    mrTextures,
+    occlusionTextures,
+    emissiveTextures,
+    ...lightmapTextures.some((t) => t !== null) ? { lightmapTextures } : {}
+  };
 }
 var TINT_PALETTE = [
   [1, 1, 1],
@@ -9522,6 +9535,7 @@ var WorldOverlaySurface = class {
 // src/render/WebglSceneRenderer.ts
 import {
   DEFAULT_RASTER_STYLE as DEFAULT_RASTER_STYLE2,
+  LIGHTMAP_RANGE,
   computeSmoothNormals,
   multiplyMat4 as multiplyMat44
 } from "@cartbox/editor";
@@ -9565,7 +9579,7 @@ function packRgba([r, g, b, a]) {
   return (a << 24 | b << 16 | g << 8 | r) >>> 0;
 }
 function sameTextures(a, b) {
-  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis;
+  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm;
 }
 function batchInstances(instances, geometryOf) {
   const batches = [];
@@ -9580,7 +9594,8 @@ function batchInstances(instances, geometryOf) {
         base: instance.textures?.[index] ?? null,
         mr: instance.mrTextures?.[index] ?? null,
         occ: instance.occlusionTextures?.[index] ?? null,
-        emis: instance.emissiveTextures?.[index] ?? null
+        emis: instance.emissiveTextures?.[index] ?? null,
+        lm: primitive.uvs2 ? instance.lightmapTextures?.[index] ?? null : null
       };
       let list = byPrimitive.get(primitive);
       if (!list) byPrimitive.set(primitive, list = []);
@@ -9847,7 +9862,7 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_TONEMAP + 3] = 0;
   target[base + OFFSET_SSAO] = uniform.hasSsao ? 1 : 0;
   target[base + OFFSET_SSAO + 1] = uniform.lightCount;
-  target[base + OFFSET_SSAO + 2] = 0;
+  target[base + OFFSET_SSAO + 2] = uniform.hasLightmap ? 1 : 0;
   target[base + OFFSET_SSAO + 3] = 0;
   const model = uniform.model;
   for (let i = 0; i < 16; i += 1) target[base + OFFSET_MODEL + i] = model ? model[i] : i % 5 === 0 ? 1 : 0;
@@ -9865,8 +9880,8 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_SHADOW2 + 2] = 0;
   target[base + OFFSET_SHADOW2 + 3] = 0;
 }
-var VERTEX_FLOATS = 8;
-function interleaveVertices(positions, normals, uvs) {
+var VERTEX_FLOATS = 10;
+function interleaveVertices(positions, normals, uvs, uvs2 = null) {
   const count = Math.floor(positions.length / 3);
   const out = new Float32Array(count * VERTEX_FLOATS);
   for (let i = 0; i < count; i += 1) {
@@ -9879,6 +9894,8 @@ function interleaveVertices(positions, normals, uvs) {
     out[to + 5] = normals[i * 3 + 2] ?? 0;
     out[to + 6] = uvs ? uvs[i * 2] ?? 0 : 0;
     out[to + 7] = uvs ? uvs[i * 2 + 1] ?? 0 : 0;
+    out[to + 8] = uvs2 ? uvs2[i * 2] ?? 0 : 0;
+    out[to + 9] = uvs2 ? uvs2[i * 2 + 1] ?? 0 : 0;
   }
   return out;
 }
@@ -9902,6 +9919,7 @@ var UNIT_EMIS = 3;
 var UNIT_SHADOW = 4;
 var UNIT_ENV = 5;
 var UNIT_SSAO = 6;
+var UNIT_LM = 7;
 var BLOCK_UNIFORMS = 0;
 var BLOCK_INSTANCES = 1;
 var BLOCK_LIGHTS = 2;
@@ -9950,8 +9968,10 @@ layout(std140) uniform Instances {
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec2 uv;
+layout(location = 3) in vec2 uv2;
 out vec3 vNormal;
 out vec2 vUv;
+out vec2 vUv2;
 out vec4 vLightClip;
 out vec3 vWorldPos;
 out float vEyeDepth;
@@ -9960,6 +9980,7 @@ void main() {
   vec4 p = t.mvp * vec4(position, 1.0);
   vNormal = t.nrm * normal;
   vUv = uv;
+  vUv2 = uv2;
   vLightClip = t.lightMvp * vec4(position, 1.0);
   vWorldPos = (t.model * vec4(position, 1.0)).xyz;
   vEyeDepth = p.w;
@@ -9990,8 +10011,10 @@ uniform sampler2D emisTex;
 uniform highp sampler2D shadowMap;
 uniform sampler2D envMap;
 uniform highp sampler2D ssaoMap;
+uniform sampler2D lmTex;
 in vec3 vNormal;
 in vec2 vUv;
+in vec2 vUv2;
 in vec4 vLightClip;
 in vec3 vWorldPos;
 in float vEyeDepth;
@@ -10122,6 +10145,11 @@ void main() {
       amb = (irr * albedo * kdm + pref * f0) * ao;
     } else {
       amb = vec3(u.light.w) * albedo * ao;
+    }
+    // A baked light map (the second UV set) scales the sky/ambient fill,
+    // mirroring the CPU path.
+    if (u.ssaoMeta.z > 0.5) {
+      amb = amb * texture(lmTex, vec2(vUv2.x, 1.0 - vUv2.y)).rgb * ${LIGHTMAP_RANGE.toFixed(4)};
     }
     if (u.ssaoMeta.x > 0.5) {
       amb = amb * texelFetch(ssaoMap, ivec2(gl_FragCoord.xy), 0).r;
@@ -10282,7 +10310,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         ["emisTex", UNIT_EMIS],
         ["shadowMap", UNIT_SHADOW],
         ["envMap", UNIT_ENV],
-        ["ssaoMap", UNIT_SSAO]
+        ["ssaoMap", UNIT_SSAO],
+        ["lmTex", UNIT_LM]
       ];
       for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
       const colour = gl.createRenderbuffer();
@@ -10390,6 +10419,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
+        hasLightmap: batch.textures.lm !== null,
         model,
         lightCount: sceneLights.length,
         fog: draw.fog ?? null
@@ -10429,6 +10459,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.bindTexture(UNIT_ENV, this.envTexture ?? this.blankTexture);
     this.bindTexture(UNIT_SSAO, ssao ? this.ssaoTexture : this.blankFloat);
     for (let unit = UNIT_BASE; unit <= UNIT_EMIS; unit += 1) gl.bindSampler(unit, this.sampler);
+    gl.bindSampler(UNIT_LM, this.sampler);
     this.timer?.begin();
     let bound = null;
     let boundBatch = -1;
@@ -10442,6 +10473,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
           this.bindTexture(UNIT_MR, this.textureFor(batch.textures.mr));
           this.bindTexture(UNIT_OCC, this.textureFor(batch.textures.occ));
           this.bindTexture(UNIT_EMIS, this.textureFor(batch.textures.emis));
+          this.bindTexture(UNIT_LM, this.textureFor(batch.textures.lm));
           bound = batch.textures;
         }
         gl.bindVertexArray(batch.geometry.vao);
@@ -10542,7 +10574,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         if (!primitive.dynamic || !g || g.revision === primitive.dynamic.revision) return;
         const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
         gl.bindBuffer(gl.ARRAY_BUFFER, g.vertexBuffer);
-        gl.bufferSubData(gl.ARRAY_BUFFER, 0, interleaveVertices(primitive.positions, normals, primitive.uvs));
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null));
         g.revision = primitive.dynamic.revision;
       });
       return cached;
@@ -10553,13 +10585,15 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       gl.bindVertexArray(vao);
       const vertexBuffer = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, interleaveVertices(primitive.positions, normals, primitive.uvs), primitive.dynamic ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
+      gl.bufferData(gl.ARRAY_BUFFER, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null), primitive.dynamic ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
       gl.enableVertexAttribArray(0);
-      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 32, 0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 40, 0);
       gl.enableVertexAttribArray(1);
-      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 32, 12);
+      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 40, 12);
       gl.enableVertexAttribArray(2);
-      gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 32, 24);
+      gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 40, 24);
+      gl.enableVertexAttribArray(3);
+      gl.vertexAttribPointer(3, 2, gl.FLOAT, false, 40, 32);
       const indexBuffer = gl.createBuffer();
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
       gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, primitive.indices, gl.STATIC_DRAW);
@@ -10617,6 +10651,7 @@ function toBytes(data) {
 // src/render/WebgpuSceneRenderer.ts
 import {
   DEFAULT_RASTER_STYLE as DEFAULT_RASTER_STYLE3,
+  LIGHTMAP_RANGE as LIGHTMAP_RANGE2,
   computeSmoothNormals as computeSmoothNormals2,
   multiplyMat4 as multiplyMat45
 } from "@cartbox/editor";
@@ -10642,7 +10677,7 @@ struct Uniforms {
   shadow: vec4<f32>,    // x = 1 when shadowed, y = map size, z = bias, w = strength
   envMeta: vec4<f32>,   // xyz = env-map mean radiance, w = 1 when an env map is bound
   tonemap: vec4<f32>,   // x = 1 when tone-mapping, y = exposure
-  ssaoMeta: vec4<f32>,  // x = 1 when an SSAO buffer is bound, y = light count
+  ssaoMeta: vec4<f32>,  // x = 1 when an SSAO buffer is bound, y = light count, z = 1 when a light map is bound
   model: mat4x4<f32>,   // this draw's world matrix (point-light world position)
   fog: vec4<f32>,       // rgb = fog colour, w = density
   fogParams: vec4<f32>, // x = 1 when fogged, y = start distance, z = max amount
@@ -10686,6 +10721,8 @@ struct InstanceXf {
   nrm: mat3x3<f32>,
 };
 @group(0) @binding(10) var<storage, read> xf: array<InstanceXf>;
+// A baked light map, sampled with the second UV set (1x1 white when none).
+@group(0) @binding(11) var lmTex: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
@@ -10694,6 +10731,7 @@ struct VSOut {
   @location(2) lightClip: vec4<f32>,
   @location(3) worldPos: vec3<f32>,
   @location(4) eyeDepth: f32,
+  @location(5) uv2: vec2<f32>,
 };
 
 // Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
@@ -10774,6 +10812,7 @@ fn vs(
   @location(0) position: vec3<f32>,
   @location(1) normal: vec3<f32>,
   @location(2) uv: vec2<f32>,
+  @location(3) uv2: vec2<f32>,
   @builtin(instance_index) instance: u32,
 ) -> VSOut {
   var out: VSOut;
@@ -10781,6 +10820,7 @@ fn vs(
   out.pos = t.mvp * vec4<f32>(position, 1.0);
   out.normal = t.nrm * normal;
   out.uv = uv;
+  out.uv2 = uv2;
   out.lightClip = t.lightMvp * vec4<f32>(position, 1.0);
   out.worldPos = (t.model * vec4<f32>(position, 1.0)).xyz;
   out.eyeDepth = out.pos.w; // clip w = view depth, for distance fog
@@ -10855,6 +10895,12 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     } else {
       amb = vec3<f32>(u.light.w) * albedo * ao;
     }
+    // A baked light map (the second UV set) scales the sky/ambient fill by how
+    // much of it reaches this point, bounce included \u2014 mirroring the CPU path.
+    // Sampled unconditionally (uniform control flow), applied when bound.
+    let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
+    let lm = textureSample(lmTex, samp, lmUv).rgb * ${LIGHTMAP_RANGE2};
+    if (u.ssaoMeta.z > 0.5) { amb = amb * lm; }
     // Screen-space AO darkens only the ambient fill, sampled at this fragment's
     // framebuffer pixel (matching the software path's ssao[di]).
     if (u.ssaoMeta.x > 0.5) {
@@ -11059,7 +11105,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           // The Modern-tier light list, read-only storage.
           { binding: 9, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
           // Per-instance transforms, read by the vertex stage.
-          { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } }
+          { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
+          { binding: 11, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } }
         ]
       });
       const pipeline = device.createRenderPipeline({
@@ -11069,12 +11116,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           entryPoint: "vs",
           buffers: [
             {
-              // Interleaved position(3) + normal(3) + uv(2).
-              arrayStride: 32,
+              // Interleaved position(3) + normal(3) + uv(2) + light-map uv(2).
+              arrayStride: 40,
               attributes: [
                 { shaderLocation: 0, offset: 0, format: "float32x3" },
                 { shaderLocation: 1, offset: 12, format: "float32x3" },
-                { shaderLocation: 2, offset: 24, format: "float32x2" }
+                { shaderLocation: 2, offset: 24, format: "float32x2" },
+                { shaderLocation: 3, offset: 32, format: "float32x2" }
               ]
             }
           ]
@@ -11296,6 +11344,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
+        hasLightmap: entry.textures.lm !== null,
         model,
         lightCount,
         fog: draw.fog ?? null
@@ -11402,16 +11451,16 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         const gpu = cached[i];
         if (!primitive.dynamic || !gpu || gpu.revision === primitive.dynamic.revision) return;
         const normals = primitive.normals ?? computeSmoothNormals2(primitive.positions, primitive.indices);
-        this.device.queue.writeBuffer(gpu.vertexBuffer, 0, interleaveVertices(primitive.positions, normals, primitive.uvs));
+        this.device.queue.writeBuffer(gpu.vertexBuffer, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null));
         gpu.revision = primitive.dynamic.revision;
       });
       return cached;
     }
     const uploaded = mesh.primitives.map((primitive) => {
       const normals = primitive.normals ?? computeSmoothNormals2(primitive.positions, primitive.indices);
-      const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs);
+      const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null);
       const vertexBuffer = this.device.createBuffer({
-        size: Math.max(32, vertices.byteLength),
+        size: Math.max(40, vertices.byteLength),
         usage: 32 | 8
         // VERTEX | COPY_DST
       });
@@ -11435,7 +11484,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   /** The bind group for one primitive, rebuilt if any of its textures changed. */
   bindGroupFor(primitive, textures) {
     const cached = this.bindGroups.get(primitive);
-    if (cached && cached.source.base === textures.base && cached.source.mr === textures.mr && cached.source.occ === textures.occ && cached.source.emis === textures.emis) {
+    if (cached && cached.source.base === textures.base && cached.source.mr === textures.mr && cached.source.occ === textures.occ && cached.source.emis === textures.emis && cached.source.lm === textures.lm) {
       return cached.group;
     }
     const view = (texture) => (texture ? this.uploadTexture(texture) : this.blankTexture).createView();
@@ -11459,7 +11508,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // The light storage buffer; a grow changes identity and invalidates the cache.
         { binding: 9, resource: { buffer: this.lightBuffer } },
         // The instance transforms; a grow changes identity and invalidates the cache.
-        { binding: 10, resource: { buffer: this.instanceBuffer } }
+        { binding: 10, resource: { buffer: this.instanceBuffer } },
+        // The baked light map (or the 1x1 white blank; the uniform flag gates it).
+        { binding: 11, resource: view(textures.lm) }
       ]
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });

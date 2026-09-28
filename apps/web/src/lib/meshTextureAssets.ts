@@ -83,7 +83,7 @@ function bytesToBase64(bytes: Uint8Array): string {
 }
 
 /** The material fields that hold an image in a serialized mesh. */
-const IMAGE_FIELDS = ["image", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage"] as const;
+const IMAGE_FIELDS = ["image", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage"] as const;
 
 type Payload = { primitives?: { material?: Record<string, unknown> }[] };
 
@@ -261,7 +261,7 @@ export async function inlineMeshTextures(
   // A material whose image lost both fields becomes null, which is the shape
   // the deserializer expects for "no texture".
   for (const { image, material, field } of walked.images) {
-    if (image.bytes === undefined) material[field] = null;
+    if (image.bytes === undefined && image.same === undefined) material[field] = null;
   }
   return walked.serialize();
 }

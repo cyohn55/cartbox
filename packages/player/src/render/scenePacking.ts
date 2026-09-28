@@ -31,7 +31,8 @@ import type { EnvironmentLight, Mat4 } from "@cartbox/editor";
  * 320  shadow     vec4<f32>    16   x = 1 when shadowed, y = map size, z = bias, w = strength
  * 336  envMeta    vec4<f32>    16   xyz = env-map mean radiance, w = 1 when an env map is bound
  * 352  tonemap    vec4<f32>    16   x = 1 when tone-mapping, y = exposure
- * 368  ssao       vec4<f32>    16   x = 1 when an SSAO buffer is bound, y = light count
+ * 368  ssao       vec4<f32>    16   x = 1 when an SSAO buffer is bound, y = light count,
+ *                                    z = 1 when a baked light map is bound
  * 384  model      mat4x4<f32>  64   this draw's world matrix (point-light world pos)
  * 448  fog        vec4<f32>    16   rgb = fog colour, w = density
  * 464  fogParams  vec4<f32>    16   x = 1 when fogged, y = start distance, z = max amount
@@ -269,6 +270,8 @@ export interface InstanceUniform {
   readonly tonemap: { readonly exposure: number } | null;
   /** Whether a screen-space AO buffer is bound (sampled per fragment on the GPU). */
   readonly hasSsao: boolean;
+  /** A baked light map is bound (it scales the ambient/IBL term, PBR draws only). */
+  readonly hasLightmap?: boolean;
   /** This draw's world matrix, for point-light world position in the shader. */
   readonly model: Mat4 | null;
   /** Number of lights in the shared storage buffer, or 0 for the single key light. */
@@ -407,7 +410,7 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
 
   target[base + OFFSET_SSAO] = uniform.hasSsao ? 1 : 0;
   target[base + OFFSET_SSAO + 1] = uniform.lightCount; // light count for the storage-buffer loop
-  target[base + OFFSET_SSAO + 2] = 0;
+  target[base + OFFSET_SSAO + 2] = uniform.hasLightmap ? 1 : 0;
   target[base + OFFSET_SSAO + 3] = 0;
 
   const model = uniform.model;
@@ -429,19 +432,20 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_SHADOW2 + 3] = 0;
 }
 
-/** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2). */
-export const VERTEX_FLOATS = 8;
+/** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2) + light-map uv(2). */
+export const VERTEX_FLOATS = 10;
 
 /**
  * Interleave the separate attribute streams into the single buffer the pipeline
- * declares (arrayStride 32). A primitive with no UVs gets zeros, which is what
- * the software path effectively uses — and the shader ignores them anyway
- * because its texture flag is off.
+ * declares (arrayStride 40). A primitive with no UVs (or no light-map UVs) gets
+ * zeros, which is what the software path effectively uses — and the shader
+ * ignores them anyway because the matching texture flag is off.
  */
 export function interleaveVertices(
   positions: Float32Array,
   normals: Float32Array,
   uvs: Float32Array | null,
+  uvs2: Float32Array | null = null,
 ): Float32Array {
   const count = Math.floor(positions.length / 3);
   const out = new Float32Array(count * VERTEX_FLOATS);
@@ -455,6 +459,8 @@ export function interleaveVertices(
     out[to + 5] = normals[i * 3 + 2] ?? 0;
     out[to + 6] = uvs ? (uvs[i * 2] ?? 0) : 0;
     out[to + 7] = uvs ? (uvs[i * 2 + 1] ?? 0) : 0;
+    out[to + 8] = uvs2 ? (uvs2[i * 2] ?? 0) : 0;
+    out[to + 9] = uvs2 ? (uvs2[i * 2 + 1] ?? 0) : 0;
   }
   return out;
 }

@@ -35,6 +35,9 @@ import { packMeshLibrary } from "./meshLibrary";
 import { bakeNavMesh, boxTriangles, serializeNavMesh, type NavMesh } from "./navmesh";
 import { serializeTerrain, terrainMesh, type Terrain } from "./terrain";
 import type { SceneTimeline } from "./timeline";
+import { applyLightmapImage, bakeLightmap, layoutFingerprint, layoutLightmap, type LightmapLayout } from "./lightmap";
+import { base64ToBytes } from "./base64";
+import { LOCKOUT_LIGHTMAP } from "./lockoutLightmap.generated";
 import { SWEETIE_16 } from "./palette";
 
 /** An axis-aligned box: centre (cx,cy,cz) and half-extents (hx,hy,hz). */
@@ -1029,6 +1032,40 @@ function mapMesh(): MeshAsset {
   };
 }
 
+// --- Baked lighting -----------------------------------------------------------
+// The arena ships with a baked light map (lightmap.ts): sky visibility and one
+// bounce of sun, so its corners, the walkway's underside and the pit darken and
+// the snow lifts the walls beside it. The bake runs offline (npm run
+// bake:lockout) and is stored as a PNG in lockoutLightmap.generated.ts; the
+// layout is recomputed here (cheap and deterministic) and must match the one the
+// stored bake was made for, which its fingerprint checks.
+
+const LIGHTMAP_DENSITY = 4;
+let mapLayout: LightmapLayout | null = null;
+
+/** The arena's light-map layout: the map mesh with its second UV set. */
+export function lockoutMapLayout(): LightmapLayout {
+  mapLayout ??= layoutLightmap(mapMesh(), IDENTITY, { density: LIGHTMAP_DENSITY, maxSize: 1024 });
+  return mapLayout;
+}
+
+/** Bake the arena's light map from scratch (seconds; the build does this, not the page). */
+export function bakeLockoutLightmap(progress?: (done: number) => void): Uint8ClampedArray {
+  const layout = lockoutMapLayout();
+  return bakeLightmap(layout, [{ mesh: layout.mesh, model: IDENTITY }], { rays: 64, distance: 7, sun: LOCKOUT_KEY_DIRECTION, bounce: 0.9, contrast: 1.25 }, progress);
+}
+
+/** The map as it ships: laid out and carrying the stored bake (or unlit, when the bake is stale). */
+function litMapMesh(): MeshAsset {
+  const layout = lockoutMapLayout();
+  if (LOCKOUT_LIGHTMAP.fingerprint !== layoutFingerprint(layout)) return mapMesh();
+  return applyLightmapImage(layout.mesh, { mime: "image/png", bytes: base64ToBytes(LOCKOUT_LIGHTMAP.png) });
+}
+
+const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] as const;
+/** Toward the sun (matches the lighting rig's key light). */
+const LOCKOUT_KEY_DIRECTION: readonly [number, number, number] = [0.45, 0.62, -0.5];
+
 // --- The mountains ------------------------------------------------------------
 // Lockout hangs in a gorge high in an icy range: sheer cliffs drop from all
 // round the facility into a chasm with no visible floor, and snow-loaded peaks
@@ -1835,7 +1872,7 @@ export function lockoutMeshSidecar(): string {
     // many bots use it.
     const soldier = serializeMeshAsset(soldierMesh());
     const meshes: { id: string; name: string; mesh: string; animator?: unknown; transform: unknown }[] = [
-      { id: "lockout-map", name: "Lockout arena", mesh: serializeMeshAsset(mapMesh()), transform: identity },
+      { id: "lockout-map", name: "Lockout arena", mesh: serializeMeshAsset(litMapMesh()), transform: identity },
     ];
     // Instances 1..7: the bots.
     for (let i = 1; i <= BOT_COUNT; i += 1) {

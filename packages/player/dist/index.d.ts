@@ -3498,7 +3498,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  * 320  shadow     vec4<f32>    16   x = 1 when shadowed, y = map size, z = bias, w = strength
  * 336  envMeta    vec4<f32>    16   xyz = env-map mean radiance, w = 1 when an env map is bound
  * 352  tonemap    vec4<f32>    16   x = 1 when tone-mapping, y = exposure
- * 368  ssao       vec4<f32>    16   x = 1 when an SSAO buffer is bound, y = light count
+ * 368  ssao       vec4<f32>    16   x = 1 when an SSAO buffer is bound, y = light count,
+ *                                    z = 1 when a baked light map is bound
  * 384  model      mat4x4<f32>  64   this draw's world matrix (point-light world pos)
  * 448  fog        vec4<f32>    16   rgb = fog colour, w = density
  * 464  fogParams  vec4<f32>    16   x = 1 when fogged, y = start distance, z = max amount
@@ -3646,6 +3647,8 @@ interface InstanceUniform {
     } | null;
     /** Whether a screen-space AO buffer is bound (sampled per fragment on the GPU). */
     readonly hasSsao: boolean;
+    /** A baked light map is bound (it scales the ambient/IBL term, PBR draws only). */
+    readonly hasLightmap?: boolean;
     /** This draw's world matrix, for point-light world position in the shader. */
     readonly model: Mat4 | null;
     /** Number of lights in the shared storage buffer, or 0 for the single key light. */
@@ -3688,15 +3691,15 @@ declare function writeInstanceTransform(target: Float32Array, index: number, tra
  * every normal, which reads as bad lighting rather than as a layout bug.
  */
 declare function writeInstanceUniform(target: Float32Array, index: number, uniform: InstanceUniform): void;
-/** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2). */
-declare const VERTEX_FLOATS = 8;
+/** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2) + light-map uv(2). */
+declare const VERTEX_FLOATS = 10;
 /**
  * Interleave the separate attribute streams into the single buffer the pipeline
- * declares (arrayStride 32). A primitive with no UVs gets zeros, which is what
- * the software path effectively uses — and the shader ignores them anyway
- * because its texture flag is off.
+ * declares (arrayStride 40). A primitive with no UVs (or no light-map UVs) gets
+ * zeros, which is what the software path effectively uses — and the shader
+ * ignores them anyway because the matching texture flag is off.
  */
-declare function interleaveVertices(positions: Float32Array, normals: Float32Array, uvs: Float32Array | null): Float32Array;
+declare function interleaveVertices(positions: Float32Array, normals: Float32Array, uvs: Float32Array | null, uvs2?: Float32Array | null): Float32Array;
 /**
  * Strip WebGPU's row padding from a mapped readback.
  *

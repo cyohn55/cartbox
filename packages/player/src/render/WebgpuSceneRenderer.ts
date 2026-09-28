@@ -63,6 +63,7 @@
 
 import {
   DEFAULT_RASTER_STYLE,
+  LIGHTMAP_RANGE,
   computeSmoothNormals,
   multiplyMat4,
   type DecodedTexture,
@@ -118,7 +119,7 @@ struct Uniforms {
   shadow: vec4<f32>,    // x = 1 when shadowed, y = map size, z = bias, w = strength
   envMeta: vec4<f32>,   // xyz = env-map mean radiance, w = 1 when an env map is bound
   tonemap: vec4<f32>,   // x = 1 when tone-mapping, y = exposure
-  ssaoMeta: vec4<f32>,  // x = 1 when an SSAO buffer is bound, y = light count
+  ssaoMeta: vec4<f32>,  // x = 1 when an SSAO buffer is bound, y = light count, z = 1 when a light map is bound
   model: mat4x4<f32>,   // this draw's world matrix (point-light world position)
   fog: vec4<f32>,       // rgb = fog colour, w = density
   fogParams: vec4<f32>, // x = 1 when fogged, y = start distance, z = max amount
@@ -162,6 +163,8 @@ struct InstanceXf {
   nrm: mat3x3<f32>,
 };
 @group(0) @binding(10) var<storage, read> xf: array<InstanceXf>;
+// A baked light map, sampled with the second UV set (1x1 white when none).
+@group(0) @binding(11) var lmTex: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
@@ -170,6 +173,7 @@ struct VSOut {
   @location(2) lightClip: vec4<f32>,
   @location(3) worldPos: vec3<f32>,
   @location(4) eyeDepth: f32,
+  @location(5) uv2: vec2<f32>,
 };
 
 // Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
@@ -250,6 +254,7 @@ fn vs(
   @location(0) position: vec3<f32>,
   @location(1) normal: vec3<f32>,
   @location(2) uv: vec2<f32>,
+  @location(3) uv2: vec2<f32>,
   @builtin(instance_index) instance: u32,
 ) -> VSOut {
   var out: VSOut;
@@ -257,6 +262,7 @@ fn vs(
   out.pos = t.mvp * vec4<f32>(position, 1.0);
   out.normal = t.nrm * normal;
   out.uv = uv;
+  out.uv2 = uv2;
   out.lightClip = t.lightMvp * vec4<f32>(position, 1.0);
   out.worldPos = (t.model * vec4<f32>(position, 1.0)).xyz;
   out.eyeDepth = out.pos.w; // clip w = view depth, for distance fog
@@ -331,6 +337,12 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     } else {
       amb = vec3<f32>(u.light.w) * albedo * ao;
     }
+    // A baked light map (the second UV set) scales the sky/ambient fill by how
+    // much of it reaches this point, bounce included — mirroring the CPU path.
+    // Sampled unconditionally (uniform control flow), applied when bound.
+    let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
+    let lm = textureSample(lmTex, samp, lmUv).rgb * ${LIGHTMAP_RANGE};
+    if (u.ssaoMeta.z > 0.5) { amb = amb * lm; }
     // Screen-space AO darkens only the ambient fill, sampled at this fragment's
     // framebuffer pixel (matching the software path's ssao[di]).
     if (u.ssaoMeta.x > 0.5) {
@@ -420,6 +432,7 @@ interface CachedBindGroup {
     mr: DecodedTexture | null;
     occ: DecodedTexture | null;
     emis: DecodedTexture | null;
+    lm: DecodedTexture | null;
   };
 }
 
@@ -602,6 +615,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 9, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
           // Per-instance transforms, read by the vertex stage.
           { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
+          { binding: 11, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
         ],
       });
 
@@ -612,12 +626,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           entryPoint: "vs",
           buffers: [
             {
-              // Interleaved position(3) + normal(3) + uv(2).
-              arrayStride: 32,
+              // Interleaved position(3) + normal(3) + uv(2) + light-map uv(2).
+              arrayStride: 40,
               attributes: [
                 { shaderLocation: 0, offset: 0, format: "float32x3" },
                 { shaderLocation: 1, offset: 12, format: "float32x3" },
                 { shaderLocation: 2, offset: 24, format: "float32x2" },
+                { shaderLocation: 3, offset: 32, format: "float32x2" },
               ],
             },
           ],
@@ -882,6 +897,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
+        hasLightmap: entry.textures.lm !== null,
         model,
         lightCount,
         fog: draw.fog ?? null,
@@ -997,7 +1013,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         const gpu = cached[i];
         if (!primitive.dynamic || !gpu || gpu.revision === primitive.dynamic.revision) return;
         const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
-        this.device.queue.writeBuffer(gpu.vertexBuffer, 0, interleaveVertices(primitive.positions, normals, primitive.uvs));
+        this.device.queue.writeBuffer(gpu.vertexBuffer, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null));
         gpu.revision = primitive.dynamic.revision;
       });
       return cached;
@@ -1005,9 +1021,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
     const uploaded = mesh.primitives.map((primitive) => {
       const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
-      const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs);
+      const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null);
       const vertexBuffer = this.device.createBuffer({
-        size: Math.max(32, vertices.byteLength),
+        size: Math.max(40, vertices.byteLength),
         usage: 0x20 | 0x08, // VERTEX | COPY_DST
       });
       this.device.queue.writeBuffer(vertexBuffer, 0, vertices);
@@ -1038,7 +1054,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       cached.source.base === textures.base &&
       cached.source.mr === textures.mr &&
       cached.source.occ === textures.occ &&
-      cached.source.emis === textures.emis
+      cached.source.emis === textures.emis &&
+      cached.source.lm === textures.lm
     ) {
       return cached.group;
     }
@@ -1066,6 +1083,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 9, resource: { buffer: this.lightBuffer } },
         // The instance transforms; a grow changes identity and invalidates the cache.
         { binding: 10, resource: { buffer: this.instanceBuffer } },
+        // The baked light map (or the 1x1 white blank; the uniform flag gates it).
+        { binding: 11, resource: view(textures.lm) },
       ],
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });
