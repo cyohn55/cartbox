@@ -86,8 +86,19 @@ general Unity/UE5 gap); items here that close a line there tick it off too.
       backend. Lockout leaves pocks where shots hit walls and burns where
       grenades go off, and carries Forerunner glyphs on the towers and frost
       streaks on the high ledges.
-- [ ] **H7. Volumetric fog and light shafts.** Height fog and fog volumes;
+- [x] **H7. Volumetric fog and light shafts.** Height fog and fog volumes;
       sun shafts through gaps. *Lockout:* mist pooling in the chasm.
+      *Done:* the fog gains a height layer (dense below a base, thinning
+      exponentially above), up to four fog volumes (boxes of mist, densest at
+      their floor) and a sun glow, all integrated exactly along the ray from the
+      eye — the same maths in the software rasteriser, WGSL and GLSL (the GPU
+      matches the CPU to a level). Sun shafts are a screen-space pass over the
+      finished frame: open sky near the sun, found by comparing the frame with
+      its sky backdrop, streams past the geometry's edges, so it is identical on
+      every backend. The Lighting panel edits the new fog layers and the shafts,
+      and the Mesh tab's viewport now shows the fog. Lockout's chasm fills with
+      a cloud sea under the deck, the haze brightens toward the sun, and beams
+      break past the towers and the walkway.
 - [ ] **H8. Sun glare and lens flare** in the post-effects stack.
 
 ## Phase C — Characters and feel (mostly existing features)

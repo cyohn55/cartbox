@@ -60,6 +60,45 @@ export interface ProceduralSky {
   readonly seed: number;
 }
 
+/**
+ * Height fog (HALO2_STYLE_ROADMAP.md, H7): a layer of fog that is dense below
+ * `base` and thins exponentially above it — mist hugging the ground.
+ */
+export interface HeightFog {
+  /** World height below which the layer is at full density. */
+  readonly base: number;
+  /** Density per world unit at and below `base` (0 = none). */
+  readonly density: number;
+  /** How fast it thins above `base`: density × e^(−falloff × height above). */
+  readonly falloff: number;
+}
+
+/**
+ * A fog volume (H7): a box of fog, dense below its floor-relative `falloff`
+ * curve — mist pooling in a chasm, a cloud bank in a valley. It thins upward
+ * from the box's floor the way {@link HeightFog} thins from its base.
+ */
+export interface FogVolume {
+  readonly min: readonly [number, number, number];
+  readonly max: readonly [number, number, number];
+  /** Density per world unit at the box's floor. */
+  readonly density: number;
+  /** How fast it thins going up from the floor (0 = even all the way up). */
+  readonly falloff: number;
+}
+
+/** Sun glow (H7): the fog brightens looking toward the sun — light scattering in it. */
+export interface FogGlow {
+  readonly color: Rgb;
+  /** 0 (none) .. 2. */
+  readonly strength: number;
+}
+
+/** At most this many fog volumes — the GPU uniform carries a fixed four. */
+export const MAX_FOG_VOLUMES = 4;
+/** Tightness of the sun glow lobe: (view·sun)^power. */
+export const FOG_GLOW_POWER = 8;
+
 /** Distance fog for the Modern tier, applied after tone mapping. */
 export interface SceneFog {
   /** Colour the scene fades toward (0..1, display space) — usually the horizon. */
@@ -68,14 +107,156 @@ export interface SceneFog {
   readonly density: number;
   /** View distance (world units) where fog begins. */
   readonly start: number;
-  /** Upper bound on the fog amount (0..1), so far geometry never fully vanishes. */
+  /** Upper bound on the distance fog amount (0..1), so far geometry never fully vanishes. */
   readonly max: number;
+  /** Ground-hugging height fog, or absent for none. */
+  readonly height?: HeightFog | null;
+  /** Boxes of fog, or absent for none. */
+  readonly volumes?: readonly FogVolume[];
+  /** Brightening toward the sun, or absent for none. */
+  readonly glow?: FogGlow | null;
 }
 
 /** Fog amount (0..1) for a fragment at view depth `distance`. */
 export function fogFactor(fog: SceneFog, distance: number): number {
   const d = Math.max(0, distance - fog.start);
   return Math.min(fog.max, 1 - Math.exp(-d * fog.density));
+}
+
+/** Whether the fog has any layer that depends on where the fragment is (height, volumes, glow). */
+export function fogIsVolumetric(fog: SceneFog): boolean {
+  return (fog.height?.density ?? 0) > 0 || (fog.volumes?.length ?? 0) > 0 || (fog.glow?.strength ?? 0) > 0;
+}
+
+/**
+ * Optical depth of a layer of density `d · e^(−k · max(0, y − base))` along the
+ * ray `C + (P − C)·t` for t in [t0, t1] (`cy` = C's height, `dy` = P's height −
+ * C's, `len` = |P − C|). Below `base` it is even; above, it thins — integrated
+ * exactly, split where the ray crosses `base`. The WGSL and GLSL ports match.
+ */
+export function fogLayerDepth(d: number, k: number, base: number, cy: number, dy: number, len: number, t0: number, t1: number): number {
+  if (d <= 0 || t1 <= t0) return 0;
+  let y0 = cy + dy * t0 - base;
+  let y1 = cy + dy * t1 - base;
+  if (y0 > y1) {
+    const t = y0;
+    y0 = y1;
+    y1 = t;
+  }
+  const span = d * len * (t1 - t0);
+  const h = y1 - y0;
+  if (h < 1e-5) return span * Math.exp(-k * Math.max(0, y0));
+  let tau = 0;
+  // The part of the ray below the base: even density.
+  if (y0 < 0) tau += (span * (Math.min(y1, 0) - y0)) / h;
+  // The part above: ∫ e^(−k·y) dy over [lo, y1], averaged over the height span.
+  if (y1 > 0) {
+    const lo = Math.max(y0, 0);
+    const above = y1 - lo;
+    const x = k * above;
+    tau += x < 1e-4 ? (span * above * Math.exp(-k * lo)) / h : (span * (Math.exp(-k * lo) - Math.exp(-k * y1))) / (k * h);
+  }
+  return tau;
+}
+
+/** Where the segment C→C+D·t (t in [0, 1]) is inside a box, or null when it misses. */
+export function fogBoxSpan(
+  min: readonly [number, number, number],
+  max: readonly [number, number, number],
+  cx: number,
+  cy: number,
+  cz: number,
+  dx: number,
+  dy: number,
+  dz: number,
+): [number, number] | null {
+  let t0 = 0;
+  let t1 = 1;
+  const o = [cx, cy, cz];
+  const dir = [dx, dy, dz];
+  for (let a = 0; a < 3; a += 1) {
+    const da = dir[a]!;
+    const oa = o[a]!;
+    if (Math.abs(da) < 1e-9) {
+      if (oa < min[a]! || oa > max[a]!) return null;
+      continue;
+    }
+    let ta = (min[a]! - oa) / da;
+    let tb = (max[a]! - oa) / da;
+    if (ta > tb) {
+      const t = ta;
+      ta = tb;
+      tb = t;
+    }
+    t0 = Math.max(t0, ta);
+    t1 = Math.min(t1, tb);
+  }
+  return t1 > t0 ? [t0, t1] : null;
+}
+
+/**
+ * The volumetric part of the fog (height layer + volumes) as an amount 0..1
+ * between the eye `c` and the surface point `p`.
+ */
+export function fogVolumeAmount(fog: SceneFog, c: readonly [number, number, number], p: readonly [number, number, number]): number {
+  const dx = p[0] - c[0];
+  const dy = p[1] - c[1];
+  const dz = p[2] - c[2];
+  const len = Math.hypot(dx, dy, dz);
+  let tau = 0;
+  const h = fog.height;
+  if (h && h.density > 0) tau += fogLayerDepth(h.density, h.falloff, h.base, c[1], dy, len, 0, 1);
+  for (const v of fog.volumes ?? []) {
+    const span = fogBoxSpan(v.min, v.max, c[0], c[1], c[2], dx, dy, dz);
+    if (span) tau += fogLayerDepth(v.density, v.falloff, v.min[1], c[1], dy, len, span[0], span[1]);
+  }
+  return 1 - Math.exp(-tau);
+}
+
+/**
+ * Fog a display-space colour (0..255 channels, written in place into `out` at
+ * `i`): the distance fog by eye depth, then the height and volume fog along the
+ * ray from the eye, toward the fog colour brightened by the sun glow in the
+ * direction of `toLight`. With only distance fog this is exactly the old mix.
+ */
+export function applyFog(
+  fog: SceneFog,
+  out: { [index: number]: number },
+  i: number,
+  eyeDepth: number,
+  eye: readonly [number, number, number],
+  p: readonly [number, number, number],
+  toLight: readonly [number, number, number],
+): void {
+  let f = fogFactor(fog, eyeDepth);
+  const volumetric = fogIsVolumetric(fog);
+  let r = fog.color[0];
+  let g = fog.color[1];
+  let b = fog.color[2];
+  if (volumetric) {
+    const fv = fogVolumeAmount(fog, eye, p);
+    f = 1 - (1 - f) * (1 - fv);
+    const glow = fog.glow;
+    if (glow && glow.strength > 0) {
+      const dx = p[0] - eye[0];
+      const dy = p[1] - eye[1];
+      const dz = p[2] - eye[2];
+      const len = Math.hypot(dx, dy, dz) || 1;
+      const ll = Math.hypot(toLight[0], toLight[1], toLight[2]) || 1;
+      const cos = Math.max(0, (dx * toLight[0] + dy * toLight[1] + dz * toLight[2]) / (len * ll));
+      const k = glow.strength * Math.pow(cos, FOG_GLOW_POWER);
+      r = Math.min(1, r + glow.color[0] * k);
+      g = Math.min(1, g + glow.color[1] * k);
+      b = Math.min(1, b + glow.color[2] * k);
+    }
+  }
+  if (f <= 0) return;
+  const cr = Math.min(255, Math.max(0, out[i]!));
+  const cg = Math.min(255, Math.max(0, out[i + 1]!));
+  const cb = Math.min(255, Math.max(0, out[i + 2]!));
+  out[i] = cr + (r * 255 - cr) * f;
+  out[i + 1] = cg + (g * 255 - cg) * f;
+  out[i + 2] = cb + (b * 255 - cb) * f;
 }
 
 // --- Noise ------------------------------------------------------------------

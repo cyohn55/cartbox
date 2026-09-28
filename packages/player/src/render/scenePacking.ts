@@ -13,12 +13,15 @@
 import {
   DEFAULT_DETAIL_SCALE,
   DEFAULT_DETAIL_STRENGTH,
+  MAX_FOG_VOLUMES,
   MAX_REFLECTION_PROBES,
   emissiveAnimation,
+  fogIsVolumetric,
   type EnvironmentLight,
   type Mat4,
   type MeshMaterial,
   type ReflectionProbeSet,
+  type SceneFog,
 } from "@cartbox/editor";
 
 /**
@@ -45,7 +48,8 @@ import {
  *                                    w = reflection-probe count
  * 384  model      mat4x4<f32>  64   this draw's world matrix (point-light world pos)
  * 448  fog        vec4<f32>    16   rgb = fog colour, w = density
- * 464  fogParams  vec4<f32>    16   x = 1 when fogged, y = start distance, z = max amount
+ * 464  fogParams  vec4<f32>    16   x = 1 when fogged, y = start distance, z = max amount,
+ *                                    w = 1 when the fog has height/volume/glow layers
  * 480  shadow2    vec4<f32>    16   x = slope-scaled shadow bias, y = 1 for 2x2 PCF
  * 496  surface0   vec4<f32>    16   x = detail scale, y = detail strength (0 = none),
  *                                    z = reflectivity, w = 1 when the MR alpha masks it
@@ -54,9 +58,13 @@ import {
  * 544  surface3   vec4<f32>    16   rgb = blend-surface colour, w = its roughness (< 0 = keep)
  *                                    (surface1.z = 1 when the primitive carries blend weights,
  *                                    surface1.w = 1 when the blend surface has a texture)
+ * 560  fogCam     vec4<f32>    16   xyz = eye (world), w = fog volume count
+ * 576  fogHeight  vec4<f32>    16   x = height-fog density, y = base, z = falloff, w = glow strength
+ * 592  fogGlow    vec4<f32>    16   rgb = sun-glow colour
+ * 608  fogVol     vec4<f32>×8 128   per volume: min xyz + density, max xyz + falloff
  * ```
  *
- * 560 bytes used, padded to a 768-byte stride (a 256-byte multiple a dynamic
+ * 736 bytes used, padded to a 768-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -71,7 +79,7 @@ export const UNIFORM_STRIDE = 768;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 560;
+export const UNIFORM_BYTES_USED = 736;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -164,6 +172,10 @@ const OFFSET_SURFACE0 = 124;
 const OFFSET_SURFACE1 = 128;
 const OFFSET_SURFACE2 = 132;
 const OFFSET_SURFACE3 = 136;
+const OFFSET_FOG_CAM = 140;
+const OFFSET_FOG_HEIGHT = 144;
+const OFFSET_FOG_GLOW = 148;
+const OFFSET_FOG_VOL = 152;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -362,13 +374,10 @@ export interface InstanceUniform {
   readonly lightCount: number;
   /** This draw's surface effects, or omitted for none. */
   readonly surface?: ResolvedSurface;
-  /** Distance fog for PBR draws, or null/omitted for none. */
-  readonly fog?: {
-    readonly color: readonly [number, number, number];
-    readonly density: number;
-    readonly start: number;
-    readonly max: number;
-  } | null;
+  /** Fog for PBR draws (distance, height, volumes, sun glow), or null/omitted for none. */
+  readonly fog?: SceneFog | null;
+  /** The eye in world space — height and volume fog trace the ray from it. */
+  readonly eye?: readonly [number, number, number];
 }
 
 /**
@@ -511,7 +520,37 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_FOG_PARAMS] = fog ? 1 : 0; // hasFog
   target[base + OFFSET_FOG_PARAMS + 1] = fog ? fog.start : 0;
   target[base + OFFSET_FOG_PARAMS + 2] = fog ? fog.max : 0;
-  target[base + OFFSET_FOG_PARAMS + 3] = 0;
+  const volumetric = fog !== null && fogIsVolumetric(fog);
+  target[base + OFFSET_FOG_PARAMS + 3] = volumetric ? 1 : 0;
+  const eye = uniform.eye ?? [0, 0, 0];
+  const layered = volumetric ? fog : null;
+  const volumes = (layered?.volumes ?? []).slice(0, MAX_FOG_VOLUMES);
+  const height = layered?.height ?? null;
+  const glow = layered?.glow ?? null;
+  target[base + OFFSET_FOG_CAM] = eye[0];
+  target[base + OFFSET_FOG_CAM + 1] = eye[1];
+  target[base + OFFSET_FOG_CAM + 2] = eye[2];
+  target[base + OFFSET_FOG_CAM + 3] = volumes.length;
+  target[base + OFFSET_FOG_HEIGHT] = height ? height.density : 0;
+  target[base + OFFSET_FOG_HEIGHT + 1] = height ? height.base : 0;
+  target[base + OFFSET_FOG_HEIGHT + 2] = height ? height.falloff : 0;
+  target[base + OFFSET_FOG_HEIGHT + 3] = glow ? glow.strength : 0;
+  target[base + OFFSET_FOG_GLOW] = glow ? glow.color[0] : 0;
+  target[base + OFFSET_FOG_GLOW + 1] = glow ? glow.color[1] : 0;
+  target[base + OFFSET_FOG_GLOW + 2] = glow ? glow.color[2] : 0;
+  target[base + OFFSET_FOG_GLOW + 3] = 0;
+  for (let i = 0; i < MAX_FOG_VOLUMES; i += 1) {
+    const v = volumes[i];
+    const o = base + OFFSET_FOG_VOL + i * 8;
+    target[o] = v ? v.min[0] : 0;
+    target[o + 1] = v ? v.min[1] : 0;
+    target[o + 2] = v ? v.min[2] : 0;
+    target[o + 3] = v ? v.density : 0;
+    target[o + 4] = v ? v.max[0] : 0;
+    target[o + 5] = v ? v.max[1] : 0;
+    target[o + 6] = v ? v.max[2] : 0;
+    target[o + 7] = v ? v.falloff : 0;
+  }
 
   target[base + OFFSET_SHADOW2] = shadow ? shadow.slopeBias ?? 0 : 0;
   target[base + OFFSET_SHADOW2 + 1] = shadow && shadow.pcf ? 1 : 0;

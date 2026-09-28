@@ -3525,7 +3525,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  *                                    w = reflection-probe count
  * 384  model      mat4x4<f32>  64   this draw's world matrix (point-light world pos)
  * 448  fog        vec4<f32>    16   rgb = fog colour, w = density
- * 464  fogParams  vec4<f32>    16   x = 1 when fogged, y = start distance, z = max amount
+ * 464  fogParams  vec4<f32>    16   x = 1 when fogged, y = start distance, z = max amount,
+ *                                    w = 1 when the fog has height/volume/glow layers
  * 480  shadow2    vec4<f32>    16   x = slope-scaled shadow bias, y = 1 for 2x2 PCF
  * 496  surface0   vec4<f32>    16   x = detail scale, y = detail strength (0 = none),
  *                                    z = reflectivity, w = 1 when the MR alpha masks it
@@ -3534,9 +3535,13 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  * 544  surface3   vec4<f32>    16   rgb = blend-surface colour, w = its roughness (< 0 = keep)
  *                                    (surface1.z = 1 when the primitive carries blend weights,
  *                                    surface1.w = 1 when the blend surface has a texture)
+ * 560  fogCam     vec4<f32>    16   xyz = eye (world), w = fog volume count
+ * 576  fogHeight  vec4<f32>    16   x = height-fog density, y = base, z = falloff, w = glow strength
+ * 592  fogGlow    vec4<f32>    16   rgb = sun-glow colour
+ * 608  fogVol     vec4<f32>×8 128   per volume: min xyz + density, max xyz + falloff
  * ```
  *
- * 560 bytes used, padded to a 768-byte stride (a 256-byte multiple a dynamic
+ * 736 bytes used, padded to a 768-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -3551,7 +3556,7 @@ declare const UNIFORM_STRIDE = 768;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 560;
+declare const UNIFORM_BYTES_USED = 736;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
@@ -3710,13 +3715,10 @@ interface InstanceUniform {
     readonly lightCount: number;
     /** This draw's surface effects, or omitted for none. */
     readonly surface?: ResolvedSurface;
-    /** Distance fog for PBR draws, or null/omitted for none. */
-    readonly fog?: {
-        readonly color: readonly [number, number, number];
-        readonly density: number;
-        readonly start: number;
-        readonly max: number;
-    } | null;
+    /** Fog for PBR draws (distance, height, volumes, sun glow), or null/omitted for none. */
+    readonly fog?: SceneFog | null;
+    /** The eye in world space — height and volume fog trace the ray from it. */
+    readonly eye?: readonly [number, number, number];
 }
 /**
  * Floats per instance in the transform storage buffer (GPU instancing): the WGSL
@@ -4906,6 +4908,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
     /** The last sky backdrop and the view it was painted for (it depends only on
      *  where the camera points, so walking without turning reuses it). */
     private skyCache;
+    /** Reused buffers for the sun-shaft pass. */
+    private shaftScratch;
     /** The cart's world lights this frame (cartbox.light3d), added to the rig's in first person. */
     private cartLights;
     /** Tinted mesh copies, per source mesh and tint index. */

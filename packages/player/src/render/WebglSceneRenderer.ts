@@ -38,7 +38,9 @@ import {
   LIGHTMAP_RANGE,
   MAX_REFLECTION_PROBES,
   PROBE_FADE,
+  FOG_GLOW_POWER,
   PROBE_RANGE,
+  cameraPositionFromView,
   computeSmoothNormals,
   multiplyMat4,
   type DecodedTexture,
@@ -122,6 +124,10 @@ layout(std140) uniform Uniforms {
   vec4 surface1;
   vec4 surface2;
   vec4 surface3;
+  vec4 fogCam;
+  vec4 fogHeight;
+  vec4 fogGlow;
+  vec4 fogVol[8];
 } u;
 `;
 
@@ -201,6 +207,44 @@ in vec4 vLightClip;
 in vec3 vWorldPos;
 in float vEyeDepth;
 out vec4 outColor;
+
+// Optical depth of a fog layer thinning above base (fogLayerDepth in skyDome.ts).
+float fogLayer(float d, float k, float base, float cy, float dy, float len, float t0, float t1) {
+  if (d <= 0.0 || t1 <= t0) return 0.0;
+  float ya = cy + dy * t0 - base;
+  float yb = cy + dy * t1 - base;
+  float y0 = min(ya, yb);
+  float y1 = max(ya, yb);
+  float span = d * len * (t1 - t0);
+  float h = y1 - y0;
+  if (h < 1e-5) return span * exp(-k * max(0.0, y0));
+  float tau = 0.0;
+  if (y0 < 0.0) tau += span * (min(y1, 0.0) - y0) / h;
+  if (y1 > 0.0) {
+    float lo = max(y0, 0.0);
+    float above = y1 - lo;
+    if (k * above < 1e-4) tau += span * above * exp(-k * lo) / h;
+    else tau += span * (exp(-k * lo) - exp(-k * y1)) / (k * h);
+  }
+  return tau;
+}
+
+// Where the segment c -> c + dir*t (t in [0, 1]) is inside a box (fogBoxSpan).
+vec2 fogBox(vec3 mn, vec3 mx, vec3 c, vec3 dir) {
+  float t0 = 0.0;
+  float t1 = 1.0;
+  for (int a = 0; a < 3; a++) {
+    if (abs(dir[a]) < 1e-9) {
+      if (c[a] < mn[a] || c[a] > mx[a]) return vec2(1.0, 0.0);
+    } else {
+      float ta = (mn[a] - c[a]) / dir[a];
+      float tb = (mx[a] - c[a]) / dir[a];
+      t0 = max(t0, min(ta, tb));
+      t1 = min(t1, max(ta, tb));
+    }
+  }
+  return vec2(t0, t1);
+}
 
 // A material map at uv (already V-flipped). An era without filtering picks the
 // texel exactly as the software rasteriser does — floor(wrap(u) · size) —
@@ -427,7 +471,27 @@ void main() {
     if (u.fogParams.x > 0.5) {
       float d = max(0.0, vEyeDepth - u.fogParams.y);
       float f = min(u.fogParams.z, 1.0 - exp(-d * u.fog.w));
-      shaded = mix(clamp(shaded, vec3(0.0), vec3(1.0)), u.fog.rgb, f);
+      vec3 fc = u.fog.rgb;
+      if (u.fogParams.w > 0.5) {
+        vec3 c = u.fogCam.xyz;
+        vec3 ray = vWorldPos - c;
+        float len = length(ray);
+        float tau = fogLayer(u.fogHeight.x, u.fogHeight.z, u.fogHeight.y, c.y, ray.y, len, 0.0, 1.0);
+        int vc = int(u.fogCam.w + 0.5);
+        for (int i = 0; i < 4; i++) {
+          if (i >= vc) break;
+          vec4 a = u.fogVol[i * 2];
+          vec4 b = u.fogVol[i * 2 + 1];
+          vec2 span = fogBox(a.xyz, b.xyz, c, ray);
+          if (span.y > span.x) tau += fogLayer(a.w, b.w, a.y, c.y, ray.y, len, span.x, span.y);
+        }
+        f = 1.0 - (1.0 - f) * exp(-tau);
+        if (u.fogHeight.w > 0.0) {
+          float cosv = max(0.0, dot(ray, u.light.xyz) / (max(len, 1e-6) * max(length(u.light.xyz), 1e-6)));
+          fc = min(vec3(1.0), fc + u.fogGlow.rgb * (u.fogHeight.w * pow(cosv, ${FOG_GLOW_POWER.toFixed(1)})));
+        }
+      }
+      shaded = mix(clamp(shaded, vec3(0.0), vec3(1.0)), fc, f);
     }
     outColor = vec4(shaded, colour.a);
     return;
@@ -674,6 +738,7 @@ export class WebglSceneRenderer implements SceneRenderer {
 
     const light = resolveLight(draw.lightDirection, draw.ambient);
     const viewDir = viewDirection(draw.view);
+    const eye = cameraPositionFromView(draw.view);
     const shadow = draw.shadow ?? null;
     this.uploadShadow(shadow);
     const shadowParams = shadow
@@ -710,6 +775,7 @@ export class WebglSceneRenderer implements SceneRenderer {
         model,
         lightCount: sceneLights.length,
         fog: draw.fog ?? null,
+        eye,
         surface: resolveSurface(batch.primitive.material, draw.time ?? 0, batch.textures.detail !== null, batch.textures.mr !== null, {
           weights: batch.primitive.blend !== undefined,
           textured: batch.textures.blend !== null,

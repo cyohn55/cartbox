@@ -23,7 +23,11 @@
  */
 
 import { boxProject, pickProbe, sampleProbe, type ReflectionProbeSet } from "./probeSampling";
-import { fogFactor, type SceneFog } from "./skyDome";
+import { applyFog, type SceneFog } from "./skyDome";
+import { cameraPositionFromView } from "./lod";
+
+/** The fog for one frame, with the eye it is seen from (height fog and volumes trace from it). */
+type FrameFog = SceneFog & { readonly eye: readonly [number, number, number] };
 import { LIGHTMAP_RANGE } from "../model/lightmap";
 import { DEFAULT_DETAIL_SCALE, DEFAULT_DETAIL_STRENGTH, detailFade, emissiveAnimation } from "../model/materialEffects";
 import { type MeshAsset, computeSmoothNormals, meshBounds } from "../model/MeshAsset";
@@ -875,7 +879,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
   const tonemap = options.tonemap ?? null;
   const ssao = options.ssao ?? null;
   const lights = options.lights ?? null;
-  const fog = options.fog ?? null;
+  const fog: FrameFog | null = options.fog ? { ...options.fog, eye: cameraPositionFromView(view) } : null;
   const style = options.style ?? DEFAULT_RASTER_STYLE;
   const time = options.time ?? 0;
   const viewProj = multiply(projection, view);
@@ -1565,7 +1569,7 @@ function drawMesh(
   ssao: Float32Array | null,
   lights: readonly SceneLight[] | null,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
-  fog: SceneFog | null = null,
+  fog: FrameFog | null = null,
 ): void {
   eachTriangle(
     mesh,
@@ -1635,7 +1639,7 @@ function rasterizeTriangle(
   ssao: Float32Array | null,
   lights: readonly SceneLight[] | null,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
-  fog: SceneFog | null = null,
+  fog: FrameFog | null = null,
 ): void {
   // Perspective divide to NDC, then to screen pixels. NDC spans the full extent
   // of each axis independently, so x maps by width and y by height — a mesh drawn
@@ -2036,15 +2040,14 @@ function rasterizeTriangle(
           out[di * 4 + 2] = lb * 255;
         }
         if (fog) {
-          // Distance fog by eye depth (clip w, perspective-interpolated), mixed
-          // in display space toward the fog colour — the WGSL path matches.
+          // Distance fog by eye depth (clip w, perspective-interpolated), then
+          // height and volume fog along the ray from the eye, mixed in display
+          // space toward the fog colour — the WGSL and GLSL paths match.
           const eyeDepth = pw0 * a.clip[3] + pw1 * b.clip[3] + pw2 * c.clip[3];
-          const f = fogFactor(fog, eyeDepth);
-          if (f > 0) {
-            out[di * 4] = out[di * 4]! + (fog.color[0] * 255 - out[di * 4]!) * f;
-            out[di * 4 + 1] = out[di * 4 + 1]! + (fog.color[1] * 255 - out[di * 4 + 1]!) * f;
-            out[di * 4 + 2] = out[di * 4 + 2]! + (fog.color[2] * 255 - out[di * 4 + 2]!) * f;
-          }
+          const wx = pw0 * a.wx + pw1 * b.wx + pw2 * c.wx;
+          const wy = pw0 * a.wy + pw1 * b.wy + pw2 * c.wy;
+          const wz = pw0 * a.wz + pw1 * b.wz + pw2 * c.wz;
+          applyFog(fog, out, di * 4, eyeDepth, fog.eye, [wx, wy, wz], light);
         }
         out[di * 4 + 3] = al;
       } else {

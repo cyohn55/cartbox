@@ -1873,7 +1873,20 @@ export const LOCKOUT_LIGHTING: SceneLighting = {
   },
   // Cold haze that thickens across the arena, tinted to the horizon.
   // Kept light: the arena is only ~30 units across, so heavy fog just washes it out.
-  fog: { color: [0.74, 0.8, 0.87], density: 0.015, start: 16, max: 0.4 },
+  fog: {
+    color: [0.74, 0.8, 0.87],
+    density: 0.015,
+    start: 16,
+    max: 0.4,
+    // Mist pooling in the chasm (HALO2_STYLE_ROADMAP.md H7): a box of fog under
+    // the deck, thickest far down and thinning toward the rim, so looking over
+    // the edge the gorge walls sink into a cloud sea and the floor never shows.
+    volumes: [{ min: [-160, -45, -160], max: [160, -2, 160], density: 0.25, falloff: 0.06 }],
+    // The haze brightens looking toward the low sun.
+    glow: { color: [1, 0.93, 0.8], strength: 0.35 },
+  },
+  // Beams from the sun between the towers and over the walls (H7).
+  shafts: { strength: 0.7, length: 0.7 },
   // Reflection probes (HALO2_STYLE_ROADMAP.md H2): the Forerunner metal
   // reflects the room it stands in — the pit under the walkway, the walkway
   // itself, each tower — rather than open sky; the arena-wide probe catches
