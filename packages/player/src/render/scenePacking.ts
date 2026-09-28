@@ -10,7 +10,7 @@
  * are the parts covered by tests.
  */
 
-import type { EnvironmentLight, Mat4 } from "@cartbox/editor";
+import { MAX_REFLECTION_PROBES, type EnvironmentLight, type Mat4, type ReflectionProbeSet } from "@cartbox/editor";
 
 /**
  * WGSL uniform layout, in bytes:
@@ -32,7 +32,8 @@ import type { EnvironmentLight, Mat4 } from "@cartbox/editor";
  * 336  envMeta    vec4<f32>    16   xyz = env-map mean radiance, w = 1 when an env map is bound
  * 352  tonemap    vec4<f32>    16   x = 1 when tone-mapping, y = exposure
  * 368  ssao       vec4<f32>    16   x = 1 when an SSAO buffer is bound, y = light count,
- *                                    z = 1 when a baked light map is bound
+ *                                    z = 1 when a baked light map is bound,
+ *                                    w = reflection-probe count
  * 384  model      mat4x4<f32>  64   this draw's world matrix (point-light world pos)
  * 448  fog        vec4<f32>    16   rgb = fog colour, w = density
  * 464  fogParams  vec4<f32>    16   x = 1 when fogged, y = start distance, z = max amount
@@ -65,6 +66,27 @@ export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
  * Matches the `Light` struct in WebgpuSceneRenderer's WGSL.
  */
 export const LIGHT_FLOATS = 12;
+
+/**
+ * Floats per reflection probe in its buffer: four vec4s — box min, box max,
+ * capture point, mean colour (xyz each). Matches the `Probe` struct in the
+ * shaders (see probeSampling.ts in @cartbox/editor).
+ */
+export const PROBE_FLOATS = 16;
+
+/** Pack a probe set's boxes (at least one zeroed slot, so the binding is never empty). */
+export function packProbes(set: ReflectionProbeSet | null | undefined): Float32Array {
+  const probes = set ? set.probes.slice(0, MAX_REFLECTION_PROBES) : [];
+  const out = new Float32Array(Math.max(1, probes.length) * PROBE_FLOATS);
+  probes.forEach((p, i) => {
+    const o = i * PROBE_FLOATS;
+    out.set(p.min, o);
+    out.set(p.max, o + 4);
+    out.set(p.position, o + 8);
+    out.set(p.average, o + 12);
+  });
+  return out;
+}
 
 /** A minimal light for {@link packLights} (mirrors editor's SceneLight). */
 export interface PackableLight {
@@ -411,7 +433,7 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_SSAO] = uniform.hasSsao ? 1 : 0;
   target[base + OFFSET_SSAO + 1] = uniform.lightCount; // light count for the storage-buffer loop
   target[base + OFFSET_SSAO + 2] = uniform.hasLightmap ? 1 : 0;
-  target[base + OFFSET_SSAO + 3] = 0;
+  target[base + OFFSET_SSAO + 3] = env?.probes ? Math.min(env.probes.probes.length, MAX_REFLECTION_PROBES) : 0;
 
   const model = uniform.model;
   for (let i = 0; i < 16; i += 1) target[base + OFFSET_MODEL + i] = model ? model[i]! : (i % 5 === 0 ? 1 : 0);

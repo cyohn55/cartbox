@@ -23,6 +23,7 @@
  */
 
 import {
+  bakeReflectionProbesAsync,
   bakeSkyPanorama,
   buildSceneShadow,
   childIndices,
@@ -276,7 +277,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     /** The baked sky-dome panorama drawn behind a first-person view, or null. */
     private readonly skyMap: DecodedTexture | null,
     /** The environment the PBR shading samples (with the dome as its map), or null. */
-    private readonly environment: EnvironmentLight | null,
+    private environment: EnvironmentLight | null,
     private readonly options: MeshOverlayOptions = {},
   ) {
     this.output = new Uint8ClampedArray(width * height * 4);
@@ -412,6 +413,28 @@ export class MeshOverlaySurface implements DisplaySurface {
     const surface = new MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
     for (const [i, mesh] of live) surface.live.set(i, mesh);
     surface.decodeKtx2 = decodeKtx2;
+    // Reflection probes: each captures the scene's still objects from its point
+    // and shiny surfaces in its box reflect that instead of the sky. Baked after
+    // the scene is up, a probe per tick, so loading isn't held back; until then
+    // everything reflects the sky.
+    if (lighting?.probes && lighting.probes.length > 0 && environment) {
+      const sky = environment;
+      const still = scene.instances.flatMap((inst, i) => {
+        const body = inst.physics?.body;
+        const moves = body === "dynamic" || body === "kinematic" || body === "character";
+        return inst.pooled || isSkinned(inst.mesh) || moves ? [] : [instances[i]!];
+      });
+      surface.probesReady = bakeReflectionProbesAsync(lighting.probes, still, {
+        lightDirection: sceneLightingKeyDirection(lighting),
+        ambient: lighting.ambient,
+        environment: sky,
+        lights: lighting.lights,
+      })
+        .then((probes) => {
+          if (probes && !surface.destroyed) surface.environment = { ...sky, probes };
+        })
+        .catch(() => undefined);
+    }
     return surface;
   }
 
@@ -1039,8 +1062,13 @@ export class MeshOverlaySurface implements DisplaySurface {
   }
 
   destroy(): void {
+    this.destroyed = true;
     this.inner.destroy();
   }
+
+  private destroyed = false;
+  /** Settles once the scene's reflection probes are baked and in use (tests await it). */
+  probesReady: Promise<void> = Promise.resolve();
 }
 
 /** The mesh with each placeholder image whose ref is in `images` filled in (the same mesh when none is). */

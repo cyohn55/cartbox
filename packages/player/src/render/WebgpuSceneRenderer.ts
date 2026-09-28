@@ -64,6 +64,9 @@
 import {
   DEFAULT_RASTER_STYLE,
   LIGHTMAP_RANGE,
+  MAX_REFLECTION_PROBES,
+  PROBE_FADE,
+  PROBE_RANGE,
   computeSmoothNormals,
   multiplyMat4,
   type DecodedTexture,
@@ -71,6 +74,7 @@ import {
   type MeshAsset,
   type MeshSceneInstance,
   type RasterStyle,
+  type ReflectionProbeSet,
 } from "@cartbox/editor";
 
 import { SoftwareSceneRenderer, applyScenePasses, type SceneDraw, type SceneRenderer } from "./sceneRenderer.js";
@@ -86,6 +90,8 @@ import {
   interleaveVertices,
   normalBasis3x3,
   packLights,
+  packProbes,
+  PROBE_FLOATS,
   resolveLight,
   resolvePbr,
   unpadRows,
@@ -165,6 +171,17 @@ struct InstanceXf {
 @group(0) @binding(10) var<storage, read> xf: array<InstanceXf>;
 // A baked light map, sampled with the second UV set (1x1 white when none).
 @group(0) @binding(11) var lmTex: texture_2d<f32>;
+// Reflection probes (probeSampling.ts in @cartbox/editor): every probe's
+// panorama stacked in one atlas, and each one's box, capture point and mean
+// colour; the uniform's ssaoMeta.w counts them (a zeroed slot when none).
+struct Probe {
+  mn: vec4<f32>,
+  mx: vec4<f32>,
+  pos: vec4<f32>,
+  avg: vec4<f32>,
+};
+@group(0) @binding(12) var probeAtlas: texture_2d<f32>;
+@group(0) @binding(13) var<storage, read> probes: array<Probe>;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
@@ -237,6 +254,17 @@ fn envColorDir(dir: vec3<f32>) -> vec3<f32> {
   let tx = i32(clamp(floor(wx * dims.x), 0.0, dims.x - 1.0));
   let ty = i32(clamp(floor(vCoord * dims.y), 0.0, dims.y - 1.0));
   return textureLoad(envMap, vec2<i32>(tx, ty), 0).rgb * u.envHorizon.w;
+}
+// Probe i's panorama along a direction, nearest — mirrors sampleProbe.
+fn probeSample(i: i32, dir: vec3<f32>) -> vec3<f32> {
+  let d = normalize(dir);
+  let uCoord = atan2(d.z, d.x) / (2.0 * 3.14159265) + 0.5;
+  let vCoord = acos(clamp(d.y, -1.0, 1.0)) / 3.14159265;
+  let dims = vec2<f32>(textureDimensions(probeAtlas, 0));
+  let h = floor(dims.x * 0.5);
+  let tx = i32(clamp(floor((uCoord - floor(uCoord)) * dims.x), 0.0, dims.x - 1.0));
+  let ty = i32(clamp(floor(vCoord * h), 0.0, h - 1.0) + f32(i) * h);
+  return textureLoad(probeAtlas, vec2<i32>(tx, ty), 0).rgb * ${PROBE_RANGE.toFixed(4)};
 }
 fn envAverage() -> vec3<f32> {
   if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
@@ -332,7 +360,27 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     if (u.envSky.w > 0.5) {
       let irr = envColorDir(N);
       let R = 2.0 * ndv * N - V;
-      let pref = mix(envColorDir(R), envAverage(), rough);
+      var spec = envColorDir(R);
+      var specAvg = envAverage();
+      // Inside a reflection probe's box (the smallest first), reflect the room
+      // around it, box-projected from this point, fading to the sky at the box's
+      // faces — mirroring pickProbe/boxProject in probeSampling.ts.
+      let pc = i32(u.ssaoMeta.w + 0.5);
+      let P = in.worldPos;
+      for (var i = 0; i < pc; i = i + 1) {
+        let pr = probes[i];
+        let inside = min(min(min(P.x - pr.mn.x, pr.mx.x - P.x), min(P.y - pr.mn.y, pr.mx.y - P.y)), min(P.z - pr.mn.z, pr.mx.z - P.z));
+        let wgt = clamp(inside / ${PROBE_FADE.toFixed(4)}, 0.0, 1.0);
+        if (wgt > 0.0) {
+          let Rs = select(R, vec3<f32>(1e-6), abs(R) < vec3<f32>(1e-6));
+          let tf = max((pr.mx.xyz - P) / Rs, (pr.mn.xyz - P) / Rs);
+          let t = max(0.0, min(min(tf.x, tf.y), tf.z));
+          spec = mix(spec, probeSample(i, P + R * t - pr.pos.xyz), wgt);
+          specAvg = mix(specAvg, pr.avg.xyz, wgt);
+          break;
+        }
+      }
+      let pref = mix(spec, specAvg, rough);
       amb = (irr * albedo * kdm + pref * f0) * ao;
     } else {
       amb = vec3<f32>(u.light.w) * albedo * ao;
@@ -483,6 +531,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private lightBuffer: any = null;
   private lightBufferFloats = 0;
 
+  /** The reflection-probe atlas (binding 12, the 1x1 blank when none) and its source. */
+  private probeTexture: any;
+  private probeSource: DecodedTexture | null = null;
+  /** The probe boxes (binding 13): room for every probe a scene may carry. */
+  private probeBuffer: any = null;
+
   /** Per-instance transforms (binding 10), grown as needed. */
   private instanceBuffer: any = null;
   private instanceCapacity = 0;
@@ -512,6 +566,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.software = new SoftwareSceneRenderer(style);
     this.shadowTexture = blankShadow;
     this.envTexture = blankTexture; // the 1x1 white stands in until a map is bound
+    this.probeTexture = blankTexture;
     this.ssaoBound = blankShadow; // the 1x1 r32float blank until an AO buffer arrives
     this.timer = WebgpuPassTimer.create(device);
   }
@@ -616,6 +671,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           // Per-instance transforms, read by the vertex stage.
           { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
           { binding: 11, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // Reflection probes: the panorama atlas (read via textureLoad) and their boxes.
+          { binding: 12, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         ],
       });
 
@@ -759,23 +817,36 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private ensureEnvTexture(map: DecodedTexture | null): void {
     if (map === this.envMapSource) return;
     if (this.envMapSource) destroySafely(this.envTexture); // release the previous upload
-    if (!map) {
-      this.envTexture = this.blankTexture;
-    } else {
-      this.envTexture = this.device.createTexture({
-        size: { width: map.width, height: map.height },
-        format: "rgba8unorm",
-        usage: 0x04 | 0x02, // TEXTURE_BINDING | COPY_DST
-      });
-      this.device.queue.writeTexture(
-        { texture: this.envTexture },
-        map.data,
-        { bytesPerRow: map.width * 4, rowsPerImage: map.height },
-        { width: map.width, height: map.height },
-      );
-    }
+    this.envTexture = map ? this.uploadRgba(map) : this.blankTexture;
     this.envMapSource = map;
     this.bindGroups = new WeakMap(); // binding 7 changed identity
+  }
+
+  /** The same for the reflection-probe atlas (binding 12), plus the boxes (binding 13). */
+  private ensureProbes(set: ReflectionProbeSet | null): void {
+    const atlas = set?.atlas ?? null;
+    if (!this.probeBuffer) {
+      this.probeBuffer = this.device.createBuffer({ size: MAX_REFLECTION_PROBES * PROBE_FLOATS * 4, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
+      this.bindGroups = new WeakMap();
+    }
+    if (atlas === this.probeSource) return;
+    if (this.probeSource) destroySafely(this.probeTexture);
+    this.probeTexture = atlas ? this.uploadRgba(atlas) : this.blankTexture;
+    this.probeSource = atlas;
+    const packed = packProbes(set);
+    this.device.queue.writeBuffer(this.probeBuffer, 0, packed, 0, packed.length);
+    this.bindGroups = new WeakMap(); // binding 12 changed identity
+  }
+
+  /** A one-off rgba8unorm upload of a decoded image. */
+  private uploadRgba(map: DecodedTexture): any {
+    const texture = this.device.createTexture({
+      size: { width: map.width, height: map.height },
+      format: "rgba8unorm",
+      usage: 0x04 | 0x02, // TEXTURE_BINDING | COPY_DST
+    });
+    this.device.queue.writeTexture({ texture }, map.data, { bytesPerRow: map.width * 4, rowsPerImage: map.height }, { width: map.width, height: map.height });
+    return texture;
   }
 
   render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
@@ -849,6 +920,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // Env map: uploaded once per distinct decoded panorama; the uniform's
     // envMeta.w (written from environment.average) gates whether it is sampled.
     this.ensureEnvTexture(draw.environment?.map ?? null);
+    this.ensureProbes(draw.environment?.probes ?? null);
 
     // SSAO: upload the CPU-generated AO buffer (same one the software path uses)
     // for the shader to sample per fragment.
@@ -1085,6 +1157,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 10, resource: { buffer: this.instanceBuffer } },
         // The baked light map (or the 1x1 white blank; the uniform flag gates it).
         { binding: 11, resource: view(textures.lm) },
+        // The probe atlas (or the blank) and boxes; a change invalidates the cache.
+        { binding: 12, resource: this.probeTexture.createView() },
+        { binding: 13, resource: { buffer: this.probeBuffer } },
       ],
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });
@@ -1122,6 +1197,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     destroySafely(this.blankShadow);
     if (this.shadowTexture !== this.blankShadow) destroySafely(this.shadowTexture);
     if (this.envTexture !== this.blankTexture) destroySafely(this.envTexture);
+    if (this.probeTexture !== this.blankTexture) destroySafely(this.probeTexture);
+    destroySafely(this.probeBuffer);
     destroySafely(this.ssaoTexture);
     destroySafely(this.lightBuffer);
     destroySafely(this.instanceBuffer);

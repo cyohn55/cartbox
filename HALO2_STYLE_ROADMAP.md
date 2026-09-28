@@ -23,11 +23,17 @@ general Unity/UE5 gap); items here that close a line there tick it off too.
       stored with a fingerprint of the geometry it was made for (`npm run
       bake:lockout` redoes it); the editor's "Baked lighting" panel bakes any
       scene's still objects.
-- [ ] **H2. Reflection probes.** Forerunner metal is bump-mapped and
+- [x] **H2. Reflection probes.** Forerunner metal is bump-mapped and
       reflective; today it can only reflect the sky dome. Placed probes bake
       a small panorama of the scene around them, and nearby metal reflects
       that instead of the sky (box-projected so reflections line up with the
       walls). *Lockout:* probes in bottom mid, the towers and the walkway.
+      *Done:* probes live on the lighting rig as a capture point and a box
+      each (the Lighting panel edits them); the player bakes their panoramas
+      from six cube faces after the scene loads, one probe per tick, into one
+      atlas. Every renderer picks the smallest box around a fragment, fades it
+      in over a unit from the box's faces, and box-projects the reflection.
+      Lockout has five: bottom mid, the walkway, both towers and the arena.
 - [ ] **H3. Material upgrades.** Detail textures (a second, finely tiled map
       blended in up close), animated emissive (scroll and pulse, so energy
       lines flow), and a fresnel/rim term with a reflection mask.

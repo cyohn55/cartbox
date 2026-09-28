@@ -20,10 +20,14 @@ import {
   patchSceneLighting,
   removeSceneLight,
   setSceneFog,
+  setSceneProbes,
+  reflectionProbeAt,
+  MAX_REFLECTION_PROBES,
   setSceneSky,
   updateSceneEnvironment,
   updateSceneLight,
   type ProceduralSky,
+  type ReflectionProbe,
   type SceneFog,
   type SceneLight,
   type SceneLighting,
@@ -138,6 +142,7 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
 
       <SkyDomeControls lighting={lighting} onChange={onChange} />
       <FogControls lighting={lighting} onChange={onChange} />
+      <ProbeControls lighting={lighting} onChange={onChange} />
 
       <RangeControl
         label="Ambient fill"
@@ -443,6 +448,56 @@ function FogControls({ lighting, onChange }: LightingEditorProps & { lighting: S
           />
         </>
       )}
+    </>
+  );
+}
+
+/**
+ * Reflection probes (HALO2_STYLE_ROADMAP.md, H2): each captures the scene from
+ * its point when the scene loads, and shiny surfaces inside its box reflect
+ * that — lined up with the box's walls — instead of the sky.
+ */
+function ProbeControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
+  const probes = lighting.probes ?? [];
+  const set = (next: readonly ReflectionProbe[]) => onChange(setSceneProbes(lighting, next));
+  const patch = (index: number, next: Partial<ReflectionProbe>) => set(probes.map((p, i) => (i === index ? { ...p, ...next } : p)));
+  return (
+    <>
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Reflection probes</div>
+      {probes.map((probe, index) => (
+        <div key={index} style={{ marginBottom: 10 }}>
+          <div className={styles.rangeRow} style={{ marginBottom: 4 }}>
+            <input
+              type="text"
+              value={probe.name}
+              aria-label={`Probe ${index + 1} name`}
+              onChange={(e) => patch(index, { name: e.target.value.slice(0, 64) })}
+              style={{ flex: 1, minWidth: 0, padding: "4px 6px", borderRadius: 6 }}
+            />
+            <button type="button" className={styles.toolBtn} aria-label={`Remove probe ${index + 1}`} onClick={() => set(probes.filter((_, i) => i !== index))}>
+              ✕
+            </button>
+          </div>
+          <VectorRow label="Capture point" value={probe.position} step={0.5} onChange={(position) => patch(index, { position })} />
+          <VectorRow label="Box min" value={probe.min} step={0.5} onChange={(min) => patch(index, { min })} />
+          <VectorRow label="Box max" value={probe.max} step={0.5} onChange={(max) => patch(index, { max })} />
+        </div>
+      ))}
+      <button
+        type="button"
+        className={styles.toolBtn}
+        disabled={probes.length >= MAX_REFLECTION_PROBES}
+        onClick={() => set([...probes, reflectionProbeAt([0, 2, 0], [8, 4, 8], `probe ${probes.length + 1}`)])}
+      >
+        <span className={styles.toolGlyph} aria-hidden>
+          ◎
+        </span>
+        Add reflection probe
+      </button>
+      <RailHint>
+        Shiny surfaces inside a probe&apos;s box reflect the scene around the capture point instead of the sky. Fit the box to the room. Up to{" "}
+        {MAX_REFLECTION_PROBES}; the smallest box wins where they overlap.
+      </RailHint>
     </>
   );
 }

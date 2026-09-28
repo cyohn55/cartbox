@@ -8010,6 +8010,7 @@ var lerp3 = (a, b, t) => a + (b - a) * t;
 
 // src/mesh/MeshOverlaySurface.ts
 import {
+  bakeReflectionProbesAsync,
   bakeSkyPanorama,
   buildSceneShadow,
   childIndices,
@@ -8351,6 +8352,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.eye = null;
     /** Each terrain block's world bounds, measured on first use. */
     this.blockBounds = /* @__PURE__ */ new Map();
+    this.destroyed = false;
+    /** Settles once the scene's reflection probes are baked and in use (tests await it). */
+    this.probesReady = Promise.resolve();
     this.output = new Uint8ClampedArray(width * height * 4);
     this.presented = new Uint8Array(this.output.buffer);
     this.depth = new Float32Array(width * height);
@@ -8459,6 +8463,22 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const surface = new _MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
     for (const [i, mesh] of live) surface.live.set(i, mesh);
     surface.decodeKtx2 = decodeKtx2;
+    if (lighting?.probes && lighting.probes.length > 0 && environment) {
+      const sky = environment;
+      const still = scene.instances.flatMap((inst, i) => {
+        const body = inst.physics?.body;
+        const moves = body === "dynamic" || body === "kinematic" || body === "character";
+        return inst.pooled || isSkinned2(inst.mesh) || moves ? [] : [instances[i]];
+      });
+      surface.probesReady = bakeReflectionProbesAsync(lighting.probes, still, {
+        lightDirection: sceneLightingKeyDirection(lighting),
+        ambient: lighting.ambient,
+        environment: sky,
+        lights: lighting.lights
+      }).then((probes) => {
+        if (probes && !surface.destroyed) surface.environment = { ...sky, probes };
+      }).catch(() => void 0);
+    }
     return surface;
   }
   /**
@@ -9001,6 +9021,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     return rect.x1 > rect.x0 && rect.y1 > rect.y0 ? rect : null;
   }
   destroy() {
+    this.destroyed = true;
     this.inner.destroy();
   }
 };
@@ -9536,6 +9557,9 @@ var WorldOverlaySurface = class {
 import {
   DEFAULT_RASTER_STYLE as DEFAULT_RASTER_STYLE2,
   LIGHTMAP_RANGE,
+  MAX_REFLECTION_PROBES as MAX_REFLECTION_PROBES2,
+  PROBE_FADE,
+  PROBE_RANGE,
   computeSmoothNormals,
   multiplyMat4 as multiplyMat44
 } from "@cartbox/editor";
@@ -9710,10 +9734,24 @@ var WebglPassTimer = class _WebglPassTimer {
 };
 
 // src/render/scenePacking.ts
+import { MAX_REFLECTION_PROBES } from "@cartbox/editor";
 var UNIFORM_STRIDE = 512;
 var UNIFORM_BYTES_USED = 496;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var LIGHT_FLOATS = 12;
+var PROBE_FLOATS = 16;
+function packProbes(set) {
+  const probes = set ? set.probes.slice(0, MAX_REFLECTION_PROBES) : [];
+  const out = new Float32Array(Math.max(1, probes.length) * PROBE_FLOATS);
+  probes.forEach((p, i) => {
+    const o = i * PROBE_FLOATS;
+    out.set(p.min, o);
+    out.set(p.max, o + 4);
+    out.set(p.position, o + 8);
+    out.set(p.average, o + 12);
+  });
+  return out;
+}
 function packLights(lights) {
   const out = new Float32Array(Math.max(1, lights.length) * LIGHT_FLOATS);
   lights.forEach((light, i) => {
@@ -9863,7 +9901,7 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_SSAO] = uniform.hasSsao ? 1 : 0;
   target[base + OFFSET_SSAO + 1] = uniform.lightCount;
   target[base + OFFSET_SSAO + 2] = uniform.hasLightmap ? 1 : 0;
-  target[base + OFFSET_SSAO + 3] = 0;
+  target[base + OFFSET_SSAO + 3] = env?.probes ? Math.min(env.probes.probes.length, MAX_REFLECTION_PROBES) : 0;
   const model = uniform.model;
   for (let i = 0; i < 16; i += 1) target[base + OFFSET_MODEL + i] = model ? model[i] : i % 5 === 0 ? 1 : 0;
   const fog = uniform.fog ?? null;
@@ -9920,6 +9958,7 @@ var UNIT_SHADOW = 4;
 var UNIT_ENV = 5;
 var UNIT_SSAO = 6;
 var UNIT_LM = 7;
+var UNIT_PROBES = 8;
 var BLOCK_UNIFORMS = 0;
 var BLOCK_INSTANCES = 1;
 var BLOCK_LIGHTS = 2;
@@ -10012,6 +10051,11 @@ uniform highp sampler2D shadowMap;
 uniform sampler2D envMap;
 uniform highp sampler2D ssaoMap;
 uniform sampler2D lmTex;
+// Reflection probes (probeSampling.ts in @cartbox/editor): the panorama atlas
+// and, per probe, box min / box max / capture point / mean colour; u.ssaoMeta.w
+// counts them.
+uniform sampler2D probeAtlas;
+uniform vec4 probeData[${MAX_REFLECTION_PROBES2 * 4}];
 in vec3 vNormal;
 in vec2 vUv;
 in vec2 vUv2;
@@ -10082,6 +10126,16 @@ vec3 envColorDir(vec3 dir) {
   int ty = int(clamp(floor(vCoord * dims.y), 0.0, dims.y - 1.0));
   return texelFetch(envMap, ivec2(tx, ty), 0).rgb * u.envHorizon.w;
 }
+vec3 probeSample(int i, vec3 dir) {
+  vec3 d = normalize(dir);
+  float uCoord = atan(d.z, d.x) / (2.0 * 3.14159265) + 0.5;
+  float vCoord = acos(clamp(d.y, -1.0, 1.0)) / 3.14159265;
+  vec2 dims = vec2(textureSize(probeAtlas, 0));
+  float h = floor(dims.x * 0.5);
+  int tx = int(clamp(floor((uCoord - floor(uCoord)) * dims.x), 0.0, dims.x - 1.0));
+  int ty = int(clamp(floor(vCoord * h), 0.0, h - 1.0) + float(i) * h);
+  return texelFetch(probeAtlas, ivec2(tx, ty), 0).rgb * ${PROBE_RANGE.toFixed(4)};
+}
 vec3 envAverage() {
   if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
   return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
@@ -10141,7 +10195,27 @@ void main() {
     if (u.envSky.w > 0.5) {
       vec3 irr = envColorDir(N);
       vec3 R = 2.0 * ndv * N - V;
-      vec3 pref = mix(envColorDir(R), envAverage(), rough);
+      vec3 spec = envColorDir(R);
+      vec3 specAvg = envAverage();
+      // Inside a reflection probe's box, reflect the room around it, box-projected
+      // (mirrors the software path and the WGSL).
+      int pc = int(u.ssaoMeta.w + 0.5);
+      vec3 P = vWorldPos;
+      for (int i = 0; i < pc; i++) {
+        vec3 mn = probeData[i * 4].xyz;
+        vec3 mx = probeData[i * 4 + 1].xyz;
+        float inside = min(min(min(P.x - mn.x, mx.x - P.x), min(P.y - mn.y, mx.y - P.y)), min(P.z - mn.z, mx.z - P.z));
+        float wgt = clamp(inside / ${PROBE_FADE.toFixed(4)}, 0.0, 1.0);
+        if (wgt > 0.0) {
+          vec3 Rs = mix(R, vec3(1e-6), lessThan(abs(R), vec3(1e-6)));
+          vec3 tf = max((mx - P) / Rs, (mn - P) / Rs);
+          float t = max(0.0, min(min(tf.x, tf.y), tf.z));
+          spec = mix(spec, probeSample(i, P + R * t - probeData[i * 4 + 2].xyz), wgt);
+          specAvg = mix(specAvg, probeData[i * 4 + 3].xyz, wgt);
+          break;
+        }
+      }
+      vec3 pref = mix(spec, specAvg, rough);
       amb = (irr * albedo * kdm + pref * f0) * ao;
     } else {
       amb = vec3(u.light.w) * albedo * ao;
@@ -10262,6 +10336,9 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.shadowUploaded = null;
     this.envTexture = null;
     this.envSource = null;
+    this.probeTexture = null;
+    this.probeSource = null;
+    this.probeData = new Float32Array(MAX_REFLECTION_PROBES2 * PROBE_FLOATS);
     this.ssaoTexture = null;
     /** Readbacks in flight, oldest first. */
     this.pending = [];
@@ -10311,7 +10388,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         ["shadowMap", UNIT_SHADOW],
         ["envMap", UNIT_ENV],
         ["ssaoMap", UNIT_SSAO],
-        ["lmTex", UNIT_LM]
+        ["lmTex", UNIT_LM],
+        ["probeAtlas", UNIT_PROBES]
       ];
       for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
       const colour = gl.createRenderbuffer();
@@ -10395,6 +10473,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.uploadShadow(shadow);
     const shadowParams = shadow ? { size: shadow.size, bias: shadow.bias ?? 3e-3, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false } : null;
     this.uploadEnv(draw.environment?.map ?? null);
+    this.uploadProbes(draw.environment?.probes ?? null);
     const ssao = draw.ssao ?? null;
     this.uploadSsao(ssao);
     const sceneLights = (draw.lights ?? []).slice(0, WEBGL_MAX_LIGHTS);
@@ -10457,6 +10536,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     gl.bindBufferBase(gl.UNIFORM_BUFFER, BLOCK_LIGHTS, this.lightBuffer);
     this.bindTexture(UNIT_SHADOW, this.shadowTexture ?? this.blankFloat);
     this.bindTexture(UNIT_ENV, this.envTexture ?? this.blankTexture);
+    this.bindTexture(UNIT_PROBES, this.probeTexture ?? this.blankTexture);
+    gl.uniform4fv(gl.getUniformLocation(this.program, "probeData"), this.probeData);
     this.bindTexture(UNIT_SSAO, ssao ? this.ssaoTexture : this.blankFloat);
     for (let unit = UNIT_BASE; unit <= UNIT_EMIS; unit += 1) gl.bindSampler(unit, this.sampler);
     gl.bindSampler(UNIT_LM, this.sampler);
@@ -10557,6 +10638,15 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.envTexture = map ? createTexture(this.gl, map.width, map.height, this.gl.RGBA8, this.gl.RGBA, this.gl.UNSIGNED_BYTE, toBytes(map.data)) : null;
     this.envSource = map;
   }
+  uploadProbes(set) {
+    const atlas = set?.atlas ?? null;
+    if (atlas === this.probeSource) return;
+    if (this.probeTexture) this.gl.deleteTexture(this.probeTexture);
+    this.probeTexture = atlas ? createTexture(this.gl, atlas.width, atlas.height, this.gl.RGBA8, this.gl.RGBA, this.gl.UNSIGNED_BYTE, toBytes(atlas.data)) : null;
+    this.probeSource = atlas;
+    this.probeData.fill(0);
+    this.probeData.set(packProbes(set).subarray(0, this.probeData.length));
+  }
   uploadSsao(ao) {
     if (!ao) return;
     const gl = this.gl;
@@ -10623,7 +10713,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       gl.deleteBuffer(this.uniformBuffer);
       gl.deleteBuffer(this.instanceBuffer);
       gl.deleteBuffer(this.lightBuffer);
-      for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.ssaoTexture]) if (t) gl.deleteTexture(t);
+      for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.probeTexture, this.ssaoTexture]) if (t) gl.deleteTexture(t);
       gl.deleteFramebuffer(this.framebuffer);
       this.timer?.destroy();
       for (const rb of this.attachments) gl.deleteRenderbuffer(rb);
@@ -10652,6 +10742,9 @@ function toBytes(data) {
 import {
   DEFAULT_RASTER_STYLE as DEFAULT_RASTER_STYLE3,
   LIGHTMAP_RANGE as LIGHTMAP_RANGE2,
+  MAX_REFLECTION_PROBES as MAX_REFLECTION_PROBES3,
+  PROBE_FADE as PROBE_FADE2,
+  PROBE_RANGE as PROBE_RANGE2,
   computeSmoothNormals as computeSmoothNormals2,
   multiplyMat4 as multiplyMat45
 } from "@cartbox/editor";
@@ -10723,6 +10816,17 @@ struct InstanceXf {
 @group(0) @binding(10) var<storage, read> xf: array<InstanceXf>;
 // A baked light map, sampled with the second UV set (1x1 white when none).
 @group(0) @binding(11) var lmTex: texture_2d<f32>;
+// Reflection probes (probeSampling.ts in @cartbox/editor): every probe's
+// panorama stacked in one atlas, and each one's box, capture point and mean
+// colour; the uniform's ssaoMeta.w counts them (a zeroed slot when none).
+struct Probe {
+  mn: vec4<f32>,
+  mx: vec4<f32>,
+  pos: vec4<f32>,
+  avg: vec4<f32>,
+};
+@group(0) @binding(12) var probeAtlas: texture_2d<f32>;
+@group(0) @binding(13) var<storage, read> probes: array<Probe>;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
@@ -10795,6 +10899,17 @@ fn envColorDir(dir: vec3<f32>) -> vec3<f32> {
   let tx = i32(clamp(floor(wx * dims.x), 0.0, dims.x - 1.0));
   let ty = i32(clamp(floor(vCoord * dims.y), 0.0, dims.y - 1.0));
   return textureLoad(envMap, vec2<i32>(tx, ty), 0).rgb * u.envHorizon.w;
+}
+// Probe i's panorama along a direction, nearest \u2014 mirrors sampleProbe.
+fn probeSample(i: i32, dir: vec3<f32>) -> vec3<f32> {
+  let d = normalize(dir);
+  let uCoord = atan2(d.z, d.x) / (2.0 * 3.14159265) + 0.5;
+  let vCoord = acos(clamp(d.y, -1.0, 1.0)) / 3.14159265;
+  let dims = vec2<f32>(textureDimensions(probeAtlas, 0));
+  let h = floor(dims.x * 0.5);
+  let tx = i32(clamp(floor((uCoord - floor(uCoord)) * dims.x), 0.0, dims.x - 1.0));
+  let ty = i32(clamp(floor(vCoord * h), 0.0, h - 1.0) + f32(i) * h);
+  return textureLoad(probeAtlas, vec2<i32>(tx, ty), 0).rgb * ${PROBE_RANGE2.toFixed(4)};
 }
 fn envAverage() -> vec3<f32> {
   if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
@@ -10890,7 +11005,27 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     if (u.envSky.w > 0.5) {
       let irr = envColorDir(N);
       let R = 2.0 * ndv * N - V;
-      let pref = mix(envColorDir(R), envAverage(), rough);
+      var spec = envColorDir(R);
+      var specAvg = envAverage();
+      // Inside a reflection probe's box (the smallest first), reflect the room
+      // around it, box-projected from this point, fading to the sky at the box's
+      // faces \u2014 mirroring pickProbe/boxProject in probeSampling.ts.
+      let pc = i32(u.ssaoMeta.w + 0.5);
+      let P = in.worldPos;
+      for (var i = 0; i < pc; i = i + 1) {
+        let pr = probes[i];
+        let inside = min(min(min(P.x - pr.mn.x, pr.mx.x - P.x), min(P.y - pr.mn.y, pr.mx.y - P.y)), min(P.z - pr.mn.z, pr.mx.z - P.z));
+        let wgt = clamp(inside / ${PROBE_FADE2.toFixed(4)}, 0.0, 1.0);
+        if (wgt > 0.0) {
+          let Rs = select(R, vec3<f32>(1e-6), abs(R) < vec3<f32>(1e-6));
+          let tf = max((pr.mx.xyz - P) / Rs, (pr.mn.xyz - P) / Rs);
+          let t = max(0.0, min(min(tf.x, tf.y), tf.z));
+          spec = mix(spec, probeSample(i, P + R * t - pr.pos.xyz), wgt);
+          specAvg = mix(specAvg, pr.avg.xyz, wgt);
+          break;
+        }
+      }
+      let pref = mix(spec, specAvg, rough);
       amb = (irr * albedo * kdm + pref * f0) * ao;
     } else {
       amb = vec3<f32>(u.light.w) * albedo * ao;
@@ -11011,6 +11146,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     /** The Modern-tier light storage buffer, grown as needed; always ≥ 1 light. */
     this.lightBuffer = null;
     this.lightBufferFloats = 0;
+    this.probeSource = null;
+    /** The probe boxes (binding 13): room for every probe a scene may carry. */
+    this.probeBuffer = null;
     /** Per-instance transforms (binding 10), grown as needed. */
     this.instanceBuffer = null;
     this.instanceCapacity = 0;
@@ -11020,6 +11158,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.software = new SoftwareSceneRenderer(style);
     this.shadowTexture = blankShadow;
     this.envTexture = blankTexture;
+    this.probeTexture = blankTexture;
     this.ssaoBound = blankShadow;
     this.timer = WebgpuPassTimer.create(device);
   }
@@ -11106,7 +11245,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 9, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
           // Per-instance transforms, read by the vertex stage.
           { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
-          { binding: 11, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } }
+          { binding: 11, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // Reflection probes: the panorama atlas (read via textureLoad) and their boxes.
+          { binding: 12, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } }
         ]
       });
       const pipeline = device.createRenderPipeline({
@@ -11241,24 +11383,35 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   ensureEnvTexture(map) {
     if (map === this.envMapSource) return;
     if (this.envMapSource) destroySafely(this.envTexture);
-    if (!map) {
-      this.envTexture = this.blankTexture;
-    } else {
-      this.envTexture = this.device.createTexture({
-        size: { width: map.width, height: map.height },
-        format: "rgba8unorm",
-        usage: 4 | 2
-        // TEXTURE_BINDING | COPY_DST
-      });
-      this.device.queue.writeTexture(
-        { texture: this.envTexture },
-        map.data,
-        { bytesPerRow: map.width * 4, rowsPerImage: map.height },
-        { width: map.width, height: map.height }
-      );
-    }
+    this.envTexture = map ? this.uploadRgba(map) : this.blankTexture;
     this.envMapSource = map;
     this.bindGroups = /* @__PURE__ */ new WeakMap();
+  }
+  /** The same for the reflection-probe atlas (binding 12), plus the boxes (binding 13). */
+  ensureProbes(set) {
+    const atlas = set?.atlas ?? null;
+    if (!this.probeBuffer) {
+      this.probeBuffer = this.device.createBuffer({ size: MAX_REFLECTION_PROBES3 * PROBE_FLOATS * 4, usage: 128 | 8 });
+      this.bindGroups = /* @__PURE__ */ new WeakMap();
+    }
+    if (atlas === this.probeSource) return;
+    if (this.probeSource) destroySafely(this.probeTexture);
+    this.probeTexture = atlas ? this.uploadRgba(atlas) : this.blankTexture;
+    this.probeSource = atlas;
+    const packed = packProbes(set);
+    this.device.queue.writeBuffer(this.probeBuffer, 0, packed, 0, packed.length);
+    this.bindGroups = /* @__PURE__ */ new WeakMap();
+  }
+  /** A one-off rgba8unorm upload of a decoded image. */
+  uploadRgba(map) {
+    const texture = this.device.createTexture({
+      size: { width: map.width, height: map.height },
+      format: "rgba8unorm",
+      usage: 4 | 2
+      // TEXTURE_BINDING | COPY_DST
+    });
+    this.device.queue.writeTexture({ texture }, map.data, { bytesPerRow: map.width * 4, rowsPerImage: map.height }, { width: map.width, height: map.height });
+    return texture;
   }
   render(instances, draw) {
     if (this.destroyed) return;
@@ -11304,6 +11457,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     }
     const shadowParams = shadow ? { size: shadow.size, bias: shadow.bias ?? 3e-3, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false } : null;
     this.ensureEnvTexture(draw.environment?.map ?? null);
+    this.ensureProbes(draw.environment?.probes ?? null);
     const ssao = draw.ssao ?? null;
     this.bindSsao(ssao);
     const sceneLights = draw.lights ?? null;
@@ -11510,7 +11664,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // The instance transforms; a grow changes identity and invalidates the cache.
         { binding: 10, resource: { buffer: this.instanceBuffer } },
         // The baked light map (or the 1x1 white blank; the uniform flag gates it).
-        { binding: 11, resource: view(textures.lm) }
+        { binding: 11, resource: view(textures.lm) },
+        // The probe atlas (or the blank) and boxes; a change invalidates the cache.
+        { binding: 12, resource: this.probeTexture.createView() },
+        { binding: 13, resource: { buffer: this.probeBuffer } }
       ]
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });
@@ -11546,6 +11703,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     destroySafely(this.blankShadow);
     if (this.shadowTexture !== this.blankShadow) destroySafely(this.shadowTexture);
     if (this.envTexture !== this.blankTexture) destroySafely(this.envTexture);
+    if (this.probeTexture !== this.blankTexture) destroySafely(this.probeTexture);
+    destroySafely(this.probeBuffer);
     destroySafely(this.ssaoTexture);
     destroySafely(this.lightBuffer);
     destroySafely(this.instanceBuffer);

@@ -379,9 +379,13 @@ export {
   parseFog,
   setSceneSky,
   setSceneFog,
+  setSceneProbes,
   type SceneLighting,
   type SceneEnvironment,
 } from "./model/SceneLighting";
+export { MAX_REFLECTION_PROBES, parseReflectionProbes, reflectionProbeAt, type ReflectionProbe } from "./model/reflectionProbes";
+export { PROBE_FADE, PROBE_RANGE, boxProject, pickProbe, probeWeight, sampleProbe, type ProbeBox, type ReflectionProbeSet } from "./render/probeSampling";
+export { PROBE_PANORAMA_WIDTH, bakePanorama, bakeReflectionProbes, bakeReflectionProbesAsync, type ProbeBakeLighting } from "./render/probeBake";
 export {
   bakeSkyPanorama,
   downsamplePanorama,
