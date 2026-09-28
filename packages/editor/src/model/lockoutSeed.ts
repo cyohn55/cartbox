@@ -1203,6 +1203,11 @@ export function lockoutTerrain(): Terrain {
     tile: 14,
     // On the map, so the menus' hiding the map hides the mountains with it.
     parent: "lockout-map",
+    // Snow thins into rock across a band of slope, its edge wandering so it
+    // reads as drifts in the hollows and wind-scoured ridges (H4)…
+    blend: { up: 0.16, height: 2, noise: 0.7 },
+    // …and the gorge walls shade the deck when the sun is low.
+    castShadows: true,
   };
   return terrain;
 }

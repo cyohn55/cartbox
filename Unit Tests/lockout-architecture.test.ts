@@ -128,7 +128,13 @@ describe("the Lockout mountains", () => {
     expect(rock!.material.name).toBe("terrain-rock");
     expect(rock!.material.baseColorImage).toBeTruthy(); // weathered rock texture + normal map
     expect(rock!.material.normalImage).toBeTruthy();
-    expect(snow!.indices.length).toBeGreaterThan(rock!.indices.length * 0.3);
+    // Where they meet the two blend per vertex (H4): each blended primitive is
+    // named for its dominant layer first.
+    const count = (prefix: string) => mesh.primitives.filter((p) => p.material.name.startsWith(prefix)).reduce((n, p) => n + p.indices.length, 0);
+    expect(count("terrain-snow")).toBeGreaterThan(count("terrain-rock") * 0.3);
+    const blended = mesh.primitives.filter((p) => p.blend);
+    expect(blended.length).toBeGreaterThan(0);
+    for (const p of blended) expect(p.blend!.some((w) => w > 0.05 && w < 0.95)).toBe(true);
     expect(lockoutTerrainTriangles()).toBeLessThan(20000);
     // Drawn in blocks: from the arena the far range is coarser, so it costs far less.
     const tris = (m: { primitives: { indices: Uint32Array }[] }) => m.primitives.reduce((n, p) => n + p.indices.length / 3, 0);

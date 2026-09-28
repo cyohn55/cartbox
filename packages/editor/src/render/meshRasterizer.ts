@@ -73,6 +73,8 @@ export interface RenderMeshOptions {
   readonly lightmapTextures?: readonly (DecodedTexture | null)[];
   /** Detail maps per primitive (see {@link MeshSceneInstance.detailTextures}). */
   readonly detailTextures?: readonly (DecodedTexture | null)[];
+  /** Blend-surface maps per primitive (see {@link MeshSceneInstance.blendTextures}). */
+  readonly blendTextures?: readonly (DecodedTexture | null)[];
   /** Seconds, for animated emissive (see {@link RenderMeshSceneOptions.time}). */
   readonly time?: number;
   /** Image-based lighting environment for PBR materials (Modern tier); when set,
@@ -397,6 +399,8 @@ function buildPbrFrag(
   lm: DecodedTexture | null = null,
   detail: DecodedTexture | null = null,
   time = 0,
+  blendTex: DecodedTexture | null = null,
+  hasBlend = false,
 ): PbrFrag | null {
   const emissiveFactor = material.emissiveFactor;
   const isPbr =
@@ -426,6 +430,9 @@ function buildPbrFrag(
     rimPower: rim?.power ?? 1,
     reflect: material.reflectivity ?? 1,
     reflectMask: material.reflectionMask === true && mr !== null,
+    blend: hasBlend
+      ? { tex: blendTex, color: material.blendColor ?? [1, 1, 1], roughness: material.blendRoughness ?? null }
+      : null,
   };
 }
 
@@ -503,6 +510,8 @@ interface Vertex {
   // Light-map coordinates (the second UV set); zero without a light map.
   lu: number;
   lv: number;
+  // Weight of the material's blend surface (0 without per-vertex blend weights).
+  bw: number;
   nx: number;
   ny: number;
   nz: number;
@@ -531,6 +540,7 @@ function lerpVertex(a: Vertex, b: Vertex, t: number): Vertex {
     v: mix(a.v, b.v),
     lu: mix(a.lu, b.lu),
     lv: mix(a.lv, b.lv),
+    bw: mix(a.bw, b.bw),
     nx: mix(a.nx, b.nx),
     ny: mix(a.ny, b.ny),
     nz: mix(a.nz, b.nz),
@@ -681,7 +691,7 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
     options.mrTextures ?? null,
     options.occlusionTextures ?? null,
     options.emissiveTextures ?? null,
-    { lightmap: options.lightmapTextures ?? null, detail: options.detailTextures ?? null, time: options.time ?? 0 },
+    { lightmap: options.lightmapTextures ?? null, detail: options.detailTextures ?? null, blend: options.blendTextures ?? null, time: options.time ?? 0 },
     light,
     viewDir,
     ambient,
@@ -748,6 +758,8 @@ export interface MeshSceneInstance {
   readonly lightmapTextures?: readonly (DecodedTexture | null)[];
   /** Decoded detail maps per primitive ({@link MeshMaterial.detailImage}), or null entries. */
   readonly detailTextures?: readonly (DecodedTexture | null)[];
+  /** Decoded blend-surface maps per primitive ({@link MeshMaterial.blendImage}), or null entries. */
+  readonly blendTextures?: readonly (DecodedTexture | null)[];
 }
 
 /**
@@ -906,7 +918,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const mrTextures = instance.mrTextures ?? null;
     const occlusionTextures = instance.occlusionTextures ?? null;
     const emissiveTextures = instance.emissiveTextures ?? null;
-    const extras: PrimitiveExtras = { lightmap: instance.lightmapTextures ?? null, detail: instance.detailTextures ?? null, time };
+    const extras: PrimitiveExtras = { lightmap: instance.lightmapTextures ?? null, detail: instance.detailTextures ?? null, blend: instance.blendTextures ?? null, time };
     const lightMvp = shadow ? multiply(shadow.lightViewProj, instance.model) : null;
     if (style.zBuffer) {
       drawMesh(instance.mesh, mvp, modelView, instance.model, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, extras, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, lights, style, fog);
@@ -1343,12 +1355,15 @@ interface PbrFrag {
   /** Reflection scale, and whether the MR map's alpha masks it. */
   readonly reflect: number;
   readonly reflectMask: boolean;
+  /** The blend surface (H4): its texture, colour and roughness, mixed in by the vertex weight; or null. */
+  readonly blend: { readonly tex: DecodedTexture | null; readonly color: readonly [number, number, number]; readonly roughness: number | null } | null;
 }
 
 /** The per-primitive extras a draw may carry beyond the core maps. */
 interface PrimitiveExtras {
   readonly lightmap?: readonly (DecodedTexture | null)[] | null;
   readonly detail?: readonly (DecodedTexture | null)[] | null;
+  readonly blend?: readonly (DecodedTexture | null)[] | null;
   readonly time?: number;
 }
 
@@ -1409,6 +1424,7 @@ function eachTriangle(
     const indices = primitive.indices;
     const lightmap = primitive.uvs2 ? (extras?.lightmap?.[primitiveIndex] ?? null) : null;
     const uvs2 = lightmap ? primitive.uvs2! : null;
+    const blendWeights = primitive.blend ?? null;
     const texture = textures?.[primitiveIndex] ?? null;
     const normalTexture = normalTextures?.[primitiveIndex] ?? null;
     const materialTexture = materialTextures?.[primitiveIndex] ?? null;
@@ -1420,6 +1436,8 @@ function eachTriangle(
       lightmap,
       extras?.detail?.[primitiveIndex] ?? null,
       extras?.time ?? 0,
+      extras?.blend?.[primitiveIndex] ?? null,
+      primitive.blend !== undefined,
     );
     const [baseR, baseG, baseB, baseA] = primitive.material.baseColorFactor;
 
@@ -1485,6 +1503,7 @@ function eachTriangle(
         v: uvs ? uvs[i * 2 + 1]! : 0,
         lu: uvs2 ? uvs2[i * 2]! : 0,
         lv: uvs2 ? uvs2[i * 2 + 1]! : 0,
+        bw: blendWeights ? blendWeights[i]! : 0,
         nx: normalBasis[0]! * onx + normalBasis[3]! * ony + normalBasis[6]! * onz,
         ny: normalBasis[1]! * onx + normalBasis[4]! * ony + normalBasis[7]! * onz,
         nz: normalBasis[2]! * onx + normalBasis[5]! * ony + normalBasis[8]! * onz,
@@ -1787,17 +1806,26 @@ function rasterizeTriangle(
         let metallic = pbr.metallic;
         let rough = pbr.roughness;
         let reflect = pbr.reflect;
+        const bw = pbr.blend ? pw0 * a.bw + pw1 * b.bw + pw2 * c.bw : 0;
         if (pbr.mr) {
           const [, mg, mb, ma] = sampleTexture(pbr.mr, u, v, style.textureFiltering);
           rough *= mg / 255;
           metallic *= mb / 255;
           if (pbr.reflectMask) reflect *= ma / 255;
         }
+        if (pbr.blend && pbr.blend.roughness !== null && bw > 0) rough += (pbr.blend.roughness - rough) * bw;
         rough = Math.min(1, Math.max(0.045, rough)); // clamp: perfectly-smooth NDF blows up
         const ao = pbr.occ ? sampleTexture(pbr.occ, u, v, style.textureFiltering)[0] / 255 : 1;
         let ar = r / 255;
         let ag = g / 255;
         let ab = bl / 255;
+        // A second surface blended in by the vertex weight (snow over rock).
+        if (pbr.blend && bw > 0) {
+          const [tr, tg, tb] = pbr.blend.tex ? sampleTexture(pbr.blend.tex, u, v, style.textureFiltering) : [255, 255, 255];
+          ar += (pbr.blend.color[0] * (tr / 255) - ar) * bw;
+          ag += (pbr.blend.color[1] * (tg / 255) - ag) * bw;
+          ab += (pbr.blend.color[2] * (tb / 255) - ab) * bw;
+        }
         // A detail map, tiled finely and blended into the albedo up close
         // (mid-grey is neutral); it fades out with view depth.
         if (pbr.detail) {

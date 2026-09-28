@@ -20,7 +20,10 @@ export const DETAIL_NEAR = 3;
 /** …and gone beyond this. */
 export const DETAIL_FAR = 12;
 
-type SurfaceEffects = Pick<MeshMaterial, "detailScale" | "detailStrength" | "emissiveScroll" | "emissivePulse" | "rim" | "reflectivity" | "reflectionMask">;
+type SurfaceEffects = Pick<
+  MeshMaterial,
+  "detailScale" | "detailStrength" | "emissiveScroll" | "emissivePulse" | "rim" | "reflectivity" | "reflectionMask" | "blendColor" | "blendRoughness"
+>;
 
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v));
@@ -42,6 +45,11 @@ export function readSurfaceEffects(raw: Record<string, unknown> | object): Surfa
   }
   if (finite(r.reflectivity)) out.reflectivity = clamp(r.reflectivity, 0, 4);
   if (r.reflectionMask === true) out.reflectionMask = true;
+  const blendColor = r.blendColor;
+  if (Array.isArray(blendColor) && blendColor.length === 3 && blendColor.every(finite)) {
+    out.blendColor = [clamp(blendColor[0] as number, 0, 1), clamp(blendColor[1] as number, 0, 1), clamp(blendColor[2] as number, 0, 1)];
+  }
+  if (finite(r.blendRoughness)) out.blendRoughness = clamp(r.blendRoughness, 0, 1);
   return out;
 }
 

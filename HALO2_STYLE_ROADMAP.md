@@ -46,10 +46,18 @@ general Unity/UE5 gap); items here that close a line there tick it off too.
       renderers match pixel for pixel. Lockout's walls and deck share one
       grain, the trim breathes with the panels' glow, and the metal gets a
       cold rim with reflections masked to its polished panels.
-- [ ] **H4. Terrain blending and shadows.** Snow and rock blend smoothly by
+- [x] **H4. Terrain blending and shadows.** Snow and rock blend smoothly by
       slope and height instead of splitting per triangle, and cliffs can cast
       into the play area's shadow. *Lockout:* soft drifts and wind-scoured
       ridges; the gorge walls shade the deck at low sun.
+      *Done:* a terrain's `blend` band gives each vertex soft layer weights
+      (smoothstep across its slope and height bounds, the edge wandered by
+      noise); triangles where two layers meet go into a blended primitive
+      whose material mixes in the other layer's albedo and roughness by a
+      per-vertex weight (an eleventh vertex float, in all three renderers).
+      `castShadows` puts the terrain into the static shadow map, with the
+      light backed off and its bias scaled so thin casters still shadow.
+      Lockout's snow drifts into the rock, and the gorge walls cast.
 
 ## Phase B — Effects (makes a fight read as Halo)
 

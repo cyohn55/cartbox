@@ -55,6 +55,8 @@ interface MeshInstance extends MeshSceneInstance {
      * the shadow map (which frames the play space), and the far plane reaches it.
      */
     readonly terrain?: true;
+    /** On a terrain block whose terrain casts shadows ({@link Terrain.castShadows}): it goes into the shadow map. */
+    readonly casts?: true;
     /**
      * On a terrain block: how far from it full detail holds (world units). Its
      * `frames` are the half- and quarter-detail versions the renderer swaps to
@@ -3524,9 +3526,12 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  *                                    z = reflectivity, w = 1 when the MR alpha masks it
  * 512  surface1   vec4<f32>    16   xy = emissive UV offset (its scroll this frame)
  * 528  surface2   vec4<f32>    16   rgb = rim colour × strength, w = rim power
+ * 544  surface3   vec4<f32>    16   rgb = blend-surface colour, w = its roughness (< 0 = keep)
+ *                                    (surface1.z = 1 when the primitive carries blend weights,
+ *                                    surface1.w = 1 when the blend surface has a texture)
  * ```
  *
- * 544 bytes used, padded to a 768-byte stride (a 256-byte multiple a dynamic
+ * 560 bytes used, padded to a 768-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -3541,7 +3546,7 @@ declare const UNIFORM_STRIDE = 768;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 544;
+declare const UNIFORM_BYTES_USED = 560;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
@@ -3649,6 +3654,12 @@ interface ResolvedSurface {
     /** Rim colour × strength (zeros for none) and power. */
     readonly rim: readonly [number, number, number];
     readonly rimPower: number;
+    /** The blend surface (H4): on when the primitive carries weights; its colour, roughness (null = keep), and whether it has a texture. */
+    readonly blend: {
+        readonly color: readonly [number, number, number];
+        readonly roughness: number | null;
+        readonly textured: boolean;
+    } | null;
 }
 interface InstanceUniform {
     readonly mvp: Mat4;
@@ -3732,15 +3743,15 @@ declare function writeInstanceTransform(target: Float32Array, index: number, tra
  * every normal, which reads as bad lighting rather than as a layout bug.
  */
 declare function writeInstanceUniform(target: Float32Array, index: number, uniform: InstanceUniform): void;
-/** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2) + light-map uv(2). */
-declare const VERTEX_FLOATS = 10;
+/** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2) + light-map uv(2) + blend weight(1). */
+declare const VERTEX_FLOATS = 11;
 /**
  * Interleave the separate attribute streams into the single buffer the pipeline
- * declares (arrayStride 40). A primitive with no UVs (or no light-map UVs) gets
+ * declares (arrayStride 44). A primitive with no UVs (or no light-map UVs, or no blend weights) gets
  * zeros, which is what the software path effectively uses — and the shader
  * ignores them anyway because the matching texture flag is off.
  */
-declare function interleaveVertices(positions: Float32Array, normals: Float32Array, uvs: Float32Array | null, uvs2?: Float32Array | null): Float32Array;
+declare function interleaveVertices(positions: Float32Array, normals: Float32Array, uvs: Float32Array | null, uvs2?: Float32Array | null, blend?: Float32Array | null): Float32Array;
 /**
  * Strip WebGPU's row padding from a mapped readback.
  *

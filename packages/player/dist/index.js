@@ -4216,6 +4216,7 @@ function parseMeshScene(raw) {
         props: {},
         physics: null,
         terrain: true,
+        ...t.castShadows ? { casts: true } : {},
         detail: chunk.detail
       });
     }
@@ -8108,7 +8109,7 @@ function capTextures(instances, budgetBytes, cache) {
     });
   };
   const capped = instances.map((instance) => {
-    if (!instance.textures && !instance.normalTextures && !instance.materialTextures && !instance.mrTextures && !instance.occlusionTextures && !instance.emissiveTextures && !instance.lightmapTextures && !instance.detailTextures) {
+    if (!instance.textures && !instance.normalTextures && !instance.materialTextures && !instance.mrTextures && !instance.occlusionTextures && !instance.emissiveTextures && !instance.lightmapTextures && !instance.detailTextures && !instance.blendTextures) {
       return instance;
     }
     let instanceChanged = false;
@@ -8123,6 +8124,7 @@ function capTextures(instances, budgetBytes, cache) {
     const fittedEmissive = fitList(instance.emissiveTextures, mark);
     const fittedLightmaps = fitList(instance.lightmapTextures, mark);
     const fittedDetail = fitList(instance.detailTextures, mark);
+    const fittedBlend = fitList(instance.blendTextures, mark);
     if (!instanceChanged) return instance;
     changed = true;
     return {
@@ -8135,7 +8137,8 @@ function capTextures(instances, budgetBytes, cache) {
       occlusionTextures: fittedOcclusion,
       emissiveTextures: fittedEmissive,
       ...fittedLightmaps ? { lightmapTextures: fittedLightmaps } : {},
-      ...fittedDetail ? { detailTextures: fittedDetail } : {}
+      ...fittedDetail ? { detailTextures: fittedDetail } : {},
+      ...fittedBlend ? { blendTextures: fittedBlend } : {}
     };
   });
   return changed ? capped : instances;
@@ -8943,8 +8946,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.pooledRoot.forEach((root, i) => {
         if (root >= 0) posed.add(i);
       });
-      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && !this.scene.instances[i]?.terrain);
-      const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow });
+      const casts = (i) => !this.scene.instances[i]?.terrain || this.scene.instances[i]?.casts === true;
+      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && casts(i));
+      const extent = this.scene.extent;
+      const reach = extent && this.scene.instances.some((inst) => inst.casts) ? Math.max(0, extent.radius * 2 - radius * 2) : 0;
+      const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow, reach });
       if (!built) return null;
       this.staticShadowMatrix = built.lightViewProj;
       this.staticShadowKey = key;
@@ -9033,7 +9039,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   }
 };
 function fillPlaceholders(mesh, images) {
-  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage"];
+  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage", "blendImage"];
   let touched = false;
   const primitives = mesh.primitives.map((primitive) => {
     let material = primitive.material;
@@ -9064,7 +9070,7 @@ async function decodeMeshTextures(mesh, decodeKtx2, cache) {
       return entry;
     })
   );
-  const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightmapTextures, detailTextures] = await Promise.all([
+  const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightmapTextures, detailTextures, blendTextures] = await Promise.all([
     each((m) => m.baseColorImage),
     // base colour
     each((m) => m.normalImage),
@@ -9079,7 +9085,9 @@ async function decodeMeshTextures(mesh, decodeKtx2, cache) {
     // A baked light map (sampled with the second UV set).
     each((m) => m.lightmapImage),
     // A finely tiled detail map (materialEffects.ts).
-    each((m) => m.detailImage)
+    each((m) => m.detailImage),
+    // The blend surface of a blended primitive (terrain snow over rock).
+    each((m) => m.blendImage)
   ]);
   return {
     mesh,
@@ -9090,7 +9098,8 @@ async function decodeMeshTextures(mesh, decodeKtx2, cache) {
     occlusionTextures,
     emissiveTextures,
     ...lightmapTextures.some((t) => t !== null) ? { lightmapTextures } : {},
-    ...detailTextures.some((t) => t !== null) ? { detailTextures } : {}
+    ...detailTextures.some((t) => t !== null) ? { detailTextures } : {},
+    ...blendTextures.some((t) => t !== null) ? { blendTextures } : {}
   };
 }
 var TINT_PALETTE = [
@@ -9615,7 +9624,7 @@ function packRgba([r, g, b, a]) {
   return (a << 24 | b << 16 | g << 8 | r) >>> 0;
 }
 function sameTextures(a, b) {
-  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.detail === b.detail;
+  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.detail === b.detail && a.blend === b.blend;
 }
 function batchInstances(instances, geometryOf) {
   const batches = [];
@@ -9632,7 +9641,8 @@ function batchInstances(instances, geometryOf) {
         occ: instance.occlusionTextures?.[index] ?? null,
         emis: instance.emissiveTextures?.[index] ?? null,
         lm: primitive.uvs2 ? instance.lightmapTextures?.[index] ?? null : null,
-        detail: instance.detailTextures?.[index] ?? null
+        detail: instance.detailTextures?.[index] ?? null,
+        blend: primitive.blend ? instance.blendTextures?.[index] ?? null : null
       };
       let list = byPrimitive.get(primitive);
       if (!list) byPrimitive.set(primitive, list = []);
@@ -9754,7 +9764,7 @@ import {
   emissiveAnimation
 } from "@cartbox/editor";
 var UNIFORM_STRIDE = 768;
-var UNIFORM_BYTES_USED = 544;
+var UNIFORM_BYTES_USED = 560;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var LIGHT_FLOATS = 12;
 var PROBE_FLOATS = 16;
@@ -9811,6 +9821,7 @@ var OFFSET_SHADOW2 = 120;
 var OFFSET_SURFACE0 = 124;
 var OFFSET_SURFACE1 = 128;
 var OFFSET_SURFACE2 = 132;
+var OFFSET_SURFACE3 = 136;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -9844,8 +9855,8 @@ function viewDirection(view) {
   const length = Math.hypot(x, y, z);
   return length < 1e-8 ? [0, 0, 1] : [x / length, y / length, z / length];
 }
-var NO_SURFACE = { detailScale: DEFAULT_DETAIL_SCALE, detailStrength: 0, reflect: 1, reflectMask: false, emisOffset: [0, 0], emisGain: 1, rim: [0, 0, 0], rimPower: 1 };
-function resolveSurface(material, time, hasDetail, hasMr) {
+var NO_SURFACE = { detailScale: DEFAULT_DETAIL_SCALE, detailStrength: 0, reflect: 1, reflectMask: false, emisOffset: [0, 0], emisGain: 1, rim: [0, 0, 0], rimPower: 1, blend: null };
+function resolveSurface(material, time, hasDetail, hasMr, blend = { weights: false, textured: false }) {
   const { offset, gain } = emissiveAnimation(material, time);
   const rim = material.rim && material.rim.strength > 0 ? material.rim : null;
   return {
@@ -9856,7 +9867,8 @@ function resolveSurface(material, time, hasDetail, hasMr) {
     emisOffset: offset,
     emisGain: gain,
     rim: rim ? [rim.color[0] * rim.strength, rim.color[1] * rim.strength, rim.color[2] * rim.strength] : [0, 0, 0],
-    rimPower: rim?.power ?? 1
+    rimPower: rim?.power ?? 1,
+    blend: blend.weights ? { color: material.blendColor ?? [1, 1, 1], roughness: material.blendRoughness ?? null, textured: blend.textured } : null
   };
 }
 var INSTANCE_FLOATS = 60;
@@ -9960,15 +9972,19 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_SURFACE0 + 3] = surface.reflectMask ? 1 : 0;
   target[base + OFFSET_SURFACE1] = surface.emisOffset[0];
   target[base + OFFSET_SURFACE1 + 1] = surface.emisOffset[1];
-  target[base + OFFSET_SURFACE1 + 2] = 0;
-  target[base + OFFSET_SURFACE1 + 3] = 0;
+  target[base + OFFSET_SURFACE1 + 2] = surface.blend ? 1 : 0;
+  target[base + OFFSET_SURFACE1 + 3] = surface.blend?.textured ? 1 : 0;
   target[base + OFFSET_SURFACE2] = surface.rim[0];
   target[base + OFFSET_SURFACE2 + 1] = surface.rim[1];
   target[base + OFFSET_SURFACE2 + 2] = surface.rim[2];
   target[base + OFFSET_SURFACE2 + 3] = surface.rimPower;
+  target[base + OFFSET_SURFACE3] = surface.blend ? surface.blend.color[0] : 0;
+  target[base + OFFSET_SURFACE3 + 1] = surface.blend ? surface.blend.color[1] : 0;
+  target[base + OFFSET_SURFACE3 + 2] = surface.blend ? surface.blend.color[2] : 0;
+  target[base + OFFSET_SURFACE3 + 3] = surface.blend && surface.blend.roughness !== null ? surface.blend.roughness : -1;
 }
-var VERTEX_FLOATS = 10;
-function interleaveVertices(positions, normals, uvs, uvs2 = null) {
+var VERTEX_FLOATS = 11;
+function interleaveVertices(positions, normals, uvs, uvs2 = null, blend = null) {
   const count = Math.floor(positions.length / 3);
   const out = new Float32Array(count * VERTEX_FLOATS);
   for (let i = 0; i < count; i += 1) {
@@ -9983,6 +9999,7 @@ function interleaveVertices(positions, normals, uvs, uvs2 = null) {
     out[to + 7] = uvs ? uvs[i * 2 + 1] ?? 0 : 0;
     out[to + 8] = uvs2 ? uvs2[i * 2] ?? 0 : 0;
     out[to + 9] = uvs2 ? uvs2[i * 2 + 1] ?? 0 : 0;
+    out[to + 10] = blend ? blend[i] ?? 0 : 0;
   }
   return out;
 }
@@ -10009,6 +10026,7 @@ var UNIT_SSAO = 6;
 var UNIT_LM = 7;
 var UNIT_PROBES = 8;
 var UNIT_DETAIL = 9;
+var UNIT_BLEND = 10;
 var BLOCK_UNIFORMS = 0;
 var BLOCK_INSTANCES = 1;
 var BLOCK_LIGHTS = 2;
@@ -10039,6 +10057,7 @@ layout(std140) uniform Uniforms {
   vec4 surface0;
   vec4 surface1;
   vec4 surface2;
+  vec4 surface3;
 } u;
 `
 );
@@ -10061,6 +10080,8 @@ layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec2 uv;
 layout(location = 3) in vec2 uv2;
+layout(location = 4) in float bw;
+out float vBw;
 out vec3 vNormal;
 out vec2 vUv;
 out vec2 vUv2;
@@ -10073,6 +10094,7 @@ void main() {
   vNormal = t.nrm * normal;
   vUv = uv;
   vUv2 = uv2;
+  vBw = bw;
   vLightClip = t.lightMvp * vec4(position, 1.0);
   vWorldPos = (t.model * vec4(position, 1.0)).xyz;
   vEyeDepth = p.w;
@@ -10109,10 +10131,12 @@ uniform sampler2D lmTex;
 // counts them.
 uniform sampler2D probeAtlas;
 uniform sampler2D detailTex;
+uniform sampler2D blendTex;
 uniform vec4 probeData[${MAX_REFLECTION_PROBES2 * 4}];
 in vec3 vNormal;
 in vec2 vUv;
 in vec2 vUv2;
+in float vBw;
 in vec4 vLightClip;
 in vec3 vWorldPos;
 in float vEyeDepth;
@@ -10219,10 +10243,16 @@ void main() {
       metallic = metallic * mr.b;
       if (u.surface0.w > 0.5) { reflectK = reflectK * mr.a; }
     }
+    if (u.surface1.z > 0.5 && u.surface3.w >= 0.0) { rough = mix(rough, u.surface3.w, vBw); }
     rough = clamp(rough, 0.045, 1.0);
     float ao = 1.0;
     if (u.texflags.z > 0.5) { ao = sampleMap(occTex, uv).r; }
     vec3 albedo = colour.rgb;
+    if (u.surface1.z > 0.5) {
+      vec3 bc = u.surface3.rgb;
+      if (u.surface1.w > 0.5) { bc = bc * sampleMap(blendTex, uv).rgb; }
+      albedo = mix(albedo, bc, vBw);
+    }
     float dk = u.surface0.y * clamp((${DETAIL_FAR.toFixed(4)} - vEyeDepth) / ${(DETAIL_FAR - DETAIL_NEAR).toFixed(4)}, 0.0, 1.0);
     if (dk > 0.0) {
       vec3 detail = sampleMap(detailTex, vec2(vUv.x * u.surface0.x, 1.0 - vUv.y * u.surface0.x)).rgb;
@@ -10452,7 +10482,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         ["ssaoMap", UNIT_SSAO],
         ["lmTex", UNIT_LM],
         ["probeAtlas", UNIT_PROBES],
-        ["detailTex", UNIT_DETAIL]
+        ["detailTex", UNIT_DETAIL],
+        ["blendTex", UNIT_BLEND]
       ];
       for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
       const colour = gl.createRenderbuffer();
@@ -10565,7 +10596,10 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         model,
         lightCount: sceneLights.length,
         fog: draw.fog ?? null,
-        surface: resolveSurface(batch.primitive.material, draw.time ?? 0, batch.textures.detail !== null, batch.textures.mr !== null)
+        surface: resolveSurface(batch.primitive.material, draw.time ?? 0, batch.textures.detail !== null, batch.textures.mr !== null, {
+          weights: batch.primitive.blend !== void 0,
+          textured: batch.textures.blend !== null
+        })
       });
     });
     for (const chunk of chunks2) {
@@ -10606,6 +10640,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     for (let unit = UNIT_BASE; unit <= UNIT_EMIS; unit += 1) gl.bindSampler(unit, this.sampler);
     gl.bindSampler(UNIT_LM, this.sampler);
     gl.bindSampler(UNIT_DETAIL, this.sampler);
+    gl.bindSampler(UNIT_BLEND, this.sampler);
     this.timer?.begin();
     let bound = null;
     let boundBatch = -1;
@@ -10621,6 +10656,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
           this.bindTexture(UNIT_EMIS, this.textureFor(batch.textures.emis));
           this.bindTexture(UNIT_LM, this.textureFor(batch.textures.lm));
           this.bindTexture(UNIT_DETAIL, this.textureFor(batch.textures.detail));
+          this.bindTexture(UNIT_BLEND, this.textureFor(batch.textures.blend));
           bound = batch.textures;
         }
         gl.bindVertexArray(batch.geometry.vao);
@@ -10730,7 +10766,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         if (!primitive.dynamic || !g || g.revision === primitive.dynamic.revision) return;
         const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
         gl.bindBuffer(gl.ARRAY_BUFFER, g.vertexBuffer);
-        gl.bufferSubData(gl.ARRAY_BUFFER, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null));
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null));
         g.revision = primitive.dynamic.revision;
       });
       return cached;
@@ -10741,15 +10777,18 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       gl.bindVertexArray(vao);
       const vertexBuffer = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null), primitive.dynamic ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
+      gl.bufferData(gl.ARRAY_BUFFER, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null), primitive.dynamic ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
+      const stride = VERTEX_FLOATS * 4;
       gl.enableVertexAttribArray(0);
-      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 40, 0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
       gl.enableVertexAttribArray(1);
-      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 40, 12);
+      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, stride, 12);
       gl.enableVertexAttribArray(2);
-      gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 40, 24);
+      gl.vertexAttribPointer(2, 2, gl.FLOAT, false, stride, 24);
       gl.enableVertexAttribArray(3);
-      gl.vertexAttribPointer(3, 2, gl.FLOAT, false, 40, 32);
+      gl.vertexAttribPointer(3, 2, gl.FLOAT, false, stride, 32);
+      gl.enableVertexAttribArray(4);
+      gl.vertexAttribPointer(4, 1, gl.FLOAT, false, stride, 40);
       const indexBuffer = gl.createBuffer();
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
       gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, primitive.indices, gl.STATIC_DRAW);
@@ -10846,6 +10885,7 @@ struct Uniforms {
   surface0: vec4<f32>,  // x = detail scale, y = detail strength, z = reflectivity, w = 1 when MR alpha masks it
   surface1: vec4<f32>,  // xy = emissive UV offset
   surface2: vec4<f32>,  // rgb = rim colour \xD7 strength, w = rim power
+  surface3: vec4<f32>,  // rgb = blend-surface colour, w = its roughness (< 0 keeps)
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -10901,6 +10941,8 @@ struct Probe {
 // A finely tiled detail map (materialEffects.ts; 1x1 white when none \u2014 the
 // uniform's surface0.y gates it).
 @group(0) @binding(14) var detailTex: texture_2d<f32>;
+// The blend surface's map (terrain snow over rock), mixed by the vertex weight.
+@group(0) @binding(15) var blendTex: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
@@ -10910,6 +10952,7 @@ struct VSOut {
   @location(3) worldPos: vec3<f32>,
   @location(4) eyeDepth: f32,
   @location(5) uv2: vec2<f32>,
+  @location(6) bw: f32,
 };
 
 // Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
@@ -11002,6 +11045,7 @@ fn vs(
   @location(1) normal: vec3<f32>,
   @location(2) uv: vec2<f32>,
   @location(3) uv2: vec2<f32>,
+  @location(4) bw: f32,
   @builtin(instance_index) instance: u32,
 ) -> VSOut {
   var out: VSOut;
@@ -11010,6 +11054,7 @@ fn vs(
   out.normal = t.nrm * normal;
   out.uv = uv;
   out.uv2 = uv2;
+  out.bw = bw;
   out.lightClip = t.lightMvp * vec4<f32>(position, 1.0);
   out.worldPos = (t.model * vec4<f32>(position, 1.0)).xyz;
   out.eyeDepth = out.pos.w; // clip w = view depth, for distance fog
@@ -11046,10 +11091,19 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
       metallic = metallic * mr.b; // metallic in B
       if (u.surface0.w > 0.5) { reflectK = reflectK * mr.a; } // the reflection mask
     }
+    // The blend surface's roughness, by the vertex weight (surface3.w < 0 keeps).
+    if (u.surface1.z > 0.5 && u.surface3.w >= 0.0) { rough = mix(rough, u.surface3.w, in.bw); }
     rough = clamp(rough, 0.045, 1.0); // a perfectly-smooth NDF blows up
     var ao = 1.0;
     if (u.texflags.z > 0.5) { ao = textureSample(occTex, samp, uv).r; }
     var albedo = colour.rgb;
+    // A second surface blended in by the vertex weight (snow drifting over rock).
+    let blendTexel = textureSample(blendTex, samp, uv).rgb;
+    if (u.surface1.z > 0.5) {
+      var bc = u.surface3.rgb;
+      if (u.surface1.w > 0.5) { bc = bc * blendTexel; }
+      albedo = mix(albedo, bc, in.bw);
+    }
     // A detail map, tiled finely and blended in up close (mid-grey neutral),
     // fading with eye depth \u2014 mirrors the software path.
     let dk = u.surface0.y * clamp((${DETAIL_FAR2.toFixed(4)} - in.eyeDepth) / ${(DETAIL_FAR2 - DETAIL_NEAR2).toFixed(4)}, 0.0, 1.0);
@@ -11332,8 +11386,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           // Reflection probes: the panorama atlas (read via textureLoad) and their boxes.
           { binding: 12, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
-          // The detail map.
-          { binding: 14, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } }
+          // The detail map, and the blend surface's map.
+          { binding: 14, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          { binding: 15, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } }
         ]
       });
       const pipeline = device.createRenderPipeline({
@@ -11344,12 +11399,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           buffers: [
             {
               // Interleaved position(3) + normal(3) + uv(2) + light-map uv(2).
-              arrayStride: 40,
+              arrayStride: 44,
               attributes: [
                 { shaderLocation: 0, offset: 0, format: "float32x3" },
                 { shaderLocation: 1, offset: 12, format: "float32x3" },
                 { shaderLocation: 2, offset: 24, format: "float32x2" },
-                { shaderLocation: 3, offset: 32, format: "float32x2" }
+                { shaderLocation: 3, offset: 32, format: "float32x2" },
+                { shaderLocation: 4, offset: 40, format: "float32" }
               ]
             }
           ]
@@ -11587,7 +11643,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         model,
         lightCount,
         fog: draw.fog ?? null,
-        surface: resolveSurface(entry.primitive.material, draw.time ?? 0, entry.textures.detail !== null, entry.textures.mr !== null)
+        surface: resolveSurface(entry.primitive.material, draw.time ?? 0, entry.textures.detail !== null, entry.textures.mr !== null, {
+          weights: entry.primitive.blend !== void 0,
+          textured: entry.textures.blend !== null
+        })
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
@@ -11691,14 +11750,14 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         const gpu = cached[i];
         if (!primitive.dynamic || !gpu || gpu.revision === primitive.dynamic.revision) return;
         const normals = primitive.normals ?? computeSmoothNormals2(primitive.positions, primitive.indices);
-        this.device.queue.writeBuffer(gpu.vertexBuffer, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null));
+        this.device.queue.writeBuffer(gpu.vertexBuffer, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null));
         gpu.revision = primitive.dynamic.revision;
       });
       return cached;
     }
     const uploaded = mesh.primitives.map((primitive) => {
       const normals = primitive.normals ?? computeSmoothNormals2(primitive.positions, primitive.indices);
-      const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null);
+      const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null);
       const vertexBuffer = this.device.createBuffer({
         size: Math.max(40, vertices.byteLength),
         usage: 32 | 8
@@ -11724,7 +11783,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   /** The bind group for one primitive, rebuilt if any of its textures changed. */
   bindGroupFor(primitive, textures) {
     const cached = this.bindGroups.get(primitive);
-    if (cached && cached.source.base === textures.base && cached.source.mr === textures.mr && cached.source.occ === textures.occ && cached.source.emis === textures.emis && cached.source.lm === textures.lm && cached.source.detail === textures.detail) {
+    if (cached && cached.source.base === textures.base && cached.source.mr === textures.mr && cached.source.occ === textures.occ && cached.source.emis === textures.emis && cached.source.lm === textures.lm && cached.source.detail === textures.detail && cached.source.blend === textures.blend) {
       return cached.group;
     }
     const view = (texture) => (texture ? this.uploadTexture(texture) : this.blankTexture).createView();
@@ -11755,7 +11814,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { binding: 12, resource: this.probeTexture.createView() },
         { binding: 13, resource: { buffer: this.probeBuffer } },
         // The detail map (or the 1x1 white blank; the uniform gates it).
-        { binding: 14, resource: view(textures.detail) }
+        { binding: 14, resource: view(textures.detail) },
+        { binding: 15, resource: view(textures.blend) }
       ]
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });

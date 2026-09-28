@@ -51,9 +51,12 @@ import {
  *                                    z = reflectivity, w = 1 when the MR alpha masks it
  * 512  surface1   vec4<f32>    16   xy = emissive UV offset (its scroll this frame)
  * 528  surface2   vec4<f32>    16   rgb = rim colour × strength, w = rim power
+ * 544  surface3   vec4<f32>    16   rgb = blend-surface colour, w = its roughness (< 0 = keep)
+ *                                    (surface1.z = 1 when the primitive carries blend weights,
+ *                                    surface1.w = 1 when the blend surface has a texture)
  * ```
  *
- * 544 bytes used, padded to a 768-byte stride (a 256-byte multiple a dynamic
+ * 560 bytes used, padded to a 768-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -68,7 +71,7 @@ export const UNIFORM_STRIDE = 768;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 544;
+export const UNIFORM_BYTES_USED = 560;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -160,6 +163,7 @@ const OFFSET_SHADOW2 = 120;
 const OFFSET_SURFACE0 = 124;
 const OFFSET_SURFACE1 = 128;
 const OFFSET_SURFACE2 = 132;
+const OFFSET_SURFACE3 = 136;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -292,13 +296,15 @@ export interface ResolvedSurface {
   /** Rim colour × strength (zeros for none) and power. */
   readonly rim: readonly [number, number, number];
   readonly rimPower: number;
+  /** The blend surface (H4): on when the primitive carries weights; its colour, roughness (null = keep), and whether it has a texture. */
+  readonly blend: { readonly color: readonly [number, number, number]; readonly roughness: number | null; readonly textured: boolean } | null;
 }
 
 /** No effects: what a material without any gets. */
-export const NO_SURFACE: ResolvedSurface = { detailScale: DEFAULT_DETAIL_SCALE, detailStrength: 0, reflect: 1, reflectMask: false, emisOffset: [0, 0], emisGain: 1, rim: [0, 0, 0], rimPower: 1 };
+export const NO_SURFACE: ResolvedSurface = { detailScale: DEFAULT_DETAIL_SCALE, detailStrength: 0, reflect: 1, reflectMask: false, emisOffset: [0, 0], emisGain: 1, rim: [0, 0, 0], rimPower: 1, blend: null };
 
 /** Resolve a material's surface effects at `time` seconds, given which maps are bound. */
-export function resolveSurface(material: MeshMaterial, time: number, hasDetail: boolean, hasMr: boolean): ResolvedSurface {
+export function resolveSurface(material: MeshMaterial, time: number, hasDetail: boolean, hasMr: boolean, blend: { weights: boolean; textured: boolean } = { weights: false, textured: false }): ResolvedSurface {
   const { offset, gain } = emissiveAnimation(material, time);
   const rim = material.rim && material.rim.strength > 0 ? material.rim : null;
   return {
@@ -310,6 +316,7 @@ export function resolveSurface(material: MeshMaterial, time: number, hasDetail: 
     emisGain: gain,
     rim: rim ? [rim.color[0] * rim.strength, rim.color[1] * rim.strength, rim.color[2] * rim.strength] : [0, 0, 0],
     rimPower: rim?.power ?? 1,
+    blend: blend.weights ? { color: material.blendColor ?? [1, 1, 1], roughness: material.blendRoughness ?? null, textured: blend.textured } : null,
   };
 }
 
@@ -517,20 +524,24 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_SURFACE0 + 3] = surface.reflectMask ? 1 : 0;
   target[base + OFFSET_SURFACE1] = surface.emisOffset[0];
   target[base + OFFSET_SURFACE1 + 1] = surface.emisOffset[1];
-  target[base + OFFSET_SURFACE1 + 2] = 0;
-  target[base + OFFSET_SURFACE1 + 3] = 0;
+  target[base + OFFSET_SURFACE1 + 2] = surface.blend ? 1 : 0;
+  target[base + OFFSET_SURFACE1 + 3] = surface.blend?.textured ? 1 : 0;
   target[base + OFFSET_SURFACE2] = surface.rim[0];
   target[base + OFFSET_SURFACE2 + 1] = surface.rim[1];
   target[base + OFFSET_SURFACE2 + 2] = surface.rim[2];
   target[base + OFFSET_SURFACE2 + 3] = surface.rimPower;
+  target[base + OFFSET_SURFACE3] = surface.blend ? surface.blend.color[0] : 0;
+  target[base + OFFSET_SURFACE3 + 1] = surface.blend ? surface.blend.color[1] : 0;
+  target[base + OFFSET_SURFACE3 + 2] = surface.blend ? surface.blend.color[2] : 0;
+  target[base + OFFSET_SURFACE3 + 3] = surface.blend && surface.blend.roughness !== null ? surface.blend.roughness : -1;
 }
 
-/** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2) + light-map uv(2). */
-export const VERTEX_FLOATS = 10;
+/** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2) + light-map uv(2) + blend weight(1). */
+export const VERTEX_FLOATS = 11;
 
 /**
  * Interleave the separate attribute streams into the single buffer the pipeline
- * declares (arrayStride 40). A primitive with no UVs (or no light-map UVs) gets
+ * declares (arrayStride 44). A primitive with no UVs (or no light-map UVs, or no blend weights) gets
  * zeros, which is what the software path effectively uses — and the shader
  * ignores them anyway because the matching texture flag is off.
  */
@@ -539,6 +550,7 @@ export function interleaveVertices(
   normals: Float32Array,
   uvs: Float32Array | null,
   uvs2: Float32Array | null = null,
+  blend: Float32Array | null = null,
 ): Float32Array {
   const count = Math.floor(positions.length / 3);
   const out = new Float32Array(count * VERTEX_FLOATS);
@@ -554,6 +566,7 @@ export function interleaveVertices(
     out[to + 7] = uvs ? (uvs[i * 2 + 1] ?? 0) : 0;
     out[to + 8] = uvs2 ? (uvs2[i * 2] ?? 0) : 0;
     out[to + 9] = uvs2 ? (uvs2[i * 2 + 1] ?? 0) : 0;
+    out[to + 10] = blend ? (blend[i] ?? 0) : 0;
   }
   return out;
 }

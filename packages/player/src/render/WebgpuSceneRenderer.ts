@@ -136,6 +136,7 @@ struct Uniforms {
   surface0: vec4<f32>,  // x = detail scale, y = detail strength, z = reflectivity, w = 1 when MR alpha masks it
   surface1: vec4<f32>,  // xy = emissive UV offset
   surface2: vec4<f32>,  // rgb = rim colour × strength, w = rim power
+  surface3: vec4<f32>,  // rgb = blend-surface colour, w = its roughness (< 0 keeps)
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -191,6 +192,8 @@ struct Probe {
 // A finely tiled detail map (materialEffects.ts; 1x1 white when none — the
 // uniform's surface0.y gates it).
 @group(0) @binding(14) var detailTex: texture_2d<f32>;
+// The blend surface's map (terrain snow over rock), mixed by the vertex weight.
+@group(0) @binding(15) var blendTex: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
@@ -200,6 +203,7 @@ struct VSOut {
   @location(3) worldPos: vec3<f32>,
   @location(4) eyeDepth: f32,
   @location(5) uv2: vec2<f32>,
+  @location(6) bw: f32,
 };
 
 // Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
@@ -292,6 +296,7 @@ fn vs(
   @location(1) normal: vec3<f32>,
   @location(2) uv: vec2<f32>,
   @location(3) uv2: vec2<f32>,
+  @location(4) bw: f32,
   @builtin(instance_index) instance: u32,
 ) -> VSOut {
   var out: VSOut;
@@ -300,6 +305,7 @@ fn vs(
   out.normal = t.nrm * normal;
   out.uv = uv;
   out.uv2 = uv2;
+  out.bw = bw;
   out.lightClip = t.lightMvp * vec4<f32>(position, 1.0);
   out.worldPos = (t.model * vec4<f32>(position, 1.0)).xyz;
   out.eyeDepth = out.pos.w; // clip w = view depth, for distance fog
@@ -336,10 +342,19 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
       metallic = metallic * mr.b; // metallic in B
       if (u.surface0.w > 0.5) { reflectK = reflectK * mr.a; } // the reflection mask
     }
+    // The blend surface's roughness, by the vertex weight (surface3.w < 0 keeps).
+    if (u.surface1.z > 0.5 && u.surface3.w >= 0.0) { rough = mix(rough, u.surface3.w, in.bw); }
     rough = clamp(rough, 0.045, 1.0); // a perfectly-smooth NDF blows up
     var ao = 1.0;
     if (u.texflags.z > 0.5) { ao = textureSample(occTex, samp, uv).r; }
     var albedo = colour.rgb;
+    // A second surface blended in by the vertex weight (snow drifting over rock).
+    let blendTexel = textureSample(blendTex, samp, uv).rgb;
+    if (u.surface1.z > 0.5) {
+      var bc = u.surface3.rgb;
+      if (u.surface1.w > 0.5) { bc = bc * blendTexel; }
+      albedo = mix(albedo, bc, in.bw);
+    }
     // A detail map, tiled finely and blended in up close (mid-grey neutral),
     // fading with eye depth — mirrors the software path.
     let dk = u.surface0.y * clamp((${DETAIL_FAR.toFixed(4)} - in.eyeDepth) / ${(DETAIL_FAR - DETAIL_NEAR).toFixed(4)}, 0.0, 1.0);
@@ -500,6 +515,7 @@ interface CachedBindGroup {
     emis: DecodedTexture | null;
     lm: DecodedTexture | null;
     detail: DecodedTexture | null;
+    blend: DecodedTexture | null;
   };
 }
 
@@ -693,8 +709,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           // Reflection probes: the panorama atlas (read via textureLoad) and their boxes.
           { binding: 12, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
-          // The detail map.
+          // The detail map, and the blend surface's map.
           { binding: 14, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          { binding: 15, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
         ],
       });
 
@@ -706,12 +723,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           buffers: [
             {
               // Interleaved position(3) + normal(3) + uv(2) + light-map uv(2).
-              arrayStride: 40,
+              arrayStride: 44,
               attributes: [
                 { shaderLocation: 0, offset: 0, format: "float32x3" },
                 { shaderLocation: 1, offset: 12, format: "float32x3" },
                 { shaderLocation: 2, offset: 24, format: "float32x2" },
                 { shaderLocation: 3, offset: 32, format: "float32x2" },
+                { shaderLocation: 4, offset: 40, format: "float32" },
               ],
             },
           ],
@@ -994,7 +1012,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         model,
         lightCount,
         fog: draw.fog ?? null,
-        surface: resolveSurface(entry.primitive.material, draw.time ?? 0, entry.textures.detail !== null, entry.textures.mr !== null),
+        surface: resolveSurface(entry.primitive.material, draw.time ?? 0, entry.textures.detail !== null, entry.textures.mr !== null, {
+          weights: entry.primitive.blend !== undefined,
+          textured: entry.textures.blend !== null,
+        }),
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
@@ -1107,7 +1128,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         const gpu = cached[i];
         if (!primitive.dynamic || !gpu || gpu.revision === primitive.dynamic.revision) return;
         const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
-        this.device.queue.writeBuffer(gpu.vertexBuffer, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null));
+        this.device.queue.writeBuffer(gpu.vertexBuffer, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null));
         gpu.revision = primitive.dynamic.revision;
       });
       return cached;
@@ -1115,7 +1136,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
     const uploaded = mesh.primitives.map((primitive) => {
       const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
-      const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null);
+      const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null);
       const vertexBuffer = this.device.createBuffer({
         size: Math.max(40, vertices.byteLength),
         usage: 0x20 | 0x08, // VERTEX | COPY_DST
@@ -1150,7 +1171,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       cached.source.occ === textures.occ &&
       cached.source.emis === textures.emis &&
       cached.source.lm === textures.lm &&
-      cached.source.detail === textures.detail
+      cached.source.detail === textures.detail &&
+      cached.source.blend === textures.blend
     ) {
       return cached.group;
     }
@@ -1185,6 +1207,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 13, resource: { buffer: this.probeBuffer } },
         // The detail map (or the 1x1 white blank; the uniform gates it).
         { binding: 14, resource: view(textures.detail) },
+        { binding: 15, resource: view(textures.blend) },
       ],
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });

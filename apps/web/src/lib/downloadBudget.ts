@@ -142,7 +142,7 @@ export function sceneBreakdown(meshSidecar: string | null): SceneBreakdown | nul
     for (const p of (mesh.primitives as Record<string, unknown>[] | undefined) ?? []) {
       geometry += len(p.positions) + len(p.normals) + len(p.uvs) + len(p.indices) + len(p.joints) + len(p.weights);
       const m = (p.material ?? {}) as Record<string, unknown>;
-      for (const key of ["image", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage"]) {
+      for (const key of ["image", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage", "blendImage"]) {
         textures += len((m[key] as { bytes?: unknown } | null | undefined)?.bytes);
       }
     }
