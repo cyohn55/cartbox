@@ -28,6 +28,7 @@ import {
   sceneLightingEnvironment,
   sceneLightingKeyDirection,
   sceneLightingTonemap,
+  terrainHeight,
   terrainMesh,
   viewMatrix,
   worldAabb,
@@ -241,12 +242,23 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
   const camera = useMemo(() => {
     const { center, radius } = bounds;
     const distance = (radius / Math.sin(FOV / 2) + radius) * zoom;
-    const cosPitch = Math.cos(pitch);
-    const eye: Vec3 = [
-      center[0] + distance * cosPitch * Math.sin(yaw),
-      center[1] + distance * Math.sin(pitch),
-      center[2] + distance * cosPitch * Math.cos(yaw),
+    const eyeAt = (p: number): Vec3 => [
+      center[0] + distance * Math.cos(p) * Math.sin(yaw),
+      center[1] + distance * Math.sin(p),
+      center[2] + distance * Math.cos(p) * Math.cos(yaw),
     ];
+    // A scene set in a valley would otherwise orbit inside its own mountains:
+    // tilt up (toward overhead) until the eye clears the terrain beneath it.
+    const buried = (e: Vec3) =>
+      terrainInstances.some((inst, k) => {
+        const t = terrains[k]?.terrain;
+        if (!t) return false;
+        const ground = terrainHeight(t, e[0] - inst.model[12]!, e[2] - inst.model[14]!);
+        return ground !== null && ground + inst.model[13]! + 4 > e[1];
+      });
+    let lifted = pitch;
+    while (lifted < 1.45 && buried(eyeAt(lifted))) lifted += 0.05;
+    const eye = eyeAt(lifted);
     // The far plane reaches past any terrain, however far it spreads.
     const far = (from: Vec3, base: number) =>
       terrainReach
@@ -262,7 +274,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
     const view = viewMatrix(eye, center);
     const projection = projectionMatrix(FOV, 1, Math.max(0.01, radius * 0.05), far(eye, distance + radius * 4));
     return { eye, target: center, view, projection, viewProj: multiplyMat4(projection, view), distance };
-  }, [bounds, yaw, pitch, zoom, previewCamera, terrainReach]);
+  }, [bounds, yaw, pitch, zoom, previewCamera, terrainReach, terrainInstances, terrains]);
 
   useEffect(() => {
     if (!previewCamera) onView?.({ eye: camera.eye, target: camera.target, fov: (FOV * 180) / Math.PI });
