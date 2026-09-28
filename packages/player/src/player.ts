@@ -743,7 +743,16 @@ export class Player {
     const scene = this.options.mesh;
     if (!spatial || !scene) return;
     const focus = this.runtime?.channel.streamFocus() ?? this.meshSurface?.eyePosition() ?? scene.bounds.center;
-    const { changed, approached } = spatial.loader.update(focus);
+    // Something the cart or physics moved is measured where it is now.
+    const surface = this.meshSurface;
+    const moved = (g: number): readonly [number, number, number] | null => {
+      const root = spatial.loader.groups[g]!.members[0]!;
+      const now = surface?.movedModel(root);
+      if (!now) return null;
+      const placed = scene.instances[root]!.model;
+      return [now[12]! - placed[12]!, now[13]! - placed[13]!, now[14]! - placed[14]!];
+    };
+    const { changed, approached } = spatial.loader.update(focus, moved);
     if (changed) {
       spatial.unloaded = spatial.loader.unloaded();
       this.applyInactive();

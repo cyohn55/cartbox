@@ -20,7 +20,7 @@ import {
   type MeshMaterial,
   type Terrain,
 } from "@cartbox/editor";
-import { buildOrbitCamera, orbitPitchAboveTerrain, parseMeshScene } from "@cartbox/player";
+import { QUALITY_PRESETS, buildOrbitCamera, orbitPitchAboveTerrain, parseMeshScene } from "@cartbox/player";
 import { decodeMeshSidecar, encodeMeshSidecar } from "@/lib/meshSidecar";
 
 const mat = (name: string): MeshMaterial => ({ name, baseColorFactor: [1, 1, 1, 1], baseColorImage: null });
@@ -200,6 +200,12 @@ describe("terrain in the runtime scene", () => {
     const reach = buildOrbitCamera(scene.bounds, 0, 0.3, 1, { near: 0.05, extent: scene.extent });
     expect(far(reach)).toBeGreaterThan(far(near));
     expect(far(reach)).toBeGreaterThan(140);
+  });
+
+  it("keeps full detail less far on lower quality presets", () => {
+    expect(QUALITY_PRESETS.high.terrainDetail).toBe(1);
+    expect(QUALITY_PRESETS.medium.terrainDetail).toBeLessThan(1);
+    expect(QUALITY_PRESETS.low.terrainDetail).toBeLessThan(QUALITY_PRESETS.medium.terrainDetail);
   });
 
   it("rides on its parent object", () => {

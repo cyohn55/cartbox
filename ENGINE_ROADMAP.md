@@ -151,7 +151,8 @@ trades state and commands with the cart through an 8 KB block at the end of RAM
         draw and simulate only while the focus (the camera, or `cartbox.streamfocus(x, y, z)`)
         is within the loading range of their bounds, with their children and a margin
         before unloading; a published cart fetches each object's textures as the focus
-        approaches. Objects can be marked always loaded; levels still load their own.
+        approaches. An object the cart or physics moves is measured where it is now.
+        Objects can be marked always loaded; levels still load their own.
         Terrain streams its detail: blocks near the camera draw in full, far ones coarser.
 - [x] WebGL2 fallback renderer for browsers without WebGPU: the same shading, instanced
       batching and asynchronous readback as the WebGPU path, chosen when WebGPU isn't
@@ -241,7 +242,9 @@ completeness.
       cells, each at full, half or quarter detail by its distance from the camera, with
       skirts hiding the seams between detail levels. It doesn't frame the camera
       or cast into the play area's shadow map, the far plane reaches it, and the
-      auto-orbit stays above it. Lockout's gorge and mountains are one.
+      auto-orbit stays above it. Lower quality presets keep full detail less far
+      (60% / 30%), and the Mesh tab's viewport draws terrain (coarser, with a toggle)
+      so a scene is composed against its landscape. Lockout's gorge and mountains are one.
 - [ ] Foliage, decals, volumetric fog.
 - [ ] A dedicated Modern-tier engine core (it currently reuses the Xbox 360 core).
 

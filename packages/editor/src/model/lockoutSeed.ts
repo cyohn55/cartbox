@@ -34,6 +34,7 @@ import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, type Streams
 import { packMeshLibrary } from "./meshLibrary";
 import { bakeNavMesh, boxTriangles, serializeNavMesh, type NavMesh } from "./navmesh";
 import { serializeTerrain, terrainMesh, type Terrain } from "./terrain";
+import type { SceneTimeline } from "./timeline";
 import { SWEETIE_16 } from "./palette";
 
 /** An axis-aligned box: centre (cx,cy,cz) and half-extents (hx,hy,hz). */
@@ -1793,6 +1794,32 @@ export const LOCKOUT_FX = {
   },
 } as const;
 
+/**
+ * The match intro (a timeline the cart plays when an offline match starts): a
+ * sweep down from high over the arena, round past the BR tower and low across
+ * the deck toward the sniper tower, before the view drops to the player's eyes.
+ * Every eye stays over the deck — the cliffs are close — and clear of the
+ * structures; a test checks both.
+ */
+export const LOCKOUT_INTRO: SceneTimeline = {
+  name: "Intro",
+  duration: 7.5,
+  loop: false,
+  autoplay: false,
+  hold: false,
+  tracks: [
+    {
+      kind: "camera",
+      keys: [
+        { time: 0, eye: [-4, 24, 15], target: [-1, 3, -2], fov: 62, ease: "smooth" },
+        { time: 2.6, eye: [13, 14, 9], target: [-3, 3, -3], fov: 56, ease: "smooth" },
+        { time: 5.2, eye: [11, 6.5, -11], target: [-6, 4, -5], fov: 52, ease: "smooth" },
+        { time: 7.5, eye: [4, 5, -9.5], target: [-7, 5, -8], fov: 50, ease: "smooth" },
+      ],
+    },
+  ],
+};
+
 let meshSidecar: string | null = null;
 
 /**
@@ -1826,6 +1853,7 @@ export function lockoutMeshSidecar(): string {
       lighting: LOCKOUT_LIGHTING,
       navmesh: serializeNavMesh(lockoutNavMesh()),
       terrains: [serializeTerrain(lockoutTerrain())],
+      timelines: [LOCKOUT_INTRO],
     });
   }
   return meshSidecar;
@@ -1928,6 +1956,7 @@ local feed = {}          -- kill feed: {text,color,t}
 local announce = {t=0, text="", color=12}
 local winner = ""
 local prev = {}
+intro = nil  -- ticks into the match intro (see play_intro), or nil
 local bob = 0
 local flash = 0
 local tick = 0
@@ -2636,6 +2665,36 @@ local function start_match(key)
   for k in pairs(sent_score) do sent_score[k] = nil end
   phase = "play"
   if NETMODE == 2 then net_match_id = net_match_id + 1 end
+  -- Offline, a match opens on the intro flyover (the "Intro" timeline); online
+  -- everyone drops straight in, so nobody's match starts behind the others'.
+  intro = NETMODE == 0 and 0 or nil
+  if intro then cartbox.playtimeline("Intro"); prev.skip = true end
+end
+
+-- The intro: the timeline has the camera while the soldiers stand at their
+-- spawns, under letterbox bars naming the map and game type. It ends by itself
+-- or on Z. Returns true while it's still showing.
+function play_intro()
+  if not intro then return false end
+  intro = intro + 1
+  local name = cartbox.timeline()
+  -- (the timeline starts the tick after it's asked for, so give it a moment)
+  if (intro > 10 and name == nil) or edge("skip", btn(4)) then
+    intro = nil
+    cartbox.stoptimeline()
+    return false
+  end
+  cartbox.clearlights()
+  cartbox.clearposes()
+  for i=1,NBOT do animate_bot(i, bots[i]) end
+  drive_camera()  -- the timeline's camera takes over; this keeps HUD compositing on
+  cartbox.hud(1)
+  rect(0, 0, 1280, 64, 5)
+  rect(0, 656, 1280, 64, 5)
+  print("LOCKOUT", 40, 18, 12, false, 3, true)
+  print(MODE.name or "", 40, 676, 9, false, 2, true)
+  print("Z to skip", 1110, 680, 13, false, 1, true)
+  return true
 end
 
 -- 8-button controls: tank move + turn, hold A to strafe, double-tap A grenade.
@@ -2845,6 +2904,22 @@ function animate_bot(i, o)
   -- A killed soldier falls where it stood, then is taken away before it respawns.
   if o.dead and (o.respawn or 0) < 40 then cartbox.meshpose(i,0,-50,0,0,0,0,0); return end
   cartbox.meshpose(i, o.x, o.y, o.z, o.face or 0, 0, 0, o.jugg and 1.25 or 1, 0, armor_tint(o))
+  -- Aim with the body (look-at on the skeleton): the chest, and with it the arms
+  -- and rifle, and the head turn toward whoever it's fighting, on top of the
+  -- run or idle. With nobody to fight they let go. Staggered across bots, since
+  -- a request stands until it's repeated.
+  local tg = (not o.dead) and o.target or nil
+  if tg then
+    if tick % 4 == i % 4 then
+      cartbox.lookat(i, "chest", tg.x, tg.y + 1.2, tg.z, 0.8, 40)
+      cartbox.lookat(i, "head", tg.x, tg.y + 1.5, tg.z, 1, 60)
+      o.aiming = true
+    end
+  elseif o.aiming then
+    o.aiming = false
+    cartbox.lookat(i, "chest", 0, 0, 0, 0)
+    cartbox.lookat(i, "head", 0, 0, 0, 0)
+  end
 end
 
 -- The mesh overlay always composites the 3D scene ON TOP of the cart's 2D frame,
@@ -3055,6 +3130,7 @@ function TIC()
 
   net_follow_host()
   if phase ~= "play" then return end
+  if play_intro() then return end
   net_roles()
   net_receive()
   play_input()

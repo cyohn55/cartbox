@@ -10,7 +10,9 @@
  * - An object's children load with it; objects in a level are the level's to
  *   load, and reserve prefab copies and terrain are never spatially loaded.
  * - Distance is measured to the object's bounds (with its children), so a
- *   big floor stays loaded while you stand anywhere on it.
+ *   big floor stays loaded while you stand anywhere on it. An object that
+ *   moves (posed by the cart, pushed by physics, spawned) is measured where it
+ *   is now, not where it was placed.
  * - A loaded object stays loaded until the focus is a little past the range
  *   ({@link STREAM_UNLOAD_MARGIN}), so standing on the boundary doesn't flicker.
  *
@@ -74,15 +76,25 @@ export class SpatialLoader {
   /**
    * Move the focus. Returns whether any group loaded or unloaded, and the
    * groups that came within prefetch range for the first time (their assets
-   * should start loading).
+   * should start loading). `moved` gives a group's offset from where it was
+   * placed, for things that move (null = where it was placed).
    */
-  update(focus: readonly [number, number, number]): { changed: boolean; approached: number[] } {
+  update(
+    focus: readonly [number, number, number],
+    moved?: (group: number) => readonly [number, number, number] | null,
+  ): { changed: boolean; approached: number[] } {
     const { range } = this.streaming;
     let changed = !this.started;
     this.started = true;
     const approached: number[] = [];
     this.groups.forEach((group, i) => {
-      const d = boxDistance(focus, group.box);
+      // A group that's moved (see `moved`: its offset from where it was placed)
+      // is measured where it is now.
+      const offset = moved?.(i);
+      const box = offset
+        ? ([group.box[0] + offset[0], group.box[1] + offset[1], group.box[2] + offset[2], group.box[3] + offset[0], group.box[4] + offset[1], group.box[5] + offset[2]] as const)
+        : group.box;
+      const d = boxDistance(focus, box);
       const inRange = this.loaded[i] ? d <= range * STREAM_UNLOAD_MARGIN : d <= range;
       if (inRange !== this.loaded[i]) {
         this.loaded[i] = inRange;

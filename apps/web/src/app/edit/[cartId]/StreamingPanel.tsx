@@ -76,8 +76,8 @@ export function StreamingPicker({ sidecar, entry, onChange }: { sidecar: MeshSid
       </label>
       <RailHint>
         {entry.alwaysLoaded
-          ? "Drawn and simulated however far away (use it for things that move across the map, like the player)."
-          : "Loads while the camera is within range of it (its children come with it)."}
+          ? "Drawn and simulated however far away."
+          : "Loads while the camera is within range of it — where it is now, if code or physics moves it (its children come with it)."}
       </RailHint>
     </RailGroup>
   );

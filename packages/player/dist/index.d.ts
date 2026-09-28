@@ -714,6 +714,9 @@ declare function uniformsFromSettings(settings: PostFxSettings): PostFxUniforms;
  *   effects; cheap per-pixel looks like grading, CRT or dithering stay), and the
  *   first-person software view capped at half size.
  *
+ * Terrain keeps full detail less far on the lower presets (60% and 30% of the
+ * authored distance), so distant ground costs fewer triangles.
+ *
  * "auto" picks one from what the browser says about the device: weak hardware
  * (≤ 2 cores or ≤ 2 GB of memory) → low; a phone or tablet, or any device with
  * no GPU renderer (WebGPU or WebGL2, so rendering on the CPU) → medium; otherwise
@@ -733,6 +736,11 @@ interface QualitySettings {
     readonly maxRenderScale: number;
     /** Post-effects this preset turns off (the costly multi-pass ones). */
     readonly disabledEffects: readonly string[];
+    /**
+     * How far terrain keeps its detail, as a share of each block's authored
+     * distance: lower presets drop to the coarser blocks sooner.
+     */
+    readonly terrainDetail: number;
 }
 declare const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualitySettings>>;
 /** What the browser reveals about the device (all optional: browsers differ). */
@@ -4941,6 +4949,13 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * placement, and a hidden pose drops the instance from the frame.
      */
     setPoseOverrides(poses: readonly MailboxMeshPose[]): void;
+    /**
+     * Where a top-level object has been moved to this frame — by its physics
+     * body, by being spawned, or by the cart posing it — whether or not it's
+     * drawn; null when it's where it was placed (or its pose hides it).
+     * Spatial loading measures a moving object here rather than where it began.
+     */
+    movedModel(i: number): Mat4 | null;
     /**
      * The world-space point lights the cart published this frame (`cartbox.light3d`
      * — an objective's glow, a muzzle flash). They light a first-person view on
