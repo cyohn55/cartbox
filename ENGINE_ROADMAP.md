@@ -147,6 +147,12 @@ trades state and commands with the cart through an 8 KB block at the end of RAM
         switches — a published cart streams that level's textures first, with a
         progress bar, and `cartbox.level()` reports the current level, the one loading
         and its progress. Levels are named and assigned in the Mesh tab.
+  - [x] Spatial loading within one map (like World Partition): with Streaming on, objects
+        draw and simulate only while the focus (the camera, or `cartbox.streamfocus(x, y, z)`)
+        is within the loading range of their bounds, with their children and a margin
+        before unloading; a published cart fetches each object's textures as the focus
+        approaches. Objects can be marked always loaded; levels still load their own.
+        Terrain streams its detail: blocks near the camera draw in full, far ones coarser.
 - [x] WebGL2 fallback renderer for browsers without WebGPU: the same shading, instanced
       batching and asynchronous readback as the WebGPU path, chosen when WebGPU isn't
       available (before the software rasteriser). It is byte-identical to the software

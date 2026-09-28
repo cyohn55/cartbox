@@ -26,6 +26,9 @@ import {
   readLevels,
   readNavMesh,
   readTerrains,
+  readStreaming,
+  type SceneStreaming,
+  type StreamGroup,
   terrainChunks,
   terrainHeight,
   type NavMesh,
@@ -93,6 +96,8 @@ export interface MeshInstance extends MeshSceneInstance {
    * with distance.
    */
   readonly detail?: number;
+  /** Kept loaded whatever the distance, when the scene streams (see streaming.ts in @cartbox/editor). */
+  readonly alwaysLoaded?: true;
 }
 
 /** A prefab's reserve of spawnable copies: each copy's root object index. */
@@ -134,6 +139,8 @@ export interface MeshScene {
   readonly terrains?: readonly Terrain[];
   /** Bounds of everything drawn, terrain included — how far the camera must see. */
   readonly extent?: SceneBounds;
+  /** Spatial loading: objects load by distance from the streaming focus (absent = all loaded). */
+  readonly streaming?: SceneStreaming;
 }
 
 /** A view + projection pair ready to hand to `renderMeshScene`. */
@@ -236,7 +243,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     pool?: { prefab: string; copy: number; rootId: string };
     levelId?: string;
   };
-  type Record_ = { mesh?: unknown; transform?: unknown; frames?: unknown; id?: unknown; name?: unknown; parent?: unknown; tags?: unknown; props?: unknown; physics?: unknown; animator?: unknown; level?: unknown };
+  type Record_ = { mesh?: unknown; transform?: unknown; frames?: unknown; id?: unknown; name?: unknown; parent?: unknown; tags?: unknown; props?: unknown; physics?: unknown; animator?: unknown; level?: unknown; alwaysLoaded?: unknown };
   const readEntry = (record: Record_, id: string, parentId: string | null, identity = false): Parsed | null => {
     if (typeof record.mesh !== "string") return null;
     const resolved = resolveMeshRef(record.mesh, library);
@@ -257,6 +264,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
       physics: readPhysicsSpec(record.physics),
       ...(readAnimatorSpec(record.animator) ? { animator: readAnimatorSpec(record.animator)! } : {}),
       ...(typeof record.level === "string" && record.level ? { levelId: record.level } : {}),
+      ...(record.alwaysLoaded === true ? { alwaysLoaded: true as const } : {}),
       parentId,
     };
   };
@@ -364,6 +372,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
     ...(terrains.length > 0 ? { terrains, extent: sceneBounds(instances.filter((instance) => !instance.pooled)) } : {}),
+    ...(readStreaming((parsed as { streaming?: unknown }).streaming) ? { streaming: readStreaming((parsed as { streaming?: unknown }).streaming)! } : {}),
     lighting,
     ...(pools.length > 0 ? { pools } : {}),
     ...(physicsWorld ? { physicsWorld } : {}),
@@ -371,6 +380,43 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     ...(levels.length > 0 ? { levels } : {}),
     ...(navmesh && navmesh.heights.length > 0 ? { navmesh } : {}),
   };
+}
+
+/**
+ * The scene's spatially loaded groups (see streaming.ts in @cartbox/editor):
+ * each root object with its children, and the world box they fill. Objects in
+ * a level, reserve prefab copies, terrain and those marked always loaded (with
+ * their children) aren't spatially loaded.
+ */
+export function streamGroups(scene: MeshScene): StreamGroup[] {
+  const { instances } = scene;
+  const children = instances.map(() => [] as number[]);
+  instances.forEach((inst, i) => {
+    if (inst.parent >= 0) children[inst.parent]!.push(i);
+  });
+  const groups: StreamGroup[] = [];
+  instances.forEach((root, r) => {
+    if (root.parent >= 0 || root.pooled || root.terrain || root.alwaysLoaded || root.level !== undefined) return;
+    const members: number[] = [];
+    const walk = (i: number) => {
+      members.push(i);
+      for (const c of children[i]!) if (!instances[c]!.terrain) walk(c);
+    };
+    walk(r);
+    let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+    for (const i of members) {
+      const inst = instances[i]!;
+      const local = meshBounds(inst.mesh);
+      if (!local) continue;
+      for (let corner = 0; corner < 8; corner += 1) {
+        const [x, y, z] = transformPoint(inst.model, corner & 1 ? local.max[0] : local.min[0], corner & 2 ? local.max[1] : local.min[1], corner & 4 ? local.max[2] : local.min[2]);
+        x0 = Math.min(x0, x); y0 = Math.min(y0, y); z0 = Math.min(z0, z);
+        x1 = Math.max(x1, x); y1 = Math.max(y1, y); z1 = Math.max(z1, z);
+      }
+    }
+    if (Number.isFinite(x0)) groups.push({ members, box: [x0, y0, z0, x1, y1, z1] });
+  });
+  return groups;
 }
 
 /**

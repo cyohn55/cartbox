@@ -39,7 +39,7 @@
  * Pure and isomorphic: hashing and fetching are injected.
  */
 
-import { effectiveLevels, readLevels } from "@cartbox/editor";
+import { effectiveLevels, readLevels, readStreaming } from "@cartbox/editor";
 
 import { serializeCartAssets, type AssetRef, type CartAssets } from "./cartAssetStore";
 
@@ -345,6 +345,56 @@ export function meshTextureLevels(encoded: string | null): Map<string, readonly 
     // Always loaded, or in the level the cart starts in: needed at start.
     const tag = level <= 0 ? null : levels[level]!.id;
     for (const hash of hashesOf(entry)) note(hash, tag);
+  });
+  for (const prefab of root.prefabs ?? []) for (const node of prefab.nodes ?? []) for (const hash of hashesOf(node)) note(hash, null);
+  return out;
+}
+
+/**
+ * With spatial loading on (see streaming.ts in @cartbox/editor), which
+ * spatially loaded objects need each asset-backed texture: hash → the ids of
+ * the root objects (whose groups load by distance) that use it, or null when
+ * something else — an always-loaded object, a level, a prefab — does. Those
+ * with ids stream as the focus approaches one of them. Empty without streaming.
+ */
+export function meshTextureObjects(encoded: string | null): Map<string, readonly string[] | null> {
+  const out = new Map<string, string[] | null>();
+  if (!encoded) return out;
+  let root: { meshes?: { id?: unknown; mesh?: unknown; frames?: unknown; parent?: unknown; level?: unknown; alwaysLoaded?: unknown }[]; library?: Record<string, unknown>; streaming?: unknown; prefabs?: { nodes?: { mesh?: unknown; frames?: unknown }[] }[] };
+  try {
+    root = JSON.parse(encoded);
+  } catch {
+    return out;
+  }
+  if (!root || !Array.isArray(root.meshes) || !readStreaming(root.streaming)) return out;
+  const library = root.library ?? {};
+  const resolve = (value: unknown): string | null => {
+    if (typeof value !== "string") return null;
+    if (value.startsWith("@lib:")) return typeof library[value.slice(5)] === "string" ? (library[value.slice(5)] as string) : null;
+    return value;
+  };
+  const hashesOf = (holder: { mesh?: unknown; frames?: unknown }): string[] => {
+    const serialized = [holder.mesh, ...(Array.isArray(holder.frames) ? holder.frames : [])].map(resolve).filter((m): m is string => m !== null);
+    return serialized.flatMap((m) => meshTextureRefs(m).map((r) => r.hash));
+  };
+  const note = (hash: string, object: string | null) => {
+    const seen = out.get(hash);
+    if (object === null || seen === null) out.set(hash, null);
+    else out.set(hash, seen ? (seen.includes(object) ? seen : [...seen, object]) : [object]);
+  };
+  const meshes = root.meshes;
+  const ids = meshes.map((m) => (typeof m.id === "string" ? m.id : ""));
+  const parentOf = (i: number) => (typeof meshes[i]!.parent === "string" ? ids.indexOf(meshes[i]!.parent as string) : -1);
+  meshes.forEach((entry, i) => {
+    // The group it loads with: its top ancestor (a loop leaves it its own).
+    let top = i;
+    let inLevel = typeof entry.level === "string" && entry.level !== "";
+    for (let guard = 0; parentOf(top) >= 0 && guard < meshes.length; guard += 1) {
+      top = parentOf(top);
+      if (typeof meshes[top]!.level === "string" && meshes[top]!.level !== "") inLevel = true;
+    }
+    const spatial = !inLevel && meshes[top]!.alwaysLoaded !== true;
+    for (const hash of hashesOf(entry)) note(hash, spatial ? ids[top]! : null);
   });
   for (const prefab of root.prefabs ?? []) for (const node of prefab.nodes ?? []) for (const hash of hashesOf(node)) note(hash, null);
   return out;
