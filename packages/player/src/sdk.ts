@@ -307,6 +307,8 @@ cartbox = {
   removeagent = function() end,
   agentpos = function() return nil end,
   navigable = function() return false end,
+  -- Spatial loading's focus: overridden when the scene streams by distance.
+  streamfocus = function() end,
 }`;
 
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */

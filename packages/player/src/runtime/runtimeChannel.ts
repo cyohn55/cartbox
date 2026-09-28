@@ -40,6 +40,7 @@ import {
   PHYS_OP_SPAWN,
   PHYS_OP_TIMELINE,
   PHYS_OP_LEVEL,
+  PHYS_OP_STREAM_FOCUS,
   PHYS_OP_WATCH,
   PHYS_OP_AGENT,
   PHYS_OP_AGENT_GOTO,
@@ -94,6 +95,8 @@ export class RuntimeChannel {
   /** Levels: the current one, the one loading (-1), its progress, and a switch the cart asked for. */
   private level = { current: -1, loading: -1, progress: 0 };
   private levelRequest = -1;
+  /** Where the cart asked spatial loading to centre (null = the camera). */
+  private focus: [number, number, number] | null = null;
   /** Joints whose world position the cart asked for, and where they were when last skinned. */
   private readonly watched = new Map<string, { object: number; joint: number; position: [number, number, number] | null }>();
 
@@ -147,6 +150,7 @@ export class RuntimeChannel {
         const n = this.scene.levels?.length ?? 0;
         if (cmd.a >= 0 && cmd.a < n && cmd.a !== this.level.current && cmd.a !== this.level.loading) this.levelRequest = cmd.a;
       } else if (cmd.op >= PHYS_OP_AGENT && cmd.op <= PHYS_OP_AGENT_REMOVE) this.agentCommand(cmd.op, cmd.a, cmd.v);
+      else if (cmd.op === PHYS_OP_STREAM_FOCUS) this.focus = cmd.a === 1 ? [cmd.v[0]!, cmd.v[1]!, cmd.v[2]!] : null;
       else if (cmd.op === PHYS_OP_TIMELINE) {
         if (cmd.a < 0) this.timeline?.stop();
         else this.timeline?.play(cmd.a, cmd.v[0], cmd.v[1]);
@@ -187,6 +191,11 @@ export class RuntimeChannel {
   /** Make `level` the current one (the loading state clears). */
   setLevel(level: number): void {
     this.level = { current: level, loading: -1, progress: 0 };
+  }
+
+  /** Where the cart asked spatial loading to centre, or null for the camera. */
+  streamFocus(): readonly [number, number, number] | null {
+    return this.focus;
   }
 
   /** The current level (-1 when the scene has none). */

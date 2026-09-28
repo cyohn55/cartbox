@@ -89,6 +89,7 @@ import {
   PHYS_OP_AGENT_GOTO,
   PHYS_OP_AGENT_STOP,
   PHYS_OP_AGENT_REMOVE,
+  PHYS_OP_STREAM_FOCUS,
   PHYS_AGENTS,
   PHYS_AGENT_BYTES,
   PHYS_MAX_AGENTS,
@@ -149,7 +150,8 @@ export function sceneNeedsRuntime(scene: MeshScene | null | undefined, { physics
         animatedObjects(scene).length > 0 ||
         (scene.timelines?.length ?? 0) > 0 ||
         (scene.levels?.length ?? 0) > 0 ||
-        Boolean(scene.navmesh)),
+        Boolean(scene.navmesh) ||
+        Boolean(scene.streaming)),
   );
 }
 
@@ -207,7 +209,7 @@ export function runtimeSdkLua(
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}end`;
 }
 
 /** The physics calls (inside the runtime block's do … end, after its helpers). */
@@ -361,6 +363,14 @@ function SPAWN_CALLS(pools: readonly string[]): string {
  *   cartbox.agentpos(key) -> x, y, z, facing, moving, air, arrived, nopath  (as of the last tick)
  *   cartbox.navigable()   -> true (the scene has a walkable surface)
  */
+/** Spatial loading: `cartbox.streamfocus(x, y, z)` loads around a point; no arguments goes back to the camera. */
+function STREAM_CALLS(): string {
+  return `  cartbox.streamfocus = function(x, y, z)
+    if x == nil then _cmd(${PHYS_OP_STREAM_FOCUS}, 0) else _cmd(${PHYS_OP_STREAM_FOCUS}, 1, x, y or 0, z or 0) end
+  end
+`;
+}
+
 function NAV_CALLS(): string {
   return `  local function _akey(k)
     if type(k) == "number" then return math.floor(k) end

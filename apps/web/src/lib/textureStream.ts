@@ -20,6 +20,8 @@ export interface StreamedTexture {
   readonly mime: string;
   /** The levels that need it (see meshTextureLevels); absent = needed at start. */
   readonly levels?: readonly string[];
+  /** The spatially loaded objects that need it (see meshTextureObjects): fetched as the focus nears one. */
+  readonly objects?: readonly string[];
 }
 
 export interface StreamOptions {

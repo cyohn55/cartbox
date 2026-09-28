@@ -18,7 +18,7 @@ import { publicUrl } from "@/lib/storage";
 import { resolveMeshSidecar } from "@/lib/meshStorage";
 import { cartAssetUrl, readCartAsset } from "@/lib/cartAssetStorage";
 import { parseCartAssets } from "@/lib/cartAssetStore";
-import { inlineMeshTextures, meshTextureLevels, meshTextureName, meshTextureRefs } from "@/lib/meshTextureAssets";
+import { inlineMeshTextures, meshTextureLevels, meshTextureName, meshTextureObjects, meshTextureRefs } from "@/lib/meshTextureAssets";
 import type { StreamedTexture } from "@/lib/textureStream";
 import { getServerUserId } from "@/lib/supabase-server";
 import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
@@ -262,10 +262,13 @@ export default async function CartridgePage({ params }: PageProps) {
       const manifest = parseCartAssets(data?.assets);
       // Textures only later levels use wait for those levels (cartbox.level).
       const needs = meshTextureLevels(meshRaw);
+      // …and textures only spatially loaded objects use wait for the focus to near them.
+      const near = meshTextureObjects(meshRaw);
       meshTextures = textureRefs.map(({ hash, mime }) => {
         const bytes = manifest?.entries[meshTextureName(hash)]?.bytes ?? 0;
         const levels = needs.get(hash);
-        return { hash, mime, bytes, url: cartAssetUrl({ hash, bytes, contentType: mime }), ...(levels ? { levels } : {}) };
+        const objects = near.get(hash);
+        return { hash, mime, bytes, url: cartAssetUrl({ hash, bytes, contentType: mime }), ...(levels ? { levels } : {}), ...(objects ? { objects } : {}) };
       });
     } catch {
       meshTextures = [];

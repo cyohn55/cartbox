@@ -20,6 +20,7 @@ import { STICK_OPTIN_MAGIC, STICK_OPTIN_WORD, STICK_WORD, packSticks } from "./s
 import { DEFAULT_CONTROL_SETTINGS, applyLookSettings, type ControlSettings } from "./controls.js";
 import { injectSdk } from "./sdk.js";
 import { sceneObjectsSdkLua } from "./mesh/sceneObjectsSdk.js";
+import { streamGroups } from "./mesh/meshScene.js";
 import { runtimeSdkLua } from "./physics/physicsSdk.js";
 import { PhysicsSession, sceneHasPhysics } from "./physics/physicsSession.js";
 import { RuntimeChannel } from "./runtime/runtimeChannel.js";
@@ -59,7 +60,7 @@ import { WorldOverlaySurface } from "./world/WorldOverlaySurface.js";
 import { createSceneRenderer } from "./render/createSceneRenderer.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
-import { type DecodedTexture, type EncodedImage, type Mat4 } from "@cartbox/editor";
+import { SpatialLoader, type DecodedTexture, type EncodedImage, type Mat4 } from "@cartbox/editor";
 import type { ControlScheme, InspectedObject, PlayerOptions } from "./types.js";
 
 /**
@@ -359,6 +360,11 @@ export class Player {
           this.meshSurface.setProfiler(this.profiler);
           // A scene with levels starts in its first; the others wait, hidden.
           if ((mesh.levels?.length ?? 0) > 0) this.activateLevel(0);
+          // A scene that streams by distance loads what's near the focus each tick.
+          if (mesh.streaming) {
+            const groups = streamGroups(mesh);
+            if (groups.length > 0) this.spatial = { loader: new SpatialLoader(groups, mesh.streaming), unloaded: new Set() };
+          }
         }
         // The HD-2D world composites a 3D tile terrain plus the cart's 2D character
         // billboards over the frame, textured from the cart's sprite sheet and
@@ -632,6 +638,7 @@ export class Player {
       this.runtime!.channel.afterTick(afterBlock);
       this.pollLevelRequest();
     }
+    this.updateSpatialLoading();
     lap("runtime");
     if (net && this.console) {
       const words = this.console.netWords();
@@ -714,6 +721,38 @@ export class Player {
     load(level, progress).then(done, done);
   }
 
+  /** Objects out of the current level. */
+  private levelInactive: ReadonlySet<number> = new Set();
+  /** Spatial loading, when the scene streams by distance: the loader and what it has unloaded. */
+  private spatial: { loader: SpatialLoader; unloaded: ReadonlySet<number> } | null = null;
+
+  /** Hide (and take out of physics) everything a level or spatial loading has out. */
+  private applyInactive(): void {
+    const inactive = new Set([...this.levelInactive, ...(this.spatial?.unloaded ?? [])]);
+    this.meshSurface?.setInactive(inactive);
+    this.runtime?.physics?.setInactive(inactive);
+  }
+
+  /**
+   * Spatial loading: load what's in range of the focus (where the cart put it,
+   * else the camera) and unload what's out; ask the host for the assets of
+   * objects coming near.
+   */
+  private updateSpatialLoading(): void {
+    const spatial = this.spatial;
+    const scene = this.options.mesh;
+    if (!spatial || !scene) return;
+    const focus = this.runtime?.channel.streamFocus() ?? this.meshSurface?.eyePosition() ?? scene.bounds.center;
+    const { changed, approached } = spatial.loader.update(focus);
+    if (changed) {
+      spatial.unloaded = spatial.loader.unloaded();
+      this.applyInactive();
+    }
+    if (approached.length > 0 && this.options.streamAssets) {
+      this.options.streamAssets(approached.map((g) => scene.instances[spatial.loader.groups[g]!.members[0]!]!.id));
+    }
+  }
+
   /** Make a level current: its objects (and the always-loaded ones) show and simulate; the rest are hidden. */
   private activateLevel(level: number): void {
     const scene = this.options.mesh;
@@ -722,8 +761,8 @@ export class Player {
     scene.instances.forEach((inst, i) => {
       if (inst.level !== undefined && inst.level !== level) inactive.add(i);
     });
-    this.meshSurface?.setInactive(inactive);
-    this.runtime?.physics?.setInactive(inactive);
+    this.levelInactive = inactive;
+    this.applyInactive();
     this.runtime?.channel.setLevel(level);
     this.options.onLevel?.({ level: scene.levels[level]?.name ?? "", loading: null, progress: 1 });
   }

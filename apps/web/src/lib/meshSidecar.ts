@@ -35,6 +35,8 @@ import {
   readLevels,
   readNavMesh,
   readTerrain,
+  readStreaming,
+  type SceneStreaming,
   type SerializedTerrain,
   type SerializedNavMesh,
   MAX_LEVELS,
@@ -96,6 +98,8 @@ export interface MeshSidecarEntry {
   readonly animator?: AnimatorSpec;
   /** The level this object belongs to (a level id); absent = always loaded (see levels.ts in @cartbox/editor). */
   readonly level?: string;
+  /** Kept loaded whatever the distance when the scene streams (see streaming.ts in @cartbox/editor). */
+  readonly alwaysLoaded?: true;
 }
 
 /**
@@ -155,6 +159,8 @@ export interface MeshSidecar {
   readonly navmesh?: SerializedNavMesh;
   /** Heightfield landscapes (see terrain.ts in @cartbox/editor), as stored; absent or empty = none. */
   readonly terrains?: readonly SerializedTerrain[];
+  /** Spatial loading: objects load by distance (see streaming.ts in @cartbox/editor); absent = off. */
+  readonly streaming?: SceneStreaming;
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -202,6 +208,7 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(sidecar.levels && sidecar.levels.length > 0 ? { levels: sidecar.levels } : {}),
     ...(sidecar.navmesh ? { navmesh: sidecar.navmesh } : {}),
     ...(sidecar.terrains && sidecar.terrains.length > 0 ? { terrains: sidecar.terrains } : {}),
+    ...(sidecar.streaming ? { streaming: sidecar.streaming } : {}),
   });
 }
 
@@ -274,6 +281,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
       ...(readPhysicsSpec(record.physics) ? { physics: readPhysicsSpec(record.physics)! } : {}),
       ...(readAnimatorSpec(record.animator) ? { animator: readAnimatorSpec(record.animator)! } : {}),
       ...(typeof record.level === "string" && record.level ? { level: record.level } : {}),
+      ...(record.alwaysLoaded === true ? { alwaysLoaded: true as const } : {}),
     });
   }
   const lighting = parseSceneLighting((parsed as { lighting?: unknown }).lighting);
@@ -303,6 +311,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     // Kept as stored, once it reads back as a valid surface.
     ...(readNavMesh((parsed as { navmesh?: unknown }).navmesh) ? { navmesh: (parsed as { navmesh: SerializedNavMesh }).navmesh } : {}),
     ...(terrains.length > 0 ? { terrains } : {}),
+    ...(readStreaming((parsed as { streaming?: unknown }).streaming) ? { streaming: readStreaming((parsed as { streaming?: unknown }).streaming)! } : {}),
   };
 }
 
@@ -434,6 +443,24 @@ export function setMeshLevel(sidecar: MeshSidecar, id: string, level: string | n
   return {
     ...sidecar,
     meshes: sidecar.meshes.map((m) => (m.id !== id ? m : level ? { ...m, level } : withoutLevel(m))),
+  };
+}
+
+/** Turn spatial loading on (with its range) or, with null, off. */
+export function setMeshStreaming(sidecar: MeshSidecar, streaming: SceneStreaming | null): MeshSidecar {
+  const { streaming: _drop, ...rest } = sidecar;
+  return streaming ? { ...rest, streaming: readStreaming(streaming)! } : rest;
+}
+
+/** Keep an object loaded whatever the distance (or let it load by distance again). */
+export function setMeshAlwaysLoaded(sidecar: MeshSidecar, id: string, always: boolean): MeshSidecar {
+  return {
+    ...sidecar,
+    meshes: sidecar.meshes.map((m) => {
+      if (m.id !== id) return m;
+      const { alwaysLoaded: _drop, ...rest } = m;
+      return always ? { ...rest, alwaysLoaded: true as const } : rest;
+    }),
   };
 }
 

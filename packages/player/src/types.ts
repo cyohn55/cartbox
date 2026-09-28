@@ -121,6 +121,12 @@ export interface PlayerOptions {
    * immediate. The web app streams the level's textures.
    */
   levelAssets?: (level: SceneLevel, onProgress: (progress: number) => void) => Promise<void>;
+  /**
+   * Spatial loading (a scene that streams by distance): called with the ids of
+   * objects the focus is coming near, the first time each does, so the host can
+   * fetch their assets ahead of them loading. The web app streams their textures.
+   */
+  streamAssets?: (objectIds: readonly string[]) => void;
   /** Called as the current level changes and while one loads (loading is null once it's in). */
   onLevel?: (state: { level: string; loading: string | null; progress: number }) => void;
   /**

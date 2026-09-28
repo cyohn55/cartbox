@@ -234,6 +234,8 @@ export const PHYS_OP_AGENT = 21;
 export const PHYS_OP_AGENT_GOTO = 22;
 export const PHYS_OP_AGENT_STOP = 23;
 export const PHYS_OP_AGENT_REMOVE = 24;
+/** Spatial loading's focus: a = 1 loads around v0..v2 from now on, a = 0 goes back to the camera. */
+export const PHYS_OP_STREAM_FOCUS = 25;
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {

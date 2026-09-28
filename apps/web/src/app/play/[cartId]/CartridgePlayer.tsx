@@ -166,6 +166,11 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
           if (!streaming.signal.aborted) setTextureProgress(null);
         });
       },
+      // Spatial loading: an object's textures load as the focus nears it.
+      streamAssets: (objectIds) => {
+        const list = (meshTextures ?? []).filter((t) => t.objects?.some((id) => objectIds.includes(id)));
+        if (list.length > 0) void stream(list, () => {});
+      },
       // The cart's authored HD-2D world: 3D terrain with the cart's 2D character
       // sprites composited into it as depth-sorted billboards.
       world: world ?? undefined,
@@ -187,7 +192,7 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
     });
     handleRef.current = handle;
 
-    const atStart = (meshTextures ?? []).filter((t) => !t.levels);
+    const atStart = (meshTextures ?? []).filter((t) => !t.levels && !t.objects);
     if (mesh && atStart.length > 0) {
       setTextureProgress({ loaded: 0, total: 1 });
       void stream(atStart, (loaded, total) => setTextureProgress({ loaded, total: Math.max(1, total) })).then(() => {

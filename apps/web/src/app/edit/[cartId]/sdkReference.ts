@@ -471,6 +471,18 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
     ],
   },
   {
+    label: "cartbox · streaming",
+    open: false,
+    entries: [
+      {
+        name: "cartbox.streamfocus",
+        signature: "cartbox.streamfocus(x, y, z) / cartbox.streamfocus()",
+        doc: "With Streaming on in the Mesh tab, objects load (draw and simulate) only near the focus — the camera by default. Pass a point to load around it instead (the player, in a third-person game); no arguments goes back to the camera. A published cart fetches each object's textures as the focus approaches.",
+        snippet: "cartbox.streamfocus(px, py, pz) -- load the world around the player",
+      },
+    ],
+  },
+  {
     label: "cartbox · navigation",
     open: false,
     entries: [

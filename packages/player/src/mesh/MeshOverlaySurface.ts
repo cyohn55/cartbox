@@ -851,6 +851,11 @@ export class MeshOverlaySurface implements DisplaySurface {
 
   /** The camera's eye this frame (terrain blocks pick their detail by distance from it). */
   private eye: readonly [number, number, number] | null = null;
+
+  /** Where the camera was last drawn from (null before the first frame). */
+  eyePosition(): readonly [number, number, number] | null {
+    return this.eye;
+  }
   /** Each terrain block's world bounds, measured on first use. */
   private readonly blockBounds = new Map<number, readonly number[]>();
 

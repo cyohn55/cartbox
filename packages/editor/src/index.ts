@@ -212,6 +212,18 @@ export {
   type SerializedNavMesh,
 } from "./model/navmesh";
 export {
+  DEFAULT_STREAM_RANGE,
+  MAX_STREAM_RANGE,
+  MIN_STREAM_RANGE,
+  STREAM_PREFETCH,
+  STREAM_UNLOAD_MARGIN,
+  SpatialLoader,
+  boxDistance,
+  readStreaming,
+  type SceneStreaming,
+  type StreamGroup,
+} from "./model/streaming";
+export {
   MAX_TERRAIN_LAYERS,
   MAX_TERRAIN_SAMPLES,
   MIN_TERRAIN_SAMPLES,
