@@ -451,6 +451,7 @@ export {
   applySunShafts,
   shaftSourceMask,
   sunScreenPosition,
+  sunVisibility,
   type ShaftScratch,
   type SunShafts,
 } from "./render/sunShafts";

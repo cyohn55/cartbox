@@ -28,6 +28,7 @@ import {
   DecalSystem,
   applySunShafts,
   sunScreenPosition,
+  sunVisibility,
   type ShaftScratch,
   bakeSkyPanorama,
   buildSceneShadow,
@@ -52,6 +53,7 @@ import {
   type MeshSceneInstance,
 } from "@cartbox/editor";
 import type { DisplaySurface } from "../display.js";
+import type { ScreenSun } from "../fx/PostFxSurface.js";
 import { SoftwareSceneRenderer, type SceneRenderer } from "../render/sceneRenderer.js";
 import type { MailboxMeshCamera, MailboxMeshPose, WorldLight } from "../mailbox.js";
 import type { ShadowInput, SceneLight, SceneLighting } from "@cartbox/editor";
@@ -61,6 +63,8 @@ import { buildOrbitCamera, orbitPitchAboveTerrain } from "./meshScene.js";
 import { estimateSceneBytes, type Profiler, type RenderStats } from "../debug/profiler.js";
 
 const RAD_TO_DEG = 180 / Math.PI;
+/** How far the sun's reported visibility moves toward this frame's each frame. */
+const SUN_EASE = 0.35;
 
 /** Near clip plane for first-person (HUD) views, world units. */
 const FIRST_PERSON_NEAR = 0.05;
@@ -218,6 +222,14 @@ export class MeshOverlaySurface implements DisplaySurface {
   /** The last sky backdrop and the view it was painted for (it depends only on
    *  where the camera points, so walking without turning reuses it). */
   private skyCache: { key: string; pixels: Uint8ClampedArray } | null = null;
+  /**
+   * Told each frame where the sky dome's sun is on screen and how much of it is
+   * unblocked, for the post-FX glare and lens flare (H8); null without a sky dome.
+   */
+  onSun: ((sun: ScreenSun | null) => void) | null = null;
+  /** The sun's eased visibility and last place on screen (0..1). */
+  private sunSeen = 0;
+  private sunAt: { x: number; y: number } = { x: 0.5, y: 0.5 };
   /** Reused buffers for the sun-shaft pass. */
   private shaftScratch: ShaftScratch | null = null;
   /** The cart's world lights this frame (cartbox.light3d), added to the rig's in first person. */
@@ -660,6 +672,9 @@ export class MeshOverlaySurface implements DisplaySurface {
       // steps with the game rather than the wall clock.
       time: this.frame / 60,
     });
+    // Where the sun is and how much of it shows, for the glare and lens flare —
+    // measured before the shafts brighten the sky round it.
+    if (this.onSun) this.reportSun(out, width, height, camera.view, camera.projection, skyBackdrop ? lighting?.sky ?? null : null);
     // Sun shafts: open sky near the sun streaks through the gaps in the scene.
     // Drawn before the held weapon, which sits in front of the light.
     if (skyBackdrop && lighting?.shafts && lighting.sky && this.skyCache) {
@@ -700,6 +715,23 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.frame += 1; // advance in lockstep with the run loop's present cadence
     this.inner.blit(this.presented);
     this.pace(performance.now() - started);
+  }
+
+  /** Report the sun to {@link onSun}: its place on screen and its eased visibility. */
+  private reportSun(out: Uint8ClampedArray, width: number, height: number, view: Mat4, projection: Mat4, sky: { sunDirection: readonly [number, number, number] } | null): void {
+    const backdrop = this.skyCache?.pixels ?? null;
+    if (!sky || !backdrop) {
+      this.sunSeen = 0;
+      this.onSun?.(null);
+      return;
+    }
+    const sun = sunScreenPosition(sky.sunDirection, view, projection, width, height);
+    const target = sun ? sunVisibility(out, backdrop, width, height, sun) : 0;
+    if (sun) this.sunAt = { x: sun.x / width, y: sun.y / height };
+    // Eased, so the flare fades as a tower slides across the sun rather than popping.
+    this.sunSeen += (target - this.sunSeen) * SUN_EASE;
+    if (this.sunSeen < 1e-3) this.sunSeen = 0;
+    this.onSun?.({ x: this.sunAt.x, y: this.sunAt.y, visible: this.sunSeen });
   }
 
   /** Paint the sky backdrop, or copy it from last frame when the view direction hasn't changed. */

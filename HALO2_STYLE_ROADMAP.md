@@ -99,7 +99,16 @@ general Unity/UE5 gap); items here that close a line there tick it off too.
       and the Mesh tab's viewport now shows the fog. Lockout's chasm fills with
       a cloud sea under the deck, the haze brightens toward the sun, and beams
       break past the towers and the walkway.
-- [ ] **H8. Sun glare and lens flare** in the post-effects stack.
+- [x] **H8. Sun glare and lens flare** in the post-effects stack.
+      *Done:* a "Sun glare & lens flare" post effect: a soft glow and a
+      six-pointed starburst round the sun, and five tinted lens ghosts strung
+      from it through the frame centre, all in the one post pass (its maths in
+      `flareModel.ts`, unit-tested). In a 3D scene with a sky dome the first-
+      person overlay reports each frame where the sun is and how much of its
+      disc still shows the sky, eased, so the flare tracks the sun and fades as
+      a tower slides across it; elsewhere it sits at the effect's source point.
+      Glare, ghosts, size and colour are editable in the FX tab. Lockout's sun
+      flares over the towers and the ghosts cross the frame.
 
 ## Phase C — Characters and feel (mostly existing features)
 

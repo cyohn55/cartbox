@@ -409,6 +409,8 @@ export class Player {
       if (shownFx && anyPostFxEnabled(shownFx)) {
         const fx = await PostFxSurface.create(this.container, scale, this.model, shownFx, makeBaseSurface);
         if (fx) this.postFxSurface = fx;
+        // The lens flare follows the 3D scene's sun and fades as geometry covers it (H8).
+        if (fx && this.meshSurface) this.meshSurface.onSun = (sun) => fx.setSun(sun);
         this.surface = fx ?? (await makeBaseSurface(this.container));
       } else {
         this.surface = await makeBaseSurface(this.container);

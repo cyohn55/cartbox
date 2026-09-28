@@ -28,11 +28,20 @@ const MAX_RENDER_WIDTH = 1280;
 /** Builds the inner (decorated) surface into the given offscreen container. */
 export type InnerSurfaceFactory = (container: HTMLElement) => Promise<DisplaySurface> | DisplaySurface;
 
+/** Where a 3D scene's sun is on screen (0..1, y down) and how much of it is unblocked (0..1). */
+export interface ScreenSun {
+  readonly x: number;
+  readonly y: number;
+  readonly visible: number;
+}
+
 export class PostFxSurface implements DisplaySurface {
   private readonly resizeObserver: ResizeObserver;
   private uniforms: PostFxUniforms;
   /** When this surface started, so animated effects get a monotonic clock. */
   private readonly startedAt = performance.now();
+  /** The sun a 3D scene reports this frame; the lens flare follows it. Null = use the source point. */
+  private sun: ScreenSun | null = null;
 
   private constructor(
     private readonly container: HTMLElement,
@@ -92,13 +101,22 @@ export class PostFxSurface implements DisplaySurface {
     this.uniforms = uniformsFromSettings(settings);
   }
 
+  /**
+   * Follow a 3D scene's sun with the lens flare (HALO2_STYLE_ROADMAP.md, H8),
+   * or null to go back to the effect's own source point.
+   */
+  setSun(sun: ScreenSun | null): void {
+    this.sun = sun;
+  }
+
   blit(rgba: Uint8Array): void {
     this.inner.blit(rgba);
+    const sun = this.sun;
     this.pass.render(
       this.innerCanvas,
       this.model.width,
       this.model.height,
-      this.uniforms,
+      sun ? { ...this.uniforms, flareOrigin: [sun.x, sun.y], flareVisible: sun.visible } : this.uniforms,
       (performance.now() - this.startedAt) / 1000,
     );
   }

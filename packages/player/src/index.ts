@@ -204,6 +204,10 @@ export type {
 export {
   BLOOM_KNEE,
   BloomPyramid,
+  FLARE_GHOSTS,
+  FLARE_GHOST_GAIN,
+  FLARE_SPIKE_POWER,
+  lensFlareAt,
   MAX_PYRAMID_LEVELS,
   MIN_PYRAMID_DIMENSION,
   POST_FX_EFFECTS,
@@ -226,7 +230,10 @@ export {
   tiltShiftBlur,
 } from "./fx/index.js";
 export type {
+  FlareGhost,
+  FlareParams,
   InnerSurfaceFactory,
+  ScreenSun,
   PostFxColorDef,
   PostFxEffectDef,
   PostFxEffectId,
