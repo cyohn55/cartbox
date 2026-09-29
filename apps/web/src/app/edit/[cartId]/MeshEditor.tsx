@@ -16,8 +16,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  Ragdoll,
+  composeModelMatrix,
   createLiveSkinnedMesh,
   isSkinned,
+  ragdollRadii,
+  restPose,
   sampleClip,
   skinMatrices,
   renderMesh,
@@ -115,6 +119,10 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
   /** The skeletal clip the preview is playing (index), or null for the still mesh, and how far in. */
   const [previewClip, setPreviewClip] = useState<number | null>(null);
   const [clipTime, setClipTime] = useState(0);
+  /** A ragdoll dropped in the preview (H9): the body, and a frame counter that re-renders as it falls. */
+  const ragdollRef = useRef<Ragdoll | null>(null);
+  const [ragdolling, setRagdolling] = useState(false);
+  const [ragdollFrame, setRagdollFrame] = useState(0);
   /** The Scene view's viewpoint (to key a timeline camera from), and a timeline moment previewed in it. */
   const [sceneView, setSceneView] = useState<ViewpointKey | null>(null);
   const [timelinePreview, setTimelinePreview] = useState<TimelinePreview | null>(null);
@@ -145,6 +153,48 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
   // A skinned mesh previews through a live copy the clip poses; stop previewing on selection change.
   const liveMesh = useMemo(() => (meshAsset && isSkinned(meshAsset) ? createLiveSkinnedMesh(meshAsset) : null), [meshAsset]);
   useEffect(() => setPreviewClip(null), [meshAsset]);
+  // Playing a clip, or picking another mesh, stands a ragdoll back up.
+  useEffect(() => {
+    if (previewClip !== null) setRagdolling(false);
+  }, [previewClip]);
+  useEffect(() => setRagdolling(false), [meshAsset]);
+  useEffect(() => {
+    if (!ragdolling) ragdollRef.current = null;
+  }, [ragdolling]);
+  // Drop the skeleton as a ragdoll onto a floor under its feet: the same
+  // simulation killed soldiers use in the game, stepped at 60 a second.
+  const dropRagdoll = useCallback(() => {
+    const skin = meshAsset?.skin;
+    const bounds = meshAsset ? meshBounds(meshAsset) : null;
+    if (!meshAsset || !skin || !bounds) return;
+    const h = Math.max(1e-3, bounds.max[1] - bounds.min[1]);
+    const clip = previewClip !== null ? meshAsset.clips?.[previewClip] : undefined;
+    const pose = clip ? sampleClip(skin, clip, clipTime) : restPose(skin);
+    const identity = composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]);
+    const doll = new Ragdoll(skin, pose, identity, {
+      impulse: [0, h * 0.6, -h * 1.6],
+      gravity: 9.81 * (h / 1.7),
+      radii: ragdollRadii(meshAsset) ?? undefined,
+    });
+    const floor = [{ center: [0, bounds.min[1] - h * 0.5, 0] as const, half: [h * 30, h * 0.5, h * 30] as const }];
+    ragdollRef.current = doll;
+    setPreviewClip(null);
+    setRagdolling(true);
+    let last = performance.now();
+    // Runs until the body sleeps, or is replaced or stood up (the ref moves on).
+    const tick = (now: number) => {
+      if (ragdollRef.current !== doll) return;
+      // Catch up in whole 60 Hz steps; redraw at most ~30 times a second.
+      let steps = Math.min(8, Math.floor((now - last) / (1000 / 60)));
+      if (steps > 0) {
+        last += steps * (1000 / 60);
+        while (steps-- > 0) doll.step(1 / 60, floor);
+        setRagdollFrame((f) => f + 1);
+      }
+      if (!doll.asleep) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }, [meshAsset, previewClip, clipTime]);
   useEffect(() => {
     if (previewClip === null) return;
     let raf = 0;
@@ -202,7 +252,13 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
     const lighting = sidecar.lighting;
     const clip = previewClip !== null ? meshAsset.clips?.[previewClip] : undefined;
     let shown = meshAsset;
-    if (liveMesh && meshAsset.skin && clip) {
+    const doll = ragdolling ? ragdollRef.current : null;
+    if (liveMesh && meshAsset.skin && doll) {
+      const pose = restPose(meshAsset.skin);
+      doll.writePose(pose, composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]));
+      liveMesh.update(skinMatrices(meshAsset.skin, pose));
+      shown = liveMesh.mesh;
+    } else if (liveMesh && meshAsset.skin && clip) {
       liveMesh.update(skinMatrices(meshAsset.skin, sampleClip(meshAsset.skin, clip, clipTime)));
       shown = liveMesh.mesh;
     }
@@ -225,7 +281,7 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
     const image = context.createImageData(VIEWPORT, VIEWPORT);
     image.data.set(buffers.out);
     context.putImageData(image, 0, 0);
-  }, [meshAsset, textures, yaw, pitch, zoom, buffers, sidecar.lighting, liveMesh, previewClip, clipTime]);
+  }, [meshAsset, textures, yaw, pitch, zoom, buffers, sidecar.lighting, liveMesh, previewClip, clipTime, ragdolling, ragdollFrame]);
 
   // Orbit + zoom.
   const drag = useRef<{ x: number; y: number } | null>(null);
@@ -453,7 +509,14 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
             <PropertyEditor sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
 
             {meshAsset && isSkinned(meshAsset) && (
-              <AnimationPanel mesh={meshAsset} name={selectedEntry.name} playing={previewClip} onPlay={setPreviewClip} />
+              <AnimationPanel
+                mesh={meshAsset}
+                name={selectedEntry.name}
+                playing={previewClip}
+                onPlay={setPreviewClip}
+                ragdoll={ragdolling}
+                onRagdoll={(on) => (on ? dropRagdoll() : setRagdolling(false))}
+              />
             )}
             {meshAsset && isSkinned(meshAsset) && (
               <AnimatorPanel sidecar={sidecar} entry={selectedEntry} mesh={meshAsset} onChange={onSidecarChange} />

@@ -4041,6 +4041,8 @@ cartbox = {
   events = function() return {} end,
   ik = function() end,
   lookat = function() end,
+  ragdoll = function() end,
+  unragdoll = function() end,
   joint = function() return nil end,
   joints = function() return {} end,
   playtimeline = function() end,
@@ -4168,7 +4170,8 @@ import {
   viewMatrix,
   parseParticleEffects,
   parseDecalDefs,
-  parseDecalMarks
+  parseDecalMarks,
+  parseRagdollColliders
 } from "@cartbox/editor";
 var DEFAULT_PREFAB_POOL = 8;
 var MAX_PREFAB_POOL = 32;
@@ -4353,6 +4356,7 @@ function parseMeshScene(raw) {
   const effects = parseParticleEffects(parsed.effects);
   const decals = parseDecalDefs(parsed.decals);
   const decalMarks = parseDecalMarks(parsed.decalMarks, decals);
+  const ragdollColliders = parseRagdollColliders(parsed.ragdollColliders);
   return {
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
@@ -4361,6 +4365,7 @@ function parseMeshScene(raw) {
     ...effects.length > 0 ? { effects } : {},
     ...decals.length > 0 ? { decals } : {},
     ...decalMarks.length > 0 ? { decalMarks } : {},
+    ...ragdollColliders.length > 0 ? { ragdollColliders } : {},
     lighting,
     ...pools.length > 0 ? { pools } : {},
     ...physicsWorld ? { physicsWorld } : {},
@@ -4575,6 +4580,7 @@ var PHYS_OP_AGENT_REMOVE = 24;
 var PHYS_OP_STREAM_FOCUS = 25;
 var PHYS_OP_BURST = 26;
 var PHYS_OP_DECAL = 27;
+var PHYS_OP_RAGDOLL = 28;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -5984,6 +5990,16 @@ function ANIM_CALLS(scene) {
     local j = i and _joint(i, joint)
     if j ~= nil then _cmd(${PHYS_OP_LOOKAT}, i, j, x or 0, y or 0, z or 0, weight or 1, maxdeg or 60) end
   end
+  cartbox.ragdoll = function(o, ix, iy, iz, joint)
+    local i = _obj(o)
+    if i == nil or _jt[i] == nil then return end
+    local j = (joint ~= nil and _joint(i, joint)) or -1
+    _cmd(${PHYS_OP_RAGDOLL}, i, 1, ix or 0, iy or 0, iz or 0, j)
+  end
+  cartbox.unragdoll = function(o)
+    local i = _obj(o)
+    if i ~= nil and _jt[i] ~= nil then _cmd(${PHYS_OP_RAGDOLL}, i, 0) end
+  end
   local _watching = {}
   cartbox.joint = function(o, joint)
     local i = _obj(o)
@@ -6067,6 +6083,8 @@ import {
   invertAffine,
   jointPosition,
   multiplyMat4 as multiplyMat42,
+  Ragdoll,
+  ragdollRadii,
   solveLookAt,
   solveTwoBoneIK
 } from "@cartbox/editor";
@@ -6336,6 +6354,16 @@ var RuntimeChannel = class {
     this.bursts = [];
     /** Decals the cart laid since the renderer last took them. */
     this.decals = [];
+    /**
+     * Ragdolls (H9): object → the limp body, built from its pose the next time it
+     * is skinned after cartbox.ragdoll (until then null, with the shove to give it).
+     * Local and cosmetic: nothing here reaches the cart or the physics world.
+     */
+    this.ragdolls = /* @__PURE__ */ new Map();
+    /** What ragdolls land on (the scene's static bodies and authored boxes), built on first use. */
+    this.ragdollBoxes = null;
+    /** Collision radii per skinned mesh. */
+    this.radii = /* @__PURE__ */ new Map();
     /** Joints whose world position the cart asked for, and where they were when last skinned. */
     this.watched = /* @__PURE__ */ new Map();
     this.animation = sceneHasAnimation(scene) ? new AnimationSession(scene) : null;
@@ -6389,7 +6417,8 @@ var RuntimeChannel = class {
       } else if (cmd.op === PHYS_OP_DECAL) {
         if (this.decals.length < MAX_BURSTS_QUEUED)
           this.decals.push({ decal: cmd.a & 255, at: [cmd.v[0], cmd.v[1], cmd.v[2]], normal: [cmd.v[3], cmd.v[4], cmd.v[5]], scale: (cmd.a >>> 8 & 65535) / 16 });
-      } else if (cmd.op === PHYS_OP_TIMELINE) {
+      } else if (cmd.op === PHYS_OP_RAGDOLL) this.ragdollCommand(cmd.a, cmd.v);
+      else if (cmd.op === PHYS_OP_TIMELINE) {
         if (cmd.a < 0) this.timeline?.stop();
         else this.timeline?.play(cmd.a, cmd.v[0], cmd.v[1]);
       }
@@ -6398,6 +6427,53 @@ var RuntimeChannel = class {
     this.physics?.run(commands.filter((c) => c.op < PHYS_OP_SPAWN || c.op > PHYS_OP_DESPAWN && c.op < PHYS_OP_PLAY));
     this.animation?.step(PHYSICS_DT);
     this.crowd?.step(PHYSICS_DT);
+    if (this.ragdolls.size > 0) {
+      const boxes = this.colliders();
+      let awake = false;
+      for (const r of this.ragdolls.values()) if (r.doll ? r.doll.step(PHYSICS_DT, boxes) : true) awake = true;
+      if (awake) this.animation?.invalidate();
+    }
+  }
+  /** Go limp (v0 = 1) with a shove, or take the animation back (v0 = 0). */
+  ragdollCommand(object, v) {
+    const inst = this.scene.instances[object];
+    if (!inst?.mesh.skin) return;
+    if (v[0] >= 0.5) this.ragdolls.set(object, { doll: null, impulse: [v[1], v[2], v[3]], joint: Math.round(v[4]) });
+    else this.ragdolls.delete(object);
+    this.animation?.invalidate();
+  }
+  /** Whether an object is a ragdoll now. */
+  isRagdoll(object) {
+    return this.ragdolls.has(object);
+  }
+  /** The boxes ragdolls collide with: static, solid bodies (as oriented boxes round their meshes) and the scene's authored ones. */
+  colliders() {
+    if (this.ragdollBoxes) return this.ragdollBoxes;
+    const boxes = [...this.scene.ragdollColliders ?? []];
+    for (const inst of this.scene.instances) {
+      if (inst.physics?.body !== "static" || inst.physics.trigger || inst.pooled) continue;
+      const lo = [Infinity, Infinity, Infinity];
+      const hi = [-Infinity, -Infinity, -Infinity];
+      for (const prim of inst.mesh.primitives)
+        for (let i = 0; i < prim.positions.length; i += 3)
+          for (let k = 0; k < 3; k += 1) {
+            lo[k] = Math.min(lo[k], prim.positions[i + k]);
+            hi[k] = Math.max(hi[k], prim.positions[i + k]);
+          }
+      if (!(lo[0] <= hi[0])) continue;
+      const m = inst.model;
+      const centre = transform(m, [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2]);
+      const cols = [0, 1, 2].map((c) => [m[c * 4], m[c * 4 + 1], m[c * 4 + 2]]);
+      const lens = cols.map((c) => Math.hypot(c[0], c[1], c[2]) || 1);
+      const axes = cols.map((c, i) => [c[0] / lens[i], c[1] / lens[i], c[2] / lens[i]]);
+      boxes.push({
+        center: centre,
+        half: [(hi[0] - lo[0]) / 2 * lens[0], (hi[1] - lo[1]) / 2 * lens[1], (hi[2] - lo[2]) / 2 * lens[2]],
+        axes: [axes[0], axes[1], axes[2]]
+      });
+    }
+    this.ragdollBoxes = boxes;
+    return boxes;
   }
   /** A navigation agent command (see PHYS_OP_AGENT). */
   agentCommand(op, key, v) {
@@ -6506,9 +6582,9 @@ var RuntimeChannel = class {
   timelinePlacements() {
     return this.timeline?.placements() ?? /* @__PURE__ */ new Map();
   }
-  /** Whether IK, look-at or joint watching needs the objects' current world matrices. */
+  /** Whether IK, look-at, joint watching or a ragdoll needs the objects' current world matrices. */
   needsWorld() {
-    return this.requests.size > 0 || this.watched.size > 0;
+    return this.requests.size > 0 || this.watched.size > 0 || this.ragdolls.size > 0;
   }
   defaultWorld(object) {
     const inst = this.scene.instances[object];
@@ -6553,13 +6629,24 @@ var RuntimeChannel = class {
     if (this.watched.has(key) || joint < 0 || joint >= joints || this.watched.size >= PHYS_MAX_JOINTS) return;
     this.watched.set(key, { object, joint, position: null });
   }
-  /** Apply an object's standing IK (first) and look-at requests to its pose. */
+  /** Apply an object's standing IK (first) and look-at requests to its pose, then a ragdoll over it all. */
   solve(object, mesh, pose, worldOf) {
     const requests = this.requests.get(object);
     const skin = mesh.skin;
-    if (!requests || !skin) return;
+    const rag = this.ragdolls.get(object);
+    if (!requests && !rag || !skin) return;
     const world = worldOf(object);
     if (!world) return;
+    if (requests) this.solveRequests(requests, skin, pose, world);
+    if (rag) {
+      if (!rag.doll) {
+        if (!this.radii.has(mesh)) this.radii.set(mesh, ragdollRadii(mesh));
+        rag.doll = new Ragdoll(skin, pose, world, { impulse: rag.impulse, joint: rag.joint, radii: this.radii.get(mesh) ?? void 0 });
+      }
+      rag.doll.writePose(pose, world);
+    }
+  }
+  solveRequests(requests, skin, pose, world) {
     const toMesh = invertAffine(world);
     if (!toMesh) return;
     const local = (p) => transform(toMesh, p);
@@ -6581,7 +6668,10 @@ var RuntimeChannel = class {
     const [x, y, z, yaw, pitch, roll] = v;
     const world = composeModelMatrix3([x, y, z], [pitch * DEG, yaw * DEG, roll * DEG], [1, 1, 1]);
     this.active.set(root, world);
-    for (const object of objects) this.animation?.reset(object);
+    for (const object of objects) {
+      this.animation?.reset(object);
+      this.ragdolls.delete(object);
+    }
     const placed = /* @__PURE__ */ new Map([[root, world]]);
     const worldOf = (i) => {
       const known = placed.get(i);
@@ -6600,6 +6690,7 @@ var RuntimeChannel = class {
     const objects = this.copyObjects.get(root);
     if (!objects || !this.active.has(root)) return;
     this.active.delete(root);
+    for (const object of objects) this.ragdolls.delete(object);
     this.physics?.setCopyActive(objects, () => null, false);
   }
   destroy() {

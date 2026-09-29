@@ -112,8 +112,21 @@ general Unity/UE5 gap); items here that close a line there tick it off too.
 
 ## Phase C — Characters and feel (mostly existing features)
 
-- [ ] **H9. Ragdoll deaths.** Killed soldiers go limp on physics joints and
+- [x] **H9. Ragdoll deaths.** Killed soldiers go limp on physics joints and
       tumble; cosmetic, simulated locally, so online play is unaffected.
+      *Done:* `cartbox.ragdoll(obj, ix, iy, iz, joint)` turns a skinned object
+      into a ragdoll — a Verlet body of its own (a particle per joint, bones
+      held to length, siblings keeping the torso rigid, grandparent limits so a
+      knee bends but never folds) that lands on the scene's static bodies and
+      authored collider boxes, rests on its armour (radii fitted to the mesh
+      round each bone) and sleeps once settled. The skeleton's pose is rebuilt
+      from it every frame, over the animation and IK, and it stays where it fell
+      however the object is moved; `cartbox.unragdoll` stands it back up. It
+      runs apart from the physics world, so the deterministic checksum and
+      online play never see it. The Mesh tab's Animation panel can drop a
+      skeleton as a ragdoll to preview it. Lockout's soldiers are thrown away
+      from whoever killed them (harder for a headshot) onto the arena's own
+      collider boxes, and lie there until just before they respawn.
 - [ ] **H10. Cosmetic physics debris.** Ejected shell casings and dropped
       weapons as spawned physics props (prefabs + bodies), local only.
 - [ ] **H11. Shield effects.** A per-pose material override: the shield flare

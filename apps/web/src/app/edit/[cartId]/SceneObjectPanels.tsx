@@ -456,11 +456,16 @@ export function AnimationPanel({
   name,
   playing,
   onPlay,
+  ragdoll = false,
+  onRagdoll,
 }: {
   mesh: MeshAsset;
   name: string;
   playing: number | null;
   onPlay: (clip: number | null) => void;
+  /** Whether the preview shows the skeleton dropped as a ragdoll (H9). */
+  ragdoll?: boolean;
+  onRagdoll?: (on: boolean) => void;
 }) {
   const clips = mesh.clips ?? [];
   return (
@@ -481,8 +486,13 @@ export function AnimationPanel({
           </button>
         ))}
       </div>
+      {onRagdoll && (
+        <button type="button" className={styles.toolBtn} style={{ marginTop: 6 }} aria-pressed={ragdoll} onClick={() => onRagdoll(!ragdoll)}>
+          {ragdoll ? "↑ Stand up" : "↓ Drop as ragdoll"}
+        </button>
+      )}
       <details style={{ marginTop: 6, fontSize: 12 }}>
-        <summary>Joints (for cartbox.ik / lookat / joint)</summary>
+        <summary>Joints (for cartbox.ik / lookat / joint / ragdoll)</summary>
         <div style={{ opacity: 0.8, marginTop: 4, lineHeight: 1.5, wordBreak: "break-word" }}>
           {(mesh.skin?.joints ?? []).map((j) => j.name).join(" · ")}
         </div>
@@ -490,7 +500,8 @@ export function AnimationPanel({
       <RailHint>
         {clips.length > 0
           ? `In the game it plays “${clips[0]!.name}” on a loop by itself. In code: cartbox.play(${JSON.stringify(name)}, ${JSON.stringify(clips[clips.length > 1 ? 1 : 0]!.name)}) switches clip with a short crossfade.`
-          : "No clips came with this model; import a glTF with animations to play them."}
+          : "No clips came with this model; import a glTF with animations to play them."}{" "}
+        {`When it dies: cartbox.ragdoll(${JSON.stringify(name)}, ix, iy, iz) makes it go limp and tumble, shoved by (ix, iy, iz); cartbox.unragdoll(${JSON.stringify(name)}) stands it back up. The body is simulated on each player's machine, so it never affects online play.`}
       </RailHint>
     </RailGroup>
   );

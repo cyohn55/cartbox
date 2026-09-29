@@ -562,6 +562,13 @@ const STRUCT: Box[] = [
 ];
 
 /**
+ * What a killed soldier's ragdoll lands on (HALO2_STYLE_ROADMAP.md H9): the
+ * same collider boxes the cart collides with, so a body sprawls on the deck,
+ * slumps down a ramp or tumbles off a tower edge onto the level below.
+ */
+export const LOCKOUT_RAGDOLL_COLLIDERS = STRUCT.map(([cx, cy, cz, hx, hy, hz]) => ({ center: [cx, cy, cz] as const, half: [hx, hy, hz] as const }));
+
+/**
  * The bots' walkable surface, baked from the same collider boxes the cart
  * collides with (see navmesh.ts): a soldier's radius from every wall and edge,
  * up every flight of steps, with drops off the ledges. The bots find their own
@@ -1998,6 +2005,7 @@ export function lockoutMeshSidecar(): string {
       timelines: [LOCKOUT_INTRO],
       effects: LOCKOUT_EFFECTS,
       decals: LOCKOUT_DECALS,
+      ragdollColliders: LOCKOUT_RAGDOLL_COLLIDERS,
       decalMarks: LOCKOUT_DECAL_MARKS,
     });
   }
@@ -2474,6 +2482,15 @@ end
 -- Register a kill: scoring, sprees, multikills, feed, and juggernaut handover.
 function register_kill(killer, victim, hs)
   victim.dead=true; victim.respawn = MODE.obj=="jugg" and 70 or 100
+  -- Which way the body is thrown when it goes limp (a cosmetic ragdoll, local
+  -- to each browser): away from the killer, harder for a headshot's snap back.
+  if killer and killer~=victim then
+    local dx, dz = victim.x-killer.x, victim.z-killer.z
+    local d = math.sqrt(dx*dx+dz*dz)+0.001
+    local f = hs and 4.5 or 3.2
+    victim.kick = {dx/d*f, 1.1, dz/d*f}
+  else victim.kick = {0, 0.4, 0} end
+  victim.kick_joint = hs and "head" or "chest"
   victim.deaths=(victim.deaths or 0)+1
   victim.streak=0
   if killer and killer~=victim then
@@ -3111,9 +3128,9 @@ local function draw_reticle()
 end
 
 -- Soldiers are skinned: each one's state machine (idle/run blended by speed,
--- a jump pose in the air, a fall when killed) plays on its skeleton, and the
--- cart only feeds it parameters and places it. The speed eases toward
--- moving/standing so the stride blends in and out rather than snapping.
+-- a jump pose in the air) plays on its skeleton, a killed one goes limp as a
+-- ragdoll, and the cart only feeds it parameters and places it. The speed eases
+-- toward moving/standing so the stride blends in and out rather than snapping.
 function animate_bot(i, o)
   local target = (o.moving and not o.dead) and 1 or 0
   o.spd = (o.spd or 0) + (target - (o.spd or 0)) * 0.25
@@ -3122,9 +3139,15 @@ function animate_bot(i, o)
   if spd ~= o.sent_spd then o.sent_spd = spd; cartbox.set(i, "speed", spd) end
   local air, dead = o.air and true or false, o.dead and true or false
   if air ~= o.sent_air then o.sent_air = air; cartbox.set(i, "grounded", not air) end
-  if dead ~= o.sent_dead then o.sent_dead = dead; cartbox.set(i, "dead", dead) end
-  -- A killed soldier falls where it stood, then is taken away before it respawns.
-  if o.dead and (o.respawn or 0) < 40 then cartbox.meshpose(i,0,-50,0,0,0,0,0); return end
+  if dead ~= o.sent_dead then
+    o.sent_dead = dead; cartbox.set(i, "dead", dead)
+    -- Killed: the body goes limp and tumbles (a ragdoll, simulated in this
+    -- browser only); respawned: it stands back up on its animation.
+    if dead then local k = o.kick or {0, 0.4, 0}; cartbox.ragdoll(i, k[1], k[2], k[3], o.kick_joint or "chest")
+    else cartbox.unragdoll(i) end
+  end
+  -- The body lies where it fell, and is taken away just before it respawns.
+  if o.dead and (o.respawn or 0) < 10 then cartbox.meshpose(i,0,-50,0,0,0,0,0); return end
   cartbox.meshpose(i, o.x, o.y, o.z, o.face or 0, 0, 0, o.jugg and 1.25 or 1, 0, armor_tint(o))
   -- Aim with the body (look-at on the skeleton): the chest, and with it the arms
   -- and rifle, and the head turn toward whoever it's fighting, on top of the

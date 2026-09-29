@@ -56,6 +56,12 @@
  *                                     the first ask)
  *   cartbox.joints(obj)               -> { name, ... } the skeleton's joints
  *
+ * Ragdolls (cosmetic, simulated on this machine only, so online play is unaffected):
+ *
+ *   cartbox.ragdoll(obj, ix, iy, iz, joint)  go limp and tumble, shoved by (ix, iy, iz)
+ *                                     world units/second, centred on `joint` when given
+ *   cartbox.unragdoll(obj)            back to its animation (e.g. on respawn)
+ *
  * Timelines (cutscenes and camera moves, when the scene has any):
  *
  *   cartbox.playtimeline(name, from, speed)  play a timeline (from seconds; speed 1)
@@ -92,6 +98,7 @@ import {
   PHYS_OP_STREAM_FOCUS,
   PHYS_OP_BURST,
   PHYS_OP_DECAL,
+  PHYS_OP_RAGDOLL,
   PHYS_AGENTS,
   PHYS_AGENT_BYTES,
   PHYS_MAX_AGENTS,
@@ -650,6 +657,16 @@ function ANIM_CALLS(scene: MeshScene): string {
     local i = _obj(o)
     local j = i and _joint(i, joint)
     if j ~= nil then _cmd(${PHYS_OP_LOOKAT}, i, j, x or 0, y or 0, z or 0, weight or 1, maxdeg or 60) end
+  end
+  cartbox.ragdoll = function(o, ix, iy, iz, joint)
+    local i = _obj(o)
+    if i == nil or _jt[i] == nil then return end
+    local j = (joint ~= nil and _joint(i, joint)) or -1
+    _cmd(${PHYS_OP_RAGDOLL}, i, 1, ix or 0, iy or 0, iz or 0, j)
+  end
+  cartbox.unragdoll = function(o)
+    local i = _obj(o)
+    if i ~= nil and _jt[i] ~= nil then _cmd(${PHYS_OP_RAGDOLL}, i, 0) end
   end
   local _watching = {}
   cartbox.joint = function(o, joint)

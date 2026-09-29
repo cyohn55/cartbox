@@ -40,6 +40,8 @@ import {
   type ParticleEffect,
   parseDecalDefs,
   parseDecalMarks,
+  parseRagdollColliders,
+  type RagdollBox,
   type DecalDef,
   type DecalMark,
   type SceneStreaming,
@@ -172,6 +174,8 @@ export interface MeshSidecar {
   /** Decals the cart lays with cartbox.decal, and permanent marks placed here (see decals.ts in @cartbox/editor). */
   readonly decals?: readonly DecalDef[];
   readonly decalMarks?: readonly DecalMark[];
+  /** Boxes ragdolls land on, besides static bodies (see ragdoll.ts in @cartbox/editor). */
+  readonly ragdollColliders?: readonly RagdollBox[];
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -223,6 +227,7 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(sidecar.effects && sidecar.effects.length > 0 ? { effects: sidecar.effects } : {}),
     ...(sidecar.decals && sidecar.decals.length > 0 ? { decals: sidecar.decals } : {}),
     ...(sidecar.decalMarks && sidecar.decalMarks.length > 0 ? { decalMarks: sidecar.decalMarks } : {}),
+    ...(sidecar.ragdollColliders && sidecar.ragdollColliders.length > 0 ? { ragdollColliders: sidecar.ragdollColliders } : {}),
   });
 }
 
@@ -316,6 +321,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
   const effects = parseParticleEffects((parsed as { effects?: unknown }).effects);
   const decals = parseDecalDefs((parsed as { decals?: unknown }).decals);
   const decalMarks = parseDecalMarks((parsed as { decalMarks?: unknown }).decalMarks, decals);
+  const ragdollColliders = parseRagdollColliders((parsed as { ragdollColliders?: unknown }).ragdollColliders);
   const placed = linked.map((entry) => (entry.level && !levelIds.has(entry.level) ? withoutLevel(entry) : entry));
   return {
     version: MESH_SIDECAR_VERSION,
@@ -332,6 +338,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     ...(effects.length > 0 ? { effects } : {}),
     ...(decals.length > 0 ? { decals } : {}),
     ...(decalMarks.length > 0 ? { decalMarks } : {}),
+    ...(ragdollColliders.length > 0 ? { ragdollColliders } : {}),
   };
 }
 
