@@ -243,6 +243,12 @@ export const PHYS_OP_STREAM_FOCUS = 25;
 export const PHYS_OP_BURST = 26;
 /** A decal (cartbox.decal): a = the decal's index | (scale × 16) << 8; v0..v2 = where, v3..v5 = the surface normal. */
 export const PHYS_OP_DECAL = 27;
+/**
+ * A ragdoll (cartbox.ragdoll / unragdoll, HALO2_STYLE_ROADMAP.md H9): a = the
+ * object; v0 = 1 to go limp, 0 to take the animation back; v1..v3 = the
+ * impulse (world units/second); v4 = the joint it centres on (-1 = none).
+ */
+export const PHYS_OP_RAGDOLL = 28;
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {

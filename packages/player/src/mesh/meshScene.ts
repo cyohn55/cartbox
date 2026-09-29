@@ -54,6 +54,8 @@ import {
   type ParticleEffect,
   parseDecalDefs,
   parseDecalMarks,
+  parseRagdollColliders,
+  type RagdollBox,
   type DecalDef,
   type DecalMark,
 } from "@cartbox/editor";
@@ -154,6 +156,8 @@ export interface MeshScene {
   /** Decals the cart lays with `cartbox.decal`, and permanent marks placed in the editor (see decals.ts in @cartbox/editor). */
   readonly decals?: readonly DecalDef[];
   readonly decalMarks?: readonly DecalMark[];
+  /** Boxes ragdolls land on (HALO2_STYLE_ROADMAP.md, H9), besides the scene's static bodies. */
+  readonly ragdollColliders?: readonly RagdollBox[];
 }
 
 /** A view + projection pair ready to hand to `renderMeshScene`. */
@@ -385,6 +389,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
   const effects = parseParticleEffects((parsed as { effects?: unknown }).effects);
   const decals = parseDecalDefs((parsed as { decals?: unknown }).decals);
   const decalMarks = parseDecalMarks((parsed as { decalMarks?: unknown }).decalMarks, decals);
+  const ragdollColliders = parseRagdollColliders((parsed as { ragdollColliders?: unknown }).ragdollColliders);
   return {
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
@@ -393,6 +398,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     ...(effects.length > 0 ? { effects } : {}),
     ...(decals.length > 0 ? { decals } : {}),
     ...(decalMarks.length > 0 ? { decalMarks } : {}),
+    ...(ragdollColliders.length > 0 ? { ragdollColliders } : {}),
     lighting,
     ...(pools.length > 0 ? { pools } : {}),
     ...(physicsWorld ? { physicsWorld } : {}),

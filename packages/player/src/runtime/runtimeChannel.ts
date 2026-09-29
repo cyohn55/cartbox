@@ -14,10 +14,13 @@ import {
   invertAffine,
   jointPosition,
   multiplyMat4,
+  Ragdoll,
+  ragdollRadii,
   solveLookAt,
   solveTwoBoneIK,
   type Mat4,
   type MeshAsset,
+  type RagdollBox,
 } from "@cartbox/editor";
 
 import { AnimationSession, sceneHasAnimation } from "../anim/animationSession.js";
@@ -43,6 +46,7 @@ import {
   PHYS_OP_STREAM_FOCUS,
   PHYS_OP_BURST,
   PHYS_OP_DECAL,
+  PHYS_OP_RAGDOLL,
   PHYS_OP_WATCH,
   PHYS_OP_AGENT,
   PHYS_OP_AGENT_GOTO,
@@ -122,6 +126,16 @@ export class RuntimeChannel {
   private bursts: ParticleBurst[] = [];
   /** Decals the cart laid since the renderer last took them. */
   private decals: DecalLaid[] = [];
+  /**
+   * Ragdolls (H9): object → the limp body, built from its pose the next time it
+   * is skinned after cartbox.ragdoll (until then null, with the shove to give it).
+   * Local and cosmetic: nothing here reaches the cart or the physics world.
+   */
+  private readonly ragdolls = new Map<number, { doll: Ragdoll | null; impulse: Vec3; joint: number }>();
+  /** What ragdolls land on (the scene's static bodies and authored boxes), built on first use. */
+  private ragdollBoxes: RagdollBox[] | null = null;
+  /** Collision radii per skinned mesh. */
+  private readonly radii = new Map<MeshAsset, Float64Array | null>();
   /** Joints whose world position the cart asked for, and where they were when last skinned. */
   private readonly watched = new Map<string, { object: number; joint: number; position: [number, number, number] | null }>();
 
@@ -184,6 +198,7 @@ export class RuntimeChannel {
         if (this.decals.length < MAX_BURSTS_QUEUED)
           this.decals.push({ decal: cmd.a & 0xff, at: [cmd.v[0]!, cmd.v[1]!, cmd.v[2]!], normal: [cmd.v[3]!, cmd.v[4]!, cmd.v[5]!], scale: ((cmd.a >>> 8) & 0xffff) / 16 });
       }
+      else if (cmd.op === PHYS_OP_RAGDOLL) this.ragdollCommand(cmd.a, cmd.v);
       else if (cmd.op === PHYS_OP_TIMELINE) {
         if (cmd.a < 0) this.timeline?.stop();
         else this.timeline?.play(cmd.a, cmd.v[0], cmd.v[1]);
@@ -194,6 +209,57 @@ export class RuntimeChannel {
     this.physics?.run(commands.filter((c) => c.op < PHYS_OP_SPAWN || (c.op > PHYS_OP_DESPAWN && c.op < PHYS_OP_PLAY)));
     this.animation?.step(PHYSICS_DT);
     this.crowd?.step(PHYSICS_DT);
+    // Ragdolls tumble on the tick clock too; while any is awake the poses change every tick.
+    if (this.ragdolls.size > 0) {
+      const boxes = this.colliders();
+      let awake = false;
+      for (const r of this.ragdolls.values()) if (r.doll ? r.doll.step(PHYSICS_DT, boxes) : true) awake = true;
+      if (awake) this.animation?.invalidate();
+    }
+  }
+
+  /** Go limp (v0 = 1) with a shove, or take the animation back (v0 = 0). */
+  private ragdollCommand(object: number, v: readonly number[]): void {
+    const inst = this.scene.instances[object];
+    if (!inst?.mesh.skin) return;
+    if (v[0]! >= 0.5) this.ragdolls.set(object, { doll: null, impulse: [v[1]!, v[2]!, v[3]!], joint: Math.round(v[4]!) });
+    else this.ragdolls.delete(object);
+    this.animation?.invalidate();
+  }
+
+  /** Whether an object is a ragdoll now. */
+  isRagdoll(object: number): boolean {
+    return this.ragdolls.has(object);
+  }
+
+  /** The boxes ragdolls collide with: static, solid bodies (as oriented boxes round their meshes) and the scene's authored ones. */
+  private colliders(): RagdollBox[] {
+    if (this.ragdollBoxes) return this.ragdollBoxes;
+    const boxes: RagdollBox[] = [...(this.scene.ragdollColliders ?? [])];
+    for (const inst of this.scene.instances) {
+      if (inst.physics?.body !== "static" || inst.physics.trigger || inst.pooled) continue;
+      const lo = [Infinity, Infinity, Infinity];
+      const hi = [-Infinity, -Infinity, -Infinity];
+      for (const prim of inst.mesh.primitives)
+        for (let i = 0; i < prim.positions.length; i += 3)
+          for (let k = 0; k < 3; k += 1) {
+            lo[k] = Math.min(lo[k]!, prim.positions[i + k]!);
+            hi[k] = Math.max(hi[k]!, prim.positions[i + k]!);
+          }
+      if (!(lo[0]! <= hi[0]!)) continue;
+      const m = inst.model;
+      const centre = transform(m, [(lo[0]! + hi[0]!) / 2, (lo[1]! + hi[1]!) / 2, (lo[2]! + hi[2]!) / 2]);
+      const cols = [0, 1, 2].map((c) => [m[c * 4]!, m[c * 4 + 1]!, m[c * 4 + 2]!] as const);
+      const lens = cols.map((c) => Math.hypot(c[0], c[1], c[2]) || 1);
+      const axes = cols.map((c, i) => [c[0] / lens[i]!, c[1] / lens[i]!, c[2] / lens[i]!] as const);
+      boxes.push({
+        center: centre,
+        half: [((hi[0]! - lo[0]!) / 2) * lens[0]!, ((hi[1]! - lo[1]!) / 2) * lens[1]!, ((hi[2]! - lo[2]!) / 2) * lens[2]!],
+        axes: [axes[0]!, axes[1]!, axes[2]!],
+      });
+    }
+    this.ragdollBoxes = boxes;
+    return boxes;
   }
 
   /** A navigation agent command (see PHYS_OP_AGENT). */
@@ -316,9 +382,9 @@ export class RuntimeChannel {
     return this.timeline?.placements() ?? new Map();
   }
 
-  /** Whether IK, look-at or joint watching needs the objects' current world matrices. */
+  /** Whether IK, look-at, joint watching or a ragdoll needs the objects' current world matrices. */
   needsWorld(): boolean {
-    return this.requests.size > 0 || this.watched.size > 0;
+    return this.requests.size > 0 || this.watched.size > 0 || this.ragdolls.size > 0;
   }
 
   private defaultWorld(object: number): Mat4 | null {
@@ -367,13 +433,25 @@ export class RuntimeChannel {
     this.watched.set(key, { object, joint, position: null });
   }
 
-  /** Apply an object's standing IK (first) and look-at requests to its pose. */
+  /** Apply an object's standing IK (first) and look-at requests to its pose, then a ragdoll over it all. */
   private solve(object: number, mesh: MeshAsset, pose: Float32Array, worldOf: (object: number) => Mat4 | null): void {
     const requests = this.requests.get(object);
     const skin = mesh.skin;
-    if (!requests || !skin) return;
+    const rag = this.ragdolls.get(object);
+    if ((!requests && !rag) || !skin) return;
     const world = worldOf(object);
     if (!world) return;
+    if (requests) this.solveRequests(requests, skin, pose, world);
+    if (rag) {
+      if (!rag.doll) {
+        if (!this.radii.has(mesh)) this.radii.set(mesh, ragdollRadii(mesh));
+        rag.doll = new Ragdoll(skin, pose, world, { impulse: rag.impulse, joint: rag.joint, radii: this.radii.get(mesh) ?? undefined });
+      }
+      rag.doll.writePose(pose, world);
+    }
+  }
+
+  private solveRequests(requests: Map<number, PoseRequest>, skin: NonNullable<MeshAsset["skin"]>, pose: Float32Array, world: Mat4): void {
     const toMesh = invertAffine(world);
     if (!toMesh) return;
     const local = (p: Vec3) => transform(toMesh, p);
@@ -397,7 +475,10 @@ export class RuntimeChannel {
     const [x, y, z, yaw, pitch, roll] = v;
     const world = composeModelMatrix([x!, y!, z!], [pitch! * DEG, yaw! * DEG, roll! * DEG], [1, 1, 1]);
     this.active.set(root, world);
-    for (const object of objects) this.animation?.reset(object);
+    for (const object of objects) {
+      this.animation?.reset(object);
+      this.ragdolls.delete(object); // a fresh copy stands up
+    }
     // Where each of the copy's objects now is: the root's placement · its authored chain.
     const placed = new Map<number, Mat4>([[root, world]]);
     const worldOf = (i: number): Mat4 | null => {
@@ -418,6 +499,7 @@ export class RuntimeChannel {
     const objects = this.copyObjects.get(root);
     if (!objects || !this.active.has(root)) return;
     this.active.delete(root);
+    for (const object of objects) this.ragdolls.delete(object);
     this.physics?.setCopyActive(objects, () => null, false);
   }
 

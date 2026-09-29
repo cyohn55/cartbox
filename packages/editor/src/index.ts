@@ -69,6 +69,7 @@ export {
   LOCKOUT_NAV_AGENT,
   LOCKOUT_INTRO,
   LOCKOUT_EFFECTS,
+  LOCKOUT_RAGDOLL_COLLIDERS,
   LOCKOUT_DECALS,
   LOCKOUT_DECAL_MARKS,
   lockoutNavMesh,
@@ -422,6 +423,21 @@ export {
   type DecalMark,
   type DecalPreset,
 } from "./model/decals";
+export {
+  MAX_RAGDOLL_COLLIDERS,
+  RAGDOLL_DAMPING,
+  RAGDOLL_FRICTION,
+  RAGDOLL_ITERATIONS,
+  RAGDOLL_KILL_Y,
+  RAGDOLL_MAX_LIFE,
+  RAGDOLL_SETTLE_STEPS,
+  Ragdoll,
+  parseRagdollColliders,
+  ragdollBoxesFromCentreHalf,
+  ragdollRadii,
+  type RagdollBox,
+  type RagdollOptions,
+} from "./model/ragdoll";
 export { DECAL_FRAMES, DECAL_OFFSET, DecalSystem, decalAtlas } from "./render/decalSystem";
 export { MAX_REFLECTION_PROBES, parseReflectionProbes, reflectionProbeAt, type ReflectionProbe } from "./model/reflectionProbes";
 export { PROBE_FADE, PROBE_RANGE, boxProject, pickProbe, probeWeight, sampleProbe, type ProbeBox, type ReflectionProbeSet } from "./render/probeSampling";
