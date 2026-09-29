@@ -642,6 +642,7 @@ export class Player {
       // Particle bursts the cart fired go to the 3D overlay to simulate and draw.
       for (const b of this.runtime!.channel.takeBursts()) this.meshSurface?.burst(b.effect, b.at, b.dir, b.scale);
       for (const d of this.runtime!.channel.takeDecals()) this.meshSurface?.decal(d.decal, d.at, d.normal, d.scale);
+      for (const d of this.runtime!.channel.takeDebris()) this.meshSurface?.throwDebris(d.debris, d.at, d.velocity, d.scale);
     }
     this.updateSpatialLoading();
     lap("runtime");

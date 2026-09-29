@@ -361,37 +361,7 @@ export class Ragdoll {
 
   /** Push joint j's particle out of any box it is inside; returns whether it touched one. */
   private collide(j: number, colliders: readonly RagdollBox[]): boolean {
-    const o = j * 3;
-    const r = this.radius[j]!;
-    let touched = false;
-    for (const box of colliders) {
-      const axes = box.axes ?? ([[1, 0, 0], [0, 1, 0], [0, 0, 1]] as const);
-      const rel: V3 = [this.pos[o]! - box.center[0], this.pos[o + 1]! - box.center[1], this.pos[o + 2]! - box.center[2]];
-      let best = Infinity;
-      let axis = -1;
-      let sign = 1;
-      let inside = true;
-      for (let a = 0; a < 3; a += 1) {
-        const d = dot(rel, axes[a] as V3);
-        const pen = box.half[a]! + r - Math.abs(d);
-        if (pen <= 0) {
-          inside = false;
-          break;
-        }
-        if (pen < best) {
-          best = pen;
-          axis = a;
-          sign = d >= 0 ? 1 : -1;
-        }
-      }
-      if (!inside || axis < 0) continue;
-      const n = axes[axis]!;
-      this.pos[o] = this.pos[o]! + n[0] * best * sign;
-      this.pos[o + 1] = this.pos[o + 1]! + n[1] * best * sign;
-      this.pos[o + 2] = this.pos[o + 2]! + n[2] * best * sign;
-      touched = true;
-    }
-    return touched;
+    return pushOutOfBoxes(this.pos, j * 3, this.radius[j]!, colliders) !== null;
   }
 
   /**
@@ -545,4 +515,41 @@ export function parseRagdollColliders(value: unknown): RagdollBox[] {
     out.push({ center, half: [Math.abs(half[0]), Math.abs(half[1]), Math.abs(half[2])] });
   }
   return out;
+}
+
+/**
+ * Push a particle (radius `r`, at `pos[o..o+2]`) out of every box it is inside,
+ * along each box's shallowest axis. Returns the last push's outward normal, or
+ * null when it touched none. Shared by ragdolls and debris.
+ */
+export function pushOutOfBoxes(pos: Float64Array, o: number, r: number, colliders: readonly RagdollBox[]): [number, number, number] | null {
+  let normal: [number, number, number] | null = null;
+  for (const box of colliders) {
+    const axes = box.axes ?? ([[1, 0, 0], [0, 1, 0], [0, 0, 1]] as const);
+    const rel: V3 = [pos[o]! - box.center[0], pos[o + 1]! - box.center[1], pos[o + 2]! - box.center[2]];
+    let best = Infinity;
+    let axis = -1;
+    let sign = 1;
+    let inside = true;
+    for (let a = 0; a < 3; a += 1) {
+      const d = dot(rel, axes[a] as V3);
+      const pen = box.half[a]! + r - Math.abs(d);
+      if (pen <= 0) {
+        inside = false;
+        break;
+      }
+      if (pen < best) {
+        best = pen;
+        axis = a;
+        sign = d >= 0 ? 1 : -1;
+      }
+    }
+    if (!inside || axis < 0) continue;
+    const n = axes[axis]!;
+    pos[o] = pos[o]! + n[0] * best * sign;
+    pos[o + 1] = pos[o + 1]! + n[1] * best * sign;
+    pos[o + 2] = pos[o + 2]! + n[2] * best * sign;
+    normal = [n[0] * sign, n[1] * sign, n[2] * sign];
+  }
+  return normal;
 }

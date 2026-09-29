@@ -314,6 +314,8 @@ cartbox = {
   burst = function() end,
   decal = function() end,
   decals = function() return {} end,
+  debris = function() end,
+  debrislist = function() return {} end,
   effects = function() return {} end,
 }`;
 

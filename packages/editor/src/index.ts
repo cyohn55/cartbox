@@ -70,6 +70,7 @@ export {
   LOCKOUT_INTRO,
   LOCKOUT_EFFECTS,
   LOCKOUT_RAGDOLL_COLLIDERS,
+  LOCKOUT_DEBRIS,
   LOCKOUT_DECALS,
   LOCKOUT_DECAL_MARKS,
   lockoutNavMesh,
@@ -433,11 +434,14 @@ export {
   RAGDOLL_SETTLE_STEPS,
   Ragdoll,
   parseRagdollColliders,
+  pushOutOfBoxes,
   ragdollBoxesFromCentreHalf,
   ragdollRadii,
   type RagdollBox,
   type RagdollOptions,
 } from "./model/ragdoll";
+export { MAX_DEBRIS_DEFS, MAX_DEBRIS_PER_DEF, debrisDefaults, parseDebrisDefs, type DebrisDef } from "./model/debris";
+export { DEBRIS_FADE, DEBRIS_GRAVITY, DebrisSystem } from "./render/debrisSystem";
 export { DECAL_FRAMES, DECAL_OFFSET, DecalSystem, decalAtlas } from "./render/decalSystem";
 export { MAX_REFLECTION_PROBES, parseReflectionProbes, reflectionProbeAt, type ReflectionProbe } from "./model/reflectionProbes";
 export { PROBE_FADE, PROBE_RANGE, boxProject, pickProbe, probeWeight, sampleProbe, type ProbeBox, type ReflectionProbeSet } from "./render/probeSampling";

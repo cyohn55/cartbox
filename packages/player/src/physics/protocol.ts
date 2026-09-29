@@ -249,6 +249,8 @@ export const PHYS_OP_DECAL = 27;
  * impulse (world units/second); v4 = the joint it centres on (-1 = none).
  */
 export const PHYS_OP_RAGDOLL = 28;
+/** Debris (cartbox.debris, H10): a = the definition's index | (scale × 16) << 8; v0..v2 = where, v3..v5 = velocity. */
+export const PHYS_OP_DEBRIS = 29;
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {

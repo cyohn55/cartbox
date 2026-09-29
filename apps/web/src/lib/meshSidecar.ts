@@ -41,6 +41,8 @@ import {
   parseDecalDefs,
   parseDecalMarks,
   parseRagdollColliders,
+  parseDebrisDefs,
+  type DebrisDef,
   type RagdollBox,
   type DecalDef,
   type DecalMark,
@@ -176,6 +178,8 @@ export interface MeshSidecar {
   readonly decalMarks?: readonly DecalMark[];
   /** Boxes ragdolls land on, besides static bodies (see ragdoll.ts in @cartbox/editor). */
   readonly ragdollColliders?: readonly RagdollBox[];
+  /** Cosmetic debris the cart throws with cartbox.debris (see debris.ts in @cartbox/editor). */
+  readonly debris?: readonly DebrisDef[];
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -228,6 +232,7 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(sidecar.decals && sidecar.decals.length > 0 ? { decals: sidecar.decals } : {}),
     ...(sidecar.decalMarks && sidecar.decalMarks.length > 0 ? { decalMarks: sidecar.decalMarks } : {}),
     ...(sidecar.ragdollColliders && sidecar.ragdollColliders.length > 0 ? { ragdollColliders: sidecar.ragdollColliders } : {}),
+    ...(sidecar.debris && sidecar.debris.length > 0 ? { debris: sidecar.debris } : {}),
   });
 }
 
@@ -322,6 +327,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
   const decals = parseDecalDefs((parsed as { decals?: unknown }).decals);
   const decalMarks = parseDecalMarks((parsed as { decalMarks?: unknown }).decalMarks, decals);
   const ragdollColliders = parseRagdollColliders((parsed as { ragdollColliders?: unknown }).ragdollColliders);
+  const debris = parseDebrisDefs((parsed as { debris?: unknown }).debris);
   const placed = linked.map((entry) => (entry.level && !levelIds.has(entry.level) ? withoutLevel(entry) : entry));
   return {
     version: MESH_SIDECAR_VERSION,
@@ -339,6 +345,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     ...(decals.length > 0 ? { decals } : {}),
     ...(decalMarks.length > 0 ? { decalMarks } : {}),
     ...(ragdollColliders.length > 0 ? { ragdollColliders } : {}),
+    ...(debris.length > 0 ? { debris } : {}),
   };
 }
 
@@ -713,4 +720,11 @@ export function hierarchyRows(sidecar: MeshSidecar): HierarchyRow[] {
     if (p < 0) visit(i, 0);
   });
   return rows;
+}
+
+/** Replace the scene's debris definitions (an empty list removes them). */
+export function setMeshDebris(sidecar: MeshSidecar, debris: readonly DebrisDef[]): MeshSidecar {
+  const { debris: _old, ...rest } = sidecar;
+  const defs = parseDebrisDefs(debris);
+  return defs.length > 0 ? { ...rest, debris: defs } : rest;
 }

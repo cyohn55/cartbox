@@ -55,6 +55,8 @@ import {
   parseDecalDefs,
   parseDecalMarks,
   parseRagdollColliders,
+  parseDebrisDefs,
+  type DebrisDef,
   type RagdollBox,
   type DecalDef,
   type DecalMark,
@@ -158,6 +160,13 @@ export interface MeshScene {
   readonly decalMarks?: readonly DecalMark[];
   /** Boxes ragdolls land on (HALO2_STYLE_ROADMAP.md, H9), besides the scene's static bodies. */
   readonly ragdollColliders?: readonly RagdollBox[];
+  /**
+   * Cosmetic debris the cart throws with cartbox.debris (H10), each with the
+   * mesh of the object or prefab it copies (`debrisMeshes[i]` for `debris[i]`;
+   * definitions whose source can't be found are dropped).
+   */
+  readonly debris?: readonly DebrisDef[];
+  readonly debrisMeshes?: readonly MeshAsset[];
 }
 
 /** A view + projection pair ready to hand to `renderMeshScene`. */
@@ -390,6 +399,26 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
   const decals = parseDecalDefs((parsed as { decals?: unknown }).decals);
   const decalMarks = parseDecalMarks((parsed as { decalMarks?: unknown }).decalMarks, decals);
   const ragdollColliders = parseRagdollColliders((parsed as { ragdollColliders?: unknown }).ragdollColliders);
+  // Debris: each definition wears the mesh of a scene object by that name, else
+  // of the root of a prefab by that name (whose mesh need never sit in the level).
+  const debris: DebrisDef[] = [];
+  const debrisMeshes: MeshAsset[] = [];
+  for (const def of parseDebrisDefs((parsed as { debris?: unknown }).debris)) {
+    let mesh: MeshAsset | null = parsedInstances.find((p) => !p.pool && p.name === def.source)?.mesh ?? null;
+    if (!mesh && Array.isArray(prefabs)) {
+      const prefab = (prefabs as { name?: unknown; nodes?: unknown }[]).find((f) => f && f.name === def.source && Array.isArray(f.nodes));
+      const root = (prefab?.nodes as Record_[] | undefined)?.find((n) => typeof n.parent !== "string" || !n.parent);
+      mesh = root ? (readEntry(root, "debris", null, true)?.mesh ?? null) : null;
+    }
+    if (mesh && def.without) {
+      const leave = new Set(def.without);
+      const kept = mesh.primitives.filter((p) => !leave.has(p.material.name));
+      mesh = kept.length > 0 ? { ...mesh, primitives: kept } : null;
+    }
+    if (!mesh) continue;
+    debris.push(def);
+    debrisMeshes.push(mesh);
+  }
   return {
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
@@ -399,6 +428,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     ...(decals.length > 0 ? { decals } : {}),
     ...(decalMarks.length > 0 ? { decalMarks } : {}),
     ...(ragdollColliders.length > 0 ? { ragdollColliders } : {}),
+    ...(debris.length > 0 ? { debris, debrisMeshes } : {}),
     lighting,
     ...(pools.length > 0 ? { pools } : {}),
     ...(physicsWorld ? { physicsWorld } : {}),

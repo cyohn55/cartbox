@@ -1801,6 +1801,21 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
   return withoutUnusedUvs({ name: `viewmodel-${id}`, primitives: primitives.filter((p) => p.indices.length > 0) });
 }
 
+/** A spent brass casing (H10), about 4 cm long, lying along Z. */
+function casingMesh(): MeshAsset {
+  const brass = newStreams();
+  limb(brass, [0, 0, -0.018], [0, 0, 0.016], 0.0065, 0.0055);
+  const rim = newStreams();
+  limb(rim, [0, 0, -0.02], [0, 0, -0.017], 0.0072);
+  return withoutUnusedUvs({
+    name: "casing",
+    primitives: [
+      toPrimitive(brass, { name: "brass", baseColorFactor: [0.78, 0.6, 0.28, 1], baseColorImage: null, metallicFactor: 1, roughnessFactor: 0.32 }),
+      toPrimitive(rim, { name: "brass-rim", baseColorFactor: [0.62, 0.46, 0.2, 1], baseColorImage: null, metallicFactor: 1, roughnessFactor: 0.4 }),
+    ],
+  });
+}
+
 
 /**
  * Viewmodels are authored at 1/1000 scale at the origin — invisible (and inside
@@ -1971,6 +1986,19 @@ export const LOCKOUT_INTRO: SceneTimeline = {
 
 let meshSidecar: string | null = null;
 
+/** The weapons a killed soldier drops (the sword vanishes with its wielder). */
+const LOCKOUT_DROPPED = ["br", "smg", "shotgun", "sniper", "magnum"] as const;
+
+/**
+ * Lockout's debris (HALO2_STYLE_ROADMAP.md H10): spent casings that ring off the
+ * deck and skitter, and the weapon a soldier drops when killed, which lands on
+ * its side and rocks still. Simulated in each browser only.
+ */
+export const LOCKOUT_DEBRIS = [
+  { name: "casing", source: "casing", life: 5, bounce: 0.35, friction: 0.3, max: 40 },
+  ...LOCKOUT_DROPPED.map((id) => ({ name: `drop_${id}`, source: `viewmodel ${id}`, without: ["glove", "sleeve"], life: 9, bounce: 0.12, friction: 0.65, max: 6 })),
+];
+
 /**
  * The arena's mesh sidecar (map + 7 bots + the lighting rig), built on first
  * call and memoised — it carries the baked textures, see {@link lockoutTextures}.
@@ -2006,6 +2034,13 @@ export function lockoutMeshSidecar(): string {
       effects: LOCKOUT_EFFECTS,
       decals: LOCKOUT_DECALS,
       ragdollColliders: LOCKOUT_RAGDOLL_COLLIDERS,
+      // Cosmetic debris (H10): the casing's look lives in a prefab, whose mesh
+      // never sits in the level (no copies held in reserve: nothing spawns it);
+      // dropped weapons wear the first-person models, minus the hands.
+      prefabs: [
+        { id: "prefab-casing", name: "casing", pool: 0, nodes: [{ key: "root", name: "casing", mesh: serializeMeshAsset(casingMesh()), transform: identity }] },
+      ],
+      debris: LOCKOUT_DEBRIS,
       decalMarks: LOCKOUT_DECAL_MARKS,
     });
   }
@@ -2491,6 +2526,11 @@ function register_kill(killer, victim, hs)
     victim.kick = {dx/d*f, 1.1, dz/d*f}
   else victim.kick = {0, 0.4, 0} end
   victim.kick_joint = hs and "head" or "chest"
+  -- The player's own weapon drops where they fell (the bots drop theirs as they go limp).
+  if victim == p then
+    local k = victim.kick
+    cartbox.debris("drop_"..((p.slot==1 and p.g1 or p.g2) or "br"), p.x, p.y + 1.15, p.z, k[1]*0.45, 1.2, k[3]*0.45)
+  end
   victim.deaths=(victim.deaths or 0)+1
   victim.streak=0
   if killer and killer~=victim then
@@ -2565,6 +2605,15 @@ local function update_grenades()
   end
 end
 
+-- A spent casing kicked out of a gun's ejection port, up and to the right of
+-- where it faces (cosmetic debris, simulated in this browser only). (fx, fz)
+-- is the facing on the ground; right of it is (-fz, fx).
+local function eject_casing(x, y, z, fx, fz)
+  local rx, rz = -fz, fx
+  cartbox.debris("casing", x + rx*0.14, y, z + rz*0.14,
+    rx*1.7 + fx*0.2 + (math.random()-0.5)*0.5, 1.5 + math.random()*0.7, rz*1.7 + fz*0.2 + (math.random()-0.5)*0.5)
+end
+
 local function player_fire()
   if p.cool>0 or p.dead then return end
   local wid = p.slot==1 and p.g1 or p.g2
@@ -2594,6 +2643,7 @@ local function player_fire()
   p.cool = w.cool; flash = 4
   if p.slot==1 then p.a1=p.a1-1 else p.a2=p.a2-1 end
   local ex,ey,ez = p.x, p.y+EYE, p.z
+  do local fx,_,fz = forward(); eject_casing(ex + fx*0.35, ey - 0.16, ez + fz*0.35, fx, fz) end
   shot.t=3; shot.x=ex; shot.y=ey; shot.z=ez
   for _=1,w.pel do
     local fx,fy,fz
@@ -2767,6 +2817,7 @@ local function think_bot(o)
     o.cool=(o.cool or 0)-1
     if m < (w.rng or 40) and o.cool<=0 then
       o.cool = (w.cool or 10) + math.random(0,6)
+      if not w.melee and m > 0.01 and d3(o.x,o.y,o.z, p.x,p.y,p.z) < 25 then eject_casing(o.x + dx/m*0.3, o.y + 1.3, o.z + dz/m*0.3, dx/m, dz/m) end
       local acc = MODE.shields and 0.30 or 0.5    -- SWAT bots hit harder
       if w.melee then acc = (m < 3) and 0.9 or 0 end
       if math.random() < acc then
@@ -3143,7 +3194,11 @@ function animate_bot(i, o)
     o.sent_dead = dead; cartbox.set(i, "dead", dead)
     -- Killed: the body goes limp and tumbles (a ragdoll, simulated in this
     -- browser only); respawned: it stands back up on its animation.
-    if dead then local k = o.kick or {0, 0.4, 0}; cartbox.ragdoll(i, k[1], k[2], k[3], o.kick_joint or "chest")
+    if dead then
+      local k = o.kick or {0, 0.4, 0}
+      cartbox.ragdoll(i, k[1], k[2], k[3], o.kick_joint or "chest")
+      -- Its weapon falls from its hands and clatters to the deck (debris; the sword goes with it).
+      cartbox.debris("drop_"..(o.g1 or "br"), o.x, o.y + 1.15, o.z, k[1]*0.45, 1.2, k[3]*0.45)
     else cartbox.unragdoll(i) end
   end
   -- The body lies where it fell, and is taken away just before it respawns.

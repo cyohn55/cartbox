@@ -99,6 +99,7 @@ import {
   PHYS_OP_BURST,
   PHYS_OP_DECAL,
   PHYS_OP_RAGDOLL,
+  PHYS_OP_DEBRIS,
   PHYS_AGENTS,
   PHYS_AGENT_BYTES,
   PHYS_MAX_AGENTS,
@@ -162,7 +163,8 @@ export function sceneNeedsRuntime(scene: MeshScene | null | undefined, { physics
         Boolean(scene.navmesh) ||
         Boolean(scene.streaming) ||
         (scene.effects?.length ?? 0) > 0 ||
-        (scene.decals?.length ?? 0) > 0),
+        (scene.decals?.length ?? 0) > 0 ||
+        (scene.debris?.length ?? 0) > 0),
   );
 }
 
@@ -220,7 +222,7 @@ export function runtimeSdkLua(
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}end`;
 }
 
 /** The physics calls (inside the runtime block's do … end, after its helpers). */
@@ -413,6 +415,35 @@ function BURST_CALLS(scene: MeshScene): string {
  *                                     after the decal's life
  *   cartbox.decals()                  -> { name, ... } the scene's decals
  */
+/**
+ * Cosmetic debris (H10), when the scene defines any:
+ *
+ *   cartbox.debris(debris, x, y, z, vx, vy, vz, scale)  throw a copy (by name or 1-based
+ *                                     index) from (x, y, z) at (vx, vy, vz) world units/second;
+ *                                     it bounces, tumbles, settles and fades after its life —
+ *                                     simulated on this machine only
+ *   cartbox.debrislist()              -> { name, ... } the scene's debris
+ */
+function DEBRIS_CALLS(scene: MeshScene): string {
+  const debris = scene.debris ?? [];
+  if (debris.length === 0) return "";
+  return `  local _db = {${debris.map((d, i) => `[${luaString(d.name)}]=${i}`).join(",")}}
+  local _dbn = {${debris.map((d) => luaString(d.name)).join(",")}}
+  cartbox.debris = function(d, x, y, z, vx, vy, vz, scale)
+    local i = d
+    if type(d) == "string" then i = _db[d] elseif type(d) == "number" then i = d - 1 end
+    if i == nil or i < 0 or i >= ${debris.length} then return end
+    local s = math.floor(math.max(0, math.min(8, scale or 1)) * 16 + 0.5)
+    _cmd(${PHYS_OP_DEBRIS}, i | (s << 8), x or 0, y or 0, z or 0, vx or 0, vy or 0, vz or 0)
+  end
+  cartbox.debrislist = function()
+    local out = {}
+    for k, n in ipairs(_dbn) do out[k] = n end
+    return out
+  end
+`;
+}
+
 function DECAL_CALLS(scene: MeshScene): string {
   const decals = scene.decals ?? [];
   if (decals.length === 0) return "";
