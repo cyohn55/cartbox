@@ -4062,6 +4062,8 @@ cartbox = {
   burst = function() end,
   decal = function() end,
   decals = function() return {} end,
+  debris = function() end,
+  debrislist = function() return {} end,
   effects = function() return {} end,
 }`;
 function injectSdk(bytes) {
@@ -4171,7 +4173,8 @@ import {
   parseParticleEffects,
   parseDecalDefs,
   parseDecalMarks,
-  parseRagdollColliders
+  parseRagdollColliders,
+  parseDebrisDefs
 } from "@cartbox/editor";
 var DEFAULT_PREFAB_POOL = 8;
 var MAX_PREFAB_POOL = 32;
@@ -4357,6 +4360,24 @@ function parseMeshScene(raw) {
   const decals = parseDecalDefs(parsed.decals);
   const decalMarks = parseDecalMarks(parsed.decalMarks, decals);
   const ragdollColliders = parseRagdollColliders(parsed.ragdollColliders);
+  const debris = [];
+  const debrisMeshes = [];
+  for (const def of parseDebrisDefs(parsed.debris)) {
+    let mesh = parsedInstances.find((p) => !p.pool && p.name === def.source)?.mesh ?? null;
+    if (!mesh && Array.isArray(prefabs)) {
+      const prefab = prefabs.find((f2) => f2 && f2.name === def.source && Array.isArray(f2.nodes));
+      const root = prefab?.nodes?.find((n) => typeof n.parent !== "string" || !n.parent);
+      mesh = root ? readEntry(root, "debris", null, true)?.mesh ?? null : null;
+    }
+    if (mesh && def.without) {
+      const leave = new Set(def.without);
+      const kept = mesh.primitives.filter((p) => !leave.has(p.material.name));
+      mesh = kept.length > 0 ? { ...mesh, primitives: kept } : null;
+    }
+    if (!mesh) continue;
+    debris.push(def);
+    debrisMeshes.push(mesh);
+  }
   return {
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
@@ -4366,6 +4387,7 @@ function parseMeshScene(raw) {
     ...decals.length > 0 ? { decals } : {},
     ...decalMarks.length > 0 ? { decalMarks } : {},
     ...ragdollColliders.length > 0 ? { ragdollColliders } : {},
+    ...debris.length > 0 ? { debris, debrisMeshes } : {},
     lighting,
     ...pools.length > 0 ? { pools } : {},
     ...physicsWorld ? { physicsWorld } : {},
@@ -4581,6 +4603,7 @@ var PHYS_OP_STREAM_FOCUS = 25;
 var PHYS_OP_BURST = 26;
 var PHYS_OP_DECAL = 27;
 var PHYS_OP_RAGDOLL = 28;
+var PHYS_OP_DEBRIS = 29;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -5559,7 +5582,7 @@ var TimelineSession = class {
 // src/physics/physicsSdk.ts
 function sceneNeedsRuntime(scene, { physics = true } = {}) {
   return Boolean(
-    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0 || Boolean(scene.navmesh) || Boolean(scene.streaming) || (scene.effects?.length ?? 0) > 0 || (scene.decals?.length ?? 0) > 0)
+    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0 || Boolean(scene.navmesh) || Boolean(scene.streaming) || (scene.effects?.length ?? 0) > 0 || (scene.decals?.length ?? 0) > 0 || (scene.debris?.length ?? 0) > 0)
   );
 }
 var luaString = (s) => JSON.stringify(s);
@@ -5606,7 +5629,7 @@ function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}end`;
 }
 function PHYSICS_CALLS() {
   return `  cartbox.physics = function() return _live() end
@@ -5757,6 +5780,25 @@ function BURST_CALLS(scene) {
   cartbox.effects = function()
     local out = {}
     for k, n in ipairs(_fxn) do out[k] = n end
+    return out
+  end
+`;
+}
+function DEBRIS_CALLS(scene) {
+  const debris = scene.debris ?? [];
+  if (debris.length === 0) return "";
+  return `  local _db = {${debris.map((d, i) => `[${luaString(d.name)}]=${i}`).join(",")}}
+  local _dbn = {${debris.map((d) => luaString(d.name)).join(",")}}
+  cartbox.debris = function(d, x, y, z, vx, vy, vz, scale)
+    local i = d
+    if type(d) == "string" then i = _db[d] elseif type(d) == "number" then i = d - 1 end
+    if i == nil or i < 0 or i >= ${debris.length} then return end
+    local s = math.floor(math.max(0, math.min(8, scale or 1)) * 16 + 0.5)
+    _cmd(${PHYS_OP_DEBRIS}, i | (s << 8), x or 0, y or 0, z or 0, vx or 0, vy or 0, vz or 0)
+  end
+  cartbox.debrislist = function()
+    local out = {}
+    for k, n in ipairs(_dbn) do out[k] = n end
     return out
   end
 `;
@@ -6325,10 +6367,43 @@ function distanceToSegment(p, a, b) {
   return Math.hypot(p[0] - (a[0] + dx * t), p[2] - (a[2] + dz * t));
 }
 
+// src/mesh/sceneColliders.ts
+var transform = (m, p) => [
+  m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
+  m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+  m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]
+];
+function sceneColliders(scene) {
+  const boxes = [...scene.ragdollColliders ?? []];
+  for (const inst of scene.instances) {
+    if (inst.physics?.body !== "static" || inst.physics.trigger || inst.pooled) continue;
+    const lo = [Infinity, Infinity, Infinity];
+    const hi = [-Infinity, -Infinity, -Infinity];
+    for (const prim of inst.mesh.primitives)
+      for (let i = 0; i < prim.positions.length; i += 3)
+        for (let k = 0; k < 3; k += 1) {
+          lo[k] = Math.min(lo[k], prim.positions[i + k]);
+          hi[k] = Math.max(hi[k], prim.positions[i + k]);
+        }
+    if (!(lo[0] <= hi[0])) continue;
+    const m = inst.model;
+    const centre = transform(m, [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2]);
+    const cols = [0, 1, 2].map((c) => [m[c * 4], m[c * 4 + 1], m[c * 4 + 2]]);
+    const lens = cols.map((c) => Math.hypot(c[0], c[1], c[2]) || 1);
+    const axes = cols.map((c, i) => [c[0] / lens[i], c[1] / lens[i], c[2] / lens[i]]);
+    boxes.push({
+      center: centre,
+      half: [(hi[0] - lo[0]) / 2 * lens[0], (hi[1] - lo[1]) / 2 * lens[1], (hi[2] - lo[2]) / 2 * lens[2]],
+      axes: [axes[0], axes[1], axes[2]]
+    });
+  }
+  return boxes;
+}
+
 // src/runtime/runtimeChannel.ts
 var DEG = 180 / Math.PI;
 var MAX_BURSTS_QUEUED = 64;
-var transform = (m, p) => [
+var transform2 = (m, p) => [
   m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
   m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
   m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]
@@ -6354,6 +6429,8 @@ var RuntimeChannel = class {
     this.bursts = [];
     /** Decals the cart laid since the renderer last took them. */
     this.decals = [];
+    /** Debris the cart threw since the renderer last took it. */
+    this.debris = [];
     /**
      * Ragdolls (H9): object → the limp body, built from its pose the next time it
      * is skinned after cartbox.ragdoll (until then null, with the shove to give it).
@@ -6418,7 +6495,10 @@ var RuntimeChannel = class {
         if (this.decals.length < MAX_BURSTS_QUEUED)
           this.decals.push({ decal: cmd.a & 255, at: [cmd.v[0], cmd.v[1], cmd.v[2]], normal: [cmd.v[3], cmd.v[4], cmd.v[5]], scale: (cmd.a >>> 8 & 65535) / 16 });
       } else if (cmd.op === PHYS_OP_RAGDOLL) this.ragdollCommand(cmd.a, cmd.v);
-      else if (cmd.op === PHYS_OP_TIMELINE) {
+      else if (cmd.op === PHYS_OP_DEBRIS) {
+        if (this.debris.length < MAX_BURSTS_QUEUED)
+          this.debris.push({ debris: cmd.a & 255, at: [cmd.v[0], cmd.v[1], cmd.v[2]], velocity: [cmd.v[3], cmd.v[4], cmd.v[5]], scale: (cmd.a >>> 8 & 65535) / 16 });
+      } else if (cmd.op === PHYS_OP_TIMELINE) {
         if (cmd.a < 0) this.timeline?.stop();
         else this.timeline?.play(cmd.a, cmd.v[0], cmd.v[1]);
       }
@@ -6446,34 +6526,10 @@ var RuntimeChannel = class {
   isRagdoll(object) {
     return this.ragdolls.has(object);
   }
-  /** The boxes ragdolls collide with: static, solid bodies (as oriented boxes round their meshes) and the scene's authored ones. */
+  /** The boxes ragdolls collide with (see sceneColliders), built on first use. */
   colliders() {
-    if (this.ragdollBoxes) return this.ragdollBoxes;
-    const boxes = [...this.scene.ragdollColliders ?? []];
-    for (const inst of this.scene.instances) {
-      if (inst.physics?.body !== "static" || inst.physics.trigger || inst.pooled) continue;
-      const lo = [Infinity, Infinity, Infinity];
-      const hi = [-Infinity, -Infinity, -Infinity];
-      for (const prim of inst.mesh.primitives)
-        for (let i = 0; i < prim.positions.length; i += 3)
-          for (let k = 0; k < 3; k += 1) {
-            lo[k] = Math.min(lo[k], prim.positions[i + k]);
-            hi[k] = Math.max(hi[k], prim.positions[i + k]);
-          }
-      if (!(lo[0] <= hi[0])) continue;
-      const m = inst.model;
-      const centre = transform(m, [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2]);
-      const cols = [0, 1, 2].map((c) => [m[c * 4], m[c * 4 + 1], m[c * 4 + 2]]);
-      const lens = cols.map((c) => Math.hypot(c[0], c[1], c[2]) || 1);
-      const axes = cols.map((c, i) => [c[0] / lens[i], c[1] / lens[i], c[2] / lens[i]]);
-      boxes.push({
-        center: centre,
-        half: [(hi[0] - lo[0]) / 2 * lens[0], (hi[1] - lo[1]) / 2 * lens[1], (hi[2] - lo[2]) / 2 * lens[2]],
-        axes: [axes[0], axes[1], axes[2]]
-      });
-    }
-    this.ragdollBoxes = boxes;
-    return boxes;
+    this.ragdollBoxes ?? (this.ragdollBoxes = sceneColliders(this.scene));
+    return this.ragdollBoxes;
   }
   /** A navigation agent command (see PHYS_OP_AGENT). */
   agentCommand(op, key, v) {
@@ -6505,6 +6561,12 @@ var RuntimeChannel = class {
   takeDecals() {
     const out = this.decals;
     this.decals = [];
+    return out;
+  }
+  /** The debris thrown since the last call (the renderer simulates and draws it). */
+  takeDebris() {
+    const out = this.debris;
+    this.debris = [];
     return out;
   }
   /** The particle bursts fired since the last call (the renderer draws them). */
@@ -6541,7 +6603,7 @@ var RuntimeChannel = class {
       const pose = this.animation.finalPose(w.object);
       const mesh = this.scene.instances[w.object]?.mesh;
       const world = worldOf(w.object);
-      if (pose && mesh?.skin && world) w.position = transform(world, jointPosition(mesh.skin, pose, w.joint));
+      if (pose && mesh?.skin && world) w.position = transform2(world, jointPosition(mesh.skin, pose, w.joint));
     }
     return matrices;
   }
@@ -6649,7 +6711,7 @@ var RuntimeChannel = class {
   solveRequests(requests, skin, pose, world) {
     const toMesh = invertAffine(world);
     if (!toMesh) return;
-    const local = (p) => transform(toMesh, p);
+    const local = (p) => transform2(toMesh, p);
     for (const kind of ["ik", "look"]) {
       for (const [joint, r] of requests) {
         if (r.kind !== kind) continue;
@@ -8296,6 +8358,7 @@ import {
   bakeReflectionProbesAsync,
   ParticleSystem,
   DecalSystem,
+  DebrisSystem,
   applySunShafts,
   sunScreenPosition,
   sunVisibility,
@@ -8661,6 +8724,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.particles = null;
     /** The scene's decals on its surfaces, or null when it defines none. */
     this.decals = null;
+    /** Debris in flight and at rest (H10), what it lands on, and each source mesh with its textures. */
+    this.debris = null;
+    this.debrisBoxes = [];
+    this.debrisLooks = /* @__PURE__ */ new Map();
     /** Settles once the scene's reflection probes are baked and in use (tests await it). */
     this.probesReady = Promise.resolve();
     this.output = new Uint8ClampedArray(width * height * 4);
@@ -8773,6 +8840,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     surface.decodeKtx2 = decodeKtx2;
     if (scene.effects && scene.effects.length > 0) surface.particles = new ParticleSystem(scene.effects);
     if (scene.decals && scene.decals.length > 0) surface.decals = new DecalSystem(scene.decals, scene.decalMarks ?? []);
+    if (scene.debris && scene.debrisMeshes && scene.debris.length > 0) {
+      surface.debris = new DebrisSystem(scene.debris, scene.debrisMeshes);
+      surface.debrisBoxes = sceneColliders(scene);
+      for (const mesh of scene.debrisMeshes) surface.debrisLooks.set(mesh, await texture(mesh));
+    }
     if (lighting?.probes && lighting.probes.length > 0 && environment) {
       const sky = environment;
       const still = scene.instances.flatMap((inst, i) => {
@@ -8942,6 +9014,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.decals.step(1 / 60);
       const marks = this.decals.sceneInstance();
       if (marks) drawn = [...drawn, marks];
+    }
+    if (this.debris) {
+      this.debris.step(1 / 60, this.debrisBoxes);
+      const pieces = this.debris.instances();
+      if (pieces.length > 0) drawn = [...drawn, ...pieces.map((p) => ({ ...this.debrisLooks.get(p.mesh) ?? {}, ...p }))];
     }
     if (this.particles) {
       this.particles.step(1 / 60);
@@ -9374,6 +9451,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   destroy() {
     this.destroyed = true;
     this.inner.destroy();
+  }
+  /** Throw a copy of debris `debris` (see cartbox.debris). */
+  throwDebris(debris, at, velocity, scale) {
+    this.debris?.throw(debris, at, velocity, scale);
   }
   /** Lay decal `decal` on a surface (see cartbox.decal). */
   decal(decal, at, normal, scale) {
@@ -10226,14 +10307,14 @@ function resolveSurface(material, time, hasDetail, hasMr, blend = { weights: fal
   };
 }
 var INSTANCE_FLOATS = 60;
-function writeInstanceTransform(target, index, transform2, base = index * INSTANCE_FLOATS) {
+function writeInstanceTransform(target, index, transform3, base = index * INSTANCE_FLOATS) {
   for (let i = 0; i < 16; i += 1) {
-    target[base + i] = transform2.mvp[i];
-    target[base + 16 + i] = transform2.lightMvp ? transform2.lightMvp[i] : 0;
-    target[base + 32 + i] = transform2.model[i];
+    target[base + i] = transform3.mvp[i];
+    target[base + 16 + i] = transform3.lightMvp ? transform3.lightMvp[i] : 0;
+    target[base + 32 + i] = transform3.model[i];
   }
   for (let column = 0; column < 3; column += 1) {
-    for (let row = 0; row < 3; row += 1) target[base + 48 + column * 4 + row] = transform2.normalBasis[column * 3 + row];
+    for (let row = 0; row < 3; row += 1) target[base + 48 + column * 4 + row] = transform3.normalBasis[column * 3 + row];
     target[base + 48 + column * 4 + 3] = 0;
   }
 }
@@ -12831,6 +12912,7 @@ var Player = class {
       this.pollLevelRequest();
       for (const b of this.runtime.channel.takeBursts()) this.meshSurface?.burst(b.effect, b.at, b.dir, b.scale);
       for (const d of this.runtime.channel.takeDecals()) this.meshSurface?.decal(d.decal, d.at, d.normal, d.scale);
+      for (const d of this.runtime.channel.takeDebris()) this.meshSurface?.throwDebris(d.debris, d.at, d.velocity, d.scale);
     }
     this.updateSpatialLoading();
     lap("runtime");

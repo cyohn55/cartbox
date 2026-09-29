@@ -28,6 +28,7 @@ import { AgentCrowd } from "../nav/agentCrowd.js";
 import { TimelineSession } from "../anim/timelineSession.js";
 import type { MailboxMeshCamera } from "../mailbox.js";
 import type { MeshScene } from "../mesh/meshScene.js";
+import { sceneColliders } from "../mesh/sceneColliders.js";
 import type { PhysicsSession } from "../physics/physicsSession.js";
 import { PHYSICS_DT } from "../physics/physicsSession.js";
 import {
@@ -47,6 +48,7 @@ import {
   PHYS_OP_BURST,
   PHYS_OP_DECAL,
   PHYS_OP_RAGDOLL,
+  PHYS_OP_DEBRIS,
   PHYS_OP_WATCH,
   PHYS_OP_AGENT,
   PHYS_OP_AGENT_GOTO,
@@ -77,6 +79,14 @@ export interface DecalLaid {
   readonly decal: number;
   readonly at: readonly [number, number, number];
   readonly normal: readonly [number, number, number];
+  readonly scale: number;
+}
+
+/** One `cartbox.debris`: the definition's index, where, its velocity, and its scale. */
+export interface DebrisThrown {
+  readonly debris: number;
+  readonly at: readonly [number, number, number];
+  readonly velocity: readonly [number, number, number];
   readonly scale: number;
 }
 
@@ -126,6 +136,8 @@ export class RuntimeChannel {
   private bursts: ParticleBurst[] = [];
   /** Decals the cart laid since the renderer last took them. */
   private decals: DecalLaid[] = [];
+  /** Debris the cart threw since the renderer last took it. */
+  private debris: DebrisThrown[] = [];
   /**
    * Ragdolls (H9): object → the limp body, built from its pose the next time it
    * is skinned after cartbox.ragdoll (until then null, with the shove to give it).
@@ -199,6 +211,10 @@ export class RuntimeChannel {
           this.decals.push({ decal: cmd.a & 0xff, at: [cmd.v[0]!, cmd.v[1]!, cmd.v[2]!], normal: [cmd.v[3]!, cmd.v[4]!, cmd.v[5]!], scale: ((cmd.a >>> 8) & 0xffff) / 16 });
       }
       else if (cmd.op === PHYS_OP_RAGDOLL) this.ragdollCommand(cmd.a, cmd.v);
+      else if (cmd.op === PHYS_OP_DEBRIS) {
+        if (this.debris.length < MAX_BURSTS_QUEUED)
+          this.debris.push({ debris: cmd.a & 0xff, at: [cmd.v[0]!, cmd.v[1]!, cmd.v[2]!], velocity: [cmd.v[3]!, cmd.v[4]!, cmd.v[5]!], scale: ((cmd.a >>> 8) & 0xffff) / 16 });
+      }
       else if (cmd.op === PHYS_OP_TIMELINE) {
         if (cmd.a < 0) this.timeline?.stop();
         else this.timeline?.play(cmd.a, cmd.v[0], cmd.v[1]);
@@ -232,34 +248,10 @@ export class RuntimeChannel {
     return this.ragdolls.has(object);
   }
 
-  /** The boxes ragdolls collide with: static, solid bodies (as oriented boxes round their meshes) and the scene's authored ones. */
+  /** The boxes ragdolls collide with (see sceneColliders), built on first use. */
   private colliders(): RagdollBox[] {
-    if (this.ragdollBoxes) return this.ragdollBoxes;
-    const boxes: RagdollBox[] = [...(this.scene.ragdollColliders ?? [])];
-    for (const inst of this.scene.instances) {
-      if (inst.physics?.body !== "static" || inst.physics.trigger || inst.pooled) continue;
-      const lo = [Infinity, Infinity, Infinity];
-      const hi = [-Infinity, -Infinity, -Infinity];
-      for (const prim of inst.mesh.primitives)
-        for (let i = 0; i < prim.positions.length; i += 3)
-          for (let k = 0; k < 3; k += 1) {
-            lo[k] = Math.min(lo[k]!, prim.positions[i + k]!);
-            hi[k] = Math.max(hi[k]!, prim.positions[i + k]!);
-          }
-      if (!(lo[0]! <= hi[0]!)) continue;
-      const m = inst.model;
-      const centre = transform(m, [(lo[0]! + hi[0]!) / 2, (lo[1]! + hi[1]!) / 2, (lo[2]! + hi[2]!) / 2]);
-      const cols = [0, 1, 2].map((c) => [m[c * 4]!, m[c * 4 + 1]!, m[c * 4 + 2]!] as const);
-      const lens = cols.map((c) => Math.hypot(c[0], c[1], c[2]) || 1);
-      const axes = cols.map((c, i) => [c[0] / lens[i]!, c[1] / lens[i]!, c[2] / lens[i]!] as const);
-      boxes.push({
-        center: centre,
-        half: [((hi[0]! - lo[0]!) / 2) * lens[0]!, ((hi[1]! - lo[1]!) / 2) * lens[1]!, ((hi[2]! - lo[2]!) / 2) * lens[2]!],
-        axes: [axes[0]!, axes[1]!, axes[2]!],
-      });
-    }
-    this.ragdollBoxes = boxes;
-    return boxes;
+    this.ragdollBoxes ??= sceneColliders(this.scene);
+    return this.ragdollBoxes;
   }
 
   /** A navigation agent command (see PHYS_OP_AGENT). */
@@ -296,6 +288,13 @@ export class RuntimeChannel {
   takeDecals(): DecalLaid[] {
     const out = this.decals;
     this.decals = [];
+    return out;
+  }
+
+  /** The debris thrown since the last call (the renderer simulates and draws it). */
+  takeDebris(): DebrisThrown[] {
+    const out = this.debris;
+    this.debris = [];
     return out;
   }
 

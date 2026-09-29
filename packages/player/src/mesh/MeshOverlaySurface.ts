@@ -26,6 +26,7 @@ import {
   bakeReflectionProbesAsync,
   ParticleSystem,
   DecalSystem,
+  DebrisSystem,
   applySunShafts,
   sunScreenPosition,
   sunVisibility,
@@ -51,6 +52,7 @@ import {
   type Mat4,
   type MeshAsset,
   type MeshSceneInstance,
+  type RagdollBox,
 } from "@cartbox/editor";
 import type { DisplaySurface } from "../display.js";
 import type { ScreenSun } from "../fx/PostFxSurface.js";
@@ -60,6 +62,7 @@ import type { ShadowInput, SceneLight, SceneLighting } from "@cartbox/editor";
 import type { MeshScene } from "./meshScene.js";
 import { QUALITY_PRESETS, type QualitySettings } from "../quality.js";
 import { buildOrbitCamera, orbitPitchAboveTerrain } from "./meshScene.js";
+import { sceneColliders } from "./sceneColliders.js";
 import { estimateSceneBytes, type Profiler, type RenderStats } from "../debug/profiler.js";
 
 const RAD_TO_DEG = 180 / Math.PI;
@@ -436,6 +439,13 @@ export class MeshOverlaySurface implements DisplaySurface {
     if (scene.effects && scene.effects.length > 0) surface.particles = new ParticleSystem(scene.effects);
     // Decals: the cart's marks and the scene's permanent ones.
     if (scene.decals && scene.decals.length > 0) surface.decals = new DecalSystem(scene.decals, scene.decalMarks ?? []);
+    // Debris the cart throws (casings, dropped weapons): simulated here, on the
+    // scene's colliders, each copy wearing its source's (textured) mesh.
+    if (scene.debris && scene.debrisMeshes && scene.debris.length > 0) {
+      surface.debris = new DebrisSystem(scene.debris, scene.debrisMeshes);
+      surface.debrisBoxes = sceneColliders(scene);
+      for (const mesh of scene.debrisMeshes) surface.debrisLooks.set(mesh, await texture(mesh));
+    }
     // Reflection probes: each captures the scene's still objects from its point
     // and shiny surfaces in its box reflect that instead of the sky. Baked after
     // the scene is up, a probe per tick, so loading isn't held back; until then
@@ -641,6 +651,11 @@ export class MeshOverlaySurface implements DisplaySurface {
       this.decals.step(1 / 60);
       const marks = this.decals.sceneInstance();
       if (marks) drawn = [...drawn, marks];
+    }
+    if (this.debris) {
+      this.debris.step(1 / 60, this.debrisBoxes);
+      const pieces = this.debris.instances();
+      if (pieces.length > 0) drawn = [...drawn, ...pieces.map((p) => ({ ...(this.debrisLooks.get(p.mesh) ?? {}), ...p }))];
     }
     if (this.particles) {
       this.particles.step(1 / 60);
@@ -1143,6 +1158,15 @@ export class MeshOverlaySurface implements DisplaySurface {
   private particles: ParticleSystem | null = null;
   /** The scene's decals on its surfaces, or null when it defines none. */
   private decals: DecalSystem | null = null;
+  /** Debris in flight and at rest (H10), what it lands on, and each source mesh with its textures. */
+  private debris: DebrisSystem | null = null;
+  private debrisBoxes: RagdollBox[] = [];
+  private readonly debrisLooks = new Map<MeshAsset, TexturedMesh>();
+
+  /** Throw a copy of debris `debris` (see cartbox.debris). */
+  throwDebris(debris: number, at: readonly [number, number, number], velocity: readonly [number, number, number], scale: number): void {
+    this.debris?.throw(debris, at, velocity, scale);
+  }
 
   /** Lay decal `decal` on a surface (see cartbox.decal). */
   decal(decal: number, at: readonly [number, number, number], normal: readonly [number, number, number], scale: number): void {

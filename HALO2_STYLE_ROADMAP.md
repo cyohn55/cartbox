@@ -127,8 +127,21 @@ general Unity/UE5 gap); items here that close a line there tick it off too.
       skeleton as a ragdoll to preview it. Lockout's soldiers are thrown away
       from whoever killed them (harder for a headshot) onto the arena's own
       collider boxes, and lie there until just before they respawn.
-- [ ] **H10. Cosmetic physics debris.** Ejected shell casings and dropped
+- [x] **H10. Cosmetic physics debris.** Ejected shell casings and dropped
       weapons as spawned physics props (prefabs + bodies), local only.
+      *Done:* debris definitions on the mesh sidecar each wear the look of a
+      prefab (whose mesh never sits in the level) or a scene object, optionally
+      leaving parts off by material. `cartbox.debris(name, x, y, z, vx, vy, vz,
+      scale)` throws a copy, which the player simulates as a small rigid body of
+      its own — its box's eight corners held rigid, landing on the scene's
+      static bodies and ragdoll colliders with the definition's bounce and
+      friction, spinning, settling, then shrinking away at the end of its life,
+      the oldest recycled past a cap. Like the ragdolls it never touches the
+      physics world, so online play is unaffected. The Mesh tab's "Debris" panel
+      edits the definitions and previews them tumbling onto a floor. Lockout
+      ejects brass casings with every shot (the player's and nearby bots') and
+      drops a killed soldier's weapon — the first-person model without its
+      hands — to clatter on the deck.
 - [ ] **H11. Shield effects.** A per-pose material override: the shield flare
       when hit, the recharge shimmer, and an Active Camo refraction.
 - [ ] **H12. Viewmodel animation.** Reload, melee and run-bob clips on the
