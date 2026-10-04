@@ -1301,7 +1301,7 @@ function WorkbenchBody({
           revision={revision}
         />
       )}
-      {activeTab === "Mesh" && <MeshEditor key="mesh" sidecar={mesh} onSidecarChange={setMesh} />}
+      {activeTab === "Mesh" && <MeshEditor key="mesh" sidecar={mesh} onSidecarChange={setMesh} code={doc} />}
       {activeTab === "Files" && (
         <FilesEditor
           key="files"

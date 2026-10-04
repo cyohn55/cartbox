@@ -96,6 +96,7 @@ import {
   type ViewportCamera,
 } from "@/lib/viewportCamera";
 import styles from "./editor.module.css";
+import { ASSET_DRAG_TYPE } from "./ContentBrowser";
 import { SegmentedControl } from "./railControls";
 
 const ORBIT_SPEED = 0.008; // radians per pixel
@@ -147,6 +148,8 @@ interface SceneViewportProps {
   previewLocals?: ReadonlyMap<string, Mat4> | null;
   /** Told the free camera's viewpoint whenever it settles (to key it into a timeline). */
   onView?: (view: ViewpointKey) => void;
+  /** An asset dragged in from the content browser, and where it landed in the world. */
+  onDropAsset?: (data: string, at: Vec3) => void;
 }
 
 /** A decoded mesh + its base-colour textures, rebuilt only when the geometry set changes. */
@@ -207,7 +210,7 @@ function frameSize(cssW: number, cssH: number, dpr: number, budget: number): { w
 
 const NO_IDS: ReadonlySet<string> = new Set();
 
-export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectIds, hidden = NO_IDS, locked = NO_IDS, onKey, previewCamera, previewLocals, onView }: SceneViewportProps) {
+export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectIds, hidden = NO_IDS, locked = NO_IDS, onKey, previewCamera, previewLocals, onView, onDropAsset }: SceneViewportProps) {
   const selectedId = selectedIds.at(-1) ?? null;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -857,6 +860,37 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
     else return;
     event.preventDefault();
   };
+  /**
+   * Where a drop lands: on the first surface under the cursor (a mesh's
+   * triangles), else on the ground (y = 0), else at the camera's pivot.
+   */
+  const dropPoint = (event: { clientX: number; clientY: number }, el: HTMLCanvasElement): Vec3 | null => {
+    const cam = cameraRef.current;
+    if (!cam) return null;
+    const { ndc } = pointerAt(event, el);
+    const ray = viewportRay(cam, aspect, ndc[0], ndc[1]);
+    const hit = raycastMeshes(ray, pickable().map((i) => ({ key: i.id, mesh: i.mesh, model: i.model })));
+    if (hit) return hit.point;
+    if (Math.abs(ray.dir[1]) > 1e-6) {
+      const t = -ray.origin[1] / ray.dir[1];
+      if (t > 0) return [ray.origin[0] + ray.dir[0] * t, 0, ray.origin[2] + ray.dir[2] * t];
+    }
+    return cameraPivot(cam);
+  };
+  const onDragOver = (event: React.DragEvent<HTMLCanvasElement>) => {
+    if (onDropAsset && event.dataTransfer.types.includes(ASSET_DRAG_TYPE)) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+    }
+  };
+  const onDrop = (event: React.DragEvent<HTMLCanvasElement>) => {
+    const data = event.dataTransfer.getData(ASSET_DRAG_TYPE);
+    if (!data || !onDropAsset) return;
+    event.preventDefault();
+    const at = dropPoint(event, event.currentTarget);
+    if (at) onDropAsset(data, at);
+  };
+
   const onKeyUp = (event: React.KeyboardEvent<HTMLCanvasElement>) => {
     keys.current.delete(event.key.toLowerCase());
   };
@@ -880,7 +914,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   }, [setCamera]);
 
   return (
-    <section className={styles.mapStage}>
+    <section className={styles.mapStage} style={{ flex: "1 1 auto" }}>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", justifyContent: "center" }}>
         <SegmentedControl
           ariaLabel="Scene tool"
@@ -960,6 +994,8 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
           onKeyUp={onKeyUp}
           onBlur={() => keys.current.clear()}
           onContextMenu={(event) => event.preventDefault()}
+          onDragOver={onDragOver}
+          onDrop={onDrop}
           style={{ position: "absolute", inset: 0, width: "100%", height: "100%", touchAction: "none", cursor: mode === "orbit" ? "grab" : "crosshair", outline: "none" }}
           role="img"
           aria-label="3D scene — click to select; drag to orbit or transform; right-drag with WASD to fly; middle- or Shift-drag to pan; wheel to dolly; F frames the selection"

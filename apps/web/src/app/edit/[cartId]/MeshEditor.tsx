@@ -50,6 +50,8 @@ import {
   type MeshTransform,
 } from "@/lib/meshSidecar";
 import { clickSelection, copyPayload, duplicateEntries, pasteEntries, removeEntries, withSubtrees } from "@/lib/sceneSelection";
+import { placeAsset, type ContentAsset } from "@/lib/contentBrowser";
+import { ContentBrowser, type CodeAccess } from "./ContentBrowser";
 import { importMeshFile, decodeMeshTextures } from "@/lib/meshImport";
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 import { KTX2_TRANSCODER_TRANSFER_BYTES, encodePngInBrowser, hasKtx2, sceneHasKtx2, settleKtx2Textures } from "@/lib/ktx2Policy";
@@ -99,6 +101,8 @@ interface MeshEditorProps {
   sidecar: MeshSidecar;
   /** Called with the next sidecar after any import, transform, rename, or delete. */
   onSidecarChange: (sidecar: MeshSidecar) => void;
+  /** The cart's code, for the content browser to find (and on a rename, update) asset names in it. */
+  code?: CodeAccess;
 }
 
 /** Trigger a browser download of raw bytes or text under `filename`. */
@@ -122,7 +126,7 @@ function fitDistance(mesh: MeshAsset): number {
   return radius / Math.sin(fov / 2) + radius;
 }
 
-export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
+export function MeshEditor({ sidecar, onSidecarChange, code }: MeshEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   /**
@@ -173,6 +177,18 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
     if (kept.length === selection.length && (kept.length > 0 || sidecar.meshes.length === 0)) return;
     setSelection(kept.length > 0 ? kept : sidecar.meshes[0] ? [sidecar.meshes[0].id] : []);
   }, [sidecar, selection]);
+
+  /** Place a mesh or prefab from the content browser at a world position, and select it in the scene view. */
+  const placeAt = useCallback(
+    (asset: Pick<ContentAsset, "kind" | "key" | "name">, at: readonly [number, number, number]) => {
+      const placed = placeAsset(sidecar, asset, at);
+      if (!placed.id) return;
+      onSidecarChange(placed.sidecar);
+      setSelection([placed.id]);
+      setView("scene");
+    },
+    [sidecar, onSidecarChange],
+  );
 
   /** Scene commands, from the keyboard (in the scene view or the hierarchy) or the hierarchy's buttons. */
   const sceneCommand = useCallback(
@@ -590,7 +606,8 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
         <PrefabLibrary sidecar={sidecar} onChange={onSidecarChange} onPlaced={setSelectedId} />
       </aside>
 
-      {/* Centre: preview — the selected mesh alone, or the whole composed scene */}
+      {/* Centre: preview — the selected mesh alone, or the whole composed scene — over the content browser */}
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
       {view === "scene" ? (
         <SceneViewport
           sidecar={sidecar}
@@ -603,9 +620,17 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
           previewCamera={timelinePreview?.camera ?? null}
           previewLocals={timelinePreview?.locals ?? null}
           onView={setSceneView}
+          onDropAsset={(data, at) => {
+            try {
+              const asset = JSON.parse(data) as { kind?: unknown; key?: unknown };
+              if ((asset.kind === "mesh" || asset.kind === "prefab") && typeof asset.key === "string") placeAt({ kind: asset.kind, key: asset.key, name: "" }, at);
+            } catch {
+              // Not one of ours.
+            }
+          }}
         />
       ) : (
-      <section className={styles.mapStage}>
+      <section className={styles.mapStage} style={{ flex: "1 1 auto" }}>
         <canvas
           ref={canvasRef}
           onPointerDown={onPointerDown}
@@ -642,6 +667,14 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
         </div>
       </section>
       )}
+        <ContentBrowser
+          sidecar={sidecar}
+          onSidecarChange={onSidecarChange}
+          code={code}
+          onSelectObjects={(ids) => setSelection(ids)}
+          onPlace={(asset) => placeAt(asset, sceneView?.target ?? [0, 0, 0])}
+        />
+      </div>
 
       {/* Right: transform, rename, export */}
       <aside style={{ width: 260, padding: 12, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
