@@ -10220,6 +10220,7 @@ import {
   cameraPositionFromView as cameraPositionFromView2,
   compiledGraphOf,
   computeSmoothNormals,
+  lightProbeTexels,
   LOCAL_SHADOW_GRID,
   LOCAL_SHADOW_TILE,
   MAX_LOCAL_SHADOW_TILES,
@@ -10802,6 +10803,7 @@ var UNIT_SCENE_DEPTH = 11;
 var UNIT_CLUSTER_TABLE = 12;
 var UNIT_CLUSTER_INDEX = 13;
 var UNIT_LOCAL_SHADOWS = 14;
+var UNIT_PROBE_GRID = 15;
 var BLOCK_UNIFORMS = 0;
 var BLOCK_INSTANCES = 1;
 var BLOCK_LIGHTS = 2;
@@ -11167,6 +11169,31 @@ float localShadow(int first, Light lgt, vec3 P, float cosL) {
         + localTap(sx - 0.5, sy + 0.5, ox, oy, own, tp.x, tp.y) + localTap(sx + 0.5, sy + 0.5, ox, oy, own, tp.x, tp.y)) * 0.25;
 }
 
+// Light probes (EP9): the grid as a 3D texture (face f's probes at x = f \xB7 nx + probe x);
+// its corner (w = 1 when bound), world \u2192 grid scale, and probes per axis.
+uniform highp sampler3D probeGrid;
+uniform vec4 probeGridMin;
+uniform vec4 probeGridScale;
+uniform vec4 probeGridCount;
+vec3 probeFace(int face, ivec3 i, vec3 f) {
+  ivec3 o = i + ivec3(face * int(probeGridCount.x + 0.5), 0, 0);
+  vec3 x00 = mix(texelFetch(probeGrid, o, 0).rgb, texelFetch(probeGrid, o + ivec3(1, 0, 0), 0).rgb, f.x);
+  vec3 x10 = mix(texelFetch(probeGrid, o + ivec3(0, 1, 0), 0).rgb, texelFetch(probeGrid, o + ivec3(1, 1, 0), 0).rgb, f.x);
+  vec3 x01 = mix(texelFetch(probeGrid, o + ivec3(0, 0, 1), 0).rgb, texelFetch(probeGrid, o + ivec3(1, 0, 1), 0).rgb, f.x);
+  vec3 x11 = mix(texelFetch(probeGrid, o + ivec3(0, 1, 1), 0).rgb, texelFetch(probeGrid, o + ivec3(1, 1, 1), 0).rgb, f.x);
+  return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z);
+}
+// The ambient scale from the probe grid at P for normal N (mirrors sampleLightProbes).
+vec3 probeLight(vec3 P, vec3 N) {
+  vec3 n = probeGridCount.xyz;
+  vec3 g = clamp((P - probeGridMin.xyz) * probeGridScale.xyz, vec3(0.0), n - vec3(1.0));
+  ivec3 i = min(ivec3(floor(g)), ivec3(n + vec3(0.5)) - ivec3(2));
+  vec3 f = g - vec3(i);
+  vec3 nn = normalize(N);
+  vec3 w = nn * nn;
+  return w.x * probeFace(nn.x >= 0.0 ? 0 : 1, i, f) + w.y * probeFace(nn.y >= 0.0 ? 2 : 3, i, f) + w.z * probeFace(nn.z >= 0.0 ? 4 : 5, i, f);
+}
+
 // One light's direct term (Cook-Torrance), mirroring the software rasteriser's
 // light loop: point and spot lights fall off to nothing at their range, a spot
 // fades across its cone, and directional lights honour the sun shadow (sf).
@@ -11310,6 +11337,8 @@ ${g.emis}
     // mirroring the CPU path.
     if (u.ssaoMeta.z > 0.5) {
       amb = amb * texture(lmTex, vec2(vUv2.x, 1.0 - vUv2.y)).rgb * ${LIGHTMAP_RANGE.toFixed(4)};
+    } else if (probeGridMin.w > 0.5) {
+      amb = amb * probeLight(vWorldPos, N); // EP9: no light map, the probes light it
     }
     if (u.ssaoMeta.x > 0.5) {
       amb = amb * texelFetch(ssaoMap, ivec2(gl_FragCoord.xy), 0).r;
@@ -11411,7 +11440,8 @@ function buildProgram2(gl, nearest, graph) {
     ["sceneDepth", UNIT_SCENE_DEPTH],
     ["clusterTable", UNIT_CLUSTER_TABLE],
     ["clusterIndex", UNIT_CLUSTER_INDEX],
-    ["localAtlas", UNIT_LOCAL_SHADOWS]
+    ["localAtlas", UNIT_LOCAL_SHADOWS],
+    ["probeGrid", UNIT_PROBE_GRID]
   ];
   for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
   return program;
@@ -11487,6 +11517,13 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.nearUploaded = null;
     /** The cell table and index list as integer textures, made on first use. */
     this.clusterTextures = null;
+    /** The light-probe grid (EP9): its uniforms, its 3D texture, and the grid it holds. */
+    this.probeGridMin = new Float32Array(4);
+    this.probeGridScale = new Float32Array(4);
+    this.probeGridCount = new Float32Array(4);
+    this.gridTexture = null;
+    this.gridSource = null;
+    this.gridBlank = null;
     /** The spot/point shadows this frame (EP8c): on/biases, each tile's view, and the atlas (made on first use). */
     this.localShadowInfo = new Float32Array(4);
     this.shadowTileMvp = new Float32Array(MAX_LOCAL_SHADOW_TILES * 16);
@@ -11631,6 +11668,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     const clusters = sceneLights.length > globalCount ? buildLightClusters(sceneLights, globalCount, draw.view, draw.projection, this.width, this.height) : null;
     this.uploadClusters(clusters);
     this.uploadLocalShadows(draw.localShadows ?? null);
+    this.uploadProbeGrid(draw.environment?.lightProbes ?? null);
     this.clusterParams.set(clusters?.params ?? [1, 1, 1, 1]);
     this.clusterInfo[0] = clusters ? globalCount : sceneLights.length;
     this.clusterInfo[1] = clusters ? 1 : 0;
@@ -11792,10 +11830,49 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     gl.uniformMatrix4fv(gl.getUniformLocation(program, "nearShadowMvp"), false, this.nearShadowMvp);
     gl.uniform4fv(gl.getUniformLocation(program, "nearShadow"), this.nearShadow);
     gl.uniform4fv(gl.getUniformLocation(program, "localShadowInfo"), this.localShadowInfo);
+    gl.uniform4fv(gl.getUniformLocation(program, "probeGridMin"), this.probeGridMin);
+    gl.uniform4fv(gl.getUniformLocation(program, "probeGridScale"), this.probeGridScale);
+    gl.uniform4fv(gl.getUniformLocation(program, "probeGridCount"), this.probeGridCount);
     if (this.localShadowInfo[0] > 0) {
       gl.uniformMatrix4fv(gl.getUniformLocation(program, "shadowTileMvp"), false, this.shadowTileMvp);
       gl.uniform4fv(gl.getUniformLocation(program, "shadowTileParams"), this.shadowTileParams);
     }
+  }
+  /** Point the probe uniforms at a frame's grid (uploading it once per grid), and bind it (a blank when there's none). */
+  uploadProbeGrid(grid) {
+    const gl = this.gl;
+    if (grid && grid !== this.gridSource) {
+      if (this.gridTexture) gl.deleteTexture(this.gridTexture);
+      const [nx, ny, nz] = grid.counts;
+      gl.activeTexture(gl.TEXTURE0 + UNIT_PROBE_GRID);
+      this.gridTexture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_3D, this.gridTexture);
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA32F, nx * 6, ny, nz, 0, gl.RGBA, gl.FLOAT, lightProbeTexels(grid));
+      this.gridSource = grid;
+    }
+    this.probeGridMin.set(grid ? [...grid.min, 1] : [0, 0, 0, 0]);
+    if (grid) {
+      this.probeGridScale.set([0, 1, 2].map((a) => (grid.counts[a] - 1) / (grid.max[a] - grid.min[a] || 1)));
+      this.probeGridCount.set(grid.counts);
+    }
+    gl.activeTexture(gl.TEXTURE0 + UNIT_PROBE_GRID);
+    gl.bindTexture(gl.TEXTURE_3D, grid ? this.gridTexture : this.blankProbe());
+    gl.bindSampler(UNIT_PROBE_GRID, null);
+  }
+  /** A 1×1×1 stand-in so the 3D sampler always has a complete texture. */
+  blankProbe() {
+    if (!this.gridBlank) {
+      const gl = this.gl;
+      gl.activeTexture(gl.TEXTURE0 + UNIT_PROBE_GRID);
+      this.gridBlank = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_3D, this.gridBlank);
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA32F, 1, 1, 1, 0, gl.RGBA, gl.FLOAT, new Float32Array(4));
+    }
+    return this.gridBlank;
   }
   /** Upload a frame's shadow tiles into the atlas, and bind it (a blank stands in when there are none). */
   uploadLocalShadows(local) {
@@ -12046,6 +12123,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.probeTexture, this.ssaoTexture]) if (t) gl.deleteTexture(t);
       gl.deleteFramebuffer(this.framebuffer);
       if (this.localAtlas) gl.deleteTexture(this.localAtlas);
+      if (this.gridTexture) gl.deleteTexture(this.gridTexture);
+      if (this.gridBlank) gl.deleteTexture(this.gridBlank);
       if (this.clusterTextures) {
         gl.deleteTexture(this.clusterTextures.table);
         gl.deleteTexture(this.clusterTextures.index);
@@ -12095,6 +12174,7 @@ import {
   cameraPositionFromView as cameraPositionFromView3,
   compiledGraphOf as compiledGraphOf2,
   computeSmoothNormals as computeSmoothNormals2,
+  lightProbeTexels as lightProbeTexels2,
   LOCAL_SHADOW_GRID as LOCAL_SHADOW_GRID2,
   LOCAL_SHADOW_TILE as LOCAL_SHADOW_TILE2,
   MAX_LOCAL_SHADOW_TILES as MAX_LOCAL_SHADOW_TILES2,
@@ -12111,7 +12191,7 @@ import {
   graphUsesNoise as graphUsesNoise2,
   multiplyMat4 as multiplyMat45
 } from "@cartbox/editor";
-var FRAME_BYTES = 128;
+var FRAME_BYTES = 176;
 var READBACK_BUFFERS2 = 3;
 var SHADER_STAGE_VERTEX = 1;
 var SHADER_STAGE_FRAGMENT = 2;
@@ -12208,6 +12288,9 @@ struct Frame {
   nearMvp: mat4x4<f32>,
   nearShadow: vec4<f32>,
   localShadow: vec4<f32>, // EP8c: x = 1 when spot/point shadows are on, y = bias, z = slope bias (world units)
+  probeMin: vec4<f32>,    // EP9: the probe grid's corner, w = 1 when a grid is bound
+  probeScale: vec4<f32>,  // world \u2192 grid units per axis: (count \u2212 1) / (max \u2212 min)
+  probeCount: vec4<f32>,  // probes per axis
 };
 // One spot/point shadow tile (EP8c): world\u2192clip, and params.xy = depth\u2192distance terms.
 struct ShadowTile {
@@ -12272,6 +12355,8 @@ struct Probe {
 // Spot and point light shadows (EP8c): the tile atlas and each tile's view.
 @group(1) @binding(4) var localAtlas: texture_2d<f32>;
 @group(1) @binding(5) var<storage, read> shadowTiles: array<ShadowTile>;
+// Light probes (EP9): the grid as a 3D texture, face f's probes at x = f \xB7 nx + probe x.
+@group(1) @binding(6) var probeGrid: texture_3d<f32>;
 
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] \u2014 fogLayerDepth in skyDome.ts.
@@ -12469,6 +12554,28 @@ fn localShadow(first: i32, lgt: Light, P: vec3<f32>, cosL: f32) -> f32 {
         + localTap(sx - 0.5, sy + 0.5, ox, oy, own, t.params.x, t.params.y) + localTap(sx + 0.5, sy + 0.5, ox, oy, own, t.params.x, t.params.y)) * 0.25;
 }
 
+// One ambient-cube face of the probe grid at grid cell i + fraction f (trilinear).
+fn probeFace(face: i32, i: vec3<i32>, f: vec3<f32>) -> vec3<f32> {
+  let o = i + vec3<i32>(face * i32(frame.probeCount.x + 0.5), 0, 0);
+  let x00 = mix(textureLoad(probeGrid, o, 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 0, 0), 0).rgb, f.x);
+  let x10 = mix(textureLoad(probeGrid, o + vec3<i32>(0, 1, 0), 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 1, 0), 0).rgb, f.x);
+  let x01 = mix(textureLoad(probeGrid, o + vec3<i32>(0, 0, 1), 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 0, 1), 0).rgb, f.x);
+  let x11 = mix(textureLoad(probeGrid, o + vec3<i32>(0, 1, 1), 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 1, 1), 0).rgb, f.x);
+  return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z);
+}
+// The ambient scale from the probe grid at P for normal N (mirrors sampleLightProbes).
+fn probeLight(P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
+  let n = frame.probeCount.xyz;
+  let g = clamp((P - frame.probeMin.xyz) * frame.probeScale.xyz, vec3<f32>(0.0), n - vec3<f32>(1.0));
+  let i = min(vec3<i32>(floor(g)), vec3<i32>(n + vec3<f32>(0.5)) - vec3<i32>(2));
+  let f = g - vec3<f32>(i);
+  let nn = normalize(N);
+  let w = nn * nn;
+  return w.x * probeFace(select(1, 0, nn.x >= 0.0), i, f)
+       + w.y * probeFace(select(3, 2, nn.y >= 0.0), i, f)
+       + w.z * probeFace(select(5, 4, nn.z >= 0.0), i, f);
+}
+
 // One light's direct term (Cook-Torrance), mirroring the software rasteriser's
 // light loop: point and spot lights fall off to nothing at their range, a spot
 // fades across its cone, and directional lights honour the sun shadow (sf).
@@ -12663,6 +12770,7 @@ ${g.emis}
     let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
     let lm = textureSample(lmTex, samp, lmUv).rgb * ${LIGHTMAP_RANGE2};
     if (u.ssaoMeta.z > 0.5) { amb = amb * lm; }
+    else if (frame.probeMin.w > 0.5) { amb = amb * probeLight(in.worldPos, N); } // EP9: no light map, the probes light it
     // Screen-space AO darkens only the ambient fill, sampled at this fragment's
     // framebuffer pixel (matching the software path's ssao[di]).
     if (u.ssaoMeta.x > 0.5) {
@@ -12911,7 +13019,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 2, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
           { binding: 3, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } },
           { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
-          { binding: 5, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } }
+          { binding: 5, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
+          { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
         ]
       });
       const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayout] });
@@ -12983,13 +13092,15 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       };
       const shadowTiles = device.createBuffer({ size: MAX_LOCAL_SHADOW_TILES2 * 80, usage: 128 | 8 });
       const atlasBlank = device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: 4 | 2 });
-      const makeGroups = (atlas) => {
+      const probesBlank = device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: "rgba32float", usage: 4 | 2 });
+      const makeGroups = (atlas, probes) => {
         const shared = [
           { binding: 1, resource: { buffer: clusterBuffers.table } },
           { binding: 2, resource: { buffer: clusterBuffers.index } },
           { binding: 3, resource: { buffer: clusterBuffers.params } },
           { binding: 4, resource: atlas.createView() },
-          { binding: 5, resource: { buffer: shadowTiles } }
+          { binding: 5, resource: { buffer: shadowTiles } },
+          { binding: 6, resource: probes.createView({ dimension: "3d" }) }
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared] }),
@@ -12997,12 +13108,15 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         };
       };
       const depthGroups = {
-        ...makeGroups(atlasBlank),
+        ...makeGroups(atlasBlank, probesBlank),
         blankTexture: blankDepth,
         clusters: clusterBuffers,
         shadowTiles,
         atlas: atlasBlank,
         atlasBlank: true,
+        probes: probesBlank,
+        probesBlank: true,
+        probeSource: null,
         makeGroups
       };
       const filter = style.textureFiltering === "none" ? "nearest" : "linear";
@@ -13367,9 +13481,28 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     }
     const local = draw.localShadows ?? null;
     if (local && local.tiles.length > 0) frame.set([1, local.bias, local.slopeBias], 28);
+    const grid = draw.environment?.lightProbes ?? null;
+    if (grid) {
+      this.uploadProbeGrid(grid);
+      frame.set([...grid.min, 1], 32);
+      frame.set([0, 1, 2].map((a) => (grid.counts[a] - 1) / (grid.max[a] - grid.min[a] || 1)), 36);
+      frame.set(grid.counts, 40);
+    }
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
+  }
+  /** Upload a probe grid (EP9) as a 3D texture, once per grid, rebuilding group 1 to point at it. */
+  uploadProbeGrid(grid) {
+    const groups = this.depthGroups;
+    if (groups.probeSource === grid) return;
+    const [nx, ny, nz] = grid.counts;
+    if (!groups.probesBlank) destroySafely(groups.probes);
+    groups.probes = this.device.createTexture({ size: { width: nx * 6, height: ny, depthOrArrayLayers: nz }, dimension: "3d", format: "rgba32float", usage: 4 | 2 });
+    groups.probesBlank = false;
+    groups.probeSource = grid;
+    this.device.queue.writeTexture({ texture: groups.probes }, lightProbeTexels2(grid), { bytesPerRow: nx * 6 * 16, rowsPerImage: ny }, { width: nx * 6, height: ny, depthOrArrayLayers: nz });
+    Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
   }
   /** Upload the spot/point shadow tiles (EP8c): each tile into its atlas cell, and every tile's view. */
   uploadLocalShadows(local) {
@@ -13379,7 +13512,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const side = LOCAL_SHADOW_TILE2 * LOCAL_SHADOW_GRID2;
       groups.atlas = this.device.createTexture({ size: { width: side, height: side }, format: "r32float", usage: 4 | 2 });
       groups.atlasBlank = false;
-      Object.assign(groups, groups.makeGroups(groups.atlas));
+      Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
     }
     const views = new Float32Array(MAX_LOCAL_SHADOW_TILES2 * 20);
     local.tiles.slice(0, MAX_LOCAL_SHADOW_TILES2).forEach((tile, i) => {
@@ -13551,6 +13684,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     destroySafely(this.depthGroups.clusters.params);
     destroySafely(this.depthGroups.shadowTiles);
     destroySafely(this.depthGroups.atlas);
+    destroySafely(this.depthGroups.probes);
     destroySafely(this.blankTexture);
     destroySafely(this.blankShadow);
     if (this.shadowTexture !== this.blankShadow) destroySafely(this.shadowTexture);

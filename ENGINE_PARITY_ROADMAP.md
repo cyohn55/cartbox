@@ -330,10 +330,37 @@ preview.
         over a copy each frame. The editor's scene view shows them too.
       - **Lockout:** the two tower floodlights cast. The walkway rails and
         anyone crossing throw shadows down the deck.
-- [ ] **EP9. Light probes and LODs.** A baked grid of light probes, so moving
+- [x] **EP9. Light probes and LODs.** A baked grid of light probes, so moving
       objects pick up the baked bounce light (the web-sized answer to Lumen),
       and LOD chains generated automatically on import (the web-sized answer
       to Nanite).
+
+      *Done (light probes; LOD generation is EP9b):*
+      - **The grid:** a baked grid of ambient-cube probes over the scene,
+        about 2.5 m apart and up to 4096. At each probe, each of the six axis
+        faces holds what a light-map texel facing that way would: sky
+        visibility and one bounce of sun. The bake uses the light map's own
+        ray tracer and the same units.
+      - **Sampling:** a surface without a light map scales its ambient and
+        sky fill by the grid. It blends trilinearly between probes and across
+        the three faces its normal leans toward, weighted by the normal's
+        squared components.
+      - **All three renderers:** the software rasteriser, WGSL and GLSL
+        sample a float 3D texture by hand, so all three agree. Parity tests
+        hold them to the same picture.
+      - **Storage and baking:** the grid is stored with the scene's lighting
+        as bytes, like a light map. "Bake lighting" now bakes it over the
+        still objects after their light maps (with a spacing control), and
+        Clear removes it.
+      - **Lockout:** ships a baked 14 × 12 × 13 grid
+        (`npm run bake:lockout-probes`, checked against the arena's layout
+        fingerprint). The soldiers darken in the pit and under the walkway
+        and pick up the snow's bounce in the open.
+- [ ] **EP9b. LOD generation.** Simplify a mesh into a chain of lighter
+      levels (quadric-error edge collapse, keeping UV seams and borders) on
+      import or on demand, stored with the object and swapped by camera
+      distance (the runtime already selects LODs). *Lockout:* the soldiers
+      and debris drop to light meshes across the arena.
 
 ## Phase C — World building
 

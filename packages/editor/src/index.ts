@@ -79,6 +79,7 @@ export {
   bakeLockoutLightmap,
   lockoutTerrainTriangles,
   LOCKOUT_LIGHTING,
+  bakeLockoutProbes,
   LOCKOUT_SCENE_TRIANGLES,
   LOCKOUT_CENTER_X,
   LOCKOUT_CENTER_Y,

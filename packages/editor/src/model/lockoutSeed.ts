@@ -27,7 +27,7 @@
 
 import type { CartEngine } from "../engine/CartEngine";
 import { encodeRgbaPng } from "./png";
-import { serializeMeshAsset, type EncodedImage, type MeshAsset, type MeshPrimitive } from "./MeshAsset";
+import { meshBounds, serializeMeshAsset, type EncodedImage, type MeshAsset, type MeshPrimitive } from "./MeshAsset";
 import type { AnimationClip, ClipChannel, SkinJoint } from "./skeleton";
 import type { SceneLighting } from "./SceneLighting";
 import type { SceneLight } from "../render/meshRasterizer";
@@ -40,9 +40,11 @@ import { builtinDetailGrain } from "./materialEffects";
 import type { MaterialGraph } from "./materialGraph";
 import { particlePreset, type ParticleEffect } from "./particleEffects";
 import { decalPreset, type DecalDef, type DecalMark } from "./decals";
-import { applyLightmapImage, bakeLightmap, layoutFingerprint, layoutLightmap, type LightmapLayout } from "./lightmap";
+import { applyLightmapImage, bakeLightProbes, bakeLightmap, layoutFingerprint, layoutLightmap, type LightmapLayout } from "./lightmap";
 import { base64ToBytes } from "./base64";
 import { LOCKOUT_LIGHTMAP } from "./lockoutLightmap.generated";
+import { LOCKOUT_PROBES } from "./lockoutProbes.generated";
+import { planProbeGrid, type LightProbeGrid, type StoredLightProbes } from "./lightProbes";
 import { SWEETIE_16 } from "./palette";
 
 /** An axis-aligned box: centre (cx,cy,cz) and half-extents (hx,hy,hz). */
@@ -1196,6 +1198,23 @@ export function bakeLockoutLightmap(progress?: (done: number) => void): Uint8Cla
   return bakeLightmap(layout, [{ mesh: layout.mesh, model: IDENTITY }], { rays: 64, distance: 7, sun: LOCKOUT_KEY_DIRECTION, bounce: 0.9, contrast: 1.25 }, progress);
 }
 
+/**
+ * Bake the arena's light probes from scratch (EP9): a grid over the map,
+ * traced against it with the light map's settings.
+ */
+export function bakeLockoutProbes(progress?: (done: number) => void): LightProbeGrid {
+  const layout = lockoutMapLayout();
+  const b = meshBounds(layout.mesh) ?? { min: [-1, -1, -1] as const, max: [1, 1, 1] as const };
+  const min: [number, number, number] = [b.min[0] - 1, b.min[1], b.min[2] - 1];
+  const max: [number, number, number] = [b.max[0] + 1, b.max[1] + 2, b.max[2] + 1];
+  return bakeLightProbes(min, max, planProbeGrid(min, max, 2.5), [{ mesh: layout.mesh, model: IDENTITY }], { rays: 64, distance: 7, sun: LOCKOUT_KEY_DIRECTION, bounce: 0.9, contrast: 1.25 }, progress);
+}
+
+/** The stored probe bake, when it was made for the arena as it is now (null when stale or not yet baked). */
+function lockoutProbes(): StoredLightProbes | null {
+  return LOCKOUT_PROBES.probes && LOCKOUT_PROBES.fingerprint === layoutFingerprint(lockoutMapLayout()) ? LOCKOUT_PROBES.probes : null;
+}
+
 /** The map as it ships: laid out and carrying the stored bake (or unlit, when the bake is stale). */
 function litMapMesh(): MeshAsset {
   const layout = lockoutMapLayout();
@@ -2100,7 +2119,8 @@ export function lockoutMeshSidecar(): string {
       version: 2,
       meshes: packed.entries,
       library: packed.library,
-      lighting: LOCKOUT_LIGHTING,
+      // The baked light probes (EP9) light the soldiers as they cross shade and bounce.
+      lighting: { ...LOCKOUT_LIGHTING, ...(lockoutProbes() ? { lightProbes: lockoutProbes() } : {}) },
       navmesh: serializeNavMesh(lockoutNavMesh()),
       terrains: [serializeTerrain(lockoutTerrain())],
       timelines: [LOCKOUT_INTRO],

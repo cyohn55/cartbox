@@ -53,6 +53,7 @@ import { SoftwareSceneRenderer, WebgpuSceneRenderer, type SceneDraw } from "@car
 import { graphInstances } from "./helpers/graphScenes";
 import { localShadowRig } from "./helpers/localShadowScene";
 import { manyLights } from "./helpers/manyLights";
+import { probeRig } from "./helpers/probeScene";
 
 
 const W = 64;
@@ -661,6 +662,33 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
       if (software.out[i]! < unshadowed.out[i]! - 8) shaded += 1;
     }
     expect(shaded).toBeGreaterThan(30); // the shadows really darken the floor
+    expect(maxDelta).toBeLessThanOrEqual(4);
+    renderer.dispose();
+  });
+
+  it("lights surfaces without light maps from the probe grid like the software rasteriser", async () => {
+    // EP9: the grid as a 3D texture, trilinear by hand, the ambient cube's faces by the normal.
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+    const rig = probeRig();
+    const lit = (withProbes = true): SceneDraw => ({ ...draw(), view: viewMatrix([0, 3.5, 5.5], [0, 0.5, 0]), lightDirection: [0.3, 1, 0.4], ambient: 0.3, environment: withProbes ? rig.environment : { ...rig.environment, lightProbes: null } });
+    renderer.render(rig.instances, lit());
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.tick?.();
+    }
+    const gpu = lit();
+    renderer.render(rig.instances, gpu);
+    const software = lit();
+    new SoftwareSceneRenderer().render(rig.instances, software);
+    const plain = lit(false);
+    new SoftwareSceneRenderer().render(rig.instances, plain);
+    let maxDelta = 0;
+    let changed = 0;
+    for (let i = 0; i < W * H * 4; i += 1) {
+      maxDelta = Math.max(maxDelta, Math.abs(gpu.out[i]! - software.out[i]!));
+      if (Math.abs(software.out[i]! - plain.out[i]!) > 6) changed += 1;
+    }
+    expect(changed).toBeGreaterThan(100); // the probes really shape the ambient
     expect(maxDelta).toBeLessThanOrEqual(4);
     renderer.dispose();
   });

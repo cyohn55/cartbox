@@ -209,6 +209,15 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     }
   });
 
+  it("lights surfaces without light maps from the probe grid like the software rasteriser", async () => {
+    const result = await run("probes");
+    expect(result.drawn).toBeGreaterThan(100);
+    if (exact) {
+      expect(result.coverage, JSON.stringify(result.diffs)).toBe(0);
+      expect(result.maxDelta).toBeLessThanOrEqual(4);
+    }
+  });
+
   it("matches distance fog within float tolerance", async () => {
     const result = await run("fog");
     expect(result.drawn).toBeGreaterThan(100);
