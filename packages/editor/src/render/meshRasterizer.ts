@@ -25,6 +25,7 @@
 import { boxProject, pickProbe, sampleProbe, type ReflectionProbeSet } from "./probeSampling";
 import { applyFog, type SceneFog } from "./skyDome";
 import { cameraPositionFromView } from "./lod";
+import { localShadowVisibility, type LocalShadows } from "./localShadows";
 import { EFFECT_RIM_POWER, bandAmount, camoThreshold, effectActive, type SurfaceEffect } from "./surfaceEffect";
 
 /** The fog for one frame, with the eye it is seen from (height fog and volumes trace from it). */
@@ -370,6 +371,13 @@ export interface SceneLight {
   /** Spot: the cone's half-angles in degrees — full strength inside `innerAngle`, none past `outerAngle`. */
   readonly innerAngle?: number;
   readonly outerAngle?: number;
+  /** Point and spot (ranged): cast shadows (EP8c; see localShadows.ts). */
+  readonly castShadows?: boolean;
+  /**
+   * Set by the renderer's caller, not authored: the light's first tile in the
+   * frame's {@link LocalShadows} atlas (see assignLocalShadowTiles).
+   */
+  readonly shadowTile?: number;
 }
 
 /** A spot light's cone as cosines: [outer, inner], inner kept just above outer so the fade never divides by zero. */
@@ -934,6 +942,8 @@ export interface RenderMeshSceneOptions {
    *  `lightDirection` key light. Directional + point; no fixed cap. See
    *  {@link SceneLight}. When omitted the single key light is used (unchanged). */
   readonly lights?: readonly SceneLight[] | null;
+  /** Shadow maps of the lights that cast (EP8c), which their `shadowTile`s index; omitted for none. */
+  readonly localShadows?: LocalShadows | null;
   /** Per-pixel rasterisation behaviour; defaults to {@link DEFAULT_RASTER_STYLE}. */
   readonly style?: RasterStyle;
   /** Seconds since the scene started, for animated emissive (scroll and pulse); default 0. */
@@ -963,6 +973,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
   const tonemap = options.tonemap ?? null;
   const ssao = options.ssao ?? null;
   const lights = options.lights ?? null;
+  const localShadows = options.localShadows ?? null;
   const fog: FrameFog | null = options.fog ? { ...options.fog, eye: cameraPositionFromView(view) } : null;
   const style = options.style ?? DEFAULT_RASTER_STYLE;
   const time = options.time ?? 0;
@@ -1011,7 +1022,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const extras: PrimitiveExtras = { lightmap: instance.lightmapTextures ?? null, detail: instance.detailTextures ?? null, blend: instance.blendTextures ?? null, time, effect: instance.effect ?? null };
     const lightMvp = shadow ? multiply(shadow.lightViewProj, instance.model) : null;
     if (style.zBuffer) {
-      drawMesh(instance.mesh, mvp, modelView, instance.model, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, extras, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, lights, style, fog, deferred);
+      drawMesh(instance.mesh, mvp, modelView, instance.model, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, extras, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, lights, style, fog, deferred, localShadows);
     } else {
       eachTriangle(instance.mesh, mvp, modelView, instance.model, normalBasis, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, extras, lightMvp, (triangle) => queue.push(triangle));
     }
@@ -1053,6 +1064,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
         fog,
         triangle.alpha,
         linear,
+        localShadows,
       );
     }
   }
@@ -1764,6 +1776,7 @@ function drawMesh(
   fog: FrameFog | null = null,
   /** Where blended and added triangles wait, to be drawn after everything opaque (null: draw them now). */
   defer: PendingTriangle[] | null = null,
+  localShadows: LocalShadows | null = null,
 ): void {
   eachTriangle(
     mesh,
@@ -1809,6 +1822,8 @@ function drawMesh(
         style,
         fog,
         triangle.alpha,
+        null,
+        localShadows,
       );
     },
   );
@@ -1842,6 +1857,8 @@ function rasterizeTriangle(
   alpha: AlphaState = OPAQUE_ALPHA,
   /** {@link depthLinearTerms} of the projection, for soft see-through edges (null: hard edges). */
   linear: readonly [number, number] | null = null,
+  /** Shadow maps of the lights that cast (EP8c). */
+  localShadows: LocalShadows | null = null,
 ): void {
   const soft = linear && alpha.mode >= 2 && alpha.soft > 0 ? alpha.soft : 0;
   // Only the lights that reach this triangle (EP8): a ranged light adds exactly
@@ -2311,7 +2328,8 @@ function rasterizeTriangle(
             const FbL = f0b + (1 - f0b) * fpL;
             // Directional lights are the ones the sun shadow map occludes; a point
             // light is unshadowed here (its own shadow map would be a follow-up).
-            const occl = lgt.kind === "directional" ? shadowLit : 1;
+            // A light that casts (EP8c) tests the point against its own maps.
+            const occl = lgt.kind === "directional" ? shadowLit : lgt.shadowTile !== undefined && localShadows ? localShadowVisibility(localShadows, lgt.shadowTile, lgt, wx, wy, wz, ndlL) : 1;
             const w = lgt.intensity * atten * ndlL * occl;
             dR += (kdm * (1 - FrL) * ar + FrL * specL) * lgt.color[0]! * w;
             dG += (kdm * (1 - FgL) * ag + FgL * specL) * lgt.color[1]! * w;
