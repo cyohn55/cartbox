@@ -412,6 +412,7 @@ export {
   compiledGraphOf,
   evaluateGraph,
   graphNoiseSource,
+  graphParams,
   graphRegisters,
   graphShaderCode,
   graphUsesNoise,

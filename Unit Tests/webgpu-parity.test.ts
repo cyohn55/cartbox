@@ -50,6 +50,8 @@ import {
 } from "@cartbox/editor";
 import { SoftwareSceneRenderer, WebgpuSceneRenderer, type SceneDraw } from "@cartbox/player";
 
+import { graphInstances } from "./helpers/graphScenes";
+
 
 const W = 64;
 const H = 48;
@@ -388,6 +390,37 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     expect(softened).toBeGreaterThan(20); // the soft edge really changed the picture
     expect(coverage).toBe(0);
     expect(maxDelta).toBeLessThanOrEqual(5);
+    renderer.dispose();
+  });
+
+  it("runs material graphs like the software rasteriser: noise, fresnel, maths and a scrolling texture", async () => {
+    // EP7: each graph compiles to its own WGSL pipeline variant; the CPU interprets the same steps.
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+    const mat = (m: Record<string, unknown>) => {
+      const q = quad();
+      return { ...q, primitives: [{ ...q.primitives[0]!, material: { ...q.primitives[0]!.material, ...m } }] };
+    };
+    const instances = graphInstances(mat);
+    const timed = () => ({ ...draw(), time: 0.7 });
+    renderer.render(instances, timed());
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.tick?.();
+    }
+    const gpu = timed();
+    renderer.render(instances, gpu);
+    const software = timed();
+    new SoftwareSceneRenderer().render(instances, software);
+    let maxDelta = 0;
+    let coverage = 0;
+    for (let i = 0; i < W * H * 4; i += 1) {
+      maxDelta = Math.max(maxDelta, Math.abs(gpu.out[i]! - software.out[i]!));
+      if (i % 4 === 3 && (gpu.out[i] === 0) !== (software.out[i] === 0)) coverage += 1;
+    }
+    const drawn = Array.from(software.out).filter((_, i) => i % 4 === 3 && software.out[i] !== 0).length;
+    expect(drawn).toBeGreaterThan(100);
+    expect(coverage).toBe(0);
+    expect(maxDelta).toBeLessThanOrEqual(6);
     renderer.dispose();
   });
 

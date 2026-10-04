@@ -17,6 +17,7 @@ import {
 } from "@cartbox/editor";
 
 import { SoftwareSceneRenderer, type SceneDraw } from "../../packages/player/src/render/sceneRenderer";
+import { graphInstances } from "./graphScenes";
 import { WebglSceneRenderer } from "../../packages/player/src/render/WebglSceneRenderer";
 
 const W = 64;
@@ -144,6 +145,9 @@ function scenes(): Record<string, Scene> {
       ],
       draw: () => ({ ...baseDraw(), view: viewMatrix([0, 4, 7], [0, 0, 0]) }),
     },
+    // Material graphs (EP7): noise, fresnel, UV and maths into every PBR input,
+    // and a scrolling texture's alpha into a see-through surface's coverage.
+    graph: { instances: graphInstances(quad), draw: () => ({ ...baseDraw(), time: 0.7 }) },
     // Shield effects (H11): rim, glow and bands within rounding, and the camo dither dropping the very same pixels.
     effects: {
       instances: [

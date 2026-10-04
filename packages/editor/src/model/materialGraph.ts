@@ -135,6 +135,28 @@ const MAX_OCTAVES = 4;
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const clampNum = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
+/**
+ * A node's params, complete and in range: a constant's value as three numbers
+ * (a lone number is splatted), and every other kind's defaults filled in.
+ */
+export function graphParams(op: GraphOp, raw: unknown): Record<string, number | string | readonly number[]> {
+  const p = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const params: Record<string, number | string | readonly number[]> = {};
+  if (op === "constant") {
+    const v = p.value;
+    const c = (x: number) => clampNum(x, -1e4, 1e4);
+    params.value = Array.isArray(v) && v.length === 3 && v.every(finite) ? (v as number[]).map(c) : finite(v) ? [c(v), c(v), c(v)] : [0, 0, 0];
+  }
+  if (op === "fresnel") params.power = finite(p.power) ? clampNum(p.power, 0.1, 16) : 5;
+  if (op === "texture") params.channel = p.channel === "a" ? "a" : "rgb";
+  if (op === "noise") {
+    params.scale = finite(p.scale) ? clampNum(p.scale, 0.001, 1000) : 1;
+    params.octaves = finite(p.octaves) ? Math.round(clampNum(p.octaves, 1, MAX_OCTAVES)) : 1;
+  }
+  if (op === "split") params.component = finite(p.component) ? Math.round(clampNum(p.component, 0, 2)) : 0;
+  return params;
+}
+
 /** Read a stored graph, dropping malformed nodes, wires and params; null when nothing usable remains. */
 export function readMaterialGraph(raw: unknown): MaterialGraph | null {
   if (!raw || typeof raw !== "object") return null;
@@ -154,19 +176,7 @@ export function readMaterialGraph(raw: unknown): MaterialGraph | null {
         if (typeof wire === "string") inputs[name] = wire;
       }
     }
-    const params: Record<string, number | string | readonly number[]> = {};
-    const p = (n.params && typeof n.params === "object" ? n.params : {}) as Record<string, unknown>;
-    if (op === "constant") {
-      const v = p.value;
-      params.value = Array.isArray(v) && v.length === 3 && v.every(finite) ? (v as number[]).map((c) => clampNum(c, -1e4, 1e4)) : finite(v) ? [clampNum(v, -1e4, 1e4), clampNum(v, -1e4, 1e4), clampNum(v, -1e4, 1e4)] : [0, 0, 0];
-    }
-    if (op === "fresnel") params.power = finite(p.power) ? clampNum(p.power, 0.1, 16) : 5;
-    if (op === "texture") params.channel = p.channel === "a" ? "a" : "rgb";
-    if (op === "noise") {
-      params.scale = finite(p.scale) ? clampNum(p.scale, 0.001, 1000) : 1;
-      params.octaves = finite(p.octaves) ? Math.round(clampNum(p.octaves, 1, MAX_OCTAVES)) : 1;
-    }
-    if (op === "split") params.component = finite(p.component) ? Math.round(clampNum(p.component, 0, 2)) : 0;
+    const params = graphParams(op, n.params);
     ids.add(n.id);
     nodes.push({
       id: n.id,
@@ -241,7 +251,7 @@ export function compileGraph(graph: MaterialGraph | null | undefined): CompiledG
     });
     visiting.delete(id);
     const index = steps.length;
-    steps.push({ op: node.op, args, params: node.params ?? {} });
+    steps.push({ op: node.op, args, params: graphParams(node.op, node.params) });
     done.set(id, index);
     return index;
   };
