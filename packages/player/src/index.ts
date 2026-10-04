@@ -417,6 +417,8 @@ export function mount(container: HTMLElement, options: PlayerOptions): PlayerHan
     setProfiling: (on) => player.setProfiling(on),
     profile: () => player.profile(),
     quality: () => player.quality(),
+    setEditorCamera: (camera) => player.setEditorCamera(camera),
+    updateMeshScene: (scene) => player.updateMeshScene(scene),
   };
 }
 

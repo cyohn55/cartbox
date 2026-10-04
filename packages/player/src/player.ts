@@ -20,7 +20,7 @@ import { STICK_OPTIN_MAGIC, STICK_OPTIN_WORD, STICK_WORD, packSticks } from "./s
 import { DEFAULT_CONTROL_SETTINGS, applyLookSettings, type ControlSettings } from "./controls.js";
 import { injectSdk } from "./sdk.js";
 import { sceneObjectsSdkLua } from "./mesh/sceneObjectsSdk.js";
-import { streamGroups } from "./mesh/meshScene.js";
+import { streamGroups, type MeshScene } from "./mesh/meshScene.js";
 import { runtimeSdkLua } from "./physics/physicsSdk.js";
 import { PhysicsSession, sceneHasPhysics } from "./physics/physicsSession.js";
 import { RuntimeChannel } from "./runtime/runtimeChannel.js";
@@ -47,7 +47,7 @@ import {
 import { effectiveBreakpoints, instrumentLua } from "./debug/instrument.js";
 import { flagsSdkLua } from "./flagsSdk.js";
 import { animClipsSdkLua } from "./anim/animClipsSdk.js";
-import { decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights } from "./mailbox.js";
+import { decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights, type MailboxMeshCamera } from "./mailbox.js";
 import { createCartSpriteSource, type CartSpriteSource } from "./scene/cartSpriteSource.js";
 import { resolveSceneLayers } from "./scene/sceneRender.js";
 import { SceneBackdropSurface } from "./scene/SceneBackdropSurface.js";
@@ -558,6 +558,19 @@ export class Player {
   };
 
   /** Turn the profiler on (it starts empty) or off. */
+  /** An editor's camera, looking at the 3D scene instead of the cart's (see PlayerHandle.setEditorCamera). */
+  private editorCamera: MailboxMeshCamera | null = null;
+
+  setEditorCamera(camera: MailboxMeshCamera | null): void {
+    this.editorCamera = camera;
+  }
+
+  /** Apply an editor's edits to the running 3D scene (see PlayerHandle.updateMeshScene). */
+  async updateMeshScene(scene: MeshScene): Promise<boolean> {
+    if (!this.meshSurface) return false;
+    return this.meshSurface.applySceneEdits(scene);
+  }
+
   setProfiling(on: boolean): void {
     if (on === (this.profiler !== null)) return;
     this.profiler = on ? new Profiler() : null;
@@ -968,6 +981,11 @@ export class Player {
           this.meshSurface.setSkinning(placed ? this.runtime.channel.skinning((o) => placed[o] ?? null) : this.runtime.channel.skinning());
         }
         this.meshSurface.setCartLights(decodeWorldLights(mailbox));
+        // An editor that has ejected from the game looks through its own camera.
+        if (this.editorCamera) {
+          this.meshSurface.setCameraOverride(this.editorCamera);
+          this.meshSurface.setHudMode(false);
+        }
       }
       // The HD-2D world reuses the same channels: cartbox.worldcam drives its
       // camera (decoded as a mesh camera) and cartbox.billboard places its 2D

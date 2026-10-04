@@ -52,6 +52,7 @@ import {
 import { clickSelection, copyPayload, duplicateEntries, pasteEntries, removeEntries, withSubtrees } from "@/lib/sceneSelection";
 import { placeAsset, type ContentAsset } from "@/lib/contentBrowser";
 import { ContentBrowser, type CodeAccess } from "./ContentBrowser";
+import { ScenePlayView, type PlaytestConfig } from "./ScenePlayView";
 import { importMeshFile, decodeMeshTextures } from "@/lib/meshImport";
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 import { KTX2_TRANSCODER_TRANSFER_BYTES, encodePngInBrowser, hasKtx2, sceneHasKtx2, settleKtx2Textures } from "@/lib/ktx2Policy";
@@ -103,6 +104,8 @@ interface MeshEditorProps {
   onSidecarChange: (sidecar: MeshSidecar) => void;
   /** The cart's code, for the content browser to find (and on a rename, update) asset names in it. */
   code?: CodeAccess;
+  /** Build a playtest to run inside the scene view (EP5), or null when the cart can't run. */
+  onStartPlay?: () => Promise<PlaytestConfig | null>;
 }
 
 /** Trigger a browser download of raw bytes or text under `filename`. */
@@ -126,7 +129,7 @@ function fitDistance(mesh: MeshAsset): number {
   return radius / Math.sin(fov / 2) + radius;
 }
 
-export function MeshEditor({ sidecar, onSidecarChange, code }: MeshEditorProps) {
+export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay }: MeshEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   /**
@@ -143,6 +146,28 @@ export function MeshEditor({ sidecar, onSidecarChange, code }: MeshEditorProps) 
   /** What was hidden before isolating the selection (isolating again puts it back). */
   const [isolatedFrom, setIsolatedFrom] = useState<ReadonlySet<string> | null>(null);
   const clipboard = useRef<string | null>(null);
+  /**
+   * Playing in the editor (EP5): the running playtest, the scene as it was when
+   * Play was pressed (what Stop goes back to), and whether to keep the edits
+   * made while it played instead.
+   */
+  const [playing, setPlaying] = useState<PlaytestConfig | null>(null);
+  const [playStart, setPlayStart] = useState<MeshSidecar | null>(null);
+  const [keepPlayEdits, setKeepPlayEdits] = useState(false);
+  const startPlay = useCallback(async () => {
+    if (!onStartPlay) return;
+    const config = await onStartPlay();
+    if (!config) return;
+    setPlayStart(sidecar);
+    setKeepPlayEdits(false);
+    setView("scene");
+    setPlaying(config);
+  }, [onStartPlay, sidecar]);
+  const stopPlay = useCallback(() => {
+    if (playStart && !keepPlayEdits && playStart !== sidecar) onSidecarChange(playStart);
+    setPlaying(null);
+    setPlayStart(null);
+  }, [playStart, keepPlayEdits, sidecar, onSidecarChange]);
   const [yaw, setYaw] = useState(0.6);
   const [pitch, setPitch] = useState(0.4);
   const [zoom, setZoom] = useState(1);
@@ -561,6 +586,18 @@ export function MeshEditor({ sidecar, onSidecarChange, code }: MeshEditorProps) 
             { id: "scene", label: "Scene", hint: "Compose every placed mesh together" },
           ]}
         />
+        {onStartPlay && (
+          <button
+            type="button"
+            className={styles.toolBtn}
+            aria-pressed={playing !== null}
+            onClick={() => (playing ? stopPlay() : void startPlay())}
+            title={playing ? "Stop playing (edits made while playing are undone unless you keep them)" : "Play the cart here, inside the scene view, and keep editing while it runs"}
+            style={{ justifyContent: "center", fontWeight: 600, color: playing ? "#ff8a8a" : "#7dff9a" }}
+          >
+            {playing ? "■ Stop" : "▶ Play in scene"}
+          </button>
+        )}
         <RailGroup label="Import">
           <div className={styles.toolGroup}>
             <button type="button" className={styles.toolBtn} onClick={() => fileRef.current?.click()}>
@@ -608,7 +645,9 @@ export function MeshEditor({ sidecar, onSidecarChange, code }: MeshEditorProps) 
 
       {/* Centre: preview — the selected mesh alone, or the whole composed scene — over the content browser */}
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-      {view === "scene" ? (
+      {playing ? (
+        <ScenePlayView config={playing} sidecar={sidecar} keep={keepPlayEdits} onKeepChange={setKeepPlayEdits} onStop={stopPlay} />
+      ) : view === "scene" ? (
         <SceneViewport
           sidecar={sidecar}
           onSidecarChange={onSidecarChange}
