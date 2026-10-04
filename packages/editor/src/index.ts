@@ -442,6 +442,23 @@ export {
 } from "./model/ragdoll";
 export { MAX_DEBRIS_DEFS, MAX_DEBRIS_PER_DEF, debrisDefaults, parseDebrisDefs, type DebrisDef } from "./model/debris";
 export { DEBRIS_FADE, DEBRIS_GRAVITY, DebrisSystem } from "./render/debrisSystem";
+export {
+  EFFECT_BAND_FREQUENCY,
+  EFFECT_BAND_POWER,
+  EFFECT_BAND_SPEED,
+  EFFECT_CAMO_CRAWL,
+  EFFECT_RIM_POWER,
+  SHIELD_CAMO_MAX,
+  SHIELD_CAMO_RIM,
+  SHIELD_FLARE_GLOW,
+  SHIELD_FLARE_RIM,
+  SHIELD_SHIMMER_BANDS,
+  bandAmount,
+  camoThreshold,
+  effectActive,
+  shieldEffect,
+  type SurfaceEffect,
+} from "./render/surfaceEffect";
 export { DECAL_FRAMES, DECAL_OFFSET, DecalSystem, decalAtlas } from "./render/decalSystem";
 export { MAX_REFLECTION_PROBES, parseReflectionProbes, reflectionProbeAt, type ReflectionProbe } from "./model/reflectionProbes";
 export { PROBE_FADE, PROBE_RANGE, boxProject, pickProbe, probeWeight, sampleProbe, type ProbeBox, type ReflectionProbeSet } from "./render/probeSampling";

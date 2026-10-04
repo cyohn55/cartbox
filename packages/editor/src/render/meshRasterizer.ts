@@ -25,6 +25,7 @@
 import { boxProject, pickProbe, sampleProbe, type ReflectionProbeSet } from "./probeSampling";
 import { applyFog, type SceneFog } from "./skyDome";
 import { cameraPositionFromView } from "./lod";
+import { EFFECT_RIM_POWER, bandAmount, camoThreshold, effectActive, type SurfaceEffect } from "./surfaceEffect";
 
 /** The fog for one frame, with the eye it is seen from (height fog and volumes trace from it). */
 type FrameFog = SceneFog & { readonly eye: readonly [number, number, number] };
@@ -405,6 +406,7 @@ function buildPbrFrag(
   time = 0,
   blendTex: DecodedTexture | null = null,
   hasBlend = false,
+  effect: SurfaceEffect | null = null,
 ): PbrFrag | null {
   const emissiveFactor = material.emissiveFactor;
   const isPbr =
@@ -418,6 +420,14 @@ function buildPbrFrag(
   const { offset, gain } = emissiveAnimation(material, time);
   const e = emissiveFactor ?? [0, 0, 0];
   const rim = material.rim;
+  let rimColor: [number, number, number] | null = rim && rim.strength > 0 ? [rim.color[0] * rim.strength, rim.color[1] * rim.strength, rim.color[2] * rim.strength] : null;
+  let rimPower = rim?.power ?? 1;
+  // A surface effect's rim adds to the material's, at the effect's power.
+  const fx = effectActive(effect) ? effect : null;
+  if (fx?.rim && (fx.rim[0] > 0 || fx.rim[1] > 0 || fx.rim[2] > 0)) {
+    rimColor = [(rimColor?.[0] ?? 0) + fx.rim[0], (rimColor?.[1] ?? 0) + fx.rim[1], (rimColor?.[2] ?? 0) + fx.rim[2]];
+    rimPower = fx.rimPower ?? EFFECT_RIM_POWER;
+  }
   return {
     mr,
     occ,
@@ -430,13 +440,17 @@ function buildPbrFrag(
     detailScale: material.detailScale ?? DEFAULT_DETAIL_SCALE,
     detailStrength: detail ? (material.detailStrength ?? DEFAULT_DETAIL_STRENGTH) : 0,
     emisOffset: offset,
-    rim: rim && rim.strength > 0 ? [rim.color[0] * rim.strength, rim.color[1] * rim.strength, rim.color[2] * rim.strength] : null,
-    rimPower: rim?.power ?? 1,
+    rim: rimColor,
+    rimPower,
     reflect: material.reflectivity ?? 1,
     reflectMask: material.reflectionMask === true && mr !== null,
     blend: hasBlend
       ? { tex: blendTex, color: material.blendColor ?? [1, 1, 1], roughness: material.blendRoughness ?? null }
       : null,
+    glow: fx?.glow ?? null,
+    bands: fx?.bands ?? null,
+    camo: Math.max(0, Math.min(1, fx?.camo ?? 0)),
+    time,
   };
 }
 
@@ -764,6 +778,8 @@ export interface MeshSceneInstance {
   readonly detailTextures?: readonly (DecodedTexture | null)[];
   /** Decoded blend-surface maps per primitive ({@link MeshMaterial.blendImage}), or null entries. */
   readonly blendTextures?: readonly (DecodedTexture | null)[];
+  /** A surface effect over its (PBR) materials this frame — a shield flare, recharge shimmer or camo (see surfaceEffect.ts). */
+  readonly effect?: SurfaceEffect | null;
 }
 
 /**
@@ -922,7 +938,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const mrTextures = instance.mrTextures ?? null;
     const occlusionTextures = instance.occlusionTextures ?? null;
     const emissiveTextures = instance.emissiveTextures ?? null;
-    const extras: PrimitiveExtras = { lightmap: instance.lightmapTextures ?? null, detail: instance.detailTextures ?? null, blend: instance.blendTextures ?? null, time };
+    const extras: PrimitiveExtras = { lightmap: instance.lightmapTextures ?? null, detail: instance.detailTextures ?? null, blend: instance.blendTextures ?? null, time, effect: instance.effect ?? null };
     const lightMvp = shadow ? multiply(shadow.lightViewProj, instance.model) : null;
     if (style.zBuffer) {
       drawMesh(instance.mesh, mvp, modelView, instance.model, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, extras, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, lights, style, fog);
@@ -1361,6 +1377,11 @@ interface PbrFrag {
   readonly reflectMask: boolean;
   /** The blend surface (H4): its texture, colour and roughness, mixed in by the vertex weight; or null. */
   readonly blend: { readonly tex: DecodedTexture | null; readonly color: readonly [number, number, number]; readonly roughness: number | null } | null;
+  /** A surface effect's untextured glow, sweeping bands and camo amount (H11), and the time they move by. */
+  readonly glow: readonly [number, number, number] | null;
+  readonly bands: readonly [number, number, number] | null;
+  readonly camo: number;
+  readonly time: number;
 }
 
 /** The per-primitive extras a draw may carry beyond the core maps. */
@@ -1369,6 +1390,7 @@ interface PrimitiveExtras {
   readonly detail?: readonly (DecodedTexture | null)[] | null;
   readonly blend?: readonly (DecodedTexture | null)[] | null;
   readonly time?: number;
+  readonly effect?: SurfaceEffect | null;
 }
 
 /** One projected, clipped triangle ready to rasterise. */
@@ -1442,6 +1464,7 @@ function eachTriangle(
       extras?.time ?? 0,
       extras?.blend?.[primitiveIndex] ?? null,
       primitive.blend !== undefined,
+      extras?.effect ?? null,
     );
     const [baseR, baseG, baseB, baseA] = primitive.material.baseColorFactor;
 
@@ -1785,6 +1808,8 @@ function rasterizeTriangle(
         al = (al * ta) / 255;
       }
       if (al < 1) continue; // skip fully-transparent texels rather than blend (opaque preview)
+      // Active Camo: screen-door transparency, the dropped pixels leaving the scene behind.
+      if (pbr && pbr.camo > 0 && camoThreshold(x, y, pbr.time) < pbr.camo) continue;
 
       if (style.zBuffer) depth[di] = zNdc;
 
@@ -2026,6 +2051,18 @@ function rasterizeTriangle(
           lr += pbr.rim[0] * rimK;
           lg += pbr.rim[1] * rimK;
           lb += pbr.rim[2] * rimK;
+        }
+        // A surface effect's glow over the whole surface, and its bands climbing it.
+        if (pbr.glow) {
+          lr += pbr.glow[0];
+          lg += pbr.glow[1];
+          lb += pbr.glow[2];
+        }
+        if (pbr.bands) {
+          const band = bandAmount(pw0 * a.wy + pw1 * b.wy + pw2 * c.wy, pbr.time);
+          lr += pbr.bands[0] * band;
+          lg += pbr.bands[1] * band;
+          lb += pbr.bands[2] * band;
         }
         if (tonemap) {
           // HDR: expose, then roll highlights off with the ACES curve instead of

@@ -295,6 +295,7 @@ cartbox = {
   lookat = function() end,
   ragdoll = function() end,
   unragdoll = function() end,
+  shield = function() end,
   joint = function() return nil end,
   joints = function() return {} end,
   playtimeline = function() end,

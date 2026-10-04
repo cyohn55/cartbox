@@ -62,6 +62,11 @@
  *                                     world units/second, centred on `joint` when given
  *   cartbox.unragdoll(obj)            back to its animation (e.g. on respawn)
  *
+ * Shield effects (cosmetic too; see SHIELD_CALLS):
+ *
+ *   cartbox.shield(obj, flare, shimmer, camo)  a hit's flare, the recharge shimmer,
+ *                                     Active Camo (each 0..1; all 0 clears it)
+ *
  * Timelines (cutscenes and camera moves, when the scene has any):
  *
  *   cartbox.playtimeline(name, from, speed)  play a timeline (from seconds; speed 1)
@@ -100,6 +105,7 @@ import {
   PHYS_OP_DECAL,
   PHYS_OP_RAGDOLL,
   PHYS_OP_DEBRIS,
+  PHYS_OP_SHIELD,
   PHYS_AGENTS,
   PHYS_AGENT_BYTES,
   PHYS_MAX_AGENTS,
@@ -218,11 +224,12 @@ export function runtimeSdkLua(
     _wr(at + 8, (v1 or 0) * ${PHYS_FIX}) _wr(at + 12, (v2 or 0) * ${PHYS_FIX}) _wr(at + 16, (v3 or 0) * ${PHYS_FIX})
     _wr(at + 20, (v4 or 0) * ${PHYS_FIX}) _wr(at + 24, (v5 or 0) * ${PHYS_FIX}) _wr(at + 28, (v6 or 0) * ${PHYS_FIX})
     _wr(_B + ${PHYS_CMDS}, n + 1)
+    return true
   end
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}${SHIELD_CALLS()}end`;
 }
 
 /** The physics calls (inside the runtime block's do … end, after its helpers). */
@@ -440,6 +447,26 @@ function DEBRIS_CALLS(scene: MeshScene): string {
     local out = {}
     for k, n in ipairs(_dbn) do out[k] = n end
     return out
+  end
+`;
+}
+
+/**
+ * Shield effects (H11) — a standing material override on an object and
+ * everything under it, drawn on this machine only:
+ *
+ *   cartbox.shield(obj, flare, shimmer, camo)  flare (a hit), shimmer (recharging)
+ *                                     and Active Camo, each 0..1; all 0 clears it.
+ *                                     Only changes are sent, so call it every tick.
+ */
+function SHIELD_CALLS(): string {
+  return `  local _shield = {}
+  cartbox.shield = function(o, flare, shimmer, camo)
+    local i = _obj(o)
+    if i == nil then return end
+    local key = string.format("%.2f %.2f %.2f", flare or 0, shimmer or 0, camo or 0)
+    if _shield[i] == key then return end -- it stands: send changes only (retried if the queue was full)
+    if _cmd(${PHYS_OP_SHIELD}, i, flare or 0, shimmer or 0, camo or 0) then _shield[i] = key end
   end
 `;
 }

@@ -5,7 +5,7 @@
  * warming up on the software rasteriser before the first one lands.
  */
 
-import type { DecodedTexture, Mat4, MeshAsset, MeshPrimitive, MeshSceneInstance } from "@cartbox/editor";
+import type { DecodedTexture, Mat4, MeshAsset, MeshPrimitive, MeshSceneInstance, SurfaceEffect } from "@cartbox/editor";
 
 import type { SceneDraw, SoftwareSceneRenderer } from "./sceneRenderer.js";
 
@@ -99,6 +99,8 @@ export interface DrawBatch<G> {
   geometry: G;
   textures: PrimitiveTextures;
   models: Mat4[];
+  /** The surface effect its copies carry (H11) — copies with an effect batch only with copies of the same one. */
+  effect: SurfaceEffect | null;
   /** Index of the batch's first copy in the instance data (set by the renderer). */
   first: number;
 }
@@ -129,11 +131,12 @@ export function batchInstances<G extends { indexCount: number }>(
         detail: instance.detailTextures?.[index] ?? null,
         blend: primitive.blend ? (instance.blendTextures?.[index] ?? null) : null,
       };
+      const effect = instance.effect ?? null;
       let list = byPrimitive.get(primitive);
       if (!list) byPrimitive.set(primitive, (list = []));
-      let batch = list.find((b) => sameTextures(b.textures, textures));
+      let batch = list.find((b) => b.effect === effect && sameTextures(b.textures, textures));
       if (!batch) {
-        batch = { primitive, geometry, textures, models: [], first: 0 };
+        batch = { primitive, geometry, textures, models: [], effect, first: 0 };
         list.push(batch);
         batches.push(batch);
       }

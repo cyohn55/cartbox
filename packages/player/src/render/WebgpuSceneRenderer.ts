@@ -70,6 +70,10 @@ import {
   PROBE_FADE,
   FOG_GLOW_POWER,
   PROBE_RANGE,
+  EFFECT_BAND_FREQUENCY,
+  EFFECT_BAND_POWER,
+  EFFECT_BAND_SPEED,
+  EFFECT_CAMO_CRAWL,
   cameraPositionFromView,
   computeSmoothNormals,
   multiplyMat4,
@@ -143,6 +147,8 @@ struct Uniforms {
   fogHeight: vec4<f32>, // x = height-fog density, y = base, z = falloff, w = glow strength
   fogGlow: vec4<f32>,   // rgb = sun-glow colour
   fogVol: array<vec4<f32>, 8>, // per volume: min xyz + density, max xyz + falloff
+  effect0: vec4<f32>,   // rgb = surface effect glow, w = camo amount
+  effect1: vec4<f32>,   // rgb = surface effect bands, w = time
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -327,6 +333,17 @@ fn probeSample(i: i32, dir: vec3<f32>) -> vec3<f32> {
   let ty = i32(clamp(floor(vCoord * h), 0.0, h - 1.0) + f32(i) * h);
   return textureLoad(probeAtlas, vec2<i32>(tx, ty), 0).rgb * ${PROBE_RANGE.toFixed(4)};
 }
+// The 2×2 ordered-dither matrix [[0, 2], [3, 1]], and the crawling camo threshold (surfaceEffect.ts).
+fn bayer2(x: i32, y: i32) -> f32 {
+  if ((y & 1) == 1) { return select(3.0, 1.0, (x & 1) == 1); }
+  return select(0.0, 2.0, (x & 1) == 1);
+}
+fn camoThreshold(p: vec2<f32>, time: f32) -> f32 {
+  let s = i32(floor(time * ${EFFECT_CAMO_CRAWL.toFixed(1)}));
+  let px = i32(floor(p.x)) + s;
+  let py = i32(floor(p.y)) + s * 3;
+  return (4.0 * bayer2(px, py) + bayer2(px >> 1u, py >> 1u) + 0.5) / 16.0;
+}
 fn envAverage() -> vec3<f32> {
   if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
   return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
@@ -374,6 +391,8 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   if (colour.a * 255.0 < 1.0) { discard; }
 
   if (u.pbr.z > 0.5) {
+    // Active Camo (H11): screen-door transparency, as the rasteriser drops pixels.
+    if (u.effect0.w > 0.0 && camoThreshold(in.pos.xy, u.effect1.w) < u.effect0.w) { discard; }
     // --- Modern tier: metallic-roughness BRDF (Cook-Torrance) ---
     // Mirrors the software rasteriser's PBR branch (meshRasterizer.ts) term for
     // term, in the engine's non-linear byte space (a linear/HDR pipeline is a
@@ -519,6 +538,9 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     }
     // A fresnel rim, light at grazing angles (zero when the material has none).
     lit = lit + u.surface2.rgb * pow(1.0 - ndv, u.surface2.w);
+    // A surface effect's glow, and its bands climbing the body (zero without one).
+    let band = pow(0.5 + 0.5 * sin(in.worldPos.y * ${EFFECT_BAND_FREQUENCY.toFixed(1)} - u.effect1.w * ${EFFECT_BAND_SPEED.toFixed(1)}), ${EFFECT_BAND_POWER.toFixed(1)});
+    lit = lit + u.effect0.rgb + u.effect1.rgb * band;
     // HDR: expose + ACES roll-off, or write the linear colour straight through.
     var shaded = lit;
     if (u.tonemap.x > 0.5) {
@@ -1083,6 +1105,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         lightCount,
         fog: draw.fog ?? null,
         eye,
+        effect: entry.effect ?? null,
+        time: draw.time ?? 0,
         surface: resolveSurface(entry.primitive.material, draw.time ?? 0, entry.textures.detail !== null, entry.textures.mr !== null, {
           weights: entry.primitive.blend !== undefined,
           textured: entry.textures.blend !== null,

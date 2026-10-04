@@ -251,6 +251,12 @@ export const PHYS_OP_DECAL = 27;
 export const PHYS_OP_RAGDOLL = 28;
 /** Debris (cartbox.debris, H10): a = the definition's index | (scale × 16) << 8; v0..v2 = where, v3..v5 = velocity. */
 export const PHYS_OP_DEBRIS = 29;
+/**
+ * A shield effect on an object and everything under it (cartbox.shield, H11):
+ * a = the object; v0 = flare, v1 = recharge shimmer, v2 = Active Camo (each 0..1;
+ * all 0 clears it). It stands until changed.
+ */
+export const PHYS_OP_SHIELD = 30;
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {
