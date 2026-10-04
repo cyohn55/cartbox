@@ -62,12 +62,24 @@ export function compositeFrame(latest: Uint8Array, draw: SceneDraw): void {
   const source = new Uint32Array(latest.buffer, latest.byteOffset, count);
   const out = new Uint32Array(draw.out.buffer, draw.out.byteOffset, count);
   if (draw.background !== null) out.fill(packRgba(draw.background));
-  // The shader discards anything below the alpha threshold, so a zero alpha
-  // means "nothing drawn here" and the cart's pixel survives — the same result
-  // as the software path's `background: null`.
+  // Opaque surfaces write alpha 255 and replace the pixel; nothing drawn reads
+  // all zero and leaves the cart's pixel — the same result as the software
+  // path's `background: null`. See-through surfaces (EP6) leave premultiplied
+  // colour and their coverage: blended over the pixel beneath, or (an added
+  // glow, coverage 0) added to it — what the software path does as it draws.
+  const bytes = draw.out;
   for (let i = 0; i < count; i += 1) {
     const word = source[i]!;
-    if (word >>> 24 !== 0) out[i] = word;
+    const a = word >>> 24;
+    if (a === 255) out[i] = word;
+    else if (word !== 0) {
+      const k = (255 - a) / 255;
+      const o = i * 4;
+      bytes[o] = (word & 0xff) + bytes[o]! * k;
+      bytes[o + 1] = ((word >>> 8) & 0xff) + bytes[o + 1]! * k;
+      bytes[o + 2] = ((word >>> 16) & 0xff) + bytes[o + 2]! * k;
+      bytes[o + 3] = a + bytes[o + 3]! * k;
+    }
   }
 }
 
@@ -101,6 +113,12 @@ export interface DrawBatch<G> {
   models: Mat4[];
   /** The surface effect its copies carry (H11) — copies with an effect batch only with copies of the same one. */
   effect: SurfaceEffect | null;
+  /**
+   * The material's transparency (EP6): 0 opaque, 1 cut out, 2 blended, 3 added.
+   * Blended and added copies are each a batch of their own, drawn after every
+   * opaque batch, farthest first, without writing depth.
+   */
+  alpha: number;
   /** Index of the batch's first copy in the instance data (set by the renderer). */
   first: number;
 }
@@ -113,8 +131,11 @@ export interface DrawBatch<G> {
 export function batchInstances<G extends { indexCount: number }>(
   instances: readonly MeshSceneInstance[],
   geometryOf: (mesh: MeshAsset) => readonly (G | undefined)[],
+  /** The camera's world position, to draw see-through copies farthest first. */
+  eye: readonly [number, number, number] = [0, 0, 0],
 ): { batches: DrawBatch<G>[]; instanceCount: number } {
   const batches: DrawBatch<G>[] = [];
+  const seeThrough: { batch: DrawBatch<G>; distance: number }[] = [];
   const byPrimitive = new Map<MeshPrimitive, DrawBatch<G>[]>();
   let instanceCount = 0;
   for (const instance of instances) {
@@ -132,11 +153,22 @@ export function batchInstances<G extends { indexCount: number }>(
         blend: primitive.blend ? (instance.blendTextures?.[index] ?? null) : null,
       };
       const effect = instance.effect ?? null;
+      const alpha = alphaCode(primitive.material.alphaMode);
+      if (alpha >= 2) {
+        const c = primitiveCentre(primitive);
+        const m = instance.model;
+        const x = m[0]! * c[0] + m[4]! * c[1] + m[8]! * c[2] + m[12]! - eye[0];
+        const y = m[1]! * c[0] + m[5]! * c[1] + m[9]! * c[2] + m[13]! - eye[1];
+        const z = m[2]! * c[0] + m[6]! * c[1] + m[10]! * c[2] + m[14]! - eye[2];
+        seeThrough.push({ batch: { primitive, geometry, textures, models: [instance.model], effect, alpha, first: 0 }, distance: x * x + y * y + z * z });
+        instanceCount += 1;
+        return;
+      }
       let list = byPrimitive.get(primitive);
       if (!list) byPrimitive.set(primitive, (list = []));
       let batch = list.find((b) => b.effect === effect && sameTextures(b.textures, textures));
       if (!batch) {
-        batch = { primitive, geometry, textures, models: [], effect, first: 0 };
+        batch = { primitive, geometry, textures, models: [], effect, alpha, first: 0 };
         list.push(batch);
         batches.push(batch);
       }
@@ -144,5 +176,31 @@ export function batchInstances<G extends { indexCount: number }>(
       instanceCount += 1;
     });
   }
+  // See-through copies after the opaque scene, farthest first.
+  seeThrough.sort((a, b) => b.distance - a.distance);
+  for (const { batch } of seeThrough) batches.push(batch);
   return { batches, instanceCount };
+}
+
+/** A material's alpha mode as the shaders' code: 0 opaque, 1 cut out, 2 blended, 3 added. */
+export function alphaCode(mode: MeshPrimitive["material"]["alphaMode"]): number {
+  return mode === "mask" ? 1 : mode === "blend" ? 2 : mode === "additive" ? 3 : 0;
+}
+
+const centres = new WeakMap<MeshPrimitive, [number, number, number]>();
+/** The centre of a primitive's bounding box (cached per primitive). */
+function primitiveCentre(primitive: MeshPrimitive): [number, number, number] {
+  let c = centres.get(primitive);
+  if (!c) {
+    const p = primitive.positions;
+    let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+    for (let i = 0; i < p.length; i += 3) {
+      x0 = Math.min(x0, p[i]!); x1 = Math.max(x1, p[i]!);
+      y0 = Math.min(y0, p[i + 1]!); y1 = Math.max(y1, p[i + 1]!);
+      z0 = Math.min(z0, p[i + 2]!); z1 = Math.max(z1, p[i + 2]!);
+    }
+    c = Number.isFinite(x0) ? [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2] : [0, 0, 0];
+    centres.set(primitive, c);
+  }
+  return c;
 }

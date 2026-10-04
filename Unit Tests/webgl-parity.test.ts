@@ -155,6 +155,15 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     if (exact) expect(result.differing).toBe(0);
   });
 
+  it("draws transparency like the software rasteriser: blended, added and cut out", async () => {
+    const result = await run("transparent");
+    expect(result.drawn).toBeGreaterThan(100);
+    if (exact) {
+      expect(result.coverage, JSON.stringify(result.diffs)).toBe(0);
+      expect(result.maxDelta).toBeLessThanOrEqual(5);
+    }
+  });
+
   it("matches distance fog within float tolerance", async () => {
     const result = await run("fog");
     expect(result.drawn).toBeGreaterThan(100);

@@ -695,6 +695,7 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
 
   // The single mesh has no model transform, so model-view is the plain view and
   // normals need no re-basing: reuse the scene path with an identity model.
+  const deferred: PendingTriangle[] = [];
   drawMesh(
     mesh,
     viewProj,
@@ -721,7 +722,15 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
     options.tonemap ?? null,
     null,
     null,
+    DEFAULT_RASTER_STYLE,
+    null,
+    deferred,
   );
+  // See-through triangles last, farthest first (EP6).
+  deferred.sort((a, b) => a.viewDepth - b.viewDepth);
+  for (const t of deferred) {
+    rasterizeTriangle(t.a, t.b, t.c, size, size, out, depth, t.texture, t.normalTexture, t.tangent, t.materialTexture, t.pbr, t.base, light, viewDir, ambient, options.environment ?? null, null, options.tonemap ?? null, null, null, DEFAULT_RASTER_STYLE, null, t.alpha);
+  }
 }
 
 // --- Scene rendering: many placed meshes through one camera -----------------
@@ -930,6 +939,8 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
   // Sorting per instance would not do: the artefact that defines the look is
   // triangles within and across objects resolving in the wrong order.
   const queue: PendingTriangle[] = [];
+  /** Blended and added triangles, drawn after every opaque one (EP6). */
+  const deferred: PendingTriangle[] = [];
   for (const instance of instances) {
     const mvp = multiply(viewProj, instance.model);
     const modelView = multiply(view, instance.model);
@@ -943,16 +954,19 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const extras: PrimitiveExtras = { lightmap: instance.lightmapTextures ?? null, detail: instance.detailTextures ?? null, blend: instance.blendTextures ?? null, time, effect: instance.effect ?? null };
     const lightMvp = shadow ? multiply(shadow.lightViewProj, instance.model) : null;
     if (style.zBuffer) {
-      drawMesh(instance.mesh, mvp, modelView, instance.model, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, extras, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, lights, style, fog);
+      drawMesh(instance.mesh, mvp, modelView, instance.model, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, extras, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, lights, style, fog, deferred);
     } else {
       eachTriangle(instance.mesh, mvp, modelView, instance.model, normalBasis, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, extras, lightMvp, (triangle) => queue.push(triangle));
     }
   }
 
-  if (queue.length > 0) {
+  // Without a depth buffer everything is drawn in one sorted list; with one,
+  // the see-through triangles follow the opaque scene, farthest first.
+  const ordered = queue.length > 0 ? queue : deferred;
+  if (ordered.length > 0) {
     // Ascending view z = farthest first, since the view looks down -z.
-    queue.sort((a, b) => a.viewDepth - b.viewDepth);
-    for (const triangle of queue) {
+    ordered.sort((a, b) => a.viewDepth - b.viewDepth);
+    for (const triangle of ordered) {
       rasterizeTriangle(
         triangle.a,
         triangle.b,
@@ -977,6 +991,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
         lights,
         style,
         fog,
+        triangle.alpha,
       );
     }
   }
@@ -1061,7 +1076,10 @@ export function renderShadowMap(
       null,
       null,
       null,
-      (triangle) => rasterizeDepthOnly(triangle.a, triangle.b, triangle.c, size, depth),
+      // See-through and added surfaces (glass, glows) cast no shadow (EP6).
+      (triangle) => {
+        if (triangle.alpha.mode < 2) rasterizeDepthOnly(triangle.a, triangle.b, triangle.c, size, depth);
+      },
     );
   }
 
@@ -1395,6 +1413,53 @@ interface PrimitiveExtras {
   readonly effect?: SurfaceEffect | null;
 }
 
+/**
+ * A material's transparency as the rasteriser applies it (see
+ * {@link MeshMaterial.alphaMode}): 0 opaque, 1 cut out below `cutoff`, 2
+ * blended over what's behind, 3 added to it. Blended and added triangles are
+ * drawn after every opaque one, farthest first, and never write depth.
+ */
+export interface AlphaState {
+  readonly mode: 0 | 1 | 2 | 3;
+  readonly cutoff: number;
+}
+export const OPAQUE_ALPHA: AlphaState = { mode: 0, cutoff: 0 };
+
+/** A material's {@link AlphaState}. */
+export function alphaStateOf(material: MeshAsset["primitives"][number]["material"]): AlphaState {
+  switch (material.alphaMode) {
+    case "mask":
+      return { mode: 1, cutoff: material.alphaCutoff ?? 0.5 };
+    case "blend":
+      return { mode: 2, cutoff: 0 };
+    case "additive":
+      return { mode: 3, cutoff: 0 };
+    default:
+      return OPAQUE_ALPHA;
+  }
+}
+
+/**
+ * Finish a transparent pixel: the shaded colour (already in `out`) blended
+ * over the colour that was there (`dr`, `dg`, `db`, `da`) by its alpha, or
+ * added to it. The result is what a GPU blending premultiplied colour gives
+ * once composited (see compositeFrame in @cartbox/player).
+ */
+function finishAlpha(out: Uint8ClampedArray, i: number, mode: number, al: number, dr: number, dg: number, db: number, da: number): void {
+  const a = al / 255;
+  if (mode === 2) {
+    out[i] = out[i]! * a + dr * (1 - a);
+    out[i + 1] = out[i + 1]! * a + dg * (1 - a);
+    out[i + 2] = out[i + 2]! * a + db * (1 - a);
+    out[i + 3] = al + da * (1 - a);
+  } else {
+    out[i] = dr + out[i]! * a;
+    out[i + 1] = dg + out[i + 1]! * a;
+    out[i + 2] = db + out[i + 2]! * a;
+    out[i + 3] = da;
+  }
+}
+
 /** One projected, clipped triangle ready to rasterise. */
 interface PendingTriangle {
   readonly a: Vertex;
@@ -1411,6 +1476,8 @@ interface PendingTriangle {
   /** PBR metallic-roughness inputs (Modern tier), or null for the fantasy path. */
   readonly pbr: PbrFrag | null;
   readonly base: readonly [number, number, number, number];
+  /** How the material's alpha is used (EP6): opaque, cut out, blended or added. */
+  readonly alpha: AlphaState;
   /**
    * Mean view-space z, for back-to-front ordering when there is no depth
    * buffer. The view looks down -z, so farther is more negative and ascending
@@ -1547,6 +1614,7 @@ function eachTriangle(
     };
 
     const base: readonly [number, number, number, number] = [baseR, baseG, baseB, baseA];
+    const alpha = alphaStateOf(primitive.material);
 
     for (let t = 0; t < indices.length; t += 3) {
       const i0 = indices[t]!;
@@ -1560,7 +1628,7 @@ function eachTriangle(
         const a = clipped[c]!;
         const b = clipped[c + 1]!;
         const cc = clipped[c + 2]!;
-        emit({ a, b, c: cc, texture, normalTexture, tangent, materialTexture, pbr, base, viewDepth: (a.viewZ + b.viewZ + cc.viewZ) / 3 });
+        emit({ a, b, c: cc, texture, normalTexture, tangent, materialTexture, pbr, base, alpha, viewDepth: (a.viewZ + b.viewZ + cc.viewZ) / 3 });
       }
     }
   });
@@ -1595,6 +1663,8 @@ function drawMesh(
   lights: readonly SceneLight[] | null,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
   fog: FrameFog | null = null,
+  /** Where blended and added triangles wait, to be drawn after everything opaque (null: draw them now). */
+  defer: PendingTriangle[] | null = null,
 ): void {
   eachTriangle(
     mesh,
@@ -1611,6 +1681,10 @@ function drawMesh(
     extras,
     lightMvp,
     (triangle) => {
+      if (defer && triangle.alpha.mode >= 2) {
+        defer.push(triangle);
+        return;
+      }
       rasterizeTriangle(
         triangle.a,
         triangle.b,
@@ -1635,6 +1709,7 @@ function drawMesh(
         lights,
         style,
         fog,
+        triangle.alpha,
       );
     },
   );
@@ -1665,6 +1740,7 @@ function rasterizeTriangle(
   lights: readonly SceneLight[] | null,
   style: RasterStyle = DEFAULT_RASTER_STYLE,
   fog: FrameFog | null = null,
+  alpha: AlphaState = OPAQUE_ALPHA,
 ): void {
   // Perspective divide to NDC, then to screen pixels. NDC spans the full extent
   // of each axis independently, so x maps by width and y by height — a mesh drawn
@@ -1809,11 +1885,19 @@ function rasterizeTriangle(
         bl = (bl * tb) / 255;
         al = (al * ta) / 255;
       }
-      if (al < 1) continue; // skip fully-transparent texels rather than blend (opaque preview)
+      if (al < 1) continue; // fully transparent texels are never drawn
+      // A cut-out surface drops what's below its threshold.
+      if (alpha.mode === 1 && al < alpha.cutoff * 255) continue;
       // Active Camo: screen-door transparency, the dropped pixels leaving the scene behind.
       if (pbr && pbr.camo > 0 && camoThreshold(x, y, pbr.time) < pbr.camo) continue;
 
-      if (style.zBuffer) depth[di] = zNdc;
+      // A blended or added pixel mixes with what's there, and never hides what's behind it.
+      const see = alpha.mode >= 2;
+      const dr = see ? out[di * 4]! : 0;
+      const dg = see ? out[di * 4 + 1]! : 0;
+      const db = see ? out[di * 4 + 2]! : 0;
+      const da = see ? out[di * 4 + 3]! : 0;
+      if (style.zBuffer && !see) depth[di] = zNdc;
 
       if (pbr) {
         // --- Modern tier: metallic-roughness BRDF (Cook-Torrance) ---
@@ -2088,7 +2172,8 @@ function rasterizeTriangle(
           const wz = pw0 * a.wz + pw1 * b.wz + pw2 * c.wz;
           applyFog(fog, out, di * 4, eyeDepth, fog.eye, [wx, wy, wz], light);
         }
-        out[di * 4 + 3] = al;
+        if (see) finishAlpha(out, di * 4, alpha.mode, al, dr, dg, db, da);
+        else out[di * 4 + 3] = 255;
       } else {
         // --- Fantasy path (unchanged) ---
         // Material map (option 2, slice 5): a view-dependent Blinn-Phong glint
@@ -2124,7 +2209,8 @@ function rasterizeTriangle(
         out[di * 4] = Math.max(r * shade + glint, r * emissive);
         out[di * 4 + 1] = Math.max(g * shade + glint, g * emissive);
         out[di * 4 + 2] = Math.max(bl * shade + glint, bl * emissive);
-        out[di * 4 + 3] = al;
+        if (see) finishAlpha(out, di * 4, alpha.mode, al, dr, dg, db, da);
+        else out[di * 4 + 3] = 255;
       }
     }
   }

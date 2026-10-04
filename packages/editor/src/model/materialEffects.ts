@@ -22,7 +22,7 @@ export const DETAIL_FAR = 12;
 
 type SurfaceEffects = Pick<
   MeshMaterial,
-  "detailScale" | "detailStrength" | "emissiveScroll" | "emissivePulse" | "rim" | "reflectivity" | "reflectionMask" | "blendColor" | "blendRoughness"
+  "detailScale" | "detailStrength" | "emissiveScroll" | "emissivePulse" | "rim" | "reflectivity" | "reflectionMask" | "blendColor" | "blendRoughness" | "alphaMode" | "alphaCutoff"
 >;
 
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -50,6 +50,8 @@ export function readSurfaceEffects(raw: Record<string, unknown> | object): Surfa
     out.blendColor = [clamp(blendColor[0] as number, 0, 1), clamp(blendColor[1] as number, 0, 1), clamp(blendColor[2] as number, 0, 1)];
   }
   if (finite(r.blendRoughness)) out.blendRoughness = clamp(r.blendRoughness, 0, 1);
+  if (r.alphaMode === "mask" || r.alphaMode === "blend" || r.alphaMode === "additive") out.alphaMode = r.alphaMode;
+  if (finite(r.alphaCutoff)) out.alphaCutoff = clamp(r.alphaCutoff, 0, 1);
   return out;
 }
 

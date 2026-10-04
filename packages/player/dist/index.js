@@ -10186,9 +10186,19 @@ function compositeFrame(latest, draw) {
   const source = new Uint32Array(latest.buffer, latest.byteOffset, count);
   const out = new Uint32Array(draw.out.buffer, draw.out.byteOffset, count);
   if (draw.background !== null) out.fill(packRgba(draw.background));
+  const bytes = draw.out;
   for (let i = 0; i < count; i += 1) {
     const word = source[i];
-    if (word >>> 24 !== 0) out[i] = word;
+    const a = word >>> 24;
+    if (a === 255) out[i] = word;
+    else if (word !== 0) {
+      const k = (255 - a) / 255;
+      const o = i * 4;
+      bytes[o] = (word & 255) + bytes[o] * k;
+      bytes[o + 1] = (word >>> 8 & 255) + bytes[o + 1] * k;
+      bytes[o + 2] = (word >>> 16 & 255) + bytes[o + 2] * k;
+      bytes[o + 3] = a + bytes[o + 3] * k;
+    }
   }
 }
 function packRgba([r, g, b, a]) {
@@ -10197,8 +10207,9 @@ function packRgba([r, g, b, a]) {
 function sameTextures(a, b) {
   return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.detail === b.detail && a.blend === b.blend;
 }
-function batchInstances(instances, geometryOf) {
+function batchInstances(instances, geometryOf, eye = [0, 0, 0]) {
   const batches = [];
+  const seeThrough = [];
   const byPrimitive = /* @__PURE__ */ new Map();
   let instanceCount = 0;
   for (const instance of instances) {
@@ -10216,11 +10227,22 @@ function batchInstances(instances, geometryOf) {
         blend: primitive.blend ? instance.blendTextures?.[index] ?? null : null
       };
       const effect = instance.effect ?? null;
+      const alpha = alphaCode(primitive.material.alphaMode);
+      if (alpha >= 2) {
+        const c = primitiveCentre(primitive);
+        const m = instance.model;
+        const x = m[0] * c[0] + m[4] * c[1] + m[8] * c[2] + m[12] - eye[0];
+        const y = m[1] * c[0] + m[5] * c[1] + m[9] * c[2] + m[13] - eye[1];
+        const z = m[2] * c[0] + m[6] * c[1] + m[10] * c[2] + m[14] - eye[2];
+        seeThrough.push({ batch: { primitive, geometry, textures, models: [instance.model], effect, alpha, first: 0 }, distance: x * x + y * y + z * z });
+        instanceCount += 1;
+        return;
+      }
       let list = byPrimitive.get(primitive);
       if (!list) byPrimitive.set(primitive, list = []);
       let batch = list.find((b) => b.effect === effect && sameTextures(b.textures, textures));
       if (!batch) {
-        batch = { primitive, geometry, textures, models: [], effect, first: 0 };
+        batch = { primitive, geometry, textures, models: [], effect, alpha, first: 0 };
         list.push(batch);
         batches.push(batch);
       }
@@ -10228,7 +10250,31 @@ function batchInstances(instances, geometryOf) {
       instanceCount += 1;
     });
   }
+  seeThrough.sort((a, b) => b.distance - a.distance);
+  for (const { batch } of seeThrough) batches.push(batch);
   return { batches, instanceCount };
+}
+function alphaCode(mode) {
+  return mode === "mask" ? 1 : mode === "blend" ? 2 : mode === "additive" ? 3 : 0;
+}
+var centres = /* @__PURE__ */ new WeakMap();
+function primitiveCentre(primitive) {
+  let c = centres.get(primitive);
+  if (!c) {
+    const p = primitive.positions;
+    let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+    for (let i = 0; i < p.length; i += 3) {
+      x0 = Math.min(x0, p[i]);
+      x1 = Math.max(x1, p[i]);
+      y0 = Math.min(y0, p[i + 1]);
+      y1 = Math.max(y1, p[i + 1]);
+      z0 = Math.min(z0, p[i + 2]);
+      z1 = Math.max(z1, p[i + 2]);
+    }
+    c = Number.isFinite(x0) ? [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2] : [0, 0, 0];
+    centres.set(primitive, c);
+  }
+  return c;
 }
 
 // src/render/gpuTimer.ts
@@ -10484,11 +10530,11 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_VIEW] = uniform.viewDir[0];
   target[base + OFFSET_VIEW + 1] = uniform.viewDir[1];
   target[base + OFFSET_VIEW + 2] = uniform.viewDir[2];
-  target[base + OFFSET_VIEW + 3] = 0;
+  target[base + OFFSET_VIEW + 3] = uniform.alpha?.cutoff ?? 0;
   target[base + OFFSET_PBR] = uniform.pbr.metallic;
   target[base + OFFSET_PBR + 1] = uniform.pbr.roughness;
   target[base + OFFSET_PBR + 2] = uniform.pbr.isPbr ? 1 : 0;
-  target[base + OFFSET_PBR + 3] = 0;
+  target[base + OFFSET_PBR + 3] = uniform.alpha?.mode ?? 0;
   const surface = uniform.surface ?? NO_SURFACE;
   target[base + OFFSET_EMISSIVE] = uniform.pbr.emissive[0] * surface.emisGain;
   target[base + OFFSET_EMISSIVE + 1] = uniform.pbr.emissive[1] * surface.emisGain;
@@ -10892,6 +10938,15 @@ float camoThreshold(vec2 p, float time) {
   int py = int(floor(p.y)) + s * 3;
   return (4.0 * bayer2(px, py) + bayer2(px >> 1, py >> 1) + 0.5) / 16.0;
 }
+// What reaches the framebuffer (EP6): opaque and cut-out surfaces cover the
+// pixel (alpha 1); a blended one leaves premultiplied colour and its coverage;
+// an added one leaves its light and no coverage (see compositeFrame).
+vec4 finishAlpha(vec3 rgb, float a) {
+  vec3 c = clamp(rgb, vec3(0.0), vec3(1.0));
+  if (u.pbr.w > 2.5) { return vec4(c * a, 0.0); }
+  if (u.pbr.w > 1.5) { return vec4(c * a, a); }
+  return vec4(c, 1.0);
+}
 vec3 envAverage() {
   if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
   return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
@@ -10908,6 +10963,8 @@ void main() {
     colour = colour * sampleMap(tex, uv);
   }
   if (colour.a * 255.0 < 1.0) { discard; }
+  // A cut-out surface (EP6) drops what's below its threshold.
+  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && colour.a < u.view.w) { discard; }
 
   if (u.pbr.z > 0.5) {
     // Active Camo (H11): screen-door transparency, as the rasteriser drops pixels.
@@ -11072,14 +11129,14 @@ void main() {
       }
       shaded = mix(clamp(shaded, vec3(0.0), vec3(1.0)), fc, f);
     }
-    outColor = vec4(shaded, colour.a);
+    outColor = finishAlpha(shaded, colour.a);
     return;
   }
 
   // Fantasy path: two-sided Lambert on the un-renormalised normal, as the software rasteriser does.
   float nl = abs(dot(vNormal, u.light.xyz));
   float shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(vLightClip, abs(dot(normalize(vNormal), u.light.xyz)));
-  outColor = vec4(colour.rgb * shade, colour.a);
+  outColor = finishAlpha(colour.rgb * shade, colour.a);
 }
 `
 );
@@ -11268,7 +11325,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
   submit(instances, draw) {
     const gl = this.gl;
     const viewProj = multiplyMat44(draw.projection, draw.view);
-    const { batches, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh));
+    const { batches, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView2(draw.view));
     if (batches.length === 0) return;
     const chunks2 = [];
     let cursor = 0;
@@ -11319,6 +11376,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         eye,
         effect: batch.effect ?? null,
         time: draw.time ?? 0,
+        alpha: { mode: batch.alpha, cutoff: batch.primitive.material.alphaCutoff ?? 0.5 },
         surface: resolveSurface(batch.primitive.material, draw.time ?? 0, batch.textures.detail !== null, batch.textures.mr !== null, {
           weights: batch.primitive.blend !== void 0,
           textured: batch.textures.blend !== null
@@ -11367,9 +11425,25 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.timer?.begin();
     let bound = null;
     let boundBatch = -1;
+    let blendState = -1;
+    const setBlend = (alpha) => {
+      const state = alpha >= 2 ? alpha : 0;
+      if (state === blendState) return;
+      blendState = state;
+      if (state === 0) {
+        gl.disable(gl.BLEND);
+        gl.depthMask(true);
+      } else {
+        gl.enable(gl.BLEND);
+        gl.depthMask(false);
+        if (state === 2) gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+        else gl.blendFuncSeparate(gl.ONE, gl.ONE, gl.ZERO, gl.ONE);
+      }
+    };
     let triangles = 0;
     for (const chunk of chunks2) {
       const batch = batches[chunk.batch];
+      setBlend(batch.alpha);
       if (chunk.batch !== boundBatch) {
         gl.bindBufferRange(gl.UNIFORM_BUFFER, BLOCK_UNIFORMS, this.uniformBuffer, chunk.batch * UNIFORM_STRIDE, UNIFORM_BYTES_USED);
         if (bound !== batch.textures) {
@@ -11390,6 +11464,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       triangles += batch.geometry.indexCount / 3 * chunk.count;
     }
     gl.bindVertexArray(null);
+    setBlend(0);
     this.timer?.end();
     this.lastFrameStats = { drawCalls: chunks2.length, instances: instanceCount, triangles, gpuMs: this.timer?.lastMs ?? null };
     this.submitted += 1;
@@ -11819,6 +11894,16 @@ fn camoThreshold(p: vec2<f32>, time: f32) -> f32 {
   let py = i32(floor(p.y)) + s * 3;
   return (4.0 * bayer2(px, py) + bayer2(px >> 1u, py >> 1u) + 0.5) / 16.0;
 }
+// What reaches the framebuffer (EP6): opaque and cut-out surfaces cover the
+// pixel (alpha 1); a blended one leaves premultiplied colour and its coverage
+// (the pipeline blends it over what's there); an added one leaves its light
+// and no coverage (the pipeline adds it). compositeFrame reads the same codes.
+fn finishAlpha(rgb: vec3<f32>, a: f32) -> vec4<f32> {
+  let c = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+  if (u.pbr.w > 2.5) { return vec4<f32>(c * a, 0.0); }
+  if (u.pbr.w > 1.5) { return vec4<f32>(c * a, a); }
+  return vec4<f32>(c, 1.0);
+}
 fn envAverage() -> vec3<f32> {
   if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
   return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
@@ -11864,6 +11949,8 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   // The CPU path skips a texel whose combined alpha is below 1/255 rather than
   // blending it, so this is a discard and not an alpha-blend state.
   if (colour.a * 255.0 < 1.0) { discard; }
+  // A cut-out surface (EP6) drops what's below its threshold.
+  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && colour.a < u.view.w) { discard; }
 
   if (u.pbr.z > 0.5) {
     // Active Camo (H11): screen-door transparency, as the rasteriser drops pixels.
@@ -12049,7 +12136,7 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
       }
       shaded = mix(clamp(shaded, vec3<f32>(0.0), vec3<f32>(1.0)), fc, f);
     }
-    return vec4<f32>(shaded, colour.a);
+    return finishAlpha(shaded, colour.a);
   }
 
   // --- Fantasy path (byte-identical when no shadow; shadow scales the direct term) ---
@@ -12059,7 +12146,7 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   // therefore skew identically under non-uniform scale.
   let nl = abs(dot(in.normal, u.light.xyz));
   let shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(in.lightClip, abs(dot(normalize(in.normal), u.light.xyz)));
-  return vec4<f32>(colour.rgb * shade, colour.a);
+  return finishAlpha(colour.rgb * shade, colour.a);
 }
 `
 );
@@ -12212,8 +12299,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 15, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } }
         ]
       });
-      const pipeline = device.createRenderPipeline({
-        layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+      const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
+      const pipelineFor = (blend, depthWrite) => device.createRenderPipeline({
+        layout,
         vertex: {
           module,
           entryPoint: "vs",
@@ -12237,13 +12325,18 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           // rgba8unorm, never rgba8unorm-srgb: the framebuffer these bytes land
           // in is the same 8-bit buffer the CPU path writes, so any gamma
           // conversion here would show up as the GPU path looking washed out.
-          targets: [{ format: "rgba8unorm" }]
+          targets: [blend ? { format: "rgba8unorm", blend } : { format: "rgba8unorm" }]
         },
         // cullMode "none" matches the software rasteriser, which draws both
         // faces (its Lambert is two-sided for exactly this reason).
         primitive: { topology: "triangle-list", cullMode: "none" },
-        depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" }
+        depthStencil: { format: "depth24plus", depthWriteEnabled: depthWrite, depthCompare: "less" }
       });
+      const pipeline = {
+        opaque: pipelineFor(null, true),
+        blend: pipelineFor({ color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" } }, false),
+        add: pipelineFor({ color: { srcFactor: "one", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "zero", dstFactor: "one", operation: "add" } }, false)
+      };
       const colourTexture = device.createTexture({
         size: { width, height },
         format: "rgba8unorm",
@@ -12398,7 +12491,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   /** Encode and submit one frame, and start a readback if a buffer is free. */
   submit(instances, draw) {
     const viewProj = multiplyMat45(draw.projection, draw.view);
-    const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh));
+    const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView3(draw.view));
     if (draws.length === 0) return;
     this.ensureUniformCapacity(draws.length);
     this.ensureInstanceCapacity(instanceCount);
@@ -12478,6 +12571,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         eye,
         effect: entry.effect ?? null,
         time: draw.time ?? 0,
+        alpha: { mode: entry.alpha, cutoff: entry.primitive.material.alphaCutoff ?? 0.5 },
         surface: resolveSurface(entry.primitive.material, draw.time ?? 0, entry.textures.detail !== null, entry.textures.mr !== null, {
           weights: entry.primitive.blend !== void 0,
           textured: entry.textures.blend !== null
@@ -12509,8 +12603,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       },
       ...this.timer ? { timestampWrites: this.timer.writes() } : {}
     });
-    pass.setPipeline(this.pipeline);
+    let bound = null;
     draws.forEach((entry, index) => {
+      const wanted = entry.alpha === 3 ? this.pipeline.add : entry.alpha === 2 ? this.pipeline.blend : this.pipeline.opaque;
+      if (wanted !== bound) {
+        pass.setPipeline(wanted);
+        bound = wanted;
+      }
       pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.textures), [index * UNIFORM_STRIDE]);
       pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
       pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");

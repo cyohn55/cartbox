@@ -311,6 +311,46 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     renderer.dispose();
   });
 
+  it("draws transparency like the software rasteriser: blended, added and cut out (within float tolerance)", async () => {
+    // EP6: the opaque wall first, then the see-through surfaces farthest first,
+    // blended (premultiplied) and added without writing depth; the cut-out quad
+    // drops the same texels. A few levels of rounding from the premultiply are expected.
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+    const half = (() => {
+      const data = new Uint8ClampedArray(4 * 4 * 4);
+      for (let i = 0; i < 16; i += 1) data.set([255, 255, 255, (i + (i >> 2)) % 2 === 0 ? 255 : 40], i * 4);
+      return { width: 4, height: 4, data };
+    })();
+    const mat = (m: Record<string, unknown>) => {
+      const q = quad();
+      return { ...q, primitives: [{ ...q.primitives[0]!, material: { ...q.primitives[0]!.material, ...m } }] };
+    };
+    const instances: MeshSceneInstance[] = [
+      { mesh: mat({ metallicFactor: 0, roughnessFactor: 0.8 }), model: composeModelMatrix([0, 0, -1], [0, 0, 0], [2.2, 1.6, 1]) },
+      { mesh: mat({ baseColorFactor: [0.2, 0.6, 1, 0.4], metallicFactor: 0, roughnessFactor: 0.2, alphaMode: "blend" }), model: composeModelMatrix([-0.5, 0, 0.3], [0, 20, 0], [0.9, 0.9, 1]) },
+      { mesh: mat({ baseColorFactor: [1, 0.3, 0.1, 0.7], alphaMode: "additive" }), model: composeModelMatrix([0.6, 0.2, 0.6], [0, -15, 0], [0.6, 0.6, 1]) },
+      { mesh: mat({ baseColorFactor: [0.3, 1, 0.3, 1], alphaMode: "mask", alphaCutoff: 0.5 }), model: composeModelMatrix([0.3, -0.6, 0.2], [0, 0, 0], [0.6, 0.6, 1]), textures: [half] },
+    ];
+    renderer.render(instances, draw());
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.tick?.();
+    }
+    const gpu = draw();
+    renderer.render(instances, gpu);
+    const software = draw();
+    new SoftwareSceneRenderer().render(instances, software);
+    let maxDelta = 0;
+    let coverage = 0;
+    for (let i = 0; i < W * H * 4; i += 1) {
+      maxDelta = Math.max(maxDelta, Math.abs(gpu.out[i]! - software.out[i]!));
+      if (i % 4 === 3 && (gpu.out[i] === 0) !== (software.out[i] === 0)) coverage += 1;
+    }
+    expect(coverage).toBe(0);
+    expect(maxDelta).toBeLessThanOrEqual(5);
+    renderer.dispose();
+  });
+
   it("matches the software rasteriser on image-based lighting (within float tolerance)", async () => {
     // The environment replaces flat ambient with directional irradiance +
     // reflection; the WGSL envColor/envAverage must match meshRasterizer.ts. As
