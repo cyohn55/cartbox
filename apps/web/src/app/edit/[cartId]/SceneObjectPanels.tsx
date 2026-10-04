@@ -121,6 +121,7 @@ export function HierarchyPanel({
                   style={{
                     flex: 1,
                     minWidth: 0,
+                    overflow: "hidden",
                     justifyContent: "flex-start",
                     paddingLeft: 8 + depth * 14,
                     outline: entry.id === primary ? "2px solid #7db8fc" : selected.has(entry.id) ? "1px solid #7db8fc" : "none",
@@ -137,7 +138,7 @@ export function HierarchyPanel({
                       ◆
                     </span>
                   )}
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 150 - depth * 14 }}>{entry.name}</span>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: "1 1 auto", minWidth: 0, textAlign: "left" }}>{entry.name}</span>
                   {entry.tags && entry.tags.length > 0 && (
                     <span aria-hidden style={{ marginLeft: "auto", opacity: 0.55, fontSize: 11 }}>
                       #{entry.tags.length}
@@ -152,7 +153,7 @@ export function HierarchyPanel({
                     aria-label={`${isHidden ? "Show" : "Hide"} ${entry.name} in the scene view`}
                     title={isHidden ? "Hidden in the scene view (H)" : "Hide in the scene view (H)"}
                     onClick={() => onToggleHidden(entry.id)}
-                    style={{ flex: "none", width: 24, padding: 0, justifyContent: "center", opacity: isHidden ? 1 : 0.45 }}
+                    style={{ flex: "none", width: 22, padding: 0, justifyContent: "center", opacity: isHidden ? 1 : 0.45 }}
                   >
                     {isHidden ? "◌" : "◉"}
                   </button>
@@ -165,7 +166,7 @@ export function HierarchyPanel({
                     aria-label={`${isLocked ? "Unlock" : "Lock"} ${entry.name}`}
                     title={isLocked ? "Locked: can't be picked or moved in the scene view (L)" : "Lock (L)"}
                     onClick={() => onToggleLocked(entry.id)}
-                    style={{ flex: "none", width: 24, padding: 0, justifyContent: "center", opacity: isLocked ? 1 : 0.35 }}
+                    style={{ flex: "none", width: 22, padding: 0, justifyContent: "center", opacity: isLocked ? 1 : 0.35, fontSize: 11 }}
                   >
                     {isLocked ? "🔒" : "🔓"}
                   </button>

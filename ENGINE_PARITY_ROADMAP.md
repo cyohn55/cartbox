@@ -123,10 +123,34 @@ preview.
 
       The hierarchy also has Duplicate, Copy, Paste, Delete, Isolate and Show
       all buttons. Every operation undoes like any other edit.
-- [ ] **EP4. Content browser.** One panel for a cart's assets (meshes, prefabs,
+- [x] **EP4. Content browser.** One panel for a cart's assets (meshes, prefabs,
       textures, materials, sounds, effects) with folders, search and
       thumbnails. Drag an asset into the viewport to place it, find what uses
       an asset, and rename safely.
+      *Done:* a drawer under the Mesh tab's view lists every asset the scene
+      is built from (`contentBrowser.ts`):
+      - each distinct mesh, with how many objects share it;
+      - prefabs, with their copies;
+      - the materials and textures inside the meshes;
+      - particle effects, decals and debris.
+
+      Assets sit in folders by kind and are searchable. Meshes and prefabs
+      get rendered thumbnails, textures their image, and materials a shaded
+      swatch.
+      - **Placing:** drag a mesh or prefab into the scene view and it lands on
+        the surface under the cursor (or the ground); double-click or Place
+        puts it where the view is looking.
+      - **Finding uses:** an asset's details list the objects that use it
+        (Select picks them), what else in the scene names it, and the code
+        lines that name it.
+      - **Safe renames** carry the new name everywhere: debris sources for a
+        prefab, every mesh and every debris `without` list for a material,
+        and the marks for a decal. Optionally, the code's string literals
+        follow too.
+
+      Sounds aren't in it yet; they arrive with audio assets in EP12. The
+      Lockout starter lists 54 assets, including the soldier mesh shared by
+      its seven bots.
 - [ ] **EP5. Play in the editor.** Play the game inside the scene viewport,
       pause and step it, and eject to a free camera to look around. Edits made
       while playing (transforms, materials, lighting) show immediately and are
