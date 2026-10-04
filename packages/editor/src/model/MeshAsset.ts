@@ -171,6 +171,17 @@ export interface MeshMaterial {
   readonly blendImage?: EncodedImage | null;
   readonly blendColor?: readonly [number, number, number];
   readonly blendRoughness?: number;
+  // --- Transparency (ENGINE_PARITY_ROADMAP.md EP6), glTF's alphaMode plus additive ---
+  /**
+   * How the surface's alpha (base colour factor × texture) is used. Absent is
+   * opaque. "mask" drops texels below {@link alphaCutoff} (foliage, grilles);
+   * "blend" is see-through (glass, water, smoke), drawn after everything
+   * opaque, farthest first, without hiding what's behind it; "additive" adds
+   * its light to what's behind (glows, energy, sparks).
+   */
+  readonly alphaMode?: "mask" | "blend" | "additive";
+  /** The alpha below which a "mask" surface is dropped (default 0.5). */
+  readonly alphaCutoff?: number;
 }
 
 /** One triangle list with a single material. */
@@ -384,6 +395,8 @@ export interface SerializedMaterial {
   blendImage?: SerializedImage | null;
   blendColor?: [number, number, number];
   blendRoughness?: number;
+  alphaMode?: "mask" | "blend" | "additive";
+  alphaCutoff?: number;
 }
 interface SerializedPrimitive {
   positions: string;

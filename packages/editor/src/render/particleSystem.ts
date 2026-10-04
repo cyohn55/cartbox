@@ -6,10 +6,10 @@
  * depth buffer hides them behind walls on every backend.
  *
  * A particle's look comes from its effect's sprite atlas: 16 frames across its
- * life, each a round sprite in that moment's colour, shrinking and breaking up
- * as it dies (the renderers draw opaque texels and drop transparent ones, so
- * the fade is a dissolve rather than a blend). Glowing effects are emissive, so
- * the post-effects' bloom makes them flare.
+ * life, each a soft round sprite in that moment's colour, fading out as it dies.
+ * Glowing effects (sparks, energy) are emissive and drawn additively, so they
+ * brighten what's behind them and the post-effects' bloom makes them flare;
+ * the rest (smoke, dust, snow) are lit and blended (ENGINE_PARITY_ROADMAP.md EP6).
  */
 
 import type { MeshAsset, MeshMaterial, MeshPrimitive } from "../model/MeshAsset";
@@ -22,13 +22,10 @@ type V3 = [number, number, number];
 export const PARTICLE_FRAMES = 16;
 const FRAME = 16;
 
-/** A 4×4 ordered-dither threshold (0..1), for the dissolving edge. */
-const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map((v) => (v + 0.5) / 16);
-
 /**
  * An effect's sprite atlas: {@link PARTICLE_FRAMES} frames side by side, each a
  * round sprite in the colour of that point in its life, brightest at its core,
- * its edge dithered away as it dies.
+ * with a soft edge (in alpha) that fades away as it dies.
  */
 export function particleAtlas(effect: ParticleEffect): DecodedTexture {
   const width = PARTICLE_FRAMES * FRAME;
@@ -37,7 +34,7 @@ export function particleAtlas(effect: ParticleEffect): DecodedTexture {
   for (let f = 0; f < PARTICLE_FRAMES; f += 1) {
     const t = f / (PARTICLE_FRAMES - 1);
     const c = [0, 1, 2].map((k) => effect.color[k]! + (effect.colorEnd[k]! - effect.color[k]!) * t);
-    // Past 60% of its life the sprite thins out: fewer texels survive the dither.
+    // Past 60% of its life the sprite fades out.
     const keep = t < 0.6 ? 1 : 1 - (t - 0.6) / 0.4;
     for (let y = 0; y < FRAME; y += 1) {
       for (let x = 0; x < FRAME; x += 1) {
@@ -45,14 +42,14 @@ export function particleAtlas(effect: ParticleEffect): DecodedTexture {
         const dy = (y + 0.5 - half) / (half - 1);
         const d = Math.hypot(dx, dy);
         const o = (y * width + f * FRAME + x) * 4;
-        // Inside the disc, and — towards its rim and late in life — past the dither.
-        const edge = Math.max(0, 1 - d) * 1.6 * keep;
-        if (d >= 1 || edge < BAYER[(y % 4) * 4 + (x % 4)]!) continue;
+        // Inside the disc, with a soft rim, all of it fading late in life.
+        const edge = Math.min(1, Math.max(0, 1 - d) * 1.6) * keep;
+        if (d >= 1 || edge <= 0) continue;
         const core = 1 - 0.45 * d * d;
         data[o] = c[0]! * core * 255;
         data[o + 1] = c[1]! * core * 255;
         data[o + 2] = c[2]! * core * 255;
-        data[o + 3] = 255;
+        data[o + 3] = edge * 255;
       }
     }
   }
@@ -109,6 +106,7 @@ export class ParticleSystem {
         metallicFactor: 0,
         roughnessFactor: 1,
         ...(glow ? { emissiveFactor: [effect.glow, effect.glow, effect.glow] as [number, number, number] } : {}),
+        alphaMode: glow ? "additive" : "blend",
       };
       const primitive: MeshPrimitive = {
         positions: new Float32Array(capacity * 12),

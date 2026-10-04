@@ -58,6 +58,13 @@ function texture(): DecodedTexture {
   return { width: 4, height: 4, data };
 }
 
+/** A 4×4 texture whose texels alternate opaque and nearly clear, for a cut-out surface. */
+function halfAlpha(): DecodedTexture {
+  const data = new Uint8ClampedArray(4 * 4 * 4);
+  for (let i = 0; i < 16; i += 1) data.set([255, 255, 255, (i + (i >> 2)) % 2 === 0 ? 255 : 40], i * 4);
+  return { width: 4, height: 4, data };
+}
+
 function baseDraw(): SceneDraw {
   return {
     width: W,
@@ -113,6 +120,17 @@ function scenes(): Record<string, Scene> {
       instances: [
         { mesh: quad({ metallicFactor: 1, roughnessFactor: 0.15 }), model: composeModelMatrix([-0.9, 0, 0], [0, 15, 0], [1.1, 1.1, 1.1]) },
         { mesh: quad({ metallicFactor: 0, roughnessFactor: 0.8 }), model: composeModelMatrix([0.9, 0, 0], [0, -15, 0], [1.1, 1.1, 1.1]) },
+      ],
+      draw: baseDraw,
+    },
+    // Transparency (EP6): an opaque wall, a blended pane and an added glow in front of
+    // it (drawn after it, farthest first, without writing depth), and a cut-out quad.
+    transparent: {
+      instances: [
+        { mesh: quad({ metallicFactor: 0, roughnessFactor: 0.8 }), model: composeModelMatrix([0, 0, -1], [0, 0, 0], [2.2, 1.6, 1]) },
+        { mesh: quad({ baseColorFactor: [0.2, 0.6, 1, 0.4], metallicFactor: 0, roughnessFactor: 0.2, alphaMode: "blend" }), model: composeModelMatrix([-0.5, 0, 0.3], [0, 20, 0], [0.9, 0.9, 1]) },
+        { mesh: quad({ baseColorFactor: [1, 0.3, 0.1, 0.7], alphaMode: "additive" }), model: composeModelMatrix([0.6, 0.2, 0.6], [0, -15, 0], [0.6, 0.6, 1]) },
+        { mesh: quad({ baseColorFactor: [0.3, 1, 0.3, 1], alphaMode: "mask", alphaCutoff: 0.5 }), model: composeModelMatrix([0.3, -0.6, 0.2], [0, 0, 0], [0.6, 0.6, 1]), textures: [halfAlpha()] },
       ],
       draw: baseDraw,
     },

@@ -84,6 +84,8 @@ interface GltfMaterial {
   occlusionTexture?: { index: number };
   emissiveTexture?: { index: number };
   emissiveFactor?: number[];
+  alphaMode?: "OPAQUE" | "MASK" | "BLEND";
+  alphaCutoff?: number;
 }
 export interface GltfPrimitive {
   attributes: { POSITION?: number; NORMAL?: number; TEXCOORD_0?: number; JOINTS_0?: number; WEIGHTS_0?: number };
@@ -445,6 +447,9 @@ function readMaterial(json: GltfJson, buffers: (Uint8Array | null)[], materialIn
     roughnessFactor: typeof pbr?.roughnessFactor === "number" ? pbr.roughnessFactor : undefined,
     emissiveFactor:
       emissive && emissive.length === 3 ? [emissive[0]!, emissive[1]!, emissive[2]!] : undefined,
+    // Transparency, as glTF states it (EP6).
+    ...(material?.alphaMode === "MASK" ? { alphaMode: "mask" as const, alphaCutoff: typeof material.alphaCutoff === "number" ? Math.max(0, Math.min(1, material.alphaCutoff)) : 0.5 } : {}),
+    ...(material?.alphaMode === "BLEND" ? { alphaMode: "blend" as const } : {}),
   };
 }
 
@@ -844,6 +849,9 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
     const gltfMaterial: GltfMaterial = {
       name: primitive.material.name,
       pbrMetallicRoughness: { baseColorFactor: [...primitive.material.baseColorFactor] },
+      // glTF has no additive mode: it exports as blended.
+      ...(primitive.material.alphaMode === "mask" ? { alphaMode: "MASK" as const, alphaCutoff: primitive.material.alphaCutoff ?? 0.5 } : {}),
+      ...(primitive.material.alphaMode === "blend" || primitive.material.alphaMode === "additive" ? { alphaMode: "BLEND" as const } : {}),
     };
     if (primitive.material.baseColorImage) {
       const imageView = addView(primitive.material.baseColorImage.bytes);

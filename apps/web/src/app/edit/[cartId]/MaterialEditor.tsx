@@ -107,6 +107,50 @@ export function MaterialEditor({ mesh, onChange }: MaterialEditorProps) {
         display={ba.toFixed(2)}
         onChange={(value) => patch({ baseColorFactor: [br, bg, bb, value] })}
       />
+      <SegmentedControl
+        label="Transparency"
+        ariaLabel="Transparency"
+        wrap
+        selected={material.alphaMode ?? "opaque"}
+        onSelect={(mode) => patch(mode === "opaque" ? { alphaMode: undefined, alphaCutoff: undefined } : { alphaMode: mode, ...(mode === "mask" ? { alphaCutoff: material.alphaCutoff ?? 0.5 } : { alphaCutoff: undefined }) })}
+        options={[
+          { id: "opaque", label: "Opaque", hint: "Solid: opacity and the texture's alpha are ignored" },
+          { id: "mask", label: "Cut out", hint: "Texels below the threshold are dropped (foliage, grilles)" },
+          { id: "blend", label: "See-through", hint: "Blended over what's behind it by its opacity (glass, water, smoke)" },
+          { id: "additive", label: "Additive", hint: "Adds its light to what's behind it (glows, energy, sparks)" },
+        ]}
+      />
+      {material.alphaMode === "mask" && (
+        <RangeControl
+          label="Cut-out threshold"
+          nested
+          min={0}
+          max={1}
+          step={0.01}
+          value={material.alphaCutoff ?? 0.5}
+          ariaLabel="Cut-out threshold"
+          display={(material.alphaCutoff ?? 0.5).toFixed(2)}
+          onChange={(value) => patch({ alphaCutoff: value })}
+        />
+      )}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <button
+          type="button"
+          className={styles.toolBtn}
+          title="Clear, glossy and reflective"
+          onClick={() => patch({ alphaMode: "blend", alphaCutoff: undefined, baseColorFactor: [0.85, 0.93, 1, 0.22], metallicFactor: 0, roughnessFactor: 0.04, reflectivity: 1.6 })}
+        >
+          Glass
+        </button>
+        <button
+          type="button"
+          className={styles.toolBtn}
+          title="Deep blue-green, smooth, mostly opaque"
+          onClick={() => patch({ alphaMode: "blend", alphaCutoff: undefined, baseColorFactor: [0.1, 0.38, 0.5, 0.7], metallicFactor: 0, roughnessFactor: 0.08, reflectivity: 1.2 })}
+        >
+          Water
+        </button>
+      </div>
 
       <RangeControl
         label="Metallic"

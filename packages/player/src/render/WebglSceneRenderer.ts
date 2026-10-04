@@ -336,6 +336,15 @@ float camoThreshold(vec2 p, float time) {
   int py = int(floor(p.y)) + s * 3;
   return (4.0 * bayer2(px, py) + bayer2(px >> 1, py >> 1) + 0.5) / 16.0;
 }
+// What reaches the framebuffer (EP6): opaque and cut-out surfaces cover the
+// pixel (alpha 1); a blended one leaves premultiplied colour and its coverage;
+// an added one leaves its light and no coverage (see compositeFrame).
+vec4 finishAlpha(vec3 rgb, float a) {
+  vec3 c = clamp(rgb, vec3(0.0), vec3(1.0));
+  if (u.pbr.w > 2.5) { return vec4(c * a, 0.0); }
+  if (u.pbr.w > 1.5) { return vec4(c * a, a); }
+  return vec4(c, 1.0);
+}
 vec3 envAverage() {
   if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
   return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
@@ -352,6 +361,8 @@ void main() {
     colour = colour * sampleMap(tex, uv);
   }
   if (colour.a * 255.0 < 1.0) { discard; }
+  // A cut-out surface (EP6) drops what's below its threshold.
+  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && colour.a < u.view.w) { discard; }
 
   if (u.pbr.z > 0.5) {
     // Active Camo (H11): screen-door transparency, as the rasteriser drops pixels.
@@ -516,14 +527,14 @@ void main() {
       }
       shaded = mix(clamp(shaded, vec3(0.0), vec3(1.0)), fc, f);
     }
-    outColor = vec4(shaded, colour.a);
+    outColor = finishAlpha(shaded, colour.a);
     return;
   }
 
   // Fantasy path: two-sided Lambert on the un-renormalised normal, as the software rasteriser does.
   float nl = abs(dot(vNormal, u.light.xyz));
   float shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(vLightClip, abs(dot(normalize(vNormal), u.light.xyz)));
-  outColor = vec4(colour.rgb * shade, colour.a);
+  outColor = finishAlpha(colour.rgb * shade, colour.a);
 }
 `;
 
@@ -763,7 +774,7 @@ export class WebglSceneRenderer implements SceneRenderer {
   private submit(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
     const gl = this.gl;
     const viewProj = multiplyMat4(draw.projection, draw.view);
-    const { batches, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh));
+    const { batches, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView(draw.view));
     if (batches.length === 0) return;
 
     // Chunks of at most one block's worth of instances, each starting at an aligned offset.
@@ -821,6 +832,7 @@ export class WebglSceneRenderer implements SceneRenderer {
         eye,
         effect: batch.effect ?? null,
         time: draw.time ?? 0,
+        alpha: { mode: batch.alpha, cutoff: batch.primitive.material.alphaCutoff ?? 0.5 },
         surface: resolveSurface(batch.primitive.material, draw.time ?? 0, batch.textures.detail !== null, batch.textures.mr !== null, {
           weights: batch.primitive.blend !== undefined,
           textured: batch.textures.blend !== null,
@@ -872,9 +884,28 @@ export class WebglSceneRenderer implements SceneRenderer {
     this.timer?.begin();
     let bound: PrimitiveTextures | null = null;
     let boundBatch = -1;
+    // Transparency (EP6): opaque draws write depth with no blending; blended
+    // ones blend premultiplied colour over what's there, added ones add, and
+    // neither writes depth. Batches come opaque first, then see-through, farthest first.
+    let blendState = -1;
+    const setBlend = (alpha: number) => {
+      const state = alpha >= 2 ? alpha : 0;
+      if (state === blendState) return;
+      blendState = state;
+      if (state === 0) {
+        gl.disable(gl.BLEND);
+        gl.depthMask(true);
+      } else {
+        gl.enable(gl.BLEND);
+        gl.depthMask(false);
+        if (state === 2) gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+        else gl.blendFuncSeparate(gl.ONE, gl.ONE, gl.ZERO, gl.ONE);
+      }
+    };
     let triangles = 0;
     for (const chunk of chunks) {
       const batch = batches[chunk.batch]!;
+      setBlend(batch.alpha);
       if (chunk.batch !== boundBatch) {
         gl.bindBufferRange(gl.UNIFORM_BUFFER, BLOCK_UNIFORMS, this.uniformBuffer, chunk.batch * UNIFORM_STRIDE, UNIFORM_BYTES_USED);
         if (bound !== batch.textures) {
@@ -895,6 +926,8 @@ export class WebglSceneRenderer implements SceneRenderer {
       triangles += (batch.geometry.indexCount / 3) * chunk.count;
     }
     gl.bindVertexArray(null);
+    // Leave the context as the next frame expects it: no blending, depth writes on.
+    setBlend(0);
     this.timer?.end();
     this.lastFrameStats = { drawCalls: chunks.length, instances: instanceCount, triangles, gpuMs: this.timer?.lastMs ?? null };
 

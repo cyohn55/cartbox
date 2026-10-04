@@ -3574,8 +3574,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  *  64  nrm        mat3x3<f32>  48   (three vec3 columns, each padded to 16)
  * 112  base       vec4<f32>    16
  * 128  light      vec4<f32>    16   xyz = direction, w = ambient
- * 144  view       vec4<f32>    16   xyz = direction towards the viewer (Modern PBR)
- * 160  pbr        vec4<f32>    16   x = metallic, y = roughness, z = 1 when PBR
+ * 144  view       vec4<f32>    16   xyz = direction towards the viewer (Modern PBR), w = alpha cutoff
+ * 160  pbr        vec4<f32>    16   x = metallic, y = roughness, z = 1 when PBR, w = alpha mode (0 opaque, 1 cut out, 2 blended, 3 added)
  * 176  emissive   vec4<f32>    16   xyz = emissive factor
  * 192  texflags   vec4<f32>    16   x = base, y = mr, z = occlusion, w = emissive
  * 208  envSky     vec4<f32>    16   xyz = sky colour, w = 1 when an environment is set
@@ -3791,6 +3791,11 @@ interface InstanceUniform {
     readonly effect?: SurfaceEffect | null;
     /** Seconds, for the effect's bands and camo crawl. */
     readonly time?: number;
+    /** The material's transparency (EP6): 0 opaque, 1 cut out below `cutoff`, 2 blended, 3 added. */
+    readonly alpha?: {
+        readonly mode: number;
+        readonly cutoff: number;
+    };
 }
 /**
  * Floats per instance in the transform storage buffer (GPU instancing): the WGSL

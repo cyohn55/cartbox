@@ -178,10 +178,36 @@ preview.
 
 ## Phase B — Rendering you can author
 
-- [ ] **EP6. Transparency.** Material blend modes (opaque, masked, blended,
+- [x] **EP6. Transparency.** Material blend modes (opaque, masked, blended,
       additive) with a sorted transparent pass in all three renderers, soft
       particles, and glass and water. *Lockout:* the energy barriers and the
       shield-door glass become true translucency.
+
+      *Done:*
+      - **Alpha modes:** a material can be opaque, cut out ("mask", with a
+        threshold), blended or additive. The mode is stored with the mesh and
+        round-trips through glTF (MASK and BLEND; additive exports as BLEND).
+      - **The transparent pass:** in the software rasteriser, WebGL2 and
+        WebGPU, see-through surfaces draw after the opaque scene, farthest
+        first, testing depth but never writing it, and they cast no shadow.
+        The GPU paths output premultiplied colour, and the composite lays it
+        over the cart's pixels; additive surfaces add light with no coverage.
+        Parity tests hold all three renderers to the same picture.
+      - **Material editor:** a Transparency control (opaque / cut-out /
+        blended / additive), a cut-out threshold, and Glass and Water presets.
+      - **Particles** blend for real: soft-edged sprites, with glowing effects
+        additive, instead of dithered cut-outs.
+      - **Lockout:** it has no barriers or glass, so the item lands in its
+        effects. Smoke, sparks, shield flares and plasma now blend and glow
+        over the arena. The cyan energy trim stays opaque: drawn additively
+        over the white walls it washed out to white.
+      - **Soft particles** (fading where a sprite meets the geometry behind
+        it) need the opaque depth readable during the transparent pass, so
+        they moved to EP6b.
+- [ ] **EP6b. Soft particles.** Copy the opaque pass's depth so the transparent
+      pass can read it, and fade sprites where they meet the surface behind
+      them (all three renderers). *Lockout:* grenade smoke stops cutting hard
+      lines into the deck and walls.
 - [ ] **EP7. Material graph.** A node-based material editor (textures, maths,
       time, UVs, fresnel, noise) feeding the PBR inputs, compiled to WGSL and
       GLSL and interpreted on the CPU, as Unity's Shader Graph and Unreal's

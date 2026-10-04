@@ -344,6 +344,16 @@ fn camoThreshold(p: vec2<f32>, time: f32) -> f32 {
   let py = i32(floor(p.y)) + s * 3;
   return (4.0 * bayer2(px, py) + bayer2(px >> 1u, py >> 1u) + 0.5) / 16.0;
 }
+// What reaches the framebuffer (EP6): opaque and cut-out surfaces cover the
+// pixel (alpha 1); a blended one leaves premultiplied colour and its coverage
+// (the pipeline blends it over what's there); an added one leaves its light
+// and no coverage (the pipeline adds it). compositeFrame reads the same codes.
+fn finishAlpha(rgb: vec3<f32>, a: f32) -> vec4<f32> {
+  let c = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+  if (u.pbr.w > 2.5) { return vec4<f32>(c * a, 0.0); }
+  if (u.pbr.w > 1.5) { return vec4<f32>(c * a, a); }
+  return vec4<f32>(c, 1.0);
+}
 fn envAverage() -> vec3<f32> {
   if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
   return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
@@ -389,6 +399,8 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   // The CPU path skips a texel whose combined alpha is below 1/255 rather than
   // blending it, so this is a discard and not an alpha-blend state.
   if (colour.a * 255.0 < 1.0) { discard; }
+  // A cut-out surface (EP6) drops what's below its threshold.
+  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && colour.a < u.view.w) { discard; }
 
   if (u.pbr.z > 0.5) {
     // Active Camo (H11): screen-door transparency, as the rasteriser drops pixels.
@@ -574,7 +586,7 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
       }
       shaded = mix(clamp(shaded, vec3<f32>(0.0), vec3<f32>(1.0)), fc, f);
     }
-    return vec4<f32>(shaded, colour.a);
+    return finishAlpha(shaded, colour.a);
   }
 
   // --- Fantasy path (byte-identical when no shadow; shadow scales the direct term) ---
@@ -584,7 +596,7 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   // therefore skew identically under non-uniform scale.
   let nl = abs(dot(in.normal, u.light.xyz));
   let shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(in.lightClip, abs(dot(normalize(in.normal), u.light.xyz)));
-  return vec4<f32>(colour.rgb * shade, colour.a);
+  return finishAlpha(colour.rgb * shade, colour.a);
 }
 `;
 
@@ -680,7 +692,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     private readonly device: any,
     private readonly width: number,
     private readonly height: number,
-    private readonly pipeline: any,
+    private readonly pipeline: { readonly opaque: any; readonly blend: any; readonly add: any },
     private readonly bindGroupLayout: any,
     private readonly colourTexture: any,
     private readonly depthTexture: any,
@@ -810,8 +822,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         ],
       });
 
-      const pipeline = device.createRenderPipeline({
-        layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+      // One pipeline per transparency (EP6): opaque surfaces write depth;
+      // blended ones (premultiplied colour over what's there) and added ones
+      // test depth without writing it, drawn after the opaque scene.
+      const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
+      const pipelineFor = (blend: unknown, depthWrite: boolean) => device.createRenderPipeline({
+        layout,
         vertex: {
           module,
           entryPoint: "vs",
@@ -835,13 +851,18 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           // rgba8unorm, never rgba8unorm-srgb: the framebuffer these bytes land
           // in is the same 8-bit buffer the CPU path writes, so any gamma
           // conversion here would show up as the GPU path looking washed out.
-          targets: [{ format: "rgba8unorm" }],
+          targets: [blend ? { format: "rgba8unorm", blend } : { format: "rgba8unorm" }],
         },
         // cullMode "none" matches the software rasteriser, which draws both
         // faces (its Lambert is two-sided for exactly this reason).
         primitive: { topology: "triangle-list", cullMode: "none" },
-        depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
+        depthStencil: { format: "depth24plus", depthWriteEnabled: depthWrite, depthCompare: "less" },
       });
+      const pipeline = {
+        opaque: pipelineFor(null, true),
+        blend: pipelineFor({ color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" } }, false),
+        add: pipelineFor({ color: { srcFactor: "one", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "zero", dstFactor: "one", operation: "add" } }, false),
+      };
 
       const colourTexture = device.createTexture({
         size: { width, height },
@@ -1021,7 +1042,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
     // Batch the copies of each primitive that bind the same textures: one
     // uniform (addressed by a dynamic offset) and one instanced draw per batch.
-    const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh));
+    const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView(draw.view));
     if (draws.length === 0) return;
 
     this.ensureUniformCapacity(draws.length);
@@ -1123,6 +1144,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         eye,
         effect: entry.effect ?? null,
         time: draw.time ?? 0,
+        alpha: { mode: entry.alpha, cutoff: entry.primitive.material.alphaCutoff ?? 0.5 },
         surface: resolveSurface(entry.primitive.material, draw.time ?? 0, entry.textures.detail !== null, entry.textures.mr !== null, {
           weights: entry.primitive.blend !== undefined,
           textured: entry.textures.blend !== null,
@@ -1155,8 +1177,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       },
       ...(this.timer ? { timestampWrites: this.timer.writes() } : {}),
     });
-    pass.setPipeline(this.pipeline);
+    let bound: any = null;
     draws.forEach((entry, index) => {
+      const wanted = entry.alpha === 3 ? this.pipeline.add : entry.alpha === 2 ? this.pipeline.blend : this.pipeline.opaque;
+      if (wanted !== bound) {
+        pass.setPipeline(wanted);
+        bound = wanted;
+      }
       pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.textures), [index * UNIFORM_STRIDE]);
       pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
       pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
