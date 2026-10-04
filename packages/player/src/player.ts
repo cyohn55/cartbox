@@ -962,6 +962,7 @@ export class Player {
           const bodies = this.runtime.physics?.overrides();
           this.meshSurface.setBodyOverrides(scripted.size > 0 ? new Map([...(bodies ?? []), ...scripted]) : (bodies ?? NO_OVERRIDES));
           this.meshSurface.setSpawned(this.runtime.channel.spawned());
+          this.meshSurface.setShields(this.runtime.channel.shields());
           // IK aims in world space: give it where each object is this frame.
           const placed = this.runtime.channel.needsWorld() ? this.meshSurface.currentPlacements() : null;
           this.meshSurface.setSkinning(placed ? this.runtime.channel.skinning((o) => placed[o] ?? null) : this.runtime.channel.skinning());

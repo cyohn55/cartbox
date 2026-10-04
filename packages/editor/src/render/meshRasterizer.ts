@@ -82,6 +82,8 @@ export interface RenderMeshOptions {
   readonly blendTextures?: readonly (DecodedTexture | null)[];
   /** Seconds, for animated emissive (see {@link RenderMeshSceneOptions.time}). */
   readonly time?: number;
+  /** A surface effect over the mesh's PBR materials (see {@link MeshSceneInstance.effect}). */
+  readonly effect?: SurfaceEffect | null;
   /** Image-based lighting environment for PBR materials (Modern tier); when set,
    *  it replaces the flat ambient term. See {@link EnvironmentLight}. */
   readonly environment?: EnvironmentLight | null;
@@ -709,7 +711,7 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
     options.mrTextures ?? null,
     options.occlusionTextures ?? null,
     options.emissiveTextures ?? null,
-    { lightmap: options.lightmapTextures ?? null, detail: options.detailTextures ?? null, blend: options.blendTextures ?? null, time: options.time ?? 0 },
+    { lightmap: options.lightmapTextures ?? null, detail: options.detailTextures ?? null, blend: options.blendTextures ?? null, time: options.time ?? 0, effect: options.effect ?? null },
     light,
     viewDir,
     ambient,

@@ -25,6 +25,7 @@ import {
   sampleClip,
   skinMatrices,
   renderMesh,
+  shieldEffect,
   encodeObj,
   encodeGlb,
   meshBounds,
@@ -70,7 +71,21 @@ import { DecalsPanel } from "./DecalsPanel";
 import { DebrisPanel } from "./DebrisPanel";
 import { StreamingPanel, StreamingPicker } from "./StreamingPanel";
 import { formatBytes } from "./assetUploads";
-import { AnimationPanel, CodeHint, HierarchyPanel, ParentPicker, PhysicsPanel, PhysicsWorldPanel, PrefabLibrary, PrefabPanel, PropertyEditor, TagEditor } from "./SceneObjectPanels";
+import {
+  AnimationPanel,
+  CodeHint,
+  HierarchyPanel,
+  NO_SHIELD,
+  ParentPicker,
+  PhysicsPanel,
+  PhysicsWorldPanel,
+  PrefabLibrary,
+  PrefabPanel,
+  PropertyEditor,
+  ShieldPanel,
+  TagEditor,
+  type ShieldPreview,
+} from "./SceneObjectPanels";
 
 const VIEWPORT = 512; // preview canvas edge in device pixels
 const ORBIT_SPEED = 0.01; // radians per pixel dragged
@@ -124,6 +139,9 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
   const ragdollRef = useRef<Ragdoll | null>(null);
   const [ragdolling, setRagdolling] = useState(false);
   const [ragdollFrame, setRagdollFrame] = useState(0);
+  /** A shield effect previewed on the selected object (H11), and the clock its shimmer and camo move by. */
+  const [shield, setShield] = useState<ShieldPreview>(NO_SHIELD);
+  const [shieldTime, setShieldTime] = useState(0);
   /** The Scene view's viewpoint (to key a timeline camera from), and a timeline moment previewed in it. */
   const [sceneView, setSceneView] = useState<ViewpointKey | null>(null);
   const [timelinePreview, setTimelinePreview] = useState<TimelinePreview | null>(null);
@@ -159,6 +177,24 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
     if (previewClip !== null) setRagdolling(false);
   }, [previewClip]);
   useEffect(() => setRagdolling(false), [meshAsset]);
+  useEffect(() => setShield(NO_SHIELD), [meshAsset]);
+  // The shimmer climbs and the camo crawls: run the preview's clock while either is on (~30 redraws a second).
+  const shieldMoving = shield.shimmer > 0 || shield.camo > 0;
+  useEffect(() => {
+    if (!shieldMoving) return;
+    const start = performance.now();
+    let frame = 0;
+    let last = 0;
+    const tick = (now: number) => {
+      if (now - last >= 33) {
+        last = now;
+        setShieldTime((now - start) / 1000);
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [shieldMoving]);
   useEffect(() => {
     if (!ragdolling) ragdollRef.current = null;
   }, [ragdolling]);
@@ -270,6 +306,8 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
       depth: buffers.depth,
       textures: textures ?? undefined,
       background: [14, 16, 26, 255],
+      effect: shieldEffect(shield.flare, shield.shimmer, shield.camo),
+      time: shieldTime,
       ...(lighting
         ? {
             ambient: lighting.ambient,
@@ -282,7 +320,7 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
     const image = context.createImageData(VIEWPORT, VIEWPORT);
     image.data.set(buffers.out);
     context.putImageData(image, 0, 0);
-  }, [meshAsset, textures, yaw, pitch, zoom, buffers, sidecar.lighting, liveMesh, previewClip, clipTime, ragdolling, ragdollFrame]);
+  }, [meshAsset, textures, yaw, pitch, zoom, buffers, sidecar.lighting, liveMesh, previewClip, clipTime, ragdolling, ragdollFrame, shield, shieldTime]);
 
   // Orbit + zoom.
   const drag = useRef<{ x: number; y: number } | null>(null);
@@ -522,6 +560,8 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
             {meshAsset && isSkinned(meshAsset) && (
               <AnimatorPanel sidecar={sidecar} entry={selectedEntry} mesh={meshAsset} onChange={onSidecarChange} />
             )}
+            {meshAsset && <ShieldPanel name={selectedEntry.name} shield={shield} onChange={setShield} />}
+
             <PhysicsPanel sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
 
             <PrefabPanel sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />

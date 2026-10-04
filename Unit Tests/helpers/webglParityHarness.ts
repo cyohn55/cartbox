@@ -116,6 +116,14 @@ function scenes(): Record<string, Scene> {
       ],
       draw: baseDraw,
     },
+    // Shield effects (H11): rim, glow and bands within rounding, and the camo dither dropping the very same pixels.
+    effects: {
+      instances: [
+        { mesh: quad({ metallicFactor: 1, roughnessFactor: 0.15 }), model: composeModelMatrix([-0.9, 0, 0], [0, 15, 0], [1.1, 1.1, 1.1]), effect: { rim: [1.2, 0.9, 0.3], rimPower: 1.5, glow: [0.2, 0.15, 0.05] } },
+        { mesh: quad({ metallicFactor: 0, roughnessFactor: 0.8 }), model: composeModelMatrix([0.9, 0, 0], [0, -15, 0], [1.1, 1.1, 1.1]), effect: { bands: [0.8, 0.7, 0.4], camo: 0.5, rim: [0.2, 0.3, 0.5], rimPower: 3 } },
+      ],
+      draw: () => ({ ...baseDraw(), time: 0.37 }),
+    },
     lights: {
       instances: [{ mesh: floor(3, 0), model: composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]) }],
       draw: () => ({ ...lit(), lights }),
@@ -146,7 +154,7 @@ function shadowScene(pbr: boolean): Scene {
   return { instances, draw: () => ({ ...baseDraw(), view: viewMatrix([0, 7, 8], [0, 0, 0]), lightDirection: [0, 1, 0], shadow }) };
 }
 
-async function run(name: string): Promise<{ drawn: number; differing: number; maxDelta: number; stats: unknown; backend: string; diffs: string[] } | { error: string }> {
+async function run(name: string): Promise<{ drawn: number; differing: number; maxDelta: number; coverage: number; stats: unknown; backend: string; diffs: string[] } | { error: string }> {
   const scene = scenes()[name];
   if (!scene) return { error: `no scene ${name}` };
   const renderer = WebglSceneRenderer.create(W, H);
@@ -165,6 +173,7 @@ async function run(name: string): Promise<{ drawn: number; differing: number; ma
   let drawn = 0;
   let differing = 0;
   let maxDelta = 0;
+  let coverage = 0;
   const diffs: string[] = [];
   for (let p = 0; p < W * H; p += 1) {
     const a = Array.from(gpu.out.subarray(p * 4, p * 4 + 4));
@@ -173,6 +182,7 @@ async function run(name: string): Promise<{ drawn: number; differing: number; ma
   }
   for (let i = 0; i < W * H * 4; i += 1) {
     if (i % 4 === 0 && (software.out[i]! | software.out[i + 1]! | software.out[i + 2]!) !== 0) drawn += 1;
+    if (i % 4 === 3 && (gpu.out[i] === 0) !== (software.out[i] === 0)) coverage += 1;
     const delta = Math.abs(gpu.out[i]! - software.out[i]!);
     if (delta > 0) {
       differing += 1;
@@ -181,7 +191,7 @@ async function run(name: string): Promise<{ drawn: number; differing: number; ma
   }
   const stats = renderer.lastFrameStats;
   renderer.dispose();
-  return { drawn, differing, maxDelta, stats, backend: renderer.backend, diffs };
+  return { drawn, differing, maxDelta, coverage, stats, backend: renderer.backend, diffs };
 }
 
 /** The rasteriser the page's WebGL2 runs on (unmasked where the browser allows). */
