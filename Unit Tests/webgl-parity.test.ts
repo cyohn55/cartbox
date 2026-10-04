@@ -182,6 +182,15 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     }
   });
 
+  it("shades forty point lights and four spots through the light clusters like the software rasteriser", async () => {
+    const result = await run("manyLights");
+    expect(result.drawn).toBeGreaterThan(100);
+    if (exact) {
+      expect(result.coverage, JSON.stringify(result.diffs)).toBe(0);
+      expect(result.maxDelta).toBeLessThanOrEqual(4);
+    }
+  });
+
   it("matches distance fog within float tolerance", async () => {
     const result = await run("fog");
     expect(result.drawn).toBeGreaterThan(100);

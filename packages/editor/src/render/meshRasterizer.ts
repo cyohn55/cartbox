@@ -1464,6 +1464,20 @@ export function alphaStateOf(material: MeshAsset["primitives"][number]["material
   }
 }
 
+/** The lights whose reach touches a triangle (by its world-space bounding sphere); unranged lights always. */
+function lightsReaching(lights: readonly SceneLight[], a: Vertex, b: Vertex, c: Vertex): readonly SceneLight[] {
+  const cx = (a.wx + b.wx + c.wx) / 3;
+  const cy = (a.wy + b.wy + c.wy) / 3;
+  const cz = (a.wz + b.wz + c.wz) / 3;
+  const r = Math.sqrt(Math.max((a.wx - cx) ** 2 + (a.wy - cy) ** 2 + (a.wz - cz) ** 2, (b.wx - cx) ** 2 + (b.wy - cy) ** 2 + (b.wz - cz) ** 2, (c.wx - cx) ** 2 + (c.wy - cy) ** 2 + (c.wz - cz) ** 2));
+  return lights.filter((l) => {
+    const range = l.range ?? 0;
+    if (l.kind === "directional" || range <= 0) return true;
+    const p = l.position ?? [0, 0, 0];
+    return Math.hypot(p[0] - cx, p[1] - cy, p[2] - cz) <= range + r + 1e-6;
+  });
+}
+
 /** The white a graph's texture node reads when the material has no base texture. */
 const WHITE4 = [1, 1, 1, 1] as const;
 
@@ -1790,6 +1804,9 @@ function rasterizeTriangle(
   linear: readonly [number, number] | null = null,
 ): void {
   const soft = linear && alpha.mode >= 2 && alpha.soft > 0 ? alpha.soft : 0;
+  // Only the lights that reach this triangle (EP8): a ranged light adds exactly
+  // nothing past its range, so the rest can be skipped without changing a pixel.
+  const reaching = lights && lights.length > 0 ? lightsReaching(lights, a, b, c) : lights;
   // A material graph (EP7): one context and register file per triangle, refilled per pixel.
   const graph = pbr?.graph ?? null;
   const regs = graph ? graphRegisters(graph) : null;
@@ -2197,7 +2214,7 @@ function rasterizeTriangle(
           let dR = 0;
           let dG = 0;
           let dB = 0;
-          for (const lgt of lights) {
+          for (const lgt of reaching!) {
             let Lx: number;
             let Ly: number;
             let Lz: number;

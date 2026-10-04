@@ -4,13 +4,15 @@
  * The scene lighting & skybox panel (Phase 6 — 3D authoring UX). Authors the
  * Modern-tier lighting rig the runtime replays over the mesh overlay: the skybox
  * gradient (image-based lighting), an ambient floor, tone mapping, shadows, and a
- * list of directional / point lights.
+ * list of directional / point / spot lights.
  *
  * Fully controlled: it edits the rig handed in through the pure helpers in
  * `@cartbox/editor` and reports the whole next rig (or null to clear it) through
  * {@link onChange}. A cart with no rig renders exactly as before, so the panel
  * leads with a single "Add lighting" button — opting in is explicit.
  */
+
+import { useState } from "react";
 
 import {
   addSceneLight,
@@ -110,6 +112,8 @@ function VectorRow({
 }
 
 export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
+  // A big rig (EP8: dozens of lights) lists each light as one row, opened one at a time.
+  const [openLight, setOpenLight] = useState<number | null>(null);
   if (!lighting) {
     return (
       <RailGroup label="Lighting" advanced defaultOpen>
@@ -199,8 +203,34 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
       <div className={`${styles.groupLabel} ${styles.railSubLabel}`} style={{ marginTop: 8 }}>
         Lights · {lighting.lights.length}
       </div>
-      {lighting.lights.map((light, index) => (
+      {lighting.lights.map((light, index) => {
+        const compact = lighting.lights.length > 3;
+        if (compact && openLight !== index) {
+          const where = light.kind === "directional" ? "from the sky" : (light.position ?? [0, 0, 0]).map((v) => v.toFixed(1)).join(", ");
+          return (
+            <button
+              key={index}
+              type="button"
+              className={styles.toolBtn}
+              onClick={() => setOpenLight(index)}
+              title="Edit this light"
+              style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", marginBottom: 3, textAlign: "left" }}
+            >
+              <span aria-hidden>{light.kind === "directional" ? "☀" : light.kind === "spot" ? "◢" : "●"}</span>
+              <span aria-hidden style={{ width: 10, height: 10, borderRadius: 5, flex: "0 0 auto", background: `rgb(${light.color.map((c) => Math.round(c * 255)).join(",")})` }} />
+              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {light.kind === "directional" ? "Sun" : light.kind === "spot" ? "Spot" : "Point"} · {where}
+              </span>
+            </button>
+          );
+        }
+        return (
         <div key={index} style={{ border: "1px solid #2a2f45", borderRadius: 8, padding: 8, marginBottom: 8 }}>
+          {compact && (
+            <button type="button" className={styles.toolBtn} onClick={() => setOpenLight(null)} style={{ marginBottom: 4 }}>
+              ▾ Light {index + 1} of {lighting.lights.length}
+            </button>
+          )}
           <SegmentedControl
             ariaLabel={`Light ${index + 1} type`}
             selected={light.kind}
@@ -210,14 +240,17 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
                   lighting,
                   index,
                   kind === "directional"
-                    ? { kind, direction: light.direction ?? [0.4, 0.8, 0.6], position: undefined, range: undefined }
-                    : { kind, position: light.position ?? [0, 1, 0], range: light.range ?? 0, direction: undefined },
+                    ? { kind, direction: light.direction ?? [0.4, 0.8, 0.6], position: undefined, range: undefined, innerAngle: undefined, outerAngle: undefined }
+                    : kind === "spot"
+                      ? { kind, position: light.position ?? [0, 3, 0], range: light.range || 12, direction: [0, -1, 0], innerAngle: light.innerAngle ?? 20, outerAngle: light.outerAngle ?? 30 }
+                      : { kind, position: light.position ?? [0, 1, 0], range: light.range ?? 0, direction: undefined, innerAngle: undefined, outerAngle: undefined },
                 ),
               )
             }
             options={[
               { id: "directional", label: "Sun" },
               { id: "point", label: "Point" },
+              { id: "spot", label: "Spot" },
             ]}
           />
           <ColorRow
@@ -262,6 +295,38 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
                 display={light.range ? `${light.range}` : "∞"}
                 onChange={(range) => onChange(updateSceneLight(lighting, index, { range }))}
               />
+              {light.kind === "spot" && (
+                <>
+                  <VectorRow
+                    label="Aim"
+                    step={0.1}
+                    value={light.direction ?? [0, -1, 0]}
+                    onChange={(direction) => onChange(updateSceneLight(lighting, index, { direction }))}
+                  />
+                  <RangeControl
+                    label="Cone"
+                    nested
+                    min={1}
+                    max={89}
+                    step={1}
+                    value={light.outerAngle ?? 30}
+                    ariaLabel={`Light ${index + 1} cone angle`}
+                    display={`${light.outerAngle ?? 30}°`}
+                    onChange={(outerAngle) => onChange(updateSceneLight(lighting, index, { outerAngle, innerAngle: Math.min(light.innerAngle ?? outerAngle * 0.75, outerAngle) }))}
+                  />
+                  <RangeControl
+                    label="Soft edge"
+                    nested
+                    min={0}
+                    max={100}
+                    step={1}
+                    value={Math.round(100 * (1 - (light.innerAngle ?? 22.5) / (light.outerAngle ?? 30)))}
+                    ariaLabel={`Light ${index + 1} cone softness`}
+                    display={`${Math.round(100 * (1 - (light.innerAngle ?? 22.5) / (light.outerAngle ?? 30)))}%`}
+                    onChange={(soft) => onChange(updateSceneLight(lighting, index, { innerAngle: (light.outerAngle ?? 30) * (1 - soft / 100) }))}
+                  />
+                </>
+              )}
             </>
           )}
           <button
@@ -276,7 +341,8 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
             Remove light
           </button>
         </div>
-      ))}
+        );
+      })}
 
       <div className={styles.toolGroup}>
         <button
@@ -294,6 +360,12 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
             ＋
           </span>
           Add point light
+        </button>
+        <button type="button" className={styles.toolBtn} onClick={() => onChange(addSceneLight(lighting, spotLight()))}>
+          <span className={styles.toolGlyph} aria-hidden>
+            ＋
+          </span>
+          Add spot light
         </button>
       </div>
 
@@ -698,6 +770,10 @@ function ProbeControls({ lighting, onChange }: LightingEditorProps & { lighting:
 
 function directionalLight(): SceneLight {
   return { kind: "directional", direction: [-0.4, 0.7, 0.5], color: [1, 1, 1], intensity: 1 };
+}
+
+function spotLight(): SceneLight {
+  return { kind: "spot", position: [0, 4, 0], direction: [0, -1, 0], color: [1, 0.95, 0.85], intensity: 3, range: 12, innerAngle: 20, outerAngle: 30 };
 }
 
 function pointLight(): SceneLight {

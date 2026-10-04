@@ -18,6 +18,7 @@ import {
 
 import { SoftwareSceneRenderer, type SceneDraw } from "../../packages/player/src/render/sceneRenderer";
 import { graphInstances } from "./graphScenes";
+import { manyLights } from "./manyLights";
 import { WebglSceneRenderer } from "../../packages/player/src/render/WebglSceneRenderer";
 
 const W = 64;
@@ -144,6 +145,12 @@ function scenes(): Record<string, Scene> {
         { mesh: quad({ baseColorFactor: [1, 0.4, 0.1, 0.9], alphaMode: "additive", softDepth: 0.5 }), model: composeModelMatrix([0.8, 0.3, 0.5], [0, -20, 0], [0.6, 0.6, 1]) },
       ],
       draw: () => ({ ...baseDraw(), view: viewMatrix([0, 4, 7], [0, 0, 0]) }),
+    },
+    // Many lights (EP8): forty coloured point lights and four spots over a
+    // floor, each shaded only by the cells it reaches.
+    manyLights: {
+      instances: [{ mesh: floor(6, 0), model: composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]) }],
+      draw: () => ({ ...lit(), lights: manyLights() }),
     },
     // Material graphs (EP7): noise, fresnel, UV and maths into every PBR input,
     // and a scrolling texture's alpha into a see-through surface's coverage.
