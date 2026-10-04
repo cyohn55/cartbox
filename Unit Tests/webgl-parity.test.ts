@@ -148,6 +148,13 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     }
   });
 
+  it("settles to the newest frame without rendering again", async () => {
+    const result = await page.evaluate((n: string) => (globalThis as unknown as { settleOnce: (n: string) => Promise<{ states: string[]; differing: number; drawn: number }> }).settleOnce(n), "fantasy");
+    expect(result.states.at(-1)).toBe("current");
+    expect(result.drawn).toBeGreaterThan(100);
+    if (exact) expect(result.differing).toBe(0);
+  });
+
   it("matches distance fog within float tolerance", async () => {
     const result = await run("fog");
     expect(result.drawn).toBeGreaterThan(100);

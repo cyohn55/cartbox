@@ -66,11 +66,35 @@ preview.
       in every view. The grid's spacing follows the camera's distance, and
       geometry hides it. A Fog toggle clears the view when the scene is seen
       from far out. Lockout's arena edits in it at full size on WebGL2.
-- [ ] **EP2. Transform gizmos and snapping.** Real handles in the viewport:
+- [x] **EP2. Transform gizmos and snapping.** Real handles in the viewport:
       move arrows with plane squares, rotate rings, and scale boxes with a
       uniform centre, in local or world space. W/E/R switch tools. Snapping
       to a grid step, an angle step and a scale step, with Ctrl to flip it
       for a drag. "Drop to surface" puts the selection on whatever is below.
+      *Done:* the maths is pure functions in `gizmo.ts`:
+      - **Handles:** arrows, plane squares and a camera-facing centre for
+        move; a ring per axis for rotate; box-tipped arms and a uniform
+        centre for scale.
+      - **Size:** handles stay the same size on screen, and highlight when
+        hovered.
+      - **Exact drags:** every drag is measured from where it started, so
+        snapping is exact and nothing drifts. Move snaps world coordinates
+        (or distances along local axes), rotate snaps the angle, and scale
+        snaps the result.
+      - **Rotation:** turns about a world axis through the object's own
+        origin, and stays correct for children of rotated parents.
+      - **Scale:** always along the object's own axes.
+
+      Q/W/E/R switch tools, X toggles world and local, Snap with three step
+      menus (Ctrl flips it for a drag), and End (or Drop) puts the selection
+      on whatever is beneath it.
+
+      Clicks now pick by triangles (`meshRaycast.ts`) instead of bounding
+      boxes, so a soldier standing in the arena is selectable. GPU renderers
+      gained `settle()`: it shows the newest finished frame without
+      submitting another and says when it's current. That keeps an editor
+      that draws on demand correct on slow GPUs, where readbacks take many
+      frames.
 - [ ] **EP3. Selection and object operations.** Shift/Ctrl-click to multi-select
       in the viewport and the hierarchy, and box select by dragging. Gizmos
       move a selection together. Duplicate (Ctrl+D), copy and paste (also
