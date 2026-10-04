@@ -29,7 +29,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   buildSceneShadow,
   composeModelMatrix,
-  localDirection,
   multiplyMat4,
   parentIndices,
   projectionMatrix,
@@ -52,7 +51,28 @@ import { MODELS, createSceneRenderer, type SceneDraw, type SceneRenderer } from 
 
 import { readMeshEntry, setMeshTransform, type MeshSidecar } from "@/lib/meshSidecar";
 import { decodeMeshTextures } from "@/lib/meshImport";
-import { pickBoxes, type Vec3 } from "@/lib/scenePick";
+import { type Vec3 } from "@/lib/scenePick";
+import {
+  GIZMO_PIXELS,
+  axisTip,
+  dragMove,
+  dragRotate,
+  dragScale,
+  gizmoFrame,
+  hitHandle,
+  localPositionFor,
+  planeSquare,
+  ringPoints,
+  rotatedTransform,
+  type Axis,
+  type GizmoFrame,
+  type GizmoSpace,
+  type Handle,
+  type Ray,
+  type SnapSteps,
+  type Transform,
+} from "@/lib/gizmo";
+import { dropDistance, raycastMeshes } from "@/lib/meshRaycast";
 import {
   VIEWPORT_FOV,
   cameraAxes,
@@ -86,8 +106,6 @@ const TERRAIN_PREVIEW_CELLS = 96;
 const MAX_PIXELS_GPU = 1920 * 1080;
 /** …and the software rasteriser, on the CPU, at most this many. */
 const MAX_PIXELS_SOFTWARE = 640 * 400;
-/** Frames drawn after a change, so a GPU renderer's one-or-two-behind picture catches up. */
-const SETTLE_FRAMES = 4;
 const BACKGROUND = "#0e101a";
 
 /** A terrain built for the viewport: its data, coarse geometry and decoded textures. */
@@ -98,6 +116,10 @@ interface PreviewTerrain {
 }
 
 type Mode = "orbit" | "move" | "rotate" | "scale";
+
+const MOVE_STEPS = [0.05, 0.1, 0.25, 0.5, 1, 2, 5];
+const ROTATE_STEPS = [5, 15, 30, 45, 90];
+const SCALE_STEPS = [0.05, 0.1, 0.25, 0.5, 1];
 
 /** A camera as a timeline keys it: world eye, look-at target, vertical FOV in degrees. */
 export interface ViewpointKey {
@@ -182,9 +204,18 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
   const [viewKind, setViewKind] = useState<ViewKind>("perspective");
   const [decoded, setDecoded] = useState<Decoded[]>([]);
   const [cssSize, setCssSize] = useState<{ w: number; h: number } | null>(null);
-  const [renderer, setRenderer] = useState<SceneRenderer | null>(null);
+  /** The renderer, and the frame size it was built for (a GPU renderer draws only at that size). */
+  const [built, setBuilt] = useState<{ renderer: SceneRenderer; width: number; height: number } | null>(null);
+  const renderer = built?.renderer ?? null;
   const [stats, setStats] = useState<FrameStats | null>(null);
   const [flySpeed, setFlySpeed] = useState(1);
+  /** Gizmo settings: world or local axes, snapping on or off (Ctrl flips it for a drag), and the steps. */
+  const [space, setSpace] = useState<GizmoSpace>("world");
+  const [snapOn, setSnapOn] = useState(false);
+  const [steps, setSteps] = useState<SnapSteps>({ move: 0.5, rotate: 15, scale: 0.1 });
+  /** The handle under the cursor (highlighted), and the one being dragged. */
+  const hover = useRef<Handle | null>(null);
+  const active = useRef<Handle | null>(null);
 
   // --- Geometry ---------------------------------------------------------------
 
@@ -311,7 +342,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
         if (cancelled) return r.dispose();
         const old = rendererRef.current;
         rendererRef.current = r;
-        setRenderer(r);
+        setBuilt({ renderer: r, width: gpuSize.width, height: gpuSize.height });
         old?.dispose();
       });
     }, 120);
@@ -328,19 +359,25 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
     [],
   );
 
-  /** The size frames are drawn at: the panel's, or a smaller one on the CPU. */
+  /**
+   * The size frames are drawn at: a GPU renderer's own (the panel's when it was
+   * built; until a resize's replacement is ready the canvas just stretches), or a
+   * smaller one on the CPU, which can draw at any size.
+   */
   const size = useMemo(() => {
-    if (!cssSize || !gpuSize) return null;
-    return renderer?.backend === "software" ? frameSize(cssSize.w, cssSize.h, dpr, MAX_PIXELS_SOFTWARE) : gpuSize;
-  }, [cssSize, gpuSize, dpr, renderer]);
+    if (!cssSize || !built) return null;
+    return built.renderer.backend === "software" ? frameSize(cssSize.w, cssSize.h, dpr, MAX_PIXELS_SOFTWARE) : { width: built.width, height: built.height };
+  }, [cssSize, dpr, built]);
   const aspect = size ? size.width / size.height : 1;
 
   // --- Camera -------------------------------------------------------------------
 
   const cameraRef = useRef<ViewportCamera | null>(null);
-  const dirty = useRef(SETTLE_FRAMES);
+  /** A change waiting to be drawn; and, after drawing, a GPU frame still on its way back. */
+  const needsRender = useRef(true);
+  const settling = useRef(false);
   const markDirty = useCallback(() => {
-    dirty.current = SETTLE_FRAMES;
+    needsRender.current = true;
   }, []);
   /** Told of every camera change: redraws, and tells the parent once the camera settles. */
   const viewTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -396,7 +433,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
   );
 
   // Anything drawn changing redraws.
-  useEffect(markDirty, [markDirty, instances, terrainInstances, shadow, sidecar.lighting, showFog, selectedId, previewCamera, size, renderer]);
+  useEffect(markDirty, [markDirty, instances, terrainInstances, shadow, sidecar.lighting, showFog, selectedId, previewCamera, size, renderer, mode, space]);
 
   // --- Drawing ------------------------------------------------------------------
 
@@ -404,8 +441,8 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
   const sceneCanvas = useMemo(() => (typeof document === "undefined" ? null : document.createElement("canvas")), []);
 
   // Everything the frame loop reads, refreshed every render.
-  const live = useRef({ instances, terrainInstances, shadow, lighting: sidecar.lighting, showFog, selectedId, previewCamera, reach, renderer, size, buffers });
-  live.current = { instances, terrainInstances, shadow, lighting: sidecar.lighting, showFog, selectedId, previewCamera, reach, renderer, size, buffers };
+  const live = useRef({ instances, terrainInstances, shadow, lighting: sidecar.lighting, showFog, selectedId, previewCamera, reach, renderer, size, buffers, mode, space, cssSize });
+  live.current = { instances, terrainInstances, shadow, lighting: sidecar.lighting, showFog, selectedId, previewCamera, reach, renderer, size, buffers, mode, space, cssSize };
 
   const keys = useRef(new Set<string>());
   const flying = useRef(false);
@@ -431,12 +468,11 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
         const up = (k.has("e") ? 1 : 0) - (k.has("q") ? 1 : 0);
         if (forward || right || up) setCamera(fly(cam0, { forward: forward * speed, right: right * speed, up: up * speed }));
       }
-      if (dirty.current <= 0) return;
-      const { instances: objects, terrainInstances: land, shadow: shadowMap, lighting, showFog: fogOn, selectedId: sel, previewCamera: preview, reach: sphere, renderer: r, size: s, buffers: b } = live.current;
+      if (!needsRender.current && !settling.current) return;
+      const { instances: objects, terrainInstances: land, shadow: shadowMap, lighting, showFog: fogOn, selectedId: sel, previewCamera: preview, reach: sphere, renderer: r, size: s, buffers: b, mode: tool, space: axesSpace, cssSize: css } = live.current;
       const canvas = canvasRef.current;
       const cam = cameraRef.current;
       if (!canvas || !cam || !r || !s || !b || !sceneCanvas) return;
-      dirty.current -= 1;
 
       const aspectNow = s.width / s.height;
       let view: Mat4;
@@ -474,10 +510,19 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
             }
           : {}),
       };
-      const started = performance.now();
-      r.render(land.length > 0 ? [...objects, ...land] : objects, draw);
-      const ms = performance.now() - started;
-      smoothedMs = smoothedMs === 0 ? ms : smoothedMs * 0.8 + ms * 0.2;
+      // A change renders once. After that a GPU renderer is only asked to show
+      // its newest finished frame, until the one for this picture has landed
+      // (rendering again only if that frame never got a readback).
+      const fresh = needsRender.current;
+      needsRender.current = false;
+      const state = !fresh && r.settle ? r.settle(draw) : null;
+      if (fresh || state === "stale") {
+        const started = performance.now();
+        r.render(land.length > 0 ? [...objects, ...land] : objects, draw);
+        const ms = performance.now() - started;
+        smoothedMs = smoothedMs === 0 ? ms : smoothedMs * 0.8 + ms * 0.2;
+      }
+      settling.current = !!r.settle && state !== "current";
 
       // Composite: the background, the grid, then the scene over both (where
       // nothing was drawn the frame is transparent, so geometry hides the grid).
@@ -498,7 +543,13 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
       if (!preview) drawGrid(context, cam, viewProj, s.width, s.height);
       context.drawImage(sceneCanvas, 0, 0);
       const selected = objects.find((i) => i.id === sel);
-      if (selected) drawSelection(context, viewProj, selected, s.width, s.height);
+      if (selected) {
+        drawSelection(context, viewProj, selected, s.width, s.height);
+        if (!preview && tool !== "orbit" && css) {
+          const frameNow = gizmoAt(cam, selected.model, tool, axesSpace, css.h);
+          drawGizmo(context, tool, frameNow, (p) => project(viewProj, p, s.width, s.height), hover.current, active.current, s.width / css.w);
+        }
+      }
 
       if (now - lastStats > 400) {
         lastStats = now;
@@ -512,17 +563,81 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
 
   // --- Pointer and keys ---------------------------------------------------------
 
-  type DragKind = "tool" | "orbit" | "pan" | "look";
-  const drag = useRef<{ kind: DragKind; x: number; y: number; moved: boolean } | null>(null);
+  type DragKind = "tool" | "orbit" | "pan" | "look" | "gizmo";
+  interface GizmoDrag {
+    readonly handle: Handle;
+    readonly frame: GizmoFrame;
+    readonly ray0: Ray;
+    readonly cursor0: readonly [number, number];
+    readonly origin: readonly [number, number];
+    readonly start: Transform;
+    readonly startWorld: Vec3;
+    readonly parentWorld: Mat4 | null;
+  }
+  const drag = useRef<{ kind: DragKind; x: number; y: number; moved: boolean; gizmo?: GizmoDrag } | null>(null);
 
-  const ndcOf = (event: { clientX: number; clientY: number }, el: HTMLElement): [number, number] => {
+  /** A pointer event's place: in canvas pixels, and as normalised device coordinates. */
+  const pointerAt = (event: { clientX: number; clientY: number }, el: HTMLCanvasElement) => {
     const rect = el.getBoundingClientRect();
-    return [((event.clientX - rect.left) / rect.width) * 2 - 1, -(((event.clientY - rect.top) / rect.height) * 2 - 1)];
+    const cx = ((event.clientX - rect.left) / rect.width) * el.width;
+    const cy = ((event.clientY - rect.top) / rect.height) * el.height;
+    const ndc: [number, number] = [((event.clientX - rect.left) / rect.width) * 2 - 1, -(((event.clientY - rect.top) / rect.height) * 2 - 1)];
+    return { canvas: [cx, cy] as [number, number], ndc, rect };
+  };
+
+  /** The selected entry, its world matrix and its parent's. */
+  const selection = () => {
+    const entry = selectedId ? sidecar.meshes.find((m) => m.id === selectedId) : null;
+    const placed = entry ? placement.get(entry.id) : undefined;
+    return entry && placed ? { entry, world: placed.world, parentWorld: placed.parentWorld } : null;
+  };
+
+  /** The gizmo handle under a pointer, or null (no gizmo: the view tool, a timeline camera, nothing selected). */
+  const handleUnder = (event: { clientX: number; clientY: number }, el: HTMLCanvasElement): { handle: Handle; frame: GizmoFrame; origin: [number, number] } | null => {
+    const cam = cameraRef.current;
+    const sel = selection();
+    if (!cam || !sel || mode === "orbit" || previewCamera || !size) return null;
+    const { canvas, rect } = pointerAt(event, el);
+    const frameNow = gizmoAt(cam, sel.world, mode, space, rect.height);
+    const planes = clipPlanes(cam, reach.center, reach.radius);
+    const { viewProj } = cameraMatrices(cam, size.width / size.height, planes.near, planes.far);
+    const projector = (p: Vec3) => project(viewProj, p, el.width, el.height);
+    const handle = hitHandle(mode, frameNow, projector, canvas, 8 * (el.width / rect.width));
+    const origin = projector(frameNow.origin);
+    return handle && origin ? { handle, frame: frameNow, origin } : null;
   };
 
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
     event.currentTarget.focus();
+    const cam = cameraRef.current;
+    if (event.button === 0 && !event.altKey && !event.shiftKey && cam) {
+      const grabbed = handleUnder(event, event.currentTarget);
+      const sel = selection();
+      if (grabbed && sel) {
+        const { canvas, ndc } = pointerAt(event, event.currentTarget);
+        const t = sel.entry.transform;
+        active.current = grabbed.handle;
+        markDirty();
+        drag.current = {
+          kind: "gizmo",
+          x: event.clientX,
+          y: event.clientY,
+          moved: false,
+          gizmo: {
+            handle: grabbed.handle,
+            frame: grabbed.frame,
+            ray0: viewportRay(cam, aspect, ndc[0], ndc[1]),
+            cursor0: canvas,
+            origin: grabbed.origin,
+            start: { position: [...t.position], rotation: [...t.rotation], scale: [...t.scale] },
+            startWorld: [sel.world[12]!, sel.world[13]!, sel.world[14]!],
+            parentWorld: sel.parentWorld,
+          },
+        };
+        return;
+      }
+    }
     const kind: DragKind = event.button === 2 ? "look" : event.button === 1 || (event.button === 0 && event.shiftKey) ? "pan" : event.button === 0 && event.altKey ? "orbit" : "tool";
     if (kind === "look") flying.current = true;
     drag.current = { kind, x: event.clientX, y: event.clientY, moved: false };
@@ -531,72 +646,99 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
   const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const state = drag.current;
     const cam = cameraRef.current;
-    if (!state || !cam) return;
+    if (!state) {
+      // Hovering: light up the handle under the cursor.
+      const under = handleUnder(event, event.currentTarget)?.handle ?? null;
+      if (JSON.stringify(under) !== JSON.stringify(hover.current)) {
+        hover.current = under;
+        markDirty();
+      }
+      return;
+    }
+    if (!cam) return;
     const dx = event.clientX - state.x;
     const dy = event.clientY - state.y;
     if (!state.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
     state.moved = true;
-    state.x = event.clientX;
-    state.y = event.clientY;
     const rect = event.currentTarget.getBoundingClientRect();
 
+    if (state.kind === "gizmo" && state.gizmo) {
+      // Measured from where the drag started, so snapping is exact and nothing drifts.
+      const g = state.gizmo;
+      const sel = selection();
+      if (!sel) return;
+      const { canvas, ndc } = pointerAt(event, event.currentTarget);
+      const ray = viewportRay(cam, aspect, ndc[0], ndc[1]);
+      const snap = snapOn !== (event.ctrlKey || event.metaKey) ? steps : null;
+      let next: Transform = g.start;
+      if (mode === "move") {
+        const world = dragMove(g.handle, g.frame, g.startWorld, g.ray0, ray, cameraAxes(cam).forward, snap, space);
+        next = { ...g.start, position: localPositionFor(world, g.parentWorld) };
+      } else if (mode === "rotate" && g.handle.kind === "ring") {
+        const angle = dragRotate(g.handle, g.frame, g.ray0, ray, snap, canvas[0] - g.cursor0[0]);
+        next = rotatedTransform(g.start, g.parentWorld, g.frame.axes[g.handle.axis], angle);
+      } else if (mode === "scale") {
+        next = { ...g.start, scale: dragScale(g.handle, g.frame, g.start.scale, g.ray0, ray, { origin: g.origin, cursor0: g.cursor0, cursor: canvas }, snap) };
+      }
+      onSidecarChange(setMeshTransform(sidecar, sel.entry.id, { position: [...next.position], rotation: [...next.rotation], scale: [...next.scale] }));
+      return;
+    }
+    state.x = event.clientX;
+    state.y = event.clientY;
     if (state.kind === "look") return setCamera(look(cam, -dx * LOOK_SPEED, dy * LOOK_SPEED));
     if (state.kind === "pan") {
       const k = unitsPerPixel(cam, cam.distance, rect.height);
       return setCamera(pan(cam, -dx * k, dy * k));
     }
-    const entry = selectedId ? sidecar.meshes.find((m) => m.id === selectedId) : null;
-    if (state.kind === "orbit" || mode === "orbit" || !entry) return setCamera(orbit(cam, -dx * ORBIT_SPEED, dy * ORBIT_SPEED));
-
-    if (mode === "move") {
-      // The pixel delta in world units at the selection's depth, along the
-      // camera's right and up, so the selection tracks the cursor.
-      const { forward, right, up } = cameraAxes(cam);
-      const world = placement.get(entry.id)?.world;
-      const at: Vec3 = world ? [world[12]!, world[13]!, world[14]!] : cameraPivot(cam);
-      const depth = (at[0] - cam.position[0]) * forward[0] + (at[1] - cam.position[1]) * forward[1] + (at[2] - cam.position[2]) * forward[2];
-      const k = unitsPerPixel(cam, depth, rect.height);
-      const worldDelta: [number, number, number] = [
-        (right[0] * dx - up[0] * dy) * k,
-        (right[1] * dx - up[1] * dy) * k,
-        (right[2] * dx - up[2] * dy) * k,
-      ];
-      // A child's position is in its parent's space: move it by the same world amount.
-      const parentWorld = placement.get(entry.id)?.parentWorld;
-      const delta = parentWorld ? localDirection(parentWorld, worldDelta) : worldDelta;
-      const pos = entry.transform.position;
-      onSidecarChange(setMeshTransform(sidecar, entry.id, { ...entry.transform, position: [pos[0] + delta[0], pos[1] + delta[1], pos[2] + delta[2]] }));
-    } else if (mode === "rotate") {
-      const r = entry.transform.rotation;
-      onSidecarChange(setMeshTransform(sidecar, entry.id, { ...entry.transform, rotation: [r[0] + dy * 0.5, r[1] + dx * 0.5, r[2]] }));
-    } else if (mode === "scale") {
-      const f = Math.exp(-dy * 0.01);
-      const s = entry.transform.scale;
-      const clamp = (n: number) => Math.max(0.01, Math.min(1000, n * f));
-      onSidecarChange(setMeshTransform(sidecar, entry.id, { ...entry.transform, scale: [clamp(s[0]), clamp(s[1]), clamp(s[2])] }));
-    }
+    // Dragging off the gizmo (or with the view tool) orbits.
+    setCamera(orbit(cam, -dx * ORBIT_SPEED, dy * ORBIT_SPEED));
   };
 
   const onPointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const state = drag.current;
     drag.current = null;
+    if (active.current) {
+      active.current = null;
+      markDirty();
+    }
     if (state?.kind === "look") {
       flying.current = false;
       keys.current.clear();
     }
     const cam = cameraRef.current;
     if (!state || state.moved || state.kind !== "tool" || !cam) return;
-    // A click: pick the instance under the cursor with a world-space ray.
-    const [ndcX, ndcY] = ndcOf(event, event.currentTarget);
-    const ray = viewportRay(cam, aspect, ndcX, ndcY);
-    const boxes = instances
-      .map((inst) => {
-        const box = worldAabb(inst.mesh, inst.model);
-        return box ? { key: inst.id, min: box.min as Vec3, max: box.max as Vec3 } : null;
-      })
-      .filter((b): b is { key: string; min: Vec3; max: Vec3 } => b !== null);
-    onSelectId(pickBoxes(boxes, ray));
+    // A click: pick the mesh whose triangles are under the cursor.
+    const { ndc } = pointerAt(event, event.currentTarget);
+    const ray = viewportRay(cam, aspect, ndc[0], ndc[1]);
+    onSelectId(raycastMeshes(ray, instances.map((i) => ({ key: i.id, mesh: i.mesh, model: i.model })))?.key ?? null);
   };
+
+  /** Drop the selection onto whatever is beneath it (other meshes, the terrain, or the ground). */
+  const dropToSurface = useCallback(() => {
+    const entry = selectedId ? sidecar.meshes.find((m) => m.id === selectedId) : null;
+    const target = instances.find((i) => i.id === selectedId);
+    const box = target ? worldAabb(target.mesh, target.model) : null;
+    if (!entry || !box) return;
+    // Everything placed under the selection moves with it, so none of it is a surface to land on.
+    const parents = parentIndices(sidecar.meshes);
+    const index = sidecar.meshes.findIndex((m) => m.id === entry.id);
+    const ignore = new Set(sidecar.meshes.filter((_, i) => { for (let k = i; k >= 0; k = parents[k]!) if (k === index) return true; return false; }).map((m) => m.id));
+    const ground = terrains.length > 0 && showTerrain
+      ? (x: number, z: number) => {
+          let best: number | null = null;
+          terrainInstances.forEach((inst, k) => {
+            const t = terrains[k]?.terrain;
+            const h = t ? terrainHeight(t, x - inst.model[12]!, z - inst.model[14]!) : null;
+            if (h !== null && (best === null || h + inst.model[13]! > best)) best = h + inst.model[13]!;
+          });
+          return best;
+        }
+      : undefined;
+    const dy = dropDistance({ min: box.min as Vec3, max: box.max as Vec3 }, [...instances.map((i) => ({ key: i.id, mesh: i.mesh, model: i.model })), ...terrainInstances.map((t, k) => ({ key: `terrain:${k}`, mesh: t.mesh, model: t.model }))], ignore, ground);
+    if (dy === null || Math.abs(dy) < 1e-6) return;
+    const world: Vec3 = [target!.model[12]!, target!.model[13]! + dy, target!.model[14]!];
+    onSidecarChange(setMeshTransform(sidecar, entry.id, { ...entry.transform, position: localPositionFor(world, placement.get(entry.id)?.parentWorld ?? null) }));
+  }, [selectedId, sidecar, instances, terrains, terrainInstances, showTerrain, placement, onSidecarChange]);
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLCanvasElement>) => {
     const key = event.key.toLowerCase();
@@ -605,13 +747,15 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
       event.preventDefault();
       return;
     }
-    if (key === "f") {
-      frameSelection();
-      event.preventDefault();
-    } else if (key === "home") {
-      frameAll();
-      event.preventDefault();
-    }
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    const tools: Record<string, Mode> = { q: "orbit", w: "move", e: "rotate", r: "scale" };
+    if (tools[key]) setMode(tools[key]!);
+    else if (key === "x") setSpace((v) => (v === "world" ? "local" : "world"));
+    else if (key === "f") frameSelection();
+    else if (key === "home") frameAll();
+    else if (key === "end") dropToSurface();
+    else return;
+    event.preventDefault();
   };
   const onKeyUp = (event: React.KeyboardEvent<HTMLCanvasElement>) => {
     keys.current.delete(event.key.toLowerCase());
@@ -643,12 +787,47 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
           selected={mode}
           onSelect={setMode}
           options={[
-            { id: "orbit", label: "Orbit", hint: "Drag to orbit the camera" },
-            { id: "move", label: "Move", hint: "Drag the selected mesh" },
-            { id: "rotate", label: "Rotate", hint: "Spin the selected mesh" },
-            { id: "scale", label: "Scale", hint: "Resize the selected mesh" },
+            { id: "orbit", label: "View", hint: "Drag to orbit the camera (Q)" },
+            { id: "move", label: "Move", hint: "Move gizmo (W)" },
+            { id: "rotate", label: "Rotate", hint: "Rotate gizmo (E)" },
+            { id: "scale", label: "Scale", hint: "Scale gizmo (R)" },
           ]}
         />
+        <button
+          type="button"
+          className={styles.toolBtn}
+          aria-pressed={space === "local"}
+          onClick={() => setSpace((v) => (v === "world" ? "local" : "world"))}
+          title="Gizmo axes: the world's or the object's own (X). Scaling is always along the object's own."
+        >
+          {space === "world" ? "World" : "Local"}
+        </button>
+        <button type="button" className={styles.toolBtn} aria-pressed={snapOn} onClick={() => setSnapOn((v) => !v)} title="Snap while dragging (hold Ctrl to flip it for one drag)">
+          Snap
+        </button>
+        <label style={{ fontSize: 12, display: "flex", gap: 4, alignItems: "center" }} title="Move snap step">
+          <select aria-label="Move snap step" value={steps.move} onChange={(e) => setSteps({ ...steps, move: Number(e.target.value) })}>
+            {MOVE_STEPS.map((v) => (
+              <option key={v} value={v}>
+                {v}
+              </option>
+            ))}
+          </select>
+          <select aria-label="Rotate snap step" value={steps.rotate} onChange={(e) => setSteps({ ...steps, rotate: Number(e.target.value) })}>
+            {ROTATE_STEPS.map((v) => (
+              <option key={v} value={v}>
+                {v}°
+              </option>
+            ))}
+          </select>
+          <select aria-label="Scale snap step" value={steps.scale} onChange={(e) => setSteps({ ...steps, scale: Number(e.target.value) })}>
+            {SCALE_STEPS.map((v) => (
+              <option key={v} value={v}>
+                ×{v}
+              </option>
+            ))}
+          </select>
+        </label>
         <SegmentedControl
           ariaLabel="Scene view"
           selected={viewKind}
@@ -665,6 +844,9 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
         </button>
         <button type="button" className={styles.toolBtn} onClick={frameAll} title="Frame the whole scene (Home)">
           All
+        </button>
+        <button type="button" className={styles.toolBtn} onClick={dropToSurface} disabled={!selectedId} title="Drop the selection onto the surface beneath it (End)">
+          Drop
         </button>
       </div>
       <div ref={containerRef} style={{ position: "relative", flex: "1 1 auto", minHeight: 420, borderRadius: 8, overflow: "hidden", background: BACKGROUND }}>
@@ -721,6 +903,110 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedId, onSelectId
   );
 }
 
+/** The gizmo for a selected object's world matrix, sized to stay the same on screen in a viewport `cssHeight` CSS pixels tall. */
+function gizmoAt(camera: ViewportCamera, world: Mat4, tool: Exclude<Mode, "orbit">, space: GizmoSpace, cssHeight: number): GizmoFrame {
+  const { forward } = cameraAxes(camera);
+  const depth = (world[12]! - camera.position[0]) * forward[0] + (world[13]! - camera.position[1]) * forward[1] + (world[14]! - camera.position[2]) * forward[2];
+  return gizmoFrame(world, tool, space, unitsPerPixel(camera, depth, cssHeight) * GIZMO_PIXELS);
+}
+
+const AXIS_COLOURS = ["#ff5a5a", "#5aff7a", "#5a9bff"];
+const HOVER_COLOUR = "#ffd84a";
+
+/** Draw the gizmo: arrows, plane squares and a centre dot (move), rings (rotate), or box-tipped arms and a centre box (scale). */
+function drawGizmo(
+  context: CanvasRenderingContext2D,
+  tool: Exclude<Mode, "orbit">,
+  frame: GizmoFrame,
+  projector: (p: Vec3) => [number, number] | null,
+  hover: Handle | null,
+  active: Handle | null,
+  pixel: number,
+): void {
+  const o = projector(frame.origin);
+  if (!o) return;
+  (globalThis as unknown as { gizmoDebug?: unknown[] }).gizmoDebug = [tool, frame.size, o, planeSquare(frame, 2).map(projector), projector(axisTip(frame, 0)), pixel];
+  const same = (a: Handle | null, b: Handle) => !!a && a.kind === b.kind && (a.kind === "center" || (a as { axis: Axis }).axis === (b as { axis: Axis }).axis);
+  const colourOf = (h: Handle, axis: number) => (same(active, h) || (!active && same(hover, h)) ? HOVER_COLOUR : AXIS_COLOURS[axis]!);
+  context.save();
+  context.lineCap = "round";
+  if (tool === "rotate") {
+    for (const axis of [0, 1, 2] as Axis[]) {
+      const h: Handle = { kind: "ring", axis };
+      context.strokeStyle = colourOf(h, axis);
+      context.lineWidth = (same(active, h) || same(hover, h) ? 3.5 : 2.2) * pixel;
+      context.beginPath();
+      let pen = false;
+      for (const p of ringPoints(frame, axis)) {
+        const q = projector(p);
+        if (!q) {
+          pen = false;
+          continue;
+        }
+        if (pen) context.lineTo(q[0], q[1]);
+        else context.moveTo(q[0], q[1]);
+        pen = true;
+      }
+      context.stroke();
+    }
+    context.restore();
+    return;
+  }
+  if (tool === "move") {
+    for (const axis of [0, 1, 2] as Axis[]) {
+      const h: Handle = { kind: "plane", axis };
+      const quad = planeSquare(frame, axis).map(projector);
+      if (!quad.every((q) => q)) continue;
+      context.fillStyle = same(active, h) || (!active && same(hover, h)) ? "rgba(255, 216, 74, 0.55)" : `${AXIS_COLOURS[axis]}55`;
+      context.beginPath();
+      quad.forEach((q, i) => (i === 0 ? context.moveTo(q![0], q![1]) : context.lineTo(q![0], q![1])));
+      context.closePath();
+      context.fill();
+    }
+  }
+  for (const axis of [0, 1, 2] as Axis[]) {
+    const h: Handle = { kind: "axis", axis };
+    const tip = projector(axisTip(frame, axis));
+    if (!tip) continue;
+    const colour = colourOf(h, axis);
+    context.strokeStyle = colour;
+    context.fillStyle = colour;
+    context.lineWidth = (same(active, h) || same(hover, h) ? 3.5 : 2.5) * pixel;
+    context.beginPath();
+    context.moveTo(o[0], o[1]);
+    context.lineTo(tip[0], tip[1]);
+    context.stroke();
+    const dx = tip[0] - o[0];
+    const dy = tip[1] - o[1];
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len;
+    const uy = dy / len;
+    const head = 11 * pixel;
+    if (tool === "move") {
+      context.beginPath();
+      context.moveTo(tip[0] + ux * head, tip[1] + uy * head);
+      context.lineTo(tip[0] - uy * head * 0.45, tip[1] + ux * head * 0.45);
+      context.lineTo(tip[0] + uy * head * 0.45, tip[1] - ux * head * 0.45);
+      context.closePath();
+      context.fill();
+    } else {
+      context.fillRect(tip[0] - head * 0.45, tip[1] - head * 0.45, head * 0.9, head * 0.9);
+    }
+  }
+  const centre: Handle = { kind: "center" };
+  context.fillStyle = same(active, centre) || (!active && same(hover, centre)) ? HOVER_COLOUR : "#e8ecf8";
+  const r = 5.5 * pixel;
+  // A dark edge keeps the light centre visible over bright surfaces.
+  context.strokeStyle = "rgba(10, 14, 26, 0.75)";
+  context.lineWidth = 1.5 * pixel;
+  context.beginPath();
+  if (tool === "scale") context.rect(o[0] - r, o[1] - r, r * 2, r * 2);
+  else context.arc(o[0], o[1], r, 0, Math.PI * 2);
+  context.fill();
+  context.stroke();
+  context.restore();
+}
+
 /** The ground grid (behind the scene): minor lines faint, every tenth brighter, the world axes coloured. */
 function drawGrid(context: CanvasRenderingContext2D, camera: ViewportCamera, viewProj: Mat4, width: number, height: number): void {
   const { lines } = gridLines(camera);
@@ -774,7 +1060,7 @@ function clipToFront(viewProj: Mat4, a: Vec3, b: Vec3, width: number, height: nu
   return pp && pq ? [pp, pq] : null;
 }
 
-/** Draw the selected instance's world-AABB wireframe + RGB axes at its origin. */
+/** Draw the selected instance's world-AABB wireframe. */
 function drawSelection(context: CanvasRenderingContext2D, viewProj: Mat4, instance: SceneInstance, width: number, height: number): void {
   const box = worldAabb(instance.mesh, instance.model);
   if (!box) return;
@@ -796,24 +1082,4 @@ function drawSelection(context: CanvasRenderingContext2D, viewProj: Mat4, instan
     context.lineTo(pb[0], pb[1]);
   }
   context.stroke();
-
-  const origin: Vec3 = [instance.model[12]!, instance.model[13]!, instance.model[14]!];
-  const len = 0.4 * Math.max(box.max[0] - box.min[0], box.max[1] - box.min[1], box.max[2] - box.min[2]);
-  const axes: [Vec3, string][] = [
-    [[origin[0] + len, origin[1], origin[2]], "#ff5a5a"],
-    [[origin[0], origin[1] + len, origin[2]], "#5aff7a"],
-    [[origin[0], origin[1], origin[2] + len], "#5a9bff"],
-  ];
-  const po = project(viewProj, origin, width, height);
-  if (!po) return;
-  context.lineWidth = 2.5;
-  for (const [tip, colour] of axes) {
-    const pt = project(viewProj, tip, width, height);
-    if (!pt) continue;
-    context.strokeStyle = colour;
-    context.beginPath();
-    context.moveTo(po[0], po[1]);
-    context.lineTo(pt[0], pt[1]);
-    context.stroke();
-  }
 }

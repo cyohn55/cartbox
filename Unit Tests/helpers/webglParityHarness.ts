@@ -202,5 +202,37 @@ function glRenderer(): string {
   return String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
 }
 
+/**
+ * Render a scene once, then only settle (never submitting again) until the
+ * renderer says the newest frame is shown — the scene viewport's loop — and
+ * compare that frame with the software rasteriser's.
+ */
+async function settleOnce(name: string): Promise<{ states: string[]; differing: number; drawn: number } | { error: string }> {
+  const scene = scenes()[name];
+  if (!scene) return { error: `no scene ${name}` };
+  const renderer = WebglSceneRenderer.create(W, H);
+  if (!renderer) return { error: "WebGL2 renderer did not build" };
+  const gpu = scene.draw();
+  renderer.render(scene.instances, gpu);
+  const states: string[] = [];
+  for (let i = 0; i < 200; i += 1) {
+    const state = renderer.settle(gpu);
+    if (states.at(-1) !== state) states.push(state);
+    if (state === "current") break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const software = scene.draw();
+  new SoftwareSceneRenderer().render(scene.instances, software);
+  let differing = 0;
+  let drawn = 0;
+  for (let i = 0; i < W * H * 4; i += 1) {
+    if (gpu.out[i] !== software.out[i]) differing += 1;
+    if (i % 4 === 3 && software.out[i] !== 0) drawn += 1;
+  }
+  renderer.dispose();
+  return { states, differing, drawn };
+}
+
+(globalThis as unknown as { settleOnce: typeof settleOnce }).settleOnce = settleOnce;
 (globalThis as unknown as { runParity: typeof run; glRenderer: typeof glRenderer }).runParity = run;
 (globalThis as unknown as { glRenderer: typeof glRenderer }).glRenderer = glRenderer;

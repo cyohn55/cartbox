@@ -85,9 +85,9 @@ import {
   type ReflectionProbeSet,
 } from "@cartbox/editor";
 
-import { SoftwareSceneRenderer, applyScenePasses, type SceneDraw, type SceneRenderer } from "./sceneRenderer.js";
+import { SoftwareSceneRenderer, applyScenePasses, type FrameState, type SceneDraw, type SceneRenderer } from "./sceneRenderer.js";
 import { webgpuCanHonour } from "./renderCaps.js";
-import { batchInstances, presentFrame, type PrimitiveTextures } from "./gpuFrame.js";
+import { batchInstances, compositeFrame, presentFrame, type PrimitiveTextures } from "./gpuFrame.js";
 import { WebgpuPassTimer } from "./gpuTimer.js";
 import type { RenderStats } from "../debug/profiler.js";
 import {
@@ -624,6 +624,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
   /** Most recent completed readback, or null before the first one lands. */
   private latest: Uint8Array | null = null;
+  /** Frames submitted, the one `latest` holds, and the newest that got a readback (see settle). */
+  private submitted = 0;
+  private latestSeq = 0;
+  private readSeq = 0;
   /** The shadow depth array last uploaded in full, so a frame that changed only
    *  a region of it (its `dirty` rect) uploads just that region. */
   private shadowUploaded: Float32Array | null = null;
@@ -684,7 +688,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     private readonly blankTexture: any,
     /** 1x1 r32float, bound to the shadow slot when no shadow map is active. */
     private readonly blankShadow: any,
-    private readonly readback: { buffer: any; busy: boolean }[],
+    private readonly readback: { buffer: any; busy: boolean; seq?: number }[],
     private readonly bytesPerRow: number,
     style: RasterStyle,
   ) {
@@ -999,6 +1003,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     }
   }
 
+  settle(draw: SceneDraw): FrameState {
+    if (this.destroyed) return "current";
+    if (this.latest) compositeFrame(this.latest, draw);
+    if (this.latestSeq >= this.submitted) return "current";
+    return this.readSeq >= this.submitted ? "pending" : "stale";
+  }
+
   /** Encode and submit one frame, and start a readback if a buffer is free. */
   private submit(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
     const viewProj = multiplyMat4(draw.projection, draw.view);
@@ -1149,9 +1160,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     pass.end();
     this.timer?.resolve(encoder);
 
+    this.submitted += 1;
     const slot = this.readback.find((entry) => !entry.busy);
     if (slot) {
       slot.busy = true;
+      slot.seq = this.submitted;
+      this.readSeq = this.submitted;
       encoder.copyTextureToBuffer(
         { texture: this.colourTexture },
         { buffer: slot.buffer, bytesPerRow: this.bytesPerRow, rowsPerImage: this.height },
@@ -1169,12 +1183,16 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   }
 
   /** Await one readback and publish it as the newest frame. */
-  private async drain(slot: { buffer: any; busy: boolean }): Promise<void> {
+  private async drain(slot: { buffer: any; busy: boolean; seq?: number }): Promise<void> {
     try {
       await slot.buffer.mapAsync(0x01); // MapMode.READ
       if (this.destroyed) return;
-      const padded = new Uint8Array(slot.buffer.getMappedRange());
-      this.latest = unpadRows(padded, this.width, this.height, this.bytesPerRow, this.latest);
+      // Readbacks can land out of order; an older one never replaces a newer frame.
+      if ((slot.seq ?? 0) >= this.latestSeq) {
+        const padded = new Uint8Array(slot.buffer.getMappedRange());
+        this.latest = unpadRows(padded, this.width, this.height, this.bytesPerRow, this.latest);
+        this.latestSeq = slot.seq ?? 0;
+      }
       slot.buffer.unmap();
     } catch {
       // A failed map just means no new frame; the previous one keeps showing.

@@ -256,6 +256,25 @@ describe("WebgpuSceneRenderer frames", () => {
     expect(bytesPerRow).toBe(256);
   });
 
+  it("settles: shows the newest finished frame without submitting, and says when it's the newest asked for", async () => {
+    const { device, log } = fakeDevice((bytes) => {
+      bytes.fill(0);
+      for (let x = 0; x < WIDTH; x += 1) bytes.set([255, 0, 255, 255], x * 4);
+    });
+    const renderer = (await WebgpuSceneRenderer.create(device, WIDTH, HEIGHT))!;
+    const submits = () => log.submits;
+    renderer.render(instances(quad()), drawOptions());
+    expect(submits()).toBe(1);
+    // Its readback hasn't landed yet.
+    const waiting = drawOptions();
+    expect(renderer.settle(waiting)).toBe("pending");
+    await settle();
+    const shown = drawOptions();
+    expect(renderer.settle(shown)).toBe("current");
+    expect(Array.from(shown.out.subarray(0, 4))).toEqual([255, 0, 255, 255]);
+    expect(submits()).toBe(1); // settling never submits
+  });
+
   it("copies back at WebGPU's aligned row stride", async () => {
     const { device, log } = fakeDevice();
     const renderer = (await WebgpuSceneRenderer.create(device, WIDTH, HEIGHT))!;

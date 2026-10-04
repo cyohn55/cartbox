@@ -145,10 +145,25 @@ export function applyScenePasses(
   }
   return out;
 }
+/**
+ * Where a renderer's newest frame stands (see {@link SceneRenderer.settle}):
+ * on screen ("current"), its readback still in flight ("pending"), or submitted
+ * without a readback, so it needs rendering again to be seen ("stale").
+ */
+export type FrameState = "current" | "pending" | "stale";
+
 export interface SceneRenderer {
   /** Human-readable backend name, for diagnostics and tests. */
   readonly backend: "software" | "webgpu" | "webgl2";
   render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
+  /**
+   * Show the newest finished frame in `draw.out` without submitting another, and
+   * say whether the newest frame submitted is the one now shown. An editor that
+   * draws only when something changes calls this until it reads "current" (and
+   * renders again on "stale"), so a slow GPU's late readback still reaches the
+   * screen. A renderer that draws synchronously has nothing to settle.
+   */
+  settle?(draw: SceneDraw): FrameState;
   dispose(): void;
   /** What the last frame drew, for the profiler (see debug/profiler.ts). */
   readonly lastFrameStats?: RenderStats;
@@ -232,6 +247,10 @@ export class CappedSceneRenderer implements SceneRenderer {
 
   render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
     this.inner.render(applyRenderCaps(instances, this.caps, this.cache), draw);
+  }
+
+  settle(draw: SceneDraw): FrameState {
+    return this.inner.settle?.(draw) ?? "current";
   }
 
   dispose(): void {

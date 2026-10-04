@@ -54,11 +54,11 @@ import {
   type ReflectionProbeSet,
 } from "@cartbox/editor";
 
-import { batchInstances, presentFrame, type PrimitiveTextures } from "./gpuFrame.js";
+import { batchInstances, compositeFrame, presentFrame, type PrimitiveTextures } from "./gpuFrame.js";
 import { WebglPassTimer } from "./gpuTimer.js";
 import type { RenderStats } from "../debug/profiler.js";
 import { webgpuCanHonour } from "./renderCaps.js";
-import { SoftwareSceneRenderer, applyScenePasses, type SceneDraw, type SceneRenderer } from "./sceneRenderer.js";
+import { SoftwareSceneRenderer, applyScenePasses, type FrameState, type SceneDraw, type SceneRenderer } from "./sceneRenderer.js";
 import {
   INSTANCE_FLOATS,
   LIGHT_FLOATS,
@@ -538,6 +538,8 @@ interface GlPrimitive {
 interface ReadbackSlot {
   buffer: any;
   fence: any;
+  /** Which submitted frame it holds. */
+  seq: number;
 }
 
 /** Makes the WebGL2 context the renderer draws with (injectable for tests); null when there is none. */
@@ -598,6 +600,10 @@ export class WebglSceneRenderer implements SceneRenderer {
   private readonly readback: ReadbackSlot[];
   /** Readbacks in flight, oldest first. */
   private readonly pending: ReadbackSlot[] = [];
+  /** Frames submitted, the one `latest` holds, and the newest that got a readback (see settle). */
+  private submitted = 0;
+  private latestSeq = 0;
+  private readSeq = 0;
 
   /** What the last submitted frame drew (for the profiler and tests); GPU time when the browser can time it. */
   lastFrameStats: RenderStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
@@ -627,7 +633,7 @@ export class WebglSceneRenderer implements SceneRenderer {
       const buffer = gl.createBuffer();
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer);
       gl.bufferData(gl.PIXEL_PACK_BUFFER, width * height * 4, gl.STREAM_READ);
-      return { buffer, fence: null };
+      return { buffer, fence: null, seq: 0 };
     });
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
     this.timer = WebglPassTimer.create(gl);
@@ -737,7 +743,16 @@ export class WebglSceneRenderer implements SceneRenderer {
       gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, bytes);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       this.latest = bytes;
+      this.latestSeq = slot.seq;
     }
+  }
+
+  settle(draw: SceneDraw): FrameState {
+    if (this.destroyed || this.lost) return "current";
+    this.collect();
+    if (this.latest) compositeFrame(this.latest, draw);
+    if (this.latestSeq >= this.submitted) return "current";
+    return this.readSeq >= this.submitted ? "pending" : "stale";
   }
 
   private submit(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
@@ -879,8 +894,11 @@ export class WebglSceneRenderer implements SceneRenderer {
     this.lastFrameStats = { drawCalls: chunks.length, instances: instanceCount, triangles, gpuMs: this.timer?.lastMs ?? null };
 
     // Read back into a free pixel-pack buffer; skip this frame's readback if all are in flight.
+    this.submitted += 1;
     const slot = this.readback.find((s) => s.fence === null);
     if (slot) {
+      slot.seq = this.submitted;
+      this.readSeq = this.submitted;
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.buffer);
       gl.readPixels(0, 0, this.width, this.height, gl.RGBA, gl.UNSIGNED_BYTE, 0);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);

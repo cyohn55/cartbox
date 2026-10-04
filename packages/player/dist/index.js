@@ -8614,6 +8614,9 @@ var CappedSceneRenderer = class {
   render(instances, draw) {
     this.inner.render(applyRenderCaps(instances, this.caps, this.cache), draw);
   }
+  settle(draw) {
+    return this.inner.settle?.(draw) ?? "current";
+  }
   dispose() {
     this.inner.dispose();
   }
@@ -11058,6 +11061,10 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.ssaoTexture = null;
     /** Readbacks in flight, oldest first. */
     this.pending = [];
+    /** Frames submitted, the one `latest` holds, and the newest that got a readback (see settle). */
+    this.submitted = 0;
+    this.latestSeq = 0;
+    this.readSeq = 0;
     /** What the last submitted frame drew (for the profiler and tests); GPU time when the browser can time it. */
     this.lastFrameStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
     this.software = new SoftwareSceneRenderer(style);
@@ -11070,7 +11077,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       const buffer = gl.createBuffer();
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer);
       gl.bufferData(gl.PIXEL_PACK_BUFFER, width * height * 4, gl.STREAM_READ);
-      return { buffer, fence: null };
+      return { buffer, fence: null, seq: 0 };
     });
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
     this.timer = WebglPassTimer.create(gl);
@@ -11168,7 +11175,15 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, bytes);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       this.latest = bytes;
+      this.latestSeq = slot.seq;
     }
+  }
+  settle(draw) {
+    if (this.destroyed || this.lost) return "current";
+    this.collect();
+    if (this.latest) compositeFrame(this.latest, draw);
+    if (this.latestSeq >= this.submitted) return "current";
+    return this.readSeq >= this.submitted ? "pending" : "stale";
   }
   submit(instances, draw) {
     const gl = this.gl;
@@ -11297,8 +11312,11 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     gl.bindVertexArray(null);
     this.timer?.end();
     this.lastFrameStats = { drawCalls: chunks2.length, instances: instanceCount, triangles, gpuMs: this.timer?.lastMs ?? null };
+    this.submitted += 1;
     const slot = this.readback.find((s) => s.fence === null);
     if (slot) {
+      slot.seq = this.submitted;
+      this.readSeq = this.submitted;
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.buffer);
       gl.readPixels(0, 0, this.width, this.height, gl.RGBA, gl.UNSIGNED_BYTE, 0);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
@@ -11987,6 +12005,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.bindGroups = /* @__PURE__ */ new WeakMap();
     /** Most recent completed readback, or null before the first one lands. */
     this.latest = null;
+    /** Frames submitted, the one `latest` holds, and the newest that got a readback (see settle). */
+    this.submitted = 0;
+    this.latestSeq = 0;
+    this.readSeq = 0;
     /** The shadow depth array last uploaded in full, so a frame that changed only
      *  a region of it (its `dirty` rect) uploads just that region. */
     this.shadowUploaded = null;
@@ -12283,6 +12305,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       this.latest = null;
     }
   }
+  settle(draw) {
+    if (this.destroyed) return "current";
+    if (this.latest) compositeFrame(this.latest, draw);
+    if (this.latestSeq >= this.submitted) return "current";
+    return this.readSeq >= this.submitted ? "pending" : "stale";
+  }
   /** Encode and submit one frame, and start a readback if a buffer is free. */
   submit(instances, draw) {
     const viewProj = multiplyMat45(draw.projection, draw.view);
@@ -12406,9 +12434,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     });
     pass.end();
     this.timer?.resolve(encoder);
+    this.submitted += 1;
     const slot = this.readback.find((entry) => !entry.busy);
     if (slot) {
       slot.busy = true;
+      slot.seq = this.submitted;
+      this.readSeq = this.submitted;
       encoder.copyTextureToBuffer(
         { texture: this.colourTexture },
         { buffer: slot.buffer, bytesPerRow: this.bytesPerRow, rowsPerImage: this.height },
@@ -12427,8 +12458,11 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     try {
       await slot.buffer.mapAsync(1);
       if (this.destroyed) return;
-      const padded = new Uint8Array(slot.buffer.getMappedRange());
-      this.latest = unpadRows(padded, this.width, this.height, this.bytesPerRow, this.latest);
+      if ((slot.seq ?? 0) >= this.latestSeq) {
+        const padded = new Uint8Array(slot.buffer.getMappedRange());
+        this.latest = unpadRows(padded, this.width, this.height, this.bytesPerRow, this.latest);
+        this.latestSeq = slot.seq ?? 0;
+      }
       slot.buffer.unmap();
     } catch {
     } finally {
