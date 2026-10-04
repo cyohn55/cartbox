@@ -95,10 +95,34 @@ preview.
       submitting another and says when it's current. That keeps an editor
       that draws on demand correct on slow GPUs, where readbacks take many
       frames.
-- [ ] **EP3. Selection and object operations.** Shift/Ctrl-click to multi-select
+- [x] **EP3. Selection and object operations.** Shift/Ctrl-click to multi-select
       in the viewport and the hierarchy, and box select by dragging. Gizmos
       move a selection together. Duplicate (Ctrl+D), copy and paste (also
       between carts, through the clipboard), delete, hide, isolate and lock.
+      *Done:* the Mesh tab keeps a selection of any number of objects, the
+      last one the primary that the inspector and gizmo follow.
+      - **Selecting:** Shift-click adds and Ctrl/Cmd-click toggles, in the
+        viewport and in the hierarchy. With a transform tool, dragging on
+        empty space box-selects (with Shift or Ctrl too). Alt+drag orbits,
+        and Alt+Shift+drag or the middle button pans.
+      - **Group moves:** one gizmo drag moves every selected root. They move
+        by the same amount, turn about the axis through the primary's origin,
+        and scale by the primary's change along their own axes.
+      - **Operations** (`sceneSelection.ts`) work on whole subtrees:
+        - Ctrl+D duplicates in place, with "(1)"-style names, keeping a
+          prefab link only when the whole placed copy comes along.
+        - Ctrl+C/V copy and paste through the system clipboard, so objects
+          paste between carts and land where they were in the world. Pasted
+          text is checked as strictly as a stored sidecar.
+        - Delete removes the selection with everything under it.
+        - H hides, Shift+H isolates, Alt+H shows everything, L locks, Ctrl+A
+          selects all, and Escape deselects.
+      - **Hide and lock** are editor-only, with an eye and a lock on every
+        hierarchy row. Hidden objects aren't drawn or picked in the scene
+        view; locked ones can't be picked or moved there.
+
+      The hierarchy also has Duplicate, Copy, Paste, Delete, Isolate and Show
+      all buttons. Every operation undoes like any other edit.
 - [ ] **EP4. Content browser.** One panel for a cart's assets (meshes, prefabs,
       textures, materials, sounds, effects) with folders, search and
       thumbnails. Drag an asset into the viewport to place it, find what uses

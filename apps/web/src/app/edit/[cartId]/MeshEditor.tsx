@@ -49,6 +49,7 @@ import {
   type MeshSidecar,
   type MeshTransform,
 } from "@/lib/meshSidecar";
+import { clickSelection, copyPayload, duplicateEntries, pasteEntries, removeEntries, withSubtrees } from "@/lib/sceneSelection";
 import { importMeshFile, decodeMeshTextures } from "@/lib/meshImport";
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 import { KTX2_TRANSCODER_TRANSFER_BYTES, encodePngInBrowser, hasKtx2, sceneHasKtx2, settleKtx2Textures } from "@/lib/ktx2Policy";
@@ -77,6 +78,7 @@ import {
   HierarchyPanel,
   NO_SHIELD,
   ParentPicker,
+  type SceneCommand,
   PhysicsPanel,
   PhysicsWorldPanel,
   PrefabLibrary,
@@ -123,7 +125,20 @@ function fitDistance(mesh: MeshAsset): number {
 export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(sidecar.meshes[0]?.id ?? null);
+  /**
+   * The selection (EP3): any number of objects, the last one the primary that
+   * the inspector and gizmo follow. Hiding and locking are the editor's own
+   * (not saved with the cart): hidden objects aren't drawn or picked in the
+   * scene view, locked ones can't be picked or moved there.
+   */
+  const [selection, setSelection] = useState<string[]>(sidecar.meshes[0] ? [sidecar.meshes[0].id] : []);
+  const selectedId = selection.at(-1) ?? null;
+  const setSelectedId = useCallback((id: string | null) => setSelection(id ? [id] : []), []);
+  const [hidden, setHidden] = useState<ReadonlySet<string>>(new Set());
+  const [locked, setLocked] = useState<ReadonlySet<string>>(new Set());
+  /** What was hidden before isolating the selection (isolating again puts it back). */
+  const [isolatedFrom, setIsolatedFrom] = useState<ReadonlySet<string> | null>(null);
+  const clipboard = useRef<string | null>(null);
   const [yaw, setYaw] = useState(0.6);
   const [pitch, setPitch] = useState(0.4);
   const [zoom, setZoom] = useState(1);
@@ -150,12 +165,106 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
     if (preview) setView("scene");
   }, []);
 
-  // Keep the selection valid as the list changes (import selects the new mesh;
-  // deleting the selected one falls back to the first remaining).
+  // Keep the selection valid as the list changes: drop ids that are gone (an
+  // emptied selection falls back to the first object, as before).
   useEffect(() => {
-    if (selectedId && sidecar.meshes.some((entry) => entry.id === selectedId)) return;
-    setSelectedId(sidecar.meshes[0]?.id ?? null);
-  }, [sidecar, selectedId]);
+    const ids = new Set(sidecar.meshes.map((m) => m.id));
+    const kept = selection.filter((id) => ids.has(id));
+    if (kept.length === selection.length && (kept.length > 0 || sidecar.meshes.length === 0)) return;
+    setSelection(kept.length > 0 ? kept : sidecar.meshes[0] ? [sidecar.meshes[0].id] : []);
+  }, [sidecar, selection]);
+
+  /** Scene commands, from the keyboard (in the scene view or the hierarchy) or the hierarchy's buttons. */
+  const sceneCommand = useCallback(
+    async (command: SceneCommand) => {
+      if (command === "selectAll") return setSelection(sidecar.meshes.filter((m) => !hidden.has(m.id) && !locked.has(m.id)).map((m) => m.id));
+      if (command === "deselect") return setSelection([]);
+      if (command === "unhideAll") {
+        setHidden(new Set());
+        setIsolatedFrom(null);
+        return;
+      }
+      if (command === "isolate") {
+        if (isolatedFrom) {
+          setHidden(isolatedFrom);
+          setIsolatedFrom(null);
+          return;
+        }
+        if (selection.length === 0) return;
+        const keep = new Set(withSubtrees(sidecar, selection));
+        setIsolatedFrom(hidden);
+        setHidden(new Set(sidecar.meshes.filter((m) => !keep.has(m.id)).map((m) => m.id)));
+        return;
+      }
+      if (command === "paste") {
+        let text = clipboard.current;
+        try {
+          text = (await navigator.clipboard?.readText?.()) || text;
+        } catch {
+          // No clipboard permission: fall back to what this tab copied.
+        }
+        if (!text) return;
+        const pasted = pasteEntries(sidecar, text);
+        if (pasted.ids.length === 0) return;
+        onSidecarChange(pasted.sidecar);
+        setSelection(pasted.ids);
+        return;
+      }
+      if (selection.length === 0) return;
+      if (command === "duplicate") {
+        const copy = duplicateEntries(sidecar, selection);
+        onSidecarChange(copy.sidecar);
+        setSelection(copy.ids);
+      } else if (command === "copy") {
+        const text = copyPayload(sidecar, selection);
+        if (!text) return;
+        clipboard.current = text;
+        try {
+          await navigator.clipboard?.writeText?.(text);
+        } catch {
+          // Kept in this tab even without clipboard permission.
+        }
+      } else if (command === "delete") {
+        onSidecarChange(removeEntries(sidecar, selection));
+        setSelection([]);
+      } else if (command === "hide") {
+        const ids = withSubtrees(sidecar, selection);
+        const allHidden = ids.every((id) => hidden.has(id));
+        setHidden(new Set(allHidden ? [...hidden].filter((id) => !ids.includes(id)) : [...hidden, ...ids]));
+      } else if (command === "lock") {
+        const allLocked = selection.every((id) => locked.has(id));
+        setLocked(new Set(allLocked ? [...locked].filter((id) => !selection.includes(id)) : [...locked, ...selection]));
+      }
+    },
+    [sidecar, selection, hidden, locked, isolatedFrom, onSidecarChange],
+  );
+  /** The scene shortcuts (Unity's): Ctrl+D/C/V/A, Delete, H, Shift+H, Alt+H, Escape. True when the key was one. */
+  const onSceneKey = useCallback(
+    (event: { key: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean; preventDefault: () => void }): boolean => {
+      const key = event.key.toLowerCase();
+      const mod = event.ctrlKey || event.metaKey;
+      const command: SceneCommand | null = mod
+        ? ({ d: "duplicate", c: "copy", v: "paste", a: "selectAll" } as Record<string, SceneCommand>)[key] ?? null
+        : key === "delete" || key === "backspace"
+          ? "delete"
+          : key === "escape"
+            ? "deselect"
+            : key === "h"
+              ? event.altKey
+                ? "unhideAll"
+                : event.shiftKey
+                  ? "isolate"
+                  : "hide"
+              : key === "l" && !event.altKey
+                ? "lock"
+                : null;
+      if (!command) return false;
+      event.preventDefault();
+      void sceneCommand(command);
+      return true;
+    },
+    [sceneCommand],
+  );
 
   const selectedEntry = sidecar.meshes.find((entry) => entry.id === selectedId) ?? null;
   // Decode the selected mesh's geometry once per selection. A corrupt entry (it
@@ -466,7 +575,17 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
           {note && <RailHint>{note}</RailHint>}
         </RailGroup>
 
-        <HierarchyPanel sidecar={sidecar} selectedId={selectedId} onSelect={setSelectedId} />
+        <HierarchyPanel
+          sidecar={sidecar}
+          selectedIds={selection}
+          onSelect={(id, mods) => setSelection((current) => clickSelection(current, id, mods))}
+          hidden={hidden}
+          locked={locked}
+          onToggleHidden={(id) => setHidden((h) => { const ids = withSubtrees(sidecar, [id]); return new Set(h.has(id) ? [...h].filter((x) => !ids.includes(x)) : [...h, ...ids]); })}
+          onToggleLocked={(id) => setLocked((l) => new Set(l.has(id) ? [...l].filter((x) => x !== id) : [...l, id]))}
+          onCommand={(command) => void sceneCommand(command)}
+          onKey={onSceneKey}
+        />
 
         <PrefabLibrary sidecar={sidecar} onChange={onSidecarChange} onPlaced={setSelectedId} />
       </aside>
@@ -476,8 +595,11 @@ export function MeshEditor({ sidecar, onSidecarChange }: MeshEditorProps) {
         <SceneViewport
           sidecar={sidecar}
           onSidecarChange={onSidecarChange}
-          selectedId={selectedId}
-          onSelectId={setSelectedId}
+          selectedIds={selection}
+          onSelectIds={setSelection}
+          hidden={hidden}
+          locked={locked}
+          onKey={onSceneKey}
           previewCamera={timelinePreview?.camera ?? null}
           previewLocals={timelinePreview?.locals ?? null}
           onView={setSceneView}

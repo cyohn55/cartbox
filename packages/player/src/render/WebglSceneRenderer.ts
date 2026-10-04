@@ -747,6 +747,11 @@ export class WebglSceneRenderer implements SceneRenderer {
     }
   }
 
+  /** Whether a finished GPU frame exists to show (false until the first readback lands). */
+  get ready(): boolean {
+    return this.latest !== null;
+  }
+
   settle(draw: SceneDraw): FrameState {
     if (this.destroyed || this.lost) return "current";
     this.collect();

@@ -8617,6 +8617,9 @@ var CappedSceneRenderer = class {
   settle(draw) {
     return this.inner.settle?.(draw) ?? "current";
   }
+  get ready() {
+    return this.inner.ready;
+  }
   dispose() {
     this.inner.dispose();
   }
@@ -11178,6 +11181,10 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       this.latestSeq = slot.seq;
     }
   }
+  /** Whether a finished GPU frame exists to show (false until the first readback lands). */
+  get ready() {
+    return this.latest !== null;
+  }
   settle(draw) {
     if (this.destroyed || this.lost) return "current";
     this.collect();
@@ -12304,6 +12311,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     } catch {
       this.latest = null;
     }
+  }
+  /** Whether a finished GPU frame exists to show (false until the first readback lands). */
+  get ready() {
+    return this.latest !== null;
   }
   settle(draw) {
     if (this.destroyed) return "current";
