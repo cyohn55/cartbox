@@ -10154,6 +10154,12 @@ import {
   cameraPositionFromView as cameraPositionFromView2,
   compiledGraphOf,
   computeSmoothNormals,
+  CLUSTER_INDEX_CAP,
+  CLUSTER_X,
+  CLUSTER_Y,
+  CLUSTER_Z,
+  buildLightClusters,
+  orderLights,
   graphNoiseSource,
   graphShaderCode,
   graphUsesNoise,
@@ -10398,12 +10404,13 @@ import {
   MAX_REFLECTION_PROBES,
   effectActive,
   emissiveAnimation,
+  spotCone,
   fogIsVolumetric
 } from "@cartbox/editor";
 var UNIFORM_STRIDE = 768;
 var UNIFORM_BYTES_USED = 768;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
-var LIGHT_FLOATS = 12;
+var LIGHT_FLOATS = 16;
 var PROBE_FLOATS = 16;
 function packProbes(set) {
   const probes = set ? set.probes.slice(0, MAX_REFLECTION_PROBES) : [];
@@ -10421,17 +10428,27 @@ function packLights(lights) {
   const out = new Float32Array(Math.max(1, lights.length) * LIGHT_FLOATS);
   lights.forEach((light, i) => {
     const base = i * LIGHT_FLOATS;
-    const point = light.kind === "point";
-    const v = point ? light.position ?? [0, 0, 0] : light.direction ?? [0, 1, 0];
+    const placed = light.kind !== "directional";
+    const v = placed ? light.position ?? [0, 0, 0] : light.direction ?? [0, 1, 0];
     out[base] = v[0];
     out[base + 1] = v[1];
     out[base + 2] = v[2];
-    out[base + 3] = point ? 1 : 0;
+    out[base + 3] = light.kind === "spot" ? 2 : placed ? 1 : 0;
     out[base + 4] = light.color[0];
     out[base + 5] = light.color[1];
     out[base + 6] = light.color[2];
     out[base + 7] = light.intensity;
     out[base + 8] = light.range ?? 0;
+    if (light.kind === "spot") {
+      const [cosOuter, cosInner] = spotCone(light);
+      out[base + 9] = cosOuter;
+      out[base + 10] = cosInner;
+      const axis = light.direction ?? [0, -1, 0];
+      const len = Math.hypot(axis[0], axis[1], axis[2]) || 1;
+      out[base + 12] = axis[0] / len;
+      out[base + 13] = axis[1] / len;
+      out[base + 14] = axis[2] / len;
+    }
   });
   return out;
 }
@@ -10697,7 +10714,7 @@ function unpadRows(padded, width, height, bytesPerRow, reuse = null) {
 
 // src/render/WebglSceneRenderer.ts
 var WEBGL_INSTANCES_PER_DRAW = 64;
-var WEBGL_MAX_LIGHTS = 64;
+var WEBGL_MAX_LIGHTS = 128;
 var READBACK_BUFFERS = 3;
 var UNIT_BASE = 0;
 var UNIT_MR = 1;
@@ -10711,6 +10728,8 @@ var UNIT_PROBES = 8;
 var UNIT_DETAIL = 9;
 var UNIT_BLEND = 10;
 var UNIT_SCENE_DEPTH = 11;
+var UNIT_CLUSTER_TABLE = 12;
+var UNIT_CLUSTER_INDEX = 13;
 var BLOCK_UNIFORMS = 0;
 var BLOCK_INSTANCES = 1;
 var BLOCK_LIGHTS = 2;
@@ -10843,7 +10862,15 @@ struct Light {
   vec4 d0;
   vec4 d1;
   vec4 d2;
+  vec4 d3;
 };
+// Clustered lights (EP8): per cell (offset, count) in an RG32UI table
+// (x = tile, y = slice), the indices in an R32UI list 1024 wide; params = tile
+// size (px), near plane, slice scale; info.x = global lights, info.y = 1 when cells are built.
+uniform highp usampler2D clusterTable;
+uniform highp usampler2D clusterIndex;
+uniform vec4 clusterParams;
+uniform vec4 clusterInfo;
 layout(std140) uniform Lights {
   Light lights[${WEBGL_MAX_LIGHTS}];
 };
@@ -11012,6 +11039,41 @@ float aces(float x) {
   return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), 0.0, 1.0);
 }
 
+// One light's direct term (Cook-Torrance), mirroring the software rasteriser's
+// light loop: point and spot lights fall off to nothing at their range, a spot
+// fades across its cone, and directional lights honour the sun shadow (sf).
+vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, vec3 f0, float kdm, vec3 albedo, float sf) {
+  vec3 Ld;
+  float atten = 1.0;
+  if (lgt.d0.w > 0.5) {
+    vec3 toL = lgt.d0.xyz - P;
+    float dist = max(length(toL), 1e-4);
+    Ld = toL / dist;
+    float range = lgt.d2.x;
+    if (range > 0.0) { float t = max(0.0, 1.0 - dist / range); atten = t * t; }
+    if (lgt.d0.w > 1.5) {
+      float ct = clamp((-dot(Ld, lgt.d3.xyz) - lgt.d2.y) / (lgt.d2.z - lgt.d2.y), 0.0, 1.0);
+      atten = atten * ct * ct * (3.0 - 2.0 * ct);
+    }
+  } else {
+    Ld = normalize(lgt.d0.xyz);
+  }
+  float ndlL = max(0.0, dot(N, Ld));
+  if (ndlL <= 0.0 || atten <= 0.0) { return vec3(0.0); }
+  vec3 Hl = normalize(Ld + V);
+  float ndhL = max(0.0, dot(N, Hl));
+  float vdhL = max(0.0, dot(V, Hl));
+  float ddL = ndhL * ndhL * (a2 - 1.0) + 1.0;
+  float DL = a2 / (3.14159265 * ddL * ddL + 1e-7);
+  float GL = (ndv / (ndv * (1.0 - k) + k)) * (ndlL / (ndlL * (1.0 - k) + k));
+  float fpL = pow(1.0 - vdhL, 5.0);
+  float specL = (DL * GL) / (4.0 * ndlL * ndv + 1e-4);
+  vec3 FL = f0 + (vec3(1.0) - f0) * fpL;
+  float occl = 1.0;
+  if (lgt.d0.w < 0.5) { occl = sf; }
+  float w = lgt.d1.w * atten * ndlL * occl;
+  return (kdm * (vec3(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
+}
 ${g.fns}
 void main() {
   vec2 uv = vec2(vUv.x, 1.0 - vUv.y);
@@ -11128,35 +11190,22 @@ ${g.emis}
     vec3 lit;
     if (lc > 0) {
       vec3 direct = vec3(0.0);
+      // The global lights (the sun, unranged lights) reach every fragment\u2026
+      int ng = int(clusterInfo.x + 0.5);
       for (int i = 0; i < ${WEBGL_MAX_LIGHTS}; i = i + 1) {
-        if (i >= lc) { break; }
-        Light lgt = lights[i];
-        vec3 Ld;
-        float atten = 1.0;
-        if (lgt.d0.w > 0.5) {
-          vec3 toL = lgt.d0.xyz - vWorldPos;
-          float dist = max(length(toL), 1e-4);
-          Ld = toL / dist;
-          float range = lgt.d2.x;
-          if (range > 0.0) { float t = max(0.0, 1.0 - dist / range); atten = t * t; }
-        } else {
-          Ld = normalize(lgt.d0.xyz);
+        if (i >= ng) { break; }
+        direct += lightTerm(lights[i], vWorldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
+      }
+      // \u2026the rest only the cells they touch (EP8): this fragment's cell, by pixel and depth.
+      if (clusterInfo.y > 0.5 && vEyeDepth >= clusterParams.z) {
+        ivec2 tile = min(ivec2(gl_FragCoord.xy / clusterParams.xy), ivec2(${CLUSTER_X - 1}, ${CLUSTER_Y - 1}));
+        int slice = min(int(log(vEyeDepth / clusterParams.z) * clusterParams.w), ${CLUSTER_Z - 1});
+        uvec2 cell = texelFetch(clusterTable, ivec2(tile.y * ${CLUSTER_X} + tile.x, slice), 0).xy;
+        for (uint j = 0u; j < cell.y; j++) {
+          uint n = cell.x + j;
+          int li = int(texelFetch(clusterIndex, ivec2(int(n % 1024u), int(n / 1024u)), 0).x);
+          direct += lightTerm(lights[li], vWorldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
         }
-        float ndlL = max(0.0, dot(N, Ld));
-        if (ndlL <= 0.0 || atten <= 0.0) { continue; }
-        vec3 Hl = normalize(Ld + V);
-        float ndhL = max(0.0, dot(N, Hl));
-        float vdhL = max(0.0, dot(V, Hl));
-        float ddL = ndhL * ndhL * (a2 - 1.0) + 1.0;
-        float DL = a2 / (3.14159265 * ddL * ddL + 1e-7);
-        float GL = (ndv / (ndv * (1.0 - k) + k)) * (ndlL / (ndlL * (1.0 - k) + k));
-        float fpL = pow(1.0 - vdhL, 5.0);
-        float specL = (DL * GL) / (4.0 * ndlL * ndv + 1e-4);
-        vec3 FL = f0 + (vec3(1.0) - f0) * fpL;
-        float occl = 1.0;
-        if (lgt.d0.w < 0.5) { occl = sf; }
-        float w = lgt.d1.w * atten * ndlL * occl;
-        direct = direct + (kdm * (vec3(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
       }
       lit = direct + amb + emis;
     } else {
@@ -11230,7 +11279,9 @@ function buildProgram2(gl, nearest, graph) {
     ["probeAtlas", UNIT_PROBES],
     ["detailTex", UNIT_DETAIL],
     ["blendTex", UNIT_BLEND],
-    ["sceneDepth", UNIT_SCENE_DEPTH]
+    ["sceneDepth", UNIT_SCENE_DEPTH],
+    ["clusterTable", UNIT_CLUSTER_TABLE],
+    ["clusterIndex", UNIT_CLUSTER_INDEX]
   ];
   for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
   return program;
@@ -11295,6 +11346,11 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.readSeq = 0;
     /** What the last submitted frame drew (for the profiler and tests); GPU time when the browser can time it. */
     this.lastFrameStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
+    /** The clustered lights' params and info this frame (EP8; see the shader's clusterParams/clusterInfo). */
+    this.clusterParams = new Float32Array(4);
+    this.clusterInfo = new Float32Array(4);
+    /** The cell table and index list as integer textures, made on first use. */
+    this.clusterTextures = null;
     /** Programs by material graph (EP7), linked on first use. */
     this.graphPrograms = /* @__PURE__ */ new Map();
     /** The opaque depth, as a texture the transparent pass can read (EP6b): made on first use. */
@@ -11425,7 +11481,14 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.uploadProbes(draw.environment?.probes ?? null);
     const ssao = draw.ssao ?? null;
     this.uploadSsao(ssao);
-    const sceneLights = (draw.lights ?? []).slice(0, WEBGL_MAX_LIGHTS);
+    const order = orderLights(draw.lights ?? []);
+    const sceneLights = order.ordered.slice(0, WEBGL_MAX_LIGHTS);
+    const globalCount = Math.min(order.globalCount, sceneLights.length);
+    const clusters = sceneLights.length > globalCount ? buildLightClusters(sceneLights, globalCount, draw.view, draw.projection, this.width, this.height) : null;
+    this.uploadClusters(clusters);
+    this.clusterParams.set(clusters?.params ?? [1, 1, 1, 1]);
+    this.clusterInfo[0] = clusters ? globalCount : sceneLights.length;
+    this.clusterInfo[1] = clusters ? 1 : 0;
     const packed = packLights(sceneLights);
     gl.bindBuffer(gl.UNIFORM_BUFFER, this.lightBuffer);
     gl.bufferSubData(gl.UNIFORM_BUFFER, 0, packed);
@@ -11496,7 +11559,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.bindTexture(UNIT_SHADOW, this.shadowTexture ?? this.blankFloat);
     this.bindTexture(UNIT_ENV, this.envTexture ?? this.blankTexture);
     this.bindTexture(UNIT_PROBES, this.probeTexture ?? this.blankTexture);
-    gl.uniform4fv(gl.getUniformLocation(this.program, "probeData"), this.probeData);
+    this.frameUniforms(this.program);
     this.bindTexture(UNIT_SSAO, ssao ? this.ssaoTexture : this.blankFloat);
     for (let unit = UNIT_BASE; unit <= UNIT_EMIS; unit += 1) gl.bindSampler(unit, this.sampler);
     gl.bindSampler(UNIT_LM, this.sampler);
@@ -11531,7 +11594,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       if (wanted !== program) {
         program = wanted;
         gl.useProgram(program);
-        gl.uniform4fv(gl.getUniformLocation(program, "probeData"), this.probeData);
+        this.frameUniforms(program);
       }
       if (soft && !depthCopied && batch.alpha >= 2) {
         this.copySceneDepth();
@@ -11574,6 +11637,42 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.flush();
+  }
+  /** The per-frame uniforms a program needs (probes, clusters), set when it's put to use. */
+  frameUniforms(program) {
+    const gl = this.gl;
+    gl.uniform4fv(gl.getUniformLocation(program, "probeData"), this.probeData);
+    gl.uniform4fv(gl.getUniformLocation(program, "clusterParams"), this.clusterParams);
+    gl.uniform4fv(gl.getUniformLocation(program, "clusterInfo"), this.clusterInfo);
+  }
+  /** Upload a frame's cells (only the index rows in use), and bind both textures. */
+  uploadClusters(clusters) {
+    const gl = this.gl;
+    if (!this.clusterTextures) {
+      const make = (internal, w, h) => {
+        const texture = gl.createTexture();
+        gl.activeTexture(gl.TEXTURE0 + UNIT_CLUSTER_TABLE);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texStorage2D(gl.TEXTURE_2D, 1, internal, w, h);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        return texture;
+      };
+      this.clusterTextures = { table: make(gl.RG32UI, CLUSTER_X * CLUSTER_Y, CLUSTER_Z), index: make(gl.R32UI, 1024, CLUSTER_INDEX_CAP / 1024) };
+    }
+    if (clusters) {
+      this.bindTexture(UNIT_CLUSTER_TABLE, this.clusterTextures.table);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, CLUSTER_X * CLUSTER_Y, CLUSTER_Z, gl.RG_INTEGER, gl.UNSIGNED_INT, clusters.table);
+      const rows = Math.ceil(clusters.used / 1024);
+      if (rows > 0) {
+        this.bindTexture(UNIT_CLUSTER_INDEX, this.clusterTextures.index);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 1024, rows, gl.RED_INTEGER, gl.UNSIGNED_INT, clusters.indices.subarray(0, rows * 1024));
+      }
+    }
+    this.bindTexture(UNIT_CLUSTER_TABLE, this.clusterTextures.table);
+    this.bindTexture(UNIT_CLUSTER_INDEX, this.clusterTextures.index);
+    gl.bindSampler(UNIT_CLUSTER_TABLE, null);
+    gl.bindSampler(UNIT_CLUSTER_INDEX, null);
   }
   /** The program a material draws with: the plain one, or its graph's variant. */
   programOf(material) {
@@ -11752,6 +11851,10 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       gl.deleteBuffer(this.lightBuffer);
       for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.probeTexture, this.ssaoTexture]) if (t) gl.deleteTexture(t);
       gl.deleteFramebuffer(this.framebuffer);
+      if (this.clusterTextures) {
+        gl.deleteTexture(this.clusterTextures.table);
+        gl.deleteTexture(this.clusterTextures.index);
+      }
       if (this.sceneDepth) {
         gl.deleteTexture(this.sceneDepth.texture);
         gl.deleteFramebuffer(this.sceneDepth.framebuffer);
@@ -11797,6 +11900,13 @@ import {
   cameraPositionFromView as cameraPositionFromView3,
   compiledGraphOf as compiledGraphOf2,
   computeSmoothNormals as computeSmoothNormals2,
+  CLUSTER_CELLS,
+  CLUSTER_INDEX_CAP as CLUSTER_INDEX_CAP2,
+  CLUSTER_X as CLUSTER_X2,
+  CLUSTER_Y as CLUSTER_Y2,
+  CLUSTER_Z as CLUSTER_Z2,
+  buildLightClusters as buildLightClusters2,
+  orderLights as orderLights2,
   graphNoiseSource as graphNoiseSource2,
   graphShaderCode as graphShaderCode2,
   graphUsesNoise as graphUsesNoise2,
@@ -11886,6 +11996,13 @@ struct Light {
   d0: vec4<f32>,
   d1: vec4<f32>,
   d2: vec4<f32>,
+  d3: vec4<f32>,
+};
+// Clustered lights (EP8): params = tile size (px), near plane, slice scale;
+// info.x = global lights (looped by every fragment), info.y = 1 when cells are built.
+struct Clusters {
+  params: vec4<f32>,
+  info: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
@@ -11938,6 +12055,10 @@ struct Probe {
 // The opaque pass's depth (EP6b), read by the see-through pass for soft edges;
 // the opaque pass binds a blank in its place.
 @group(1) @binding(0) var sceneDepth: texture_depth_2d;
+// Clustered lights (EP8): per cell (offset, count) into the index list.
+@group(1) @binding(1) var<storage, read> clusterTable: array<vec2<u32>>;
+@group(1) @binding(2) var<storage, read> clusterIndex: array<u32>;
+@group(1) @binding(3) var<uniform> clusters: Clusters;
 
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] \u2014 fogLayerDepth in skyDome.ts.
@@ -12086,6 +12207,42 @@ fn finishAlpha(rgb: vec3<f32>, a: f32) -> vec4<f32> {
   if (u.pbr.w > 1.5) { return vec4<f32>(c * a, a); }
   return vec4<f32>(c, 1.0);
 }
+// One light's direct term (Cook-Torrance), mirroring the software rasteriser's
+// light loop: point and spot lights fall off to nothing at their range, a spot
+// fades across its cone, and directional lights honour the sun shadow (sf).
+fn lightTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, a2: f32, k: f32, f0: vec3<f32>, kdm: f32, albedo: vec3<f32>, sf: f32) -> vec3<f32> {
+  var Ld: vec3<f32>;
+  var atten = 1.0;
+  if (lgt.d0.w > 0.5) { // point or spot
+    let toL = lgt.d0.xyz - P;
+    let dist = max(length(toL), 1e-4);
+    Ld = toL / dist;
+    let range = lgt.d2.x;
+    if (range > 0.0) { let t = max(0.0, 1.0 - dist / range); atten = t * t; }
+    if (lgt.d0.w > 1.5) {
+      let ct = clamp((-dot(Ld, lgt.d3.xyz) - lgt.d2.y) / (lgt.d2.z - lgt.d2.y), 0.0, 1.0);
+      atten = atten * ct * ct * (3.0 - 2.0 * ct);
+    }
+  } else {
+    Ld = normalize(lgt.d0.xyz);
+  }
+  let ndlL = max(0.0, dot(N, Ld));
+  if (ndlL <= 0.0 || atten <= 0.0) { return vec3<f32>(0.0); }
+  let Hl = normalize(Ld + V);
+  let ndhL = max(0.0, dot(N, Hl));
+  let vdhL = max(0.0, dot(V, Hl));
+  let ddL = ndhL * ndhL * (a2 - 1.0) + 1.0;
+  let DL = a2 / (3.14159265 * ddL * ddL + 1e-7);
+  let GL = (ndv / (ndv * (1.0 - k) + k)) * (ndlL / (ndlL * (1.0 - k) + k));
+  let fpL = pow(1.0 - vdhL, 5.0);
+  let specL = (DL * GL) / (4.0 * ndlL * ndv + 1e-4);
+  let FL = f0 + (vec3<f32>(1.0) - f0) * fpL;
+  var occl = 1.0;
+  if (lgt.d0.w < 0.5) { occl = sf; }
+  let w = lgt.d1.w * atten * ndlL * occl;
+  return (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
+}
+
 fn envAverage() -> vec3<f32> {
   if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
   return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
@@ -12257,34 +12414,19 @@ ${g.emis}
       // Mirrors meshRasterizer.ts: each light re-evaluates the direct term with
       // shared N/ndv/f0/kdm/a2/k; point lights fall off to nothing at their range.
       var direct = vec3<f32>(0.0);
-      for (var i = 0; i < lc; i = i + 1) {
-        let lgt = lights[i];
-        var Ld: vec3<f32>;
-        var atten = 1.0;
-        if (lgt.d0.w > 0.5) { // point
-          let toL = lgt.d0.xyz - in.worldPos;
-          let dist = max(length(toL), 1e-4);
-          Ld = toL / dist;
-          let range = lgt.d2.x;
-          if (range > 0.0) { let t = max(0.0, 1.0 - dist / range); atten = t * t; }
-        } else {
-          Ld = normalize(lgt.d0.xyz);
+      // The global lights (the sun, unranged lights) reach every fragment\u2026
+      let ng = i32(clusters.info.x + 0.5);
+      for (var i = 0; i < ng; i = i + 1) {
+        direct = direct + lightTerm(lights[i], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
+      }
+      // \u2026the rest only the cells they touch (EP8): this fragment's cell, by pixel and depth.
+      if (clusters.info.y > 0.5 && in.eyeDepth >= clusters.params.z) {
+        let tile = min(vec2<u32>(in.pos.xy / clusters.params.xy), vec2<u32>(${CLUSTER_X2 - 1}u, ${CLUSTER_Y2 - 1}u));
+        let slice = min(u32(log(in.eyeDepth / clusters.params.z) * clusters.params.w), ${CLUSTER_Z2 - 1}u);
+        let cell = clusterTable[(slice * ${CLUSTER_Y2}u + tile.y) * ${CLUSTER_X2}u + tile.x];
+        for (var j = 0u; j < cell.y; j = j + 1u) {
+          direct = direct + lightTerm(lights[clusterIndex[cell.x + j]], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
         }
-        let ndlL = max(0.0, dot(N, Ld));
-        if (ndlL <= 0.0 || atten <= 0.0) { continue; }
-        let Hl = normalize(Ld + V);
-        let ndhL = max(0.0, dot(N, Hl));
-        let vdhL = max(0.0, dot(V, Hl));
-        let ddL = ndhL * ndhL * (a2 - 1.0) + 1.0;
-        let DL = a2 / (3.14159265 * ddL * ddL + 1e-7);
-        let GL = (ndv / (ndv * (1.0 - k) + k)) * (ndlL / (ndlL * (1.0 - k) + k));
-        let fpL = pow(1.0 - vdhL, 5.0);
-        let specL = (DL * GL) / (4.0 * ndlL * ndv + 1e-4);
-        let FL = f0 + (vec3<f32>(1.0) - f0) * fpL;
-        var occl = 1.0;
-        if (lgt.d0.w < 0.5) { occl = sf; } // directional lights honour the sun shadow
-        let w = lgt.d1.w * atten * ndlL * occl;
-        direct = direct + (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
       }
       lit = direct + amb + emis;
     } else {
@@ -12496,7 +12638,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         ]
       });
       const depthLayout = device.createBindGroupLayout({
-        entries: [{ binding: 0, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "depth" } }]
+        entries: [
+          { binding: 0, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "depth" } },
+          { binding: 1, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
+          { binding: 2, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
+          { binding: 3, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } }
+        ]
       });
       const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayout] });
       const pipelinesFor = (code) => {
@@ -12558,10 +12705,23 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         usage: 16 | 4
         // RENDER_ATTACHMENT | TEXTURE_BINDING
       });
+      const clusterBuffers = {
+        table: device.createBuffer({ size: CLUSTER_CELLS * 8, usage: 128 | 8 }),
+        // STORAGE | COPY_DST
+        index: device.createBuffer({ size: CLUSTER_INDEX_CAP2 * 4, usage: 128 | 8 }),
+        params: device.createBuffer({ size: 32, usage: 64 | 8 })
+        // UNIFORM | COPY_DST
+      };
+      const clusterEntries = [
+        { binding: 1, resource: { buffer: clusterBuffers.table } },
+        { binding: 2, resource: { buffer: clusterBuffers.index } },
+        { binding: 3, resource: { buffer: clusterBuffers.params } }
+      ];
       const depthGroups = {
-        blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }] }),
-        scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: depthTexture.createView() }] }),
-        blankTexture: blankDepth
+        blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...clusterEntries] }),
+        scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: depthTexture.createView() }, ...clusterEntries] }),
+        blankTexture: blankDepth,
+        clusters: clusterBuffers
       };
       const filter = style.textureFiltering === "none" ? "nearest" : "linear";
       const sampler = device.createSampler({
@@ -12742,9 +12902,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.ensureProbes(draw.environment?.probes ?? null);
     const ssao = draw.ssao ?? null;
     this.bindSsao(ssao);
-    const sceneLights = draw.lights ?? null;
-    this.uploadLights(packLights(sceneLights ?? []));
-    const lightCount = sceneLights?.length ?? 0;
+    const { ordered } = this.clusterLights(draw);
+    this.uploadLights(packLights(ordered));
+    const lightCount = ordered.length;
     let next = 0;
     draws.forEach((entry, index) => {
       entry.first = next;
@@ -12881,6 +13041,25 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       this.graphPipelines.set(graph.key, set);
     }
     return set;
+  }
+  /**
+   * Order the frame's lights (global first), build the clustered cells, and
+   * write both and their params. An orthographic view (no cells) loops every light.
+   */
+  clusterLights(draw) {
+    const { ordered, globalCount } = orderLights2(draw.lights ?? []);
+    const clusters = ordered.length > globalCount ? buildLightClusters2(ordered, globalCount, draw.view, draw.projection, this.width, this.height) : null;
+    const buffers = this.depthGroups.clusters;
+    if (clusters) {
+      this.device.queue.writeBuffer(buffers.table, 0, clusters.table);
+      this.device.queue.writeBuffer(buffers.index, 0, clusters.indices, 0, Math.max(4, Math.ceil(clusters.used / 4) * 4));
+    }
+    this.device.queue.writeBuffer(
+      buffers.params,
+      0,
+      new Float32Array([...clusters?.params ?? [1, 1, 1, 1], clusters ? globalCount : ordered.length, clusters ? 1 : 0, 0, 0])
+    );
+    return { ordered, globalCount, clusters };
   }
   /** Await one readback and publish it as the newest frame. */
   async drain(slot) {
@@ -13034,6 +13213,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     destroySafely(this.colourTexture);
     destroySafely(this.depthTexture);
     destroySafely(this.depthGroups.blankTexture);
+    destroySafely(this.depthGroups.clusters.table);
+    destroySafely(this.depthGroups.clusters.index);
+    destroySafely(this.depthGroups.clusters.params);
     destroySafely(this.blankTexture);
     destroySafely(this.blankShadow);
     if (this.shadowTexture !== this.blankShadow) destroySafely(this.shadowTexture);

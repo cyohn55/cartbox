@@ -3263,7 +3263,7 @@ declare function webgpuCanHonour(style: RasterStyle): boolean;
 /** Instances per uniform block (and so per draw call): 64 × 240 bytes fits WebGL2's guaranteed 16 KB. */
 declare const WEBGL_INSTANCES_PER_DRAW = 64;
 /** Modern-tier lights the shader loops over at most. */
-declare const WEBGL_MAX_LIGHTS = 64;
+declare const WEBGL_MAX_LIGHTS = 128;
 /** Makes the WebGL2 context the renderer draws with (injectable for tests); null when there is none. */
 type GlContextProvider = () => any | null;
 declare class WebglSceneRenderer implements SceneRenderer {
@@ -3327,6 +3327,15 @@ declare class WebglSceneRenderer implements SceneRenderer {
     get ready(): boolean;
     settle(draw: SceneDraw): FrameState;
     private submit;
+    /** The clustered lights' params and info this frame (EP8; see the shader's clusterParams/clusterInfo). */
+    private readonly clusterParams;
+    private readonly clusterInfo;
+    /** The cell table and index list as integer textures, made on first use. */
+    private clusterTextures;
+    /** The per-frame uniforms a program needs (probes, clusters), set when it's put to use. */
+    private frameUniforms;
+    /** Upload a frame's cells (only the index rows in use), and bind both textures. */
+    private uploadClusters;
     /** Programs by material graph (EP7), linked on first use. */
     private readonly graphPrograms;
     /** The program a material draws with: the plain one, or its graph's variant. */
@@ -3553,6 +3562,11 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private readonly graphPipelines;
     /** The pipelines a material draws with: the plain shader's, or its graph's variant. */
     private pipelinesOf;
+    /**
+     * Order the frame's lights (global first), build the clustered cells, and
+     * write both and their params. An orthographic view (no cells) loops every light.
+     */
+    private clusterLights;
     /** Await one readback and publish it as the newest frame. */
     private drain;
     /** Grow the per-draw uniform buffer to hold at least `count` draws. */
@@ -3649,21 +3663,24 @@ declare const UNIFORM_BYTES_USED = 768;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
- * Floats per light in the storage buffer: three vec4s —
- *   d0: xyz = direction (directional) or world position (point), w = kind (0/1)
+ * Floats per light in the storage buffer: four vec4s —
+ *   d0: xyz = direction (directional) or world position (point, spot), w = kind (0 directional, 1 point, 2 spot)
  *   d1: rgb = colour, w = intensity
- *   d2: x = point range (0 = no falloff)
- * Matches the `Light` struct in WebgpuSceneRenderer's WGSL.
+ *   d2: x = range (0 = no falloff), y = spot cone's outer cosine, z = its inner cosine
+ *   d3: xyz = spot beam axis (unit, the way it points)
+ * Matches the `Light` struct in the WGSL and GLSL scene shaders.
  */
-declare const LIGHT_FLOATS = 12;
+declare const LIGHT_FLOATS = 16;
 /** A minimal light for {@link packLights} (mirrors editor's SceneLight). */
 interface PackableLight {
-    readonly kind: "directional" | "point";
+    readonly kind: "directional" | "point" | "spot";
     readonly direction?: readonly [number, number, number];
     readonly position?: readonly [number, number, number];
     readonly color: readonly [number, number, number];
     readonly intensity: number;
     readonly range?: number;
+    readonly innerAngle?: number;
+    readonly outerAngle?: number;
 }
 /**
  * Pack a light list into the storage-buffer layout the WGSL loop reads. Always
