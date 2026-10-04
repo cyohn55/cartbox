@@ -8397,6 +8397,10 @@ import {
   sunVisibility,
   bakeSkyPanorama,
   buildSceneShadow,
+  LOCAL_SHADOW_BIAS,
+  LOCAL_SHADOW_SLOPE_BIAS,
+  assignLocalShadowTiles,
+  renderLocalShadow,
   childIndices,
   computeEnvironmentAverage,
   createLiveSkinnedMesh,
@@ -8591,6 +8595,7 @@ var SoftwareSceneRenderer = class {
       tonemap: draw.tonemap,
       ssao: draw.ssao,
       lights: draw.lights,
+      localShadows: draw.localShadows,
       fog: draw.fog,
       time: draw.time,
       style: this.style
@@ -8697,6 +8702,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     /** The sun's shadow maps (see buildShadow): the whole scene, and the near cascade round the camera (EP8b). */
     this.farShadow = newShadowLayer();
     this.nearShadow = newShadowLayer();
+    /** Each casting spot/point light's cached still tiles and this frame's copies (EP8c), in tile order. */
+    this.localShadowCache = [];
     /** Instances ever posed on the front layer (a held weapon): never part of the static shadow. */
     this.everFront = /* @__PURE__ */ new Set();
     /** Each mesh's local bounding box, for projecting shadow footprints. */
@@ -8887,6 +8894,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.flat = null;
       this.farShadow.key = "";
       this.nearShadow.key = "";
+      this.localShadowCache = [];
     }
     return true;
   }
@@ -8895,6 +8903,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (quality.shadowMapSize !== this.quality.shadowMapSize) {
       this.farShadow = newShadowLayer();
       this.nearShadow = newShadowLayer();
+      this.localShadowCache = [];
     }
     this.quality = quality;
   }
@@ -9117,7 +9126,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       profiler.add("shadow", now - mark);
       mark = now;
     }
-    const lights = this.hud && this.cartLights.length > 0 ? [...lighting?.lights ?? [], ...this.cartLights] : lighting?.lights;
+    const rig = this.hud && this.cartLights.length > 0 ? [...lighting?.lights ?? [], ...this.cartLights] : lighting?.lights;
+    const local = lighting?.shadows && this.quality.shadows && rig ? this.buildLocalShadows(rig, moved) : null;
+    const lights = local ? local.lights : rig;
     const skyBackdrop = this.hud && this.skyMap !== null;
     if (skyBackdrop) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : SKY_BACKDROP_SCALE);
     if (profiler) {
@@ -9157,6 +9168,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         environment: this.environment,
         tonemap: sceneLightingTonemap(lighting),
         lights,
+        localShadows: local?.shadows ?? null,
         shadow,
         fog: lighting.fog ?? null
       } : {},
@@ -9471,16 +9483,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (!lighting.shadows || !this.quality.shadows) return null;
     const size = this.quality.shadowMapSize || SHADOW_MAP_SIZE;
     const { center, radius } = this.scene.bounds;
-    for (const i of this.withChildren(this.poses.filter((p) => p.front).map((p) => p.index))) this.everFront.add(i);
-    const key = `${this.poses.filter((p) => !p.front).map((p) => p.index).sort((a, b) => a - b).join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}|${[...this.bodies.keys()].join(",")}|${[...this.live.keys()].join(",")}|${this.inactiveKey}`;
-    const still = () => {
-      const posed = this.withChildren([...this.poses.map((p) => p.index), ...this.bodies.keys(), ...this.live.keys()]);
-      this.pooledRoot.forEach((root, i) => {
-        if (root >= 0) posed.add(i);
-      });
-      const casts = (i) => !this.scene.instances[i]?.terrain || this.scene.instances[i]?.casts === true;
-      return this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && casts(i));
-    };
+    const key = this.staticShadowKey();
+    const still = () => this.stillCasters();
     const extent = this.scene.extent;
     const reach = extent && this.scene.instances.some((inst) => inst.casts) ? Math.max(0, extent.radius * 2 - radius * 2) : 0;
     const far = this.renderShadowLayer(this.farShadow, key, still, moved, lighting, center, radius, size, reach);
@@ -9494,6 +9498,53 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       if (built) near = { lightViewProj: built.lightViewProj, depth: built.depth, bias: built.bias ?? 3e-3, slopeBias: built.slopeBias ?? 0, dirty: built.dirty };
     }
     return { ...far, near };
+  }
+  /**
+   * What the static shadow maps depend on: *which* instances are posed (not
+   * whether a posed one is hidden this frame — a character dying must not
+   * re-render the whole arena's shadow); a held weapon never casts, so
+   * anything ever posed in front is out too.
+   */
+  staticShadowKey() {
+    for (const i of this.withChildren(this.poses.filter((p) => p.front).map((p) => p.index))) this.everFront.add(i);
+    return `${this.poses.filter((p) => !p.front).map((p) => p.index).sort((a, b) => a - b).join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}|${[...this.bodies.keys()].join(",")}|${[...this.live.keys()].join(",")}|${this.inactiveKey}`;
+  }
+  /** Everything that casts and never moves: what the static shadow maps hold. */
+  stillCasters() {
+    const posed = this.withChildren([...this.poses.map((p) => p.index), ...this.bodies.keys(), ...this.live.keys()]);
+    this.pooledRoot.forEach((root, i) => {
+      if (root >= 0) posed.add(i);
+    });
+    const casts = (i) => !this.scene.instances[i]?.terrain || this.scene.instances[i]?.casts === true;
+    return this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && casts(i));
+  }
+  /**
+   * Shadows from the spot and point lights that cast (EP8c): each light's
+   * tiles of everything still, cached until the light or the still set
+   * changes, copied each frame with the movers drawn over them. Returns the
+   * lights with their tiles assigned, or null when none casts.
+   */
+  buildLocalShadows(lights, moved) {
+    const assigned = assignLocalShadowTiles(lights);
+    if (assigned.tiles === 0) return null;
+    const statics = this.staticShadowKey();
+    const tiles = [];
+    let slot = 0;
+    for (const light of assigned.lights) {
+      if (light.shadowTile === void 0) continue;
+      const key = `${JSON.stringify([light.kind, light.position, light.direction, light.range, light.innerAngle, light.outerAngle])}|${statics}`;
+      let cache = this.localShadowCache[slot];
+      if (!cache || cache.key !== key) {
+        const built = renderLocalShadow(light, this.stillCasters());
+        cache = { key, statics: built.map((t) => t.depth), frames: built.map((t) => new Float32Array(t.depth.length)) };
+        this.localShadowCache[slot] = cache;
+      }
+      cache.frames.forEach((frame, i) => frame.set(cache.statics[i]));
+      tiles.push(...renderLocalShadow(light, moved, cache.frames, false));
+      slot += 1;
+    }
+    this.localShadowCache.length = slot;
+    return { lights: assigned.lights, shadows: { tiles, bias: LOCAL_SHADOW_BIAS, slopeBias: LOCAL_SHADOW_SLOPE_BIAS } };
   }
   /**
    * One shadow map for this frame: the layer's cached static depth (redrawn
@@ -10169,6 +10220,9 @@ import {
   cameraPositionFromView as cameraPositionFromView2,
   compiledGraphOf,
   computeSmoothNormals,
+  LOCAL_SHADOW_GRID,
+  LOCAL_SHADOW_TILE,
+  MAX_LOCAL_SHADOW_TILES,
   NEAR_CASCADE_EDGE,
   CLUSTER_INDEX_CAP,
   CLUSTER_X,
@@ -10455,6 +10509,7 @@ function packLights(lights) {
     out[base + 6] = light.color[2];
     out[base + 7] = light.intensity;
     out[base + 8] = light.range ?? 0;
+    out[base + 11] = light.shadowTile ?? -1;
     if (light.kind === "spot") {
       const [cosOuter, cosInner] = spotCone(light);
       out[base + 9] = cosOuter;
@@ -10746,6 +10801,7 @@ var UNIT_BLEND = 10;
 var UNIT_SCENE_DEPTH = 11;
 var UNIT_CLUSTER_TABLE = 12;
 var UNIT_CLUSTER_INDEX = 13;
+var UNIT_LOCAL_SHADOWS = 14;
 var BLOCK_UNIFORMS = 0;
 var BLOCK_INSTANCES = 1;
 var BLOCK_LIGHTS = 2;
@@ -11071,6 +11127,46 @@ float aces(float x) {
   return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), 0.0, 1.0);
 }
 
+// Spot and point light shadows (EP8c): the tile atlas, each tile's world\u2192clip
+// and depth\u2192distance terms (xy), and (1 when on, bias, slope bias) in world units.
+uniform highp sampler2D localAtlas;
+uniform mat4 shadowTileMvp[${MAX_LOCAL_SHADOW_TILES}];
+uniform vec4 shadowTileParams[${MAX_LOCAL_SHADOW_TILES}];
+uniform vec4 localShadowInfo;
+float localTap(float fx, float fy, float ox, float oy, float own, float a, float b) {
+  float size = ${LOCAL_SHADOW_TILE}.0;
+  int tx = int(clamp(floor(fx), 0.0, size - 1.0) + ox);
+  int ty = int(clamp(floor(fy), 0.0, size - 1.0) + oy);
+  float stored = texelFetch(localAtlas, ivec2(tx, ty), 0).r;
+  if (own > b / (min(stored, 1.0) + a)) { return 0.0; }
+  return 1.0;
+}
+// A spot/point light's shadow at P (mirrors localShadowVisibility).
+float localShadow(int first, Light lgt, vec3 P, float cosL) {
+  int tile = first;
+  if (lgt.d0.w < 1.5) {
+    vec3 d = P - lgt.d0.xyz;
+    vec3 m = abs(d);
+    if (m.x >= m.y && m.x >= m.z) { tile += d.x >= 0.0 ? 0 : 1; }
+    else if (m.y >= m.z) { tile += d.y >= 0.0 ? 2 : 3; }
+    else { tile += d.z >= 0.0 ? 4 : 5; }
+  }
+  vec4 c = shadowTileMvp[tile] * vec4(P, 1.0);
+  if (c.w <= 0.0) { return 1.0; }
+  vec3 n = c.xyz / c.w;
+  if (n.x < -1.0 || n.x > 1.0 || n.y < -1.0 || n.y > 1.0 || n.z < -1.0 || n.z > 1.0) { return 1.0; }
+  float size = ${LOCAL_SHADOW_TILE}.0;
+  float sx = (n.x * 0.5 + 0.5) * size;
+  float sy = (1.0 - (n.y * 0.5 + 0.5)) * size;
+  float cc = clamp(cosL, 0.05, 1.0);
+  vec4 tp = shadowTileParams[tile];
+  float own = tp.y / (n.z + tp.x) - localShadowInfo.y - localShadowInfo.z * min(10.0, sqrt(1.0 - cc * cc) / cc);
+  float ox = float((tile % ${LOCAL_SHADOW_GRID}) * ${LOCAL_SHADOW_TILE});
+  float oy = float((tile / ${LOCAL_SHADOW_GRID}) * ${LOCAL_SHADOW_TILE});
+  return (localTap(sx - 0.5, sy - 0.5, ox, oy, own, tp.x, tp.y) + localTap(sx + 0.5, sy - 0.5, ox, oy, own, tp.x, tp.y)
+        + localTap(sx - 0.5, sy + 0.5, ox, oy, own, tp.x, tp.y) + localTap(sx + 0.5, sy + 0.5, ox, oy, own, tp.x, tp.y)) * 0.25;
+}
+
 // One light's direct term (Cook-Torrance), mirroring the software rasteriser's
 // light loop: point and spot lights fall off to nothing at their range, a spot
 // fades across its cone, and directional lights honour the sun shadow (sf).
@@ -11103,6 +11199,7 @@ vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, 
   vec3 FL = f0 + (vec3(1.0) - f0) * fpL;
   float occl = 1.0;
   if (lgt.d0.w < 0.5) { occl = sf; }
+  else if (lgt.d2.w >= 0.0 && localShadowInfo.x > 0.5) { occl = localShadow(int(lgt.d2.w + 0.5), lgt, P, ndlL); }
   float w = lgt.d1.w * atten * ndlL * occl;
   return (kdm * (vec3(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
 }
@@ -11313,7 +11410,8 @@ function buildProgram2(gl, nearest, graph) {
     ["blendTex", UNIT_BLEND],
     ["sceneDepth", UNIT_SCENE_DEPTH],
     ["clusterTable", UNIT_CLUSTER_TABLE],
-    ["clusterIndex", UNIT_CLUSTER_INDEX]
+    ["clusterIndex", UNIT_CLUSTER_INDEX],
+    ["localAtlas", UNIT_LOCAL_SHADOWS]
   ];
   for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
   return program;
@@ -11389,6 +11487,11 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.nearUploaded = null;
     /** The cell table and index list as integer textures, made on first use. */
     this.clusterTextures = null;
+    /** The spot/point shadows this frame (EP8c): on/biases, each tile's view, and the atlas (made on first use). */
+    this.localShadowInfo = new Float32Array(4);
+    this.shadowTileMvp = new Float32Array(MAX_LOCAL_SHADOW_TILES * 16);
+    this.shadowTileParams = new Float32Array(MAX_LOCAL_SHADOW_TILES * 4);
+    this.localAtlas = null;
     /** Programs by material graph (EP7), linked on first use. */
     this.graphPrograms = /* @__PURE__ */ new Map();
     /** The opaque depth, as a texture the transparent pass can read (EP6b): made on first use. */
@@ -11527,6 +11630,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     const globalCount = Math.min(order.globalCount, sceneLights.length);
     const clusters = sceneLights.length > globalCount ? buildLightClusters(sceneLights, globalCount, draw.view, draw.projection, this.width, this.height) : null;
     this.uploadClusters(clusters);
+    this.uploadLocalShadows(draw.localShadows ?? null);
     this.clusterParams.set(clusters?.params ?? [1, 1, 1, 1]);
     this.clusterInfo[0] = clusters ? globalCount : sceneLights.length;
     this.clusterInfo[1] = clusters ? 1 : 0;
@@ -11687,6 +11791,32 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     gl.uniform4fv(gl.getUniformLocation(program, "clusterInfo"), this.clusterInfo);
     gl.uniformMatrix4fv(gl.getUniformLocation(program, "nearShadowMvp"), false, this.nearShadowMvp);
     gl.uniform4fv(gl.getUniformLocation(program, "nearShadow"), this.nearShadow);
+    gl.uniform4fv(gl.getUniformLocation(program, "localShadowInfo"), this.localShadowInfo);
+    if (this.localShadowInfo[0] > 0) {
+      gl.uniformMatrix4fv(gl.getUniformLocation(program, "shadowTileMvp"), false, this.shadowTileMvp);
+      gl.uniform4fv(gl.getUniformLocation(program, "shadowTileParams"), this.shadowTileParams);
+    }
+  }
+  /** Upload a frame's shadow tiles into the atlas, and bind it (a blank stands in when there are none). */
+  uploadLocalShadows(local) {
+    const gl = this.gl;
+    const on = local && local.tiles.length > 0;
+    this.localShadowInfo.set(on ? [1, local.bias, local.slopeBias, 0] : [0, 0, 0, 0]);
+    if (on) {
+      if (!this.localAtlas) {
+        const side = LOCAL_SHADOW_TILE * LOCAL_SHADOW_GRID;
+        gl.activeTexture(gl.TEXTURE0 + UNIT_LOCAL_SHADOWS);
+        this.localAtlas = createTexture(gl, side, side, gl.R32F, gl.RED, gl.FLOAT, null);
+      }
+      this.bindTexture(UNIT_LOCAL_SHADOWS, this.localAtlas);
+      local.tiles.slice(0, MAX_LOCAL_SHADOW_TILES).forEach((tile, i) => {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, i % LOCAL_SHADOW_GRID * LOCAL_SHADOW_TILE, Math.floor(i / LOCAL_SHADOW_GRID) * LOCAL_SHADOW_TILE, LOCAL_SHADOW_TILE, LOCAL_SHADOW_TILE, gl.RED, gl.FLOAT, tile.depth);
+        this.shadowTileMvp.set(tile.lightViewProj, i * 16);
+        this.shadowTileParams.set(tile.linear, i * 4);
+      });
+    }
+    this.bindTexture(UNIT_LOCAL_SHADOWS, this.localAtlas ?? this.blankFloat);
+    gl.bindSampler(UNIT_LOCAL_SHADOWS, null);
   }
   /** Upload a frame's cells (only the index rows in use), and bind both textures. */
   uploadClusters(clusters) {
@@ -11915,6 +12045,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       gl.deleteBuffer(this.lightBuffer);
       for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.probeTexture, this.ssaoTexture]) if (t) gl.deleteTexture(t);
       gl.deleteFramebuffer(this.framebuffer);
+      if (this.localAtlas) gl.deleteTexture(this.localAtlas);
       if (this.clusterTextures) {
         gl.deleteTexture(this.clusterTextures.table);
         gl.deleteTexture(this.clusterTextures.index);
@@ -11964,6 +12095,9 @@ import {
   cameraPositionFromView as cameraPositionFromView3,
   compiledGraphOf as compiledGraphOf2,
   computeSmoothNormals as computeSmoothNormals2,
+  LOCAL_SHADOW_GRID as LOCAL_SHADOW_GRID2,
+  LOCAL_SHADOW_TILE as LOCAL_SHADOW_TILE2,
+  MAX_LOCAL_SHADOW_TILES as MAX_LOCAL_SHADOW_TILES2,
   NEAR_CASCADE_EDGE as NEAR_CASCADE_EDGE2,
   CLUSTER_CELLS,
   CLUSTER_INDEX_CAP as CLUSTER_INDEX_CAP2,
@@ -11977,7 +12111,7 @@ import {
   graphUsesNoise as graphUsesNoise2,
   multiplyMat4 as multiplyMat45
 } from "@cartbox/editor";
-var FRAME_BYTES = 112;
+var FRAME_BYTES = 128;
 var READBACK_BUFFERS2 = 3;
 var SHADER_STAGE_VERTEX = 1;
 var SHADER_STAGE_FRAGMENT = 2;
@@ -12073,6 +12207,12 @@ struct Frame {
   clusterInfo: vec4<f32>,
   nearMvp: mat4x4<f32>,
   nearShadow: vec4<f32>,
+  localShadow: vec4<f32>, // EP8c: x = 1 when spot/point shadows are on, y = bias, z = slope bias (world units)
+};
+// One spot/point shadow tile (EP8c): world\u2192clip, and params.xy = depth\u2192distance terms.
+struct ShadowTile {
+  mvp: mat4x4<f32>,
+  params: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
@@ -12129,6 +12269,9 @@ struct Probe {
 @group(1) @binding(1) var<storage, read> clusterTable: array<vec2<u32>>;
 @group(1) @binding(2) var<storage, read> clusterIndex: array<u32>;
 @group(1) @binding(3) var<uniform> frame: Frame;
+// Spot and point light shadows (EP8c): the tile atlas and each tile's view.
+@group(1) @binding(4) var localAtlas: texture_2d<f32>;
+@group(1) @binding(5) var<storage, read> shadowTiles: array<ShadowTile>;
 
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] \u2014 fogLayerDepth in skyDome.ts.
@@ -12290,6 +12433,42 @@ fn finishAlpha(rgb: vec3<f32>, a: f32) -> vec4<f32> {
   if (u.pbr.w > 1.5) { return vec4<f32>(c * a, a); }
   return vec4<f32>(c, 1.0);
 }
+// A spot/point light's shadow at P (mirrors localShadowVisibility): the tile
+// that sees it (a point light's face by dominant axis), a 2\xD72 PCF of distance
+// compares against a slope-scaled world bias.
+fn localTap(fx: f32, fy: f32, ox: f32, oy: f32, own: f32, a: f32, b: f32) -> f32 {
+  let size = ${LOCAL_SHADOW_TILE2}.0;
+  let tx = i32(clamp(floor(fx), 0.0, size - 1.0) + ox);
+  let ty = i32(clamp(floor(fy), 0.0, size - 1.0) + oy);
+  let stored = textureLoad(localAtlas, vec2<i32>(tx, ty), 0).r;
+  if (own > b / (min(stored, 1.0) + a)) { return 0.0; }
+  return 1.0;
+}
+fn localShadow(first: i32, lgt: Light, P: vec3<f32>, cosL: f32) -> f32 {
+  var tile = first;
+  if (lgt.d0.w < 1.5) {
+    let d = P - lgt.d0.xyz;
+    let m = abs(d);
+    if (m.x >= m.y && m.x >= m.z) { tile = tile + select(1, 0, d.x >= 0.0); }
+    else if (m.y >= m.z) { tile = tile + select(3, 2, d.y >= 0.0); }
+    else { tile = tile + select(5, 4, d.z >= 0.0); }
+  }
+  let t = shadowTiles[tile];
+  let c = t.mvp * vec4<f32>(P, 1.0);
+  if (c.w <= 0.0) { return 1.0; }
+  let n = c.xyz / c.w;
+  if (n.x < -1.0 || n.x > 1.0 || n.y < -1.0 || n.y > 1.0 || n.z < -1.0 || n.z > 1.0) { return 1.0; }
+  let size = ${LOCAL_SHADOW_TILE2}.0;
+  let sx = (n.x * 0.5 + 0.5) * size;
+  let sy = (1.0 - (n.y * 0.5 + 0.5)) * size;
+  let cc = clamp(cosL, 0.05, 1.0);
+  let own = t.params.y / (n.z + t.params.x) - frame.localShadow.y - frame.localShadow.z * min(10.0, sqrt(1.0 - cc * cc) / cc);
+  let ox = f32((tile % ${LOCAL_SHADOW_GRID2}) * ${LOCAL_SHADOW_TILE2});
+  let oy = f32((tile / ${LOCAL_SHADOW_GRID2}) * ${LOCAL_SHADOW_TILE2});
+  return (localTap(sx - 0.5, sy - 0.5, ox, oy, own, t.params.x, t.params.y) + localTap(sx + 0.5, sy - 0.5, ox, oy, own, t.params.x, t.params.y)
+        + localTap(sx - 0.5, sy + 0.5, ox, oy, own, t.params.x, t.params.y) + localTap(sx + 0.5, sy + 0.5, ox, oy, own, t.params.x, t.params.y)) * 0.25;
+}
+
 // One light's direct term (Cook-Torrance), mirroring the software rasteriser's
 // light loop: point and spot lights fall off to nothing at their range, a spot
 // fades across its cone, and directional lights honour the sun shadow (sf).
@@ -12322,6 +12501,7 @@ fn lightTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, a2:
   let FL = f0 + (vec3<f32>(1.0) - f0) * fpL;
   var occl = 1.0;
   if (lgt.d0.w < 0.5) { occl = sf; }
+  else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occl = localShadow(i32(lgt.d2.w + 0.5), lgt, P, ndlL); }
   let w = lgt.d1.w * atten * ndlL * occl;
   return (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
 }
@@ -12729,7 +12909,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 0, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "depth" } },
           { binding: 1, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
           { binding: 2, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
-          { binding: 3, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } }
+          { binding: 3, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } },
+          { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+          { binding: 5, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } }
         ]
       });
       const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayout] });
@@ -12799,16 +12981,29 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         params: device.createBuffer({ size: FRAME_BYTES, usage: 64 | 8 })
         // UNIFORM | COPY_DST
       };
-      const clusterEntries = [
-        { binding: 1, resource: { buffer: clusterBuffers.table } },
-        { binding: 2, resource: { buffer: clusterBuffers.index } },
-        { binding: 3, resource: { buffer: clusterBuffers.params } }
-      ];
+      const shadowTiles = device.createBuffer({ size: MAX_LOCAL_SHADOW_TILES2 * 80, usage: 128 | 8 });
+      const atlasBlank = device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: 4 | 2 });
+      const makeGroups = (atlas) => {
+        const shared = [
+          { binding: 1, resource: { buffer: clusterBuffers.table } },
+          { binding: 2, resource: { buffer: clusterBuffers.index } },
+          { binding: 3, resource: { buffer: clusterBuffers.params } },
+          { binding: 4, resource: atlas.createView() },
+          { binding: 5, resource: { buffer: shadowTiles } }
+        ];
+        return {
+          blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared] }),
+          scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: depthTexture.createView() }, ...shared] })
+        };
+      };
       const depthGroups = {
-        blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...clusterEntries] }),
-        scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: depthTexture.createView() }, ...clusterEntries] }),
+        ...makeGroups(atlasBlank),
         blankTexture: blankDepth,
-        clusters: clusterBuffers
+        clusters: clusterBuffers,
+        shadowTiles,
+        atlas: atlasBlank,
+        atlasBlank: true,
+        makeGroups
       };
       const filter = style.textureFiltering === "none" ? "nearest" : "linear";
       const sampler = device.createSampler({
@@ -13170,8 +13365,34 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       frame.set(near.lightViewProj, 8);
       frame.set([1, near.bias, near.slopeBias], 24);
     }
+    const local = draw.localShadows ?? null;
+    if (local && local.tiles.length > 0) frame.set([1, local.bias, local.slopeBias], 28);
     this.device.queue.writeBuffer(buffers.params, 0, frame);
+    this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
+  }
+  /** Upload the spot/point shadow tiles (EP8c): each tile into its atlas cell, and every tile's view. */
+  uploadLocalShadows(local) {
+    if (!local || local.tiles.length === 0) return;
+    const groups = this.depthGroups;
+    if (groups.atlasBlank) {
+      const side = LOCAL_SHADOW_TILE2 * LOCAL_SHADOW_GRID2;
+      groups.atlas = this.device.createTexture({ size: { width: side, height: side }, format: "r32float", usage: 4 | 2 });
+      groups.atlasBlank = false;
+      Object.assign(groups, groups.makeGroups(groups.atlas));
+    }
+    const views = new Float32Array(MAX_LOCAL_SHADOW_TILES2 * 20);
+    local.tiles.slice(0, MAX_LOCAL_SHADOW_TILES2).forEach((tile, i) => {
+      this.device.queue.writeTexture(
+        { texture: groups.atlas, origin: { x: i % LOCAL_SHADOW_GRID2 * LOCAL_SHADOW_TILE2, y: Math.floor(i / LOCAL_SHADOW_GRID2) * LOCAL_SHADOW_TILE2 } },
+        tile.depth,
+        { bytesPerRow: LOCAL_SHADOW_TILE2 * 4, rowsPerImage: LOCAL_SHADOW_TILE2 },
+        { width: LOCAL_SHADOW_TILE2, height: LOCAL_SHADOW_TILE2 }
+      );
+      views.set(tile.lightViewProj, i * 20);
+      views.set(tile.linear, i * 20 + 16);
+    });
+    this.device.queue.writeBuffer(groups.shadowTiles, 0, views);
   }
   /** Await one readback and publish it as the newest frame. */
   async drain(slot) {
@@ -13328,6 +13549,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     destroySafely(this.depthGroups.clusters.table);
     destroySafely(this.depthGroups.clusters.index);
     destroySafely(this.depthGroups.clusters.params);
+    destroySafely(this.depthGroups.shadowTiles);
+    destroySafely(this.depthGroups.atlas);
     destroySafely(this.blankTexture);
     destroySafely(this.blankShadow);
     if (this.shadowTexture !== this.blankShadow) destroySafely(this.shadowTexture);
