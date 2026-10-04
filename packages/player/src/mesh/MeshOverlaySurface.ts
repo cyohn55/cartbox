@@ -33,6 +33,10 @@ import {
   type ShaftScratch,
   bakeSkyPanorama,
   buildSceneShadow,
+  LOCAL_SHADOW_BIAS,
+  LOCAL_SHADOW_SLOPE_BIAS,
+  assignLocalShadowTiles,
+  renderLocalShadow,
   childIndices,
   computeEnvironmentAverage,
   createLiveSkinnedMesh,
@@ -60,7 +64,7 @@ import type { DisplaySurface } from "../display.js";
 import type { ScreenSun } from "../fx/PostFxSurface.js";
 import { SoftwareSceneRenderer, type SceneRenderer } from "../render/sceneRenderer.js";
 import type { MailboxMeshCamera, MailboxMeshPose, WorldLight } from "../mailbox.js";
-import type { ShadowCascade, ShadowInput, SceneLight, SceneLighting } from "@cartbox/editor";
+import type { LocalShadowTile, LocalShadows, ShadowCascade, ShadowInput, SceneLight, SceneLighting } from "@cartbox/editor";
 import type { MeshScene } from "./meshScene.js";
 import { QUALITY_PRESETS, type QualitySettings } from "../quality.js";
 import { buildOrbitCamera, orbitPitchAboveTerrain } from "./meshScene.js";
@@ -228,6 +232,8 @@ export class MeshOverlaySurface implements DisplaySurface {
   /** The sun's shadow maps (see buildShadow): the whole scene, and the near cascade round the camera (EP8b). */
   private farShadow: ShadowLayer = newShadowLayer();
   private nearShadow: ShadowLayer = newShadowLayer();
+  /** Each casting spot/point light's cached still tiles and this frame's copies (EP8c), in tile order. */
+  private localShadowCache: { key: string; statics: Float32Array[]; frames: Float32Array[] }[] = [];
   /** Instances ever posed on the front layer (a held weapon): never part of the static shadow. */
   private readonly everFront = new Set<number>();
   /** Each mesh's local bounding box, for projecting shadow footprints. */
@@ -448,6 +454,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       // The still objects' shadow was drawn where they stood: draw it again.
       this.farShadow.key = "";
       this.nearShadow.key = "";
+      this.localShadowCache = [];
     }
     return true;
   }
@@ -458,6 +465,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       // A new map size: the cached maps are rebuilt at it.
       this.farShadow = newShadowLayer();
       this.nearShadow = newShadowLayer();
+      this.localShadowCache = [];
     }
     this.quality = quality;
   }
@@ -734,7 +742,10 @@ export class MeshOverlaySurface implements DisplaySurface {
       profiler.add("shadow", now - mark);
       mark = now;
     }
-    const lights = this.hud && this.cartLights.length > 0 ? [...(lighting?.lights ?? []), ...this.cartLights] : lighting?.lights;
+    const rig = this.hud && this.cartLights.length > 0 ? [...(lighting?.lights ?? []), ...this.cartLights] : lighting?.lights;
+    // Spot and point lights that cast get their own maps (EP8c), and their tiles.
+    const local = lighting?.shadows && this.quality.shadows && rig ? this.buildLocalShadows(rig, moved) : null;
+    const lights = local ? local.lights : rig;
     // First-person with a sky dome: paint the panorama through the camera, then
     // composite the meshes over it (background null) — backend-agnostic, since
     // both renderers leave untouched pixels alone.
@@ -779,6 +790,7 @@ export class MeshOverlaySurface implements DisplaySurface {
             environment: this.environment,
             tonemap: sceneLightingTonemap(lighting),
             lights,
+            localShadows: local?.shadows ?? null,
             shadow,
             fog: lighting.fog ?? null,
           }
@@ -1148,25 +1160,9 @@ export class MeshOverlaySurface implements DisplaySurface {
     // on *which* instances are posed (not whether a posed one is hidden this
     // frame — a character dying must not re-render the whole arena's shadow),
     // and a held weapon never casts, so anything ever posed in front is out too.
-    for (const i of this.withChildren(this.poses.filter((p) => p.front).map((p) => p.index))) this.everFront.add(i);
-    const key = `${this.poses
-      .filter((p) => !p.front)
-      .map((p) => p.index)
-      .sort((a, b) => a - b)
-      .join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}|${[...this.bodies.keys()].join(",")}|${[...this.live.keys()].join(",")}|${this.inactiveKey}`;
+    const key = this.staticShadowKey();
     // What never moves, gathered only when a layer must redraw its static map.
-    const still = (): MeshSceneInstance[] => {
-      // Skinned objects are never still: their shape changes as they animate.
-      const posed = this.withChildren([...this.poses.map((p) => p.index), ...this.bodies.keys(), ...this.live.keys()]);
-      // Reserve prefab copies are never part of the static shadow (hidden, or moving once spawned).
-      this.pooledRoot.forEach((root, i) => {
-        if (root >= 0) posed.add(i);
-      });
-      // Terrain frames nothing (the map is sized to the play space) and casts
-      // only when its terrain says so — its cliffs shading the deck at a low sun.
-      const casts = (i: number) => !this.scene.instances[i]?.terrain || this.scene.instances[i]?.casts === true;
-      return this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && casts(i));
-    };
+    const still = (): MeshSceneInstance[] => this.stillCasters();
     const extent = this.scene.extent;
     const reach = extent && this.scene.instances.some((inst) => inst.casts) ? Math.max(0, extent.radius * 2 - radius * 2) : 0;
     const far = this.renderShadowLayer(this.farShadow, key, still, moved, lighting, center, radius, size, reach);
@@ -1184,6 +1180,64 @@ export class MeshOverlaySurface implements DisplaySurface {
       if (built) near = { lightViewProj: built.lightViewProj, depth: built.depth, bias: built.bias ?? 0.003, slopeBias: built.slopeBias ?? 0, dirty: built.dirty };
     }
     return { ...far, near };
+  }
+
+  /**
+   * What the static shadow maps depend on: *which* instances are posed (not
+   * whether a posed one is hidden this frame — a character dying must not
+   * re-render the whole arena's shadow); a held weapon never casts, so
+   * anything ever posed in front is out too.
+   */
+  private staticShadowKey(): string {
+    for (const i of this.withChildren(this.poses.filter((p) => p.front).map((p) => p.index))) this.everFront.add(i);
+    return `${this.poses
+      .filter((p) => !p.front)
+      .map((p) => p.index)
+      .sort((a, b) => a - b)
+      .join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}|${[...this.bodies.keys()].join(",")}|${[...this.live.keys()].join(",")}|${this.inactiveKey}`;
+  }
+
+  /** Everything that casts and never moves: what the static shadow maps hold. */
+  private stillCasters(): MeshSceneInstance[] {
+    // Skinned objects are never still: their shape changes as they animate.
+    const posed = this.withChildren([...this.poses.map((p) => p.index), ...this.bodies.keys(), ...this.live.keys()]);
+    // Reserve prefab copies are never part of the static shadow (hidden, or moving once spawned).
+    this.pooledRoot.forEach((root, i) => {
+      if (root >= 0) posed.add(i);
+    });
+    // Terrain frames nothing (the map is sized to the play space) and casts
+    // only when its terrain says so — its cliffs shading the deck at a low sun.
+    const casts = (i: number) => !this.scene.instances[i]?.terrain || this.scene.instances[i]?.casts === true;
+    return this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && casts(i));
+  }
+
+  /**
+   * Shadows from the spot and point lights that cast (EP8c): each light's
+   * tiles of everything still, cached until the light or the still set
+   * changes, copied each frame with the movers drawn over them. Returns the
+   * lights with their tiles assigned, or null when none casts.
+   */
+  private buildLocalShadows(lights: readonly SceneLight[], moved: readonly MeshSceneInstance[]): { lights: readonly SceneLight[]; shadows: LocalShadows } | null {
+    const assigned = assignLocalShadowTiles(lights);
+    if (assigned.tiles === 0) return null;
+    const statics = this.staticShadowKey();
+    const tiles: LocalShadowTile[] = [];
+    let slot = 0;
+    for (const light of assigned.lights) {
+      if (light.shadowTile === undefined) continue;
+      const key = `${JSON.stringify([light.kind, light.position, light.direction, light.range, light.innerAngle, light.outerAngle])}|${statics}`;
+      let cache = this.localShadowCache[slot];
+      if (!cache || cache.key !== key) {
+        const built = renderLocalShadow(light, this.stillCasters());
+        cache = { key, statics: built.map((t) => t.depth), frames: built.map((t) => new Float32Array(t.depth.length)) };
+        this.localShadowCache[slot] = cache;
+      }
+      cache.frames.forEach((frame, i) => frame.set(cache!.statics[i]!));
+      tiles.push(...renderLocalShadow(light, moved, cache.frames, false));
+      slot += 1;
+    }
+    this.localShadowCache.length = slot;
+    return { lights: assigned.lights, shadows: { tiles, bias: LOCAL_SHADOW_BIAS, slopeBias: LOCAL_SHADOW_SLOPE_BIAS } };
   }
 
   /**

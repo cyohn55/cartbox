@@ -28,6 +28,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   buildSceneShadow,
+  LOCAL_SHADOW_BIAS,
+  LOCAL_SHADOW_SLOPE_BIAS,
+  assignLocalShadowTiles,
+  renderLocalShadow,
   composeModelMatrix,
   multiplyMat4,
   parentIndices,
@@ -327,6 +331,15 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
     shadowDepth.current ??= new Float32Array(SHADOW_SIZE * SHADOW_SIZE);
     return buildSceneShadow(instances, lighting, bounds.center, bounds.radius, { size: SHADOW_SIZE, depth: shadowDepth.current });
   }, [instances, sidecar.lighting, bounds]);
+  // Spot and point lights that cast (EP8c): their tiles, and the lights with their tiles assigned.
+  const local = useMemo(() => {
+    const lighting = sidecar.lighting;
+    if (!lighting?.shadows) return null;
+    const { lights, tiles } = assignLocalShadowTiles(lighting.lights);
+    if (tiles === 0) return null;
+    const rendered = lights.flatMap((l) => (l.shadowTile !== undefined ? renderLocalShadow(l, instances) : []));
+    return { lights, shadows: { tiles: rendered, bias: LOCAL_SHADOW_BIAS, slopeBias: LOCAL_SHADOW_SLOPE_BIAS } };
+  }, [instances, sidecar.lighting]);
 
   // --- Size and renderer ------------------------------------------------------
 
@@ -455,8 +468,8 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   const sceneCanvas = useMemo(() => (typeof document === "undefined" ? null : document.createElement("canvas")), []);
 
   // Everything the frame loop reads, refreshed every render.
-  const live = useRef({ instances, terrainInstances, shadow, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize });
-  live.current = { instances, terrainInstances, shadow, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize };
+  const live = useRef({ instances, terrainInstances, shadow, local, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize });
+  live.current = { instances, terrainInstances, shadow, local, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize };
   /** The box select being dragged, in canvas pixels. */
   const marquee = useRef<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
 
@@ -485,7 +498,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
         if (forward || right || up) setCamera(fly(cam0, { forward: forward * speed, right: right * speed, up: up * speed }));
       }
       if (!needsRender.current && !settling.current) return;
-      const { instances: objects, terrainInstances: land, shadow: shadowMap, lighting, showFog: fogOn, selectedId: sel, selectedIds: sels, locked: lockedIds, previewCamera: preview, reach: sphere, renderer: r, size: s, buffers: b, mode: tool, space: axesSpace, cssSize: css } = live.current;
+      const { instances: objects, terrainInstances: land, shadow: shadowMap, local: localShadows, lighting, showFog: fogOn, selectedId: sel, selectedIds: sels, locked: lockedIds, previewCamera: preview, reach: sphere, renderer: r, size: s, buffers: b, mode: tool, space: axesSpace, cssSize: css } = live.current;
       const canvas = canvasRef.current;
       const cam = cameraRef.current;
       if (!canvas || !cam || !r || !s || !b || !sceneCanvas) return;
@@ -520,7 +533,8 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
               lightDirection: sceneLightingKeyDirection(lighting),
               environment: sceneLightingEnvironment(lighting),
               tonemap: sceneLightingTonemap(lighting),
-              lights: lighting.lights,
+              lights: localShadows?.lights ?? lighting.lights,
+              localShadows: localShadows?.shadows ?? null,
               shadow: shadowMap,
               fog: fogOn ? (lighting.fog ?? null) : null,
             }

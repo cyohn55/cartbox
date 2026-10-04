@@ -51,6 +51,7 @@ import {
 import { SoftwareSceneRenderer, WebgpuSceneRenderer, type SceneDraw } from "@cartbox/player";
 
 import { graphInstances } from "./helpers/graphScenes";
+import { localShadowRig } from "./helpers/localShadowScene";
 import { manyLights } from "./helpers/manyLights";
 
 
@@ -633,6 +634,33 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
       if (software.out[i] !== coarse.out[i]) sharper += 1;
     }
     expect(sharper).toBeGreaterThan(10); // the near cascade really changed the shadow's edge
+    expect(maxDelta).toBeLessThanOrEqual(4);
+    renderer.dispose();
+  });
+
+  it("casts spot and point light shadows like the software rasteriser", async () => {
+    // EP8c: the tiles packed in an atlas; each fragment a light reaches projects into its tile.
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+    const rig = localShadowRig();
+    const lit = (withShadows = true): SceneDraw => ({ ...draw(), view: viewMatrix([0, 4, 6], [0, 0.5, 0]), lights: rig.lights, localShadows: withShadows ? rig.localShadows : null });
+    renderer.render(rig.instances, lit());
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.tick?.();
+    }
+    const gpu = lit();
+    renderer.render(rig.instances, gpu);
+    const software = lit();
+    new SoftwareSceneRenderer().render(rig.instances, software);
+    const unshadowed = lit(false);
+    new SoftwareSceneRenderer().render(rig.instances, unshadowed);
+    let maxDelta = 0;
+    let shaded = 0;
+    for (let i = 0; i < W * H * 4; i += 1) {
+      maxDelta = Math.max(maxDelta, Math.abs(gpu.out[i]! - software.out[i]!));
+      if (software.out[i]! < unshadowed.out[i]! - 8) shaded += 1;
+    }
+    expect(shaded).toBeGreaterThan(30); // the shadows really darken the floor
     expect(maxDelta).toBeLessThanOrEqual(4);
     renderer.dispose();
   });

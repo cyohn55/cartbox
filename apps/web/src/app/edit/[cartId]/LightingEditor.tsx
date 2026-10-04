@@ -295,6 +295,16 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
                 display={light.range ? `${light.range}` : "∞"}
                 onChange={(range) => onChange(updateSceneLight(lighting, index, { range }))}
               />
+              <SegmentedControl
+                label="Shadows"
+                ariaLabel={`Light ${index + 1} shadows`}
+                selected={light.castShadows ? "on" : "off"}
+                onSelect={(v) => onChange(updateSceneLight(lighting, index, { castShadows: v === "on" ? true : undefined, range: v === "on" && !light.range ? 10 : light.range }))}
+                options={[
+                  { id: "off", label: "Off" },
+                  { id: "on", label: "Cast", hint: "This light throws shadows (it needs a range); a spot takes one shadow map, a point light six" },
+                ]}
+              />
               {light.kind === "spot" && (
                 <>
                   <VectorRow
