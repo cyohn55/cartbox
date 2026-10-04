@@ -10152,7 +10152,11 @@ import {
   EFFECT_BAND_SPEED,
   EFFECT_CAMO_CRAWL,
   cameraPositionFromView as cameraPositionFromView2,
+  compiledGraphOf,
   computeSmoothNormals,
+  graphNoiseSource,
+  graphShaderCode,
+  graphUsesNoise,
   multiplyMat4 as multiplyMat44
 } from "@cartbox/editor";
 
@@ -10479,7 +10483,7 @@ function normalBasis3x3(model) {
 }
 function resolvePbr(material, hasMr, hasOcc, hasEmis) {
   const emissiveFactor = material.emissiveFactor;
-  const isPbr = hasMr || hasOcc || hasEmis || material.metallicFactor !== void 0 || material.roughnessFactor !== void 0 || emissiveFactor !== void 0 && (emissiveFactor[0] > 0 || emissiveFactor[1] > 0 || emissiveFactor[2] > 0);
+  const isPbr = hasMr || hasOcc || hasEmis || material.metallicFactor !== void 0 || material.roughnessFactor !== void 0 || emissiveFactor !== void 0 && (emissiveFactor[0] > 0 || emissiveFactor[1] > 0 || emissiveFactor[2] > 0) || material.graph !== void 0;
   return {
     isPbr,
     metallic: material.metallicFactor ?? 1,
@@ -10789,9 +10793,48 @@ void main() {
 }
 `
 );
-var fragmentShader = (nearest) => (
-  /* glsl */
-  `#version 300 es
+function graphSites(graph) {
+  if (!graph) return { fns: "", base: "", pbr: "", emis: "" };
+  const out = graph.outputs;
+  const code = graphShaderCode(graph, "glsl", {
+    uv: "vUv",
+    position: "vWorldPos",
+    normal: "gN",
+    view: "u.view.xyz",
+    time: "u.effect1.w",
+    baseColor: "colour.rgb",
+    baseAlpha: "colour.a",
+    sample: (p) => `sampleMap(tex, vec2((${p}).x, 1.0 - (${p}).y))`
+  });
+  const set = [
+    out.baseColor !== void 0 ? `colour = vec4(g${out.baseColor}, colour.a);` : "",
+    out.alpha !== void 0 ? `colour.a = clamp(g${out.alpha}.x, 0.0, 1.0);` : "",
+    out.metallic !== void 0 ? `gMetal = clamp(g${out.metallic}.x, 0.0, 1.0);` : "",
+    out.roughness !== void 0 ? `gRough = g${out.roughness}.x;` : "",
+    out.emissive !== void 0 ? `gEmis = max(g${out.emissive}, vec3(0.0));` : ""
+  ].filter(Boolean);
+  return {
+    fns: graphUsesNoise(graph) ? graphNoiseSource("glsl") : "",
+    base: `  // The material graph (EP7).
+  float gMetal = -1.0;
+  float gRough = -1.0;
+  vec3 gEmis = vec3(-1.0);
+  {
+    vec3 gN = normalize(vNormal);
+    if (dot(gN, u.view.xyz) < 0.0) { gN = -gN; }
+${code.split("\n").map((l) => `    ${l}`).join("\n")}
+${set.map((l) => `    ${l}`).join("\n")}
+  }`,
+    pbr: `    if (gMetal >= 0.0) { metallic = gMetal; }
+    if (gRough >= 0.0) { rough = gRough; }`,
+    emis: `    if (gEmis.x >= 0.0) { emis = gEmis; }`
+  };
+}
+var fragmentShader = (nearest, graph = null) => {
+  const g = graphSites(graph);
+  return (
+    /* glsl */
+    `#version 300 es
 precision highp float;
 precision highp int;
 #define NEAREST ${nearest ? 1 : 0}
@@ -10969,12 +11012,14 @@ float aces(float x) {
   return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), 0.0, 1.0);
 }
 
+${g.fns}
 void main() {
   vec2 uv = vec2(vUv.x, 1.0 - vUv.y);
   vec4 colour = u.base;
   if (u.texflags.x > 0.5) {
     colour = colour * sampleMap(tex, uv);
   }
+${g.base}
   // Soft edges (EP6b): a see-through surface fades out as it meets the opaque
   // scene behind it \u2014 both depths read back as view distance (shadow2.zw).
   if (u.tonemap.z > 0.0) {
@@ -11001,6 +11046,7 @@ void main() {
       if (u.surface0.w > 0.5) { reflectK = reflectK * mr.a; }
     }
     if (u.surface1.z > 0.5 && u.surface3.w >= 0.0) { rough = mix(rough, u.surface3.w, vBw); }
+${g.pbr}
     rough = clamp(rough, 0.045, 1.0);
     float ao = 1.0;
     if (u.texflags.z > 0.5) { ao = sampleMap(occTex, uv).r; }
@@ -11039,6 +11085,7 @@ void main() {
       if (u.texflags.w > 0.5) { es = sampleMap(emisTex, vec2(vUv.x + u.surface1.x, 1.0 - (vUv.y + u.surface1.y))).rgb; }
       emis = ef * es;
     }
+${g.emis}
     vec3 amb;
     if (u.envSky.w > 0.5) {
       vec3 irr = envColorDir(N);
@@ -11159,7 +11206,35 @@ void main() {
   outColor = finishAlpha(colour.rgb * shade, colour.a);
 }
 `
-);
+  );
+};
+function buildProgram2(gl, nearest, graph) {
+  const program = gl.createProgram();
+  gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, VERTEX_SHADER));
+  gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, fragmentShader(nearest, graph)));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(`WebGL2 program failed to link: ${gl.getProgramInfoLog(program)}`);
+  gl.uniformBlockBinding(program, gl.getUniformBlockIndex(program, "Uniforms"), BLOCK_UNIFORMS);
+  gl.uniformBlockBinding(program, gl.getUniformBlockIndex(program, "Instances"), BLOCK_INSTANCES);
+  gl.uniformBlockBinding(program, gl.getUniformBlockIndex(program, "Lights"), BLOCK_LIGHTS);
+  gl.useProgram(program);
+  const units = [
+    ["tex", UNIT_BASE],
+    ["mrTex", UNIT_MR],
+    ["occTex", UNIT_OCC],
+    ["emisTex", UNIT_EMIS],
+    ["shadowMap", UNIT_SHADOW],
+    ["envMap", UNIT_ENV],
+    ["ssaoMap", UNIT_SSAO],
+    ["lmTex", UNIT_LM],
+    ["probeAtlas", UNIT_PROBES],
+    ["detailTex", UNIT_DETAIL],
+    ["blendTex", UNIT_BLEND],
+    ["sceneDepth", UNIT_SCENE_DEPTH]
+  ];
+  for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
+  return program;
+}
 function defaultContext() {
   try {
     const options = { alpha: true, antialias: false, depth: false, stencil: false, premultipliedAlpha: false, preserveDrawingBuffer: false };
@@ -11220,9 +11295,12 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.readSeq = 0;
     /** What the last submitted frame drew (for the profiler and tests); GPU time when the browser can time it. */
     this.lastFrameStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
+    /** Programs by material graph (EP7), linked on first use. */
+    this.graphPrograms = /* @__PURE__ */ new Map();
     /** The opaque depth, as a texture the transparent pass can read (EP6b): made on first use. */
     this.sceneDepth = null;
     this.software = new SoftwareSceneRenderer(style);
+    this.nearest = style.textureFiltering === "none";
     this.uniformBuffer = gl.createBuffer();
     this.instanceBuffer = gl.createBuffer();
     this.lightBuffer = gl.createBuffer();
@@ -11249,30 +11327,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       const align = gl.getParameter(gl.UNIFORM_BUFFER_OFFSET_ALIGNMENT);
       if (!(align > 0) || UNIFORM_STRIDE % align !== 0) return null;
       if (gl.getParameter(gl.MAX_UNIFORM_BLOCK_SIZE) < WEBGL_INSTANCES_PER_DRAW * INSTANCE_FLOATS * 4) return null;
-      const program = gl.createProgram();
-      gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, VERTEX_SHADER));
-      gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, fragmentShader(style.textureFiltering === "none")));
-      gl.linkProgram(program);
-      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(`WebGL2 program failed to link: ${gl.getProgramInfoLog(program)}`);
-      gl.uniformBlockBinding(program, gl.getUniformBlockIndex(program, "Uniforms"), BLOCK_UNIFORMS);
-      gl.uniformBlockBinding(program, gl.getUniformBlockIndex(program, "Instances"), BLOCK_INSTANCES);
-      gl.uniformBlockBinding(program, gl.getUniformBlockIndex(program, "Lights"), BLOCK_LIGHTS);
-      gl.useProgram(program);
-      const units = [
-        ["tex", UNIT_BASE],
-        ["mrTex", UNIT_MR],
-        ["occTex", UNIT_OCC],
-        ["emisTex", UNIT_EMIS],
-        ["shadowMap", UNIT_SHADOW],
-        ["envMap", UNIT_ENV],
-        ["ssaoMap", UNIT_SSAO],
-        ["lmTex", UNIT_LM],
-        ["probeAtlas", UNIT_PROBES],
-        ["detailTex", UNIT_DETAIL],
-        ["blendTex", UNIT_BLEND],
-        ["sceneDepth", UNIT_SCENE_DEPTH]
-      ];
-      for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
+      const program = buildProgram2(gl, style.textureFiltering === "none", null);
       const colour = gl.createRenderbuffer();
       gl.bindRenderbuffer(gl.RENDERBUFFER, colour);
       gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, width, height);
@@ -11436,6 +11491,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     gl.clearDepth(1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.useProgram(this.program);
+    let program = this.program;
     gl.bindBufferBase(gl.UNIFORM_BUFFER, BLOCK_LIGHTS, this.lightBuffer);
     this.bindTexture(UNIT_SHADOW, this.shadowTexture ?? this.blankFloat);
     this.bindTexture(UNIT_ENV, this.envTexture ?? this.blankTexture);
@@ -11471,6 +11527,12 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     let triangles = 0;
     for (const chunk of chunks2) {
       const batch = batches[chunk.batch];
+      const wanted = this.programOf(batch.primitive.material);
+      if (wanted !== program) {
+        program = wanted;
+        gl.useProgram(program);
+        gl.uniform4fv(gl.getUniformLocation(program, "probeData"), this.probeData);
+      }
       if (soft && !depthCopied && batch.alpha >= 2) {
         this.copySceneDepth();
         depthCopied = true;
@@ -11512,6 +11574,21 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.flush();
+  }
+  /** The program a material draws with: the plain one, or its graph's variant. */
+  programOf(material) {
+    const graph = compiledGraphOf(material);
+    if (!graph) return this.program;
+    let program = this.graphPrograms.get(graph.key);
+    if (!program) {
+      try {
+        program = buildProgram2(this.gl, this.nearest, graph);
+      } catch {
+        program = this.program;
+      }
+      this.graphPrograms.set(graph.key, program);
+    }
+    return program;
   }
   /** Copy the main framebuffer's depth into {@link sceneDepth} and bind it, leaving the main framebuffer bound. */
   copySceneDepth() {
@@ -11683,6 +11760,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       for (const rb of this.attachments) gl.deleteRenderbuffer(rb);
       gl.deleteSampler(this.sampler);
       gl.deleteProgram(this.program);
+      for (const program of this.graphPrograms.values()) if (program !== this.program) gl.deleteProgram(program);
       gl.getExtension("WEBGL_lose_context")?.loseContext();
     } catch {
     }
@@ -11717,15 +11795,58 @@ import {
   EFFECT_BAND_SPEED as EFFECT_BAND_SPEED2,
   EFFECT_CAMO_CRAWL as EFFECT_CAMO_CRAWL2,
   cameraPositionFromView as cameraPositionFromView3,
+  compiledGraphOf as compiledGraphOf2,
   computeSmoothNormals as computeSmoothNormals2,
+  graphNoiseSource as graphNoiseSource2,
+  graphShaderCode as graphShaderCode2,
+  graphUsesNoise as graphUsesNoise2,
   multiplyMat4 as multiplyMat45
 } from "@cartbox/editor";
 var READBACK_BUFFERS2 = 3;
 var SHADER_STAGE_VERTEX = 1;
 var SHADER_STAGE_FRAGMENT = 2;
-var SHADER = (
-  /* wgsl */
-  `
+function graphSites2(graph) {
+  if (!graph) return { fns: "", base: "", pbr: "", emis: "" };
+  const out = graph.outputs;
+  const code = graphShaderCode2(graph, "wgsl", {
+    uv: "in.uv",
+    position: "in.worldPos",
+    normal: "gN",
+    view: "u.view.xyz",
+    time: "u.effect1.w",
+    baseColor: "colour.rgb",
+    baseAlpha: "colour.a",
+    sample: (p) => `textureSample(tex, samp, vec2<f32>((${p}).x, 1.0 - (${p}).y))`
+  });
+  const set = [
+    out.baseColor !== void 0 ? `colour = vec4<f32>(g${out.baseColor}, colour.a);` : "",
+    out.alpha !== void 0 ? `colour.a = clamp(g${out.alpha}.x, 0.0, 1.0);` : "",
+    out.metallic !== void 0 ? `gMetal = clamp(g${out.metallic}.x, 0.0, 1.0);` : "",
+    out.roughness !== void 0 ? `gRough = g${out.roughness}.x;` : "",
+    out.emissive !== void 0 ? `gEmis = max(g${out.emissive}, vec3<f32>(0.0));` : ""
+  ].filter(Boolean);
+  return {
+    fns: graphUsesNoise2(graph) ? graphNoiseSource2("wgsl") : "",
+    base: `  // The material graph (EP7).
+  var gMetal = -1.0;
+  var gRough = -1.0;
+  var gEmis = vec3<f32>(-1.0);
+  {
+    var gN = normalize(in.normal);
+    if (dot(gN, u.view.xyz) < 0.0) { gN = -gN; }
+${code.split("\n").map((l) => `    ${l}`).join("\n")}
+${set.map((l) => `    ${l}`).join("\n")}
+  }`,
+    pbr: `    if (gMetal >= 0.0) { metallic = gMetal; }
+    if (gRough >= 0.0) { rough = gRough; }`,
+    emis: `    if (gEmis.x >= 0.0) { emis = gEmis; }`
+  };
+}
+function sceneShader(graph = null) {
+  const g = graphSites2(graph);
+  return (
+    /* wgsl */
+    `
 struct Uniforms {
   mvp: mat4x4<f32>,
   nrm: mat3x3<f32>,
@@ -11998,6 +12119,7 @@ fn vs(
   return out;
 }
 
+${g.fns}
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4<f32> {
   // glTF's V origin is top-left, so flip; the sampler wraps and (per era) filters.
@@ -12007,6 +12129,7 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   if (u.texflags.x > 0.5) {
     colour = colour * textureSample(tex, samp, uv);
   }
+${g.base}
   // The CPU path skips a texel whose combined alpha is below 1/255 rather than
   // blending it, so this is a discard and not an alpha-blend state.
   // Soft edges (EP6b): a see-through surface fades out as it meets the opaque
@@ -12040,6 +12163,7 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     }
     // The blend surface's roughness, by the vertex weight (surface3.w < 0 keeps).
     if (u.surface1.z > 0.5 && u.surface3.w >= 0.0) { rough = mix(rough, u.surface3.w, in.bw); }
+${g.pbr}
     rough = clamp(rough, 0.045, 1.0); // a perfectly-smooth NDF blows up
     var ao = 1.0;
     if (u.texflags.z > 0.5) { ao = textureSample(occTex, samp, uv).r; }
@@ -12080,6 +12204,7 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
       if (u.texflags.w > 0.5) { es = textureSample(emisTex, samp, vec2<f32>(in.uv.x + u.surface1.x, 1.0 - (in.uv.y + u.surface1.y))).rgb; }
       emis = ef * es;
     }
+${g.emis}
     // Ambient / image-based lighting, mirroring the software rasteriser: with an
     // environment, a diffuse irradiance along N + a specular reflection along R
     // blurred toward the average by roughness; without one, the flat ambient.
@@ -12216,13 +12341,15 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   return finishAlpha(colour.rgb * shade, colour.a);
 }
 `
-);
+  );
+}
 var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
-  constructor(device, width, height, pipeline, bindGroupLayout, colourTexture, depthTexture, depthGroups, sampler, blankTexture, blankShadow, readback, bytesPerRow, style) {
+  constructor(device, width, height, pipeline, pipelinesFor, bindGroupLayout, colourTexture, depthTexture, depthGroups, sampler, blankTexture, blankShadow, readback, bytesPerRow, style) {
     this.device = device;
     this.width = width;
     this.height = height;
     this.pipeline = pipeline;
+    this.pipelinesFor = pipelinesFor;
     this.bindGroupLayout = bindGroupLayout;
     this.colourTexture = colourTexture;
     this.depthTexture = depthTexture;
@@ -12268,6 +12395,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.instanceData = new Float32Array(0);
     /** What the last submitted frame drew (for the profiler and tests); GPU time when the device can time it. */
     this.lastFrameStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
+    /** Shader variants by material graph (EP7), built on first use. */
+    this.graphPipelines = /* @__PURE__ */ new Map();
     this.software = new SoftwareSceneRenderer(style);
     this.shadowTexture = blankShadow;
     this.envTexture = blankTexture;
@@ -12331,7 +12460,6 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   static async create(device, width, height, style = DEFAULT_RASTER_STYLE3) {
     if (!webgpuCanHonour(style)) return null;
     try {
-      const module = device.createShaderModule({ code: SHADER });
       const bindGroupLayout = device.createBindGroupLayout({
         entries: [
           {
@@ -12371,43 +12499,47 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         entries: [{ binding: 0, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "depth" } }]
       });
       const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayout] });
-      const pipelineFor = (blend, depthWrite) => device.createRenderPipeline({
-        layout,
-        vertex: {
-          module,
-          entryPoint: "vs",
-          buffers: [
-            {
-              // Interleaved position(3) + normal(3) + uv(2) + light-map uv(2).
-              arrayStride: 44,
-              attributes: [
-                { shaderLocation: 0, offset: 0, format: "float32x3" },
-                { shaderLocation: 1, offset: 12, format: "float32x3" },
-                { shaderLocation: 2, offset: 24, format: "float32x2" },
-                { shaderLocation: 3, offset: 32, format: "float32x2" },
-                { shaderLocation: 4, offset: 40, format: "float32" }
-              ]
-            }
-          ]
-        },
-        fragment: {
-          module,
-          entryPoint: "fs",
-          // rgba8unorm, never rgba8unorm-srgb: the framebuffer these bytes land
-          // in is the same 8-bit buffer the CPU path writes, so any gamma
-          // conversion here would show up as the GPU path looking washed out.
-          targets: [blend ? { format: "rgba8unorm", blend } : { format: "rgba8unorm" }]
-        },
-        // cullMode "none" matches the software rasteriser, which draws both
-        // faces (its Lambert is two-sided for exactly this reason).
-        primitive: { topology: "triangle-list", cullMode: "none" },
-        depthStencil: { format: "depth24plus", depthWriteEnabled: depthWrite, depthCompare: "less" }
-      });
-      const pipeline = {
-        opaque: pipelineFor(null, true),
-        blend: pipelineFor({ color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" } }, false),
-        add: pipelineFor({ color: { srcFactor: "one", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "zero", dstFactor: "one", operation: "add" } }, false)
+      const pipelinesFor = (code) => {
+        const module = device.createShaderModule({ code });
+        const pipelineFor = (blend, depthWrite) => device.createRenderPipeline({
+          layout,
+          vertex: {
+            module,
+            entryPoint: "vs",
+            buffers: [
+              {
+                // Interleaved position(3) + normal(3) + uv(2) + light-map uv(2).
+                arrayStride: 44,
+                attributes: [
+                  { shaderLocation: 0, offset: 0, format: "float32x3" },
+                  { shaderLocation: 1, offset: 12, format: "float32x3" },
+                  { shaderLocation: 2, offset: 24, format: "float32x2" },
+                  { shaderLocation: 3, offset: 32, format: "float32x2" },
+                  { shaderLocation: 4, offset: 40, format: "float32" }
+                ]
+              }
+            ]
+          },
+          fragment: {
+            module,
+            entryPoint: "fs",
+            // rgba8unorm, never rgba8unorm-srgb: the framebuffer these bytes land
+            // in is the same 8-bit buffer the CPU path writes, so any gamma
+            // conversion here would show up as the GPU path looking washed out.
+            targets: [blend ? { format: "rgba8unorm", blend } : { format: "rgba8unorm" }]
+          },
+          // cullMode "none" matches the software rasteriser, which draws both
+          // faces (its Lambert is two-sided for exactly this reason).
+          primitive: { topology: "triangle-list", cullMode: "none" },
+          depthStencil: { format: "depth24plus", depthWriteEnabled: depthWrite, depthCompare: "less" }
+        });
+        return {
+          opaque: pipelineFor(null, true),
+          blend: pipelineFor({ color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" } }, false),
+          add: pipelineFor({ color: { srcFactor: "one", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "zero", dstFactor: "one", operation: "add" } }, false)
+        };
       };
+      const pipeline = pipelinesFor(sceneShader());
       const colourTexture = device.createTexture({
         size: { width, height },
         format: "rgba8unorm",
@@ -12476,6 +12608,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         width,
         height,
         pipeline,
+        pipelinesFor,
         bindGroupLayout,
         colourTexture,
         depthTexture,
@@ -12675,7 +12808,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       let bound = null;
       for (let index = from; index < to; index += 1) {
         const entry = draws[index];
-        const wanted = entry.alpha === 3 ? this.pipeline.add : entry.alpha === 2 ? this.pipeline.blend : this.pipeline.opaque;
+        const set = this.pipelinesOf(entry.primitive.material);
+        const wanted = entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque;
         if (wanted !== bound) {
           pass2.setPipeline(wanted);
           bound = wanted;
@@ -12736,6 +12870,17 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       this.device.queue.submit([encoder.finish()]);
       this.timer?.read();
     }
+  }
+  /** The pipelines a material draws with: the plain shader's, or its graph's variant. */
+  pipelinesOf(material) {
+    const graph = compiledGraphOf2(material);
+    if (!graph) return this.pipeline;
+    let set = this.graphPipelines.get(graph.key);
+    if (!set) {
+      set = this.pipelinesFor(sceneShader(graph));
+      this.graphPipelines.set(graph.key, set);
+    }
+    return set;
   }
   /** Await one readback and publish it as the newest frame. */
   async drain(slot) {

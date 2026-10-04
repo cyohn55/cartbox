@@ -28,13 +28,14 @@ import {
   NODE_HEADER,
   NODE_ROW,
   NODE_WIDTH,
-  OUTPUT_AT,
   addNode,
   connect,
   disconnect,
+  freeSpot,
   inputPort,
   materialPort,
   moveNode,
+  outputAt,
   outputPort,
   removeNode,
   renderGraphPreview,
@@ -87,6 +88,7 @@ export function GraphEditor({
 }) {
   const graph = material.graph!;
   const [pan, setPan] = useState({ x: 20, y: 20 });
+  const [zoom, setZoom] = useState(1);
   const [drag, setDrag] = useState<{ id: string; x: number; y: number } | null>(null);
   const [wire, setWire] = useState<{ from: string; x: number; y: number } | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -95,6 +97,19 @@ export function GraphEditor({
   // The graph as shown: a node being dragged sits where the pointer is.
   const shown = useMemo(() => (drag ? moveNode(graph, drag.id, drag.x, drag.y) : graph), [graph, drag]);
   const byId = useMemo(() => new Map(shown.nodes.map((n) => [n.id, n])), [shown]);
+  // The output node keeps clear of the nodes (placed from the committed graph, so it holds still during a drag).
+  const outAt = useMemo(() => outputAt(graph), [graph]);
+
+  // Open with the whole graph in view: zoomed out (never in) to fit it and the output node.
+  useEffect(() => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const width = outputAt(graph).x + NODE_WIDTH + 40;
+    const height = graph.nodes.reduce((max, n) => Math.max(max, (n.y ?? 0) + nodeHeight(n)), 200) + 40;
+    setZoom(Math.max(0.35, Math.min(1, (rect.width - 20) / width, (rect.height - 20) / height)));
+    // Only on opening: later edits keep the view where the creator left it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // --- Preview ---------------------------------------------------------------------------
   const previewRef = useRef<HTMLCanvasElement>(null);
@@ -122,7 +137,7 @@ export function GraphEditor({
   // --- Pointer gestures --------------------------------------------------------------------
   const toCanvas = (clientX: number, clientY: number) => {
     const rect = canvasRef.current!.getBoundingClientRect();
-    return { x: clientX - rect.left - pan.x, y: clientY - rect.top - pan.y };
+    return { x: (clientX - rect.left - pan.x) / zoom, y: (clientY - rect.top - pan.y) / zoom };
   };
   const onPointerMove = (e: React.PointerEvent) => {
     const g = gesture.current;
@@ -135,7 +150,7 @@ export function GraphEditor({
     const dx = e.clientX - g.startX;
     const dy = e.clientY - g.startY;
     if (g.kind === "pan") setPan({ x: g.originX + dx, y: g.originY + dy });
-    else setDrag({ id: g.id!, x: g.originX + dx, y: g.originY + dy });
+    else setDrag({ id: g.id!, x: g.originX + dx / zoom, y: g.originY + dy / zoom });
   };
   const onPointerUp = (e: React.PointerEvent) => {
     if (wire) {
@@ -152,7 +167,8 @@ export function GraphEditor({
 
   const add = (op: GraphOp) => {
     const rect = canvasRef.current?.getBoundingClientRect();
-    const at = { x: (rect ? rect.width / 2 : 300) - pan.x - NODE_WIDTH / 2 + (graph.nodes.length % 5) * 14, y: 60 - pan.y + (graph.nodes.length % 7) * 18 };
+    // Somewhere in view, clear of the other nodes.
+    const at = freeSpot(graph, { x: Math.round(((rect ? rect.width / 3 : 200) - pan.x) / zoom), y: Math.round((40 - pan.y) / zoom) });
     onChange(addNode(graph, op, at).graph);
   };
 
@@ -167,7 +183,7 @@ export function GraphEditor({
   }
   for (const output of GRAPH_OUTPUTS) {
     const source = shown.outputs[output] ? byId.get(shown.outputs[output]!) : undefined;
-    if (source) wires.push({ key: `out.${output}`, d: curve(outputPort(source), materialPort(output, GRAPH_OUTPUTS)) });
+    if (source) wires.push({ key: `out.${output}`, d: curve(outputPort(source), materialPort(output, GRAPH_OUTPUTS, outAt)) });
   }
   const pending = wire && byId.get(wire.from) ? curve(outputPort(byId.get(wire.from)!), { x: wire.x, y: wire.y }) : null;
 
@@ -190,7 +206,7 @@ export function GraphEditor({
     <div
       role="dialog"
       aria-label="Material graph"
-      style={{ position: "fixed", inset: "4vh 3vw", zIndex: 60, display: "flex", flexDirection: "column", background: "#0d1118", border: "1px solid #2a3444", borderRadius: 10, boxShadow: "0 20px 60px rgba(0,0,0,0.6)", color: "#dde", overflow: "hidden" }}
+      style={{ position: "fixed", inset: "4vh 3vw", zIndex: 60, display: "flex", flexDirection: "column", background: "#0d1118", border: "1px solid #2a3444", borderRadius: 10, boxShadow: "0 20px 60px rgba(0,0,0,0.6)", color: "#dde", overflow: "hidden", userSelect: "none" }}
       onKeyDown={(e) => {
         if (e.key === "Escape") onClose();
       }}
@@ -239,7 +255,7 @@ export function GraphEditor({
         </div>
         <div
           ref={canvasRef}
-          style={{ position: "relative", flex: "1 1 auto", overflow: "hidden", touchAction: "none", cursor: gesture.current?.kind === "pan" ? "grabbing" : "default", backgroundImage: "radial-gradient(#223 1px, transparent 1px)", backgroundSize: "20px 20px", backgroundPosition: `${pan.x}px ${pan.y}px` }}
+          style={{ position: "relative", flex: "1 1 auto", overflow: "hidden", touchAction: "none", cursor: gesture.current?.kind === "pan" ? "grabbing" : "default", backgroundImage: "radial-gradient(#223 1px, transparent 1px)", backgroundSize: `${20 * zoom}px ${20 * zoom}px`, backgroundPosition: `${pan.x}px ${pan.y}px` }}
           onPointerDown={(e) => {
             if (e.target !== e.currentTarget) return;
             e.currentTarget.setPointerCapture(e.pointerId);
@@ -247,8 +263,17 @@ export function GraphEditor({
           }}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
+          onWheel={(e) => {
+            // Zoom about the pointer.
+            const rect = e.currentTarget.getBoundingClientRect();
+            const next = Math.min(1.5, Math.max(0.35, zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            setPan({ x: mx - ((mx - pan.x) * next) / zoom, y: my - ((my - pan.y) * next) / zoom });
+            setZoom(next);
+          }}
         >
-          <div style={{ position: "absolute", left: pan.x, top: pan.y, pointerEvents: "none" }}>
+          <div style={{ position: "absolute", left: pan.x, top: pan.y, pointerEvents: "none", transform: `scale(${zoom})`, transformOrigin: "0 0" }}>
             <svg style={{ position: "absolute", left: 0, top: 0, overflow: "visible" }} width={1} height={1} aria-hidden>
               {wires.map((w) => (
                 <path key={w.key} d={w.d} stroke="#6cf" strokeWidth={2} fill="none" opacity={0.85} />
@@ -256,7 +281,7 @@ export function GraphEditor({
               {pending && <path d={pending} stroke="#ffd84a" strokeWidth={2} fill="none" strokeDasharray="5 4" />}
             </svg>
           </div>
-          <div style={{ position: "absolute", left: pan.x, top: pan.y }}>
+          <div style={{ position: "absolute", left: pan.x, top: pan.y, transform: `scale(${zoom})`, transformOrigin: "0 0" }}>
             {shown.nodes.map((node) => {
               const def = GRAPH_NODES[node.op];
               const p = node.params ?? {};
@@ -283,6 +308,7 @@ export function GraphEditor({
                       style={{ ...port, position: "absolute", right: -7, top: NODE_HEADER / 2 - 6, borderColor: "#6cf" }}
                       onPointerDown={(e) => {
                         e.stopPropagation();
+                        e.preventDefault();
                         canvasRef.current?.setPointerCapture(e.pointerId);
                         const at = outputPort(node);
                         setWire({ from: node.id, x: at.x, y: at.y });
@@ -353,7 +379,7 @@ export function GraphEditor({
                 </div>
               );
             })}
-            <div style={{ position: "absolute", left: OUTPUT_AT.x, top: OUTPUT_AT.y, width: NODE_WIDTH, background: "#22180f", border: "1px solid #6a4a2a", borderRadius: 6, fontSize: 11 }}>
+            <div style={{ position: "absolute", left: outAt.x, top: outAt.y, width: NODE_WIDTH, background: "#22180f", border: "1px solid #6a4a2a", borderRadius: 6, fontSize: 11 }}>
               <div style={{ height: NODE_HEADER, display: "flex", alignItems: "center", padding: "0 8px", fontWeight: 600, background: "#4a3018", borderRadius: "6px 6px 0 0" }}>Material output</div>
               {GRAPH_OUTPUTS.map((output) => {
                 const wired = Boolean(graph.outputs[output]);
@@ -376,7 +402,7 @@ export function GraphEditor({
         </div>
       </div>
       <div style={{ padding: "4px 10px", fontSize: 11, opacity: 0.6, borderTop: "1px solid #223" }}>
-        Drag from a node&apos;s right edge to an input or a material output · click a wired input to unwire it · drag the background to pan
+        Drag from a node&apos;s right edge to an input or a material output · click a wired input to unwire it · drag the background to pan, wheel to zoom
       </div>
     </div>
   );

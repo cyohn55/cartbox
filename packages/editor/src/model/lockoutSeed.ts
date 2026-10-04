@@ -36,6 +36,7 @@ import { bakeNavMesh, boxTriangles, serializeNavMesh, type NavMesh } from "./nav
 import { serializeTerrain, terrainMesh, type Terrain } from "./terrain";
 import type { SceneTimeline } from "./timeline";
 import { builtinDetailGrain } from "./materialEffects";
+import type { MaterialGraph } from "./materialGraph";
 import { particlePreset, type ParticleEffect } from "./particleEffects";
 import { decalPreset, type DecalDef, type DecalMark } from "./decals";
 import { applyLightmapImage, bakeLightmap, layoutFingerprint, layoutLightmap, type LightmapLayout } from "./lightmap";
@@ -1017,6 +1018,41 @@ export const LOCKOUT_DECAL_MARKS: readonly DecalMark[] = [
 const ENERGY_PULSE = { rate: 0.35, depth: 0.35 } as const;
 const ENERGY_PULSE_WALL = { rate: 0.35, depth: 0.2 } as const;
 
+/**
+ * The energy's glow as a material graph (EP7): its HDR cyan × bands running
+ * diagonally across the arena (dot of the world position with an axis, minus
+ * time) × the breath (cos of time at ENERGY_PULSE's rate, dipping by a third).
+ */
+const ENERGY_FLOW: MaterialGraph = {
+  nodes: [
+    { id: "pos", op: "position", x: 20, y: 20 },
+    { id: "axis", op: "constant", params: { value: [2.5, 0.6, 2.5] }, x: 20, y: 90 },
+    { id: "along", op: "dot", inputs: { a: "pos", b: "axis" }, x: 210, y: 30 },
+    { id: "time", op: "time", x: 20, y: 180 },
+    { id: "speed", op: "constant", params: { value: 3 }, x: 20, y: 240 },
+    { id: "shift", op: "multiply", inputs: { a: "time", b: "speed" }, x: 210, y: 160 },
+    { id: "phase", op: "subtract", inputs: { a: "along", b: "shift" }, x: 400, y: 60 },
+    { id: "wave", op: "sin", inputs: { x: "phase" }, x: 400, y: 150 },
+    { id: "half", op: "constant", params: { value: 0.5 }, x: 210, y: 260 },
+    { id: "wave01", op: "multiply", inputs: { a: "wave", b: "half" }, x: 590, y: 120 },
+    { id: "band", op: "add", inputs: { a: "wave01", b: "half" }, x: 590, y: 200 },
+    { id: "dim", op: "constant", params: { value: 0.6 }, x: 400, y: 260 },
+    { id: "full", op: "constant", params: { value: 1 }, x: 400, y: 330 },
+    { id: "flow", op: "mix", inputs: { a: "dim", b: "full", t: "band" }, x: 780, y: 220 },
+    { id: "rate", op: "constant", params: { value: 2 * Math.PI * ENERGY_PULSE.rate }, x: 20, y: 330 },
+    { id: "beat", op: "multiply", inputs: { a: "time", b: "rate" }, x: 210, y: 340 },
+    { id: "cos", op: "cos", inputs: { x: "beat" }, x: 210, y: 420 },
+    { id: "swing", op: "constant", params: { value: ENERGY_PULSE.depth / 2 }, x: 20, y: 420 },
+    { id: "sway", op: "multiply", inputs: { a: "cos", b: "swing" }, x: 400, y: 420 },
+    { id: "rest", op: "constant", params: { value: 1 - ENERGY_PULSE.depth / 2 }, x: 400, y: 500 },
+    { id: "breath", op: "add", inputs: { a: "sway", b: "rest" }, x: 590, y: 440 },
+    { id: "cyan", op: "constant", params: { value: [0.5, 1.7, 1.9] }, x: 590, y: 300 },
+    { id: "lit", op: "multiply", inputs: { a: "cyan", b: "flow" }, x: 960, y: 260 },
+    { id: "glow", op: "multiply", inputs: { a: "lit", b: "breath" }, x: 960, y: 380 },
+  ],
+  outputs: { emissive: "glow" },
+};
+
 function mapMesh(): MeshAsset {
   const tex = lockoutTextures();
   const WALL_TEX = tex.wall;
@@ -1094,6 +1130,9 @@ function mapMesh(): MeshAsset {
     emissiveFactor: [0.5, 1.7, 1.9],
     // The energy trim breathes: a slow pulse, dipping by a third.
     emissivePulse: ENERGY_PULSE,
+    // …and flows (ENGINE_PARITY_ROADMAP.md EP7): a material graph runs bands of
+    // light along the strips and markers, over the same slow breath.
+    graph: ENERGY_FLOW,
   };
   const g = MAP_GEOMETRY;
   return {

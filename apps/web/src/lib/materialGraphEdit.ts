@@ -24,8 +24,33 @@ import {
 export const NODE_WIDTH = 156;
 export const NODE_HEADER = 26;
 export const NODE_ROW = 22;
-/** Where the output node sits on the canvas. */
-export const OUTPUT_AT = { x: 620, y: 30 } as const;
+/** The tallest a node gets (its header, inputs and param rows), for keeping new nodes clear of others. */
+const NODE_TALL = NODE_HEADER + 5 * NODE_ROW;
+
+/** Where the output node sits on the canvas: clear of every node, to their right. */
+export function outputAt(graph: MaterialGraph): { x: number; y: number } {
+  const right = graph.nodes.reduce((max, n) => Math.max(max, (n.x ?? 0) + NODE_WIDTH), 0);
+  return { x: Math.max(420, right + 80), y: 30 };
+}
+
+/**
+ * A spot near `want` where a new node overlaps none already there: stepping
+ * down, then across, until it's clear.
+ */
+export function freeSpot(graph: MaterialGraph, want: { x: number; y: number }): { x: number; y: number } {
+  const out = outputAt(graph);
+  const overlaps = (x: number, y: number) =>
+    graph.nodes.some((n) => Math.abs((n.x ?? 0) - x) < NODE_WIDTH + 16 && Math.abs((n.y ?? 0) - y) < NODE_TALL) ||
+    (Math.abs(out.x - x) < NODE_WIDTH + 16 && Math.abs(out.y - y) < NODE_TALL + 40);
+  for (let col = 0; col < 8; col += 1) {
+    for (let row = 0; row < 12; row += 1) {
+      const x = want.x + col * (NODE_WIDTH + 24);
+      const y = want.y + row * 40;
+      if (!overlaps(x, y)) return { x, y };
+    }
+  }
+  return want;
+}
 
 /** Where a node's output port is, and its `i`th input port (canvas coordinates). */
 export function outputPort(node: GraphNode): { x: number; y: number } {
@@ -34,9 +59,9 @@ export function outputPort(node: GraphNode): { x: number; y: number } {
 export function inputPort(node: GraphNode, i: number): { x: number; y: number } {
   return { x: node.x ?? 0, y: (node.y ?? 0) + NODE_HEADER + i * NODE_ROW + NODE_ROW / 2 };
 }
-/** The output node's port for each material output. */
-export function materialPort(output: GraphOutput, outputs: readonly GraphOutput[]): { x: number; y: number } {
-  return { x: OUTPUT_AT.x, y: OUTPUT_AT.y + NODE_HEADER + outputs.indexOf(output) * NODE_ROW + NODE_ROW / 2 };
+/** The output node's port for each material output, with the output node at `at`. */
+export function materialPort(output: GraphOutput, outputs: readonly GraphOutput[], at: { x: number; y: number }): { x: number; y: number } {
+  return { x: at.x, y: at.y + NODE_HEADER + outputs.indexOf(output) * NODE_ROW + NODE_ROW / 2 };
 }
 
 /** A new graph: the material's own base colour, wired through. */

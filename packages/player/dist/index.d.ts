@@ -3312,6 +3312,8 @@ declare class WebglSceneRenderer implements SceneRenderer {
     /** What the last submitted frame drew (for the profiler and tests); GPU time when the browser can time it. */
     lastFrameStats: RenderStats;
     private readonly timer;
+    /** Whether the era samples nearest (it shapes every program variant). */
+    private readonly nearest;
     private constructor();
     /**
      * Build the renderer for one framebuffer size, or null when WebGL2 is missing,
@@ -3325,6 +3327,10 @@ declare class WebglSceneRenderer implements SceneRenderer {
     get ready(): boolean;
     settle(draw: SceneDraw): FrameState;
     private submit;
+    /** Programs by material graph (EP7), linked on first use. */
+    private readonly graphPrograms;
+    /** The program a material draws with: the plain one, or its graph's variant. */
+    private programOf;
     /** The opaque depth, as a texture the transparent pass can read (EP6b): made on first use. */
     private sceneDepth;
     /** Copy the main framebuffer's depth into {@link sceneDepth} and bind it, leaving the main framebuffer bound. */
@@ -3437,6 +3443,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private readonly width;
     private readonly height;
     private readonly pipeline;
+    /** Build the pipelines for a shader variant (a material graph's, EP7). */
+    private readonly pipelinesFor;
     private readonly bindGroupLayout;
     private readonly colourTexture;
     private readonly depthTexture;
@@ -3541,6 +3549,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     settle(draw: SceneDraw): FrameState;
     /** Encode and submit one frame, and start a readback if a buffer is free. */
     private submit;
+    /** Shader variants by material graph (EP7), built on first use. */
+    private readonly graphPipelines;
+    /** The pipelines a material draws with: the plain shader's, or its graph's variant. */
+    private pipelinesOf;
     /** Await one readback and publish it as the newest frame. */
     private drain;
     /** Grow the per-draw uniform buffer to hold at least `count` draws. */
@@ -3708,6 +3720,8 @@ interface PbrMaterial {
     readonly metallicFactor?: number;
     readonly roughnessFactor?: number;
     readonly emissiveFactor?: readonly [number, number, number];
+    /** A material graph (EP7) always takes the PBR path. */
+    readonly graph?: unknown;
 }
 /**
  * Resolve a draw's PBR inputs, matching `buildPbrFrag`. `hasMr`/`hasOcc`/`hasEmis`
