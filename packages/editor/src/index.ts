@@ -235,6 +235,7 @@ export {
   LIGHTMAP_RANGE,
   applyLightmapImage,
   bakeLightmap,
+  bakeLightProbes,
   layoutFingerprint,
   layoutLightmap,
   withLightmap,
@@ -461,6 +462,19 @@ export {
   type GraphStep,
   type MaterialGraph,
 } from "./model/materialGraph";
+export {
+  MAX_LIGHT_PROBES,
+  PROBE_FACES,
+  decodeLightProbes,
+  encodeLightProbes,
+  lightProbeTexels,
+  planProbeGrid,
+  probePosition,
+  quantizeLightProbes,
+  sampleLightProbes,
+  type LightProbeGrid,
+  type StoredLightProbes,
+} from "./model/lightProbes";
 export {
   MAX_PARTICLE_EFFECTS,
   MAX_PARTICLES_PER_EFFECT,

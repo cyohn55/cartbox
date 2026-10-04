@@ -16,6 +16,7 @@
  * multiple lights, tone mapping, and shadows (see AAA_TIER_ROADMAP.md).
  */
 
+import { decodeLightProbes, type LightProbeGrid, type StoredLightProbes } from "./lightProbes";
 import {
   orthographicMatrix,
   renderShadowMap,
@@ -73,6 +74,11 @@ export interface SceneLighting {
    * behind the geometry are what shine through. Absent = none.
    */
   readonly shafts?: SunShafts | null;
+  /**
+   * Baked light probes (ENGINE_PARITY_ROADMAP.md EP9; see lightProbes.ts):
+   * things without a light map take their ambient from this grid. Absent = none.
+   */
+  readonly lightProbes?: StoredLightProbes | null;
 }
 
 const clamp01 = (n: number): number => Math.max(0, Math.min(1, n));
@@ -143,6 +149,8 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
   const fog = parseFog(record.fog);
   const probes = parseReflectionProbes(record.probes);
   const shafts = parseShafts(record.shafts);
+  // Kept only when it decodes: a bad grid is dropped, never half-used.
+  const lightProbes = decodeLightProbes(record.lightProbes) ? (record.lightProbes as StoredLightProbes) : null;
 
   const lights = Array.isArray(record.lights)
     ? record.lights.map(parseLight).filter((l): l is SceneLight => l !== null)
@@ -164,6 +172,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     ...(fog ? { fog } : {}),
     ...(probes.length > 0 ? { probes } : {}),
     ...(shafts ? { shafts } : {}),
+    ...(lightProbes ? { lightProbes } : {}),
   };
 }
 
@@ -353,12 +362,25 @@ export function removeSceneLight(lighting: SceneLighting, index: number): SceneL
 
 /** The authored gradient as an {@link EnvironmentLight} the rasteriser samples. */
 export function sceneLightingEnvironment(lighting: SceneLighting): EnvironmentLight {
+  const grid = lighting.lightProbes ? decodedProbes(lighting.lightProbes) : null;
   return {
     sky: lighting.environment.sky,
     horizon: lighting.environment.horizon,
     ground: lighting.environment.ground,
     intensity: lighting.environment.intensity,
+    ...(grid ? { lightProbes: grid } : {}),
   };
+}
+
+const decoded = new WeakMap<StoredLightProbes, LightProbeGrid | null>();
+/** A stored probe grid, decoded once per stored object. */
+function decodedProbes(stored: StoredLightProbes): LightProbeGrid | null {
+  let grid = decoded.get(stored);
+  if (grid === undefined) {
+    grid = decodeLightProbes(stored);
+    decoded.set(stored, grid);
+  }
+  return grid;
 }
 
 /** The tone-map for the scene, or null when the creator left it off. */
