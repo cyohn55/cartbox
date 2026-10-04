@@ -18,12 +18,14 @@ import {
   MAX_REFLECTION_PROBES,
   effectActive,
   emissiveAnimation,
+  spotCone,
   fogIsVolumetric,
   type EnvironmentLight,
   type Mat4,
   type MeshMaterial,
   type ReflectionProbeSet,
   type SceneFog,
+  type SceneLight,
   type SurfaceEffect,
 } from "@cartbox/editor";
 
@@ -93,13 +95,14 @@ export const UNIFORM_BYTES_USED = 768;
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
 /**
- * Floats per light in the storage buffer: three vec4s —
- *   d0: xyz = direction (directional) or world position (point), w = kind (0/1)
+ * Floats per light in the storage buffer: four vec4s —
+ *   d0: xyz = direction (directional) or world position (point, spot), w = kind (0 directional, 1 point, 2 spot)
  *   d1: rgb = colour, w = intensity
- *   d2: x = point range (0 = no falloff)
- * Matches the `Light` struct in WebgpuSceneRenderer's WGSL.
+ *   d2: x = range (0 = no falloff), y = spot cone's outer cosine, z = its inner cosine
+ *   d3: xyz = spot beam axis (unit, the way it points)
+ * Matches the `Light` struct in the WGSL and GLSL scene shaders.
  */
-export const LIGHT_FLOATS = 12;
+export const LIGHT_FLOATS = 16;
 
 /**
  * Floats per reflection probe in its buffer: four vec4s — box min, box max,
@@ -124,12 +127,14 @@ export function packProbes(set: ReflectionProbeSet | null | undefined): Float32A
 
 /** A minimal light for {@link packLights} (mirrors editor's SceneLight). */
 export interface PackableLight {
-  readonly kind: "directional" | "point";
+  readonly kind: "directional" | "point" | "spot";
   readonly direction?: readonly [number, number, number];
   readonly position?: readonly [number, number, number];
   readonly color: readonly [number, number, number];
   readonly intensity: number;
   readonly range?: number;
+  readonly innerAngle?: number;
+  readonly outerAngle?: number;
 }
 
 /**
@@ -141,17 +146,27 @@ export function packLights(lights: readonly PackableLight[]): Float32Array {
   const out = new Float32Array(Math.max(1, lights.length) * LIGHT_FLOATS);
   lights.forEach((light, i) => {
     const base = i * LIGHT_FLOATS;
-    const point = light.kind === "point";
-    const v = point ? light.position ?? [0, 0, 0] : light.direction ?? [0, 1, 0];
+    const placed = light.kind !== "directional";
+    const v = placed ? light.position ?? [0, 0, 0] : light.direction ?? [0, 1, 0];
     out[base] = v[0]!;
     out[base + 1] = v[1]!;
     out[base + 2] = v[2]!;
-    out[base + 3] = point ? 1 : 0;
+    out[base + 3] = light.kind === "spot" ? 2 : placed ? 1 : 0;
     out[base + 4] = light.color[0]!;
     out[base + 5] = light.color[1]!;
     out[base + 6] = light.color[2]!;
     out[base + 7] = light.intensity;
     out[base + 8] = light.range ?? 0;
+    if (light.kind === "spot") {
+      const [cosOuter, cosInner] = spotCone(light as SceneLight);
+      out[base + 9] = cosOuter;
+      out[base + 10] = cosInner;
+      const axis = light.direction ?? [0, -1, 0];
+      const len = Math.hypot(axis[0]!, axis[1]!, axis[2]!) || 1;
+      out[base + 12] = axis[0]! / len;
+      out[base + 13] = axis[1]! / len;
+      out[base + 14] = axis[2]! / len;
+    }
   });
   return out;
 }

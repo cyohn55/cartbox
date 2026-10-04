@@ -106,7 +106,7 @@ function clampTriple(value: readonly [number, number, number]): [number, number,
 /** Read one authored light defensively, dropping anything malformed to a default. */
 function parseLight(value: unknown): SceneLight | null {
   const raw = (value ?? {}) as Record<string, unknown>;
-  const kind = raw.kind === "point" ? "point" : raw.kind === "directional" ? "directional" : null;
+  const kind = raw.kind === "point" ? "point" : raw.kind === "spot" ? "spot" : raw.kind === "directional" ? "directional" : null;
   if (!kind) return null;
   const color = isFiniteTriple(raw.color) ? clampTriple(raw.color) : ([1, 1, 1] as [number, number, number]);
   const intensity = typeof raw.intensity === "number" && Number.isFinite(raw.intensity) ? Math.max(0, raw.intensity) : 1;
@@ -116,6 +116,13 @@ function parseLight(value: unknown): SceneLight | null {
   }
   const position = isFiniteTriple(raw.position) ? raw.position : ([0, 1, 0] as [number, number, number]);
   const range = typeof raw.range === "number" && Number.isFinite(raw.range) ? Math.max(0, raw.range) : 0;
+  if (kind === "spot") {
+    const direction = isFiniteTriple(raw.direction) ? raw.direction : ([0, -1, 0] as [number, number, number]);
+    const angle = (v: unknown, fallback: number) => (typeof v === "number" && Number.isFinite(v) ? Math.min(89, Math.max(0, v)) : fallback);
+    const outerAngle = Math.max(1, angle(raw.outerAngle, 30));
+    const innerAngle = Math.min(outerAngle, angle(raw.innerAngle, outerAngle * 0.75));
+    return { kind, position, direction, color, intensity, range, innerAngle, outerAngle };
+  }
   return { kind, position, color, intensity, range };
 }
 

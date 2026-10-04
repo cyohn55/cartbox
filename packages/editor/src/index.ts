@@ -352,7 +352,22 @@ export {
   type RenderGeometryOptions,
   depthLinearTerms,
   softFade,
+  spotCone,
 } from "./render/meshRasterizer";
+export {
+  CLUSTER_CELLS,
+  CLUSTER_INDEX_CAP,
+  CLUSTER_MAX_PER_CELL,
+  CLUSTER_X,
+  CLUSTER_Y,
+  CLUSTER_Z,
+  buildLightClusters,
+  clusterSlice,
+  clusterTile,
+  lightBounded,
+  orderLights,
+  type LightClusters,
+} from "./render/lightClusters";
 export {
   frustumPlanes,
   aabbOutsideFrustum,
