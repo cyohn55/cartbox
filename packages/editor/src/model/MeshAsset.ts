@@ -25,6 +25,7 @@
 
 import { bytesToBase64, base64ToBytes } from "./base64";
 import { readSurfaceEffects, writeSurfaceEffects } from "./materialEffects";
+import type { MaterialGraph } from "./materialGraph";
 import {
   MAX_CLIP_KEYS,
   MAX_CLIPS,
@@ -188,6 +189,12 @@ export interface MeshMaterial {
    * meet the floor and walls without a hard line. Absent or 0 is a hard edge.
    */
   readonly softDepth?: number;
+  /**
+   * A material graph (EP7): nodes wired into the base colour, alpha,
+   * emissive, metallic and roughness, replacing the material's own values for
+   * whichever it drives. A material with a graph always takes the PBR path.
+   */
+  readonly graph?: MaterialGraph;
 }
 
 /** One triangle list with a single material. */
@@ -404,6 +411,7 @@ export interface SerializedMaterial {
   alphaMode?: "mask" | "blend" | "additive";
   alphaCutoff?: number;
   softDepth?: number;
+  graph?: MaterialGraph;
 }
 interface SerializedPrimitive {
   positions: string;
