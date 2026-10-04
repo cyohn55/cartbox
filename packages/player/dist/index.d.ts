@@ -3073,6 +3073,8 @@ interface SceneRenderer {
      * screen. A renderer that draws synchronously has nothing to settle.
      */
     settle?(draw: SceneDraw): FrameState;
+    /** False while a GPU renderer has no finished frame to show yet (just built); absent for one that always has. */
+    readonly ready?: boolean;
     dispose(): void;
     /** What the last frame drew, for the profiler (see debug/profiler.ts). */
     readonly lastFrameStats?: RenderStats;
@@ -3112,6 +3114,7 @@ declare class CappedSceneRenderer implements SceneRenderer {
     get lastFrameStats(): RenderStats | undefined;
     render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
     settle(draw: SceneDraw): FrameState;
+    get ready(): boolean | undefined;
     dispose(): void;
 }
 /** True when a model's caps constrain the scene, so wrapping would do something. */
@@ -3305,6 +3308,8 @@ declare class WebglSceneRenderer implements SceneRenderer {
     render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
     /** Take the newest finished readback, if any (never waits). */
     private collect;
+    /** Whether a finished GPU frame exists to show (false until the first readback lands). */
+    get ready(): boolean;
     settle(draw: SceneDraw): FrameState;
     private submit;
     private ensureCapacity;
@@ -3512,6 +3517,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     /** A one-off rgba8unorm upload of a decoded image. */
     private uploadRgba;
     render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
+    /** Whether a finished GPU frame exists to show (false until the first readback lands). */
+    get ready(): boolean;
     settle(draw: SceneDraw): FrameState;
     /** Encode and submit one frame, and start a readback if a buffer is free. */
     private submit;

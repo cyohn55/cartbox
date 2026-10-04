@@ -193,7 +193,7 @@ export function emptyMeshSidecar(): MeshSidecar {
 }
 
 /** A stable-ish unique id for a new mesh entry. */
-function newMeshId(): string {
+export function newMeshId(): string {
   return `mesh-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`}`;
 }
 

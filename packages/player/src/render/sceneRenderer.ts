@@ -164,6 +164,8 @@ export interface SceneRenderer {
    * screen. A renderer that draws synchronously has nothing to settle.
    */
   settle?(draw: SceneDraw): FrameState;
+  /** False while a GPU renderer has no finished frame to show yet (just built); absent for one that always has. */
+  readonly ready?: boolean;
   dispose(): void;
   /** What the last frame drew, for the profiler (see debug/profiler.ts). */
   readonly lastFrameStats?: RenderStats;
@@ -251,6 +253,10 @@ export class CappedSceneRenderer implements SceneRenderer {
 
   settle(draw: SceneDraw): FrameState {
     return this.inner.settle?.(draw) ?? "current";
+  }
+
+  get ready(): boolean | undefined {
+    return this.inner.ready;
   }
 
   dispose(): void {

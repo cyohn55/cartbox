@@ -344,3 +344,12 @@ export function rotatedTransform(start: Transform, parentWorld: Mat4 | null, axi
   const back = inv ? multiplyMat4(inv, turned) : turned;
   return { position: start.position, rotation: decomposeModelMatrix(back).rotation, scale: start.scale };
 }
+
+/** A point turned `angle` radians about the world `axis` through `pivot` (moving several objects as one). */
+export function rotateAbout(point: Vec3, pivot: Vec3, axis: Vec3, angle: number): Vec3 {
+  const m = axisRotation(axis, angle);
+  const x = point[0] - pivot[0];
+  const y = point[1] - pivot[1];
+  const z = point[2] - pivot[2];
+  return [pivot[0] + m[0]! * x + m[4]! * y + m[8]! * z, pivot[1] + m[1]! * x + m[5]! * y + m[9]! * z, pivot[2] + m[2]! * x + m[6]! * y + m[10]! * z];
+}

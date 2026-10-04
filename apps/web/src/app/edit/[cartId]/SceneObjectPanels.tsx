@@ -59,56 +59,144 @@ import { RailGroup, RailHint, RangeControl } from "./railControls";
 const inputStyle: React.CSSProperties = { width: "100%", minWidth: 0, padding: "4px 6px", borderRadius: 6 };
 
 /** The placed meshes as a tree; click a row to select it. */
+/** A scene command (EP3), from a shortcut or a hierarchy button. */
+export type SceneCommand = "duplicate" | "copy" | "paste" | "delete" | "hide" | "unhideAll" | "isolate" | "lock" | "selectAll" | "deselect";
+
+/**
+ * The scene's objects as a tree. Click to select, Ctrl/Cmd-click to toggle one
+ * in or out, Shift-click to add; each row has an eye (hide it and what's under
+ * it in the scene view) and a lock (can't be picked or moved there). The
+ * buttons and the scene shortcuts work on the whole selection.
+ */
 export function HierarchyPanel({
   sidecar,
-  selectedId,
+  selectedIds,
   onSelect,
+  hidden,
+  locked,
+  onToggleHidden,
+  onToggleLocked,
+  onCommand,
+  onKey,
 }: {
   sidecar: MeshSidecar;
-  selectedId: string | null;
-  onSelect: (id: string) => void;
+  selectedIds: readonly string[];
+  onSelect: (id: string, mods: { toggle: boolean; add: boolean }) => void;
+  hidden?: ReadonlySet<string>;
+  locked?: ReadonlySet<string>;
+  onToggleHidden?: (id: string) => void;
+  onToggleLocked?: (id: string) => void;
+  onCommand?: (command: SceneCommand) => void;
+  onKey?: (event: React.KeyboardEvent) => boolean;
 }) {
   const rows = hierarchyRows(sidecar);
+  const primary = selectedIds.at(-1) ?? null;
+  const selected = new Set(selectedIds);
   return (
-    <RailGroup label={`Hierarchy · ${sidecar.meshes.length}`}>
+    <RailGroup label={`Hierarchy · ${sidecar.meshes.length}${selectedIds.length > 1 ? ` · ${selectedIds.length} selected` : ""}`}>
       {rows.length === 0 ? (
         <RailHint>No meshes yet. Import one above.</RailHint>
       ) : (
-        <div role="tree" aria-label="Scene hierarchy" style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          {rows.map(({ entry, depth, hasChildren }) => (
-            <button
-              key={entry.id}
-              type="button"
-              role="treeitem"
-              aria-level={depth + 1}
-              aria-selected={entry.id === selectedId}
-              className={styles.toolBtn}
-              onClick={() => onSelect(entry.id)}
-              style={{
-                justifyContent: "flex-start",
-                paddingLeft: 8 + depth * 14,
-                outline: entry.id === selectedId ? "2px solid #7db8fc" : "none",
-              }}
-              title={entry.tags?.length ? `${entry.name} · ${entry.tags.join(", ")}` : entry.name}
-            >
-              <span aria-hidden style={{ opacity: 0.55, width: 12, flex: "none" }}>
-                {hasChildren ? "▾" : depth > 0 ? "·" : ""}
-              </span>
-              {entry.prefab && (
-                <span aria-hidden title="Part of a prefab copy" style={{ color: "#7db8fc", marginRight: 4, flex: "none" }}>
-                  ◆
-                </span>
-              )}
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 170 - depth * 14 }}>
-                {entry.name}
-              </span>
-              {entry.tags && entry.tags.length > 0 && (
-                <span aria-hidden style={{ marginLeft: "auto", opacity: 0.55, fontSize: 11 }}>
-                  #{entry.tags.length}
-                </span>
-              )}
+        <div
+          role="tree"
+          aria-label="Scene hierarchy"
+          aria-multiselectable
+          style={{ display: "flex", flexDirection: "column", gap: 2 }}
+          onKeyDown={(event) => {
+            onKey?.(event);
+          }}
+        >
+          {rows.map(({ entry, depth, hasChildren }) => {
+            const isHidden = hidden?.has(entry.id) ?? false;
+            const isLocked = locked?.has(entry.id) ?? false;
+            return (
+              <div key={entry.id} style={{ display: "flex", alignItems: "center", gap: 2 }}>
+                <button
+                  type="button"
+                  role="treeitem"
+                  aria-level={depth + 1}
+                  aria-selected={selected.has(entry.id)}
+                  className={styles.toolBtn}
+                  onClick={(event) => onSelect(entry.id, { toggle: event.ctrlKey || event.metaKey, add: event.shiftKey })}
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    justifyContent: "flex-start",
+                    paddingLeft: 8 + depth * 14,
+                    outline: entry.id === primary ? "2px solid #7db8fc" : selected.has(entry.id) ? "1px solid #7db8fc" : "none",
+                    background: selected.has(entry.id) ? "rgba(125, 184, 252, 0.12)" : undefined,
+                    opacity: isHidden ? 0.5 : 1,
+                  }}
+                  title={entry.tags?.length ? `${entry.name} · ${entry.tags.join(", ")}` : entry.name}
+                >
+                  <span aria-hidden style={{ opacity: 0.55, width: 12, flex: "none" }}>
+                    {hasChildren ? "▾" : depth > 0 ? "·" : ""}
+                  </span>
+                  {entry.prefab && (
+                    <span aria-hidden title="Part of a prefab copy" style={{ color: "#7db8fc", marginRight: 4, flex: "none" }}>
+                      ◆
+                    </span>
+                  )}
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 150 - depth * 14 }}>{entry.name}</span>
+                  {entry.tags && entry.tags.length > 0 && (
+                    <span aria-hidden style={{ marginLeft: "auto", opacity: 0.55, fontSize: 11 }}>
+                      #{entry.tags.length}
+                    </span>
+                  )}
+                </button>
+                {onToggleHidden && (
+                  <button
+                    type="button"
+                    className={styles.toolBtn}
+                    aria-pressed={isHidden}
+                    aria-label={`${isHidden ? "Show" : "Hide"} ${entry.name} in the scene view`}
+                    title={isHidden ? "Hidden in the scene view (H)" : "Hide in the scene view (H)"}
+                    onClick={() => onToggleHidden(entry.id)}
+                    style={{ flex: "none", width: 24, padding: 0, justifyContent: "center", opacity: isHidden ? 1 : 0.45 }}
+                  >
+                    {isHidden ? "◌" : "◉"}
+                  </button>
+                )}
+                {onToggleLocked && (
+                  <button
+                    type="button"
+                    className={styles.toolBtn}
+                    aria-pressed={isLocked}
+                    aria-label={`${isLocked ? "Unlock" : "Lock"} ${entry.name}`}
+                    title={isLocked ? "Locked: can't be picked or moved in the scene view (L)" : "Lock (L)"}
+                    onClick={() => onToggleLocked(entry.id)}
+                    style={{ flex: "none", width: 24, padding: 0, justifyContent: "center", opacity: isLocked ? 1 : 0.35 }}
+                  >
+                    {isLocked ? "🔒" : "🔓"}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {onCommand && rows.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
+          <button type="button" className={styles.toolBtn} disabled={selectedIds.length === 0} onClick={() => onCommand("duplicate")} title="Duplicate the selection (Ctrl+D)">
+            Duplicate
+          </button>
+          <button type="button" className={styles.toolBtn} disabled={selectedIds.length === 0} onClick={() => onCommand("copy")} title="Copy the selection, also to paste into another cart (Ctrl+C)">
+            Copy
+          </button>
+          <button type="button" className={styles.toolBtn} onClick={() => onCommand("paste")} title="Paste copied objects (Ctrl+V)">
+            Paste
+          </button>
+          <button type="button" className={styles.toolBtn} disabled={selectedIds.length === 0} onClick={() => onCommand("delete")} title="Delete the selection and what's under it (Delete)">
+            Delete
+          </button>
+          <button type="button" className={styles.toolBtn} disabled={selectedIds.length === 0 && !hidden?.size} onClick={() => onCommand("isolate")} title="Show only the selection, or everything again (Shift+H)">
+            Isolate
+          </button>
+          {hidden && hidden.size > 0 && (
+            <button type="button" className={styles.toolBtn} onClick={() => onCommand("unhideAll")} title="Show everything (Alt+H)">
+              Show all
             </button>
-          ))}
+          )}
         </div>
       )}
     </RailGroup>
