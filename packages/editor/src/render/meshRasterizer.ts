@@ -963,6 +963,9 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
   // Without a depth buffer everything is drawn in one sorted list; with one,
   // the see-through triangles follow the opaque scene, farthest first.
   const ordered = queue.length > 0 ? queue : deferred;
+  // Soft particles read the opaque depth back as distance: only with a depth
+  // buffer and a perspective projection (an orthographic view keeps hard edges).
+  const linear = style.zBuffer && projection[15] === 0 ? depthLinearTerms(projection) : null;
   if (ordered.length > 0) {
     // Ascending view z = farthest first, since the view looks down -z.
     ordered.sort((a, b) => a.viewDepth - b.viewDepth);
@@ -992,6 +995,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
         style,
         fog,
         triangle.alpha,
+        linear,
       );
     }
   }
@@ -1422,21 +1426,40 @@ interface PrimitiveExtras {
 export interface AlphaState {
   readonly mode: 0 | 1 | 2 | 3;
   readonly cutoff: number;
+  /** World distance over which a see-through surface fades into what's behind it (EP6b); 0 = a hard edge. */
+  readonly soft: number;
 }
-export const OPAQUE_ALPHA: AlphaState = { mode: 0, cutoff: 0 };
+export const OPAQUE_ALPHA: AlphaState = { mode: 0, cutoff: 0, soft: 0 };
 
 /** A material's {@link AlphaState}. */
 export function alphaStateOf(material: MeshAsset["primitives"][number]["material"]): AlphaState {
   switch (material.alphaMode) {
     case "mask":
-      return { mode: 1, cutoff: material.alphaCutoff ?? 0.5 };
+      return { mode: 1, cutoff: material.alphaCutoff ?? 0.5, soft: 0 };
     case "blend":
-      return { mode: 2, cutoff: 0 };
+      return { mode: 2, cutoff: 0, soft: material.softDepth ?? 0 };
     case "additive":
-      return { mode: 3, cutoff: 0 };
+      return { mode: 3, cutoff: 0, soft: material.softDepth ?? 0 };
     default:
       return OPAQUE_ALPHA;
   }
+}
+
+/**
+ * The two projection terms that turn a depth-buffer NDC z back into a view
+ * distance: `distance = b / (z + a)` (from z_clip = a·z_view + b, w = −z_view).
+ */
+export function depthLinearTerms(projection: Mat4): readonly [number, number] {
+  return [projection[10]!, projection[14]!];
+}
+
+/**
+ * Soft particles (EP6b): how much of a see-through pixel survives at view
+ * distance `own` when the opaque surface behind it is at `behind` — fading to
+ * nothing as the two meet, over `soft` world units.
+ */
+export function softFade(own: number, behind: number, soft: number): number {
+  return Math.min(1, Math.max(0, (behind - own) / soft));
 }
 
 /**
@@ -1741,7 +1764,10 @@ function rasterizeTriangle(
   style: RasterStyle = DEFAULT_RASTER_STYLE,
   fog: FrameFog | null = null,
   alpha: AlphaState = OPAQUE_ALPHA,
+  /** {@link depthLinearTerms} of the projection, for soft see-through edges (null: hard edges). */
+  linear: readonly [number, number] | null = null,
 ): void {
+  const soft = linear && alpha.mode >= 2 && alpha.soft > 0 ? alpha.soft : 0;
   // Perspective divide to NDC, then to screen pixels. NDC spans the full extent
   // of each axis independently, so x maps by width and y by height — a mesh drawn
   // into a non-square framebuffer (the runtime's 240×136) is undistorted as long
@@ -1885,6 +1911,9 @@ function rasterizeTriangle(
         bl = (bl * tb) / 255;
         al = (al * ta) / 255;
       }
+      // A soft surface fades out where it meets the opaque scene behind it. An
+      // empty pixel (depth cleared to Infinity) reads as the far plane, as a GPU's cleared 1 does.
+      if (soft > 0) al *= softFade(linear![1] / (zNdc + linear![0]), linear![1] / (Math.min(depth[di]!, 1) + linear![0]), soft);
       if (al < 1) continue; // fully transparent texels are never drawn
       // A cut-out surface drops what's below its threshold.
       if (alpha.mode === 1 && al < alpha.cutoff * 255) continue;

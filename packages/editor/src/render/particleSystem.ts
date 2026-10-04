@@ -107,6 +107,9 @@ export class ParticleSystem {
         roughnessFactor: 1,
         ...(glow ? { emissiveFactor: [effect.glow, effect.glow, effect.glow] as [number, number, number] } : {}),
         alphaMode: glow ? "additive" : "blend",
+        // Soft edges (EP6b): a sprite fades out over half its size as it nears
+        // the floor or a wall, instead of cutting a hard line into it.
+        softDepth: Math.max(effect.size, effect.sizeEnd) * 0.5,
       };
       const primitive: MeshPrimitive = {
         positions: new Float32Array(capacity * 12),

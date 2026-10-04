@@ -3325,6 +3325,10 @@ declare class WebglSceneRenderer implements SceneRenderer {
     get ready(): boolean;
     settle(draw: SceneDraw): FrameState;
     private submit;
+    /** The opaque depth, as a texture the transparent pass can read (EP6b): made on first use. */
+    private sceneDepth;
+    /** Copy the main framebuffer's depth into {@link sceneDepth} and bind it, leaving the main framebuffer bound. */
+    private copySceneDepth;
     private ensureCapacity;
     private bindTexture;
     private textureFor;
@@ -3436,6 +3440,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private readonly bindGroupLayout;
     private readonly colourTexture;
     private readonly depthTexture;
+    /** Group 1 (EP6b): the opaque depth for the see-through pass, or a blank for the opaque one. */
+    private readonly depthGroups;
     private readonly sampler;
     private readonly blankTexture;
     /** 1x1 r32float, bound to the shadow slot when no shadow map is active. */
@@ -3584,7 +3590,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  * 256  lightMvp   mat4x4<f32>  64   world→light-clip for this draw (shadow mapping)
  * 320  shadow     vec4<f32>    16   x = 1 when shadowed, y = map size, z = bias, w = strength
  * 336  envMeta    vec4<f32>    16   xyz = env-map mean radiance, w = 1 when an env map is bound
- * 352  tonemap    vec4<f32>    16   x = 1 when tone-mapping, y = exposure
+ * 352  tonemap    vec4<f32>    16   x = 1 when tone-mapping, y = exposure,
+ *                                    z = soft-edge distance (EP6b; 0 = hard)
  * 368  ssao       vec4<f32>    16   x = 1 when an SSAO buffer is bound, y = light count,
  *                                    z = 1 when a baked light map is bound,
  *                                    w = reflection-probe count
@@ -3592,7 +3599,9 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  * 448  fog        vec4<f32>    16   rgb = fog colour, w = density
  * 464  fogParams  vec4<f32>    16   x = 1 when fogged, y = start distance, z = max amount,
  *                                    w = 1 when the fog has height/volume/glow layers
- * 480  shadow2    vec4<f32>    16   x = slope-scaled shadow bias, y = 1 for 2x2 PCF
+ * 480  shadow2    vec4<f32>    16   x = slope-scaled shadow bias, y = 1 for 2x2 PCF,
+ *                                    zw = projection[10], [14]: depth → view distance
+ *                                    as zw.y / (ndcZ + zw.x) (soft edges, EP6b)
  * 496  surface0   vec4<f32>    16   x = detail scale, y = detail strength (0 = none),
  *                                    z = reflectivity, w = 1 when the MR alpha masks it
  * 512  surface1   vec4<f32>    16   xy = emissive UV offset (its scroll this frame)
@@ -3795,6 +3804,14 @@ interface InstanceUniform {
     readonly alpha?: {
         readonly mode: number;
         readonly cutoff: number;
+    };
+    /**
+     * Soft edges (EP6b): the distance a see-through surface fades over as it
+     * meets the opaque scene, and the projection terms that read depth back as distance.
+     */
+    readonly soft?: {
+        readonly distance: number;
+        readonly linear: readonly [number, number];
     };
 }
 /**

@@ -182,6 +182,12 @@ export interface MeshMaterial {
   readonly alphaMode?: "mask" | "blend" | "additive";
   /** The alpha below which a "mask" surface is dropped (default 0.5). */
   readonly alphaCutoff?: number;
+  /**
+   * Soft edges (EP6b): a blended or added surface fades out over this many
+   * world units as it nears the opaque surface behind it, so smoke and glows
+   * meet the floor and walls without a hard line. Absent or 0 is a hard edge.
+   */
+  readonly softDepth?: number;
 }
 
 /** One triangle list with a single material. */
@@ -397,6 +403,7 @@ export interface SerializedMaterial {
   blendRoughness?: number;
   alphaMode?: "mask" | "blend" | "additive";
   alphaCutoff?: number;
+  softDepth?: number;
 }
 interface SerializedPrimitive {
   positions: string;

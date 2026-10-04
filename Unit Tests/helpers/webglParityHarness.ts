@@ -134,6 +134,16 @@ function scenes(): Record<string, Scene> {
       ],
       draw: baseDraw,
     },
+    // Soft edges (EP6b): a blended and an added quad standing through the
+    // floor fade out as they meet it, reading the opaque depth back as distance.
+    soft: {
+      instances: [
+        { mesh: floor(3, 0), model: composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]) },
+        { mesh: quad({ baseColorFactor: [0.2, 0.6, 1, 0.8], metallicFactor: 0, roughnessFactor: 1, alphaMode: "blend", softDepth: 0.8 }), model: composeModelMatrix([-0.7, 0.4, 0], [0, 10, 0], [0.8, 0.8, 1]) },
+        { mesh: quad({ baseColorFactor: [1, 0.4, 0.1, 0.9], alphaMode: "additive", softDepth: 0.5 }), model: composeModelMatrix([0.8, 0.3, 0.5], [0, -20, 0], [0.6, 0.6, 1]) },
+      ],
+      draw: () => ({ ...baseDraw(), view: viewMatrix([0, 4, 7], [0, 0, 0]) }),
+    },
     // Shield effects (H11): rim, glow and bands within rounding, and the camo dither dropping the very same pixels.
     effects: {
       instances: [

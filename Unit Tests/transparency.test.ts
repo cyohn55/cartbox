@@ -2,18 +2,24 @@
  * Transparency (ENGINE_PARITY_ROADMAP.md EP6): blended, added and cut-out
  * materials in the software rasteriser (drawn after the opaque scene,
  * farthest first, never writing depth), the GPU path's batching and
- * premultiplied composite, and the materials' stored and glTF forms.
+ * premultiplied composite, and the materials' stored and glTF forms. Soft
+ * edges (EP6b): see-through surfaces fading out where they meet the scene.
  */
 
 import { describe, expect, it } from "vitest";
 
 import {
+  ParticleSystem,
   composeModelMatrix,
+  depthLinearTerms,
   deserializeMeshAsset,
+  orthographicMatrix,
+  particlePreset,
   encodeGlb,
   parseGlb,
   projectionMatrix,
   renderMeshScene,
+  softFade,
   serializeMeshAsset,
   viewMatrix,
   type DecodedTexture,
@@ -22,7 +28,7 @@ import {
   type MeshSceneInstance,
 } from "@cartbox/editor";
 
-import { batchInstances, compositeFrame } from "../packages/player/src/render/gpuFrame";
+import { batchInstances, compositeFrame, softEdges } from "../packages/player/src/render/gpuFrame";
 
 const SIZE = 32;
 const flat = { metallicFactor: 0, roughnessFactor: 1 } as const;
@@ -44,7 +50,8 @@ function quad(material: Partial<MeshMaterial>, z = 0, half = 1): MeshAsset {
 const at = (mesh: MeshAsset, z = 0, textures?: (DecodedTexture | null)[]): MeshSceneInstance => ({ mesh, model: composeModelMatrix([0, 0, z], [0, 0, 0], [1, 1, 1]), ...(textures ? { textures } : {}) });
 
 /** Draw a scene head-on, lit flat (ambient 1), over black; the centre pixel and the depth buffer. */
-function draw(instances: MeshSceneInstance[]) {
+const PERSPECTIVE = projectionMatrix((50 * Math.PI) / 180, 1, 0.1, 100);
+function draw(instances: MeshSceneInstance[], projection = PERSPECTIVE) {
   const out = new Uint8ClampedArray(SIZE * SIZE * 4);
   const depth = new Float32Array(SIZE * SIZE);
   renderMeshScene(instances, {
@@ -53,7 +60,7 @@ function draw(instances: MeshSceneInstance[]) {
     out,
     depth,
     view: viewMatrix([0, 0, 3], [0, 0, 0]),
-    projection: projectionMatrix((50 * Math.PI) / 180, 1, 0.1, 100),
+    projection,
     lightDirection: [0, 0, 1],
     ambient: 1,
     background: [0, 0, 0, 255],
@@ -155,5 +162,50 @@ describe("stored and glTF forms", () => {
     expect(parseGlb(encodeGlb(quad({ alphaMode: "blend" }))).primitives[0]!.material.alphaMode).toBe("blend");
     expect(parseGlb(encodeGlb(quad({ alphaMode: "additive" }))).primitives[0]!.material.alphaMode).toBe("blend");
     expect(parseGlb(encodeGlb(quad({}))).primitives[0]!.material.alphaMode).toBeUndefined();
+  });
+});
+
+describe("soft edges (EP6b)", () => {
+  it("reads depth back as view distance", () => {
+    const [a, b] = depthLinearTerms(PERSPECTIVE);
+    expect(b / (-1 + a)).toBeCloseTo(0.1, 6); // the near plane
+    expect(b / (1 + a)).toBeCloseTo(100, 3); // the far plane
+    expect(softFade(2, 2.25, 1)).toBeCloseTo(0.25);
+    expect(softFade(2, 5, 1)).toBe(1);
+    expect(softFade(2, 1, 1)).toBe(0);
+  });
+
+  it("fades a soft pane by how close it stands to the wall behind it", () => {
+    const soft = (gap: number) => draw([at(wall), at(quad({ baseColorFactor: [0, 0, 1, 0.5], alphaMode: "blend", softDepth: 1, ...flat }), gap)]).px;
+    // 0.25 in front of the wall: a quarter of its alpha (0.125) survives.
+    const near25 = soft(0.25);
+    expect(near25[2]).toBeCloseTo(255 * 0.125, -0.5);
+    expect(near25[0]).toBeCloseTo(255 * 0.875, -0.5);
+    // A full softDepth away it's untouched, as a hard pane.
+    expect(soft(1.2)).toEqual(draw([at(wall), at(pane(0.5), 1.2)]).px);
+  });
+
+  it("softens added light too, and keeps hard edges in an orthographic view", () => {
+    const glow = quad({ baseColorFactor: [0, 1, 0, 1], alphaMode: "additive", softDepth: 1, ...flat });
+    expect(draw([at(wall), at(glow, 0.5)]).px[1]).toBeCloseTo(128, -0.5);
+    const ortho = orthographicMatrix(-2, 2, -2, 2, 0.1, 10);
+    near(draw([at(wall), at(glow, 0.5)], ortho).px.slice(0, 3), [255, 255, 0]);
+  });
+
+  it("gives the GPU a batch's soft edges only for see-through, softened surfaces in perspective", () => {
+    const material = { name: "m", baseColorFactor: [1, 1, 1, 1] as [number, number, number, number], baseColorImage: null, softDepth: 0.5 };
+    expect(softEdges(material, 2, PERSPECTIVE)).toEqual({ distance: 0.5, linear: depthLinearTerms(PERSPECTIVE) });
+    expect(softEdges(material, 0, PERSPECTIVE)).toBeUndefined();
+    expect(softEdges({ ...material, softDepth: undefined }, 2, PERSPECTIVE)).toBeUndefined();
+    expect(softEdges(material, 3, orthographicMatrix(-1, 1, -1, 1, 0.1, 10))).toBeUndefined();
+  });
+
+  it("stores a material's soft depth, and gives particle sprites one from their size", () => {
+    expect(deserializeMeshAsset(serializeMeshAsset(quad({ alphaMode: "blend", softDepth: 0.4 }))).primitives[0]!.material.softDepth).toBe(0.4);
+    expect(deserializeMeshAsset(serializeMeshAsset(quad({ alphaMode: "blend", softDepth: -1 }))).primitives[0]!.material.softDepth).toBeUndefined();
+    const smoke = { ...particlePreset("smoke", "smoke"), size: 0.6, sizeEnd: 1.4 };
+    const system = new ParticleSystem([smoke]);
+    system.burst(0, [0, 0, 0]);
+    expect(system.instanceFor([0, 0, -1])!.mesh.primitives[0]!.material.softDepth).toBeCloseTo(0.7);
   });
 });

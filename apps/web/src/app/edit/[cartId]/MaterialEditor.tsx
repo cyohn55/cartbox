@@ -112,7 +112,13 @@ export function MaterialEditor({ mesh, onChange }: MaterialEditorProps) {
         ariaLabel="Transparency"
         wrap
         selected={material.alphaMode ?? "opaque"}
-        onSelect={(mode) => patch(mode === "opaque" ? { alphaMode: undefined, alphaCutoff: undefined } : { alphaMode: mode, ...(mode === "mask" ? { alphaCutoff: material.alphaCutoff ?? 0.5 } : { alphaCutoff: undefined }) })}
+        onSelect={(mode) =>
+          patch(
+            mode === "opaque"
+              ? { alphaMode: undefined, alphaCutoff: undefined, softDepth: undefined }
+              : { alphaMode: mode, ...(mode === "mask" ? { alphaCutoff: material.alphaCutoff ?? 0.5, softDepth: undefined } : { alphaCutoff: undefined }) },
+          )
+        }
         options={[
           { id: "opaque", label: "Opaque", hint: "Solid: opacity and the texture's alpha are ignored" },
           { id: "mask", label: "Cut out", hint: "Texels below the threshold are dropped (foliage, grilles)" },
@@ -133,20 +139,33 @@ export function MaterialEditor({ mesh, onChange }: MaterialEditorProps) {
           onChange={(value) => patch({ alphaCutoff: value })}
         />
       )}
+      {(material.alphaMode === "blend" || material.alphaMode === "additive") && (
+        <RangeControl
+          label="Soft edge"
+          nested
+          min={0}
+          max={2}
+          step={0.05}
+          value={material.softDepth ?? 0}
+          ariaLabel="Soft edge"
+          display={material.softDepth ? `${material.softDepth.toFixed(2)} m` : "hard"}
+          onChange={(value) => patch({ softDepth: value > 0 ? value : undefined })}
+        />
+      )}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         <button
           type="button"
           className={styles.toolBtn}
           title="Clear, glossy and reflective"
-          onClick={() => patch({ alphaMode: "blend", alphaCutoff: undefined, baseColorFactor: [0.85, 0.93, 1, 0.22], metallicFactor: 0, roughnessFactor: 0.04, reflectivity: 1.6 })}
+          onClick={() => patch({ alphaMode: "blend", alphaCutoff: undefined, softDepth: undefined, baseColorFactor: [0.85, 0.93, 1, 0.22], metallicFactor: 0, roughnessFactor: 0.04, reflectivity: 1.6 })}
         >
           Glass
         </button>
         <button
           type="button"
           className={styles.toolBtn}
-          title="Deep blue-green, smooth, mostly opaque"
-          onClick={() => patch({ alphaMode: "blend", alphaCutoff: undefined, baseColorFactor: [0.1, 0.38, 0.5, 0.7], metallicFactor: 0, roughnessFactor: 0.08, reflectivity: 1.2 })}
+          title="Deep blue-green, smooth, mostly opaque, fading out at the shore"
+          onClick={() => patch({ alphaMode: "blend", alphaCutoff: undefined, softDepth: 0.6, baseColorFactor: [0.1, 0.38, 0.5, 0.7], metallicFactor: 0, roughnessFactor: 0.08, reflectivity: 1.2 })}
         >
           Water
         </button>
