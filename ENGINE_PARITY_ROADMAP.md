@@ -285,10 +285,27 @@ preview.
       - **Lockout:** 40 lights. Cyan pools along every energy strip and vent
         and at the weapon markers, plus two floodlights from the towers onto
         the walkway.
-- [ ] **EP8b. Cascaded sun shadows.** Split the view's depth into cascades,
+- [x] **EP8b. Cascaded sun shadows.** Split the view's depth into cascades,
       each with its own sun shadow map, fitted and stabilised (texel-snapped)
       to its slice, so near shadows stay sharp while far ones still reach the
       horizon. *Lockout:* crisp shadows at your feet and across the whole map.
+
+      *Done:*
+      - **Near cascade:** the main map still covers the whole scene. A second
+        map of the same size covers a box round the camera: 30 % of the
+        scene's radius, 4–24 m, so several times sharper.
+      - **Stabilised:** its centre snaps to a grid half the box's size, so it
+        doesn't shimmer as the camera moves. Its static depth is cached like
+        the main map's and redrawn only when the camera crosses a cell. Moving
+        objects are drawn over it each frame, uploading only the changed rects.
+      - **Choosing a map:** each fragment uses the near map when its world
+        position sits well inside it (95 % of its extent), else the main map.
+        This is the same in the software rasteriser, WGSL and GLSL, and the GPUs
+        pack both maps side by side in one texture.
+      - **Quality:** a high-quality feature; medium and low keep the single
+        map. The movers now use the static map's light reach too.
+      - **Lockout:** shadows at your feet are crisp while the far map still
+        covers the arena.
 - [ ] **EP8c. Spot and point light shadows.** Shadow maps for spot lights
       (perspective) and point lights (six faces), packed in an atlas and
       shared by all three renderers. *Lockout:* the tower floodlights throw

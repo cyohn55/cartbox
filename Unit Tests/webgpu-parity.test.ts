@@ -606,6 +606,37 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     renderer.dispose();
   });
 
+  it("picks the near shadow cascade where it covers a point, the main map elsewhere, like the software rasteriser", async () => {
+    // EP8b: both maps packed side by side in one texture; the near one chosen from the world position.
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+    const instances = shadowScene();
+    const lightView = viewMatrix([0, 10, 0], [0, 0, 0], [0, 0, -1]);
+    const far = renderShadowMap(instances, { lightView, lightProjection: orthographicMatrix(-6, 6, -6, 6, 0.1, 20), size: 64, depth: new Float32Array(64 * 64) });
+    const near = renderShadowMap(instances, { lightView, lightProjection: orthographicMatrix(-2, 2, -2, 2, 0.1, 20), size: 64, depth: new Float32Array(64 * 64) });
+    const shadow = { ...far, pcf: true, near: { lightViewProj: near.lightViewProj, depth: near.depth, bias: 0.002, slopeBias: 0 } };
+    const lit = (withNear = true): SceneDraw => ({ ...draw(), view: viewMatrix([0, 7, 8], [0, 0, 0]), lightDirection: [0, 1, 0], shadow: withNear ? shadow : far });
+    renderer.render(instances, lit());
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.tick?.();
+    }
+    const gpu = lit();
+    renderer.render(instances, gpu);
+    const software = lit();
+    new SoftwareSceneRenderer().render(instances, software);
+    const coarse = lit(false);
+    new SoftwareSceneRenderer().render(instances, coarse);
+    let maxDelta = 0;
+    let sharper = 0;
+    for (let i = 0; i < W * H * 4; i += 1) {
+      maxDelta = Math.max(maxDelta, Math.abs(gpu.out[i]! - software.out[i]!));
+      if (software.out[i] !== coarse.out[i]) sharper += 1;
+    }
+    expect(sharper).toBeGreaterThan(10); // the near cascade really changed the shadow's edge
+    expect(maxDelta).toBeLessThanOrEqual(4);
+    renderer.dispose();
+  });
+
   it("matches the software rasteriser on directional shadows (within float tolerance)", async () => {
     // The GPU samples the *same* CPU-generated shadow map (uploaded as r32float)
     // with the same nearest compare + bias, so the shadow decision is identical;

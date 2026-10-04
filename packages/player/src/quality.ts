@@ -33,6 +33,8 @@ export interface QualitySettings {
   readonly shadows: boolean;
   /** Shadow map edge in texels. */
   readonly shadowMapSize: number;
+  /** Add a near shadow cascade round the camera (ENGINE_PARITY_ROADMAP.md EP8b): sharp shadows close up. */
+  readonly shadowCascades?: boolean;
   /** The largest 3D render scale for a software first-person view (the governor works below it). */
   readonly maxRenderScale: number;
   /** Post-effects this preset turns off (the costly multi-pass ones). */
@@ -45,7 +47,7 @@ export interface QualitySettings {
 }
 
 export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualitySettings>> = {
-  high: { level: "high", shadows: true, shadowMapSize: 1024, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1 },
+  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1 },
   medium: { level: "medium", shadows: true, shadowMapSize: 512, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6 },
   low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3 },
 };

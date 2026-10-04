@@ -759,6 +759,8 @@ interface QualitySettings {
     readonly shadows: boolean;
     /** Shadow map edge in texels. */
     readonly shadowMapSize: number;
+    /** Add a near shadow cascade round the camera (ENGINE_PARITY_ROADMAP.md EP8b): sharp shadows close up. */
+    readonly shadowCascades?: boolean;
     /** The largest 3D render scale for a software first-person view (the governor works below it). */
     readonly maxRenderScale: number;
     /** Post-effects this preset turns off (the costly multi-pass ones). */
@@ -3330,6 +3332,12 @@ declare class WebglSceneRenderer implements SceneRenderer {
     /** The clustered lights' params and info this frame (EP8; see the shader's clusterParams/clusterInfo). */
     private readonly clusterParams;
     private readonly clusterInfo;
+    /** The near shadow cascade this frame (EP8b; see the shader's nearShadowMvp/nearShadow). */
+    private readonly nearShadowMvp;
+    private readonly nearShadow;
+    /** Maps side by side in the shadow texture (2 with a near cascade), and the near map last uploaded in full. */
+    private shadowCascades;
+    private nearUploaded;
     /** The cell table and index list as integer textures, made on first use. */
     private clusterTextures;
     /** The per-frame uniforms a program needs (probes, clusters), set when it's put to use. */
@@ -3491,6 +3499,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      */
     private shadowTexture;
     private shadowMapSize;
+    /** Maps side by side in the shadow texture: 1, or 2 with a near cascade (EP8b). */
+    private shadowCascades;
+    /** The near cascade's depth array last uploaded in full (as shadowUploaded is the main map's). */
+    private nearUploaded;
     /**
      * The bound equirectangular environment map — the 1x1 blank (reusing the white
      * texture) when the frame has none, else an rgba8unorm upload of the decoded
@@ -5072,16 +5084,9 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private readonly output;
     private readonly presented;
     private readonly depth;
-    /** Shadow-map depth scratch, allocated once the first shadowed frame needs it. */
-    private shadowDepth;
-    /** Cached shadow depth of everything not posed (see buildShadow), and what it was built for. */
-    private staticShadow;
-    private staticShadowKey;
-    private staticShadowLighting;
-    /** The light's world→clip matrix of the cached static map (movers' footprints are projected with it). */
-    private staticShadowMatrix;
-    /** Shadow-map rects last frame's movers drew into (restored from the static map next frame). */
-    private shadowRects;
+    /** The sun's shadow maps (see buildShadow): the whole scene, and the near cascade round the camera (EP8b). */
+    private farShadow;
+    private nearShadow;
     /** Instances ever posed on the front layer (a held weapon): never part of the static shadow. */
     private readonly everFront;
     /** Each mesh's local bounding box, for projecting shadow footprints. */
@@ -5319,6 +5324,12 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * full-scene shadow pass per frame into a memcpy plus a few characters.
      */
     private buildShadow;
+    /**
+     * One shadow map for this frame: the layer's cached static depth (redrawn
+     * when `key` or the rig changes), copied, with this frame's movers drawn over
+     * it — and the texels that changed since last frame, for a GPU's partial upload.
+     */
+    private renderShadowLayer;
     /**
      * The shadow-map texels an instance can cover: its bounding box through the
      * light's (orthographic) projection, padded for filtering and rounding.
