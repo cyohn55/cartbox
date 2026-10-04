@@ -142,8 +142,23 @@ general Unity/UE5 gap); items here that close a line there tick it off too.
       ejects brass casings with every shot (the player's and nearby bots') and
       drops a killed soldier's weapon — the first-person model without its
       hands — to clatter on the deck.
-- [ ] **H11. Shield effects.** A per-pose material override: the shield flare
+- [x] **H11. Shield effects.** A per-pose material override: the shield flare
       when hit, the recharge shimmer, and an Active Camo refraction.
+      *Done:* a scene instance can carry a surface effect over its PBR
+      materials: a fresnel rim added to the material's, an untextured glow,
+      bands of light climbing the body, and camo. All three renderers draw it
+      the same way. Camo is screen-door transparency: an ordered-dither pattern
+      that crawls with time and drops the same pixels on the CPU, in WGSL and
+      in GLSL. None of the renderers blends, so it is a see-through outline
+      rather than true refraction. `cartbox.shield(obj, flare, shimmer, camo)`
+      sets a standing effect on an object and everything under it. Only
+      changes are sent, so a cart can call it every tick. The gold flare, the
+      white-gold shimmer and the cool camo edge come from one mapping
+      (`shieldEffect`). The Mesh tab's "Shield effects" sliders preview it on
+      the selected object. Lockout soldiers' shields flare gold where they're
+      hit and fade over a few ticks. Shields now recharge, Halo-style: after
+      4 s without a hit they refill over 2 s, shimmering as they climb, and a
+      soldier another browser owns shimmers too.
 - [ ] **H12. Viewmodel animation.** Reload, melee and run-bob clips on the
       held weapons, and first-person arms.
 - [ ] **H13. More timelines.** A killcam and a post-game camera sweep.

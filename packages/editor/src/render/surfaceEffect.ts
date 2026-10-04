@@ -57,8 +57,8 @@ export function effectActive(e: SurfaceEffect | null | undefined): e is SurfaceE
 }
 
 /** A shield's colours (H11): the gold flare of a hit, its white-gold recharge bands, and Active Camo's cool edge. */
-export const SHIELD_FLARE_RIM: readonly [number, number, number] = [1.9, 1.4, 0.45];
-export const SHIELD_FLARE_GLOW: readonly [number, number, number] = [0.45, 0.33, 0.08];
+export const SHIELD_FLARE_RIM: readonly [number, number, number] = [1.6, 1.2, 0.4];
+export const SHIELD_FLARE_GLOW: readonly [number, number, number] = [0.32, 0.24, 0.06];
 export const SHIELD_SHIMMER_BANDS: readonly [number, number, number] = [1.0, 0.85, 0.45];
 export const SHIELD_CAMO_RIM: readonly [number, number, number] = [0.35, 0.5, 0.7];
 /** The share of a fully cloaked surface's pixels dropped (the rest keep its outline readable). */
