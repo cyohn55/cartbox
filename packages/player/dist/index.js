@@ -8834,6 +8834,64 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     }
     this.animated = new Set([...skinning.keys()].filter((i) => this.live.has(i)));
   }
+  /**
+   * Apply an editor's edits to the running scene (ENGINE_PARITY_ROADMAP.md EP5):
+   * objects' placements, their meshes and materials, and the lighting rig, shown
+   * from the next frame without restarting the cart. `next` must be the same
+   * scene structure — the same objects, parents and prefab reserves in the same
+   * order — or nothing changes and this answers false (the editor then says the
+   * change applies on the next run). Physics bodies keep simulating where they are.
+   */
+  async applySceneEdits(next) {
+    const before = this.scene;
+    if (next.instances.length !== before.instances.length) return false;
+    for (let i = 0; i < next.instances.length; i += 1) {
+      const a = before.instances[i];
+      const b = next.instances[i];
+      if ((a.parent ?? -1) !== (b.parent ?? -1) || (a.pooled?.root ?? -1) !== (b.pooled?.root ?? -1) || !!a.terrain !== !!b.terrain) return false;
+    }
+    let moved = false;
+    for (let i = 0; i < next.instances.length; i += 1) {
+      const a = before.instances[i];
+      const b = next.instances[i];
+      const local = b.local ?? b.model;
+      if (!sameMatrix(a.model, b.model) || !sameMatrix(a.local ?? a.model, local)) {
+        this.instances[i] = { ...this.instances[i], model: b.model };
+        if (this.hierarchy) this.hierarchy.locals[i] = local;
+        this.blockBounds.delete(i);
+        moved = true;
+      }
+      if (meshSignature(a.mesh) !== meshSignature(b.mesh)) {
+        const textured = await decodeMeshTextures(b.mesh, this.decodeKtx2 ?? void 0);
+        const skinned = isSkinned2(b.mesh) ? createLiveSkinnedMesh(b.mesh) : null;
+        if (skinned) this.live.set(i, skinned);
+        else this.live.delete(i);
+        this.lastSkin.delete(i);
+        this.instances[i] = { ...textured, ...skinned ? { mesh: skinned.mesh } : {}, model: this.instances[i].model };
+        moved = true;
+      }
+    }
+    if (JSON.stringify(before.lighting ?? null) !== JSON.stringify(next.lighting ?? null)) {
+      const lighting = next.lighting;
+      let environment = lighting ? sceneLightingEnvironment(lighting) : null;
+      let skyMap = null;
+      if (lighting?.sky && environment) {
+        skyMap = bakeSkyPanorama(lighting.sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT);
+        const ibl = downsamplePanorama(skyMap, SKY_IBL_DOWNSAMPLE);
+        environment = { ...environment, map: ibl, average: computeEnvironmentAverage(ibl) };
+      }
+      this.environment = environment;
+      this.skyMap = skyMap;
+      this.skyCache = null;
+    }
+    this.scene = next;
+    if (moved) {
+      this.unpooled = this.pooledRoot.some((r) => r >= 0) ? this.instances.filter((_, i) => this.pooledRoot[i] < 0) : this.instances;
+      this.flat = null;
+      this.staticShadowKey = "";
+    }
+    return true;
+  }
   /** Apply a graphics quality preset (takes effect on the next frame). */
   setQuality(quality) {
     if (quality.shadowMapSize !== this.quality.shadowMapSize) {
@@ -9679,6 +9737,21 @@ function expandNearest(src, sw, sh, dst, dw, dh) {
     for (let x = 0; x < dw; x += 1) to[row + x] = from[srow + xs[x]];
     lastRow = sy;
   }
+}
+function sameMatrix(a, b) {
+  for (let i = 0; i < 16; i += 1) if (Math.abs(a[i] - b[i]) > 1e-9) return false;
+  return true;
+}
+function meshSignature(mesh) {
+  return mesh.primitives.map((p) => {
+    const scalars = {};
+    const images = [];
+    for (const [key, value] of Object.entries(p.material)) {
+      if (key.endsWith("Image")) images.push(value ? value.bytes?.length ?? 0 : 0);
+      else scalars[key] = value;
+    }
+    return `${p.positions.length}:${p.indices.length}:${JSON.stringify(scalars)}:${images.join(",")}`;
+  }).join("|");
 }
 
 // src/world/worldScene.ts
@@ -12722,6 +12795,9 @@ var Player = class {
       }
       this.frameHandle = this.view.requestAnimationFrame(this.loop);
     };
+    /** Turn the profiler on (it starts empty) or off. */
+    /** An editor's camera, looking at the 3D scene instead of the cart's (see PlayerHandle.setEditorCamera). */
+    this.editorCamera = null;
     /** Counts level loads, so a load overtaken by a newer switch doesn't activate. */
     this.levelLoads = 0;
     /** Objects out of the current level. */
@@ -13000,7 +13076,14 @@ var Player = class {
     this.gamepad.reset();
     void this.audio?.pause();
   }
-  /** Turn the profiler on (it starts empty) or off. */
+  setEditorCamera(camera) {
+    this.editorCamera = camera;
+  }
+  /** Apply an editor's edits to the running 3D scene (see PlayerHandle.updateMeshScene). */
+  async updateMeshScene(scene) {
+    if (!this.meshSurface) return false;
+    return this.meshSurface.applySceneEdits(scene);
+  }
   setProfiling(on) {
     if (on === (this.profiler !== null)) return;
     this.profiler = on ? new Profiler() : null;
@@ -13360,6 +13443,10 @@ var Player = class {
           this.meshSurface.setSkinning(placed ? this.runtime.channel.skinning((o) => placed[o] ?? null) : this.runtime.channel.skinning());
         }
         this.meshSurface.setCartLights(decodeWorldLights(mailbox));
+        if (this.editorCamera) {
+          this.meshSurface.setCameraOverride(this.editorCamera);
+          this.meshSurface.setHudMode(false);
+        }
       }
       if (this.worldSurface && this.console) {
         const mailbox = this.console.readMailbox();
@@ -14182,7 +14269,9 @@ function mount(container, options) {
     breakableLines: () => player.breakableLines(),
     setProfiling: (on) => player.setProfiling(on),
     profile: () => player.profile(),
-    quality: () => player.quality()
+    quality: () => player.quality(),
+    setEditorCamera: (camera) => player.setEditorCamera(camera),
+    updateMeshScene: (scene) => player.updateMeshScene(scene)
   };
 }
 export {

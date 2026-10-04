@@ -2560,6 +2560,19 @@ interface PlayerHandle {
     setProfiling(on: boolean): void;
     /** Where recent frames spent their time, what the 3D scene drew, memory and network use; null while profiling is off. */
     profile(): ProfileSnapshot | null;
+    /**
+     * Look at the 3D scene through an editor's camera instead of the cart's (an
+     * orbit, as cartbox.meshcam takes it), or give the camera back with null —
+     * ejecting from the game to look around while it plays (EP5).
+     */
+    setEditorCamera(camera: MailboxMeshCamera | null): void;
+    /**
+     * Apply an editor's edits to the running 3D scene — placements, meshes and
+     * materials, lighting — without restarting. Resolves false when the edit
+     * changed the scene's structure (objects added, removed or re-parented),
+     * which takes a fresh run to show.
+     */
+    updateMeshScene(scene: MeshScene): Promise<boolean>;
 }
 /** One scene object in a live inspection snapshot. */
 interface InspectedObject {
@@ -4984,7 +4997,7 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private readonly inner;
     private readonly width;
     private readonly height;
-    private readonly scene;
+    private scene;
     /** The authored instances (baked placement); per-frame poses compose on top. */
     private readonly instances;
     /** Each instance's animation frames (textured), or null when it has none. */
@@ -4996,7 +5009,7 @@ declare class MeshOverlaySurface implements DisplaySurface {
      */
     private readonly renderer;
     /** The baked sky-dome panorama drawn behind a first-person view, or null. */
-    private readonly skyMap;
+    private skyMap;
     /** The environment the PBR shading samples (with the dome as its map), or null. */
     private environment;
     private readonly options;
@@ -5111,6 +5124,15 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * matrices changed, and it counts as moving this frame for the shadow cache.
      */
     setSkinning(skinning: ReadonlyMap<number, Float32Array>): void;
+    /**
+     * Apply an editor's edits to the running scene (ENGINE_PARITY_ROADMAP.md EP5):
+     * objects' placements, their meshes and materials, and the lighting rig, shown
+     * from the next frame without restarting the cart. `next` must be the same
+     * scene structure — the same objects, parents and prefab reserves in the same
+     * order — or nothing changes and this answers false (the editor then says the
+     * change applies on the next run). Physics bodies keep simulating where they are.
+     */
+    applySceneEdits(next: MeshScene): Promise<boolean>;
     /** Apply a graphics quality preset (takes effect on the next frame). */
     setQuality(quality: QualitySettings): void;
     /**

@@ -71,6 +71,7 @@ import { ShaderEditor } from "./ShaderEditor";
 import { AssetsEditor } from "./AssetsEditor";
 import { FilesEditor } from "./FilesEditor";
 import { MeshEditor } from "./MeshEditor";
+import type { PlaytestConfig } from "./ScenePlayView";
 import { WorldEditor } from "./WorldEditor";
 import { useEditorHistory, hashBytes, snapshotsEqual, type CartSnapshot } from "./useEditorHistory";
 import { saveCartLocally, saveCartToAccount, type SaveOutcome } from "./persistCart";
@@ -784,6 +785,30 @@ function WorkbenchBody({
     })();
   }, [runnable, rebakeMesh, sidecars.mesh, setSidecar]);
 
+  /**
+   * What playing inside the Mesh tab needs (EP5): the same inputs the Run
+   * overlay gets, built at the moment Play is pressed (sprite-backed textures
+   * rebaked first, as a playtest does).
+   */
+  const startPlaytest = useCallback(async (): Promise<PlaytestConfig | null> => {
+    if (!runnable) return null;
+    const baked = await rebakeMesh();
+    if (baked !== sidecars.mesh) setSidecar("mesh", baked ?? null);
+    return {
+      bytes: runnable.saveTic(),
+      engineUrl,
+      modelId,
+      postFx: fx,
+      scene: scene ?? undefined,
+      anim: anim ?? undefined,
+      particles: particles ?? undefined,
+      collision: collision ?? undefined,
+      flags: flags ?? undefined,
+      world: world ?? undefined,
+      mesh: parseMeshScene(baked ?? null),
+    };
+  }, [runnable, rebakeMesh, sidecars.mesh, setSidecar, engineUrl, modelId, fx, scene, anim, particles, collision, flags, world]);
+
   // ---- shortcuts ----------------------------------------------------------
 
   const bindings = useMemo<ReadonlyArray<readonly [Shortcut, () => void]>>(() => {
@@ -1301,7 +1326,7 @@ function WorkbenchBody({
           revision={revision}
         />
       )}
-      {activeTab === "Mesh" && <MeshEditor key="mesh" sidecar={mesh} onSidecarChange={setMesh} code={doc} />}
+      {activeTab === "Mesh" && <MeshEditor key="mesh" sidecar={mesh} onSidecarChange={setMesh} code={doc} onStartPlay={startPlaytest} />}
       {activeTab === "Files" && (
         <FilesEditor
           key="files"

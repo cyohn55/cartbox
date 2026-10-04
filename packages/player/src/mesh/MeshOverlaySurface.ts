@@ -290,7 +290,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     private readonly inner: DisplaySurface,
     private readonly width: number,
     private readonly height: number,
-    private readonly scene: MeshScene,
+    private scene: MeshScene,
     /** The authored instances (baked placement); per-frame poses compose on top. */
     private readonly instances: MeshSceneInstance[],
     /** Each instance's animation frames (textured), or null when it has none. */
@@ -302,7 +302,7 @@ export class MeshOverlaySurface implements DisplaySurface {
      */
     private readonly renderer: SceneRenderer,
     /** The baked sky-dome panorama drawn behind a first-person view, or null. */
-    private readonly skyMap: DecodedTexture | null,
+    private skyMap: DecodedTexture | null,
     /** The environment the PBR shading samples (with the dome as its map), or null. */
     private environment: EnvironmentLight | null,
     private readonly options: MeshOverlayOptions = {},
@@ -374,6 +374,68 @@ export class MeshOverlaySurface implements DisplaySurface {
       this.lastSkin.set(i, matrices);
     }
     this.animated = new Set([...skinning.keys()].filter((i) => this.live.has(i)));
+  }
+
+  /**
+   * Apply an editor's edits to the running scene (ENGINE_PARITY_ROADMAP.md EP5):
+   * objects' placements, their meshes and materials, and the lighting rig, shown
+   * from the next frame without restarting the cart. `next` must be the same
+   * scene structure — the same objects, parents and prefab reserves in the same
+   * order — or nothing changes and this answers false (the editor then says the
+   * change applies on the next run). Physics bodies keep simulating where they are.
+   */
+  async applySceneEdits(next: MeshScene): Promise<boolean> {
+    const before = this.scene;
+    if (next.instances.length !== before.instances.length) return false;
+    for (let i = 0; i < next.instances.length; i += 1) {
+      const a = before.instances[i]!;
+      const b = next.instances[i]!;
+      if ((a.parent ?? -1) !== (b.parent ?? -1) || (a.pooled?.root ?? -1) !== (b.pooled?.root ?? -1) || !!a.terrain !== !!b.terrain) return false;
+    }
+    let moved = false;
+    for (let i = 0; i < next.instances.length; i += 1) {
+      const a = before.instances[i]!;
+      const b = next.instances[i]!;
+      const local = b.local ?? b.model;
+      if (!sameMatrix(a.model, b.model) || !sameMatrix(a.local ?? a.model, local)) {
+        this.instances[i] = { ...this.instances[i]!, model: b.model };
+        if (this.hierarchy) (this.hierarchy.locals as Mat4[])[i] = local;
+        this.blockBounds.delete(i);
+        moved = true;
+      }
+      if (meshSignature(a.mesh) !== meshSignature(b.mesh)) {
+        // New geometry or materials: decode its textures and draw it from the next frame.
+        const textured = await decodeMeshTextures(b.mesh, this.decodeKtx2 ?? undefined);
+        const skinned = isSkinned(b.mesh) ? createLiveSkinnedMesh(b.mesh) : null;
+        if (skinned) this.live.set(i, skinned);
+        else this.live.delete(i);
+        this.lastSkin.delete(i);
+        this.instances[i] = { ...textured, ...(skinned ? { mesh: skinned.mesh } : {}), model: this.instances[i]!.model };
+        moved = true;
+      }
+    }
+    if (JSON.stringify(before.lighting ?? null) !== JSON.stringify(next.lighting ?? null)) {
+      // The rig changed: re-bake the sky dome and the light the PBR shading samples.
+      const lighting = next.lighting;
+      let environment: EnvironmentLight | null = lighting ? sceneLightingEnvironment(lighting) : null;
+      let skyMap: DecodedTexture | null = null;
+      if (lighting?.sky && environment) {
+        skyMap = bakeSkyPanorama(lighting.sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT);
+        const ibl = downsamplePanorama(skyMap, SKY_IBL_DOWNSAMPLE);
+        environment = { ...environment, map: ibl, average: computeEnvironmentAverage(ibl) };
+      }
+      this.environment = environment;
+      this.skyMap = skyMap;
+      this.skyCache = null;
+    }
+    this.scene = next;
+    if (moved) {
+      this.unpooled = this.pooledRoot.some((r) => r >= 0) ? this.instances.filter((_, i) => this.pooledRoot[i]! < 0) : this.instances;
+      this.flat = null;
+      // The still objects' shadow was drawn where they stood: draw it again.
+      this.staticShadowKey = "";
+    }
+    return true;
   }
 
   /** Apply a graphics quality preset (takes effect on the next frame). */
@@ -1373,4 +1435,25 @@ function expandNearest(src: Uint8ClampedArray, sw: number, sh: number, dst: Uint
     for (let x = 0; x < dw; x += 1) to[row + x] = from[srow + xs[x]!]!;
     lastRow = sy;
   }
+}
+
+/** Whether two matrices are the same to within float noise. */
+function sameMatrix(a: Mat4, b: Mat4): boolean {
+  for (let i = 0; i < 16; i += 1) if (Math.abs(a[i]! - b[i]!) > 1e-9) return false;
+  return true;
+}
+
+/** A cheap fingerprint of a mesh's geometry and materials (what an editor edit can change); images count by size. */
+function meshSignature(mesh: MeshAsset): string {
+  return mesh.primitives
+    .map((p) => {
+      const scalars: Record<string, unknown> = {};
+      const images: number[] = [];
+      for (const [key, value] of Object.entries(p.material)) {
+        if (key.endsWith("Image")) images.push(value ? ((value as EncodedImage).bytes?.length ?? 0) : 0);
+        else scalars[key] = value;
+      }
+      return `${p.positions.length}:${p.indices.length}:${JSON.stringify(scalars)}:${images.join(",")}`;
+    })
+    .join("|");
 }

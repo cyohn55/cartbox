@@ -151,10 +151,30 @@ preview.
       Sounds aren't in it yet; they arrive with audio assets in EP12. The
       Lockout starter lists 54 assets, including the soldier mesh shared by
       its seven bots.
-- [ ] **EP5. Play in the editor.** Play the game inside the scene viewport,
+- [x] **EP5. Play in the editor.** Play the game inside the scene viewport,
       pause and step it, and eject to a free camera to look around. Edits made
       while playing (transforms, materials, lighting) show immediately and are
       reverted on stop unless you keep them.
+      *Done:* "▶ Play in scene" runs the cart inside the Mesh tab's view, with
+      the same inputs as the Run overlay. The hierarchy, inspector and content
+      browser stay usable beside it.
+      - **Controls:** Pause, Resume and Step. Eject hands the game's 3D camera
+        to a free camera, with the scene view's orbit, pan, dolly and
+        right-drag WASD fly (`PlayerHandle.setEditorCamera`). "Back to the
+        game's camera" returns it.
+      - **Live edits:** changes made while playing are pushed into the running
+        scene from the next frame, without a restart
+        (`PlayerHandle.updateMeshScene` → `MeshOverlaySurface.applySceneEdits`).
+        That covers placements (children follow their parents), meshes and
+        materials (textures re-decoded), and the lighting rig (sky and image
+        light re-baked); the cached static shadow is redrawn.
+      - **Structural changes:** adding, removing or re-parenting objects is
+        refused while playing, and the view says it shows on the next run.
+      - **Stop** puts the scene back as it was when Play was pressed, unless
+        "Keep changes" is ticked.
+
+      Lockout plays in the view, a match runs, Eject looks down on the gorge,
+      and raising the arena while it plays lifts it at once.
 
 ## Phase B — Rendering you can author
 

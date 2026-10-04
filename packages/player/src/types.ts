@@ -12,7 +12,7 @@ import type { NetSession } from "./net/NetSession.js";
 import type { ControlSettings } from "./controls.js";
 import type { ModelId } from "./models.js";
 import type { Replay } from "./replay.js";
-import type { MailboxEvent } from "./mailbox.js";
+import type { MailboxEvent, MailboxMeshCamera } from "./mailbox.js";
 import type { LightingOptions } from "./lighting/types.js";
 import type { PostFxSettings } from "./fx/postfx.js";
 import type { ProfileSnapshot } from "./debug/profiler.js";
@@ -313,6 +313,19 @@ export interface PlayerHandle {
   setProfiling(on: boolean): void;
   /** Where recent frames spent their time, what the 3D scene drew, memory and network use; null while profiling is off. */
   profile(): ProfileSnapshot | null;
+  /**
+   * Look at the 3D scene through an editor's camera instead of the cart's (an
+   * orbit, as cartbox.meshcam takes it), or give the camera back with null —
+   * ejecting from the game to look around while it plays (EP5).
+   */
+  setEditorCamera(camera: MailboxMeshCamera | null): void;
+  /**
+   * Apply an editor's edits to the running 3D scene — placements, meshes and
+   * materials, lighting — without restarting. Resolves false when the edit
+   * changed the scene's structure (objects added, removed or re-parented),
+   * which takes a fresh run to show.
+   */
+  updateMeshScene(scene: MeshScene): Promise<boolean>;
 }
 
 /** One scene object in a live inspection snapshot. */
