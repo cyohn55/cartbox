@@ -87,7 +87,7 @@ import {
 
 import { SoftwareSceneRenderer, applyScenePasses, type FrameState, type SceneDraw, type SceneRenderer } from "./sceneRenderer.js";
 import { webgpuCanHonour } from "./renderCaps.js";
-import { batchInstances, compositeFrame, presentFrame, type PrimitiveTextures } from "./gpuFrame.js";
+import { batchInstances, compositeFrame, presentFrame, softEdges, type PrimitiveTextures } from "./gpuFrame.js";
 import { WebgpuPassTimer } from "./gpuTimer.js";
 import type { RenderStats } from "../debug/profiler.js";
 import {
@@ -206,6 +206,9 @@ struct Probe {
 @group(0) @binding(14) var detailTex: texture_2d<f32>;
 // The blend surface's map (terrain snow over rock), mixed by the vertex weight.
 @group(0) @binding(15) var blendTex: texture_2d<f32>;
+// The opaque pass's depth (EP6b), read by the see-through pass for soft edges;
+// the opaque pass binds a blank in its place.
+@group(1) @binding(0) var sceneDepth: texture_depth_2d;
 
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] — fogLayerDepth in skyDome.ts.
@@ -398,6 +401,12 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   }
   // The CPU path skips a texel whose combined alpha is below 1/255 rather than
   // blending it, so this is a discard and not an alpha-blend state.
+  // Soft edges (EP6b): a see-through surface fades out as it meets the opaque
+  // scene behind it — both depths read back as view distance (shadow2.zw).
+  if (u.tonemap.z > 0.0) {
+    let behind = textureLoad(sceneDepth, vec2<i32>(in.pos.xy), 0);
+    colour.a *= clamp((u.shadow2.w / (behind + u.shadow2.z) - u.shadow2.w / (in.pos.z + u.shadow2.z)) / u.tonemap.z, 0.0, 1.0);
+  }
   if (colour.a * 255.0 < 1.0) { discard; }
   // A cut-out surface (EP6) drops what's below its threshold.
   if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && colour.a < u.view.w) { discard; }
@@ -696,6 +705,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     private readonly bindGroupLayout: any,
     private readonly colourTexture: any,
     private readonly depthTexture: any,
+    /** Group 1 (EP6b): the opaque depth for the see-through pass, or a blank for the opaque one. */
+    private readonly depthGroups: { readonly blank: any; readonly scene: any; readonly blankTexture: any },
     private readonly sampler: any,
     private readonly blankTexture: any,
     /** 1x1 r32float, bound to the shadow slot when no shadow map is active. */
@@ -825,7 +836,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       // One pipeline per transparency (EP6): opaque surfaces write depth;
       // blended ones (premultiplied colour over what's there) and added ones
       // test depth without writing it, drawn after the opaque scene.
-      const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
+      // Group 1 is the opaque depth for soft edges (EP6b): the see-through pass
+      // reads it while it is attached read-only; the opaque pass binds a blank.
+      const depthLayout = device.createBindGroupLayout({
+        entries: [{ binding: 0, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "depth" } }],
+      });
+      const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayout] });
       const pipelineFor = (blend: unknown, depthWrite: boolean) => device.createRenderPipeline({
         layout,
         vertex: {
@@ -872,8 +888,18 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const depthTexture = device.createTexture({
         size: { width, height },
         format: "depth24plus",
-        usage: 0x10, // RENDER_ATTACHMENT
+        usage: 0x10 | 0x04, // RENDER_ATTACHMENT | TEXTURE_BINDING (soft edges read it)
       });
+      const blankDepth = device.createTexture({
+        size: { width: 1, height: 1 },
+        format: "depth24plus",
+        usage: 0x10 | 0x04, // RENDER_ATTACHMENT | TEXTURE_BINDING
+      });
+      const depthGroups = {
+        blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }] }),
+        scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: depthTexture.createView() }] }),
+        blankTexture: blankDepth,
+      };
       // Filtering is the one era trait that is just a sampler setting. Nearest
       // gives the crunchy, aliased texels of a machine that could not filter;
       // linear gives the softness of one that could.
@@ -930,6 +956,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         bindGroupLayout,
         colourTexture,
         depthTexture,
+        depthGroups,
         sampler,
         blankTexture,
         blankShadow,
@@ -1145,6 +1172,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         effect: entry.effect ?? null,
         time: draw.time ?? 0,
         alpha: { mode: entry.alpha, cutoff: entry.primitive.material.alphaCutoff ?? 0.5 },
+        soft: softEdges(entry.primitive.material, entry.alpha, draw.projection),
         surface: resolveSurface(entry.primitive.material, draw.time ?? 0, entry.textures.detail !== null, entry.textures.mr !== null, {
           weights: entry.primitive.blend !== undefined,
           textured: entry.textures.blend !== null,
@@ -1157,7 +1185,29 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     for (const entry of draws) triangles += (entry.geometry.indexCount / 3) * entry.models.length;
     this.lastFrameStats = { drawCalls: draws.length, instances: instanceCount, triangles, gpuMs: this.timer?.lastMs ?? null };
 
+    // Soft edges (EP6b) need the opaque depth readable, so a frame that has
+    // any draws its see-through batches in a second pass, with the depth
+    // attached read-only and bound for the shader to sample.
+    const split = draws.some((entry) => softEdges(entry.primitive.material, entry.alpha, draw.projection) !== undefined);
+    const firstSeeThrough = split ? draws.findIndex((entry) => entry.alpha >= 2) : -1;
     const encoder = this.device.createCommandEncoder();
+    const drawRange = (pass: any, from: number, to: number, depthGroup: any) => {
+      pass.setBindGroup(1, depthGroup);
+      let bound: any = null;
+      for (let index = from; index < to; index += 1) {
+        const entry = draws[index]!;
+        const wanted = entry.alpha === 3 ? this.pipeline.add : entry.alpha === 2 ? this.pipeline.blend : this.pipeline.opaque;
+        if (wanted !== bound) {
+          pass.setPipeline(wanted);
+          bound = wanted;
+        }
+        pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.textures), [index * UNIFORM_STRIDE]);
+        pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
+        pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
+        pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+      }
+    };
+    const opaqueEnd = firstSeeThrough >= 0 ? firstSeeThrough : draws.length;
     const pass = encoder.beginRenderPass({
       colorAttachments: [
         {
@@ -1175,21 +1225,19 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         depthLoadOp: "clear",
         depthStoreOp: "store",
       },
-      ...(this.timer ? { timestampWrites: this.timer.writes() } : {}),
+      ...(this.timer ? { timestampWrites: this.timer.writes(firstSeeThrough >= 0 ? "begin" : "both") } : {}),
     });
-    let bound: any = null;
-    draws.forEach((entry, index) => {
-      const wanted = entry.alpha === 3 ? this.pipeline.add : entry.alpha === 2 ? this.pipeline.blend : this.pipeline.opaque;
-      if (wanted !== bound) {
-        pass.setPipeline(wanted);
-        bound = wanted;
-      }
-      pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.textures), [index * UNIFORM_STRIDE]);
-      pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
-      pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-      pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
-    });
+    drawRange(pass, 0, opaqueEnd, this.depthGroups.blank);
     pass.end();
+    if (firstSeeThrough >= 0) {
+      const seeThrough = encoder.beginRenderPass({
+        colorAttachments: [{ view: this.colourTexture.createView(), loadOp: "load", storeOp: "store" }],
+        depthStencilAttachment: { view: this.depthTexture.createView(), depthReadOnly: true },
+        ...(this.timer ? { timestampWrites: this.timer.writes("end") } : {}),
+      });
+      drawRange(seeThrough, firstSeeThrough, draws.length, this.depthGroups.scene);
+      seeThrough.end();
+    }
     this.timer?.resolve(encoder);
 
     this.submitted += 1;
@@ -1386,6 +1434,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.software.dispose();
     destroySafely(this.colourTexture);
     destroySafely(this.depthTexture);
+    destroySafely(this.depthGroups.blankTexture);
     destroySafely(this.blankTexture);
     destroySafely(this.blankShadow);
     if (this.shadowTexture !== this.blankShadow) destroySafely(this.shadowTexture);

@@ -350,6 +350,8 @@ export {
   type SsaoOptions,
   type GeometryBuffers,
   type RenderGeometryOptions,
+  depthLinearTerms,
+  softFade,
 } from "./render/meshRasterizer";
 export {
   frustumPlanes,

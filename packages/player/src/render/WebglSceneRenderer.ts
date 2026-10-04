@@ -54,7 +54,7 @@ import {
   type ReflectionProbeSet,
 } from "@cartbox/editor";
 
-import { batchInstances, compositeFrame, presentFrame, type PrimitiveTextures } from "./gpuFrame.js";
+import { batchInstances, compositeFrame, presentFrame, softEdges, type PrimitiveTextures } from "./gpuFrame.js";
 import { WebglPassTimer } from "./gpuTimer.js";
 import type { RenderStats } from "../debug/profiler.js";
 import { webgpuCanHonour } from "./renderCaps.js";
@@ -97,6 +97,8 @@ const UNIT_LM = 7;
 const UNIT_PROBES = 8;
 const UNIT_DETAIL = 9;
 const UNIT_BLEND = 10;
+/** The opaque pass's depth, copied for soft see-through edges (EP6b). */
+const UNIT_SCENE_DEPTH = 11;
 
 const BLOCK_UNIFORMS = 0;
 const BLOCK_INSTANCES = 1;
@@ -204,6 +206,7 @@ uniform sampler2D lmTex;
 uniform sampler2D probeAtlas;
 uniform sampler2D detailTex;
 uniform sampler2D blendTex;
+uniform highp sampler2D sceneDepth;
 uniform vec4 probeData[${MAX_REFLECTION_PROBES * 4}];
 in vec3 vNormal;
 in vec2 vUv;
@@ -359,6 +362,13 @@ void main() {
   vec4 colour = u.base;
   if (u.texflags.x > 0.5) {
     colour = colour * sampleMap(tex, uv);
+  }
+  // Soft edges (EP6b): a see-through surface fades out as it meets the opaque
+  // scene behind it — both depths read back as view distance (shadow2.zw).
+  if (u.tonemap.z > 0.0) {
+    float behind = texelFetch(sceneDepth, ivec2(gl_FragCoord.xy), 0).r * 2.0 - 1.0;
+    float own = gl_FragCoord.z * 2.0 - 1.0;
+    colour.a *= clamp((u.shadow2.w / (behind + u.shadow2.z) - u.shadow2.w / (own + u.shadow2.z)) / u.tonemap.z, 0.0, 1.0);
   }
   if (colour.a * 255.0 < 1.0) { discard; }
   // A cut-out surface (EP6) drops what's below its threshold.
@@ -686,6 +696,7 @@ export class WebglSceneRenderer implements SceneRenderer {
         ["probeAtlas", UNIT_PROBES],
         ["detailTex", UNIT_DETAIL],
         ["blendTex", UNIT_BLEND],
+        ["sceneDepth", UNIT_SCENE_DEPTH],
       ];
       for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
 
@@ -833,6 +844,7 @@ export class WebglSceneRenderer implements SceneRenderer {
         effect: batch.effect ?? null,
         time: draw.time ?? 0,
         alpha: { mode: batch.alpha, cutoff: batch.primitive.material.alphaCutoff ?? 0.5 },
+        soft: softEdges(batch.primitive.material, batch.alpha, draw.projection),
         surface: resolveSurface(batch.primitive.material, draw.time ?? 0, batch.textures.detail !== null, batch.textures.mr !== null, {
           weights: batch.primitive.blend !== undefined,
           textured: batch.textures.blend !== null,
@@ -880,6 +892,11 @@ export class WebglSceneRenderer implements SceneRenderer {
     gl.bindSampler(UNIT_LM, this.sampler);
     gl.bindSampler(UNIT_DETAIL, this.sampler);
     gl.bindSampler(UNIT_BLEND, this.sampler);
+    this.bindTexture(UNIT_SCENE_DEPTH, this.blankFloat);
+    gl.bindSampler(UNIT_SCENE_DEPTH, null);
+    // Soft edges read the opaque depth: copied once, as the see-through batches begin.
+    const soft = batches.some((batch) => softEdges(batch.primitive.material, batch.alpha, draw.projection) !== undefined);
+    let depthCopied = false;
 
     this.timer?.begin();
     let bound: PrimitiveTextures | null = null;
@@ -905,6 +922,10 @@ export class WebglSceneRenderer implements SceneRenderer {
     let triangles = 0;
     for (const chunk of chunks) {
       const batch = batches[chunk.batch]!;
+      if (soft && !depthCopied && batch.alpha >= 2) {
+        this.copySceneDepth();
+        depthCopied = true;
+      }
       setBlend(batch.alpha);
       if (chunk.batch !== boundBatch) {
         gl.bindBufferRange(gl.UNIFORM_BUFFER, BLOCK_UNIFORMS, this.uniformBuffer, chunk.batch * UNIFORM_STRIDE, UNIFORM_BYTES_USED);
@@ -945,6 +966,32 @@ export class WebglSceneRenderer implements SceneRenderer {
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.flush();
+  }
+
+  /** The opaque depth, as a texture the transparent pass can read (EP6b): made on first use. */
+  private sceneDepth: { texture: any; framebuffer: any } | null = null;
+
+  /** Copy the main framebuffer's depth into {@link sceneDepth} and bind it, leaving the main framebuffer bound. */
+  private copySceneDepth(): void {
+    const gl = this.gl;
+    if (!this.sceneDepth) {
+      const texture = gl.createTexture();
+      this.bindTexture(UNIT_SCENE_DEPTH, texture); // on its own unit, so no batch's texture is disturbed
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH_COMPONENT24, this.width, this.height);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const framebuffer = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, texture, 0);
+      this.sceneDepth = { texture, framebuffer };
+    }
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.framebuffer);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.sceneDepth.framebuffer);
+    gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, this.width, this.height, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
+    this.bindTexture(UNIT_SCENE_DEPTH, this.sceneDepth.texture);
   }
 
   private ensureCapacity(draws: number, instanceFloats: number): void {
@@ -1097,6 +1144,10 @@ export class WebglSceneRenderer implements SceneRenderer {
       gl.deleteBuffer(this.lightBuffer);
       for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.probeTexture, this.ssaoTexture]) if (t) gl.deleteTexture(t);
       gl.deleteFramebuffer(this.framebuffer);
+      if (this.sceneDepth) {
+        gl.deleteTexture(this.sceneDepth.texture);
+        gl.deleteFramebuffer(this.sceneDepth.framebuffer);
+      }
       this.timer?.destroy();
       for (const rb of this.attachments) gl.deleteRenderbuffer(rb);
       gl.deleteSampler(this.sampler);

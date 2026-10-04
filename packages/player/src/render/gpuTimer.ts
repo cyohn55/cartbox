@@ -32,8 +32,13 @@ export class WebgpuPassTimer {
     }
   }
 
-  /** The render pass descriptor's `timestampWrites`. */
-  writes(): object {
+  /**
+   * The render pass descriptor's `timestampWrites`. A frame drawn in two passes
+   * times from the first's beginning (`"begin"`) to the second's end (`"end"`).
+   */
+  writes(part: "both" | "begin" | "end" = "both"): object {
+    if (part === "begin") return { querySet: this.querySet, beginningOfPassWriteIndex: 0 };
+    if (part === "end") return { querySet: this.querySet, endOfPassWriteIndex: 1 };
     return { querySet: this.querySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 };
   }
 

@@ -10157,6 +10157,7 @@ import {
 } from "@cartbox/editor";
 
 // src/render/gpuFrame.ts
+import { depthLinearTerms } from "@cartbox/editor";
 var SOFTWARE_WARMUP_TRIANGLES = 2e4;
 var SOFTWARE_WARMUP_PIXELS = 640 * 360;
 var triangleCounts = /* @__PURE__ */ new WeakMap();
@@ -10257,6 +10258,11 @@ function batchInstances(instances, geometryOf, eye = [0, 0, 0]) {
 function alphaCode(mode) {
   return mode === "mask" ? 1 : mode === "blend" ? 2 : mode === "additive" ? 3 : 0;
 }
+function softEdges(material, alpha, projection) {
+  const distance = alpha >= 2 ? material.softDepth ?? 0 : 0;
+  if (!(distance > 0) || projection[15] !== 0) return void 0;
+  return { distance, linear: depthLinearTerms(projection) };
+}
 var centres = /* @__PURE__ */ new WeakMap();
 function primitiveCentre(primitive) {
   let c = centres.get(primitive);
@@ -10295,8 +10301,13 @@ var WebgpuPassTimer = class _WebgpuPassTimer {
       return null;
     }
   }
-  /** The render pass descriptor's `timestampWrites`. */
-  writes() {
+  /**
+   * The render pass descriptor's `timestampWrites`. A frame drawn in two passes
+   * times from the first's beginning (`"begin"`) to the second's end (`"end"`).
+   */
+  writes(part = "both") {
+    if (part === "begin") return { querySet: this.querySet, beginningOfPassWriteIndex: 0 };
+    if (part === "end") return { querySet: this.querySet, endOfPassWriteIndex: 1 };
     return { querySet: this.querySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 };
   }
   /** After the pass ends: resolve its timestamps (and copy them out unless the last copy is still being read). */
@@ -10573,7 +10584,7 @@ function writeInstanceUniform(target, index, uniform) {
   const tonemap = uniform.tonemap;
   target[base + OFFSET_TONEMAP] = tonemap ? 1 : 0;
   target[base + OFFSET_TONEMAP + 1] = tonemap ? tonemap.exposure : 0;
-  target[base + OFFSET_TONEMAP + 2] = 0;
+  target[base + OFFSET_TONEMAP + 2] = uniform.soft?.distance ?? 0;
   target[base + OFFSET_TONEMAP + 3] = 0;
   target[base + OFFSET_SSAO] = uniform.hasSsao ? 1 : 0;
   target[base + OFFSET_SSAO + 1] = uniform.lightCount;
@@ -10622,8 +10633,8 @@ function writeInstanceUniform(target, index, uniform) {
   }
   target[base + OFFSET_SHADOW2] = shadow ? shadow.slopeBias ?? 0 : 0;
   target[base + OFFSET_SHADOW2 + 1] = shadow && shadow.pcf ? 1 : 0;
-  target[base + OFFSET_SHADOW2 + 2] = 0;
-  target[base + OFFSET_SHADOW2 + 3] = 0;
+  target[base + OFFSET_SHADOW2 + 2] = uniform.soft?.linear[0] ?? 0;
+  target[base + OFFSET_SHADOW2 + 3] = uniform.soft?.linear[1] ?? 0;
   target[base + OFFSET_SURFACE0] = surface.detailScale;
   target[base + OFFSET_SURFACE0 + 1] = surface.detailStrength;
   target[base + OFFSET_SURFACE0 + 2] = surface.reflect;
@@ -10695,6 +10706,7 @@ var UNIT_LM = 7;
 var UNIT_PROBES = 8;
 var UNIT_DETAIL = 9;
 var UNIT_BLEND = 10;
+var UNIT_SCENE_DEPTH = 11;
 var BLOCK_UNIFORMS = 0;
 var BLOCK_INSTANCES = 1;
 var BLOCK_LIGHTS = 2;
@@ -10806,6 +10818,7 @@ uniform sampler2D lmTex;
 uniform sampler2D probeAtlas;
 uniform sampler2D detailTex;
 uniform sampler2D blendTex;
+uniform highp sampler2D sceneDepth;
 uniform vec4 probeData[${MAX_REFLECTION_PROBES2 * 4}];
 in vec3 vNormal;
 in vec2 vUv;
@@ -10961,6 +10974,13 @@ void main() {
   vec4 colour = u.base;
   if (u.texflags.x > 0.5) {
     colour = colour * sampleMap(tex, uv);
+  }
+  // Soft edges (EP6b): a see-through surface fades out as it meets the opaque
+  // scene behind it \u2014 both depths read back as view distance (shadow2.zw).
+  if (u.tonemap.z > 0.0) {
+    float behind = texelFetch(sceneDepth, ivec2(gl_FragCoord.xy), 0).r * 2.0 - 1.0;
+    float own = gl_FragCoord.z * 2.0 - 1.0;
+    colour.a *= clamp((u.shadow2.w / (behind + u.shadow2.z) - u.shadow2.w / (own + u.shadow2.z)) / u.tonemap.z, 0.0, 1.0);
   }
   if (colour.a * 255.0 < 1.0) { discard; }
   // A cut-out surface (EP6) drops what's below its threshold.
@@ -11200,6 +11220,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.readSeq = 0;
     /** What the last submitted frame drew (for the profiler and tests); GPU time when the browser can time it. */
     this.lastFrameStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
+    /** The opaque depth, as a texture the transparent pass can read (EP6b): made on first use. */
+    this.sceneDepth = null;
     this.software = new SoftwareSceneRenderer(style);
     this.uniformBuffer = gl.createBuffer();
     this.instanceBuffer = gl.createBuffer();
@@ -11247,7 +11269,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         ["lmTex", UNIT_LM],
         ["probeAtlas", UNIT_PROBES],
         ["detailTex", UNIT_DETAIL],
-        ["blendTex", UNIT_BLEND]
+        ["blendTex", UNIT_BLEND],
+        ["sceneDepth", UNIT_SCENE_DEPTH]
       ];
       for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
       const colour = gl.createRenderbuffer();
@@ -11377,6 +11400,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         effect: batch.effect ?? null,
         time: draw.time ?? 0,
         alpha: { mode: batch.alpha, cutoff: batch.primitive.material.alphaCutoff ?? 0.5 },
+        soft: softEdges(batch.primitive.material, batch.alpha, draw.projection),
         surface: resolveSurface(batch.primitive.material, draw.time ?? 0, batch.textures.detail !== null, batch.textures.mr !== null, {
           weights: batch.primitive.blend !== void 0,
           textured: batch.textures.blend !== null
@@ -11422,6 +11446,10 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     gl.bindSampler(UNIT_LM, this.sampler);
     gl.bindSampler(UNIT_DETAIL, this.sampler);
     gl.bindSampler(UNIT_BLEND, this.sampler);
+    this.bindTexture(UNIT_SCENE_DEPTH, this.blankFloat);
+    gl.bindSampler(UNIT_SCENE_DEPTH, null);
+    const soft = batches.some((batch) => softEdges(batch.primitive.material, batch.alpha, draw.projection) !== void 0);
+    let depthCopied = false;
     this.timer?.begin();
     let bound = null;
     let boundBatch = -1;
@@ -11443,6 +11471,10 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     let triangles = 0;
     for (const chunk of chunks2) {
       const batch = batches[chunk.batch];
+      if (soft && !depthCopied && batch.alpha >= 2) {
+        this.copySceneDepth();
+        depthCopied = true;
+      }
       setBlend(batch.alpha);
       if (chunk.batch !== boundBatch) {
         gl.bindBufferRange(gl.UNIFORM_BUFFER, BLOCK_UNIFORMS, this.uniformBuffer, chunk.batch * UNIFORM_STRIDE, UNIFORM_BYTES_USED);
@@ -11480,6 +11512,28 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.flush();
+  }
+  /** Copy the main framebuffer's depth into {@link sceneDepth} and bind it, leaving the main framebuffer bound. */
+  copySceneDepth() {
+    const gl = this.gl;
+    if (!this.sceneDepth) {
+      const texture = gl.createTexture();
+      this.bindTexture(UNIT_SCENE_DEPTH, texture);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH_COMPONENT24, this.width, this.height);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const framebuffer = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, texture, 0);
+      this.sceneDepth = { texture, framebuffer };
+    }
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.framebuffer);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.sceneDepth.framebuffer);
+    gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, this.width, this.height, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
+    this.bindTexture(UNIT_SCENE_DEPTH, this.sceneDepth.texture);
   }
   ensureCapacity(draws, instanceFloats) {
     const gl = this.gl;
@@ -11621,6 +11675,10 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       gl.deleteBuffer(this.lightBuffer);
       for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.probeTexture, this.ssaoTexture]) if (t) gl.deleteTexture(t);
       gl.deleteFramebuffer(this.framebuffer);
+      if (this.sceneDepth) {
+        gl.deleteTexture(this.sceneDepth.texture);
+        gl.deleteFramebuffer(this.sceneDepth.framebuffer);
+      }
       this.timer?.destroy();
       for (const rb of this.attachments) gl.deleteRenderbuffer(rb);
       gl.deleteSampler(this.sampler);
@@ -11756,6 +11814,9 @@ struct Probe {
 @group(0) @binding(14) var detailTex: texture_2d<f32>;
 // The blend surface's map (terrain snow over rock), mixed by the vertex weight.
 @group(0) @binding(15) var blendTex: texture_2d<f32>;
+// The opaque pass's depth (EP6b), read by the see-through pass for soft edges;
+// the opaque pass binds a blank in its place.
+@group(1) @binding(0) var sceneDepth: texture_depth_2d;
 
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] \u2014 fogLayerDepth in skyDome.ts.
@@ -11948,6 +12009,12 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   }
   // The CPU path skips a texel whose combined alpha is below 1/255 rather than
   // blending it, so this is a discard and not an alpha-blend state.
+  // Soft edges (EP6b): a see-through surface fades out as it meets the opaque
+  // scene behind it \u2014 both depths read back as view distance (shadow2.zw).
+  if (u.tonemap.z > 0.0) {
+    let behind = textureLoad(sceneDepth, vec2<i32>(in.pos.xy), 0);
+    colour.a *= clamp((u.shadow2.w / (behind + u.shadow2.z) - u.shadow2.w / (in.pos.z + u.shadow2.z)) / u.tonemap.z, 0.0, 1.0);
+  }
   if (colour.a * 255.0 < 1.0) { discard; }
   // A cut-out surface (EP6) drops what's below its threshold.
   if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && colour.a < u.view.w) { discard; }
@@ -12151,7 +12218,7 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
 `
 );
 var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
-  constructor(device, width, height, pipeline, bindGroupLayout, colourTexture, depthTexture, sampler, blankTexture, blankShadow, readback, bytesPerRow, style) {
+  constructor(device, width, height, pipeline, bindGroupLayout, colourTexture, depthTexture, depthGroups, sampler, blankTexture, blankShadow, readback, bytesPerRow, style) {
     this.device = device;
     this.width = width;
     this.height = height;
@@ -12159,6 +12226,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.bindGroupLayout = bindGroupLayout;
     this.colourTexture = colourTexture;
     this.depthTexture = depthTexture;
+    this.depthGroups = depthGroups;
     this.sampler = sampler;
     this.blankTexture = blankTexture;
     this.blankShadow = blankShadow;
@@ -12299,7 +12367,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 15, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } }
         ]
       });
-      const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
+      const depthLayout = device.createBindGroupLayout({
+        entries: [{ binding: 0, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "depth" } }]
+      });
+      const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayout] });
       const pipelineFor = (blend, depthWrite) => device.createRenderPipeline({
         layout,
         vertex: {
@@ -12346,9 +12417,20 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const depthTexture = device.createTexture({
         size: { width, height },
         format: "depth24plus",
-        usage: 16
-        // RENDER_ATTACHMENT
+        usage: 16 | 4
+        // RENDER_ATTACHMENT | TEXTURE_BINDING (soft edges read it)
       });
+      const blankDepth = device.createTexture({
+        size: { width: 1, height: 1 },
+        format: "depth24plus",
+        usage: 16 | 4
+        // RENDER_ATTACHMENT | TEXTURE_BINDING
+      });
+      const depthGroups = {
+        blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }] }),
+        scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: depthTexture.createView() }] }),
+        blankTexture: blankDepth
+      };
       const filter = style.textureFiltering === "none" ? "nearest" : "linear";
       const sampler = device.createSampler({
         magFilter: filter,
@@ -12397,6 +12479,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         bindGroupLayout,
         colourTexture,
         depthTexture,
+        depthGroups,
         sampler,
         blankTexture,
         blankShadow,
@@ -12572,6 +12655,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         effect: entry.effect ?? null,
         time: draw.time ?? 0,
         alpha: { mode: entry.alpha, cutoff: entry.primitive.material.alphaCutoff ?? 0.5 },
+        soft: softEdges(entry.primitive.material, entry.alpha, draw.projection),
         surface: resolveSurface(entry.primitive.material, draw.time ?? 0, entry.textures.detail !== null, entry.textures.mr !== null, {
           weights: entry.primitive.blend !== void 0,
           textured: entry.textures.blend !== null
@@ -12583,7 +12667,26 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     let triangles = 0;
     for (const entry of draws) triangles += entry.geometry.indexCount / 3 * entry.models.length;
     this.lastFrameStats = { drawCalls: draws.length, instances: instanceCount, triangles, gpuMs: this.timer?.lastMs ?? null };
+    const split = draws.some((entry) => softEdges(entry.primitive.material, entry.alpha, draw.projection) !== void 0);
+    const firstSeeThrough = split ? draws.findIndex((entry) => entry.alpha >= 2) : -1;
     const encoder = this.device.createCommandEncoder();
+    const drawRange = (pass2, from, to, depthGroup) => {
+      pass2.setBindGroup(1, depthGroup);
+      let bound = null;
+      for (let index = from; index < to; index += 1) {
+        const entry = draws[index];
+        const wanted = entry.alpha === 3 ? this.pipeline.add : entry.alpha === 2 ? this.pipeline.blend : this.pipeline.opaque;
+        if (wanted !== bound) {
+          pass2.setPipeline(wanted);
+          bound = wanted;
+        }
+        pass2.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.textures), [index * UNIFORM_STRIDE]);
+        pass2.setVertexBuffer(0, entry.geometry.vertexBuffer);
+        pass2.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
+        pass2.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+      }
+    };
+    const opaqueEnd = firstSeeThrough >= 0 ? firstSeeThrough : draws.length;
     const pass = encoder.beginRenderPass({
       colorAttachments: [
         {
@@ -12601,21 +12704,19 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         depthLoadOp: "clear",
         depthStoreOp: "store"
       },
-      ...this.timer ? { timestampWrites: this.timer.writes() } : {}
+      ...this.timer ? { timestampWrites: this.timer.writes(firstSeeThrough >= 0 ? "begin" : "both") } : {}
     });
-    let bound = null;
-    draws.forEach((entry, index) => {
-      const wanted = entry.alpha === 3 ? this.pipeline.add : entry.alpha === 2 ? this.pipeline.blend : this.pipeline.opaque;
-      if (wanted !== bound) {
-        pass.setPipeline(wanted);
-        bound = wanted;
-      }
-      pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.textures), [index * UNIFORM_STRIDE]);
-      pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
-      pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-      pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
-    });
+    drawRange(pass, 0, opaqueEnd, this.depthGroups.blank);
     pass.end();
+    if (firstSeeThrough >= 0) {
+      const seeThrough = encoder.beginRenderPass({
+        colorAttachments: [{ view: this.colourTexture.createView(), loadOp: "load", storeOp: "store" }],
+        depthStencilAttachment: { view: this.depthTexture.createView(), depthReadOnly: true },
+        ...this.timer ? { timestampWrites: this.timer.writes("end") } : {}
+      });
+      drawRange(seeThrough, firstSeeThrough, draws.length, this.depthGroups.scene);
+      seeThrough.end();
+    }
     this.timer?.resolve(encoder);
     this.submitted += 1;
     const slot = this.readback.find((entry) => !entry.busy);
@@ -12787,6 +12888,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.software.dispose();
     destroySafely(this.colourTexture);
     destroySafely(this.depthTexture);
+    destroySafely(this.depthGroups.blankTexture);
     destroySafely(this.blankTexture);
     destroySafely(this.blankShadow);
     if (this.shadowTexture !== this.blankShadow) destroySafely(this.shadowTexture);

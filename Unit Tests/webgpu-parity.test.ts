@@ -351,6 +351,46 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     renderer.dispose();
   });
 
+  it("fades soft see-through edges where they meet the floor, like the software rasteriser", async () => {
+    // EP6b: the see-through pass reads the opaque depth (attached read-only)
+    // and fades each surface as it nears the floor behind it.
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+    const mat = (m: Record<string, unknown>) => {
+      const q = quad();
+      return { ...q, primitives: [{ ...q.primitives[0]!, material: { ...q.primitives[0]!.material, ...m } }] };
+    };
+    const ground = mat({ baseColorFactor: [0.8, 0.8, 0.8, 1], metallicFactor: 0, roughnessFactor: 1 });
+    const instances: MeshSceneInstance[] = [
+      { mesh: ground, model: composeModelMatrix([0, 0, 0], [-90, 0, 0], [3, 3, 1]) },
+      { mesh: mat({ baseColorFactor: [0.2, 0.6, 1, 0.8], metallicFactor: 0, roughnessFactor: 1, alphaMode: "blend", softDepth: 0.8 }), model: composeModelMatrix([-0.7, 0.4, 0], [0, 10, 0], [0.8, 0.8, 1]) },
+      { mesh: mat({ baseColorFactor: [1, 0.4, 0.1, 0.9], alphaMode: "additive", softDepth: 0.5 }), model: composeModelMatrix([0.8, 0.3, 0.5], [0, -20, 0], [0.6, 0.6, 1]) },
+    ];
+    const lit = () => ({ ...draw(), view: viewMatrix([0, 4, 7], [0, 0, 0]) });
+    renderer.render(instances, lit());
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.tick?.();
+    }
+    const gpu = lit();
+    renderer.render(instances, gpu);
+    const software = lit();
+    new SoftwareSceneRenderer().render(instances, software);
+    let maxDelta = 0;
+    let coverage = 0;
+    let softened = 0;
+    const hard = lit();
+    new SoftwareSceneRenderer().render(instances.map((inst, i) => (i === 0 ? inst : { ...inst, mesh: mat({ ...inst.mesh.primitives[0]!.material, softDepth: 0 }) })), hard);
+    for (let i = 0; i < W * H * 4; i += 1) {
+      maxDelta = Math.max(maxDelta, Math.abs(gpu.out[i]! - software.out[i]!));
+      if (i % 4 === 3 && (gpu.out[i] === 0) !== (software.out[i] === 0)) coverage += 1;
+      if (software.out[i] !== hard.out[i]) softened += 1;
+    }
+    expect(softened).toBeGreaterThan(20); // the soft edge really changed the picture
+    expect(coverage).toBe(0);
+    expect(maxDelta).toBeLessThanOrEqual(5);
+    renderer.dispose();
+  });
+
   it("matches the software rasteriser on image-based lighting (within float tolerance)", async () => {
     // The environment replaces flat ambient with directional irradiance +
     // reflection; the WGSL envColor/envAverage must match meshRasterizer.ts. As

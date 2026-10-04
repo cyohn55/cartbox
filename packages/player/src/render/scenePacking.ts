@@ -45,7 +45,8 @@ import {
  * 256  lightMvp   mat4x4<f32>  64   world→light-clip for this draw (shadow mapping)
  * 320  shadow     vec4<f32>    16   x = 1 when shadowed, y = map size, z = bias, w = strength
  * 336  envMeta    vec4<f32>    16   xyz = env-map mean radiance, w = 1 when an env map is bound
- * 352  tonemap    vec4<f32>    16   x = 1 when tone-mapping, y = exposure
+ * 352  tonemap    vec4<f32>    16   x = 1 when tone-mapping, y = exposure,
+ *                                    z = soft-edge distance (EP6b; 0 = hard)
  * 368  ssao       vec4<f32>    16   x = 1 when an SSAO buffer is bound, y = light count,
  *                                    z = 1 when a baked light map is bound,
  *                                    w = reflection-probe count
@@ -53,7 +54,9 @@ import {
  * 448  fog        vec4<f32>    16   rgb = fog colour, w = density
  * 464  fogParams  vec4<f32>    16   x = 1 when fogged, y = start distance, z = max amount,
  *                                    w = 1 when the fog has height/volume/glow layers
- * 480  shadow2    vec4<f32>    16   x = slope-scaled shadow bias, y = 1 for 2x2 PCF
+ * 480  shadow2    vec4<f32>    16   x = slope-scaled shadow bias, y = 1 for 2x2 PCF,
+ *                                    zw = projection[10], [14]: depth → view distance
+ *                                    as zw.y / (ndcZ + zw.x) (soft edges, EP6b)
  * 496  surface0   vec4<f32>    16   x = detail scale, y = detail strength (0 = none),
  *                                    z = reflectivity, w = 1 when the MR alpha masks it
  * 512  surface1   vec4<f32>    16   xy = emissive UV offset (its scroll this frame)
@@ -392,6 +395,11 @@ export interface InstanceUniform {
   readonly time?: number;
   /** The material's transparency (EP6): 0 opaque, 1 cut out below `cutoff`, 2 blended, 3 added. */
   readonly alpha?: { readonly mode: number; readonly cutoff: number };
+  /**
+   * Soft edges (EP6b): the distance a see-through surface fades over as it
+   * meets the opaque scene, and the projection terms that read depth back as distance.
+   */
+  readonly soft?: { readonly distance: number; readonly linear: readonly [number, number] };
 }
 
 /**
@@ -515,7 +523,7 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   const tonemap = uniform.tonemap;
   target[base + OFFSET_TONEMAP] = tonemap ? 1 : 0; // hasTonemap
   target[base + OFFSET_TONEMAP + 1] = tonemap ? tonemap.exposure : 0;
-  target[base + OFFSET_TONEMAP + 2] = 0;
+  target[base + OFFSET_TONEMAP + 2] = uniform.soft?.distance ?? 0;
   target[base + OFFSET_TONEMAP + 3] = 0;
 
   target[base + OFFSET_SSAO] = uniform.hasSsao ? 1 : 0;
@@ -568,8 +576,8 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
 
   target[base + OFFSET_SHADOW2] = shadow ? shadow.slopeBias ?? 0 : 0;
   target[base + OFFSET_SHADOW2 + 1] = shadow && shadow.pcf ? 1 : 0;
-  target[base + OFFSET_SHADOW2 + 2] = 0;
-  target[base + OFFSET_SHADOW2 + 3] = 0;
+  target[base + OFFSET_SHADOW2 + 2] = uniform.soft?.linear[0] ?? 0;
+  target[base + OFFSET_SHADOW2 + 3] = uniform.soft?.linear[1] ?? 0;
 
   target[base + OFFSET_SURFACE0] = surface.detailScale;
   target[base + OFFSET_SURFACE0 + 1] = surface.detailStrength;

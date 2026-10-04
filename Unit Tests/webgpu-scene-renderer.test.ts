@@ -292,8 +292,10 @@ describe("WebgpuSceneRenderer frames", () => {
     // Three different meshes: three batches, three uniforms.
     renderer.render([...instances(quad()), ...instances(quad()), ...instances(quad())], drawOptions());
 
-    const offsets = log.passCalls.filter((c) => c.op === "setBindGroup").map((c) => c.args[2]);
+    const offsets = log.passCalls.filter((c) => c.op === "setBindGroup" && c.args[0] === 0).map((c) => c.args[2]);
     expect(offsets).toEqual([[0], [UNIFORM_STRIDE], [UNIFORM_STRIDE * 2]]);
+    // Group 1 (the opaque depth for soft edges, EP6b) is set once for the pass.
+    expect(log.passCalls.filter((c) => c.op === "setBindGroup" && c.args[0] === 1)).toHaveLength(1);
     expect(log.passCalls.filter((c) => c.op === "drawIndexed")).toHaveLength(3);
   });
 
@@ -363,6 +365,26 @@ describe("WebgpuSceneRenderer frames", () => {
     const pass = log.passCalls.find((c) => c.op === "beginRenderPass")!.args[0];
     expect(pass.colorAttachments[0].clearValue).toEqual({ r: 0, g: 0, b: 0, a: 0 });
     expect(pass.depthStencilAttachment.depthClearValue).toBe(1);
+  });
+
+  it("draws soft see-through surfaces in a second pass that reads the opaque depth (EP6b)", async () => {
+    const { device, log } = fakeDevice();
+    const renderer = (await WebgpuSceneRenderer.create(device, WIDTH, HEIGHT))!;
+    const smoke = quad();
+    const soft: MeshAsset = { ...smoke, primitives: [{ ...smoke.primitives[0]!, material: { ...smoke.primitives[0]!.material, alphaMode: "blend", softDepth: 0.5 } }] };
+    renderer.render([...instances(quad()), ...instances(soft)], drawOptions());
+    const passes = log.passCalls.filter((c) => c.op === "beginRenderPass").map((c) => c.args[0]);
+    expect(passes).toHaveLength(2);
+    expect(passes[1].colorAttachments[0].loadOp).toBe("load");
+    expect(passes[1].depthStencilAttachment.depthReadOnly).toBe(true);
+    expect(log.passCalls.filter((c) => c.op === "drawIndexed")).toHaveLength(2);
+
+    // Without soft edges, one pass as before.
+    const { device: plainDevice, log: plainLog } = fakeDevice();
+    const plain = (await WebgpuSceneRenderer.create(plainDevice, WIDTH, HEIGHT))!;
+    const glass: MeshAsset = { ...smoke, primitives: [{ ...smoke.primitives[0]!, material: { ...smoke.primitives[0]!.material, alphaMode: "blend" } }] };
+    plain.render([...instances(quad()), ...instances(glass)], drawOptions());
+    expect(plainLog.passCalls.filter((c) => c.op === "beginRenderPass")).toHaveLength(1);
   });
 
   it("submits nothing for an empty scene", async () => {

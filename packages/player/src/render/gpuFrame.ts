@@ -5,7 +5,7 @@
  * warming up on the software rasteriser before the first one lands.
  */
 
-import type { DecodedTexture, Mat4, MeshAsset, MeshPrimitive, MeshSceneInstance, SurfaceEffect } from "@cartbox/editor";
+import { depthLinearTerms, type DecodedTexture, type Mat4, type MeshAsset, type MeshPrimitive, type MeshSceneInstance, type SurfaceEffect } from "@cartbox/editor";
 
 import type { SceneDraw, SoftwareSceneRenderer } from "./sceneRenderer.js";
 
@@ -185,6 +185,18 @@ export function batchInstances<G extends { indexCount: number }>(
 /** A material's alpha mode as the shaders' code: 0 opaque, 1 cut out, 2 blended, 3 added. */
 export function alphaCode(mode: MeshPrimitive["material"]["alphaMode"]): number {
   return mode === "mask" ? 1 : mode === "blend" ? 2 : mode === "additive" ? 3 : 0;
+}
+
+/**
+ * A batch's soft edges (EP6b): the distance a see-through surface fades over
+ * as it meets the opaque scene, with the projection terms that read depth back
+ * as distance — or undefined for a hard edge (opaque, unsoftened, or an
+ * orthographic view, where the software path keeps hard edges too).
+ */
+export function softEdges(material: MeshPrimitive["material"], alpha: number, projection: Mat4): { distance: number; linear: readonly [number, number] } | undefined {
+  const distance = alpha >= 2 ? material.softDepth ?? 0 : 0;
+  if (!(distance > 0) || projection[15] !== 0) return undefined;
+  return { distance, linear: depthLinearTerms(projection) };
 }
 
 const centres = new WeakMap<MeshPrimitive, [number, number, number]>();

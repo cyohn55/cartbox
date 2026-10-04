@@ -204,10 +204,29 @@ preview.
       - **Soft particles** (fading where a sprite meets the geometry behind
         it) need the opaque depth readable during the transparent pass, so
         they moved to EP6b.
-- [ ] **EP6b. Soft particles.** Copy the opaque pass's depth so the transparent
+- [x] **EP6b. Soft particles.** Copy the opaque pass's depth so the transparent
       pass can read it, and fade sprites where they meet the surface behind
       them (all three renderers). *Lockout:* grenade smoke stops cutting hard
       lines into the deck and walls.
+
+      *Done:*
+      - **Soft depth:** a blended or additive material can fade out over
+        `softDepth` world units as it nears the opaque surface behind it.
+        Both depths are turned back into view distance through the projection.
+        An orthographic view keeps hard edges.
+      - **Reading the opaque depth:**
+        - The software rasteriser reads its own depth buffer, which the
+          transparent pass never writes.
+        - WebGL2 copies the depth into a texture once, as the see-through
+          batches begin.
+        - WebGPU draws them in a second pass with the depth attached read-only
+          and bound for the shader.
+        - Parity tests hold all three renderers to the same picture.
+      - **Particles** get a soft depth of half their size. In Lockout, grenade
+        smoke, dust and sparks fade into the deck and walls instead of cutting
+        a line.
+      - **Material editor:** a Soft edge slider for see-through and additive
+        materials. The Water preset fades out at the shore.
 - [ ] **EP7. Material graph.** A node-based material editor (textures, maths,
       time, UVs, fresnel, noise) feeding the PBR inputs, compiled to WGSL and
       GLSL and interpreted on the CPU, as Unity's Shader Graph and Unreal's
