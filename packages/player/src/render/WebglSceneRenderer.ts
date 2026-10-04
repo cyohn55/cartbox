@@ -47,6 +47,9 @@ import {
   cameraPositionFromView,
   compiledGraphOf,
   computeSmoothNormals,
+  LOCAL_SHADOW_GRID,
+  LOCAL_SHADOW_TILE,
+  MAX_LOCAL_SHADOW_TILES,
   NEAR_CASCADE_EDGE,
   CLUSTER_INDEX_CAP,
   CLUSTER_X,
@@ -115,6 +118,8 @@ const UNIT_SCENE_DEPTH = 11;
 /** The clustered lights' cell table and index list (EP8). */
 const UNIT_CLUSTER_TABLE = 12;
 const UNIT_CLUSTER_INDEX = 13;
+/** The spot/point shadow atlas (EP8c). */
+const UNIT_LOCAL_SHADOWS = 14;
 
 const BLOCK_UNIFORMS = 0;
 const BLOCK_INSTANCES = 1;
@@ -441,6 +446,46 @@ float aces(float x) {
   return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), 0.0, 1.0);
 }
 
+// Spot and point light shadows (EP8c): the tile atlas, each tile's world→clip
+// and depth→distance terms (xy), and (1 when on, bias, slope bias) in world units.
+uniform highp sampler2D localAtlas;
+uniform mat4 shadowTileMvp[${MAX_LOCAL_SHADOW_TILES}];
+uniform vec4 shadowTileParams[${MAX_LOCAL_SHADOW_TILES}];
+uniform vec4 localShadowInfo;
+float localTap(float fx, float fy, float ox, float oy, float own, float a, float b) {
+  float size = ${LOCAL_SHADOW_TILE}.0;
+  int tx = int(clamp(floor(fx), 0.0, size - 1.0) + ox);
+  int ty = int(clamp(floor(fy), 0.0, size - 1.0) + oy);
+  float stored = texelFetch(localAtlas, ivec2(tx, ty), 0).r;
+  if (own > b / (min(stored, 1.0) + a)) { return 0.0; }
+  return 1.0;
+}
+// A spot/point light's shadow at P (mirrors localShadowVisibility).
+float localShadow(int first, Light lgt, vec3 P, float cosL) {
+  int tile = first;
+  if (lgt.d0.w < 1.5) {
+    vec3 d = P - lgt.d0.xyz;
+    vec3 m = abs(d);
+    if (m.x >= m.y && m.x >= m.z) { tile += d.x >= 0.0 ? 0 : 1; }
+    else if (m.y >= m.z) { tile += d.y >= 0.0 ? 2 : 3; }
+    else { tile += d.z >= 0.0 ? 4 : 5; }
+  }
+  vec4 c = shadowTileMvp[tile] * vec4(P, 1.0);
+  if (c.w <= 0.0) { return 1.0; }
+  vec3 n = c.xyz / c.w;
+  if (n.x < -1.0 || n.x > 1.0 || n.y < -1.0 || n.y > 1.0 || n.z < -1.0 || n.z > 1.0) { return 1.0; }
+  float size = ${LOCAL_SHADOW_TILE}.0;
+  float sx = (n.x * 0.5 + 0.5) * size;
+  float sy = (1.0 - (n.y * 0.5 + 0.5)) * size;
+  float cc = clamp(cosL, 0.05, 1.0);
+  vec4 tp = shadowTileParams[tile];
+  float own = tp.y / (n.z + tp.x) - localShadowInfo.y - localShadowInfo.z * min(10.0, sqrt(1.0 - cc * cc) / cc);
+  float ox = float((tile % ${LOCAL_SHADOW_GRID}) * ${LOCAL_SHADOW_TILE});
+  float oy = float((tile / ${LOCAL_SHADOW_GRID}) * ${LOCAL_SHADOW_TILE});
+  return (localTap(sx - 0.5, sy - 0.5, ox, oy, own, tp.x, tp.y) + localTap(sx + 0.5, sy - 0.5, ox, oy, own, tp.x, tp.y)
+        + localTap(sx - 0.5, sy + 0.5, ox, oy, own, tp.x, tp.y) + localTap(sx + 0.5, sy + 0.5, ox, oy, own, tp.x, tp.y)) * 0.25;
+}
+
 // One light's direct term (Cook-Torrance), mirroring the software rasteriser's
 // light loop: point and spot lights fall off to nothing at their range, a spot
 // fades across its cone, and directional lights honour the sun shadow (sf).
@@ -473,6 +518,7 @@ vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, 
   vec3 FL = f0 + (vec3(1.0) - f0) * fpL;
   float occl = 1.0;
   if (lgt.d0.w < 0.5) { occl = sf; }
+  else if (lgt.d2.w >= 0.0 && localShadowInfo.x > 0.5) { occl = localShadow(int(lgt.d2.w + 0.5), lgt, P, ndlL); }
   float w = lgt.d1.w * atten * ndlL * occl;
   return (kdm * (vec3(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
 }
@@ -703,6 +749,7 @@ function buildProgram(gl: any, nearest: boolean, graph: CompiledGraph | null): a
     ["sceneDepth", UNIT_SCENE_DEPTH],
     ["clusterTable", UNIT_CLUSTER_TABLE],
     ["clusterIndex", UNIT_CLUSTER_INDEX],
+    ["localAtlas", UNIT_LOCAL_SHADOWS],
   ];
   for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
   return program;
@@ -948,6 +995,7 @@ export class WebglSceneRenderer implements SceneRenderer {
     const globalCount = Math.min(order.globalCount, sceneLights.length);
     const clusters = sceneLights.length > globalCount ? buildLightClusters(sceneLights, globalCount, draw.view, draw.projection, this.width, this.height) : null;
     this.uploadClusters(clusters);
+    this.uploadLocalShadows(draw.localShadows ?? null);
     this.clusterParams.set(clusters?.params ?? [1, 1, 1, 1]);
     this.clusterInfo[0] = clusters ? globalCount : sceneLights.length;
     this.clusterInfo[1] = clusters ? 1 : 0;
@@ -1133,6 +1181,39 @@ export class WebglSceneRenderer implements SceneRenderer {
     gl.uniform4fv(gl.getUniformLocation(program, "clusterInfo"), this.clusterInfo);
     gl.uniformMatrix4fv(gl.getUniformLocation(program, "nearShadowMvp"), false, this.nearShadowMvp);
     gl.uniform4fv(gl.getUniformLocation(program, "nearShadow"), this.nearShadow);
+    gl.uniform4fv(gl.getUniformLocation(program, "localShadowInfo"), this.localShadowInfo);
+    if (this.localShadowInfo[0]! > 0) {
+      gl.uniformMatrix4fv(gl.getUniformLocation(program, "shadowTileMvp"), false, this.shadowTileMvp);
+      gl.uniform4fv(gl.getUniformLocation(program, "shadowTileParams"), this.shadowTileParams);
+    }
+  }
+
+  /** The spot/point shadows this frame (EP8c): on/biases, each tile's view, and the atlas (made on first use). */
+  private readonly localShadowInfo = new Float32Array(4);
+  private readonly shadowTileMvp = new Float32Array(MAX_LOCAL_SHADOW_TILES * 16);
+  private readonly shadowTileParams = new Float32Array(MAX_LOCAL_SHADOW_TILES * 4);
+  private localAtlas: any = null;
+
+  /** Upload a frame's shadow tiles into the atlas, and bind it (a blank stands in when there are none). */
+  private uploadLocalShadows(local: SceneDraw["localShadows"]): void {
+    const gl = this.gl;
+    const on = local && local.tiles.length > 0;
+    this.localShadowInfo.set(on ? [1, local.bias, local.slopeBias, 0] : [0, 0, 0, 0]);
+    if (on) {
+      if (!this.localAtlas) {
+        const side = LOCAL_SHADOW_TILE * LOCAL_SHADOW_GRID;
+        gl.activeTexture(gl.TEXTURE0 + UNIT_LOCAL_SHADOWS); // made on its own unit, so no other binding moves
+        this.localAtlas = createTexture(gl, side, side, gl.R32F, gl.RED, gl.FLOAT, null);
+      }
+      this.bindTexture(UNIT_LOCAL_SHADOWS, this.localAtlas);
+      local.tiles.slice(0, MAX_LOCAL_SHADOW_TILES).forEach((tile, i) => {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, (i % LOCAL_SHADOW_GRID) * LOCAL_SHADOW_TILE, Math.floor(i / LOCAL_SHADOW_GRID) * LOCAL_SHADOW_TILE, LOCAL_SHADOW_TILE, LOCAL_SHADOW_TILE, gl.RED, gl.FLOAT, tile.depth);
+        this.shadowTileMvp.set(tile.lightViewProj, i * 16);
+        this.shadowTileParams.set(tile.linear, i * 4);
+      });
+    }
+    this.bindTexture(UNIT_LOCAL_SHADOWS, this.localAtlas ?? this.blankFloat);
+    gl.bindSampler(UNIT_LOCAL_SHADOWS, null);
   }
 
   /** Upload a frame's cells (only the index rows in use), and bind both textures. */
@@ -1382,6 +1463,7 @@ export class WebglSceneRenderer implements SceneRenderer {
       gl.deleteBuffer(this.lightBuffer);
       for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.probeTexture, this.ssaoTexture]) if (t) gl.deleteTexture(t);
       gl.deleteFramebuffer(this.framebuffer);
+      if (this.localAtlas) gl.deleteTexture(this.localAtlas);
       if (this.clusterTextures) {
         gl.deleteTexture(this.clusterTextures.table);
         gl.deleteTexture(this.clusterTextures.index);

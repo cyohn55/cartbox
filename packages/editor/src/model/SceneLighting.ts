@@ -121,9 +121,9 @@ function parseLight(value: unknown): SceneLight | null {
     const angle = (v: unknown, fallback: number) => (typeof v === "number" && Number.isFinite(v) ? Math.min(89, Math.max(0, v)) : fallback);
     const outerAngle = Math.max(1, angle(raw.outerAngle, 30));
     const innerAngle = Math.min(outerAngle, angle(raw.innerAngle, outerAngle * 0.75));
-    return { kind, position, direction, color, intensity, range, innerAngle, outerAngle };
+    return { kind, position, direction, color, intensity, range, innerAngle, outerAngle, ...(raw.castShadows === true ? { castShadows: true } : {}) };
   }
-  return { kind, position, color, intensity, range };
+  return { kind, position, color, intensity, range, ...(raw.castShadows === true ? { castShadows: true } : {}) };
 }
 
 /**

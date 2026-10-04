@@ -1944,8 +1944,9 @@ export const LOCKOUT_LIGHTING: SceneLighting = {
     // from the towers down onto the walkway — dozens of lights, each shading
     // only the cells of the view it reaches.
     ...energyLights(),
-    { kind: "spot", position: [-6.7, 7.9, -6.6], direction: [0.55, -0.62, 0.55], color: [1, 0.93, 0.8], intensity: 2.2, range: 16, innerAngle: 14, outerAngle: 24 },
-    { kind: "spot", position: [9.6, 5.1, 3.9], direction: [-0.7, -0.45, -0.55], color: [1, 0.93, 0.8], intensity: 2.2, range: 16, innerAngle: 14, outerAngle: 24 },
+    // The floodlights cast (EP8c): the walkway rails and anyone crossing throw shadows down the deck.
+    { kind: "spot", position: [-6.7, 7.9, -6.6], direction: [0.55, -0.62, 0.55], color: [1, 0.93, 0.8], intensity: 2.2, range: 16, innerAngle: 14, outerAngle: 24, castShadows: true },
+    { kind: "spot", position: [9.6, 5.1, 3.9], direction: [-0.7, -0.45, -0.55], color: [1, 0.93, 0.8], intensity: 2.2, range: 16, innerAngle: 14, outerAngle: 24, castShadows: true },
   ],
   // A procedural alpine dome (original art, baked at load): a cold overcast sky
   // over two rings of snow-capped peaks, with a misty glacier valley far below —

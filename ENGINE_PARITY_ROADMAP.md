@@ -306,10 +306,30 @@ preview.
         map. The movers now use the static map's light reach too.
       - **Lockout:** shadows at your feet are crisp while the far map still
         covers the arena.
-- [ ] **EP8c. Spot and point light shadows.** Shadow maps for spot lights
+- [x] **EP8c. Spot and point light shadows.** Shadow maps for spot lights
       (perspective) and point lights (six faces), packed in an atlas and
       shared by all three renderers. *Lockout:* the tower floodlights throw
       the walkway rails' shadows.
+
+      *Done:*
+      - **Casting lights:** a ranged spot or point light can cast
+        (`castShadows`, a toggle in the lighting panel).
+        - A spot gets a perspective shadow map down its cone; a point light
+          gets six 90° faces.
+        - Each map is a 256² tile in one 1024² atlas, up to 16 tiles, handed
+          out in light order.
+      - **Comparing distances:** each fragment projects into its light's
+        tile (a point light's face chosen by the dominant axis) and compares
+        distance from the light, not perspective depth. So the bias is a
+        constant few centimetres in world units, slope-scaled, with 2×2 PCF.
+      - **All three renderers:** the software rasteriser, WGSL (the atlas and
+        tile views in bind group 1) and GLSL (an atlas texture plus uniform
+        arrays). Parity tests hold them to the same picture.
+      - **Runtime:** the overlay caches each light's tiles of everything
+        still, until the light or the still set changes, and draws the movers
+        over a copy each frame. The editor's scene view shows them too.
+      - **Lockout:** the two tower floodlights cast. The walkway rails and
+        anyone crossing throw shadows down the deck.
 - [ ] **EP9. Light probes and LODs.** A baked grid of light probes, so moving
       objects pick up the baked bounce light (the web-sized answer to Lumen),
       and LOD chains generated automatically on import (the web-sized answer

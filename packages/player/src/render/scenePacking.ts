@@ -98,7 +98,8 @@ export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
  * Floats per light in the storage buffer: four vec4s —
  *   d0: xyz = direction (directional) or world position (point, spot), w = kind (0 directional, 1 point, 2 spot)
  *   d1: rgb = colour, w = intensity
- *   d2: x = range (0 = no falloff), y = spot cone's outer cosine, z = its inner cosine
+ *   d2: x = range (0 = no falloff), y = spot cone's outer cosine, z = its inner cosine,
+ *       w = first shadow tile (EP8c), −1 when it casts none
  *   d3: xyz = spot beam axis (unit, the way it points)
  * Matches the `Light` struct in the WGSL and GLSL scene shaders.
  */
@@ -135,6 +136,7 @@ export interface PackableLight {
   readonly range?: number;
   readonly innerAngle?: number;
   readonly outerAngle?: number;
+  readonly shadowTile?: number;
 }
 
 /**
@@ -157,6 +159,7 @@ export function packLights(lights: readonly PackableLight[]): Float32Array {
     out[base + 6] = light.color[2]!;
     out[base + 7] = light.intensity;
     out[base + 8] = light.range ?? 0;
+    out[base + 11] = light.shadowTile ?? -1;
     if (light.kind === "spot") {
       const [cosOuter, cosInner] = spotCone(light as SceneLight);
       out[base + 9] = cosOuter;

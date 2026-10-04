@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, StreamGroup, JointKind, JointSpec, DecodedTexture, EncodedImage, EnvironmentLight, ShadowInput, ToneMap, SceneLight, SceneFog, RasterStyle, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, StreamGroup, JointKind, JointSpec, DecodedTexture, EncodedImage, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, SceneFog, RasterStyle, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -3049,6 +3049,8 @@ interface SceneDraw {
      * {@link SceneLight}.
      */
     readonly lights?: readonly SceneLight[] | null;
+    /** Shadow maps of the spot and point lights that cast (EP8c), indexed by their `shadowTile`. See {@link LocalShadows}. */
+    readonly localShadows?: LocalShadows | null;
     /**
      * Distance fog for PBR (Modern-tier) materials, applied after tone mapping, or
      * omitted for none. Both backends fade by the fragment's eye depth. See
@@ -3342,6 +3344,13 @@ declare class WebglSceneRenderer implements SceneRenderer {
     private clusterTextures;
     /** The per-frame uniforms a program needs (probes, clusters), set when it's put to use. */
     private frameUniforms;
+    /** The spot/point shadows this frame (EP8c): on/biases, each tile's view, and the atlas (made on first use). */
+    private readonly localShadowInfo;
+    private readonly shadowTileMvp;
+    private readonly shadowTileParams;
+    private localAtlas;
+    /** Upload a frame's shadow tiles into the atlas, and bind it (a blank stands in when there are none). */
+    private uploadLocalShadows;
     /** Upload a frame's cells (only the index rows in use), and bind both textures. */
     private uploadClusters;
     /** Programs by material graph (EP7), linked on first use. */
@@ -3579,6 +3588,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * write both and their params. An orthographic view (no cells) loops every light.
      */
     private clusterLights;
+    /** Upload the spot/point shadow tiles (EP8c): each tile into its atlas cell, and every tile's view. */
+    private uploadLocalShadows;
     /** Await one readback and publish it as the newest frame. */
     private drain;
     /** Grow the per-draw uniform buffer to hold at least `count` draws. */
@@ -3678,7 +3689,8 @@ declare const UNIFORM_FLOATS: number;
  * Floats per light in the storage buffer: four vec4s —
  *   d0: xyz = direction (directional) or world position (point, spot), w = kind (0 directional, 1 point, 2 spot)
  *   d1: rgb = colour, w = intensity
- *   d2: x = range (0 = no falloff), y = spot cone's outer cosine, z = its inner cosine
+ *   d2: x = range (0 = no falloff), y = spot cone's outer cosine, z = its inner cosine,
+ *       w = first shadow tile (EP8c), −1 when it casts none
  *   d3: xyz = spot beam axis (unit, the way it points)
  * Matches the `Light` struct in the WGSL and GLSL scene shaders.
  */
@@ -3693,6 +3705,7 @@ interface PackableLight {
     readonly range?: number;
     readonly innerAngle?: number;
     readonly outerAngle?: number;
+    readonly shadowTile?: number;
 }
 /**
  * Pack a light list into the storage-buffer layout the WGSL loop reads. Always
@@ -5087,6 +5100,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
     /** The sun's shadow maps (see buildShadow): the whole scene, and the near cascade round the camera (EP8b). */
     private farShadow;
     private nearShadow;
+    /** Each casting spot/point light's cached still tiles and this frame's copies (EP8c), in tile order. */
+    private localShadowCache;
     /** Instances ever posed on the front layer (a held weapon): never part of the static shadow. */
     private readonly everFront;
     /** Each mesh's local bounding box, for projecting shadow footprints. */
@@ -5324,6 +5339,22 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * full-scene shadow pass per frame into a memcpy plus a few characters.
      */
     private buildShadow;
+    /**
+     * What the static shadow maps depend on: *which* instances are posed (not
+     * whether a posed one is hidden this frame — a character dying must not
+     * re-render the whole arena's shadow); a held weapon never casts, so
+     * anything ever posed in front is out too.
+     */
+    private staticShadowKey;
+    /** Everything that casts and never moves: what the static shadow maps hold. */
+    private stillCasters;
+    /**
+     * Shadows from the spot and point lights that cast (EP8c): each light's
+     * tiles of everything still, cached until the light or the still set
+     * changes, copied each frame with the movers drawn over them. Returns the
+     * lights with their tiles assigned, or null when none casts.
+     */
+    private buildLocalShadows;
     /**
      * One shadow map for this frame: the layer's cached static depth (redrawn
      * when `key` or the rig changes), copied, with this frame's movers drawn over

@@ -200,6 +200,15 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     }
   });
 
+  it("casts spot and point light shadows like the software rasteriser", async () => {
+    const result = await run("localShadows");
+    expect(result.drawn).toBeGreaterThan(100);
+    if (exact) {
+      expect(result.coverage, JSON.stringify(result.diffs)).toBe(0);
+      expect(result.maxDelta).toBeLessThanOrEqual(4);
+    }
+  });
+
   it("matches distance fog within float tolerance", async () => {
     const result = await run("fog");
     expect(result.drawn).toBeGreaterThan(100);

@@ -77,6 +77,9 @@ import {
   cameraPositionFromView,
   compiledGraphOf,
   computeSmoothNormals,
+  LOCAL_SHADOW_GRID,
+  LOCAL_SHADOW_TILE,
+  MAX_LOCAL_SHADOW_TILES,
   NEAR_CASCADE_EDGE,
   CLUSTER_CELLS,
   CLUSTER_INDEX_CAP,
@@ -131,7 +134,7 @@ interface PipelineSet {
 }
 
 /** The per-frame globals' bytes (WGSL `Frame`): cluster params and info, the near cascade's matrix and params. */
-const FRAME_BYTES = 112;
+const FRAME_BYTES = 128;
 
 /** Staging buffers in flight. Three lets a readback land while two more queue. */
 const READBACK_BUFFERS = 3;
@@ -237,6 +240,12 @@ struct Frame {
   clusterInfo: vec4<f32>,
   nearMvp: mat4x4<f32>,
   nearShadow: vec4<f32>,
+  localShadow: vec4<f32>, // EP8c: x = 1 when spot/point shadows are on, y = bias, z = slope bias (world units)
+};
+// One spot/point shadow tile (EP8c): world→clip, and params.xy = depth→distance terms.
+struct ShadowTile {
+  mvp: mat4x4<f32>,
+  params: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
@@ -293,6 +302,9 @@ struct Probe {
 @group(1) @binding(1) var<storage, read> clusterTable: array<vec2<u32>>;
 @group(1) @binding(2) var<storage, read> clusterIndex: array<u32>;
 @group(1) @binding(3) var<uniform> frame: Frame;
+// Spot and point light shadows (EP8c): the tile atlas and each tile's view.
+@group(1) @binding(4) var localAtlas: texture_2d<f32>;
+@group(1) @binding(5) var<storage, read> shadowTiles: array<ShadowTile>;
 
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] — fogLayerDepth in skyDome.ts.
@@ -454,6 +466,42 @@ fn finishAlpha(rgb: vec3<f32>, a: f32) -> vec4<f32> {
   if (u.pbr.w > 1.5) { return vec4<f32>(c * a, a); }
   return vec4<f32>(c, 1.0);
 }
+// A spot/point light's shadow at P (mirrors localShadowVisibility): the tile
+// that sees it (a point light's face by dominant axis), a 2×2 PCF of distance
+// compares against a slope-scaled world bias.
+fn localTap(fx: f32, fy: f32, ox: f32, oy: f32, own: f32, a: f32, b: f32) -> f32 {
+  let size = ${LOCAL_SHADOW_TILE}.0;
+  let tx = i32(clamp(floor(fx), 0.0, size - 1.0) + ox);
+  let ty = i32(clamp(floor(fy), 0.0, size - 1.0) + oy);
+  let stored = textureLoad(localAtlas, vec2<i32>(tx, ty), 0).r;
+  if (own > b / (min(stored, 1.0) + a)) { return 0.0; }
+  return 1.0;
+}
+fn localShadow(first: i32, lgt: Light, P: vec3<f32>, cosL: f32) -> f32 {
+  var tile = first;
+  if (lgt.d0.w < 1.5) {
+    let d = P - lgt.d0.xyz;
+    let m = abs(d);
+    if (m.x >= m.y && m.x >= m.z) { tile = tile + select(1, 0, d.x >= 0.0); }
+    else if (m.y >= m.z) { tile = tile + select(3, 2, d.y >= 0.0); }
+    else { tile = tile + select(5, 4, d.z >= 0.0); }
+  }
+  let t = shadowTiles[tile];
+  let c = t.mvp * vec4<f32>(P, 1.0);
+  if (c.w <= 0.0) { return 1.0; }
+  let n = c.xyz / c.w;
+  if (n.x < -1.0 || n.x > 1.0 || n.y < -1.0 || n.y > 1.0 || n.z < -1.0 || n.z > 1.0) { return 1.0; }
+  let size = ${LOCAL_SHADOW_TILE}.0;
+  let sx = (n.x * 0.5 + 0.5) * size;
+  let sy = (1.0 - (n.y * 0.5 + 0.5)) * size;
+  let cc = clamp(cosL, 0.05, 1.0);
+  let own = t.params.y / (n.z + t.params.x) - frame.localShadow.y - frame.localShadow.z * min(10.0, sqrt(1.0 - cc * cc) / cc);
+  let ox = f32((tile % ${LOCAL_SHADOW_GRID}) * ${LOCAL_SHADOW_TILE});
+  let oy = f32((tile / ${LOCAL_SHADOW_GRID}) * ${LOCAL_SHADOW_TILE});
+  return (localTap(sx - 0.5, sy - 0.5, ox, oy, own, t.params.x, t.params.y) + localTap(sx + 0.5, sy - 0.5, ox, oy, own, t.params.x, t.params.y)
+        + localTap(sx - 0.5, sy + 0.5, ox, oy, own, t.params.x, t.params.y) + localTap(sx + 0.5, sy + 0.5, ox, oy, own, t.params.x, t.params.y)) * 0.25;
+}
+
 // One light's direct term (Cook-Torrance), mirroring the software rasteriser's
 // light loop: point and spot lights fall off to nothing at their range, a spot
 // fades across its cone, and directional lights honour the sun shadow (sf).
@@ -486,6 +534,7 @@ fn lightTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, a2:
   let FL = f0 + (vec3<f32>(1.0) - f0) * fpL;
   var occl = 1.0;
   if (lgt.d0.w < 0.5) { occl = sf; }
+  else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occl = localShadow(i32(lgt.d2.w + 0.5), lgt, P, ndlL); }
   let w = lgt.d1.w * atten * ndlL * occl;
   return (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
 }
@@ -835,7 +884,16 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     private readonly colourTexture: any,
     private readonly depthTexture: any,
     /** Group 1 (EP6b): the opaque depth for the see-through pass, or a blank for the opaque one. */
-    private readonly depthGroups: { readonly blank: any; readonly scene: any; readonly blankTexture: any; readonly clusters: { readonly table: any; readonly index: any; readonly params: any } },
+    private readonly depthGroups: {
+      blank: any;
+      scene: any;
+      readonly blankTexture: any;
+      readonly clusters: { readonly table: any; readonly index: any; readonly params: any };
+      readonly shadowTiles: any;
+      atlas: any;
+      atlasBlank: boolean;
+      readonly makeGroups: (atlas: any) => { blank: any; scene: any };
+    },
     private readonly sampler: any,
     private readonly blankTexture: any,
     /** 1x1 r32float, bound to the shadow slot when no shadow map is active. */
@@ -973,6 +1031,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 1, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
           { binding: 2, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
           { binding: 3, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } },
+          { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+          { binding: 5, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         ],
       });
       const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayout] });
@@ -1038,16 +1098,30 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         index: device.createBuffer({ size: CLUSTER_INDEX_CAP * 4, usage: 0x80 | 0x08 }),
         params: device.createBuffer({ size: FRAME_BYTES, usage: 0x40 | 0x08 }), // UNIFORM | COPY_DST
       };
-      const clusterEntries = [
-        { binding: 1, resource: { buffer: clusterBuffers.table } },
-        { binding: 2, resource: { buffer: clusterBuffers.index } },
-        { binding: 3, resource: { buffer: clusterBuffers.params } },
-      ];
+      // Spot/point shadows (EP8c): the atlas (a 1×1 stand-in until a light casts) and the tiles' views.
+      const shadowTiles = device.createBuffer({ size: MAX_LOCAL_SHADOW_TILES * 80, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
+      const atlasBlank = device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: 0x04 | 0x02 });
+      const makeGroups = (atlas: any) => {
+        const shared = [
+          { binding: 1, resource: { buffer: clusterBuffers.table } },
+          { binding: 2, resource: { buffer: clusterBuffers.index } },
+          { binding: 3, resource: { buffer: clusterBuffers.params } },
+          { binding: 4, resource: atlas.createView() },
+          { binding: 5, resource: { buffer: shadowTiles } },
+        ];
+        return {
+          blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared] }),
+          scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: depthTexture.createView() }, ...shared] }),
+        };
+      };
       const depthGroups = {
-        blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...clusterEntries] }),
-        scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: depthTexture.createView() }, ...clusterEntries] }),
+        ...makeGroups(atlasBlank),
         blankTexture: blankDepth,
         clusters: clusterBuffers,
+        shadowTiles,
+        atlas: atlasBlank,
+        atlasBlank: true,
+        makeGroups,
       };
       // Filtering is the one era trait that is just a sampler setting. Nearest
       // gives the crunchy, aliased texels of a machine that could not filter;
@@ -1471,8 +1545,35 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       frame.set(near.lightViewProj, 8);
       frame.set([1, near.bias, near.slopeBias], 24);
     }
+    const local = draw.localShadows ?? null;
+    if (local && local.tiles.length > 0) frame.set([1, local.bias, local.slopeBias], 28);
     this.device.queue.writeBuffer(buffers.params, 0, frame);
+    this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
+  }
+
+  /** Upload the spot/point shadow tiles (EP8c): each tile into its atlas cell, and every tile's view. */
+  private uploadLocalShadows(local: SceneDraw["localShadows"]): void {
+    if (!local || local.tiles.length === 0) return;
+    const groups = this.depthGroups;
+    if (groups.atlasBlank) {
+      const side = LOCAL_SHADOW_TILE * LOCAL_SHADOW_GRID;
+      groups.atlas = this.device.createTexture({ size: { width: side, height: side }, format: "r32float", usage: 0x04 | 0x02 });
+      groups.atlasBlank = false;
+      Object.assign(groups, groups.makeGroups(groups.atlas));
+    }
+    const views = new Float32Array(MAX_LOCAL_SHADOW_TILES * 20);
+    local.tiles.slice(0, MAX_LOCAL_SHADOW_TILES).forEach((tile, i) => {
+      this.device.queue.writeTexture(
+        { texture: groups.atlas, origin: { x: (i % LOCAL_SHADOW_GRID) * LOCAL_SHADOW_TILE, y: Math.floor(i / LOCAL_SHADOW_GRID) * LOCAL_SHADOW_TILE } },
+        tile.depth,
+        { bytesPerRow: LOCAL_SHADOW_TILE * 4, rowsPerImage: LOCAL_SHADOW_TILE },
+        { width: LOCAL_SHADOW_TILE, height: LOCAL_SHADOW_TILE },
+      );
+      views.set(tile.lightViewProj, i * 20);
+      views.set(tile.linear, i * 20 + 16);
+    });
+    this.device.queue.writeBuffer(groups.shadowTiles, 0, views);
   }
 
   /** Await one readback and publish it as the newest frame. */
@@ -1651,6 +1752,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     destroySafely(this.depthGroups.clusters.table);
     destroySafely(this.depthGroups.clusters.index);
     destroySafely(this.depthGroups.clusters.params);
+    destroySafely(this.depthGroups.shadowTiles);
+    destroySafely(this.depthGroups.atlas);
     destroySafely(this.blankTexture);
     destroySafely(this.blankShadow);
     if (this.shadowTexture !== this.blankShadow) destroySafely(this.shadowTexture);

@@ -30,7 +30,7 @@ import {
   renderMeshScene,
   type MeshSceneInstance,
 } from "@cartbox/editor";
-import type { EnvironmentLight, Mat4, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
+import type { EnvironmentLight, LocalShadows, Mat4, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
 import type { RenderStats } from "../debug/profiler.js";
@@ -94,6 +94,8 @@ export interface SceneDraw {
    * {@link SceneLight}.
    */
   readonly lights?: readonly SceneLight[] | null;
+  /** Shadow maps of the spot and point lights that cast (EP8c), indexed by their `shadowTile`. See {@link LocalShadows}. */
+  readonly localShadows?: LocalShadows | null;
   /**
    * Distance fog for PBR (Modern-tier) materials, applied after tone mapping, or
    * omitted for none. Both backends fade by the fragment's eye depth. See
@@ -212,6 +214,7 @@ export class SoftwareSceneRenderer implements SceneRenderer {
       tonemap: draw.tonemap,
       ssao: draw.ssao,
       lights: draw.lights,
+      localShadows: draw.localShadows,
       fog: draw.fog,
       time: draw.time,
       style: this.style,

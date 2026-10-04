@@ -18,6 +18,7 @@ import {
 
 import { SoftwareSceneRenderer, type SceneDraw } from "../../packages/player/src/render/sceneRenderer";
 import { graphInstances } from "./graphScenes";
+import { localShadowRig } from "./localShadowScene";
 import { manyLights } from "./manyLights";
 import { WebglSceneRenderer } from "../../packages/player/src/render/WebglSceneRenderer";
 
@@ -152,6 +153,11 @@ function scenes(): Record<string, Scene> {
       instances: [{ mesh: floor(6, 0), model: composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]) }],
       draw: () => ({ ...lit(), lights: manyLights() }),
     },
+    // Spot and point light shadows (EP8c): a block under a casting spot, a post beside a casting point light.
+    localShadows: (() => {
+      const rig = localShadowRig();
+      return { instances: rig.instances, draw: () => ({ ...baseDraw(), view: viewMatrix([0, 4, 6], [0, 0.5, 0]), lights: rig.lights, localShadows: rig.localShadows }) };
+    })(),
     // Material graphs (EP7): noise, fresnel, UV and maths into every PBR input,
     // and a scrolling texture's alpha into a see-through surface's coverage.
     graph: { instances: graphInstances(quad), draw: () => ({ ...baseDraw(), time: 0.7 }) },

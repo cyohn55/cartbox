@@ -432,12 +432,14 @@ describe("packLights", () => {
     // Directional: d0 = dir + kind 0; d1 = colour + intensity; d2.x = range 0.
     expect(Array.from(packed.subarray(0, 8))).toEqual([0, 1, 0, 0, 1, Math.fround(0.5), Math.fround(0.25), 2]);
     expect(packed[8]).toBe(0);
-    // Point: d0 = position + kind 1; d2.x = range; no cone (d2.yz, d3 stay 0).
+    // Point: d0 = position + kind 1; d2.x = range; no cone (d2.yz, d3 stay 0); d2.w = −1, no shadow tile.
     const p = LIGHT_FLOATS;
     expect(Array.from(packed.subarray(p, p + 4))).toEqual([3, 4, 5, 1]);
     expect(packed[p + 7]).toBe(Math.fround(1.5)); // intensity
     expect(packed[p + 8]).toBe(8); // range
-    expect(Array.from(packed.subarray(p + 9, p + 16))).toEqual([0, 0, 0, 0, 0, 0, 0]);
+    expect(Array.from(packed.subarray(p + 9, p + 16))).toEqual([0, 0, -1, 0, 0, 0, 0]);
+    // A light that casts (EP8c) packs its first shadow tile in d2.w.
+    expect(packLights([{ kind: "point", position: [0, 0, 0], color: [1, 1, 1], intensity: 1, range: 4, shadowTile: 3 }])[11]).toBe(3);
   });
 
   it("returns at least one (zeroed) light so the binding is never empty", () => {

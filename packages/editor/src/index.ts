@@ -372,6 +372,22 @@ export {
   type LightClusters,
 } from "./render/lightClusters";
 export {
+  LOCAL_SHADOW_BIAS,
+  LOCAL_SHADOW_GRID,
+  LOCAL_SHADOW_SLOPE_BIAS,
+  LOCAL_SHADOW_TILE,
+  MAX_LOCAL_SHADOW_TILES,
+  assignLocalShadowTiles,
+  castsLocalShadow,
+  localShadowFace,
+  localShadowTileCount,
+  localShadowViews,
+  localShadowVisibility,
+  renderLocalShadow,
+  type LocalShadowTile,
+  type LocalShadows,
+} from "./render/localShadows";
+export {
   frustumPlanes,
   aabbOutsideFrustum,
   worldAabb,
