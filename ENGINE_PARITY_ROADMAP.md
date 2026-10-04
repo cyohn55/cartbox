@@ -260,9 +260,39 @@ preview.
         - a live preview sphere.
       - **Lockout:** the energy trim and weapon markers run on a graph. Bands
         of light flow diagonally across the arena over the trim's slow breath.
-- [ ] **EP8. Shadows and many lights.** Cascaded sun shadows, spot lights,
+- [x] **EP8. Shadows and many lights.** Cascaded sun shadows, spot lights,
       shadows from spot and point lights, and clustered light culling so a
       scene can hold dozens of lights.
+
+      *Done (lights; the shadows are EP8b and EP8c):*
+      - **Spot lights:** a point light narrowed to a cone, full inside its
+        inner angle and fading to nothing at its outer one. They're authored
+        in the lighting panel (aim, cone, soft edge) and shaded the same in
+        all three renderers.
+      - **Clustered light culling:** each frame the view is cut into
+        16 × 9 × 24 cells (screen tiles by exponential depth slices). Each
+        ranged light is listed in the cells its reach touches: a sphere
+        against the cell's box, conservatively.
+        - The GPU fragment shades the global lights (sun, unranged), then only
+          its own cell's list. WebGPU reads the cells from storage buffers,
+          WebGL2 from integer textures.
+        - A light contributes exactly nothing past its range, so the picture
+          is the same as shading every light. The software rasteriser,
+          still the reference, skips lights that can't reach a triangle.
+        - WebGL2 holds 128 lights, WebGPU any number, each cell up to 64.
+      - **Lighting panel:** a big rig lists each light as one row (kind,
+        colour, position), opened one at a time.
+      - **Lockout:** 40 lights. Cyan pools along every energy strip and vent
+        and at the weapon markers, plus two floodlights from the towers onto
+        the walkway.
+- [ ] **EP8b. Cascaded sun shadows.** Split the view's depth into cascades,
+      each with its own sun shadow map, fitted and stabilised (texel-snapped)
+      to its slice, so near shadows stay sharp while far ones still reach the
+      horizon. *Lockout:* crisp shadows at your feet and across the whole map.
+- [ ] **EP8c. Spot and point light shadows.** Shadow maps for spot lights
+      (perspective) and point lights (six faces), packed in an atlas and
+      shared by all three renderers. *Lockout:* the tower floodlights throw
+      the walkway rails' shadows.
 - [ ] **EP9. Light probes and LODs.** A baked grid of light probes, so moving
       objects pick up the baked bounce light (the web-sized answer to Lumen),
       and LOD chains generated automatically on import (the web-sized answer

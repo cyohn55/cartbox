@@ -55,7 +55,7 @@ describe("parseSceneLighting", () => {
     const parsed = parseSceneLighting({
       environment: { sky: [2, -1, 0.5], horizon: "bad", intensity: -3 },
       ambient: 5,
-      lights: [{ kind: "point", position: [1, 2, 3], color: [1, 1, 1], intensity: 2, range: 8 }, { kind: "spot" }, {}],
+      lights: [{ kind: "point", position: [1, 2, 3], color: [1, 1, 1], intensity: 2, range: 8 }, { kind: "laser" }, {}],
     })!;
     expect(parsed.environment.sky).toEqual([1, 0, 0.5]); // clamped 0..1
     expect(parsed.environment.horizon).toEqual(defaultSceneLighting().environment.horizon); // bad → default

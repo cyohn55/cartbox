@@ -77,6 +77,13 @@ import {
   cameraPositionFromView,
   compiledGraphOf,
   computeSmoothNormals,
+  CLUSTER_CELLS,
+  CLUSTER_INDEX_CAP,
+  CLUSTER_X,
+  CLUSTER_Y,
+  CLUSTER_Z,
+  buildLightClusters,
+  orderLights,
   graphNoiseSource,
   graphShaderCode,
   graphUsesNoise,
@@ -215,6 +222,13 @@ struct Light {
   d0: vec4<f32>,
   d1: vec4<f32>,
   d2: vec4<f32>,
+  d3: vec4<f32>,
+};
+// Clustered lights (EP8): params = tile size (px), near plane, slice scale;
+// info.x = global lights (looped by every fragment), info.y = 1 when cells are built.
+struct Clusters {
+  params: vec4<f32>,
+  info: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
@@ -267,6 +281,10 @@ struct Probe {
 // The opaque pass's depth (EP6b), read by the see-through pass for soft edges;
 // the opaque pass binds a blank in its place.
 @group(1) @binding(0) var sceneDepth: texture_depth_2d;
+// Clustered lights (EP8): per cell (offset, count) into the index list.
+@group(1) @binding(1) var<storage, read> clusterTable: array<vec2<u32>>;
+@group(1) @binding(2) var<storage, read> clusterIndex: array<u32>;
+@group(1) @binding(3) var<uniform> clusters: Clusters;
 
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] — fogLayerDepth in skyDome.ts.
@@ -415,6 +433,42 @@ fn finishAlpha(rgb: vec3<f32>, a: f32) -> vec4<f32> {
   if (u.pbr.w > 1.5) { return vec4<f32>(c * a, a); }
   return vec4<f32>(c, 1.0);
 }
+// One light's direct term (Cook-Torrance), mirroring the software rasteriser's
+// light loop: point and spot lights fall off to nothing at their range, a spot
+// fades across its cone, and directional lights honour the sun shadow (sf).
+fn lightTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, a2: f32, k: f32, f0: vec3<f32>, kdm: f32, albedo: vec3<f32>, sf: f32) -> vec3<f32> {
+  var Ld: vec3<f32>;
+  var atten = 1.0;
+  if (lgt.d0.w > 0.5) { // point or spot
+    let toL = lgt.d0.xyz - P;
+    let dist = max(length(toL), 1e-4);
+    Ld = toL / dist;
+    let range = lgt.d2.x;
+    if (range > 0.0) { let t = max(0.0, 1.0 - dist / range); atten = t * t; }
+    if (lgt.d0.w > 1.5) {
+      let ct = clamp((-dot(Ld, lgt.d3.xyz) - lgt.d2.y) / (lgt.d2.z - lgt.d2.y), 0.0, 1.0);
+      atten = atten * ct * ct * (3.0 - 2.0 * ct);
+    }
+  } else {
+    Ld = normalize(lgt.d0.xyz);
+  }
+  let ndlL = max(0.0, dot(N, Ld));
+  if (ndlL <= 0.0 || atten <= 0.0) { return vec3<f32>(0.0); }
+  let Hl = normalize(Ld + V);
+  let ndhL = max(0.0, dot(N, Hl));
+  let vdhL = max(0.0, dot(V, Hl));
+  let ddL = ndhL * ndhL * (a2 - 1.0) + 1.0;
+  let DL = a2 / (3.14159265 * ddL * ddL + 1e-7);
+  let GL = (ndv / (ndv * (1.0 - k) + k)) * (ndlL / (ndlL * (1.0 - k) + k));
+  let fpL = pow(1.0 - vdhL, 5.0);
+  let specL = (DL * GL) / (4.0 * ndlL * ndv + 1e-4);
+  let FL = f0 + (vec3<f32>(1.0) - f0) * fpL;
+  var occl = 1.0;
+  if (lgt.d0.w < 0.5) { occl = sf; }
+  let w = lgt.d1.w * atten * ndlL * occl;
+  return (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
+}
+
 fn envAverage() -> vec3<f32> {
   if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
   return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
@@ -586,34 +640,19 @@ ${g.emis}
       // Mirrors meshRasterizer.ts: each light re-evaluates the direct term with
       // shared N/ndv/f0/kdm/a2/k; point lights fall off to nothing at their range.
       var direct = vec3<f32>(0.0);
-      for (var i = 0; i < lc; i = i + 1) {
-        let lgt = lights[i];
-        var Ld: vec3<f32>;
-        var atten = 1.0;
-        if (lgt.d0.w > 0.5) { // point
-          let toL = lgt.d0.xyz - in.worldPos;
-          let dist = max(length(toL), 1e-4);
-          Ld = toL / dist;
-          let range = lgt.d2.x;
-          if (range > 0.0) { let t = max(0.0, 1.0 - dist / range); atten = t * t; }
-        } else {
-          Ld = normalize(lgt.d0.xyz);
+      // The global lights (the sun, unranged lights) reach every fragment…
+      let ng = i32(clusters.info.x + 0.5);
+      for (var i = 0; i < ng; i = i + 1) {
+        direct = direct + lightTerm(lights[i], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
+      }
+      // …the rest only the cells they touch (EP8): this fragment's cell, by pixel and depth.
+      if (clusters.info.y > 0.5 && in.eyeDepth >= clusters.params.z) {
+        let tile = min(vec2<u32>(in.pos.xy / clusters.params.xy), vec2<u32>(${CLUSTER_X - 1}u, ${CLUSTER_Y - 1}u));
+        let slice = min(u32(log(in.eyeDepth / clusters.params.z) * clusters.params.w), ${CLUSTER_Z - 1}u);
+        let cell = clusterTable[(slice * ${CLUSTER_Y}u + tile.y) * ${CLUSTER_X}u + tile.x];
+        for (var j = 0u; j < cell.y; j = j + 1u) {
+          direct = direct + lightTerm(lights[clusterIndex[cell.x + j]], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
         }
-        let ndlL = max(0.0, dot(N, Ld));
-        if (ndlL <= 0.0 || atten <= 0.0) { continue; }
-        let Hl = normalize(Ld + V);
-        let ndhL = max(0.0, dot(N, Hl));
-        let vdhL = max(0.0, dot(V, Hl));
-        let ddL = ndhL * ndhL * (a2 - 1.0) + 1.0;
-        let DL = a2 / (3.14159265 * ddL * ddL + 1e-7);
-        let GL = (ndv / (ndv * (1.0 - k) + k)) * (ndlL / (ndlL * (1.0 - k) + k));
-        let fpL = pow(1.0 - vdhL, 5.0);
-        let specL = (DL * GL) / (4.0 * ndlL * ndv + 1e-4);
-        let FL = f0 + (vec3<f32>(1.0) - f0) * fpL;
-        var occl = 1.0;
-        if (lgt.d0.w < 0.5) { occl = sf; } // directional lights honour the sun shadow
-        let w = lgt.d1.w * atten * ndlL * occl;
-        direct = direct + (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
       }
       lit = direct + amb + emis;
     } else {
@@ -771,7 +810,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     private readonly colourTexture: any,
     private readonly depthTexture: any,
     /** Group 1 (EP6b): the opaque depth for the see-through pass, or a blank for the opaque one. */
-    private readonly depthGroups: { readonly blank: any; readonly scene: any; readonly blankTexture: any },
+    private readonly depthGroups: { readonly blank: any; readonly scene: any; readonly blankTexture: any; readonly clusters: { readonly table: any; readonly index: any; readonly params: any } },
     private readonly sampler: any,
     private readonly blankTexture: any,
     /** 1x1 r32float, bound to the shadow slot when no shadow map is active. */
@@ -902,8 +941,14 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       // test depth without writing it, drawn after the opaque scene.
       // Group 1 is the opaque depth for soft edges (EP6b): the see-through pass
       // reads it while it is attached read-only; the opaque pass binds a blank.
+      // It also carries the clustered lights (EP8): the cell table, the index list and their params.
       const depthLayout = device.createBindGroupLayout({
-        entries: [{ binding: 0, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "depth" } }],
+        entries: [
+          { binding: 0, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "depth" } },
+          { binding: 1, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
+          { binding: 2, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
+          { binding: 3, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } },
+        ],
       });
       const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayout] });
       const pipelinesFor = (code: string): PipelineSet => {
@@ -963,10 +1008,21 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         format: "depth24plus",
         usage: 0x10 | 0x04, // RENDER_ATTACHMENT | TEXTURE_BINDING
       });
+      const clusterBuffers = {
+        table: device.createBuffer({ size: CLUSTER_CELLS * 8, usage: 0x80 | 0x08 }), // STORAGE | COPY_DST
+        index: device.createBuffer({ size: CLUSTER_INDEX_CAP * 4, usage: 0x80 | 0x08 }),
+        params: device.createBuffer({ size: 32, usage: 0x40 | 0x08 }), // UNIFORM | COPY_DST
+      };
+      const clusterEntries = [
+        { binding: 1, resource: { buffer: clusterBuffers.table } },
+        { binding: 2, resource: { buffer: clusterBuffers.index } },
+        { binding: 3, resource: { buffer: clusterBuffers.params } },
+      ];
       const depthGroups = {
-        blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }] }),
-        scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: depthTexture.createView() }] }),
+        blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...clusterEntries] }),
+        scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: depthTexture.createView() }, ...clusterEntries] }),
         blankTexture: blankDepth,
+        clusters: clusterBuffers,
       };
       // Filtering is the one era trait that is just a sampler setting. Nearest
       // gives the crunchy, aliased texels of a machine that could not filter;
@@ -1191,10 +1247,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const ssao = draw.ssao ?? null;
     this.bindSsao(ssao);
 
-    // Modern-tier lights: pack the list into the storage buffer for the WGSL loop.
-    const sceneLights = draw.lights ?? null;
-    this.uploadLights(packLights(sceneLights ?? []));
-    const lightCount = sceneLights?.length ?? 0;
+    // Modern-tier lights: packed global-first for the WGSL loop, the rest
+    // sorted into the view's cells (EP8) so each fragment shades only its own.
+    const { ordered } = this.clusterLights(draw);
+    this.uploadLights(packLights(ordered));
+    const lightCount = ordered.length;
 
     let next = 0;
     draws.forEach((entry, index) => {
@@ -1345,6 +1402,26 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       this.graphPipelines.set(graph.key, set);
     }
     return set;
+  }
+
+  /**
+   * Order the frame's lights (global first), build the clustered cells, and
+   * write both and their params. An orthographic view (no cells) loops every light.
+   */
+  private clusterLights(draw: SceneDraw) {
+    const { ordered, globalCount } = orderLights(draw.lights ?? []);
+    const clusters = ordered.length > globalCount ? buildLightClusters(ordered, globalCount, draw.view, draw.projection, this.width, this.height) : null;
+    const buffers = this.depthGroups.clusters;
+    if (clusters) {
+      this.device.queue.writeBuffer(buffers.table, 0, clusters.table);
+      this.device.queue.writeBuffer(buffers.index, 0, clusters.indices, 0, Math.max(4, Math.ceil(clusters.used / 4) * 4));
+    }
+    this.device.queue.writeBuffer(
+      buffers.params,
+      0,
+      new Float32Array([...(clusters?.params ?? [1, 1, 1, 1]), clusters ? globalCount : ordered.length, clusters ? 1 : 0, 0, 0]),
+    );
+    return { ordered, globalCount, clusters };
   }
 
   /** Await one readback and publish it as the newest frame. */
@@ -1520,6 +1597,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     destroySafely(this.colourTexture);
     destroySafely(this.depthTexture);
     destroySafely(this.depthGroups.blankTexture);
+    destroySafely(this.depthGroups.clusters.table);
+    destroySafely(this.depthGroups.clusters.index);
+    destroySafely(this.depthGroups.clusters.params);
     destroySafely(this.blankTexture);
     destroySafely(this.blankShadow);
     if (this.shadowTexture !== this.blankShadow) destroySafely(this.shadowTexture);

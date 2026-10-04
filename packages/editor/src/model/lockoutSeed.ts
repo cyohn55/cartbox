@@ -30,6 +30,7 @@ import { encodeRgbaPng } from "./png";
 import { serializeMeshAsset, type EncodedImage, type MeshAsset, type MeshPrimitive } from "./MeshAsset";
 import type { AnimationClip, ClipChannel, SkinJoint } from "./skeleton";
 import type { SceneLighting } from "./SceneLighting";
+import type { SceneLight } from "../render/meshRasterizer";
 import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, type Streams } from "./seedGeometry";
 import { packMeshLibrary } from "./meshLibrary";
 import { bakeNavMesh, boxTriangles, serializeNavMesh, type NavMesh } from "./navmesh";
@@ -597,6 +598,31 @@ const TRIM: Box[] = [
   [0, 0.72, -2.55, 3.1, 0.02, 0.05],
   [-9, 2.22, 3.65, 2.4, 0.02, 0.05], // shotgun-room threshold strip
 ];
+
+/**
+ * Light from the energy trim and markers (EP8): a small cyan point light every
+ * ~1.6 m along each strip (and one per vent), just off its face, and one over
+ * each weapon marker but the Sword's (the pit light covers it).
+ */
+function energyLights(): SceneLight[] {
+  const cyan = [0.35, 0.92, 1] as const;
+  const lights: SceneLight[] = [];
+  for (const [cx, cy, cz, hx, , hz] of TRIM) {
+    const long = Math.max(hx, hz);
+    const n = Math.max(1, Math.round((long * 2) / 1.6));
+    for (let i = 0; i < n; i += 1) {
+      const t = n === 1 ? 0 : (i / (n - 1)) * 2 - 1;
+      const x = cx + (hx >= hz ? t * hx * 0.9 : 0);
+      const z = cz + (hz > hx ? t * hz * 0.9 : 0);
+      lights.push({ kind: "point", position: [x, cy + 0.25, z], color: cyan, intensity: 0.7, range: 1.8 });
+    }
+  }
+  for (const [cx, cy, cz] of MARKERS) {
+    if (cx === 0 && cy < 2) continue; // the Sword's, lit by the pit
+    lights.push({ kind: "point", position: [cx, cy + 0.2, cz], color: cyan, intensity: 1.2, range: 2.4 });
+  }
+  return lights;
+}
 
 /** Weapon-spawn markers (non-solid), cyan-lit cubes, at the sandbox spots. */
 const MARKERS: Box[] = [
@@ -1913,6 +1939,13 @@ export const LOCKOUT_LIGHTING: SceneLighting = {
     { kind: "directional", direction: [-0.5, 0.35, 0.55], color: [0.5, 0.62, 0.8], intensity: 0.35 },
     // The Sword pit's cyan glow, at the bottom-mid centre.
     { kind: "point", position: [0, 0.9, 0], color: [0.4, 0.95, 1], intensity: 2.4, range: 4.5 }, // kept in the pit, off the walkway above
+    // The energy's own light (ENGINE_PARITY_ROADMAP.md EP8): small cyan pools
+    // along every strip and vent and at the weapon markers, and two floodlights
+    // from the towers down onto the walkway — dozens of lights, each shading
+    // only the cells of the view it reaches.
+    ...energyLights(),
+    { kind: "spot", position: [-6.7, 7.9, -6.6], direction: [0.55, -0.62, 0.55], color: [1, 0.93, 0.8], intensity: 2.2, range: 16, innerAngle: 14, outerAngle: 24 },
+    { kind: "spot", position: [9.6, 5.1, 3.9], direction: [-0.7, -0.45, -0.55], color: [1, 0.93, 0.8], intensity: 2.2, range: 16, innerAngle: 14, outerAngle: 24 },
   ],
   // A procedural alpine dome (original art, baked at load): a cold overcast sky
   // over two rings of snow-capped peaks, with a misty glacier valley far below —

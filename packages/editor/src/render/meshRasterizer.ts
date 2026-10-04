@@ -352,18 +352,32 @@ export interface ToneMap {
  * pmem block ends at the 256-word ceiling), so the Modern tier takes its lights
  * here instead — a dedicated scene channel with no fixed cap. A `directional`
  * light is the sun (parallel rays); a `point` light falls off to nothing at
- * `range`. Colours are 0..1 in the engine's byte space; `intensity` scales them.
+ * `range`; a `spot` light (ENGINE_PARITY_ROADMAP.md EP8) is a point light
+ * narrowed to a cone, full inside `innerAngle` and fading to nothing at
+ * `outerAngle`. Colours are 0..1 in the engine's byte space; `intensity`
+ * scales them.
  */
 export interface SceneLight {
-  readonly kind: "directional" | "point";
-  /** Directional: unit direction *towards* the light. */
+  readonly kind: "directional" | "point" | "spot";
+  /** Directional: unit direction *towards* the light. Spot: the direction the beam points. */
   readonly direction?: readonly [number, number, number];
-  /** Point: world-space position. */
+  /** Point and spot: world-space position. */
   readonly position?: readonly [number, number, number];
   readonly color: readonly [number, number, number];
   readonly intensity: number;
-  /** Point falloff radius in world units; ≤ 0 means no distance falloff. */
+  /** Point and spot falloff radius in world units; ≤ 0 means no distance falloff. */
   readonly range?: number;
+  /** Spot: the cone's half-angles in degrees — full strength inside `innerAngle`, none past `outerAngle`. */
+  readonly innerAngle?: number;
+  readonly outerAngle?: number;
+}
+
+/** A spot light's cone as cosines: [outer, inner], inner kept just above outer so the fade never divides by zero. */
+export function spotCone(light: SceneLight): readonly [number, number] {
+  const outer = Math.min(89, Math.max(1, light.outerAngle ?? 30));
+  const inner = Math.min(outer, Math.max(0, light.innerAngle ?? outer * 0.75));
+  const cosOuter = Math.cos((outer * Math.PI) / 180);
+  return [cosOuter, Math.max(Math.cos((inner * Math.PI) / 180), cosOuter + 1e-4)];
 }
 
 /**
@@ -1450,6 +1464,20 @@ export function alphaStateOf(material: MeshAsset["primitives"][number]["material
   }
 }
 
+/** The lights whose reach touches a triangle (by its world-space bounding sphere); unranged lights always. */
+function lightsReaching(lights: readonly SceneLight[], a: Vertex, b: Vertex, c: Vertex): readonly SceneLight[] {
+  const cx = (a.wx + b.wx + c.wx) / 3;
+  const cy = (a.wy + b.wy + c.wy) / 3;
+  const cz = (a.wz + b.wz + c.wz) / 3;
+  const r = Math.sqrt(Math.max((a.wx - cx) ** 2 + (a.wy - cy) ** 2 + (a.wz - cz) ** 2, (b.wx - cx) ** 2 + (b.wy - cy) ** 2 + (b.wz - cz) ** 2, (c.wx - cx) ** 2 + (c.wy - cy) ** 2 + (c.wz - cz) ** 2));
+  return lights.filter((l) => {
+    const range = l.range ?? 0;
+    if (l.kind === "directional" || range <= 0) return true;
+    const p = l.position ?? [0, 0, 0];
+    return Math.hypot(p[0] - cx, p[1] - cy, p[2] - cz) <= range + r + 1e-6;
+  });
+}
+
 /** The white a graph's texture node reads when the material has no base texture. */
 const WHITE4 = [1, 1, 1, 1] as const;
 
@@ -1776,6 +1804,9 @@ function rasterizeTriangle(
   linear: readonly [number, number] | null = null,
 ): void {
   const soft = linear && alpha.mode >= 2 && alpha.soft > 0 ? alpha.soft : 0;
+  // Only the lights that reach this triangle (EP8): a ranged light adds exactly
+  // nothing past its range, so the rest can be skipped without changing a pixel.
+  const reaching = lights && lights.length > 0 ? lightsReaching(lights, a, b, c) : lights;
   // A material graph (EP7): one context and register file per triangle, refilled per pixel.
   const graph = pbr?.graph ?? null;
   const regs = graph ? graphRegisters(graph) : null;
@@ -2183,12 +2214,12 @@ function rasterizeTriangle(
           let dR = 0;
           let dG = 0;
           let dB = 0;
-          for (const lgt of lights) {
+          for (const lgt of reaching!) {
             let Lx: number;
             let Ly: number;
             let Lz: number;
             let atten = 1;
-            if (lgt.kind === "point") {
+            if (lgt.kind === "point" || lgt.kind === "spot") {
               const px = (lgt.position?.[0] ?? 0) - wx;
               const py = (lgt.position?.[1] ?? 0) - wy;
               const pz = (lgt.position?.[2] ?? 0) - wz;
@@ -2200,6 +2231,15 @@ function rasterizeTriangle(
               if (range > 0) {
                 const t = Math.max(0, 1 - dist / range);
                 atten = t * t;
+              }
+              if (lgt.kind === "spot") {
+                // The cone: how far this point sits off the beam's axis, faded smoothly between the angles.
+                const axis = lgt.direction ?? [0, -1, 0];
+                const al = Math.hypot(axis[0]!, axis[1]!, axis[2]!) || 1;
+                const [cosOuter, cosInner] = spotCone(lgt);
+                const cd = -(Lx * axis[0]! + Ly * axis[1]! + Lz * axis[2]!) / al;
+                const ct = Math.min(1, Math.max(0, (cd - cosOuter) / (cosInner - cosOuter)));
+                atten *= ct * ct * (3 - 2 * ct);
               }
             } else {
               const dir = lgt.direction ?? [0, 1, 0];

@@ -47,12 +47,19 @@ import {
   cameraPositionFromView,
   compiledGraphOf,
   computeSmoothNormals,
+  CLUSTER_INDEX_CAP,
+  CLUSTER_X,
+  CLUSTER_Y,
+  CLUSTER_Z,
+  buildLightClusters,
+  orderLights,
   graphNoiseSource,
   graphShaderCode,
   graphUsesNoise,
   multiplyMat4,
   type CompiledGraph,
   type DecodedTexture,
+  type LightClusters,
   type MeshAsset,
   type MeshSceneInstance,
   type RasterStyle,
@@ -87,7 +94,7 @@ import {
 /** Instances per uniform block (and so per draw call): 64 × 240 bytes fits WebGL2's guaranteed 16 KB. */
 export const WEBGL_INSTANCES_PER_DRAW = 64;
 /** Modern-tier lights the shader loops over at most. */
-export const WEBGL_MAX_LIGHTS = 64;
+export const WEBGL_MAX_LIGHTS = 128;
 const READBACK_BUFFERS = 3;
 
 // Texture units: the material maps, then the frame-wide buffers.
@@ -104,6 +111,9 @@ const UNIT_DETAIL = 9;
 const UNIT_BLEND = 10;
 /** The opaque pass's depth, copied for soft see-through edges (EP6b). */
 const UNIT_SCENE_DEPTH = 11;
+/** The clustered lights' cell table and index list (EP8). */
+const UNIT_CLUSTER_TABLE = 12;
+const UNIT_CLUSTER_INDEX = 13;
 
 const BLOCK_UNIFORMS = 0;
 const BLOCK_INSTANCES = 1;
@@ -237,7 +247,15 @@ struct Light {
   vec4 d0;
   vec4 d1;
   vec4 d2;
+  vec4 d3;
 };
+// Clustered lights (EP8): per cell (offset, count) in an RG32UI table
+// (x = tile, y = slice), the indices in an R32UI list 1024 wide; params = tile
+// size (px), near plane, slice scale; info.x = global lights, info.y = 1 when cells are built.
+uniform highp usampler2D clusterTable;
+uniform highp usampler2D clusterIndex;
+uniform vec4 clusterParams;
+uniform vec4 clusterInfo;
 layout(std140) uniform Lights {
   Light lights[${WEBGL_MAX_LIGHTS}];
 };
@@ -406,6 +424,41 @@ float aces(float x) {
   return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), 0.0, 1.0);
 }
 
+// One light's direct term (Cook-Torrance), mirroring the software rasteriser's
+// light loop: point and spot lights fall off to nothing at their range, a spot
+// fades across its cone, and directional lights honour the sun shadow (sf).
+vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, vec3 f0, float kdm, vec3 albedo, float sf) {
+  vec3 Ld;
+  float atten = 1.0;
+  if (lgt.d0.w > 0.5) {
+    vec3 toL = lgt.d0.xyz - P;
+    float dist = max(length(toL), 1e-4);
+    Ld = toL / dist;
+    float range = lgt.d2.x;
+    if (range > 0.0) { float t = max(0.0, 1.0 - dist / range); atten = t * t; }
+    if (lgt.d0.w > 1.5) {
+      float ct = clamp((-dot(Ld, lgt.d3.xyz) - lgt.d2.y) / (lgt.d2.z - lgt.d2.y), 0.0, 1.0);
+      atten = atten * ct * ct * (3.0 - 2.0 * ct);
+    }
+  } else {
+    Ld = normalize(lgt.d0.xyz);
+  }
+  float ndlL = max(0.0, dot(N, Ld));
+  if (ndlL <= 0.0 || atten <= 0.0) { return vec3(0.0); }
+  vec3 Hl = normalize(Ld + V);
+  float ndhL = max(0.0, dot(N, Hl));
+  float vdhL = max(0.0, dot(V, Hl));
+  float ddL = ndhL * ndhL * (a2 - 1.0) + 1.0;
+  float DL = a2 / (3.14159265 * ddL * ddL + 1e-7);
+  float GL = (ndv / (ndv * (1.0 - k) + k)) * (ndlL / (ndlL * (1.0 - k) + k));
+  float fpL = pow(1.0 - vdhL, 5.0);
+  float specL = (DL * GL) / (4.0 * ndlL * ndv + 1e-4);
+  vec3 FL = f0 + (vec3(1.0) - f0) * fpL;
+  float occl = 1.0;
+  if (lgt.d0.w < 0.5) { occl = sf; }
+  float w = lgt.d1.w * atten * ndlL * occl;
+  return (kdm * (vec3(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
+}
 ${g.fns}
 void main() {
   vec2 uv = vec2(vUv.x, 1.0 - vUv.y);
@@ -522,35 +575,22 @@ ${g.emis}
     vec3 lit;
     if (lc > 0) {
       vec3 direct = vec3(0.0);
+      // The global lights (the sun, unranged lights) reach every fragment…
+      int ng = int(clusterInfo.x + 0.5);
       for (int i = 0; i < ${WEBGL_MAX_LIGHTS}; i = i + 1) {
-        if (i >= lc) { break; }
-        Light lgt = lights[i];
-        vec3 Ld;
-        float atten = 1.0;
-        if (lgt.d0.w > 0.5) {
-          vec3 toL = lgt.d0.xyz - vWorldPos;
-          float dist = max(length(toL), 1e-4);
-          Ld = toL / dist;
-          float range = lgt.d2.x;
-          if (range > 0.0) { float t = max(0.0, 1.0 - dist / range); atten = t * t; }
-        } else {
-          Ld = normalize(lgt.d0.xyz);
+        if (i >= ng) { break; }
+        direct += lightTerm(lights[i], vWorldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
+      }
+      // …the rest only the cells they touch (EP8): this fragment's cell, by pixel and depth.
+      if (clusterInfo.y > 0.5 && vEyeDepth >= clusterParams.z) {
+        ivec2 tile = min(ivec2(gl_FragCoord.xy / clusterParams.xy), ivec2(${CLUSTER_X - 1}, ${CLUSTER_Y - 1}));
+        int slice = min(int(log(vEyeDepth / clusterParams.z) * clusterParams.w), ${CLUSTER_Z - 1});
+        uvec2 cell = texelFetch(clusterTable, ivec2(tile.y * ${CLUSTER_X} + tile.x, slice), 0).xy;
+        for (uint j = 0u; j < cell.y; j++) {
+          uint n = cell.x + j;
+          int li = int(texelFetch(clusterIndex, ivec2(int(n % 1024u), int(n / 1024u)), 0).x);
+          direct += lightTerm(lights[li], vWorldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
         }
-        float ndlL = max(0.0, dot(N, Ld));
-        if (ndlL <= 0.0 || atten <= 0.0) { continue; }
-        vec3 Hl = normalize(Ld + V);
-        float ndhL = max(0.0, dot(N, Hl));
-        float vdhL = max(0.0, dot(V, Hl));
-        float ddL = ndhL * ndhL * (a2 - 1.0) + 1.0;
-        float DL = a2 / (3.14159265 * ddL * ddL + 1e-7);
-        float GL = (ndv / (ndv * (1.0 - k) + k)) * (ndlL / (ndlL * (1.0 - k) + k));
-        float fpL = pow(1.0 - vdhL, 5.0);
-        float specL = (DL * GL) / (4.0 * ndlL * ndv + 1e-4);
-        vec3 FL = f0 + (vec3(1.0) - f0) * fpL;
-        float occl = 1.0;
-        if (lgt.d0.w < 0.5) { occl = sf; }
-        float w = lgt.d1.w * atten * ndlL * occl;
-        direct = direct + (kdm * (vec3(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
       }
       lit = direct + amb + emis;
     } else {
@@ -644,6 +684,8 @@ function buildProgram(gl: any, nearest: boolean, graph: CompiledGraph | null): a
     ["detailTex", UNIT_DETAIL],
     ["blendTex", UNIT_BLEND],
     ["sceneDepth", UNIT_SCENE_DEPTH],
+    ["clusterTable", UNIT_CLUSTER_TABLE],
+    ["clusterIndex", UNIT_CLUSTER_INDEX],
   ];
   for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
   return program;
@@ -879,7 +921,16 @@ export class WebglSceneRenderer implements SceneRenderer {
     this.uploadProbes(draw.environment?.probes ?? null);
     const ssao = draw.ssao ?? null;
     this.uploadSsao(ssao);
-    const sceneLights = (draw.lights ?? []).slice(0, WEBGL_MAX_LIGHTS);
+    // Lights packed global-first (the block holds WEBGL_MAX_LIGHTS), the rest
+    // sorted into the view's cells (EP8) so each fragment shades only its own.
+    const order = orderLights(draw.lights ?? []);
+    const sceneLights = order.ordered.slice(0, WEBGL_MAX_LIGHTS);
+    const globalCount = Math.min(order.globalCount, sceneLights.length);
+    const clusters = sceneLights.length > globalCount ? buildLightClusters(sceneLights, globalCount, draw.view, draw.projection, this.width, this.height) : null;
+    this.uploadClusters(clusters);
+    this.clusterParams.set(clusters?.params ?? [1, 1, 1, 1]);
+    this.clusterInfo[0] = clusters ? globalCount : sceneLights.length;
+    this.clusterInfo[1] = clusters ? 1 : 0;
     const packed = packLights(sceneLights);
     gl.bindBuffer(gl.UNIFORM_BUFFER, this.lightBuffer);
     gl.bufferSubData(gl.UNIFORM_BUFFER, 0, packed);
@@ -953,7 +1004,7 @@ export class WebglSceneRenderer implements SceneRenderer {
     this.bindTexture(UNIT_SHADOW, this.shadowTexture ?? this.blankFloat);
     this.bindTexture(UNIT_ENV, this.envTexture ?? this.blankTexture);
     this.bindTexture(UNIT_PROBES, this.probeTexture ?? this.blankTexture);
-    gl.uniform4fv(gl.getUniformLocation(this.program, "probeData"), this.probeData);
+    this.frameUniforms(this.program);
     this.bindTexture(UNIT_SSAO, ssao ? this.ssaoTexture : this.blankFloat);
     for (let unit = UNIT_BASE; unit <= UNIT_EMIS; unit += 1) gl.bindSampler(unit, this.sampler);
     gl.bindSampler(UNIT_LM, this.sampler);
@@ -994,7 +1045,7 @@ export class WebglSceneRenderer implements SceneRenderer {
       if (wanted !== program) {
         program = wanted;
         gl.useProgram(program);
-        gl.uniform4fv(gl.getUniformLocation(program, "probeData"), this.probeData);
+        this.frameUniforms(program);
       }
       if (soft && !depthCopied && batch.alpha >= 2) {
         this.copySceneDepth();
@@ -1040,6 +1091,50 @@ export class WebglSceneRenderer implements SceneRenderer {
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.flush();
+  }
+
+  /** The clustered lights' params and info this frame (EP8; see the shader's clusterParams/clusterInfo). */
+  private readonly clusterParams = new Float32Array(4);
+  private readonly clusterInfo = new Float32Array(4);
+  /** The cell table and index list as integer textures, made on first use. */
+  private clusterTextures: { table: any; index: any } | null = null;
+
+  /** The per-frame uniforms a program needs (probes, clusters), set when it's put to use. */
+  private frameUniforms(program: any): void {
+    const gl = this.gl;
+    gl.uniform4fv(gl.getUniformLocation(program, "probeData"), this.probeData);
+    gl.uniform4fv(gl.getUniformLocation(program, "clusterParams"), this.clusterParams);
+    gl.uniform4fv(gl.getUniformLocation(program, "clusterInfo"), this.clusterInfo);
+  }
+
+  /** Upload a frame's cells (only the index rows in use), and bind both textures. */
+  private uploadClusters(clusters: LightClusters | null): void {
+    const gl = this.gl;
+    if (!this.clusterTextures) {
+      const make = (internal: number, w: number, h: number) => {
+        const texture = gl.createTexture();
+        gl.activeTexture(gl.TEXTURE0 + UNIT_CLUSTER_TABLE);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texStorage2D(gl.TEXTURE_2D, 1, internal, w, h);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        return texture;
+      };
+      this.clusterTextures = { table: make(gl.RG32UI, CLUSTER_X * CLUSTER_Y, CLUSTER_Z), index: make(gl.R32UI, 1024, CLUSTER_INDEX_CAP / 1024) };
+    }
+    if (clusters) {
+      this.bindTexture(UNIT_CLUSTER_TABLE, this.clusterTextures.table);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, CLUSTER_X * CLUSTER_Y, CLUSTER_Z, gl.RG_INTEGER, gl.UNSIGNED_INT, clusters.table);
+      const rows = Math.ceil(clusters.used / 1024);
+      if (rows > 0) {
+        this.bindTexture(UNIT_CLUSTER_INDEX, this.clusterTextures.index);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 1024, rows, gl.RED_INTEGER, gl.UNSIGNED_INT, clusters.indices.subarray(0, rows * 1024));
+      }
+    }
+    this.bindTexture(UNIT_CLUSTER_TABLE, this.clusterTextures.table);
+    this.bindTexture(UNIT_CLUSTER_INDEX, this.clusterTextures.index);
+    gl.bindSampler(UNIT_CLUSTER_TABLE, null);
+    gl.bindSampler(UNIT_CLUSTER_INDEX, null);
   }
 
   /** Programs by material graph (EP7), linked on first use. */
@@ -1237,6 +1332,10 @@ export class WebglSceneRenderer implements SceneRenderer {
       gl.deleteBuffer(this.lightBuffer);
       for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.probeTexture, this.ssaoTexture]) if (t) gl.deleteTexture(t);
       gl.deleteFramebuffer(this.framebuffer);
+      if (this.clusterTextures) {
+        gl.deleteTexture(this.clusterTextures.table);
+        gl.deleteTexture(this.clusterTextures.index);
+      }
       if (this.sceneDepth) {
         gl.deleteTexture(this.sceneDepth.texture);
         gl.deleteFramebuffer(this.sceneDepth.framebuffer);

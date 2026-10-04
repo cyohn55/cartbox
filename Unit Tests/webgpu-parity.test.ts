@@ -51,6 +51,7 @@ import {
 import { SoftwareSceneRenderer, WebgpuSceneRenderer, type SceneDraw } from "@cartbox/player";
 
 import { graphInstances } from "./helpers/graphScenes";
+import { manyLights } from "./helpers/manyLights";
 
 
 const W = 64;
@@ -580,6 +581,28 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     }
     expect(maxDelta).toBeLessThanOrEqual(4);
 
+    renderer.dispose();
+  });
+
+  it("shades forty point lights and four spots through the light clusters like the software rasteriser", async () => {
+    // EP8: the ranged lights are sorted into the view's cells and each fragment
+    // shades only its cell's list; the software path shades every light.
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+    const instances = [{ mesh: pbrFloor(6, 0), model: composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]) }];
+    const lit = (): SceneDraw => ({ ...draw(), view: viewMatrix([0, 4, 7], [0, 0, 0]), lights: manyLights() });
+    renderer.render(instances, lit());
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.tick?.();
+    }
+    const gpu = lit();
+    renderer.render(instances, gpu);
+    const software = lit();
+    new SoftwareSceneRenderer().render(instances, software);
+    let maxDelta = 0;
+    for (let i = 0; i < W * H * 4; i += 1) maxDelta = Math.max(maxDelta, Math.abs(gpu.out[i]! - software.out[i]!));
+    expect(Array.from(software.out).filter((_, i) => i % 4 === 3 && software.out[i] !== 0).length).toBeGreaterThan(100);
+    expect(maxDelta).toBeLessThanOrEqual(4);
     renderer.dispose();
   });
 
