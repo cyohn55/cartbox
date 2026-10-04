@@ -13,8 +13,10 @@
 import {
   DEFAULT_DETAIL_SCALE,
   DEFAULT_DETAIL_STRENGTH,
+  EFFECT_RIM_POWER,
   MAX_FOG_VOLUMES,
   MAX_REFLECTION_PROBES,
+  effectActive,
   emissiveAnimation,
   fogIsVolumetric,
   type EnvironmentLight,
@@ -22,6 +24,7 @@ import {
   type MeshMaterial,
   type ReflectionProbeSet,
   type SceneFog,
+  type SurfaceEffect,
 } from "@cartbox/editor";
 
 /**
@@ -62,9 +65,12 @@ import {
  * 576  fogHeight  vec4<f32>    16   x = height-fog density, y = base, z = falloff, w = glow strength
  * 592  fogGlow    vec4<f32>    16   rgb = sun-glow colour
  * 608  fogVol     vec4<f32>×8 128   per volume: min xyz + density, max xyz + falloff
+ * 736  effect0    vec4<f32>    16   rgb = surface-effect glow, w = camo amount (H11)
+ * 752  effect1    vec4<f32>    16   rgb = surface-effect bands, w = time (seconds)
+ *                                    (an effect's rim adds into surface2, at its power)
  * ```
  *
- * 736 bytes used, padded to a 768-byte stride (a 256-byte multiple a dynamic
+ * 768 bytes used — exactly the stride to a 768-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -79,7 +85,7 @@ export const UNIFORM_STRIDE = 768;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 736;
+export const UNIFORM_BYTES_USED = 768;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -176,6 +182,8 @@ const OFFSET_FOG_CAM = 140;
 const OFFSET_FOG_HEIGHT = 144;
 const OFFSET_FOG_GLOW = 148;
 const OFFSET_FOG_VOL = 152;
+const OFFSET_EFFECT0 = 184;
+const OFFSET_EFFECT1 = 188;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -378,6 +386,10 @@ export interface InstanceUniform {
   readonly fog?: SceneFog | null;
   /** The eye in world space — height and volume fog trace the ray from it. */
   readonly eye?: readonly [number, number, number];
+  /** A surface effect over the draw (shield flare, shimmer, camo — PBR draws only), or null/omitted for none. */
+  readonly effect?: SurfaceEffect | null;
+  /** Seconds, for the effect's bands and camo crawl. */
+  readonly time?: number;
 }
 
 /**
@@ -565,14 +577,25 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_SURFACE1 + 1] = surface.emisOffset[1];
   target[base + OFFSET_SURFACE1 + 2] = surface.blend ? 1 : 0;
   target[base + OFFSET_SURFACE1 + 3] = surface.blend?.textured ? 1 : 0;
-  target[base + OFFSET_SURFACE2] = surface.rim[0];
-  target[base + OFFSET_SURFACE2 + 1] = surface.rim[1];
-  target[base + OFFSET_SURFACE2 + 2] = surface.rim[2];
-  target[base + OFFSET_SURFACE2 + 3] = surface.rimPower;
+  // A surface effect's rim adds to the material's, at the effect's power (as the rasteriser does).
+  const effect = effectActive(uniform.effect) ? uniform.effect : null;
+  const fxRim = effect?.rim && (effect.rim[0] > 0 || effect.rim[1] > 0 || effect.rim[2] > 0) ? effect.rim : null;
+  target[base + OFFSET_SURFACE2] = surface.rim[0] + (fxRim ? fxRim[0] : 0);
+  target[base + OFFSET_SURFACE2 + 1] = surface.rim[1] + (fxRim ? fxRim[1] : 0);
+  target[base + OFFSET_SURFACE2 + 2] = surface.rim[2] + (fxRim ? fxRim[2] : 0);
+  target[base + OFFSET_SURFACE2 + 3] = fxRim ? (effect!.rimPower ?? EFFECT_RIM_POWER) : surface.rimPower;
   target[base + OFFSET_SURFACE3] = surface.blend ? surface.blend.color[0] : 0;
   target[base + OFFSET_SURFACE3 + 1] = surface.blend ? surface.blend.color[1] : 0;
   target[base + OFFSET_SURFACE3 + 2] = surface.blend ? surface.blend.color[2] : 0;
   target[base + OFFSET_SURFACE3 + 3] = surface.blend && surface.blend.roughness !== null ? surface.blend.roughness : -1;
+  target[base + OFFSET_EFFECT0] = effect?.glow ? effect.glow[0] : 0;
+  target[base + OFFSET_EFFECT0 + 1] = effect?.glow ? effect.glow[1] : 0;
+  target[base + OFFSET_EFFECT0 + 2] = effect?.glow ? effect.glow[2] : 0;
+  target[base + OFFSET_EFFECT0 + 3] = effect ? Math.max(0, Math.min(1, effect.camo ?? 0)) : 0;
+  target[base + OFFSET_EFFECT1] = effect?.bands ? effect.bands[0] : 0;
+  target[base + OFFSET_EFFECT1 + 1] = effect?.bands ? effect.bands[1] : 0;
+  target[base + OFFSET_EFFECT1 + 2] = effect?.bands ? effect.bands[2] : 0;
+  target[base + OFFSET_EFFECT1 + 3] = uniform.time ?? 0;
 }
 
 /** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2) + light-map uv(2) + blend weight(1). */

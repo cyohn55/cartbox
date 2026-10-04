@@ -49,6 +49,7 @@ import {
   PHYS_OP_DECAL,
   PHYS_OP_RAGDOLL,
   PHYS_OP_DEBRIS,
+  PHYS_OP_SHIELD,
   PHYS_OP_WATCH,
   PHYS_OP_AGENT,
   PHYS_OP_AGENT_GOTO,
@@ -80,6 +81,13 @@ export interface DecalLaid {
   readonly at: readonly [number, number, number];
   readonly normal: readonly [number, number, number];
   readonly scale: number;
+}
+
+/** An object's standing `cartbox.shield`: a hit's flare, the recharge shimmer and Active Camo (each 0..1). */
+export interface ShieldState {
+  readonly flare: number;
+  readonly shimmer: number;
+  readonly camo: number;
 }
 
 /** One `cartbox.debris`: the definition's index, where, its velocity, and its scale. */
@@ -138,6 +146,8 @@ export class RuntimeChannel {
   private decals: DecalLaid[] = [];
   /** Debris the cart threw since the renderer last took it. */
   private debris: DebrisThrown[] = [];
+  /** Standing shield effects (cartbox.shield): object → flare, shimmer, camo. */
+  private readonly shieldStates = new Map<number, ShieldState>();
   /**
    * Ragdolls (H9): object → the limp body, built from its pose the next time it
    * is skinned after cartbox.ragdoll (until then null, with the shove to give it).
@@ -211,6 +221,7 @@ export class RuntimeChannel {
           this.decals.push({ decal: cmd.a & 0xff, at: [cmd.v[0]!, cmd.v[1]!, cmd.v[2]!], normal: [cmd.v[3]!, cmd.v[4]!, cmd.v[5]!], scale: ((cmd.a >>> 8) & 0xffff) / 16 });
       }
       else if (cmd.op === PHYS_OP_RAGDOLL) this.ragdollCommand(cmd.a, cmd.v);
+      else if (cmd.op === PHYS_OP_SHIELD) this.shieldCommand(cmd.a, cmd.v);
       else if (cmd.op === PHYS_OP_DEBRIS) {
         if (this.debris.length < MAX_BURSTS_QUEUED)
           this.debris.push({ debris: cmd.a & 0xff, at: [cmd.v[0]!, cmd.v[1]!, cmd.v[2]!], velocity: [cmd.v[3]!, cmd.v[4]!, cmd.v[5]!], scale: ((cmd.a >>> 8) & 0xffff) / 16 });
@@ -241,6 +252,20 @@ export class RuntimeChannel {
     if (v[0]! >= 0.5) this.ragdolls.set(object, { doll: null, impulse: [v[1]!, v[2]!, v[3]!], joint: Math.round(v[4]!) });
     else this.ragdolls.delete(object);
     this.animation?.invalidate();
+  }
+
+  /** Set (or, with all three 0, clear) an object's shield effect. */
+  private shieldCommand(object: number, v: readonly number[]): void {
+    if (!this.scene.instances[object]) return;
+    const unit = (x: number | undefined) => Math.max(0, Math.min(1, x ?? 0));
+    const state: ShieldState = { flare: unit(v[0]), shimmer: unit(v[1]), camo: unit(v[2]) };
+    if (state.flare === 0 && state.shimmer === 0 && state.camo === 0) this.shieldStates.delete(object);
+    else this.shieldStates.set(object, state);
+  }
+
+  /** The standing shield effects (object → state); the renderer draws them on the object and everything under it. */
+  shields(): ReadonlyMap<number, ShieldState> {
+    return this.shieldStates;
   }
 
   /** Whether an object is a ragdoll now. */
@@ -477,6 +502,7 @@ export class RuntimeChannel {
     for (const object of objects) {
       this.animation?.reset(object);
       this.ragdolls.delete(object); // a fresh copy stands up
+      this.shieldStates.delete(object);
     }
     // Where each of the copy's objects now is: the root's placement · its authored chain.
     const placed = new Map<number, Mat4>([[root, world]]);
@@ -498,7 +524,10 @@ export class RuntimeChannel {
     const objects = this.copyObjects.get(root);
     if (!objects || !this.active.has(root)) return;
     this.active.delete(root);
-    for (const object of objects) this.ragdolls.delete(object);
+    for (const object of objects) {
+      this.ragdolls.delete(object);
+      this.shieldStates.delete(object);
+    }
     this.physics?.setCopyActive(objects, () => null, false);
   }
 

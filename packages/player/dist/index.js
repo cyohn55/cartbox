@@ -4043,6 +4043,7 @@ cartbox = {
   lookat = function() end,
   ragdoll = function() end,
   unragdoll = function() end,
+  shield = function() end,
   joint = function() return nil end,
   joints = function() return {} end,
   playtimeline = function() end,
@@ -4604,6 +4605,7 @@ var PHYS_OP_BURST = 26;
 var PHYS_OP_DECAL = 27;
 var PHYS_OP_RAGDOLL = 28;
 var PHYS_OP_DEBRIS = 29;
+var PHYS_OP_SHIELD = 30;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -5625,11 +5627,12 @@ function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
     _wr(at + 8, (v1 or 0) * ${PHYS_FIX}) _wr(at + 12, (v2 or 0) * ${PHYS_FIX}) _wr(at + 16, (v3 or 0) * ${PHYS_FIX})
     _wr(at + 20, (v4 or 0) * ${PHYS_FIX}) _wr(at + 24, (v5 or 0) * ${PHYS_FIX}) _wr(at + 28, (v6 or 0) * ${PHYS_FIX})
     _wr(_B + ${PHYS_CMDS}, n + 1)
+    return true
   end
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}${SHIELD_CALLS()}end`;
 }
 function PHYSICS_CALLS() {
   return `  cartbox.physics = function() return _live() end
@@ -5800,6 +5803,17 @@ function DEBRIS_CALLS(scene) {
     local out = {}
     for k, n in ipairs(_dbn) do out[k] = n end
     return out
+  end
+`;
+}
+function SHIELD_CALLS() {
+  return `  local _shield = {}
+  cartbox.shield = function(o, flare, shimmer, camo)
+    local i = _obj(o)
+    if i == nil then return end
+    local key = string.format("%.2f %.2f %.2f", flare or 0, shimmer or 0, camo or 0)
+    if _shield[i] == key then return end -- it stands: send changes only (retried if the queue was full)
+    if _cmd(${PHYS_OP_SHIELD}, i, flare or 0, shimmer or 0, camo or 0) then _shield[i] = key end
   end
 `;
 }
@@ -6431,6 +6445,8 @@ var RuntimeChannel = class {
     this.decals = [];
     /** Debris the cart threw since the renderer last took it. */
     this.debris = [];
+    /** Standing shield effects (cartbox.shield): object → flare, shimmer, camo. */
+    this.shieldStates = /* @__PURE__ */ new Map();
     /**
      * Ragdolls (H9): object → the limp body, built from its pose the next time it
      * is skinned after cartbox.ragdoll (until then null, with the shove to give it).
@@ -6495,6 +6511,7 @@ var RuntimeChannel = class {
         if (this.decals.length < MAX_BURSTS_QUEUED)
           this.decals.push({ decal: cmd.a & 255, at: [cmd.v[0], cmd.v[1], cmd.v[2]], normal: [cmd.v[3], cmd.v[4], cmd.v[5]], scale: (cmd.a >>> 8 & 65535) / 16 });
       } else if (cmd.op === PHYS_OP_RAGDOLL) this.ragdollCommand(cmd.a, cmd.v);
+      else if (cmd.op === PHYS_OP_SHIELD) this.shieldCommand(cmd.a, cmd.v);
       else if (cmd.op === PHYS_OP_DEBRIS) {
         if (this.debris.length < MAX_BURSTS_QUEUED)
           this.debris.push({ debris: cmd.a & 255, at: [cmd.v[0], cmd.v[1], cmd.v[2]], velocity: [cmd.v[3], cmd.v[4], cmd.v[5]], scale: (cmd.a >>> 8 & 65535) / 16 });
@@ -6521,6 +6538,18 @@ var RuntimeChannel = class {
     if (v[0] >= 0.5) this.ragdolls.set(object, { doll: null, impulse: [v[1], v[2], v[3]], joint: Math.round(v[4]) });
     else this.ragdolls.delete(object);
     this.animation?.invalidate();
+  }
+  /** Set (or, with all three 0, clear) an object's shield effect. */
+  shieldCommand(object, v) {
+    if (!this.scene.instances[object]) return;
+    const unit = (x) => Math.max(0, Math.min(1, x ?? 0));
+    const state = { flare: unit(v[0]), shimmer: unit(v[1]), camo: unit(v[2]) };
+    if (state.flare === 0 && state.shimmer === 0 && state.camo === 0) this.shieldStates.delete(object);
+    else this.shieldStates.set(object, state);
+  }
+  /** The standing shield effects (object → state); the renderer draws them on the object and everything under it. */
+  shields() {
+    return this.shieldStates;
   }
   /** Whether an object is a ragdoll now. */
   isRagdoll(object) {
@@ -6733,6 +6762,7 @@ var RuntimeChannel = class {
     for (const object of objects) {
       this.animation?.reset(object);
       this.ragdolls.delete(object);
+      this.shieldStates.delete(object);
     }
     const placed = /* @__PURE__ */ new Map([[root, world]]);
     const worldOf = (i) => {
@@ -6752,7 +6782,10 @@ var RuntimeChannel = class {
     const objects = this.copyObjects.get(root);
     if (!objects || !this.active.has(root)) return;
     this.active.delete(root);
-    for (const object of objects) this.ragdolls.delete(object);
+    for (const object of objects) {
+      this.ragdolls.delete(object);
+      this.shieldStates.delete(object);
+    }
     this.physics?.setCopyActive(objects, () => null, false);
   }
   destroy() {
@@ -8370,6 +8403,7 @@ import {
   downsamplePanorama,
   isSkinned as isSkinned2,
   renderSkyBackground,
+  shieldEffect,
   composeModelMatrix as composeModelMatrix4,
   multiplyMat4 as multiplyMat43,
   sceneLightingEnvironment,
@@ -8694,6 +8728,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.flat = null;
     /** World matrices of the objects physics moved this frame (see setBodyOverrides). */
     this.bodies = /* @__PURE__ */ new Map();
+    /** Shield effects (H11): object index → the surface effect it and everything under it wear (see setShields). */
+    this.effects = /* @__PURE__ */ new Map();
+    this.shieldCache = /* @__PURE__ */ new Map();
     /** Spawned prefab copies: root object index → the root's world matrix (see setSpawned). */
     this.spawned = /* @__PURE__ */ new Map();
     /** Graphics quality (see quality.ts): shadows on/off and their map size, the first-person scale cap. */
@@ -8757,6 +8794,25 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    */
   setSpawned(spawned) {
     this.spawned = spawned;
+  }
+  /**
+   * Set the shield effects the cart has standing (cartbox.shield: object →
+   * flare, shimmer, camo). Each is drawn on the object and everything under it,
+   * as a surface effect over its PBR materials (see shieldEffect).
+   */
+  setShields(shields) {
+    if (shields.size === 0 && this.effects.size === 0) return;
+    const effects = /* @__PURE__ */ new Map();
+    for (const [object, { flare, shimmer, camo }] of shields) {
+      let cached = this.shieldCache.get(object);
+      if (!cached || cached.flare !== flare || cached.shimmer !== shimmer || cached.camo !== camo) {
+        cached = { flare, shimmer, camo, effect: shieldEffect(flare, shimmer, camo) };
+        this.shieldCache.set(object, cached);
+      }
+      if (cached.effect) effects.set(object, cached.effect);
+    }
+    for (const object of this.shieldCache.keys()) if (!shields.has(object)) this.shieldCache.delete(object);
+    this.effects = effects;
   }
   /**
    * Pose the skinned objects (object index → skinning matrices, see
@@ -9152,12 +9208,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * only part of the shadow map that has to be redrawn each frame.
    */
   posedInstances() {
-    if (this.poses.length === 0 && this.bodies.size === 0 && this.spawned.size === 0 && this.animated.size === 0) {
+    if (this.poses.length === 0 && this.bodies.size === 0 && this.spawned.size === 0 && this.animated.size === 0 && this.effects.size === 0) {
       this.lastPlacement = null;
       return { main: this.unpooled, front: [], moved: [] };
     }
     if (this.hierarchy) return this.posedHierarchy(this.hierarchy);
-    if (this.bodies.size > 0 || this.spawned.size > 0 || this.animated.size > 0 || this.unpooled !== this.instances) {
+    if (this.bodies.size > 0 || this.spawned.size > 0 || this.animated.size > 0 || this.effects.size > 0 || this.unpooled !== this.instances) {
       this.flat ?? (this.flat = {
         parents: this.instances.map(() => -1),
         children: this.instances.map(() => []),
@@ -9225,7 +9281,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         model,
         moved: moved2,
         hidden: reserved || this.inactive.has(i) || Boolean(pose?.hidden) || Boolean(up?.hidden),
-        front: Boolean(pose?.front) || Boolean(up?.front)
+        front: Boolean(pose?.front) || Boolean(up?.front),
+        // A shield effect covers the object and everything under it (its weapon, say).
+        effect: this.effects.get(i) ?? up?.effect ?? null
       };
       states[i] = out;
       return out;
@@ -9240,7 +9298,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       placement[i] = s.hidden ? null : s.model;
       if (s.hidden) continue;
       if (!s.moved) {
-        main.push(this.atDetail(i, authored));
+        main.push(s.effect ? { ...this.atDetail(i, authored), effect: s.effect } : this.atDetail(i, authored));
         continue;
       }
       const pose = byIndex.get(i);
@@ -9250,7 +9308,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const instance = {
         ...source,
         mesh: pose?.tint ? this.tinted(source.mesh, pose.tint) : source.mesh,
-        model: s.model
+        model: s.model,
+        ...s.effect ? { effect: s.effect } : {}
       };
       if (s.front) front.push(instance);
       else {
@@ -10009,6 +10068,10 @@ import {
   PROBE_FADE,
   FOG_GLOW_POWER,
   PROBE_RANGE,
+  EFFECT_BAND_FREQUENCY,
+  EFFECT_BAND_POWER,
+  EFFECT_BAND_SPEED,
+  EFFECT_CAMO_CRAWL,
   cameraPositionFromView as cameraPositionFromView2,
   computeSmoothNormals,
   multiplyMat4 as multiplyMat44
@@ -10073,11 +10136,12 @@ function batchInstances(instances, geometryOf) {
         detail: instance.detailTextures?.[index] ?? null,
         blend: primitive.blend ? instance.blendTextures?.[index] ?? null : null
       };
+      const effect = instance.effect ?? null;
       let list = byPrimitive.get(primitive);
       if (!list) byPrimitive.set(primitive, list = []);
-      let batch = list.find((b) => sameTextures(b.textures, textures));
+      let batch = list.find((b) => b.effect === effect && sameTextures(b.textures, textures));
       if (!batch) {
-        batch = { primitive, geometry, textures, models: [], first: 0 };
+        batch = { primitive, geometry, textures, models: [], effect, first: 0 };
         list.push(batch);
         batches.push(batch);
       }
@@ -10189,13 +10253,15 @@ var WebglPassTimer = class _WebglPassTimer {
 import {
   DEFAULT_DETAIL_SCALE,
   DEFAULT_DETAIL_STRENGTH,
+  EFFECT_RIM_POWER,
   MAX_FOG_VOLUMES,
   MAX_REFLECTION_PROBES,
+  effectActive,
   emissiveAnimation,
   fogIsVolumetric
 } from "@cartbox/editor";
 var UNIFORM_STRIDE = 768;
-var UNIFORM_BYTES_USED = 736;
+var UNIFORM_BYTES_USED = 768;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var LIGHT_FLOATS = 12;
 var PROBE_FLOATS = 16;
@@ -10257,6 +10323,8 @@ var OFFSET_FOG_CAM = 140;
 var OFFSET_FOG_HEIGHT = 144;
 var OFFSET_FOG_GLOW = 148;
 var OFFSET_FOG_VOL = 152;
+var OFFSET_EFFECT0 = 184;
+var OFFSET_EFFECT1 = 188;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -10439,14 +10507,24 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_SURFACE1 + 1] = surface.emisOffset[1];
   target[base + OFFSET_SURFACE1 + 2] = surface.blend ? 1 : 0;
   target[base + OFFSET_SURFACE1 + 3] = surface.blend?.textured ? 1 : 0;
-  target[base + OFFSET_SURFACE2] = surface.rim[0];
-  target[base + OFFSET_SURFACE2 + 1] = surface.rim[1];
-  target[base + OFFSET_SURFACE2 + 2] = surface.rim[2];
-  target[base + OFFSET_SURFACE2 + 3] = surface.rimPower;
+  const effect = effectActive(uniform.effect) ? uniform.effect : null;
+  const fxRim = effect?.rim && (effect.rim[0] > 0 || effect.rim[1] > 0 || effect.rim[2] > 0) ? effect.rim : null;
+  target[base + OFFSET_SURFACE2] = surface.rim[0] + (fxRim ? fxRim[0] : 0);
+  target[base + OFFSET_SURFACE2 + 1] = surface.rim[1] + (fxRim ? fxRim[1] : 0);
+  target[base + OFFSET_SURFACE2 + 2] = surface.rim[2] + (fxRim ? fxRim[2] : 0);
+  target[base + OFFSET_SURFACE2 + 3] = fxRim ? effect.rimPower ?? EFFECT_RIM_POWER : surface.rimPower;
   target[base + OFFSET_SURFACE3] = surface.blend ? surface.blend.color[0] : 0;
   target[base + OFFSET_SURFACE3 + 1] = surface.blend ? surface.blend.color[1] : 0;
   target[base + OFFSET_SURFACE3 + 2] = surface.blend ? surface.blend.color[2] : 0;
   target[base + OFFSET_SURFACE3 + 3] = surface.blend && surface.blend.roughness !== null ? surface.blend.roughness : -1;
+  target[base + OFFSET_EFFECT0] = effect?.glow ? effect.glow[0] : 0;
+  target[base + OFFSET_EFFECT0 + 1] = effect?.glow ? effect.glow[1] : 0;
+  target[base + OFFSET_EFFECT0 + 2] = effect?.glow ? effect.glow[2] : 0;
+  target[base + OFFSET_EFFECT0 + 3] = effect ? Math.max(0, Math.min(1, effect.camo ?? 0)) : 0;
+  target[base + OFFSET_EFFECT1] = effect?.bands ? effect.bands[0] : 0;
+  target[base + OFFSET_EFFECT1 + 1] = effect?.bands ? effect.bands[1] : 0;
+  target[base + OFFSET_EFFECT1 + 2] = effect?.bands ? effect.bands[2] : 0;
+  target[base + OFFSET_EFFECT1 + 3] = uniform.time ?? 0;
 }
 var VERTEX_FLOATS = 11;
 function interleaveVertices(positions, normals, uvs, uvs2 = null, blend = null) {
@@ -10527,6 +10605,8 @@ layout(std140) uniform Uniforms {
   vec4 fogHeight;
   vec4 fogGlow;
   vec4 fogVol[8];
+  vec4 effect0; // rgb = surface effect glow, w = camo amount
+  vec4 effect1; // rgb = surface effect bands, w = time
 } u;
 `
 );
@@ -10721,6 +10801,18 @@ vec3 probeSample(int i, vec3 dir) {
   int ty = int(clamp(floor(vCoord * h), 0.0, h - 1.0) + float(i) * h);
   return texelFetch(probeAtlas, ivec2(tx, ty), 0).rgb * ${PROBE_RANGE.toFixed(4)};
 }
+// The 2\xD72 ordered-dither matrix [[0, 2], [3, 1]], and the crawling camo threshold
+// (surfaceEffect.ts). gl_FragCoord rows run top-first here (the vertex stage flips Y).
+float bayer2(int x, int y) {
+  if ((y & 1) == 1) { return (x & 1) == 1 ? 1.0 : 3.0; }
+  return (x & 1) == 1 ? 2.0 : 0.0;
+}
+float camoThreshold(vec2 p, float time) {
+  int s = int(floor(time * ${EFFECT_CAMO_CRAWL.toFixed(1)}));
+  int px = int(floor(p.x)) + s;
+  int py = int(floor(p.y)) + s * 3;
+  return (4.0 * bayer2(px, py) + bayer2(px >> 1, py >> 1) + 0.5) / 16.0;
+}
 vec3 envAverage() {
   if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
   return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
@@ -10739,6 +10831,8 @@ void main() {
   if (colour.a * 255.0 < 1.0) { discard; }
 
   if (u.pbr.z > 0.5) {
+    // Active Camo (H11): screen-door transparency, as the rasteriser drops pixels.
+    if (u.effect0.w > 0.0 && camoThreshold(gl_FragCoord.xy, u.effect1.w) < u.effect0.w) { discard; }
     vec3 N = normalize(vNormal);
     if (dot(N, u.view.xyz) < 0.0) { N = -N; }
     float metallic = u.pbr.x;
@@ -10866,6 +10960,9 @@ void main() {
       lit = (kdm * (vec3(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
     }
     lit = lit + u.surface2.rgb * pow(1.0 - ndv, u.surface2.w);
+    // A surface effect's glow, and its bands climbing the body (zero without one).
+    float band = pow(0.5 + 0.5 * sin(vWorldPos.y * ${EFFECT_BAND_FREQUENCY.toFixed(1)} - u.effect1.w * ${EFFECT_BAND_SPEED.toFixed(1)}), ${EFFECT_BAND_POWER.toFixed(1)});
+    lit = lit + u.effect0.rgb + u.effect1.rgb * band;
     vec3 shaded = lit;
     if (u.tonemap.x > 0.5) {
       float e = u.tonemap.y;
@@ -11125,6 +11222,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         lightCount: sceneLights.length,
         fog: draw.fog ?? null,
         eye,
+        effect: batch.effect ?? null,
+        time: draw.time ?? 0,
         surface: resolveSurface(batch.primitive.material, draw.time ?? 0, batch.textures.detail !== null, batch.textures.mr !== null, {
           weights: batch.primitive.blend !== void 0,
           textured: batch.textures.blend !== null
@@ -11382,6 +11481,10 @@ import {
   PROBE_FADE as PROBE_FADE2,
   FOG_GLOW_POWER as FOG_GLOW_POWER2,
   PROBE_RANGE as PROBE_RANGE2,
+  EFFECT_BAND_FREQUENCY as EFFECT_BAND_FREQUENCY2,
+  EFFECT_BAND_POWER as EFFECT_BAND_POWER2,
+  EFFECT_BAND_SPEED as EFFECT_BAND_SPEED2,
+  EFFECT_CAMO_CRAWL as EFFECT_CAMO_CRAWL2,
   cameraPositionFromView as cameraPositionFromView3,
   computeSmoothNormals as computeSmoothNormals2,
   multiplyMat4 as multiplyMat45
@@ -11421,6 +11524,8 @@ struct Uniforms {
   fogHeight: vec4<f32>, // x = height-fog density, y = base, z = falloff, w = glow strength
   fogGlow: vec4<f32>,   // rgb = sun-glow colour
   fogVol: array<vec4<f32>, 8>, // per volume: min xyz + density, max xyz + falloff
+  effect0: vec4<f32>,   // rgb = surface effect glow, w = camo amount
+  effect1: vec4<f32>,   // rgb = surface effect bands, w = time
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -11605,6 +11710,17 @@ fn probeSample(i: i32, dir: vec3<f32>) -> vec3<f32> {
   let ty = i32(clamp(floor(vCoord * h), 0.0, h - 1.0) + f32(i) * h);
   return textureLoad(probeAtlas, vec2<i32>(tx, ty), 0).rgb * ${PROBE_RANGE2.toFixed(4)};
 }
+// The 2\xD72 ordered-dither matrix [[0, 2], [3, 1]], and the crawling camo threshold (surfaceEffect.ts).
+fn bayer2(x: i32, y: i32) -> f32 {
+  if ((y & 1) == 1) { return select(3.0, 1.0, (x & 1) == 1); }
+  return select(0.0, 2.0, (x & 1) == 1);
+}
+fn camoThreshold(p: vec2<f32>, time: f32) -> f32 {
+  let s = i32(floor(time * ${EFFECT_CAMO_CRAWL2.toFixed(1)}));
+  let px = i32(floor(p.x)) + s;
+  let py = i32(floor(p.y)) + s * 3;
+  return (4.0 * bayer2(px, py) + bayer2(px >> 1u, py >> 1u) + 0.5) / 16.0;
+}
 fn envAverage() -> vec3<f32> {
   if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
   return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
@@ -11652,6 +11768,8 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   if (colour.a * 255.0 < 1.0) { discard; }
 
   if (u.pbr.z > 0.5) {
+    // Active Camo (H11): screen-door transparency, as the rasteriser drops pixels.
+    if (u.effect0.w > 0.0 && camoThreshold(in.pos.xy, u.effect1.w) < u.effect0.w) { discard; }
     // --- Modern tier: metallic-roughness BRDF (Cook-Torrance) ---
     // Mirrors the software rasteriser's PBR branch (meshRasterizer.ts) term for
     // term, in the engine's non-linear byte space (a linear/HDR pipeline is a
@@ -11797,6 +11915,9 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     }
     // A fresnel rim, light at grazing angles (zero when the material has none).
     lit = lit + u.surface2.rgb * pow(1.0 - ndv, u.surface2.w);
+    // A surface effect's glow, and its bands climbing the body (zero without one).
+    let band = pow(0.5 + 0.5 * sin(in.worldPos.y * ${EFFECT_BAND_FREQUENCY2.toFixed(1)} - u.effect1.w * ${EFFECT_BAND_SPEED2.toFixed(1)}), ${EFFECT_BAND_POWER2.toFixed(1)});
+    lit = lit + u.effect0.rgb + u.effect1.rgb * band;
     // HDR: expose + ACES roll-off, or write the linear colour straight through.
     var shaded = lit;
     if (u.tonemap.x > 0.5) {
@@ -12243,6 +12364,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         lightCount,
         fog: draw.fog ?? null,
         eye,
+        effect: entry.effect ?? null,
+        time: draw.time ?? 0,
         surface: resolveSurface(entry.primitive.material, draw.time ?? 0, entry.textures.detail !== null, entry.textures.mr !== null, {
           weights: entry.primitive.blend !== void 0,
           textured: entry.textures.blend !== null
@@ -13187,6 +13310,7 @@ var Player = class {
           const bodies = this.runtime.physics?.overrides();
           this.meshSurface.setBodyOverrides(scripted.size > 0 ? new Map([...bodies ?? [], ...scripted]) : bodies ?? NO_OVERRIDES);
           this.meshSurface.setSpawned(this.runtime.channel.spawned());
+          this.meshSurface.setShields(this.runtime.channel.shields());
           const placed = this.runtime.channel.needsWorld() ? this.meshSurface.currentPlacements() : null;
           this.meshSurface.setSkinning(placed ? this.runtime.channel.skinning((o) => placed[o] ?? null) : this.runtime.channel.skinning());
         }

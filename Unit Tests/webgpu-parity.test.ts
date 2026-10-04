@@ -279,6 +279,38 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     renderer.dispose();
   });
 
+  it("matches the software rasteriser on shield effects — rim, glow, bands and camo (within float tolerance)", async () => {
+    // HALO2_STYLE_ROADMAP.md H11: the camo dither must drop the very same pixels
+    // (an exact pattern), and the rim, glow and bands shade within rounding.
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+    const instances: MeshSceneInstance[] = [
+      { ...pbrScene()[0]!, effect: { rim: [1.2, 0.9, 0.3], rimPower: 1.5, glow: [0.2, 0.15, 0.05] } },
+      { ...pbrScene()[1]!, effect: { bands: [0.8, 0.7, 0.4], camo: 0.5, rim: [0.2, 0.3, 0.5], rimPower: 3 } },
+    ];
+    const at = (): SceneDraw => ({ ...draw(), time: 0.37 });
+    renderer.render(instances, at());
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.tick?.();
+    }
+    const gpu = at();
+    renderer.render(instances, gpu);
+    const software = at();
+    new SoftwareSceneRenderer().render(instances, software);
+
+    const drawn = Array.from(software.out).filter((_, i) => i % 4 === 3 && software.out[i] !== 0).length;
+    expect(drawn).toBeGreaterThan(100);
+    let maxDelta = 0;
+    let coverage = 0;
+    for (let i = 0; i < W * H * 4; i += 1) {
+      maxDelta = Math.max(maxDelta, Math.abs(gpu.out[i]! - software.out[i]!));
+      if (i % 4 === 3 && (gpu.out[i] === 0) !== (software.out[i] === 0)) coverage += 1;
+    }
+    expect(coverage).toBe(0);
+    expect(maxDelta).toBeLessThanOrEqual(4);
+    renderer.dispose();
+  });
+
   it("matches the software rasteriser on image-based lighting (within float tolerance)", async () => {
     // The environment replaces flat ambient with directional irradiance +
     // reflection; the WGSL envColor/envAverage must match meshRasterizer.ts. As

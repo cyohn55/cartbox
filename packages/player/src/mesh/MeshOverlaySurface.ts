@@ -39,6 +39,7 @@ import {
   downsamplePanorama,
   isSkinned,
   renderSkyBackground,
+  shieldEffect,
   composeModelMatrix,
   multiplyMat4,
   sceneLightingEnvironment,
@@ -53,6 +54,7 @@ import {
   type MeshAsset,
   type MeshSceneInstance,
   type RagdollBox,
+  type SurfaceEffect,
 } from "@cartbox/editor";
 import type { DisplaySurface } from "../display.js";
 import type { ScreenSun } from "../fx/PostFxSurface.js";
@@ -257,6 +259,9 @@ export class MeshOverlaySurface implements DisplaySurface {
   private flat: NonNullable<MeshOverlaySurface["hierarchy"]> | null = null;
   /** World matrices of the objects physics moved this frame (see setBodyOverrides). */
   private bodies: ReadonlyMap<number, Mat4> = new Map();
+  /** Shield effects (H11): object index → the surface effect it and everything under it wear (see setShields). */
+  private effects: ReadonlyMap<number, SurfaceEffect> = new Map();
+  private readonly shieldCache = new Map<number, { flare: number; shimmer: number; camo: number; effect: SurfaceEffect | null }>();
   /** Spawned prefab copies: root object index → the root's world matrix (see setSpawned). */
   private spawned: ReadonlyMap<number, Mat4> = new Map();
   /** Graphics quality (see quality.ts): shadows on/off and their map size, the first-person scale cap. */
@@ -333,6 +338,27 @@ export class MeshOverlaySurface implements DisplaySurface {
    */
   setSpawned(spawned: ReadonlyMap<number, Mat4>): void {
     this.spawned = spawned;
+  }
+
+  /**
+   * Set the shield effects the cart has standing (cartbox.shield: object →
+   * flare, shimmer, camo). Each is drawn on the object and everything under it,
+   * as a surface effect over its PBR materials (see shieldEffect).
+   */
+  setShields(shields: ReadonlyMap<number, { readonly flare: number; readonly shimmer: number; readonly camo: number }>): void {
+    if (shields.size === 0 && this.effects.size === 0) return;
+    const effects = new Map<number, SurfaceEffect>();
+    for (const [object, { flare, shimmer, camo }] of shields) {
+      let cached = this.shieldCache.get(object);
+      // The same state keeps the same effect object, so its batches stay together.
+      if (!cached || cached.flare !== flare || cached.shimmer !== shimmer || cached.camo !== camo) {
+        cached = { flare, shimmer, camo, effect: shieldEffect(flare, shimmer, camo) };
+        this.shieldCache.set(object, cached);
+      }
+      if (cached.effect) effects.set(object, cached.effect);
+    }
+    for (const object of this.shieldCache.keys()) if (!shields.has(object)) this.shieldCache.delete(object);
+    this.effects = effects;
   }
 
   /**
@@ -820,12 +846,12 @@ export class MeshOverlaySurface implements DisplaySurface {
     front: readonly MeshSceneInstance[];
     moved: readonly MeshSceneInstance[];
   } {
-    if (this.poses.length === 0 && this.bodies.size === 0 && this.spawned.size === 0 && this.animated.size === 0) {
+    if (this.poses.length === 0 && this.bodies.size === 0 && this.spawned.size === 0 && this.animated.size === 0 && this.effects.size === 0) {
       this.lastPlacement = null;
       return { main: this.unpooled, front: [], moved: [] };
     }
     if (this.hierarchy) return this.posedHierarchy(this.hierarchy);
-    if (this.bodies.size > 0 || this.spawned.size > 0 || this.animated.size > 0 || this.unpooled !== this.instances) {
+    if (this.bodies.size > 0 || this.spawned.size > 0 || this.animated.size > 0 || this.effects.size > 0 || this.unpooled !== this.instances) {
       this.flat ??= {
         parents: this.instances.map(() => -1),
         children: this.instances.map(() => []),
@@ -877,7 +903,7 @@ export class MeshOverlaySurface implements DisplaySurface {
   } {
     const byIndex = new Map<number, MailboxMeshPose>();
     for (const pose of this.poses) if (!byIndex.has(pose.index)) byIndex.set(pose.index, pose);
-    type State = { model: Mat4; hidden: boolean; front: boolean; moved: boolean };
+    type State = { model: Mat4; hidden: boolean; front: boolean; moved: boolean; effect: SurfaceEffect | null };
     const states: (State | undefined)[] = new Array(this.instances.length);
     const state = (i: number): State => {
       const done = states[i];
@@ -903,6 +929,8 @@ export class MeshOverlaySurface implements DisplaySurface {
         moved,
         hidden: reserved || this.inactive.has(i) || Boolean(pose?.hidden) || Boolean(up?.hidden),
         front: Boolean(pose?.front) || Boolean(up?.front),
+        // A shield effect covers the object and everything under it (its weapon, say).
+        effect: this.effects.get(i) ?? up?.effect ?? null,
       };
       states[i] = out;
       return out;
@@ -917,7 +945,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       placement[i] = s.hidden ? null : s.model;
       if (s.hidden) continue;
       if (!s.moved) {
-        main.push(this.atDetail(i, authored));
+        main.push(s.effect ? { ...this.atDetail(i, authored), effect: s.effect } : this.atDetail(i, authored));
         continue;
       }
       const pose = byIndex.get(i);
@@ -928,6 +956,7 @@ export class MeshOverlaySurface implements DisplaySurface {
         ...source,
         mesh: pose?.tint ? this.tinted(source.mesh, pose.tint) : source.mesh,
         model: s.model,
+        ...(s.effect ? { effect: s.effect } : {}),
       };
       if (s.front) front.push(instance);
       else {

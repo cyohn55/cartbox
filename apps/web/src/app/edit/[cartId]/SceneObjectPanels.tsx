@@ -54,7 +54,7 @@ import {
   unlinkPrefab,
 } from "@/lib/meshPrefabs";
 import styles from "./editor.module.css";
-import { RailGroup, RailHint } from "./railControls";
+import { RailGroup, RailHint, RangeControl } from "./railControls";
 
 const inputStyle: React.CSSProperties = { width: "100%", minWidth: 0, padding: "4px 6px", borderRadius: 6 };
 
@@ -772,6 +772,35 @@ export function PhysicsPanel({
             ? `An upright capsule fitted to the mesh. In code: cartbox.move(${JSON.stringify(entry.name)}, dx, dy, dz).`
             : `The collider is fitted to the mesh. In code: cartbox.body(${JSON.stringify(entry.name)}).`
           : "Give the object a body to have it collide, fall or be pushed when the cart runs."}
+      </RailHint>
+    </RailGroup>
+  );
+}
+
+/** A shield state previewed on the selected object (H11): a hit's flare, the recharge shimmer, Active Camo. */
+export interface ShieldPreview {
+  readonly flare: number;
+  readonly shimmer: number;
+  readonly camo: number;
+}
+
+export const NO_SHIELD: ShieldPreview = { flare: 0, shimmer: 0, camo: 0 };
+
+/**
+ * Shield effects (HALO2_STYLE_ROADMAP.md H11): preview cartbox.shield on the
+ * selected object — the same surface effect the game draws, over its PBR
+ * materials. Nothing here is saved; the cart sets shields as it plays.
+ */
+export function ShieldPanel({ name, shield, onChange }: { name: string; shield: ShieldPreview; onChange: (shield: ShieldPreview) => void }) {
+  const pct = (v: number) => `${Math.round(v * 100)}%`;
+  return (
+    <RailGroup label="Shield effects" collapsible>
+      <RangeControl nested label="Flare (a hit)" min={0} max={1} step={0.05} value={shield.flare} display={pct(shield.flare)} ariaLabel="Shield flare" onChange={(flare) => onChange({ ...shield, flare })} />
+      <RangeControl nested label="Shimmer (recharging)" min={0} max={1} step={0.05} value={shield.shimmer} display={pct(shield.shimmer)} ariaLabel="Shield shimmer" onChange={(shimmer) => onChange({ ...shield, shimmer })} />
+      <RangeControl nested label="Active Camo" min={0} max={1} step={0.05} value={shield.camo} display={pct(shield.camo)} ariaLabel="Active Camo" onChange={(camo) => onChange({ ...shield, camo })} />
+      <RailHint>
+        Preview only. In code: cartbox.shield(&quot;{name}&quot;, flare, shimmer, camo) — it stands until changed, covers everything under the object, and
+        shows on PBR materials.
       </RailHint>
     </RailGroup>
   );

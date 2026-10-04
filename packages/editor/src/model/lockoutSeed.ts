@@ -2240,9 +2240,11 @@ function ledge_snow()
   cartbox.burst("drift", x, top+0.05, z, 0.9, 0.15, -0.6)
 end
 
--- A cyan flare off a soldier's shield where a round lands (toward the shooter).
+-- A cyan flare off a soldier's shield where a round lands (toward the shooter),
+-- and the shield itself lights up around the body (cartbox.shield, see animate_bot).
 local function shield_hit(o, hy, sx,sy,sz)
   cartbox.burst("shield", o.x, hy or o.y+1.2, o.z, sx-o.x, (sy or o.y+1.2)-(hy or o.y+1.2), sz-o.z, 0.8)
+  if (o.sh or 0) > 0 then o.flare = 1 end
 end
 
 local function move_axis(ax, d)
@@ -2283,6 +2285,16 @@ function respawn(who)
   who.ay = math.atan(-who.x, -who.z)  -- face into the arena, not the spawn wall
   who.vy=0; who.hp=100; who.sh = MODE.shields and 100 or 0
   who.dead=false; who.respawn=0
+end
+
+-- Shields recharge, Halo-style: after 4 s without a hit they refill over 2 s.
+-- Only the machine that owns a soldier runs this; the others see its shield
+-- rise in the net state (animate_bot shimmers it either way).
+local function recharge(o)
+  if o.dead or o.remote or not MODE.shields then return end
+  o.calm = (o.calm or 0) + 1
+  local cap = o.jugg and 200 or 100
+  if o.calm > 240 and (o.sh or 0) < cap then o.sh = math.min(cap, (o.sh or 0) + cap/120) end
 end
 
 local function give(who, slot, id) who["g"..slot]=id; who["a"..slot]=W[id].mag; who["r"..slot]=W[id].reserve or 0 end
@@ -2365,7 +2377,9 @@ function damage(target, dmg, attacker, head)
     cartbox.netsend(ev_word(EV_HIT, (attacker or target).ns, target.ns, head, dmg), 0)
     return
   end
+  target.calm = 0   -- the shield's recharge waits for a quiet spell (see recharge)
   if (target.sh or 0) > 0 then
+    target.flare = 1
     target.sh = target.sh - dmg
     if target.sh < 0 then target.hp = target.hp + target.sh; target.sh = 0 end
   else
@@ -3201,6 +3215,17 @@ function animate_bot(i, o)
       cartbox.debris("drop_"..(o.g1 or "br"), o.x, o.y + 1.15, o.z, k[1]*0.45, 1.2, k[3]*0.45)
     else cartbox.unragdoll(i) end
   end
+  -- The shield (H11): it flares gold where it's hit, fading over a few ticks, and
+  -- shimmers while it recharges -- seen as the shield value climbing, so a soldier
+  -- another browser owns shimmers too (a jump, a respawn, doesn't count).
+  local sh = o.sh or 0
+  local rise = sh - (o.prev_sh or sh)
+  o.prev_sh = sh
+  if rise > 0 and rise < 40 then o.shim_t = 20 end
+  o.shim_t = math.max(0, (o.shim_t or 0) - 1)
+  if o.dead then o.flare, o.shim_t = 0, 0 end
+  cartbox.shield(i, o.flare or 0, math.min(1, o.shim_t / 10), 0)
+  o.flare = math.max(0, (o.flare or 0) - 0.1)
   -- The body lies where it fell, and is taken away just before it respawns.
   if o.dead and (o.respawn or 0) < 10 then cartbox.meshpose(i,0,-50,0,0,0,0,0); return end
   cartbox.meshpose(i, o.x, o.y, o.z, o.face or 0, 0, 0, o.jugg and 1.25 or 1, 0, armor_tint(o))
@@ -3439,6 +3464,7 @@ function TIC()
   push_from_bots()
   nav_obstacles()
   for _,o in ipairs(bots) do think_bot(o) end
+  recharge(p); for _,o in ipairs(bots) do recharge(o) end
   update_grenades()
   ledge_snow()
   update_objective()

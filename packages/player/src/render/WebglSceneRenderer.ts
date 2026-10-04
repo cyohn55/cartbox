@@ -40,6 +40,10 @@ import {
   PROBE_FADE,
   FOG_GLOW_POWER,
   PROBE_RANGE,
+  EFFECT_BAND_FREQUENCY,
+  EFFECT_BAND_POWER,
+  EFFECT_BAND_SPEED,
+  EFFECT_CAMO_CRAWL,
   cameraPositionFromView,
   computeSmoothNormals,
   multiplyMat4,
@@ -128,6 +132,8 @@ layout(std140) uniform Uniforms {
   vec4 fogHeight;
   vec4 fogGlow;
   vec4 fogVol[8];
+  vec4 effect0; // rgb = surface effect glow, w = camo amount
+  vec4 effect1; // rgb = surface effect bands, w = time
 } u;
 `;
 
@@ -318,6 +324,18 @@ vec3 probeSample(int i, vec3 dir) {
   int ty = int(clamp(floor(vCoord * h), 0.0, h - 1.0) + float(i) * h);
   return texelFetch(probeAtlas, ivec2(tx, ty), 0).rgb * ${PROBE_RANGE.toFixed(4)};
 }
+// The 2×2 ordered-dither matrix [[0, 2], [3, 1]], and the crawling camo threshold
+// (surfaceEffect.ts). gl_FragCoord rows run top-first here (the vertex stage flips Y).
+float bayer2(int x, int y) {
+  if ((y & 1) == 1) { return (x & 1) == 1 ? 1.0 : 3.0; }
+  return (x & 1) == 1 ? 2.0 : 0.0;
+}
+float camoThreshold(vec2 p, float time) {
+  int s = int(floor(time * ${EFFECT_CAMO_CRAWL.toFixed(1)}));
+  int px = int(floor(p.x)) + s;
+  int py = int(floor(p.y)) + s * 3;
+  return (4.0 * bayer2(px, py) + bayer2(px >> 1, py >> 1) + 0.5) / 16.0;
+}
 vec3 envAverage() {
   if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
   return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
@@ -336,6 +354,8 @@ void main() {
   if (colour.a * 255.0 < 1.0) { discard; }
 
   if (u.pbr.z > 0.5) {
+    // Active Camo (H11): screen-door transparency, as the rasteriser drops pixels.
+    if (u.effect0.w > 0.0 && camoThreshold(gl_FragCoord.xy, u.effect1.w) < u.effect0.w) { discard; }
     vec3 N = normalize(vNormal);
     if (dot(N, u.view.xyz) < 0.0) { N = -N; }
     float metallic = u.pbr.x;
@@ -463,6 +483,9 @@ void main() {
       lit = (kdm * (vec3(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
     }
     lit = lit + u.surface2.rgb * pow(1.0 - ndv, u.surface2.w);
+    // A surface effect's glow, and its bands climbing the body (zero without one).
+    float band = pow(0.5 + 0.5 * sin(vWorldPos.y * ${EFFECT_BAND_FREQUENCY.toFixed(1)} - u.effect1.w * ${EFFECT_BAND_SPEED.toFixed(1)}), ${EFFECT_BAND_POWER.toFixed(1)});
+    lit = lit + u.effect0.rgb + u.effect1.rgb * band;
     vec3 shaded = lit;
     if (u.tonemap.x > 0.5) {
       float e = u.tonemap.y;
@@ -776,6 +799,8 @@ export class WebglSceneRenderer implements SceneRenderer {
         lightCount: sceneLights.length,
         fog: draw.fog ?? null,
         eye,
+        effect: batch.effect ?? null,
+        time: draw.time ?? 0,
         surface: resolveSurface(batch.primitive.material, draw.time ?? 0, batch.textures.detail !== null, batch.textures.mr !== null, {
           weights: batch.primitive.blend !== undefined,
           textured: batch.textures.blend !== null,

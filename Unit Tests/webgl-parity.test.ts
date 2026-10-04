@@ -48,6 +48,8 @@ interface Parity {
   drawn: number;
   differing: number;
   maxDelta: number;
+  /** Pixels one side drew and the other didn't. */
+  coverage: number;
   stats: { drawCalls: number; instances: number; triangles: number; gpuMs: number | null };
   backend: string;
   diffs: string[];
@@ -135,6 +137,15 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     const result = await run("shadow");
     expect(result.drawn).toBeGreaterThan(100);
     if (exact) expect(result.maxDelta).toBeLessThanOrEqual(4);
+  });
+
+  it("matches shield effects within float tolerance, dropping the same camo pixels", async () => {
+    const result = await run("effects");
+    expect(result.drawn).toBeGreaterThan(100);
+    if (exact) {
+      expect(result.coverage, JSON.stringify(result.diffs)).toBe(0);
+      expect(result.maxDelta).toBeLessThanOrEqual(4);
+    }
   });
 
   it("matches distance fog within float tolerance", async () => {
