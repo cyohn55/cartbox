@@ -60,7 +60,7 @@ import type { DisplaySurface } from "../display.js";
 import type { ScreenSun } from "../fx/PostFxSurface.js";
 import { SoftwareSceneRenderer, type SceneRenderer } from "../render/sceneRenderer.js";
 import type { MailboxMeshCamera, MailboxMeshPose, WorldLight } from "../mailbox.js";
-import type { ShadowInput, SceneLight, SceneLighting } from "@cartbox/editor";
+import type { ShadowCascade, ShadowInput, SceneLight, SceneLighting } from "@cartbox/editor";
 import type { MeshScene } from "./meshScene.js";
 import { QUALITY_PRESETS, type QualitySettings } from "../quality.js";
 import { buildOrbitCamera, orbitPitchAboveTerrain } from "./meshScene.js";
@@ -195,6 +195,26 @@ export function poseLocalMatrix(pose: MailboxMeshPose): Mat4 {
 
 /** Radians of yaw per presented frame — one full turn every ~12s at 60Hz. */
 const AUTO_ORBIT_YAW_PER_FRAME = (2 * Math.PI) / 720;
+/**
+ * One sun shadow map (see MeshOverlaySurface.buildShadow): the cached depth of
+ * everything still, what it was drawn for, its light matrix, this frame's
+ * copy with the movers drawn in, and the rects they covered.
+ */
+interface ShadowLayer {
+  staticDepth: Float32Array | null;
+  key: string;
+  lighting: SceneLighting | null;
+  matrix: Mat4 | null;
+  depth: Float32Array | null;
+  rects: TexelRect[];
+}
+const newShadowLayer = (): ShadowLayer => ({ staticDepth: null, key: "", lighting: null, matrix: null, depth: null, rects: [] });
+
+/** The near shadow cascade's half-size (EP8b): this share of the scene's radius, within these bounds (world units). */
+const NEAR_CASCADE_SHARE = 0.3;
+const NEAR_CASCADE_MIN = 4;
+const NEAR_CASCADE_MAX = 24;
+
 /** Fixed downward tilt so the scene reads as a 3D object, not a flat silhouette. */
 const AUTO_ORBIT_PITCH = 0.35;
 
@@ -205,16 +225,9 @@ export class MeshOverlaySurface implements DisplaySurface {
   private readonly output: Uint8ClampedArray;
   private readonly presented: Uint8Array;
   private readonly depth: Float32Array;
-  /** Shadow-map depth scratch, allocated once the first shadowed frame needs it. */
-  private shadowDepth: Float32Array | null = null;
-  /** Cached shadow depth of everything not posed (see buildShadow), and what it was built for. */
-  private staticShadow: Float32Array | null = null;
-  private staticShadowKey = "";
-  private staticShadowLighting: SceneLighting | null = null;
-  /** The light's world→clip matrix of the cached static map (movers' footprints are projected with it). */
-  private staticShadowMatrix: Mat4 | null = null;
-  /** Shadow-map rects last frame's movers drew into (restored from the static map next frame). */
-  private shadowRects: TexelRect[] = [];
+  /** The sun's shadow maps (see buildShadow): the whole scene, and the near cascade round the camera (EP8b). */
+  private farShadow: ShadowLayer = newShadowLayer();
+  private nearShadow: ShadowLayer = newShadowLayer();
   /** Instances ever posed on the front layer (a held weapon): never part of the static shadow. */
   private readonly everFront = new Set<number>();
   /** Each mesh's local bounding box, for projecting shadow footprints. */
@@ -433,7 +446,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       this.unpooled = this.pooledRoot.some((r) => r >= 0) ? this.instances.filter((_, i) => this.pooledRoot[i]! < 0) : this.instances;
       this.flat = null;
       // The still objects' shadow was drawn where they stood: draw it again.
-      this.staticShadowKey = "";
+      this.farShadow.key = "";
+      this.nearShadow.key = "";
     }
     return true;
   }
@@ -442,10 +456,8 @@ export class MeshOverlaySurface implements DisplaySurface {
   setQuality(quality: QualitySettings): void {
     if (quality.shadowMapSize !== this.quality.shadowMapSize) {
       // A new map size: the cached maps are rebuilt at it.
-      this.staticShadow = null;
-      this.shadowDepth = null;
-      this.staticShadowKey = "";
-      this.shadowRects = [];
+      this.farShadow = newShadowLayer();
+      this.nearShadow = newShadowLayer();
     }
     this.quality = quality;
   }
@@ -1142,9 +1154,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       .map((p) => p.index)
       .sort((a, b) => a - b)
       .join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}|${[...this.bodies.keys()].join(",")}|${[...this.live.keys()].join(",")}|${this.inactiveKey}`;
-    let full = false;
-    if (!this.staticShadow || this.staticShadowKey !== key || this.staticShadowLighting !== lighting) {
-      this.staticShadow ??= new Float32Array(size * size);
+    // What never moves, gathered only when a layer must redraw its static map.
+    const still = (): MeshSceneInstance[] => {
       // Skinned objects are never still: their shape changes as they animate.
       const posed = this.withChildren([...this.poses.map((p) => p.index), ...this.bodies.keys(), ...this.live.keys()]);
       // Reserve prefab copies are never part of the static shadow (hidden, or moving once spawned).
@@ -1154,33 +1165,70 @@ export class MeshOverlaySurface implements DisplaySurface {
       // Terrain frames nothing (the map is sized to the play space) and casts
       // only when its terrain says so — its cliffs shading the deck at a low sun.
       const casts = (i: number) => !this.scene.instances[i]?.terrain || this.scene.instances[i]?.casts === true;
-      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && casts(i));
-      const extent = this.scene.extent;
-      const reach = extent && this.scene.instances.some((inst) => inst.casts) ? Math.max(0, extent.radius * 2 - radius * 2) : 0;
-      const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow, reach });
+      return this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && casts(i));
+    };
+    const extent = this.scene.extent;
+    const reach = extent && this.scene.instances.some((inst) => inst.casts) ? Math.max(0, extent.radius * 2 - radius * 2) : 0;
+    const far = this.renderShadowLayer(this.farShadow, key, still, moved, lighting, center, radius, size, reach);
+    if (!far) return null;
+    // The near cascade (EP8b): the same size of map over a box round the camera,
+    // three or more times sharper. Its centre snaps to a grid half its size, so it
+    // redraws only as the camera crosses a cell, not every frame it moves.
+    let near: ShadowCascade | null = null;
+    const nearRadius = Math.min(NEAR_CASCADE_MAX, Math.max(NEAR_CASCADE_MIN, radius * NEAR_CASCADE_SHARE));
+    if (this.quality.shadowCascades && this.eye && nearRadius < radius * 0.7) {
+      const step = nearRadius / 2;
+      const c: [number, number, number] = [Math.round(this.eye[0] / step) * step, Math.round(this.eye[1] / step) * step, Math.round(this.eye[2] / step) * step];
+      // Back the light off past the whole scene, so a far tower still shades the near box.
+      const built = this.renderShadowLayer(this.nearShadow, `${key}|${c.join(",")}`, still, moved, lighting, c, nearRadius, size, Math.max(reach, radius * 2));
+      if (built) near = { lightViewProj: built.lightViewProj, depth: built.depth, bias: built.bias ?? 0.003, slopeBias: built.slopeBias ?? 0, dirty: built.dirty };
+    }
+    return { ...far, near };
+  }
+
+  /**
+   * One shadow map for this frame: the layer's cached static depth (redrawn
+   * when `key` or the rig changes), copied, with this frame's movers drawn over
+   * it — and the texels that changed since last frame, for a GPU's partial upload.
+   */
+  private renderShadowLayer(
+    layer: ShadowLayer,
+    key: string,
+    still: () => MeshSceneInstance[],
+    moved: readonly MeshSceneInstance[],
+    lighting: SceneLighting,
+    center: readonly [number, number, number],
+    radius: number,
+    size: number,
+    reach: number,
+  ): ShadowInput | null {
+    let full = false;
+    if (!layer.staticDepth || layer.key !== key || layer.lighting !== lighting) {
+      layer.staticDepth ??= new Float32Array(size * size);
+      const built = buildSceneShadow(still(), lighting, center, radius, { size, depth: layer.staticDepth, reach });
       if (!built) return null;
-      this.staticShadowMatrix = built.lightViewProj;
-      this.staticShadowKey = key;
-      this.staticShadowLighting = lighting;
+      layer.matrix = built.lightViewProj;
+      layer.key = key;
+      layer.lighting = lighting;
       full = true;
     }
-    const base = this.staticShadow;
-    if (full || !this.shadowDepth) {
-      this.shadowDepth ??= new Float32Array(size * size);
-      this.shadowDepth.set(base);
+    const base = layer.staticDepth;
+    if (full || !layer.depth) {
+      layer.depth ??= new Float32Array(size * size);
+      layer.depth.set(base);
       full = true;
     } else {
       // Undo last frame's movers: restore just their rects from the static map.
-      for (const r of this.shadowRects) {
-        for (let y = r.y0; y < r.y1; y += 1) this.shadowDepth.set(base.subarray(y * size + r.x0, y * size + r.x1), y * size + r.x0);
+      for (const r of layer.rects) {
+        for (let y = r.y0; y < r.y1; y += 1) layer.depth.set(base.subarray(y * size + r.x0, y * size + r.x1), y * size + r.x0);
       }
     }
-    const rects = moved.map((instance) => this.shadowFootprint(instance, size)).filter((r): r is TexelRect => r !== null);
-    const result = buildSceneShadow(moved, lighting, center, radius, { size, depth: this.shadowDepth, clear: false });
+    const rects = moved.map((instance) => this.shadowFootprint(instance, size, layer.matrix)).filter((r): r is TexelRect => r !== null);
+    const result = buildSceneShadow(moved, lighting, center, radius, { size, depth: layer.depth, clear: false, reach });
     if (!result) return null;
     let dirty: ShadowInput["dirty"] = null;
     if (!full) {
-      const all = [...this.shadowRects, ...rects];
+      const all = [...layer.rects, ...rects];
       if (all.length === 0) dirty = { x: 0, y: 0, width: 0, height: 0 };
       else {
         const x0 = Math.min(...all.map((r) => r.x0));
@@ -1188,7 +1236,7 @@ export class MeshOverlaySurface implements DisplaySurface {
         dirty = { x: x0, y: y0, width: Math.max(...all.map((r) => r.x1)) - x0, height: Math.max(...all.map((r) => r.y1)) - y0 };
       }
     }
-    this.shadowRects = rects;
+    layer.rects = rects;
     return { ...result, dirty };
   }
 
@@ -1196,8 +1244,7 @@ export class MeshOverlaySurface implements DisplaySurface {
    * The shadow-map texels an instance can cover: its bounding box through the
    * light's (orthographic) projection, padded for filtering and rounding.
    */
-  private shadowFootprint(instance: MeshSceneInstance, size: number): TexelRect | null {
-    const m = this.staticShadowMatrix;
+  private shadowFootprint(instance: MeshSceneInstance, size: number, m: Mat4 | null): TexelRect | null {
     if (!m) return null;
     // A live skinned mesh changes shape every frame: measure it afresh.
     let b = instance.mesh.primitives.some((p) => p.dynamic) ? undefined : this.meshBounds.get(instance.mesh);

@@ -47,6 +47,7 @@ import {
   cameraPositionFromView,
   compiledGraphOf,
   computeSmoothNormals,
+  NEAR_CASCADE_EDGE,
   CLUSTER_INDEX_CAP,
   CLUSTER_X,
   CLUSTER_Y,
@@ -335,36 +336,52 @@ vec4 sampleMap(sampler2D s, vec2 uv) {
 #endif
 }
 
-float shadowTap(float fx, float fy, float z) {
+float shadowTap(float fx, float fy, float z, float ox) {
   float size = u.shadow.y;
-  int tx = int(clamp(floor(fx), 0.0, size - 1.0));
+  int tx = int(clamp(floor(fx), 0.0, size - 1.0) + ox);
   int ty = int(clamp(floor(fy), 0.0, size - 1.0));
   float stored = texelFetch(shadowMap, ivec2(tx, ty), 0).r;
   if (z > stored) { return 0.0; }
   return 1.0;
 }
-float shadowFactor(vec4 lightClip, float cosL) {
+// One shadow map's test at a light-NDC point: the main map (ox 0) or the near
+// cascade packed to its right (ox = size), with its own biases.
+float shadowAt(vec3 ndc, float bias0, float slope, float ox, float cosL) {
+  float size = u.shadow.y;
+  float sx = (ndc.x * 0.5 + 0.5) * size;
+  float sy = (1.0 - (ndc.y * 0.5 + 0.5)) * size;
+  float bias = bias0;
+  if (slope > 0.0) {
+    float c = clamp(cosL, 0.05, 1.0);
+    bias = bias + slope * min(10.0, sqrt(1.0 - c * c) / c);
+  }
+  float z = ndc.z - bias;
+  if (u.shadow2.y < 0.5) {
+    if (shadowTap(sx, sy, z, ox) < 0.5) { return 1.0 - u.shadow.w; }
+    return 1.0;
+  }
+  float lit = (shadowTap(sx - 0.5, sy - 0.5, z, ox) + shadowTap(sx + 0.5, sy - 0.5, z, ox)
+             + shadowTap(sx - 0.5, sy + 0.5, z, ox) + shadowTap(sx + 0.5, sy + 0.5, z, ox)) * 0.25;
+  return 1.0 - u.shadow.w * (1.0 - lit);
+}
+// The near shadow cascade (EP8b): world→light-clip, and (1 when present, bias, slope bias).
+uniform mat4 nearShadowMvp;
+uniform vec4 nearShadow;
+// The sun's shadow (mirrors sunShadowVisibility): the near cascade when the
+// point sits well inside it, else the main map.
+float shadowFactor(vec4 lightClip, vec3 worldPos, float cosL) {
   if (u.shadow.x < 0.5) { return 1.0; }
+  if (nearShadow.x > 0.5) {
+    vec3 n = (nearShadowMvp * vec4(worldPos, 1.0)).xyz;
+    if (abs(n.x) < ${NEAR_CASCADE_EDGE} && abs(n.y) < ${NEAR_CASCADE_EDGE} && abs(n.z) <= 1.0) {
+      return shadowAt(n, nearShadow.y, nearShadow.z, u.shadow.y, cosL);
+    }
+  }
   vec3 ndc = lightClip.xyz / lightClip.w;
   if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < -1.0 || ndc.z > 1.0) {
     return 1.0;
   }
-  float size = u.shadow.y;
-  float sx = (ndc.x * 0.5 + 0.5) * size;
-  float sy = (1.0 - (ndc.y * 0.5 + 0.5)) * size;
-  float bias = u.shadow.z;
-  if (u.shadow2.x > 0.0) {
-    float c = clamp(cosL, 0.05, 1.0);
-    bias = bias + u.shadow2.x * min(10.0, sqrt(1.0 - c * c) / c);
-  }
-  float z = ndc.z - bias;
-  if (u.shadow2.y < 0.5) {
-    if (shadowTap(sx, sy, z) < 0.5) { return 1.0 - u.shadow.w; }
-    return 1.0;
-  }
-  float lit = (shadowTap(sx - 0.5, sy - 0.5, z) + shadowTap(sx + 0.5, sy - 0.5, z)
-             + shadowTap(sx - 0.5, sy + 0.5, z) + shadowTap(sx + 0.5, sy + 0.5, z)) * 0.25;
-  return 1.0 - u.shadow.w * (1.0 - lit);
+  return shadowAt(ndc, u.shadow.z, u.shadow2.x, 0.0, cosL);
 }
 vec3 envGradient(float y) {
   float t = clamp(y, -1.0, 1.0);
@@ -570,7 +587,7 @@ ${g.emis}
     if (u.ssaoMeta.x > 0.5) {
       amb = amb * texelFetch(ssaoMap, ivec2(gl_FragCoord.xy), 0).r;
     }
-    float sf = shadowFactor(vLightClip, abs(dot(normalize(vNormal), u.light.xyz)));
+    float sf = shadowFactor(vLightClip, vWorldPos, abs(dot(normalize(vNormal), u.light.xyz)));
     int lc = int(u.ssaoMeta.y + 0.5);
     vec3 lit;
     if (lc > 0) {
@@ -636,7 +653,7 @@ ${g.emis}
 
   // Fantasy path: two-sided Lambert on the un-renormalised normal, as the software rasteriser does.
   float nl = abs(dot(vNormal, u.light.xyz));
-  float shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(vLightClip, abs(dot(normalize(vNormal), u.light.xyz)));
+  float shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(vLightClip, vWorldPos, abs(dot(normalize(vNormal), u.light.xyz)));
   outColor = finishAlpha(colour.rgb * shade, colour.a);
 }
 `;
@@ -914,6 +931,9 @@ export class WebglSceneRenderer implements SceneRenderer {
     const eye = cameraPositionFromView(draw.view);
     const shadow = draw.shadow ?? null;
     this.uploadShadow(shadow);
+    const near = shadow?.near ?? null;
+    if (near) this.nearShadowMvp.set(near.lightViewProj);
+    this.nearShadow.set(near ? [1, near.bias, near.slopeBias, 0] : [0, 0, 0, 0]);
     const shadowParams = shadow
       ? { size: shadow.size, bias: shadow.bias ?? 0.003, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false }
       : null;
@@ -1096,6 +1116,12 @@ export class WebglSceneRenderer implements SceneRenderer {
   /** The clustered lights' params and info this frame (EP8; see the shader's clusterParams/clusterInfo). */
   private readonly clusterParams = new Float32Array(4);
   private readonly clusterInfo = new Float32Array(4);
+  /** The near shadow cascade this frame (EP8b; see the shader's nearShadowMvp/nearShadow). */
+  private readonly nearShadowMvp = new Float32Array(16);
+  private readonly nearShadow = new Float32Array(4);
+  /** Maps side by side in the shadow texture (2 with a near cascade), and the near map last uploaded in full. */
+  private shadowCascades = 1;
+  private nearUploaded: Float32Array | null = null;
   /** The cell table and index list as integer textures, made on first use. */
   private clusterTextures: { table: any; index: any } | null = null;
 
@@ -1105,6 +1131,8 @@ export class WebglSceneRenderer implements SceneRenderer {
     gl.uniform4fv(gl.getUniformLocation(program, "probeData"), this.probeData);
     gl.uniform4fv(gl.getUniformLocation(program, "clusterParams"), this.clusterParams);
     gl.uniform4fv(gl.getUniformLocation(program, "clusterInfo"), this.clusterInfo);
+    gl.uniformMatrix4fv(gl.getUniformLocation(program, "nearShadowMvp"), false, this.nearShadowMvp);
+    gl.uniform4fv(gl.getUniformLocation(program, "nearShadow"), this.nearShadow);
   }
 
   /** Upload a frame's cells (only the index rows in use), and bind both textures. */
@@ -1216,11 +1244,15 @@ export class WebglSceneRenderer implements SceneRenderer {
   private uploadShadow(shadow: SceneDraw["shadow"]): void {
     const gl = this.gl;
     if (!shadow) return;
-    if (shadow.size !== this.shadowSize || !this.shadowTexture) {
+    // With a near cascade (EP8b) the texture holds two maps side by side.
+    const cascades = shadow.near ? 2 : 1;
+    if (shadow.size !== this.shadowSize || cascades !== this.shadowCascades || !this.shadowTexture) {
       if (this.shadowTexture) gl.deleteTexture(this.shadowTexture);
-      this.shadowTexture = createTexture(gl, shadow.size, shadow.size, gl.R32F, gl.RED, gl.FLOAT, null);
+      this.shadowTexture = createTexture(gl, shadow.size * cascades, shadow.size, gl.R32F, gl.RED, gl.FLOAT, null);
       this.shadowSize = shadow.size;
+      this.shadowCascades = cascades;
       this.shadowUploaded = null;
+      this.nearUploaded = null;
     }
     gl.bindTexture(gl.TEXTURE_2D, this.shadowTexture);
     const dirty = shadow.dirty;
@@ -1238,6 +1270,24 @@ export class WebglSceneRenderer implements SceneRenderer {
     } else {
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, shadow.size, shadow.size, gl.RED, gl.FLOAT, shadow.depth);
       this.shadowUploaded = shadow.depth;
+    }
+    const near = shadow.near;
+    if (near) {
+      const nd = near.dirty;
+      if (nd && this.nearUploaded === near.depth) {
+        if (nd.width > 0 && nd.height > 0) {
+          gl.pixelStorei(gl.UNPACK_ROW_LENGTH, shadow.size);
+          gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, nd.x);
+          gl.pixelStorei(gl.UNPACK_SKIP_ROWS, nd.y);
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, shadow.size + nd.x, nd.y, nd.width, nd.height, gl.RED, gl.FLOAT, near.depth);
+          gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+          gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
+          gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
+        }
+      } else {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, shadow.size, 0, shadow.size, shadow.size, gl.RED, gl.FLOAT, near.depth);
+        this.nearUploaded = near.depth;
+      }
     }
   }
 

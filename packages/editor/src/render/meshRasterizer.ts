@@ -508,6 +508,44 @@ export interface ShadowInput {
    * changed. The software rasteriser reads the array directly and ignores it.
    */
   readonly dirty?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | null;
+  /**
+   * A near cascade (ENGINE_PARITY_ROADMAP.md EP8b): a sharper map, the same
+   * `size`, of the region round the camera. A fragment well inside it
+   * ({@link NEAR_CASCADE_EDGE} of its extent) tests against it instead of the
+   * main map; GPU renderers pack it to the right of the main map in one texture.
+   */
+  readonly near?: ShadowCascade | null;
+}
+
+/** A near shadow cascade: its world→light-clip, depth map (`size × size`), biases, and what changed in it. */
+export interface ShadowCascade {
+  readonly lightViewProj: Mat4;
+  readonly depth: Float32Array;
+  readonly bias: number;
+  readonly slopeBias: number;
+  readonly dirty?: ShadowInput["dirty"];
+}
+
+/** How far into the near cascade (in its NDC) a fragment must be to use it; past that the main map takes over. */
+export const NEAR_CASCADE_EDGE = 0.95;
+
+/**
+ * The sun's shadow at a fragment (EP8b): from the near cascade when the
+ * world-space point `(wx, wy, wz)` sits well inside it, else from the main map
+ * at its light-NDC `(lx, ly, lz)`. Mirrors `shadowFactor` in both GPU shaders.
+ */
+export function sunShadowVisibility(shadow: ShadowInput, lx: number, ly: number, lz: number, wx: number, wy: number, wz: number, cosToLight: number): number {
+  const near = shadow.near;
+  if (near) {
+    const m = near.lightViewProj;
+    const nx = m[0]! * wx + m[4]! * wy + m[8]! * wz + m[12]!;
+    const ny = m[1]! * wx + m[5]! * wy + m[9]! * wz + m[13]!;
+    const nz = m[2]! * wx + m[6]! * wy + m[10]! * wz + m[14]!;
+    if (Math.abs(nx) < NEAR_CASCADE_EDGE && Math.abs(ny) < NEAR_CASCADE_EDGE && Math.abs(nz) <= 1) {
+      return shadowTest(near.depth, shadow.size, near.bias, near.slopeBias, shadow.strength ?? 1, shadow.pcf === true, nx, ny, nz, cosToLight);
+    }
+  }
+  return shadowVisibility(shadow, lx, ly, lz, cosToLight);
 }
 
 /**
@@ -517,23 +555,25 @@ export interface ShadowInput {
  * (drives the slope-scaled bias). Mirrors `shadowFactor` in the WGSL renderer.
  */
 export function shadowVisibility(shadow: ShadowInput, lx: number, ly: number, lz: number, cosToLight: number): number {
-  const size = shadow.size;
+  return shadowTest(shadow.depth, shadow.size, shadow.bias ?? 0.003, shadow.slopeBias ?? 0, shadow.strength ?? 1, shadow.pcf === true, lx, ly, lz, cosToLight);
+}
+
+/** {@link shadowVisibility} over one map's depth, size and biases. */
+function shadowTest(depth: Float32Array, size: number, bias0: number, slope: number, strength: number, pcf: boolean, lx: number, ly: number, lz: number, cosToLight: number): number {
   const sx = (lx * 0.5 + 0.5) * size;
   const sy = (1 - (ly * 0.5 + 0.5)) * size;
   if (!(sx >= 0 && sx < size && sy >= 0 && sy < size && lz >= -1 && lz <= 1)) return 1;
-  let bias = shadow.bias ?? 0.003;
-  const slope = shadow.slopeBias ?? 0;
+  let bias = bias0;
   if (slope > 0) {
     const c = Math.min(1, Math.max(0.05, cosToLight));
     bias += slope * Math.min(10, Math.sqrt(1 - c * c) / c);
   }
-  const strength = shadow.strength ?? 1;
   const test = (fx: number, fy: number): number => {
     const tx = Math.min(size - 1, Math.max(0, Math.floor(fx)));
     const ty = Math.min(size - 1, Math.max(0, Math.floor(fy)));
-    return lz - bias > shadow.depth[ty * size + tx]! ? 0 : 1;
+    return lz - bias > depth[ty * size + tx]! ? 0 : 1;
   };
-  if (!shadow.pcf) return test(sx, sy) ? 1 : 1 - strength;
+  if (!pcf) return test(sx, sy) ? 1 : 1 - strength;
   const lit = (test(sx - 0.5, sy - 0.5) + test(sx + 0.5, sy - 0.5) + test(sx - 0.5, sy + 0.5) + test(sx + 0.5, sy + 0.5)) / 4;
   return 1 - strength * (1 - lit);
 }
@@ -1959,7 +1999,9 @@ function rasterizeTriangle(
         const lxi = pw0 * a.lx + pw1 * b.lx + pw2 * c.lx;
         const lyi = pw0 * a.ly + pw1 * b.ly + pw2 * c.ly;
         const lzi = pw0 * a.lz + pw1 * b.lz + pw2 * c.lz;
-        shadowLit = shadowVisibility(shadow, lxi, lyi, lzi, geoCosL);
+        shadowLit = shadow.near
+          ? sunShadowVisibility(shadow, lxi, lyi, lzi, pw0 * a.wx + pw1 * b.wx + pw2 * c.wx, pw0 * a.wy + pw1 * b.wy + pw2 * c.wy, pw0 * a.wz + pw1 * b.wz + pw2 * c.wz, geoCosL)
+          : shadowVisibility(shadow, lxi, lyi, lzi, geoCosL);
       }
 
       // Two-sided Lambert: |N·L| so inconsistent winding still lights.

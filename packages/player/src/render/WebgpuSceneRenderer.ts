@@ -77,6 +77,7 @@ import {
   cameraPositionFromView,
   compiledGraphOf,
   computeSmoothNormals,
+  NEAR_CASCADE_EDGE,
   CLUSTER_CELLS,
   CLUSTER_INDEX_CAP,
   CLUSTER_X,
@@ -128,6 +129,9 @@ interface PipelineSet {
   readonly blend: any;
   readonly add: any;
 }
+
+/** The per-frame globals' bytes (WGSL `Frame`): cluster params and info, the near cascade's matrix and params. */
+const FRAME_BYTES = 112;
 
 /** Staging buffers in flight. Three lets a readback land while two more queue. */
 const READBACK_BUFFERS = 3;
@@ -224,11 +228,15 @@ struct Light {
   d2: vec4<f32>,
   d3: vec4<f32>,
 };
-// Clustered lights (EP8): params = tile size (px), near plane, slice scale;
-// info.x = global lights (looped by every fragment), info.y = 1 when cells are built.
-struct Clusters {
-  params: vec4<f32>,
-  info: vec4<f32>,
+// Per-frame globals. Clustered lights (EP8): clusterParams = tile size (px),
+// near plane, slice scale; clusterInfo.x = global lights (looped by every
+// fragment), .y = 1 when cells are built. The near shadow cascade (EP8b):
+// world→light-clip, and nearShadow = (1 when present, bias, slope bias).
+struct Frame {
+  clusterParams: vec4<f32>,
+  clusterInfo: vec4<f32>,
+  nearMvp: mat4x4<f32>,
+  nearShadow: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
@@ -284,7 +292,7 @@ struct Probe {
 // Clustered lights (EP8): per cell (offset, count) into the index list.
 @group(1) @binding(1) var<storage, read> clusterTable: array<vec2<u32>>;
 @group(1) @binding(2) var<storage, read> clusterIndex: array<u32>;
-@group(1) @binding(3) var<uniform> clusters: Clusters;
+@group(1) @binding(3) var<uniform> frame: Frame;
 
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] — fogLayerDepth in skyDome.ts.
@@ -342,9 +350,9 @@ struct VSOut {
 // Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
 // project into the light's frame, look up the nearest depth the light sees, and
 // return 1 (lit) or 1−strength (occluded). The light is orthographic (w = 1).
-fn shadowTap(fx: f32, fy: f32, z: f32) -> f32 {
+fn shadowTap(fx: f32, fy: f32, z: f32, ox: f32) -> f32 {
   let size = u.shadow.y;
-  let tx = i32(clamp(floor(fx), 0.0, size - 1.0));
+  let tx = i32(clamp(floor(fx), 0.0, size - 1.0) + ox);
   let ty = i32(clamp(floor(fy), 0.0, size - 1.0));
   let stored = textureLoad(shadowMap, vec2<i32>(tx, ty), 0).r;
   if (z > stored) { return 0.0; }
@@ -352,28 +360,41 @@ fn shadowTap(fx: f32, fy: f32, z: f32) -> f32 {
 }
 // cosL = |N.L| of the geometric normal against the key light, for the slope bias.
 // Mirrors shadowVisibility in meshRasterizer.ts.
-fn shadowFactor(lightClip: vec4<f32>, cosL: f32) -> f32 {
+// One shadow map's test at a light-NDC point: the main map (ox 0) or the near
+// cascade packed to its right (ox = size), with its own biases.
+fn shadowAt(ndc: vec3<f32>, bias0: f32, slope: f32, ox: f32, cosL: f32) -> f32 {
+  let size = u.shadow.y;
+  let sx = (ndc.x * 0.5 + 0.5) * size;
+  let sy = (1.0 - (ndc.y * 0.5 + 0.5)) * size;
+  var bias = bias0;
+  if (slope > 0.0) {
+    let c = clamp(cosL, 0.05, 1.0);
+    bias = bias + slope * min(10.0, sqrt(1.0 - c * c) / c);
+  }
+  let z = ndc.z - bias;
+  if (u.shadow2.y < 0.5) {
+    if (shadowTap(sx, sy, z, ox) < 0.5) { return 1.0 - u.shadow.w; }
+    return 1.0;
+  }
+  let lit = (shadowTap(sx - 0.5, sy - 0.5, z, ox) + shadowTap(sx + 0.5, sy - 0.5, z, ox)
+           + shadowTap(sx - 0.5, sy + 0.5, z, ox) + shadowTap(sx + 0.5, sy + 0.5, z, ox)) * 0.25;
+  return 1.0 - u.shadow.w * (1.0 - lit);
+}
+// The sun's shadow (mirrors sunShadowVisibility): the near cascade (EP8b) when
+// the point sits well inside it, else the main map.
+fn shadowFactor(lightClip: vec4<f32>, worldPos: vec3<f32>, cosL: f32) -> f32 {
   if (u.shadow.x < 0.5) { return 1.0; }
+  if (frame.nearShadow.x > 0.5) {
+    let n = (frame.nearMvp * vec4<f32>(worldPos, 1.0)).xyz;
+    if (abs(n.x) < ${NEAR_CASCADE_EDGE} && abs(n.y) < ${NEAR_CASCADE_EDGE} && abs(n.z) <= 1.0) {
+      return shadowAt(n, frame.nearShadow.y, frame.nearShadow.z, u.shadow.y, cosL);
+    }
+  }
   let ndc = lightClip.xyz / lightClip.w;
   if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < -1.0 || ndc.z > 1.0) {
     return 1.0;
   }
-  let size = u.shadow.y;
-  let sx = (ndc.x * 0.5 + 0.5) * size;
-  let sy = (1.0 - (ndc.y * 0.5 + 0.5)) * size;
-  var bias = u.shadow.z;
-  if (u.shadow2.x > 0.0) {
-    let c = clamp(cosL, 0.05, 1.0);
-    bias = bias + u.shadow2.x * min(10.0, sqrt(1.0 - c * c) / c);
-  }
-  let z = ndc.z - bias;
-  if (u.shadow2.y < 0.5) {
-    if (shadowTap(sx, sy, z) < 0.5) { return 1.0 - u.shadow.w; }
-    return 1.0;
-  }
-  let lit = (shadowTap(sx - 0.5, sy - 0.5, z) + shadowTap(sx + 0.5, sy - 0.5, z)
-           + shadowTap(sx - 0.5, sy + 0.5, z) + shadowTap(sx + 0.5, sy + 0.5, z)) * 0.25;
-  return 1.0 - u.shadow.w * (1.0 - lit);
+  return shadowAt(ndc, u.shadow.z, u.shadow2.x, 0.0, cosL);
 }
 
 // Analytic environment (Phase 3 IBL), mirroring environmentColor /
@@ -632,7 +653,7 @@ ${g.emis}
       amb = amb * textureLoad(ssaoMap, vec2<i32>(in.pos.xy), 0).r;
     }
     // The direct light is what a shadow occludes; ambient/IBL still fills it.
-    let sf = shadowFactor(in.lightClip, abs(dot(normalize(in.normal), u.light.xyz)));
+    let sf = shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)));
     let lc = i32(u.ssaoMeta.y + 0.5);
     var lit: vec3<f32>;
     if (lc > 0) {
@@ -641,14 +662,14 @@ ${g.emis}
       // shared N/ndv/f0/kdm/a2/k; point lights fall off to nothing at their range.
       var direct = vec3<f32>(0.0);
       // The global lights (the sun, unranged lights) reach every fragment…
-      let ng = i32(clusters.info.x + 0.5);
+      let ng = i32(frame.clusterInfo.x + 0.5);
       for (var i = 0; i < ng; i = i + 1) {
         direct = direct + lightTerm(lights[i], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
       }
       // …the rest only the cells they touch (EP8): this fragment's cell, by pixel and depth.
-      if (clusters.info.y > 0.5 && in.eyeDepth >= clusters.params.z) {
-        let tile = min(vec2<u32>(in.pos.xy / clusters.params.xy), vec2<u32>(${CLUSTER_X - 1}u, ${CLUSTER_Y - 1}u));
-        let slice = min(u32(log(in.eyeDepth / clusters.params.z) * clusters.params.w), ${CLUSTER_Z - 1}u);
+      if (frame.clusterInfo.y > 0.5 && in.eyeDepth >= frame.clusterParams.z) {
+        let tile = min(vec2<u32>(in.pos.xy / frame.clusterParams.xy), vec2<u32>(${CLUSTER_X - 1}u, ${CLUSTER_Y - 1}u));
+        let slice = min(u32(log(in.eyeDepth / frame.clusterParams.z) * frame.clusterParams.w), ${CLUSTER_Z - 1}u);
         let cell = clusterTable[(slice * ${CLUSTER_Y}u + tile.y) * ${CLUSTER_X}u + tile.x];
         for (var j = 0u; j < cell.y; j = j + 1u) {
           direct = direct + lightTerm(lights[clusterIndex[cell.x + j]], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
@@ -705,7 +726,7 @@ ${g.emis}
   // dots without normalising, and parity with it is the contract here. Both
   // therefore skew identically under non-uniform scale.
   let nl = abs(dot(in.normal, u.light.xyz));
-  let shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(in.lightClip, abs(dot(normalize(in.normal), u.light.xyz)));
+  let shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)));
   return finishAlpha(colour.rgb * shade, colour.a);
 }
 `;
@@ -766,6 +787,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    */
   private shadowTexture: any;
   private shadowMapSize = 0;
+  /** Maps side by side in the shadow texture: 1, or 2 with a near cascade (EP8b). */
+  private shadowCascades = 1;
+  /** The near cascade's depth array last uploaded in full (as shadowUploaded is the main map's). */
+  private nearUploaded: Float32Array | null = null;
 
   /**
    * The bound equirectangular environment map — the 1x1 blank (reusing the white
@@ -1011,7 +1036,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const clusterBuffers = {
         table: device.createBuffer({ size: CLUSTER_CELLS * 8, usage: 0x80 | 0x08 }), // STORAGE | COPY_DST
         index: device.createBuffer({ size: CLUSTER_INDEX_CAP * 4, usage: 0x80 | 0x08 }),
-        params: device.createBuffer({ size: 32, usage: 0x40 | 0x08 }), // UNIFORM | COPY_DST
+        params: device.createBuffer({ size: FRAME_BYTES, usage: 0x40 | 0x08 }), // UNIFORM | COPY_DST
       };
       const clusterEntries = [
         { binding: 1, resource: { buffer: clusterBuffers.table } },
@@ -1099,15 +1124,17 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    * size change and invalidating cached bind groups (binding 6 identity moved).
    * `size` 0 restores the 1x1 blank for a frame with no shadow.
    */
-  private ensureShadowTexture(size: number): void {
-    if (size === this.shadowMapSize) return;
+  private ensureShadowTexture(size: number, cascades = 1): void {
+    if (size === this.shadowMapSize && cascades === this.shadowCascades) return;
+    this.shadowCascades = cascades;
     this.shadowUploaded = null; // a new texture needs a full upload
+    this.nearUploaded = null;
     if (size === 0) {
       if (this.shadowTexture !== this.blankShadow) this.shadowTexture = this.blankShadow;
     } else {
       destroySafely(this.shadowMapSize > 0 ? this.shadowTexture : null);
       this.shadowTexture = this.device.createTexture({
-        size: { width: size, height: size },
+        size: { width: size * cascades, height: size },
         format: "r32float",
         usage: 0x04 | 0x02, // TEXTURE_BINDING | COPY_DST
       });
@@ -1209,7 +1236,27 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // the GPU samples the *same* depths the software path tests against. `size` 0
     // restores the blank when this frame casts no shadow.
     const shadow = draw.shadow ?? null;
-    this.ensureShadowTexture(shadow ? shadow.size : 0);
+    this.ensureShadowTexture(shadow ? shadow.size : 0, shadow?.near ? 2 : 1);
+    if (shadow?.near) {
+      // The near cascade (EP8b), to the right of the main map: its changed region, or all of it.
+      const near = shadow.near;
+      const dirty = near.dirty;
+      if (dirty && this.nearUploaded === near.depth) {
+        if (dirty.width > 0 && dirty.height > 0) {
+          this.device.queue.writeTexture(
+            { texture: this.shadowTexture, origin: { x: shadow.size + dirty.x, y: dirty.y } },
+            near.depth,
+            { offset: (dirty.y * shadow.size + dirty.x) * 4, bytesPerRow: shadow.size * 4, rowsPerImage: dirty.height },
+            { width: dirty.width, height: dirty.height },
+          );
+        }
+      } else {
+        this.device.queue.writeTexture({ texture: this.shadowTexture, origin: { x: shadow.size, y: 0 } }, near.depth, { bytesPerRow: shadow.size * 4, rowsPerImage: shadow.size }, { width: shadow.size, height: shadow.size });
+        this.nearUploaded = near.depth;
+      }
+    } else {
+      this.nearUploaded = null;
+    }
     if (shadow) {
       const dirty = shadow.dirty;
       if (dirty && this.shadowUploaded === shadow.depth) {
@@ -1416,11 +1463,15 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       this.device.queue.writeBuffer(buffers.table, 0, clusters.table);
       this.device.queue.writeBuffer(buffers.index, 0, clusters.indices, 0, Math.max(4, Math.ceil(clusters.used / 4) * 4));
     }
-    this.device.queue.writeBuffer(
-      buffers.params,
-      0,
-      new Float32Array([...(clusters?.params ?? [1, 1, 1, 1]), clusters ? globalCount : ordered.length, clusters ? 1 : 0, 0, 0]),
-    );
+    const near = draw.shadow?.near ?? null;
+    const frame = new Float32Array(FRAME_BYTES / 4);
+    frame.set(clusters?.params ?? [1, 1, 1, 1], 0);
+    frame.set([clusters ? globalCount : ordered.length, clusters ? 1 : 0], 4);
+    if (near) {
+      frame.set(near.lightViewProj, 8);
+      frame.set([1, near.bias, near.slopeBias], 24);
+    }
+    this.device.queue.writeBuffer(buffers.params, 0, frame);
     return { ordered, globalCount, clusters };
   }
 
