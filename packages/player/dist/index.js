@@ -2525,7 +2525,7 @@ var PostFxSurface = class _PostFxSurface {
 // src/quality.ts
 var QUALITY_LEVELS = ["low", "medium", "high"];
 var QUALITY_PRESETS = {
-  high: { level: "high", shadows: true, shadowMapSize: 1024, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1 },
+  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1 },
   medium: { level: "medium", shadows: true, shadowMapSize: 512, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6 },
   low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3 }
 };
@@ -8674,6 +8674,10 @@ function poseLocalMatrix(pose) {
   );
 }
 var AUTO_ORBIT_YAW_PER_FRAME = 2 * Math.PI / 720;
+var newShadowLayer = () => ({ staticDepth: null, key: "", lighting: null, matrix: null, depth: null, rects: [] });
+var NEAR_CASCADE_SHARE = 0.3;
+var NEAR_CASCADE_MIN = 4;
+var NEAR_CASCADE_MAX = 24;
 var AUTO_ORBIT_PITCH = 0.35;
 var MeshOverlaySurface = class _MeshOverlaySurface {
   constructor(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options = {}) {
@@ -8690,16 +8694,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.frame = 0;
     this.cartCamera = null;
     this.poses = [];
-    /** Shadow-map depth scratch, allocated once the first shadowed frame needs it. */
-    this.shadowDepth = null;
-    /** Cached shadow depth of everything not posed (see buildShadow), and what it was built for. */
-    this.staticShadow = null;
-    this.staticShadowKey = "";
-    this.staticShadowLighting = null;
-    /** The light's world→clip matrix of the cached static map (movers' footprints are projected with it). */
-    this.staticShadowMatrix = null;
-    /** Shadow-map rects last frame's movers drew into (restored from the static map next frame). */
-    this.shadowRects = [];
+    /** The sun's shadow maps (see buildShadow): the whole scene, and the near cascade round the camera (EP8b). */
+    this.farShadow = newShadowLayer();
+    this.nearShadow = newShadowLayer();
     /** Instances ever posed on the front layer (a held weapon): never part of the static shadow. */
     this.everFront = /* @__PURE__ */ new Set();
     /** Each mesh's local bounding box, for projecting shadow footprints. */
@@ -8888,17 +8885,16 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (moved) {
       this.unpooled = this.pooledRoot.some((r) => r >= 0) ? this.instances.filter((_, i) => this.pooledRoot[i] < 0) : this.instances;
       this.flat = null;
-      this.staticShadowKey = "";
+      this.farShadow.key = "";
+      this.nearShadow.key = "";
     }
     return true;
   }
   /** Apply a graphics quality preset (takes effect on the next frame). */
   setQuality(quality) {
     if (quality.shadowMapSize !== this.quality.shadowMapSize) {
-      this.staticShadow = null;
-      this.shadowDepth = null;
-      this.staticShadowKey = "";
-      this.shadowRects = [];
+      this.farShadow = newShadowLayer();
+      this.nearShadow = newShadowLayer();
     }
     this.quality = quality;
   }
@@ -9477,40 +9473,60 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const { center, radius } = this.scene.bounds;
     for (const i of this.withChildren(this.poses.filter((p) => p.front).map((p) => p.index))) this.everFront.add(i);
     const key = `${this.poses.filter((p) => !p.front).map((p) => p.index).sort((a, b) => a - b).join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}|${[...this.bodies.keys()].join(",")}|${[...this.live.keys()].join(",")}|${this.inactiveKey}`;
-    let full = false;
-    if (!this.staticShadow || this.staticShadowKey !== key || this.staticShadowLighting !== lighting) {
-      this.staticShadow ?? (this.staticShadow = new Float32Array(size * size));
+    const still = () => {
       const posed = this.withChildren([...this.poses.map((p) => p.index), ...this.bodies.keys(), ...this.live.keys()]);
       this.pooledRoot.forEach((root, i) => {
         if (root >= 0) posed.add(i);
       });
       const casts = (i) => !this.scene.instances[i]?.terrain || this.scene.instances[i]?.casts === true;
-      const still = this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && casts(i));
-      const extent = this.scene.extent;
-      const reach = extent && this.scene.instances.some((inst) => inst.casts) ? Math.max(0, extent.radius * 2 - radius * 2) : 0;
-      const built = buildSceneShadow(still, lighting, center, radius, { size, depth: this.staticShadow, reach });
+      return this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && casts(i));
+    };
+    const extent = this.scene.extent;
+    const reach = extent && this.scene.instances.some((inst) => inst.casts) ? Math.max(0, extent.radius * 2 - radius * 2) : 0;
+    const far = this.renderShadowLayer(this.farShadow, key, still, moved, lighting, center, radius, size, reach);
+    if (!far) return null;
+    let near = null;
+    const nearRadius = Math.min(NEAR_CASCADE_MAX, Math.max(NEAR_CASCADE_MIN, radius * NEAR_CASCADE_SHARE));
+    if (this.quality.shadowCascades && this.eye && nearRadius < radius * 0.7) {
+      const step = nearRadius / 2;
+      const c = [Math.round(this.eye[0] / step) * step, Math.round(this.eye[1] / step) * step, Math.round(this.eye[2] / step) * step];
+      const built = this.renderShadowLayer(this.nearShadow, `${key}|${c.join(",")}`, still, moved, lighting, c, nearRadius, size, Math.max(reach, radius * 2));
+      if (built) near = { lightViewProj: built.lightViewProj, depth: built.depth, bias: built.bias ?? 3e-3, slopeBias: built.slopeBias ?? 0, dirty: built.dirty };
+    }
+    return { ...far, near };
+  }
+  /**
+   * One shadow map for this frame: the layer's cached static depth (redrawn
+   * when `key` or the rig changes), copied, with this frame's movers drawn over
+   * it — and the texels that changed since last frame, for a GPU's partial upload.
+   */
+  renderShadowLayer(layer, key, still, moved, lighting, center, radius, size, reach) {
+    let full = false;
+    if (!layer.staticDepth || layer.key !== key || layer.lighting !== lighting) {
+      layer.staticDepth ?? (layer.staticDepth = new Float32Array(size * size));
+      const built = buildSceneShadow(still(), lighting, center, radius, { size, depth: layer.staticDepth, reach });
       if (!built) return null;
-      this.staticShadowMatrix = built.lightViewProj;
-      this.staticShadowKey = key;
-      this.staticShadowLighting = lighting;
+      layer.matrix = built.lightViewProj;
+      layer.key = key;
+      layer.lighting = lighting;
       full = true;
     }
-    const base = this.staticShadow;
-    if (full || !this.shadowDepth) {
-      this.shadowDepth ?? (this.shadowDepth = new Float32Array(size * size));
-      this.shadowDepth.set(base);
+    const base = layer.staticDepth;
+    if (full || !layer.depth) {
+      layer.depth ?? (layer.depth = new Float32Array(size * size));
+      layer.depth.set(base);
       full = true;
     } else {
-      for (const r of this.shadowRects) {
-        for (let y = r.y0; y < r.y1; y += 1) this.shadowDepth.set(base.subarray(y * size + r.x0, y * size + r.x1), y * size + r.x0);
+      for (const r of layer.rects) {
+        for (let y = r.y0; y < r.y1; y += 1) layer.depth.set(base.subarray(y * size + r.x0, y * size + r.x1), y * size + r.x0);
       }
     }
-    const rects = moved.map((instance) => this.shadowFootprint(instance, size)).filter((r) => r !== null);
-    const result = buildSceneShadow(moved, lighting, center, radius, { size, depth: this.shadowDepth, clear: false });
+    const rects = moved.map((instance) => this.shadowFootprint(instance, size, layer.matrix)).filter((r) => r !== null);
+    const result = buildSceneShadow(moved, lighting, center, radius, { size, depth: layer.depth, clear: false, reach });
     if (!result) return null;
     let dirty = null;
     if (!full) {
-      const all = [...this.shadowRects, ...rects];
+      const all = [...layer.rects, ...rects];
       if (all.length === 0) dirty = { x: 0, y: 0, width: 0, height: 0 };
       else {
         const x0 = Math.min(...all.map((r) => r.x0));
@@ -9518,15 +9534,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         dirty = { x: x0, y: y0, width: Math.max(...all.map((r) => r.x1)) - x0, height: Math.max(...all.map((r) => r.y1)) - y0 };
       }
     }
-    this.shadowRects = rects;
+    layer.rects = rects;
     return { ...result, dirty };
   }
   /**
    * The shadow-map texels an instance can cover: its bounding box through the
    * light's (orthographic) projection, padded for filtering and rounding.
    */
-  shadowFootprint(instance, size) {
-    const m = this.staticShadowMatrix;
+  shadowFootprint(instance, size, m) {
     if (!m) return null;
     let b = instance.mesh.primitives.some((p) => p.dynamic) ? void 0 : this.meshBounds.get(instance.mesh);
     if (!b) {
@@ -10154,6 +10169,7 @@ import {
   cameraPositionFromView as cameraPositionFromView2,
   compiledGraphOf,
   computeSmoothNormals,
+  NEAR_CASCADE_EDGE,
   CLUSTER_INDEX_CAP,
   CLUSTER_X,
   CLUSTER_Y,
@@ -10950,36 +10966,52 @@ vec4 sampleMap(sampler2D s, vec2 uv) {
 #endif
 }
 
-float shadowTap(float fx, float fy, float z) {
+float shadowTap(float fx, float fy, float z, float ox) {
   float size = u.shadow.y;
-  int tx = int(clamp(floor(fx), 0.0, size - 1.0));
+  int tx = int(clamp(floor(fx), 0.0, size - 1.0) + ox);
   int ty = int(clamp(floor(fy), 0.0, size - 1.0));
   float stored = texelFetch(shadowMap, ivec2(tx, ty), 0).r;
   if (z > stored) { return 0.0; }
   return 1.0;
 }
-float shadowFactor(vec4 lightClip, float cosL) {
+// One shadow map's test at a light-NDC point: the main map (ox 0) or the near
+// cascade packed to its right (ox = size), with its own biases.
+float shadowAt(vec3 ndc, float bias0, float slope, float ox, float cosL) {
+  float size = u.shadow.y;
+  float sx = (ndc.x * 0.5 + 0.5) * size;
+  float sy = (1.0 - (ndc.y * 0.5 + 0.5)) * size;
+  float bias = bias0;
+  if (slope > 0.0) {
+    float c = clamp(cosL, 0.05, 1.0);
+    bias = bias + slope * min(10.0, sqrt(1.0 - c * c) / c);
+  }
+  float z = ndc.z - bias;
+  if (u.shadow2.y < 0.5) {
+    if (shadowTap(sx, sy, z, ox) < 0.5) { return 1.0 - u.shadow.w; }
+    return 1.0;
+  }
+  float lit = (shadowTap(sx - 0.5, sy - 0.5, z, ox) + shadowTap(sx + 0.5, sy - 0.5, z, ox)
+             + shadowTap(sx - 0.5, sy + 0.5, z, ox) + shadowTap(sx + 0.5, sy + 0.5, z, ox)) * 0.25;
+  return 1.0 - u.shadow.w * (1.0 - lit);
+}
+// The near shadow cascade (EP8b): world\u2192light-clip, and (1 when present, bias, slope bias).
+uniform mat4 nearShadowMvp;
+uniform vec4 nearShadow;
+// The sun's shadow (mirrors sunShadowVisibility): the near cascade when the
+// point sits well inside it, else the main map.
+float shadowFactor(vec4 lightClip, vec3 worldPos, float cosL) {
   if (u.shadow.x < 0.5) { return 1.0; }
+  if (nearShadow.x > 0.5) {
+    vec3 n = (nearShadowMvp * vec4(worldPos, 1.0)).xyz;
+    if (abs(n.x) < ${NEAR_CASCADE_EDGE} && abs(n.y) < ${NEAR_CASCADE_EDGE} && abs(n.z) <= 1.0) {
+      return shadowAt(n, nearShadow.y, nearShadow.z, u.shadow.y, cosL);
+    }
+  }
   vec3 ndc = lightClip.xyz / lightClip.w;
   if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < -1.0 || ndc.z > 1.0) {
     return 1.0;
   }
-  float size = u.shadow.y;
-  float sx = (ndc.x * 0.5 + 0.5) * size;
-  float sy = (1.0 - (ndc.y * 0.5 + 0.5)) * size;
-  float bias = u.shadow.z;
-  if (u.shadow2.x > 0.0) {
-    float c = clamp(cosL, 0.05, 1.0);
-    bias = bias + u.shadow2.x * min(10.0, sqrt(1.0 - c * c) / c);
-  }
-  float z = ndc.z - bias;
-  if (u.shadow2.y < 0.5) {
-    if (shadowTap(sx, sy, z) < 0.5) { return 1.0 - u.shadow.w; }
-    return 1.0;
-  }
-  float lit = (shadowTap(sx - 0.5, sy - 0.5, z) + shadowTap(sx + 0.5, sy - 0.5, z)
-             + shadowTap(sx - 0.5, sy + 0.5, z) + shadowTap(sx + 0.5, sy + 0.5, z)) * 0.25;
-  return 1.0 - u.shadow.w * (1.0 - lit);
+  return shadowAt(ndc, u.shadow.z, u.shadow2.x, 0.0, cosL);
 }
 vec3 envGradient(float y) {
   float t = clamp(y, -1.0, 1.0);
@@ -11185,7 +11217,7 @@ ${g.emis}
     if (u.ssaoMeta.x > 0.5) {
       amb = amb * texelFetch(ssaoMap, ivec2(gl_FragCoord.xy), 0).r;
     }
-    float sf = shadowFactor(vLightClip, abs(dot(normalize(vNormal), u.light.xyz)));
+    float sf = shadowFactor(vLightClip, vWorldPos, abs(dot(normalize(vNormal), u.light.xyz)));
     int lc = int(u.ssaoMeta.y + 0.5);
     vec3 lit;
     if (lc > 0) {
@@ -11251,7 +11283,7 @@ ${g.emis}
 
   // Fantasy path: two-sided Lambert on the un-renormalised normal, as the software rasteriser does.
   float nl = abs(dot(vNormal, u.light.xyz));
-  float shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(vLightClip, abs(dot(normalize(vNormal), u.light.xyz)));
+  float shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(vLightClip, vWorldPos, abs(dot(normalize(vNormal), u.light.xyz)));
   outColor = finishAlpha(colour.rgb * shade, colour.a);
 }
 `
@@ -11349,6 +11381,12 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     /** The clustered lights' params and info this frame (EP8; see the shader's clusterParams/clusterInfo). */
     this.clusterParams = new Float32Array(4);
     this.clusterInfo = new Float32Array(4);
+    /** The near shadow cascade this frame (EP8b; see the shader's nearShadowMvp/nearShadow). */
+    this.nearShadowMvp = new Float32Array(16);
+    this.nearShadow = new Float32Array(4);
+    /** Maps side by side in the shadow texture (2 with a near cascade), and the near map last uploaded in full. */
+    this.shadowCascades = 1;
+    this.nearUploaded = null;
     /** The cell table and index list as integer textures, made on first use. */
     this.clusterTextures = null;
     /** Programs by material graph (EP7), linked on first use. */
@@ -11476,6 +11514,9 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     const eye = cameraPositionFromView2(draw.view);
     const shadow = draw.shadow ?? null;
     this.uploadShadow(shadow);
+    const near = shadow?.near ?? null;
+    if (near) this.nearShadowMvp.set(near.lightViewProj);
+    this.nearShadow.set(near ? [1, near.bias, near.slopeBias, 0] : [0, 0, 0, 0]);
     const shadowParams = shadow ? { size: shadow.size, bias: shadow.bias ?? 3e-3, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false } : null;
     this.uploadEnv(draw.environment?.map ?? null);
     this.uploadProbes(draw.environment?.probes ?? null);
@@ -11644,6 +11685,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     gl.uniform4fv(gl.getUniformLocation(program, "probeData"), this.probeData);
     gl.uniform4fv(gl.getUniformLocation(program, "clusterParams"), this.clusterParams);
     gl.uniform4fv(gl.getUniformLocation(program, "clusterInfo"), this.clusterInfo);
+    gl.uniformMatrix4fv(gl.getUniformLocation(program, "nearShadowMvp"), false, this.nearShadowMvp);
+    gl.uniform4fv(gl.getUniformLocation(program, "nearShadow"), this.nearShadow);
   }
   /** Upload a frame's cells (only the index rows in use), and bind both textures. */
   uploadClusters(clusters) {
@@ -11742,11 +11785,14 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
   uploadShadow(shadow) {
     const gl = this.gl;
     if (!shadow) return;
-    if (shadow.size !== this.shadowSize || !this.shadowTexture) {
+    const cascades = shadow.near ? 2 : 1;
+    if (shadow.size !== this.shadowSize || cascades !== this.shadowCascades || !this.shadowTexture) {
       if (this.shadowTexture) gl.deleteTexture(this.shadowTexture);
-      this.shadowTexture = createTexture(gl, shadow.size, shadow.size, gl.R32F, gl.RED, gl.FLOAT, null);
+      this.shadowTexture = createTexture(gl, shadow.size * cascades, shadow.size, gl.R32F, gl.RED, gl.FLOAT, null);
       this.shadowSize = shadow.size;
+      this.shadowCascades = cascades;
       this.shadowUploaded = null;
+      this.nearUploaded = null;
     }
     gl.bindTexture(gl.TEXTURE_2D, this.shadowTexture);
     const dirty = shadow.dirty;
@@ -11763,6 +11809,24 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     } else {
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, shadow.size, shadow.size, gl.RED, gl.FLOAT, shadow.depth);
       this.shadowUploaded = shadow.depth;
+    }
+    const near = shadow.near;
+    if (near) {
+      const nd = near.dirty;
+      if (nd && this.nearUploaded === near.depth) {
+        if (nd.width > 0 && nd.height > 0) {
+          gl.pixelStorei(gl.UNPACK_ROW_LENGTH, shadow.size);
+          gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, nd.x);
+          gl.pixelStorei(gl.UNPACK_SKIP_ROWS, nd.y);
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, shadow.size + nd.x, nd.y, nd.width, nd.height, gl.RED, gl.FLOAT, near.depth);
+          gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+          gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
+          gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
+        }
+      } else {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, shadow.size, 0, shadow.size, shadow.size, gl.RED, gl.FLOAT, near.depth);
+        this.nearUploaded = near.depth;
+      }
     }
   }
   uploadEnv(map) {
@@ -11900,6 +11964,7 @@ import {
   cameraPositionFromView as cameraPositionFromView3,
   compiledGraphOf as compiledGraphOf2,
   computeSmoothNormals as computeSmoothNormals2,
+  NEAR_CASCADE_EDGE as NEAR_CASCADE_EDGE2,
   CLUSTER_CELLS,
   CLUSTER_INDEX_CAP as CLUSTER_INDEX_CAP2,
   CLUSTER_X as CLUSTER_X2,
@@ -11912,6 +11977,7 @@ import {
   graphUsesNoise as graphUsesNoise2,
   multiplyMat4 as multiplyMat45
 } from "@cartbox/editor";
+var FRAME_BYTES = 112;
 var READBACK_BUFFERS2 = 3;
 var SHADER_STAGE_VERTEX = 1;
 var SHADER_STAGE_FRAGMENT = 2;
@@ -11998,11 +12064,15 @@ struct Light {
   d2: vec4<f32>,
   d3: vec4<f32>,
 };
-// Clustered lights (EP8): params = tile size (px), near plane, slice scale;
-// info.x = global lights (looped by every fragment), info.y = 1 when cells are built.
-struct Clusters {
-  params: vec4<f32>,
-  info: vec4<f32>,
+// Per-frame globals. Clustered lights (EP8): clusterParams = tile size (px),
+// near plane, slice scale; clusterInfo.x = global lights (looped by every
+// fragment), .y = 1 when cells are built. The near shadow cascade (EP8b):
+// world\u2192light-clip, and nearShadow = (1 when present, bias, slope bias).
+struct Frame {
+  clusterParams: vec4<f32>,
+  clusterInfo: vec4<f32>,
+  nearMvp: mat4x4<f32>,
+  nearShadow: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
@@ -12058,7 +12128,7 @@ struct Probe {
 // Clustered lights (EP8): per cell (offset, count) into the index list.
 @group(1) @binding(1) var<storage, read> clusterTable: array<vec2<u32>>;
 @group(1) @binding(2) var<storage, read> clusterIndex: array<u32>;
-@group(1) @binding(3) var<uniform> clusters: Clusters;
+@group(1) @binding(3) var<uniform> frame: Frame;
 
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] \u2014 fogLayerDepth in skyDome.ts.
@@ -12116,9 +12186,9 @@ struct VSOut {
 // Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
 // project into the light's frame, look up the nearest depth the light sees, and
 // return 1 (lit) or 1\u2212strength (occluded). The light is orthographic (w = 1).
-fn shadowTap(fx: f32, fy: f32, z: f32) -> f32 {
+fn shadowTap(fx: f32, fy: f32, z: f32, ox: f32) -> f32 {
   let size = u.shadow.y;
-  let tx = i32(clamp(floor(fx), 0.0, size - 1.0));
+  let tx = i32(clamp(floor(fx), 0.0, size - 1.0) + ox);
   let ty = i32(clamp(floor(fy), 0.0, size - 1.0));
   let stored = textureLoad(shadowMap, vec2<i32>(tx, ty), 0).r;
   if (z > stored) { return 0.0; }
@@ -12126,28 +12196,41 @@ fn shadowTap(fx: f32, fy: f32, z: f32) -> f32 {
 }
 // cosL = |N.L| of the geometric normal against the key light, for the slope bias.
 // Mirrors shadowVisibility in meshRasterizer.ts.
-fn shadowFactor(lightClip: vec4<f32>, cosL: f32) -> f32 {
+// One shadow map's test at a light-NDC point: the main map (ox 0) or the near
+// cascade packed to its right (ox = size), with its own biases.
+fn shadowAt(ndc: vec3<f32>, bias0: f32, slope: f32, ox: f32, cosL: f32) -> f32 {
+  let size = u.shadow.y;
+  let sx = (ndc.x * 0.5 + 0.5) * size;
+  let sy = (1.0 - (ndc.y * 0.5 + 0.5)) * size;
+  var bias = bias0;
+  if (slope > 0.0) {
+    let c = clamp(cosL, 0.05, 1.0);
+    bias = bias + slope * min(10.0, sqrt(1.0 - c * c) / c);
+  }
+  let z = ndc.z - bias;
+  if (u.shadow2.y < 0.5) {
+    if (shadowTap(sx, sy, z, ox) < 0.5) { return 1.0 - u.shadow.w; }
+    return 1.0;
+  }
+  let lit = (shadowTap(sx - 0.5, sy - 0.5, z, ox) + shadowTap(sx + 0.5, sy - 0.5, z, ox)
+           + shadowTap(sx - 0.5, sy + 0.5, z, ox) + shadowTap(sx + 0.5, sy + 0.5, z, ox)) * 0.25;
+  return 1.0 - u.shadow.w * (1.0 - lit);
+}
+// The sun's shadow (mirrors sunShadowVisibility): the near cascade (EP8b) when
+// the point sits well inside it, else the main map.
+fn shadowFactor(lightClip: vec4<f32>, worldPos: vec3<f32>, cosL: f32) -> f32 {
   if (u.shadow.x < 0.5) { return 1.0; }
+  if (frame.nearShadow.x > 0.5) {
+    let n = (frame.nearMvp * vec4<f32>(worldPos, 1.0)).xyz;
+    if (abs(n.x) < ${NEAR_CASCADE_EDGE2} && abs(n.y) < ${NEAR_CASCADE_EDGE2} && abs(n.z) <= 1.0) {
+      return shadowAt(n, frame.nearShadow.y, frame.nearShadow.z, u.shadow.y, cosL);
+    }
+  }
   let ndc = lightClip.xyz / lightClip.w;
   if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < -1.0 || ndc.z > 1.0) {
     return 1.0;
   }
-  let size = u.shadow.y;
-  let sx = (ndc.x * 0.5 + 0.5) * size;
-  let sy = (1.0 - (ndc.y * 0.5 + 0.5)) * size;
-  var bias = u.shadow.z;
-  if (u.shadow2.x > 0.0) {
-    let c = clamp(cosL, 0.05, 1.0);
-    bias = bias + u.shadow2.x * min(10.0, sqrt(1.0 - c * c) / c);
-  }
-  let z = ndc.z - bias;
-  if (u.shadow2.y < 0.5) {
-    if (shadowTap(sx, sy, z) < 0.5) { return 1.0 - u.shadow.w; }
-    return 1.0;
-  }
-  let lit = (shadowTap(sx - 0.5, sy - 0.5, z) + shadowTap(sx + 0.5, sy - 0.5, z)
-           + shadowTap(sx - 0.5, sy + 0.5, z) + shadowTap(sx + 0.5, sy + 0.5, z)) * 0.25;
-  return 1.0 - u.shadow.w * (1.0 - lit);
+  return shadowAt(ndc, u.shadow.z, u.shadow2.x, 0.0, cosL);
 }
 
 // Analytic environment (Phase 3 IBL), mirroring environmentColor /
@@ -12406,7 +12489,7 @@ ${g.emis}
       amb = amb * textureLoad(ssaoMap, vec2<i32>(in.pos.xy), 0).r;
     }
     // The direct light is what a shadow occludes; ambient/IBL still fills it.
-    let sf = shadowFactor(in.lightClip, abs(dot(normalize(in.normal), u.light.xyz)));
+    let sf = shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)));
     let lc = i32(u.ssaoMeta.y + 0.5);
     var lit: vec3<f32>;
     if (lc > 0) {
@@ -12415,14 +12498,14 @@ ${g.emis}
       // shared N/ndv/f0/kdm/a2/k; point lights fall off to nothing at their range.
       var direct = vec3<f32>(0.0);
       // The global lights (the sun, unranged lights) reach every fragment\u2026
-      let ng = i32(clusters.info.x + 0.5);
+      let ng = i32(frame.clusterInfo.x + 0.5);
       for (var i = 0; i < ng; i = i + 1) {
         direct = direct + lightTerm(lights[i], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
       }
       // \u2026the rest only the cells they touch (EP8): this fragment's cell, by pixel and depth.
-      if (clusters.info.y > 0.5 && in.eyeDepth >= clusters.params.z) {
-        let tile = min(vec2<u32>(in.pos.xy / clusters.params.xy), vec2<u32>(${CLUSTER_X2 - 1}u, ${CLUSTER_Y2 - 1}u));
-        let slice = min(u32(log(in.eyeDepth / clusters.params.z) * clusters.params.w), ${CLUSTER_Z2 - 1}u);
+      if (frame.clusterInfo.y > 0.5 && in.eyeDepth >= frame.clusterParams.z) {
+        let tile = min(vec2<u32>(in.pos.xy / frame.clusterParams.xy), vec2<u32>(${CLUSTER_X2 - 1}u, ${CLUSTER_Y2 - 1}u));
+        let slice = min(u32(log(in.eyeDepth / frame.clusterParams.z) * frame.clusterParams.w), ${CLUSTER_Z2 - 1}u);
         let cell = clusterTable[(slice * ${CLUSTER_Y2}u + tile.y) * ${CLUSTER_X2}u + tile.x];
         for (var j = 0u; j < cell.y; j = j + 1u) {
           direct = direct + lightTerm(lights[clusterIndex[cell.x + j]], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
@@ -12479,7 +12562,7 @@ ${g.emis}
   // dots without normalising, and parity with it is the contract here. Both
   // therefore skew identically under non-uniform scale.
   let nl = abs(dot(in.normal, u.light.xyz));
-  let shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(in.lightClip, abs(dot(normalize(in.normal), u.light.xyz)));
+  let shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)));
   return finishAlpha(colour.rgb * shade, colour.a);
 }
 `
@@ -12521,6 +12604,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.uniformData = new Float32Array(0);
     this.destroyed = false;
     this.shadowMapSize = 0;
+    /** Maps side by side in the shadow texture: 1, or 2 with a near cascade (EP8b). */
+    this.shadowCascades = 1;
+    /** The near cascade's depth array last uploaded in full (as shadowUploaded is the main map's). */
+    this.nearUploaded = null;
     this.envMapSource = null;
     /** The SSAO buffer: a lazily-created width×height r32float upload target, and
      *  what binding 8 currently references (that upload, or the 1x1 blank). */
@@ -12709,7 +12796,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         table: device.createBuffer({ size: CLUSTER_CELLS * 8, usage: 128 | 8 }),
         // STORAGE | COPY_DST
         index: device.createBuffer({ size: CLUSTER_INDEX_CAP2 * 4, usage: 128 | 8 }),
-        params: device.createBuffer({ size: 32, usage: 64 | 8 })
+        params: device.createBuffer({ size: FRAME_BYTES, usage: 64 | 8 })
         // UNIFORM | COPY_DST
       };
       const clusterEntries = [
@@ -12789,15 +12876,17 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
    * size change and invalidating cached bind groups (binding 6 identity moved).
    * `size` 0 restores the 1x1 blank for a frame with no shadow.
    */
-  ensureShadowTexture(size) {
-    if (size === this.shadowMapSize) return;
+  ensureShadowTexture(size, cascades = 1) {
+    if (size === this.shadowMapSize && cascades === this.shadowCascades) return;
+    this.shadowCascades = cascades;
     this.shadowUploaded = null;
+    this.nearUploaded = null;
     if (size === 0) {
       if (this.shadowTexture !== this.blankShadow) this.shadowTexture = this.blankShadow;
     } else {
       destroySafely(this.shadowMapSize > 0 ? this.shadowTexture : null);
       this.shadowTexture = this.device.createTexture({
-        size: { width: size, height: size },
+        size: { width: size * cascades, height: size },
         format: "r32float",
         usage: 4 | 2
         // TEXTURE_BINDING | COPY_DST
@@ -12875,7 +12964,26 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const viewDir = viewDirection(draw.view);
     const eye = cameraPositionFromView3(draw.view);
     const shadow = draw.shadow ?? null;
-    this.ensureShadowTexture(shadow ? shadow.size : 0);
+    this.ensureShadowTexture(shadow ? shadow.size : 0, shadow?.near ? 2 : 1);
+    if (shadow?.near) {
+      const near = shadow.near;
+      const dirty = near.dirty;
+      if (dirty && this.nearUploaded === near.depth) {
+        if (dirty.width > 0 && dirty.height > 0) {
+          this.device.queue.writeTexture(
+            { texture: this.shadowTexture, origin: { x: shadow.size + dirty.x, y: dirty.y } },
+            near.depth,
+            { offset: (dirty.y * shadow.size + dirty.x) * 4, bytesPerRow: shadow.size * 4, rowsPerImage: dirty.height },
+            { width: dirty.width, height: dirty.height }
+          );
+        }
+      } else {
+        this.device.queue.writeTexture({ texture: this.shadowTexture, origin: { x: shadow.size, y: 0 } }, near.depth, { bytesPerRow: shadow.size * 4, rowsPerImage: shadow.size }, { width: shadow.size, height: shadow.size });
+        this.nearUploaded = near.depth;
+      }
+    } else {
+      this.nearUploaded = null;
+    }
     if (shadow) {
       const dirty = shadow.dirty;
       if (dirty && this.shadowUploaded === shadow.depth) {
@@ -13054,11 +13162,15 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       this.device.queue.writeBuffer(buffers.table, 0, clusters.table);
       this.device.queue.writeBuffer(buffers.index, 0, clusters.indices, 0, Math.max(4, Math.ceil(clusters.used / 4) * 4));
     }
-    this.device.queue.writeBuffer(
-      buffers.params,
-      0,
-      new Float32Array([...clusters?.params ?? [1, 1, 1, 1], clusters ? globalCount : ordered.length, clusters ? 1 : 0, 0, 0])
-    );
+    const near = draw.shadow?.near ?? null;
+    const frame = new Float32Array(FRAME_BYTES / 4);
+    frame.set(clusters?.params ?? [1, 1, 1, 1], 0);
+    frame.set([clusters ? globalCount : ordered.length, clusters ? 1 : 0], 4);
+    if (near) {
+      frame.set(near.lightViewProj, 8);
+      frame.set([1, near.bias, near.slopeBias], 24);
+    }
+    this.device.queue.writeBuffer(buffers.params, 0, frame);
     return { ordered, globalCount, clusters };
   }
   /** Await one readback and publish it as the newest frame. */
