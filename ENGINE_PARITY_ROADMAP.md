@@ -227,10 +227,39 @@ preview.
         a line.
       - **Material editor:** a Soft edge slider for see-through and additive
         materials. The Water preset fades out at the shore.
-- [ ] **EP7. Material graph.** A node-based material editor (textures, maths,
+- [x] **EP7. Material graph.** A node-based material editor (textures, maths,
       time, UVs, fresnel, noise) feeding the PBR inputs, compiled to WGSL and
       GLSL and interpreted on the CPU, as Unity's Shader Graph and Unreal's
       Material Editor do.
+
+      *Done:*
+      - **The graph:** a material can carry a graph of 35 kinds of node:
+        - surface inputs: UV, world position, normal, view direction, time,
+          and the material's own colour and alpha;
+        - patterns: texture, value noise with octaves, fresnel;
+        - maths: arithmetic, mix, clamp, step/smoothstep, trig, dot, length,
+          split and combine.
+
+        It is wired into base colour, alpha, emissive, metallic and
+        roughness. It's stored with the mesh, validated on load, and a
+        material with a graph always takes the PBR path.
+      - **One graph, three runs:** the compiler orders the graph into
+        straight-line steps, dropping loops and unreachable nodes. The
+        software rasteriser interprets the steps per pixel. WebGPU and WebGL2
+        splice them into their fragment shaders, with one cached
+        pipeline/program variant per distinct graph. The noise hashes with
+        integer maths, so all three agree. Parity tests hold the GPUs to the
+        software picture.
+      - **The node editor:** opened from the material panel ("Material
+        graph…"):
+        - a palette and starter graphs (flowing energy, marble, fresnel glow,
+          dissolve, scrolling texture);
+        - drag-to-wire, with wires that would loop refused;
+        - params edited on each node;
+        - pan and zoom, opening fitted to the graph;
+        - a live preview sphere.
+      - **Lockout:** the energy trim and weapon markers run on a graph. Bands
+        of light flow diagonally across the arena over the trim's slow breath.
 - [ ] **EP8. Shadows and many lights.** Cascaded sun shadows, spot lights,
       shadows from spot and point lights, and clustered light culling so a
       scene can hold dozens of lights.

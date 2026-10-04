@@ -28,7 +28,9 @@ import {
   type MeshMaterial,
 } from "@cartbox/editor";
 
+import { starterGraph } from "@/lib/materialGraphEdit";
 import styles from "./editor.module.css";
+import { GraphEditor } from "./GraphEditor";
 import { RailGroup, RailHint, RangeControl, SegmentedControl } from "./railControls";
 
 interface MaterialEditorProps {
@@ -53,6 +55,7 @@ function fromHex(hex: string): [number, number, number] {
 
 export function MaterialEditor({ mesh, onChange }: MaterialEditorProps) {
   const [primitiveIndex, setPrimitiveIndex] = useState(0);
+  const [graphOpen, setGraphOpen] = useState(false);
   const index = primitiveIndex < mesh.primitives.length ? primitiveIndex : 0;
   const primitive = mesh.primitives[index];
   if (!primitive) return null;
@@ -75,6 +78,31 @@ export function MaterialEditor({ mesh, onChange }: MaterialEditorProps) {
           selected={index}
           onSelect={setPrimitiveIndex}
           options={mesh.primitives.map((p, i) => ({ id: i, label: p.material.name || `#${i + 1}`, hint: p.material.name }))}
+        />
+      )}
+
+      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+        <button
+          type="button"
+          className={styles.toolBtn}
+          title="Build this material from nodes: textures, maths, time, UVs, fresnel and noise wired into its colour, alpha, glow, metalness and roughness"
+          onClick={() => {
+            if (!material.graph) patch({ graph: starterGraph() });
+            setGraphOpen(true);
+          }}
+        >
+          {material.graph ? "◇ Edit graph…" : "◇ Material graph…"}
+        </button>
+        {material.graph && <span className={styles.hudLabel}>a graph drives {Object.keys(material.graph.outputs).length || "none"} of its inputs</span>}
+      </div>
+      {graphOpen && material.graph && (
+        <GraphEditor
+          material={material}
+          onChange={(graph) => {
+            patch({ graph });
+            if (!graph) setGraphOpen(false);
+          }}
+          onClose={() => setGraphOpen(false)}
         />
       )}
 

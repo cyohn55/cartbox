@@ -257,6 +257,8 @@ export interface PbrMaterial {
   readonly metallicFactor?: number;
   readonly roughnessFactor?: number;
   readonly emissiveFactor?: readonly [number, number, number];
+  /** A material graph (EP7) always takes the PBR path. */
+  readonly graph?: unknown;
 }
 
 /**
@@ -278,7 +280,8 @@ export function resolvePbr(
     hasEmis ||
     material.metallicFactor !== undefined ||
     material.roughnessFactor !== undefined ||
-    (emissiveFactor !== undefined && (emissiveFactor[0]! > 0 || emissiveFactor[1]! > 0 || emissiveFactor[2]! > 0));
+    (emissiveFactor !== undefined && (emissiveFactor[0]! > 0 || emissiveFactor[1]! > 0 || emissiveFactor[2]! > 0)) ||
+    material.graph !== undefined;
   return {
     isPbr,
     metallic: material.metallicFactor ?? 1,

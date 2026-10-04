@@ -45,8 +45,13 @@ import {
   EFFECT_BAND_SPEED,
   EFFECT_CAMO_CRAWL,
   cameraPositionFromView,
+  compiledGraphOf,
   computeSmoothNormals,
+  graphNoiseSource,
+  graphShaderCode,
+  graphUsesNoise,
   multiplyMat4,
+  type CompiledGraph,
   type DecodedTexture,
   type MeshAsset,
   type MeshSceneInstance,
@@ -179,7 +184,51 @@ void main() {
 }
 `;
 
-const fragmentShader = (nearest: boolean) => /* glsl */ `#version 300 es
+/**
+ * A material graph's code (EP7) at its three sites in the fragment shader —
+ * mirroring graphSites in WebgpuSceneRenderer.ts. Empty for the plain shader.
+ */
+function graphSites(graph: CompiledGraph | null): { fns: string; base: string; pbr: string; emis: string } {
+  if (!graph) return { fns: "", base: "", pbr: "", emis: "" };
+  const out = graph.outputs;
+  const code = graphShaderCode(graph, "glsl", {
+    uv: "vUv",
+    position: "vWorldPos",
+    normal: "gN",
+    view: "u.view.xyz",
+    time: "u.effect1.w",
+    baseColor: "colour.rgb",
+    baseAlpha: "colour.a",
+    sample: (p) => `sampleMap(tex, vec2((${p}).x, 1.0 - (${p}).y))`,
+  });
+  const set = [
+    out.baseColor !== undefined ? `colour = vec4(g${out.baseColor}, colour.a);` : "",
+    out.alpha !== undefined ? `colour.a = clamp(g${out.alpha}.x, 0.0, 1.0);` : "",
+    out.metallic !== undefined ? `gMetal = clamp(g${out.metallic}.x, 0.0, 1.0);` : "",
+    out.roughness !== undefined ? `gRough = g${out.roughness}.x;` : "",
+    out.emissive !== undefined ? `gEmis = max(g${out.emissive}, vec3(0.0));` : "",
+  ].filter(Boolean);
+  return {
+    fns: graphUsesNoise(graph) ? graphNoiseSource("glsl") : "",
+    base: `  // The material graph (EP7).
+  float gMetal = -1.0;
+  float gRough = -1.0;
+  vec3 gEmis = vec3(-1.0);
+  {
+    vec3 gN = normalize(vNormal);
+    if (dot(gN, u.view.xyz) < 0.0) { gN = -gN; }
+${code.split("\n").map((l) => `    ${l}`).join("\n")}
+${set.map((l) => `    ${l}`).join("\n")}
+  }`,
+    pbr: `    if (gMetal >= 0.0) { metallic = gMetal; }
+    if (gRough >= 0.0) { rough = gRough; }`,
+    emis: `    if (gEmis.x >= 0.0) { emis = gEmis; }`,
+  };
+}
+
+const fragmentShader = (nearest: boolean, graph: CompiledGraph | null = null) => {
+  const g = graphSites(graph);
+  return /* glsl */ `#version 300 es
 precision highp float;
 precision highp int;
 #define NEAREST ${nearest ? 1 : 0}
@@ -357,12 +406,14 @@ float aces(float x) {
   return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), 0.0, 1.0);
 }
 
+${g.fns}
 void main() {
   vec2 uv = vec2(vUv.x, 1.0 - vUv.y);
   vec4 colour = u.base;
   if (u.texflags.x > 0.5) {
     colour = colour * sampleMap(tex, uv);
   }
+${g.base}
   // Soft edges (EP6b): a see-through surface fades out as it meets the opaque
   // scene behind it — both depths read back as view distance (shadow2.zw).
   if (u.tonemap.z > 0.0) {
@@ -389,6 +440,7 @@ void main() {
       if (u.surface0.w > 0.5) { reflectK = reflectK * mr.a; }
     }
     if (u.surface1.z > 0.5 && u.surface3.w >= 0.0) { rough = mix(rough, u.surface3.w, vBw); }
+${g.pbr}
     rough = clamp(rough, 0.045, 1.0);
     float ao = 1.0;
     if (u.texflags.z > 0.5) { ao = sampleMap(occTex, uv).r; }
@@ -427,6 +479,7 @@ void main() {
       if (u.texflags.w > 0.5) { es = sampleMap(emisTex, vec2(vUv.x + u.surface1.x, 1.0 - (vUv.y + u.surface1.y))).rgb; }
       emis = ef * es;
     }
+${g.emis}
     vec3 amb;
     if (u.envSky.w > 0.5) {
       vec3 irr = envColorDir(N);
@@ -547,6 +600,7 @@ void main() {
   outColor = finishAlpha(colour.rgb * shade, colour.a);
 }
 `;
+};
 
 interface GlPrimitive {
   vao: any;
@@ -561,6 +615,38 @@ interface ReadbackSlot {
   fence: any;
   /** Which submitted frame it holds. */
   seq: number;
+}
+
+/**
+ * Compile and link the scene program — plain, or with a material graph spliced
+ * into its fragment shader (EP7) — with its blocks and texture units bound.
+ */
+function buildProgram(gl: any, nearest: boolean, graph: CompiledGraph | null): any {
+  const program = gl.createProgram();
+  gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, VERTEX_SHADER));
+  gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, fragmentShader(nearest, graph)));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(`WebGL2 program failed to link: ${gl.getProgramInfoLog(program)}`);
+  gl.uniformBlockBinding(program, gl.getUniformBlockIndex(program, "Uniforms"), BLOCK_UNIFORMS);
+  gl.uniformBlockBinding(program, gl.getUniformBlockIndex(program, "Instances"), BLOCK_INSTANCES);
+  gl.uniformBlockBinding(program, gl.getUniformBlockIndex(program, "Lights"), BLOCK_LIGHTS);
+  gl.useProgram(program);
+  const units: [string, number][] = [
+    ["tex", UNIT_BASE],
+    ["mrTex", UNIT_MR],
+    ["occTex", UNIT_OCC],
+    ["emisTex", UNIT_EMIS],
+    ["shadowMap", UNIT_SHADOW],
+    ["envMap", UNIT_ENV],
+    ["ssaoMap", UNIT_SSAO],
+    ["lmTex", UNIT_LM],
+    ["probeAtlas", UNIT_PROBES],
+    ["detailTex", UNIT_DETAIL],
+    ["blendTex", UNIT_BLEND],
+    ["sceneDepth", UNIT_SCENE_DEPTH],
+  ];
+  for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
+  return program;
 }
 
 /** Makes the WebGL2 context the renderer draws with (injectable for tests); null when there is none. */
@@ -629,6 +715,8 @@ export class WebglSceneRenderer implements SceneRenderer {
   /** What the last submitted frame drew (for the profiler and tests); GPU time when the browser can time it. */
   lastFrameStats: RenderStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
   private readonly timer: WebglPassTimer | null;
+  /** Whether the era samples nearest (it shapes every program variant). */
+  private readonly nearest: boolean;
 
   private constructor(
     private readonly gl: any,
@@ -645,6 +733,7 @@ export class WebglSceneRenderer implements SceneRenderer {
     style: RasterStyle,
   ) {
     this.software = new SoftwareSceneRenderer(style);
+    this.nearest = style.textureFiltering === "none";
     this.uniformBuffer = gl.createBuffer();
     this.instanceBuffer = gl.createBuffer();
     this.lightBuffer = gl.createBuffer();
@@ -675,30 +764,7 @@ export class WebglSceneRenderer implements SceneRenderer {
       if (!(align > 0) || UNIFORM_STRIDE % align !== 0) return null;
       if ((gl.getParameter(gl.MAX_UNIFORM_BLOCK_SIZE) as number) < WEBGL_INSTANCES_PER_DRAW * INSTANCE_FLOATS * 4) return null;
 
-      const program = gl.createProgram();
-      gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, VERTEX_SHADER));
-      gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, fragmentShader(style.textureFiltering === "none")));
-      gl.linkProgram(program);
-      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(`WebGL2 program failed to link: ${gl.getProgramInfoLog(program)}`);
-      gl.uniformBlockBinding(program, gl.getUniformBlockIndex(program, "Uniforms"), BLOCK_UNIFORMS);
-      gl.uniformBlockBinding(program, gl.getUniformBlockIndex(program, "Instances"), BLOCK_INSTANCES);
-      gl.uniformBlockBinding(program, gl.getUniformBlockIndex(program, "Lights"), BLOCK_LIGHTS);
-      gl.useProgram(program);
-      const units: [string, number][] = [
-        ["tex", UNIT_BASE],
-        ["mrTex", UNIT_MR],
-        ["occTex", UNIT_OCC],
-        ["emisTex", UNIT_EMIS],
-        ["shadowMap", UNIT_SHADOW],
-        ["envMap", UNIT_ENV],
-        ["ssaoMap", UNIT_SSAO],
-        ["lmTex", UNIT_LM],
-        ["probeAtlas", UNIT_PROBES],
-        ["detailTex", UNIT_DETAIL],
-        ["blendTex", UNIT_BLEND],
-        ["sceneDepth", UNIT_SCENE_DEPTH],
-      ];
-      for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(program, name), unit);
+      const program = buildProgram(gl, style.textureFiltering === "none", null);
 
       const colour = gl.createRenderbuffer();
       gl.bindRenderbuffer(gl.RENDERBUFFER, colour);
@@ -882,6 +948,7 @@ export class WebglSceneRenderer implements SceneRenderer {
     gl.clearDepth(1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.useProgram(this.program);
+    let program = this.program;
     gl.bindBufferBase(gl.UNIFORM_BUFFER, BLOCK_LIGHTS, this.lightBuffer);
     this.bindTexture(UNIT_SHADOW, this.shadowTexture ?? this.blankFloat);
     this.bindTexture(UNIT_ENV, this.envTexture ?? this.blankTexture);
@@ -922,6 +989,13 @@ export class WebglSceneRenderer implements SceneRenderer {
     let triangles = 0;
     for (const chunk of chunks) {
       const batch = batches[chunk.batch]!;
+      // A material graph draws with its own program (EP7); the probe data is per program.
+      const wanted = this.programOf(batch.primitive.material);
+      if (wanted !== program) {
+        program = wanted;
+        gl.useProgram(program);
+        gl.uniform4fv(gl.getUniformLocation(program, "probeData"), this.probeData);
+      }
       if (soft && !depthCopied && batch.alpha >= 2) {
         this.copySceneDepth();
         depthCopied = true;
@@ -966,6 +1040,25 @@ export class WebglSceneRenderer implements SceneRenderer {
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.flush();
+  }
+
+  /** Programs by material graph (EP7), linked on first use. */
+  private readonly graphPrograms = new Map<string, any>();
+
+  /** The program a material draws with: the plain one, or its graph's variant. */
+  private programOf(material: MeshAsset["primitives"][number]["material"]): any {
+    const graph = compiledGraphOf(material);
+    if (!graph) return this.program;
+    let program = this.graphPrograms.get(graph.key);
+    if (!program) {
+      try {
+        program = buildProgram(this.gl, this.nearest, graph);
+      } catch {
+        program = this.program; // a variant that won't build draws as the plain material
+      }
+      this.graphPrograms.set(graph.key, program);
+    }
+    return program;
   }
 
   /** The opaque depth, as a texture the transparent pass can read (EP6b): made on first use. */
@@ -1152,6 +1245,7 @@ export class WebglSceneRenderer implements SceneRenderer {
       for (const rb of this.attachments) gl.deleteRenderbuffer(rb);
       gl.deleteSampler(this.sampler);
       gl.deleteProgram(this.program);
+      for (const program of this.graphPrograms.values()) if (program !== this.program) gl.deleteProgram(program);
       // Meshes and material textures go with the context; release it now rather than at GC.
       gl.getExtension("WEBGL_lose_context")?.loseContext();
     } catch {
