@@ -31,6 +31,7 @@ import { EFFECT_RIM_POWER, bandAmount, camoThreshold, effectActive, type Surface
 type FrameFog = SceneFog & { readonly eye: readonly [number, number, number] };
 import { LIGHTMAP_RANGE } from "../model/lightmap";
 import { DEFAULT_DETAIL_SCALE, DEFAULT_DETAIL_STRENGTH, detailFade, emissiveAnimation } from "../model/materialEffects";
+import { compiledGraphOf, evaluateGraph, graphRegisters, type CompiledGraph, type GraphContext } from "../model/materialGraph";
 import { type MeshAsset, computeSmoothNormals, meshBounds } from "../model/MeshAsset";
 
 /** A decoded texture: tightly-packed RGBA rows, `width × height`. */
@@ -417,7 +418,8 @@ function buildPbrFrag(
     emis !== null ||
     material.metallicFactor !== undefined ||
     material.roughnessFactor !== undefined ||
-    (emissiveFactor !== undefined && (emissiveFactor[0] > 0 || emissiveFactor[1] > 0 || emissiveFactor[2] > 0));
+    (emissiveFactor !== undefined && (emissiveFactor[0] > 0 || emissiveFactor[1] > 0 || emissiveFactor[2] > 0)) ||
+    material.graph !== undefined;
   if (!isPbr) return null;
   const { offset, gain } = emissiveAnimation(material, time);
   const e = emissiveFactor ?? [0, 0, 0];
@@ -453,6 +455,7 @@ function buildPbrFrag(
     bands: fx?.bands ?? null,
     camo: Math.max(0, Math.min(1, fx?.camo ?? 0)),
     time,
+    graph: compiledGraphOf(material),
   };
 }
 
@@ -1406,6 +1409,8 @@ interface PbrFrag {
   readonly bands: readonly [number, number, number] | null;
   readonly camo: number;
   readonly time: number;
+  /** The material's graph (EP7), run per pixel, or null. */
+  readonly graph: CompiledGraph | null;
 }
 
 /** The per-primitive extras a draw may carry beyond the core maps. */
@@ -1444,6 +1449,9 @@ export function alphaStateOf(material: MeshAsset["primitives"][number]["material
       return OPAQUE_ALPHA;
   }
 }
+
+/** The white a graph's texture node reads when the material has no base texture. */
+const WHITE4 = [1, 1, 1, 1] as const;
 
 /**
  * The two projection terms that turn a depth-buffer NDC z back into a view
@@ -1768,6 +1776,35 @@ function rasterizeTriangle(
   linear: readonly [number, number] | null = null,
 ): void {
   const soft = linear && alpha.mode >= 2 && alpha.soft > 0 ? alpha.soft : 0;
+  // A material graph (EP7): one context and register file per triangle, refilled per pixel.
+  const graph = pbr?.graph ?? null;
+  const regs = graph ? graphRegisters(graph) : null;
+  const graphCtx: GraphContext | null = graph
+    ? {
+        u: 0,
+        v: 0,
+        px: 0,
+        py: 0,
+        pz: 0,
+        nx: 0,
+        ny: 0,
+        nz: 1,
+        vx: viewDir[0],
+        vy: viewDir[1],
+        vz: viewDir[2],
+        time: pbr!.time,
+        br: 1,
+        bg: 1,
+        bb: 1,
+        ba: 1,
+        sample: texture
+          ? (su, sv) => {
+              const t = sampleTexture(texture, su, sv, style.textureFiltering);
+              return [t[0] / 255, t[1] / 255, t[2] / 255, t[3] / 255];
+            }
+          : () => WHITE4,
+      }
+    : null;
   // Perspective divide to NDC, then to screen pixels. NDC spans the full extent
   // of each axis independently, so x maps by width and y by height — a mesh drawn
   // into a non-square framebuffer (the runtime's 240×136) is undistorted as long
@@ -1911,6 +1948,45 @@ function rasterizeTriangle(
         bl = (bl * tb) / 255;
         al = (al * ta) / 255;
       }
+      // The material graph's outputs (EP7): base colour and alpha now, the
+      // rest where the PBR terms are worked out below. -1 = not driven.
+      let gMetal = -1;
+      let gRough = -1;
+      let gEr = -1;
+      let gEg = 0;
+      let gEb = 0;
+      if (graph) {
+        const ctx = graphCtx!;
+        ctx.u = pw0 * a.u + pw1 * b.u + pw2 * c.u;
+        ctx.v = pw0 * a.v + pw1 * b.v + pw2 * c.v;
+        ctx.px = pw0 * a.wx + pw1 * b.wx + pw2 * c.wx;
+        ctx.py = pw0 * a.wy + pw1 * b.wy + pw2 * c.wy;
+        ctx.pz = pw0 * a.wz + pw1 * b.wz + pw2 * c.wz;
+        const nlen = Math.hypot(nx, ny, nz) || 1;
+        const flip = nx * viewDir[0] + ny * viewDir[1] + nz * viewDir[2] < 0 ? -1 : 1;
+        ctx.nx = (nx / nlen) * flip;
+        ctx.ny = (ny / nlen) * flip;
+        ctx.nz = (nz / nlen) * flip;
+        ctx.br = r / 255;
+        ctx.bg = g / 255;
+        ctx.bb = bl / 255;
+        ctx.ba = al / 255;
+        evaluateGraph(graph, ctx, regs!);
+        const outs = graph.outputs;
+        if (outs.baseColor !== undefined) {
+          r = regs![outs.baseColor * 3]! * 255;
+          g = regs![outs.baseColor * 3 + 1]! * 255;
+          bl = regs![outs.baseColor * 3 + 2]! * 255;
+        }
+        if (outs.alpha !== undefined) al = Math.min(1, Math.max(0, regs![outs.alpha * 3]!)) * 255;
+        if (outs.metallic !== undefined) gMetal = Math.min(1, Math.max(0, regs![outs.metallic * 3]!));
+        if (outs.roughness !== undefined) gRough = regs![outs.roughness * 3]!;
+        if (outs.emissive !== undefined) {
+          gEr = Math.max(0, regs![outs.emissive * 3]!);
+          gEg = Math.max(0, regs![outs.emissive * 3 + 1]!);
+          gEb = Math.max(0, regs![outs.emissive * 3 + 2]!);
+        }
+      }
       // A soft surface fades out where it meets the opaque scene behind it. An
       // empty pixel (depth cleared to Infinity) reads as the far plane, as a GPU's cleared 1 does.
       if (soft > 0) al *= softFade(linear![1] / (zNdc + linear![0]), linear![1] / (Math.min(depth[di]!, 1) + linear![0]), soft);
@@ -1957,7 +2033,9 @@ function rasterizeTriangle(
           metallic *= mb / 255;
           if (pbr.reflectMask) reflect *= ma / 255;
         }
+        if (gMetal >= 0) metallic = gMetal;
         if (pbr.blend && pbr.blend.roughness !== null && bw > 0) rough += (pbr.blend.roughness - rough) * bw;
+        if (gRough >= 0) rough = gRough;
         rough = Math.min(1, Math.max(0.045, rough)); // clamp: perfectly-smooth NDF blows up
         const ao = pbr.occ ? sampleTexture(pbr.occ, u, v, style.textureFiltering)[0] / 255 : 1;
         let ar = r / 255;
@@ -2015,6 +2093,11 @@ function rasterizeTriangle(
           er = pbr.emissive[0] * (es[0]! / 255);
           eg = pbr.emissive[1] * (es[1]! / 255);
           eb = pbr.emissive[2] * (es[2]! / 255);
+        }
+        if (gEr >= 0) {
+          er = gEr;
+          eg = gEg;
+          eb = gEb;
         }
         // Ambient / image-based lighting. With no environment this is the flat
         // ambient stand-in (byte-identical to Phase 2). With one, it becomes

@@ -9,6 +9,7 @@
  */
 
 import type { EncodedImage, MeshMaterial } from "./MeshAsset";
+import { readMaterialGraph } from "./materialGraph";
 import { encodeRgbaPng } from "./png";
 
 /** Detail tiles per base UV unit when a material doesn't say. */
@@ -22,7 +23,7 @@ export const DETAIL_FAR = 12;
 
 type SurfaceEffects = Pick<
   MeshMaterial,
-  "detailScale" | "detailStrength" | "emissiveScroll" | "emissivePulse" | "rim" | "reflectivity" | "reflectionMask" | "blendColor" | "blendRoughness" | "alphaMode" | "alphaCutoff" | "softDepth"
+  "detailScale" | "detailStrength" | "emissiveScroll" | "emissivePulse" | "rim" | "reflectivity" | "reflectionMask" | "blendColor" | "blendRoughness" | "alphaMode" | "alphaCutoff" | "softDepth" | "graph"
 >;
 
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -53,6 +54,8 @@ export function readSurfaceEffects(raw: Record<string, unknown> | object): Surfa
   if (r.alphaMode === "mask" || r.alphaMode === "blend" || r.alphaMode === "additive") out.alphaMode = r.alphaMode;
   if (finite(r.alphaCutoff)) out.alphaCutoff = clamp(r.alphaCutoff, 0, 1);
   if (finite(r.softDepth) && r.softDepth > 0) out.softDepth = Math.min(r.softDepth, 100);
+  const graph = readMaterialGraph(r.graph);
+  if (graph) out.graph = graph;
   return out;
 }
 
