@@ -43,6 +43,8 @@ import {
   type Mat4,
   type MeshAsset,
   type MeshSceneInstance,
+  type LodChain,
+  decodeLods,
   type AnimatorSpec,
   type PhysicsSpec,
   type PhysicsWorldSettings,
@@ -167,6 +169,8 @@ export interface MeshScene {
    */
   readonly debris?: readonly DebrisDef[];
   readonly debrisMeshes?: readonly MeshAsset[];
+  /** Each debris mesh's LOD chain (EP9b), or null; absent when none has one. */
+  readonly debrisLods?: readonly (LodChain | null)[];
 }
 
 /** A view + projection pair ready to hand to `renderMeshScene`. */
@@ -269,7 +273,20 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     pool?: { prefab: string; copy: number; rootId: string };
     levelId?: string;
   };
-  type Record_ = { mesh?: unknown; transform?: unknown; frames?: unknown; id?: unknown; name?: unknown; parent?: unknown; tags?: unknown; props?: unknown; physics?: unknown; animator?: unknown; level?: unknown; alwaysLoaded?: unknown };
+  // LOD levels decode over their base mesh once, so instances sharing a model share its levels too.
+  const levelCache = new Map<MeshAsset, Map<string, LodChain | null>>();
+  const lodOf = (mesh: MeshAsset, stored: unknown): LodChain | null => {
+    if (!stored) return null;
+    let byBase = levelCache.get(mesh);
+    if (!byBase) levelCache.set(mesh, (byBase = new Map()));
+    const key = JSON.stringify(stored);
+    if (!byBase.has(key)) {
+      const chain = decodeLods(mesh, stored, (level) => resolveMeshRef(level, library));
+      byBase.set(key, chain ? { meshes: [mesh, ...chain.meshes], distances: chain.distances } : null);
+    }
+    return byBase.get(key) ?? null;
+  };
+  type Record_ = { mesh?: unknown; transform?: unknown; frames?: unknown; lods?: unknown; id?: unknown; name?: unknown; parent?: unknown; tags?: unknown; props?: unknown; physics?: unknown; animator?: unknown; level?: unknown; alwaysLoaded?: unknown };
   const readEntry = (record: Record_, id: string, parentId: string | null, identity = false): Parsed | null => {
     if (typeof record.mesh !== "string") return null;
     const resolved = resolveMeshRef(record.mesh, library);
@@ -279,10 +296,12 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
       .map(load)
       .filter((frame): frame is MeshAsset => frame !== null);
     const t = identity ? { position: [0, 0, 0] as const, rotation: [0, 0, 0] as const, scale: [1, 1, 1] as const } : readTransform(record.transform);
+    const lod = lodOf(mesh, record.lods);
     return {
       mesh,
       local: composeModelMatrix(t.position, t.rotation, t.scale),
       ...(frames.length > 0 ? { frames } : {}),
+      ...(lod ? { lod } : {}),
       id,
       name: typeof record.name === "string" ? record.name : "Mesh",
       tags: readSceneTags(record.tags),
@@ -403,21 +422,30 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
   // of the root of a prefab by that name (whose mesh need never sit in the level).
   const debris: DebrisDef[] = [];
   const debrisMeshes: MeshAsset[] = [];
+  const debrisLods: (LodChain | null)[] = [];
   for (const def of parseDebrisDefs((parsed as { debris?: unknown }).debris)) {
-    let mesh: MeshAsset | null = parsedInstances.find((p) => !p.pool && p.name === def.source)?.mesh ?? null;
+    const source = parsedInstances.find((p) => !p.pool && p.name === def.source);
+    let mesh: MeshAsset | null = source?.mesh ?? null;
+    let lod: LodChain | null = source?.lod ?? null;
     if (!mesh && Array.isArray(prefabs)) {
       const prefab = (prefabs as { name?: unknown; nodes?: unknown }[]).find((f) => f && f.name === def.source && Array.isArray(f.nodes));
       const root = (prefab?.nodes as Record_[] | undefined)?.find((n) => typeof n.parent !== "string" || !n.parent);
-      mesh = root ? (readEntry(root, "debris", null, true)?.mesh ?? null) : null;
+      const entry = root ? readEntry(root, "debris", null, true) : null;
+      mesh = entry?.mesh ?? null;
+      lod = entry?.lod ?? null;
     }
     if (mesh && def.without) {
+      // Leave the same parts out of every level (a level's primitives line up with its base's).
       const leave = new Set(def.without);
-      const kept = mesh.primitives.filter((p) => !leave.has(p.material.name));
-      mesh = kept.length > 0 ? { ...mesh, primitives: kept } : null;
+      const keep = (m: MeshAsset): MeshAsset => ({ ...m, primitives: m.primitives.filter((p) => !leave.has(p.material.name)) });
+      const kept = keep(mesh);
+      mesh = kept.primitives.length > 0 ? kept : null;
+      lod = mesh && lod ? { meshes: [mesh, ...lod.meshes.slice(1).map(keep)], distances: lod.distances } : null;
     }
     if (!mesh) continue;
     debris.push(def);
     debrisMeshes.push(mesh);
+    debrisLods.push(lod);
   }
   return {
     instances,
@@ -428,7 +456,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     ...(decals.length > 0 ? { decals } : {}),
     ...(decalMarks.length > 0 ? { decalMarks } : {}),
     ...(ragdollColliders.length > 0 ? { ragdollColliders } : {}),
-    ...(debris.length > 0 ? { debris, debrisMeshes } : {}),
+    ...(debris.length > 0 ? { debris, debrisMeshes, ...(debrisLods.some(Boolean) ? { debrisLods } : {}) } : {}),
     lighting,
     ...(pools.length > 0 ? { pools } : {}),
     ...(physicsWorld ? { physicsWorld } : {}),

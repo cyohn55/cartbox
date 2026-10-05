@@ -356,11 +356,41 @@ preview.
         (`npm run bake:lockout-probes`, checked against the arena's layout
         fingerprint). The soldiers darken in the pit and under the walkway
         and pick up the snow's bounce in the open.
-- [ ] **EP9b. LOD generation.** Simplify a mesh into a chain of lighter
+- [x] **EP9b. LOD generation.** Simplify a mesh into a chain of lighter
       levels (quadric-error edge collapse, keeping UV seams and borders) on
       import or on demand, stored with the object and swapped by camera
       distance (the runtime already selects LODs). *Lockout:* the soldiers
       and debris drop to light meshes across the arena.
+
+      *Done:*
+      - **The simplifier:** quadric-error half-edge collapse. A level keeps
+        the original vertices and rewrites only the triangle list, so it
+        shares its base's vertex arrays (positions, normals, UVs, skin
+        weights) and costs only its indices. Borders and UV seams stay put, no
+        collapse may flip a triangle, and a level stops at an error budget
+        rather than distort the shape.
+      - **Hard-edged meshes:** a faceted mesh such as Lockout's (every vertex
+        on a crease) is simplified across its creases when it has no
+        textures. Each corner then takes the vertex whose normal best fits
+        its new face. Parts as plain as a box are left whole, and parts too
+        small to see far off are dropped.
+      - **Levels:** two by default, at about half and a quarter, taking over
+        at 12 and 30 times the mesh's radius.
+      - **Storage:** levels are stored on the object as indices, with a
+        fingerprint of the geometry they were made from, so levels left over
+        from older geometry are refused. A model placed many times stores
+        them once in the sidecar's library.
+      - **Runtime:** reads them into each instance's chain, and the overlay
+        and the scene view draw by distance. Distance is measured in the
+        mesh's own units, so a small copy drops detail sooner. A skinned
+        object's levels ride its live, posed buffers, a tinted one's are
+        tinted too, and debris wears its source's levels.
+      - **Editor:** a Level of detail panel (Generate, Regenerate, Clear,
+        each level's triangles and distance, a warning when stale) that
+        covers every copy of the model. A heavy import (2,000+ triangles) gets
+        LODs on the way in.
+      - **Lockout:** the soldiers drop from 512 to 392 and then 292
+        triangles, and the dropped weapons to about a fifth.
 
 ## Phase C — World building
 

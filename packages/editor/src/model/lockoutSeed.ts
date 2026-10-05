@@ -33,6 +33,7 @@ import type { SceneLighting } from "./SceneLighting";
 import type { SceneLight } from "../render/meshRasterizer";
 import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, type Streams } from "./seedGeometry";
 import { packMeshLibrary } from "./meshLibrary";
+import { encodeLods, generateLods, type StoredLods } from "./meshSimplify";
 import { bakeNavMesh, boxTriangles, serializeNavMesh, type NavMesh } from "./navmesh";
 import { serializeTerrain, terrainMesh, type Terrain } from "./terrain";
 import type { SceneTimeline } from "./timeline";
@@ -2102,17 +2103,26 @@ export function lockoutMeshSidecar(): string {
     // One skinned soldier mesh (tinted per bot at runtime, animated per bot by
     // its state machine), stored once in the sidecar's shared library however
     // many bots use it.
-    const soldier = serializeMeshAsset(soldierMesh());
-    const meshes: { id: string; name: string; mesh: string; animator?: unknown; transform: unknown }[] = [
+    const soldierAsset = soldierMesh();
+    const soldier = serializeMeshAsset(soldierAsset);
+    // LODs (EP9b): lighter levels for soldiers across the arena and for weapons
+    // dropped far off, each stored once in the library however many use it.
+    const lodsOf = (mesh: MeshAsset): { lods?: StoredLods } => {
+      const chain = generateLods(mesh);
+      return chain ? { lods: encodeLods(mesh, chain) } : {};
+    };
+    const soldierLods = lodsOf(soldierAsset);
+    const meshes: { id: string; name: string; mesh: string; lods?: StoredLods; animator?: unknown; transform: unknown }[] = [
       { id: "lockout-map", name: "Lockout arena", mesh: serializeMeshAsset(litMapMesh()), transform: identity },
     ];
     // Instances 1..7: the bots.
     for (let i = 1; i <= BOT_COUNT; i += 1) {
-      meshes.push({ id: `bot-${i}`, name: `bot ${i}`, mesh: soldier, animator: LOCKOUT_SOLDIER_ANIMATOR, transform: identity });
+      meshes.push({ id: `bot-${i}`, name: `bot ${i}`, mesh: soldier, ...soldierLods, animator: LOCKOUT_SOLDIER_ANIMATOR, transform: identity });
     }
     // Instances 8..13: one first-person viewmodel per weapon, at rest scale.
     for (const id of LOCKOUT_VIEWMODELS) {
-      meshes.push({ id: `viewmodel-${id}`, name: `viewmodel ${id}`, mesh: serializeMeshAsset(viewmodelMesh(id)), transform: rest });
+      const model = viewmodelMesh(id);
+      meshes.push({ id: `viewmodel-${id}`, name: `viewmodel ${id}`, mesh: serializeMeshAsset(model), ...lodsOf(model), transform: rest });
     }
     const packed = packMeshLibrary(meshes);
     meshSidecar = JSON.stringify({

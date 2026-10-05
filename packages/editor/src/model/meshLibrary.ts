@@ -24,6 +24,8 @@ export interface MeshBearingEntry {
   readonly mesh: string;
   /** Optional animation frames: alternate meshes a pose can select by number. */
   readonly frames?: readonly string[];
+  /** Optional LOD chain (see meshSimplify.ts): each level's stored triangle lists. */
+  readonly lods?: { readonly distances: readonly number[]; readonly levels: readonly string[] };
 }
 
 /** Read a library defensively: only string values survive. */
@@ -60,7 +62,7 @@ export function resolveMeshFrames(value: unknown, library: MeshLibrary): string[
 
 /**
  * Pack entries for storage: every mesh string used more than once across all
- * entries' `mesh` and `frames` — plus every frame, which is shared by nature —
+ * entries' `mesh`, `frames` and LOD levels — plus every frame, which is shared by nature —
  * goes into the library once and is replaced by a reference. Returns the packed
  * entries (other fields kept) and the library, which is empty when nothing
  * repeats, so a plain scene stores exactly as before.
@@ -73,6 +75,7 @@ export function packMeshLibrary<T extends MeshBearingEntry>(
   for (const entry of entries) {
     count(entry.mesh);
     for (const frame of entry.frames ?? []) count(frame, 2);
+    for (const level of entry.lods?.levels ?? []) count(level);
   }
   const library: Record<string, string> = {};
   const keys = new Map<string, string>();
@@ -90,6 +93,7 @@ export function packMeshLibrary<T extends MeshBearingEntry>(
     ...entry,
     mesh: ref(entry.mesh),
     ...(entry.frames && entry.frames.length > 0 ? { frames: entry.frames.map(ref) } : {}),
+    ...(entry.lods ? { lods: { ...entry.lods, levels: entry.lods.levels.map(ref) } } : {}),
   }));
   return { entries: packed, library };
 }

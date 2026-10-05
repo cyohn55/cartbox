@@ -53,6 +53,7 @@ import {
   setPrefabPool,
   unlinkPrefab,
 } from "@/lib/meshPrefabs";
+import { clearEntryLods, generateEntryLods, lodSummary } from "@/lib/meshLods";
 import styles from "./editor.module.css";
 import { RailGroup, RailHint, RangeControl } from "./railControls";
 
@@ -766,6 +767,57 @@ export function PhysicsWorldPanel({ sidecar, onChange }: { sidecar: MeshSidecar;
           ? "Same scene + same inputs = the same simulation everywhere, for replays and for online games that each simulate shared objects. A little slower. cartbox.physicshash() lets players compare states."
           : "Turn on for replays or online games where every player simulates the same objects."}
       </RailHint>
+    </RailGroup>
+  );
+}
+
+/**
+ * Level of detail (EP9b): generate lighter versions of the object's model,
+ * swapped in by camera distance in the game and the scene view, or clear them.
+ */
+export function LodPanel({
+  sidecar,
+  entry,
+  onChange,
+}: {
+  sidecar: MeshSidecar;
+  entry: MeshSidecarEntry;
+  onChange: (next: MeshSidecar) => void;
+}) {
+  const [note, setNote] = useState<string | null>(null);
+  const summary = lodSummary(entry);
+  const copies = sidecar.meshes.filter((m) => m.mesh === entry.mesh).length;
+  const generate = () => {
+    const { sidecar: next, made } = generateEntryLods(sidecar, entry.id);
+    if (made) onChange(next);
+    setNote(made ? null : "This model is already as light as it gets — no level would save enough to matter.");
+  };
+  return (
+    <RailGroup label="Level of detail">
+      {summary && !summary.stale ? (
+        <RailHint>
+          {summary.triangles.map((t, i) => (
+            <span key={i} style={{ display: "block" }}>
+              {i === 0 ? "Full" : `LOD ${i}`}: {t.toLocaleString()} triangles{i === 0 ? "" : ` from ${summary.distances[i - 1]!.toFixed(1)} m`}
+            </span>
+          ))}
+        </RailHint>
+      ) : summary?.stale ? (
+        <RailHint>The model changed since its LODs were made, so they're skipped. Generate them again.</RailHint>
+      ) : (
+        <RailHint>Lighter versions of the model, drawn when it's far from the camera.</RailHint>
+      )}
+      <div className={styles.toolGroup}>
+        <button type="button" className={styles.toolBtn} onClick={generate} title={copies > 1 ? `Also gives the other ${copies - 1} copies of this model the same levels` : undefined}>
+          {summary ? "Regenerate LODs" : "Generate LODs"}
+        </button>
+        {summary && (
+          <button type="button" className={styles.toolBtn} onClick={() => onChange(clearEntryLods(sidecar, entry.id))}>
+            Clear
+          </button>
+        )}
+      </div>
+      {note && <RailHint>{note}</RailHint>}
     </RailGroup>
   );
 }

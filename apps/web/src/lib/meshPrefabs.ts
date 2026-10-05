@@ -24,7 +24,7 @@ import {
 } from "./meshSidecar";
 import { parentIndices } from "@cartbox/editor";
 
-const VERSION_FIELDS = ["name", "mesh", "frames", "tags", "props", "physics", "animator", "transform"] as const;
+const VERSION_FIELDS = ["name", "mesh", "frames", "lods", "tags", "props", "physics", "animator", "transform"] as const;
 type Field = (typeof VERSION_FIELDS)[number];
 
 function newId(prefix: string): string {
@@ -100,6 +100,7 @@ function nodeFrom(entry: MeshSidecarEntry, key: string, parent: string | undefin
     mesh: entry.mesh,
     transform: isRoot ? defaultMeshTransform() : entry.transform,
     ...(entry.frames && entry.frames.length > 0 ? { frames: entry.frames } : {}),
+    ...(entry.lods ? { lods: entry.lods } : {}),
     ...(parent ? { parent } : {}),
     ...(entry.tags && entry.tags.length > 0 ? { tags: entry.tags } : {}),
     ...(entry.props && Object.keys(entry.props).length > 0 ? { props: entry.props } : {}),
@@ -150,6 +151,7 @@ export function placePrefab(
       mesh: node.mesh,
       transform: isRoot ? (transform ?? defaultMeshTransform()) : node.transform,
       ...(node.frames ? { frames: node.frames } : {}),
+      ...(node.lods ? { lods: node.lods } : {}),
       ...(parent ? { parent } : {}),
       ...(node.tags ? { tags: node.tags } : {}),
       ...(node.props ? { props: node.props } : {}),
@@ -196,6 +198,7 @@ function syncInstance(
         mesh: node.mesh,
         transform: node.transform,
         ...(node.frames ? { frames: node.frames } : {}),
+        ...(node.lods ? { lods: node.lods } : {}),
         parent: idOf.get(node.parent!)!,
         ...(node.tags ? { tags: node.tags } : {}),
         ...(node.props ? { props: node.props } : {}),
