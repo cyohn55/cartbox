@@ -26,6 +26,7 @@ import { boxProject, pickProbe, sampleProbe, type ReflectionProbeSet } from "./p
 import { applyFog, type SceneFog } from "./skyDome";
 import { cameraPositionFromView } from "./lod";
 import { localShadowVisibility, type LocalShadows } from "./localShadows";
+import { sampleLightProbes, type LightProbeGrid } from "../model/lightProbes";
 import { EFFECT_RIM_POWER, bandAmount, camoThreshold, effectActive, type SurfaceEffect } from "./surfaceEffect";
 
 /** The fog for one frame, with the eye it is seen from (height fog and volumes trace from it). */
@@ -267,6 +268,11 @@ export interface EnvironmentLight {
    * sky. Diffuse light still comes from the environment.
    */
   readonly probes?: ReflectionProbeSet | null;
+  /**
+   * Baked light probes (EP9; see lightProbes.ts): a surface without a light
+   * map scales its ambient and sky fill by the grid at its position and normal.
+   */
+  readonly lightProbes?: LightProbeGrid | null;
 }
 
 /**
@@ -2247,6 +2253,12 @@ function rasterizeTriangle(
           ambR *= (lr / 255) * LIGHTMAP_RANGE;
           ambG *= (lg / 255) * LIGHTMAP_RANGE;
           ambB *= (lb / 255) * LIGHTMAP_RANGE;
+        } else if (environment?.lightProbes) {
+          // No light map of its own: the baked probe grid lights it (EP9).
+          const [pr, pg, pb] = sampleLightProbes(environment.lightProbes, pw0 * a.wx + pw1 * b.wx + pw2 * c.wx, pw0 * a.wy + pw1 * b.wy + pw2 * c.wy, pw0 * a.wz + pw1 * b.wz + pw2 * c.wz, Nx, Ny, Nz);
+          ambR *= pr;
+          ambG *= pg;
+          ambB *= pb;
         }
         // Screen-space ambient occlusion darkens only the ambient/IBL fill (never
         // the direct light), matching where AO physically applies.

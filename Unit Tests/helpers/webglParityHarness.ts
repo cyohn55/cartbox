@@ -20,6 +20,7 @@ import { SoftwareSceneRenderer, type SceneDraw } from "../../packages/player/src
 import { graphInstances } from "./graphScenes";
 import { localShadowRig } from "./localShadowScene";
 import { manyLights } from "./manyLights";
+import { probeRig } from "./probeScene";
 import { WebglSceneRenderer } from "../../packages/player/src/render/WebglSceneRenderer";
 
 const W = 64;
@@ -157,6 +158,11 @@ function scenes(): Record<string, Scene> {
     localShadows: (() => {
       const rig = localShadowRig();
       return { instances: rig.instances, draw: () => ({ ...baseDraw(), view: viewMatrix([0, 4, 6], [0, 0.5, 0]), lights: rig.lights, localShadows: rig.localShadows }) };
+    })(),
+    // Light probes (EP9): blocks without light maps, their ambient from a varied probe grid.
+    probes: (() => {
+      const rig = probeRig();
+      return { instances: rig.instances, draw: () => ({ ...baseDraw(), view: viewMatrix([0, 3.5, 5.5], [0, 0.5, 0]), lightDirection: [0.3, 1, 0.4] as [number, number, number], ambient: 0.3, environment: rig.environment }) };
     })(),
     // Material graphs (EP7): noise, fresnel, UV and maths into every PBR input,
     // and a scrolling texture's alpha into a see-through surface's coverage.

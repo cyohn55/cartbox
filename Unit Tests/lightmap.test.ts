@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  defaultSceneLighting,
   LIGHTMAP_RANGE,
   applyLightmapImage,
   bakeLightmap,
@@ -310,17 +311,26 @@ describe("editor scene bake", () => {
 
   it("bakes every still object, then clears them all", async () => {
     const sidecar = scene();
-    expect(lightingStats(sidecar)).toEqual({ baked: 0, still: 2 });
+    expect(lightingStats(sidecar)).toMatchObject({ baked: 0, still: 2 });
     const seen: number[] = [];
     const baked = await bakeSceneLighting(sidecar, { density: 2, rays: 8 }, (d) => seen.push(d));
-    expect(lightingStats(baked)).toEqual({ baked: 2, still: 2 });
+    expect(lightingStats(baked)).toMatchObject({ baked: 2, still: 2 });
     expect(seen.at(-1)).toBeCloseTo(1, 5);
     const cleared = clearSceneLighting(baked);
-    expect(lightingStats(cleared)).toEqual({ baked: 0, still: 2 });
+    expect(lightingStats(cleared)).toMatchObject({ baked: 0, still: 2 });
     for (const entry of cleared.meshes) {
       const mesh = deserializeMeshAsset(entry.mesh);
       expect(mesh.primitives.every((p) => !p.uvs2 && !p.material.lightmapImage)).toBe(true);
     }
+  });
+
+  it("bakes light probes over the still objects when the scene has a lighting rig, and clears them (EP9)", async () => {
+    const sidecar = { ...scene(), lighting: defaultSceneLighting() };
+    const baked = await bakeSceneLighting(sidecar, { density: 2, rays: 8, probeSpacing: 2 });
+    expect(lightingStats(baked).probes).toBeGreaterThanOrEqual(8);
+    expect(baked.lighting!.lightProbes!.counts.every((c) => c >= 2)).toBe(true);
+    expect(lightingStats(clearSceneLighting(baked)).probes).toBe(0);
+    expect(lightingStats(await bakeSceneLighting(sidecar, { density: 2, rays: 8, probeSpacing: 0 })).probes).toBe(0);
   });
 
   it("leaves an empty scene alone", async () => {

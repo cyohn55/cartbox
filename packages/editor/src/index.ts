@@ -79,6 +79,7 @@ export {
   bakeLockoutLightmap,
   lockoutTerrainTriangles,
   LOCKOUT_LIGHTING,
+  bakeLockoutProbes,
   LOCKOUT_SCENE_TRIANGLES,
   LOCKOUT_CENTER_X,
   LOCKOUT_CENTER_Y,
@@ -235,6 +236,7 @@ export {
   LIGHTMAP_RANGE,
   applyLightmapImage,
   bakeLightmap,
+  bakeLightProbes,
   layoutFingerprint,
   layoutLightmap,
   withLightmap,
@@ -461,6 +463,19 @@ export {
   type GraphStep,
   type MaterialGraph,
 } from "./model/materialGraph";
+export {
+  MAX_LIGHT_PROBES,
+  PROBE_FACES,
+  decodeLightProbes,
+  encodeLightProbes,
+  lightProbeTexels,
+  planProbeGrid,
+  probePosition,
+  quantizeLightProbes,
+  sampleLightProbes,
+  type LightProbeGrid,
+  type StoredLightProbes,
+} from "./model/lightProbes";
 export {
   MAX_PARTICLE_EFFECTS,
   MAX_PARTICLES_PER_EFFECT,

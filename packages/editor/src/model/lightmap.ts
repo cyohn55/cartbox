@@ -24,6 +24,7 @@
  * sun's direct light is left to the live shadow map). Pure and DOM-free.
  */
 
+import { PROBE_FACES, probePosition, quantizeLightProbes, type LightProbeGrid } from "./lightProbes";
 import { encodeRgbaPng } from "./png";
 import type { EncodedImage, MeshAsset, MeshPrimitive } from "./MeshAsset";
 
@@ -532,6 +533,52 @@ function shadeTexel(b: Bvh, pos: V3, n: V3, rays: number, sq: number, reach: num
   out[1] = br / rays;
   out[2] = bg / rays;
   out[3] = bb / rays;
+}
+
+/**
+ * Bake a light-probe grid (EP9; see lightProbes.ts): at each probe, what a
+ * light map texel facing each axis direction would hold — sky visibility and
+ * bounced sun — traced against `occluders`, quantised as storage keeps it.
+ * `progress` hears the share done.
+ */
+export function bakeLightProbes(
+  min: readonly [number, number, number],
+  max: readonly [number, number, number],
+  counts: readonly [number, number, number],
+  occluders: readonly Occluder[],
+  options: LightBakeOptions = {},
+  progress?: (done: number) => void,
+): LightProbeGrid {
+  const rays = Math.max(4, options.rays ?? 64);
+  const reach = options.distance ?? 8;
+  const bounce = options.bounce ?? 0.9;
+  const contrast = options.contrast ?? 1.2;
+  const sun = options.sun ? normalize([...options.sun] as V3) : null;
+  const bvh = buildBvh(occluders);
+  const [cx, cy, cz] = counts;
+  const values = new Float32Array(cx * cy * cz * 18);
+  const hit = new Float64Array(2);
+  const shade = new Float64Array(4);
+  const sq = Math.ceil(Math.sqrt(rays));
+  const grid = { min, max, counts };
+  for (let z = 0; z < cz; z += 1) {
+    for (let y = 0; y < cy; y += 1) {
+      for (let x = 0; x < cx; x += 1) {
+        const probe = (z * cy + y) * cx + x;
+        const pos = probePosition(grid, x, y, z) as V3;
+        PROBE_FACES.forEach((face, f) => {
+          shadeTexel(bvh, pos, face as V3, rays, sq, reach, sun, bounce, hit, probe * 6 + f, shade);
+          const vis = Math.pow(shade[0]!, contrast);
+          const o = (probe * 6 + f) * 3;
+          values[o] = Math.min(LIGHTMAP_RANGE, vis + shade[1]!);
+          values[o + 1] = Math.min(LIGHTMAP_RANGE, vis + shade[2]!);
+          values[o + 2] = Math.min(LIGHTMAP_RANGE, vis + shade[3]!);
+        });
+      }
+    }
+    progress?.((z + 1) / cz);
+  }
+  return { min: [...min], max: [...max], counts: [...counts], values: quantizeLightProbes(values) };
 }
 
 /** A 3×3 blur that only mixes texels of the same chart (hides ray noise, keeps edges). */

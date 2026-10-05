@@ -3344,6 +3344,17 @@ declare class WebglSceneRenderer implements SceneRenderer {
     private clusterTextures;
     /** The per-frame uniforms a program needs (probes, clusters), set when it's put to use. */
     private frameUniforms;
+    /** The light-probe grid (EP9): its uniforms, its 3D texture, and the grid it holds. */
+    private readonly probeGridMin;
+    private readonly probeGridScale;
+    private readonly probeGridCount;
+    private gridTexture;
+    private gridSource;
+    /** Point the probe uniforms at a frame's grid (uploading it once per grid), and bind it (a blank when there's none). */
+    private uploadProbeGrid;
+    private gridBlank;
+    /** A 1×1×1 stand-in so the 3D sampler always has a complete texture. */
+    private blankProbe;
     /** The spot/point shadows this frame (EP8c): on/biases, each tile's view, and the atlas (made on first use). */
     private readonly localShadowInfo;
     private readonly shadowTileMvp;
@@ -3588,6 +3599,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * write both and their params. An orthographic view (no cells) loops every light.
      */
     private clusterLights;
+    /** Upload a probe grid (EP9) as a 3D texture, once per grid, rebuilding group 1 to point at it. */
+    private uploadProbeGrid;
     /** Upload the spot/point shadow tiles (EP8c): each tile into its atlas cell, and every tile's view. */
     private uploadLocalShadows;
     /** Await one readback and publish it as the newest frame. */
