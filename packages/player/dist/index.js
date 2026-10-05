@@ -424,6 +424,842 @@ cartbox.ui = U
 end`;
 }
 
+// src/actionsSdk.ts
+import { actionLabel, parseInputActions } from "@cartbox/editor";
+
+// src/physics/protocol.ts
+var CLASSIC = { pmemAddress: 81924, ramSize: 98304 };
+var PRO = { pmemAddress: 542304, ramSize: 786432 };
+var ERA = { pmemAddress: 257632, ramSize: 393216 };
+var HD = { pmemAddress: 3068512, ramSize: 8388608 };
+var RAM_LAYOUTS = {
+  classic: CLASSIC,
+  voxel: CLASSIC,
+  pro: PRO,
+  portrait: PRO,
+  ps1: ERA,
+  n64: ERA,
+  xbox360: HD,
+  modern: HD
+};
+var PHYS_BLOCK_BYTES = 8192;
+var PHYS_MAGIC = 1213219395;
+var PHYS_FIX = 1024;
+var PHYS_HDR_MAGIC = 0;
+var PHYS_HDR_BODIES = 4;
+var PHYS_HDR_TICK = 8;
+var PHYS_HDR_HASH = 12;
+var PHYS_HDR_LEVEL = 16;
+var PHYS_HDR_LEVEL_LOADING = 20;
+var PHYS_HDR_LEVEL_PROGRESS = 24;
+var PHYS_BODIES = 64;
+var PHYS_BODY_BYTES = 32;
+var PHYS_MAX_BODIES = 64;
+var PHYS_RAYS = PHYS_BODIES + PHYS_MAX_BODIES * PHYS_BODY_BYTES;
+var PHYS_RAY_BYTES = 32;
+var PHYS_MAX_RAYS = 16;
+var PHYS_EVENTS = PHYS_RAYS + PHYS_MAX_RAYS * PHYS_RAY_BYTES;
+var PHYS_EVENT_BYTES = 12;
+var PHYS_MAX_EVENTS = 48;
+var PHYS_OVERLAPS = PHYS_EVENTS + 4 + PHYS_MAX_EVENTS * PHYS_EVENT_BYTES;
+var PHYS_OVERLAP_BYTES = 8;
+var PHYS_MAX_OVERLAPS = 64;
+var PHYS_EVENT_STARTED = 1;
+var PHYS_EVENT_TRIGGER = 2;
+var PHYS_AGENTS = 3720;
+var PHYS_AGENT_BYTES = 16;
+var PHYS_MAX_AGENTS = 16;
+var NAV_FLAG_MOVING = 1;
+var NAV_FLAG_AIR = 2;
+var NAV_FLAG_ARRIVED = 4;
+var NAV_FLAG_NO_PATH = 8;
+var NAV_FLAG_OBSTACLE = 16;
+var PHYS_ANIMS = 6400;
+var PHYS_ANIM_BYTES = 16;
+var PHYS_MAX_ANIMS = 64;
+var PHYS_ANIM_EVENTS = PHYS_ANIMS + 4 + PHYS_MAX_ANIMS * PHYS_ANIM_BYTES;
+var PHYS_ANIM_EVENT_BYTES = 8;
+var PHYS_MAX_ANIM_EVENTS = 32;
+var PHYS_JOINTS = 7700;
+var PHYS_JOINT_BYTES = 20;
+var PHYS_MAX_JOINTS = 16;
+var PHYS_TIMELINE = 8032;
+var PHYS_TIMELINE_EVENTS = PHYS_TIMELINE + 12;
+var PHYS_MAX_TIMELINE_EVENTS = 8;
+function writeLevelState(block, level) {
+  block.setInt32(PHYS_HDR_LEVEL, level.current, true);
+  block.setInt32(PHYS_HDR_LEVEL_LOADING, level.loading, true);
+  block.setInt32(PHYS_HDR_LEVEL_PROGRESS, toFix(Math.max(0, Math.min(1, level.progress))), true);
+}
+function writeTimelineState(block, playback, events = []) {
+  block.setInt32(PHYS_TIMELINE, playback.index, true);
+  block.setInt32(PHYS_TIMELINE + 4, toFix(playback.time), true);
+  block.setInt32(PHYS_TIMELINE + 8, playback.playing ? 1 : 0, true);
+  const n = Math.min(events.length, PHYS_MAX_TIMELINE_EVENTS);
+  block.setInt32(PHYS_TIMELINE_EVENTS, n, true);
+  for (let i = 0; i < n; i += 1) block.setInt32(PHYS_TIMELINE_EVENTS + 4 + i * 4, events[i], true);
+}
+function writeAgents(block, agents) {
+  const n = Math.min(agents.length, PHYS_MAX_AGENTS);
+  block.setInt32(PHYS_AGENTS, n, true);
+  for (let i = 0; i < n; i += 1) {
+    const a = agents[i];
+    const at = PHYS_AGENTS + 4 + i * PHYS_AGENT_BYTES;
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + k * 4, toFix(a.position[k]), true);
+    let f2 = a.facing;
+    while (f2 > Math.PI) f2 -= 2 * Math.PI;
+    while (f2 < -Math.PI) f2 += 2 * Math.PI;
+    const facing = Math.round(f2 * 1e4) & 65535;
+    block.setUint32(at + 12, (a.key & 1023 | (a.flags & 63) << 10 | facing << 16) >>> 0, true);
+  }
+}
+function writeJointPositions(block, joints) {
+  const n = Math.min(joints.length, PHYS_MAX_JOINTS);
+  block.setInt32(PHYS_JOINTS, n, true);
+  for (let i = 0; i < n; i += 1) {
+    const at = PHYS_JOINTS + 4 + i * PHYS_JOINT_BYTES;
+    block.setInt32(at, joints[i].object, true);
+    block.setInt32(at + 4, joints[i].joint, true);
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + 8 + k * 4, toFix(joints[i].position[k]), true);
+  }
+}
+var PHYS_CMDS = 4096;
+var PHYS_CMD_BYTES = 32;
+var PHYS_MAX_CMDS = 64;
+var PHYS_FLAG_GROUNDED = 1;
+var PHYS_FLAG_SLEEPING = 2;
+var PHYS_OP_IMPULSE = 1;
+var PHYS_OP_VELOCITY = 2;
+var PHYS_OP_TELEPORT = 3;
+var PHYS_OP_MOVE = 4;
+var PHYS_OP_RAY = 5;
+var PHYS_OP_SPAWN = 6;
+var PHYS_OP_DESPAWN = 7;
+var PHYS_OP_CAST = 8;
+var PHYS_CAST_RAY = 0;
+var PHYS_CAST_SPHERE = 1;
+var PHYS_CAST_BOX = 2;
+var PHYS_CAST_CAPSULE = 3;
+var PHYS_OP_MOTOR = 9;
+var PHYS_OP_UNJOIN = 10;
+var PHYS_OP_PLAY = 11;
+var PHYS_OP_ANIM_SET = 12;
+var PHYS_OP_ANIM_TRIGGER = 13;
+var PHYS_OP_ANIM_GOTO = 14;
+var PHYS_OP_IK = 15;
+var PHYS_OP_IK_POLE = 16;
+var PHYS_OP_LOOKAT = 17;
+var PHYS_OP_WATCH = 18;
+var PHYS_OP_TIMELINE = 19;
+var PHYS_OP_LEVEL = 20;
+var PHYS_OP_AGENT = 21;
+var PHYS_OP_AGENT_GOTO = 22;
+var PHYS_OP_AGENT_STOP = 23;
+var PHYS_OP_AGENT_REMOVE = 24;
+var PHYS_OP_STREAM_FOCUS = 25;
+var PHYS_OP_BURST = 26;
+var PHYS_OP_DECAL = 27;
+var PHYS_OP_RAGDOLL = 28;
+var PHYS_OP_DEBRIS = 29;
+var PHYS_OP_SHIELD = 30;
+var PHYS_OP_SOUND = 31;
+var PHYS_OP_SOUND_LOOP = 32;
+var PHYS_OP_MIX = 33;
+var PHYS_OP_PLACE = 34;
+var PHYS_OP_UNPLACE = 35;
+function physicsBlockAddress(layout) {
+  return layout.ramSize - PHYS_BLOCK_BYTES;
+}
+var toFix = (v) => {
+  const n = Math.round(v * PHYS_FIX);
+  return Math.max(-2147483647, Math.min(2147483647, Number.isFinite(n) ? n : 0));
+};
+var fromFix = (n) => n / PHYS_FIX;
+function writePhysicsState(block, tick, bodies, rays, events = [], overlaps = [], hash = 0) {
+  block.setInt32(PHYS_HDR_HASH, hash | 0, true);
+  const ne = Math.min(events.length, PHYS_MAX_EVENTS);
+  block.setInt32(PHYS_EVENTS, ne, true);
+  for (let i = 0; i < ne; i += 1) {
+    const e = events[i];
+    const at = PHYS_EVENTS + 4 + i * PHYS_EVENT_BYTES;
+    block.setInt32(at, e.a, true);
+    block.setInt32(at + 4, e.b, true);
+    block.setInt32(at + 8, (e.started ? PHYS_EVENT_STARTED : 0) | (e.trigger ? PHYS_EVENT_TRIGGER : 0), true);
+  }
+  const no = Math.min(overlaps.length, PHYS_MAX_OVERLAPS);
+  block.setInt32(PHYS_OVERLAPS, no, true);
+  for (let i = 0; i < no; i += 1) {
+    const at = PHYS_OVERLAPS + 4 + i * PHYS_OVERLAP_BYTES;
+    block.setInt32(at, overlaps[i][0], true);
+    block.setInt32(at + 4, overlaps[i][1], true);
+  }
+  block.setInt32(PHYS_HDR_MAGIC, PHYS_MAGIC, true);
+  const n = Math.min(bodies.length, PHYS_MAX_BODIES);
+  block.setInt32(PHYS_HDR_BODIES, n, true);
+  block.setInt32(PHYS_HDR_TICK, tick | 0, true);
+  for (let i = 0; i < n; i += 1) {
+    const b = bodies[i];
+    const at = PHYS_BODIES + i * PHYS_BODY_BYTES;
+    block.setInt32(at, b.object, true);
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + 4 + k * 4, toFix(b.position[k]), true);
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + 16 + k * 4, toFix(b.velocity[k]), true);
+    block.setInt32(at + 28, (b.grounded ? PHYS_FLAG_GROUNDED : 0) | (b.sleeping ? PHYS_FLAG_SLEEPING : 0), true);
+  }
+  for (let i = 0; i < PHYS_MAX_RAYS; i += 1) {
+    const r = rays[i] ?? null;
+    const at = PHYS_RAYS + i * PHYS_RAY_BYTES;
+    if (!r) {
+      block.setInt32(at, 0, true);
+      continue;
+    }
+    block.setInt32(at, r.object >= 0 ? r.object + 2 : 1, true);
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + 4 + k * 4, toFix(r.point[k]), true);
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + 16 + k * 4, toFix(r.normal[k]), true);
+    block.setInt32(at + 28, toFix(r.distance), true);
+  }
+}
+function writeAnimationState(block, playback, events = []) {
+  const n = Math.min(playback.length, PHYS_MAX_ANIMS);
+  block.setInt32(PHYS_ANIMS, n, true);
+  for (let i = 0; i < n; i += 1) {
+    const at = PHYS_ANIMS + 4 + i * PHYS_ANIM_BYTES;
+    block.setInt32(at, playback[i].object, true);
+    block.setInt32(at + 4, playback[i].clip, true);
+    block.setInt32(at + 8, toFix(playback[i].time), true);
+    block.setInt32(at + 12, playback[i].state ?? -1, true);
+  }
+  const ne = Math.min(events.length, PHYS_MAX_ANIM_EVENTS);
+  block.setInt32(PHYS_ANIM_EVENTS, ne, true);
+  for (let i = 0; i < ne; i += 1) {
+    const at = PHYS_ANIM_EVENTS + 4 + i * PHYS_ANIM_EVENT_BYTES;
+    block.setInt32(at, events[i].object, true);
+    block.setInt32(at + 4, events[i].event, true);
+  }
+}
+function takePhysicsCommands(block) {
+  const n = Math.max(0, Math.min(PHYS_MAX_CMDS, block.getInt32(PHYS_CMDS, true)));
+  const out = [];
+  for (let i = 0; i < n; i += 1) {
+    const at = PHYS_CMDS + 4 + i * PHYS_CMD_BYTES;
+    const v = [0, 0, 0, 0, 0, 0].map((_, k) => fromFix(block.getInt32(at + 8 + k * 4, true)));
+    out.push({ op: block.getInt32(at, true), a: block.getInt32(at + 4, true), v });
+  }
+  block.setInt32(PHYS_CMDS, 0, true);
+  return out;
+}
+
+// src/debug/instrument.ts
+var KEYWORDS = /* @__PURE__ */ new Set([
+  "and",
+  "break",
+  "do",
+  "else",
+  "elseif",
+  "end",
+  "false",
+  "for",
+  "function",
+  "goto",
+  "if",
+  "in",
+  "local",
+  "nil",
+  "not",
+  "or",
+  "repeat",
+  "return",
+  "then",
+  "true",
+  "until",
+  "while"
+]);
+var SYMBOLS = ["...", "..", "::", "==", "~=", "<=", ">=", "//", "<<", ">>"];
+function tokenizeLua(code) {
+  const out = [];
+  let i = 0;
+  let line = 1;
+  const n = code.length;
+  const longOpen = (at) => {
+    if (code[at] !== "[") return 0;
+    let j = at + 1;
+    while (code[j] === "=") j += 1;
+    return code[j] === "[" ? j - at + 1 : 0;
+  };
+  const skipLong = (level) => {
+    const close = `]${"=".repeat(level)}]`;
+    const end = code.indexOf(close, i);
+    if (end < 0) return false;
+    for (let k = i; k < end; k += 1) if (code.charCodeAt(k) === 10) line += 1;
+    i = end + close.length;
+    return true;
+  };
+  while (i < n) {
+    const c = code[i];
+    if (c === "\n") {
+      line += 1;
+      i += 1;
+      continue;
+    }
+    if (c === " " || c === "	" || c === "\r" || c === "\f" || c === "\v") {
+      i += 1;
+      continue;
+    }
+    const start = i;
+    const startLine = line;
+    if (c === "-" && code[i + 1] === "-") {
+      i += 2;
+      const open2 = longOpen(i);
+      if (open2 > 0) {
+        i += open2;
+        if (!skipLong(open2 - 2)) return null;
+      } else {
+        while (i < n && code[i] !== "\n") i += 1;
+      }
+      continue;
+    }
+    const open = longOpen(i);
+    if (open > 0) {
+      i += open;
+      if (!skipLong(open - 2)) return null;
+      out.push({ type: "string", value: code.slice(start, i), line: startLine, start });
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      i += 1;
+      while (i < n && code[i] !== c) {
+        if (code[i] === "\\") {
+          i += 1;
+          if (code[i] === "\n") line += 1;
+          else if (code[i] === "z") {
+            i += 1;
+            while (i < n && /\s/.test(code[i])) {
+              if (code[i] === "\n") line += 1;
+              i += 1;
+            }
+            continue;
+          }
+        } else if (code[i] === "\n") return null;
+        i += 1;
+      }
+      if (i >= n) return null;
+      i += 1;
+      out.push({ type: "string", value: code.slice(start, i), line: startLine, start });
+      continue;
+    }
+    if (/[0-9]/.test(c) || c === "." && /[0-9]/.test(code[i + 1] ?? "")) {
+      if (c === "0" && (code[i + 1] === "x" || code[i + 1] === "X")) {
+        i += 2;
+        while (i < n && /[0-9a-fA-F.pP]/.test(code[i])) {
+          if ((code[i] === "p" || code[i] === "P") && (code[i + 1] === "+" || code[i + 1] === "-")) i += 1;
+          i += 1;
+        }
+      } else {
+        while (i < n && /[0-9.eE]/.test(code[i])) {
+          if ((code[i] === "e" || code[i] === "E") && (code[i + 1] === "+" || code[i + 1] === "-")) i += 1;
+          i += 1;
+        }
+      }
+      out.push({ type: "number", value: code.slice(start, i), line: startLine, start });
+      continue;
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      while (i < n && /[A-Za-z0-9_]/.test(code[i])) i += 1;
+      const value = code.slice(start, i);
+      out.push({ type: KEYWORDS.has(value) ? "keyword" : "name", value, line: startLine, start });
+      continue;
+    }
+    const symbol = SYMBOLS.find((s) => code.startsWith(s, i)) ?? c;
+    if (!/[+\-*/%^#&~|<>=(){}[\];:,.]/.test(symbol[0])) return null;
+    i += symbol.length;
+    out.push({ type: "symbol", value: symbol, line: startLine, start });
+  }
+  return out;
+}
+var STATEMENT_KEYWORDS = /* @__PURE__ */ new Set(["local", "if", "for", "while", "repeat", "do", "return", "break", "goto", "function"]);
+var ENDS_STATEMENT = /* @__PURE__ */ new Set(["end", "then", "do", "else", "repeat", "break", ")", "]", "}", ";", "true", "false", "nil", "..."]);
+var BREAK_HOOK = "__bp";
+function instrumentLua(code) {
+  const tokens = tokenizeLua(code);
+  if (!tokens) return { code, lines: [] };
+  const stack = ["root"];
+  const inserts = [];
+  let prev = null;
+  for (const token of tokens) {
+    const top = stack[stack.length - 1];
+    const firstOnLine = !prev || prev.line !== token.line;
+    if (firstOnLine && (top === "root" || top === "block" || top === "function")) {
+      const starts = token.type === "name" || token.type === "keyword" && STATEMENT_KEYWORDS.has(token.value) || token.value === "::";
+      const after = !prev || prev.type === "name" || prev.type === "number" || prev.type === "string" || ENDS_STATEMENT.has(prev.value);
+      if (starts && after) inserts.push({ at: token.start, line: token.line });
+    }
+    const v = token.value;
+    if (token.type === "symbol") {
+      if (v === "(" || v === "[" || v === "{") stack.push("bracket");
+      else if (v === ")" || v === "]" || v === "}") {
+        if (stack.pop() !== "bracket") return { code, lines: [] };
+      }
+    } else if (token.type === "keyword") {
+      if (v === "function") stack.push("function");
+      else if (v === "if" || v === "repeat") stack.push("block");
+      else if (v === "while" || v === "for") stack.push("head");
+      else if (v === "do") {
+        if (top === "head") stack[stack.length - 1] = "block";
+        else stack.push("block");
+      } else if (v === "end" || v === "until") {
+        const popped = stack.pop();
+        if (popped !== "block" && popped !== "function") return { code, lines: [] };
+      }
+    }
+    prev = token;
+  }
+  if (stack.length !== 1) return { code, lines: [] };
+  let out = "";
+  let cursor = 0;
+  for (const insert of inserts) {
+    out += code.slice(cursor, insert.at) + `${BREAK_HOOK}(${insert.line}) `;
+    cursor = insert.at;
+  }
+  out += code.slice(cursor);
+  return { code: out, lines: inserts.map((i) => i.line) };
+}
+function breakableLine(line, lines) {
+  for (const l of lines) if (l >= line) return l;
+  return null;
+}
+function effectiveBreakpoints(list, lines) {
+  const out = /* @__PURE__ */ new Set();
+  for (const line of list) {
+    const at = breakableLine(line, lines);
+    if (at !== null) out.add(at);
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+// src/debug/debugBlock.ts
+var DEBUG_BLOCK_BYTES = 4096;
+var DEBUG_MAGIC = 1195655747;
+var DBG_MAGIC = 0;
+var DBG_LINE_OFFSET = 4;
+var DBG_STATE = 8;
+var DBG_COMMAND = 12;
+var DBG_TRACE_USED = 16;
+var DBG_TRACE_DROPPED = 20;
+var DBG_PAUSED_LINE = 24;
+var DBG_BP_VERSION = 28;
+var DBG_BP_COUNT = 32;
+var DBG_LINE_COUNT = 36;
+var DBG_INFO_LENGTH = 40;
+var DBG_WATCH_LENGTH = 44;
+var DBG_BPS_AT = 64;
+var DBG_BPS_MAX = 240;
+var DBG_TRACE_AT = 1024;
+var DBG_TRACE_BYTES = 1024;
+var DBG_TRACE_MAX = 240;
+var DBG_WATCH_AT = 2048;
+var DBG_WATCH_BYTES = 512;
+var DBG_INFO_AT = 2560;
+var DBG_INFO_BYTES = 1536;
+var DebugCommand = { continue: 1, into: 2, over: 3, out: 4, refresh: 5 };
+function debugBlockAddress(layout) {
+  return layout.ramSize - PHYS_BLOCK_BYTES - DEBUG_BLOCK_BYTES;
+}
+function codeLineOffset(original, final) {
+  if (!original || final === null || final.length <= original.length) return 0;
+  const at = final.lastIndexOf(original);
+  if (at <= 0) return 0;
+  const head = final.slice(0, at);
+  let lines = 0;
+  for (let i = 0; i < head.length; i += 1) if (head.charCodeAt(i) === 10) lines += 1;
+  return lines;
+}
+function remapErrorLines(message, offset) {
+  return message.replace(/\[string "[^"]*"\]:(\d+):/g, (_all, n) => {
+    const line = Number(n) - offset;
+    return line > 0 ? `line ${line}:` : "cartbox:";
+  });
+}
+function errorStack(message) {
+  const at = /\nat (.*)$/m.exec(message);
+  if (!at) return [];
+  const frames = [];
+  for (const part of at[1].split(" < ")) {
+    const m = /^(.*):(\d+)$/.exec(part.trim());
+    if (m) frames.push({ name: m[1], line: Number(m[2]) });
+  }
+  return frames;
+}
+function debugSdkLua(address, options = {}) {
+  const dbg = options.debugger === true;
+  return `${dbg ? `local ${BREAK_HOOK}, __cbx_run
+` : ""}do
+  local _B = ${address}
+  local function _rd(a)
+    local v = peek(a) | (peek(a + 1) << 8) | (peek(a + 2) << 16) | (peek(a + 3) << 24)
+    if v >= 0x80000000 then v = v - 0x100000000 end
+    return v
+  end
+  local function _wr(a, v)
+    v = math.floor(v) & 0xffffffff
+    poke(a, v & 0xff) poke(a + 1, (v >> 8) & 0xff) poke(a + 2, (v >> 16) & 0xff) poke(a + 3, (v >> 24) & 0xff)
+  end
+  local function _live() return _rd(_B + ${DBG_MAGIC}) == ${DEBUG_MAGIC} end
+  local _trace = trace
+  trace = function(msg, color)
+    if _trace then _trace(msg, color) end
+    if not _live() then return end
+    local s = tostring(msg)
+    if #s > ${DBG_TRACE_MAX} then s = s:sub(1, ${DBG_TRACE_MAX}) end
+    local used = _rd(_B + ${DBG_TRACE_USED})
+    if used < 0 or used + 3 + #s > ${DBG_TRACE_BYTES} then
+      _wr(_B + ${DBG_TRACE_DROPPED}, _rd(_B + ${DBG_TRACE_DROPPED}) + 1)
+      return
+    end
+    local a = _B + ${DBG_TRACE_AT} + used
+    poke(a, #s & 0xff) poke(a + 1, #s >> 8) poke(a + 2, (math.tointeger(color) or 15) & 0xff)
+    for i = 1, #s do poke(a + 2 + i, s:byte(i)) end
+    _wr(_B + ${DBG_TRACE_USED}, used + 3 + #s)
+  end
+  local _src = debug.getinfo(1, "S").source
+  -- A cart line for a line of the merged source, or nil inside the injected code.
+  local function _cart(n)
+    local off = _live() and _rd(_B + ${DBG_LINE_OFFSET}) or 0
+    local count = _live() and _rd(_B + ${DBG_LINE_COUNT}) or 0
+    n = tonumber(n) - off
+    if n < 1 or (count > 0 and n > count) then return nil end
+    return n
+  end
+  local _tic = nil -- the cart's own TIC, once the debugger wraps it
+  -- A function the core calls (TIC, BDR ...) has no name Lua can see: look it up.
+  local function _name(info)
+    if info.name then return info.name end
+    if info.what == "main" then return "main" end
+    if _tic and info.func == _tic then return "TIC" end
+    for k, v in pairs(_G) do
+      if v == info.func and type(k) == "string" then return k end
+    end
+    return "?"
+  end
+  -- The cart frames of a stack, innermost first: {name, line, level}.
+  local function _frames(co, max)
+    local out = {}
+    for level = co and 0 or 2, 60 do
+      local info
+      if co then info = debug.getinfo(co, level, "Slnf") else info = debug.getinfo(level, "Slnf") end
+      if not info then break end
+      if info.source == _src and info.currentline and info.currentline > 0 then
+        local l = _cart(info.currentline)
+        if l then out[#out + 1] = { name = _name(info), line = l, level = level, func = info.func } end
+      end
+      if #out >= max then break end
+    end
+    return out
+  end
+  -- The core passes every runtime error through debug.traceback. Name cart
+  -- lines, and keep it short: the core keeps only 256 bytes of it.
+  local _tb = debug.traceback
+  local function _traceback(co, msg)
+    msg = tostring(msg or ""):gsub('^%[string "[^"]*"%]:(%d+):', function(n)
+      local l = _cart(n)
+      return l and ("line " .. l .. ":") or "cartbox:"
+    end)
+    local parts = {}
+    for _, f in ipairs(_frames(co, 6)) do parts[#parts + 1] = f.name .. ":" .. f.line end
+    if #parts > 0 then msg = msg .. "\\nat " .. table.concat(parts, " < ") end
+    return msg
+  end
+  debug.traceback = function(msg, ...)
+    if type(msg) ~= "string" and msg ~= nil then return _tb(msg, ...) end
+    return _traceback(nil, msg)
+  end${dbg ? debuggerLua() : ""}
+end`;
+}
+function debuggerLua() {
+  return `
+  local _bps, _bpver, _armed = {}, -1, false
+  local _step, _depth = 0, 0 -- step: 1 into, 2 over, 3 out
+  local _co = nil
+  local function _stackdepth()
+    local d = 0
+    for level = 2, 250 do
+      local info = debug.getinfo(level, "S")
+      if not info then break end
+      if info.source == _src then d = d + 1 end
+    end
+    return d
+  end
+  local function _loadbps()
+    local v = _rd(_B + ${DBG_BP_VERSION})
+    if v == _bpver then return end
+    _bpver = v
+    _bps = {}
+    for i = 0, math.min(_rd(_B + ${DBG_BP_COUNT}), ${DBG_BPS_MAX}) - 1 do _bps[_rd(_B + ${DBG_BPS_AT} + i * 4)] = true end
+  end
+  ${BREAK_HOOK} = function(line)
+    if not _armed then return end
+    local stop = _bps[line]
+    if not stop then
+      if _step == 1 then stop = true
+      elseif _step == 2 then stop = _stackdepth() <= _depth
+      elseif _step == 3 then stop = _stackdepth() < _depth end
+    end
+    if not stop or not coroutine.isyieldable() then return end
+    _depth = _stackdepth()
+    _step = 0
+    _wr(_B + ${DBG_PAUSED_LINE}, line)
+    _wr(_B + ${DBG_STATE}, 1)
+    coroutine.yield()
+    local cmd = _rd(_B + ${DBG_COMMAND})
+    _wr(_B + ${DBG_COMMAND}, 0)
+    _wr(_B + ${DBG_STATE}, 0)
+    _step = (cmd == ${DebugCommand.into} and 1) or (cmd == ${DebugCommand.over} and 2) or (cmd == ${DebugCommand.out} and 3) or 0
+    _armed = _step ~= 0 or next(_bps) ~= nil
+  end
+  local function _fmt(v, deep)
+    local t = type(v)
+    if t == "string" then
+      if #v > 40 then v = v:sub(1, 40) .. "..." end
+      return (string.format("%q", v):gsub("\\n", "n"))
+    elseif t == "number" then
+      return math.type(v) == "integer" and tostring(v) or string.format("%.4g", v)
+    elseif t == "table" then
+      if deep then return "{...}" end
+      local parts, n = {}, 0
+      for k, x in pairs(v) do
+        n = n + 1
+        if n <= 4 then parts[#parts + 1] = (type(k) == "string" and k or ("[" .. tostring(k) .. "]")) .. "=" .. _fmt(x, true) end
+      end
+      return "{" .. table.concat(parts, ", ") .. (n > 4 and (", ... " .. n .. " in all") or "") .. "}"
+    elseif t == "function" then
+      return "function"
+    end
+    return tostring(v)
+  end
+  local function _show(v)
+    local ok, s = pcall(_fmt, v)
+    s = ok and s or "?"
+    return #s > 90 and (s:sub(1, 90) .. "...") or s
+  end
+  -- Write where the cart stopped: its stack, the stopped function's locals and
+  -- upvalues, and each watch expression's value there.
+  local function _writeinfo(co)
+    local lines = {}
+    local frames = _frames(co, 8)
+    for _, f in ipairs(frames) do lines[#lines + 1] = "S " .. f.name .. ":" .. f.line end
+    local top = frames[1]
+    local scope = {}
+    if top then
+      for i = 1, 200 do
+        local k, v = debug.getlocal(co, top.level, i)
+        if not k then break end
+        if k:sub(1, 1) ~= "(" then scope[k] = { v }; lines[#lines + 1] = "L " .. k .. "=" .. _show(v) end
+      end
+      for i = 1, 60 do
+        local k, v = debug.getupvalue(top.func, i)
+        if not k then break end
+        if k ~= "_ENV" and k ~= "${BREAK_HOOK}" and not scope[k] then scope[k] = { v }; lines[#lines + 1] = "U " .. k .. "=" .. _show(v) end
+      end
+    end
+    local env = setmetatable({}, { __index = function(_, k)
+      local s = scope[k]
+      if s then return s[1] end
+      return _G[k]
+    end })
+    local n = _rd(_B + ${DBG_WATCH_LENGTH})
+    local text = {}
+    for i = 0, math.min(n, ${DBG_WATCH_BYTES}) - 1 do text[#text + 1] = string.char(peek(_B + ${DBG_WATCH_AT} + i)) end
+    local index = 0
+    for expr in (table.concat(text) .. "\\n"):gmatch("([^\\n]*)\\n") do
+      index = index + 1
+      if expr:match("%S") then
+        local f, err = load("return " .. expr, "=watch", "t", env)
+        local ok, v = false, err
+        if f then ok, v = pcall(f) end
+        lines[#lines + 1] = "W " .. index .. (ok and ("=" .. _show(v)) or ("!" .. tostring(v):gsub("^watch:1: ", ""))):sub(1, 120)
+      end
+    end
+    local out = table.concat(lines, "\\n")
+    if #out > ${DBG_INFO_BYTES} then out = out:sub(1, ${DBG_INFO_BYTES}) end
+    for i = 1, #out do poke(_B + ${DBG_INFO_AT} + i - 1, out:byte(i)) end
+    _wr(_B + ${DBG_INFO_LENGTH}, #out)
+  end
+  -- Run one frame of the cart's TIC: straight through when nothing can stop it,
+  -- else in a coroutine the hooks can yield from, carrying on from a stop.
+  __cbx_run = function(tic)
+    _tic = tic
+    if not _live() then return tic() end
+    _loadbps()
+    if _co then
+      if _rd(_B + ${DBG_STATE}) == 1 then
+        local cmd = _rd(_B + ${DBG_COMMAND})
+        if cmd == ${DebugCommand.refresh} then
+          _wr(_B + ${DBG_COMMAND}, 0)
+          _writeinfo(_co)
+        end
+        if cmd < ${DebugCommand.continue} or cmd > ${DebugCommand.out} then return end
+      end
+    else
+      _armed = _step ~= 0 or next(_bps) ~= nil
+      if not _armed then return tic() end
+      _co = coroutine.create(tic)
+    end
+    local ok, err = coroutine.resume(_co)
+    if not ok then
+      local co = _co
+      _co = nil
+      _step = 0
+      _wr(_B + ${DBG_STATE}, 0)
+      error(_traceback(co, err), 0)
+    end
+    if coroutine.status(_co) == "dead" then
+      _co = nil
+    else
+      _writeinfo(_co)
+    end
+  end`;
+}
+function debugPostlude() {
+  return `do local _t = TIC if type(_t) == "function" then TIC = function() __cbx_run(_t) end end end`;
+}
+function parsePauseInfo(line, text, watchCount) {
+  const stack = [];
+  const locals = [];
+  const upvalues = [];
+  const watches = Array.from({ length: watchCount }, () => ({ value: "", error: false }));
+  for (const row of text.split("\n")) {
+    const kind = row.slice(0, 2);
+    const body = row.slice(2);
+    if (kind === "S ") {
+      const m = /^(.*):(\d+)$/.exec(body);
+      if (m) stack.push({ name: m[1], line: Number(m[2]) });
+    } else if (kind === "L " || kind === "U ") {
+      const eq = body.indexOf("=");
+      if (eq > 0) (kind === "L " ? locals : upvalues).push({ name: body.slice(0, eq), value: body.slice(eq + 1) });
+    } else if (kind === "W ") {
+      const m = /^(\d+)([=!])(.*)$/s.exec(body);
+      const index = m ? Number(m[1]) - 1 : -1;
+      if (m && index >= 0 && index < watchCount) watches[index] = { value: m[3], error: m[2] === "!" };
+    }
+  }
+  return { line, stack, locals, upvalues, watches };
+}
+function readPause(block, watchCount) {
+  if (block.getInt32(DBG_STATE, true) !== 1) return null;
+  const length = Math.max(0, Math.min(block.getInt32(DBG_INFO_LENGTH, true), DBG_INFO_BYTES));
+  const text = new TextDecoder().decode(new Uint8Array(block.buffer, block.byteOffset + DBG_INFO_AT, length));
+  return parsePauseInfo(block.getInt32(DBG_PAUSED_LINE, true), text, watchCount);
+}
+function sendDebugCommand(block, command) {
+  block.setInt32(DBG_COMMAND, command, true);
+}
+function drainTraces(block) {
+  const used = Math.min(block.getInt32(DBG_TRACE_USED, true), DBG_TRACE_BYTES);
+  const dropped = block.getInt32(DBG_TRACE_DROPPED, true);
+  const traces = [];
+  if (used > 0) {
+    const decoder = new TextDecoder();
+    let at = 0;
+    while (at + 3 <= used) {
+      const length = block.getUint16(DBG_TRACE_AT + at, true);
+      const color = block.getUint8(DBG_TRACE_AT + at + 2);
+      const start = DBG_TRACE_AT + at + 3;
+      if (at + 3 + length > used) break;
+      traces.push({ text: decoder.decode(new Uint8Array(block.buffer, block.byteOffset + start, length)), color });
+      at += 3 + length;
+    }
+  }
+  if (used !== 0) block.setInt32(DBG_TRACE_USED, 0, true);
+  if (dropped !== 0) block.setInt32(DBG_TRACE_DROPPED, 0, true);
+  return { traces, dropped: Math.max(0, dropped) };
+}
+function armDebugBlock(block, lineOffset, lineCount = 0) {
+  block.setUint32(DBG_MAGIC, DEBUG_MAGIC, true);
+  block.setInt32(DBG_LINE_OFFSET, lineOffset, true);
+  block.setInt32(DBG_LINE_COUNT, lineCount, true);
+}
+function writeBreakpoints(block, lines) {
+  const list = lines.slice(0, DBG_BPS_MAX);
+  list.forEach((line, i) => block.setInt32(DBG_BPS_AT + i * 4, line, true));
+  block.setInt32(DBG_BP_COUNT, list.length, true);
+  block.setInt32(DBG_BP_VERSION, block.getInt32(DBG_BP_VERSION, true) + 1 | 0, true);
+}
+function writeWatches(block, expressions) {
+  const encoder = new TextEncoder();
+  let bytes = new Uint8Array(0);
+  let fitted = 0;
+  for (const expr of expressions) {
+    const next = encoder.encode((fitted > 0 ? "\n" : "") + expr.replace(/\n/g, " "));
+    if (bytes.length + next.length > DBG_WATCH_BYTES) break;
+    const joined = new Uint8Array(bytes.length + next.length);
+    joined.set(bytes);
+    joined.set(next, bytes.length);
+    bytes = joined;
+    fitted += 1;
+  }
+  new Uint8Array(block.buffer, block.byteOffset + DBG_WATCH_AT, bytes.length).set(bytes);
+  block.setInt32(DBG_WATCH_LENGTH, bytes.length, true);
+  return fitted;
+}
+
+// src/actionsSdk.ts
+var INPUT_BLOCK_BYTES = 16;
+var INPUT_MAGIC = 1095320131;
+var INPUT_HELD = 4;
+var INPUT_PREVIOUS = 8;
+function inputBlockAddress(layout) {
+  return debugBlockAddress(layout) - INPUT_BLOCK_BYTES;
+}
+function writeInputBlock(block, held, previous) {
+  block.setUint32(0, INPUT_MAGIC, true);
+  block.setUint32(INPUT_HELD, held >>> 0, true);
+  block.setUint32(INPUT_PREVIOUS, previous >>> 0, true);
+}
+var lua2 = (s) => JSON.stringify(s);
+function actionsSdkLua(actions, layout) {
+  if (!actions || actions.length === 0) return "";
+  const names = actions.map((a) => lua2(a.name));
+  const idx = actions.map((a, i) => `[${lua2(a.name)}]=${i}`);
+  const buttons = actions.map((a) => `{${a.buttons.join(",")}}`);
+  const keyLabels = actions.map((a) => lua2(actionLabel(a, "keyboard")));
+  const padLabels = actions.map((a) => lua2(actionLabel(a, "pad")));
+  return `do
+local _A = ${inputBlockAddress(layout)}
+local NAMES = {${names.join(",")}}
+local IDX = {${idx.join(",")}}
+local BTN = {${buttons.join(",")}}
+local LK, LP = {${keyLabels.join(",")}}, {${padLabels.join(",")}}
+local function rd(a) return peek(a) | (peek(a + 1) << 8) | (peek(a + 2) << 16) | (peek(a + 3) << 24) end
+local function index(n) if type(n) == "number" then return n end return IDX[n] end
+local function any(i, f) for _, b in ipairs(BTN[i + 1] or {}) do if f(b) then return true end end return false end
+-- now, before (nil for an unknown action); without the host, from the console buttons.
+local function state(n)
+  local i = index(n)
+  if i == nil or i < 0 or i >= #NAMES then return nil end
+  if rd(_A) ~= ${INPUT_MAGIC} then
+    local now = any(i, btn)
+    return now, now and not any(i, btnp)
+  end
+  return (rd(_A + ${INPUT_HELD}) >> i) & 1 == 1, (rd(_A + ${INPUT_PREVIOUS}) >> i) & 1 == 1
+end
+cartbox.action = function(n) local now = state(n) return now == true end
+cartbox.actionp = function(n) local now, before = state(n) return now == true and not before end
+cartbox.actionr = function(n) local now, before = state(n) return now == false and before == true end
+cartbox.actions = function() local out = {} for i, v in ipairs(NAMES) do out[i] = v end return out end
+cartbox.actionlabel = function(n, device)
+  local i = index(n)
+  if i == nil then return "" end
+  return (device == "pad" and LP or LK)[i + 1] or ""
+end
+end`;
+}
+function readSidecarActions(raw) {
+  if (!raw) return [];
+  try {
+    return parseInputActions(JSON.parse(raw).actions);
+  } catch {
+    return [];
+  }
+}
+
 // src/cartridge.ts
 var CartridgeLoadError = class extends Error {
   constructor(message, cause) {
@@ -3395,6 +4231,7 @@ function stickDirections(x, y, threshold = STICK_DPAD_THRESHOLD) {
 }
 
 // src/controls.ts
+import { parseActionRebinds } from "@cartbox/editor";
 var PAD_BUTTONS = [
   "A",
   "B",
@@ -3478,7 +4315,8 @@ function parseControlSettings(value, defaults = DEFAULT_CONTROL_SETTINGS) {
     padBindings,
     keyBindings,
     touchOpacity: num3(raw.touchOpacity, 0.2, 1, defaults.touchOpacity),
-    touchScale: num3(raw.touchScale, 0.7, 1.4, defaults.touchScale)
+    touchScale: num3(raw.touchScale, 0.7, 1.4, defaults.touchScale),
+    ...raw.actionBindings !== void 0 ? { actionBindings: parseActionRebinds(raw.actionBindings) } : defaults.actionBindings ? { actionBindings: defaults.actionBindings } : {}
   };
 }
 function applyLookSettings(axes, settings) {
@@ -3531,10 +4369,12 @@ function readPad(raw, bindings) {
   const pad = standardizePad(raw);
   let mask = 0;
   let start = false;
+  const pressed = /* @__PURE__ */ new Set();
   PAD_BUTTONS.forEach((name, index) => {
     const button = pad.buttons[index];
     const down = button ? button.pressed || button.value > 0.5 : false;
     if (!down) return;
+    pressed.add(name);
     const target = bindings[name];
     if (target === "start") start = true;
     else if (target !== null && target !== void 0) mask |= 1 << target;
@@ -3542,10 +4382,11 @@ function readPad(raw, bindings) {
   if (bindings.Start === null && !Object.values(bindings).includes("start") && pad.buttons[9]?.pressed) start = true;
   const [lx, ly] = deadZoned(pad.axes[0] ?? 0, pad.axes[1] ?? 0);
   const [rx, ry] = deadZoned(pad.axes[2] ?? 0, pad.axes[3] ?? 0);
-  return { mask, axes: [lx, ly, rx, ry], start };
+  return { mask, axes: [lx, ly, rx, ry], start, pressed };
 }
 
 // src/input.ts
+var NO_KEYS = /* @__PURE__ */ new Set();
 function resolveButton(keyCode, bindings = DEFAULT_KEY_BINDINGS) {
   return bindings[keyCode];
 }
@@ -3611,37 +4452,52 @@ var KeyboardInput = class {
    * @param bindings The key map, or a getter for it (read on every key, so a
    *   rebind from a settings menu applies at once).
    * @param onStart Called for a Start key (Enter / P) that isn't bound to a button.
+   * @param claimed Keys the cart's input actions bind. They're the actions':
+   *   kept from the page (no scrolling on Space), and they press no console
+   *   button and never open Start.
    */
-  constructor(target, state, bindings = DEFAULT_KEY_BINDINGS, onStart) {
+  constructor(target, state, bindings = DEFAULT_KEY_BINDINGS, onStart, claimed = () => NO_KEYS) {
     this.target = target;
+    /** Every key held now (KeyboardEvent.code), bound or not — what input actions read. */
+    this.held = /* @__PURE__ */ new Set();
     const current = typeof bindings === "function" ? bindings : () => bindings;
     const held = /* @__PURE__ */ new Map();
     this.onKeyDown = (event) => {
+      const tag = event.target?.tagName;
+      const typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+      if (!typing) this.held.add(event.code);
       const button = resolveButton(event.code, current());
+      if (claimed().has(event.code) && !typing) {
+        event.preventDefault();
+        return;
+      }
       if (button !== void 0) {
         held.set(event.code, button);
         state.press(button);
         event.preventDefault();
       } else if (onStart && START_KEYS.includes(event.code) && !event.repeat) {
-        const tag = event.target?.tagName;
-        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON") return;
+        if (typing || tag === "BUTTON") return;
         event.preventDefault();
         onStart();
       }
     };
     this.onKeyUp = (event) => {
+      this.held.delete(event.code);
       const button = held.get(event.code) ?? resolveButton(event.code, current());
       held.delete(event.code);
       if (button !== void 0) {
         state.release(button);
       }
     };
+    this.onBlur = () => this.held.clear();
     target.addEventListener("keydown", this.onKeyDown);
     target.addEventListener("keyup", this.onKeyUp);
+    target.addEventListener("blur", this.onBlur);
   }
   destroy() {
     this.target.removeEventListener("keydown", this.onKeyDown);
     this.target.removeEventListener("keyup", this.onKeyUp);
+    this.target.removeEventListener("blur", this.onBlur);
   }
 };
 var TOUCH_LAYOUT = [
@@ -3888,12 +4744,15 @@ var TouchInput = class {
   }
 };
 var GamepadInput = class {
-  constructor(nav, state, settings, onStart) {
+  constructor(nav, state, settings, onStart, claimed = () => NO_KEYS) {
     this.nav = nav;
     this.state = state;
     this.settings = settings;
     this.onStart = onStart;
+    this.claimed = claimed;
     this.startHeld = false;
+    /** Every controller button held at the last poll — what input actions read. */
+    this.pressed = NO_KEYS;
     /** The pad index in use, so a second controller plugged in later doesn't take over mid-game. */
     this.index = null;
   }
@@ -3916,10 +4775,15 @@ var GamepadInput = class {
     if (!pad) {
       this.state.setPad(0, [0, 0, 0, 0]);
       this.startHeld = false;
+      this.pressed = NO_KEYS;
       return;
     }
-    const { mask, axes, start } = readPad(pad, this.settings().padBindings);
+    const claimed = this.claimed();
+    let bindings = this.settings().padBindings;
+    if (claimed.size > 0) bindings = Object.fromEntries(Object.entries(bindings).map(([b, t]) => [b, claimed.has(b) ? null : t]));
+    const { mask, axes, start, pressed } = readPad(pad, bindings);
     this.state.setPad(mask, axes);
+    this.pressed = pressed;
     if (start && !this.startHeld) this.onStart?.();
     this.startHeld = start;
   }
@@ -4451,6 +5315,12 @@ cartbox = {
     on = function() end, update = function() return nil end, draw = function() end,
   },
   effects = function() return {} end,
+  -- Input actions (EP15): replaced when the cart has any.
+  action = function() return false end,
+  actionp = function() return false end,
+  actionr = function() return false end,
+  actions = function() return {} end,
+  actionlabel = function() return "" end,
   -- Placing objects (EP14): live once the scene has the runtime.
   place = function() end,
   -- Components (EP14): replaced when any object has one.
@@ -5040,227 +5910,6 @@ function buildOrbitCamera(bounds, yaw, pitch, aspect, options = {}) {
     view: viewMatrix(eye, target),
     projection: projectionMatrix(fovY, aspect, options.near && options.near > 0 ? options.near : Math.max(0.01, radius * 0.05), far)
   };
-}
-
-// src/physics/protocol.ts
-var CLASSIC = { pmemAddress: 81924, ramSize: 98304 };
-var PRO = { pmemAddress: 542304, ramSize: 786432 };
-var ERA = { pmemAddress: 257632, ramSize: 393216 };
-var HD = { pmemAddress: 3068512, ramSize: 8388608 };
-var RAM_LAYOUTS = {
-  classic: CLASSIC,
-  voxel: CLASSIC,
-  pro: PRO,
-  portrait: PRO,
-  ps1: ERA,
-  n64: ERA,
-  xbox360: HD,
-  modern: HD
-};
-var PHYS_BLOCK_BYTES = 8192;
-var PHYS_MAGIC = 1213219395;
-var PHYS_FIX = 1024;
-var PHYS_HDR_MAGIC = 0;
-var PHYS_HDR_BODIES = 4;
-var PHYS_HDR_TICK = 8;
-var PHYS_HDR_HASH = 12;
-var PHYS_HDR_LEVEL = 16;
-var PHYS_HDR_LEVEL_LOADING = 20;
-var PHYS_HDR_LEVEL_PROGRESS = 24;
-var PHYS_BODIES = 64;
-var PHYS_BODY_BYTES = 32;
-var PHYS_MAX_BODIES = 64;
-var PHYS_RAYS = PHYS_BODIES + PHYS_MAX_BODIES * PHYS_BODY_BYTES;
-var PHYS_RAY_BYTES = 32;
-var PHYS_MAX_RAYS = 16;
-var PHYS_EVENTS = PHYS_RAYS + PHYS_MAX_RAYS * PHYS_RAY_BYTES;
-var PHYS_EVENT_BYTES = 12;
-var PHYS_MAX_EVENTS = 48;
-var PHYS_OVERLAPS = PHYS_EVENTS + 4 + PHYS_MAX_EVENTS * PHYS_EVENT_BYTES;
-var PHYS_OVERLAP_BYTES = 8;
-var PHYS_MAX_OVERLAPS = 64;
-var PHYS_EVENT_STARTED = 1;
-var PHYS_EVENT_TRIGGER = 2;
-var PHYS_AGENTS = 3720;
-var PHYS_AGENT_BYTES = 16;
-var PHYS_MAX_AGENTS = 16;
-var NAV_FLAG_MOVING = 1;
-var NAV_FLAG_AIR = 2;
-var NAV_FLAG_ARRIVED = 4;
-var NAV_FLAG_NO_PATH = 8;
-var NAV_FLAG_OBSTACLE = 16;
-var PHYS_ANIMS = 6400;
-var PHYS_ANIM_BYTES = 16;
-var PHYS_MAX_ANIMS = 64;
-var PHYS_ANIM_EVENTS = PHYS_ANIMS + 4 + PHYS_MAX_ANIMS * PHYS_ANIM_BYTES;
-var PHYS_ANIM_EVENT_BYTES = 8;
-var PHYS_MAX_ANIM_EVENTS = 32;
-var PHYS_JOINTS = 7700;
-var PHYS_JOINT_BYTES = 20;
-var PHYS_MAX_JOINTS = 16;
-var PHYS_TIMELINE = 8032;
-var PHYS_TIMELINE_EVENTS = PHYS_TIMELINE + 12;
-var PHYS_MAX_TIMELINE_EVENTS = 8;
-function writeLevelState(block, level) {
-  block.setInt32(PHYS_HDR_LEVEL, level.current, true);
-  block.setInt32(PHYS_HDR_LEVEL_LOADING, level.loading, true);
-  block.setInt32(PHYS_HDR_LEVEL_PROGRESS, toFix(Math.max(0, Math.min(1, level.progress))), true);
-}
-function writeTimelineState(block, playback, events = []) {
-  block.setInt32(PHYS_TIMELINE, playback.index, true);
-  block.setInt32(PHYS_TIMELINE + 4, toFix(playback.time), true);
-  block.setInt32(PHYS_TIMELINE + 8, playback.playing ? 1 : 0, true);
-  const n = Math.min(events.length, PHYS_MAX_TIMELINE_EVENTS);
-  block.setInt32(PHYS_TIMELINE_EVENTS, n, true);
-  for (let i = 0; i < n; i += 1) block.setInt32(PHYS_TIMELINE_EVENTS + 4 + i * 4, events[i], true);
-}
-function writeAgents(block, agents) {
-  const n = Math.min(agents.length, PHYS_MAX_AGENTS);
-  block.setInt32(PHYS_AGENTS, n, true);
-  for (let i = 0; i < n; i += 1) {
-    const a = agents[i];
-    const at = PHYS_AGENTS + 4 + i * PHYS_AGENT_BYTES;
-    for (let k = 0; k < 3; k += 1) block.setInt32(at + k * 4, toFix(a.position[k]), true);
-    let f2 = a.facing;
-    while (f2 > Math.PI) f2 -= 2 * Math.PI;
-    while (f2 < -Math.PI) f2 += 2 * Math.PI;
-    const facing = Math.round(f2 * 1e4) & 65535;
-    block.setUint32(at + 12, (a.key & 1023 | (a.flags & 63) << 10 | facing << 16) >>> 0, true);
-  }
-}
-function writeJointPositions(block, joints) {
-  const n = Math.min(joints.length, PHYS_MAX_JOINTS);
-  block.setInt32(PHYS_JOINTS, n, true);
-  for (let i = 0; i < n; i += 1) {
-    const at = PHYS_JOINTS + 4 + i * PHYS_JOINT_BYTES;
-    block.setInt32(at, joints[i].object, true);
-    block.setInt32(at + 4, joints[i].joint, true);
-    for (let k = 0; k < 3; k += 1) block.setInt32(at + 8 + k * 4, toFix(joints[i].position[k]), true);
-  }
-}
-var PHYS_CMDS = 4096;
-var PHYS_CMD_BYTES = 32;
-var PHYS_MAX_CMDS = 64;
-var PHYS_FLAG_GROUNDED = 1;
-var PHYS_FLAG_SLEEPING = 2;
-var PHYS_OP_IMPULSE = 1;
-var PHYS_OP_VELOCITY = 2;
-var PHYS_OP_TELEPORT = 3;
-var PHYS_OP_MOVE = 4;
-var PHYS_OP_RAY = 5;
-var PHYS_OP_SPAWN = 6;
-var PHYS_OP_DESPAWN = 7;
-var PHYS_OP_CAST = 8;
-var PHYS_CAST_RAY = 0;
-var PHYS_CAST_SPHERE = 1;
-var PHYS_CAST_BOX = 2;
-var PHYS_CAST_CAPSULE = 3;
-var PHYS_OP_MOTOR = 9;
-var PHYS_OP_UNJOIN = 10;
-var PHYS_OP_PLAY = 11;
-var PHYS_OP_ANIM_SET = 12;
-var PHYS_OP_ANIM_TRIGGER = 13;
-var PHYS_OP_ANIM_GOTO = 14;
-var PHYS_OP_IK = 15;
-var PHYS_OP_IK_POLE = 16;
-var PHYS_OP_LOOKAT = 17;
-var PHYS_OP_WATCH = 18;
-var PHYS_OP_TIMELINE = 19;
-var PHYS_OP_LEVEL = 20;
-var PHYS_OP_AGENT = 21;
-var PHYS_OP_AGENT_GOTO = 22;
-var PHYS_OP_AGENT_STOP = 23;
-var PHYS_OP_AGENT_REMOVE = 24;
-var PHYS_OP_STREAM_FOCUS = 25;
-var PHYS_OP_BURST = 26;
-var PHYS_OP_DECAL = 27;
-var PHYS_OP_RAGDOLL = 28;
-var PHYS_OP_DEBRIS = 29;
-var PHYS_OP_SHIELD = 30;
-var PHYS_OP_SOUND = 31;
-var PHYS_OP_SOUND_LOOP = 32;
-var PHYS_OP_MIX = 33;
-var PHYS_OP_PLACE = 34;
-var PHYS_OP_UNPLACE = 35;
-function physicsBlockAddress(layout) {
-  return layout.ramSize - PHYS_BLOCK_BYTES;
-}
-var toFix = (v) => {
-  const n = Math.round(v * PHYS_FIX);
-  return Math.max(-2147483647, Math.min(2147483647, Number.isFinite(n) ? n : 0));
-};
-var fromFix = (n) => n / PHYS_FIX;
-function writePhysicsState(block, tick, bodies, rays, events = [], overlaps = [], hash = 0) {
-  block.setInt32(PHYS_HDR_HASH, hash | 0, true);
-  const ne = Math.min(events.length, PHYS_MAX_EVENTS);
-  block.setInt32(PHYS_EVENTS, ne, true);
-  for (let i = 0; i < ne; i += 1) {
-    const e = events[i];
-    const at = PHYS_EVENTS + 4 + i * PHYS_EVENT_BYTES;
-    block.setInt32(at, e.a, true);
-    block.setInt32(at + 4, e.b, true);
-    block.setInt32(at + 8, (e.started ? PHYS_EVENT_STARTED : 0) | (e.trigger ? PHYS_EVENT_TRIGGER : 0), true);
-  }
-  const no = Math.min(overlaps.length, PHYS_MAX_OVERLAPS);
-  block.setInt32(PHYS_OVERLAPS, no, true);
-  for (let i = 0; i < no; i += 1) {
-    const at = PHYS_OVERLAPS + 4 + i * PHYS_OVERLAP_BYTES;
-    block.setInt32(at, overlaps[i][0], true);
-    block.setInt32(at + 4, overlaps[i][1], true);
-  }
-  block.setInt32(PHYS_HDR_MAGIC, PHYS_MAGIC, true);
-  const n = Math.min(bodies.length, PHYS_MAX_BODIES);
-  block.setInt32(PHYS_HDR_BODIES, n, true);
-  block.setInt32(PHYS_HDR_TICK, tick | 0, true);
-  for (let i = 0; i < n; i += 1) {
-    const b = bodies[i];
-    const at = PHYS_BODIES + i * PHYS_BODY_BYTES;
-    block.setInt32(at, b.object, true);
-    for (let k = 0; k < 3; k += 1) block.setInt32(at + 4 + k * 4, toFix(b.position[k]), true);
-    for (let k = 0; k < 3; k += 1) block.setInt32(at + 16 + k * 4, toFix(b.velocity[k]), true);
-    block.setInt32(at + 28, (b.grounded ? PHYS_FLAG_GROUNDED : 0) | (b.sleeping ? PHYS_FLAG_SLEEPING : 0), true);
-  }
-  for (let i = 0; i < PHYS_MAX_RAYS; i += 1) {
-    const r = rays[i] ?? null;
-    const at = PHYS_RAYS + i * PHYS_RAY_BYTES;
-    if (!r) {
-      block.setInt32(at, 0, true);
-      continue;
-    }
-    block.setInt32(at, r.object >= 0 ? r.object + 2 : 1, true);
-    for (let k = 0; k < 3; k += 1) block.setInt32(at + 4 + k * 4, toFix(r.point[k]), true);
-    for (let k = 0; k < 3; k += 1) block.setInt32(at + 16 + k * 4, toFix(r.normal[k]), true);
-    block.setInt32(at + 28, toFix(r.distance), true);
-  }
-}
-function writeAnimationState(block, playback, events = []) {
-  const n = Math.min(playback.length, PHYS_MAX_ANIMS);
-  block.setInt32(PHYS_ANIMS, n, true);
-  for (let i = 0; i < n; i += 1) {
-    const at = PHYS_ANIMS + 4 + i * PHYS_ANIM_BYTES;
-    block.setInt32(at, playback[i].object, true);
-    block.setInt32(at + 4, playback[i].clip, true);
-    block.setInt32(at + 8, toFix(playback[i].time), true);
-    block.setInt32(at + 12, playback[i].state ?? -1, true);
-  }
-  const ne = Math.min(events.length, PHYS_MAX_ANIM_EVENTS);
-  block.setInt32(PHYS_ANIM_EVENTS, ne, true);
-  for (let i = 0; i < ne; i += 1) {
-    const at = PHYS_ANIM_EVENTS + 4 + i * PHYS_ANIM_EVENT_BYTES;
-    block.setInt32(at, events[i].object, true);
-    block.setInt32(at + 4, events[i].event, true);
-  }
-}
-function takePhysicsCommands(block) {
-  const n = Math.max(0, Math.min(PHYS_MAX_CMDS, block.getInt32(PHYS_CMDS, true)));
-  const out = [];
-  for (let i = 0; i < n; i += 1) {
-    const at = PHYS_CMDS + 4 + i * PHYS_CMD_BYTES;
-    const v = [0, 0, 0, 0, 0, 0].map((_, k) => fromFix(block.getInt32(at + 8 + k * 4, true)));
-    out.push({ op: block.getInt32(at, true), a: block.getInt32(at + 4, true), v });
-  }
-  block.setInt32(PHYS_CMDS, 0, true);
-  return out;
 }
 
 // src/physics/physicsSession.ts
@@ -7577,558 +8226,6 @@ function estimateSceneBytes(instances, width, height) {
     }
   }
   return bytes;
-}
-
-// src/debug/instrument.ts
-var KEYWORDS = /* @__PURE__ */ new Set([
-  "and",
-  "break",
-  "do",
-  "else",
-  "elseif",
-  "end",
-  "false",
-  "for",
-  "function",
-  "goto",
-  "if",
-  "in",
-  "local",
-  "nil",
-  "not",
-  "or",
-  "repeat",
-  "return",
-  "then",
-  "true",
-  "until",
-  "while"
-]);
-var SYMBOLS = ["...", "..", "::", "==", "~=", "<=", ">=", "//", "<<", ">>"];
-function tokenizeLua(code) {
-  const out = [];
-  let i = 0;
-  let line = 1;
-  const n = code.length;
-  const longOpen = (at) => {
-    if (code[at] !== "[") return 0;
-    let j = at + 1;
-    while (code[j] === "=") j += 1;
-    return code[j] === "[" ? j - at + 1 : 0;
-  };
-  const skipLong = (level) => {
-    const close = `]${"=".repeat(level)}]`;
-    const end = code.indexOf(close, i);
-    if (end < 0) return false;
-    for (let k = i; k < end; k += 1) if (code.charCodeAt(k) === 10) line += 1;
-    i = end + close.length;
-    return true;
-  };
-  while (i < n) {
-    const c = code[i];
-    if (c === "\n") {
-      line += 1;
-      i += 1;
-      continue;
-    }
-    if (c === " " || c === "	" || c === "\r" || c === "\f" || c === "\v") {
-      i += 1;
-      continue;
-    }
-    const start = i;
-    const startLine = line;
-    if (c === "-" && code[i + 1] === "-") {
-      i += 2;
-      const open2 = longOpen(i);
-      if (open2 > 0) {
-        i += open2;
-        if (!skipLong(open2 - 2)) return null;
-      } else {
-        while (i < n && code[i] !== "\n") i += 1;
-      }
-      continue;
-    }
-    const open = longOpen(i);
-    if (open > 0) {
-      i += open;
-      if (!skipLong(open - 2)) return null;
-      out.push({ type: "string", value: code.slice(start, i), line: startLine, start });
-      continue;
-    }
-    if (c === '"' || c === "'") {
-      i += 1;
-      while (i < n && code[i] !== c) {
-        if (code[i] === "\\") {
-          i += 1;
-          if (code[i] === "\n") line += 1;
-          else if (code[i] === "z") {
-            i += 1;
-            while (i < n && /\s/.test(code[i])) {
-              if (code[i] === "\n") line += 1;
-              i += 1;
-            }
-            continue;
-          }
-        } else if (code[i] === "\n") return null;
-        i += 1;
-      }
-      if (i >= n) return null;
-      i += 1;
-      out.push({ type: "string", value: code.slice(start, i), line: startLine, start });
-      continue;
-    }
-    if (/[0-9]/.test(c) || c === "." && /[0-9]/.test(code[i + 1] ?? "")) {
-      if (c === "0" && (code[i + 1] === "x" || code[i + 1] === "X")) {
-        i += 2;
-        while (i < n && /[0-9a-fA-F.pP]/.test(code[i])) {
-          if ((code[i] === "p" || code[i] === "P") && (code[i + 1] === "+" || code[i + 1] === "-")) i += 1;
-          i += 1;
-        }
-      } else {
-        while (i < n && /[0-9.eE]/.test(code[i])) {
-          if ((code[i] === "e" || code[i] === "E") && (code[i + 1] === "+" || code[i + 1] === "-")) i += 1;
-          i += 1;
-        }
-      }
-      out.push({ type: "number", value: code.slice(start, i), line: startLine, start });
-      continue;
-    }
-    if (/[A-Za-z_]/.test(c)) {
-      while (i < n && /[A-Za-z0-9_]/.test(code[i])) i += 1;
-      const value = code.slice(start, i);
-      out.push({ type: KEYWORDS.has(value) ? "keyword" : "name", value, line: startLine, start });
-      continue;
-    }
-    const symbol = SYMBOLS.find((s) => code.startsWith(s, i)) ?? c;
-    if (!/[+\-*/%^#&~|<>=(){}[\];:,.]/.test(symbol[0])) return null;
-    i += symbol.length;
-    out.push({ type: "symbol", value: symbol, line: startLine, start });
-  }
-  return out;
-}
-var STATEMENT_KEYWORDS = /* @__PURE__ */ new Set(["local", "if", "for", "while", "repeat", "do", "return", "break", "goto", "function"]);
-var ENDS_STATEMENT = /* @__PURE__ */ new Set(["end", "then", "do", "else", "repeat", "break", ")", "]", "}", ";", "true", "false", "nil", "..."]);
-var BREAK_HOOK = "__bp";
-function instrumentLua(code) {
-  const tokens = tokenizeLua(code);
-  if (!tokens) return { code, lines: [] };
-  const stack = ["root"];
-  const inserts = [];
-  let prev = null;
-  for (const token of tokens) {
-    const top = stack[stack.length - 1];
-    const firstOnLine = !prev || prev.line !== token.line;
-    if (firstOnLine && (top === "root" || top === "block" || top === "function")) {
-      const starts = token.type === "name" || token.type === "keyword" && STATEMENT_KEYWORDS.has(token.value) || token.value === "::";
-      const after = !prev || prev.type === "name" || prev.type === "number" || prev.type === "string" || ENDS_STATEMENT.has(prev.value);
-      if (starts && after) inserts.push({ at: token.start, line: token.line });
-    }
-    const v = token.value;
-    if (token.type === "symbol") {
-      if (v === "(" || v === "[" || v === "{") stack.push("bracket");
-      else if (v === ")" || v === "]" || v === "}") {
-        if (stack.pop() !== "bracket") return { code, lines: [] };
-      }
-    } else if (token.type === "keyword") {
-      if (v === "function") stack.push("function");
-      else if (v === "if" || v === "repeat") stack.push("block");
-      else if (v === "while" || v === "for") stack.push("head");
-      else if (v === "do") {
-        if (top === "head") stack[stack.length - 1] = "block";
-        else stack.push("block");
-      } else if (v === "end" || v === "until") {
-        const popped = stack.pop();
-        if (popped !== "block" && popped !== "function") return { code, lines: [] };
-      }
-    }
-    prev = token;
-  }
-  if (stack.length !== 1) return { code, lines: [] };
-  let out = "";
-  let cursor = 0;
-  for (const insert of inserts) {
-    out += code.slice(cursor, insert.at) + `${BREAK_HOOK}(${insert.line}) `;
-    cursor = insert.at;
-  }
-  out += code.slice(cursor);
-  return { code: out, lines: inserts.map((i) => i.line) };
-}
-function breakableLine(line, lines) {
-  for (const l of lines) if (l >= line) return l;
-  return null;
-}
-function effectiveBreakpoints(list, lines) {
-  const out = /* @__PURE__ */ new Set();
-  for (const line of list) {
-    const at = breakableLine(line, lines);
-    if (at !== null) out.add(at);
-  }
-  return [...out].sort((a, b) => a - b);
-}
-
-// src/debug/debugBlock.ts
-var DEBUG_BLOCK_BYTES = 4096;
-var DEBUG_MAGIC = 1195655747;
-var DBG_MAGIC = 0;
-var DBG_LINE_OFFSET = 4;
-var DBG_STATE = 8;
-var DBG_COMMAND = 12;
-var DBG_TRACE_USED = 16;
-var DBG_TRACE_DROPPED = 20;
-var DBG_PAUSED_LINE = 24;
-var DBG_BP_VERSION = 28;
-var DBG_BP_COUNT = 32;
-var DBG_LINE_COUNT = 36;
-var DBG_INFO_LENGTH = 40;
-var DBG_WATCH_LENGTH = 44;
-var DBG_BPS_AT = 64;
-var DBG_BPS_MAX = 240;
-var DBG_TRACE_AT = 1024;
-var DBG_TRACE_BYTES = 1024;
-var DBG_TRACE_MAX = 240;
-var DBG_WATCH_AT = 2048;
-var DBG_WATCH_BYTES = 512;
-var DBG_INFO_AT = 2560;
-var DBG_INFO_BYTES = 1536;
-var DebugCommand = { continue: 1, into: 2, over: 3, out: 4, refresh: 5 };
-function debugBlockAddress(layout) {
-  return layout.ramSize - PHYS_BLOCK_BYTES - DEBUG_BLOCK_BYTES;
-}
-function codeLineOffset(original, final) {
-  if (!original || final === null || final.length <= original.length) return 0;
-  const at = final.lastIndexOf(original);
-  if (at <= 0) return 0;
-  const head = final.slice(0, at);
-  let lines = 0;
-  for (let i = 0; i < head.length; i += 1) if (head.charCodeAt(i) === 10) lines += 1;
-  return lines;
-}
-function remapErrorLines(message, offset) {
-  return message.replace(/\[string "[^"]*"\]:(\d+):/g, (_all, n) => {
-    const line = Number(n) - offset;
-    return line > 0 ? `line ${line}:` : "cartbox:";
-  });
-}
-function errorStack(message) {
-  const at = /\nat (.*)$/m.exec(message);
-  if (!at) return [];
-  const frames = [];
-  for (const part of at[1].split(" < ")) {
-    const m = /^(.*):(\d+)$/.exec(part.trim());
-    if (m) frames.push({ name: m[1], line: Number(m[2]) });
-  }
-  return frames;
-}
-function debugSdkLua(address, options = {}) {
-  const dbg = options.debugger === true;
-  return `${dbg ? `local ${BREAK_HOOK}, __cbx_run
-` : ""}do
-  local _B = ${address}
-  local function _rd(a)
-    local v = peek(a) | (peek(a + 1) << 8) | (peek(a + 2) << 16) | (peek(a + 3) << 24)
-    if v >= 0x80000000 then v = v - 0x100000000 end
-    return v
-  end
-  local function _wr(a, v)
-    v = math.floor(v) & 0xffffffff
-    poke(a, v & 0xff) poke(a + 1, (v >> 8) & 0xff) poke(a + 2, (v >> 16) & 0xff) poke(a + 3, (v >> 24) & 0xff)
-  end
-  local function _live() return _rd(_B + ${DBG_MAGIC}) == ${DEBUG_MAGIC} end
-  local _trace = trace
-  trace = function(msg, color)
-    if _trace then _trace(msg, color) end
-    if not _live() then return end
-    local s = tostring(msg)
-    if #s > ${DBG_TRACE_MAX} then s = s:sub(1, ${DBG_TRACE_MAX}) end
-    local used = _rd(_B + ${DBG_TRACE_USED})
-    if used < 0 or used + 3 + #s > ${DBG_TRACE_BYTES} then
-      _wr(_B + ${DBG_TRACE_DROPPED}, _rd(_B + ${DBG_TRACE_DROPPED}) + 1)
-      return
-    end
-    local a = _B + ${DBG_TRACE_AT} + used
-    poke(a, #s & 0xff) poke(a + 1, #s >> 8) poke(a + 2, (math.tointeger(color) or 15) & 0xff)
-    for i = 1, #s do poke(a + 2 + i, s:byte(i)) end
-    _wr(_B + ${DBG_TRACE_USED}, used + 3 + #s)
-  end
-  local _src = debug.getinfo(1, "S").source
-  -- A cart line for a line of the merged source, or nil inside the injected code.
-  local function _cart(n)
-    local off = _live() and _rd(_B + ${DBG_LINE_OFFSET}) or 0
-    local count = _live() and _rd(_B + ${DBG_LINE_COUNT}) or 0
-    n = tonumber(n) - off
-    if n < 1 or (count > 0 and n > count) then return nil end
-    return n
-  end
-  local _tic = nil -- the cart's own TIC, once the debugger wraps it
-  -- A function the core calls (TIC, BDR ...) has no name Lua can see: look it up.
-  local function _name(info)
-    if info.name then return info.name end
-    if info.what == "main" then return "main" end
-    if _tic and info.func == _tic then return "TIC" end
-    for k, v in pairs(_G) do
-      if v == info.func and type(k) == "string" then return k end
-    end
-    return "?"
-  end
-  -- The cart frames of a stack, innermost first: {name, line, level}.
-  local function _frames(co, max)
-    local out = {}
-    for level = co and 0 or 2, 60 do
-      local info
-      if co then info = debug.getinfo(co, level, "Slnf") else info = debug.getinfo(level, "Slnf") end
-      if not info then break end
-      if info.source == _src and info.currentline and info.currentline > 0 then
-        local l = _cart(info.currentline)
-        if l then out[#out + 1] = { name = _name(info), line = l, level = level, func = info.func } end
-      end
-      if #out >= max then break end
-    end
-    return out
-  end
-  -- The core passes every runtime error through debug.traceback. Name cart
-  -- lines, and keep it short: the core keeps only 256 bytes of it.
-  local _tb = debug.traceback
-  local function _traceback(co, msg)
-    msg = tostring(msg or ""):gsub('^%[string "[^"]*"%]:(%d+):', function(n)
-      local l = _cart(n)
-      return l and ("line " .. l .. ":") or "cartbox:"
-    end)
-    local parts = {}
-    for _, f in ipairs(_frames(co, 6)) do parts[#parts + 1] = f.name .. ":" .. f.line end
-    if #parts > 0 then msg = msg .. "\\nat " .. table.concat(parts, " < ") end
-    return msg
-  end
-  debug.traceback = function(msg, ...)
-    if type(msg) ~= "string" and msg ~= nil then return _tb(msg, ...) end
-    return _traceback(nil, msg)
-  end${dbg ? debuggerLua() : ""}
-end`;
-}
-function debuggerLua() {
-  return `
-  local _bps, _bpver, _armed = {}, -1, false
-  local _step, _depth = 0, 0 -- step: 1 into, 2 over, 3 out
-  local _co = nil
-  local function _stackdepth()
-    local d = 0
-    for level = 2, 250 do
-      local info = debug.getinfo(level, "S")
-      if not info then break end
-      if info.source == _src then d = d + 1 end
-    end
-    return d
-  end
-  local function _loadbps()
-    local v = _rd(_B + ${DBG_BP_VERSION})
-    if v == _bpver then return end
-    _bpver = v
-    _bps = {}
-    for i = 0, math.min(_rd(_B + ${DBG_BP_COUNT}), ${DBG_BPS_MAX}) - 1 do _bps[_rd(_B + ${DBG_BPS_AT} + i * 4)] = true end
-  end
-  ${BREAK_HOOK} = function(line)
-    if not _armed then return end
-    local stop = _bps[line]
-    if not stop then
-      if _step == 1 then stop = true
-      elseif _step == 2 then stop = _stackdepth() <= _depth
-      elseif _step == 3 then stop = _stackdepth() < _depth end
-    end
-    if not stop or not coroutine.isyieldable() then return end
-    _depth = _stackdepth()
-    _step = 0
-    _wr(_B + ${DBG_PAUSED_LINE}, line)
-    _wr(_B + ${DBG_STATE}, 1)
-    coroutine.yield()
-    local cmd = _rd(_B + ${DBG_COMMAND})
-    _wr(_B + ${DBG_COMMAND}, 0)
-    _wr(_B + ${DBG_STATE}, 0)
-    _step = (cmd == ${DebugCommand.into} and 1) or (cmd == ${DebugCommand.over} and 2) or (cmd == ${DebugCommand.out} and 3) or 0
-    _armed = _step ~= 0 or next(_bps) ~= nil
-  end
-  local function _fmt(v, deep)
-    local t = type(v)
-    if t == "string" then
-      if #v > 40 then v = v:sub(1, 40) .. "..." end
-      return (string.format("%q", v):gsub("\\n", "n"))
-    elseif t == "number" then
-      return math.type(v) == "integer" and tostring(v) or string.format("%.4g", v)
-    elseif t == "table" then
-      if deep then return "{...}" end
-      local parts, n = {}, 0
-      for k, x in pairs(v) do
-        n = n + 1
-        if n <= 4 then parts[#parts + 1] = (type(k) == "string" and k or ("[" .. tostring(k) .. "]")) .. "=" .. _fmt(x, true) end
-      end
-      return "{" .. table.concat(parts, ", ") .. (n > 4 and (", ... " .. n .. " in all") or "") .. "}"
-    elseif t == "function" then
-      return "function"
-    end
-    return tostring(v)
-  end
-  local function _show(v)
-    local ok, s = pcall(_fmt, v)
-    s = ok and s or "?"
-    return #s > 90 and (s:sub(1, 90) .. "...") or s
-  end
-  -- Write where the cart stopped: its stack, the stopped function's locals and
-  -- upvalues, and each watch expression's value there.
-  local function _writeinfo(co)
-    local lines = {}
-    local frames = _frames(co, 8)
-    for _, f in ipairs(frames) do lines[#lines + 1] = "S " .. f.name .. ":" .. f.line end
-    local top = frames[1]
-    local scope = {}
-    if top then
-      for i = 1, 200 do
-        local k, v = debug.getlocal(co, top.level, i)
-        if not k then break end
-        if k:sub(1, 1) ~= "(" then scope[k] = { v }; lines[#lines + 1] = "L " .. k .. "=" .. _show(v) end
-      end
-      for i = 1, 60 do
-        local k, v = debug.getupvalue(top.func, i)
-        if not k then break end
-        if k ~= "_ENV" and k ~= "${BREAK_HOOK}" and not scope[k] then scope[k] = { v }; lines[#lines + 1] = "U " .. k .. "=" .. _show(v) end
-      end
-    end
-    local env = setmetatable({}, { __index = function(_, k)
-      local s = scope[k]
-      if s then return s[1] end
-      return _G[k]
-    end })
-    local n = _rd(_B + ${DBG_WATCH_LENGTH})
-    local text = {}
-    for i = 0, math.min(n, ${DBG_WATCH_BYTES}) - 1 do text[#text + 1] = string.char(peek(_B + ${DBG_WATCH_AT} + i)) end
-    local index = 0
-    for expr in (table.concat(text) .. "\\n"):gmatch("([^\\n]*)\\n") do
-      index = index + 1
-      if expr:match("%S") then
-        local f, err = load("return " .. expr, "=watch", "t", env)
-        local ok, v = false, err
-        if f then ok, v = pcall(f) end
-        lines[#lines + 1] = "W " .. index .. (ok and ("=" .. _show(v)) or ("!" .. tostring(v):gsub("^watch:1: ", ""))):sub(1, 120)
-      end
-    end
-    local out = table.concat(lines, "\\n")
-    if #out > ${DBG_INFO_BYTES} then out = out:sub(1, ${DBG_INFO_BYTES}) end
-    for i = 1, #out do poke(_B + ${DBG_INFO_AT} + i - 1, out:byte(i)) end
-    _wr(_B + ${DBG_INFO_LENGTH}, #out)
-  end
-  -- Run one frame of the cart's TIC: straight through when nothing can stop it,
-  -- else in a coroutine the hooks can yield from, carrying on from a stop.
-  __cbx_run = function(tic)
-    _tic = tic
-    if not _live() then return tic() end
-    _loadbps()
-    if _co then
-      if _rd(_B + ${DBG_STATE}) == 1 then
-        local cmd = _rd(_B + ${DBG_COMMAND})
-        if cmd == ${DebugCommand.refresh} then
-          _wr(_B + ${DBG_COMMAND}, 0)
-          _writeinfo(_co)
-        end
-        if cmd < ${DebugCommand.continue} or cmd > ${DebugCommand.out} then return end
-      end
-    else
-      _armed = _step ~= 0 or next(_bps) ~= nil
-      if not _armed then return tic() end
-      _co = coroutine.create(tic)
-    end
-    local ok, err = coroutine.resume(_co)
-    if not ok then
-      local co = _co
-      _co = nil
-      _step = 0
-      _wr(_B + ${DBG_STATE}, 0)
-      error(_traceback(co, err), 0)
-    end
-    if coroutine.status(_co) == "dead" then
-      _co = nil
-    else
-      _writeinfo(_co)
-    end
-  end`;
-}
-function debugPostlude() {
-  return `do local _t = TIC if type(_t) == "function" then TIC = function() __cbx_run(_t) end end end`;
-}
-function parsePauseInfo(line, text, watchCount) {
-  const stack = [];
-  const locals = [];
-  const upvalues = [];
-  const watches = Array.from({ length: watchCount }, () => ({ value: "", error: false }));
-  for (const row of text.split("\n")) {
-    const kind = row.slice(0, 2);
-    const body = row.slice(2);
-    if (kind === "S ") {
-      const m = /^(.*):(\d+)$/.exec(body);
-      if (m) stack.push({ name: m[1], line: Number(m[2]) });
-    } else if (kind === "L " || kind === "U ") {
-      const eq = body.indexOf("=");
-      if (eq > 0) (kind === "L " ? locals : upvalues).push({ name: body.slice(0, eq), value: body.slice(eq + 1) });
-    } else if (kind === "W ") {
-      const m = /^(\d+)([=!])(.*)$/s.exec(body);
-      const index = m ? Number(m[1]) - 1 : -1;
-      if (m && index >= 0 && index < watchCount) watches[index] = { value: m[3], error: m[2] === "!" };
-    }
-  }
-  return { line, stack, locals, upvalues, watches };
-}
-function readPause(block, watchCount) {
-  if (block.getInt32(DBG_STATE, true) !== 1) return null;
-  const length = Math.max(0, Math.min(block.getInt32(DBG_INFO_LENGTH, true), DBG_INFO_BYTES));
-  const text = new TextDecoder().decode(new Uint8Array(block.buffer, block.byteOffset + DBG_INFO_AT, length));
-  return parsePauseInfo(block.getInt32(DBG_PAUSED_LINE, true), text, watchCount);
-}
-function sendDebugCommand(block, command) {
-  block.setInt32(DBG_COMMAND, command, true);
-}
-function drainTraces(block) {
-  const used = Math.min(block.getInt32(DBG_TRACE_USED, true), DBG_TRACE_BYTES);
-  const dropped = block.getInt32(DBG_TRACE_DROPPED, true);
-  const traces = [];
-  if (used > 0) {
-    const decoder = new TextDecoder();
-    let at = 0;
-    while (at + 3 <= used) {
-      const length = block.getUint16(DBG_TRACE_AT + at, true);
-      const color = block.getUint8(DBG_TRACE_AT + at + 2);
-      const start = DBG_TRACE_AT + at + 3;
-      if (at + 3 + length > used) break;
-      traces.push({ text: decoder.decode(new Uint8Array(block.buffer, block.byteOffset + start, length)), color });
-      at += 3 + length;
-    }
-  }
-  if (used !== 0) block.setInt32(DBG_TRACE_USED, 0, true);
-  if (dropped !== 0) block.setInt32(DBG_TRACE_DROPPED, 0, true);
-  return { traces, dropped: Math.max(0, dropped) };
-}
-function armDebugBlock(block, lineOffset, lineCount = 0) {
-  block.setUint32(DBG_MAGIC, DEBUG_MAGIC, true);
-  block.setInt32(DBG_LINE_OFFSET, lineOffset, true);
-  block.setInt32(DBG_LINE_COUNT, lineCount, true);
-}
-function writeBreakpoints(block, lines) {
-  const list = lines.slice(0, DBG_BPS_MAX);
-  list.forEach((line, i) => block.setInt32(DBG_BPS_AT + i * 4, line, true));
-  block.setInt32(DBG_BP_COUNT, list.length, true);
-  block.setInt32(DBG_BP_VERSION, block.getInt32(DBG_BP_VERSION, true) + 1 | 0, true);
-}
-function writeWatches(block, expressions) {
-  const encoder = new TextEncoder();
-  let bytes = new Uint8Array(0);
-  let fitted = 0;
-  for (const expr of expressions) {
-    const next = encoder.encode((fitted > 0 ? "\n" : "") + expr.replace(/\n/g, " "));
-    if (bytes.length + next.length > DBG_WATCH_BYTES) break;
-    const joined = new Uint8Array(bytes.length + next.length);
-    joined.set(bytes);
-    joined.set(next, bytes.length);
-    bytes = joined;
-    fitted += 1;
-  }
-  new Uint8Array(block.buffer, block.byteOffset + DBG_WATCH_AT, bytes.length).set(bytes);
-  block.setInt32(DBG_WATCH_LENGTH, bytes.length, true);
-  return fitted;
 }
 
 // src/flagsSdk.ts
@@ -14429,13 +14526,14 @@ async function createSceneRenderer(width, height, caps, deviceProvider = getWebg
 }
 
 // src/player.ts
-import { SpatialLoader } from "@cartbox/editor";
+import { SpatialLoader, actionMask, reboundActions } from "@cartbox/editor";
 function shouldUseTouch(scheme, view) {
   if (scheme === "touch") return true;
   if (scheme === "keyboard") return false;
   const coarse = view.matchMedia?.("(pointer: coarse)").matches ?? false;
   return hasTouchSupport(view.navigator?.maxTouchPoints ?? 0, coarse);
 }
+var NO_HELD = /* @__PURE__ */ new Set();
 var NO_OVERRIDES = /* @__PURE__ */ new Map();
 var Player = class {
   constructor(container, options) {
@@ -14450,6 +14548,13 @@ var Player = class {
     this.presentFrame = 0;
     /** The cart reads analog sticks (it opted in via cartbox.stick). */
     this.analogCart = false;
+    /** Input actions (EP15): the cart's, with the player's rebinding, and the keys they claim. */
+    this.actions = [];
+    this.actionKeys = /* @__PURE__ */ new Set();
+    this.actionPad = /* @__PURE__ */ new Set();
+    /** Where the input block sits (bytes after pmem word 0), when the cart has actions; and last tick's mask. */
+    this.inputOffset = null;
+    this.lastActions = 0;
     this.controlSettings = DEFAULT_CONTROL_SETTINGS;
     this.volume = 1;
     /** False while a host menu is open: the game keeps running but sees no input. */
@@ -14526,6 +14631,18 @@ var Player = class {
   setControlSettings(settings) {
     this.controlSettings = settings;
     this.touch?.applySettings(settings);
+    this.rebindActions();
+  }
+  /** The cart's actions with the player's rebinding applied (EP15). */
+  rebindActions() {
+    this.actions = reboundActions(this.options.actions ?? [], this.controlSettings.actionBindings);
+    this.actionKeys = new Set(this.actions.flatMap((a) => a.keys));
+    this.actionPad = new Set(this.actions.flatMap((a) => a.pad));
+  }
+  /** The actions held now (bit i = action i), from every device. */
+  heldActions() {
+    if (this.actions.length === 0) return 0;
+    return actionMask(this.actions, { keys: this.keyboard?.held ?? NO_HELD, pad: this.controllerInput?.pressed ?? NO_HELD, buttons: this.gamepad.value });
   }
   /** Let the game see input (true) or hold it neutral (false) — e.g. under a menu. */
   setInputEnabled(enabled) {
@@ -14579,6 +14696,12 @@ var Player = class {
       if (flagsLua) prepared = prependLuaCode(prepared, flagsLua);
       const animClipsLua = animClipsSdkLua(this.options.anim);
       if (animClipsLua) prepared = prependLuaCode(prepared, animClipsLua);
+      this.rebindActions();
+      const actionsLua = layout ? actionsSdkLua(this.actions, layout) : "";
+      if (actionsLua && layout) {
+        prepared = prependLuaCode(prepared, actionsLua);
+        this.inputOffset = inputBlockAddress(layout) - layout.pmemAddress;
+      }
       const uiLua = uiSdkLua(this.options.ui, this.model.width, this.model.height);
       if (uiLua) prepared = prependLuaCode(prepared, uiLua);
       const sceneLua = sceneObjectsSdkLua(this.options.mesh);
@@ -14732,8 +14855,8 @@ var Player = class {
     const scheme = this.options.controls ?? "auto";
     const onStart = this.options.onStart;
     if (scheme !== "touch") {
-      this.keyboard = new KeyboardInput(this.view, this.gamepad, () => this.controlSettings.keyBindings, onStart);
-      this.controllerInput = new GamepadInput(this.view.navigator, this.gamepad, () => this.controlSettings, onStart);
+      this.keyboard = new KeyboardInput(this.view, this.gamepad, () => this.controlSettings.keyBindings, onStart, () => this.actionKeys);
+      this.controllerInput = new GamepadInput(this.view.navigator, this.gamepad, () => this.controlSettings, onStart, () => this.actionPad);
     }
     if (shouldUseTouch(scheme, this.view)) {
       this.touch = new TouchInput(this.container, this.gamepad, onStart);
@@ -14860,7 +14983,9 @@ var Player = class {
       profiler.add(section, now - mark);
       mark = now;
     };
-    const mask = this.replaySource ? this.replaySource.maskForFrame(this.tickFrame) : this.inputEnabled ? this.gamepad.value : 0;
+    const input = (this.replaySource ? this.replaySource.maskForFrame(this.tickFrame) : this.inputEnabled ? this.gamepad.value | this.heldActions() << 8 : 0) >>> 0;
+    const mask = input & 255;
+    this.feedActions(input >>> 8);
     const net = this.options.netplay;
     if (net && this.console) {
       const words = this.console.netWords();
@@ -14907,7 +15032,7 @@ var Player = class {
       if (words) net.afterTick(words);
     }
     lap("net");
-    this.recorder?.record(mask);
+    this.recorder?.record(input);
     this.tickFrame++;
     if (this.console && this.options.onRuntimeError) {
       const error = this.console.readError();
@@ -15237,6 +15362,14 @@ var Player = class {
     }
     words[STICK_WORD] = this.replaySource || !this.inputEnabled ? 0 : packSticks(applyLookSettings(this.gamepad.axes, this.controlSettings));
   }
+  /** Input actions (EP15): this tick's mask and last tick's into the input block. */
+  feedActions(held) {
+    if (this.inputOffset === null || !this.console) return;
+    const bytes = this.console.ramView(this.inputOffset, INPUT_BLOCK_BYTES);
+    if (!bytes) return;
+    writeInputBlock(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), held, this.lastActions);
+    this.lastActions = held;
+  }
   fail(error) {
     const normalized = error instanceof Error ? error : new Error(String(error));
     this.options.onError?.(normalized);
@@ -15273,12 +15406,19 @@ function makeWorldTextureLookup(cartSource, tilesPerSide) {
 }
 
 // src/verify.ts
-function runReplayEvents(console2, replay) {
+function runReplayEvents(console2, replay, options = {}) {
   const source = new ReplaySource(replay.inputs);
   let lastSeq = decodeMailbox(console2.readMailbox(), 0).seq;
   const events = [];
+  let lastActions = 0;
   for (let frame = 0; frame < replay.frameCount; frame++) {
-    console2.tick(source.maskForFrame(frame));
+    const input = source.maskForFrame(frame) >>> 0;
+    if (options.inputOffset !== void 0) {
+      const bytes = console2.ramView(options.inputOffset, INPUT_BLOCK_BYTES);
+      if (bytes) writeInputBlock(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), input >>> 8, lastActions);
+      lastActions = input >>> 8;
+    }
+    console2.tick(input & 255);
     const read = decodeMailbox(console2.readMailbox(), lastSeq);
     lastSeq = read.seq;
     events.push(...read.events);
@@ -15303,8 +15443,8 @@ function extractUnlocks(events) {
   }
   return [...ids];
 }
-function verifyReplayScore(console2, replay, claimedScore) {
-  const events = runReplayEvents(console2, replay);
+function verifyReplayScore(console2, replay, claimedScore, options = {}) {
+  const events = runReplayEvents(console2, replay, options);
   const score = extractScore(events);
   return {
     score,
@@ -16040,6 +16180,8 @@ export {
   FLARE_SPIKE_POWER,
   GamepadInput,
   HEIGHT_WORLD,
+  INPUT_BLOCK_BYTES,
+  INPUT_MAGIC,
   INSTANCE_FLOATS,
   LIGHTS_BASE,
   LIGHTS_CAPACITY,
@@ -16116,6 +16258,7 @@ export {
   WorldOverlaySurface,
   acesFilmic,
   acesFilmicChannel,
+  actionsSdkLua,
   alignBytesPerRow,
   animClipsSdkLua,
   animatedObjects,
@@ -16188,6 +16331,7 @@ export {
   hashEventId,
   hexToRgb01,
   injectSdk,
+  inputBlockAddress,
   instrumentLua,
   interleaveVertices,
   interpolateNormal,
@@ -16228,6 +16372,7 @@ export {
   readCartCode,
   readPad,
   readPause,
+  readSidecarActions,
   readSidecarUi,
   reflectionFade,
   reflectionSampleY,
@@ -16273,6 +16418,7 @@ export {
   webgpuCanHonour,
   worldCenter,
   writeBreakpoints,
+  writeInputBlock,
   writeInstanceTransform,
   writeInstanceUniform,
   writeNetInbox,

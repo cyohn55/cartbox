@@ -37,6 +37,7 @@ export const ALL_TABS = [
   "Weather",
   "FX",
   "UI",
+  "Input",
   "Files",
   "SFX",
   "Music",
@@ -66,6 +67,7 @@ export const TAB_META: Record<Tab, { label: string; icon: string }> = {
   Weather: { label: "Weather", icon: "☁" },
   FX: { label: "FX", icon: "✦" },
   UI: { label: "UI", icon: "▣" },
+  Input: { label: "Input", icon: "⌘" },
   Files: { label: "Files", icon: "⭳" },
   SFX: { label: "SFX", icon: "♪" },
   Music: { label: "Music", icon: "♫" },
@@ -77,7 +79,7 @@ export const TAB_META: Record<Tab, { label: string; icon: string }> = {
  * looking like a fantasy-console editor, not a flight deck.
  */
 const PRIMARY: readonly Tab[] = ["Code", "Assets", "Map", "SFX", "Music"];
-const MORE: readonly Tab[] = ["World", "Scene", "Mesh", "Anim", "Weather", "FX", "UI", "Files"];
+const MORE: readonly Tab[] = ["World", "Scene", "Mesh", "Anim", "Weather", "FX", "UI", "Input", "Files"];
 
 /**
  * Tabs that author a 3D scene, keyed to the sidecar that holds their content.

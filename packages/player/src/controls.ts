@@ -5,6 +5,8 @@
  * layer applies, so every piece is testable without a DOM or a gamepad.
  */
 
+import { parseActionRebinds, type ActionRebind } from "@cartbox/editor";
+
 import { ConsoleButton } from "./types.js";
 
 /**
@@ -32,6 +34,8 @@ export interface ControlSettings {
   readonly touchOpacity: number;
   /** On-screen pad size, 0.7..1.4. */
   readonly touchScale: number;
+  /** The player's rebinding of the cart's input actions (EP15), by action name; absent = the cart's own. */
+  readonly actionBindings?: Readonly<Record<string, ActionRebind>>;
 }
 
 /** Face buttons to face buttons, the D-pad to the D-pad, and the triggers doubling up. */
@@ -111,6 +115,11 @@ export function parseControlSettings(value: unknown, defaults: ControlSettings =
     keyBindings,
     touchOpacity: num(raw.touchOpacity, 0.2, 1, defaults.touchOpacity),
     touchScale: num(raw.touchScale, 0.7, 1.4, defaults.touchScale),
+    ...(raw.actionBindings !== undefined
+      ? { actionBindings: parseActionRebinds(raw.actionBindings) }
+      : defaults.actionBindings
+        ? { actionBindings: defaults.actionBindings }
+        : {}),
   };
 }
 
@@ -176,20 +185,23 @@ export function standardizePad<T extends PadSnapshot & { readonly mapping?: stri
 
 /**
  * What a gamepad is doing: the console-button mask its bindings press, both
- * sticks (dead-zoned), and whether a control bound to "start" is held.
+ * sticks (dead-zoned), whether a control bound to "start" is held, and every
+ * button held (which input actions bind directly, whatever it's mapped to).
  */
 export function readPad(
   raw: PadSnapshot & { readonly mapping?: string; readonly id?: string },
   bindings: Readonly<Record<PadButton, ControlTarget>>,
-): { mask: number; axes: [number, number, number, number]; start: boolean } {
+): { mask: number; axes: [number, number, number, number]; start: boolean; pressed: Set<PadButton> } {
   const pad = standardizePad(raw);
   let mask = 0;
   let start = false;
+  const pressed = new Set<PadButton>();
   PAD_BUTTONS.forEach((name, index) => {
     const button = pad.buttons[index];
     // Triggers are analog; count them as pressed past half-way.
     const down = button ? button.pressed || button.value > 0.5 : false;
     if (!down) return;
+    pressed.add(name);
     const target = bindings[name];
     if (target === "start") start = true;
     else if (target !== null && target !== undefined) mask |= 1 << target;
@@ -198,5 +210,5 @@ export function readPad(
   if (bindings.Start === null && !Object.values(bindings).includes("start") && pad.buttons[9]?.pressed) start = true;
   const [lx, ly] = deadZoned(pad.axes[0] ?? 0, pad.axes[1] ?? 0);
   const [rx, ry] = deadZoned(pad.axes[2] ?? 0, pad.axes[3] ?? 0);
-  return { mask, axes: [lx, ly, rx, ry], start };
+  return { mask, axes: [lx, ly, rx, ry], start, pressed };
 }

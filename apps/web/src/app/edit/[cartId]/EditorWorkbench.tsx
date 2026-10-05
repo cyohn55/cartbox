@@ -22,7 +22,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { defaultPostFxSettings, getModel, parsePostFxSettings, parseMeshScene, parseWorldScene, readSidecarUi, type AnimSpec, type MeshScene, type ParticleSpec, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
+import { defaultPostFxSettings, getModel, parsePostFxSettings, parseMeshScene, parseWorldScene, readSidecarUi, readSidecarActions, type AnimSpec, type MeshScene, type ParticleSpec, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
 import {
   BANK_COUNT,
   CartEngine,
@@ -72,6 +72,7 @@ import { AssetsEditor } from "./AssetsEditor";
 import { FilesEditor } from "./FilesEditor";
 import { MeshEditor } from "./MeshEditor";
 import { UiEditor } from "./UiEditor";
+import { InputEditor } from "./InputEditor";
 import type { PlaytestConfig } from "./ScenePlayView";
 import { WorldEditor } from "./WorldEditor";
 import { useEditorHistory, hashBytes, snapshotsEqual, type CartSnapshot } from "./useEditorHistory";
@@ -401,6 +402,7 @@ function WorkbenchBody({
   );
   const meshScene = useMemo<MeshScene | null>(() => parseMeshScene(sidecars.mesh), [sidecars.mesh]);
   const meshUi = useMemo(() => readSidecarUi(sidecars.mesh), [sidecars.mesh]);
+  const meshActions = useMemo(() => readSidecarActions(sidecars.mesh), [sidecars.mesh]);
   // Every sidecar but the mesh one (measured separately), for the download budget.
   const budgetOtherData = useMemo(
     () => (Object.entries(sidecars) as [string, unknown][]).filter(([key]) => key !== "mesh").map(([, value]) => value),
@@ -815,6 +817,7 @@ function WorkbenchBody({
       world: world ?? undefined,
       mesh: parseMeshScene(baked ?? null),
       ui: readSidecarUi(baked ?? null),
+      actions: readSidecarActions(baked ?? null),
     };
   }, [runnable, rebakeMesh, sidecars.mesh, setSidecar, engineUrl, modelId, fx, scene, anim, particles, collision, flags, world]);
 
@@ -1336,6 +1339,7 @@ function WorkbenchBody({
         />
       )}
       {activeTab === "Mesh" && <MeshEditor key="mesh" sidecar={mesh} onSidecarChange={setMesh} code={doc} onStartPlay={startPlaytest} />}
+      {activeTab === "Input" && <InputEditor key="input" sidecar={mesh} onSidecarChange={setMesh} />}
       {activeTab === "UI" && <UiEditor key="ui" sidecar={mesh} onSidecarChange={setMesh} width={activeModel.width} height={activeModel.height} palette={uiPalette} />}
       {activeTab === "Files" && (
         <FilesEditor
@@ -1473,6 +1477,7 @@ function WorkbenchBody({
           flags={flags ?? undefined}
           mesh={meshScene ?? undefined}
           ui={meshUi}
+          actions={meshActions}
           world={world ?? undefined}
           breakpoints={breakpoints}
           onBreakpointsChange={setBreakpoints}

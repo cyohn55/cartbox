@@ -39,6 +39,7 @@ import { boulderMesh, driftMesh } from "./foliagePresets";
 import type { SceneAudio, SceneSound, SynthPreset } from "./sound";
 import type { UiDocument, UiWidget } from "./ui";
 import type { ComponentDef } from "./components";
+import type { InputAction } from "./inputActions";
 import { bakeNavMesh, boxTriangles, serializeNavMesh, type NavMesh } from "./navmesh";
 import { serializeTerrain, terrainMesh, type Terrain } from "./terrain";
 import type { SceneTimeline } from "./timeline";
@@ -2049,6 +2050,22 @@ end
   },
 ];
 
+/**
+ * Lockout's input actions (EP15). Each keeps its console button, so the
+ * on-screen pad and a remapped controller still play as before, and adds
+ * its own keys and controller buttons: Space jumps, Tab swaps, G or Q (or
+ * LT) throws a grenade, and Shift (or a right-stick click) zooms. A key or
+ * button an action binds is that action's: LT no longer also holds X (strafe).
+ * The double-tapped X grenade and the held-X zoom stay for the 8-button pad.
+ */
+export const LOCKOUT_INPUT_ACTIONS: readonly InputAction[] = [
+  { name: "fire", keys: [], pad: [], buttons: [4] },
+  { name: "jump", keys: ["Space"], pad: [], buttons: [5] },
+  { name: "swap", keys: ["Tab"], pad: [], buttons: [7] },
+  { name: "grenade", keys: ["KeyG", "KeyQ"], pad: ["LT"], buttons: [] },
+  { name: "zoom", keys: ["ShiftLeft"], pad: ["RS"], buttons: [] },
+];
+
 /** A spent brass casing (H10), about 4 cm long, lying along Z. */
 function casingMesh(): MeshAsset {
   const brass = newStreams();
@@ -2324,6 +2341,7 @@ export function lockoutMeshSidecar(): string {
       audio: LOCKOUT_AUDIO,
       ui: LOCKOUT_UI,
       components: LOCKOUT_COMPONENTS,
+      actions: LOCKOUT_INPUT_ACTIONS,
     });
   }
   return meshSidecar;
@@ -3302,6 +3320,9 @@ local function play_input()
     if tick-(p.lastA or -99) < 14 and not p.dead then local fx,fy,fz=forward(); throw_grenade(p,fx,fy,fz) end
     p.lastA=tick
   end
+  -- Input actions (EP15): fire, jump, swap, grenade and zoom, each on its console
+  -- button plus its own keys and controller buttons (see the Input tab).
+  if cartbox.actionp("grenade") and not p.dead then local fx,fy,fz=forward(); throw_grenade(p,fx,fy,fz) end
   -- Facing yaw ay looks along (sin ay, cos ay); the screen's right is then
   -- (-cos ay, sin ay) — the same right the held weapon is placed with — so
   -- turning right *decreases* ay.
@@ -3351,12 +3372,12 @@ local function play_input()
   else
     p.ap=p.ap+(want-p.ap)*0.2
   end
-  if btn(5) and p.grounded and not p.dead then p.vy=JUMP; p.grounded=false end
-  if edge("swap", btn(7)) then p.slot=(p.slot==1) and 2 or 1 end
+  if cartbox.action("jump") and p.grounded and not p.dead then p.vy=JUMP; p.grounded=false end
+  if cartbox.actionp("swap") then p.slot=(p.slot==1) and 2 or 1 end
   local cur=W[p.slot==1 and p.g1 or p.g2]
-  p.zoom = cur.zoom and aheld and not lstick and not (btn(0) or btn(1) or btn(2) or btn(3))
+  p.zoom = cur.zoom and (cartbox.action("zoom") or (aheld and not lstick and not (btn(0) or btn(1) or btn(2) or btn(3))))
   if p.cool>0 then p.cool=p.cool-1 end
-  local firing = cur.auto and btn(4) or edge("fire", btn(4))
+  local firing = cur.auto and cartbox.action("fire") or cartbox.actionp("fire")
   if firing then player_fire() end
 end
 

@@ -15,6 +15,8 @@ import { DEFAULT_KEY_BINDINGS, START_KEYS, readPad, type ControlSettings, type P
  */
 export { DEFAULT_KEY_BINDINGS };
 
+const NO_KEYS: ReadonlySet<string> = new Set();
+
 /**
  * Resolves a physical key to a console button, or undefined if unbound.
  * Pure — no DOM access — so callers and tests can use it freely.
@@ -97,36 +99,50 @@ export class GamepadState {
 export class KeyboardInput {
   private readonly onKeyDown: (event: KeyboardEvent) => void;
   private readonly onKeyUp: (event: KeyboardEvent) => void;
+  private readonly onBlur: () => void;
+  /** Every key held now (KeyboardEvent.code), bound or not — what input actions read. */
+  readonly held = new Set<string>();
 
   /**
    * @param bindings The key map, or a getter for it (read on every key, so a
    *   rebind from a settings menu applies at once).
    * @param onStart Called for a Start key (Enter / P) that isn't bound to a button.
+   * @param claimed Keys the cart's input actions bind. They're the actions':
+   *   kept from the page (no scrolling on Space), and they press no console
+   *   button and never open Start.
    */
   constructor(
     private readonly target: Window,
     state: GamepadState,
     bindings: Readonly<Record<string, ConsoleButton>> | (() => Readonly<Record<string, ConsoleButton>>) = DEFAULT_KEY_BINDINGS,
     onStart?: () => void,
+    claimed: () => ReadonlySet<string> = () => NO_KEYS,
   ) {
     const current = typeof bindings === "function" ? bindings : () => bindings;
     // Remember which button each held key pressed, so a rebind while it is held
     // still releases the right one.
     const held = new Map<string, ConsoleButton>();
     this.onKeyDown = (event) => {
+      const tag = (event.target as { tagName?: string } | null)?.tagName;
+      const typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+      if (!typing) this.held.add(event.code);
       const button = resolveButton(event.code, current());
+      if (claimed().has(event.code) && !typing) {
+        event.preventDefault();
+        return;
+      }
       if (button !== undefined) {
         held.set(event.code, button);
         state.press(button);
         event.preventDefault(); // stop arrow keys from scrolling the page
       } else if (onStart && START_KEYS.includes(event.code) && !event.repeat) {
-        const tag = (event.target as { tagName?: string } | null)?.tagName;
-        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON") return;
+        if (typing || tag === "BUTTON") return;
         event.preventDefault();
         onStart();
       }
     };
     this.onKeyUp = (event) => {
+      this.held.delete(event.code);
       const button = held.get(event.code) ?? resolveButton(event.code, current());
       held.delete(event.code);
       if (button !== undefined) {
@@ -134,13 +150,18 @@ export class KeyboardInput {
       }
     };
 
+    // Keys let go while the page wasn't looking never send keyup.
+    this.onBlur = () => this.held.clear();
+
     target.addEventListener("keydown", this.onKeyDown);
     target.addEventListener("keyup", this.onKeyUp);
+    target.addEventListener("blur", this.onBlur);
   }
 
   destroy(): void {
     this.target.removeEventListener("keydown", this.onKeyDown);
     this.target.removeEventListener("keyup", this.onKeyUp);
+    this.target.removeEventListener("blur", this.onBlur);
   }
 }
 
@@ -466,6 +487,8 @@ export class TouchInput {
  */
 export class GamepadInput {
   private startHeld = false;
+  /** Every controller button held at the last poll — what input actions read. */
+  pressed: ReadonlySet<string> = NO_KEYS;
   /** The pad index in use, so a second controller plugged in later doesn't take over mid-game. */
   private index: number | null = null;
 
@@ -474,6 +497,8 @@ export class GamepadInput {
     private readonly state: GamepadState,
     private readonly settings: () => ControlSettings,
     private readonly onStart?: () => void,
+    /** Buttons the cart's input actions bind: they're the actions', and press no console button. */
+    private readonly claimed: () => ReadonlySet<string> = () => NO_KEYS,
   ) {}
 
   poll(): void {
@@ -495,10 +520,15 @@ export class GamepadInput {
     if (!pad) {
       this.state.setPad(0, [0, 0, 0, 0]);
       this.startHeld = false;
+      this.pressed = NO_KEYS;
       return;
     }
-    const { mask, axes, start } = readPad(pad, this.settings().padBindings);
+    const claimed = this.claimed();
+    let bindings = this.settings().padBindings;
+    if (claimed.size > 0) bindings = Object.fromEntries(Object.entries(bindings).map(([b, t]) => [b, claimed.has(b) ? null : t])) as typeof bindings;
+    const { mask, axes, start, pressed } = readPad(pad, bindings);
     this.state.setPad(mask, axes);
+    this.pressed = pressed;
     if (start && !this.startHeld) this.onStart?.();
     this.startHeld = start;
   }

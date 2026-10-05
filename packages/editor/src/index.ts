@@ -75,6 +75,7 @@ export {
   LOCKOUT_AUDIO,
   LOCKOUT_UI,
   LOCKOUT_COMPONENTS,
+  LOCKOUT_INPUT_ACTIONS,
   LOCKOUT_DECALS,
   LOCKOUT_DECAL_MARKS,
   lockoutNavMesh,
@@ -355,6 +356,23 @@ export {
   type ComponentFieldType,
   type ComponentValue,
 } from "./model/components";
+export {
+  ACTION_CONSOLE_BUTTONS,
+  ACTION_PAD_BUTTONS,
+  MAX_ACTIONS,
+  MAX_ACTION_BINDINGS,
+  actionLabel,
+  actionMask,
+  keyLabel,
+  newInputAction,
+  parseActionRebinds,
+  parseInputActions,
+  reboundActions,
+  type ActionPadButton,
+  type ActionRebind,
+  type HeldControls,
+  type InputAction,
+} from "./model/inputActions";
 export { decompressGltf, gltfCompression, type DracoAttributeRequest, type DracoDecoded, type GltfDecoders } from "./model/gltfCompression";
 export {
   ANIMATOR_LIMITS,

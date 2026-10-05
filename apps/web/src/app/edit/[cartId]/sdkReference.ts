@@ -519,6 +519,120 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
     ],
   },
   {
+    label: "cartbox · sound",
+    open: false,
+    entries: [
+      {
+        name: "cartbox.sound",
+        signature: "cartbox.sound(s, x, y, z, volume, pitch)",
+        doc: "Play one of the scene's sounds (by name or 1-based index) once: from (x, y, z) when given, so it pans and fades with distance; else everywhere.",
+        snippet: 'cartbox.sound("shot", x, y, z)',
+      },
+      {
+        name: "cartbox.loop",
+        signature: "cartbox.loop(slot, s, volume, x, y, z)",
+        doc: "Keep a sound looping in slot 1..16 (s nil stops it). Call it every tick to move or fade it; only changes are sent.",
+        snippet: 'cartbox.loop(1, "engine", 0.8, x, y, z)',
+      },
+      {
+        name: "cartbox.mix",
+        signature: "cartbox.mix(bus, volume)",
+        doc: "Set a mixer bus's volume (by name or 1-based index): music, effects, voice …",
+        snippet: 'cartbox.mix("music", 0.5)',
+      },
+      {
+        name: "cartbox.sounds",
+        signature: "cartbox.sounds() -> { name, ... }",
+        doc: "The scene's sounds, in index order.",
+        snippet: "local names = cartbox.sounds()",
+      },
+    ],
+  },
+  {
+    label: "cartbox · UI",
+    open: false,
+    entries: [
+      {
+        name: "cartbox.ui.show",
+        signature: "cartbox.ui.show(name) / hide(name) / shown(name)",
+        doc: "Put a UI document (made in the UI tab) up, take it down, or ask whether it's up.",
+        snippet: 'cartbox.ui.show("hud")',
+      },
+      {
+        name: "cartbox.ui.set",
+        signature: "cartbox.ui.set(key, value) / get(key)",
+        doc: "A binding the documents read: {key} in text, a bar's fill 0..1, a list's items, a visibility or colour.",
+        snippet: 'cartbox.ui.set("score", score)',
+      },
+      {
+        name: "cartbox.ui.update",
+        signature: "cartbox.ui.update() -> id, value",
+        doc: "The d-pad moves focus in the topmost document with any; A presses and returns what was pressed (a list's row as its value).",
+        snippet: "local id, value = cartbox.ui.update()\nif id == \"play\" then\n  \nend",
+      },
+      {
+        name: "cartbox.ui.on",
+        signature: "cartbox.ui.on(id, function(value) ... end)",
+        doc: "Have a function called when a widget is pressed, instead of reading update().",
+        snippet: 'cartbox.ui.on("play", function() start_game() end)',
+      },
+      {
+        name: "cartbox.ui.draw",
+        signature: "cartbox.ui.draw()",
+        doc: "Draw every shown document, in the order they were shown. Call it after your own drawing.",
+        snippet: "cartbox.ui.draw()",
+      },
+    ],
+  },
+  {
+    label: "cartbox · components",
+    open: false,
+    entries: [
+      {
+        name: "cartbox.component",
+        signature: "cartbox.component(obj, name) -> self",
+        doc: "Another object's copy of a component (attached in the Mesh tab's inspector): its fields and state, or nil.",
+        snippet: 'local door = cartbox.component("door", "Door")',
+      },
+      {
+        name: "cartbox.place",
+        signature: "cartbox.place(obj, x, y, z, yaw, pitch, roll, scale)",
+        doc: "Put an object somewhere (world space; scale 0 hides it) and leave it there. cartbox.place(obj) sends it home. Not limited like meshpose.",
+        snippet: "cartbox.place(self.obj, x, y, z, yaw, 0, 0, 1)",
+      },
+    ],
+  },
+  {
+    label: "cartbox · input actions",
+    open: false,
+    entries: [
+      {
+        name: "cartbox.action",
+        signature: "cartbox.action(name) -> held",
+        doc: "Whether an input action (named and bound in the Input tab — keys, controller buttons, console buttons) is held.",
+        snippet: 'if cartbox.action("jump") then\n  \nend',
+      },
+      {
+        name: "cartbox.actionp",
+        signature: "cartbox.actionp(name) -> pressed",
+        doc: "Whether it was pressed this tick (cartbox.actionr: released this tick).",
+        snippet: 'if cartbox.actionp("fire") then\n  \nend',
+      },
+      {
+        name: "cartbox.actionlabel",
+        signature: 'cartbox.actionlabel(name, device) -> "G / Q"',
+        doc: 'Its bindings for an on-screen prompt: the keyboard\'s, or the controller\'s with device "pad".',
+        snippet: 'print("Press " .. cartbox.actionlabel("reload") .. " to reload", 8, 8, 12)',
+      },
+      {
+        name: "cartbox.actions",
+        signature: "cartbox.actions() -> { name, ... }",
+        doc: "The cart's actions, in order.",
+        snippet: "local names = cartbox.actions()",
+      },
+    ],
+  },
+  {
     label: "cartbox · netplay",
     open: false,
     entries: [

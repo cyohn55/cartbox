@@ -7,6 +7,7 @@
 import { AudioController } from "./audio.js";
 import { SoundSystem } from "./soundSystem.js";
 import { uiSdkLua } from "./uiSdk.js";
+import { INPUT_BLOCK_BYTES, actionsSdkLua, inputBlockAddress, writeInputBlock } from "./actionsSdk.js";
 import { fetchCartridge } from "./cartridge.js";
 import { CanvasSurface, type DisplaySurface } from "./display.js";
 import { LitCanvasSurface } from "./lighting/LitCanvasSurface.js";
@@ -63,7 +64,7 @@ import { WorldOverlaySurface } from "./world/WorldOverlaySurface.js";
 import { createSceneRenderer } from "./render/createSceneRenderer.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
-import { SpatialLoader, type DecodedTexture, type EncodedImage, type Mat4 } from "@cartbox/editor";
+import { SpatialLoader, actionMask, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4 } from "@cartbox/editor";
 import type { ControlScheme, InspectedObject, PlayerOptions } from "./types.js";
 
 /**
@@ -79,6 +80,9 @@ function shouldUseTouch(scheme: ControlScheme, view: Window): boolean {
   const coarse = view.matchMedia?.("(pointer: coarse)").matches ?? false;
   return hasTouchSupport(view.navigator?.maxTouchPoints ?? 0, coarse);
 }
+
+/** No keys or controller buttons held (shared, so it allocates nothing per frame). */
+const NO_HELD: ReadonlySet<string> = new Set();
 
 /** No objects placed by physics or a timeline (shared, so it allocates nothing per frame). */
 const NO_OVERRIDES: ReadonlyMap<number, Mat4> = new Map();
@@ -113,6 +117,13 @@ export class Player {
   private touch?: TouchInput;
   /** The cart reads analog sticks (it opted in via cartbox.stick). */
   private analogCart = false;
+  /** Input actions (EP15): the cart's, with the player's rebinding, and the keys they claim. */
+  private actions: InputAction[] = [];
+  private actionKeys: ReadonlySet<string> = new Set();
+  private actionPad: ReadonlySet<string> = new Set();
+  /** Where the input block sits (bytes after pmem word 0), when the cart has actions; and last tick's mask. */
+  private inputOffset: number | null = null;
+  private lastActions = 0;
   private controllerInput?: GamepadInput;
   private controlSettings: ControlSettings = DEFAULT_CONTROL_SETTINGS;
   private volume = 1;
@@ -178,6 +189,20 @@ export class Player {
   setControlSettings(settings: ControlSettings): void {
     this.controlSettings = settings;
     this.touch?.applySettings(settings);
+    this.rebindActions();
+  }
+
+  /** The cart's actions with the player's rebinding applied (EP15). */
+  private rebindActions(): void {
+    this.actions = reboundActions(this.options.actions ?? [], this.controlSettings.actionBindings);
+    this.actionKeys = new Set(this.actions.flatMap((a) => a.keys));
+    this.actionPad = new Set(this.actions.flatMap((a) => a.pad));
+  }
+
+  /** The actions held now (bit i = action i), from every device. */
+  private heldActions(): number {
+    if (this.actions.length === 0) return 0;
+    return actionMask(this.actions, { keys: this.keyboard?.held ?? NO_HELD, pad: this.controllerInput?.pressed ?? NO_HELD, buttons: this.gamepad.value });
   }
 
   /** Let the game see input (true) or hold it neutral (false) — e.g. under a menu. */
@@ -256,6 +281,13 @@ export class Player {
       // sprite ids by hand. Injected like collision/flags: after the base SDK.
       const animClipsLua = animClipsSdkLua(this.options.anim);
       if (animClipsLua) prepared = prependLuaCode(prepared, animClipsLua);
+      // Input actions (EP15): read from the input block the host fills before each tick.
+      this.rebindActions();
+      const actionsLua = layout ? actionsSdkLua(this.actions, layout) : "";
+      if (actionsLua && layout) {
+        prepared = prependLuaCode(prepared, actionsLua);
+        this.inputOffset = inputBlockAddress(layout) - layout.pmemAddress;
+      }
       // UI documents (EP13): laid out for this screen, driven with cartbox.ui.
       const uiLua = uiSdkLua(this.options.ui, this.model.width, this.model.height);
       if (uiLua) prepared = prependLuaCode(prepared, uiLua);
@@ -470,9 +502,9 @@ export class Player {
     // device can take touch. Both write the same GamepadState.
     const onStart = this.options.onStart;
     if (scheme !== "touch") {
-      this.keyboard = new KeyboardInput(this.view, this.gamepad, () => this.controlSettings.keyBindings, onStart);
+      this.keyboard = new KeyboardInput(this.view, this.gamepad, () => this.controlSettings.keyBindings, onStart, () => this.actionKeys);
       // A physical controller (Xbox 360 / any standard-mapping gamepad), read each frame.
-      this.controllerInput = new GamepadInput(this.view.navigator, this.gamepad, () => this.controlSettings, onStart);
+      this.controllerInput = new GamepadInput(this.view.navigator, this.gamepad, () => this.controlSettings, onStart, () => this.actionPad);
     }
     if (shouldUseTouch(scheme, this.view)) {
       this.touch = new TouchInput(this.container, this.gamepad, onStart);
@@ -652,8 +684,11 @@ export class Player {
       profiler.add(section, now - mark);
       mark = now;
     };
-    // In playback the mask comes from the replay; otherwise from live input.
-    const mask = this.replaySource ? this.replaySource.maskForFrame(this.tickFrame) : this.inputEnabled ? this.gamepad.value : 0;
+    // In playback the mask comes from the replay; otherwise from live input. The
+    // console buttons are its low 8 bits, the input actions (EP15) the bits above.
+    const input = (this.replaySource ? this.replaySource.maskForFrame(this.tickFrame) : this.inputEnabled ? this.gamepad.value | (this.heldActions() << 8) : 0) >>> 0;
+    const mask = input & 0xff;
+    this.feedActions(input >>> 8);
     const net = this.options.netplay;
     if (net && this.console) {
       const words = this.console.netWords();
@@ -703,7 +738,7 @@ export class Player {
       if (words) net.afterTick(words);
     }
     lap("net");
-    this.recorder?.record(mask);
+    this.recorder?.record(input);
     this.tickFrame++;
     // Surface a Lua runtime error raised during this tick (once per new error).
     // The core aborts only this frame's TIC and keeps running, so this reports to
@@ -1092,6 +1127,15 @@ export class Player {
       this.touch?.setAnalog(true);
     }
     words[STICK_WORD] = this.replaySource || !this.inputEnabled ? 0 : packSticks(applyLookSettings(this.gamepad.axes, this.controlSettings));
+  }
+
+  /** Input actions (EP15): this tick's mask and last tick's into the input block. */
+  private feedActions(held: number): void {
+    if (this.inputOffset === null || !this.console) return;
+    const bytes = this.console.ramView(this.inputOffset, INPUT_BLOCK_BYTES);
+    if (!bytes) return;
+    writeInputBlock(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), held, this.lastActions);
+    this.lastActions = held;
   }
 
   private fail(error: unknown): void {

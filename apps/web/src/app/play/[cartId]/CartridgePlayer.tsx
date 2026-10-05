@@ -13,7 +13,7 @@ import {
   getModel,
   mount,
   parseMeshScene,
-  readSidecarUi,
+  readSidecarUi, readSidecarActions,
   parseWorldScene,
   serializeReplay,
   type MailboxEvent,
@@ -75,6 +75,7 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
   const mesh = useMemo(() => parseMeshScene(meshRaw), [meshRaw]);
   // Its UI documents (EP13), from the same sidecar.
   const ui = useMemo(() => readSidecarUi(meshRaw), [meshRaw]);
+  const actions = useMemo(() => readSidecarActions(meshRaw), [meshRaw]);
   // The HD-2D world sidecar, parsed once per cart (malformed → null → no world).
   const world = useMemo(() => parseWorldScene(worldRaw), [worldRaw]);
   const handleRef = useRef<PlayerHandle | null>(null);
@@ -153,6 +154,7 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       // player's software rasteriser (Phase 2 of the mesh asset feature).
       mesh: mesh ?? undefined,
       ...(ui.length > 0 ? { ui } : {}),
+      ...(actions.length > 0 ? { actions } : {}),
       // Physics bodies on those meshes, simulated by Rapier (fetched only when a
       // cart actually has bodies).
       physics: rapierPhysics(),
@@ -208,7 +210,7 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       streaming.abort();
       handle.destroy();
     };
-  }, [cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, ui, world, meshTextures]);
+  }, [cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, ui, actions, world, meshTextures]);
 
   const togglePlayback = () => {
     const handle = handleRef.current;

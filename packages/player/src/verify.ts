@@ -15,19 +15,34 @@
 import type { ConsoleInstance } from "./engine.js";
 import { decodeMailbox, type MailboxEvent } from "./mailbox.js";
 import { ReplaySource, type Replay } from "./replay.js";
+import { INPUT_BLOCK_BYTES, writeInputBlock } from "./actionsSdk.js";
+
+/** How the cart was built: where its input block sits (bytes after pmem word 0), when it has input actions. */
+export interface ReplayRunOptions {
+  readonly inputOffset?: number;
+}
 
 /**
  * Re-runs a replay into a loaded console and returns every platform event the
  * cart emits. The console must already hold the correct cartridge (seeded with
  * `replay.seed`, SDK present) for the result to match the original session.
+ * A recorded mask carries the console buttons in its low 8 bits and the input
+ * actions (EP15) above them, which go to the input block when the cart has one.
  */
-export function runReplayEvents(console: ConsoleInstance, replay: Replay): MailboxEvent[] {
+export function runReplayEvents(console: ConsoleInstance, replay: Replay, options: ReplayRunOptions = {}): MailboxEvent[] {
   const source = new ReplaySource(replay.inputs);
   let lastSeq = decodeMailbox(console.readMailbox(), 0).seq; // baseline pre-existing pmem
   const events: MailboxEvent[] = [];
+  let lastActions = 0;
 
   for (let frame = 0; frame < replay.frameCount; frame++) {
-    console.tick(source.maskForFrame(frame));
+    const input = source.maskForFrame(frame) >>> 0;
+    if (options.inputOffset !== undefined) {
+      const bytes = console.ramView(options.inputOffset, INPUT_BLOCK_BYTES);
+      if (bytes) writeInputBlock(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), input >>> 8, lastActions);
+      lastActions = input >>> 8;
+    }
+    console.tick(input & 0xff);
     const read = decodeMailbox(console.readMailbox(), lastSeq);
     lastSeq = read.seq;
     events.push(...read.events);
@@ -77,8 +92,9 @@ export function verifyReplayScore(
   console: ConsoleInstance,
   replay: Replay,
   claimedScore: number,
+  options: ReplayRunOptions = {},
 ): VerificationResult {
-  const events = runReplayEvents(console, replay);
+  const events = runReplayEvents(console, replay, options);
   const score = extractScore(events);
   return {
     score,
