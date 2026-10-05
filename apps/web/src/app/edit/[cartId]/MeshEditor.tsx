@@ -34,8 +34,10 @@ import {
   sceneLightingEnvironment,
   sceneLightingKeyDirection,
   sceneLightingTonemap,
+  terrainHeight,
   type MeshAsset,
   type DecodedTexture,
+  type Terrain,
 } from "@cartbox/editor";
 
 import {
@@ -50,6 +52,8 @@ import {
   type MeshTransform,
 } from "@/lib/meshSidecar";
 import { withAutoLods } from "@/lib/meshLods";
+import { DAB_SPACING, applyTerrainTool, findTerrain, replaceTerrain, strokeDabs } from "@/lib/terrainEdit";
+import { INITIAL_TERRAIN_EDIT, TerrainPanel, type TerrainEditState } from "./TerrainPanel";
 import { clickSelection, copyPayload, duplicateEntries, pasteEntries, removeEntries, withSubtrees } from "@/lib/sceneSelection";
 import { placeAsset, type ContentAsset } from "@/lib/contentBrowser";
 import { ContentBrowser, type CodeAccess } from "./ContentBrowser";
@@ -178,6 +182,35 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay }: Mesh
   const [libraryOpen, setLibraryOpen] = useState(false);
   /** "solo" previews the selected mesh alone; "scene" composes every instance. */
   const [view, setView] = useState<"solo" | "scene">("solo");
+  /** The Terrain panel's tool and brush (EP10); a tool up turns the scene view's left button into a brush. */
+  const [terrainEdit, setTerrainEdit] = useState<TerrainEditState>(INITIAL_TERRAIN_EDIT);
+  const onTerrainEdit = (next: TerrainEditState) => {
+    setTerrainEdit(next);
+    if (next.tool) setView("scene"); // brushing happens in the scene view
+  };
+  /** The stroke in progress: the terrain as it's been brushed so far, the last dab, and the level a flatten holds. */
+  const strokeRef = useRef<{ terrain: Terrain; last: readonly [number, number] | null; level?: number } | null>(null);
+  const onTerrainStroke = (id: string, x: number, z: number, start: boolean) => {
+    const { tool, radius, strength } = terrainEdit;
+    if (!tool) return;
+    if (start || !strokeRef.current || strokeRef.current.terrain.id !== id) {
+      const t = findTerrain(sidecar, id);
+      if (!t) return;
+      const level = tool.kind === "sculpt" && tool.op === "flatten" ? (terrainHeight({ ...t, origin: [0, 0, 0], holes: undefined }, x, z) ?? 0) : undefined;
+      strokeRef.current = { terrain: t, last: null, ...(level !== undefined ? { level } : {}) };
+    }
+    const stroke = strokeRef.current;
+    const { dabs, last } = strokeDabs(stroke.last, [x, z], radius);
+    if (dabs.length === 0) return;
+    // Dabs overlap (a quarter of the brush apart), so each lays a share of the
+    // strength: a pass with a sculpt brush at half strength lifts about a sixth of its radius.
+    const share = tool.kind === "hole" ? 1 : tool.kind === "paint" ? DAB_SPACING : 0.5;
+    let t = stroke.terrain;
+    for (const [dx, dz] of dabs) t = applyTerrainTool(t, tool, { x: dx, z: dz, radius, strength: strength * share }, stroke.level);
+    stroke.terrain = t;
+    stroke.last = last;
+    onSidecarChange(replaceTerrain(sidecar, t));
+  };
   /** The skeletal clip the preview is playing (index), or null for the still mesh, and how far in. */
   const [previewClip, setPreviewClip] = useState<number | null>(null);
   const [clipTime, setClipTime] = useState(0);
@@ -648,6 +681,8 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay }: Mesh
         />
 
         <PrefabLibrary sidecar={sidecar} onChange={onSidecarChange} onPlaced={setSelectedId} />
+
+        <TerrainPanel sidecar={sidecar} onChange={onSidecarChange} edit={terrainEdit} onEdit={onTerrainEdit} />
       </aside>
 
       {/* Centre: preview — the selected mesh alone, or the whole composed scene — over the content browser */}
@@ -666,6 +701,8 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay }: Mesh
           previewCamera={timelinePreview?.camera ?? null}
           previewLocals={timelinePreview?.locals ?? null}
           onView={setSceneView}
+          terrainBrush={terrainEdit.tool && terrainEdit.id ? { id: terrainEdit.id, radius: terrainEdit.radius } : null}
+          onTerrainStroke={onTerrainStroke}
           onDropAsset={(data, at) => {
             try {
               const asset = JSON.parse(data) as { kind?: unknown; key?: unknown };

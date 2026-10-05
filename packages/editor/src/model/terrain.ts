@@ -27,6 +27,8 @@ export interface TerrainLayer {
   readonly up?: readonly [number, number];
   /** World height of the triangle's centre, [min, max]. Absent = any. */
   readonly height?: readonly [number, number];
+  /** Shown only where painted (EP10): the rules never pick it (paths, scorch marks). */
+  readonly paintOnly?: boolean;
 }
 
 export interface Terrain {
@@ -61,6 +63,14 @@ export interface Terrain {
   readonly blend?: { readonly up: number; readonly height: number; readonly noise?: number };
   /** Let the terrain cast into the play space's shadow map (its cliffs shade the deck at a low sun). */
   readonly castShadows?: boolean;
+  /**
+   * Painted layer weights (EP10), a splat map: one byte per layer per height
+   * sample (sample-major, `samples² × layers.length`). Where present it
+   * replaces the layers' rules, and neighbouring layers blend per vertex.
+   */
+  readonly paint?: Uint8Array;
+  /** Holes cut in the ground (EP10): one byte per cell (`(samples − 1)²`, row by row along Z), non-zero = no ground. */
+  readonly holes?: Uint8Array;
 }
 
 export const MIN_TERRAIN_SAMPLES = 2;
@@ -70,7 +80,12 @@ export const MAX_TERRAIN_LAYERS = 4;
 const HEIGHT_STEP = 0.05;
 const DEFAULT_TILE = 8;
 
-/** The terrain's world height at (x, z), bilinear between samples; null off the grid. */
+/** Whether cell (i, j) is cut out of the ground. */
+export function terrainHole(t: Terrain, i: number, j: number): boolean {
+  return Boolean(t.holes && t.holes[j * (t.samples - 1) + i]);
+}
+
+/** The terrain's world height at (x, z), bilinear between samples; null off the grid or over a hole. */
 export function terrainHeight(t: Terrain, x: number, z: number): number | null {
   const n = t.samples;
   const gx = ((x - t.origin[0]) / t.size[0]) * (n - 1);
@@ -78,6 +93,7 @@ export function terrainHeight(t: Terrain, x: number, z: number): number | null {
   if (!(gx >= 0 && gz >= 0 && gx <= n - 1 && gz <= n - 1)) return null;
   const x0 = Math.min(n - 2, Math.floor(gx));
   const z0 = Math.min(n - 2, Math.floor(gz));
+  if (terrainHole(t, x0, z0)) return null;
   const fx = gx - x0;
   const fz = gz - z0;
   const h = (i: number, j: number) => t.heights[j * n + i]!;
@@ -123,7 +139,7 @@ export function terrainLayerWeights(t: Terrain, up: number, height: number, jitt
       out.push(rest);
       return;
     }
-    const w = rest * within(u, l.up, wu, [0, 1]) * within(h, l.height, wh);
+    const w = l.paintOnly ? 0 : rest * within(u, l.up, wu, [0, 1]) * within(h, l.height, wh);
     out.push(w);
     rest -= w;
   });
@@ -153,9 +169,21 @@ function edgeNoise(x: number, z: number): number {
   return (octave(9) * 0.65 + octave(3.5) * 0.35) * 2 - 1;
 }
 
+/** A sample's painted layer weights (normalised), or null where nothing is painted (all zero). */
+export function paintedWeights(t: Terrain, i: number, j: number): number[] | null {
+  if (!t.paint) return null;
+  const L = t.layers.length;
+  const o = (j * t.samples + i) * L;
+  let sum = 0;
+  for (let k = 0; k < L; k += 1) sum += t.paint[o + k]!;
+  if (sum === 0) return null;
+  return Array.from({ length: L }, (_, k) => t.paint![o + k]! / sum);
+}
+
 function layerFor(layers: readonly TerrainLayer[], up: number, height: number): number {
   for (let i = 0; i < layers.length - 1; i += 1) {
     const l = layers[i]!;
+    if (l.paintOnly) continue;
     if (l.up && (up < l.up[0] || up > l.up[1])) continue;
     if (l.height && (height < l.height[0] || height > l.height[1])) continue;
     return i;
@@ -239,6 +267,8 @@ export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, nu
   const weightsAt = (i: number, j: number): number[] => {
     const key = j * n + i;
     let w = weightCache.get(key);
+    if (!w && t.paint) w = paintedWeights(t, i, j) ?? undefined;
+    if (w) weightCache.set(key, w);
     if (!w) {
       const x = t.origin[0] + i * dx;
       const z = t.origin[2] + j * dz;
@@ -279,6 +309,11 @@ export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, nu
     return index;
   };
   const floor = t.floor ?? -Infinity;
+  // A coarse cell that covers any hole is left out, so a hole stays open at every detail.
+  const holeWithin = (i0: number, j0: number, i1: number, j1: number): boolean => {
+    for (let j = j0; j < j1; j += 1) for (let i = i0; i < i1; i += 1) if (terrainHole(t, i, j)) return true;
+    return false;
+  };
   const tri = (a: [number, number], b: [number, number], c: [number, number]) => {
     const pa = [a[0] * dx, h(a[0], a[1]), a[1] * dz];
     const pb = [b[0] * dx, h(b[0], b[1]), b[1] * dz];
@@ -288,7 +323,7 @@ export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, nu
     const vx = pc[0]! - pa[0]!, vy = pc[1]! - pa[1]!, vz = pc[2]! - pa[2]!;
     const ny = uz * vx - ux * vz;
     const len = Math.hypot(uy * vz - uz * vy, ny, ux * vy - uy * vx) || 1;
-    const layer = t.blend ? blendBucket(a, b, c) : layerFor(t.layers, ny / len, t.origin[1] + (pa[1]! + pb[1]! + pc[1]!) / 3);
+    const layer = t.blend || t.paint ? blendBucket(a, b, c) : layerFor(t.layers, ny / len, t.origin[1] + (pa[1]! + pb[1]! + pc[1]!) / 3);
     out[layer]!.indices.push(vertex(layer, a[0], a[1]), vertex(layer, b[0], b[1]), vertex(layer, c[0], c[1]));
     if (skirt > 0) {
       for (const [p, q, r] of [[a, b, c], [b, c, a], [c, a, b]] as const) if (onEdge(p, q)) hang(layer, p, q, r);
@@ -334,6 +369,7 @@ export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, nu
       const j1 = Math.min(cz1, j + s);
       const h00 = h(i, j), h10 = h(i1, j), h01 = h(i, j1), h11 = h(i1, j1);
       if (t.origin[1] + Math.max(h00, h10, h01, h11) < floor) continue;
+      if (t.holes && holeWithin(i, j, i1, j1)) continue;
       // Split along the diagonal whose ends are closer in height, so ridges and
       // gullies follow the terrain rather than a fixed grain.
       if (Math.abs(h00 - h11) <= Math.abs(h10 - h01)) {
@@ -407,12 +443,16 @@ export interface SerializedTerrain {
   samples: number;
   /** Heights as little-endian Int16 multiples of 0.05, base64. */
   heights: string;
-  layers: { material: SerializedMaterial; up?: [number, number]; height?: [number, number] }[];
+  layers: { material: SerializedMaterial; up?: [number, number]; height?: [number, number]; paintOnly?: boolean }[];
   floor?: number;
   tile?: number;
   parent?: string;
   blend?: { up: number; height: number; noise?: number };
   castShadows?: boolean;
+  /** The splat map's bytes, base64 (see {@link Terrain.paint}). */
+  paint?: string;
+  /** Holes as bits, one per cell (least significant first), base64. */
+  holes?: string;
 }
 
 export function serializeTerrain(t: Terrain): SerializedTerrain {
@@ -425,13 +465,46 @@ export function serializeTerrain(t: Terrain): SerializedTerrain {
     size: [...t.size],
     samples: t.samples,
     heights: bytesToBase64(new Uint8Array(q.buffer)),
-    layers: t.layers.map((l) => ({ material: serializeMaterial(l.material), ...(l.up ? { up: [...l.up] } : {}), ...(l.height ? { height: [...l.height] } : {}) })),
+    layers: t.layers.map((l) => ({ material: serializeMaterial(l.material), ...(l.up ? { up: [...l.up] } : {}), ...(l.height ? { height: [...l.height] } : {}), ...(l.paintOnly ? { paintOnly: true } : {}) })),
     ...(t.floor !== undefined ? { floor: t.floor } : {}),
     ...(t.tile !== undefined ? { tile: t.tile } : {}),
     ...(t.parent ? { parent: t.parent } : {}),
     ...(t.blend ? { blend: { up: t.blend.up, height: t.blend.height, ...(t.blend.noise !== undefined ? { noise: t.blend.noise } : {}) } } : {}),
     ...(t.castShadows ? { castShadows: true } : {}),
+    ...(t.paint && t.paint.length === t.samples * t.samples * t.layers.length ? { paint: bytesToBase64(t.paint) } : {}),
+    ...(t.holes && t.holes.some((v) => v !== 0) ? { holes: packBits(t.holes) } : {}),
   };
+}
+
+function packBits(cells: Uint8Array): string {
+  const bits = new Uint8Array(Math.ceil(cells.length / 8));
+  cells.forEach((v, i) => {
+    if (v) bits[i >> 3]! |= 1 << (i & 7);
+  });
+  return bytesToBase64(bits);
+}
+
+function unpackBits(stored: string, count: number): Uint8Array | null {
+  let bits: Uint8Array;
+  try {
+    bits = base64ToBytes(stored);
+  } catch {
+    return null;
+  }
+  if (bits.length !== Math.ceil(count / 8)) return null;
+  const out = new Uint8Array(count);
+  for (let i = 0; i < count; i += 1) out[i] = (bits[i >> 3]! >> (i & 7)) & 1;
+  return out;
+}
+
+function readPaint(value: unknown, length: number): { paint?: Uint8Array } {
+  if (typeof value !== "string") return {};
+  try {
+    const bytes = base64ToBytes(value);
+    return bytes.length === length ? { paint: bytes } : {};
+  } catch {
+    return {};
+  }
 }
 
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -459,10 +532,10 @@ export function readTerrain(value: unknown): Terrain | null {
   const heights = new Float32Array(n * n);
   for (let i = 0; i < heights.length; i += 1) heights[i] = view.getInt16(i * 2, true) * HEIGHT_STEP;
   const layers: TerrainLayer[] = r.layers.slice(0, MAX_TERRAIN_LAYERS).map((raw) => {
-    const l = (raw ?? {}) as { material?: unknown; up?: unknown; height?: unknown };
+    const l = (raw ?? {}) as { material?: unknown; up?: unknown; height?: unknown; paintOnly?: unknown };
     const up = pair(l.up);
     const height = pair(l.height);
-    return { material: deserializeMaterial(l.material), ...(up ? { up } : {}), ...(height ? { height } : {}) };
+    return { material: deserializeMaterial(l.material), ...(up ? { up } : {}), ...(height ? { height } : {}), ...(l.paintOnly === true ? { paintOnly: true } : {}) };
   });
   return {
     id: typeof r.id === "string" ? r.id : "terrain",
@@ -477,6 +550,8 @@ export function readTerrain(value: unknown): Terrain | null {
     ...(typeof r.parent === "string" && r.parent ? { parent: r.parent } : {}),
     ...readBlend(r.blend),
     ...(r.castShadows === true ? { castShadows: true } : {}),
+    ...readPaint(r.paint, n * n * layers.length),
+    ...(typeof r.holes === "string" && unpackBits(r.holes, (n - 1) * (n - 1)) ? { holes: unpackBits(r.holes, (n - 1) * (n - 1))! } : {}),
   };
 }
 

@@ -204,12 +204,12 @@ export function newMeshId(): string {
 
 /**
  * Serialize the sidecar for storage. Returns null when there is nothing to keep —
- * no meshes and no lighting rig — so an empty cart stores nothing. A lighting rig
+ * no meshes, lighting rig or terrain — so an empty cart stores nothing. A lighting rig
  * alone (meshes removed but the scene still lit) is kept.
  */
 export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
   const prefabs = sidecar.prefabs ?? [];
-  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0) return null;
+  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0) return null;
   // Repeated meshes (and animation frames) are stored once in a shared library,
   // shared between placed entries and prefab nodes (a prefab's copies repeat its meshes).
   const nodes = prefabs.flatMap((prefab) => prefab.nodes);

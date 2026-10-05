@@ -394,9 +394,32 @@ preview.
 
 ## Phase C — World building
 
-- [ ] **EP10. Terrain tools.** Create a terrain in the editor, sculpt it
+- [x] **EP10. Terrain tools.** Create a terrain in the editor, sculpt it
       (raise, lower, smooth, flatten, noise), paint its material layers, and
       cut holes, as Unity's Terrain tools and Unreal's Landscape mode do.
+
+      *Done:*
+      - **Terrain panel** (Mesh tab): add a flat terrain of any size and
+        detail. It starts with rock on steep faces, snow up high, grass
+        elsewhere, and a paint-only dirt layer. Pick a tool, set the brush
+        size and strength, and drag over the ground in the scene view; Alt
+        still orbits. The brush's rim is drawn on the ground under the cursor.
+      - **Sculpting:** raise, lower, smooth, flatten (to the height where the
+        stroke starts) and noise, each on a round soft-edged brush. A stroke's
+        dabs are spaced along the cursor's path, so a fast drag lays as much
+        as a slow one, and a whole stroke is one undo step.
+      - **Painting:** a splat map, one byte per layer per height sample. The
+        first dab bakes the layers' slope and height rules into it, so
+        painting starts from what the terrain already shows. Neighbouring
+        layers blend per vertex through the existing blended-layer path, so
+        all three renderers draw it unchanged. Layer colours can be edited,
+        and "Clear paint" hands the terrain back to its rules.
+      - **Holes:** cut or fill cells. A hole has no triangles at any detail
+        level and no height, so picking passes through it.
+      - **Storage:** heights, splat map, holes (as bits) and paint-only
+        layers survive the sidecar. A sidecar holding only a terrain is now
+        kept on save (it used to be dropped as empty), and the scene view
+        frames a terrain-only scene.
 - [ ] **EP11. Foliage.** Paint instanced meshes (grass, rocks, trees) with
       density, random scale and rotation, alignment to the slope, and a
       distance cull. *Lockout:* rocks and snow drifts across the gorge.
