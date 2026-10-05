@@ -65,6 +65,16 @@ interface MeshInstance extends MeshSceneInstance {
     readonly detail?: number;
     /** Kept loaded whatever the distance, when the scene streams (see streaming.ts in @cartbox/editor). */
     readonly alwaysLoaded?: true;
+    /**
+     * On a block of merged foliage copies (EP11): past `cull` world units from
+     * the camera (to the edge of its bounds — `center` and `radius`, in the
+     * instance's space) it isn't drawn.
+     */
+    readonly foliage?: {
+        readonly cull: number;
+        readonly center: readonly [number, number, number];
+        readonly radius: number;
+    };
 }
 /** A prefab's reserve of spawnable copies: each copy's root object index. */
 interface PrefabPool {
@@ -5335,6 +5345,10 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private eye;
     /** Where the camera was last drawn from (null before the first frame). */
     eyePosition(): readonly [number, number, number] | null;
+    /** Foliage blocks by mesh (EP11): their cull distance and bounds. */
+    private readonly foliage;
+    /** Whether an instance is in reach of the eye: anything but a foliage block is; a block is within its cull distance. */
+    private foliageInReach;
     /** Each terrain block's world bounds, measured on first use. */
     private readonly blockBounds;
     /**

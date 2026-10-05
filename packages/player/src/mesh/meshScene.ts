@@ -45,6 +45,8 @@ import {
   type MeshSceneInstance,
   type LodChain,
   decodeLods,
+  foliageBlocks,
+  readFoliage,
   type AnimatorSpec,
   type PhysicsSpec,
   type PhysicsWorldSettings,
@@ -112,6 +114,12 @@ export interface MeshInstance extends MeshSceneInstance {
   readonly detail?: number;
   /** Kept loaded whatever the distance, when the scene streams (see streaming.ts in @cartbox/editor). */
   readonly alwaysLoaded?: true;
+  /**
+   * On a block of merged foliage copies (EP11): past `cull` world units from
+   * the camera (to the edge of its bounds — `center` and `radius`, in the
+   * instance's space) it isn't drawn.
+   */
+  readonly foliage?: { readonly cull: number; readonly center: readonly [number, number, number]; readonly radius: number };
 }
 
 /** A prefab's reserve of spawnable copies: each copy's root object index. */
@@ -401,6 +409,39 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
         terrain: true,
         ...(t.castShadows ? { casts: true as const } : {}),
         detail: chunk.detail,
+      });
+    }
+  }
+
+  // Foliage (EP11): each layer's copies, set on its terrain and merged into
+  // blocks, drawn as landscape (no framing, no shadow map) and culled by distance.
+  const storedFoliage = (parsed as { foliage?: unknown }).foliage;
+  if (Array.isArray(storedFoliage)) {
+    for (const raw of storedFoliage) {
+      const read = readFoliage(raw, terrains);
+      if (!read) continue;
+      const text = resolveMeshRef(read.mesh, library);
+      const mesh = text ? load(text) : null;
+      const t = terrains.find((x) => x.id === read.layer.terrain);
+      if (!mesh || !t) continue;
+      const parent = t.parent !== undefined ? (indexOf.get(t.parent) ?? -1) : -1;
+      const model = parent >= 0 ? instances[parent]!.model : identity;
+      foliageBlocks(t, read.layer, mesh).forEach((block, k) => {
+        instances.push({
+          mesh: block.mesh,
+          model,
+          local: identity,
+          parent,
+          id: `foliage:${read.layer.id}:${k}`,
+          name: read.layer.name,
+          tags: [],
+          props: {},
+          physics: null,
+          terrain: true,
+          // On a terrain that casts, its foliage casts too (boulders shade the snow).
+          ...(t.castShadows ? { casts: true as const } : {}),
+          foliage: { cull: read.layer.cull, center: block.center, radius: block.radius },
+        });
       });
     }
   }

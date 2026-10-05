@@ -420,9 +420,38 @@ preview.
         layers survive the sidecar. A sidecar holding only a terrain is now
         kept on save (it used to be dropped as empty), and the scene view
         frames a terrain-only scene.
-- [ ] **EP11. Foliage.** Paint instanced meshes (grass, rocks, trees) with
+- [x] **EP11. Foliage.** Paint instanced meshes (grass, rocks, trees) with
       density, random scale and rotation, alignment to the slope, and a
       distance cull. *Lockout:* rocks and snow drifts across the gorge.
+
+      *Done:*
+      - **Layers:** a foliage layer is a mesh on a terrain with a density,
+        a random size range, slope alignment (0 = upright like a tree, 1 =
+        along the ground like a rock), sink, and a draw distance. Each copy
+        is turned at random.
+      - **Painting:** a brush paints copies (kept a spacing apart, so dabs
+        fill in rather than pile up) and erases them.
+      - **Filling by rules:** steepest slope, a height range and a circle to
+        keep clear, scattered from a seed, with Reseed. A fill costs nothing
+        per copy on the sidecar; painted copies cost six bytes each.
+      - **On the ground:** copies store where they stand, not their height,
+        so each is set on the terrain when the scene loads. Sculpting
+        afterwards keeps them on it, and they skip holes and the floor.
+      - **Drawing:** copies merge into one mesh per 48 m block, so a layer
+        is a few draws. A block past the layer's draw distance (scaled by the
+        quality preset) isn't drawn. Blocks count as landscape: they don't
+        set the framing, and they cast into the shadow map only when their
+        terrain does.
+      - **Editor:** a Foliage section in the Terrain panel. Add a layer from
+        a built-in mesh (boulder, snow drift, grass tuft, pine) or a copy of
+        a scene object's mesh; Paint or Erase it with the brush; edit its
+        settings; turn on Fill; clear the painted copies; remove the layer.
+        The scene view draws the layers. A layer's mesh shares the sidecar's
+        library with the objects, and a terrain's foliage goes when the
+        terrain is deleted.
+      - **Lockout:** about 190 boulders on the range's slopes and 120 snow
+        drifts on its flats, filled by rules and kept clear of the gorge. They
+        add about 8 KB to the sidecar.
 
 ## Phase D — Game systems
 

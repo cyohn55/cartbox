@@ -56,6 +56,9 @@ import {
   SCENE_TAG_MAX,
   resolveMeshFrames,
   readStoredLods,
+  readFoliage,
+  serializeFoliage,
+  type SerializedFoliage,
   type StoredLods,
   resolveMeshRef,
   serializeMeshAsset,
@@ -185,6 +188,8 @@ export interface MeshSidecar {
   readonly ragdollColliders?: readonly RagdollBox[];
   /** Cosmetic debris the cart throws with cartbox.debris (see debris.ts in @cartbox/editor). */
   readonly debris?: readonly DebrisDef[];
+  /** Meshes scattered over the terrains (see foliage.ts in @cartbox/editor), each layer's mesh stored whole. */
+  readonly foliage?: readonly SerializedFoliage[];
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -213,8 +218,10 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
   // Repeated meshes (and animation frames) are stored once in a shared library,
   // shared between placed entries and prefab nodes (a prefab's copies repeat its meshes).
   const nodes = prefabs.flatMap((prefab) => prefab.nodes);
-  const { entries, library } = packMeshLibrary<MeshSidecarEntry | PrefabNode>([...sidecar.meshes, ...nodes]);
-  const packedNodes = entries.slice(sidecar.meshes.length) as PrefabNode[];
+  const foliage = sidecar.foliage ?? [];
+  const { entries, library } = packMeshLibrary<MeshSidecarEntry | PrefabNode | SerializedFoliage>([...sidecar.meshes, ...nodes, ...foliage]);
+  const packedNodes = entries.slice(sidecar.meshes.length, sidecar.meshes.length + nodes.length) as PrefabNode[];
+  const packedFoliage = entries.slice(sidecar.meshes.length + nodes.length) as SerializedFoliage[];
   let at = 0;
   const packedPrefabs = prefabs.map((prefab) => {
     const out = { ...prefab, nodes: packedNodes.slice(at, at + prefab.nodes.length) };
@@ -238,6 +245,7 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(sidecar.decalMarks && sidecar.decalMarks.length > 0 ? { decalMarks: sidecar.decalMarks } : {}),
     ...(sidecar.ragdollColliders && sidecar.ragdollColliders.length > 0 ? { ragdollColliders: sidecar.ragdollColliders } : {}),
     ...(sidecar.debris && sidecar.debris.length > 0 ? { debris: sidecar.debris } : {}),
+    ...(packedFoliage.length > 0 ? { foliage: packedFoliage } : {}),
   });
 }
 
@@ -335,6 +343,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
   const decalMarks = parseDecalMarks((parsed as { decalMarks?: unknown }).decalMarks, decals);
   const ragdollColliders = parseRagdollColliders((parsed as { ragdollColliders?: unknown }).ragdollColliders);
   const debris = parseDebrisDefs((parsed as { debris?: unknown }).debris);
+  const foliage = readFoliageLayers((parsed as { foliage?: unknown }).foliage, terrains, library, isValid);
   const placed = linked.map((entry) => (entry.level && !levelIds.has(entry.level) ? withoutLevel(entry) : entry));
   return {
     version: MESH_SIDECAR_VERSION,
@@ -353,7 +362,30 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     ...(decalMarks.length > 0 ? { decalMarks } : {}),
     ...(ragdollColliders.length > 0 ? { ragdollColliders } : {}),
     ...(debris.length > 0 ? { debris } : {}),
+    ...(foliage.length > 0 ? { foliage } : {}),
   };
+}
+
+/** Read stored foliage layers: each must sit on a terrain the sidecar has and carry a mesh that decodes; its mesh is resolved from the library. */
+function readFoliageLayers(value: unknown, terrains: readonly SerializedTerrain[], library: ReturnType<typeof readMeshLibrary>, isValid: (mesh: string) => boolean): SerializedFoliage[] {
+  if (!Array.isArray(value)) return [];
+  const sizes = terrains.map((t) => ({ id: t.id, size: t.size }));
+  const out: SerializedFoliage[] = [];
+  for (const raw of value) {
+    const read = readFoliage(raw, sizes);
+    const mesh = read ? resolveMeshRef(read.mesh, library) : null;
+    if (!read || !mesh || !isValid(mesh)) continue;
+    const t = sizes.find((x) => x.id === read.layer.terrain)!;
+    out.push(serializeFoliage(t, read.layer, mesh));
+  }
+  return out;
+}
+
+/** Replace the scene's foliage layers (an empty list removes them). */
+export function setMeshFoliage(sidecar: MeshSidecar, foliage: readonly SerializedFoliage[]): MeshSidecar {
+  const { foliage: _drop, ...rest } = sidecar;
+  void _drop;
+  return foliage.length > 0 ? { ...rest, foliage } : rest;
 }
 
 /**

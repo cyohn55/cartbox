@@ -37,6 +37,9 @@ import {
   parentIndices,
   projectionMatrix,
   readTerrain,
+  readFoliage,
+  foliageBlocks,
+  deserializeMeshAsset,
   sceneLightingEnvironment,
   sceneLightingKeyDirection,
   sceneLightingTonemap,
@@ -281,7 +284,9 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   const [showFog, setShowFog] = useState(true);
   const [terrains, setTerrains] = useState<PreviewTerrain[]>([]);
   // Everything about the terrains (a brush stroke changes their heights, paint and holes).
-  const terrainSignature = useMemo(() => JSON.stringify(sidecar.terrains ?? []), [sidecar.terrains]);
+  const terrainSignature = useMemo(() => JSON.stringify([sidecar.terrains ?? [], sidecar.foliage ?? []]), [sidecar.terrains, sidecar.foliage]);
+  /** Foliage (EP11): each layer's merged blocks, drawn with the terrain they grow on. */
+  const [foliage, setFoliage] = useState<{ readonly terrainId: string; readonly mesh: MeshAsset; readonly textures: (DecodedTexture | null)[] }[]>([]);
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -293,7 +298,24 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
         if (mesh.primitives.length === 0) continue;
         next.push({ terrain, mesh, textures: await decodeMeshTextures(mesh) });
       }
-      if (!cancelled) setTerrains(next);
+      const plants: { terrainId: string; mesh: MeshAsset; textures: (DecodedTexture | null)[] }[] = [];
+      for (const stored of sidecar.foliage ?? []) {
+        const terrain = next.find((p) => p.terrain.id === stored.terrain)?.terrain;
+        const read = terrain ? readFoliage(stored, [terrain]) : null;
+        if (!terrain || !read) continue;
+        let mesh: MeshAsset;
+        try {
+          mesh = deserializeMeshAsset(read.mesh);
+        } catch {
+          continue;
+        }
+        const textures = await decodeMeshTextures(mesh);
+        for (const block of foliageBlocks(terrain, read.layer, mesh)) plants.push({ terrainId: terrain.id, mesh: block.mesh, textures });
+      }
+      if (!cancelled) {
+        setTerrains(next);
+        setFoliage(plants);
+      }
     })();
     return () => {
       cancelled = true;
@@ -324,12 +346,16 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   const terrainInstances = useMemo<MeshSceneInstance[]>(() => {
     if (!showTerrain) return [];
     const identity = composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]);
-    return terrains.map(({ terrain, mesh, textures }) => ({
-      mesh,
-      textures,
-      model: (terrain.parent ? placement.get(terrain.parent)?.world : undefined) ?? identity,
-    }));
-  }, [terrains, placement, showTerrain]);
+    const modelOf = (terrain: Terrain) => (terrain.parent ? placement.get(terrain.parent)?.world : undefined) ?? identity;
+    // The terrains first (index k matches `terrains[k]`), then the foliage on them.
+    return [
+      ...terrains.map(({ terrain, mesh, textures }) => ({ mesh, textures, model: modelOf(terrain) })),
+      ...foliage.flatMap(({ terrainId, mesh, textures }) => {
+        const terrain = terrains.find((t) => t.terrain.id === terrainId)?.terrain;
+        return terrain ? [{ mesh, textures, model: modelOf(terrain) }] : [];
+      }),
+    ];
+  }, [terrains, foliage, placement, showTerrain]);
 
   /** The objects' bounding sphere (framing, shadows) and the whole scene's with terrain (clip planes). */
   const bounds = useMemo(() => sphereAround(instances) ?? { center: [0, 0, 0] as Vec3, radius: 1 }, [instances]);
