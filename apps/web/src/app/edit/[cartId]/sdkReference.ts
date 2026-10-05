@@ -633,6 +633,30 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
     ],
   },
   {
+    label: "cartbox · save data",
+    open: false,
+    entries: [
+      {
+        name: "cartbox.save",
+        signature: "cartbox.save(t) -> ok, why",
+        doc: "Save a table (numbers, strings, booleans, tables of them) for next time: in this browser, and in the player's account when signed in. Up to 16 KB (436 bytes on Classic).",
+        snippet: "cartbox.save({ level = level, best = best })",
+      },
+      {
+        name: "cartbox.load",
+        signature: "cartbox.load() -> t or nil",
+        doc: "The table last saved — in this session or an earlier one — or nil. Works from the first line.",
+        snippet: "local save = cartbox.load() or {}",
+      },
+      {
+        name: "cartbox.erase",
+        signature: "cartbox.erase()",
+        doc: "Forget the save.",
+        snippet: "cartbox.erase()",
+      },
+    ],
+  },
+  {
     label: "cartbox · netplay",
     open: false,
     entries: [

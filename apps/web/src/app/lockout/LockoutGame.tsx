@@ -32,6 +32,10 @@ import { newRoomCode, onlineRoomsAvailable, parseRoomCode, roomTransport } from 
 import { MM_FAILED, MM_SEARCHING, createMatchmaker, type Matchmaker } from "@/lib/matchmaking";
 import { LOCKOUT_ACTIONS, loadGameSettings, saveGameSettings, type GameSettings } from "@/lib/gameSettings";
 import { StartMenu } from "./StartMenu";
+import { browserStorage, readLocalSave, saveKey, writeLocalSave } from "@/lib/saveData";
+
+/** Where Lockout keeps its career record (it has no cart row, so it stays in this browser). */
+const LOCKOUT_SAVE_KEY = saveKey("lockout");
 
 /** cartbox.request kinds the Lockout cart sends. */
 const REQ_MATCHMAKE = 1;
@@ -196,6 +200,9 @@ export function LockoutGame() {
           mesh: parseMeshScene(lockoutMeshSidecar()) ?? undefined,
           ui: readSidecarUi(lockoutMeshSidecar()),
           actions: readSidecarActions(lockoutMeshSidecar()),
+          // The career record (EP15b), kept in this browser.
+          saveData: readLocalSave(browserStorage(), LOCKOUT_SAVE_KEY)?.data ?? null,
+          onSave: (data) => writeLocalSave(browserStorage(), LOCKOUT_SAVE_KEY, data, new Date().toISOString()),
           netplay: session,
           controlSettings: current.controls,
           volume: current.muted ? 0 : current.volume,

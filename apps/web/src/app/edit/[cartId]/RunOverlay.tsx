@@ -11,6 +11,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { frameDurationMs, getModel, mount, readCartCode, type DebugStep, type InspectedObject, type PauseInfo, type ProfileSnapshot, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type QualityChoice, type SceneSpec, type WorldScene } from "@cartbox/player";
 import type { InputAction, UiDocument } from "@cartbox/editor";
+import { browserStorage, readLocalSave, writeLocalSave } from "@/lib/saveData";
 
 import styles from "./editor.module.css";
 import { errorLineFrom } from "./codeTools";
@@ -54,6 +55,8 @@ interface RunOverlayProps {
   ui?: readonly UiDocument[];
   /** The cart's input actions (EP15), read by its Lua through cartbox.action. */
   actions?: readonly InputAction[];
+  /** Where the playtest keeps the cart's save data (EP15b) in this browser, apart from players' saves; absent = saves off. */
+  saveKey?: string;
   /** The cart's HD-2D world (3D terrain + 2D character billboards), during the playtest. */
   world?: WorldScene;
   /**
@@ -87,6 +90,7 @@ export function RunOverlay({
   mesh,
   ui,
   actions,
+  saveKey,
   world,
   onGoToLine,
   breakpoints = NO_LINES,
@@ -126,6 +130,9 @@ export function RunOverlay({
   // The debugger: on from the start when there are breakpoints (it costs a
   // call per statement, so otherwise it's switched on by hand, which restarts).
   const [debugOn, setDebugOn] = useState(() => breakpoints.length > 0);
+  // Save data (EP15b): whether the playtest holds a save, and a bump to restart without it.
+  const [hasSave, setHasSave] = useState(() => (saveKey ? readLocalSave(browserStorage(), saveKey) !== null : false));
+  const [restarts, setRestarts] = useState(0);
   const [pause, setPause] = useState<PauseInfo | null>(null);
   const breakpointsRef = useRef(breakpoints);
   breakpointsRef.current = breakpoints;
@@ -198,6 +205,15 @@ export function RunOverlay({
       mesh,
       ...(ui && ui.length > 0 ? { ui } : {}),
       ...(actions && actions.length > 0 ? { actions } : {}),
+      ...(saveKey
+        ? {
+            saveData: readLocalSave(browserStorage(), saveKey)?.data ?? null,
+            onSave: (data: string | null) => {
+              writeLocalSave(browserStorage(), saveKey, data, new Date().toISOString());
+              setHasSave(data !== null);
+            },
+          }
+        : {}),
       physics: rapierPhysics(),
       // KTX2 textures: the transcoder is fetched only if the scene has one.
       ktx2: loadKtx2Decoder,
@@ -243,7 +259,7 @@ export function RunOverlay({
       handle.destroy();
       URL.revokeObjectURL(url);
     };
-  }, [bytes, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, ui, actions, world, debugOn]);
+  }, [bytes, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, ui, actions, saveKey, restarts, world, debugOn]);
 
   // Breakpoints and watches edited during the run reach the player at once.
   useEffect(() => {
@@ -414,6 +430,21 @@ export function RunOverlay({
             <button type="button" className="cbx-btn" aria-pressed={profiling} onClick={() => setProfiling((v) => !v)} disabled={status !== "ready"}>
               Profiler
             </button>
+            {saveKey && (
+              <button
+                type="button"
+                className="cbx-btn"
+                disabled={!hasSave}
+                title="Forget what the cart saved with cartbox.save, and restart it"
+                onClick={() => {
+                  writeLocalSave(browserStorage(), saveKey, null, new Date().toISOString());
+                  setHasSave(false);
+                  setRestarts((n) => n + 1);
+                }}
+              >
+                Clear save
+              </button>
+            )}
             <button type="button" className="cbx-btn" aria-pressed={consoleOpen} onClick={() => setConsoleOpen((v) => !v)}>
               Console{log.length > 0 ? ` · ${log.length}` : ""}
             </button>

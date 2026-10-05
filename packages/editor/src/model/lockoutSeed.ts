@@ -1420,8 +1420,9 @@ export const LOCKOUT_UI: UiDocument[] = [
       { id: "modes", kind: "list", anchor: [0, 0], pivot: [0, 0], offset: [470, 190], size: [360, 320], row: 40, value: "modes", color: 13, focusFill: 1, focusColor: 12, scale: 2, small: true },
       txt("keys", 430, 540, 800, 6, "Up/Down choose . Z (or A) select . Start: controls, audio & more", 13, 1),
       txt("move", 300, 584, 900, 6, "Move Up/Down . Turn Left/Right . hold A strafe . dbl-tap A grenade", 13, 1),
-      txt("fire", 300, 612, 900, 6, "Z fire (auto-melee close) . X jump . S swap . sniper: hold A to zoom", 13, 1),
-      txt("pad", 260, 640, 1000, 6, "Touch/controller: left stick moves . right stick aims . A fire . B jump . X zoom/grenade . Y swap", 13, 1),
+      txt("fire", 300, 612, 900, 6, "Z fire (auto-melee close) . X/Space jump . S/Tab swap . G/Q grenade . sniper: Shift (or hold A) to zoom", 13, 1),
+      txt("pad", 260, 640, 1000, 6, "Touch/controller: left stick moves . right stick aims . A fire . B jump . X zoom/grenade . Y swap . LT grenade", 13, 1),
+      txt("career", 330, 676, 800, 6, "{career}", 9, 1),
     ],
   },
 ];
@@ -2833,6 +2834,7 @@ end
 -- Register a kill: scoring, sprees, multikills, feed, and juggernaut handover.
 function register_kill(killer, victim, hs)
   victim.dead=true; victim.respawn = MODE.obj=="jugg" and 70 or 100
+  if killer == p and victim ~= p then p.kills = (p.kills or 0) + 1 end
   -- Which way the body is thrown when it goes limp (a cosmetic ragdoll, local
   -- to each browser): away from the killer, harder for a headshot's snap back.
   if killer and killer~=victim then
@@ -3251,6 +3253,22 @@ local function update_objective()
   end
 end
 
+-- Your career (EP15b): matches, wins, kills and deaths, kept with cartbox.save
+-- between visits (and, signed in, between browsers). Shown on the title menu.
+career = cartbox.load() or {}
+function record_match(w)
+  local mine = p.team=="blue" and "BLUE TEAM WINS" or "RED TEAM WINS"
+  career.matches = (career.matches or 0) + 1
+  if w == "YOU WIN" or (MODE.teams and w == mine) then career.wins = (career.wins or 0) + 1 end
+  career.kills = (career.kills or 0) + (p.kills or 0)
+  career.deaths = (career.deaths or 0) + (p.deaths or 0)
+  cartbox.save(career)
+end
+function career_line()
+  if not career.matches then return "" end
+  return "Career: "..career.matches.." match"..(career.matches==1 and "" or "es").." . "..(career.wins or 0).." won . "..(career.kills or 0).." kills . "..(career.deaths or 0).." deaths"
+end
+
 function reached_target()
   if MODE.teams and MODE.obj=="slayer" then
     if team.blue>=MODE.target then return "BLUE TEAM WINS" end
@@ -3589,7 +3607,7 @@ local function net_follow_host()
     net_seen_match = id
     start_match(ONLINE_KEYS[((word >> 1) & 7) + 1] or "ffa")
   elseif (word & 1) == 0 and id == net_seen_match then
-    winner = reached_target() or "MATCH OVER"; phase = "over"
+    winner = reached_target() or "MATCH OVER"; phase = "over"; record_match(winner)
   end
 end
 
@@ -3722,6 +3740,7 @@ function title_screen()
     local humans = humans_in_room()
     U.set("menutop","ONLINE  --  you are the host  --  "..humans.." player"..(humans==1 and "" or "s").." + "..(8-humans).." bots"); U.set("menutopc",9)
   else U.set("menutop","Matchmaking finds players online . or play the game types below vs 7 bots"); U.set("menutopc",13) end
+  U.set("career", career_line())
   U.show("menu")
   local id
   if U.shown("menu") then
@@ -3784,7 +3803,7 @@ function TIC()
   update_grenades()
   ledge_snow()
   update_objective()
-  local w=reached_target(); if w then winner=w; phase="over" end
+  local w=reached_target(); if w then winner=w; phase="over"; record_match(w) end
   net_publish()
   net_objective_publish()
   if NETMODE == 2 then cartbox.netmatch(net_match_word()) end

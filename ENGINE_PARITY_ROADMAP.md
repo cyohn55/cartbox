@@ -623,10 +623,35 @@ preview.
         - the Start menu's button-mapping page rebinds them.
         - A side effect: the A press that starts a match no longer also fires
           a stray shot.
-- [ ] **EP15b. Save data.** Structured saves (local, and cloud for signed-in
-      players): `cartbox.save` / `cartbox.load` of a Lua table, in a save
-      block in free RAM, kept per cart in the browser and, signed in, in the
-      player's account.
+- [x] **EP15b. Save data.** Structured saves (local, and cloud for signed-in
+      players).
+
+      *Done:*
+      - **From Lua:**
+        - `cartbox.save(t)` saves a table as JSON (numbers, strings, booleans
+          and tables of them), or returns false and why: too big, or a
+          function in it.
+        - `cartbox.load()` returns the last save from the cart's first line.
+        - `cartbox.erase()` forgets it.
+      - **Runtime:**
+        - The last save reaches the cart as code (a prelude written at load).
+        - A new save comes back through a save block below the input block:
+          16 KB on the larger cores, 448 bytes on Classic.
+        - It is a flag the cart sets and the host clears in the same tick,
+          because Classic's core clears that RAM between frames.
+      - **Keeping saves:**
+        - The play page keeps each cart's save in the browser.
+        - For a signed-in player it also keeps it in their account (a new
+          `cart_saves` table, migration 0028; private by row-level security,
+          written only through `/api/carts/[cartId]/save`). Whichever copy is
+          newer wins, and a burst of saves settles before the account's copy
+          is written.
+        - The editor's playtests keep their own browser copy, apart from
+          players' saves, and the run overlay has Clear save.
+      - **SDK reference:** a save-data group.
+      - **Lockout:** a career record: matches, wins, kills, deaths. It is saved
+        at the end of each match and shown on the title menu. The menu's
+        control hints now name the new action keys.
 - [ ] **EP16. Visual scripting.** A node graph that compiles to Lua, for
       gameplay logic without code, in the spirit of Unreal's Blueprints.
 

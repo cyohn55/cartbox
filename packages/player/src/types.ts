@@ -205,6 +205,16 @@ export interface PlayerOptions {
    */
   actions?: readonly InputAction[];
   /**
+   * Save data (EP15b): the JSON the cart last saved, which cartbox.load returns
+   * (null or absent: nothing saved yet). Only read when {@link onSave} is set.
+   */
+  saveData?: string | null;
+  /**
+   * Called when the cart saves (cartbox.save) with the new JSON, or null when it
+   * erases. Setting it turns save data on: the host keeps what it's given.
+   */
+  onSave?: (data: string | null) => void;
+  /**
    * Render a declared HD-2D {@link WorldScene}: a height-mapped 3D tile world with
    * the cart's own 2D character sprites standing in it as camera-facing billboards,
    * all sharing one depth buffer so terrain and characters occlude correctly. The

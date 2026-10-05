@@ -1260,6 +1260,186 @@ function readSidecarActions(raw) {
   }
 }
 
+// src/saveSdk.ts
+var SAVE_MAGIC = 1448297027;
+var SAVE_PENDING = 4;
+var SAVE_SAVED = 1;
+var SAVE_ERASED = 2;
+var SAVE_LENGTH = 8;
+var SAVE_DATA = 12;
+function saveBlockBytes(layout) {
+  return layout.ramSize <= 98304 ? 448 : 16384;
+}
+function saveCapacity(layout) {
+  return saveBlockBytes(layout) - SAVE_DATA;
+}
+function saveBlockAddress(layout) {
+  return inputBlockAddress(layout) - saveBlockBytes(layout);
+}
+function armSaveBlock(block) {
+  block.setUint32(0, SAVE_MAGIC, true);
+}
+function takeSave(block) {
+  const pending = block.getUint32(SAVE_PENDING, true);
+  if (pending === 0) return null;
+  block.setUint32(SAVE_PENDING, 0, true);
+  if (pending === SAVE_ERASED) return { data: null };
+  if (pending !== SAVE_SAVED) return null;
+  const length = block.getUint32(SAVE_LENGTH, true);
+  if (length === 0 || length > block.byteLength - SAVE_DATA) return null;
+  const text = new TextDecoder().decode(new Uint8Array(block.buffer, block.byteOffset + SAVE_DATA, length).slice());
+  const data = validSave(text);
+  return data ? { data } : null;
+}
+function validSave(text) {
+  if (!text) return null;
+  try {
+    const value = JSON.parse(text);
+    return value !== null && typeof value === "object" ? text : null;
+  } catch {
+    return null;
+  }
+}
+var luaLong = (s) => {
+  let eq = "";
+  while (s.includes(`]${eq}]`)) eq += "=";
+  return `[${eq}[${s}]${eq}]`;
+};
+function saveSdkLua(layout, saved) {
+  const start = validSave(saved);
+  return `do
+local _S, _CAP = ${saveBlockAddress(layout)}, ${saveCapacity(layout)}
+local saved = ${start ? luaLong(start) : "nil"}
+local function wr(a, v) poke(a, v & 0xff) poke(a + 1, (v >> 8) & 0xff) poke(a + 2, (v >> 16) & 0xff) poke(a + 3, (v >> 24) & 0xff) end
+local ESC = { ['"'] = '\\\\"', ['\\\\'] = '\\\\\\\\', ['\\b'] = '\\\\b', ['\\f'] = '\\\\f', ['\\n'] = '\\\\n', ['\\r'] = '\\\\r', ['\\t'] = '\\\\t' }
+local function enc(v, out, depth)
+  local t = type(v)
+  if depth > 32 then error("nested too deep", 0) end
+  if v == nil then out[#out + 1] = "null"
+  elseif t == "boolean" then out[#out + 1] = v and "true" or "false"
+  elseif t == "number" then
+    if v ~= v or v == math.huge or v == -math.huge then out[#out + 1] = "null"
+    elseif math.type(v) == "integer" then out[#out + 1] = string.format("%d", v)
+    else out[#out + 1] = string.format("%.14g", v) end
+  elseif t == "string" then
+    out[#out + 1] = '"' .. v:gsub('[%c"\\\\]', function(c) return ESC[c] or string.format("\\\\u%04x", c:byte()) end) .. '"'
+  elseif t == "table" then
+    local n = #v
+    local list = n > 0
+    if list then for k in pairs(v) do if math.type(k) ~= "integer" or k < 1 or k > n then list = false break end end end
+    if list then
+      out[#out + 1] = "["
+      for i = 1, n do if i > 1 then out[#out + 1] = "," end enc(v[i], out, depth + 1) end
+      out[#out + 1] = "]"
+    else
+      out[#out + 1] = "{"
+      local first = true
+      for k, x in pairs(v) do
+        local kt = type(k)
+        if kt ~= "string" and kt ~= "number" then error("can't save a " .. kt .. " key", 0) end
+        if not first then out[#out + 1] = "," end
+        first = false
+        enc(tostring(k), out, depth + 1)
+        out[#out + 1] = ":"
+        enc(x, out, depth + 1)
+      end
+      out[#out + 1] = "}"
+    end
+  else error("can't save a " .. t, 0) end
+end
+local function dec(s)
+  local i = 1
+  local function ws() i = s:find("[^ \\t\\r\\n]", i) or #s + 1 end
+  local value
+  local function str()
+    local out, j = {}, i + 1
+    while true do
+      local c = s:sub(j, j)
+      if c == "" then error("bad save", 0) end
+      if c == '"' then i = j + 1 return table.concat(out) end
+      if c == "\\\\" then
+        local e = s:sub(j + 1, j + 1)
+        local map = { b = "\\b", f = "\\f", n = "\\n", r = "\\r", t = "\\t" }
+        if e == "u" then out[#out + 1] = utf8.char(tonumber(s:sub(j + 2, j + 5), 16) or 63) j = j + 6
+        else out[#out + 1] = map[e] or e j = j + 2 end
+      else out[#out + 1] = c j = j + 1 end
+    end
+  end
+  value = function(depth)
+    if depth > 32 then error("bad save", 0) end
+    ws()
+    local c = s:sub(i, i)
+    if c == "{" then
+      local t = {}
+      i = i + 1 ws()
+      if s:sub(i, i) == "}" then i = i + 1 return t end
+      while true do
+        ws()
+        if s:sub(i, i) ~= '"' then error("bad save", 0) end
+        local k = str()
+        ws()
+        if s:sub(i, i) ~= ":" then error("bad save", 0) end
+        i = i + 1
+        t[k] = value(depth + 1)
+        ws()
+        local d = s:sub(i, i)
+        i = i + 1
+        if d == "}" then return t elseif d ~= "," then error("bad save", 0) end
+      end
+    elseif c == "[" then
+      local t = {}
+      i = i + 1 ws()
+      if s:sub(i, i) == "]" then i = i + 1 return t end
+      while true do
+        t[#t + 1] = value(depth + 1)
+        ws()
+        local d = s:sub(i, i)
+        i = i + 1
+        if d == "]" then return t elseif d ~= "," then error("bad save", 0) end
+      end
+    elseif c == '"' then return str()
+    elseif s:sub(i, i + 3) == "true" then i = i + 4 return true
+    elseif s:sub(i, i + 4) == "false" then i = i + 5 return false
+    elseif s:sub(i, i + 3) == "null" then i = i + 4 return nil
+    else
+      local num = s:match("^-?%d+%.?%d*[eE]?[-+]?%d*", i)
+      if not num or num == "" then error("bad save", 0) end
+      i = i + #num
+      return math.tointeger(tonumber(num)) or tonumber(num)
+    end
+  end
+  return value(0)
+end
+local function publish(text)
+  local n = #text
+  for k = 1, n do poke(_S + ${SAVE_DATA} + k - 1, text:byte(k)) end
+  wr(_S + ${SAVE_LENGTH}, n)
+  wr(_S + ${SAVE_PENDING}, n > 0 and ${SAVE_SAVED} or ${SAVE_ERASED})
+end
+cartbox.save = function(t)
+  if type(t) ~= "table" then return false, "save a table" end
+  local out = {}
+  local ok, err = pcall(enc, t, out, 0)
+  if not ok then return false, err end
+  local text = table.concat(out)
+  if #text > _CAP then return false, "too big" end
+  saved = text
+  publish(text)
+  return true
+end
+cartbox.load = function()
+  if not saved then return nil end
+  local ok, t = pcall(dec, saved)
+  if ok and type(t) == "table" then return t end
+  return nil
+end
+cartbox.erase = function()
+  saved = nil
+  publish("")
+end
+end`;
+}
+
 // src/cartridge.ts
 var CartridgeLoadError = class extends Error {
   constructor(message, cause) {
@@ -5315,6 +5495,10 @@ cartbox = {
     on = function() end, update = function() return nil end, draw = function() end,
   },
   effects = function() return {} end,
+  -- Save data (EP15b): replaced when the host keeps saves.
+  save = function() return false, "saves are off here" end,
+  load = function() return nil end,
+  erase = function() end,
   -- Input actions (EP15): replaced when the cart has any.
   action = function() return false end,
   actionp = function() return false end,
@@ -14555,6 +14739,8 @@ var Player = class {
     /** Where the input block sits (bytes after pmem word 0), when the cart has actions; and last tick's mask. */
     this.inputOffset = null;
     this.lastActions = 0;
+    /** Save data (EP15b): where the save block sits (bytes after pmem word 0), and its size. */
+    this.saveBlock = null;
     this.controlSettings = DEFAULT_CONTROL_SETTINGS;
     this.volume = 1;
     /** False while a host menu is open: the game keeps running but sees no input. */
@@ -14696,6 +14882,10 @@ var Player = class {
       if (flagsLua) prepared = prependLuaCode(prepared, flagsLua);
       const animClipsLua = animClipsSdkLua(this.options.anim);
       if (animClipsLua) prepared = prependLuaCode(prepared, animClipsLua);
+      if (layout && this.options.onSave) {
+        prepared = prependLuaCode(prepared, saveSdkLua(layout, this.options.saveData ?? null));
+        this.saveBlock = { offset: saveBlockAddress(layout) - layout.pmemAddress, bytes: saveBlockBytes(layout) };
+      }
       this.rebindActions();
       const actionsLua = layout ? actionsSdkLua(this.actions, layout) : "";
       if (actionsLua && layout) {
@@ -15033,6 +15223,7 @@ var Player = class {
     }
     lap("net");
     this.recorder?.record(input);
+    this.pollSave();
     this.tickFrame++;
     if (this.console && this.options.onRuntimeError) {
       const error = this.console.readError();
@@ -15361,6 +15552,16 @@ var Player = class {
       this.touch?.setAnalog(true);
     }
     words[STICK_WORD] = this.replaySource || !this.inputEnabled ? 0 : packSticks(applyLookSettings(this.gamepad.axes, this.controlSettings));
+  }
+  /** Save data (EP15b): hand a save the cart made this tick to the host. */
+  pollSave() {
+    if (!this.saveBlock || !this.console) return;
+    const bytes = this.console.ramView(this.saveBlock.offset, this.saveBlock.bytes);
+    if (!bytes) return;
+    const block = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    armSaveBlock(block);
+    const save = takeSave(block);
+    if (save) this.options.onSave?.(save.data);
   }
   /** Input actions (EP15): this tick's mask and last tick's into the input block. */
   feedActions(held) {
@@ -16239,6 +16440,7 @@ export {
   ReplayRecorder,
   ReplaySource,
   RuntimeChannel,
+  SAVE_MAGIC,
   SOFTWARE_RASTER_CAPS,
   START_KEYS,
   SceneBackdropSurface,
@@ -16268,6 +16470,7 @@ export {
   applyQualityToPostFx,
   applyRenderCaps,
   armDebugBlock,
+  armSaveBlock,
   breakableLine,
   browserDeviceHints,
   browserSpeaker,
@@ -16392,6 +16595,10 @@ export {
   sampleNormalBilinear,
   sampleScalarBilinear,
   sampleTrack,
+  saveBlockAddress,
+  saveBlockBytes,
+  saveCapacity,
+  saveSdkLua,
   sceneHasAnimation,
   sceneHasPhysics,
   sceneNeedsRuntime,
@@ -16408,11 +16615,13 @@ export {
   sway,
   takeNetOutbox,
   takePhysicsCommands,
+  takeSave,
   tiltShiftBlur,
   tokenizeLua,
   uiSdkLua,
   uniformsFromSettings,
   unpadRows,
+  validSave,
   verifyReplayScore,
   viewDirection,
   webgpuCanHonour,

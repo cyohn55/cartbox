@@ -13,7 +13,8 @@ import {
   getModel,
   mount,
   parseMeshScene,
-  readSidecarUi, readSidecarActions,
+  readSidecarUi,
+  readSidecarActions,
   parseWorldScene,
   serializeReplay,
   type MailboxEvent,
@@ -27,7 +28,8 @@ import {
   type FlagsField,
 } from "@cartbox/player";
 
-import { authHeaders } from "@/lib/supabase-browser";
+import { authHeaders, getAccessToken } from "@/lib/supabase-browser";
+import { browserStorage, openSaves, type SaveKeeper } from "@/lib/saveData";
 import { isStaticExport } from "@/lib/staticSite";
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 import { rapierPhysics } from "@/lib/physicsRapier";
@@ -76,6 +78,27 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
   // Its UI documents (EP13), from the same sidecar.
   const ui = useMemo(() => readSidecarUi(meshRaw), [meshRaw]);
   const actions = useMemo(() => readSidecarActions(meshRaw), [meshRaw]);
+  // Save data (EP15b): this browser's and, signed in, the account's — loaded
+  // before the cart starts, so cartbox.load has it from the first tick.
+  const [saves, setSaves] = useState<SaveKeeper | null>(null);
+  useEffect(() => {
+    let live = true;
+    let keeper: SaveKeeper | null = null;
+    void (async () => {
+      const token = isStaticExport ? null : await getAccessToken().catch(() => null);
+      keeper = await openSaves({
+        cartId,
+        cloud: Boolean(token),
+        storage: browserStorage(),
+        request: async (url, init) => fetch(url, { ...init, headers: await authHeaders(init?.headers ?? {}) }),
+      });
+      if (live) setSaves(keeper);
+    })();
+    return () => {
+      live = false;
+      void keeper?.flush();
+    };
+  }, [cartId]);
   // The HD-2D world sidecar, parsed once per cart (malformed → null → no world).
   const world = useMemo(() => parseWorldScene(worldRaw), [worldRaw]);
   const handleRef = useRef<PlayerHandle | null>(null);
@@ -125,6 +148,7 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       });
     };
 
+    if (!saves) return;
     const handle = mount(stage, {
       cartUrl,
       engineUrl,
@@ -155,6 +179,8 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       mesh: mesh ?? undefined,
       ...(ui.length > 0 ? { ui } : {}),
       ...(actions.length > 0 ? { actions } : {}),
+      saveData: saves.data,
+      onSave: saves.onSave,
       // Physics bodies on those meshes, simulated by Rapier (fetched only when a
       // cart actually has bodies).
       physics: rapierPhysics(),
@@ -210,7 +236,7 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       streaming.abort();
       handle.destroy();
     };
-  }, [cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, ui, actions, world, meshTextures]);
+  }, [cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, ui, actions, saves, world, meshTextures]);
 
   const togglePlayback = () => {
     const handle = handleRef.current;

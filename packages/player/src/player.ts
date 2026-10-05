@@ -8,6 +8,7 @@ import { AudioController } from "./audio.js";
 import { SoundSystem } from "./soundSystem.js";
 import { uiSdkLua } from "./uiSdk.js";
 import { INPUT_BLOCK_BYTES, actionsSdkLua, inputBlockAddress, writeInputBlock } from "./actionsSdk.js";
+import { armSaveBlock, saveBlockAddress, saveBlockBytes, saveSdkLua, takeSave } from "./saveSdk.js";
 import { fetchCartridge } from "./cartridge.js";
 import { CanvasSurface, type DisplaySurface } from "./display.js";
 import { LitCanvasSurface } from "./lighting/LitCanvasSurface.js";
@@ -124,6 +125,8 @@ export class Player {
   /** Where the input block sits (bytes after pmem word 0), when the cart has actions; and last tick's mask. */
   private inputOffset: number | null = null;
   private lastActions = 0;
+  /** Save data (EP15b): where the save block sits (bytes after pmem word 0), and its size. */
+  private saveBlock: { offset: number; bytes: number } | null = null;
   private controllerInput?: GamepadInput;
   private controlSettings: ControlSettings = DEFAULT_CONTROL_SETTINGS;
   private volume = 1;
@@ -281,6 +284,11 @@ export class Player {
       // sprite ids by hand. Injected like collision/flags: after the base SDK.
       const animClipsLua = animClipsSdkLua(this.options.anim);
       if (animClipsLua) prepared = prependLuaCode(prepared, animClipsLua);
+      // Save data (EP15b): the last save rides in as code; a new one comes back through a block.
+      if (layout && this.options.onSave) {
+        prepared = prependLuaCode(prepared, saveSdkLua(layout, this.options.saveData ?? null));
+        this.saveBlock = { offset: saveBlockAddress(layout) - layout.pmemAddress, bytes: saveBlockBytes(layout) };
+      }
       // Input actions (EP15): read from the input block the host fills before each tick.
       this.rebindActions();
       const actionsLua = layout ? actionsSdkLua(this.actions, layout) : "";
@@ -739,6 +747,7 @@ export class Player {
     }
     lap("net");
     this.recorder?.record(input);
+    this.pollSave();
     this.tickFrame++;
     // Surface a Lua runtime error raised during this tick (once per new error).
     // The core aborts only this frame's TIC and keeps running, so this reports to
@@ -1127,6 +1136,17 @@ export class Player {
       this.touch?.setAnalog(true);
     }
     words[STICK_WORD] = this.replaySource || !this.inputEnabled ? 0 : packSticks(applyLookSettings(this.gamepad.axes, this.controlSettings));
+  }
+
+  /** Save data (EP15b): hand a save the cart made this tick to the host. */
+  private pollSave(): void {
+    if (!this.saveBlock || !this.console) return;
+    const bytes = this.console.ramView(this.saveBlock.offset, this.saveBlock.bytes);
+    if (!bytes) return;
+    const block = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    armSaveBlock(block);
+    const save = takeSave(block);
+    if (save) this.options.onSave?.(save.data);
   }
 
   /** Input actions (EP15): this tick's mask and last tick's into the input block. */

@@ -19,6 +19,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { mount, parseMeshScene, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
 import type { InputAction, UiDocument } from "@cartbox/editor";
+import { browserStorage, readLocalSave, writeLocalSave } from "@/lib/saveData";
 
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 import { encodeMeshSidecar, type MeshSidecar } from "@/lib/meshSidecar";
@@ -44,6 +45,8 @@ export interface PlaytestConfig {
   /** The cart's UI documents (EP13). */
   readonly ui?: readonly UiDocument[];
   readonly actions?: readonly InputAction[];
+  /** Where the playtest keeps the cart's save data (EP15b) in this browser; absent = saves off. */
+  readonly saveKey?: string;
 }
 
 const ORBIT_SPEED = 0.008;
@@ -97,6 +100,12 @@ export function ScenePlayView({
       mesh: config.mesh ?? undefined,
       ...(config.ui && config.ui.length > 0 ? { ui: config.ui } : {}),
       ...(config.actions && config.actions.length > 0 ? { actions: config.actions } : {}),
+      ...(config.saveKey
+        ? {
+            saveData: readLocalSave(browserStorage(), config.saveKey)?.data ?? null,
+            onSave: (data: string | null) => writeLocalSave(browserStorage(), config.saveKey!, data, new Date().toISOString()),
+          }
+        : {}),
       physics: rapierPhysics(),
       ktx2: loadKtx2Decoder,
       world: config.world,
