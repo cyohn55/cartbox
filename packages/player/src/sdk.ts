@@ -322,6 +322,14 @@ cartbox = {
   loop = function() end,
   mix = function() end,
   sounds = function() return {} end,
+  -- UI documents (EP13): replaced when the cart has any.
+  ui = {
+    set = function() end, get = function() return nil end,
+    show = function() end, hide = function() end, shown = function() return false end,
+    focus = function() end, focused = function() return nil end,
+    select = function() end, selected = function() return 1 end,
+    on = function() end, update = function() return nil end, draw = function() end,
+  },
   effects = function() return {} end,
 }`;
 

@@ -37,6 +37,7 @@ import { encodeLods, generateLods, type StoredLods } from "./meshSimplify";
 import { serializeFoliage, type FoliageLayer, type SerializedFoliage } from "./foliage";
 import { boulderMesh, driftMesh } from "./foliagePresets";
 import type { SceneAudio, SceneSound, SynthPreset } from "./sound";
+import type { UiDocument, UiWidget } from "./ui";
 import { bakeNavMesh, boxTriangles, serializeNavMesh, type NavMesh } from "./navmesh";
 import { serializeTerrain, terrainMesh, type Terrain } from "./terrain";
 import type { SceneTimeline } from "./timeline";
@@ -1386,6 +1387,43 @@ export const LOCKOUT_FOLIAGE: readonly FoliageLayer[] = [
  * fire across the map pans and fades), the wind moaning through the gorge,
  * and the announcer calling multikills and sprees — a few hundred bytes.
  */
+/**
+ * Lockout's HUD and start menu as UI documents (EP13), laid out on its
+ * 1280 × 720 screen: the cart sets their bindings (shield, ammo, the score
+ * line, the kill feed, the announcer) and draws them with cartbox.ui; the
+ * menu's game-type list moves with the d-pad. Drawn custom still: the
+ * reticle, the grenade pips and the motion tracker.
+ */
+const txt = (id: string, x: number, y: number, w: number, h: number, text: string, color: number, scale: number, extra: Partial<UiWidget> = {}): UiWidget => ({ id, kind: "text", anchor: [0, 0], pivot: [0, 0], offset: [x, y], size: [w, h], text, color, scale, small: true, ...extra });
+export const LOCKOUT_UI: UiDocument[] = [
+  {
+    name: "hud",
+    widgets: [
+      { id: "shield", kind: "bar", anchor: [0, 0], pivot: [0, 0], offset: [40, 40], size: [300, 20], fill: 5, color: 9, value: "hp1", tint: "hpc" },
+      { id: "health", kind: "bar", anchor: [0, 0], pivot: [0, 0], offset: [40, 66], size: [300, 12], fill: 5, color: 6, value: "hp2", visible: "shields" },
+      txt("weapon", 900, 40, 340, 12, "{weapon}", 12, 2),
+      txt("ammo", 1040, 74, 200, 12, "{ammo}", 12, 2, { tint: "ammoc" }),
+      txt("frag", 1150, 96, 60, 6, "FRAG", 13, 1),
+      txt("mode", 540, 40, 700, 6, "{mode}", 13, 1),
+      txt("status", 540, 58, 700, 12, "{status}", 12, 2),
+      { id: "feed", kind: "list", anchor: [0, 0], pivot: [0, 0], offset: [872, 165], size: [400, 132], row: 22, value: "feed", color: 12, scale: 1, small: true },
+      txt("announce", 540, 150, 700, 18, "{announce}", 12, 3, { tint: "announcec", visible: "announce" }),
+      txt("respawn", 520, 330, 400, 18, "RESPAWNING...", 6, 3, { visible: "dead" }),
+    ],
+  },
+  {
+    name: "menu",
+    widgets: [
+      txt("top", 330, 150, 800, 6, "{menutop}", 13, 1, { tint: "menutopc" }),
+      { id: "modes", kind: "list", anchor: [0, 0], pivot: [0, 0], offset: [470, 190], size: [360, 320], row: 40, value: "modes", color: 13, focusFill: 1, focusColor: 12, scale: 2, small: true },
+      txt("keys", 430, 540, 800, 6, "Up/Down choose . Z (or A) select . Start: controls, audio & more", 13, 1),
+      txt("move", 300, 584, 900, 6, "Move Up/Down . Turn Left/Right . hold A strafe . dbl-tap A grenade", 13, 1),
+      txt("fire", 300, 612, 900, 6, "Z fire (auto-melee close) . X jump . S swap . sniper: hold A to zoom", 13, 1),
+      txt("pad", 260, 640, 1000, 6, "Touch/controller: left stick moves . right stick aims . A fire . B jump . X zoom/grenade . Y swap", 13, 1),
+    ],
+  },
+];
+
 const gun = (id: string, synth: SynthPreset): SceneSound => ({ name: `fire_${id}`, source: { kind: "synth", synth }, bus: "sfx", volume: 0.8, range: [6, 90] });
 const vox = (name: string, text: string): SceneSound => ({ name, source: { kind: "speech", text }, bus: "voice", volume: 1 });
 export const LOCKOUT_AUDIO: SceneAudio = {
@@ -2223,6 +2261,7 @@ export function lockoutMeshSidecar(): string {
       decalMarks: LOCKOUT_DECAL_MARKS,
       foliage: lockoutFoliage(),
       audio: LOCKOUT_AUDIO,
+      ui: LOCKOUT_UI,
     });
   }
   return meshSidecar;
@@ -3331,35 +3370,30 @@ local function draw_tracker()
 end
 
 local function draw_hud()
-  -- shield (top) + health (under), segmented. Backgrounds use index 5 (a dark
-  -- slate), never 0: in HUD mode index 0 is the transparent "world" key.
-  rect(40,40,300,20,5)
-  local sc = p.sh>0 and 9 or 6
-  rect(42,42,math.max(0,2.96*(MODE.shields and p.sh or p.hp)),16,sc)
-  if MODE.shields then rect(40,66,300,12,5); rect(42,68,math.max(0,2.96*p.hp),8,6) end
-  -- weapon + ammo (top-right)
+  -- The HUD is a UI document (cartbox.ui): this sets what it shows.
+  local U=cartbox.ui
+  U.hide("menu")
+  U.set("hp1",(MODE.shields and p.sh or p.hp)/100); U.set("hpc",p.sh>0 and 9 or 6)
+  U.set("shields",MODE.shields); U.set("hp2",p.hp/100)
   local cur=W[p.slot==1 and p.g1 or p.g2]
   local ammo=p.slot==1 and p.a1 or p.a2
   local res=p.slot==1 and p.r1 or p.r2
-  print(cur.name,900,40,12,false,2,true)
-  print(ammo.." / "..res,1040,74,cur.melee and 13 or 12,false,2,true)
-  -- grenades
+  U.set("weapon",cur.name); U.set("ammo",ammo.." / "..res); U.set("ammoc",cur.melee and 13 or 12)
   for i=1,(p.nade or 0) do circ(1150+i*22,120,8,6); circb(1150+i*22,120,8,12) end
-  print("FRAG",1150,96,13,false,1,true)
-  -- objective / score readout (top center)
   local st
   if MODE.obj=="slayer" and MODE.teams then st="BLUE "..team.blue.."   RED "..team.red.."   /"..MODE.target
   elseif MODE.obj=="ball" then st=(ball.carrier==p and "YOU HOLD THE BALL  " or "").."Ball "..(p.score or 0).." /"..MODE.target
   elseif MODE.obj=="hill" then st="Hill "..(p.score or 0).." /"..MODE.target
   elseif MODE.obj=="jugg" then st=(p.jugg and "YOU ARE THE JUGGERNAUT  " or "Hunt the Juggernaut  ")..(p.score or 0).." /"..MODE.target
   else st="Score "..(p.score or 0).."   Deaths "..p.deaths.."   /"..MODE.target end
-  print(MODE.name,540,40,13,false,1,true)
-  print(st,540,58,12,false,2,true)
-  -- kill feed (right, under ammo)
-  for i,f in ipairs(feed) do print(f.text,880,150+i*22,f.color,false,1,true); f.t=f.t-1 end
+  U.set("mode",MODE.name); U.set("status",st)
+  local fd={}
+  for i,f in ipairs(feed) do fd[i]={text=f.text,color=f.color}; f.t=f.t-1 end
   for i=#feed,1,-1 do if feed[i].t<=0 then table.remove(feed,i) end end
-  -- announcer / medal (center)
-  if announce.t>0 then announce.t=announce.t-1; print(announce.text,540,150,announce.color,false,3,true) end
+  U.set("feed",fd)
+  if announce.t>0 then announce.t=announce.t-1; U.set("announce",announce.text); U.set("announcec",announce.color) else U.set("announce",nil) end
+  U.set("dead",p.dead)
+  U.show("hud"); U.draw()
   if MODE.radar then draw_tracker() end
 end
 
@@ -3522,6 +3556,7 @@ end
 
 function title_screen()
   local _, _, _, _, status = cartbox.net()
+  cartbox.ui.hide("hud"); cartbox.ui.hide("menu")
   if MM_RESET then MM_RESET = false; mm_mode, mm_page, mm_start_at = nil, nil, nil end
   if NETMODE == 1 then
     -- An online guest: the host picks the game type (or its lobby timer does).
@@ -3591,24 +3626,29 @@ function title_screen()
   if NETMODE == 0 then items[#items+1] = "Matchmaking (online)" end
   local n=#items
   if sel > n then sel = 1 end
-  if edge("up", btn(0)) then sel=(sel-2)%n+1 end
-  if edge("down", btn(1)) then sel=sel%n+1 end
+  -- The menu is a UI document (cartbox.ui): its list moves with the d-pad.
+  local U=cartbox.ui
+  U.set("modes",items); U.select("modes",sel)
   if NETMODE == 2 then
     local humans = humans_in_room()
-    print("ONLINE  --  you are the host  --  "..humans.." player"..(humans==1 and "" or "s").." + "..(8-humans).." bots",360,150,9,false,1,true)
+    U.set("menutop","ONLINE  --  you are the host  --  "..humans.." player"..(humans==1 and "" or "s").." + "..(8-humans).." bots"); U.set("menutopc",9)
+  else U.set("menutop","Matchmaking finds players online . or play the game types below vs 7 bots"); U.set("menutopc",13) end
+  U.show("menu")
+  local id
+  if U.shown("menu") then
+    id=U.update(); sel=U.selected("modes"); U.draw()
+    if NETMODE == 0 then rect(470, 190+(n-1)*40-4, 360, 2, 5) end   -- a rule above Matchmaking
   else
-    print("Matchmaking finds players online . or play the game types below vs 7 bots",330,150,13,false,1,true)
+    -- Run without its UI documents: the plain list.
+    if edge("up", btn(0)) then sel=(sel-2)%n+1 end
+    if edge("down", btn(1)) then sel=sel%n+1 end
+    menu_list(items, 196, sel)
   end
-  menu_list(items, 196, sel)
-  if NETMODE == 0 then rect(470, 196+(n-1)*40-12, 360, 2, 5) end   -- a rule above Matchmaking
-  if edge("go", btn(4)) or edge("go2", btn(5)) then
+  local go, go2 = edge("go", btn(4)), edge("go2", btn(5))
+  if id=="modes" or go or go2 then
     if NETMODE == 0 and sel == n then mm_page, mm_pick = "playlist", 1
     else start_match(keys[sel]) end
   end
-  print("Up/Down choose . Z (or A) select . Start: controls, audio & more",430,540,13,false,1,true)
-  print("Move Up/Down . Turn Left/Right . hold A strafe . dbl-tap A grenade",300,584,13,false,1,true)
-  print("Z fire (auto-melee close) . X jump . S swap . sniper: hold A to zoom",300,612,13,false,1,true)
-  print("Touch/controller: left stick moves . right stick aims . A fire . B jump . X zoom/grenade . Y swap",260,640,13,false,1,true)
 end
 
 function TIC()
@@ -3681,7 +3721,6 @@ function TIC()
   draw_reticle()
   draw_muzzle_flash(W[cur_id])
   draw_hud()
-  if p.dead then print("RESPAWNING...",520,330,6,false,3,true) end
 end
 `;
 

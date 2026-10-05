@@ -73,6 +73,7 @@ export {
   LOCKOUT_DEBRIS,
   LOCKOUT_FOLIAGE,
   LOCKOUT_AUDIO,
+  LOCKOUT_UI,
   LOCKOUT_DECALS,
   LOCKOUT_DECAL_MARKS,
   lockoutNavMesh,
@@ -321,6 +322,22 @@ export {
   type SynthSound,
   type SynthVoice,
 } from "./model/sound";
+export {
+  FOCUSABLE,
+  MAX_UI_DOCUMENTS,
+  MAX_UI_WIDGETS,
+  UI_KINDS,
+  fillUiText,
+  layoutUi,
+  newUiWidget,
+  parseUiDocuments,
+  uiNavigation,
+  uiTextWidth,
+  type UiDocument,
+  type UiKind,
+  type UiPlaced,
+  type UiWidget,
+} from "./model/ui";
 export { decompressGltf, gltfCompression, type DracoAttributeRequest, type DracoDecoded, type GltfDecoders } from "./model/gltfCompression";
 export {
   ANIMATOR_LIMITS,

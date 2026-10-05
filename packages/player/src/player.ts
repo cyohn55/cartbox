@@ -6,6 +6,7 @@
 
 import { AudioController } from "./audio.js";
 import { SoundSystem } from "./soundSystem.js";
+import { uiSdkLua } from "./uiSdk.js";
 import { fetchCartridge } from "./cartridge.js";
 import { CanvasSurface, type DisplaySurface } from "./display.js";
 import { LitCanvasSurface } from "./lighting/LitCanvasSurface.js";
@@ -250,6 +251,9 @@ export class Player {
       // sprite ids by hand. Injected like collision/flags: after the base SDK.
       const animClipsLua = animClipsSdkLua(this.options.anim);
       if (animClipsLua) prepared = prependLuaCode(prepared, animClipsLua);
+      // UI documents (EP13): laid out for this screen, driven with cartbox.ui.
+      const uiLua = uiSdkLua(this.options.ui, this.model.width, this.model.height);
+      if (uiLua) prepared = prependLuaCode(prepared, uiLua);
       // The placed meshes as scene objects (cartbox.find / prop / tagged ...).
       const sceneLua = sceneObjectsSdkLua(this.options.mesh);
       if (sceneLua) prepared = prependLuaCode(prepared, sceneLua);

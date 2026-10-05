@@ -172,3 +172,6 @@ general Unity/UE5 gap); items here that close a line there tick it off too.
       procedural one, with drifting clouds.
 - [ ] **H16. HUD authoring.** Build a HUD (arcs, bars, radar, icons) in the
       editor instead of hand-coding rectangles.
+      *Partly done by ENGINE_PARITY_ROADMAP.md EP13:* bars, text, lists and
+      icons are authored in the UI tab and Lockout's HUD is a UI document;
+      arcs and the radar are still drawn in code.

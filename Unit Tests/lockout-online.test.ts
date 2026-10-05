@@ -9,8 +9,9 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { LOCKOUT_CODE, lockoutCartridge } from "@cartbox/editor";
-import { CARTBOX_SDK_LUA, decodeMeshPoses, injectSdk, readCartCode, type NetMessage, type NetPeer } from "@cartbox/player";
+import { LOCKOUT_CODE, lockoutCartridge, lockoutMeshSidecar } from "@cartbox/editor";
+import { CARTBOX_SDK_LUA, decodeMeshPoses, injectSdk, readCartCode, readSidecarUi, uiSdkLua, type NetMessage, type NetPeer } from "@cartbox/player";
+import { prependLuaCode } from "../packages/player/src/cartseed";
 import { SupabaseNetTransport, newRoomCode, parseRoomCode } from "../apps/web/src/lib/netplayTransport";
 
 const ENGINE = path.resolve(__dirname, "../packages/engine/dist/xbox360/engine.js");
@@ -41,7 +42,8 @@ describe("lockoutCartridge", () => {
   });
 
   it.skipIf(!existsSync(ENGINE))("boots on the Xbox 360 core and starts a match from its menu", async () => {
-    const tic = injectSdk(lockoutCartridge());
+    // With its UI documents, as the player runs it: the menu is one (EP13).
+    const tic = injectSdk(prependLuaCode(lockoutCartridge(), uiSdkLua(readSidecarUi(lockoutMeshSidecar()), 1280, 720)));
     const factory = (await import(pathToFileURL(ENGINE).href)).default;
     const mod = await factory();
     const h = mod._cbx_create(44100);
@@ -54,6 +56,20 @@ describe("lockoutCartridge", () => {
     mod._cbx_delete(h);
     const bots = decodeMeshPoses(words).filter((pose) => pose.index >= 1 && pose.index <= 7 && pose.position[1] > -10);
     expect(bots.length).toBeGreaterThan(0);
+  });
+
+  it.skipIf(!existsSync(ENGINE))("still starts a match without its UI documents (the plain menu)", async () => {
+    const tic = injectSdk(lockoutCartridge());
+    const mod = await (await import(pathToFileURL(ENGINE).href)).default();
+    const h = mod._cbx_create(44100);
+    const ptr = mod._malloc(tic.length);
+    mod.HEAPU8.set(tic, ptr);
+    expect(mod._cbx_load(h, ptr, tic.length)).toBe(1);
+    mod._free(ptr);
+    for (const buttons of [0, 0, 0x10, 0x10, 0, 0, 0]) mod._cbx_tick(h, buttons);
+    const words = new Uint32Array(mod.HEAPU8.buffer, mod._cbx_mailbox_ptr(h), mod._cbx_mailbox_words(h)).slice();
+    mod._cbx_delete(h);
+    expect(decodeMeshPoses(words).some((pose) => pose.index >= 1 && pose.index <= 7 && pose.position[1] > -10)).toBe(true);
   });
 });
 

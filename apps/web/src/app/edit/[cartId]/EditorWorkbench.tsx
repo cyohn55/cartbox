@@ -22,7 +22,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { defaultPostFxSettings, getModel, parsePostFxSettings, parseMeshScene, parseWorldScene, type AnimSpec, type MeshScene, type ParticleSpec, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
+import { defaultPostFxSettings, getModel, parsePostFxSettings, parseMeshScene, parseWorldScene, readSidecarUi, type AnimSpec, type MeshScene, type ParticleSpec, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
 import {
   BANK_COUNT,
   CartEngine,
@@ -71,6 +71,7 @@ import { ShaderEditor } from "./ShaderEditor";
 import { AssetsEditor } from "./AssetsEditor";
 import { FilesEditor } from "./FilesEditor";
 import { MeshEditor } from "./MeshEditor";
+import { UiEditor } from "./UiEditor";
 import type { PlaytestConfig } from "./ScenePlayView";
 import { WorldEditor } from "./WorldEditor";
 import { useEditorHistory, hashBytes, snapshotsEqual, type CartSnapshot } from "./useEditorHistory";
@@ -399,6 +400,7 @@ function WorkbenchBody({
     [sidecars.mesh, setSidecar],
   );
   const meshScene = useMemo<MeshScene | null>(() => parseMeshScene(sidecars.mesh), [sidecars.mesh]);
+  const meshUi = useMemo(() => readSidecarUi(sidecars.mesh), [sidecars.mesh]);
   // Every sidecar but the mesh one (measured separately), for the download budget.
   const budgetOtherData = useMemo(
     () => (Object.entries(sidecars) as [string, unknown][]).filter(([key]) => key !== "mesh").map(([, value]) => value),
@@ -424,6 +426,12 @@ function WorkbenchBody({
   const resyncKey = `${bank}:${revision}`;
 
   const sheet = useMemo(() => new SpriteSheet(editEngine), [editEngine]);
+  // The UI tab previews in the cart's own colours (re-read on every edit: the
+  // sheet stays the same object while its palette changes).
+  const uiPalette = useMemo(() => {
+    void revision;
+    return sheet.paletteRgb();
+  }, [sheet, revision]);
   const map = useMemo(() => new TileMap(editEngine), [editEngine]);
   const doc = useMemo(() => new CodeDocument(editEngine), [editEngine]);
   const soundBank = useMemo(() => new SoundBank(editEngine), [editEngine]);
@@ -806,6 +814,7 @@ function WorkbenchBody({
       flags: flags ?? undefined,
       world: world ?? undefined,
       mesh: parseMeshScene(baked ?? null),
+      ui: readSidecarUi(baked ?? null),
     };
   }, [runnable, rebakeMesh, sidecars.mesh, setSidecar, engineUrl, modelId, fx, scene, anim, particles, collision, flags, world]);
 
@@ -1327,6 +1336,7 @@ function WorkbenchBody({
         />
       )}
       {activeTab === "Mesh" && <MeshEditor key="mesh" sidecar={mesh} onSidecarChange={setMesh} code={doc} onStartPlay={startPlaytest} />}
+      {activeTab === "UI" && <UiEditor key="ui" sidecar={mesh} onSidecarChange={setMesh} width={activeModel.width} height={activeModel.height} palette={uiPalette} />}
       {activeTab === "Files" && (
         <FilesEditor
           key="files"
@@ -1462,6 +1472,7 @@ function WorkbenchBody({
           collision={collision ?? undefined}
           flags={flags ?? undefined}
           mesh={meshScene ?? undefined}
+          ui={meshUi}
           world={world ?? undefined}
           breakpoints={breakpoints}
           onBreakpointsChange={setBreakpoints}
