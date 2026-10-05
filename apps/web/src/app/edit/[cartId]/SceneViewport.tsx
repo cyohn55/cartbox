@@ -49,6 +49,8 @@ import {
   type Mat4,
   type MeshAsset,
   type MeshSceneInstance,
+  type LodChain,
+  decodeLods,
   type Terrain,
 } from "@cartbox/editor";
 import { MODELS, createSceneRenderer, type SceneDraw, type SceneRenderer } from "@cartbox/player";
@@ -161,6 +163,8 @@ interface Decoded {
   readonly id: string;
   readonly mesh: MeshAsset;
   readonly textures: (DecodedTexture | null)[];
+  /** Its LOD chain (EP9b), base mesh first, or null. */
+  readonly lod: LodChain | null;
 }
 
 /** A render instance tagged with its sidecar id, for selection + gizmo overlay. */
@@ -239,7 +243,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
 
   // Decode geometry + base-colour textures only when the *set* of meshes changes
   // (id + payload), never on a transform edit — so dragging never re-decodes.
-  const geometrySignature = sidecar.meshes.map((m) => `${m.id}:${m.mesh.length}`).join("|");
+  const geometrySignature = sidecar.meshes.map((m) => `${m.id}:${m.mesh.length}:${m.lods?.levels.map((l) => l.length).join(".") ?? ""}`).join("|");
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -252,7 +256,8 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
           continue;
         }
         const textures = await decodeMeshTextures(mesh);
-        next.push({ id: entry.id, mesh, textures });
+        const chain = entry.lods ? decodeLods(mesh, entry.lods) : null;
+        next.push({ id: entry.id, mesh, textures, lod: chain ? { meshes: [mesh, ...chain.meshes], distances: chain.distances } : null });
       }
       if (!cancelled) setDecoded(next);
     })();
@@ -302,7 +307,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
     const out: SceneInstance[] = [];
     for (const d of decoded) {
       const placed = placement.get(d.id);
-      if (placed && !hidden.has(d.id)) out.push({ id: d.id, mesh: d.mesh, textures: d.textures, model: placed.world });
+      if (placed && !hidden.has(d.id)) out.push({ id: d.id, mesh: d.mesh, textures: d.textures, model: placed.world, ...(d.lod ? { lod: d.lod } : {}) });
     }
     return out;
   }, [decoded, placement, hidden]);
@@ -527,6 +532,8 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
         projection,
         background: [0, 0, 0, 0],
         cull: true,
+        // Show each object at the LOD its distance picks, as the game will.
+        lod: true,
         ...(lighting
           ? {
               ambient: lighting.ambient,

@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, StreamGroup, JointKind, JointSpec, DecodedTexture, EncodedImage, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, SceneFog, RasterStyle, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, StreamGroup, JointKind, JointSpec, DecodedTexture, EncodedImage, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, SceneFog, RasterStyle, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -115,6 +115,8 @@ interface MeshScene {
      */
     readonly debris?: readonly DebrisDef[];
     readonly debrisMeshes?: readonly MeshAsset[];
+    /** Each debris mesh's LOD chain (EP9b), or null; absent when none has one. */
+    readonly debrisLods?: readonly (LodChain | null)[];
 }
 /** A view + projection pair ready to hand to `renderMeshScene`. */
 interface SceneCamera$1 {
@@ -5325,6 +5327,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
      */
     currentPlacements(): readonly (Mat4 | null)[];
     placements(): readonly (Mat4 | null)[];
+    /** A tinted instance's mesh and LOD levels (each level tinted alike). */
+    private tintedLook;
     /** A tinted copy of `mesh`, cached so its identity (and any GPU upload) is stable. */
     private tinted;
     /** The camera's eye this frame (terrain blocks pick their detail by distance from it). */

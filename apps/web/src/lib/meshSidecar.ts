@@ -55,6 +55,8 @@ import {
   SCENE_STRING_MAX,
   SCENE_TAG_MAX,
   resolveMeshFrames,
+  readStoredLods,
+  type StoredLods,
   resolveMeshRef,
   serializeMeshAsset,
   worldMatrices,
@@ -91,6 +93,8 @@ export interface MeshSidecarEntry {
    * this instance to per frame through `cartbox.meshpose(..., frame)`.
    */
   readonly frames?: readonly string[];
+  /** Level-of-detail chain (EP9b): lighter versions of `mesh` swapped in by camera distance (see meshSimplify.ts). */
+  readonly lods?: StoredLods;
   /**
    * Scene objects (ENGINE_ROADMAP.md, Phase 1), all optional. `parent` is another
    * entry's id: this entry's transform is then relative to it. `tags` group
@@ -128,6 +132,7 @@ export interface PrefabNode {
   readonly name: string;
   readonly mesh: string;
   readonly frames?: readonly string[];
+  readonly lods?: StoredLods;
   /** Relative to the parent node; ignored for the root (each copy has its own placement). */
   readonly transform: MeshTransform;
   /** The parent node's key; absent for the root (exactly one node). */
@@ -290,6 +295,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     const mesh = resolveMeshRef(record.mesh, library);
     if (!mesh || !isValid(mesh)) continue; // drop an entry whose geometry is missing or invalid
     const frames = resolveMeshFrames(record.frames, library).filter(isValid);
+    const lods = readStoredLods(record.lods, (level) => resolveMeshRef(level, library));
     const tags = readSceneTags(record.tags);
     const props = readSceneProps(record.props);
     meshes.push({
@@ -298,6 +304,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
       mesh,
       transform: readTransform(record.transform),
       ...(frames.length > 0 ? { frames } : {}),
+      ...(lods ? { lods } : {}),
       ...(typeof record.parent === "string" && record.parent ? { parent: record.parent } : {}),
       ...(tags.length > 0 ? { tags } : {}),
       ...(Object.keys(props).length > 0 ? { props } : {}),
@@ -403,6 +410,7 @@ function readPrefabs(value: unknown, library: ReturnType<typeof readMeshLibrary>
       const mesh = resolveMeshRef(node.mesh, library);
       if (!mesh || !isValid(mesh)) continue;
       const frames = resolveMeshFrames(node.frames, library).filter(isValid);
+      const lods = readStoredLods(node.lods, (level) => resolveMeshRef(level, library));
       const tags = readSceneTags(node.tags);
       const props = readSceneProps(node.props);
       nodes.push({
@@ -411,6 +419,7 @@ function readPrefabs(value: unknown, library: ReturnType<typeof readMeshLibrary>
         mesh,
         transform: readTransform(node.transform),
         ...(frames.length > 0 ? { frames } : {}),
+        ...(lods ? { lods } : {}),
         ...(typeof node.parent === "string" && node.parent ? { parent: node.parent } : {}),
         ...(tags.length > 0 ? { tags } : {}),
         ...(Object.keys(props).length > 0 ? { props } : {}),

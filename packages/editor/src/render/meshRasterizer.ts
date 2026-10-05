@@ -811,7 +811,8 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
  * A level-of-detail chain for an instance (Phase 5): progressively cheaper meshes
  * chosen by camera distance. `meshes[0]` is the highest detail; `distances` are
  * ascending switch points, one fewer than `meshes` (past the last switch point
- * the coarsest mesh is used). Applied by `applyLods`; absent, `mesh` is drawn.
+ * the coarsest mesh is used), in the mesh's own units: an instance scaled up
+ * switches proportionally farther away. Applied by `applyLods`; absent, `mesh` is drawn.
  */
 export interface LodChain {
   readonly meshes: readonly MeshAsset[];

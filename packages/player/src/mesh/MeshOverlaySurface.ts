@@ -54,6 +54,7 @@ import {
   type EncodedImage,
   type EnvironmentLight,
   type LiveSkinnedMesh,
+  type LodChain,
   type Mat4,
   type MeshAsset,
   type MeshSceneInstance,
@@ -429,7 +430,15 @@ export class MeshOverlaySurface implements DisplaySurface {
         if (skinned) this.live.set(i, skinned);
         else this.live.delete(i);
         this.lastSkin.delete(i);
-        this.instances[i] = { ...textured, ...(skinned ? { mesh: skinned.mesh } : {}), model: this.instances[i]!.model };
+        const lod = liveLod(b.lod, skinned);
+        this.instances[i] = { ...textured, ...(skinned ? { mesh: skinned.mesh } : {}), ...(lod ? { lod } : {}), model: this.instances[i]!.model };
+        moved = true;
+      } else if (lodSignature(a.lod) !== lodSignature(b.lod)) {
+        // Same mesh, new levels (generated or cleared in the editor).
+        const { lod: _old, ...rest } = this.instances[i]!;
+        void _old;
+        const lod = liveLod(b.lod, this.live.get(i) ?? null);
+        this.instances[i] = { ...rest, ...(lod ? { lod } : {}) };
         moved = true;
       }
     }
@@ -527,7 +536,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       // A skinned object draws its own live copy of the mesh (same textures), posed each frame.
       const skinned = isSkinned(instance.mesh) ? createLiveSkinnedMesh(instance.mesh) : null;
       if (skinned) live.set(i, skinned);
-      instances.push({ ...textured, ...(skinned ? { mesh: skinned.mesh } : {}), model: instance.model });
+      const lod = liveLod(instance.lod, skinned);
+      instances.push({ ...textured, ...(skinned ? { mesh: skinned.mesh } : {}), ...(lod ? { lod } : {}), model: instance.model });
       frames.push(instance.frames && instance.frames.length > 0 ? await Promise.all(instance.frames.map(texture)) : null);
     }
     // Bake the procedural sky dome once, if the rig authors one: the full map is
@@ -552,7 +562,10 @@ export class MeshOverlaySurface implements DisplaySurface {
     if (scene.debris && scene.debrisMeshes && scene.debris.length > 0) {
       surface.debris = new DebrisSystem(scene.debris, scene.debrisMeshes);
       surface.debrisBoxes = sceneColliders(scene);
-      for (const mesh of scene.debrisMeshes) surface.debrisLooks.set(mesh, await texture(mesh));
+      for (const [k, mesh] of scene.debrisMeshes.entries()) {
+        const lod = scene.debrisLods?.[k];
+        surface.debrisLooks.set(mesh, { ...(await texture(mesh)), ...(lod ? { lod } : {}) });
+      }
     }
     // Reflection probes: each captures the scene's still objects from its point
     // and shiny surfaces in its box reflect that instead of the sky. Baked after
@@ -780,6 +793,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       depth,
       view: camera.view,
       projection: camera.projection,
+      // Objects with LOD levels (EP9b) draw the one their distance calls for.
+      lod: true,
       // HUD mode fills the frame with a sky so the 3D scene is opaque before the
       // HUD lands on top; third-person keeps the cart frame behind the meshes.
       background: this.hud && !skyBackdrop ? HUD_SKY : null,
@@ -961,7 +976,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       const source: TexturedMesh = frame > 0 && frames && frames.length > 0 ? frames[(frame - 1) % frames.length]! : authored;
       const instance: MeshSceneInstance = {
         ...source,
-        mesh: pose.tint ? this.tinted(source.mesh, pose.tint) : source.mesh,
+        ...(pose.tint ? this.tintedLook(source, pose.tint) : {}),
         model: multiplyMat4(authored.model, poseLocalMatrix(pose)),
       };
       if (pose.front) {
@@ -1040,7 +1055,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       const source: TexturedMesh = frame > 0 && frames && frames.length > 0 ? frames[(frame - 1) % frames.length]! : this.atDetail(i, authored);
       const instance: MeshSceneInstance = {
         ...source,
-        mesh: pose?.tint ? this.tinted(source.mesh, pose.tint) : source.mesh,
+        ...(pose?.tint ? this.tintedLook(source, pose.tint) : {}),
         model: s.model,
         ...(s.effect ? { effect: s.effect } : {}),
       };
@@ -1070,6 +1085,14 @@ export class MeshOverlaySurface implements DisplaySurface {
 
   placements(): readonly (Mat4 | null)[] {
     return this.lastPlacement ?? this.instances.map((instance, i) => (this.pooledRoot[i]! >= 0 || this.inactive.has(i) ? null : instance.model));
+  }
+
+  /** A tinted instance's mesh and LOD levels (each level tinted alike). */
+  private tintedLook(source: Pick<MeshSceneInstance, "mesh" | "lod">, tint: number): { mesh: MeshAsset; lod?: LodChain } {
+    const mesh = this.tinted(source.mesh, tint);
+    const lod = source.lod;
+    if (!lod) return { mesh };
+    return { mesh, lod: { distances: lod.distances, meshes: lod.meshes.map((m) => this.tinted(m, tint)) } };
   }
 
   /** A tinted copy of `mesh`, cached so its identity (and any GPU upload) is stable. */
@@ -1353,7 +1376,7 @@ export class MeshOverlaySurface implements DisplaySurface {
   /** Debris in flight and at rest (H10), what it lands on, and each source mesh with its textures. */
   private debris: DebrisSystem | null = null;
   private debrisBoxes: RagdollBox[] = [];
-  private readonly debrisLooks = new Map<MeshAsset, TexturedMesh>();
+  private readonly debrisLooks = new Map<MeshAsset, TexturedMesh & { readonly lod?: LodChain | null }>();
 
   /** Throw a copy of debris `debris` (see cartbox.debris). */
   throwDebris(debris: number, at: readonly [number, number, number], velocity: readonly [number, number, number], scale: number): void {
@@ -1472,6 +1495,22 @@ export const TINT_PALETTE: readonly (readonly [number, number, number])[] = [
 ];
 
 /** A copy of `mesh` with its tintable materials recoloured (geometry arrays shared). */
+/**
+ * An instance's LOD chain as it draws: a skinned object's levels ride its live
+ * copy's vertex buffers (posed each frame), with each level's triangle lists.
+ */
+function liveLod(lod: LodChain | null | undefined, live: LiveSkinnedMesh | null): LodChain | null {
+  if (!lod || lod.meshes.length < 2) return null;
+  if (!live) return lod;
+  const levels = lod.meshes.slice(1).map((level) => ({ ...level, primitives: level.primitives.map((p, k) => ({ ...live.mesh.primitives[k]!, indices: p.indices })) }));
+  return { distances: lod.distances, meshes: [live.mesh, ...levels] };
+}
+
+/** What tells two LOD chains apart (their switch distances and each level's size). */
+function lodSignature(lod: LodChain | null | undefined): string {
+  return lod ? `${lod.distances.join(",")}|${lod.meshes.map((m) => m.primitives.map((p) => p.indices.length).join(".")).join(",")}` : "";
+}
+
 export function tintMesh(mesh: MeshAsset, tint: number): MeshAsset {
   const color = TINT_PALETTE[tint];
   if (!color || tint === 0) return mesh;

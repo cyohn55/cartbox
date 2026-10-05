@@ -49,7 +49,8 @@ export function resolveLodMesh(instance: MeshSceneInstance, distance: number): M
 
 /**
  * Swap each LOD-carrying instance's `mesh` for the level its camera distance
- * selects (measured to the instance's origin — its model translation). Instances
+ * selects (measured to the instance's origin — its model translation — and
+ * divided by its scale, so the switch points are in the mesh's units). Instances
  * with no LOD chain pass through untouched; returns the original array when
  * nothing changed, so a scene with no LODs allocates nothing.
  */
@@ -65,7 +66,11 @@ export function applyLods(
     const dx = instance.model[12]! - cameraX;
     const dy = instance.model[13]! - cameraY;
     const dz = instance.model[14]! - cameraZ;
-    const distance = Math.hypot(dx, dy, dz);
+    // Switch points are in the mesh's own units, so a model placed at half size
+    // drops detail at half the distance (its largest axis scale decides).
+    const m = instance.model;
+    const scale = Math.max(Math.hypot(m[0]!, m[1]!, m[2]!), Math.hypot(m[4]!, m[5]!, m[6]!), Math.hypot(m[8]!, m[9]!, m[10]!)) || 1;
+    const distance = Math.hypot(dx, dy, dz) / scale;
     const mesh = resolveLodMesh(instance, distance);
     if (mesh === instance.mesh) return instance;
     changed = true;

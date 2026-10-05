@@ -4171,6 +4171,7 @@ import {
   resolveMeshFrames,
   resolveMeshRef,
   viewMatrix,
+  decodeLods,
   parseParticleEffects,
   parseDecalDefs,
   parseDecalMarks,
@@ -4249,6 +4250,18 @@ function parseMeshScene(raw) {
     }
     return cache.get(serialized) ?? null;
   };
+  const levelCache = /* @__PURE__ */ new Map();
+  const lodOf = (mesh, stored) => {
+    if (!stored) return null;
+    let byBase = levelCache.get(mesh);
+    if (!byBase) levelCache.set(mesh, byBase = /* @__PURE__ */ new Map());
+    const key = JSON.stringify(stored);
+    if (!byBase.has(key)) {
+      const chain = decodeLods(mesh, stored, (level) => resolveMeshRef(level, library));
+      byBase.set(key, chain ? { meshes: [mesh, ...chain.meshes], distances: chain.distances } : null);
+    }
+    return byBase.get(key) ?? null;
+  };
   const readEntry = (record, id, parentId, identity2 = false) => {
     if (typeof record.mesh !== "string") return null;
     const resolved = resolveMeshRef(record.mesh, library);
@@ -4256,10 +4269,12 @@ function parseMeshScene(raw) {
     if (!mesh) return null;
     const frames = resolveMeshFrames(record.frames, library).map(load).filter((frame) => frame !== null);
     const t = identity2 ? { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } : readTransform(record.transform);
+    const lod = lodOf(mesh, record.lods);
     return {
       mesh,
       local: composeModelMatrix(t.position, t.rotation, t.scale),
       ...frames.length > 0 ? { frames } : {},
+      ...lod ? { lod } : {},
       id,
       name: typeof record.name === "string" ? record.name : "Mesh",
       tags: readSceneTags(record.tags),
@@ -4363,21 +4378,29 @@ function parseMeshScene(raw) {
   const ragdollColliders = parseRagdollColliders(parsed.ragdollColliders);
   const debris = [];
   const debrisMeshes = [];
+  const debrisLods = [];
   for (const def of parseDebrisDefs(parsed.debris)) {
-    let mesh = parsedInstances.find((p) => !p.pool && p.name === def.source)?.mesh ?? null;
+    const source = parsedInstances.find((p) => !p.pool && p.name === def.source);
+    let mesh = source?.mesh ?? null;
+    let lod = source?.lod ?? null;
     if (!mesh && Array.isArray(prefabs)) {
       const prefab = prefabs.find((f2) => f2 && f2.name === def.source && Array.isArray(f2.nodes));
       const root = prefab?.nodes?.find((n) => typeof n.parent !== "string" || !n.parent);
-      mesh = root ? readEntry(root, "debris", null, true)?.mesh ?? null : null;
+      const entry = root ? readEntry(root, "debris", null, true) : null;
+      mesh = entry?.mesh ?? null;
+      lod = entry?.lod ?? null;
     }
     if (mesh && def.without) {
       const leave = new Set(def.without);
-      const kept = mesh.primitives.filter((p) => !leave.has(p.material.name));
-      mesh = kept.length > 0 ? { ...mesh, primitives: kept } : null;
+      const keep = (m) => ({ ...m, primitives: m.primitives.filter((p) => !leave.has(p.material.name)) });
+      const kept = keep(mesh);
+      mesh = kept.primitives.length > 0 ? kept : null;
+      lod = mesh && lod ? { meshes: [mesh, ...lod.meshes.slice(1).map(keep)], distances: lod.distances } : null;
     }
     if (!mesh) continue;
     debris.push(def);
     debrisMeshes.push(mesh);
+    debrisLods.push(lod);
   }
   return {
     instances,
@@ -4388,7 +4411,7 @@ function parseMeshScene(raw) {
     ...decals.length > 0 ? { decals } : {},
     ...decalMarks.length > 0 ? { decalMarks } : {},
     ...ragdollColliders.length > 0 ? { ragdollColliders } : {},
-    ...debris.length > 0 ? { debris, debrisMeshes } : {},
+    ...debris.length > 0 ? { debris, debrisMeshes, ...debrisLods.some(Boolean) ? { debrisLods } : {} } : {},
     lighting,
     ...pools.length > 0 ? { pools } : {},
     ...physicsWorld ? { physicsWorld } : {},
@@ -8871,7 +8894,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         if (skinned) this.live.set(i, skinned);
         else this.live.delete(i);
         this.lastSkin.delete(i);
-        this.instances[i] = { ...textured, ...skinned ? { mesh: skinned.mesh } : {}, model: this.instances[i].model };
+        const lod = liveLod(b.lod, skinned);
+        this.instances[i] = { ...textured, ...skinned ? { mesh: skinned.mesh } : {}, ...lod ? { lod } : {}, model: this.instances[i].model };
+        moved = true;
+      } else if (lodSignature(a.lod) !== lodSignature(b.lod)) {
+        const { lod: _old, ...rest } = this.instances[i];
+        void _old;
+        const lod = liveLod(b.lod, this.live.get(i) ?? null);
+        this.instances[i] = { ...rest, ...lod ? { lod } : {} };
         moved = true;
       }
     }
@@ -8949,7 +8979,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const textured = await texture(instance.mesh);
       const skinned = isSkinned2(instance.mesh) ? createLiveSkinnedMesh(instance.mesh) : null;
       if (skinned) live.set(i, skinned);
-      instances.push({ ...textured, ...skinned ? { mesh: skinned.mesh } : {}, model: instance.model });
+      const lod = liveLod(instance.lod, skinned);
+      instances.push({ ...textured, ...skinned ? { mesh: skinned.mesh } : {}, ...lod ? { lod } : {}, model: instance.model });
       frames.push(instance.frames && instance.frames.length > 0 ? await Promise.all(instance.frames.map(texture)) : null);
     }
     const lighting = scene.lighting;
@@ -8968,7 +8999,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (scene.debris && scene.debrisMeshes && scene.debris.length > 0) {
       surface.debris = new DebrisSystem(scene.debris, scene.debrisMeshes);
       surface.debrisBoxes = sceneColliders(scene);
-      for (const mesh of scene.debrisMeshes) surface.debrisLooks.set(mesh, await texture(mesh));
+      for (const [k, mesh] of scene.debrisMeshes.entries()) {
+        const lod = scene.debrisLods?.[k];
+        surface.debrisLooks.set(mesh, { ...await texture(mesh), ...lod ? { lod } : {} });
+      }
     }
     if (lighting?.probes && lighting.probes.length > 0 && environment) {
       const sky = environment;
@@ -9159,6 +9193,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       depth,
       view: camera.view,
       projection: camera.projection,
+      // Objects with LOD levels (EP9b) draw the one their distance calls for.
+      lod: true,
       // HUD mode fills the frame with a sky so the 3D scene is opaque before the
       // HUD lands on top; third-person keeps the cart frame behind the meshes.
       background: this.hud && !skyBackdrop ? HUD_SKY : null,
@@ -9309,7 +9345,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const source = frame > 0 && frames && frames.length > 0 ? frames[(frame - 1) % frames.length] : authored;
       const instance = {
         ...source,
-        mesh: pose.tint ? this.tinted(source.mesh, pose.tint) : source.mesh,
+        ...pose.tint ? this.tintedLook(source, pose.tint) : {},
         model: multiplyMat43(authored.model, poseLocalMatrix(pose))
       };
       if (pose.front) {
@@ -9379,7 +9415,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const source = frame > 0 && frames && frames.length > 0 ? frames[(frame - 1) % frames.length] : this.atDetail(i, authored);
       const instance = {
         ...source,
-        mesh: pose?.tint ? this.tinted(source.mesh, pose.tint) : source.mesh,
+        ...pose?.tint ? this.tintedLook(source, pose.tint) : {},
         model: s.model,
         ...s.effect ? { effect: s.effect } : {}
       };
@@ -9407,6 +9443,13 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   }
   placements() {
     return this.lastPlacement ?? this.instances.map((instance, i) => this.pooledRoot[i] >= 0 || this.inactive.has(i) ? null : instance.model);
+  }
+  /** A tinted instance's mesh and LOD levels (each level tinted alike). */
+  tintedLook(source, tint) {
+    const mesh = this.tinted(source.mesh, tint);
+    const lod = source.lod;
+    if (!lod) return { mesh };
+    return { mesh, lod: { distances: lod.distances, meshes: lod.meshes.map((m) => this.tinted(m, tint)) } };
   }
   /** A tinted copy of `mesh`, cached so its identity (and any GPU upload) is stable. */
   tinted(mesh, tint) {
@@ -9752,6 +9795,15 @@ var TINT_PALETTE = [
   [0.5, 0.6, 0.45]
   // 15 sage
 ];
+function liveLod(lod, live) {
+  if (!lod || lod.meshes.length < 2) return null;
+  if (!live) return lod;
+  const levels = lod.meshes.slice(1).map((level) => ({ ...level, primitives: level.primitives.map((p, k) => ({ ...live.mesh.primitives[k], indices: p.indices })) }));
+  return { distances: lod.distances, meshes: [live.mesh, ...levels] };
+}
+function lodSignature(lod) {
+  return lod ? `${lod.distances.join(",")}|${lod.meshes.map((m) => m.primitives.map((p) => p.indices.length).join(".")).join(",")}` : "";
+}
 function tintMesh(mesh, tint) {
   const color = TINT_PALETTE[tint];
   if (!color || tint === 0) return mesh;

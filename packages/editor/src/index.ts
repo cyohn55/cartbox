@@ -477,6 +477,22 @@ export {
   type StoredLightProbes,
 } from "./model/lightProbes";
 export {
+  LOD_LEVELS,
+  LOD_MIN_TRIANGLES,
+  decodeLodLevel,
+  decodeLods,
+  encodeLodLevel,
+  encodeLods,
+  generateLods,
+  meshFingerprint,
+  pruneSmallParts,
+  readStoredLods,
+  simplifyIndices,
+  simplifyMesh,
+  triangleCountOf,
+  type StoredLods,
+} from "./model/meshSimplify";
+export {
   MAX_PARTICLE_EFFECTS,
   MAX_PARTICLES_PER_EFFECT,
   PARTICLE_PRESETS,

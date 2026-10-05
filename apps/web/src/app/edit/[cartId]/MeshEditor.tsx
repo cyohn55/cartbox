@@ -49,6 +49,7 @@ import {
   type MeshSidecar,
   type MeshTransform,
 } from "@/lib/meshSidecar";
+import { withAutoLods } from "@/lib/meshLods";
 import { clickSelection, copyPayload, duplicateEntries, pasteEntries, removeEntries, withSubtrees } from "@/lib/sceneSelection";
 import { placeAsset, type ContentAsset } from "@/lib/contentBrowser";
 import { ContentBrowser, type CodeAccess } from "./ContentBrowser";
@@ -82,6 +83,7 @@ import {
   NO_SHIELD,
   ParentPicker,
   type SceneCommand,
+  LodPanel,
   PhysicsPanel,
   PhysicsWorldPanel,
   PrefabLibrary,
@@ -514,7 +516,10 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay }: Mesh
         encodePng: encodePngInBrowser,
       });
       const asset = settled.mesh;
-      const { sidecar: next, id } = addMesh(sidecar, asset, asset.name);
+      const added = addMesh(sidecar, asset, asset.name);
+      const id = added.id;
+      // A heavy model gets its LODs on the way in.
+      const next = withAutoLods(added.sidecar, id);
       onSidecarChange(next);
       setSelectedId(id);
       const textures =
@@ -526,7 +531,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay }: Mesh
       setNote(
         `Imported “${asset.name}” — ${meshTriangleCount(asset).toLocaleString()} triangles, ${meshVertexCount(
           asset,
-        ).toLocaleString()} vertices.${textures}`,
+        ).toLocaleString()} vertices.${textures}${next !== added.sidecar ? " Lighter LODs made for distance." : ""}`,
       );
     } catch (error) {
       setNote(error instanceof Error ? error.message : "Could not import that file.");
@@ -538,7 +543,9 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay }: Mesh
   // and an uploaded one are indistinguishable once in the cart.
   const insertFromLibrary = async (asset: LibraryAsset) => {
     const mesh = await fetchLibraryMesh(asset.payloadUrl, asset.name);
-    const { sidecar: next, id } = addMesh(sidecar, mesh, asset.name);
+    const added = addMesh(sidecar, mesh, asset.name);
+    const id = added.id;
+    const next = withAutoLods(added.sidecar, id);
     onSidecarChange(next);
     setSelectedId(id);
     setNote(
@@ -755,6 +762,8 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay }: Mesh
               <AnimatorPanel sidecar={sidecar} entry={selectedEntry} mesh={meshAsset} onChange={onSidecarChange} />
             )}
             {meshAsset && <ShieldPanel name={selectedEntry.name} shield={shield} onChange={setShield} />}
+
+            <LodPanel sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
 
             <PhysicsPanel sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
 
