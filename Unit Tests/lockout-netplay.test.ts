@@ -11,14 +11,15 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { LOCKOUT_CODE } from "@cartbox/editor";
-import { CARTBOX_SDK_LUA, MemoryNetHub, NET_WORDS, NetSession, codeChunks, decodeMeshPoses } from "@cartbox/player";
+import { LOCKOUT_CODE, LOCKOUT_INPUT_ACTIONS } from "@cartbox/editor";
+import { CARTBOX_SDK_LUA, MemoryNetHub, NET_WORDS, NetSession, RAM_LAYOUTS, actionsSdkLua, codeChunks, decodeMeshPoses } from "@cartbox/player";
 
 const ENGINE = path.resolve(__dirname, "../packages/engine/dist/xbox360/engine.js");
 
 // Test-only probe appended to the cart: after each tick in play it writes the
-// scores of slots 0-3 to pmem 117, and the kill count (low half) and the ball
-// carrier's slot (high half) to pmem 118 — words the netplay channel leaves free.
+// scores of slots 0-3 to pmem 117, and to pmem 118 the kill count (bits 0-15),
+// the ball carrier's slot (16-19) and everyone's scores summed (20-31) — words
+// the netplay channel leaves free.
 const PROBE = `
 local _rk = register_kill
 function register_kill(k, v, h) KILLS = (KILLS or 0) + 1; return _rk(k, v, h) end
@@ -27,15 +28,19 @@ function TIC()
   _T()
   if phase=="play" and p then
     local s = {}
-    for _,o in ipairs(all_players()) do s[o.ns+1] = math.floor(o.score or 0) & 255 end
+    local total = 0
+    for _,o in ipairs(all_players()) do s[o.ns+1] = math.floor(o.score or 0) & 255; total = total + math.floor(o.score or 0) end
     pmem(117, (s[1] or 0) | ((s[2] or 0) << 8) | ((s[3] or 0) << 16) | ((s[4] or 0) << 24))
-    pmem(118, (KILLS or 0) | ((ball.carrier and ball.carrier.ns or 9) << 16))
+    pmem(118, ((KILLS or 0) & 0xffff) | ((ball.carrier and ball.carrier.ns or 9) << 16) | ((math.min(total, 4095)) << 20))
   end
 end`;
 
 function cart(): Uint8Array {
   // Split across code banks as needed (the code with the SDK and probe runs past 64 KB).
-  return codeChunks(new TextEncoder().encode(`${CARTBOX_SDK_LUA}\n${LOCKOUT_CODE}\n${PROBE}`));
+  // With its input actions (EP15), as the player builds it; no host fills the
+  // input block here, so each action answers from its console button.
+  const actions = actionsSdkLua(LOCKOUT_INPUT_ACTIONS, RAM_LAYOUTS.xbox360);
+  return codeChunks(new TextEncoder().encode(`${CARTBOX_SDK_LUA}\n${actions}\n${LOCKOUT_CODE}\n${PROBE}`));
 }
 
 interface Engine {
@@ -142,9 +147,9 @@ describe.skipIf(!existsSync(ENGINE))("Lockout over netplay (two engines, one roo
       const host = unpack(a);
       unpack(b).forEach((score, slot) => expect(Math.abs(score - host[slot]!)).toBeLessThanOrEqual(1));
     }
-    // Someone has scored by holding the ball, and the carrier matches.
-    expect(samples.at(-1)![0]).toBeGreaterThan(0);
-    expect(guest.net()[118]! >>> 16).toBe(host.net()[118]! >>> 16);
+    // Someone (in any slot) has scored by holding the ball, and the carrier matches.
+    expect(host.net()[118]! >>> 20).toBeGreaterThan(0);
+    expect((guest.net()[118]! >>> 16) & 15).toBe((host.net()[118]! >>> 16) & 15);
     // The match is still on (a point a second, not a point a tick).
     expect(host.poses().some((q) => q.index >= 1 && q.index <= 7 && !hidden(q.position[1]))).toBe(true);
   }, 180_000);

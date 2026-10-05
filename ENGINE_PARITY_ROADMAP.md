@@ -580,8 +580,53 @@ preview.
         under budget. A `Pickup` component turns it and bobs it while the
         weapon is there to take, and hides it while the pad recharges or when
         the game type leaves that weapon out.
-- [ ] **EP15. Input actions and save data.** Named actions with per-device
-      bindings, and structured saves (local, and cloud for signed-in players).
+- [x] **EP15. Input actions.** Named actions with per-device bindings.
+
+      *Done:*
+      - **Actions:** an action has a name ("jump", "fire", "reload") and is
+        bound to keyboard keys, controller buttons and console buttons. Console
+        buttons also cover the on-screen pad and the player's button mapping.
+        A key or controller button an action binds belongs to that action: it
+        no longer also presses the console button it's mapped to.
+      - **Runtime:** each tick the host works out which actions are held, from
+        every device, with the player's rebinding applied. It writes that mask,
+        with the last tick's, into a 16-byte input block just below the debug
+        block. The block is in free RAM on every core, including Classic's last
+        few hundred bytes, clear of TIC-80's system font.
+      - **Replays:** the mask is recorded in replays above the 8 console-button
+        bits, so a replay plays the actions back. Verification feeds it to the
+        input block and never to the engine's other gamepad bytes.
+      - **From Lua:**
+        - `cartbox.action(name)` is held;
+        - `actionp` is pressed this tick, `actionr` released this tick;
+        - `actions()` lists them;
+        - `actionlabel(name, device)` gives the bindings for a prompt ("G / Q").
+        - Without the host's block, an action answers from its console
+          buttons. The SDK carries no-op defaults.
+      - **Editor:** an Input tab with a table of actions:
+        - name;
+        - keys (press to bind);
+        - controller buttons;
+        - console-button checkboxes;
+        - a light that shows each action held as you press its bindings.
+
+        Actions are stored in the scene sidecar and passed by every host.
+      - **Rebinding:** players rebind an action's key and controller button,
+        saved in their control settings (`actionBindings`).
+      - **SDK reference:** the Code tab's reference gains sound, UI,
+        components and input-action entries.
+      - **Lockout:**
+        - fire, jump, swap, grenade and zoom are actions, each keeping its
+          console button;
+        - Space jumps, Tab swaps, G, Q or LT throws a grenade, and Shift or a
+          right-stick click zooms;
+        - the Start menu's button-mapping page rebinds them.
+        - A side effect: the A press that starts a match no longer also fires
+          a stray shot.
+- [ ] **EP15b. Save data.** Structured saves (local, and cloud for signed-in
+      players): `cartbox.save` / `cartbox.load` of a Lua table, in a save
+      block in free RAM, kept per cart in the browser and, signed in, in the
+      player's account.
 - [ ] **EP16. Visual scripting.** A node graph that compiles to Lua, for
       gameplay logic without code, in the spirit of Unreal's Blueprints.
 

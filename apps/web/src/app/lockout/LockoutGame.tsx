@@ -19,13 +19,13 @@ import {
   NetSession,
   SwitchableTransport,
   parseMeshScene,
-  readSidecarUi,
+  readSidecarUi, readSidecarActions,
   parsePostFxSettings,
   type MailboxEvent,
   type NetRoomStatus,
   type PlayerHandle,
 } from "@cartbox/player";
-import { LOCKOUT_FX, lockoutCartridge, lockoutMeshSidecar } from "@cartbox/editor";
+import { LOCKOUT_FX, LOCKOUT_INPUT_ACTIONS, lockoutCartridge, lockoutMeshSidecar } from "@cartbox/editor";
 
 import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
 import { newRoomCode, onlineRoomsAvailable, parseRoomCode, roomTransport } from "@/lib/netplayTransport";
@@ -195,6 +195,7 @@ export function LockoutGame() {
           postFx: parsePostFxSettings(LOCKOUT_FX) ?? undefined,
           mesh: parseMeshScene(lockoutMeshSidecar()) ?? undefined,
           ui: readSidecarUi(lockoutMeshSidecar()),
+          actions: readSidecarActions(lockoutMeshSidecar()),
           netplay: session,
           controlSettings: current.controls,
           volume: current.muted ? 0 : current.volume,
@@ -355,6 +356,7 @@ export function LockoutGame() {
             settings={settings}
             onChange={applySettings}
             actions={LOCKOUT_ACTIONS}
+            inputActions={LOCKOUT_INPUT_ACTIONS}
             online={inRoom()}
             isFullscreen={isFullscreen}
             onToggleFullscreen={() => void (isFullscreen ? exitFullscreen() : enterFullscreen(wrapperRef.current))}

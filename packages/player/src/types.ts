@@ -1,4 +1,4 @@
-import type { DecodedTexture, EncodedImage, SceneLevel, UiDocument } from "@cartbox/editor";
+import type { DecodedTexture, EncodedImage, InputAction, SceneLevel, UiDocument } from "@cartbox/editor";
 import type { PhysicsBackend } from "./physics/physicsSession.js";
 import type { QualityChoice, QualityLevel } from "./quality.js";
 /**
@@ -198,6 +198,12 @@ export interface PlayerOptions {
   mesh?: MeshScene;
   /** UI documents (EP13) the cart drives with cartbox.ui, laid out for this console's screen. */
   ui?: readonly UiDocument[];
+  /**
+   * Input actions (EP15) the cart reads with cartbox.action: named, each bound
+   * to keys, controller buttons and console buttons (the player's rebinding in
+   * {@link ControlSettings.actionBindings} applies on top).
+   */
+  actions?: readonly InputAction[];
   /**
    * Render a declared HD-2D {@link WorldScene}: a height-mapped 3D tile world with
    * the cart's own 2D character sprites standing in it as camera-facing billboards,

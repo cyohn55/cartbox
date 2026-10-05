@@ -331,6 +331,12 @@ cartbox = {
     on = function() end, update = function() return nil end, draw = function() end,
   },
   effects = function() return {} end,
+  -- Input actions (EP15): replaced when the cart has any.
+  action = function() return false end,
+  actionp = function() return false end,
+  actionr = function() return false end,
+  actions = function() return {} end,
+  actionlabel = function() return "" end,
   -- Placing objects (EP14): live once the scene has the runtime.
   place = function() end,
   -- Components (EP14): replaced when any object has one.

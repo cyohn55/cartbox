@@ -3,7 +3,8 @@
 /**
  * The Start menu: opened by a controller's Start, the touch pad's Start button,
  * or Enter / P. Controls (aim inversion, look sensitivity, the touch pad),
- * button mapping for a controller and the keyboard, audio and display, plus
+ * button mapping for a controller and the keyboard, the game's input actions
+ * (EP15: rebind each one's key and controller button), audio and display, plus
  * resume / leave. Every setting applies at once and is kept in this browser.
  * Fully usable with a controller: D-pad or stick to move, left/right to adjust,
  * A to choose, B or Start to close.
@@ -11,6 +12,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { ConsoleButton, DEFAULT_CONTROL_SETTINGS, PAD_BUTTONS, standardizePad, type ControlTarget, type PadButton } from "@cartbox/player";
+import { actionLabel, reboundActions, type ActionPadButton, type InputAction } from "@cartbox/editor";
 
 import {
   DEFAULT_GAME_SETTINGS,
@@ -28,6 +30,8 @@ export interface StartMenuProps {
   settings: GameSettings;
   onChange: (settings: GameSettings) => void;
   actions: readonly GameAction[];
+  /** The game's input actions (EP15), which the player can rebind here. */
+  inputActions?: readonly InputAction[];
   /** In an online room (the game keeps running while the menu is open). */
   online: boolean;
   isFullscreen: boolean;
@@ -51,11 +55,29 @@ export function StartMenu(props: StartMenuProps) {
   const { settings, onChange, actions } = props;
   const [tab, setTab] = useState<Tab>("controls");
   const [listening, setListening] = useState<ConsoleButton | null>(null);
+  const [listeningAction, setListeningAction] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const controls = settings.controls;
   const setControls = (patch: Partial<typeof controls>) => onChange({ ...settings, controls: { ...controls, ...patch } });
 
-  useGamepadNavigation(rootRef, props.onClose, listening === null);
+  useGamepadNavigation(rootRef, props.onClose, listening === null && listeningAction === null);
+  const rebinds = controls.actionBindings ?? {};
+  const rebind = (name: string, patch: { keys?: readonly string[]; pad?: readonly ActionPadButton[] }) =>
+    setControls({ actionBindings: { ...rebinds, [name]: { ...rebinds[name], ...patch } } });
+  const current = reboundActions(props.inputActions ?? [], rebinds);
+
+  // Rebinding an action's key: the next key pressed becomes its key (Escape cancels).
+  useEffect(() => {
+    if (listeningAction === null) return;
+    const onKey = (event: KeyboardEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.code !== "Escape") rebind(listeningAction, { keys: [event.code] });
+      setListeningAction(null);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  });
 
   // Focus the first control so a controller or keyboard can drive the menu at once.
   useEffect(() => {
@@ -78,7 +100,7 @@ export function StartMenu(props: StartMenuProps) {
   // Escape or P closes the menu (when not rebinding).
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if ((event.code === "Escape" || event.code === "KeyP") && listening === null) props.onClose();
+      if ((event.code === "Escape" || event.code === "KeyP") && listening === null && listeningAction === null) props.onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -195,6 +217,39 @@ export function StartMenu(props: StartMenuProps) {
               <p style={styles.note}>
                 Start menu: {["Enter", "KeyP"].map(keyLabel).join(" or ")}.
               </p>
+
+              {current.length > 0 && (
+                <>
+                  <h3 style={styles.h3}>Actions</h3>
+                  {current.map((a) => (
+                    <Row key={a.name} label={a.name[0]!.toUpperCase() + a.name.slice(1)}>
+                      <span style={{ fontFamily: "var(--font-data)", minWidth: 60 }}>{actionLabel({ ...a, buttons: [] }, "keyboard") || "—"}</span>
+                      <button type="button" className="cbx-btn" onClick={() => setListeningAction(a.name)}>
+                        {listeningAction === a.name ? "Press a key… (Esc cancels)" : "Change key"}
+                      </button>
+                      <select
+                        aria-label={`${a.name} on the controller`}
+                        style={styles.select}
+                        value={a.pad[0] ?? ""}
+                        onChange={(event) => rebind(a.name, { pad: event.target.value ? [event.target.value as ActionPadButton] : [] })}
+                      >
+                        <option value="">No controller button</option>
+                        {PAD_BUTTONS.map((b) => (
+                          <option key={b} value={b}>
+                            {PAD_LABELS[b]}
+                          </option>
+                        ))}
+                      </select>
+                    </Row>
+                  ))}
+                  <p style={styles.note}>A key or controller button given to an action is that action&apos;s alone. Each action also keeps its button above.</p>
+                  <Row label="">
+                    <button type="button" className="cbx-btn" onClick={() => setControls({ actionBindings: {} })}>
+                      Reset actions
+                    </button>
+                  </Row>
+                </>
+              )}
             </>
           )}
 

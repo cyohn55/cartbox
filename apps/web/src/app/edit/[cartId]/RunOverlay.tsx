@@ -10,7 +10,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { frameDurationMs, getModel, mount, readCartCode, type DebugStep, type InspectedObject, type PauseInfo, type ProfileSnapshot, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type QualityChoice, type SceneSpec, type WorldScene } from "@cartbox/player";
-import type { UiDocument } from "@cartbox/editor";
+import type { InputAction, UiDocument } from "@cartbox/editor";
 
 import styles from "./editor.module.css";
 import { errorLineFrom } from "./codeTools";
@@ -52,6 +52,8 @@ interface RunOverlayProps {
   mesh?: MeshScene;
   /** The cart's UI documents (EP13), driven by its Lua through cartbox.ui. */
   ui?: readonly UiDocument[];
+  /** The cart's input actions (EP15), read by its Lua through cartbox.action. */
+  actions?: readonly InputAction[];
   /** The cart's HD-2D world (3D terrain + 2D character billboards), during the playtest. */
   world?: WorldScene;
   /**
@@ -84,6 +86,7 @@ export function RunOverlay({
   flags,
   mesh,
   ui,
+  actions,
   world,
   onGoToLine,
   breakpoints = NO_LINES,
@@ -194,6 +197,7 @@ export function RunOverlay({
       // their physics bodies simulated (Rapier loads only when there are bodies).
       mesh,
       ...(ui && ui.length > 0 ? { ui } : {}),
+      ...(actions && actions.length > 0 ? { actions } : {}),
       physics: rapierPhysics(),
       // KTX2 textures: the transcoder is fetched only if the scene has one.
       ktx2: loadKtx2Decoder,
@@ -239,7 +243,7 @@ export function RunOverlay({
       handle.destroy();
       URL.revokeObjectURL(url);
     };
-  }, [bytes, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, ui, world, debugOn]);
+  }, [bytes, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, ui, actions, world, debugOn]);
 
   // Breakpoints and watches edited during the run reach the player at once.
   useEffect(() => {
