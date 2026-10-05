@@ -85,6 +85,7 @@ export const SCRIPT_NODES = {
   random: { label: "Random", category: "value", inputs: [num("min"), num("max", 1)], outputs: [num("out")], doc: "A random number between min and max." },
   actionHeld: { label: "Action held", category: "value", inputs: [], outputs: [bool("held")], param: { label: "Action", value: "fire" }, doc: "Whether an input action is held." },
   callValue: { label: "Ask cart function", category: "value", inputs: [any("argument")], outputs: [any("result")], param: { label: "Function", value: "" }, doc: "What a global function in the cart's code returns for one argument." },
+  timelineValue: { label: "Timeline value", category: "value", inputs: [], outputs: [num("value")], param: { label: "Value track", value: "" }, doc: "A playing timeline's value track (0 when none plays it)." },
   // Maths and logic
   add: binary("Add", "a + b"),
   subtract: binary("Subtract", "a − b"),
@@ -271,6 +272,8 @@ export function compileScriptGraph(graph: ScriptGraph, name = "Graph"): string {
         return `cartbox.action(${luaString(param)})`;
       case "callValue":
         return NAME.test(param) ? `(${param} and ${param}(${e("argument")}))` : "nil";
+      case "timelineValue":
+        return `(cartbox.timelinevalue(${luaString(param)}) or 0)`;
       case "add":
         return `(${e("a")} + ${e("b")})`;
       case "subtract":

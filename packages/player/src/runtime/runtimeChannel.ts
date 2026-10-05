@@ -67,6 +67,7 @@ import {
   writeJointPositions,
   writePhysicsState,
   writeTimelineState,
+  writeTimelineValues,
   writeLevelState,
 } from "../physics/protocol.js";
 
@@ -198,6 +199,7 @@ export class RuntimeChannel {
     else writePhysicsState(block, 0, [], []);
     writeAnimationState(block, this.animation?.state() ?? [], this.animation?.events() ?? []);
     writeTimelineState(block, this.timeline?.state() ?? { index: -1, time: 0, playing: false }, this.timeline?.events() ?? []);
+    if (this.timeline) writeTimelineValues(block, this.timeline.valueNames(), this.timeline.values());
     writeLevelState(block, this.level);
     writeAgents(block, this.crowd?.state() ?? []);
     writeJointPositions(
@@ -441,6 +443,11 @@ export class RuntimeChannel {
   /** Where the cart has put objects with cartbox.place (object → world matrix). */
   placements(): ReadonlyMap<number, Mat4> {
     return this.placed;
+  }
+
+  /** The playing timeline's value tracks now (EP17: name → value). */
+  timelineValues(): ReadonlyMap<string, number> {
+    return this.timeline?.values() ?? new Map();
   }
 
   timelinePlacements(): ReadonlyMap<number, Mat4> {

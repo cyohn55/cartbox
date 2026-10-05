@@ -147,6 +147,9 @@ import {
   PHYS_OP_TIMELINE,
   PHYS_TIMELINE,
   PHYS_TIMELINE_EVENTS,
+  PHYS_TIMELINE_VALUES,
+  PHYS_MAX_TIMELINE_VALUES,
+  TIMELINE_VALUE_NONE,
   PHYS_OP_CAST,
   PHYS_OP_DESPAWN,
   PHYS_OP_IMPULSE,
@@ -166,6 +169,7 @@ import {
 import { physicsSlots, sceneHasPhysics } from "./physicsSession.js";
 import { animatedObjects } from "../anim/animationSession.js";
 import { timelineEventNames } from "../anim/timelineSession.js";
+import { timelineValueNames } from "@cartbox/editor";
 
 /**
  * Whether a scene needs the runtime block at all: bodies (when a physics engine
@@ -670,8 +674,17 @@ function TIMELINE_CALLS(scene: MeshScene): string {
   if (timelines.length === 0) return "";
   const names = timelines.map((t) => luaString(t.name)).join(",");
   const events = timelines.map((t) => `{${timelineEventNames(t).map(luaString).join(",")}}`).join(",");
+  const values = timelineValueNames(timelines).slice(0, PHYS_MAX_TIMELINE_VALUES).map((n, i) => `[${luaString(n)}]=${i}`).join(",");
   return `  local _tl = {${names}}
   local _tlev = {${events}}
+  local _tlval = {${values}}
+  cartbox.timelinevalue = function(name)
+    local i = _tlval[name]
+    if i == nil or not _live() or i >= _rd(_B + ${PHYS_TIMELINE_VALUES}) then return nil end
+    local v = _rd(_B + ${PHYS_TIMELINE_VALUES + 4} + i * 4)
+    if v == ${TIMELINE_VALUE_NONE} then return nil end
+    return v / ${PHYS_FIX}
+  end
   cartbox.playtimeline = function(name, from, speed)
     for k, n in ipairs(_tl) do
       if n == name or k - 1 == name then

@@ -2299,6 +2299,26 @@ export const LOCKOUT_INTRO: SceneTimeline = {
         { time: 7.5, eye: [4, 5, -9.5], target: [-7, 5, -8], fov: 50, ease: "smooth" },
       ],
     },
+    // Value tracks (EP17): the letterbox bars slide in (an eased-out curve) and
+    // back out at the end; the wind fades up on the ambience bus.
+    {
+      kind: "value",
+      name: "letterbox",
+      keys: [
+        { time: 0, value: 0, ease: "curve", curve: [0.16, 1, 0.3, 1] },
+        { time: 0.8, value: 1, ease: "step" },
+        { time: 6.9, value: 1, ease: "curve", curve: [0.7, 0, 0.84, 0] },
+        { time: 7.5, value: 0, ease: "step" },
+      ],
+    },
+    {
+      kind: "value",
+      name: "bus:ambience",
+      keys: [
+        { time: 0, value: 0, ease: "smooth" },
+        { time: 3, value: 0.5, ease: "step" },
+      ],
+    },
   ],
 };
 
@@ -3367,8 +3387,10 @@ function play_intro()
   for i=1,NBOT do animate_bot(i, bots[i]) end
   drive_camera()  -- the timeline's camera takes over; this keeps HUD compositing on
   cartbox.hud(1)
-  rect(0, 0, 1280, 64, 5)
-  rect(0, 656, 1280, 64, 5)
+  -- The letterbox slides in and out with the timeline's "letterbox" value (EP17).
+  local bar = math.floor(64 * (cartbox.timelinevalue("letterbox") or 1))
+  rect(0, 0, 1280, bar, 5)
+  rect(0, 720 - bar, 1280, bar, 5)
   print("LOCKOUT", 40, 18, 12, false, 3, true)
   print(MODE.name or "", 40, 676, 9, false, 2, true)
   print("Z to skip", 1110, 680, 13, false, 1, true)

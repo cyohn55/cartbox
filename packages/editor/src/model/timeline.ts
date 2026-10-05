@@ -11,18 +11,28 @@
  * - **animation**: cues that start a clip (or state machine state) on a skinned
  *   object at a moment;
  * - **events**: named moments the cart hears (cartbox.timelineevents) — a line
- *   of dialogue, a sound, the end of the cutscene.
+ *   of dialogue, a sound, the end of the cutscene;
+ * - **value** (ENGINE_PARITY_ROADMAP.md EP17): keys of one named number — any
+ *   property the cart wants to animate. The cart reads it with
+ *   cartbox.timelinevalue(name); a track named `bus:<name>` also sets that
+ *   mixer bus's volume.
  *
  * Each key eases into the next: `linear`, `smooth` (a curve through the keys,
- * slowing into and out of each one) or `step` (hold, then jump). A timeline can
+ * slowing into and out of each one), `step` (hold, then jump) or `curve` (its
+ * own easing curve: a cubic Bézier from (0,0) to (1,1) through the key's two
+ * handles, as CSS's cubic-bezier, drawn in the curve editor). A timeline can
  * loop, start by itself when the cart does (`autoplay`), and `hold` its last
  * frame when it ends (otherwise the camera and objects go back to the cart).
  * Objects are referred to by their sidecar entry id; everything is validated on
  * the way in.
  */
 
-export type TimelineEase = "linear" | "smooth" | "step";
-export const TIMELINE_EASES: readonly TimelineEase[] = ["linear", "smooth", "step"];
+export type TimelineEase = "linear" | "smooth" | "step" | "curve";
+export const TIMELINE_EASES: readonly TimelineEase[] = ["linear", "smooth", "step", "curve"];
+
+/** A `curve` key's easing handles: x1, y1, x2, y2 (x in 0..1; y may overshoot, −1..2). */
+export type EaseCurve = readonly [number, number, number, number];
+export const DEFAULT_EASE_CURVE: EaseCurve = [0.42, 0, 0.58, 1];
 
 type V3 = readonly [number, number, number];
 
@@ -33,6 +43,7 @@ export interface CameraKey {
   /** Vertical field of view, degrees. */
   readonly fov: number;
   readonly ease: TimelineEase;
+  readonly curve?: EaseCurve;
 }
 
 export interface TransformKey {
@@ -42,6 +53,15 @@ export interface TransformKey {
   readonly rotation: V3;
   readonly scale: V3;
   readonly ease: TimelineEase;
+  readonly curve?: EaseCurve;
+}
+
+/** A value track's key (EP17). */
+export interface ValueKey {
+  readonly time: number;
+  readonly value: number;
+  readonly ease: TimelineEase;
+  readonly curve?: EaseCurve;
 }
 
 export interface AnimationCue {
@@ -56,7 +76,8 @@ export type TimelineTrack =
   | { readonly kind: "camera"; readonly keys: readonly CameraKey[] }
   | { readonly kind: "object"; readonly object: string; readonly keys: readonly TransformKey[] }
   | { readonly kind: "animation"; readonly object: string; readonly cues: readonly AnimationCue[] }
-  | { readonly kind: "events"; readonly events: readonly { readonly time: number; readonly name: string }[] };
+  | { readonly kind: "events"; readonly events: readonly { readonly time: number; readonly name: string }[] }
+  | { readonly kind: "value"; readonly name: string; readonly keys: readonly ValueKey[] };
 
 export interface SceneTimeline {
   readonly name: string;
@@ -81,6 +102,15 @@ const vec = (v: unknown, fallback: V3): V3 =>
     ? [Math.max(-1e6, Math.min(1e6, v[0])), Math.max(-1e6, Math.min(1e6, v[1])), Math.max(-1e6, Math.min(1e6, v[2]))]
     : fallback;
 const ease = (v: unknown): TimelineEase => (TIMELINE_EASES.includes(v as TimelineEase) ? (v as TimelineEase) : "smooth");
+/** A key's ease, with its curve handles when it has its own curve. */
+const easeOf = (k: Record<string, unknown>): { ease: TimelineEase; curve?: EaseCurve } => {
+  const e = ease(k.ease);
+  if (e !== "curve") return { ease: e };
+  const c = Array.isArray(k.curve) && k.curve.length === 4 && k.curve.every((n) => typeof n === "number" && Number.isFinite(n)) ? (k.curve as number[]) : [...DEFAULT_EASE_CURVE];
+  return { ease: e, curve: [Math.max(0, Math.min(1, c[0]!)), Math.max(-1, Math.min(2, c[1]!)), Math.max(0, Math.min(1, c[2]!)), Math.max(-1, Math.min(2, c[3]!))] };
+};
+/** A value track's name: letters, digits and _ . : - (so `bus:music` works). */
+const VALUE_NAME = /^[A-Za-z_][\w.:-]{0,31}$/;
 const text = (v: unknown): string | null => {
   if (typeof v !== "string") return null;
   const s = v.trim().slice(0, NAME_MAX);
@@ -102,7 +132,7 @@ function readTrack(raw: Record<string, unknown>, duration: number): TimelineTrac
             eye: vec(k.eye, [0, 2, 8]),
             target: vec(k.target, [0, 0, 0]),
             fov: num(k.fov, 5, 150, DEFAULT_TIMELINE_FOV),
-            ease: ease(k.ease),
+            ...easeOf(k),
           })),
         ),
       };
@@ -118,7 +148,7 @@ function readTrack(raw: Record<string, unknown>, duration: number): TimelineTrac
             position: vec(k.position, [0, 0, 0]),
             rotation: vec(k.rotation, [0, 0, 0]),
             scale: vec(k.scale, [1, 1, 1]),
-            ease: ease(k.ease),
+            ...easeOf(k),
           })),
         ),
       };
@@ -140,6 +170,15 @@ function readTrack(raw: Record<string, unknown>, duration: number): TimelineTrac
         if (name) events.push({ time: time(e.time), name });
       }
       return { kind: "events", events: byTime(events) };
+    }
+    case "value": {
+      const name = typeof raw.name === "string" && VALUE_NAME.test(raw.name) ? raw.name : null;
+      if (!name) return null;
+      return {
+        kind: "value",
+        name,
+        keys: byTime(list(raw.keys, TIMELINE_LIMITS.keys).map((k) => ({ time: time(k.time), value: num(k.value, -1e6, 1e6, 0), ...easeOf(k) }))),
+      };
     }
     default:
       return null;
@@ -168,8 +207,36 @@ export function newTimeline(name: string): SceneTimeline {
 
 // --- Sampling -------------------------------------------------------------
 
+/**
+ * A cubic Bézier easing from (0,0) to (1,1) with handles (x1,y1) and (x2,y2),
+ * as CSS's cubic-bezier: the curve's y where its x is `u`.
+ */
+export function easeCurve(curve: EaseCurve, u: number): number {
+  const [x1, y1, x2, y2] = curve;
+  const bez = (a: number, b: number, s: number) => 3 * a * s * (1 - s) * (1 - s) + 3 * b * s * s * (1 - s) + s * s * s;
+  // Find s with x(s) = u: Newton's method, falling back to bisection.
+  let s = u;
+  for (let k = 0; k < 8; k += 1) {
+    const x = bez(x1, x2, s) - u;
+    const dx = 3 * x1 * (1 - s) * (1 - s) + 6 * (x2 - x1) * s * (1 - s) + 3 * (1 - x2) * s * s;
+    if (Math.abs(x) < 1e-6) break;
+    if (Math.abs(dx) < 1e-6) break;
+    s = Math.max(0, Math.min(1, s - x / dx));
+  }
+  if (Math.abs(bez(x1, x2, s) - u) > 1e-4) {
+    let lo = 0;
+    let hi = 1;
+    for (let k = 0; k < 30; k += 1) {
+      s = (lo + hi) / 2;
+      if (bez(x1, x2, s) < u) lo = s;
+      else hi = s;
+    }
+  }
+  return bez(y1, y2, s);
+}
+
 /** The two keys around `t` and how far between them, eased by the first key's ease. */
-function segment<K extends { time: number; ease: TimelineEase }>(keys: readonly K[], t: number): { i: number; j: number; u: number } | null {
+function segment<K extends { time: number; ease: TimelineEase; curve?: EaseCurve }>(keys: readonly K[], t: number): { i: number; j: number; u: number } | null {
   if (keys.length === 0) return null;
   if (t <= keys[0]!.time) return { i: 0, j: 0, u: 0 };
   const last = keys.length - 1;
@@ -179,7 +246,7 @@ function segment<K extends { time: number; ease: TimelineEase }>(keys: readonly 
   const a = keys[i]!;
   const b = keys[i + 1]!;
   const raw = b.time > a.time ? (t - a.time) / (b.time - a.time) : 1;
-  const u = a.ease === "step" ? 0 : a.ease === "smooth" ? raw * raw * (3 - 2 * raw) : raw;
+  const u = a.ease === "step" ? 0 : a.ease === "smooth" ? raw * raw * (3 - 2 * raw) : a.ease === "curve" ? easeCurve(a.curve ?? DEFAULT_EASE_CURVE, raw) : raw;
   return { i, j: i + 1, u };
 }
 
@@ -226,6 +293,26 @@ export function sampleObjects(timeline: SceneTimeline, t: number): Map<string, {
     });
   }
   return out;
+}
+
+/** Every value track's value at `t` (name → value; the first track of a name wins). */
+export function sampleValues(timeline: SceneTimeline, t: number): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const track of timeline.tracks) {
+    if (track.kind !== "value" || track.keys.length === 0 || out.has(track.name)) continue;
+    const s = segment(track.keys, t)!;
+    const a = track.keys[s.i]!.value;
+    const b = track.keys[s.j]!.value;
+    out.set(track.name, a + (b - a) * s.u);
+  }
+  return out;
+}
+
+/** Every value track name across a scene's timelines, sorted (what the cart's value slots refer to). */
+export function timelineValueNames(timelines: readonly SceneTimeline[]): string[] {
+  const names = new Set<string>();
+  for (const t of timelines) for (const track of t.tracks) if (track.kind === "value") names.add(track.name);
+  return [...names].sort();
 }
 
 /**

@@ -374,6 +374,7 @@ export {
   type ScriptVariable,
   type ScriptWire,
 } from "./model/scriptGraph";
+export { addMeshClip, freeClipName, renameMeshClip, retimeClip, reverseClip, setMeshClip, trimClip } from "./model/clipEdit";
 export {
   ACTION_CONSOLE_BUTTONS,
   ACTION_PAD_BUTTONS,
@@ -419,12 +420,18 @@ export {
   readTimelines,
   sampleCamera,
   sampleObjects,
+  sampleValues,
+  timelineValueNames,
+  easeCurve,
+  DEFAULT_EASE_CURVE,
   type AnimationCue,
   type CameraKey,
+  type EaseCurve,
   type SceneTimeline,
   type TimelineEase,
   type TimelineTrack,
   type TransformKey,
+  type ValueKey,
 } from "./model/timeline";
 export {
   MAX_CLIPS,

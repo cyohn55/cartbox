@@ -8,7 +8,7 @@
  * cartbox.tagged and cartbox.prop.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
   DEFAULT_PHYSICS_SPEC,
@@ -53,6 +53,7 @@ import {
   setPrefabPool,
   unlinkPrefab,
 } from "@/lib/meshPrefabs";
+import { addMeshClip, renameMeshClip, retimeClip, reverseClip, setMeshClip, trimClip } from "@cartbox/editor";
 import { clearEntryLods, generateEntryLods, lodSummary } from "@/lib/meshLods";
 import styles from "./editor.module.css";
 import { RailGroup, RailHint, RangeControl } from "./railControls";
@@ -548,6 +549,7 @@ export function AnimationPanel({
   onPlay,
   ragdoll = false,
   onRagdoll,
+  onEdit,
 }: {
   mesh: MeshAsset;
   name: string;
@@ -556,6 +558,8 @@ export function AnimationPanel({
   /** Whether the preview shows the skeleton dropped as a ragdoll (H9). */
   ragdoll?: boolean;
   onRagdoll?: (on: boolean) => void;
+  /** Edit the clips (EP17): the mesh with its clips changed. */
+  onEdit?: (mesh: MeshAsset) => void;
 }) {
   const clips = mesh.clips ?? [];
   return (
@@ -576,6 +580,7 @@ export function AnimationPanel({
           </button>
         ))}
       </div>
+      {onEdit && clips.length > 0 && <ClipEditor mesh={mesh} clip={playing ?? 0} onEdit={onEdit} />}
       {onRagdoll && (
         <button type="button" className={styles.toolBtn} style={{ marginTop: 6 }} aria-pressed={ragdoll} onClick={() => onRagdoll(!ragdoll)}>
           {ragdoll ? "↑ Stand up" : "↓ Drop as ragdoll"}
@@ -594,6 +599,61 @@ export function AnimationPanel({
         {`When it dies: cartbox.ragdoll(${JSON.stringify(name)}, ix, iy, iz) makes it go limp and tumble, shoved by (ix, iy, iz); cartbox.unragdoll(${JSON.stringify(name)}) stands it back up. The body is simulated on each player's machine, so it never affects online play.`}
       </RailHint>
     </RailGroup>
+  );
+}
+
+/**
+ * Editing a clip (EP17): the playing clip (or the first) — rename it, trim a
+ * span of it into a new clip, change its speed, make a reversed copy,
+ * duplicate or delete it.
+ */
+function ClipEditor({ mesh, clip: index, onEdit }: { mesh: MeshAsset; clip: number; onEdit: (mesh: MeshAsset) => void }) {
+  const clip = mesh.clips?.[index];
+  const [from, setFrom] = useState(0);
+  const [to, setTo] = useState(clip?.duration ?? 1);
+  const [speed, setSpeed] = useState(1);
+  useEffect(() => {
+    setFrom(0);
+    setTo(clip?.duration ?? 1);
+    setSpeed(1);
+  }, [clip]);
+  if (!clip) return null;
+  const num = (label: string, value: number, set: (v: number) => void, step = 0.05) => (
+    <input type="number" aria-label={label} step={step} value={Math.round(value * 1000) / 1000} onChange={(e) => Number.isFinite(Number(e.target.value)) && set(Number(e.target.value))} style={{ width: 58, fontSize: 12 }} />
+  );
+  return (
+    <details style={{ marginTop: 6, fontSize: 12 }}>
+      <summary>Edit “{clip.name}”</summary>
+      <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
+        <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          Name
+          <input aria-label="Clip name" defaultValue={clip.name} key={clip.name} onBlur={(e) => onEdit(renameMeshClip(mesh, index, e.target.value))} style={{ flex: 1, minWidth: 0 }} />
+        </label>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+          From {num("Trim from", from, setFrom)} to {num("Trim to", to, setTo)} s
+          <button type="button" className={styles.toolBtn} onClick={() => onEdit(addMeshClip(mesh, trimClip(clip, from, to, `${clip.name} cut`)))}>
+            Trim into a new clip
+          </button>
+        </div>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+          Speed ×{num("Clip speed", speed, setSpeed, 0.1)}
+          <button type="button" className={styles.toolBtn} disabled={speed === 1} onClick={() => onEdit(setMeshClip(mesh, index, retimeClip(clip, speed)))}>
+            Apply speed
+          </button>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <button type="button" className={styles.toolBtn} onClick={() => onEdit(addMeshClip(mesh, reverseClip(clip, `${clip.name} reversed`)))}>
+            Reversed copy
+          </button>
+          <button type="button" className={styles.toolBtn} onClick={() => onEdit(addMeshClip(mesh, { ...clip, name: `${clip.name} copy` }))}>
+            Duplicate
+          </button>
+          <button type="button" className={styles.toolBtn} onClick={() => onEdit(setMeshClip(mesh, index, null))}>
+            Delete
+          </button>
+        </div>
+      </div>
+    </details>
   );
 }
 

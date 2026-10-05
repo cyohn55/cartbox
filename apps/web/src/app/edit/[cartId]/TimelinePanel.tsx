@@ -6,14 +6,22 @@
  * Scene view), key the camera from the current Scene view, key objects'
  * transforms, cue animation clips / states, and name events for the cart. The
  * cart plays it with cartbox.playtimeline (or it autoplays).
+ *
+ * EP17 adds value tracks — a named number keyed over time, any property the
+ * cart animates (cartbox.timelinevalue; `bus:<name>` sets a mixer bus) — and
+ * per-key easing curves edited by dragging their handles.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  DEFAULT_EASE_CURVE,
   TIMELINE_EASES,
   TIMELINE_LIMITS,
   composeModelMatrix,
+  sampleValues,
+  type EaseCurve,
+  type ValueKey,
   newTimeline,
   sampleCamera,
   sampleObjects,
@@ -27,6 +35,7 @@ import {
 
 import { readMeshEntry, setMeshTimelines, type MeshSidecar } from "@/lib/meshSidecar";
 import styles from "./editor.module.css";
+import { CurveEditor } from "./CurveEditor";
 import { RailGroup, RailHint } from "./railControls";
 import type { ViewpointKey } from "./SceneViewport";
 
@@ -40,6 +49,36 @@ type CameraTrack = Extract<TimelineTrack, { kind: "camera" }>;
 type ObjectTrack = Extract<TimelineTrack, { kind: "object" }>;
 type AnimTrack = Extract<TimelineTrack, { kind: "animation" }>;
 type EventTrack = Extract<TimelineTrack, { kind: "events" }>;
+type ValueTrack = Extract<TimelineTrack, { kind: "value" }>;
+
+/** A key with a new ease: a curve key gets handles (its old ones, else the default); others drop them. */
+function withEase<K extends { ease: TimelineEase; curve?: EaseCurve }>(key: K, ease: TimelineEase): K {
+  const { curve, ...rest } = key;
+  return (ease === "curve" ? { ...rest, ease, curve: curve ?? DEFAULT_EASE_CURVE } : { ...rest, ease }) as K;
+}
+
+/** A small plot of a value track over the timeline, with its keys and the playhead. */
+function ValuePlot({ track, duration, time }: { track: ValueTrack; duration: number; time: number }) {
+  const W = 220;
+  const H = 60;
+  const probe: SceneTimeline = { name: "", duration, loop: false, autoplay: false, hold: false, tracks: [track] };
+  const samples = Array.from({ length: 61 }, (_, i) => (i / 60) * duration).map((t) => sampleValues(probe, t).get(track.name) ?? 0);
+  const lo = Math.min(...samples, ...track.keys.map((k) => k.value));
+  const hi = Math.max(...samples, ...track.keys.map((k) => k.value));
+  const span = hi - lo || 1;
+  const y = (v: number) => H - 4 - ((v - lo) / span) * (H - 8);
+  const x = (t: number) => (duration > 0 ? (t / duration) * W : 0);
+  const d = samples.map((v, i) => `${i === 0 ? "M" : "L"}${((i / 60) * W).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  return (
+    <svg width={W} height={H} role="img" aria-label={`${track.name} over time`} style={{ background: "rgba(0,0,0,0.3)", borderRadius: 6 }}>
+      <path d={d} fill="none" stroke="#ffd84a" strokeWidth={1.5} />
+      {track.keys.map((k, i) => (
+        <circle key={i} cx={x(k.time)} cy={y(k.value)} r={3} fill="#7db8fc" />
+      ))}
+      <line x1={x(time)} x2={x(time)} y1={0} y2={H} stroke="rgba(255,255,255,0.4)" />
+    </svg>
+  );
+}
 
 export interface TimelinePreview {
   readonly camera: ViewpointKey | null;
@@ -285,13 +324,18 @@ export function TimelinePanel({
         Key the Scene view at {fmt(time)} s
       </button>
       {(camTrack?.keys ?? []).map((k, i) => (
-        <div key={i} style={row}>
+        <div key={i} style={{ ...row, flexWrap: "wrap" }}>
           <Num label="Camera key time" value={k.time} onChange={(v) => replaceTrack(camTrack!, { kind: "camera", keys: camTrack!.keys.map((q, j) => (j === i ? { ...q, time: v } : q)) })} />
           <span style={{ opacity: 0.75, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }} title={`eye ${k.eye.map(fmt).join(", ")} → ${k.target.map(fmt).join(", ")}`}>
             {k.eye.map(fmt).join(",")}
           </span>
-          <EaseSelect value={k.ease} onChange={(ease) => replaceTrack(camTrack!, { kind: "camera", keys: camTrack!.keys.map((q, j) => (j === i ? { ...q, ease } : q)) })} />
+          <EaseSelect value={k.ease} onChange={(ease) => replaceTrack(camTrack!, { kind: "camera", keys: camTrack!.keys.map((q, j) => (j === i ? withEase(q, ease) : q)) })} />
           <Remove label="Remove camera key" onClick={() => replaceTrack(camTrack!, { kind: "camera", keys: camTrack!.keys.filter((_, j) => j !== i) })} />
+          {k.ease === "curve" && (
+            <div style={{ flexBasis: "100%" }}>
+              <CurveEditor curve={k.curve ?? DEFAULT_EASE_CURVE} onChange={(curve) => replaceTrack(camTrack!, { kind: "camera", keys: camTrack!.keys.map((q, j) => (j === i ? { ...q, curve } : q)) })} />
+            </div>
+          )}
         </div>
       ))}
       {!view && <RailHint>Switch to the Scene view to key the camera from it.</RailHint>}
@@ -320,9 +364,10 @@ export function TimelinePanel({
                 <div key={i} style={{ display: "grid", gap: 3 }}>
                   <div style={row}>
                     <Num label="Object key time" value={k.time} onChange={(v) => replaceTrack(track, { ...track, keys: track.keys.map((q, j) => (j === i ? { ...q, time: v } : q)) })} />
-                    <EaseSelect value={k.ease} onChange={(ease) => replaceTrack(track, { ...track, keys: track.keys.map((q, j) => (j === i ? { ...q, ease } : q)) })} />
+                    <EaseSelect value={k.ease} onChange={(ease) => replaceTrack(track, { ...track, keys: track.keys.map((q, j) => (j === i ? withEase(q, ease) : q)) })} />
                     <Remove label="Remove object key" onClick={() => replaceTrack(track, { ...track, keys: track.keys.filter((_, j) => j !== i) })} />
                   </div>
+                  {k.ease === "curve" && <CurveEditor curve={k.curve ?? DEFAULT_EASE_CURVE} onChange={(curve) => replaceTrack(track, { ...track, keys: track.keys.map((q, j) => (j === i ? { ...q, curve } : q)) })} />}
                   <div style={row}>
                     <span style={{ width: 24, flex: "none" }}>pos</span>
                     {([0, 1, 2] as const).map((c) => (
@@ -432,6 +477,68 @@ export function TimelinePanel({
           </select>
         </>
       )}
+
+      <div style={sub}>Values</div>
+      {tracks
+        .filter((t): t is ValueTrack => t.kind === "value")
+        .map((track, n) => {
+          const now = sampleValues({ ...tl, tracks: [track] }, time).get(track.name);
+          const setKeys = (keys: ValueKey[]) => replaceTrack(track, { ...track, keys: [...keys].sort((a, b) => a.time - b.time) });
+          return (
+            <div key={`${track.name}-${n}`} style={card}>
+              <div style={row}>
+                <input
+                  aria-label="Value track name"
+                  defaultValue={track.name}
+                  key={track.name}
+                  onBlur={(e) => {
+                    const name = e.target.value.trim();
+                    if (/^[A-Za-z_][\w.:-]{0,31}$/.test(name) && !tracks.some((t) => t.kind === "value" && t.name === name)) replaceTrack(track, { ...track, name });
+                    else e.target.value = track.name;
+                  }}
+                  style={input}
+                />
+                <span style={{ flex: "none", opacity: 0.75 }}>{now === undefined ? "—" : fmt(now)}</span>
+                <Remove label={`Remove ${track.name} track`} onClick={() => setTracks(tracks.filter((t) => t !== track))} />
+              </div>
+              {track.keys.length > 0 && <ValuePlot track={track} duration={tl.duration} time={time} />}
+              {track.keys.map((k, i) => (
+                <div key={i} style={{ display: "grid", gap: 3 }}>
+                  <div style={row}>
+                    <Num label="Value key time" value={k.time} onChange={(v) => setKeys(track.keys.map((q, j) => (j === i ? { ...q, time: Math.max(0, Math.min(tl.duration, v)) } : q)))} />
+                    <Num label="Value" value={k.value} onChange={(v) => setKeys(track.keys.map((q, j) => (j === i ? { ...q, value: v } : q)))} />
+                    <EaseSelect value={k.ease} onChange={(ease) => setKeys(track.keys.map((q, j) => (j === i ? withEase(q, ease) : q)))} />
+                    <Remove label="Remove value key" onClick={() => setKeys(track.keys.filter((_, j) => j !== i))} />
+                  </div>
+                  {k.ease === "curve" && <CurveEditor curve={k.curve ?? DEFAULT_EASE_CURVE} onChange={(curve) => setKeys(track.keys.map((q, j) => (j === i ? { ...q, curve } : q)))} />}
+                </div>
+              ))}
+              <button
+                type="button"
+                className={styles.toolBtn}
+                style={{ fontSize: 12 }}
+                onClick={() => setKeys([...track.keys.filter((k) => Math.abs(k.time - time) > 1e-3), { time: Math.min(time, tl.duration), value: now ?? 0, ease: "smooth" }])}
+              >
+                + Key at {fmt(time)} s
+              </button>
+            </div>
+          );
+        })}
+      <button
+        type="button"
+        className={styles.toolBtn}
+        style={{ fontSize: 12 }}
+        disabled={tracks.length >= TIMELINE_LIMITS.tracks}
+        onClick={() => {
+          const taken = new Set(tracks.flatMap((t) => (t.kind === "value" ? [t.name] : [])));
+          let name = "value";
+          for (let k = 2; taken.has(name); k += 1) name = `value${k}`;
+          setTracks([...tracks, { kind: "value", name, keys: [] }]);
+        }}
+      >
+        + Value track
+      </button>
+      <RailHint>A value track animates one number: the cart reads it with cartbox.timelinevalue(name). Name it bus:music (any bus) to fade that mixer bus.</RailHint>
 
       <div style={sub}>Events</div>
       {(eventTrack?.events ?? []).map((ev, i) => (

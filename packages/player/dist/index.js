@@ -188,6 +188,10 @@ var SoundSystem = class _SoundSystem {
     const g = this.buses[bus];
     if (g) g.gain.value = Math.max(0, Math.min(2, volume));
   }
+  /** A bus's index by name (-1 when the scene has none of that name). */
+  busIndex(name) {
+    return this.audio.buses.findIndex((b) => b.name === name);
+  }
   /** The level a bus is at. */
   busVolume(bus) {
     return this.buses[bus]?.gain.value ?? 0;
@@ -486,6 +490,17 @@ var PHYS_MAX_JOINTS = 16;
 var PHYS_TIMELINE = 8032;
 var PHYS_TIMELINE_EVENTS = PHYS_TIMELINE + 12;
 var PHYS_MAX_TIMELINE_EVENTS = 8;
+var PHYS_TIMELINE_VALUES = 6160;
+var PHYS_MAX_TIMELINE_VALUES = 32;
+var TIMELINE_VALUE_NONE = -2147483648;
+function writeTimelineValues(block, names, values) {
+  const n = Math.min(names.length, PHYS_MAX_TIMELINE_VALUES);
+  block.setInt32(PHYS_TIMELINE_VALUES, n, true);
+  for (let i = 0; i < n; i += 1) {
+    const v = values.get(names[i]);
+    block.setInt32(PHYS_TIMELINE_VALUES + 4 + i * 4, v === void 0 ? TIMELINE_VALUE_NONE : toFix(Math.max(-2e6, Math.min(2e6, v))), true);
+  }
+}
 function writeLevelState(block, level) {
   block.setInt32(PHYS_HDR_LEVEL, level.current, true);
   block.setInt32(PHYS_HDR_LEVEL_LOADING, level.loading, true);
@@ -5495,6 +5510,8 @@ cartbox = {
     on = function() end, update = function() return nil end, draw = function() end,
   },
   effects = function() return {} end,
+  -- Timeline values (EP17): replaced when the scene's timelines have value tracks.
+  timelinevalue = function() return nil end,
   -- Save data (EP15b): replaced when the host keeps saves.
   save = function() return false, "saves are off here" end,
   load = function() return nil end,
@@ -6867,7 +6884,7 @@ var AnimationSession = class {
 };
 
 // src/anim/timelineSession.ts
-import { composeModelMatrix as composeModelMatrix2, crossedMarks, multiplyMat4, sampleCamera, sampleObjects } from "@cartbox/editor";
+import { composeModelMatrix as composeModelMatrix2, crossedMarks, multiplyMat4, sampleCamera, sampleObjects, sampleValues, timelineValueNames } from "@cartbox/editor";
 function timelineEventNames(timeline) {
   const names = [];
   for (const track of timeline.tracks) {
@@ -6955,6 +6972,15 @@ var TimelineSession = class {
   events() {
     return this.fired;
   }
+  /** Every value track name in the scene's timelines (the cart's value slots). */
+  valueNames() {
+    return timelineValueNames(this.timelines);
+  }
+  /** The playing (or held) timeline's values now (name → value); empty when none plays. */
+  values() {
+    const c = this.current;
+    return c ? sampleValues(this.timelines[c.index], c.time) : /* @__PURE__ */ new Map();
+  }
   /** The timeline camera now (world eye, target, fov in degrees), or null. */
   camera() {
     const c = this.current;
@@ -6991,6 +7017,7 @@ var TimelineSession = class {
 };
 
 // src/physics/physicsSdk.ts
+import { timelineValueNames as timelineValueNames2 } from "@cartbox/editor";
 function sceneNeedsRuntime(scene, { physics = true } = {}) {
   return Boolean(
     scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0 || Boolean(scene.navmesh) || Boolean(scene.streaming) || (scene.effects?.length ?? 0) > 0 || (scene.decals?.length ?? 0) > 0 || (scene.debris?.length ?? 0) > 0 || (scene.audio?.sounds.length ?? 0) > 0 || (scene.components?.length ?? 0) > 0)
@@ -7379,8 +7406,17 @@ function TIMELINE_CALLS(scene) {
   if (timelines.length === 0) return "";
   const names = timelines.map((t) => luaString(t.name)).join(",");
   const events = timelines.map((t) => `{${timelineEventNames(t).map(luaString).join(",")}}`).join(",");
+  const values = timelineValueNames2(timelines).slice(0, PHYS_MAX_TIMELINE_VALUES).map((n, i) => `[${luaString(n)}]=${i}`).join(",");
   return `  local _tl = {${names}}
   local _tlev = {${events}}
+  local _tlval = {${values}}
+  cartbox.timelinevalue = function(name)
+    local i = _tlval[name]
+    if i == nil or not _live() or i >= _rd(_B + ${PHYS_TIMELINE_VALUES}) then return nil end
+    local v = _rd(_B + ${PHYS_TIMELINE_VALUES + 4} + i * 4)
+    if v == ${TIMELINE_VALUE_NONE} then return nil end
+    return v / ${PHYS_FIX}
+  end
   cartbox.playtimeline = function(name, from, speed)
     for k, n in ipairs(_tl) do
       if n == name or k - 1 == name then
@@ -7942,6 +7978,7 @@ var RuntimeChannel = class {
     else writePhysicsState(block, 0, [], []);
     writeAnimationState(block, this.animation?.state() ?? [], this.animation?.events() ?? []);
     writeTimelineState(block, this.timeline?.state() ?? { index: -1, time: 0, playing: false }, this.timeline?.events() ?? []);
+    if (this.timeline) writeTimelineValues(block, this.timeline.valueNames(), this.timeline.values());
     writeLevelState(block, this.level);
     writeAgents(block, this.crowd?.state() ?? []);
     writeJointPositions(
@@ -8159,6 +8196,10 @@ var RuntimeChannel = class {
   /** Where the cart has put objects with cartbox.place (object → world matrix). */
   placements() {
     return this.placed;
+  }
+  /** The playing timeline's value tracks now (EP17: name → value). */
+  timelineValues() {
+    return this.timeline?.values() ?? /* @__PURE__ */ new Map();
   }
   timelinePlacements() {
     return this.timeline?.placements() ?? /* @__PURE__ */ new Map();
@@ -15208,6 +15249,13 @@ var Player = class {
           if (withSound) this.sounds.play(c.sound, c.volume, c.pitch, c.at);
         } else if (c.kind === "loop") this.sounds.loop(c.slot, c.sound, c.volume, c.at);
         else this.sounds.mix(c.bus, c.volume);
+      }
+    }
+    if (this.sounds && this.runtime) {
+      for (const [name, v] of this.runtime.channel.timelineValues()) {
+        if (!name.startsWith("bus:")) continue;
+        const bus = this.sounds.busIndex(name.slice(4));
+        if (bus >= 0) this.sounds.mix(bus, v);
       }
     }
     if (this.sounds && this.meshSurface) {

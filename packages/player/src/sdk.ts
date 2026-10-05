@@ -331,6 +331,8 @@ cartbox = {
     on = function() end, update = function() return nil end, draw = function() end,
   },
   effects = function() return {} end,
+  -- Timeline values (EP17): replaced when the scene's timelines have value tracks.
+  timelinevalue = function() return nil end,
   -- Save data (EP15b): replaced when the host keeps saves.
   save = function() return false, "saves are off here" end,
   load = function() return nil end,

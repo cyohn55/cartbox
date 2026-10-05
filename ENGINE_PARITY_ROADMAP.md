@@ -692,8 +692,34 @@ preview.
 
 ## Phase E — Content and shipping
 
-- [ ] **EP17. Animation authoring.** Keyframe any property, a curve editor,
-      clip editing, blend spaces and retargeting between skeletons.
+- [x] **EP17. Animation authoring.** Keyframe any property, a curve editor
+      and clip editing.
+
+      *Done:*
+      - **Curves:** any timeline key (camera, object, value) can ease into the
+        next along its own curve. The curve is a cubic Bézier from (0,0) to
+        (1,1), as CSS's cubic-bezier, and its handles may overshoot for
+        anticipation and bounce. The curve editor drags the two handles and
+        has presets.
+      - **Value tracks** keyframe any property:
+        - a value track is a named number keyed over time;
+        - `cartbox.timelinevalue(name)` reads it (it rides a new region of the
+          runtime block), and a visual-script node reads it too;
+        - a track named `bus:<name>` sets that mixer bus's volume.
+        - The Timelines panel plots each value track over time, with its keys
+          and the playhead.
+      - **Clip editing** in the Mesh tab's Animation panel:
+        - rename;
+        - trim a span into a new clip (keys added at the cut so the motion
+          starts and stops where it was);
+        - change the speed;
+        - make a reversed copy;
+        - duplicate and delete.
+      - **Lockout:** the intro's letterbox slides in and out from a
+        "letterbox" value track, and the wind fades up on the ambience bus.
+- [ ] **EP17b. Blend spaces and retargeting.** Two-parameter blend spaces in
+      the state machine, and playing one skeleton's clips on another by joint
+      names.
 - [ ] **EP18. Standalone export.** Export a game as a self-contained HTML
       bundle (a zip for itch.io), and as an installable app that plays
       offline.

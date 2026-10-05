@@ -450,6 +450,12 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
         doc: "The playing timeline's events that passed on the last tick — cue a line of dialogue, a sound, or the game starting.",
         snippet: 'for _, e in ipairs(cartbox.timelineevents()) do\n  if e == "done" then state = "play" end\nend',
       },
+      {
+        name: "cartbox.timelinevalue",
+        signature: "cartbox.timelinevalue(name) -> number or nil",
+        doc: "A playing timeline's value track now (keyed in the Mesh tab's Timelines) — any number you animate: a fade, a letterbox, a colour. nil when none plays it.",
+        snippet: 'local fade = cartbox.timelinevalue("fade") or 0',
+      },
     ],
   },
   {

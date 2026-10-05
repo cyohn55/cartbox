@@ -733,6 +733,14 @@ export class Player {
         else this.sounds.mix(c.bus, c.volume);
       }
     }
+    // A playing timeline's `bus:<name>` value tracks set those mixer buses (EP17).
+    if (this.sounds && this.runtime) {
+      for (const [name, v] of this.runtime.channel.timelineValues()) {
+        if (!name.startsWith("bus:")) continue;
+        const bus = this.sounds.busIndex(name.slice(4));
+        if (bus >= 0) this.sounds.mix(bus, v);
+      }
+    }
     // The scene's sound hears from the camera; emitters on objects follow them.
     if (this.sounds && this.meshSurface) {
       const pose = this.meshSurface.listenerPose();

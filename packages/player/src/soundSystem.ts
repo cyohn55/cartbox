@@ -181,6 +181,11 @@ export class SoundSystem {
     if (g) g.gain.value = Math.max(0, Math.min(2, volume));
   }
 
+  /** A bus's index by name (-1 when the scene has none of that name). */
+  busIndex(name: string): number {
+    return this.audio.buses.findIndex((b) => b.name === name);
+  }
+
   /** The level a bus is at. */
   busVolume(bus: number): number {
     return this.buses[bus]?.gain.value ?? 0;
