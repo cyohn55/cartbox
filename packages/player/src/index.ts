@@ -331,6 +331,7 @@ export type {
 // code needed. Phase 2 of the mesh asset feature.
 export { MeshOverlaySurface, parseMeshScene, buildOrbitCamera, orbitPitchAboveTerrain, streamGroups, sceneObjectsSdkLua } from "./mesh/index.js";
 export { readSidecarUi, uiSdkLua } from "./uiSdk.js";
+export { componentsSdkLua } from "./componentsSdk.js";
 export { SoundSystem, browserSpeaker, LOOP_SLOTS, MAX_VOICES, type SoundContext, type Speaker } from "./soundSystem.js";
 export type { MeshScene, MeshInstance, SceneBounds, MeshSceneCamera } from "./mesh/index.js";
 

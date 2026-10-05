@@ -4451,13 +4451,134 @@ cartbox = {
     on = function() end, update = function() return nil end, draw = function() end,
   },
   effects = function() return {} end,
+  -- Placing objects (EP14): live once the scene has the runtime.
+  place = function() end,
+  -- Components (EP14): replaced when any object has one.
+  component = function() return nil end,
 }`;
 function injectSdk(bytes) {
   return prependLuaCode(bytes, CARTBOX_SDK_LUA);
 }
 
+// src/componentsSdk.ts
+import { componentFields, componentValues } from "@cartbox/editor";
+function luaQuote(text) {
+  let out = '"';
+  for (const ch of text) {
+    const code = ch.codePointAt(0);
+    if (ch === '"') out += '\\"';
+    else if (ch === "\\") out += "\\\\";
+    else if (ch === "\n") out += "\\n";
+    else if (code < 32 || code === 127) out += `\\${code}`;
+    else out += ch;
+  }
+  return out + '"';
+}
+var luaValue = (v) => typeof v === "string" ? luaQuote(v) : typeof v === "boolean" ? String(v) : Number.isFinite(v) ? String(v) : "0";
+function componentsSdkLua(scene) {
+  const defs = scene?.components ?? [];
+  if (!scene || defs.length === 0) return null;
+  const used = scene.instances.some((i) => (i.components?.length ?? 0) > 0);
+  if (!used) return null;
+  const byName = new Map(defs.map((d) => [d.name, d]));
+  const copies = [];
+  scene.instances.forEach((inst, i) => {
+    for (const a of inst.components ?? []) {
+      const def = byName.get(a.name);
+      if (!def) continue;
+      const values = componentValues(def, a);
+      const objectFields = componentFields(def.code).filter((f2) => f2.type === "object").map((f2) => luaQuote(f2.name));
+      const fields = Object.entries(values).map(([k, v]) => `[${luaQuote(k)}]=${luaValue(v)}`);
+      const root = inst.pooled ? inst.pooled.root : -1;
+      const at = [12, 13, 14].map((k) => +(inst.model[k] ?? 0).toFixed(4));
+      copies.push(`{obj=${i},def=${luaQuote(def.name)},root=${root},o={${at.join(",")}},f={${fields.join(",")}},objf={${objectFields.join(",")}}}`);
+    }
+  });
+  const prelude = `do
+local SRC = {${defs.map((d) => `[${luaQuote(d.name)}]=${luaQuote(d.code)}`).join(",\n")}}
+local LIST = {${copies.join(",\n")}}
+local built, C, by = {}, {}, {}
+local function behaviour(name)
+  if built[name] == nil then
+    local env = setmetatable({}, {__index = _G})
+    local chunk, err = load(SRC[name], "=" .. name, "t", env)
+    if chunk then
+      local ok, e = pcall(chunk)
+      if ok then built[name] = env else trace("component " .. name .. ": " .. tostring(e), 2); built[name] = false end
+    else trace("component " .. name .. ": " .. tostring(err), 2); built[name] = false end
+  end
+  return built[name]
+end
+for _, e in ipairs(LIST) do
+  local b = behaviour(e.def)
+  if b then
+    local self = {obj = e.obj, origin = {x = e.o[1], y = e.o[2], z = e.o[3]}}
+    for k, v in pairs(e.f) do self[k] = v end
+    local c = {b = b, self = self, name = e.def, root = e.root, objf = e.objf, started = false}
+    C[#C + 1] = c
+    by[e.obj] = by[e.obj] or {}
+    table.insert(by[e.obj], c)
+  end
+end
+-- A callback that errors is reported once and that copy stops (the rest run on).
+local function call(c, fn, ...)
+  local f = rawget(c.b, fn)
+  if f and not c.dead then
+    local ok, e = pcall(f, c.self, ...)
+    if not ok then c.dead = true; trace("component " .. c.name .. " (" .. fn .. "): " .. tostring(e), 2) end
+  end
+end
+cartbox.component = function(obj, name)
+  if type(obj) == "string" and cartbox.find then obj = cartbox.find(obj) end
+  for _, c in ipairs(by[obj] or {}) do if c.name == name then return c.self end end
+  return nil
+end
+function _cbx_components_late()
+  for _, c in ipairs(C) do
+    if c.started and (c.root < 0 or (cartbox.alive and cartbox.alive(c.root))) then call(c, "late", 1 / 60) end
+  end
+end
+function _cbx_components_tick()
+  for _, c in ipairs(C) do
+    if c.root < 0 or (cartbox.alive and cartbox.alive(c.root)) then
+      if not c.started then
+        c.started = true
+        -- An object field names an object: look it up once it exists.
+        for _, k in ipairs(c.objf) do
+          local v = c.self[k]
+          if type(v) == "string" then c.self[k] = (v ~= "" and cartbox.find) and cartbox.find(v) or nil end
+        end
+        call(c, "start")
+      end
+      call(c, "update", 1 / 60)
+    elseif c.started then c.started = false end
+  end
+  if cartbox.contacts then
+    for _, e in ipairs(cartbox.contacts()) do
+      for side = 1, 2 do
+        local me, other = e.a, e.b
+        if side == 2 then me, other = e.b, e.a end
+        for _, c in ipairs(by[me] or {}) do
+          if c.started then call(c, e.trigger and "trigger" or "collision", other, e.started) end
+        end
+      end
+    end
+  end
+end
+end`;
+  const postlude = `do
+local _cart_tic = TIC
+function TIC()
+  _cbx_components_tick()
+  if _cart_tic then _cart_tic() end
+  _cbx_components_late()
+end
+end`;
+  return { prelude, postlude };
+}
+
 // src/mesh/sceneObjectsSdk.ts
-function luaQuote(value) {
+function luaQuote2(value) {
   let out = '"';
   for (const ch of value) {
     const code = ch.codePointAt(0);
@@ -4468,8 +4589,8 @@ function luaQuote(value) {
   }
   return `${out}"`;
 }
-function luaValue(value) {
-  if (typeof value === "string") return luaQuote(value);
+function luaValue2(value) {
+  if (typeof value === "string") return luaQuote2(value);
   if (typeof value === "boolean") return value ? "true" : "false";
   return Number.isFinite(value) ? String(value) : "0";
 }
@@ -4480,12 +4601,12 @@ function sceneObjectsSdkLua(scene) {
   const tags = [];
   const props = [];
   scene.instances.forEach((instance, i) => {
-    names.push(`[${i}]=${luaQuote(instance.name ?? "")}`);
+    names.push(`[${i}]=${luaQuote2(instance.name ?? "")}`);
     if ((instance.parent ?? -1) >= 0) parents.push(`[${i}]=${instance.parent}`);
     const t = instance.tags ?? [];
-    if (t.length > 0) tags.push(`[${i}]={${t.map((tag) => `[${luaQuote(tag)}]=true`).join(",")}}`);
+    if (t.length > 0) tags.push(`[${i}]={${t.map((tag) => `[${luaQuote2(tag)}]=true`).join(",")}}`);
     const entries = Object.entries(instance.props ?? {});
-    if (entries.length > 0) props.push(`[${i}]={${entries.map(([k, v]) => `[${luaQuote(k)}]=${luaValue(v)}`).join(",")}}`);
+    if (entries.length > 0) props.push(`[${i}]={${entries.map(([k, v]) => `[${luaQuote2(k)}]=${luaValue2(v)}`).join(",")}}`);
   });
   return `do
   cartbox = cartbox or {}
@@ -4564,7 +4685,9 @@ import {
   parseDecalDefs,
   parseDecalMarks,
   parseRagdollColliders,
-  parseDebrisDefs
+  parseDebrisDefs,
+  parseComponentDefs,
+  parseAttached
 } from "@cartbox/editor";
 var DEFAULT_PREFAB_POOL = 8;
 var MAX_PREFAB_POOL = 32;
@@ -4627,6 +4750,8 @@ function parseMeshScene(raw) {
   const entries = parsed.meshes;
   if (!Array.isArray(entries)) return null;
   const library = readMeshLibrary(parsed.library);
+  const componentDefs = parseComponentDefs(parsed.components);
+  const componentNames = new Set(componentDefs.map((d) => d.name));
   const cache = /* @__PURE__ */ new Map();
   const load = (serialized) => {
     if (!cache.has(serialized)) {
@@ -4658,6 +4783,7 @@ function parseMeshScene(raw) {
     const frames = resolveMeshFrames(record.frames, library).map(load).filter((frame) => frame !== null);
     const t = identity2 ? { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } : readTransform(record.transform);
     const lod = lodOf(mesh, record.lods);
+    const components = componentNames.size > 0 ? parseAttached(record.components, componentNames) : [];
     return {
       mesh,
       local: composeModelMatrix(t.position, t.rotation, t.scale),
@@ -4671,6 +4797,7 @@ function parseMeshScene(raw) {
       ...readAnimatorSpec(record.animator) ? { animator: readAnimatorSpec(record.animator) } : {},
       ...typeof record.level === "string" && record.level ? { levelId: record.level } : {},
       ...record.alwaysLoaded === true ? { alwaysLoaded: true } : {},
+      ...components.length > 0 ? { components } : {},
       parentId
     };
   };
@@ -4832,6 +4959,7 @@ function parseMeshScene(raw) {
     ...ragdollColliders.length > 0 ? { ragdollColliders } : {},
     ...debris.length > 0 ? { debris, debrisMeshes, ...debrisLods.some(Boolean) ? { debrisLods } : {} } : {},
     ...audio ? { audio } : {},
+    ...componentDefs.length > 0 ? { components: componentDefs } : {},
     lighting,
     ...pools.length > 0 ? { pools } : {},
     ...physicsWorld ? { physicsWorld } : {},
@@ -5052,6 +5180,8 @@ var PHYS_OP_SHIELD = 30;
 var PHYS_OP_SOUND = 31;
 var PHYS_OP_SOUND_LOOP = 32;
 var PHYS_OP_MIX = 33;
+var PHYS_OP_PLACE = 34;
+var PHYS_OP_UNPLACE = 35;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -6030,7 +6160,7 @@ var TimelineSession = class {
 // src/physics/physicsSdk.ts
 function sceneNeedsRuntime(scene, { physics = true } = {}) {
   return Boolean(
-    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0 || Boolean(scene.navmesh) || Boolean(scene.streaming) || (scene.effects?.length ?? 0) > 0 || (scene.decals?.length ?? 0) > 0 || (scene.debris?.length ?? 0) > 0 || (scene.audio?.sounds.length ?? 0) > 0)
+    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0 || Boolean(scene.navmesh) || Boolean(scene.streaming) || (scene.effects?.length ?? 0) > 0 || (scene.decals?.length ?? 0) > 0 || (scene.debris?.length ?? 0) > 0 || (scene.audio?.sounds.length ?? 0) > 0 || (scene.components?.length ?? 0) > 0)
   );
 }
 var luaString = (s) => JSON.stringify(s);
@@ -6078,7 +6208,7 @@ function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}${SOUND_CALLS(scene)}${SHIELD_CALLS()}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}${SOUND_CALLS(scene)}${SHIELD_CALLS()}${PLACE_CALLS()}end`;
 }
 function PHYSICS_CALLS() {
   return `  cartbox.physics = function() return _live() end
@@ -6292,6 +6422,16 @@ function SOUND_CALLS(scene) {
     local out = {}
     for k, n in ipairs(_sndn) do out[k] = n end
     return out
+  end
+`;
+}
+function PLACE_CALLS() {
+  return `  cartbox.place = function(o, x, y, z, yaw, pitch, roll, scale)
+    local i = _obj(o)
+    if i == nil or i > 65535 then return end
+    if x == nil then return _cmd(${PHYS_OP_UNPLACE}, i) end
+    local s = math.max(0, math.min(32767, math.floor((scale or 1) * 256 + 0.5)))
+    return _cmd(${PHYS_OP_PLACE}, i | (s << 16), x, y or 0, z or 0, yaw or 0, pitch or 0, roll or 0)
   end
 `;
 }
@@ -6917,6 +7057,8 @@ var RuntimeChannel = class {
     this.physics = physics;
     /** Spawned copies: root object index → the root's world matrix. */
     this.active = /* @__PURE__ */ new Map();
+    /** Objects the cart put somewhere with cartbox.place (object → world matrix). */
+    this.placed = /* @__PURE__ */ new Map();
     /** Each reserve root's objects (itself first, then its descendants). */
     this.copyObjects = /* @__PURE__ */ new Map();
     /** Standing IK / look-at requests: object → joint → request (IK before look-at). */
@@ -7011,6 +7153,12 @@ var RuntimeChannel = class {
         const v = cmd.v;
         this.sounds.push({ kind: "loop", slot: cmd.a & 255, sound: (cmd.a >>> 8 & 65535) - 1, volume: v[0], at: v[4] >= 0.5 ? [v[1], v[2], v[3]] : null });
       } else if (cmd.op === PHYS_OP_MIX) this.sounds.push({ kind: "mix", bus: cmd.a, volume: cmd.v[0] });
+      else if (cmd.op === PHYS_OP_PLACE) {
+        const object = cmd.a & 65535;
+        const s = (cmd.a >>> 16 & 32767) / 256;
+        const [x, y, z, yaw, pitch, roll] = cmd.v;
+        if (object < this.scene.instances.length) this.placed.set(object, composeModelMatrix3([x, y, z], [pitch * DEG, yaw * DEG, roll * DEG], [s, s, s]));
+      } else if (cmd.op === PHYS_OP_UNPLACE) this.placed.delete(cmd.a);
       else if (cmd.op === PHYS_OP_DEBRIS) {
         if (this.debris.length < MAX_BURSTS_QUEUED)
           this.debris.push({ debris: cmd.a & 255, at: [cmd.v[0], cmd.v[1], cmd.v[2]], velocity: [cmd.v[3], cmd.v[4], cmd.v[5]], scale: (cmd.a >>> 8 & 65535) / 16 });
@@ -7175,6 +7323,10 @@ var RuntimeChannel = class {
     };
   }
   /** World matrices of the objects a timeline is placing (object index → matrix). */
+  /** Where the cart has put objects with cartbox.place (object → world matrix). */
+  placements() {
+    return this.placed;
+  }
   timelinePlacements() {
     return this.timeline?.placements() ?? /* @__PURE__ */ new Map();
   }
@@ -14419,6 +14571,8 @@ var Player = class {
         prepared = prependLuaCode(prepared, debugSdkLua(debugBlockAddress(layout), { debugger: this.debugState !== null }));
         this.debugOffset = debugBlockAddress(layout) - layout.pmemAddress;
       }
+      const components = componentsSdkLua(this.options.mesh);
+      if (components) prepared = appendLuaCode(prependLuaCode(prepared, components.prelude), components.postlude);
       const collisionLua = collisionSdkLua(this.options.collision);
       if (collisionLua) prepared = prependLuaCode(prepared, collisionLua);
       const flagsLua = flagsSdkLua(this.options.flags);
@@ -15016,8 +15170,9 @@ var Player = class {
           const cutscene = this.runtime.channel.timelineCamera(meshCamera?.hud ?? false);
           if (cutscene) this.meshSurface.setCameraOverride(cutscene);
           const scripted = this.runtime.channel.timelinePlacements();
+          const put = this.runtime.channel.placements();
           const bodies = this.runtime.physics?.overrides();
-          this.meshSurface.setBodyOverrides(scripted.size > 0 ? new Map([...bodies ?? [], ...scripted]) : bodies ?? NO_OVERRIDES);
+          this.meshSurface.setBodyOverrides(scripted.size > 0 || put.size > 0 ? new Map([...bodies ?? [], ...put, ...scripted]) : bodies ?? NO_OVERRIDES);
           this.meshSurface.setSpawned(this.runtime.channel.spawned());
           this.meshSurface.setShields(this.runtime.channel.shields());
           const placed = this.runtime.channel.needsWorld() ? this.meshSurface.currentPlacements() : null;
@@ -15989,6 +16144,7 @@ export {
   codeLineOffset,
   collisionSdkLua,
   compileAnimator,
+  componentsSdkLua,
   composeParallax,
   composeWorldMatrix,
   compositeOverBackdrop,

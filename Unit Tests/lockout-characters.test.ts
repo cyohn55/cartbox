@@ -63,13 +63,14 @@ describe("the Lockout soldiers and weapons", () => {
     meshes: { id: string; mesh: string; transform: { scale: number[] } }[];
   };
 
-  it("orders instances as map, 7 bots, then one viewmodel per weapon", () => {
+  it("orders instances as map, 7 bots, one viewmodel per weapon, then the pad pickups", () => {
     const ids = sidecar.meshes.map((m) => m.id);
-    expect(ids).toHaveLength(14);
+    expect(ids).toHaveLength(19);
     expect(ids[0]).toBe("lockout-map");
     expect(ids.slice(1, 8)).toEqual([1, 2, 3, 4, 5, 6, 7].map((i) => `bot-${i}`));
-    expect(ids.slice(8)).toEqual(LOCKOUT_VIEWMODELS.map((w) => `viewmodel-${w}`));
-    expect(parseMeshScene(lockoutMeshSidecar())!.instances.findIndex((i) => i.terrain)).toBe(14); // …and the mountains last
+    expect(ids.slice(8, 14)).toEqual(LOCKOUT_VIEWMODELS.map((w) => `viewmodel-${w}`));
+    expect(ids.slice(14)).toEqual([1, 2, 3, 4, 5].map((i) => `pickup-${i}`));
+    expect(parseMeshScene(lockoutMeshSidecar())!.instances.findIndex((i) => i.terrain)).toBe(19); // …and the mountains last
   });
 
   it("shares one tintable, skinned soldier across all 7 bots, stored once, each with the state machine", () => {
@@ -144,7 +145,7 @@ describe("the Lockout soldiers and weapons", () => {
   });
 
   it("rests every viewmodel at 1/1000 scale and poses the one in hand at the matching index", () => {
-    for (const m of sidecar.meshes.slice(8)) expect(m.transform.scale).toEqual([0.001, 0.001, 0.001]);
+    for (const m of sidecar.meshes.slice(8, 14)) expect(m.transform.scale).toEqual([0.001, 0.001, 0.001]);
     // The cart's index table must agree with the sidecar order (8..13).
     LOCKOUT_VIEWMODELS.forEach((w, k) => expect(LOCKOUT_CODE).toMatch(new RegExp(`${w}=${8 + k}\\b`)));
     expect(LOCKOUT_CODE).toContain("local WS = 1000");

@@ -59,6 +59,7 @@ import { DAB_SPACING, applyTerrainTool, findTerrain, replaceTerrain, strokeDabs 
 import { findFoliage, replaceFoliage } from "@/lib/foliageEdit";
 import { INITIAL_TERRAIN_EDIT, TerrainPanel, type TerrainEditState } from "./TerrainPanel";
 import { SoundsPanel } from "./SoundsPanel";
+import { ComponentScriptsPanel, ComponentsInspector } from "./ComponentsPanel";
 import { clickSelection, copyPayload, duplicateEntries, pasteEntries, removeEntries, withSubtrees } from "@/lib/sceneSelection";
 import { placeAsset, type ContentAsset } from "@/lib/contentBrowser";
 import { ContentBrowser, type CodeAccess } from "./ContentBrowser";
@@ -832,6 +833,8 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay }: Mesh
 
             <PhysicsPanel sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
 
+            <ComponentsInspector sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
+
             <PrefabPanel sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
 
             <CodeHint entry={selectedEntry} />
@@ -888,6 +891,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay }: Mesh
         <DecalsPanel sidecar={sidecar} onChange={onSidecarChange} />
         <DebrisPanel sidecar={sidecar} onChange={onSidecarChange} />
         <SoundsPanel sidecar={sidecar} onChange={onSidecarChange} />
+        <ComponentScriptsPanel sidecar={sidecar} onChange={onSidecarChange} />
         <TimelinePanel sidecar={sidecar} onChange={onSidecarChange} view={view === "scene" ? sceneView : null} onPreview={onTimelinePreview} />
       </aside>
 
