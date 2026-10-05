@@ -1,4 +1,4 @@
-import type { DecodedTexture, EncodedImage, SceneLevel } from "@cartbox/editor";
+import type { DecodedTexture, EncodedImage, SceneLevel, UiDocument } from "@cartbox/editor";
 import type { PhysicsBackend } from "./physics/physicsSession.js";
 import type { QualityChoice, QualityLevel } from "./quality.js";
 /**
@@ -196,6 +196,8 @@ export interface PlayerOptions {
    * MeshScene with `parseMeshScene`.
    */
   mesh?: MeshScene;
+  /** UI documents (EP13) the cart drives with cartbox.ui, laid out for this console's screen. */
+  ui?: readonly UiDocument[];
   /**
    * Render a declared HD-2D {@link WorldScene}: a height-mapped 3D tile world with
    * the cart's own 2D character sprites standing in it as camera-facing billboards,

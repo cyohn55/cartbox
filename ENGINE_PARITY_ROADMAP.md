@@ -491,9 +491,50 @@ preview.
         - It costs 1.7 KB on the sidecar, which now sits just under its
           1.4 MB budget. Lockout's code passed 64 KB and now spans two code
           banks, which the cartridge already supported.
-- [ ] **EP13. UI system.** Widget layouts authored in the editor (anchors,
+- [x] **EP13. UI system.** Widget layouts authored in the editor (anchors,
       text, images, buttons, sliders, lists) with controller focus navigation,
       driven from Lua. *Lockout:* the start menu and HUD become UI documents.
+
+      *Done:*
+      - **Documents** are trees of widgets: panel, text, button, bar,
+        slider, list and image. A widget is placed by an anchor on its
+        parent, its own pivot, an offset and a size, so a layout fits any
+        console's screen. What it shows comes from bindings: `{key}` in
+        text, a bar's or slider's fill, a list's items (with per-row
+        colours), visibility and colour.
+      - **Focus:** moves between buttons, sliders and lists by position (the
+        nearest one in the direction pressed). A list moves its selection
+        and a slider its value before focus leaves them.
+      - **Runtime:** the documents are laid out for the console's screen
+        when the cart loads. The generated Lua draws them with the console's
+        own `rect`, `print` and `spr`, so they are pixel-exact in the cart's
+        frame (over the 3D scene in HUD mode).
+      - **From Lua:**
+        - `cartbox.ui.show/hide/shown` put a document up and take it down;
+        - `set/get` read and write bindings;
+        - `update()` handles the d-pad and A, returning what was pressed;
+        - `on(id, fn)` calls a function on a press;
+        - `focus/focused` and `select/selected` read and set focus and a
+          list's selection;
+        - `draw()` draws every shown document.
+        - The SDK carries no-op defaults.
+      - **Editor:** a UI tab:
+        - documents (new, rename, delete) and a widget tree (add at the top
+          or inside a panel, reorder, delete);
+        - a preview at the console's resolution in the cart's palette: click
+          to select, drag to move, arrow keys try the focus;
+        - preview values typed as `key=value`;
+        - an inspector with an anchor grid, offset, size, text, font size,
+          alignment, palette swatches and bindings.
+        - Documents are stored with the scene sidecar and handed to the
+          player by every host.
+      - **Lockout:** the HUD (shield and health bars, weapon, ammo, mode,
+        score line, kill feed, announcer, respawn notice) and the start menu
+        (game-type list and hints) are UI documents. The reticle, grenade
+        pips and motion tracker stay drawn in code. Run without its
+        documents, the menu falls back to its plain list. The sidecar budget
+        guard moves to 1.5 MB: large sidecars are offloaded to object storage
+        above 512 KB, and a save stays well inside the request limit.
 - [ ] **EP14. Components.** Reusable Lua behaviours attached to objects in the
       inspector, with fields you edit there and lifecycle callbacks (start,
       update, collision, trigger), the way Unity's components work.

@@ -59,7 +59,9 @@ import {
   readFoliage,
   serializeFoliage,
   parseSceneAudio,
+  parseUiDocuments,
   type SceneAudio,
+  type UiDocument,
   type SerializedFoliage,
   type StoredLods,
   resolveMeshRef,
@@ -194,6 +196,8 @@ export interface MeshSidecar {
   readonly foliage?: readonly SerializedFoliage[];
   /** The scene's sounds, mixer buses and emitters (see sound.ts in @cartbox/editor). */
   readonly audio?: SceneAudio;
+  /** UI documents (menus, HUDs) the cart drives with cartbox.ui (see ui.ts in @cartbox/editor). */
+  readonly ui?: readonly UiDocument[];
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -218,7 +222,7 @@ export function newMeshId(): string {
  */
 export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
   const prefabs = sidecar.prefabs ?? [];
-  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0 && (sidecar.audio?.sounds.length ?? 0) === 0) return null;
+  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0 && (sidecar.audio?.sounds.length ?? 0) === 0 && (sidecar.ui?.length ?? 0) === 0) return null;
   // Repeated meshes (and animation frames) are stored once in a shared library,
   // shared between placed entries and prefab nodes (a prefab's copies repeat its meshes).
   const nodes = prefabs.flatMap((prefab) => prefab.nodes);
@@ -251,6 +255,7 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(sidecar.debris && sidecar.debris.length > 0 ? { debris: sidecar.debris } : {}),
     ...(packedFoliage.length > 0 ? { foliage: packedFoliage } : {}),
     ...(sidecar.audio && sidecar.audio.sounds.length > 0 ? { audio: sidecar.audio } : {}),
+    ...(sidecar.ui && sidecar.ui.length > 0 ? { ui: sidecar.ui } : {}),
   });
 }
 
@@ -350,6 +355,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
   const debris = parseDebrisDefs((parsed as { debris?: unknown }).debris);
   const foliage = readFoliageLayers((parsed as { foliage?: unknown }).foliage, terrains, library, isValid);
   const audio = parseSceneAudio((parsed as { audio?: unknown }).audio);
+  const ui = parseUiDocuments((parsed as { ui?: unknown }).ui);
   const placed = linked.map((entry) => (entry.level && !levelIds.has(entry.level) ? withoutLevel(entry) : entry));
   return {
     version: MESH_SIDECAR_VERSION,
@@ -370,7 +376,16 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     ...(debris.length > 0 ? { debris } : {}),
     ...(foliage.length > 0 ? { foliage } : {}),
     ...(audio ? { audio } : {}),
+    ...(ui.length > 0 ? { ui } : {}),
   };
+}
+
+/** Replace the cart's UI documents (none removes them). */
+export function setMeshUi(sidecar: MeshSidecar, ui: readonly UiDocument[]): MeshSidecar {
+  const { ui: _drop, ...rest } = sidecar;
+  void _drop;
+  const docs = parseUiDocuments(ui);
+  return docs.length > 0 ? { ...rest, ui: docs } : rest;
 }
 
 /** Replace the scene's audio (no sounds removes it). */

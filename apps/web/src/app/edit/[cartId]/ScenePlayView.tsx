@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { mount, parseMeshScene, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
+import type { UiDocument } from "@cartbox/editor";
 
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 import { encodeMeshSidecar, type MeshSidecar } from "@/lib/meshSidecar";
@@ -40,6 +41,8 @@ export interface PlaytestConfig {
   readonly world?: WorldScene;
   /** The 3D scene as the run starts. */
   readonly mesh: MeshScene | null;
+  /** The cart's UI documents (EP13). */
+  readonly ui?: readonly UiDocument[];
 }
 
 const ORBIT_SPEED = 0.008;
@@ -91,6 +94,7 @@ export function ScenePlayView({
       collision: config.collision,
       flags: config.flags,
       mesh: config.mesh ?? undefined,
+      ...(config.ui && config.ui.length > 0 ? { ui: config.ui } : {}),
       physics: rapierPhysics(),
       ktx2: loadKtx2Decoder,
       world: config.world,

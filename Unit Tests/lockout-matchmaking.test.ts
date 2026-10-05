@@ -11,7 +11,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { lockoutCartridge } from "@cartbox/editor";
+import { lockoutCartridge, lockoutMeshSidecar } from "@cartbox/editor";
 import {
   MemoryNetHub,
   NET_WORDS,
@@ -20,14 +20,18 @@ import {
   decodeMailbox,
   decodeMeshPoses,
   injectSdk,
+  readSidecarUi,
+  uiSdkLua,
   type MailboxEvent,
 } from "@cartbox/player";
+import { prependLuaCode } from "../packages/player/src/cartseed";
 
 const ENGINE = path.resolve(__dirname, "../packages/engine/dist/xbox360/engine.js");
 const DOWN = 1 << 1, A = 1 << 4, B = 1 << 5;
 
 async function player(session: NetSession) {
-  const tic = injectSdk(lockoutCartridge());
+  // With its UI documents, as the player runs it: the title menu is one (EP13).
+  const tic = injectSdk(prependLuaCode(lockoutCartridge(), uiSdkLua(readSidecarUi(lockoutMeshSidecar()), 1280, 720)));
   const mod = await (await import(pathToFileURL(ENGINE).href)).default();
   const h = mod._cbx_create(44100);
   const ptr = mod._malloc(tic.length);

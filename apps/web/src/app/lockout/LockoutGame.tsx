@@ -19,6 +19,7 @@ import {
   NetSession,
   SwitchableTransport,
   parseMeshScene,
+  readSidecarUi,
   parsePostFxSettings,
   type MailboxEvent,
   type NetRoomStatus,
@@ -193,6 +194,7 @@ export function LockoutGame() {
           // every frame a material capture and a full-screen relight pass.
           postFx: parsePostFxSettings(LOCKOUT_FX) ?? undefined,
           mesh: parseMeshScene(lockoutMeshSidecar()) ?? undefined,
+          ui: readSidecarUi(lockoutMeshSidecar()),
           netplay: session,
           controlSettings: current.controls,
           volume: current.muted ? 0 : current.volume,

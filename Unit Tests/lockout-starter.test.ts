@@ -131,7 +131,10 @@ describe("the Lockout arena starter", () => {
     expect(scene.lighting?.fog).toEqual(LOCKOUT_LIGHTING.fog);
     // The sidecar stays small — no baked panorama inside it (the arena's light
     // map is its one large bake).
-    expect(lockoutMeshSidecar().length).toBeLessThan(1_400_000);
+    // 1.5 MB since its sounds and UI documents (EP12, EP13): a sidecar over
+    // 512 KB is offloaded to object storage anyway, and this keeps a save well
+    // inside the 4.5 MB request body limit.
+    expect(lockoutMeshSidecar().length).toBeLessThan(1_500_000);
     // Bloom on the energy trim, via the starter's post-FX stack.
     const fx = parsePostFxSettings(resolveStarter("lockout").fx)!;
     expect(fx.enabled.bloom).toBe(true);
