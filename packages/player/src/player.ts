@@ -5,6 +5,7 @@
  */
 
 import { AudioController } from "./audio.js";
+import { SoundSystem } from "./soundSystem.js";
 import { fetchCartridge } from "./cartridge.js";
 import { CanvasSurface, type DisplaySurface } from "./display.js";
 import { LitCanvasSurface } from "./lighting/LitCanvasSurface.js";
@@ -87,6 +88,8 @@ export class Player {
   private litSurface?: LitCanvasSurface;
   private sceneSurface?: SceneBackdropSurface;
   private meshSurface?: MeshOverlaySurface;
+  /** The scene's sounds (EP12), once loaded. */
+  private sounds: SoundSystem | null = null;
   private worldSurface?: WorldOverlaySurface;
   /**
    * The 3D renderer both overlays draw through — WebGPU when the device allows,
@@ -421,6 +424,19 @@ export class Player {
       }
       this.audio = new AudioController(sampleRate);
       this.audio.setVolume(this.options.volume ?? this.volume);
+      // The scene's sounds (EP12) play on the same context, through the same volume.
+      const sceneAudio = this.options.mesh?.audio;
+      if (sceneAudio) {
+        const mesh = this.options.mesh!;
+        void SoundSystem.create(this.audio.audioContext, sceneAudio, this.audio.output, (id) => mesh.instances.findIndex((i) => i.id === id))
+          .then((system) => {
+            if (this.destroyed) system.dispose();
+            else this.sounds = system;
+          })
+          .catch(() => {
+            /* sound is optional: the game plays on silent */
+          });
+      }
       if (this.options.volume !== undefined) this.volume = this.options.volume;
       this.setupReplay(bytes, seed);
 
@@ -656,6 +672,20 @@ export class Player {
       for (const b of this.runtime!.channel.takeBursts()) this.meshSurface?.burst(b.effect, b.at, b.dir, b.scale);
       for (const d of this.runtime!.channel.takeDecals()) this.meshSurface?.decal(d.decal, d.at, d.normal, d.scale);
       for (const d of this.runtime!.channel.takeDebris()) this.meshSurface?.throwDebris(d.debris, d.at, d.velocity, d.scale);
+      // Sounds the cart played (dropped when this frame is silent: stepping, or off 1× speed).
+      for (const c of this.runtime!.channel.takeSounds()) {
+        if (!this.sounds) continue;
+        if (c.kind === "play") {
+          if (withSound) this.sounds.play(c.sound, c.volume, c.pitch, c.at);
+        } else if (c.kind === "loop") this.sounds.loop(c.slot, c.sound, c.volume, c.at);
+        else this.sounds.mix(c.bus, c.volume);
+      }
+    }
+    // The scene's sound hears from the camera; emitters on objects follow them.
+    if (this.sounds && this.meshSurface) {
+      const pose = this.meshSurface.listenerPose();
+      if (pose) this.sounds.listen(pose.eye, pose.forward, pose.up);
+      this.sounds.follow(this.meshSurface.placements());
     }
     this.updateSpatialLoading();
     lap("runtime");
@@ -1069,6 +1099,7 @@ export class Player {
     this.touch?.destroy();
     this.runtime?.channel.destroy();
     this.runtime = null;
+    this.sounds?.dispose();
     this.audio?.destroy();
     this.surface?.destroy();
     // After the surfaces: they draw through it, and the decorator chain's

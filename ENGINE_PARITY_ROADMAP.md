@@ -455,10 +455,42 @@ preview.
 
 ## Phase D — Game systems
 
-- [ ] **EP12. Audio.** Import sound files (Ogg, MP3, WAV), a mixer with buses,
+- [x] **EP12. Audio.** Import sound files (Ogg, MP3, WAV), a mixer with buses,
       and 3D positional sound on objects through Web Audio, driven from Lua.
       This covers `HALO2_STYLE_ROADMAP.md` H14. *Lockout:* weapon sounds,
       gorge wind and the announcer.
+
+      *Done:*
+      - **Sounds** come from an imported file (Ogg, MP3, WAV, up to 2 MB), a
+        **synth** recipe, or **speech**. A synth recipe is a few voices of
+        noise or a waveform, with pitch and filter sweeps and an envelope,
+        rendered when the scene loads. The built-ins are rifle, smg, shotgun,
+        sniper, pistol, swing, explosion, wind, laser, pickup, click and jump;
+        naming one costs a few bytes. Speech is a line the browser's voice
+        reads out, for an announcer.
+      - **Mixer:** every sound plays through a bus (sfx, music, voice,
+        ambience, or the scene's own) into a master. The master joins the
+        console's own output, so the player's volume and pause cover it too.
+      - **Positional sound:** a sound with a range pans and fades linearly
+        with distance from the camera, which is the listener.
+      - **Emitters** loop from the start, everywhere at once or on an object
+        (following it).
+      - **From Lua:** `cartbox.sound(s, x, y, z, volume, pitch)` plays once.
+        `cartbox.loop(slot, s, volume, x, y, z)` holds a loop in one of 16
+        slots, sending only changes. `cartbox.mix(bus, volume)` sets a bus.
+        All go through the runtime's command channel; one-shots are dropped
+        on silent frames (stepping, off 1× speed) and capped at 24 voices.
+      - **Editor:** a Sound panel lists each sound with ▶ preview, name, bus,
+        volume, 3D range and loop. You can add a synth or a spoken line,
+        import a file, set the mixer's bus levels, and add ambience emitters.
+      - **Lockout:**
+        - every weapon's report and the sword's swing (a bot's shots heard
+          from where it stands, panned and fading);
+        - grenade blasts and the wind moaning through the gorge;
+        - the announcer calling multikills, sprees and the juggernaut.
+        - It costs 1.7 KB on the sidecar, which now sits just under its
+          1.4 MB budget. Lockout's code passed 64 KB and now spans two code
+          banks, which the cartridge already supported.
 - [ ] **EP13. UI system.** Widget layouts authored in the editor (anchors,
       text, images, buttons, sliders, lists) with controller focus navigation,
       driven from Lua. *Lockout:* the start menu and HUD become UI documents.

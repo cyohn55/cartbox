@@ -47,6 +47,8 @@ import {
   decodeLods,
   foliageBlocks,
   readFoliage,
+  parseSceneAudio,
+  type SceneAudio,
   type AnimatorSpec,
   type PhysicsSpec,
   type PhysicsWorldSettings,
@@ -179,6 +181,8 @@ export interface MeshScene {
   readonly debrisMeshes?: readonly MeshAsset[];
   /** Each debris mesh's LOD chain (EP9b), or null; absent when none has one. */
   readonly debrisLods?: readonly (LodChain | null)[];
+  /** The scene's sounds, mixer and ambience (EP12), or absent. */
+  readonly audio?: SceneAudio;
 }
 
 /** A view + projection pair ready to hand to `renderMeshScene`. */
@@ -447,6 +451,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
   }
 
   if (instances.length === 0) return null;
+  const audio = parseSceneAudio((parsed as { audio?: unknown }).audio);
   const lighting = parseSceneLighting((parsed as { lighting?: unknown }).lighting);
   const pools: PrefabPool[] = [...poolRoots.entries()].map(([prefab, ids]) => ({ prefab, roots: ids.map((id) => indexOf.get(id)!) }));
   // Reserve copies sit hidden at the origin, and later levels aren't loaded yet:
@@ -498,6 +503,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     ...(decalMarks.length > 0 ? { decalMarks } : {}),
     ...(ragdollColliders.length > 0 ? { ragdollColliders } : {}),
     ...(debris.length > 0 ? { debris, debrisMeshes, ...(debrisLods.some(Boolean) ? { debrisLods } : {}) } : {}),
+    ...(audio ? { audio } : {}),
     lighting,
     ...(pools.length > 0 ? { pools } : {}),
     ...(physicsWorld ? { physicsWorld } : {}),

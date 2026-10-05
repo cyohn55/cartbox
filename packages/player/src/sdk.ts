@@ -317,6 +317,11 @@ cartbox = {
   decals = function() return {} end,
   debris = function() end,
   debrislist = function() return {} end,
+  -- Sound: overridden when the scene has sounds.
+  sound = function() end,
+  loop = function() end,
+  mix = function() end,
+  sounds = function() return {} end,
   effects = function() return {} end,
 }`;
 

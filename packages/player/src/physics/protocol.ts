@@ -257,6 +257,18 @@ export const PHYS_OP_DEBRIS = 29;
  * all 0 clears it). It stands until changed.
  */
 export const PHYS_OP_SHIELD = 30;
+/**
+ * A sound (cartbox.sound, EP12): a = the sound's index | (volume × 64) << 8;
+ * v0..v2 = where, v3 = pitch (playback rate), v4 = 1 when positional.
+ */
+export const PHYS_OP_SOUND = 31;
+/**
+ * A looping sound in a slot (cartbox.loop): a = the slot | (sound index + 1) << 8
+ * (0 = stop the slot); v0 = volume, v1..v3 = where, v4 = 1 when positional.
+ */
+export const PHYS_OP_SOUND_LOOP = 32;
+/** A mixer bus's volume (cartbox.mix): a = the bus's index; v0 = volume. */
+export const PHYS_OP_MIX = 33;
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {

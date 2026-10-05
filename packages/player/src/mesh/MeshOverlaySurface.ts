@@ -745,6 +745,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       : this.autoOrbitCamera();
     // The eye, from the view matrix (eye = −Rᵀt): terrain detail follows it.
     const v = camera.view;
+    this.lastView = v;
     this.eye = [-(v[0]! * v[12]! + v[1]! * v[13]! + v[2]! * v[14]!), -(v[4]! * v[12]! + v[5]! * v[13]! + v[6]! * v[14]!), -(v[8]! * v[12]! + v[9]! * v[13]! + v[10]! * v[14]!)];
     const { main: instances, front, moved } = this.posedInstances();
     // Apply the authored Modern-tier lighting rig, if any. Absent (every cart
@@ -1116,6 +1117,17 @@ export class MeshOverlaySurface implements DisplaySurface {
 
   /** The camera's eye this frame (terrain blocks pick their detail by distance from it). */
   private eye: readonly [number, number, number] | null = null;
+
+  /** The last frame's view matrix (null before the first frame). */
+  private lastView: Mat4 | null = null;
+
+  /** Where the camera was last drawn from and which way it looked: what the scene's sound hears from (EP12). */
+  listenerPose(): { eye: readonly [number, number, number]; forward: readonly [number, number, number]; up: readonly [number, number, number] } | null {
+    const v = this.lastView;
+    if (!v || !this.eye) return null;
+    // The view's rows: right, up, back (forward is −back).
+    return { eye: this.eye, forward: [-v[2]!, -v[6]!, -v[10]!], up: [v[1]!, v[5]!, v[9]!] };
+  }
 
   /** Where the camera was last drawn from (null before the first frame). */
   eyePosition(): readonly [number, number, number] | null {
