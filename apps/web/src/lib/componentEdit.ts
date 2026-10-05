@@ -5,7 +5,7 @@
  * @cartbox/editor for what a component is.
  */
 
-import { MAX_COMPONENTS, componentTemplate, componentValues, type AttachedComponent, type ComponentDef, type ComponentValue } from "@cartbox/editor";
+import { MAX_COMPONENTS, compileScriptGraph, componentTemplate, componentValues, emptyScriptGraph, type AttachedComponent, type ComponentDef, type ComponentValue, type ScriptGraph } from "@cartbox/editor";
 
 import { setMeshAttached, setMeshComponents, type MeshSidecar } from "./meshSidecar";
 
@@ -26,6 +26,20 @@ export function addComponent(sidecar: MeshSidecar, base = "Behaviour"): { sideca
   return { sidecar: setMeshComponents(sidecar, [...defs, { name, code: componentTemplate(name) }]), name };
 }
 
+/** Add a visual script (EP16): a component whose code is its graph compiled. */
+export function addVisualScript(sidecar: MeshSidecar, base = "Script"): { sidecar: MeshSidecar; name: string } | null {
+  const defs = sidecar.components ?? [];
+  if (defs.length >= MAX_COMPONENTS) return null;
+  const name = freeName(defs, base);
+  const graph = emptyScriptGraph();
+  return { sidecar: setMeshComponents(sidecar, [...defs, { name, code: compileScriptGraph(graph, name), graph }]), name };
+}
+
+/** Replace a visual script's graph (its code follows). */
+export function setComponentGraph(sidecar: MeshSidecar, name: string, graph: ScriptGraph): MeshSidecar {
+  return setMeshComponents(sidecar, (sidecar.components ?? []).map((d) => (d.name === name ? { name, code: compileScriptGraph(graph, name), graph } : d)));
+}
+
 /**
  * Change a script's code, or rename it — a rename follows it onto every object
  * (and prefab node) it's attached to. An invalid or taken name is refused (null).
@@ -34,7 +48,7 @@ export function updateComponent(sidecar: MeshSidecar, name: string, patch: { nam
   const defs = sidecar.components ?? [];
   const to = patch.name ?? name;
   if (!NAME.test(to) || (to !== name && defs.some((d) => d.name === to))) return null;
-  const next = defs.map((d) => (d.name === name ? { name: to, code: patch.code ?? d.code } : d));
+  const next = defs.map((d) => (d.name === name ? (d.graph ? { name: to, code: compileScriptGraph(d.graph, to), graph: d.graph } : { name: to, code: patch.code ?? d.code }) : d));
   if (to === name) return setMeshComponents(sidecar, next);
   const rename = <T extends { components?: readonly AttachedComponent[] }>(item: T): T =>
     item.components?.some((c) => c.name === name) ? { ...item, components: item.components.map((c) => (c.name === name ? { ...c, name: to } : c)) } : item;

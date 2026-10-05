@@ -652,8 +652,43 @@ preview.
       - **Lockout:** a career record: matches, wins, kills, deaths. It is saved
         at the end of each match and shown on the title menu. The menu's
         control hints now name the new action keys.
-- [ ] **EP16. Visual scripting.** A node graph that compiles to Lua, for
+- [x] **EP16. Visual scripting.** A node graph that compiles to Lua, for
       gameplay logic without code, in the spirit of Unreal's Blueprints.
+
+      *Done:*
+      - **Graphs are components** (EP14): a visual script compiles to a
+        component's Lua. So it attaches to objects in the inspector, its
+        variables are the component's fields (set per object), and it runs
+        wherever components run. The code is always recompiled from the graph
+        and never trusted as stored.
+      - **Nodes:**
+        - events: on start, every tick, on an input action, every so many
+          seconds, on collision, on trigger;
+        - flow: branch, sequence, loop;
+        - actions: set a variable, place an object, spawn and despawn, play a
+          sound, set a UI value, show a UI document, post a score, print, call
+          a cart function;
+        - values: constants, variables, this object and where it was placed,
+          find an object, time, random, action held, ask a cart function;
+        - maths and logic: add, subtract, multiply, divide, min, max, sin,
+          cos, abs, floor, comparisons, and, or, not, join text.
+      - **Wires:** white execution wires order the actions; coloured data
+        wires carry values, and only join pins that fit. An exec output leads
+        to one place and a data input takes one value. An unwired input uses
+        the value typed beside it.
+      - **Compiler:** one callback per kind of event. Action and timer events
+        run from update. Data nodes become expressions and flow nodes become
+        `if`, `for` and sequences. A chain that loops back on itself stops
+        rather than compiling forever.
+      - **Editor:**
+        - the Mesh tab's Components panel gains "New visual script" and "Edit
+          graph";
+        - the graph editor has a palette by category, a canvas (drag, pan,
+          zoom, wire, unwire), variables, and the compiled Lua beside it,
+          read-only.
+      - **Lockout:** the weapon Pickup (EP14) is now a visual script that
+          compiles to the same behaviour. It's exercised by the real-engine
+          pickup test.
 
 ## Phase E — Content and shipping
 

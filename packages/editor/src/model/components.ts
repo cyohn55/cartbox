@@ -25,6 +25,8 @@
  * them into the cart's Lua (componentsSdk.ts).
  */
 
+import { compileScriptGraph, parseScriptGraph, type ScriptGraph } from "./scriptGraph";
+
 export type ComponentFieldType = "number" | "bool" | "text" | "object";
 export type ComponentValue = number | boolean | string;
 
@@ -34,10 +36,15 @@ export interface ComponentField {
   readonly default: ComponentValue;
 }
 
-/** A component script: its name and its Lua. Its fields come from its `@field` lines. */
+/**
+ * A component script: its name and its Lua. Its fields come from its `@field`
+ * lines. A visual script (EP16) also carries its graph, and its code is always
+ * the graph compiled.
+ */
 export interface ComponentDef {
   readonly name: string;
   readonly code: string;
+  readonly graph?: ScriptGraph;
 }
 
 /** A component on an object: which script, and the field values set for this object. */
@@ -100,11 +107,14 @@ export function parseComponentDefs(value: unknown): ComponentDef[] {
   const out: ComponentDef[] = [];
   const names = new Set<string>();
   for (const raw of value) {
-    const r = raw as { name?: unknown; code?: unknown } | null;
-    if (!r || typeof r.name !== "string" || !NAME.test(r.name) || names.has(r.name) || typeof r.code !== "string") continue;
+    const r = raw as { name?: unknown; code?: unknown; graph?: unknown } | null;
+    if (!r || typeof r.name !== "string" || !NAME.test(r.name) || names.has(r.name)) continue;
+    const graph = r.graph !== undefined ? parseScriptGraph(r.graph) : null;
+    if (!graph && typeof r.code !== "string") continue;
     if (out.length >= MAX_COMPONENTS) break;
     names.add(r.name);
-    out.push({ name: r.name, code: r.code.slice(0, MAX_COMPONENT_CODE) });
+    // A graph's code is recompiled, never trusted as stored: the two can't drift apart.
+    out.push(graph ? { name: r.name, code: compileScriptGraph(graph, r.name), graph } : { name: r.name, code: (r.code as string).slice(0, MAX_COMPONENT_CODE) });
   }
   return out;
 }

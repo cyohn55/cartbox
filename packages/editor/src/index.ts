@@ -357,6 +357,24 @@ export {
   type ComponentValue,
 } from "./model/components";
 export {
+  MAX_SCRIPT_NODES,
+  SCRIPT_NODES,
+  compileScriptGraph,
+  emptyScriptGraph,
+  parseScriptGraph,
+  pinsConnect,
+  type PinDef,
+  type PinType,
+  type ScriptCategory,
+  type ScriptGraph,
+  type ScriptNode,
+  type ScriptNodeDef,
+  type ScriptNodeKind,
+  type ScriptValue,
+  type ScriptVariable,
+  type ScriptWire,
+} from "./model/scriptGraph";
+export {
   ACTION_CONSOLE_BUTTONS,
   ACTION_PAD_BUTTONS,
   MAX_ACTIONS,

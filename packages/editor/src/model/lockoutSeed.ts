@@ -39,6 +39,7 @@ import { boulderMesh, driftMesh } from "./foliagePresets";
 import type { SceneAudio, SceneSound, SynthPreset } from "./sound";
 import type { UiDocument, UiWidget } from "./ui";
 import type { ComponentDef } from "./components";
+import { compileScriptGraph, type ScriptGraph, type ScriptNode, type ScriptWire } from "./scriptGraph";
 import type { InputAction } from "./inputActions";
 import { bakeNavMesh, boxTriangles, serializeNavMesh, type NavMesh } from "./navmesh";
 import { serializeTerrain, terrainMesh, type Terrain } from "./terrain";
@@ -2025,31 +2026,74 @@ function pickupMesh(id: WeaponId): MeshAsset {
  * cartbox.place — which, unlike a pose, needs no slot in the frame's short
  * pose list (the bots and the gun in hand fill it).
  */
-export const LOCKOUT_COMPONENTS: readonly ComponentDef[] = [
-  {
-    name: "Pickup",
-    code: `-- Pickup: a weapon over its spawn pad, turning and bobbing; gone while the pad recharges.
--- @field slot number 1
--- @field spin number 1.4
--- @field bob number 0.06
-function start(self)
-  self.t = self.slot * 1.3 -- out of step with the other pads
-  self.shown = nil
-end
-function update(self, dt)
-  local o = self.origin
-  local up = pickup_ready ~= nil and pickup_ready(self.slot) and true or false
-  if up then
-    self.t = self.t + dt
-    cartbox.place(self.obj, o.x, o.y + math.sin(self.t * 2.2) * self.bob, o.z, self.t * self.spin, 0, 0, 1)
-    self.shown = true
-  elseif self.shown ~= false and cartbox.place(self.obj, o.x, o.y, o.z, 0, 0, 0, 0) then
-    self.shown = false -- hidden once; it stays put until shown again
-  end
-end
-`,
-  },
-];
+/**
+ * The Pickup visual script (EP16): on start it puts each pad out of step with
+ * the others; every tick it asks the cart whether its pad's weapon is up, and
+ * either turns and bobs the weapon over the pad or hides it.
+ */
+const PICKUP_GRAPH: ScriptGraph = (() => {
+  const v = (name: string, value: number) => ({ name, type: "number" as const, value });
+  const n = (id: string, kind: ScriptNode["kind"], x: number, y: number, extra: Partial<ScriptNode> = {}): ScriptNode => ({ id, kind, x, y, ...extra });
+  const w = (from: string, fromPin: string, to: string, toPin: string): ScriptWire => ({ from, fromPin, to, toPin });
+  return {
+    variables: [v("slot", 1), v("spin", 1.4), v("bob", 0.06), v("t", 0)],
+    nodes: [
+      n("start", "onStart", 0, 0),
+      n("slot1", "getVar", 0, 110, { param: "slot" }),
+      n("stagger", "multiply", 260, 110, { values: { b: 1.3 } }),
+      n("setStart", "setVar", 520, 0, { param: "t" }),
+      n("tick", "onTick", 0, 260),
+      n("slot2", "getVar", 0, 370, { param: "slot" }),
+      n("ready", "callValue", 260, 370, { param: "pickup_ready" }),
+      n("branch", "branch", 520, 260),
+      n("t1", "getVar", 520, 380, { param: "t" }),
+      n("advance", "add", 780, 380),
+      n("setT", "setVar", 780, 260, { param: "t" }),
+      n("here", "self", 1040, 500),
+      n("t2", "getVar", 260, 560, { param: "t" }),
+      n("phase", "multiply", 520, 560, { values: { b: 2.2 } }),
+      n("wave", "sin", 780, 560),
+      n("bob", "getVar", 780, 660, { param: "bob" }),
+      n("height", "multiply", 1040, 660),
+      n("lift", "add", 1300, 500),
+      n("spin", "getVar", 1040, 780, { param: "spin" }),
+      n("turn", "multiply", 1300, 620),
+      n("show", "place", 1300, 260),
+      n("hide", "place", 520, 700, { values: { scale: 0 } }),
+    ],
+    wires: [
+      w("start", "then", "setStart", "in"),
+      w("slot1", "value", "stagger", "a"),
+      w("stagger", "out", "setStart", "value"),
+      w("tick", "then", "branch", "in"),
+      w("slot2", "value", "ready", "argument"),
+      w("ready", "result", "branch", "condition"),
+      w("branch", "true", "setT", "in"),
+      w("t1", "value", "advance", "a"),
+      w("tick", "dt", "advance", "b"),
+      w("advance", "out", "setT", "value"),
+      w("setT", "then", "show", "in"),
+      w("here", "x", "show", "x"),
+      w("t2", "value", "phase", "a"),
+      w("phase", "out", "wave", "x"),
+      w("wave", "out", "height", "a"),
+      w("bob", "value", "height", "b"),
+      w("here", "y", "lift", "a"),
+      w("height", "out", "lift", "b"),
+      w("lift", "out", "show", "y"),
+      w("here", "z", "show", "z"),
+      w("t2", "value", "turn", "a"),
+      w("spin", "value", "turn", "b"),
+      w("turn", "out", "show", "yaw"),
+      w("branch", "false", "hide", "in"),
+      w("here", "x", "hide", "x"),
+      w("here", "y", "hide", "y"),
+      w("here", "z", "hide", "z"),
+    ],
+  };
+})();
+
+export const LOCKOUT_COMPONENTS: readonly ComponentDef[] = [{ name: "Pickup", code: compileScriptGraph(PICKUP_GRAPH, "Pickup"), graph: PICKUP_GRAPH }];
 
 /**
  * Lockout's input actions (EP15). Each keeps its console button, so the
