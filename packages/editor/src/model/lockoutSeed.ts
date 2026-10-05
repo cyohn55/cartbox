@@ -38,6 +38,7 @@ import { serializeFoliage, type FoliageLayer, type SerializedFoliage } from "./f
 import { boulderMesh, driftMesh } from "./foliagePresets";
 import type { SceneAudio, SceneSound, SynthPreset } from "./sound";
 import type { UiDocument, UiWidget } from "./ui";
+import type { ComponentDef } from "./components";
 import { bakeNavMesh, boxTriangles, serializeNavMesh, type NavMesh } from "./navmesh";
 import { serializeTerrain, terrainMesh, type Terrain } from "./terrain";
 import type { SceneTimeline } from "./timeline";
@@ -2000,6 +2001,54 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
   return withoutUnusedUvs({ name: `viewmodel-${id}`, primitives: primitives.filter((p) => p.indices.length > 0) });
 }
 
+/**
+ * A weapon as it lies on its spawn pad (EP14): its first-person model without
+ * the hands. Its normals aren't stored — every renderer rebuilds them from the
+ * triangles, and the parts' faces don't share corners, so the hard edges stay
+ * hard — which near halves what five more guns add to the sidecar.
+ */
+function pickupMesh(id: WeaponId): MeshAsset {
+  const model = viewmodelMesh(id);
+  return {
+    name: `pickup-${id}`,
+    primitives: model.primitives.filter((p) => p.material.name !== "glove" && p.material.name !== "sleeve").map((p) => ({ ...p, normals: null })),
+  };
+}
+
+/**
+ * Lockout's components (EP14). Pickup sits on the weapon over each spawn pad:
+ * it turns and bobs while the weapon is there to take, and is gone while the
+ * pad recharges (or the game type leaves that weapon out). It asks the cart
+ * (pickup_ready) whether its pad's weapon is up, and moves the weapon with
+ * cartbox.place — which, unlike a pose, needs no slot in the frame's short
+ * pose list (the bots and the gun in hand fill it).
+ */
+export const LOCKOUT_COMPONENTS: readonly ComponentDef[] = [
+  {
+    name: "Pickup",
+    code: `-- Pickup: a weapon over its spawn pad, turning and bobbing; gone while the pad recharges.
+-- @field slot number 1
+-- @field spin number 1.4
+-- @field bob number 0.06
+function start(self)
+  self.t = self.slot * 1.3 -- out of step with the other pads
+  self.shown = nil
+end
+function update(self, dt)
+  local o = self.origin
+  local up = pickup_ready ~= nil and pickup_ready(self.slot) and true or false
+  if up then
+    self.t = self.t + dt
+    cartbox.place(self.obj, o.x, o.y + math.sin(self.t * 2.2) * self.bob, o.z, self.t * self.spin, 0, 0, 1)
+    self.shown = true
+  elseif self.shown ~= false and cartbox.place(self.obj, o.x, o.y, o.z, 0, 0, 0, 0) then
+    self.shown = false -- hidden once; it stays put until shown again
+  end
+end
+`,
+  },
+];
+
 /** A spent brass casing (H10), about 4 cm long, lying along Z. */
 function casingMesh(): MeshAsset {
   const brass = newStreams();
@@ -2226,7 +2275,7 @@ export function lockoutMeshSidecar(): string {
       return chain ? { lods: encodeLods(mesh, chain) } : {};
     };
     const soldierLods = lodsOf(soldierAsset);
-    const meshes: { id: string; name: string; mesh: string; lods?: StoredLods; animator?: unknown; transform: unknown }[] = [
+    const meshes: { id: string; name: string; mesh: string; lods?: StoredLods; animator?: unknown; transform: unknown; components?: unknown }[] = [
       { id: "lockout-map", name: "Lockout arena", mesh: serializeMeshAsset(litMapMesh()), transform: identity },
     ];
     // Instances 1..7: the bots.
@@ -2238,6 +2287,18 @@ export function lockoutMeshSidecar(): string {
       const model = viewmodelMesh(id);
       meshes.push({ id: `viewmodel-${id}`, name: `viewmodel ${id}`, mesh: serializeMeshAsset(model), ...lodsOf(model), transform: rest });
     }
+    // Instances 14..18 (EP14): the weapon over each spawn pad, which its Pickup
+    // component turns, bobs and hides while the pad recharges.
+    MARKERS.forEach(([cx, cy, cz, , hy], i) => {
+      const id = MARKER_WEAPONS[i]!;
+      meshes.push({
+        id: `pickup-${i + 1}`,
+        name: `pickup ${id}`,
+        mesh: serializeMeshAsset(pickupMesh(id)),
+        transform: { position: [cx, cy + hy + 0.32, cz], rotation: [0, 0, 0], scale: [1, 1, 1] },
+        components: [{ name: "Pickup", fields: { slot: i + 1 } }],
+      });
+    });
     const packed = packMeshLibrary(meshes);
     meshSidecar = JSON.stringify({
       version: 2,
@@ -2262,6 +2323,7 @@ export function lockoutMeshSidecar(): string {
       foliage: lockoutFoliage(),
       audio: LOCKOUT_AUDIO,
       ui: LOCKOUT_UI,
+      components: LOCKOUT_COMPONENTS,
     });
   }
   return meshSidecar;
@@ -2912,6 +2974,12 @@ local function player_fire()
       wall_sparks(ex,ey,ez, fx,fy,fz, w.rng)
     end
   end
+end
+
+-- Whether spawn pad i's weapon is there to take: the Pickup component (EP14)
+-- shows the weapon floating over the pad only then.
+function pickup_ready(i)
+  return phase == "play" and MODE.weapons[MW[i]] and (mtimer[i] or 0) == 0
 end
 
 local function try_pickups()

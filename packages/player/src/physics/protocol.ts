@@ -269,6 +269,14 @@ export const PHYS_OP_SOUND = 31;
 export const PHYS_OP_SOUND_LOOP = 32;
 /** A mixer bus's volume (cartbox.mix): a = the bus's index; v0 = volume. */
 export const PHYS_OP_MIX = 33;
+/**
+ * Put an object somewhere in the world and leave it there (cartbox.place,
+ * EP14): a = the object | (scale × 256) << 16 (scale 0 hides it); v0..v2 =
+ * where, v3..v5 = yaw, pitch, roll (radians).
+ */
+export const PHYS_OP_PLACE = 34;
+/** Send a placed object back to where the scene put it: a = the object. */
+export const PHYS_OP_UNPLACE = 35;
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {

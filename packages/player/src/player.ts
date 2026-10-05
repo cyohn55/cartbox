@@ -21,6 +21,7 @@ import { seedCartridge, prependLuaCode, readCartCode, appendLuaCode, rewriteLuaC
 import { STICK_OPTIN_MAGIC, STICK_OPTIN_WORD, STICK_WORD, packSticks } from "./sticks.js";
 import { DEFAULT_CONTROL_SETTINGS, applyLookSettings, type ControlSettings } from "./controls.js";
 import { injectSdk } from "./sdk.js";
+import { componentsSdkLua } from "./componentsSdk.js";
 import { sceneObjectsSdkLua } from "./mesh/sceneObjectsSdk.js";
 import { streamGroups, type MeshScene } from "./mesh/meshScene.js";
 import { runtimeSdkLua } from "./physics/physicsSdk.js";
@@ -242,6 +243,10 @@ export class Player {
         prepared = prependLuaCode(prepared, debugSdkLua(debugBlockAddress(layout), { debugger: this.debugState !== null }));
         this.debugOffset = debugBlockAddress(layout) - layout.pmemAddress;
       }
+      // Components (EP14): their scripts sit nearest the cart's code (after every
+      // SDK they call), and their step runs ahead of the cart's TIC.
+      const components = componentsSdkLua(this.options.mesh);
+      if (components) prepared = appendLuaCode(prependLuaCode(prepared, components.prelude), components.postlude);
       const collisionLua = collisionSdkLua(this.options.collision);
       if (collisionLua) prepared = prependLuaCode(prepared, collisionLua);
       const flagsLua = flagsSdkLua(this.options.flags);
@@ -1005,9 +1010,11 @@ export class Player {
           // A playing timeline takes the camera, and places the objects it animates (over physics).
           const cutscene = this.runtime.channel.timelineCamera(meshCamera?.hud ?? false);
           if (cutscene) this.meshSurface.setCameraOverride(cutscene);
+          // Over physics, objects the cart placed (cartbox.place); over both, a playing timeline.
           const scripted = this.runtime.channel.timelinePlacements();
+          const put = this.runtime.channel.placements();
           const bodies = this.runtime.physics?.overrides();
-          this.meshSurface.setBodyOverrides(scripted.size > 0 ? new Map([...(bodies ?? []), ...scripted]) : (bodies ?? NO_OVERRIDES));
+          this.meshSurface.setBodyOverrides(scripted.size > 0 || put.size > 0 ? new Map([...(bodies ?? []), ...put, ...scripted]) : (bodies ?? NO_OVERRIDES));
           this.meshSurface.setSpawned(this.runtime.channel.spawned());
           this.meshSurface.setShields(this.runtime.channel.shields());
           // IK aims in world space: give it where each object is this frame.

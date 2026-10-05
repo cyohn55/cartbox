@@ -535,9 +535,51 @@ preview.
         documents, the menu falls back to its plain list. The sidecar budget
         guard moves to 1.5 MB: large sidecars are offloaded to object storage
         above 512 KB, and a save stays well inside the request limit.
-- [ ] **EP14. Components.** Reusable Lua behaviours attached to objects in the
+- [x] **EP14. Components.** Reusable Lua behaviours attached to objects in the
       inspector, with fields you edit there and lifecycle callbacks (start,
       update, collision, trigger), the way Unity's components work.
+
+      *Done:*
+      - **Scripts:** a component is a named Lua script. Lines like
+        `-- @field speed number 2` declare its fields, of four types:
+        number, bool, text, and object (a scene object picked by name). It
+        defines any of these callbacks:
+        - `start(self)`;
+        - `update(self, dt)`, before the cart's TIC;
+        - `late(self, dt)`, after the cart's TIC;
+        - `collision(self, other, started)`;
+        - `trigger(self, other, entered)`.
+      - **Copies:** each object a component is on gets its own `self`, which
+        holds:
+        - its field values (the object's own, else the defaults), with
+          object fields resolved to objects;
+        - `obj` (the object it's on);
+        - `origin` (where the scene placed the object, in world space).
+
+        Each script runs in its own environment, so its globals don't collide
+        with the cart's or another script's.
+      - **Errors:** a script that doesn't compile, or a callback that errors,
+        is reported with `trace` and stops only that copy.
+      - **Prefabs:** a reserve prefab copy's components start when the copy
+        is spawned, and again each time it comes back.
+      - **From Lua:**
+        - `cartbox.component(obj, name)` reads another object's copy.
+        - `cartbox.place(obj, x, y, z, yaw, pitch, roll, scale)` puts any
+          object somewhere and leaves it there; `cartbox.place(obj)` sends it
+          home. It goes through the runtime block, so it has no limit on how
+          many objects it moves (a pose uses one of only 8 slots per frame).
+      - **Editor:** in the Mesh tab:
+        - a Components panel to add, rename and delete scripts and edit their
+          code (a rename follows the script onto every object);
+        - an inspector section to attach a script to the selected object and
+          set its fields (a number, a checkbox, text, or an object picker).
+        - Scripts and attachments are stored in the scene sidecar and carried
+          by prefabs.
+      - **Lockout:** a weapon floats over each spawn pad: its first-person
+        model without the hands, stored without normals to keep the sidecar
+        under budget. A `Pickup` component turns it and bobs it while the
+        weapon is there to take, and hides it while the pad recharges or when
+        the game type leaves that weapon out.
 - [ ] **EP15. Input actions and save data.** Named actions with per-device
       bindings, and structured saves (local, and cloud for signed-in players).
 - [ ] **EP16. Visual scripting.** A node graph that compiles to Lua, for

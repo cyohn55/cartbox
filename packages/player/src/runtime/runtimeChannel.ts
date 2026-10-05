@@ -50,6 +50,8 @@ import {
   PHYS_OP_RAGDOLL,
   PHYS_OP_DEBRIS,
   PHYS_OP_MIX,
+  PHYS_OP_PLACE,
+  PHYS_OP_UNPLACE,
   PHYS_OP_SOUND,
   PHYS_OP_SOUND_LOOP,
   PHYS_OP_SHIELD,
@@ -132,6 +134,8 @@ const transform = (m: Mat4, p: Vec3): [number, number, number] => [
 export class RuntimeChannel {
   /** Spawned copies: root object index → the root's world matrix. */
   private readonly active = new Map<number, Mat4>();
+  /** Objects the cart put somewhere with cartbox.place (object → world matrix). */
+  private readonly placed = new Map<number, Mat4>();
   /** Each reserve root's objects (itself first, then its descendants). */
   private readonly copyObjects = new Map<number, number[]>();
   /** The skeletal animation player, when the scene has skinned objects. */
@@ -241,6 +245,12 @@ export class RuntimeChannel {
         const v = cmd.v;
         this.sounds.push({ kind: "loop", slot: cmd.a & 0xff, sound: ((cmd.a >>> 8) & 0xffff) - 1, volume: v[0]!, at: v[4]! >= 0.5 ? [v[1]!, v[2]!, v[3]!] : null });
       } else if (cmd.op === PHYS_OP_MIX) this.sounds.push({ kind: "mix", bus: cmd.a, volume: cmd.v[0]! });
+      else if (cmd.op === PHYS_OP_PLACE) {
+        const object = cmd.a & 0xffff;
+        const s = ((cmd.a >>> 16) & 0x7fff) / 256;
+        const [x, y, z, yaw, pitch, roll] = cmd.v;
+        if (object < this.scene.instances.length) this.placed.set(object, composeModelMatrix([x!, y!, z!], [pitch! * DEG, yaw! * DEG, roll! * DEG], [s, s, s]));
+      } else if (cmd.op === PHYS_OP_UNPLACE) this.placed.delete(cmd.a);
       else if (cmd.op === PHYS_OP_DEBRIS) {
         if (this.debris.length < MAX_BURSTS_QUEUED)
           this.debris.push({ debris: cmd.a & 0xff, at: [cmd.v[0]!, cmd.v[1]!, cmd.v[2]!], velocity: [cmd.v[3]!, cmd.v[4]!, cmd.v[5]!], scale: ((cmd.a >>> 8) & 0xffff) / 16 });
@@ -428,6 +438,11 @@ export class RuntimeChannel {
   }
 
   /** World matrices of the objects a timeline is placing (object index → matrix). */
+  /** Where the cart has put objects with cartbox.place (object → world matrix). */
+  placements(): ReadonlyMap<number, Mat4> {
+    return this.placed;
+  }
+
   timelinePlacements(): ReadonlyMap<number, Mat4> {
     return this.timeline?.placements() ?? new Map();
   }

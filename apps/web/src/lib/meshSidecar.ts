@@ -60,6 +60,10 @@ import {
   serializeFoliage,
   parseSceneAudio,
   parseUiDocuments,
+  parseComponentDefs,
+  parseAttached,
+  type ComponentDef,
+  type AttachedComponent,
   type SceneAudio,
   type UiDocument,
   type SerializedFoliage,
@@ -121,6 +125,8 @@ export interface MeshSidecarEntry {
   readonly level?: string;
   /** Kept loaded whatever the distance when the scene streams (see streaming.ts in @cartbox/editor). */
   readonly alwaysLoaded?: true;
+  /** Components attached to this object, with its field values (see components.ts in @cartbox/editor). */
+  readonly components?: readonly AttachedComponent[];
 }
 
 /**
@@ -148,6 +154,7 @@ export interface PrefabNode {
   readonly props?: Readonly<Record<string, ScenePropValue>>;
   readonly physics?: PhysicsSpec;
   readonly animator?: AnimatorSpec;
+  readonly components?: readonly AttachedComponent[];
 }
 
 /** A reusable group of objects: a root node and everything under it. */
@@ -198,6 +205,8 @@ export interface MeshSidecar {
   readonly audio?: SceneAudio;
   /** UI documents (menus, HUDs) the cart drives with cartbox.ui (see ui.ts in @cartbox/editor). */
   readonly ui?: readonly UiDocument[];
+  /** Component scripts objects attach in the inspector (see components.ts in @cartbox/editor). */
+  readonly components?: readonly ComponentDef[];
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -222,7 +231,7 @@ export function newMeshId(): string {
  */
 export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
   const prefabs = sidecar.prefabs ?? [];
-  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0 && (sidecar.audio?.sounds.length ?? 0) === 0 && (sidecar.ui?.length ?? 0) === 0) return null;
+  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0 && (sidecar.audio?.sounds.length ?? 0) === 0 && (sidecar.ui?.length ?? 0) === 0 && (sidecar.components?.length ?? 0) === 0) return null;
   // Repeated meshes (and animation frames) are stored once in a shared library,
   // shared between placed entries and prefab nodes (a prefab's copies repeat its meshes).
   const nodes = prefabs.flatMap((prefab) => prefab.nodes);
@@ -256,6 +265,7 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(packedFoliage.length > 0 ? { foliage: packedFoliage } : {}),
     ...(sidecar.audio && sidecar.audio.sounds.length > 0 ? { audio: sidecar.audio } : {}),
     ...(sidecar.ui && sidecar.ui.length > 0 ? { ui: sidecar.ui } : {}),
+    ...(sidecar.components && sidecar.components.length > 0 ? { components: sidecar.components } : {}),
   });
 }
 
@@ -291,6 +301,10 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
   if (!Array.isArray(entries)) return emptyMeshSidecar();
 
   const library = readMeshLibrary((parsed as { library?: unknown }).library);
+  // Attachments to a script the sidecar doesn't carry are dropped.
+  const componentDefs = parseComponentDefs((parsed as { components?: unknown }).components);
+  const componentNames = new Set(componentDefs.map((d) => d.name));
+  const attached = (value: unknown) => (componentNames.size > 0 ? parseAttached(value, componentNames) : []);
   // Each distinct mesh string is validated once, however many entries share it.
   const valid = new Map<string, boolean>();
   const isValid = (mesh: string): boolean => {
@@ -308,7 +322,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
   };
   const meshes: MeshSidecarEntry[] = [];
   for (const entry of entries) {
-    const record = entry as Partial<MeshSidecarEntry> & { frames?: unknown };
+    const record = entry as Partial<MeshSidecarEntry> & { frames?: unknown; components?: unknown };
     if (typeof record.mesh !== "string") continue;
     const mesh = resolveMeshRef(record.mesh, library);
     if (!mesh || !isValid(mesh)) continue; // drop an entry whose geometry is missing or invalid
@@ -331,10 +345,11 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
       ...(readAnimatorSpec(record.animator) ? { animator: readAnimatorSpec(record.animator)! } : {}),
       ...(typeof record.level === "string" && record.level ? { level: record.level } : {}),
       ...(record.alwaysLoaded === true ? { alwaysLoaded: true as const } : {}),
+      ...(attached(record.components).length > 0 ? { components: attached(record.components) } : {}),
     });
   }
   const lighting = parseSceneLighting((parsed as { lighting?: unknown }).lighting);
-  const prefabs = readPrefabs((parsed as { prefabs?: unknown }).prefabs, library, isValid);
+  const prefabs = readPrefabs((parsed as { prefabs?: unknown }).prefabs, library, isValid, attached);
   // A link to a prefab (or node) that didn't survive decoding is dropped.
   const known = new Map(prefabs.map((p) => [p.id, new Set(p.nodes.map((n) => n.key))]));
   const linked = meshes.map((entry) =>
@@ -377,6 +392,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     ...(foliage.length > 0 ? { foliage } : {}),
     ...(audio ? { audio } : {}),
     ...(ui.length > 0 ? { ui } : {}),
+    ...(componentDefs.length > 0 ? { components: componentDefs } : {}),
   };
 }
 
@@ -386,6 +402,46 @@ export function setMeshUi(sidecar: MeshSidecar, ui: readonly UiDocument[]): Mesh
   void _drop;
   const docs = parseUiDocuments(ui);
   return docs.length > 0 ? { ...rest, ui: docs } : rest;
+}
+
+/**
+ * Replace the cart's component scripts (none removes them). Objects keep only
+ * attachments to scripts that remain, so deleting a script detaches it everywhere.
+ */
+export function setMeshComponents(sidecar: MeshSidecar, components: readonly ComponentDef[]): MeshSidecar {
+  const { components: _drop, ...rest } = sidecar;
+  void _drop;
+  const defs = parseComponentDefs(components);
+  const names = new Set(defs.map((d) => d.name));
+  const keep = <T extends { components?: readonly AttachedComponent[] }>(item: T): T => {
+    if (!item.components) return item;
+    const kept = item.components.filter((c) => names.has(c.name));
+    if (kept.length === item.components.length) return item;
+    const { components: _old, ...others } = item;
+    void _old;
+    return (kept.length > 0 ? { ...others, components: kept } : others) as T;
+  };
+  return {
+    ...rest,
+    meshes: rest.meshes.map(keep),
+    ...(rest.prefabs ? { prefabs: rest.prefabs.map((p) => ({ ...p, nodes: p.nodes.map(keep) })) } : {}),
+    ...(defs.length > 0 ? { components: defs } : {}),
+  };
+}
+
+/** Set one object's attached components (none removes them). */
+export function setMeshAttached(sidecar: MeshSidecar, id: string, components: readonly AttachedComponent[]): MeshSidecar {
+  const known = new Set((sidecar.components ?? []).map((d) => d.name));
+  const list = parseAttached(components, known);
+  return {
+    ...sidecar,
+    meshes: sidecar.meshes.map((entry) => {
+      if (entry.id !== id) return entry;
+      const { components: _drop, ...rest } = entry;
+      void _drop;
+      return list.length > 0 ? { ...rest, components: list } : rest;
+    }),
+  };
 }
 
 /** Replace the scene's audio (no sounds removes it). */
@@ -458,7 +514,7 @@ function readPrefabLink(value: unknown): PrefabLink | null {
 }
 
 /** Read stored prefabs, dropping invalid nodes and any prefab left without exactly one root. */
-function readPrefabs(value: unknown, library: ReturnType<typeof readMeshLibrary>, isValid: (mesh: string) => boolean): MeshPrefab[] {
+function readPrefabs(value: unknown, library: ReturnType<typeof readMeshLibrary>, isValid: (mesh: string) => boolean, attached: (value: unknown) => AttachedComponent[]): MeshPrefab[] {
   if (!Array.isArray(value)) return [];
   const out: MeshPrefab[] = [];
   for (const item of value) {
@@ -486,6 +542,7 @@ function readPrefabs(value: unknown, library: ReturnType<typeof readMeshLibrary>
         ...(Object.keys(props).length > 0 ? { props } : {}),
         ...(readPhysicsSpec(node.physics) ? { physics: readPhysicsSpec(node.physics)! } : {}),
         ...(readAnimatorSpec(node.animator) ? { animator: readAnimatorSpec(node.animator)! } : {}),
+        ...(attached(node.components).length > 0 ? { components: attached(node.components) } : {}),
       });
     }
     const keys = new Set(nodes.map((n) => n.key));

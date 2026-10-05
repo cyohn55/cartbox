@@ -331,6 +331,10 @@ cartbox = {
     on = function() end, update = function() return nil end, draw = function() end,
   },
   effects = function() return {} end,
+  -- Placing objects (EP14): live once the scene has the runtime.
+  place = function() end,
+  -- Components (EP14): replaced when any object has one.
+  component = function() return nil end,
 }`;
 
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */

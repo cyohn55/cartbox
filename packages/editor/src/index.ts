@@ -74,6 +74,7 @@ export {
   LOCKOUT_FOLIAGE,
   LOCKOUT_AUDIO,
   LOCKOUT_UI,
+  LOCKOUT_COMPONENTS,
   LOCKOUT_DECALS,
   LOCKOUT_DECAL_MARKS,
   lockoutNavMesh,
@@ -338,6 +339,22 @@ export {
   type UiPlaced,
   type UiWidget,
 } from "./model/ui";
+export {
+  COMPONENT_CALLBACKS,
+  MAX_COMPONENTS,
+  MAX_COMPONENT_CODE,
+  componentCallbacks,
+  componentFields,
+  componentTemplate,
+  componentValues,
+  parseAttached,
+  parseComponentDefs,
+  type AttachedComponent,
+  type ComponentDef,
+  type ComponentField,
+  type ComponentFieldType,
+  type ComponentValue,
+} from "./model/components";
 export { decompressGltf, gltfCompression, type DracoAttributeRequest, type DracoDecoded, type GltfDecoders } from "./model/gltfCompression";
 export {
   ANIMATOR_LIMITS,

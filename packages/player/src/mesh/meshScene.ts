@@ -66,6 +66,10 @@ import {
   type RagdollBox,
   type DecalDef,
   type DecalMark,
+  parseComponentDefs,
+  parseAttached,
+  type ComponentDef,
+  type AttachedComponent,
 } from "@cartbox/editor";
 
 /** One placed mesh ready to rasterise: decoded geometry + its baked world matrix. */
@@ -122,6 +126,8 @@ export interface MeshInstance extends MeshSceneInstance {
    * instance's space) it isn't drawn.
    */
   readonly foliage?: { readonly cull: number; readonly center: readonly [number, number, number]; readonly radius: number };
+  /** The components attached to this object (EP14), each with its field values; absent when none. */
+  readonly components?: readonly AttachedComponent[];
 }
 
 /** A prefab's reserve of spawnable copies: each copy's root object index. */
@@ -183,6 +189,8 @@ export interface MeshScene {
   readonly debrisLods?: readonly (LodChain | null)[];
   /** The scene's sounds, mixer and ambience (EP12), or absent. */
   readonly audio?: SceneAudio;
+  /** The scene's component scripts (EP14), which objects' `components` name; absent when none. */
+  readonly components?: readonly ComponentDef[];
 }
 
 /** A view + projection pair ready to hand to `renderMeshScene`. */
@@ -267,6 +275,8 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
   if (!Array.isArray(entries)) return null;
 
   const library = readMeshLibrary((parsed as { library?: unknown }).library);
+  const componentDefs = parseComponentDefs((parsed as { components?: unknown }).components);
+  const componentNames = new Set(componentDefs.map((d) => d.name));
   // Deserialize each distinct mesh string once: instances that share a model
   // share one MeshAsset (and so one texture decode and one GPU upload).
   const cache = new Map<string, MeshAsset | null>();
@@ -298,7 +308,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     }
     return byBase.get(key) ?? null;
   };
-  type Record_ = { mesh?: unknown; transform?: unknown; frames?: unknown; lods?: unknown; id?: unknown; name?: unknown; parent?: unknown; tags?: unknown; props?: unknown; physics?: unknown; animator?: unknown; level?: unknown; alwaysLoaded?: unknown };
+  type Record_ = { mesh?: unknown; transform?: unknown; frames?: unknown; lods?: unknown; id?: unknown; name?: unknown; parent?: unknown; tags?: unknown; props?: unknown; physics?: unknown; animator?: unknown; level?: unknown; alwaysLoaded?: unknown; components?: unknown };
   const readEntry = (record: Record_, id: string, parentId: string | null, identity = false): Parsed | null => {
     if (typeof record.mesh !== "string") return null;
     const resolved = resolveMeshRef(record.mesh, library);
@@ -309,6 +319,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
       .filter((frame): frame is MeshAsset => frame !== null);
     const t = identity ? { position: [0, 0, 0] as const, rotation: [0, 0, 0] as const, scale: [1, 1, 1] as const } : readTransform(record.transform);
     const lod = lodOf(mesh, record.lods);
+    const components = componentNames.size > 0 ? parseAttached(record.components, componentNames) : [];
     return {
       mesh,
       local: composeModelMatrix(t.position, t.rotation, t.scale),
@@ -322,6 +333,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
       ...(readAnimatorSpec(record.animator) ? { animator: readAnimatorSpec(record.animator)! } : {}),
       ...(typeof record.level === "string" && record.level ? { levelId: record.level } : {}),
       ...(record.alwaysLoaded === true ? { alwaysLoaded: true as const } : {}),
+      ...(components.length > 0 ? { components } : {}),
       parentId,
     };
   };
@@ -504,6 +516,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     ...(ragdollColliders.length > 0 ? { ragdollColliders } : {}),
     ...(debris.length > 0 ? { debris, debrisMeshes, ...(debrisLods.some(Boolean) ? { debrisLods } : {}) } : {}),
     ...(audio ? { audio } : {}),
+    ...(componentDefs.length > 0 ? { components: componentDefs } : {}),
     lighting,
     ...(pools.length > 0 ? { pools } : {}),
     ...(physicsWorld ? { physicsWorld } : {}),

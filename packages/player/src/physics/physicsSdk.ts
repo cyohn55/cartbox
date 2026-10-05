@@ -23,6 +23,14 @@
  *   cartbox.physicshash()             -> a digest of every moving body's exact state (compare
  *                                     across players to catch a desync; see deterministic mode)
  *
+ * Any scene with the runtime can also move objects where a pose can't reach
+ * (a pose is a slot in a small per-frame list; this persists, and isn't capped):
+ *
+ *   cartbox.place(obj, x, y, z, yaw, pitch, roll, scale)   put it there (world space;
+ *                                     scale 0 hides it) and leave it until placed again
+ *   cartbox.place(obj)                send it back to where the scene put it
+ *                                     (both -> true once queued; nil before the host runs)
+ *
  * Spawning prefab copies (when the cart has prefabs) rides the same block:
  *
  *   cartbox.spawn(prefab, x, y, z, yaw, pitch, roll) -> the copy's root object, or nil
@@ -106,6 +114,8 @@ import {
   PHYS_OP_RAGDOLL,
   PHYS_OP_DEBRIS,
   PHYS_OP_MIX,
+  PHYS_OP_PLACE,
+  PHYS_OP_UNPLACE,
   PHYS_OP_SOUND,
   PHYS_OP_SOUND_LOOP,
   PHYS_OP_SHIELD,
@@ -174,7 +184,8 @@ export function sceneNeedsRuntime(scene: MeshScene | null | undefined, { physics
         (scene.effects?.length ?? 0) > 0 ||
         (scene.decals?.length ?? 0) > 0 ||
         (scene.debris?.length ?? 0) > 0 ||
-        (scene.audio?.sounds.length ?? 0) > 0),
+        (scene.audio?.sounds.length ?? 0) > 0 ||
+        (scene.components?.length ?? 0) > 0),
   );
 }
 
@@ -233,7 +244,7 @@ export function runtimeSdkLua(
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}${SOUND_CALLS(scene)}${SHIELD_CALLS()}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}${SOUND_CALLS(scene)}${SHIELD_CALLS()}${PLACE_CALLS()}end`;
 }
 
 /** The physics calls (inside the runtime block's do … end, after its helpers). */
@@ -521,6 +532,21 @@ function SOUND_CALLS(scene: MeshScene): string {
  *                                     and Active Camo, each 0..1; all 0 clears it.
  *                                     Only changes are sent, so call it every tick.
  */
+/**
+ * Placing objects (EP14): an object put somewhere stays there until it's
+ * placed again or sent home — no pose slot each frame, so any number move.
+ */
+function PLACE_CALLS(): string {
+  return `  cartbox.place = function(o, x, y, z, yaw, pitch, roll, scale)
+    local i = _obj(o)
+    if i == nil or i > 65535 then return end
+    if x == nil then return _cmd(${PHYS_OP_UNPLACE}, i) end
+    local s = math.max(0, math.min(32767, math.floor((scale or 1) * 256 + 0.5)))
+    return _cmd(${PHYS_OP_PLACE}, i | (s << 16), x, y or 0, z or 0, yaw or 0, pitch or 0, roll or 0)
+  end
+`;
+}
+
 function SHIELD_CALLS(): string {
   return `  local _shield = {}
   cartbox.shield = function(o, flare, shimmer, camo)
