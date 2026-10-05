@@ -49,6 +49,9 @@ import {
   PHYS_OP_DECAL,
   PHYS_OP_RAGDOLL,
   PHYS_OP_DEBRIS,
+  PHYS_OP_MIX,
+  PHYS_OP_SOUND,
+  PHYS_OP_SOUND_LOOP,
   PHYS_OP_SHIELD,
   PHYS_OP_WATCH,
   PHYS_OP_AGENT,
@@ -91,6 +94,12 @@ export interface ShieldState {
 }
 
 /** One `cartbox.debris`: the definition's index, where, its velocity, and its scale. */
+/** A sound command from the cart (cartbox.sound / loop / mix). */
+export type SoundCommand =
+  | { readonly kind: "play"; readonly sound: number; readonly volume: number; readonly pitch: number; readonly at: readonly [number, number, number] | null }
+  | { readonly kind: "loop"; readonly slot: number; readonly sound: number; readonly volume: number; readonly at: readonly [number, number, number] | null }
+  | { readonly kind: "mix"; readonly bus: number; readonly volume: number };
+
 export interface DebrisThrown {
   readonly debris: number;
   readonly at: readonly [number, number, number];
@@ -146,6 +155,7 @@ export class RuntimeChannel {
   private decals: DecalLaid[] = [];
   /** Debris the cart threw since the renderer last took it. */
   private debris: DebrisThrown[] = [];
+  private sounds: SoundCommand[] = [];
   /** Standing shield effects (cartbox.shield): object → flare, shimmer, camo. */
   private readonly shieldStates = new Map<number, ShieldState>();
   /**
@@ -222,6 +232,15 @@ export class RuntimeChannel {
       }
       else if (cmd.op === PHYS_OP_RAGDOLL) this.ragdollCommand(cmd.a, cmd.v);
       else if (cmd.op === PHYS_OP_SHIELD) this.shieldCommand(cmd.a, cmd.v);
+      else if (cmd.op === PHYS_OP_SOUND) {
+        if (this.sounds.length < MAX_BURSTS_QUEUED) {
+          const v = cmd.v;
+          this.sounds.push({ kind: "play", sound: cmd.a & 0xff, volume: ((cmd.a >>> 8) & 0xffff) / 64, pitch: v[3]! > 0 ? v[3]! : 1, at: v[4]! >= 0.5 ? [v[0]!, v[1]!, v[2]!] : null });
+        }
+      } else if (cmd.op === PHYS_OP_SOUND_LOOP) {
+        const v = cmd.v;
+        this.sounds.push({ kind: "loop", slot: cmd.a & 0xff, sound: ((cmd.a >>> 8) & 0xffff) - 1, volume: v[0]!, at: v[4]! >= 0.5 ? [v[1]!, v[2]!, v[3]!] : null });
+      } else if (cmd.op === PHYS_OP_MIX) this.sounds.push({ kind: "mix", bus: cmd.a, volume: cmd.v[0]! });
       else if (cmd.op === PHYS_OP_DEBRIS) {
         if (this.debris.length < MAX_BURSTS_QUEUED)
           this.debris.push({ debris: cmd.a & 0xff, at: [cmd.v[0]!, cmd.v[1]!, cmd.v[2]!], velocity: [cmd.v[3]!, cmd.v[4]!, cmd.v[5]!], scale: ((cmd.a >>> 8) & 0xffff) / 16 });
@@ -320,6 +339,13 @@ export class RuntimeChannel {
   takeDebris(): DebrisThrown[] {
     const out = this.debris;
     this.debris = [];
+    return out;
+  }
+
+  /** The sound commands since the last call (the sound system plays them). */
+  takeSounds(): SoundCommand[] {
+    const out = this.sounds;
+    this.sounds = [];
     return out;
   }
 

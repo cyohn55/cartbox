@@ -165,8 +165,9 @@ general Unity/UE5 gap); items here that close a line there tick it off too.
 
 ## Phase D — World and presentation
 
-- [ ] **H14. Audio.** Imported sound files, a mixer, and 3D positional sound
+- [x] **H14. Audio.** Imported sound files, a mixer, and 3D positional sound
       through Web Audio. *Lockout:* weapon sounds, gorge wind, the announcer.
+      *Done as ENGINE_PARITY_ROADMAP.md EP12.*
 - [ ] **H15. Imported skybox.** A painted cubemap or HDR sky in place of the
       procedural one, with drifting clouds.
 - [ ] **H16. HUD authoring.** Build a HUD (arcs, bars, radar, icons) in the

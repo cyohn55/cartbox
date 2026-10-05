@@ -72,6 +72,7 @@ export {
   LOCKOUT_RAGDOLL_COLLIDERS,
   LOCKOUT_DEBRIS,
   LOCKOUT_FOLIAGE,
+  LOCKOUT_AUDIO,
   LOCKOUT_DECALS,
   LOCKOUT_DECAL_MARKS,
   lockoutNavMesh,
@@ -300,6 +301,26 @@ export {
   type SerializedFoliage,
 } from "./model/foliage";
 export { boulderMesh, driftMesh, foliagePreset, grassMesh, pineMesh, type FoliagePreset } from "./model/foliagePresets";
+export {
+  DEFAULT_BUSES,
+  MAX_EMITTERS,
+  MAX_SOUNDS,
+  MAX_SOUND_BUSES,
+  MAX_SOUND_FILE_BYTES,
+  SYNTH_PRESETS,
+  parseSceneAudio,
+  resolveSynth,
+  soundRecipe,
+  synthesizeSound,
+  type SceneAudio,
+  type SceneSound,
+  type SoundBus,
+  type SoundEmitter,
+  type SoundSource,
+  type SynthPreset,
+  type SynthSound,
+  type SynthVoice,
+} from "./model/sound";
 export { decompressGltf, gltfCompression, type DracoAttributeRequest, type DracoDecoded, type GltfDecoders } from "./model/gltfCompression";
 export {
   ANIMATOR_LIMITS,

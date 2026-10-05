@@ -16,15 +16,20 @@ import { SupabaseNetTransport, newRoomCode, parseRoomCode } from "../apps/web/sr
 const ENGINE = path.resolve(__dirname, "../packages/engine/dist/xbox360/engine.js");
 
 describe("lockoutCartridge", () => {
-  it("is a palette chunk and a code chunk carrying the starter's code", () => {
+  it("is a palette chunk and code chunks carrying the starter's code", () => {
     const bytes = lockoutCartridge();
     expect(bytes[0]).toBe(12); // CHUNK_PALETTE, bank 0
     expect(bytes[1]! | (bytes[2]! << 8)).toBe(48);
     expect(Array.from(bytes.subarray(4, 7))).toEqual([0, 0, 0]); // index 0 is the HUD's transparent black
-    const code = 4 + 48;
-    expect(bytes[code]).toBe(5); // CHUNK_CODE
-    const size = bytes[code + 1]! | (bytes[code + 2]! << 8);
-    expect(new TextDecoder().decode(bytes.subarray(code + 4, code + 4 + size))).toBe(LOCKOUT_CODE);
+    // Then the code: one chunk per 64 KB bank, the start of the code in the highest bank.
+    let at = 4 + 48;
+    while (at < bytes.length) {
+      expect(bytes[at]! & 31).toBe(5); // CHUNK_CODE
+      const size = bytes[at + 1]! | (bytes[at + 2]! << 8);
+      at += 4 + (size === 0 ? 0x10000 : size);
+    }
+    expect(at).toBe(bytes.length);
+    expect(readCartCode(lockoutCartridge())).toBe(LOCKOUT_CODE);
   });
 
   it("gets the SDK injected ahead of its code", () => {

@@ -58,6 +58,8 @@ import {
   readStoredLods,
   readFoliage,
   serializeFoliage,
+  parseSceneAudio,
+  type SceneAudio,
   type SerializedFoliage,
   type StoredLods,
   resolveMeshRef,
@@ -190,6 +192,8 @@ export interface MeshSidecar {
   readonly debris?: readonly DebrisDef[];
   /** Meshes scattered over the terrains (see foliage.ts in @cartbox/editor), each layer's mesh stored whole. */
   readonly foliage?: readonly SerializedFoliage[];
+  /** The scene's sounds, mixer buses and emitters (see sound.ts in @cartbox/editor). */
+  readonly audio?: SceneAudio;
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -214,7 +218,7 @@ export function newMeshId(): string {
  */
 export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
   const prefabs = sidecar.prefabs ?? [];
-  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0) return null;
+  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0 && (sidecar.audio?.sounds.length ?? 0) === 0) return null;
   // Repeated meshes (and animation frames) are stored once in a shared library,
   // shared between placed entries and prefab nodes (a prefab's copies repeat its meshes).
   const nodes = prefabs.flatMap((prefab) => prefab.nodes);
@@ -246,6 +250,7 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(sidecar.ragdollColliders && sidecar.ragdollColliders.length > 0 ? { ragdollColliders: sidecar.ragdollColliders } : {}),
     ...(sidecar.debris && sidecar.debris.length > 0 ? { debris: sidecar.debris } : {}),
     ...(packedFoliage.length > 0 ? { foliage: packedFoliage } : {}),
+    ...(sidecar.audio && sidecar.audio.sounds.length > 0 ? { audio: sidecar.audio } : {}),
   });
 }
 
@@ -344,6 +349,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
   const ragdollColliders = parseRagdollColliders((parsed as { ragdollColliders?: unknown }).ragdollColliders);
   const debris = parseDebrisDefs((parsed as { debris?: unknown }).debris);
   const foliage = readFoliageLayers((parsed as { foliage?: unknown }).foliage, terrains, library, isValid);
+  const audio = parseSceneAudio((parsed as { audio?: unknown }).audio);
   const placed = linked.map((entry) => (entry.level && !levelIds.has(entry.level) ? withoutLevel(entry) : entry));
   return {
     version: MESH_SIDECAR_VERSION,
@@ -363,7 +369,15 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     ...(ragdollColliders.length > 0 ? { ragdollColliders } : {}),
     ...(debris.length > 0 ? { debris } : {}),
     ...(foliage.length > 0 ? { foliage } : {}),
+    ...(audio ? { audio } : {}),
   };
+}
+
+/** Replace the scene's audio (no sounds removes it). */
+export function setMeshAudio(sidecar: MeshSidecar, audio: SceneAudio | null): MeshSidecar {
+  const { audio: _drop, ...rest } = sidecar;
+  void _drop;
+  return audio && audio.sounds.length > 0 ? { ...rest, audio } : rest;
 }
 
 /** Read stored foliage layers: each must sit on a terrain the sidecar has and carry a mesh that decodes; its mesh is resolved from the library. */

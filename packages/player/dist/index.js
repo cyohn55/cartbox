@@ -42,6 +42,14 @@ var AudioController = class {
     source.start(startAt);
     this.nextStartTime = startAt + buffer.duration;
   }
+  /** The context, for other sound (the scene's sounds, EP12) to play on. */
+  get audioContext() {
+    return this.context;
+  }
+  /** Where other sound joins the chip's: through the master volume, so it and pause cover everything. */
+  get output() {
+    return this.gain;
+  }
   /** Master volume, 0 (silent) .. 1 (full). */
   setVolume(volume) {
     this.gain.gain.value = Math.max(0, Math.min(1, Number.isFinite(volume) ? volume : 1));
@@ -51,6 +59,216 @@ var AudioController = class {
     void this.context.close();
   }
 };
+
+// src/soundSystem.ts
+import { base64ToBytes, synthesizeSound, resolveSynth } from "@cartbox/editor";
+function browserSpeaker() {
+  const synth = typeof globalThis !== "undefined" ? globalThis.speechSynthesis : void 0;
+  const Utterance = typeof globalThis !== "undefined" ? globalThis.SpeechSynthesisUtterance : void 0;
+  if (!synth || !Utterance) return null;
+  return (text, { volume, pitch, rate }) => {
+    const u = new Utterance(text);
+    u.volume = Math.max(0, Math.min(1, volume));
+    u.pitch = pitch;
+    u.rate = rate;
+    synth.cancel();
+    synth.speak(u);
+  };
+}
+var MAX_VOICES = 24;
+var LOOP_SLOTS = 16;
+var SoundSystem = class _SoundSystem {
+  constructor(context, audio, output, speak) {
+    this.context = context;
+    this.audio = audio;
+    this.speak = speak;
+    this.voices = [];
+    this.loops = /* @__PURE__ */ new Map();
+    /** Emitters: their voice, and the object (scene instance index) each follows, or -1. */
+    this.emitters = [];
+    this.disposed = false;
+    this.master = context.createGain();
+    this.master.connect(output);
+    this.buses = audio.buses.map((bus) => {
+      const g = context.createGain();
+      g.gain.value = bus.volume;
+      g.connect(this.master);
+      return g;
+    });
+    this.buffers = audio.sounds.map(() => null);
+  }
+  /**
+   * Build the scene's sound: every sound decoded or synthesised (a file that
+   * won't decode is left silent), then the emitters started. `objectIndex`
+   * finds an emitter's object (by id) among the scene's instances.
+   */
+  static async create(context, audio, output, objectIndex, speak = browserSpeaker()) {
+    const system = new _SoundSystem(context, audio, output, speak);
+    await Promise.all(
+      audio.sounds.map(async (sound, i) => {
+        system.buffers[i] = await bufferFor(context, sound);
+      })
+    );
+    for (const emitter of audio.emitters) {
+      const sound = audio.sounds.findIndex((s) => s.name === emitter.sound);
+      if (sound < 0) continue;
+      const object = emitter.object ? objectIndex(emitter.object) : -1;
+      const voice = system.start(sound, emitter.volume, 1, null, true, object >= 0);
+      if (voice) system.emitters.push({ ...voice, object });
+    }
+    return system;
+  }
+  /** Start a sound (a buffer source through its gain, panner if positional, into its bus). */
+  start(sound, volume, pitch, at, loop, positional = at !== null) {
+    const def = this.audio.sounds[sound];
+    const buffer = this.buffers[sound];
+    if (!def || this.disposed) return null;
+    if (def.source.kind === "speech") {
+      const bus2 = this.audio.buses.findIndex((b) => b.name === def.bus);
+      const level = def.volume * volume * (this.buses[bus2]?.gain.value ?? 1) * this.master.gain.value;
+      this.speak?.(def.source.text, { volume: level, pitch: def.source.pitch ?? 0.6, rate: def.source.rate ?? 0.9 });
+      return null;
+    }
+    if (!buffer) return null;
+    const source = this.context.createBufferSource();
+    source.buffer = buffer;
+    source.loop = loop || Boolean(def.loop);
+    source.playbackRate.value = Math.max(0.1, Math.min(4, pitch));
+    const gain = this.context.createGain();
+    gain.gain.value = def.volume * volume;
+    source.connect(gain);
+    let panner = null;
+    if (positional && def.range) {
+      panner = this.context.createPanner();
+      panner.panningModel = "equalpower";
+      panner.distanceModel = "linear";
+      panner.refDistance = def.range[0];
+      panner.maxDistance = def.range[1];
+      panner.rolloffFactor = 1;
+      if (at) place(panner, at);
+      gain.connect(panner);
+    }
+    const bus = Math.max(0, this.audio.buses.findIndex((b) => b.name === def.bus));
+    (panner ?? gain).connect(this.buses[bus] ?? this.master);
+    source.start(this.context.currentTime);
+    return { source, gain, panner };
+  }
+  /** Play a sound once (cartbox.sound). */
+  play(sound, volume = 1, pitch = 1, at = null) {
+    const voice = this.start(sound, volume, pitch, at, false);
+    if (!voice) return;
+    this.voices.push(voice);
+    voice.source.onended = () => {
+      const k = this.voices.indexOf(voice);
+      if (k >= 0) this.voices.splice(k, 1);
+      voice.gain.disconnect();
+      voice.panner?.disconnect();
+    };
+    if (this.voices.length > MAX_VOICES) stop(this.voices.shift());
+  }
+  /** Start, move, fade or (sound < 0) stop a looping slot (cartbox.loop). */
+  loop(slot, sound, volume = 1, at = null) {
+    if (slot < 0 || slot >= LOOP_SLOTS) return;
+    const held = this.loops.get(slot);
+    if (held && held.sound === sound && sound >= 0) {
+      held.gain.gain.value = (this.audio.sounds[sound]?.volume ?? 1) * volume;
+      if (held.panner && at) place(held.panner, at);
+      return;
+    }
+    if (held) {
+      stop(held);
+      this.loops.delete(slot);
+    }
+    if (sound < 0) return;
+    const voice = this.start(sound, volume, 1, at, true);
+    if (voice) this.loops.set(slot, { ...voice, sound });
+  }
+  /** Set a mixer bus's volume (cartbox.mix). */
+  mix(bus, volume) {
+    const g = this.buses[bus];
+    if (g) g.gain.value = Math.max(0, Math.min(2, volume));
+  }
+  /** The level a bus is at. */
+  busVolume(bus) {
+    return this.buses[bus]?.gain.value ?? 0;
+  }
+  /** Put the listener where the camera is, facing where it looks. */
+  listen(eye, forward, up) {
+    const l = this.context.listener;
+    if (l.positionX) {
+      l.positionX.value = eye[0];
+      l.positionY.value = eye[1];
+      l.positionZ.value = eye[2];
+      l.forwardX.value = forward[0];
+      l.forwardY.value = forward[1];
+      l.forwardZ.value = forward[2];
+      l.upX.value = up[0];
+      l.upY.value = up[1];
+      l.upZ.value = up[2];
+    } else {
+      l.setPosition(eye[0], eye[1], eye[2]);
+      l.setOrientation(forward[0], forward[1], forward[2], up[0], up[1], up[2]);
+    }
+  }
+  /** Move each emitter that follows an object to where the object is (its world matrices, null = hidden). */
+  follow(placements) {
+    for (const e of this.emitters) {
+      if (e.object < 0 || !e.panner) continue;
+      const m = placements[e.object];
+      if (m) place(e.panner, [m[12], m[13], m[14]]);
+    }
+  }
+  /** How many one-shots are playing (for tests and tooling). */
+  playing() {
+    return this.voices.length;
+  }
+  /** Which slots hold a loop, and which sound. */
+  loopingSlots() {
+    return new Map([...this.loops].map(([slot, v]) => [slot, v.sound]));
+  }
+  dispose() {
+    this.disposed = true;
+    for (const v of [...this.voices, ...this.loops.values(), ...this.emitters]) stop(v);
+    this.voices.length = 0;
+    this.loops.clear();
+    this.emitters.length = 0;
+    this.master.disconnect();
+  }
+};
+function place(panner, at) {
+  if (panner.positionX) {
+    panner.positionX.value = at[0];
+    panner.positionY.value = at[1];
+    panner.positionZ.value = at[2];
+  } else panner.setPosition(at[0], at[1], at[2]);
+}
+function stop(v) {
+  try {
+    v.source.stop();
+  } catch {
+  }
+  v.gain.disconnect();
+  v.panner?.disconnect();
+}
+async function bufferFor(context, sound) {
+  if (sound.source.kind === "synth") {
+    const recipe = resolveSynth(sound.source.synth);
+    if (!recipe) return null;
+    const samples = synthesizeSound(recipe, context.sampleRate);
+    const buffer = context.createBuffer(1, samples.length, context.sampleRate);
+    buffer.copyToChannel(samples, 0);
+    return buffer;
+  }
+  if (sound.source.kind === "file") {
+    try {
+      const bytes = base64ToBytes(sound.source.data);
+      return await context.decodeAudioData(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
 
 // src/cartridge.ts
 var CartridgeLoadError = class extends Error {
@@ -3381,7 +3599,7 @@ var TouchInput = class {
     this.rightStick.style.display = on ? "block" : "none";
   }
   /** A virtual thumbstick: a ring you press anywhere in, and a knob that follows the thumb. */
-  createStick(doc, state, index, place) {
+  createStick(doc, state, index, place2) {
     const base = doc.createElement("div");
     base.setAttribute("data-cbx-stick", index === 0 ? "left" : "right");
     base.setAttribute("aria-label", index === 0 ? "Left stick" : "Right stick");
@@ -3396,7 +3614,7 @@ var TouchInput = class {
       touchAction: "none",
       webkitTouchCallout: "none",
       webkitTapHighlightColor: "transparent",
-      ...place
+      ...place2
     });
     const knob = doc.createElement("div");
     Object.assign(knob.style, {
@@ -4065,6 +4283,11 @@ cartbox = {
   decals = function() return {} end,
   debris = function() end,
   debrislist = function() return {} end,
+  -- Sound: overridden when the scene has sounds.
+  sound = function() end,
+  loop = function() end,
+  mix = function() end,
+  sounds = function() return {} end,
   effects = function() return {} end,
 }`;
 function injectSdk(bytes) {
@@ -4174,6 +4397,7 @@ import {
   decodeLods,
   foliageBlocks,
   readFoliage,
+  parseSceneAudio,
   parseParticleEffects,
   parseDecalDefs,
   parseDecalMarks,
@@ -4398,6 +4622,7 @@ function parseMeshScene(raw) {
     }
   }
   if (instances.length === 0) return null;
+  const audio = parseSceneAudio(parsed.audio);
   const lighting = parseSceneLighting(parsed.lighting);
   const pools = [...poolRoots.entries()].map(([prefab, ids]) => ({ prefab, roots: ids.map((id) => indexOf.get(id)) }));
   const placed = instances.filter((instance) => !instance.pooled && !instance.terrain && (instance.level === void 0 || instance.level === 0));
@@ -4444,6 +4669,7 @@ function parseMeshScene(raw) {
     ...decalMarks.length > 0 ? { decalMarks } : {},
     ...ragdollColliders.length > 0 ? { ragdollColliders } : {},
     ...debris.length > 0 ? { debris, debrisMeshes, ...debrisLods.some(Boolean) ? { debrisLods } : {} } : {},
+    ...audio ? { audio } : {},
     lighting,
     ...pools.length > 0 ? { pools } : {},
     ...physicsWorld ? { physicsWorld } : {},
@@ -4661,6 +4887,9 @@ var PHYS_OP_DECAL = 27;
 var PHYS_OP_RAGDOLL = 28;
 var PHYS_OP_DEBRIS = 29;
 var PHYS_OP_SHIELD = 30;
+var PHYS_OP_SOUND = 31;
+var PHYS_OP_SOUND_LOOP = 32;
+var PHYS_OP_MIX = 33;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -5639,7 +5868,7 @@ var TimelineSession = class {
 // src/physics/physicsSdk.ts
 function sceneNeedsRuntime(scene, { physics = true } = {}) {
   return Boolean(
-    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0 || Boolean(scene.navmesh) || Boolean(scene.streaming) || (scene.effects?.length ?? 0) > 0 || (scene.decals?.length ?? 0) > 0 || (scene.debris?.length ?? 0) > 0)
+    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0 || Boolean(scene.navmesh) || Boolean(scene.streaming) || (scene.effects?.length ?? 0) > 0 || (scene.decals?.length ?? 0) > 0 || (scene.debris?.length ?? 0) > 0 || (scene.audio?.sounds.length ?? 0) > 0)
   );
 }
 var luaString = (s) => JSON.stringify(s);
@@ -5687,7 +5916,7 @@ function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}${SHIELD_CALLS()}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}${SOUND_CALLS(scene)}${SHIELD_CALLS()}end`;
 }
 function PHYSICS_CALLS() {
   return `  cartbox.physics = function() return _live() end
@@ -5857,6 +6086,49 @@ function DEBRIS_CALLS(scene) {
   cartbox.debrislist = function()
     local out = {}
     for k, n in ipairs(_dbn) do out[k] = n end
+    return out
+  end
+`;
+}
+function SOUND_CALLS(scene) {
+  const sounds = scene.audio?.sounds ?? [];
+  if (sounds.length === 0) return "";
+  const buses = scene.audio?.buses ?? [];
+  return `  local _snd = {${sounds.map((s, i) => `[${luaString(s.name)}]=${i}`).join(",")}}
+  local _sndn = {${sounds.map((s) => luaString(s.name)).join(",")}}
+  local _bus = {${buses.map((b, i) => `[${luaString(b.name)}]=${i}`).join(",")}}
+  local function _sound(s)
+    local i = s
+    if type(s) == "string" then i = _snd[s] elseif type(s) == "number" then i = s - 1 end
+    if i == nil or i < 0 or i >= ${sounds.length} then return nil end
+    return i
+  end
+  cartbox.sound = function(s, x, y, z, volume, pitch)
+    local i = _sound(s)
+    if i == nil then return end
+    local v = math.floor(math.max(0, math.min(4, volume or 1)) * 64 + 0.5)
+    _cmd(${PHYS_OP_SOUND}, i | (v << 8), x or 0, y or 0, z or 0, pitch or 1, x and 1 or 0)
+  end
+  local _loops = {}
+  cartbox.loop = function(slot, s, volume, x, y, z)
+    slot = math.floor(slot or 1) - 1
+    if slot < 0 or slot > 15 then return end
+    local i = s ~= nil and _sound(s) or nil
+    local key = i and string.format("%d %.2f %.1f %.1f %.1f", i, volume or 1, x or 0, y or 0, z or 0) or "off"
+    if _loops[slot] == key or (key == "off" and _loops[slot] == nil) then return end
+    if _cmd(${PHYS_OP_SOUND_LOOP}, slot | ((i and i + 1 or 0) << 8), volume or 1, x or 0, y or 0, z or 0, x and 1 or 0) then
+      _loops[slot] = key ~= "off" and key or nil
+    end
+  end
+  cartbox.mix = function(b, volume)
+    local i = b
+    if type(b) == "string" then i = _bus[b] elseif type(b) == "number" then i = b - 1 end
+    if i == nil or i < 0 or i >= ${buses.length} then return end
+    _cmd(${PHYS_OP_MIX}, i, math.max(0, math.min(2, volume or 1)))
+  end
+  cartbox.sounds = function()
+    local out = {}
+    for k, n in ipairs(_sndn) do out[k] = n end
     return out
   end
 `;
@@ -6500,6 +6772,7 @@ var RuntimeChannel = class {
     this.decals = [];
     /** Debris the cart threw since the renderer last took it. */
     this.debris = [];
+    this.sounds = [];
     /** Standing shield effects (cartbox.shield): object → flare, shimmer, camo. */
     this.shieldStates = /* @__PURE__ */ new Map();
     /**
@@ -6567,6 +6840,15 @@ var RuntimeChannel = class {
           this.decals.push({ decal: cmd.a & 255, at: [cmd.v[0], cmd.v[1], cmd.v[2]], normal: [cmd.v[3], cmd.v[4], cmd.v[5]], scale: (cmd.a >>> 8 & 65535) / 16 });
       } else if (cmd.op === PHYS_OP_RAGDOLL) this.ragdollCommand(cmd.a, cmd.v);
       else if (cmd.op === PHYS_OP_SHIELD) this.shieldCommand(cmd.a, cmd.v);
+      else if (cmd.op === PHYS_OP_SOUND) {
+        if (this.sounds.length < MAX_BURSTS_QUEUED) {
+          const v = cmd.v;
+          this.sounds.push({ kind: "play", sound: cmd.a & 255, volume: (cmd.a >>> 8 & 65535) / 64, pitch: v[3] > 0 ? v[3] : 1, at: v[4] >= 0.5 ? [v[0], v[1], v[2]] : null });
+        }
+      } else if (cmd.op === PHYS_OP_SOUND_LOOP) {
+        const v = cmd.v;
+        this.sounds.push({ kind: "loop", slot: cmd.a & 255, sound: (cmd.a >>> 8 & 65535) - 1, volume: v[0], at: v[4] >= 0.5 ? [v[1], v[2], v[3]] : null });
+      } else if (cmd.op === PHYS_OP_MIX) this.sounds.push({ kind: "mix", bus: cmd.a, volume: cmd.v[0] });
       else if (cmd.op === PHYS_OP_DEBRIS) {
         if (this.debris.length < MAX_BURSTS_QUEUED)
           this.debris.push({ debris: cmd.a & 255, at: [cmd.v[0], cmd.v[1], cmd.v[2]], velocity: [cmd.v[3], cmd.v[4], cmd.v[5]], scale: (cmd.a >>> 8 & 65535) / 16 });
@@ -6651,6 +6933,12 @@ var RuntimeChannel = class {
   takeDebris() {
     const out = this.debris;
     this.debris = [];
+    return out;
+  }
+  /** The sound commands since the last call (the sound system plays them). */
+  takeSounds() {
+    const out = this.sounds;
+    this.sounds = [];
     return out;
   }
   /** The particle bursts fired since the last call (the renderer draws them). */
@@ -8819,6 +9107,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.decodeKtx2 = async () => null;
     /** The camera's eye this frame (terrain blocks pick their detail by distance from it). */
     this.eye = null;
+    /** The last frame's view matrix (null before the first frame). */
+    this.lastView = null;
     /** Foliage blocks by mesh (EP11): their cull distance and bounds. */
     this.foliage = /* @__PURE__ */ new Map();
     /** Each terrain block's world bounds, measured on first use. */
@@ -9187,6 +9477,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       extent: this.scene.extent
     }) : this.autoOrbitCamera();
     const v = camera.view;
+    this.lastView = v;
     this.eye = [-(v[0] * v[12] + v[1] * v[13] + v[2] * v[14]), -(v[4] * v[12] + v[5] * v[13] + v[6] * v[14]), -(v[8] * v[12] + v[9] * v[13] + v[10] * v[14])];
     const { main: instances, front, moved } = this.posedInstances();
     const lighting = this.scene.lighting;
@@ -9501,6 +9792,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       byTint.set(tint, out);
     }
     return out;
+  }
+  /** Where the camera was last drawn from and which way it looked: what the scene's sound hears from (EP12). */
+  listenerPose() {
+    const v = this.lastView;
+    if (!v || !this.eye) return null;
+    return { eye: this.eye, forward: [-v[2], -v[6], -v[10]], up: [v[1], v[5], v[9]] };
   }
   /** Where the camera was last drawn from (null before the first frame). */
   eyePosition() {
@@ -13831,6 +14128,8 @@ var Player = class {
     this.container = container;
     this.options = options;
     this.gamepad = new GamepadState();
+    /** The scene's sounds (EP12), once loaded. */
+    this.sounds = null;
     /** The graphics preset in effect (resolved from the quality option once the renderer is known). */
     this.qualitySettings = QUALITY_PRESETS.high;
     /** Presented-frame clock for animation, kept in lockstep with the scene backdrop. */
@@ -14090,6 +14389,15 @@ var Player = class {
       }
       this.audio = new AudioController(sampleRate);
       this.audio.setVolume(this.options.volume ?? this.volume);
+      const sceneAudio = this.options.mesh?.audio;
+      if (sceneAudio) {
+        const mesh2 = this.options.mesh;
+        void SoundSystem.create(this.audio.audioContext, sceneAudio, this.audio.output, (id) => mesh2.instances.findIndex((i) => i.id === id)).then((system) => {
+          if (this.destroyed) system.dispose();
+          else this.sounds = system;
+        }).catch(() => {
+        });
+      }
       if (this.options.volume !== void 0) this.volume = this.options.volume;
       this.setupReplay(bytes, seed);
       this.renderSingleFrame();
@@ -14261,6 +14569,18 @@ var Player = class {
       for (const b of this.runtime.channel.takeBursts()) this.meshSurface?.burst(b.effect, b.at, b.dir, b.scale);
       for (const d of this.runtime.channel.takeDecals()) this.meshSurface?.decal(d.decal, d.at, d.normal, d.scale);
       for (const d of this.runtime.channel.takeDebris()) this.meshSurface?.throwDebris(d.debris, d.at, d.velocity, d.scale);
+      for (const c of this.runtime.channel.takeSounds()) {
+        if (!this.sounds) continue;
+        if (c.kind === "play") {
+          if (withSound) this.sounds.play(c.sound, c.volume, c.pitch, c.at);
+        } else if (c.kind === "loop") this.sounds.loop(c.slot, c.sound, c.volume, c.at);
+        else this.sounds.mix(c.bus, c.volume);
+      }
+    }
+    if (this.sounds && this.meshSurface) {
+      const pose = this.meshSurface.listenerPose();
+      if (pose) this.sounds.listen(pose.eye, pose.forward, pose.up);
+      this.sounds.follow(this.meshSurface.placements());
     }
     this.updateSpatialLoading();
     lap("runtime");
@@ -14613,6 +14933,7 @@ var Player = class {
     this.touch?.destroy();
     this.runtime?.channel.destroy();
     this.runtime = null;
+    this.sounds?.dispose();
     this.audio?.destroy();
     this.surface?.destroy();
     this.sceneRenderer?.dispose();
@@ -15405,6 +15726,7 @@ export {
   LIGHTS_CAPACITY,
   LIGHT_FLOATS,
   LIGHT_STRIDE,
+  LOOP_SLOTS,
   LightingLayer,
   LitCanvasSurface,
   MAILBOX_TYPE_ACHIEVEMENT,
@@ -15414,6 +15736,7 @@ export {
   MAX_EMITTERS,
   MAX_PARTICLES_PER_EMITTER,
   MAX_PYRAMID_LEVELS,
+  MAX_VOICES,
   MESH_CAM_ANGLE_SCALE,
   MESH_CAM_BASE,
   MESH_CAM_DIST_SCALE,
@@ -15459,6 +15782,7 @@ export {
   START_KEYS,
   SceneBackdropSurface,
   SoftwareSceneRenderer,
+  SoundSystem,
   SwitchableTransport,
   TILT_SHIFT_FEATHER,
   UNIFORM_BYTES_USED,
@@ -15484,6 +15808,7 @@ export {
   armDebugBlock,
   breakableLine,
   browserDeviceHints,
+  browserSpeaker,
   buildBillboardInstance,
   buildClipTable,
   buildOrbitCamera,

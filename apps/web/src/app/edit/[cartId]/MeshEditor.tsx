@@ -58,6 +58,7 @@ import { withAutoLods } from "@/lib/meshLods";
 import { DAB_SPACING, applyTerrainTool, findTerrain, replaceTerrain, strokeDabs } from "@/lib/terrainEdit";
 import { findFoliage, replaceFoliage } from "@/lib/foliageEdit";
 import { INITIAL_TERRAIN_EDIT, TerrainPanel, type TerrainEditState } from "./TerrainPanel";
+import { SoundsPanel } from "./SoundsPanel";
 import { clickSelection, copyPayload, duplicateEntries, pasteEntries, removeEntries, withSubtrees } from "@/lib/sceneSelection";
 import { placeAsset, type ContentAsset } from "@/lib/contentBrowser";
 import { ContentBrowser, type CodeAccess } from "./ContentBrowser";
@@ -886,6 +887,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay }: Mesh
         <ParticleEffectsPanel sidecar={sidecar} onChange={onSidecarChange} />
         <DecalsPanel sidecar={sidecar} onChange={onSidecarChange} />
         <DebrisPanel sidecar={sidecar} onChange={onSidecarChange} />
+        <SoundsPanel sidecar={sidecar} onChange={onSidecarChange} />
         <TimelinePanel sidecar={sidecar} onChange={onSidecarChange} view={view === "scene" ? sceneView : null} onPreview={onTimelinePreview} />
       </aside>
 

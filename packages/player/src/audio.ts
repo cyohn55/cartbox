@@ -62,6 +62,16 @@ export class AudioController {
     this.nextStartTime = startAt + buffer.duration;
   }
 
+  /** The context, for other sound (the scene's sounds, EP12) to play on. */
+  get audioContext(): AudioContext {
+    return this.context;
+  }
+
+  /** Where other sound joins the chip's: through the master volume, so it and pause cover everything. */
+  get output(): AudioNode {
+    return this.gain;
+  }
+
   /** Master volume, 0 (silent) .. 1 (full). */
   setVolume(volume: number): void {
     this.gain.gain.value = Math.max(0, Math.min(1, Number.isFinite(volume) ? volume : 1));

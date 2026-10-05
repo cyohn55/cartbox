@@ -36,6 +36,7 @@ import { packMeshLibrary } from "./meshLibrary";
 import { encodeLods, generateLods, type StoredLods } from "./meshSimplify";
 import { serializeFoliage, type FoliageLayer, type SerializedFoliage } from "./foliage";
 import { boulderMesh, driftMesh } from "./foliagePresets";
+import type { SceneAudio, SceneSound, SynthPreset } from "./sound";
 import { bakeNavMesh, boxTriangles, serializeNavMesh, type NavMesh } from "./navmesh";
 import { serializeTerrain, terrainMesh, type Terrain } from "./terrain";
 import type { SceneTimeline } from "./timeline";
@@ -1379,6 +1380,41 @@ export const LOCKOUT_FOLIAGE: readonly FoliageLayer[] = [
   },
 ];
 
+/**
+ * Lockout's sound (EP12): every weapon's report, the sword's swing and a
+ * grenade's blast synthesised from built-in recipes (positional, so a bot's
+ * fire across the map pans and fades), the wind moaning through the gorge,
+ * and the announcer calling multikills and sprees — a few hundred bytes.
+ */
+const gun = (id: string, synth: SynthPreset): SceneSound => ({ name: `fire_${id}`, source: { kind: "synth", synth }, bus: "sfx", volume: 0.8, range: [6, 90] });
+const vox = (name: string, text: string): SceneSound => ({ name, source: { kind: "speech", text }, bus: "voice", volume: 1 });
+export const LOCKOUT_AUDIO: SceneAudio = {
+  buses: [
+    { name: "sfx", volume: 0.9 },
+    { name: "voice", volume: 1 },
+    { name: "ambience", volume: 0.5 },
+  ],
+  sounds: [
+    gun("br", "rifle"),
+    gun("smg", "smg"),
+    gun("shotgun", "shotgun"),
+    gun("sniper", "sniper"),
+    gun("magnum", "pistol"),
+    gun("sword", "swing"),
+    { name: "blast", source: { kind: "synth", synth: "explosion" }, bus: "sfx", volume: 1, range: [8, 120] },
+    { name: "wind", source: { kind: "synth", synth: "wind" }, bus: "ambience", volume: 1, loop: true },
+    vox("v2", "Double kill"),
+    vox("v3", "Triple kill"),
+    vox("v4", "Overkill"),
+    vox("v5", "Killtacular"),
+    vox("s5", "Killing spree"),
+    vox("s10", "Killing frenzy"),
+    vox("s15", "Running riot"),
+    vox("jug", "Juggernaut"),
+  ],
+  emitters: [{ sound: "wind", volume: 1 }],
+};
+
 function lockoutFoliage(): SerializedFoliage[] {
   const t = lockoutTerrain();
   const meshes = [serializeMeshAsset(boulderMesh(11, [0.3, 0.31, 0.34])), serializeMeshAsset(driftMesh(5))];
@@ -2186,6 +2222,7 @@ export function lockoutMeshSidecar(): string {
       debris: LOCKOUT_DEBRIS,
       decalMarks: LOCKOUT_DECAL_MARKS,
       foliage: lockoutFoliage(),
+      audio: LOCKOUT_AUDIO,
     });
   }
   return meshSidecar;
@@ -2668,8 +2705,10 @@ function add_feed(txt, color)
   if #feed > 5 then table.remove(feed) end
 end
 
+local VOX={["Double Kill!"]="v2",["Triple Kill!"]="v3",["Overkill!"]="v4",["Killtacular!"]="v5",["Killing Spree!"]="s5",["Killing Frenzy!"]="s10",["Running Riot!"]="s15",JUGGERNAUT="jug"}
 function say(txt, color)
   announce.text=txt; announce.color=color or 12; announce.t=110
+  if VOX[txt] then cartbox.sound(VOX[txt]) end
 end
 
 -- Register a kill: scoring, sprees, multikills, feed, and juggernaut handover.
@@ -2733,6 +2772,7 @@ end
 
 local function explode(g)
   flash = math.max(flash, 3)
+  cartbox.sound("blast",g.x,g.y+0.2,g.z,1.4)
   cartbox.burst("blast", g.x, g.y+0.2, g.z, 0,1,0)
   cartbox.burst("smoke", g.x, g.y+0.3, g.z, 0,1,0)
   -- A soot burn on whatever it went off over.
@@ -2781,6 +2821,7 @@ local function player_fire()
   local aim,ad = auto_target()
   if aim and ad < 2.4 then
     p.cool=18; flash=3
+    cartbox.sound("fire_sword",nil,nil,nil,1,0.9+math.random()*0.2)
     -- The swipe's glowing arc, right to left across the view.
     local fx,fy,fz = forward()
     local rx,rz = fz, -fx
@@ -2799,6 +2840,7 @@ local function player_fire()
     p.slot=(p.slot==1) and 2 or 1; return
   end
   p.cool = w.cool; flash = 4
+  cartbox.sound("fire_"..wid,nil,nil,nil,0.7,0.96+math.random()*0.08)
   if p.slot==1 then p.a1=p.a1-1 else p.a2=p.a2-1 end
   local ex,ey,ez = p.x, p.y+EYE, p.z
   do local fx,_,fz = forward(); eject_casing(ex + fx*0.35, ey - 0.16, ez + fz*0.35, fx, fz) end
@@ -2975,6 +3017,7 @@ local function think_bot(o)
     o.cool=(o.cool or 0)-1
     if m < (w.rng or 40) and o.cool<=0 then
       o.cool = (w.cool or 10) + math.random(0,6)
+      cartbox.sound("fire_"..(w.melee and "sword" or (o.g1 or "br")),o.x,o.y+1.3,o.z,1,0.92+math.random()*0.16)
       if not w.melee and m > 0.01 and d3(o.x,o.y,o.z, p.x,p.y,p.z) < 25 then eject_casing(o.x + dx/m*0.3, o.y + 1.3, o.z + dz/m*0.3, dx/m, dz/m) end
       local acc = MODE.shields and 0.30 or 0.5    -- SWAT bots hit harder
       if w.melee then acc = (m < 3) and 0.9 or 0 end

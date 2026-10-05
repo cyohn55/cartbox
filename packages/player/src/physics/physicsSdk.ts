@@ -105,6 +105,9 @@ import {
   PHYS_OP_DECAL,
   PHYS_OP_RAGDOLL,
   PHYS_OP_DEBRIS,
+  PHYS_OP_MIX,
+  PHYS_OP_SOUND,
+  PHYS_OP_SOUND_LOOP,
   PHYS_OP_SHIELD,
   PHYS_AGENTS,
   PHYS_AGENT_BYTES,
@@ -170,7 +173,8 @@ export function sceneNeedsRuntime(scene: MeshScene | null | undefined, { physics
         Boolean(scene.streaming) ||
         (scene.effects?.length ?? 0) > 0 ||
         (scene.decals?.length ?? 0) > 0 ||
-        (scene.debris?.length ?? 0) > 0),
+        (scene.debris?.length ?? 0) > 0 ||
+        (scene.audio?.sounds.length ?? 0) > 0),
   );
 }
 
@@ -229,7 +233,7 @@ export function runtimeSdkLua(
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}${SHIELD_CALLS()}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}${SOUND_CALLS(scene)}${SHIELD_CALLS()}end`;
 }
 
 /** The physics calls (inside the runtime block's do … end, after its helpers). */
@@ -446,6 +450,64 @@ function DEBRIS_CALLS(scene: MeshScene): string {
   cartbox.debrislist = function()
     local out = {}
     for k, n in ipairs(_dbn) do out[k] = n end
+    return out
+  end
+`;
+}
+
+/**
+ * Sound (EP12), when the scene has any:
+ *
+ *   cartbox.sound(s, x, y, z, volume, pitch)  play a sound (by name or 1-based index)
+ *                                     once: from (x, y, z) when given (it pans and fades
+ *                                     with distance if the sound has a range), else
+ *                                     everywhere alike; volume (default 1, up to 4) and
+ *                                     pitch (default 1) scale it
+ *   cartbox.loop(slot, s, volume, x, y, z)  keep a sound looping in slot 1..16 (s nil
+ *                                     stops it); call it every tick to move or fade it —
+ *                                     only changes are sent
+ *   cartbox.mix(bus, volume)          set a mixer bus's volume (by name or 1-based index)
+ *   cartbox.sounds()                  -> { name, ... } the scene's sounds
+ */
+function SOUND_CALLS(scene: MeshScene): string {
+  const sounds = scene.audio?.sounds ?? [];
+  if (sounds.length === 0) return "";
+  const buses = scene.audio?.buses ?? [];
+  return `  local _snd = {${sounds.map((s, i) => `[${luaString(s.name)}]=${i}`).join(",")}}
+  local _sndn = {${sounds.map((s) => luaString(s.name)).join(",")}}
+  local _bus = {${buses.map((b, i) => `[${luaString(b.name)}]=${i}`).join(",")}}
+  local function _sound(s)
+    local i = s
+    if type(s) == "string" then i = _snd[s] elseif type(s) == "number" then i = s - 1 end
+    if i == nil or i < 0 or i >= ${sounds.length} then return nil end
+    return i
+  end
+  cartbox.sound = function(s, x, y, z, volume, pitch)
+    local i = _sound(s)
+    if i == nil then return end
+    local v = math.floor(math.max(0, math.min(4, volume or 1)) * 64 + 0.5)
+    _cmd(${PHYS_OP_SOUND}, i | (v << 8), x or 0, y or 0, z or 0, pitch or 1, x and 1 or 0)
+  end
+  local _loops = {}
+  cartbox.loop = function(slot, s, volume, x, y, z)
+    slot = math.floor(slot or 1) - 1
+    if slot < 0 or slot > 15 then return end
+    local i = s ~= nil and _sound(s) or nil
+    local key = i and string.format("%d %.2f %.1f %.1f %.1f", i, volume or 1, x or 0, y or 0, z or 0) or "off"
+    if _loops[slot] == key or (key == "off" and _loops[slot] == nil) then return end
+    if _cmd(${PHYS_OP_SOUND_LOOP}, slot | ((i and i + 1 or 0) << 8), volume or 1, x or 0, y or 0, z or 0, x and 1 or 0) then
+      _loops[slot] = key ~= "off" and key or nil
+    end
+  end
+  cartbox.mix = function(b, volume)
+    local i = b
+    if type(b) == "string" then i = _bus[b] elseif type(b) == "number" then i = b - 1 end
+    if i == nil or i < 0 or i >= ${buses.length} then return end
+    _cmd(${PHYS_OP_MIX}, i, math.max(0, math.min(2, volume or 1)))
+  end
+  cartbox.sounds = function()
+    local out = {}
+    for k, n in ipairs(_sndn) do out[k] = n end
     return out
   end
 `;
