@@ -56,6 +56,7 @@ import {
 import { MODELS, createSceneRenderer, type SceneDraw, type SceneRenderer } from "@cartbox/player";
 
 import { readMeshEntry, setMeshTransform, type MeshSidecar } from "@/lib/meshSidecar";
+import { brushRing, terrainRayHit } from "@/lib/terrainEdit";
 import { decodeMeshTextures } from "@/lib/meshImport";
 import { type Vec3 } from "@/lib/scenePick";
 import {
@@ -156,6 +157,13 @@ interface SceneViewportProps {
   onView?: (view: ViewpointKey) => void;
   /** An asset dragged in from the content browser, and where it landed in the world. */
   onDropAsset?: (data: string, at: Vec3) => void;
+  /**
+   * A terrain tool is up (EP10): the left button brushes terrain `id` instead
+   * of selecting, with the brush's rim drawn on the ground under the cursor.
+   */
+  terrainBrush?: { readonly id: string; readonly radius: number } | null;
+  /** Each point a brush stroke passes over, in the terrain's own space; `start` on the stroke's first. */
+  onTerrainStroke?: (id: string, x: number, z: number, start: boolean) => void;
 }
 
 /** A decoded mesh + its base-colour textures, rebuilt only when the geometry set changes. */
@@ -218,7 +226,7 @@ function frameSize(cssW: number, cssH: number, dpr: number, budget: number): { w
 
 const NO_IDS: ReadonlySet<string> = new Set();
 
-export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectIds, hidden = NO_IDS, locked = NO_IDS, onKey, previewCamera, previewLocals, onView, onDropAsset }: SceneViewportProps) {
+export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectIds, hidden = NO_IDS, locked = NO_IDS, onKey, previewCamera, previewLocals, onView, onDropAsset, terrainBrush = null, onTerrainStroke }: SceneViewportProps) {
   const selectedId = selectedIds.at(-1) ?? null;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -272,7 +280,8 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   /** Fog is drawn as the game draws it, but seen from far out it can hide the scene: it can be turned off here. */
   const [showFog, setShowFog] = useState(true);
   const [terrains, setTerrains] = useState<PreviewTerrain[]>([]);
-  const terrainSignature = (sidecar.terrains ?? []).map((t) => `${t.id}:${t.samples}:${t.heights.length}:${t.parent ?? ""}`).join("|");
+  // Everything about the terrains (a brush stroke changes their heights, paint and holes).
+  const terrainSignature = useMemo(() => JSON.stringify(sidecar.terrains ?? []), [sidecar.terrains]);
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -430,9 +439,11 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   // The first time there's something to look at, frame it from above and to one
   // side — tilted up, if need be, until the eye clears any terrain.
   useEffect(() => {
-    if (cameraRef.current || decoded.length === 0) return;
+    if (cameraRef.current || (decoded.length === 0 && terrains.length === 0)) return;
     let pitch = 0.4;
-    const at = (p: number) => frame(cameraLookingAt(bounds.center, 0.6, p, 1), bounds.center, bounds.radius, aspect);
+    // No objects yet (a new terrain alone): frame the terrain.
+    const sphere = decoded.length > 0 ? bounds : reach;
+    const at = (p: number) => frame(cameraLookingAt(sphere.center, 0.6, p, 1), sphere.center, sphere.radius, aspect);
     const buried = (cam: ViewportCamera) =>
       terrainInstances.some((inst, k) => {
         const t = terrains[k]?.terrain;
@@ -441,7 +452,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
       });
     while (pitch < 1.4 && buried(at(pitch))) pitch += 0.05;
     setCamera(at(pitch));
-  }, [decoded, bounds, aspect, terrainInstances, terrains, setCamera]);
+  }, [decoded, bounds, reach, aspect, terrainInstances, terrains, setCamera]);
 
   const frameSelection = useCallback(() => {
     const cam = cameraRef.current;
@@ -465,7 +476,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   );
 
   // Anything drawn changing redraws.
-  useEffect(markDirty, [markDirty, instances, terrainInstances, shadow, sidecar.lighting, showFog, selectedIds, locked, previewCamera, size, renderer, mode, space]);
+  useEffect(markDirty, [markDirty, instances, terrainInstances, shadow, sidecar.lighting, showFog, selectedIds, locked, previewCamera, size, renderer, mode, space, terrainBrush]);
 
   // --- Drawing ------------------------------------------------------------------
 
@@ -473,8 +484,8 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   const sceneCanvas = useMemo(() => (typeof document === "undefined" ? null : document.createElement("canvas")), []);
 
   // Everything the frame loop reads, refreshed every render.
-  const live = useRef({ instances, terrainInstances, shadow, local, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize });
-  live.current = { instances, terrainInstances, shadow, local, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize };
+  const live = useRef({ instances, terrainInstances, terrains, terrainBrush, shadow, local, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize });
+  live.current = { instances, terrainInstances, terrains, terrainBrush, shadow, local, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize };
   /** The box select being dragged, in canvas pixels. */
   const marquee = useRef<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
 
@@ -592,6 +603,34 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
         }
       }
 
+      // The terrain brush's rim, on the ground under the cursor.
+      const under = brushHover.current;
+      const brushNow = live.current.terrainBrush;
+      if (brushNow && under && !preview) {
+        const k = live.current.terrains.findIndex((t) => t.terrain.id === brushNow.id);
+        const inst = live.current.terrainInstances[k];
+        const t = live.current.terrains[k]?.terrain;
+        if (inst && t) {
+          const pts = brushRing(t, inst.model, under[0], under[1], brushNow.radius).map((p) => project(viewProj, p, s.width, s.height));
+          context.save();
+          context.strokeStyle = "#ffd36b";
+          context.lineWidth = Math.max(1, s.width / (css?.w ?? s.width)) * 1.5;
+          context.beginPath();
+          let pen = false;
+          for (const p of pts) {
+            if (!p) {
+              pen = false;
+              continue;
+            }
+            if (pen) context.lineTo(p[0], p[1]);
+            else context.moveTo(p[0], p[1]);
+            pen = true;
+          }
+          context.stroke();
+          context.restore();
+        }
+      }
+
       const box = marquee.current;
       if (box) {
         context.save();
@@ -618,7 +657,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
 
   // --- Pointer and keys ---------------------------------------------------------
 
-  type DragKind = "tool" | "orbit" | "pan" | "look" | "gizmo" | "box";
+  type DragKind = "tool" | "orbit" | "pan" | "look" | "gizmo" | "box" | "brush";
   /** One selected object a gizmo drag moves: where it started, in its parent's space and the world's. */
   interface Moving {
     readonly id: string;
@@ -676,11 +715,37 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
     return handle && origin ? { handle, frame: frameNow, origin } : null;
   };
 
+  /** The terrain point under the cursor for the brush (terrain space x, z), or null. */
+  const brushHover = useRef<readonly [number, number] | null>(null);
+  const terrainUnder = (event: { clientX: number; clientY: number }, el: HTMLCanvasElement): readonly [number, number] | null => {
+    const cam = cameraRef.current;
+    if (!terrainBrush || !cam) return null;
+    const k = terrains.findIndex((t) => t.terrain.id === terrainBrush.id);
+    const inst = terrainInstances[k];
+    const t = terrains[k]?.terrain;
+    if (!inst || !t) return null;
+    const { ndc } = pointerAt(event, el);
+    const hit = terrainRayHit(t, inst.model, viewportRay(cam, aspect, ndc[0], ndc[1]));
+    return hit ? [hit.local[0], hit.local[2]] : null;
+  };
+  const brushAt = (event: { clientX: number; clientY: number }, el: HTMLCanvasElement, start: boolean) => {
+    const at = terrainUnder(event, el);
+    brushHover.current = at;
+    markDirty();
+    if (at && terrainBrush) onTerrainStroke?.(terrainBrush.id, at[0], at[1], start);
+  };
+
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
     event.currentTarget.focus();
     const cam = cameraRef.current;
     const plainLeft = event.button === 0 && !event.altKey;
+    if (plainLeft && terrainBrush) {
+      // A terrain tool is up: the left button brushes the ground.
+      drag.current = { kind: "brush", x: event.clientX, y: event.clientY, moved: false };
+      brushAt(event, event.currentTarget, true);
+      return;
+    }
     if (plainLeft && cam) {
       const grabbed = handleUnder(event, event.currentTarget);
       const primary = selectedId ? moving(selectedId) : null;
@@ -712,6 +777,16 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const state = drag.current;
     const cam = cameraRef.current;
+    if (state?.kind === "brush") {
+      brushAt(event, event.currentTarget, false);
+      return;
+    }
+    if (!state && terrainBrush) {
+      // Hovering with a terrain tool: the brush's rim follows the cursor.
+      brushHover.current = terrainUnder(event, event.currentTarget);
+      markDirty();
+      return;
+    }
     if (!state) {
       // Hovering: light up the handle under the cursor.
       const under = handleUnder(event, event.currentTarget)?.handle ?? null;
@@ -1017,7 +1092,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
           onContextMenu={(event) => event.preventDefault()}
           onDragOver={onDragOver}
           onDrop={onDrop}
-          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", touchAction: "none", cursor: mode === "orbit" ? "grab" : "crosshair", outline: "none" }}
+          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", touchAction: "none", cursor: terrainBrush ? "crosshair" : mode === "orbit" ? "grab" : "crosshair", outline: "none" }}
           role="img"
           aria-label="3D scene — click to select; drag to orbit or transform; right-drag with WASD to fly; middle- or Shift-drag to pan; wheel to dolly; F frames the selection"
         />

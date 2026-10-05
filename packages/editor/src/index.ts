@@ -258,10 +258,25 @@ export {
   terrainHeight,
   terrainMesh,
   terrainLayerWeights,
+  paintedWeights,
+  terrainHole,
   type SerializedTerrain,
   type Terrain,
   type TerrainLayer,
 } from "./model/terrain";
+export {
+  bakeTerrainPaint,
+  brushFalloff,
+  cutTerrainHoles,
+  defaultTerrainLayers,
+  newTerrain,
+  paintTerrain,
+  raycastTerrain,
+  sculptTerrain,
+  terrainHoleAt,
+  type SculptTool,
+  type TerrainBrush,
+} from "./model/terrainBrush";
 export { decompressGltf, gltfCompression, type DracoAttributeRequest, type DracoDecoded, type GltfDecoders } from "./model/gltfCompression";
 export {
   ANIMATOR_LIMITS,
