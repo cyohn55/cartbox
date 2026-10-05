@@ -4172,6 +4172,8 @@ import {
   resolveMeshRef,
   viewMatrix,
   decodeLods,
+  foliageBlocks,
+  readFoliage,
   parseParticleEffects,
   parseDecalDefs,
   parseDecalMarks,
@@ -4362,6 +4364,36 @@ function parseMeshScene(raw) {
         terrain: true,
         ...t.castShadows ? { casts: true } : {},
         detail: chunk.detail
+      });
+    }
+  }
+  const storedFoliage = parsed.foliage;
+  if (Array.isArray(storedFoliage)) {
+    for (const raw2 of storedFoliage) {
+      const read = readFoliage(raw2, terrains);
+      if (!read) continue;
+      const text = resolveMeshRef(read.mesh, library);
+      const mesh = text ? load(text) : null;
+      const t = terrains.find((x) => x.id === read.layer.terrain);
+      if (!mesh || !t) continue;
+      const parent = t.parent !== void 0 ? indexOf.get(t.parent) ?? -1 : -1;
+      const model = parent >= 0 ? instances[parent].model : identity;
+      foliageBlocks(t, read.layer, mesh).forEach((block, k) => {
+        instances.push({
+          mesh: block.mesh,
+          model,
+          local: identity,
+          parent,
+          id: `foliage:${read.layer.id}:${k}`,
+          name: read.layer.name,
+          tags: [],
+          props: {},
+          physics: null,
+          terrain: true,
+          // On a terrain that casts, its foliage casts too (boulders shade the snow).
+          ...t.castShadows ? { casts: true } : {},
+          foliage: { cull: read.layer.cull, center: block.center, radius: block.radius }
+        });
       });
     }
   }
@@ -8787,6 +8819,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.decodeKtx2 = async () => null;
     /** The camera's eye this frame (terrain blocks pick their detail by distance from it). */
     this.eye = null;
+    /** Foliage blocks by mesh (EP11): their cull distance and bounds. */
+    this.foliage = /* @__PURE__ */ new Map();
     /** Each terrain block's world bounds, measured on first use. */
     this.blockBounds = /* @__PURE__ */ new Map();
     this.destroyed = false;
@@ -8993,6 +9027,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     }
     const surface = new _MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
     for (const [i, mesh] of live) surface.live.set(i, mesh);
+    scene.instances.forEach((instance, i) => {
+      if (instance.foliage) surface.foliage.set(instances[i].mesh, instance.foliage);
+    });
     surface.decodeKtx2 = decodeKtx2;
     if (scene.effects && scene.effects.length > 0) surface.particles = new ParticleSystem(scene.effects);
     if (scene.decals && scene.decals.length > 0) surface.decals = new DecalSystem(scene.decals, scene.decalMarks ?? []);
@@ -9170,7 +9207,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       profiler.add("sky", now - mark);
       mark = now;
     }
-    let drawn = instances;
+    let drawn = this.foliage.size > 0 ? instances.filter((i) => this.foliageInReach(i)) : instances;
     if (this.decals) {
       this.decals.step(1 / 60);
       const marks = this.decals.sceneInstance();
@@ -9468,6 +9505,17 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   /** Where the camera was last drawn from (null before the first frame). */
   eyePosition() {
     return this.eye;
+  }
+  /** Whether an instance is in reach of the eye: anything but a foliage block is; a block is within its cull distance. */
+  foliageInReach(instance) {
+    const f2 = this.foliage.get(instance.mesh);
+    if (!f2 || !this.eye) return true;
+    const m = instance.model;
+    const [x, y, z] = f2.center;
+    const cx = m[0] * x + m[4] * y + m[8] * z + m[12];
+    const cy = m[1] * x + m[5] * y + m[9] * z + m[13];
+    const cz = m[2] * x + m[6] * y + m[10] * z + m[14];
+    return Math.hypot(cx - this.eye[0], cy - this.eye[1], cz - this.eye[2]) - f2.radius < f2.cull * this.quality.terrainDetail;
   }
   /**
    * A terrain block at the detail its distance from the eye calls for: full

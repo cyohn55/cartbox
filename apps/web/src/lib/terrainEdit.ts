@@ -24,11 +24,12 @@ import {
 
 import type { MeshSidecar } from "./meshSidecar";
 
-/** What a stroke does: sculpt the ground, paint a layer, or cut (or fill) holes. */
+/** What a stroke does: sculpt the ground, paint a layer, cut (or fill) holes, or paint (or erase) a foliage layer. */
 export type TerrainTool =
   | { readonly kind: "sculpt"; readonly op: SculptTool }
   | { readonly kind: "paint"; readonly layer: number }
-  | { readonly kind: "hole"; readonly fill: boolean };
+  | { readonly kind: "hole"; readonly fill: boolean }
+  | { readonly kind: "foliage"; readonly layer: string; readonly erase: boolean };
 
 /** The brush settings: radius in world units, strength 0..1. */
 export interface TerrainBrushSettings {
@@ -56,12 +57,14 @@ export function replaceTerrain(sidecar: MeshSidecar, terrain: Terrain): MeshSide
   return { ...sidecar, terrains: (sidecar.terrains ?? []).map((t) => (t.id === terrain.id ? stored : t)) };
 }
 
+/** Remove a terrain, and the foliage growing on it. */
 export function removeTerrain(sidecar: MeshSidecar, id: string): MeshSidecar {
   const terrains = (sidecar.terrains ?? []).filter((t) => t.id !== id);
-  if (terrains.length > 0) return { ...sidecar, terrains };
-  const { terrains: _gone, ...rest } = sidecar;
+  const foliage = (sidecar.foliage ?? []).filter((f) => f.terrain !== id);
+  const { terrains: _gone, foliage: _plants, ...rest } = sidecar;
   void _gone;
-  return rest;
+  void _plants;
+  return { ...rest, ...(terrains.length > 0 ? { terrains } : {}), ...(foliage.length > 0 ? { foliage } : {}) };
 }
 
 /** A terrain on the sidecar, decoded, or null. */
@@ -70,11 +73,12 @@ export function findTerrain(sidecar: MeshSidecar, id: string): Terrain | null {
   return stored ? readTerrain(stored) : null;
 }
 
-/** One dab of a tool. `level` is the flatten height (terrain space) the stroke holds. */
+/** One dab of a tool that changes the ground (foliage tools leave it be). `level` is the flatten height (terrain space) the stroke holds. */
 export function applyTerrainTool(t: Terrain, tool: TerrainTool, brush: TerrainBrush, level?: number): Terrain {
   if (tool.kind === "sculpt") return sculptTerrain(t, tool.op, brush, level);
   if (tool.kind === "paint") return paintTerrain(t, tool.layer, brush);
-  return cutTerrainHoles(t, brush, tool.fill);
+  if (tool.kind === "hole") return cutTerrainHoles(t, brush, tool.fill);
+  return t;
 }
 
 /** A stroke's dabs land a quarter of the brush apart, so a fast drag lays as much as a slow one. */

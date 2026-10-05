@@ -34,6 +34,8 @@ import type { SceneLight } from "../render/meshRasterizer";
 import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, type Streams } from "./seedGeometry";
 import { packMeshLibrary } from "./meshLibrary";
 import { encodeLods, generateLods, type StoredLods } from "./meshSimplify";
+import { serializeFoliage, type FoliageLayer, type SerializedFoliage } from "./foliage";
+import { boulderMesh, driftMesh } from "./foliagePresets";
 import { bakeNavMesh, boxTriangles, serializeNavMesh, type NavMesh } from "./navmesh";
 import { serializeTerrain, terrainMesh, type Terrain } from "./terrain";
 import type { SceneTimeline } from "./timeline";
@@ -1345,6 +1347,44 @@ export function lockoutTerrain(): Terrain {
   return terrain;
 }
 
+/**
+ * Lockout's foliage (EP11): boulders strewn over the range's slopes and snow
+ * drifts banked on its flats, filled by rules (nothing stored per copy) and
+ * kept back from the gorge so none of it reaches the play space.
+ */
+export const LOCKOUT_FOLIAGE: readonly FoliageLayer[] = [
+  {
+    id: "lockout-boulders",
+    name: "Boulders",
+    terrain: "lockout-range",
+    density: 0.5,
+    scale: [1.2, 4.2],
+    align: 0.85,
+    sink: 0.15,
+    cull: 260,
+    copies: [],
+    fill: { seed: 41, up: [0.45, 0.93], height: [-40, 400], clear: [TERRAIN_SIZE / 2, TERRAIN_SIZE / 2, 48] },
+  },
+  {
+    id: "lockout-drifts",
+    name: "Snow drifts",
+    terrain: "lockout-range",
+    density: 0.7,
+    scale: [1.4, 4],
+    align: 1,
+    sink: 0.05,
+    cull: 220,
+    copies: [],
+    fill: { seed: 7, up: [0.84, 1], height: [-20, 400], clear: [TERRAIN_SIZE / 2, TERRAIN_SIZE / 2, 48] },
+  },
+];
+
+function lockoutFoliage(): SerializedFoliage[] {
+  const t = lockoutTerrain();
+  const meshes = [serializeMeshAsset(boulderMesh(11, [0.3, 0.31, 0.34])), serializeMeshAsset(driftMesh(5))];
+  return LOCKOUT_FOLIAGE.map((layer, k) => serializeFoliage(t, layer, meshes[k]!));
+}
+
 /** Triangles the landscape draws (it isn't part of the arena's budget). */
 export function lockoutTerrainTriangles(): number {
   return terrainMesh(lockoutTerrain()).primitives.reduce((n, p) => n + p.indices.length / 3, 0);
@@ -2145,6 +2185,7 @@ export function lockoutMeshSidecar(): string {
       ],
       debris: LOCKOUT_DEBRIS,
       decalMarks: LOCKOUT_DECAL_MARKS,
+      foliage: lockoutFoliage(),
     });
   }
   return meshSidecar;

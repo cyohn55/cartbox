@@ -35,8 +35,11 @@ import {
   sceneLightingKeyDirection,
   sceneLightingTonemap,
   terrainHeight,
+  eraseFoliage,
+  paintFoliage,
   type MeshAsset,
   type DecodedTexture,
+  type FoliageLayer,
   type Terrain,
 } from "@cartbox/editor";
 
@@ -53,6 +56,7 @@ import {
 } from "@/lib/meshSidecar";
 import { withAutoLods } from "@/lib/meshLods";
 import { DAB_SPACING, applyTerrainTool, findTerrain, replaceTerrain, strokeDabs } from "@/lib/terrainEdit";
+import { findFoliage, replaceFoliage } from "@/lib/foliageEdit";
 import { INITIAL_TERRAIN_EDIT, TerrainPanel, type TerrainEditState } from "./TerrainPanel";
 import { clickSelection, copyPayload, duplicateEntries, pasteEntries, removeEntries, withSubtrees } from "@/lib/sceneSelection";
 import { placeAsset, type ContentAsset } from "@/lib/contentBrowser";
@@ -190,9 +194,32 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay }: Mesh
   };
   /** The stroke in progress: the terrain as it's been brushed so far, the last dab, and the level a flatten holds. */
   const strokeRef = useRef<{ terrain: Terrain; last: readonly [number, number] | null; level?: number } | null>(null);
+  /** A foliage stroke in progress: the layer as painted so far, its mesh, the terrain it grows on, the last dab, and a seed per dab. */
+  const foliageStrokeRef = useRef<{ layer: FoliageLayer; mesh: string; terrain: Terrain; last: readonly [number, number] | null; seed: number } | null>(null);
   const onTerrainStroke = (id: string, x: number, z: number, start: boolean) => {
     const { tool, radius, strength } = terrainEdit;
     if (!tool) return;
+    if (tool.kind === "foliage") {
+      if (start || !foliageStrokeRef.current || foliageStrokeRef.current.layer.id !== tool.layer) {
+        const found = findFoliage(sidecar, tool.layer);
+        const t = found ? findTerrain(sidecar, found.layer.terrain) : null;
+        if (!found || !t) return;
+        foliageStrokeRef.current = { layer: found.layer, mesh: found.mesh, terrain: t, last: null, seed: Math.floor(Math.random() * 2 ** 31) };
+      }
+      const f = foliageStrokeRef.current;
+      const { dabs, last } = strokeDabs(f.last, [x, z], radius);
+      if (dabs.length === 0) return;
+      let layer = f.layer;
+      for (const [dx, dz] of dabs) {
+        const brush = { x: dx, z: dz, radius, strength: strength * 0.5 };
+        f.seed += 1;
+        layer = tool.erase ? eraseFoliage(layer, brush, f.seed) : paintFoliage(f.terrain, layer, brush, f.seed);
+      }
+      f.layer = layer;
+      f.last = last;
+      onSidecarChange(replaceFoliage(sidecar, layer, f.mesh));
+      return;
+    }
     if (start || !strokeRef.current || strokeRef.current.terrain.id !== id) {
       const t = findTerrain(sidecar, id);
       if (!t) return;

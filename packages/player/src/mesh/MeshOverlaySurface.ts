@@ -66,7 +66,7 @@ import type { ScreenSun } from "../fx/PostFxSurface.js";
 import { SoftwareSceneRenderer, type SceneRenderer } from "../render/sceneRenderer.js";
 import type { MailboxMeshCamera, MailboxMeshPose, WorldLight } from "../mailbox.js";
 import type { LocalShadowTile, LocalShadows, ShadowCascade, ShadowInput, SceneLight, SceneLighting } from "@cartbox/editor";
-import type { MeshScene } from "./meshScene.js";
+import type { MeshInstance, MeshScene } from "./meshScene.js";
 import { QUALITY_PRESETS, type QualitySettings } from "../quality.js";
 import { buildOrbitCamera, orbitPitchAboveTerrain } from "./meshScene.js";
 import { sceneColliders } from "./sceneColliders.js";
@@ -552,6 +552,9 @@ export class MeshOverlaySurface implements DisplaySurface {
     }
     const surface = new MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
     for (const [i, mesh] of live) surface.live.set(i, mesh);
+    scene.instances.forEach((instance, i) => {
+      if (instance.foliage) surface.foliage.set(instances[i]!.mesh, instance.foliage);
+    });
     surface.decodeKtx2 = decodeKtx2;
     // 3D particle effects the cart fires with cartbox.burst.
     if (scene.effects && scene.effects.length > 0) surface.particles = new ParticleSystem(scene.effects);
@@ -770,7 +773,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       mark = now;
     }
     // Particles: stepped on the frame clock and drawn as billboards facing this camera.
-    let drawn: readonly MeshSceneInstance[] = instances;
+    // Foliage blocks past their layer's cull distance aren't drawn (EP11).
+    let drawn: readonly MeshSceneInstance[] = this.foliage.size > 0 ? instances.filter((i) => this.foliageInReach(i)) : instances;
     if (this.decals) {
       this.decals.step(1 / 60);
       const marks = this.decals.sceneInstance();
@@ -1117,6 +1121,21 @@ export class MeshOverlaySurface implements DisplaySurface {
   eyePosition(): readonly [number, number, number] | null {
     return this.eye;
   }
+  /** Foliage blocks by mesh (EP11): their cull distance and bounds. */
+  private readonly foliage = new Map<MeshAsset, NonNullable<MeshInstance["foliage"]>>();
+
+  /** Whether an instance is in reach of the eye: anything but a foliage block is; a block is within its cull distance. */
+  private foliageInReach(instance: MeshSceneInstance): boolean {
+    const f = this.foliage.get(instance.mesh);
+    if (!f || !this.eye) return true;
+    const m = instance.model;
+    const [x, y, z] = f.center;
+    const cx = m[0]! * x + m[4]! * y + m[8]! * z + m[12]!;
+    const cy = m[1]! * x + m[5]! * y + m[9]! * z + m[13]!;
+    const cz = m[2]! * x + m[6]! * y + m[10]! * z + m[14]!;
+    return Math.hypot(cx - this.eye[0], cy - this.eye[1], cz - this.eye[2]) - f.radius < f.cull * this.quality.terrainDetail;
+  }
+
   /** Each terrain block's world bounds, measured on first use. */
   private readonly blockBounds = new Map<number, readonly number[]>();
 

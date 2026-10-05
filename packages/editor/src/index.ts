@@ -71,6 +71,7 @@ export {
   LOCKOUT_EFFECTS,
   LOCKOUT_RAGDOLL_COLLIDERS,
   LOCKOUT_DEBRIS,
+  LOCKOUT_FOLIAGE,
   LOCKOUT_DECALS,
   LOCKOUT_DECAL_MARKS,
   lockoutNavMesh,
@@ -277,6 +278,28 @@ export {
   type SculptTool,
   type TerrainBrush,
 } from "./model/terrainBrush";
+export {
+  FOLIAGE_BLOCK,
+  MAX_FOLIAGE_COPIES,
+  copyMatrix,
+  eraseFoliage,
+  fillCopies,
+  foliageBlocks,
+  foliageRandom,
+  groundAt,
+  layerCopies,
+  packFoliageCopies,
+  paintFoliage,
+  readFoliage,
+  serializeFoliage,
+  unpackFoliageCopies,
+  type FoliageBlock,
+  type FoliageCopy,
+  type FoliageFill,
+  type FoliageLayer,
+  type SerializedFoliage,
+} from "./model/foliage";
+export { boulderMesh, driftMesh, foliagePreset, grassMesh, pineMesh, type FoliagePreset } from "./model/foliagePresets";
 export { decompressGltf, gltfCompression, type DracoAttributeRequest, type DracoDecoded, type GltfDecoders } from "./model/gltfCompression";
 export {
   ANIMATOR_LIMITS,

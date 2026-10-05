@@ -10,6 +10,9 @@
 
 import { useState } from "react";
 
+import { foliageRandom, layerCopies, type FoliageLayer, type FoliagePreset } from "@cartbox/editor";
+
+import { addFoliage, foliageOn, removeFoliage, replaceFoliage } from "@/lib/foliageEdit";
 import { type MeshSidecar } from "@/lib/meshSidecar";
 import { addTerrain, findTerrain, removeTerrain, replaceTerrain, type TerrainBrushSettings, type TerrainTool } from "@/lib/terrainEdit";
 import styles from "./editor.module.css";
@@ -123,6 +126,8 @@ export function TerrainPanel({
             })}
           </div>
 
+          <FoliageSection sidecar={sidecar} onChange={onChange} terrainId={terrain.id} edit={edit} onEdit={(next) => onEdit({ ...next, id })} />
+
           <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
             {terrain.paint && (
               <button type="button" className="cbx-btn" onClick={() => onChange(replaceTerrain(sidecar, { ...terrain, paint: undefined }))} title="Forget the painting: the layers follow their slope and height rules again">
@@ -163,4 +168,134 @@ export function TerrainPanel({
       </details>
     </RailGroup>
   );
+}
+
+const PRESETS: readonly FoliagePreset[] = ["boulder", "drift", "grass", "pine"];
+
+/**
+ * Foliage on the terrain (EP11): its layers — paint or erase each with the
+ * brush, fill it across the ground by slope and height, and set its density,
+ * size, slope alignment and draw distance.
+ */
+function FoliageSection({
+  sidecar,
+  onChange,
+  terrainId,
+  edit,
+  onEdit,
+}: {
+  sidecar: MeshSidecar;
+  onChange: (next: MeshSidecar) => void;
+  terrainId: string;
+  edit: TerrainEditState;
+  onEdit: (next: TerrainEditState) => void;
+}) {
+  const [source, setSource] = useState<string>("preset:boulder");
+  const layers = foliageOn(sidecar, terrainId);
+  const terrain = (sidecar.terrains ?? []).find((t) => t.id === terrainId);
+  const activeId = edit.tool?.kind === "foliage" ? edit.tool.layer : null;
+  const [open, setOpen] = useState<string | null>(null);
+  const shown = activeId ?? open;
+  const set = (found: { layer: FoliageLayer; mesh: string }, patch: Partial<FoliageLayer>) => onChange(replaceFoliage(sidecar, { ...found.layer, ...patch }, found.mesh));
+  const add = () => {
+    const made = source.startsWith("preset:") ? addFoliage(sidecar, terrainId, { preset: source.slice(7) as FoliagePreset }) : addFoliage(sidecar, terrainId, { from: source.slice(7) });
+    if (!made) return;
+    onChange(made.sidecar);
+    setOpen(made.id);
+    onEdit({ ...edit, tool: { kind: "foliage", layer: made.id, erase: false } });
+  };
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ fontSize: 11, opacity: 0.7 }}>Foliage — scatter meshes over the ground</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+        {layers.map((found) => {
+          const { layer } = found;
+          const painting = edit.tool?.kind === "foliage" && edit.tool.layer === layer.id && !edit.tool.erase;
+          const erasing = edit.tool?.kind === "foliage" && edit.tool.layer === layer.id && edit.tool.erase;
+          const total = terrain ? layerCopiesCount(sidecar, found) : layer.copies.length;
+          return (
+            <div key={layer.id} style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 6, padding: 6 }}>
+              <button type="button" className="cbx-btn" style={{ width: "100%", textAlign: "left" }} onClick={() => setOpen(shown === layer.id ? null : layer.id)} aria-expanded={shown === layer.id} title="Show this layer's settings">
+                {shown === layer.id ? "▾" : "▸"} {layer.name} · {total.toLocaleString()}
+              </button>
+              <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
+                <button type="button" className={`${styles.toolBtn} ${painting ? styles.toolBtnActive : ""}`} aria-pressed={painting} style={{ flex: 1, justifyContent: "center" }} title={`Paint ${layer.name} with the brush`} onClick={() => onEdit({ ...edit, tool: painting ? null : { kind: "foliage", layer: layer.id, erase: false } })}>
+                  Paint
+                </button>
+                <button type="button" className={`${styles.toolBtn} ${erasing ? styles.toolBtnActive : ""}`} aria-pressed={erasing} style={{ flex: 1, justifyContent: "center" }} title="Erase painted copies with the brush" onClick={() => onEdit({ ...edit, tool: erasing ? null : { kind: "foliage", layer: layer.id, erase: true } })}>
+                  Erase
+                </button>
+              </div>
+              {shown === layer.id && (
+                <>
+                  <RangeControl label="Density" nested min={0.1} max={100} step={0.1} value={layer.density} onChange={(density) => set(found, { density })} ariaLabel={`${layer.name} density`} display={`${layer.density.toFixed(1)} / 100 m²`} />
+                  <RangeControl label="Smallest" nested min={0.1} max={5} step={0.05} value={layer.scale[0]} onChange={(v) => set(found, { scale: [v, Math.max(v, layer.scale[1])] })} ariaLabel={`${layer.name} smallest size`} display={`×${layer.scale[0].toFixed(2)}`} />
+                  <RangeControl label="Largest" nested min={0.1} max={5} step={0.05} value={layer.scale[1]} onChange={(v) => set(found, { scale: [Math.min(v, layer.scale[0]), v] })} ariaLabel={`${layer.name} largest size`} display={`×${layer.scale[1].toFixed(2)}`} />
+                  <RangeControl label="Follow slope" nested min={0} max={1} step={0.05} value={layer.align} onChange={(align) => set(found, { align })} ariaLabel={`${layer.name} slope alignment`} display={`${Math.round(layer.align * 100)}%`} />
+                  <RangeControl label="Draw distance" nested min={10} max={600} step={10} value={layer.cull} onChange={(cull) => set(found, { cull })} ariaLabel={`${layer.name} draw distance`} display={`${layer.cull} m`} />
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginTop: 6 }}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(layer.fill)}
+                      onChange={(event) => set(found, { fill: event.target.checked ? { seed: Math.floor(foliageRandom(Date.now())() * 1e6), up: [0.6, 1] } : undefined })}
+                    />
+                    Fill the ground by rules
+                  </label>
+                  {layer.fill && (
+                    <>
+                      <RangeControl label="Steepest slope" nested min={0} max={90} step={1} value={Math.round((Math.acos(Math.max(0, Math.min(1, layer.fill.up?.[0] ?? 0))) * 180) / Math.PI)} onChange={(deg) => set(found, { fill: { ...layer.fill!, up: [Math.cos((deg * Math.PI) / 180), 1] } })} ariaLabel={`${layer.name} steepest slope`} display={`${Math.round((Math.acos(Math.max(0, Math.min(1, layer.fill.up?.[0] ?? 0))) * 180) / Math.PI)}°`} />
+                      <button type="button" className="cbx-btn" onClick={() => set(found, { fill: { ...layer.fill!, seed: layer.fill!.seed + 1 } })} title="Scatter the filled copies differently">
+                        Reseed
+                      </button>
+                    </>
+                  )}
+                  <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                    {layer.copies.length > 0 && (
+                      <button type="button" className="cbx-btn" onClick={() => set(found, { copies: [] })}>
+                        Clear painted
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="cbx-btn"
+                      onClick={() => {
+                        onChange(removeFoliage(sidecar, layer.id));
+                        if (activeId === layer.id) onEdit({ ...edit, tool: null });
+                      }}
+                    >
+                      Remove layer
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
+        <select aria-label="New foliage mesh" value={source} onChange={(event) => setSource(event.target.value)} style={{ flex: 1, minWidth: 0 }}>
+          {PRESETS.map((p) => (
+            <option key={p} value={`preset:${p}`}>
+              {p}
+            </option>
+          ))}
+          {sidecar.meshes.map((m) => (
+            <option key={m.id} value={`object:${m.id}`}>
+              {m.name} (scene object)
+            </option>
+          ))}
+        </select>
+        <button type="button" className="cbx-btn" onClick={add}>
+          Add foliage
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** How many copies a layer has, filled ones included. */
+function layerCopiesCount(sidecar: MeshSidecar, found: { layer: FoliageLayer }): number {
+  if (!found.layer.fill) return found.layer.copies.length;
+  const terrain = findTerrain(sidecar, found.layer.terrain);
+  return terrain ? layerCopies(terrain, found.layer).length : found.layer.copies.length;
 }
