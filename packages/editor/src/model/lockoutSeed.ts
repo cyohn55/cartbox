@@ -34,6 +34,7 @@ import type { SceneLight } from "../render/meshRasterizer";
 import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, type Streams } from "./seedGeometry";
 import { packMeshLibrary } from "./meshLibrary";
 import { encodeLods, generateLods, type StoredLods } from "./meshSimplify";
+import { reverseClip } from "./clipEdit";
 import { serializeFoliage, type FoliageLayer, type SerializedFoliage } from "./foliage";
 import { boulderMesh, driftMesh } from "./foliagePresets";
 import type { SceneAudio, SceneSound, SynthPreset } from "./sound";
@@ -1727,21 +1728,59 @@ function soldierClips(bones: readonly { at: P3 }[]): AnimationClip[] {
       hips: [0, -0.74 * ease, -0.35 * ease],
     };
   });
-  return [idle, run, air, die];
+  // For the 2D move blend (EP17b): stepping sideways while facing ahead — the
+  // legs swing out to the side, the hips turn into the step and the chest
+  // turns back to face forward — and a back-pedal (the run played backwards).
+  const strafe = (name: string, dir: 1 | -1) =>
+    clipFrom(name, 0.6, 9, bones, (t) => {
+      const a = t * TAU;
+      const s = Math.sin(a);
+      const fold = (c: number) => 0.25 + 0.6 * Math.max(0, c);
+      return {
+        rot: {
+          [J.thighL]: pitchYaw(-0.15, 0, dir * 0.35 * s), [J.shinL]: pitchYaw(fold(Math.cos(a))),
+          [J.thighR]: pitchYaw(-0.15, 0, dir * 0.35 * s), [J.shinR]: pitchYaw(fold(-Math.cos(a))),
+          [J.hips]: pitchYaw(0, dir * 0.35),
+          [J.spine]: pitchYaw(0.1, -dir * 0.35),
+        },
+        hips: [0, -0.04 + Math.abs(Math.cos(a)) * 0.04, 0],
+      };
+    });
+  const back = { ...reverseClip(run), name: "back" };
+  return [idle, run, air, die, strafe("strafeR", 1), strafe("strafeL", -1), back];
 }
 
 /**
- * The soldier's state machine: idle ↔ run blended by `speed` (0..1), `air`
- * while not `grounded`, `die` while `dead`.
+ * The soldier's state machine: a 2D blend space (EP17b) by `speed` (forward,
+ * −1 back-pedalling … 1 running) and `side` (−1 left … 1 right) — idle in the
+ * middle, run ahead, back-pedal behind, a strafe to each side — `air` while not
+ * `grounded`, `die` while `dead`.
  */
 export const LOCKOUT_SOLDIER_ANIMATOR = {
   params: [
     { name: "speed", kind: "number", initial: 0 },
+    { name: "side", kind: "number", initial: 0 },
     { name: "grounded", kind: "bool", initial: 1 },
     { name: "dead", kind: "bool", initial: 0 },
   ],
   states: [
-    { name: "move", clip: null, speed: 1, loop: true, blend: { param: "speed", points: [{ clip: "idle", at: 0 }, { clip: "run", at: 1 }] } },
+    {
+      name: "move",
+      clip: null,
+      speed: 1,
+      loop: true,
+      blend: {
+        param: "speed",
+        param2: "side",
+        points: [
+          { clip: "idle", at: 0, at2: 0 },
+          { clip: "run", at: 1, at2: 0 },
+          { clip: "back", at: -1, at2: 0 },
+          { clip: "strafeR", at: 0, at2: 1 },
+          { clip: "strafeL", at: 0, at2: -1 },
+        ],
+      },
+    },
     { name: "air", clip: "air", speed: 1, loop: true },
     { name: "die", clip: "die", speed: 1, loop: false },
   ],
@@ -3592,10 +3631,22 @@ end
 -- toward moving/standing so the stride blends in and out rather than snapping.
 function animate_bot(i, o)
   local target = (o.moving and not o.dead) and 1 or 0
-  o.spd = (o.spd or 0) + (target - (o.spd or 0)) * 0.25
+  -- Which way it's going relative to where it faces (EP17b's 2D move blend):
+  -- ahead runs, behind back-pedals, sideways strafes -- a bot keeps facing
+  -- whoever it's fighting while it moves.
+  local fx, fz = math.sin(o.face or 0), math.cos(o.face or 0)
+  local vx, vz = o.x - (o.px or o.x), o.z - (o.pz or o.z)
+  o.px, o.pz = o.x, o.z
+  local vm = math.sqrt(vx*vx + vz*vz)
+  local ahead, across = 1, 0
+  if vm > 1e-4 then ahead, across = (vx*fx + vz*fz) / vm, (vz*fx - vx*fz) / vm end
+  o.spd = (o.spd or 0) + (target*ahead - (o.spd or 0)) * 0.25
+  o.side = (o.side or 0) + (target*across - (o.side or 0)) * 0.25
   -- Only changes go out: the runtime takes a limited number of commands a tick.
   local spd = math.floor(o.spd * 50 + 0.5) / 50
   if spd ~= o.sent_spd then o.sent_spd = spd; cartbox.set(i, "speed", spd) end
+  local side = math.floor(o.side * 10 + 0.5) / 10
+  if side ~= o.sent_side then o.sent_side = side; cartbox.set(i, "side", side) end
   local air, dead = o.air and true or false, o.dead and true or false
   if air ~= o.sent_air then o.sent_air = air; cartbox.set(i, "grounded", not air) end
   if dead ~= o.sent_dead then

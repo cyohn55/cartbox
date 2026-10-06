@@ -53,7 +53,7 @@ import {
   setPrefabPool,
   unlinkPrefab,
 } from "@/lib/meshPrefabs";
-import { addMeshClip, renameMeshClip, retimeClip, reverseClip, setMeshClip, trimClip } from "@cartbox/editor";
+import { addMeshClip, renameMeshClip, retargetClip, retimeClip, reverseClip, setMeshClip, trimClip } from "@cartbox/editor";
 import { clearEntryLods, generateEntryLods, lodSummary } from "@/lib/meshLods";
 import styles from "./editor.module.css";
 import { RailGroup, RailHint, RangeControl } from "./railControls";
@@ -550,6 +550,8 @@ export function AnimationPanel({
   ragdoll = false,
   onRagdoll,
   onEdit,
+  sources,
+  loadSource,
 }: {
   mesh: MeshAsset;
   name: string;
@@ -560,6 +562,9 @@ export function AnimationPanel({
   onRagdoll?: (on: boolean) => void;
   /** Edit the clips (EP17): the mesh with its clips changed. */
   onEdit?: (mesh: MeshAsset) => void;
+  /** Other objects whose clips can be copied onto this one (EP17b), decoded on demand. */
+  sources?: readonly { readonly id: string; readonly name: string }[];
+  loadSource?: (id: string) => MeshAsset | null;
 }) {
   const clips = mesh.clips ?? [];
   return (
@@ -581,6 +586,7 @@ export function AnimationPanel({
         ))}
       </div>
       {onEdit && clips.length > 0 && <ClipEditor mesh={mesh} clip={playing ?? 0} onEdit={onEdit} />}
+      {onEdit && loadSource && sources && sources.length > 0 && <RetargetPicker mesh={mesh} sources={sources} loadSource={loadSource} onEdit={onEdit} />}
       {onRagdoll && (
         <button type="button" className={styles.toolBtn} style={{ marginTop: 6 }} aria-pressed={ragdoll} onClick={() => onRagdoll(!ragdoll)}>
           {ragdoll ? "↑ Stand up" : "↓ Drop as ragdoll"}
@@ -599,6 +605,59 @@ export function AnimationPanel({
         {`When it dies: cartbox.ragdoll(${JSON.stringify(name)}, ix, iy, iz) makes it go limp and tumble, shoved by (ix, iy, iz); cartbox.unragdoll(${JSON.stringify(name)}) stands it back up. The body is simulated on each player's machine, so it never affects online play.`}
       </RailHint>
     </RailGroup>
+  );
+}
+
+/**
+ * Copying another object's clips onto this skeleton (EP17b): joints matched by
+ * name, motion carried relative to each skeleton's rest pose, the root's
+ * travel scaled by their heights. Reports how many came across.
+ */
+function RetargetPicker({
+  mesh,
+  sources,
+  loadSource,
+  onEdit,
+}: {
+  mesh: MeshAsset;
+  sources: readonly { id: string; name: string }[];
+  loadSource: (id: string) => MeshAsset | null;
+  onEdit: (mesh: MeshAsset) => void;
+}) {
+  const [note, setNote] = useState<string | null>(null);
+  return (
+    <div style={{ marginTop: 6, fontSize: 12, display: "grid", gap: 4 }}>
+      <select
+        aria-label="Copy clips from"
+        value=""
+        onChange={(e) => {
+          const src = e.target.value ? loadSource(e.target.value) : null;
+          if (!src?.skin || !(src.clips ?? []).length || !mesh.skin) {
+            setNote(e.target.value ? "That object has no skeleton with clips." : null);
+            return;
+          }
+          let next = mesh;
+          let copied = 0;
+          for (const clip of src.clips ?? []) {
+            const made = retargetClip(clip, src.skin, mesh.skin);
+            if (!made) continue;
+            next = addMeshClip(next, made);
+            copied += 1;
+          }
+          setNote(copied > 0 ? `Copied ${copied} clip${copied === 1 ? "" : "s"} (joints matched by name).` : "No joints share a name with this skeleton.");
+          if (copied > 0) onEdit(next);
+        }}
+        style={{ fontSize: 12 }}
+      >
+        <option value="">Copy clips from another object…</option>
+        {sources.map((s) => (
+          <option key={s.id} value={s.id}>
+            {s.name}
+          </option>
+        ))}
+      </select>
+      {note && <span style={{ opacity: 0.8 }}>{note}</span>}
+    </div>
   );
 }
 

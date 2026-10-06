@@ -6613,6 +6613,7 @@ var PhysicsSession = class {
 import {
   DEFAULT_ANIMATOR_FADE,
   blendPoses,
+  blendWeights,
   clipTime,
   conditionHolds,
   isSkinned,
@@ -6644,14 +6645,15 @@ function compileAnimator(spec, mesh) {
   return {
     params: spec.params,
     states: spec.states.map((s) => {
-      const points = (s.blend?.points ?? []).map((p) => ({ clip: clipIndex(p.clip), at: p.at })).filter((p) => p.clip >= 0);
+      const points = (s.blend?.points ?? []).map((p) => ({ clip: clipIndex(p.clip), at: p.at, ...p.at2 !== void 0 ? { at2: p.at2 } : {} })).filter((p) => p.clip >= 0);
       const param = s.blend ? paramIndex(s.blend.param) : -1;
+      const param2 = s.blend?.param2 ? paramIndex(s.blend.param2) : -1;
       return {
         name: s.name,
         clip: clipIndex(s.clip),
         speed: s.speed,
         loop: s.loop,
-        blend: param >= 0 && points.length > 0 ? { param, points } : null
+        blend: param >= 0 && points.length > 0 ? { param, param2, points } : null
       };
     }),
     transitions: spec.transitions.map((t) => ({
@@ -6670,15 +6672,9 @@ function stateTrack(machine, state) {
   const s = machine.states[state];
   return { state, clip: s.clip, time: 0, phase: 0, speed: s.speed, loop: s.loop, fresh: true };
 }
-function blendPair(points, v) {
-  if (v <= points[0].at) return { a: points[0].clip, b: points[0].clip, w: 0 };
-  for (let i = 0; i < points.length - 1; i += 1) {
-    const p = points[i];
-    const q = points[i + 1];
-    if (v <= q.at) return { a: p.clip, b: q.clip, w: q.at > p.at ? (v - p.at) / (q.at - p.at) : 1 };
-  }
-  const last = points[points.length - 1].clip;
-  return { a: last, b: last, w: 0 };
+function blendMix(points, v, v2) {
+  const weights = blendWeights(points, v, v2);
+  return points.map((p, i) => ({ clip: p.clip, w: weights[i] })).filter((m) => m.w > 1e-6).sort((a, b) => b.w - a.w);
 }
 var AnimationSession = class {
   constructor(scene) {
@@ -6771,10 +6767,12 @@ var AnimationSession = class {
       return;
     }
   }
-  /** The blend state's weights now, or null for a single clip. */
+  /** The blend state's mix now, or null for a single clip. */
   blendOf(p, track) {
     const s = track.state >= 0 ? p.machine?.states[track.state] : void 0;
-    return s?.blend ? blendPair(s.blend.points, p.params[s.blend.param]) : null;
+    if (!s?.blend) return null;
+    const mix = blendMix(s.blend.points, p.params[s.blend.param], s.blend.param2 >= 0 ? p.params[s.blend.param2] : void 0);
+    return mix.length > 0 ? mix : null;
   }
   advance(p, track, dt) {
     const blend = this.blendOf(p, track);
@@ -6783,14 +6781,14 @@ var AnimationSession = class {
       return;
     }
     const clips = p.mesh.clips ?? [];
-    const length = (clips[blend.a]?.duration ?? 0) * (1 - blend.w) + (clips[blend.b]?.duration ?? 0) * blend.w;
+    const length = blend.reduce((sum, m) => sum + (clips[m.clip]?.duration ?? 0) * m.w, 0);
     track.phase += length > 0 ? dt * track.speed / length : 0;
   }
   /** Where the playhead is for events: which clip, and seconds into it (unwrapped). */
   cursor(p, track) {
     const blend = this.blendOf(p, track);
     if (!blend) return { clip: track.clip, time: track.fresh ? track.time - 1e-9 : track.time };
-    const clip = blend.w < 0.5 ? blend.a : blend.b;
+    const clip = blend[0].clip;
     const d = p.mesh.clips?.[clip]?.duration ?? 0;
     return { clip, time: track.phase * d - (track.fresh ? 1e-9 : 0) };
   }
@@ -6832,7 +6830,7 @@ var AnimationSession = class {
     const blend = this.blendOf(p, track);
     const clips = p.mesh.clips ?? [];
     if (blend) {
-      const clip = blend.w < 0.5 ? blend.a : blend.b;
+      const clip = blend[0].clip;
       const c2 = clips[clip];
       return { clip, time: c2 ? clipTime(c2, track.phase * c2.duration, track.loop) : 0 };
     }
@@ -6873,10 +6871,15 @@ var AnimationSession = class {
     const blend = this.blendOf(p, track);
     if (blend) {
       const at = (c) => track.phase * c.duration;
-      const a = clips[blend.a];
-      const b = clips[blend.b];
-      const pa = sampleClip(skin, a, at(a), track.loop);
-      return blend.w <= 0 || blend.a === blend.b ? pa : blendPoses(pa, sampleClip(skin, b, at(b), track.loop), blend.w);
+      let pose = null;
+      let total = 0;
+      for (const m of blend) {
+        const c = clips[m.clip];
+        const sample = sampleClip(skin, c, at(c), track.loop);
+        pose = pose ? blendPoses(pose, sample, m.w / (total + m.w)) : sample;
+        total += m.w;
+      }
+      return pose;
     }
     const clip = track.clip >= 0 ? clips[track.clip] : void 0;
     return clip ? sampleClip(skin, clip, track.time, track.loop) : restPose(skin);

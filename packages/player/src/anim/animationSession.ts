@@ -21,6 +21,7 @@
 import {
   DEFAULT_ANIMATOR_FADE,
   blendPoses,
+  blendWeights,
   clipTime,
   conditionHolds,
   isSkinned,
@@ -55,7 +56,12 @@ interface CompiledState {
   readonly clip: number; // -1 = rest pose
   readonly speed: number;
   readonly loop: boolean;
-  readonly blend: { readonly param: number; readonly points: readonly { readonly clip: number; readonly at: number }[] } | null;
+  readonly blend: {
+    readonly param: number;
+    /** The second parameter of a 2D blend space, or -1. */
+    readonly param2: number;
+    readonly points: readonly { readonly clip: number; readonly at: number; readonly at2?: number }[];
+  } | null;
 }
 
 interface CompiledMachine {
@@ -114,14 +120,15 @@ export function compileAnimator(spec: AnimatorSpec, mesh: MeshAsset): CompiledMa
   return {
     params: spec.params,
     states: spec.states.map((s) => {
-      const points = (s.blend?.points ?? []).map((p) => ({ clip: clipIndex(p.clip), at: p.at })).filter((p) => p.clip >= 0);
+      const points = (s.blend?.points ?? []).map((p) => ({ clip: clipIndex(p.clip), at: p.at, ...(p.at2 !== undefined ? { at2: p.at2 } : {}) })).filter((p) => p.clip >= 0);
       const param = s.blend ? paramIndex(s.blend.param) : -1;
+      const param2 = s.blend?.param2 ? paramIndex(s.blend.param2) : -1;
       return {
         name: s.name,
         clip: clipIndex(s.clip),
         speed: s.speed,
         loop: s.loop,
-        blend: param >= 0 && points.length > 0 ? { param, points } : null,
+        blend: param >= 0 && points.length > 0 ? { param, param2, points } : null,
       };
     }),
     transitions: spec.transitions
@@ -145,16 +152,15 @@ function stateTrack(machine: CompiledMachine, state: number): Track {
   return { state, clip: s.clip, time: 0, phase: 0, speed: s.speed, loop: s.loop, fresh: true };
 }
 
-/** A blend state's two neighbouring clips and the second one's weight for parameter value `v`. */
-function blendPair(points: readonly { clip: number; at: number }[], v: number): { a: number; b: number; w: number } {
-  if (v <= points[0]!.at) return { a: points[0]!.clip, b: points[0]!.clip, w: 0 };
-  for (let i = 0; i < points.length - 1; i += 1) {
-    const p = points[i]!;
-    const q = points[i + 1]!;
-    if (v <= q.at) return { a: p.clip, b: q.clip, w: q.at > p.at ? (v - p.at) / (q.at - p.at) : 1 };
-  }
-  const last = points[points.length - 1]!.clip;
-  return { a: last, b: last, w: 0 };
+/** A blend's clips with weight, strongest first (weights sum to 1; clips with none dropped). */
+type BlendMix = readonly { readonly clip: number; readonly w: number }[];
+
+function blendMix(points: readonly { clip: number; at: number; at2?: number }[], v: number, v2?: number): BlendMix {
+  const weights = blendWeights(points, v, v2);
+  return points
+    .map((p, i) => ({ clip: p.clip, w: weights[i]! }))
+    .filter((m) => m.w > 1e-6)
+    .sort((a, b) => b.w - a.w);
 }
 
 export class AnimationSession {
@@ -259,10 +265,12 @@ export class AnimationSession {
     }
   }
 
-  /** The blend state's weights now, or null for a single clip. */
-  private blendOf(p: Playback, track: Track): { a: number; b: number; w: number } | null {
+  /** The blend state's mix now, or null for a single clip. */
+  private blendOf(p: Playback, track: Track): BlendMix | null {
     const s = track.state >= 0 ? p.machine?.states[track.state] : undefined;
-    return s?.blend ? blendPair(s.blend.points, p.params[s.blend.param]!) : null;
+    if (!s?.blend) return null;
+    const mix = blendMix(s.blend.points, p.params[s.blend.param]!, s.blend.param2 >= 0 ? p.params[s.blend.param2]! : undefined);
+    return mix.length > 0 ? mix : null;
   }
 
   private advance(p: Playback, track: Track, dt: number): void {
@@ -274,7 +282,7 @@ export class AnimationSession {
     // Every clip in a blend plays at the same fraction of its own length; the
     // cycle's length is the mix of theirs.
     const clips = p.mesh.clips ?? [];
-    const length = (clips[blend.a]?.duration ?? 0) * (1 - blend.w) + (clips[blend.b]?.duration ?? 0) * blend.w;
+    const length = blend.reduce((sum, m) => sum + (clips[m.clip]?.duration ?? 0) * m.w, 0);
     track.phase += length > 0 ? (dt * track.speed) / length : 0;
   }
 
@@ -282,7 +290,7 @@ export class AnimationSession {
   private cursor(p: Playback, track: Track): { clip: number; time: number } {
     const blend = this.blendOf(p, track);
     if (!blend) return { clip: track.clip, time: track.fresh ? track.time - 1e-9 : track.time };
-    const clip = blend.w < 0.5 ? blend.a : blend.b; // events follow the stronger clip
+    const clip = blend[0]!.clip; // events follow the strongest clip
     const d = p.mesh.clips?.[clip]?.duration ?? 0;
     return { clip, time: track.phase * d - (track.fresh ? 1e-9 : 0) };
   }
@@ -329,7 +337,7 @@ export class AnimationSession {
     const blend = this.blendOf(p, track);
     const clips = p.mesh.clips ?? [];
     if (blend) {
-      const clip = blend.w < 0.5 ? blend.a : blend.b;
+      const clip = blend[0]!.clip;
       const c = clips[clip];
       return { clip, time: c ? clipTime(c, track.phase * c.duration, track.loop) : 0 };
     }
@@ -376,11 +384,17 @@ export class AnimationSession {
     const clips = p.mesh.clips ?? [];
     const blend = this.blendOf(p, track);
     if (blend) {
+      // Every clip at the same fraction of its length, mixed in by weight.
       const at = (c: AnimationClip) => track.phase * c.duration;
-      const a = clips[blend.a]!;
-      const b = clips[blend.b]!;
-      const pa = sampleClip(skin, a, at(a), track.loop);
-      return blend.w <= 0 || blend.a === blend.b ? pa : blendPoses(pa, sampleClip(skin, b, at(b), track.loop), blend.w);
+      let pose: Float32Array | null = null;
+      let total = 0;
+      for (const m of blend) {
+        const c = clips[m.clip]!;
+        const sample = sampleClip(skin, c, at(c), track.loop);
+        pose = pose ? blendPoses(pose, sample, m.w / (total + m.w)) : sample;
+        total += m.w;
+      }
+      return pose!;
     }
     const clip = track.clip >= 0 ? clips[track.clip] : undefined;
     return clip ? sampleClip(skin, clip, track.time, track.loop) : restPose(skin);

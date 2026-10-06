@@ -375,6 +375,8 @@ export {
   type ScriptWire,
 } from "./model/scriptGraph";
 export { addMeshClip, freeClipName, renameMeshClip, retimeClip, reverseClip, setMeshClip, trimClip } from "./model/clipEdit";
+export { blendWeights, type BlendPoint } from "./model/blendSpace";
+export { jointKey, matchJoints, retargetClip } from "./model/retarget";
 export {
   ACTION_CONSOLE_BUTTONS,
   ACTION_PAD_BUTTONS,

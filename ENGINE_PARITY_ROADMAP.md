@@ -717,9 +717,37 @@ preview.
         - duplicate and delete.
       - **Lockout:** the intro's letterbox slides in and out from a
         "letterbox" value track, and the wind fades up on the ambience bus.
-- [ ] **EP17b. Blend spaces and retargeting.** Two-parameter blend spaces in
+- [x] **EP17b. Blend spaces and retargeting.** Two-parameter blend spaces in
       the state machine, and playing one skeleton's clips on another by joint
       names.
+
+      *Done:*
+      - **Blend spaces:**
+        - A blend state can take a second number parameter, which makes it a
+          2D blend space: clips are placed on a plane (forward speed ×
+          sideways speed, say).
+        - They are mixed by gradient band interpolation, so each clip plays
+          exactly at its own point, mixes ease between neighbours, and the
+          weights always sum to 1.
+        - The runtime now blends any number of clips by weight (1D blends
+          unchanged), keeping them in step at the same fraction of their
+          lengths.
+        - The Animator panel picks the second parameter, gives each clip a
+          second coordinate, and plots the space.
+      - **Retargeting:**
+        - The Animation panel's "Copy clips from another object…" copies a
+          skeleton's clips onto the selected one.
+        - Joints match by name, ignoring case, rig prefixes and separators.
+          Rotations carry the motion relative to each rest pose.
+        - The root's travel is scaled by the skeletons' heights. Other
+          translations and scale keys are dropped, so bones keep the target's
+          proportions.
+      - **Lockout:**
+        - The soldiers move on a 2D blend space: idle, run, back-pedal (the
+          run reversed) and a strafe to each side.
+        - Each soldier is fed its forward and sideways speed relative to the
+          way it faces, so a bot that keeps its gun on a target while moving
+          strafes and back-pedals.
 - [ ] **EP18. Standalone export.** Export a game as a self-contained HTML
       bundle (a zip for itch.io), and as an installable app that plays
       offline.
