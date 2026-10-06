@@ -852,7 +852,7 @@ export {
   type VoxelMeshOptions,
 } from "./render/voxelMesh";
 export { voxelGridToMeshAsset, type VoxelToMeshOptions } from "./model/voxelToMesh";
-export { encodeRgbaPng } from "./model/png";
+export { crc32, deflateFixed, encodeRgbaPng } from "./model/png";
 export { bytesToBase64, base64ToBytes } from "./model/base64";
 export {
   MESH_LIBRARY_REF,

@@ -1,0 +1,276 @@
+/**
+ * Standalone export (ENGINE_PARITY_ROADMAP.md EP18): a game as one HTML file
+ * and as a zip for itch.io that installs as an offline app. Covers the zip
+ * writer, what parts a game needs, the page (its data block can't be broken
+ * out of, and boots), the manifest, service worker and icons, and — in a real
+ * browser, opened straight from disk — an exported cart running and saving.
+ */
+
+import { execFileSync } from "node:child_process";
+import { createServer, type Server } from "node:http";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { inflateRawSync } from "node:zlib";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+import { LOCKOUT_FX, lockoutCartridge, lockoutMeshSidecar } from "@cartbox/editor";
+import { codeChunks } from "@cartbox/player";
+
+import {
+  OFFLINE_FILES,
+  scriptJson,
+  standaloneData,
+  standaloneFileName,
+  standaloneHtml,
+  standaloneIcon,
+  standaloneManifest,
+  standaloneNeeds,
+  standaloneServiceWorker,
+  standaloneZip,
+  type StandaloneGame,
+  type StandaloneParts,
+} from "../apps/web/src/lib/standaloneExport";
+import { zipFiles } from "../apps/web/src/lib/zip";
+
+/** Read a zip's entries back (local headers), inflating as needed. */
+function unzip(bytes: Uint8Array): Map<string, Buffer> {
+  const out = new Map<string, Buffer>();
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let at = 0;
+  while (view.getUint32(at, true) === 0x04034b50) {
+    const method = view.getUint16(at + 8, true);
+    const size = view.getUint32(at + 18, true);
+    const nameLength = view.getUint16(at + 26, true);
+    const extra = view.getUint16(at + 28, true);
+    const name = new TextDecoder().decode(bytes.subarray(at + 30, at + 30 + nameLength));
+    const start = at + 30 + nameLength + extra;
+    const body = Buffer.from(bytes.subarray(start, start + size));
+    out.set(name, method === 8 ? inflateRawSync(body) : body);
+    at = start + size;
+  }
+  return out;
+}
+
+const PARTS: StandaloneParts = {
+  runtime: 'export async function boot() { document.title = "</script><!-- booted"; }',
+  engine: { js: "export default async () => ({});", wasm: Uint8Array.from([0, 97, 115, 109]) },
+  physics: "export const backend = 1;",
+  ktx2: "export const decoder = 1;",
+};
+
+const GAME: StandaloneGame = {
+  title: 'Tom & Jerry <"Chase">',
+  cartId: "abc-123",
+  modelId: "classic",
+  cart: Uint8Array.from([5, 6, 7]),
+  mesh: null,
+};
+
+describe("zip writer", () => {
+  it("packs files that unzip to the same bytes, compressing what shrinks", () => {
+    const text = new TextEncoder().encode("hello hello hello hello hello ".repeat(50));
+    const noise = Uint8Array.from({ length: 300 }, (_, i) => (i * 7919) % 251);
+    const zip = zipFiles([{ name: "a.txt", data: text }, { name: "dir/noise.bin", data: noise }], new Date(2026, 9, 6, 12, 30, 10));
+    const files = unzip(zip);
+    expect([...files.keys()]).toEqual(["a.txt", "dir/noise.bin"]);
+    expect(Buffer.compare(files.get("a.txt")!, Buffer.from(text))).toBe(0);
+    expect(Buffer.compare(files.get("dir/noise.bin")!, Buffer.from(noise))).toBe(0);
+    expect(zip.length).toBeLessThan(text.length); // the text was deflated
+    // The end record lists both entries.
+    const end = new DataView(zip.buffer, zip.length - 22);
+    expect(end.getUint32(0, true)).toBe(0x06054b50);
+    expect(end.getUint16(10, true)).toBe(2);
+  });
+});
+
+describe("what an export carries", () => {
+  it("physics only for scenes with bodies (the deterministic build when asked), the transcoder only for KTX2 textures", () => {
+    expect(standaloneNeeds({ mesh: null })).toEqual({ physics: null, ktx2: false });
+    expect(standaloneNeeds({ mesh: '{"meshes":[{"physics":{"body":"dynamic"}}]}' })).toEqual({ physics: "regular", ktx2: false });
+    expect(standaloneNeeds({ mesh: '{"physicsWorld":{"deterministic":true},"m":[{"physics":{"body":"static"}}]}' }).physics).toBe("deterministic");
+    expect(standaloneNeeds({ mesh: '{"img":{"mime":"image/ktx2"}}' }).ktx2).toBe(true);
+    const data = standaloneData(GAME, PARTS);
+    expect(data.physics).toBeNull();
+    expect(data.ktx2).toBeNull();
+    expect(data.cart).toBe("BQYH");
+    expect(data.engine.wasm).toBe("AGFzbQ==");
+  });
+
+  it("names files from the title", () => {
+    expect(standaloneFileName("  Neon City: Part 2! ")).toBe("neon-city-part-2");
+    expect(standaloneFileName("★★★")).toBe("game");
+  });
+});
+
+describe("the page", () => {
+  it("keeps its data in one block nothing can close, and gives it back intact", () => {
+    const html = standaloneHtml(GAME, PARTS);
+    expect(html).toContain("<title>Tom &amp; Jerry &lt;&quot;Chase&quot;&gt;</title>");
+    const block = html.match(/<script type="application\/json" id="cartbox-game">([\s\S]*?)<\/script>/)![1]!;
+    expect(block).not.toContain("<");
+    const { runtime, game } = JSON.parse(block);
+    expect(runtime).toBe(PARTS.runtime);
+    expect(game.title).toBe(GAME.title);
+    expect(scriptJson("a\u2028b</script>")).toBe('"a\\u2028b\\u003c/script>"');
+    // Only the offline page links the manifest and registers the worker.
+    expect(html).not.toContain("manifest.webmanifest");
+    expect(html).not.toContain("serviceWorker");
+    const offline = standaloneHtml(GAME, PARTS, { offline: true });
+    expect(offline).toContain('<link rel="manifest" href="manifest.webmanifest">');
+    expect(offline).toContain('navigator.serviceWorker.register("sw.js")');
+  });
+
+  it("zips for itch.io: index.html, a manifest, icons and a service worker that caches every file", () => {
+    const files = unzip(standaloneZip(GAME, PARTS));
+    expect([...files.keys()]).toEqual(["index.html", "manifest.webmanifest", "sw.js", "icon-192.png", "icon-512.png"]);
+    expect(files.get("index.html")!.toString()).toBe(standaloneHtml(GAME, PARTS, { offline: true }));
+    const manifest = JSON.parse(files.get("manifest.webmanifest")!.toString());
+    expect(manifest).toMatchObject({ name: GAME.title, start_url: "./index.html", display: "fullscreen" });
+    expect(manifest.short_name.length).toBeLessThanOrEqual(12);
+    expect(manifest.icons.map((i: { sizes: string }) => i.sizes)).toEqual(["192x192", "512x512"]);
+    const sw = files.get("sw.js")!.toString();
+    for (const file of OFFLINE_FILES) expect(sw).toContain(JSON.stringify(file));
+    expect(sw).toContain('"cartbox-abc-123-"');
+    expect(standaloneServiceWorker(GAME, "v1")).not.toBe(standaloneServiceWorker(GAME, "v2"));
+    // Real PNGs, the right size.
+    for (const [name, size] of [["icon-192.png", 192], ["icon-512.png", 512]] as const) {
+      const png = files.get(name)!;
+      expect(png.subarray(1, 4).toString()).toBe("PNG");
+      expect(png.readUInt32BE(16)).toBe(size);
+      expect(png.readUInt32BE(20)).toBe(size);
+    }
+    expect(standaloneIcon(48).length).toBeGreaterThan(50);
+    expect(standaloneManifest({ title: "" }).includes('"name": "Game"')).toBe(true);
+  });
+});
+
+describe("Lockout", () => {
+  it("exports as one page: its cartridge, scene, effects and input actions inline, no physics engine needed", () => {
+    const game: StandaloneGame = { title: "Lockout", cartId: "lockout", modelId: "xbox360", cart: lockoutCartridge(), postFx: LOCKOUT_FX, mesh: lockoutMeshSidecar() };
+    expect(standaloneNeeds(game)).toEqual({ physics: null, ktx2: false });
+    const html = standaloneHtml(game, { ...PARTS, physics: null, ktx2: null });
+    const { game: data } = JSON.parse(html.match(/id="cartbox-game">([\s\S]*?)<\/script>/)![1]!);
+    expect(data.mesh).toBe(lockoutMeshSidecar());
+    expect(data.modelId).toBe("xbox360");
+    expect(data.postFx).toEqual(LOCKOUT_FX);
+    expect(html.length).toBeLessThan(3_000_000);
+  });
+});
+
+// ── In a real browser ────────────────────────────────────────────────────────
+
+function findChromium(): string | null {
+  const root = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  if (!root || !existsSync(root)) return null;
+  for (const dir of readdirSync(root).filter((d) => d.startsWith("chromium-")).sort().reverse()) {
+    for (const bin of ["chrome-linux/chrome", "chrome-linux64/chrome"]) {
+      const file = path.join(root, dir, bin);
+      if (existsSync(file)) return file;
+    }
+  }
+  return null;
+}
+
+const chromiumPath = findChromium();
+const ENGINE_DIST = path.resolve(__dirname, "../packages/engine/dist");
+const canRun = Boolean(chromiumPath) && existsSync(path.join(ENGINE_DIST, "tic80.wasm"));
+
+describe.skipIf(!canRun)("an exported game in a real browser", () => {
+  let dir = "";
+  let parts: (engine: "tic80" | "xbox360") => StandaloneParts;
+  let browser: any = null;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(path.join(tmpdir(), "cartbox-export-"));
+    execFileSync("node", [path.resolve(__dirname, "../apps/web/scripts/build-standalone.mjs"), path.join(dir, "parts")]);
+    const runtime = readFileSync(path.join(dir, "parts", "runtime.js"), "utf8");
+    parts = (engine) => {
+      const base = engine === "tic80" ? path.join(ENGINE_DIST, "tic80") : path.join(ENGINE_DIST, engine, "engine");
+      return { runtime, engine: { js: readFileSync(`${base}.js`, "utf8"), wasm: new Uint8Array(readFileSync(`${base}.wasm`)) } };
+    };
+    const { chromium } = await import("playwright");
+    browser = await chromium.launch({ executablePath: chromiumPath!, headless: true, args: ["--no-sandbox", "--enable-unsafe-swiftshader"] });
+  }, 60_000);
+
+  afterAll(async () => {
+    await browser?.close();
+  });
+
+  it("opens from disk, starts on a click, runs the cart and keeps its save in the browser", async () => {
+    const code = `
+t = 0
+function TIC()
+  cls(2)
+  t = t + 1
+  if t == 30 then cartbox.save({ frames = t, hello = "standalone" }) end
+end`;
+    const game: StandaloneGame = { title: "Export test", cartId: "export-test", modelId: "classic", cart: codeChunks(new TextEncoder().encode(code)) };
+    const file = path.join(dir, "game.html");
+    writeFileSync(file, standaloneHtml(game, parts("tic80")));
+    const page = await browser.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (error: Error) => errors.push(error.message));
+    await page.goto(pathToFileURL(file).href);
+    await page.waitForFunction(() => document.getElementById("status")?.textContent?.includes("press a key"), null, { timeout: 30_000 });
+    await page.mouse.click(10, 10);
+    await page.waitForFunction(() => Object.keys(localStorage).some((k) => k.startsWith("cartbox:save:play:export-test")), null, { timeout: 30_000 });
+    const saved = await page.evaluate(() => localStorage.getItem("cartbox:save:play:export-test"));
+    expect(saved).toContain("standalone");
+    expect(await page.evaluate(() => document.getElementById("status")?.hidden)).toBe(true);
+    expect(errors).toEqual([]);
+    await page.close();
+  }, 90_000);
+
+  it("served from its zip, installs its service worker and then plays with the network gone", async () => {
+    const code = "function TIC() cls(3) end";
+    const game: StandaloneGame = { title: "Offline test", cartId: "offline-test", modelId: "classic", cart: codeChunks(new TextEncoder().encode(code)) };
+    const files = unzip(standaloneZip(game, parts("tic80")));
+    const types: Record<string, string> = { html: "text/html", webmanifest: "application/manifest+json", js: "text/javascript", png: "image/png" };
+    const server: Server = createServer((req, res) => {
+      const name = (req.url ?? "/").split("?")[0]!.replace(/^\/+/, "") || "index.html";
+      const body = files.get(name);
+      if (!body) return void res.writeHead(404).end();
+      res.writeHead(200, { "Content-Type": types[name.split(".").pop()!] ?? "application/octet-stream" }).end(body);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    try {
+      await page.goto(`http://localhost:${port}/`);
+      await page.waitForFunction(() => document.getElementById("status")?.textContent?.includes("press a key"), null, { timeout: 30_000 });
+      // The worker has cached every file once it's active.
+      await page.evaluate(() => navigator.serviceWorker.ready.then(() => undefined));
+      const manifest = await page.evaluate(() => document.querySelector('link[rel="manifest"]')?.getAttribute("href"));
+      expect(manifest).toBe("manifest.webmanifest");
+      await context.setOffline(true);
+      server.close();
+      await page.reload();
+      await page.waitForFunction(() => document.getElementById("status")?.textContent?.includes("press a key"), null, { timeout: 30_000 });
+      const cached = await page.evaluate(async () => (await caches.keys()).filter((k) => k.startsWith("cartbox-offline-test-")).length);
+      expect(cached).toBe(1);
+    } finally {
+      await context.close();
+      server.close();
+    }
+  }, 90_000);
+
+  it("plays Lockout (the Modern core and its 3D scene) from one file", async () => {
+    const game: StandaloneGame = { title: "Lockout", cartId: "lockout", modelId: "xbox360", cart: lockoutCartridge(), postFx: LOCKOUT_FX, mesh: lockoutMeshSidecar() };
+    const file = path.join(dir, "lockout.html");
+    writeFileSync(file, standaloneHtml(game, parts("xbox360")));
+    const page = await browser.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (error: Error) => errors.push(error.message));
+    await page.goto(pathToFileURL(file).href);
+    await page.waitForFunction(() => document.getElementById("status")?.textContent?.includes("press a key"), null, { timeout: 60_000 });
+    await page.mouse.click(10, 10);
+    await page.waitForTimeout(2000);
+    expect(await page.evaluate(() => document.getElementById("status")?.hidden)).toBe(true);
+    expect(await page.evaluate(() => document.querySelectorAll("#game canvas").length)).toBeGreaterThan(0);
+    expect(errors).toEqual([]);
+    await page.close();
+  }, 120_000);
+});

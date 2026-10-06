@@ -748,9 +748,46 @@ preview.
         - Each soldier is fed its forward and sideways speed relative to the
           way it faces, so a bot that keeps its gun on a target while moving
           strafes and back-pedals.
-- [ ] **EP18. Standalone export.** Export a game as a self-contained HTML
+- [x] **EP18. Standalone export.** Export a game as a self-contained HTML
       bundle (a zip for itch.io), and as an installable app that plays
       offline.
+
+      *Done:*
+      - **One HTML file:**
+        - The editor's File menu has "Export game…", which downloads the game
+          as a single page.
+        - The page carries everything inline: the cartridge, the editor-made
+          data (3D scene, world, effects, backdrop, weather, collision), the
+          engine core for the cart's console model, and the player.
+        - It carries the physics engine (the deterministic build when asked)
+          or the KTX2 transcoder only when the scene uses them.
+        - It plays opened straight from disk or from any web host, starting on
+          the first click, tap or key (browsers only allow sound after a
+          gesture).
+        - Saves stay in each player's browser.
+      - **A zip for itch.io:** that page as index.html, plus a web app
+        manifest, two icons and a service worker. Served over HTTPS (itch.io,
+        any static host), the game installs as an app, and once loaded it plays
+        with no connection. The service worker caches every file, named for
+        that game and build, and clears only its own older caches.
+      - **How it's built:**
+        - The player gained an `engineWasm` option, so the engine glue can be
+          imported from a blob URL.
+        - The runtime, Rapier and the transcoder are each bundled with esbuild
+          into one self-contained module (apps/web/scripts/build-standalone.mjs,
+          which runs before `next build` and `next dev`).
+        - The page's data rides in one JSON block with every "<" escaped, so
+          nothing in it can close the block.
+        - A small ZIP writer uses the editor's own DEFLATE encoder.
+      - **Lockout:** the lobby has "Play offline" with two downloads, one HTML
+        file and an installable zip. Both play against bots with no server.
+      - **Tests** cover the zip writer, which parts a game needs, the page's
+        data block, the manifest, service worker and icons, and Lockout's
+        export. Three tests run in a real browser:
+        - an exported cart opened from disk runs and saves;
+        - the zip, served locally, installs its service worker and boots again
+          with the network off;
+        - Lockout boots on the Modern core from one file.
 - [ ] **EP19. History, localisation and accessibility.** Named snapshots of a
       cart with restore; string tables for localisation; text size,
       colour-blind and remapping settings as engine features.

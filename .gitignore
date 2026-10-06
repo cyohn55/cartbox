@@ -107,3 +107,6 @@ apps/web/public/cavestory/*
 # Screenshots written by the verify-* scripts as evidence of a passing run.
 # Regenerated on demand, never reviewed as source.
 *-shots/
+
+# Standalone export parts (apps/web/scripts/build-standalone.mjs builds them)
+apps/web/public/standalone/

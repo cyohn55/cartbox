@@ -58,6 +58,7 @@ import { loadCartDraft, draftBytes } from "@/lib/localCartStore";
 import { loadPendingVoxelEdit, clearPendingVoxelEdit, type PendingVoxelEdit } from "@/lib/backdropPropsStore";
 import { decodeVoxelSidecar, mergeVoxelSidecar } from "@/lib/voxelSidecar";
 import type { Sidecars } from "@/lib/sidecars";
+import type { StandaloneGame } from "@/lib/standaloneExport";
 import styles from "./editor.module.css";
 import { MapEditor } from "./MapEditor";
 import { CodeEditor } from "./CodeEditor";
@@ -81,6 +82,7 @@ import { saveCartLocally, saveCartToAccount, type SaveOutcome } from "./persistC
 import { SPATIAL_TABS, TAB_META, visibleTabs, type Tab } from "./editorTabs";
 import { ShortcutHelp } from "./ShortcutHelp";
 import { DownloadBudget } from "./DownloadBudget";
+import { ExportDialog } from "./ExportDialog";
 import { useShortcuts, WORKBENCH_SHORTCUTS, type Shortcut } from "./shortcuts";
 import { decodeMeshSidecar, encodeMeshSidecar, addMesh, type MeshSidecar } from "@/lib/meshSidecar";
 import { rebakeMeshSidecar } from "@/lib/meshTextureBake";
@@ -486,6 +488,9 @@ function WorkbenchBody({
   /** The download-size dialog, with the cartridge bytes captured when it opened. */
   const [budgetCart, setBudgetCart] = useState<Uint8Array | null | undefined>(undefined);
   const closeBudget = useCallback(() => setBudgetCart(undefined), []);
+  /** The export dialog (EP18): the game as one HTML file or an offline-capable zip. */
+  const [showExport, setShowExport] = useState(false);
+  const closeExport = useCallback(() => setShowExport(false), []);
   // First-run guidance: a dismissible card naming the handful of tabs that
   // matter, for a 12-tab tool that otherwise opens on a demo seed with no "start
   // here". Persisted per-browser so a returning creator never sees it again;
@@ -780,6 +785,26 @@ function WorkbenchBody({
     anchor.click();
     URL.revokeObjectURL(url);
   }, [details.title, runnable]);
+
+  /** The game as it stands, for a standalone export: the cart as saved, sprite textures rebaked. */
+  const exportGame = useCallback(async (): Promise<StandaloneGame | null> => {
+    if (!runnable) return null;
+    const baked = await rebakeMesh();
+    return {
+      title: details.title || cartName,
+      cartId,
+      modelId,
+      cart: runnable.saveTic(),
+      postFx: sidecars.fx,
+      scene: sidecars.scene,
+      anim: sidecars.anim,
+      particles: sidecars.particles,
+      collision: sidecars.collision,
+      flags: sidecars.flags,
+      mesh: baked ?? null,
+      world: sidecars.world,
+    };
+  }, [runnable, rebakeMesh, details.title, cartName, cartId, modelId, sidecars]);
 
   const runCart = useCallback(() => {
     // A new playtest starts from a clean slate: last run's error line should not
@@ -1188,6 +1213,19 @@ function WorkbenchBody({
                 type="button"
                 role="menuitem"
                 className={styles.fileMenuItem}
+                disabled={!runnable}
+                onMouseDown={() => {
+                  if (!runnable) return;
+                  setShowExport(true);
+                  setFileOpen(false);
+                }}
+              >
+                Export game…
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className={styles.fileMenuItem}
                 onMouseDown={() => {
                   setBudgetCart(runnable ? runnable.saveTic() : null);
                   setFileOpen(false);
@@ -1397,6 +1435,7 @@ function WorkbenchBody({
       )}
 
       {showHelp && <ShortcutHelp tabs={tabs.order.slice(0, 9)} onClose={() => setShowHelp(false)} />}
+      {showExport && <ExportDialog title={details.title || cartName} engineUrl={engineUrl} game={exportGame} onClose={closeExport} />}
       {budgetCart !== undefined && (
         <DownloadBudget
           modelId={modelId}
