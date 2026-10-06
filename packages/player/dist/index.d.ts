@@ -6325,6 +6325,13 @@ declare class RuntimeChannel {
      * its commands came after the block's.
      */
     afterTick(block: DataView, ring?: DataView | null): void;
+    /**
+     * Carry out a tick's commands, in order, then step the scene (timeline,
+     * physics, animation, crowds, ragdolls). The TIC-80–derived cores hand them
+     * over through RAM (afterTick); the dedicated Modern core (EP20b) collects
+     * them as the cart calls and hands them here directly.
+     */
+    applyCommands(commands: readonly PhysicsCommand[]): void;
     /** Go limp (v0 = 1) with a shove, or take the animation back (v0 = 0). */
     private ragdollCommand;
     /** Set (or, with all three 0, clear) an object's shield effect. */

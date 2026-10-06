@@ -916,12 +916,40 @@ preview.
             order, up to exactly the new cap;
           - without the host reading the ring, only the block's 64 arrive.
 - [ ] **EP20b. A dedicated Modern core.** A core of its own for the Modern
-      tier, a Lua VM with a direct scripting API into the 3D engine (calls
-      rather than a command channel), is still the foundation for scale.
-      - It is a new WebAssembly runtime, not a feature of this one: cart
-        loading, the 2D layer, sound and input would all be reimplemented
-        around it.
-      - Building it needs the Emscripten toolchain, which this repository
-        builds cores with in CI (build-engine-cores.yml) but doesn't vendor.
-      - EP20 removes the cap that most limited carts today, so this can follow
-        as a project of its own.
+      tier: a Lua VM with a direct scripting API into the 3D engine, calls
+      rather than a command channel. It is the foundation for scale. In
+      progress, in parts.
+
+      *Done so far (part 1, the core):*
+      - **`packages/modern-core`:** Lua 5.4.7 compiled to WebAssembly with
+        Emscripten 3.1.64 (the TIC-80 cores' version), 335 KB.
+        - The VM is sandboxed: base, coroutine, table, string, math and utf8
+          only, with no file access.
+        - It is deterministic: the host seeds `math.random`, and `time()` is
+          the tick clock.
+      - **The direct API:**
+        - `cartbox.command(op, a, v1..v6)` reaches the host synchronously,
+          the moment the cart calls it, in order and with no cap (a test sends
+          100,000 in one tick).
+        - `cartbox.query(op, ...)` returns the host's numbers in the same
+          call.
+        - The op numbers are the runtime protocol's.
+          `RuntimeChannel.applyCommands` now takes a tick's commands from
+          either core, so the same host code drives the 3D scene.
+      - **The 2D layer:** a 32-bit framebuffer drawn with `cls`, `pix`,
+        `rect`, `rectb`, `line`, `circ`, `circb` and `tri` in palette colours
+        (Sweetie 16 first, settable). `print` hands its text to the host to
+        draw over the frame. Input is `btn` and `btnp`.
+      - **Build:** reproducible. The build is committed, and a CI workflow
+        rebuilds it and fails if the committed bytes differ, then runs its
+        tests.
+
+      *Next:*
+      - **Part 2:** the player runs carts on it. A Modern cart can opt in to
+        the dedicated core, and the full `cartbox.*` SDK (place, spawn,
+        bodies, sounds, UI, actions, saves, strings…) is written on the direct
+        API, with queries for state the RAM block carries today.
+      - **Part 3:** sprites, map and sound for its 2D layer, from the
+        cartridge's banks.
+      - **Part 4:** Lockout on the dedicated core, compared frame for frame
+        with the TIC-80–derived one.

@@ -63,6 +63,7 @@ import {
   PHYS_OP_AGENT_REMOVE,
   PHYS_MAX_AGENTS,
   takePhysicsCommands,
+  type PhysicsCommand,
   writeAgents,
   writeAnimationState,
   writeJointPositions,
@@ -217,6 +218,16 @@ export class RuntimeChannel {
   afterTick(block: DataView, ring?: DataView | null): void {
     const commands = takePhysicsCommands(block);
     if (ring) commands.push(...takeRingCommands(ring));
+    this.applyCommands(commands);
+  }
+
+  /**
+   * Carry out a tick's commands, in order, then step the scene (timeline,
+   * physics, animation, crowds, ragdolls). The TIC-80–derived cores hand them
+   * over through RAM (afterTick); the dedicated Modern core (EP20b) collects
+   * them as the cart calls and hands them here directly.
+   */
+  applyCommands(commands: readonly PhysicsCommand[]): void {
     for (const cmd of commands) {
       if (cmd.op === PHYS_OP_SPAWN) this.spawn(cmd.a, cmd.v);
       else if (cmd.op === PHYS_OP_DESPAWN) this.despawn(cmd.a);
