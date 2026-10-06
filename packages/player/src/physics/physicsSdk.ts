@@ -86,6 +86,7 @@
  * (sdk.ts) make every call a safe no-op for carts without bodies or prefabs.
  */
 
+import { CMD_RING_MAX, commandRingAddress } from "../runtime/commandRing.js";
 import type { MeshScene } from "../mesh/meshScene.js";
 import {
   PHYS_BODIES,
@@ -210,9 +211,12 @@ export function runtimeSdkLua(
   const slots = physicsSlots(scene).map((object, slot) => `[${object}]=${slot}`);
   const pools = (scene.pools ?? []).map((pool) => `[${luaString(pool.prefab)}]={${pool.roots.join(",")}}`);
   const B = physicsBlockAddress(layout);
+  // Commands past the block's 64 continue into the overflow ring where the core has one (EP20).
+  const R = commandRingAddress(layout);
   return `do
   cartbox = cartbox or {}
   local _B = ${B}
+  local _R = ${R ?? "nil"}
   local _slot = {${slots.join(",")}}
   local _ok = false
   local function _rd(a)
@@ -236,13 +240,15 @@ export function runtimeSdkLua(
   end
   local function _cmd(op, a, v1, v2, v3, v4, v5, v6)
     if not _live() then return end
-    local n = _rd(_B + ${PHYS_CMDS})
-    if n < 0 or n >= ${PHYS_MAX_CMDS} then return end
-    local at = _B + ${PHYS_CMDS + 4} + n * ${PHYS_CMD_BYTES}
+    local count, cap = _B + ${PHYS_CMDS}, ${PHYS_MAX_CMDS}
+    local n = _rd(count)
+    if n >= cap and _R then count, cap = _R, ${CMD_RING_MAX}; n = _rd(count) end
+    if n < 0 or n >= cap then return end
+    local at = count + 4 + n * ${PHYS_CMD_BYTES}
     _wr(at, op) _wr(at + 4, a)
     _wr(at + 8, (v1 or 0) * ${PHYS_FIX}) _wr(at + 12, (v2 or 0) * ${PHYS_FIX}) _wr(at + 16, (v3 or 0) * ${PHYS_FIX})
     _wr(at + 20, (v4 or 0) * ${PHYS_FIX}) _wr(at + 24, (v5 or 0) * ${PHYS_FIX}) _wr(at + 28, (v6 or 0) * ${PHYS_FIX})
-    _wr(_B + ${PHYS_CMDS}, n + 1)
+    _wr(count, n + 1)
     return true
   end
 ${physics ? PHYSICS_CALLS() : ""}

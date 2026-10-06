@@ -8,6 +8,7 @@ import { AudioController } from "./audio.js";
 import { SoundSystem } from "./soundSystem.js";
 import { uiSdkLua } from "./uiSdk.js";
 import { playLanguage, stringsSdkLua } from "./stringsSdk.js";
+import { CMD_RING_BYTES, commandRingAddress, hasCommandRing, resetCommandRing } from "./runtime/commandRing.js";
 import { INPUT_BLOCK_BYTES, actionsSdkLua, inputBlockAddress, writeInputBlock } from "./actionsSdk.js";
 import { armSaveBlock, saveBlockAddress, saveBlockBytes, saveSdkLua, takeSave } from "./saveSdk.js";
 import { fetchCartridge } from "./cartridge.js";
@@ -140,7 +141,7 @@ export class Player {
    * The cart's runtime channel (physics bodies and/or spawnable prefabs), its
    * physics world if any, and where the shared block sits (bytes after pmem word 0).
    */
-  private runtime: { channel: RuntimeChannel; physics: PhysicsSession | null; offset: number } | null = null;
+  private runtime: { channel: RuntimeChannel; physics: PhysicsSession | null; offset: number; ring: number | null } | null = null;
   private cartSource?: CartSpriteSource;
   private readonly model: ConsoleModel;
 
@@ -355,6 +356,8 @@ export class Player {
           channel: new RuntimeChannel(mesh, physics),
           physics,
           offset: physicsBlockAddress(layout) - layout.pmemAddress,
+          // The overflow command ring (EP20), where the core's RAM affords one.
+          ring: hasCommandRing(layout) ? commandRingAddress(layout)! - layout.pmemAddress : null,
         };
       }
       const preparedBytes = injectSdk(prepared);
@@ -365,6 +368,9 @@ export class Player {
       if (!this.console.loadCartridge(preparedBytes)) {
         throw new Error("Engine rejected the cartridge");
       }
+      // The overflow command ring starts empty (EP20).
+      const ring = this.commandRing();
+      if (ring) resetCommandRing(ring);
       // Only pay for the per-pixel material G-buffer when a lit surface will use it.
       this.console.setMaterialCapture(Boolean(this.options.lighting));
       // Baseline the mailbox so any pre-existing persistent memory isn't
@@ -750,7 +756,7 @@ export class Player {
     }
     const afterBlock = runtimeBlock ? this.runtimeBlock() : null;
     if (afterBlock) {
-      this.runtime!.channel.afterTick(afterBlock);
+      this.runtime!.channel.afterTick(afterBlock, this.commandRing());
       this.pollLevelRequest();
       // Particle bursts the cart fired go to the 3D overlay to simulate and draw.
       for (const b of this.runtime!.channel.takeBursts()) this.meshSurface?.burst(b.effect, b.at, b.dir, b.scale);
@@ -954,6 +960,13 @@ export class Player {
   private runtimeBlock(): DataView | null {
     if (!this.runtime || !this.console) return null;
     const bytes = this.console.ramView(this.runtime.offset, PHYS_BLOCK_BYTES);
+    return bytes ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
+  }
+
+  /** A DataView over the overflow command ring (EP20), on cores that have one. */
+  private commandRing(): DataView | null {
+    if (!this.runtime || this.runtime.ring === null || !this.console) return null;
+    const bytes = this.console.ramView(this.runtime.ring, CMD_RING_BYTES);
     return bytes ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
   }
 

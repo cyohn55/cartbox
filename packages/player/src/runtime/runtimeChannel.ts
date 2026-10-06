@@ -23,6 +23,7 @@ import {
   type RagdollBox,
 } from "@cartbox/editor";
 
+import { takeRingCommands } from "./commandRing.js";
 import { AnimationSession, sceneHasAnimation } from "../anim/animationSession.js";
 import { AgentCrowd } from "../nav/agentCrowd.js";
 import { TimelineSession } from "../anim/timelineSession.js";
@@ -208,9 +209,14 @@ export class RuntimeChannel {
     );
   }
 
-  /** Take the cart's commands: scene ops here, the rest to physics (which then steps). */
-  afterTick(block: DataView): void {
+  /**
+   * Take the cart's commands: scene ops here, the rest to physics (which then
+   * steps). `ring` is the overflow command ring on cores that have one (EP20):
+   * its commands came after the block's.
+   */
+  afterTick(block: DataView, ring?: DataView | null): void {
     const commands = takePhysicsCommands(block);
+    if (ring) commands.push(...takeRingCommands(ring));
     for (const cmd of commands) {
       if (cmd.op === PHYS_OP_SPAWN) this.spawn(cmd.a, cmd.v);
       else if (cmd.op === PHYS_OP_DESPAWN) this.despawn(cmd.a);
