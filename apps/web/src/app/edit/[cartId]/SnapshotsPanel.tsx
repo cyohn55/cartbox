@@ -58,10 +58,11 @@ export function SnapshotsPanel({
     try {
       setList(await store.list());
     } catch (error) {
-      // Signed out (or not this cart's owner): keep snapshots in this browser instead.
-      if (error instanceof SnapshotError && (error.status === 401 || error.status === 403) && store.home === "account" && browser) {
+      // Signed out, not this cart's owner, or a server without snapshots: keep them in this browser instead.
+      if (error instanceof SnapshotError && [401, 403, 503].includes(error.status) && store.home === "account" && browser) {
         setStore(browser);
-        setMessage({ text: error.status === 401 ? "Not signed in: snapshots are kept in this browser." : "This cart isn't yours: snapshots are kept in this browser." });
+        const why = error.status === 401 ? "Not signed in" : error.status === 403 ? "This cart isn't yours" : "Snapshots aren't set up on this server";
+        setMessage({ text: `${why}: snapshots are kept in this browser.` });
         return;
       }
       setList([]);

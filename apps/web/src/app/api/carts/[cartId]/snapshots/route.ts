@@ -23,6 +23,10 @@ import { serviceClient } from "@/lib/supabase";
 
 type Params = { params: { cartId: string } };
 
+/** Postgres "relation does not exist": migration 0029 hasn't reached this deployment. */
+const UNDEFINED_TABLE = "42P01";
+const notSetUp = () => NextResponse.json({ error: "Snapshots aren't set up on this server yet." }, { status: 503 });
+
 export async function GET(request: Request, { params }: Params): Promise<NextResponse> {
   if (!isValidCartId(params.cartId)) return NextResponse.json({ error: "Unknown cart" }, { status: 404 });
   const guard = await guardCartWrite(request, params.cartId, "snapshots");
@@ -32,6 +36,7 @@ export async function GET(request: Request, { params }: Params): Promise<NextRes
     .select("id, name, created_at, size")
     .eq("cart_id", guard.cartId)
     .order("created_at", { ascending: false });
+  if (error?.code === UNDEFINED_TABLE) return notSetUp();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({
     snapshots: (data ?? []).map((row) => ({ id: row.id, name: row.name, createdAt: row.created_at, size: row.size })),
@@ -45,6 +50,7 @@ export async function POST(request: Request, { params }: Params): Promise<NextRe
   const bytes = new Uint8Array(await request.arrayBuffer());
   const db = serviceClient();
   const { count, error: countError } = await db.from("cart_snapshots").select("id", { count: "exact", head: true }).eq("cart_id", guard.cartId);
+  if (countError?.code === UNDEFINED_TABLE) return notSetUp();
   if (countError) return NextResponse.json({ error: countError.message }, { status: 500 });
   const problem = snapshotUploadError(bytes, count ?? 0);
   if (problem) return NextResponse.json({ error: problem.message }, { status: problem.status });

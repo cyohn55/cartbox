@@ -809,7 +809,8 @@ preview.
             isn't configured.
           - Migration 0029 adds the table with row-level security on and no
             policies.
-        - Signed out, or on the static build: in this browser's IndexedDB.
+        - Signed out, on the static build, or on a server the migration
+          hasn't reached yet: in this browser's IndexedDB.
       - **Limits:** a snapshot is gzipped JSON, re-validated when it's opened
         (a damaged layer is dropped, not trusted). A cart keeps up to 50, each
         up to 24 MB compressed.
