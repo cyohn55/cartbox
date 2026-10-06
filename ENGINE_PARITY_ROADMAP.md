@@ -788,9 +788,38 @@ preview.
         - the zip, served locally, installs its service worker and boots again
           with the network off;
         - Lockout boots on the Modern core from one file.
-- [ ] **EP19. History, localisation and accessibility.** Named snapshots of a
-      cart with restore; string tables for localisation; text size,
-      colour-blind and remapping settings as engine features.
+- [x] **EP19. History: named snapshots.** Named snapshots of a cart with
+      restore.
+
+      *Done:*
+      - **Taking one:** File → Snapshots… keeps the whole cart under a name:
+        its .tic bytes, every sidecar and its details (exactly what Save
+        writes).
+      - **Restoring:**
+        - The editor first says what will change, by part: code, sprites,
+          map, sound… then each layer by name, the details and the console
+          model.
+        - It snapshots the current state ("Before restoring …") before
+          replacing anything, so a restore can itself be undone.
+        - The restored cart is unsaved work until Save.
+      - **Where they're kept:**
+        - Signed in, in the account:
+          - The API is `/api/carts/[cartId]/snapshots`, owner only.
+          - Payloads go to object storage, or inline on the row when storage
+            isn't configured.
+          - Migration 0029 adds the table with row-level security on and no
+            policies.
+        - Signed out, on the static build, or on a server the migration
+          hasn't reached yet: in this browser's IndexedDB.
+      - **Limits:** a snapshot is gzipped JSON, re-validated when it's opened
+        (a damaged layer is dropped, not trusted). A cart keeps up to 50, each
+        up to 24 MB compressed.
+      - **Tests** cover names, the codec, the change summary, the upload rules,
+        both stores (the account's against a stand-in API, the browser's on
+        real IndexedDB in Chromium) and the migration.
+- [ ] **EP19b. Localisation and accessibility.** String tables for
+      localisation; text size, colour-blind and remapping settings as engine
+      features.
 - [ ] **EP20. A dedicated Modern core.** Game code on the Modern tier currently
       runs in a TIC-80–derived core and reaches the 3D engine through a
       command channel capped at 64 commands a tick. A dedicated core with a
