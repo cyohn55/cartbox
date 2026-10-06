@@ -31,7 +31,7 @@ const px = (frame: Uint8ClampedArray, width: number, x: number, y: number) => Ar
 const SWEETIE = (hex: number) => [(hex >> 16) & 255, (hex >> 8) & 255, hex & 255, 255];
 
 describe.skipIf(!existsSync(CORE))("the Modern core", () => {
-  it("runs a cart: its top level once, TIC every tick, with the clock counting ticks", async () => {
+  it("runs a cart: its top level once, TIC every tick, with the HD core's clock (0 on the first frame, then frames × 1/60 s)", async () => {
     const seen: number[][] = [];
     const { c, ok } = await core(
       `
@@ -44,7 +44,7 @@ function TIC() n = n + 1 cartbox.command(2, n, time()) end`,
     for (let i = 0; i < 3; i += 1) expect(c.tick()).toBe(true);
     expect(seen).toEqual([
       [1, 100, 0],
-      [2, 1, 17],
+      [2, 1, 0],
       [2, 2, 33],
       [2, 3, 50],
     ]);

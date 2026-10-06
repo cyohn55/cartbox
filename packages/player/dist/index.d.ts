@@ -6464,15 +6464,13 @@ declare function takeRingCommands(ring: DataView, max?: number): PhysicsCommand[
  * preludes, the event mailbox, the runtime block, physics, the 3D overlay,
  * saves, input actions — works unchanged.
  *
- * What differs is underneath. The core emulates the TIC-80 RAM layout of the
- * HD core (pmem, the mailbox, the runtime and other blocks sit at the same
- * addresses), and its Lua has `_cbx_cmd`: the runtime SDK sends its commands
- * through that, straight to the host as the cart makes them, instead of into
- * the RAM block's 64 slots. {@link DirectConsole.takeCommands} hands the
- * tick's commands to the runtime, which applies them after the block's.
- *
- * Sprites, the map and sound come in a later part (those calls do nothing
- * yet), so the console makes no audio.
+ * What differs is underneath. The core carries TIC-80 as a cart sees it, at
+ * the HD core's spec: the same RAM layout (pmem, the mailbox, the runtime and
+ * other blocks sit at the same addresses), the cartridge's banks, the 2D API,
+ * input and sound. And its Lua has `_cbx_cmd`: the runtime SDK sends its
+ * commands through that, straight to the host as the cart makes them, instead
+ * of into the RAM block's 64 slots. {@link DirectConsole.takeCommands} hands
+ * the tick's commands to the runtime, which applies them after the block's.
  */
 
 interface DirectConsole extends ConsoleInstance {
@@ -6483,7 +6481,7 @@ interface DirectConsole extends ConsoleInstance {
 /** The models the dedicated core runs (the HD core's tier). */
 declare function directCoreModel(model: ConsoleModel): boolean;
 /** Wrap an instantiated modern-core module as a console for `model`. */
-declare function createDirectConsole(module: unknown, model: ConsoleModel, layout?: RamLayout): DirectConsole;
+declare function createDirectConsole(module: unknown, model: ConsoleModel, layout?: RamLayout, sampleRate?: number): DirectConsole;
 
 /**
  * Player orchestrator. Wires the cartridge, engine, display, input, and audio

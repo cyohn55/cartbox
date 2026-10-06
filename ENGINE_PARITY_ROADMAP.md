@@ -915,10 +915,10 @@ preview.
           - 300, then 5,000, then 10 placements in successive ticks arrive in
             order, up to exactly the new cap;
           - without the host reading the ring, only the block's 64 arrive.
-- [ ] **EP20b. A dedicated Modern core.** A core of its own for the Modern
+- [x] **EP20b. A dedicated Modern core.** A core of its own for the Modern
       tier: a Lua VM with a direct scripting API into the 3D engine, calls
-      rather than a command channel. It is the foundation for scale. In
-      progress, in parts.
+      rather than a command channel. It is the foundation for scale. Done, in
+      four parts.
 
       *Done so far (part 1, the core):*
       - **`packages/modern-core`:** Lua 5.4.7 compiled to WebAssembly with
@@ -971,8 +971,62 @@ preview.
         - The site serves it at `/engine/modern-core/`, and exports carry it
           in place of the TIC-80–derived core when the scene chooses it.
 
-      *Next:*
-      - **Part 3:** sprites, map and sound for its 2D layer, from the
-        cartridge's banks.
-      - **Part 4:** Lockout on the dedicated core, compared frame for frame
-        with the TIC-80–derived one.
+      *Done (part 3, TIC-80 as a cart sees it):*
+      - **`src/tic.c`, ported from TIC-80 (MIT)** at the HD core's spec (8 bits
+        a pixel, 8 sound channels), its algorithms step for step:
+        - the RAM, the layout following from the screen size and the
+          persistent words, byte for byte the HD core's at 1280×720;
+        - the cartridge's banks (palette, tiles, sprites, map, flags, sfx,
+          waveforms, music, screen), read with TIC-80's loader rules (DB16
+          for a cart with no palette), and `sync` between them and RAM;
+        - the whole 2D API: shapes (`elli`, `trib`, `paint` too), `spr`
+          (flip, rotate, scale, colour keys, multi-tile), `map` (with
+          remap), `mget`/`mset`, `fget`/`fset`, `ttri` (tiles, map or vbank,
+          with depth), `textri`, `print` and `font` from the fonts in RAM,
+          the palette mapping, vbanks, screen offsets and the per-line
+          palette (`SCN`, `BDR`);
+        - input (`btn`, `btnp` with repeat, `key`, `keyp`, `mouse`),
+          `reset`, `BOOT` and `OVR`, and the HD core's tick order and clock;
+        - sound and music: TIC-80's state machine, register for register.
+      - **Two things are not TIC-80's:**
+        - the samples come from a small mixer of our own (TIC-80's,
+          blip_buf, is LGPL): the notes, timing and volumes are TIC-80's,
+          the samples differ by a little filtering;
+        - the language is Lua 5.4 (TIC-80 runs 5.3), with Lua 5.3's
+          `math.random` on the same C library generator, so a seed rolls the
+          same numbers on both cores.
+      - **The player** hands the core the cartridge's banks and plays its
+        sound.
+
+      *Done (part 4, compared with the TIC-80–derived core):*
+      - **A parity test** runs carts on the dedicated core and the HD core
+        side by side. On every tick it requires the same frame, pixel for
+        pixel, and the same RAM, byte for byte. The carts cover:
+        - shapes, text, clip and paint;
+        - sprites, the map, flags, textured triangles and the font from a
+          cartridge's banks;
+        - vbanks with `OVR`, `SCN` and `BDR`, screen offsets, and the
+          palette and its mapping;
+        - banks and `sync`, input, `BOOT` and the clock;
+        - `reset`;
+        - sound and music: every register every tick, and the samples'
+          loudness frame by frame.
+      - **Lockout, as the player runs it,** with its scene, runtime, UI,
+        actions, strings and save preludes:
+        - 600 frames, from the menu into a match: the intro flyover, then
+          moving, turning and firing among bots;
+        - every frame identical;
+        - all of RAM identical except the command slots (the channel the
+          direct calls bypass);
+        - the same commands to the 3D runtime, tick by tick, in order. The
+          direct ones carry full precision, where the RAM channel floors to
+          1/1024.
+      - **What the comparison caught and fixed:**
+        - the HD core's clock reads 0 on the first frame, then frames ×
+          1/60 s;
+        - a cart with no palette chunk gets DB16;
+        - coordinates truncate (they don't floor), and argument counts are
+          checked as TIC-80 checks them;
+        - Lua 5.3's `math.random`.
+      - **CI:** the core's workflow runs the comparison against each fresh
+        build.

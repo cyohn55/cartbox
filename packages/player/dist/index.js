@@ -4828,7 +4828,7 @@ function hashEventId(id) {
 function directCoreModel(model) {
   return model.id === "modern" || model.id === "xbox360";
 }
-function createDirectConsole(module, model, layout = RAM_LAYOUTS[model.id]) {
+function createDirectConsole(module, model, layout = RAM_LAYOUTS[model.id], sampleRate = model.sampleRate) {
   let commands = [];
   let errorSeq = 0;
   let errorMessage = "";
@@ -4836,6 +4836,7 @@ function createDirectConsole(module, model, layout = RAM_LAYOUTS[model.id]) {
     width: model.width,
     height: model.height,
     ram: { size: layout.ramSize, pmem: layout.pmemAddress },
+    sampleRate,
     host: {
       command: (op, a, v1, v2, v3, v4, v5, v6) => {
         commands.push({ op, a, v: [v1, v2, v3, v4, v5, v6] });
@@ -4862,6 +4863,7 @@ function createDirectConsole(module, model, layout = RAM_LAYOUTS[model.id]) {
     loadCartridge(bytes) {
       const code = readCartCode(bytes);
       if (code === null) return false;
+      core.cart(bytes);
       if (core.load(code)) return true;
       fail();
       return false;
@@ -4870,7 +4872,7 @@ function createDirectConsole(module, model, layout = RAM_LAYOUTS[model.id]) {
       if (!core.tick(mask)) fail();
     },
     readFramebuffer: () => core.frame(),
-    readAudioSamples: () => new Int16Array(0),
+    readAudioSamples: () => core.samples(),
     readMailbox() {
       const words = pmem();
       const view = new Uint32Array(words.buffer, words.byteOffset + NET_WORDS * 4, MAILBOX_WORDS);
@@ -15255,7 +15257,7 @@ var Player = class {
       const preparedBytes = injectSdk(prepared);
       this.lineOffset = codeLineOffset(ownCode, readCartCode(preparedBytes));
       this.lineCount = cartCode === null ? 0 : cartCode.split("\n").length;
-      this.console = direct ? createDirectConsole(module, this.model) : createConsole(module, this.model, sampleRate);
+      this.console = direct ? createDirectConsole(module, this.model, void 0, sampleRate) : createConsole(module, this.model, sampleRate);
       if (!this.console.loadCartridge(preparedBytes)) {
         throw new Error("Engine rejected the cartridge");
       }

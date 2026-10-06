@@ -382,7 +382,7 @@ export class Player {
       this.lineOffset = codeLineOffset(ownCode, readCartCode(preparedBytes));
       this.lineCount = cartCode === null ? 0 : cartCode.split("\n").length;
 
-      this.console = direct ? createDirectConsole(module, this.model) : createConsole(module as Parameters<typeof createConsole>[0], this.model, sampleRate);
+      this.console = direct ? createDirectConsole(module, this.model, undefined, sampleRate) : createConsole(module as Parameters<typeof createConsole>[0], this.model, sampleRate);
       if (!this.console.loadCartridge(preparedBytes)) {
         throw new Error("Engine rejected the cartridge");
       }

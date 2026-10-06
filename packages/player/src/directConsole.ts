@@ -5,15 +5,13 @@
  * preludes, the event mailbox, the runtime block, physics, the 3D overlay,
  * saves, input actions — works unchanged.
  *
- * What differs is underneath. The core emulates the TIC-80 RAM layout of the
- * HD core (pmem, the mailbox, the runtime and other blocks sit at the same
- * addresses), and its Lua has `_cbx_cmd`: the runtime SDK sends its commands
- * through that, straight to the host as the cart makes them, instead of into
- * the RAM block's 64 slots. {@link DirectConsole.takeCommands} hands the
- * tick's commands to the runtime, which applies them after the block's.
- *
- * Sprites, the map and sound come in a later part (those calls do nothing
- * yet), so the console makes no audio.
+ * What differs is underneath. The core carries TIC-80 as a cart sees it, at
+ * the HD core's spec: the same RAM layout (pmem, the mailbox, the runtime and
+ * other blocks sit at the same addresses), the cartridge's banks, the 2D API,
+ * input and sound. And its Lua has `_cbx_cmd`: the runtime SDK sends its
+ * commands through that, straight to the host as the cart makes them, instead
+ * of into the RAM block's 64 slots. {@link DirectConsole.takeCommands} hands
+ * the tick's commands to the runtime, which applies them after the block's.
  */
 
 import { wrapModernCore, type ModernCore } from "@cartbox/modern-core";
@@ -37,7 +35,12 @@ export function directCoreModel(model: ConsoleModel): boolean {
 }
 
 /** Wrap an instantiated modern-core module as a console for `model`. */
-export function createDirectConsole(module: unknown, model: ConsoleModel, layout: RamLayout = RAM_LAYOUTS[model.id]): DirectConsole {
+export function createDirectConsole(
+  module: unknown,
+  model: ConsoleModel,
+  layout: RamLayout = RAM_LAYOUTS[model.id],
+  sampleRate: number = model.sampleRate,
+): DirectConsole {
   let commands: PhysicsCommand[] = [];
   let errorSeq = 0;
   let errorMessage = "";
@@ -45,6 +48,7 @@ export function createDirectConsole(module: unknown, model: ConsoleModel, layout
     width: model.width,
     height: model.height,
     ram: { size: layout.ramSize, pmem: layout.pmemAddress },
+    sampleRate,
     host: {
       command: (op, a, v1, v2, v3, v4, v5, v6) => {
         commands.push({ op, a, v: [v1, v2, v3, v4, v5, v6] });
@@ -71,6 +75,7 @@ export function createDirectConsole(module: unknown, model: ConsoleModel, layout
     loadCartridge(bytes) {
       const code = readCartCode(bytes);
       if (code === null) return false;
+      core.cart(bytes);
       if (core.load(code)) return true;
       fail();
       return false;
@@ -79,7 +84,7 @@ export function createDirectConsole(module: unknown, model: ConsoleModel, layout
       if (!core.tick(mask)) fail();
     },
     readFramebuffer: () => core.frame(),
-    readAudioSamples: () => new Int16Array(0),
+    readAudioSamples: () => core.samples(),
     readMailbox() {
       const words = pmem();
       const view = new Uint32Array(words.buffer, words.byteOffset + NET_WORDS * 4, MAILBOX_WORDS);
