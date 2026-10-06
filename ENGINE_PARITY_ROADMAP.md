@@ -815,6 +815,10 @@ preview.
             policies.
         - Signed out, on the static build, or on a server the migration
           hasn't reached yet: in this browser's IndexedDB.
+      - **Nothing left behind:** when a cart is deleted in the database (an
+        owner's delete, an account's cascade), triggers queue its .tic, its
+        offloaded mesh and its snapshots' payloads (migration 0030), and the API
+        deletes those objects a few at a time as it writes to storage.
       - **Limits:** a snapshot is gzipped JSON, re-validated when it's opened
         (a damaged layer is dropped, not trusted). A cart keeps up to 50, each
         up to 24 MB compressed.
@@ -863,9 +867,14 @@ preview.
       - **Where the settings appear:** under the player on the play page, in
         the playtest, in exported games (EP18), and in Lockout's Start menu
         (Display → Accessibility).
-      - **Lockout** speaks English and Spanish: its UI's fixed texts and its
-        game type names, written in ASCII for the console font. Its sidecar
-        budget is raised to 1.55 MB for the table.
+      - **Lockout** speaks English and Spanish, written in ASCII for the
+        console font:
+        - its UI's fixed texts, game type names and weapon names;
+        - the in-match messages: announcements, multikills and sprees, pickups,
+          the kill feed and the status line.
+        - Names are relabelled as the menu and HUD draw, so a language switch
+          shows mid-match. Its sidecar budget is raised to 1.55 MB for the
+          table.
       - **Tests** cover:
         - the table reader, language choice, translation, missing keys and UI
           keys;
@@ -892,8 +901,10 @@ preview.
           burst, impulses and the rest simply stop being dropped.
         - The host reads the block's commands, then the ring's, so their order
           is kept. It empties the ring after every tick.
-        - Other cores keep the 8 KB block alone: their free RAM can't hold the
-          ring.
+        - Every core whose free RAM affords a ring has one: 128 KB on the Pro
+          core (Pro, Portrait) too, so 4,159 commands a tick; 64 KB on the era
+          core (PS1, N64), so 2,111. Classic keeps the 8 KB block alone: its
+          free RAM is the block's.
       - **Lockout** runs on the HD core, so it gets the higher cap as it is.
       - **Tests:**
         - where the ring sits (only on the HD core, clear of TIC-80's own RAM

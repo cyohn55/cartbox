@@ -1431,7 +1431,8 @@ export const LOCKOUT_UI: UiDocument[] = [
 ];
 
 /**
- * Lockout's string table (EP19b): its UI's fixed texts and game type names in
+ * Lockout's string table (EP19b): its UI's fixed texts, game type and weapon
+ * names, and the in-match messages (announcements, kill feed, status line) in
  * English and Spanish. The console font is ASCII, so the Spanish is written
  * without accents. Lua reads it through cartbox.text, keeping the English as
  * written when no table is loaded (see T in LOCKOUT_CODE).
@@ -1455,6 +1456,34 @@ export const LOCKOUT_STRINGS: StringTable = {
     { key: "mode.ball", text: { en: "Oddball", es: "Bola rara" } },
     { key: "mode.koth", text: { en: "King of the Hill", es: "Rey de la colina" } },
     { key: "mode.jugg", text: { en: "Juggernaut", es: "Coloso" } },
+    { key: "menu.host", text: { en: "ONLINE  --  you are the host  --  {1} player(s) + {2} bots", es: "EN LINEA  --  eres el anfitrion  --  {1} jugador(es) + {2} bots" } },
+    { key: "weapon.br", text: { en: "Battle Rifle", es: "Rifle de batalla" } },
+    { key: "weapon.smg", text: { en: "SMG", es: "Subfusil" } },
+    { key: "weapon.shotgun", text: { en: "Shotgun", es: "Escopeta" } },
+    { key: "weapon.sniper", text: { en: "Sniper Rifle", es: "Rifle de precision" } },
+    { key: "weapon.magnum", text: { en: "Magnum", es: "Magnum" } },
+    { key: "weapon.sword", text: { en: "Energy Sword", es: "Espada de energia" } },
+    { key: "msg.ball", text: { en: "You have the ball", es: "Tienes la bola" } },
+    { key: "msg.hill", text: { en: "Hill moved", es: "La colina se movio" } },
+    { key: "msg.jugg", text: { en: "JUGGERNAUT", es: "COLOSO" } },
+    { key: "msg.hunted", text: { en: "YOU ARE THE HUNTED", es: "ERES LA PRESA" } },
+    { key: "msg.double", text: { en: "Double Kill!", es: "Doble baja!" } },
+    { key: "msg.triple", text: { en: "Triple Kill!", es: "Triple baja!" } },
+    { key: "msg.overkill", text: { en: "Overkill!", es: "Masacre!" } },
+    { key: "msg.killtacular", text: { en: "Killtacular!", es: "Bajatacular!" } },
+    { key: "msg.spree", text: { en: "Killing Spree!", es: "Racha asesina!" } },
+    { key: "msg.frenzy", text: { en: "Killing Frenzy!", es: "Frenesi asesino!" } },
+    { key: "msg.riot", text: { en: "Running Riot!", es: "Imparable!" } },
+    { key: "msg.pickup", text: { en: "Picked up {1}", es: "Recogiste {1}" } },
+    { key: "feed.headshot", text: { en: "  (headshot)", es: "  (a la cabeza)" } },
+    { key: "status.teams", text: { en: "BLUE {1}   RED {2}   /{3}", es: "AZUL {1}   ROJO {2}   /{3}" } },
+    { key: "status.holdball", text: { en: "YOU HOLD THE BALL  ", es: "TIENES LA BOLA  " } },
+    { key: "status.ball", text: { en: "Ball {1} /{2}", es: "Bola {1} /{2}" } },
+    { key: "status.hill", text: { en: "Hill {1} /{2}", es: "Colina {1} /{2}" } },
+    { key: "status.youjugg", text: { en: "YOU ARE THE JUGGERNAUT  ", es: "ERES EL COLOSO  " } },
+    { key: "status.huntjugg", text: { en: "Hunt the Juggernaut  ", es: "Caza al Coloso  " } },
+    { key: "status.score", text: { en: "Score {1}   Deaths {2}   /{3}", es: "Puntos {1}   Muertes {2}   /{3}" } },
+    { key: "hud.motion", text: { en: "MOTION", es: "RADAR" } },
   ],
 };
 
@@ -2565,7 +2594,15 @@ local function T(key, english, ...)
   if s == key then return english end
   return s
 end
-for k, m in pairs(MODES) do m.name = T("mode."..k, m.name) end
+-- Game type and weapon names, in the current language: relabelled as the menu
+-- and HUD draw, so a language switch mid-game shows at once.
+for k, m in pairs(MODES) do m.en = m.name end
+for id, w in pairs(W) do w.en = w.name end
+local function relabel()
+  for k, m in pairs(MODES) do m.name = T("mode."..k, m.en) end
+  for id, w in pairs(W) do w.name = T("weapon."..id, w.en) end
+end
+relabel()
 
 -- Hill locations King-of-the-Hill rotates through (the named power positions).
 local HILL_MOVE = 1800   -- the hill moves every 30s
@@ -2880,13 +2917,13 @@ end
 -- juggernaut, where a loose ball lies, which hill is live.
 function net_objective(holder, live, value, b)
   if MODE.obj == "ball" then
-    if holder == p and ball.carrier ~= p then say("You have the ball",9) end
+    if holder == p and ball.carrier ~= p then say(T("msg.ball","You have the ball"),9) end
     ball.carrier, ball.live = holder, live
     if not holder then ball.x, ball.z, ball.y = s16(b)/100, s16(b >> 16)/100, s16(value)/100 end
   elseif MODE.obj == "hill" and value ~= hill.idx and HILLS[value] then
     hill.idx = value
     local h = HILLS[value]; hill.x,hill.y,hill.z = h[1],h[2],h[3]
-    say("Hill moved",12)
+    say(T("msg.hill","Hill moved"),12)
   elseif MODE.obj == "jugg" and holder and not holder.jugg then
     for _,o in ipairs(all_players()) do o.jugg = false end
     holder.jugg = true
@@ -2996,7 +3033,7 @@ function register_kill(killer, victim, hs)
     if MODE.obj=="ball" or MODE.obj=="hill" then
       -- objective modes: kills don't score, holding does
     elseif MODE.obj=="jugg" then
-      if victim.jugg then killer.jugg=true; victim.jugg=false; killer.score=(killer.score or 0)+1; if killer==p then say("JUGGERNAUT",9) elseif victim==p then say("YOU ARE THE HUNTED",6) end
+      if victim.jugg then killer.jugg=true; victim.jugg=false; killer.score=(killer.score or 0)+1; if killer==p then say(T("msg.jugg","JUGGERNAUT"),9) elseif victim==p then say(T("msg.hunted","YOU ARE THE HUNTED"),6) end
       elseif killer.jugg then killer.score=(killer.score or 0)+1 end   -- the juggernaut scores its kills
     elseif MODE.teams then
       team[killer.team]=team[killer.team]+1
@@ -3008,12 +3045,12 @@ function register_kill(killer, victim, hs)
     if tick-(killer.lastkill or -999) < 240 then killer.multi=(killer.multi or 1)+1 else killer.multi=1 end
     killer.lastkill=tick
     if killer==p then
-      local m = {"","","Double Kill!","Triple Kill!","Overkill!","Killtacular!"}
-      if killer.multi>=2 then say(m[math.min(6,killer.multi)] or "Killtacular!",9) end
-      local sp = {[5]="Killing Spree!",[10]="Killing Frenzy!",[15]="Running Riot!"}
+      local m = {"","",T("msg.double","Double Kill!"),T("msg.triple","Triple Kill!"),T("msg.overkill","Overkill!"),T("msg.killtacular","Killtacular!")}
+      if killer.multi>=2 then say(m[math.min(6,killer.multi)],9) end
+      local sp = {[5]=T("msg.spree","Killing Spree!"),[10]=T("msg.frenzy","Killing Frenzy!"),[15]=T("msg.riot","Running Riot!")}
       if sp[killer.streak] then say(sp[killer.streak],6) end
     end
-    add_feed((killer.tag or "?").." > "..(victim.tag or "?")..(hs and "  (headshot)" or ""), killer==p and 6 or 13)
+    add_feed((killer.tag or "?").." > "..(victim.tag or "?")..(hs and T("feed.headshot","  (headshot)") or ""), killer==p and 6 or 13)
   end
   if MODE.obj=="ball" and ball.carrier==victim then ball.live=true; ball.carrier=nil; ball.x=victim.x; ball.y=victim.y+0.6; ball.z=victim.z end
 end
@@ -3150,7 +3187,7 @@ local function try_pickups()
     if legal and mtimer[i+1]==0 then
       local mx,my,mz=MRK[i*3+1],MRK[i*3+2],MRK[i*3+3]
       if math.abs(p.x-mx)<1.4 and math.abs(p.z-mz)<1.6 and math.abs((p.y+1)-my)<2.0 then
-        give(p,1,id); p.slot=1; mtimer[i+1]=540; say("Picked up "..W[id].name,12)
+        give(p,1,id); p.slot=1; mtimer[i+1]=540; say(T("msg.pickup","Picked up "..W[id].name,W[id].name),12)
       end
     end
   end
@@ -3372,7 +3409,7 @@ local function update_objective()
       for _,o in ipairs(all_players()) do
         if not o.dead and d3(o.x,o.y,o.z, ball.x,ball.y,ball.z) < ((o==p) and 1.5 or 1.3) then
           ball.carrier=o; ball.live=false
-          if o==p then say("You have the ball",9) end
+          if o==p then say(T("msg.ball","You have the ball"),9) end
           break
         end
       end
@@ -3381,7 +3418,7 @@ local function update_objective()
     if tick>=hill.next then
       hill.idx = hill.idx % #HILLS + 1
       local h=HILLS[hill.idx]; hill.x,hill.y,hill.z=h[1],h[2],h[3]; hill.next=tick+HILL_MOVE
-      if tick>1 then say("Hill moved",12) end
+      if tick>1 then say(T("msg.hill","Hill moved"),12) end
     end
     local function inhill(o) return (not o.dead) and math.abs(o.x-hill.x)<3 and math.abs(o.z-hill.z)<3 end
     -- a point for every second in the hill
@@ -3616,11 +3653,12 @@ local function draw_tracker()
     elseif not o.dead then blip(o,9) end
   end
   tri(rx,ry-7, rx-5,ry+5, rx+5,ry+5, 12)  -- player
-  print("MOTION",rx-34,ry+rr+6,13,false,1,true)
+  print(T("hud.motion","MOTION"),rx-34,ry+rr+6,13,false,1,true)
 end
 
 local function draw_hud()
   -- The HUD is a UI document (cartbox.ui): this sets what it shows.
+  relabel()
   local U=cartbox.ui
   U.hide("menu")
   U.set("hp1",(MODE.shields and p.sh or p.hp)/100); U.set("hpc",p.sh>0 and 9 or 6)
@@ -3631,11 +3669,12 @@ local function draw_hud()
   U.set("weapon",cur.name); U.set("ammo",ammo.." / "..res); U.set("ammoc",cur.melee and 13 or 12)
   for i=1,(p.nade or 0) do circ(1150+i*22,120,8,6); circb(1150+i*22,120,8,12) end
   local st
-  if MODE.obj=="slayer" and MODE.teams then st="BLUE "..team.blue.."   RED "..team.red.."   /"..MODE.target
-  elseif MODE.obj=="ball" then st=(ball.carrier==p and "YOU HOLD THE BALL  " or "").."Ball "..(p.score or 0).." /"..MODE.target
-  elseif MODE.obj=="hill" then st="Hill "..(p.score or 0).." /"..MODE.target
-  elseif MODE.obj=="jugg" then st=(p.jugg and "YOU ARE THE JUGGERNAUT  " or "Hunt the Juggernaut  ")..(p.score or 0).." /"..MODE.target
-  else st="Score "..(p.score or 0).."   Deaths "..p.deaths.."   /"..MODE.target end
+  local sc, tg = p.score or 0, MODE.target
+  if MODE.obj=="slayer" and MODE.teams then st=T("status.teams","BLUE "..team.blue.."   RED "..team.red.."   /"..tg,team.blue,team.red,tg)
+  elseif MODE.obj=="ball" then st=(ball.carrier==p and T("status.holdball","YOU HOLD THE BALL  ") or "")..T("status.ball","Ball "..sc.." /"..tg,sc,tg)
+  elseif MODE.obj=="hill" then st=T("status.hill","Hill "..sc.." /"..tg,sc,tg)
+  elseif MODE.obj=="jugg" then st=(p.jugg and T("status.youjugg","YOU ARE THE JUGGERNAUT  ") or T("status.huntjugg","Hunt the Juggernaut  "))..sc.." /"..tg
+  else st=T("status.score","Score "..sc.."   Deaths "..p.deaths.."   /"..tg,sc,p.deaths,tg) end
   U.set("mode",MODE.name); U.set("status",st)
   local fd={}
   for i,f in ipairs(feed) do fd[i]={text=f.text,color=f.color}; f.t=f.t-1 end
@@ -3882,6 +3921,7 @@ function title_screen()
     return
   end
   -- The game types (and, offline, Matchmaking after them).
+  relabel()
   local keys = (NETMODE == 2) and ONLINE_KEYS or MODE_KEYS
   local items = {}
   for _,k in ipairs(keys) do items[#items+1] = MODES[k].name end
@@ -3893,7 +3933,7 @@ function title_screen()
   U.set("modes",items); U.select("modes",sel)
   if NETMODE == 2 then
     local humans = humans_in_room()
-    U.set("menutop","ONLINE  --  you are the host  --  "..humans.." player"..(humans==1 and "" or "s").." + "..(8-humans).." bots"); U.set("menutopc",9)
+    U.set("menutop",T("menu.host","ONLINE  --  you are the host  --  "..humans.." player"..(humans==1 and "" or "s").." + "..(8-humans).." bots",humans,8-humans)); U.set("menutopc",9)
   else U.set("menutop",T("menu.top","Matchmaking finds players online . or play the game types below vs 7 bots")); U.set("menutopc",13) end
   U.set("career", career_line())
   U.show("menu")

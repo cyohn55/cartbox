@@ -1,6 +1,7 @@
 /**
- * The overflow command ring (ENGINE_PARITY_ROADMAP.md EP20): on the Modern
- * tier's HD core, the cart's scene commands no longer stop at 64 a tick.
+ * The overflow command ring (ENGINE_PARITY_ROADMAP.md EP20): on every core
+ * whose free RAM affords one (HD, Pro, era), the cart's scene commands no
+ * longer stop at 64 a tick.
  * Covers where the ring sits (only where the core's free RAM affords it, clear
  * of every other block), that the real engine never touches it while drawing,
  * and that a cart's commands past the 64th arrive in order, up to the new cap.
@@ -21,8 +22,8 @@ import {
   RuntimeChannel,
   codeChunks,
   commandRingAddress,
+  commandRingBytes,
   commandsPerTick,
-  hasCommandRing,
   injectSdk,
   parseMeshScene,
   physicsBlockAddress,
@@ -37,27 +38,28 @@ const ENGINE = path.resolve(__dirname, "../packages/engine/dist/xbox360/engine.j
 const HD = RAM_LAYOUTS.modern;
 
 describe("where the ring sits", () => {
-  it("only on the HD core (Modern, Xbox 360), whose free RAM holds it", () => {
-    expect(hasCommandRing(RAM_LAYOUTS.modern)).toBe(true);
-    expect(hasCommandRing(RAM_LAYOUTS.xbox360)).toBe(true);
-    for (const model of ["classic", "pro", "portrait", "ps1", "n64"] as const) {
-      expect(hasCommandRing(RAM_LAYOUTS[model])).toBe(false);
-      expect(commandRingAddress(RAM_LAYOUTS[model])).toBeNull();
-      expect(commandsPerTick(RAM_LAYOUTS[model])).toBe(PHYS_MAX_CMDS);
-    }
+  it("on every core whose free RAM holds one: 128 KB on HD and Pro, 64 KB on the era core, none on Classic", () => {
+    const sizes = Object.fromEntries((["classic", "voxel", "pro", "portrait", "ps1", "n64", "xbox360", "modern"] as const).map((m) => [m, commandRingBytes(RAM_LAYOUTS[m])]));
+    expect(sizes).toEqual({ classic: 0, voxel: 0, pro: 131072, portrait: 131072, ps1: 65536, n64: 65536, xbox360: 131072, modern: 131072 });
+    expect(commandRingAddress(RAM_LAYOUTS.classic)).toBeNull();
+    expect(commandsPerTick(RAM_LAYOUTS.classic)).toBe(PHYS_MAX_CMDS);
     expect(commandsPerTick(HD)).toBe(PHYS_MAX_CMDS + CMD_RING_MAX);
+    expect(commandsPerTick(RAM_LAYOUTS.ps1)).toBe(PHYS_MAX_CMDS + 2047);
     expect(CMD_RING_MAX).toBe(4095);
   });
 
   it("just below the save block, above the end of TIC-80's own RAM (pmem, flags, font, mapping)", () => {
-    const ring = commandRingAddress(HD)!;
-    expect(ring + CMD_RING_BYTES).toBe(saveBlockAddress(HD));
-    expect(ring).toBeGreaterThan(HD.pmemAddress + 0x1024);
-    expect(saveBlockAddress(HD)).toBeLessThan(physicsBlockAddress(HD));
+    for (const model of ["pro", "ps1", "xbox360"] as const) {
+      const layout = RAM_LAYOUTS[model];
+      const ring = commandRingAddress(layout)!;
+      expect(ring + commandRingBytes(layout)).toBe(saveBlockAddress(layout));
+      expect(ring).toBeGreaterThan(layout.pmemAddress + 0x1024);
+      expect(saveBlockAddress(layout)).toBeLessThan(physicsBlockAddress(layout));
+    }
   });
 });
 
-describe.skipIf(!existsSync(ENGINE))("in the real HD engine", () => {
+describe.skipIf(!existsSync(ENGINE))("in the real engines", () => {
   const box: MeshAsset = { name: "b", primitives: [{ positions: Float32Array.from([0, 0, 0, 1, 0, 0, 0, 1, 0]), normals: null, uvs: null, indices: Uint32Array.from([0, 1, 2]), material: { name: "m", baseColorFactor: [1, 1, 1, 1], baseColorImage: null } }] };
   const tf = { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] };
   // A timeline gives the scene its runtime (and so cartbox.place).
@@ -70,23 +72,26 @@ describe.skipIf(!existsSync(ENGINE))("in the real HD engine", () => {
     }),
   )!;
 
-  async function boot(code: string, preludes: string[]) {
+  async function boot(code: string, preludes: string[], engineFile = ENGINE, layout = HD) {
     let tic = codeChunks(new TextEncoder().encode(code));
     for (const p of preludes) if (p) tic = prependLuaCode(tic, p);
     tic = injectSdk(tic);
-    const mod = await (await import(pathToFileURL(ENGINE).href)).default();
+    const mod = await (await import(pathToFileURL(engineFile).href)).default();
     const h = mod._cbx_create(44100);
     const ptr = mod._malloc(tic.length);
     mod.HEAPU8.set(tic, ptr);
     expect(mod._cbx_load(h, ptr, tic.length)).toBe(1);
     mod._free(ptr);
     const base = mod._cbx_mailbox_ptr(h) - NET_WORDS * 4;
-    const view = (address: number, bytes: number) => new DataView(mod.HEAPU8.buffer, base + address - HD.pmemAddress, bytes);
+    const view = (address: number, bytes: number) => new DataView(mod.HEAPU8.buffer, base + address - layout.pmemAddress, bytes);
     return { tick: () => mod._cbx_tick(h, 0), view, pmem: (i: number) => new Int32Array(mod.HEAPU8.buffer, base, 256)[i]! };
   }
 
-  it("never touches the ring's RAM, however much a cart draws", async () => {
-    const code = `
+  for (const model of ["xbox360", "pro", "ps1", "n64"] as const) {
+    const file = path.resolve(__dirname, `../packages/engine/dist/${model}/engine.js`);
+    it.skipIf(!existsSync(file))(`never touches the ring's RAM on the ${model} core, however much a cart draws`, async () => {
+      const layout = RAM_LAYOUTS[model];
+      const code = `
 function TIC()
   cls(3)
   for i = 0, 200 do
@@ -94,16 +99,19 @@ function TIC()
     spr(i % 64, i * 2 % 600, i % 300, 0, 2) print("STRESS " .. i, i % 500, i % 340, 12)
   end
   map(0, 0, 60, 34, 0, 0)
+  sfx(0, 30, 10) music(0)
 end`;
-    const engine = await boot(code, []);
-    const ring = engine.view(commandRingAddress(HD)!, CMD_RING_BYTES);
-    for (let i = 0; i < CMD_RING_BYTES; i += 4) ring.setUint32(i, (0x9e3779b1 * (i + 1)) >>> 0, true);
-    for (let t = 0; t < 10; t += 1) engine.tick();
-    const after = engine.view(commandRingAddress(HD)!, CMD_RING_BYTES);
-    let changed = 0;
-    for (let i = 0; i < CMD_RING_BYTES; i += 4) if (after.getUint32(i, true) !== (0x9e3779b1 * (i + 1)) >>> 0) changed += 1;
-    expect(changed).toBe(0);
-  });
+      const engine = await boot(code, [], file, layout);
+      const bytes = commandRingBytes(layout);
+      const ring = engine.view(commandRingAddress(layout)!, bytes);
+      for (let i = 0; i < bytes; i += 4) ring.setUint32(i, (0x9e3779b1 * (i + 1)) >>> 0, true);
+      for (let t = 0; t < 10; t += 1) engine.tick();
+      const after = engine.view(commandRingAddress(layout)!, bytes);
+      let changed = 0;
+      for (let i = 0; i < bytes; i += 4) if (after.getUint32(i, true) !== (0x9e3779b1 * (i + 1)) >>> 0) changed += 1;
+      expect(changed).toBe(0);
+    });
+  }
 
   it("carries a cart's commands past the 64th, in order, up to the new cap", async () => {
     // Each tick asks for N placements of one object at x = 1..N: the last one
@@ -134,6 +142,24 @@ end`;
     expect([engine.pmem(101), engine.pmem(102), engine.pmem(103)]).toEqual([300, PHYS_MAX_CMDS + CMD_RING_MAX, 10]);
     // The last accepted placement wins each tick: everything arrived, in order (and the ring was emptied between ticks).
     expect(xs).toEqual([300, PHYS_MAX_CMDS + CMD_RING_MAX, 10]);
+  });
+
+  it.skipIf(!existsSync(path.resolve(__dirname, "../packages/engine/dist/ps1/engine.js")))("on the era core, up to its own cap (2111)", async () => {
+    const layout = RAM_LAYOUTS.ps1;
+    const code = `
+function TIC()
+  local ok = 0
+  for i = 1, 3000 do if cartbox.place("crate", i, 0, 0, 0, 0, 0, 1) then ok = ok + 1 end end
+  pmem(101, ok)
+end`;
+    const engine = await boot(code, [sceneObjectsSdkLua(sc), runtimeSdkLua(sc, layout, { physics: false })], path.resolve(__dirname, "../packages/engine/dist/ps1/engine.js"), layout);
+    const channel = new RuntimeChannel(sc, null);
+    channel.beforeTick(engine.view(physicsBlockAddress(layout), PHYS_BLOCK_BYTES));
+    engine.tick();
+    channel.afterTick(engine.view(physicsBlockAddress(layout), PHYS_BLOCK_BYTES), engine.view(commandRingAddress(layout)!, commandRingBytes(layout)));
+    expect(engine.pmem(101)).toBe(commandsPerTick(layout));
+    expect(Math.round(channel.placements().get(0)![12]!)).toBe(commandsPerTick(layout));
+    channel.destroy();
   });
 
   it("without the host reading the ring, only the block's 64 arrive", async () => {

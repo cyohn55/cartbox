@@ -1546,17 +1546,26 @@ end`;
 // src/runtime/commandRing.ts
 var CMD_RING_BYTES = 131072;
 var CMD_RING_MAX = Math.floor((CMD_RING_BYTES - 4) / PHYS_CMD_BYTES);
+function commandRingBytes(layout) {
+  const free = saveBlockAddress(layout) - (layout.pmemAddress + 4128);
+  for (const bytes of [CMD_RING_BYTES, 65536]) if (free >= bytes + 4096) return bytes;
+  return 0;
+}
+function commandRingMax(layout) {
+  const bytes = commandRingBytes(layout);
+  return bytes > 0 ? Math.floor((bytes - 4) / PHYS_CMD_BYTES) : 0;
+}
 function hasCommandRing(layout) {
-  return layout.ramSize >= 8 * 1024 * 1024 && saveBlockBytes(layout) > 0;
+  return commandRingBytes(layout) > 0 && saveBlockBytes(layout) > 0;
 }
 function commandRingAddress(layout) {
-  return hasCommandRing(layout) ? saveBlockAddress(layout) - CMD_RING_BYTES : null;
+  return hasCommandRing(layout) ? saveBlockAddress(layout) - commandRingBytes(layout) : null;
 }
 function commandsPerTick(layout) {
-  return PHYS_MAX_CMDS + (hasCommandRing(layout) ? CMD_RING_MAX : 0);
+  return PHYS_MAX_CMDS + (hasCommandRing(layout) ? commandRingMax(layout) : 0);
 }
-function takeRingCommands(ring) {
-  return takeCommandsAt(ring, 0, CMD_RING_MAX);
+function takeRingCommands(ring, max = Math.floor((ring.byteLength - 4) / PHYS_CMD_BYTES)) {
+  return takeCommandsAt(ring, 0, max);
 }
 function resetCommandRing(ring) {
   ring.setInt32(0, 0, true);
@@ -7187,7 +7196,7 @@ function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
     if not _live() then return end
     local count, cap = _B + ${PHYS_CMDS}, ${PHYS_MAX_CMDS}
     local n = _rd(count)
-    if n >= cap and _R then count, cap = _R, ${CMD_RING_MAX}; n = _rd(count) end
+    if n >= cap and _R then count, cap = _R, ${commandRingMax(layout)}; n = _rd(count) end
     if n < 0 or n >= cap then return end
     local at = count + 4 + n * ${PHYS_CMD_BYTES}
     _wr(at, op) _wr(at + 4, a)
@@ -15134,7 +15143,8 @@ var Player = class {
           physics,
           offset: physicsBlockAddress(layout) - layout.pmemAddress,
           // The overflow command ring (EP20), where the core's RAM affords one.
-          ring: hasCommandRing(layout) ? commandRingAddress(layout) - layout.pmemAddress : null
+          ring: hasCommandRing(layout) ? commandRingAddress(layout) - layout.pmemAddress : null,
+          ringBytes: commandRingBytes(layout)
         };
       }
       const preparedBytes = injectSdk(prepared);
@@ -15602,7 +15612,7 @@ var Player = class {
   /** A DataView over the overflow command ring (EP20), on cores that have one. */
   commandRing() {
     if (!this.runtime || this.runtime.ring === null || !this.console) return null;
-    const bytes = this.console.ramView(this.runtime.ring, CMD_RING_BYTES);
+    const bytes = this.console.ramView(this.runtime.ring, this.runtime.ringBytes);
     return bytes ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
   }
   /** A DataView over the debug block, when the console is on (re-fetched, like runtimeBlock). */
@@ -16752,6 +16762,8 @@ export {
   codeLineOffset,
   collisionSdkLua,
   commandRingAddress,
+  commandRingBytes,
+  commandRingMax,
   commandsPerTick,
   compileAnimator,
   componentsSdkLua,

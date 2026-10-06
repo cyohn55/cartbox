@@ -17,6 +17,7 @@ import { putObject } from "@/lib/storage";
 import { getSessionUserId } from "@/lib/auth";
 import { resolveModelId } from "@/lib/consoleModel";
 import { buildDefaultProfileRow, buildNewCartRow, isValidCartId } from "@/lib/cartDraft";
+import { collectStorageGarbage } from "@/lib/storageGarbage";
 
 /** A .tic cartridge is small; reject anything implausibly large early. */
 const MAX_CART_BYTES = 2 * 1024 * 1024;
@@ -101,5 +102,7 @@ export async function PUT(
     }
   }
 
+  // Objects left by deleted carts and snapshots (migration 0030), a few per save.
+  await collectStorageGarbage();
   return NextResponse.json({ ok: true, published: publish, slug: cart.slug });
 }

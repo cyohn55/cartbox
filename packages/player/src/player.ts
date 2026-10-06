@@ -8,7 +8,7 @@ import { AudioController } from "./audio.js";
 import { SoundSystem } from "./soundSystem.js";
 import { uiSdkLua } from "./uiSdk.js";
 import { playLanguage, stringsSdkLua, writeInputSettings } from "./stringsSdk.js";
-import { CMD_RING_BYTES, commandRingAddress, hasCommandRing, resetCommandRing } from "./runtime/commandRing.js";
+import { commandRingAddress, commandRingBytes, hasCommandRing, resetCommandRing } from "./runtime/commandRing.js";
 import { INPUT_BLOCK_BYTES, actionsSdkLua, inputBlockAddress, writeInputBlock } from "./actionsSdk.js";
 import { armSaveBlock, saveBlockAddress, saveBlockBytes, saveSdkLua, takeSave } from "./saveSdk.js";
 import { fetchCartridge } from "./cartridge.js";
@@ -141,7 +141,7 @@ export class Player {
    * The cart's runtime channel (physics bodies and/or spawnable prefabs), its
    * physics world if any, and where the shared block sits (bytes after pmem word 0).
    */
-  private runtime: { channel: RuntimeChannel; physics: PhysicsSession | null; offset: number; ring: number | null } | null = null;
+  private runtime: { channel: RuntimeChannel; physics: PhysicsSession | null; offset: number; ring: number | null; ringBytes: number } | null = null;
   private cartSource?: CartSpriteSource;
   private readonly model: ConsoleModel;
 
@@ -369,6 +369,7 @@ export class Player {
           offset: physicsBlockAddress(layout) - layout.pmemAddress,
           // The overflow command ring (EP20), where the core's RAM affords one.
           ring: hasCommandRing(layout) ? commandRingAddress(layout)! - layout.pmemAddress : null,
+          ringBytes: commandRingBytes(layout),
         };
       }
       const preparedBytes = injectSdk(prepared);
@@ -977,7 +978,7 @@ export class Player {
   /** A DataView over the overflow command ring (EP20), on cores that have one. */
   private commandRing(): DataView | null {
     if (!this.runtime || this.runtime.ring === null || !this.console) return null;
-    const bytes = this.console.ramView(this.runtime.ring, CMD_RING_BYTES);
+    const bytes = this.console.ramView(this.runtime.ring, this.runtime.ringBytes);
     return bytes ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
   }
 

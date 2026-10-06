@@ -86,7 +86,7 @@
  * (sdk.ts) make every call a safe no-op for carts without bodies or prefabs.
  */
 
-import { CMD_RING_MAX, commandRingAddress } from "../runtime/commandRing.js";
+import { commandRingAddress, commandRingMax } from "../runtime/commandRing.js";
 import type { MeshScene } from "../mesh/meshScene.js";
 import {
   PHYS_BODIES,
@@ -242,7 +242,7 @@ export function runtimeSdkLua(
     if not _live() then return end
     local count, cap = _B + ${PHYS_CMDS}, ${PHYS_MAX_CMDS}
     local n = _rd(count)
-    if n >= cap and _R then count, cap = _R, ${CMD_RING_MAX}; n = _rd(count) end
+    if n >= cap and _R then count, cap = _R, ${commandRingMax(layout)}; n = _rd(count) end
     if n < 0 or n >= cap then return end
     local at = count + 4 + n * ${PHYS_CMD_BYTES}
     _wr(at, op) _wr(at + 4, a)
