@@ -5,9 +5,12 @@
  * - **Parameters** are the cart's inputs: numbers (speed), bools (grounded) and
  *   triggers (fire — set once, used up by the transition that takes them).
  *   Lua sets them with cartbox.set / cartbox.trigger.
- * - **States** each play a clip (or the rest pose), or a 1D **blend** between
+ * - **States** each play a clip (or the rest pose), or a **blend** between
  *   clips driven by a number parameter — walk ↔ run by speed, the clips kept in
- *   step by playing at the same fraction of their length.
+ *   step by playing at the same fraction of their length. A blend with a second
+ *   parameter is a 2D **blend space** (EP17b): clips placed on a plane — forward
+ *   speed × sideways speed, say — mixed by gradient band interpolation, which
+ *   plays each clip exactly at its own point and eases between neighbours.
  * - **Transitions** move between states when all their conditions hold (and,
  *   with an exit time, once the current state is that far through its clip),
  *   crossfading over `fade` seconds. `from: "*"` means from any state.
@@ -31,8 +34,10 @@ export interface AnimatorParam {
 export interface AnimatorBlend {
   /** The number parameter that picks the mix. */
   readonly param: string;
-  /** Clips placed along the parameter, ascending by `at`. */
-  readonly points: readonly { readonly clip: string; readonly at: number }[];
+  /** A second number parameter: present, the blend is a 2D blend space (EP17b). */
+  readonly param2?: string;
+  /** Clips placed along the parameter, ascending by `at` (and at `at2` on the second, in a blend space). */
+  readonly points: readonly { readonly clip: string; readonly at: number; readonly at2?: number }[];
 }
 
 export interface AnimatorState {
@@ -81,7 +86,7 @@ export interface AnimatorSpec {
   readonly events: readonly AnimatorEvent[];
 }
 
-export const ANIMATOR_LIMITS = { params: 32, states: 32, transitions: 64, conditions: 8, events: 64, blendPoints: 8 } as const;
+export const ANIMATOR_LIMITS = { params: 32, states: 32, transitions: 64, conditions: 8, events: 64, blendPoints: 16 } as const;
 export const DEFAULT_ANIMATOR_FADE = 0.2;
 
 const NAME_MAX = 32;
@@ -123,11 +128,16 @@ export function readAnimatorSpec(value: unknown): AnimatorSpec | null {
     const b = s.blend as Record<string, unknown> | undefined;
     const bp = param(name(b?.param));
     if (b && bp?.kind === "number") {
+      const bp2 = param(name(b.param2));
+      const two = bp2?.kind === "number" && bp2.name !== bp.name;
       const points = list(b.points, ANIMATOR_LIMITS.blendPoints)
-        .map((pt) => ({ clip: name((pt as Record<string, unknown>)?.clip), at: num((pt as Record<string, unknown>)?.at, -1e6, 1e6, NaN) }))
-        .filter((pt): pt is { clip: string; at: number } => pt.clip !== null && Number.isFinite(pt.at))
+        .map((pt) => {
+          const r = pt as Record<string, unknown>;
+          return { clip: name(r?.clip), at: num(r?.at, -1e6, 1e6, NaN), ...(two ? { at2: num(r?.at2, -1e6, 1e6, 0) } : {}) };
+        })
+        .filter((pt): pt is { clip: string; at: number; at2?: number } => pt.clip !== null && Number.isFinite(pt.at))
         .sort((x, y) => x.at - y.at);
-      if (points.length > 0) blend = { param: bp.name, points };
+      if (points.length > 0) blend = { param: bp.name, ...(two ? { param2: bp2!.name } : {}), points };
     }
     states.push({
       name: n,

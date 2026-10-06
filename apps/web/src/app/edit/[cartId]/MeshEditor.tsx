@@ -823,6 +823,15 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay }: Mesh
                 ragdoll={ragdolling}
                 onRagdoll={(on) => (on ? dropRagdoll() : setRagdolling(false))}
                 onEdit={applyMeshEdit}
+                sources={sidecar.meshes.filter((m) => m.id !== selectedEntry.id && m.mesh !== selectedEntry.mesh).map((m) => ({ id: m.id, name: m.name }))}
+                loadSource={(id) => {
+                  const entry = sidecar.meshes.find((m) => m.id === id);
+                  try {
+                    return entry ? readMeshEntry(entry) : null;
+                  } catch {
+                    return null;
+                  }
+                }}
               />
             )}
             {meshAsset && isSkinned(meshAsset) && (

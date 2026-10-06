@@ -5951,9 +5951,12 @@ interface CompiledState {
     readonly loop: boolean;
     readonly blend: {
         readonly param: number;
+        /** The second parameter of a 2D blend space, or -1. */
+        readonly param2: number;
         readonly points: readonly {
             readonly clip: number;
             readonly at: number;
+            readonly at2?: number;
         }[];
     } | null;
 }
@@ -6012,7 +6015,7 @@ declare class AnimationSession {
     /** How far through its cycle a track is (0..1 per pass of its clip; loops keep counting). */
     private progress;
     private transition;
-    /** The blend state's weights now, or null for a single clip. */
+    /** The blend state's mix now, or null for a single clip. */
     private blendOf;
     private advance;
     /** Where the playhead is for events: which clip, and seconds into it (unwrapped). */

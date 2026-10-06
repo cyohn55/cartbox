@@ -13,6 +13,7 @@ import { useEffect, useState } from "react";
 import {
   ANIMATOR_LIMITS,
   DEFAULT_ANIMATOR_FADE,
+  blendWeights,
   defaultAnimator,
   type AnimatorCondition,
   type AnimatorOp,
@@ -87,6 +88,43 @@ function fresh(base: string, taken: readonly string[]): string {
   for (let n = 2; ; n += 1) if (!taken.includes(`${base} ${n}`)) return `${base} ${n}`;
 }
 
+/** A 2D blend space's clips on their plane (EP17b), with the mix shaded: brighter where the nearest clip dominates. */
+function BlendSpacePlot({ points }: { points: readonly { clip: string; at: number; at2?: number }[] }) {
+  const W = 200;
+  const H = 120;
+  const xs = points.map((p) => p.at);
+  const ys = points.map((p) => p.at2 ?? 0);
+  const [x0, x1] = [Math.min(...xs, 0) - 0.5, Math.max(...xs, 0) + 0.5];
+  const [y0, y1] = [Math.min(...ys, 0) - 0.5, Math.max(...ys, 0) + 0.5];
+  const px = (x: number) => ((x - x0) / (x1 - x0)) * W;
+  const py = (y: number) => H - ((y - y0) / (y1 - y0)) * H;
+  const cells: { x: number; y: number; w: number }[] = [];
+  for (let gx = 0; gx < 20; gx += 1) {
+    for (let gy = 0; gy < 12; gy += 1) {
+      const vx = x0 + ((gx + 0.5) / 20) * (x1 - x0);
+      const vy = y1 - ((gy + 0.5) / 12) * (y1 - y0);
+      cells.push({ x: gx, y: gy, w: Math.max(...blendWeights(points, vx, vy)) });
+    }
+  }
+  return (
+    <svg width={W} height={H} role="img" aria-label="Blend space" style={{ background: "rgba(0,0,0,0.3)", borderRadius: 6 }}>
+      {cells.map((c) => (
+        <rect key={`${c.x}-${c.y}`} x={(c.x * W) / 20} y={(c.y * H) / 12} width={W / 20 + 0.5} height={H / 12 + 0.5} fill="#7db8fc" opacity={(c.w - 0.3) * 0.5} />
+      ))}
+      <line x1={px(0)} x2={px(0)} y1={0} y2={H} stroke="rgba(255,255,255,0.2)" />
+      <line x1={0} x2={W} y1={py(0)} y2={py(0)} stroke="rgba(255,255,255,0.2)" />
+      {points.map((p, i) => (
+        <g key={i}>
+          <circle cx={px(p.at)} cy={py(p.at2 ?? 0)} r={4} fill="#ffd84a" />
+          <text x={px(p.at) + 6} y={py(p.at2 ?? 0) + 3} fontSize={9} fill="#dde">
+            {p.clip}
+          </text>
+        </g>
+      ))}
+    </svg>
+  );
+}
+
 export function AnimatorPanel({
   sidecar,
   entry,
@@ -137,7 +175,11 @@ export function AnimatorPanel({
     save({
       ...spec,
       params: spec.params.map((p, k) => (k === i ? { ...p, name: to } : p)),
-      states: spec.states.map((s) => (s.blend?.param === from ? { ...s, blend: { ...s.blend, param: to } } : s)),
+      states: spec.states.map((s) =>
+        s.blend && (s.blend.param === from || s.blend.param2 === from)
+          ? { ...s, blend: { ...s.blend, param: s.blend.param === from ? to : s.blend.param, ...(s.blend.param2 !== undefined ? { param2: s.blend.param2 === from ? to : s.blend.param2 } : {}) } }
+          : s,
+      ),
       transitions: spec.transitions.map((t) => ({ ...t, when: t.when.map((c) => (c.param === from ? { ...c, param: to } : c)) })),
     });
   };
@@ -233,7 +275,33 @@ export function AnimatorPanel({
                     </option>
                   ))}
                 </select>
+                <span style={{ fontSize: 12, flex: "none" }}>and</span>
+                <select
+                  aria-label="Second blend parameter"
+                  value={s.blend.param2 ?? ""}
+                  onChange={(e) => {
+                    const { param2: _old, ...blend } = s.blend!;
+                    void _old;
+                    const v = e.target.value;
+                    setState(i, {
+                      ...s,
+                      blend: v ? { ...blend, param2: v, points: blend.points.map((q) => ({ ...q, at2: q.at2 ?? 0 })) } : { ...blend, points: blend.points.map(({ at2: _a, ...q }) => q) },
+                    });
+                  }}
+                  style={input}
+                  title="A second parameter makes a 2D blend space"
+                >
+                  <option value="">(nothing: 1D)</option>
+                  {numberParams
+                    .filter((p) => p.name !== s.blend!.param)
+                    .map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.name}
+                      </option>
+                    ))}
+                </select>
               </div>
+              {s.blend.param2 && <BlendSpacePlot points={s.blend.points} />}
               {s.blend.points.map((pt, k) => (
                 <div key={k} style={row}>
                   <select
@@ -253,6 +321,16 @@ export function AnimatorPanel({
                     onChange={(e) => setState(i, { ...s, blend: { ...s.blend!, points: s.blend!.points.map((q, j) => (j === k ? { ...q, at: Number(e.target.value) } : q)) } })}
                     style={{ ...input, width: 56, flex: "none" }}
                   />
+                  {s.blend!.param2 && (
+                    <input
+                      type="number"
+                      step={0.1}
+                      aria-label="Blend point (second parameter)"
+                      value={pt.at2 ?? 0}
+                      onChange={(e) => setState(i, { ...s, blend: { ...s.blend!, points: s.blend!.points.map((q, j) => (j === k ? { ...q, at2: Number(e.target.value) } : q)) } })}
+                      style={{ ...input, width: 56, flex: "none" }}
+                    />
+                  )}
                   {s.blend!.points.length > 1 && (
                     <Remove label="Remove blend point" onClick={() => setState(i, { ...s, blend: { ...s.blend!, points: s.blend!.points.filter((_, j) => j !== k) } })} />
                   )}
@@ -262,7 +340,7 @@ export function AnimatorPanel({
                 disabled={s.blend.points.length >= ANIMATOR_LIMITS.blendPoints || clipNames.length === 0}
                 onClick={() => {
                   const last = s.blend!.points[s.blend!.points.length - 1];
-                  setState(i, { ...s, blend: { ...s.blend!, points: [...s.blend!.points, { clip: clipNames[0]!, at: (last?.at ?? 0) + 1 }] } });
+                  setState(i, { ...s, blend: { ...s.blend!, points: [...s.blend!.points, { clip: clipNames[0]!, at: (last?.at ?? 0) + 1, ...(s.blend!.param2 ? { at2: 0 } : {}) }] } });
                 }}
               >
                 Blend point
