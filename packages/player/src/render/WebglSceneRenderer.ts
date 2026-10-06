@@ -73,6 +73,7 @@ import {
 } from "@cartbox/editor";
 
 import { batchInstances, compositeFrame, presentFrame, softEdges, type PrimitiveTextures } from "./gpuFrame.js";
+import { TEMPORAL_RESOLVE_GLSL, TEMPORAL_SHARPEN_GLSL, TEMPORAL_VERTEX_GLSL, TemporalState } from "./temporal.js";
 import { WebglPassTimer } from "./gpuTimer.js";
 import type { RenderStats } from "../debug/profiler.js";
 import { webgpuCanHonour } from "./renderCaps.js";
@@ -997,7 +998,10 @@ export class WebglSceneRenderer implements SceneRenderer {
 
   private submit(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
     const gl = this.gl;
-    const viewProj = multiplyMat4(draw.projection, draw.view);
+    // Temporal anti-aliasing (I2), where the context can render to half floats: the jittered projection and the resolve's uniforms.
+    const temporal = draw.temporal === true && this.ensureTemporal() ? this.temporalState.begin(draw.view, draw.projection, this.width, this.height) : null;
+    if (!temporal) this.temporalState.reset();
+    const viewProj = multiplyMat4(temporal ? temporal.projection : draw.projection, draw.view);
     const { batches, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView(draw.view));
     if (batches.length === 0) return;
 
@@ -1195,6 +1199,7 @@ export class WebglSceneRenderer implements SceneRenderer {
       gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, this.width, this.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
     }
+    if (temporal) this.resolveTemporal(temporal.uniforms);
     // Read back into a free pixel-pack buffer; skip this frame's readback if all are in flight.
     this.submitted += 1;
     const slot = this.readback.find((s) => s.fence === null);
@@ -1405,6 +1410,116 @@ export class WebglSceneRenderer implements SceneRenderer {
     return this.msaa.framebuffer;
   }
 
+  private readonly temporalState = new TemporalState("unit");
+  /**
+   * The temporal resolve's resources (I2): the frame copied into a texture, two
+   * half-float history images (one read, one written, swapping each frame),
+   * the two programs and their samplers. Made on first use; false where the
+   * context can't render to half floats (no EXT_color_buffer_float), which
+   * leaves frames plain.
+   */
+  private taa: {
+    current: { texture: any; framebuffer: any };
+    history: [{ texture: any; framebuffer: any }, { texture: any; framebuffer: any }];
+    index: number;
+    resolve: { program: any; reproject: any; params: any };
+    sharpen: { program: any; params: any };
+    linear: any;
+    nearest: any;
+  } | null | false = null;
+
+  private ensureTemporal(): boolean {
+    if (this.taa === null) {
+      const gl = this.gl;
+      try {
+        if (!gl.getExtension("EXT_color_buffer_float")) throw new Error("no half-float targets");
+        const target = (internal: number, format: number, type: number) => {
+          const texture = createTexture(gl, this.width, this.height, internal, format, type, null);
+          const framebuffer = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+          if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error("temporal target incomplete");
+          return { texture, framebuffer };
+        };
+        const program = (fragment: string, units: [string, number][]) => {
+          const p = gl.createProgram();
+          gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, TEMPORAL_VERTEX_GLSL));
+          gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, fragment));
+          gl.linkProgram(p);
+          if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(`WebGL2 program failed to link: ${gl.getProgramInfoLog(p)}`);
+          gl.useProgram(p);
+          for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(p, name), unit);
+          return p;
+        };
+        const sampler = (filter: number) => {
+          const s = gl.createSampler();
+          gl.samplerParameteri(s, gl.TEXTURE_MIN_FILTER, filter);
+          gl.samplerParameteri(s, gl.TEXTURE_MAG_FILTER, filter);
+          gl.samplerParameteri(s, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.samplerParameteri(s, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          return s;
+        };
+        const resolve = program(TEMPORAL_RESOLVE_GLSL, [["uCurrent", 0], ["uHistory", 1], ["uDepth", 2]]);
+        const sharpen = program(TEMPORAL_SHARPEN_GLSL, [["uResolved", 0]]);
+        this.taa = {
+          current: target(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE),
+          history: [target(gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT), target(gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT)],
+          index: 0,
+          resolve: { program: resolve, reproject: gl.getUniformLocation(resolve, "uReproject"), params: gl.getUniformLocation(resolve, "uParams") },
+          sharpen: { program: sharpen, params: gl.getUniformLocation(sharpen, "uParams") },
+          linear: sampler(gl.LINEAR),
+          nearest: sampler(gl.NEAREST),
+        };
+      } catch {
+        this.taa = false;
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+    return this.taa !== false;
+  }
+
+  /**
+   * Resolve the frame (in {@link framebuffer}) into the history and sharpen it
+   * back into {@link framebuffer} for the readback (HALO_INFINITE_STYLE_ROADMAP.md I2).
+   * Units 0–2 are borrowed; every frame binds its own textures and samplers there.
+   */
+  private resolveTemporal(uniforms: Float32Array): void {
+    const gl = this.gl;
+    const taa = this.taa as Exclude<WebglSceneRenderer["taa"], null | false>;
+    // The frame's colour into a texture, and its depth (a multisampled frame's resolved).
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.framebuffer);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, taa.current.framebuffer);
+    gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, this.width, this.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    this.copySceneDepth();
+    const read = taa.history[taa.index]!;
+    const write = taa.history[1 - taa.index]!;
+    taa.index = 1 - taa.index;
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.depthMask(false);
+    gl.bindVertexArray(null);
+    gl.viewport(0, 0, this.width, this.height);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, write.framebuffer);
+    gl.useProgram(taa.resolve.program);
+    gl.uniformMatrix4fv(taa.resolve.reproject, false, uniforms.subarray(0, 16));
+    gl.uniform4fv(taa.resolve.params, uniforms.subarray(16, 20));
+    this.bindTexture(0, taa.current.texture);
+    gl.bindSampler(0, taa.nearest);
+    this.bindTexture(1, read.texture);
+    gl.bindSampler(1, taa.linear);
+    this.bindTexture(2, this.sceneDepth!.texture);
+    gl.bindSampler(2, taa.nearest);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
+    gl.useProgram(taa.sharpen.program);
+    gl.uniform4fv(taa.sharpen.params, uniforms.subarray(16, 20));
+    this.bindTexture(0, write.texture);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.depthMask(true);
+  }
+
   /** Copy this frame's depth into {@link sceneDepth} and bind it, leaving the frame's framebuffer bound. */
   private copySceneDepth(): void {
     const gl = this.gl;
@@ -1611,6 +1726,16 @@ export class WebglSceneRenderer implements SceneRenderer {
       if (this.clusterTextures) {
         gl.deleteTexture(this.clusterTextures.table);
         gl.deleteTexture(this.clusterTextures.index);
+      }
+      if (this.taa) {
+        for (const t of [this.taa.current, ...this.taa.history]) {
+          gl.deleteTexture(t.texture);
+          gl.deleteFramebuffer(t.framebuffer);
+        }
+        gl.deleteProgram(this.taa.resolve.program);
+        gl.deleteProgram(this.taa.sharpen.program);
+        gl.deleteSampler(this.taa.linear);
+        gl.deleteSampler(this.taa.nearest);
       }
       if (this.sceneDepth) {
         gl.deleteTexture(this.sceneDepth.texture);

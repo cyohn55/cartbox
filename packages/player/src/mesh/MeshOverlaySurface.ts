@@ -118,6 +118,8 @@ export interface MeshOverlayOptions {
    * when the graphics quality allows it too. Off by default.
    */
   readonly antialias?: boolean;
+  /** The model's temporal anti-aliasing cap (`temporal`, I2), likewise gated by the quality. Off by default. */
+  readonly temporal?: boolean;
 }
 
 /** Loads a KTX2 → RGBA decoder (see {@link MeshOverlayOptions.ktx2}). */
@@ -811,6 +813,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       // Objects with LOD levels (EP9b) draw the one their distance calls for.
       lod: true,
       antialias,
+      temporal: this.options.temporal === true && this.quality.temporal === true,
       // HUD mode fills the frame with a sky so the 3D scene is opaque before the
       // HUD lands on top; third-person keeps the cart frame behind the meshes.
       background: this.hud && !skyBackdrop ? HUD_SKY : null,

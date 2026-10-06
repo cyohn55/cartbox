@@ -244,6 +244,13 @@ interface RenderCaps {
      * and the Modern tier. The earlier eras keep their hard edges.
      */
     antialias?: boolean;
+    /**
+     * Temporal anti-aliasing (HALO_INFINITE_STYLE_ROADMAP.md I2): sub-pixel
+     * jitter blended over frames, for the shimmer multisampling can't reach.
+     * The Xbox 360 tier (Halo: Reach shipped a temporal anti-aliaser on it) and
+     * the Modern tier.
+     */
+    temporal?: boolean;
 }
 /**
  * What the shared software rasteriser behind the mesh/world overlays actually
@@ -802,6 +809,8 @@ interface QualitySettings {
     readonly terrainDetail: number;
     /** Anti-alias the 3D where the model does (HALO_INFINITE_STYLE_ROADMAP.md I1). */
     readonly antialias?: boolean;
+    /** Temporal anti-aliasing where the model has it (I2). */
+    readonly temporal?: boolean;
 }
 declare const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualitySettings>>;
 /** What the browser reveals about the device (all optional: browsers differ). */
@@ -3137,6 +3146,15 @@ interface SceneDraw {
      */
     readonly antialias?: boolean;
     /**
+     * Temporal anti-aliasing (HALO_INFINITE_STYLE_ROADMAP.md I2), on the GPU
+     * renderers: the projection jittered by a sub-pixel step each frame and the
+     * frame blended into a reprojected history, then sharpened, before readback
+     * (see temporal.ts). Calms the shimmer of thin detail multisampling can't
+     * reach. Off by default (parity, as {@link antialias}); the software renderer
+     * ignores it.
+     */
+    readonly temporal?: boolean;
+    /**
      * Key light direction, or omitted for the rasteriser's default. The world
      * overlay publishes a cart-driven sun here, so it changes per frame.
      */
@@ -3507,6 +3525,22 @@ declare class WebglSceneRenderer implements SceneRenderer {
      * use; the plain one otherwise, or where the context can't multisample.
      */
     private drawFramebuffer;
+    private readonly temporalState;
+    /**
+     * The temporal resolve's resources (I2): the frame copied into a texture, two
+     * half-float history images (one read, one written, swapping each frame),
+     * the two programs and their samplers. Made on first use; false where the
+     * context can't render to half floats (no EXT_color_buffer_float), which
+     * leaves frames plain.
+     */
+    private taa;
+    private ensureTemporal;
+    /**
+     * Resolve the frame (in {@link framebuffer}) into the history and sharpen it
+     * back into {@link framebuffer} for the readback (HALO_INFINITE_STYLE_ROADMAP.md I2).
+     * Units 0–2 are borrowed; every frame binds its own textures and samplers there.
+     */
+    private resolveTemporal;
     /** Copy this frame's depth into {@link sceneDepth} and bind it, leaving the frame's framebuffer bound. */
     private copySceneDepth;
     private ensureCapacity;
@@ -3727,6 +3761,18 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     settle(draw: SceneDraw): FrameState;
     /** Encode and submit one frame, and start a readback if a buffer is free. */
     private submit;
+    private readonly temporalState;
+    /**
+     * The temporal resolve's resources (I2): two history images (one read, one
+     * written, swapping each frame), its uniforms, sampler and pipelines. Made on
+     * first use.
+     */
+    private taa;
+    /**
+     * Resolve the frame into the history and sharpen it back into the colour
+     * texture that is read back (HALO_INFINITE_STYLE_ROADMAP.md I2).
+     */
+    private encodeTemporal;
     /** Shader variants by material graph (EP7), built on first use. */
     private readonly graphPipelines;
     /**
@@ -5231,6 +5277,8 @@ interface MeshOverlayOptions {
      * when the graphics quality allows it too. Off by default.
      */
     readonly antialias?: boolean;
+    /** The model's temporal anti-aliasing cap (`temporal`, I2), likewise gated by the quality. Off by default. */
+    readonly temporal?: boolean;
 }
 /** Loads a KTX2 → RGBA decoder (see {@link MeshOverlayOptions.ktx2}). */
 type Ktx2DecoderLoader = () => Promise<(bytes: Uint8Array) => DecodedTexture | null>;

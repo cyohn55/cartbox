@@ -53,6 +53,13 @@ export interface RenderCaps {
    * and the Modern tier. The earlier eras keep their hard edges.
    */
   antialias?: boolean;
+  /**
+   * Temporal anti-aliasing (HALO_INFINITE_STYLE_ROADMAP.md I2): sub-pixel
+   * jitter blended over frames, for the shimmer multisampling can't reach.
+   * The Xbox 360 tier (Halo: Reach shipped a temporal anti-aliaser on it) and
+   * the Modern tier.
+   */
+  temporal?: boolean;
 }
 
 /**
@@ -156,6 +163,7 @@ export const XBOX360_RASTER_CAPS: RenderCaps = {
   polyBudget: 0,
   programmableShaders: false,
   antialias: true,
+  temporal: true,
 };
 
 /**
@@ -179,6 +187,7 @@ export const MODERN_RASTER_CAPS: RenderCaps = {
   polyBudget: 0,
   programmableShaders: true,
   antialias: true,
+  temporal: true,
 };
 
 export interface ConsoleModel {

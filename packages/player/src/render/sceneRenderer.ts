@@ -67,6 +67,15 @@ export interface SceneDraw {
    */
   readonly antialias?: boolean;
   /**
+   * Temporal anti-aliasing (HALO_INFINITE_STYLE_ROADMAP.md I2), on the GPU
+   * renderers: the projection jittered by a sub-pixel step each frame and the
+   * frame blended into a reprojected history, then sharpened, before readback
+   * (see temporal.ts). Calms the shimmer of thin detail multisampling can't
+   * reach. Off by default (parity, as {@link antialias}); the software renderer
+   * ignores it.
+   */
+  readonly temporal?: boolean;
+  /**
    * Key light direction, or omitted for the rasteriser's default. The world
    * overlay publishes a cart-driven sun here, so it changes per frame.
    */
