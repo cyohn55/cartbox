@@ -39,6 +39,7 @@ import { boulderMesh, driftMesh } from "./foliagePresets";
 import type { SceneAudio, SceneSound, SynthPreset } from "./sound";
 import type { UiDocument, UiWidget } from "./ui";
 import type { ComponentDef } from "./components";
+import { compileScriptGraph, type ScriptGraph, type ScriptNode, type ScriptWire } from "./scriptGraph";
 import type { InputAction } from "./inputActions";
 import { bakeNavMesh, boxTriangles, serializeNavMesh, type NavMesh } from "./navmesh";
 import { serializeTerrain, terrainMesh, type Terrain } from "./terrain";
@@ -1420,8 +1421,9 @@ export const LOCKOUT_UI: UiDocument[] = [
       { id: "modes", kind: "list", anchor: [0, 0], pivot: [0, 0], offset: [470, 190], size: [360, 320], row: 40, value: "modes", color: 13, focusFill: 1, focusColor: 12, scale: 2, small: true },
       txt("keys", 430, 540, 800, 6, "Up/Down choose . Z (or A) select . Start: controls, audio & more", 13, 1),
       txt("move", 300, 584, 900, 6, "Move Up/Down . Turn Left/Right . hold A strafe . dbl-tap A grenade", 13, 1),
-      txt("fire", 300, 612, 900, 6, "Z fire (auto-melee close) . X jump . S swap . sniper: hold A to zoom", 13, 1),
-      txt("pad", 260, 640, 1000, 6, "Touch/controller: left stick moves . right stick aims . A fire . B jump . X zoom/grenade . Y swap", 13, 1),
+      txt("fire", 300, 612, 900, 6, "Z fire (auto-melee close) . X/Space jump . S/Tab swap . G/Q grenade . sniper: Shift (or hold A) to zoom", 13, 1),
+      txt("pad", 260, 640, 1000, 6, "Touch/controller: left stick moves . right stick aims . A fire . B jump . X zoom/grenade . Y swap . LT grenade", 13, 1),
+      txt("career", 330, 676, 800, 6, "{career}", 9, 1),
     ],
   },
 ];
@@ -2024,31 +2026,74 @@ function pickupMesh(id: WeaponId): MeshAsset {
  * cartbox.place — which, unlike a pose, needs no slot in the frame's short
  * pose list (the bots and the gun in hand fill it).
  */
-export const LOCKOUT_COMPONENTS: readonly ComponentDef[] = [
-  {
-    name: "Pickup",
-    code: `-- Pickup: a weapon over its spawn pad, turning and bobbing; gone while the pad recharges.
--- @field slot number 1
--- @field spin number 1.4
--- @field bob number 0.06
-function start(self)
-  self.t = self.slot * 1.3 -- out of step with the other pads
-  self.shown = nil
-end
-function update(self, dt)
-  local o = self.origin
-  local up = pickup_ready ~= nil and pickup_ready(self.slot) and true or false
-  if up then
-    self.t = self.t + dt
-    cartbox.place(self.obj, o.x, o.y + math.sin(self.t * 2.2) * self.bob, o.z, self.t * self.spin, 0, 0, 1)
-    self.shown = true
-  elseif self.shown ~= false and cartbox.place(self.obj, o.x, o.y, o.z, 0, 0, 0, 0) then
-    self.shown = false -- hidden once; it stays put until shown again
-  end
-end
-`,
-  },
-];
+/**
+ * The Pickup visual script (EP16): on start it puts each pad out of step with
+ * the others; every tick it asks the cart whether its pad's weapon is up, and
+ * either turns and bobs the weapon over the pad or hides it.
+ */
+const PICKUP_GRAPH: ScriptGraph = (() => {
+  const v = (name: string, value: number) => ({ name, type: "number" as const, value });
+  const n = (id: string, kind: ScriptNode["kind"], x: number, y: number, extra: Partial<ScriptNode> = {}): ScriptNode => ({ id, kind, x, y, ...extra });
+  const w = (from: string, fromPin: string, to: string, toPin: string): ScriptWire => ({ from, fromPin, to, toPin });
+  return {
+    variables: [v("slot", 1), v("spin", 1.4), v("bob", 0.06), v("t", 0)],
+    nodes: [
+      n("start", "onStart", 0, 0),
+      n("slot1", "getVar", 0, 110, { param: "slot" }),
+      n("stagger", "multiply", 260, 110, { values: { b: 1.3 } }),
+      n("setStart", "setVar", 520, 0, { param: "t" }),
+      n("tick", "onTick", 0, 260),
+      n("slot2", "getVar", 0, 370, { param: "slot" }),
+      n("ready", "callValue", 260, 370, { param: "pickup_ready" }),
+      n("branch", "branch", 520, 260),
+      n("t1", "getVar", 520, 380, { param: "t" }),
+      n("advance", "add", 780, 380),
+      n("setT", "setVar", 780, 260, { param: "t" }),
+      n("here", "self", 1040, 500),
+      n("t2", "getVar", 260, 560, { param: "t" }),
+      n("phase", "multiply", 520, 560, { values: { b: 2.2 } }),
+      n("wave", "sin", 780, 560),
+      n("bob", "getVar", 780, 660, { param: "bob" }),
+      n("height", "multiply", 1040, 660),
+      n("lift", "add", 1300, 500),
+      n("spin", "getVar", 1040, 780, { param: "spin" }),
+      n("turn", "multiply", 1300, 620),
+      n("show", "place", 1300, 260),
+      n("hide", "place", 520, 700, { values: { scale: 0 } }),
+    ],
+    wires: [
+      w("start", "then", "setStart", "in"),
+      w("slot1", "value", "stagger", "a"),
+      w("stagger", "out", "setStart", "value"),
+      w("tick", "then", "branch", "in"),
+      w("slot2", "value", "ready", "argument"),
+      w("ready", "result", "branch", "condition"),
+      w("branch", "true", "setT", "in"),
+      w("t1", "value", "advance", "a"),
+      w("tick", "dt", "advance", "b"),
+      w("advance", "out", "setT", "value"),
+      w("setT", "then", "show", "in"),
+      w("here", "x", "show", "x"),
+      w("t2", "value", "phase", "a"),
+      w("phase", "out", "wave", "x"),
+      w("wave", "out", "height", "a"),
+      w("bob", "value", "height", "b"),
+      w("here", "y", "lift", "a"),
+      w("height", "out", "lift", "b"),
+      w("lift", "out", "show", "y"),
+      w("here", "z", "show", "z"),
+      w("t2", "value", "turn", "a"),
+      w("spin", "value", "turn", "b"),
+      w("turn", "out", "show", "yaw"),
+      w("branch", "false", "hide", "in"),
+      w("here", "x", "hide", "x"),
+      w("here", "y", "hide", "y"),
+      w("here", "z", "hide", "z"),
+    ],
+  };
+})();
+
+export const LOCKOUT_COMPONENTS: readonly ComponentDef[] = [{ name: "Pickup", code: compileScriptGraph(PICKUP_GRAPH, "Pickup"), graph: PICKUP_GRAPH }];
 
 /**
  * Lockout's input actions (EP15). Each keeps its console button, so the
@@ -2252,6 +2297,26 @@ export const LOCKOUT_INTRO: SceneTimeline = {
         { time: 2.6, eye: [13, 14, 9], target: [-3, 3, -3], fov: 56, ease: "smooth" },
         { time: 5.2, eye: [11, 6.5, -11], target: [-6, 4, -5], fov: 52, ease: "smooth" },
         { time: 7.5, eye: [4, 5, -9.5], target: [-7, 5, -8], fov: 50, ease: "smooth" },
+      ],
+    },
+    // Value tracks (EP17): the letterbox bars slide in (an eased-out curve) and
+    // back out at the end; the wind fades up on the ambience bus.
+    {
+      kind: "value",
+      name: "letterbox",
+      keys: [
+        { time: 0, value: 0, ease: "curve", curve: [0.16, 1, 0.3, 1] },
+        { time: 0.8, value: 1, ease: "step" },
+        { time: 6.9, value: 1, ease: "curve", curve: [0.7, 0, 0.84, 0] },
+        { time: 7.5, value: 0, ease: "step" },
+      ],
+    },
+    {
+      kind: "value",
+      name: "bus:ambience",
+      keys: [
+        { time: 0, value: 0, ease: "smooth" },
+        { time: 3, value: 0.5, ease: "step" },
       ],
     },
   ],
@@ -2833,6 +2898,7 @@ end
 -- Register a kill: scoring, sprees, multikills, feed, and juggernaut handover.
 function register_kill(killer, victim, hs)
   victim.dead=true; victim.respawn = MODE.obj=="jugg" and 70 or 100
+  if killer == p and victim ~= p then p.kills = (p.kills or 0) + 1 end
   -- Which way the body is thrown when it goes limp (a cosmetic ragdoll, local
   -- to each browser): away from the killer, harder for a headshot's snap back.
   if killer and killer~=victim then
@@ -3251,6 +3317,22 @@ local function update_objective()
   end
 end
 
+-- Your career (EP15b): matches, wins, kills and deaths, kept with cartbox.save
+-- between visits (and, signed in, between browsers). Shown on the title menu.
+career = cartbox.load() or {}
+function record_match(w)
+  local mine = p.team=="blue" and "BLUE TEAM WINS" or "RED TEAM WINS"
+  career.matches = (career.matches or 0) + 1
+  if w == "YOU WIN" or (MODE.teams and w == mine) then career.wins = (career.wins or 0) + 1 end
+  career.kills = (career.kills or 0) + (p.kills or 0)
+  career.deaths = (career.deaths or 0) + (p.deaths or 0)
+  cartbox.save(career)
+end
+function career_line()
+  if not career.matches then return "" end
+  return "Career: "..career.matches.." match"..(career.matches==1 and "" or "es").." . "..(career.wins or 0).." won . "..(career.kills or 0).." kills . "..(career.deaths or 0).." deaths"
+end
+
 function reached_target()
   if MODE.teams and MODE.obj=="slayer" then
     if team.blue>=MODE.target then return "BLUE TEAM WINS" end
@@ -3305,8 +3387,10 @@ function play_intro()
   for i=1,NBOT do animate_bot(i, bots[i]) end
   drive_camera()  -- the timeline's camera takes over; this keeps HUD compositing on
   cartbox.hud(1)
-  rect(0, 0, 1280, 64, 5)
-  rect(0, 656, 1280, 64, 5)
+  -- The letterbox slides in and out with the timeline's "letterbox" value (EP17).
+  local bar = math.floor(64 * (cartbox.timelinevalue("letterbox") or 1))
+  rect(0, 0, 1280, bar, 5)
+  rect(0, 720 - bar, 1280, bar, 5)
   print("LOCKOUT", 40, 18, 12, false, 3, true)
   print(MODE.name or "", 40, 676, 9, false, 2, true)
   print("Z to skip", 1110, 680, 13, false, 1, true)
@@ -3589,7 +3673,7 @@ local function net_follow_host()
     net_seen_match = id
     start_match(ONLINE_KEYS[((word >> 1) & 7) + 1] or "ffa")
   elseif (word & 1) == 0 and id == net_seen_match then
-    winner = reached_target() or "MATCH OVER"; phase = "over"
+    winner = reached_target() or "MATCH OVER"; phase = "over"; record_match(winner)
   end
 end
 
@@ -3722,6 +3806,7 @@ function title_screen()
     local humans = humans_in_room()
     U.set("menutop","ONLINE  --  you are the host  --  "..humans.." player"..(humans==1 and "" or "s").." + "..(8-humans).." bots"); U.set("menutopc",9)
   else U.set("menutop","Matchmaking finds players online . or play the game types below vs 7 bots"); U.set("menutopc",13) end
+  U.set("career", career_line())
   U.show("menu")
   local id
   if U.shown("menu") then
@@ -3784,7 +3869,7 @@ function TIC()
   update_grenades()
   ledge_snow()
   update_objective()
-  local w=reached_target(); if w then winner=w; phase="over" end
+  local w=reached_target(); if w then winner=w; phase="over"; record_match(w) end
   net_publish()
   net_objective_publish()
   if NETMODE == 2 then cartbox.netmatch(net_match_word()) end

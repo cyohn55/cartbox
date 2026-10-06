@@ -822,6 +822,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay }: Mesh
                 onPlay={setPreviewClip}
                 ragdoll={ragdolling}
                 onRagdoll={(on) => (on ? dropRagdoll() : setRagdolling(false))}
+                onEdit={applyMeshEdit}
               />
             )}
             {meshAsset && isSkinned(meshAsset) && (

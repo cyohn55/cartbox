@@ -450,6 +450,12 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
         doc: "The playing timeline's events that passed on the last tick — cue a line of dialogue, a sound, or the game starting.",
         snippet: 'for _, e in ipairs(cartbox.timelineevents()) do\n  if e == "done" then state = "play" end\nend',
       },
+      {
+        name: "cartbox.timelinevalue",
+        signature: "cartbox.timelinevalue(name) -> number or nil",
+        doc: "A playing timeline's value track now (keyed in the Mesh tab's Timelines) — any number you animate: a fade, a letterbox, a colour. nil when none plays it.",
+        snippet: 'local fade = cartbox.timelinevalue("fade") or 0',
+      },
     ],
   },
   {
@@ -629,6 +635,30 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
         signature: "cartbox.actions() -> { name, ... }",
         doc: "The cart's actions, in order.",
         snippet: "local names = cartbox.actions()",
+      },
+    ],
+  },
+  {
+    label: "cartbox · save data",
+    open: false,
+    entries: [
+      {
+        name: "cartbox.save",
+        signature: "cartbox.save(t) -> ok, why",
+        doc: "Save a table (numbers, strings, booleans, tables of them) for next time: in this browser, and in the player's account when signed in. Up to 16 KB (436 bytes on Classic).",
+        snippet: "cartbox.save({ level = level, best = best })",
+      },
+      {
+        name: "cartbox.load",
+        signature: "cartbox.load() -> t or nil",
+        doc: "The table last saved — in this session or an earlier one — or nil. Works from the first line.",
+        snippet: "local save = cartbox.load() or {}",
+      },
+      {
+        name: "cartbox.erase",
+        signature: "cartbox.erase()",
+        doc: "Forget the save.",
+        snippet: "cartbox.erase()",
       },
     ],
   },

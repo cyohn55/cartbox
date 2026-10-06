@@ -623,17 +623,103 @@ preview.
         - the Start menu's button-mapping page rebinds them.
         - A side effect: the A press that starts a match no longer also fires
           a stray shot.
-- [ ] **EP15b. Save data.** Structured saves (local, and cloud for signed-in
-      players): `cartbox.save` / `cartbox.load` of a Lua table, in a save
-      block in free RAM, kept per cart in the browser and, signed in, in the
-      player's account.
-- [ ] **EP16. Visual scripting.** A node graph that compiles to Lua, for
+- [x] **EP15b. Save data.** Structured saves (local, and cloud for signed-in
+      players).
+
+      *Done:*
+      - **From Lua:**
+        - `cartbox.save(t)` saves a table as JSON (numbers, strings, booleans
+          and tables of them), or returns false and why: too big, or a
+          function in it.
+        - `cartbox.load()` returns the last save from the cart's first line.
+        - `cartbox.erase()` forgets it.
+      - **Runtime:**
+        - The last save reaches the cart as code (a prelude written at load).
+        - A new save comes back through a save block below the input block:
+          16 KB on the larger cores, 448 bytes on Classic.
+        - It is a flag the cart sets and the host clears in the same tick,
+          because Classic's core clears that RAM between frames.
+      - **Keeping saves:**
+        - The play page keeps each cart's save in the browser.
+        - For a signed-in player it also keeps it in their account (a new
+          `cart_saves` table, migration 0028; private by row-level security,
+          written only through `/api/carts/[cartId]/save`). Whichever copy is
+          newer wins, and a burst of saves settles before the account's copy
+          is written.
+        - The editor's playtests keep their own browser copy, apart from
+          players' saves, and the run overlay has Clear save.
+      - **SDK reference:** a save-data group.
+      - **Lockout:** a career record: matches, wins, kills, deaths. It is saved
+        at the end of each match and shown on the title menu. The menu's
+        control hints now name the new action keys.
+- [x] **EP16. Visual scripting.** A node graph that compiles to Lua, for
       gameplay logic without code, in the spirit of Unreal's Blueprints.
+
+      *Done:*
+      - **Graphs are components** (EP14): a visual script compiles to a
+        component's Lua. So it attaches to objects in the inspector, its
+        variables are the component's fields (set per object), and it runs
+        wherever components run. The code is always recompiled from the graph
+        and never trusted as stored.
+      - **Nodes:**
+        - events: on start, every tick, on an input action, every so many
+          seconds, on collision, on trigger;
+        - flow: branch, sequence, loop;
+        - actions: set a variable, place an object, spawn and despawn, play a
+          sound, set a UI value, show a UI document, post a score, print, call
+          a cart function;
+        - values: constants, variables, this object and where it was placed,
+          find an object, time, random, action held, ask a cart function;
+        - maths and logic: add, subtract, multiply, divide, min, max, sin,
+          cos, abs, floor, comparisons, and, or, not, join text.
+      - **Wires:** white execution wires order the actions; coloured data
+        wires carry values, and only join pins that fit. An exec output leads
+        to one place and a data input takes one value. An unwired input uses
+        the value typed beside it.
+      - **Compiler:** one callback per kind of event. Action and timer events
+        run from update. Data nodes become expressions and flow nodes become
+        `if`, `for` and sequences. A chain that loops back on itself stops
+        rather than compiling forever.
+      - **Editor:**
+        - the Mesh tab's Components panel gains "New visual script" and "Edit
+          graph";
+        - the graph editor has a palette by category, a canvas (drag, pan,
+          zoom, wire, unwire), variables, and the compiled Lua beside it,
+          read-only.
+      - **Lockout:** the weapon Pickup (EP14) is now a visual script that
+          compiles to the same behaviour. It's exercised by the real-engine
+          pickup test.
 
 ## Phase E — Content and shipping
 
-- [ ] **EP17. Animation authoring.** Keyframe any property, a curve editor,
-      clip editing, blend spaces and retargeting between skeletons.
+- [x] **EP17. Animation authoring.** Keyframe any property, a curve editor
+      and clip editing.
+
+      *Done:*
+      - **Curves:** any timeline key (camera, object, value) can ease into the
+        next along its own curve. The curve is a cubic Bézier from (0,0) to
+        (1,1), as CSS's cubic-bezier, and its handles may overshoot for
+        anticipation and bounce. The curve editor drags the two handles and
+        has presets.
+      - **Value tracks** keyframe any property:
+        - a value track is a named number keyed over time;
+        - `cartbox.timelinevalue(name)` reads it (it rides a new region of the
+          runtime block), and a visual-script node reads it too;
+        - a track named `bus:<name>` sets that mixer bus's volume.
+        - The Timelines panel plots each value track over time, with its keys
+          and the playhead.
+      - **Clip editing** in the Mesh tab's Animation panel:
+        - rename;
+        - trim a span into a new clip (keys added at the cut so the motion
+          starts and stops where it was);
+        - change the speed;
+        - make a reversed copy;
+        - duplicate and delete.
+      - **Lockout:** the intro's letterbox slides in and out from a
+        "letterbox" value track, and the wind fades up on the ambience bus.
+- [ ] **EP17b. Blend spaces and retargeting.** Two-parameter blend spaces in
+      the state machine, and playing one skeleton's clips on another by joint
+      names.
 - [ ] **EP18. Standalone export.** Export a game as a self-contained HTML
       bundle (a zip for itch.io), and as an installable app that plays
       offline.

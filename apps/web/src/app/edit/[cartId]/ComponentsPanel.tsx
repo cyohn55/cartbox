@@ -11,7 +11,8 @@ import { useState } from "react";
 
 import { componentCallbacks, componentFields, componentValues, type ComponentField, type ComponentValue } from "@cartbox/editor";
 
-import { addComponent, attachComponent, attachedTo, detachComponent, removeComponent, setComponentField, updateComponent } from "@/lib/componentEdit";
+import { addComponent, addVisualScript, attachComponent, attachedTo, detachComponent, removeComponent, setComponentField, setComponentGraph, updateComponent } from "@/lib/componentEdit";
+import { ScriptGraphEditor } from "./ScriptGraphEditor";
 import { type MeshSidecar, type MeshSidecarEntry } from "@/lib/meshSidecar";
 import { RailGroup, RailHint } from "./railControls";
 
@@ -22,7 +23,9 @@ const row = { fontSize: 12, display: "flex", gap: 6, alignItems: "center" } as c
 export function ComponentScriptsPanel({ sidecar, onChange }: { sidecar: MeshSidecar; onChange: (next: MeshSidecar) => void }) {
   const defs = sidecar.components ?? [];
   const [open, setOpen] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const editingDef = defs.find((d) => d.name === editing && d.graph);
   const uses = (name: string) => sidecar.meshes.filter((m) => m.components?.some((c) => c.name === name)).length;
 
   return (
@@ -34,7 +37,7 @@ export function ComponentScriptsPanel({ sidecar, onChange }: { sidecar: MeshSide
               {def.name}
               <span style={{ opacity: 0.55, fontSize: 11 }}>
                 {" "}
-                · {componentCallbacks(def.code).join(", ") || "no callbacks"} · on {uses(def.name)}
+                · {def.graph ? "visual script" : componentCallbacks(def.code).join(", ") || "no callbacks"} · on {uses(def.name)}
               </span>
             </button>
             {open === def.name && (
@@ -53,8 +56,15 @@ export function ComponentScriptsPanel({ sidecar, onChange }: { sidecar: MeshSide
                     } else event.target.value = def.name;
                   }}
                 />
+                {def.graph && (
+                  <button type="button" className="cbx-btn" onClick={() => setEditing(def.name)}>
+                    Edit graph
+                  </button>
+                )}
                 <textarea
                   aria-label={`${def.name} script`}
+                  readOnly={Boolean(def.graph)}
+                  key={def.graph ? def.code : def.name}
                   defaultValue={def.code}
                   spellCheck={false}
                   rows={14}
@@ -65,7 +75,7 @@ export function ComponentScriptsPanel({ sidecar, onChange }: { sidecar: MeshSide
                     const t = event.currentTarget;
                     t.setRangeText("  ", t.selectionStart, t.selectionEnd, "end");
                   }}
-                  onBlur={(event) => event.target.value !== def.code && onChange(updateComponent(sidecar, def.name, { code: event.target.value }) ?? sidecar)}
+                  onBlur={(event) => !def.graph && event.target.value !== def.code && onChange(updateComponent(sidecar, def.name, { code: event.target.value }) ?? sidecar)}
                 />
                 <RailHint>
                   Fields: {componentFields(def.code).map((f) => `${f.name} (${f.type})`).join(", ") || "none — declare one with “-- @field speed number 2”"}.
@@ -90,6 +100,23 @@ export function ComponentScriptsPanel({ sidecar, onChange }: { sidecar: MeshSide
         >
           + New component
         </button>
+        <button
+          type="button"
+          className="cbx-btn"
+          onClick={() => {
+            const made = addVisualScript(sidecar);
+            if (!made) return setError("A cart holds up to 64 components.");
+            setError(null);
+            onChange(made.sidecar);
+            setOpen(made.name);
+            setEditing(made.name);
+          }}
+        >
+          + New visual script
+        </button>
+        {editingDef?.graph && (
+          <ScriptGraphEditor name={editingDef.name} graph={editingDef.graph} onChange={(graph) => onChange(setComponentGraph(sidecar, editingDef.name, graph))} onClose={() => setEditing(null)} />
+        )}
         {error && <RailHint>{error}</RailHint>}
         <RailHint>
           A component is a Lua behaviour — start(self), update(self, dt), collision(self, other, started), trigger(self, other, entered) — attached to objects

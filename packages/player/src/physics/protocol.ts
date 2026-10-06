@@ -109,6 +109,25 @@ export const PHYS_TIMELINE = 8032;
 export const PHYS_TIMELINE_EVENTS = PHYS_TIMELINE + 12; // 8044
 export const PHYS_MAX_TIMELINE_EVENTS = 8;
 
+/**
+ * The playing timeline's value tracks (EP17; host → Lua): count, then one
+ * fixed-point word per value name (timelineValueNames order), or
+ * {@link TIMELINE_VALUE_NONE} where the playing timeline has no such track.
+ * In the gap between the command queue and the animations.
+ */
+export const PHYS_TIMELINE_VALUES = 6160;
+export const PHYS_MAX_TIMELINE_VALUES = 32;
+export const TIMELINE_VALUE_NONE = -0x80000000;
+
+export function writeTimelineValues(block: DataView, names: readonly string[], values: ReadonlyMap<string, number>): void {
+  const n = Math.min(names.length, PHYS_MAX_TIMELINE_VALUES);
+  block.setInt32(PHYS_TIMELINE_VALUES, n, true);
+  for (let i = 0; i < n; i += 1) {
+    const v = values.get(names[i]!);
+    block.setInt32(PHYS_TIMELINE_VALUES + 4 + i * 4, v === undefined ? TIMELINE_VALUE_NONE : toFix(Math.max(-2e6, Math.min(2e6, v))), true);
+  }
+}
+
 /** Write the timeline's playback and the events it just passed (host → Lua). */
 export function writeLevelState(block: DataView, level: { readonly current: number; readonly loading: number; readonly progress: number }): void {
   block.setInt32(PHYS_HDR_LEVEL, level.current, true);

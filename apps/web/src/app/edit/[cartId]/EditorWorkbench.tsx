@@ -73,6 +73,7 @@ import { FilesEditor } from "./FilesEditor";
 import { MeshEditor } from "./MeshEditor";
 import { UiEditor } from "./UiEditor";
 import { InputEditor } from "./InputEditor";
+import { saveKey } from "@/lib/saveData";
 import type { PlaytestConfig } from "./ScenePlayView";
 import { WorldEditor } from "./WorldEditor";
 import { useEditorHistory, hashBytes, snapshotsEqual, type CartSnapshot } from "./useEditorHistory";
@@ -818,8 +819,9 @@ function WorkbenchBody({
       mesh: parseMeshScene(baked ?? null),
       ui: readSidecarUi(baked ?? null),
       actions: readSidecarActions(baked ?? null),
+      saveKey: saveKey(cartId, "playtest"),
     };
-  }, [runnable, rebakeMesh, sidecars.mesh, setSidecar, engineUrl, modelId, fx, scene, anim, particles, collision, flags, world]);
+  }, [runnable, rebakeMesh, sidecars.mesh, setSidecar, engineUrl, modelId, fx, scene, anim, particles, collision, flags, world, cartId]);
 
   // ---- shortcuts ----------------------------------------------------------
 
@@ -1478,6 +1480,7 @@ function WorkbenchBody({
           mesh={meshScene ?? undefined}
           ui={meshUi}
           actions={meshActions}
+          saveKey={saveKey(cartId, "playtest")}
           world={world ?? undefined}
           breakpoints={breakpoints}
           onBreakpointsChange={setBreakpoints}

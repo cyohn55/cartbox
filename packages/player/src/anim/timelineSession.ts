@@ -9,7 +9,7 @@
  * place their objects. A timeline marked autoplay starts with the cart.
  */
 
-import { composeModelMatrix, crossedMarks, multiplyMat4, sampleCamera, sampleObjects, type AnimationCue, type Mat4, type SceneTimeline } from "@cartbox/editor";
+import { composeModelMatrix, crossedMarks, multiplyMat4, sampleCamera, sampleObjects, sampleValues, timelineValueNames, type AnimationCue, type Mat4, type SceneTimeline } from "@cartbox/editor";
 
 import type { MeshScene } from "../mesh/meshScene.js";
 
@@ -115,6 +115,17 @@ export class TimelineSession {
   /** Indices (into the playing timeline's event names) of the events passed on the last step. */
   events(): number[] {
     return this.fired;
+  }
+
+  /** Every value track name in the scene's timelines (the cart's value slots). */
+  valueNames(): string[] {
+    return timelineValueNames(this.timelines);
+  }
+
+  /** The playing (or held) timeline's values now (name → value); empty when none plays. */
+  values(): Map<string, number> {
+    const c = this.current;
+    return c ? sampleValues(this.timelines[c.index]!, c.time) : new Map();
   }
 
   /** The timeline camera now (world eye, target, fov in degrees), or null. */
