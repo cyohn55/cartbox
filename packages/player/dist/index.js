@@ -1,6 +1,7 @@
 // src/audio.ts
 var AudioController = class {
-  constructor(sampleRate) {
+  constructor(sampleRate, channels = 2) {
+    this.channels = channels;
     this.nextStartTime = 0;
     this.context = new AudioContext({ sampleRate });
     this.gain = this.context.createGain();
@@ -26,13 +27,16 @@ var AudioController = class {
    * background tab), it resyncs to the context clock.
    */
   enqueue(samples) {
-    if (samples.length === 0) {
+    const frames = Math.floor(samples.length / this.channels);
+    if (frames === 0) {
       return;
     }
-    const buffer = this.context.createBuffer(1, samples.length, this.context.sampleRate);
-    const channel = buffer.getChannelData(0);
-    for (let i = 0; i < samples.length; i++) {
-      channel[i] = (samples[i] ?? 0) / 32768;
+    const buffer = this.context.createBuffer(this.channels, frames, this.context.sampleRate);
+    for (let c = 0; c < this.channels; c++) {
+      const channel = buffer.getChannelData(c);
+      for (let i = 0; i < frames; i++) {
+        channel[i] = (samples[i * this.channels + c] ?? 0) / 32768;
+      }
     }
     const source = this.context.createBufferSource();
     source.buffer = buffer;

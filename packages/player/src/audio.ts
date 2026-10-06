@@ -7,13 +7,21 @@
  * gesture that starts playback.
  */
 
-/** Int16 PCM, mono, at the context sample rate — the format TIC-80 emits. */
+/**
+ * Int16 PCM at the context sample rate, interleaved stereo (left, right, left,
+ * ...) — the format TIC-80 emits (TIC80_SAMPLE_CHANNELS is 2), and so the
+ * dedicated Modern core too. One 60 Hz frame is sampleRate / 60 pairs.
+ */
 export class AudioController {
   private readonly context: AudioContext;
   private readonly gain: GainNode;
   private nextStartTime = 0;
 
-  constructor(sampleRate: number) {
+  constructor(
+    sampleRate: number,
+    /** Interleaved channels per sample frame. */
+    private readonly channels = 2,
+  ) {
     this.context = new AudioContext({ sampleRate });
     this.gain = this.context.createGain();
     this.gain.connect(this.context.destination);
@@ -41,15 +49,21 @@ export class AudioController {
    * background tab), it resyncs to the context clock.
    */
   enqueue(samples: Int16Array): void {
-    if (samples.length === 0) {
+    const frames = Math.floor(samples.length / this.channels);
+    if (frames === 0) {
       return;
     }
 
-    const buffer = this.context.createBuffer(1, samples.length, this.context.sampleRate);
-    const channel = buffer.getChannelData(0);
-    for (let i = 0; i < samples.length; i++) {
-      // Convert signed 16-bit PCM to the Web Audio [-1, 1] float range.
-      channel[i] = (samples[i] ?? 0) / 0x8000;
+    // Split the interleaved samples into one buffer channel each. (Played as
+    // one mono run they would last twice as long: half speed, an octave low,
+    // and further behind every frame.)
+    const buffer = this.context.createBuffer(this.channels, frames, this.context.sampleRate);
+    for (let c = 0; c < this.channels; c++) {
+      const channel = buffer.getChannelData(c);
+      for (let i = 0; i < frames; i++) {
+        // Convert signed 16-bit PCM to the Web Audio [-1, 1] float range.
+        channel[i] = (samples[i * this.channels + c] ?? 0) / 0x8000;
+      }
     }
 
     const source = this.context.createBufferSource();
