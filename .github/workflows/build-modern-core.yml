@@ -1,0 +1,56 @@
+# Build the dedicated Modern core (packages/modern-core, ENGINE_PARITY_ROADMAP.md
+# EP20b) and check it matches the committed build.
+#
+# The core is a binary artefact committed beside its source, like the TIC-80
+# cores. Its build is reproducible (same sources + same Emscripten = the same
+# bytes), so this rebuilds it and fails if the committed dist differs: a source
+# change that wasn't rebuilt, or a dist that wasn't built from these sources.
+# Then it runs the core's tests against the fresh build.
+
+name: Build the Modern core
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - packages/modern-core/**
+      - .github/workflows/build-modern-core.yml
+  pull_request:
+    paths:
+      - packages/modern-core/**
+      - .github/workflows/build-modern-core.yml
+
+concurrency:
+  group: modern-core-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Pinned with the TIC-80 cores (build-engine-cores.yml): its MODULARIZE +
+      # EXPORT_ES6 glue is the shape older WebKit loads.
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.64
+          actions-cache-folder: emsdk-cache-modern-core
+
+      - name: Build the core
+        run: bash packages/modern-core/build.sh
+
+      - name: The committed build matches
+        run: git diff --exit-code --stat -- packages/modern-core/dist
+
+      - name: Test the core
+        run: npx vitest run "Unit Tests/modern-core.test.ts"

@@ -28,7 +28,7 @@
     "lint": "eslint .",
     "serve:demo": "node packages/player/examples/serve.mjs",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit -p apps/web/tsconfig.json && tsc --noEmit -p packages/player/tsconfig.json",
+    "typecheck": "tsc --noEmit -p apps/web/tsconfig.json && tsc --noEmit -p packages/player/tsconfig.json && tsc --noEmit -p packages/modern-core/tsconfig.json",
     "verify": "npm run typecheck && npm run lint && npm run test && npm run check:dist",
     "verify:engine": "node packages/engine/examples/verify-engine.mjs",
     "verify:portrait": "node packages/engine/examples/verify-portrait-engine.mjs",
