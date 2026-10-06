@@ -93,7 +93,9 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
   const changePrefs = (next: PlayerPrefs) => {
     setPrefs(next);
     writePlayerPrefs(browserStorage(), next);
-    if (next.colorFilter !== prefs.colorFilter) handleRef.current?.setColorFilter(next.colorFilter);
+    // All three apply at once: the filter over the frame, text size and language from the next tick.
+    handleRef.current?.setAccessibility(next);
+    handleRef.current?.setLanguages(preferredLanguages(next));
   };
   // Save data (EP15b): this browser's and, signed in, the account's — loaded
   // before the cart starts, so cartbox.load has it from the first tick.

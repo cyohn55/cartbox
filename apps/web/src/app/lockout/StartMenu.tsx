@@ -311,7 +311,7 @@ export function StartMenu(props: StartMenuProps) {
                       ))}
                     </select>
                   </Row>
-                  <Row label="Text size (next game)">
+                  <Row label="Text size">
                     <select
                       aria-label="Text size"
                       value={props.prefs.textScale}
@@ -326,7 +326,7 @@ export function StartMenu(props: StartMenuProps) {
                     </select>
                   </Row>
                   {props.languages && props.languages.length > 1 && (
-                    <Row label="Language (next game)">
+                    <Row label="Language">
                       <select
                         aria-label="Language"
                         value={props.prefs.language ?? ""}

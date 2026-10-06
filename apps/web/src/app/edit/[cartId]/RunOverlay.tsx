@@ -108,6 +108,8 @@ export function RunOverlay({
   const [quality, setQuality] = useState<QualityChoice>("auto");
   // Localisation and accessibility (EP19b): the playtest's language (switching restarts it) and a colour preview.
   const [language, setLanguage] = useState<string | null>(null);
+  const languageRef = useRef(language);
+  languageRef.current = language;
   const [colorPreview, setColorPreview] = useState<{ filter: ColorFilter; kind: "correct" | "simulate" }>({ filter: "none", kind: "simulate" });
   const colorPreviewRef = useRef(colorPreview);
   colorPreviewRef.current = colorPreview;
@@ -215,7 +217,7 @@ export function RunOverlay({
       ...(ui && ui.length > 0 ? { ui } : {}),
       ...(actions && actions.length > 0 ? { actions } : {}),
       strings: strings ?? null,
-      languages: language ? [language] : preferredLanguages(readPlayerPrefs(browserStorage())),
+      languages: languageRef.current ? [languageRef.current] : preferredLanguages(readPlayerPrefs(browserStorage())),
       accessibility: readPlayerPrefs(browserStorage()),
       ...(saveKey
         ? {
@@ -275,7 +277,7 @@ export function RunOverlay({
       handle.destroy();
       URL.revokeObjectURL(url);
     };
-  }, [bytes, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, ui, actions, saveKey, strings, language, restarts, world, debugOn]);
+  }, [bytes, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, ui, actions, saveKey, strings, restarts, world, debugOn]);
 
   // Breakpoints and watches edited during the run reach the player at once.
   useEffect(() => {
@@ -409,9 +411,13 @@ export function RunOverlay({
             {strings && strings.languages.length > 1 && (
               <select
                 aria-label="Language"
-                title="Play in another of the cart's languages (restarts the playtest)"
+                title="Play in another of the cart's languages (switches at once)"
                 value={language ?? ""}
-                onChange={(e) => setLanguage(e.target.value || null)}
+                onChange={(e) => {
+                  const next = e.target.value || null;
+                  setLanguage(next);
+                  handleRef.current?.setLanguages(next ? [next] : preferredLanguages(readPlayerPrefs(browserStorage())));
+                }}
                 style={{ font: "inherit", padding: "4px 8px", borderRadius: 6 }}
               >
                 <option value="">Language: player&apos;s</option>

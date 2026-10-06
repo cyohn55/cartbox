@@ -281,7 +281,8 @@ export function LockoutGame() {
   const changePrefs = (next: PlayerPrefs) => {
     setPrefs(next);
     writePlayerPrefs(browserStorage(), next);
-    if (next.colorFilter !== prefsRef.current.colorFilter) handleRef.current?.setColorFilter(next.colorFilter);
+    handleRef.current?.setAccessibility(next);
+    handleRef.current?.setLanguages(preferredLanguages(next));
   };
   // The offline copy (EP18): one HTML file, or a zip that installs as an app.
   const [exporting, setExporting] = useState<"html" | "zip" | "error" | null>(null);
