@@ -781,6 +781,10 @@ preview.
         - A small ZIP writer uses the editor's own DEFLATE encoder.
       - **Lockout:** the lobby has "Play offline" with two downloads, one HTML
         file and an installable zip. Both play against bots with no server.
+      - **A Start menu in every export:** a controller's Start, Esc / Enter /
+        P or the ≡ button pauses the game. The menu offers resume, full screen,
+        volume and the player's accessibility settings, which apply at once.
+        (So an exported Lockout has its menu too.)
       - **Tests** cover the zip writer, which parts a game needs, the page's
         data block, the manifest, service worker and icons, and Lockout's
         export. Three tests run in a real browser:
@@ -852,6 +856,10 @@ preview.
           - The playtest can also *simulate* each type, to see the cart as a
             colour-blind player does.
         - *Remapping* stays with each game's control settings (EP15).
+        - Text size, colour filter and language all change *while a game
+          runs*. The host writes them into the input block before each tick
+          and the cart reads them there. A language the cart chose itself with
+          `setlanguage` holds until the player picks another.
       - **Where the settings appear:** under the player on the play page, in
         the playtest, in exported games (EP18), and in Lockout's Start menu
         (Display → Accessibility).

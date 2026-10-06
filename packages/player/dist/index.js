@@ -439,47 +439,7 @@ end`;
 }
 
 // src/stringsSdk.ts
-import { pickLanguage } from "@cartbox/editor";
-var lua2 = (s) => JSON.stringify(s);
-function playLanguage(table, preferred) {
-  return table ? pickLanguage(table, preferred ?? []) : null;
-}
-function stringsSdkLua(table, language, accessibility) {
-  const parts = [];
-  if (table && table.languages.length > 0) {
-    const byLanguage = table.languages.map((l) => {
-      const rows = table.entries.flatMap((e) => e.text[l] !== void 0 ? [`[${lua2(e.key)}]=${lua2(e.text[l])}`] : []);
-      return `[${lua2(l)}]={${rows.join(",")}}`;
-    });
-    const current = language && table.languages.includes(language) ? language : table.fallback;
-    parts.push(`local S = {${byLanguage.join(",\n")}}
-local LANGS = {${table.languages.map(lua2).join(",")}}
-local FALLBACK, lang = ${lua2(table.fallback)}, ${lua2(current)}
-local function fill(s, a)
-  local t = type(a[1]) == "table" and a[1] or nil
-  return (string.gsub(s, "{(%w+)}", function(n)
-    local v
-    if tonumber(n) then v = a[tonumber(n)] elseif t then v = t[n] end
-    if v == nil then return nil end
-    return tostring(v)
-  end))
-end
-cartbox.text = function(k, ...)
-  local s = S[lang][k] or S[FALLBACK][k] or tostring(k)
-  return fill(s, {...})
-end
-cartbox.language = function() return lang end
-cartbox.languages = function() local out = {} for i, l in ipairs(LANGS) do out[i] = l end return out end
-cartbox.setlanguage = function(l) if S[l] then lang = l return true end return false end`);
-  }
-  if (accessibility && (accessibility.textScale !== 1 || accessibility.colorFilter !== "none")) {
-    parts.push(`cartbox.textscale = function() return ${accessibility.textScale} end
-cartbox.colorfilter = function() return ${lua2(accessibility.colorFilter)} end`);
-  }
-  return parts.length > 0 ? `do
-${parts.join("\n")}
-end` : "";
-}
+import { COLOR_FILTERS, TEXT_SCALES, pickLanguage } from "@cartbox/editor";
 
 // src/actionsSdk.ts
 import { actionLabel, parseInputActions } from "@cartbox/editor";
@@ -1284,14 +1244,14 @@ function writeInputBlock(block, held, previous) {
   block.setUint32(INPUT_HELD, held >>> 0, true);
   block.setUint32(INPUT_PREVIOUS, previous >>> 0, true);
 }
-var lua3 = (s) => JSON.stringify(s);
+var lua2 = (s) => JSON.stringify(s);
 function actionsSdkLua(actions, layout) {
   if (!actions || actions.length === 0) return "";
-  const names = actions.map((a) => lua3(a.name));
-  const idx = actions.map((a, i) => `[${lua3(a.name)}]=${i}`);
+  const names = actions.map((a) => lua2(a.name));
+  const idx = actions.map((a, i) => `[${lua2(a.name)}]=${i}`);
   const buttons = actions.map((a) => `{${a.buttons.join(",")}}`);
-  const keyLabels = actions.map((a) => lua3(actionLabel(a, "keyboard")));
-  const padLabels = actions.map((a) => lua3(actionLabel(a, "pad")));
+  const keyLabels = actions.map((a) => lua2(actionLabel(a, "keyboard")));
+  const padLabels = actions.map((a) => lua2(actionLabel(a, "pad")));
   return `do
 local _A = ${inputBlockAddress(layout)}
 local NAMES = {${names.join(",")}}
@@ -1329,6 +1289,78 @@ function readSidecarActions(raw) {
   } catch {
     return [];
   }
+}
+
+// src/stringsSdk.ts
+var lua3 = (s) => JSON.stringify(s);
+function playLanguage(table, preferred) {
+  return table ? pickLanguage(table, preferred ?? []) : null;
+}
+var INPUT_SETTINGS = 12;
+function writeInputSettings(block, accessibility, languageIndex, revision) {
+  block.setUint8(INPUT_SETTINGS, Math.max(0, TEXT_SCALES.indexOf(accessibility.textScale)));
+  block.setUint8(INPUT_SETTINGS + 1, Math.max(0, COLOR_FILTERS.indexOf(accessibility.colorFilter)));
+  block.setUint8(INPUT_SETTINGS + 2, Math.max(0, Math.min(255, languageIndex)));
+  block.setUint8(INPUT_SETTINGS + 3, revision & 255);
+}
+function stringsSdkLua(table, language, accessibility, live) {
+  const parts = [];
+  const startScale = accessibility?.textScale ?? 1;
+  const startFilter = accessibility?.colorFilter ?? "none";
+  if (live !== void 0 && live !== null && (table || accessibility)) {
+    parts.push(`local _A = ${live}
+local TS = {${TEXT_SCALES.join(",")}}
+local CF = {${COLOR_FILTERS.map(lua3).join(",")}}
+local function live(i)
+  if (peek(_A) | (peek(_A + 1) << 8) | (peek(_A + 2) << 16) | (peek(_A + 3) << 24)) ~= ${INPUT_MAGIC} then return nil end
+  return peek(_A + ${INPUT_SETTINGS} + i)
+end
+cartbox.textscale = function() local v = live(0) if v == nil then return ${startScale} end return TS[v + 1] or 1 end
+cartbox.colorfilter = function() local v = live(1) if v == nil then return ${lua3(startFilter)} end return CF[v + 1] or "none" end`);
+  } else if (accessibility && (accessibility.textScale !== 1 || accessibility.colorFilter !== "none")) {
+    parts.push(`cartbox.textscale = function() return ${startScale} end
+cartbox.colorfilter = function() return ${lua3(startFilter)} end`);
+  }
+  if (table && table.languages.length > 0) {
+    const byLanguage = table.languages.map((l) => {
+      const rows = table.entries.flatMap((e) => e.text[l] !== void 0 ? [`[${lua3(e.key)}]=${lua3(e.text[l])}`] : []);
+      return `[${lua3(l)}]={${rows.join(",")}}`;
+    });
+    const current = language && table.languages.includes(language) ? language : table.fallback;
+    const liveLanguage = live !== void 0 && live !== null;
+    parts.push(`local S = {${byLanguage.join(",\n")}}
+local LANGS = {${table.languages.map(lua3).join(",")}}
+local FALLBACK, lang = ${lua3(table.fallback)}, ${lua3(current)}
+${liveLanguage ? `-- The host's language choice, adopted whenever it changes (the cart's own setlanguage holds until then).
+local seen = nil
+local function sync()
+  local rev = live(3)
+  if rev == nil or rev == seen then return end
+  seen = rev
+  local i = live(2)
+  if i and i > 0 and LANGS[i] then lang = LANGS[i] end
+end` : "local function sync() end"}
+local function fill(s, a)
+  local t = type(a[1]) == "table" and a[1] or nil
+  return (string.gsub(s, "{(%w+)}", function(n)
+    local v
+    if tonumber(n) then v = a[tonumber(n)] elseif t then v = t[n] end
+    if v == nil then return nil end
+    return tostring(v)
+  end))
+end
+cartbox.text = function(k, ...)
+  sync()
+  local s = S[lang][k] or S[FALLBACK][k] or tostring(k)
+  return fill(s, {...})
+end
+cartbox.language = function() sync() return lang end
+cartbox.languages = function() local out = {} for i, l in ipairs(LANGS) do out[i] = l end return out end
+cartbox.setlanguage = function(l) sync() if S[l] then lang = l return true end return false end`);
+  }
+  return parts.length > 0 ? `do
+${parts.join("\n")}
+end` : "";
 }
 
 // src/saveSdk.ts
@@ -14855,7 +14887,7 @@ async function createSceneRenderer(width, height, caps, deviceProvider = getWebg
 }
 
 // src/player.ts
-import { SpatialLoader, actionMask, reboundActions, colorFilterSvg } from "@cartbox/editor";
+import { SpatialLoader, actionMask, reboundActions, colorFilterSvg, DEFAULT_ACCESSIBILITY } from "@cartbox/editor";
 function shouldUseTouch(scheme, view) {
   if (scheme === "touch") return true;
   if (scheme === "keyboard") return false;
@@ -14954,6 +14986,11 @@ var Player = class {
     this.levelInactive = /* @__PURE__ */ new Set();
     /** Spatial loading, when the scene streams by distance: the loader and what it has unloaded. */
     this.spatial = null;
+    /** The player's settings now (EP19b): text size and colour filter, read by the cart each tick. */
+    this.settings = DEFAULT_ACCESSIBILITY;
+    /** The language to play in (1-based in the cart's table; 0 for none) and a revision bumped when it changes. */
+    this.languageIndex = 0;
+    this.settingsRevision = 1;
     const view = container.ownerDocument.defaultView;
     if (!view) {
       throw new Error("Container is not attached to a window");
@@ -15062,8 +15099,18 @@ var Player = class {
         prepared = prependLuaCode(prepared, actionsLua);
         this.inputOffset = inputBlockAddress(layout) - layout.pmemAddress;
       }
-      const stringsLua = stringsSdkLua(this.options.strings, playLanguage(this.options.strings, this.options.languages), this.options.accessibility);
-      if (stringsLua) prepared = prependLuaCode(prepared, stringsLua);
+      this.settings = this.options.accessibility ?? DEFAULT_ACCESSIBILITY;
+      this.languageIndex = this.languageIndexFor(this.options.languages);
+      const stringsLua = stringsSdkLua(
+        this.options.strings,
+        playLanguage(this.options.strings, this.options.languages),
+        this.options.accessibility,
+        layout ? inputBlockAddress(layout) : null
+      );
+      if (stringsLua && layout) {
+        prepared = prependLuaCode(prepared, stringsLua);
+        this.inputOffset = inputBlockAddress(layout) - layout.pmemAddress;
+      }
       const uiLua = uiSdkLua(this.options.ui, this.model.width, this.model.height);
       if (uiLua) prepared = prependLuaCode(prepared, uiLua);
       const sceneLua = sceneObjectsSdkLua(this.options.mesh);
@@ -15757,8 +15804,27 @@ var Player = class {
     if (this.inputOffset === null || !this.console) return;
     const bytes = this.console.ramView(this.inputOffset, INPUT_BLOCK_BYTES);
     if (!bytes) return;
-    writeInputBlock(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), held, this.lastActions);
+    const block = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    writeInputBlock(block, held, this.lastActions);
+    writeInputSettings(block, this.settings, this.languageIndex, this.settingsRevision);
     this.lastActions = held;
+  }
+  languageIndexFor(preferred) {
+    const table = this.options.strings;
+    const language = playLanguage(table, preferred);
+    return table && language ? table.languages.indexOf(language) + 1 : 0;
+  }
+  /** Change text size and colour filter at once (see PlayerHandle.setAccessibility). */
+  setAccessibility(settings) {
+    this.settings = settings;
+    this.setColorFilter(settings.colorFilter);
+  }
+  /** Play in the first of these languages the cart has, from the next tick (see PlayerHandle.setLanguages). */
+  setLanguages(preferred) {
+    const index = this.languageIndexFor(preferred);
+    if (index === this.languageIndex) return;
+    this.languageIndex = index;
+    this.settingsRevision = this.settingsRevision % 255 + 1;
   }
   fail(error) {
     const normalized = error instanceof Error ? error : new Error(String(error));
@@ -16523,6 +16589,8 @@ function mount(container, options) {
     setControlSettings: (settings) => player.setControlSettings(settings),
     setVolume: (volume) => player.setVolume(volume),
     setColorFilter: (filter, kind) => player.setColorFilter(filter, kind),
+    setAccessibility: (settings) => player.setAccessibility(settings),
+    setLanguages: (preferred) => player.setLanguages(preferred),
     setInputEnabled: (enabled) => player.setInputEnabled(enabled),
     inspect: () => player.inspect(),
     setQuality: (choice) => player.setQuality(choice),
@@ -16576,6 +16644,7 @@ export {
   HEIGHT_WORLD,
   INPUT_BLOCK_BYTES,
   INPUT_MAGIC,
+  INPUT_SETTINGS,
   INSTANCE_FLOATS,
   LIGHTS_BASE,
   LIGHTS_CAPACITY,
@@ -16827,6 +16896,7 @@ export {
   worldCenter,
   writeBreakpoints,
   writeInputBlock,
+  writeInputSettings,
   writeInstanceTransform,
   writeInstanceUniform,
   writeNetInbox,

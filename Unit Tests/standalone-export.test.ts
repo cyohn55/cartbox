@@ -15,7 +15,7 @@ import { pathToFileURL } from "node:url";
 import { inflateRawSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { LOCKOUT_FX, lockoutCartridge, lockoutMeshSidecar } from "@cartbox/editor";
+import { LOCKOUT_FX, lockoutCartridge, lockoutMeshSidecar, serializeMeshAsset, type MeshAsset } from "@cartbox/editor";
 import { codeChunks } from "@cartbox/player";
 
 import {
@@ -271,6 +271,106 @@ end`;
     expect(await page.evaluate(() => document.getElementById("status")?.hidden)).toBe(true);
     expect(await page.evaluate(() => document.querySelectorAll("#game canvas").length)).toBeGreaterThan(0);
     expect(errors).toEqual([]);
+    await page.close();
+  }, 120_000);
+
+  /** Open a page, start the game with a click, and wait for the cart's save under `cartId`. */
+  async function playUntilSaved(file: string, cartId: string, act?: (page: any) => Promise<void>) {
+    const page = await browser.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (error: Error) => errors.push(error.message));
+    await page.goto(pathToFileURL(file).href);
+    await page.waitForFunction(() => document.getElementById("status")?.textContent?.includes("press a key"), null, { timeout: 60_000 });
+    await page.mouse.click(10, 300);
+    if (act) await act(page);
+    await page.waitForFunction((id: string) => localStorage.getItem(`cartbox:save:play:${id}`) !== null, cartId, { timeout: 60_000 });
+    const saved = JSON.parse(JSON.parse(await page.evaluate((id: string) => localStorage.getItem(`cartbox:save:play:${id}`)!, cartId)).data);
+    return { page, saved, errors };
+  }
+
+  it("carries the physics engine: a scene's crate falls and lands", async () => {
+    // Two triangles spanning the whole unit cube, so each body's box is a full cube.
+    const box = { name: "b", primitives: [{ positions: [-0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5, -0.5, 0.5, -0.5, 0.5, -0.5], normals: null, uvs: null, indices: [0, 1, 2, 0, 3, 1], material: { name: "m", baseColorFactor: [1, 1, 1, 1], baseColorImage: null } }] };
+    const mesh = serializeMeshAsset({ ...box, primitives: box.primitives.map((p) => ({ ...p, positions: Float32Array.from(p.positions), indices: Uint32Array.from(p.indices) })) } as MeshAsset);
+    const sidecar = JSON.stringify({
+      version: 2,
+      meshes: [
+        { id: "floor", name: "floor", mesh, transform: { position: [0, -0.5, 0], rotation: [0, 0, 0], scale: [30, 1, 30] }, physics: { body: "static", shape: "box" } },
+        { id: "crate", name: "crate", mesh, transform: { position: [0, 6, 0], rotation: [0, 0, 0], scale: [1, 1, 1] }, physics: { body: "dynamic", shape: "box", mass: 1 } },
+      ],
+    });
+    const code = `
+t = 0
+function TIC()
+  cls(0)
+  if cartbox.physics() then t = t + 1 end
+  if t == 150 then local _, y = cartbox.body("crate") cartbox.save({ physics = true, y = math.floor(y * 100) }) end
+end`;
+    const game: StandaloneGame = { title: "Fall", cartId: "fall-test", modelId: "xbox360", cart: codeChunks(new TextEncoder().encode(code)), mesh: sidecar };
+    expect(standaloneNeeds(game).physics).toBe("regular");
+    const file = path.join(dir, "fall.html");
+    writeFileSync(file, standaloneHtml(game, { ...parts("xbox360"), physics: readFileSync(path.join(dir, "parts", "physics.js"), "utf8") }));
+    const { page, saved, errors } = await playUntilSaved(file, "fall-test");
+    expect(saved.physics).toBe(true);
+    expect(saved.y).toBeLessThan(150); // dropped from 6 m, resting on the floor (~0.5 m)
+    expect(saved.y).toBeGreaterThan(0);
+    expect(errors).toEqual([]);
+    await page.close();
+  }, 120_000);
+
+  it("carries the KTX2 transcoder: its module decodes a texture, and a scene using one plays", async () => {
+    const ktx2 = readFileSync(path.join(dir, "parts", "ktx2.js"), "utf8");
+    const page = await browser.newPage();
+    await page.goto(pathToFileURL(path.join(dir, "fall.html")).href);
+    // As a string, so the test runner leaves the page's dynamic import alone.
+    await page.evaluate(`window.__ktx2 = ${JSON.stringify({ source: ktx2, bytes: Array.from(readFileSync(path.join(__dirname, "fixtures", "quad8-uastc.ktx2"))) })}`);
+    const decoded = await page.evaluate(`(async () => {
+      const { source, bytes } = window.__ktx2;
+      const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+      const mod = await import(url);
+      const decode = await mod.decoder();
+      const tex = decode(new Uint8Array(bytes));
+      return tex ? { width: tex.width, height: tex.height, corner: Array.from(tex.data.slice(0, 4)), opposite: Array.from(tex.data.slice(-4)) } : null;
+    })()`) as { width: number; height: number; corner: number[]; opposite: number[] } | null;
+    await page.close();
+    expect(decoded).not.toBeNull();
+    expect([decoded!.width, decoded!.height]).toEqual([8, 8]);
+    expect(decoded!.corner).not.toEqual(decoded!.opposite); // quadrants of different colours
+    // A scene whose texture is KTX2: the export carries the transcoder and the game plays.
+    const textured = JSON.stringify({ version: 2, meshes: [{ id: "q", name: "q", transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] }, mesh: JSON.parse(serializeMeshAsset({ name: "q", primitives: [{ positions: Float32Array.from([0, 0, 0, 1, 0, 0, 0, 1, 0]), normals: null, uvs: Float32Array.from([0, 0, 1, 0, 0, 1]), indices: Uint32Array.from([0, 1, 2]), material: { name: "m", baseColorFactor: [1, 1, 1, 1], baseColorImage: { mime: "image/ktx2", bytes: new Uint8Array(readFileSync(path.join(__dirname, "fixtures", "quad8-uastc.ktx2"))) } } }] } as MeshAsset)) }] });
+    const code = `t = 0 function TIC() t = t + 1 if t == 30 then cartbox.save({ ok = true }) end end`;
+    const game: StandaloneGame = { title: "Tex", cartId: "ktx2-test", modelId: "xbox360", cart: codeChunks(new TextEncoder().encode(code)), mesh: textured };
+    expect(standaloneNeeds(game).ktx2).toBe(true);
+    const file = path.join(dir, "tex.html");
+    writeFileSync(file, standaloneHtml(game, { ...parts("xbox360"), ktx2 }));
+    const run = await playUntilSaved(file, "ktx2-test");
+    expect(run.saved.ok).toBe(true);
+    expect(run.errors).toEqual([]);
+    await run.page.close();
+  }, 120_000);
+
+  it("has a Start menu: Esc pauses, and its settings apply to the running cart at once", async () => {
+    const code = `
+last = nil
+function TIC()
+  cls(1)
+  local s = cartbox.textscale() .. "/" .. cartbox.colorfilter()
+  if s ~= last then last = s cartbox.save({ seen = s }) end
+end`;
+    const game: StandaloneGame = { title: "Menu test", cartId: "menu-test", modelId: "classic", cart: codeChunks(new TextEncoder().encode(code)) };
+    const file = path.join(dir, "menu.html");
+    writeFileSync(file, standaloneHtml(game, parts("tic80")));
+    const { page, saved } = await playUntilSaved(file, "menu-test");
+    expect(saved.seen).toBe("1/none");
+    await page.keyboard.press("Escape");
+    await page.waitForSelector('[role="dialog"][aria-label="Paused"]:not([hidden])');
+    await page.selectOption('select[aria-label="Text size"]', "2");
+    await page.selectOption('select[aria-label="Colour filter"]', "protanopia");
+    await page.click("text=Resume");
+    await page.waitForFunction(() => localStorage.getItem("cartbox:save:play:menu-test")?.includes("2/protanopia"), null, { timeout: 30_000 });
+    expect(await page.evaluate(() => document.getElementById("game")!.style.filter)).toMatch(/cbx-color-filter/);
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem("cartbox:accessibility")!))).toMatchObject({ textScale: 2, colorFilter: "protanopia" });
+    expect(await page.isVisible('[role="dialog"][aria-label="Paused"]')).toBe(false);
     await page.close();
   }, 120_000);
 });

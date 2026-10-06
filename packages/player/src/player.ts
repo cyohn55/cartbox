@@ -7,7 +7,7 @@
 import { AudioController } from "./audio.js";
 import { SoundSystem } from "./soundSystem.js";
 import { uiSdkLua } from "./uiSdk.js";
-import { playLanguage, stringsSdkLua } from "./stringsSdk.js";
+import { playLanguage, stringsSdkLua, writeInputSettings } from "./stringsSdk.js";
 import { CMD_RING_BYTES, commandRingAddress, hasCommandRing, resetCommandRing } from "./runtime/commandRing.js";
 import { INPUT_BLOCK_BYTES, actionsSdkLua, inputBlockAddress, writeInputBlock } from "./actionsSdk.js";
 import { armSaveBlock, saveBlockAddress, saveBlockBytes, saveSdkLua, takeSave } from "./saveSdk.js";
@@ -67,7 +67,7 @@ import { WorldOverlaySurface } from "./world/WorldOverlaySurface.js";
 import { createSceneRenderer } from "./render/createSceneRenderer.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
-import { SpatialLoader, actionMask, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, type ColorFilter } from "@cartbox/editor";
+import { SpatialLoader, actionMask, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter } from "@cartbox/editor";
 import type { ControlScheme, InspectedObject, PlayerOptions } from "./types.js";
 
 /**
@@ -326,9 +326,20 @@ export class Player {
         prepared = prependLuaCode(prepared, actionsLua);
         this.inputOffset = inputBlockAddress(layout) - layout.pmemAddress;
       }
-      // The string table and the player's accessibility settings (EP19b).
-      const stringsLua = stringsSdkLua(this.options.strings, playLanguage(this.options.strings, this.options.languages), this.options.accessibility);
-      if (stringsLua) prepared = prependLuaCode(prepared, stringsLua);
+      // The string table and the player's accessibility settings (EP19b), read
+      // live from the input block so a change applies at once.
+      this.settings = this.options.accessibility ?? DEFAULT_ACCESSIBILITY;
+      this.languageIndex = this.languageIndexFor(this.options.languages);
+      const stringsLua = stringsSdkLua(
+        this.options.strings,
+        playLanguage(this.options.strings, this.options.languages),
+        this.options.accessibility,
+        layout ? inputBlockAddress(layout) : null,
+      );
+      if (stringsLua && layout) {
+        prepared = prependLuaCode(prepared, stringsLua);
+        this.inputOffset = inputBlockAddress(layout) - layout.pmemAddress;
+      }
       // UI documents (EP13): laid out for this screen, driven with cartbox.ui.
       const uiLua = uiSdkLua(this.options.ui, this.model.width, this.model.height);
       if (uiLua) prepared = prependLuaCode(prepared, uiLua);
@@ -1207,8 +1218,36 @@ export class Player {
     if (this.inputOffset === null || !this.console) return;
     const bytes = this.console.ramView(this.inputOffset, INPUT_BLOCK_BYTES);
     if (!bytes) return;
-    writeInputBlock(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), held, this.lastActions);
+    const block = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    writeInputBlock(block, held, this.lastActions);
+    writeInputSettings(block, this.settings, this.languageIndex, this.settingsRevision);
     this.lastActions = held;
+  }
+
+  /** The player's settings now (EP19b): text size and colour filter, read by the cart each tick. */
+  private settings: AccessibilitySettings = DEFAULT_ACCESSIBILITY;
+  /** The language to play in (1-based in the cart's table; 0 for none) and a revision bumped when it changes. */
+  private languageIndex = 0;
+  private settingsRevision = 1;
+
+  private languageIndexFor(preferred: readonly string[] | undefined): number {
+    const table = this.options.strings;
+    const language = playLanguage(table, preferred);
+    return table && language ? table.languages.indexOf(language) + 1 : 0;
+  }
+
+  /** Change text size and colour filter at once (see PlayerHandle.setAccessibility). */
+  setAccessibility(settings: AccessibilitySettings): void {
+    this.settings = settings;
+    this.setColorFilter(settings.colorFilter);
+  }
+
+  /** Play in the first of these languages the cart has, from the next tick (see PlayerHandle.setLanguages). */
+  setLanguages(preferred: readonly string[]): void {
+    const index = this.languageIndexFor(preferred);
+    if (index === this.languageIndex) return;
+    this.languageIndex = index;
+    this.settingsRevision = (this.settingsRevision % 255) + 1;
   }
 
   private fail(error: unknown): void {

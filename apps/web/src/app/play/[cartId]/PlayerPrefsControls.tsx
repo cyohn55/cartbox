@@ -16,14 +16,11 @@ export function PlayerPrefsControls({
   prefs,
   languages,
   onChange,
-  restartNote = true,
 }: {
   prefs: PlayerPrefs;
   /** The cart's languages (null or one: no language choice). */
   languages: readonly string[] | null;
   onChange: (next: PlayerPrefs) => void;
-  /** Say that text size and language apply from the next start. */
-  restartNote?: boolean;
 }) {
   return (
     <div role="group" aria-label="Accessibility" style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", fontSize: 13 }}>
@@ -60,7 +57,6 @@ export function PlayerPrefsControls({
           </select>
         </label>
       )}
-      {restartNote && <span style={{ opacity: 0.6 }}>Text size and language apply when the game next starts.</span>}
     </div>
   );
 }

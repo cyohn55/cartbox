@@ -35,7 +35,7 @@ import {
   type StringTable,
   type UiDocument,
 } from "@cartbox/editor";
-import { NET_WORDS, codeChunks, injectSdk, playLanguage, stringsSdkLua, uiSdkLua } from "@cartbox/player";
+import { INPUT_MAGIC, NET_WORDS, RAM_LAYOUTS, codeChunks, inputBlockAddress, injectSdk, playLanguage, stringsSdkLua, uiSdkLua, writeInputSettings } from "@cartbox/player";
 import { prependLuaCode } from "../packages/player/src/cartseed";
 
 import { parsePlayerPrefs, preferredLanguages } from "../apps/web/src/lib/accessibilityPrefs";
@@ -231,6 +231,48 @@ function TIC()
 end`;
     const w = await run(code, [stringsSdkLua(TABLE, "es", { textScale: 2, colorFilter: "none" }), uiSdkLua(docs, 1280, 720)]);
     expect(Array.from(w.slice(100, 102))).toEqual([1, 1]);
+  });
+});
+
+describe.skipIf(!existsSync(ENGINE))("live settings (real engine)", () => {
+  it("text size, colour filter and language change between ticks when the host writes them, the cart's own choice holding until then", async () => {
+    const layout = RAM_LAYOUTS.xbox360;
+    const at = inputBlockAddress(layout);
+    // Each tick the cart records what it sees: size ×10, a filter flag, and which greeting it would show.
+    const code = `
+t = 0
+function TIC()
+  t = t + 1
+  pmem(100 + t, math.floor(cartbox.textscale() * 10) * 100 + (cartbox.colorfilter() == "tritanopia" and 10 or 0) + (cartbox.text("greet", "") == "Hola " and 1 or 0))
+  if t == 3 then cartbox.setlanguage("en") end
+end`;
+    let tic = codeChunks(new TextEncoder().encode(code));
+    tic = prependLuaCode(tic, stringsSdkLua(TABLE, "es", { textScale: 1, colorFilter: "none" }, at));
+    tic = injectSdk(tic);
+    const mod = await (await import(pathToFileURL(ENGINE).href)).default();
+    const h = mod._cbx_create(44100);
+    const ptr = mod._malloc(tic.length);
+    mod.HEAPU8.set(tic, ptr);
+    expect(mod._cbx_load(h, ptr, tic.length)).toBe(1);
+    mod._free(ptr);
+    const base = mod._cbx_mailbox_ptr(h) - NET_WORDS * 4;
+    const block = () => new DataView(mod.HEAPU8.buffer, base + at - layout.pmemAddress, 16);
+    // [text size, filter, language index (1 en, 2 es), revision] per tick.
+    const plan: [number, "none" | "tritanopia", number, number][] = [
+      [1, "none", 2, 1], // 1: Spanish, as started
+      [2, "none", 2, 1], // 2: text size ×2 at once
+      [2, "tritanopia", 2, 1], // 3: filter on; the cart switches itself to English after reading
+      [2, "tritanopia", 2, 1], // 4: same revision: the cart's English holds
+      [1, "none", 2, 2], // 5: the host picks Spanish again (new revision): adopted
+    ];
+    for (const [size, filter, language, revision] of plan) {
+      const b = block();
+      b.setUint32(0, INPUT_MAGIC, true);
+      writeInputSettings(b, { textScale: size, colorFilter: filter }, language, revision);
+      mod._cbx_tick(h, 0);
+    }
+    const w = new Int32Array(mod.HEAPU8.buffer, base, 256);
+    expect(Array.from(w.slice(101, 106))).toEqual([1001, 2001, 2011, 2010, 1001]);
   });
 });
 

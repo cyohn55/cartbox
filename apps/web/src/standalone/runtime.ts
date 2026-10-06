@@ -31,6 +31,7 @@ import {
 
 import { preferredLanguages, readPlayerPrefs } from "../lib/accessibilityPrefs";
 import { browserStorage, openSaves } from "../lib/saveData";
+import { createGameMenu, type GameMenu } from "./menu";
 import type { StandaloneData } from "../lib/standaloneExport";
 
 type Ktx2Decode = Awaited<ReturnType<NonNullable<Parameters<typeof mount>[1]["ktx2"]>>>;
@@ -67,6 +68,8 @@ export async function boot(game: StandaloneData, stage: HTMLElement, status?: HT
   addEventListener("pagehide", () => void saves.flush());
 
   say("Loading…");
+  const strings = readSidecarStrings(game.mesh);
+  let menu: GameMenu | null = null;
   const handle = mount(stage, {
     cartUrl,
     engineUrl,
@@ -86,7 +89,7 @@ export async function boot(game: StandaloneData, stage: HTMLElement, status?: HT
     ...(ui.length > 0 ? { ui } : {}),
     ...(actions.length > 0 ? { actions } : {}),
     // The string table, in the player's language; their text size and colour filter (EP19b).
-    strings: readSidecarStrings(game.mesh),
+    strings,
     languages: preferredLanguages(prefs),
     accessibility: prefs,
     saveData: saves.data,
@@ -107,7 +110,10 @@ export async function boot(game: StandaloneData, stage: HTMLElement, status?: HT
       addEventListener("pointerdown", start);
       addEventListener("keydown", start);
     },
+    // Start (a controller's, Esc / Enter / P, the touch pad's) opens the game's menu.
+    onStart: () => menu?.toggle(),
     onError: (error) => say(`This game could not start: ${error.message}`),
   });
+  menu = createGameMenu({ stage, handle: () => handle, title: game.title || "Game", prefs, languages: strings?.languages ?? [], storage: browserStorage() });
   return handle;
 }

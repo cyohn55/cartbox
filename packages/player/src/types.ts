@@ -312,6 +312,14 @@ export interface PlayerHandle {
    * cart. (What carts read with cartbox.colorfilter stays as started.)
    */
   setColorFilter(filter: ColorFilter, kind?: "correct" | "simulate"): void;
+  /**
+   * Change the player's accessibility settings at once (EP19b): the colour
+   * filter over the frame, and the text size UI documents draw at and carts
+   * read with cartbox.textscale / colorfilter, from the next tick.
+   */
+  setAccessibility(settings: AccessibilitySettings): void;
+  /** Play in the first of these languages the cart has, from the next tick (the cart's own setlanguage holds until then). */
+  setLanguages(preferred: readonly string[]): void;
   /** Hold the game's input neutral (false) while a host menu is open over it, or restore it. */
   setInputEnabled(enabled: boolean): void;
   /**

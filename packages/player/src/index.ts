@@ -331,7 +331,7 @@ export type {
 // code needed. Phase 2 of the mesh asset feature.
 export { MeshOverlaySurface, parseMeshScene, buildOrbitCamera, orbitPitchAboveTerrain, streamGroups, sceneObjectsSdkLua } from "./mesh/index.js";
 export { readSidecarUi, uiSdkLua } from "./uiSdk.js";
-export { playLanguage, stringsSdkLua } from "./stringsSdk.js";
+export { INPUT_SETTINGS, playLanguage, stringsSdkLua, writeInputSettings } from "./stringsSdk.js";
 export { componentsSdkLua } from "./componentsSdk.js";
 export { INPUT_BLOCK_BYTES, INPUT_MAGIC, actionsSdkLua, inputBlockAddress, readSidecarActions, writeInputBlock } from "./actionsSdk.js";
 export { SAVE_MAGIC, armSaveBlock, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, takeSave, validSave } from "./saveSdk.js";
@@ -408,6 +408,8 @@ export function mount(container: HTMLElement, options: PlayerOptions): PlayerHan
     setControlSettings: (settings) => player.setControlSettings(settings),
     setVolume: (volume) => player.setVolume(volume),
     setColorFilter: (filter, kind) => player.setColorFilter(filter, kind),
+    setAccessibility: (settings) => player.setAccessibility(settings),
+    setLanguages: (preferred) => player.setLanguages(preferred),
     setInputEnabled: (enabled) => player.setInputEnabled(enabled),
     inspect: () => player.inspect(),
     setQuality: (choice) => player.setQuality(choice),
