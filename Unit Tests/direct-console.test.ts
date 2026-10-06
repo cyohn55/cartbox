@@ -87,10 +87,11 @@ end`,
     const cam = decodeMeshCamera(console.readMailbox());
     expect(cam?.yaw).toBeCloseTo(30, 2);
     expect(cam?.distance).toBeCloseTo(5, 2);
-    // The frame is RGBA at the model's size, the HUD text drawn into it.
+    // The frame is RGBA at the model's size, the HUD text drawn into it. A cart
+    // with no palette chunk gets TIC-80's DB16 palette, as on the HD core.
     const frame = console.readFramebuffer();
     expect(frame.length).toBe(1280 * 720 * 4);
-    expect(Array.from(frame.slice(0, 4))).toEqual([0x1a, 0x1c, 0x2c, 255]);
+    expect(Array.from(frame.slice(0, 4))).toEqual([0x14, 0x0c, 0x1c, 255]);
   });
 
   it("sends the runtime's commands as calls: 6,000 placements in one tick, past even the overflow ring's 4,159", async () => {

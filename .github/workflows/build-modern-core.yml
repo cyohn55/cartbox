@@ -5,7 +5,8 @@
 # cores. Its build is reproducible (same sources + same Emscripten = the same
 # bytes), so this rebuilds it and fails if the committed dist differs: a source
 # change that wasn't rebuilt, or a dist that wasn't built from these sources.
-# Then it runs the core's tests against the fresh build.
+# Then it runs the core's tests against the fresh build, including its
+# frame-for-frame comparison with the TIC-80–derived HD core it stands in for.
 
 name: Build the Modern core
 
@@ -53,4 +54,4 @@ jobs:
         run: git diff --exit-code --stat -- packages/modern-core/dist
 
       - name: Test the core
-        run: npx vitest run "Unit Tests/modern-core.test.ts"
+        run: npx vitest run "Unit Tests/modern-core.test.ts" "Unit Tests/modern-core-parity.test.ts" "Unit Tests/direct-console.test.ts"
