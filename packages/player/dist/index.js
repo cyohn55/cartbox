@@ -704,16 +704,19 @@ function writeAnimationState(block, playback, events = []) {
     block.setInt32(at + 4, events[i].event, true);
   }
 }
-function takePhysicsCommands(block) {
-  const n = Math.max(0, Math.min(PHYS_MAX_CMDS, block.getInt32(PHYS_CMDS, true)));
+function takeCommandsAt(view, base, max) {
+  const n = Math.max(0, Math.min(max, view.getInt32(base, true)));
   const out = [];
   for (let i = 0; i < n; i += 1) {
-    const at = PHYS_CMDS + 4 + i * PHYS_CMD_BYTES;
-    const v = [0, 0, 0, 0, 0, 0].map((_, k) => fromFix(block.getInt32(at + 8 + k * 4, true)));
-    out.push({ op: block.getInt32(at, true), a: block.getInt32(at + 4, true), v });
+    const at = base + 4 + i * PHYS_CMD_BYTES;
+    const v = [0, 0, 0, 0, 0, 0].map((_, k) => fromFix(view.getInt32(at + 8 + k * 4, true)));
+    out.push({ op: view.getInt32(at, true), a: view.getInt32(at + 4, true), v });
   }
-  block.setInt32(PHYS_CMDS, 0, true);
+  view.setInt32(base, 0, true);
   return out;
+}
+function takePhysicsCommands(block) {
+  return takeCommandsAt(block, PHYS_CMDS, PHYS_MAX_CMDS);
 }
 
 // src/debug/instrument.ts
@@ -1506,6 +1509,25 @@ cartbox.erase = function()
   publish("")
 end
 end`;
+}
+
+// src/runtime/commandRing.ts
+var CMD_RING_BYTES = 131072;
+var CMD_RING_MAX = Math.floor((CMD_RING_BYTES - 4) / PHYS_CMD_BYTES);
+function hasCommandRing(layout) {
+  return layout.ramSize >= 8 * 1024 * 1024 && saveBlockBytes(layout) > 0;
+}
+function commandRingAddress(layout) {
+  return hasCommandRing(layout) ? saveBlockAddress(layout) - CMD_RING_BYTES : null;
+}
+function commandsPerTick(layout) {
+  return PHYS_MAX_CMDS + (hasCommandRing(layout) ? CMD_RING_MAX : 0);
+}
+function takeRingCommands(ring) {
+  return takeCommandsAt(ring, 0, CMD_RING_MAX);
+}
+function resetCommandRing(ring) {
+  ring.setInt32(0, 0, true);
 }
 
 // src/cartridge.ts
@@ -7103,9 +7125,11 @@ function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
   const slots = physicsSlots(scene).map((object, slot) => `[${object}]=${slot}`);
   const pools = (scene.pools ?? []).map((pool) => `[${luaString(pool.prefab)}]={${pool.roots.join(",")}}`);
   const B = physicsBlockAddress(layout);
+  const R = commandRingAddress(layout);
   return `do
   cartbox = cartbox or {}
   local _B = ${B}
+  local _R = ${R ?? "nil"}
   local _slot = {${slots.join(",")}}
   local _ok = false
   local function _rd(a)
@@ -7129,13 +7153,15 @@ function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
   end
   local function _cmd(op, a, v1, v2, v3, v4, v5, v6)
     if not _live() then return end
-    local n = _rd(_B + ${PHYS_CMDS})
-    if n < 0 or n >= ${PHYS_MAX_CMDS} then return end
-    local at = _B + ${PHYS_CMDS + 4} + n * ${PHYS_CMD_BYTES}
+    local count, cap = _B + ${PHYS_CMDS}, ${PHYS_MAX_CMDS}
+    local n = _rd(count)
+    if n >= cap and _R then count, cap = _R, ${CMD_RING_MAX}; n = _rd(count) end
+    if n < 0 or n >= cap then return end
+    local at = count + 4 + n * ${PHYS_CMD_BYTES}
     _wr(at, op) _wr(at + 4, a)
     _wr(at + 8, (v1 or 0) * ${PHYS_FIX}) _wr(at + 12, (v2 or 0) * ${PHYS_FIX}) _wr(at + 16, (v3 or 0) * ${PHYS_FIX})
     _wr(at + 20, (v4 or 0) * ${PHYS_FIX}) _wr(at + 24, (v5 or 0) * ${PHYS_FIX}) _wr(at + 28, (v6 or 0) * ${PHYS_FIX})
-    _wr(_B + ${PHYS_CMDS}, n + 1)
+    _wr(count, n + 1)
     return true
   end
 ${physics ? PHYSICS_CALLS() : ""}
@@ -8059,9 +8085,14 @@ var RuntimeChannel = class {
       [...this.watched.values()].flatMap((w) => w.position ? [{ object: w.object, joint: w.joint, position: w.position }] : [])
     );
   }
-  /** Take the cart's commands: scene ops here, the rest to physics (which then steps). */
-  afterTick(block) {
+  /**
+   * Take the cart's commands: scene ops here, the rest to physics (which then
+   * steps). `ring` is the overflow command ring on cores that have one (EP20):
+   * its commands came after the block's.
+   */
+  afterTick(block, ring) {
     const commands = takePhysicsCommands(block);
+    if (ring) commands.push(...takeRingCommands(ring));
     for (const cmd of commands) {
       if (cmd.op === PHYS_OP_SPAWN) this.spawn(cmd.a, cmd.v);
       else if (cmd.op === PHYS_OP_DESPAWN) this.despawn(cmd.a);
@@ -15054,7 +15085,9 @@ var Player = class {
         this.runtime = {
           channel: new RuntimeChannel(mesh, physics),
           physics,
-          offset: physicsBlockAddress(layout) - layout.pmemAddress
+          offset: physicsBlockAddress(layout) - layout.pmemAddress,
+          // The overflow command ring (EP20), where the core's RAM affords one.
+          ring: hasCommandRing(layout) ? commandRingAddress(layout) - layout.pmemAddress : null
         };
       }
       const preparedBytes = injectSdk(prepared);
@@ -15064,6 +15097,8 @@ var Player = class {
       if (!this.console.loadCartridge(preparedBytes)) {
         throw new Error("Engine rejected the cartridge");
       }
+      const ring = this.commandRing();
+      if (ring) resetCommandRing(ring);
       this.console.setMaterialCapture(Boolean(this.options.lighting));
       this.lastMailboxSeq = this.console.readMailbox()[0] ?? 0;
       this.lastErrorSeq = this.console.readError()?.seq ?? 0;
@@ -15338,7 +15373,7 @@ var Player = class {
     }
     const afterBlock = runtimeBlock ? this.runtimeBlock() : null;
     if (afterBlock) {
-      this.runtime.channel.afterTick(afterBlock);
+      this.runtime.channel.afterTick(afterBlock, this.commandRing());
       this.pollLevelRequest();
       for (const b of this.runtime.channel.takeBursts()) this.meshSurface?.burst(b.effect, b.at, b.dir, b.scale);
       for (const d of this.runtime.channel.takeDecals()) this.meshSurface?.decal(d.decal, d.at, d.normal, d.scale);
@@ -15515,6 +15550,12 @@ var Player = class {
   runtimeBlock() {
     if (!this.runtime || !this.console) return null;
     const bytes = this.console.ramView(this.runtime.offset, PHYS_BLOCK_BYTES);
+    return bytes ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
+  }
+  /** A DataView over the overflow command ring (EP20), on cores that have one. */
+  commandRing() {
+    if (!this.runtime || this.runtime.ring === null || !this.console) return null;
+    const bytes = this.console.ramView(this.runtime.ring, CMD_RING_BYTES);
     return bytes ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
   }
   /** A DataView over the debug block, when the console is on (re-fetched, like runtimeBlock). */
@@ -16513,6 +16554,8 @@ export {
   CAMERA_SCALE,
   CARTBOX_SDK_LUA,
   CELL_WORLD,
+  CMD_RING_BYTES,
+  CMD_RING_MAX,
   CappedSceneRenderer,
   CartridgeLoadError,
   ConsoleButton,
@@ -16639,6 +16682,8 @@ export {
   codeChunks,
   codeLineOffset,
   collisionSdkLua,
+  commandRingAddress,
+  commandsPerTick,
   compileAnimator,
   componentsSdkLua,
   composeParallax,
@@ -16680,6 +16725,7 @@ export {
   framebufferBytes,
   getModel,
   getWebgpuDevice,
+  hasCommandRing,
   hashCart,
   hashEventId,
   hexToRgb01,
@@ -16767,6 +16813,7 @@ export {
   sway,
   takeNetOutbox,
   takePhysicsCommands,
+  takeRingCommands,
   takeSave,
   tiltShiftBlur,
   tokenizeLua,

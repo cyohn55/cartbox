@@ -870,7 +870,39 @@ preview.
         - an exported game in Chromium that plays in the player's language,
           reports their text size and colour filter to the cart, and filters
           the frame.
-- [ ] **EP20. A dedicated Modern core.** Game code on the Modern tier currently
-      runs in a TIC-80–derived core and reaches the 3D engine through a
-      command channel capped at 64 commands a tick. A dedicated core with a
-      direct scripting API lifts that cap and is the foundation for scale.
+- [x] **EP20. Lift the Modern tier's command cap.** Game code on the Modern
+      tier runs in a TIC-80–derived core and reaches the 3D engine through a
+      command channel capped at 64 commands a tick.
+
+      *Done:*
+      - **The overflow command ring:**
+        - On the HD core behind the Modern and Xbox 360 models, commands past
+          the runtime block's 64 continue into a 128 KB ring in the core's
+          free RAM, just below the save block.
+        - That is another 4,095 a tick: 4,159 in all, 65× the old cap.
+        - The cart's code doesn't change: `cartbox.place`, spawn, play, sound,
+          burst, impulses and the rest simply stop being dropped.
+        - The host reads the block's commands, then the ring's, so their order
+          is kept. It empties the ring after every tick.
+        - Other cores keep the 8 KB block alone: their free RAM can't hold the
+          ring.
+      - **Lockout** runs on the HD core, so it gets the higher cap as it is.
+      - **Tests:**
+        - where the ring sits (only on the HD core, clear of TIC-80's own RAM
+          and the other blocks);
+        - in the real HD engine:
+          - a cart drawing heavily for ten frames never touches the ring's
+            RAM;
+          - 300, then 5,000, then 10 placements in successive ticks arrive in
+            order, up to exactly the new cap;
+          - without the host reading the ring, only the block's 64 arrive.
+- [ ] **EP20b. A dedicated Modern core.** A core of its own for the Modern
+      tier, a Lua VM with a direct scripting API into the 3D engine (calls
+      rather than a command channel), is still the foundation for scale.
+      - It is a new WebAssembly runtime, not a feature of this one: cart
+        loading, the 2D layer, sound and input would all be reimplemented
+        around it.
+      - Building it needs the Emscripten toolchain, which this repository
+        builds cores with in CI (build-engine-cores.yml) but doesn't vendor.
+      - EP20 removes the cap that most limited carts today, so this can follow
+        as a project of its own.

@@ -430,15 +430,20 @@ export function writeAnimationState(
   }
 }
 
-/** Read (and clear) the commands the cart wrote this tick. */
-export function takePhysicsCommands(block: DataView): PhysicsCommand[] {
-  const n = Math.max(0, Math.min(PHYS_MAX_CMDS, block.getInt32(PHYS_CMDS, true)));
+/** Read (and clear) `max` at most commands from a count word at `base` followed by the commands. */
+export function takeCommandsAt(view: DataView, base: number, max: number): PhysicsCommand[] {
+  const n = Math.max(0, Math.min(max, view.getInt32(base, true)));
   const out: PhysicsCommand[] = [];
   for (let i = 0; i < n; i += 1) {
-    const at = PHYS_CMDS + 4 + i * PHYS_CMD_BYTES;
-    const v = [0, 0, 0, 0, 0, 0].map((_, k) => fromFix(block.getInt32(at + 8 + k * 4, true))) as unknown as PhysicsCommand["v"];
-    out.push({ op: block.getInt32(at, true), a: block.getInt32(at + 4, true), v });
+    const at = base + 4 + i * PHYS_CMD_BYTES;
+    const v = [0, 0, 0, 0, 0, 0].map((_, k) => fromFix(view.getInt32(at + 8 + k * 4, true))) as unknown as PhysicsCommand["v"];
+    out.push({ op: view.getInt32(at, true), a: view.getInt32(at + 4, true), v });
   }
-  block.setInt32(PHYS_CMDS, 0, true);
+  view.setInt32(base, 0, true);
   return out;
+}
+
+/** Read (and clear) the commands the cart wrote this tick. */
+export function takePhysicsCommands(block: DataView): PhysicsCommand[] {
+  return takeCommandsAt(block, PHYS_CMDS, PHYS_MAX_CMDS);
 }

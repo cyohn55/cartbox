@@ -492,3 +492,4 @@ export {
   writePhysicsState,
   type RamLayout,
 } from "./physics/protocol.js";
+export { CMD_RING_BYTES, CMD_RING_MAX, commandRingAddress, commandsPerTick, hasCommandRing, takeRingCommands } from "./runtime/commandRing.js";
