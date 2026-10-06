@@ -12,7 +12,8 @@ import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { fillUiText, layoutUi, newUiWidget, parseUiDocuments, uiNavigation, type UiDocument } from "@cartbox/editor";
-import { NET_WORDS, codeChunks, injectSdk, uiSdkLua } from "@cartbox/player";
+import { NET_WORDS, RAM_LAYOUTS, codeChunks, injectSdk, toConsolePixel, uiSdkLua, writePointer } from "@cartbox/player";
+import { debugBlockAddress } from "../packages/player/src/debug/debugBlock";
 import { prependLuaCode } from "../packages/player/src/cartseed";
 
 const ENGINE = path.resolve(__dirname, "../packages/engine/dist/xbox360/engine.js");
@@ -223,5 +224,88 @@ describe("Lockout", () => {
     };
     for (const d of LOCKOUT_UI) visit(d.widgets);
     for (const k of keys) expect(LOCKOUT_CODE, k).toContain(`"${k}"`);
+  });
+});
+
+describe.skipIf(!existsSync(ENGINE))("cartbox.ui with the pointer (mouse and taps)", () => {
+  const LAYOUT = RAM_LAYOUTS.xbox360;
+  type Pointer = { x: number; y: number; over?: boolean; down?: boolean; clicks: number };
+  async function run(code: string, pointers: Pointer[]) {
+    let tic = codeChunks(new TextEncoder().encode(code));
+    tic = prependLuaCode(tic, uiSdkLua([MENU, HUD], W, H, debugBlockAddress(LAYOUT)));
+    tic = injectSdk(tic);
+    const mod = await (await import(pathToFileURL(ENGINE).href)).default();
+    const h = mod._cbx_create(44100);
+    const ptr = mod._malloc(tic.length);
+    mod.HEAPU8.set(tic, ptr);
+    expect(mod._cbx_load(h, ptr, tic.length)).toBe(1);
+    mod._free(ptr);
+    const pmemBase = mod._cbx_mailbox_ptr(h) - NET_WORDS * 4;
+    const out: number[][] = [];
+    for (const p of pointers) {
+      const at = pmemBase + debugBlockAddress(LAYOUT) - LAYOUT.pmemAddress;
+      writePointer(new DataView(mod.HEAPU8.buffer, at, 64), { over: true, down: false, ...p });
+      mod._cbx_tick(h, 0);
+      out.push(Array.from(new Int32Array(mod.HEAPU8.buffer, pmemBase, 256).slice(100, 105)));
+    }
+    mod._cbx_delete(h);
+    return out;
+  }
+  const CART = `
+t, presses = 0, 0
+IDS = { modes = 1, go = 2, quit = 3 }
+function TIC()
+  t = t + 1
+  cartbox.ui.set("items", {"Slayer", "Oddball", "King"})
+  if t >= 5 and t < 9 then cartbox.ui.hide("menu") else cartbox.ui.show("menu") end
+  local id, v = cartbox.ui.update()
+  if id then presses = presses + 1; pmem(103, IDS[id]); pmem(104, tonumber(v) or 0) end
+  pmem(100, presses)
+  pmem(101, cartbox.ui.selected("modes"))
+  pmem(102, IDS[cartbox.ui.focused("menu") or ""] or 0)
+end`;
+
+  it("points at a list row to select it, clicks to press it, and clicks a button", async () => {
+    // The menu's list rows are 30 px from y 260; its "Go" button is at (465..615, 458..490).
+    const out = await run(CART, [
+      { x: 500, y: 330, clicks: 0 }, // over row 3: selects it
+      { x: 500, y: 330, clicks: 1 }, // click: presses the list with row 3
+      { x: 540, y: 470, clicks: 2 }, // onto "Go" with a click: focuses and presses it
+      { x: 540, y: 470, clicks: 2 }, // resting: nothing more
+    ]);
+    expect(out[0]).toEqual([0, 3, 1, 0, 0]);
+    expect(out[1]).toEqual([1, 3, 1, 1, 3]);
+    expect(out[2]).toEqual([2, 3, 2, 2, 0]);
+    expect(out[3]).toEqual([2, 3, 2, 2, 0]);
+  });
+
+  it("ignores clicks made while no document was being updated, and the pointer off the screen", async () => {
+    const out = await run(CART, [
+      { x: 500, y: 300, clicks: 0 },
+      { x: 500, y: 300, clicks: 0 },
+      { x: 500, y: 300, clicks: 0 },
+      { x: 500, y: 300, clicks: 0 },
+      { x: 500, y: 300, clicks: 1 }, // the menu is hidden (ticks 5..8): these clicks aren't for it
+      { x: 500, y: 300, clicks: 2 },
+      { x: 500, y: 300, clicks: 3 },
+      { x: 500, y: 300, clicks: 4 },
+      { x: 500, y: 300, clicks: 4 }, // shown again: no phantom press
+      { x: 500, y: 330, over: false, clicks: 5 }, // off the screen: ignored
+      { x: 500, y: 330, clicks: 6 }, // back over row 3 and clicked
+    ]);
+    expect(out[8]![0]).toBe(0);
+    expect(out[9]![0]).toBe(0);
+    expect(out[10]).toEqual([1, 3, 1, 1, 3]);
+  });
+});
+
+describe("the pointer's console pixel", () => {
+  it("maps a point on the page into the scaled screen, and knows when it's off it", () => {
+    const rect = { left: 100, top: 50, width: 640, height: 360 }; // a 1280×720 screen shown at half size
+    expect(toConsolePixel(100, 50, rect, { width: 1280, height: 720 })).toEqual({ x: 0, y: 0, over: true });
+    expect(toConsolePixel(420, 230, rect, { width: 1280, height: 720 })).toEqual({ x: 640, y: 360, over: true });
+    expect(toConsolePixel(90, 230, rect, { width: 1280, height: 720 }).over).toBe(false);
+    expect(toConsolePixel(740, 230, rect, { width: 1280, height: 720 }).over).toBe(false);
+    expect(toConsolePixel(0, 0, { left: 0, top: 0, width: 0, height: 0 }, { width: 1280, height: 720 }).over).toBe(false);
   });
 });

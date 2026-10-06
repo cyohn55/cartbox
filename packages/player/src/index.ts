@@ -334,6 +334,7 @@ export { readSidecarUi, uiSdkLua } from "./uiSdk.js";
 export { INPUT_SETTINGS, playLanguage, stringsSdkLua, writeInputSettings } from "./stringsSdk.js";
 export { componentsSdkLua } from "./componentsSdk.js";
 export { INPUT_BLOCK_BYTES, INPUT_MAGIC, actionsSdkLua, inputBlockAddress, readSidecarActions, writeInputBlock } from "./actionsSdk.js";
+export { POINTER_AT, POINTER_MAGIC, PointerInput, toConsolePixel, writePointer, type PointerState } from "./pointer.js";
 export { SAVE_MAGIC, armSaveBlock, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, takeSave, validSave } from "./saveSdk.js";
 export { SoundSystem, browserSpeaker, LOOP_SLOTS, MAX_VOICES, type SoundContext, type Speaker } from "./soundSystem.js";
 export type { MeshScene, MeshInstance, SceneBounds, MeshSceneCamera } from "./mesh/index.js";
