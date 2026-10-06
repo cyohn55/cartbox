@@ -19,6 +19,7 @@ import { defaultSnapshotName, snapshotName, snapshotObjectKey, snapshotUploadErr
 import { isObjectStorageConfigured } from "@/lib/meshStorage";
 import { guardCartWrite } from "@/lib/sidecarRoute";
 import { putObject } from "@/lib/storage";
+import { collectStorageGarbage } from "@/lib/storageGarbage";
 import { serviceClient } from "@/lib/supabase";
 
 type Params = { params: { cartId: string } };
@@ -72,5 +73,6 @@ export async function POST(request: Request, { params }: Params): Promise<NextRe
     .select("id, name, created_at, size")
     .single();
   if (error || !data) return NextResponse.json({ error: error?.message ?? "The snapshot could not be saved." }, { status: 500 });
+  await collectStorageGarbage();
   return NextResponse.json({ snapshot: { id: data.id, name: data.name, createdAt: data.created_at, size: data.size } });
 }

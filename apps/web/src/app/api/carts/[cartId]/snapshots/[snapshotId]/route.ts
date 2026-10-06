@@ -13,6 +13,7 @@ import { base64ToBytes } from "@cartbox/editor";
 import { isValidCartId } from "@/lib/cartDraft";
 import { guardCartWrite } from "@/lib/sidecarRoute";
 import { deleteObject, getObject } from "@/lib/storage";
+import { collectStorageGarbage } from "@/lib/storageGarbage";
 import { serviceClient } from "@/lib/supabase";
 
 type Params = { params: { cartId: string; snapshotId: string } };
@@ -52,5 +53,6 @@ export async function DELETE(request: Request, { params }: Params): Promise<Next
       // The row is gone; a stray object costs only storage.
     }
   }
+  await collectStorageGarbage();
   return NextResponse.json({ deleted: true });
 }

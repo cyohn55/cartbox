@@ -16,6 +16,7 @@ import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  LOCKOUT_CODE,
   LOCKOUT_STRINGS,
   LOCKOUT_UI,
   accessibleTextScale,
@@ -286,6 +287,14 @@ describe("Lockout", () => {
     for (const e of LOCKOUT_STRINGS.entries) expect(/^[\x20-\x7e]*$/.test(e.text.es!)).toBe(true);
     expect(readSidecarStrings(lockoutMeshSidecar())).toEqual(LOCKOUT_STRINGS);
     expect(translate(LOCKOUT_STRINGS, "es", "mode.koth")).toBe("Rey de la colina");
+    // In-match text too: every key its code asks for (T("key", english, ...)) is in the table, in both languages.
+    const used = [...LOCKOUT_CODE.matchAll(/\bT\("([\w.]+)"/g)].map((m) => m[1]!).filter((k) => !k.endsWith("."));
+    for (const k of ["ffa", "slayer", "swat", "snipe", "ball", "koth", "jugg"]) used.push(`mode.${k}`);
+    for (const k of ["br", "smg", "shotgun", "sniper", "magnum", "sword"]) used.push(`weapon.${k}`);
+    expect(used.length).toBeGreaterThan(20);
+    for (const key of used) expect(keys.has(key)).toBe(true);
+    expect(translate(LOCKOUT_STRINGS, "es", "msg.pickup", ["Escopeta"])).toBe("Recogiste Escopeta");
+    expect(translate(LOCKOUT_STRINGS, "es", "status.teams", [3, 5, 40])).toBe("AZUL 3   ROJO 5   /40");
   });
 });
 
