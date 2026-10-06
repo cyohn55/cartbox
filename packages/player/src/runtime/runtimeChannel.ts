@@ -215,9 +215,11 @@ export class RuntimeChannel {
    * steps). `ring` is the overflow command ring on cores that have one (EP20):
    * its commands came after the block's.
    */
-  afterTick(block: DataView, ring?: DataView | null): void {
+  afterTick(block: DataView, ring?: DataView | null, direct?: readonly PhysicsCommand[]): void {
     const commands = takePhysicsCommands(block);
     if (ring) commands.push(...takeRingCommands(ring));
+    // Commands the dedicated Modern core's cart made as calls (EP20b).
+    if (direct) commands.push(...direct);
     this.applyCommands(commands);
   }
 

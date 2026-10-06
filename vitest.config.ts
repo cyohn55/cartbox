@@ -15,6 +15,7 @@ import { defineConfig } from "vitest/config";
 const playerSource = fileURLToPath(
   new URL("./packages/player/src/index.ts", import.meta.url),
 );
+const modernCoreSource = fileURLToPath(new URL("./packages/modern-core/src/index.ts", import.meta.url));
 const editorSource = fileURLToPath(
   new URL("./packages/editor/src/index.ts", import.meta.url),
 );
@@ -28,6 +29,7 @@ export default defineConfig({
     alias: {
       "@cartbox/player": playerSource,
       "@cartbox/editor": editorSource,
+      "@cartbox/modern-core": modernCoreSource,
       "@": webSource,
     },
   },

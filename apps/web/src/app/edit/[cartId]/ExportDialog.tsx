@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { basePath } from "@/lib/staticSite";
+import { DIRECT_CORE_URL } from "@/lib/consoleModel";
 import { fetchStandaloneParts, standaloneFileName, standaloneHtml, standaloneNeeds, standaloneZip, type StandaloneGame } from "@/lib/standaloneExport";
 import { formatBytes } from "./assetUploads";
 import styles from "./editor.module.css";
@@ -55,7 +56,7 @@ export function ExportDialog({
     try {
       const current = await game();
       if (!current) throw new Error("The cart can't be saved right now (is the engine loaded?).");
-      const parts = await fetchStandaloneParts(current, { engineUrl, basePath });
+      const parts = await fetchStandaloneParts(current, { engineUrl, directCoreUrl: DIRECT_CORE_URL, basePath });
       const name = standaloneFileName(current.title);
       if (format === "html") {
         const html = standaloneHtml(current, parts);

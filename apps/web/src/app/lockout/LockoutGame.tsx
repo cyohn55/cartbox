@@ -28,7 +28,7 @@ import {
 import { LOCKOUT_FX, LOCKOUT_INPUT_ACTIONS, LOCKOUT_STRINGS, lockoutCartridge, lockoutMeshSidecar } from "@cartbox/editor";
 import { preferredLanguages, readPlayerPrefs, writePlayerPrefs, type PlayerPrefs } from "@/lib/accessibilityPrefs";
 
-import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
+import { DIRECT_CORE_URL, ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
 import { newRoomCode, onlineRoomsAvailable, parseRoomCode, roomTransport } from "@/lib/netplayTransport";
 import { MM_FAILED, MM_SEARCHING, createMatchmaker, type Matchmaker } from "@/lib/matchmaking";
 import { LOCKOUT_ACTIONS, loadGameSettings, saveGameSettings, type GameSettings } from "@/lib/gameSettings";
@@ -196,6 +196,8 @@ export function LockoutGame() {
         handleRef.current = mount(stage, {
           cartUrl,
           engineUrl: ENGINE_URL_BY_MODEL.xbox360,
+          // ?core=direct tries Lockout on the dedicated Modern core (EP20b).
+          ...(new URLSearchParams(window.location.search).get("core") === "direct" ? { core: "direct" as const, directCoreUrl: DIRECT_CORE_URL } : {}),
           modelId: "xbox360",
           autostart: true,
           record: false,

@@ -495,3 +495,5 @@ export {
   type RamLayout,
 } from "./physics/protocol.js";
 export { CMD_RING_BYTES, CMD_RING_MAX, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, hasCommandRing, takeRingCommands } from "./runtime/commandRing.js";
+export { createDirectConsole, directCoreModel, type DirectConsole } from "./directConsole.js";
+export { DIRECT_CORE_URL } from "./player.js";

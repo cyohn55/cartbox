@@ -21,6 +21,7 @@ import { mount, parseMeshScene, type AnimSpec, type CollisionField, type FlagsFi
 import type { InputAction, StringTable, UiDocument } from "@cartbox/editor";
 import { browserStorage, readLocalSave, writeLocalSave } from "@/lib/saveData";
 import { preferredLanguages, readPlayerPrefs } from "@/lib/accessibilityPrefs";
+import { DIRECT_CORE_URL } from "@/lib/consoleModel";
 
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 import { encodeMeshSidecar, type MeshSidecar } from "@/lib/meshSidecar";
@@ -88,6 +89,7 @@ export function ScenePlayView({
     const handle = mount(stage, {
       cartUrl: url,
       engineUrl: config.engineUrl,
+      directCoreUrl: DIRECT_CORE_URL,
       modelId: config.modelId,
       autostart: true,
       record: false,

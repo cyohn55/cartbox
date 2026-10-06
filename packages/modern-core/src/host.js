@@ -7,10 +7,6 @@ addToLibrary({
     Module.cbxHost.command(op, a, v1, v2, v3, v4, v5, v6);
   },
   cbx_host_query: (op, a, v1, v2, v3, v4, v5, v6) => Module.cbxHost.query(op, a, v1, v2, v3, v4, v5, v6) | 0,
-  cbx_host_text__deps: ["$UTF8ToString"],
-  cbx_host_text: (ptr, len, x, y, color, scale, small) => {
-    Module.cbxHost.text(UTF8ToString(ptr, len), x, y, color, scale, small !== 0);
-  },
   cbx_host_trace__deps: ["$UTF8ToString"],
   cbx_host_trace: (ptr, len) => {
     Module.cbxHost.trace(UTF8ToString(ptr, len));

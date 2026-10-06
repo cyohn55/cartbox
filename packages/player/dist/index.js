@@ -4430,6 +4430,18 @@ async function loadEngineModule(engineUrl, wasm) {
   moduleCache.set(engineUrl, pending);
   return pending;
 }
+async function instantiateEngineModule(engineUrl, wasm) {
+  try {
+    const glue = await import(
+      /* @vite-ignore */
+      /* webpackIgnore: true */
+      engineUrl
+    );
+    return await glue.default(wasm ? { wasmBinary: wasm, locateFile: (file) => file } : void 0);
+  } catch (error) {
+    throw new EngineLoadError(`Failed to load the engine module at ${engineUrl}`, error);
+  }
+}
 function createConsole(module, model, sampleRate = model.sampleRate) {
   const handle = module._cbx_create(sampleRate);
   if (handle === 0) {
@@ -4506,6 +4518,381 @@ function createConsole(module, model, sampleRate = model.sampleRate) {
     },
     dispose() {
       module._cbx_delete(handle);
+    }
+  };
+}
+
+// src/directConsole.ts
+import { wrapModernCore } from "@cartbox/modern-core";
+
+// src/cartseed.ts
+var CHUNK_CODE = 5;
+var CHUNK_BINARY = 19;
+var CODE_BANK_SIZE = 65536;
+var CODE_BANKS = 8;
+var MAX_CODE_BYTES = CODE_BANK_SIZE * CODE_BANKS - 1;
+function chunks(bytes) {
+  const out = [];
+  let offset = 0;
+  while (offset + 4 <= bytes.length) {
+    const byte0 = bytes[offset] ?? 0;
+    const type = byte0 & 31;
+    const field = (bytes[offset + 1] ?? 0) | (bytes[offset + 2] ?? 0) << 8;
+    const size = field === 0 && (type === CHUNK_CODE || type === CHUNK_BINARY) ? CODE_BANK_SIZE : field;
+    const dataStart = offset + 4;
+    const dataEnd = Math.min(dataStart + size, bytes.length);
+    out.push({ headerStart: offset, dataStart, dataEnd, type, bank: byte0 >> 5 });
+    offset = dataStart + size;
+  }
+  return out;
+}
+function joinedCode(bytes) {
+  const all = chunks(bytes);
+  const byBank = /* @__PURE__ */ new Map();
+  for (const chunk of all) if (chunk.type === CHUNK_CODE) byBank.set(chunk.bank, chunk);
+  const banks = [...byBank.keys()].sort((a, b) => b - a);
+  const parts = banks.map((bank) => bytes.subarray(byBank.get(bank).dataStart, byBank.get(bank).dataEnd));
+  const length = parts.reduce((n, part) => n + part.length, 0);
+  if (length === 0) return null;
+  const code = new Uint8Array(length);
+  let at = 0;
+  for (const part of parts) {
+    code.set(part, at);
+    at += part.length;
+  }
+  const nul = code.indexOf(0);
+  return { code: nul >= 0 ? code.subarray(0, nul) : code, chunks: all.filter((chunk) => chunk.type === CHUNK_CODE) };
+}
+function codeChunks(code) {
+  const count = Math.max(1, Math.ceil(code.length / CODE_BANK_SIZE));
+  const out = new Uint8Array(code.length + count * 4);
+  let at = 0;
+  for (let k = 0; k < count; k += 1) {
+    const slice = code.subarray(k * CODE_BANK_SIZE, (k + 1) * CODE_BANK_SIZE);
+    const bank = count - 1 - k;
+    out.set([CHUNK_CODE | bank << 5, slice.length & 255, slice.length >> 8 & 255, 0], at);
+    out.set(slice, at + 4);
+    at += 4 + slice.length;
+  }
+  return out;
+}
+function detectLanguage(code) {
+  const firstLine = code.split("\n", 1)[0] ?? "";
+  const match = firstLine.match(/script:\s*([a-z0-9]+)/i);
+  return match?.[1]?.toLowerCase() ?? "lua";
+}
+function readCartCode(bytes) {
+  const joined = joinedCode(bytes);
+  return joined ? new TextDecoder().decode(joined.code) : null;
+}
+function prependLuaCode(bytes, prelude) {
+  return rewriteLuaCode(bytes, (code) => `${prelude}
+${code}`);
+}
+function appendLuaCode(bytes, postlude) {
+  return rewriteLuaCode(bytes, (code) => `${code}
+${postlude}`);
+}
+function rewriteLuaCode(bytes, rewrite) {
+  const joined = joinedCode(bytes);
+  if (!joined) {
+    return bytes;
+  }
+  const code = new TextDecoder().decode(joined.code);
+  if (detectLanguage(code) !== "lua") {
+    return bytes;
+  }
+  const merged = new TextEncoder().encode(rewrite(code));
+  if (merged.length > MAX_CODE_BYTES) {
+    return bytes;
+  }
+  const replacement = codeChunks(merged);
+  const first = joined.chunks[0];
+  const kept = [];
+  let cursor = 0;
+  for (const chunk of joined.chunks) {
+    kept.push(bytes.subarray(cursor, chunk.headerStart));
+    if (chunk === first) kept.push(replacement);
+    cursor = chunk.dataEnd;
+  }
+  kept.push(bytes.subarray(cursor));
+  const out = new Uint8Array(kept.reduce((n, part) => n + part.length, 0));
+  let at = 0;
+  for (const part of kept) {
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
+}
+function seedCartridge(bytes, seed) {
+  return prependLuaCode(bytes, `math.randomseed(${Math.trunc(seed)})`);
+}
+
+// src/mailbox.ts
+var MAILBOX_TYPE_ACHIEVEMENT = 1;
+var MAILBOX_TYPE_SCORE = 2;
+var MAILBOX_TYPE_PROGRESS = 3;
+var MAILBOX_TYPE_REQUEST = 4;
+var MAILBOX_WORDS = 137;
+var EVENT_CAPACITY = 8;
+var LIGHTS_BASE = 1 + EVENT_CAPACITY * 3;
+var LIGHTS_CAPACITY = 6;
+var LIGHT_STRIDE = 6;
+var LIGHT_INTENSITY_SCALE = 256;
+var CAMERA_BASE = LIGHTS_BASE + 1 + LIGHTS_CAPACITY * LIGHT_STRIDE;
+var CAMERA_SCALE = 16;
+var MESH_CAM_BASE = CAMERA_BASE + 2;
+var MESH_CAM_STRIDE = 8;
+var MESH_CAM_ANGLE_SCALE = 1024;
+var MESH_CAM_DIST_SCALE = 256;
+var MESH_CAM_ACTIVE = 1;
+var MESH_CAM_HUD = 2;
+var MESH_POSE_BASE = MESH_CAM_BASE + MESH_CAM_STRIDE;
+var MESH_POSE_CAPACITY = 8;
+var MESH_POSE_STRIDE = 8;
+var MESH_POSE_HIDDEN = 1 << 8;
+var MESH_POSE_FRAME_SHIFT = 9;
+var MESH_POSE_FRAME_MASK = 127;
+var MESH_POSE_TINT_SHIFT = 16;
+var MESH_POSE_TINT_MASK = 15;
+var MESH_POSE_FRONT = 1 << 20;
+var LIGHT_KIND_POINT = 0;
+var LIGHT_KIND_SPOT = 2;
+var LIGHT_KIND_WORLD = 3;
+var WORLD_LIGHT_SCALE = 64;
+var LIGHT_DIR_SCALE = 127;
+var LIGHT_CONE_SCALE = 63;
+var KIND_BY_CODE = ["point", "directional", "spot"];
+function signedByte(byte2) {
+  return byte2 < 128 ? byte2 : byte2 - 256;
+}
+function kindOf(type) {
+  switch (type) {
+    case MAILBOX_TYPE_ACHIEVEMENT:
+      return "achievement";
+    case MAILBOX_TYPE_SCORE:
+      return "score";
+    case MAILBOX_TYPE_PROGRESS:
+      return "progress";
+    case MAILBOX_TYPE_REQUEST:
+      return "request";
+    default:
+      return "unknown";
+  }
+}
+function decodeMailbox(words, lastSeq) {
+  const seq = words[0] ?? 0;
+  const capacity = words.length > 0 ? EVENT_CAPACITY : 0;
+  if (capacity === 0 || seq <= lastSeq) {
+    return { events: [], seq };
+  }
+  const start = Math.max(lastSeq, seq - capacity);
+  const events = [];
+  for (let i = start; i < seq; i++) {
+    const slot = i % capacity;
+    const base = 1 + slot * 3;
+    const type = words[base] ?? 0;
+    events.push({
+      type,
+      kind: kindOf(type),
+      id: words[base + 1] ?? 0,
+      value: words[base + 2] ?? 0
+    });
+  }
+  return { events, seq };
+}
+function decodeLights(words) {
+  if (words.length <= LIGHTS_BASE) {
+    return [];
+  }
+  const count = Math.min(words[LIGHTS_BASE] ?? 0, LIGHTS_CAPACITY);
+  const lights = [];
+  for (let i = 0; i < count; i++) {
+    const base = LIGHTS_BASE + 1 + i * LIGHT_STRIDE;
+    const packed = words[base + 4] ?? 16777215;
+    const intensityWord = words[base + 5] ?? LIGHT_INTENSITY_SCALE;
+    const intensity = (intensityWord & 65535) / LIGHT_INTENSITY_SCALE;
+    const light = {
+      x: words[base] ?? 0,
+      y: words[base + 1] ?? 0,
+      z: words[base + 2] ?? 0,
+      radius: words[base + 3] ?? 0,
+      color: [
+        (packed >>> 16 & 255) / 255 * intensity,
+        (packed >>> 8 & 255) / 255 * intensity,
+        (packed & 255) / 255 * intensity
+      ]
+    };
+    const kindCode = packed >>> 24 & 3;
+    if (kindCode === LIGHT_KIND_WORLD) continue;
+    if (kindCode !== LIGHT_KIND_POINT) {
+      light.kind = KIND_BY_CODE[kindCode] ?? "point";
+      const dirX = signedByte(intensityWord >>> 16 & 255) / LIGHT_DIR_SCALE;
+      const dirY = signedByte(intensityWord >>> 24 & 255) / LIGHT_DIR_SCALE;
+      const dirZ = Math.sqrt(Math.max(0, 1 - dirX * dirX - dirY * dirY));
+      light.direction = [dirX, dirY, dirZ];
+      if (kindCode === LIGHT_KIND_SPOT) {
+        light.coneCos = (packed >>> 26 & 63) / LIGHT_CONE_SCALE;
+      }
+    }
+    lights.push(light);
+  }
+  return lights;
+}
+function decodeWorldLights(words) {
+  if (words.length <= LIGHTS_BASE) return [];
+  const count = Math.min(words[LIGHTS_BASE] ?? 0, LIGHTS_CAPACITY);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const base = LIGHTS_BASE + 1 + i * LIGHT_STRIDE;
+    const packed = words[base + 4] ?? 0;
+    if ((packed >>> 24 & 3) !== LIGHT_KIND_WORLD) continue;
+    const intensity = ((words[base + 5] ?? LIGHT_INTENSITY_SCALE) & 65535) / LIGHT_INTENSITY_SCALE;
+    const signed = (k) => ((words[base + k] ?? 0) | 0) / WORLD_LIGHT_SCALE;
+    out.push({
+      position: [signed(0), signed(1), signed(2)],
+      range: signed(3),
+      color: [
+        (packed >>> 16 & 255) / 255 * intensity,
+        (packed >>> 8 & 255) / 255 * intensity,
+        (packed & 255) / 255 * intensity
+      ]
+    });
+  }
+  return out;
+}
+function decodeCamera(words) {
+  if (words.length <= CAMERA_BASE + 1) {
+    return { x: 0, y: 0 };
+  }
+  return {
+    x: ((words[CAMERA_BASE] ?? 0) | 0) / CAMERA_SCALE,
+    y: ((words[CAMERA_BASE + 1] ?? 0) | 0) / CAMERA_SCALE
+  };
+}
+function decodeMeshCamera(words) {
+  if (words.length <= MESH_CAM_BASE + MESH_CAM_STRIDE - 1) {
+    return null;
+  }
+  const flags = words[MESH_CAM_BASE] ?? 0;
+  if ((flags & MESH_CAM_ACTIVE) === 0) {
+    return null;
+  }
+  const angle = (word) => (word | 0) / MESH_CAM_ANGLE_SCALE;
+  const dist = (word) => (word | 0) / MESH_CAM_DIST_SCALE;
+  const distanceWord = words[MESH_CAM_BASE + 3] ?? 0;
+  const fovWord = words[MESH_CAM_BASE + 7] ?? 0;
+  return {
+    yaw: angle(words[MESH_CAM_BASE + 1] ?? 0),
+    pitch: angle(words[MESH_CAM_BASE + 2] ?? 0),
+    distance: distanceWord > 0 ? dist(distanceWord) : null,
+    target: [dist(words[MESH_CAM_BASE + 4] ?? 0), dist(words[MESH_CAM_BASE + 5] ?? 0), dist(words[MESH_CAM_BASE + 6] ?? 0)],
+    fov: fovWord > 0 ? angle(fovWord) : null,
+    hud: (flags & MESH_CAM_HUD) !== 0
+  };
+}
+function decodeMeshPoses(words) {
+  if (words.length <= MESH_POSE_BASE) {
+    return [];
+  }
+  const count = Math.min(words[MESH_POSE_BASE] ?? 0, MESH_POSE_CAPACITY);
+  const poses = [];
+  for (let i = 0; i < count; i += 1) {
+    const base = MESH_POSE_BASE + 1 + i * MESH_POSE_STRIDE;
+    const indexWord = words[base] ?? 0;
+    const pos = (word) => (word | 0) / MESH_CAM_DIST_SCALE;
+    const angle = (word) => (word | 0) / MESH_CAM_ANGLE_SCALE;
+    poses.push({
+      index: indexWord & 255,
+      hidden: (indexWord & MESH_POSE_HIDDEN) !== 0,
+      frame: indexWord >>> MESH_POSE_FRAME_SHIFT & MESH_POSE_FRAME_MASK,
+      tint: indexWord >>> MESH_POSE_TINT_SHIFT & MESH_POSE_TINT_MASK,
+      front: (indexWord & MESH_POSE_FRONT) !== 0,
+      position: [pos(words[base + 1] ?? 0), pos(words[base + 2] ?? 0), pos(words[base + 3] ?? 0)],
+      rotation: [angle(words[base + 4] ?? 0), angle(words[base + 5] ?? 0), angle(words[base + 6] ?? 0)],
+      scale: (words[base + 7] ?? 0) / MESH_CAM_DIST_SCALE
+    });
+  }
+  return poses;
+}
+function hashEventId(id) {
+  let hash = 2166136261 >>> 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = (hash ^ id.charCodeAt(i)) >>> 0;
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+// src/directConsole.ts
+function directCoreModel(model) {
+  return model.id === "modern" || model.id === "xbox360";
+}
+function createDirectConsole(module, model, layout = RAM_LAYOUTS[model.id]) {
+  let commands = [];
+  let errorSeq = 0;
+  let errorMessage = "";
+  const core = wrapModernCore(module, {
+    width: model.width,
+    height: model.height,
+    ram: { size: layout.ramSize, pmem: layout.pmemAddress },
+    host: {
+      command: (op, a, v1, v2, v3, v4, v5, v6) => {
+        commands.push({ op, a, v: [v1, v2, v3, v4, v5, v6] });
+      },
+      // Queries arrive with the direct SDK; until then the cart reads state from the RAM blocks.
+      query: () => null
+    }
+  });
+  const fail = () => {
+    errorSeq += 1;
+    errorMessage = core.error();
+  };
+  const pmem = () => core.ram().subarray(layout.pmemAddress, layout.pmemAddress + 1024);
+  const pixels = model.width * model.height;
+  let material = null;
+  let emissive = null;
+  return {
+    direct: true,
+    takeCommands() {
+      const taken = commands;
+      commands = [];
+      return taken;
+    },
+    loadCartridge(bytes) {
+      const code = readCartCode(bytes);
+      if (code === null) return false;
+      if (core.load(code)) return true;
+      fail();
+      return false;
+    },
+    tick(mask) {
+      if (!core.tick(mask)) fail();
+    },
+    readFramebuffer: () => core.frame(),
+    readAudioSamples: () => new Int16Array(0),
+    readMailbox() {
+      const words = pmem();
+      const view = new Uint32Array(words.buffer, words.byteOffset + NET_WORDS * 4, MAILBOX_WORDS);
+      return view.slice();
+    },
+    netWords() {
+      const words = pmem();
+      return new Uint32Array(words.buffer, words.byteOffset, NET_WORDS);
+    },
+    ramView(offsetFromPmem, length) {
+      const start = layout.pmemAddress + offsetFromPmem;
+      if (start < 0 || start + length > layout.ramSize) return null;
+      return core.ram().subarray(start, start + length);
+    },
+    setMaterialCapture() {
+    },
+    readMaterial: () => material ?? (material = new Uint8Array(pixels * 4)),
+    readEmissive: () => emissive ?? (emissive = new Uint8Array(pixels)),
+    readError: () => ({ seq: errorSeq, message: errorMessage }),
+    memoryBytes: () => core.memoryBytes(),
+    dispose() {
+      commands = [];
     }
   };
 }
@@ -5200,109 +5587,6 @@ function parseReplay(json) {
     throw new ReplayError("Replay is missing required fields");
   }
   return candidate;
-}
-
-// src/cartseed.ts
-var CHUNK_CODE = 5;
-var CHUNK_BINARY = 19;
-var CODE_BANK_SIZE = 65536;
-var CODE_BANKS = 8;
-var MAX_CODE_BYTES = CODE_BANK_SIZE * CODE_BANKS - 1;
-function chunks(bytes) {
-  const out = [];
-  let offset = 0;
-  while (offset + 4 <= bytes.length) {
-    const byte0 = bytes[offset] ?? 0;
-    const type = byte0 & 31;
-    const field = (bytes[offset + 1] ?? 0) | (bytes[offset + 2] ?? 0) << 8;
-    const size = field === 0 && (type === CHUNK_CODE || type === CHUNK_BINARY) ? CODE_BANK_SIZE : field;
-    const dataStart = offset + 4;
-    const dataEnd = Math.min(dataStart + size, bytes.length);
-    out.push({ headerStart: offset, dataStart, dataEnd, type, bank: byte0 >> 5 });
-    offset = dataStart + size;
-  }
-  return out;
-}
-function joinedCode(bytes) {
-  const all = chunks(bytes);
-  const byBank = /* @__PURE__ */ new Map();
-  for (const chunk of all) if (chunk.type === CHUNK_CODE) byBank.set(chunk.bank, chunk);
-  const banks = [...byBank.keys()].sort((a, b) => b - a);
-  const parts = banks.map((bank) => bytes.subarray(byBank.get(bank).dataStart, byBank.get(bank).dataEnd));
-  const length = parts.reduce((n, part) => n + part.length, 0);
-  if (length === 0) return null;
-  const code = new Uint8Array(length);
-  let at = 0;
-  for (const part of parts) {
-    code.set(part, at);
-    at += part.length;
-  }
-  const nul = code.indexOf(0);
-  return { code: nul >= 0 ? code.subarray(0, nul) : code, chunks: all.filter((chunk) => chunk.type === CHUNK_CODE) };
-}
-function codeChunks(code) {
-  const count = Math.max(1, Math.ceil(code.length / CODE_BANK_SIZE));
-  const out = new Uint8Array(code.length + count * 4);
-  let at = 0;
-  for (let k = 0; k < count; k += 1) {
-    const slice = code.subarray(k * CODE_BANK_SIZE, (k + 1) * CODE_BANK_SIZE);
-    const bank = count - 1 - k;
-    out.set([CHUNK_CODE | bank << 5, slice.length & 255, slice.length >> 8 & 255, 0], at);
-    out.set(slice, at + 4);
-    at += 4 + slice.length;
-  }
-  return out;
-}
-function detectLanguage(code) {
-  const firstLine = code.split("\n", 1)[0] ?? "";
-  const match = firstLine.match(/script:\s*([a-z0-9]+)/i);
-  return match?.[1]?.toLowerCase() ?? "lua";
-}
-function readCartCode(bytes) {
-  const joined = joinedCode(bytes);
-  return joined ? new TextDecoder().decode(joined.code) : null;
-}
-function prependLuaCode(bytes, prelude) {
-  return rewriteLuaCode(bytes, (code) => `${prelude}
-${code}`);
-}
-function appendLuaCode(bytes, postlude) {
-  return rewriteLuaCode(bytes, (code) => `${code}
-${postlude}`);
-}
-function rewriteLuaCode(bytes, rewrite) {
-  const joined = joinedCode(bytes);
-  if (!joined) {
-    return bytes;
-  }
-  const code = new TextDecoder().decode(joined.code);
-  if (detectLanguage(code) !== "lua") {
-    return bytes;
-  }
-  const merged = new TextEncoder().encode(rewrite(code));
-  if (merged.length > MAX_CODE_BYTES) {
-    return bytes;
-  }
-  const replacement = codeChunks(merged);
-  const first = joined.chunks[0];
-  const kept = [];
-  let cursor = 0;
-  for (const chunk of joined.chunks) {
-    kept.push(bytes.subarray(cursor, chunk.headerStart));
-    if (chunk === first) kept.push(replacement);
-    cursor = chunk.dataEnd;
-  }
-  kept.push(bytes.subarray(cursor));
-  const out = new Uint8Array(kept.reduce((n, part) => n + part.length, 0));
-  let at = 0;
-  for (const part of kept) {
-    out.set(part, at);
-    at += part.length;
-  }
-  return out;
-}
-function seedCartridge(bytes, seed) {
-  return prependLuaCode(bytes, `math.randomseed(${Math.trunc(seed)})`);
 }
 
 // src/sdk.ts
@@ -6120,6 +6404,7 @@ function parseMeshScene(raw) {
   const pools = [...poolRoots.entries()].map(([prefab, ids]) => ({ prefab, roots: ids.map((id) => indexOf.get(id)) }));
   const placed = instances.filter((instance) => !instance.pooled && !instance.terrain && (instance.level === void 0 || instance.level === 0));
   const physicsWorld = readPhysicsWorld(parsed.physicsWorld);
+  const core = parsed.core === "direct" ? "direct" : void 0;
   const timelines = readTimelines(parsed.timelines);
   const navmesh = readNavMesh(parsed.navmesh);
   const effects = parseParticleEffects(parsed.effects);
@@ -6167,6 +6452,7 @@ function parseMeshScene(raw) {
     lighting,
     ...pools.length > 0 ? { pools } : {},
     ...physicsWorld ? { physicsWorld } : {},
+    ...core ? { core } : {},
     ...timelines.length > 0 ? { timelines } : {},
     ...levels.length > 0 ? { levels } : {},
     ...navmesh && navmesh.heights.length > 0 ? { navmesh } : {}
@@ -7192,8 +7478,11 @@ function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
     if type(o) == "string" then return cartbox.find(o) end
     return o
   end
+  -- The dedicated Modern core (EP20b) takes commands as calls: no slots, no cap.
+  local _direct = _cbx_cmd
   local function _cmd(op, a, v1, v2, v3, v4, v5, v6)
     if not _live() then return end
+    if _direct then return _direct(op, a, v1 or 0, v2 or 0, v3 or 0, v4 or 0, v5 or 0, v6 or 0) end
     local count, cap = _B + ${PHYS_CMDS}, ${PHYS_MAX_CMDS}
     local n = _rd(count)
     if n >= cap and _R then count, cap = _R, ${commandRingMax(layout)}; n = _rd(count) end
@@ -8131,9 +8420,10 @@ var RuntimeChannel = class {
    * steps). `ring` is the overflow command ring on cores that have one (EP20):
    * its commands came after the block's.
    */
-  afterTick(block, ring) {
+  afterTick(block, ring, direct) {
     const commands = takePhysicsCommands(block);
     if (ring) commands.push(...takeRingCommands(ring));
+    if (direct) commands.push(...direct);
     this.applyCommands(commands);
   }
   /**
@@ -8748,202 +9038,6 @@ ${entries.join(",\n")}
     return c.tile[i], c.w[i], c.h[i]
   end
 end`;
-}
-
-// src/mailbox.ts
-var MAILBOX_TYPE_ACHIEVEMENT = 1;
-var MAILBOX_TYPE_SCORE = 2;
-var MAILBOX_TYPE_PROGRESS = 3;
-var MAILBOX_TYPE_REQUEST = 4;
-var MAILBOX_WORDS = 137;
-var EVENT_CAPACITY = 8;
-var LIGHTS_BASE = 1 + EVENT_CAPACITY * 3;
-var LIGHTS_CAPACITY = 6;
-var LIGHT_STRIDE = 6;
-var LIGHT_INTENSITY_SCALE = 256;
-var CAMERA_BASE = LIGHTS_BASE + 1 + LIGHTS_CAPACITY * LIGHT_STRIDE;
-var CAMERA_SCALE = 16;
-var MESH_CAM_BASE = CAMERA_BASE + 2;
-var MESH_CAM_STRIDE = 8;
-var MESH_CAM_ANGLE_SCALE = 1024;
-var MESH_CAM_DIST_SCALE = 256;
-var MESH_CAM_ACTIVE = 1;
-var MESH_CAM_HUD = 2;
-var MESH_POSE_BASE = MESH_CAM_BASE + MESH_CAM_STRIDE;
-var MESH_POSE_CAPACITY = 8;
-var MESH_POSE_STRIDE = 8;
-var MESH_POSE_HIDDEN = 1 << 8;
-var MESH_POSE_FRAME_SHIFT = 9;
-var MESH_POSE_FRAME_MASK = 127;
-var MESH_POSE_TINT_SHIFT = 16;
-var MESH_POSE_TINT_MASK = 15;
-var MESH_POSE_FRONT = 1 << 20;
-var LIGHT_KIND_POINT = 0;
-var LIGHT_KIND_SPOT = 2;
-var LIGHT_KIND_WORLD = 3;
-var WORLD_LIGHT_SCALE = 64;
-var LIGHT_DIR_SCALE = 127;
-var LIGHT_CONE_SCALE = 63;
-var KIND_BY_CODE = ["point", "directional", "spot"];
-function signedByte(byte2) {
-  return byte2 < 128 ? byte2 : byte2 - 256;
-}
-function kindOf(type) {
-  switch (type) {
-    case MAILBOX_TYPE_ACHIEVEMENT:
-      return "achievement";
-    case MAILBOX_TYPE_SCORE:
-      return "score";
-    case MAILBOX_TYPE_PROGRESS:
-      return "progress";
-    case MAILBOX_TYPE_REQUEST:
-      return "request";
-    default:
-      return "unknown";
-  }
-}
-function decodeMailbox(words, lastSeq) {
-  const seq = words[0] ?? 0;
-  const capacity = words.length > 0 ? EVENT_CAPACITY : 0;
-  if (capacity === 0 || seq <= lastSeq) {
-    return { events: [], seq };
-  }
-  const start = Math.max(lastSeq, seq - capacity);
-  const events = [];
-  for (let i = start; i < seq; i++) {
-    const slot = i % capacity;
-    const base = 1 + slot * 3;
-    const type = words[base] ?? 0;
-    events.push({
-      type,
-      kind: kindOf(type),
-      id: words[base + 1] ?? 0,
-      value: words[base + 2] ?? 0
-    });
-  }
-  return { events, seq };
-}
-function decodeLights(words) {
-  if (words.length <= LIGHTS_BASE) {
-    return [];
-  }
-  const count = Math.min(words[LIGHTS_BASE] ?? 0, LIGHTS_CAPACITY);
-  const lights = [];
-  for (let i = 0; i < count; i++) {
-    const base = LIGHTS_BASE + 1 + i * LIGHT_STRIDE;
-    const packed = words[base + 4] ?? 16777215;
-    const intensityWord = words[base + 5] ?? LIGHT_INTENSITY_SCALE;
-    const intensity = (intensityWord & 65535) / LIGHT_INTENSITY_SCALE;
-    const light = {
-      x: words[base] ?? 0,
-      y: words[base + 1] ?? 0,
-      z: words[base + 2] ?? 0,
-      radius: words[base + 3] ?? 0,
-      color: [
-        (packed >>> 16 & 255) / 255 * intensity,
-        (packed >>> 8 & 255) / 255 * intensity,
-        (packed & 255) / 255 * intensity
-      ]
-    };
-    const kindCode = packed >>> 24 & 3;
-    if (kindCode === LIGHT_KIND_WORLD) continue;
-    if (kindCode !== LIGHT_KIND_POINT) {
-      light.kind = KIND_BY_CODE[kindCode] ?? "point";
-      const dirX = signedByte(intensityWord >>> 16 & 255) / LIGHT_DIR_SCALE;
-      const dirY = signedByte(intensityWord >>> 24 & 255) / LIGHT_DIR_SCALE;
-      const dirZ = Math.sqrt(Math.max(0, 1 - dirX * dirX - dirY * dirY));
-      light.direction = [dirX, dirY, dirZ];
-      if (kindCode === LIGHT_KIND_SPOT) {
-        light.coneCos = (packed >>> 26 & 63) / LIGHT_CONE_SCALE;
-      }
-    }
-    lights.push(light);
-  }
-  return lights;
-}
-function decodeWorldLights(words) {
-  if (words.length <= LIGHTS_BASE) return [];
-  const count = Math.min(words[LIGHTS_BASE] ?? 0, LIGHTS_CAPACITY);
-  const out = [];
-  for (let i = 0; i < count; i++) {
-    const base = LIGHTS_BASE + 1 + i * LIGHT_STRIDE;
-    const packed = words[base + 4] ?? 0;
-    if ((packed >>> 24 & 3) !== LIGHT_KIND_WORLD) continue;
-    const intensity = ((words[base + 5] ?? LIGHT_INTENSITY_SCALE) & 65535) / LIGHT_INTENSITY_SCALE;
-    const signed = (k) => ((words[base + k] ?? 0) | 0) / WORLD_LIGHT_SCALE;
-    out.push({
-      position: [signed(0), signed(1), signed(2)],
-      range: signed(3),
-      color: [
-        (packed >>> 16 & 255) / 255 * intensity,
-        (packed >>> 8 & 255) / 255 * intensity,
-        (packed & 255) / 255 * intensity
-      ]
-    });
-  }
-  return out;
-}
-function decodeCamera(words) {
-  if (words.length <= CAMERA_BASE + 1) {
-    return { x: 0, y: 0 };
-  }
-  return {
-    x: ((words[CAMERA_BASE] ?? 0) | 0) / CAMERA_SCALE,
-    y: ((words[CAMERA_BASE + 1] ?? 0) | 0) / CAMERA_SCALE
-  };
-}
-function decodeMeshCamera(words) {
-  if (words.length <= MESH_CAM_BASE + MESH_CAM_STRIDE - 1) {
-    return null;
-  }
-  const flags = words[MESH_CAM_BASE] ?? 0;
-  if ((flags & MESH_CAM_ACTIVE) === 0) {
-    return null;
-  }
-  const angle = (word) => (word | 0) / MESH_CAM_ANGLE_SCALE;
-  const dist = (word) => (word | 0) / MESH_CAM_DIST_SCALE;
-  const distanceWord = words[MESH_CAM_BASE + 3] ?? 0;
-  const fovWord = words[MESH_CAM_BASE + 7] ?? 0;
-  return {
-    yaw: angle(words[MESH_CAM_BASE + 1] ?? 0),
-    pitch: angle(words[MESH_CAM_BASE + 2] ?? 0),
-    distance: distanceWord > 0 ? dist(distanceWord) : null,
-    target: [dist(words[MESH_CAM_BASE + 4] ?? 0), dist(words[MESH_CAM_BASE + 5] ?? 0), dist(words[MESH_CAM_BASE + 6] ?? 0)],
-    fov: fovWord > 0 ? angle(fovWord) : null,
-    hud: (flags & MESH_CAM_HUD) !== 0
-  };
-}
-function decodeMeshPoses(words) {
-  if (words.length <= MESH_POSE_BASE) {
-    return [];
-  }
-  const count = Math.min(words[MESH_POSE_BASE] ?? 0, MESH_POSE_CAPACITY);
-  const poses = [];
-  for (let i = 0; i < count; i += 1) {
-    const base = MESH_POSE_BASE + 1 + i * MESH_POSE_STRIDE;
-    const indexWord = words[base] ?? 0;
-    const pos = (word) => (word | 0) / MESH_CAM_DIST_SCALE;
-    const angle = (word) => (word | 0) / MESH_CAM_ANGLE_SCALE;
-    poses.push({
-      index: indexWord & 255,
-      hidden: (indexWord & MESH_POSE_HIDDEN) !== 0,
-      frame: indexWord >>> MESH_POSE_FRAME_SHIFT & MESH_POSE_FRAME_MASK,
-      tint: indexWord >>> MESH_POSE_TINT_SHIFT & MESH_POSE_TINT_MASK,
-      front: (indexWord & MESH_POSE_FRONT) !== 0,
-      position: [pos(words[base + 1] ?? 0), pos(words[base + 2] ?? 0), pos(words[base + 3] ?? 0)],
-      rotation: [angle(words[base + 4] ?? 0), angle(words[base + 5] ?? 0), angle(words[base + 6] ?? 0)],
-      scale: (words[base + 7] ?? 0) / MESH_CAM_DIST_SCALE
-    });
-  }
-  return poses;
-}
-function hashEventId(id) {
-  let hash = 2166136261 >>> 0;
-  for (let i = 0; i < id.length; i++) {
-    hash = (hash ^ id.charCodeAt(i)) >>> 0;
-    hash = Math.imul(hash, 16777619) >>> 0;
-  }
-  return hash >>> 0;
 }
 
 // src/scene/cartSpriteSource.ts
@@ -14906,6 +15000,7 @@ async function createSceneRenderer(width, height, caps, deviceProvider = getWebg
 
 // src/player.ts
 import { SpatialLoader, actionMask, reboundActions, colorFilterSvg, DEFAULT_ACCESSIBILITY } from "@cartbox/editor";
+var DIRECT_CORE_URL = "/engine/modern-core/modern-core.js";
 function shouldUseTouch(scheme, view) {
   if (scheme === "touch") return true;
   if (scheme === "keyboard") return false;
@@ -15067,10 +15162,11 @@ var Player = class {
     const filter = this.options.accessibility?.colorFilter;
     if (filter && filter !== "none") this.setColorFilter(filter);
     try {
-      const engineUrl = this.options.engineUrl ?? this.model.engineUrl;
+      const direct = directCoreModel(this.model) && (this.options.core ?? this.options.mesh?.core) === "direct";
+      const engineUrl = direct ? this.options.directCoreUrl ?? DIRECT_CORE_URL : this.options.engineUrl ?? this.model.engineUrl;
       const [bytes, module] = await Promise.all([
         fetchCartridge(this.options.cartUrl, this.abortController.signal),
-        loadEngineModule(engineUrl, this.options.engineWasm)
+        direct ? instantiateEngineModule(engineUrl, this.options.engineWasm) : loadEngineModule(engineUrl, this.options.engineWasm)
       ]);
       if (this.destroyed) return;
       const sampleRate = this.options.sampleRate ?? this.model.sampleRate;
@@ -15159,7 +15255,7 @@ var Player = class {
       const preparedBytes = injectSdk(prepared);
       this.lineOffset = codeLineOffset(ownCode, readCartCode(preparedBytes));
       this.lineCount = cartCode === null ? 0 : cartCode.split("\n").length;
-      this.console = createConsole(module, this.model, sampleRate);
+      this.console = direct ? createDirectConsole(module, this.model) : createConsole(module, this.model, sampleRate);
       if (!this.console.loadCartridge(preparedBytes)) {
         throw new Error("Engine rejected the cartridge");
       }
@@ -15439,7 +15535,8 @@ var Player = class {
     }
     const afterBlock = runtimeBlock ? this.runtimeBlock() : null;
     if (afterBlock) {
-      this.runtime.channel.afterTick(afterBlock, this.commandRing());
+      const directCommands = this.console && "direct" in this.console ? this.console.takeCommands() : void 0;
+      this.runtime.channel.afterTick(afterBlock, this.commandRing(), directCommands);
       this.pollLevelRequest();
       for (const b of this.runtime.channel.takeBursts()) this.meshSurface?.burst(b.effect, b.at, b.dir, b.scale);
       for (const d of this.runtime.channel.takeDecals()) this.meshSurface?.decal(d.decal, d.at, d.normal, d.scale);
@@ -16653,6 +16750,7 @@ export {
   DEFAULT_LIGHT,
   DEFAULT_MODEL_ID,
   DEFAULT_PAD_BINDINGS,
+  DIRECT_CORE_URL,
   DebugCommand,
   EVENT_CAPACITY,
   EngineLoadError,
@@ -16781,6 +16879,7 @@ export {
   compositeOverBackdrop,
   createCartSpriteSource,
   createConsole,
+  createDirectConsole,
   createFlatMaterial,
   createLightingLayer,
   createSceneRenderer,
@@ -16798,6 +16897,7 @@ export {
   defaultPostFxSettings,
   detectQuality,
   deterministicBackend,
+  directCoreModel,
   drift,
   effectiveBreakpoints,
   emitterPreset,

@@ -184,6 +184,8 @@ export interface MeshSidecar {
   readonly prefabs?: readonly MeshPrefab[];
   /** Scene-wide physics settings (absent = the defaults). */
   readonly physicsWorld?: PhysicsWorldSettings;
+  /** Run the cart on the dedicated Modern core (EP20b; Modern-tier models only). */
+  readonly core?: "direct";
   /** Cutscenes and scripted camera moves (ENGINE_ROADMAP.md, Phase 3); absent or empty = none. */
   readonly timelines?: readonly SceneTimeline[];
   /** Named levels, one loaded at a time (the first at start); see levels.ts in @cartbox/editor. */
@@ -260,6 +262,7 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     lighting: sidecar.lighting ?? null,
     ...(packedPrefabs.length > 0 ? { prefabs: packedPrefabs } : {}),
     ...(sidecar.physicsWorld?.deterministic ? { physicsWorld: sidecar.physicsWorld } : {}),
+    ...(sidecar.core === "direct" ? { core: "direct" } : {}),
     ...(sidecar.timelines && sidecar.timelines.length > 0 ? { timelines: sidecar.timelines } : {}),
     ...(sidecar.levels && sidecar.levels.length > 0 ? { levels: sidecar.levels } : {}),
     ...(sidecar.navmesh ? { navmesh: sidecar.navmesh } : {}),
@@ -366,6 +369,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     entry.prefab && !known.get(entry.prefab.id)?.has(entry.prefab.node) ? withoutLink(entry) : entry,
   );
   const physicsWorld = readPhysicsWorld((parsed as { physicsWorld?: unknown }).physicsWorld);
+  const core = (parsed as { core?: unknown }).core === "direct" ? ("direct" as const) : undefined;
   const timelines = readTimelines((parsed as { timelines?: unknown }).timelines);
   // An object in a level that no longer exists is always loaded.
   const levels = readLevels((parsed as { levels?: unknown }).levels);
@@ -390,6 +394,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     lighting,
     ...(prefabs.length > 0 ? { prefabs } : {}),
     ...(physicsWorld ? { physicsWorld } : {}),
+    ...(core ? { core } : {}),
     ...(timelines.length > 0 ? { timelines } : {}),
     ...(levels.length > 0 ? { levels } : {}),
     // Kept as stored, once it reads back as a valid surface.
@@ -677,6 +682,13 @@ export function setMeshPhysicsWorld(sidecar: MeshSidecar, world: PhysicsWorldSet
   const { physicsWorld: _drop, ...rest } = sidecar;
   const next = world ? readPhysicsWorld(world) : null;
   return next ? { ...rest, physicsWorld: next } : rest;
+}
+
+/** Choose the core that runs the cart (EP20b): the dedicated Modern core, or (null) the usual one. */
+export function setMeshCore(sidecar: MeshSidecar, core: "direct" | null): MeshSidecar {
+  const { core: _drop, ...rest } = sidecar;
+  void _drop;
+  return core === "direct" ? { ...rest, core } : rest;
 }
 
 /** Replace the scene's lighting rig (null clears it). */

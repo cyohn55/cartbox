@@ -12,6 +12,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { frameDurationMs, getModel, mount, readCartCode, type DebugStep, type InspectedObject, type PauseInfo, type ProfileSnapshot, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type QualityChoice, type SceneSpec, type WorldScene } from "@cartbox/player";
 import { COLOR_FILTERS, COLOR_FILTER_LABELS, languageName, type ColorFilter, type InputAction, type StringTable, type UiDocument } from "@cartbox/editor";
 import { preferredLanguages, readPlayerPrefs } from "@/lib/accessibilityPrefs";
+import { DIRECT_CORE_URL } from "@/lib/consoleModel";
 import { browserStorage, readLocalSave, writeLocalSave } from "@/lib/saveData";
 
 import styles from "./editor.module.css";
@@ -193,6 +194,7 @@ export function RunOverlay({
     const handle = mount(stage, {
       cartUrl: url,
       engineUrl,
+      directCoreUrl: DIRECT_CORE_URL,
       // Playtest at the cart's own geometry and caps, not Classic's.
       modelId,
       autostart: true,

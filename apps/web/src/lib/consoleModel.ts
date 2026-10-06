@@ -61,6 +61,9 @@ export function modelBadge(value: string | null | undefined): string {
  * side-by-side compatibility architecture), so the editor loads a different
  * binary per model. Overridable via env for non-default deployments.
  */
+/** The dedicated Modern core (EP20b), for Modern-tier carts that choose it. */
+export const DIRECT_CORE_URL = withBasePath("/engine/modern-core/modern-core.js");
+
 export const ENGINE_URL_BY_MODEL: Record<ConsoleModelId, string> = {
   classic: withBasePath(process.env.NEXT_PUBLIC_ENGINE_URL ?? "/engine/tic80.js"),
   pro: withBasePath(process.env.NEXT_PUBLIC_PRO_ENGINE_URL ?? "/engine/pro/engine.js"),

@@ -17,7 +17,11 @@ import { LitCanvasSurface } from "./lighting/LitCanvasSurface.js";
 import { PostFxSurface } from "./fx/PostFxSurface.js";
 import { anyPostFxEnabled, type PostFxSettings } from "./fx/postfx.js";
 import { QUALITY_PRESETS, applyQualityToPostFx, browserDeviceHints, resolveQuality, type QualityChoice, type QualityLevel, type QualitySettings } from "./quality.js";
-import { createConsole, loadEngineModule, type ConsoleInstance } from "./engine.js";
+import { createConsole, instantiateEngineModule, loadEngineModule, type ConsoleInstance } from "./engine.js";
+import { createDirectConsole, directCoreModel, type DirectConsole } from "./directConsole.js";
+
+/** Where the dedicated Modern core is served by default (EP20b). */
+export const DIRECT_CORE_URL = "/engine/modern-core/modern-core.js";
 import { GamepadInput, GamepadState, KeyboardInput, TouchInput, hasTouchSupport } from "./input.js";
 import { frameDurationMs, getModel, type ConsoleModel } from "./models.js";
 import { ReplayRecorder, ReplaySource, hashCart, randomSeed, type Replay } from "./replay.js";
@@ -252,10 +256,12 @@ export class Player {
     const filter = this.options.accessibility?.colorFilter;
     if (filter && filter !== "none") this.setColorFilter(filter);
     try {
-      const engineUrl = this.options.engineUrl ?? this.model.engineUrl;
+      // The dedicated Modern core (EP20b) when the cart asks for it on a model that has it.
+      const direct = directCoreModel(this.model) && (this.options.core ?? this.options.mesh?.core) === "direct";
+      const engineUrl = direct ? (this.options.directCoreUrl ?? DIRECT_CORE_URL) : (this.options.engineUrl ?? this.model.engineUrl);
       const [bytes, module] = await Promise.all([
         fetchCartridge(this.options.cartUrl, this.abortController.signal),
-        loadEngineModule(engineUrl, this.options.engineWasm),
+        direct ? instantiateEngineModule(engineUrl, this.options.engineWasm) : loadEngineModule(engineUrl, this.options.engineWasm),
       ]);
       if (this.destroyed) return;
 
@@ -376,7 +382,7 @@ export class Player {
       this.lineOffset = codeLineOffset(ownCode, readCartCode(preparedBytes));
       this.lineCount = cartCode === null ? 0 : cartCode.split("\n").length;
 
-      this.console = createConsole(module, this.model, sampleRate);
+      this.console = direct ? createDirectConsole(module, this.model) : createConsole(module as Parameters<typeof createConsole>[0], this.model, sampleRate);
       if (!this.console.loadCartridge(preparedBytes)) {
         throw new Error("Engine rejected the cartridge");
       }
@@ -768,7 +774,8 @@ export class Player {
     }
     const afterBlock = runtimeBlock ? this.runtimeBlock() : null;
     if (afterBlock) {
-      this.runtime!.channel.afterTick(afterBlock, this.commandRing());
+      const directCommands = this.console && "direct" in this.console ? (this.console as DirectConsole).takeCommands() : undefined;
+      this.runtime!.channel.afterTick(afterBlock, this.commandRing(), directCommands);
       this.pollLevelRequest();
       // Particle bursts the cart fired go to the 3D overlay to simulate and draw.
       for (const b of this.runtime!.channel.takeBursts()) this.meshSurface?.burst(b.effect, b.at, b.dir, b.scale);

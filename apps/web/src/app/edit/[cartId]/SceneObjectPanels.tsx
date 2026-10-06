@@ -35,6 +35,7 @@ import {
   parentCandidates,
   setMeshParent,
   setMeshPhysics,
+  setMeshCore,
   setMeshPhysicsWorld,
   setMeshProp,
   setMeshTags,
@@ -885,6 +886,27 @@ export function PhysicsWorldPanel({ sidecar, onChange }: { sidecar: MeshSidecar;
         {deterministic
           ? "Same scene + same inputs = the same simulation everywhere, for replays and for online games that each simulate shared objects. A little slower. cartbox.physicshash() lets players compare states."
           : "Turn on for replays or online games where every player simulates the same objects."}
+      </RailHint>
+    </RailGroup>
+  );
+}
+
+/**
+ * The core that runs the cart (EP20b), on the Modern tier: the dedicated
+ * Modern core (a preview while it's being built) or the usual TIC-80–derived one.
+ */
+export function CorePanel({ sidecar, onChange }: { sidecar: MeshSidecar; onChange: (next: MeshSidecar) => void }) {
+  const direct = sidecar.core === "direct";
+  return (
+    <RailGroup label="Core">
+      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+        <input type="checkbox" aria-label="Dedicated Modern core" checked={direct} onChange={(event) => onChange(setMeshCore(sidecar, event.target.checked ? "direct" : null))} />
+        Run on the dedicated Modern core (preview)
+      </label>
+      <RailHint>
+        {direct
+          ? "The cart's calls reach the 3D engine directly, with no limit a tick. Sprites, the map and sound aren't on this core yet: they do nothing until they are."
+          : "A core of the Modern tier's own: the cart's calls reach the 3D engine directly, with no limit a tick. Still being built — sprites, the map and sound come later."}
       </RailHint>
     </RailGroup>
   );

@@ -31,6 +31,7 @@ import {
 import { authHeaders, getAccessToken } from "@/lib/supabase-browser";
 import { browserStorage, openSaves, type SaveKeeper } from "@/lib/saveData";
 import { isStaticExport } from "@/lib/staticSite";
+import { DIRECT_CORE_URL } from "@/lib/consoleModel";
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 import { rapierPhysics } from "@/lib/physicsRapier";
 import { streamTextures, type StreamedTexture } from "@/lib/textureStream";
@@ -171,6 +172,8 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
     const handle = mount(stage, {
       cartUrl,
       engineUrl,
+      // A Modern cart can run on the dedicated core (EP20b): the scene says so.
+      directCoreUrl: DIRECT_CORE_URL,
       modelId,
       controls: "auto",
       scale: "fit",

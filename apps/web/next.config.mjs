@@ -48,7 +48,7 @@ const nextConfig = {
   // types) via their package exports, so no transpilePackages is needed.
   // @cartbox/editor is consumed as TypeScript source for fast iteration, so Next
   // transpiles it here.
-  transpilePackages: ["@cartbox/editor"],
+  transpilePackages: ["@cartbox/editor", "@cartbox/modern-core"],
   // draco3d's decoder glue (loaded on demand to import Draco-compressed glTF)
   // keeps its Node-only `fs`/`path` requires behind an environment check; in the
   // browser it is handed the WASM directly, so those modules are stubbed out.

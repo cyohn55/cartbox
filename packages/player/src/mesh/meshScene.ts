@@ -159,6 +159,12 @@ export interface MeshScene {
   readonly lighting: SceneLighting | null;
   /** Scene-wide physics settings (absent = the defaults). */
   readonly physicsWorld?: PhysicsWorldSettings;
+  /**
+   * Which core runs the cart (EP20b): "direct", the dedicated Modern core with
+   * its direct scripting API; absent, the TIC-80–derived core. Only the Modern
+   * tier's models (modern, xbox360) have the dedicated core.
+   */
+  readonly core?: "direct";
   /** Cutscenes and scripted camera moves (objects referred to by instance `id`). */
   readonly timelines?: readonly SceneTimeline[];
   /** Named levels, one loaded at a time (the first at start); see levels.ts in @cartbox/editor. */
@@ -470,6 +476,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
   // neither counts toward the framing bounds.
   const placed = instances.filter((instance) => !instance.pooled && !instance.terrain && (instance.level === undefined || instance.level === 0));
   const physicsWorld = readPhysicsWorld((parsed as { physicsWorld?: unknown }).physicsWorld);
+  const core = (parsed as { core?: unknown }).core === "direct" ? ("direct" as const) : undefined;
   const timelines = readTimelines((parsed as { timelines?: unknown }).timelines);
   const navmesh = readNavMesh((parsed as { navmesh?: unknown }).navmesh);
   const effects = parseParticleEffects((parsed as { effects?: unknown }).effects);
@@ -520,6 +527,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     lighting,
     ...(pools.length > 0 ? { pools } : {}),
     ...(physicsWorld ? { physicsWorld } : {}),
+    ...(core ? { core } : {}),
     ...(timelines.length > 0 ? { timelines } : {}),
     ...(levels.length > 0 ? { levels } : {}),
     ...(navmesh && navmesh.heights.length > 0 ? { navmesh } : {}),
