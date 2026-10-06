@@ -1,0 +1,128 @@
+# Halo Infinite art style roadmap
+
+Editor and engine upgrades aimed at the Halo Infinite look, each applied to the
+Lockout demo as it lands. Ordered by visual payoff per unit of work; each item
+ships as its own PR with tests, and the Lockout demo uses it in the same PR.
+
+Successor to [`HALO2_STYLE_ROADMAP.md`](HALO2_STYLE_ROADMAP.md), whose light,
+surface and effects work (baked lighting, reflection probes, detail maps,
+volumetric fog, particles, decals, shields) this builds on. Its three open
+items move here: H12 becomes I9, H15 becomes I6, the rest of H16 becomes I12.
+
+## Where Lockout stands
+
+The engine already has most of the lighting a modern look needs: PBR
+materials with normal, AO and emissive maps, cascaded sun shadows, spot and
+point shadows, light and reflection probes, baked light maps, SSAO, bloom,
+filmic tone mapping, grading, volumetric fog and shafts, lens flare, depth of
+field, particles, decals, terrain, foliage, LOD and a material graph.
+
+What separates Lockout from Halo Infinite, seen in a match:
+
+- **Image quality.** No anti-aliasing anywhere: every edge is jagged.
+- **Shapes and surfaces.** The arena is generated in code from boxes, wedges
+  and fins with 256×256 noise textures. Infinite's Forerunner architecture is
+  huge, sweeping, angular and layered, with crisp detail and worn metal.
+- **Characters and first person.** Block-built Spartans; a flat white sword
+  with no hands. Infinite has detailed armour, glossy visors, gloved hands and
+  translucent plasma.
+- **World.** A gradient sky over a floating arena. Infinite has painted
+  skies, the ring overhead, clouds and distant country.
+- **Light and colour.** Dark, teal-tinted interiors. Infinite is bright,
+  saturated and warm.
+- **HUD.** A pixel font and rectangles. Infinite's is thin, curved and
+  holographic.
+
+## Phase A — Image quality (cheap, engine-wide)
+
+- [x] **I1. Anti-aliasing.** Multisampling (4×) in both GPU scene renderers,
+      resolved before the frame is read back, so edges between surfaces are
+      smooth and the coverage it reads back smooths silhouettes against the
+      sky too. The held weapon, drawn by the software rasteriser, gets its
+      outline smoothed. A render cap: on for the Xbox 360 tier (the real
+      console's 4× MSAA) and the Modern tier; the retro tiers keep their
+      crisp edges. Off on the low graphics preset.
+      *Lockout:* clean edges on the towers, the trim and the sword.
+      *Done:* `SceneDraw.antialias` asks the WebGPU and WebGL2 renderers for
+      4× multisampling (off by default, so their byte-for-byte parity with the
+      software rasteriser holds); texture coordinates are sampled at the
+      centroid so edge samples never read past a triangle. The scene renders
+      into multisampled colour and depth and resolves before readback;
+      transparent and soft-particle passes and material graphs run
+      multisampled too. An `antialias` render cap (on for Xbox 360 and Modern)
+      and quality setting (on for high and medium) both have to allow it.
+      The held weapon's outline is feathered by a pixel. Tested on real
+      Chromium WebGL2 and a real WebGPU device: only edge pixels change, and
+      only to values between their neighbours. Lockout (Xbox 360 tier) has it
+      on.
+- [ ] **I2. Temporal anti-aliasing.** Jittered frames blended with history,
+      reprojected with the camera, to calm the shimmer multisampling can't
+      reach: thin trim, specular sparkle on metal, foliage cut-outs. With a
+      sharpening pass. *Lockout:* the deck's panel lines stop crawling as you
+      walk.
+- [ ] **I3. Screen-space reflections.** Polished floors and metal reflect
+      what's on screen, falling back to the reflection probes where the
+      screen has nothing. *Lockout:* the towers and bots reflected in the
+      polished deck of bottom mid.
+- [ ] **I4. Material upgrades.** Clearcoat (a glossy layer over paint, for
+      armour and visors), anisotropic highlights (brushed metal), parallax
+      occlusion (depth in panel seams without geometry), and wear masks in the
+      material graph (edges and cavities from a baked curvature map).
+      *Lockout:* chipped edges on the walls, a lacquered armour finish.
+- [ ] **I5. Refraction and distortion.** A pass that bends what's behind a
+      surface: glass, plasma, shield shimmer, active camouflage, heat haze.
+      *Lockout:* the shield flare and the sword's blade warp the view behind
+      them.
+
+## Phase B — World and sky
+
+- [ ] **I6. Imported sky.** An HDR panorama or cubemap in place of the
+      procedural sky (it also lights the scene and fills the reflections),
+      drifting cloud layers, and sky objects drawn at infinity (a ring, a
+      planet, a distant structure). *Lockout:* a painted sky with the ring
+      arching over the valley.
+- [ ] **I7. Distant vistas.** Far terrain and backdrop meshes beyond the play
+      space, cheap (impostors or one coarse level), fogged into the sky.
+      *Lockout:* mountains and a forest edge around the gorge instead of a
+      void.
+- [ ] **I8. Light and colour pass.** An Infinite look for the lighting rig: a
+      warm, strong sun, a bright sky fill, saturated team colours and a
+      grading LUT; Lockout re-lit and re-baked to match. *Lockout:* bright
+      noon on snow, with blue-grey metal and cyan light channels.
+
+## Phase C — Characters and first person
+
+- [ ] **I9. First-person arms and viewmodel animation.** Gloved hands holding
+      each weapon, with idle sway, run bob, reload, melee and the sword's
+      swing (supersedes H12). *Lockout:* arms on every weapon.
+- [ ] **I10. Plasma weapons.** The energy sword as translucent emissive
+      plasma: a hot core fading to blue edges, a glow halo, a swing trail, and
+      the distortion from I5. *Lockout:* the sword, the plasma grenade.
+- [ ] **I11. Spartans.** A higher-detail armour model with team-colour masks,
+      a reflective visor (I3 and I4), and the armour's own animation set.
+      *Lockout:* bots that read as Spartans at a distance.
+
+## Phase D — Content and editor tools
+
+- [ ] **I12. HUD authoring.** Vector (SDF) fonts at any size, arcs and curved
+      bars as UI widgets, and a holographic style (thin lines, glow, a curve
+      toward the edges) (supersedes the rest of H16). *Lockout:* the shield
+      arc, the motion tracker and the ammo counter rebuilt in the UI tab.
+- [ ] **I13. Asset pipeline for artist-made content.** Skinned glTF with its
+      animations and material sets imported in one step, texture conventions
+      (packed occlusion/roughness/metal maps), compressed textures by default,
+      and a documented Blender workflow. The editor can't stand in for a 3D
+      artist, so this is how real art gets in.
+- [ ] **I14. Modular kits and blockout tools.** Snapping kit pieces edge to
+      edge, prefab variants, and simple in-editor mesh editing (extrude,
+      bevel, inset) for blockouts and quick fixes.
+- [ ] **I15. Texture baking.** Bake ambient occlusion, curvature and
+      thickness from a mesh in the editor, feeding the wear masks of I4.
+- [ ] **I16. A Forerunner kit for Lockout.** The arena rebuilt from a designed
+      modular kit: chamfered, layered, angular forms with inset light
+      channels, at a higher texture resolution, using I4, I14 and I15.
+
+## Phase E — Optional lighting tech
+
+- [ ] **I17. Dynamic bounce light.** Probes that relight as lights move, so a
+      time of day or a moving light still bounces (today's bounce is baked).

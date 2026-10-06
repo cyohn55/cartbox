@@ -93,6 +93,20 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     else expect(result.differing, JSON.stringify(result.diffs)).toBeLessThanOrEqual(Math.ceil(result.drawn * 4 * share));
   };
 
+  const antialiased = (name: string): Promise<{ changed: number; offEdge: number; outside: number; drawn: number; errors: number[] }> =>
+    page.evaluate((n: string) => (globalThis as unknown as { runAntialias: (n: string) => Promise<never> }).runAntialias(n), name);
+
+  it("anti-aliases (I1): multisampling smooths edges and nothing else", async () => {
+    for (const name of ["fantasy", "transparent", "soft"]) {
+      const result = await antialiased(name);
+      expect(result.errors, name).toEqual([0, 0]); // no GL error, the soft scene's depth copy from the multisampled frame included
+      expect(result.drawn, name).toBeGreaterThan(100);
+      expect(result.changed, name).toBeGreaterThan(10); // the edges did change
+      expect(result.offEdge, name).toBe(0); // and only edges did
+      expect(result.outside, name).toBe(0); // each to a blend of the colours either side
+    }
+  }, 60_000);
+
   it("renders the fantasy path byte-identically", async () => {
     const result = await run("fantasy");
     expect(result.backend).toBe("webgl2");

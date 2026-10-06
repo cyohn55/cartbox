@@ -112,6 +112,12 @@ export interface MeshOverlayOptions {
    * textures render as their flat base colour.
    */
   readonly ktx2?: Ktx2DecoderLoader;
+  /**
+   * The model's anti-aliasing render cap (`antialias`, I1): the GPU
+   * renderers multisample the scene and the held weapon's outline is smoothed,
+   * when the graphics quality allows it too. Off by default.
+   */
+  readonly antialias?: boolean;
 }
 
 /** Loads a KTX2 → RGBA decoder (see {@link MeshOverlayOptions.ktx2}). */
@@ -257,6 +263,8 @@ export class MeshOverlaySurface implements DisplaySurface {
   private sunAt: { x: number; y: number } = { x: 0.5, y: 0.5 };
   /** Reused buffers for the sun-shaft pass. */
   private shaftScratch: ShaftScratch | null = null;
+  /** A copy of the frame for smoothing the held weapon's outline (I1). */
+  private edgeScratch: Uint8ClampedArray | null = null;
   /** The cart's world lights this frame (cartbox.light3d), added to the rig's in first person. */
   private cartLights: readonly SceneLight[] = [];
   /** Tinted mesh copies, per source mesh and tint index. */
@@ -791,6 +799,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       const particles = this.particles.instanceFor([-v[2]!, -v[6]!, -v[10]!], [v[1]!, v[5]!, v[9]!]);
       if (particles) drawn = [...drawn, particles];
     }
+    // Anti-aliasing (I1): the model's cap and the graphics quality must both allow it.
+    const antialias = this.options.antialias === true && this.quality.antialias === true;
     this.renderer.render(drawn, {
       width,
       height,
@@ -800,6 +810,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       projection: camera.projection,
       // Objects with LOD levels (EP9b) draw the one their distance calls for.
       lod: true,
+      antialias,
       // HUD mode fills the frame with a sky so the 3D scene is opaque before the
       // HUD lands on top; third-person keeps the cart frame behind the meshes.
       background: this.hud && !skyBackdrop ? HUD_SKY : null,
@@ -854,6 +865,11 @@ export class MeshOverlaySurface implements DisplaySurface {
           : {}),
         time: this.frame / 60,
       });
+      // The software rasteriser doesn't multisample, so smooth the weapon's outline instead.
+      if (antialias) {
+        if (this.edgeScratch?.length !== out.length) this.edgeScratch = new Uint8ClampedArray(out.length);
+        smoothFrontEdges(out, depth, width, height, this.edgeScratch);
+      }
     }
     if (profiler) profiler.add("scene", performance.now() - mark);
     if (target) expandNearest(target.out, target.width, target.height, this.output, this.width, this.height);
@@ -1585,6 +1601,31 @@ async function decodeTexture(mime: string, bytes: Uint8Array): Promise<DecodedTe
     return { width: image.width, height: image.height, data: image.data };
   } catch {
     return null;
+  }
+}
+
+/**
+ * Smooth the outline of the front layer (I1). The front render starts from a
+ * cleared depth buffer, so its pixels are the ones with a finite depth; each
+ * pixel on either side of that boundary is blended with its four neighbours
+ * (itself counting twice), a one-pixel feather standing in for the coverage
+ * multisampling gives the GPU-drawn scene. `scratch` is the frame's size.
+ */
+export function smoothFrontEdges(out: Uint8ClampedArray, depth: Float32Array, width: number, height: number, scratch: Uint8ClampedArray): void {
+  scratch.set(out);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const i = y * width + x;
+      const front = depth[i]! !== Infinity;
+      const l = x > 0 ? i - 1 : i;
+      const r = x < width - 1 ? i + 1 : i;
+      const u = y > 0 ? i - width : i;
+      const d = y < height - 1 ? i + width : i;
+      if ((depth[l]! !== Infinity) === front && (depth[r]! !== Infinity) === front && (depth[u]! !== Infinity) === front && (depth[d]! !== Infinity) === front) continue;
+      for (let c = 0; c < 3; c += 1) {
+        out[i * 4 + c] = (2 * scratch[i * 4 + c]! + scratch[l * 4 + c]! + scratch[r * 4 + c]! + scratch[u * 4 + c]! + scratch[d * 4 + c]!) / 6;
+      }
+    }
   }
 }
 

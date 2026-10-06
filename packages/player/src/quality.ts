@@ -9,8 +9,8 @@
  * - **medium**: half-resolution shadow maps; the first-person software view
  *   starts at three-quarter size.
  * - **low**: no shadows, no bloom or chromatic aberration (the multi-pass
- *   effects; cheap per-pixel looks like grading, CRT or dithering stay), and the
- *   first-person software view capped at half size.
+ *   effects; cheap per-pixel looks like grading, CRT or dithering stay), no
+ *   anti-aliasing, and the first-person software view capped at half size.
  *
  * Terrain keeps full detail less far on the lower presets (60% and 30% of the
  * authored distance), so distant ground costs fewer triangles.
@@ -44,12 +44,14 @@ export interface QualitySettings {
    * distance: lower presets drop to the coarser blocks sooner.
    */
   readonly terrainDetail: number;
+  /** Anti-alias the 3D where the model does (HALO_INFINITE_STYLE_ROADMAP.md I1). */
+  readonly antialias?: boolean;
 }
 
 export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualitySettings>> = {
-  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1 },
-  medium: { level: "medium", shadows: true, shadowMapSize: 512, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6 },
-  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3 },
+  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true },
+  medium: { level: "medium", shadows: true, shadowMapSize: 512, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true },
+  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false },
 };
 
 /** What the browser reveals about the device (all optional: browsers differ). */

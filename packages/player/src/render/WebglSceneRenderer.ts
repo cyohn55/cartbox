@@ -184,8 +184,9 @@ layout(location = 3) in vec2 uv2;
 layout(location = 4) in float bw;
 out float vBw;
 out vec3 vNormal;
-out vec2 vUv;
-out vec2 vUv2;
+// Centroid (I1): a multisampled edge pixel samples its textures inside the triangle, not past its edge.
+centroid out vec2 vUv;
+centroid out vec2 vUv2;
 out vec4 vLightClip;
 out vec3 vWorldPos;
 out float vEyeDepth;
@@ -286,8 +287,8 @@ uniform sampler2D blendTex;
 uniform highp sampler2D sceneDepth;
 uniform vec4 probeData[${MAX_REFLECTION_PROBES * 4}];
 in vec3 vNormal;
-in vec2 vUv;
-in vec2 vUv2;
+centroid in vec2 vUv;
+centroid in vec2 vUv2;
 in float vBw;
 in vec4 vLightClip;
 in vec3 vWorldPos;
@@ -848,6 +849,14 @@ export class WebglSceneRenderer implements SceneRenderer {
   /** Frames submitted, the one `latest` holds, and the newest that got a readback (see settle). */
   private submitted = 0;
   private latestSeq = 0;
+  /**
+   * The multisampled framebuffer anti-aliased frames draw into
+   * (HALO_INFINITE_STYLE_ROADMAP.md I1): made on first use, false where the
+   * context can't multisample. Resolved into {@link framebuffer} before readback.
+   */
+  private msaa: { framebuffer: any; attachments: any[] } | null | false = null;
+  /** What this frame draws into: {@link framebuffer}, or {@link msaa}'s. */
+  private target: any = null;
   private readSeq = 0;
 
   /** What the last submitted frame drew (for the profiler and tests); GPU time when the browser can time it. */
@@ -1086,7 +1095,8 @@ export class WebglSceneRenderer implements SceneRenderer {
     gl.bindBuffer(gl.UNIFORM_BUFFER, this.instanceBuffer);
     gl.bufferSubData(gl.UNIFORM_BUFFER, 0, this.instanceData, 0, cursor);
 
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
+    this.target = this.drawFramebuffer(draw.antialias === true);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.target);
     gl.viewport(0, 0, this.width, this.height);
     gl.disable(gl.BLEND);
     gl.disable(gl.CULL_FACE);
@@ -1178,6 +1188,13 @@ export class WebglSceneRenderer implements SceneRenderer {
     this.timer?.end();
     this.lastFrameStats = { drawCalls: chunks.length, instances: instanceCount, triangles, gpuMs: this.timer?.lastMs ?? null };
 
+    // An anti-aliased frame resolves its samples into the plain framebuffer, which is read back.
+    if (this.target !== this.framebuffer) {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.target);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.framebuffer);
+      gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, this.width, this.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
+    }
     // Read back into a free pixel-pack buffer; skip this frame's readback if all are in flight.
     this.submitted += 1;
     const slot = this.readback.find((s) => s.fence === null);
@@ -1350,7 +1367,45 @@ export class WebglSceneRenderer implements SceneRenderer {
   /** The opaque depth, as a texture the transparent pass can read (EP6b): made on first use. */
   private sceneDepth: { texture: any; framebuffer: any } | null = null;
 
-  /** Copy the main framebuffer's depth into {@link sceneDepth} and bind it, leaving the main framebuffer bound. */
+  /**
+   * The framebuffer a frame draws into: the multisampled one for an
+   * anti-aliased frame (4 samples, or the most the context has), made on first
+   * use; the plain one otherwise, or where the context can't multisample.
+   */
+  private drawFramebuffer(antialias: boolean): any {
+    if (!antialias || this.msaa === false) return this.framebuffer;
+    if (!this.msaa) {
+      const gl = this.gl;
+      const samples = Math.min(4, Number(gl.getParameter(gl.MAX_SAMPLES)) || 0);
+      if (samples < 2) {
+        this.msaa = false;
+        return this.framebuffer;
+      }
+      const colour = gl.createRenderbuffer();
+      gl.bindRenderbuffer(gl.RENDERBUFFER, colour);
+      gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.RGBA8, this.width, this.height);
+      const depth = gl.createRenderbuffer();
+      gl.bindRenderbuffer(gl.RENDERBUFFER, depth);
+      gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.DEPTH_COMPONENT24, this.width, this.height);
+      const framebuffer = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, colour);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
+      const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      if (!complete) {
+        gl.deleteFramebuffer(framebuffer);
+        gl.deleteRenderbuffer(colour);
+        gl.deleteRenderbuffer(depth);
+        this.msaa = false;
+        return this.framebuffer;
+      }
+      this.msaa = { framebuffer, attachments: [colour, depth] };
+    }
+    return this.msaa.framebuffer;
+  }
+
+  /** Copy this frame's depth into {@link sceneDepth} and bind it, leaving the frame's framebuffer bound. */
   private copySceneDepth(): void {
     const gl = this.gl;
     if (!this.sceneDepth) {
@@ -1366,10 +1421,11 @@ export class WebglSceneRenderer implements SceneRenderer {
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, texture, 0);
       this.sceneDepth = { texture, framebuffer };
     }
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.framebuffer);
+    // From a multisampled framebuffer, the blit resolves the depth as it copies.
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.target ?? this.framebuffer);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.sceneDepth.framebuffer);
     gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, this.width, this.height, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.target ?? this.framebuffer);
     this.bindTexture(UNIT_SCENE_DEPTH, this.sceneDepth.texture);
   }
 
@@ -1545,6 +1601,10 @@ export class WebglSceneRenderer implements SceneRenderer {
       gl.deleteBuffer(this.lightBuffer);
       for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.probeTexture, this.ssaoTexture]) if (t) gl.deleteTexture(t);
       gl.deleteFramebuffer(this.framebuffer);
+      if (this.msaa) {
+        gl.deleteFramebuffer(this.msaa.framebuffer);
+        for (const rb of this.msaa.attachments) gl.deleteRenderbuffer(rb);
+      }
       if (this.localAtlas) gl.deleteTexture(this.localAtlas);
       if (this.gridTexture) gl.deleteTexture(this.gridTexture);
       if (this.gridBlank) gl.deleteTexture(this.gridBlank);

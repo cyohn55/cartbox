@@ -47,6 +47,12 @@ export interface RenderCaps {
    * every fantasy-console model.
    */
   programmableShaders: boolean;
+  /**
+   * Smooth 3D edges with multisampling (HALO_INFINITE_STYLE_ROADMAP.md I1).
+   * Only the tiers whose hardware did: the Xbox 360 (4× MSAA from its eDRAM)
+   * and the Modern tier. The earlier eras keep their hard edges.
+   */
+  antialias?: boolean;
 }
 
 /**
@@ -149,6 +155,7 @@ export const XBOX360_RASTER_CAPS: RenderCaps = {
   textureCacheBytes: 0,
   polyBudget: 0,
   programmableShaders: false,
+  antialias: true,
 };
 
 /**
@@ -171,6 +178,7 @@ export const MODERN_RASTER_CAPS: RenderCaps = {
   textureCacheBytes: 0,
   polyBudget: 0,
   programmableShaders: true,
+  antialias: true,
 };
 
 export interface ConsoleModel {
