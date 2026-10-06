@@ -59,6 +59,7 @@ import { loadPendingVoxelEdit, clearPendingVoxelEdit, type PendingVoxelEdit } fr
 import { decodeVoxelSidecar, mergeVoxelSidecar } from "@/lib/voxelSidecar";
 import type { Sidecars } from "@/lib/sidecars";
 import type { StandaloneGame } from "@/lib/standaloneExport";
+import type { SnapshotContent } from "@/lib/cartSnapshots";
 import styles from "./editor.module.css";
 import { MapEditor } from "./MapEditor";
 import { CodeEditor } from "./CodeEditor";
@@ -83,6 +84,7 @@ import { SPATIAL_TABS, TAB_META, visibleTabs, type Tab } from "./editorTabs";
 import { ShortcutHelp } from "./ShortcutHelp";
 import { DownloadBudget } from "./DownloadBudget";
 import { ExportDialog } from "./ExportDialog";
+import { SnapshotsPanel } from "./SnapshotsPanel";
 import { useShortcuts, WORKBENCH_SHORTCUTS, type Shortcut } from "./shortcuts";
 import { decodeMeshSidecar, encodeMeshSidecar, addMesh, type MeshSidecar } from "@/lib/meshSidecar";
 import { rebakeMeshSidecar } from "@/lib/meshTextureBake";
@@ -491,6 +493,9 @@ function WorkbenchBody({
   /** The export dialog (EP18): the game as one HTML file or an offline-capable zip. */
   const [showExport, setShowExport] = useState(false);
   const closeExport = useCallback(() => setShowExport(false), []);
+  /** The snapshots dialog (EP19). */
+  const [showSnapshots, setShowSnapshots] = useState(false);
+  const closeSnapshots = useCallback(() => setShowSnapshots(false), []);
   // First-run guidance: a dismissible card naming the handful of tabs that
   // matter, for a 12-tab tool that otherwise opens on a demo seed with no "start
   // here". Persisted per-browser so a returning creator never sees it again;
@@ -756,6 +761,28 @@ function WorkbenchBody({
     historyRef.current?.resync();
     setRecovery(null);
   }, [cartId, runnable, setSidecar]);
+
+  /** The cart as it stands, for a snapshot (EP19): what Save would write. */
+  const snapshotContent = useCallback((): SnapshotContent | null => {
+    if (!runnable) return null;
+    return { model: modelId, bytes: runnable.saveTic(), sidecars, meta: details };
+  }, [runnable, modelId, sidecars, details]);
+
+  /** Put a snapshot back, as a draft recovery does: into engine memory, then every view re-reads. */
+  const restoreSnapshot = useCallback(
+    (content: SnapshotContent) => {
+      if (!runnable) return;
+      runnable.loadTic(content.bytes);
+      for (const [key, value] of Object.entries(content.sidecars)) {
+        setSidecar(key as keyof Sidecars, value as never);
+      }
+      if (content.meta.title) setDetails(content.meta);
+      historyRef.current?.resync();
+      // The restored cart is unsaved work until Save.
+      setTimeout(evaluateDirty, 0);
+    },
+    [runnable, setSidecar, evaluateDirty],
+  );
 
   // The unsaved-work dot is drawn by CSS off `data-dirty`, not put in the label:
   // "Save •" wraps onto two lines in the action bar and pushes the header taller.
@@ -1226,6 +1253,19 @@ function WorkbenchBody({
                 type="button"
                 role="menuitem"
                 className={styles.fileMenuItem}
+                disabled={!runnable}
+                onMouseDown={() => {
+                  if (!runnable) return;
+                  setShowSnapshots(true);
+                  setFileOpen(false);
+                }}
+              >
+                Snapshots…
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className={styles.fileMenuItem}
                 onMouseDown={() => {
                   setBudgetCart(runnable ? runnable.saveTic() : null);
                   setFileOpen(false);
@@ -1435,6 +1475,7 @@ function WorkbenchBody({
       )}
 
       {showHelp && <ShortcutHelp tabs={tabs.order.slice(0, 9)} onClose={() => setShowHelp(false)} />}
+      {showSnapshots && <SnapshotsPanel cartId={cartId} current={snapshotContent} onRestore={restoreSnapshot} onClose={closeSnapshots} />}
       {showExport && <ExportDialog title={details.title || cartName} engineUrl={engineUrl} game={exportGame} onClose={closeExport} />}
       {budgetCart !== undefined && (
         <DownloadBudget
