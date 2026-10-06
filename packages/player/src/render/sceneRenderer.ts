@@ -59,6 +59,14 @@ export interface SceneDraw {
    */
   readonly background: readonly [number, number, number, number] | null;
   /**
+   * Smooth edges with multisampling (HALO_INFINITE_STYLE_ROADMAP.md I1), on the
+   * GPU renderers: 4× MSAA, resolved before the frame is read back, so the
+   * coverage it reads back also smooths silhouettes over whatever the frame is
+   * composited onto. Off by default, because the GPU renderers otherwise match
+   * the software rasteriser pixel for pixel; the software renderer ignores it.
+   */
+  readonly antialias?: boolean;
+  /**
    * Key light direction, or omitted for the rasteriser's default. The world
    * overlay publishes a cart-driven sun here, so it changes per frame.
    */

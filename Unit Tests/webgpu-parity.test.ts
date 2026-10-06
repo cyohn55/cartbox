@@ -736,3 +736,98 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     renderer.dispose();
   });
 });
+
+/**
+ * Anti-aliasing (HALO_INFINITE_STYLE_ROADMAP.md I1) on the real device: the
+ * multisampled pipelines and targets validate (a material graph's variant and
+ * the see-through pass's multisampled depth included), and the frame differs
+ * from the plain one only on edges, each changed pixel a blend of the colours
+ * around it.
+ */
+describe.skipIf(!device)("WebGPU anti-aliasing on a real device", () => {
+  const mat = (m: Record<string, unknown>) => {
+    const q = quad();
+    return { ...q, primitives: [{ ...q.primitives[0]!, material: { ...q.primitives[0]!.material, ...m } }] };
+  };
+
+  async function frame(instances: MeshSceneInstance[], make: () => SceneDraw, antialias: boolean): Promise<{ out: Uint8ClampedArray; error: string | null }> {
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+    device.pushErrorScope("validation");
+    renderer.render(instances, { ...make(), antialias });
+    // Wait for a real GPU frame: until one lands, the renderer shows its software warm-up (which ignores antialias).
+    for (let attempt = 0; attempt < 200 && !(renderer as unknown as { latest: Uint8Array | null }).latest; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.tick?.();
+    }
+    expect((renderer as unknown as { latest: Uint8Array | null }).latest).not.toBeNull();
+    const d = { ...make(), antialias };
+    renderer.render(instances, d);
+    const error = await device.popErrorScope();
+    renderer.dispose();
+    return { out: d.out, error: error ? String(error.message ?? error) : null };
+  }
+
+  function compare(a: Uint8ClampedArray, b: Uint8ClampedArray) {
+    const px = (o: Uint8ClampedArray, x: number, y: number) => [o[(y * W + x) * 4]!, o[(y * W + x) * 4 + 1]!, o[(y * W + x) * 4 + 2]!];
+    let changed = 0;
+    let offEdge = 0;
+    let outside = 0;
+    for (let y = 0; y < H; y += 1) {
+      for (let x = 0; x < W; x += 1) {
+        const p = px(a, x, y);
+        const q = px(b, x, y);
+        if (p.every((v, c) => Math.abs(v - q[c]!) <= 2)) continue;
+        changed += 1;
+        const ring = (r: number) => {
+          const out: number[][] = [];
+          for (let dy = -r; dy <= r; dy += 1) for (let dx = -r; dx <= r; dx += 1) if ((dx || dy) && x + dx >= 0 && y + dy >= 0 && x + dx < W && y + dy < H) out.push(px(a, x + dx, y + dy));
+          return out;
+        };
+        if (!ring(1).some((n) => n.some((v, c) => Math.abs(v - p[c]!) > 2))) offEdge += 1;
+        const around = [p, ...ring(2)];
+        for (let c = 0; c < 3; c += 1) {
+          const values = around.map((n) => n[c]!);
+          if (q[c]! < Math.min(...values) - 8 || q[c]! > Math.max(...values) + 8) {
+            outside += 1;
+            break;
+          }
+        }
+      }
+    }
+    return { changed, offEdge, outside };
+  }
+
+  const cases: Record<string, { instances: () => MeshSceneInstance[]; draw: () => SceneDraw }> = {
+    textured: { instances: scene, draw },
+    transparent: {
+      instances: () => [
+        { mesh: mat({ metallicFactor: 0, roughnessFactor: 0.8 }), model: composeModelMatrix([0, 0, -1], [0, 0, 0], [2.2, 1.6, 1]) },
+        { mesh: mat({ baseColorFactor: [0.2, 0.6, 1, 0.4], metallicFactor: 0, roughnessFactor: 0.2, alphaMode: "blend" }), model: composeModelMatrix([-0.5, 0, 0.3], [0, 20, 0], [0.9, 0.9, 1]) },
+        { mesh: mat({ baseColorFactor: [1, 0.3, 0.1, 0.7], alphaMode: "additive" }), model: composeModelMatrix([0.6, 0.2, 0.6], [0, -15, 0], [0.6, 0.6, 1]) },
+      ],
+      draw,
+    },
+    soft: {
+      instances: () => [
+        { mesh: mat({ baseColorFactor: [0.8, 0.8, 0.8, 1], metallicFactor: 0, roughnessFactor: 1 }), model: composeModelMatrix([0, 0, 0], [-90, 0, 0], [3, 3, 1]) },
+        { mesh: mat({ baseColorFactor: [0.2, 0.6, 1, 0.8], metallicFactor: 0, roughnessFactor: 1, alphaMode: "blend", softDepth: 0.8 }), model: composeModelMatrix([-0.7, 0.4, 0], [0, 10, 0], [0.8, 0.8, 1]) },
+      ],
+      draw: () => ({ ...draw(), view: viewMatrix([0, 4, 7], [0, 0, 0]) }),
+    },
+    graph: { instances: () => graphInstances(mat), draw: () => ({ ...draw(), time: 0.7 }) },
+  };
+
+  for (const [name, c] of Object.entries(cases)) {
+    it(`smooths only edges: ${name}`, async () => {
+      const instances = c.instances();
+      const plain = await frame(instances, c.draw, false);
+      const smooth = await frame(instances, c.draw, true);
+      expect(plain.error).toBeNull();
+      expect(smooth.error).toBeNull();
+      const result = compare(plain.out, smooth.out);
+      expect(result.changed).toBeGreaterThan(10);
+      expect(result.offEdge).toBe(0);
+      expect(result.outside).toBe(0);
+    }, 60_000);
+  }
+});

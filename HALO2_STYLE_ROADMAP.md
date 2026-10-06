@@ -161,6 +161,7 @@ general Unity/UE5 gap); items here that close a line there tick it off too.
       soldier another browser owns shimmers too.
 - [ ] **H12. Viewmodel animation.** Reload, melee and run-bob clips on the
       held weapons, and first-person arms.
+      *Moved to HALO_INFINITE_STYLE_ROADMAP.md I9.*
 - [ ] **H13. More timelines.** A killcam and a post-game camera sweep.
 
 ## Phase D — World and presentation
@@ -170,8 +171,10 @@ general Unity/UE5 gap); items here that close a line there tick it off too.
       *Done as ENGINE_PARITY_ROADMAP.md EP12.*
 - [ ] **H15. Imported skybox.** A painted cubemap or HDR sky in place of the
       procedural one, with drifting clouds.
+      *Moved to HALO_INFINITE_STYLE_ROADMAP.md I6.*
 - [ ] **H16. HUD authoring.** Build a HUD (arcs, bars, radar, icons) in the
       editor instead of hand-coding rectangles.
       *Partly done by ENGINE_PARITY_ROADMAP.md EP13:* bars, text, lists and
       icons are authored in the UI tab and Lockout's HUD is a UI document;
-      arcs and the radar are still drawn in code.
+      arcs and the radar are still drawn in code. *The rest moved to
+      HALO_INFINITE_STYLE_ROADMAP.md I12.*

@@ -189,6 +189,14 @@ ${set.map((l) => `    ${l}`).join("\n")}
 }
 
 /** The scene shader, plain or with a material graph spliced in (EP7). */
+/** Samples an anti-aliased frame takes (HALO_INFINITE_STYLE_ROADMAP.md I1): 4, the count every WebGPU device supports. */
+export const MSAA_SAMPLES = 4;
+
+/** The scene shader for multisampled targets: its soft edges read the depth's first sample. */
+export function multisampledDepthShader(code: string): string {
+  return code.replace("var sceneDepth: texture_depth_2d;", "var sceneDepth: texture_depth_multisampled_2d;");
+}
+
 export function sceneShader(graph: CompiledGraph | null = null): string {
   const g = graphSites(graph);
   return /* wgsl */ `
@@ -358,11 +366,12 @@ fn fogBox(mn: vec3<f32>, mx: vec3<f32>, c: vec3<f32>, dir: vec3<f32>) -> vec2<f3
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) normal: vec3<f32>,
-  @location(1) uv: vec2<f32>,
+  // Centroid (I1): a multisampled edge pixel samples its textures inside the triangle, not past its edge.
+  @location(1) @interpolate(perspective, centroid) uv: vec2<f32>,
   @location(2) lightClip: vec4<f32>,
   @location(3) worldPos: vec3<f32>,
   @location(4) eyeDepth: f32,
-  @location(5) uv2: vec2<f32>,
+  @location(5) @interpolate(perspective, centroid) uv2: vec2<f32>,
   @location(6) bw: f32,
 };
 
@@ -908,8 +917,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     private readonly width: number,
     private readonly height: number,
     private readonly pipeline: PipelineSet,
-    /** Build the pipelines for a shader variant (a material graph's, EP7). */
-    private readonly pipelinesFor: (code: string) => PipelineSet,
+    /** Build the pipelines for a shader variant (a material graph's, EP7), at a sample count (I1). */
+    private readonly pipelinesFor: (code: string, samples?: number) => PipelineSet,
     private readonly bindGroupLayout: any,
     private readonly colourTexture: any,
     private readonly depthTexture: any,
@@ -926,6 +935,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       probesBlank: boolean;
       probeSource: LightProbeGrid | null;
       readonly makeGroups: (atlas: any, probes: any) => { blank: any; scene: any };
+      /** The same groups for an anti-aliased frame: its multisampled blank and depth (I1). */
+      readonly makeGroupsMs: (atlas: any, probes: any, blank: any, depth: any) => { blank: any; scene: any };
     },
     private readonly sampler: any,
     private readonly blankTexture: any,
@@ -1058,22 +1069,28 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       // Group 1 is the opaque depth for soft edges (EP6b): the see-through pass
       // reads it while it is attached read-only; the opaque pass binds a blank.
       // It also carries the clustered lights (EP8): the cell table, the index list and their params.
-      const depthLayout = device.createBindGroupLayout({
-        entries: [
-          { binding: 0, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "depth" } },
-          { binding: 1, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
-          { binding: 2, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
-          { binding: 3, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } },
-          { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
-          { binding: 5, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
-          { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
-        ],
-      });
+      // An anti-aliased frame (HALO_INFINITE_STYLE_ROADMAP.md I1) draws into
+      // multisampled targets, so its soft edges read a multisampled depth: the
+      // same group with binding 0 declared multisampled.
+      const depthEntries = (multisampled: boolean) => [
+        { binding: 0, visibility: SHADER_STAGE_FRAGMENT, texture: multisampled ? { sampleType: "depth", multisampled: true } : { sampleType: "depth" } },
+        { binding: 1, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
+        { binding: 2, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
+        { binding: 3, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } },
+        { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+        { binding: 5, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
+        { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+      ];
+      const depthLayout = device.createBindGroupLayout({ entries: depthEntries(false) });
+      const depthLayoutMs = device.createBindGroupLayout({ entries: depthEntries(true) });
       const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayout] });
-      const pipelinesFor = (code: string): PipelineSet => {
-        const module = device.createShaderModule({ code });
+      const layoutMs = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayoutMs] });
+      const pipelinesFor = (code: string, samples = 1): PipelineSet => {
+        const multisampled = samples > 1;
+        const module = device.createShaderModule({ code: multisampled ? multisampledDepthShader(code) : code });
         const pipelineFor = (blend: unknown, depthWrite: boolean) => device.createRenderPipeline({
-          layout,
+          layout: multisampled ? layoutMs : layout,
+          ...(multisampled ? { multisample: { count: samples } } : {}),
           vertex: {
             module,
             entryPoint: "vs",
@@ -1150,6 +1167,20 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: depthTexture.createView() }, ...shared] }),
         };
       };
+      const makeGroupsMs = (atlas: any, probes: any, blank: any, depth: any) => {
+        const shared = [
+          { binding: 1, resource: { buffer: clusterBuffers.table } },
+          { binding: 2, resource: { buffer: clusterBuffers.index } },
+          { binding: 3, resource: { buffer: clusterBuffers.params } },
+          { binding: 4, resource: atlas.createView() },
+          { binding: 5, resource: { buffer: shadowTiles } },
+          { binding: 6, resource: probes.createView({ dimension: "3d" }) },
+        ];
+        return {
+          blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared] }),
+          scene: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: depth.createView() }, ...shared] }),
+        };
+      };
       const depthGroups = {
         ...makeGroups(atlasBlank, probesBlank),
         blankTexture: blankDepth,
@@ -1161,6 +1192,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         probesBlank: true,
         probeSource: null,
         makeGroups,
+        makeGroupsMs,
       };
       // Filtering is the one era trait that is just a sampler setting. Nearest
       // gives the crunchy, aliased texels of a machine that could not filter;
@@ -1477,12 +1509,14 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const split = draws.some((entry) => softEdges(entry.primitive.material, entry.alpha, draw.projection) !== undefined);
     const firstSeeThrough = split ? draws.findIndex((entry) => entry.alpha >= 2) : -1;
     const encoder = this.device.createCommandEncoder();
+    // Anti-aliased (I1): draw into the multisampled targets and resolve into the read-back texture as the last pass ends.
+    const msaa = draw.antialias === true ? this.ensureMsaa() : null;
     const drawRange = (pass: any, from: number, to: number, depthGroup: any) => {
       pass.setBindGroup(1, depthGroup);
       let bound: any = null;
       for (let index = from; index < to; index += 1) {
         const entry = draws[index]!;
-        const set = this.pipelinesOf(entry.primitive.material);
+        const set = this.pipelinesOf(entry.primitive.material, msaa);
         const wanted = entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque;
         if (wanted !== bound) {
           pass.setPipeline(wanted);
@@ -1495,34 +1529,39 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       }
     };
     const opaqueEnd = firstSeeThrough >= 0 ? firstSeeThrough : draws.length;
+    const colourView = (msaa ? msaa.colour : this.colourTexture).createView();
+    const depthView = (msaa ? msaa.depth : this.depthTexture).createView();
+    const groups = msaa ? msaa.groups : this.depthGroups;
+    // The pass that ends the frame resolves the samples (and need not keep them).
+    const ending = (last: boolean) => (msaa && last ? { resolveTarget: this.colourTexture.createView(), storeOp: "discard" } : { storeOp: "store" });
     const pass = encoder.beginRenderPass({
       colorAttachments: [
         {
-          view: this.colourTexture.createView(),
+          view: colourView,
           // Transparent black: every untouched pixel reads as "nothing drawn",
           // which is what lets the composite leave the cart's frame showing.
           clearValue: { r: 0, g: 0, b: 0, a: 0 },
           loadOp: "clear",
-          storeOp: "store",
+          ...ending(firstSeeThrough < 0),
         },
       ],
       depthStencilAttachment: {
-        view: this.depthTexture.createView(),
+        view: depthView,
         depthClearValue: 1,
         depthLoadOp: "clear",
         depthStoreOp: "store",
       },
       ...(this.timer ? { timestampWrites: this.timer.writes(firstSeeThrough >= 0 ? "begin" : "both") } : {}),
     });
-    drawRange(pass, 0, opaqueEnd, this.depthGroups.blank);
+    drawRange(pass, 0, opaqueEnd, groups.blank);
     pass.end();
     if (firstSeeThrough >= 0) {
       const seeThrough = encoder.beginRenderPass({
-        colorAttachments: [{ view: this.colourTexture.createView(), loadOp: "load", storeOp: "store" }],
-        depthStencilAttachment: { view: this.depthTexture.createView(), depthReadOnly: true },
+        colorAttachments: [{ view: colourView, loadOp: "load", ...ending(true) }],
+        depthStencilAttachment: { view: depthView, depthReadOnly: true },
         ...(this.timer ? { timestampWrites: this.timer.writes("end") } : {}),
       });
-      drawRange(seeThrough, firstSeeThrough, draws.length, this.depthGroups.scene);
+      drawRange(seeThrough, firstSeeThrough, draws.length, groups.scene);
       seeThrough.end();
     }
     this.timer?.resolve(encoder);
@@ -1552,9 +1591,37 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   /** Shader variants by material graph (EP7), built on first use. */
   private readonly graphPipelines = new Map<string, PipelineSet>();
 
-  /** The pipelines a material draws with: the plain shader's, or its graph's variant. */
-  private pipelinesOf(material: MeshPrimitive["material"]): PipelineSet {
+  /**
+   * The multisampled targets and pipelines an anti-aliased frame draws with
+   * (HALO_INFINITE_STYLE_ROADMAP.md I1): made on first use, so a renderer that
+   * never anti-aliases pays nothing for them.
+   */
+  private msaa: { colour: any; depth: any; blank: any; groups: { blank: any; scene: any }; pipeline: PipelineSet; graph: Map<string, PipelineSet> } | null = null;
+
+  private ensureMsaa(): NonNullable<WebgpuSceneRenderer["msaa"]> {
+    if (!this.msaa) {
+      const size = { width: this.width, height: this.height };
+      const colour = this.device.createTexture({ size, format: "rgba8unorm", sampleCount: MSAA_SAMPLES, usage: 0x10 }); // RENDER_ATTACHMENT
+      const depth = this.device.createTexture({ size, format: "depth24plus", sampleCount: MSAA_SAMPLES, usage: 0x10 | 0x04 }); // + TEXTURE_BINDING (soft edges)
+      const blank = this.device.createTexture({ size: { width: 1, height: 1 }, format: "depth24plus", sampleCount: MSAA_SAMPLES, usage: 0x10 | 0x04 });
+      const groups = this.depthGroups;
+      this.msaa = { colour, depth, blank, groups: groups.makeGroupsMs(groups.atlas, groups.probes, blank, depth), pipeline: this.pipelinesFor(sceneShader(), MSAA_SAMPLES), graph: new Map() };
+    }
+    return this.msaa;
+  }
+
+  /** The pipelines a material draws with: the plain shader's, or its graph's variant; multisampled for an anti-aliased frame. */
+  private pipelinesOf(material: MeshPrimitive["material"], msaa: WebgpuSceneRenderer["msaa"] = null): PipelineSet {
     const graph = compiledGraphOf(material);
+    if (msaa) {
+      if (!graph) return msaa.pipeline;
+      let set = msaa.graph.get(graph.key);
+      if (!set) {
+        set = this.pipelinesFor(sceneShader(graph), MSAA_SAMPLES);
+        msaa.graph.set(graph.key, set);
+      }
+      return set;
+    }
     if (!graph) return this.pipeline;
     let set = this.graphPipelines.get(graph.key);
     if (!set) {
@@ -1609,6 +1676,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     groups.probeSource = grid;
     this.device.queue.writeTexture({ texture: groups.probes }, lightProbeTexels(grid), { bytesPerRow: nx * 6 * 16, rowsPerImage: ny }, { width: nx * 6, height: ny, depthOrArrayLayers: nz });
     Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
+    if (this.msaa) this.msaa.groups = groups.makeGroupsMs(groups.atlas, groups.probes, this.msaa.blank, this.msaa.depth);
   }
 
   /** Upload the spot/point shadow tiles (EP8c): each tile into its atlas cell, and every tile's view. */
@@ -1620,6 +1688,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       groups.atlas = this.device.createTexture({ size: { width: side, height: side }, format: "r32float", usage: 0x04 | 0x02 });
       groups.atlasBlank = false;
       Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
+      if (this.msaa) this.msaa.groups = groups.makeGroupsMs(groups.atlas, groups.probes, this.msaa.blank, this.msaa.depth);
     }
     const views = new Float32Array(MAX_LOCAL_SHADOW_TILES * 20);
     local.tiles.slice(0, MAX_LOCAL_SHADOW_TILES).forEach((tile, i) => {
@@ -1807,6 +1876,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.software.dispose();
     destroySafely(this.colourTexture);
     destroySafely(this.depthTexture);
+    if (this.msaa) {
+      destroySafely(this.msaa.colour);
+      destroySafely(this.msaa.depth);
+      destroySafely(this.msaa.blank);
+    }
     destroySafely(this.depthGroups.blankTexture);
     destroySafely(this.depthGroups.clusters.table);
     destroySafely(this.depthGroups.clusters.index);

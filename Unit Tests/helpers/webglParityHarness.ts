@@ -305,6 +305,70 @@ async function settleOnce(name: string): Promise<{ states: string[]; differing: 
   return { states, differing, drawn };
 }
 
+/** The newest GPU frame of a scene drawn with or without anti-aliasing (I1), and any GL error on the way. */
+async function frameOf(name: string, antialias: boolean): Promise<{ out: Uint8ClampedArray; error: number } | { error: string }> {
+  const scene = scenes()[name];
+  if (!scene) return { error: `no scene ${name}` };
+  const renderer = WebglSceneRenderer.create(W, H);
+  if (!renderer) return { error: "WebGL2 renderer did not build" };
+  const draw = () => ({ ...scene.draw(), antialias });
+  renderer.render(scene.instances, draw());
+  for (let i = 0; i < 100 && !(renderer as unknown as { latest: Uint8Array | null }).latest; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    renderer.render(scene.instances, draw());
+  }
+  const frame = draw();
+  renderer.render(scene.instances, frame);
+  const error = (renderer as unknown as { gl: { getError(): number } }).gl.getError();
+  renderer.dispose();
+  return { out: frame.out, error };
+}
+
+/**
+ * Anti-aliasing (HALO_INFINITE_STYLE_ROADMAP.md I1): the same scene without and
+ * with it. Every pixel it changes must sit on an edge of the plain frame (a
+ * pixel unlike one of its neighbours), and an edge pixel it changes must land
+ * between the colours either side of that edge.
+ */
+async function runAntialias(name: string): Promise<{ changed: number; offEdge: number; outside: number; drawn: number; errors: number[] } | { error: string }> {
+  const plain = await frameOf(name, false);
+  const smooth = await frameOf(name, true);
+  if ("error" in plain && typeof plain.error === "string") return { error: plain.error };
+  if ("error" in smooth && typeof smooth.error === "string") return { error: smooth.error };
+  const a = (plain as { out: Uint8ClampedArray }).out;
+  const b = (smooth as { out: Uint8ClampedArray }).out;
+  const px = (o: Uint8ClampedArray, x: number, y: number) => [o[(y * W + x) * 4]!, o[(y * W + x) * 4 + 1]!, o[(y * W + x) * 4 + 2]!];
+  let changed = 0;
+  let offEdge = 0;
+  let outside = 0;
+  let drawn = 0;
+  for (let y = 0; y < H; y += 1) {
+    for (let x = 0; x < W; x += 1) {
+      const p = px(a, x, y);
+      const q = px(b, x, y);
+      if (p.some((v) => v > 0)) drawn += 1;
+      if (p.every((v, c) => Math.abs(v - q[c]!) <= 2)) continue;
+      changed += 1;
+      const near: number[][] = [];
+      for (let dy = -1; dy <= 1; dy += 1) for (let dx = -1; dx <= 1; dx += 1) if ((dx || dy) && x + dx >= 0 && y + dy >= 0 && x + dx < W && y + dy < H) near.push(px(a, x + dx, y + dy));
+      if (!near.some((n) => n.some((v, c) => Math.abs(v - p[c]!) > 2))) offEdge += 1;
+      // Between the darkest and brightest of the pixels around it, per channel (a little slack for shading).
+      // Two pixels out, because a sample can catch a sliver of geometry the plain frame missed next door.
+      const around: number[][] = [];
+      for (let dy = -2; dy <= 2; dy += 1) for (let dx = -2; dx <= 2; dx += 1) if (x + dx >= 0 && y + dy >= 0 && x + dx < W && y + dy < H) around.push(px(a, x + dx, y + dy));
+      for (let c = 0; c < 3; c += 1) {
+        const values = around.map((n) => n[c]!);
+        if (q[c]! < Math.min(...values) - 8 || q[c]! > Math.max(...values) + 8) {
+          outside += 1;
+          break;
+        }
+      }
+    }
+  }
+  return { changed, offEdge, outside, drawn, errors: [(plain as { error: number }).error, (smooth as { error: number }).error] };
+}
+
+(globalThis as unknown as { runAntialias: typeof runAntialias }).runAntialias = runAntialias;
 (globalThis as unknown as { settleOnce: typeof settleOnce }).settleOnce = settleOnce;
 (globalThis as unknown as { runParity: typeof run; glRenderer: typeof glRenderer }).runParity = run;
 (globalThis as unknown as { glRenderer: typeof glRenderer }).glRenderer = glRenderer;
