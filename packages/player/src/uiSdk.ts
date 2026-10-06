@@ -14,7 +14,11 @@
  *                                                       document that has any (a list moves
  *                                                       its selection, a slider its value);
  *                                                       A presses: returns what was pressed
- *                                                       (a list's selected row as its value)
+ *                                                       (a list's selected row as its value).
+ *                                                       The pointer works too (pointer.ts):
+ *                                                       pointing focuses a button or a list
+ *                                                       row, a click (or tap) presses it, and
+ *                                                       a slider follows a click or drag
  *   cartbox.ui.on(id, function(value) ... end)          or have it called instead
  *   cartbox.ui.focus(name, id) / focused(name)          set or read where focus is
  *   cartbox.ui.select(id, row) / selected(id)           a list's selected row (1-based)
@@ -23,6 +27,8 @@
  */
 
 import { FOCUSABLE, layoutUi, parseUiDocuments, uiNavigation, type UiDocument } from "@cartbox/editor";
+
+import { POINTER_AT, POINTER_CLICKS, POINTER_FLAGS, POINTER_MAGIC, POINTER_X, POINTER_Y } from "./pointer.js";
 
 const lua = (s: string) => JSON.stringify(s);
 
@@ -36,8 +42,12 @@ export function readSidecarUi(raw: string | null | undefined): UiDocument[] {
   }
 }
 
-/** The `cartbox.ui` Lua for a cart's documents on a `width × height` screen, or "" when it has none. */
-export function uiSdkLua(docs: readonly UiDocument[] | null | undefined, width: number, height: number): string {
+/**
+ * The `cartbox.ui` Lua for a cart's documents on a `width × height` screen, or
+ * "" when it has none. With `debugBlock` (the debug block's address), it reads
+ * the pointer the host writes there (pointer.ts).
+ */
+export function uiSdkLua(docs: readonly UiDocument[] | null | undefined, width: number, height: number, debugBlock?: number | null): string {
   if (!docs || docs.length === 0) return "";
   const tables = docs.map((doc) => {
     const placed = layoutUi(doc, width, height);
@@ -94,11 +104,63 @@ U.focused = function(n) local d, f = DOCS[n], focus[n]; if d and f and f > 0 the
 U.select = function(id, row) sel[id] = row end
 U.selected = function(id) return sel[id] or 1 end
 U.on = function(id, fn) on[id] = fn end
+-- The pointer (pointer.ts): where it is, whether it moved, and whether it clicked since the last update.
+local _P = ${debugBlock ?? "nil"}
+local plast, ptime, px, py, pdown, pclick, pmoved
+local function rd16(a) local v = peek(a) | (peek(a + 1) << 8); if v >= 32768 then v = v - 65536 end return v end
+local function pointer()
+  if not _P or (peek(_P + ${POINTER_AT}) | (peek(_P + ${POINTER_AT + 1}) << 8) | (peek(_P + ${POINTER_AT + 2}) << 16) | (peek(_P + ${POINTER_AT + 3}) << 24)) ~= ${POINTER_MAGIC} then return false end
+  local x, y, f, c, now = rd16(_P + ${POINTER_X}), rd16(_P + ${POINTER_Y}), peek(_P + ${POINTER_FLAGS}), peek(_P + ${POINTER_CLICKS}), time()
+  -- A click from before this document was being updated (a frame or more ago) isn't for it.
+  if plast == nil or ptime == nil or now - ptime > 50 then plast = c end
+  pclick, plast, ptime = c ~= plast, c, now
+  pmoved = x ~= px or y ~= py
+  px, py, pdown = x, y, f & 2 == 2
+  return f & 1 == 1
+end
+-- The focusable widget under (x, y): the last drawn, so the topmost.
+local function hit(d, x, y)
+  local found, i, count = nil, 1, #d.w
+  while i <= count do
+    local w = d.w[i]
+    if w.vis and not B[w.vis] then i = i + w.skip + 1
+    else
+      if (w.k == "button" or w.k == "list" or w.k == "slider") and x >= w.x and y >= w.y and x < w.x + w.w and y < w.y + w.h then found = i end
+      i = i + 1
+    end
+  end
+  return found
+end
+local function press(w)
+  local value = w.k == "list" and (sel[w.id] or 1) or (w.v and B[w.v])
+  if on[w.id] then on[w.id](value) end
+  return w.id, value
+end
 U.update = function()
   local n
   for i = #shown, 1, -1 do if DOCS[shown[i]].first > 0 then n = shown[i]; break end end
+  local over = pointer()
   if not n then return nil end
   local d, f = DOCS[n], focus[n] or 0
+  if over and (pclick or pmoved or pdown) then
+    local i = hit(d, px, py)
+    if i then
+      local w = d.w[i]
+      if pclick or pmoved then focus[n] = i; f = i end
+      if w.k == "list" then
+        local items, row = B[w.v] or {}, w.row or 12
+        local s = sel[w.id] or 1
+        local r = math.max(1, s - math.max(1, w.h // row) + 1) + (py - w.y) // row
+        if r >= 1 and r <= #items and (pclick or pmoved) then
+          sel[w.id] = r
+          if pclick then return press(w) end
+        end
+      elseif w.k == "slider" then
+        if pclick or pdown then B[w.v] = math.max(0, math.min(1, (px - w.x) / math.max(1, w.w - 1))) end
+      elseif pclick then return press(w) end
+      if pclick then return nil end
+    end
+  end
   if f == 0 then return nil end
   local w = d.w[f]
   if w.k == "list" then
@@ -112,11 +174,7 @@ U.update = function()
   end
   local links = d.nav[f]
   if links then for dir = 0, 3 do if btnp(dir) and links[dir + 1] > 0 then focus[n] = links[dir + 1]; return nil end end end
-  if btnp(4) then
-    local value = w.k == "list" and (sel[w.id] or 1) or (w.v and B[w.v])
-    if on[w.id] then on[w.id](value) end
-    return w.id, value
-  end
+  if btnp(4) then return press(w) end
   return nil
 end
 local function text(s, x, y, w, h, c, scale, small, align)

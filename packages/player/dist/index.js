@@ -280,6 +280,83 @@ async function bufferFor(context, sound) {
 
 // src/uiSdk.ts
 import { FOCUSABLE, layoutUi, parseUiDocuments, uiNavigation } from "@cartbox/editor";
+
+// src/pointer.ts
+var POINTER_AT = 48;
+var POINTER_MAGIC = 1414545987;
+var POINTER_X = 52;
+var POINTER_Y = 54;
+var POINTER_FLAGS = 56;
+var POINTER_CLICKS = 57;
+function writePointer(debugBlock, state) {
+  const s = state ?? { x: 0, y: 0, over: false, down: false, clicks: 0 };
+  debugBlock.setUint32(POINTER_AT, POINTER_MAGIC, true);
+  debugBlock.setInt16(POINTER_X, Math.max(-32768, Math.min(32767, Math.floor(s.x))), true);
+  debugBlock.setInt16(POINTER_Y, Math.max(-32768, Math.min(32767, Math.floor(s.y))), true);
+  debugBlock.setUint8(POINTER_FLAGS, (s.over ? 1 : 0) | (s.down ? 2 : 0));
+  debugBlock.setUint8(POINTER_CLICKS, s.clicks & 255);
+}
+function toConsolePixel(clientX, clientY, rect, model) {
+  if (rect.width <= 0 || rect.height <= 0) return { x: 0, y: 0, over: false };
+  const x = (clientX - rect.left) / rect.width * model.width;
+  const y = (clientY - rect.top) / rect.height * model.height;
+  return { x, y, over: x >= 0 && y >= 0 && x < model.width && y < model.height };
+}
+var PointerInput = class {
+  constructor(container, model) {
+    this.container = container;
+    this.model = model;
+    this.x = 0;
+    this.y = 0;
+    this.over = false;
+    this.down = false;
+    this.clicks = 0;
+    this.onMove = (e) => this.track(e);
+    this.onDown = (e) => {
+      this.track(e);
+      if (this.over && e.button === 0) {
+        this.down = true;
+        this.clicks = this.clicks + 1 & 255;
+      }
+    };
+    this.onUp = (e) => {
+      this.track(e);
+      this.down = false;
+    };
+    this.onLeave = (e) => {
+      this.down = false;
+      if (e.pointerType !== "touch") this.over = false;
+    };
+    container.addEventListener("pointermove", this.onMove, true);
+    container.addEventListener("pointerdown", this.onDown, true);
+    container.addEventListener("pointerup", this.onUp, true);
+    container.addEventListener("pointerleave", this.onLeave, true);
+  }
+  screen() {
+    let best = null;
+    for (const canvas of Array.from(this.container.querySelectorAll("canvas"))) {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0 && (!best || rect.width * rect.height > best.width * best.height)) best = rect;
+    }
+    return best;
+  }
+  track(e) {
+    const rect = this.screen();
+    if (!rect) return;
+    const p = toConsolePixel(e.clientX, e.clientY, rect, this.model);
+    this.x = p.x;
+    this.y = p.y;
+    this.over = p.over;
+  }
+  destroy() {
+    this.container.removeEventListener("pointermove", this.onMove, true);
+    this.container.removeEventListener("pointerdown", this.onDown, true);
+    this.container.removeEventListener("pointerup", this.onUp, true);
+    this.container.removeEventListener("pointerleave", this.onLeave, true);
+  }
+};
+
+// src/uiSdk.ts
 var lua = (s) => JSON.stringify(s);
 function readSidecarUi(raw) {
   if (!raw) return [];
@@ -289,7 +366,7 @@ function readSidecarUi(raw) {
     return [];
   }
 }
-function uiSdkLua(docs, width, height) {
+function uiSdkLua(docs, width, height, debugBlock) {
   if (!docs || docs.length === 0) return "";
   const tables = docs.map((doc) => {
     const placed = layoutUi(doc, width, height);
@@ -346,11 +423,63 @@ U.focused = function(n) local d, f = DOCS[n], focus[n]; if d and f and f > 0 the
 U.select = function(id, row) sel[id] = row end
 U.selected = function(id) return sel[id] or 1 end
 U.on = function(id, fn) on[id] = fn end
+-- The pointer (pointer.ts): where it is, whether it moved, and whether it clicked since the last update.
+local _P = ${debugBlock ?? "nil"}
+local plast, ptime, px, py, pdown, pclick, pmoved
+local function rd16(a) local v = peek(a) | (peek(a + 1) << 8); if v >= 32768 then v = v - 65536 end return v end
+local function pointer()
+  if not _P or (peek(_P + ${POINTER_AT}) | (peek(_P + ${POINTER_AT + 1}) << 8) | (peek(_P + ${POINTER_AT + 2}) << 16) | (peek(_P + ${POINTER_AT + 3}) << 24)) ~= ${POINTER_MAGIC} then return false end
+  local x, y, f, c, now = rd16(_P + ${POINTER_X}), rd16(_P + ${POINTER_Y}), peek(_P + ${POINTER_FLAGS}), peek(_P + ${POINTER_CLICKS}), time()
+  -- A click from before this document was being updated (a frame or more ago) isn't for it.
+  if plast == nil or ptime == nil or now - ptime > 50 then plast = c end
+  pclick, plast, ptime = c ~= plast, c, now
+  pmoved = x ~= px or y ~= py
+  px, py, pdown = x, y, f & 2 == 2
+  return f & 1 == 1
+end
+-- The focusable widget under (x, y): the last drawn, so the topmost.
+local function hit(d, x, y)
+  local found, i, count = nil, 1, #d.w
+  while i <= count do
+    local w = d.w[i]
+    if w.vis and not B[w.vis] then i = i + w.skip + 1
+    else
+      if (w.k == "button" or w.k == "list" or w.k == "slider") and x >= w.x and y >= w.y and x < w.x + w.w and y < w.y + w.h then found = i end
+      i = i + 1
+    end
+  end
+  return found
+end
+local function press(w)
+  local value = w.k == "list" and (sel[w.id] or 1) or (w.v and B[w.v])
+  if on[w.id] then on[w.id](value) end
+  return w.id, value
+end
 U.update = function()
   local n
   for i = #shown, 1, -1 do if DOCS[shown[i]].first > 0 then n = shown[i]; break end end
+  local over = pointer()
   if not n then return nil end
   local d, f = DOCS[n], focus[n] or 0
+  if over and (pclick or pmoved or pdown) then
+    local i = hit(d, px, py)
+    if i then
+      local w = d.w[i]
+      if pclick or pmoved then focus[n] = i; f = i end
+      if w.k == "list" then
+        local items, row = B[w.v] or {}, w.row or 12
+        local s = sel[w.id] or 1
+        local r = math.max(1, s - math.max(1, w.h // row) + 1) + (py - w.y) // row
+        if r >= 1 and r <= #items and (pclick or pmoved) then
+          sel[w.id] = r
+          if pclick then return press(w) end
+        end
+      elseif w.k == "slider" then
+        if pclick or pdown then B[w.v] = math.max(0, math.min(1, (px - w.x) / math.max(1, w.w - 1))) end
+      elseif pclick then return press(w) end
+      if pclick then return nil end
+    end
+  end
   if f == 0 then return nil end
   local w = d.w[f]
   if w.k == "list" then
@@ -364,11 +493,7 @@ U.update = function()
   end
   local links = d.nav[f]
   if links then for dir = 0, 3 do if btnp(dir) and links[dir + 1] > 0 then focus[n] = links[dir + 1]; return nil end end end
-  if btnp(4) then
-    local value = w.k == "list" and (sel[w.id] or 1) or (w.v and B[w.v])
-    if on[w.id] then on[w.id](value) end
-    return w.id, value
-  end
+  if btnp(4) then return press(w) end
   return nil
 end
 local function text(s, x, y, w, h, c, scale, small, align)
@@ -15027,6 +15152,8 @@ var Player = class {
     this.qualitySettings = QUALITY_PRESETS.high;
     /** Presented-frame clock for animation, kept in lockstep with the scene backdrop. */
     this.presentFrame = 0;
+    /** Where the pointer is written (the debug block's offset from pmem), when the cart has UI documents. */
+    this.pointerOffset = null;
     /** The cart reads analog sticks (it opted in via cartbox.stick). */
     this.analogCart = false;
     /** Input actions (EP15): the cart's, with the player's rebinding, and the keys they claim. */
@@ -15231,8 +15358,9 @@ var Player = class {
         prepared = prependLuaCode(prepared, stringsLua);
         this.inputOffset = inputBlockAddress(layout) - layout.pmemAddress;
       }
-      const uiLua = uiSdkLua(this.options.ui, this.model.width, this.model.height);
+      const uiLua = uiSdkLua(this.options.ui, this.model.width, this.model.height, layout ? debugBlockAddress(layout) : null);
       if (uiLua) prepared = prependLuaCode(prepared, uiLua);
+      if (uiLua && layout) this.pointerOffset = debugBlockAddress(layout) - layout.pmemAddress;
       const sceneLua = sceneObjectsSdkLua(this.options.mesh);
       if (sceneLua) prepared = prependLuaCode(prepared, sceneLua);
       const mesh = this.options.mesh;
@@ -15396,6 +15524,7 @@ var Player = class {
       this.touch = new TouchInput(this.container, this.gamepad, onStart);
       this.touch.applySettings(this.controlSettings);
     }
+    this.pointer = new PointerInput(this.container, this.model);
   }
   /**
    * Chooses the input source. In playback mode the console is driven by the
@@ -15520,6 +15649,7 @@ var Player = class {
     const input = (this.replaySource ? this.replaySource.maskForFrame(this.tickFrame) : this.inputEnabled ? this.gamepad.value | this.heldActions() << 8 : 0) >>> 0;
     const mask = input & 255;
     this.feedActions(input >>> 8);
+    this.feedPointer();
     const net = this.options.netplay;
     if (net && this.console) {
       const words = this.console.netWords();
@@ -15921,6 +16051,14 @@ var Player = class {
     const save = takeSave(block);
     if (save) this.options.onSave?.(save.data);
   }
+  /** The pointer, for the cart's UI documents (pointer.ts); off the screen in playback. */
+  feedPointer() {
+    if (this.pointerOffset === null || !this.console) return;
+    const bytes = this.console.ramView(this.pointerOffset, POINTER_CLICKS + 1);
+    if (!bytes) return;
+    const live = this.pointer && !this.replaySource && this.inputEnabled ? this.pointer : null;
+    writePointer(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), live);
+  }
   /** Input actions (EP15): this tick's mask and last tick's into the input block. */
   feedActions(held) {
     if (this.inputOffset === null || !this.console) return;
@@ -15962,6 +16100,7 @@ var Player = class {
     this.view.cancelAnimationFrame(this.frameHandle);
     this.keyboard?.destroy();
     this.touch?.destroy();
+    this.pointer?.destroy();
     this.runtime?.channel.destroy();
     this.runtime = null;
     this.sounds?.dispose();
@@ -16809,11 +16948,14 @@ export {
   PHYSICS_DT,
   PHYS_BLOCK_BYTES,
   PHYS_MAGIC,
+  POINTER_AT,
+  POINTER_MAGIC,
   POST_FX_EFFECTS,
   PROFILE_SECTIONS,
   PROFILE_WINDOW,
   ParticleOverlaySurface,
   PhysicsSession,
+  PointerInput,
   PostFxPass,
   PostFxSurface,
   Profiler,
@@ -17012,6 +17154,7 @@ export {
   takeRingCommands,
   takeSave,
   tiltShiftBlur,
+  toConsolePixel,
   tokenizeLua,
   uiSdkLua,
   uniformsFromSettings,
@@ -17028,5 +17171,6 @@ export {
   writeInstanceUniform,
   writeNetInbox,
   writePhysicsState,
+  writePointer,
   writeWatches
 };

@@ -27,6 +27,7 @@ import { frameDurationMs, getModel, type ConsoleModel } from "./models.js";
 import { ReplayRecorder, ReplaySource, hashCart, randomSeed, type Replay } from "./replay.js";
 import { seedCartridge, prependLuaCode, readCartCode, appendLuaCode, rewriteLuaCode } from "./cartseed.js";
 import { STICK_OPTIN_MAGIC, STICK_OPTIN_WORD, STICK_WORD, packSticks } from "./sticks.js";
+import { POINTER_CLICKS, PointerInput, writePointer } from "./pointer.js";
 import { DEFAULT_CONTROL_SETTINGS, applyLookSettings, type ControlSettings } from "./controls.js";
 import { injectSdk } from "./sdk.js";
 import { componentsSdkLua } from "./componentsSdk.js";
@@ -124,6 +125,10 @@ export class Player {
   private audio?: AudioController;
   private keyboard?: KeyboardInput;
   private touch?: TouchInput;
+  /** The pointer over the screen, for the cart's UI documents (pointer.ts). */
+  private pointer?: PointerInput;
+  /** Where the pointer is written (the debug block's offset from pmem), when the cart has UI documents. */
+  private pointerOffset: number | null = null;
   /** The cart reads analog sticks (it opted in via cartbox.stick). */
   private analogCart = false;
   /** Input actions (EP15): the cart's, with the player's rebinding, and the keys they claim. */
@@ -347,8 +352,10 @@ export class Player {
         this.inputOffset = inputBlockAddress(layout) - layout.pmemAddress;
       }
       // UI documents (EP13): laid out for this screen, driven with cartbox.ui.
-      const uiLua = uiSdkLua(this.options.ui, this.model.width, this.model.height);
+      const uiLua = uiSdkLua(this.options.ui, this.model.width, this.model.height, layout ? debugBlockAddress(layout) : null);
       if (uiLua) prepared = prependLuaCode(prepared, uiLua);
+      // Its documents answer the mouse and taps too: the pointer goes in before each tick.
+      if (uiLua && layout) this.pointerOffset = debugBlockAddress(layout) - layout.pmemAddress;
       // The placed meshes as scene objects (cartbox.find / prop / tagged ...).
       const sceneLua = sceneObjectsSdkLua(this.options.mesh);
       if (sceneLua) prepared = prependLuaCode(prepared, sceneLua);
@@ -574,6 +581,7 @@ export class Player {
       this.touch = new TouchInput(this.container, this.gamepad, onStart);
       this.touch.applySettings(this.controlSettings);
     }
+    this.pointer = new PointerInput(this.container, this.model);
   }
 
   /**
@@ -753,6 +761,7 @@ export class Player {
     const input = (this.replaySource ? this.replaySource.maskForFrame(this.tickFrame) : this.inputEnabled ? this.gamepad.value | (this.heldActions() << 8) : 0) >>> 0;
     const mask = input & 0xff;
     this.feedActions(input >>> 8);
+    this.feedPointer();
     const net = this.options.netplay;
     if (net && this.console) {
       const words = this.console.netWords();
@@ -1221,6 +1230,15 @@ export class Player {
     if (save) this.options.onSave?.(save.data);
   }
 
+  /** The pointer, for the cart's UI documents (pointer.ts); off the screen in playback. */
+  private feedPointer(): void {
+    if (this.pointerOffset === null || !this.console) return;
+    const bytes = this.console.ramView(this.pointerOffset, POINTER_CLICKS + 1);
+    if (!bytes) return;
+    const live = this.pointer && !this.replaySource && this.inputEnabled ? this.pointer : null;
+    writePointer(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), live);
+  }
+
   /** Input actions (EP15): this tick's mask and last tick's into the input block. */
   private feedActions(held: number): void {
     if (this.inputOffset === null || !this.console) return;
@@ -1273,6 +1291,7 @@ export class Player {
     this.view.cancelAnimationFrame(this.frameHandle);
     this.keyboard?.destroy();
     this.touch?.destroy();
+    this.pointer?.destroy();
     this.runtime?.channel.destroy();
     this.runtime = null;
     this.sounds?.dispose();
