@@ -10,7 +10,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { frameDurationMs, getModel, mount, readCartCode, type DebugStep, type InspectedObject, type PauseInfo, type ProfileSnapshot, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type QualityChoice, type SceneSpec, type WorldScene } from "@cartbox/player";
-import type { InputAction, UiDocument } from "@cartbox/editor";
+import { COLOR_FILTERS, COLOR_FILTER_LABELS, languageName, type ColorFilter, type InputAction, type StringTable, type UiDocument } from "@cartbox/editor";
+import { preferredLanguages, readPlayerPrefs } from "@/lib/accessibilityPrefs";
 import { browserStorage, readLocalSave, writeLocalSave } from "@/lib/saveData";
 
 import styles from "./editor.module.css";
@@ -57,6 +58,8 @@ interface RunOverlayProps {
   actions?: readonly InputAction[];
   /** Where the playtest keeps the cart's save data (EP15b) in this browser, apart from players' saves; absent = saves off. */
   saveKey?: string;
+  /** The cart's string table (EP19b): the playtest can run in each of its languages. */
+  strings?: StringTable | null;
   /** The cart's HD-2D world (3D terrain + 2D character billboards), during the playtest. */
   world?: WorldScene;
   /**
@@ -91,6 +94,7 @@ export function RunOverlay({
   ui,
   actions,
   saveKey,
+  strings,
   world,
   onGoToLine,
   breakpoints = NO_LINES,
@@ -102,6 +106,11 @@ export function RunOverlay({
   const stageRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<PlayerHandle | null>(null);
   const [quality, setQuality] = useState<QualityChoice>("auto");
+  // Localisation and accessibility (EP19b): the playtest's language (switching restarts it) and a colour preview.
+  const [language, setLanguage] = useState<string | null>(null);
+  const [colorPreview, setColorPreview] = useState<{ filter: ColorFilter; kind: "correct" | "simulate" }>({ filter: "none", kind: "simulate" });
+  const colorPreviewRef = useRef(colorPreview);
+  colorPreviewRef.current = colorPreview;
   // Read at mount so a remount (the cart's data changed) keeps the chosen preset.
   const qualityRef = useRef<QualityChoice>("auto");
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
@@ -205,6 +214,9 @@ export function RunOverlay({
       mesh,
       ...(ui && ui.length > 0 ? { ui } : {}),
       ...(actions && actions.length > 0 ? { actions } : {}),
+      strings: strings ?? null,
+      languages: language ? [language] : preferredLanguages(readPlayerPrefs(browserStorage())),
+      accessibility: readPlayerPrefs(browserStorage()),
       ...(saveKey
         ? {
             saveData: readLocalSave(browserStorage(), saveKey)?.data ?? null,
@@ -221,7 +233,11 @@ export function RunOverlay({
       // sprites standing in it as depth-composited billboards.
       world,
       quality: qualityRef.current,
-      onReady: () => setStatus("ready"),
+      onReady: () => {
+        setStatus("ready");
+        const preview = colorPreviewRef.current;
+        if (preview.filter !== "none") handleRef.current?.setColorFilter(preview.filter, preview.kind);
+      },
       // Surface the real load-error message instead of a generic failure line.
       // (A runtime Lua error renders on the cart's own screen — the core does not
       // report it to the host.)
@@ -259,7 +275,7 @@ export function RunOverlay({
       handle.destroy();
       URL.revokeObjectURL(url);
     };
-  }, [bytes, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, ui, actions, saveKey, restarts, world, debugOn]);
+  }, [bytes, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, ui, actions, saveKey, strings, language, restarts, world, debugOn]);
 
   // Breakpoints and watches edited during the run reach the player at once.
   useEffect(() => {
@@ -390,6 +406,46 @@ export function RunOverlay({
                 {inspecting ? "Hide objects" : "Objects"}
               </button>
             )}
+            {strings && strings.languages.length > 1 && (
+              <select
+                aria-label="Language"
+                title="Play in another of the cart's languages (restarts the playtest)"
+                value={language ?? ""}
+                onChange={(e) => setLanguage(e.target.value || null)}
+                style={{ font: "inherit", padding: "4px 8px", borderRadius: 6 }}
+              >
+                <option value="">Language: player&apos;s</option>
+                {strings.languages.map((l) => (
+                  <option key={l} value={l}>
+                    {languageName(l)} ({l})
+                  </option>
+                ))}
+              </select>
+            )}
+            <select
+              aria-label="Colour preview"
+              title="See the cart as a colour-blind player does, or with a player's correction filter"
+              value={`${colorPreview.kind}:${colorPreview.filter}`}
+              disabled={status !== "ready"}
+              onChange={(e) => {
+                const [kind, filter] = e.target.value.split(":") as ["correct" | "simulate", ColorFilter];
+                setColorPreview({ filter, kind });
+                handleRef.current?.setColorFilter(filter, kind);
+              }}
+              style={{ font: "inherit", padding: "4px 8px", borderRadius: 6 }}
+            >
+              <option value="simulate:none">Colours: normal</option>
+              {COLOR_FILTERS.filter((f) => f !== "none" && f !== "high-contrast").map((f) => (
+                <option key={`s${f}`} value={`simulate:${f}`}>
+                  As seen with {f}
+                </option>
+              ))}
+              {COLOR_FILTERS.filter((f) => f !== "none").map((f) => (
+                <option key={`c${f}`} value={`correct:${f}`}>
+                  Player filter: {COLOR_FILTER_LABELS[f]}
+                </option>
+              ))}
+            </select>
             <select
               aria-label="Speed"
               title="Game speed — slow it down to watch a bug happen (sound is muted away from 1×)"

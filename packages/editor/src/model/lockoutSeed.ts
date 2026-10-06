@@ -42,6 +42,7 @@ import type { UiDocument, UiWidget } from "./ui";
 import type { ComponentDef } from "./components";
 import { compileScriptGraph, type ScriptGraph, type ScriptNode, type ScriptWire } from "./scriptGraph";
 import type { InputAction } from "./inputActions";
+import type { StringTable } from "./strings";
 import { bakeNavMesh, boxTriangles, serializeNavMesh, type NavMesh } from "./navmesh";
 import { serializeTerrain, terrainMesh, type Terrain } from "./terrain";
 import type { SceneTimeline } from "./timeline";
@@ -1407,12 +1408,12 @@ export const LOCKOUT_UI: UiDocument[] = [
       { id: "health", kind: "bar", anchor: [0, 0], pivot: [0, 0], offset: [40, 66], size: [300, 12], fill: 5, color: 6, value: "hp2", visible: "shields" },
       txt("weapon", 900, 40, 340, 12, "{weapon}", 12, 2),
       txt("ammo", 1040, 74, 200, 12, "{ammo}", 12, 2, { tint: "ammoc" }),
-      txt("frag", 1150, 96, 60, 6, "FRAG", 13, 1),
+      txt("frag", 1150, 96, 60, 6, "@hud.frag", 13, 1),
       txt("mode", 540, 40, 700, 6, "{mode}", 13, 1),
       txt("status", 540, 58, 700, 12, "{status}", 12, 2),
       { id: "feed", kind: "list", anchor: [0, 0], pivot: [0, 0], offset: [872, 165], size: [400, 132], row: 22, value: "feed", color: 12, scale: 1, small: true },
       txt("announce", 540, 150, 700, 18, "{announce}", 12, 3, { tint: "announcec", visible: "announce" }),
-      txt("respawn", 520, 330, 400, 18, "RESPAWNING...", 6, 3, { visible: "dead" }),
+      txt("respawn", 520, 330, 400, 18, "@hud.respawn", 6, 3, { visible: "dead" }),
     ],
   },
   {
@@ -1420,14 +1421,42 @@ export const LOCKOUT_UI: UiDocument[] = [
     widgets: [
       txt("top", 330, 150, 800, 6, "{menutop}", 13, 1, { tint: "menutopc" }),
       { id: "modes", kind: "list", anchor: [0, 0], pivot: [0, 0], offset: [470, 190], size: [360, 320], row: 40, value: "modes", color: 13, focusFill: 1, focusColor: 12, scale: 2, small: true },
-      txt("keys", 430, 540, 800, 6, "Up/Down choose . Z (or A) select . Start: controls, audio & more", 13, 1),
-      txt("move", 300, 584, 900, 6, "Move Up/Down . Turn Left/Right . hold A strafe . dbl-tap A grenade", 13, 1),
-      txt("fire", 300, 612, 900, 6, "Z fire (auto-melee close) . X/Space jump . S/Tab swap . G/Q grenade . sniper: Shift (or hold A) to zoom", 13, 1),
-      txt("pad", 260, 640, 1000, 6, "Touch/controller: left stick moves . right stick aims . A fire . B jump . X zoom/grenade . Y swap . LT grenade", 13, 1),
+      txt("keys", 430, 540, 800, 6, "@menu.keys", 13, 1),
+      txt("move", 300, 584, 900, 6, "@menu.move", 13, 1),
+      txt("fire", 300, 612, 900, 6, "@menu.fire", 13, 1),
+      txt("pad", 260, 640, 1000, 6, "@menu.pad", 13, 1),
       txt("career", 330, 676, 800, 6, "{career}", 9, 1),
     ],
   },
 ];
+
+/**
+ * Lockout's string table (EP19b): its UI's fixed texts and game type names in
+ * English and Spanish. The console font is ASCII, so the Spanish is written
+ * without accents. Lua reads it through cartbox.text, keeping the English as
+ * written when no table is loaded (see T in LOCKOUT_CODE).
+ */
+export const LOCKOUT_STRINGS: StringTable = {
+  languages: ["en", "es"],
+  fallback: "en",
+  entries: [
+    { key: "hud.frag", text: { en: "FRAG", es: "GRANADA" } },
+    { key: "hud.respawn", text: { en: "RESPAWNING...", es: "REAPARECIENDO..." } },
+    { key: "menu.keys", text: { en: "Up/Down choose . Z (or A) select . Start: controls, audio & more", es: "Arriba/Abajo elige . Z (o A) acepta . Start: controles, audio y mas" } },
+    { key: "menu.move", text: { en: "Move Up/Down . Turn Left/Right . hold A strafe . dbl-tap A grenade", es: "Mover Arriba/Abajo . Girar Izq/Der . manten A lateral . doble A granada" } },
+    { key: "menu.fire", text: { en: "Z fire (auto-melee close) . X/Space jump . S/Tab swap . G/Q grenade . sniper: Shift (or hold A) to zoom", es: "Z dispara (cuerpo a cuerpo de cerca) . X/Espacio salta . S/Tab cambia . G/Q granada . francotirador: Shift (o manten A) apunta" } },
+    { key: "menu.pad", text: { en: "Touch/controller: left stick moves . right stick aims . A fire . B jump . X zoom/grenade . Y swap . LT grenade", es: "Tactil/mando: stick izq mueve . stick der apunta . A dispara . B salta . X zoom/granada . Y cambia . LT granada" } },
+    { key: "menu.top", text: { en: "Matchmaking finds players online . or play the game types below vs 7 bots", es: "Partida en linea busca jugadores . o juega estos modos contra 7 bots" } },
+    { key: "menu.matchmaking", text: { en: "Matchmaking (online)", es: "Partida en linea" } },
+    { key: "mode.ffa", text: { en: "Free for All", es: "Todos contra todos" } },
+    { key: "mode.slayer", text: { en: "Team Slayer", es: "Asesino por equipos" } },
+    { key: "mode.swat", text: { en: "SWAT", es: "SWAT" } },
+    { key: "mode.snipe", text: { en: "Team Snipers", es: "Francotiradores" } },
+    { key: "mode.ball", text: { en: "Oddball", es: "Bola rara" } },
+    { key: "mode.koth", text: { en: "King of the Hill", es: "Rey de la colina" } },
+    { key: "mode.jugg", text: { en: "Juggernaut", es: "Coloso" } },
+  ],
+};
 
 const gun = (id: string, synth: SynthPreset): SceneSound => ({ name: `fire_${id}`, source: { kind: "synth", synth }, bus: "sfx", volume: 0.8, range: [6, 90] });
 const vox = (name: string, text: string): SceneSound => ({ name, source: { kind: "speech", text }, bus: "voice", volume: 1 });
@@ -2446,6 +2475,7 @@ export function lockoutMeshSidecar(): string {
       ui: LOCKOUT_UI,
       components: LOCKOUT_COMPONENTS,
       actions: LOCKOUT_INPUT_ACTIONS,
+      strings: LOCKOUT_STRINGS,
     });
   }
   return meshSidecar;
@@ -2528,6 +2558,14 @@ local MODES = {
   jugg   = { name="Juggernaut",    obj="jugg",   teams=false, shields=true,  radar=true,  start="magnum", target=15, weapons={br=true,shotgun=true,sniper=true,sword=true} },
 }
 local MODE_KEYS = {"ffa","slayer","swat","snipe","ball","koth","jugg"}
+
+-- Text in the player's language (EP19b): the string table's, else the English as written.
+local function T(key, english, ...)
+  local s = cartbox.text(key, ...)
+  if s == key then return english end
+  return s
+end
+for k, m in pairs(MODES) do m.name = T("mode."..k, m.name) end
 
 -- Hill locations King-of-the-Hill rotates through (the named power positions).
 local HILL_MOVE = 1800   -- the hill moves every 30s
@@ -3847,7 +3885,7 @@ function title_screen()
   local keys = (NETMODE == 2) and ONLINE_KEYS or MODE_KEYS
   local items = {}
   for _,k in ipairs(keys) do items[#items+1] = MODES[k].name end
-  if NETMODE == 0 then items[#items+1] = "Matchmaking (online)" end
+  if NETMODE == 0 then items[#items+1] = T("menu.matchmaking", "Matchmaking (online)") end
   local n=#items
   if sel > n then sel = 1 end
   -- The menu is a UI document (cartbox.ui): its list moves with the d-pad.
@@ -3856,7 +3894,7 @@ function title_screen()
   if NETMODE == 2 then
     local humans = humans_in_room()
     U.set("menutop","ONLINE  --  you are the host  --  "..humans.." player"..(humans==1 and "" or "s").." + "..(8-humans).." bots"); U.set("menutopc",9)
-  else U.set("menutop","Matchmaking finds players online . or play the game types below vs 7 bots"); U.set("menutopc",13) end
+  else U.set("menutop",T("menu.top","Matchmaking finds players online . or play the game types below vs 7 bots")); U.set("menutopc",13) end
   U.set("career", career_line())
   U.show("menu")
   local id

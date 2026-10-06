@@ -639,6 +639,36 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
     ],
   },
   {
+    label: "cartbox · text & accessibility",
+    open: false,
+    entries: [
+      {
+        name: "cartbox.text",
+        signature: "cartbox.text(key, ...) -> string",
+        doc: "A text from the Text tab's string table, in the player's language (else the fallback language, else the key). {1}, {2}… fill from the arguments; {name} from a table. In the UI tab, a text of @key does the same.",
+        snippet: 'print(cartbox.text("hud.score", score), 8, 8, 12)',
+      },
+      {
+        name: "cartbox.language",
+        signature: "cartbox.language() -> code",
+        doc: "The language being played in (\"en\", \"es\"…); cartbox.languages() lists the cart's, cartbox.setlanguage(code) switches.",
+        snippet: 'if cartbox.language() == "ja" then\n  \nend',
+      },
+      {
+        name: "cartbox.textscale",
+        signature: "cartbox.textscale() -> 1, 1.5 or 2",
+        doc: "The player's text size. UI documents already follow it; use it to size text the cart prints itself.",
+        snippet: "local s = math.floor(cartbox.textscale() + 0.5)\nprint(msg, 8, 8, 12, false, s)",
+      },
+      {
+        name: "cartbox.colorfilter",
+        signature: 'cartbox.colorfilter() -> "none" | "protanopia" | …',
+        doc: "The player's colour filter (the frame is already corrected). Add shapes or patterns to things told apart only by colour when it isn't \"none\".",
+        snippet: 'local markers = cartbox.colorfilter() ~= "none"',
+      },
+    ],
+  },
+  {
     label: "cartbox · save data",
     open: false,
     entries: [

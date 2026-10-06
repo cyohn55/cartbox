@@ -75,6 +75,7 @@ import { FilesEditor } from "./FilesEditor";
 import { MeshEditor } from "./MeshEditor";
 import { UiEditor } from "./UiEditor";
 import { InputEditor } from "./InputEditor";
+import { StringsEditor } from "./StringsEditor";
 import { saveKey } from "@/lib/saveData";
 import type { PlaytestConfig } from "./ScenePlayView";
 import { WorldEditor } from "./WorldEditor";
@@ -88,7 +89,7 @@ import { SnapshotsPanel } from "./SnapshotsPanel";
 import { useShortcuts, WORKBENCH_SHORTCUTS, type Shortcut } from "./shortcuts";
 import { decodeMeshSidecar, encodeMeshSidecar, addMesh, type MeshSidecar } from "@/lib/meshSidecar";
 import { rebakeMeshSidecar } from "@/lib/meshTextureBake";
-import type { MeshAsset } from "@cartbox/editor";
+import { readSidecarStrings, type MeshAsset } from "@cartbox/editor";
 import { toggleBreakpoint } from "./debuggerView";
 
 // Which tabs a cart gets depends on its console model and what it already
@@ -408,6 +409,7 @@ function WorkbenchBody({
   const meshScene = useMemo<MeshScene | null>(() => parseMeshScene(sidecars.mesh), [sidecars.mesh]);
   const meshUi = useMemo(() => readSidecarUi(sidecars.mesh), [sidecars.mesh]);
   const meshActions = useMemo(() => readSidecarActions(sidecars.mesh), [sidecars.mesh]);
+  const meshStrings = useMemo(() => readSidecarStrings(sidecars.mesh), [sidecars.mesh]);
   // Every sidecar but the mesh one (measured separately), for the download budget.
   const budgetOtherData = useMemo(
     () => (Object.entries(sidecars) as [string, unknown][]).filter(([key]) => key !== "mesh").map(([, value]) => value),
@@ -871,6 +873,7 @@ function WorkbenchBody({
       mesh: parseMeshScene(baked ?? null),
       ui: readSidecarUi(baked ?? null),
       actions: readSidecarActions(baked ?? null),
+      strings: readSidecarStrings(baked ?? null),
       saveKey: saveKey(cartId, "playtest"),
     };
   }, [runnable, rebakeMesh, sidecars.mesh, setSidecar, engineUrl, modelId, fx, scene, anim, particles, collision, flags, world, cartId]);
@@ -1420,6 +1423,7 @@ function WorkbenchBody({
       )}
       {activeTab === "Mesh" && <MeshEditor key="mesh" sidecar={mesh} onSidecarChange={setMesh} code={doc} onStartPlay={startPlaytest} />}
       {activeTab === "Input" && <InputEditor key="input" sidecar={mesh} onSidecarChange={setMesh} />}
+      {activeTab === "Text" && <StringsEditor key="text" sidecar={mesh} ui={mesh.ui ?? []} onSidecarChange={setMesh} />}
       {activeTab === "UI" && <UiEditor key="ui" sidecar={mesh} onSidecarChange={setMesh} width={activeModel.width} height={activeModel.height} palette={uiPalette} />}
       {activeTab === "Files" && (
         <FilesEditor
@@ -1560,6 +1564,7 @@ function WorkbenchBody({
           mesh={meshScene ?? undefined}
           ui={meshUi}
           actions={meshActions}
+          strings={meshStrings}
           saveKey={saveKey(cartId, "playtest")}
           world={world ?? undefined}
           breakpoints={breakpoints}

@@ -11,7 +11,7 @@
  * browser.
  */
 
-import { base64ToBytes } from "@cartbox/editor";
+import { base64ToBytes, readSidecarStrings } from "@cartbox/editor";
 import {
   mount,
   parseAnim,
@@ -29,6 +29,7 @@ import {
   type PlayerHandle,
 } from "@cartbox/player";
 
+import { preferredLanguages, readPlayerPrefs } from "../lib/accessibilityPrefs";
 import { browserStorage, openSaves } from "../lib/saveData";
 import type { StandaloneData } from "../lib/standaloneExport";
 
@@ -59,6 +60,7 @@ export async function boot(game: StandaloneData, stage: HTMLElement, status?: HT
   const mesh = parseMeshScene(game.mesh);
   const ui = readSidecarUi(game.mesh);
   const actions = readSidecarActions(game.mesh);
+  const prefs = readPlayerPrefs(browserStorage());
   const saves = await openSaves({ cartId: game.cartId, cloud: false, storage: browserStorage() });
   const physicsSource = game.physics;
   const ktx2Source = game.ktx2;
@@ -83,6 +85,10 @@ export async function boot(game: StandaloneData, stage: HTMLElement, status?: HT
     world: parseWorldScene(game.world) ?? undefined,
     ...(ui.length > 0 ? { ui } : {}),
     ...(actions.length > 0 ? { actions } : {}),
+    // The string table, in the player's language; their text size and colour filter (EP19b).
+    strings: readSidecarStrings(game.mesh),
+    languages: preferredLanguages(prefs),
+    accessibility: prefs,
     saveData: saves.data,
     onSave: saves.onSave,
     ...(physicsSource

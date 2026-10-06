@@ -18,8 +18,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { mount, parseMeshScene, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
-import type { InputAction, UiDocument } from "@cartbox/editor";
+import type { InputAction, StringTable, UiDocument } from "@cartbox/editor";
 import { browserStorage, readLocalSave, writeLocalSave } from "@/lib/saveData";
+import { preferredLanguages, readPlayerPrefs } from "@/lib/accessibilityPrefs";
 
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 import { encodeMeshSidecar, type MeshSidecar } from "@/lib/meshSidecar";
@@ -45,6 +46,8 @@ export interface PlaytestConfig {
   /** The cart's UI documents (EP13). */
   readonly ui?: readonly UiDocument[];
   readonly actions?: readonly InputAction[];
+  /** The cart's string table (EP19b). */
+  readonly strings?: StringTable | null;
   /** Where the playtest keeps the cart's save data (EP15b) in this browser; absent = saves off. */
   readonly saveKey?: string;
 }
@@ -100,6 +103,9 @@ export function ScenePlayView({
       mesh: config.mesh ?? undefined,
       ...(config.ui && config.ui.length > 0 ? { ui: config.ui } : {}),
       ...(config.actions && config.actions.length > 0 ? { actions: config.actions } : {}),
+      strings: config.strings ?? null,
+      languages: preferredLanguages(readPlayerPrefs(browserStorage())),
+      accessibility: readPlayerPrefs(browserStorage()),
       ...(config.saveKey
         ? {
             saveData: readLocalSave(browserStorage(), config.saveKey)?.data ?? null,

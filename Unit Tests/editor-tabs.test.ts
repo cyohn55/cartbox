@@ -32,12 +32,12 @@ describe("visibleTabs", () => {
   });
 
   it("keeps the 2D dressing tabs on a 2D model", () => {
-    // Scene, Anim, Weather, FX, UI and Input dress or drive a 2D frame (parallax
-    // backdrop, sprite animation, weather over the playfield, a post-process
-    // pass, menus and a HUD, input actions), so they are not gated — only the
-    // two that open an orbit camera are.
+    // Scene, Anim, Weather, FX, UI, Input and Text dress or drive a 2D frame
+    // (parallax backdrop, sprite animation, weather over the playfield, a
+    // post-process pass, menus and a HUD, input actions, translated text), so
+    // they are not gated — only the two that open an orbit camera are.
     const tabs = visibleTabs("raster2d", empty);
-    expect(tabs.more).toEqual(["Scene", "Anim", "Weather", "FX", "UI", "Input"]);
+    expect(tabs.more).toEqual(["Scene", "Anim", "Weather", "FX", "UI", "Input", "Text"]);
   });
 
   it("shows every tab on a 3D model", () => {

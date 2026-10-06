@@ -73,6 +73,8 @@ local U = {}
 local DOCS = {${tables.join(",\n")}}
 local B, shown, focus, sel, on = {}, {}, {}, {}, {}
 local function fill(s)
+  -- "@key": the string table's text for it (EP19b), in the current language.
+  if string.sub(s, 1, 1) == "@" then s = cartbox.text(string.sub(s, 2)) end
   return (string.gsub(s, "{(%w+)}", function(k) local v = B[k]; if v == nil then return "" end; return tostring(v) end))
 end
 local function isshown(n) for _, m in ipairs(shown) do if m == n then return true end end return false end
@@ -118,6 +120,14 @@ U.update = function()
   return nil
 end
 local function text(s, x, y, w, h, c, scale, small, align)
+  -- The player's text size (EP19b), stepped back down while it would overflow the box.
+  local ts = cartbox.textscale()
+  if ts ~= 1 then
+    local big = math.max(scale, math.floor(scale * ts + 0.5))
+    local one = print(s, 0, -64, 0, false, 1, small)
+    while big > scale and ((w > 0 and one * big > w) or (h > 0 and 6 * big > h)) do big = big - 1 end
+    scale = big
+  end
   local tw = print(s, 0, -64, 0, false, scale, small)
   local tx = x
   if align == 1 then tx = x + (w - tw) // 2 elseif align == 2 then tx = x + w - tw end

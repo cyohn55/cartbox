@@ -34,7 +34,9 @@ import { isStaticExport } from "@/lib/staticSite";
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 import { rapierPhysics } from "@/lib/physicsRapier";
 import { streamTextures, type StreamedTexture } from "@/lib/textureStream";
-import type { EncodedImage } from "@cartbox/editor";
+import { readSidecarStrings, type EncodedImage } from "@cartbox/editor";
+import { parsePlayerPrefs, preferredLanguages, readPlayerPrefs, writePlayerPrefs, type PlayerPrefs } from "@/lib/accessibilityPrefs";
+import { PlayerPrefsControls } from "./PlayerPrefsControls";
 
 interface CartridgePlayerProps {
   cartId: string;
@@ -78,6 +80,21 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
   // Its UI documents (EP13), from the same sidecar.
   const ui = useMemo(() => readSidecarUi(meshRaw), [meshRaw]);
   const actions = useMemo(() => readSidecarActions(meshRaw), [meshRaw]);
+  // Its string table (EP19b), and the player's accessibility and language settings (read after hydration).
+  const strings = useMemo(() => readSidecarStrings(meshRaw), [meshRaw]);
+  const [prefs, setPrefs] = useState<PlayerPrefs>(() => parsePlayerPrefs(null));
+  const prefsRef = useRef(prefs);
+  prefsRef.current = prefs;
+  const [prefsLoaded, setPrefsLoaded] = useState(false);
+  useEffect(() => {
+    setPrefs(readPlayerPrefs(browserStorage()));
+    setPrefsLoaded(true);
+  }, []);
+  const changePrefs = (next: PlayerPrefs) => {
+    setPrefs(next);
+    writePlayerPrefs(browserStorage(), next);
+    if (next.colorFilter !== prefs.colorFilter) handleRef.current?.setColorFilter(next.colorFilter);
+  };
   // Save data (EP15b): this browser's and, signed in, the account's — loaded
   // before the cart starts, so cartbox.load has it from the first tick.
   const [saves, setSaves] = useState<SaveKeeper | null>(null);
@@ -148,7 +165,7 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       });
     };
 
-    if (!saves) return;
+    if (!saves || !prefsLoaded) return;
     const handle = mount(stage, {
       cartUrl,
       engineUrl,
@@ -179,6 +196,9 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       mesh: mesh ?? undefined,
       ...(ui.length > 0 ? { ui } : {}),
       ...(actions.length > 0 ? { actions } : {}),
+      strings,
+      languages: preferredLanguages(prefsRef.current),
+      accessibility: prefsRef.current,
       saveData: saves.data,
       onSave: saves.onSave,
       // Physics bodies on those meshes, simulated by Rapier (fetched only when a
@@ -236,7 +256,7 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       streaming.abort();
       handle.destroy();
     };
-  }, [cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, ui, actions, saves, world, meshTextures]);
+  }, [cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, ui, actions, strings, saves, prefsLoaded, world, meshTextures]);
 
   const togglePlayback = () => {
     const handle = handleRef.current;
@@ -341,6 +361,7 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
           </button>
         )}
       </div>
+      <PlayerPrefsControls prefs={prefs} languages={strings?.languages ?? null} onChange={changePrefs} />
       {bestScore !== null && <p>Best score this session: {bestScore}</p>}
       {status === "loading" && <p>Loading cartridge…</p>}
       {status === "error" && <p role="alert">This cartridge failed to load.</p>}
