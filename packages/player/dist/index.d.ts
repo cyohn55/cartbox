@@ -2328,6 +2328,12 @@ interface PlayerOptions {
      * WASM core). Defaults to the selected model's `engineUrl` when omitted.
      */
     engineUrl?: string;
+    /**
+     * The engine's WebAssembly, handed over directly rather than fetched beside
+     * `engineUrl` — for a standalone export (EP18) whose engine glue is imported
+     * from a blob URL.
+     */
+    engineWasm?: Uint8Array;
     /** Console model — selects the runtime and its fixed specs. Defaults to "classic". */
     modelId?: ModelId;
     /** When false (default) a poster is shown and playback starts on the first user gesture. */
@@ -2764,7 +2770,12 @@ declare class EngineLoadError extends Error {
     readonly cause?: unknown | undefined;
     constructor(message: string, cause?: unknown | undefined);
 }
-declare function loadEngineModule(engineUrl: string): Promise<EmscriptenModule>;
+/**
+ * Loads (once per URL) and instantiates an engine module. `wasm` hands the core
+ * its WebAssembly directly instead of fetching it beside the glue: a standalone
+ * export (EP18) imports the glue from a blob URL, which has no "beside".
+ */
+declare function loadEngineModule(engineUrl: string, wasm?: Uint8Array): Promise<EmscriptenModule>;
 /** Wraps an Emscripten module as a {@link ConsoleInstance} for a given model. */
 declare function createConsole(module: EmscriptenModule, model: ConsoleModel, sampleRate?: number): ConsoleInstance;
 

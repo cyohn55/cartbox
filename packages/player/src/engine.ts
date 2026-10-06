@@ -45,7 +45,7 @@ interface EmscriptenModule {
 }
 
 /** Signature of the Emscripten factory exported by the engine glue script. */
-type EmscriptenFactory = () => Promise<EmscriptenModule>;
+type EmscriptenFactory = (moduleArg?: object) => Promise<EmscriptenModule>;
 
 /** A loaded console ready to run a single cartridge. */
 export interface ConsoleInstance {
@@ -129,14 +129,19 @@ export class EngineLoadError extends Error {
   }
 }
 
-export async function loadEngineModule(engineUrl: string): Promise<EmscriptenModule> {
+/**
+ * Loads (once per URL) and instantiates an engine module. `wasm` hands the core
+ * its WebAssembly directly instead of fetching it beside the glue: a standalone
+ * export (EP18) imports the glue from a blob URL, which has no "beside".
+ */
+export async function loadEngineModule(engineUrl: string, wasm?: Uint8Array): Promise<EmscriptenModule> {
   const cached = moduleCache.get(engineUrl);
   if (cached) {
     return cached;
   }
 
   const pending = import(/* @vite-ignore */ /* webpackIgnore: true */ engineUrl)
-    .then((glue: { default: EmscriptenFactory }) => glue.default())
+    .then((glue: { default: EmscriptenFactory }) => glue.default(wasm ? { wasmBinary: wasm, locateFile: (file: string) => file } : undefined))
     .catch((error: unknown) => {
       moduleCache.delete(engineUrl); // let a later attempt retry a failed load
       // Rethrowing raw loses the one fact that matters. A dynamic import that

@@ -33,6 +33,8 @@ import { MM_FAILED, MM_SEARCHING, createMatchmaker, type Matchmaker } from "@/li
 import { LOCKOUT_ACTIONS, loadGameSettings, saveGameSettings, type GameSettings } from "@/lib/gameSettings";
 import { StartMenu } from "./StartMenu";
 import { browserStorage, readLocalSave, saveKey, writeLocalSave } from "@/lib/saveData";
+import { basePath } from "@/lib/staticSite";
+import { fetchStandaloneParts, standaloneHtml, standaloneZip, type StandaloneGame } from "@/lib/standaloneExport";
 
 /** Where Lockout keeps its career record (it has no cart row, so it stays in this browser). */
 const LOCKOUT_SAVE_KEY = saveKey("lockout");
@@ -40,6 +42,11 @@ const LOCKOUT_SAVE_KEY = saveKey("lockout");
 /** cartbox.request kinds the Lockout cart sends. */
 const REQ_MATCHMAKE = 1;
 const REQ_CANCEL = 2;
+
+/** Lockout as a standalone export (EP18): plays against bots with no server. */
+function lockoutStandalone(): StandaloneGame {
+  return { title: "Lockout", cartId: "lockout", modelId: "xbox360", cart: lockoutCartridge(), postFx: LOCKOUT_FX, mesh: lockoutMeshSidecar() };
+}
 
 type Phase = { kind: "lobby" } | { kind: "playing" } | { kind: "error"; message: string };
 
@@ -261,6 +268,28 @@ export function LockoutGame() {
 
   const joinable = parseRoomCode(joinCode);
   const playing = phase.kind === "playing";
+  // The offline copy (EP18): one HTML file, or a zip that installs as an app.
+  const [exporting, setExporting] = useState<"html" | "zip" | "error" | null>(null);
+  const downloadOffline = async (format: "html" | "zip") => {
+    setExporting(format);
+    try {
+      const game = lockoutStandalone();
+      const parts = await fetchStandaloneParts(game, { engineUrl: ENGINE_URL_BY_MODEL.xbox360, basePath });
+      const file =
+        format === "html"
+          ? new Blob([standaloneHtml(game, parts)], { type: "text/html" })
+          : new Blob([standaloneZip(game, parts).buffer as ArrayBuffer], { type: "application/zip" });
+      const url = URL.createObjectURL(file);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = format === "html" ? "lockout.html" : "lockout.zip";
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setExporting(null);
+    } catch {
+      setExporting("error");
+    }
+  };
 
   return (
     <section>
@@ -308,6 +337,18 @@ export function LockoutGame() {
                 Join
               </button>
             </form>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+            <span style={{ color: "var(--muted)" }}>Play offline:</span>
+            <button type="button" className="cbx-btn" disabled={exporting === "html" || exporting === "zip"} onClick={() => void downloadOffline("html")}>
+              {exporting === "html" ? "Preparing…" : "Download HTML"}
+            </button>
+            <button type="button" className="cbx-btn" disabled={exporting === "html" || exporting === "zip"} onClick={() => void downloadOffline("zip")}>
+              {exporting === "zip" ? "Preparing…" : "Download app (.zip)"}
+            </button>
+            <span style={{ color: "var(--faint)", fontSize: 13 }}>
+              {exporting === "error" ? "The download couldn't be prepared — try again." : "Vs bots, no connection needed. The zip installs as an app from any HTTPS host."}
+            </span>
           </div>
           <p style={{ margin: 0, color: "var(--faint)", fontSize: 13 }}>
             Plays full screen. Xbox 360 / Xbox controllers work (left stick moves, right stick aims, Start for the menu), as

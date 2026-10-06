@@ -4298,7 +4298,7 @@ var EngineLoadError = class extends Error {
     this.name = "EngineLoadError";
   }
 };
-async function loadEngineModule(engineUrl) {
+async function loadEngineModule(engineUrl, wasm) {
   const cached = moduleCache.get(engineUrl);
   if (cached) {
     return cached;
@@ -4307,7 +4307,7 @@ async function loadEngineModule(engineUrl) {
     /* @vite-ignore */
     /* webpackIgnore: true */
     engineUrl
-  ).then((glue) => glue.default()).catch((error) => {
+  ).then((glue) => glue.default(wasm ? { wasmBinary: wasm, locateFile: (file) => file } : void 0)).catch((error) => {
     moduleCache.delete(engineUrl);
     throw new EngineLoadError(`Failed to load the engine module at ${engineUrl}`, error);
   });
@@ -14889,7 +14889,7 @@ var Player = class {
       const engineUrl = this.options.engineUrl ?? this.model.engineUrl;
       const [bytes, module] = await Promise.all([
         fetchCartridge(this.options.cartUrl, this.abortController.signal),
-        loadEngineModule(engineUrl)
+        loadEngineModule(engineUrl, this.options.engineWasm)
       ]);
       if (this.destroyed) return;
       const sampleRate = this.options.sampleRate ?? this.model.sampleRate;

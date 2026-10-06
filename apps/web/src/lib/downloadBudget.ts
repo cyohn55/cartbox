@@ -174,7 +174,7 @@ export function sceneBreakdown(meshSidecar: string | null): SceneBreakdown | nul
 }
 
 /** Whether a stored mesh sidecar has physics bodies (anywhere) and asks for deterministic physics. */
-function physicsNeeds(meshSidecar: string | null): { bodies: boolean; deterministic: boolean } {
+export function physicsNeeds(meshSidecar: string | null): { bodies: boolean; deterministic: boolean } {
   if (!meshSidecar) return { bodies: false, deterministic: false };
   // A cheap textual check keeps this from decoding every mesh: bodies are the only
   // place a `"physics":{"body"` appears.

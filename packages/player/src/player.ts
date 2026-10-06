@@ -225,7 +225,7 @@ export class Player {
       const engineUrl = this.options.engineUrl ?? this.model.engineUrl;
       const [bytes, module] = await Promise.all([
         fetchCartridge(this.options.cartUrl, this.abortController.signal),
-        loadEngineModule(engineUrl),
+        loadEngineModule(engineUrl, this.options.engineWasm),
       ]);
       if (this.destroyed) return;
 

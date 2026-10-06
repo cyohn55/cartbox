@@ -48,6 +48,9 @@ function restoreServerOnlySources() {
 }
 
 function runNextBuild() {
+  // The standalone export's parts (npm's prebuild hook doesn't run for npx).
+  const parts = spawnSync("node", [join(webAppRoot, "scripts", "build-standalone.mjs")], { cwd: webAppRoot, stdio: "inherit" });
+  if (parts.status !== 0) return parts.status ?? 1;
   const result = spawnSync("npx", ["next", "build"], {
     cwd: webAppRoot,
     stdio: "inherit",
