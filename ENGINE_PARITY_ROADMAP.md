@@ -817,9 +817,59 @@ preview.
       - **Tests** cover names, the codec, the change summary, the upload rules,
         both stores (the account's against a stand-in API, the browser's on
         real IndexedDB in Chromium) and the migration.
-- [ ] **EP19b. Localisation and accessibility.** String tables for
+- [x] **EP19b. Localisation and accessibility.** String tables for
       localisation; text size, colour-blind and remapping settings as engine
       features.
+
+      *Done:*
+      - **String tables:**
+        - A new Text tab lists every player-facing text under a key, in each
+          language the cart speaks. One language is the ★ fallback.
+        - Untranslated cells are flagged, and keys the UI uses but the table
+          lacks can be added in one go.
+        - The table is stored in the scene sidecar.
+      - **Lua:**
+        - `cartbox.text(key, ...)`: `{1}`, `{2}`… fill from the arguments,
+          `{name}` from a table, so word order can differ by language.
+        - `cartbox.language()`, `languages()` and `setlanguage(code)`.
+        - A UI widget whose text is `@key` shows that key's text.
+        - Without a table, the base SDK answers with the key itself.
+      - **Choosing a language:**
+        - The player gets the first of their languages that the cart has
+          ("es-MX" finds "es", "pt" finds "pt-br"), else the fallback.
+        - Their order is a chosen language first, then the browser's.
+        - The playtest can run in any of the cart's languages.
+      - **Accessibility settings, kept once per browser and honoured by every
+        cart:**
+        - *Text size* (×1, ×1.5, ×2): UI text is drawn at whole steps larger,
+          stepping back only where it would overflow its widget. Carts read it
+          with `cartbox.textscale()`.
+        - *Colour filters:* correction (daltonisation) for protanopia,
+          deuteranopia and tritanopia, or high contrast.
+          - It is applied to the finished frame as an SVG colour matrix, so it
+            works for every renderer and changes at once.
+          - Carts read it with `cartbox.colorfilter()`.
+          - The playtest can also *simulate* each type, to see the cart as a
+            colour-blind player does.
+        - *Remapping* stays with each game's control settings (EP15).
+      - **Where the settings appear:** under the player on the play page, in
+        the playtest, in exported games (EP18), and in Lockout's Start menu
+        (Display → Accessibility).
+      - **Lockout** speaks English and Spanish: its UI's fixed texts and its
+        game type names, written in ASCII for the console font. Its sidecar
+        budget is raised to 1.55 MB for the table.
+      - **Tests** cover:
+        - the table reader, language choice, translation, missing keys and UI
+          keys;
+        - colour correction (it moves apart what each type confuses and leaves
+          greys alone), high contrast, text-size stepping and the
+          preferences;
+        - the Lua API and UI `@key` texts at the player's text size, in the
+          real engine;
+        - Lockout's table;
+        - an exported game in Chromium that plays in the player's language,
+          reports their text size and colour filter to the cart, and filters
+          the frame.
 - [ ] **EP20. A dedicated Modern core.** Game code on the Modern tier currently
       runs in a TIC-80–derived core and reaches the 3D engine through a
       command channel capped at 64 commands a tick. A dedicated core with a

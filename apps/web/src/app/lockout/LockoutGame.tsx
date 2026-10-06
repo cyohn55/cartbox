@@ -25,7 +25,8 @@ import {
   type NetRoomStatus,
   type PlayerHandle,
 } from "@cartbox/player";
-import { LOCKOUT_FX, LOCKOUT_INPUT_ACTIONS, lockoutCartridge, lockoutMeshSidecar } from "@cartbox/editor";
+import { LOCKOUT_FX, LOCKOUT_INPUT_ACTIONS, LOCKOUT_STRINGS, lockoutCartridge, lockoutMeshSidecar } from "@cartbox/editor";
+import { preferredLanguages, readPlayerPrefs, writePlayerPrefs, type PlayerPrefs } from "@/lib/accessibilityPrefs";
 
 import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
 import { newRoomCode, onlineRoomsAvailable, parseRoomCode, roomTransport } from "@/lib/netplayTransport";
@@ -207,6 +208,10 @@ export function LockoutGame() {
           mesh: parseMeshScene(lockoutMeshSidecar()) ?? undefined,
           ui: readSidecarUi(lockoutMeshSidecar()),
           actions: readSidecarActions(lockoutMeshSidecar()),
+          // Its string table in the player's language, and their accessibility settings (EP19b).
+          strings: LOCKOUT_STRINGS,
+          languages: preferredLanguages(prefsRef.current),
+          accessibility: prefsRef.current,
           // The career record (EP15b), kept in this browser.
           saveData: readLocalSave(browserStorage(), LOCKOUT_SAVE_KEY)?.data ?? null,
           onSave: (data) => writeLocalSave(browserStorage(), LOCKOUT_SAVE_KEY, data, new Date().toISOString()),
@@ -268,6 +273,16 @@ export function LockoutGame() {
 
   const joinable = parseRoomCode(joinCode);
   const playing = phase.kind === "playing";
+  // Accessibility and language (EP19b): kept for every game; the colour filter applies at once.
+  const [prefs, setPrefs] = useState<PlayerPrefs>(() => readPlayerPrefs(null));
+  const prefsRef = useRef(prefs);
+  prefsRef.current = prefs;
+  useEffect(() => setPrefs(readPlayerPrefs(browserStorage())), []);
+  const changePrefs = (next: PlayerPrefs) => {
+    setPrefs(next);
+    writePlayerPrefs(browserStorage(), next);
+    if (next.colorFilter !== prefsRef.current.colorFilter) handleRef.current?.setColorFilter(next.colorFilter);
+  };
   // The offline copy (EP18): one HTML file, or a zip that installs as an app.
   const [exporting, setExporting] = useState<"html" | "zip" | "error" | null>(null);
   const downloadOffline = async (format: "html" | "zip") => {
@@ -412,6 +427,9 @@ export function LockoutGame() {
             onLeave={() => void leaveRoom()}
             onQuit={quit}
             quality={handleRef.current?.quality()}
+            prefs={prefs}
+            onPrefsChange={changePrefs}
+            languages={LOCKOUT_STRINGS.languages}
           />
         )}
       </div>

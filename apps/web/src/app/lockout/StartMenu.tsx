@@ -12,7 +12,8 @@
 
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { ConsoleButton, DEFAULT_CONTROL_SETTINGS, PAD_BUTTONS, standardizePad, type ControlTarget, type PadButton } from "@cartbox/player";
-import { actionLabel, reboundActions, type ActionPadButton, type InputAction } from "@cartbox/editor";
+import { COLOR_FILTERS, COLOR_FILTER_LABELS, TEXT_SCALES, actionLabel, languageName, reboundActions, type ActionPadButton, type ColorFilter, type InputAction } from "@cartbox/editor";
+import type { PlayerPrefs } from "@/lib/accessibilityPrefs";
 
 import {
   DEFAULT_GAME_SETTINGS,
@@ -43,6 +44,11 @@ export interface StartMenuProps {
   onQuit: () => void;
   /** The preset "auto" picked on this device, when a game is running. */
   quality?: string;
+  /** The player's accessibility and language settings (EP19b), shared by every game. */
+  prefs?: PlayerPrefs;
+  onPrefsChange?: (prefs: PlayerPrefs) => void;
+  /** The game's languages. */
+  languages?: readonly string[];
 }
 
 const PAD_LABELS: Record<PadButton, string> = {
@@ -288,6 +294,56 @@ export function StartMenu(props: StartMenuProps) {
               <Row label="Show frame rate">
                 <Toggle on={settings.showFps} onChange={(showFps) => onChange({ ...settings, showFps })} />
               </Row>
+              {props.prefs && props.onPrefsChange && (
+                <>
+                  <h3 style={styles.h3}>Accessibility</h3>
+                  <Row label="Colour filter">
+                    <select
+                      aria-label="Colour filter"
+                      value={props.prefs.colorFilter}
+                      onChange={(e) => props.onPrefsChange!({ ...props.prefs!, colorFilter: e.target.value as ColorFilter })}
+                      style={{ font: "inherit", padding: "6px 10px", borderRadius: "var(--radius-sm)" }}
+                    >
+                      {COLOR_FILTERS.map((f) => (
+                        <option key={f} value={f}>
+                          {COLOR_FILTER_LABELS[f]}
+                        </option>
+                      ))}
+                    </select>
+                  </Row>
+                  <Row label="Text size (next game)">
+                    <select
+                      aria-label="Text size"
+                      value={props.prefs.textScale}
+                      onChange={(e) => props.onPrefsChange!({ ...props.prefs!, textScale: Number(e.target.value) })}
+                      style={{ font: "inherit", padding: "6px 10px", borderRadius: "var(--radius-sm)" }}
+                    >
+                      {TEXT_SCALES.map((t) => (
+                        <option key={t} value={t}>
+                          {t === 1 ? "Normal" : `×${t}`}
+                        </option>
+                      ))}
+                    </select>
+                  </Row>
+                  {props.languages && props.languages.length > 1 && (
+                    <Row label="Language (next game)">
+                      <select
+                        aria-label="Language"
+                        value={props.prefs.language ?? ""}
+                        onChange={(e) => props.onPrefsChange!({ ...props.prefs!, language: e.target.value || null })}
+                        style={{ font: "inherit", padding: "6px 10px", borderRadius: "var(--radius-sm)" }}
+                      >
+                        <option value="">Browser&apos;s</option>
+                        {props.languages.map((l) => (
+                          <option key={l} value={l}>
+                            {languageName(l)}
+                          </option>
+                        ))}
+                      </select>
+                    </Row>
+                  )}
+                </>
+              )}
               <Row label="">
                 <button type="button" className="cbx-btn" onClick={() => onChange({ ...DEFAULT_GAME_SETTINGS, controls })}>
                   Reset audio &amp; display

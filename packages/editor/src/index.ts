@@ -74,6 +74,7 @@ export {
   LOCKOUT_FOLIAGE,
   LOCKOUT_AUDIO,
   LOCKOUT_UI,
+  LOCKOUT_STRINGS,
   LOCKOUT_COMPONENTS,
   LOCKOUT_INPUT_ACTIONS,
   LOCKOUT_DECALS,
@@ -1108,3 +1109,33 @@ export {
   type PixelRect,
 } from "./model/handheldPaintDoc";
 export { gradientSortOrder } from "./model/paletteSort";
+export {
+  MAX_LANGUAGES,
+  MAX_STRINGS,
+  MAX_STRING_LENGTH,
+  fillPlaceholders,
+  isStringKey,
+  languageCode,
+  languageName,
+  missingTranslations,
+  parseStringTable,
+  pickLanguage,
+  readSidecarStrings,
+  translate,
+  uiStringKeys,
+  type StringEntry,
+  type StringTable,
+} from "./model/strings";
+export {
+  COLOR_FILTERS,
+  COLOR_FILTER_LABELS,
+  DEFAULT_ACCESSIBILITY,
+  TEXT_SCALES,
+  accessibleTextScale,
+  applyColorMatrix,
+  colorFilterMatrix,
+  colorFilterSvg,
+  parseAccessibility,
+  type AccessibilitySettings,
+  type ColorFilter,
+} from "./model/accessibility";

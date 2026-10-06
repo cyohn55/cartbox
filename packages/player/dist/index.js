@@ -321,6 +321,8 @@ local U = {}
 local DOCS = {${tables.join(",\n")}}
 local B, shown, focus, sel, on = {}, {}, {}, {}, {}
 local function fill(s)
+  -- "@key": the string table's text for it (EP19b), in the current language.
+  if string.sub(s, 1, 1) == "@" then s = cartbox.text(string.sub(s, 2)) end
   return (string.gsub(s, "{(%w+)}", function(k) local v = B[k]; if v == nil then return "" end; return tostring(v) end))
 end
 local function isshown(n) for _, m in ipairs(shown) do if m == n then return true end end return false end
@@ -366,6 +368,14 @@ U.update = function()
   return nil
 end
 local function text(s, x, y, w, h, c, scale, small, align)
+  -- The player's text size (EP19b), stepped back down while it would overflow the box.
+  local ts = cartbox.textscale()
+  if ts ~= 1 then
+    local big = math.max(scale, math.floor(scale * ts + 0.5))
+    local one = print(s, 0, -64, 0, false, 1, small)
+    while big > scale and ((w > 0 and one * big > w) or (h > 0 and 6 * big > h)) do big = big - 1 end
+    scale = big
+  end
   local tw = print(s, 0, -64, 0, false, scale, small)
   local tx = x
   if align == 1 then tx = x + (w - tw) // 2 elseif align == 2 then tx = x + w - tw end
@@ -426,6 +436,49 @@ end
 U.draw = function() for _, n in ipairs(shown) do drawdoc(n) end end
 cartbox.ui = U
 end`;
+}
+
+// src/stringsSdk.ts
+import { pickLanguage } from "@cartbox/editor";
+var lua2 = (s) => JSON.stringify(s);
+function playLanguage(table, preferred) {
+  return table ? pickLanguage(table, preferred ?? []) : null;
+}
+function stringsSdkLua(table, language, accessibility) {
+  const parts = [];
+  if (table && table.languages.length > 0) {
+    const byLanguage = table.languages.map((l) => {
+      const rows = table.entries.flatMap((e) => e.text[l] !== void 0 ? [`[${lua2(e.key)}]=${lua2(e.text[l])}`] : []);
+      return `[${lua2(l)}]={${rows.join(",")}}`;
+    });
+    const current = language && table.languages.includes(language) ? language : table.fallback;
+    parts.push(`local S = {${byLanguage.join(",\n")}}
+local LANGS = {${table.languages.map(lua2).join(",")}}
+local FALLBACK, lang = ${lua2(table.fallback)}, ${lua2(current)}
+local function fill(s, a)
+  local t = type(a[1]) == "table" and a[1] or nil
+  return (string.gsub(s, "{(%w+)}", function(n)
+    local v
+    if tonumber(n) then v = a[tonumber(n)] elseif t then v = t[n] end
+    if v == nil then return nil end
+    return tostring(v)
+  end))
+end
+cartbox.text = function(k, ...)
+  local s = S[lang][k] or S[FALLBACK][k] or tostring(k)
+  return fill(s, {...})
+end
+cartbox.language = function() return lang end
+cartbox.languages = function() local out = {} for i, l in ipairs(LANGS) do out[i] = l end return out end
+cartbox.setlanguage = function(l) if S[l] then lang = l return true end return false end`);
+  }
+  if (accessibility && (accessibility.textScale !== 1 || accessibility.colorFilter !== "none")) {
+    parts.push(`cartbox.textscale = function() return ${accessibility.textScale} end
+cartbox.colorfilter = function() return ${lua2(accessibility.colorFilter)} end`);
+  }
+  return parts.length > 0 ? `do
+${parts.join("\n")}
+end` : "";
 }
 
 // src/actionsSdk.ts
@@ -1228,14 +1281,14 @@ function writeInputBlock(block, held, previous) {
   block.setUint32(INPUT_HELD, held >>> 0, true);
   block.setUint32(INPUT_PREVIOUS, previous >>> 0, true);
 }
-var lua2 = (s) => JSON.stringify(s);
+var lua3 = (s) => JSON.stringify(s);
 function actionsSdkLua(actions, layout) {
   if (!actions || actions.length === 0) return "";
-  const names = actions.map((a) => lua2(a.name));
-  const idx = actions.map((a, i) => `[${lua2(a.name)}]=${i}`);
+  const names = actions.map((a) => lua3(a.name));
+  const idx = actions.map((a, i) => `[${lua3(a.name)}]=${i}`);
   const buttons = actions.map((a) => `{${a.buttons.join(",")}}`);
-  const keyLabels = actions.map((a) => lua2(actionLabel(a, "keyboard")));
-  const padLabels = actions.map((a) => lua2(actionLabel(a, "pad")));
+  const keyLabels = actions.map((a) => lua3(actionLabel(a, "keyboard")));
+  const padLabels = actions.map((a) => lua3(actionLabel(a, "pad")));
   return `do
 local _A = ${inputBlockAddress(layout)}
 local NAMES = {${names.join(",")}}
@@ -5526,6 +5579,23 @@ cartbox = {
   place = function() end,
   -- Components (EP14): replaced when any object has one.
   component = function() return nil end,
+  -- Localisation (EP19b): replaced when the cart has a string table.
+  text = function(k, ...)
+    local a = {...}
+    local t = type(a[1]) == "table" and a[1] or nil
+    return (string.gsub(tostring(k), "{(%w+)}", function(n)
+      local v
+      if tonumber(n) then v = a[tonumber(n)] elseif t then v = t[n] end
+      if v == nil then return nil end
+      return tostring(v)
+    end))
+  end,
+  language = function() return nil end,
+  languages = function() return {} end,
+  setlanguage = function() return false end,
+  -- Accessibility (EP19b): replaced when the player has set any.
+  textscale = function() return 1 end,
+  colorfilter = function() return "none" end,
 }`;
 function injectSdk(bytes) {
   return prependLuaCode(bytes, CARTBOX_SDK_LUA);
@@ -14754,7 +14824,7 @@ async function createSceneRenderer(width, height, caps, deviceProvider = getWebg
 }
 
 // src/player.ts
-import { SpatialLoader, actionMask, reboundActions } from "@cartbox/editor";
+import { SpatialLoader, actionMask, reboundActions, colorFilterSvg } from "@cartbox/editor";
 function shouldUseTouch(scheme, view) {
   if (scheme === "touch") return true;
   if (scheme === "keyboard") return false;
@@ -14762,6 +14832,7 @@ function shouldUseTouch(scheme, view) {
   return hasTouchSupport(view.navigator?.maxTouchPoints ?? 0, coarse);
 }
 var NO_HELD = /* @__PURE__ */ new Set();
+var nextColorFilterId = 0;
 var NO_OVERRIDES = /* @__PURE__ */ new Map();
 var Player = class {
   constructor(container, options) {
@@ -14817,6 +14888,9 @@ var Player = class {
     this.destroyed = false;
     this.abortController = new AbortController();
     this.running = false;
+    /** The colour filter's SVG definition, while one is applied (EP19b). */
+    this.colorFilterNode = null;
+    this.colorFilterBefore = null;
     /**
      * Fixed-timestep loop: advance one console frame per 1/60s of elapsed time.
      * Decoupling console frames from the display refresh keeps game speed correct
@@ -14857,6 +14931,25 @@ var Player = class {
     this.model = getModel(options.modelId);
     if (options.controlSettings) this.controlSettings = options.controlSettings;
   }
+  /** Filter the finished frame (see PlayerHandle.setColorFilter): an SVG colour matrix on the container. */
+  setColorFilter(filter, kind = "correct") {
+    const style = this.container.style;
+    this.colorFilterNode?.remove();
+    this.colorFilterNode = null;
+    const id = `cbx-color-filter-${nextColorFilterId += 1}`;
+    const svg = colorFilterSvg(filter, kind, id);
+    if (!svg) {
+      if (this.colorFilterBefore !== null) style.filter = this.colorFilterBefore;
+      this.colorFilterBefore = null;
+      return;
+    }
+    const holder = this.container.ownerDocument.createElement("div");
+    holder.innerHTML = svg;
+    this.colorFilterNode = holder.firstElementChild;
+    if (this.colorFilterNode) this.container.appendChild(this.colorFilterNode);
+    if (this.colorFilterBefore === null) this.colorFilterBefore = style.filter;
+    style.filter = `url(#${id})`;
+  }
   /** Apply new control settings at once (see PlayerHandle.setControlSettings). */
   setControlSettings(settings) {
     this.controlSettings = settings;
@@ -14885,6 +14978,8 @@ var Player = class {
   }
   /** Loads the cartridge and engine, then starts (or arms) playback. */
   async start() {
+    const filter = this.options.accessibility?.colorFilter;
+    if (filter && filter !== "none") this.setColorFilter(filter);
     try {
       const engineUrl = this.options.engineUrl ?? this.model.engineUrl;
       const [bytes, module] = await Promise.all([
@@ -14936,6 +15031,8 @@ var Player = class {
         prepared = prependLuaCode(prepared, actionsLua);
         this.inputOffset = inputBlockAddress(layout) - layout.pmemAddress;
       }
+      const stringsLua = stringsSdkLua(this.options.strings, playLanguage(this.options.strings, this.options.languages), this.options.accessibility);
+      if (stringsLua) prepared = prependLuaCode(prepared, stringsLua);
       const uiLua = uiSdkLua(this.options.ui, this.model.width, this.model.height);
       if (uiLua) prepared = prependLuaCode(prepared, uiLua);
       const sceneLua = sceneObjectsSdkLua(this.options.mesh);
@@ -15630,6 +15727,7 @@ var Player = class {
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.setColorFilter("none");
     this.running = false;
     this.abortController.abort();
     this.view.cancelAnimationFrame(this.frameHandle);
@@ -16383,6 +16481,7 @@ function mount(container, options) {
     },
     setControlSettings: (settings) => player.setControlSettings(settings),
     setVolume: (volume) => player.setVolume(volume),
+    setColorFilter: (filter, kind) => player.setColorFilter(filter, kind),
     setInputEnabled: (enabled) => player.setInputEnabled(enabled),
     inspect: () => player.inspect(),
     setQuality: (choice) => player.setQuality(choice),
@@ -16616,6 +16715,7 @@ export {
   physicsSdkLua,
   physicsSlots,
   physicsStateHash,
+  playLanguage,
   prehazeLayers,
   prependLuaCode,
   pulse,
@@ -16663,6 +16763,7 @@ export {
   splitWorldMatrix,
   standardizePad,
   streamGroups,
+  stringsSdkLua,
   sway,
   takeNetOutbox,
   takePhysicsCommands,

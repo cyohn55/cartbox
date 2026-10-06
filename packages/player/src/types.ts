@@ -1,4 +1,4 @@
-import type { DecodedTexture, EncodedImage, InputAction, SceneLevel, UiDocument } from "@cartbox/editor";
+import type { AccessibilitySettings, ColorFilter, DecodedTexture, EncodedImage, InputAction, SceneLevel, StringTable, UiDocument } from "@cartbox/editor";
 import type { PhysicsBackend } from "./physics/physicsSession.js";
 import type { QualityChoice, QualityLevel } from "./quality.js";
 /**
@@ -211,6 +211,19 @@ export interface PlayerOptions {
    */
   actions?: readonly InputAction[];
   /**
+   * The cart's string table (EP19b): cartbox.text and UI documents' `@key`
+   * texts read it, in the language picked from {@link languages}.
+   */
+  strings?: StringTable | null;
+  /** The player's preferred languages, best first (the browser's, say): the first the cart has is played in. */
+  languages?: readonly string[];
+  /**
+   * The player's accessibility settings (EP19b): UI text drawn larger, and a
+   * colour filter over the finished frame. Carts read both
+   * (cartbox.textscale / colorfilter).
+   */
+  accessibility?: AccessibilitySettings;
+  /**
    * Save data (EP15b): the JSON the cart last saved, which cartbox.load returns
    * (null or absent: nothing saved yet). Only read when {@link onSave} is set.
    */
@@ -293,6 +306,12 @@ export interface PlayerHandle {
   setControlSettings(settings: ControlSettings): void;
   /** Master volume, 0..1. */
   setVolume(volume: number): void;
+  /**
+   * Change the colour filter over the frame at once (EP19b): `correct` for a
+   * player's setting, `simulate` to preview how a colour-blind player sees the
+   * cart. (What carts read with cartbox.colorfilter stays as started.)
+   */
+  setColorFilter(filter: ColorFilter, kind?: "correct" | "simulate"): void;
   /** Hold the game's input neutral (false) while a host menu is open over it, or restore it. */
   setInputEnabled(enabled: boolean): void;
   /**

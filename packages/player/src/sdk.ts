@@ -347,6 +347,23 @@ cartbox = {
   place = function() end,
   -- Components (EP14): replaced when any object has one.
   component = function() return nil end,
+  -- Localisation (EP19b): replaced when the cart has a string table.
+  text = function(k, ...)
+    local a = {...}
+    local t = type(a[1]) == "table" and a[1] or nil
+    return (string.gsub(tostring(k), "{(%w+)}", function(n)
+      local v
+      if tonumber(n) then v = a[tonumber(n)] elseif t then v = t[n] end
+      if v == nil then return nil end
+      return tostring(v)
+    end))
+  end,
+  language = function() return nil end,
+  languages = function() return {} end,
+  setlanguage = function() return false end,
+  -- Accessibility (EP19b): replaced when the player has set any.
+  textscale = function() return 1 end,
+  colorfilter = function() return "none" end,
 }`;
 
 /** Injects the cartbox SDK into a Lua cart (returns non-Lua carts unchanged). */

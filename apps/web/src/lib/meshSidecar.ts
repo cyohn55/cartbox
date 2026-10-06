@@ -63,6 +63,8 @@ import {
   parseComponentDefs,
   parseAttached,
   parseInputActions,
+  parseStringTable,
+  type StringTable,
   type InputAction,
   type ComponentDef,
   type AttachedComponent,
@@ -211,6 +213,8 @@ export interface MeshSidecar {
   readonly components?: readonly ComponentDef[];
   /** Named input actions the cart reads with cartbox.action (see inputActions.ts in @cartbox/editor). */
   readonly actions?: readonly InputAction[];
+  /** The string table cartbox.text and UI `@key` texts read (see strings.ts in @cartbox/editor). */
+  readonly strings?: StringTable;
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -235,7 +239,7 @@ export function newMeshId(): string {
  */
 export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
   const prefabs = sidecar.prefabs ?? [];
-  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0 && (sidecar.audio?.sounds.length ?? 0) === 0 && (sidecar.ui?.length ?? 0) === 0 && (sidecar.components?.length ?? 0) === 0 && (sidecar.actions?.length ?? 0) === 0) return null;
+  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0 && (sidecar.audio?.sounds.length ?? 0) === 0 && (sidecar.ui?.length ?? 0) === 0 && (sidecar.components?.length ?? 0) === 0 && (sidecar.actions?.length ?? 0) === 0 && !sidecar.strings) return null;
   // Repeated meshes (and animation frames) are stored once in a shared library,
   // shared between placed entries and prefab nodes (a prefab's copies repeat its meshes).
   const nodes = prefabs.flatMap((prefab) => prefab.nodes);
@@ -271,6 +275,7 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(sidecar.ui && sidecar.ui.length > 0 ? { ui: sidecar.ui } : {}),
     ...(sidecar.components && sidecar.components.length > 0 ? { components: sidecar.components } : {}),
     ...(sidecar.actions && sidecar.actions.length > 0 ? { actions: sidecar.actions } : {}),
+    ...(sidecar.strings ? { strings: sidecar.strings } : {}),
   });
 }
 
@@ -377,6 +382,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
   const audio = parseSceneAudio((parsed as { audio?: unknown }).audio);
   const ui = parseUiDocuments((parsed as { ui?: unknown }).ui);
   const actions = parseInputActions((parsed as { actions?: unknown }).actions);
+  const strings = parseStringTable((parsed as { strings?: unknown }).strings);
   const placed = linked.map((entry) => (entry.level && !levelIds.has(entry.level) ? withoutLevel(entry) : entry));
   return {
     version: MESH_SIDECAR_VERSION,
@@ -400,7 +406,16 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     ...(ui.length > 0 ? { ui } : {}),
     ...(componentDefs.length > 0 ? { components: componentDefs } : {}),
     ...(actions.length > 0 ? { actions } : {}),
+    ...(strings ? { strings } : {}),
   };
+}
+
+/** Replace the cart's string table (null removes it). */
+export function setMeshStrings(sidecar: MeshSidecar, strings: StringTable | null): MeshSidecar {
+  const { strings: _drop, ...rest } = sidecar;
+  void _drop;
+  const table = parseStringTable(strings);
+  return table ? { ...rest, strings: table } : rest;
 }
 
 /** Replace the cart's input actions (none removes them). */

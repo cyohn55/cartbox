@@ -7,6 +7,7 @@
 import { AudioController } from "./audio.js";
 import { SoundSystem } from "./soundSystem.js";
 import { uiSdkLua } from "./uiSdk.js";
+import { playLanguage, stringsSdkLua } from "./stringsSdk.js";
 import { INPUT_BLOCK_BYTES, actionsSdkLua, inputBlockAddress, writeInputBlock } from "./actionsSdk.js";
 import { armSaveBlock, saveBlockAddress, saveBlockBytes, saveSdkLua, takeSave } from "./saveSdk.js";
 import { fetchCartridge } from "./cartridge.js";
@@ -65,7 +66,7 @@ import { WorldOverlaySurface } from "./world/WorldOverlaySurface.js";
 import { createSceneRenderer } from "./render/createSceneRenderer.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
-import { SpatialLoader, actionMask, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4 } from "@cartbox/editor";
+import { SpatialLoader, actionMask, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, type ColorFilter } from "@cartbox/editor";
 import type { ControlScheme, InspectedObject, PlayerOptions } from "./types.js";
 
 /**
@@ -84,6 +85,8 @@ function shouldUseTouch(scheme: ControlScheme, view: Window): boolean {
 
 /** No keys or controller buttons held (shared, so it allocates nothing per frame). */
 const NO_HELD: ReadonlySet<string> = new Set();
+/** Each player's colour filter gets its own SVG id, so two players on a page don't share one. */
+let nextColorFilterId = 0;
 
 /** No objects placed by physics or a timeline (shared, so it allocates nothing per frame). */
 const NO_OVERRIDES: ReadonlyMap<number, Mat4> = new Map();
@@ -188,6 +191,30 @@ export class Player {
     if (options.controlSettings) this.controlSettings = options.controlSettings;
   }
 
+  /** The colour filter's SVG definition, while one is applied (EP19b). */
+  private colorFilterNode: Element | null = null;
+  private colorFilterBefore: string | null = null;
+
+  /** Filter the finished frame (see PlayerHandle.setColorFilter): an SVG colour matrix on the container. */
+  setColorFilter(filter: ColorFilter, kind: "correct" | "simulate" = "correct"): void {
+    const style = this.container.style;
+    this.colorFilterNode?.remove();
+    this.colorFilterNode = null;
+    const id = `cbx-color-filter-${(nextColorFilterId += 1)}`;
+    const svg = colorFilterSvg(filter, kind, id);
+    if (!svg) {
+      if (this.colorFilterBefore !== null) style.filter = this.colorFilterBefore;
+      this.colorFilterBefore = null;
+      return;
+    }
+    const holder = this.container.ownerDocument.createElement("div");
+    holder.innerHTML = svg;
+    this.colorFilterNode = holder.firstElementChild;
+    if (this.colorFilterNode) this.container.appendChild(this.colorFilterNode);
+    if (this.colorFilterBefore === null) this.colorFilterBefore = style.filter;
+    style.filter = `url(#${id})`;
+  }
+
   /** Apply new control settings at once (see PlayerHandle.setControlSettings). */
   setControlSettings(settings: ControlSettings): void {
     this.controlSettings = settings;
@@ -221,6 +248,8 @@ export class Player {
 
   /** Loads the cartridge and engine, then starts (or arms) playback. */
   async start(): Promise<void> {
+    const filter = this.options.accessibility?.colorFilter;
+    if (filter && filter !== "none") this.setColorFilter(filter);
     try {
       const engineUrl = this.options.engineUrl ?? this.model.engineUrl;
       const [bytes, module] = await Promise.all([
@@ -296,6 +325,9 @@ export class Player {
         prepared = prependLuaCode(prepared, actionsLua);
         this.inputOffset = inputBlockAddress(layout) - layout.pmemAddress;
       }
+      // The string table and the player's accessibility settings (EP19b).
+      const stringsLua = stringsSdkLua(this.options.strings, playLanguage(this.options.strings, this.options.languages), this.options.accessibility);
+      if (stringsLua) prepared = prependLuaCode(prepared, stringsLua);
       // UI documents (EP13): laid out for this screen, driven with cartbox.ui.
       const uiLua = uiSdkLua(this.options.ui, this.model.width, this.model.height);
       if (uiLua) prepared = prependLuaCode(prepared, uiLua);
@@ -1175,6 +1207,7 @@ export class Player {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.setColorFilter("none");
     this.running = false;
     this.abortController.abort();
     this.view.cancelAnimationFrame(this.frameHandle);
