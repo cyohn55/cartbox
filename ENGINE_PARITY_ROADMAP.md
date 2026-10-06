@@ -944,11 +944,34 @@ preview.
         rebuilds it and fails if the committed bytes differ, then runs its
         tests.
 
+      *Done (part 2, the player runs carts on it):*
+      - **Choosing it:**
+        - A Modern-tier scene can choose the dedicated core: the Mesh tab →
+          Core → "Run on the dedicated Modern core (preview)", stored as the
+          scene's `core: "direct"`.
+        - The player then runs the cart there; other models never do.
+        - Lockout can be tried on it with `?core=direct`.
+      - **One SDK for both cores:**
+        - The core emulates the HD core's RAM: `peek`, `poke` (and in bits),
+          `pmem`, `memcpy` and `memset` over the same layout.
+        - So the whole Lua SDK runs unchanged on it: the event mailbox, the
+          mesh camera, the runtime and other blocks the host writes before each
+          tick, saves, actions, strings.
+        - `print` draws in TIC-80's own font, measured exactly as TIC-80
+          measures it, and `clip` works.
+      - **Calls, not a channel:**
+        - The runtime SDK sends its commands through `_cbx_cmd` when the core
+          has it: straight to the host, with no slots and no cap (a test
+          places 6,000 objects in one tick, past even the overflow ring).
+        - `RuntimeChannel.afterTick` applies them after the block's.
+      - **The player side:**
+        - A `DirectConsole` presents the core through the player's
+          `ConsoleInstance` interface.
+        - Each player gets its own instance of the core.
+        - The site serves it at `/engine/modern-core/`, and exports carry it
+          in place of the TIC-80–derived core when the scene chooses it.
+
       *Next:*
-      - **Part 2:** the player runs carts on it. A Modern cart can opt in to
-        the dedicated core, and the full `cartbox.*` SDK (place, spawn,
-        bodies, sounds, UI, actions, saves, strings…) is written on the direct
-        API, with queries for state the RAM block carries today.
       - **Part 3:** sprites, map and sound for its 2D layer, from the
         cartridge's banks.
       - **Part 4:** Lockout on the dedicated core, compared frame for frame

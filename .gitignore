@@ -110,3 +110,4 @@ apps/web/public/cavestory/*
 
 # Standalone export parts (apps/web/scripts/build-standalone.mjs builds them)
 apps/web/public/standalone/
+apps/web/public/engine/modern-core/

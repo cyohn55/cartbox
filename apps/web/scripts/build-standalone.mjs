@@ -15,7 +15,7 @@
  * Usage: node scripts/build-standalone.mjs [outDir]
  */
 
-import { mkdirSync } from "node:fs";
+import { cpSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -58,3 +58,14 @@ await Promise.all(
   ),
 );
 console.log(`Standalone export parts built in ${Date.now() - started} ms → ${outDir}`);
+
+// The dedicated Modern core (EP20b, packages/modern-core): served beside the
+// TIC-80 cores, for Modern carts that choose it (and exports that carry it).
+// Its build is committed in its package; this copies it into public/ (when
+// building the site, not when a test builds the parts elsewhere).
+if (!process.argv[2]) {
+  const coreOut = join(webAppRoot, "public", "engine", "modern-core");
+  mkdirSync(coreOut, { recursive: true });
+  cpSync(join(webAppRoot, "..", "..", "packages", "modern-core", "dist"), coreOut, { recursive: true });
+  console.log(`Dedicated Modern core copied → ${coreOut}`);
+}

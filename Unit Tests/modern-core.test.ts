@@ -102,19 +102,49 @@ end`, { command: (op, a, v1) => reads.push(a, v1) });
     expect(reads).toEqual([3, 5]);
   });
 
-  it("hands printed text to the host (it draws it), returning its width", async () => {
+  it("prints in TIC-80's own font, measured exactly as TIC-80 measures it", async () => {
     const widths: number[] = [];
-    const { c } = await core(`function TIC() local w = print("SCORE 10", 4, 6, 12, false, 2) cartbox.command(1, w) print("small", 0, 0, 3, false, 1, true) end`, {
-      command: (_op, a) => widths.push(a),
-    });
+    const { c } = await core(
+      `function TIC() cls(0) cartbox.command(1, print("A", 10, 20, 12), print("SCORE 10", 0, 100, 4, false, 2), print("small", 0, 150, 3, false, 1, true), print("Hi there", 0, 160, 5)) end`,
+      { command: (_op, a, v1, v2, v3) => widths.push(a, v1, v2, v3) },
+    );
     c.tick();
-    expect(c.texts()).toEqual([
-      { text: "SCORE 10", x: 4, y: 6, color: 12, scale: 2, small: false },
-      { text: "small", x: 0, y: 0, color: 3, scale: 1, small: true },
-    ]);
-    expect(widths).toEqual([96]);
+    expect(widths).toEqual([6, 90, 20, 43]);
+    // TIC-80's "A": a three-pixel top bar, two-pixel left legs.
+    const f = c.frame();
+    const ink = SWEETIE(0xf4f4f4);
+    expect(px(f, c.width, 10, 20)).not.toEqual(ink);
+    expect(px(f, c.width, 11, 20)).toEqual(ink);
+    expect(px(f, c.width, 13, 20)).toEqual(ink);
+    expect(px(f, c.width, 10, 21)).toEqual(ink);
+    expect(px(f, c.width, 11, 21)).toEqual(ink);
+    expect(px(f, c.width, 12, 21)).not.toEqual(ink);
+    // Scale 2 doubles every pixel.
+    expect(px(f, c.width, 0, 100)).toEqual(px(f, c.width, 1, 101));
+  });
+
+  it("emulates TIC-80's RAM: peek, poke (and in bits), pmem in its place, memcpy, memset", async () => {
+    const out: number[] = [];
+    const { c } = await core(
+      `
+function TIC()
+  poke(1000, 300)
+  poke(20001, 7, 4)
+  pmem(5, 0x12345678)
+  memcpy(4000, 1000, 1)
+  memset(5000, 9, 3)
+  cartbox.command(1, peek(1000), peek(20001, 4), peek4(20001))
+  cartbox.command(2, pmem(5), peek(4000), peek(5002))
+end`,
+      { command: (op, a, v1, v2) => out.push(op, a, v1, v2) },
+    );
     c.tick();
-    expect(c.texts().length).toBe(2); // cleared each tick, then printed again
+    expect(out).toEqual([1, 44, 7, 7, 2, 0x12345678, 44, 9]);
+    // pmem word 5 sits at the HD core's pmem address in the RAM the host sees.
+    const ram = c.ram();
+    const at = 3068512 + 5 * 4;
+    expect(ram[at]! | (ram[at + 1]! << 8) | (ram[at + 2]! << 16) | (ram[at + 3]! << 24)).toBe(0x12345678);
+    expect(ram[10000]).toBe(7 << 4); // nibble 20001 is byte 10000's high half
   });
 
   it("reads the console buttons: held, and pressed this tick", async () => {

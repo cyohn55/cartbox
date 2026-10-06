@@ -15,7 +15,8 @@
   },
   "files": ["dist"],
   "dependencies": {
-    "@cartbox/editor": "*"
+    "@cartbox/editor": "*",
+    "@cartbox/modern-core": "*"
   },
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",

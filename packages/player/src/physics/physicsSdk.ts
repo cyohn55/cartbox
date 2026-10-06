@@ -238,8 +238,11 @@ export function runtimeSdkLua(
     if type(o) == "string" then return cartbox.find(o) end
     return o
   end
+  -- The dedicated Modern core (EP20b) takes commands as calls: no slots, no cap.
+  local _direct = _cbx_cmd
   local function _cmd(op, a, v1, v2, v3, v4, v5, v6)
     if not _live() then return end
+    if _direct then return _direct(op, a, v1 or 0, v2 or 0, v3 or 0, v4 or 0, v5 or 0, v6 or 0) end
     local count, cap = _B + ${PHYS_CMDS}, ${PHYS_MAX_CMDS}
     local n = _rd(count)
     if n >= cap and _R then count, cap = _R, ${commandRingMax(layout)}; n = _rd(count) end

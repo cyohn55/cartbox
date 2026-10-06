@@ -87,8 +87,8 @@ describe("zip writer", () => {
 
 describe("what an export carries", () => {
   it("physics only for scenes with bodies (the deterministic build when asked), the transcoder only for KTX2 textures", () => {
-    expect(standaloneNeeds({ mesh: null })).toEqual({ physics: null, ktx2: false });
-    expect(standaloneNeeds({ mesh: '{"meshes":[{"physics":{"body":"dynamic"}}]}' })).toEqual({ physics: "regular", ktx2: false });
+    expect(standaloneNeeds({ mesh: null })).toEqual({ physics: null, ktx2: false, direct: false });
+    expect(standaloneNeeds({ mesh: '{"meshes":[{"physics":{"body":"dynamic"}}]}' })).toEqual({ physics: "regular", ktx2: false, direct: false });
     expect(standaloneNeeds({ mesh: '{"physicsWorld":{"deterministic":true},"m":[{"physics":{"body":"static"}}]}' }).physics).toBe("deterministic");
     expect(standaloneNeeds({ mesh: '{"img":{"mime":"image/ktx2"}}' }).ktx2).toBe(true);
     const data = standaloneData(GAME, PARTS);
@@ -149,7 +149,7 @@ describe("the page", () => {
 describe("Lockout", () => {
   it("exports as one page: its cartridge, scene, effects and input actions inline, no physics engine needed", () => {
     const game: StandaloneGame = { title: "Lockout", cartId: "lockout", modelId: "xbox360", cart: lockoutCartridge(), postFx: LOCKOUT_FX, mesh: lockoutMeshSidecar() };
-    expect(standaloneNeeds(game)).toEqual({ physics: null, ktx2: false });
+    expect(standaloneNeeds(game)).toEqual({ physics: null, ktx2: false, direct: false });
     const html = standaloneHtml(game, { ...PARTS, physics: null, ktx2: null });
     const { game: data } = JSON.parse(html.match(/id="cartbox-game">([\s\S]*?)<\/script>/)![1]!);
     expect(data.mesh).toBe(lockoutMeshSidecar());
@@ -347,6 +347,37 @@ end`;
     expect(run.saved.ok).toBe(true);
     expect(run.errors).toEqual([]);
     await run.page.close();
+  }, 120_000);
+
+  it("runs a Modern scene on the dedicated core: the whole player around it, 6,000 placements in a tick", async () => {
+    const box = { name: "b", primitives: [{ positions: Float32Array.from([0, 0, 0, 1, 0, 0, 0, 1, 0]), normals: null, uvs: null, indices: Uint32Array.from([0, 1, 2]), material: { name: "m", baseColorFactor: [1, 1, 1, 1], baseColorImage: null } }] } as MeshAsset;
+    const sidecar = JSON.stringify({
+      version: 2,
+      core: "direct",
+      meshes: [{ id: "a", name: "crate", mesh: serializeMeshAsset(box), transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } }],
+      timelines: [{ name: "t", duration: 1, tracks: [] }],
+    });
+    const code = `
+t = 0
+function TIC()
+  cls(0)
+  print("DIRECT", 10, 10, 12)
+  t = t + 1
+  if t == 20 then
+    local ok = 0
+    for i = 1, 6000 do if cartbox.place("crate", i, 0, 0, 0, 0, 0, 1) then ok = ok + 1 end end
+    cartbox.save({ direct = _cbx_cmd ~= nil, placed = ok })
+  end
+end`;
+    const game: StandaloneGame = { title: "Direct", cartId: "direct-test", modelId: "xbox360", cart: codeChunks(new TextEncoder().encode(code)), mesh: sidecar };
+    expect(standaloneNeeds(game).direct).toBe(true);
+    const core = path.resolve(__dirname, "../packages/modern-core/dist/modern-core");
+    const file = path.join(dir, "direct.html");
+    writeFileSync(file, standaloneHtml(game, { ...parts("xbox360"), engine: { js: readFileSync(`${core}.js`, "utf8"), wasm: new Uint8Array(readFileSync(`${core}.wasm`)) } }));
+    const { page, saved, errors } = await playUntilSaved(file, "direct-test");
+    expect(saved).toEqual({ direct: true, placed: 6000 });
+    expect(errors).toEqual([]);
+    await page.close();
   }, 120_000);
 
   it("has a Start menu: Esc pauses, and its settings apply to the running cart at once", async () => {

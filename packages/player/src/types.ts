@@ -68,6 +68,17 @@ export interface PlayerOptions {
    * from a blob URL.
    */
   engineWasm?: Uint8Array;
+  /**
+   * Run the cart on the dedicated Modern core (EP20b) instead of the
+   * TIC-80–derived one: "direct". Defaults to the scene's choice
+   * ({@link MeshScene.core}); only the Modern tier's models have it.
+   */
+  core?: "tic80" | "direct";
+  /**
+   * URL of the dedicated core's loader (its .wasm beside it, or handed over as
+   * {@link engineWasm}). Defaults to "/engine/modern-core/modern-core.js".
+   */
+  directCoreUrl?: string;
   /** Console model — selects the runtime and its fixed specs. Defaults to "classic". */
   modelId?: ModelId;
   /** When false (default) a poster is shown and playback starts on the first user gesture. */

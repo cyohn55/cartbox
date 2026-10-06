@@ -9,10 +9,14 @@
  * the moment the cart makes them (imported functions, see host.js), so there is
  * no cap and a query answers in the same call.
  *
- * Besides the bridge, the core keeps the cart's 2D layer: a 32-bit RGBA
- * framebuffer drawn with the familiar primitives (cls, pix, rect, rectb, line,
- * circ, circb, tri) in palette colours, and print, whose text the host draws
- * over the frame. Input is the console's buttons, given each tick (btn, btnp).
+ * So that carts and the Lua SDK written for the other tiers run unchanged, the
+ * core also emulates what they rely on of TIC-80: its RAM (peek, poke, pmem,
+ * memcpy, memset over the same layout, so the SDK's blocks and the event
+ * mailbox sit where the host looks for them), the 2D layer (a 32-bit
+ * framebuffer drawn with cls, pix, rect, rectb, line, circ, circb, tri, clip and
+ * print in TIC-80's own font, measured identically) and input (btn, btnp).
+ * Sprites, the map and sound come in a later part; until then those calls do
+ * nothing.
  *
  * Sandboxed: only Lua's base, coroutine, table, string, math and utf8
  * libraries, with file access (dofile, loadfile) removed. Deterministic: the
@@ -30,10 +34,11 @@
 #include "lua.h"
 #include "lualib.h"
 
+#include "font.h"
+
 /* Host functions (host.js): the direct API, text and traces. */
 extern void cbx_host_command(int op, int a, double v1, double v2, double v3, double v4, double v5, double v6);
 extern int cbx_host_query(int op, int a, double v1, double v2, double v3, double v4, double v5, double v6);
-extern void cbx_host_text(const char *s, int len, int x, int y, int color, int scale, int small);
 extern void cbx_host_trace(const char *s, int len);
 
 #define MAX_RETURNS 32
@@ -45,6 +50,10 @@ static struct {
   uint32_t palette[256];
   uint32_t buttons, previous;
   int tick;
+  /* TIC-80's RAM, emulated: the Lua SDK's peek/poke/pmem blocks live here. */
+  uint8_t *ram;
+  int ram_size, pmem_address;
+  int clip_l, clip_t, clip_r, clip_b;
   int has_tic;
   char error[1024];
 } core;
@@ -74,15 +83,15 @@ static void reset_palette(void) {
 /* ---- 2D layer ----------------------------------------------------------- */
 
 static inline void plot(int x, int y, int c) {
-  if (x < 0 || y < 0 || x >= core.width || y >= core.height) return;
+  if (x < core.clip_l || y < core.clip_t || x >= core.clip_r || y >= core.clip_b) return;
   core.fb[y * core.width + x] = core.palette[c & 0xff];
 }
 
 static void hspan(int x0, int x1, int y, int c) {
-  if (y < 0 || y >= core.height) return;
+  if (y < core.clip_t || y >= core.clip_b) return;
   if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
-  if (x0 < 0) x0 = 0;
-  if (x1 >= core.width) x1 = core.width - 1;
+  if (x0 < core.clip_l) x0 = core.clip_l;
+  if (x1 >= core.clip_r) x1 = core.clip_r - 1;
   uint32_t color = core.palette[c & 0xff];
   uint32_t *row = core.fb + y * core.width;
   for (int x = x0; x <= x1; x++) row[x] = color;
@@ -91,9 +100,23 @@ static void hspan(int x0, int x1, int y, int c) {
 static int color_arg(lua_State *L, int i) { return (int)luaL_optinteger(L, i, 0); }
 
 static int l_cls(lua_State *L) {
-  uint32_t color = core.palette[color_arg(L, 1) & 0xff];
-  int n = core.width * core.height;
-  for (int i = 0; i < n; i++) core.fb[i] = color;
+  int c = color_arg(L, 1);
+  for (int y = core.clip_t; y < core.clip_b; y++) hspan(core.clip_l, core.clip_r - 1, y, c);
+  return 0;
+}
+
+/* clip(x, y, w, h) limits drawing to a rectangle; clip() lifts it. */
+static int l_clip(lua_State *L) {
+  if (lua_isnoneornil(L, 1)) {
+    core.clip_l = 0; core.clip_t = 0; core.clip_r = core.width; core.clip_b = core.height;
+    return 0;
+  }
+  int x = (int)luaL_checknumber(L, 1), y = (int)luaL_checknumber(L, 2);
+  int w = (int)luaL_checknumber(L, 3), h = (int)luaL_checknumber(L, 4);
+  core.clip_l = x < 0 ? 0 : x;
+  core.clip_t = y < 0 ? 0 : y;
+  core.clip_r = x + w > core.width ? core.width : x + w;
+  core.clip_b = y + h > core.height ? core.height : y + h;
   return 0;
 }
 
@@ -194,18 +217,112 @@ static int l_tri(lua_State *L) {
   return 0;
 }
 
-/* print(text, x, y, color, fixed, scale, small) -> width: the host draws the text over the frame. */
+/* One character of TIC-80's font at (x, y); its width (trimmed to its inked columns unless fixed). */
+static int draw_char(const unsigned char *font, unsigned char ch, int x, int y, int color, int scale, int fixed) {
+  if (ch >= 127) return 0;
+  const unsigned char *rows = font + ch * 8;
+  int start = 0, end = 8;
+  if (!fixed) {
+    while (start < 8) { int ink = 0; for (int j = 0; j < 8; j++) ink |= (rows[j] >> start) & 1; if (ink) break; start++; }
+    while (end > start) { int ink = 0; for (int j = 0; j < 8; j++) ink |= (rows[j] >> (end - 1)) & 1; if (ink) break; end--; }
+  }
+  for (int i = start; i < end; i++)
+    for (int j = 0; j < 8; j++)
+      if ((rows[j] >> i) & 1)
+        for (int sy = 0; sy < scale; sy++) hspan(x + (i - start) * scale, x + (i - start + 1) * scale - 1, y + j * scale + sy, color);
+  return end - start;
+}
+
+/* print(text, x, y, color, fixed, scale, small) -> width, drawn and measured exactly as TIC-80 does. */
 static int l_print(lua_State *L) {
   /* Arguments first: luaL_tolstring pushes its result onto the stack. */
   int x = (int)luaL_optnumber(L, 2, 0), y = (int)luaL_optnumber(L, 3, 0), c = (int)luaL_optinteger(L, 4, 15);
+  int fixed = lua_toboolean(L, 5);
   int scale = (int)luaL_optinteger(L, 6, 1), small = lua_toboolean(L, 7);
   if (scale < 1) scale = 1;
   size_t len;
   const char *s = luaL_tolstring(L, 1, &len);
-  cbx_host_text(s, (int)len, x, y, c, scale, small);
-  lua_pushinteger(L, (lua_Integer)len * (small ? 4 : 6) * scale);
+  const unsigned char *font = small ? FONT_SMALL : FONT_REGULAR;
+  int font_width = small ? 4 : 6, height = 6;
+  int space = fixed ? font_width : font_width - 2;
+  int pos = x, max = x;
+  for (size_t k = 0; k < len; k++) {
+    unsigned char ch = (unsigned char)s[k];
+    if (ch == '\n') {
+      if (pos > max) max = pos;
+      pos = x;
+      y += height * scale;
+      continue;
+    }
+    int size = draw_char(font, ch, pos, y, c, scale, fixed);
+    pos += ((!fixed && size) ? size + 1 : space) * scale;
+  }
+  lua_pushinteger(L, (pos > max ? pos : max) - x);
   return 1;
 }
+
+/* ---- RAM: peek, poke, pmem, memcpy, memset ------------------------------- */
+
+static int ram_ok(lua_Integer a, lua_Integer n) { return a >= 0 && n >= 0 && a + n <= core.ram_size; }
+
+/* peek(address, bits=8): a byte (or 1/2/4 bits of one, the address counted in those units). */
+static int l_peek(lua_State *L) {
+  lua_Integer a = luaL_checkinteger(L, 1);
+  int bits = (int)luaL_optinteger(L, 2, 8);
+  if (bits == 8) { lua_pushinteger(L, ram_ok(a, 1) ? core.ram[a] : 0); return 1; }
+  if (bits != 1 && bits != 2 && bits != 4) return luaL_error(L, "peek: bits must be 1, 2, 4 or 8");
+  int per = 8 / bits;
+  lua_Integer byte = a / per;
+  int shift = (int)(a % per) * bits;
+  lua_pushinteger(L, ram_ok(byte, 1) ? (core.ram[byte] >> shift) & ((1 << bits) - 1) : 0);
+  return 1;
+}
+
+static int l_poke(lua_State *L) {
+  lua_Integer a = luaL_checkinteger(L, 1), v = luaL_checkinteger(L, 2);
+  int bits = (int)luaL_optinteger(L, 3, 8);
+  if (bits == 8) { if (ram_ok(a, 1)) core.ram[a] = (uint8_t)v; return 0; }
+  if (bits != 1 && bits != 2 && bits != 4) return luaL_error(L, "poke: bits must be 1, 2, 4 or 8");
+  int per = 8 / bits;
+  lua_Integer byte = a / per;
+  int shift = (int)(a % per) * bits, mask = ((1 << bits) - 1) << shift;
+  if (ram_ok(byte, 1)) core.ram[byte] = (uint8_t)((core.ram[byte] & ~mask) | ((v << shift) & mask));
+  return 0;
+}
+
+static int l_peek4(lua_State *L) { lua_pushinteger(L, 4); lua_insert(L, 2); lua_settop(L, 2); return l_peek(L); }
+static int l_poke4(lua_State *L) { lua_settop(L, 2); lua_pushinteger(L, 4); return l_poke(L); }
+
+/* pmem(index, value): persistent words (TIC-80's 256), read or written; returns the word as it was. */
+static int l_pmem(lua_State *L) {
+  lua_Integer i = luaL_checkinteger(L, 1);
+  if (i < 0 || i > 255) return luaL_error(L, "pmem: index out of range");
+  uint8_t *w = core.ram + core.pmem_address + i * 4;
+  uint32_t old = (uint32_t)w[0] | ((uint32_t)w[1] << 8) | ((uint32_t)w[2] << 16) | ((uint32_t)w[3] << 24);
+  if (!lua_isnoneornil(L, 2)) {
+    uint32_t v = (uint32_t)(lua_Integer)luaL_checknumber(L, 2);
+    w[0] = v & 0xff; w[1] = (v >> 8) & 0xff; w[2] = (v >> 16) & 0xff; w[3] = (v >> 24) & 0xff;
+  }
+  lua_pushinteger(L, old);
+  return 1;
+}
+
+static int l_memcpy(lua_State *L) {
+  lua_Integer d = luaL_checkinteger(L, 1), s = luaL_checkinteger(L, 2), n = luaL_checkinteger(L, 3);
+  if (ram_ok(d, n) && ram_ok(s, n)) memmove(core.ram + d, core.ram + s, (size_t)n);
+  return 0;
+}
+
+static int l_memset(lua_State *L) {
+  lua_Integer d = luaL_checkinteger(L, 1), v = luaL_checkinteger(L, 2), n = luaL_checkinteger(L, 3);
+  if (ram_ok(d, n)) memset(core.ram + d, (int)(v & 0xff), (size_t)n);
+  return 0;
+}
+
+/* What part 3 brings (sprites, map, sound): here they do nothing, so carts that call them still run. */
+static int l_nothing(lua_State *L) { (void)L; return 0; }
+static int l_zero(lua_State *L) { lua_pushinteger(L, 0); return 1; }
+static int l_false(lua_State *L) { lua_pushboolean(L, 0); return 1; }
 
 static int l_trace(lua_State *L) {
   size_t len;
@@ -296,7 +413,12 @@ static void open_libs(lua_State *L) {
   static const luaL_Reg api[] = {
     {"cls", l_cls}, {"pix", l_pix}, {"rect", l_rect}, {"rectb", l_rectb}, {"line", l_line}, {"circ", l_circ},
     {"circb", l_circb}, {"tri", l_tri}, {"print", l_print}, {"trace", l_trace}, {"btn", l_btn}, {"btnp", l_btnp},
-    {"time", l_time}, {"_cbx_cmd", l_cmd}, {"_cbx_query", l_query}, {"_cbx_palette", l_palette}, {NULL, NULL},
+    {"time", l_time}, {"_cbx_cmd", l_cmd}, {"_cbx_query", l_query}, {"_cbx_palette", l_palette},
+    {"clip", l_clip}, {"peek", l_peek}, {"poke", l_poke}, {"peek4", l_peek4}, {"poke4", l_poke4}, {"pmem", l_pmem},
+    {"memcpy", l_memcpy}, {"memset", l_memset},
+    {"spr", l_nothing}, {"map", l_nothing}, {"mset", l_nothing}, {"sfx", l_nothing}, {"music", l_nothing},
+    {"sync", l_nothing}, {"vbank", l_zero}, {"mget", l_zero}, {"fget", l_false}, {"fset", l_nothing},
+    {"key", l_false}, {"keyp", l_false}, {NULL, NULL},
   };
   for (const luaL_Reg *f = api; f->func; f++) {
     lua_pushcfunction(L, f->func);
@@ -304,15 +426,28 @@ static void open_libs(lua_State *L) {
   }
 }
 
-/* Start a console of `width × height`, its random numbers seeded with `seed`. */
-EMSCRIPTEN_KEEPALIVE int cbx_core_init(int width, int height, int seed) {
+/*
+ * Start a console of `width × height`, its random numbers seeded with `seed`,
+ * with `ram_size` bytes of RAM whose persistent words start at `pmem_address`
+ * (the TIC-80–derived core's layout, so the Lua SDK's blocks sit where it
+ * expects them).
+ */
+EMSCRIPTEN_KEEPALIVE int cbx_core_init(int width, int height, int seed, int ram_size, int pmem_address) {
   if (core.L) lua_close(core.L);
   free(core.fb);
+  free(core.ram);
   memset(&core, 0, sizeof core);
   core.width = width;
   core.height = height;
+  core.clip_r = width;
+  core.clip_b = height;
   core.fb = calloc((size_t)width * height, sizeof(uint32_t));
   if (!core.fb) return 0;
+  if (ram_size < pmem_address + 1024) return 0;
+  core.ram = calloc((size_t)ram_size, 1);
+  if (!core.ram) return 0;
+  core.ram_size = ram_size;
+  core.pmem_address = pmem_address;
   reset_palette();
   core.L = luaL_newstate();
   if (!core.L) return 0;
@@ -357,6 +492,7 @@ EMSCRIPTEN_KEEPALIVE int cbx_core_tick(int buttons) {
 }
 
 EMSCRIPTEN_KEEPALIVE uint32_t *cbx_core_framebuffer(void) { return core.fb; }
+EMSCRIPTEN_KEEPALIVE uint8_t *cbx_core_ram(void) { return core.ram; }
 EMSCRIPTEN_KEEPALIVE double *cbx_core_returns(void) { return returns; }
 EMSCRIPTEN_KEEPALIVE const char *cbx_core_error(void) { return core.error; }
 EMSCRIPTEN_KEEPALIVE int cbx_core_memory(void) { return core.L ? lua_gc(core.L, LUA_GCCOUNT, 0) : 0; }

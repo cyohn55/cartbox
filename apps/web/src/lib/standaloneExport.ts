@@ -82,6 +82,8 @@ export interface StandaloneData {
 export interface StandaloneNeeds {
   readonly physics: "regular" | "deterministic" | null;
   readonly ktx2: boolean;
+  /** The scene runs on the dedicated Modern core (EP20b): the export carries that core instead of the TIC-80–derived one. */
+  readonly direct: boolean;
 }
 
 export function standaloneNeeds(game: Pick<StandaloneGame, "mesh">): StandaloneNeeds {
@@ -90,6 +92,7 @@ export function standaloneNeeds(game: Pick<StandaloneGame, "mesh">): StandaloneN
   return {
     physics: physics.bodies ? (physics.deterministic ? "deterministic" : "regular") : null,
     ktx2: Boolean(mesh?.includes('"mime":"image/ktx2"')),
+    direct: Boolean(mesh && /"core":"direct"/.test(mesh)),
   };
 }
 
@@ -307,6 +310,8 @@ export function standaloneZip(game: StandaloneGame, parts: StandaloneParts, date
 export interface StandaloneSources {
   /** The model's engine glue URL (its .wasm sits beside it). */
   readonly engineUrl: string;
+  /** The dedicated Modern core's glue URL, for scenes that run on it (EP20b). */
+  readonly directCoreUrl?: string;
   /** The site's base path ("" at the root). */
   readonly basePath: string;
   readonly fetch?: typeof fetch;
@@ -323,10 +328,11 @@ export async function fetchStandaloneParts(game: Pick<StandaloneGame, "mesh">, s
   };
   const text = async (url: string) => (await load(url)).text();
   const part = (name: string) => `${sources.basePath}/standalone/${name}`;
+  const engineUrl = needs.direct && sources.directCoreUrl ? sources.directCoreUrl : sources.engineUrl;
   const [runtime, js, wasm, physics, ktx2] = await Promise.all([
     text(part("runtime.js")),
-    text(sources.engineUrl),
-    load(sources.engineUrl.replace(/\.js(\?.*)?$/, ".wasm")).then(async (r) => new Uint8Array(await r.arrayBuffer())),
+    text(engineUrl),
+    load(engineUrl.replace(/\.js(\?.*)?$/, ".wasm")).then(async (r) => new Uint8Array(await r.arrayBuffer())),
     needs.physics ? text(part(needs.physics === "deterministic" ? "physics-deterministic.js" : "physics.js")) : null,
     needs.ktx2 ? text(part("ktx2.js")) : null,
   ]);

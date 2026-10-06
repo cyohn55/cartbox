@@ -16,7 +16,7 @@ emcc -O2 -flto \
   -sENVIRONMENT=web,worker,node \
   -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=33554432 \
   -sFILESYSTEM=0 \
-  -sEXPORTED_FUNCTIONS=_cbx_core_init,_cbx_core_load,_cbx_core_tick,_cbx_core_framebuffer,_cbx_core_returns,_cbx_core_error,_cbx_core_memory,_malloc,_free \
+  -sEXPORTED_FUNCTIONS=_cbx_core_init,_cbx_core_load,_cbx_core_tick,_cbx_core_framebuffer,_cbx_core_ram,_cbx_core_returns,_cbx_core_error,_cbx_core_memory,_malloc,_free \
   -sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPF64,UTF8ToString \
   -o dist/modern-core.js
 ls -l dist

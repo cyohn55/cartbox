@@ -11,13 +11,22 @@ nothing is capped and a query answers in the same call. The op numbers are the
 runtime protocol's, so the same host code (`RuntimeChannel.applyCommands`)
 serves both cores.
 
-- `src/core.c` is the core: the Lua VM, sandboxed (base, coroutine, table,
-  string, math and utf8 only), a 2D layer (a 32-bit framebuffer drawn with
-  `cls`, `pix`, `rect`, `rectb`, `line`, `circ`, `circb`, `tri` in palette
-  colours; `print` hands its text to the host), input (`btn`, `btnp`), a tick
-  clock (`time`) and the bridge (`_cbx_cmd`, `_cbx_query`).
+- `src/core.c` is the core:
+  - the Lua VM, sandboxed (base, coroutine, table, string, math and utf8
+    only);
+  - an emulation of TIC-80's RAM (`peek`, `poke`, `pmem`, `memcpy`, `memset`
+    over a TIC-80–derived core's layout), so the Lua SDK written for those
+    cores runs unchanged;
+  - a 2D layer: a 32-bit framebuffer drawn with `cls`, `pix`, `rect`, `rectb`,
+    `line`, `circ`, `circb`, `tri` and `clip` in palette colours, and `print`
+    in TIC-80's own font (`src/font.h`, MIT);
+  - input (`btn`, `btnp`) and a tick clock (`time`);
+  - the bridge: `_cbx_cmd` and `_cbx_query`.
 - `src/host.js` holds the imports the bridge calls.
-- `src/index.ts` wraps it for JavaScript: `createModernCore(factory, options)`.
+- `src/index.ts` wraps it for JavaScript: `createModernCore(factory, options)`,
+  or `wrapModernCore(module, options)` for an instantiated module. The player
+  presents it as a console (`packages/player/src/directConsole.ts`) for
+  Modern-tier scenes that choose it.
 - `vendor/lua` is Lua 5.4.7 (MIT, see its LICENSE).
 - `dist/` is the build, committed like the TIC-80 cores. Run `npm run build`
   with Emscripten 3.1.64 on PATH. The build is reproducible, and CI checks the

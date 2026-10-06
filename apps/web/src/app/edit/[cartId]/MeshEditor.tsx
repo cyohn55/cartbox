@@ -96,6 +96,7 @@ import {
   LodPanel,
   PhysicsPanel,
   PhysicsWorldPanel,
+  CorePanel,
   PrefabLibrary,
   PrefabPanel,
   PropertyEditor,
@@ -118,6 +119,8 @@ interface MeshEditorProps {
   code?: CodeAccess;
   /** Build a playtest to run inside the scene view (EP5), or null when the cart can't run. */
   onStartPlay?: () => Promise<PlaytestConfig | null>;
+  /** The cart is on the Modern tier, which has the dedicated core (EP20b). */
+  modernTier?: boolean;
 }
 
 /** Trigger a browser download of raw bytes or text under `filename`. */
@@ -141,7 +144,7 @@ function fitDistance(mesh: MeshAsset): number {
   return radius / Math.sin(fov / 2) + radius;
 }
 
-export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay }: MeshEditorProps) {
+export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modernTier = false }: MeshEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   /**
@@ -893,6 +896,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay }: Mesh
             outside the per-mesh selection. */}
         <LightingEditor lighting={sidecar.lighting} onChange={(lighting) => onSidecarChange(setMeshLighting(sidecar, lighting))} />
         <PhysicsWorldPanel sidecar={sidecar} onChange={onSidecarChange} />
+        {modernTier && <CorePanel sidecar={sidecar} onChange={onSidecarChange} />}
         <LevelsPanel sidecar={sidecar} onChange={onSidecarChange} />
         <StreamingPanel sidecar={sidecar} onChange={onSidecarChange} />
         <NavigationPanel sidecar={sidecar} onChange={onSidecarChange} />

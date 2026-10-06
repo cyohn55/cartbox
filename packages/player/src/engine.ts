@@ -162,6 +162,20 @@ export async function loadEngineModule(engineUrl: string, wasm?: Uint8Array): Pr
   return pending;
 }
 
+/**
+ * A fresh instance of an engine module, never shared: the dedicated Modern core
+ * (EP20b) holds one cart per instance, so each player gets its own. (The glue's
+ * import is still cached by the browser.)
+ */
+export async function instantiateEngineModule(engineUrl: string, wasm?: Uint8Array): Promise<unknown> {
+  try {
+    const glue = (await import(/* @vite-ignore */ /* webpackIgnore: true */ engineUrl)) as { default: EmscriptenFactory };
+    return await glue.default(wasm ? { wasmBinary: wasm, locateFile: (file: string) => file } : undefined);
+  } catch (error) {
+    throw new EngineLoadError(`Failed to load the engine module at ${engineUrl}`, error);
+  }
+}
+
 /** Wraps an Emscripten module as a {@link ConsoleInstance} for a given model. */
 export function createConsole(
   module: EmscriptenModule,
