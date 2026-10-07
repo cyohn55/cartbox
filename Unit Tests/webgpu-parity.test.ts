@@ -55,6 +55,7 @@ import { localShadowRig } from "./helpers/localShadowScene";
 import { manyLights } from "./helpers/manyLights";
 import { probeRig } from "./helpers/probeScene";
 import { expectTemporal, temporalReport, type GpuRenderer } from "./helpers/temporalScene";
+import { expectReflections, reflectionReport } from "./helpers/reflectionScene";
 
 
 const W = 64;
@@ -845,6 +846,21 @@ describe.skipIf(!device)("WebGPU temporal anti-aliasing on a real device", () =>
       const error = await device.popErrorScope();
       expect(error ? String(error.message ?? error) : null).toBeNull();
       expectTemporal(report);
+    }, 120_000);
+  }
+});
+
+describe.skipIf(!device)("WebGPU screen-space reflections on a real device", () => {
+  const make = async (width: number, height: number) => (await WebgpuSceneRenderer.create(device, width, height)) as unknown as GpuRenderer;
+  const tick = () => device.tick?.();
+
+  for (const [name, extra] of [["alone", {}], ["with multisampling", { antialias: true }], ["with multisampling and temporal", { antialias: true, temporal: true }]] as const) {
+    it(`reflects the panels in the floor, each on its side, and changes nothing else: ${name}`, async () => {
+      device.pushErrorScope("validation");
+      const report = await reflectionReport(make, tick, W, H, extra);
+      const error = await device.popErrorScope();
+      expect(error ? String(error.message ?? error) : null).toBeNull();
+      expectReflections(report);
     }, 120_000);
   }
 });

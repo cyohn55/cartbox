@@ -49,6 +49,7 @@ import {
   computeSmoothNormals,
   lightProbeTexels,
   type LightProbeGrid,
+  type Mat4,
   LOCAL_SHADOW_GRID,
   LOCAL_SHADOW_TILE,
   MAX_LOCAL_SHADOW_TILES,
@@ -74,6 +75,7 @@ import {
 
 import { batchInstances, compositeFrame, presentFrame, softEdges, type PrimitiveTextures } from "./gpuFrame.js";
 import { TEMPORAL_RESOLVE_GLSL, TEMPORAL_SHARPEN_GLSL, TEMPORAL_VERTEX_GLSL, TemporalState } from "./temporal.js";
+import { REFLECTION_GLSL, reflectionUniforms } from "./reflections.js";
 import { WebglPassTimer } from "./gpuTimer.js";
 import type { RenderStats } from "../debug/profiler.js";
 import { webgpuCanHonour } from "./renderCaps.js";
@@ -248,7 +250,44 @@ ${set.map((l) => `    ${l}`).join("\n")}
   };
 }
 
-const fragmentShader = (nearest: boolean, graph: CompiledGraph | null = null) => {
+/** The Modern path's tone map and fog, applied to the GLSL variable `v` in place (as wgslDisplay). */
+function glslDisplay(v: string): string {
+  return /* glsl */ `    if (u.tonemap.x > 0.5) {
+      float e = u.tonemap.y;
+      ${v} = vec3(aces(${v}.r * e), aces(${v}.g * e), aces(${v}.b * e));
+    }
+    if (u.fogParams.x > 0.5) {
+      float d = max(0.0, vEyeDepth - u.fogParams.y);
+      float f = min(u.fogParams.z, 1.0 - exp(-d * u.fog.w));
+      vec3 fc = u.fog.rgb;
+      if (u.fogParams.w > 0.5) {
+        vec3 c = u.fogCam.xyz;
+        vec3 ray = vWorldPos - c;
+        float len = length(ray);
+        float tau = fogLayer(u.fogHeight.x, u.fogHeight.z, u.fogHeight.y, c.y, ray.y, len, 0.0, 1.0);
+        int vc = int(u.fogCam.w + 0.5);
+        for (int i = 0; i < 4; i++) {
+          if (i >= vc) break;
+          vec4 a = u.fogVol[i * 2];
+          vec4 b = u.fogVol[i * 2 + 1];
+          vec2 span = fogBox(a.xyz, b.xyz, c, ray);
+          if (span.y > span.x) tau += fogLayer(a.w, b.w, a.y, c.y, ray.y, len, span.x, span.y);
+        }
+        f = 1.0 - (1.0 - f) * exp(-tau);
+        if (u.fogHeight.w > 0.0) {
+          float cosv = max(0.0, dot(ray, u.light.xyz) / (max(len, 1e-6) * max(length(u.light.xyz), 1e-6)));
+          fc = min(vec3(1.0), fc + u.fogGlow.rgb * (u.fogHeight.w * pow(cosv, ${FOG_GLOW_POWER.toFixed(1)})));
+        }
+      }
+      ${v} = mix(clamp(${v}, vec3(0.0), vec3(1.0)), fc, f);
+    }`;
+}
+
+/**
+ * The scene's fragment shader. `reflect` (HALO_INFINITE_STYLE_ROADMAP.md I3)
+ * writes the two reflection targets beside the colour (see reflections.ts).
+ */
+const fragmentShader = (nearest: boolean, graph: CompiledGraph | null = null, reflect = false) => {
   const g = graphSites(graph);
   return /* glsl */ `#version 300 es
 precision highp float;
@@ -294,7 +333,7 @@ in float vBw;
 in vec4 vLightClip;
 in vec3 vWorldPos;
 in float vEyeDepth;
-out vec4 outColor;
+${reflect ? "layout(location = 0) out vec4 outColor;\nlayout(location = 1) out vec4 outReflect;\nlayout(location = 2) out vec4 outEnv;" : "out vec4 outColor;"}
 
 // Optical depth of a fog layer thinning above base (fogLayerDepth in skyDome.ts).
 float fogLayer(float d, float k, float base, float cy, float dy, float len, float t0, float t1) {
@@ -555,7 +594,7 @@ vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, 
 }
 ${g.fns}
 void main() {
-  vec2 uv = vec2(vUv.x, 1.0 - vUv.y);
+${reflect ? "  outReflect = vec4(0.0);\n  outEnv = vec4(0.0);\n" : ""}  vec2 uv = vec2(vUv.x, 1.0 - vUv.y);
   vec4 colour = u.base;
   if (u.texflags.x > 0.5) {
     colour = colour * sampleMap(tex, uv);
@@ -627,7 +666,7 @@ ${g.pbr}
       emis = ef * es;
     }
 ${g.emis}
-    vec3 amb;
+${reflect ? "    vec3 envSpec = vec3(0.0);\n    vec3 envSeen = vec3(0.0);\n" : ""}    vec3 amb;
     if (u.envSky.w > 0.5) {
       vec3 irr = envColorDir(N);
       vec3 R = 2.0 * ndv * N - V;
@@ -653,10 +692,10 @@ ${g.emis}
       }
       vec3 pref = mix(spec, specAvg, rough);
       amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;
-    } else {
+${reflect ? "      envSpec = pref * f0 * reflectK * ao;\n      envSeen = pref;\n" : ""}    } else {
       amb = vec3(u.light.w) * albedo * ao;
     }
-    // A baked light map (the second UV set) scales the sky/ambient fill,
+${reflect ? "    vec3 ambRaw = amb;\n" : ""}    // A baked light map (the second UV set) scales the sky/ambient fill,
     // mirroring the CPU path.
     if (u.ssaoMeta.z > 0.5) {
       amb = amb * texture(lmTex, vec2(vUv2.x, 1.0 - vUv2.y)).rgb * ${LIGHTMAP_RANGE.toFixed(4)};
@@ -666,7 +705,7 @@ ${g.emis}
     if (u.ssaoMeta.x > 0.5) {
       amb = amb * texelFetch(ssaoMap, ivec2(gl_FragCoord.xy), 0).r;
     }
-    float sf = shadowFactor(vLightClip, vWorldPos, abs(dot(normalize(vNormal), u.light.xyz)));
+${reflect ? "    // What the light map, probes and SSAO did to the fill, they do to its reflection.\n    vec3 occl = mix(vec3(1.0), amb / max(ambRaw, vec3(1e-6)), vec3(greaterThan(ambRaw, vec3(1e-6))));\n    envSpec = envSpec * occl;\n" : ""}    float sf = shadowFactor(vLightClip, vWorldPos, abs(dot(normalize(vNormal), u.light.xyz)));
     int lc = int(u.ssaoMeta.y + 0.5);
     vec3 lit;
     if (lc > 0) {
@@ -697,44 +736,26 @@ ${g.emis}
     float band = pow(0.5 + 0.5 * sin(vWorldPos.y * ${EFFECT_BAND_FREQUENCY.toFixed(1)} - u.effect1.w * ${EFFECT_BAND_SPEED.toFixed(1)}), ${EFFECT_BAND_POWER.toFixed(1)});
     lit = lit + u.effect0.rgb + u.effect1.rgb * band;
     vec3 shaded = lit;
-    if (u.tonemap.x > 0.5) {
-      float e = u.tonemap.y;
-      shaded = vec3(aces(lit.r * e), aces(lit.g * e), aces(lit.b * e));
-    }
-    if (u.fogParams.x > 0.5) {
-      float d = max(0.0, vEyeDepth - u.fogParams.y);
-      float f = min(u.fogParams.z, 1.0 - exp(-d * u.fog.w));
-      vec3 fc = u.fog.rgb;
-      if (u.fogParams.w > 0.5) {
-        vec3 c = u.fogCam.xyz;
-        vec3 ray = vWorldPos - c;
-        float len = length(ray);
-        float tau = fogLayer(u.fogHeight.x, u.fogHeight.z, u.fogHeight.y, c.y, ray.y, len, 0.0, 1.0);
-        int vc = int(u.fogCam.w + 0.5);
-        for (int i = 0; i < 4; i++) {
-          if (i >= vc) break;
-          vec4 a = u.fogVol[i * 2];
-          vec4 b = u.fogVol[i * 2 + 1];
-          vec2 span = fogBox(a.xyz, b.xyz, c, ray);
-          if (span.y > span.x) tau += fogLayer(a.w, b.w, a.y, c.y, ray.y, len, span.x, span.y);
-        }
-        f = 1.0 - (1.0 - f) * exp(-tau);
-        if (u.fogHeight.w > 0.0) {
-          float cosv = max(0.0, dot(ray, u.light.xyz) / (max(len, 1e-6) * max(length(u.light.xyz), 1e-6)));
-          fc = min(vec3(1.0), fc + u.fogGlow.rgb * (u.fogHeight.w * pow(cosv, ${FOG_GLOW_POWER.toFixed(1)})));
-        }
-      }
-      shaded = mix(clamp(shaded, vec3(0.0), vec3(1.0)), fc, f);
-    }
+${glslDisplay("shaded")}${reflect ? /* glsl */ `
+    // Reflections (I3): the same without the environment's reflection, so the pass can take it away.
+    vec3 without = lit - envSpec;
+${glslDisplay("without")}
+    vec3 contribution = max(clamp(shaded, vec3(0.0), vec3(1.0)) - clamp(without, vec3(0.0), vec3(1.0)), vec3(0.0));
+    vec3 seen = envSeen;
+    if (u.tonemap.x > 0.5) { seen = vec3(aces(seen.r * u.tonemap.y), aces(seen.g * u.tonemap.y), aces(seen.b * u.tonemap.y)); }
+    seen = clamp(seen, vec3(0.0), vec3(1.0));
+    vec3 weight = f0 * reflectK * ao * occl;
+    outReflect = vec4(clamp(mix(weight, contribution / max(seen, vec3(1e-3)), vec3(greaterThan(seen, vec3(0.02)))), vec3(0.0), vec3(1.0)), rough);
+    outEnv = vec4(contribution, 1.0);` : ""}
     outColor = finishAlpha(shaded, colour.a);
-    return;
+${reflect ? "    if (u.pbr.w > 1.5) { outReflect = vec4(0.0, 0.0, 0.0, outColor.a); outEnv = outReflect; }\n" : ""}    return;
   }
 
   // Fantasy path: two-sided Lambert on the un-renormalised normal, as the software rasteriser does.
   float nl = abs(dot(vNormal, u.light.xyz));
   float shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(vLightClip, vWorldPos, abs(dot(normalize(vNormal), u.light.xyz)));
   outColor = finishAlpha(colour.rgb * shade, colour.a);
-}
+${reflect ? "  if (u.pbr.w > 1.5) { outReflect = vec4(0.0, 0.0, 0.0, outColor.a); outEnv = outReflect; }\n" : ""}}
 `;
 };
 
@@ -757,10 +778,10 @@ interface ReadbackSlot {
  * Compile and link the scene program — plain, or with a material graph spliced
  * into its fragment shader (EP7) — with its blocks and texture units bound.
  */
-function buildProgram(gl: any, nearest: boolean, graph: CompiledGraph | null): any {
+function buildProgram(gl: any, nearest: boolean, graph: CompiledGraph | null, reflect = false): any {
   const program = gl.createProgram();
   gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, VERTEX_SHADER));
-  gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, fragmentShader(nearest, graph)));
+  gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, fragmentShader(nearest, graph, reflect)));
   gl.linkProgram(program);
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(`WebGL2 program failed to link: ${gl.getProgramInfoLog(program)}`);
   gl.uniformBlockBinding(program, gl.getUniformBlockIndex(program, "Uniforms"), BLOCK_UNIFORMS);
@@ -855,7 +876,7 @@ export class WebglSceneRenderer implements SceneRenderer {
    * (HALO_INFINITE_STYLE_ROADMAP.md I1): made on first use, false where the
    * context can't multisample. Resolved into {@link framebuffer} before readback.
    */
-  private msaa: { framebuffer: any; attachments: any[] } | null | false = null;
+  private msaa: { framebuffer: any; attachments: any[]; samples: number } | null | false = null;
   /** What this frame draws into: {@link framebuffer}, or {@link msaa}'s. */
   private target: any = null;
   private readSeq = 0;
@@ -1099,7 +1120,10 @@ export class WebglSceneRenderer implements SceneRenderer {
     gl.bindBuffer(gl.UNIFORM_BUFFER, this.instanceBuffer);
     gl.bufferSubData(gl.UNIFORM_BUFFER, 0, this.instanceData, 0, cursor);
 
+    // Reflections (I3), where the context can render half floats: the reflection targets beside the colour.
+    const reflect = draw.reflections === true && this.ensureReflections();
     this.target = this.drawFramebuffer(draw.antialias === true);
+    if (reflect) this.target = this.reflectionFramebuffer(this.target !== this.framebuffer);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.target);
     gl.viewport(0, 0, this.width, this.height);
     gl.disable(gl.BLEND);
@@ -1156,7 +1180,7 @@ export class WebglSceneRenderer implements SceneRenderer {
     for (const chunk of chunks) {
       const batch = batches[chunk.batch]!;
       // A material graph draws with its own program (EP7); the probe data is per program.
-      const wanted = this.programOf(batch.primitive.material);
+      const wanted = this.programOf(batch.primitive.material, reflect);
       if (wanted !== program) {
         program = wanted;
         gl.useProgram(program);
@@ -1192,8 +1216,12 @@ export class WebglSceneRenderer implements SceneRenderer {
     this.timer?.end();
     this.lastFrameStats = { drawCalls: chunks.length, instances: instanceCount, triangles, gpuMs: this.timer?.lastMs ?? null };
 
-    // An anti-aliased frame resolves its samples into the plain framebuffer, which is read back.
-    if (this.target !== this.framebuffer) {
+    // An anti-aliased frame resolves its samples into the plain framebuffer, which is read back
+    // (and its reflection targets into theirs); a frame with reflections then swaps them in.
+    if (reflect) {
+      this.resolveReflectionTargets();
+      this.reflectPass(temporal ? temporal.projection : draw.projection);
+    } else if (this.target !== this.framebuffer) {
       gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.target);
       gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.framebuffer);
       gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, this.width, this.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
@@ -1354,17 +1382,19 @@ export class WebglSceneRenderer implements SceneRenderer {
   private readonly graphPrograms = new Map<string, any>();
 
   /** The program a material draws with: the plain one, or its graph's variant. */
-  private programOf(material: MeshAsset["primitives"][number]["material"]): any {
+  private programOf(material: MeshAsset["primitives"][number]["material"], reflect = false): any {
     const graph = compiledGraphOf(material);
-    if (!graph) return this.program;
-    let program = this.graphPrograms.get(graph.key);
+    if (!graph && !reflect) return this.program;
+    const key = `${graph?.key ?? ""}|${reflect ? 1 : 0}`;
+    let program = this.graphPrograms.get(key);
     if (!program) {
       try {
-        program = buildProgram(this.gl, this.nearest, graph);
+        program = buildProgram(this.gl, this.nearest, graph, reflect);
       } catch {
-        program = this.program; // a variant that won't build draws as the plain material
+        // A variant that won't build draws as the plain material (a reflecting one as the plain reflecting shader).
+        program = graph && reflect ? this.programOf({ ...material, graph: undefined }, true) : this.program;
       }
-      this.graphPrograms.set(graph.key, program);
+      this.graphPrograms.set(key, program);
     }
     return program;
   }
@@ -1405,9 +1435,149 @@ export class WebglSceneRenderer implements SceneRenderer {
         this.msaa = false;
         return this.framebuffer;
       }
-      this.msaa = { framebuffer, attachments: [colour, depth] };
+      this.msaa = { framebuffer, attachments: [colour, depth], samples };
     }
     return this.msaa.framebuffer;
+  }
+
+  /**
+   * The reflection targets (I3): two half-float textures that, with the plain
+   * framebuffer's colour and depth, make the framebuffer a frame with
+   * reflections draws into, and its multisampled twin; a copy of the frame for
+   * the pass to read; the pass's program and sampler. Made on first use; false
+   * where the context can't render half floats, which leaves frames plain.
+   */
+  private reflections: {
+    textures: [any, any];
+    framebuffer: any;
+    msaa: { framebuffer: any; buffers: [any, any] } | null;
+    copy: { texture: any; framebuffer: any };
+    program: { handle: any; proj: any; invProj: any; params: any; params2: any };
+    nearest: any;
+    data: Float32Array<ArrayBuffer>;
+  } | null | false = null;
+
+  private ensureReflections(): boolean {
+    if (this.reflections === null) {
+      const gl = this.gl;
+      try {
+        if (!gl.getExtension("EXT_color_buffer_float")) throw new Error("no half-float targets");
+        const textures = [0, 1].map(() => createTexture(gl, this.width, this.height, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, null)) as [any, any];
+        const framebuffer = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, this.attachments[0]);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, textures[0], 0);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT2, gl.TEXTURE_2D, textures[1], 0);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, this.attachments[1]);
+        gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2]);
+        if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error("reflection targets incomplete");
+        const copyTexture = createTexture(gl, this.width, this.height, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        const copyFramebuffer = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, copyFramebuffer);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, copyTexture, 0);
+        const handle = gl.createProgram();
+        gl.attachShader(handle, compile(gl, gl.VERTEX_SHADER, TEMPORAL_VERTEX_GLSL));
+        gl.attachShader(handle, compile(gl, gl.FRAGMENT_SHADER, REFLECTION_GLSL));
+        gl.linkProgram(handle);
+        if (!gl.getProgramParameter(handle, gl.LINK_STATUS)) throw new Error(`WebGL2 program failed to link: ${gl.getProgramInfoLog(handle)}`);
+        gl.useProgram(handle);
+        for (const [name, unit] of [["uColour", 0], ["uDepth", 1], ["uReflect", 2], ["uEnv", 3]] as const) gl.uniform1i(gl.getUniformLocation(handle, name), unit);
+        const nearest = gl.createSampler();
+        gl.samplerParameteri(nearest, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.samplerParameteri(nearest, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.samplerParameteri(nearest, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.samplerParameteri(nearest, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        this.reflections = {
+          textures,
+          framebuffer,
+          msaa: null,
+          copy: { texture: copyTexture, framebuffer: copyFramebuffer },
+          program: { handle, proj: gl.getUniformLocation(handle, "uProj"), invProj: gl.getUniformLocation(handle, "uInvProj"), params: gl.getUniformLocation(handle, "uParams"), params2: gl.getUniformLocation(handle, "uParams2") },
+          nearest,
+          data: new Float32Array(40),
+        };
+      } catch {
+        this.reflections = false;
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+    return this.reflections !== false;
+  }
+
+  /** The framebuffer a frame with reflections draws into: over the multisampled colour and depth when anti-aliased. */
+  private reflectionFramebuffer(multisampled: boolean): any {
+    const r = this.reflections as Exclude<WebglSceneRenderer["reflections"], null | false>;
+    const msaa = this.msaa;
+    if (!multisampled || !msaa) return r.framebuffer;
+    if (!r.msaa) {
+      const gl = this.gl;
+      const buffers = [0, 1].map(() => {
+        const buffer = gl.createRenderbuffer();
+        gl.bindRenderbuffer(gl.RENDERBUFFER, buffer);
+        gl.renderbufferStorageMultisample(gl.RENDERBUFFER, msaa.samples, gl.RGBA16F, this.width, this.height);
+        return buffer;
+      }) as [any, any];
+      const framebuffer = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, msaa.attachments[0]);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.RENDERBUFFER, buffers[0]);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT2, gl.RENDERBUFFER, buffers[1]);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, msaa.attachments[1]);
+      gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2]);
+      r.msaa = { framebuffer, buffers };
+    }
+    return r.msaa.framebuffer;
+  }
+
+  /** Resolve a multisampled frame's colour and reflection targets, one attachment at a time; leave the plain framebuffer bound. */
+  private resolveReflectionTargets(): void {
+    const gl = this.gl;
+    const r = this.reflections as Exclude<WebglSceneRenderer["reflections"], null | false>;
+    if (r.msaa && this.target === r.msaa.framebuffer) {
+      const all = [gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2];
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, r.msaa.framebuffer);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, r.framebuffer);
+      all.forEach((attachment, i) => {
+        gl.readBuffer(attachment);
+        gl.drawBuffers(all.map((a, j) => (j === i ? a : gl.NONE)));
+        gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, this.width, this.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      });
+      gl.readBuffer(gl.COLOR_ATTACHMENT0);
+      gl.drawBuffers(all);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
+  }
+
+  /**
+   * Swap on-screen reflections in for the probes' (HALO_INFINITE_STYLE_ROADMAP.md I3):
+   * the frame is copied to a texture and the pass draws the reflected frame
+   * back into {@link framebuffer}. Units 0–3 are borrowed, as the temporal resolve does.
+   */
+  private reflectPass(projection: Mat4): void {
+    const gl = this.gl;
+    const r = this.reflections as Exclude<WebglSceneRenderer["reflections"], null | false>;
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.framebuffer);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, r.copy.framebuffer);
+    gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, this.width, this.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    this.copySceneDepth();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.depthMask(false);
+    gl.bindVertexArray(null);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.useProgram(r.program.handle);
+    const u = reflectionUniforms(projection, "unit", r.data);
+    gl.uniformMatrix4fv(r.program.proj, false, u.subarray(0, 16));
+    gl.uniformMatrix4fv(r.program.invProj, false, u.subarray(16, 32));
+    gl.uniform4fv(r.program.params, u.subarray(32, 36));
+    gl.uniform4fv(r.program.params2, u.subarray(36, 40));
+    [r.copy.texture, this.sceneDepth!.texture, r.textures[0], r.textures[1]].forEach((texture, unit) => {
+      this.bindTexture(unit, texture);
+      gl.bindSampler(unit, r.nearest);
+    });
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.depthMask(true);
   }
 
   private readonly temporalState = new TemporalState("unit");
@@ -1726,6 +1896,18 @@ export class WebglSceneRenderer implements SceneRenderer {
       if (this.clusterTextures) {
         gl.deleteTexture(this.clusterTextures.table);
         gl.deleteTexture(this.clusterTextures.index);
+      }
+      if (this.reflections) {
+        for (const t of this.reflections.textures) gl.deleteTexture(t);
+        gl.deleteFramebuffer(this.reflections.framebuffer);
+        if (this.reflections.msaa) {
+          gl.deleteFramebuffer(this.reflections.msaa.framebuffer);
+          for (const b of this.reflections.msaa.buffers) gl.deleteRenderbuffer(b);
+        }
+        gl.deleteTexture(this.reflections.copy.texture);
+        gl.deleteFramebuffer(this.reflections.copy.framebuffer);
+        gl.deleteProgram(this.reflections.program.handle);
+        gl.deleteSampler(this.reflections.nearest);
       }
       if (this.taa) {
         for (const t of [this.taa.current, ...this.taa.history]) {

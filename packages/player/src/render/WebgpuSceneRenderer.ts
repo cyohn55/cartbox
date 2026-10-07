@@ -96,6 +96,7 @@ import {
   multiplyMat4,
   type CompiledGraph,
   type DecodedTexture,
+  type Mat4,
   type MeshPrimitive,
   type MeshAsset,
   type MeshSceneInstance,
@@ -108,6 +109,7 @@ import { webgpuCanHonour } from "./renderCaps.js";
 import { batchInstances, compositeFrame, presentFrame, softEdges, type PrimitiveTextures } from "./gpuFrame.js";
 import { WebgpuPassTimer } from "./gpuTimer.js";
 import { TEMPORAL_SHARPEN_WGSL, TemporalState, temporalShaderWgsl } from "./temporal.js";
+import { reflectionShaderWgsl, reflectionUniforms } from "./reflections.js";
 import type { RenderStats } from "../debug/profiler.js";
 import {
   UNIFORM_FLOATS,
@@ -198,9 +200,52 @@ export function multisampledDepthShader(code: string): string {
   return code.replace("var sceneDepth: texture_depth_2d;", "var sceneDepth: texture_depth_multisampled_2d;");
 }
 
-export function sceneShader(graph: CompiledGraph | null = null): string {
+/**
+ * The Modern path's tone map and fog, applied to the WGSL variable `v` in
+ * place (display space, mirroring applyFog in skyDome.ts).
+ */
+function wgslDisplay(v: string): string {
+  return /* wgsl */ `    if (u.tonemap.x > 0.5) {
+      let e = u.tonemap.y;
+      ${v} = vec3<f32>(aces(${v}.r * e), aces(${v}.g * e), aces(${v}.b * e));
+    }
+    // Fog in display space, mirroring applyFog in skyDome.ts: distance fog by
+    // eye depth, then height and volume fog along the ray from the eye, toward
+    // the fog colour brightened by the sun glow.
+    if (u.fogParams.x > 0.5) {
+      let d = max(0.0, in.eyeDepth - u.fogParams.y);
+      var f = min(u.fogParams.z, 1.0 - exp(-d * u.fog.w));
+      var fc = u.fog.rgb;
+      if (u.fogParams.w > 0.5) {
+        let c = u.fogCam.xyz;
+        let ray = in.worldPos - c;
+        let len = length(ray);
+        var tau = fogLayer(u.fogHeight.x, u.fogHeight.z, u.fogHeight.y, c.y, ray.y, len, 0.0, 1.0);
+        let vc = i32(u.fogCam.w + 0.5);
+        for (var i = 0; i < vc; i = i + 1) {
+          let a = u.fogVol[i * 2];
+          let b = u.fogVol[i * 2 + 1];
+          let span = fogBox(a.xyz, b.xyz, c, ray);
+          if (span.y > span.x) { tau = tau + fogLayer(a.w, b.w, a.y, c.y, ray.y, len, span.x, span.y); }
+        }
+        f = 1.0 - (1.0 - f) * exp(-tau);
+        if (u.fogHeight.w > 0.0) {
+          let cosv = max(0.0, dot(ray, u.light.xyz) / (max(len, 1e-6) * max(length(u.light.xyz), 1e-6)));
+          fc = min(vec3<f32>(1.0), fc + u.fogGlow.rgb * (u.fogHeight.w * pow(cosv, ${FOG_GLOW_POWER.toFixed(1)})));
+        }
+      }
+      ${v} = mix(clamp(${v}, vec3<f32>(0.0), vec3<f32>(1.0)), fc, f);
+    }`;
+}
+
+/**
+ * The scene shader. `reflect` (HALO_INFINITE_STYLE_ROADMAP.md I3) adds the
+ * reflection targets a frame with screen-space reflections writes beside the
+ * colour (see reflections.ts); the colour itself is the same.
+ */
+export function sceneShader(graph: CompiledGraph | null = null, reflect = false): string {
   const g = graphSites(graph);
-  return /* wgsl */ `
+  const code = /* wgsl */ `
 struct Uniforms {
   mvp: mat4x4<f32>,
   nrm: mat3x3<f32>,
@@ -700,7 +745,7 @@ ${g.emis}
     // Ambient / image-based lighting, mirroring the software rasteriser: with an
     // environment, a diffuse irradiance along N + a specular reflection along R
     // blurred toward the average by roughness; without one, the flat ambient.
-    var amb: vec3<f32>;
+${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0);\n" : ""}    var amb: vec3<f32>;
     if (u.envSky.w > 0.5) {
       let irr = envColorDir(N);
       let R = 2.0 * ndv * N - V;
@@ -726,10 +771,10 @@ ${g.emis}
       }
       let pref = mix(spec, specAvg, rough);
       amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;
-    } else {
+${reflect ? "      envSpec = pref * f0 * reflectK * ao;\n      envSeen = pref;\n" : ""}    } else {
       amb = vec3<f32>(u.light.w) * albedo * ao;
     }
-    // A baked light map (the second UV set) scales the sky/ambient fill by how
+${reflect ? "    let ambRaw = amb;\n" : ""}    // A baked light map (the second UV set) scales the sky/ambient fill by how
     // much of it reaches this point, bounce included — mirroring the CPU path.
     // Sampled unconditionally (uniform control flow), applied when bound.
     let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
@@ -741,7 +786,7 @@ ${g.emis}
     if (u.ssaoMeta.x > 0.5) {
       amb = amb * textureLoad(ssaoMap, vec2<i32>(in.pos.xy), 0).r;
     }
-    // The direct light is what a shadow occludes; ambient/IBL still fills it.
+${reflect ? "    // What the light map, probes and SSAO did to the fill, they do to its reflection.\n    let occl = select(vec3<f32>(1.0), amb / max(ambRaw, vec3<f32>(1e-6)), ambRaw > vec3<f32>(1e-6));\n    envSpec = envSpec * occl;\n" : ""}    // The direct light is what a shadow occludes; ambient/IBL still fills it.
     let sf = shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)));
     let lc = i32(u.ssaoMeta.y + 0.5);
     var lit: vec3<f32>;
@@ -775,37 +820,17 @@ ${g.emis}
     lit = lit + u.effect0.rgb + u.effect1.rgb * band;
     // HDR: expose + ACES roll-off, or write the linear colour straight through.
     var shaded = lit;
-    if (u.tonemap.x > 0.5) {
-      let e = u.tonemap.y;
-      shaded = vec3<f32>(aces(lit.r * e), aces(lit.g * e), aces(lit.b * e));
-    }
-    // Fog in display space, mirroring applyFog in skyDome.ts: distance fog by
-    // eye depth, then height and volume fog along the ray from the eye, toward
-    // the fog colour brightened by the sun glow.
-    if (u.fogParams.x > 0.5) {
-      let d = max(0.0, in.eyeDepth - u.fogParams.y);
-      var f = min(u.fogParams.z, 1.0 - exp(-d * u.fog.w));
-      var fc = u.fog.rgb;
-      if (u.fogParams.w > 0.5) {
-        let c = u.fogCam.xyz;
-        let ray = in.worldPos - c;
-        let len = length(ray);
-        var tau = fogLayer(u.fogHeight.x, u.fogHeight.z, u.fogHeight.y, c.y, ray.y, len, 0.0, 1.0);
-        let vc = i32(u.fogCam.w + 0.5);
-        for (var i = 0; i < vc; i = i + 1) {
-          let a = u.fogVol[i * 2];
-          let b = u.fogVol[i * 2 + 1];
-          let span = fogBox(a.xyz, b.xyz, c, ray);
-          if (span.y > span.x) { tau = tau + fogLayer(a.w, b.w, a.y, c.y, ray.y, len, span.x, span.y); }
-        }
-        f = 1.0 - (1.0 - f) * exp(-tau);
-        if (u.fogHeight.w > 0.0) {
-          let cosv = max(0.0, dot(ray, u.light.xyz) / (max(len, 1e-6) * max(length(u.light.xyz), 1e-6)));
-          fc = min(vec3<f32>(1.0), fc + u.fogGlow.rgb * (u.fogHeight.w * pow(cosv, ${FOG_GLOW_POWER.toFixed(1)})));
-        }
-      }
-      shaded = mix(clamp(shaded, vec3<f32>(0.0), vec3<f32>(1.0)), fc, f);
-    }
+${wgslDisplay("shaded")}${reflect ? /* wgsl */ `
+    // Reflections (I3): the same without the environment's reflection, so the pass can take it away.
+    var without = lit - envSpec;
+${wgslDisplay("without")}
+    let contribution = max(clamp(shaded, vec3<f32>(0.0), vec3<f32>(1.0)) - clamp(without, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(0.0));
+    var seen = envSeen;
+    if (u.tonemap.x > 0.5) { seen = vec3<f32>(aces(seen.r * u.tonemap.y), aces(seen.g * u.tonemap.y), aces(seen.b * u.tonemap.y)); }
+    seen = clamp(seen, vec3<f32>(0.0), vec3<f32>(1.0));
+    let weight = f0 * reflectK * ao * occl;
+    reflectOut = vec4<f32>(clamp(select(weight, contribution / max(seen, vec3<f32>(1e-3)), seen > vec3<f32>(0.02)), vec3<f32>(0.0), vec3<f32>(1.0)), rough);
+    envOut = vec4<f32>(contribution, 1.0);` : ""}
     return finishAlpha(shaded, colour.a);
   }
 
@@ -817,6 +842,35 @@ ${g.emis}
   let nl = abs(dot(in.normal, u.light.xyz));
   let shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)));
   return finishAlpha(colour.rgb * shade, colour.a);
+}
+`;
+  return reflect ? withReflectionTargets(code) : code;
+}
+
+/**
+ * The scene shader writing the reflection targets too (I3): the shading
+ * becomes a function, and the entry point returns its colour with what it
+ * left in the reflection variables. A see-through surface writes nothing but
+ * its coverage there, so the blend keeps that share of what's behind it.
+ */
+function withReflectionTargets(code: string): string {
+  const entry = "@fragment\nfn fs(in: VSOut) -> @location(0) vec4<f32> {";
+  if (!code.includes(entry)) throw new Error("scene shader entry point not found");
+  return code.replace(entry, "fn shade(in: VSOut) -> vec4<f32> {") + /* wgsl */ `
+struct SceneOut {
+  @location(0) colour: vec4<f32>,
+  @location(1) reflect: vec4<f32>,
+  @location(2) env: vec4<f32>,
+};
+var<private> reflectOut: vec4<f32>;
+var<private> envOut: vec4<f32>;
+@fragment
+fn fs(in: VSOut) -> SceneOut {
+  reflectOut = vec4<f32>(0.0);
+  envOut = vec4<f32>(0.0);
+  let c = shade(in);
+  if (u.pbr.w > 1.5) { return SceneOut(c, vec4<f32>(0.0, 0.0, 0.0, c.a), vec4<f32>(0.0, 0.0, 0.0, c.a)); }
+  return SceneOut(c, reflectOut, envOut);
 }
 `;
 }
@@ -919,7 +973,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     private readonly height: number,
     private readonly pipeline: PipelineSet,
     /** Build the pipelines for a shader variant (a material graph's, EP7), at a sample count (I1). */
-    private readonly pipelinesFor: (code: string, samples?: number) => PipelineSet,
+    private readonly pipelinesFor: (code: string, samples?: number, reflect?: boolean) => PipelineSet,
     private readonly bindGroupLayout: any,
     private readonly colourTexture: any,
     private readonly depthTexture: any,
@@ -1086,7 +1140,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const depthLayoutMs = device.createBindGroupLayout({ entries: depthEntries(true) });
       const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayout] });
       const layoutMs = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayoutMs] });
-      const pipelinesFor = (code: string, samples = 1): PipelineSet => {
+      const pipelinesFor = (code: string, samples = 1, reflect = false): PipelineSet => {
         const multisampled = samples > 1;
         const module = device.createShaderModule({ code: multisampled ? multisampledDepthShader(code) : code });
         const pipelineFor = (blend: unknown, depthWrite: boolean) => device.createRenderPipeline({
@@ -1115,7 +1169,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
             // rgba8unorm, never rgba8unorm-srgb: the framebuffer these bytes land
             // in is the same 8-bit buffer the CPU path writes, so any gamma
             // conversion here would show up as the GPU path looking washed out.
-            targets: [blend ? { format: "rgba8unorm", blend } : { format: "rgba8unorm" }],
+            // A frame with reflections (I3) writes the two reflection targets too, blended as the colour is.
+            targets: [
+              blend ? { format: "rgba8unorm", blend } : { format: "rgba8unorm" },
+              ...(reflect ? [0, 1].map(() => (blend ? { format: "rgba16float", blend } : { format: "rgba16float" })) : []),
+            ],
           },
           // cullMode "none" matches the software rasteriser, which draws both
           // faces (its Lambert is two-sided for exactly this reason).
@@ -1133,7 +1191,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const colourTexture = device.createTexture({
         size: { width, height },
         format: "rgba8unorm",
-        usage: 0x10 | 0x01 | 0x04, // RENDER_ATTACHMENT | COPY_SRC | TEXTURE_BINDING (the temporal resolve reads it)
+        usage: 0x10 | 0x01 | 0x04 | 0x02, // RENDER_ATTACHMENT | COPY_SRC | TEXTURE_BINDING (the temporal resolve reads it) | COPY_DST (reflections land in it)
       });
       const depthTexture = device.createTexture({
         size: { width, height },
@@ -1515,12 +1573,22 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const encoder = this.device.createCommandEncoder();
     // Anti-aliased (I1): draw into the multisampled targets and resolve into the read-back texture as the last pass ends.
     const msaa = draw.antialias === true ? this.ensureMsaa() : null;
+    // Reflections (I3): the two reflection targets beside the colour, multisampled with it.
+    const gbuffer = draw.reflections === true ? this.ensureReflectionTargets(msaa !== null) : null;
+    const reflectionAttachments = (load: boolean, last: boolean) =>
+      gbuffer
+        ? gbuffer.targets.map((target) => ({
+            view: (msaa ? target.ms : target.texture).createView(),
+            ...(load ? { loadOp: "load" } : { loadOp: "clear", clearValue: { r: 0, g: 0, b: 0, a: 0 } }),
+            ...(msaa && last ? { resolveTarget: target.texture.createView(), storeOp: "discard" } : { storeOp: "store" }),
+          }))
+        : [];
     const drawRange = (pass: any, from: number, to: number, depthGroup: any) => {
       pass.setBindGroup(1, depthGroup);
       let bound: any = null;
       for (let index = from; index < to; index += 1) {
         const entry = draws[index]!;
-        const set = this.pipelinesOf(entry.primitive.material, msaa);
+        const set = this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, gbuffer !== null);
         const wanted = entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque;
         if (wanted !== bound) {
           pass.setPipeline(wanted);
@@ -1548,6 +1616,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           loadOp: "clear",
           ...ending(firstSeeThrough < 0),
         },
+        ...reflectionAttachments(false, firstSeeThrough < 0),
       ],
       depthStencilAttachment: {
         view: depthView,
@@ -1561,13 +1630,14 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     pass.end();
     if (firstSeeThrough >= 0) {
       const seeThrough = encoder.beginRenderPass({
-        colorAttachments: [{ view: colourView, loadOp: "load", ...ending(true) }],
+        colorAttachments: [{ view: colourView, loadOp: "load", ...ending(true) }, ...reflectionAttachments(true, true)],
         depthStencilAttachment: { view: depthView, depthReadOnly: true },
         ...(this.timer ? { timestampWrites: this.timer.writes("end") } : {}),
       });
       drawRange(seeThrough, firstSeeThrough, draws.length, groups.scene);
       seeThrough.end();
     }
+    if (gbuffer) this.encodeReflections(encoder, gbuffer, temporal ? temporal.projection : draw.projection, msaa ? msaa.depth : this.depthTexture, msaa !== null);
     if (temporal) this.encodeTemporal(encoder, temporal.uniforms, msaa ? msaa.depth : this.depthTexture, msaa !== null);
     this.timer?.resolve(encoder);
 
@@ -1591,6 +1661,60 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       this.device.queue.submit([encoder.finish()]);
       this.timer?.read();
     }
+  }
+
+  /**
+   * The reflection targets (I3): reflect and env, each single-sampled (read by
+   * the pass) with a multisampled twin for an anti-aliased frame; the pass's
+   * output, copied back over the colour; its uniforms and pipelines. Made on
+   * first use.
+   */
+  private gbuffer: { targets: { texture: any; ms: any }[]; output: any; uniforms: any; data: Float32Array<ArrayBuffer>; pipelines: [any, any] } | null = null;
+
+  private ensureReflectionTargets(multisampled: boolean): NonNullable<WebgpuSceneRenderer["gbuffer"]> {
+    const device = this.device;
+    const size = { width: this.width, height: this.height };
+    if (!this.gbuffer) {
+      this.gbuffer = {
+        targets: [0, 1].map(() => ({ texture: device.createTexture({ size, format: "rgba16float", usage: 0x10 | 0x04 }), ms: null })), // RENDER_ATTACHMENT | TEXTURE_BINDING
+        output: device.createTexture({ size, format: "rgba8unorm", usage: 0x10 | 0x01 }), // RENDER_ATTACHMENT | COPY_SRC
+        uniforms: device.createBuffer({ size: 160, usage: 0x40 | 0x08 }), // UNIFORM | COPY_DST
+        data: new Float32Array(40),
+        pipelines: [null, null],
+      };
+    }
+    if (multisampled) {
+      for (const target of this.gbuffer.targets) target.ms ??= device.createTexture({ size, format: "rgba16float", sampleCount: MSAA_SAMPLES, usage: 0x10 });
+    }
+    return this.gbuffer;
+  }
+
+  /**
+   * Swap on-screen reflections in for the probes' (HALO_INFINITE_STYLE_ROADMAP.md I3):
+   * the pass reads the frame, its depth and the reflection targets and writes
+   * the reflected frame, which is copied back over the colour.
+   */
+  private encodeReflections(encoder: any, gbuffer: NonNullable<WebgpuSceneRenderer["gbuffer"]>, projection: Mat4, depth: any, multisampled: boolean): void {
+    const device = this.device;
+    const k = multisampled ? 1 : 0;
+    gbuffer.pipelines[k] ??= fullScreenPipeline(device, reflectionShaderWgsl(multisampled), "reflectPass", "rgba8unorm");
+    const pipeline = gbuffer.pipelines[k];
+    device.queue.writeBuffer(gbuffer.uniforms, 0, reflectionUniforms(projection, "ndc", gbuffer.data));
+    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: gbuffer.output.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }] });
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: gbuffer.uniforms } },
+        { binding: 1, resource: this.colourTexture.createView() },
+        { binding: 2, resource: depth.createView() },
+        { binding: 3, resource: gbuffer.targets[0]!.texture.createView() },
+        { binding: 4, resource: gbuffer.targets[1]!.texture.createView() },
+      ],
+    }));
+    pass.draw(3);
+    pass.end();
+    encoder.copyTextureToTexture({ texture: gbuffer.output }, { texture: this.colourTexture }, { width: this.width, height: this.height });
   }
 
   private readonly temporalState = new TemporalState("ndc");
@@ -1647,15 +1771,15 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     ]);
   }
 
-  /** Shader variants by material graph (EP7), built on first use. */
-  private readonly graphPipelines = new Map<string, PipelineSet>();
+  /** Pipeline variants (material graph, sample count, reflection targets), built on first use. */
+  private readonly variants = new Map<string, PipelineSet>();
 
   /**
    * The multisampled targets and pipelines an anti-aliased frame draws with
    * (HALO_INFINITE_STYLE_ROADMAP.md I1): made on first use, so a renderer that
    * never anti-aliases pays nothing for them.
    */
-  private msaa: { colour: any; depth: any; blank: any; groups: { blank: any; scene: any }; pipeline: PipelineSet; graph: Map<string, PipelineSet> } | null = null;
+  private msaa: { colour: any; depth: any; blank: any; groups: { blank: any; scene: any } } | null = null;
 
   private ensureMsaa(): NonNullable<WebgpuSceneRenderer["msaa"]> {
     if (!this.msaa) {
@@ -1664,28 +1788,24 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const depth = this.device.createTexture({ size, format: "depth24plus", sampleCount: MSAA_SAMPLES, usage: 0x10 | 0x04 }); // + TEXTURE_BINDING (soft edges)
       const blank = this.device.createTexture({ size: { width: 1, height: 1 }, format: "depth24plus", sampleCount: MSAA_SAMPLES, usage: 0x10 | 0x04 });
       const groups = this.depthGroups;
-      this.msaa = { colour, depth, blank, groups: groups.makeGroupsMs(groups.atlas, groups.probes, blank, depth), pipeline: this.pipelinesFor(sceneShader(), MSAA_SAMPLES), graph: new Map() };
+      this.msaa = { colour, depth, blank, groups: groups.makeGroupsMs(groups.atlas, groups.probes, blank, depth) };
     }
     return this.msaa;
   }
 
-  /** The pipelines a material draws with: the plain shader's, or its graph's variant; multisampled for an anti-aliased frame. */
-  private pipelinesOf(material: MeshPrimitive["material"], msaa: WebgpuSceneRenderer["msaa"] = null): PipelineSet {
+  /**
+   * The pipelines a material draws with: the plain shader's, or its graph's
+   * variant; multisampled for an anti-aliased frame (I1); writing the
+   * reflection targets for a frame with reflections (I3). Built on first use.
+   */
+  private pipelinesOf(material: MeshPrimitive["material"], samples = 1, reflect = false): PipelineSet {
     const graph = compiledGraphOf(material);
-    if (msaa) {
-      if (!graph) return msaa.pipeline;
-      let set = msaa.graph.get(graph.key);
-      if (!set) {
-        set = this.pipelinesFor(sceneShader(graph), MSAA_SAMPLES);
-        msaa.graph.set(graph.key, set);
-      }
-      return set;
-    }
-    if (!graph) return this.pipeline;
-    let set = this.graphPipelines.get(graph.key);
+    if (!graph && samples === 1 && !reflect) return this.pipeline;
+    const key = `${graph?.key ?? ""}|${samples}|${reflect ? 1 : 0}`;
+    let set = this.variants.get(key);
     if (!set) {
-      set = this.pipelinesFor(sceneShader(graph));
-      this.graphPipelines.set(graph.key, set);
+      set = this.pipelinesFor(sceneShader(graph, reflect), samples, reflect);
+      this.variants.set(key, set);
     }
     return set;
   }
@@ -1939,6 +2059,14 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       destroySafely(this.msaa.colour);
       destroySafely(this.msaa.depth);
       destroySafely(this.msaa.blank);
+    }
+    if (this.gbuffer) {
+      for (const target of this.gbuffer.targets) {
+        destroySafely(target.texture);
+        destroySafely(target.ms);
+      }
+      destroySafely(this.gbuffer.output);
+      destroySafely(this.gbuffer.uniforms);
     }
     if (this.taa) {
       destroySafely(this.taa.history[0]);

@@ -1129,7 +1129,9 @@ function mapMesh(): MeshAsset {
     metallicRoughnessImage: FLOOR_TEX.metallicRoughness,
     emissiveImage: FLOOR_TEX.emissive,
     metallicFactor: 0.4, // a deck is worn, not a mirror
-    roughnessFactor: 1,
+    // Polished plates (HALO_INFINITE_STYLE_ROADMAP.md I3): smooth enough that the
+    // towers and soldiers show in them in screen space; the frosted joints stay rough.
+    roughnessFactor: 0.7,
     emissiveFactor: [1.4, 1.4, 1.4],
     detailImage: tex.grain, // the same grain (stored once in the sidecar)
     detailScale: 8,

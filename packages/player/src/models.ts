@@ -60,6 +60,12 @@ export interface RenderCaps {
    * the Modern tier.
    */
   temporal?: boolean;
+  /**
+   * Screen-space reflections (HALO_INFINITE_STYLE_ROADMAP.md I3): polished
+   * surfaces reflect what's on screen. The Xbox 360 tier (its late games, Crysis
+   * 2 among them, reflected in screen space) and the Modern tier.
+   */
+  reflections?: boolean;
 }
 
 /**
@@ -164,6 +170,7 @@ export const XBOX360_RASTER_CAPS: RenderCaps = {
   programmableShaders: false,
   antialias: true,
   temporal: true,
+  reflections: true,
 };
 
 /**
@@ -188,6 +195,7 @@ export const MODERN_RASTER_CAPS: RenderCaps = {
   programmableShaders: true,
   antialias: true,
   temporal: true,
+  reflections: true,
 };
 
 export interface ConsoleModel {

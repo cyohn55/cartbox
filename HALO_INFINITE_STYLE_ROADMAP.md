@@ -77,10 +77,29 @@ What separates Lockout from Halo Infinite, seen in a match:
       keeps the history, and the crawl as the camera drifts drops from 7.4
       to 2.0. It reprojects with the camera only, so a fast-moving object
       leans on the clamp rather than its own motion. Lockout has it on.
-- [ ] **I3. Screen-space reflections.** Polished floors and metal reflect
+- [x] **I3. Screen-space reflections.** Polished floors and metal reflect
       what's on screen, falling back to the reflection probes where the
       screen has nothing. *Lockout:* the towers and bots reflected in the
       polished deck of bottom mid.
+      *Done:* `SceneDraw.reflections` has the WebGPU and WebGL2 renderers draw
+      Modern-tier surfaces with two more targets beside the colour: how much
+      of a reflected colour reaches the screen (the specular weight carried
+      through the tone map and fog, with the roughness) and what the probe or
+      environment reflection added. A pass before readback (and before the
+      temporal resolve) rebuilds each reflective pixel's position and normal
+      from depth, marches the reflected ray across the depth buffer, and
+      swaps the pixel it meets in for the probe's reflection, fading toward
+      the screen's edges, with distance and roughness, and for rays turning
+      back to the camera, so the probes stay where the screen has nothing
+      (`reflections.ts`). Glass keeps a share of what's behind it. A
+      `reflections` render cap (Xbox 360 and Modern) and quality setting
+      (high and medium) gate it; with it off, parity with the software
+      rasteriser holds. Tested on real WebGPU and Chromium WebGL2, alone and
+      with multisampling and temporal anti-aliasing: a red and a blue panel
+      on a polished floor each show in the floor on their own side, nothing
+      but the floor changes, and the floor nearest the camera, whose rays
+      leave the screen, keeps its probe reflection. Lockout's deck plates
+      are polished (roughness 0.35) so the towers and soldiers show in them.
 - [ ] **I4. Material upgrades.** Clearcoat (a glossy layer over paint, for
       armour and visors), anisotropic highlights (brushed metal), parallax
       occlusion (depth in panel seams without geometry), and wear masks in the

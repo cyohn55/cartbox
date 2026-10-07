@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { expectTemporal, type TemporalReport } from "./helpers/temporalScene";
+import { expectReflections, type ReflectionReport } from "./helpers/reflectionScene";
 
 function findChromium(): string | null {
   const root = process.env.PLAYWRIGHT_BROWSERS_PATH;
@@ -117,6 +118,17 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
       expect(supported).toBe(true); // the context renders half floats
       expect(errors).toEqual([0]);
       expectTemporal(report);
+    }
+  }, 120_000);
+
+  it("reflects in screen space (I3): the panels show in the floor, each on its side, and nothing else changes", async () => {
+    for (const extra of [{}, { antialias: true }, { antialias: true, temporal: true }]) {
+      const result = await page.evaluate((e: object) => (globalThis as unknown as { runReflections: (e: object) => Promise<never> }).runReflections(e), extra);
+      expect(result, JSON.stringify(extra)).not.toHaveProperty("error");
+      const { report, supported, errors } = result as { report: ReflectionReport; supported: boolean; errors: number[] };
+      expect(supported).toBe(true); // the context renders half floats
+      expect(errors).toEqual([0]);
+      expectReflections(report);
     }
   }, 120_000);
 
