@@ -473,6 +473,7 @@ export class Player {
               ...(this.options.ktx2 ? { ktx2: this.options.ktx2 } : {}),
               antialias: this.model.renderCaps.antialias === true,
               temporal: this.model.renderCaps.temporal === true,
+              reflections: this.model.renderCaps.reflections === true,
             },
           );
           this.meshSurface.setQuality(this.qualitySettings);

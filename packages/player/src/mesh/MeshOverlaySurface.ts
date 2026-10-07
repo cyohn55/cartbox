@@ -120,6 +120,8 @@ export interface MeshOverlayOptions {
   readonly antialias?: boolean;
   /** The model's temporal anti-aliasing cap (`temporal`, I2), likewise gated by the quality. Off by default. */
   readonly temporal?: boolean;
+  /** The model's screen-space reflections cap (`reflections`, I3), likewise gated by the quality. Off by default. */
+  readonly reflections?: boolean;
 }
 
 /** Loads a KTX2 → RGBA decoder (see {@link MeshOverlayOptions.ktx2}). */
@@ -814,6 +816,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       lod: true,
       antialias,
       temporal: this.options.temporal === true && this.quality.temporal === true,
+      reflections: this.options.reflections === true && this.quality.reflections === true,
       // HUD mode fills the frame with a sky so the 3D scene is opaque before the
       // HUD lands on top; third-person keeps the cart frame behind the meshes.
       background: this.hud && !skyBackdrop ? HUD_SKY : null,

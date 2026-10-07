@@ -76,6 +76,14 @@ export interface SceneDraw {
    */
   readonly temporal?: boolean;
   /**
+   * Screen-space reflections (HALO_INFINITE_STYLE_ROADMAP.md I3), on the GPU
+   * renderers: polished Modern-tier surfaces reflect what's on screen, keeping
+   * the reflection probes' reflection where the screen has nothing (see
+   * reflections.ts). Off by default (parity, as {@link antialias}); the
+   * software renderer ignores it.
+   */
+  readonly reflections?: boolean;
+  /**
    * Key light direction, or omitted for the rasteriser's default. The world
    * overlay publishes a cart-driven sun here, so it changes per frame.
    */

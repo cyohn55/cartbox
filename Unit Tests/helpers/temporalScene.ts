@@ -116,7 +116,7 @@ export function crawl(previous: Uint8ClampedArray, frame: Uint8ClampedArray, pre
 }
 
 /** Draw a frame and wait until the GPU has finished exactly that one; its image. */
-async function shown(renderer: GpuRenderer, instances: readonly MeshSceneInstance[], draw: SceneDraw, tick: () => void): Promise<Uint8ClampedArray> {
+export async function shown(renderer: GpuRenderer, instances: readonly MeshSceneInstance[], draw: SceneDraw, tick: () => void): Promise<Uint8ClampedArray> {
   renderer.render(instances, draw);
   for (let attempt = 0; attempt < 500; attempt += 1) {
     const view = { ...draw, out: new Uint8ClampedArray(draw.out.length) };

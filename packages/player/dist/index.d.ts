@@ -251,6 +251,12 @@ interface RenderCaps {
      * the Modern tier.
      */
     temporal?: boolean;
+    /**
+     * Screen-space reflections (HALO_INFINITE_STYLE_ROADMAP.md I3): polished
+     * surfaces reflect what's on screen. The Xbox 360 tier (its late games, Crysis
+     * 2 among them, reflected in screen space) and the Modern tier.
+     */
+    reflections?: boolean;
 }
 /**
  * What the shared software rasteriser behind the mesh/world overlays actually
@@ -811,6 +817,8 @@ interface QualitySettings {
     readonly antialias?: boolean;
     /** Temporal anti-aliasing where the model has it (I2). */
     readonly temporal?: boolean;
+    /** Screen-space reflections where the model has them (I3). */
+    readonly reflections?: boolean;
 }
 declare const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualitySettings>>;
 /** What the browser reveals about the device (all optional: browsers differ). */
@@ -3155,6 +3163,14 @@ interface SceneDraw {
      */
     readonly temporal?: boolean;
     /**
+     * Screen-space reflections (HALO_INFINITE_STYLE_ROADMAP.md I3), on the GPU
+     * renderers: polished Modern-tier surfaces reflect what's on screen, keeping
+     * the reflection probes' reflection where the screen has nothing (see
+     * reflections.ts). Off by default (parity, as {@link antialias}); the
+     * software renderer ignores it.
+     */
+    readonly reflections?: boolean;
+    /**
      * Key light direction, or omitted for the rasteriser's default. The world
      * overlay publishes a cart-driven sun here, so it changes per frame.
      */
@@ -3525,6 +3541,25 @@ declare class WebglSceneRenderer implements SceneRenderer {
      * use; the plain one otherwise, or where the context can't multisample.
      */
     private drawFramebuffer;
+    /**
+     * The reflection targets (I3): two half-float textures that, with the plain
+     * framebuffer's colour and depth, make the framebuffer a frame with
+     * reflections draws into, and its multisampled twin; a copy of the frame for
+     * the pass to read; the pass's program and sampler. Made on first use; false
+     * where the context can't render half floats, which leaves frames plain.
+     */
+    private reflections;
+    private ensureReflections;
+    /** The framebuffer a frame with reflections draws into: over the multisampled colour and depth when anti-aliased. */
+    private reflectionFramebuffer;
+    /** Resolve a multisampled frame's colour and reflection targets, one attachment at a time; leave the plain framebuffer bound. */
+    private resolveReflectionTargets;
+    /**
+     * Swap on-screen reflections in for the probes' (HALO_INFINITE_STYLE_ROADMAP.md I3):
+     * the frame is copied to a texture and the pass draws the reflected frame
+     * back into {@link framebuffer}. Units 0–3 are borrowed, as the temporal resolve does.
+     */
+    private reflectPass;
     private readonly temporalState;
     /**
      * The temporal resolve's resources (I2): the frame copied into a texture, two
@@ -3761,6 +3796,20 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     settle(draw: SceneDraw): FrameState;
     /** Encode and submit one frame, and start a readback if a buffer is free. */
     private submit;
+    /**
+     * The reflection targets (I3): reflect and env, each single-sampled (read by
+     * the pass) with a multisampled twin for an anti-aliased frame; the pass's
+     * output, copied back over the colour; its uniforms and pipelines. Made on
+     * first use.
+     */
+    private gbuffer;
+    private ensureReflectionTargets;
+    /**
+     * Swap on-screen reflections in for the probes' (HALO_INFINITE_STYLE_ROADMAP.md I3):
+     * the pass reads the frame, its depth and the reflection targets and writes
+     * the reflected frame, which is copied back over the colour.
+     */
+    private encodeReflections;
     private readonly temporalState;
     /**
      * The temporal resolve's resources (I2): two history images (one read, one
@@ -3773,8 +3822,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * texture that is read back (HALO_INFINITE_STYLE_ROADMAP.md I2).
      */
     private encodeTemporal;
-    /** Shader variants by material graph (EP7), built on first use. */
-    private readonly graphPipelines;
+    /** Pipeline variants (material graph, sample count, reflection targets), built on first use. */
+    private readonly variants;
     /**
      * The multisampled targets and pipelines an anti-aliased frame draws with
      * (HALO_INFINITE_STYLE_ROADMAP.md I1): made on first use, so a renderer that
@@ -3782,7 +3831,11 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      */
     private msaa;
     private ensureMsaa;
-    /** The pipelines a material draws with: the plain shader's, or its graph's variant; multisampled for an anti-aliased frame. */
+    /**
+     * The pipelines a material draws with: the plain shader's, or its graph's
+     * variant; multisampled for an anti-aliased frame (I1); writing the
+     * reflection targets for a frame with reflections (I3). Built on first use.
+     */
     private pipelinesOf;
     /**
      * Order the frame's lights (global first), build the clustered cells, and
@@ -5279,6 +5332,8 @@ interface MeshOverlayOptions {
     readonly antialias?: boolean;
     /** The model's temporal anti-aliasing cap (`temporal`, I2), likewise gated by the quality. Off by default. */
     readonly temporal?: boolean;
+    /** The model's screen-space reflections cap (`reflections`, I3), likewise gated by the quality. Off by default. */
+    readonly reflections?: boolean;
 }
 /** Loads a KTX2 → RGBA decoder (see {@link MeshOverlayOptions.ktx2}). */
 type Ktx2DecoderLoader = () => Promise<(bytes: Uint8Array) => DecodedTexture | null>;

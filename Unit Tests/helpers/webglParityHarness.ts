@@ -23,6 +23,7 @@ import { manyLights } from "./manyLights";
 import { probeRig } from "./probeScene";
 import { WebglSceneRenderer } from "../../packages/player/src/render/WebglSceneRenderer";
 import { temporalReport, type GpuRenderer, type TemporalReport } from "./temporalScene";
+import { reflectionReport, type ReflectionReport } from "./reflectionScene";
 
 const W = 64;
 const H = 48;
@@ -233,7 +234,8 @@ async function run(name: string): Promise<{ drawn: number; differing: number; ma
   const renderer = WebglSceneRenderer.create(W, H);
   if (!renderer) return { error: "WebGL2 renderer did not build" };
   renderer.render(scene.instances, scene.draw());
-  for (let i = 0; i < 100 && !(renderer as unknown as { latest: Uint8Array | null }).latest; i += 1) {
+  // Up to 10 s: a cold shader compile (a material graph, a busy machine) can take seconds.
+  for (let i = 0; i < 500 && !(renderer as unknown as { latest: Uint8Array | null }).latest; i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 20));
     renderer.render(scene.instances, scene.draw());
   }
@@ -314,10 +316,12 @@ async function frameOf(name: string, antialias: boolean): Promise<{ out: Uint8Cl
   if (!renderer) return { error: "WebGL2 renderer did not build" };
   const draw = () => ({ ...scene.draw(), antialias });
   renderer.render(scene.instances, draw());
-  for (let i = 0; i < 100 && !(renderer as unknown as { latest: Uint8Array | null }).latest; i += 1) {
+  // Up to 10 s: a cold shader compile (a material graph, a busy machine) can take seconds.
+  for (let i = 0; i < 500 && !(renderer as unknown as { latest: Uint8Array | null }).latest; i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 20));
     renderer.render(scene.instances, draw());
   }
+  if (!(renderer as unknown as { latest: Uint8Array | null }).latest) return { error: "no GPU frame arrived" };
   const frame = draw();
   renderer.render(scene.instances, frame);
   const error = (renderer as unknown as { gl: { getError(): number } }).gl.getError();
@@ -398,6 +402,33 @@ async function runTemporal(antialias: boolean): Promise<{ report: TemporalReport
   }
 }
 
+/** Screen-space reflections (I3): the floor and panels measured as on WebGPU (reflectionScene.ts), with any GL error. */
+async function runReflections(extra: Partial<SceneDraw>): Promise<{ report: ReflectionReport; supported: boolean; errors: number[] } | { error: string }> {
+  const errors: number[] = [];
+  let supported = true;
+  const make = async (width: number, height: number) => {
+    const renderer = WebglSceneRenderer.create(width, height);
+    if (!renderer) throw new Error("WebGL2 renderer did not build");
+    const gl = (renderer as unknown as { gl: { getError(): number } }).gl;
+    return {
+      render: (instances, draw) => {
+        renderer.render(instances, draw);
+        errors.push(gl.getError());
+        if (draw.reflections && (renderer as unknown as { reflections: unknown }).reflections === false) supported = false;
+      },
+      settle: (draw) => renderer.settle(draw),
+      dispose: () => renderer.dispose(),
+    } satisfies GpuRenderer;
+  };
+  try {
+    const report = await reflectionReport(make, () => {}, W, H, extra);
+    return { report, supported, errors: [...new Set(errors)] };
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
+
+(globalThis as unknown as { runReflections: typeof runReflections }).runReflections = runReflections;
 (globalThis as unknown as { runTemporal: typeof runTemporal }).runTemporal = runTemporal;
 (globalThis as unknown as { runAntialias: typeof runAntialias }).runAntialias = runAntialias;
 (globalThis as unknown as { settleOnce: typeof settleOnce }).settleOnce = settleOnce;
