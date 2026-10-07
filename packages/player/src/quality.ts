@@ -46,12 +46,14 @@ export interface QualitySettings {
   readonly terrainDetail: number;
   /** Anti-alias the 3D where the model does (HALO_INFINITE_STYLE_ROADMAP.md I1). */
   readonly antialias?: boolean;
+  /** Temporal anti-aliasing where the model has it (I2). */
+  readonly temporal?: boolean;
 }
 
 export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualitySettings>> = {
-  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true },
-  medium: { level: "medium", shadows: true, shadowMapSize: 512, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true },
-  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false },
+  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true },
+  medium: { level: "medium", shadows: true, shadowMapSize: 512, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true },
+  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false },
 };
 
 /** What the browser reveals about the device (all optional: browsers differ). */

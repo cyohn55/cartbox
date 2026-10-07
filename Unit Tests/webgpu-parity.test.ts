@@ -54,6 +54,7 @@ import { graphInstances } from "./helpers/graphScenes";
 import { localShadowRig } from "./helpers/localShadowScene";
 import { manyLights } from "./helpers/manyLights";
 import { probeRig } from "./helpers/probeScene";
+import { expectTemporal, temporalReport, type GpuRenderer } from "./helpers/temporalScene";
 
 
 const W = 64;
@@ -829,5 +830,21 @@ describe.skipIf(!device)("WebGPU anti-aliasing on a real device", () => {
       expect(result.offEdge).toBe(0);
       expect(result.outside).toBe(0);
     }, 60_000);
+  }
+});
+
+describe.skipIf(!device)("WebGPU temporal anti-aliasing on a real device", () => {
+  const make = async (width: number, height: number) => (await WebgpuSceneRenderer.create(device, width, height)) as unknown as GpuRenderer;
+  const reference = (instances: readonly MeshSceneInstance[], d: SceneDraw) => new SoftwareSceneRenderer().render(instances, d);
+  const tick = () => device.tick?.();
+
+  for (const [name, extra] of [["alone", {}], ["with multisampling", { antialias: true }]] as const) {
+    it(`converges toward a supersampled frame, keeps it through a pan, and stops the crawl: ${name}`, async () => {
+      device.pushErrorScope("validation");
+      const report = await temporalReport(make, reference, tick, W, H, extra);
+      const error = await device.popErrorScope();
+      expect(error ? String(error.message ?? error) : null).toBeNull();
+      expectTemporal(report);
+    }, 120_000);
   }
 });

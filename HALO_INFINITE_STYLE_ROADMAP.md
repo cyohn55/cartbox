@@ -55,11 +55,28 @@ What separates Lockout from Halo Infinite, seen in a match:
       Chromium WebGL2 and a real WebGPU device: only edge pixels change, and
       only to values between their neighbours. Lockout (Xbox 360 tier) has it
       on.
-- [ ] **I2. Temporal anti-aliasing.** Jittered frames blended with history,
+- [x] **I2. Temporal anti-aliasing.** Jittered frames blended with history,
       reprojected with the camera, to calm the shimmer multisampling can't
       reach: thin trim, specular sparkle on metal, foliage cut-outs. With a
       sharpening pass. *Lockout:* the deck's panel lines stop crawling as you
       walk.
+      *Done:* `SceneDraw.temporal` has the WebGPU and WebGL2 renderers jitter
+      the projection through an 8-step Halton (2,3) sequence and resolve each
+      frame on the GPU before readback (so the readback's lag doesn't matter):
+      the history, in half floats, is reprojected through the frame's depth
+      and both cameras, clamped to the new frame's 3×3 neighbourhood (so
+      what moves or appears replaces it instead of ghosting), and blended at
+      10%; a contrast-limited sharpen writes the output without feeding the
+      history (`temporal.ts`). A `temporal` render cap (Xbox 360, whose
+      Halo: Reach shipped a temporal anti-aliaser, and Modern) and quality
+      setting (high and medium) both gate it; with it off, parity with the
+      software rasteriser holds. Measured on real WebGPU and Chromium WebGL2
+      against a 4×-supersampled frame of sub-pixel bars and a too-fine
+      checkerboard, with and without multisampling: the error more than
+      halves (8.0 → 3.2; 5.9 → 2.7 with MSAA), the first frame after a pan
+      keeps the history, and the crawl as the camera drifts drops from 7.4
+      to 2.0. It reprojects with the camera only, so a fast-moving object
+      leans on the clamp rather than its own motion. Lockout has it on.
 - [ ] **I3. Screen-space reflections.** Polished floors and metal reflect
       what's on screen, falling back to the reflection probes where the
       screen has nothing. *Lockout:* the towers and bots reflected in the

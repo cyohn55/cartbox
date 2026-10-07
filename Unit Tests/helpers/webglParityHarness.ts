@@ -22,6 +22,7 @@ import { localShadowRig } from "./localShadowScene";
 import { manyLights } from "./manyLights";
 import { probeRig } from "./probeScene";
 import { WebglSceneRenderer } from "../../packages/player/src/render/WebglSceneRenderer";
+import { temporalReport, type GpuRenderer, type TemporalReport } from "./temporalScene";
 
 const W = 64;
 const H = 48;
@@ -368,6 +369,36 @@ async function runAntialias(name: string): Promise<{ changed: number; offEdge: n
   return { changed, offEdge, outside, drawn, errors: [(plain as { error: number }).error, (smooth as { error: number }).error] };
 }
 
+/**
+ * Temporal anti-aliasing (I2): the bars measured as on WebGPU (temporalScene.ts),
+ * with whether the context could render half floats and any GL error.
+ */
+async function runTemporal(antialias: boolean): Promise<{ report: TemporalReport; supported: boolean; errors: number[] } | { error: string }> {
+  const errors: number[] = [];
+  let supported = true;
+  const make = async (width: number, height: number) => {
+    const renderer = WebglSceneRenderer.create(width, height);
+    if (!renderer) throw new Error("WebGL2 renderer did not build");
+    const gl = (renderer as unknown as { gl: { getError(): number } }).gl;
+    return {
+      render: (instances, draw) => {
+        renderer.render(instances, draw);
+        errors.push(gl.getError());
+        if (draw.temporal && (renderer as unknown as { taa: unknown }).taa === false) supported = false;
+      },
+      settle: (draw) => renderer.settle(draw),
+      dispose: () => renderer.dispose(),
+    } satisfies GpuRenderer;
+  };
+  try {
+    const report = await temporalReport(make, (instances, draw) => new SoftwareSceneRenderer().render(instances, draw), () => {}, W, H, { antialias });
+    return { report, supported, errors: [...new Set(errors)] };
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
+
+(globalThis as unknown as { runTemporal: typeof runTemporal }).runTemporal = runTemporal;
 (globalThis as unknown as { runAntialias: typeof runAntialias }).runAntialias = runAntialias;
 (globalThis as unknown as { settleOnce: typeof settleOnce }).settleOnce = settleOnce;
 (globalThis as unknown as { runParity: typeof run; glRenderer: typeof glRenderer }).runParity = run;

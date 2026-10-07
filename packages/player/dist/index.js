@@ -4173,9 +4173,9 @@ var PostFxSurface = class _PostFxSurface {
 // src/quality.ts
 var QUALITY_LEVELS = ["low", "medium", "high"];
 var QUALITY_PRESETS = {
-  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true },
-  medium: { level: "medium", shadows: true, shadowMapSize: 512, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true },
-  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false }
+  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true },
+  medium: { level: "medium", shadows: true, shadowMapSize: 512, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true },
+  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false }
 };
 function detectQuality(hints) {
   if (hints.cores !== void 0 && hints.cores <= 2 || hints.memoryGB !== void 0 && hints.memoryGB <= 2) return "low";
@@ -4295,7 +4295,8 @@ var XBOX360_RASTER_CAPS = {
   textureCacheBytes: 0,
   polyBudget: 0,
   programmableShaders: false,
-  antialias: true
+  antialias: true,
+  temporal: true
 };
 var MODERN_RASTER_CAPS = {
   zBuffer: true,
@@ -4305,7 +4306,8 @@ var MODERN_RASTER_CAPS = {
   textureCacheBytes: 0,
   polyBudget: 0,
   programmableShaders: true,
-  antialias: true
+  antialias: true,
+  temporal: true
 };
 var MODELS = {
   classic: {
@@ -10544,6 +10546,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       // Objects with LOD levels (EP9b) draw the one their distance calls for.
       lod: true,
       antialias,
+      temporal: this.options.temporal === true && this.quality.temporal === true,
       // HUD mode fills the frame with a sky so the 3D scene is opaque before the
       // HUD lands on top; third-person keeps the cart frame behind the meshes.
       background: this.hud && !skyBackdrop ? HUD_SKY : null,
@@ -11673,7 +11676,7 @@ import {
   graphNoiseSource,
   graphShaderCode,
   graphUsesNoise,
-  multiplyMat4 as multiplyMat44
+  multiplyMat4 as multiplyMat45
 } from "@cartbox/editor";
 
 // src/render/gpuFrame.ts
@@ -11802,6 +11805,232 @@ function primitiveCentre(primitive) {
   }
   return c;
 }
+
+// src/render/temporal.ts
+import { multiplyMat4 as multiplyMat44 } from "@cartbox/editor";
+var TEMPORAL_SAMPLES = 8;
+var TEMPORAL_BLEND = 0.1;
+var TEMPORAL_SHARPEN = 0.25;
+var TEMPORAL_UNIFORM_FLOATS = 20;
+function halton(index, base) {
+  let result = 0;
+  let f2 = 1;
+  for (let i = index; i > 0; i = Math.floor(i / base)) {
+    f2 /= base;
+    result += f2 * (i % base);
+  }
+  return result;
+}
+function temporalJitter(frame) {
+  const i = (frame % TEMPORAL_SAMPLES + TEMPORAL_SAMPLES) % TEMPORAL_SAMPLES + 1;
+  return [halton(i, 2) - 0.5, halton(i, 3) - 0.5];
+}
+function jitterProjection(projection, jitter, width, height) {
+  const dx = 2 * jitter[0] / width;
+  const dy = 2 * jitter[1] / height;
+  const out = projection.slice();
+  for (let c = 0; c < 4; c += 1) {
+    const w = projection[c * 4 + 3];
+    out[c * 4] = projection[c * 4] + dx * w;
+    out[c * 4 + 1] = projection[c * 4 + 1] + dy * w;
+  }
+  return out;
+}
+function invertMat4(m) {
+  const [a00, a01, a02, a03, a10, a11, a12, a13, a20, a21, a22, a23, a30, a31, a32, a33] = m;
+  const b00 = a00 * a11 - a01 * a10;
+  const b01 = a00 * a12 - a02 * a10;
+  const b02 = a00 * a13 - a03 * a10;
+  const b03 = a01 * a12 - a02 * a11;
+  const b04 = a01 * a13 - a03 * a11;
+  const b05 = a02 * a13 - a03 * a12;
+  const b06 = a20 * a31 - a21 * a30;
+  const b07 = a20 * a32 - a22 * a30;
+  const b08 = a20 * a33 - a23 * a30;
+  const b09 = a21 * a32 - a22 * a31;
+  const b10 = a21 * a33 - a23 * a31;
+  const b11 = a22 * a33 - a23 * a32;
+  const det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+  if (!Number.isFinite(det) || Math.abs(det) < 1e-300) return null;
+  const k = 1 / det;
+  return [
+    (a11 * b11 - a12 * b10 + a13 * b09) * k,
+    (a02 * b10 - a01 * b11 - a03 * b09) * k,
+    (a31 * b05 - a32 * b04 + a33 * b03) * k,
+    (a22 * b04 - a21 * b05 - a23 * b03) * k,
+    (a12 * b08 - a10 * b11 - a13 * b07) * k,
+    (a00 * b11 - a02 * b08 + a03 * b07) * k,
+    (a32 * b02 - a30 * b05 - a33 * b01) * k,
+    (a20 * b05 - a22 * b02 + a23 * b01) * k,
+    (a10 * b10 - a11 * b08 + a13 * b06) * k,
+    (a01 * b08 - a00 * b10 - a03 * b06) * k,
+    (a30 * b04 - a31 * b02 + a33 * b00) * k,
+    (a21 * b02 - a20 * b04 - a23 * b00) * k,
+    (a11 * b07 - a10 * b09 - a12 * b06) * k,
+    (a00 * b09 - a01 * b07 + a02 * b06) * k,
+    (a31 * b01 - a30 * b03 - a32 * b00) * k,
+    (a20 * b03 - a21 * b01 + a22 * b00) * k
+  ];
+}
+var TemporalState = class {
+  constructor(depth) {
+    this.depth = depth;
+    this.frame = 0;
+    this.previous = null;
+    this.uniforms = new Float32Array(TEMPORAL_UNIFORM_FLOATS);
+  }
+  /** Start a temporal frame of `width × height` seen through `view` and `projection`. */
+  begin(view, projection, width, height) {
+    const viewProj = multiplyMat44(projection, view);
+    const inverse = invertMat4(viewProj);
+    const reprojection = this.previous && inverse ? multiplyMat44(this.previous, inverse) : null;
+    this.uniforms.set(reprojection ?? IDENTITY, 0);
+    this.uniforms.set([TEMPORAL_BLEND, TEMPORAL_SHARPEN, reprojection ? 1 : 0, this.depth === "unit" ? 1 : 0], 16);
+    const jittered = jitterProjection(projection, temporalJitter(this.frame), width, height);
+    this.frame += 1;
+    this.previous = viewProj;
+    return { projection: jittered, uniforms: this.uniforms };
+  }
+  /** Forget the history: the next temporal frame starts fresh. */
+  reset() {
+    this.previous = null;
+  }
+};
+var IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+function temporalShaderWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `
+struct Temporal { reproject: mat4x4<f32>, params: vec4<f32> };
+@group(0) @binding(0) var<uniform> taa: Temporal;
+@group(0) @binding(1) var current: texture_2d<f32>;
+@group(0) @binding(2) var history: texture_2d<f32>;
+@group(0) @binding(3) var historySampler: sampler;
+@group(0) @binding(4) var depth: ${multisampled ? "texture_depth_multisampled_2d" : "texture_depth_2d"};
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment
+fn resolve(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(current));
+  let p = vec2<i32>(frag.xy);
+  let c = textureLoad(current, p, 0);
+  if (taa.params.z < 0.5) { return c; }
+  var lo = c;
+  var hi = c;
+  for (var dy = -1; dy <= 1; dy += 1) {
+    for (var dx = -1; dx <= 1; dx += 1) {
+      let s = textureLoad(current, clamp(p + vec2<i32>(dx, dy), vec2<i32>(0, 0), size - 1), 0);
+      lo = min(lo, s);
+      hi = max(hi, s);
+    }
+  }
+  var z = textureLoad(depth, p, 0);
+  if (taa.params.w > 0.5) { z = z * 2.0 - 1.0; }
+  let ndc = vec2<f32>(frag.x / f32(size.x) * 2.0 - 1.0, 1.0 - frag.y / f32(size.y) * 2.0);
+  let prev = taa.reproject * vec4<f32>(ndc, z, 1.0);
+  if (prev.w <= 0.0) { return c; }
+  let uv = vec2<f32>(prev.x / prev.w * 0.5 + 0.5, 0.5 - prev.y / prev.w * 0.5);
+  if (any(uv < vec2<f32>(0.0, 0.0)) || any(uv > vec2<f32>(1.0, 1.0))) { return c; }
+  let h = clamp(textureSampleLevel(history, historySampler, uv, 0.0), lo, hi);
+  return mix(h, c, taa.params.x);
+}
+`
+  );
+}
+var TEMPORAL_SHARPEN_WGSL = (
+  /* wgsl */
+  `
+struct Temporal { reproject: mat4x4<f32>, params: vec4<f32> };
+@group(0) @binding(0) var<uniform> taa: Temporal;
+@group(0) @binding(1) var resolved: texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment
+fn sharpen(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(resolved));
+  let p = vec2<i32>(frag.xy);
+  let top = size - 1;
+  let c = textureLoad(resolved, p, 0);
+  let n = textureLoad(resolved, clamp(p + vec2<i32>(0, -1), vec2<i32>(0, 0), top), 0);
+  let s = textureLoad(resolved, clamp(p + vec2<i32>(0, 1), vec2<i32>(0, 0), top), 0);
+  let w = textureLoad(resolved, clamp(p + vec2<i32>(-1, 0), vec2<i32>(0, 0), top), 0);
+  let e = textureLoad(resolved, clamp(p + vec2<i32>(1, 0), vec2<i32>(0, 0), top), 0);
+  let lo = min(c, min(min(n, s), min(w, e)));
+  let hi = max(c, max(max(n, s), max(w, e)));
+  return clamp(c + (4.0 * c - n - s - w - e) * taa.params.y, lo, hi);
+}
+`
+);
+var TEMPORAL_VERTEX_GLSL = `#version 300 es
+void main() {
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+`;
+var TEMPORAL_RESOLVE_GLSL = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform mat4 uReproject;
+uniform vec4 uParams;
+uniform sampler2D uCurrent;
+uniform sampler2D uHistory;
+uniform sampler2D uDepth;
+out vec4 colour;
+void main() {
+  ivec2 size = textureSize(uCurrent, 0);
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec4 c = texelFetch(uCurrent, p, 0);
+  if (uParams.z < 0.5) { colour = c; return; }
+  vec4 lo = c;
+  vec4 hi = c;
+  for (int dy = -1; dy <= 1; dy++) {
+    for (int dx = -1; dx <= 1; dx++) {
+      vec4 s = texelFetch(uCurrent, clamp(p + ivec2(dx, dy), ivec2(0), size - 1), 0);
+      lo = min(lo, s);
+      hi = max(hi, s);
+    }
+  }
+  float z = texelFetch(uDepth, p, 0).r;
+  if (uParams.w > 0.5) z = z * 2.0 - 1.0;
+  vec2 ndc = vec2(gl_FragCoord.x / float(size.x) * 2.0 - 1.0, 1.0 - gl_FragCoord.y / float(size.y) * 2.0);
+  vec4 prev = uReproject * vec4(ndc, z, 1.0);
+  if (prev.w <= 0.0) { colour = c; return; }
+  vec2 uv = vec2(prev.x / prev.w * 0.5 + 0.5, 0.5 - prev.y / prev.w * 0.5);
+  if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) { colour = c; return; }
+  vec4 h = clamp(textureLod(uHistory, uv, 0.0), lo, hi);
+  colour = mix(h, c, uParams.x);
+}
+`;
+var TEMPORAL_SHARPEN_GLSL = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform vec4 uParams;
+uniform sampler2D uResolved;
+out vec4 colour;
+void main() {
+  ivec2 size = textureSize(uResolved, 0);
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  ivec2 top = size - 1;
+  vec4 c = texelFetch(uResolved, p, 0);
+  vec4 n = texelFetch(uResolved, clamp(p + ivec2(0, -1), ivec2(0), top), 0);
+  vec4 s = texelFetch(uResolved, clamp(p + ivec2(0, 1), ivec2(0), top), 0);
+  vec4 w = texelFetch(uResolved, clamp(p + ivec2(-1, 0), ivec2(0), top), 0);
+  vec4 e = texelFetch(uResolved, clamp(p + ivec2(1, 0), ivec2(0), top), 0);
+  vec4 lo = min(c, min(min(n, s), min(w, e)));
+  vec4 hi = max(c, max(max(n, s), max(w, e)));
+  colour = clamp(c + (4.0 * c - n - s - w - e) * uParams.y, lo, hi);
+}
+`;
 
 // src/render/gpuTimer.ts
 var WebgpuPassTimer = class _WebgpuPassTimer {
@@ -12981,6 +13210,15 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.graphPrograms = /* @__PURE__ */ new Map();
     /** The opaque depth, as a texture the transparent pass can read (EP6b): made on first use. */
     this.sceneDepth = null;
+    this.temporalState = new TemporalState("unit");
+    /**
+     * The temporal resolve's resources (I2): the frame copied into a texture, two
+     * half-float history images (one read, one written, swapping each frame),
+     * the two programs and their samplers. Made on first use; false where the
+     * context can't render to half floats (no EXT_color_buffer_float), which
+     * leaves frames plain.
+     */
+    this.taa = null;
     this.software = new SoftwareSceneRenderer(style);
     this.nearest = style.textureFiltering === "none";
     this.uniformBuffer = gl.createBuffer();
@@ -13084,7 +13322,9 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
   }
   submit(instances, draw) {
     const gl = this.gl;
-    const viewProj = multiplyMat44(draw.projection, draw.view);
+    const temporal = draw.temporal === true && this.ensureTemporal() ? this.temporalState.begin(draw.view, draw.projection, this.width, this.height) : null;
+    if (!temporal) this.temporalState.reset();
+    const viewProj = multiplyMat45(temporal ? temporal.projection : draw.projection, draw.view);
     const { batches, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView2(draw.view));
     if (batches.length === 0) return;
     const chunks2 = [];
@@ -13126,7 +13366,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     batches.forEach((batch, index) => {
       const model = batch.models[0];
       writeInstanceUniform(this.uniformData, index, {
-        mvp: multiplyMat44(viewProj, model),
+        mvp: multiplyMat45(viewProj, model),
         normalBasis: normalBasis3x3(model),
         baseColor: batch.primitive.material.baseColorFactor,
         hasTexture: batch.textures.base !== null,
@@ -13137,7 +13377,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         hasOcclusionMap: batch.textures.occ !== null,
         hasEmissiveMap: batch.textures.emis !== null,
         environment: draw.environment ?? null,
-        lightMvp: shadow ? multiplyMat44(shadow.lightViewProj, model) : null,
+        lightMvp: shadow ? multiplyMat45(shadow.lightViewProj, model) : null,
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
@@ -13163,7 +13403,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         writeInstanceTransform(
           this.instanceData,
           j,
-          { mvp: multiplyMat44(viewProj, model), lightMvp: shadow ? multiplyMat44(shadow.lightViewProj, model) : null, model, normalBasis: normalBasis3x3(model) },
+          { mvp: multiplyMat45(viewProj, model), lightMvp: shadow ? multiplyMat45(shadow.lightViewProj, model) : null, model, normalBasis: normalBasis3x3(model) },
           chunk.offsetFloats + j * INSTANCE_FLOATS
         );
       }
@@ -13262,6 +13502,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, this.width, this.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
     }
+    if (temporal) this.resolveTemporal(temporal.uniforms);
     this.submitted += 1;
     const slot = this.readback.find((s) => s.fence === null);
     if (slot) {
@@ -13430,6 +13671,93 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       this.msaa = { framebuffer, attachments: [colour, depth] };
     }
     return this.msaa.framebuffer;
+  }
+  ensureTemporal() {
+    if (this.taa === null) {
+      const gl = this.gl;
+      try {
+        if (!gl.getExtension("EXT_color_buffer_float")) throw new Error("no half-float targets");
+        const target = (internal, format, type) => {
+          const texture = createTexture(gl, this.width, this.height, internal, format, type, null);
+          const framebuffer = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+          if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error("temporal target incomplete");
+          return { texture, framebuffer };
+        };
+        const program = (fragment, units) => {
+          const p = gl.createProgram();
+          gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, TEMPORAL_VERTEX_GLSL));
+          gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, fragment));
+          gl.linkProgram(p);
+          if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(`WebGL2 program failed to link: ${gl.getProgramInfoLog(p)}`);
+          gl.useProgram(p);
+          for (const [name, unit] of units) gl.uniform1i(gl.getUniformLocation(p, name), unit);
+          return p;
+        };
+        const sampler = (filter) => {
+          const s = gl.createSampler();
+          gl.samplerParameteri(s, gl.TEXTURE_MIN_FILTER, filter);
+          gl.samplerParameteri(s, gl.TEXTURE_MAG_FILTER, filter);
+          gl.samplerParameteri(s, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.samplerParameteri(s, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          return s;
+        };
+        const resolve = program(TEMPORAL_RESOLVE_GLSL, [["uCurrent", 0], ["uHistory", 1], ["uDepth", 2]]);
+        const sharpen = program(TEMPORAL_SHARPEN_GLSL, [["uResolved", 0]]);
+        this.taa = {
+          current: target(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE),
+          history: [target(gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT), target(gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT)],
+          index: 0,
+          resolve: { program: resolve, reproject: gl.getUniformLocation(resolve, "uReproject"), params: gl.getUniformLocation(resolve, "uParams") },
+          sharpen: { program: sharpen, params: gl.getUniformLocation(sharpen, "uParams") },
+          linear: sampler(gl.LINEAR),
+          nearest: sampler(gl.NEAREST)
+        };
+      } catch {
+        this.taa = false;
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+    return this.taa !== false;
+  }
+  /**
+   * Resolve the frame (in {@link framebuffer}) into the history and sharpen it
+   * back into {@link framebuffer} for the readback (HALO_INFINITE_STYLE_ROADMAP.md I2).
+   * Units 0–2 are borrowed; every frame binds its own textures and samplers there.
+   */
+  resolveTemporal(uniforms) {
+    const gl = this.gl;
+    const taa = this.taa;
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.framebuffer);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, taa.current.framebuffer);
+    gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, this.width, this.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    this.copySceneDepth();
+    const read = taa.history[taa.index];
+    const write = taa.history[1 - taa.index];
+    taa.index = 1 - taa.index;
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.depthMask(false);
+    gl.bindVertexArray(null);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, write.framebuffer);
+    gl.useProgram(taa.resolve.program);
+    gl.uniformMatrix4fv(taa.resolve.reproject, false, uniforms.subarray(0, 16));
+    gl.uniform4fv(taa.resolve.params, uniforms.subarray(16, 20));
+    this.bindTexture(0, taa.current.texture);
+    gl.bindSampler(0, taa.nearest);
+    this.bindTexture(1, read.texture);
+    gl.bindSampler(1, taa.linear);
+    this.bindTexture(2, this.sceneDepth.texture);
+    gl.bindSampler(2, taa.nearest);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
+    gl.useProgram(taa.sharpen.program);
+    gl.uniform4fv(taa.sharpen.params, uniforms.subarray(16, 20));
+    this.bindTexture(0, write.texture);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.depthMask(true);
   }
   /** Copy this frame's depth into {@link sceneDepth} and bind it, leaving the frame's framebuffer bound. */
   copySceneDepth() {
@@ -13625,6 +13953,16 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         gl.deleteTexture(this.clusterTextures.table);
         gl.deleteTexture(this.clusterTextures.index);
       }
+      if (this.taa) {
+        for (const t of [this.taa.current, ...this.taa.history]) {
+          gl.deleteTexture(t.texture);
+          gl.deleteFramebuffer(t.framebuffer);
+        }
+        gl.deleteProgram(this.taa.resolve.program);
+        gl.deleteProgram(this.taa.sharpen.program);
+        gl.deleteSampler(this.taa.linear);
+        gl.deleteSampler(this.taa.nearest);
+      }
       if (this.sceneDepth) {
         gl.deleteTexture(this.sceneDepth.texture);
         gl.deleteFramebuffer(this.sceneDepth.framebuffer);
@@ -13685,7 +14023,7 @@ import {
   graphNoiseSource as graphNoiseSource2,
   graphShaderCode as graphShaderCode2,
   graphUsesNoise as graphUsesNoise2,
-  multiplyMat4 as multiplyMat45
+  multiplyMat4 as multiplyMat46
 } from "@cartbox/editor";
 var FRAME_BYTES = 176;
 var READBACK_BUFFERS2 = 3;
@@ -14413,6 +14751,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.instanceData = new Float32Array(0);
     /** What the last submitted frame drew (for the profiler and tests); GPU time when the device can time it. */
     this.lastFrameStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
+    this.temporalState = new TemporalState("ndc");
+    /**
+     * The temporal resolve's resources (I2): two history images (one read, one
+     * written, swapping each frame), its uniforms, sampler and pipelines. Made on
+     * first use.
+     */
+    this.taa = null;
     /** Shader variants by material graph (EP7), built on first use. */
     this.graphPipelines = /* @__PURE__ */ new Map();
     /**
@@ -14578,8 +14923,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const colourTexture = device.createTexture({
         size: { width, height },
         format: "rgba8unorm",
-        usage: 16 | 1
-        // RENDER_ATTACHMENT | COPY_SRC
+        usage: 16 | 1 | 4
+        // RENDER_ATTACHMENT | COPY_SRC | TEXTURE_BINDING (the temporal resolve reads it)
       });
       const depthTexture = device.createTexture({
         size: { width, height },
@@ -14789,7 +15134,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   }
   /** Encode and submit one frame, and start a readback if a buffer is free. */
   submit(instances, draw) {
-    const viewProj = multiplyMat45(draw.projection, draw.view);
+    const temporal = draw.temporal === true ? this.temporalState.begin(draw.view, draw.projection, this.width, this.height) : null;
+    if (!temporal) this.temporalState.reset();
+    const viewProj = multiplyMat46(temporal ? temporal.projection : draw.projection, draw.view);
     const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView3(draw.view));
     if (draws.length === 0) return;
     this.ensureUniformCapacity(draws.length);
@@ -14852,8 +15199,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       entry.first = next;
       for (const model2 of entry.models) {
         writeInstanceTransform(this.instanceData, next, {
-          mvp: multiplyMat45(viewProj, model2),
-          lightMvp: shadow ? multiplyMat45(shadow.lightViewProj, model2) : null,
+          mvp: multiplyMat46(viewProj, model2),
+          lightMvp: shadow ? multiplyMat46(shadow.lightViewProj, model2) : null,
           model: model2,
           normalBasis: normalBasis3x3(model2)
         });
@@ -14867,7 +15214,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         entry.textures.emis !== null
       );
       writeInstanceUniform(this.uniformData, index, {
-        mvp: multiplyMat45(viewProj, model),
+        mvp: multiplyMat46(viewProj, model),
         normalBasis: normalBasis3x3(model),
         baseColor: entry.primitive.material.baseColorFactor,
         hasTexture: entry.textures.base !== null,
@@ -14878,7 +15225,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         hasOcclusionMap: entry.textures.occ !== null,
         hasEmissiveMap: entry.textures.emis !== null,
         environment: draw.environment ?? null,
-        lightMvp: shadow ? multiplyMat45(shadow.lightViewProj, model) : null,
+        lightMvp: shadow ? multiplyMat46(shadow.lightViewProj, model) : null,
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
@@ -14958,6 +15305,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       drawRange(seeThrough, firstSeeThrough, draws.length, groups.scene);
       seeThrough.end();
     }
+    if (temporal) this.encodeTemporal(encoder, temporal.uniforms, msaa ? msaa.depth : this.depthTexture, msaa !== null);
     this.timer?.resolve(encoder);
     this.submitted += 1;
     const slot = this.readback.find((entry) => !entry.busy);
@@ -14977,6 +15325,52 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       this.device.queue.submit([encoder.finish()]);
       this.timer?.read();
     }
+  }
+  /**
+   * Resolve the frame into the history and sharpen it back into the colour
+   * texture that is read back (HALO_INFINITE_STYLE_ROADMAP.md I2).
+   */
+  encodeTemporal(encoder, uniforms, depth, multisampled) {
+    var _a;
+    const device = this.device;
+    if (!this.taa) {
+      const size = { width: this.width, height: this.height };
+      const history = () => device.createTexture({ size, format: "rgba16float", usage: 16 | 4 });
+      this.taa = {
+        history: [history(), history()],
+        index: 0,
+        uniforms: device.createBuffer({ size: uniforms.byteLength, usage: 64 | 8 }),
+        // UNIFORM | COPY_DST
+        sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        resolve: [null, null],
+        sharpen: fullScreenPipeline(device, TEMPORAL_SHARPEN_WGSL, "sharpen", "rgba8unorm")
+      };
+    }
+    const taa = this.taa;
+    const k = multisampled ? 1 : 0;
+    (_a = taa.resolve)[k] ?? (_a[k] = fullScreenPipeline(device, temporalShaderWgsl(multisampled), "resolve", "rgba16float"));
+    device.queue.writeBuffer(taa.uniforms, 0, uniforms);
+    const read = taa.history[taa.index];
+    const write = taa.history[1 - taa.index];
+    taa.index = 1 - taa.index;
+    const fullScreen = (pipeline, target, entries) => {
+      const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }] });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }));
+      pass.draw(3);
+      pass.end();
+    };
+    fullScreen(taa.resolve[k], write, [
+      { binding: 0, resource: { buffer: taa.uniforms } },
+      { binding: 1, resource: this.colourTexture.createView() },
+      { binding: 2, resource: read.createView() },
+      { binding: 3, resource: taa.sampler },
+      { binding: 4, resource: depth.createView() }
+    ]);
+    fullScreen(taa.sharpen, this.colourTexture, [
+      { binding: 0, resource: { buffer: taa.uniforms } },
+      { binding: 1, resource: write.createView() }
+    ]);
   }
   ensureMsaa() {
     if (!this.msaa) {
@@ -15235,6 +15629,11 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       destroySafely(this.msaa.depth);
       destroySafely(this.msaa.blank);
     }
+    if (this.taa) {
+      destroySafely(this.taa.history[0]);
+      destroySafely(this.taa.history[1]);
+      destroySafely(this.taa.uniforms);
+    }
     destroySafely(this.depthGroups.blankTexture);
     destroySafely(this.depthGroups.clusters.table);
     destroySafely(this.depthGroups.clusters.index);
@@ -15256,6 +15655,15 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.timer?.destroy();
   }
 };
+function fullScreenPipeline(device, code, entryPoint, format) {
+  const module = device.createShaderModule({ code });
+  return device.createRenderPipeline({
+    layout: "auto",
+    vertex: { module, entryPoint: "vs" },
+    fragment: { module, entryPoint, targets: [{ format }] },
+    primitive: { topology: "triangle-list" }
+  });
+}
 function destroySafely(resource) {
   try {
     resource?.destroy?.();
@@ -15582,7 +15990,8 @@ var Player = class {
             this.sceneRenderer,
             {
               ...this.options.ktx2 ? { ktx2: this.options.ktx2 } : {},
-              antialias: this.model.renderCaps.antialias === true
+              antialias: this.model.renderCaps.antialias === true,
+              temporal: this.model.renderCaps.temporal === true
             }
           );
           this.meshSurface.setQuality(this.qualitySettings);

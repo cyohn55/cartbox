@@ -107,6 +107,7 @@ import { SoftwareSceneRenderer, applyScenePasses, type FrameState, type SceneDra
 import { webgpuCanHonour } from "./renderCaps.js";
 import { batchInstances, compositeFrame, presentFrame, softEdges, type PrimitiveTextures } from "./gpuFrame.js";
 import { WebgpuPassTimer } from "./gpuTimer.js";
+import { TEMPORAL_SHARPEN_WGSL, TemporalState, temporalShaderWgsl } from "./temporal.js";
 import type { RenderStats } from "../debug/profiler.js";
 import {
   UNIFORM_FLOATS,
@@ -1132,7 +1133,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const colourTexture = device.createTexture({
         size: { width, height },
         format: "rgba8unorm",
-        usage: 0x10 | 0x01, // RENDER_ATTACHMENT | COPY_SRC
+        usage: 0x10 | 0x01 | 0x04, // RENDER_ATTACHMENT | COPY_SRC | TEXTURE_BINDING (the temporal resolve reads it)
       });
       const depthTexture = device.createTexture({
         size: { width, height },
@@ -1362,7 +1363,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
   /** Encode and submit one frame, and start a readback if a buffer is free. */
   private submit(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
-    const viewProj = multiplyMat4(draw.projection, draw.view);
+    // Temporal anti-aliasing (I2): this frame's jittered projection and the resolve's uniforms.
+    const temporal = draw.temporal === true ? this.temporalState.begin(draw.view, draw.projection, this.width, this.height) : null;
+    if (!temporal) this.temporalState.reset();
+    const viewProj = multiplyMat4(temporal ? temporal.projection : draw.projection, draw.view);
 
     // Batch the copies of each primitive that bind the same textures: one
     // uniform (addressed by a dynamic offset) and one instanced draw per batch.
@@ -1564,6 +1568,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       drawRange(seeThrough, firstSeeThrough, draws.length, groups.scene);
       seeThrough.end();
     }
+    if (temporal) this.encodeTemporal(encoder, temporal.uniforms, msaa ? msaa.depth : this.depthTexture, msaa !== null);
     this.timer?.resolve(encoder);
 
     this.submitted += 1;
@@ -1586,6 +1591,60 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       this.device.queue.submit([encoder.finish()]);
       this.timer?.read();
     }
+  }
+
+  private readonly temporalState = new TemporalState("ndc");
+  /**
+   * The temporal resolve's resources (I2): two history images (one read, one
+   * written, swapping each frame), its uniforms, sampler and pipelines. Made on
+   * first use.
+   */
+  private taa: { history: [any, any]; index: number; uniforms: any; sampler: any; resolve: [any, any]; sharpen: any } | null = null;
+
+  /**
+   * Resolve the frame into the history and sharpen it back into the colour
+   * texture that is read back (HALO_INFINITE_STYLE_ROADMAP.md I2).
+   */
+  private encodeTemporal(encoder: any, uniforms: Float32Array, depth: any, multisampled: boolean): void {
+    const device = this.device;
+    if (!this.taa) {
+      const size = { width: this.width, height: this.height };
+      const history = () => device.createTexture({ size, format: "rgba16float", usage: 0x10 | 0x04 }); // RENDER_ATTACHMENT | TEXTURE_BINDING
+      this.taa = {
+        history: [history(), history()],
+        index: 0,
+        uniforms: device.createBuffer({ size: uniforms.byteLength, usage: 0x40 | 0x08 }), // UNIFORM | COPY_DST
+        sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        resolve: [null, null],
+        sharpen: fullScreenPipeline(device, TEMPORAL_SHARPEN_WGSL, "sharpen", "rgba8unorm"),
+      };
+    }
+    const taa = this.taa;
+    // The resolve reads the frame's depth: plain, or a multisampled frame's first sample.
+    const k = multisampled ? 1 : 0;
+    taa.resolve[k] ??= fullScreenPipeline(device, temporalShaderWgsl(multisampled), "resolve", "rgba16float");
+    device.queue.writeBuffer(taa.uniforms, 0, uniforms);
+    const read = taa.history[taa.index];
+    const write = taa.history[1 - taa.index];
+    taa.index = 1 - taa.index;
+    const fullScreen = (pipeline: any, target: any, entries: any[]) => {
+      const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }] });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }));
+      pass.draw(3);
+      pass.end();
+    };
+    fullScreen(taa.resolve[k], write, [
+      { binding: 0, resource: { buffer: taa.uniforms } },
+      { binding: 1, resource: this.colourTexture.createView() },
+      { binding: 2, resource: read.createView() },
+      { binding: 3, resource: taa.sampler },
+      { binding: 4, resource: depth.createView() },
+    ]);
+    fullScreen(taa.sharpen, this.colourTexture, [
+      { binding: 0, resource: { buffer: taa.uniforms } },
+      { binding: 1, resource: write.createView() },
+    ]);
   }
 
   /** Shader variants by material graph (EP7), built on first use. */
@@ -1881,6 +1940,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       destroySafely(this.msaa.depth);
       destroySafely(this.msaa.blank);
     }
+    if (this.taa) {
+      destroySafely(this.taa.history[0]);
+      destroySafely(this.taa.history[1]);
+      destroySafely(this.taa.uniforms);
+    }
     destroySafely(this.depthGroups.blankTexture);
     destroySafely(this.depthGroups.clusters.table);
     destroySafely(this.depthGroups.clusters.index);
@@ -1901,6 +1965,17 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     for (const slot of this.readback) destroySafely(slot.buffer);
     this.timer?.destroy();
   }
+}
+
+/** A pipeline drawing one full-screen triangle (no vertex buffers) into a `format` target. */
+function fullScreenPipeline(device: any, code: string, entryPoint: string, format: string): any {
+  const module = device.createShaderModule({ code });
+  return device.createRenderPipeline({
+    layout: "auto",
+    vertex: { module, entryPoint: "vs" },
+    fragment: { module, entryPoint, targets: [{ format }] },
+    primitive: { topology: "triangle-list" },
+  });
 }
 
 /** Release a GPU resource without caring whether it exists or supports destroy. */

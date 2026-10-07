@@ -18,6 +18,8 @@ import { fileURLToPath } from "node:url";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { expectTemporal, type TemporalReport } from "./helpers/temporalScene";
+
 function findChromium(): string | null {
   const root = process.env.PLAYWRIGHT_BROWSERS_PATH;
   if (!root || !existsSync(root)) return null;
@@ -106,6 +108,17 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
       expect(result.outside, name).toBe(0); // each to a blend of the colours either side
     }
   }, 60_000);
+
+  it("anti-aliases temporally (I2): converges, survives a pan, and stops the crawl", async () => {
+    for (const antialias of [false, true]) {
+      const result = await page.evaluate((a: boolean) => (globalThis as unknown as { runTemporal: (a: boolean) => Promise<never> }).runTemporal(a), antialias);
+      expect(result, `antialias ${antialias}`).not.toHaveProperty("error");
+      const { report, supported, errors } = result as { report: TemporalReport; supported: boolean; errors: number[] };
+      expect(supported).toBe(true); // the context renders half floats
+      expect(errors).toEqual([0]);
+      expectTemporal(report);
+    }
+  }, 120_000);
 
   it("renders the fantasy path byte-identically", async () => {
     const result = await run("fantasy");
