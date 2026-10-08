@@ -580,6 +580,28 @@ export {
   readSurfaceEffects,
 } from "./model/materialEffects";
 export {
+  ANISOTROPY_MIN_ALPHA,
+  CLEARCOAT_F0,
+  DEFAULT_CLEARCOAT_ROUGHNESS,
+  NO_LAYERS,
+  PANEL_RELIEF_SIZE,
+  PARALLAX_MAX_DEPTH,
+  PARALLAX_MIN_NDV,
+  PARALLAX_STEPS,
+  anisotropicD,
+  builtinPanelRelief,
+  curvatureOf,
+  materialHasLayers,
+  panelReliefRgba,
+  reliefFromHeight,
+  parallaxRate,
+  parallaxUv,
+  readMaterialLayers,
+  resolveLayers,
+  uvGradients,
+  type ResolvedLayers,
+} from "./model/materialLayers";
+export {
   GRAPH_NODES,
   GRAPH_OUTPUTS,
   MAX_GRAPH_NODES,

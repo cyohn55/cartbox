@@ -47,6 +47,7 @@ import { bakeNavMesh, boxTriangles, serializeNavMesh, type NavMesh } from "./nav
 import { serializeTerrain, terrainMesh, type Terrain } from "./terrain";
 import type { SceneTimeline } from "./timeline";
 import { builtinDetailGrain } from "./materialEffects";
+import { reliefFromHeight } from "./materialLayers";
 import type { MaterialGraph } from "./materialGraph";
 import { particlePreset, type ParticleEffect } from "./particleEffects";
 import { decalPreset, type DecalDef, type DecalMark } from "./decals";
@@ -364,6 +365,8 @@ interface BakedSurface {
   normal: EncodedImage;
   metallicRoughness: EncodedImage;
   emissive: EncodedImage;
+  /** Height and curvature from the same height field (I4), for wear masks. */
+  relief: EncodedImage;
 }
 
 /** Bake one painted surface into its albedo, normal, metallic-roughness and emissive PNGs. */
@@ -404,7 +407,10 @@ function bakeSurface(surface: (x: number, y: number) => Surf, strength: number):
     }
   }
   const png = (rgba: Uint8ClampedArray): EncodedImage => ({ mime: "image/png", bytes: encodeRgbaPng(rgba, TEX, TEX, { compress: true }) });
-  return { albedo: png(albedo), normal: png(normal), metallicRoughness: png(mr), emissive: png(emissive) };
+  // The relief (I4): the height the normal map was derived from, and its
+  // curvature — the panels' raised rims read as edges, the seams as cavities.
+  const relief = reliefFromHeight(samples.map((s) => s.h), TEX, TEX, 8);
+  return { albedo: png(albedo), normal: png(normal), metallicRoughness: png(mr), emissive: png(emissive), relief: png(relief) };
 }
 
 /**
@@ -1091,6 +1097,32 @@ const ENERGY_FLOW: MaterialGraph = {
   outputs: { emissive: "glow" },
 };
 
+/**
+ * Chipped paint on the Forerunner walls (HALO_INFINITE_STYLE_ROADMAP.md I4): the
+ * wall's own colour worn back to bright bare metal along the panels' raised
+ * rims, broken up by noise so it chips rather than outlines, and grime settled
+ * in the seams — wear masks over the relief baked from the wall's height.
+ */
+const WALL_WEAR: MaterialGraph = {
+  nodes: [
+    { id: "paint", op: "baseColor", x: 20, y: 20 },
+    { id: "pos", op: "position", x: 20, y: 110 },
+    { id: "noise", op: "noise", inputs: { position: "pos" }, params: { scale: 5, octaves: 3 }, x: 210, y: 110 },
+    { id: "lo", op: "constant", params: { value: -0.4 }, x: 210, y: 200 },
+    { id: "hi", op: "constant", params: { value: 2 }, x: 210, y: 270 },
+    { id: "breakup", op: "mix", inputs: { a: "lo", b: "hi", t: "noise" }, x: 400, y: 160 },
+    { id: "edge", op: "wear", inputs: { breakup: "breakup" }, params: { side: "edge", amount: 0.5, sharpness: 6 }, x: 590, y: 120 },
+    { id: "cavity", op: "wear", params: { side: "cavity", amount: 0.55, sharpness: 3 }, x: 590, y: 260 },
+    { id: "bare", op: "constant", params: { value: [0.93, 0.95, 0.98] }, x: 590, y: 20 },
+    { id: "chipped", op: "mix", inputs: { a: "paint", b: "bare", t: "edge" }, x: 780, y: 60 },
+    { id: "clean", op: "constant", params: { value: 1 }, x: 590, y: 360 },
+    { id: "grime", op: "constant", params: { value: 0.55 }, x: 590, y: 430 },
+    { id: "dirt", op: "mix", inputs: { a: "clean", b: "grime", t: "cavity" }, x: 780, y: 300 },
+    { id: "colour", op: "multiply", inputs: { a: "chipped", b: "dirt" }, x: 970, y: 160 },
+  ],
+  outputs: { baseColor: "colour" },
+};
+
 function mapMesh(): MeshAsset {
   const tex = lockoutTextures();
   const WALL_TEX = tex.wall;
@@ -1120,6 +1152,9 @@ function mapMesh(): MeshAsset {
     rim: { color: [0.55, 0.7, 0.9], power: 4, strength: 0.18 },
     reflectivity: 1.2,
     reflectionMask: true,
+    // Chipped edges (I4): wear masks over the wall's relief.
+    reliefImage: WALL_TEX.relief,
+    graph: WALL_WEAR,
   };
   const floorMat: MeshPrimitive["material"] = {
     name: "forerunner-deck",
@@ -1582,16 +1617,19 @@ function block(s: Streams, cx: number, cy: number, cz: number, hx: number, hy: n
  * Free for All — instead of storing a mesh per colour.
  */
 const ARMOR_PAINT: readonly [number, number, number, number] = [0.45, 0.5, 0.56, 1];
+/** The armour paint's lacquer (I4): a glossy clearcoat the base shows through. */
+const ARMOR_LACQUER = { clearcoat: 0.8, clearcoatRoughness: 0.08 } as const;
 
 /**
  * Drop texture coordinates from primitives that have no texture — the soldiers
- * and weapons are flat PBR colours, and UVs are a quarter of every vertex.
+ * and weapons are flat PBR colours, and UVs are a quarter of every vertex. A
+ * brushed (anisotropic) surface keeps them: its grain runs along U (I4).
  */
 function withoutUnusedUvs(mesh: MeshAsset): MeshAsset {
   return {
     name: mesh.name,
     primitives: mesh.primitives.map((p) =>
-      p.material.baseColorImage || p.material.normalImage || p.material.metallicRoughnessImage || p.material.emissiveImage
+      p.material.baseColorImage || p.material.normalImage || p.material.metallicRoughnessImage || p.material.emissiveImage || p.material.reliefImage || (p.material.anisotropy ?? 0) !== 0
         ? p
         : { ...p, uvs: null },
     ),
@@ -1923,13 +1961,14 @@ function soldierMesh(): MeshAsset {
       scale: [1, 1, 1],
     };
   });
-  const paintMat: Mat = { name: "armor", baseColorFactor: ARMOR_PAINT, baseColorImage: null, metallicFactor: 0.45, roughnessFactor: 0.4, tintable: true };
+  // Lacquered armour (I4): the team paint under a glossy clearcoat, and a coated visor.
+  const paintMat: Mat = { name: "armor", baseColorFactor: ARMOR_PAINT, baseColorImage: null, metallicFactor: 0.45, roughnessFactor: 0.4, tintable: true, ...ARMOR_LACQUER };
   return {
     name: "soldier",
     primitives: [
       boundPrimitive(paint, paintMat),
       boundPrimitive(suit, { name: "undersuit", baseColorFactor: [0.2, 0.21, 0.24, 1], baseColorImage: null, metallicFactor: 0.3, roughnessFactor: 0.6 }),
-      boundPrimitive(visor, { name: "visor", baseColorFactor: [0.95, 0.7, 0.28, 1], baseColorImage: null, metallicFactor: 0.9, roughnessFactor: 0.12, emissiveFactor: [0.35, 0.22, 0.05] }),
+      boundPrimitive(visor, { name: "visor", baseColorFactor: [0.95, 0.7, 0.28, 1], baseColorImage: null, metallicFactor: 0.9, roughnessFactor: 0.12, emissiveFactor: [0.35, 0.22, 0.05], clearcoat: 1, clearcoatRoughness: 0.03 }),
       boundPrimitive(gun, { name: "rifle", baseColorFactor: [0.2, 0.21, 0.23, 1], baseColorImage: null, metallicFactor: 0.7, roughnessFactor: 0.4 }),
     ],
     skin: { joints, inverseBind },
@@ -2081,11 +2120,12 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
   }
   const glowColor: readonly [number, number, number, number] = id === "sword" ? [0.45, 0.85, 1, 1] : [0.3, 0.9, 1, 1];
   const primitives: MeshPrimitive[] = [
-    toPrimitive(metal, { name: "gunmetal", baseColorFactor: [0.42, 0.45, 0.5, 1], baseColorImage: null, metallicFactor: 0.8, roughnessFactor: 0.3 }),
+    // Brushed gunmetal (I4): the highlight drawn out along the barrel.
+    toPrimitive(metal, { name: "gunmetal", baseColorFactor: [0.42, 0.45, 0.5, 1], baseColorImage: null, metallicFactor: 0.8, roughnessFactor: 0.3, anisotropy: 0.6 }),
     toPrimitive(poly, { name: "polymer", baseColorFactor: [0.2, 0.21, 0.23, 1], baseColorImage: null, metallicFactor: 0.15, roughnessFactor: 0.5 }),
     toPrimitive(accent, { name: "accent", baseColorFactor: [0.42, 0.46, 0.38, 1], baseColorImage: null, metallicFactor: 0.5, roughnessFactor: 0.42 }),
     toPrimitive(glove, { name: "glove", baseColorFactor: [0.12, 0.12, 0.13, 1], baseColorImage: null, metallicFactor: 0.05, roughnessFactor: 0.8 }),
-    toPrimitive(sleeve, { name: "sleeve", baseColorFactor: ARMOR_PAINT, baseColorImage: null, metallicFactor: 0.45, roughnessFactor: 0.4, tintable: true }),
+    toPrimitive(sleeve, { name: "sleeve", baseColorFactor: ARMOR_PAINT, baseColorImage: null, metallicFactor: 0.45, roughnessFactor: 0.4, tintable: true, ...ARMOR_LACQUER }),
     toPrimitive(dark, { name: "recess", baseColorFactor: [0.05, 0.05, 0.06, 1], baseColorImage: null, metallicFactor: 0.3, roughnessFactor: 0.7 }),
   ];
   if (glow.indices.length > 0) {

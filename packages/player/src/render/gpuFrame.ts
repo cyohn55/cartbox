@@ -92,6 +92,7 @@ export function packRgba([r, g, b, a]: readonly [number, number, number, number]
 export interface PrimitiveTextures {
   base: DecodedTexture | null;
   mr: DecodedTexture | null;
+  /** The occlusion map, carrying the relief map in G and B when there is one (see {@link occlusionWithRelief}). */
   occ: DecodedTexture | null;
   emis: DecodedTexture | null;
   lm: DecodedTexture | null;
@@ -99,10 +100,54 @@ export interface PrimitiveTextures {
   detail: DecodedTexture | null;
   /** The blend surface's map (H4), or null. */
   blend: DecodedTexture | null;
+  /** The relief map (I4), or null — bound inside {@link occ}, kept here so a draw knows it has one. */
+  relief: DecodedTexture | null;
 }
 
 export function sameTextures(a: PrimitiveTextures, b: PrimitiveTextures): boolean {
-  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.detail === b.detail && a.blend === b.blend;
+  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.detail === b.detail && a.blend === b.blend && a.relief === b.relief;
+}
+
+const NO_OCCLUSION = {};
+const withRelief = new WeakMap<DecodedTexture, WeakMap<object, DecodedTexture>>();
+
+/**
+ * The occlusion map with a relief map packed beside it (I4): R = ambient
+ * occlusion (white without an occlusion map), G = the relief's height, B = its
+ * curvature. WebGL2 guarantees sixteen texture units and the scene shader
+ * already binds sixteen, so the relief rides in the occlusion map's unused
+ * channels rather than taking a unit of its own; WebGPU binds it the same way.
+ * Made at the larger of the two maps' sizes (each sampled nearest at the
+ * texel centres) and kept per pair, so it is built once per material.
+ */
+export function occlusionWithRelief(occ: DecodedTexture | null, relief: DecodedTexture | null): DecodedTexture | null {
+  if (!relief) return occ;
+  let byOcc = withRelief.get(relief);
+  if (!byOcc) withRelief.set(relief, (byOcc = new WeakMap()));
+  const key = occ ?? NO_OCCLUSION;
+  const known = byOcc.get(key);
+  if (known) return known;
+  const bigger = occ && occ.width * occ.height > relief.width * relief.height ? occ : relief;
+  const { width, height } = bigger;
+  const data = new Uint8ClampedArray(width * height * 4);
+  const texel = (t: DecodedTexture, x: number, y: number): number => {
+    const tx = Math.min(t.width - 1, Math.floor(((x + 0.5) / width) * t.width));
+    const ty = Math.min(t.height - 1, Math.floor(((y + 0.5) / height) * t.height));
+    return (ty * t.width + tx) * 4;
+  };
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const o = (y * width + x) * 4;
+      const r = texel(relief, x, y);
+      data[o] = occ ? occ.data[texel(occ, x, y)]! : 255;
+      data[o + 1] = relief.data[r]!;
+      data[o + 2] = relief.data[r + 1]!;
+      data[o + 3] = 255;
+    }
+  }
+  const out: DecodedTexture = { width, height, data };
+  byOcc.set(key, out);
+  return out;
 }
 
 /** The copies of one primitive drawn together: one instanced draw. */
@@ -146,11 +191,12 @@ export function batchInstances<G extends { indexCount: number }>(
       const textures: PrimitiveTextures = {
         base: instance.textures?.[index] ?? null,
         mr: instance.mrTextures?.[index] ?? null,
-        occ: instance.occlusionTextures?.[index] ?? null,
+        occ: occlusionWithRelief(instance.occlusionTextures?.[index] ?? null, instance.reliefTextures?.[index] ?? null),
         emis: instance.emissiveTextures?.[index] ?? null,
         lm: primitive.uvs2 ? (instance.lightmapTextures?.[index] ?? null) : null,
         detail: instance.detailTextures?.[index] ?? null,
         blend: primitive.blend ? (instance.blendTextures?.[index] ?? null) : null,
+        relief: instance.reliefTextures?.[index] ?? null,
       };
       const effect = instance.effect ?? null;
       const alpha = alphaCode(primitive.material.alphaMode);

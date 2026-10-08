@@ -35,6 +35,11 @@ import {
   DEFAULT_RASTER_STYLE,
   DETAIL_FAR,
   DETAIL_NEAR,
+  ANISOTROPY_MIN_ALPHA,
+  CLEARCOAT_F0,
+  PARALLAX_MIN_NDV,
+  PARALLAX_STEPS,
+  resolveLayers,
   LIGHTMAP_RANGE,
   MAX_REFLECTION_PROBES,
   PROBE_FADE,
@@ -164,6 +169,8 @@ layout(std140) uniform Uniforms {
   vec4 fogVol[8];
   vec4 effect0; // rgb = surface effect glow, w = camo amount
   vec4 effect1; // rgb = surface effect bands, w = time
+  vec4 layer0;  // x = clearcoat, y = its roughness, z = anisotropy, w = parallax depth (I4)
+  vec4 layer1;  // xy = anisotropy rotation (cos, sin), z = 1 when the relief rides in occTex's G and B
 } u;
 `;
 
@@ -216,11 +223,12 @@ function graphSites(graph: CompiledGraph | null): { fns: string; base: string; p
   if (!graph) return { fns: "", base: "", pbr: "", emis: "" };
   const out = graph.outputs;
   const code = graphShaderCode(graph, "glsl", {
-    uv: "vUv",
+    uv: "puv",
     position: "vWorldPos",
     normal: "gN",
     view: "u.view.xyz",
     time: "u.effect1.w",
+    curvature: "gCurv",
     baseColor: "colour.rgb",
     baseAlpha: "colour.a",
     sample: (p) => `sampleMap(tex, vec2((${p}).x, 1.0 - (${p}).y))`,
@@ -241,6 +249,8 @@ function graphSites(graph: CompiledGraph | null): { fns: string; base: string; p
   {
     vec3 gN = normalize(vNormal);
     if (dot(gN, u.view.xyz) < 0.0) { gN = -gN; }
+    // The relief's curvature for wear masks (I4): occTex's B, −1..1.
+    float gCurv = u.layer1.z > 0.5 ? sampleMap(occTex, uv).b * 2.0 - 1.0 : 0.0;
 ${code.split("\n").map((l) => `    ${l}`).join("\n")}
 ${set.map((l) => `    ${l}`).join("\n")}
   }`,
@@ -383,6 +393,14 @@ vec4 sampleMap(sampler2D s, vec2 uv) {
   return texelFetch(s, min(size - 1, ivec2(floor(f))), 0);
 #else
   return texture(s, uv);
+#endif
+}
+// The same at level 0, for reads inside a loop (no derivatives there).
+vec4 sampleMapLod(sampler2D s, vec2 uv) {
+#if NEAREST
+  return sampleMap(s, uv);
+#else
+  return textureLod(s, uv, 0.0);
 #endif
 }
 
@@ -556,6 +574,91 @@ vec3 probeLight(vec3 P, vec3 N) {
   return w.x * probeFace(nn.x >= 0.0 ? 0 : 1, i, f) + w.y * probeFace(nn.y >= 0.0 ? 2 : 3, i, f) + w.z * probeFace(nn.z >= 0.0 ? 4 : 5, i, f);
 }
 
+
+// --- Layers and relief (HALO_INFINITE_STYLE_ROADMAP.md I4; materialLayers.ts) ---
+// The world gradients of u (xyz of the first) and v, from screen derivatives
+// and the normal — mirrors uvGradients and the WGSL.
+void uvGrads(vec3 n, vec3 dp1, vec3 dp2, vec2 duv1, vec2 duv2, out vec3 gu, out vec3 gv) {
+  vec3 a = cross(dp2, n);
+  vec3 b = cross(n, dp1);
+  float det = dot(dp1, a);
+  if (abs(det) < 1e-20) { gu = vec3(0.0); gv = vec3(0.0); return; }
+  gu = (a * duv1.x + b * duv2.x) / det;
+  gv = (a * duv1.y + b * duv2.y) / det;
+}
+// The relief's height at a glTF UV (occTex's G, see occlusionWithRelief).
+float reliefHeight(vec2 p) {
+  return sampleMapLod(occTex, vec2(p.x, 1.0 - p.y)).g;
+}
+// Parallax occlusion: where the view ray meets the relief — parallaxUv, line for line.
+vec2 parallaxUv(vec2 uv0, vec2 rate, float depth) {
+  float layer = 1.0 / ${PARALLAX_STEPS}.0;
+  vec2 st = rate * depth * layer;
+  vec2 c = uv0;
+  float cur = 0.0;
+  float below = 1.0 - reliefHeight(c);
+  for (int i = 0; i < ${PARALLAX_STEPS}; i++) {
+    if (cur >= below) { break; }
+    c += st;
+    cur += layer;
+    below = 1.0 - reliefHeight(c);
+  }
+  float after = below - cur;
+  float before = 1.0 - reliefHeight(c - st) - (cur - layer);
+  float span = after - before;
+  float w = abs(span) > 1e-6 ? after / span : 0.0;
+  return c - st * w;
+}
+// The anisotropic GGX distribution (anisotropicD).
+float anisoD(float rough, float aniso, float toh, float boh, float ndh) {
+  float alpha = rough * rough;
+  float at = max(alpha * (1.0 + aniso), ${ANISOTROPY_MIN_ALPHA});
+  float ab = max(alpha * (1.0 - aniso), ${ANISOTROPY_MIN_ALPHA});
+  float a2 = at * ab;
+  vec3 d = vec3(ab * toh, at * boh, a2 * ndh);
+  float b2 = a2 / (dot(d, d) + 1e-12);
+  return a2 * b2 * b2 / 3.14159265;
+}
+// This fragment's anisotropy frame (set in main, read by lightTerm).
+float aniso = 0.0;
+vec3 aT = vec3(0.0);
+vec3 aB = vec3(0.0);
+// The clearcoat's lobe for one light (coatLobe): x = its radiance factor, y = the Fresnel dimming the base.
+vec2 coatTerm(vec3 N, float ndv, vec3 Ld, vec3 H, float vdh) {
+  float rc = u.layer0.y;
+  float ac2 = rc * rc * rc * rc;
+  float kc = ((rc + 1.0) * (rc + 1.0)) / 8.0;
+  float ndl = max(0.0, dot(N, Ld));
+  float ndh = max(0.0, dot(N, H));
+  float dd = ndh * ndh * (ac2 - 1.0) + 1.0;
+  float D = ac2 / (3.14159265 * dd * dd + 1e-7);
+  float G = (ndv / (ndv * (1.0 - kc) + kc)) * (ndl / (ndl * (1.0 - kc) + kc));
+  float fc = ${CLEARCOAT_F0} + (1.0 - ${CLEARCOAT_F0}) * pow(1.0 - vdh, 5.0);
+  return vec2(u.layer0.x * fc * (D * G) / (4.0 * ndl * ndv + 1e-4) * ndl, u.layer0.x * fc);
+}
+// The environment's reflection along R from P, blurred toward its average by
+// roughness, box-projected inside a reflection probe (environmentReflection).
+vec3 envReflect(vec3 P, vec3 R, float rough) {
+  vec3 spec = envColorDir(R);
+  vec3 specAvg = envAverage();
+  int pc = int(u.ssaoMeta.w + 0.5);
+  for (int i = 0; i < pc; i++) {
+    vec3 mn = probeData[i * 4].xyz;
+    vec3 mx = probeData[i * 4 + 1].xyz;
+    float inside = min(min(min(P.x - mn.x, mx.x - P.x), min(P.y - mn.y, mx.y - P.y)), min(P.z - mn.z, mx.z - P.z));
+    float wgt = clamp(inside / ${PROBE_FADE.toFixed(4)}, 0.0, 1.0);
+    if (wgt > 0.0) {
+      vec3 Rs = mix(R, vec3(1e-6), lessThan(abs(R), vec3(1e-6)));
+      vec3 tf = max((mx - P) / Rs, (mn - P) / Rs);
+      float t = max(0.0, min(min(tf.x, tf.y), tf.z));
+      spec = mix(spec, probeSample(i, P + R * t - probeData[i * 4 + 2].xyz), wgt);
+      specAvg = mix(specAvg, probeData[i * 4 + 3].xyz, wgt);
+      break;
+    }
+  }
+  return mix(spec, specAvg, rough);
+}
+
 // One light's direct term (Cook-Torrance), mirroring the software rasteriser's
 // light loop: point and spot lights fall off to nothing at their range, a spot
 // fades across its cone, and directional lights honour the sun shadow (sf).
@@ -582,6 +685,7 @@ vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, 
   float vdhL = max(0.0, dot(V, Hl));
   float ddL = ndhL * ndhL * (a2 - 1.0) + 1.0;
   float DL = a2 / (3.14159265 * ddL * ddL + 1e-7);
+  if (aniso != 0.0) { DL = anisoD(sqrt(sqrt(a2)), aniso, dot(aT, Hl), dot(aB, Hl), ndhL); }
   float GL = (ndv / (ndv * (1.0 - k) + k)) * (ndlL / (ndlL * (1.0 - k) + k));
   float fpL = pow(1.0 - vdhL, 5.0);
   float specL = (DL * GL) / (4.0 * ndlL * ndv + 1e-4);
@@ -590,11 +694,35 @@ vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, 
   if (lgt.d0.w < 0.5) { occl = sf; }
   else if (lgt.d2.w >= 0.0 && localShadowInfo.x > 0.5) { occl = localShadow(int(lgt.d2.w + 0.5), lgt, P, ndlL); }
   float w = lgt.d1.w * atten * ndlL * occl;
-  return (kdm * (vec3(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
+  vec3 lit = (kdm * (vec3(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
+  if (u.layer0.x > 0.0) {
+    // The clearcoat's own highlight, over a base its Fresnel dims (I4).
+    vec2 c = coatTerm(N, ndv, Ld, Hl, vdhL);
+    return lit * (1.0 - c.y) + c.x * lgt.d1.rgb * (lgt.d1.w * atten * occl);
+  }
+  return lit;
 }
 ${g.fns}
 void main() {
-${reflect ? "  outReflect = vec4(0.0);\n  outEnv = vec4(0.0);\n" : ""}  vec2 uv = vec2(vUv.x, 1.0 - vUv.y);
+${reflect ? "  outReflect = vec4(0.0);\n  outEnv = vec4(0.0);\n" : ""}  // The surface's screen derivatives, for the UV gradients parallax and
+  // anisotropy need (I4) — taken here, in uniform control flow.
+  vec3 dp1 = dFdx(vWorldPos);
+  vec3 dp2 = dFdy(vWorldPos);
+  vec2 duv1 = dFdx(vUv);
+  vec2 duv2 = dFdy(vUv);
+  // Every map is sampled at puv: the interpolated UVs, or where the view ray
+  // meets the relief (parallax occlusion, I4).
+  vec2 puv = vUv;
+  if (u.pbr.z > 0.5 && u.layer0.w > 0.0) {
+    vec3 pn = normalize(vNormal);
+    if (dot(pn, u.view.xyz) < 0.0) { pn = -pn; }
+    vec3 pgu;
+    vec3 pgv;
+    uvGrads(pn, dp1, dp2, duv1, duv2, pgu, pgv);
+    float pv = max(${PARALLAX_MIN_NDV}, dot(pn, u.view.xyz));
+    puv = parallaxUv(vUv, -vec2(dot(pgu, u.view.xyz), dot(pgv, u.view.xyz)) / pv, u.layer0.w);
+  }
+  vec2 uv = vec2(puv.x, 1.0 - puv.y);
   vec4 colour = u.base;
   if (u.texflags.x > 0.5) {
     colour = colour * sampleMap(tex, uv);
@@ -630,6 +758,21 @@ ${g.pbr}
     rough = clamp(rough, 0.045, 1.0);
     float ao = 1.0;
     if (u.texflags.z > 0.5) { ao = sampleMap(occTex, uv).r; }
+    // Anisotropy (I4): the grain's tangent, U's gradient laid in the surface and
+    // turned about N, and the bitangent across it (round without a gradient).
+    aniso = 0.0;
+    if (u.layer0.z != 0.0) {
+      vec3 agu;
+      vec3 agv;
+      uvGrads(N, dp1, dp2, duv1, duv2, agu, agv);
+      vec3 t0 = agu - N * dot(agu, N);
+      if (length(t0) > 1e-8) {
+        vec3 tn = normalize(t0);
+        aT = u.layer1.x * tn + u.layer1.y * cross(N, tn);
+        aB = cross(N, aT);
+        aniso = u.layer0.z;
+      }
+    }
     vec3 albedo = colour.rgb;
     if (u.surface1.z > 0.5) {
       vec3 bc = u.surface3.rgb;
@@ -638,7 +781,7 @@ ${g.pbr}
     }
     float dk = u.surface0.y * clamp((${DETAIL_FAR.toFixed(4)} - vEyeDepth) / ${(DETAIL_FAR - DETAIL_NEAR).toFixed(4)}, 0.0, 1.0);
     if (dk > 0.0) {
-      vec3 detail = sampleMap(detailTex, vec2(vUv.x * u.surface0.x, 1.0 - vUv.y * u.surface0.x)).rgb;
+      vec3 detail = sampleMap(detailTex, vec2(puv.x * u.surface0.x, 1.0 - puv.y * u.surface0.x)).rgb;
       albedo = albedo * (vec3(1.0) + dk * (2.0 * detail - vec3(1.0)));
     }
     vec3 L = u.light.xyz;
@@ -651,6 +794,7 @@ ${g.pbr}
     float a2 = rough * rough * rough * rough;
     float dd = ndh * ndh * (a2 - 1.0) + 1.0;
     float D = a2 / (3.14159265 * dd * dd + 1e-7);
+    if (aniso != 0.0) { D = anisoD(rough, aniso, dot(aT, H), dot(aB, H), ndh); }
     float k = ((rough + 1.0) * (rough + 1.0)) / 8.0;
     float G = (ndv / (ndv * (1.0 - k) + k)) * (ndl / (ndl * (1.0 - k) + k));
     float fp = pow(1.0 - vdh, 5.0);
@@ -662,37 +806,35 @@ ${g.pbr}
     vec3 ef = u.emissive.xyz;
     if (ef.r > 0.0 || ef.g > 0.0 || ef.b > 0.0) {
       vec3 es = vec3(1.0);
-      if (u.texflags.w > 0.5) { es = sampleMap(emisTex, vec2(vUv.x + u.surface1.x, 1.0 - (vUv.y + u.surface1.y))).rgb; }
+      if (u.texflags.w > 0.5) { es = sampleMap(emisTex, vec2(puv.x + u.surface1.x, 1.0 - (puv.y + u.surface1.y))).rgb; }
       emis = ef * es;
     }
 ${g.emis}
 ${reflect ? "    vec3 envSpec = vec3(0.0);\n    vec3 envSeen = vec3(0.0);\n" : ""}    vec3 amb;
+    float coatV = 0.0;
     if (u.envSky.w > 0.5) {
       vec3 irr = envColorDir(N);
-      vec3 R = 2.0 * ndv * N - V;
-      vec3 spec = envColorDir(R);
-      vec3 specAvg = envAverage();
+      // Brushed metal (I4) reflects about a normal bent across its grain.
+      vec3 Rn = N;
+      float rdv = ndv;
+      if (aniso != 0.0) {
+        vec3 ad = aniso > 0.0 ? aB : aT;
+        vec3 an = cross(cross(ad, V), ad);
+        Rn = normalize(mix(N, an, abs(aniso) * min(1.0, 4.0 * rough)));
+        rdv = dot(Rn, V);
+      }
       // Inside a reflection probe's box, reflect the room around it, box-projected
       // (mirrors the software path and the WGSL).
-      int pc = int(u.ssaoMeta.w + 0.5);
-      vec3 P = vWorldPos;
-      for (int i = 0; i < pc; i++) {
-        vec3 mn = probeData[i * 4].xyz;
-        vec3 mx = probeData[i * 4 + 1].xyz;
-        float inside = min(min(min(P.x - mn.x, mx.x - P.x), min(P.y - mn.y, mx.y - P.y)), min(P.z - mn.z, mx.z - P.z));
-        float wgt = clamp(inside / ${PROBE_FADE.toFixed(4)}, 0.0, 1.0);
-        if (wgt > 0.0) {
-          vec3 Rs = mix(R, vec3(1e-6), lessThan(abs(R), vec3(1e-6)));
-          vec3 tf = max((mx - P) / Rs, (mn - P) / Rs);
-          float t = max(0.0, min(min(tf.x, tf.y), tf.z));
-          spec = mix(spec, probeSample(i, P + R * t - probeData[i * 4 + 2].xyz), wgt);
-          specAvg = mix(specAvg, probeData[i * 4 + 3].xyz, wgt);
-          break;
-        }
-      }
-      vec3 pref = mix(spec, specAvg, rough);
+      vec3 pref = envReflect(vWorldPos, 2.0 * rdv * Rn - V, rough);
       amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;
-${reflect ? "      envSpec = pref * f0 * reflectK * ao;\n      envSeen = pref;\n" : ""}    } else {
+${reflect ? "      envSpec = pref * f0 * reflectK * ao;\n      envSeen = pref;\n" : ""}      // The clearcoat (I4) reflects the room sharply about its own normal, and
+      // what it reflects the base beneath no longer receives.
+      if (u.layer0.x > 0.0) {
+        vec3 prefC = envReflect(vWorldPos, 2.0 * ndv * N - V, u.layer0.y);
+        coatV = u.layer0.x * (${CLEARCOAT_F0} + (1.0 - ${CLEARCOAT_F0}) * pow(1.0 - ndv, 5.0));
+        amb = amb * (1.0 - coatV) + coatV * prefC * reflectK * ao;
+${reflect ? "        envSpec = envSpec * (1.0 - coatV) + coatV * prefC * reflectK * ao;\n" : ""}      }
+    } else {
       amb = vec3(u.light.w) * albedo * ao;
     }
 ${reflect ? "    vec3 ambRaw = amb;\n" : ""}    // A baked light map (the second UV set) scales the sky/ambient fill,
@@ -728,6 +870,10 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
         }
       }
       lit = direct + amb + emis;
+    } else if (u.layer0.x > 0.0) {
+      // The clearcoat's own highlight, over a base its Fresnel dims (I4).
+      vec2 c = coatTerm(N, ndv, L, H, vdh);
+      lit = ((kdm * (vec3(1.0) - F) * albedo + F * specD) * ndl * (1.0 - c.y) + vec3(c.x)) * sf + amb + emis;
     } else {
       lit = (kdm * (vec3(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
     }
@@ -744,8 +890,8 @@ ${glslDisplay("without")}
     vec3 seen = envSeen;
     if (u.tonemap.x > 0.5) { seen = vec3(aces(seen.r * u.tonemap.y), aces(seen.g * u.tonemap.y), aces(seen.b * u.tonemap.y)); }
     seen = clamp(seen, vec3(0.0), vec3(1.0));
-    vec3 weight = f0 * reflectK * ao * occl;
-    outReflect = vec4(clamp(mix(weight, contribution / max(seen, vec3(1e-3)), vec3(greaterThan(seen, vec3(0.02)))), vec3(0.0), vec3(1.0)), rough);
+    vec3 weight = (f0 * (1.0 - coatV) + vec3(coatV)) * reflectK * ao * occl;
+    outReflect = vec4(clamp(mix(weight, contribution / max(seen, vec3(1e-3)), vec3(greaterThan(seen, vec3(0.02)))), vec3(0.0), vec3(1.0)), mix(rough, u.layer0.y, u.layer0.x));
     outEnv = vec4(contribution, 1.0);` : ""}
     outColor = finishAlpha(shaded, colour.a);
 ${reflect ? "    if (u.pbr.w > 1.5) { outReflect = vec4(0.0, 0.0, 0.0, outColor.a); outEnv = outReflect; }\n" : ""}    return;
@@ -1101,6 +1247,7 @@ export class WebglSceneRenderer implements SceneRenderer {
           weights: batch.primitive.blend !== undefined,
           textured: batch.textures.blend !== null,
         }),
+        layers: resolveLayers(batch.primitive.material, batch.textures.relief !== null),
       });
     });
     for (const chunk of chunks) {

@@ -18,6 +18,7 @@ import {
 
 import { SoftwareSceneRenderer, type SceneDraw } from "../../packages/player/src/render/sceneRenderer";
 import { graphInstances } from "./graphScenes";
+import { LAYER_ENVIRONMENT, LAYER_LIGHTS, layerInstances } from "./layerScenes";
 import { localShadowRig } from "./localShadowScene";
 import { manyLights } from "./manyLights";
 import { probeRig } from "./probeScene";
@@ -169,6 +170,10 @@ function scenes(): Record<string, Scene> {
     // Material graphs (EP7): noise, fresnel, UV and maths into every PBR input,
     // and a scrolling texture's alpha into a see-through surface's coverage.
     graph: { instances: graphInstances(quad), draw: () => ({ ...baseDraw(), time: 0.7 }) },
+    // Layers and relief (I4): clearcoat, brushed metal, parallax panels and wear masks,
+    // lit by the key light and the environment, then by a list of lights.
+    layers: { instances: layerInstances(quad), draw: () => ({ ...baseDraw(), lightDirection: [0.4, 0.8, 0.6] as [number, number, number], environment: LAYER_ENVIRONMENT }) },
+    layersLit: { instances: layerInstances(quad), draw: () => ({ ...baseDraw(), environment: LAYER_ENVIRONMENT, lights: LAYER_LIGHTS }) },
     // Shield effects (H11): rim, glow and bands within rounding, and the camo dither dropping the very same pixels.
     effects: {
       instances: [
@@ -228,7 +233,7 @@ function cascadeScene(): Scene {
   return { instances, draw: () => ({ ...baseDraw(), view: viewMatrix([0, 7, 8], [0, 0, 0]), lightDirection: [0, 1, 0], shadow }) };
 }
 
-async function run(name: string): Promise<{ drawn: number; differing: number; maxDelta: number; coverage: number; stats: unknown; backend: string; diffs: string[] } | { error: string }> {
+async function run(name: string): Promise<{ drawn: number; differing: number; maxDelta: number; coverage: number; far: number; stats: unknown; backend: string; diffs: string[] } | { error: string }> {
   const scene = scenes()[name];
   if (!scene) return { error: `no scene ${name}` };
   const renderer = WebglSceneRenderer.create(W, H);
@@ -249,11 +254,14 @@ async function run(name: string): Promise<{ drawn: number; differing: number; ma
   let differing = 0;
   let maxDelta = 0;
   let coverage = 0;
+  /** Pixels off by more than 8 in some channel (a parallax step landing on the other side of a texel). */
+  let far = 0;
   const diffs: string[] = [];
   for (let p = 0; p < W * H; p += 1) {
     const a = Array.from(gpu.out.subarray(p * 4, p * 4 + 4));
     const b = Array.from(software.out.subarray(p * 4, p * 4 + 4));
     if (diffs.length < 8 && a.some((v, c) => v !== b[c])) diffs.push(`${p % W},${Math.floor(p / W)} gpu=${a} sw=${b}`);
+    if (a.some((v, c) => Math.abs(v - b[c]!) > 8)) far += 1;
   }
   for (let i = 0; i < W * H * 4; i += 1) {
     if (i % 4 === 0 && (software.out[i]! | software.out[i + 1]! | software.out[i + 2]!) !== 0) drawn += 1;
@@ -266,7 +274,7 @@ async function run(name: string): Promise<{ drawn: number; differing: number; ma
   }
   const stats = renderer.lastFrameStats;
   renderer.dispose();
-  return { drawn, differing, maxDelta, coverage, stats, backend: renderer.backend, diffs };
+  return { drawn, differing, maxDelta, coverage, far, stats, backend: renderer.backend, diffs };
 }
 
 /** The rasteriser the page's WebGL2 runs on (unmasked where the browser allows). */

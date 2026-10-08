@@ -1451,7 +1451,7 @@ export class MeshOverlaySurface implements DisplaySurface {
 
 /** The mesh with each placeholder image whose ref is in `images` filled in (the same mesh when none is). */
 function fillPlaceholders(mesh: MeshAsset, images: ReadonlyMap<string, EncodedImage>): MeshAsset {
-  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage", "blendImage"] as const;
+  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage", "blendImage", "reliefImage"] as const;
   let touched = false;
   const primitives = mesh.primitives.map((primitive) => {
     let material = primitive.material;
@@ -1494,7 +1494,7 @@ async function decodeMeshTextures(
         return entry;
       }),
     );
-  const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightmapTextures, detailTextures, blendTextures] = await Promise.all([
+  const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightmapTextures, detailTextures, blendTextures, reliefTextures] = await Promise.all([
     each((m) => m.baseColorImage), // base colour
     each((m) => m.normalImage), // per-pixel normals (option 2)
     each((m) => m.materialImage), // packed specular/roughness/emissive (option 2, slice 5)
@@ -1509,6 +1509,8 @@ async function decodeMeshTextures(
     each((m) => m.detailImage),
     // The blend surface of a blended primitive (terrain snow over rock).
     each((m) => m.blendImage),
+    // The relief map: parallax height and wear curvature (materialLayers.ts).
+    each((m) => m.reliefImage),
   ]);
   return {
     mesh,
@@ -1521,6 +1523,7 @@ async function decodeMeshTextures(
     ...(lightmapTextures.some((t) => t !== null) ? { lightmapTextures } : {}),
     ...(detailTextures.some((t) => t !== null) ? { detailTextures } : {}),
     ...(blendTextures.some((t) => t !== null) ? { blendTextures } : {}),
+    ...(reliefTextures.some((t) => t !== null) ? { reliefTextures } : {}),
   };
 }
 

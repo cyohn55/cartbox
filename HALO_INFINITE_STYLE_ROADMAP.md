@@ -100,11 +100,38 @@ What separates Lockout from Halo Infinite, seen in a match:
       but the floor changes, and the floor nearest the camera, whose rays
       leave the screen, keeps its probe reflection. Lockout's deck plates
       are polished (roughness 0.35) so the towers and soldiers show in them.
-- [ ] **I4. Material upgrades.** Clearcoat (a glossy layer over paint, for
+- [x] **I4. Material upgrades.** Clearcoat (a glossy layer over paint, for
       armour and visors), anisotropic highlights (brushed metal), parallax
       occlusion (depth in panel seams without geometry), and wear masks in the
       material graph (edges and cavities from a baked curvature map).
       *Lockout:* chipped edges on the walls, a lacquered armour finish.
+      *Done:* `MeshMaterial` gains `clearcoat` and `clearcoatRoughness`,
+      `anisotropy` and `anisotropyRotation`, and a relief map (`reliefImage`:
+      height in R, curvature in G) with a `parallaxDepth` in world units, all
+      stored and read defensively (`materialLayers.ts`) and carried to and from
+      glTF as `KHR_materials_clearcoat` and `KHR_materials_anisotropy`. The
+      software rasteriser and both GPU shaders shade them term for term: a
+      second GGX lobe for the coat about the geometric normal (over normal-
+      mapped bumps), its Fresnel dimming the base and its own sharp reflection
+      of the sky and probes; Burley's anisotropic GGX along the UV gradient
+      laid in the surface, with the reflection bent across the grain; and a
+      16-layer parallax march into the relief that moves every map's UVs.
+      The CPU takes each triangle's exact UV gradients, the GPU the screen
+      derivatives. The material graph gains a *Curvature* input and a *Wear
+      mask* node (edges or cavities, an amount, a sharpness and a breakup
+      input), with an *Add edge wear* button and a *Worn edges* preset that
+      chip whatever drives the colour to bare metal and settle grime in the
+      seams. WebGL2 guarantees 16 texture units and the scene shader binds 16,
+      so the relief rides in the occlusion map's G and B rather than a unit
+      of its own (`occlusionWithRelief`); the uniform struct grows to 800
+      bytes (stride 1024). The Material panel has Clearcoat, Brushed metal and
+      Relief sections with a built-in panel relief. Tested against the
+      software rasteriser on real WebGPU (Dawn on lavapipe) and Chromium
+      WebGL2 with the key light and with a light list: within 1 of the
+      software frame in every channel on both. Lockout's walls bake a relief
+      from the height their normal map comes from and chip along their rims,
+      the soldiers' paint and the first-person sleeves are lacquered, the
+      visor is coated, and the weapons' gunmetal is brushed.
 - [ ] **I5. Refraction and distortion.** A pass that bends what's behind a
       surface: glass, plasma, shield shimmer, active camouflage, heat haze.
       *Lockout:* the shield flare and the sword's blade warp the view behind

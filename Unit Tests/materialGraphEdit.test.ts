@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import { compileGraph, readMaterialGraph, type MaterialGraph } from "@cartbox/editor";
 
-import { GRAPH_PRESETS, addNode, connect, disconnect, freeSpot, inputPort, moveNode, outputAt, outputPort, removeNode, renderGraphPreview, setOutput, setParams, starterGraph, NODE_HEADER, NODE_ROW, NODE_WIDTH } from "@/lib/materialGraphEdit";
+import { GRAPH_PRESETS, addNode, connect, disconnect, freeSpot, inputPort, moveNode, outputAt, outputPort, removeNode, renderGraphPreview, setOutput, setParams, starterGraph, wornEdgesGraph, NODE_HEADER, NODE_ROW, NODE_WIDTH } from "@/lib/materialGraphEdit";
 
 describe("editing", () => {
   it("adds nodes with fresh ids and default params, and moves them", () => {
@@ -87,6 +87,37 @@ describe("starter graphs", () => {
       for (const node of graph.nodes) for (const from of Object.values(node.inputs ?? {})) expect(ids.has(from!), `${name}: ${node.id}`).toBe(true);
       expect(compileGraph(readMaterialGraph(JSON.parse(JSON.stringify(graph))))!.key, name).toBe(compiled!.key);
     }
+  });
+});
+
+describe("edge wear (I4)", () => {
+  it("wears whatever drove the base colour, and keeps the rest of the graph", () => {
+    const tinted: MaterialGraph = {
+      nodes: [
+        { id: "base", op: "baseColor", x: 0, y: 0 },
+        { id: "tint", op: "constant", params: { value: [1, 0.5, 0.5] }, x: 0, y: 80 },
+        { id: "mul", op: "multiply", inputs: { a: "base", b: "tint" }, x: 200, y: 40 },
+        { id: "r", op: "constant", params: { value: 0.3 }, x: 0, y: 160 },
+      ],
+      outputs: { baseColor: "mul", roughness: "r" },
+    };
+    const worn = wornEdgesGraph(tinted);
+    expect(worn.outputs.roughness).toBe("r");
+    const out = worn.nodes.find((n) => n.id === worn.outputs.baseColor)!;
+    expect(out.op).toBe("multiply");
+    const chipped = worn.nodes.find((n) => n.id === out.inputs!.a)!;
+    expect(chipped.inputs!.a).toBe("mul"); // the old colour is what wears
+    expect(worn.nodes.filter((n) => n.op === "wear").map((n) => n.params!.side).sort()).toEqual(["cavity", "edge"]);
+    expect(Math.min(...worn.nodes.filter((n) => !tinted.nodes.some((t) => t.id === n.id)).map((n) => n.x!))).toBeGreaterThan(200);
+    // Stored and read back, it compiles with every node reaching the output.
+    const compiled = compileGraph(readMaterialGraph(JSON.parse(JSON.stringify(worn))))!;
+    expect(compiled.steps.filter((s) => s.op === "wear")).toHaveLength(2);
+  });
+
+  it("starts from the material's own colour without a graph", () => {
+    const worn = wornEdgesGraph(undefined);
+    expect(worn.nodes.filter((n) => n.op === "baseColor")).toHaveLength(1);
+    expect(compileGraph(worn)!.outputs.baseColor).toBeDefined();
   });
 });
 

@@ -51,6 +51,8 @@ interface Parity {
   drawn: number;
   differing: number;
   maxDelta: number;
+  /** Pixels off by more than 8 in some channel. */
+  far: number;
   /** Pixels one side drew and the other didn't. */
   coverage: number;
   stats: { drawCalls: number; instances: number; triangles: number; gpuMs: number | null };
@@ -218,6 +220,20 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     if (exact) {
       expect(result.coverage, JSON.stringify(result.diffs)).toBe(0);
       expect(result.maxDelta).toBeLessThanOrEqual(6);
+    }
+  });
+
+  it("shades clearcoat, brushed metal, parallax relief and wear masks like the software rasteriser (I4)", async () => {
+    for (const name of ["layers", "layersLit"]) {
+      const result = await run(name);
+      expect(result.drawn, name).toBeGreaterThan(400);
+      if (exact) {
+        expect(result.coverage, JSON.stringify(result.diffs)).toBe(0);
+        // The parallax march steps by the screen's UV derivatives on the GPU and
+        // the triangle's exact gradients on the CPU, so a step can land on the
+        // other side of a relief texel: a few pixels may differ, the rest match.
+        expect(result.far, JSON.stringify(result.diffs)).toBeLessThanOrEqual(result.drawn * 0.03);
+      }
     }
   });
 

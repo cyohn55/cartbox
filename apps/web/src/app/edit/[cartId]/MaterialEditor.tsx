@@ -20,15 +20,18 @@
 import { useState } from "react";
 
 import {
+  DEFAULT_CLEARCOAT_ROUGHNESS,
   DEFAULT_DETAIL_SCALE,
   DEFAULT_DETAIL_STRENGTH,
+  PARALLAX_MAX_DEPTH,
   builtinDetailGrain,
+  builtinPanelRelief,
   updateMeshMaterial,
   type MeshAsset,
   type MeshMaterial,
 } from "@cartbox/editor";
 
-import { starterGraph } from "@/lib/materialGraphEdit";
+import { starterGraph, wornEdgesGraph } from "@/lib/materialGraphEdit";
 import styles from "./editor.module.css";
 import { GraphEditor } from "./GraphEditor";
 import { RailGroup, RailHint, RangeControl, SegmentedControl } from "./railControls";
@@ -232,6 +235,7 @@ export function MaterialEditor({ mesh, onChange }: MaterialEditorProps) {
       />
 
       <SurfaceEffects material={material} patch={patch} />
+      <MaterialLayers material={material} patch={patch} onWear={() => setGraphOpen(true)} />
 
       <RailHint>Metallic-roughness PBR — used by the Modern render tier. Capped tiers ignore these and render unchanged.</RailHint>
     </RailGroup>
@@ -334,6 +338,83 @@ function SurfaceEffects({ material, patch }: { material: MeshMaterial; patch: (c
           ]}
         />
       )}
+    </>
+  );
+}
+
+/**
+ * Layers and relief (HALO_INFINITE_STYLE_ROADMAP.md I4): a glossy clearcoat over
+ * the base, brushed-metal anisotropy, and a relief map whose height gives panel
+ * seams depth (parallax) and whose curvature drives the graph's wear masks.
+ */
+function MaterialLayers({ material, patch, onWear }: { material: MeshMaterial; patch: (change: Partial<MeshMaterial>) => void; onWear: () => void }) {
+  const coat = material.clearcoat ?? 0;
+  const aniso = material.anisotropy ?? 0;
+  const turn = Math.round(((material.anisotropyRotation ?? 0) * 180) / Math.PI);
+  const reliefOn = !!material.reliefImage;
+  const depth = material.parallaxDepth ?? 0;
+  return (
+    <>
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Clearcoat</div>
+      <RangeControl label="Coat" nested min={0} max={1} step={0.05} value={coat} ariaLabel="Clearcoat" display={coat > 0 ? coat.toFixed(2) : "none"} onChange={(value) => patch({ clearcoat: value > 0 ? value : undefined })} />
+      {coat > 0 && (
+        <RangeControl
+          label="Coat roughness"
+          nested
+          min={0}
+          max={1}
+          step={0.01}
+          value={material.clearcoatRoughness ?? DEFAULT_CLEARCOAT_ROUGHNESS}
+          ariaLabel="Clearcoat roughness"
+          display={(material.clearcoatRoughness ?? DEFAULT_CLEARCOAT_ROUGHNESS).toFixed(2)}
+          onChange={(value) => patch({ clearcoatRoughness: value })}
+        />
+      )}
+
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Brushed metal</div>
+      <RangeControl label="Anisotropy" nested min={-1} max={1} step={0.05} value={aniso} ariaLabel="Anisotropy" display={aniso !== 0 ? aniso.toFixed(2) : "round"} onChange={(value) => patch({ anisotropy: value !== 0 ? value : undefined })} />
+      {aniso !== 0 && (
+        <RangeControl label="Grain direction" nested min={-180} max={180} step={5} value={turn} ariaLabel="Anisotropy direction" display={`${turn}°`} onChange={(deg) => patch({ anisotropyRotation: deg !== 0 ? (deg * Math.PI) / 180 : undefined })} />
+      )}
+
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Relief</div>
+      <SegmentedControl
+        label="Relief"
+        ariaLabel="Relief map"
+        selected={reliefOn ? "on" : "off"}
+        onSelect={(id) => patch(id === "on" ? { reliefImage: builtinPanelRelief() } : { reliefImage: undefined, parallaxDepth: undefined })}
+        options={[
+          { id: "off", label: "Off" },
+          { id: "on", label: "Panels" },
+        ]}
+      />
+      {reliefOn && (
+        <>
+          <RangeControl
+            label="Depth"
+            nested
+            min={0}
+            max={PARALLAX_MAX_DEPTH}
+            step={0.005}
+            value={depth}
+            ariaLabel="Parallax depth"
+            display={depth > 0 ? `${depth.toFixed(3)} m` : "flat"}
+            onChange={(value) => patch({ parallaxDepth: value > 0 ? value : undefined })}
+          />
+          <button
+            type="button"
+            className={styles.toolBtn}
+            title="Wire the relief's curvature into the material graph: the colour worn to bare metal on its edges, broken up by noise, and grime in its cavities"
+            onClick={() => {
+              patch({ graph: wornEdgesGraph(material.graph) });
+              onWear();
+            }}
+          >
+            ◇ Add edge wear
+          </button>
+        </>
+      )}
+      <RailHint>A relief map&apos;s height gives seams depth; its curvature feeds the graph&apos;s wear masks.</RailHint>
     </>
   );
 }
