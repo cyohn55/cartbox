@@ -19,6 +19,7 @@ import {
 import { SoftwareSceneRenderer, type SceneDraw } from "../../packages/player/src/render/sceneRenderer";
 import { graphInstances } from "./graphScenes";
 import { LAYER_ENVIRONMENT, LAYER_LIGHTS, layerInstances } from "./layerScenes";
+import { REFRACTION_TIME, refractionInstances, straightInstances } from "./refractionScenes";
 import { localShadowRig } from "./localShadowScene";
 import { manyLights } from "./manyLights";
 import { probeRig } from "./probeScene";
@@ -174,6 +175,10 @@ function scenes(): Record<string, Scene> {
     // lit by the key light and the environment, then by a list of lights.
     layers: { instances: layerInstances(quad), draw: () => ({ ...baseDraw(), lightDirection: [0.4, 0.8, 0.6] as [number, number, number], environment: LAYER_ENVIRONMENT }) },
     layersLit: { instances: layerInstances(quad), draw: () => ({ ...baseDraw(), environment: LAYER_ENVIRONMENT, lights: LAYER_LIGHTS }) },
+    // Refraction (I5): glass, heat haze, camo and a flaring shield over a striped wall,
+    // and the same without their bend (to see that the bend happened).
+    refraction: { instances: refractionInstances(quad), draw: () => ({ ...baseDraw(), background: [20, 20, 30, 255] as [number, number, number, number], time: REFRACTION_TIME }) },
+    refractionStraight: { instances: straightInstances(quad), draw: () => ({ ...baseDraw(), background: [20, 20, 30, 255] as [number, number, number, number], time: REFRACTION_TIME }) },
     // Shield effects (H11): rim, glow and bands within rounding, and the camo dither dropping the very same pixels.
     effects: {
       instances: [
@@ -343,6 +348,12 @@ async function frameOf(name: string, antialias: boolean): Promise<{ out: Uint8Cl
  * pixel unlike one of its neighbours), and an edge pixel it changes must land
  * between the colours either side of that edge.
  */
+/** A scene's newest GPU frame, as a plain array (to cross into the test), and any GL error. */
+async function runFrame(name: string, antialias: boolean): Promise<{ out: number[]; error: number }> {
+  const frame = await frameOf(name, antialias);
+  return "out" in frame ? { out: Array.from(frame.out), error: frame.error } : { out: [], error: -1 };
+}
+
 async function runAntialias(name: string): Promise<{ changed: number; offEdge: number; outside: number; drawn: number; errors: number[] } | { error: string }> {
   const plain = await frameOf(name, false);
   const smooth = await frameOf(name, true);
@@ -439,6 +450,7 @@ async function runReflections(extra: Partial<SceneDraw>): Promise<{ report: Refl
 (globalThis as unknown as { runReflections: typeof runReflections }).runReflections = runReflections;
 (globalThis as unknown as { runTemporal: typeof runTemporal }).runTemporal = runTemporal;
 (globalThis as unknown as { runAntialias: typeof runAntialias }).runAntialias = runAntialias;
+(globalThis as unknown as { runFrame: typeof runFrame }).runFrame = runFrame;
 (globalThis as unknown as { settleOnce: typeof settleOnce }).settleOnce = settleOnce;
 (globalThis as unknown as { runParity: typeof run; glRenderer: typeof glRenderer }).runParity = run;
 (globalThis as unknown as { glRenderer: typeof glRenderer }).glRenderer = glRenderer;

@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, SceneFog, RasterStyle, ResolvedLayers, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, SceneFog, RasterStyle, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -3576,6 +3576,23 @@ declare class WebglSceneRenderer implements SceneRenderer {
      * Units 0–2 are borrowed; every frame binds its own textures and samplers there.
      */
     private resolveTemporal;
+    /**
+     * The opaque scene for refraction (I5): its colour blitted into an RGBA8
+     * texture, then packed with the depth copy into one RGBA32F texture — R the
+     * depth (so soft edges read it as before), G the 8-bit RGB as one exact
+     * integer, or -1 where the scene drew nothing. One texture, because the scene
+     * shader already uses all sixteen units WebGL2 guarantees, and the soft edges'
+     * unit is the one free in the see-through pass. Made on first use; false
+     * without float render targets (EXT_color_buffer_float).
+     */
+    private sceneCopy;
+    private ensureSceneCopy;
+    /**
+     * Pack the opaque scene for refraction (after {@link copySceneDepth}, whose
+     * depth it reads on the soft edges' unit) and bind the result there, leaving
+     * the frame's framebuffer bound. The caller puts its own program back.
+     */
+    private packScene;
     /** Copy this frame's depth into {@link sceneDepth} and bind it, leaving the frame's framebuffer bound. */
     private copySceneDepth;
     private ensureCapacity;
@@ -3925,9 +3942,13 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  *                                    w = parallax depth (0 = none) (I4)
  * 784  layer1     vec4<f32>    16   xy = anisotropy rotation's cos and sin,
  *                                    z = 1 when a relief map rides in the occlusion map's G and B
+ * 800  refract0   vec4<f32>    16   x = bend, y = warp, z = silhouette distortion,
+ *                                    w = 1 when the draw refracts (I5; refraction.ts)
+ * 816  refract1   vec4<f32>    16   xyz = the camera's right (world), w = frame height (px)
+ * 832  refract2   vec4<f32>    16   xyz = the camera's up (world)
  * ```
  *
- * 800 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
+ * 848 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -3942,7 +3963,7 @@ declare const UNIFORM_STRIDE = 1024;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 800;
+declare const UNIFORM_BYTES_USED = 848;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
@@ -4024,10 +4045,13 @@ interface PbrMaterial {
     readonly emissiveFactor?: readonly [number, number, number];
     /** A material graph (EP7) always takes the PBR path. */
     readonly graph?: unknown;
-    /** So do a clearcoat, anisotropy and a parallax relief (I4). */
+    /** So do a clearcoat, anisotropy and a parallax relief (I4)… */
     readonly clearcoat?: number;
     readonly anisotropy?: number;
     readonly parallaxDepth?: number;
+    /** …and refraction (I5). */
+    readonly refraction?: number;
+    readonly distortion?: number;
 }
 /**
  * Resolve a draw's PBR inputs, matching `buildPbrFrag`. `hasMr`/`hasOcc`/`hasEmis`
@@ -4114,6 +4138,14 @@ interface InstanceUniform {
     readonly surface?: ResolvedSurface;
     /** This draw's clearcoat, anisotropy and relief (I4; see materialLayers.ts in @cartbox/editor), or omitted for none. */
     readonly layers?: ResolvedLayers;
+    /** How this draw bends what's behind it (I5; refraction.ts in @cartbox/editor), or null/omitted when it doesn't. */
+    readonly refraction?: ResolvedRefraction | null;
+    /** The camera's right and up and the frame's height, which a refraction's offset is measured by. */
+    readonly camera?: {
+        readonly right: readonly [number, number, number];
+        readonly up: readonly [number, number, number];
+        readonly height: number;
+    } | null;
     /** Fog for PBR draws (distance, height, volumes, sun glow), or null/omitted for none. */
     readonly fog?: SceneFog | null;
     /** The eye in world space — height and volume fog trace the ray from it. */

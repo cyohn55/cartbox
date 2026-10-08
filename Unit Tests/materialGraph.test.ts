@@ -232,10 +232,10 @@ describe("shader code", () => {
   it("splices a graph into the scene shader only where one is used", () => {
     expect(sceneShader()).not.toContain("gMetal");
     const marble = sceneShader(compileGraph(MARBLE));
-    expect(marble).toContain("fn gNoise(");
     expect(marble).toContain("gMetal = clamp(");
     expect(marble).toContain("if (gEmis.x >= 0.0) { emis = gEmis; }");
-    expect(sceneShader(compileGraph(SCROLL))).not.toContain("fn gNoise(");
+    // The noise functions are in every scene shader (refraction's warp uses them, I5), once.
+    for (const code of [sceneShader(), marble, sceneShader(compileGraph(SCROLL))]) expect(code.split("fn gNoise(").length).toBe(2);
   });
 });
 

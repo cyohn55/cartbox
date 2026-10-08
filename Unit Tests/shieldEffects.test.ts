@@ -215,7 +215,8 @@ describe("GPU uniforms and batching", () => {
 
   it("batches copies with an effect apart from plain ones, and together when they share it", () => {
     const mesh = quad(PBR);
-    const fx = shieldEffect(1, 0, 0);
+    // A rim and glow alone: an effect that bends nothing, so its copies instance together.
+    const fx: SurfaceEffect = { rim: [1, 0.8, 0.2], glow: [0.2, 0.1, 0] };
     const geometryOf = (m: MeshAsset) => m.primitives.map(() => ({ indexCount: 6 }));
     const copies = (effects: (SurfaceEffect | null)[]): MeshSceneInstance[] => effects.map((effect) => ({ mesh, model: IDENTITY, effect }));
     const split = batchInstances(copies([null, fx, null, fx]), geometryOf);
@@ -224,6 +225,18 @@ describe("GPU uniforms and batching", () => {
       [fx, 2],
     ]);
     expect(batchInstances(copies([null, null]), geometryOf).batches).toHaveLength(1);
+  });
+
+  it("draws a flaring shield's copies after the opaque scene, each on its own, because they bend what's behind them (I5)", () => {
+    const mesh = quad(PBR);
+    const flare = shieldEffect(1, 0, 0);
+    const geometryOf = (m: MeshAsset) => m.primitives.map(() => ({ indexCount: 6 }));
+    const { batches } = batchInstances([null, flare, null, flare].map((effect) => ({ mesh, model: IDENTITY, effect })), geometryOf);
+    expect(batches.map((b) => [b.effect, b.models.length, b.refract])).toEqual([
+      [null, 2, false],
+      [flare, 1, true],
+      [flare, 1, true],
+    ]);
   });
 });
 

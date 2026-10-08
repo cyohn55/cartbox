@@ -183,12 +183,38 @@ export function MaterialEditor({ mesh, onChange }: MaterialEditorProps) {
           onChange={(value) => patch({ softDepth: value > 0 ? value : undefined })}
         />
       )}
+      {(material.alphaMode === "blend" || material.alphaMode === "additive") && (
+        <>
+          <RangeControl
+            label="Refraction"
+            nested
+            min={0}
+            max={1}
+            step={0.05}
+            value={material.refraction ?? 0}
+            ariaLabel="Refraction"
+            display={material.refraction ? material.refraction.toFixed(2) : "none"}
+            onChange={(value) => patch({ refraction: value > 0 ? value : undefined })}
+          />
+          <RangeControl
+            label="Shimmer"
+            nested
+            min={0}
+            max={1}
+            step={0.05}
+            value={material.distortion ?? 0}
+            ariaLabel="Shimmer"
+            display={material.distortion ? material.distortion.toFixed(2) : "none"}
+            onChange={(value) => patch({ distortion: value > 0 ? value : undefined })}
+          />
+        </>
+      )}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         <button
           type="button"
           className={styles.toolBtn}
           title="Clear, glossy and reflective"
-          onClick={() => patch({ alphaMode: "blend", alphaCutoff: undefined, softDepth: undefined, baseColorFactor: [0.85, 0.93, 1, 0.22], metallicFactor: 0, roughnessFactor: 0.04, reflectivity: 1.6 })}
+          onClick={() => patch({ alphaMode: "blend", alphaCutoff: undefined, softDepth: undefined, baseColorFactor: [0.85, 0.93, 1, 0.22], metallicFactor: 0, roughnessFactor: 0.04, reflectivity: 1.6, refraction: 0.5, distortion: undefined })}
         >
           Glass
         </button>
@@ -199,6 +225,14 @@ export function MaterialEditor({ mesh, onChange }: MaterialEditorProps) {
           onClick={() => patch({ alphaMode: "blend", alphaCutoff: undefined, softDepth: 0.6, baseColorFactor: [0.1, 0.38, 0.5, 0.7], metallicFactor: 0, roughnessFactor: 0.08, reflectivity: 1.2 })}
         >
           Water
+        </button>
+        <button
+          type="button"
+          className={styles.toolBtn}
+          title="Faint and additive, shimmering whatever is behind it (a vent, an engine, a plasma blade's heat)"
+          onClick={() => patch({ alphaMode: "additive", alphaCutoff: undefined, softDepth: 0.4, baseColorFactor: [0.06, 0.04, 0.02, 1], metallicFactor: 0, roughnessFactor: 1, refraction: undefined, distortion: 0.6 })}
+        >
+          Heat haze
         </button>
       </div>
 

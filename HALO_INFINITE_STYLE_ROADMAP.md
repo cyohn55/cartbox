@@ -132,10 +132,36 @@ What separates Lockout from Halo Infinite, seen in a match:
       from the height their normal map comes from and chip along their rims,
       the soldiers' paint and the first-person sleeves are lacquered, the
       visor is coated, and the weapons' gunmetal is brushed.
-- [ ] **I5. Refraction and distortion.** A pass that bends what's behind a
+- [x] **I5. Refraction and distortion.** A pass that bends what's behind a
       surface: glass, plasma, shield shimmer, active camouflage, heat haze.
       *Lockout:* the shield flare and the sword's blade warp the view behind
       them.
+      *Done:* `MeshMaterial` gains `refraction` (a bend by the surface normal
+      seen from the camera) and `distortion` (a warp of drifting value noise),
+      and a surface effect gains `distort`, which a shield's flare and recharge
+      now carry (`refraction.ts`). Every renderer keeps the opaque scene and
+      lets a refracting fragment read it at its own pixel pushed by the offset:
+      a blended surface lays its colour over the bent view, an added one adds to
+      it, a shield lets it through at its silhouette, and Active Camo's dropped
+      pixels show it instead of the view straight behind. A nearer object is
+      never pulled in: the pushed pixel counts only if the scene drew it behind
+      the surface. The software rasteriser snapshots its frame as the
+      see-through triangles begin. WebGPU copies the colour target (or resolves
+      it, anti-aliased) between its two passes and binds it beside the depth it
+      already reads for soft edges. WebGL2 has no free texture unit, so it packs
+      the colour into the soft edges' depth copy: an RGBA32F texture with the
+      depth in R and the 8-bit RGB as one exact integer in G. Refracting draws
+      batch after the opaque scene, farthest first, covering what they bend.
+      Drawn over what was already there, the software path also bends pixels it
+      didn't draw, which is how the first-person sword on the front layer bends
+      the scene. The GPU renderers bend only what they drew. The Material panel
+      has Refraction and Shimmer for see-through materials and a Heat haze
+      preset; Glass now bends. Tested against the software rasteriser on real
+      WebGPU (Dawn on lavapipe) and Chromium WebGL2, including anti-aliased
+      frames: within 1 of the software frame in every channel on both.
+      *Lockout:* the energy sword has a faint additive sheath that bends and
+      shimmers the view round its blade, and a shield's flare and recharge warp
+      the scene at the body's edge. Active Camo's bend comes with the effect.
 
 ## Phase B — World and sky
 

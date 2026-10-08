@@ -70,6 +70,12 @@ import {
   PARALLAX_MIN_NDV,
   PARALLAX_STEPS,
   resolveLayers,
+  DISTORTION_FREQUENCY,
+  DISTORTION_SPEED,
+  EFFECT_DISTORT_POWER,
+  REFRACTION_SCALE,
+  effectActive,
+  resolveRefraction,
   LIGHTMAP_RANGE,
   MAX_REFLECTION_PROBES,
   PROBE_FADE,
@@ -97,7 +103,6 @@ import {
   orderLights,
   graphNoiseSource,
   graphShaderCode,
-  graphUsesNoise,
   multiplyMat4,
   type CompiledGraph,
   type DecodedTexture,
@@ -134,6 +139,7 @@ import {
   writeInstanceUniform,
   INSTANCE_FLOATS,
   writeInstanceTransform,
+  refractionCamera,
 } from "./scenePacking.js";
 
 /** One shader variant's pipelines: opaque, blended and added (EP6). */
@@ -180,7 +186,8 @@ function graphSites(graph: CompiledGraph | null): { fns: string; base: string; p
     out.emissive !== undefined ? `gEmis = max(g${out.emissive}, vec3<f32>(0.0));` : "",
   ].filter(Boolean);
   return {
-    fns: graphUsesNoise(graph) ? graphNoiseSource("wgsl") : "",
+    // The noise functions are always in the shader (refraction's warp uses them, I5).
+    fns: "",
     base: `  // The material graph (EP7).
   var gMetal = -1.0;
   var gRough = -1.0;
@@ -287,6 +294,9 @@ struct Uniforms {
   effect1: vec4<f32>,   // rgb = surface effect bands, w = time
   layer0: vec4<f32>,    // x = clearcoat, y = its roughness, z = anisotropy, w = parallax depth (I4)
   layer1: vec4<f32>,    // xy = anisotropy rotation (cos, sin), z = 1 when the relief rides in occTex's G and B
+  refract0: vec4<f32>,  // x = bend, y = warp, z = silhouette distortion, w = 1 when the draw refracts (I5)
+  refract1: vec4<f32>,  // xyz = camera right (world), w = frame height (px)
+  refract2: vec4<f32>,  // xyz = camera up (world)
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -376,6 +386,9 @@ struct Probe {
 @group(1) @binding(5) var<storage, read> shadowTiles: array<ShadowTile>;
 // Light probes (EP9): the grid as a 3D texture, face f's probes at x = f · nx + probe x.
 @group(1) @binding(6) var probeGrid: texture_3d<f32>;
+// The opaque scene's colour (I5), copied as the see-through pass begins — what a
+// refracting surface bends (a 1×1 blank in the opaque pass, which never reads it).
+@group(1) @binding(7) var sceneColour: texture_2d<f32>;
 
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] — fogLayerDepth in skyDome.ts.
@@ -765,7 +778,49 @@ fn vs(
   return out;
 }
 
-${g.fns}
+${graphNoiseSource("wgsl")}
+// --- Refraction (HALO_INFINITE_STYLE_ROADMAP.md I5; refraction.ts) ---
+// The offset in pixels at a fragment with geometric normal N (facing the
+// viewer) at world point P — refractionOffset, term for term.
+fn refractOffset(N: vec3<f32>, P: vec3<f32>) -> vec2<f32> {
+  var w = vec2<f32>(0.0);
+  let warp = u.refract0.y + u.refract0.z;
+  if (warp > 0.0) {
+    let f = ${DISTORTION_FREQUENCY.toFixed(1)};
+    let qy = P.y * f - u.effect1.w * ${DISTORTION_SPEED.toFixed(4)};
+    w = vec2<f32>(2.0 * gNoise1(vec3<f32>(P.x * f, qy, P.z * f)) - 1.0, 2.0 * gNoise1(vec3<f32>(P.x * f + 17.0, qy + 31.0, P.z * f + 47.0)) - 1.0) * warp;
+  }
+  let k = ${REFRACTION_SCALE.toFixed(4)} * u.refract1.w;
+  return vec2<f32>(u.refract0.x * dot(N, u.refract1.xyz) + w.x, -u.refract0.x * dot(N, u.refract2.xyz) + w.y) * k;
+}
+// What a refracting fragment at screen point frag, depth z, sees (rgb, a = 1
+// when it sees anything) — refractedPixel: the pushed pixel when the opaque
+// scene drew it behind the fragment, else the pixel straight behind.
+fn behindColour(frag: vec2<f32>, z: f32, off: vec2<f32>) -> vec4<f32> {
+  let dims = vec2<f32>(textureDimensions(sceneColour, 0));
+  let s = vec2<i32>(clamp(floor(frag + off), vec2<f32>(0.0), dims - vec2<f32>(1.0)));
+  let c = textureLoad(sceneColour, s, 0);
+  if (c.a > 0.5 && textureLoad(sceneDepth, s, 0) >= z) { return vec4<f32>(c.rgb, 1.0); }
+  let o = textureLoad(sceneColour, vec2<i32>(floor(frag)), 0);
+  if (o.a > 0.5) { return vec4<f32>(o.rgb, 1.0); }
+  return vec4<f32>(0.0);
+}
+// The geometric normal facing the viewer (refraction bends by it, as the CPU does).
+fn facingNormal(n: vec3<f32>) -> vec3<f32> {
+  let g = normalize(n);
+  return select(g, -g, dot(g, u.view.xyz) < 0.0);
+}
+// A refracting surface over what it bends: under a blend, added to by an
+// addition, or let through at a shield's silhouette — finishAlpha with the
+// bent scene for the destination, so the pixel ends covered.
+fn finishRefracted(rgb: vec3<f32>, a: f32, bg: vec3<f32>, N: vec3<f32>) -> vec4<f32> {
+  let c = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+  if (u.pbr.w > 2.5) { return vec4<f32>(c * a + bg, 1.0); }
+  if (u.pbr.w > 1.5) { return vec4<f32>(c * a + bg * (1.0 - a), 1.0); }
+  let t = u.refract0.z * pow(1.0 - max(0.0, dot(N, u.view.xyz)), ${EFFECT_DISTORT_POWER.toFixed(4)});
+  return vec4<f32>(mix(c, bg, t), 1.0);
+}
+
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4<f32> {
   // The surface's screen derivatives, for the UV gradients parallax and
@@ -806,7 +861,13 @@ ${g.base}
 
   if (u.pbr.z > 0.5) {
     // Active Camo (H11): screen-door transparency, as the rasteriser drops pixels.
-    if (u.effect0.w > 0.0 && camoThreshold(in.pos.xy, u.effect1.w) < u.effect0.w) { discard; }
+    // …its dropped pixels showing the scene behind, bent (I5). Kept, not
+    // returned, here: the samples below must stay in uniform control flow.
+    var camoSeen = vec4<f32>(0.0);
+    if (u.effect0.w > 0.0 && camoThreshold(in.pos.xy, u.effect1.w) < u.effect0.w) {
+      if (u.refract0.w > 0.5) { camoSeen = behindColour(in.pos.xy, in.pos.z, refractOffset(facingNormal(in.normal), in.worldPos)); }
+      if (camoSeen.a < 0.5) { discard; }
+    }
     // --- Modern tier: metallic-roughness BRDF (Cook-Torrance) ---
     // Mirrors the software rasteriser's PBR branch (meshRasterizer.ts) term for
     // term, in the engine's non-linear byte space (a linear/HDR pipeline is a
@@ -970,6 +1031,13 @@ ${wgslDisplay("without")}
     let weight = (f0 * (1.0 - coatV) + vec3<f32>(coatV)) * reflectK * ao * occl;
     reflectOut = vec4<f32>(clamp(select(weight, contribution / max(seen, vec3<f32>(1e-3)), seen > vec3<f32>(0.02)), vec3<f32>(0.0), vec3<f32>(1.0)), mix(rough, u.layer0.y, u.layer0.x));
     envOut = vec4<f32>(contribution, 1.0);` : ""}
+    // Refraction (I5): what's behind is the opaque scene, bent.
+    if (camoSeen.a > 0.5) { return vec4<f32>(camoSeen.rgb, 1.0); }
+    if (u.refract0.w > 0.5) {
+      let rn = facingNormal(in.normal);
+      let b = behindColour(in.pos.xy, in.pos.z, refractOffset(rn, in.worldPos));
+      if (b.a > 0.5) { return finishRefracted(shaded, colour.a, b.rgb, rn); }
+    }
     return finishAlpha(shaded, colour.a);
   }
 
@@ -1121,6 +1189,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       blank: any;
       scene: any;
       readonly blankTexture: any;
+      /** The opaque scene's colour for refraction (I5), the size of the frame, and its 1×1 stand-in. */
+      readonly behind: any;
+      readonly behindBlank: any;
       readonly clusters: { readonly table: any; readonly index: any; readonly params: any };
       readonly shadowTiles: any;
       atlas: any;
@@ -1274,6 +1345,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
         { binding: 5, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+        // The opaque scene's colour, for refraction (I5).
+        { binding: 7, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
       ];
       const depthLayout = device.createBindGroupLayout({ entries: depthEntries(false) });
       const depthLayoutMs = device.createBindGroupLayout({ entries: depthEntries(true) });
@@ -1351,6 +1424,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const shadowTiles = device.createBuffer({ size: MAX_LOCAL_SHADOW_TILES * 80, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
       const atlasBlank = device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: 0x04 | 0x02 });
       const probesBlank = device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: "rgba32float", usage: 0x04 | 0x02 });
+      // Refraction (I5): the opaque scene's colour, copied (or resolved) into this as the
+      // see-through pass begins; a 1×1 blank stands in for it in the opaque pass.
+      const behind = device.createTexture({ size: { width, height }, format: "rgba8unorm", usage: 0x04 | 0x02 | 0x10 }); // TEXTURE_BINDING | COPY_DST | RENDER_ATTACHMENT (a resolve target)
+      const behindBlank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: 0x04 | 0x02 });
       const makeGroups = (atlas: any, probes: any) => {
         const shared = [
           { binding: 1, resource: { buffer: clusterBuffers.table } },
@@ -1361,8 +1438,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 6, resource: probes.createView({ dimension: "3d" }) },
         ];
         return {
-          blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared] }),
-          scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: depthTexture.createView() }, ...shared] }),
+          blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
+          scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: depthTexture.createView() }, ...shared, { binding: 7, resource: behind.createView() }] }),
         };
       };
       const makeGroupsMs = (atlas: any, probes: any, blank: any, depth: any) => {
@@ -1375,13 +1452,15 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 6, resource: probes.createView({ dimension: "3d" }) },
         ];
         return {
-          blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared] }),
-          scene: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: depth.createView() }, ...shared] }),
+          blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
+          scene: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: depth.createView() }, ...shared, { binding: 7, resource: behind.createView() }] }),
         };
       };
       const depthGroups = {
         ...makeGroups(atlasBlank, probesBlank),
         blankTexture: blankDepth,
+        behind,
+        behindBlank,
         clusters: clusterBuffers,
         shadowTiles,
         atlas: atlasBlank,
@@ -1646,6 +1725,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.uploadLights(packLights(ordered));
     const lightCount = ordered.length;
 
+    const camera = refractionCamera(draw.view, this.height);
     let next = 0;
     draws.forEach((entry, index) => {
       entry.first = next;
@@ -1697,6 +1777,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           textured: entry.textures.blend !== null,
         }),
         layers: resolveLayers(entry.primitive.material, entry.textures.relief !== null),
+        refraction: entry.refract ? resolveRefraction(entry.primitive.material, effectActive(entry.effect) ? entry.effect : null) : null,
+        camera,
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
@@ -1708,8 +1790,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // Soft edges (EP6b) need the opaque depth readable, so a frame that has
     // any draws its see-through batches in a second pass, with the depth
     // attached read-only and bound for the shader to sample.
-    const split = draws.some((entry) => softEdges(entry.primitive.material, entry.alpha, draw.projection) !== undefined);
-    const firstSeeThrough = split ? draws.findIndex((entry) => entry.alpha >= 2) : -1;
+    // Refraction (I5) reads the opaque scene's colour the same way: copied
+    // (or resolved) between the two passes.
+    const refract = draws.some((entry) => entry.refract);
+    const split = refract || draws.some((entry) => softEdges(entry.primitive.material, entry.alpha, draw.projection) !== undefined);
+    const firstSeeThrough = split ? draws.findIndex((entry) => entry.alpha >= 2 || entry.refract) : -1;
     const encoder = this.device.createCommandEncoder();
     // Anti-aliased (I1): draw into the multisampled targets and resolve into the read-back texture as the last pass ends.
     const msaa = draw.antialias === true ? this.ensureMsaa() : null;
@@ -1729,7 +1814,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       for (let index = from; index < to; index += 1) {
         const entry = draws[index]!;
         const set = this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, gbuffer !== null);
-        const wanted = entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque;
+        // A refracting draw covers what it bends (premultiplied, alpha 1), or blends or adds as usual where it bends nothing.
+        const wanted = entry.refract ? set.blend : entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque;
         if (wanted !== bound) {
           pass.setPipeline(wanted);
           bound = wanted;
@@ -1755,6 +1841,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           clearValue: { r: 0, g: 0, b: 0, a: 0 },
           loadOp: "clear",
           ...ending(firstSeeThrough < 0),
+          // An anti-aliased frame that refracts resolves the opaque scene for the see-through pass to read.
+          ...(msaa && refract && firstSeeThrough >= 0 ? { resolveTarget: this.depthGroups.behind.createView() } : {}),
         },
         ...reflectionAttachments(false, firstSeeThrough < 0),
       ],
@@ -1768,6 +1856,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     });
     drawRange(pass, 0, opaqueEnd, groups.blank);
     pass.end();
+    if (refract && firstSeeThrough >= 0 && !msaa) {
+      encoder.copyTextureToTexture({ texture: this.colourTexture }, { texture: this.depthGroups.behind }, { width: this.width, height: this.height });
+    }
     if (firstSeeThrough >= 0) {
       const seeThrough = encoder.beginRenderPass({
         colorAttachments: [{ view: colourView, loadOp: "load", ...ending(true) }, ...reflectionAttachments(true, true)],
@@ -2214,6 +2305,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       destroySafely(this.taa.uniforms);
     }
     destroySafely(this.depthGroups.blankTexture);
+    destroySafely(this.depthGroups.behind);
+    destroySafely(this.depthGroups.behindBlank);
     destroySafely(this.depthGroups.clusters.table);
     destroySafely(this.depthGroups.clusters.index);
     destroySafely(this.depthGroups.clusters.params);
