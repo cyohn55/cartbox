@@ -165,11 +165,30 @@ What separates Lockout from Halo Infinite, seen in a match:
 
 ## Phase B — World and sky
 
-- [ ] **I6. Imported sky.** An HDR panorama or cubemap in place of the
+- [x] **I6. Imported sky.** An HDR panorama or cubemap in place of the
       procedural sky (it also lights the scene and fills the reflections),
       drifting cloud layers, and sky objects drawn at infinity (a ring, a
       planet, a distant structure). *Lockout:* a painted sky with the ring
       arching over the valley.
+      *Done:* the sky dome (`ProceduralSky`) gains three things
+      (`skyLayers.ts`). An imported **panorama**: an equirectangular PNG, JPEG
+      or Radiance `.hdr` (our own RGBE decoder, run-length scanlines included,
+      exposed into 8 bits), kept as base64 in the lighting rig, turned and
+      brightened, and baked in place of the procedural sky. Like that sky it is
+      both the backdrop and the image-based light. **Sky objects** at infinity:
+      a ring (a great-circle band with land, water and cloud on its inner face,
+      rim walls, day under the sun's bearing and its own night opposite, hazed
+      toward the horizon) and planets (a lit disc with a soft terminator, seas
+      and an atmospheric halo), baked in front of the sky and behind its clouds
+      and mountains, so metals reflect them. **Cloud layers** that drift: a
+      tileable density map per layer on a plane overhead, composited over the
+      backdrop every frame as the wind moves it, and laid once, at rest, over
+      the reflections' copy. The Lighting panel imports a panorama (exposure,
+      turn), adds rings and planets (colour, width or size, tilt) and cloud
+      layers (cover, size, wind, opacity). A cubemap is not taken directly;
+      an equirectangular export of it is. *Lockout:* the ring arches over the
+      valley from one horizon to the other, a pale moon hangs in the east, and
+      two decks of cloud drift across a lighter painted sky.
 - [ ] **I7. Distant vistas.** Far terrain and backdrop meshes beyond the play
       space, cheap (impostors or one coarse level), fogged into the sky.
       *Lockout:* mountains and a forest edge around the gorge instead of a

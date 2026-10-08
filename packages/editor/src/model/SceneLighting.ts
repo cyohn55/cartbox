@@ -27,7 +27,8 @@ import {
   type ShadowInput,
   type ToneMap,
 } from "../render/meshRasterizer";
-import { MAX_FOG_VOLUMES, type FogVolume, type ProceduralSky, type SceneFog, type SkyMountainRange } from "../render/skyDome";
+import { MAX_FOG_VOLUMES, type FogVolume, type ProceduralSky, type SceneFog, type SkyMountainRange, type SkyPanorama } from "../render/skyDome";
+import { MAX_CLOUD_LAYERS, MAX_SKY_OBJECTS, type SkyCloudLayer, type SkyObject } from "../render/skyLayers";
 import type { SunShafts } from "../render/sunShafts";
 import { parseReflectionProbes, type ReflectionProbe } from "./reflectionProbes";
 
@@ -229,7 +230,13 @@ export function parseSky(value: unknown): ProceduralSky | null {
   const mountains = Array.isArray(raw.mountains)
     ? raw.mountains.map(parseMountain).filter((m): m is SkyMountainRange => m !== null).slice(0, MAX_SKY_MOUNTAINS)
     : base.mountains;
+  const objects = Array.isArray(raw.objects) ? raw.objects.map(parseSkyObject).filter((o): o is SkyObject => o !== null).slice(0, MAX_SKY_OBJECTS) : [];
+  const cloudLayers = Array.isArray(raw.cloudLayers) ? raw.cloudLayers.map(parseCloudLayer).filter((l): l is SkyCloudLayer => l !== null).slice(0, MAX_CLOUD_LAYERS) : [];
+  const panorama = parsePanorama(raw.panorama);
   return {
+    ...(panorama ? { panorama } : {}),
+    ...(objects.length > 0 ? { objects } : {}),
+    ...(cloudLayers.length > 0 ? { cloudLayers } : {}),
     zenith: tripleOr(raw.zenith, base.zenith),
     horizon: tripleOr(raw.horizon, base.horizon),
     below: tripleOr(raw.below, base.below),
@@ -239,6 +246,60 @@ export function parseSky(value: unknown): ProceduralSky | null {
     cloudColor: tripleOr(raw.cloudColor, base.cloudColor),
     mountains,
     seed: Math.floor(finiteOr(raw.seed, base.seed)),
+  };
+}
+
+/** The largest imported panorama kept (base64 characters) — about 6 MB of file. */
+export const MAX_SKY_PANORAMA_CHARS = 8_000_000;
+const PANORAMA_MIMES = ["image/png", "image/jpeg", "image/vnd.radiance"];
+
+function parsePanorama(value: unknown): SkyPanorama | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.mime !== "string" || !PANORAMA_MIMES.includes(raw.mime)) return null;
+  if (typeof raw.data !== "string" || raw.data.length === 0 || raw.data.length > MAX_SKY_PANORAMA_CHARS || !/^[A-Za-z0-9+/]+=*$/.test(raw.data)) return null;
+  return { mime: raw.mime, data: raw.data, exposure: Math.max(0.01, Math.min(64, finiteOr(raw.exposure, 1))), yaw: ((finiteOr(raw.yaw, 0) % 360) + 360) % 360 };
+}
+
+function parseSkyObject(value: unknown): SkyObject | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const seed = Math.floor(finiteOr(raw.seed, 1));
+  if (raw.kind === "ring") {
+    return {
+      kind: "ring",
+      axis: isFiniteTriple(raw.axis) && Math.hypot(...raw.axis) > 1e-6 ? raw.axis : [0.3, 0.2, 1],
+      width: Math.max(0.2, Math.min(30, finiteOr(raw.width, 3))),
+      color: tripleOr(raw.color, [0.55, 0.62, 0.5]),
+      edge: tripleOr(raw.edge, [0.85, 0.87, 0.9]),
+      haze: clamp01(finiteOr(raw.haze, 0.5)),
+      seed,
+    };
+  }
+  if (raw.kind === "planet") {
+    return {
+      kind: "planet",
+      direction: isFiniteTriple(raw.direction) && Math.hypot(...raw.direction) > 1e-6 ? raw.direction : [-0.5, 0.4, -0.6],
+      radius: Math.max(0.2, Math.min(45, finiteOr(raw.radius, 6))),
+      color: tripleOr(raw.color, [0.75, 0.62, 0.48]),
+      atmosphere: tripleOr(raw.atmosphere, [0.55, 0.7, 1]),
+      seed,
+    };
+  }
+  return null;
+}
+
+function parseCloudLayer(value: unknown): SkyCloudLayer | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const wind = Array.isArray(raw.wind) && raw.wind.length === 2 && raw.wind.every((n) => typeof n === "number" && Number.isFinite(n)) ? (raw.wind as number[]) : [0.02, 0.01];
+  return {
+    cover: clamp01(finiteOr(raw.cover, 0.4)),
+    scale: Math.max(0.01, Math.min(10, finiteOr(raw.scale, 0.35))),
+    wind: [Math.max(-2, Math.min(2, wind[0]!)), Math.max(-2, Math.min(2, wind[1]!))],
+    color: tripleOr(raw.color, [0.95, 0.96, 0.98]),
+    opacity: clamp01(finiteOr(raw.opacity, 0.85)),
+    seed: Math.floor(finiteOr(raw.seed, 1)),
   };
 }
 

@@ -2362,13 +2362,26 @@ export const LOCKOUT_LIGHTING: SceneLighting = {
     below: [0.66, 0.72, 0.8],
     sunDirection: [0.45, 0.62, -0.5], // matches the key light
     sunColor: [1, 0.95, 0.85],
-    clouds: 0.62,
+    // Lighter painted cloud: the drifting layers below carry the rest (I6).
+    clouds: 0.3,
     cloudColor: [0.9, 0.93, 0.97],
     mountains: [
       { height: 8, peaks: 11, rock: [0.44, 0.49, 0.57], snow: [0.88, 0.92, 0.97], snowLine: 0.25, haze: 0.55, seed: 11 },
       { height: 15, peaks: 7, rock: [0.24, 0.27, 0.32], snow: [0.93, 0.95, 0.98], snowLine: 0.42, haze: 0.18, seed: 29 },
     ],
     seed: 7,
+    // The ring (HALO_INFINITE_STYLE_ROADMAP.md I6), arching over the valley from
+    // one horizon to the other, lit on the sun's side and hazed where it meets
+    // the mountains; and a pale moon low in the east.
+    objects: [
+      { kind: "ring", axis: [0.82, 0.38, 0.43], width: 4.5, color: [0.5, 0.62, 0.55], edge: [0.86, 0.88, 0.92], haze: 0.5, seed: 5 },
+      { kind: "planet", direction: [-0.7, 0.22, 0.68], radius: 5, color: [0.7, 0.72, 0.76], atmosphere: [0.6, 0.72, 0.95], seed: 3 },
+    ],
+    // Two decks of cloud drifting on the wind: a high thin sheet and lower puffs.
+    cloudLayers: [
+      { cover: 0.35, scale: 0.22, wind: [0.012, 0.005], color: [0.94, 0.96, 0.99], opacity: 0.55, seed: 41 },
+      { cover: 0.3, scale: 0.5, wind: [0.028, 0.011], color: [0.9, 0.92, 0.96], opacity: 0.7, seed: 43 },
+    ],
   },
   // Cold haze that thickens across the arena, tinted to the horizon.
   // Kept light: the arena is only ~30 units across, so heavy fog just washes it out.
