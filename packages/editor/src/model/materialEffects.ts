@@ -23,7 +23,7 @@ export const DETAIL_FAR = 12;
 
 type SurfaceEffects = Pick<
   MeshMaterial,
-  "detailScale" | "detailStrength" | "emissiveScroll" | "emissivePulse" | "rim" | "reflectivity" | "reflectionMask" | "blendColor" | "blendRoughness" | "alphaMode" | "alphaCutoff" | "softDepth" | "refraction" | "distortion" | "graph"
+  "detailScale" | "detailStrength" | "emissiveScroll" | "emissivePulse" | "rim" | "reflectivity" | "reflectionMask" | "blendColor" | "blendRoughness" | "alphaMode" | "alphaCutoff" | "softDepth" | "graph"
 >;
 
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -54,8 +54,6 @@ export function readSurfaceEffects(raw: Record<string, unknown> | object): Surfa
   if (r.alphaMode === "mask" || r.alphaMode === "blend" || r.alphaMode === "additive") out.alphaMode = r.alphaMode;
   if (finite(r.alphaCutoff)) out.alphaCutoff = clamp(r.alphaCutoff, 0, 1);
   if (finite(r.softDepth) && r.softDepth > 0) out.softDepth = Math.min(r.softDepth, 100);
-  if (finite(r.refraction) && r.refraction > 0) out.refraction = clamp(r.refraction, 0, 1);
-  if (finite(r.distortion) && r.distortion > 0) out.distortion = clamp(r.distortion, 0, 1);
   const graph = readMaterialGraph(r.graph);
   if (graph) out.graph = graph;
   return out;

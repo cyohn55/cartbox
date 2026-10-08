@@ -580,20 +580,6 @@ export {
   readSurfaceEffects,
 } from "./model/materialEffects";
 export {
-  CAMO_BEND,
-  CAMO_WARP,
-  DISTORTION_FREQUENCY,
-  DISTORTION_SPEED,
-  EFFECT_DISTORT_POWER,
-  NO_REFRACTION,
-  REFRACTION_SCALE,
-  materialRefracts,
-  refractionOffset,
-  refracts,
-  resolveRefraction,
-  type ResolvedRefraction,
-} from "./render/refraction";
-export {
   ANISOTROPY_MIN_ALPHA,
   CLEARCOAT_F0,
   DEFAULT_CLEARCOAT_ROUGHNESS,
@@ -714,8 +700,6 @@ export {
   EFFECT_CAMO_CRAWL,
   EFFECT_RIM_POWER,
   SHIELD_CAMO_MAX,
-  SHIELD_FLARE_DISTORT,
-  SHIELD_SHIMMER_DISTORT,
   SHIELD_CAMO_RIM,
   SHIELD_FLARE_GLOW,
   SHIELD_FLARE_RIM,

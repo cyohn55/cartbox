@@ -10,10 +10,7 @@
  * - `bands`: bands of light sweeping up the body — a recharge shimmer.
  * - `camo`: that share of the surface's pixels dropped (screen-door
  *   transparency on an ordered-dither pattern that crawls with time), so the
- *   scene shows through — bent, as through glass (I5; see refraction.ts); with
- *   a rim it reads as a cloaked outline.
- * - `distort`: the view behind the surface warped at its silhouette (I5) — a
- *   shield's flare and shimmer bending the light around the body.
+ *   scene shows through; with a rim it reads as a cloaked outline.
  */
 
 export interface SurfaceEffect {
@@ -23,8 +20,6 @@ export interface SurfaceEffect {
   readonly bands?: readonly [number, number, number];
   /** 0 (solid) .. 1 (gone). */
   readonly camo?: number;
-  /** 0 .. 1: how strongly the view behind warps at the silhouette (I5). */
-  readonly distort?: number;
 }
 
 /** Bands per world unit (radians), how fast they climb, and how sharp they are. */
@@ -58,7 +53,7 @@ export function bandAmount(y: number, time: number): number {
 export function effectActive(e: SurfaceEffect | null | undefined): e is SurfaceEffect {
   if (!e) return false;
   const any = (c?: readonly number[]) => !!c && (c[0]! > 0 || c[1]! > 0 || c[2]! > 0);
-  return any(e.rim) || any(e.glow) || any(e.bands) || (e.camo ?? 0) > 0 || (e.distort ?? 0) > 0;
+  return any(e.rim) || any(e.glow) || any(e.bands) || (e.camo ?? 0) > 0;
 }
 
 /** A shield's colours (H11): the gold flare of a hit, its white-gold recharge bands, and Active Camo's cool edge. */
@@ -68,9 +63,6 @@ export const SHIELD_SHIMMER_BANDS: readonly [number, number, number] = [1.0, 0.8
 export const SHIELD_CAMO_RIM: readonly [number, number, number] = [0.35, 0.5, 0.7];
 /** The share of a fully cloaked surface's pixels dropped (the rest keep its outline readable). */
 export const SHIELD_CAMO_MAX = 0.88;
-/** How strongly a full flare, and a recharge shimmer, warp the view at the body's edge (I5). */
-export const SHIELD_FLARE_DISTORT = 0.6;
-export const SHIELD_SHIMMER_DISTORT = 0.3;
 
 const unit = (v: number | undefined) => (Number.isFinite(v) ? Math.max(0, Math.min(1, v!)) : 0);
 
@@ -94,7 +86,5 @@ export function shieldEffect(flare: number, shimmer: number, camo: number): Surf
     glow: [SHIELD_FLARE_GLOW[0] * f, SHIELD_FLARE_GLOW[1] * f, SHIELD_FLARE_GLOW[2] * f],
     bands: [SHIELD_SHIMMER_BANDS[0] * s, SHIELD_SHIMMER_BANDS[1] * s, SHIELD_SHIMMER_BANDS[2] * s],
     camo: c * SHIELD_CAMO_MAX,
-    // The flare and the recharge bend the light round the body (I5).
-    ...(f > 0 || s > 0 ? { distort: Math.min(1, SHIELD_FLARE_DISTORT * f + SHIELD_SHIMMER_DISTORT * s) } : {}),
   };
 }
