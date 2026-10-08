@@ -40,6 +40,7 @@ import {
 } from "./MeshAsset";
 import { base64ToBytes } from "./base64";
 import { decompressGltf, type GltfDecoders, type MeshoptViewExtension } from "./gltfCompression";
+import { readMaterialLayers } from "./materialLayers";
 import { MAX_CLIP_KEYS, MAX_CLIPS, MAX_SKIN_JOINTS, type AnimationClip, type ClipChannel, type MeshSkin, type SkinJoint } from "./skeleton";
 
 // --- glTF JSON shape (only the fields this codec reads/writes) -------------
@@ -86,6 +87,10 @@ interface GltfMaterial {
   emissiveFactor?: number[];
   alphaMode?: "OPAQUE" | "MASK" | "BLEND";
   alphaCutoff?: number;
+  extensions?: {
+    KHR_materials_clearcoat?: { clearcoatFactor?: number; clearcoatRoughnessFactor?: number };
+    KHR_materials_anisotropy?: { anisotropyStrength?: number; anisotropyRotation?: number };
+  };
 }
 export interface GltfPrimitive {
   attributes: { POSITION?: number; NORMAL?: number; TEXCOORD_0?: number; JOINTS_0?: number; WEIGHTS_0?: number };
@@ -411,6 +416,28 @@ function collectMeshInstances(json: GltfJson): Map<number, { world: Mat4; node: 
   return instances;
 }
 
+/** A material's clearcoat and anisotropy as glTF extensions (I4), or nothing when it has neither. */
+function materialLayerExtensions(material: MeshMaterial): Pick<GltfMaterial, "extensions"> {
+  const extensions: NonNullable<GltfMaterial["extensions"]> = {};
+  if ((material.clearcoat ?? 0) > 0) {
+    extensions.KHR_materials_clearcoat = { clearcoatFactor: material.clearcoat, ...(material.clearcoatRoughness !== undefined ? { clearcoatRoughnessFactor: material.clearcoatRoughness } : {}) };
+  }
+  // glTF's strength is 0..1 along the tangent; a negative one runs along the bitangent, a quarter turn on.
+  const aniso = material.anisotropy ?? 0;
+  if (aniso !== 0) {
+    extensions.KHR_materials_anisotropy = { anisotropyStrength: Math.abs(aniso), anisotropyRotation: (material.anisotropyRotation ?? 0) + (aniso < 0 ? Math.PI / 2 : 0) };
+  }
+  return Object.keys(extensions).length > 0 ? { extensions } : {};
+}
+
+/** The extensions a written file uses: basisu (required, when a texture is KTX2) and the material ones (optional). */
+function extensionLists(basisu: boolean, materials: readonly GltfMaterial[]): Pick<GltfJson, "extensionsUsed" | "extensionsRequired"> {
+  const used = new Set<string>(basisu ? ["KHR_texture_basisu"] : []);
+  for (const m of materials) for (const name of Object.keys(m.extensions ?? {})) used.add(name);
+  if (used.size === 0) return {};
+  return { extensionsUsed: [...used], ...(basisu ? { extensionsRequired: ["KHR_texture_basisu"] } : {}) };
+}
+
 /** Resolve a material's base-colour factor and, if any, its embedded texture image. */
 function readMaterial(json: GltfJson, buffers: (Uint8Array | null)[], materialIndex: number | undefined): MeshMaterial {
   const material = materialIndex !== undefined ? json.materials?.[materialIndex] : undefined;
@@ -450,6 +477,13 @@ function readMaterial(json: GltfJson, buffers: (Uint8Array | null)[], materialIn
     // Transparency, as glTF states it (EP6).
     ...(material?.alphaMode === "MASK" ? { alphaMode: "mask" as const, alphaCutoff: typeof material.alphaCutoff === "number" ? Math.max(0, Math.min(1, material.alphaCutoff)) : 0.5 } : {}),
     ...(material?.alphaMode === "BLEND" ? { alphaMode: "blend" as const } : {}),
+    // The clearcoat and anisotropy extensions' factors (I4); their textures are not read.
+    ...readMaterialLayers({
+      clearcoat: material?.extensions?.KHR_materials_clearcoat?.clearcoatFactor,
+      clearcoatRoughness: material?.extensions?.KHR_materials_clearcoat?.clearcoatRoughnessFactor,
+      anisotropy: material?.extensions?.KHR_materials_anisotropy?.anisotropyStrength,
+      anisotropyRotation: material?.extensions?.KHR_materials_anisotropy?.anisotropyRotation,
+    }),
   };
 }
 
@@ -852,6 +886,7 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
       // glTF has no additive mode: it exports as blended.
       ...(primitive.material.alphaMode === "mask" ? { alphaMode: "MASK" as const, alphaCutoff: primitive.material.alphaCutoff ?? 0.5 } : {}),
       ...(primitive.material.alphaMode === "blend" || primitive.material.alphaMode === "additive" ? { alphaMode: "BLEND" as const } : {}),
+      ...materialLayerExtensions(primitive.material),
     };
     if (primitive.material.baseColorImage) {
       const imageView = addView(primitive.material.baseColorImage.bytes);
@@ -876,9 +911,7 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
     buffers: [{ byteLength: binLength }],
     materials,
     ...(textures.length ? { textures, images } : {}),
-    ...(textures.some((t) => t.extensions?.KHR_texture_basisu)
-      ? { extensionsUsed: ["KHR_texture_basisu"], extensionsRequired: ["KHR_texture_basisu"] }
-      : {}),
+    ...extensionLists(textures.some((t) => t.extensions?.KHR_texture_basisu), materials),
   };
 
   // Assemble the GLB: header, JSON chunk (space-padded), BIN chunk (zero-padded).

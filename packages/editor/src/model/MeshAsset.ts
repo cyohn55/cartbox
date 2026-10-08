@@ -25,6 +25,7 @@
 
 import { bytesToBase64, base64ToBytes } from "./base64";
 import { readSurfaceEffects, writeSurfaceEffects } from "./materialEffects";
+import { readMaterialLayers, writeMaterialLayers } from "./materialLayers";
 import type { MaterialGraph } from "./materialGraph";
 import {
   MAX_CLIP_KEYS,
@@ -172,6 +173,33 @@ export interface MeshMaterial {
   readonly blendImage?: EncodedImage | null;
   readonly blendColor?: readonly [number, number, number];
   readonly blendRoughness?: number;
+  // --- Layers and relief (HALO_INFINITE_STYLE_ROADMAP.md I4; see materialLayers.ts) ---
+  /**
+   * A clearcoat: a thin glossy lacquer over the base surface (armour paint, a
+   * visor), with a reflection of its own that the base shows through, 0..1.
+   * Absent or 0 is no coat. glTF's KHR_materials_clearcoat `clearcoatFactor`.
+   */
+  readonly clearcoat?: number;
+  /** The coat's roughness, 0..1 (default 0.05, a fresh lacquer). */
+  readonly clearcoatRoughness?: number;
+  /**
+   * Anisotropy, −1..1: highlights stretched across the surface's grain, as on
+   * brushed metal. Positive stretches them along the tangent (the direction U
+   * increases, turned by {@link anisotropyRotation}), negative along the
+   * bitangent. Absent or 0 is an ordinary round highlight.
+   */
+  readonly anisotropy?: number;
+  /** Turns the anisotropy's tangent about the normal, radians from U toward V (default 0). */
+  readonly anisotropyRotation?: number;
+  /**
+   * A relief map (R = height, white the top; G = curvature about mid-grey,
+   * lighter a convex edge, darker a cavity), sampled with the base UVs. Its
+   * height gives panel seams depth by parallax occlusion ({@link parallaxDepth});
+   * its curvature drives the material graph's wear masks.
+   */
+  readonly reliefImage?: EncodedImage | null;
+  /** How deep the relief's darkest point sits, in world units (0..0.25); absent or 0 is flat. */
+  readonly parallaxDepth?: number;
   // --- Transparency (ENGINE_PARITY_ROADMAP.md EP6), glTF's alphaMode plus additive ---
   /**
    * How the surface's alpha (base colour factor × texture) is used. Absent is
@@ -406,6 +434,12 @@ export interface SerializedMaterial {
   reflectivity?: number;
   reflectionMask?: boolean;
   blendImage?: SerializedImage | null;
+  reliefImage?: SerializedImage | null;
+  clearcoat?: number;
+  clearcoatRoughness?: number;
+  anisotropy?: number;
+  anisotropyRotation?: number;
+  parallaxDepth?: number;
   blendColor?: [number, number, number];
   blendRoughness?: number;
   alphaMode?: "mask" | "blend" | "additive";
@@ -662,7 +696,9 @@ export function serializeMaterial(material: MeshMaterial, table?: ImageTable): S
     ...(material.tintable ? { tintable: true } : {}),
     ...(material.detailImage ? { detailImage: serializeImage(material.detailImage, "detailImage", table) } : {}),
     ...(material.blendImage ? { blendImage: serializeImage(material.blendImage, "blendImage", table) } : {}),
+    ...(material.reliefImage ? { reliefImage: serializeImage(material.reliefImage, "reliefImage", table) } : {}),
     ...writeSurfaceEffects(material),
+    ...writeMaterialLayers(material),
   };
 }
 
@@ -686,7 +722,9 @@ export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMat
     ...(material.tintable === true ? { tintable: true } : {}),
     ...(material.detailImage ? { detailImage: deserializeImage(material.detailImage, "detailImage", table) } : {}),
     ...(material.blendImage ? { blendImage: deserializeImage(material.blendImage, "blendImage", table) } : {}),
+    ...(material.reliefImage ? { reliefImage: deserializeImage(material.reliefImage, "reliefImage", table) } : {}),
     ...readSurfaceEffects(material),
+    ...readMaterialLayers(material),
   };
 }
 

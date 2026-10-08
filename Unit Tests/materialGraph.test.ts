@@ -32,7 +32,7 @@ import { sceneShader } from "../packages/player/src/render/WebgpuSceneRenderer";
 import { MARBLE, SCROLL } from "./helpers/graphScenes";
 
 function ctx(over: Partial<GraphContext> = {}): GraphContext {
-  return { u: 0.25, v: 0.75, px: 1, py: 2, pz: 3, nx: 0, ny: 0, nz: 1, vx: 0, vy: 0, vz: 1, time: 2, br: 0.5, bg: 0.25, bb: 1, ba: 0.8, sample: () => [0.1, 0.2, 0.3, 0.4], ...over };
+  return { u: 0.25, v: 0.75, px: 1, py: 2, pz: 3, nx: 0, ny: 0, nz: 1, vx: 0, vy: 0, vz: 1, time: 2, curv: 0, br: 0.5, bg: 0.25, bb: 1, ba: 0.8, sample: () => [0.1, 0.2, 0.3, 0.4], ...over };
 }
 
 /** Evaluate one output of a graph at a context. */

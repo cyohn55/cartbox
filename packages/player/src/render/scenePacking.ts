@@ -16,14 +16,17 @@ import {
   EFFECT_RIM_POWER,
   MAX_FOG_VOLUMES,
   MAX_REFLECTION_PROBES,
+  NO_LAYERS,
   effectActive,
   emissiveAnimation,
+  materialHasLayers,
   spotCone,
   fogIsVolumetric,
   type EnvironmentLight,
   type Mat4,
   type MeshMaterial,
   type ReflectionProbeSet,
+  type ResolvedLayers,
   type SceneFog,
   type SceneLight,
   type SurfaceEffect,
@@ -73,9 +76,13 @@ import {
  * 736  effect0    vec4<f32>    16   rgb = surface-effect glow, w = camo amount (H11)
  * 752  effect1    vec4<f32>    16   rgb = surface-effect bands, w = time (seconds)
  *                                    (an effect's rim adds into surface2, at its power)
+ * 768  layer0     vec4<f32>    16   x = clearcoat, y = its roughness, z = anisotropy,
+ *                                    w = parallax depth (0 = none) (I4)
+ * 784  layer1     vec4<f32>    16   xy = anisotropy rotation's cos and sin,
+ *                                    z = 1 when a relief map rides in the occlusion map's G and B
  * ```
  *
- * 768 bytes used — exactly the stride to a 768-byte stride (a 256-byte multiple a dynamic
+ * 800 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -84,13 +91,13 @@ import {
  * `envMeta.w` at 0 uses the analytic gradient instead of a panorama, and
  * `shadow.x` at 0 skips the shadow test.
  */
-export const UNIFORM_STRIDE = 768;
+export const UNIFORM_STRIDE = 1024;
 /**
  * Bytes the struct actually occupies, before the stride padding. This is what a
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 768;
+export const UNIFORM_BYTES_USED = 800;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -205,6 +212,8 @@ const OFFSET_FOG_GLOW = 148;
 const OFFSET_FOG_VOL = 152;
 const OFFSET_EFFECT0 = 184;
 const OFFSET_EFFECT1 = 188;
+const OFFSET_LAYER0 = 192;
+const OFFSET_LAYER1 = 196;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -277,6 +286,10 @@ export interface PbrMaterial {
   readonly emissiveFactor?: readonly [number, number, number];
   /** A material graph (EP7) always takes the PBR path. */
   readonly graph?: unknown;
+  /** So do a clearcoat, anisotropy and a parallax relief (I4). */
+  readonly clearcoat?: number;
+  readonly anisotropy?: number;
+  readonly parallaxDepth?: number;
 }
 
 /**
@@ -299,7 +312,8 @@ export function resolvePbr(
     material.metallicFactor !== undefined ||
     material.roughnessFactor !== undefined ||
     (emissiveFactor !== undefined && (emissiveFactor[0]! > 0 || emissiveFactor[1]! > 0 || emissiveFactor[2]! > 0)) ||
-    material.graph !== undefined;
+    material.graph !== undefined ||
+    materialHasLayers(material);
   return {
     isPbr,
     metallic: material.metallicFactor ?? 1,
@@ -406,6 +420,8 @@ export interface InstanceUniform {
   readonly lightCount: number;
   /** This draw's surface effects, or omitted for none. */
   readonly surface?: ResolvedSurface;
+  /** This draw's clearcoat, anisotropy and relief (I4; see materialLayers.ts in @cartbox/editor), or omitted for none. */
+  readonly layers?: ResolvedLayers;
   /** Fog for PBR draws (distance, height, volumes, sun glow), or null/omitted for none. */
   readonly fog?: SceneFog | null;
   /** The eye in world space — height and volume fog trace the ray from it. */
@@ -627,6 +643,16 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_EFFECT1 + 1] = effect?.bands ? effect.bands[1] : 0;
   target[base + OFFSET_EFFECT1 + 2] = effect?.bands ? effect.bands[2] : 0;
   target[base + OFFSET_EFFECT1 + 3] = uniform.time ?? 0;
+
+  const layers = uniform.layers ?? NO_LAYERS;
+  target[base + OFFSET_LAYER0] = layers.clearcoat;
+  target[base + OFFSET_LAYER0 + 1] = layers.clearcoatRoughness;
+  target[base + OFFSET_LAYER0 + 2] = layers.anisotropy;
+  target[base + OFFSET_LAYER0 + 3] = layers.parallaxDepth;
+  target[base + OFFSET_LAYER1] = layers.anisotropyCos;
+  target[base + OFFSET_LAYER1 + 1] = layers.anisotropySin;
+  target[base + OFFSET_LAYER1 + 2] = layers.relief ? 1 : 0;
+  target[base + OFFSET_LAYER1 + 3] = 0;
 }
 
 /** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2) + light-map uv(2) + blend weight(1). */

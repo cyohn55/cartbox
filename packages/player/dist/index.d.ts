@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, SceneFog, RasterStyle, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, SceneFog, RasterStyle, ResolvedLayers, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -3921,9 +3921,13 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  * 736  effect0    vec4<f32>    16   rgb = surface-effect glow, w = camo amount (H11)
  * 752  effect1    vec4<f32>    16   rgb = surface-effect bands, w = time (seconds)
  *                                    (an effect's rim adds into surface2, at its power)
+ * 768  layer0     vec4<f32>    16   x = clearcoat, y = its roughness, z = anisotropy,
+ *                                    w = parallax depth (0 = none) (I4)
+ * 784  layer1     vec4<f32>    16   xy = anisotropy rotation's cos and sin,
+ *                                    z = 1 when a relief map rides in the occlusion map's G and B
  * ```
  *
- * 768 bytes used — exactly the stride to a 768-byte stride (a 256-byte multiple a dynamic
+ * 800 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -3932,13 +3936,13 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  * `envMeta.w` at 0 uses the analytic gradient instead of a panorama, and
  * `shadow.x` at 0 skips the shadow test.
  */
-declare const UNIFORM_STRIDE = 768;
+declare const UNIFORM_STRIDE = 1024;
 /**
  * Bytes the struct actually occupies, before the stride padding. This is what a
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 768;
+declare const UNIFORM_BYTES_USED = 800;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
@@ -4020,6 +4024,10 @@ interface PbrMaterial {
     readonly emissiveFactor?: readonly [number, number, number];
     /** A material graph (EP7) always takes the PBR path. */
     readonly graph?: unknown;
+    /** So do a clearcoat, anisotropy and a parallax relief (I4). */
+    readonly clearcoat?: number;
+    readonly anisotropy?: number;
+    readonly parallaxDepth?: number;
 }
 /**
  * Resolve a draw's PBR inputs, matching `buildPbrFrag`. `hasMr`/`hasOcc`/`hasEmis`
@@ -4104,6 +4112,8 @@ interface InstanceUniform {
     readonly lightCount: number;
     /** This draw's surface effects, or omitted for none. */
     readonly surface?: ResolvedSurface;
+    /** This draw's clearcoat, anisotropy and relief (I4; see materialLayers.ts in @cartbox/editor), or omitted for none. */
+    readonly layers?: ResolvedLayers;
     /** Fog for PBR draws (distance, height, volumes, sun glow), or null/omitted for none. */
     readonly fog?: SceneFog | null;
     /** The eye in world space — height and volume fog trace the ray from it. */

@@ -69,6 +69,41 @@ export function starterGraph(): MaterialGraph {
   return { nodes: [{ id: "base", op: "baseColor", x: 40, y: 40 }], outputs: { baseColor: "base" } };
 }
 
+/**
+ * Edge wear (HALO_INFINITE_STYLE_ROADMAP.md I4) added to a graph (or a new one):
+ * whatever drives the base colour now — the material's own colour when nothing
+ * does — worn to bright bare metal along the relief's convex edges, broken up
+ * by noise so it chips, with grime settled in its cavities. The new nodes sit to
+ * the right of the existing ones; the base colour output moves to their result.
+ */
+export function wornEdgesGraph(graph: MaterialGraph | undefined): MaterialGraph {
+  let g = graph ?? starterGraph();
+  const right = g.nodes.reduce((x, n) => Math.max(x, (n.x ?? 0) + NODE_WIDTH), 0) + 40;
+  const add = (op: GraphOp, x: number, y: number, params: Record<string, number | string | readonly number[]> = {}, inputs: Record<string, string> = {}): string => {
+    const placed = addNode(g, op, { x: right + x, y: 40 + y });
+    g = placed.graph;
+    if (Object.keys(params).length > 0) g = setParams(g, placed.id, params);
+    for (const [name, from] of Object.entries(inputs)) g = connect(g, from, placed.id, name);
+    return placed.id;
+  };
+  let paint = g.outputs.baseColor;
+  if (!paint) paint = add("baseColor", 0, 0);
+  const pos = add("position", 0, 90);
+  const noise = add("noise", 190, 90, { scale: 5, octaves: 3 }, { position: pos });
+  const lo = add("constant", 190, 190, { value: [-0.4, -0.4, -0.4] });
+  const hi = add("constant", 190, 260, { value: [2, 2, 2] });
+  const breakup = add("mix", 380, 150, {}, { a: lo, b: hi, t: noise });
+  const edge = add("wear", 570, 90, { side: "edge", amount: 0.5, sharpness: 6 }, { breakup });
+  const cavity = add("wear", 570, 230, { side: "cavity", amount: 0.55, sharpness: 3 });
+  const bare = add("constant", 570, 0, { value: [0.93, 0.95, 0.98] });
+  const chipped = add("mix", 760, 40, {}, { a: paint, b: bare, t: edge });
+  const clean = add("constant", 570, 340, { value: [1, 1, 1] });
+  const grime = add("constant", 570, 410, { value: [0.55, 0.55, 0.55] });
+  const dirt = add("mix", 760, 280, {}, { a: clean, b: grime, t: cavity });
+  const colour = add("multiply", 950, 150, {}, { a: chipped, b: dirt });
+  return setOutput(g, "baseColor", colour);
+}
+
 function freshId(graph: MaterialGraph, op: GraphOp): string {
   const ids = new Set(graph.nodes.map((n) => n.id));
   let i = 1;
@@ -152,6 +187,10 @@ export function setOutput(graph: MaterialGraph, output: GraphOutput, from: strin
 
 /** Starter graphs, each a complete look to adapt. */
 export const GRAPH_PRESETS: Readonly<Record<string, { readonly hint: string; readonly graph: () => MaterialGraph }>> = {
+  "Worn edges": {
+    hint: "Paint chipped to bare metal on the relief's edges, grime in its cavities (needs a relief map)",
+    graph: (): MaterialGraph => wornEdgesGraph(undefined),
+  },
   "Flowing energy": {
     hint: "Bands of light running across the surface over time",
     graph: (): MaterialGraph => ({

@@ -11,6 +11,10 @@
  * GLSL for the GPU renderers (spliced into their fragment shaders, one
  * variant per distinct graph).
  *
+ * Wear masks (HALO_INFINITE_STYLE_ROADMAP.md I4) read the relief map's
+ * curvature: a "wear" node picks out convex edges (chipped paint, bare metal)
+ * or cavities (grime), broken up by whatever is wired into it.
+ *
  * Every value is a vec3; a scalar is the same number in all three
  * components, and a scalar input reads `.x`. That keeps the graph untyped —
  * any output plugs into any input — with no conversions to infer.
@@ -33,6 +37,8 @@ export type GraphOp =
   | "fresnel"
   | "texture"
   | "noise"
+  | "curvature"
+  | "wear"
   // Maths
   | "add"
   | "subtract"
@@ -64,7 +70,10 @@ export interface GraphNode {
   readonly op: GraphOp;
   /** Each input wired to another node's output (by id); absent or null takes the input's default. */
   readonly inputs?: Readonly<Record<string, string | null>>;
-  /** constant: `value`; fresnel: `power`; texture: `channel` ("rgb" | "a"); noise: `scale`, `octaves`; split: `component` (0–2). */
+  /**
+   * constant: `value`; fresnel: `power`; texture: `channel` ("rgb" | "a"); noise: `scale`, `octaves`;
+   * wear: `side` ("edge" | "cavity"), `amount`, `sharpness`; split: `component` (0–2).
+   */
   readonly params?: Readonly<Record<string, number | string | readonly number[]>>;
   /** Where the node sits on the editor's canvas. */
   readonly x?: number;
@@ -78,7 +87,7 @@ export interface MaterialGraph {
 }
 
 /** A default for an unwired input: a constant, or one of the surface inputs. */
-type InputDefault = number | "uv" | "position";
+type InputDefault = number | "uv" | "position" | "curvature";
 
 interface NodeDef {
   readonly label: string;
@@ -99,6 +108,8 @@ export const GRAPH_NODES: Readonly<Record<GraphOp, NodeDef>> = {
   fresnel: { label: "Fresnel", category: "pattern", inputs: [] },
   texture: { label: "Texture", category: "pattern", inputs: [["uv", "uv"]] },
   noise: { label: "Noise", category: "pattern", inputs: [["position", "position"]] },
+  curvature: { label: "Curvature", category: "input", inputs: [] },
+  wear: { label: "Wear mask", category: "pattern", inputs: [["curvature", "curvature"], ["breakup", 1]] },
   add: { label: "Add", category: "maths", inputs: [["a", 0], ["b", 0]] },
   subtract: { label: "Subtract", category: "maths", inputs: [["a", 0], ["b", 0]] },
   multiply: { label: "Multiply", category: "maths", inputs: [["a", 1], ["b", 1]] },
@@ -152,6 +163,11 @@ export function graphParams(op: GraphOp, raw: unknown): Record<string, number | 
   if (op === "noise") {
     params.scale = finite(p.scale) ? clampNum(p.scale, 0.001, 1000) : 1;
     params.octaves = finite(p.octaves) ? Math.round(clampNum(p.octaves, 1, MAX_OCTAVES)) : 1;
+  }
+  if (op === "wear") {
+    params.side = p.side === "cavity" ? "cavity" : "edge";
+    params.amount = finite(p.amount) ? clampNum(p.amount, 0, 1) : 0.5;
+    params.sharpness = finite(p.sharpness) ? clampNum(p.sharpness, 1, 64) : 8;
   }
   if (op === "split") params.component = finite(p.component) ? Math.round(clampNum(p.component, 0, 2)) : 0;
   return params;
@@ -328,6 +344,8 @@ export interface GraphContext {
   vy: number;
   vz: number;
   time: number;
+  /** The relief map's curvature here, −1 (cavity) .. 1 (convex edge); 0 without one (I4). */
+  curv: number;
   /** The material's base colour and alpha (factor × texture), 0–1. */
   br: number;
   bg: number;
@@ -416,6 +434,16 @@ export function evaluateGraph(graph: CompiledGraph, ctx: GraphContext, regs: Flo
       case "noise": {
         const scale = step.params.scale as number;
         splat(valueNoise(regs[a]! * scale, regs[a + 1]! * scale, regs[a + 2]! * scale, step.params.octaves as number));
+        break;
+      }
+      case "curvature":
+        splat(ctx.curv);
+        break;
+      case "wear": {
+        const sign = step.params.side === "cavity" ? -1 : 1;
+        const threshold = 1 - (step.params.amount as number);
+        const sharpness = step.params.sharpness as number;
+        each((c, breakup) => Math.min(Math.max((sign * c * breakup - threshold) * sharpness, 0), 1));
         break;
       }
       case "add":
@@ -515,6 +543,8 @@ export interface GraphShaderInputs {
   readonly normal: string;
   readonly view: string;
   readonly time: string;
+  /** The relief's curvature, a float (I4). */
+  readonly curvature: string;
   readonly baseColor: string;
   readonly baseAlpha: string;
   readonly sample: (uv: string) => string;
@@ -640,6 +670,14 @@ export function graphShaderCode(graph: CompiledGraph, lang: "wgsl" | "glsl", inp
       case "noise":
         e = `${v3}(gNoise(${a} * ${num(step.params.scale as number)}, ${step.params.octaves as number}))`;
         break;
+      case "curvature":
+        e = `${v3}(${inputs.curvature})`;
+        break;
+      case "wear": {
+        const sign = step.params.side === "cavity" ? "-" : "";
+        e = `clamp((${sign}${a} * ${b} - ${v3}(${num(1 - (step.params.amount as number))})) * ${num(step.params.sharpness as number)}, ${v3}(0.0), ${v3}(1.0))`;
+        break;
+      }
       case "add":
         e = `${a} + ${b}`;
         break;

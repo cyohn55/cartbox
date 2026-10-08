@@ -34,6 +34,7 @@ type FrameFog = SceneFog & { readonly eye: readonly [number, number, number] };
 import { LIGHTMAP_RANGE } from "../model/lightmap";
 import { DEFAULT_DETAIL_SCALE, DEFAULT_DETAIL_STRENGTH, detailFade, emissiveAnimation } from "../model/materialEffects";
 import { compiledGraphOf, evaluateGraph, graphRegisters, type CompiledGraph, type GraphContext } from "../model/materialGraph";
+import { CLEARCOAT_F0, anisotropicD, curvatureOf, materialHasLayers, parallaxRate, parallaxUv, resolveLayers, uvGradients, type ResolvedLayers } from "../model/materialLayers";
 import { type MeshAsset, computeSmoothNormals, meshBounds } from "../model/MeshAsset";
 
 /** A decoded texture: tightly-packed RGBA rows, `width × height`. */
@@ -83,6 +84,8 @@ export interface RenderMeshOptions {
   readonly detailTextures?: readonly (DecodedTexture | null)[];
   /** Blend-surface maps per primitive (see {@link MeshSceneInstance.blendTextures}). */
   readonly blendTextures?: readonly (DecodedTexture | null)[];
+  /** Relief maps per primitive (see {@link MeshSceneInstance.reliefTextures}). */
+  readonly reliefTextures?: readonly (DecodedTexture | null)[];
   /** Seconds, for animated emissive (see {@link RenderMeshSceneOptions.time}). */
   readonly time?: number;
   /** A surface effect over the mesh's PBR materials (see {@link MeshSceneInstance.effect}). */
@@ -438,6 +441,7 @@ function buildPbrFrag(
   blendTex: DecodedTexture | null = null,
   hasBlend = false,
   effect: SurfaceEffect | null = null,
+  relief: DecodedTexture | null = null,
 ): PbrFrag | null {
   const emissiveFactor = material.emissiveFactor;
   const isPbr =
@@ -447,7 +451,9 @@ function buildPbrFrag(
     material.metallicFactor !== undefined ||
     material.roughnessFactor !== undefined ||
     (emissiveFactor !== undefined && (emissiveFactor[0] > 0 || emissiveFactor[1] > 0 || emissiveFactor[2] > 0)) ||
-    material.graph !== undefined;
+    material.graph !== undefined ||
+    relief !== null ||
+    materialHasLayers(material);
   if (!isPbr) return null;
   const { offset, gain } = emissiveAnimation(material, time);
   const e = emissiveFactor ?? [0, 0, 0];
@@ -484,6 +490,8 @@ function buildPbrFrag(
     camo: Math.max(0, Math.min(1, fx?.camo ?? 0)),
     time,
     graph: compiledGraphOf(material),
+    relief,
+    layers: resolveLayers(material, relief !== null),
   };
 }
 
@@ -783,7 +791,7 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
     options.mrTextures ?? null,
     options.occlusionTextures ?? null,
     options.emissiveTextures ?? null,
-    { lightmap: options.lightmapTextures ?? null, detail: options.detailTextures ?? null, blend: options.blendTextures ?? null, time: options.time ?? 0, effect: options.effect ?? null },
+    { lightmap: options.lightmapTextures ?? null, detail: options.detailTextures ?? null, blend: options.blendTextures ?? null, relief: options.reliefTextures ?? null, time: options.time ?? 0, effect: options.effect ?? null },
     light,
     viewDir,
     ambient,
@@ -800,7 +808,7 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
   // See-through triangles last, farthest first (EP6).
   deferred.sort((a, b) => a.viewDepth - b.viewDepth);
   for (const t of deferred) {
-    rasterizeTriangle(t.a, t.b, t.c, size, size, out, depth, t.texture, t.normalTexture, t.tangent, t.materialTexture, t.pbr, t.base, light, viewDir, ambient, options.environment ?? null, null, options.tonemap ?? null, null, null, DEFAULT_RASTER_STYLE, null, t.alpha);
+    rasterizeTriangle(t.a, t.b, t.c, size, size, out, depth, t.texture, t.normalTexture, t.tangent, t.materialTexture, t.pbr, t.base, light, viewDir, ambient, options.environment ?? null, null, options.tonemap ?? null, null, null, DEFAULT_RASTER_STYLE, null, t.alpha, null, null, t.grads);
   }
 }
 
@@ -861,6 +869,8 @@ export interface MeshSceneInstance {
   readonly detailTextures?: readonly (DecodedTexture | null)[];
   /** Decoded blend-surface maps per primitive ({@link MeshMaterial.blendImage}), or null entries. */
   readonly blendTextures?: readonly (DecodedTexture | null)[];
+  /** Decoded relief maps per primitive ({@link MeshMaterial.reliefImage}: height, curvature), or null entries. */
+  readonly reliefTextures?: readonly (DecodedTexture | null)[];
   /** A surface effect over its (PBR) materials this frame — a shield flare, recharge shimmer or camo (see surfaceEffect.ts). */
   readonly effect?: SurfaceEffect | null;
 }
@@ -1026,7 +1036,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const mrTextures = instance.mrTextures ?? null;
     const occlusionTextures = instance.occlusionTextures ?? null;
     const emissiveTextures = instance.emissiveTextures ?? null;
-    const extras: PrimitiveExtras = { lightmap: instance.lightmapTextures ?? null, detail: instance.detailTextures ?? null, blend: instance.blendTextures ?? null, time, effect: instance.effect ?? null };
+    const extras: PrimitiveExtras = { lightmap: instance.lightmapTextures ?? null, detail: instance.detailTextures ?? null, blend: instance.blendTextures ?? null, relief: instance.reliefTextures ?? null, time, effect: instance.effect ?? null };
     const lightMvp = shadow ? multiply(shadow.lightViewProj, instance.model) : null;
     if (style.zBuffer) {
       drawMesh(instance.mesh, mvp, modelView, instance.model, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, extras, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, lights, style, fog, deferred, localShadows);
@@ -1072,6 +1082,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
         triangle.alpha,
         linear,
         localShadows,
+        triangle.grads,
       );
     }
   }
@@ -1484,6 +1495,10 @@ interface PbrFrag {
   readonly time: number;
   /** The material's graph (EP7), run per pixel, or null. */
   readonly graph: CompiledGraph | null;
+  /** The relief map (I4: R = height, G = curvature), or null. */
+  readonly relief: DecodedTexture | null;
+  /** The clearcoat, anisotropy and parallax depth (I4). */
+  readonly layers: ResolvedLayers;
 }
 
 /** The per-primitive extras a draw may carry beyond the core maps. */
@@ -1491,6 +1506,7 @@ interface PrimitiveExtras {
   readonly lightmap?: readonly (DecodedTexture | null)[] | null;
   readonly detail?: readonly (DecodedTexture | null)[] | null;
   readonly blend?: readonly (DecodedTexture | null)[] | null;
+  readonly relief?: readonly (DecodedTexture | null)[] | null;
   readonly time?: number;
   readonly effect?: SurfaceEffect | null;
 }
@@ -1602,6 +1618,83 @@ interface PendingTriangle {
    * order is farthest-first.
    */
   readonly viewDepth: number;
+  /** The world gradients of u and v across the triangle (I4: parallax and anisotropy), or null when unneeded. */
+  readonly grads: TriangleGrads | null;
+}
+
+/** A triangle's world-space UV gradients (see {@link uvGradients}). */
+interface TriangleGrads {
+  readonly gu: readonly [number, number, number];
+  readonly gv: readonly [number, number, number];
+}
+
+/**
+ * The environment's reflection along `(rx, ry, rz)` from world point
+ * `(px, py, pz)`, blurred toward its average by roughness: inside a reflection
+ * probe's box, the room around it (box-projected from the point), fading to
+ * the sky at the box's faces. Mirrors `envReflect` in both GPU shaders.
+ */
+function environmentReflection(
+  environment: EnvironmentLight,
+  px: number,
+  py: number,
+  pz: number,
+  rx: number,
+  ry: number,
+  rz: number,
+  rough: number,
+): [number, number, number] {
+  let [pr, pg, pb] = sampleEnvironmentDir(environment, rx, ry, rz);
+  let [avr, avg, avb] = environmentAverage(environment);
+  const probes = environment.probes;
+  if (probes) {
+    const hit = pickProbe(probes, px, py, pz);
+    if (hit) {
+      const box = probes.probes[hit.index]!;
+      const [dx, dy, dz] = boxProject(box, px, py, pz, rx, ry, rz);
+      const [qr, qg, qb] = sampleProbe(probes, hit.index, dx, dy, dz);
+      const k = hit.weight;
+      pr += (qr - pr) * k;
+      pg += (qg - pg) * k;
+      pb += (qb - pb) * k;
+      avr += (box.average[0] - avr) * k;
+      avg += (box.average[1] - avg) * k;
+      avb += (box.average[2] - avb) * k;
+    }
+  }
+  return [pr + (avr - pr) * rough, pg + (avg - pg) * rough, pb + (avb - pb) * rough];
+}
+
+/**
+ * The clearcoat's direct reflection of one light (I4): a GGX lobe at the coat's
+ * own roughness about the coat normal, with the lacquer's Fresnel. Returns the
+ * lobe's radiance factor (to multiply by the light) and the Fresnel `fc` that
+ * dims the base beneath. Mirrors `coatTerm` in both GPU shaders.
+ */
+function coatLobe(
+  layers: ResolvedLayers,
+  cx: number,
+  cy: number,
+  cz: number,
+  ndvC: number,
+  lx: number,
+  ly: number,
+  lz: number,
+  hx: number,
+  hy: number,
+  hz: number,
+  vdh: number,
+): { spec: number; fc: number } {
+  const rc = layers.clearcoatRoughness;
+  const ac2 = rc * rc * rc * rc;
+  const kc = ((rc + 1) * (rc + 1)) / 8;
+  const ndl = Math.max(0, cx * lx + cy * ly + cz * lz);
+  const ndh = Math.max(0, cx * hx + cy * hy + cz * hz);
+  const dd = ndh * ndh * (ac2 - 1) + 1;
+  const D = ac2 / (Math.PI * dd * dd + 1e-7);
+  const G = (ndvC / (ndvC * (1 - kc) + kc)) * (ndl / (ndl * (1 - kc) + kc));
+  const fc = CLEARCOAT_F0 + (1 - CLEARCOAT_F0) * Math.pow(1 - vdh, 5);
+  return { spec: layers.clearcoat * fc * ((D * G) / (4 * ndl * ndvC + 1e-4)) * ndl, fc: layers.clearcoat * fc };
 }
 
 /**
@@ -1652,8 +1745,28 @@ function eachTriangle(
       extras?.blend?.[primitiveIndex] ?? null,
       primitive.blend !== undefined,
       extras?.effect ?? null,
+      extras?.relief?.[primitiveIndex] ?? null,
     );
     const [baseR, baseG, baseB, baseA] = primitive.material.baseColorFactor;
+    // The parallax march and anisotropy need the triangle's UV gradients (I4).
+    const needsGrads = pbr !== null && (pbr.layers.parallaxDepth > 0 || pbr.layers.anisotropy !== 0);
+    const triangleGrads = (i0: number, i1: number, i2: number): TriangleGrads | null => {
+      if (!uvs) return null;
+      const edge = (i: number): [number, number, number] => {
+        const x = positions[i * 3]! - positions[i0 * 3]!;
+        const y = positions[i * 3 + 1]! - positions[i0 * 3 + 1]!;
+        const z = positions[i * 3 + 2]! - positions[i0 * 3 + 2]!;
+        return [model[0]! * x + model[4]! * y + model[8]! * z, model[1]! * x + model[5]! * y + model[9]! * z, model[2]! * x + model[6]! * y + model[10]! * z];
+      };
+      return uvGradients(
+        edge(i1),
+        edge(i2),
+        uvs[i1 * 2]! - uvs[i0 * 2]!,
+        uvs[i1 * 2 + 1]! - uvs[i0 * 2 + 1]!,
+        uvs[i2 * 2]! - uvs[i0 * 2]!,
+        uvs[i2 * 2 + 1]! - uvs[i0 * 2 + 1]!,
+      );
+    };
 
     // The world-space surface tangent for one triangle, from its positions and
     // UVs (Lengyel's method), for the TBN frame a normal map is applied in. Only
@@ -1741,12 +1854,13 @@ function eachTriangle(
       // The tangent is constant across the triangle, so compute it once (before
       // clipping) and share it with every clipped piece.
       const tangent = normalTexture ? worldTangent(i0, i1, i2) : null;
+      const grads = needsGrads ? triangleGrads(i0, i1, i2) : null;
       const clipped = clipNear([project(i0), project(i1), project(i2)]);
       for (let c = 0; c < clipped.length; c += 3) {
         const a = clipped[c]!;
         const b = clipped[c + 1]!;
         const cc = clipped[c + 2]!;
-        emit({ a, b, c: cc, texture, normalTexture, tangent, materialTexture, pbr, base, alpha, viewDepth: (a.viewZ + b.viewZ + cc.viewZ) / 3 });
+        emit({ a, b, c: cc, texture, normalTexture, tangent, materialTexture, pbr, base, alpha, viewDepth: (a.viewZ + b.viewZ + cc.viewZ) / 3, grads });
       }
     }
   });
@@ -1831,6 +1945,7 @@ function drawMesh(
         triangle.alpha,
         null,
         localShadows,
+        triangle.grads,
       );
     },
   );
@@ -1866,8 +1981,14 @@ function rasterizeTriangle(
   linear: readonly [number, number] | null = null,
   /** Shadow maps of the lights that cast (EP8c). */
   localShadows: LocalShadows | null = null,
+  /** The triangle's world UV gradients (I4), or null. */
+  grads: TriangleGrads | null = null,
 ): void {
   const soft = linear && alpha.mode >= 2 && alpha.soft > 0 ? alpha.soft : 0;
+  // Parallax occlusion (I4): the relief's height, read where the view ray meets it.
+  const relief = pbr?.relief ?? null;
+  const parallax = relief && grads && pbr!.layers.parallaxDepth > 0 ? pbr!.layers.parallaxDepth : 0;
+  const reliefHeight = relief ? (su: number, sv: number) => sampleTexture(relief, su, sv, style.textureFiltering)[0] / 255 : null;
   // Only the lights that reach this triangle (EP8): a ranged light adds exactly
   // nothing past its range, so the rest can be skipped without changing a pixel.
   const reaching = lights && lights.length > 0 ? lightsReaching(lights, a, b, c) : lights;
@@ -1888,6 +2009,7 @@ function rasterizeTriangle(
         vy: viewDir[1],
         vz: viewDir[2],
         time: pbr!.time,
+        curv: 0,
         br: 1,
         bg: 1,
         bb: 1,
@@ -1966,6 +2088,20 @@ function rasterizeTriangle(
       let nx = pw0 * a.nx + pw1 * b.nx + pw2 * c.nx;
       let ny = pw0 * a.ny + pw1 * b.ny + pw2 * c.ny;
       let nz = pw0 * a.nz + pw1 * b.nz + pw2 * c.nz;
+      // The geometric normal before any normal map: the clearcoat lies over the bumps (I4).
+      const gnx = nx;
+      const gny = ny;
+      const gnz = nz;
+      // Every map is sampled at these UVs: the interpolated ones, or where the
+      // view ray meets the relief (parallax occlusion, I4).
+      let tu = pw0 * a.u + pw1 * b.u + pw2 * c.u;
+      let tv = pw0 * a.v + pw1 * b.v + pw2 * c.v;
+      if (parallax > 0) {
+        const glen = Math.hypot(nx, ny, nz) || 1;
+        const flip = nx * viewDir[0] + ny * viewDir[1] + nz * viewDir[2] < 0 ? -glen : glen;
+        const [du, dv] = parallaxRate(grads!.gu, grads!.gv, [nx / flip, ny / flip, nz / flip], viewDir);
+        [tu, tv] = parallaxUv(tu, tv, du, dv, parallax, reliefHeight!);
+      }
       // |N·L| of the *geometric* normal (before any normal map), for the shadow
       // test's slope bias — the GPU path has no normal maps, so this keeps parity.
       const geoCosL = shadow
@@ -1977,8 +2113,8 @@ function rasterizeTriangle(
       // Absent a normal map or a valid tangent, this is skipped and shading is
       // exactly the geometric-normal path.
       if (normalTexture && tangent) {
-        const u = pw0 * a.u + pw1 * b.u + pw2 * c.u;
-        const v = pw0 * a.v + pw1 * b.v + pw2 * c.v;
+        const u = tu;
+        const v = tv;
         const [snr, sng, snb] = sampleTexture(normalTexture, u, v, style.textureFiltering);
         // Decode RGB -> tangent-space normal in [-1, 1].
         const tnx = (snr / 255) * 2 - 1;
@@ -2037,8 +2173,8 @@ function rasterizeTriangle(
       let bl = base[2] * 255;
       let al = base[3] * 255;
       if (texture) {
-        const u = pw0 * a.u + pw1 * b.u + pw2 * c.u;
-        const v = pw0 * a.v + pw1 * b.v + pw2 * c.v;
+        const u = tu;
+        const v = tv;
         const [tr, tg, tb, ta] = sampleTexture(texture, u, v, style.textureFiltering);
         r = (r * tr) / 255;
         g = (g * tg) / 255;
@@ -2054,8 +2190,9 @@ function rasterizeTriangle(
       let gEb = 0;
       if (graph) {
         const ctx = graphCtx!;
-        ctx.u = pw0 * a.u + pw1 * b.u + pw2 * c.u;
-        ctx.v = pw0 * a.v + pw1 * b.v + pw2 * c.v;
+        ctx.u = tu;
+        ctx.v = tv;
+        ctx.curv = relief ? curvatureOf(sampleTexture(relief, tu, tv, style.textureFiltering)[1]) : 0;
         ctx.px = pw0 * a.wx + pw1 * b.wx + pw2 * c.wx;
         ctx.py = pw0 * a.wy + pw1 * b.wy + pw2 * c.wy;
         ctx.pz = pw0 * a.wz + pw1 * b.wz + pw2 * c.wz;
@@ -2107,8 +2244,8 @@ function rasterizeTriangle(
         // correct HDR pipeline is a later phase (AAA_TIER_ROADMAP.md 2b/4). The
         // ambient term is a flat IBL stand-in until real image-based lighting
         // lands in Phase 3.
-        const u = pw0 * a.u + pw1 * b.u + pw2 * c.u;
-        const v = pw0 * a.v + pw1 * b.v + pw2 * c.v;
+        const u = tu;
+        const v = tv;
         // Normalise N and flip it toward the viewer, so imported geometry of
         // either winding lights correctly (two-sided).
         const nlen = Math.hypot(nx, ny, nz) || 1;
@@ -2135,6 +2272,50 @@ function rasterizeTriangle(
         if (gRough >= 0) rough = gRough;
         rough = Math.min(1, Math.max(0.045, rough)); // clamp: perfectly-smooth NDF blows up
         const ao = pbr.occ ? sampleTexture(pbr.occ, u, v, style.textureFiltering)[0] / 255 : 1;
+        // Anisotropy (I4): the grain's tangent, U's gradient laid in the surface
+        // and turned about N, and the bitangent across it. Without a usable
+        // gradient the highlight stays round.
+        const layers = pbr.layers;
+        let aniso = 0;
+        let Tx = 0;
+        let Ty = 0;
+        let Tz = 0;
+        let Bx = 0;
+        let By = 0;
+        let Bz = 0;
+        if (layers.anisotropy !== 0 && grads) {
+          const [gx, gy, gz] = grads.gu;
+          const gd = gx * Nx + gy * Ny + gz * Nz;
+          const ux = gx - Nx * gd;
+          const uy = gy - Ny * gd;
+          const uz = gz - Nz * gd;
+          const ul = Math.hypot(ux, uy, uz);
+          if (ul > 1e-8) {
+            const t0x = ux / ul;
+            const t0y = uy / ul;
+            const t0z = uz / ul;
+            const b0x = Ny * t0z - Nz * t0y;
+            const b0y = Nz * t0x - Nx * t0z;
+            const b0z = Nx * t0y - Ny * t0x;
+            const cr = layers.anisotropyCos;
+            const sr = layers.anisotropySin;
+            Tx = cr * t0x + sr * b0x;
+            Ty = cr * t0y + sr * b0y;
+            Tz = cr * t0z + sr * b0z;
+            Bx = Ny * Tz - Nz * Ty;
+            By = Nz * Tx - Nx * Tz;
+            Bz = Nx * Ty - Ny * Tx;
+            aniso = layers.anisotropy;
+          }
+        }
+        // The clearcoat's normal (I4): the geometric one, facing the viewer.
+        const cc = layers.clearcoat;
+        const glen = Math.hypot(gnx, gny, gnz) || 1;
+        const gflip = gnx * viewDir[0] + gny * viewDir[1] + gnz * viewDir[2] < 0 ? -glen : glen;
+        const Cx = gnx / gflip;
+        const Cy = gny / gflip;
+        const Cz = gnz / gflip;
+        const ndvC = Math.max(1e-4, Cx * viewDir[0] + Cy * viewDir[1] + Cz * viewDir[2]);
         let ar = r / 255;
         let ag = g / 255;
         let ab = bl / 255;
@@ -2170,7 +2351,7 @@ function rasterizeTriangle(
         const vdh = Math.max(0, viewDir[0] * hx + viewDir[1] * hy + viewDir[2] * hz);
         const a2 = rough * rough * rough * rough; // (rough^2)^2 for the GGX NDF
         const dd = ndh * ndh * (a2 - 1) + 1;
-        const D = a2 / (Math.PI * dd * dd + 1e-7);
+        const D = aniso !== 0 ? anisotropicD(rough, aniso, Tx * hx + Ty * hy + Tz * hz, Bx * hx + By * hy + Bz * hz, ndh) : a2 / (Math.PI * dd * dd + 1e-7);
         const k = ((rough + 1) * (rough + 1)) / 8; // Schlick-GGX (direct lighting)
         const G = (ndv / (ndv * (1 - k) + k)) * (ndl / (ndl * (1 - k) + k));
         const fp = Math.pow(1 - vdh, 5); // Fresnel-Schlick
@@ -2208,38 +2389,50 @@ function rasterizeTriangle(
         if (environment) {
           const [ir, ig, ib] = sampleEnvironmentDir(environment, Nx, Ny, Nz);
           // Reflection of the view direction about N (N already faces the viewer).
-          const rx = 2 * ndv * Nx - viewDir[0];
-          const ry = 2 * ndv * Ny - viewDir[1];
-          const rz = 2 * ndv * Nz - viewDir[2];
-          let [pr, pg, pb] = sampleEnvironmentDir(environment, rx, ry, rz);
-          let [avr, avg, avb] = environmentAverage(environment);
+          // Brushed metal (I4) reflects about a normal bent across its grain, so
+          // the reflection streaks the way its highlights do.
+          let bx = Nx;
+          let by = Ny;
+          let bz = Nz;
+          let bdv = ndv;
+          if (aniso !== 0) {
+            const dx = aniso > 0 ? Bx : Tx;
+            const dy = aniso > 0 ? By : Ty;
+            const dz = aniso > 0 ? Bz : Tz;
+            const atx = dy * viewDir[2] - dz * viewDir[1];
+            const aty = dz * viewDir[0] - dx * viewDir[2];
+            const atz = dx * viewDir[1] - dy * viewDir[0];
+            const anx = aty * dz - atz * dy;
+            const any = atz * dx - atx * dz;
+            const anz = atx * dy - aty * dx;
+            const bend = Math.abs(aniso) * Math.min(1, 4 * rough);
+            bx = Nx + (anx - Nx) * bend;
+            by = Ny + (any - Ny) * bend;
+            bz = Nz + (anz - Nz) * bend;
+            const bl = Math.hypot(bx, by, bz) || 1;
+            bx /= bl;
+            by /= bl;
+            bz /= bl;
+            bdv = bx * viewDir[0] + by * viewDir[1] + bz * viewDir[2];
+          }
+          const px = pw0 * a.wx + pw1 * b.wx + pw2 * c.wx;
+          const py = pw0 * a.wy + pw1 * b.wy + pw2 * c.wy;
+          const pz = pw0 * a.wz + pw1 * b.wz + pw2 * c.wz;
           // Inside a reflection probe's box, the reflection is the room around
           // it (box-projected from this point), fading to the sky at the box's faces.
-          const probes = environment.probes;
-          if (probes) {
-            const px = pw0 * a.wx + pw1 * b.wx + pw2 * c.wx;
-            const py = pw0 * a.wy + pw1 * b.wy + pw2 * c.wy;
-            const pz = pw0 * a.wz + pw1 * b.wz + pw2 * c.wz;
-            const hit = pickProbe(probes, px, py, pz);
-            if (hit) {
-              const box = probes.probes[hit.index]!;
-              const [dx, dy, dz] = boxProject(box, px, py, pz, rx, ry, rz);
-              const [qr, qg, qb] = sampleProbe(probes, hit.index, dx, dy, dz);
-              const k = hit.weight;
-              pr += (qr - pr) * k;
-              pg += (qg - pg) * k;
-              pb += (qb - pb) * k;
-              avr += (box.average[0] - avr) * k;
-              avg += (box.average[1] - avg) * k;
-              avb += (box.average[2] - avb) * k;
-            }
-          }
-          const specR = pr + (avr - pr) * rough;
-          const specG = pg + (avg - pg) * rough;
-          const specB = pb + (avb - pb) * rough;
+          const [specR, specG, specB] = environmentReflection(environment, px, py, pz, 2 * bdv * bx - viewDir[0], 2 * bdv * by - viewDir[1], 2 * bdv * bz - viewDir[2], rough);
           ambR = (ir * ar * kdm + specR * f0r * reflect) * ao;
           ambG = (ig * ag * kdm + specG * f0g * reflect) * ao;
           ambB = (ib * ab * kdm + specB * f0b * reflect) * ao;
+          // The clearcoat (I4) reflects the room sharply about its own normal,
+          // and what it reflects the base beneath no longer receives.
+          if (cc > 0) {
+            const [cr, cg, cb] = environmentReflection(environment, px, py, pz, 2 * ndvC * Cx - viewDir[0], 2 * ndvC * Cy - viewDir[1], 2 * ndvC * Cz - viewDir[2], layers.clearcoatRoughness);
+            const fv = cc * (CLEARCOAT_F0 + (1 - CLEARCOAT_F0) * Math.pow(1 - ndvC, 5));
+            ambR = ambR * (1 - fv) + fv * cr * reflect * ao;
+            ambG = ambG * (1 - fv) + fv * cg * reflect * ao;
+            ambB = ambB * (1 - fv) + fv * cb * reflect * ao;
+          }
         } else {
           ambR = ambient * ar * ao;
           ambG = ambient * ag * ao;
@@ -2332,7 +2525,7 @@ function rasterizeTriangle(
             const ndhL = Math.max(0, Nx * hxL + Ny * hyL + Nz * hzL);
             const vdhL = Math.max(0, viewDir[0] * hxL + viewDir[1] * hyL + viewDir[2] * hzL);
             const ddL = ndhL * ndhL * (a2 - 1) + 1;
-            const DL = a2 / (Math.PI * ddL * ddL + 1e-7);
+            const DL = aniso !== 0 ? anisotropicD(rough, aniso, Tx * hxL + Ty * hyL + Tz * hzL, Bx * hxL + By * hyL + Bz * hzL, ndhL) : a2 / (Math.PI * ddL * ddL + 1e-7);
             const GL = (ndv / (ndv * (1 - k) + k)) * (ndlL / (ndlL * (1 - k) + k));
             const fpL = Math.pow(1 - vdhL, 5);
             const specL = (DL * GL) / (4 * ndlL * ndv + 1e-4);
@@ -2344,6 +2537,15 @@ function rasterizeTriangle(
             // A light that casts (EP8c) tests the point against its own maps.
             const occl = lgt.kind === "directional" ? shadowLit : lgt.shadowTile !== undefined && localShadows ? localShadowVisibility(localShadows, lgt.shadowTile, lgt, wx, wy, wz, ndlL) : 1;
             const w = lgt.intensity * atten * ndlL * occl;
+            if (cc > 0) {
+              // The clearcoat's own highlight, over a base its Fresnel dims (I4).
+              const coat = coatLobe(layers, Cx, Cy, Cz, ndvC, Lx, Ly, Lz, hxL, hyL, hzL, vdhL);
+              const wc = lgt.intensity * atten * occl;
+              dR += ((kdm * (1 - FrL) * ar + FrL * specL) * w * (1 - coat.fc) + coat.spec * wc) * lgt.color[0]!;
+              dG += ((kdm * (1 - FgL) * ag + FgL * specL) * w * (1 - coat.fc) + coat.spec * wc) * lgt.color[1]!;
+              dB += ((kdm * (1 - FbL) * ab + FbL * specL) * w * (1 - coat.fc) + coat.spec * wc) * lgt.color[2]!;
+              continue;
+            }
             dR += (kdm * (1 - FrL) * ar + FrL * specL) * lgt.color[0]! * w;
             dG += (kdm * (1 - FgL) * ag + FgL * specL) * lgt.color[1]! * w;
             dB += (kdm * (1 - FbL) * ab + FbL * specL) * lgt.color[2]! * w;
@@ -2351,6 +2553,12 @@ function rasterizeTriangle(
           lr = dR + ambR + er;
           lg = dG + ambG + eg;
           lb = dB + ambB + eb;
+        } else if (cc > 0) {
+          // The clearcoat's own highlight, over a base its Fresnel dims (I4).
+          const coat = coatLobe(layers, Cx, Cy, Cz, ndvC, light[0], light[1], light[2], hx, hy, hz, vdh);
+          lr = ((kdm * (1 - Fr) * ar + Fr * specD) * ndl * (1 - coat.fc) + coat.spec) * shadowLit + ambR + er;
+          lg = ((kdm * (1 - Fg) * ag + Fg * specD) * ndl * (1 - coat.fc) + coat.spec) * shadowLit + ambG + eg;
+          lb = ((kdm * (1 - Fb) * ab + Fb * specD) * ndl * (1 - coat.fc) + coat.spec) * shadowLit + ambB + eb;
         } else {
           lr = (kdm * (1 - Fr) * ar + Fr * specD) * ndl * shadowLit + ambR + er;
           lg = (kdm * (1 - Fg) * ag + Fg * specD) * ndl * shadowLit + ambG + eg;
@@ -2406,8 +2614,8 @@ function rasterizeTriangle(
         let glint = 0;
         let emissive = 0;
         if (materialTexture) {
-          const u = pw0 * a.u + pw1 * b.u + pw2 * c.u;
-          const v = pw0 * a.v + pw1 * b.v + pw2 * c.v;
+          const u = tu;
+          const v = tv;
           const [, spec, rough, emis] = sampleTexture(materialTexture, u, v, style.textureFiltering);
           const specStrength = spec / 255;
           emissive = emis / 255;

@@ -65,6 +65,11 @@ import {
   DEFAULT_RASTER_STYLE,
   DETAIL_FAR,
   DETAIL_NEAR,
+  ANISOTROPY_MIN_ALPHA,
+  CLEARCOAT_F0,
+  PARALLAX_MIN_NDV,
+  PARALLAX_STEPS,
+  resolveLayers,
   LIGHTMAP_RANGE,
   MAX_REFLECTION_PROBES,
   PROBE_FADE,
@@ -157,11 +162,12 @@ function graphSites(graph: CompiledGraph | null): { fns: string; base: string; p
   if (!graph) return { fns: "", base: "", pbr: "", emis: "" };
   const out = graph.outputs;
   const code = graphShaderCode(graph, "wgsl", {
-    uv: "in.uv",
+    uv: "puv",
     position: "in.worldPos",
     normal: "gN",
     view: "u.view.xyz",
     time: "u.effect1.w",
+    curvature: "gCurv",
     baseColor: "colour.rgb",
     baseAlpha: "colour.a",
     sample: (p) => `textureSample(tex, samp, vec2<f32>((${p}).x, 1.0 - (${p}).y))`,
@@ -182,6 +188,8 @@ function graphSites(graph: CompiledGraph | null): { fns: string; base: string; p
   {
     var gN = normalize(in.normal);
     if (dot(gN, u.view.xyz) < 0.0) { gN = -gN; }
+    // The relief's curvature for wear masks (I4): occTex's B, −1..1.
+    let gCurv = select(0.0, textureSample(occTex, samp, uv).b * 2.0 - 1.0, u.layer1.z > 0.5);
 ${code.split("\n").map((l) => `    ${l}`).join("\n")}
 ${set.map((l) => `    ${l}`).join("\n")}
   }`,
@@ -277,6 +285,8 @@ struct Uniforms {
   fogVol: array<vec4<f32>, 8>, // per volume: min xyz + density, max xyz + falloff
   effect0: vec4<f32>,   // rgb = surface effect glow, w = camo amount
   effect1: vec4<f32>,   // rgb = surface effect bands, w = time
+  layer0: vec4<f32>,    // x = clearcoat, y = its roughness, z = anisotropy, w = parallax depth (I4)
+  layer1: vec4<f32>,    // xy = anisotropy rotation (cos, sin), z = 1 when the relief rides in occTex's G and B
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -586,6 +596,98 @@ fn probeLight(P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
        + w.z * probeFace(select(5, 4, nn.z >= 0.0), i, f);
 }
 
+
+// --- Layers and relief (HALO_INFINITE_STYLE_ROADMAP.md I4; materialLayers.ts) ---
+// The world gradients of u and v, from screen derivatives and the normal: the
+// in-plane vectors whose dot with a step across the surface is its change in
+// u (and v). Mirrors uvGradients.
+struct Grads {
+  gu: vec3<f32>,
+  gv: vec3<f32>,
+};
+fn uvGrads(n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, duv1: vec2<f32>, duv2: vec2<f32>) -> Grads {
+  let a = cross(dp2, n);
+  let b = cross(n, dp1);
+  let det = dot(dp1, a);
+  if (abs(det) < 1e-20) { return Grads(vec3<f32>(0.0), vec3<f32>(0.0)); }
+  return Grads((a * duv1.x + b * duv2.x) / det, (a * duv1.y + b * duv2.y) / det);
+}
+// The relief's height at a glTF UV (occTex's G, see occlusionWithRelief), at
+// level 0 so it can be read inside the march.
+fn reliefHeight(p: vec2<f32>) -> f32 {
+  return textureSampleLevel(occTex, samp, vec2<f32>(p.x, 1.0 - p.y), 0.0).g;
+}
+// Parallax occlusion: where the view ray meets the relief — parallaxUv, line for line.
+fn parallaxUv(uv0: vec2<f32>, rate: vec2<f32>, depth: f32) -> vec2<f32> {
+  let layer = 1.0 / ${PARALLAX_STEPS}.0;
+  let st = rate * depth * layer;
+  var c = uv0;
+  var cur = 0.0;
+  var below = 1.0 - reliefHeight(c);
+  for (var i = 0; i < ${PARALLAX_STEPS}; i = i + 1) {
+    if (cur >= below) { break; }
+    c = c + st;
+    cur = cur + layer;
+    below = 1.0 - reliefHeight(c);
+  }
+  let after = below - cur;
+  let before = 1.0 - reliefHeight(c - st) - (cur - layer);
+  let span = after - before;
+  var w = 0.0;
+  if (abs(span) > 1e-6) { w = after / span; }
+  return c - st * w;
+}
+// The anisotropic GGX distribution (anisotropicD).
+fn anisoD(rough: f32, aniso: f32, toh: f32, boh: f32, ndh: f32) -> f32 {
+  let alpha = rough * rough;
+  let at = max(alpha * (1.0 + aniso), ${ANISOTROPY_MIN_ALPHA});
+  let ab = max(alpha * (1.0 - aniso), ${ANISOTROPY_MIN_ALPHA});
+  let a2 = at * ab;
+  let d = vec3<f32>(ab * toh, at * boh, a2 * ndh);
+  let b2 = a2 / (dot(d, d) + 1e-12);
+  return a2 * b2 * b2 / 3.14159265;
+}
+// This fragment's anisotropy frame (set in fs, read by lightTerm).
+var<private> aniso: f32;
+var<private> aT: vec3<f32>;
+var<private> aB: vec3<f32>;
+// The clearcoat's lobe for one light (coatLobe): x = its radiance factor, y = the Fresnel dimming the base.
+fn coatTerm(N: vec3<f32>, ndv: f32, Ld: vec3<f32>, H: vec3<f32>, vdh: f32) -> vec2<f32> {
+  let rc = u.layer0.y;
+  let ac2 = rc * rc * rc * rc;
+  let kc = ((rc + 1.0) * (rc + 1.0)) / 8.0;
+  let ndl = max(0.0, dot(N, Ld));
+  let ndh = max(0.0, dot(N, H));
+  let dd = ndh * ndh * (ac2 - 1.0) + 1.0;
+  let D = ac2 / (3.14159265 * dd * dd + 1e-7);
+  let G = (ndv / (ndv * (1.0 - kc) + kc)) * (ndl / (ndl * (1.0 - kc) + kc));
+  let fc = ${CLEARCOAT_F0} + (1.0 - ${CLEARCOAT_F0}) * pow(1.0 - vdh, 5.0);
+  return vec2<f32>(u.layer0.x * fc * (D * G) / (4.0 * ndl * ndv + 1e-4) * ndl, u.layer0.x * fc);
+}
+// The environment's reflection along R from P, blurred toward its average by
+// roughness: inside a reflection probe's box (the smallest first), the room
+// around it, box-projected from this point, fading to the sky at the box's
+// faces — mirroring environmentReflection and pickProbe/boxProject.
+fn envReflect(P: vec3<f32>, R: vec3<f32>, rough: f32) -> vec3<f32> {
+  var spec = envColorDir(R);
+  var specAvg = envAverage();
+  let pc = i32(u.ssaoMeta.w + 0.5);
+  for (var i = 0; i < pc; i = i + 1) {
+    let pr = probes[i];
+    let inside = min(min(min(P.x - pr.mn.x, pr.mx.x - P.x), min(P.y - pr.mn.y, pr.mx.y - P.y)), min(P.z - pr.mn.z, pr.mx.z - P.z));
+    let wgt = clamp(inside / ${PROBE_FADE.toFixed(4)}, 0.0, 1.0);
+    if (wgt > 0.0) {
+      let Rs = select(R, vec3<f32>(1e-6), abs(R) < vec3<f32>(1e-6));
+      let tf = max((pr.mx.xyz - P) / Rs, (pr.mn.xyz - P) / Rs);
+      let t = max(0.0, min(min(tf.x, tf.y), tf.z));
+      spec = mix(spec, probeSample(i, P + R * t - pr.pos.xyz), wgt);
+      specAvg = mix(specAvg, pr.avg.xyz, wgt);
+      break;
+    }
+  }
+  return mix(spec, specAvg, rough);
+}
+
 // One light's direct term (Cook-Torrance), mirroring the software rasteriser's
 // light loop: point and spot lights fall off to nothing at their range, a spot
 // fades across its cone, and directional lights honour the sun shadow (sf).
@@ -611,7 +713,8 @@ fn lightTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, a2:
   let ndhL = max(0.0, dot(N, Hl));
   let vdhL = max(0.0, dot(V, Hl));
   let ddL = ndhL * ndhL * (a2 - 1.0) + 1.0;
-  let DL = a2 / (3.14159265 * ddL * ddL + 1e-7);
+  var DL = a2 / (3.14159265 * ddL * ddL + 1e-7);
+  if (aniso != 0.0) { DL = anisoD(sqrt(sqrt(a2)), aniso, dot(aT, Hl), dot(aB, Hl), ndhL); }
   let GL = (ndv / (ndv * (1.0 - k) + k)) * (ndlL / (ndlL * (1.0 - k) + k));
   let fpL = pow(1.0 - vdhL, 5.0);
   let specL = (DL * GL) / (4.0 * ndlL * ndv + 1e-4);
@@ -620,7 +723,13 @@ fn lightTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, a2:
   if (lgt.d0.w < 0.5) { occl = sf; }
   else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occl = localShadow(i32(lgt.d2.w + 0.5), lgt, P, ndlL); }
   let w = lgt.d1.w * atten * ndlL * occl;
-  return (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
+  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
+  if (u.layer0.x > 0.0) {
+    // The clearcoat's own highlight, over a base its Fresnel dims (I4).
+    let c = coatTerm(N, ndv, Ld, Hl, vdhL);
+    return lit * (1.0 - c.y) + c.x * lgt.d1.rgb * (lgt.d1.w * atten * occl);
+  }
+  return lit;
 }
 
 fn envAverage() -> vec3<f32> {
@@ -659,8 +768,24 @@ fn vs(
 ${g.fns}
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4<f32> {
+  // The surface's screen derivatives, for the UV gradients parallax and
+  // anisotropy need (I4) — taken here, in uniform control flow.
+  let dp1 = dpdx(in.worldPos);
+  let dp2 = dpdy(in.worldPos);
+  let duv1 = dpdx(in.uv);
+  let duv2 = dpdy(in.uv);
+  // Every map is sampled at puv: the interpolated UVs, or where the view ray
+  // meets the relief (parallax occlusion, I4).
+  var puv = in.uv;
+  if (u.pbr.z > 0.5 && u.layer0.w > 0.0) {
+    var pn = normalize(in.normal);
+    if (dot(pn, u.view.xyz) < 0.0) { pn = -pn; }
+    let pg = uvGrads(pn, dp1, dp2, duv1, duv2);
+    let pv = max(${PARALLAX_MIN_NDV}, dot(pn, u.view.xyz));
+    puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w);
+  }
   // glTF's V origin is top-left, so flip; the sampler wraps and (per era) filters.
-  let uv = vec2<f32>(in.uv.x, 1.0 - in.uv.y);
+  let uv = vec2<f32>(puv.x, 1.0 - puv.y);
 
   var colour = u.base;
   if (u.texflags.x > 0.5) {
@@ -704,6 +829,19 @@ ${g.pbr}
     rough = clamp(rough, 0.045, 1.0); // a perfectly-smooth NDF blows up
     var ao = 1.0;
     if (u.texflags.z > 0.5) { ao = textureSample(occTex, samp, uv).r; }
+    // Anisotropy (I4): the grain's tangent, U's gradient laid in the surface and
+    // turned about N, and the bitangent across it (round without a gradient).
+    aniso = 0.0;
+    if (u.layer0.z != 0.0) {
+      let ag = uvGrads(N, dp1, dp2, duv1, duv2);
+      let t0 = ag.gu - N * dot(ag.gu, N);
+      if (length(t0) > 1e-8) {
+        let tn = normalize(t0);
+        aT = u.layer1.x * tn + u.layer1.y * cross(N, tn);
+        aB = cross(N, aT);
+        aniso = u.layer0.z;
+      }
+    }
     var albedo = colour.rgb;
     // A second surface blended in by the vertex weight (snow drifting over rock).
     let blendTexel = textureSample(blendTex, samp, uv).rgb;
@@ -715,7 +853,7 @@ ${g.pbr}
     // A detail map, tiled finely and blended in up close (mid-grey neutral),
     // fading with eye depth — mirrors the software path.
     let dk = u.surface0.y * clamp((${DETAIL_FAR.toFixed(4)} - in.eyeDepth) / ${(DETAIL_FAR - DETAIL_NEAR).toFixed(4)}, 0.0, 1.0);
-    let detail = textureSample(detailTex, samp, vec2<f32>(in.uv.x * u.surface0.x, 1.0 - in.uv.y * u.surface0.x)).rgb;
+    let detail = textureSample(detailTex, samp, vec2<f32>(puv.x * u.surface0.x, 1.0 - puv.y * u.surface0.x)).rgb;
     if (dk > 0.0) { albedo = albedo * (vec3<f32>(1.0) + dk * (2.0 * detail - vec3<f32>(1.0))); }
     let L = u.light.xyz;
     let V = u.view.xyz;
@@ -726,7 +864,8 @@ ${g.pbr}
     let vdh = max(0.0, dot(V, H));
     let a2 = rough * rough * rough * rough;   // (rough^2)^2 for the GGX NDF
     let dd = ndh * ndh * (a2 - 1.0) + 1.0;
-    let D = a2 / (3.14159265 * dd * dd + 1e-7);
+    var D = a2 / (3.14159265 * dd * dd + 1e-7);
+    if (aniso != 0.0) { D = anisoD(rough, aniso, dot(aT, H), dot(aB, H), ndh); }
     let k = ((rough + 1.0) * (rough + 1.0)) / 8.0; // Schlick-GGX (direct)
     let G = (ndv / (ndv * (1.0 - k) + k)) * (ndl / (ndl * (1.0 - k) + k));
     let fp = pow(1.0 - vdh, 5.0);              // Fresnel-Schlick
@@ -738,7 +877,7 @@ ${g.pbr}
     let ef = u.emissive.xyz;
     if (ef.r > 0.0 || ef.g > 0.0 || ef.b > 0.0) {
       var es = vec3<f32>(1.0);
-      if (u.texflags.w > 0.5) { es = textureSample(emisTex, samp, vec2<f32>(in.uv.x + u.surface1.x, 1.0 - (in.uv.y + u.surface1.y))).rgb; }
+      if (u.texflags.w > 0.5) { es = textureSample(emisTex, samp, vec2<f32>(puv.x + u.surface1.x, 1.0 - (puv.y + u.surface1.y))).rgb; }
       emis = ef * es;
     }
 ${g.emis}
@@ -746,32 +885,28 @@ ${g.emis}
     // environment, a diffuse irradiance along N + a specular reflection along R
     // blurred toward the average by roughness; without one, the flat ambient.
 ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0);\n" : ""}    var amb: vec3<f32>;
+    var coatV = 0.0;
     if (u.envSky.w > 0.5) {
       let irr = envColorDir(N);
-      let R = 2.0 * ndv * N - V;
-      var spec = envColorDir(R);
-      var specAvg = envAverage();
-      // Inside a reflection probe's box (the smallest first), reflect the room
-      // around it, box-projected from this point, fading to the sky at the box's
-      // faces — mirroring pickProbe/boxProject in probeSampling.ts.
-      let pc = i32(u.ssaoMeta.w + 0.5);
-      let P = in.worldPos;
-      for (var i = 0; i < pc; i = i + 1) {
-        let pr = probes[i];
-        let inside = min(min(min(P.x - pr.mn.x, pr.mx.x - P.x), min(P.y - pr.mn.y, pr.mx.y - P.y)), min(P.z - pr.mn.z, pr.mx.z - P.z));
-        let wgt = clamp(inside / ${PROBE_FADE.toFixed(4)}, 0.0, 1.0);
-        if (wgt > 0.0) {
-          let Rs = select(R, vec3<f32>(1e-6), abs(R) < vec3<f32>(1e-6));
-          let tf = max((pr.mx.xyz - P) / Rs, (pr.mn.xyz - P) / Rs);
-          let t = max(0.0, min(min(tf.x, tf.y), tf.z));
-          spec = mix(spec, probeSample(i, P + R * t - pr.pos.xyz), wgt);
-          specAvg = mix(specAvg, pr.avg.xyz, wgt);
-          break;
-        }
+      // Brushed metal (I4) reflects about a normal bent across its grain.
+      var Rn = N;
+      if (aniso != 0.0) {
+        let ad = select(aT, aB, aniso > 0.0);
+        let an = cross(cross(ad, V), ad);
+        Rn = normalize(mix(N, an, abs(aniso) * min(1.0, 4.0 * rough)));
       }
-      let pref = mix(spec, specAvg, rough);
+      var rdv = ndv;
+      if (aniso != 0.0) { rdv = dot(Rn, V); }
+      let pref = envReflect(in.worldPos, 2.0 * rdv * Rn - V, rough);
       amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;
-${reflect ? "      envSpec = pref * f0 * reflectK * ao;\n      envSeen = pref;\n" : ""}    } else {
+${reflect ? "      envSpec = pref * f0 * reflectK * ao;\n      envSeen = pref;\n" : ""}      // The clearcoat (I4) reflects the room sharply about its own normal, and
+      // what it reflects the base beneath no longer receives.
+      if (u.layer0.x > 0.0) {
+        let prefC = envReflect(in.worldPos, 2.0 * ndv * N - V, u.layer0.y);
+        coatV = u.layer0.x * (${CLEARCOAT_F0} + (1.0 - ${CLEARCOAT_F0}) * pow(1.0 - ndv, 5.0));
+        amb = amb * (1.0 - coatV) + coatV * prefC * reflectK * ao;
+${reflect ? "        envSpec = envSpec * (1.0 - coatV) + coatV * prefC * reflectK * ao;\n" : ""}      }
+    } else {
       amb = vec3<f32>(u.light.w) * albedo * ao;
     }
 ${reflect ? "    let ambRaw = amb;\n" : ""}    // A baked light map (the second UV set) scales the sky/ambient fill by how
@@ -810,6 +945,10 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
         }
       }
       lit = direct + amb + emis;
+    } else if (u.layer0.x > 0.0) {
+      // The clearcoat's own highlight, over a base its Fresnel dims (I4).
+      let c = coatTerm(N, ndv, L, H, vdh);
+      lit = ((kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
     } else {
       lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
     }
@@ -828,8 +967,8 @@ ${wgslDisplay("without")}
     var seen = envSeen;
     if (u.tonemap.x > 0.5) { seen = vec3<f32>(aces(seen.r * u.tonemap.y), aces(seen.g * u.tonemap.y), aces(seen.b * u.tonemap.y)); }
     seen = clamp(seen, vec3<f32>(0.0), vec3<f32>(1.0));
-    let weight = f0 * reflectK * ao * occl;
-    reflectOut = vec4<f32>(clamp(select(weight, contribution / max(seen, vec3<f32>(1e-3)), seen > vec3<f32>(0.02)), vec3<f32>(0.0), vec3<f32>(1.0)), rough);
+    let weight = (f0 * (1.0 - coatV) + vec3<f32>(coatV)) * reflectK * ao * occl;
+    reflectOut = vec4<f32>(clamp(select(weight, contribution / max(seen, vec3<f32>(1e-3)), seen > vec3<f32>(0.02)), vec3<f32>(0.0), vec3<f32>(1.0)), mix(rough, u.layer0.y, u.layer0.x));
     envOut = vec4<f32>(contribution, 1.0);` : ""}
     return finishAlpha(shaded, colour.a);
   }
@@ -1557,6 +1696,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           weights: entry.primitive.blend !== undefined,
           textured: entry.textures.blend !== null,
         }),
+        layers: resolveLayers(entry.primitive.material, entry.textures.relief !== null),
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);

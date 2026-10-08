@@ -51,6 +51,7 @@ import {
 import { SoftwareSceneRenderer, WebgpuSceneRenderer, type SceneDraw } from "@cartbox/player";
 
 import { graphInstances } from "./helpers/graphScenes";
+import { LAYER_ENVIRONMENT, LAYER_LIGHTS, layerInstances } from "./helpers/layerScenes";
 import { localShadowRig } from "./helpers/localShadowScene";
 import { manyLights } from "./helpers/manyLights";
 import { probeRig } from "./helpers/probeScene";
@@ -427,6 +428,46 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     expect(coverage).toBe(0);
     expect(maxDelta).toBeLessThanOrEqual(6);
     renderer.dispose();
+  });
+
+  it("shades clearcoat, brushed metal, parallax relief and wear masks like the software rasteriser (I4)", async () => {
+    const mat = (m: Record<string, unknown>) => {
+      const q = quad();
+      return { ...q, primitives: [{ ...q.primitives[0]!, material: { ...q.primitives[0]!.material, ...m } }] };
+    };
+    const instances = layerInstances(mat);
+    for (const [name, frame] of [
+      ["key light", (): SceneDraw => ({ ...draw(), lightDirection: [0.4, 0.8, 0.6], environment: LAYER_ENVIRONMENT })],
+      ["light list", (): SceneDraw => ({ ...draw(), environment: LAYER_ENVIRONMENT, lights: LAYER_LIGHTS })],
+    ] as const) {
+      const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+      renderer.render(instances, frame());
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        device.tick?.();
+      }
+      const gpu = frame();
+      renderer.render(instances, gpu);
+      const software = frame();
+      new SoftwareSceneRenderer().render(instances, software);
+      let drawn = 0;
+      let coverage = 0;
+      let far = 0;
+      for (let p = 0; p < W * H; p += 1) {
+        if (software.out[p * 4]! + software.out[p * 4 + 1]! + software.out[p * 4 + 2]! > 0) drawn += 1;
+        if ((gpu.out[p * 4 + 3] === 0) !== (software.out[p * 4 + 3] === 0)) coverage += 1;
+        let worst = 0;
+        for (let c = 0; c < 3; c += 1) worst = Math.max(worst, Math.abs(gpu.out[p * 4 + c]! - software.out[p * 4 + c]!));
+        if (worst > 8) far += 1;
+      }
+      expect(drawn, name).toBeGreaterThan(400);
+      expect(coverage, name).toBe(0);
+      // The parallax march steps by the screen's UV derivatives on the GPU and
+      // the triangle's exact gradients on the CPU, so a step can land on the
+      // other side of a relief texel: a few pixels may differ, the rest match.
+      expect(far, name).toBeLessThanOrEqual(drawn * 0.03);
+      renderer.dispose();
+    }
   });
 
   it("matches the software rasteriser on image-based lighting (within float tolerance)", async () => {

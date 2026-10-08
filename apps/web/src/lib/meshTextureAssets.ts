@@ -83,7 +83,7 @@ function bytesToBase64(bytes: Uint8Array): string {
 }
 
 /** The material fields that hold an image in a serialized mesh. */
-const IMAGE_FIELDS = ["image", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage", "blendImage"] as const;
+const IMAGE_FIELDS = ["image", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage", "blendImage", "reliefImage"] as const;
 
 type Payload = { primitives?: { material?: Record<string, unknown> }[] };
 

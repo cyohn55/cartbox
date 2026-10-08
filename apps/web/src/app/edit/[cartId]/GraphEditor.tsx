@@ -60,7 +60,7 @@ const PREVIEW = 128;
 
 /** Rows of params a node shows under its inputs. */
 function paramRows(op: GraphOp): number {
-  return op === "constant" ? 1 : op === "noise" ? 2 : op === "fresnel" || op === "texture" || op === "split" ? 1 : 0;
+  return op === "constant" ? 1 : op === "noise" ? 2 : op === "wear" ? 3 : op === "fresnel" || op === "texture" || op === "split" ? 1 : 0;
 }
 function nodeHeight(node: GraphNode): number {
   return NODE_HEADER + (GRAPH_NODES[node.op].inputs.length + paramRows(node.op)) * NODE_ROW + 6;
@@ -356,6 +356,22 @@ export function GraphEditor({
                             </option>
                           ))}
                         </select>
+                      </div>
+                    </>
+                  )}
+                  {node.op === "wear" && (
+                    <>
+                      <div style={{ height: NODE_ROW, display: "flex", alignItems: "center", gap: 4, padding: "0 6px" }}>
+                        <select aria-label="Side" value={p.side as string} onChange={(e) => onChange(setParams(graph, node.id, { side: e.target.value }))} style={{ fontSize: 11 }}>
+                          <option value="edge">edges</option>
+                          <option value="cavity">cavities</option>
+                        </select>
+                      </div>
+                      <div style={{ height: NODE_ROW, display: "flex", alignItems: "center", gap: 4, padding: "0 6px" }}>
+                        amount {number(p.amount as number, (v) => onChange(setParams(graph, node.id, { amount: v })), 0.05, "Amount")}
+                      </div>
+                      <div style={{ height: NODE_ROW, display: "flex", alignItems: "center", gap: 4, padding: "0 6px" }}>
+                        sharpness {number(p.sharpness as number, (v) => onChange(setParams(graph, node.id, { sharpness: v })), 1, "Sharpness")}
                       </div>
                     </>
                   )}
