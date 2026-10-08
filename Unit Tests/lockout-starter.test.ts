@@ -124,7 +124,9 @@ describe("the Lockout arena starter", () => {
   it("paints a procedural alpine sky dome, cold distance fog and bloom", () => {
     // The dome is parameters, not pixels: the runtime bakes it at load.
     expect(LOCKOUT_LIGHTING.sky?.mountains.length).toBeGreaterThanOrEqual(2);
-    expect(LOCKOUT_LIGHTING.sky?.clouds).toBeGreaterThan(0.3);
+    // Painted cloud, lighter since the drifting layers (I6) carry the rest.
+    expect(LOCKOUT_LIGHTING.sky?.clouds).toBeGreaterThan(0.2);
+    expect(LOCKOUT_LIGHTING.sky?.cloudLayers?.length).toBeGreaterThanOrEqual(1);
     expect(LOCKOUT_LIGHTING.fog?.density).toBeGreaterThan(0);
     const scene = parseMeshScene(lockoutMeshSidecar())!;
     expect(scene.lighting?.sky).toEqual(LOCKOUT_LIGHTING.sky);

@@ -731,8 +731,31 @@ export { MAX_REFLECTION_PROBES, parseReflectionProbes, reflectionProbeAt, type R
 export { PROBE_FADE, PROBE_RANGE, boxProject, pickProbe, probeWeight, sampleProbe, type ProbeBox, type ReflectionProbeSet } from "./render/probeSampling";
 export { PROBE_PANORAMA_WIDTH, bakePanorama, bakeReflectionProbes, bakeReflectionProbesAsync, type ProbeBakeLighting } from "./render/probeBake";
 export {
+  CLOUD_TILE,
+  MAX_CLOUD_LAYERS,
+  MAX_SKY_OBJECTS,
+  bakeCloudLayer,
+  cloudDensity,
+  cloudPlane,
+  decodeRadianceHdr,
+  hdrToTexture,
+  overClouds,
+  prepareSkyObjects,
+  resamplePanorama,
+  skyObjectsAt,
+  type BakedCloudLayer,
+  type HdrImage,
+  type SkyCloudLayer,
+  type SkyObject,
+  type SkyPlanet,
+  type SkyRing,
+} from "./render/skyLayers";
+export { MAX_SKY_PANORAMA_CHARS } from "./model/SceneLighting";
+export {
   bakeSkyPanorama,
   downsamplePanorama,
+  isRadiance,
+  panoramaWithClouds,
   renderSkyBackground,
   fogFactor,
   applyFog,
@@ -747,6 +770,7 @@ export {
   type HeightFog,
   type ProceduralSky,
   type SkyMountainRange,
+  type SkyPanorama,
   type SceneFog,
 } from "./render/skyDome";
 export {

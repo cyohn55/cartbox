@@ -15,6 +15,12 @@
 import { useState } from "react";
 
 import {
+  MAX_CLOUD_LAYERS,
+  MAX_SKY_OBJECTS,
+  MAX_SKY_PANORAMA_CHARS,
+  bytesToBase64,
+  type SkyCloudLayer,
+  type SkyObject,
   addSceneLight,
   defaultProceduralSky,
   defaultSceneFog,
@@ -468,8 +474,146 @@ function SkyDomeControls({ lighting, onChange }: LightingEditorProps & { lightin
             display={`#${sky.seed}`}
             onChange={(seed) => patch({ seed: Math.round(seed) })}
           />
+          <SkyPanoramaControls sky={sky} patch={patch} />
+          <SkyObjectControls sky={sky} patch={patch} />
+          <CloudLayerControls sky={sky} patch={patch} />
         </>
       )}
+    </>
+  );
+}
+
+/** The file types a sky panorama may be, by extension. */
+const PANORAMA_TYPES: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", hdr: "image/vnd.radiance" };
+
+/**
+ * An imported sky (HALO_INFINITE_STYLE_ROADMAP.md I6): an equirectangular PNG,
+ * JPEG or Radiance HDR in place of the procedural sky, turned and brightened.
+ */
+function SkyPanoramaControls({ sky, patch }: { sky: ProceduralSky; patch: (next: Partial<ProceduralSky>) => void }) {
+  const [error, setError] = useState<string | null>(null);
+  const panorama = sky.panorama ?? null;
+  return (
+    <>
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Imported sky</div>
+      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+        <label className={styles.toolBtn} title="An equirectangular (2:1) panorama — PNG, JPEG or Radiance .hdr — in place of the painted sky; it lights the scene and fills the reflections too">
+          {panorama ? "Replace panorama…" : "Import panorama…"}
+          <input
+            type="file"
+            accept=".png,.jpg,.jpeg,.hdr"
+            style={{ display: "none" }}
+            onChange={async (event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              if (!file) return;
+              const mime = PANORAMA_TYPES[file.name.split(".").pop()?.toLowerCase() ?? ""];
+              if (!mime) return setError("Use a .png, .jpg or .hdr panorama.");
+              const data = bytesToBase64(new Uint8Array(await file.arrayBuffer()));
+              if (data.length > MAX_SKY_PANORAMA_CHARS) return setError("That panorama is too large (about 6 MB at most).");
+              setError(null);
+              patch({ panorama: { mime, data, exposure: 1, yaw: 0 } });
+            }}
+          />
+        </label>
+        {panorama && (
+          <button type="button" className={styles.toolBtn} onClick={() => patch({ panorama: null })}>
+            Back to the painted sky
+          </button>
+        )}
+      </div>
+      {error && <RailHint>{error}</RailHint>}
+      {panorama && (
+        <>
+          <RangeControl label="Exposure" nested min={0.1} max={8} step={0.05} value={panorama.exposure} ariaLabel="Panorama exposure" display={`×${panorama.exposure.toFixed(2)}`} onChange={(exposure) => patch({ panorama: { ...panorama, exposure } })} />
+          <RangeControl label="Turn" nested min={0} max={359} step={1} value={panorama.yaw} ariaLabel="Panorama turn" display={`${Math.round(panorama.yaw)}°`} onChange={(yaw) => patch({ panorama: { ...panorama, yaw } })} />
+        </>
+      )}
+    </>
+  );
+}
+
+/** Things in the sky at infinity (I6): a ring arching over the scene, a planet. */
+function SkyObjectControls({ sky, patch }: { sky: ProceduralSky; patch: (next: Partial<ProceduralSky>) => void }) {
+  const objects = sky.objects ?? [];
+  const set = (next: SkyObject[]) => patch({ objects: next });
+  const full = objects.length >= MAX_SKY_OBJECTS;
+  return (
+    <>
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>In the sky</div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <button type="button" className={styles.toolBtn} disabled={full} onClick={() => set([...objects, { kind: "ring", axis: [0.8, 0.35, 0.45], width: 4, color: [0.5, 0.62, 0.55], edge: [0.86, 0.88, 0.92], haze: 0.5, seed: objects.length + 1 }])}>
+          + Ring
+        </button>
+        <button type="button" className={styles.toolBtn} disabled={full} onClick={() => set([...objects, { kind: "planet", direction: [-0.6, 0.3, 0.7], radius: 6, color: [0.72, 0.62, 0.5], atmosphere: [0.6, 0.72, 0.95], seed: objects.length + 1 }])}>
+          + Planet
+        </button>
+      </div>
+      {objects.map((object, i) => {
+        const update = (change: Partial<SkyObject>) => set(objects.map((o, j) => (j === i ? ({ ...o, ...change } as SkyObject) : o)));
+        const remove = () => set(objects.filter((_, j) => j !== i));
+        return (
+          <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span className={styles.hudLabel}>{object.kind === "ring" ? "Ring" : "Planet"}</span>
+              <button type="button" className={styles.toolBtn} onClick={remove} aria-label={`Remove ${object.kind} ${i + 1}`}>
+                ×
+              </button>
+            </div>
+            <ColorRow label="Colour" value={object.color} onChange={(color) => update({ color })} />
+            {object.kind === "ring" ? (
+              <>
+                <RangeControl label="Width" nested min={0.5} max={15} step={0.25} value={object.width} ariaLabel="Ring width" display={`${object.width.toFixed(1)}°`} onChange={(width) => update({ width })} />
+                <RangeControl label="Tilt" nested min={0} max={80} step={1} value={Math.round((Math.asin(Math.max(-1, Math.min(1, object.axis[1] / (Math.hypot(...object.axis) || 1)))) * 180) / Math.PI)} ariaLabel="Ring tilt" display={`${Math.round((Math.asin(Math.max(-1, Math.min(1, object.axis[1] / (Math.hypot(...object.axis) || 1)))) * 180) / Math.PI)}°`} onChange={(tilt) => {
+                  const flat = Math.hypot(object.axis[0], object.axis[2]) || 1;
+                  const t = (tilt * Math.PI) / 180;
+                  update({ axis: [(object.axis[0] / flat) * Math.cos(t), Math.sin(t), (object.axis[2] / flat) * Math.cos(t)] });
+                }} />
+              </>
+            ) : (
+              <RangeControl label="Size" nested min={0.5} max={30} step={0.5} value={object.radius} ariaLabel="Planet size" display={`${object.radius.toFixed(1)}°`} onChange={(radius) => update({ radius })} />
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+/** Cloud layers that drift on the wind (I6). */
+function CloudLayerControls({ sky, patch }: { sky: ProceduralSky; patch: (next: Partial<ProceduralSky>) => void }) {
+  const layers = sky.cloudLayers ?? [];
+  const set = (next: SkyCloudLayer[]) => patch({ cloudLayers: next });
+  return (
+    <>
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Drifting clouds</div>
+      <button
+        type="button"
+        className={styles.toolBtn}
+        disabled={layers.length >= MAX_CLOUD_LAYERS}
+        onClick={() => set([...layers, { cover: 0.35, scale: 0.35, wind: [0.02, 0.008], color: [0.94, 0.96, 0.99], opacity: 0.7, seed: 40 + layers.length }])}
+      >
+        + Cloud layer
+      </button>
+      {layers.map((layer, i) => {
+        const update = (change: Partial<SkyCloudLayer>) => set(layers.map((l, j) => (j === i ? { ...l, ...change } : l)));
+        const speed = Math.hypot(layer.wind[0], layer.wind[1]);
+        const heading = Math.atan2(layer.wind[1], layer.wind[0]);
+        return (
+          <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span className={styles.hudLabel}>Layer {i + 1}</span>
+              <button type="button" className={styles.toolBtn} onClick={() => set(layers.filter((_, j) => j !== i))} aria-label={`Remove cloud layer ${i + 1}`}>
+                ×
+              </button>
+            </div>
+            <RangeControl label="Cover" nested min={0} max={1} step={0.05} value={layer.cover} ariaLabel="Cloud cover" display={`${Math.round(layer.cover * 100)}%`} onChange={(cover) => update({ cover })} />
+            <RangeControl label="Size" nested min={0.05} max={2} step={0.05} value={layer.scale} ariaLabel="Cloud size" display={layer.scale < 0.3 ? "large" : layer.scale < 0.8 ? "medium" : "small"} onChange={(scale) => update({ scale })} />
+            <RangeControl label="Wind" nested min={0} max={0.2} step={0.005} value={speed} ariaLabel="Cloud wind speed" display={speed.toFixed(3)} onChange={(v) => update({ wind: [Math.cos(heading) * v, Math.sin(heading) * v] })} />
+            <RangeControl label="Opacity" nested min={0} max={1} step={0.05} value={layer.opacity} ariaLabel="Cloud opacity" display={`${Math.round(layer.opacity * 100)}%`} onChange={(opacity) => update({ opacity })} />
+          </div>
+        );
+      })}
     </>
   );
 }
