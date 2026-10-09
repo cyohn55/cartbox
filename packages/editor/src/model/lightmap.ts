@@ -230,7 +230,8 @@ export interface Occluder {
   readonly albedo?: readonly (readonly [number, number, number])[];
 }
 
-interface Bvh {
+/** A triangle BVH over occluders (shared with the texture baker, textureBake.ts). */
+export interface Bvh {
   tri: Float32Array; // 9 floats per triangle
   nrm: Float32Array; // face normal per triangle
   col: Float32Array; // albedo per triangle
@@ -239,7 +240,7 @@ interface Bvh {
   order: Int32Array;
 }
 
-function buildBvh(occluders: readonly Occluder[]): Bvh {
+export function buildBvh(occluders: readonly Occluder[]): Bvh {
   const tris: number[] = [], cols: number[] = [];
   for (const o of occluders) {
     o.mesh.primitives.forEach((p, pi) => {
@@ -315,7 +316,7 @@ function buildBvh(occluders: readonly Occluder[]): Bvh {
 }
 
 /** Closest hit along a ray within tMax: the triangle index, or -1. `out[0]` = distance. */
-function trace(b: Bvh, o: V3, d: V3, tMax: number, out: Float64Array, anyHit: boolean): number {
+export function trace(b: Bvh, o: V3, d: V3, tMax: number, out: Float64Array, anyHit: boolean): number {
   if (b.meta.length === 0) return -1;
   const inv: V3 = [1 / d[0], 1 / d[1], 1 / d[2]];
   const stack = new Int32Array(64);
@@ -393,7 +394,7 @@ export interface LightBakeOptions {
 }
 
 /** A pseudo-random 0..1 from an integer (deterministic bakes). */
-function hash01(n: number): number {
+export function hash01(n: number): number {
   let h = Math.imul(n ^ 0x9e3779b9, 0x85ebca6b);
   h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;

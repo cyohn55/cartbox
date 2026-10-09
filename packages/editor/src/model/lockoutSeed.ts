@@ -35,6 +35,8 @@ import type { MeshTrail } from "../render/meshTrails";
 import type { SceneLight } from "../render/meshRasterizer";
 import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, toPrimitive as streamPrimitive, type Streams } from "./seedGeometry";
 import { editFace, faceAt, primitiveFaces, type FaceEdit } from "./meshEdit";
+import { bakeLayout, bakeSurfaceMaps, type SurfaceBakeOptions } from "./textureBake";
+import { LOCKOUT_KIT_MAPS } from "./lockoutKitMaps.generated";
 import { packMeshLibrary } from "./meshLibrary";
 import { encodeLods, generateLods, type StoredLods } from "./meshSimplify";
 import { reverseClip } from "./clipEdit";
@@ -55,7 +57,7 @@ import type { MaterialGraph } from "./materialGraph";
 import { particlePreset, type ParticleEffect } from "./particleEffects";
 import { decalPreset, type DecalDef, type DecalMark } from "./decals";
 import { applyLightmapImage, bakeLightProbes, bakeLightmap, layoutFingerprint, layoutLightmap, type LightmapLayout } from "./lightmap";
-import { base64ToBytes } from "./base64";
+import { base64ToBytes, bytesToBase64 } from "./base64";
 import { LOCKOUT_LIGHTMAP } from "./lockoutLightmap.generated";
 import { LOCKOUT_PROBES } from "./lockoutProbes.generated";
 import { planProbeGrid, type LightProbeGrid, type StoredLightProbes } from "./lightProbes";
@@ -2839,7 +2841,41 @@ function shape(p: MeshPrimitive, triangle: number, edits: readonly FaceEdit[]): 
   return edits.reduce((q, edit) => editFace(q, faceAt(q, triangle).triangles, edit), p);
 }
 
-const FORERUNNER_ALLOY: MeshPrimitive["material"] = { name: "forerunner-alloy", baseColorFactor: [0.6, 0.62, 0.64, 1], baseColorImage: null, metallicFactor: 0.8, roughnessFactor: 0.32, clearcoat: 0.3, clearcoatRoughness: 0.15 };
+/**
+ * Worn Forerunner alloy (I15), driven by the kit's baked maps: the bevels' rims
+ * polished bright where the curvature is convex (broken up by noise), grime in
+ * the seams and recesses from the cavities and the baked occlusion, and the
+ * polished rims smoother. Without baked maps it is plain alloy.
+ */
+export const FORERUNNER_WORN: MaterialGraph = {
+  nodes: [
+    { id: "pos", op: "position" },
+    { id: "noise", op: "noise", inputs: { position: "pos" }, params: { scale: 3, octaves: 2 } },
+    { id: "lo", op: "constant", params: { value: 0.7 } },
+    { id: "hi", op: "constant", params: { value: 1.3 } },
+    { id: "breakup", op: "mix", inputs: { a: "lo", b: "hi", t: "noise" } },
+    { id: "edge", op: "wear", inputs: { breakup: "breakup" }, params: { side: "edge", amount: 0.7, sharpness: 5 } },
+    { id: "cavity", op: "wear", params: { side: "cavity", amount: 0.6, sharpness: 3 } },
+    { id: "alloy", op: "constant", params: { value: [0.6, 0.62, 0.64] } },
+    { id: "polished", op: "constant", params: { value: [0.88, 0.9, 0.92] } },
+    { id: "base", op: "mix", inputs: { a: "alloy", b: "polished", t: "edge" } },
+    { id: "ao", op: "occlusion" },
+    { id: "dark", op: "constant", params: { value: 0.45 } },
+    { id: "one", op: "constant", params: { value: 1 } },
+    { id: "aoGrime", op: "mix", inputs: { a: "dark", b: "one", t: "ao" } },
+    { id: "seam", op: "constant", params: { value: 0.55 } },
+    { id: "cavGrime", op: "mix", inputs: { a: "one", b: "seam", t: "cavity" } },
+    { id: "grimed", op: "multiply", inputs: { a: "base", b: "aoGrime" } },
+    { id: "colour", op: "multiply", inputs: { a: "grimed", b: "cavGrime" } },
+    { id: "r0", op: "constant", params: { value: 0.36 } },
+    { id: "r1", op: "constant", params: { value: 0.16 } },
+    { id: "rough", op: "mix", inputs: { a: "r0", b: "r1", t: "edge" } },
+    { id: "metal", op: "constant", params: { value: 0.85 } },
+  ],
+  outputs: { baseColor: "colour", roughness: "rough", metallic: "metal" },
+};
+
+const FORERUNNER_ALLOY: MeshPrimitive["material"] = { name: "forerunner-alloy", baseColorFactor: [1, 1, 1, 1], baseColorImage: null, metallicFactor: 0.8, roughnessFactor: 0.32, clearcoat: 0.3, clearcoatRoughness: 0.15, graph: FORERUNNER_WORN };
 const FORERUNNER_LIGHT: MeshPrimitive["material"] = { name: "forerunner-light", baseColorFactor: [0.05, 0.08, 0.1, 1], baseColorImage: null, metallicFactor: 0, roughnessFactor: 0.4, emissiveFactor: [0.9, 2.6, 3.2] };
 
 /** The kit's pieces. */
@@ -2865,11 +2901,63 @@ export function forerunnerKit(): { wall: MeshAsset; channel: MeshAsset; pillar: 
   };
 }
 
+/** How the kit's maps are baked (I15): 128² atlases, edges lit over 8 cm. */
+export const LOCKOUT_KIT_BAKE: SurfaceBakeOptions & { size: number } = { size: 128, rays: 48, aoDistance: 1.2, thicknessDistance: 0.6, curvatureRadius: 0.08 };
+
+/** The kit pieces that take baked maps, by name. */
+function kitBakeTargets(): Record<string, MeshAsset> {
+  const kit = forerunnerKit();
+  return { wall: kit.wall, pillar: kit.pillar, floor: kit.floor };
+}
+
+/** A laid-out mesh's fingerprint: its positions, triangles and texture coordinates (FNV-1a). */
+function kitFingerprint(mesh: MeshAsset): string {
+  let h = 0x811c9dc5;
+  const mix = (a: Float32Array | Uint32Array | null) => {
+    if (!a) return;
+    const bytes = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+    for (let i = 0; i < bytes.length; i += 1) h = Math.imul(h ^ bytes[i]!, 0x01000193);
+  };
+  for (const p of mesh.primitives) {
+    mix(p.positions);
+    mix(p.indices);
+    mix(p.uvs);
+  }
+  return (h >>> 0).toString(16);
+}
+
+/** Bake the kit's maps (the offline step `npm run bake:lockout-kit` stores). */
+export function bakeLockoutKit(): Record<string, { fingerprint: string; occlusion: string; relief: string }> {
+  const out: Record<string, { fingerprint: string; occlusion: string; relief: string }> = {};
+  for (const [name, mesh] of Object.entries(kitBakeTargets())) {
+    const baked = bakeSurfaceMaps(mesh, LOCKOUT_KIT_BAKE).mesh;
+    const m = baked.primitives[0]!.material;
+    out[name] = { fingerprint: kitFingerprint(baked), occlusion: bytesToBase64(m.occlusionImage!.bytes), relief: bytesToBase64(m.reliefImage!.bytes) };
+  }
+  return out;
+}
+
+/** Whether each stored kit bake still fits its piece (its layout's fingerprint). */
+export function lockoutKitBakeCurrent(): Record<string, boolean> {
+  return Object.fromEntries(Object.entries(kitBakeTargets()).map(([name, mesh]) => [name, LOCKOUT_KIT_MAPS[name]?.fingerprint === kitFingerprint(bakeLayout(mesh, LOCKOUT_KIT_BAKE.size).mesh)]));
+}
+
+/** A kit piece on its bake layout wearing its stored maps — or, if the bake is stale or missing, as it is. */
+function withKitMaps(name: string, mesh: MeshAsset): MeshAsset {
+  const stored = LOCKOUT_KIT_MAPS[name];
+  const laid = bakeLayout(mesh, LOCKOUT_KIT_BAKE.size).mesh;
+  if (!stored || stored.fingerprint !== kitFingerprint(laid)) return mesh;
+  const occlusionImage = { mime: "image/png", bytes: base64ToBytes(stored.occlusion) };
+  const reliefImage = { mime: "image/png", bytes: base64ToBytes(stored.relief) };
+  return { ...laid, primitives: laid.primitives.map((p) => ({ ...p, material: { ...p.material, occlusionImage, reliefImage } })) };
+}
+
 /** The kit as Lockout's prefabs: the wall, the wall with its light channel (a variant of the wall), the pillar and the floor tile. */
 function forerunnerKitPrefabs(identity: unknown): unknown[] {
   // Stored without normals: no two faces share a vertex, so every renderer rebuilds the same flat normals (as for the soldier, I11).
   const stored = (m: MeshAsset) => serializeMeshAsset({ ...m, primitives: m.primitives.map((p) => ({ ...p, normals: null })) });
-  const kit = forerunnerKit();
+  const raw = forerunnerKit();
+  const kit = { ...raw, wall: withKitMaps("wall", raw.wall), pillar: withKitMaps("pillar", raw.pillar), floor: withKitMaps("floor", raw.floor) };
   const wall = stored(kit.wall);
   // The strip sits in the recess: centred, 2 m up, flush with the recessed face (0.25 + 0.12 − 0.08 = 0.29 out).
   const channelAt = { position: [0, 2, 0.31], rotation: [0, 0, 0], scale: [1, 1, 1] };

@@ -21,7 +21,29 @@ export function checkerTexture(): DecodedTexture {
   return { width: 8, height: 8, data };
 }
 
-/** Painted armour worn to bare metal on its edges, broken up by noise; grime in the cavities darkens it. */
+/** The relief tile with a thinness pattern in its B (a baked thickness, I15): bands thinning across it. */
+export function thinReliefTexture(): DecodedTexture {
+  const t = reliefTexture();
+  const data = new Uint8ClampedArray(t.data);
+  for (let y = 0; y < t.height; y += 1) for (let x = 0; x < t.width; x += 1) data[(y * t.width + x) * 4 + 2] = ((x * 9 + y * 5) % 64) * 4;
+  return { width: t.width, height: t.height, data };
+}
+
+/** A baked occlusion map (I15): darker towards one corner, in R (G and B as a bake writes them). */
+export function occlusionTexture(): DecodedTexture {
+  const data = new Uint8ClampedArray(8 * 8 * 4);
+  for (let y = 0; y < 8; y += 1) for (let x = 0; x < 8; x += 1) {
+    const ao = 255 - (x + y) * 12;
+    data.set([ao, ao, ao, 255], (y * 8 + x) * 4);
+  }
+  return { width: 8, height: 8, data };
+}
+
+/**
+ * Painted armour worn to bare metal on its edges, broken up by noise; grime in
+ * the cavities darkens it, and the baked occlusion deepens the grime (I15),
+ * while thin parts glow faintly through (the baked thickness, I15).
+ */
 export const WORN_PAINT: MaterialGraph = {
   nodes: [
     { id: "pos", op: "position" },
@@ -37,12 +59,18 @@ export const WORN_PAINT: MaterialGraph = {
     { id: "grime", op: "constant", params: { value: 0.45 } },
     { id: "dirt", op: "mix", inputs: { a: "one1", b: "grime", t: "cavity" } },
     { id: "one1", op: "constant", params: { value: 1 } },
-    { id: "colour", op: "multiply", inputs: { a: "worn", b: "dirt" } },
+    { id: "dirty", op: "multiply", inputs: { a: "worn", b: "dirt" } },
+    { id: "ao", op: "occlusion" },
+    { id: "colour", op: "multiply", inputs: { a: "dirty", b: "ao" } },
+    { id: "thick", op: "thickness" },
+    { id: "thin", op: "oneMinus", inputs: { x: "thick" } },
+    { id: "glowTint", op: "constant", params: { value: [0.3, 0.7, 0.9] } },
+    { id: "glow", op: "multiply", inputs: { a: "thin", b: "glowTint" } },
     { id: "rough", op: "mix", inputs: { a: "r0", b: "r1", t: "edge" } },
     { id: "r0", op: "constant", params: { value: 0.6 } },
     { id: "r1", op: "constant", params: { value: 0.3 } },
   ],
-  outputs: { baseColor: "colour", metallic: "edge", roughness: "rough" },
+  outputs: { baseColor: "colour", metallic: "edge", roughness: "rough", emissive: "glow" },
 };
 
 /** The four layered surfaces, on quads built by `quad` (a unit quad facing +Z with the given material). */
@@ -60,8 +88,13 @@ export function layerInstances(quad: (material: Material) => MeshAsset): MeshSce
       textures: [checkerTexture()],
       reliefTextures: [relief],
     },
-    // Worn paint: the graph's wear masks over the relief's curvature.
-    { mesh: quad({ baseColorFactor: [1, 1, 1, 1], graph: WORN_PAINT }), model: composeModelMatrix([1.3, -0.95, 0], [0, -20, 0], [0.85, 0.85, 0.85]), reliefTextures: [relief] },
+    // Worn paint: the graph's wear masks over the relief's curvature, with baked occlusion and thickness (I15).
+    {
+      mesh: quad({ baseColorFactor: [1, 1, 1, 1], graph: WORN_PAINT }),
+      model: composeModelMatrix([1.3, -0.95, 0], [0, -20, 0], [0.85, 0.85, 0.85]),
+      reliefTextures: [thinReliefTexture()],
+      occlusionTextures: [occlusionTexture()],
+    },
   ];
 }
 

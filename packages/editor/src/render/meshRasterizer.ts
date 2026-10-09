@@ -2138,6 +2138,8 @@ function rasterizeTriangle(
         vz: viewDir[2],
         time: pbr!.time,
         curv: 0,
+        ao: 1,
+        thick: 1,
         br: 1,
         bg: 1,
         bb: 1,
@@ -2320,7 +2322,11 @@ function rasterizeTriangle(
         const ctx = graphCtx!;
         ctx.u = tu;
         ctx.v = tv;
-        ctx.curv = relief ? curvatureOf(sampleTexture(relief, tu, tv, style.textureFiltering)[1]) : 0;
+        const reliefTexel = relief ? sampleTexture(relief, tu, tv, style.textureFiltering) : null;
+        ctx.curv = reliefTexel ? curvatureOf(reliefTexel[1]) : 0;
+        // Baked occlusion and thickness (I15): the occlusion map's R, and 1 − the relief's B (its thinness).
+        ctx.ao = pbr?.occ ? sampleTexture(pbr.occ, tu, tv, style.textureFiltering)[0] / 255 : 1;
+        ctx.thick = reliefTexel ? 1 - reliefTexel[2] / 255 : 1;
         ctx.px = pw0 * a.wx + pw1 * b.wx + pw2 * c.wx;
         ctx.py = pw0 * a.wy + pw1 * b.wy + pw2 * c.wy;
         ctx.pz = pw0 * a.wz + pw1 * b.wz + pw2 * c.wz;

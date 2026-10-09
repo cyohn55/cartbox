@@ -291,3 +291,23 @@ describe("Lockout's Forerunner kit (I14)", () => {
     expect(sc.prefabs!.find((p) => p.id === "kit-wall-lit")!.nodes[0]!.tags).toEqual(["cover"]);
   });
 });
+
+describe("the Forerunner kit's baked maps (I15)", () => {
+  it("are current, and dress the kit in worn alloy: polished rims, grime in the seams", async () => {
+    const { FORERUNNER_WORN, lockoutKitBakeCurrent, lockoutMeshSidecar } = await import("@cartbox/editor");
+    // The stored bake still fits each piece (re-run `npm run bake:lockout-kit` after changing the kit).
+    expect(lockoutKitBakeCurrent()).toEqual({ wall: true, pillar: true, floor: true });
+    const sidecar = decodeMeshSidecar(lockoutMeshSidecar());
+    for (const id of ["kit-wall", "kit-pillar", "kit-floor"]) {
+      const node = sidecar.prefabs!.find((p) => p.id === id)!.nodes[0]!;
+      const mesh = (await import("@cartbox/editor")).deserializeMeshAsset(node.mesh);
+      const m = mesh.primitives[0]!.material;
+      expect(m.occlusionImage?.mime, id).toBe("image/png");
+      expect(m.reliefImage?.mime, id).toBe("image/png");
+      expect(mesh.primitives[0]!.uvs, id).not.toBeNull();
+      expect(m.graph?.nodes.map((n) => n.op), id).toEqual(FORERUNNER_WORN.nodes.map((n) => n.op));
+    }
+    // The graph reads the bake: edge wear on the curvature, grime from the occlusion.
+    expect(FORERUNNER_WORN.nodes.map((n) => n.op)).toEqual(expect.arrayContaining(["wear", "occlusion"]));
+  });
+});

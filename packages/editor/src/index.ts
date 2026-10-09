@@ -68,6 +68,10 @@ export {
   LOCKOUT_SOLDIER_ANIMATOR,
   LOCKOUT_BOT_VARIANTS,
   forerunnerKit,
+  FORERUNNER_WORN,
+  LOCKOUT_KIT_BAKE,
+  bakeLockoutKit,
+  lockoutKitBakeCurrent,
   LOCKOUT_VIEWMODEL_ANIMATOR,
   LOCKOUT_NAV_AGENT,
   LOCKOUT_INTRO,
@@ -1235,3 +1239,4 @@ export {
   type ColorFilter,
 } from "./model/accessibility";
 export { editFace, editMeshFace, faceAt, faceBoundary, primitiveFaces, type FaceEdit, type MeshFace } from "./model/meshEdit";
+export { CURVATURE_FULL_BEND, bakeLayout, bakeSurfaceMaps, type BakedMaps, type SurfaceBake, type SurfaceBakeOptions } from "./model/textureBake";

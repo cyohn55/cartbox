@@ -38,6 +38,8 @@ export type GraphOp =
   | "texture"
   | "noise"
   | "curvature"
+  | "occlusion"
+  | "thickness"
   | "wear"
   // Maths
   | "add"
@@ -109,6 +111,9 @@ export const GRAPH_NODES: Readonly<Record<GraphOp, NodeDef>> = {
   texture: { label: "Texture", category: "pattern", inputs: [["uv", "uv"]] },
   noise: { label: "Noise", category: "pattern", inputs: [["position", "position"]] },
   curvature: { label: "Curvature", category: "input", inputs: [] },
+  // Baked from the mesh (I15): ambient occlusion (the occlusion map, 1 = open) and thickness (the relief map, 1 = solid).
+  occlusion: { label: "Occlusion", category: "input", inputs: [] },
+  thickness: { label: "Thickness", category: "input", inputs: [] },
   wear: { label: "Wear mask", category: "pattern", inputs: [["curvature", "curvature"], ["breakup", 1]] },
   add: { label: "Add", category: "maths", inputs: [["a", 0], ["b", 0]] },
   subtract: { label: "Subtract", category: "maths", inputs: [["a", 0], ["b", 0]] },
@@ -346,6 +351,10 @@ export interface GraphContext {
   time: number;
   /** The relief map's curvature here, −1 (cavity) .. 1 (convex edge); 0 without one (I4). */
   curv: number;
+  /** The occlusion map's ambient occlusion here, 0..1 (1 = open); 1 without one (I15). */
+  ao: number;
+  /** The relief map's thickness here, 0..1 (1 = solid, as without one) (I15). */
+  thick: number;
   /** The material's base colour and alpha (factor × texture), 0–1. */
   br: number;
   bg: number;
@@ -438,6 +447,12 @@ export function evaluateGraph(graph: CompiledGraph, ctx: GraphContext, regs: Flo
       }
       case "curvature":
         splat(ctx.curv);
+        break;
+      case "occlusion":
+        splat(ctx.ao);
+        break;
+      case "thickness":
+        splat(ctx.thick);
         break;
       case "wear": {
         const sign = step.params.side === "cavity" ? -1 : 1;
@@ -545,6 +560,9 @@ export interface GraphShaderInputs {
   readonly time: string;
   /** The relief's curvature, a float (I4). */
   readonly curvature: string;
+  /** Ambient occlusion and thickness, floats 0..1 (I15). */
+  readonly occlusion: string;
+  readonly thickness: string;
   readonly baseColor: string;
   readonly baseAlpha: string;
   readonly sample: (uv: string) => string;
@@ -672,6 +690,12 @@ export function graphShaderCode(graph: CompiledGraph, lang: "wgsl" | "glsl", inp
         break;
       case "curvature":
         e = `${v3}(${inputs.curvature})`;
+        break;
+      case "occlusion":
+        e = `${v3}(${inputs.occlusion})`;
+        break;
+      case "thickness":
+        e = `${v3}(${inputs.thickness})`;
         break;
       case "wear": {
         const sign = step.params.side === "cavity" ? "-" : "";
