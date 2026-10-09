@@ -27,6 +27,7 @@ import { bytesToBase64, base64ToBytes } from "./base64";
 import { readSurfaceEffects, writeSurfaceEffects } from "./materialEffects";
 import { readMaterialLayers, writeMaterialLayers } from "./materialLayers";
 import type { MaterialGraph } from "./materialGraph";
+import { readMeshTrails, type MeshTrail } from "../render/meshTrails";
 import {
   MAX_CLIP_KEYS,
   MAX_CLIPS,
@@ -274,6 +275,8 @@ export interface MeshAsset {
   readonly skin?: MeshSkin | null;
   /** Animation clips that move the skeleton. */
   readonly clips?: readonly AnimationClip[];
+  /** Ribbons of light the mesh leaves as parts of it sweep (I10; see meshTrails.ts). */
+  readonly trails?: readonly MeshTrail[];
 }
 
 /** A neutral, fully-opaque white material — the default when a source names none. */
@@ -489,6 +492,7 @@ interface SerializedMesh {
   primitives: SerializedPrimitive[];
   skin?: { joints: SerializedJoint[]; inverseBind: string };
   clips?: SerializedClip[];
+  trails?: MeshTrail[];
 }
 
 function u16ToBase64(array: Uint16Array): string {
@@ -628,6 +632,7 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
     })),
     ...(mesh.skin ? { skin: serializeSkin(mesh.skin) } : {}),
     ...(mesh.skin && mesh.clips && mesh.clips.length > 0 ? { clips: mesh.clips.map(serializeClip) } : {}),
+    ...(mesh.trails && mesh.trails.length > 0 ? { trails: mesh.trails.map((t) => ({ ...t, from: [...t.from], to: [...t.to], color: [...t.color] })) } : {}),
   };
   return JSON.stringify(payload);
 }
@@ -825,10 +830,12 @@ export function deserializeMeshAsset(json: string): MeshAsset {
 
   if (primitives.length === 0) throw new Error(MALFORMED);
   const clips = skin ? deserializeClips(raw.clips, skin.joints.length) : [];
+  const trails = readMeshTrails(raw.trails, skin?.joints.length ?? 0);
   return {
     name: typeof raw.name === "string" ? raw.name : "mesh",
     primitives,
     ...(skin ? { skin } : {}),
     ...(clips.length > 0 ? { clips } : {}),
+    ...(trails.length > 0 ? { trails } : {}),
   };
 }

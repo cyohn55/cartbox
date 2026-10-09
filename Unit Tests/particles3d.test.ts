@@ -248,7 +248,8 @@ describe("editor sidecar", () => {
 describe("Lockout", () => {
   it("ships its effects and fires them from the cart", () => {
     const names = LOCKOUT_EFFECTS.map((e) => e.name);
-    expect(names).toEqual(["spark", "shield", "blast", "smoke", "slash", "drift"]);
+    // The plasma grenade's burst joined them (I10).
+    expect(names).toEqual(["spark", "shield", "blast", "smoke", "slash", "drift", "plasmablast"]);
     expect(parseMeshScene(lockoutMeshSidecar())!.effects!.map((e) => e.name)).toEqual(names);
     for (const n of names) expect(LOCKOUT_CODE).toContain(`"${n}"`);
     expect(LOCKOUT_CODE).toContain("cartbox.burst(");

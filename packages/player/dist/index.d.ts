@@ -5567,6 +5567,11 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private inactiveKey;
     /** Each object's world matrix as last drawn (null = hidden), or null when nothing moved. */
     private lastPlacement;
+    /** Which objects drew on the front layer last frame (where their trails go). */
+    private lastFront;
+    /** Swing trails (I10): the objects whose meshes leave them, and the ribbons they've swept. */
+    private trailed;
+    private trails;
     /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
     private hudFrame;
     /** The playtest profiler, when it's on: shadow, sky and scene time go to it. */
