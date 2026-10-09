@@ -53,6 +53,10 @@ import {
   PHYS_OP_MIX,
   PHYS_OP_PLACE,
   PHYS_OP_UNPLACE,
+  PHYS_OP_UI_LIST,
+  PHYS_OP_UI_NUM,
+  PHYS_OP_UI_SHOW,
+  PHYS_OP_UI_TEXT,
   PHYS_OP_SOUND,
   PHYS_OP_SOUND_LOOP,
   PHYS_OP_SHIELD,
@@ -175,6 +179,13 @@ export class RuntimeChannel {
   private ragdollBoxes: RagdollBox[] | null = null;
   /** Collision radii per skinned mesh. */
   private readonly radii = new Map<MeshAsset, Float64Array | null>();
+  /**
+   * Holo UI documents (I12): which are shown (by index among the holo
+   * documents) and what each binding (by key index) holds — a number, a
+   * string or a list of numbers. Strings and lists arrive in chunks.
+   */
+  readonly holo = { shown: new Set<number>(), values: new Map<number, number | string | number[]>() };
+  private readonly holoParts = new Map<number, { kind: "text" | "list"; length: number; items: number[] }>();
   /** Joints whose world position the cart asked for, and where they were when last skinned. */
   private readonly watched = new Map<string, { object: number; joint: number; position: [number, number, number] | null }>();
 
@@ -276,6 +287,7 @@ export class RuntimeChannel {
         if (this.debris.length < MAX_BURSTS_QUEUED)
           this.debris.push({ debris: cmd.a & 0xff, at: [cmd.v[0]!, cmd.v[1]!, cmd.v[2]!], velocity: [cmd.v[3]!, cmd.v[4]!, cmd.v[5]!], scale: ((cmd.a >>> 8) & 0xffff) / 16 });
       }
+      else if (cmd.op >= PHYS_OP_UI_SHOW && cmd.op <= PHYS_OP_UI_LIST) this.holoCommand(cmd);
       else if (cmd.op === PHYS_OP_TIMELINE) {
         if (cmd.a < 0) this.timeline?.stop();
         else this.timeline?.play(cmd.a, cmd.v[0], cmd.v[1]);
@@ -293,6 +305,42 @@ export class RuntimeChannel {
       for (const r of this.ragdolls.values()) if (r.doll ? r.doll.step(PHYSICS_DT, boxes) : true) awake = true;
       if (awake) this.animation?.invalidate();
     }
+  }
+
+  /** A holo UI command: a document shown or hidden, or a binding (or a chunk of one) set. */
+  private holoCommand(cmd: PhysicsCommand): void {
+    if (cmd.op === PHYS_OP_UI_SHOW) {
+      if (cmd.v[0]! >= 0.5) this.holo.shown.add(cmd.a);
+      else this.holo.shown.delete(cmd.a);
+      return;
+    }
+    if (cmd.op === PHYS_OP_UI_NUM) {
+      this.holo.values.set(cmd.a, cmd.v[0]!);
+      return;
+    }
+    const key = cmd.a & 0xffff;
+    const chunk = cmd.a >>> 16;
+    const kind = cmd.op === PHYS_OP_UI_TEXT ? "text" : "list";
+    let part = this.holoParts.get(key);
+    if (chunk === 0) {
+      part = { kind, length: Math.max(0, Math.round(cmd.v[0]!)), items: [...cmd.v.slice(1)] };
+      this.holoParts.set(key, part);
+    } else if (part && part.kind === kind) part.items.push(...cmd.v);
+    else return;
+    // Two characters a value for text; a number a value for a list.
+    const have = kind === "text" ? part.items.length * 2 : part.items.length;
+    if (have < part.length) return;
+    this.holoParts.delete(key);
+    if (kind === "list") {
+      this.holo.values.set(key, part.items.slice(0, part.length));
+      return;
+    }
+    const chars: number[] = [];
+    for (const code of part.items) {
+      const c = Math.round(code);
+      chars.push((c >> 8) & 0xff, c & 0xff);
+    }
+    this.holo.values.set(key, String.fromCharCode(...chars.slice(0, part.length)));
   }
 
   /** Go limp (v0 = 1) with a shove, or take the animation back (v0 = 0). */

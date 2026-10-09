@@ -72,7 +72,7 @@ import { WorldOverlaySurface } from "./world/WorldOverlaySurface.js";
 import { createSceneRenderer } from "./render/createSceneRenderer.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
-import { SpatialLoader, actionMask, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter } from "@cartbox/editor";
+import { SpatialLoader, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter } from "@cartbox/editor";
 import type { ControlScheme, InspectedObject, PlayerOptions } from "./types.js";
 
 /**
@@ -478,6 +478,30 @@ export class Player {
           );
           this.meshSurface.setQuality(this.qualitySettings);
           this.meshSurface.setProfiler(this.profiler);
+          // Holo UI documents (I12): the host draws them from what the cart sends.
+          const holoDocs = holoDocuments(this.options.ui ?? []);
+          const runtime = this.runtime;
+          if (holoDocs.length > 0 && runtime) {
+            const keys = holoBindingKeys(this.options.ui ?? []);
+            const strings = this.options.strings ?? null;
+            const language = playLanguage(strings, this.options.languages) ?? "";
+            const text = (key: string) => translate(strings, language, key);
+            // Unchanged widgets composite from their kept layers; only what moves is redrawn.
+            const cache = createHoloCache();
+            this.meshSurface.setHolo((out, width, height, time) => {
+              const state = runtime.channel.holo;
+              if (state.shown.size === 0) return;
+              const bindings: Record<string, unknown> = {};
+              keys.forEach((k, i) => {
+                const v = state.values.get(i);
+                if (v !== undefined) bindings[k] = v;
+              });
+              for (const i of [...state.shown].sort((a, b) => a - b)) {
+                const doc = holoDocs[i];
+                if (doc) renderHoloDocument(out, width, height, doc, { bindings, time, text }, cache);
+              }
+            });
+          }
           // A scene with levels starts in its first; the others wait, hidden.
           if ((mesh.levels?.length ?? 0) > 0) this.activateLevel(0);
           // A scene that streams by distance loads what's near the focus each tick.

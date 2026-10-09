@@ -254,6 +254,12 @@ export function runtimeSdkLua(
     _wr(count, n + 1)
     return true
   end
+  -- For the UI's holo documents (I12; uiSdk.ts): true once the command is on its way.
+  cartbox._cmd = function(op, a, v1, v2, v3, v4, v5, v6)
+    if not _live() then return false end
+    local r = _cmd(op, a, v1, v2, v3, v4, v5, v6)
+    return r == true or _direct ~= nil
+  end
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}

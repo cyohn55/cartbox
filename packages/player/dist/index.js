@@ -279,7 +279,246 @@ async function bufferFor(context, sound) {
 }
 
 // src/uiSdk.ts
-import { FOCUSABLE, layoutUi, parseUiDocuments, uiNavigation } from "@cartbox/editor";
+import { FOCUSABLE, holoBindingKeys, holoDocuments, layoutUi, parseUiDocuments, uiNavigation } from "@cartbox/editor";
+
+// src/physics/protocol.ts
+var CLASSIC = { pmemAddress: 81924, ramSize: 98304 };
+var PRO = { pmemAddress: 542304, ramSize: 786432 };
+var ERA = { pmemAddress: 257632, ramSize: 393216 };
+var HD = { pmemAddress: 3068512, ramSize: 8388608 };
+var RAM_LAYOUTS = {
+  classic: CLASSIC,
+  voxel: CLASSIC,
+  pro: PRO,
+  portrait: PRO,
+  ps1: ERA,
+  n64: ERA,
+  xbox360: HD,
+  modern: HD
+};
+var PHYS_BLOCK_BYTES = 8192;
+var PHYS_MAGIC = 1213219395;
+var PHYS_FIX = 1024;
+var PHYS_HDR_MAGIC = 0;
+var PHYS_HDR_BODIES = 4;
+var PHYS_HDR_TICK = 8;
+var PHYS_HDR_HASH = 12;
+var PHYS_HDR_LEVEL = 16;
+var PHYS_HDR_LEVEL_LOADING = 20;
+var PHYS_HDR_LEVEL_PROGRESS = 24;
+var PHYS_BODIES = 64;
+var PHYS_BODY_BYTES = 32;
+var PHYS_MAX_BODIES = 64;
+var PHYS_RAYS = PHYS_BODIES + PHYS_MAX_BODIES * PHYS_BODY_BYTES;
+var PHYS_RAY_BYTES = 32;
+var PHYS_MAX_RAYS = 16;
+var PHYS_EVENTS = PHYS_RAYS + PHYS_MAX_RAYS * PHYS_RAY_BYTES;
+var PHYS_EVENT_BYTES = 12;
+var PHYS_MAX_EVENTS = 48;
+var PHYS_OVERLAPS = PHYS_EVENTS + 4 + PHYS_MAX_EVENTS * PHYS_EVENT_BYTES;
+var PHYS_OVERLAP_BYTES = 8;
+var PHYS_MAX_OVERLAPS = 64;
+var PHYS_EVENT_STARTED = 1;
+var PHYS_EVENT_TRIGGER = 2;
+var PHYS_AGENTS = 3720;
+var PHYS_AGENT_BYTES = 16;
+var PHYS_MAX_AGENTS = 16;
+var NAV_FLAG_MOVING = 1;
+var NAV_FLAG_AIR = 2;
+var NAV_FLAG_ARRIVED = 4;
+var NAV_FLAG_NO_PATH = 8;
+var NAV_FLAG_OBSTACLE = 16;
+var PHYS_ANIMS = 6400;
+var PHYS_ANIM_BYTES = 16;
+var PHYS_MAX_ANIMS = 64;
+var PHYS_ANIM_EVENTS = PHYS_ANIMS + 4 + PHYS_MAX_ANIMS * PHYS_ANIM_BYTES;
+var PHYS_ANIM_EVENT_BYTES = 8;
+var PHYS_MAX_ANIM_EVENTS = 32;
+var PHYS_JOINTS = 7700;
+var PHYS_JOINT_BYTES = 20;
+var PHYS_MAX_JOINTS = 16;
+var PHYS_TIMELINE = 8032;
+var PHYS_TIMELINE_EVENTS = PHYS_TIMELINE + 12;
+var PHYS_MAX_TIMELINE_EVENTS = 8;
+var PHYS_TIMELINE_VALUES = 6160;
+var PHYS_MAX_TIMELINE_VALUES = 32;
+var TIMELINE_VALUE_NONE = -2147483648;
+function writeTimelineValues(block, names, values) {
+  const n = Math.min(names.length, PHYS_MAX_TIMELINE_VALUES);
+  block.setInt32(PHYS_TIMELINE_VALUES, n, true);
+  for (let i = 0; i < n; i += 1) {
+    const v = values.get(names[i]);
+    block.setInt32(PHYS_TIMELINE_VALUES + 4 + i * 4, v === void 0 ? TIMELINE_VALUE_NONE : toFix(Math.max(-2e6, Math.min(2e6, v))), true);
+  }
+}
+function writeLevelState(block, level) {
+  block.setInt32(PHYS_HDR_LEVEL, level.current, true);
+  block.setInt32(PHYS_HDR_LEVEL_LOADING, level.loading, true);
+  block.setInt32(PHYS_HDR_LEVEL_PROGRESS, toFix(Math.max(0, Math.min(1, level.progress))), true);
+}
+function writeTimelineState(block, playback, events = []) {
+  block.setInt32(PHYS_TIMELINE, playback.index, true);
+  block.setInt32(PHYS_TIMELINE + 4, toFix(playback.time), true);
+  block.setInt32(PHYS_TIMELINE + 8, playback.playing ? 1 : 0, true);
+  const n = Math.min(events.length, PHYS_MAX_TIMELINE_EVENTS);
+  block.setInt32(PHYS_TIMELINE_EVENTS, n, true);
+  for (let i = 0; i < n; i += 1) block.setInt32(PHYS_TIMELINE_EVENTS + 4 + i * 4, events[i], true);
+}
+function writeAgents(block, agents) {
+  const n = Math.min(agents.length, PHYS_MAX_AGENTS);
+  block.setInt32(PHYS_AGENTS, n, true);
+  for (let i = 0; i < n; i += 1) {
+    const a = agents[i];
+    const at = PHYS_AGENTS + 4 + i * PHYS_AGENT_BYTES;
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + k * 4, toFix(a.position[k]), true);
+    let f2 = a.facing;
+    while (f2 > Math.PI) f2 -= 2 * Math.PI;
+    while (f2 < -Math.PI) f2 += 2 * Math.PI;
+    const facing = Math.round(f2 * 1e4) & 65535;
+    block.setUint32(at + 12, (a.key & 1023 | (a.flags & 63) << 10 | facing << 16) >>> 0, true);
+  }
+}
+function writeJointPositions(block, joints) {
+  const n = Math.min(joints.length, PHYS_MAX_JOINTS);
+  block.setInt32(PHYS_JOINTS, n, true);
+  for (let i = 0; i < n; i += 1) {
+    const at = PHYS_JOINTS + 4 + i * PHYS_JOINT_BYTES;
+    block.setInt32(at, joints[i].object, true);
+    block.setInt32(at + 4, joints[i].joint, true);
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + 8 + k * 4, toFix(joints[i].position[k]), true);
+  }
+}
+var PHYS_CMDS = 4096;
+var PHYS_CMD_BYTES = 32;
+var PHYS_MAX_CMDS = 64;
+var PHYS_FLAG_GROUNDED = 1;
+var PHYS_FLAG_SLEEPING = 2;
+var PHYS_OP_IMPULSE = 1;
+var PHYS_OP_VELOCITY = 2;
+var PHYS_OP_TELEPORT = 3;
+var PHYS_OP_MOVE = 4;
+var PHYS_OP_RAY = 5;
+var PHYS_OP_SPAWN = 6;
+var PHYS_OP_DESPAWN = 7;
+var PHYS_OP_CAST = 8;
+var PHYS_CAST_RAY = 0;
+var PHYS_CAST_SPHERE = 1;
+var PHYS_CAST_BOX = 2;
+var PHYS_CAST_CAPSULE = 3;
+var PHYS_OP_MOTOR = 9;
+var PHYS_OP_UNJOIN = 10;
+var PHYS_OP_PLAY = 11;
+var PHYS_OP_ANIM_SET = 12;
+var PHYS_OP_ANIM_TRIGGER = 13;
+var PHYS_OP_ANIM_GOTO = 14;
+var PHYS_OP_IK = 15;
+var PHYS_OP_IK_POLE = 16;
+var PHYS_OP_LOOKAT = 17;
+var PHYS_OP_WATCH = 18;
+var PHYS_OP_TIMELINE = 19;
+var PHYS_OP_LEVEL = 20;
+var PHYS_OP_AGENT = 21;
+var PHYS_OP_AGENT_GOTO = 22;
+var PHYS_OP_AGENT_STOP = 23;
+var PHYS_OP_AGENT_REMOVE = 24;
+var PHYS_OP_STREAM_FOCUS = 25;
+var PHYS_OP_BURST = 26;
+var PHYS_OP_DECAL = 27;
+var PHYS_OP_RAGDOLL = 28;
+var PHYS_OP_DEBRIS = 29;
+var PHYS_OP_SHIELD = 30;
+var PHYS_OP_SOUND = 31;
+var PHYS_OP_SOUND_LOOP = 32;
+var PHYS_OP_MIX = 33;
+var PHYS_OP_PLACE = 34;
+var PHYS_OP_UNPLACE = 35;
+var PHYS_OP_UI_SHOW = 36;
+var PHYS_OP_UI_NUM = 37;
+var PHYS_OP_UI_TEXT = 38;
+var PHYS_OP_UI_LIST = 39;
+function physicsBlockAddress(layout) {
+  return layout.ramSize - PHYS_BLOCK_BYTES;
+}
+var toFix = (v) => {
+  const n = Math.round(v * PHYS_FIX);
+  return Math.max(-2147483647, Math.min(2147483647, Number.isFinite(n) ? n : 0));
+};
+var fromFix = (n) => n / PHYS_FIX;
+function writePhysicsState(block, tick, bodies, rays, events = [], overlaps = [], hash = 0) {
+  block.setInt32(PHYS_HDR_HASH, hash | 0, true);
+  const ne = Math.min(events.length, PHYS_MAX_EVENTS);
+  block.setInt32(PHYS_EVENTS, ne, true);
+  for (let i = 0; i < ne; i += 1) {
+    const e = events[i];
+    const at = PHYS_EVENTS + 4 + i * PHYS_EVENT_BYTES;
+    block.setInt32(at, e.a, true);
+    block.setInt32(at + 4, e.b, true);
+    block.setInt32(at + 8, (e.started ? PHYS_EVENT_STARTED : 0) | (e.trigger ? PHYS_EVENT_TRIGGER : 0), true);
+  }
+  const no = Math.min(overlaps.length, PHYS_MAX_OVERLAPS);
+  block.setInt32(PHYS_OVERLAPS, no, true);
+  for (let i = 0; i < no; i += 1) {
+    const at = PHYS_OVERLAPS + 4 + i * PHYS_OVERLAP_BYTES;
+    block.setInt32(at, overlaps[i][0], true);
+    block.setInt32(at + 4, overlaps[i][1], true);
+  }
+  block.setInt32(PHYS_HDR_MAGIC, PHYS_MAGIC, true);
+  const n = Math.min(bodies.length, PHYS_MAX_BODIES);
+  block.setInt32(PHYS_HDR_BODIES, n, true);
+  block.setInt32(PHYS_HDR_TICK, tick | 0, true);
+  for (let i = 0; i < n; i += 1) {
+    const b = bodies[i];
+    const at = PHYS_BODIES + i * PHYS_BODY_BYTES;
+    block.setInt32(at, b.object, true);
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + 4 + k * 4, toFix(b.position[k]), true);
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + 16 + k * 4, toFix(b.velocity[k]), true);
+    block.setInt32(at + 28, (b.grounded ? PHYS_FLAG_GROUNDED : 0) | (b.sleeping ? PHYS_FLAG_SLEEPING : 0), true);
+  }
+  for (let i = 0; i < PHYS_MAX_RAYS; i += 1) {
+    const r = rays[i] ?? null;
+    const at = PHYS_RAYS + i * PHYS_RAY_BYTES;
+    if (!r) {
+      block.setInt32(at, 0, true);
+      continue;
+    }
+    block.setInt32(at, r.object >= 0 ? r.object + 2 : 1, true);
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + 4 + k * 4, toFix(r.point[k]), true);
+    for (let k = 0; k < 3; k += 1) block.setInt32(at + 16 + k * 4, toFix(r.normal[k]), true);
+    block.setInt32(at + 28, toFix(r.distance), true);
+  }
+}
+function writeAnimationState(block, playback, events = []) {
+  const n = Math.min(playback.length, PHYS_MAX_ANIMS);
+  block.setInt32(PHYS_ANIMS, n, true);
+  for (let i = 0; i < n; i += 1) {
+    const at = PHYS_ANIMS + 4 + i * PHYS_ANIM_BYTES;
+    block.setInt32(at, playback[i].object, true);
+    block.setInt32(at + 4, playback[i].clip, true);
+    block.setInt32(at + 8, toFix(playback[i].time), true);
+    block.setInt32(at + 12, playback[i].state ?? -1, true);
+  }
+  const ne = Math.min(events.length, PHYS_MAX_ANIM_EVENTS);
+  block.setInt32(PHYS_ANIM_EVENTS, ne, true);
+  for (let i = 0; i < ne; i += 1) {
+    const at = PHYS_ANIM_EVENTS + 4 + i * PHYS_ANIM_EVENT_BYTES;
+    block.setInt32(at, events[i].object, true);
+    block.setInt32(at + 4, events[i].event, true);
+  }
+}
+function takeCommandsAt(view, base, max) {
+  const n = Math.max(0, Math.min(max, view.getInt32(base, true)));
+  const out = [];
+  for (let i = 0; i < n; i += 1) {
+    const at = base + 4 + i * PHYS_CMD_BYTES;
+    const v = [0, 0, 0, 0, 0, 0].map((_, k) => fromFix(view.getInt32(at + 8 + k * 4, true)));
+    out.push({ op: view.getInt32(at, true), a: view.getInt32(at + 4, true), v });
+  }
+  view.setInt32(base, 0, true);
+  return out;
+}
+function takePhysicsCommands(block) {
+  return takeCommandsAt(block, PHYS_CMDS, PHYS_MAX_CMDS);
+}
 
 // src/pointer.ts
 var POINTER_AT = 48;
@@ -357,6 +596,8 @@ var PointerInput = class {
 };
 
 // src/uiSdk.ts
+var HOLO_TEXT_MAX = 240;
+var HOLO_LIST_MAX = 192;
 var lua = (s) => JSON.stringify(s);
 function readSidecarUi(raw) {
   if (!raw) return [];
@@ -397,6 +638,9 @@ function uiSdkLua(docs, width, height, debugBlock) {
     }).filter(Boolean);
     return `[${lua(doc.name)}]={w={${widgets.join(",\n")}},nav={${links.join(",")}},first=${first}}`;
   });
+  const holo = holoDocuments(docs);
+  const holoMap = holo.map((d, i) => `[${lua(d.name)}]=${i}`).join(",");
+  const keyMap = holoBindingKeys(docs).map((k, i) => `[${lua(k)}]=${i}`).join(",");
   return `do
 local U = {}
 local DOCS = {${tables.join(",\n")}}
@@ -562,7 +806,80 @@ local function drawdoc(n)
     end
   end
 end
-U.draw = function() for _, n in ipairs(shown) do drawdoc(n) end end
+-- Holo documents (I12) are drawn by the host, in true colour: it hears which are
+-- shown and what their bindings hold, once a frame, as commands (cartbox._cmd,
+-- from the runtime). Without the runtime they fall back to the console's drawing.
+local HOLO = {${holoMap}}
+local HK = {${keyMap}}
+local hsent, sentv, dirty = {}, {}, {}
+for k in pairs(HK) do dirty[k] = true end
+local function sig(v)
+  if type(v) == "table" then
+    local parts = {}
+    for i, item in ipairs(v) do parts[i] = type(item) == "table" and tostring(item.text) or tostring(item) end
+    return "t" .. table.concat(parts, "\\1")
+  end
+  return type(v) .. tostring(v)
+end
+local function sendtext(cmd, key, s)
+  s = string.sub(s, 1, ${HOLO_TEXT_MAX})
+  local codes = {}
+  for i = 1, #s, 2 do codes[#codes + 1] = string.byte(s, i) * 256 + (string.byte(s, i + 1) or 0) end
+  local ok = cmd(${PHYS_OP_UI_TEXT}, key, #s, codes[1], codes[2], codes[3], codes[4], codes[5])
+  local chunk, at = 1, 6
+  while ok and at <= #codes do
+    ok = cmd(${PHYS_OP_UI_TEXT}, key | (chunk << 16), codes[at], codes[at + 1], codes[at + 2], codes[at + 3], codes[at + 4], codes[at + 5])
+    chunk, at = chunk + 1, at + 6
+  end
+  return ok
+end
+local function sendlist(cmd, key, t)
+  local n = math.min(#t, ${HOLO_LIST_MAX})
+  local ok = cmd(${PHYS_OP_UI_LIST}, key, n, t[1], t[2], t[3], t[4], t[5])
+  local chunk, at = 1, 6
+  while ok and at <= n do
+    ok = cmd(${PHYS_OP_UI_LIST}, key | (chunk << 16), t[at], at + 1 <= n and t[at + 1] or 0, at + 2 <= n and t[at + 2] or 0, at + 3 <= n and t[at + 3] or 0, at + 4 <= n and t[at + 4] or 0, at + 5 <= n and t[at + 5] or 0)
+    chunk, at = chunk + 1, at + 6
+  end
+  return ok
+end
+local function sendval(cmd, key, v)
+  if type(v) == "number" then return cmd(${PHYS_OP_UI_NUM}, key, v) end
+  if type(v) == "boolean" or v == nil then return cmd(${PHYS_OP_UI_NUM}, key, v and 1 or 0) end
+  if type(v) == "table" then
+    local nums = true
+    for _, item in ipairs(v) do if type(item) ~= "number" then nums = false end end
+    if nums then return sendlist(cmd, key, v) end
+    -- A list of texts: one string, a row a line.
+    local rows = {}
+    for i, item in ipairs(v) do rows[i] = type(item) == "table" and tostring(item.text or "") or tostring(item) end
+    return sendtext(cmd, key, table.concat(rows, "\\n"))
+  end
+  local text = tostring(v)
+  if string.sub(text, 1, 1) == "@" then text = cartbox.text(string.sub(text, 2)) end
+  return sendtext(cmd, key, text)
+end
+local function hflush()
+  local cmd = cartbox._cmd
+  if not cmd then return false end
+  for n, i in pairs(HOLO) do
+    local want = isshown(n)
+    if hsent[n] ~= want and cmd(${PHYS_OP_UI_SHOW}, i, want and 1 or 0) then hsent[n] = want end
+  end
+  for k in pairs(dirty) do
+    local v = B[k]
+    local s = sig(v)
+    if s == sentv[k] then dirty[k] = nil
+    elseif sendval(cmd, HK[k], v) then sentv[k] = s; dirty[k] = nil end
+  end
+  return true
+end
+local plainset = U.set
+U.set = function(k, v) plainset(k, v); if HK[k] then dirty[k] = true end end
+U.draw = function()
+  local host = hflush()
+  for _, n in ipairs(shown) do if not (host and HOLO[n]) then drawdoc(n) end end
+end
 cartbox.ui = U
 end`;
 }
@@ -572,241 +889,6 @@ import { COLOR_FILTERS, TEXT_SCALES, pickLanguage } from "@cartbox/editor";
 
 // src/actionsSdk.ts
 import { actionLabel, parseInputActions } from "@cartbox/editor";
-
-// src/physics/protocol.ts
-var CLASSIC = { pmemAddress: 81924, ramSize: 98304 };
-var PRO = { pmemAddress: 542304, ramSize: 786432 };
-var ERA = { pmemAddress: 257632, ramSize: 393216 };
-var HD = { pmemAddress: 3068512, ramSize: 8388608 };
-var RAM_LAYOUTS = {
-  classic: CLASSIC,
-  voxel: CLASSIC,
-  pro: PRO,
-  portrait: PRO,
-  ps1: ERA,
-  n64: ERA,
-  xbox360: HD,
-  modern: HD
-};
-var PHYS_BLOCK_BYTES = 8192;
-var PHYS_MAGIC = 1213219395;
-var PHYS_FIX = 1024;
-var PHYS_HDR_MAGIC = 0;
-var PHYS_HDR_BODIES = 4;
-var PHYS_HDR_TICK = 8;
-var PHYS_HDR_HASH = 12;
-var PHYS_HDR_LEVEL = 16;
-var PHYS_HDR_LEVEL_LOADING = 20;
-var PHYS_HDR_LEVEL_PROGRESS = 24;
-var PHYS_BODIES = 64;
-var PHYS_BODY_BYTES = 32;
-var PHYS_MAX_BODIES = 64;
-var PHYS_RAYS = PHYS_BODIES + PHYS_MAX_BODIES * PHYS_BODY_BYTES;
-var PHYS_RAY_BYTES = 32;
-var PHYS_MAX_RAYS = 16;
-var PHYS_EVENTS = PHYS_RAYS + PHYS_MAX_RAYS * PHYS_RAY_BYTES;
-var PHYS_EVENT_BYTES = 12;
-var PHYS_MAX_EVENTS = 48;
-var PHYS_OVERLAPS = PHYS_EVENTS + 4 + PHYS_MAX_EVENTS * PHYS_EVENT_BYTES;
-var PHYS_OVERLAP_BYTES = 8;
-var PHYS_MAX_OVERLAPS = 64;
-var PHYS_EVENT_STARTED = 1;
-var PHYS_EVENT_TRIGGER = 2;
-var PHYS_AGENTS = 3720;
-var PHYS_AGENT_BYTES = 16;
-var PHYS_MAX_AGENTS = 16;
-var NAV_FLAG_MOVING = 1;
-var NAV_FLAG_AIR = 2;
-var NAV_FLAG_ARRIVED = 4;
-var NAV_FLAG_NO_PATH = 8;
-var NAV_FLAG_OBSTACLE = 16;
-var PHYS_ANIMS = 6400;
-var PHYS_ANIM_BYTES = 16;
-var PHYS_MAX_ANIMS = 64;
-var PHYS_ANIM_EVENTS = PHYS_ANIMS + 4 + PHYS_MAX_ANIMS * PHYS_ANIM_BYTES;
-var PHYS_ANIM_EVENT_BYTES = 8;
-var PHYS_MAX_ANIM_EVENTS = 32;
-var PHYS_JOINTS = 7700;
-var PHYS_JOINT_BYTES = 20;
-var PHYS_MAX_JOINTS = 16;
-var PHYS_TIMELINE = 8032;
-var PHYS_TIMELINE_EVENTS = PHYS_TIMELINE + 12;
-var PHYS_MAX_TIMELINE_EVENTS = 8;
-var PHYS_TIMELINE_VALUES = 6160;
-var PHYS_MAX_TIMELINE_VALUES = 32;
-var TIMELINE_VALUE_NONE = -2147483648;
-function writeTimelineValues(block, names, values) {
-  const n = Math.min(names.length, PHYS_MAX_TIMELINE_VALUES);
-  block.setInt32(PHYS_TIMELINE_VALUES, n, true);
-  for (let i = 0; i < n; i += 1) {
-    const v = values.get(names[i]);
-    block.setInt32(PHYS_TIMELINE_VALUES + 4 + i * 4, v === void 0 ? TIMELINE_VALUE_NONE : toFix(Math.max(-2e6, Math.min(2e6, v))), true);
-  }
-}
-function writeLevelState(block, level) {
-  block.setInt32(PHYS_HDR_LEVEL, level.current, true);
-  block.setInt32(PHYS_HDR_LEVEL_LOADING, level.loading, true);
-  block.setInt32(PHYS_HDR_LEVEL_PROGRESS, toFix(Math.max(0, Math.min(1, level.progress))), true);
-}
-function writeTimelineState(block, playback, events = []) {
-  block.setInt32(PHYS_TIMELINE, playback.index, true);
-  block.setInt32(PHYS_TIMELINE + 4, toFix(playback.time), true);
-  block.setInt32(PHYS_TIMELINE + 8, playback.playing ? 1 : 0, true);
-  const n = Math.min(events.length, PHYS_MAX_TIMELINE_EVENTS);
-  block.setInt32(PHYS_TIMELINE_EVENTS, n, true);
-  for (let i = 0; i < n; i += 1) block.setInt32(PHYS_TIMELINE_EVENTS + 4 + i * 4, events[i], true);
-}
-function writeAgents(block, agents) {
-  const n = Math.min(agents.length, PHYS_MAX_AGENTS);
-  block.setInt32(PHYS_AGENTS, n, true);
-  for (let i = 0; i < n; i += 1) {
-    const a = agents[i];
-    const at = PHYS_AGENTS + 4 + i * PHYS_AGENT_BYTES;
-    for (let k = 0; k < 3; k += 1) block.setInt32(at + k * 4, toFix(a.position[k]), true);
-    let f2 = a.facing;
-    while (f2 > Math.PI) f2 -= 2 * Math.PI;
-    while (f2 < -Math.PI) f2 += 2 * Math.PI;
-    const facing = Math.round(f2 * 1e4) & 65535;
-    block.setUint32(at + 12, (a.key & 1023 | (a.flags & 63) << 10 | facing << 16) >>> 0, true);
-  }
-}
-function writeJointPositions(block, joints) {
-  const n = Math.min(joints.length, PHYS_MAX_JOINTS);
-  block.setInt32(PHYS_JOINTS, n, true);
-  for (let i = 0; i < n; i += 1) {
-    const at = PHYS_JOINTS + 4 + i * PHYS_JOINT_BYTES;
-    block.setInt32(at, joints[i].object, true);
-    block.setInt32(at + 4, joints[i].joint, true);
-    for (let k = 0; k < 3; k += 1) block.setInt32(at + 8 + k * 4, toFix(joints[i].position[k]), true);
-  }
-}
-var PHYS_CMDS = 4096;
-var PHYS_CMD_BYTES = 32;
-var PHYS_MAX_CMDS = 64;
-var PHYS_FLAG_GROUNDED = 1;
-var PHYS_FLAG_SLEEPING = 2;
-var PHYS_OP_IMPULSE = 1;
-var PHYS_OP_VELOCITY = 2;
-var PHYS_OP_TELEPORT = 3;
-var PHYS_OP_MOVE = 4;
-var PHYS_OP_RAY = 5;
-var PHYS_OP_SPAWN = 6;
-var PHYS_OP_DESPAWN = 7;
-var PHYS_OP_CAST = 8;
-var PHYS_CAST_RAY = 0;
-var PHYS_CAST_SPHERE = 1;
-var PHYS_CAST_BOX = 2;
-var PHYS_CAST_CAPSULE = 3;
-var PHYS_OP_MOTOR = 9;
-var PHYS_OP_UNJOIN = 10;
-var PHYS_OP_PLAY = 11;
-var PHYS_OP_ANIM_SET = 12;
-var PHYS_OP_ANIM_TRIGGER = 13;
-var PHYS_OP_ANIM_GOTO = 14;
-var PHYS_OP_IK = 15;
-var PHYS_OP_IK_POLE = 16;
-var PHYS_OP_LOOKAT = 17;
-var PHYS_OP_WATCH = 18;
-var PHYS_OP_TIMELINE = 19;
-var PHYS_OP_LEVEL = 20;
-var PHYS_OP_AGENT = 21;
-var PHYS_OP_AGENT_GOTO = 22;
-var PHYS_OP_AGENT_STOP = 23;
-var PHYS_OP_AGENT_REMOVE = 24;
-var PHYS_OP_STREAM_FOCUS = 25;
-var PHYS_OP_BURST = 26;
-var PHYS_OP_DECAL = 27;
-var PHYS_OP_RAGDOLL = 28;
-var PHYS_OP_DEBRIS = 29;
-var PHYS_OP_SHIELD = 30;
-var PHYS_OP_SOUND = 31;
-var PHYS_OP_SOUND_LOOP = 32;
-var PHYS_OP_MIX = 33;
-var PHYS_OP_PLACE = 34;
-var PHYS_OP_UNPLACE = 35;
-function physicsBlockAddress(layout) {
-  return layout.ramSize - PHYS_BLOCK_BYTES;
-}
-var toFix = (v) => {
-  const n = Math.round(v * PHYS_FIX);
-  return Math.max(-2147483647, Math.min(2147483647, Number.isFinite(n) ? n : 0));
-};
-var fromFix = (n) => n / PHYS_FIX;
-function writePhysicsState(block, tick, bodies, rays, events = [], overlaps = [], hash = 0) {
-  block.setInt32(PHYS_HDR_HASH, hash | 0, true);
-  const ne = Math.min(events.length, PHYS_MAX_EVENTS);
-  block.setInt32(PHYS_EVENTS, ne, true);
-  for (let i = 0; i < ne; i += 1) {
-    const e = events[i];
-    const at = PHYS_EVENTS + 4 + i * PHYS_EVENT_BYTES;
-    block.setInt32(at, e.a, true);
-    block.setInt32(at + 4, e.b, true);
-    block.setInt32(at + 8, (e.started ? PHYS_EVENT_STARTED : 0) | (e.trigger ? PHYS_EVENT_TRIGGER : 0), true);
-  }
-  const no = Math.min(overlaps.length, PHYS_MAX_OVERLAPS);
-  block.setInt32(PHYS_OVERLAPS, no, true);
-  for (let i = 0; i < no; i += 1) {
-    const at = PHYS_OVERLAPS + 4 + i * PHYS_OVERLAP_BYTES;
-    block.setInt32(at, overlaps[i][0], true);
-    block.setInt32(at + 4, overlaps[i][1], true);
-  }
-  block.setInt32(PHYS_HDR_MAGIC, PHYS_MAGIC, true);
-  const n = Math.min(bodies.length, PHYS_MAX_BODIES);
-  block.setInt32(PHYS_HDR_BODIES, n, true);
-  block.setInt32(PHYS_HDR_TICK, tick | 0, true);
-  for (let i = 0; i < n; i += 1) {
-    const b = bodies[i];
-    const at = PHYS_BODIES + i * PHYS_BODY_BYTES;
-    block.setInt32(at, b.object, true);
-    for (let k = 0; k < 3; k += 1) block.setInt32(at + 4 + k * 4, toFix(b.position[k]), true);
-    for (let k = 0; k < 3; k += 1) block.setInt32(at + 16 + k * 4, toFix(b.velocity[k]), true);
-    block.setInt32(at + 28, (b.grounded ? PHYS_FLAG_GROUNDED : 0) | (b.sleeping ? PHYS_FLAG_SLEEPING : 0), true);
-  }
-  for (let i = 0; i < PHYS_MAX_RAYS; i += 1) {
-    const r = rays[i] ?? null;
-    const at = PHYS_RAYS + i * PHYS_RAY_BYTES;
-    if (!r) {
-      block.setInt32(at, 0, true);
-      continue;
-    }
-    block.setInt32(at, r.object >= 0 ? r.object + 2 : 1, true);
-    for (let k = 0; k < 3; k += 1) block.setInt32(at + 4 + k * 4, toFix(r.point[k]), true);
-    for (let k = 0; k < 3; k += 1) block.setInt32(at + 16 + k * 4, toFix(r.normal[k]), true);
-    block.setInt32(at + 28, toFix(r.distance), true);
-  }
-}
-function writeAnimationState(block, playback, events = []) {
-  const n = Math.min(playback.length, PHYS_MAX_ANIMS);
-  block.setInt32(PHYS_ANIMS, n, true);
-  for (let i = 0; i < n; i += 1) {
-    const at = PHYS_ANIMS + 4 + i * PHYS_ANIM_BYTES;
-    block.setInt32(at, playback[i].object, true);
-    block.setInt32(at + 4, playback[i].clip, true);
-    block.setInt32(at + 8, toFix(playback[i].time), true);
-    block.setInt32(at + 12, playback[i].state ?? -1, true);
-  }
-  const ne = Math.min(events.length, PHYS_MAX_ANIM_EVENTS);
-  block.setInt32(PHYS_ANIM_EVENTS, ne, true);
-  for (let i = 0; i < ne; i += 1) {
-    const at = PHYS_ANIM_EVENTS + 4 + i * PHYS_ANIM_EVENT_BYTES;
-    block.setInt32(at, events[i].object, true);
-    block.setInt32(at + 4, events[i].event, true);
-  }
-}
-function takeCommandsAt(view, base, max) {
-  const n = Math.max(0, Math.min(max, view.getInt32(base, true)));
-  const out = [];
-  for (let i = 0; i < n; i += 1) {
-    const at = base + 4 + i * PHYS_CMD_BYTES;
-    const v = [0, 0, 0, 0, 0, 0].map((_, k) => fromFix(view.getInt32(at + 8 + k * 4, true)));
-    out.push({ op: view.getInt32(at, true), a: view.getInt32(at + 4, true), v });
-  }
-  view.setInt32(base, 0, true);
-  return out;
-}
-function takePhysicsCommands(block) {
-  return takeCommandsAt(block, PHYS_CMDS, PHYS_MAX_CMDS);
-}
 
 // src/debug/instrument.ts
 var KEYWORDS = /* @__PURE__ */ new Set([
@@ -7897,6 +7979,12 @@ function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
     _wr(count, n + 1)
     return true
   end
+  -- For the UI's holo documents (I12; uiSdk.ts): true once the command is on its way.
+  cartbox._cmd = function(op, a, v1, v2, v3, v4, v5, v6)
+    if not _live() then return false end
+    local r = _cmd(op, a, v1, v2, v3, v4, v5, v6)
+    return r == true or _direct ~= nil
+  end
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
@@ -8790,6 +8878,13 @@ var RuntimeChannel = class {
     this.ragdollBoxes = null;
     /** Collision radii per skinned mesh. */
     this.radii = /* @__PURE__ */ new Map();
+    /**
+     * Holo UI documents (I12): which are shown (by index among the holo
+     * documents) and what each binding (by key index) holds — a number, a
+     * string or a list of numbers. Strings and lists arrive in chunks.
+     */
+    this.holo = { shown: /* @__PURE__ */ new Set(), values: /* @__PURE__ */ new Map() };
+    this.holoParts = /* @__PURE__ */ new Map();
     /** Joints whose world position the cart asked for, and where they were when last skinned. */
     this.watched = /* @__PURE__ */ new Map();
     this.animation = sceneHasAnimation(scene) ? new AnimationSession(scene) : null;
@@ -8879,7 +8974,8 @@ var RuntimeChannel = class {
       else if (cmd.op === PHYS_OP_DEBRIS) {
         if (this.debris.length < MAX_BURSTS_QUEUED)
           this.debris.push({ debris: cmd.a & 255, at: [cmd.v[0], cmd.v[1], cmd.v[2]], velocity: [cmd.v[3], cmd.v[4], cmd.v[5]], scale: (cmd.a >>> 8 & 65535) / 16 });
-      } else if (cmd.op === PHYS_OP_TIMELINE) {
+      } else if (cmd.op >= PHYS_OP_UI_SHOW && cmd.op <= PHYS_OP_UI_LIST) this.holoCommand(cmd);
+      else if (cmd.op === PHYS_OP_TIMELINE) {
         if (cmd.a < 0) this.timeline?.stop();
         else this.timeline?.play(cmd.a, cmd.v[0], cmd.v[1]);
       }
@@ -8894,6 +8990,40 @@ var RuntimeChannel = class {
       for (const r of this.ragdolls.values()) if (r.doll ? r.doll.step(PHYSICS_DT, boxes) : true) awake = true;
       if (awake) this.animation?.invalidate();
     }
+  }
+  /** A holo UI command: a document shown or hidden, or a binding (or a chunk of one) set. */
+  holoCommand(cmd) {
+    if (cmd.op === PHYS_OP_UI_SHOW) {
+      if (cmd.v[0] >= 0.5) this.holo.shown.add(cmd.a);
+      else this.holo.shown.delete(cmd.a);
+      return;
+    }
+    if (cmd.op === PHYS_OP_UI_NUM) {
+      this.holo.values.set(cmd.a, cmd.v[0]);
+      return;
+    }
+    const key = cmd.a & 65535;
+    const chunk = cmd.a >>> 16;
+    const kind = cmd.op === PHYS_OP_UI_TEXT ? "text" : "list";
+    let part = this.holoParts.get(key);
+    if (chunk === 0) {
+      part = { kind, length: Math.max(0, Math.round(cmd.v[0])), items: [...cmd.v.slice(1)] };
+      this.holoParts.set(key, part);
+    } else if (part && part.kind === kind) part.items.push(...cmd.v);
+    else return;
+    const have = kind === "text" ? part.items.length * 2 : part.items.length;
+    if (have < part.length) return;
+    this.holoParts.delete(key);
+    if (kind === "list") {
+      this.holo.values.set(key, part.items.slice(0, part.length));
+      return;
+    }
+    const chars = [];
+    for (const code of part.items) {
+      const c = Math.round(code);
+      chars.push(c >> 8 & 255, c & 255);
+    }
+    this.holo.values.set(key, String.fromCharCode(...chars.slice(0, part.length)));
   }
   /** Go limp (v0 = 1) with a shove, or take the animation back (v0 = 0). */
   ragdollCommand(object, v) {
@@ -10403,6 +10533,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.inactiveKey = "";
     /** Each object's world matrix as last drawn (null = hidden), or null when nothing moved. */
     this.lastPlacement = null;
+    /** Draws the cart's shown holo UI documents over the finished frame (I12; set by the player). */
+    this.holo = null;
     /** Which objects drew on the front layer last frame (where their trails go). */
     this.lastFront = [];
     /** Swing trails (I10): the objects whose meshes leave them, and the ribbons they've swept. */
@@ -10566,6 +10698,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.localShadowCache = [];
     }
     return true;
+  }
+  /** Draw holo UI documents over every frame with `draw` (null: none). */
+  setHolo(draw) {
+    this.holo = draw;
   }
   /** Apply a graphics quality preset (takes effect on the next frame). */
   setQuality(quality) {
@@ -10913,6 +11049,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (profiler) profiler.add("scene", performance.now() - mark);
     if (target) expandNearest(target.out, target.width, target.height, this.output, this.width, this.height);
     if (this.hud && this.hudFrame) compositeHudOverScene(this.output, this.hudFrame, this.width * this.height);
+    if (this.holo) this.holo(this.output, this.width, this.height, this.frame / 60);
     this.frame += 1;
     this.inner.blit(this.presented);
     this.pace(performance.now() - started);
@@ -17140,7 +17277,7 @@ async function createSceneRenderer(width, height, caps, deviceProvider = getWebg
 }
 
 // src/player.ts
-import { SpatialLoader, actionMask, reboundActions, colorFilterSvg, DEFAULT_ACCESSIBILITY } from "@cartbox/editor";
+import { SpatialLoader, actionMask, createHoloCache, holoBindingKeys as holoBindingKeys2, holoDocuments as holoDocuments2, renderHoloDocument, translate, reboundActions, colorFilterSvg, DEFAULT_ACCESSIBILITY } from "@cartbox/editor";
 var DIRECT_CORE_URL = "/engine/modern-core/modern-core.js";
 function shouldUseTouch(scheme, view) {
   if (scheme === "touch") return true;
@@ -17454,6 +17591,28 @@ var Player = class {
           );
           this.meshSurface.setQuality(this.qualitySettings);
           this.meshSurface.setProfiler(this.profiler);
+          const holoDocs = holoDocuments2(this.options.ui ?? []);
+          const runtime = this.runtime;
+          if (holoDocs.length > 0 && runtime) {
+            const keys = holoBindingKeys2(this.options.ui ?? []);
+            const strings = this.options.strings ?? null;
+            const language = playLanguage(strings, this.options.languages) ?? "";
+            const text = (key) => translate(strings, language, key);
+            const cache = createHoloCache();
+            this.meshSurface.setHolo((out, width, height, time) => {
+              const state = runtime.channel.holo;
+              if (state.shown.size === 0) return;
+              const bindings = {};
+              keys.forEach((k, i) => {
+                const v = state.values.get(i);
+                if (v !== void 0) bindings[k] = v;
+              });
+              for (const i of [...state.shown].sort((a, b) => a - b)) {
+                const doc = holoDocs[i];
+                if (doc) renderHoloDocument(out, width, height, doc, { bindings, time, text }, cache);
+              }
+            });
+          }
           if ((mesh2.levels?.length ?? 0) > 0) this.activateLevel(0);
           if (mesh2.streaming) {
             const groups = streamGroups(mesh2);

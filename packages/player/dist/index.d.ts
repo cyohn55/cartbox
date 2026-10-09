@@ -5567,6 +5567,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private inactiveKey;
     /** Each object's world matrix as last drawn (null = hidden), or null when nothing moved. */
     private lastPlacement;
+    /** Draws the cart's shown holo UI documents over the finished frame (I12; set by the player). */
+    private holo;
     /** Which objects drew on the front layer last frame (where their trails go). */
     private lastFront;
     /** Swing trails (I10): the objects whose meshes leave them, and the ribbons they've swept. */
@@ -5614,6 +5616,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * change applies on the next run). Physics bodies keep simulating where they are.
      */
     applySceneEdits(next: MeshScene): Promise<boolean>;
+    /** Draw holo UI documents over every frame with `draw` (null: none). */
+    setHolo(draw: ((out: Uint8ClampedArray, width: number, height: number, time: number) => void) | null): void;
     /** Apply a graphics quality preset (takes effect on the next frame). */
     setQuality(quality: QualitySettings): void;
     /**
@@ -6705,6 +6709,16 @@ declare class RuntimeChannel {
     private ragdollBoxes;
     /** Collision radii per skinned mesh. */
     private readonly radii;
+    /**
+     * Holo UI documents (I12): which are shown (by index among the holo
+     * documents) and what each binding (by key index) holds — a number, a
+     * string or a list of numbers. Strings and lists arrive in chunks.
+     */
+    readonly holo: {
+        shown: Set<number>;
+        values: Map<number, string | number | number[]>;
+    };
+    private readonly holoParts;
     /** Joints whose world position the cart asked for, and where they were when last skinned. */
     private readonly watched;
     constructor(scene: MeshScene, physics: PhysicsSession | null);
@@ -6723,6 +6737,8 @@ declare class RuntimeChannel {
      * them as the cart calls and hands them here directly.
      */
     applyCommands(commands: readonly PhysicsCommand[]): void;
+    /** A holo UI command: a document shown or hidden, or a binding (or a chunk of one) set. */
+    private holoCommand;
     /** Go limp (v0 = 1) with a shove, or take the animation back (v0 = 0). */
     private ragdollCommand;
     /** Set (or, with all three 0, clear) an object's shield effect. */
