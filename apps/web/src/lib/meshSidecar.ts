@@ -28,6 +28,7 @@ import {
   parseSceneLighting,
   readMeshLibrary,
   readAnimatorSpec,
+  defaultAnimator,
   readPhysicsSpec,
   readPhysicsWorld,
   readSceneProps,
@@ -102,6 +103,8 @@ export interface MeshSidecarEntry {
   readonly name: string;
   /** The mesh geometry as a {@link serializeMeshAsset} string. */
   readonly mesh: string;
+  /** The mesh's material set this copy wears (I13; see applyMeshVariant in @cartbox/editor); absent = its own materials. */
+  readonly variant?: string;
   readonly transform: MeshTransform;
   /**
    * Optional animation frames: alternate meshes (serialized) a cart can switch
@@ -347,6 +350,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
       id: typeof record.id === "string" ? record.id : newMeshId(),
       name: typeof record.name === "string" ? record.name : "Mesh",
       mesh,
+      ...(typeof record.variant === "string" && record.variant ? { variant: record.variant.slice(0, 64) } : {}),
       transform: readTransform(record.transform),
       ...(frames.length > 0 ? { frames } : {}),
       ...(lods ? { lods } : {}),
@@ -603,6 +607,29 @@ export function addMesh(sidecar: MeshSidecar, mesh: MeshAsset, name: string): { 
     transform: defaultMeshTransform(),
   };
   return { sidecar: { ...sidecar, version: MESH_SIDECAR_VERSION, meshes: [...sidecar.meshes, entry] }, id };
+}
+
+/**
+ * Add an imported model in one step (I13): the mesh with its skin, clips and
+ * material sets, and — when it brings clips — a state machine to start from,
+ * one looping state per clip, which the Animator panel then edits.
+ */
+export function addImportedMesh(sidecar: MeshSidecar, mesh: MeshAsset): { sidecar: MeshSidecar; id: string } {
+  const added = addMesh(sidecar, mesh, mesh.name);
+  const clips = mesh.skin ? (mesh.clips ?? []).map((c) => c.name) : [];
+  return clips.length > 0 ? { sidecar: setMeshAnimator(added.sidecar, added.id, defaultAnimator(clips)), id: added.id } : added;
+}
+
+/** Dress one entry in its mesh's material set `variant`, or (null) its own materials. */
+export function setMeshVariant(sidecar: MeshSidecar, id: string, variant: string | null): MeshSidecar {
+  return {
+    ...sidecar,
+    meshes: sidecar.meshes.map((m) => {
+      if (m.id !== id) return m;
+      const { variant: _drop, ...rest } = m;
+      return variant ? { ...rest, variant } : rest;
+    }),
+  };
 }
 
 /** Replace one entry's transform. */

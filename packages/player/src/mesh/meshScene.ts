@@ -47,6 +47,7 @@ import {
   type MeshSceneInstance,
   type LodChain,
   decodeLods,
+  applyMeshVariant,
   foliageBlocks,
   readFoliage,
   parseSceneAudio,
@@ -311,6 +312,15 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     }
     return cache.get(serialized) ?? null;
   };
+  // A copy wearing one of its mesh's material sets (I13): one derived asset per mesh and set, shared like the mesh.
+  const variantCache = new Map<MeshAsset, Map<string, MeshAsset>>();
+  const wear = (mesh: MeshAsset, variant: unknown): MeshAsset => {
+    if (typeof variant !== "string" || !mesh.variants?.some((v) => v.name === variant)) return mesh;
+    let byName = variantCache.get(mesh);
+    if (!byName) variantCache.set(mesh, (byName = new Map()));
+    if (!byName.has(variant)) byName.set(variant, applyMeshVariant(mesh, variant));
+    return byName.get(variant)!;
+  };
   type Parsed = Omit<MeshInstance, "model" | "parent" | "pooled" | "level"> & {
     parentId: string | null;
     pool?: { prefab: string; copy: number; rootId: string };
@@ -329,12 +339,13 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     }
     return byBase.get(key) ?? null;
   };
-  type Record_ = { mesh?: unknown; transform?: unknown; frames?: unknown; lods?: unknown; id?: unknown; name?: unknown; parent?: unknown; tags?: unknown; props?: unknown; physics?: unknown; animator?: unknown; level?: unknown; alwaysLoaded?: unknown; components?: unknown };
+  type Record_ = { mesh?: unknown; variant?: unknown; transform?: unknown; frames?: unknown; lods?: unknown; id?: unknown; name?: unknown; parent?: unknown; tags?: unknown; props?: unknown; physics?: unknown; animator?: unknown; level?: unknown; alwaysLoaded?: unknown; components?: unknown };
   const readEntry = (record: Record_, id: string, parentId: string | null, identity = false): Parsed | null => {
     if (typeof record.mesh !== "string") return null;
     const resolved = resolveMeshRef(record.mesh, library);
-    const mesh = resolved ? load(resolved) : null;
-    if (!mesh) return null;
+    const loaded = resolved ? load(resolved) : null;
+    if (!loaded) return null;
+    const mesh = wear(loaded, record.variant);
     const frames = resolveMeshFrames(record.frames, library)
       .map(load)
       .filter((frame): frame is MeshAsset => frame !== null);
