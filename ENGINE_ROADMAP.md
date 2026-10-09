@@ -257,7 +257,10 @@ completeness.
 - [ ] Real-time multi-user editing of a cart.
 - [ ] Version history with named snapshots and restore.
 - [ ] Authoritative server or rollback netcode for competitive multiplayer
-      (today's netplay relays through Supabase Realtime).
+      (today's netplay relays through Supabase Realtime). Planned as a
+      host-authoritative model in
+      [`LOCKOUT_MULTIPLAYER_ROADMAP.md`](LOCKOUT_MULTIPLAYER_ROADMAP.md)
+      (L2–L8).
 - [ ] Export to a standalone HTML bundle / itch.io embed; installable PWA with
       offline play.
 - [ ] Localization and accessibility settings (text size, colour-blind modes,
