@@ -5216,9 +5216,11 @@ function decodeWorldLights(words) {
     if ((packed >>> 24 & 3) !== LIGHT_KIND_WORLD) continue;
     const intensity = ((words[base + 5] ?? LIGHT_INTENSITY_SCALE) & 65535) / LIGHT_INTENSITY_SCALE;
     const signed = (k) => ((words[base + k] ?? 0) | 0) / WORLD_LIGHT_SCALE;
+    const sun = signed(3) < 0;
     out.push({
       position: [signed(0), signed(1), signed(2)],
-      range: signed(3),
+      range: sun ? 0 : signed(3),
+      ...sun ? { sun: true } : {},
       color: [
         (packed >>> 16 & 255) / 255 * intensity,
         (packed >>> 8 & 255) / 255 * intensity,
@@ -6133,6 +6135,14 @@ cartbox = {
   -- 2D relight ignores it. E.g. a glow over an objective.
   light3d = function(x, y, z, radius, r, g, b, intensity)
     _light(3, (x or 0) * 64, (y or 0) * 64, (z or 0) * 64, (radius or 4) * 64, r, g, b, intensity, 0, 0, 0)
+  end,
+  -- sun3d(dx, dy, dz, r, g, b, intensity): the 3D scene's sun this frame, toward
+  -- (dx, dy, dz) -- a time of day: it replaces the lighting rig's key light,
+  -- its shadows follow, and the light probes' bounce relights (I17).
+  sun3d = function(dx, dy, dz, r, g, b, intensity)
+    local l = math.sqrt((dx or 0)^2 + (dy or 1)^2 + (dz or 0)^2)
+    if l < 1e-6 then l = 1 end
+    _light(3, (dx or 0) / l * 64, (dy or 1) / l * 64, (dz or 0) / l * 64, -64, r, g, b, intensity, 0, 0, 0)
   end,
   spot = function(x, y, z, dx, dy, dz, radius, angle, r, g, b, intensity)
     local nx, ny = _norm(dx or 0, dy or 0, dz or 1)
@@ -10198,8 +10208,35 @@ import {
   decodeRadianceHdr,
   hdrToTexture,
   isRadiance,
-  panoramaWithClouds
+  panoramaWithClouds,
+  BounceTransferBuilder,
+  probeBounce,
+  readProbeBake,
+  relightProbes,
+  surfelLight
 } from "@cartbox/editor";
+
+// src/mesh/dynamicLights.ts
+function withCartSun(lighting, sun) {
+  const l = Math.hypot(...sun.direction) || 1;
+  const key = { kind: "directional", direction: [sun.direction[0] / l, sun.direction[1] / l, sun.direction[2] / l], color: [...sun.color], intensity: 1 };
+  const at = lighting.lights.findIndex((x) => x.kind === "directional");
+  return { ...lighting, lights: at < 0 ? [key, ...lighting.lights] : lighting.lights.map((x, i) => i === at ? { ...x, ...key } : x) };
+}
+function bounceLightsFor(authored, frame, cart) {
+  const authoredKey = authored.lights.find((x) => x.kind === "directional");
+  const reference = authoredKey ? authoredKey.color.map((c) => c * authoredKey.intensity) : [1, 1, 1];
+  const brightness = 0.2126 * reference[0] + 0.7152 * reference[1] + 0.0722 * reference[2] || 1;
+  const key = frame.lights.find((x) => x.kind === "directional");
+  const sun = key?.direction ? { direction: key.direction, color: [0, 1, 2].map((k) => reference[k] > 1e-6 ? key.color[k] * key.intensity / reference[k] : 0) } : null;
+  const points = [...frame.lights, ...cart].filter((x) => (x.kind === "point" || x.kind === "spot") && x.position).map((x) => ({ position: x.position, color: x.color.map((c) => c * x.intensity / brightness), range: x.range && x.range > 0 ? x.range : 8 }));
+  return { sun, points };
+}
+function bounceSignature(lights) {
+  const r = (v, s) => Math.round(v * s);
+  const sun = lights.sun ? `${lights.sun.direction.map((v) => r(v, 100)).join(",")}:${lights.sun.color.map((v) => r(v, 50)).join(",")}` : "-";
+  return `${sun}|${lights.points.map((p) => `${p.position.map((v) => r(v, 20)).join(",")}:${p.color.map((v) => r(v, 50)).join(",")}:${r(p.range, 10)}`).join(";")}`;
+}
 
 // src/render/sceneRenderer.ts
 import {
@@ -10423,6 +10460,8 @@ function capsConstrainScene(caps) {
 // src/mesh/MeshOverlaySurface.ts
 var RAD_TO_DEG = 180 / Math.PI;
 var SUN_EASE = 0.35;
+var BOUNCE_FACES_PER_FRAME = 150;
+var BOUNCE_EVERY = 4;
 var FIRST_PERSON_NEAR = 0.05;
 var SHADOW_MAP_SIZE = 1024;
 var SKY_BACKDROP_SCALE = 3;
@@ -10521,6 +10560,17 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.edgeScratch = null;
     /** The cart's world lights this frame (cartbox.light3d), added to the rig's in first person. */
     this.cartLights = [];
+    /** The cart's sun this frame (cartbox.sun3d, I17), which takes the rig's key light's place; null for the rig's own. */
+    this.cartSun = null;
+    /** The rig with the cart's sun in it, kept while neither changes (the shadow maps redraw when it does). */
+    this.sunRig = null;
+    /**
+     * Dynamic bounce (I17): the probes' transfer, found a slice a frame after
+     * loading, then the probes relit whenever the lights change (see
+     * dynamicBounce.ts in @cartbox/editor). Null when the probes weren't baked
+     * with their light recorded.
+     */
+    this.bounce = null;
     /** Tinted mesh copies, per source mesh and tint index. */
     this.tintCache = /* @__PURE__ */ new Map();
     /** Draws the front layer (a held weapon) over the finished scene. */
@@ -10701,6 +10751,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       }
       this.environment = environment;
       this.skyMap = skyMap;
+      this.startBounce();
       this.skyClouds = clouds;
       this.skyCache = null;
       if (JSON.stringify(before.lighting?.tints ?? null) !== JSON.stringify(next.lighting?.tints ?? null)) this.tintCache.clear();
@@ -10787,6 +10838,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     }
     const surface = new _MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
     surface.skyClouds = clouds;
+    surface.startBounce();
     surface.vistas = vistas;
     surface.trailed = scene.instances.flatMap((instance, i) => instance.mesh.trails && instance.mesh.trails.length > 0 ? [i] : []);
     if (surface.trailed.length > 0) surface.trails = new TrailSystem();
@@ -10818,7 +10870,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         environment: sky,
         lights: lighting.lights
       }).then((probes) => {
-        if (probes && !surface.destroyed) surface.environment = { ...sky, probes };
+        if (probes && !surface.destroyed) surface.environment = { ...surface.environment ?? sky, probes };
       }).catch(() => void 0);
     }
     return surface;
@@ -10911,7 +10963,54 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * top of the authored rig's lights.
    */
   setCartLights(lights) {
-    this.cartLights = lights.map((light) => ({ kind: "point", position: light.position, color: light.color, intensity: 1, range: light.range }));
+    this.cartLights = lights.filter((light) => !light.sun).map((light) => ({ kind: "point", position: light.position, color: light.color, intensity: 1, range: light.range }));
+    const sun = lights.find((light) => light.sun);
+    this.cartSun = sun ? { direction: sun.position, color: sun.color } : null;
+  }
+  /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17). */
+  frameLighting() {
+    const lighting = this.scene.lighting ?? null;
+    if (!lighting || !this.cartSun) return lighting;
+    const sun = `${this.cartSun.direction.map((v) => v.toFixed(3)).join(",")}|${this.cartSun.color.map((v) => v.toFixed(3)).join(",")}`;
+    if (this.sunRig?.source !== lighting || this.sunRig.sun !== sun) this.sunRig = { source: lighting, sun, lighting: withCartSun(lighting, this.cartSun) };
+    return this.sunRig.lighting;
+  }
+  /** Start finding the probes' bounce transfer (I17), when they were baked with their light recorded. */
+  startBounce() {
+    this.bounce = null;
+    const lighting = this.scene.lighting;
+    const bake = readProbeBake(lighting?.lightProbes ?? null);
+    const grid = this.environment?.lightProbes;
+    if (!bake || !grid) return;
+    const still = this.scene.instances.flatMap((inst) => {
+      const body = inst.physics?.body;
+      const moves = body === "dynamic" || body === "kinematic" || body === "character";
+      return inst.pooled || isSkinned2(inst.mesh) || moves ? [] : [{ mesh: inst.mesh, model: inst.model }];
+    });
+    if (still.length === 0) return;
+    this.bounce = { builder: new BounceTransferBuilder(grid, still, { distance: bake.distance, bounce: bake.bounce }), bake, transfer: null, baked: null, signature: "", at: -Infinity };
+  }
+  /**
+   * One frame of dynamic bounce (I17): trace a slice of the transfer until it's
+   * found; then, at most every few frames and only when the lights have
+   * changed, relight the probes from the lights as they are now.
+   */
+  stepBounce(lighting) {
+    const b = this.bounce;
+    const authored = this.scene.lighting;
+    if (!b || !lighting || !authored || !this.environment) return;
+    if (!b.transfer) {
+      if (!b.builder.step(BOUNCE_FACES_PER_FRAME)) return;
+      b.transfer = b.builder.result();
+      b.baked = probeBounce(b.transfer, surfelLight(b.transfer, { sun: { direction: b.bake.sun, color: [1, 1, 1] }, points: [] }));
+    }
+    if (this.frame - b.at < BOUNCE_EVERY) return;
+    const lights = bounceLightsFor(authored, lighting, this.cartLights);
+    const signature = bounceSignature(lights);
+    if (signature === b.signature) return;
+    b.signature = signature;
+    b.at = this.frame;
+    this.environment = { ...this.environment, lightProbes: relightProbes(b.transfer, probeBounce(b.transfer, surfelLight(b.transfer, lights)), b.baked) };
   }
   /** Report per-pass times to `profiler` (null: stop). */
   setProfiler(profiler) {
@@ -10954,7 +11053,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.lastView = v;
     this.eye = [-(v[0] * v[12] + v[1] * v[13] + v[2] * v[14]), -(v[4] * v[12] + v[5] * v[13] + v[6] * v[14]), -(v[8] * v[12] + v[9] * v[13] + v[10] * v[14])];
     const { main: instances, front, moved } = this.posedInstances();
-    const lighting = this.scene.lighting;
+    const lighting = this.frameLighting();
+    this.stepBounce(lighting);
     let mark = profiler ? performance.now() : 0;
     const shadow = lighting ? this.buildShadow(instances, moved, lighting) : null;
     if (profiler) {

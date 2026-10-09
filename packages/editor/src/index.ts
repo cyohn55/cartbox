@@ -666,6 +666,8 @@ export {
   PROBE_FACES,
   decodeLightProbes,
   encodeLightProbes,
+  readProbeBake,
+  type ProbeBake,
   lightProbeTexels,
   planProbeGrid,
   probePosition,
@@ -1240,3 +1242,4 @@ export {
 } from "./model/accessibility";
 export { editFace, editMeshFace, faceAt, faceBoundary, primitiveFaces, type FaceEdit, type MeshFace } from "./model/meshEdit";
 export { CURVATURE_FULL_BEND, bakeLayout, bakeSurfaceMaps, type BakedMaps, type SurfaceBake, type SurfaceBakeOptions } from "./model/textureBake";
+export { BounceTransferBuilder, buildBounceTransfer, buildSurfels, clipOccluders, probeBounce, relightProbes, surfelLight, type BounceLights, type BounceOptions, type BounceTransfer, type Surfels } from "./model/dynamicBounce";

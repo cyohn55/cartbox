@@ -33,6 +33,23 @@ export interface StoredLightProbes {
   readonly max: readonly [number, number, number];
   readonly counts: readonly [number, number, number];
   readonly data: string;
+  /** The light the bounce was baked with (I17): with it, the player relights the bounce as lights move (see dynamicBounce.ts). */
+  readonly bake?: ProbeBake;
+}
+
+/** How a grid's bounce was baked: toward the sun, how far rays reached, how strongly surfaces bounced. */
+export interface ProbeBake {
+  readonly sun: readonly [number, number, number];
+  readonly distance: number;
+  readonly bounce: number;
+}
+
+/** A stored grid's bake settings, or null when it has none (or they're malformed). */
+export function readProbeBake(stored: StoredLightProbes | null | undefined): ProbeBake | null {
+  const b = stored?.bake as Partial<ProbeBake> | undefined;
+  if (!b || !finite3(b.sun) || Math.hypot(...b.sun) < 1e-6) return null;
+  if (typeof b.distance !== "number" || !(b.distance > 0) || typeof b.bounce !== "number" || !(b.bounce >= 0)) return null;
+  return { sun: [b.sun[0], b.sun[1], b.sun[2]], distance: Math.min(b.distance, 100), bounce: Math.min(b.bounce, 4) };
 }
 
 /** The most probes a grid holds (the spacing widens to stay under it). */
@@ -68,9 +85,9 @@ export function quantizeLightProbes(values: Float32Array): Float32Array {
   return Float32Array.from(values, (v) => (Math.min(255, Math.max(0, Math.round((v / RANGE) * 255))) / 255) * RANGE);
 }
 
-export function encodeLightProbes(grid: LightProbeGrid): StoredLightProbes {
+export function encodeLightProbes(grid: LightProbeGrid, bake?: ProbeBake): StoredLightProbes {
   const bytes = Uint8Array.from(grid.values, (v) => Math.min(255, Math.max(0, Math.round((v / RANGE) * 255))));
-  return { min: [...grid.min], max: [...grid.max], counts: [...grid.counts], data: bytesToBase64(bytes) };
+  return { min: [...grid.min], max: [...grid.max], counts: [...grid.counts], data: bytesToBase64(bytes), ...(bake ? { bake: { sun: [...bake.sun], distance: bake.distance, bounce: bake.bounce } } : {}) };
 }
 
 const finite3 = (v: unknown): v is [number, number, number] => Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === "number" && Number.isFinite(n));

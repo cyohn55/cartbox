@@ -71,7 +71,15 @@ import {
   panoramaWithClouds,
   type BakedCloudLayer,
   type ProceduralSky,
+  BounceTransferBuilder,
+  probeBounce,
+  readProbeBake,
+  relightProbes,
+  surfelLight,
+  type BounceTransfer,
+  type ProbeBake,
 } from "@cartbox/editor";
+import { bounceLightsFor, bounceSignature, withCartSun, type CartSun } from "./dynamicLights.js";
 import type { DisplaySurface } from "../display.js";
 import type { ScreenSun } from "../fx/PostFxSurface.js";
 import { SoftwareSceneRenderer, type SceneRenderer } from "../render/sceneRenderer.js";
@@ -86,6 +94,9 @@ import { estimateSceneBytes, type Profiler, type RenderStats } from "../debug/pr
 const RAD_TO_DEG = 180 / Math.PI;
 /** How far the sun's reported visibility moves toward this frame's each frame. */
 const SUN_EASE = 0.35;
+/** Dynamic bounce (I17): probe faces traced per frame while the transfer is found, and frames between relights. */
+const BOUNCE_FACES_PER_FRAME = 150;
+const BOUNCE_EVERY = 4;
 
 /** Near clip plane for first-person (HUD) views, world units. */
 const FIRST_PERSON_NEAR = 0.05;
@@ -286,6 +297,24 @@ export class MeshOverlaySurface implements DisplaySurface {
   private edgeScratch: Uint8ClampedArray | null = null;
   /** The cart's world lights this frame (cartbox.light3d), added to the rig's in first person. */
   private cartLights: readonly SceneLight[] = [];
+  /** The cart's sun this frame (cartbox.sun3d, I17), which takes the rig's key light's place; null for the rig's own. */
+  private cartSun: CartSun | null = null;
+  /** The rig with the cart's sun in it, kept while neither changes (the shadow maps redraw when it does). */
+  private sunRig: { source: SceneLighting; sun: string; lighting: SceneLighting } | null = null;
+  /**
+   * Dynamic bounce (I17): the probes' transfer, found a slice a frame after
+   * loading, then the probes relit whenever the lights change (see
+   * dynamicBounce.ts in @cartbox/editor). Null when the probes weren't baked
+   * with their light recorded.
+   */
+  private bounce: {
+    readonly builder: BounceTransferBuilder;
+    readonly bake: ProbeBake;
+    transfer: BounceTransfer | null;
+    baked: Float32Array | null;
+    signature: string;
+    at: number;
+  } | null = null;
   /** Tinted mesh copies, per source mesh and tint index. */
   private readonly tintCache = new Map<MeshAsset, Map<number, MeshAsset>>();
   /** Draws the front layer (a held weapon) over the finished scene. */
@@ -492,6 +521,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       }
       this.environment = environment;
       this.skyMap = skyMap;
+      this.startBounce();
       this.skyClouds = clouds;
       this.skyCache = null;
       // The rig's armour colours (I8) may have changed: tint afresh.
@@ -602,6 +632,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     }
     const surface = new MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
     surface.skyClouds = clouds;
+    surface.startBounce();
     surface.vistas = vistas;
     surface.trailed = scene.instances.flatMap((instance, i) => (instance.mesh.trails && instance.mesh.trails.length > 0 ? [i] : []));
     if (surface.trailed.length > 0) surface.trails = new TrailSystem();
@@ -642,7 +673,8 @@ export class MeshOverlaySurface implements DisplaySurface {
         lights: lighting.lights,
       })
         .then((probes) => {
-          if (probes && !surface.destroyed) surface.environment = { ...sky, probes };
+          // Onto the environment as it is by now (its light probes may have been relit, I17).
+          if (probes && !surface.destroyed) surface.environment = { ...(surface.environment ?? sky), probes };
         })
         .catch(() => undefined);
     }
@@ -746,7 +778,59 @@ export class MeshOverlaySurface implements DisplaySurface {
    * top of the authored rig's lights.
    */
   setCartLights(lights: readonly WorldLight[]): void {
-    this.cartLights = lights.map((light) => ({ kind: "point", position: light.position, color: light.color, intensity: 1, range: light.range }));
+    this.cartLights = lights.filter((light) => !light.sun).map((light) => ({ kind: "point", position: light.position, color: light.color, intensity: 1, range: light.range }));
+    // A sun among them (cartbox.sun3d, I17): this frame's key light — a time of day.
+    const sun = lights.find((light) => light.sun);
+    this.cartSun = sun ? { direction: sun.position, color: sun.color } : null;
+  }
+
+  /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17). */
+  private frameLighting(): SceneLighting | null {
+    const lighting = this.scene.lighting ?? null;
+    if (!lighting || !this.cartSun) return lighting;
+    const sun = `${this.cartSun.direction.map((v) => v.toFixed(3)).join(",")}|${this.cartSun.color.map((v) => v.toFixed(3)).join(",")}`;
+    if (this.sunRig?.source !== lighting || this.sunRig.sun !== sun) this.sunRig = { source: lighting, sun, lighting: withCartSun(lighting, this.cartSun) };
+    return this.sunRig.lighting;
+  }
+
+  /** Start finding the probes' bounce transfer (I17), when they were baked with their light recorded. */
+  private startBounce(): void {
+    this.bounce = null;
+    const lighting = this.scene.lighting;
+    const bake = readProbeBake(lighting?.lightProbes ?? null);
+    const grid = this.environment?.lightProbes;
+    if (!bake || !grid) return;
+    // What the probes bounce off: everything that stays put (as the reflection probes capture).
+    const still = this.scene.instances.flatMap((inst) => {
+      const body = inst.physics?.body;
+      const moves = body === "dynamic" || body === "kinematic" || body === "character";
+      return inst.pooled || isSkinned(inst.mesh) || moves ? [] : [{ mesh: inst.mesh, model: inst.model }];
+    });
+    if (still.length === 0) return;
+    this.bounce = { builder: new BounceTransferBuilder(grid, still, { distance: bake.distance, bounce: bake.bounce }), bake, transfer: null, baked: null, signature: "", at: -Infinity };
+  }
+
+  /**
+   * One frame of dynamic bounce (I17): trace a slice of the transfer until it's
+   * found; then, at most every few frames and only when the lights have
+   * changed, relight the probes from the lights as they are now.
+   */
+  private stepBounce(lighting: SceneLighting | null): void {
+    const b = this.bounce;
+    const authored = this.scene.lighting;
+    if (!b || !lighting || !authored || !this.environment) return;
+    if (!b.transfer) {
+      if (!b.builder.step(BOUNCE_FACES_PER_FRAME)) return;
+      b.transfer = b.builder.result()!;
+      b.baked = probeBounce(b.transfer, surfelLight(b.transfer, { sun: { direction: b.bake.sun, color: [1, 1, 1] }, points: [] }));
+    }
+    if (this.frame - b.at < BOUNCE_EVERY) return;
+    const lights = bounceLightsFor(authored, lighting, this.cartLights);
+    const signature = bounceSignature(lights);
+    if (signature === b.signature) return;
+    b.signature = signature;
+    b.at = this.frame;
+    this.environment = { ...this.environment, lightProbes: relightProbes(b.transfer, probeBounce(b.transfer, surfelLight(b.transfer, lights)), b.baked!) };
   }
 
   /** Report per-pass times to `profiler` (null: stop). */
@@ -804,8 +888,10 @@ export class MeshOverlaySurface implements DisplaySurface {
     const { main: instances, front, moved } = this.posedInstances();
     // Apply the authored Modern-tier lighting rig, if any. Absent (every cart
     // that never opted in) leaves these omitted, so the draw is exactly as before
-    // and the fantasy tiers render byte-identically.
-    const lighting = this.scene.lighting;
+    // and the fantasy tiers render byte-identically. The cart's sun, if it set one,
+    // is the key light (I17), and the probes' bounce follows the lights.
+    const lighting = this.frameLighting();
+    this.stepBounce(lighting);
     let mark = profiler ? performance.now() : 0;
     const shadow = lighting ? this.buildShadow(instances, moved, lighting) : null;
     if (profiler) {

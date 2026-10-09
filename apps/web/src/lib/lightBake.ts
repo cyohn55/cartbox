@@ -84,7 +84,9 @@ export async function bakeSceneLighting(sidecar: MeshSidecar, options: SceneLigh
     const max: [number, number, number] = [box.max[0] + 1, box.max[1] + 2, box.max[2] + 1];
     const counts = planProbeGrid(min, max, options.probeSpacing ?? 2.5);
     const grid = bakeLightProbes(min, max, counts, occluders, { rays: options.rays ?? 48, distance: options.distance ?? 7, sun }, (d) => progress?.(share + d * (1 - share)));
-    next = { ...next, lighting: { ...next.lighting, lightProbes: encodeLightProbes(grid) } };
+    // With the sun it was baked under, so the player can relight the bounce as lights move (I17).
+    const bake = sun ? { sun, distance: options.distance ?? 7, bounce: 0.9 } : undefined;
+    next = { ...next, lighting: { ...next.lighting, lightProbes: encodeLightProbes(grid, bake) } };
   }
   progress?.(1);
   return next;
