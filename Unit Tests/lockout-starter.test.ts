@@ -135,10 +135,11 @@ describe("the Lockout arena starter", () => {
     // map is its one large bake).
     // 1.5 MB since its sounds and UI documents (EP12, EP13), 1.55 MB since its
     // string table (EP19b), 1.65 MB since its distant vista (I7: the far
-    // range's heights, two small maps and its pines): a sidecar over 512 KB is offloaded to object
+    // range's heights, two small maps and its pines), 1.7 MB since its
+    // first-person arms (I9: six rigs, their clips and state machines): a sidecar over 512 KB is offloaded to object
     // storage anyway, and this keeps a save well inside the 4.5 MB request body
     // limit.
-    expect(lockoutMeshSidecar().length).toBeLessThan(1_650_000);
+    expect(lockoutMeshSidecar().length).toBeLessThan(1_700_000);
     // Bloom on the energy trim, via the starter's post-FX stack.
     const fx = parsePostFxSettings(resolveStarter("lockout").fx)!;
     expect(fx.enabled.bloom).toBe(true);

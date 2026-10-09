@@ -467,6 +467,8 @@ interface SerializedPrimitive {
   material: SerializedMaterial;
   joints?: string;
   weights?: string;
+  /** In place of joints and weights: the one joint every vertex rides wholly. */
+  bone?: number;
 }
 interface SerializedJoint {
   name: string;
@@ -566,6 +568,21 @@ function deserializeSkin(raw: unknown): MeshSkin | null {
   return { joints: out, inverseBind: ibm };
 }
 
+/**
+ * A primitive's skin binding as stored: just the joint when every vertex rides
+ * that one joint wholly (a rigid part, the way plates and held weapons are
+ * bound — a few bytes instead of 24 a vertex), else every vertex's four joints
+ * and weights.
+ */
+function serializeBinding(joints: Uint16Array, weights: Float32Array): { bone: number } | { joints: string; weights: string } {
+  const bone = joints[0] ?? 0;
+  let rigid = joints.length > 0;
+  for (let v = 0; rigid && v < joints.length / 4; v += 1) {
+    rigid = joints[v * 4] === bone && weights[v * 4] === 1 && weights[v * 4 + 1] === 0 && weights[v * 4 + 2] === 0 && weights[v * 4 + 3] === 0;
+  }
+  return rigid ? { bone } : { joints: u16ToBase64(joints), weights: f32ToBase64(weights) };
+}
+
 /** Validate untrusted clips against a skeleton of `jointCount` joints. */
 function deserializeClips(raw: unknown, jointCount: number): AnimationClip[] {
   if (!Array.isArray(raw)) return [];
@@ -607,9 +624,7 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
       ...(primitive.blend ? { blend: f32ToBase64(primitive.blend) } : {}),
       indices: u32ToBase64(primitive.indices),
       material: serializeMaterial(primitive.material, Object.assign(images, { primitive: index })),
-      ...(primitive.joints && primitive.weights && mesh.skin
-        ? { joints: u16ToBase64(primitive.joints), weights: f32ToBase64(primitive.weights) }
-        : {}),
+      ...(primitive.joints && primitive.weights && mesh.skin ? serializeBinding(primitive.joints, primitive.weights) : {}),
     })),
     ...(mesh.skin ? { skin: serializeSkin(mesh.skin) } : {}),
     ...(mesh.skin && mesh.clips && mesh.clips.length > 0 ? { clips: mesh.clips.map(serializeClip) } : {}),
@@ -778,7 +793,17 @@ export function deserializeMeshAsset(json: string): MeshAsset {
     // Skin bindings: four joints (each in range) and four weights per vertex.
     let joints: Uint16Array | null = null;
     let weights: Float32Array | null = null;
-    if (skin && typeof entry.joints === "string" && typeof entry.weights === "string") {
+    if (skin && typeof entry.bone === "number") {
+      // Bound wholly to one joint (a rigid part): stored as just the joint.
+      const bone = entry.bone;
+      if (!Number.isInteger(bone) || bone < 0 || bone >= skin.joints.length) throw new Error(MALFORMED);
+      joints = new Uint16Array(vertexCount * 4);
+      weights = new Float32Array(vertexCount * 4);
+      for (let v = 0; v < vertexCount; v += 1) {
+        joints[v * 4] = bone;
+        weights[v * 4] = 1;
+      }
+    } else if (skin && typeof entry.joints === "string" && typeof entry.weights === "string") {
       joints = base64ToU16(entry.joints);
       weights = base64ToF32(entry.weights);
       if (joints.length !== vertexCount * 4 || weights.length !== vertexCount * 4) throw new Error(MALFORMED);

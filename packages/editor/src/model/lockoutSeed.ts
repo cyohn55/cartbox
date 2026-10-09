@@ -31,7 +31,7 @@ import { meshBounds, serializeMeshAsset, type EncodedImage, type MeshAsset, type
 import type { AnimationClip, ClipChannel, SkinJoint } from "./skeleton";
 import { INFINITE_TINTS, type SceneLighting } from "./SceneLighting";
 import type { SceneLight } from "../render/meshRasterizer";
-import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, type Streams } from "./seedGeometry";
+import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, toPrimitive as streamPrimitive, type Streams } from "./seedGeometry";
 import { packMeshLibrary } from "./meshLibrary";
 import { encodeLods, generateLods, type StoredLods } from "./meshSimplify";
 import { reverseClip } from "./clipEdit";
@@ -2081,6 +2081,183 @@ function soldierMesh(): MeshAsset {
   };
 }
 
+// --- First-person arms (HALO_INFINITE_STYLE_ROADMAP.md I9) --------------------
+// Each viewmodel is skinned to a three-bone rig: the root (the whole held
+// assembly: idle sway, the run's bob, a melee lunge, the raise on a swap), the
+// weapon under it (recoil, a reload's tilt) and the left hand under that, which
+// a reload takes off the gun to the magazine and back. A state machine plays
+// the clips: the cart sets `speed` and fires `fire`, `reload`, `melee` and
+// `ready` as they happen.
+
+/** Bone indices of the viewmodel rig. */
+const VM = { root: 0, weapon: 1, handL: 2 } as const;
+
+function viewmodelBones(leftAt: P3): { name: string; parent: number; at: P3 }[] {
+  return [
+    { name: "root", parent: -1, at: [0, 0, 0] },
+    { name: "weapon", parent: VM.root, at: [0, 0, 0] },
+    { name: "hand_l", parent: VM.weapon, at: leftAt },
+  ];
+}
+
+/** A skin over unrotated rest bones: each joint's offset from its parent, inverse binds as plain translations. */
+function rigSkin(bones: readonly { name: string; parent: number; at: P3 }[]): NonNullable<MeshAsset["skin"]> {
+  const inverseBind = new Float32Array(bones.length * 16);
+  bones.forEach((bone, j) => inverseBind.set([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -bone.at[0], -bone.at[1], -bone.at[2], 1], j * 16));
+  const joints: SkinJoint[] = bones.map((bone) => {
+    const parent = bone.parent >= 0 ? bones[bone.parent]!.at : ([0, 0, 0] as P3);
+    return { name: bone.name, parent: bone.parent, translation: [bone.at[0] - parent[0], bone.at[1] - parent[1], bone.at[2] - parent[2]], rotation: [0, 0, 0, 1], scale: [1, 1, 1] };
+  });
+  return { joints, inverseBind };
+}
+
+/** A pose of the viewmodel rig: rotations and offsets from rest, per bone. */
+interface RigPose {
+  readonly rot?: Partial<Record<number, readonly number[]>>;
+  readonly move?: Partial<Record<number, P3>>;
+}
+
+/**
+ * A clip of the rig sampled at `keys` moments over `duration` seconds: a
+ * rotation and a translation channel for each bone it moves.
+ */
+function rigClip(name: string, duration: number, keys: number, bones: readonly { parent: number; at: P3 }[], sample: (t: number) => RigPose): AnimationClip {
+  const times = new Float32Array(keys);
+  const rot = bones.map(() => [] as number[]);
+  const pos = bones.map(() => [] as number[]);
+  const moved = new Set<number>();
+  for (let k = 0; k < keys; k += 1) {
+    const t = k / (keys - 1);
+    times[k] = t * duration;
+    const pose = sample(t);
+    for (const j of [...Object.keys(pose.rot ?? {}), ...Object.keys(pose.move ?? {})]) moved.add(Number(j));
+    bones.forEach((bone, j) => {
+      rot[j]!.push(...(pose.rot?.[j] ?? [0, 0, 0, 1]));
+      const parent = bone.parent >= 0 ? bones[bone.parent]!.at : ([0, 0, 0] as P3);
+      const m = pose.move?.[j] ?? [0, 0, 0];
+      pos[j]!.push(bone.at[0] - parent[0] + m[0], bone.at[1] - parent[1] + m[1], bone.at[2] - parent[2] + m[2]);
+    });
+  }
+  // Only the bones the clip moves get channels; the others hold their rest pose.
+  const channels: ClipChannel[] = [...moved].sort((a, b) => a - b).flatMap((j) => [
+    { joint: j, path: "rotation" as const, interpolation: "linear" as const, times, values: new Float32Array(rot[j]!) },
+    { joint: j, path: "translation" as const, interpolation: "linear" as const, times, values: new Float32Array(pos[j]!) },
+  ]);
+  return { name, duration, channels };
+}
+
+/** 0 → 1 → 0 over a clip: up fast by `peak`, then eased back down. */
+function pulse(t: number, peak: number): number {
+  if (t <= 0 || t >= 1) return 0;
+  if (t < peak) return Math.sin((t / peak) * (Math.PI / 2));
+  const u = (t - peak) / (1 - peak);
+  return 0.5 + 0.5 * Math.cos(u * Math.PI);
+}
+
+/** Weight of a window [a, b] of a clip: in and out smoothly. */
+function windowed(t: number, a: number, b: number): number {
+  return t <= a || t >= b ? 0 : Math.sin(((t - a) / (b - a)) * Math.PI);
+}
+
+/**
+ * The viewmodel's clips: `idle` (a slow breathing sway), `run` (a stepping
+ * figure-eight bob), `fire` (the kick: back and muzzle up, then settle),
+ * `reload` (the gun tips over, the left hand drops to the magazine, slaps it
+ * home and returns), `melee` (a lunge, the stock leading), and `ready` (raised
+ * into view from below). The sword's `fire` and `melee` are one swing, right
+ * to left across the view, and it never reloads (a flourish stands in).
+ */
+function viewmodelClips(id: WeaponId, bones: readonly { parent: number; at: P3 }[]): AnimationClip[] {
+  const TAU = Math.PI * 2;
+  const heavy = id === "sniper" || id === "shotgun";
+  const idle = rigClip("idle", 3.2, 9, bones, (t) => ({
+    rot: { [VM.root]: pitchYaw(Math.sin(t * TAU) * 0.012, Math.sin(t * TAU + 1.3) * 0.01) },
+    move: { [VM.root]: [Math.sin(t * TAU + 1.3) * 0.003, Math.sin(t * TAU * 2) * 0.003, 0] },
+  }));
+  const run = rigClip("run", 0.75, 13, bones, (t) => {
+    const step = Math.sin(t * TAU);
+    return {
+      rot: { [VM.root]: pitchYaw(Math.sin(t * TAU * 2) * 0.025, step * 0.03, step * 0.05) },
+      move: { [VM.root]: [step * 0.014, -Math.abs(Math.cos(t * TAU)) * 0.014, 0] },
+    };
+  });
+  const ready = rigClip("ready", 0.35, 9, bones, (t) => {
+    const down = (1 - t) * (1 - t);
+    return { rot: { [VM.root]: pitchYaw(down * 0.7, down * -0.2) }, move: { [VM.root]: [0, -down * 0.22, -down * 0.08] } };
+  });
+  if (id === "sword") {
+    // One swing serves the attack and the melee: wound back to the right, then
+    // across to the left and down, the blade leading.
+    const swing = (name: string) =>
+      rigClip(name, 0.45, 13, bones, (t) => {
+        const wind = windowed(t, 0, 0.3);
+        const cut = t < 0.18 ? 0 : Math.sin(Math.min(1, (t - 0.18) / 0.4) * Math.PI) * (1 - Math.max(0, (t - 0.58) / 0.42));
+        return {
+          rot: { [VM.root]: pitchYaw(-wind * 0.15 + cut * 0.35, wind * 0.5 - cut * 0.9, wind * 0.4 - cut * 0.7) },
+          move: { [VM.root]: [wind * 0.06 - cut * 0.18, wind * 0.04 - cut * 0.05, cut * 0.1] },
+        };
+      });
+    const flourish = rigClip("reload", 0.8, 13, bones, (t) => ({ rot: { [VM.weapon]: pitchYaw(0, 0, Math.sin(t * Math.PI) * 0.6) } }));
+    return [idle, run, swing("fire"), swing("melee"), flourish, ready];
+  }
+  const kick = heavy ? 1.6 : id === "smg" ? 0.5 : 1;
+  const fire = rigClip("fire", heavy ? 0.32 : 0.18, 9, bones, (t) => {
+    const k = pulse(t, 0.15) * kick;
+    return { rot: { [VM.weapon]: pitchYaw(-k * 0.07, 0, k * 0.02) }, move: { [VM.root]: [0, k * 0.008, -k * 0.035] } };
+  });
+  const reload = rigClip("reload", heavy ? 1.6 : 1.25, 17, bones, (t) => {
+    const tilt = windowed(t, 0.02, 0.98);
+    const away = windowed(t, 0.18, 0.62); // to the magazine and back with a fresh one
+    const slap = windowed(t, 0.58, 0.72); // and slapped home
+    return {
+      rot: { [VM.weapon]: pitchYaw(-tilt * 0.22, tilt * 0.12, tilt * 0.55 - slap * 0.08) },
+      move: {
+        [VM.root]: [0, -tilt * 0.05, -tilt * 0.02],
+        [VM.handL]: [-away * 0.02, -away * 0.13 + slap * 0.02, -away * 0.12],
+      },
+    };
+  });
+  const melee = rigClip("melee", 0.45, 9, bones, (t) => {
+    const lunge = pulse(t, 0.3);
+    return { rot: { [VM.root]: pitchYaw(lunge * 0.2, -lunge * 0.55, -lunge * 0.35) }, move: { [VM.root]: [-lunge * 0.1, lunge * 0.04, lunge * 0.14] } };
+  });
+  return [idle, run, fire, reload, melee, ready];
+}
+
+/**
+ * The viewmodel's state machine (EP17): a blend from idle to run by `speed`,
+ * and one-shot states the cart's triggers start — each plays through and
+ * fades back. A shot during a shot starts the kick again.
+ */
+export const LOCKOUT_VIEWMODEL_ANIMATOR = {
+  params: [
+    { name: "speed", kind: "number", initial: 0 },
+    { name: "fire", kind: "trigger", initial: 0 },
+    { name: "reload", kind: "trigger", initial: 0 },
+    { name: "melee", kind: "trigger", initial: 0 },
+    { name: "ready", kind: "trigger", initial: 0 },
+  ],
+  states: [
+    { name: "move", clip: null, speed: 1, loop: true, blend: { param: "speed", points: [{ clip: "idle", at: 0 }, { clip: "run", at: 1 }] } },
+    { name: "fire", clip: "fire", speed: 1, loop: false },
+    { name: "reload", clip: "reload", speed: 1, loop: false },
+    { name: "melee", clip: "melee", speed: 1, loop: false },
+    { name: "ready", clip: "ready", speed: 1, loop: false },
+  ],
+  transitions: [
+    { from: "*", to: "ready", when: [{ param: "ready", op: "set", value: 1 }], fade: 0 },
+    { from: "*", to: "melee", when: [{ param: "melee", op: "set", value: 1 }], fade: 0.04 },
+    { from: "*", to: "reload", when: [{ param: "reload", op: "set", value: 1 }], fade: 0.1 },
+    { from: "fire", to: "fire", when: [{ param: "fire", op: "set", value: 1 }], fade: 0.02 },
+    { from: "*", to: "fire", when: [{ param: "fire", op: "set", value: 1 }], fade: 0.03 },
+    { from: "fire", to: "move", when: [], fade: 0.1, exitTime: 1 },
+    { from: "reload", to: "move", when: [], fade: 0.15, exitTime: 1 },
+    { from: "melee", to: "move", when: [], fade: 0.12, exitTime: 1 },
+    { from: "ready", to: "move", when: [], fade: 0.08, exitTime: 1 },
+  ],
+  events: [],
+} as const;
+
 /** Weapon ids, in the order their viewmodel instances follow the bots in the sidecar. */
 export const LOCKOUT_VIEWMODELS = ["br", "smg", "shotgun", "sniper", "magnum", "sword"] as const;
 type WeaponId = (typeof LOCKOUT_VIEWMODELS)[number];
@@ -2108,10 +2285,16 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
     limb(sleeve, [x + 0.01, y - 0.03, z - 0.04], [x + 0.14, y - 0.2, z - 0.42], 0.045, 0.06);
     block(sleeve, x + 0.03, y - 0.06, z - 0.1, 0.05, 0.02, 0.05, 0.015); // wrist plate
   };
+  // The left hand rides its own bone (I9), so a reload can take it off the gun:
+  // its glove and sleeve are parts of their own.
+  let leftAt: P3 = [0, 0, 0];
+  const gloveL = newStreams();
+  const sleeveL = newStreams();
   const leftHand = (x: number, y: number, z: number) => {
-    block(glove, x, y, z, 0.038, 0.028, 0.05, 0.012); // palm under the handguard
-    for (let f = 0; f < 3; f += 1) block(glove, x + 0.035, y + 0.01, z - 0.03 + f * 0.028, 0.01, 0.022, 0.012); // fingers over the top
-    limb(sleeve, [x - 0.02, y - 0.02, z - 0.04], [x - 0.3, y - 0.22, z - 0.34], 0.045, 0.06);
+    leftAt = [x, y, z];
+    block(gloveL, x, y, z, 0.038, 0.028, 0.05, 0.012); // palm under the handguard
+    for (let f = 0; f < 3; f += 1) block(gloveL, x + 0.035, y + 0.01, z - 0.03 + f * 0.028, 0.01, 0.022, 0.012); // fingers over the top
+    limb(sleeveL, [x - 0.02, y - 0.02, z - 0.04], [x - 0.3, y - 0.22, z - 0.34], 0.045, 0.06);
   };
   /** A trigger guard: a thin loop under the receiver ahead of the grip. */
   const triggerGuard = (y: number, z0: number, z1: number) => {
@@ -2228,13 +2411,29 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
     rightHand(0, -0.05, 0.0);
   }
   const glowColor: readonly [number, number, number, number] = id === "sword" ? [0.45, 0.85, 1, 1] : [0.3, 0.9, 1, 1];
+  // Skinned (I9), every part rigidly: the left hand's on its bone, the rest on the weapon's.
+  const toPrimitive = (st: Streams, material: Mat): MeshPrimitive => {
+    const n = st.positions.length / 3;
+    const joints = new Uint16Array(n * 4).fill(0);
+    const weights = new Float32Array(n * 4);
+    const bone = st === gloveL || st === sleeveL ? VM.handL : VM.weapon;
+    for (let i = 0; i < n; i += 1) {
+      joints[i * 4] = bone;
+      weights[i * 4] = 1;
+    }
+    return { ...streamPrimitive(st, material), joints, weights };
+  };
+  const gloveMat: Mat = { name: "glove", baseColorFactor: [0.12, 0.12, 0.13, 1], baseColorImage: null, metallicFactor: 0.05, roughnessFactor: 0.8 };
+  const sleeveMat: Mat = { name: "sleeve", baseColorFactor: ARMOR_PAINT, baseColorImage: null, metallicFactor: 0.45, roughnessFactor: 0.4, tintable: true, ...ARMOR_LACQUER };
   const primitives: MeshPrimitive[] = [
     // Brushed gunmetal (I4): the highlight drawn out along the barrel.
     toPrimitive(metal, { name: "gunmetal", baseColorFactor: [0.42, 0.45, 0.5, 1], baseColorImage: null, metallicFactor: 0.8, roughnessFactor: 0.3, anisotropy: 0.6 }),
     toPrimitive(poly, { name: "polymer", baseColorFactor: [0.2, 0.21, 0.23, 1], baseColorImage: null, metallicFactor: 0.15, roughnessFactor: 0.5 }),
     toPrimitive(accent, { name: "accent", baseColorFactor: [0.42, 0.46, 0.38, 1], baseColorImage: null, metallicFactor: 0.5, roughnessFactor: 0.42 }),
-    toPrimitive(glove, { name: "glove", baseColorFactor: [0.12, 0.12, 0.13, 1], baseColorImage: null, metallicFactor: 0.05, roughnessFactor: 0.8 }),
-    toPrimitive(sleeve, { name: "sleeve", baseColorFactor: ARMOR_PAINT, baseColorImage: null, metallicFactor: 0.45, roughnessFactor: 0.4, tintable: true, ...ARMOR_LACQUER }),
+    toPrimitive(glove, gloveMat),
+    toPrimitive(sleeve, sleeveMat),
+    toPrimitive(gloveL, gloveMat),
+    toPrimitive(sleeveL, sleeveMat),
     toPrimitive(dark, { name: "recess", baseColorFactor: [0.05, 0.05, 0.06, 1], baseColorImage: null, metallicFactor: 0.3, roughnessFactor: 0.7 }),
   ];
   if (glow.indices.length > 0) {
@@ -2265,7 +2464,12 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
       }),
     );
   }
-  return withoutUnusedUvs({ name: `viewmodel-${id}`, primitives: primitives.filter((p) => p.indices.length > 0) });
+  const bones = viewmodelBones(leftAt);
+  return {
+    ...withoutUnusedUvs({ name: `viewmodel-${id}`, primitives: primitives.filter((p) => p.indices.length > 0) }),
+    skin: rigSkin(bones),
+    clips: viewmodelClips(id, bones),
+  };
 }
 
 /**
@@ -2278,7 +2482,10 @@ function pickupMesh(id: WeaponId): MeshAsset {
   const model = viewmodelMesh(id);
   return {
     name: `pickup-${id}`,
-    primitives: model.primitives.filter((p) => p.material.name !== "glove" && p.material.name !== "sleeve").map((p) => ({ ...p, normals: null })),
+    // No skeleton: a pickup only turns and bobs as a whole.
+    primitives: model.primitives
+      .filter((p) => p.material.name !== "glove" && p.material.name !== "sleeve")
+      .map(({ joints: _joints, weights: _weights, ...p }) => ({ ...p, normals: null })),
   };
 }
 
@@ -2654,7 +2861,7 @@ export function lockoutMeshSidecar(): string {
     // Instances 8..13: one first-person viewmodel per weapon, at rest scale.
     for (const id of LOCKOUT_VIEWMODELS) {
       const model = viewmodelMesh(id);
-      meshes.push({ id: `viewmodel-${id}`, name: `viewmodel ${id}`, mesh: serializeMeshAsset(model), ...lodsOf(model), transform: rest });
+      meshes.push({ id: `viewmodel-${id}`, name: `viewmodel ${id}`, mesh: serializeMeshAsset(model), ...lodsOf(model), animator: LOCKOUT_VIEWMODEL_ANIMATOR, transform: rest });
     }
     // Instances 14..18 (EP14): the weapon over each spawn pad, which its Pickup
     // component turns, bobs and hides while the pad recharges.
@@ -2814,9 +3021,17 @@ local announce = {t=0, text="", color=12}
 local winner = ""
 local prev = {}
 intro = nil  -- ticks into the match intro (see play_intro), or nil
-local bob = 0
 local flash = 0
 local tick = 0
+-- First-person arms (I9): each weapon's viewmodel instance, whose state machine
+-- plays the motion -- the cart only says what happened (fire, reload, melee,
+-- ready) and how fast the player is moving.
+local WIDX = { br=8, smg=9, shotgun=10, sniper=11, magnum=12, sword=13 }
+local vm_speed = {}
+local function vm(name)
+  local idx = WIDX[p.slot==1 and p.g1 or p.g2]
+  if idx then cartbox.trigger(idx, name) end
+end
 local ball = { x=0,y=0,z=0, carrier=nil, live=false }
 local hill = { x=0,y=0,z=0, next=0, idx=1 }
 local shot = {t=0, x=0, y=0, z=0}   -- last shot tracer for a beam flash
@@ -3309,7 +3524,7 @@ local function player_fire()
   -- auto-melee when an enemy is right in front
   local aim,ad = auto_target()
   if aim and ad < 2.4 then
-    p.cool=18; flash=3
+    p.cool=18; flash=3; vm("melee")
     cartbox.sound("fire_sword",nil,nil,nil,1,0.9+math.random()*0.2)
     -- The swipe's glowing arc, right to left across the view.
     local fx,fy,fz = forward()
@@ -3324,11 +3539,11 @@ local function player_fire()
     if res>0 then
       local take=math.min(w.mag,res)
       if p.slot==1 then p.a1=take; p.r1=res-take else p.a2=take; p.r2=res-take end
-      p.cool=40; return
+      p.cool=40; vm("reload"); return
     end
-    p.slot=(p.slot==1) and 2 or 1; return
+    p.slot=(p.slot==1) and 2 or 1; vm("ready"); return
   end
-  p.cool = w.cool; flash = 4
+  p.cool = w.cool; flash = 4; vm("fire")
   cartbox.sound("fire_"..wid,nil,nil,nil,0.7,0.96+math.random()*0.08)
   if p.slot==1 then p.a1=p.a1-1 else p.a2=p.a2-1 end
   local ex,ey,ez = p.x, p.y+EYE, p.z
@@ -3377,7 +3592,7 @@ local function try_pickups()
     if legal and mtimer[i+1]==0 then
       local mx,my,mz=MRK[i*3+1],MRK[i*3+2],MRK[i*3+3]
       if math.abs(p.x-mx)<1.4 and math.abs(p.z-mz)<1.6 and math.abs((p.y+1)-my)<2.0 then
-        give(p,1,id); p.slot=1; mtimer[i+1]=540; say(T("msg.pickup","Picked up "..W[id].name,W[id].name),12)
+        give(p,1,id); p.slot=1; vm("ready"); mtimer[i+1]=540; say(T("msg.pickup","Picked up "..W[id].name,W[id].name),12)
       end
     end
   end
@@ -3742,7 +3957,11 @@ local function play_input()
     local mm=math.sqrt(mvx*mvx+mvz*mvz)
     if mm>0 then local sp=MOVE*math.min(1,mm); move_axis("x",mvx/mm*sp); move_axis("z",mvz/mm*sp) end
   end
-  if moving then bob=bob+0.28 end
+  do
+    local idx = WIDX[p.slot==1 and p.g1 or p.g2]
+    local sp = moving and 1 or 0
+    if idx and vm_speed[idx] ~= sp then vm_speed[idx] = sp; cartbox.set(idx, "speed", sp) end
+  end
   -- Pitch: the right stick aims up and down (up is up). Without it, auto-aim
   -- eases the pitch toward the locked enemy (the 8-button scheme has no pitch);
   -- once you have aimed by hand, the view stays where you leave it and auto-aim
@@ -3761,7 +3980,7 @@ local function play_input()
     p.ap=p.ap+(want-p.ap)*0.2
   end
   if cartbox.action("jump") and p.grounded and not p.dead then p.vy=JUMP; p.grounded=false end
-  if cartbox.actionp("swap") then p.slot=(p.slot==1) and 2 or 1 end
+  if cartbox.actionp("swap") then p.slot=(p.slot==1) and 2 or 1; vm("ready") end
   local cur=W[p.slot==1 and p.g1 or p.g2]
   p.zoom = cur.zoom and (cartbox.action("zoom") or (aheld and not lstick and not (btn(0) or btn(1) or btn(2) or btn(3))))
   if p.cool>0 then p.cool=p.cool-1 end
@@ -3781,8 +4000,7 @@ end
 -- First-person weapon: a real 3D viewmodel. Each weapon is its own mesh
 -- instance (8..13) authored at 1/1000 scale, so it is invisible until posed;
 -- each frame only the weapon in hand is posed just in front of the eye (scaled
--- back up by WS), bobbing with the walk and kicking back when it fires.
-local WIDX = { br=8, smg=9, shotgun=10, sniper=11, magnum=12, sword=13 }
+-- back up by WS); its arms animate themselves (see WIDX and vm above).
 -- Armour tints (the runtime's 15-colour tint palette): red/blue by team in team
 -- modes; in Free for All every player wears their own colour.
 local TINT_RED, TINT_BLUE, TINT_GREEN = 1, 2, 3
@@ -3802,16 +4020,17 @@ local function pose_viewmodel(wid)
   local fx, fy, fz = cp*s, sp, cp*c        -- forward
   local rx, rz = -c, s                     -- right (horizontal)
   local ux, uy, uz = -s*sp, cp, -c*sp      -- up
-  local kick = flash*0.012
-  local fwd, rgt, up = 0.4 - kick, 0.19 + math.sin(bob)*0.012, -0.235 - math.abs(math.cos(bob))*0.01
-  if wid=="sword" then fwd, rgt, up = 0.3, 0.13 + math.sin(bob)*0.012, -0.24 end
+  -- Where the gun is held; its sway, bob, kick, reload and swing are the arms'
+  -- own animation (I9), played by the viewmodel's state machine.
+  local fwd, rgt, up = 0.4, 0.19, -0.235
+  if wid=="sword" then fwd, rgt, up = 0.3, 0.13, -0.24 end
   if wid=="magnum" then rgt = rgt - 0.03; fwd = fwd - 0.03 end
   local ex, ey, ez = p.x, p.y+EYE, p.z
   local px = ex + fx*fwd + rx*rgt + ux*up
   local py = ey + fy*fwd + uy*up
   local pz = ez + fz*fwd + rz*rgt + uz*up
   -- Front layer: drawn over the finished scene, so it never clips into a wall.
-  cartbox.meshpose(idx, px*WS, py*WS, pz*WS, p.ay, -p.ap - flash*0.03, 0, WS, 0, armor_tint(p), true)
+  cartbox.meshpose(idx, px*WS, py*WS, pz*WS, p.ay, -p.ap, 0, WS, 0, armor_tint(p), true)
 end
 
 -- The muzzle flash stays a 2D HUD flare, drawn where the barrel sits on screen.
