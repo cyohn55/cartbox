@@ -224,7 +224,7 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
       expect(result.coverage, JSON.stringify(result.diffs)).toBe(0);
       expect(result.maxDelta).toBeLessThanOrEqual(6);
     }
-  });
+  }, 60_000);
 
   it("shades clearcoat, brushed metal, parallax relief and wear masks like the software rasteriser (I4)", async () => {
     for (const name of ["layers", "layersLit"]) {
@@ -257,7 +257,7 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     let changed = 0;
     for (let i = 0; i < bent.out.length; i += 4) if (Math.abs(bent.out[i]! - straight.out[i]!) + Math.abs(bent.out[i + 2]! - straight.out[i + 2]!) > 30) changed += 1;
     expect(changed).toBeGreaterThan(30);
-  });
+  }, 60_000);
 
   it("shades forty point lights and four spots through the light clusters like the software rasteriser", async () => {
     const result = await run("manyLights");

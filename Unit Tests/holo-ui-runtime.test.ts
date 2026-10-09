@@ -130,6 +130,8 @@ end`,
     const nums = log.filter((c) => c.op === PHYS_OP_UI_NUM);
     // sh, ammo (32 then 31), reserve and armed: each sent when it changed, and only then.
     expect(nums.map((c) => [keys[c.a], c.v[0]]).sort()).toEqual([["ammo", 31], ["ammo", 32], ["armed", 1], ["reserve", 96], ["sh", 0.5]]);
+    // In key order, never a hash table's: every core sends the same commands in the same order.
+    expect(nums.slice(0, 4).map((c) => keys[c.a])).toEqual(["ammo", "armed", "reserve", "sh"]);
     expect(log.filter((c) => c.op === PHYS_OP_UI_LIST)).toEqual([{ op: PHYS_OP_UI_LIST, a: key("blips"), v: [3, 0.5, -0.5, 1, 0, 0] }]);
     // The console document's binding never goes to the host.
     expect(log.some((c) => c.op === PHYS_OP_UI_TEXT)).toBe(false);

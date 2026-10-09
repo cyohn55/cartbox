@@ -641,6 +641,8 @@ function uiSdkLua(docs, width, height, debugBlock) {
   const holo = holoDocuments(docs);
   const holoMap = holo.map((d, i) => `[${lua(d.name)}]=${i}`).join(",");
   const keyMap = holoBindingKeys(docs).map((k, i) => `[${lua(k)}]=${i}`).join(",");
+  const holoNames = holo.map((d) => lua(d.name)).join(",");
+  const keyNames = holoBindingKeys(docs).map(lua).join(",");
   return `do
 local U = {}
 local DOCS = {${tables.join(",\n")}}
@@ -811,8 +813,9 @@ end
 -- from the runtime). Without the runtime they fall back to the console's drawing.
 local HOLO = {${holoMap}}
 local HK = {${keyMap}}
+local HOLON, HKN = {${holoNames}}, {${keyNames}}
 local hsent, sentv, dirty = {}, {}, {}
-for k in pairs(HK) do dirty[k] = true end
+for _, k in ipairs(HKN) do dirty[k] = true end
 local function sig(v)
   if type(v) == "table" then
     local parts = {}
@@ -862,15 +865,18 @@ end
 local function hflush()
   local cmd = cartbox._cmd
   if not cmd then return false end
-  for n, i in pairs(HOLO) do
+  for i, n in ipairs(HOLON) do
+    i = i - 1
     local want = isshown(n)
     if hsent[n] ~= want and cmd(${PHYS_OP_UI_SHOW}, i, want and 1 or 0) then hsent[n] = want end
   end
-  for k in pairs(dirty) do
-    local v = B[k]
-    local s = sig(v)
-    if s == sentv[k] then dirty[k] = nil
-    elseif sendval(cmd, HK[k], v) then sentv[k] = s; dirty[k] = nil end
+  for _, k in ipairs(HKN) do
+    if dirty[k] then
+      local v = B[k]
+      local s = sig(v)
+      if s == sentv[k] then dirty[k] = nil
+      elseif sendval(cmd, HK[k], v) then sentv[k] = s; dirty[k] = nil end
+    end
   end
   return true
 end
