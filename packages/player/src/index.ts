@@ -228,8 +228,21 @@ export {
   reflectionFade,
   reflectionSampleY,
   tiltShiftBlur,
+  IMPORTED_LOOK,
+  LUT_LOOKS,
+  LUT_SIZE,
+  MAX_LUT_SIZE,
+  MIN_LUT_SIZE,
+  applyLut,
+  decodeLut,
+  encodeLut,
+  identityLut,
+  lookLut,
+  lutStrip,
+  parseCubeLut,
 } from "./fx/index.js";
 export type {
+  GradingLut,
   FlareGhost,
   FlareParams,
   InnerSurfaceFactory,
@@ -329,7 +342,7 @@ export type {
 // geometry with placement transforms); the player rasterises it over each frame
 // with a pure software rasteriser — the runtime has no GPU triangle path — no cart
 // code needed. Phase 2 of the mesh asset feature.
-export { MeshOverlaySurface, smoothFrontEdges, parseMeshScene, buildOrbitCamera, orbitPitchAboveTerrain, streamGroups, sceneObjectsSdkLua } from "./mesh/index.js";
+export { MeshOverlaySurface, TINT_PALETTE, smoothFrontEdges, parseMeshScene, buildOrbitCamera, orbitPitchAboveTerrain, streamGroups, sceneObjectsSdkLua } from "./mesh/index.js";
 export { readSidecarUi, uiSdkLua } from "./uiSdk.js";
 export { INPUT_SETTINGS, playLanguage, stringsSdkLua, writeInputSettings } from "./stringsSdk.js";
 export { componentsSdkLua } from "./componentsSdk.js";

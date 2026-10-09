@@ -18,6 +18,8 @@
  * flat 2D scene suggests a light source it cannot actually cast.
  */
 
+import { IMPORTED_LOOK, decodeLut, identityLut, lookLut, type GradingLut } from "./lutModel.js";
+
 export type PostFxEffectId =
   | "grade"
   | "fog"
@@ -33,6 +35,7 @@ export type PostFxEffectId =
   | "streaks"
   | "lensflare"
   | "splittone"
+  | "lut"
   | "reflection"
   | "tiltshift"
   | "kaleidoscope"
@@ -204,6 +207,16 @@ export const POST_FX_EFFECTS: PostFxEffectDef[] = [
     ],
   },
   {
+    id: "lut",
+    label: "Grading LUT",
+    description: "A colourist's look in one lookup table: a built-in grade (Infinite, Warm noon, Cold steel, Bleach bypass) or an imported .cube.",
+    params: [
+      { id: "strength", label: "Strength", min: 0, max: 1, step: 0.01, defaultValue: 1 },
+      // Which table: one of LUT_LOOKS, the last being the imported one.
+      { id: "look", label: "Look", min: 0, max: IMPORTED_LOOK, step: 1, defaultValue: 0 },
+    ],
+  },
+  {
     id: "reflection",
     label: "Wet-floor reflection",
     description: "Mirrors the scene above a horizon line down into the floor below it, fading with distance — the screen-space reflection of a rain-slick street.",
@@ -259,6 +272,8 @@ export interface PostFxSettings {
   values: Record<string, number>;
   /** Effect colours as #rrggbb, keyed by {@link paramKey}. */
   colors: Record<string, string>;
+  /** An imported grading table (a `.cube`, packed by {@link encodeLut}), which the LUT's last look reads. */
+  lut?: { size: number; data: string };
 }
 
 /** Where the fog tint lived before effects could declare colours generically. */
@@ -324,6 +339,11 @@ export function parsePostFxSettings(value: unknown): PostFxSettings | null {
       const raw = (rawColors as Record<string, unknown>)[key];
       if (typeof raw === "string" && HEX_COLOR.test(raw)) settings.colors[key] = raw;
     }
+  }
+
+  if (decodeLut(record.lut)) {
+    const { size, data } = record.lut as { size: number; data: string };
+    settings.lut = { size, data };
   }
 
   const legacyFog = record[LEGACY_FOG_COLOR_KEY];
@@ -402,6 +422,10 @@ export interface PostFxUniforms {
   kaleidoAngle: number;
   grainAmount: number;
   grainSize: number;
+  /** How much of the graded colour replaces the frame's (0 = no grade). */
+  lutStrength: number;
+  /** The grading table, or null with the effect off. */
+  lut: GradingLut | null;
 }
 
 /** Parse #rrggbb into a 0..1 RGB triplet. */
@@ -483,5 +507,29 @@ export function uniformsFromSettings(settings: PostFxSettings): PostFxUniforms {
     kaleidoAngle: (shape("kaleidoscope", "angle", 0) * Math.PI) / 180,
     grainAmount: value("grain", "amount", 0),
     grainSize: shape("grain", "size", 1),
+    lutStrength: value("lut", "strength", 0),
+    lut: settings.enabled.lut ? gradingLut(Math.round(shape("lut", "look", 0)), settings.lut) : null,
   };
+}
+
+const builtInLuts = new Map<number, GradingLut>();
+let importedLut: { key: string; lut: GradingLut } | null = null;
+
+/** The table a look reads: a built-in one (made once), or the imported one (identity when there is none). */
+function gradingLut(look: number, stored: PostFxSettings["lut"]): GradingLut {
+  if (look === IMPORTED_LOOK) {
+    if (!stored) return identityLut();
+    if (importedLut?.key !== stored.data) {
+      const lut = decodeLut(stored);
+      if (!lut) return identityLut();
+      importedLut = { key: stored.data, lut };
+    }
+    return importedLut.lut;
+  }
+  let lut = builtInLuts.get(look);
+  if (!lut) {
+    lut = lookLut(look);
+    builtInLuts.set(look, lut);
+  }
+  return lut;
 }

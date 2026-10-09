@@ -29,7 +29,7 @@ import type { CartEngine } from "../engine/CartEngine";
 import { encodeRgbaPng } from "./png";
 import { meshBounds, serializeMeshAsset, type EncodedImage, type MeshAsset, type MeshPrimitive } from "./MeshAsset";
 import type { AnimationClip, ClipChannel, SkinJoint } from "./skeleton";
-import type { SceneLighting } from "./SceneLighting";
+import { INFINITE_TINTS, type SceneLighting } from "./SceneLighting";
 import type { SceneLight } from "../render/meshRasterizer";
 import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, type Streams } from "./seedGeometry";
 import { packMeshLibrary } from "./meshLibrary";
@@ -1187,7 +1187,7 @@ function mapMesh(): MeshAsset {
   // because the rig's exposure lifts it — a white albedo blows out to flat paper.
   const snowMat: MeshPrimitive["material"] = {
     name: "snow",
-    baseColorFactor: [0.7, 0.74, 0.8, 1],
+    baseColorFactor: [0.8, 0.82, 0.86, 1],
     baseColorImage: SNOW_TEX.albedo,
     normalImage: SNOW_TEX.normal,
     metallicRoughnessImage: SNOW_TEX.metallicRoughness,
@@ -1270,8 +1270,8 @@ function litMapMesh(): MeshAsset {
 }
 
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] as const;
-/** Toward the sun (matches the lighting rig's key light). */
-const LOCKOUT_KEY_DIRECTION: readonly [number, number, number] = [0.45, 0.62, -0.5];
+/** Toward the sun (matches the lighting rig's key light): high noon, about 52° up (I8). */
+const LOCKOUT_KEY_DIRECTION: readonly [number, number, number] = [0.42, 0.8, -0.46];
 
 // --- The mountains ------------------------------------------------------------
 // Lockout hangs in a gorge high in an icy range: sheer cliffs drop from all
@@ -1363,7 +1363,7 @@ export function lockoutTerrain(): Terrain {
   }
   // Snow wherever it can lie, and dark weathered rock on the faces too steep to
   // hold it (one texture, stored once).
-  const snow: MeshPrimitive["material"] = { name: "terrain-snow", baseColorFactor: [0.8, 0.84, 0.9, 1], baseColorImage: null, metallicFactor: 0, roughnessFactor: 0.85 };
+  const snow: MeshPrimitive["material"] = { name: "terrain-snow", baseColorFactor: [0.86, 0.88, 0.92, 1], baseColorImage: null, metallicFactor: 0, roughnessFactor: 0.85 };
   rockTexture ??= bakeLandscape(rockSurface, 3, 128);
   const stone = { baseColorImage: rockTexture.albedo, normalImage: rockTexture.normal, metallicFactor: 0 };
   const rock: MeshPrimitive["material"] = { name: "terrain-rock", baseColorFactor: [0.26, 0.28, 0.32, 1], ...stone, roughnessFactor: 0.9 };
@@ -2427,25 +2427,27 @@ export const LOCKOUT_CENTER_Z = CENTER[2];
  * shadows the towers and bridge cast onto the floor.
  */
 export const LOCKOUT_LIGHTING: SceneLighting = {
+  // The light and colour pass (HALO_INFINITE_STYLE_ROADMAP.md I8): bright noon
+  // on snow. A warm, strong sun high overhead does the modelling; a bright blue
+  // sky fills the shade so it stays open and cool, never murky.
   environment: {
-    sky: [0.42, 0.56, 0.8],
-    horizon: [0.55, 0.66, 0.74],
-    ground: [0.2, 0.22, 0.26],
+    sky: [0.45, 0.58, 0.82],
+    horizon: [0.74, 0.8, 0.88],
+    ground: [0.4, 0.4, 0.42],
     // The baked sky dome (below) is the environment map, and it is far brighter
-    // than the gradient it replaced, so its intensity sits well under 1: the sky
-    // fills the shadows with cold blue, and the sun does the modelling.
+    // than the gradient it replaced, so its intensity sits under 1.
     intensity: 0.6,
   },
-  ambient: 0.45,
-  exposure: 1.0,
+  ambient: 0.42,
+  exposure: 1.1,
   tonemap: true,
   shadows: true,
   lights: [
-    // Key: a low-ish, warm-white sun, strong enough that shadows read clearly
+    // Key: a warm noon sun, strong enough that shadows read crisply
     // (direction points *towards* the light).
-    { kind: "directional", direction: [0.45, 0.62, -0.5], color: [1, 0.95, 0.86], intensity: 2.3 },
-    // Fill: a faint cold bounce from the opposite side so shadows aren't black.
-    { kind: "directional", direction: [-0.5, 0.35, 0.55], color: [0.5, 0.62, 0.8], intensity: 0.35 },
+    { kind: "directional", direction: [...LOCKOUT_KEY_DIRECTION], color: [1, 0.88, 0.7], intensity: 3.4 },
+    // Fill: blue skylight from the opposite side, so the shade reads cool and open.
+    { kind: "directional", direction: [-0.5, 0.45, 0.55], color: [0.6, 0.7, 0.92], intensity: 0.4 },
     // The Sword pit's cyan glow, at the bottom-mid centre.
     { kind: "point", position: [0, 0.9, 0], color: [0.4, 0.95, 1], intensity: 2.4, range: 4.5 }, // kept in the pit, off the walkway above
     // The energy's own light (ENGINE_PARITY_ROADMAP.md EP8): small cyan pools
@@ -2462,13 +2464,14 @@ export const LOCKOUT_LIGHTING: SceneLighting = {
   // the arena reads as a facility perched high in the mountains. The same bake
   // is the image-based light, so the metal panels reflect these clouds.
   sky: {
-    zenith: [0.3, 0.41, 0.58],
-    horizon: [0.78, 0.83, 0.89],
-    below: [0.66, 0.72, 0.8],
-    sunDirection: [0.45, 0.62, -0.5], // matches the key light
-    sunColor: [1, 0.95, 0.85],
+    // A clear noon blue, deep overhead and pale at the horizon (I8).
+    zenith: [0.18, 0.38, 0.76],
+    horizon: [0.76, 0.86, 0.96],
+    below: [0.68, 0.76, 0.86],
+    sunDirection: [...LOCKOUT_KEY_DIRECTION], // matches the key light
+    sunColor: [1, 0.93, 0.8],
     // Lighter painted cloud: the drifting layers below carry the rest (I6).
-    clouds: 0.3,
+    clouds: 0.25,
     cloudColor: [0.9, 0.93, 0.97],
     mountains: [
       { height: 8, peaks: 11, rock: [0.44, 0.49, 0.57], snow: [0.88, 0.92, 0.97], snowLine: 0.25, haze: 0.55, seed: 11 },
@@ -2491,16 +2494,17 @@ export const LOCKOUT_LIGHTING: SceneLighting = {
   // Cold haze that thickens across the arena, tinted to the horizon.
   // Kept light: the arena is only ~30 units across, so heavy fog just washes it out.
   fog: {
-    color: [0.74, 0.8, 0.87],
-    density: 0.015,
+    // Clear noon air: a thin blue haze (I8).
+    color: [0.72, 0.82, 0.95],
+    density: 0.012,
     start: 16,
-    max: 0.4,
+    max: 0.32,
     // Mist pooling in the chasm (HALO2_STYLE_ROADMAP.md H7): a box of fog under
     // the deck, thickest far down and thinning toward the rim, so looking over
     // the edge the gorge walls sink into a cloud sea and the floor never shows.
     volumes: [{ min: [-160, -45, -160], max: [160, -2, 160], density: 0.25, falloff: 0.06 }],
-    // The haze brightens looking toward the low sun.
-    glow: { color: [1, 0.93, 0.8], strength: 0.35 },
+    // The haze brightens looking toward the sun.
+    glow: { color: [1, 0.92, 0.78], strength: 0.3 },
   },
   // Beams from the sun between the towers and over the walls (H7).
   shafts: { strength: 0.7, length: 0.7 },
@@ -2516,6 +2520,8 @@ export const LOCKOUT_LIGHTING: SceneLighting = {
     { name: "BR tower", position: [9.6, 5.5, 6.8], min: [4.2, 0, 3.4], max: [11.4, 7.5, 10.2] },
     { name: "arena", position: [4, 2.5, -8], min: [-16, -1, -13], max: [14, 14, 13] },
   ],
+  // Team colours saturated to hold up in the bright light (I8).
+  tints: INFINITE_TINTS,
 };
 
 /**
@@ -2526,7 +2532,7 @@ export const LOCKOUT_LIGHTING: SceneLighting = {
  * `PostFxSettings` shape as plain JSON; every effect not named stays off.
  */
 export const LOCKOUT_FX = {
-  enabled: { bloom: true, grade: true, splittone: true, vignette: true, lensflare: true },
+  enabled: { bloom: true, grade: true, splittone: true, lut: true, vignette: true, lensflare: true },
   values: {
     // Calibrated against the player's real bloom pyramid (HDR, multi-scale):
     // just the brightest glow — cyan trim, sun-lit snow — past threshold, and a
@@ -2534,11 +2540,15 @@ export const LOCKOUT_FX = {
     "bloom.strength": 0.2,
     "bloom.threshold": 0.9,
     "bloom.radius": 0.55,
-    "grade.brightness": 0.95,
-    "grade.contrast": 1.12,
-    "grade.saturation": 0.85,
-    "splittone.strength": 0.28,
+    "grade.brightness": 1,
+    "grade.contrast": 1.05,
+    "grade.saturation": 1.05,
+    // A whisper of split tone: the Infinite LUT does the grading now (I8).
+    "splittone.strength": 0.1,
     "splittone.balance": 0.45,
+    // The Infinite look (I8): saturated, clean daylight, warm light over cool shade.
+    "lut.strength": 0.7,
+    "lut.look": 0,
     "vignette.strength": 0.18,
     // Sun glare and lens flare (HALO2_STYLE_ROADMAP.md H8): a soft starburst on
     // the sun and a string of cold ghosts, fading as a tower covers it.

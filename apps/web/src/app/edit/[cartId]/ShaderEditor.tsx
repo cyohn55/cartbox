@@ -28,10 +28,14 @@ import {
   type TileMap,
 } from "@cartbox/editor";
 import {
+  IMPORTED_LOOK,
+  LUT_LOOKS,
   POST_FX_EFFECTS,
   PostFxPass,
   defaultPostFxSettings,
+  encodeLut,
   paramKey,
+  parseCubeLut,
   uniformsFromSettings,
   type PostFxEffectId,
   type PostFxSettings,
@@ -356,11 +360,34 @@ export function ShaderEditor({ sheet, map, columnPayload, settings, onSettingsCh
                 aria-label={`${effect.label} ${param.label}`}
               />
               <span className={`${styles.fxParamValue} data`}>
-                {(settings.values[key] ?? param.defaultValue).toFixed(param.step >= 1 ? 0 : 2)}
+                {effect.id === "lut" && param.id === "look"
+                  ? LUT_LOOKS[Math.round(settings.values[key] ?? param.defaultValue)]
+                  : (settings.values[key] ?? param.defaultValue).toFixed(param.step >= 1 ? 0 : 2)}
               </span>
             </label>
           );
         })}
+      {effect.id === "lut" && settings.enabled.lut && (
+        <label className={styles.fxParam} title="Import a 3D LUT exported from a grading tool (.cube, up to 33 steps a side); the Imported look then uses it">
+          <span className={styles.fxParamLabel}>{settings.lut ? `Imported ${settings.lut.size}³` : "Import .cube"}</span>
+          <input
+            type="file"
+            accept=".cube"
+            aria-label="Import a .cube grading LUT"
+            onChange={async (event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              if (!file) return;
+              const lut = parseCubeLut(await file.text());
+              if (!lut) {
+                window.alert("That isn't a 3D .cube LUT this can read (2–33 steps a side).");
+                return;
+              }
+              onSettingsChange({ ...settings, lut: encodeLut(lut), values: { ...settings.values, [paramKey("lut", "look")]: IMPORTED_LOOK } });
+            }}
+          />
+        </label>
+      )}
     </div>
   ));
 
