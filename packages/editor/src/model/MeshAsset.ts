@@ -144,6 +144,13 @@ export interface MeshMaterial {
    * mesh serves every team colour. Absent/false: tints never touch it.
    */
   readonly tintable?: boolean;
+  /**
+   * A team-colour mask by part (HALO_INFINITE_STYLE_ROADMAP.md I11): how much of
+   * the tint a tintable material takes, 0..1 — 1 (absent) paints it the team
+   * colour outright, less mixes the colour into its own, so trims and
+   * secondary plates pick up only a hint of it.
+   */
+  readonly tintMix?: number;
   // --- Surface effects (HALO2_STYLE_ROADMAP.md, H3; see materialEffects.ts) ---
   /**
    * A finely tiled detail map blended into the albedo up close (it fades out
@@ -436,6 +443,7 @@ export interface SerializedMaterial {
   emissiveFactor?: [number, number, number];
   textureSprite?: SpriteTextureRef | null;
   tintable?: boolean;
+  tintMix?: number;
   detailImage?: SerializedImage | null;
   detailScale?: number;
   detailStrength?: number;
@@ -472,6 +480,8 @@ interface SerializedPrimitive {
   weights?: string;
   /** In place of joints and weights: the one joint every vertex rides wholly. */
   bone?: number;
+  /** In place of joints and weights: each vertex's one joint (a byte each), every weight 1. */
+  bones?: string;
 }
 interface SerializedJoint {
   name: string;
@@ -574,17 +584,28 @@ function deserializeSkin(raw: unknown): MeshSkin | null {
 
 /**
  * A primitive's skin binding as stored: just the joint when every vertex rides
- * that one joint wholly (a rigid part, the way plates and held weapons are
- * bound — a few bytes instead of 24 a vertex), else every vertex's four joints
- * and weights.
+ * that one joint wholly (a rigid part, the way held weapons are bound — a few
+ * bytes instead of 24 a vertex); a byte a vertex when each rides one joint but
+ * not all the same (plates bound piece by piece); else every vertex's four
+ * joints and weights.
  */
-function serializeBinding(joints: Uint16Array, weights: Float32Array): { bone: number } | { joints: string; weights: string } {
+function serializeBinding(joints: Uint16Array, weights: Float32Array): { bone: number } | { bones: string } | { joints: string; weights: string } {
+  const count = joints.length / 4;
   const bone = joints[0] ?? 0;
-  let rigid = joints.length > 0;
-  for (let v = 0; rigid && v < joints.length / 4; v += 1) {
-    rigid = joints[v * 4] === bone && weights[v * 4] === 1 && weights[v * 4 + 1] === 0 && weights[v * 4 + 2] === 0 && weights[v * 4 + 3] === 0;
+  let same = count > 0;
+  let single = count > 0;
+  for (let v = 0; single && v < count; v += 1) {
+    single = weights[v * 4] === 1 && weights[v * 4 + 1] === 0 && weights[v * 4 + 2] === 0 && weights[v * 4 + 3] === 0 && joints[v * 4]! < 256;
+    same = same && joints[v * 4] === bone;
   }
-  return rigid ? { bone } : { joints: u16ToBase64(joints), weights: f32ToBase64(weights) };
+  if (single && same) return { bone };
+  // Every vertex on one joint, but not all the same one (plates bound piece by piece): a byte each.
+  if (single) {
+    const bytes = new Uint8Array(count);
+    for (let v = 0; v < count; v += 1) bytes[v] = joints[v * 4]!;
+    return { bones: bytesToBase64(bytes) };
+  }
+  return { joints: u16ToBase64(joints), weights: f32ToBase64(weights) };
 }
 
 /** Validate untrusted clips against a skeleton of `jointCount` joints. */
@@ -724,6 +745,7 @@ export function serializeMaterial(material: MeshMaterial, table?: ImageTable): S
     emissiveFactor: material.emissiveFactor ? [...material.emissiveFactor] : undefined,
     textureSprite: material.textureSprite ?? null,
     ...(material.tintable ? { tintable: true } : {}),
+    ...(material.tintable && material.tintMix !== undefined && material.tintMix < 1 ? { tintMix: material.tintMix } : {}),
     ...(material.detailImage ? { detailImage: serializeImage(material.detailImage, "detailImage", table) } : {}),
     ...(material.blendImage ? { blendImage: serializeImage(material.blendImage, "blendImage", table) } : {}),
     ...(material.reliefImage ? { reliefImage: serializeImage(material.reliefImage, "reliefImage", table) } : {}),
@@ -750,6 +772,7 @@ export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMat
     emissiveFactor: toEmissiveFactor(material.emissiveFactor),
     textureSprite: toTextureSprite(material.textureSprite),
     ...(material.tintable === true ? { tintable: true } : {}),
+    ...(material.tintable === true && typeof material.tintMix === "number" && Number.isFinite(material.tintMix) && material.tintMix < 1 ? { tintMix: Math.max(0, material.tintMix) } : {}),
     ...(material.detailImage ? { detailImage: deserializeImage(material.detailImage, "detailImage", table) } : {}),
     ...(material.blendImage ? { blendImage: deserializeImage(material.blendImage, "blendImage", table) } : {}),
     ...(material.reliefImage ? { reliefImage: deserializeImage(material.reliefImage, "reliefImage", table) } : {}),
@@ -806,6 +829,16 @@ export function deserializeMeshAsset(json: string): MeshAsset {
       weights = new Float32Array(vertexCount * 4);
       for (let v = 0; v < vertexCount; v += 1) {
         joints[v * 4] = bone;
+        weights[v * 4] = 1;
+      }
+    } else if (skin && typeof entry.bones === "string") {
+      const each = base64ToBytes(entry.bones);
+      if (each.length !== vertexCount) throw new Error(MALFORMED);
+      joints = new Uint16Array(vertexCount * 4);
+      weights = new Float32Array(vertexCount * 4);
+      for (let v = 0; v < vertexCount; v += 1) {
+        if (each[v]! >= skin.joints.length) throw new Error(MALFORMED);
+        joints[v * 4] = each[v]!;
         weights[v * 4] = 1;
       }
     } else if (skin && typeof entry.joints === "string" && typeof entry.weights === "string") {

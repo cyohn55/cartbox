@@ -86,8 +86,9 @@ describe("the Lockout soldiers and weapons", () => {
     expect(scene.instances[1]!.mesh).toBe(scene.instances[7]!.mesh); // shared at runtime too
     const soldier = scene.instances[1]!.mesh;
     expect(isSkinned(soldier)).toBe(true);
-    expect(soldier.clips!.map((c) => c.name)).toEqual(["idle", "run", "air", "die", "strafeR", "strafeL", "back"]);
-    expect(scene.instances[1]!.animator?.states.map((st) => st.name)).toEqual(["move", "air", "die"]);
+    // …and the armour's own moves since I11: a melee, a flinch and a landing.
+    expect(soldier.clips!.map((c) => c.name)).toEqual(["idle", "run", "air", "die", "strafeR", "strafeL", "back", "melee", "hit", "land"]);
+    expect(scene.instances[1]!.animator?.states.map((st) => st.name)).toEqual(["move", "air", "die", "melee", "hit", "land"]);
     expect(scene.instances[1]!.animator?.states[0]!.blend?.param).toBe("speed");
     expect(scene.instances[1]!.animator?.states[0]!.blend?.param2).toBe("side"); // a 2D blend space (EP17b)
     const armor = soldier.primitives.find((p) => p.material.name === "armor")!;

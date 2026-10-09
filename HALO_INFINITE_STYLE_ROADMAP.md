@@ -294,9 +294,36 @@ What separates Lockout from Halo Infinite, seen in a match:
       trailing light and lighting what it passes. It sticks to the first
       soldier it reaches (not its thrower) and goes off in a ball of blue
       plasma. Until now grenades were invisible in flight.
-- [ ] **I11. Spartans.** A higher-detail armour model with team-colour masks,
+- [x] **I11. Spartans.** A higher-detail armour model with team-colour masks,
       a reflective visor (I3 and I4), and the armour's own animation set.
       *Lockout:* bots that read as Spartans at a distance.
+      *Done:* **team-colour masks** by part: a tintable material's `tintMix`
+      is the share of the team colour it takes. At 1 (the default) the part
+      is painted the colour outright, as before; below 1 the colour is mixed
+      into its own, so trims and secondary plates pick up a hint of it. The
+      Material panel has "Takes the team colour" and a share slider. Lockout's
+      soldier is rebuilt as a **Spartan** on the same skeleton:
+      - Team-colour plates: a layered chest plate, broad pauldrons,
+        gauntlets, thigh plates and shin guards.
+      - Brushed gunmetal trim that takes a fifth of the team colour: the
+        chest core, collar, abdominal bands, knee and calf plates, boots with
+        toe caps, cheek and neck guards, an ear module and a thruster pack.
+      - A black undersuit.
+      - A wraparound gold **visor**: a near-mirror (I3 reflects the arena in
+        it) under a clear coat (I4), with a faint glow of its own.
+
+      The **armour's own moves** join its clips: a melee (a step in, the
+      stock driven across), a flinch when hit, and a landing that takes a
+      jump in the knees. The state machine plays them on `melee` and `hit`
+      triggers and after a fall, and dies from any of them. Storage: a skin
+      binding where each vertex rides one joint is stored as a byte a vertex
+      (not 24). The soldier is stored without normals, since its plates'
+      faces share no corners and every renderer rebuilds the same flat
+      normals, and its LODs are fingerprinted against the stored mesh. So the
+      far more detailed Spartan stores lighter than the old soldier (88 KB
+      against 90). *Lockout:* bots read as Spartans across the arena: broad
+      pauldrons, a gold visor and the team colour in their plates. They swing
+      their rifles up close and flinch when hit.
 
 ## Phase D — Content and editor tools
 

@@ -11564,15 +11564,13 @@ function tintMesh(mesh, tint, overrides) {
   if (!color || tint === 0) return mesh;
   return {
     name: mesh.name,
-    primitives: mesh.primitives.map(
-      (primitive) => primitive.material.tintable ? {
-        ...primitive,
-        material: {
-          ...primitive.material,
-          baseColorFactor: [color[0], color[1], color[2], primitive.material.baseColorFactor[3]]
-        }
-      } : primitive
-    )
+    primitives: mesh.primitives.map((primitive) => {
+      if (!primitive.material.tintable) return primitive;
+      const k = Math.max(0, Math.min(1, primitive.material.tintMix ?? 1));
+      const base = primitive.material.baseColorFactor;
+      const mixed = k >= 1 ? color : [base[0] + (color[0] - base[0]) * k, base[1] + (color[1] - base[1]) * k, base[2] + (color[2] - base[2]) * k];
+      return { ...primitive, material: { ...primitive.material, baseColorFactor: [mixed[0], mixed[1], mixed[2], base[3]] } };
+    })
   };
 }
 async function decodeTexture(mime, bytes) {

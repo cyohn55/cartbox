@@ -97,11 +97,23 @@ describe("rigid parts on disk", () => {
     });
   });
 
-  it("keep per-vertex joints where a part is shared between joints, and refuse a joint out of range", () => {
+  it("store a byte a vertex where each vertex rides one joint, keep blends whole, and refuse a joint out of range", () => {
+    // The soldier's plates are bound piece by piece: a joint a vertex.
     const soldier = JSON.parse(storedMesh("bot-1"));
-    expect(soldier.primitives.some((p: { joints?: string }) => typeof p.joints === "string")).toBe(true);
-    const stored = JSON.parse(serializeMeshAsset(viewmodel("smg")));
-    stored.primitives[0].bone = 9;
+    expect(soldier.primitives.some((p: { bones?: string; joints?: string }) => typeof p.bones === "string" && p.joints === undefined)).toBe(true);
+    const back = deserializeMeshAsset(storedMesh("bot-1"));
+    expect(back.primitives.every((p) => p.joints && p.weights)).toBe(true);
+    // A vertex blended between two joints keeps its four joints and weights.
+    const mesh = viewmodel("smg");
+    const first = mesh.primitives[0]!;
+    const weights = first.weights!.slice();
+    weights[0] = 0.5;
+    weights[1] = 0.5;
+    const blended = { ...mesh, primitives: [{ ...first, weights }, ...mesh.primitives.slice(1)] };
+    const stored = JSON.parse(serializeMeshAsset(blended));
+    expect(typeof stored.primitives[0].joints).toBe("string");
+    expect(Array.from(deserializeMeshAsset(serializeMeshAsset(blended)).primitives[0]!.weights!)).toEqual(Array.from(weights));
+    stored.primitives[1].bone = 9;
     expect(() => deserializeMeshAsset(JSON.stringify(stored))).toThrow();
   });
 });

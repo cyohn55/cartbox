@@ -1954,7 +1954,41 @@ function soldierClips(bones: readonly { at: P3 }[]): AnimationClip[] {
       };
     });
   const back = { ...reverseClip(run), name: "back" };
-  return [idle, run, air, die, strafe("strafeR", 1), strafe("strafeL", -1), back];
+  // The armour's own moves (I11). A melee: a step in, the chest wound to the
+  // right, then the rifle's stock driven across to the left.
+  const melee = clipFrom("melee", 0.5, 11, bones, (t) => {
+    const wind = Math.sin(Math.min(1, t / 0.3) * Math.PI) * (t < 0.3 ? 1 : 0);
+    const strike = t < 0.2 ? 0 : Math.sin(Math.min(1, (t - 0.2) / 0.5) * Math.PI);
+    return {
+      rot: {
+        [J.spine]: pitchYaw(0.1 + strike * 0.25, wind * 0.45 - strike * 0.7),
+        [J.chest]: pitchYaw(0.05, -strike * 0.25),
+        [J.armR]: pitchYaw(-0.3 * strike, 0, 0.3 * strike),
+        [J.foreR]: pitchYaw(-0.5 * strike),
+        [J.armL]: pitchYaw(-0.2 * strike, 0, -0.2 * strike),
+        [J.thighL]: pitchYaw(-0.45 * strike), [J.shinL]: pitchYaw(0.35 * strike),
+        [J.thighR]: pitchYaw(0.15 * strike),
+      },
+      hips: [0, -0.04 * strike, 0.12 * strike],
+    };
+  });
+  // A flinch: knocked back a little by a hit, head snapping, then recovering.
+  const hit = clipFrom("hit", 0.35, 8, bones, (t) => {
+    const k = Math.sin(Math.min(1, t / 0.25) * Math.PI) * (1 - t * 0.5);
+    return {
+      rot: { [J.spine]: pitchYaw(-0.22 * k), [J.chest]: pitchYaw(-0.1 * k), [J.head]: pitchYaw(-0.3 * k, 0.15 * k), [J.armL]: pitchYaw(0, 0, -0.25 * k), [J.armR]: pitchYaw(0, 0, 0.2 * k) },
+      hips: [0, -0.02 * k, -0.05 * k],
+    };
+  });
+  // A landing: the knees take it, the body dips and rises.
+  const land = clipFrom("land", 0.3, 7, bones, (t) => {
+    const k = Math.sin(Math.min(1, t / 0.9) * Math.PI);
+    return {
+      rot: { [J.thighL]: pitchYaw(-0.5 * k), [J.shinL]: pitchYaw(0.9 * k), [J.footL]: pitchYaw(-0.35 * k), [J.thighR]: pitchYaw(-0.5 * k), [J.shinR]: pitchYaw(0.9 * k), [J.footR]: pitchYaw(-0.35 * k), [J.spine]: pitchYaw(0.2 * k) },
+      hips: [0, -0.13 * k, 0],
+    };
+  });
+  return [idle, run, air, die, strafe("strafeR", 1), strafe("strafeL", -1), back, melee, hit, land];
 }
 
 /**
@@ -1969,6 +2003,8 @@ export const LOCKOUT_SOLDIER_ANIMATOR = {
     { name: "side", kind: "number", initial: 0 },
     { name: "grounded", kind: "bool", initial: 1 },
     { name: "dead", kind: "bool", initial: 0 },
+    { name: "melee", kind: "trigger", initial: 0 },
+    { name: "hit", kind: "trigger", initial: 0 },
   ],
   states: [
     {
@@ -1990,13 +2026,21 @@ export const LOCKOUT_SOLDIER_ANIMATOR = {
     },
     { name: "air", clip: "air", speed: 1, loop: true },
     { name: "die", clip: "die", speed: 1, loop: false },
+    // The armour's own moves (I11), each played through and faded back.
+    { name: "melee", clip: "melee", speed: 1, loop: false },
+    { name: "hit", clip: "hit", speed: 1, loop: false },
+    { name: "land", clip: "land", speed: 1, loop: false },
   ],
   transitions: [
-    { from: "move", to: "die", when: [{ param: "dead", op: "true", value: 1 }], fade: 0.08 },
-    { from: "air", to: "die", when: [{ param: "dead", op: "true", value: 1 }], fade: 0.08 },
+    { from: "*", to: "die", when: [{ param: "dead", op: "true", value: 1 }], fade: 0.08 },
     { from: "die", to: "move", when: [{ param: "dead", op: "false", value: 0 }], fade: 0 },
     { from: "move", to: "air", when: [{ param: "grounded", op: "false", value: 0 }], fade: 0.12 },
-    { from: "air", to: "move", when: [{ param: "grounded", op: "true", value: 1 }], fade: 0.1 },
+    { from: "air", to: "land", when: [{ param: "grounded", op: "true", value: 1 }], fade: 0.05 },
+    { from: "move", to: "melee", when: [{ param: "melee", op: "set", value: 1 }], fade: 0.05 },
+    { from: "move", to: "hit", when: [{ param: "hit", op: "set", value: 1 }], fade: 0.03 },
+    { from: "melee", to: "move", when: [], fade: 0.15, exitTime: 1 },
+    { from: "hit", to: "move", when: [], fade: 0.12, exitTime: 1 },
+    { from: "land", to: "move", when: [], fade: 0.12, exitTime: 1 },
   ],
   events: [],
 } as const;
@@ -2009,7 +2053,10 @@ export const LOCKOUT_SOLDIER_ANIMATOR = {
  * {@link soldierBones}, and it carries the clips of {@link soldierClips}.
  */
 function soldierMesh(): MeshAsset {
+  // Four parts (I11): the team-colour plates, grey trim plates that take only a
+  // hint of the team colour (a mask by part), the black undersuit, and the visor.
   const paint = bound();
+  const trim = bound();
   const suit = bound();
   const visor = bound();
   const gun = bound();
@@ -2024,35 +2071,62 @@ function soldierMesh(): MeshAsset {
     const hip = bones[thighJ]!.at;
     const kneeAt = bones[shinJ]!.at;
     const ankle = bones[footJ]!.at;
-    on(suit, thighJ, (s) => limb(s, hip, kneeAt, 0.12, 0.1)); // thigh
-    on(paint, thighJ, (s) => limb(s, swing([hip[0], hip[1], hip[2] + 0.07], 0.12, 0), swing([hip[0], hip[1], hip[2] + 0.07], 0.34, 0), 0.075, 0.06, 0.5)); // thigh plate
-    on(paint, shinJ, (s) => block(s, kneeAt[0], kneeAt[1], kneeAt[2] + 0.08, 0.06, 0.05, 0.03)); // knee pad
-    on(suit, shinJ, (s) => limb(s, kneeAt, ankle, 0.085, 0.075)); // shin
-    on(paint, shinJ, (s) => limb(s, swing([kneeAt[0], kneeAt[1], kneeAt[2] + 0.06], 0.08, -0.05), swing([kneeAt[0], kneeAt[1], kneeAt[2] + 0.06], 0.34, -0.05), 0.07, 0.06, 0.5)); // shin guard
-    on(suit, footJ, (s) => block(s, ankle[0], Math.max(0.06, ankle[1] - 0.02), ankle[2] + 0.03, 0.085, 0.06, 0.15)); // boot
-    // Shoulder pad, upper arm, and a forearm reaching forward to the rifle.
-    on(paint, armJ, (s) => block(s, side * 0.31, 1.46, -0.01, 0.1, 0.075, 0.12, 0.05, 0.35));
+    const front = (p: P3, dz: number): P3 => [p[0], p[1], p[2] + dz];
+    // Thigh: undersuit, a team-colour plate on the front, a grey plate on the outside.
+    on(suit, thighJ, (s) => limb(s, hip, kneeAt, 0.12, 0.1));
+    on(paint, thighJ, (s) => limb(s, swing(front(hip, 0.075), 0.1, 0), swing(front(hip, 0.075), 0.34, 0), 0.085, 0.068, 0.5));
+    on(trim, thighJ, (s) => block(s, hip[0] + side * 0.105, hip[1] - 0.2, hip[2], 0.022, 0.13, 0.075, 0.02));
+    // Knee: a grey pad; shin: a team-colour guard in front, grey calf plate behind.
+    on(trim, shinJ, (s) => block(s, kneeAt[0], kneeAt[1], kneeAt[2] + 0.09, 0.066, 0.06, 0.035, 0.025));
+    on(suit, shinJ, (s) => limb(s, kneeAt, ankle, 0.085, 0.075));
+    on(paint, shinJ, (s) => limb(s, swing(front(kneeAt, 0.065), 0.09, -0.05), swing(front(kneeAt, 0.065), 0.33, -0.05), 0.072, 0.06, 0.5));
+    on(trim, shinJ, (s) => block(s, kneeAt[0], kneeAt[1] - 0.2, kneeAt[2] - 0.065, 0.06, 0.12, 0.03, 0.02));
+    // Boot, with a raised toe cap.
+    on(trim, footJ, (s) => block(s, ankle[0], Math.max(0.06, ankle[1] - 0.02), ankle[2] + 0.03, 0.088, 0.062, 0.155, 0.03));
+    on(trim, footJ, (s) => block(s, ankle[0], 0.05, ankle[2] + 0.16, 0.07, 0.035, 0.035, 0.02));
+    // Shoulder: a broad team-colour pauldron over a grey rim.
+    on(paint, armJ, (s) => block(s, side * 0.32, 1.47, -0.01, 0.125, 0.08, 0.135, 0.06, 0.35));
+    on(trim, armJ, (s) => block(s, side * 0.33, 1.4, -0.01, 0.13, 0.02, 0.14, 0.04));
+    // Upper arm: undersuit and a grey plate on the outside.
     on(suit, armJ, (s) => limb(s, [side * 0.33, 1.42, 0], [side * 0.3, 1.12, 0.05], 0.065));
-    on(paint, foreJ, (s) => limb(s, [side * 0.3, 1.12, 0.05], [side * 0.1 + 0.06, 1.15, L ? 0.42 : 0.2], 0.06, 0.05));
+    on(trim, armJ, (s) => limb(s, [side * 0.37, 1.34, 0.01], [side * 0.35, 1.2, 0.04], 0.03, 0.026, 0.5));
+    // Forearm: a team-colour gauntlet, a grey wrist ring, and the glove on the rifle.
+    on(paint, foreJ, (s) => limb(s, [side * 0.3, 1.12, 0.05], [side * 0.1 + 0.06, 1.15, L ? 0.4 : 0.18], 0.066, 0.054));
+    on(trim, foreJ, (s) => block(s, side * 0.1 + 0.06 + side * 0.012, 1.15, L ? 0.405 : 0.185, 0.05, 0.05, 0.015, 0.015));
     on(suit, foreJ, (s) => block(s, side * 0.1 + 0.06, 1.15, L ? 0.44 : 0.22, 0.045, 0.045, 0.05)); // glove
   }
-  on(suit, J.hips, (s) => block(s, 0, 0.94, 0, 0.21, 0.07, 0.13, 0.05)); // belt / hips
-  on(suit, J.spine, (s) => block(s, 0, 1.07, 0, 0.18, 0.07, 0.12, 0.05)); // abdomen
-  // Chest: a plate widening toward the shoulders, with a raised front piece.
-  on(paint, J.chest, (s) => pushLoft(s, chamferedRect(0, 0, 0.23, 0.15, 0.07, 1.13), chamferedRect(0, 0.01, 0.28, 0.17, 0.09, 1.5), 1));
-  on(paint, J.chest, (s) => block(s, 0, 1.32, 0.16, 0.16, 0.13, 0.03, 0.05, 0.1));
-  on(suit, J.chest, (s) => block(s, 0, 1.28, -0.21, 0.17, 0.17, 0.06)); // backpack
+  // Waist: belt, a grey codpiece plate, abdomen and two grey bands.
+  on(suit, J.hips, (s) => block(s, 0, 0.94, 0, 0.21, 0.07, 0.13, 0.05));
+  on(trim, J.hips, (s) => block(s, 0, 0.88, 0.12, 0.07, 0.06, 0.025, 0.02, 0.3));
+  on(suit, J.spine, (s) => block(s, 0, 1.07, 0, 0.18, 0.07, 0.12, 0.05));
+  on(trim, J.spine, (s) => block(s, 0, 1.02, 0.01, 0.175, 0.022, 0.13, 0.05));
+  on(trim, J.spine, (s) => block(s, 0, 1.1, 0.01, 0.18, 0.022, 0.13, 0.05));
+  // Chest: a grey core widening to the shoulders, a layered team-colour plate
+  // on its front, a collar, and the thruster pack on the back.
+  on(trim, J.chest, (s) => pushLoft(s, chamferedRect(0, 0, 0.22, 0.145, 0.07, 1.13), chamferedRect(0, 0.01, 0.27, 0.165, 0.09, 1.5), 1));
+  on(paint, J.chest, (s) => block(s, 0, 1.33, 0.155, 0.19, 0.15, 0.04, 0.07, 0.12));
+  on(paint, J.chest, (s) => block(s, 0, 1.36, 0.19, 0.12, 0.09, 0.015, 0.04, 0.15));
+  on(trim, J.chest, (s) => block(s, 0, 1.5, 0, 0.15, 0.03, 0.12, 0.05));
+  on(trim, J.chest, (s) => block(s, 0, 1.3, -0.22, 0.18, 0.16, 0.07, 0.04));
+  for (const x of [-0.09, 0.09]) on(suit, J.chest, (s) => limb(s, [x, 1.18, -0.26], [x, 1.1, -0.27], 0.035, 0.042)); // thruster nozzles
   on(suit, J.chest, (s) => block(s, 0, 1.55, 0, 0.07, 0.05, 0.07)); // neck
-  // Helmet: a rounded crown over a jaw, with the visor set into its face.
-  on(paint, J.head, (s) => block(s, 0, 1.69, 0, 0.13, 0.11, 0.15, 0.06, 0.18));
-  on(paint, J.head, (s) => block(s, 0, 1.6, 0.05, 0.11, 0.04, 0.11, 0.04));
+  // Helmet: a rounded team-colour crown with a brow and chin, grey cheek
+  // guards, a grey neck guard and an ear module, and the wraparound visor.
+  on(paint, J.head, (s) => block(s, 0, 1.69, 0, 0.135, 0.115, 0.155, 0.07, 0.2));
+  on(paint, J.head, (s) => block(s, 0, 1.765, 0.09, 0.1, 0.018, 0.06, 0.015));
+  on(paint, J.head, (s) => block(s, 0, 1.6, 0.11, 0.075, 0.035, 0.045, 0.025, 0.2));
+  for (const x of [-0.123, 0.123]) on(trim, J.head, (s) => block(s, x, 1.63, 0.05, 0.022, 0.055, 0.08, 0.015));
+  on(trim, J.head, (s) => block(s, 0, 1.61, -0.13, 0.1, 0.05, 0.03, 0.02));
+  on(trim, J.head, (s) => block(s, 0.142, 1.7, -0.01, 0.015, 0.035, 0.04, 0.01));
   on(visor, J.head, (s) =>
-    pushLoft(s, [[-0.1, 1.64, 0.145], [0.1, 1.64, 0.145], [0.1, 1.64, 0.1], [-0.1, 1.64, 0.1]], [[-0.095, 1.76, 0.13], [0.095, 1.76, 0.13], [0.095, 1.76, 0.09], [-0.095, 1.76, 0.09]], 1),
+    pushLoft(s, [[-0.09, 1.645, 0.15], [0.09, 1.645, 0.15], [0.09, 1.645, 0.105], [-0.09, 1.645, 0.105]], [[-0.085, 1.755, 0.135], [0.085, 1.755, 0.135], [0.085, 1.755, 0.095], [-0.085, 1.755, 0.095]], 1),
   );
+  for (const side of [-1, 1]) on(visor, J.head, (s) => limb(s, [side * 0.085, 1.7, 0.13], [side * 0.128, 1.7, 0.07], 0.045, 0.04, 0.35)); // wrapping round the sides
   // The rifle, held across the body: it rides the right forearm, with the hands.
   on(gun, J.foreR, (s) => limb(s, [0.06, 1.16, 0.0], [0.06, 1.16, 0.55], 0.035, 0.03, 1.6));
   on(gun, J.foreR, (s) => limb(s, [0.06, 1.18, 0.55], [0.06, 1.18, 0.78], 0.013));
   on(gun, J.foreR, (s) => block(s, 0.06, 1.24, 0.22, 0.02, 0.025, 0.1));
+  on(gun, J.foreR, (s) => limb(s, [0.06, 1.1, 0.12], [0.06, 1.0, 0.1], 0.016, 0.018, 1.4)); // magazine
 
   // Bones rest unrotated, so each one's rest transform is its offset from its
   // parent and its inverse bind matrix is a plain translation back to the origin.
@@ -2070,14 +2144,20 @@ function soldierMesh(): MeshAsset {
       scale: [1, 1, 1],
     };
   });
-  // Lacquered armour (I4): the team paint under a glossy clearcoat, and a coated visor.
+  // Lacquered armour (I4): the team paint under a glossy clearcoat. The trim is
+  // brushed gunmetal that takes a fifth of the team colour (I11), so a team
+  // reads in the plates and the trim ties them together.
   const paintMat: Mat = { name: "armor", baseColorFactor: ARMOR_PAINT, baseColorImage: null, metallicFactor: 0.45, roughnessFactor: 0.4, tintable: true, ...ARMOR_LACQUER };
+  const trimMat: Mat = { name: "armor-trim", baseColorFactor: [0.27, 0.29, 0.32, 1], baseColorImage: null, metallicFactor: 0.75, roughnessFactor: 0.34, tintable: true, tintMix: 0.2 };
   return {
     name: "soldier",
     primitives: [
       boundPrimitive(paint, paintMat),
-      boundPrimitive(suit, { name: "undersuit", baseColorFactor: [0.2, 0.21, 0.24, 1], baseColorImage: null, metallicFactor: 0.3, roughnessFactor: 0.6 }),
-      boundPrimitive(visor, { name: "visor", baseColorFactor: [0.95, 0.7, 0.28, 1], baseColorImage: null, metallicFactor: 0.9, roughnessFactor: 0.12, emissiveFactor: [0.35, 0.22, 0.05], clearcoat: 1, clearcoatRoughness: 0.03 }),
+      boundPrimitive(trim, trimMat),
+      boundPrimitive(suit, { name: "undersuit", baseColorFactor: [0.13, 0.14, 0.16, 1], baseColorImage: null, metallicFactor: 0.3, roughnessFactor: 0.6 }),
+      // The visor (I3, I4): a gold mirror under a clear coat, smooth enough to
+      // reflect the arena in screen space, with a faint glow of its own.
+      boundPrimitive(visor, { name: "visor", baseColorFactor: [0.98, 0.72, 0.26, 1], baseColorImage: null, metallicFactor: 0.95, roughnessFactor: 0.05, emissiveFactor: [0.3, 0.18, 0.04], clearcoat: 1, clearcoatRoughness: 0.02, reflectivity: 1.5 }),
       boundPrimitive(gun, { name: "rifle", baseColorFactor: [0.2, 0.21, 0.23, 1], baseColorImage: null, metallicFactor: 0.7, roughnessFactor: 0.4 }),
     ],
     skin: { joints, inverseBind },
@@ -2903,14 +2983,19 @@ export function lockoutMeshSidecar(): string {
     // its state machine), stored once in the sidecar's shared library however
     // many bots use it.
     const soldierAsset = soldierMesh();
-    const soldier = serializeMeshAsset(soldierAsset);
+    // Stored without normals: its plates' faces share no corners, so every
+    // renderer rebuilds the same flat normals from the triangles (I11).
+    const storedSoldier: MeshAsset = { ...soldierAsset, primitives: soldierAsset.primitives.map((p) => ({ ...p, normals: null })) };
+    const soldier = serializeMeshAsset(storedSoldier);
     // LODs (EP9b): lighter levels for soldiers across the arena and for weapons
     // dropped far off, each stored once in the library however many use it.
     const lodsOf = (mesh: MeshAsset): { lods?: StoredLods } => {
       const chain = generateLods(mesh);
       return chain ? { lods: encodeLods(mesh, chain) } : {};
     };
-    const soldierLods = lodsOf(soldierAsset);
+    // Simplified with its normals, but fingerprinted as stored, so the levels fit the soldier that loads.
+    const soldierChain = generateLods(soldierAsset);
+    const soldierLods = soldierChain ? { lods: encodeLods(storedSoldier, soldierChain) } : {};
     const meshes: { id: string; name: string; mesh: string; lods?: StoredLods; animator?: unknown; transform: unknown; components?: unknown }[] = [
       { id: "lockout-map", name: "Lockout arena", mesh: serializeMeshAsset(litMapMesh()), transform: identity },
     ];
@@ -3332,6 +3417,7 @@ function damage(target, dmg, attacker, head)
     target.hp = target.hp - dmg
   end
   target.lasthit = attacker
+  target.flinch = true
   if target.hp <= 0 then kill_ent(attacker, target, head) end
 end
 
@@ -3814,6 +3900,7 @@ local function think_bot(o)
     if m < (w.rng or 40) and o.cool<=0 then
       o.cool = (w.cool or 10) + math.random(0,6)
       cartbox.sound("fire_"..(w.melee and "sword" or (o.g1 or "br")),o.x,o.y+1.3,o.z,1,0.92+math.random()*0.16)
+      if w.melee or m < 1.8 then o.swing = true end   -- up close: the armour swings (I11)
       if not w.melee and m > 0.01 and d3(o.x,o.y,o.z, p.x,p.y,p.z) < 25 then eject_casing(o.x + dx/m*0.3, o.y + 1.3, o.z + dz/m*0.3, dx/m, dz/m) end
       local acc = MODE.shields and 0.30 or 0.5    -- SWAT bots hit harder
       if w.melee then acc = (m < 3) and 0.9 or 0 end
@@ -4220,6 +4307,9 @@ function animate_bot(i, o)
   if spd ~= o.sent_spd then o.sent_spd = spd; cartbox.set(i, "speed", spd) end
   local side = math.floor(o.side * 10 + 0.5) / 10
   if side ~= o.sent_side then o.sent_side = side; cartbox.set(i, "side", side) end
+  -- The armour's own moves (I11): a swing when it attacks up close, a flinch when hit.
+  if o.swing then o.swing = nil; if not o.dead then cartbox.trigger(i, "melee") end end
+  if o.flinch then o.flinch = nil; if not o.dead then cartbox.trigger(i, "hit") end end
   local air, dead = o.air and true or false, o.dead and true or false
   if air ~= o.sent_air then o.sent_air = air; cartbox.set(i, "grounded", not air) end
   if dead ~= o.sent_dead then

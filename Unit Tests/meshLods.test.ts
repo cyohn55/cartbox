@@ -13,8 +13,8 @@ import {
   applyLods,
   composeModelMatrix,
   deserializeMeshAsset,
-  encodeLods,
   generateLods,
+  decodeLods,
   lockoutMeshSidecar,
   resolveMeshRef,
   serializeMeshAsset,
@@ -203,7 +203,9 @@ describe("Lockout", () => {
   it("stores levels that still fit the soldier after its round trip through storage", () => {
     const stored = JSON.parse(lockoutMeshSidecar());
     const mesh = deserializeMeshAsset(resolveMeshRef(stored.meshes[1].mesh, stored.library)!);
-    expect(encodeLods(mesh, generateLods(mesh)!).base).toBe(stored.meshes[1].lods.base);
+    // The soldier is stored without normals (I11): its levels were simplified
+    // with them, but fingerprinted against what loads, so they still fit it.
+    expect(decodeLods(mesh, stored.meshes[1].lods, (k) => resolveMeshRef(k, stored.library))).not.toBeNull();
     // And a reserialised soldier is byte-identical, so the fingerprint is stable.
     expect(serializeMeshAsset(mesh)).toBe(resolveMeshRef(stored.meshes[1].mesh, stored.library));
   });
