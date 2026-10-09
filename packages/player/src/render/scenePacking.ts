@@ -20,6 +20,7 @@ import {
   effectActive,
   emissiveAnimation,
   materialHasLayers,
+  materialRefracts,
   spotCone,
   fogIsVolumetric,
   type EnvironmentLight,
@@ -27,6 +28,7 @@ import {
   type MeshMaterial,
   type ReflectionProbeSet,
   type ResolvedLayers,
+  type ResolvedRefraction,
   type SceneFog,
   type SceneLight,
   type SurfaceEffect,
@@ -80,9 +82,13 @@ import {
  *                                    w = parallax depth (0 = none) (I4)
  * 784  layer1     vec4<f32>    16   xy = anisotropy rotation's cos and sin,
  *                                    z = 1 when a relief map rides in the occlusion map's G and B
+ * 800  refract0   vec4<f32>    16   x = bend, y = warp, z = silhouette distortion,
+ *                                    w = 1 when the draw refracts (I5; refraction.ts)
+ * 816  refract1   vec4<f32>    16   xyz = the camera's right (world), w = frame height (px)
+ * 832  refract2   vec4<f32>    16   xyz = the camera's up (world)
  * ```
  *
- * 800 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
+ * 848 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -97,7 +103,7 @@ export const UNIFORM_STRIDE = 1024;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 800;
+export const UNIFORM_BYTES_USED = 848;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -214,6 +220,9 @@ const OFFSET_EFFECT0 = 184;
 const OFFSET_EFFECT1 = 188;
 const OFFSET_LAYER0 = 192;
 const OFFSET_LAYER1 = 196;
+const OFFSET_REFRACT0 = 200;
+const OFFSET_REFRACT1 = 204;
+const OFFSET_REFRACT2 = 208;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -286,10 +295,13 @@ export interface PbrMaterial {
   readonly emissiveFactor?: readonly [number, number, number];
   /** A material graph (EP7) always takes the PBR path. */
   readonly graph?: unknown;
-  /** So do a clearcoat, anisotropy and a parallax relief (I4). */
+  /** So do a clearcoat, anisotropy and a parallax relief (I4)… */
   readonly clearcoat?: number;
   readonly anisotropy?: number;
   readonly parallaxDepth?: number;
+  /** …and refraction (I5). */
+  readonly refraction?: number;
+  readonly distortion?: number;
 }
 
 /**
@@ -313,7 +325,8 @@ export function resolvePbr(
     material.roughnessFactor !== undefined ||
     (emissiveFactor !== undefined && (emissiveFactor[0]! > 0 || emissiveFactor[1]! > 0 || emissiveFactor[2]! > 0)) ||
     material.graph !== undefined ||
-    materialHasLayers(material);
+    materialHasLayers(material) ||
+    materialRefracts(material);
   return {
     isPbr,
     metallic: material.metallicFactor ?? 1,
@@ -422,6 +435,10 @@ export interface InstanceUniform {
   readonly surface?: ResolvedSurface;
   /** This draw's clearcoat, anisotropy and relief (I4; see materialLayers.ts in @cartbox/editor), or omitted for none. */
   readonly layers?: ResolvedLayers;
+  /** How this draw bends what's behind it (I5; refraction.ts in @cartbox/editor), or null/omitted when it doesn't. */
+  readonly refraction?: ResolvedRefraction | null;
+  /** The camera's right and up and the frame's height, which a refraction's offset is measured by. */
+  readonly camera?: { readonly right: readonly [number, number, number]; readonly up: readonly [number, number, number]; readonly height: number } | null;
   /** Fog for PBR draws (distance, height, volumes, sun glow), or null/omitted for none. */
   readonly fog?: SceneFog | null;
   /** The eye in world space — height and volume fog trace the ray from it. */
@@ -653,6 +670,26 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_LAYER1 + 1] = layers.anisotropySin;
   target[base + OFFSET_LAYER1 + 2] = layers.relief ? 1 : 0;
   target[base + OFFSET_LAYER1 + 3] = 0;
+
+  const refraction = uniform.refraction ?? null;
+  target[base + OFFSET_REFRACT0] = refraction ? refraction.bend : 0;
+  target[base + OFFSET_REFRACT0 + 1] = refraction ? refraction.warp : 0;
+  target[base + OFFSET_REFRACT0 + 2] = refraction ? refraction.edge : 0;
+  target[base + OFFSET_REFRACT0 + 3] = refraction ? 1 : 0;
+  const camera = uniform.camera ?? null;
+  target[base + OFFSET_REFRACT1] = camera ? camera.right[0] : 0;
+  target[base + OFFSET_REFRACT1 + 1] = camera ? camera.right[1] : 0;
+  target[base + OFFSET_REFRACT1 + 2] = camera ? camera.right[2] : 0;
+  target[base + OFFSET_REFRACT1 + 3] = camera ? camera.height : 0;
+  target[base + OFFSET_REFRACT2] = camera ? camera.up[0] : 0;
+  target[base + OFFSET_REFRACT2 + 1] = camera ? camera.up[1] : 0;
+  target[base + OFFSET_REFRACT2 + 2] = camera ? camera.up[2] : 0;
+  target[base + OFFSET_REFRACT2 + 3] = 0;
+}
+
+/** The camera's right and up in world space (the view's first two rows) and the frame's height, for refraction (I5). */
+export function refractionCamera(view: Mat4, height: number): NonNullable<InstanceUniform["camera"]> {
+  return { right: [view[0]!, view[4]!, view[8]!], up: [view[1]!, view[5]!, view[9]!], height };
 }
 
 /** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2) + light-map uv(2) + blend weight(1). */

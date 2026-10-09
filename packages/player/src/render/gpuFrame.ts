@@ -5,9 +5,10 @@
  * warming up on the software rasteriser before the first one lands.
  */
 
-import { depthLinearTerms, type DecodedTexture, type Mat4, type MeshAsset, type MeshPrimitive, type MeshSceneInstance, type SurfaceEffect } from "@cartbox/editor";
+import { depthLinearTerms, effectActive, refracts, resolveRefraction, type DecodedTexture, type Mat4, type MeshAsset, type MeshPrimitive, type MeshSceneInstance, type SurfaceEffect } from "@cartbox/editor";
 
 import type { SceneDraw, SoftwareSceneRenderer } from "./sceneRenderer.js";
+import { resolvePbr } from "./scenePacking.js";
 
 /**
  * The largest job the software rasteriser takes on while the GPU pipeline
@@ -164,8 +165,20 @@ export interface DrawBatch<G> {
    * opaque batch, farthest first, without writing depth.
    */
   alpha: number;
+  /**
+   * The copies bend what's behind them (I5; refraction.ts): drawn after the
+   * opaque scene, farthest first, reading a copy of it — whatever their alpha.
+   */
+  refract: boolean;
   /** Index of the batch's first copy in the instance data (set by the renderer). */
   first: number;
+}
+
+/** Whether a batch refracts (I5): a PBR draw whose material or surface effect bends what's behind it. */
+export function batchRefracts(primitive: MeshPrimitive, textures: PrimitiveTextures, effect: SurfaceEffect | null): boolean {
+  const material = primitive.material;
+  if (!resolvePbr(material, textures.mr !== null, textures.occ !== null, textures.emis !== null).isPbr) return false;
+  return refracts(resolveRefraction(material, effectActive(effect) ? effect : null));
 }
 
 /**
@@ -200,13 +213,14 @@ export function batchInstances<G extends { indexCount: number }>(
       };
       const effect = instance.effect ?? null;
       const alpha = alphaCode(primitive.material.alphaMode);
-      if (alpha >= 2) {
+      const refract = batchRefracts(primitive, textures, effect);
+      if (alpha >= 2 || refract) {
         const c = primitiveCentre(primitive);
         const m = instance.model;
         const x = m[0]! * c[0] + m[4]! * c[1] + m[8]! * c[2] + m[12]! - eye[0];
         const y = m[1]! * c[0] + m[5]! * c[1] + m[9]! * c[2] + m[13]! - eye[1];
         const z = m[2]! * c[0] + m[6]! * c[1] + m[10]! * c[2] + m[14]! - eye[2];
-        seeThrough.push({ batch: { primitive, geometry, textures, models: [instance.model], effect, alpha, first: 0 }, distance: x * x + y * y + z * z });
+        seeThrough.push({ batch: { primitive, geometry, textures, models: [instance.model], effect, alpha, refract, first: 0 }, distance: x * x + y * y + z * z });
         instanceCount += 1;
         return;
       }
@@ -214,7 +228,7 @@ export function batchInstances<G extends { indexCount: number }>(
       if (!list) byPrimitive.set(primitive, (list = []));
       let batch = list.find((b) => b.effect === effect && sameTextures(b.textures, textures));
       if (!batch) {
-        batch = { primitive, geometry, textures, models: [], effect, alpha, first: 0 };
+        batch = { primitive, geometry, textures, models: [], effect, alpha, refract, first: 0 };
         list.push(batch);
         batches.push(batch);
       }

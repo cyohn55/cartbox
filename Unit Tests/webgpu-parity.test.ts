@@ -52,6 +52,7 @@ import { SoftwareSceneRenderer, WebgpuSceneRenderer, type SceneDraw } from "@car
 
 import { graphInstances } from "./helpers/graphScenes";
 import { LAYER_ENVIRONMENT, LAYER_LIGHTS, layerInstances } from "./helpers/layerScenes";
+import { REFRACTION_TIME, refractionInstances, straightInstances } from "./helpers/refractionScenes";
 import { localShadowRig } from "./helpers/localShadowScene";
 import { manyLights } from "./helpers/manyLights";
 import { probeRig } from "./helpers/probeScene";
@@ -468,6 +469,51 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
       expect(far, name).toBeLessThanOrEqual(drawn * 0.03);
       renderer.dispose();
     }
+  });
+
+  it("bends what's behind glass, heat haze, camo and a shield's edge like the software rasteriser (I5)", async () => {
+    const mat = (m: Record<string, unknown>) => {
+      const q = quad();
+      return { ...q, primitives: [{ ...q.primitives[0]!, material: { ...q.primitives[0]!.material, ...m } }] };
+    };
+    const frame = (antialias: boolean) => (): SceneDraw => ({ ...draw(), background: [20, 20, 30, 255], time: REFRACTION_TIME, antialias });
+    const gpuFrame = async (instances: MeshSceneInstance[], at: () => SceneDraw) => {
+      const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+      renderer.render(instances, at());
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        device.tick?.();
+      }
+      const out = at();
+      renderer.render(instances, out);
+      renderer.dispose();
+      return out.out;
+    };
+    const bentScene = refractionInstances(mat);
+    const gpu = await gpuFrame(bentScene, frame(false));
+    const software = frame(false)();
+    new SoftwareSceneRenderer().render(bentScene, software);
+    let drawn = 0;
+    let coverage = 0;
+    let far = 0;
+    for (let p = 0; p < W * H; p += 1) {
+      if (software.out[p * 4]! + software.out[p * 4 + 1]! + software.out[p * 4 + 2]! > 0) drawn += 1;
+      if ((gpu[p * 4 + 3] === 0) !== (software.out[p * 4 + 3] === 0)) coverage += 1;
+      let worst = 0;
+      for (let c = 0; c < 3; c += 1) worst = Math.max(worst, Math.abs(gpu[p * 4 + c]! - software.out[p * 4 + c]!));
+      if (worst > 8) far += 1;
+    }
+    expect(drawn).toBeGreaterThan(400);
+    expect(coverage).toBe(0);
+    // The warp's noise is float32 here and float64 on the CPU: an offset on a
+    // texel edge can round the other way, so a few pixels may differ.
+    expect(far).toBeLessThanOrEqual(drawn * 0.03);
+    // Anti-aliased, the opaque scene is resolved before it is read: the bend still shows.
+    const bent = await gpuFrame(bentScene, frame(true));
+    const straight = await gpuFrame(straightInstances(mat), frame(true));
+    let changed = 0;
+    for (let i = 0; i < bent.length; i += 4) if (Math.abs(bent[i]! - straight[i]!) + Math.abs(bent[i + 2]! - straight[i + 2]!) > 30) changed += 1;
+    expect(changed).toBeGreaterThan(30);
   });
 
   it("matches the software rasteriser on image-based lighting (within float tolerance)", async () => {

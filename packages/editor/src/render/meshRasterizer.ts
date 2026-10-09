@@ -34,6 +34,7 @@ type FrameFog = SceneFog & { readonly eye: readonly [number, number, number] };
 import { LIGHTMAP_RANGE } from "../model/lightmap";
 import { DEFAULT_DETAIL_SCALE, DEFAULT_DETAIL_STRENGTH, detailFade, emissiveAnimation } from "../model/materialEffects";
 import { compiledGraphOf, evaluateGraph, graphRegisters, type CompiledGraph, type GraphContext } from "../model/materialGraph";
+import { EFFECT_DISTORT_POWER, materialRefracts, refractionOffset, refracts, resolveRefraction, type ResolvedRefraction } from "./refraction";
 import { CLEARCOAT_F0, anisotropicD, curvatureOf, materialHasLayers, parallaxRate, parallaxUv, resolveLayers, uvGradients, type ResolvedLayers } from "../model/materialLayers";
 import { type MeshAsset, computeSmoothNormals, meshBounds } from "../model/MeshAsset";
 
@@ -453,7 +454,8 @@ function buildPbrFrag(
     (emissiveFactor !== undefined && (emissiveFactor[0] > 0 || emissiveFactor[1] > 0 || emissiveFactor[2] > 0)) ||
     material.graph !== undefined ||
     relief !== null ||
-    materialHasLayers(material);
+    materialHasLayers(material) ||
+    materialRefracts(material);
   if (!isPbr) return null;
   const { offset, gain } = emissiveAnimation(material, time);
   const e = emissiveFactor ?? [0, 0, 0];
@@ -462,6 +464,7 @@ function buildPbrFrag(
   let rimPower = rim?.power ?? 1;
   // A surface effect's rim adds to the material's, at the effect's power.
   const fx = effectActive(effect) ? effect : null;
+  const refraction = resolveRefraction(material, fx);
   if (fx?.rim && (fx.rim[0] > 0 || fx.rim[1] > 0 || fx.rim[2] > 0)) {
     rimColor = [(rimColor?.[0] ?? 0) + fx.rim[0], (rimColor?.[1] ?? 0) + fx.rim[1], (rimColor?.[2] ?? 0) + fx.rim[2]];
     rimPower = fx.rimPower ?? EFFECT_RIM_POWER;
@@ -492,6 +495,8 @@ function buildPbrFrag(
     graph: compiledGraphOf(material),
     relief,
     layers: resolveLayers(material, relief !== null),
+    refraction,
+    refracting: refracts(refraction),
   };
 }
 
@@ -805,10 +810,11 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
     null,
     deferred,
   );
-  // See-through triangles last, farthest first (EP6).
+  // See-through (and refracting) triangles last, farthest first (EP6, I5).
   deferred.sort((a, b) => a.viewDepth - b.viewDepth);
+  const behind = keepBehind(deferred, out, depth, view);
   for (const t of deferred) {
-    rasterizeTriangle(t.a, t.b, t.c, size, size, out, depth, t.texture, t.normalTexture, t.tangent, t.materialTexture, t.pbr, t.base, light, viewDir, ambient, options.environment ?? null, null, options.tonemap ?? null, null, null, DEFAULT_RASTER_STYLE, null, t.alpha, null, null, t.grads);
+    rasterizeTriangle(t.a, t.b, t.c, size, size, out, depth, t.texture, t.normalTexture, t.tangent, t.materialTexture, t.pbr, t.base, light, viewDir, ambient, options.environment ?? null, null, options.tonemap ?? null, null, null, DEFAULT_RASTER_STYLE, null, t.alpha, null, null, t.grads, behind);
   }
 }
 
@@ -1054,6 +1060,8 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
   if (ordered.length > 0) {
     // Ascending view z = farthest first, since the view looks down -z.
     ordered.sort((a, b) => a.viewDepth - b.viewDepth);
+    // Refraction (I5) reads the opaque scene, so only with a depth buffer (which draws it first).
+    const behind = style.zBuffer ? keepBehind(ordered, out, depth, view, options.background === null) : null;
     for (const triangle of ordered) {
       rasterizeTriangle(
         triangle.a,
@@ -1083,6 +1091,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
         linear,
         localShadows,
         triangle.grads,
+        behind,
       );
     }
   }
@@ -1499,6 +1508,49 @@ interface PbrFrag {
   readonly relief: DecodedTexture | null;
   /** The clearcoat, anisotropy and parallax depth (I4). */
   readonly layers: ResolvedLayers;
+  /** How it bends what's behind it (I5), and whether it does at all — then it draws after the opaque scene. */
+  readonly refraction: ResolvedRefraction;
+  readonly refracting: boolean;
+}
+
+/**
+ * The opaque scene kept for refraction (I5): the frame and depth as they stood
+ * when the see-through triangles began, and the camera's right and up (to see
+ * a normal from the camera) — or null when nothing in the frame refracts.
+ */
+interface Behind {
+  readonly out: Uint8ClampedArray;
+  readonly depth: Float32Array;
+  /**
+   * The frame was drawn over what was already there (`background: null`): a
+   * pixel this renderer didn't draw holds what lies behind everything it does
+   * draw (the scene under a held weapon, the cart's own frame), so it bends too.
+   */
+  readonly over: boolean;
+  readonly right: readonly [number, number, number];
+  readonly up: readonly [number, number, number];
+}
+
+/** The opaque scene, kept if any of the waiting triangles refracts. */
+function keepBehind(waiting: readonly PendingTriangle[], out: Uint8ClampedArray, depth: Float32Array, view: Mat4, over = false): Behind | null {
+  if (!waiting.some((t) => t.pbr?.refracting)) return null;
+  return { out: out.slice(), depth: depth.slice(), over, right: [view[0]!, view[4]!, view[8]!], up: [view[1]!, view[5]!, view[9]!] };
+}
+
+/**
+ * The pixel a refracting fragment at `(x, y)`, depth `z`, sees (I5): its own
+ * pushed by the offset when the opaque scene drew it behind the fragment,
+ * else its own when the scene drew that, else none (-1). Mirrors
+ * `refractedPixel` in both GPU shaders.
+ */
+function refractedPixel(behind: Behind, width: number, height: number, x: number, y: number, dx: number, dy: number, z: number): number {
+  const sx = Math.min(width - 1, Math.max(0, Math.floor(x + 0.5 + dx)));
+  const sy = Math.min(height - 1, Math.max(0, Math.floor(y + 0.5 + dy)));
+  const si = sy * width + sx;
+  const there = behind.depth[si]!;
+  if ((behind.over || there !== Infinity) && there >= z) return si;
+  const di = y * width + x;
+  return behind.over || behind.depth[di] !== Infinity ? di : -1;
 }
 
 /** The per-primitive extras a draw may carry beyond the core maps. */
@@ -1914,7 +1966,7 @@ function drawMesh(
     extras,
     lightMvp,
     (triangle) => {
-      if (defer && triangle.alpha.mode >= 2) {
+      if (defer && (triangle.alpha.mode >= 2 || triangle.pbr?.refracting)) {
         defer.push(triangle);
         return;
       }
@@ -1983,7 +2035,17 @@ function rasterizeTriangle(
   localShadows: LocalShadows | null = null,
   /** The triangle's world UV gradients (I4), or null. */
   grads: TriangleGrads | null = null,
+  /** The opaque scene, for refraction (I5); null when nothing refracts. */
+  behind: Behind | null = null,
 ): void {
+  const refraction = behind && pbr?.refracting ? pbr.refraction : null;
+  // Where a refracting fragment looks (I5), by its geometric normal facing the camera.
+  const seen = (x: number, y: number, z: number, nx: number, ny: number, nz: number, wx: number, wy: number, wz: number): number => {
+    const r = refraction!;
+    const b = behind!;
+    const [dx, dy] = refractionOffset(r, nx * b.right[0] + ny * b.right[1] + nz * b.right[2], nx * b.up[0] + ny * b.up[1] + nz * b.up[2], wx, wy, wz, pbr!.time, height);
+    return refractedPixel(b, width, height, x, y, dx, dy, z);
+  };
   const soft = linear && alpha.mode >= 2 && alpha.soft > 0 ? alpha.soft : 0;
   // Parallax occlusion (I4): the relief's height, read where the view ray meets it.
   const relief = pbr?.relief ?? null;
@@ -2227,8 +2289,22 @@ function rasterizeTriangle(
       if (al < 1) continue; // fully transparent texels are never drawn
       // A cut-out surface drops what's below its threshold.
       if (alpha.mode === 1 && al < alpha.cutoff * 255) continue;
-      // Active Camo: screen-door transparency, the dropped pixels leaving the scene behind.
-      if (pbr && pbr.camo > 0 && camoThreshold(x, y, pbr.time) < pbr.camo) continue;
+      // Active Camo: screen-door transparency, the dropped pixels leaving the
+      // scene behind — bent, when the frame keeps it (I5).
+      if (pbr && pbr.camo > 0 && camoThreshold(x, y, pbr.time) < pbr.camo) {
+        if (refraction) {
+          const gl = Math.hypot(gnx, gny, gnz) || 1;
+          const gs = gnx * viewDir[0] + gny * viewDir[1] + gnz * viewDir[2] < 0 ? -gl : gl;
+          const si = seen(x, y, zNdc, gnx / gs, gny / gs, gnz / gs, pw0 * a.wx + pw1 * b.wx + pw2 * c.wx, pw0 * a.wy + pw1 * b.wy + pw2 * c.wy, pw0 * a.wz + pw1 * b.wz + pw2 * c.wz);
+          if (si >= 0) {
+            out[di * 4] = behind!.out[si * 4]!;
+            out[di * 4 + 1] = behind!.out[si * 4 + 1]!;
+            out[di * 4 + 2] = behind!.out[si * 4 + 2]!;
+            out[di * 4 + 3] = 255;
+          }
+        }
+        continue;
+      }
 
       // A blended or added pixel mixes with what's there, and never hides what's behind it.
       const see = alpha.mode >= 2;
@@ -2605,7 +2681,26 @@ function rasterizeTriangle(
           const wz = pw0 * a.wz + pw1 * b.wz + pw2 * c.wz;
           applyFog(fog, out, di * 4, eyeDepth, fog.eye, [wx, wy, wz], light);
         }
-        if (see) finishAlpha(out, di * 4, alpha.mode, al, dr, dg, db, da);
+        // Refraction (I5): what's behind is the opaque scene, bent — laid
+        // under a blended surface, added to by an added one, and let through
+        // at a shield's silhouette.
+        const si = refraction
+          ? seen(x, y, zNdc, Cx, Cy, Cz, pw0 * a.wx + pw1 * b.wx + pw2 * c.wx, pw0 * a.wy + pw1 * b.wy + pw2 * c.wy, pw0 * a.wz + pw1 * b.wz + pw2 * c.wz)
+          : -1;
+        if (si >= 0) {
+          const br = behind!.out[si * 4]!;
+          const bg = behind!.out[si * 4 + 1]!;
+          const bb = behind!.out[si * 4 + 2]!;
+          if (see) finishAlpha(out, di * 4, alpha.mode, al, br, bg, bb, 255);
+          else {
+            const ndvG = Math.max(0, Cx * viewDir[0] + Cy * viewDir[1] + Cz * viewDir[2]);
+            const t = refraction!.edge * Math.pow(1 - ndvG, EFFECT_DISTORT_POWER);
+            out[di * 4] = out[di * 4]! + (br - out[di * 4]!) * t;
+            out[di * 4 + 1] = out[di * 4 + 1]! + (bg - out[di * 4 + 1]!) * t;
+            out[di * 4 + 2] = out[di * 4 + 2]! + (bb - out[di * 4 + 2]!) * t;
+            out[di * 4 + 3] = 255;
+          }
+        } else if (see) finishAlpha(out, di * 4, alpha.mode, al, dr, dg, db, da);
         else out[di * 4 + 3] = 255;
       } else {
         // --- Fantasy path (unchanged) ---

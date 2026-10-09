@@ -40,6 +40,12 @@ import {
   PARALLAX_MIN_NDV,
   PARALLAX_STEPS,
   resolveLayers,
+  DISTORTION_FREQUENCY,
+  DISTORTION_SPEED,
+  EFFECT_DISTORT_POWER,
+  REFRACTION_SCALE,
+  effectActive,
+  resolveRefraction,
   LIGHTMAP_RANGE,
   MAX_REFLECTION_PROBES,
   PROBE_FADE,
@@ -67,7 +73,6 @@ import {
   orderLights,
   graphNoiseSource,
   graphShaderCode,
-  graphUsesNoise,
   multiplyMat4,
   type CompiledGraph,
   type DecodedTexture,
@@ -103,6 +108,7 @@ import {
   viewDirection,
   writeInstanceTransform,
   writeInstanceUniform,
+  refractionCamera,
 } from "./scenePacking.js";
 
 /** Instances per uniform block (and so per draw call): 64 × 240 bytes fits WebGL2's guaranteed 16 KB. */
@@ -132,6 +138,23 @@ const UNIT_CLUSTER_INDEX = 13;
 const UNIT_LOCAL_SHADOWS = 14;
 /** The light-probe grid (EP9), a 3D texture. */
 const UNIT_PROBE_GRID = 15;
+
+/**
+ * Packs the opaque scene for refraction (I5; see packScene): R the depth, G the
+ * colour's 8-bit RGB as one integer (exact in a float), or -1 where nothing was drawn.
+ */
+const SCENE_PACK_GLSL = /* glsl */ `#version 300 es
+precision highp float;
+uniform sampler2D uColour;
+uniform highp sampler2D uDepth;
+out vec4 outPacked;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec4 c = texelFetch(uColour, p, 0);
+  ivec3 b = ivec3(c.rgb * 255.0 + 0.5);
+  outPacked = vec4(texelFetch(uDepth, p, 0).r, c.a > 0.5 ? float(b.r * 65536 + b.g * 256 + b.b) : -1.0, 0.0, 0.0);
+}
+`;
 
 const BLOCK_UNIFORMS = 0;
 const BLOCK_INSTANCES = 1;
@@ -171,6 +194,9 @@ layout(std140) uniform Uniforms {
   vec4 effect1; // rgb = surface effect bands, w = time
   vec4 layer0;  // x = clearcoat, y = its roughness, z = anisotropy, w = parallax depth (I4)
   vec4 layer1;  // xy = anisotropy rotation (cos, sin), z = 1 when the relief rides in occTex's G and B
+  vec4 refract0; // x = bend, y = warp, z = silhouette distortion, w = 1 when the draw refracts (I5)
+  vec4 refract1; // xyz = camera right (world), w = frame height (px)
+  vec4 refract2; // xyz = camera up (world)
 } u;
 `;
 
@@ -241,7 +267,8 @@ function graphSites(graph: CompiledGraph | null): { fns: string; base: string; p
     out.emissive !== undefined ? `gEmis = max(g${out.emissive}, vec3(0.0));` : "",
   ].filter(Boolean);
   return {
-    fns: graphUsesNoise(graph) ? graphNoiseSource("glsl") : "",
+    // The noise functions are always in the shader (refraction's warp uses them, I5).
+    fns: "",
     base: `  // The material graph (EP7).
   float gMetal = -1.0;
   float gRough = -1.0;
@@ -702,7 +729,49 @@ vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, 
   }
   return lit;
 }
-${g.fns}
+${graphNoiseSource("glsl")}
+// --- Refraction (HALO_INFINITE_STYLE_ROADMAP.md I5; refraction.ts) ---
+// The offset in pixels at a fragment with geometric normal N (facing the
+// viewer) at world point P — refractionOffset, term for term.
+vec2 refractOffset(vec3 N, vec3 P) {
+  vec2 w = vec2(0.0);
+  float warp = u.refract0.y + u.refract0.z;
+  if (warp > 0.0) {
+    float f = ${DISTORTION_FREQUENCY.toFixed(1)};
+    float qy = P.y * f - u.effect1.w * ${DISTORTION_SPEED.toFixed(4)};
+    w = vec2(2.0 * gNoise1(vec3(P.x * f, qy, P.z * f)) - 1.0, 2.0 * gNoise1(vec3(P.x * f + 17.0, qy + 31.0, P.z * f + 47.0)) - 1.0) * warp;
+  }
+  float k = ${REFRACTION_SCALE.toFixed(4)} * u.refract1.w;
+  return vec2(u.refract0.x * dot(N, u.refract1.xyz) + w.x, -u.refract0.x * dot(N, u.refract2.xyz) + w.y) * k;
+}
+// The opaque scene's colour, packed beside its depth (see packScene): G holds
+// the 8-bit RGB as one exact integer, or -1 where the scene drew nothing.
+vec3 unpackColour(float v) {
+  int i = int(v + 0.5);
+  return vec3(float(i >> 16), float((i >> 8) & 255), float(i & 255)) / 255.0;
+}
+// What a refracting fragment sees (rgb, a = 1 when it sees anything) — refractedPixel.
+vec4 behindColour(vec2 frag, float z, vec2 off) {
+  ivec2 dims = textureSize(sceneDepth, 0);
+  ivec2 s = ivec2(clamp(floor(frag + off), vec2(0.0), vec2(dims) - vec2(1.0)));
+  vec4 c = texelFetch(sceneDepth, s, 0);
+  if (c.g >= 0.0 && c.r >= z) { return vec4(unpackColour(c.g), 1.0); }
+  vec4 o = texelFetch(sceneDepth, ivec2(floor(frag)), 0);
+  if (o.g >= 0.0) { return vec4(unpackColour(o.g), 1.0); }
+  return vec4(0.0);
+}
+vec3 facingNormal(vec3 n) {
+  vec3 g = normalize(n);
+  return dot(g, u.view.xyz) < 0.0 ? -g : g;
+}
+// A refracting surface over what it bends (finishRefracted in the WGSL).
+vec4 finishRefracted(vec3 rgb, float a, vec3 bg, vec3 N) {
+  vec3 c = clamp(rgb, vec3(0.0), vec3(1.0));
+  if (u.pbr.w > 2.5) { return vec4(c * a + bg, 1.0); }
+  if (u.pbr.w > 1.5) { return vec4(c * a + bg * (1.0 - a), 1.0); }
+  float t = u.refract0.z * pow(1.0 - max(0.0, dot(N, u.view.xyz)), ${EFFECT_DISTORT_POWER.toFixed(4)});
+  return vec4(mix(c, bg, t), 1.0);
+}
 void main() {
 ${reflect ? "  outReflect = vec4(0.0);\n  outEnv = vec4(0.0);\n" : ""}  // The surface's screen derivatives, for the UV gradients parallax and
   // anisotropy need (I4) — taken here, in uniform control flow.
@@ -741,7 +810,13 @@ ${g.base}
 
   if (u.pbr.z > 0.5) {
     // Active Camo (H11): screen-door transparency, as the rasteriser drops pixels.
-    if (u.effect0.w > 0.0 && camoThreshold(gl_FragCoord.xy, u.effect1.w) < u.effect0.w) { discard; }
+    // …its dropped pixels showing the scene behind, bent (I5); kept for the end
+    // so the samples below stay in uniform control flow.
+    vec4 camoSeen = vec4(0.0);
+    if (u.effect0.w > 0.0 && camoThreshold(gl_FragCoord.xy, u.effect1.w) < u.effect0.w) {
+      if (u.refract0.w > 0.5) { camoSeen = behindColour(gl_FragCoord.xy, gl_FragCoord.z, refractOffset(facingNormal(vNormal), vWorldPos)); }
+      if (camoSeen.a < 0.5) { discard; }
+    }
     vec3 N = normalize(vNormal);
     if (dot(N, u.view.xyz) < 0.0) { N = -N; }
     float metallic = u.pbr.x;
@@ -894,6 +969,14 @@ ${glslDisplay("without")}
     outReflect = vec4(clamp(mix(weight, contribution / max(seen, vec3(1e-3)), vec3(greaterThan(seen, vec3(0.02)))), vec3(0.0), vec3(1.0)), mix(rough, u.layer0.y, u.layer0.x));
     outEnv = vec4(contribution, 1.0);` : ""}
     outColor = finishAlpha(shaded, colour.a);
+    // Refraction (I5): what's behind is the opaque scene, bent.
+    if (camoSeen.a > 0.5) {
+      outColor = vec4(camoSeen.rgb, 1.0);
+    } else if (u.refract0.w > 0.5) {
+      vec3 rn = facingNormal(vNormal);
+      vec4 b = behindColour(gl_FragCoord.xy, gl_FragCoord.z, refractOffset(rn, vWorldPos));
+      if (b.a > 0.5) { outColor = finishRefracted(shaded, colour.a, b.rgb, rn); }
+    }
 ${reflect ? "    if (u.pbr.w > 1.5) { outReflect = vec4(0.0, 0.0, 0.0, outColor.a); outEnv = outReflect; }\n" : ""}    return;
   }
 
@@ -1188,6 +1271,9 @@ export class WebglSceneRenderer implements SceneRenderer {
     const light = resolveLight(draw.lightDirection, draw.ambient);
     const viewDir = viewDirection(draw.view);
     const eye = cameraPositionFromView(draw.view);
+    const camera = refractionCamera(draw.view, this.height);
+    // Refraction (I5) needs the opaque scene packed into a float texture; without float targets it draws unbent.
+    const refractOk = batches.some((batch) => batch.refract) && this.ensureSceneCopy();
     const shadow = draw.shadow ?? null;
     this.uploadShadow(shadow);
     const near = shadow?.near ?? null;
@@ -1248,6 +1334,9 @@ export class WebglSceneRenderer implements SceneRenderer {
           textured: batch.textures.blend !== null,
         }),
         layers: resolveLayers(batch.primitive.material, batch.textures.relief !== null),
+        // Refraction (I5), where the context can pack the opaque scene for it to read.
+        refraction: batch.refract && refractOk ? resolveRefraction(batch.primitive.material, effectActive(batch.effect) ? batch.effect : null) : null,
+        camera,
       });
     });
     for (const chunk of chunks) {
@@ -1298,7 +1387,8 @@ export class WebglSceneRenderer implements SceneRenderer {
     gl.bindSampler(UNIT_BLEND, this.sampler);
     this.bindTexture(UNIT_SCENE_DEPTH, this.blankFloat);
     gl.bindSampler(UNIT_SCENE_DEPTH, null);
-    // Soft edges read the opaque depth: copied once, as the see-through batches begin.
+    // Soft edges read the opaque depth, and refraction (I5) its colour too:
+    // copied once, as the see-through batches begin.
     const soft = batches.some((batch) => softEdges(batch.primitive.material, batch.alpha, draw.projection) !== undefined);
     let depthCopied = false;
 
@@ -1333,11 +1423,19 @@ export class WebglSceneRenderer implements SceneRenderer {
         gl.useProgram(program);
         this.frameUniforms(program);
       }
-      if (soft && !depthCopied && batch.alpha >= 2) {
+      if ((soft || refractOk) && !depthCopied && (batch.alpha >= 2 || batch.refract)) {
         this.copySceneDepth();
+        if (refractOk) {
+          this.packScene();
+          gl.useProgram(program);
+          bound = null;
+          boundBatch = -1;
+          blendState = -1;
+        }
         depthCopied = true;
       }
-      setBlend(batch.alpha);
+      // A refracting batch covers what it bends (premultiplied, alpha 1), or blends or adds as usual where it bends nothing.
+      setBlend(batch.refract ? 2 : batch.alpha);
       if (chunk.batch !== boundBatch) {
         gl.bindBufferRange(gl.UNIFORM_BUFFER, BLOCK_UNIFORMS, this.uniformBuffer, chunk.batch * UNIFORM_STRIDE, UNIFORM_BYTES_USED);
         if (bound !== batch.textures) {
@@ -1837,6 +1935,73 @@ export class WebglSceneRenderer implements SceneRenderer {
     gl.depthMask(true);
   }
 
+  /**
+   * The opaque scene for refraction (I5): its colour blitted into an RGBA8
+   * texture, then packed with the depth copy into one RGBA32F texture — R the
+   * depth (so soft edges read it as before), G the 8-bit RGB as one exact
+   * integer, or -1 where the scene drew nothing. One texture, because the scene
+   * shader already uses all sixteen units WebGL2 guarantees, and the soft edges'
+   * unit is the one free in the see-through pass. Made on first use; false
+   * without float render targets (EXT_color_buffer_float).
+   */
+  private sceneCopy: { colour: { texture: any; framebuffer: any }; packed: { texture: any; framebuffer: any }; program: any } | null | false = null;
+
+  private ensureSceneCopy(): boolean {
+    if (this.sceneCopy === null) {
+      const gl = this.gl;
+      try {
+        if (!gl.getExtension("EXT_color_buffer_float")) throw new Error("no float targets");
+        const target = (internal: number, format: number, type: number) => {
+          const texture = createTexture(gl, this.width, this.height, internal, format, type, null);
+          const framebuffer = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+          if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error("scene copy incomplete");
+          return { texture, framebuffer };
+        };
+        const colour = target(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE);
+        const packed = target(gl.RGBA32F, gl.RGBA, gl.FLOAT);
+        const program = gl.createProgram();
+        gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, TEMPORAL_VERTEX_GLSL));
+        gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, SCENE_PACK_GLSL));
+        gl.linkProgram(program);
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(`WebGL2 program failed to link: ${gl.getProgramInfoLog(program)}`);
+        gl.useProgram(program);
+        gl.uniform1i(gl.getUniformLocation(program, "uColour"), UNIT_BASE);
+        gl.uniform1i(gl.getUniformLocation(program, "uDepth"), UNIT_SCENE_DEPTH);
+        this.sceneCopy = { colour, packed, program };
+      } catch {
+        this.sceneCopy = false;
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.target ?? this.framebuffer);
+    }
+    return this.sceneCopy !== false;
+  }
+
+  /**
+   * Pack the opaque scene for refraction (after {@link copySceneDepth}, whose
+   * depth it reads on the soft edges' unit) and bind the result there, leaving
+   * the frame's framebuffer bound. The caller puts its own program back.
+   */
+  private packScene(): void {
+    const gl = this.gl;
+    const copy = this.sceneCopy as Exclude<WebglSceneRenderer["sceneCopy"], null | false>;
+    // From a multisampled framebuffer, the blit resolves the colour as it copies.
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.target ?? this.framebuffer);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, copy.colour.framebuffer);
+    gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, this.width, this.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, copy.packed.framebuffer);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.bindVertexArray(null);
+    gl.useProgram(copy.program);
+    this.bindTexture(UNIT_BASE, copy.colour.texture);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.enable(gl.DEPTH_TEST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.target ?? this.framebuffer);
+    this.bindTexture(UNIT_SCENE_DEPTH, copy.packed.texture);
+  }
+
   /** Copy this frame's depth into {@link sceneDepth} and bind it, leaving the frame's framebuffer bound. */
   private copySceneDepth(): void {
     const gl = this.gl;
@@ -2069,6 +2234,13 @@ export class WebglSceneRenderer implements SceneRenderer {
       if (this.sceneDepth) {
         gl.deleteTexture(this.sceneDepth.texture);
         gl.deleteFramebuffer(this.sceneDepth.framebuffer);
+      }
+      if (this.sceneCopy) {
+        for (const t of [this.sceneCopy.colour, this.sceneCopy.packed]) {
+          gl.deleteTexture(t.texture);
+          gl.deleteFramebuffer(t.framebuffer);
+        }
+        gl.deleteProgram(this.sceneCopy.program);
       }
       this.timer?.destroy();
       for (const rb of this.attachments) gl.deleteRenderbuffer(rb);

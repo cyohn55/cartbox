@@ -1989,6 +1989,8 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
   const poly = newStreams();
   const accent = newStreams();
   const glow = newStreams();
+  // The shimmer round a plasma blade (I5): wider than the blade, faint, and bending the view behind it.
+  const haze = newStreams();
   const glove = newStreams();
   const sleeve = newStreams();
   const dark = newStreams();
@@ -2115,6 +2117,8 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
     for (const side of [-1, 1]) {
       limb(glow, [side * 0.04, 0.03, 0.03], [side * 0.03, 0.2, 0.34], 0.012, 0.018, 0.35);
       limb(glow, [side * 0.03, 0.2, 0.34], [side * 0.005, 0.3, 0.62], 0.018, 0.001, 0.35);
+      limb(haze, [side * 0.04, 0.03, 0.03], [side * 0.03, 0.2, 0.34], 0.04, 0.055, 0.5);
+      limb(haze, [side * 0.03, 0.2, 0.34], [side * 0.005, 0.3, 0.62], 0.055, 0.012, 0.5);
     }
     rightHand(0, -0.05, 0.0);
   }
@@ -2137,6 +2141,22 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
         metallicFactor: 0,
         roughnessFactor: 0.4,
         emissiveFactor: id === "sword" ? [0.9, 2.0, 2.6] : [0.5, 1.6, 1.9],
+      }),
+    );
+  }
+  if (haze.indices.length > 0) {
+    // The blade's heat (I5): a faint cyan added over the view round the blade,
+    // which it bends and sets shimmering.
+    primitives.push(
+      toPrimitive(haze, {
+        name: "blade-haze",
+        baseColorFactor: [0.05, 0.12, 0.16, 1],
+        baseColorImage: null,
+        metallicFactor: 0,
+        roughnessFactor: 1,
+        alphaMode: "additive",
+        refraction: 0.25,
+        distortion: 0.2,
       }),
     );
   }

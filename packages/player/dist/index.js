@@ -11663,6 +11663,12 @@ import {
   PARALLAX_MIN_NDV,
   PARALLAX_STEPS,
   resolveLayers,
+  DISTORTION_FREQUENCY,
+  DISTORTION_SPEED,
+  EFFECT_DISTORT_POWER,
+  REFRACTION_SCALE,
+  effectActive as effectActive3,
+  resolveRefraction as resolveRefraction2,
   LIGHTMAP_RANGE,
   MAX_REFLECTION_PROBES as MAX_REFLECTION_PROBES2,
   PROBE_FADE,
@@ -11688,12 +11694,365 @@ import {
   orderLights,
   graphNoiseSource,
   graphShaderCode,
-  graphUsesNoise,
   multiplyMat4 as multiplyMat45
 } from "@cartbox/editor";
 
 // src/render/gpuFrame.ts
-import { depthLinearTerms } from "@cartbox/editor";
+import { depthLinearTerms, effectActive as effectActive2, refracts, resolveRefraction } from "@cartbox/editor";
+
+// src/render/scenePacking.ts
+import {
+  DEFAULT_DETAIL_SCALE,
+  DEFAULT_DETAIL_STRENGTH,
+  EFFECT_RIM_POWER,
+  MAX_FOG_VOLUMES,
+  MAX_REFLECTION_PROBES,
+  NO_LAYERS,
+  effectActive,
+  emissiveAnimation,
+  materialHasLayers,
+  materialRefracts,
+  spotCone,
+  fogIsVolumetric
+} from "@cartbox/editor";
+var UNIFORM_STRIDE = 1024;
+var UNIFORM_BYTES_USED = 848;
+var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
+var LIGHT_FLOATS = 16;
+var PROBE_FLOATS = 16;
+function packProbes(set) {
+  const probes = set ? set.probes.slice(0, MAX_REFLECTION_PROBES) : [];
+  const out = new Float32Array(Math.max(1, probes.length) * PROBE_FLOATS);
+  probes.forEach((p, i) => {
+    const o = i * PROBE_FLOATS;
+    out.set(p.min, o);
+    out.set(p.max, o + 4);
+    out.set(p.position, o + 8);
+    out.set(p.average, o + 12);
+  });
+  return out;
+}
+function packLights(lights) {
+  const out = new Float32Array(Math.max(1, lights.length) * LIGHT_FLOATS);
+  lights.forEach((light, i) => {
+    const base = i * LIGHT_FLOATS;
+    const placed = light.kind !== "directional";
+    const v = placed ? light.position ?? [0, 0, 0] : light.direction ?? [0, 1, 0];
+    out[base] = v[0];
+    out[base + 1] = v[1];
+    out[base + 2] = v[2];
+    out[base + 3] = light.kind === "spot" ? 2 : placed ? 1 : 0;
+    out[base + 4] = light.color[0];
+    out[base + 5] = light.color[1];
+    out[base + 6] = light.color[2];
+    out[base + 7] = light.intensity;
+    out[base + 8] = light.range ?? 0;
+    out[base + 11] = light.shadowTile ?? -1;
+    if (light.kind === "spot") {
+      const [cosOuter, cosInner] = spotCone(light);
+      out[base + 9] = cosOuter;
+      out[base + 10] = cosInner;
+      const axis = light.direction ?? [0, -1, 0];
+      const len = Math.hypot(axis[0], axis[1], axis[2]) || 1;
+      out[base + 12] = axis[0] / len;
+      out[base + 13] = axis[1] / len;
+      out[base + 14] = axis[2] / len;
+    }
+  });
+  return out;
+}
+var OFFSET_MVP = 0;
+var OFFSET_NRM = 16;
+var OFFSET_BASE = 28;
+var OFFSET_LIGHT = 32;
+var OFFSET_VIEW = 36;
+var OFFSET_PBR = 40;
+var OFFSET_EMISSIVE = 44;
+var OFFSET_TEXFLAGS = 48;
+var OFFSET_ENV_SKY = 52;
+var OFFSET_ENV_HORIZON = 56;
+var OFFSET_ENV_GROUND = 60;
+var OFFSET_LIGHT_MVP = 64;
+var OFFSET_SHADOW = 80;
+var OFFSET_ENV_META = 84;
+var OFFSET_TONEMAP = 88;
+var OFFSET_SSAO = 92;
+var OFFSET_MODEL = 96;
+var OFFSET_FOG = 112;
+var OFFSET_FOG_PARAMS = 116;
+var OFFSET_SHADOW2 = 120;
+var OFFSET_SURFACE0 = 124;
+var OFFSET_SURFACE1 = 128;
+var OFFSET_SURFACE2 = 132;
+var OFFSET_SURFACE3 = 136;
+var OFFSET_FOG_CAM = 140;
+var OFFSET_FOG_HEIGHT = 144;
+var OFFSET_FOG_GLOW = 148;
+var OFFSET_FOG_VOL = 152;
+var OFFSET_EFFECT0 = 184;
+var OFFSET_EFFECT1 = 188;
+var OFFSET_LAYER0 = 192;
+var OFFSET_LAYER1 = 196;
+var OFFSET_REFRACT0 = 200;
+var OFFSET_REFRACT1 = 204;
+var OFFSET_REFRACT2 = 208;
+var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
+var DEFAULT_AMBIENT2 = 0.35;
+function resolveLight(direction, ambient) {
+  const [lx, ly, lz] = direction ?? DEFAULT_LIGHT;
+  const length = Math.hypot(lx, ly, lz) || 1;
+  return {
+    direction: [lx / length, ly / length, lz / length],
+    ambient: ambient ?? DEFAULT_AMBIENT2
+  };
+}
+function alignBytesPerRow(width) {
+  return Math.ceil(width * 4 / 256) * 256;
+}
+function normalBasis3x3(model) {
+  return [model[0], model[1], model[2], model[4], model[5], model[6], model[8], model[9], model[10]];
+}
+function resolvePbr(material, hasMr, hasOcc, hasEmis) {
+  const emissiveFactor = material.emissiveFactor;
+  const isPbr = hasMr || hasOcc || hasEmis || material.metallicFactor !== void 0 || material.roughnessFactor !== void 0 || emissiveFactor !== void 0 && (emissiveFactor[0] > 0 || emissiveFactor[1] > 0 || emissiveFactor[2] > 0) || material.graph !== void 0 || materialHasLayers(material) || materialRefracts(material);
+  return {
+    isPbr,
+    metallic: material.metallicFactor ?? 1,
+    roughness: material.roughnessFactor ?? 1,
+    emissive: emissiveFactor ?? [0, 0, 0]
+  };
+}
+function viewDirection(view) {
+  const x = view[2];
+  const y = view[6];
+  const z = view[10];
+  const length = Math.hypot(x, y, z);
+  return length < 1e-8 ? [0, 0, 1] : [x / length, y / length, z / length];
+}
+var NO_SURFACE = { detailScale: DEFAULT_DETAIL_SCALE, detailStrength: 0, reflect: 1, reflectMask: false, emisOffset: [0, 0], emisGain: 1, rim: [0, 0, 0], rimPower: 1, blend: null };
+function resolveSurface(material, time, hasDetail, hasMr, blend = { weights: false, textured: false }) {
+  const { offset, gain } = emissiveAnimation(material, time);
+  const rim = material.rim && material.rim.strength > 0 ? material.rim : null;
+  return {
+    detailScale: material.detailScale ?? DEFAULT_DETAIL_SCALE,
+    detailStrength: hasDetail ? material.detailStrength ?? DEFAULT_DETAIL_STRENGTH : 0,
+    reflect: material.reflectivity ?? 1,
+    reflectMask: material.reflectionMask === true && hasMr,
+    emisOffset: offset,
+    emisGain: gain,
+    rim: rim ? [rim.color[0] * rim.strength, rim.color[1] * rim.strength, rim.color[2] * rim.strength] : [0, 0, 0],
+    rimPower: rim?.power ?? 1,
+    blend: blend.weights ? { color: material.blendColor ?? [1, 1, 1], roughness: material.blendRoughness ?? null, textured: blend.textured } : null
+  };
+}
+var INSTANCE_FLOATS = 60;
+function writeInstanceTransform(target, index, transform3, base = index * INSTANCE_FLOATS) {
+  for (let i = 0; i < 16; i += 1) {
+    target[base + i] = transform3.mvp[i];
+    target[base + 16 + i] = transform3.lightMvp ? transform3.lightMvp[i] : 0;
+    target[base + 32 + i] = transform3.model[i];
+  }
+  for (let column = 0; column < 3; column += 1) {
+    for (let row = 0; row < 3; row += 1) target[base + 48 + column * 4 + row] = transform3.normalBasis[column * 3 + row];
+    target[base + 48 + column * 4 + 3] = 0;
+  }
+}
+function writeInstanceUniform(target, index, uniform) {
+  const base = index * UNIFORM_FLOATS;
+  for (let i = 0; i < 16; i += 1) target[base + OFFSET_MVP + i] = uniform.mvp[i];
+  for (let column = 0; column < 3; column += 1) {
+    for (let row = 0; row < 3; row += 1) {
+      target[base + OFFSET_NRM + column * 4 + row] = uniform.normalBasis[column * 3 + row];
+    }
+  }
+  target[base + OFFSET_BASE] = uniform.baseColor[0];
+  target[base + OFFSET_BASE + 1] = uniform.baseColor[1];
+  target[base + OFFSET_BASE + 2] = uniform.baseColor[2];
+  target[base + OFFSET_BASE + 3] = uniform.baseColor[3];
+  target[base + OFFSET_LIGHT] = uniform.light.direction[0];
+  target[base + OFFSET_LIGHT + 1] = uniform.light.direction[1];
+  target[base + OFFSET_LIGHT + 2] = uniform.light.direction[2];
+  target[base + OFFSET_LIGHT + 3] = uniform.light.ambient;
+  target[base + OFFSET_VIEW] = uniform.viewDir[0];
+  target[base + OFFSET_VIEW + 1] = uniform.viewDir[1];
+  target[base + OFFSET_VIEW + 2] = uniform.viewDir[2];
+  target[base + OFFSET_VIEW + 3] = uniform.alpha?.cutoff ?? 0;
+  target[base + OFFSET_PBR] = uniform.pbr.metallic;
+  target[base + OFFSET_PBR + 1] = uniform.pbr.roughness;
+  target[base + OFFSET_PBR + 2] = uniform.pbr.isPbr ? 1 : 0;
+  target[base + OFFSET_PBR + 3] = uniform.alpha?.mode ?? 0;
+  const surface = uniform.surface ?? NO_SURFACE;
+  target[base + OFFSET_EMISSIVE] = uniform.pbr.emissive[0] * surface.emisGain;
+  target[base + OFFSET_EMISSIVE + 1] = uniform.pbr.emissive[1] * surface.emisGain;
+  target[base + OFFSET_EMISSIVE + 2] = uniform.pbr.emissive[2] * surface.emisGain;
+  target[base + OFFSET_EMISSIVE + 3] = 0;
+  target[base + OFFSET_TEXFLAGS] = uniform.hasTexture ? 1 : 0;
+  target[base + OFFSET_TEXFLAGS + 1] = uniform.hasMrMap ? 1 : 0;
+  target[base + OFFSET_TEXFLAGS + 2] = uniform.hasOcclusionMap ? 1 : 0;
+  target[base + OFFSET_TEXFLAGS + 3] = uniform.hasEmissiveMap ? 1 : 0;
+  const env = uniform.environment;
+  target[base + OFFSET_ENV_SKY] = env ? env.sky[0] : 0;
+  target[base + OFFSET_ENV_SKY + 1] = env ? env.sky[1] : 0;
+  target[base + OFFSET_ENV_SKY + 2] = env ? env.sky[2] : 0;
+  target[base + OFFSET_ENV_SKY + 3] = env ? 1 : 0;
+  target[base + OFFSET_ENV_HORIZON] = env ? env.horizon[0] : 0;
+  target[base + OFFSET_ENV_HORIZON + 1] = env ? env.horizon[1] : 0;
+  target[base + OFFSET_ENV_HORIZON + 2] = env ? env.horizon[2] : 0;
+  target[base + OFFSET_ENV_HORIZON + 3] = env ? env.intensity : 0;
+  target[base + OFFSET_ENV_GROUND] = env ? env.ground[0] : 0;
+  target[base + OFFSET_ENV_GROUND + 1] = env ? env.ground[1] : 0;
+  target[base + OFFSET_ENV_GROUND + 2] = env ? env.ground[2] : 0;
+  target[base + OFFSET_ENV_GROUND + 3] = 0;
+  const lightMvp = uniform.lightMvp;
+  for (let i = 0; i < 16; i += 1) target[base + OFFSET_LIGHT_MVP + i] = lightMvp ? lightMvp[i] : 0;
+  const shadow = uniform.shadow;
+  target[base + OFFSET_SHADOW] = shadow ? 1 : 0;
+  target[base + OFFSET_SHADOW + 1] = shadow ? shadow.size : 0;
+  target[base + OFFSET_SHADOW + 2] = shadow ? shadow.bias : 0;
+  target[base + OFFSET_SHADOW + 3] = shadow ? shadow.strength : 0;
+  const envMap = env && env.map ? env : null;
+  const avg = envMap?.average ?? null;
+  target[base + OFFSET_ENV_META] = avg ? avg[0] : 0;
+  target[base + OFFSET_ENV_META + 1] = avg ? avg[1] : 0;
+  target[base + OFFSET_ENV_META + 2] = avg ? avg[2] : 0;
+  target[base + OFFSET_ENV_META + 3] = envMap && avg ? 1 : 0;
+  const tonemap = uniform.tonemap;
+  target[base + OFFSET_TONEMAP] = tonemap ? 1 : 0;
+  target[base + OFFSET_TONEMAP + 1] = tonemap ? tonemap.exposure : 0;
+  target[base + OFFSET_TONEMAP + 2] = uniform.soft?.distance ?? 0;
+  target[base + OFFSET_TONEMAP + 3] = 0;
+  target[base + OFFSET_SSAO] = uniform.hasSsao ? 1 : 0;
+  target[base + OFFSET_SSAO + 1] = uniform.lightCount;
+  target[base + OFFSET_SSAO + 2] = uniform.hasLightmap ? 1 : 0;
+  target[base + OFFSET_SSAO + 3] = env?.probes ? Math.min(env.probes.probes.length, MAX_REFLECTION_PROBES) : 0;
+  const model = uniform.model;
+  for (let i = 0; i < 16; i += 1) target[base + OFFSET_MODEL + i] = model ? model[i] : i % 5 === 0 ? 1 : 0;
+  const fog = uniform.fog ?? null;
+  target[base + OFFSET_FOG] = fog ? fog.color[0] : 0;
+  target[base + OFFSET_FOG + 1] = fog ? fog.color[1] : 0;
+  target[base + OFFSET_FOG + 2] = fog ? fog.color[2] : 0;
+  target[base + OFFSET_FOG + 3] = fog ? fog.density : 0;
+  target[base + OFFSET_FOG_PARAMS] = fog ? 1 : 0;
+  target[base + OFFSET_FOG_PARAMS + 1] = fog ? fog.start : 0;
+  target[base + OFFSET_FOG_PARAMS + 2] = fog ? fog.max : 0;
+  const volumetric = fog !== null && fogIsVolumetric(fog);
+  target[base + OFFSET_FOG_PARAMS + 3] = volumetric ? 1 : 0;
+  const eye = uniform.eye ?? [0, 0, 0];
+  const layered = volumetric ? fog : null;
+  const volumes = (layered?.volumes ?? []).slice(0, MAX_FOG_VOLUMES);
+  const height = layered?.height ?? null;
+  const glow = layered?.glow ?? null;
+  target[base + OFFSET_FOG_CAM] = eye[0];
+  target[base + OFFSET_FOG_CAM + 1] = eye[1];
+  target[base + OFFSET_FOG_CAM + 2] = eye[2];
+  target[base + OFFSET_FOG_CAM + 3] = volumes.length;
+  target[base + OFFSET_FOG_HEIGHT] = height ? height.density : 0;
+  target[base + OFFSET_FOG_HEIGHT + 1] = height ? height.base : 0;
+  target[base + OFFSET_FOG_HEIGHT + 2] = height ? height.falloff : 0;
+  target[base + OFFSET_FOG_HEIGHT + 3] = glow ? glow.strength : 0;
+  target[base + OFFSET_FOG_GLOW] = glow ? glow.color[0] : 0;
+  target[base + OFFSET_FOG_GLOW + 1] = glow ? glow.color[1] : 0;
+  target[base + OFFSET_FOG_GLOW + 2] = glow ? glow.color[2] : 0;
+  target[base + OFFSET_FOG_GLOW + 3] = 0;
+  for (let i = 0; i < MAX_FOG_VOLUMES; i += 1) {
+    const v = volumes[i];
+    const o = base + OFFSET_FOG_VOL + i * 8;
+    target[o] = v ? v.min[0] : 0;
+    target[o + 1] = v ? v.min[1] : 0;
+    target[o + 2] = v ? v.min[2] : 0;
+    target[o + 3] = v ? v.density : 0;
+    target[o + 4] = v ? v.max[0] : 0;
+    target[o + 5] = v ? v.max[1] : 0;
+    target[o + 6] = v ? v.max[2] : 0;
+    target[o + 7] = v ? v.falloff : 0;
+  }
+  target[base + OFFSET_SHADOW2] = shadow ? shadow.slopeBias ?? 0 : 0;
+  target[base + OFFSET_SHADOW2 + 1] = shadow && shadow.pcf ? 1 : 0;
+  target[base + OFFSET_SHADOW2 + 2] = uniform.soft?.linear[0] ?? 0;
+  target[base + OFFSET_SHADOW2 + 3] = uniform.soft?.linear[1] ?? 0;
+  target[base + OFFSET_SURFACE0] = surface.detailScale;
+  target[base + OFFSET_SURFACE0 + 1] = surface.detailStrength;
+  target[base + OFFSET_SURFACE0 + 2] = surface.reflect;
+  target[base + OFFSET_SURFACE0 + 3] = surface.reflectMask ? 1 : 0;
+  target[base + OFFSET_SURFACE1] = surface.emisOffset[0];
+  target[base + OFFSET_SURFACE1 + 1] = surface.emisOffset[1];
+  target[base + OFFSET_SURFACE1 + 2] = surface.blend ? 1 : 0;
+  target[base + OFFSET_SURFACE1 + 3] = surface.blend?.textured ? 1 : 0;
+  const effect = effectActive(uniform.effect) ? uniform.effect : null;
+  const fxRim = effect?.rim && (effect.rim[0] > 0 || effect.rim[1] > 0 || effect.rim[2] > 0) ? effect.rim : null;
+  target[base + OFFSET_SURFACE2] = surface.rim[0] + (fxRim ? fxRim[0] : 0);
+  target[base + OFFSET_SURFACE2 + 1] = surface.rim[1] + (fxRim ? fxRim[1] : 0);
+  target[base + OFFSET_SURFACE2 + 2] = surface.rim[2] + (fxRim ? fxRim[2] : 0);
+  target[base + OFFSET_SURFACE2 + 3] = fxRim ? effect.rimPower ?? EFFECT_RIM_POWER : surface.rimPower;
+  target[base + OFFSET_SURFACE3] = surface.blend ? surface.blend.color[0] : 0;
+  target[base + OFFSET_SURFACE3 + 1] = surface.blend ? surface.blend.color[1] : 0;
+  target[base + OFFSET_SURFACE3 + 2] = surface.blend ? surface.blend.color[2] : 0;
+  target[base + OFFSET_SURFACE3 + 3] = surface.blend && surface.blend.roughness !== null ? surface.blend.roughness : -1;
+  target[base + OFFSET_EFFECT0] = effect?.glow ? effect.glow[0] : 0;
+  target[base + OFFSET_EFFECT0 + 1] = effect?.glow ? effect.glow[1] : 0;
+  target[base + OFFSET_EFFECT0 + 2] = effect?.glow ? effect.glow[2] : 0;
+  target[base + OFFSET_EFFECT0 + 3] = effect ? Math.max(0, Math.min(1, effect.camo ?? 0)) : 0;
+  target[base + OFFSET_EFFECT1] = effect?.bands ? effect.bands[0] : 0;
+  target[base + OFFSET_EFFECT1 + 1] = effect?.bands ? effect.bands[1] : 0;
+  target[base + OFFSET_EFFECT1 + 2] = effect?.bands ? effect.bands[2] : 0;
+  target[base + OFFSET_EFFECT1 + 3] = uniform.time ?? 0;
+  const layers = uniform.layers ?? NO_LAYERS;
+  target[base + OFFSET_LAYER0] = layers.clearcoat;
+  target[base + OFFSET_LAYER0 + 1] = layers.clearcoatRoughness;
+  target[base + OFFSET_LAYER0 + 2] = layers.anisotropy;
+  target[base + OFFSET_LAYER0 + 3] = layers.parallaxDepth;
+  target[base + OFFSET_LAYER1] = layers.anisotropyCos;
+  target[base + OFFSET_LAYER1 + 1] = layers.anisotropySin;
+  target[base + OFFSET_LAYER1 + 2] = layers.relief ? 1 : 0;
+  target[base + OFFSET_LAYER1 + 3] = 0;
+  const refraction = uniform.refraction ?? null;
+  target[base + OFFSET_REFRACT0] = refraction ? refraction.bend : 0;
+  target[base + OFFSET_REFRACT0 + 1] = refraction ? refraction.warp : 0;
+  target[base + OFFSET_REFRACT0 + 2] = refraction ? refraction.edge : 0;
+  target[base + OFFSET_REFRACT0 + 3] = refraction ? 1 : 0;
+  const camera = uniform.camera ?? null;
+  target[base + OFFSET_REFRACT1] = camera ? camera.right[0] : 0;
+  target[base + OFFSET_REFRACT1 + 1] = camera ? camera.right[1] : 0;
+  target[base + OFFSET_REFRACT1 + 2] = camera ? camera.right[2] : 0;
+  target[base + OFFSET_REFRACT1 + 3] = camera ? camera.height : 0;
+  target[base + OFFSET_REFRACT2] = camera ? camera.up[0] : 0;
+  target[base + OFFSET_REFRACT2 + 1] = camera ? camera.up[1] : 0;
+  target[base + OFFSET_REFRACT2 + 2] = camera ? camera.up[2] : 0;
+  target[base + OFFSET_REFRACT2 + 3] = 0;
+}
+function refractionCamera(view, height) {
+  return { right: [view[0], view[4], view[8]], up: [view[1], view[5], view[9]], height };
+}
+var VERTEX_FLOATS = 11;
+function interleaveVertices(positions, normals, uvs, uvs2 = null, blend = null) {
+  const count = Math.floor(positions.length / 3);
+  const out = new Float32Array(count * VERTEX_FLOATS);
+  for (let i = 0; i < count; i += 1) {
+    const to = i * VERTEX_FLOATS;
+    out[to] = positions[i * 3] ?? 0;
+    out[to + 1] = positions[i * 3 + 1] ?? 0;
+    out[to + 2] = positions[i * 3 + 2] ?? 0;
+    out[to + 3] = normals[i * 3] ?? 0;
+    out[to + 4] = normals[i * 3 + 1] ?? 0;
+    out[to + 5] = normals[i * 3 + 2] ?? 0;
+    out[to + 6] = uvs ? uvs[i * 2] ?? 0 : 0;
+    out[to + 7] = uvs ? uvs[i * 2 + 1] ?? 0 : 0;
+    out[to + 8] = uvs2 ? uvs2[i * 2] ?? 0 : 0;
+    out[to + 9] = uvs2 ? uvs2[i * 2 + 1] ?? 0 : 0;
+    out[to + 10] = blend ? blend[i] ?? 0 : 0;
+  }
+  return out;
+}
+function unpadRows(padded, width, height, bytesPerRow, reuse = null) {
+  const rowBytes = width * 4;
+  const out = reuse && reuse.length === rowBytes * height ? reuse : new Uint8Array(rowBytes * height);
+  for (let y = 0; y < height; y += 1) {
+    out.set(padded.subarray(y * bytesPerRow, y * bytesPerRow + rowBytes), y * rowBytes);
+  }
+  return out;
+}
+
+// src/render/gpuFrame.ts
 var SOFTWARE_WARMUP_TRIANGLES = 2e4;
 var SOFTWARE_WARMUP_PIXELS = 640 * 360;
 var triangleCounts = /* @__PURE__ */ new WeakMap();
@@ -11775,6 +12134,11 @@ function occlusionWithRelief(occ, relief) {
   byOcc.set(key, out);
   return out;
 }
+function batchRefracts(primitive, textures, effect) {
+  const material = primitive.material;
+  if (!resolvePbr(material, textures.mr !== null, textures.occ !== null, textures.emis !== null).isPbr) return false;
+  return refracts(resolveRefraction(material, effectActive2(effect) ? effect : null));
+}
 function batchInstances(instances, geometryOf, eye = [0, 0, 0]) {
   const batches = [];
   const seeThrough = [];
@@ -11797,13 +12161,14 @@ function batchInstances(instances, geometryOf, eye = [0, 0, 0]) {
       };
       const effect = instance.effect ?? null;
       const alpha = alphaCode(primitive.material.alphaMode);
-      if (alpha >= 2) {
+      const refract = batchRefracts(primitive, textures, effect);
+      if (alpha >= 2 || refract) {
         const c = primitiveCentre(primitive);
         const m = instance.model;
         const x = m[0] * c[0] + m[4] * c[1] + m[8] * c[2] + m[12] - eye[0];
         const y = m[1] * c[0] + m[5] * c[1] + m[9] * c[2] + m[13] - eye[1];
         const z = m[2] * c[0] + m[6] * c[1] + m[10] * c[2] + m[14] - eye[2];
-        seeThrough.push({ batch: { primitive, geometry, textures, models: [instance.model], effect, alpha, first: 0 }, distance: x * x + y * y + z * z });
+        seeThrough.push({ batch: { primitive, geometry, textures, models: [instance.model], effect, alpha, refract, first: 0 }, distance: x * x + y * y + z * z });
         instanceCount += 1;
         return;
       }
@@ -11811,7 +12176,7 @@ function batchInstances(instances, geometryOf, eye = [0, 0, 0]) {
       if (!list) byPrimitive.set(primitive, list = []);
       let batch = list.find((b) => b.effect === effect && sameTextures(b.textures, textures));
       if (!batch) {
-        batch = { primitive, geometry, textures, models: [], effect, alpha, first: 0 };
+        batch = { primitive, geometry, textures, models: [], effect, alpha, refract, first: 0 };
         list.push(batch);
         batches.push(batch);
       }
@@ -12372,337 +12737,6 @@ var WebglPassTimer = class _WebglPassTimer {
   }
 };
 
-// src/render/scenePacking.ts
-import {
-  DEFAULT_DETAIL_SCALE,
-  DEFAULT_DETAIL_STRENGTH,
-  EFFECT_RIM_POWER,
-  MAX_FOG_VOLUMES,
-  MAX_REFLECTION_PROBES,
-  NO_LAYERS,
-  effectActive,
-  emissiveAnimation,
-  materialHasLayers,
-  spotCone,
-  fogIsVolumetric
-} from "@cartbox/editor";
-var UNIFORM_STRIDE = 1024;
-var UNIFORM_BYTES_USED = 800;
-var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
-var LIGHT_FLOATS = 16;
-var PROBE_FLOATS = 16;
-function packProbes(set) {
-  const probes = set ? set.probes.slice(0, MAX_REFLECTION_PROBES) : [];
-  const out = new Float32Array(Math.max(1, probes.length) * PROBE_FLOATS);
-  probes.forEach((p, i) => {
-    const o = i * PROBE_FLOATS;
-    out.set(p.min, o);
-    out.set(p.max, o + 4);
-    out.set(p.position, o + 8);
-    out.set(p.average, o + 12);
-  });
-  return out;
-}
-function packLights(lights) {
-  const out = new Float32Array(Math.max(1, lights.length) * LIGHT_FLOATS);
-  lights.forEach((light, i) => {
-    const base = i * LIGHT_FLOATS;
-    const placed = light.kind !== "directional";
-    const v = placed ? light.position ?? [0, 0, 0] : light.direction ?? [0, 1, 0];
-    out[base] = v[0];
-    out[base + 1] = v[1];
-    out[base + 2] = v[2];
-    out[base + 3] = light.kind === "spot" ? 2 : placed ? 1 : 0;
-    out[base + 4] = light.color[0];
-    out[base + 5] = light.color[1];
-    out[base + 6] = light.color[2];
-    out[base + 7] = light.intensity;
-    out[base + 8] = light.range ?? 0;
-    out[base + 11] = light.shadowTile ?? -1;
-    if (light.kind === "spot") {
-      const [cosOuter, cosInner] = spotCone(light);
-      out[base + 9] = cosOuter;
-      out[base + 10] = cosInner;
-      const axis = light.direction ?? [0, -1, 0];
-      const len = Math.hypot(axis[0], axis[1], axis[2]) || 1;
-      out[base + 12] = axis[0] / len;
-      out[base + 13] = axis[1] / len;
-      out[base + 14] = axis[2] / len;
-    }
-  });
-  return out;
-}
-var OFFSET_MVP = 0;
-var OFFSET_NRM = 16;
-var OFFSET_BASE = 28;
-var OFFSET_LIGHT = 32;
-var OFFSET_VIEW = 36;
-var OFFSET_PBR = 40;
-var OFFSET_EMISSIVE = 44;
-var OFFSET_TEXFLAGS = 48;
-var OFFSET_ENV_SKY = 52;
-var OFFSET_ENV_HORIZON = 56;
-var OFFSET_ENV_GROUND = 60;
-var OFFSET_LIGHT_MVP = 64;
-var OFFSET_SHADOW = 80;
-var OFFSET_ENV_META = 84;
-var OFFSET_TONEMAP = 88;
-var OFFSET_SSAO = 92;
-var OFFSET_MODEL = 96;
-var OFFSET_FOG = 112;
-var OFFSET_FOG_PARAMS = 116;
-var OFFSET_SHADOW2 = 120;
-var OFFSET_SURFACE0 = 124;
-var OFFSET_SURFACE1 = 128;
-var OFFSET_SURFACE2 = 132;
-var OFFSET_SURFACE3 = 136;
-var OFFSET_FOG_CAM = 140;
-var OFFSET_FOG_HEIGHT = 144;
-var OFFSET_FOG_GLOW = 148;
-var OFFSET_FOG_VOL = 152;
-var OFFSET_EFFECT0 = 184;
-var OFFSET_EFFECT1 = 188;
-var OFFSET_LAYER0 = 192;
-var OFFSET_LAYER1 = 196;
-var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
-var DEFAULT_AMBIENT2 = 0.35;
-function resolveLight(direction, ambient) {
-  const [lx, ly, lz] = direction ?? DEFAULT_LIGHT;
-  const length = Math.hypot(lx, ly, lz) || 1;
-  return {
-    direction: [lx / length, ly / length, lz / length],
-    ambient: ambient ?? DEFAULT_AMBIENT2
-  };
-}
-function alignBytesPerRow(width) {
-  return Math.ceil(width * 4 / 256) * 256;
-}
-function normalBasis3x3(model) {
-  return [model[0], model[1], model[2], model[4], model[5], model[6], model[8], model[9], model[10]];
-}
-function resolvePbr(material, hasMr, hasOcc, hasEmis) {
-  const emissiveFactor = material.emissiveFactor;
-  const isPbr = hasMr || hasOcc || hasEmis || material.metallicFactor !== void 0 || material.roughnessFactor !== void 0 || emissiveFactor !== void 0 && (emissiveFactor[0] > 0 || emissiveFactor[1] > 0 || emissiveFactor[2] > 0) || material.graph !== void 0 || materialHasLayers(material);
-  return {
-    isPbr,
-    metallic: material.metallicFactor ?? 1,
-    roughness: material.roughnessFactor ?? 1,
-    emissive: emissiveFactor ?? [0, 0, 0]
-  };
-}
-function viewDirection(view) {
-  const x = view[2];
-  const y = view[6];
-  const z = view[10];
-  const length = Math.hypot(x, y, z);
-  return length < 1e-8 ? [0, 0, 1] : [x / length, y / length, z / length];
-}
-var NO_SURFACE = { detailScale: DEFAULT_DETAIL_SCALE, detailStrength: 0, reflect: 1, reflectMask: false, emisOffset: [0, 0], emisGain: 1, rim: [0, 0, 0], rimPower: 1, blend: null };
-function resolveSurface(material, time, hasDetail, hasMr, blend = { weights: false, textured: false }) {
-  const { offset, gain } = emissiveAnimation(material, time);
-  const rim = material.rim && material.rim.strength > 0 ? material.rim : null;
-  return {
-    detailScale: material.detailScale ?? DEFAULT_DETAIL_SCALE,
-    detailStrength: hasDetail ? material.detailStrength ?? DEFAULT_DETAIL_STRENGTH : 0,
-    reflect: material.reflectivity ?? 1,
-    reflectMask: material.reflectionMask === true && hasMr,
-    emisOffset: offset,
-    emisGain: gain,
-    rim: rim ? [rim.color[0] * rim.strength, rim.color[1] * rim.strength, rim.color[2] * rim.strength] : [0, 0, 0],
-    rimPower: rim?.power ?? 1,
-    blend: blend.weights ? { color: material.blendColor ?? [1, 1, 1], roughness: material.blendRoughness ?? null, textured: blend.textured } : null
-  };
-}
-var INSTANCE_FLOATS = 60;
-function writeInstanceTransform(target, index, transform3, base = index * INSTANCE_FLOATS) {
-  for (let i = 0; i < 16; i += 1) {
-    target[base + i] = transform3.mvp[i];
-    target[base + 16 + i] = transform3.lightMvp ? transform3.lightMvp[i] : 0;
-    target[base + 32 + i] = transform3.model[i];
-  }
-  for (let column = 0; column < 3; column += 1) {
-    for (let row = 0; row < 3; row += 1) target[base + 48 + column * 4 + row] = transform3.normalBasis[column * 3 + row];
-    target[base + 48 + column * 4 + 3] = 0;
-  }
-}
-function writeInstanceUniform(target, index, uniform) {
-  const base = index * UNIFORM_FLOATS;
-  for (let i = 0; i < 16; i += 1) target[base + OFFSET_MVP + i] = uniform.mvp[i];
-  for (let column = 0; column < 3; column += 1) {
-    for (let row = 0; row < 3; row += 1) {
-      target[base + OFFSET_NRM + column * 4 + row] = uniform.normalBasis[column * 3 + row];
-    }
-  }
-  target[base + OFFSET_BASE] = uniform.baseColor[0];
-  target[base + OFFSET_BASE + 1] = uniform.baseColor[1];
-  target[base + OFFSET_BASE + 2] = uniform.baseColor[2];
-  target[base + OFFSET_BASE + 3] = uniform.baseColor[3];
-  target[base + OFFSET_LIGHT] = uniform.light.direction[0];
-  target[base + OFFSET_LIGHT + 1] = uniform.light.direction[1];
-  target[base + OFFSET_LIGHT + 2] = uniform.light.direction[2];
-  target[base + OFFSET_LIGHT + 3] = uniform.light.ambient;
-  target[base + OFFSET_VIEW] = uniform.viewDir[0];
-  target[base + OFFSET_VIEW + 1] = uniform.viewDir[1];
-  target[base + OFFSET_VIEW + 2] = uniform.viewDir[2];
-  target[base + OFFSET_VIEW + 3] = uniform.alpha?.cutoff ?? 0;
-  target[base + OFFSET_PBR] = uniform.pbr.metallic;
-  target[base + OFFSET_PBR + 1] = uniform.pbr.roughness;
-  target[base + OFFSET_PBR + 2] = uniform.pbr.isPbr ? 1 : 0;
-  target[base + OFFSET_PBR + 3] = uniform.alpha?.mode ?? 0;
-  const surface = uniform.surface ?? NO_SURFACE;
-  target[base + OFFSET_EMISSIVE] = uniform.pbr.emissive[0] * surface.emisGain;
-  target[base + OFFSET_EMISSIVE + 1] = uniform.pbr.emissive[1] * surface.emisGain;
-  target[base + OFFSET_EMISSIVE + 2] = uniform.pbr.emissive[2] * surface.emisGain;
-  target[base + OFFSET_EMISSIVE + 3] = 0;
-  target[base + OFFSET_TEXFLAGS] = uniform.hasTexture ? 1 : 0;
-  target[base + OFFSET_TEXFLAGS + 1] = uniform.hasMrMap ? 1 : 0;
-  target[base + OFFSET_TEXFLAGS + 2] = uniform.hasOcclusionMap ? 1 : 0;
-  target[base + OFFSET_TEXFLAGS + 3] = uniform.hasEmissiveMap ? 1 : 0;
-  const env = uniform.environment;
-  target[base + OFFSET_ENV_SKY] = env ? env.sky[0] : 0;
-  target[base + OFFSET_ENV_SKY + 1] = env ? env.sky[1] : 0;
-  target[base + OFFSET_ENV_SKY + 2] = env ? env.sky[2] : 0;
-  target[base + OFFSET_ENV_SKY + 3] = env ? 1 : 0;
-  target[base + OFFSET_ENV_HORIZON] = env ? env.horizon[0] : 0;
-  target[base + OFFSET_ENV_HORIZON + 1] = env ? env.horizon[1] : 0;
-  target[base + OFFSET_ENV_HORIZON + 2] = env ? env.horizon[2] : 0;
-  target[base + OFFSET_ENV_HORIZON + 3] = env ? env.intensity : 0;
-  target[base + OFFSET_ENV_GROUND] = env ? env.ground[0] : 0;
-  target[base + OFFSET_ENV_GROUND + 1] = env ? env.ground[1] : 0;
-  target[base + OFFSET_ENV_GROUND + 2] = env ? env.ground[2] : 0;
-  target[base + OFFSET_ENV_GROUND + 3] = 0;
-  const lightMvp = uniform.lightMvp;
-  for (let i = 0; i < 16; i += 1) target[base + OFFSET_LIGHT_MVP + i] = lightMvp ? lightMvp[i] : 0;
-  const shadow = uniform.shadow;
-  target[base + OFFSET_SHADOW] = shadow ? 1 : 0;
-  target[base + OFFSET_SHADOW + 1] = shadow ? shadow.size : 0;
-  target[base + OFFSET_SHADOW + 2] = shadow ? shadow.bias : 0;
-  target[base + OFFSET_SHADOW + 3] = shadow ? shadow.strength : 0;
-  const envMap = env && env.map ? env : null;
-  const avg = envMap?.average ?? null;
-  target[base + OFFSET_ENV_META] = avg ? avg[0] : 0;
-  target[base + OFFSET_ENV_META + 1] = avg ? avg[1] : 0;
-  target[base + OFFSET_ENV_META + 2] = avg ? avg[2] : 0;
-  target[base + OFFSET_ENV_META + 3] = envMap && avg ? 1 : 0;
-  const tonemap = uniform.tonemap;
-  target[base + OFFSET_TONEMAP] = tonemap ? 1 : 0;
-  target[base + OFFSET_TONEMAP + 1] = tonemap ? tonemap.exposure : 0;
-  target[base + OFFSET_TONEMAP + 2] = uniform.soft?.distance ?? 0;
-  target[base + OFFSET_TONEMAP + 3] = 0;
-  target[base + OFFSET_SSAO] = uniform.hasSsao ? 1 : 0;
-  target[base + OFFSET_SSAO + 1] = uniform.lightCount;
-  target[base + OFFSET_SSAO + 2] = uniform.hasLightmap ? 1 : 0;
-  target[base + OFFSET_SSAO + 3] = env?.probes ? Math.min(env.probes.probes.length, MAX_REFLECTION_PROBES) : 0;
-  const model = uniform.model;
-  for (let i = 0; i < 16; i += 1) target[base + OFFSET_MODEL + i] = model ? model[i] : i % 5 === 0 ? 1 : 0;
-  const fog = uniform.fog ?? null;
-  target[base + OFFSET_FOG] = fog ? fog.color[0] : 0;
-  target[base + OFFSET_FOG + 1] = fog ? fog.color[1] : 0;
-  target[base + OFFSET_FOG + 2] = fog ? fog.color[2] : 0;
-  target[base + OFFSET_FOG + 3] = fog ? fog.density : 0;
-  target[base + OFFSET_FOG_PARAMS] = fog ? 1 : 0;
-  target[base + OFFSET_FOG_PARAMS + 1] = fog ? fog.start : 0;
-  target[base + OFFSET_FOG_PARAMS + 2] = fog ? fog.max : 0;
-  const volumetric = fog !== null && fogIsVolumetric(fog);
-  target[base + OFFSET_FOG_PARAMS + 3] = volumetric ? 1 : 0;
-  const eye = uniform.eye ?? [0, 0, 0];
-  const layered = volumetric ? fog : null;
-  const volumes = (layered?.volumes ?? []).slice(0, MAX_FOG_VOLUMES);
-  const height = layered?.height ?? null;
-  const glow = layered?.glow ?? null;
-  target[base + OFFSET_FOG_CAM] = eye[0];
-  target[base + OFFSET_FOG_CAM + 1] = eye[1];
-  target[base + OFFSET_FOG_CAM + 2] = eye[2];
-  target[base + OFFSET_FOG_CAM + 3] = volumes.length;
-  target[base + OFFSET_FOG_HEIGHT] = height ? height.density : 0;
-  target[base + OFFSET_FOG_HEIGHT + 1] = height ? height.base : 0;
-  target[base + OFFSET_FOG_HEIGHT + 2] = height ? height.falloff : 0;
-  target[base + OFFSET_FOG_HEIGHT + 3] = glow ? glow.strength : 0;
-  target[base + OFFSET_FOG_GLOW] = glow ? glow.color[0] : 0;
-  target[base + OFFSET_FOG_GLOW + 1] = glow ? glow.color[1] : 0;
-  target[base + OFFSET_FOG_GLOW + 2] = glow ? glow.color[2] : 0;
-  target[base + OFFSET_FOG_GLOW + 3] = 0;
-  for (let i = 0; i < MAX_FOG_VOLUMES; i += 1) {
-    const v = volumes[i];
-    const o = base + OFFSET_FOG_VOL + i * 8;
-    target[o] = v ? v.min[0] : 0;
-    target[o + 1] = v ? v.min[1] : 0;
-    target[o + 2] = v ? v.min[2] : 0;
-    target[o + 3] = v ? v.density : 0;
-    target[o + 4] = v ? v.max[0] : 0;
-    target[o + 5] = v ? v.max[1] : 0;
-    target[o + 6] = v ? v.max[2] : 0;
-    target[o + 7] = v ? v.falloff : 0;
-  }
-  target[base + OFFSET_SHADOW2] = shadow ? shadow.slopeBias ?? 0 : 0;
-  target[base + OFFSET_SHADOW2 + 1] = shadow && shadow.pcf ? 1 : 0;
-  target[base + OFFSET_SHADOW2 + 2] = uniform.soft?.linear[0] ?? 0;
-  target[base + OFFSET_SHADOW2 + 3] = uniform.soft?.linear[1] ?? 0;
-  target[base + OFFSET_SURFACE0] = surface.detailScale;
-  target[base + OFFSET_SURFACE0 + 1] = surface.detailStrength;
-  target[base + OFFSET_SURFACE0 + 2] = surface.reflect;
-  target[base + OFFSET_SURFACE0 + 3] = surface.reflectMask ? 1 : 0;
-  target[base + OFFSET_SURFACE1] = surface.emisOffset[0];
-  target[base + OFFSET_SURFACE1 + 1] = surface.emisOffset[1];
-  target[base + OFFSET_SURFACE1 + 2] = surface.blend ? 1 : 0;
-  target[base + OFFSET_SURFACE1 + 3] = surface.blend?.textured ? 1 : 0;
-  const effect = effectActive(uniform.effect) ? uniform.effect : null;
-  const fxRim = effect?.rim && (effect.rim[0] > 0 || effect.rim[1] > 0 || effect.rim[2] > 0) ? effect.rim : null;
-  target[base + OFFSET_SURFACE2] = surface.rim[0] + (fxRim ? fxRim[0] : 0);
-  target[base + OFFSET_SURFACE2 + 1] = surface.rim[1] + (fxRim ? fxRim[1] : 0);
-  target[base + OFFSET_SURFACE2 + 2] = surface.rim[2] + (fxRim ? fxRim[2] : 0);
-  target[base + OFFSET_SURFACE2 + 3] = fxRim ? effect.rimPower ?? EFFECT_RIM_POWER : surface.rimPower;
-  target[base + OFFSET_SURFACE3] = surface.blend ? surface.blend.color[0] : 0;
-  target[base + OFFSET_SURFACE3 + 1] = surface.blend ? surface.blend.color[1] : 0;
-  target[base + OFFSET_SURFACE3 + 2] = surface.blend ? surface.blend.color[2] : 0;
-  target[base + OFFSET_SURFACE3 + 3] = surface.blend && surface.blend.roughness !== null ? surface.blend.roughness : -1;
-  target[base + OFFSET_EFFECT0] = effect?.glow ? effect.glow[0] : 0;
-  target[base + OFFSET_EFFECT0 + 1] = effect?.glow ? effect.glow[1] : 0;
-  target[base + OFFSET_EFFECT0 + 2] = effect?.glow ? effect.glow[2] : 0;
-  target[base + OFFSET_EFFECT0 + 3] = effect ? Math.max(0, Math.min(1, effect.camo ?? 0)) : 0;
-  target[base + OFFSET_EFFECT1] = effect?.bands ? effect.bands[0] : 0;
-  target[base + OFFSET_EFFECT1 + 1] = effect?.bands ? effect.bands[1] : 0;
-  target[base + OFFSET_EFFECT1 + 2] = effect?.bands ? effect.bands[2] : 0;
-  target[base + OFFSET_EFFECT1 + 3] = uniform.time ?? 0;
-  const layers = uniform.layers ?? NO_LAYERS;
-  target[base + OFFSET_LAYER0] = layers.clearcoat;
-  target[base + OFFSET_LAYER0 + 1] = layers.clearcoatRoughness;
-  target[base + OFFSET_LAYER0 + 2] = layers.anisotropy;
-  target[base + OFFSET_LAYER0 + 3] = layers.parallaxDepth;
-  target[base + OFFSET_LAYER1] = layers.anisotropyCos;
-  target[base + OFFSET_LAYER1 + 1] = layers.anisotropySin;
-  target[base + OFFSET_LAYER1 + 2] = layers.relief ? 1 : 0;
-  target[base + OFFSET_LAYER1 + 3] = 0;
-}
-var VERTEX_FLOATS = 11;
-function interleaveVertices(positions, normals, uvs, uvs2 = null, blend = null) {
-  const count = Math.floor(positions.length / 3);
-  const out = new Float32Array(count * VERTEX_FLOATS);
-  for (let i = 0; i < count; i += 1) {
-    const to = i * VERTEX_FLOATS;
-    out[to] = positions[i * 3] ?? 0;
-    out[to + 1] = positions[i * 3 + 1] ?? 0;
-    out[to + 2] = positions[i * 3 + 2] ?? 0;
-    out[to + 3] = normals[i * 3] ?? 0;
-    out[to + 4] = normals[i * 3 + 1] ?? 0;
-    out[to + 5] = normals[i * 3 + 2] ?? 0;
-    out[to + 6] = uvs ? uvs[i * 2] ?? 0 : 0;
-    out[to + 7] = uvs ? uvs[i * 2 + 1] ?? 0 : 0;
-    out[to + 8] = uvs2 ? uvs2[i * 2] ?? 0 : 0;
-    out[to + 9] = uvs2 ? uvs2[i * 2 + 1] ?? 0 : 0;
-    out[to + 10] = blend ? blend[i] ?? 0 : 0;
-  }
-  return out;
-}
-function unpadRows(padded, width, height, bytesPerRow, reuse = null) {
-  const rowBytes = width * 4;
-  const out = reuse && reuse.length === rowBytes * height ? reuse : new Uint8Array(rowBytes * height);
-  for (let y = 0; y < height; y += 1) {
-    out.set(padded.subarray(y * bytesPerRow, y * bytesPerRow + rowBytes), y * rowBytes);
-  }
-  return out;
-}
-
 // src/render/WebglSceneRenderer.ts
 var WEBGL_INSTANCES_PER_DRAW = 64;
 var WEBGL_MAX_LIGHTS = 128;
@@ -12723,6 +12757,21 @@ var UNIT_CLUSTER_TABLE = 12;
 var UNIT_CLUSTER_INDEX = 13;
 var UNIT_LOCAL_SHADOWS = 14;
 var UNIT_PROBE_GRID = 15;
+var SCENE_PACK_GLSL = (
+  /* glsl */
+  `#version 300 es
+precision highp float;
+uniform sampler2D uColour;
+uniform highp sampler2D uDepth;
+out vec4 outPacked;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec4 c = texelFetch(uColour, p, 0);
+  ivec3 b = ivec3(c.rgb * 255.0 + 0.5);
+  outPacked = vec4(texelFetch(uDepth, p, 0).r, c.a > 0.5 ? float(b.r * 65536 + b.g * 256 + b.b) : -1.0, 0.0, 0.0);
+}
+`
+);
 var BLOCK_UNIFORMS = 0;
 var BLOCK_INSTANCES = 1;
 var BLOCK_LIGHTS = 2;
@@ -12762,6 +12811,9 @@ layout(std140) uniform Uniforms {
   vec4 effect1; // rgb = surface effect bands, w = time
   vec4 layer0;  // x = clearcoat, y = its roughness, z = anisotropy, w = parallax depth (I4)
   vec4 layer1;  // xy = anisotropy rotation (cos, sin), z = 1 when the relief rides in occTex's G and B
+  vec4 refract0; // x = bend, y = warp, z = silhouette distortion, w = 1 when the draw refracts (I5)
+  vec4 refract1; // xyz = camera right (world), w = frame height (px)
+  vec4 refract2; // xyz = camera up (world)
 } u;
 `
 );
@@ -12830,7 +12882,8 @@ function graphSites(graph) {
     out.emissive !== void 0 ? `gEmis = max(g${out.emissive}, vec3(0.0));` : ""
   ].filter(Boolean);
   return {
-    fns: graphUsesNoise(graph) ? graphNoiseSource("glsl") : "",
+    // The noise functions are always in the shader (refraction's warp uses them, I5).
+    fns: "",
     base: `  // The material graph (EP7).
   float gMetal = -1.0;
   float gRough = -1.0;
@@ -13289,7 +13342,49 @@ vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, 
   }
   return lit;
 }
-${g.fns}
+${graphNoiseSource("glsl")}
+// --- Refraction (HALO_INFINITE_STYLE_ROADMAP.md I5; refraction.ts) ---
+// The offset in pixels at a fragment with geometric normal N (facing the
+// viewer) at world point P \u2014 refractionOffset, term for term.
+vec2 refractOffset(vec3 N, vec3 P) {
+  vec2 w = vec2(0.0);
+  float warp = u.refract0.y + u.refract0.z;
+  if (warp > 0.0) {
+    float f = ${DISTORTION_FREQUENCY.toFixed(1)};
+    float qy = P.y * f - u.effect1.w * ${DISTORTION_SPEED.toFixed(4)};
+    w = vec2(2.0 * gNoise1(vec3(P.x * f, qy, P.z * f)) - 1.0, 2.0 * gNoise1(vec3(P.x * f + 17.0, qy + 31.0, P.z * f + 47.0)) - 1.0) * warp;
+  }
+  float k = ${REFRACTION_SCALE.toFixed(4)} * u.refract1.w;
+  return vec2(u.refract0.x * dot(N, u.refract1.xyz) + w.x, -u.refract0.x * dot(N, u.refract2.xyz) + w.y) * k;
+}
+// The opaque scene's colour, packed beside its depth (see packScene): G holds
+// the 8-bit RGB as one exact integer, or -1 where the scene drew nothing.
+vec3 unpackColour(float v) {
+  int i = int(v + 0.5);
+  return vec3(float(i >> 16), float((i >> 8) & 255), float(i & 255)) / 255.0;
+}
+// What a refracting fragment sees (rgb, a = 1 when it sees anything) \u2014 refractedPixel.
+vec4 behindColour(vec2 frag, float z, vec2 off) {
+  ivec2 dims = textureSize(sceneDepth, 0);
+  ivec2 s = ivec2(clamp(floor(frag + off), vec2(0.0), vec2(dims) - vec2(1.0)));
+  vec4 c = texelFetch(sceneDepth, s, 0);
+  if (c.g >= 0.0 && c.r >= z) { return vec4(unpackColour(c.g), 1.0); }
+  vec4 o = texelFetch(sceneDepth, ivec2(floor(frag)), 0);
+  if (o.g >= 0.0) { return vec4(unpackColour(o.g), 1.0); }
+  return vec4(0.0);
+}
+vec3 facingNormal(vec3 n) {
+  vec3 g = normalize(n);
+  return dot(g, u.view.xyz) < 0.0 ? -g : g;
+}
+// A refracting surface over what it bends (finishRefracted in the WGSL).
+vec4 finishRefracted(vec3 rgb, float a, vec3 bg, vec3 N) {
+  vec3 c = clamp(rgb, vec3(0.0), vec3(1.0));
+  if (u.pbr.w > 2.5) { return vec4(c * a + bg, 1.0); }
+  if (u.pbr.w > 1.5) { return vec4(c * a + bg * (1.0 - a), 1.0); }
+  float t = u.refract0.z * pow(1.0 - max(0.0, dot(N, u.view.xyz)), ${EFFECT_DISTORT_POWER.toFixed(4)});
+  return vec4(mix(c, bg, t), 1.0);
+}
 void main() {
 ${reflect ? "  outReflect = vec4(0.0);\n  outEnv = vec4(0.0);\n" : ""}  // The surface's screen derivatives, for the UV gradients parallax and
   // anisotropy need (I4) \u2014 taken here, in uniform control flow.
@@ -13328,7 +13423,13 @@ ${g.base}
 
   if (u.pbr.z > 0.5) {
     // Active Camo (H11): screen-door transparency, as the rasteriser drops pixels.
-    if (u.effect0.w > 0.0 && camoThreshold(gl_FragCoord.xy, u.effect1.w) < u.effect0.w) { discard; }
+    // \u2026its dropped pixels showing the scene behind, bent (I5); kept for the end
+    // so the samples below stay in uniform control flow.
+    vec4 camoSeen = vec4(0.0);
+    if (u.effect0.w > 0.0 && camoThreshold(gl_FragCoord.xy, u.effect1.w) < u.effect0.w) {
+      if (u.refract0.w > 0.5) { camoSeen = behindColour(gl_FragCoord.xy, gl_FragCoord.z, refractOffset(facingNormal(vNormal), vWorldPos)); }
+      if (camoSeen.a < 0.5) { discard; }
+    }
     vec3 N = normalize(vNormal);
     if (dot(N, u.view.xyz) < 0.0) { N = -N; }
     float metallic = u.pbr.x;
@@ -13484,6 +13585,14 @@ ${glslDisplay("without")}
     outEnv = vec4(contribution, 1.0);`
     ) : ""}
     outColor = finishAlpha(shaded, colour.a);
+    // Refraction (I5): what's behind is the opaque scene, bent.
+    if (camoSeen.a > 0.5) {
+      outColor = vec4(camoSeen.rgb, 1.0);
+    } else if (u.refract0.w > 0.5) {
+      vec3 rn = facingNormal(vNormal);
+      vec4 b = behindColour(gl_FragCoord.xy, gl_FragCoord.z, refractOffset(rn, vWorldPos));
+      if (b.a > 0.5) { outColor = finishRefracted(shaded, colour.a, b.rgb, rn); }
+    }
 ${reflect ? "    if (u.pbr.w > 1.5) { outReflect = vec4(0.0, 0.0, 0.0, outColor.a); outEnv = outReflect; }\n" : ""}    return;
   }
 
@@ -13638,6 +13747,16 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
      * leaves frames plain.
      */
     this.taa = null;
+    /**
+     * The opaque scene for refraction (I5): its colour blitted into an RGBA8
+     * texture, then packed with the depth copy into one RGBA32F texture — R the
+     * depth (so soft edges read it as before), G the 8-bit RGB as one exact
+     * integer, or -1 where the scene drew nothing. One texture, because the scene
+     * shader already uses all sixteen units WebGL2 guarantees, and the soft edges'
+     * unit is the one free in the see-through pass. Made on first use; false
+     * without float render targets (EXT_color_buffer_float).
+     */
+    this.sceneCopy = null;
     this.software = new SoftwareSceneRenderer(style);
     this.nearest = style.textureFiltering === "none";
     this.uniformBuffer = gl.createBuffer();
@@ -13759,6 +13878,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     const light = resolveLight(draw.lightDirection, draw.ambient);
     const viewDir = viewDirection(draw.view);
     const eye = cameraPositionFromView2(draw.view);
+    const camera = refractionCamera(draw.view, this.height);
+    const refractOk = batches.some((batch) => batch.refract) && this.ensureSceneCopy();
     const shadow = draw.shadow ?? null;
     this.uploadShadow(shadow);
     const near = shadow?.near ?? null;
@@ -13813,7 +13934,10 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
           weights: batch.primitive.blend !== void 0,
           textured: batch.textures.blend !== null
         }),
-        layers: resolveLayers(batch.primitive.material, batch.textures.relief !== null)
+        layers: resolveLayers(batch.primitive.material, batch.textures.relief !== null),
+        // Refraction (I5), where the context can pack the opaque scene for it to read.
+        refraction: batch.refract && refractOk ? resolveRefraction2(batch.primitive.material, effectActive3(batch.effect) ? batch.effect : null) : null,
+        camera
       });
     });
     for (const chunk of chunks2) {
@@ -13890,11 +14014,18 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         gl.useProgram(program);
         this.frameUniforms(program);
       }
-      if (soft && !depthCopied && batch.alpha >= 2) {
+      if ((soft || refractOk) && !depthCopied && (batch.alpha >= 2 || batch.refract)) {
         this.copySceneDepth();
+        if (refractOk) {
+          this.packScene();
+          gl.useProgram(program);
+          bound = null;
+          boundBatch = -1;
+          blendState = -1;
+        }
         depthCopied = true;
       }
-      setBlend(batch.alpha);
+      setBlend(batch.refract ? 2 : batch.alpha);
       if (chunk.batch !== boundBatch) {
         gl.bindBufferRange(gl.UNIFORM_BUFFER, BLOCK_UNIFORMS, this.uniformBuffer, chunk.batch * UNIFORM_STRIDE, UNIFORM_BYTES_USED);
         if (bound !== batch.textures) {
@@ -14304,6 +14435,59 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.depthMask(true);
   }
+  ensureSceneCopy() {
+    if (this.sceneCopy === null) {
+      const gl = this.gl;
+      try {
+        if (!gl.getExtension("EXT_color_buffer_float")) throw new Error("no float targets");
+        const target = (internal, format, type) => {
+          const texture = createTexture(gl, this.width, this.height, internal, format, type, null);
+          const framebuffer = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+          if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error("scene copy incomplete");
+          return { texture, framebuffer };
+        };
+        const colour = target(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE);
+        const packed = target(gl.RGBA32F, gl.RGBA, gl.FLOAT);
+        const program = gl.createProgram();
+        gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, TEMPORAL_VERTEX_GLSL));
+        gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, SCENE_PACK_GLSL));
+        gl.linkProgram(program);
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(`WebGL2 program failed to link: ${gl.getProgramInfoLog(program)}`);
+        gl.useProgram(program);
+        gl.uniform1i(gl.getUniformLocation(program, "uColour"), UNIT_BASE);
+        gl.uniform1i(gl.getUniformLocation(program, "uDepth"), UNIT_SCENE_DEPTH);
+        this.sceneCopy = { colour, packed, program };
+      } catch {
+        this.sceneCopy = false;
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.target ?? this.framebuffer);
+    }
+    return this.sceneCopy !== false;
+  }
+  /**
+   * Pack the opaque scene for refraction (after {@link copySceneDepth}, whose
+   * depth it reads on the soft edges' unit) and bind the result there, leaving
+   * the frame's framebuffer bound. The caller puts its own program back.
+   */
+  packScene() {
+    const gl = this.gl;
+    const copy = this.sceneCopy;
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.target ?? this.framebuffer);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, copy.colour.framebuffer);
+    gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, this.width, this.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, copy.packed.framebuffer);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.bindVertexArray(null);
+    gl.useProgram(copy.program);
+    this.bindTexture(UNIT_BASE, copy.colour.texture);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.enable(gl.DEPTH_TEST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.target ?? this.framebuffer);
+    this.bindTexture(UNIT_SCENE_DEPTH, copy.packed.texture);
+  }
   /** Copy this frame's depth into {@link sceneDepth} and bind it, leaving the frame's framebuffer bound. */
   copySceneDepth() {
     const gl = this.gl;
@@ -14524,6 +14708,13 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         gl.deleteTexture(this.sceneDepth.texture);
         gl.deleteFramebuffer(this.sceneDepth.framebuffer);
       }
+      if (this.sceneCopy) {
+        for (const t of [this.sceneCopy.colour, this.sceneCopy.packed]) {
+          gl.deleteTexture(t.texture);
+          gl.deleteFramebuffer(t.framebuffer);
+        }
+        gl.deleteProgram(this.sceneCopy.program);
+      }
       this.timer?.destroy();
       for (const rb of this.attachments) gl.deleteRenderbuffer(rb);
       gl.deleteSampler(this.sampler);
@@ -14558,6 +14749,12 @@ import {
   PARALLAX_MIN_NDV as PARALLAX_MIN_NDV2,
   PARALLAX_STEPS as PARALLAX_STEPS2,
   resolveLayers as resolveLayers2,
+  DISTORTION_FREQUENCY as DISTORTION_FREQUENCY2,
+  DISTORTION_SPEED as DISTORTION_SPEED2,
+  EFFECT_DISTORT_POWER as EFFECT_DISTORT_POWER2,
+  REFRACTION_SCALE as REFRACTION_SCALE2,
+  effectActive as effectActive4,
+  resolveRefraction as resolveRefraction3,
   LIGHTMAP_RANGE as LIGHTMAP_RANGE2,
   MAX_REFLECTION_PROBES as MAX_REFLECTION_PROBES3,
   PROBE_FADE as PROBE_FADE2,
@@ -14584,7 +14781,6 @@ import {
   orderLights as orderLights2,
   graphNoiseSource as graphNoiseSource2,
   graphShaderCode as graphShaderCode2,
-  graphUsesNoise as graphUsesNoise2,
   multiplyMat4 as multiplyMat46
 } from "@cartbox/editor";
 var FRAME_BYTES = 176;
@@ -14613,7 +14809,8 @@ function graphSites2(graph) {
     out.emissive !== void 0 ? `gEmis = max(g${out.emissive}, vec3<f32>(0.0));` : ""
   ].filter(Boolean);
   return {
-    fns: graphUsesNoise2(graph) ? graphNoiseSource2("wgsl") : "",
+    // The noise functions are always in the shader (refraction's warp uses them, I5).
+    fns: "",
     base: `  // The material graph (EP7).
   var gMetal = -1.0;
   var gRough = -1.0;
@@ -14709,6 +14906,9 @@ struct Uniforms {
   effect1: vec4<f32>,   // rgb = surface effect bands, w = time
   layer0: vec4<f32>,    // x = clearcoat, y = its roughness, z = anisotropy, w = parallax depth (I4)
   layer1: vec4<f32>,    // xy = anisotropy rotation (cos, sin), z = 1 when the relief rides in occTex's G and B
+  refract0: vec4<f32>,  // x = bend, y = warp, z = silhouette distortion, w = 1 when the draw refracts (I5)
+  refract1: vec4<f32>,  // xyz = camera right (world), w = frame height (px)
+  refract2: vec4<f32>,  // xyz = camera up (world)
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -14798,6 +14998,9 @@ struct Probe {
 @group(1) @binding(5) var<storage, read> shadowTiles: array<ShadowTile>;
 // Light probes (EP9): the grid as a 3D texture, face f's probes at x = f \xB7 nx + probe x.
 @group(1) @binding(6) var probeGrid: texture_3d<f32>;
+// The opaque scene's colour (I5), copied as the see-through pass begins \u2014 what a
+// refracting surface bends (a 1\xD71 blank in the opaque pass, which never reads it).
+@group(1) @binding(7) var sceneColour: texture_2d<f32>;
 
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] \u2014 fogLayerDepth in skyDome.ts.
@@ -15187,7 +15390,49 @@ fn vs(
   return out;
 }
 
-${g.fns}
+${graphNoiseSource2("wgsl")}
+// --- Refraction (HALO_INFINITE_STYLE_ROADMAP.md I5; refraction.ts) ---
+// The offset in pixels at a fragment with geometric normal N (facing the
+// viewer) at world point P \u2014 refractionOffset, term for term.
+fn refractOffset(N: vec3<f32>, P: vec3<f32>) -> vec2<f32> {
+  var w = vec2<f32>(0.0);
+  let warp = u.refract0.y + u.refract0.z;
+  if (warp > 0.0) {
+    let f = ${DISTORTION_FREQUENCY2.toFixed(1)};
+    let qy = P.y * f - u.effect1.w * ${DISTORTION_SPEED2.toFixed(4)};
+    w = vec2<f32>(2.0 * gNoise1(vec3<f32>(P.x * f, qy, P.z * f)) - 1.0, 2.0 * gNoise1(vec3<f32>(P.x * f + 17.0, qy + 31.0, P.z * f + 47.0)) - 1.0) * warp;
+  }
+  let k = ${REFRACTION_SCALE2.toFixed(4)} * u.refract1.w;
+  return vec2<f32>(u.refract0.x * dot(N, u.refract1.xyz) + w.x, -u.refract0.x * dot(N, u.refract2.xyz) + w.y) * k;
+}
+// What a refracting fragment at screen point frag, depth z, sees (rgb, a = 1
+// when it sees anything) \u2014 refractedPixel: the pushed pixel when the opaque
+// scene drew it behind the fragment, else the pixel straight behind.
+fn behindColour(frag: vec2<f32>, z: f32, off: vec2<f32>) -> vec4<f32> {
+  let dims = vec2<f32>(textureDimensions(sceneColour, 0));
+  let s = vec2<i32>(clamp(floor(frag + off), vec2<f32>(0.0), dims - vec2<f32>(1.0)));
+  let c = textureLoad(sceneColour, s, 0);
+  if (c.a > 0.5 && textureLoad(sceneDepth, s, 0) >= z) { return vec4<f32>(c.rgb, 1.0); }
+  let o = textureLoad(sceneColour, vec2<i32>(floor(frag)), 0);
+  if (o.a > 0.5) { return vec4<f32>(o.rgb, 1.0); }
+  return vec4<f32>(0.0);
+}
+// The geometric normal facing the viewer (refraction bends by it, as the CPU does).
+fn facingNormal(n: vec3<f32>) -> vec3<f32> {
+  let g = normalize(n);
+  return select(g, -g, dot(g, u.view.xyz) < 0.0);
+}
+// A refracting surface over what it bends: under a blend, added to by an
+// addition, or let through at a shield's silhouette \u2014 finishAlpha with the
+// bent scene for the destination, so the pixel ends covered.
+fn finishRefracted(rgb: vec3<f32>, a: f32, bg: vec3<f32>, N: vec3<f32>) -> vec4<f32> {
+  let c = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+  if (u.pbr.w > 2.5) { return vec4<f32>(c * a + bg, 1.0); }
+  if (u.pbr.w > 1.5) { return vec4<f32>(c * a + bg * (1.0 - a), 1.0); }
+  let t = u.refract0.z * pow(1.0 - max(0.0, dot(N, u.view.xyz)), ${EFFECT_DISTORT_POWER2.toFixed(4)});
+  return vec4<f32>(mix(c, bg, t), 1.0);
+}
+
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4<f32> {
   // The surface's screen derivatives, for the UV gradients parallax and
@@ -15228,7 +15473,13 @@ ${g.base}
 
   if (u.pbr.z > 0.5) {
     // Active Camo (H11): screen-door transparency, as the rasteriser drops pixels.
-    if (u.effect0.w > 0.0 && camoThreshold(in.pos.xy, u.effect1.w) < u.effect0.w) { discard; }
+    // \u2026its dropped pixels showing the scene behind, bent (I5). Kept, not
+    // returned, here: the samples below must stay in uniform control flow.
+    var camoSeen = vec4<f32>(0.0);
+    if (u.effect0.w > 0.0 && camoThreshold(in.pos.xy, u.effect1.w) < u.effect0.w) {
+      if (u.refract0.w > 0.5) { camoSeen = behindColour(in.pos.xy, in.pos.z, refractOffset(facingNormal(in.normal), in.worldPos)); }
+      if (camoSeen.a < 0.5) { discard; }
+    }
     // --- Modern tier: metallic-roughness BRDF (Cook-Torrance) ---
     // Mirrors the software rasteriser's PBR branch (meshRasterizer.ts) term for
     // term, in the engine's non-linear byte space (a linear/HDR pipeline is a
@@ -15395,6 +15646,13 @@ ${wgslDisplay("without")}
     reflectOut = vec4<f32>(clamp(select(weight, contribution / max(seen, vec3<f32>(1e-3)), seen > vec3<f32>(0.02)), vec3<f32>(0.0), vec3<f32>(1.0)), mix(rough, u.layer0.y, u.layer0.x));
     envOut = vec4<f32>(contribution, 1.0);`
     ) : ""}
+    // Refraction (I5): what's behind is the opaque scene, bent.
+    if (camoSeen.a > 0.5) { return vec4<f32>(camoSeen.rgb, 1.0); }
+    if (u.refract0.w > 0.5) {
+      let rn = facingNormal(in.normal);
+      let b = behindColour(in.pos.xy, in.pos.z, refractOffset(rn, in.worldPos));
+      if (b.a > 0.5) { return finishRefracted(shaded, colour.a, b.rgb, rn); }
+    }
     return finishAlpha(shaded, colour.a);
   }
 
@@ -15616,7 +15874,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { binding: 3, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } },
         { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
         { binding: 5, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
-        { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
+        { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+        // The opaque scene's colour, for refraction (I5).
+        { binding: 7, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } }
       ];
       const depthLayout = device.createBindGroupLayout({ entries: depthEntries(false) });
       const depthLayoutMs = device.createBindGroupLayout({ entries: depthEntries(true) });
@@ -15697,6 +15957,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const shadowTiles = device.createBuffer({ size: MAX_LOCAL_SHADOW_TILES2 * 80, usage: 128 | 8 });
       const atlasBlank = device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: 4 | 2 });
       const probesBlank = device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: "rgba32float", usage: 4 | 2 });
+      const behind = device.createTexture({ size: { width, height }, format: "rgba8unorm", usage: 4 | 2 | 16 });
+      const behindBlank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: 4 | 2 });
       const makeGroups = (atlas, probes) => {
         const shared = [
           { binding: 1, resource: { buffer: clusterBuffers.table } },
@@ -15707,8 +15969,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 6, resource: probes.createView({ dimension: "3d" }) }
         ];
         return {
-          blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared] }),
-          scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: depthTexture.createView() }, ...shared] })
+          blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
+          scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: depthTexture.createView() }, ...shared, { binding: 7, resource: behind.createView() }] })
         };
       };
       const makeGroupsMs = (atlas, probes, blank, depth) => {
@@ -15721,13 +15983,15 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 6, resource: probes.createView({ dimension: "3d" }) }
         ];
         return {
-          blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared] }),
-          scene: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: depth.createView() }, ...shared] })
+          blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
+          scene: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: depth.createView() }, ...shared, { binding: 7, resource: behind.createView() }] })
         };
       };
       const depthGroups = {
         ...makeGroups(atlasBlank, probesBlank),
         blankTexture: blankDepth,
+        behind,
+        behindBlank,
         clusters: clusterBuffers,
         shadowTiles,
         atlas: atlasBlank,
@@ -15943,6 +16207,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const { ordered } = this.clusterLights(draw);
     this.uploadLights(packLights(ordered));
     const lightCount = ordered.length;
+    const camera = refractionCamera(draw.view, this.height);
     let next = 0;
     draws.forEach((entry, index) => {
       entry.first = next;
@@ -15991,7 +16256,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           weights: entry.primitive.blend !== void 0,
           textured: entry.textures.blend !== null
         }),
-        layers: resolveLayers2(entry.primitive.material, entry.textures.relief !== null)
+        layers: resolveLayers2(entry.primitive.material, entry.textures.relief !== null),
+        refraction: entry.refract ? resolveRefraction3(entry.primitive.material, effectActive4(entry.effect) ? entry.effect : null) : null,
+        camera
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
@@ -15999,8 +16266,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     let triangles = 0;
     for (const entry of draws) triangles += entry.geometry.indexCount / 3 * entry.models.length;
     this.lastFrameStats = { drawCalls: draws.length, instances: instanceCount, triangles, gpuMs: this.timer?.lastMs ?? null };
-    const split = draws.some((entry) => softEdges(entry.primitive.material, entry.alpha, draw.projection) !== void 0);
-    const firstSeeThrough = split ? draws.findIndex((entry) => entry.alpha >= 2) : -1;
+    const refract = draws.some((entry) => entry.refract);
+    const split = refract || draws.some((entry) => softEdges(entry.primitive.material, entry.alpha, draw.projection) !== void 0);
+    const firstSeeThrough = split ? draws.findIndex((entry) => entry.alpha >= 2 || entry.refract) : -1;
     const encoder = this.device.createCommandEncoder();
     const msaa = draw.antialias === true ? this.ensureMsaa() : null;
     const gbuffer = draw.reflections === true ? this.ensureReflectionTargets(msaa !== null) : null;
@@ -16015,7 +16283,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       for (let index = from; index < to; index += 1) {
         const entry = draws[index];
         const set = this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, gbuffer !== null);
-        const wanted = entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque;
+        const wanted = entry.refract ? set.blend : entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque;
         if (wanted !== bound) {
           pass2.setPipeline(wanted);
           bound = wanted;
@@ -16039,7 +16307,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           // which is what lets the composite leave the cart's frame showing.
           clearValue: { r: 0, g: 0, b: 0, a: 0 },
           loadOp: "clear",
-          ...ending(firstSeeThrough < 0)
+          ...ending(firstSeeThrough < 0),
+          // An anti-aliased frame that refracts resolves the opaque scene for the see-through pass to read.
+          ...msaa && refract && firstSeeThrough >= 0 ? { resolveTarget: this.depthGroups.behind.createView() } : {}
         },
         ...reflectionAttachments(false, firstSeeThrough < 0)
       ],
@@ -16053,6 +16323,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     });
     drawRange(pass, 0, opaqueEnd, groups.blank);
     pass.end();
+    if (refract && firstSeeThrough >= 0 && !msaa) {
+      encoder.copyTextureToTexture({ texture: this.colourTexture }, { texture: this.depthGroups.behind }, { width: this.width, height: this.height });
+    }
     if (firstSeeThrough >= 0) {
       const seeThrough = encoder.beginRenderPass({
         colorAttachments: [{ view: colourView, loadOp: "load", ...ending(true) }, ...reflectionAttachments(true, true)],
@@ -16445,6 +16718,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       destroySafely(this.taa.uniforms);
     }
     destroySafely(this.depthGroups.blankTexture);
+    destroySafely(this.depthGroups.behind);
+    destroySafely(this.depthGroups.behindBlank);
     destroySafely(this.depthGroups.clusters.table);
     destroySafely(this.depthGroups.clusters.index);
     destroySafely(this.depthGroups.clusters.params);

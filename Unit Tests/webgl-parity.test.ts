@@ -98,6 +98,9 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     else expect(result.differing, JSON.stringify(result.diffs)).toBeLessThanOrEqual(Math.ceil(result.drawn * 4 * share));
   };
 
+  const antialiasedFrame = (name: string): Promise<{ out: number[]; error: number }> =>
+    page.evaluate((n: string) => (globalThis as unknown as { runFrame: (n: string, aa: boolean) => Promise<never> }).runFrame(n, true), name);
+
   const antialiased = (name: string): Promise<{ changed: number; offEdge: number; outside: number; drawn: number; errors: number[] }> =>
     page.evaluate((n: string) => (globalThis as unknown as { runAntialias: (n: string) => Promise<never> }).runAntialias(n), name);
 
@@ -235,6 +238,25 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
         expect(result.far, JSON.stringify(result.diffs)).toBeLessThanOrEqual(result.drawn * 0.03);
       }
     }
+  });
+
+  it("bends what's behind glass, heat haze, camo and a shield's edge like the software rasteriser (I5)", async () => {
+    const result = await run("refraction");
+    expect(result.drawn).toBeGreaterThan(400);
+    if (exact) {
+      expect(result.coverage, JSON.stringify(result.diffs)).toBe(0);
+      // The warp's noise is float32 on the GPU and float64 on the CPU, so an
+      // offset that lands on a texel edge can round the other way: a few
+      // pixels may take the next stripe over, the rest match.
+      expect(result.far, JSON.stringify(result.diffs)).toBeLessThanOrEqual(result.drawn * 0.03);
+    }
+    // Anti-aliased, the opaque scene is resolved before it is read: the bend still shows, with no GL error.
+    const bent = await antialiasedFrame("refraction");
+    const straight = await antialiasedFrame("refractionStraight");
+    expect(bent.error).toBe(0);
+    let changed = 0;
+    for (let i = 0; i < bent.out.length; i += 4) if (Math.abs(bent.out[i]! - straight.out[i]!) + Math.abs(bent.out[i + 2]! - straight.out[i + 2]!) > 30) changed += 1;
+    expect(changed).toBeGreaterThan(30);
   });
 
   it("shades forty point lights and four spots through the light clusters like the software rasteriser", async () => {

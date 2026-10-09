@@ -200,6 +200,14 @@ export interface MeshMaterial {
   readonly reliefImage?: EncodedImage | null;
   /** How deep the relief's darkest point sits, in world units (0..0.25); absent or 0 is flat. */
   readonly parallaxDepth?: number;
+  // --- Refraction (HALO_INFINITE_STYLE_ROADMAP.md I5; see render/refraction.ts) ---
+  /**
+   * How strongly a see-through surface bends the view behind it by its normal,
+   * 0..1 (glass, a plasma blade). Absent or 0 is a straight view through.
+   */
+  readonly refraction?: number;
+  /** How strongly the view behind shimmers with drifting noise, 0..1 (heat haze, plasma). */
+  readonly distortion?: number;
   // --- Transparency (ENGINE_PARITY_ROADMAP.md EP6), glTF's alphaMode plus additive ---
   /**
    * How the surface's alpha (base colour factor × texture) is used. Absent is
@@ -445,6 +453,8 @@ export interface SerializedMaterial {
   alphaMode?: "mask" | "blend" | "additive";
   alphaCutoff?: number;
   softDepth?: number;
+  refraction?: number;
+  distortion?: number;
   graph?: MaterialGraph;
 }
 interface SerializedPrimitive {
