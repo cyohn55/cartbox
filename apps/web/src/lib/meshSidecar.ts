@@ -151,6 +151,8 @@ export interface PrefabNode {
   readonly key: string;
   readonly name: string;
   readonly mesh: string;
+  /** The material set the node's mesh wears (I13). */
+  readonly variant?: string;
   readonly frames?: readonly string[];
   readonly lods?: StoredLods;
   /** Relative to the parent node; ignored for the root (each copy has its own placement). */
@@ -171,6 +173,11 @@ export interface MeshPrefab {
   readonly nodes: readonly PrefabNode[];
   /** Copies held in reserve for cartbox.spawn at run time (0..32; absent = 8). */
   readonly pool?: number;
+  /**
+   * The prefab this one is a variant of (I14; see meshPrefabs.ts): it holds its
+   * own full nodes, and takes the base's edits to every field it hasn't changed.
+   */
+  readonly base?: string;
 }
 
 /** The whole mesh sidecar: every placed mesh on the cart, plus its lighting rig. */
@@ -573,6 +580,7 @@ function readPrefabs(value: unknown, library: ReturnType<typeof readMeshLibrary>
         key: node.key,
         name: typeof node.name === "string" ? node.name : "Mesh",
         mesh,
+        ...(typeof node.variant === "string" && node.variant ? { variant: node.variant.slice(0, 64) } : {}),
         transform: readTransform(node.transform),
         ...(frames.length > 0 ? { frames } : {}),
         ...(lods ? { lods } : {}),
@@ -590,9 +598,24 @@ function readPrefabs(value: unknown, library: ReturnType<typeof readMeshLibrary>
     if (kept.filter((n) => !n.parent).length !== 1) continue;
     const poolRaw = (item as { pool?: unknown }).pool;
     const pool = typeof poolRaw === "number" && Number.isFinite(poolRaw) ? Math.max(0, Math.min(32, Math.floor(poolRaw))) : undefined;
-    out.push({ id: raw.id, name: typeof raw.name === "string" ? raw.name : "Prefab", nodes: kept, ...(pool !== undefined ? { pool } : {}) });
+    const base = (item as { base?: unknown }).base;
+    out.push({ id: raw.id, name: typeof raw.name === "string" ? raw.name : "Prefab", nodes: kept, ...(pool !== undefined ? { pool } : {}), ...(typeof base === "string" && base ? { base } : {}) });
   }
-  return out;
+  // A variant whose base is gone (or that would be its own ancestor) stands alone.
+  const ids = new Set(out.map((p) => p.id));
+  const ancestry = (p: MeshPrefab) => {
+    const seen = new Set<string>([p.id]);
+    for (let at = p.base; at; at = out.find((q) => q.id === at)?.base) {
+      if (seen.has(at) || !ids.has(at)) return false;
+      seen.add(at);
+    }
+    return true;
+  };
+  return out.map((p) => {
+    if (!p.base || ancestry(p)) return p;
+    const { base: _base, ...rest } = p;
+    return rest;
+  });
 }
 
 // --- Immutable list operations (the editor edits through these) ------------

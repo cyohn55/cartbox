@@ -25,7 +25,10 @@ import {
 import {
   applyToPrefab,
   createPrefab,
+  createPrefabVariant,
   deletePrefab,
+  prefabVariants,
+  variantChanges,
   overrideCount,
   placePrefab,
   prefabInstances,
@@ -170,5 +173,121 @@ describe("prefabs", () => {
     const orphan = JSON.parse(raw) as { prefabs?: unknown };
     delete orphan.prefabs;
     expect(decodeMeshSidecar(JSON.stringify(orphan)).meshes.some((m) => m.prefab)).toBe(false);
+  });
+});
+
+describe("prefab variants (I14)", () => {
+  /** The turret, a variant of it ("Heavy turret": a bigger barrel), and a copy of each placed. */
+  function variantScene() {
+    const { sc, prefabId, baseId } = turretScene();
+    const made = createPrefabVariant(sc, prefabId, "Heavy turret");
+    let s2 = made.sidecar;
+    const placed = placePrefab(s2, made.prefabId, { transform: T([0, 0, 9]) });
+    s2 = placed.sidecar;
+    // Make it a variant: the heavy barrel has more hp and its own mesh, then Apply to the variant.
+    const heavyBarrel = nodeIn(s2, placed.rootId, "barrel");
+    s2 = setMeshProp(s2, heavyBarrel.id, "hp", 120);
+    s2 = applyToPrefab(s2, placed.rootId);
+    return { sc: s2, baseId, prefabId, variantId: made.prefabId, heavyId: placed.rootId };
+  }
+
+  it("starts as a copy of its base, linked to it, and counts what it changes", () => {
+    const { sc, prefabId, variantId } = variantScene();
+    const variant = sc.prefabs!.find((p) => p.id === variantId)!;
+    expect(variant.base).toBe(prefabId);
+    expect(variant.nodes.map((n) => n.key)).toEqual(sc.prefabs!.find((p) => p.id === prefabId)!.nodes.map((n) => n.key));
+    expect(prefabVariants(sc, prefabId).map((p) => p.id)).toEqual([variantId]);
+    expect(variantChanges(sc, variantId)).toBe(1); // the barrel's hp
+  });
+
+  it("takes the base's edits to what it left alone, keeps its own, and passes them to its copies", () => {
+    const { sc, baseId, variantId, heavyId } = variantScene();
+    // Edit the base turret: retag it, and change the barrel's hp (which the variant overrides).
+    let s2 = setMeshTags(sc, baseId, ["enemy", "kit"]);
+    s2 = setMeshProp(s2, nodeIn(s2, baseId, "barrel").id, "hp", 50);
+    s2 = applyToPrefab(s2, baseId);
+    const variant = s2.prefabs!.find((p) => p.id === variantId)!;
+    expect(variant.nodes[0]!.tags).toEqual(["enemy", "kit"]);
+    expect(variant.nodes[1]!.props).toEqual({ hp: 120 });
+    // The variant's placed copy follows.
+    expect(s2.meshes.find((m) => m.id === heavyId)!.tags).toEqual(["enemy", "kit"]);
+    expect(nodeIn(s2, heavyId, "barrel").props).toEqual({ hp: 120 });
+  });
+
+  it("gains the base's new parts and loses the ones it drops, unless it changed them", () => {
+    const { sc, baseId, prefabId, variantId, heavyId } = variantScene();
+    // Add a sight under the base's barrel and apply.
+    const sight = addMesh(sc, quad(0.2), "sight");
+    let s2 = setMeshParent(sight.sidecar, sight.id, nodeIn(sight.sidecar, baseId, "barrel").id, { keepWorld: false });
+    s2 = applyToPrefab(s2, baseId);
+    const parts = (id: string) => s2.prefabs!.find((p) => p.id === id)!.nodes.slice(1).map((n) => n.name);
+    expect(parts(variantId)).toEqual(["barrel", "sight"]);
+    expect(copyOf(s2, heavyId).filter((m) => m.id !== heavyId).map((m) => m.name).sort()).toEqual(["barrel", "sight"]);
+    // Now remove the barrel (and its sight) from the base: the variant keeps its barrel (it changed it), but not the sight (it didn't).
+    const barrel = nodeIn(s2, baseId, "barrel");
+    s2 = { ...s2, meshes: s2.meshes.filter((m) => m.id !== barrel.id && m.parent !== barrel.id) };
+    s2 = applyToPrefab(s2, baseId);
+    expect(parts(prefabId)).toEqual([]);
+    expect(parts(variantId)).toEqual(["barrel"]);
+    expect(copyOf(s2, heavyId).filter((m) => m.id !== heavyId).map((m) => m.name)).toEqual(["barrel"]);
+  });
+
+  it("wears its own material set, and survives a save; deleting the base leaves it standing alone", () => {
+    const { sc, variantId, heavyId } = variantScene();
+    // A material set per node is part of what a variant can change.
+    const root = sc.meshes.find((m) => m.id === heavyId)!;
+    let s2 = { ...sc, meshes: sc.meshes.map((m) => (m.id === root.id ? { ...m, variant: "Veteran" } : m)) };
+    s2 = applyToPrefab(s2, heavyId);
+    expect(s2.prefabs!.find((p) => p.id === variantId)!.nodes[0]!.variant).toBe("Veteran");
+    const back = decodeMeshSidecar(encodeMeshSidecar(s2));
+    expect(back.prefabs!.find((p) => p.id === variantId)!.base).toBe(sc.prefabs![0]!.id);
+    expect(back.prefabs!.find((p) => p.id === variantId)!.nodes[0]!.variant).toBe("Veteran");
+    const alone = deletePrefab(back, sc.prefabs![0]!.id);
+    expect(alone.prefabs!.find((p) => p.id === variantId)!.base).toBeUndefined();
+    // The player places its pooled copies from its own full nodes.
+    expect(parseMeshScene(encodeMeshSidecar(alone))).not.toBeNull();
+  });
+
+  it("chains: a variant of a variant follows both", () => {
+    const { sc, baseId, variantId } = variantScene();
+    const deep = createPrefabVariant(sc, variantId, "Heavy turret, dark");
+    let s2 = setMeshTags(deep.sidecar, baseId, ["boss"]);
+    s2 = applyToPrefab(s2, baseId);
+    expect(s2.prefabs!.find((p) => p.id === deep.prefabId)!.nodes[0]!.tags).toEqual(["boss"]);
+    expect(s2.prefabs!.find((p) => p.id === deep.prefabId)!.nodes[1]!.props).toEqual({ hp: 120 });
+  });
+});
+
+describe("Lockout's Forerunner kit (I14)", () => {
+  it("ships as prefabs on a 4 m grid, modelled with the editor's own face edits, the lit wall a variant of the wall", async () => {
+    const { forerunnerKit, lockoutMeshSidecar, meshBounds, primitiveFaces } = await import("@cartbox/editor");
+    const sidecar = decodeMeshSidecar(lockoutMeshSidecar());
+    const byId = (id: string) => sidecar.prefabs!.find((p) => p.id === id)!;
+    for (const id of ["kit-wall", "kit-wall-lit", "kit-pillar", "kit-floor"]) expect(byId(id).pool).toBe(0);
+    expect(byId("kit-wall-lit").base).toBe("kit-wall");
+    expect(byId("kit-wall-lit").nodes.map((n) => n.name)).toEqual(["forerunner wall", "light channel"]);
+    const kit = forerunnerKit();
+    const size = (m: MeshAsset) => {
+      const b = meshBounds(m)!;
+      return b.max.map((v, k) => Math.round((v - b.min[k]!) * 100) / 100);
+    };
+    // Footprints on the grid (the bevels stand proud of the wall's face, and the cap's chamfer sits within the pillar's height).
+    expect(size(kit.wall)).toEqual([4, 4.08, 0.62]);
+    expect(size(kit.pillar)).toEqual([1, 4.12, 1]);
+    expect(size(kit.floor)).toEqual([4, 0.3, 4]);
+    // Far more than a box: the bevels, insets and recesses made their faces.
+    expect(primitiveFaces(kit.wall.primitives[0]!).length).toBeGreaterThan(14);
+    expect(primitiveFaces(kit.pillar.primitives[0]!).length).toBeGreaterThan(20);
+    // The light channel glows.
+    expect(kit.channel.primitives[0]!.material.emissiveFactor![2]).toBeGreaterThan(1);
+  });
+
+  it("is edited like any prefab: a change to the wall reaches the lit wall", async () => {
+    const { lockoutMeshSidecar } = await import("@cartbox/editor");
+    let sc = decodeMeshSidecar(lockoutMeshSidecar());
+    const placed = placePrefab(sc, "kit-wall");
+    sc = setMeshTags(placed.sidecar, placed.rootId, ["cover"]);
+    sc = applyToPrefab(sc, placed.rootId);
+    expect(sc.prefabs!.find((p) => p.id === "kit-wall-lit")!.nodes[0]!.tags).toEqual(["cover"]);
   });
 });

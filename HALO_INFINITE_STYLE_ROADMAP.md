@@ -418,9 +418,55 @@ What separates Lockout from Halo Infinite, seen in a match:
       *Not yet:* skeletons and clips in GLB export, a second UV set and morph
       targets on import, and uploading textures to the GPU still compressed
       (KTX2 is transcoded to RGBA, so the saving is in download size).
-- [ ] **I14. Modular kits and blockout tools.** Snapping kit pieces edge to
+- [x] **I14. Modular kits and blockout tools.** Snapping kit pieces edge to
       edge, prefab variants, and simple in-editor mesh editing (extrude,
       bevel, inset) for blockouts and quick fixes.
+      *Done:* **mesh editing** (`meshEdit.ts`) works on faces as a modelling
+      tool shows them: coplanar triangles that share vertices edge to edge.
+      - **Extrude** moves a face along its normal and builds walls (negative:
+        a recess).
+      - **Inset** shrinks it in its plane, leaving a ring of quads.
+      - **Bevel** insets and lifts or sinks the inner face, so the ring
+        slopes: a chamfer, or a sunken channel.
+      - Edits keep a mesh closed and consistently wound (tested by edge
+        pairing and exact volumes), and flat-shade what they make.
+      - New walls get texture coordinates at the face's own density.
+      - The edited face keeps its triangles, so edits chain (inset, then
+        extrude what's left).
+      - The light map, which no longer fits, is dropped; skinned meshes are
+        left to the modelling tool.
+
+      **In the Mesh tab:** a click (not a drag) on the preview picks a face,
+      using `renderMesh`'s own orbit camera (`orbitView`, `pickMeshTriangle`).
+      The face is outlined, and Extrude, Inset and Bevel act on it. An edit
+      remakes the object's LODs (other copies of the old model keep theirs).
+
+      **Kit snapping** (`kitSnap.ts`, the viewport's **Kit** toggle): a
+      dragged piece whose box comes within reach of another's opposite face
+      closes the gap without passing into it. Along the other two axes it
+      lines its edges up — floor to floor, face to face, or centred.
+
+      **Prefab variants:** a variant is a prefab made from another (its
+      base), with its own full nodes, which is all the runtime sees. Applying
+      a change to the base updates the variant:
+      - every field the variant had left matching the base takes the new
+        value;
+      - parts new to the base are added;
+      - parts the base dropped go, unless the variant had changed them.
+
+      Then the variant's copies and its own variants follow. A variant can
+      also wear another material set (`variant` on prefab nodes). The prefab
+      library makes variants and marks them ◇, with their change count.
+      *Lockout:* a starter **Forerunner kit** in its prefab library, on a
+      4 m grid, every piece modelled with the editor's own face edits from a
+      box:
+      - a wall with a bevelled, recessed front plate and a chamfered top;
+      - a **lit wall**, a variant of the wall that adds a glowing light
+        channel in the recess;
+      - a pillar with a chamfered cap and sunken side panels;
+      - a seamed floor tile.
+
+      The arena's rebuild from them is I16.
 - [ ] **I15. Texture baking.** Bake ambient occlusion, curvature and
       thickness from a mesh in the editor, feeding the wear masks of I4.
 - [ ] **I16. A Forerunner kit for Lockout.** The arena rebuilt from a designed
