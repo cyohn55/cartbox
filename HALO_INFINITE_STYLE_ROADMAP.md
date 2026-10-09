@@ -512,9 +512,36 @@ What separates Lockout from Halo Infinite, seen in a match:
       - grime in the seams and recesses from the cavities and the baked
         occlusion;
       - smoother polished rims.
-- [ ] **I16. A Forerunner kit for Lockout.** The arena rebuilt from a designed
+- [x] **I16. A Forerunner kit for Lockout.** The arena rebuilt from a designed
       modular kit: chamfered, layered, angular forms with inset light
       channels, at a higher texture resolution, using I4, I14 and I15.
+      *Done:* the arena's tiers are rebuilt from the kit's wall module: the
+      sniper tower's three tiers, the BR's two, the Sword pit and its lips,
+      and the shotgun room's floor tier.
+      - **Panels:** every long side of a tier is a grid of panels near
+        2.2 × 1.6 m. Each panel is the kit wall's recipe applied with the
+        editor's face edits (I14): an inset that leaves a frame between
+        panels, then a bevel that sinks the plate 5 cm behind a chamfered rim.
+      - **Corners and roofs:** chamfered corners stay plain. The battered
+        feet, cornices and leaning fins keep the angular, layered massing.
+      - **Colliders:** every cut goes inward, so no panel stands past the
+        colliders it clads (tested vertex by vertex), and the physics, nav
+        mesh and spawns are unchanged.
+      - **Light channels:** the sniper tower's upper tiers and the BR top
+        carry the lit wall's light channel in every other panel of their top
+        row, as glowing strips set into the recess, drawn with the energy
+        trim.
+      - **Texture density:** a tile now spans about 4.4 m, two panels,
+        instead of 7. That is about 1.6× the texels per metre, with no larger
+        textures and no extra download.
+
+      The panels add about 1,200 triangles (the scene is about 11,700, within
+      its 14,000 cap). The arena now ships without normals: every face owns
+      its corners, so renderers rebuild the same flat normals, which saves
+      about 95 KB. The light map and probes were re-baked for the new
+      walls (`npm run bake:lockout`, `bake:lockout-probes`). The kit's prefabs
+      (I14) with their baked worn alloy (I15) are in the editor's library for
+      building more.
 
 ## Phase E — Optional lighting tech
 

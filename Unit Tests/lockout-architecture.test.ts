@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { LOCKOUT_CODE, lockoutMeshSidecar, deserializeMeshAsset, lockoutTerrain, lockoutTerrainTriangles, terrainChunks, terrainHeight, terrainMesh } from "@cartbox/editor";
+import { LOCKOUT_CODE, LOCKOUT_RAGDOLL_COLLIDERS, computeSmoothNormals, lockoutMeshSidecar, deserializeMeshAsset, readMeshLibrary, resolveMeshRef, lockoutTerrain, lockoutTerrainTriangles, terrainChunks, terrainHeight, terrainMesh } from "@cartbox/editor";
 import { chamferedRect, newStreams, pushLoft } from "../packages/editor/src/model/seedGeometry";
 
 /** Read a `local NAME = {…}` numeric table out of the shipped cart code. */
@@ -90,9 +90,9 @@ describe("the Lockout architecture", () => {
     const map = deserializeMeshAsset((JSON.parse(lockoutMeshSidecar()) as { meshes: { mesh: string }[] }).meshes[0]!.mesh);
     const names = map.primitives.map((p) => p.material.name);
     expect(names).toEqual(expect.arrayContaining(["forerunner", "forerunner-underside", "snow", "energy"]));
-    // Sloped faces: some structure normals are neither axis-aligned nor flat.
+    // Sloped faces: some structure normals are neither axis-aligned nor flat (rebuilt from the triangles: the map ships without normals).
     const structure = map.primitives.find((p) => p.material.name === "forerunner")!;
-    const n = structure.normals!;
+    const n = computeSmoothNormals(structure.positions, structure.indices);
     let sloped = 0;
     for (let i = 0; i < n.length; i += 3) {
       const m = Math.max(Math.abs(n[i]!), Math.abs(n[i + 1]!), Math.abs(n[i + 2]!));
@@ -104,6 +104,51 @@ describe("the Lockout architecture", () => {
     let minY = Infinity;
     for (let i = 1; i < under.positions.length; i += 3) minY = Math.min(minY, under.positions[i]!);
     expect(minY).toBeLessThan(-8);
+  });
+});
+
+describe("the arena rebuilt from the Forerunner kit (I16)", () => {
+  const sidecar = JSON.parse(lockoutMeshSidecar()) as { meshes: { mesh: string }[]; library?: unknown };
+  const map = deserializeMeshAsset(sidecar.meshes[0]!.mesh.startsWith("{") ? sidecar.meshes[0]!.mesh : resolveMeshRef(sidecar.meshes[0]!.mesh, readMeshLibrary(sidecar.library))!);
+  const shipped = map.primitives.find((p) => p.material.name === "forerunner")!;
+  // The map ships without normals (every face owns its corners): the renderers' rebuilt ones.
+  const wall = { ...shipped, normals: computeSmoothNormals(shipped.positions, shipped.indices) };
+  // A kit panel's sunken plate sits behind a rim sloping 0.05 in over 0.1: its faces lean 26.6° off the wall's.
+  const RIM = Math.cos(Math.atan(0.05 / 0.1));
+  const rimVertices: number[] = [];
+  for (let i = 0; i < wall.normals!.length / 3; i += 1) {
+    const n = [wall.normals![i * 3]!, wall.normals![i * 3 + 1]!, wall.normals![i * 3 + 2]!];
+    const dominant = Math.max(...n.map(Math.abs));
+    // (The tiers top out at the sniper deck, 7 m; the leaning fins above happen to lean about as steeply.)
+    if (Math.abs(dominant - RIM) < 0.01 && wall.positions[i * 3 + 1]! <= 7) rimVertices.push(i);
+  }
+
+  it("clads the towers, the BR and the pit in kit panels: framed, sunken plates behind chamfered rims", () => {
+    expect(rimVertices.length).toBeGreaterThan(400);
+  });
+
+  it("cuts every panel inward: nothing of a panel stands past the colliders it clads", () => {
+    const inside = (p: readonly number[]) =>
+      LOCKOUT_RAGDOLL_COLLIDERS.some(({ center, half }) => [0, 1, 2].every((k) => Math.abs(p[k]! - center[k]!) <= half[k]! + 0.01));
+    const outside = rimVertices.filter((i) => !inside([wall.positions[i * 3]!, wall.positions[i * 3 + 1]!, wall.positions[i * 3 + 2]!]));
+    expect(outside.map((i) => [0, 1, 2].map((k) => +wall.positions[i * 3 + k]!.toFixed(3)))).toEqual([]);
+  });
+
+  it("sets glowing light channels into the sniper tower's and the BR's panels", () => {
+    const energy = map.primitives.find((p) => p.material.name === "energy")!;
+    // Thin strips 1.5 cm deep, set inside the tower tiers' footprints.
+    let channels = 0;
+    for (let i = 0; i + 24 <= energy.positions.length / 3; i += 24) {
+      const xs: number[] = [], ys: number[] = [], zs: number[] = [];
+      for (let v = i; v < i + 24; v += 1) {
+        xs.push(energy.positions[v * 3]!);
+        ys.push(energy.positions[v * 3 + 1]!);
+        zs.push(energy.positions[v * 3 + 2]!);
+      }
+      const thin = Math.min(Math.max(...xs) - Math.min(...xs), Math.max(...zs) - Math.min(...zs));
+      if (Math.abs(thin - 0.03) < 1e-3 && Math.abs(Math.max(...ys) - Math.min(...ys) - 0.1) < 1e-3) channels += 1;
+    }
+    expect(channels).toBeGreaterThanOrEqual(6);
   });
 });
 
