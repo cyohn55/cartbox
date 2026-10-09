@@ -337,7 +337,7 @@ export { INPUT_BLOCK_BYTES, INPUT_MAGIC, actionsSdkLua, inputBlockAddress, readS
 export { POINTER_AT, POINTER_MAGIC, PointerInput, toConsolePixel, writePointer, type PointerState } from "./pointer.js";
 export { SAVE_MAGIC, armSaveBlock, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, takeSave, validSave } from "./saveSdk.js";
 export { SoundSystem, browserSpeaker, LOOP_SLOTS, MAX_VOICES, type SoundContext, type Speaker } from "./soundSystem.js";
-export type { MeshScene, MeshInstance, SceneBounds, MeshSceneCamera } from "./mesh/index.js";
+export type { MeshScene, MeshInstance, SceneBounds, SceneVista, MeshSceneCamera } from "./mesh/index.js";
 
 // Runtime HD-2D world (optional): a cart declares a height-mapped 3D tile world
 // (the `world` sidecar) and stands its 2D character sprites in it as camera-facing

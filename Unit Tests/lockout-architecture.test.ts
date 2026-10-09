@@ -151,11 +151,13 @@ describe("the Lockout mountains", () => {
 
   it("ships on the sidecar, riding on the map so the menus' hiding the map hides it too", () => {
     const sidecar = JSON.parse(lockoutMeshSidecar());
-    expect(sidecar.terrains).toHaveLength(1);
+    // The mountains, then the far range drawn into the sky (I7; see vistas.test.ts).
+    expect(sidecar.terrains.map((t: { id: string }) => t.id)).toEqual(["lockout-range", "lockout-vista"]);
     expect(sidecar.terrains[0].parent).toBe("lockout-map");
     expect(sidecar.meshes[0].id).toBe("lockout-map");
     expect(LOCKOUT_CODE).toMatch(/for i=0,NBOT do cartbox\.meshpose\(i,0,-999/);
     // Compact: the heightfield and its one rock texture, not a mesh.
-    expect(JSON.stringify(sidecar.terrains).length).toBeLessThan(140_000);
+    expect(JSON.stringify(sidecar.terrains[0]).length).toBeLessThan(140_000);
+    expect(JSON.stringify(sidecar.terrains[1]).length).toBeLessThan(80_000);
   });
 });

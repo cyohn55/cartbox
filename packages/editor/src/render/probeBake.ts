@@ -35,8 +35,8 @@ export const PROBE_PANORAMA_WIDTH = 128;
 
 type V3 = [number, number, number];
 
-/** The six faces: forward and up for each. */
-const FACES: readonly { forward: V3; up: V3 }[] = [
+/** The six cube faces: forward and up for each (+X, −X, +Y, −Y, +Z, −Z). */
+export const PANORAMA_FACES: readonly { forward: V3; up: V3 }[] = [
   { forward: [1, 0, 0], up: [0, 1, 0] },
   { forward: [-1, 0, 0], up: [0, 1, 0] },
   { forward: [0, 1, 0], up: [0, 0, -1] },
@@ -136,7 +136,7 @@ export function bakePanorama(eye: readonly [number, number, number], instances: 
     lights: lighting.lights ?? null,
     shadow: lighting.shadow ?? null,
   };
-  const faces = FACES.map(({ forward, up }) => {
+  const faces = PANORAMA_FACES.map(({ forward, up }) => {
     const out = new Uint8ClampedArray(face * face * 4);
     const depth = new Float32Array(face * face);
     const view = viewMatrix(eye, [eye[0] + forward[0], eye[1] + forward[1], eye[2] + forward[2]], up);

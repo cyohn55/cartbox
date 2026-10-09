@@ -207,7 +207,8 @@ describe("Lockout", () => {
   it("strews boulders and drifts over the range, clear of the gorge, at no cost per copy", () => {
     const t = lockoutTerrain();
     const stored = JSON.parse(lockoutMeshSidecar());
-    expect(stored.foliage.map((f: { name: string }) => f.name)).toEqual(["Boulders", "Snow drifts"]);
+    // Pines on the far range too, drawn into the sky with it (I7; see vistas.test.ts).
+    expect(stored.foliage.map((f: { name: string }) => f.name)).toEqual(["Boulders", "Snow drifts", "Far pines"]);
     expect(stored.foliage.every((f: { copies?: string }) => f.copies === undefined)).toBe(true); // filled by rules
     for (const l of LOCKOUT_FOLIAGE) {
       const copies = layerCopies(t, l);
