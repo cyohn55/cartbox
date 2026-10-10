@@ -467,8 +467,51 @@ What separates Lockout from Halo Infinite, seen in a match:
       - a seamed floor tile.
 
       The arena's rebuild from them is I16.
-- [ ] **I15. Texture baking.** Bake ambient occlusion, curvature and
+- [x] **I15. Texture baking.** Bake ambient occlusion, curvature and
       thickness from a mesh in the editor, feeding the wear masks of I4.
+      *Done:* `textureBake.ts` bakes a mesh into its texture space, tracing
+      rays against the whole mesh with the light map's BVH:
+      - **Ambient occlusion:** cosine-weighted hemisphere rays, nearer hits
+        darker.
+      - **Thickness:** how far rays into the surface travel before leaving
+        it.
+      - **Curvature:** each edge between two faces adds its signed bend
+        (convex positive, concave negative) to everything within an edge
+        width, fading with distance.
+      - Occlusion and thickness are denoised by a 3 × 3 average over texels
+        that are also neighbours on the surface, so charts never bleed, and
+        charts are padded so filtering never reads background.
+
+      **Where the maps go:**
+      - Occlusion goes to the occlusion map, which every renderer already
+        applies to ambient light.
+      - Curvature and thickness go to the relief map: G = curvature, and
+        B = **thinness**, so every existing relief map reads solid.
+      - A primitive with texture coordinates is baked in them. Those without
+        share one unique atlas from the light map's chart packer
+        (`bakeLayout`).
+
+      **The graph** gains **Occlusion** and **Thickness** inputs beside
+      Curvature, so wear masks can put grime where the bake says the surface
+      is shut in, and a glow where it is thin.
+      - The software rasteriser reads them from the maps.
+      - Both GPU renderers read occlusion from the packed occlusion map's R
+        and thickness from its A (`occlusionWithRelief` now packs
+        1 − thinness there).
+      - The shared layer parity scene uses both, and matches on WebGL2 and
+        WebGPU.
+
+      **The Mesh tab's Bake maps panel** sets size, rays, occlusion and
+      thickness reach, and edge width, shows the three maps, and remakes
+      LODs.
+      *Lockout:* the Forerunner kit's maps are baked offline
+      (`npm run bake:lockout-kit`, stored with a layout fingerprint, like the
+      arena's light map). The kit wears **worn alloy**, a graph on the bake:
+      - rims polished bright where the curvature is convex (broken up by
+        noise);
+      - grime in the seams and recesses from the cavities and the baked
+        occlusion;
+      - smoother polished rims.
 - [ ] **I16. A Forerunner kit for Lockout.** The arena rebuilt from a designed
       modular kit: chamfered, layered, angular forms with inset light
       channels, at a higher texture resolution, using I4, I14 and I15.

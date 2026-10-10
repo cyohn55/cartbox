@@ -82,6 +82,7 @@ import { RailGroup, RailHint, SegmentedControl } from "./railControls";
 import { LibraryBrowser } from "./LibraryBrowser";
 import { MaterialEditor } from "./MaterialEditor";
 import { FaceEditPanel, type PickedFace } from "./FaceEditPanel";
+import { BakePanel } from "./BakePanel";
 import { AnimatorPanel } from "./AnimatorPanel";
 import { LightingEditor } from "./LightingEditor";
 import { TimelinePanel, type TimelinePreview } from "./TimelinePanel";
@@ -935,6 +936,8 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
             <CodeHint entry={selectedEntry} />
 
             {meshAsset && <FaceEditPanel mesh={meshAsset} picked={pickedFace} onEdit={applyGeometryEdit} />}
+
+            {meshAsset && <BakePanel mesh={meshAsset} onBaked={applyGeometryEdit} />}
 
             {meshAsset && <MaterialEditor mesh={meshAsset} onChange={applyMeshEdit} />}
 

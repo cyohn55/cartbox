@@ -222,7 +222,7 @@ describe("the built-in panel relief", () => {
 });
 
 describe("wear masks in the material graph", () => {
-  const ctx = (curv: number): GraphContext => ({ u: 0, v: 0, px: 0, py: 0, pz: 0, nx: 0, ny: 0, nz: 1, vx: 0, vy: 0, vz: 1, time: 0, curv, br: 1, bg: 1, bb: 1, ba: 1, sample: () => [1, 1, 1, 1] });
+  const ctx = (curv: number): GraphContext => ({ u: 0, v: 0, px: 0, py: 0, pz: 0, nx: 0, ny: 0, nz: 1, vx: 0, vy: 0, vz: 1, time: 0, curv, ao: 1, thick: 1, br: 1, bg: 1, bb: 1, ba: 1, sample: () => [1, 1, 1, 1] });
   const run = (graph: Parameters<typeof compileGraph>[0], curv: number) => {
     const compiled = compileGraph(graph)!;
     const regs = graphRegisters(compiled);

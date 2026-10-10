@@ -12651,7 +12651,7 @@ function occlusionWithRelief(occ, relief) {
       data[o] = occ ? occ.data[texel(occ, x, y)] : 255;
       data[o + 1] = relief.data[r];
       data[o + 2] = relief.data[r + 1];
-      data[o + 3] = 255;
+      data[o + 3] = 255 - relief.data[r + 2];
     }
   }
   const out = { width, height, data };
@@ -13394,6 +13394,8 @@ function graphSites(graph) {
     view: "u.view.xyz",
     time: "u.effect1.w",
     curvature: "gCurv",
+    occlusion: "gAO",
+    thickness: "gThick",
     baseColor: "colour.rgb",
     baseAlpha: "colour.a",
     sample: (p) => `sampleMap(tex, vec2((${p}).x, 1.0 - (${p}).y))`
@@ -13417,6 +13419,9 @@ function graphSites(graph) {
     if (dot(gN, u.view.xyz) < 0.0) { gN = -gN; }
     // The relief's curvature for wear masks (I4): occTex's B, \u22121..1.
     float gCurv = u.layer1.z > 0.5 ? sampleMap(occTex, uv).b * 2.0 - 1.0 : 0.0;
+    // Baked occlusion and thickness (I15): occTex's R (1 without a map) and A (1 \u2212 the relief's thinness).
+    float gAO = u.texflags.z > 0.5 ? sampleMap(occTex, uv).r : 1.0;
+    float gThick = u.layer1.z > 0.5 ? sampleMap(occTex, uv).a : 1.0;
 ${code.split("\n").map((l) => `    ${l}`).join("\n")}
 ${set.map((l) => `    ${l}`).join("\n")}
   }`,
@@ -15321,6 +15326,8 @@ function graphSites2(graph) {
     view: "u.view.xyz",
     time: "u.effect1.w",
     curvature: "gCurv",
+    occlusion: "gAO",
+    thickness: "gThick",
     baseColor: "colour.rgb",
     baseAlpha: "colour.a",
     sample: (p) => `textureSample(tex, samp, vec2<f32>((${p}).x, 1.0 - (${p}).y))`
@@ -15344,6 +15351,9 @@ function graphSites2(graph) {
     if (dot(gN, u.view.xyz) < 0.0) { gN = -gN; }
     // The relief's curvature for wear masks (I4): occTex's B, \u22121..1.
     let gCurv = select(0.0, textureSample(occTex, samp, uv).b * 2.0 - 1.0, u.layer1.z > 0.5);
+    // Baked occlusion and thickness (I15): occTex's R (1 without a map) and A (1 \u2212 the relief's thinness).
+    let gAO = select(1.0, textureSample(occTex, samp, uv).r, u.texflags.z > 0.5);
+    let gThick = select(1.0, textureSample(occTex, samp, uv).a, u.layer1.z > 0.5);
 ${code.split("\n").map((l) => `    ${l}`).join("\n")}
 ${set.map((l) => `    ${l}`).join("\n")}
   }`,

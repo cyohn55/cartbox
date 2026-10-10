@@ -141,10 +141,11 @@ describe("the Lockout arena starter", () => {
     // range's heights, two small maps and its pines), 1.7 MB since its
     // first-person arms (I9: six rigs, their clips and state machines), 1.75 MB
     // since the Spartans' armour sets and the Forerunner kit's prefabs (I13,
-    // I14): a sidecar over 512 KB is offloaded to object
+    // I14), 1.8 MB since the kit's baked occlusion and relief maps (I15): a
+    // sidecar over 512 KB is offloaded to object
     // storage anyway, and this keeps a save well inside the 4.5 MB request body
     // limit.
-    expect(lockoutMeshSidecar().length).toBeLessThan(1_750_000);
+    expect(lockoutMeshSidecar().length).toBeLessThan(1_800_000);
     // Bloom on the energy trim, via the starter's post-FX stack.
     const fx = parsePostFxSettings(resolveStarter("lockout").fx)!;
     expect(fx.enabled.bloom).toBe(true);
