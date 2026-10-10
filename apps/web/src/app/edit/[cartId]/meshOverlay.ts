@@ -1,11 +1,23 @@
 /**
- * Drawing over the Mesh tab's preview (LOCKOUT_MULTIPLAYER_ROADMAP.md L15):
- * the modelling wireframe, the selection, the box being dragged and the
- * move/rotate/scale gizmo, all projected with the preview's own camera so
- * they sit exactly on the software-rendered image beneath.
+ * Drawing over the Mesh tab's preview (LOCKOUT_MULTIPLAYER_ROADMAP.md L15,
+ * L16): the modelling wireframe, the selection, the box being dragged and the
+ * move/rotate/scale gizmo; the skeleton in pose mode; the weight heat map and
+ * the brush. All projected with the preview's own camera, so they sit exactly
+ * on the software-rendered image beneath.
  */
 
-import { primitiveTopology, projectPoint, selectionWelds, type MeshAsset, type MeshSelection } from "@cartbox/editor";
+import {
+  jointOrigins,
+  jointWeights,
+  primitiveTopology,
+  projectPoint,
+  selectionWelds,
+  skeletonSegments,
+  weightHeat,
+  type MeshAsset,
+  type MeshSelection,
+  type MeshSkin,
+} from "@cartbox/editor";
 
 export type GizmoTool = "move" | "rotate" | "scale";
 type Ndc = readonly [number, number];
@@ -160,4 +172,110 @@ export function drawGizmo(ctx: CanvasRenderingContext2D, viewProj: ArrayLike<num
   ctx.beginPath();
   ctx.arc(cx, cy, 3, 0, Math.PI * 2);
   ctx.fill();
+}
+
+/** The skeleton (pose mode): each bone a line from a joint to its child, each joint a dot, the picked one ringed. */
+export function drawSkeleton(ctx: CanvasRenderingContext2D, skin: MeshSkin, pose: Float32Array, viewProj: ArrayLike<number>, size: number, selected: number | null): void {
+  const px = (p: readonly number[]) => {
+    const s = projectPoint(viewProj, p);
+    return s ? toPixels([s[0], s[1]], size) : null;
+  };
+  ctx.save();
+  ctx.lineCap = "round";
+  for (const bone of skeletonSegments(skin, pose)) {
+    const a = px(bone.from), b = px(bone.to);
+    if (!a || !b) continue;
+    // Dark under light, so a bone reads over any armour colour.
+    for (const [style, width] of [["rgba(0, 0, 0, 0.7)", 5], [bone.parent === selected ? SELECTED : "rgba(235, 240, 255, 0.95)", 2.5]] as const) {
+      ctx.strokeStyle = style;
+      ctx.lineWidth = width;
+      ctx.beginPath();
+      ctx.moveTo(a[0], a[1]);
+      ctx.lineTo(b[0], b[1]);
+      ctx.stroke();
+    }
+  }
+  jointOrigins(skin, pose).forEach((p, j) => {
+    const q = px(p);
+    if (!q) return;
+    ctx.fillStyle = j === selected ? SELECTED : "#ffffff";
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(q[0], q[1], j === selected ? 5 : 3.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  });
+  ctx.restore();
+}
+
+/**
+ * The weight heat map (weight paint mode): every front-facing triangle filled
+ * by how much `joint` carries its corners (blue none, red all), shaded by
+ * its facing, drawn farthest first.
+ */
+export function drawHeatMap(ctx: CanvasRenderingContext2D, mesh: MeshAsset, joint: number, viewProj: ArrayLike<number>, size: number): void {
+  const tris: { pts: [number, number][]; depth: number; color: string }[] = [];
+  const light = [0.4, 0.8, 0.6].map((v) => v / Math.hypot(0.4, 0.8, 0.6));
+  for (const p of mesh.primitives) {
+    if (!p.joints || !p.weights) continue;
+    const w = jointWeights(p, joint);
+    const screen: (readonly [number, number, number] | null)[] = [];
+    for (let v = 0; v < p.positions.length / 3; v += 1) screen.push(projectPoint(viewProj, [p.positions[v * 3]!, p.positions[v * 3 + 1]!, p.positions[v * 3 + 2]!]));
+    for (let t = 0; t < p.indices.length; t += 3) {
+      const [a, b, c] = [p.indices[t]!, p.indices[t + 1]!, p.indices[t + 2]!];
+      const sa = screen[a], sb = screen[b], sc = screen[c];
+      if (!sa || !sb || !sc) continue;
+      // Counter-clockwise on screen (NDC, y up) faces the camera.
+      if ((sb[0] - sa[0]) * (sc[1] - sa[1]) - (sb[1] - sa[1]) * (sc[0] - sa[0]) <= 0) continue;
+      const at = (i: number) => [p.positions[i * 3]!, p.positions[i * 3 + 1]!, p.positions[i * 3 + 2]!];
+      const [pa, pb, pc] = [at(a), at(b), at(c)];
+      const e1 = pb.map((x, k) => x - pa[k]!), e2 = pc.map((x, k) => x - pa[k]!);
+      const n = [e1[1]! * e2[2]! - e1[2]! * e2[1]!, e1[2]! * e2[0]! - e1[0]! * e2[2]!, e1[0]! * e2[1]! - e1[1]! * e2[0]!];
+      const shade = 0.55 + 0.45 * Math.max(0, (n[0]! * light[0]! + n[1]! * light[1]! + n[2]! * light[2]!) / (Math.hypot(n[0]!, n[1]!, n[2]!) || 1));
+      const [r, g, bl] = weightHeat((w[a]! + w[b]! + w[c]!) / 3);
+      tris.push({
+        pts: [sa, sb, sc].map((s) => toPixels([s[0], s[1]], size)),
+        depth: sa[2] + sb[2] + sc[2],
+        color: `rgb(${Math.round(r * shade)}, ${Math.round(g * shade)}, ${Math.round(bl * shade)})`,
+      });
+    }
+  }
+  tris.sort((x, y) => y.depth - x.depth);
+  ctx.save();
+  ctx.lineWidth = 0.75;
+  ctx.lineJoin = "round";
+  for (const tri of tris) {
+    ctx.fillStyle = tri.color;
+    ctx.strokeStyle = tri.color;
+    ctx.beginPath();
+    ctx.moveTo(tri.pts[0]![0], tri.pts[0]![1]);
+    ctx.lineTo(tri.pts[1]![0], tri.pts[1]![1]);
+    ctx.lineTo(tri.pts[2]![0], tri.pts[2]![1]);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** A brush's outline where it meets the surface: a circle of its radius, at its distance from the eye. */
+export function drawBrush(ctx: CanvasRenderingContext2D, viewProj: ArrayLike<number>, size: number, at: readonly number[], radius: number, fov = (50 * Math.PI) / 180): void {
+  const s = projectPoint(viewProj, at);
+  if (!s) return;
+  const [x, y] = toPixels([s[0], s[1]], size);
+  // A sphere of `radius` at clip depth w spans radius / (w·tan(fov/2)) of the half-screen.
+  const r = (radius / (s[2] * Math.tan(fov / 2))) * (size / 2);
+  ctx.save();
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(x, y, Math.max(2, r), 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.6)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(x, y, Math.max(2, r) + 1.5, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
 }

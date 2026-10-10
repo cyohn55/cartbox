@@ -680,13 +680,57 @@ then brings the tools into the editor.
       mirrored onto the other side rides the head. The battle rifle
       viewmodel's stock, pulled 4 cm back, plays all six of its clips on the
       `weapon` joint.
-- [ ] **L16. Rigging and keyframes.** The skeleton drawn over the mesh; a pose
+- [x] **L16. Rigging and keyframes.** The skeleton drawn over the mesh; a pose
       mode to rotate bones; weight painting (add, subtract, smooth, normalise)
       with a heat-map view; and a dope sheet that keys bones on a clip, with
       the timeline's easing curves.
       *Lockout:* tune a Spartan's run or author a new taunt clip in the editor.
       *Tests:* painted weights stay normalised; a keyed clip plays back
       through the existing animator the same as an imported one.
+      *Done:* the Mesh tab's **Edit** control gains **Pose** and **Weights**
+      for a skinned mesh.
+      - **Pose mode** (`poseMode.ts`) draws the skeleton over the posed mesh,
+        a bone from each joint to its children. A click picks a joint, or the
+        joint that swings the bone clicked. The rotate gizmo turns it about
+        the world's axes, and the **Pose** panel's angles turn it about its
+        own. It keys the picked bone, or every bone moved, at the playhead
+        with an ease.
+      - **The dope sheet** (`dopeSheet.ts`, under the preview) has a row per
+        bone and a diamond per key. Click a track to scrub, and drag a key to
+        retime it. A picked key takes any of the timeline's eases (linear,
+        smooth, step, or its own curve in the curve editor), and can be
+        deleted. **New clip** starts a taunt.
+      - **How keys play:** a keyed bone's channels are baked from its keys.
+        A linear span is two keys, and a step holds until 1 ms before the
+        next. A smooth or curved span is sampled 30 times a second. The keys
+        themselves are stored with the clip (`AnimationClip.keys`), so the
+        sheet edits keys, not samples. A bone of an imported clip shows its
+        channels' own keys, and keying it leaves every other bone's channels
+        untouched. The player is unchanged: a keyed clip is an ordinary clip
+        to the animator and to GLB export.
+      - **Weight painting** (`weightPaint.ts`): a brush sphere in bind space,
+        fading smoothly to its edge. Add and subtract move the bone's share,
+        and the vertex's other bones make up the difference. A bone taken off
+        a vertex it carried alone hands it to its parent. Smooth blends toward
+        the edge neighbours, and normalise rescales and drops slivers. The
+        four strongest bones are kept, and every split copy of a vertex
+        agrees. The heat map shades each front-facing triangle by its
+        weight: blue for none, through green, to red for all.
+
+      In `rigging-keyframes.test.ts`, every brush leaves every vertex
+      summing to 1 within 1e-6. A subtract on the helmet crown hands exactly
+      the faded strength to `chest`. Loose weights summing to 1.6 normalise.
+      Eases bake as promised, for example smoothstep(¼) = 0.156 of the way
+      in angle a quarter of the way through a smooth span. Keys survive the
+      cart's save and load.
+      *Lockout:* a 1.6 s taunt (right arm raised and pumped, chest turned,
+      head nodding) is keyed through pose mode: 23 keys on 14 bones, baked to
+      165 samples. Played through the cart's animator for 96 ticks, it
+      matches the same clip exported to GLB and re-imported to within 1e-5
+      on every skinning matrix. Its hand rises more than 20 cm at the peak.
+      The run is tuned with a 0.15 rad deeper chest lean keyed between two of
+      its keys. Through the animator, the chest leans exactly that much
+      further there, and the legs and hips are unchanged.
 - [ ] **L17. UVs and texture painting.** A UV view with unwrap and island
       editing, painting into a material's base colour, roughness/metal and
       emissive maps (with the team-colour mask as a paintable layer),

@@ -781,16 +781,7 @@ export function pickMeshTriangle(
 ): { primitive: number; triangle: number; t: number } | null {
   const bounds = framed ?? meshBounds(mesh);
   if (!bounds) return null;
-  const { eye, center, fov } = orbitView(bounds, camera);
-  const f = [center[0] - eye[0], center[1] - eye[1], center[2] - eye[2]];
-  const fl = Math.hypot(f[0]!, f[1]!, f[2]!) || 1;
-  const forward = f.map((v) => v / fl);
-  // lookAt's basis: right = forward × world up, up = right × forward.
-  const rl = Math.hypot(forward[2]!, forward[0]!) || 1;
-  const right = [-forward[2]! / rl, 0, forward[0]! / rl];
-  const up = [right[1]! * forward[2]! - right[2]! * forward[1]!, right[2]! * forward[0]! - right[0]! * forward[2]!, right[0]! * forward[1]! - right[1]! * forward[0]!];
-  const k = Math.tan(fov / 2);
-  const dir = [0, 1, 2].map((i) => forward[i]! + right[i]! * ndcX * k + up[i]! * ndcY * k);
+  const { origin: eye, dir } = previewRay(bounds, camera, ndcX, ndcY);
   let best: { primitive: number; triangle: number; t: number } | null = null;
   mesh.primitives.forEach((p, pi) => {
     for (let t = 0; t < p.indices.length / 3; t += 1) {
@@ -803,6 +794,55 @@ export function pickMeshTriangle(
     }
   });
   return best;
+}
+
+/** The ray from {@link renderMesh}'s eye through a point of its image (NDC), framing `bounds`; `dir` is not unit length. */
+export function previewRay(bounds: MeshBounds, camera: OrbitCamera, ndcX: number, ndcY: number): { origin: [number, number, number]; dir: [number, number, number] } {
+  const { eye, center, fov } = orbitView(bounds, camera);
+  const f = [center[0] - eye[0], center[1] - eye[1], center[2] - eye[2]];
+  const fl = Math.hypot(f[0]!, f[1]!, f[2]!) || 1;
+  const forward = f.map((v) => v / fl);
+  // lookAt's basis: right = forward × world up, up = right × forward.
+  const rl = Math.hypot(forward[2]!, forward[0]!) || 1;
+  const right = [-forward[2]! / rl, 0, forward[0]! / rl];
+  const up = [right[1]! * forward[2]! - right[2]! * forward[1]!, right[2]! * forward[0]! - right[0]! * forward[2]!, right[0]! * forward[1]! - right[1]! * forward[0]!];
+  const k = Math.tan(fov / 2);
+  const dir = [0, 1, 2].map((i) => forward[i]! + right[i]! * ndcX * k + up[i]! * ndcY * k) as [number, number, number];
+  return { origin: eye, dir };
+}
+
+/**
+ * The surface point under a point of the preview (L16's weight brush, L17's
+ * paint brush): the triangle {@link pickMeshTriangle} finds, where on it
+ * (model space) and its barycentric weights (one per corner, summing to 1).
+ */
+export function pickMeshPoint(
+  mesh: MeshAsset,
+  camera: OrbitCamera,
+  ndcX: number,
+  ndcY: number,
+  framed?: MeshBounds | null,
+): { primitive: number; triangle: number; point: [number, number, number]; barycentric: [number, number, number] } | null {
+  const bounds = framed ?? meshBounds(mesh);
+  const hit = bounds ? pickMeshTriangle(mesh, camera, ndcX, ndcY, bounds) : null;
+  if (!hit || !bounds) return null;
+  const { origin, dir } = previewRay(bounds, camera, ndcX, ndcY);
+  const point: [number, number, number] = [origin[0] + dir[0] * hit.t, origin[1] + dir[1] * hit.t, origin[2] + dir[2] * hit.t];
+  const p = mesh.primitives[hit.primitive]!;
+  const [a, b, c] = [0, 1, 2].map((k) => {
+    const i = p.indices[hit.triangle * 3 + k]! * 3;
+    return [p.positions[i]!, p.positions[i + 1]!, p.positions[i + 2]!];
+  }) as [number[], number[], number[]];
+  // Barycentrics by areas: each corner's weight is the sub-triangle opposite it.
+  const sub = (x: number[], y: number[]) => [x[0]! - y[0]!, x[1]! - y[1]!, x[2]! - y[2]!];
+  const cross = (x: number[], y: number[]) => [x[1]! * y[2]! - x[2]! * y[1]!, x[2]! * y[0]! - x[0]! * y[2]!, x[0]! * y[1]! - x[1]! * y[0]!];
+  const n = cross(sub(b, a), sub(c, a));
+  const nn = n[0]! * n[0]! + n[1]! * n[1]! + n[2]! * n[2]! || 1;
+  const area = (x: number[], y: number[]) => {
+    const m = cross(sub(x, point), sub(y, point));
+    return (m[0]! * n[0]! + m[1]! * n[1]! + m[2]! * n[2]!) / nn;
+  };
+  return { primitive: hit.primitive, triangle: hit.triangle, point, barycentric: [area(b, c), area(c, a), area(a, b)] };
 }
 
 /** Möller–Trumbore: the ray parameter where it meets the triangle (either side), or null. */
