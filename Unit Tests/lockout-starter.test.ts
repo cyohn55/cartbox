@@ -185,7 +185,7 @@ describe("the Lockout arena starter", () => {
     expect(LOCKOUT_CODE).toContain("throw_grenade"); // double-tap-A frag grenades
     expect(LOCKOUT_CODE).toContain("seg_blocked"); // shots can't pass through walls
     expect(LOCKOUT_CODE).toContain("auto-melee"); // point-blank melee
-    expect(LOCKOUT_CODE).toContain("draw_tracker"); // radar / motion tracker
+    expect(LOCKOUT_CODE).toContain("tracker_blips"); // radar / motion tracker
     expect(LOCKOUT_CODE).toContain("register_kill"); // sprees + multikills + kill feed
   });
 });

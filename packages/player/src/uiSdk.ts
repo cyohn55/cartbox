@@ -26,9 +26,15 @@
  *                                                       order they were shown
  */
 
-import { FOCUSABLE, layoutUi, parseUiDocuments, uiNavigation, type UiDocument } from "@cartbox/editor";
+import { FOCUSABLE, holoBindingKeys, holoDocuments, layoutUi, parseUiDocuments, uiNavigation, type UiDocument } from "@cartbox/editor";
 
+import { PHYS_OP_UI_LIST, PHYS_OP_UI_NUM, PHYS_OP_UI_SHOW, PHYS_OP_UI_TEXT } from "./physics/protocol.js";
 import { POINTER_AT, POINTER_CLICKS, POINTER_FLAGS, POINTER_MAGIC, POINTER_X, POINTER_Y } from "./pointer.js";
+
+/** The longest string a holo binding carries to the host (characters). */
+export const HOLO_TEXT_MAX = 240;
+/** The most numbers a holo list binding carries. */
+export const HOLO_LIST_MAX = 192;
 
 const lua = (s: string) => JSON.stringify(s);
 
@@ -78,6 +84,12 @@ export function uiSdkLua(docs: readonly UiDocument[] | null | undefined, width: 
     }).filter(Boolean);
     return `[${lua(doc.name)}]={w={${widgets.join(",\n")}},nav={${links.join(",")}},first=${first}}`;
   });
+  const holo = holoDocuments(docs);
+  const holoMap = holo.map((d, i) => `[${lua(d.name)}]=${i}`).join(",");
+  const keyMap = holoBindingKeys(docs).map((k, i) => `[${lua(k)}]=${i}`).join(",");
+  // The same names in order: the flush walks these, never pairs(), so every core sends in one order.
+  const holoNames = holo.map((d) => lua(d.name)).join(",");
+  const keyNames = holoBindingKeys(docs).map(lua).join(",");
   return `do
 local U = {}
 local DOCS = {${tables.join(",\n")}}
@@ -243,7 +255,84 @@ local function drawdoc(n)
     end
   end
 end
-U.draw = function() for _, n in ipairs(shown) do drawdoc(n) end end
+-- Holo documents (I12) are drawn by the host, in true colour: it hears which are
+-- shown and what their bindings hold, once a frame, as commands (cartbox._cmd,
+-- from the runtime). Without the runtime they fall back to the console's drawing.
+local HOLO = {${holoMap}}
+local HK = {${keyMap}}
+local HOLON, HKN = {${holoNames}}, {${keyNames}}
+local hsent, sentv, dirty = {}, {}, {}
+for _, k in ipairs(HKN) do dirty[k] = true end
+local function sig(v)
+  if type(v) == "table" then
+    local parts = {}
+    for i, item in ipairs(v) do parts[i] = type(item) == "table" and tostring(item.text) or tostring(item) end
+    return "t" .. table.concat(parts, "\\1")
+  end
+  return type(v) .. tostring(v)
+end
+local function sendtext(cmd, key, s)
+  s = string.sub(s, 1, ${HOLO_TEXT_MAX})
+  local codes = {}
+  for i = 1, #s, 2 do codes[#codes + 1] = string.byte(s, i) * 256 + (string.byte(s, i + 1) or 0) end
+  local ok = cmd(${PHYS_OP_UI_TEXT}, key, #s, codes[1], codes[2], codes[3], codes[4], codes[5])
+  local chunk, at = 1, 6
+  while ok and at <= #codes do
+    ok = cmd(${PHYS_OP_UI_TEXT}, key | (chunk << 16), codes[at], codes[at + 1], codes[at + 2], codes[at + 3], codes[at + 4], codes[at + 5])
+    chunk, at = chunk + 1, at + 6
+  end
+  return ok
+end
+local function sendlist(cmd, key, t)
+  local n = math.min(#t, ${HOLO_LIST_MAX})
+  local ok = cmd(${PHYS_OP_UI_LIST}, key, n, t[1], t[2], t[3], t[4], t[5])
+  local chunk, at = 1, 6
+  while ok and at <= n do
+    ok = cmd(${PHYS_OP_UI_LIST}, key | (chunk << 16), t[at], at + 1 <= n and t[at + 1] or 0, at + 2 <= n and t[at + 2] or 0, at + 3 <= n and t[at + 3] or 0, at + 4 <= n and t[at + 4] or 0, at + 5 <= n and t[at + 5] or 0)
+    chunk, at = chunk + 1, at + 6
+  end
+  return ok
+end
+local function sendval(cmd, key, v)
+  if type(v) == "number" then return cmd(${PHYS_OP_UI_NUM}, key, v) end
+  if type(v) == "boolean" or v == nil then return cmd(${PHYS_OP_UI_NUM}, key, v and 1 or 0) end
+  if type(v) == "table" then
+    local nums = true
+    for _, item in ipairs(v) do if type(item) ~= "number" then nums = false end end
+    if nums then return sendlist(cmd, key, v) end
+    -- A list of texts: one string, a row a line.
+    local rows = {}
+    for i, item in ipairs(v) do rows[i] = type(item) == "table" and tostring(item.text or "") or tostring(item) end
+    return sendtext(cmd, key, table.concat(rows, "\\n"))
+  end
+  local text = tostring(v)
+  if string.sub(text, 1, 1) == "@" then text = cartbox.text(string.sub(text, 2)) end
+  return sendtext(cmd, key, text)
+end
+local function hflush()
+  local cmd = cartbox._cmd
+  if not cmd then return false end
+  for i, n in ipairs(HOLON) do
+    i = i - 1
+    local want = isshown(n)
+    if hsent[n] ~= want and cmd(${PHYS_OP_UI_SHOW}, i, want and 1 or 0) then hsent[n] = want end
+  end
+  for _, k in ipairs(HKN) do
+    if dirty[k] then
+      local v = B[k]
+      local s = sig(v)
+      if s == sentv[k] then dirty[k] = nil
+      elseif sendval(cmd, HK[k], v) then sentv[k] = s; dirty[k] = nil end
+    end
+  end
+  return true
+end
+local plainset = U.set
+U.set = function(k, v) plainset(k, v); if HK[k] then dirty[k] = true end end
+U.draw = function()
+  local host = hflush()
+  for _, n in ipairs(shown) do if not (host and HOLO[n]) then drawdoc(n) end end
+end
 cartbox.ui = U
 end`;
 }

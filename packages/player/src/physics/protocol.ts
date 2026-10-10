@@ -296,6 +296,17 @@ export const PHYS_OP_MIX = 33;
 export const PHYS_OP_PLACE = 34;
 /** Send a placed object back to where the scene put it: a = the object. */
 export const PHYS_OP_UNPLACE = 35;
+/**
+ * Holo UI documents (HALO_INFINITE_STYLE_ROADMAP.md I12), drawn by the host: a
+ * document shown or hidden (a = its index among the holo documents, v0 = 1/0),
+ * and a binding set (a = the key's index, high 16 bits a chunk number) to a
+ * number (v0), a string (chunk 0: v0 = length, then two characters a value),
+ * or a list of numbers (chunk 0: v0 = count, then one number a value).
+ */
+export const PHYS_OP_UI_SHOW = 36;
+export const PHYS_OP_UI_NUM = 37;
+export const PHYS_OP_UI_TEXT = 38;
+export const PHYS_OP_UI_LIST = 39;
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {

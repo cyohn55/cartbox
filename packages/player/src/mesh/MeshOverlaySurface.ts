@@ -328,6 +328,8 @@ export class MeshOverlaySurface implements DisplaySurface {
   private inactiveKey = "";
   /** Each object's world matrix as last drawn (null = hidden), or null when nothing moved. */
   private lastPlacement: (Mat4 | null)[] | null = null;
+  /** Draws the cart's shown holo UI documents over the finished frame (I12; set by the player). */
+  private holo: ((out: Uint8ClampedArray, width: number, height: number, time: number) => void) | null = null;
   /** Which objects drew on the front layer last frame (where their trails go). */
   private lastFront: boolean[] = [];
   /** Swing trails (I10): the objects whose meshes leave them, and the ribbons they've swept. */
@@ -505,6 +507,11 @@ export class MeshOverlaySurface implements DisplaySurface {
       this.localShadowCache = [];
     }
     return true;
+  }
+
+  /** Draw holo UI documents over every frame with `draw` (null: none). */
+  setHolo(draw: ((out: Uint8ClampedArray, width: number, height: number, time: number) => void) | null): void {
+    this.holo = draw;
   }
 
   /** Apply a graphics quality preset (takes effect on the next frame). */
@@ -930,6 +937,8 @@ export class MeshOverlaySurface implements DisplaySurface {
     if (target) expandNearest(target.out, target.width, target.height, this.output, this.width, this.height);
     // Lay the cart's 2D frame over the rendered scene as a HUD (first-person).
     if (this.hud && this.hudFrame) compositeHudOverScene(this.output, this.hudFrame, this.width * this.height);
+    // Holo UI documents (I12): drawn over everything, in true colour.
+    if (this.holo) this.holo(this.output, this.width, this.height, this.frame / 60);
     this.frame += 1; // advance in lockstep with the run loop's present cadence
     this.inner.blit(this.presented);
     this.pace(performance.now() - started);

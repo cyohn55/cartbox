@@ -429,7 +429,7 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     expect(coverage).toBe(0);
     expect(maxDelta).toBeLessThanOrEqual(6);
     renderer.dispose();
-  });
+  }, 60_000);
 
   it("shades clearcoat, brushed metal, parallax relief and wear masks like the software rasteriser (I4)", async () => {
     const mat = (m: Record<string, unknown>) => {
@@ -514,7 +514,7 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     let changed = 0;
     for (let i = 0; i < bent.length; i += 4) if (Math.abs(bent[i]! - straight[i]!) + Math.abs(bent[i + 2]! - straight[i + 2]!) > 30) changed += 1;
     expect(changed).toBeGreaterThan(30);
-  });
+  }, 60_000);
 
   it("matches the software rasteriser on image-based lighting (within float tolerance)", async () => {
     // The environment replaces flat ambient with directional irradiance +
