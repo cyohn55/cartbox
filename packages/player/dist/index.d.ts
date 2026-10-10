@@ -5422,6 +5422,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
     /** The last sky backdrop and the view it was painted for (it depends only on
      *  where the camera points, so walking without turning reuses it). */
     private skyCache;
+    /** The sky's drifting cloud layers (I6), drawn over the backdrop each frame. */
+    private skyClouds;
     /**
      * Told each frame where the sky dome's sun is on screen and how much of it is
      * unblocked, for the post-FX glare and lens flare (H8); null without a sky dome.

@@ -19,6 +19,7 @@
  */
 
 import type { DecodedTexture, Mat4 } from "./meshRasterizer";
+import { cloudPlane, overClouds, prepareSkyObjects, resamplePanorama, skyObjectsAt, type BakedCloudLayer, type SkyCloudLayer, type SkyObject } from "./skyLayers";
 
 type Rgb = readonly [number, number, number];
 
@@ -58,6 +59,31 @@ export interface ProceduralSky {
   /** Far-to-near: later ranges draw in front of earlier ones. */
   readonly mountains: readonly SkyMountainRange[];
   readonly seed: number;
+  /**
+   * An imported panorama (HALO_INFINITE_STYLE_ROADMAP.md I6; see skyLayers.ts)
+   * in place of the gradient, sun glow, clouds and mountains above. The sun
+   * direction still aims the key light, the shafts and the flare.
+   */
+  readonly panorama?: SkyPanorama | null;
+  /** Objects at infinity — a ring, a planet — in front of the sky, behind its clouds and mountains (I6). */
+  readonly objects?: readonly SkyObject[];
+  /** Cloud layers drifting overhead, drawn over the backdrop each frame (I6). */
+  readonly cloudLayers?: readonly SkyCloudLayer[];
+}
+
+/**
+ * An imported equirectangular sky (I6): a PNG, JPEG or Radiance `.hdr`, kept
+ * as base64 in the lighting rig (which travels as JSON).
+ */
+export interface SkyPanorama {
+  /** "image/png", "image/jpeg" or "image/vnd.radiance". */
+  readonly mime: string;
+  /** The file's bytes, base64. */
+  readonly data: string;
+  /** Brightness: an HDR image's exposure into the 8-bit sky, an 8-bit image's gain (default 1). */
+  readonly exposure: number;
+  /** Turns it about the vertical, degrees (default 0). */
+  readonly yaw: number;
 }
 
 /**
@@ -327,7 +353,32 @@ const MOUNTAIN_BASE = 0.05;
  * longitude = atan2(z, x) across, latitude top→bottom), matching the projection
  * `sampleEnvironmentDir` reads. Deterministic for a given sky and size.
  */
-export function bakeSkyPanorama(sky: ProceduralSky, width: number, height: number): DecodedTexture {
+export function bakeSkyPanorama(sky: ProceduralSky, width: number, height: number, imported: DecodedTexture | null = null): DecodedTexture {
+  // Sky objects (I6), framed once; shaded per texel in front of the sky.
+  const objects = prepareSkyObjects(sky.objects ?? [], sky.sunDirection);
+  const pixel = Math.PI / height;
+  if (imported) {
+    // An imported panorama (I6) stands in for the procedural sky: resampled, then the objects laid over it.
+    const map = resamplePanorama(imported, width, height, sky.panorama?.yaw ?? 0, sky.panorama && !isRadiance(sky.panorama.mime) ? sky.panorama.exposure : 1);
+    if (objects.length > 0) {
+      const sl = Math.hypot(sky.sunDirection[0], sky.sunDirection[1], sky.sunDirection[2]) || 1;
+      const sun = [sky.sunDirection[0] / sl, sky.sunDirection[1] / sl, sky.sunDirection[2] / sl] as const;
+      for (let y = 0; y < height; y += 1) {
+        const theta = ((y + 0.5) / height) * Math.PI;
+        const st = Math.sin(theta);
+        for (let x = 0; x < width; x += 1) {
+          const phi = ((x + 0.5) / width - 0.5) * 2 * Math.PI;
+          const [or, og, ob, oa] = skyObjectsAt(objects, [st * Math.cos(phi), Math.cos(theta), st * Math.sin(phi)], sun, sky.horizon, pixel);
+          if (oa <= 0) continue;
+          const o = (y * width + x) * 4;
+          map.data[o] = map.data[o]! + (or * 255 - map.data[o]!) * oa;
+          map.data[o + 1] = map.data[o + 1]! + (og * 255 - map.data[o + 1]!) * oa;
+          map.data[o + 2] = map.data[o + 2]! + (ob * 255 - map.data[o + 2]!) * oa;
+        }
+      }
+    }
+    return map;
+  }
   const data = new Uint8ClampedArray(width * height * 4);
   const sl = Math.hypot(sky.sunDirection[0], sky.sunDirection[1], sky.sunDirection[2]) || 1;
   const sun = [sky.sunDirection[0] / sl, sky.sunDirection[1] / sl, sky.sunDirection[2] / sl] as const;
@@ -386,6 +437,16 @@ export function bakeSkyPanorama(sky: ProceduralSky, width: number, height: numbe
       let r = sky.horizon[0] + (sky.zenith[0] - sky.horizon[0]) * g;
       let gg = sky.horizon[1] + (sky.zenith[1] - sky.horizon[1]) * g;
       let b = sky.horizon[2] + (sky.zenith[2] - sky.horizon[2]) * g;
+
+      // Sky objects (I6): in front of the sky, behind its clouds and mountains.
+      if (objects.length > 0) {
+        const [or, og, ob, oa] = skyObjectsAt(objects, [dx, dy, dz], sun, sky.horizon, pixel);
+        if (oa > 0) {
+          r += (or - r) * oa;
+          gg += (og - gg) * oa;
+          b += (ob - b) * oa;
+        }
+      }
 
       // Sun: a wide soft glow plus a tight core.
       const cosSun = Math.max(0, dx * sun[0] + dy * sun[1] + dz * sun[2]);
@@ -484,6 +545,38 @@ export function bakeSkyPanorama(sky: ProceduralSky, width: number, height: numbe
   return { width, height, data };
 }
 
+/** Whether a panorama's file is a Radiance HDR (exposed at decode, not as a gain). */
+export function isRadiance(mime: string): boolean {
+  return mime === "image/vnd.radiance";
+}
+
+/**
+ * A panorama with drifting cloud layers laid over it as they stand at `time`
+ * (I6) — what the reflections see, baked once at rest; the backdrop draws the
+ * layers itself, moving, each frame.
+ */
+export function panoramaWithClouds(map: DecodedTexture, layers: readonly BakedCloudLayer[], time = 0): DecodedTexture {
+  if (layers.length === 0) return map;
+  const { width, height } = map;
+  const data = new Uint8ClampedArray(map.data);
+  for (let y = 0; y < height; y += 1) {
+    const theta = ((y + 0.5) / height) * Math.PI;
+    const dy = Math.cos(theta);
+    if (dy <= 0.02) continue;
+    const st = Math.sin(theta);
+    for (let x = 0; x < width; x += 1) {
+      const phi = ((x + 0.5) / width - 0.5) * 2 * Math.PI;
+      const [px, pz, fade] = cloudPlane(st * Math.cos(phi), dy, st * Math.sin(phi));
+      const o = (y * width + x) * 4;
+      const [r, g, b] = overClouds(layers, px, pz, fade, time, data[o]!, data[o + 1]!, data[o + 2]!);
+      data[o] = r;
+      data[o + 1] = g;
+      data[o + 2] = b;
+    }
+  }
+  return { width, height, data };
+}
+
 /** Box-downsample a panorama by an integer factor (for the IBL copy). */
 export function downsamplePanorama(map: DecodedTexture, factor: number): DecodedTexture {
   const f = Math.max(1, Math.floor(factor));
@@ -518,6 +611,9 @@ export function downsamplePanorama(map: DecodedTexture, factor: number): Decoded
 let skyScratch: Uint32Array | null = null;
 let gridU: Float32Array | null = null;
 let gridV: Float32Array | null = null;
+let gridPx: Float32Array | null = null;
+let gridPz: Float32Array | null = null;
+let gridFade: Float32Array | null = null;
 
 /**
  * Paint a panorama behind the camera into `out` (RGBA, `width × height`): every
@@ -540,6 +636,8 @@ export function renderSkyBackground(
   map: DecodedTexture,
   step = 8,
   scale = 2,
+  /** Drifting cloud layers (I6) and the time they have drifted to, or omitted for none. */
+  clouds: { readonly layers: readonly BakedCloudLayer[]; readonly time: number } | null = null,
 ): void {
   const k = Math.max(1, Math.floor(scale));
   const sw = Math.ceil(width / k);
@@ -563,6 +661,13 @@ export function renderSkyBackground(
   }
   const gu = gridU;
   const gv = gridV!;
+  // Where each grid ray meets the cloud plane (I6), interpolated across cells as u and v are.
+  const layered = clouds !== null && clouds.layers.length > 0;
+  if (layered && (!gridPx || gridPx.length < gw * gh)) {
+    gridPx = new Float32Array(gw * gh);
+    gridPz = new Float32Array(gw * gh);
+    gridFade = new Float32Array(gw * gh);
+  }
   const TWO_PI = 2 * Math.PI;
   for (let j = 0; j < gh; j += 1) {
     const ndcY = 1 - ((j * gstep * k) / height) * 2;
@@ -576,6 +681,12 @@ export function renderSkyBackground(
       const len = Math.hypot(dx, dy, dz) || 1;
       gu[j * gw + i] = Math.atan2(dz, dx) / TWO_PI + 0.5;
       gv[j * gw + i] = Math.acos(Math.max(-1, Math.min(1, dy / len))) / Math.PI;
+      if (layered) {
+        const [px, pz, fade] = cloudPlane(dx / len, dy / len, dz / len);
+        gridPx![j * gw + i] = px;
+        gridPz![j * gw + i] = pz;
+        gridFade![j * gw + i] = fade;
+      }
     }
   }
 
@@ -644,6 +755,44 @@ export function renderSkyBackground(
           const b = src[p00 + 2]! * w00 + src[p10 + 2]! * w10 + src[p01 + 2]! * w01 + src[p11 + 2]! * w11;
           // Little-endian RGBA packed as one word (alpha 255).
           small[o] = 0xff000000 | ((b + 0.5) << 16) | ((gg + 0.5) << 8) | (r + 0.5);
+        }
+      }
+    }
+  }
+
+  // Drifting cloud layers (I6), over the shaded sky: each pixel's plane point
+  // and fade interpolated across its grid cell.
+  if (layered) {
+    const px = gridPx!;
+    const pz = gridPz!;
+    const pf = gridFade!;
+    for (let j = 0; j < gh - 1; j += 1) {
+      const y0c = j * gstep;
+      if (y0c >= sh) break;
+      const y1c = Math.min(sh, y0c + gstep);
+      for (let i = 0; i < gw - 1; i += 1) {
+        const x0c = i * gstep;
+        if (x0c >= sw) break;
+        const x1c = Math.min(sw, x0c + gstep);
+        const g = j * gw + i;
+        // A cell whose corners are all below the clouds' fade has none to draw.
+        if (pf[g]! <= 0 && pf[g + 1]! <= 0 && pf[g + gw]! <= 0 && pf[g + gw + 1]! <= 0) continue;
+        for (let y = y0c; y < y1c; y += 1) {
+          const ty = (y - y0c) * inv;
+          for (let x = x0c; x < x1c; x += 1) {
+            const tx = (x - x0c) * inv;
+            const lerp = (f: Float32Array) => {
+              const top = f[g]! + (f[g + 1]! - f[g]!) * tx;
+              const bottom = f[g + gw]! + (f[g + gw + 1]! - f[g + gw]!) * tx;
+              return top + (bottom - top) * ty;
+            };
+            const fade = lerp(pf);
+            if (fade <= 0) continue;
+            const o = y * sw + x;
+            const word = small[o]!;
+            const [r, gg, b] = overClouds(clouds!.layers, lerp(px), lerp(pz), fade, clouds!.time, word & 0xff, (word >>> 8) & 0xff, (word >>> 16) & 0xff);
+            small[o] = 0xff000000 | ((Math.min(255, Math.max(0, b)) + 0.5) << 16) | ((Math.min(255, Math.max(0, gg)) + 0.5) << 8) | (Math.min(255, Math.max(0, r)) + 0.5);
+          }
         }
       }
     }

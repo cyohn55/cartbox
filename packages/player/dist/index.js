@@ -9777,7 +9777,13 @@ import {
   sceneLightingEnvironment,
   sceneLightingKeyDirection,
   sceneLightingTonemap,
-  withDescendants
+  withDescendants,
+  bakeCloudLayer,
+  base64ToBytes as base64ToBytes2,
+  decodeRadianceHdr,
+  hdrToTexture,
+  isRadiance,
+  panoramaWithClouds
 } from "@cartbox/editor";
 
 // src/render/sceneRenderer.ts
@@ -10082,6 +10088,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     /** The last sky backdrop and the view it was painted for (it depends only on
      *  where the camera points, so walking without turning reuses it). */
     this.skyCache = null;
+    /** The sky's drifting cloud layers (I6), drawn over the backdrop each frame. */
+    this.skyClouds = [];
     /**
      * Told each frame where the sky dome's sun is on screen and how much of it is
      * unblocked, for the post-FX glare and lens flare (H8); null without a sky dome.
@@ -10258,13 +10266,16 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const lighting = next.lighting;
       let environment = lighting ? sceneLightingEnvironment(lighting) : null;
       let skyMap = null;
+      let clouds = [];
       if (lighting?.sky && environment) {
-        skyMap = bakeSkyPanorama(lighting.sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT);
-        const ibl = downsamplePanorama(skyMap, SKY_IBL_DOWNSAMPLE);
-        environment = { ...environment, map: ibl, average: computeEnvironmentAverage(ibl) };
+        const baked = await bakeSceneSky(lighting.sky);
+        skyMap = baked.map;
+        clouds = baked.clouds;
+        environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections) };
       }
       this.environment = environment;
       this.skyMap = skyMap;
+      this.skyClouds = clouds;
       this.skyCache = null;
     }
     this.scene = next;
@@ -10334,13 +10345,16 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     }
     const lighting = scene.lighting;
     let skyMap = null;
+    let clouds = [];
     let environment = lighting ? sceneLightingEnvironment(lighting) : null;
     if (lighting?.sky && environment) {
-      skyMap = bakeSkyPanorama(lighting.sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT);
-      const ibl = downsamplePanorama(skyMap, SKY_IBL_DOWNSAMPLE);
-      environment = { ...environment, map: ibl, average: computeEnvironmentAverage(ibl) };
+      const baked = await bakeSceneSky(lighting.sky);
+      skyMap = baked.map;
+      clouds = baked.clouds;
+      environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections) };
     }
     const surface = new _MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
+    surface.skyClouds = clouds;
     for (const [i, mesh] of live) surface.live.set(i, mesh);
     scene.instances.forEach((instance, i) => {
       if (instance.foliage) surface.foliage.set(instances[i].mesh, instance.foliage);
@@ -10626,11 +10640,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   paintSky(out, width, height, view, projection, scale) {
     const key = [width, height, scale, view[0], view[1], view[2], view[4], view[5], view[6], view[8], view[9], view[10], projection[0], projection[5]].map((n) => Math.round(n * 1e5)).join(",");
     const cache = this.skyCache;
-    if (cache && cache.key === key && cache.pixels.length === width * height * 4) {
+    const drifting = this.skyClouds.length > 0;
+    if (!drifting && cache && cache.key === key && cache.pixels.length === width * height * 4) {
       out.set(cache.pixels);
       return;
     }
-    renderSkyBackground(out, width, height, view, projection, this.skyMap, 8, scale);
+    renderSkyBackground(out, width, height, view, projection, this.skyMap, 8, scale, drifting ? { layers: this.skyClouds, time: this.frame / 60 } : null);
     const pixels = cache && cache.pixels.length === width * height * 4 ? cache.pixels : new Uint8ClampedArray(width * height * 4);
     pixels.set(out.subarray(0, width * height * 4));
     this.skyCache = { key, pixels };
@@ -11091,6 +11106,26 @@ function fillPlaceholders(mesh, images) {
     return material === primitive.material ? primitive : { ...primitive, material };
   });
   return touched ? { ...mesh, primitives } : mesh;
+}
+async function bakeSceneSky(sky) {
+  let imported = null;
+  if (sky.panorama) {
+    try {
+      const bytes = base64ToBytes2(sky.panorama.data);
+      if (isRadiance(sky.panorama.mime)) {
+        const hdr = decodeRadianceHdr(bytes);
+        imported = hdr ? hdrToTexture(hdr, sky.panorama.exposure) : null;
+      } else {
+        imported = await decodeTexture(sky.panorama.mime, bytes);
+      }
+    } catch {
+      imported = null;
+    }
+  }
+  const map = bakeSkyPanorama(sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT, imported);
+  const clouds = (sky.cloudLayers ?? []).map(bakeCloudLayer);
+  const reflections = panoramaWithClouds(downsamplePanorama(map, SKY_IBL_DOWNSAMPLE), clouds, 0);
+  return { map, reflections, clouds };
 }
 async function decodeMeshTextures(mesh, decodeKtx2, cache) {
   const decode = (image) => image.mime === "image/ktx2" ? decodeKtx2(image.bytes) : decodeTexture(image.mime, image.bytes);
