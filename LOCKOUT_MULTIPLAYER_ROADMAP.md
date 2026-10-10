@@ -304,7 +304,7 @@ inset and bevel. But:
 The order below gets edited Spartans into the demo first, through Blender,
 then brings the tools into the editor.
 
-- [ ] **L13. Lockout's assets as editable data.** The Spartans, viewmodels,
+- [x] **L13. Lockout's assets as editable data.** The Spartans, viewmodels,
       pickups and kit become an asset pack (the one L10 shares between maps)
       that the demo loads, instead of rebuilding them from code. Opening the
       pack in the editor and saving it updates the demo. An import can
@@ -316,6 +316,29 @@ then brings the tools into the editor.
       *Tests:* replacing the soldier keeps every bot's index and animator; a
       replacement missing `head` or `run` is flagged; the demo loads the
       saved pack.
+      *Done:* the demo reads a saved cart, not a separate pack. Moving the
+      shared assets into a pack of their own stays with L10, where two maps
+      need it.
+      - **The editor:** the Mesh tab's **Replace model** (`meshReplace.ts`)
+        puts an imported model in place of the selected object and every
+        copy of it, so all seven bots change together. Each keeps its id,
+        place, animator and props. A material set the new model lacks is
+        dropped, and LODs are remade.
+      - **The contract:** before replacing, the editor checks that the new
+        model keeps the old one's joints and clips, the clips the objects'
+        state machines play, and the material sets they wear. If any are
+        missing it says which and asks before replacing.
+      - **The demo:** `/lockout?assets=<cart>` reads that cart's saved copy
+        in this browser. It plays the cart's Spartans, viewmodels and
+        pickups in place of its own, but never its arena, lighting or code
+        (`lockoutAssets.ts`). An asset whose replacement breaks the contract
+        keeps the demo's model, and the lobby says why.
+      - **The link:** a Lockout cart's Mesh tab links straight to the demo
+        with its assets.
+
+      *Lockout:* a Spartan exported as GLB (L14), reshaped as Blender would
+      and brought back plays on every bot in the demo, with its joints and
+      clips intact (`lockout-assets.test.ts`).
 - [x] **L14. A rigged round trip with Blender.** GLB export writes skins
       (joints, weights, inverse bind matrices), animation clips, the second UV
       set and material sets, so a Spartan exported, edited in Blender and

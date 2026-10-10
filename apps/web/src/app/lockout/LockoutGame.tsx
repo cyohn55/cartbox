@@ -11,6 +11,9 @@
  * Start button, the ≡ Menu button, or Esc / Enter / P — opens the Start menu
  * (controls, button mapping, audio, display); offline it pauses the game,
  * online the match keeps going underneath.
+ *
+ * `?assets=<cart id>` plays a Lockout cart saved in the editor in this browser
+ * with its own Spartans, viewmodels and pickups (L13; see lockoutAssets.ts).
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -36,6 +39,8 @@ import { StartMenu } from "./StartMenu";
 import { browserStorage, readLocalSave, saveKey, writeLocalSave } from "@/lib/saveData";
 import { basePath } from "@/lib/staticSite";
 import { fetchStandaloneParts, standaloneHtml, standaloneZip, type StandaloneGame } from "@/lib/standaloneExport";
+import { loadCartDraft } from "@/lib/localCartStore";
+import { lockoutSidecarWithAssets, type LockoutAssetOverlay } from "@/lib/lockoutAssets";
 
 /** Where Lockout keeps its career record (it has no cart row, so it stays in this browser). */
 const LOCKOUT_SAVE_KEY = saveKey("lockout");
@@ -50,6 +55,18 @@ function lockoutStandalone(): StandaloneGame {
 }
 
 type Phase = { kind: "lobby" } | { kind: "playing" } | { kind: "error"; message: string };
+
+/** The cart named by `?assets=`, whose saved assets the demo plays (null for the demo's own). */
+function assetsCartId(): string | null {
+  const id = new URLSearchParams(window.location.search).get("assets");
+  return id && /^[\w-]{1,64}$/.test(id) ? id : null;
+}
+
+/** The demo's scene, with the `?assets=` cart's saved Spartans, viewmodels and pickups laid in. */
+function lockoutScene(): { json: string; overlay: LockoutAssetOverlay | null } {
+  const id = assetsCartId();
+  return lockoutSidecarWithAssets(lockoutMeshSidecar(), id ? (loadCartDraft(id)?.sidecars.mesh ?? null) : null);
+}
 
 export function LockoutGame() {
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -74,12 +91,16 @@ export function LockoutGame() {
   /** How to open the menu, shown for a few seconds when a game starts. */
   const [menuHint, setMenuHint] = useState(false);
   const online = onlineRoomsAvailable();
+  /** The `?assets=` cart's assets: what was laid in, and what kept the demo's model (L13). */
+  const [assets, setAssets] = useState<{ cart: string; overlay: LockoutAssetOverlay | null } | null>(null);
 
   // Stored settings (after hydration), and a shared link (?room=CODE) pre-filling the join box.
   useEffect(() => {
     setSettings(loadGameSettings("lockout"));
     const linked = parseRoomCode(new URLSearchParams(window.location.search).get("room"));
     if (linked) setJoinCode(linked);
+    const assetsCart = assetsCartId();
+    if (assetsCart) setAssets({ cart: assetsCart, overlay: lockoutScene().overlay });
     const onFs = () => setIsFullscreen(Boolean(fullscreenElement()));
     document.addEventListener("fullscreenchange", onFs);
     document.addEventListener("webkitfullscreenchange", onFs);
@@ -191,6 +212,7 @@ export function LockoutGame() {
         const stage = stageRef.current;
         if (!stage) return;
         const bytes = lockoutCartridge();
+        const scene = lockoutScene().json;
         const cartUrl = URL.createObjectURL(new Blob([bytes.buffer as ArrayBuffer], { type: "application/octet-stream" }));
         const current = settingsRef.current;
         handleRef.current = mount(stage, {
@@ -207,9 +229,9 @@ export function LockoutGame() {
           // through cartbox.light3d), and skipping the 2D lighting layer spares
           // every frame a material capture and a full-screen relight pass.
           postFx: parsePostFxSettings(LOCKOUT_FX) ?? undefined,
-          mesh: parseMeshScene(lockoutMeshSidecar()) ?? undefined,
-          ui: readSidecarUi(lockoutMeshSidecar()),
-          actions: readSidecarActions(lockoutMeshSidecar()),
+          mesh: parseMeshScene(scene) ?? undefined,
+          ui: readSidecarUi(scene),
+          actions: readSidecarActions(scene),
           // Its string table in the player's language, and their accessibility settings (EP19b).
           strings: LOCKOUT_STRINGS,
           languages: preferredLanguages(prefsRef.current),
@@ -375,6 +397,16 @@ export function LockoutGame() {
               ? "Matchmaking and rooms are online."
               : "This build has no online relay, so matchmaking and rooms connect the tabs of this browser only."}
           </p>
+          {assets && (
+            <p style={{ margin: 0, color: "var(--muted)", fontSize: 13 }}>
+              {!assets.overlay
+                ? `No cart "${assets.cart}" is saved in this browser, so the demo plays its own Spartans and weapons.`
+                : assets.overlay.replaced.length === 0
+                  ? "The saved cart's Spartans, weapons and pickups are the demo's own."
+                  : `Playing your edited assets from the saved cart: ${assets.overlay.replaced.length} object${assets.overlay.replaced.length === 1 ? "" : "s"}.`}
+              {assets.overlay?.refused.map((r) => ` ${r.id} keeps the demo's model: ${r.reason}`).join("")}
+            </p>
+          )}
           {phase.kind === "error" && (
             <p role="alert" style={{ margin: 0, color: "var(--live)" }}>
               {phase.message}
