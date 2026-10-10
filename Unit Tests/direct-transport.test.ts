@@ -34,10 +34,11 @@ describe("the packed message format", () => {
       t: 0xfffffff0,
       pi: 1234,
       po: [[2, 1234, 99, 0xffffffff]],
+      ro: [[0, "p-abc"], [3, "tab-é"]],
     };
     const bytes = encodeNetMessage(message);
     expect(decodeNetMessage(bytes)).toEqual(message);
-    expect(bytes.length).toBe(1 + 1 + 2 * 17 + 2 + 2 * 8 + 4 + 4 + 4 + 1 + 13);
+    expect(bytes.length).toBe(1 + 1 + 2 * 17 + 2 + 2 * 8 + 4 + 4 + 4 + 1 + 13 + 1 + (2 + 5) + (2 + 6));
     expect(bytes.length).toBeLessThan(JSON.stringify(message).length * 0.6);
     // Full 32-bit words (Lockout packs positions into them): about a third.
     const lockoutLike: NetMessage = { s: [[1, 0xfe0c0a1b, 0x3a2b00c8, 0x000a3c64, 0x0001a2f3]], t: 0x12345678 };

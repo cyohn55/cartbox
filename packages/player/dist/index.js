@@ -4549,6 +4549,7 @@ var NET_IN_EVENT_COUNT = 39;
 var NET_IN_EVENTS = 40;
 var NET_IN_EVENT_CAPACITY = 12;
 var NET_IN_SENDERS = 64;
+var NET_IN_HOST = 66;
 var NET_OUT_MASK = 70;
 var NET_OUT_MATCH = 71;
 var NET_OUT_SLOTS = 72;
@@ -4565,6 +4566,7 @@ function writeNetInbox(words, inbox) {
   words[NET_IN_HEADER] = (inbox.mode & 3 | (inbox.mySlot & 7) << 2 | ((inbox.status ?? 0) & 7) << 5 | (inbox.humans & 255) << 8 | (inbox.live & 255) << 16 | netLagUnits(inbox.lag ?? 0) << 24) >>> 0;
   words[NET_IN_MATCH] = inbox.match >>> 0;
   words[NET_IN_CLOCK] = inbox.clock >>> 0;
+  words[NET_IN_HOST] = Math.max(0, inbox.hostSlot ?? 0) & 7;
   for (let slot = 0; slot < NET_SLOTS; slot += 1) {
     const state = inbox.slots[slot] ?? null;
     for (let k = 0; k < NET_STATE_WORDS; k += 1) {
@@ -6288,10 +6290,11 @@ cartbox = {
   -- between browsers through pmem words 0..118 (so a netplay cart must not keep
   -- save data there); see packages/player/src/net/netplay.ts for the layout.
   -- net() -> mode (0 offline, 1 client, 2 host), my slot, humans mask, match word,
-  -- and the page's status code (0 idle; the page defines the rest, e.g. searching)
+  -- the page's status code (0 idle; the page defines the rest, e.g. searching),
+  -- and the host's slot (slots stick, so after a host leaves it may not be 0)
   net = function()
     local h = pmem(0)
-    return h & 3, (h >> 2) & 7, (h >> 8) & 0xff, pmem(1), (h >> 5) & 7
+    return h & 3, (h >> 2) & 7, (h >> 8) & 0xff, pmem(1), (h >> 5) & 7, pmem(66) & 7
   end,
   -- netclock() -> the room's shared clock, ms (the host's clock; every player
   -- keeps theirs on it by ping), and the view lag: how old the others'
@@ -18912,20 +18915,24 @@ var MATCH = 4;
 var TIME = 8;
 var PING = 16;
 var PONGS = 32;
+var ROSTER = 64;
 var STATE_BYTES = 17;
 var PONG_BYTES = 13;
+var utf8 = new TextEncoder();
+var utf8decode = new TextDecoder();
 function encodeNetMessage(message) {
   const states = message.s ?? [];
   const events = message.e ?? [];
   const pongs = message.po ?? [];
+  const roster = (message.ro ?? []).map(([slot, id]) => [slot, utf8.encode(id).slice(0, 255)]);
   const hasMatch = message.m !== void 0;
   const hasTime = message.t !== void 0;
   const hasPing = message.pi !== void 0;
-  const size = 1 + (states.length ? 1 + states.length * STATE_BYTES : 0) + (events.length ? 2 + events.length * 8 : 0) + (hasMatch ? 4 : 0) + (hasTime ? 4 : 0) + (hasPing ? 4 : 0) + (pongs.length ? 1 + pongs.length * PONG_BYTES : 0);
+  const size = 1 + (states.length ? 1 + states.length * STATE_BYTES : 0) + (events.length ? 2 + events.length * 8 : 0) + (hasMatch ? 4 : 0) + (hasTime ? 4 : 0) + (hasPing ? 4 : 0) + (pongs.length ? 1 + pongs.length * PONG_BYTES : 0) + (roster.length ? 1 + roster.reduce((n, [, id]) => n + 2 + id.length, 0) : 0);
   const bytes = new Uint8Array(size);
   const view = new DataView(bytes.buffer);
   let at = 0;
-  bytes[at++] = (states.length ? STATES : 0) | (events.length ? EVENTS : 0) | (hasMatch ? MATCH : 0) | (hasTime ? TIME : 0) | (hasPing ? PING : 0) | (pongs.length ? PONGS : 0);
+  bytes[at++] = (states.length ? STATES : 0) | (events.length ? EVENTS : 0) | (hasMatch ? MATCH : 0) | (hasTime ? TIME : 0) | (hasPing ? PING : 0) | (pongs.length ? PONGS : 0) | (roster.length ? ROSTER : 0);
   const u322 = (v) => {
     view.setUint32(at, v >>> 0, true);
     at += 4;
@@ -18963,13 +18970,23 @@ function encodeNetMessage(message) {
       u322(t2);
     }
   }
+  if (roster.length) {
+    if (roster.length > 255) throw new Error("too many players in one roster");
+    bytes[at++] = roster.length;
+    for (const [slot, id] of roster) {
+      bytes[at++] = slot & 255;
+      bytes[at++] = id.length;
+      bytes.set(id, at);
+      at += id.length;
+    }
+  }
   return bytes;
 }
 function decodeNetMessage(bytes) {
   if (bytes.length < 1) return null;
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const flags = bytes[0];
-  if (flags & ~(STATES | EVENTS | MATCH | TIME | PING | PONGS)) return null;
+  if (flags & ~(STATES | EVENTS | MATCH | TIME | PING | PONGS | ROSTER)) return null;
   let at = 1;
   const need = (n) => at + n <= bytes.length;
   const u322 = () => {
@@ -19015,6 +19032,19 @@ function decodeNetMessage(bytes) {
       message.po.push([slot, u322(), u322(), u322()]);
     }
   }
+  if (flags & ROSTER) {
+    if (!need(1)) return null;
+    const count = bytes[at++];
+    message.ro = [];
+    for (let i = 0; i < count; i += 1) {
+      if (!need(2)) return null;
+      const slot = bytes[at++];
+      const length = bytes[at++];
+      if (!need(length)) return null;
+      message.ro.push([slot, utf8decode.decode(bytes.subarray(at, at + length))]);
+      at += length;
+    }
+  }
   return at === bytes.length ? message : null;
 }
 
@@ -19030,6 +19060,8 @@ var EARLY_PINGS = 5;
 var CLOCK_SAMPLES = 8;
 var LAG_RISE = 0.5;
 var LAG_FALL = 0.5;
+var REJOIN_MS = 6e4;
+var ROSTER_TICKS = 60;
 function since(a, b) {
   return b - a | 0;
 }
@@ -19068,8 +19100,20 @@ var NetSession = class {
     /** Bytes sent and received so far, in the messages' binary form (for the profiler). */
     this.sentBytes = 0;
     this.receivedBytes = 0;
+    /** Who holds which slot (peer id → slot), as the host has it (L8). */
+    this.roster = /* @__PURE__ */ new Map();
+    /** Slots held for players who dropped, until they're back or REJOIN_MS is up. */
+    this.held = /* @__PURE__ */ new Map();
+    /** The roster changed (as host): send it in the next message. */
+    this.rosterDirty = false;
+    this.lastRosterTick = -Infinity;
     transport.onPeers((peers) => {
       this.peers = [...peers].sort((a, b) => a.joinedAt - b.joinedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      if (this.peers.length === 0) {
+        this.roster.clear();
+        this.held.clear();
+      }
+      this.reslot();
       this.emit();
     });
     transport.onMessage((message, from) => this.receive(message, from));
@@ -19105,6 +19149,9 @@ var NetSession = class {
     this.outStates = /* @__PURE__ */ new Map();
     this.hostMatch = 0;
     this.lastSent = "";
+    this.roster.clear();
+    this.held.clear();
+    this.reslot();
   }
   /** A status for the cart (0..7, read as net()'s fifth value) — e.g. matchmaking progress. */
   setStatus(code) {
@@ -19123,11 +19170,66 @@ var NetSession = class {
   }
   /** This browser's slot (0..7), or -1 while the room is full/unknown. */
   get mySlot() {
-    const index = this.peers.findIndex((p) => p.id === this.transport.selfId);
-    return index >= 0 && index < NET_SLOTS ? index : -1;
+    return this.slotOf(this.transport.selfId);
+  }
+  /** The host's slot: the lowest held by anyone present (-1 in an empty room). */
+  get hostSlot() {
+    let lowest = -1;
+    for (const peer of this.peers) {
+      const slot = this.roster.get(peer.id);
+      if (slot !== void 0 && (lowest < 0 || slot < lowest)) lowest = slot;
+    }
+    return lowest;
   }
   get isHost() {
-    return this.mySlot === 0;
+    return this.mySlot >= 0 && this.mySlot === this.hostSlot;
+  }
+  /** A peer's slot, by the roster (-1 when it has none yet). */
+  slotOf(id) {
+    return this.roster.get(id) ?? -1;
+  }
+  /** Who holds which slot, as this browser has it. */
+  slots() {
+    return this.roster;
+  }
+  /**
+   * Bring the roster up to date with who is here. In a new room (no roster
+   * yet) slots go by join order. After that only the host changes it: a
+   * player who left has its slot held for REJOIN_MS; a newcomer gets its old
+   * slot back if it's held for it, or the lowest free one.
+   */
+  reslot() {
+    if (this.roster.size === 0) {
+      this.peers.slice(0, NET_SLOTS).forEach((peer, slot) => this.roster.set(peer.id, slot));
+      this.rosterDirty = true;
+      return;
+    }
+    if (!this.isHost) return;
+    const now = this.now();
+    const present = new Set(this.peers.map((p) => p.id));
+    let changed = false;
+    for (const [id, slot] of [...this.roster]) {
+      if (present.has(id)) continue;
+      this.roster.delete(id);
+      this.held.set(id, { slot, until: now + REJOIN_MS });
+      changed = true;
+    }
+    for (const [id, hold] of [...this.held]) if (hold.until < now) this.held.delete(id);
+    for (const peer of this.peers) {
+      if (this.roster.has(peer.id)) continue;
+      const taken = new Set(this.roster.values());
+      const back = this.held.get(peer.id);
+      let slot = back && !taken.has(back.slot) ? back.slot : -1;
+      if (slot < 0) {
+        const kept = new Set([...this.held.values()].map((h) => h.slot));
+        for (let s = 0; s < NET_SLOTS && slot < 0; s += 1) if (!taken.has(s) && !kept.has(s)) slot = s;
+      }
+      if (slot < 0) continue;
+      this.roster.set(peer.id, slot);
+      this.held.delete(peer.id);
+      changed = true;
+    }
+    if (changed) this.rosterDirty = true;
   }
   status() {
     return { connected: this.connected, peers: this.peers, mySlot: this.mySlot, isHost: this.isHost };
@@ -19147,7 +19249,10 @@ var NetSession = class {
     }
     const now = this.now();
     let humans = 0;
-    for (let slot = 0; slot < Math.min(NET_SLOTS, this.peers.length); slot += 1) humans |= 1 << slot;
+    for (const peer of this.peers) {
+      const slot = this.slotOf(peer.id);
+      if (slot >= 0) humans |= 1 << slot;
+    }
     let live = 0;
     const slots = [];
     const stamps = [];
@@ -19171,6 +19276,7 @@ var NetSession = class {
       humans,
       live,
       match: this.hostMatch,
+      hostSlot: this.hostSlot,
       clock: Math.floor(this.sharedNow()),
       lag: this.viewLag,
       slots,
@@ -19197,7 +19303,13 @@ var NetSession = class {
     const pingEvery = this.pingsAnswered < EARLY_PINGS ? PING_TICKS_EARLY : PING_TICKS;
     const ping = !this.isHost && this.peers.length > 1 && this.tick - this.lastPingTick >= pingEvery;
     const signature = JSON.stringify([message.s ?? null, message.m ?? null]);
-    const quiet = this.outEvents.length === 0 && this.pongsDue.length === 0 && !ping;
+    const roster = this.isHost && (this.rosterDirty || this.tick - this.lastRosterTick >= ROSTER_TICKS);
+    if (roster) {
+      message.ro = [...this.roster].map(([id, slot]) => [slot, id]);
+      this.rosterDirty = false;
+      this.lastRosterTick = this.tick;
+    }
+    const quiet = this.outEvents.length === 0 && this.pongsDue.length === 0 && !ping && !roster;
     if (quiet && signature === this.lastSent && this.tick - this.lastSentTick < KEEPALIVE_TICKS) return;
     if (this.outEvents.length > 0) message.e = this.outEvents.splice(0);
     const shared = Math.floor(this.sharedNow());
@@ -19207,7 +19319,7 @@ var NetSession = class {
       this.lastPingTick = this.tick;
     }
     if (this.pongsDue.length > 0) message.po = this.pongsDue.splice(0).map(([slot, t0, t1]) => [slot, t0, t1, shared >>> 0]);
-    if (message.s || message.e || message.m !== void 0 || message.pi !== void 0 || message.po) {
+    if (message.s || message.e || message.m !== void 0 || message.pi !== void 0 || message.po || message.ro) {
       this.transport.send(message);
       this.sentBytes += encodeNetMessage(message).length;
       this.lastSent = signature;
@@ -19229,17 +19341,28 @@ var NetSession = class {
       if (held && now - held.at < STALE_MS && stamp < held.stamp) continue;
       this.remote.set(slot, { state: [a, b, c, d ?? 0], stamp, at: now });
     }
-    const sender = from === void 0 ? -1 : this.peers.findIndex((p) => p.id === from);
+    if (message.ro && from !== void 0) this.adoptRoster(message.ro, from);
+    const sender = from === void 0 ? -1 : this.slotOf(from);
     for (const event of message.e ?? []) if (this.pendingEvents.length < 200 && sender >= 0 && sender < NET_SLOTS) this.pendingEvents.push({ event, from: sender });
     if (message.m !== void 0 && !this.isHost) this.hostMatch = message.m;
     if (message.pi !== void 0 && this.isHost) {
-      const slot = from === void 0 ? -1 : this.peers.findIndex((p) => p.id === from);
+      const slot = from === void 0 ? -1 : this.slotOf(from);
       if (slot > 0 && slot < NET_SLOTS && this.pongsDue.length < NET_SLOTS) this.pongsDue.push([slot, message.pi, Math.floor(this.sharedNow()) >>> 0]);
     }
     for (const [slot, t0, t1, t2] of message.po ?? []) {
       if (slot !== mySlot || this.isHost) continue;
       this.clockAnswer(t0, t1, t2, Math.floor(now));
     }
+  }
+  adoptRoster(entries, from) {
+    const next = new Map(entries.map(([slot, id]) => [id, slot]));
+    const present = new Set(this.peers.map((p) => p.id));
+    let lowest = Infinity;
+    for (const [id, slot] of next) if (present.has(id) && slot < lowest) lowest = slot;
+    if (next.get(from) !== lowest) return;
+    this.roster = next;
+    for (const id of next.keys()) this.held.delete(id);
+    this.emit();
   }
   /** NTP's estimate from one answered ping: t0 sent and t3 back on our clock, t1 heard and t2 answered on the host's. */
   clockAnswer(t0, t1, t2, t3) {
@@ -19735,7 +19858,7 @@ var DirectTransport = class {
       if (message.s || message.m !== void 0 || message.pi !== void 0 || message.po) {
         link.state.send(stateBytes ?? (stateBytes = encodeNetMessage({ s: message.s, m: message.m, t: message.t, pi: message.pi, po: message.po })));
       }
-      if (message.e) link.events.send(eventBytes ?? (eventBytes = encodeNetMessage({ e: message.e, t: message.t })));
+      if (message.e || message.ro) link.events.send(eventBytes ?? (eventBytes = encodeNetMessage({ e: message.e, t: message.t, ro: message.ro })));
     }
     if (relayed.length > 0) this.relay.send(relayed.length === others.length ? message : { ...message, r: relayed });
   }

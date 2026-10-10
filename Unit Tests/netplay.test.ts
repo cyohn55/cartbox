@@ -166,11 +166,12 @@ describe("NetSession over a memory room", () => {
     expect((gw[0]! >> 16) & 0xff).toBe(0);
   });
 
-  it("promotes the guest to host when the host leaves", async () => {
+  it("promotes the guest to host when the host leaves, in the slot it had (L8)", async () => {
     const { host, guest } = await room();
     host.close();
-    expect(guest.mySlot).toBe(0);
+    expect(guest.mySlot).toBe(1);
     expect(guest.isHost).toBe(true);
+    expect(guest.hostSlot).toBe(1);
   });
 
   it("sends one batched message per 4 ticks however busy the tick is", async () => {
@@ -246,6 +247,79 @@ describe("NetSession over a memory room", () => {
     solo.beforeTick(words);
     expect(words[0]).toBe(0);
     expect(words[39]).toBe(0);
+  });
+});
+
+describe("slots that stick (L8)", () => {
+  /** Players in one room, each ticking its session (so the host's roster goes round). */
+  async function party() {
+    const hub = new MemoryNetHub();
+    let clock = 1000;
+    const players = new Map<string, { session: NetSession; words: Uint32Array }>();
+    const join = async (id: string) => {
+      const session = new NetSession(hub.transport(id), () => clock);
+      await session.connect(id);
+      players.set(id, { session, words: new Uint32Array(NET_WORDS) });
+      await new Promise((r) => setTimeout(r, 2));
+      return session;
+    };
+    const tick = (n = 8) => {
+      for (let t = 0; t < n; t += 1) {
+        for (const { session, words } of players.values()) {
+          session.beforeTick(words);
+          session.afterTick(words);
+        }
+        clock += 1000 / 60;
+      }
+    };
+    const leave = (id: string) => {
+      players.get(id)!.session.close();
+      players.delete(id);
+    };
+    return { join, tick, leave, slot: (id: string) => players.get(id)!.session.mySlot, session: (id: string) => players.get(id)!.session, advance: (ms: number) => (clock += ms) };
+  }
+
+  it("keeps everyone's slot when another leaves, and the next in line takes over as host", async () => {
+    const room = await party();
+    await room.join("a");
+    await room.join("b");
+    await room.join("c");
+    room.tick();
+    expect(["a", "b", "c"].map(room.slot)).toEqual([0, 1, 2]);
+    room.leave("a");
+    room.tick();
+    expect(["b", "c"].map(room.slot)).toEqual([1, 2]);
+    expect(room.session("b").isHost).toBe(true);
+    expect(room.session("c").hostSlot).toBe(1);
+    // The new host's inbox says so, for the cart.
+    const words = new Uint32Array(NET_WORDS);
+    room.session("c").beforeTick(words);
+    expect(words[66]).toBe(1);
+    expect((words[0]! >> 8) & 0xff).toBe(0b110); // slots 1 and 2 hold humans
+  });
+
+  it("gives a newcomer the lowest free slot, and one who drops its own back within a minute", async () => {
+    const room = await party();
+    for (const id of ["a", "b", "c"]) await room.join(id);
+    room.tick();
+    room.leave("b");
+    room.tick();
+    await room.join("d");
+    room.tick();
+    // Slot 1 is held for b: d takes 3, and everyone agrees.
+    expect(room.slot("d")).toBe(3);
+    expect(room.session("c").slotOf("d")).toBe(3);
+    await room.join("b");
+    room.tick();
+    expect(room.slot("b")).toBe(1);
+    expect(room.session("d").slotOf("b")).toBe(1);
+    // After a minute away the slot is free for anyone.
+    room.leave("b");
+    room.tick();
+    room.advance(61_000);
+    await room.join("e");
+    room.tick();
+    expect(room.slot("e")).toBe(1);
   });
 });
 

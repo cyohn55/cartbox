@@ -3269,7 +3269,9 @@ export function lockoutCode(map: ArenaMap, center: ArenaPoint): string {
 -- desc:   A vertical Forerunner-arena FPS homage -- you + 7 bots, 7 game types, Xbox 360 core
 -- script: lua
 
--- Cartbox has no netcode, so "8 players" is you + 7 AI bots in one local match.
+-- Up to 8 players: you, and bots in every slot no human holds -- offline 7 of
+-- them; online (LOCKOUT_MULTIPLAYER_ROADMAP.md L4-L8) the room's host runs
+-- them, moves everyone by their inputs and judges every hit.
 -- The web player forwards only 8 buttons (arrows + Z X A S), so this is a
 -- single-stick console FPS with vertical auto-aim:
 --   Up/Down move . Left/Right turn . hold A strafe . double-tap A = grenade
@@ -3546,6 +3548,8 @@ end
 -- else. Each client is authoritative for its own player; a hit on someone else
 -- is sent to them as an event, and a victim announces its own death.
 local NETMODE, MYSLOT, HUMANS = 0, 0, 0     -- 0 offline / 1 client / 2 host
+-- The host's slot: slots stick (L8), so after a host leaves it needn't be 0.
+local HOSTSLOT = 0
 local WLIST = {"br","smg","shotgun","sniper","magnum","sword"}
 local WIDX_OF = {}; for i,id in ipairs(WLIST) do WIDX_OF[id]=i-1 end
 -- (Event kinds and impact kinds sit in tables, not a local each: the cart is
@@ -3960,8 +3964,12 @@ local function host_drive()
 end
 
 -- Read the room: mode, my slot, and who is human; (re)assign every slot's role.
+-- A host that takes over (L8) keeps every soldier it starts to drive where it
+-- stands, as it stands; and when a player joins a match under way, the host
+-- tells it everything it can't see for itself (net_catch_up).
 local function net_roles()
-  local mode, myslot, humans = cartbox.net()
+  local mode, myslot, humans, _, _, hostslot = cartbox.net()
+  HOSTSLOT = hostslot or 0
   if NETMODE ~= 0 and mode == 0 and phase == "play" then
     -- Left the room (or lost it) mid-match: back to the title screen.
     NETMODE, MYSLOT, HUMANS = 0, 0, 1
@@ -3969,6 +3977,7 @@ local function net_roles()
     return
   end
   if NETMODE == 1 and mode == 2 then net_match_id = net_seen_match end   -- took over as host
+  local joined = (mode == 2 and phase == "play") and (humans & ~HUMANS) or 0
   NETMODE, HUMANS = mode, humans
   if mode ~= 0 then MYSLOT = myslot else MYSLOT = 0; HUMANS = 1 end
   if p then p.ns = MYSLOT; p.team = (MYSLOT % 2 == 0) and "blue" or "red" end
@@ -3977,11 +3986,15 @@ local function net_roles()
     o.team = (o.ns % 2 == 0) and "blue" or "red"
     local human = (HUMANS >> o.ns) & 1 == 1
     local remote = NETMODE ~= 0 and (human or NETMODE == 1)
-    if o.remote and not remote then respawn(o); nav_place(o) end   -- the host takes over an empty slot
+    if o.remote and not remote then   -- the host takes over a slot: from where it is
+      if o.dead or o.x == nil then respawn(o) end
+      nav_place(o)
+    end
     if remote and not o.remote then nav_drop(o); o.snaps = {} end    -- another browser drives it now
     o.remote, o.human = remote, human
     o.tag = human and ("Player "..(o.ns+1)) or ("Bot "..o.ns)
   end
+  if joined ~= 0 then net_catch_up() end
 end
 
 -- Per tick in a match: mirror remote players, then apply incoming hits/kills.
@@ -4005,7 +4018,7 @@ local function net_receive()
     local a, sender = ev[1], ev[3] or 0
     local kind, from, to, head, value = a & 15, (a >> 4) & 7, (a >> 7) & 7, ((a >> 10) & 1) == 1, (a >> 16) & 0xffff
     local src, dst = ent_by_slot(from), ent_by_slot(to)
-    local host = sender == 0
+    local host = sender == HOSTSLOT
     if kind == EV.KILL then
       if dst and (host or (sender == to and from == to)) then
         register_kill(src, dst, head)
@@ -4013,7 +4026,11 @@ local function net_receive()
         local s = dst.snaps and dst.snaps[#dst.snaps]
         if dst ~= p and s then dst.killed_life = s.life end
       end
-    elseif kind == EV.SCORE then if host and NETMODE == 1 and dst then dst.score = value end
+    elseif kind == EV.SCORE then
+      if host and NETMODE == 1 then
+        if from == 1 then team[to == 0 and "blue" or "red"] = value   -- a team's (L8)
+        elseif dst then dst.score = value end
+      end
     elseif kind == EV.OBJ then if host and NETMODE == 1 then net_objective(from == 1 and dst or nil, head, value, ev[2]) end
     elseif kind == EV.VERDICT then if host and from == MYSLOT then net_verdict(a) end
     elseif kind == EV.WARP then
@@ -4022,7 +4039,8 @@ local function net_receive()
       -- not its own to send
     elseif kind == EV.PICKUP then
       local pad = (a >> 7) & 63
-      mtimer[pad + 1] = 540
+      -- (a pad still empty when someone joined comes with what's left of its wait: L8)
+      mtimer[pad + 1] = ((a >> 16) & 0xffff) > 0 and ((a >> 16) & 0xffff) or 540
       if NETMODE == 2 and src and src.ammo then src.ammo[MW[pad + 1]] = nil end   -- a full load of what it took
     elseif kind == EV.NADE then nade_from[from*16 + ((a >> 7) & 15)] = { s16(a >> 16)/100, s16(ev[2])/100, s16(ev[2] >> 16)/100 }
     elseif kind == EV.INPUT then
@@ -4068,11 +4086,13 @@ function net_objective(holder, live, value, b)
   end
 end
 
--- The host sends the objective (4 Hz) and any changed scores (3 Hz).
-local sent_score = {}
-local function net_objective_publish()
-  if NETMODE ~= 2 or MODE.obj == "slayer" then return end
-  if tick % 15 == 5 then
+-- The host sends the objective (4 Hz) and any changed scores (3 Hz) --
+-- each player's and, in team games, each team's (L8: a newcomer or a new host
+-- needs them; the rest count kills for themselves).
+local sent_score, sent_team = {}, {}
+local function net_objective_publish(now)
+  if NETMODE ~= 2 then return end
+  if MODE.obj ~= "slayer" and (now or tick % 15 == 5) then
     local holder, value, b = nil, 0, 0
     if MODE.obj == "ball" then
       holder = ball.carrier
@@ -4081,10 +4101,30 @@ local function net_objective_publish()
     else for _,o in ipairs(all_players()) do if o.jugg then holder = o end end end
     cartbox.netsend(ev_word(EV.OBJ, holder and 1 or 0, holder and holder.ns or 0, MODE.obj == "ball" and ball.live, value), b)
   end
-  if tick % 20 == 0 then
+  if now or tick % 20 == 0 then
     for _,o in ipairs(all_players()) do
       local sc = math.floor(o.score or 0)
       if sent_score[o.ns] ~= sc then sent_score[o.ns] = sc; cartbox.netsend(ev_word(EV.SCORE, 0, o.ns, false, sc), 0) end
+    end
+    if MODE.teams then
+      for k, name in ipairs({"blue", "red"}) do
+        local sc = math.floor(team[name] or 0)
+        if sent_team[k] ~= sc then sent_team[k] = sc; cartbox.netsend(ev_word(EV.SCORE, 1, k - 1, false, sc), 0) end
+      end
+    end
+  end
+end
+
+-- Someone joined a match under way (L8): the host sends what they can't see
+-- for themselves -- every score, the objective, and the pads still empty,
+-- with what's left of their waits. (Grenades already in the air, they miss.)
+function net_catch_up()
+  for k in pairs(sent_score) do sent_score[k] = nil end
+  for k in pairs(sent_team) do sent_team[k] = nil end
+  net_objective_publish(true)
+  for i = 1, #MRK // 3 do
+    if (mtimer[i] or 0) > 0 then
+      cartbox.netsend(EV.PICKUP | ((MYSLOT & 7) << 4) | (((i - 1) & 63) << 7) | ((math.floor(mtimer[i]) & 0xffff) << 16), 0)
     end
   end
 end
@@ -5145,8 +5185,8 @@ end
 -- and (as a guest) join the host's match when it starts.
 function net_menu_sync()
   local was = NETMODE
-  local mode, myslot, humans, word = cartbox.net()
-  NETMODE, HUMANS = mode, humans
+  local mode, myslot, humans, word, _, hostslot = cartbox.net()
+  NETMODE, HUMANS, HOSTSLOT = mode, humans, hostslot or 0
   MYSLOT = (mode ~= 0) and myslot or 0
   if was == 1 and NETMODE == 2 then net_match_id = net_seen_match end   -- took over as host
   if NETMODE == 2 then cartbox.netmatch(net_match_word()) end

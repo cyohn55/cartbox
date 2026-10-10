@@ -424,7 +424,7 @@ I16 panels are re-made inline over hand-placed collision boxes.
         4.6 to 4.8 KB/s, since it sends every soldier. In a room of 8 a guest
         receives 8.6 KB/s, partly the others' inputs, which ride to everyone
         though only the host needs them.
-- [ ] **L8. Host migration and joining mid-match.** When the host leaves, the
+- [x] **L8. Host migration and joining mid-match.** When the host leaves, the
       next host takes over the whole match: bots, objective, scores, the
       clock and grenades in flight. A client joining mid-match receives a
       full snapshot. A dropped client can rejoin into its old slot.
@@ -434,6 +434,50 @@ I16 panels are re-made inline over hand-placed collision boxes.
       *Tests:* in the lab, the host leaves mid-Oddball and the match
       continues with scores and the ball intact; a mid-match joiner sees the
       same state as everyone else within a second.
+
+      *Done:*
+      - **Slots that stick:** the host keeps the room's roster (player id to
+        slot) and sends it with its events, once a second and on any change.
+        - A player who leaves keeps its slot held for 60 s. Coming back with
+          the same id within that time gives it the same slot, and its
+          score with it.
+        - Nobody else moves up when a player leaves, so no soldier changes
+          hands mid-match.
+        - The host is the present player with the lowest slot. A session
+          takes a roster only from that player, so two would-be hosts
+          settle on one. The host's slot reaches the cart in pmem 66 and as
+          `net()`'s sixth value.
+      - **Migration:** the next host takes every slot it now drives from
+        where it stands, as it stands: bots keep their positions, health
+        and weapons, and only a dead one is respawned. It carries on
+        sending the objective and scores, now team scores too, so the match
+        goes on with the ball, scores and clock intact. Guests trust events
+        from the host's slot, wherever it is.
+      - **Joining mid-match:** when a player joins a match under way, the
+        host sends at once every score, both team scores, the objective and
+        each empty pad with what's left of its wait. The newcomer sees
+        everyone else through the states every player publishes anyway.
+      - **The header:** the stale "Cartbox has no netcode" note in the cart
+        is gone.
+
+      *Lockout* (`lockout-migration.test.ts`, real engines over 30 ± 5 ms
+      links):
+      - **Host leaving mid-Oddball:** with three players 20 s into a match,
+        the host leaves. The player in slot 1 takes over in its own slot,
+        and slot 2 keeps its slot. Both stay in the match, no score goes
+        backwards, and they agree on every score and on the ball's carrier.
+        Scoring carries on under the new host for the next 15 s.
+      - **Joining Team Slayer under way:** a third player joining 30 s in
+        has the host's team and player scores in under a second.
+      - **Rejoining:** a player dropped for two seconds of a Free for All
+        comes back into slot 2 with its score.
+
+      *Limits:*
+      - Grenades already in the air aren't sent to a newcomer, so it misses
+        their blasts until they land.
+      - Inputs still ride to every guest, though only the host needs them.
+      - In the browser, a player's id is new each page load, so rejoining
+        keeps the slot across a dropped connection but not across a reload.
 
 ## Phase C — A second map
 

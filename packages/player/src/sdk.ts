@@ -224,10 +224,11 @@ cartbox = {
   -- between browsers through pmem words 0..118 (so a netplay cart must not keep
   -- save data there); see packages/player/src/net/netplay.ts for the layout.
   -- net() -> mode (0 offline, 1 client, 2 host), my slot, humans mask, match word,
-  -- and the page's status code (0 idle; the page defines the rest, e.g. searching)
+  -- the page's status code (0 idle; the page defines the rest, e.g. searching),
+  -- and the host's slot (slots stick, so after a host leaves it may not be 0)
   net = function()
     local h = pmem(0)
-    return h & 3, (h >> 2) & 7, (h >> 8) & 0xff, pmem(1), (h >> 5) & 7
+    return h & 3, (h >> 2) & 7, (h >> 8) & 0xff, pmem(1), (h >> 5) & 7, pmem(66) & 7
   end,
   -- netclock() -> the room's shared clock, ms (the host's clock; every player
   -- keeps theirs on it by ping), and the view lag: how old the others'

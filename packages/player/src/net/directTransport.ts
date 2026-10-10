@@ -121,11 +121,11 @@ export class DirectTransport implements NetTransport {
       }
       // Snapshots, the match word and the clock's pings unreliably (a lost one
       // is replaced by the next, and a retransmitted ping would only mislead
-      // the clock); events reliably. Both carry the message's time.
+      // the clock); events and the host's roster reliably. Both carry the message's time.
       if (message.s || message.m !== undefined || message.pi !== undefined || message.po) {
         link.state.send((stateBytes ??= encodeNetMessage({ s: message.s, m: message.m, t: message.t, pi: message.pi, po: message.po })));
       }
-      if (message.e) link.events.send((eventBytes ??= encodeNetMessage({ e: message.e, t: message.t })));
+      if (message.e || message.ro) link.events.send((eventBytes ??= encodeNetMessage({ e: message.e, t: message.t, ro: message.ro })));
     }
     if (relayed.length > 0) this.relay.send(relayed.length === others.length ? message : { ...message, r: relayed });
   }

@@ -3,9 +3,13 @@
  * assigns player slots, and relays the cart's published state and events to the
  * other players — and theirs into this cart. See netplay.ts for the pmem layout.
  *
- * Slots are assigned deterministically from the room's membership (ordered by
- * join time, then id), so every browser agrees who is in which slot without a
- * server; the lowest slot is the host. Everything is sent in one message every
+ * Slots are the host's to give (LOCKOUT_MULTIPLAYER_ROADMAP.md L8), and they
+ * stick: the host keeps a roster of who holds which, sends it round, and a
+ * player keeps its slot however many leave or join around it — and gets it
+ * back if it drops and rejoins within a minute. A newcomer takes the lowest
+ * free slot. The host is whoever present holds the lowest slot, so when the
+ * host leaves the next in line takes over, roster and all. (A brand-new room,
+ * before any roster, goes by join order — every browser agrees on that.) Everything is sent in one message every
  * few ticks (30 Hz over direct links, 7.5–15 Hz over the relay): the latest state
  * (a snapshot — a lost one is replaced by the next), every event raised since
  * (a hit, a kill), and the host's match word.
@@ -55,6 +59,8 @@ export interface NetMessage {
   readonly po?: readonly (readonly [number, number, number, number])[];
   /** Transport-level: the peers a relayed copy is for (the rest have it directly); absent for everyone. */
   readonly r?: readonly string[];
+  /** The host's roster (L8): [slot, peer id] for everyone in the room. */
+  readonly ro?: readonly (readonly [number, string])[];
   /** Transport-level: a WebRTC handshake message for one peer (see DirectTransport). Never reaches a session. */
   readonly sig?: NetSignal;
 }
@@ -113,6 +119,11 @@ const CLOCK_SAMPLES = 8;
 const LAG_RISE = 0.5;
 const LAG_FALL = 0.5;
 
+/** How long a dropped player's slot is held for it to come back to (ms). */
+const REJOIN_MS = 60_000;
+/** The host repeats its roster this often (ticks), for anyone who missed it. */
+const ROSTER_TICKS = 60;
+
 /** Two times on a 32-bit wrapping clock, b − a, wrap-safe (|b − a| < 2^31 ms). */
 function since(a: number, b: number): number {
   return ((b - a) | 0);
@@ -152,6 +163,13 @@ export class NetSession {
   /** Bytes sent and received so far, in the messages' binary form (for the profiler). */
   private sentBytes = 0;
   private receivedBytes = 0;
+  /** Who holds which slot (peer id → slot), as the host has it (L8). */
+  private roster = new Map<string, number>();
+  /** Slots held for players who dropped, until they're back or REJOIN_MS is up. */
+  private readonly held = new Map<string, { slot: number; until: number }>();
+  /** The roster changed (as host): send it in the next message. */
+  private rosterDirty = false;
+  private lastRosterTick = -Infinity;
 
   constructor(
     private readonly transport: NetTransport,
@@ -159,6 +177,12 @@ export class NetSession {
   ) {
     transport.onPeers((peers) => {
       this.peers = [...peers].sort((a, b) => a.joinedAt - b.joinedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      // Out of the room (or into another): its roster goes with it.
+      if (this.peers.length === 0) {
+        this.roster.clear();
+        this.held.clear();
+      }
+      this.reslot();
       this.emit();
     });
     transport.onMessage((message, from) => this.receive(message, from));
@@ -199,6 +223,9 @@ export class NetSession {
     this.outStates = new Map();
     this.hostMatch = 0;
     this.lastSent = "";
+    this.roster.clear();
+    this.held.clear();
+    this.reslot();
   }
 
   /** A status for the cart (0..7, read as net()'s fifth value) — e.g. matchmaking progress. */
@@ -221,12 +248,71 @@ export class NetSession {
 
   /** This browser's slot (0..7), or -1 while the room is full/unknown. */
   get mySlot(): number {
-    const index = this.peers.findIndex((p) => p.id === this.transport.selfId);
-    return index >= 0 && index < NET_SLOTS ? index : -1;
+    return this.slotOf(this.transport.selfId);
+  }
+
+  /** The host's slot: the lowest held by anyone present (-1 in an empty room). */
+  get hostSlot(): number {
+    let lowest = -1;
+    for (const peer of this.peers) {
+      const slot = this.roster.get(peer.id);
+      if (slot !== undefined && (lowest < 0 || slot < lowest)) lowest = slot;
+    }
+    return lowest;
   }
 
   get isHost(): boolean {
-    return this.mySlot === 0;
+    return this.mySlot >= 0 && this.mySlot === this.hostSlot;
+  }
+
+  /** A peer's slot, by the roster (-1 when it has none yet). */
+  slotOf(id: string): number {
+    return this.roster.get(id) ?? -1;
+  }
+
+  /** Who holds which slot, as this browser has it. */
+  slots(): ReadonlyMap<string, number> {
+    return this.roster;
+  }
+
+  /**
+   * Bring the roster up to date with who is here. In a new room (no roster
+   * yet) slots go by join order. After that only the host changes it: a
+   * player who left has its slot held for REJOIN_MS; a newcomer gets its old
+   * slot back if it's held for it, or the lowest free one.
+   */
+  private reslot(): void {
+    if (this.roster.size === 0) {
+      this.peers.slice(0, NET_SLOTS).forEach((peer, slot) => this.roster.set(peer.id, slot));
+      this.rosterDirty = true;
+      return;
+    }
+    if (!this.isHost) return;
+    const now = this.now();
+    const present = new Set(this.peers.map((p) => p.id));
+    let changed = false;
+    for (const [id, slot] of [...this.roster]) {
+      if (present.has(id)) continue;
+      this.roster.delete(id);
+      this.held.set(id, { slot, until: now + REJOIN_MS });
+      changed = true;
+    }
+    for (const [id, hold] of [...this.held]) if (hold.until < now) this.held.delete(id);
+    for (const peer of this.peers) {
+      if (this.roster.has(peer.id)) continue;
+      const taken = new Set(this.roster.values());
+      const back = this.held.get(peer.id);
+      let slot = back && !taken.has(back.slot) ? back.slot : -1;
+      if (slot < 0) {
+        const kept = new Set([...this.held.values()].map((h) => h.slot));
+        for (let s = 0; s < NET_SLOTS && slot < 0; s += 1) if (!taken.has(s) && !kept.has(s)) slot = s;
+      }
+      if (slot < 0) continue; // the room is full
+      this.roster.set(peer.id, slot);
+      this.held.delete(peer.id);
+      changed = true;
+    }
+    if (changed) this.rosterDirty = true;
   }
 
   status(): NetRoomStatus {
@@ -249,7 +335,10 @@ export class NetSession {
     }
     const now = this.now();
     let humans = 0;
-    for (let slot = 0; slot < Math.min(NET_SLOTS, this.peers.length); slot += 1) humans |= 1 << slot;
+    for (const peer of this.peers) {
+      const slot = this.slotOf(peer.id);
+      if (slot >= 0) humans |= 1 << slot;
+    }
     let live = 0;
     const slots: (NetState | null)[] = [];
     const stamps: number[] = [];
@@ -275,6 +364,7 @@ export class NetSession {
       humans,
       live,
       match: this.hostMatch,
+      hostSlot: this.hostSlot,
       clock: Math.floor(this.sharedNow()),
       lag: this.viewLag,
       slots,
@@ -302,6 +392,7 @@ export class NetSession {
       t?: number;
       pi?: number;
       po?: [number, number, number, number][];
+      ro?: [number, string][];
     } = {};
     if (this.outStates.size > 0) message.s = [...this.outStates].map(([slot, w]) => [slot, w[0], w[1], w[2], w[3]]);
     if (this.isHost) message.m = this.hostMatch;
@@ -312,7 +403,14 @@ export class NetSession {
     // Nothing new (standing still, waiting in the lobby): stay quiet, bar a
     // keepalive so the others don't time this player out.
     const signature = JSON.stringify([message.s ?? null, message.m ?? null]);
-    const quiet = this.outEvents.length === 0 && this.pongsDue.length === 0 && !ping;
+    // As host, the roster when it changes, and now and then for anyone who missed it (L8).
+    const roster = this.isHost && (this.rosterDirty || this.tick - this.lastRosterTick >= ROSTER_TICKS);
+    if (roster) {
+      message.ro = [...this.roster].map(([id, slot]) => [slot, id]);
+      this.rosterDirty = false;
+      this.lastRosterTick = this.tick;
+    }
+    const quiet = this.outEvents.length === 0 && this.pongsDue.length === 0 && !ping && !roster;
     if (quiet && signature === this.lastSent && this.tick - this.lastSentTick < KEEPALIVE_TICKS) return;
     if (this.outEvents.length > 0) message.e = this.outEvents.splice(0);
     const shared = Math.floor(this.sharedNow());
@@ -322,7 +420,7 @@ export class NetSession {
       this.lastPingTick = this.tick;
     }
     if (this.pongsDue.length > 0) message.po = this.pongsDue.splice(0).map(([slot, t0, t1]) => [slot, t0, t1, shared >>> 0]);
-    if (message.s || message.e || message.m !== undefined || message.pi !== undefined || message.po) {
+    if (message.s || message.e || message.m !== undefined || message.pi !== undefined || message.po || message.ro) {
       this.transport.send(message);
       this.sentBytes += encodeNetMessage(message).length;
       this.lastSent = signature;
@@ -348,18 +446,32 @@ export class NetSession {
       this.remote.set(slot, { state: [a, b, c, d ?? 0], stamp, at: now });
     }
     // Cap the backlog: a burst beyond this is stale by the time it would land.
-    const sender = from === undefined ? -1 : this.peers.findIndex((p) => p.id === from);
+    // The host's roster (L8): taken from whoever it says is host — the present
+    // player it puts in the lowest slot — so a newcomer and a new host agree.
+    if (message.ro && from !== undefined) this.adoptRoster(message.ro, from);
+    const sender = from === undefined ? -1 : this.slotOf(from);
     for (const event of message.e ?? []) if (this.pendingEvents.length < 200 && sender >= 0 && sender < NET_SLOTS) this.pendingEvents.push({ event, from: sender });
     if (message.m !== undefined && !this.isHost) this.hostMatch = message.m;
     // The clock: answer a guest's ping (as host), or take the host's answer to ours.
     if (message.pi !== undefined && this.isHost) {
-      const slot = from === undefined ? -1 : this.peers.findIndex((p) => p.id === from);
+      const slot = from === undefined ? -1 : this.slotOf(from);
       if (slot > 0 && slot < NET_SLOTS && this.pongsDue.length < NET_SLOTS) this.pongsDue.push([slot, message.pi, Math.floor(this.sharedNow()) >>> 0]);
     }
     for (const [slot, t0, t1, t2] of message.po ?? []) {
       if (slot !== mySlot || this.isHost) continue;
       this.clockAnswer(t0, t1, t2, Math.floor(now));
     }
+  }
+
+  private adoptRoster(entries: readonly (readonly [number, string])[], from: string): void {
+    const next = new Map(entries.map(([slot, id]) => [id, slot] as const));
+    const present = new Set(this.peers.map((p) => p.id));
+    let lowest = Infinity;
+    for (const [id, slot] of next) if (present.has(id) && slot < lowest) lowest = slot;
+    if (next.get(from) !== lowest) return;
+    this.roster = next;
+    for (const id of next.keys()) this.held.delete(id);
+    this.emit();
   }
 
   /** NTP's estimate from one answered ping: t0 sent and t3 back on our clock, t1 heard and t2 answered on the host's. */

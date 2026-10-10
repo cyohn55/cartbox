@@ -29,7 +29,9 @@
  *   40..63 12 events × 2 words
  *   64..65 the slot each event came from, 3 bits each (events 0-9 in 64,
  *          10-11 in 65), so a cart can tell the host's word from a guest's
- *          claim (L6); 66..67 spare
+ *          claim (L6)
+ *   66     the host's slot (bits 0-2; L8: slots stick, so it isn't always 0)
+ *   67     spare
  * OUTBOX (cart → host)
  *   70     mask of slots the cart published this tick
  *   71     match word (only the host's is relayed)
@@ -62,6 +64,7 @@ export const NET_IN_EVENT_COUNT = 39;
 export const NET_IN_EVENTS = 40;
 export const NET_IN_EVENT_CAPACITY = 12;
 export const NET_IN_SENDERS = 64;
+export const NET_IN_HOST = 66;
 
 export const NET_OUT_MASK = 70;
 export const NET_OUT_MATCH = 71;
@@ -92,6 +95,8 @@ export interface NetInbox {
   readonly match: number;
   /** The room's shared clock, ms. */
   readonly clock: number;
+  /** The host's slot (absent or -1 counts as 0). */
+  readonly hostSlot?: number;
   /** How old the others' snapshots are when they arrive (ms; carried in 4 ms units, up to 1020). */
   readonly lag?: number;
   /** Remote state per slot (null when there is none). */
@@ -128,6 +133,7 @@ export function writeNetInbox(words: Uint32Array, inbox: NetInbox): number {
     0;
   words[NET_IN_MATCH] = inbox.match >>> 0;
   words[NET_IN_CLOCK] = inbox.clock >>> 0;
+  words[NET_IN_HOST] = Math.max(0, inbox.hostSlot ?? 0) & 7;
   for (let slot = 0; slot < NET_SLOTS; slot += 1) {
     const state = inbox.slots[slot] ?? null;
     for (let k = 0; k < NET_STATE_WORDS; k += 1) {
