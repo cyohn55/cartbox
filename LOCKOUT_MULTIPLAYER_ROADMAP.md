@@ -239,7 +239,7 @@ I16 panels are re-made inline over hand-placed collision boxes.
       On two engines in one room, the host's copy of a guest follows its
       pitch to within 0.02 rad, sees every jump for as long as it lasts, and
       flashes its shots.
-- [ ] **L5. Replicated combat.** Every shot, tracer, muzzle flash, melee,
+- [x] **L5. Replicated combat.** Every shot, tracer, muzzle flash, melee,
       grenade throw, sword lunge and pickup becomes an event every client
       sees. A grenade is thrown with its starting state and a shared seed,
       so every client simulates the same arc.
@@ -247,6 +247,40 @@ I16 panels are re-made inline over hand-placed collision boxes.
       grenades and the I17 bounce light from them.
       *Tests:* two clients' grenades land within a few centimetres of each
       other; every shot one client fires appears on the others.
+      *Done:* six new event kinds in Lockout, each two words.
+      - **A shot:** its shooter, weapon, direction (yaw and pitch, 1e-4
+        rad), how far it flew (cm) and what it hit (nothing, a wall, a body
+        or a shield). Every shot is sent, the player's own and, from the
+        host, every bot's.
+      - **Shown in step:** a browser holds the others' shots, swings and
+        throws for the same 100 ms it draws them behind, then plays each
+        from where its owner is drawn. A shot gets its sound, a muzzle flash
+        (a light), a tracer, and sparks and a pock where it struck a wall or
+        a flare where it struck a shield.
+      - **A new `tracer` effect** (a glowing trail laid from the muzzle to
+        where the round stopped) now marks every round in the arena: the
+        player's own, the bots', and the others'.
+      - **A melee swing** (a sword lunge among them) is shown with its slash
+        and sound.
+      - **A grenade** goes out as two events: where it was thrown from (to
+        the centimetre) and which way. The thrower simulates from that same
+        rounded start state, so every browser runs a bit-identical arc.
+        Others launch a replica that lights the arena as it flies, does no
+        damage (the thrower's browser deals that), and sticks only where the
+        thrower says, by a third event. Lockout's arc has nothing random in
+        it, so the shared start state is the shared seed.
+      - **A pickup** empties the pad on every browser. The pads' respawn
+        clocks now run every tick on every browser; before, each counted
+        only while its own player was alive, so pads drifted apart.
+
+      *Lockout* (`lockout-combat.test.ts`, two engines in one room): the
+      guest fired 44 shots and the host showed all 44. The host's bots fired
+      558 and the guest had shown 556 when the run ended, the last two still
+      inside the 100 ms display delay; none was shown twice. A guest's two
+      grenades went off at the same centimetre on both browsers. The pads
+      stood the same on both 95% of the time or more (a pickup reaches the
+      other a few ticks late). The bots' shots add about 0.4 KB/s to a
+      two-player host over direct links (3.9 to 4.3 KB/s).
 - [ ] **L6. Authoritative hits with lag compensation.** A client sends its
       shot (origin, direction, the tick it saw) to the host. The host rewinds
       every Spartan's hitbox to what that shooter saw, decides the hit, and
