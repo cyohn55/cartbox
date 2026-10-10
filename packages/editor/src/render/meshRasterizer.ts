@@ -995,6 +995,12 @@ export interface MeshSceneInstance {
   readonly blendTextures?: readonly (DecodedTexture | null)[];
   /** Decoded relief maps per primitive ({@link MeshMaterial.reliefImage}: height, curvature), or null entries. */
   readonly reliefTextures?: readonly (DecodedTexture | null)[];
+  /**
+   * Decoded team-colour masks per primitive ({@link MeshMaterial.tintMaskImage}),
+   * or null entries: the player paints a tint through them into the base
+   * colour maps it draws a tinted copy with (L17).
+   */
+  readonly tintMaskTextures?: readonly (DecodedTexture | null)[];
   /** A surface effect over its (PBR) materials this frame — a shield flare, recharge shimmer or camo (see surfaceEffect.ts). */
   readonly effect?: SurfaceEffect | null;
 }

@@ -10237,6 +10237,7 @@ import {
   isSkinned as isSkinned2,
   renderSkyBackground,
   shieldEffect,
+  tintMaskTexture,
   composeModelMatrix as composeModelMatrix4,
   multiplyMat4 as multiplyMat43,
   sceneLightingEnvironment,
@@ -10678,6 +10679,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.profiler = null;
     /** Decodes a KTX2 texture (loading the decoder on first use); set by create. */
     this.decodeKtx2 = async () => null;
+    this.maskCache = /* @__PURE__ */ new WeakMap();
     /** The camera's eye this frame (terrain blocks pick their detail by distance from it). */
     this.eye = null;
     /** The last frame's view matrix (null before the first frame). */
@@ -10823,7 +10825,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.startBounce();
       this.skyClouds = clouds;
       this.skyCache = null;
-      if (JSON.stringify(before.lighting?.tints ?? null) !== JSON.stringify(next.lighting?.tints ?? null)) this.tintCache.clear();
+      if (JSON.stringify(before.lighting?.tints ?? null) !== JSON.stringify(next.lighting?.tints ?? null)) {
+        this.tintCache.clear();
+        this.maskCache = /* @__PURE__ */ new WeakMap();
+      }
     }
     this.scene = next;
     if (moved) {
@@ -11471,23 +11476,53 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   placements() {
     return this.lastPlacement ?? this.instances.map((instance, i) => this.pooledRoot[i] >= 0 || this.inactive.has(i) ? null : instance.model);
   }
-  /** A tinted instance's mesh and LOD levels (each level tinted alike). */
+  /**
+   * A tinted instance's mesh and LOD levels (each level tinted alike). Where a
+   * tintable part has a painted team-colour mask (L17), the tint is painted
+   * through it into the base colour maps the copy draws with instead.
+   */
   tintedLook(source, tint) {
-    const mesh = this.tinted(source.mesh, tint);
+    const masks = source.tintMaskTextures;
+    const masked = masks && source.mesh.primitives.some((p, i) => p.material.tintable && masks[i]) ? new Set(source.mesh.primitives.flatMap((p, i) => p.material.tintable && masks[i] ? [i] : [])) : void 0;
+    const mesh = this.tinted(source.mesh, tint, masked);
+    const color = this.scene.lighting?.tints?.[tint] ?? TINT_PALETTE[tint];
+    const textures = masked && color ? source.mesh.primitives.map((p, i) => masked.has(i) ? this.maskedTexture(source.textures?.[i] ?? null, masks[i], p.material, color, tint) : source.textures?.[i] ?? null) : void 0;
     const lod = source.lod;
-    if (!lod) return { mesh };
-    return { mesh, lod: { distances: lod.distances, meshes: lod.meshes.map((m) => this.tinted(m, tint)) } };
+    const look = { mesh, ...textures ? { textures } : {} };
+    if (!lod) return look;
+    return { ...look, lod: { distances: lod.distances, meshes: lod.meshes.map((m) => this.tinted(m, tint, masked)) } };
   }
   /** A tinted copy of `mesh`, cached so its identity (and any GPU upload) is stable. */
-  tinted(mesh, tint) {
+  tinted(mesh, tint, masked) {
     let byTint = this.tintCache.get(mesh);
     if (!byTint) {
       byTint = /* @__PURE__ */ new Map();
       this.tintCache.set(mesh, byTint);
     }
+    const key = masked ? `${tint}m` : tint;
+    let out = byTint.get(key);
+    if (!out) {
+      out = tintMesh(mesh, tint, this.scene.lighting?.tints, masked);
+      byTint.set(key, out);
+    }
+    return out;
+  }
+  /** A part's base colour map with the tint painted through its mask, cached per mask, map and tint (stable identity for GPU uploads). */
+  maskedTexture(base, mask, material, color, tint) {
+    let byBase = this.maskCache.get(mask);
+    if (!byBase) {
+      byBase = /* @__PURE__ */ new Map();
+      this.maskCache.set(mask, byBase);
+    }
+    let byTint = byBase.get(base);
+    if (!byTint) {
+      byTint = /* @__PURE__ */ new Map();
+      byBase.set(base, byTint);
+    }
     let out = byTint.get(tint);
     if (!out) {
-      out = tintMesh(mesh, tint, this.scene.lighting?.tints);
+      const [r, g, b] = material.baseColorFactor;
+      out = tintMaskTexture(base, mask, [r, g, b], color, material.tintMix ?? 1);
       byTint.set(tint, out);
     }
     return out;
@@ -11742,7 +11777,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   }
 };
 function fillPlaceholders(mesh, images) {
-  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage", "blendImage", "reliefImage"];
+  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage", "blendImage", "reliefImage", "tintMaskImage"];
   let touched = false;
   const primitives = mesh.primitives.map((primitive) => {
     let material = primitive.material;
@@ -11832,7 +11867,7 @@ async function decodeMeshTextures(mesh, decodeKtx2, cache = /* @__PURE__ */ new 
       return entry;
     })
   );
-  const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightmapTextures, detailTextures, blendTextures, reliefTextures] = await Promise.all([
+  const [textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, lightmapTextures, detailTextures, blendTextures, reliefTextures, tintMaskTextures] = await Promise.all([
     each((m) => m.baseColorImage),
     // base colour
     each((m) => m.normalImage),
@@ -11851,7 +11886,9 @@ async function decodeMeshTextures(mesh, decodeKtx2, cache = /* @__PURE__ */ new 
     // The blend surface of a blended primitive (terrain snow over rock).
     each((m) => m.blendImage),
     // The relief map: parallax height and wear curvature (materialLayers.ts).
-    each((m) => m.reliefImage)
+    each((m) => m.reliefImage),
+    // A painted team-colour mask (L17): applied when the copy is tinted.
+    each((m) => m.tintMaskImage)
   ]);
   return {
     mesh,
@@ -11864,7 +11901,8 @@ async function decodeMeshTextures(mesh, decodeKtx2, cache = /* @__PURE__ */ new 
     ...lightmapTextures.some((t) => t !== null) ? { lightmapTextures } : {},
     ...detailTextures.some((t) => t !== null) ? { detailTextures } : {},
     ...blendTextures.some((t) => t !== null) ? { blendTextures } : {},
-    ...reliefTextures.some((t) => t !== null) ? { reliefTextures } : {}
+    ...reliefTextures.some((t) => t !== null) ? { reliefTextures } : {},
+    ...tintMaskTextures.some((t) => t !== null) ? { tintMaskTextures } : {}
   };
 }
 var TINT_PALETTE = [
@@ -11910,13 +11948,14 @@ function liveLod(lod, live) {
 function lodSignature(lod) {
   return lod ? `${lod.distances.join(",")}|${lod.meshes.map((m) => m.primitives.map((p) => p.indices.length).join(".")).join(",")}` : "";
 }
-function tintMesh(mesh, tint, overrides) {
+function tintMesh(mesh, tint, overrides, masked) {
   const color = overrides?.[tint] ?? TINT_PALETTE[tint];
   if (!color || tint === 0) return mesh;
   return {
     name: mesh.name,
-    primitives: mesh.primitives.map((primitive) => {
+    primitives: mesh.primitives.map((primitive, index) => {
       if (!primitive.material.tintable) return primitive;
+      if (masked?.has(index)) return { ...primitive, material: { ...primitive.material, baseColorFactor: [1, 1, 1, primitive.material.baseColorFactor[3]] } };
       const k = Math.max(0, Math.min(1, primitive.material.tintMix ?? 1));
       const base = primitive.material.baseColorFactor;
       const mixed = k >= 1 ? color : [base[0] + (color[0] - base[0]) * k, base[1] + (color[1] - base[1]) * k, base[2] + (color[2] - base[2]) * k];

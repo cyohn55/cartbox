@@ -1341,6 +1341,43 @@ export {
   type WeightPaintMode,
 } from "./model/weightPaint";
 export {
+  packIslands,
+  pickIsland,
+  transformIsland,
+  unwrapPrimitive,
+  uvIslands,
+  type IslandTransform,
+  type UnwrapOptions,
+  type UvIsland,
+} from "./model/uvUnwrap";
+export {
+  PAINT_LAYERS,
+  blankLayer,
+  encodePaintImage,
+  layerValue,
+  paintImageFrom,
+  paintLayer,
+  paintTexels,
+  surfaceUv,
+  texelOf,
+  tintMaskTexture,
+  type PaintBrush,
+  type PaintImage,
+  type TexturePaintLayer,
+} from "./model/texturePaint";
+export {
+  MATERIAL_IMAGE_SLOTS,
+  addMaterialSet,
+  materialFor,
+  patchMaterial,
+  removeMaterialSet,
+  renameMaterialSet,
+  resetSetMaterial,
+  setHasMaterial,
+  setMaterialImage,
+  type MaterialImageSlot,
+} from "./model/materialSets";
+export {
   BAKE_RATE,
   bakeJoint,
   deleteBoneKey,

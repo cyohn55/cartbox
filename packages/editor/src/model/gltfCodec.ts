@@ -94,6 +94,8 @@ interface GltfMaterial {
   emissiveFactor?: number[];
   alphaMode?: "OPAQUE" | "MASK" | "BLEND";
   alphaCutoff?: number;
+  /** A painted team-colour mask (L17), as a texture of the file: no glTF material has one. */
+  extras?: { tintMaskTexture?: { index: number } };
   extensions?: {
     KHR_materials_clearcoat?: { clearcoatFactor?: number; clearcoatRoughnessFactor?: number };
     KHR_materials_anisotropy?: { anisotropyStrength?: number; anisotropyRotation?: number };
@@ -499,6 +501,7 @@ function readMaterial(json: GltfJson, buffers: (Uint8Array | null)[], materialIn
     metallicRoughnessImage: imageAt(pbr?.metallicRoughnessTexture),
     occlusionImage: imageAt(material?.occlusionTexture),
     emissiveImage: imageAt(material?.emissiveTexture),
+    ...(typeof material?.extras?.tintMaskTexture?.index === "number" ? { tintMaskImage: imageAt(material.extras.tintMaskTexture) } : {}),
     metallicFactor: typeof pbr?.metallicFactor === "number" ? pbr.metallicFactor : undefined,
     roughnessFactor: typeof pbr?.roughnessFactor === "number" ? pbr.roughnessFactor : undefined,
     emissiveFactor:
@@ -986,6 +989,7 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
       ...(m.alphaMode === "mask" ? { alphaMode: "MASK" as const, alphaCutoff: m.alphaCutoff ?? 0.5 } : {}),
       ...(m.alphaMode === "blend" || m.alphaMode === "additive" ? { alphaMode: "BLEND" as const } : {}),
       ...materialLayerExtensions(m),
+      ...(m.tintMaskImage ? { extras: { tintMaskTexture: addTexture(m.tintMaskImage) } } : {}),
     };
     materials.push(gltfMaterial);
     materialOf.set(m, materials.length - 1);

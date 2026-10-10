@@ -731,7 +731,7 @@ then brings the tools into the editor.
       The run is tuned with a 0.15 rad deeper chest lean keyed between two of
       its keys. Through the animator, the chest leans exactly that much
       further there, and the legs and hips are unchanged.
-- [ ] **L17. UVs and texture painting.** A UV view with unwrap and island
+- [x] **L17. UVs and texture painting.** A UV view with unwrap and island
       editing, painting into a material's base colour, roughness/metal and
       emissive maps (with the team-colour mask as a paintable layer),
       uploading an image into any material slot, and editing a material set's
@@ -740,6 +740,58 @@ then brings the tools into the editor.
       editor.
       *Tests:* painting writes the right texels through the UVs; a re-saved
       material set round-trips through GLB export (L14).
+      *Done:* the Mesh tab's **Edit: Paint** mode, with the **Paint** panel
+      and its UV view.
+      - **Unwrap** (`uvUnwrap.ts`) lays each face flat along the axis it
+        faces most. Faces that share an edge and face one way join into a
+        chart, and the charts pack into the unit square at one texel density,
+        a margin apart. UVs keep each triangle's winding, so paint is never
+        mirrored. A vertex two charts share is split with its weights;
+        nothing moves.
+      - **Islands** are triangles joined by edges whose UVs agree. The UV
+        view picks one by a click, moves it by dragging, turns it a quarter,
+        scales it, or re-packs them all. Each is split from its neighbours
+        first, so nothing else moves.
+      - **Painting** (`texturePaint.ts`) works on the model in the preview,
+        or straight onto the UV view. A soft round brush, radius in texels,
+        paints one of five layers: base colour, roughness (the
+        metal-roughness map's green), metal (its blue), emissive, and the
+        team-colour mask. A layer with no map yet starts as what the
+        material shows there now, its factor handed over to the map, so the
+        first dab changes only what it touches. Each stroke is saved as a PNG
+        in the slot of the material, or of the material set the copy wears.
+      - **The team-colour mask** (`MeshMaterial.tintMaskImage`) is new. Its
+        red channel is how much of the team colour each texel takes, times
+        the part's tint mix. In the player, a tinted copy of a masked part
+        draws with its base colour map, the tint painted through the mask
+        (`tintMaskTexture`, cached per tint) and a white factor. Unmasked
+        parts tint as before. GLB export carries the mask as a material
+        `extras` texture, and other exports are byte-identical.
+      - **Maps and sets** (`materialSets.ts`): the **Material** panel takes a
+        PNG or JPEG into any of its 11 map slots, or clears one. It edits the
+        mesh's own materials or a material set's. A set's part starts as a
+        copy of its own the first time it changes, and can be put back. Sets
+        can be made (empty or copying another), renamed and deleted, and the
+        copy wears the set being edited.
+
+      In `uv-texture-paint.test.ts`, the soldier's armour unwraps into 77
+      charts, all inside the square and wound the right way. No texel
+      centre of a 256² grid is covered twice. Every corner keeps its
+      position and weights, and the mesh stays closed. A 3-texel dab of red
+      at the point of the chest plate under the preview's centre turns that
+      texel red and 20 to 40 others around it, nothing farther than 4.5
+      texels. The software preview, sampling the map through the same UVs,
+      draws red there and not before. Each layer writes only its own
+      channels, and the mask colours a masked texel the team colour and an
+      unmasked one its own. An image put in each of the 11 slots, of the
+      part's own material or of a set's, survives the cart's save.
+      *Lockout:* the Spartan's armour, trim and visor are unwrapped and
+      painted as a new **Desert** set. It has tan plates, a team-colour
+      stripe down the helmet's centre line (the mask reads 255 there), worn
+      lower plates and a glowing visor seam. Out through GLB and back, the
+      set's base colour, metal-roughness, emissive and mask maps return byte
+      for byte, with its factors and the parts' UVs. Veteran and Recon are
+      untouched, and a bot set to wear Desert draws the painted map.
 
 ## Not in this roadmap
 

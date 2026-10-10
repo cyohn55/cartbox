@@ -152,6 +152,14 @@ export interface MeshMaterial {
    * secondary plates pick up only a hint of it.
    */
   readonly tintMix?: number;
+  /**
+   * A team-colour mask painted per texel (LOCKOUT_MULTIPLAYER_ROADMAP.md
+   * L17): its red channel (0..255, sampled with the base UVs) is how much of
+   * the tint each texel takes, times {@link tintMix} — the paint on a plate
+   * but not its scuffs, a stripe of team colour on a helmet. Absent: the
+   * whole part takes {@link tintMix} of it.
+   */
+  readonly tintMaskImage?: EncodedImage | null;
   // --- Surface effects (HALO2_STYLE_ROADMAP.md, H3; see materialEffects.ts) ---
   /**
    * A finely tiled detail map blended into the albedo up close (it fades out
@@ -469,6 +477,7 @@ export interface SerializedMaterial {
   textureSprite?: SpriteTextureRef | null;
   tintable?: boolean;
   tintMix?: number;
+  tintMaskImage?: SerializedImage | null;
   detailImage?: SerializedImage | null;
   detailScale?: number;
   detailStrength?: number;
@@ -805,6 +814,7 @@ export function serializeMaterial(material: MeshMaterial, table?: ImageTable): S
     textureSprite: material.textureSprite ?? null,
     ...(material.tintable ? { tintable: true } : {}),
     ...(material.tintable && material.tintMix !== undefined && material.tintMix < 1 ? { tintMix: material.tintMix } : {}),
+    ...(material.tintMaskImage ? { tintMaskImage: serializeImage(material.tintMaskImage, "tintMaskImage", table) } : {}),
     ...(material.detailImage ? { detailImage: serializeImage(material.detailImage, "detailImage", table) } : {}),
     ...(material.blendImage ? { blendImage: serializeImage(material.blendImage, "blendImage", table) } : {}),
     ...(material.reliefImage ? { reliefImage: serializeImage(material.reliefImage, "reliefImage", table) } : {}),
@@ -832,6 +842,7 @@ export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMat
     textureSprite: toTextureSprite(material.textureSprite),
     ...(material.tintable === true ? { tintable: true } : {}),
     ...(material.tintable === true && typeof material.tintMix === "number" && Number.isFinite(material.tintMix) && material.tintMix < 1 ? { tintMix: Math.max(0, material.tintMix) } : {}),
+    ...(material.tintMaskImage ? { tintMaskImage: deserializeImage(material.tintMaskImage, "tintMaskImage", table) } : {}),
     ...(material.detailImage ? { detailImage: deserializeImage(material.detailImage, "detailImage", table) } : {}),
     ...(material.blendImage ? { blendImage: deserializeImage(material.blendImage, "blendImage", table) } : {}),
     ...(material.reliefImage ? { reliefImage: deserializeImage(material.reliefImage, "reliefImage", table) } : {}),
