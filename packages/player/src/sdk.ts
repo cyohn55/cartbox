@@ -21,6 +21,17 @@ local _MPB = _MCB + 8
 local _MPCAP = 8
 local _ln = 0
 local _mn = 0
+local _netq = {}
+local function _netflush()
+  local n = pmem(104)
+  while n < 6 and #_netq > 0 do
+    local e = table.remove(_netq, 1)
+    pmem(105 + n * 2, e[1])
+    pmem(106 + n * 2, e[2])
+    n = n + 1
+  end
+  pmem(104, n)
+end
 local function _emit(kind, id, value)
   local seq = pmem(_MB)
   local slot = seq % _CAP
@@ -213,41 +224,55 @@ cartbox = {
   -- between browsers through pmem words 0..118 (so a netplay cart must not keep
   -- save data there); see packages/player/src/net/netplay.ts for the layout.
   -- net() -> mode (0 offline, 1 client, 2 host), my slot, humans mask, match word,
-  -- and the page's status code (0 idle; the page defines the rest, e.g. searching)
+  -- the page's status code (0 idle; the page defines the rest, e.g. searching),
+  -- and the host's slot (slots stick, so after a host leaves it may not be 0)
   net = function()
     local h = pmem(0)
-    return h & 3, (h >> 2) & 7, (h >> 8) & 0xff, pmem(1), (h >> 5) & 7
+    return h & 3, (h >> 2) & 7, (h >> 8) & 0xff, pmem(1), (h >> 5) & 7, pmem(66) & 7
   end,
-  -- netpeer(slot) -> the slot's 3 state words, and whether they are live
+  -- netclock() -> the room's shared clock, ms (the host's clock; every player
+  -- keeps theirs on it by ping), and the view lag: how old the others'
+  -- snapshots are when they arrive. Draw them at clock - lag - a buffer.
+  netclock = function() return pmem(2), ((pmem(0) >> 24) & 0xff) * 4 end,
+  -- netpeer(slot) -> the slot's 4 state words, whether they are live, and when
+  -- they were taken on the shared clock (ms) -- to draw it between snapshots
   netpeer = function(slot)
-    local b = 3 + slot * 3
-    return pmem(b), pmem(b + 1), pmem(b + 2), ((pmem(0) >> 16) & (1 << slot)) ~= 0
+    local b = 3 + slot * 4
+    local clock = pmem(2)
+    local half = (pmem(35 + (slot >> 1)) >> ((slot & 1) * 16)) & 0xffff
+    return pmem(b), pmem(b + 1), pmem(b + 2), pmem(b + 3), ((pmem(0) >> 16) & (1 << slot)) ~= 0,
+      clock - ((clock - half) & 0xffff)
   end,
-  -- netpublish(slot, a, b, c): publish a slot's state this tick (your own, or a
-  -- bot's when you are the host)
-  netpublish = function(slot, a, b, c)
-    local base = 72 + slot * 3
+  -- netpublish(slot, a, b, c, d): publish a slot's state this tick (your own, or
+  -- a bot's when you are the host)
+  netpublish = function(slot, a, b, c, d)
+    local base = 72 + slot * 4
     pmem(base, math.floor(a or 0) & 0xffffffff)
     pmem(base + 1, math.floor(b or 0) & 0xffffffff)
     pmem(base + 2, math.floor(c or 0) & 0xffffffff)
+    pmem(base + 3, math.floor(d or 0) & 0xffffffff)
     pmem(70, pmem(70) | (1 << slot))
+    _netflush()
   end,
   -- netmatch(word): the host's shared game-state word (clients read it via net())
   netmatch = function(w) pmem(71, math.floor(w or 0) & 0xffffffff) end,
-  -- netsend(a, b): broadcast a 2-word event to every other player (≤ 10/tick)
+  -- netsend(a, b): broadcast a 2-word event to every other player. Six go out a
+  -- tick; the rest wait their turn (up to 64), sent on the next netsend or netpublish.
   netsend = function(a, b)
-    local n = pmem(96)
-    if n >= 10 then return false end
-    pmem(97 + n * 2, math.floor(a or 0) & 0xffffffff)
-    pmem(98 + n * 2, math.floor(b or 0) & 0xffffffff)
-    pmem(96, n + 1)
+    if #_netq >= 64 then return false end
+    _netq[#_netq + 1] = { math.floor(a or 0) & 0xffffffff, math.floor(b or 0) & 0xffffffff }
+    _netflush()
     return true
   end,
-  -- netevents() -> this tick's incoming events, as a list of {a, b}
+  -- netevents() -> this tick's incoming events, as a list of {a, b, from}: from
+  -- is the slot that sent it (the host is slot 0), for telling its word apart
   netevents = function()
-    local n = pmem(27)
+    local n = pmem(39)
     local out = {}
-    for i = 0, n - 1 do out[#out + 1] = { pmem(28 + i * 2), pmem(29 + i * 2) } end
+    for i = 0, n - 1 do
+      local from = (pmem(i < 10 and 64 or 65) >> ((i % 10) * 3)) & 7
+      out[#out + 1] = { pmem(40 + i * 2), pmem(41 + i * 2), from }
+    end
     return out
   end,
   -- Collision defaults: overridden by the injected layer when the cart has one,

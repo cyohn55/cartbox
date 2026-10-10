@@ -94,7 +94,9 @@ describe.skipIf(!existsSync(LOCKOUT_ENGINE))("Lockout in the lab (today's netcod
     const [lan, net, far] = reports;
     for (const r of reports) {
       // Both players were seen by each other through most of the match.
-      expect(r.humans.samples).toBeGreaterThan(600);
+      // (since L7 the host moves the guest's soldier, so only the guest's view
+      // of the host's player is a guess to measure)
+      expect(r.humans.samples).toBeGreaterThan(550);
       expect(r.all.samples).toBeGreaterThan(r.humans.samples);
     }
     // Remote Spartans trail their owners more the further away they are.
@@ -120,10 +122,12 @@ describe.skipIf(!existsSync(LOCKOUT_ENGINE))("Lockout in the lab (today's netcod
     const r = await lab({ latencyMs: 80, jitterMs: 20, loss: 0.05 }, 8, 300);
     expect(r.humans.samples).toBeGreaterThan(1000);
     expect(r.messages.lost).toBeGreaterThan(0);
-    for (const b of r.bytesPerSecond) {
+    // Guests send their inputs; the host, every soldier (L7).
+    for (const b of r.bytesPerSecond.slice(1)) {
       expect(b.sent).toBeLessThan(2_000);
       expect(b.received).toBeLessThan(12_000);
     }
+    expect(r.bytesPerSecond[0]!.sent).toBeLessThan(6_000);
     console.log(`net lab, 8 players at 80 ms with 5% loss: humans drift mean ${r.humans.mean} m, p95 ${r.humans.p95} m; host sends ${r.bytesPerSecond[0]!.sent} B/s, receives ${r.bytesPerSecond[0]!.received} B/s; guest sends ${r.bytesPerSecond[1]!.sent} B/s`);
   }, 600_000);
 });

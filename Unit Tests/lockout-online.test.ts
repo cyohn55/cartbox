@@ -172,8 +172,8 @@ describe("SupabaseNetTransport", () => {
       [a.selfId, 100],
       [b.selfId, 200],
     ]);
-    a.send({ s: [[0, 1, 2, 3]], m: 5 });
-    expect(gotB).toEqual([{ s: [[0, 1, 2, 3]], m: 5 }]);
+    a.send({ s: [[0, 1, 2, 3, 4]], m: 5, t: 77 });
+    expect(gotB).toEqual([{ s: [[0, 1, 2, 3, 4]], m: 5, t: 77 }]);
     expect(gotA).toEqual([]); // never echoed to the sender
 
     a.close();

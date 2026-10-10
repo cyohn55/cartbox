@@ -108,6 +108,6 @@ describe("Lockout's Spartans", () => {
     expect(LOCKOUT_CODE).toContain('cartbox.trigger(i, "melee")');
     expect(LOCKOUT_CODE).toContain('cartbox.trigger(i, "hit")');
     expect(LOCKOUT_CODE).toContain("target.flinch = true");
-    expect(LOCKOUT_CODE).toContain("if w.melee or m < 1.8 then o.swing = true end");
+    expect(LOCKOUT_CODE).toContain("if w.melee or m < 1.8 then o.swing = true");
   });
 });
