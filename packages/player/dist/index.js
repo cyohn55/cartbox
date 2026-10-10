@@ -10209,6 +10209,8 @@ import {
   hdrToTexture,
   isRadiance,
   panoramaWithClouds,
+  panoramaWithSun,
+  skySun,
   BounceTransferBuilder,
   probeBounce,
   readProbeBake,
@@ -10219,9 +10221,25 @@ import {
 // src/mesh/dynamicLights.ts
 function withCartSun(lighting, sun) {
   const l = Math.hypot(...sun.direction) || 1;
-  const key = { kind: "directional", direction: [sun.direction[0] / l, sun.direction[1] / l, sun.direction[2] / l], color: [...sun.color], intensity: 1 };
+  const direction = [sun.direction[0] / l, sun.direction[1] / l, sun.direction[2] / l];
+  const key = { kind: "directional", direction, color: [...sun.color], intensity: 1 };
   const at = lighting.lights.findIndex((x) => x.kind === "directional");
-  return { ...lighting, lights: at < 0 ? [key, ...lighting.lights] : lighting.lights.map((x, i) => i === at ? { ...x, ...key } : x) };
+  const authored = at < 0 ? null : lighting.lights[at];
+  const sky = lighting.sky;
+  return {
+    ...lighting,
+    lights: at < 0 ? [key, ...lighting.lights] : lighting.lights.map((x, i) => i === at ? { ...x, ...key } : x),
+    ...sky ? {
+      sky: {
+        ...sky,
+        sunDirection: direction,
+        sunColor: [0, 1, 2].map((k) => {
+          const reference = authored ? authored.color[k] * authored.intensity : 1;
+          return reference > 1e-6 ? sky.sunColor[k] * sun.color[k] / reference : 0;
+        })
+      }
+    } : {}
+  };
 }
 function bounceLightsFor(authored, frame, cart) {
   const authoredKey = authored.lights.find((x) => x.kind === "directional");
@@ -10497,6 +10515,7 @@ function compositeHudOverScene(scene, hud, count) {
 var SKY_PANORAMA_WIDTH = 1536;
 var SKY_PANORAMA_HEIGHT = 768;
 var SKY_IBL_DOWNSAMPLE = 8;
+var SKY_IBL_SUN_SAMPLES = 4;
 function poseLocalMatrix(pose) {
   return composeModelMatrix4(
     pose.position,
@@ -10544,6 +10563,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.skyCache = null;
     /** The sky's drifting cloud layers (I6), drawn over the backdrop each frame. */
     this.skyClouds = [];
+    /**
+     * The sky's reflections copy without its sun (a sun layer, see bakeSceneSky),
+     * and the sun the environment map now shows: a cart's sun (cartbox.sun3d)
+     * moves the sun the metals reflect too.
+     */
+    this.skyReflections = null;
     /** The scene's distant vistas, textured: re-drawn into the sky whenever it is re-baked. */
     this.vistas = [];
     /**
@@ -10748,6 +10773,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         skyMap = baked.map;
         clouds = baked.clouds;
         environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections) };
+        this.skyReflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
+      } else {
+        this.skyReflections = null;
       }
       this.environment = environment;
       this.skyMap = skyMap;
@@ -10830,14 +10858,17 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     let clouds = [];
     let environment = lighting ? sceneLightingEnvironment(lighting) : null;
     const vistas = await texturedVistas(scene.vistas, texture);
+    let reflections = null;
     if (lighting?.sky && environment) {
       const baked = await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center);
       skyMap = baked.map;
       clouds = baked.clouds;
       environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections) };
+      reflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
     }
     const surface = new _MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
     surface.skyClouds = clouds;
+    surface.skyReflections = reflections;
     surface.startBounce();
     surface.vistas = vistas;
     surface.trailed = scene.instances.flatMap((instance, i) => instance.mesh.trails && instance.mesh.trails.length > 0 ? [i] : []);
@@ -10975,6 +11006,21 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (this.sunRig?.source !== lighting || this.sunRig.sun !== sun) this.sunRig = { source: lighting, sun, lighting: withCartSun(lighting, this.cartSun) };
     return this.sunRig.lighting;
   }
+  /**
+   * Keep the sun the metals reflect where the frame's sun is: when it has
+   * moved (or changed colour) past what {@link sunKey} rounds away, redraw the
+   * reflections copy's glow — a small map, a few milliseconds.
+   */
+  followSun(lighting) {
+    const reflections = this.skyReflections;
+    if (!reflections || !lighting?.sky || !this.environment) return;
+    const sun = skySun(lighting.sky);
+    const key = sunKey(sun);
+    if (key === reflections.sun) return;
+    const map = skyReflectionsWith(reflections.small, sun, this.skyClouds);
+    this.environment = { ...this.environment, map, average: computeEnvironmentAverage(map) };
+    this.skyReflections = { small: reflections.small, sun: key };
+  }
   /** Start finding the probes' bounce transfer (I17), when they were baked with their light recorded. */
   startBounce() {
     this.bounce = null;
@@ -11055,6 +11101,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const { main: instances, front, moved } = this.posedInstances();
     const lighting = this.frameLighting();
     this.stepBounce(lighting);
+    this.followSun(lighting);
     let mark = profiler ? performance.now() : 0;
     const shadow = lighting ? this.buildShadow(instances, moved, lighting) : null;
     if (profiler) {
@@ -11066,7 +11113,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const local = lighting?.shadows && this.quality.shadows && rig ? this.buildLocalShadows(rig, moved) : null;
     const lights = local ? local.lights : rig;
     const skyBackdrop = this.hud && this.skyMap !== null;
-    if (skyBackdrop) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : SKY_BACKDROP_SCALE);
+    if (skyBackdrop) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : SKY_BACKDROP_SCALE, lighting?.sky ? skySun(lighting.sky) : null);
     if (profiler) {
       const now = performance.now();
       profiler.add("sky", now - mark);
@@ -11185,16 +11232,20 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (this.sunSeen < 1e-3) this.sunSeen = 0;
     this.onSun?.({ x: this.sunAt.x, y: this.sunAt.y, visible: this.sunSeen });
   }
-  /** Paint the sky backdrop, or copy it from last frame when the view direction hasn't changed. */
-  paintSky(out, width, height, view, projection, scale) {
-    const key = [width, height, scale, view[0], view[1], view[2], view[4], view[5], view[6], view[8], view[9], view[10], projection[0], projection[5]].map((n) => Math.round(n * 1e5)).join(",");
+  /**
+   * Paint the sky backdrop with its sun's glow toward `sun` (the frame's: the
+   * cart's, if it set one), or copy it from last frame when neither the view
+   * direction nor the sun has changed.
+   */
+  paintSky(out, width, height, view, projection, scale, sun) {
+    const key = [width, height, scale, view[0], view[1], view[2], view[4], view[5], view[6], view[8], view[9], view[10], projection[0], projection[5]].map((n) => Math.round(n * 1e5)).join(",") + (sun ? `|${sunKey(sun)}` : "");
     const cache = this.skyCache;
     const drifting = this.skyClouds.length > 0;
     if (!drifting && cache && cache.key === key && cache.pixels.length === width * height * 4) {
       out.set(cache.pixels);
       return;
     }
-    renderSkyBackground(out, width, height, view, projection, this.skyMap, 8, scale, drifting ? { layers: this.skyClouds, time: this.frame / 60 } : null);
+    renderSkyBackground(out, width, height, view, projection, this.skyMap, 8, scale, drifting ? { layers: this.skyClouds, time: this.frame / 60 } : null, sun);
     const pixels = cache && cache.pixels.length === width * height * 4 ? cache.pixels : new Uint8ClampedArray(width * height * 4);
     pixels.set(out.subarray(0, width * height * 4));
     this.skyCache = { key, pixels };
@@ -11691,10 +11742,10 @@ async function bakeSceneSky(sky, lighting, environment, vistas, eye) {
       imported = null;
     }
   }
-  let map = bakeSkyPanorama(sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT, imported);
+  let map = bakeSkyPanorama(sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT, imported, { sunLayer: true });
   const bounds = vistas.length > 0 ? vistaBounds(vistas) : null;
   if (bounds) {
-    const light = downsamplePanorama(map, SKY_IBL_DOWNSAMPLE);
+    const light = panoramaWithSun(downsamplePanorama(map, SKY_IBL_DOWNSAMPLE), skySun(sky), SKY_IBL_SUN_SAMPLES);
     const shadow = buildSceneShadow(
       vistas.flatMap((v) => v.instances),
       lighting,
@@ -11702,7 +11753,7 @@ async function bakeSceneSky(sky, lighting, environment, vistas, eye) {
       bounds.radius,
       { size: VISTA_SHADOW_SIZE, depth: new Float32Array(VISTA_SHADOW_SIZE * VISTA_SHADOW_SIZE) }
     );
-    const air = sky.objects && sky.objects.length > 0 ? bakeSkyPanorama({ ...sky, objects: [] }, VISTA_AIR_WIDTH, VISTA_AIR_WIDTH / 2, imported) : null;
+    const air = sky.objects && sky.objects.length > 0 ? bakeSkyPanorama({ ...sky, objects: [] }, VISTA_AIR_WIDTH, VISTA_AIR_WIDTH / 2, imported, { sunLayer: true }) : null;
     map = bakeVistas(map, vistas, eye, {
       ambient: lighting.ambient,
       lightDirection: sceneLightingKeyDirection(lighting),
@@ -11713,11 +11764,18 @@ async function bakeSceneSky(sky, lighting, environment, vistas, eye) {
       // Fog boxes sit in the play space, not out where the vistas are.
       fog: lighting.fog ? { ...lighting.fog, volumes: [] } : null,
       shadow
-    }, void 0, air);
+    }, void 0, air, true);
   }
   const clouds = (sky.cloudLayers ?? []).map(bakeCloudLayer);
-  const reflections = panoramaWithClouds(downsamplePanorama(map, SKY_IBL_DOWNSAMPLE), clouds, 0);
-  return { map, reflections, clouds };
+  const small = downsamplePanorama(map, SKY_IBL_DOWNSAMPLE);
+  return { map, small, reflections: skyReflectionsWith(small, skySun(sky), clouds), clouds };
+}
+function skyReflectionsWith(small, sun, clouds) {
+  return panoramaWithClouds(panoramaWithSun(small, sun, SKY_IBL_SUN_SAMPLES), clouds, 0);
+}
+function sunKey(sun) {
+  const l = Math.hypot(sun.direction[0], sun.direction[1], sun.direction[2]) || 1;
+  return `${sun.direction.map((v) => Math.round(v / l * 100)).join(",")}:${sun.color.map((v) => Math.round(v * 50)).join(",")}`;
 }
 async function decodeMeshTextures(mesh, decodeKtx2, cache = /* @__PURE__ */ new Map()) {
   const decode = (image) => image.mime === "image/ktx2" ? decodeKtx2(image.bytes) : decodeTexture(image.mime, image.bytes);

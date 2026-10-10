@@ -14,12 +14,35 @@ export interface CartSun {
   readonly color: readonly [number, number, number];
 }
 
-/** `lighting` with `sun` as its key (the first directional light; added first if it has none). */
+/**
+ * `lighting` with `sun` as its key (the first directional light; added first
+ * if it has none), and its sky's sun moved to it — the glow, the shafts and
+ * the flare — coloured by how `sun` compares, channel by channel, with the
+ * key it replaces (a dimmer, redder evening sun paints a dimmer, redder glow).
+ */
 export function withCartSun(lighting: SceneLighting, sun: CartSun): SceneLighting {
   const l = Math.hypot(...sun.direction) || 1;
-  const key: SceneLight = { kind: "directional", direction: [sun.direction[0] / l, sun.direction[1] / l, sun.direction[2] / l], color: [...sun.color], intensity: 1 };
+  const direction: [number, number, number] = [sun.direction[0] / l, sun.direction[1] / l, sun.direction[2] / l];
+  const key: SceneLight = { kind: "directional", direction, color: [...sun.color], intensity: 1 };
   const at = lighting.lights.findIndex((x) => x.kind === "directional");
-  return { ...lighting, lights: at < 0 ? [key, ...lighting.lights] : lighting.lights.map((x, i) => (i === at ? { ...x, ...key } : x)) };
+  const authored = at < 0 ? null : lighting.lights[at]!;
+  const sky = lighting.sky;
+  return {
+    ...lighting,
+    lights: at < 0 ? [key, ...lighting.lights] : lighting.lights.map((x, i) => (i === at ? { ...x, ...key } : x)),
+    ...(sky
+      ? {
+          sky: {
+            ...sky,
+            sunDirection: direction,
+            sunColor: [0, 1, 2].map((k) => {
+              const reference = authored ? authored.color[k]! * authored.intensity : 1;
+              return reference > 1e-6 ? (sky.sunColor[k]! * sun.color[k]!) / reference : 0;
+            }) as [number, number, number],
+          },
+        }
+      : {}),
+  };
 }
 
 /**

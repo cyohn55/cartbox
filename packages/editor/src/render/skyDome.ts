@@ -348,12 +348,66 @@ const smoothstep = (e0: number, e1: number, x: number): number => {
 /** How far below the horizon (radians) a mountain's base runs before the mist takes it. */
 const MOUNTAIN_BASE = 0.05;
 
+/** Below this cosine to the sun its glow is under a fifth of an 8-bit step, so it isn't drawn. */
+const GLOW_FLOOR = 0.4;
+/** Beyond this cosine (8° off the sun) the core is under a millionth of a step. */
+const CORE_FLOOR = 0.99;
+
+/**
+ * A procedural sky's sun glow, looking `cosSun` (the cosine of the angle) off
+ * the sun: a wide soft glow plus a tight core.
+ */
+export function sunGlow(cosSun: number): number {
+  return broadGlow(cosSun) + coreGlow(cosSun);
+}
+
+/** The glow's wide, smooth part (powers by squaring: it runs per grid point when the backdrop draws the sun live). */
+function broadGlow(c: number): number {
+  if (c <= 0) return 0;
+  const c2 = c * c;
+  const c6 = c2 * c2 * c2;
+  const c8 = c6 * c2;
+  const c16 = c8 * c8;
+  const c32 = c16 * c16;
+  return c6 * 0.18 + c32 * c32 * 0.25;
+}
+
+/** The glow's tight core: a couple of degrees across. */
+function coreGlow(c: number): number {
+  return c > CORE_FLOOR ? Math.pow(c, 1500) * 0.6 : 0;
+}
+
+/** The sun a backdrop or a reflections copy draws: where it is, and its glow's colour. */
+export interface SkySun {
+  /** World direction toward the sun (normalised on use). */
+  readonly direction: readonly [number, number, number];
+  readonly color: Rgb;
+}
+
+/** A sky's own sun: where it was authored and its colour. */
+export function skySun(sky: ProceduralSky): SkySun {
+  return { direction: sky.sunDirection, color: sky.sunColor };
+}
+
 /**
  * Bake a {@link ProceduralSky} into an equirectangular panorama (`width × height`,
  * longitude = atan2(z, x) across, latitude top→bottom), matching the projection
  * `sampleEnvironmentDir` reads. Deterministic for a given sky and size.
+ *
+ * With `sunLayer`, the sun's glow is left out and its alpha holds how much of
+ * the glow each texel lets through — less under cloud, none on a mountain or
+ * the valley mist — so the glow can be drawn toward any sun later
+ * ({@link panoramaWithSun}, or {@link renderSkyBackground}'s `sun`): a time of
+ * day. An imported panorama paints its own sun, so its alpha is 0.
  */
-export function bakeSkyPanorama(sky: ProceduralSky, width: number, height: number, imported: DecodedTexture | null = null): DecodedTexture {
+export function bakeSkyPanorama(
+  sky: ProceduralSky,
+  width: number,
+  height: number,
+  imported: DecodedTexture | null = null,
+  options: { readonly sunLayer?: boolean } = {},
+): DecodedTexture {
+  const sunLayer = options.sunLayer === true;
   // Sky objects (I6), framed once; shaded per texel in front of the sky.
   const objects = prepareSkyObjects(sky.objects ?? [], sky.sunDirection);
   const pixel = Math.PI / height;
@@ -377,6 +431,7 @@ export function bakeSkyPanorama(sky: ProceduralSky, width: number, height: numbe
         }
       }
     }
+    if (sunLayer) for (let i = 3; i < map.data.length; i += 4) map.data[i] = 0;
     return map;
   }
   const data = new Uint8ClampedArray(width * height * 4);
@@ -450,7 +505,7 @@ export function bakeSkyPanorama(sky: ProceduralSky, width: number, height: numbe
 
       // Sun: a wide soft glow plus a tight core.
       const cosSun = Math.max(0, dx * sun[0] + dy * sun[1] + dz * sun[2]);
-      const glow = Math.pow(cosSun, 6) * 0.18 + Math.pow(cosSun, 64) * 0.25 + Math.pow(cosSun, 1500) * 0.6;
+      const glow = sunGlow(cosSun);
 
       // Clouds on a plane overhead (dir.xz / dir.y), fading into the horizon haze.
       let cloud = 0;
@@ -472,10 +527,14 @@ export function bakeSkyPanorama(sky: ProceduralSky, width: number, height: numbe
         gg += (cg - gg) * cloud;
         b += (cb - b) * cloud;
       }
-      const sunVis = 1 - cloud * 0.85;
-      r += sky.sunColor[0] * glow * sunVis;
-      gg += sky.sunColor[1] * glow * sunVis;
-      b += sky.sunColor[2] * glow * sunVis;
+      // How much of the glow shows here: dimmed by cloud, then by the mist and
+      // mountains laid over it below (kept in alpha for a sun layer).
+      let sunVis = 1 - cloud * 0.85;
+      if (!sunLayer) {
+        r += sky.sunColor[0] * glow * sunVis;
+        gg += sky.sunColor[1] * glow * sunVis;
+        b += sky.sunColor[2] * glow * sunVis;
+      }
 
       // Below the horizon: a misty valley / cloud sea.
       if (elevation < 0) {
@@ -490,6 +549,7 @@ export function bakeSkyPanorama(sky: ProceduralSky, width: number, height: numbe
         r += (br * (1 - depth * 0.25) - r) * m;
         gg += (bg * (1 - depth * 0.25) - gg) * m;
         b += (bb * (1 - depth * 0.2) - b) * m;
+        sunVis *= 1 - m;
       }
 
       // Mountains, far to near: each covers the band from a little below the
@@ -533,13 +593,14 @@ export function bakeSkyPanorama(sky: ProceduralSky, width: number, height: numbe
         r += (mr - r) * edge;
         gg += (mg - gg) * edge;
         b += (mb - b) * edge;
+        sunVis *= 1 - edge;
       }
 
       const o = (y * width + x) * 4;
       data[o] = r * 255;
       data[o + 1] = gg * 255;
       data[o + 2] = b * 255;
-      data[o + 3] = 255;
+      data[o + 3] = sunLayer ? sunVis * 255 : 255;
     }
   }
   return { width, height, data };
@@ -577,7 +638,7 @@ export function panoramaWithClouds(map: DecodedTexture, layers: readonly BakedCl
   return { width, height, data };
 }
 
-/** Box-downsample a panorama by an integer factor (for the IBL copy). */
+/** Box-downsample a panorama by an integer factor (for the IBL copy); alpha (a sun layer's) is averaged too. */
 export function downsamplePanorama(map: DecodedTexture, factor: number): DecodedTexture {
   const f = Math.max(1, Math.floor(factor));
   const width = Math.max(1, Math.floor(map.width / f));
@@ -589,22 +650,75 @@ export function downsamplePanorama(map: DecodedTexture, factor: number): Decoded
       let r = 0;
       let g = 0;
       let b = 0;
+      let a = 0;
       for (let j = 0; j < f; j += 1) {
         for (let i = 0; i < f; i += 1) {
           const at = ((y * f + j) * map.width + x * f + i) * 4;
           r += map.data[at]!;
           g += map.data[at + 1]!;
           b += map.data[at + 2]!;
+          a += map.data[at + 3]!;
         }
       }
       const o = (y * width + x) * 4;
       data[o] = r / n;
       data[o + 1] = g / n;
       data[o + 2] = b / n;
-      data[o + 3] = 255;
+      data[o + 3] = a / n;
     }
   }
   return { width, height, data };
+}
+
+/**
+ * A sun-layer panorama ({@link bakeSkyPanorama}'s `sunLayer`) with the glow of
+ * `sun` drawn in — what a reflections copy shows — opaque. Near the sun each
+ * texel's core is the mean over `samples × samples` points across it, so a
+ * small copy still holds the core's light.
+ */
+export function panoramaWithSun(map: DecodedTexture, sun: SkySun, samples = 1): DecodedTexture {
+  const { width, height } = map;
+  const data = new Uint8ClampedArray(map.data);
+  const l = Math.hypot(sun.direction[0], sun.direction[1], sun.direction[2]) || 1;
+  const sx = sun.direction[0] / l, sy = sun.direction[1] / l, sz = sun.direction[2] / l;
+  const s = Math.max(1, Math.floor(samples));
+  // A texel's corners are within this cosine of its centre's (well inside the floor's margin).
+  const margin = 1 - Math.cos((Math.PI / height) * 1.5);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const o = (y * width + x) * 4;
+      const a = data[o + 3]!;
+      data[o + 3] = 255;
+      if (a === 0) continue;
+      const centre = texelDirection(x + 0.5, y + 0.5, width, height);
+      const c = centre[0] * sx + centre[1] * sy + centre[2] * sz;
+      if (c < GLOW_FLOOR - margin) continue;
+      let glow = broadGlow(c);
+      if (c > CORE_FLOOR - margin) {
+        let core = 0;
+        for (let j = 0; j < s; j += 1) {
+          for (let i = 0; i < s; i += 1) {
+            const d = texelDirection(x + (i + 0.5) / s, y + (j + 0.5) / s, width, height);
+            core += coreGlow(d[0] * sx + d[1] * sy + d[2] * sz);
+          }
+        }
+        glow += core / (s * s);
+      }
+      const g = glow * a;
+      data[o] = data[o]! + sun.color[0] * g;
+      data[o + 1] = data[o + 1]! + sun.color[1] * g;
+      data[o + 2] = data[o + 2]! + sun.color[2] * g;
+    }
+  }
+  return { width, height, data };
+}
+
+/** The direction through panorama point (`x`, `y`) in texels (the bake's own mapping). */
+function texelDirection(x: number, y: number, width: number, height: number): [number, number, number] {
+  const theta = (y / height) * Math.PI;
+  const phi = (x / width - 0.5) * 2 * Math.PI;
+  const st = Math.sin(theta);
+  return [st * Math.cos(phi), Math.cos(theta), st * Math.sin(phi)];
 }
 
 /** Reused half-resolution scratch for {@link renderSkyBackground}. */
@@ -614,6 +728,9 @@ let gridV: Float32Array | null = null;
 let gridPx: Float32Array | null = null;
 let gridPz: Float32Array | null = null;
 let gridFade: Float32Array | null = null;
+/** Each grid ray's direction, unit length, and the sun's wide glow along it (for a sun drawn live). */
+let gridDir: Float32Array | null = null;
+let gridGlow: Float32Array | null = null;
 
 /**
  * Paint a panorama behind the camera into `out` (RGBA, `width × height`): every
@@ -626,6 +743,12 @@ let gridFade: Float32Array | null = null;
  * `step`-pixel grid with the panorama coordinates interpolated between, and the
  * sky — soft by nature — is shaded at 1/`scale` resolution then expanded with
  * 32-bit block copies.
+ *
+ * With `sun`, the map is a sun layer ({@link bakeSkyPanorama}'s `sunLayer`) and
+ * the sun's glow is drawn toward `sun` as it is now, through the map's alpha —
+ * a sun that moves (`cartbox.sun3d`). The wide glow is solved on the grid
+ * and interpolated like the panorama coordinates; only the few cells round the
+ * sun's core solve it per pixel.
  */
 export function renderSkyBackground(
   out: Uint8ClampedArray,
@@ -638,6 +761,7 @@ export function renderSkyBackground(
   scale = 2,
   /** Drifting cloud layers (I6) and the time they have drifted to, or omitted for none. */
   clouds: { readonly layers: readonly BakedCloudLayer[]; readonly time: number } | null = null,
+  sun: SkySun | null = null,
 ): void {
   const k = Math.max(1, Math.floor(scale));
   const sw = Math.ceil(width / k);
@@ -661,6 +785,16 @@ export function renderSkyBackground(
   }
   const gu = gridU;
   const gv = gridV!;
+  if (sun && (!gridDir || gridDir.length < gw * gh * 3)) {
+    gridDir = new Float32Array(gw * gh * 3);
+    gridGlow = new Float32Array(gw * gh);
+  }
+  const gd = gridDir;
+  const gl = gridGlow;
+  const sl = sun ? Math.hypot(sun.direction[0], sun.direction[1], sun.direction[2]) || 1 : 1;
+  const sunX = sun ? sun.direction[0] / sl : 0, sunY = sun ? sun.direction[1] / sl : 0, sunZ = sun ? sun.direction[2] / sl : 0;
+  // The glow's colour in 8-bit units.
+  const glowR = sun ? sun.color[0] * 255 : 0, glowG = sun ? sun.color[1] * 255 : 0, glowB = sun ? sun.color[2] * 255 : 0;
   // Where each grid ray meets the cloud plane (I6), interpolated across cells as u and v are.
   const layered = clouds !== null && clouds.layers.length > 0;
   if (layered && (!gridPx || gridPx.length < gw * gh)) {
@@ -681,6 +815,12 @@ export function renderSkyBackground(
       const len = Math.hypot(dx, dy, dz) || 1;
       gu[j * gw + i] = Math.atan2(dz, dx) / TWO_PI + 0.5;
       gv[j * gw + i] = Math.acos(Math.max(-1, Math.min(1, dy / len))) / Math.PI;
+      if (sun) {
+        gd![(j * gw + i) * 3] = dx / len;
+        gd![(j * gw + i) * 3 + 1] = dy / len;
+        gd![(j * gw + i) * 3 + 2] = dz / len;
+        gl![j * gw + i] = broadGlow((dx * sunX + dy * sunY + dz * sunZ) / len);
+      }
       if (layered) {
         const [px, pz, fade] = cloudPlane(dx / len, dy / len, dz / len);
         gridPx![j * gw + i] = px;
@@ -696,6 +836,10 @@ export function renderSkyBackground(
   const mh = map.height;
   const src = map.data;
   const inv = 1 / gstep;
+  /** How squarely grid ray `c` (its index × 3) faces the sun. */
+  const facing = (c: number) => gd![c]! * sunX + gd![c + 1]! * sunY + gd![c + 2]! * sunZ;
+  /** The wide glow's floor, at {@link GLOW_FLOOR}. */
+  const broadFloor = broadGlow(GLOW_FLOOR);
   for (let j = 0; j < gh - 1; j += 1) {
     const y0c = j * gstep;
     if (y0c >= sh) break;
@@ -718,6 +862,11 @@ export function renderSkyBackground(
       const v10 = gv[g + 1]!;
       const v01 = gv[g + gw]!;
       const v11 = gv[g + gw + 1]!;
+      // The sun's glow, if any corner of the cell is near enough the sun to show
+      // it; its core (per pixel), if a corner is within a few degrees of it.
+      const glowing = sun !== null && Math.max(gl![g]!, gl![g + 1]!, gl![g + gw]!, gl![g + gw + 1]!) > broadFloor;
+      const g3 = g * 3, gr3 = (g + 1) * 3, gb3 = (g + gw) * 3, gbr3 = (g + gw + 1) * 3;
+      const cored = glowing && Math.max(facing(g3), facing(gr3), facing(gb3), facing(gbr3)) > CORE_FLOOR - 0.01;
       for (let y = y0c; y < y1c; y += 1) {
         const ty = (y - y0c) * inv;
         const uL = u00 + (u01 - u00) * ty;
@@ -729,6 +878,24 @@ export function renderSkyBackground(
         let u = uL + 1; // keep positive so |0 floors
         let v = vL;
         let o = y * sw + x0c;
+        // The wide glow across the row, and near the core the ray's direction: linear between the corners'.
+        let glow = 0, dglow = 0;
+        let ex = 0, ey = 0, ez = 0, dex = 0, dey = 0, dez = 0;
+        if (glowing) {
+          const left = gl![g]! + (gl![g + gw]! - gl![g]!) * ty;
+          glow = left;
+          dglow = (gl![g + 1]! + (gl![g + gw + 1]! - gl![g + 1]!) * ty - left) * inv;
+        }
+        if (cored) {
+          const lerp = (k: number) => {
+            const left = gd![g3 + k]! + (gd![gb3 + k]! - gd![g3 + k]!) * ty;
+            const right = gd![gr3 + k]! + (gd![gbr3 + k]! - gd![gr3 + k]!) * ty;
+            return [left, (right - left) * inv] as const;
+          };
+          [ex, dex] = lerp(0);
+          [ey, dey] = lerp(1);
+          [ez, dez] = lerp(2);
+        }
         for (let x = x0c; x < x1c; x += 1, u += du, v += dv, o += 1) {
           // Bilinear fetch, wrapping longitude and clamping latitude.
           const fx = (u - (u | 0)) * mw - 0.5 + mw;
@@ -753,6 +920,24 @@ export function renderSkyBackground(
           const r = src[p00]! * w00 + src[p10]! * w10 + src[p01]! * w01 + src[p11]! * w11;
           const gg = src[p00 + 1]! * w00 + src[p10 + 1]! * w10 + src[p01 + 1]! * w01 + src[p11 + 1]! * w11;
           const b = src[p00 + 2]! * w00 + src[p10 + 2]! * w10 + src[p01 + 2]! * w01 + src[p11 + 2]! * w11;
+          if (glowing) {
+            let here = glow;
+            glow += dglow;
+            if (cored) {
+              // Interpolated directions fall short of unit length mid-cell: normalise, or the core dims.
+              here += coreGlow((ex * sunX + ey * sunY + ez * sunZ) / Math.sqrt(ex * ex + ey * ey + ez * ez));
+              ex += dex;
+              ey += dey;
+              ez += dez;
+            }
+            const a = src[p00 + 3]! * w00 + src[p10 + 3]! * w10 + src[p01 + 3]! * w01 + src[p11 + 3]! * w11;
+            if (here > broadFloor && a > 0) {
+              const lit = here * (a / 255);
+              const lr = Math.min(255, r + glowR * lit), lg = Math.min(255, gg + glowG * lit), lb = Math.min(255, b + glowB * lit);
+              small[o] = 0xff000000 | ((lb + 0.5) << 16) | ((lg + 0.5) << 8) | (lr + 0.5);
+              continue;
+            }
+          }
           // Little-endian RGBA packed as one word (alpha 255).
           small[o] = 0xff000000 | ((b + 0.5) << 16) | ((gg + 0.5) << 8) | (r + 0.5);
         }

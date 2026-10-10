@@ -5519,6 +5519,12 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private skyCache;
     /** The sky's drifting cloud layers (I6), drawn over the backdrop each frame. */
     private skyClouds;
+    /**
+     * The sky's reflections copy without its sun (a sun layer, see bakeSceneSky),
+     * and the sun the environment map now shows: a cart's sun (cartbox.sun3d)
+     * moves the sun the metals reflect too.
+     */
+    private skyReflections;
     /** The scene's distant vistas, textured: re-drawn into the sky whenever it is re-baked. */
     private vistas;
     /**
@@ -5693,6 +5699,12 @@ declare class MeshOverlaySurface implements DisplaySurface {
     setCartLights(lights: readonly WorldLight[]): void;
     /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17). */
     private frameLighting;
+    /**
+     * Keep the sun the metals reflect where the frame's sun is: when it has
+     * moved (or changed colour) past what {@link sunKey} rounds away, redraw the
+     * reflections copy's glow — a small map, a few milliseconds.
+     */
+    private followSun;
     /** Start finding the probes' bounce transfer (I17), when they were baked with their light recorded. */
     private startBounce;
     /**
@@ -5710,7 +5722,11 @@ declare class MeshOverlaySurface implements DisplaySurface {
     blit(rgba: Uint8Array): void;
     /** Report the sun to {@link onSun}: its place on screen and its eased visibility. */
     private reportSun;
-    /** Paint the sky backdrop, or copy it from last frame when the view direction hasn't changed. */
+    /**
+     * Paint the sky backdrop with its sun's glow toward `sun` (the frame's: the
+     * cart's, if it set one), or copy it from last frame when neither the view
+     * direction nor the sun has changed.
+     */
     private paintSky;
     /** The 3D render scale this frame: 1, unless the software governor has stepped down. */
     private renderScale;
