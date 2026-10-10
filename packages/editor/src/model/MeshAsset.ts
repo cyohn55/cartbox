@@ -284,6 +284,30 @@ export interface MeshAsset {
   readonly clips?: readonly AnimationClip[];
   /** Ribbons of light the mesh leaves as parts of it sweep (I10; see meshTrails.ts). */
   readonly trails?: readonly MeshTrail[];
+  /** Named material sets (I13): glTF's KHR_materials_variants, chosen per placed copy. */
+  readonly variants?: readonly MeshVariant[];
+}
+
+/**
+ * A material set (HALO_INFINITE_STYLE_ROADMAP.md I13): an alternative
+ * material for some of the mesh's primitives — another armour finish, a
+ * damaged look, a team's livery — as an artist exports it with
+ * KHR_materials_variants. `materials` runs parallel to the primitives; null
+ * keeps a primitive's own material.
+ */
+export interface MeshVariant {
+  readonly name: string;
+  readonly materials: readonly (MeshMaterial | null)[];
+}
+
+/** The most material sets a mesh keeps. */
+export const MAX_MESH_VARIANTS = 16;
+
+/** `mesh` wearing its material set `name` (unchanged when it has no such set). */
+export function applyMeshVariant(mesh: MeshAsset, name: string | undefined): MeshAsset {
+  const variant = name ? mesh.variants?.find((v) => v.name === name) : undefined;
+  if (!variant) return mesh;
+  return { ...mesh, primitives: mesh.primitives.map((p, i) => (variant.materials[i] ? { ...p, material: variant.materials[i]! } : p)) };
 }
 
 /** A neutral, fully-opaque white material — the default when a source names none. */
@@ -503,6 +527,7 @@ interface SerializedMesh {
   skin?: { joints: SerializedJoint[]; inverseBind: string };
   clips?: SerializedClip[];
   trails?: MeshTrail[];
+  variants?: { name: string; materials: (SerializedMaterial | null)[] }[];
 }
 
 function u16ToBase64(array: Uint16Array): string {
@@ -654,6 +679,18 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
     ...(mesh.skin ? { skin: serializeSkin(mesh.skin) } : {}),
     ...(mesh.skin && mesh.clips && mesh.clips.length > 0 ? { clips: mesh.clips.map(serializeClip) } : {}),
     ...(mesh.trails && mesh.trails.length > 0 ? { trails: mesh.trails.map((t) => ({ ...t, from: [...t.from], to: [...t.to], color: [...t.color] })) } : {}),
+    // Material sets after the primitives, so an image a set shares with them is stored once.
+    ...(mesh.variants && mesh.variants.length > 0
+      ? {
+          variants: mesh.variants.slice(0, MAX_MESH_VARIANTS).map((v, k) => ({
+            name: v.name,
+            materials: mesh.primitives.map((_, i) => {
+              const m = v.materials[i];
+              return m ? serializeMaterial(m, Object.assign(images, { primitive: `v${k}.${i}` })) : null;
+            }),
+          })),
+        }
+      : {}),
   };
   return JSON.stringify(payload);
 }
@@ -666,8 +703,8 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
 interface ImageTable {
   readonly written: Map<EncodedImage, string>;
   readonly read: Map<string, EncodedImage>;
-  /** The primitive whose material is being written or read. */
-  primitive: number;
+  /** The primitive whose material is being written or read (a material set's: "v<set>.<primitive>"). */
+  primitive: number | string;
 }
 const newImageTable = (): ImageTable => ({ written: new Map(), read: new Map(), primitive: 0 });
 
@@ -864,11 +901,23 @@ export function deserializeMeshAsset(json: string): MeshAsset {
   if (primitives.length === 0) throw new Error(MALFORMED);
   const clips = skin ? deserializeClips(raw.clips, skin.joints.length) : [];
   const trails = readMeshTrails(raw.trails, skin?.joints.length ?? 0);
+  const variants: MeshVariant[] = [];
+  if (raw.variants !== undefined) {
+    if (!Array.isArray(raw.variants) || raw.variants.length > MAX_MESH_VARIANTS) throw new Error(MALFORMED);
+    raw.variants.forEach((v, k) => {
+      if (!v || typeof v.name !== "string" || !Array.isArray(v.materials) || v.materials.length !== primitives.length) throw new Error(MALFORMED);
+      variants.push({
+        name: v.name.slice(0, 64),
+        materials: v.materials.map((m, i) => (m ? deserializeMaterial(m, Object.assign(images, { primitive: `v${k}.${i}` })) : null)),
+      });
+    });
+  }
   return {
     name: typeof raw.name === "string" ? raw.name : "mesh",
     primitives,
     ...(skin ? { skin } : {}),
     ...(clips.length > 0 ? { clips } : {}),
     ...(trails.length > 0 ? { trails } : {}),
+    ...(variants.length > 0 ? { variants } : {}),
   };
 }

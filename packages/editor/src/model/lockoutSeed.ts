@@ -27,7 +27,7 @@
 
 import type { CartEngine } from "../engine/CartEngine";
 import { encodeRgbaPng } from "./png";
-import { meshBounds, serializeMeshAsset, type EncodedImage, type MeshAsset, type MeshPrimitive } from "./MeshAsset";
+import { meshBounds, serializeMeshAsset, type EncodedImage, type MeshAsset, type MeshMaterial, type MeshPrimitive, type MeshVariant } from "./MeshAsset";
 import type { AnimationClip, ClipChannel, SkinJoint } from "./skeleton";
 import { INFINITE_TINTS, type SceneLighting } from "./SceneLighting";
 import { plasmaMaterial, type PlasmaLook } from "./plasma";
@@ -2178,8 +2178,48 @@ function soldierMesh(): MeshAsset {
     ],
     skin: { joints, inverseBind },
     clips: soldierClips(bones),
+    variants: soldierVariants(paintMat, trimMat),
   };
 }
+
+/**
+ * The Spartans' material sets (I13), as an artist would ship them with the
+ * armour: the same plates in another finish, which each bot wears by its
+ * scene entry. Paint, trim, undersuit, visor and rifle run in the soldier's
+ * primitive order; null keeps the standard material.
+ * - "Veteran": the lacquer worn off — matte, scuffed plates that keep most of
+ *   the team colour, darkened bronze trim, and a deep amber visor.
+ * - "Recon": satin plates with brushed (anisotropic) trim and a cold silver
+ *   mirror visor with a faint blue glow.
+ */
+function soldierVariants(paint: MeshMaterial, trim: MeshMaterial): MeshVariant[] {
+  const { clearcoat: _c, clearcoatRoughness: _r, ...matte } = paint;
+  return [
+    {
+      name: "Veteran",
+      materials: [
+        { ...matte, name: "armor-veteran", metallicFactor: 0.3, roughnessFactor: 0.68, tintMix: 0.85 },
+        { ...trim, name: "armor-trim-veteran", baseColorFactor: [0.3, 0.23, 0.15, 1], roughnessFactor: 0.55 },
+        null,
+        { name: "visor-veteran", baseColorFactor: [0.85, 0.42, 0.1, 1], baseColorImage: null, metallicFactor: 0.95, roughnessFactor: 0.08, emissiveFactor: [0.3, 0.12, 0.02], clearcoat: 1, clearcoatRoughness: 0.04, reflectivity: 1.4 },
+        null,
+      ],
+    },
+    {
+      name: "Recon",
+      materials: [
+        { ...paint, name: "armor-recon", metallicFactor: 0.55, roughnessFactor: 0.3, clearcoat: 0.4, clearcoatRoughness: 0.2 },
+        { ...trim, name: "armor-trim-recon", baseColorFactor: [0.2, 0.22, 0.25, 1], metallicFactor: 0.9, roughnessFactor: 0.28, anisotropy: 0.6 },
+        null,
+        { name: "visor-recon", baseColorFactor: [0.62, 0.74, 0.86, 1], baseColorImage: null, metallicFactor: 0.95, roughnessFactor: 0.04, emissiveFactor: [0.04, 0.1, 0.2], clearcoat: 1, clearcoatRoughness: 0.02, reflectivity: 1.6 },
+        null,
+      ],
+    },
+  ];
+}
+
+/** Which material set each bot wears (I13): the standard armour, then a veteran, then a recon. */
+export const LOCKOUT_BOT_VARIANTS: readonly (string | null)[] = [null, "Veteran", "Recon"];
 
 // --- First-person arms (HALO_INFINITE_STYLE_ROADMAP.md I9) --------------------
 // Each viewmodel is skinned to a three-bone rig: the root (the whole held
@@ -3012,12 +3052,13 @@ export function lockoutMeshSidecar(): string {
     // Simplified with its normals, but fingerprinted as stored, so the levels fit the soldier that loads.
     const soldierChain = generateLods(soldierAsset);
     const soldierLods = soldierChain ? { lods: encodeLods(storedSoldier, soldierChain) } : {};
-    const meshes: { id: string; name: string; mesh: string; lods?: StoredLods; animator?: unknown; transform: unknown; components?: unknown }[] = [
+    const meshes: { id: string; name: string; mesh: string; variant?: string; lods?: StoredLods; animator?: unknown; transform: unknown; components?: unknown }[] = [
       { id: "lockout-map", name: "Lockout arena", mesh: serializeMeshAsset(litMapMesh()), transform: identity },
     ];
     // Instances 1..7: the bots.
     for (let i = 1; i <= BOT_COUNT; i += 1) {
-      meshes.push({ id: `bot-${i}`, name: `bot ${i}`, mesh: soldier, ...soldierLods, animator: LOCKOUT_SOLDIER_ANIMATOR, transform: identity });
+      const variant = LOCKOUT_BOT_VARIANTS[(i - 1) % LOCKOUT_BOT_VARIANTS.length];
+      meshes.push({ id: `bot-${i}`, name: `bot ${i}`, mesh: soldier, ...(variant ? { variant } : {}), ...soldierLods, animator: LOCKOUT_SOLDIER_ANIMATOR, transform: identity });
     }
     // Instances 8..13: one first-person viewmodel per weapon, at rest scale.
     for (const id of LOCKOUT_VIEWMODELS) {

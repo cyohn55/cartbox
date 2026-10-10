@@ -1625,7 +1625,8 @@ type TexturedMesh = Omit<MeshSceneInstance, "model">;
 async function decodeMeshTextures(
   mesh: MeshAsset,
   decodeKtx2: (bytes: Uint8Array) => Promise<DecodedTexture | null>,
-  cache?: Map<EncodedImage, Promise<DecodedTexture | null>>,
+  // One decode an image, however many slots and primitives use it (a packed occlusion/roughness/metal map fills two).
+  cache: Map<EncodedImage, Promise<DecodedTexture | null>> = new Map(),
 ): Promise<TexturedMesh> {
   const decode = (image: EncodedImage) => (image.mime === "image/ktx2" ? decodeKtx2(image.bytes) : decodeTexture(image.mime, image.bytes));
   const each = (pick: (m: MeshAsset["primitives"][number]["material"]) => EncodedImage | null | undefined) =>
@@ -1635,7 +1636,6 @@ async function decodeMeshTextures(
         // No image, or a streamed placeholder whose bytes haven't arrived: flat colour for now.
         if (!image || image.bytes.length === 0) return Promise.resolve(null);
         // Meshes that share an image (a terrain's blocks) share one decode.
-        if (!cache) return decode(image);
         let entry = cache.get(image);
         if (!entry) {
           entry = decode(image);

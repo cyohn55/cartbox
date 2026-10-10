@@ -19,6 +19,22 @@ import { parseObj, type MeshAsset, type DecodedTexture } from "@cartbox/editor";
 import { parseGlbDecoded, parseGltfTextDecoded } from "./gltfDecoders";
 import { loadKtx2Decoder } from "./ktx2Decoder";
 
+/**
+ * What an import brought besides geometry (I13), for the editor's note: the
+ * skeleton's clips (which arrive with a state machine to start from), the
+ * material sets, and a packed occlusion/roughness/metal map kept once.
+ */
+export function importSummary(mesh: MeshAsset): string {
+  const parts: string[] = [];
+  const clips = mesh.skin ? (mesh.clips?.length ?? 0) : 0;
+  if (mesh.skin) parts.push(`a ${mesh.skin.joints.length}-joint skeleton${clips > 0 ? ` with ${clips} clip${clips === 1 ? "" : "s"} and a state machine` : ""}`);
+  const sets = mesh.variants?.length ?? 0;
+  if (sets > 0) parts.push(`${sets} material set${sets === 1 ? "" : "s"}`);
+  const packed = mesh.primitives.some((p) => p.material.occlusionImage && p.material.occlusionImage === p.material.metallicRoughnessImage);
+  if (packed) parts.push("packed occlusion/roughness/metal maps");
+  return parts.length > 0 ? ` With ${parts.join(", ")}.` : "";
+}
+
 /** Strip the extension and directory to a friendly asset name. */
 function assetNameFromFile(fileName: string): string {
   const base = fileName.split(/[\\/]/).pop() ?? fileName;
@@ -74,8 +90,12 @@ export async function decodeMeshTextures(mesh: MeshAsset): Promise<(DecodedTextu
   );
 }
 
-/** Decode compressed image bytes into an RGBA {@link DecodedTexture}. */
-async function decodeImage(bytes: Uint8Array, mime: string): Promise<DecodedTexture> {
+/**
+ * Decode compressed image bytes into an RGBA {@link DecodedTexture}. `raw`
+ * reads the pixels exactly as stored (no colour-space conversion, no
+ * premultiplied alpha), as a data map — normals, roughness, metal — needs.
+ */
+export async function decodeImage(bytes: Uint8Array, mime: string, raw = false): Promise<DecodedTexture> {
   if (mime === "image/ktx2") {
     // Browsers can't decode KTX2; the Basis transcoder (fetched on first use) can.
     const decoded = (await loadKtx2Decoder())(bytes);
@@ -84,7 +104,7 @@ async function decodeImage(bytes: Uint8Array, mime: string): Promise<DecodedText
   }
   // Copy into a standalone ArrayBuffer so Blob never sees a shared/offset view.
   const blob = new Blob([bytes.slice().buffer], { type: mime || "image/png" });
-  const bitmap = await createImageBitmap(blob);
+  const bitmap = await createImageBitmap(blob, raw ? { colorSpaceConversion: "none", premultiplyAlpha: "none" } : {});
   const { width, height } = bitmap;
   const canvas = document.createElement("canvas");
   canvas.width = width;
