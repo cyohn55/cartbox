@@ -1030,6 +1030,19 @@ interface NetMessage {
     readonly s?: readonly (readonly [number, number, number, number])[];
     readonly e?: readonly NetEvent[];
     readonly m?: number;
+    /** Transport-level: the peers a relayed copy is for (the rest have it directly); absent for everyone. */
+    readonly r?: readonly string[];
+    /** Transport-level: a WebRTC handshake message for one peer (see DirectTransport). Never reaches a session. */
+    readonly sig?: NetSignal;
+}
+/** A WebRTC handshake message, relayed to one peer. */
+interface NetSignal {
+    readonly to: string;
+    readonly description?: {
+        readonly type: string;
+        readonly sdp?: string;
+    };
+    readonly candidate?: unknown;
 }
 /** A room-scoped broadcast channel with presence. */
 interface NetTransport {
@@ -1043,6 +1056,8 @@ interface NetTransport {
     /** The full membership, each time it changes (including us). */
     onPeers(handler: (peers: readonly NetPeer[]) => void): void;
     close(): void;
+    /** Ticks between messages for a room of `players`, when the transport can carry more than {@link netSendInterval}'s rate. */
+    sendInterval?(players: number): number;
 }
 /** The session's view of the room, for a lobby UI. */
 interface NetRoomStatus {
@@ -1075,11 +1090,11 @@ declare class NetSession {
     private lastSent;
     private lastSentTick;
     private readonly listeners;
-    /** Bytes sent and received so far, as JSON on the wire (for the profiler). */
+    /** Bytes sent and received so far, in the messages' binary form (for the profiler). */
     private sentBytes;
     private receivedBytes;
     constructor(transport: NetTransport, now?: () => number);
-    /** Bytes this session has sent and received, measured as the messages' JSON. */
+    /** Bytes this session has sent and received, measured in the messages' binary form (netCodec.ts). */
     traffic(): {
         sent: number;
         received: number;
@@ -1162,6 +1177,7 @@ declare class SwitchableTransport implements NetTransport {
     /** Leave the current room (if any) and join `next` (or stay out when null). */
     use(next: NetTransport | null): Promise<void>;
     send(message: NetMessage): void;
+    sendInterval(players: number): number;
     onMessage(handler: (message: NetMessage, from: string) => void): void;
     onPeers(handler: (peers: readonly NetPeer[]) => void): void;
     close(): void;
@@ -6316,6 +6332,8 @@ interface LinkConditions {
     readonly loss?: number;
     /** The sender's uplink, bytes per second; a message waits for the ones before it to leave. Unlimited when absent. */
     readonly bandwidth?: number;
+    /** Peers connect directly (L3: WebRTC data channels): sessions send at 30 Hz instead of the relay's rate. */
+    readonly direct?: boolean;
 }
 /**
  * An in-process room over a simulated network. Every message is serialised
@@ -6412,6 +6430,139 @@ interface NetLabReport {
  * each slot's owner has it with where every other client draws it.
  */
 declare function runNetLab(options: NetLabOptions): Promise<NetLabReport>;
+
+/**
+ * Netplay messages on the wire (LOCKOUT_MULTIPLAYER_ROADMAP.md L3): a packed
+ * little-endian binary form of {@link NetMessage} — about a third of its JSON
+ * for full 32-bit state words, about half for small numbers.
+ *
+ *   flags  u8   bit 0 states, bit 1 events, bit 2 match
+ *   states u8 count, then per slot: u8 slot, u32 × 3
+ *   events u16 count, then per event: u32 × 2
+ *   match  u32
+ *
+ * Pure. Transport-level fields (signalling, relay recipients) never travel
+ * this way: they ride the relay as JSON.
+ */
+
+/** The binary form of a message's states, events and match word. */
+declare function encodeNetMessage(message: NetMessage): Uint8Array;
+/** A message back from its binary form; null when the bytes aren't one. */
+declare function decodeNetMessage(bytes: Uint8Array): NetMessage | null;
+
+/**
+ * Direct connections between players (LOCKOUT_MULTIPLAYER_ROADMAP.md L3): a
+ * {@link NetTransport} that opens a WebRTC data channel to every peer, using a
+ * relay transport (Supabase Realtime, say) for presence, for the handshake,
+ * and for any peer a direct connection can't reach.
+ *
+ * Each link has two channels: `state`, unordered with no retransmits (a lost
+ * snapshot is replaced by the next), and `events`, reliable and ordered (a
+ * hit or a kill must arrive). Messages on them are packed binary
+ * (netCodec.ts). A message is sent directly to every peer whose channels are
+ * open and once through the relay, addressed to the rest; so each peer gets
+ * it exactly once. With every peer direct the session sends at 30 Hz.
+ *
+ * The lower peer id makes the offer, so each pair negotiates once. A link
+ * that fails, or hasn't opened within `timeoutMs`, stays on the relay.
+ */
+
+/** The parts of the WebRTC API the transport uses (so tests can stand in for it). */
+interface RtcDataChannelLike {
+    readonly label: string;
+    readyState: string;
+    binaryType: string;
+    onopen: (() => void) | null;
+    onclose: (() => void) | null;
+    onmessage: ((event: {
+        data: unknown;
+    }) => void) | null;
+    send(data: Uint8Array): void;
+    close(): void;
+}
+interface RtcPeerConnectionLike {
+    connectionState: string;
+    onicecandidate: ((event: {
+        candidate: unknown;
+    }) => void) | null;
+    ondatachannel: ((event: {
+        channel: RtcDataChannelLike;
+    }) => void) | null;
+    onconnectionstatechange: (() => void) | null;
+    createDataChannel(label: string, options?: {
+        ordered?: boolean;
+        maxRetransmits?: number;
+    }): RtcDataChannelLike;
+    createOffer(): Promise<{
+        type: string;
+        sdp?: string;
+    }>;
+    createAnswer(): Promise<{
+        type: string;
+        sdp?: string;
+    }>;
+    setLocalDescription(description: {
+        type: string;
+        sdp?: string;
+    }): Promise<void>;
+    setRemoteDescription(description: {
+        type: string;
+        sdp?: string;
+    }): Promise<void>;
+    addIceCandidate(candidate: unknown): Promise<void>;
+    close(): void;
+}
+type RtcPeerConnectionFactory = (config: {
+    iceServers: readonly {
+        urls: string | readonly string[];
+    }[];
+}) => RtcPeerConnectionLike;
+interface DirectTransportOptions {
+    /** Makes peer connections; absent (or null) means none can be made: everything goes over the relay. */
+    readonly rtc?: RtcPeerConnectionFactory | null;
+    readonly iceServers?: readonly {
+        urls: string | readonly string[];
+    }[];
+    /** How long a link may take to open before its peer stays on the relay, ms. */
+    readonly timeoutMs?: number;
+    /** Ticks between messages with every peer direct (2: 30 Hz). */
+    readonly directInterval?: number;
+}
+/** The browser's RTCPeerConnection as a factory, when there is one. */
+declare function browserRtc(): RtcPeerConnectionFactory | null;
+type LinkState = "connecting" | "open" | "relay";
+declare class DirectTransport implements NetTransport {
+    private readonly relay;
+    private readonly options;
+    private readonly links;
+    private peers;
+    private messageHandler;
+    private peersHandler;
+    private readonly rtc;
+    private closed;
+    constructor(relay: NetTransport, options?: DirectTransportOptions);
+    get selfId(): string;
+    /** How each other peer is reached: directly, still connecting, or through the relay. */
+    linkStatus(peer: string): LinkState;
+    connect(joinedAt: number, name?: string): Promise<void>;
+    send(message: NetMessage): void;
+    sendInterval(players: number): number;
+    onMessage(handler: (message: NetMessage, from: string) => void): void;
+    onPeers(handler: (peers: readonly NetPeer[]) => void): void;
+    close(): void;
+    /** Open a link to every new peer (offering when our id is lower) and drop departed ones. */
+    private syncLinks;
+    private newLink;
+    private offer;
+    private answer;
+    private attach;
+    private maybeOpen;
+    private fallBack;
+    private drop;
+    private signal;
+    private fromRelay;
+    private onSignal;
+}
 
 /**
  * The cart-facing physics calls (ENGINE_ROADMAP.md, Phase 2), generated for a
@@ -7071,4 +7222,4 @@ declare const DIRECT_CORE_URL = "/engine/modern-core/modern-core.js";
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { AgentCrowd, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_PAD_BINDINGS, DIRECT_CORE_URL, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, type DriftStats, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GamepadInput, type GeneratedTrack, type GlContextProvider, type GradingLut, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LabCart, type LabProbe, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, type LinkConditions, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetLabOptions, type NetLabReport, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetState, type NetTransport, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type ProfileSection, type ProfileSnapshot, Profiler, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, RuntimeChannel, SAVE_MAGIC, SOFTWARE_RASTER_CAPS, START_KEYS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, SimulatedNetHub, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, SwitchableTransport, TILT_SHIFT_FEATHER, TINT_PALETTE, type TextureLookup, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3$2 as Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, breakableLine, browserDeviceHints, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreModel, drift, effectiveBreakpoints, emitterPreset, encodeLut, errorStack, estimateSceneBytes, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hasCommandRing, hashCart, hashEventId, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interpolateNormal, jointFrames, lensFlareAt, loadEngineModule, lookLut, lutStrip, makeShadowTexture, mount, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, rewriteLuaCode, runNetLab, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, sendDebugCommand, serializeReplay, shade, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, tokenizeLua, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };
+export { AgentCrowd, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_PAD_BINDINGS, DIRECT_CORE_URL, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, DirectTransport, type DirectTransportOptions, type DriftStats, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GamepadInput, type GeneratedTrack, type GlContextProvider, type GradingLut, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LabCart, type LabProbe, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, type LinkConditions, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetLabOptions, type NetLabReport, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetSignal, type NetState, type NetTransport, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type ProfileSection, type ProfileSnapshot, Profiler, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, type RtcDataChannelLike, type RtcPeerConnectionFactory, type RtcPeerConnectionLike, RuntimeChannel, SAVE_MAGIC, SOFTWARE_RASTER_CAPS, START_KEYS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, SimulatedNetHub, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, SwitchableTransport, TILT_SHIFT_FEATHER, TINT_PALETTE, type TextureLookup, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3$2 as Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, breakableLine, browserDeviceHints, browserRtc, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeNetMessage, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreModel, drift, effectiveBreakpoints, emitterPreset, encodeLut, encodeNetMessage, errorStack, estimateSceneBytes, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hasCommandRing, hashCart, hashEventId, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interpolateNormal, jointFrames, lensFlareAt, loadEngineModule, lookLut, lutStrip, makeShadowTexture, mount, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, rewriteLuaCode, runNetLab, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, sendDebugCommand, serializeReplay, shade, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, tokenizeLua, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };

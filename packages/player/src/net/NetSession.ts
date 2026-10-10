@@ -21,6 +21,7 @@ import {
   type NetEvent,
   type NetState,
 } from "./netplay.js";
+import { encodeNetMessage } from "./netCodec.js";
 
 /** A room member as the transport's presence reports it. */
 export interface NetPeer {
@@ -40,6 +41,17 @@ export interface NetMessage {
   readonly s?: readonly (readonly [number, number, number, number])[];
   readonly e?: readonly NetEvent[];
   readonly m?: number;
+  /** Transport-level: the peers a relayed copy is for (the rest have it directly); absent for everyone. */
+  readonly r?: readonly string[];
+  /** Transport-level: a WebRTC handshake message for one peer (see DirectTransport). Never reaches a session. */
+  readonly sig?: NetSignal;
+}
+
+/** A WebRTC handshake message, relayed to one peer. */
+export interface NetSignal {
+  readonly to: string;
+  readonly description?: { readonly type: string; readonly sdp?: string };
+  readonly candidate?: unknown;
 }
 
 /** A room-scoped broadcast channel with presence. */
@@ -54,6 +66,8 @@ export interface NetTransport {
   /** The full membership, each time it changes (including us). */
   onPeers(handler: (peers: readonly NetPeer[]) => void): void;
   close(): void;
+  /** Ticks between messages for a room of `players`, when the transport can carry more than {@link netSendInterval}'s rate. */
+  sendInterval?(players: number): number;
 }
 
 /** The session's view of the room, for a lobby UI. */
@@ -93,7 +107,7 @@ export class NetSession {
   private lastSent = "";
   private lastSentTick = -Infinity;
   private readonly listeners = new Set<(status: NetRoomStatus) => void>();
-  /** Bytes sent and received so far, as JSON on the wire (for the profiler). */
+  /** Bytes sent and received so far, in the messages' binary form (for the profiler). */
   private sentBytes = 0;
   private receivedBytes = 0;
 
@@ -108,7 +122,7 @@ export class NetSession {
     transport.onMessage((message) => this.receive(message));
   }
 
-  /** Bytes this session has sent and received, measured as the messages' JSON. */
+  /** Bytes this session has sent and received, measured in the messages' binary form (netCodec.ts). */
   traffic(): { sent: number; received: number } {
     return { sent: this.sentBytes, received: this.receivedBytes };
   }
@@ -207,7 +221,8 @@ export class NetSession {
     for (const event of out.events) if (this.outEvents.length < 200) this.outEvents.push(event);
     for (const [slot, state] of out.states) this.outStates.set(slot, state);
     if (this.isHost) this.hostMatch = out.match;
-    if (this.tick % netSendInterval(this.peers.length) !== 0) return;
+    const interval = this.transport.sendInterval?.(this.peers.length) ?? netSendInterval(this.peers.length);
+    if (this.tick % interval !== 0) return;
     const message: { s?: [number, number, number, number][]; e?: NetEvent[]; m?: number } = {};
     if (this.outStates.size > 0) message.s = [...this.outStates].map(([slot, w]) => [slot, w[0], w[1], w[2]]);
     if (this.isHost) message.m = this.hostMatch;
@@ -219,14 +234,14 @@ export class NetSession {
     if (this.outEvents.length > 0) message.e = this.outEvents.splice(0);
     if (message.s || message.e || message.m !== undefined) {
       this.transport.send(message);
-      this.sentBytes += JSON.stringify(message).length;
+      this.sentBytes += encodeNetMessage(message).length;
       this.lastSent = signature;
       this.lastSentTick = this.tick;
     }
   }
 
   private receive(message: NetMessage): void {
-    this.receivedBytes += JSON.stringify(message).length;
+    this.receivedBytes += encodeNetMessage(message).length;
     const now = this.now();
     for (const [slot, a, b, c] of message.s ?? []) {
       if (slot >= 0 && slot < NET_SLOTS && slot !== this.mySlot) this.remote.set(slot, { state: [a, b, c], at: now });
@@ -438,6 +453,9 @@ export class SwitchableTransport implements NetTransport {
 
   send(message: NetMessage): void {
     this.inner?.send(message);
+  }
+  sendInterval(players: number): number {
+    return this.inner?.sendInterval?.(players) ?? netSendInterval(players);
   }
   onMessage(handler: (message: NetMessage, from: string) => void): void {
     this.messageHandler = handler;
