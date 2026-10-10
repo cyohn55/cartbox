@@ -4,7 +4,9 @@
  * Blockout editing in the Mesh tab (HALO_INFINITE_STYLE_ROADMAP.md I14): click
  * a face in the preview, then extrude, inset or bevel it (see meshEdit.ts in
  * @cartbox/editor). The face stays selected after an edit, so an inset can be
- * followed by an extrude of the face it leaves.
+ * followed by an extrude of the face it leaves. Skinned meshes too (L15): what
+ * an edit grows rides the bones its face did. In the Model edit mode, the face
+ * is the first selected one.
  */
 
 import { useState } from "react";
@@ -36,7 +38,6 @@ export function FaceEditPanel({ mesh, picked, onEdit }: { mesh: MeshAsset; picke
   const [width, setWidth] = useState(0.15);
   const [depth, setDepth] = useState(0.1);
   const [error, setError] = useState<string | null>(null);
-  const skinned = mesh.primitives.some((p) => p.joints);
   const primitive = picked ? mesh.primitives[picked.primitive] : undefined;
   const face = primitive && picked ? faceAt(primitive, picked.triangle) : null;
   const apply = (edit: FaceEdit) => {
@@ -50,9 +51,7 @@ export function FaceEditPanel({ mesh, picked, onEdit }: { mesh: MeshAsset; picke
   };
   return (
     <RailGroup label="Edit faces">
-      {skinned ? (
-        <RailHint>A skinned mesh is edited in a modelling tool and re-imported (see BLENDER_WORKFLOW.md).</RailHint>
-      ) : !face ? (
+      {!face ? (
         <RailHint>Click a face in the preview to select it; drag to orbit.</RailHint>
       ) : (
         <>

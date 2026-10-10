@@ -57,6 +57,12 @@ export interface OrbitCamera {
 
 export interface RenderMeshOptions {
   readonly camera: OrbitCamera;
+  /**
+   * The bounds the camera frames, in place of the mesh's own — so an edit in
+   * progress, or a pose, doesn't move the camera (the Mesh tab frames the
+   * stored mesh while modelling and posing, L15/L16).
+   */
+  readonly bounds?: MeshBounds | null;
   /** Square viewport edge in pixels; `out`/`depth` must be `size × size`. */
   readonly size: number;
   /** RGBA output, `size × size × 4`. */
@@ -766,8 +772,14 @@ export function orbitView(bounds: MeshBounds, camera: OrbitCamera): OrbitView {
  * `ndcY` in −1..1, y up), nearest the camera: which primitive, which triangle,
  * and how far along the ray. Null when the point shows background.
  */
-export function pickMeshTriangle(mesh: MeshAsset, camera: OrbitCamera, ndcX: number, ndcY: number): { primitive: number; triangle: number; t: number } | null {
-  const bounds = meshBounds(mesh);
+export function pickMeshTriangle(
+  mesh: MeshAsset,
+  camera: OrbitCamera,
+  ndcX: number,
+  ndcY: number,
+  framed?: MeshBounds | null,
+): { primitive: number; triangle: number; t: number } | null {
+  const bounds = framed ?? meshBounds(mesh);
   if (!bounds) return null;
   const { eye, center, fov } = orbitView(bounds, camera);
   const f = [center[0] - eye[0], center[1] - eye[1], center[2] - eye[2]];
@@ -820,7 +832,7 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
   const { size, out, depth, camera } = options;
   const ambient = options.ambient ?? 0.35;
   const background = options.background ?? [0, 0, 0, 0];
-  const bounds = meshBounds(mesh);
+  const bounds = options.bounds ?? meshBounds(mesh);
 
   // Clear.
   depth.fill(Infinity);
