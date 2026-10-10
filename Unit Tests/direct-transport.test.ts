@@ -312,9 +312,9 @@ describe.skipIf(!existsSync(LOCKOUT_ENGINE))("Lockout in the lab over direct lin
     expect(direct.interpolation!.humans.p95).toBeLessThan(relay.interpolation!.humans.p95);
     // Packed binary at 30 Hz: twice the messages, each about the size of one
     // at the relay's rate — four state words a slot since L4, for the host and
-    // its 6 bots.
+    // its 6 bots, and since L5 every shot its bots fire (8 bytes each).
     expect(direct.bytesPerSecond[0]!.sent).toBeLessThan(relay.bytesPerSecond[0]!.sent * 2.1);
-    expect(direct.bytesPerSecond[0]!.sent).toBeLessThan(4_200);
+    expect(direct.bytesPerSecond[0]!.sent).toBeLessThan(5_000);
     const full = await lab(true, 8, 300);
     for (const b of full.bytesPerSecond) {
       expect(b.sent).toBeLessThan(2_000);

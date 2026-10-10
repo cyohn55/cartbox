@@ -963,6 +963,10 @@ export const LOCKOUT_EFFECTS: readonly ParticleEffect[] = [
   { ...particlePreset("snow", "drift"), count: 16, speed: 1.8, spread: 0.5, gravity: 0.8, life: 2 },
   // A plasma grenade's burst (I10): a ball of blue-white plasma, no fire.
   { ...particlePreset("explosion", "plasmablast"), count: 44, color: [0.7, 0.92, 1], colorEnd: [0.1, 0.35, 1], glow: 4 },
+  // A round's flight (LOCKOUT_MULTIPLAYER_ROADMAP.md L5): a hot streak laid
+  // from the muzzle to where it stopped, gone in a tenth of a second — every
+  // shot in the arena, whoever fired it.
+  { ...particlePreset("trail", "tracer"), count: 12, life: 0.09, lifeJitter: 0.3, speed: 0.05, drag: 6, size: 0.035, sizeEnd: 0.012, color: [1, 0.92, 0.65], colorEnd: [1, 0.55, 0.2], glow: 4 },
 ];
 
 /**
@@ -3420,13 +3424,16 @@ function seg_first(x0,y0,z0, x1,y1,z1)
 end
 
 -- Sparks where a shot from (x0,y0,z0) along (fx,fy,fz) strikes a wall within rng.
-local function wall_sparks(x0,y0,z0, fx,fy,fz, rng)
+-- Returns how far the round got (rng when it hit nothing); quiet, it only measures.
+local function wall_sparks(x0,y0,z0, fx,fy,fz, rng, quiet)
   local t,nx,ny,nz = seg_first(x0,y0,z0, x0+fx*rng, y0+fy*rng, z0+fz*rng)
-  if t then
+  if not t then return rng end
+  if not quiet then
     local hx,hy,hz = x0+fx*rng*t, y0+fy*rng*t, z0+fz*rng*t
     cartbox.burst("spark", hx+nx*0.03, hy+ny*0.03, hz+nz*0.03, nx,ny,nz)
     cartbox.decal("pock", hx, hy, hz, nx,ny,nz)
   end
+  return rng*t
 end
 
 -- Now and then the wind lifts snow off a high ledge near the player.
@@ -3526,6 +3533,10 @@ local NETMODE, MYSLOT, HUMANS = 0, 0, 0     -- 0 offline / 1 client / 2 host
 local WLIST = {"br","smg","shotgun","sniper","magnum","sword"}
 local WIDX_OF = {}; for i,id in ipairs(WLIST) do WIDX_OF[id]=i-1 end
 local EV_HIT, EV_KILL, EV_OBJ, EV_SCORE = 1, 2, 3, 4
+-- The fight everyone sees (L5): shots, melee swings, grenades (thrown in two
+-- halves: where from, then which way; and where one sticks) and pickups.
+local EV_SHOT, EV_MELEE, EV_NADE, EV_NADE2, EV_STICK, EV_PICKUP = 5, 6, 7, 8, 9, 10
+local IMPACT_NONE, IMPACT_WALL, IMPACT_BODY, IMPACT_SHIELD = 0, 1, 2, 3
 local net_match_id, net_seen_match = 0, -1
 -- Called when the room goes away mid-match; the title screen resets the rest.
 function leave_room_state() MM_RESET = true end
@@ -3606,10 +3617,9 @@ local function net_sample(o, rt)
   o.moving = ((w2 >> 18) & 1) == 1
   o.air, o.crouch = ((w3 >> 8) & 1) == 1, ((w3 >> 9) & 1) == 1
   o.reloading, o.nade = ((w3 >> 11) & 1) == 1, (w3 >> 13) & 3
-  -- Its moves, on their rising edges: a shot (a flash at the muzzle), a melee
-  -- swing, a flinch for each hit it took.
+  -- Its moves, on their rising edges: a melee swing, a flinch for each hit it
+  -- took. (Each shot flashes at the muzzle as it's shown: L5's events.)
   local firing, melee, hits = ((w3 >> 10) & 1) == 1, ((w3 >> 12) & 1) == 1, (w3 >> 17) & 3
-  if firing and not o.firing then o.muzzle = 3 end
   if melee and not o.was_melee then o.swing = true end
   if o.seen_hits and hits ~= o.seen_hits and not o.dead then o.flinch = true end
   o.firing, o.was_melee, o.seen_hits = firing, melee, hits
@@ -3625,6 +3635,43 @@ end
 local function ev_word(kind, from, to, head, value)
   return kind | ((from & 7) << 4) | ((to & 7) << 7) | ((head and 1 or 0) << 10) | ((math.floor(value) & 0xffff) << 16)
 end
+
+-- A direction as two packed angles (yaw and pitch, 1e-4 rad), and back.
+local function pack_dir(fx, fy, fz)
+  return u16(math.atan(fx, fz)*10000) | (u16(math.asin(clamp(fy, -1, 1))*10000) << 16)
+end
+local function unpack_dir(b)
+  local yaw, pitch = s16(b)/10000, s16(b >> 16)/10000
+  local cp = math.cos(pitch)
+  return cp*math.sin(yaw), math.sin(pitch), cp*math.cos(yaw)
+end
+
+-- A round's flight (L5): a streak from the muzzle to wherever it stopped.
+local function tracer(x, y, z, fx, fy, fz, dist)
+  local len = math.min(dist, 90) - 0.6
+  if len > 0.4 then cartbox.burst("tracer", x+fx*0.6, y+fy*0.6, z+fz*0.6, fx*len, fy*len, fz*len) end
+end
+
+-- Tell the others about a shot this browser fired (its player's, or a bot's
+-- as host): which way, how far it went and what it hit. They draw it from
+-- where they see the shooter.
+local function net_shot(e, wid, fx, fy, fz, dist, impact)
+  if NETMODE == 0 then return end
+  cartbox.netsend(EV_SHOT | ((e.ns & 7) << 4) | ((WIDX_OF[wid] or 0) << 7) | ((impact & 3) << 10)
+    | (math.max(0, math.min(65535, math.floor(dist*100))) << 16), pack_dir(fx, fy, fz))
+end
+-- ... a melee swing (a sword's lunge among them), facing yaw ...
+local function net_melee(e, wid, yaw)
+  if NETMODE ~= 0 then cartbox.netsend(EV_MELEE | ((e.ns & 7) << 4) | ((WIDX_OF[wid] or 0) << 7), u16(wrap_angle(yaw)*10000)) end
+end
+-- ... and a weapon taken from a pad (0-based), so every browser empties it.
+function net_pickup(e, pad)
+  if NETMODE ~= 0 then cartbox.netsend(EV_PICKUP | ((e.ns & 7) << 4) | ((pad & 63) << 7), 0) end
+end
+-- The others' shots, swings and throws wait here to be shown in step with
+-- where their owners are drawn (see net_fx_run); a grenade's start point
+-- waits for its direction.
+local fxq, nade_from = {}, {}
 
 -- A kill of a player this browser owns: score it here, and tell everyone.
 function kill_ent(killer, victim, head)
@@ -3701,7 +3748,12 @@ local function net_receive()
     if kind == EV_HIT and dst and not dst.remote then damage(dst, value, src, head)
     elseif kind == EV_KILL and dst then register_kill(src, dst, head)
     elseif NETMODE == 1 and kind == EV_SCORE and dst then dst.score = value
-    elseif NETMODE == 1 and kind == EV_OBJ then net_objective(from == 1 and dst or nil, head, value, ev[2]) end
+    elseif NETMODE == 1 and kind == EV_OBJ then net_objective(from == 1 and dst or nil, head, value, ev[2])
+    elseif kind == EV_PICKUP then mtimer[((a >> 7) & 63) + 1] = 540
+    elseif kind == EV_NADE then nade_from[from*16 + ((a >> 7) & 15)] = { s16(a >> 16)/100, s16(ev[2])/100, s16(ev[2] >> 16)/100 }
+    elseif kind >= EV_SHOT and kind <= EV_STICK and from ~= MYSLOT and #fxq < 96 then
+      fxq[#fxq+1] = { at = now + INTERP, a = a, b = ev[2] }
+    end
   end
 end
 
@@ -3857,12 +3909,29 @@ end
 -- level, sticks to any soldier it touches, and detonates on a fuse, dealing
 -- splash to everyone in range. In flight it is a boiling blue charge (a prefab
 -- copy, placed each tick) lighting what it passes, trailing light.
+-- Online (L5), a grenade starts from a state every browser can reproduce to
+-- the bit -- its point to the centimetre, its direction as packed angles --
+-- so each simulates the same arc. The thrower's is the real one; the others
+-- launch a replica from its two events, which hurts nobody (the thrower's
+-- browser does the damage) and sticks only where the thrower says.
+function launch_grenade(owner, x, y, z, fx, fy, fz, id, replica)
+  local obj = cartbox.spawn("plasma grenade", x, y, z, 0, 0, 0)
+  table.insert(grenades, { x=x, y=y, z=z, vx=fx*0.5, vy=fy*0.5+0.12, vz=fz*0.5, t=90, owner=owner, obj=obj, spin=0, id=id, replica=replica })
+end
+
 function throw_grenade(who, fx,fy,fz)
   if (who.nade or 0) <= 0 then return end
   who.nade = who.nade - 1
-  local x, y, z = who.x, who.y+EYE, who.z
-  local obj = cartbox.spawn("plasma grenade", x, y, z, 0, 0, 0)
-  table.insert(grenades, { x=x, y=y, z=z, vx=fx*0.5, vy=fy*0.5+0.12, vz=fz*0.5, t=90, owner=who, obj=obj, spin=0 })
+  local dir = pack_dir(fx, fy, fz)
+  local x, y, z = u16(who.x*100), u16((who.y+EYE)*100), u16(who.z*100)
+  who.nade_id = ((who.nade_id or 0) + 1) & 15
+  if NETMODE ~= 0 then
+    local head = ((who.ns & 7) << 4) | (who.nade_id << 7)
+    cartbox.netsend(EV_NADE | head | (x << 16), y | (z << 16))
+    cartbox.netsend(EV_NADE2 | head, dir)
+  end
+  fx, fy, fz = unpack_dir(dir)
+  launch_grenade(who, s16(x)/100, s16(y)/100, s16(z)/100, fx, fy, fz, who.nade_id, false)
 end
 
 local function explode(g)
@@ -3874,6 +3943,7 @@ local function explode(g)
   -- A soot burn on whatever it went off over.
   local t,nx,ny,nz = seg_first(g.x, g.y+0.3, g.z, g.x, g.y-3, g.z)
   if t then cartbox.decal("burn", g.x, g.y+0.3-3.3*t, g.z, nx,ny,nz) end
+  if g.replica then return end   -- its thrower's browser does the damage
   local function splash(o)
     if not o or o.dead then return end
     local m = d3(g.x,g.y,g.z, o.x,o.y+1,o.z)
@@ -3908,13 +3978,72 @@ local function update_grenades()
           g.y=COL[b+5]; g.vy=-g.vy*0.4; g.vx=g.vx*0.6; g.vz=g.vz*0.6
         end
       end
-      local o = stick(g)
-      if o then g.stuck = o; g.ox, g.oy, g.oz = g.x - o.x, g.y - o.y, g.z - o.z end
+      local o = (not g.replica) and stick(g) or nil
+      if o then
+        g.stuck = o; g.ox, g.oy, g.oz = g.x - o.x, g.y - o.y, g.z - o.z
+        if NETMODE ~= 0 then
+          cartbox.netsend(EV_STICK | ((g.owner.ns & 7) << 4) | ((g.id & 15) << 7) | ((o.ns & 7) << 11),
+            s8(g.ox*100) | (s8(g.oy*100) << 8) | (s8(g.oz*100) << 16))
+        end
+      end
       g.spin = g.spin + 0.25
     end
     if g.obj then cartbox.place(g.obj, g.x, g.y, g.z, g.spin, g.spin*0.6, 0, 1) end
     g.t=g.t-1
     if g.t<=0 or g.y<-8 then explode(g); table.remove(grenades,i) end
+  end
+end
+
+-- The others' moves, shown in step with where they're drawn (L5): a shot, a
+-- swing or a throw arrives about when it happened and plays INTERP ms later,
+-- when its owner is drawn where it stood -- the shot from its muzzle, with its
+-- sound, its flash and its tracer to where it stopped.
+local function sb(v) v = v & 0xff; if v >= 128 then v = v - 256 end; return v end
+local function net_fx_run()
+  if NETMODE == 0 then return end
+  local now = cartbox.netclock()
+  while fxq[1] and fxq[1].at <= now do
+    local ev = table.remove(fxq, 1)
+    local a, b = ev.a, ev.b
+    local kind, from = a & 15, (a >> 4) & 7
+    local e = ent_by_slot(from)
+    if e and e ~= p then
+      if kind == EV_SHOT then
+        local wid = WLIST[((a >> 7) & 7) + 1] or "br"
+        local w, impact, dist = W[wid], (a >> 10) & 3, ((a >> 16) & 0xffff)/100
+        local fx, fy, fz = unpack_dir(b)
+        local x, y, z = e.x, e.y + EYE, e.z
+        e.muzzle = 3
+        cartbox.sound("fire_"..wid, x, y, z, 1, 0.94 + math.random()*0.12)
+        tracer(x, y, z, fx, fy, fz, dist)
+        for _ = 2, math.min(w.pel or 1, 4) do   -- a shotgun's fan, near enough
+          tracer(x, y, z, fx + (math.random()-0.5)*w.spr, fy, fz + (math.random()-0.5)*w.spr, dist)
+        end
+        if impact == IMPACT_WALL then wall_sparks(x, y, z, fx, fy, fz, dist + 0.3)
+        elseif impact == IMPACT_SHIELD then cartbox.burst("shield", x+fx*dist, y+fy*dist, z+fz*dist, -fx, -fy, -fz, 0.8) end
+      elseif kind == EV_MELEE then
+        local yaw = s16(b)/10000
+        local fx, fz = math.sin(yaw), math.cos(yaw)
+        local rx, rz = fz, -fx
+        cartbox.sound("fire_sword", e.x, e.y + 1.3, e.z, 1, 0.9 + math.random()*0.2)
+        cartbox.burst("slash", e.x+rx*0.7+fx*0.8, e.y+1.25, e.z+rz*0.7+fz*0.8, -rx*1.4+fx*0.3, 0.15, -rz*1.4+fz*0.3)
+      elseif kind == EV_NADE2 then
+        local id = (a >> 7) & 15
+        local at = nade_from[from*16 + id]
+        nade_from[from*16 + id] = nil
+        if at then
+          local fx, fy, fz = unpack_dir(b)
+          launch_grenade(e, at[1], at[2], at[3], fx, fy, fz, id, true)
+        end
+      elseif kind == EV_STICK then
+        local id, victim = (a >> 7) & 15, ent_by_slot((a >> 11) & 7)
+        for _, g in ipairs(grenades) do
+          if g.replica and g.owner == e and g.id == id and victim and not g.stuck then
+            g.stuck, g.ox, g.oy, g.oz = victim, sb(b)/100, sb(b >> 8)/100, sb(b >> 16)/100
+          end
+        end
+      end
+    end
   end
 end
 
@@ -3941,6 +4070,7 @@ local function player_fire()
     local fx,fy,fz = forward()
     local rx,rz = fz, -fx
     cartbox.burst("slash", p.x+rx*0.7+fx*0.8, p.y+EYE-0.25, p.z+rz*0.7+fz*0.8, -rx*1.4+fx*0.3, 0.15, -rz*1.4+fz*0.3)
+    net_melee(p, wid, p.ay)
     if not aim.dead then damage(aim, (aim.sh or 0) + 90, p, false) end   -- melee strips shields
     return
   end
@@ -3960,7 +4090,7 @@ local function player_fire()
   local ex,ey,ez = p.x, p.y+EYE, p.z
   do local fx,_,fz = forward(); eject_casing(ex + fx*0.35, ey - 0.16, ez + fz*0.35, fx, fz) end
   shot.t=3; shot.x=ex; shot.y=ey; shot.z=ez
-  for _=1,w.pel do
+  for k=1,w.pel do
     local fx,fy,fz
     if aim then
       fx,fy,fz = aim.x-ex, (aim.y+1.2)-ey, aim.z-ez
@@ -3978,15 +4108,21 @@ local function player_fire()
         end
       end
     end
+    local dist, impact
     if best then
       local dmg=w.dmg
       local head = best._hy and best._hy>best.y+1.5
       if head then dmg=dmg*w.hs end
+      local shielded = (best.sh or 0) > 0
       damage(best, dmg, p, head)
       shield_hit(best, best._hy, ex,ey,ez)
+      dist, impact = bt, shielded and IMPACT_SHIELD or IMPACT_BODY
     else
-      wall_sparks(ex,ey,ez, fx,fy,fz, w.rng)
+      dist = wall_sparks(ex,ey,ez, fx,fy,fz, w.rng)
+      impact = dist < w.rng and IMPACT_WALL or IMPACT_NONE
     end
+    tracer(ex, ey - 0.12, ez, fx, fy, fz, dist)
+    if k == 1 then net_shot(p, wid, fx, fy, fz, dist, impact) end
   end
 end
 
@@ -3996,14 +4132,19 @@ function pickup_ready(i)
   return phase == "play" and MODE.weapons[MW[i]] and (mtimer[i] or 0) == 0
 end
 
+-- The pads' respawn clocks run every tick, whoever is alive, so every browser
+-- has each pad back at the same moment (L5: a pickup empties it everywhere).
+local function pad_clock()
+  for i=1,(#MRK//3) do mtimer[i]=math.max(0,(mtimer[i] or 0)-1) end
+end
+
 local function try_pickups()
   for i=0,(#MRK//3)-1 do
     local id=MW[i+1]; local legal=MODE.weapons[id]
-    mtimer[i+1]=math.max(0,(mtimer[i+1] or 0)-1)
     if legal and mtimer[i+1]==0 then
       local mx,my,mz=MRK[i*3+1],MRK[i*3+2],MRK[i*3+3]
       if math.abs(p.x-mx)<1.4 and math.abs(p.z-mz)<1.6 and math.abs((p.y+1)-my)<2.0 then
-        give(p,1,id); p.slot=1; vm("ready"); mtimer[i+1]=540; say(T("msg.pickup","Picked up "..W[id].name,W[id].name),12)
+        give(p,1,id); p.slot=1; vm("ready"); mtimer[i+1]=540; net_pickup(p, i); say(T("msg.pickup","Picked up "..W[id].name,W[id].name),12)
       end
     end
   end
@@ -4100,7 +4241,7 @@ local function bot_pickups(o)
     if MODE.weapons[id] and (mtimer[i+1] or 0)==0 and o.g1 ~= id then
       local mx,my,mz=MRK[i*3+1],MRK[i*3+2],MRK[i*3+3]
       if math.abs(o.x-mx)<1.4 and math.abs(o.z-mz)<1.6 and math.abs((o.y+1)-my)<2.0 then
-        o.g1=id; mtimer[i+1]=540
+        o.g1=id; mtimer[i+1]=540; net_pickup(o, i)
       end
     end
   end
@@ -4141,22 +4282,41 @@ local function think_bot(o)
       o.cool = (w.cool or 10) + math.random(0,6)
       cartbox.sound("fire_"..(w.melee and "sword" or (o.g1 or "br")),o.x,o.y+1.3,o.z,1,0.92+math.random()*0.16)
       o.fired_t = tick
-      if w.melee or m < 1.8 then o.swing = true; o.melee_t = tick end   -- up close: the armour swings (I11)
+      if w.melee or m < 1.8 then o.swing = true; o.melee_t = tick; net_melee(o, o.g1 or "br", o.face) end   -- up close: the armour swings (I11)
       if not w.melee and m > 0.01 and d3(o.x,o.y,o.z, p.x,p.y,p.z) < 25 then eject_casing(o.x + dx/m*0.3, o.y + 1.3, o.z + dz/m*0.3, dx/m, dz/m) end
       local acc = MODE.shields and 0.30 or 0.5    -- SWAT bots hit harder
       if w.melee then acc = (m < 3) and 0.9 or 0 end
+      -- Its round: drawn here when the player is near enough to see it, and
+      -- sent to the others (L5) whether it hits or flies past.
+      local ox,oy,oz = o.x, o.y+1.4, o.z
+      local near = d3(ox,oy,oz, p.x,p.y,p.z) < 40
       if math.random() < acc then
         local dmg = (w.dmg or 12) * (w.pel or 1) * 0.6
         local head = math.random() < 0.12
         if head then dmg = dmg*(w.hs or 1.5) end
+        local shielded = (tg.sh or 0) > 0
         damage(tg, dmg, o, head)
-        if not w.melee then shield_hit(tg, tg.y + (head and 1.6 or 1.1), o.x,o.y+1.4,o.z) end
+        if not w.melee then
+          local hy = tg.y + (head and 1.6 or 1.1)
+          shield_hit(tg, hy, ox,oy,oz)
+          local fx,fy,fz = tg.x-ox, hy-oy, tg.z-oz
+          local fm = math.sqrt(fx*fx+fy*fy+fz*fz)
+          if fm > 0.01 then
+            fx,fy,fz = fx/fm, fy/fm, fz/fm
+            if near then tracer(ox,oy,oz, fx,fy,fz, fm) end
+            net_shot(o, o.g1 or "br", fx,fy,fz, fm, shielded and IMPACT_SHIELD or IMPACT_BODY)
+          end
+        end
       elseif not w.melee then
         -- A miss: the round goes past its target and sparks off whatever is behind.
-        local ox,oy,oz = o.x, o.y+1.4, o.z
         local fx,fy,fz = tg.x-ox+(math.random()-0.5)*1.2, tg.y+1.2-oy+(math.random()-0.5)*0.8, tg.z-oz+(math.random()-0.5)*1.2
         local fm = math.sqrt(fx*fx+fy*fy+fz*fz)
-        if fm > 0.01 and d3(ox,oy,oz, p.x,p.y,p.z) < 30 then wall_sparks(ox,oy,oz, fx/fm,fy/fm,fz/fm, w.rng or 40) end
+        if fm > 0.01 then
+          fx,fy,fz = fx/fm, fy/fm, fz/fm
+          local d = wall_sparks(ox,oy,oz, fx,fy,fz, w.rng or 40, not near)
+          if near then tracer(ox,oy,oz, fx,fy,fz, d) end
+          net_shot(o, o.g1 or "br", fx,fy,fz, d, d < (w.rng or 40) and IMPACT_WALL or IMPACT_NONE)
+        end
       end
     end
     -- Close the distance when out of range; in range, strafe -- a step to one
@@ -4827,6 +4987,8 @@ function TIC()
   if play_intro() then return end
   net_roles()
   net_receive()
+  net_fx_run()
+  pad_clock()
   play_input()
   if p.dead then p.respawn=p.respawn-1; if p.respawn<=0 then respawn(p) end
   else move_vertical(); try_pickups() end
