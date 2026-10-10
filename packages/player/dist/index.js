@@ -4539,38 +4539,54 @@ function applyQualityToPostFx(settings, quality) {
 // src/net/netplay.ts
 var NET_WORDS = 119;
 var NET_SLOTS = 8;
-var NET_STATE_WORDS = 3;
+var NET_STATE_WORDS = 4;
 var NET_IN_HEADER = 0;
 var NET_IN_MATCH = 1;
-var NET_IN_SEQ = 2;
+var NET_IN_CLOCK = 2;
 var NET_IN_SLOTS = 3;
-var NET_IN_EVENT_COUNT = 27;
-var NET_IN_EVENTS = 28;
-var NET_IN_EVENT_CAPACITY = 20;
+var NET_IN_STAMPS = 35;
+var NET_IN_EVENT_COUNT = 39;
+var NET_IN_EVENTS = 40;
+var NET_IN_EVENT_CAPACITY = 12;
+var NET_IN_SENDERS = 64;
+var NET_IN_HOST = 66;
 var NET_OUT_MASK = 70;
 var NET_OUT_MATCH = 71;
 var NET_OUT_SLOTS = 72;
-var NET_OUT_EVENT_COUNT = 96;
-var NET_OUT_EVENTS = 97;
-var NET_OUT_EVENT_CAPACITY = 10;
+var NET_OUT_EVENT_COUNT = 104;
+var NET_OUT_EVENTS = 105;
+var NET_OUT_EVENT_CAPACITY = 6;
 var NET_MODE_OFFLINE = 0;
 var NET_MODE_CLIENT = 1;
 var NET_MODE_HOST = 2;
+function netLagUnits(ms) {
+  return Math.max(0, Math.min(255, Math.round(ms / 4)));
+}
 function writeNetInbox(words, inbox) {
-  words[NET_IN_HEADER] = (inbox.mode & 3 | (inbox.mySlot & 7) << 2 | ((inbox.status ?? 0) & 7) << 5 | (inbox.humans & 255) << 8 | (inbox.live & 255) << 16) >>> 0;
+  words[NET_IN_HEADER] = (inbox.mode & 3 | (inbox.mySlot & 7) << 2 | ((inbox.status ?? 0) & 7) << 5 | (inbox.humans & 255) << 8 | (inbox.live & 255) << 16 | netLagUnits(inbox.lag ?? 0) << 24) >>> 0;
   words[NET_IN_MATCH] = inbox.match >>> 0;
-  words[NET_IN_SEQ] = inbox.seq >>> 0;
+  words[NET_IN_CLOCK] = inbox.clock >>> 0;
+  words[NET_IN_HOST] = Math.max(0, inbox.hostSlot ?? 0) & 7;
   for (let slot = 0; slot < NET_SLOTS; slot += 1) {
     const state = inbox.slots[slot] ?? null;
     for (let k = 0; k < NET_STATE_WORDS; k += 1) {
       words[NET_IN_SLOTS + slot * NET_STATE_WORDS + k] = state ? state[k] >>> 0 : 0;
     }
   }
+  for (let pair = 0; pair < NET_SLOTS / 2; pair += 1) {
+    const lo = (inbox.stamps?.[pair * 2] ?? 0) & 65535;
+    const hi = (inbox.stamps?.[pair * 2 + 1] ?? 0) & 65535;
+    words[NET_IN_STAMPS + pair] = (lo | hi << 16) >>> 0;
+  }
   const count = Math.min(inbox.events.length, NET_IN_EVENT_CAPACITY);
   words[NET_IN_EVENT_COUNT] = count;
+  words[NET_IN_SENDERS] = 0;
+  words[NET_IN_SENDERS + 1] = 0;
   for (let i = 0; i < count; i += 1) {
     words[NET_IN_EVENTS + i * 2] = inbox.events[i][0] >>> 0;
     words[NET_IN_EVENTS + i * 2 + 1] = inbox.events[i][1] >>> 0;
+    const word = NET_IN_SENDERS + (i < 10 ? 0 : 1);
+    words[word] = (words[word] | ((inbox.senders?.[i] ?? 0) & 7) << i % 10 * 3) >>> 0;
   }
   return count;
 }
@@ -4580,7 +4596,7 @@ function takeNetOutbox(words) {
   for (let slot = 0; slot < NET_SLOTS; slot += 1) {
     if (!(mask & 1 << slot)) continue;
     const base = NET_OUT_SLOTS + slot * NET_STATE_WORDS;
-    states.set(slot, [words[base], words[base + 1], words[base + 2]]);
+    states.set(slot, [words[base], words[base + 1], words[base + 2], words[base + 3]]);
   }
   const count = Math.min(words[NET_OUT_EVENT_COUNT], NET_OUT_EVENT_CAPACITY);
   const events = [];
@@ -5248,14 +5264,14 @@ function decodeMeshCamera(words) {
     return null;
   }
   const angle = (word) => (word | 0) / MESH_CAM_ANGLE_SCALE;
-  const dist = (word) => (word | 0) / MESH_CAM_DIST_SCALE;
+  const dist2 = (word) => (word | 0) / MESH_CAM_DIST_SCALE;
   const distanceWord = words[MESH_CAM_BASE + 3] ?? 0;
   const fovWord = words[MESH_CAM_BASE + 7] ?? 0;
   return {
     yaw: angle(words[MESH_CAM_BASE + 1] ?? 0),
     pitch: angle(words[MESH_CAM_BASE + 2] ?? 0),
-    distance: distanceWord > 0 ? dist(distanceWord) : null,
-    target: [dist(words[MESH_CAM_BASE + 4] ?? 0), dist(words[MESH_CAM_BASE + 5] ?? 0), dist(words[MESH_CAM_BASE + 6] ?? 0)],
+    distance: distanceWord > 0 ? dist2(distanceWord) : null,
+    target: [dist2(words[MESH_CAM_BASE + 4] ?? 0), dist2(words[MESH_CAM_BASE + 5] ?? 0), dist2(words[MESH_CAM_BASE + 6] ?? 0)],
     fov: fovWord > 0 ? angle(fovWord) : null,
     hud: (flags & MESH_CAM_HUD) !== 0
   };
@@ -6071,6 +6087,17 @@ local _MPB = _MCB + 8
 local _MPCAP = 8
 local _ln = 0
 local _mn = 0
+local _netq = {}
+local function _netflush()
+  local n = pmem(104)
+  while n < 6 and #_netq > 0 do
+    local e = table.remove(_netq, 1)
+    pmem(105 + n * 2, e[1])
+    pmem(106 + n * 2, e[2])
+    n = n + 1
+  end
+  pmem(104, n)
+end
 local function _emit(kind, id, value)
   local seq = pmem(_MB)
   local slot = seq % _CAP
@@ -6263,41 +6290,55 @@ cartbox = {
   -- between browsers through pmem words 0..118 (so a netplay cart must not keep
   -- save data there); see packages/player/src/net/netplay.ts for the layout.
   -- net() -> mode (0 offline, 1 client, 2 host), my slot, humans mask, match word,
-  -- and the page's status code (0 idle; the page defines the rest, e.g. searching)
+  -- the page's status code (0 idle; the page defines the rest, e.g. searching),
+  -- and the host's slot (slots stick, so after a host leaves it may not be 0)
   net = function()
     local h = pmem(0)
-    return h & 3, (h >> 2) & 7, (h >> 8) & 0xff, pmem(1), (h >> 5) & 7
+    return h & 3, (h >> 2) & 7, (h >> 8) & 0xff, pmem(1), (h >> 5) & 7, pmem(66) & 7
   end,
-  -- netpeer(slot) -> the slot's 3 state words, and whether they are live
+  -- netclock() -> the room's shared clock, ms (the host's clock; every player
+  -- keeps theirs on it by ping), and the view lag: how old the others'
+  -- snapshots are when they arrive. Draw them at clock - lag - a buffer.
+  netclock = function() return pmem(2), ((pmem(0) >> 24) & 0xff) * 4 end,
+  -- netpeer(slot) -> the slot's 4 state words, whether they are live, and when
+  -- they were taken on the shared clock (ms) -- to draw it between snapshots
   netpeer = function(slot)
-    local b = 3 + slot * 3
-    return pmem(b), pmem(b + 1), pmem(b + 2), ((pmem(0) >> 16) & (1 << slot)) ~= 0
+    local b = 3 + slot * 4
+    local clock = pmem(2)
+    local half = (pmem(35 + (slot >> 1)) >> ((slot & 1) * 16)) & 0xffff
+    return pmem(b), pmem(b + 1), pmem(b + 2), pmem(b + 3), ((pmem(0) >> 16) & (1 << slot)) ~= 0,
+      clock - ((clock - half) & 0xffff)
   end,
-  -- netpublish(slot, a, b, c): publish a slot's state this tick (your own, or a
-  -- bot's when you are the host)
-  netpublish = function(slot, a, b, c)
-    local base = 72 + slot * 3
+  -- netpublish(slot, a, b, c, d): publish a slot's state this tick (your own, or
+  -- a bot's when you are the host)
+  netpublish = function(slot, a, b, c, d)
+    local base = 72 + slot * 4
     pmem(base, math.floor(a or 0) & 0xffffffff)
     pmem(base + 1, math.floor(b or 0) & 0xffffffff)
     pmem(base + 2, math.floor(c or 0) & 0xffffffff)
+    pmem(base + 3, math.floor(d or 0) & 0xffffffff)
     pmem(70, pmem(70) | (1 << slot))
+    _netflush()
   end,
   -- netmatch(word): the host's shared game-state word (clients read it via net())
   netmatch = function(w) pmem(71, math.floor(w or 0) & 0xffffffff) end,
-  -- netsend(a, b): broadcast a 2-word event to every other player (\u2264 10/tick)
+  -- netsend(a, b): broadcast a 2-word event to every other player. Six go out a
+  -- tick; the rest wait their turn (up to 64), sent on the next netsend or netpublish.
   netsend = function(a, b)
-    local n = pmem(96)
-    if n >= 10 then return false end
-    pmem(97 + n * 2, math.floor(a or 0) & 0xffffffff)
-    pmem(98 + n * 2, math.floor(b or 0) & 0xffffffff)
-    pmem(96, n + 1)
+    if #_netq >= 64 then return false end
+    _netq[#_netq + 1] = { math.floor(a or 0) & 0xffffffff, math.floor(b or 0) & 0xffffffff }
+    _netflush()
     return true
   end,
-  -- netevents() -> this tick's incoming events, as a list of {a, b}
+  -- netevents() -> this tick's incoming events, as a list of {a, b, from}: from
+  -- is the slot that sent it (the host is slot 0), for telling its word apart
   netevents = function()
-    local n = pmem(27)
+    local n = pmem(39)
     local out = {}
-    for i = 0, n - 1 do out[#out + 1] = { pmem(28 + i * 2), pmem(29 + i * 2) } end
+    for i = 0, n - 1 do
+      local from = (pmem(i < 10 and 64 or 65) >> ((i % 10) * 3)) & 7
+      out[#out + 1] = { pmem(40 + i * 2), pmem(41 + i * 2), from }
+    end
     return out
   end,
   -- Collision defaults: overridden by the injected layer when the cart has one,
@@ -8744,8 +8785,8 @@ var AgentCrowd = class {
       this.move(a, v[0], v[2], dt, climb);
       const mx = a.pos[0] - before[0];
       const mz = a.pos[2] - before[2];
-      const dist = Math.hypot(mx, mz);
-      a.moving = dist > a.speed * dt * 0.2;
+      const dist2 = Math.hypot(mx, mz);
+      a.moving = dist2 > a.speed * dt * 0.2;
       if (a.moving) {
         const target = Math.atan2(mx, mz);
         let delta = target - a.facing;
@@ -18910,24 +18951,40 @@ function parseParticles(raw) {
 var STATES = 1;
 var EVENTS = 2;
 var MATCH = 4;
+var TIME = 8;
+var PING = 16;
+var PONGS = 32;
+var ROSTER = 64;
+var STATE_BYTES = 17;
+var PONG_BYTES = 13;
+var utf8 = new TextEncoder();
+var utf8decode = new TextDecoder();
 function encodeNetMessage(message) {
   const states = message.s ?? [];
   const events = message.e ?? [];
+  const pongs = message.po ?? [];
+  const roster = (message.ro ?? []).map(([slot, id]) => [slot, utf8.encode(id).slice(0, 255)]);
   const hasMatch = message.m !== void 0;
-  const size = 1 + (states.length ? 1 + states.length * 13 : 0) + (events.length ? 2 + events.length * 8 : 0) + (hasMatch ? 4 : 0);
+  const hasTime = message.t !== void 0;
+  const hasPing = message.pi !== void 0;
+  const size = 1 + (states.length ? 1 + states.length * STATE_BYTES : 0) + (events.length ? 2 + events.length * 8 : 0) + (hasMatch ? 4 : 0) + (hasTime ? 4 : 0) + (hasPing ? 4 : 0) + (pongs.length ? 1 + pongs.length * PONG_BYTES : 0) + (roster.length ? 1 + roster.reduce((n, [, id]) => n + 2 + id.length, 0) : 0);
   const bytes = new Uint8Array(size);
   const view = new DataView(bytes.buffer);
   let at = 0;
-  bytes[at++] = (states.length ? STATES : 0) | (events.length ? EVENTS : 0) | (hasMatch ? MATCH : 0);
+  bytes[at++] = (states.length ? STATES : 0) | (events.length ? EVENTS : 0) | (hasMatch ? MATCH : 0) | (hasTime ? TIME : 0) | (hasPing ? PING : 0) | (pongs.length ? PONGS : 0) | (roster.length ? ROSTER : 0);
+  const u322 = (v) => {
+    view.setUint32(at, v >>> 0, true);
+    at += 4;
+  };
   if (states.length) {
     if (states.length > 255) throw new Error("too many slot states in one message");
     bytes[at++] = states.length;
-    for (const [slot, a, b, c] of states) {
+    for (const [slot, a, b, c, d] of states) {
       bytes[at++] = slot & 255;
-      view.setUint32(at, a >>> 0, true);
-      view.setUint32(at + 4, b >>> 0, true);
-      view.setUint32(at + 8, c >>> 0, true);
-      at += 12;
+      u322(a);
+      u322(b);
+      u322(c);
+      u322(d);
     }
   }
   if (events.length) {
@@ -18935,30 +18992,56 @@ function encodeNetMessage(message) {
     view.setUint16(at, events.length, true);
     at += 2;
     for (const [a, b] of events) {
-      view.setUint32(at, a >>> 0, true);
-      view.setUint32(at + 4, b >>> 0, true);
-      at += 8;
+      u322(a);
+      u322(b);
     }
   }
-  if (hasMatch) view.setUint32(at, message.m >>> 0, true);
+  if (hasMatch) u322(message.m);
+  if (hasTime) u322(message.t);
+  if (hasPing) u322(message.pi);
+  if (pongs.length) {
+    if (pongs.length > 255) throw new Error("too many pongs in one message");
+    bytes[at++] = pongs.length;
+    for (const [slot, t0, t1, t2] of pongs) {
+      bytes[at++] = slot & 255;
+      u322(t0);
+      u322(t1);
+      u322(t2);
+    }
+  }
+  if (roster.length) {
+    if (roster.length > 255) throw new Error("too many players in one roster");
+    bytes[at++] = roster.length;
+    for (const [slot, id] of roster) {
+      bytes[at++] = slot & 255;
+      bytes[at++] = id.length;
+      bytes.set(id, at);
+      at += id.length;
+    }
+  }
   return bytes;
 }
 function decodeNetMessage(bytes) {
   if (bytes.length < 1) return null;
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const flags = bytes[0];
-  if (flags & ~(STATES | EVENTS | MATCH)) return null;
+  if (flags & ~(STATES | EVENTS | MATCH | TIME | PING | PONGS | ROSTER)) return null;
   let at = 1;
   const need = (n) => at + n <= bytes.length;
+  const u322 = () => {
+    const v = view.getUint32(at, true);
+    at += 4;
+    return v;
+  };
   const message = {};
   if (flags & STATES) {
     if (!need(1)) return null;
     const count = bytes[at++];
-    if (!need(count * 13)) return null;
+    if (!need(count * STATE_BYTES)) return null;
     message.s = [];
     for (let i = 0; i < count; i += 1) {
-      message.s.push([bytes[at], view.getUint32(at + 1, true), view.getUint32(at + 5, true), view.getUint32(at + 9, true)]);
-      at += 13;
+      const slot = bytes[at++];
+      message.s.push([slot, u322(), u322(), u322(), u322()]);
     }
   }
   if (flags & EVENTS) {
@@ -18967,15 +19050,39 @@ function decodeNetMessage(bytes) {
     at += 2;
     if (!need(count * 8)) return null;
     message.e = [];
+    for (let i = 0; i < count; i += 1) message.e.push([u322(), u322()]);
+  }
+  for (const [flag, key] of [
+    [MATCH, "m"],
+    [TIME, "t"],
+    [PING, "pi"]
+  ]) {
+    if (!(flags & flag)) continue;
+    if (!need(4)) return null;
+    message[key] = u322();
+  }
+  if (flags & PONGS) {
+    if (!need(1)) return null;
+    const count = bytes[at++];
+    if (!need(count * PONG_BYTES)) return null;
+    message.po = [];
     for (let i = 0; i < count; i += 1) {
-      message.e.push([view.getUint32(at, true), view.getUint32(at + 4, true)]);
-      at += 8;
+      const slot = bytes[at++];
+      message.po.push([slot, u322(), u322(), u322()]);
     }
   }
-  if (flags & MATCH) {
-    if (!need(4)) return null;
-    message.m = view.getUint32(at, true);
-    at += 4;
+  if (flags & ROSTER) {
+    if (!need(1)) return null;
+    const count = bytes[at++];
+    message.ro = [];
+    for (let i = 0; i < count; i += 1) {
+      if (!need(2)) return null;
+      const slot = bytes[at++];
+      const length = bytes[at++];
+      if (!need(length)) return null;
+      message.ro.push([slot, utf8decode.decode(bytes.subarray(at, at + length))]);
+      at += length;
+    }
   }
   return at === bytes.length ? message : null;
 }
@@ -18986,6 +19093,20 @@ function netSendInterval(players) {
 }
 var KEEPALIVE_TICKS = 60;
 var STALE_MS = 3e3;
+var PING_TICKS = 30;
+var PING_TICKS_EARLY = 6;
+var EARLY_PINGS = 5;
+var CLOCK_SAMPLES = 8;
+var LAG_RISE = 0.5;
+var LAG_FALL = 0.5;
+var REJOIN_MS = 6e4;
+var ROSTER_TICKS = 60;
+function since(a, b) {
+  return b - a | 0;
+}
+function unwrap(stamp, clock) {
+  return clock + since(clock >>> 0, stamp >>> 0);
+}
 var NetSession = class {
   constructor(transport, now = () => Date.now()) {
     this.transport = transport;
@@ -18994,6 +19115,17 @@ var NetSession = class {
     this.connected = false;
     this.joinedAt = Date.now();
     this.remote = /* @__PURE__ */ new Map();
+    /** This player's clock minus the host's (ms): shared time = now() + offset. */
+    this.offset = 0;
+    this.clockSamples = [];
+    this.pingsAnswered = 0;
+    this.lastPingTick = -Infinity;
+    /** Pings heard (as host), to answer in the next message: [slot, their ping, when heard]. */
+    this.pongsDue = [];
+    /** How old the others' snapshots are when they arrive (ms): the slowest link's, smoothed. */
+    this.viewLag = 0;
+    /** The view lag the last inbox carried (ms, as the cart read it). */
+    this.viewLagWritten = 0;
     this.pendingEvents = [];
     this.hostMatch = 0;
     this.statusCode = 0;
@@ -19007,25 +19139,58 @@ var NetSession = class {
     /** Bytes sent and received so far, in the messages' binary form (for the profiler). */
     this.sentBytes = 0;
     this.receivedBytes = 0;
+    /** Who holds which slot (peer id → slot), as the host has it (L8). */
+    this.roster = /* @__PURE__ */ new Map();
+    /** Slots held for players who dropped, until they're back or REJOIN_MS is up. */
+    this.held = /* @__PURE__ */ new Map();
+    /** The roster changed (as host): send it in the next message. */
+    this.rosterDirty = false;
+    this.lastRosterTick = -Infinity;
     transport.onPeers((peers) => {
       this.peers = [...peers].sort((a, b) => a.joinedAt - b.joinedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      if (this.peers.length === 0) {
+        this.roster.clear();
+        this.held.clear();
+      }
+      this.reslot();
       this.emit();
     });
-    transport.onMessage((message) => this.receive(message));
+    transport.onMessage((message, from) => this.receive(message, from));
   }
   /** Bytes this session has sent and received, measured in the messages' binary form (netCodec.ts). */
   traffic() {
     return { sent: this.sentBytes, received: this.receivedBytes };
   }
+  /** The room's shared clock, ms: the host's own clock, as this player estimates it. */
+  sharedNow() {
+    return this.now() + this.offset;
+  }
+  /** The view lag the cart was last given (ms): how far behind the shared clock the newest snapshots are. */
+  viewLagMs() {
+    return this.viewLagWritten;
+  }
+  /** The clock estimate: offset to the host's clock, and the round trip of the ping it came from (0 before any answer). */
+  clockSync() {
+    const best = this.bestSample();
+    return { offset: this.offset, rtt: best?.delay ?? 0, samples: this.clockSamples.length };
+  }
   /** Forget the current room's state (remote players, queued events, the host's
    *  match word) — for moving to another room without carrying anything over. */
   resetRoom() {
     this.remote.clear();
+    this.clockSamples.length = 0;
+    this.pongsDue.length = 0;
+    this.pingsAnswered = 0;
+    this.lastPingTick = -Infinity;
+    this.viewLag = 0;
     this.pendingEvents.length = 0;
     this.outEvents.length = 0;
     this.outStates = /* @__PURE__ */ new Map();
     this.hostMatch = 0;
     this.lastSent = "";
+    this.roster.clear();
+    this.held.clear();
+    this.reslot();
   }
   /** A status for the cart (0..7, read as net()'s fifth value) — e.g. matchmaking progress. */
   setStatus(code) {
@@ -19044,11 +19209,66 @@ var NetSession = class {
   }
   /** This browser's slot (0..7), or -1 while the room is full/unknown. */
   get mySlot() {
-    const index = this.peers.findIndex((p) => p.id === this.transport.selfId);
-    return index >= 0 && index < NET_SLOTS ? index : -1;
+    return this.slotOf(this.transport.selfId);
+  }
+  /** The host's slot: the lowest held by anyone present (-1 in an empty room). */
+  get hostSlot() {
+    let lowest = -1;
+    for (const peer of this.peers) {
+      const slot = this.roster.get(peer.id);
+      if (slot !== void 0 && (lowest < 0 || slot < lowest)) lowest = slot;
+    }
+    return lowest;
   }
   get isHost() {
-    return this.mySlot === 0;
+    return this.mySlot >= 0 && this.mySlot === this.hostSlot;
+  }
+  /** A peer's slot, by the roster (-1 when it has none yet). */
+  slotOf(id) {
+    return this.roster.get(id) ?? -1;
+  }
+  /** Who holds which slot, as this browser has it. */
+  slots() {
+    return this.roster;
+  }
+  /**
+   * Bring the roster up to date with who is here. In a new room (no roster
+   * yet) slots go by join order. After that only the host changes it: a
+   * player who left has its slot held for REJOIN_MS; a newcomer gets its old
+   * slot back if it's held for it, or the lowest free one.
+   */
+  reslot() {
+    if (this.roster.size === 0) {
+      this.peers.slice(0, NET_SLOTS).forEach((peer, slot) => this.roster.set(peer.id, slot));
+      this.rosterDirty = true;
+      return;
+    }
+    if (!this.isHost) return;
+    const now = this.now();
+    const present = new Set(this.peers.map((p) => p.id));
+    let changed = false;
+    for (const [id, slot] of [...this.roster]) {
+      if (present.has(id)) continue;
+      this.roster.delete(id);
+      this.held.set(id, { slot, until: now + REJOIN_MS });
+      changed = true;
+    }
+    for (const [id, hold] of [...this.held]) if (hold.until < now) this.held.delete(id);
+    for (const peer of this.peers) {
+      if (this.roster.has(peer.id)) continue;
+      const taken = new Set(this.roster.values());
+      const back = this.held.get(peer.id);
+      let slot = back && !taken.has(back.slot) ? back.slot : -1;
+      if (slot < 0) {
+        const kept = new Set([...this.held.values()].map((h) => h.slot));
+        for (let s = 0; s < NET_SLOTS && slot < 0; s += 1) if (!taken.has(s) && !kept.has(s)) slot = s;
+      }
+      if (slot < 0) continue;
+      this.roster.set(peer.id, slot);
+      this.held.delete(peer.id);
+      changed = true;
+    }
+    if (changed) this.rosterDirty = true;
   }
   status() {
     return { connected: this.connected, peers: this.peers, mySlot: this.mySlot, isHost: this.isHost };
@@ -19063,24 +19283,31 @@ var NetSession = class {
   beforeTick(words) {
     const mySlot = this.mySlot;
     if (!this.connected || mySlot < 0) {
-      writeNetInbox(words, { mode: 0, mySlot: 0, status: this.statusCode, humans: 0, live: 0, match: 0, seq: this.tick, slots: [], events: [] });
+      writeNetInbox(words, { mode: 0, mySlot: 0, status: this.statusCode, humans: 0, live: 0, match: 0, clock: Math.floor(this.sharedNow()), slots: [], events: [] });
       return;
     }
     const now = this.now();
     let humans = 0;
-    for (let slot = 0; slot < Math.min(NET_SLOTS, this.peers.length); slot += 1) humans |= 1 << slot;
+    for (const peer of this.peers) {
+      const slot = this.slotOf(peer.id);
+      if (slot >= 0) humans |= 1 << slot;
+    }
     let live = 0;
     const slots = [];
+    const stamps = [];
     for (let slot = 0; slot < NET_SLOTS; slot += 1) {
-      const entry = slot === mySlot ? void 0 : this.remote.get(slot);
+      const entry = this.remote.get(slot);
       if (entry && now - entry.at < STALE_MS) {
         slots.push(entry.state);
+        stamps.push(entry.stamp);
         live |= 1 << slot;
       } else {
         slots.push(null);
+        stamps.push(0);
       }
     }
-    const events = this.pendingEvents.slice(0, NET_IN_EVENT_CAPACITY);
+    const pending = this.pendingEvents.slice(0, NET_IN_EVENT_CAPACITY);
+    this.viewLagWritten = netLagUnits(this.viewLag) * 4;
     const delivered = writeNetInbox(words, {
       mode: this.isHost ? NET_MODE_HOST : NET_MODE_CLIENT,
       status: this.statusCode,
@@ -19088,9 +19315,13 @@ var NetSession = class {
       humans,
       live,
       match: this.hostMatch,
-      seq: this.tick,
+      hostSlot: this.hostSlot,
+      clock: Math.floor(this.sharedNow()),
+      lag: this.viewLag,
       slots,
-      events
+      stamps,
+      events: pending.map((p) => p.event),
+      senders: pending.map((p) => p.from)
     });
     this.pendingEvents.splice(0, delivered);
   }
@@ -19105,27 +19336,87 @@ var NetSession = class {
     const interval = this.transport.sendInterval?.(this.peers.length) ?? netSendInterval(this.peers.length);
     if (this.tick % interval !== 0) return;
     const message = {};
-    if (this.outStates.size > 0) message.s = [...this.outStates].map(([slot, w]) => [slot, w[0], w[1], w[2]]);
+    if (this.outStates.size > 0) message.s = [...this.outStates].map(([slot, w]) => [slot, w[0], w[1], w[2], w[3]]);
     if (this.isHost) message.m = this.hostMatch;
     this.outStates = /* @__PURE__ */ new Map();
+    const pingEvery = this.pingsAnswered < EARLY_PINGS ? PING_TICKS_EARLY : PING_TICKS;
+    const ping = !this.isHost && this.peers.length > 1 && this.tick - this.lastPingTick >= pingEvery;
     const signature = JSON.stringify([message.s ?? null, message.m ?? null]);
-    if (this.outEvents.length === 0 && signature === this.lastSent && this.tick - this.lastSentTick < KEEPALIVE_TICKS) return;
+    const roster = this.isHost && (this.rosterDirty || this.tick - this.lastRosterTick >= ROSTER_TICKS);
+    if (roster) {
+      message.ro = [...this.roster].map(([id, slot]) => [slot, id]);
+      this.rosterDirty = false;
+      this.lastRosterTick = this.tick;
+    }
+    const quiet = this.outEvents.length === 0 && this.pongsDue.length === 0 && !ping && !roster;
+    if (quiet && signature === this.lastSent && this.tick - this.lastSentTick < KEEPALIVE_TICKS) return;
     if (this.outEvents.length > 0) message.e = this.outEvents.splice(0);
-    if (message.s || message.e || message.m !== void 0) {
+    const shared = Math.floor(this.sharedNow());
+    message.t = shared >>> 0;
+    if (ping) {
+      message.pi = Math.floor(this.now()) >>> 0;
+      this.lastPingTick = this.tick;
+    }
+    if (this.pongsDue.length > 0) message.po = this.pongsDue.splice(0).map(([slot, t0, t1]) => [slot, t0, t1, shared >>> 0]);
+    if (message.s || message.e || message.m !== void 0 || message.pi !== void 0 || message.po || message.ro) {
       this.transport.send(message);
       this.sentBytes += encodeNetMessage(message).length;
       this.lastSent = signature;
       this.lastSentTick = this.tick;
     }
   }
-  receive(message) {
+  receive(message, from) {
     this.receivedBytes += encodeNetMessage(message).length;
     const now = this.now();
-    for (const [slot, a, b, c] of message.s ?? []) {
-      if (slot >= 0 && slot < NET_SLOTS && slot !== this.mySlot) this.remote.set(slot, { state: [a, b, c], at: now });
+    const mySlot = this.mySlot;
+    const stamp = message.t !== void 0 ? unwrap(message.t, this.sharedNow()) : this.sharedNow();
+    if (message.s && message.t !== void 0) {
+      const age = Math.max(0, this.sharedNow() - stamp);
+      this.viewLag = age > this.viewLag ? this.viewLag + (age - this.viewLag) * LAG_RISE : Math.max(age, this.viewLag - LAG_FALL);
     }
-    for (const event of message.e ?? []) if (this.pendingEvents.length < 200) this.pendingEvents.push(event);
+    for (const [slot, a, b, c, d] of message.s ?? []) {
+      if (slot < 0 || slot >= NET_SLOTS) continue;
+      const held = this.remote.get(slot);
+      if (held && now - held.at < STALE_MS && stamp < held.stamp) continue;
+      this.remote.set(slot, { state: [a, b, c, d ?? 0], stamp, at: now });
+    }
+    if (message.ro && from !== void 0) this.adoptRoster(message.ro, from);
+    const sender = from === void 0 ? -1 : this.slotOf(from);
+    for (const event of message.e ?? []) if (this.pendingEvents.length < 200 && sender >= 0 && sender < NET_SLOTS) this.pendingEvents.push({ event, from: sender });
     if (message.m !== void 0 && !this.isHost) this.hostMatch = message.m;
+    if (message.pi !== void 0 && this.isHost) {
+      const slot = from === void 0 ? -1 : this.slotOf(from);
+      if (slot > 0 && slot < NET_SLOTS && this.pongsDue.length < NET_SLOTS) this.pongsDue.push([slot, message.pi, Math.floor(this.sharedNow()) >>> 0]);
+    }
+    for (const [slot, t0, t1, t2] of message.po ?? []) {
+      if (slot !== mySlot || this.isHost) continue;
+      this.clockAnswer(t0, t1, t2, Math.floor(now));
+    }
+  }
+  adoptRoster(entries, from) {
+    const next = new Map(entries.map(([slot, id]) => [id, slot]));
+    const present = new Set(this.peers.map((p) => p.id));
+    let lowest = Infinity;
+    for (const [id, slot] of next) if (present.has(id) && slot < lowest) lowest = slot;
+    if (next.get(from) !== lowest) return;
+    this.roster = next;
+    for (const id of next.keys()) this.held.delete(id);
+    this.emit();
+  }
+  /** NTP's estimate from one answered ping: t0 sent and t3 back on our clock, t1 heard and t2 answered on the host's. */
+  clockAnswer(t0, t1, t2, t3) {
+    const delay = since(t0, t3 >>> 0) - since(t1, t2);
+    if (delay < 0) return;
+    const offset = (since(t0, t1) + since(t3 >>> 0, t2)) / 2;
+    this.clockSamples.push({ offset, delay });
+    if (this.clockSamples.length > CLOCK_SAMPLES) this.clockSamples.shift();
+    this.pingsAnswered += 1;
+    this.offset = this.bestSample().offset;
+  }
+  bestSample() {
+    let best;
+    for (const sample of this.clockSamples) if (!best || sample.delay < best.delay) best = sample;
+    return best;
   }
   emit() {
     const status = this.status();
@@ -19377,11 +19668,12 @@ var SimulatedNetHub = class {
     sender.busyUntil = leaves;
     for (const [id, member] of this.members) {
       if (id === from || !member.peer) continue;
+      const at = leaves + link.latencyMs + (link.jitterMs ? this.rand() * link.jitterMs : 0);
       if (link.loss && this.rand() < link.loss) {
         this.counts.lost += 1;
+        if (message.e) this.queue.push({ at: at + 2 * link.latencyMs + 20, order: this.order++, to: id, from, wire: JSON.stringify({ e: message.e, t: message.t }) });
         continue;
       }
-      const at = leaves + link.latencyMs + (link.jitterMs ? this.rand() * link.jitterMs : 0);
       this.queue.push({ at, order: this.order++, to: id, from, wire });
     }
   }
@@ -19438,8 +19730,31 @@ function round(report) {
     ...report,
     bytesPerSecond: report.bytesPerSecond.map((b) => ({ sent: Math.round(b.sent), received: Math.round(b.received) })),
     humans: s(report.humans),
-    all: s(report.all)
+    all: s(report.all),
+    ...report.interpolation ? { interpolation: { humans: s(report.interpolation.humans), all: s(report.interpolation.all), maxStep: r(report.interpolation.maxStep), snaps: report.interpolation.snaps } } : {}
   };
+}
+function trackAt(track, t) {
+  const hi = track.findIndex((s) => s.t >= t);
+  if (hi < 0) return null;
+  if (track[hi].t === t || hi === 0) return track[hi].at;
+  const a = track[hi - 1];
+  const b = track[hi];
+  if (!a.at || !b.at) return null;
+  const f2 = (t - a.t) / (b.t - a.t);
+  return [a.at[0] + (b.at[0] - a.at[0]) * f2, a.at[1] + (b.at[1] - a.at[1]) * f2, a.at[2] + (b.at[2] - a.at[2]) * f2];
+}
+var dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+function ownerStep(track, from, to) {
+  let most = 0;
+  for (let k = 1; k < track.length; k += 1) {
+    const a = track[k - 1];
+    const b = track[k];
+    if (b.t < from || a.t > to) continue;
+    if (!a.at || !b.at) return null;
+    most = Math.max(most, dist(a.at, b.at));
+  }
+  return most;
 }
 async function runNetLab(options) {
   const hub = new SimulatedNetHub(options.conditions, options.seed ?? 1);
@@ -19454,6 +19769,13 @@ async function runNetLab(options) {
   const owned = /* @__PURE__ */ new Map();
   const humanDrift = [];
   const allDrift = [];
+  const delay = options.renderDelayMs;
+  const tracks = /* @__PURE__ */ new Map();
+  const lerpHumans = [];
+  const lerpAll = [];
+  const lastSeen = /* @__PURE__ */ new Map();
+  let maxStep = 0;
+  let snaps = 0;
   const startTraffic = sessions.map(() => ({ sent: 0, received: 0 }));
   const total = options.warmup + options.ticks;
   for (let t = 0; t < total; t += 1) {
@@ -19464,7 +19786,16 @@ async function runNetLab(options) {
       session.beforeTick(cart.net());
       cart.tick(options.input(i, t));
       const peek = takeNetOutbox(new Uint32Array(cart.net().slice(0, NET_WORDS)));
-      for (const [slot, state] of peek.states) owned.set(slot, { at: options.probe.owned(state), owner: i });
+      for (const [slot, state] of peek.states) {
+        const at = options.probe.owned(state);
+        owned.set(slot, { at, owner: i });
+        if (delay !== void 0) {
+          const track = tracks.get(slot) ?? [];
+          track.push({ t: hub.now(), at });
+          if (track.length > 240) track.shift();
+          tracks.set(slot, track);
+        }
+      }
       session.afterTick(cart.net());
     }
     if (t >= options.warmup) {
@@ -19472,12 +19803,32 @@ async function runNetLab(options) {
         const mySlot = sessions[i].mySlot;
         const mailbox = carts[i].mailbox();
         for (const [slot, { at, owner }] of owned) {
-          if (owner === i || !at) continue;
+          if (owner === i || slot === mySlot) continue;
           const seen = options.probe.seen(mailbox, mySlot, slot);
-          if (!seen) continue;
-          const d = Math.hypot(seen[0] - at[0], seen[1] - at[1], seen[2] - at[2]);
+          const key = `${i}:${slot}`;
+          const before = lastSeen.get(key);
+          if (seen) lastSeen.set(key, seen);
+          else lastSeen.delete(key);
+          if (!seen || !at) continue;
+          const d = dist(seen, at);
           allDrift.push(d);
           if (slot < options.players) humanDrift.push(d);
+          if (delay === void 0) continue;
+          const track = tracks.get(slot);
+          const observer = sessions[i];
+          const shift = observer.clockSync().offset - observer.viewLagMs() - delay - sessions[owner].clockSync().offset;
+          const then = trackAt(track, hub.now() + shift);
+          if (!then) continue;
+          const e = dist(seen, then);
+          lerpAll.push(e);
+          if (slot >= options.players) continue;
+          lerpHumans.push(e);
+          if (!before) continue;
+          const own = ownerStep(track, hub.now() + shift - 150, hub.now() + shift + 20);
+          if (own === null || own > 1) continue;
+          const excess = dist(seen, before) - own;
+          maxStep = Math.max(maxStep, excess);
+          if (excess > 0.5) snaps += 1;
         }
       }
     }
@@ -19494,7 +19845,8 @@ async function runNetLab(options) {
     }),
     humans: stats(humanDrift),
     all: stats(allDrift),
-    messages: { ...hub.counts }
+    messages: { ...hub.counts },
+    ...delay !== void 0 ? { interpolation: { humans: stats(lerpHumans), all: stats(lerpAll), maxStep, snaps } } : {}
   });
 }
 
@@ -19542,8 +19894,10 @@ var DirectTransport = class {
         relayed.push(peer.id);
         continue;
       }
-      if (message.s || message.m !== void 0) link.state.send(stateBytes ?? (stateBytes = encodeNetMessage({ s: message.s, m: message.m })));
-      if (message.e) link.events.send(eventBytes ?? (eventBytes = encodeNetMessage({ e: message.e })));
+      if (message.s || message.m !== void 0 || message.pi !== void 0 || message.po) {
+        link.state.send(stateBytes ?? (stateBytes = encodeNetMessage({ s: message.s, m: message.m, t: message.t, pi: message.pi, po: message.po })));
+      }
+      if (message.e || message.ro) link.events.send(eventBytes ?? (eventBytes = encodeNetMessage({ e: message.e, t: message.t, ro: message.ro })));
     }
     if (relayed.length > 0) this.relay.send(relayed.length === others.length ? message : { ...message, r: relayed });
   }
