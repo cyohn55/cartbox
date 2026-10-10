@@ -62,9 +62,20 @@ import { LOCKOUT_LIGHTMAP } from "./lockoutLightmap.generated";
 import { LOCKOUT_PROBES } from "./lockoutProbes.generated";
 import { planProbeGrid, type LightProbeGrid, type StoredLightProbes } from "./lightProbes";
 import { SWEETIE_16 } from "./palette";
+import {
+  ARENA_TILE_WORLD,
+  arenaColliders,
+  arenaFlight,
+  arenaLua,
+  forerunnerBuilder,
+  type ArenaBox,
+  type ArenaFlight,
+  type ArenaMap,
+  type ArenaPoint,
+} from "./forerunnerArena";
 
 /** An axis-aligned box: centre (cx,cy,cz) and half-extents (hx,hy,hz). */
-type Box = readonly [number, number, number, number, number, number];
+type Box = ArenaBox;
 
 // --- The Forerunner texture set -------------------------------------------
 // Three original, procedurally painted, seamlessly tiling surfaces, each baked
@@ -490,22 +501,6 @@ function lockoutTextures(): LockoutTextures {
 // Shotgun room off to one side, all over a recover floor. This is a homage to
 // that massing (axis-aligned, so approximate), not a survey-accurate rip.
 
-/** A flight of steps connecting two heights along one axis (the code's step-up
- *  lets the player and bots climb the ~0.5u risers). */
-function steps(axis: "x" | "z", fixed: number, halfFixed: number, start: number, sign: 1 | -1, topFrom: number, topTo: number): Box[] {
-  const n = Math.max(1, Math.round(Math.abs(topFrom - topTo) / 0.5));
-  const rise = (topFrom - topTo) / n;
-  const run = 0.85;
-  const out: Box[] = [];
-  for (let i = 0; i < n; i += 1) {
-    const top = topFrom - rise * (i + 1);
-    const pos = start + sign * (i + 0.5) * run;
-    const hy = Math.max(0.05, top / 2);
-    out.push(axis === "z" ? [fixed, top / 2, pos, halfFixed, hy, run / 2] : [pos, top / 2, fixed, run / 2, hy, halfFixed]);
-  }
-  return out;
-}
-
 // Named collider boxes. The physics uses these boxes exactly; the *visual* shell
 // (see "The visual layer" below) is built from the same numbers but drawn as
 // chamfered, battered and sloped Forerunner forms, so what you see and what you
@@ -549,20 +544,9 @@ const RAILS: Box[] = [
   [9.6, 4.3, 9.85, 1.6, 0.3, 0.15],
 ];
 
-/** A flight of steps (collision) that the visual layer draws as a smooth ramp. */
-interface Flight {
-  readonly axis: "x" | "z";
-  readonly fixed: number;
-  readonly halfFixed: number;
-  readonly start: number;
-  readonly sign: 1 | -1;
-  readonly topFrom: number;
-  readonly topTo: number;
-}
-const flight = (axis: "x" | "z", fixed: number, halfFixed: number, start: number, sign: 1 | -1, topFrom: number, topTo: number): Flight => ({
-  axis, fixed, halfFixed, start, sign, topFrom, topTo,
-});
-const FLIGHTS: Flight[] = [
+/** Flights of steps (collision) that the visual layer draws as smooth ramps. */
+const flight = arenaFlight;
+const FLIGHTS: ArenaFlight[] = [
   flight("z", -5.7, 1.1, -3.8, 1, 2.0, 0), // floor -> the sniper tower's landing
   flight("x", -5.0, 1.2, -11.1, 1, 4.5, 2.0), // landing -> mid tier (climbs west)
   flight("x", -9.8, 1.2, -8.8, -1, 7.0, 4.5), // mid tier -> sniper deck (climbs east)
@@ -572,10 +556,8 @@ const FLIGHTS: Flight[] = [
   flight("z", 0, 1.4, 6.5, 1, 3.65, 0),
   flight("x", 6, 2.0, -6.4, 1, 2.2, 0), // floor -> shotgun room (climbs west into its open east side)
 ];
-const flightSteps = (f: Flight): Box[] => steps(f.axis, f.fixed, f.halfFixed, f.start, f.sign, f.topFrom, f.topTo);
-
-/** Every solid collider the cart's physics and shot occlusion test against. */
-const STRUCT: Box[] = [
+/** The solid colliders, besides the flights' steps. */
+const SOLIDS: Box[] = [
   FLOOR,
   T1, T2, T3,
   B1, B2,
@@ -583,8 +565,10 @@ const STRUCT: Box[] = [
   PIT, ...PIT_WALLS,
   SG_FLOOR, SG_ROOF, SG_BACK, SG_SIDE,
   ...RAILS,
-  ...FLIGHTS.flatMap(flightSteps),
 ];
+
+/** Every solid collider the cart's physics and shot occlusion test against. */
+const STRUCT: Box[] = arenaColliders({ solids: SOLIDS, flights: FLIGHTS });
 
 /**
  * What a killed soldier's ragdoll lands on (HALO2_STYLE_ROADMAP.md H9): the
@@ -706,6 +690,27 @@ const NAV_NODES: ReadonlyArray<readonly [number, number, number]> = [
 /** Power positions bots like to hold (indices into NAV_NODES): the sniper deck, the BR top, the walkway centre, the shotgun room. */
 const NAV_POWER: readonly number[] = [42, 41, 49, 48, 24, 51];
 
+/**
+ * Lockout as an arena map (LOCKOUT_MULTIPLAYER_ROADMAP.md L1): what the cart's
+ * code reads to play it — its colliders and flights, spawns (any team), bot
+ * destinations and power positions, the hills King of the Hill rotates
+ * through (the named power positions), the ball's spawn in the Sword pit,
+ * the death plane under the deck, and the weapon markers.
+ */
+export const LOCKOUT_MAP: ArenaMap = {
+  id: "lockout",
+  name: "Lockout",
+  solids: SOLIDS,
+  flights: FLIGHTS,
+  spawns: SPAWNS.map((at) => ({ at })),
+  destinations: NAV_NODES,
+  power: NAV_POWER,
+  hills: [[0, 3.65, 0], [-6.7, 7.0, -8.6], [9.6, 4.0, 7.2], [0, 0.7, 0], [-9, 2.2, 6]],
+  ball: [0, 1.1, 0],
+  deathY: -6,
+  markers: MARKERS.map((box, i) => ({ box, weapon: MARKER_WEAPONS[i]! })),
+};
+
 
 // --- Mesh assembly --------------------------------------------------------
 
@@ -713,7 +718,7 @@ const NAV_POWER: readonly number[] = [42, 41, 49, 48, 24, 51];
  *  face, so panels read at a consistent size across the map. 4.4 since the
  *  kit rebuild (I16): a tile across two kit panels, so the textures land at
  *  about 1.6× the texels per metre they had at 7 (with no larger textures). */
-const TILE_WORLD = 4.4;
+const TILE_WORLD = ARENA_TILE_WORLD;
 const UV = 1 / TILE_WORLD;
 
 type V3 = readonly [number, number, number];
@@ -733,220 +738,12 @@ function boxesPrimitive(boxes: Box[], material: MeshPrimitive["material"], fixed
 // a deck perched over a drop, with snow gathered on every ledge. These builders
 // draw that over the collider boxes above, which stay the physics.
 
-/** A chamfered prism over a box's footprint, from y0 to y1 (sides only by default). */
-function prism(s: Streams, [cx, , cz, hx, , hz]: Box, y0: number, y1: number, chamfer: number, caps = { top: false, bottom: false }): void {
-  pushLoft(s, chamferedRect(cx, cz, hx, hz, chamfer, y0), chamferedRect(cx, cz, hx, hz, chamfer, y1), UV, caps);
-}
-
-// --- The kit on the arena (HALO_INFINITE_STYLE_ROADMAP.md I16) ---------------
-// The tiers' walls are built from the Forerunner kit's wall module: each long
-// side is a grid of panels, and each panel is the kit wall's recipe applied
-// with the editor's face edits (meshEdit.ts) — an inset that leaves a frame
-// between panels, then a bevel that sinks the plate behind a chamfered rim.
-// Every cut goes inward, so the walls never stand past their colliders. Some
-// panels carry the lit wall's light channel: a glowing strip set into the
-// recess.
-
-/** A panel's target size; a side is divided into whole panels near it. */
-const KIT_PANEL_W = 2.2;
-const KIT_PANEL_H = 1.6;
-/** The frame between panels, and the sunken plate's rim width and depth. */
-const KIT_FRAME = 0.06;
-const KIT_RIM = 0.1;
-const KIT_SINK = 0.05;
-
-/** Light channels set into the panels, gathered as the walls are built (energy material, with the trim). */
-const LIGHT_CHANNELS: Box[] = [];
-
-/** One kit panel on a wall: the quad a→b→c→d (counter-clockwise from outside), framed and sunk. */
-function kitPanel(s: Streams, quad: readonly V3[], normal: V3, channel: boolean): void {
-  const positions: number[] = [];
-  const uvs: number[] = [];
-  const ax = Math.abs(normal[0]), ay = Math.abs(normal[1]), az = Math.abs(normal[2]);
-  for (const p of quad) {
-    positions.push(p[0], p[1], p[2]);
-    // The arena's world-projected tiling (as pushFace), so the wall texture runs on across panels.
-    if (ay >= ax && ay >= az) uvs.push(p[0] * UV, p[2] * UV);
-    else if (ax >= az) uvs.push(p[2] * UV, p[1] * UV);
-    else uvs.push(p[0] * UV, p[1] * UV);
-  }
-  let panel: MeshPrimitive = {
-    positions: Float32Array.from(positions),
-    normals: Float32Array.from([...normal, ...normal, ...normal, ...normal]),
-    uvs: Float32Array.from(uvs),
-    indices: Uint32Array.from([0, 1, 2, 0, 2, 3]),
-    material: { name: "panel", baseColorFactor: [1, 1, 1, 1], baseColorImage: null },
-  };
-  panel = editFace(panel, [0, 1], { kind: "inset", amount: KIT_FRAME });
-  panel = editFace(panel, faceAt(panel, 0).triangles, { kind: "bevel", width: KIT_RIM, depth: -KIT_SINK });
-  const base = s.positions.length / 3;
-  s.positions.push(...panel.positions);
-  s.normals.push(...panel.normals!);
-  s.uvs.push(...panel.uvs!);
-  for (const i of panel.indices) s.indices.push(base + i);
-  if (channel) {
-    // A strip along the sunken plate's middle, just proud of it (still well inside the wall).
-    const mid: V3 = [(quad[0]![0] + quad[2]![0]) / 2, (quad[0]![1] + quad[2]![1]) / 2, (quad[0]![2] + quad[2]![2]) / 2];
-    const along = Math.hypot(quad[1]![0] - quad[0]![0], quad[1]![2] - quad[0]![2]);
-    const half = Math.max(0.2, along / 2 - KIT_FRAME - KIT_RIM - 0.25);
-    const inset = KIT_SINK - 0.015;
-    const cx = mid[0] - normal[0] * inset, cz = mid[2] - normal[2] * inset;
-    LIGHT_CHANNELS.push(ax > az ? [cx, mid[1], cz, 0.015, 0.05, half] : [cx, mid[1], cz, half, 0.05, 0.015]);
-  }
-}
-
-/** One flat wall quad, wound and lit facing away from `inside`, world-mapped like the rest. */
-function plainQuad(s: Streams, quad: readonly V3[], inside: V3): void {
-  const e1: V3 = [quad[1]![0] - quad[0]![0], quad[1]![1] - quad[0]![1], quad[1]![2] - quad[0]![2]];
-  const e2: V3 = [quad[3]![0] - quad[0]![0], quad[3]![1] - quad[0]![1], quad[3]![2] - quad[0]![2]];
-  let n: V3 = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
-  const l = Math.hypot(n[0], n[1], n[2]);
-  if (l < 1e-9) return;
-  n = [n[0] / l, n[1] / l, n[2] / l];
-  const mid = quad.reduce<V3>((m, p) => [m[0] + p[0] / 4, m[1] + p[1] / 4, m[2] + p[2] / 4], [0, 0, 0]);
-  let pts = quad;
-  if (n[0] * (mid[0] - inside[0]) + n[1] * (mid[1] - inside[1]) + n[2] * (mid[2] - inside[2]) < 0) {
-    pts = [quad[1]!, quad[0]!, quad[3]!, quad[2]!];
-    n = [-n[0], -n[1], -n[2]];
-  }
-  const ax = Math.abs(n[0]), ay = Math.abs(n[1]), az = Math.abs(n[2]);
-  const base = s.positions.length / 3;
-  for (const p of pts) {
-    s.positions.push(p[0], p[1], p[2]);
-    s.normals.push(n[0], n[1], n[2]);
-    if (ay >= ax && ay >= az) s.uvs.push(p[0] * UV, p[2] * UV);
-    else if (ax >= az) s.uvs.push(p[2] * UV, p[1] * UV);
-    else s.uvs.push(p[0] * UV, p[1] * UV);
-  }
-  s.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-}
-
-/**
- * A tier's wall built from kit panels: the chamfered prism over `box` from y0 to
- * y1, its long sides divided into panels, its chamfers left plain. `lit` puts a
- * light channel in every other panel of the top row.
- */
-function panelledPrism(s: Streams, box: Box, y0: number, y1: number, chamfer: number, lit: boolean): void {
-  const [cx, , cz, hx, , hz] = box;
-  const lo = chamferedRect(cx, cz, hx, hz, chamfer, y0);
-  const hi = chamferedRect(cx, cz, hx, hz, chamfer, y1);
-  const h = y1 - y0;
-  for (let i = 0; i < lo.length; i += 1) {
-    const j = (i + 1) % lo.length;
-    const a = lo[i]!, b = lo[j]!;
-    const len = Math.hypot(b[0] - a[0], b[2] - a[2]);
-    const straight = Math.abs(b[0] - a[0]) < 1e-6 || Math.abs(b[2] - a[2]) < 1e-6;
-    if (!straight || len < 1.2 || h < 0.9) {
-      plainQuad(s, [a, b, hi[j]!, hi[i]!], [cx, (y0 + y1) / 2, cz]);
-      continue;
-    }
-    // Outward: away from the box's centre.
-    let normal: V3 = Math.abs(b[0] - a[0]) < 1e-6 ? [Math.sign(a[0] - cx), 0, 0] : [0, 0, Math.sign(a[2] - cz)];
-    if (normal[0] === 0 && normal[2] === 0) normal = [0, 0, 1];
-    const cols = Math.max(1, Math.round(len / KIT_PANEL_W));
-    const rows = Math.max(1, Math.round(h / KIT_PANEL_H));
-    for (let r = 0; r < rows; r += 1) {
-      for (let c = 0; c < cols; c += 1) {
-        const at = (u: number, v: number): V3 => [a[0] + (b[0] - a[0]) * u, y0 + h * v, a[2] + (b[2] - a[2]) * u];
-        const u0 = c / cols, u1 = (c + 1) / cols, v0 = r / rows, v1 = (r + 1) / rows;
-        let quad = [at(u0, v0), at(u1, v0), at(u1, v1), at(u0, v1)];
-        // Wind it counter-clockwise seen from outside.
-        const e1: V3 = [quad[1]![0] - quad[0]![0], quad[1]![1] - quad[0]![1], quad[1]![2] - quad[0]![2]];
-        const e2: V3 = [quad[3]![0] - quad[0]![0], quad[3]![1] - quad[0]![1], quad[3]![2] - quad[0]![2]];
-        const n: V3 = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
-        if (n[0] * normal[0] + n[2] * normal[2] < 0) quad = [quad[1]!, quad[0]!, quad[3]!, quad[2]!];
-        kitPanel(s, quad, normal, lit && r === rows - 1 && c % 2 === 0);
-      }
-    }
-  }
-}
-
-/**
- * A Forerunner tier: chamfered walls, a battered foot flaring out at the base
- * (it stays inside the player's collision radius, so feet never clip it), and an
- * overhanging cornice whose top face is the walkable roof. The walls are kit
- * panels (I16); `lit` sets light channels into some of them.
- */
-function tier(s: Streams, box: Box, opts: { batter?: number; cornice?: number; chamfer?: number; lit?: boolean } = {}): void {
-  const [cx, cy, cz, hx, hy, hz] = box;
-  const c = opts.chamfer ?? 0.55;
-  const bottom = cy - hy;
-  const top = cy + hy;
-  const batter = opts.batter ?? 0;
-  const lip = opts.cornice ?? 0.2;
-  const footH = batter > 0 ? Math.min(0.9, (top - bottom) * 0.45) : 0;
-  if (batter > 0) {
-    pushLoft(s, chamferedRect(cx, cz, hx + batter, hz + batter, c + batter * 0.6, bottom), chamferedRect(cx, cz, hx, hz, c, bottom + footH), UV, { top: false, bottom: false });
-  }
-  const corniceH = 0.32;
-  panelledPrism(s, box, bottom + footH, top - corniceH, c, opts.lit ?? false);
-  // The cornice flares out to its lip, then its cap is the roof.
-  pushLoft(s, chamferedRect(cx, cz, hx, hz, c, top - corniceH), chamferedRect(cx, cz, hx + lip, hz + lip, c + lip * 0.4, top), UV, { top: true, bottom: false });
-}
-
-/** A smooth ramp drawn over a flight of steps, level with each step's centre. */
-function ramp(s: Streams, f: Flight): void {
-  const n = Math.max(1, Math.round(Math.abs(f.topFrom - f.topTo) / 0.5));
-  const rise = (f.topFrom - f.topTo) / n;
-  const run = 0.85;
-  const end = f.start + f.sign * n * run;
-  const h0 = Math.max(0.02, f.topFrom - rise / 2);
-  const h1 = Math.max(0.02, f.topTo + rise / 2 - rise); // one run past the last step centre
-  const at = (along: number, across: number, y: number): V3 =>
-    f.axis === "z" ? [f.fixed + across, y, along] : [along, y, f.fixed + across];
-  const w = f.halfFixed;
-  const bottom = [at(f.start, -w, 0), at(f.start, w, 0), at(end, w, 0), at(end, -w, 0)];
-  const top = [at(f.start, -w, h0), at(f.start, w, h0), at(end, w, Math.max(0.02, h1)), at(end, -w, Math.max(0.02, h1))];
-  pushLoft(s, bottom, top, UV, { top: true, bottom: false });
-  // Low angled side skirts so the ramp reads as a machined piece, not a slab.
-  for (const side of [-1, 1]) {
-    // The skirt's inner face sits just inside the ramp, never coplanar with its
-    // side (coplanar faces z-fight into a sawtooth).
-    const xi = side * (w - 0.03);
-    const x0 = side * (w + 0.12);
-    pushLoft(
-      s,
-      [at(f.start, xi, 0), at(f.start, x0, 0), at(end, x0, 0), at(end, xi, 0)],
-      [at(f.start, xi, h0 + 0.18), at(f.start, x0, h0 + 0.1), at(end, x0, 0.1), at(end, xi, 0.18)],
-      UV,
-      { top: true, bottom: false },
-    );
-  }
-}
-
-/**
- * A blade-like Forerunner fin rising from (x, y0, z) along direction (dx, dz):
- * thin, tapering to a point at y1, and leaning outward by `lean` — the silhouette
- * that makes a Forerunner tower read from across the map.
- */
-function fin(s: Streams, x: number, z: number, dx: number, dz: number, y0: number, y1: number, length: number, lean: number): void {
-  const l = Math.hypot(dx, dz) || 1;
-  const ux = dx / l;
-  const uz = dz / l;
-  const px = -uz * 0.16; // half thickness, perpendicular to the blade
-  const pz = ux * 0.16;
-  const base: V3[] = [
-    [x - px, y0, z - pz],
-    [x + ux * length - px, y0, z + uz * length - pz],
-    [x + ux * length + px, y0, z + uz * length + pz],
-    [x + px, y0, z + pz],
-  ];
-  const tx = x + ux * (lean + length * 0.25);
-  const tz = z + uz * (lean + length * 0.25);
-  const tipLen = length * 0.3;
-  const tip: V3[] = [
-    [tx - px * 0.5, y1, tz - pz * 0.5],
-    [tx + ux * tipLen - px * 0.5, y1, tz + uz * tipLen - pz * 0.5],
-    [tx + ux * tipLen + px * 0.5, y1, tz + uz * tipLen + pz * 0.5],
-    [tx + px * 0.5, y1, tz + pz * 0.5],
-  ];
-  pushLoft(s, base, tip, UV);
-}
-
-/** A tapering octagonal column between two heights (pylons, canopy struts). */
-function column(s: Streams, x0: number, z0: number, y0: number, r0: number, x1: number, z1: number, y1: number, r1: number): void {
-  pushLoft(s, chamferedRect(x0, z0, r0, r0, r0 * 0.42, y0), chamferedRect(x1, z1, r1, r1, r1 * 0.42, y1), UV);
-}
+// The Forerunner kit's arena builders (forerunnerArena.ts): tiers walled in kit
+// panels (I16) — each the kit wall's recipe applied with the editor's face
+// edits, an inset frame and a sunken bevelled plate, every cut going inward so
+// the walls never stand past their colliders — ramps over the flights, fins
+// and columns. Lit panels carry light channels (energy, with the trim).
+const { prism, tier, ramp, fin, column, channels: LIGHT_CHANNELS } = forerunnerBuilder();
 
 /**
  * Forerunner metal: the arena's walls, fins and canopy (`wall`), and everything
@@ -3458,27 +3255,12 @@ export const LOCKOUT_SCENE_TRIANGLES = (() => {
 
 // --- The cart code --------------------------------------------------------
 
-function collidersLua(): string {
-  const nums: number[] = [];
-  for (const [cx, cy, cz, hx, hy, hz] of STRUCT) nums.push(cx - hx, cy - hy, cz - hz, cx + hx, cy + hy, cz + hz);
-  return nums.map((n) => n.toFixed(2)).join(",");
-}
-function spawnsLua(): string {
-  return SPAWNS.flat().map((n) => n.toFixed(2)).join(",");
-}
-function navLua(): string {
-  const roam = NAV_NODES.flat().map((n) => n.toFixed(2)).join(",");
-  const power = NAV_POWER.flatMap((i) => NAV_NODES[i]!).map((n) => n.toFixed(2)).join(",");
-  return `local ROAM = {${roam}}\nlocal POWER = {${power}}`;
-}
-function markersLua(): string {
-  return MARKERS.map(([cx, cy, cz]) => `${cx.toFixed(2)},${cy.toFixed(2)},${cz.toFixed(2)}`).join(",");
-}
-function markerWeaponsLua(): string {
-  return MARKER_WEAPONS.map((w) => `"${w}"`).join(",");
-}
-
-export const LOCKOUT_CODE = `-- title:  Lockout arena
+/**
+ * The arena cart's code, playing `map` (its tables written by arenaLua) with
+ * the camera offset from `center`, the scene's centre the mesh camera orbits.
+ */
+export function lockoutCode(map: ArenaMap, center: ArenaPoint): string {
+  return `-- title:  Lockout arena
 -- author: you
 -- desc:   A vertical Forerunner-arena FPS homage -- you + 7 bots, 7 game types, Xbox 360 core
 -- script: lua
@@ -3490,15 +3272,11 @@ export const LOCKOUT_CODE = `-- title:  Lockout arena
 --   Z fire (auto-melee point-blank) . X jump . S swap weapon
 --   menu: Up/Down pick . Z start   |   sniper: hold A still to zoom
 
-local CENTER_X = ${LOCKOUT_CENTER_X.toFixed(4)}
-local CENTER_Y = ${LOCKOUT_CENTER_Y.toFixed(4)}
-local CENTER_Z = ${LOCKOUT_CENTER_Z.toFixed(4)}
-local COL = {${collidersLua()}}
-local SPN = {${spawnsLua()}}
-local MRK = {${markersLua()}}
-local MW  = {${markerWeaponsLua()}}
+local CENTER_X = ${center[0].toFixed(4)}
+local CENTER_Y = ${center[1].toFixed(4)}
+local CENTER_Z = ${center[2].toFixed(4)}
+${arenaLua(map)}
 local NBOT = ${BOT_COUNT}
-${navLua()}
 
 -- ---------------------------------------------------------------------------
 -- Weapon sandbox. dmg per shot, cool = frames between shots, rng world units,
@@ -3542,9 +3320,8 @@ local function relabel()
 end
 relabel()
 
--- Hill locations King-of-the-Hill rotates through (the named power positions).
-local HILL_MOVE = 1800   -- the hill moves every 30s
-local HILLS = { {0,3.65,0}, {-6.7,7.0,-8.6}, {9.6,4.0,7.2}, {0,0.7,0}, {-9,2.2,6} }
+-- The hill moves every 30 s, through the map's HILLS in turn.
+local HILL_MOVE = 1800
 
 local PR,PH,EYE,STEP = 0.55,1.7,1.5,0.6
 local GRAV,MOVE,JUMP,TURN = 0.028,0.15,0.5,0.045
@@ -3701,11 +3478,18 @@ local function move_vertical()
       elseif p.vy>0 and head>y0 and feet<y0 then p.y=y0-PH; p.vy=0 end
     end
   end
-  if p.y < -6 then p.hp=0; kill_ent(p, p, false) end   -- fell off the arena
+  if p.y < DEATH_Y then p.hp=0; kill_ent(p, p, false) end   -- fell off the arena
+end
+
+-- Spawns on the team's own spawns in team games, if the map has any (SPT), else anywhere.
+local TEAM_SPAWNS = { blue={}, red={} }
+for i=1,#SPT do
+  if SPT[i]==1 then TEAM_SPAWNS.blue[#TEAM_SPAWNS.blue+1]=i-1 elseif SPT[i]==2 then TEAM_SPAWNS.red[#TEAM_SPAWNS.red+1]=i-1 end
 end
 
 function respawn(who)
-  local s = (math.random(0, NBOT)) * 3
+  local own = MODE.teams and who.team and TEAM_SPAWNS[who.team]
+  local s = (own and #own>0) and own[math.random(1,#own)]*3 or math.random(0, #SPN//3 - 1)*3
   who.x,who.y,who.z = SPN[s+1],SPN[s+2],SPN[s+3]
   who.ay = math.atan(-who.x, -who.z)  -- face into the arena, not the spawn wall
   who.vy=0; who.hp=100; who.sh = MODE.shields and 100 or 0
@@ -4444,7 +4228,7 @@ local function start_match(key)
     respawn(o); nav_place(o); bots[i]=o
   end
   net_roles()
-  if MODE.obj=="ball" then ball={x=0,y=1.1,z=0,carrier=nil,live=true} end
+  if MODE.obj=="ball" then ball={x=BALL[1],y=BALL[2],z=BALL[3],carrier=nil,live=true} end
   if MODE.obj=="hill" then hill={x=HILLS[1][1],y=HILLS[1][2],z=HILLS[1][3],next=HILL_MOVE,idx=1} end
   if MODE.obj=="jugg" then local j = ent_by_slot(1) or bots[1]; j.jugg=true; j.sh=200 end
   for k in pairs(sent_score) do sent_score[k] = nil end
@@ -5010,6 +4794,10 @@ function TIC()
   draw_hud()
 end
 `;
+}
+
+/** Lockout's cart code: the arena code playing Lockout, its camera centred on the arena's mesh. */
+export const LOCKOUT_CODE = lockoutCode(LOCKOUT_MAP, CENTER);
 
 /** Seed a fresh cart with the Lockout arena code and a cool Forerunner palette. */
 /** Lockout's palette over the default Sweetie-16: index → hex. */
@@ -5041,9 +4829,10 @@ export function seedLockoutCart(engine: CartEngine): void {
  * The Lockout cartridge as .tic bytes — its code and palette, exactly what the
  * starter seeds — for playing it outside the editor (the /lockout page). The
  * cart has no sprites, map or sound, so its palette and code are the whole cart.
+ * `source` swaps in other code: the same arena code on another map (lockoutCode).
  */
-export function lockoutCartridge(): Uint8Array {
-  const code = new TextEncoder().encode(LOCKOUT_CODE);
+export function lockoutCartridge(source: string = LOCKOUT_CODE): Uint8Array {
+  const code = new TextEncoder().encode(source);
   const palette = new Uint8Array(16 * 3);
   SWEETIE_16.forEach((hex, i) => palette.set(hexRgb(hex), i * 3));
   for (const [index, hex] of LOCKOUT_PALETTE) palette.set(hexRgb(hex), index * 3);
