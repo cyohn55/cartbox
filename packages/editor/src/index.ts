@@ -81,6 +81,8 @@ export {
   LOCKOUT_DECAL_MARKS,
   lockoutNavMesh,
   lockoutTerrain,
+  lockoutVista,
+  LOCKOUT_VISTA_FOREST,
   lockoutMapLayout,
   bakeLockoutLightmap,
   lockoutTerrainTriangles,
@@ -729,6 +731,18 @@ export {
 export { DECAL_FRAMES, DECAL_OFFSET, DecalSystem, decalAtlas } from "./render/decalSystem";
 export { MAX_REFLECTION_PROBES, parseReflectionProbes, reflectionProbeAt, type ReflectionProbe } from "./model/reflectionProbes";
 export { PROBE_FADE, PROBE_RANGE, boxProject, pickProbe, probeWeight, sampleProbe, type ProbeBox, type ReflectionProbeSet } from "./render/probeSampling";
+export {
+  MAX_VISTA_HAZE,
+  VISTA_FAR,
+  VISTA_HAZE_DISTANCE,
+  VISTA_NEAR,
+  bakeVistas,
+  vistaBounds,
+  vistaFaceSize,
+  vistaHaze,
+  type VistaLayer,
+  type VistaShading,
+} from "./render/vista";
 export { PROBE_PANORAMA_WIDTH, bakePanorama, bakeReflectionProbes, bakeReflectionProbesAsync, type ProbeBakeLighting } from "./render/probeBake";
 export {
   CLOUD_TILE,

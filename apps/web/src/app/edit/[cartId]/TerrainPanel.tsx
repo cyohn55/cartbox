@@ -10,7 +10,7 @@
 
 import { useState } from "react";
 
-import { foliageRandom, layerCopies, type FoliageLayer, type FoliagePreset } from "@cartbox/editor";
+import { MAX_VISTA_HAZE, foliageRandom, layerCopies, type FoliageLayer, type FoliagePreset } from "@cartbox/editor";
 
 import { addFoliage, foliageOn, removeFoliage, replaceFoliage } from "@/lib/foliageEdit";
 import { type MeshSidecar } from "@/lib/meshSidecar";
@@ -33,6 +33,9 @@ const SCULPT: readonly { readonly op: "raise" | "lower" | "smooth" | "flatten" |
   { op: "flatten", label: "Flatten", glyph: "▬", hint: "Level the ground to the height where the stroke starts" },
   { op: "noise", label: "Noise", glyph: "⁂", hint: "Roughen the ground with bumps" },
 ];
+
+/** A new vista's haze: a third of the sky shows through ground a kilometre out. */
+const DEFAULT_VISTA_HAZE = 0.35;
 
 const same = (a: TerrainTool | null, b: TerrainTool): boolean => JSON.stringify(a) === JSON.stringify(b);
 
@@ -128,6 +131,17 @@ export function TerrainPanel({
 
           <FoliageSection sidecar={sidecar} onChange={onChange} terrainId={terrain.id} edit={edit} onEdit={(next) => onEdit({ ...next, id })} />
 
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginTop: 10 }} title="Draw this terrain (and its foliage) once into the sky from the play space, instead of as geometry: far mountains and forests for nothing per frame">
+            <input type="checkbox" checked={Boolean(terrain.vista)} onChange={(event) => onChange(replaceTerrain(sidecar, { ...terrain, vista: event.target.checked ? { haze: DEFAULT_VISTA_HAZE } : undefined }))} />
+            Distant vista (drawn into the sky)
+          </label>
+          {terrain.vista && (
+            <>
+              <RangeControl label="Haze" nested min={0} max={MAX_VISTA_HAZE} step={0.01} value={terrain.vista.haze} onChange={(haze) => onChange(replaceTerrain(sidecar, { ...terrain, vista: { haze } }))} ariaLabel="Vista haze" display={`${Math.round(terrain.vista.haze * 100)}% at 1 km`} />
+              <RailHint>Needs the sky dome (Lighting). Seen from the play space's centre; nothing stands on it or collides with it, so keep it beyond where anyone can go.</RailHint>
+            </>
+          )}
+
           <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
             {terrain.paint && (
               <button type="button" className="cbx-btn" onClick={() => onChange(replaceTerrain(sidecar, { ...terrain, paint: undefined }))} title="Forget the painting: the layers follow their slope and height rules again">
@@ -159,7 +173,7 @@ export function TerrainPanel({
       ) : null}
       <details style={{ marginTop: 6 }} open={stored.length === 0}>
         <summary style={{ cursor: "pointer", fontSize: 12 }}>{stored.length === 0 ? "New terrain" : "Add another terrain"}</summary>
-        <RangeControl label="Size" nested min={16} max={512} step={16} value={size} onChange={setSize} ariaLabel="New terrain size" display={`${size} m`} />
+        <RangeControl label="Size" nested min={16} max={4096} step={16} value={size} onChange={setSize} ariaLabel="New terrain size" display={`${size} m`} />
         <RangeControl label="Detail" nested min={17} max={257} step={16} value={samples} onChange={setSamples} ariaLabel="New terrain heights per side" display={`${samples} × ${samples}`} />
         <button type="button" className="cbx-btn" onClick={add} style={{ marginTop: 6 }}>
           Add terrain

@@ -6293,7 +6293,9 @@ import {
   readNavMesh,
   readTerrains,
   readStreaming,
+  TERRAIN_CHUNK,
   terrainChunks,
+  terrainMesh,
   terrainHeight,
   effectiveLevels,
   readSceneProps,
@@ -6482,11 +6484,25 @@ function parseMeshScene(raw) {
     ...pool ? { pooled: { prefab: pool.prefab, copy: pool.copy, root: indexOf.get(pool.rootId) } } : {},
     ...levelOf[i] >= 0 ? { level: levelOf[i] } : {}
   }));
-  const terrains = readTerrains(parsed.terrains);
+  const allTerrains = readTerrains(parsed.terrains);
+  const terrains = allTerrains.filter((t) => !t.vista);
   const identity = composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]);
-  for (const t of terrains) {
+  const vistas = /* @__PURE__ */ new Map();
+  for (const t of allTerrains) {
     const parent = t.parent !== void 0 ? indexOf.get(t.parent) ?? -1 : -1;
     const model = parent >= 0 ? instances[parent].model : identity;
+    if (t.vista) {
+      const parts = [];
+      const cells = t.samples - 1;
+      for (let z0 = 0; z0 < cells; z0 += TERRAIN_CHUNK) {
+        for (let x0 = 0; x0 < cells; x0 += TERRAIN_CHUNK) {
+          const mesh = terrainMesh(t, 1, [x0, z0, Math.min(cells, x0 + TERRAIN_CHUNK), Math.min(cells, z0 + TERRAIN_CHUNK)]);
+          if (mesh.primitives.length > 0) parts.push({ mesh, model });
+        }
+      }
+      vistas.set(t.id, { id: t.id, haze: t.vista.haze, parts });
+      continue;
+    }
     for (const chunk of terrainChunks(t)) {
       instances.push({
         mesh: chunk.mesh,
@@ -6508,14 +6524,19 @@ function parseMeshScene(raw) {
   const storedFoliage = parsed.foliage;
   if (Array.isArray(storedFoliage)) {
     for (const raw2 of storedFoliage) {
-      const read = readFoliage(raw2, terrains);
+      const read = readFoliage(raw2, allTerrains);
       if (!read) continue;
       const text = resolveMeshRef(read.mesh, library);
       const mesh = text ? load(text) : null;
-      const t = terrains.find((x) => x.id === read.layer.terrain);
+      const t = allTerrains.find((x) => x.id === read.layer.terrain);
       if (!mesh || !t) continue;
       const parent = t.parent !== void 0 ? indexOf.get(t.parent) ?? -1 : -1;
       const model = parent >= 0 ? instances[parent].model : identity;
+      const vista = vistas.get(t.id);
+      if (vista) {
+        for (const block of foliageBlocks(t, read.layer, mesh)) vista.parts.push({ mesh: block.mesh, model });
+        continue;
+      }
       foliageBlocks(t, read.layer, mesh).forEach((block, k) => {
         instances.push({
           mesh: block.mesh,
@@ -6578,6 +6599,7 @@ function parseMeshScene(raw) {
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
     ...terrains.length > 0 ? { terrains, extent: sceneBounds(instances.filter((instance) => !instance.pooled)) } : {},
+    ...vistas.size > 0 ? { vistas: [...vistas.values()] } : {},
     ...readStreaming(parsed.streaming) ? { streaming: readStreaming(parsed.streaming) } : {},
     ...effects.length > 0 ? { effects } : {},
     ...decals.length > 0 ? { decals } : {},
@@ -9760,6 +9782,7 @@ import {
   sunScreenPosition,
   sunVisibility,
   bakeSkyPanorama,
+  bakeVistas,
   buildSceneShadow,
   LOCAL_SHADOW_BIAS,
   LOCAL_SHADOW_SLOPE_BIAS,
@@ -9776,6 +9799,7 @@ import {
   multiplyMat4 as multiplyMat43,
   sceneLightingEnvironment,
   sceneLightingKeyDirection,
+  vistaBounds,
   sceneLightingTonemap,
   withDescendants,
   bakeCloudLayer,
@@ -10090,6 +10114,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.skyCache = null;
     /** The sky's drifting cloud layers (I6), drawn over the backdrop each frame. */
     this.skyClouds = [];
+    /** The scene's distant vistas, textured: re-drawn into the sky whenever it is re-baked. */
+    this.vistas = [];
     /**
      * Told each frame where the sky dome's sun is on screen and how much of it is
      * unblocked, for the post-FX glare and lens flare (H8); null without a sky dome.
@@ -10262,13 +10288,15 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         moved = true;
       }
     }
-    if (JSON.stringify(before.lighting ?? null) !== JSON.stringify(next.lighting ?? null)) {
+    const vistasChanged = vistaSignature(before.vistas) !== vistaSignature(next.vistas);
+    if (vistasChanged) this.vistas = await texturedVistas(next.vistas, (mesh) => decodeMeshTextures(mesh, this.decodeKtx2 ?? (() => Promise.resolve(null))));
+    if (vistasChanged || JSON.stringify(before.lighting ?? null) !== JSON.stringify(next.lighting ?? null)) {
       const lighting = next.lighting;
       let environment = lighting ? sceneLightingEnvironment(lighting) : null;
       let skyMap = null;
       let clouds = [];
       if (lighting?.sky && environment) {
-        const baked = await bakeSceneSky(lighting.sky);
+        const baked = await bakeSceneSky(lighting.sky, lighting, environment, this.vistas, next.bounds.center);
         skyMap = baked.map;
         clouds = baked.clouds;
         environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections) };
@@ -10347,14 +10375,16 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     let skyMap = null;
     let clouds = [];
     let environment = lighting ? sceneLightingEnvironment(lighting) : null;
+    const vistas = await texturedVistas(scene.vistas, texture);
     if (lighting?.sky && environment) {
-      const baked = await bakeSceneSky(lighting.sky);
+      const baked = await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center);
       skyMap = baked.map;
       clouds = baked.clouds;
       environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections) };
     }
     const surface = new _MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
     surface.skyClouds = clouds;
+    surface.vistas = vistas;
     for (const [i, mesh] of live) surface.live.set(i, mesh);
     scene.instances.forEach((instance, i) => {
       if (instance.foliage) surface.foliage.set(instances[i].mesh, instance.foliage);
@@ -11107,7 +11137,17 @@ function fillPlaceholders(mesh, images) {
   });
   return touched ? { ...mesh, primitives } : mesh;
 }
-async function bakeSceneSky(sky) {
+var VISTA_SHADOW_SIZE = 2048;
+var VISTA_AIR_WIDTH = 192;
+async function texturedVistas(vistas, texture) {
+  return Promise.all(
+    (vistas ?? []).map(async (v) => ({ haze: v.haze, instances: await Promise.all(v.parts.map(async (p) => ({ ...await texture(p.mesh), model: p.model }))) }))
+  );
+}
+function vistaSignature(vistas) {
+  return JSON.stringify((vistas ?? []).map((v) => [v.id, v.haze, v.parts.map((p) => [meshSignature(p.mesh), Array.from(p.model)])]));
+}
+async function bakeSceneSky(sky, lighting, environment, vistas, eye) {
   let imported = null;
   if (sky.panorama) {
     try {
@@ -11122,7 +11162,30 @@ async function bakeSceneSky(sky) {
       imported = null;
     }
   }
-  const map = bakeSkyPanorama(sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT, imported);
+  let map = bakeSkyPanorama(sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT, imported);
+  const bounds = vistas.length > 0 ? vistaBounds(vistas) : null;
+  if (bounds) {
+    const light = downsamplePanorama(map, SKY_IBL_DOWNSAMPLE);
+    const shadow = buildSceneShadow(
+      vistas.flatMap((v) => v.instances),
+      lighting,
+      bounds.center,
+      bounds.radius,
+      { size: VISTA_SHADOW_SIZE, depth: new Float32Array(VISTA_SHADOW_SIZE * VISTA_SHADOW_SIZE) }
+    );
+    const air = sky.objects && sky.objects.length > 0 ? bakeSkyPanorama({ ...sky, objects: [] }, VISTA_AIR_WIDTH, VISTA_AIR_WIDTH / 2, imported) : null;
+    map = bakeVistas(map, vistas, eye, {
+      ambient: lighting.ambient,
+      lightDirection: sceneLightingKeyDirection(lighting),
+      lights: lighting.lights,
+      // The sky's light alone: the play space's light probes don't reach out there.
+      environment: { ...environment, lightProbes: void 0, map: light, average: computeEnvironmentAverage(light) },
+      tonemap: sceneLightingTonemap(lighting),
+      // Fog boxes sit in the play space, not out where the vistas are.
+      fog: lighting.fog ? { ...lighting.fog, volumes: [] } : null,
+      shadow
+    }, void 0, air);
+  }
   const clouds = (sky.cloudLayers ?? []).map(bakeCloudLayer);
   const reflections = panoramaWithClouds(downsamplePanorama(map, SKY_IBL_DOWNSAMPLE), clouds, 0);
   return { map, reflections, clouds };

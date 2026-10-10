@@ -29,7 +29,9 @@ import {
   readStreaming,
   type SceneStreaming,
   type StreamGroup,
+  TERRAIN_CHUNK,
   terrainChunks,
+  terrainMesh,
   terrainHeight,
   type NavMesh,
   type Terrain,
@@ -150,6 +152,13 @@ export interface SceneBounds {
 }
 
 /** The parsed runtime scene: every placed mesh, their shared world bounds, and the lighting rig. */
+/** One distant vista: its geometry, placed, and how hazy it reads. */
+export interface SceneVista {
+  readonly id: string;
+  readonly haze: number;
+  readonly parts: readonly { readonly mesh: MeshAsset; readonly model: Mat4 }[];
+}
+
 export interface MeshScene {
   readonly instances: readonly MeshInstance[];
   /** Prefabs code can spawn copies of (their copies are hidden instances at the end). */
@@ -171,8 +180,14 @@ export interface MeshScene {
   readonly levels?: readonly SceneLevel[];
   /** The baked walkable surface characters find paths over (see navmesh.ts in @cartbox/editor). */
   readonly navmesh?: NavMesh;
-  /** Heightfield landscapes, as authored (their geometry is among the instances). */
+  /** Heightfield landscapes, as authored (their geometry is among the instances). Vistas aren't. */
   readonly terrains?: readonly Terrain[];
+  /**
+   * Distant vistas (HALO_INFINITE_STYLE_ROADMAP.md I7): far terrains, and the
+   * foliage set on them, drawn once into the sky panorama when the scene loads
+   * (see vista.ts in @cartbox/editor) rather than among the instances.
+   */
+  readonly vistas?: readonly SceneVista[];
   /** Bounds of everything drawn, terrain included — how far the camera must see. */
   readonly extent?: SceneBounds;
   /** Spatial loading: objects load by distance from the streaming focus (absent = all loaded). */
@@ -410,12 +425,28 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
 
   // Terrain: built into geometry here, after the objects — in blocks, each with
   // coarser versions (as frames) for distance.
-  const terrains = readTerrains((parsed as { terrains?: unknown }).terrains);
+  // Vistas (I7) are drawn into the sky instead: whole, at full detail, once.
+  const allTerrains = readTerrains((parsed as { terrains?: unknown }).terrains);
+  const terrains = allTerrains.filter((t) => !t.vista);
   const identity = composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]);
-  for (const t of terrains) {
+  const vistas = new Map<string, { id: string; haze: number; parts: { mesh: MeshAsset; model: Mat4 }[] }>();
+  for (const t of allTerrains) {
     // Riding on a parent: the heights are in its space (a missing parent leaves it a root).
     const parent = t.parent !== undefined ? (indexOf.get(t.parent) ?? -1) : -1;
     const model = parent >= 0 ? instances[parent]!.model : identity;
+    if (t.vista) {
+      // In blocks, so each face of the bake draws only the blocks it sees.
+      const parts: { mesh: MeshAsset; model: Mat4 }[] = [];
+      const cells = t.samples - 1;
+      for (let z0 = 0; z0 < cells; z0 += TERRAIN_CHUNK) {
+        for (let x0 = 0; x0 < cells; x0 += TERRAIN_CHUNK) {
+          const mesh = terrainMesh(t, 1, [x0, z0, Math.min(cells, x0 + TERRAIN_CHUNK), Math.min(cells, z0 + TERRAIN_CHUNK)]);
+          if (mesh.primitives.length > 0) parts.push({ mesh, model });
+        }
+      }
+      vistas.set(t.id, { id: t.id, haze: t.vista.haze, parts });
+      continue;
+    }
     for (const chunk of terrainChunks(t)) {
       instances.push({
         mesh: chunk.mesh,
@@ -440,14 +471,20 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
   const storedFoliage = (parsed as { foliage?: unknown }).foliage;
   if (Array.isArray(storedFoliage)) {
     for (const raw of storedFoliage) {
-      const read = readFoliage(raw, terrains);
+      const read = readFoliage(raw, allTerrains);
       if (!read) continue;
       const text = resolveMeshRef(read.mesh, library);
       const mesh = text ? load(text) : null;
-      const t = terrains.find((x) => x.id === read.layer.terrain);
+      const t = allTerrains.find((x) => x.id === read.layer.terrain);
       if (!mesh || !t) continue;
       const parent = t.parent !== undefined ? (indexOf.get(t.parent) ?? -1) : -1;
       const model = parent >= 0 ? instances[parent]!.model : identity;
+      const vista = vistas.get(t.id);
+      if (vista) {
+        // On a vista, the copies go into the sky with their ground (a forest edge).
+        for (const block of foliageBlocks(t, read.layer, mesh)) vista.parts.push({ mesh: block.mesh, model });
+        continue;
+      }
       foliageBlocks(t, read.layer, mesh).forEach((block, k) => {
         instances.push({
           mesh: block.mesh,
@@ -516,6 +553,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
     ...(terrains.length > 0 ? { terrains, extent: sceneBounds(instances.filter((instance) => !instance.pooled)) } : {}),
+    ...(vistas.size > 0 ? { vistas: [...vistas.values()] } : {}),
     ...(readStreaming((parsed as { streaming?: unknown }).streaming) ? { streaming: readStreaming((parsed as { streaming?: unknown }).streaming)! } : {}),
     ...(effects.length > 0 ? { effects } : {}),
     ...(decals.length > 0 ? { decals } : {}),
