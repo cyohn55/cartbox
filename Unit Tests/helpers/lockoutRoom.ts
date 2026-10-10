@@ -87,3 +87,30 @@ export async function lockoutRoom(probe: string, options: RoomOptions | number =
   if (lab) for (let i = 0; i < 30; i += 1) both(0, 0);
   return { host, guest, both, hostSession, guestSession };
 }
+
+/**
+ * Any number of Lockout engines in one room (L8), joining and leaving as the
+ * test says: `join(id)` brings a player in (the same id again rejoins),
+ * `leave(id)` takes one out, `step(buttons)` runs a tick for everyone (each
+ * player's buttons by id, 0 for the rest).
+ */
+export async function lockoutParty(probe: string, link: LinkConditions = { latencyMs: 30, jitterMs: 5, direct: true }) {
+  const tic = codeChunks(new TextEncoder().encode(`${CARTBOX_SDK_LUA}\n${actionsSdkLua(LOCKOUT_INPUT_ACTIONS, RAM_LAYOUTS.xbox360)}\n${LOCKOUT_CODE}\n${probe}`));
+  const hub = new SimulatedNetHub(link, 11);
+  const players = new Map<string, { session: NetSession; engine: RoomEngine }>();
+  const join = async (id: string) => {
+    const session = new NetSession(hub.transport(id), hub.now);
+    await session.connect(id);
+    players.set(id, { session, engine: await engine(tic, session) });
+    await new Promise((r) => setTimeout(r, 2));
+  };
+  const leave = (id: string) => {
+    players.get(id)?.session.close();
+    players.delete(id);
+  };
+  const step = (buttons: Record<string, number> = {}) => {
+    for (const [id, { engine }] of players) engine.step(buttons[id] ?? 0);
+    hub.advance(1000 / 60);
+  };
+  return { join, leave, step, probe: (id: string) => players.get(id)!.engine.probe(), session: (id: string) => players.get(id)!.session };
+}
