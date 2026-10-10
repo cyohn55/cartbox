@@ -18,7 +18,7 @@ import { lockoutRoom } from "./helpers/lockoutRoom";
 // at a remote soldier's eye, which only a replayed shot does (counted once,
 // however many soldiers stand on that spot) — into pmem 117 (shown, low half;
 // sent, high half).
-const SHOTS = `
+const SHOTS = `;(function()
 local _send, _sound = cartbox.netsend, cartbox.sound
 local sent, shown = 0, 0
 cartbox.netsend = function(a, b)
@@ -34,11 +34,12 @@ cartbox.sound = function(name, x, y, z, ...)
   return _sound(name, x, y, z, ...)
 end
 local _T = TIC
-function TIC() _T(); pmem(117, (shown & 0xffff) | ((sent & 0xffff) << 16)) end`;
+function TIC() _T(); pmem(117, (shown & 0xffff) | ((sent & 0xffff) << 16)) end
+end)()`;
 
 // Records each grenade's blast: the newest at pmem 117 (x and z, cm) and 118
 // (y, cm; the count in the high half).
-const BLASTS = `
+const BLASTS = `;(function()
 local _burst = cartbox.burst
 local n = 0
 cartbox.burst = function(name, x, y, z, ...)
@@ -48,10 +49,11 @@ cartbox.burst = function(name, x, y, z, ...)
     pmem(118, (math.floor(y*100+0.5) & 0xffff) | (n << 16))
   end
   return _burst(name, x, y, z, ...)
-end`;
+end
+end)()`;
 
 // Which weapon pads stand empty (pmem 117, a bit a pad).
-const PADS = `
+const PADS = `;(function()
 local _T = TIC
 function TIC()
   _T()
@@ -60,7 +62,8 @@ function TIC()
     for i = 1, math.min(31, #MRK // 3) do if (mtimer[i] or 0) > 0 then m = m | (1 << (i-1)) end end
     pmem(117, m)
   end
-end`;
+end
+end)()`;
 
 const s16 = (v: number) => ((v & 0xffff) >= 32768 ? (v & 0xffff) - 65536 : v & 0xffff) / 100;
 const runAndTurn = (f: number) => (f % 240 < 150 ? 0x01 : 0x08);

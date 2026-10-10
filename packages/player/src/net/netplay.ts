@@ -25,8 +25,11 @@
  *   3..34  8 slots × 4 words of remote player state (opaque to the relay)
  *   35..38 each slot's snapshot time on the shared clock, ms mod 65536, two
  *          slots a word (slot 2k in the low half)
- *   39     event count (≤ 14)
- *   40..67 14 events × 2 words
+ *   39     event count (≤ 12)
+ *   40..63 12 events × 2 words
+ *   64..65 the slot each event came from, 3 bits each (events 0-9 in 64,
+ *          10-11 in 65), so a cart can tell the host's word from a guest's
+ *          claim (L6); 66..67 spare
  * OUTBOX (cart → host)
  *   70     mask of slots the cart published this tick
  *   71     match word (only the host's is relayed)
@@ -57,7 +60,8 @@ export const NET_IN_SLOTS = 3;
 export const NET_IN_STAMPS = 35;
 export const NET_IN_EVENT_COUNT = 39;
 export const NET_IN_EVENTS = 40;
-export const NET_IN_EVENT_CAPACITY = 14;
+export const NET_IN_EVENT_CAPACITY = 12;
+export const NET_IN_SENDERS = 64;
 
 export const NET_OUT_MASK = 70;
 export const NET_OUT_MATCH = 71;
@@ -95,6 +99,8 @@ export interface NetInbox {
   /** When each slot's state was taken, on the shared clock (ms); absent counts as 0. */
   readonly stamps?: readonly number[];
   readonly events: readonly NetEvent[];
+  /** The slot each event came from (the same order as `events`); absent counts as 0. */
+  readonly senders?: readonly number[];
 }
 
 /** What the cart told the host page during a tick. */
@@ -135,9 +141,13 @@ export function writeNetInbox(words: Uint32Array, inbox: NetInbox): number {
   }
   const count = Math.min(inbox.events.length, NET_IN_EVENT_CAPACITY);
   words[NET_IN_EVENT_COUNT] = count;
+  words[NET_IN_SENDERS] = 0;
+  words[NET_IN_SENDERS + 1] = 0;
   for (let i = 0; i < count; i += 1) {
     words[NET_IN_EVENTS + i * 2] = inbox.events[i]![0] >>> 0;
     words[NET_IN_EVENTS + i * 2 + 1] = inbox.events[i]![1] >>> 0;
+    const word = NET_IN_SENDERS + (i < 10 ? 0 : 1);
+    words[word] = (words[word]! | (((inbox.senders?.[i] ?? 0) & 7) << ((i % 10) * 3))) >>> 0;
   }
   return count; // how many events were delivered (the rest wait for the next tick)
 }

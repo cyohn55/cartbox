@@ -263,11 +263,15 @@ cartbox = {
     _netflush()
     return true
   end,
-  -- netevents() -> this tick's incoming events, as a list of {a, b}
+  -- netevents() -> this tick's incoming events, as a list of {a, b, from}: from
+  -- is the slot that sent it (the host is slot 0), for telling its word apart
   netevents = function()
     local n = pmem(39)
     local out = {}
-    for i = 0, n - 1 do out[#out + 1] = { pmem(40 + i * 2), pmem(41 + i * 2) } end
+    for i = 0, n - 1 do
+      local from = (pmem(i < 10 and 64 or 65) >> ((i % 10) * 3)) & 7
+      out[#out + 1] = { pmem(40 + i * 2), pmem(41 + i * 2), from }
+    end
     return out
   end,
   -- Collision defaults: overridden by the injected layer when the cart has one,
