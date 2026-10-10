@@ -25,7 +25,9 @@ describe.skipIf(!existsSync(LOCKOUT_ENGINE))("Lockout's interpolation in the lab
     const r = await lab({ latencyMs: 80, jitterMs: 20, loss: 0.05, direct: true });
     const lerp = r.interpolation!;
     expect(r.messages.lost).toBeGreaterThan(0);
-    expect(lerp.humans.samples).toBeGreaterThan(1000);
+    // (the guest's view of the host's player: since L7 the host moves the
+    // guest's soldier itself, so its view of it is the truth, not a guess)
+    expect(lerp.humans.samples).toBeGreaterThan(550);
     expect(lerp.humans.mean).toBeLessThan(0.03);
     expect(lerp.humans.p95).toBeLessThan(0.05);
     expect(lerp.snaps).toBe(0);
@@ -44,7 +46,9 @@ describe.skipIf(!existsSync(LOCKOUT_ENGINE))("Lockout's interpolation in the lab
     expect(full.interpolation!.humans.samples).toBeGreaterThan(10_000);
     expect(full.interpolation!.humans.p95).toBeLessThan(0.1);
     expect(full.interpolation!.snaps).toBe(0);
-    for (const b of full.bytesPerSecond) expect(b.sent).toBeLessThan(2_000);
+    // Guests send their inputs; the host sends every soldier (L7).
+    for (const b of full.bytesPerSecond.slice(1)) expect(b.sent).toBeLessThan(2_000);
+    expect(full.bytesPerSecond[0]!.sent).toBeLessThan(6_000);
     console.log(
       `L4, 150 ms ±30 with 5% loss: error p95 ${far.interpolation!.humans.p95} m; 8 players at 80 ms: error p95 ${full.interpolation!.humans.p95} m, ` +
         `host sends ${full.bytesPerSecond[0]!.sent} B/s`,
@@ -124,8 +128,9 @@ describe.skipIf(!existsSync(LOCKOUT_ENGINE))("what a remote Spartan is doing (tw
       guestSide.push(guest.probe());
       hostSide.push(host.probe());
     }
-    // The host's copy runs the guest's own record a fixed delay behind (its
-    // view lag and the 100 ms buffer); find that delay, then compare.
+    // The host's copy runs the guest's own record a fixed delay behind — since
+    // L7 the host moves it by the guest's inputs as they arrive, so the delay
+    // is their trip and the host's queue — find that delay, then compare.
     const air = (w: number) => (w >> 8) & 1;
     const firing = (w: number) => (w >> 9) & 1;
     const lagFor = (k: number) => {
@@ -133,10 +138,10 @@ describe.skipIf(!existsSync(LOCKOUT_ENGINE))("what a remote Spartan is doing (tw
       for (let f = 200; f < guestSide.length; f += 1) miss += Math.abs(s8(hostSide[f]!) - s8(guestSide[f - k]!)) + Math.abs(air(hostSide[f]!) - air(guestSide[f - k]!));
       return miss;
     };
-    const ks = Array.from({ length: 12 }, (_, i) => i + 2);
+    const ks = Array.from({ length: 12 }, (_, i) => i + 1);
     const k = ks.reduce((best, c) => (lagFor(c) < lagFor(best) ? c : best), ks[0]!);
-    expect(k).toBeGreaterThanOrEqual(6); // 100 ms or more behind
-    expect(k).toBeLessThanOrEqual(10);
+    expect(k).toBeGreaterThanOrEqual(1);
+    expect(k).toBeLessThanOrEqual(6); // a tenth of a second at most
     let pitchErr = 0;
     let n = 0;
     for (let f = 200; f < guestSide.length; f += 1) {

@@ -58,7 +58,7 @@ describe("Lockout as an arena map", () => {
     expect(LOCKOUT_CODE).not.toContain("{0,3.65,0}");
     expect(LOCKOUT_CODE).not.toContain("p.y < -6");
     expect(LOCKOUT_CODE).not.toContain("x=0,y=1.1,z=0");
-    expect(LOCKOUT_CODE).toContain("p.y < DEATH_Y");
+    expect(LOCKOUT_CODE).toContain("e.y < DEATH_Y"); // any soldier falling off (L7: the host moves them all)
   });
 });
 

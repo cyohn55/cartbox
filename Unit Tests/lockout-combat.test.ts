@@ -97,13 +97,23 @@ describe.skipIf(!existsSync(LOCKOUT_ENGINE))("Lockout's fight, seen by everyone 
   }, 300_000);
 
   it("lands a guest's grenades where they land on the host, to the centimetre", async () => {
-    const { host, guest, both } = await room(BLASTS);
+    // (the host's bots out of it, so nothing kills the guest between throws)
+    const quiet = `;(function()
+local _T = TIC
+function TIC()
+  _T()
+  if phase == "play" and NETMODE == 2 then
+    for _,o in ipairs(bots) do if not o.human then o.dead, o.respawn, o.x, o.y, o.z = true, 1e9, 0, -60, 0 end end
+  end
+end
+end)()`;
+    const { host, guest, both } = await room(`${BLASTS}\n${quiet}`);
     const blasts = { host: [] as [number, number, number][], guest: [] as [number, number, number][] };
     const seen = { host: 0, guest: 0 };
     for (let f = 0; f < 900; f += 1) {
       // Two throws (a double tap of A), at 1.7 s and 6.7 s.
       const tap = f === 100 || f === 102 || f === 400 || f === 402 ? 0x40 : 0;
-      both(0, (f < 100 ? runAndTurn(f) : 0) | tap);
+      both(0, tap); // from where it spawned, which faces into the arena
       for (const [side, engine] of [["host", host], ["guest", guest]] as const) {
         const [a, b] = engine.probe();
         if (b >>> 16 !== seen[side]) {

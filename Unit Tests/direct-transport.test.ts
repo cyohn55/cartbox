@@ -316,10 +316,12 @@ describe.skipIf(!existsSync(LOCKOUT_ENGINE))("Lockout in the lab over direct lin
     expect(direct.bytesPerSecond[0]!.sent).toBeLessThan(relay.bytesPerSecond[0]!.sent * 2.1);
     expect(direct.bytesPerSecond[0]!.sent).toBeLessThan(5_000);
     const full = await lab(true, 8, 300);
-    for (const b of full.bytesPerSecond) {
+    // Guests send their inputs (60 a second); the host sends every soldier (L7).
+    for (const b of full.bytesPerSecond.slice(1)) {
       expect(b.sent).toBeLessThan(2_000);
       expect(b.received).toBeLessThan(10_000);
     }
+    expect(full.bytesPerSecond[0]!.sent).toBeLessThan(6_000);
     console.log(
       `direct links, 80 ms: interpolation error mean ${direct.interpolation!.humans.mean} m (relay ${relay.interpolation!.humans.mean} m), p95 ${direct.interpolation!.humans.p95} m (relay ${relay.interpolation!.humans.p95} m); ` +
         `host sends ${direct.bytesPerSecond[0]!.sent} B/s (relay ${relay.bytesPerSecond[0]!.sent} B/s); ` +
