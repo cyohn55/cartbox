@@ -710,8 +710,10 @@ const NAV_POWER: readonly number[] = [42, 41, 49, 48, 24, 51];
 // --- Mesh assembly --------------------------------------------------------
 
 /** One full texture tile (its four panels) spans about `TILE_WORLD` units on any
- *  face, so panels read at a consistent size across the map. */
-const TILE_WORLD = 7;
+ *  face, so panels read at a consistent size across the map. 4.4 since the
+ *  kit rebuild (I16): a tile across two kit panels, so the textures land at
+ *  about 1.6× the texels per metre they had at 7 (with no larger textures). */
+const TILE_WORLD = 4.4;
 const UV = 1 / TILE_WORLD;
 
 type V3 = readonly [number, number, number];
@@ -736,12 +738,136 @@ function prism(s: Streams, [cx, , cz, hx, , hz]: Box, y0: number, y1: number, ch
   pushLoft(s, chamferedRect(cx, cz, hx, hz, chamfer, y0), chamferedRect(cx, cz, hx, hz, chamfer, y1), UV, caps);
 }
 
+// --- The kit on the arena (HALO_INFINITE_STYLE_ROADMAP.md I16) ---------------
+// The tiers' walls are built from the Forerunner kit's wall module: each long
+// side is a grid of panels, and each panel is the kit wall's recipe applied
+// with the editor's face edits (meshEdit.ts) — an inset that leaves a frame
+// between panels, then a bevel that sinks the plate behind a chamfered rim.
+// Every cut goes inward, so the walls never stand past their colliders. Some
+// panels carry the lit wall's light channel: a glowing strip set into the
+// recess.
+
+/** A panel's target size; a side is divided into whole panels near it. */
+const KIT_PANEL_W = 2.2;
+const KIT_PANEL_H = 1.6;
+/** The frame between panels, and the sunken plate's rim width and depth. */
+const KIT_FRAME = 0.06;
+const KIT_RIM = 0.1;
+const KIT_SINK = 0.05;
+
+/** Light channels set into the panels, gathered as the walls are built (energy material, with the trim). */
+const LIGHT_CHANNELS: Box[] = [];
+
+/** One kit panel on a wall: the quad a→b→c→d (counter-clockwise from outside), framed and sunk. */
+function kitPanel(s: Streams, quad: readonly V3[], normal: V3, channel: boolean): void {
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const ax = Math.abs(normal[0]), ay = Math.abs(normal[1]), az = Math.abs(normal[2]);
+  for (const p of quad) {
+    positions.push(p[0], p[1], p[2]);
+    // The arena's world-projected tiling (as pushFace), so the wall texture runs on across panels.
+    if (ay >= ax && ay >= az) uvs.push(p[0] * UV, p[2] * UV);
+    else if (ax >= az) uvs.push(p[2] * UV, p[1] * UV);
+    else uvs.push(p[0] * UV, p[1] * UV);
+  }
+  let panel: MeshPrimitive = {
+    positions: Float32Array.from(positions),
+    normals: Float32Array.from([...normal, ...normal, ...normal, ...normal]),
+    uvs: Float32Array.from(uvs),
+    indices: Uint32Array.from([0, 1, 2, 0, 2, 3]),
+    material: { name: "panel", baseColorFactor: [1, 1, 1, 1], baseColorImage: null },
+  };
+  panel = editFace(panel, [0, 1], { kind: "inset", amount: KIT_FRAME });
+  panel = editFace(panel, faceAt(panel, 0).triangles, { kind: "bevel", width: KIT_RIM, depth: -KIT_SINK });
+  const base = s.positions.length / 3;
+  s.positions.push(...panel.positions);
+  s.normals.push(...panel.normals!);
+  s.uvs.push(...panel.uvs!);
+  for (const i of panel.indices) s.indices.push(base + i);
+  if (channel) {
+    // A strip along the sunken plate's middle, just proud of it (still well inside the wall).
+    const mid: V3 = [(quad[0]![0] + quad[2]![0]) / 2, (quad[0]![1] + quad[2]![1]) / 2, (quad[0]![2] + quad[2]![2]) / 2];
+    const along = Math.hypot(quad[1]![0] - quad[0]![0], quad[1]![2] - quad[0]![2]);
+    const half = Math.max(0.2, along / 2 - KIT_FRAME - KIT_RIM - 0.25);
+    const inset = KIT_SINK - 0.015;
+    const cx = mid[0] - normal[0] * inset, cz = mid[2] - normal[2] * inset;
+    LIGHT_CHANNELS.push(ax > az ? [cx, mid[1], cz, 0.015, 0.05, half] : [cx, mid[1], cz, half, 0.05, 0.015]);
+  }
+}
+
+/** One flat wall quad, wound and lit facing away from `inside`, world-mapped like the rest. */
+function plainQuad(s: Streams, quad: readonly V3[], inside: V3): void {
+  const e1: V3 = [quad[1]![0] - quad[0]![0], quad[1]![1] - quad[0]![1], quad[1]![2] - quad[0]![2]];
+  const e2: V3 = [quad[3]![0] - quad[0]![0], quad[3]![1] - quad[0]![1], quad[3]![2] - quad[0]![2]];
+  let n: V3 = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+  const l = Math.hypot(n[0], n[1], n[2]);
+  if (l < 1e-9) return;
+  n = [n[0] / l, n[1] / l, n[2] / l];
+  const mid = quad.reduce<V3>((m, p) => [m[0] + p[0] / 4, m[1] + p[1] / 4, m[2] + p[2] / 4], [0, 0, 0]);
+  let pts = quad;
+  if (n[0] * (mid[0] - inside[0]) + n[1] * (mid[1] - inside[1]) + n[2] * (mid[2] - inside[2]) < 0) {
+    pts = [quad[1]!, quad[0]!, quad[3]!, quad[2]!];
+    n = [-n[0], -n[1], -n[2]];
+  }
+  const ax = Math.abs(n[0]), ay = Math.abs(n[1]), az = Math.abs(n[2]);
+  const base = s.positions.length / 3;
+  for (const p of pts) {
+    s.positions.push(p[0], p[1], p[2]);
+    s.normals.push(n[0], n[1], n[2]);
+    if (ay >= ax && ay >= az) s.uvs.push(p[0] * UV, p[2] * UV);
+    else if (ax >= az) s.uvs.push(p[2] * UV, p[1] * UV);
+    else s.uvs.push(p[0] * UV, p[1] * UV);
+  }
+  s.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+}
+
+/**
+ * A tier's wall built from kit panels: the chamfered prism over `box` from y0 to
+ * y1, its long sides divided into panels, its chamfers left plain. `lit` puts a
+ * light channel in every other panel of the top row.
+ */
+function panelledPrism(s: Streams, box: Box, y0: number, y1: number, chamfer: number, lit: boolean): void {
+  const [cx, , cz, hx, , hz] = box;
+  const lo = chamferedRect(cx, cz, hx, hz, chamfer, y0);
+  const hi = chamferedRect(cx, cz, hx, hz, chamfer, y1);
+  const h = y1 - y0;
+  for (let i = 0; i < lo.length; i += 1) {
+    const j = (i + 1) % lo.length;
+    const a = lo[i]!, b = lo[j]!;
+    const len = Math.hypot(b[0] - a[0], b[2] - a[2]);
+    const straight = Math.abs(b[0] - a[0]) < 1e-6 || Math.abs(b[2] - a[2]) < 1e-6;
+    if (!straight || len < 1.2 || h < 0.9) {
+      plainQuad(s, [a, b, hi[j]!, hi[i]!], [cx, (y0 + y1) / 2, cz]);
+      continue;
+    }
+    // Outward: away from the box's centre.
+    let normal: V3 = Math.abs(b[0] - a[0]) < 1e-6 ? [Math.sign(a[0] - cx), 0, 0] : [0, 0, Math.sign(a[2] - cz)];
+    if (normal[0] === 0 && normal[2] === 0) normal = [0, 0, 1];
+    const cols = Math.max(1, Math.round(len / KIT_PANEL_W));
+    const rows = Math.max(1, Math.round(h / KIT_PANEL_H));
+    for (let r = 0; r < rows; r += 1) {
+      for (let c = 0; c < cols; c += 1) {
+        const at = (u: number, v: number): V3 => [a[0] + (b[0] - a[0]) * u, y0 + h * v, a[2] + (b[2] - a[2]) * u];
+        const u0 = c / cols, u1 = (c + 1) / cols, v0 = r / rows, v1 = (r + 1) / rows;
+        let quad = [at(u0, v0), at(u1, v0), at(u1, v1), at(u0, v1)];
+        // Wind it counter-clockwise seen from outside.
+        const e1: V3 = [quad[1]![0] - quad[0]![0], quad[1]![1] - quad[0]![1], quad[1]![2] - quad[0]![2]];
+        const e2: V3 = [quad[3]![0] - quad[0]![0], quad[3]![1] - quad[0]![1], quad[3]![2] - quad[0]![2]];
+        const n: V3 = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+        if (n[0] * normal[0] + n[2] * normal[2] < 0) quad = [quad[1]!, quad[0]!, quad[3]!, quad[2]!];
+        kitPanel(s, quad, normal, lit && r === rows - 1 && c % 2 === 0);
+      }
+    }
+  }
+}
+
 /**
  * A Forerunner tier: chamfered walls, a battered foot flaring out at the base
  * (it stays inside the player's collision radius, so feet never clip it), and an
- * overhanging cornice whose top face is the walkable roof.
+ * overhanging cornice whose top face is the walkable roof. The walls are kit
+ * panels (I16); `lit` sets light channels into some of them.
  */
-function tier(s: Streams, box: Box, opts: { batter?: number; cornice?: number; chamfer?: number } = {}): void {
+function tier(s: Streams, box: Box, opts: { batter?: number; cornice?: number; chamfer?: number; lit?: boolean } = {}): void {
   const [cx, cy, cz, hx, hy, hz] = box;
   const c = opts.chamfer ?? 0.55;
   const bottom = cy - hy;
@@ -753,7 +879,7 @@ function tier(s: Streams, box: Box, opts: { batter?: number; cornice?: number; c
     pushLoft(s, chamferedRect(cx, cz, hx + batter, hz + batter, c + batter * 0.6, bottom), chamferedRect(cx, cz, hx, hz, c, bottom + footH), UV, { top: false, bottom: false });
   }
   const corniceH = 0.32;
-  prism(s, box, bottom + footH, top - corniceH, c);
+  panelledPrism(s, box, bottom + footH, top - corniceH, c, opts.lit ?? false);
   // The cornice flares out to its lip, then its cap is the roof.
   pushLoft(s, chamferedRect(cx, cz, hx, hz, c, top - corniceH), chamferedRect(cx, cz, hx + lip, hz + lip, c + lip * 0.4, top), UV, { top: true, bottom: false });
 }
@@ -836,15 +962,15 @@ function structureStreams(): { wall: Streams; floor: Streams } {
 
   // Sniper tower: three battered, corniced tiers and a crown of blades.
   tier(s, T1, { batter: 0.35, cornice: 0.22 });
-  tier(s, T2, { cornice: 0.2 });
-  tier(s, T3, { cornice: 0.25 });
+  tier(s, T2, { cornice: 0.2, lit: true });
+  tier(s, T3, { cornice: 0.25, lit: true });
   fin(s, -12.7, -10.7, -1, -1, 4.5, 11.4, 2.2, 1.0);
   fin(s, -4.9, -10.7, 0.3, -1, 7.0, 10.4, 1.8, 0.8);
   fin(s, -12.7, -6.5, -1, 0.3, 4.5, 10.0, 1.8, 0.8);
 
   // BR structure: two tiers under a slanted canopy on raked struts.
   tier(s, B1, { batter: 0.35, cornice: 0.22 });
-  tier(s, B2, { cornice: 0.2 });
+  tier(s, B2, { cornice: 0.2, lit: true });
   const [bx, , bz, bhx, , bhz] = B2;
   // Struts on the east edge, clear of the ramp arriving on the west.
   column(s, bx + bhx - 0.3, bz + bhz - 0.3, 4.0, 0.2, bx + bhx - 0.1, bz + bhz - 0.1, 6.3, 0.14);
@@ -1019,7 +1145,8 @@ function mapGeometry(): MapGeometry {
     floor: structure.floor,
     under: undersideStreams(),
     snow: snowStreams(),
-    trim: boxesPrimitive([...TRIM, ...MARKERS], { name: "energy", baseColorFactor: [1, 1, 1, 1], baseColorImage: null }, 1),
+    // The energy trim, the pads, and the light channels set into the kit panels (I16).
+    trim: boxesPrimitive([...TRIM, ...MARKERS, ...LIGHT_CHANNELS], { name: "energy", baseColorFactor: [1, 1, 1, 1], baseColorImage: null }, 1),
   };
 }
 const MAP_GEOMETRY = mapGeometry();
@@ -1274,6 +1401,11 @@ function litMapMesh(): MeshAsset {
   const layout = lockoutMapLayout();
   if (LOCKOUT_LIGHTMAP.fingerprint !== layoutFingerprint(layout)) return mapMesh();
   return applyLightmapImage(layout.mesh, { mime: "image/png", bytes: base64ToBytes(LOCKOUT_LIGHTMAP.png) });
+}
+
+/** A mesh stored without normals, for one whose faces own their corners (renderers rebuild the same flat normals). */
+function withoutNormals(mesh: MeshAsset): MeshAsset {
+  return { ...mesh, primitives: mesh.primitives.map((p) => ({ ...p, normals: null })) };
 }
 
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] as const;
@@ -3252,7 +3384,9 @@ export function lockoutMeshSidecar(): string {
     const soldierChain = generateLods(soldierAsset);
     const soldierLods = soldierChain ? { lods: encodeLods(storedSoldier, soldierChain) } : {};
     const meshes: { id: string; name: string; mesh: string; variant?: string; lods?: StoredLods; animator?: unknown; transform: unknown; components?: unknown }[] = [
-      { id: "lockout-map", name: "Lockout arena", mesh: serializeMeshAsset(litMapMesh()), transform: identity },
+      // Stored without normals: every face of the arena owns its corners, so every renderer
+      // rebuilds the same flat normals from the triangles (as for the soldier, I11; I16's panels made it worth it).
+      { id: "lockout-map", name: "Lockout arena", mesh: serializeMeshAsset(withoutNormals(litMapMesh())), transform: identity },
     ];
     // Instances 1..7: the bots.
     for (let i = 1; i <= BOT_COUNT; i += 1) {
