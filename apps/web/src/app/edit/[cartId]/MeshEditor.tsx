@@ -943,7 +943,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
 
             <RailGroup label="Export">
               <div className={styles.toolGroup}>
-                <button type="button" className={styles.toolBtn} onClick={exportGlb} title="Download as glTF binary (keeps textures)">
+                <button type="button" className={styles.toolBtn} onClick={exportGlb} title="Download as glTF binary (keeps the rig, clips and textures)">
                   <span className={styles.toolGlyph} aria-hidden>
                     ⬇
                   </span>
@@ -956,7 +956,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
                   Export .obj
                 </button>
               </div>
-              <RailHint>GLB keeps every PBR map and the material sets (not the skeleton); OBJ keeps geometry and flat colour.</RailHint>
+              <RailHint>GLB keeps the skeleton, its weights and clips, every PBR map and the material sets, for a round trip through Blender; OBJ keeps geometry and flat colour.</RailHint>
             </RailGroup>
 
             <RailGroup label="Remove">
