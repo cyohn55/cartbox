@@ -3,7 +3,9 @@
  * the cart, relayed through NetSessions over an in-memory room exactly as two
  * browsers would be over the network. The guest must join the host's match,
  * mirror the host's bots, appear in the host's arena, and agree with the host
- * on every kill, score and objective.
+ * on every kill, score and objective. The room runs on a virtual clock, a
+ * sixtieth of a second a tick, so the guest's drawing of the host's bots a
+ * little in the past (L4) is measured against where the host had them then.
  */
 
 import { existsSync } from "node:fs";
@@ -73,16 +75,19 @@ async function engine(tic: Uint8Array, session: NetSession): Promise<Engine> {
 async function room(downs: number) {
   const hub = new MemoryNetHub();
   const tic = cart();
-  const hostSession = new NetSession(hub.transport("host"));
+  let clock = 0;
+  const now = () => clock;
+  const hostSession = new NetSession(hub.transport("host"), now);
   await hostSession.connect("Host");
   await new Promise((r) => setTimeout(r, 3));
-  const guestSession = new NetSession(hub.transport("guest"));
+  const guestSession = new NetSession(hub.transport("guest"), now);
   await guestSession.connect("Guest");
   const host = await engine(tic, hostSession);
   const guest = await engine(tic, guestSession);
   const both = (hb: number, gb: number) => {
     host.step(hb);
     guest.step(gb);
+    clock += 1000 / 60;
   };
   for (let i = 0; i < 4; i += 1) both(0, 0);
   // The host picks a game type from its menu (down `downs` times, then fire).
@@ -93,39 +98,44 @@ async function room(downs: number) {
   both(0x10, 0);
   both(0x10, 0);
   both(0, 0);
-  return { host, guest, both };
+  return { host, guest, both, guestSession };
 }
 
 const hidden = (y: number) => y < -10;
 
 describe.skipIf(!existsSync(ENGINE))("Lockout over netplay (two engines, one room)", () => {
   it("the guest joins the host's match and both agree on the fight", async () => {
-    const { host, guest, both } = await room(0); // Free for All
+    const { host, guest, both, guestSession } = await room(0); // Free for All
     let guestSawBots = 0;
     let hostSawGuest = 0;
     let err = 0;
     let n = 0;
+    const hostBot: ([number, number, number] | null)[] = [];
     for (let f = 0; f < 1500; f += 1) {
       both(0, f % 240 < 150 ? 0x01 : 0x08); // the guest runs and turns
       const hp = host.poses();
       const gp = guest.poses();
+      const hb = hp.find((q) => q.index === 2);
+      hostBot.push(hb && !hidden(hb.position[1]) ? hb.position : null);
       if (gp.some((q) => q.index >= 1 && q.index <= 7 && !hidden(q.position[1]))) guestSawBots += 1;
       // Slot 1 is the guest: on the host it's instance 1.
       const g = hp.find((q) => q.index === 1);
       if (g && !hidden(g.position[1])) hostSawGuest += 1;
       // Slot 2 is a host bot: instance 2 on both (the host's own slot 0 is the
-      // guest's instance 1, so slots >= 2 line up).
-      const a = hp.find((q) => q.index === 2);
+      // guest's instance 1, so slots >= 2 line up). The guest draws it its view
+      // lag and 100 ms in the past: compare with where the host had it then.
+      const back = Math.round((guestSession.viewLagMs() + 100) / (1000 / 60));
+      const a = hostBot[f - back];
       const b = gp.find((q) => q.index === 2);
-      if (a && b && !hidden(a.position[1]) && !hidden(b.position[1])) {
-        err += Math.hypot(a.position[0] - b.position[0], a.position[2] - b.position[2]);
+      if (a && b && !hidden(b.position[1])) {
+        err += Math.hypot(a[0] - b.position[0], a[2] - b.position[2]);
         n += 1;
       }
     }
     expect(guestSawBots).toBeGreaterThan(1400);
     expect(hostSawGuest).toBeGreaterThan(300);
     expect(n).toBeGreaterThan(500);
-    expect(err / n).toBeLessThan(0.3); // the guest's copy of a host bot tracks it closely
+    expect(err / n).toBeLessThan(0.1); // the guest's copy of a host bot follows its path closely
     // Bots fight each other now: kills happen, and both browsers counted the same ones.
     const kills = host.net()[118]! & 0xffff;
     expect(kills).toBeGreaterThan(3);

@@ -704,20 +704,26 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
       },
       {
         name: "cartbox.netpeer",
-        signature: "cartbox.netpeer(slot) -> a, b, c, live",
-        doc: "Another slot's 3 state words as its owner last published them, and whether they are fresh.",
-        snippet: "local a, b, c, live = cartbox.netpeer(1)",
+        signature: "cartbox.netpeer(slot) -> a, b, c, d, live, stamp",
+        doc: "Another slot's 4 state words as its owner last published them, whether they are fresh, and when they were taken on the room's shared clock (ms) — to draw it a little in the past, between snapshots.",
+        snippet: "local a, b, c, d, live, stamp = cartbox.netpeer(1)",
+      },
+      {
+        name: "cartbox.netclock",
+        signature: "cartbox.netclock() -> ms, lag",
+        doc: "The room's shared clock in milliseconds (the host's clock, which every player keeps theirs on by ping; snapshot stamps are on it), and the view lag: how old the others' snapshots are when they arrive. Draw them at clock - lag - a buffer, between real snapshots.",
+        snippet: "local now, lag = cartbox.netclock()\nlocal render_at = now - lag - 100",
       },
       {
         name: "cartbox.netpublish",
-        signature: "cartbox.netpublish(slot, a, b, c)",
-        doc: "Publish a slot's state this tick: your own, or (as host) the bots you simulate. Sent ~15 times a second.",
-        snippet: "cartbox.netpublish(slot, x, y, hp)",
+        signature: "cartbox.netpublish(slot, a, b, c, d)",
+        doc: "Publish a slot's state this tick: your own, or (as host) the bots you simulate. Sent 30 times a second over direct links (7.5–15 over the relay), stamped with the shared clock.",
+        snippet: "cartbox.netpublish(slot, x, y, hp, 0)",
       },
       {
         name: "cartbox.netsend",
         signature: "cartbox.netsend(a, b) -> ok",
-        doc: "Broadcast a 2-word event (a hit, a kill) to every other player at once; up to 10 a tick.",
+        doc: "Broadcast a 2-word event (a hit, a kill) to every other player. Six leave a tick; the rest queue (up to 64) for the next.",
         snippet: "cartbox.netsend(1, 0)",
       },
       {
