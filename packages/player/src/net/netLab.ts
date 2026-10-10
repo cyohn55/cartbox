@@ -9,8 +9,9 @@
  * clock only moves when the harness advances it.
  */
 
+import { encodeNetMessage } from "./netCodec.js";
 import { NET_WORDS, takeNetOutbox, type NetState } from "./netplay.js";
-import { NetSession, type NetMessage, type NetPeer, type NetTransport } from "./NetSession.js";
+import { NetSession, netSendInterval, type NetMessage, type NetPeer, type NetTransport } from "./NetSession.js";
 
 /** How a link behaves. */
 export interface LinkConditions {
@@ -22,6 +23,8 @@ export interface LinkConditions {
   readonly loss?: number;
   /** The sender's uplink, bytes per second; a message waits for the ones before it to leave. Unlimited when absent. */
   readonly bandwidth?: number;
+  /** Peers connect directly (L3: WebRTC data channels): sessions send at 30 Hz instead of the relay's rate. */
+  readonly direct?: boolean;
 }
 
 /** A small seeded PRNG (mulberry32): the lab's only source of chance. */
@@ -70,7 +73,7 @@ export class SimulatedNetHub {
 
   /** A transport for peer `id`; its uplink has the hub's conditions unless `link` overrides them. */
   transport(id: string, link: LinkConditions = this.conditions): NetTransport {
-    const transport = new SimulatedTransport(id, this);
+    const transport = new SimulatedTransport(id, this, link.direct === true);
     this.members.set(id, { peer: null, transport, link, busyUntil: 0 });
     return transport;
   }
@@ -111,8 +114,9 @@ export class SimulatedNetHub {
     const wire = JSON.stringify(message);
     this.counts.sent += 1;
     const { link } = sender;
-    // The uplink: one copy leaves after whatever is still queued ahead of it.
-    const leaves = link.bandwidth ? Math.max(this.clock, sender.busyUntil) + (wire.length / link.bandwidth) * 1000 : this.clock;
+    // The uplink: one copy leaves after whatever is still queued ahead of it (its size as it travels: packed binary).
+    const bytes = encodeNetMessage(message).length;
+    const leaves = link.bandwidth ? Math.max(this.clock, sender.busyUntil) + (bytes / link.bandwidth) * 1000 : this.clock;
     sender.busyUntil = leaves;
     for (const [id, member] of this.members) {
       if (id === from || !member.peer) continue;
@@ -138,6 +142,7 @@ class SimulatedTransport implements NetTransport {
   constructor(
     readonly selfId: string,
     private readonly hub: SimulatedNetHub,
+    private readonly direct: boolean,
   ) {}
 
   async connect(joinedAt: number, name?: string): Promise<void> {
@@ -145,6 +150,9 @@ class SimulatedTransport implements NetTransport {
   }
   send(message: NetMessage): void {
     this.hub.send(this.selfId, message);
+  }
+  sendInterval(players: number): number {
+    return this.direct ? 2 : netSendInterval(players);
   }
   onMessage(handler: (message: NetMessage, from: string) => void): void {
     this.messageHandler = handler;

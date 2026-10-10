@@ -18867,6 +18867,80 @@ function parseParticles(raw) {
   return emitters.length > 0 ? { emitters } : null;
 }
 
+// src/net/netCodec.ts
+var STATES = 1;
+var EVENTS = 2;
+var MATCH = 4;
+function encodeNetMessage(message) {
+  const states = message.s ?? [];
+  const events = message.e ?? [];
+  const hasMatch = message.m !== void 0;
+  const size = 1 + (states.length ? 1 + states.length * 13 : 0) + (events.length ? 2 + events.length * 8 : 0) + (hasMatch ? 4 : 0);
+  const bytes = new Uint8Array(size);
+  const view = new DataView(bytes.buffer);
+  let at = 0;
+  bytes[at++] = (states.length ? STATES : 0) | (events.length ? EVENTS : 0) | (hasMatch ? MATCH : 0);
+  if (states.length) {
+    if (states.length > 255) throw new Error("too many slot states in one message");
+    bytes[at++] = states.length;
+    for (const [slot, a, b, c] of states) {
+      bytes[at++] = slot & 255;
+      view.setUint32(at, a >>> 0, true);
+      view.setUint32(at + 4, b >>> 0, true);
+      view.setUint32(at + 8, c >>> 0, true);
+      at += 12;
+    }
+  }
+  if (events.length) {
+    if (events.length > 65535) throw new Error("too many events in one message");
+    view.setUint16(at, events.length, true);
+    at += 2;
+    for (const [a, b] of events) {
+      view.setUint32(at, a >>> 0, true);
+      view.setUint32(at + 4, b >>> 0, true);
+      at += 8;
+    }
+  }
+  if (hasMatch) view.setUint32(at, message.m >>> 0, true);
+  return bytes;
+}
+function decodeNetMessage(bytes) {
+  if (bytes.length < 1) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const flags = bytes[0];
+  if (flags & ~(STATES | EVENTS | MATCH)) return null;
+  let at = 1;
+  const need = (n) => at + n <= bytes.length;
+  const message = {};
+  if (flags & STATES) {
+    if (!need(1)) return null;
+    const count = bytes[at++];
+    if (!need(count * 13)) return null;
+    message.s = [];
+    for (let i = 0; i < count; i += 1) {
+      message.s.push([bytes[at], view.getUint32(at + 1, true), view.getUint32(at + 5, true), view.getUint32(at + 9, true)]);
+      at += 13;
+    }
+  }
+  if (flags & EVENTS) {
+    if (!need(2)) return null;
+    const count = view.getUint16(at, true);
+    at += 2;
+    if (!need(count * 8)) return null;
+    message.e = [];
+    for (let i = 0; i < count; i += 1) {
+      message.e.push([view.getUint32(at, true), view.getUint32(at + 4, true)]);
+      at += 8;
+    }
+  }
+  if (flags & MATCH) {
+    if (!need(4)) return null;
+    message.m = view.getUint32(at, true);
+    at += 4;
+  }
+  return at === bytes.length ? message : null;
+}
+
 // src/net/NetSession.ts
 function netSendInterval(players) {
   return players <= 2 ? 4 : players <= 4 ? 6 : 8;
@@ -18891,7 +18965,7 @@ var NetSession = class {
     this.lastSent = "";
     this.lastSentTick = -Infinity;
     this.listeners = /* @__PURE__ */ new Set();
-    /** Bytes sent and received so far, as JSON on the wire (for the profiler). */
+    /** Bytes sent and received so far, in the messages' binary form (for the profiler). */
     this.sentBytes = 0;
     this.receivedBytes = 0;
     transport.onPeers((peers) => {
@@ -18900,7 +18974,7 @@ var NetSession = class {
     });
     transport.onMessage((message) => this.receive(message));
   }
-  /** Bytes this session has sent and received, measured as the messages' JSON. */
+  /** Bytes this session has sent and received, measured in the messages' binary form (netCodec.ts). */
   traffic() {
     return { sent: this.sentBytes, received: this.receivedBytes };
   }
@@ -18989,7 +19063,8 @@ var NetSession = class {
     for (const event of out.events) if (this.outEvents.length < 200) this.outEvents.push(event);
     for (const [slot, state] of out.states) this.outStates.set(slot, state);
     if (this.isHost) this.hostMatch = out.match;
-    if (this.tick % netSendInterval(this.peers.length) !== 0) return;
+    const interval = this.transport.sendInterval?.(this.peers.length) ?? netSendInterval(this.peers.length);
+    if (this.tick % interval !== 0) return;
     const message = {};
     if (this.outStates.size > 0) message.s = [...this.outStates].map(([slot, w]) => [slot, w[0], w[1], w[2]]);
     if (this.isHost) message.m = this.hostMatch;
@@ -18999,13 +19074,13 @@ var NetSession = class {
     if (this.outEvents.length > 0) message.e = this.outEvents.splice(0);
     if (message.s || message.e || message.m !== void 0) {
       this.transport.send(message);
-      this.sentBytes += JSON.stringify(message).length;
+      this.sentBytes += encodeNetMessage(message).length;
       this.lastSent = signature;
       this.lastSentTick = this.tick;
     }
   }
   receive(message) {
-    this.receivedBytes += JSON.stringify(message).length;
+    this.receivedBytes += encodeNetMessage(message).length;
     const now = this.now();
     for (const [slot, a, b, c] of message.s ?? []) {
       if (slot >= 0 && slot < NET_SLOTS && slot !== this.mySlot) this.remote.set(slot, { state: [a, b, c], at: now });
@@ -19181,6 +19256,9 @@ var SwitchableTransport = class {
   send(message) {
     this.inner?.send(message);
   }
+  sendInterval(players) {
+    return this.inner?.sendInterval?.(players) ?? netSendInterval(players);
+  }
   onMessage(handler) {
     this.messageHandler = handler;
   }
@@ -19218,7 +19296,7 @@ var SimulatedNetHub = class {
   }
   /** A transport for peer `id`; its uplink has the hub's conditions unless `link` overrides them. */
   transport(id, link = this.conditions) {
-    const transport = new SimulatedTransport(id, this);
+    const transport = new SimulatedTransport(id, this, link.direct === true);
     this.members.set(id, { peer: null, transport, link, busyUntil: 0 });
     return transport;
   }
@@ -19255,7 +19333,8 @@ var SimulatedNetHub = class {
     const wire = JSON.stringify(message);
     this.counts.sent += 1;
     const { link } = sender;
-    const leaves = link.bandwidth ? Math.max(this.clock, sender.busyUntil) + wire.length / link.bandwidth * 1e3 : this.clock;
+    const bytes = encodeNetMessage(message).length;
+    const leaves = link.bandwidth ? Math.max(this.clock, sender.busyUntil) + bytes / link.bandwidth * 1e3 : this.clock;
     sender.busyUntil = leaves;
     for (const [id, member] of this.members) {
       if (id === from || !member.peer) continue;
@@ -19273,9 +19352,10 @@ var SimulatedNetHub = class {
   }
 };
 var SimulatedTransport = class {
-  constructor(selfId, hub) {
+  constructor(selfId, hub, direct) {
     this.selfId = selfId;
     this.hub = hub;
+    this.direct = direct;
     this.messageHandler = null;
     this.peersHandler = null;
   }
@@ -19284,6 +19364,9 @@ var SimulatedTransport = class {
   }
   send(message) {
     this.hub.send(this.selfId, message);
+  }
+  sendInterval(players) {
+    return this.direct ? 2 : netSendInterval(players);
   }
   onMessage(handler) {
     this.messageHandler = handler;
@@ -19376,6 +19459,204 @@ async function runNetLab(options) {
   });
 }
 
+// src/net/directTransport.ts
+var DEFAULT_ICE = [{ urls: "stun:stun.l.google.com:19302" }];
+function browserRtc() {
+  const Ctor = globalThis.RTCPeerConnection;
+  return Ctor ? (config) => new Ctor(config) : null;
+}
+var DirectTransport = class {
+  constructor(relay, options = {}) {
+    this.relay = relay;
+    this.options = options;
+    this.links = /* @__PURE__ */ new Map();
+    this.peers = [];
+    this.messageHandler = null;
+    this.peersHandler = null;
+    this.closed = false;
+    this.rtc = options.rtc === void 0 ? browserRtc() : options.rtc;
+  }
+  get selfId() {
+    return this.relay.selfId;
+  }
+  /** How each other peer is reached: directly, still connecting, or through the relay. */
+  linkStatus(peer) {
+    return this.links.get(peer)?.status ?? "relay";
+  }
+  async connect(joinedAt, name) {
+    this.relay.onMessage((message, from) => this.fromRelay(message, from));
+    this.relay.onPeers((peers) => {
+      this.peers = peers;
+      this.syncLinks();
+      this.peersHandler?.(peers);
+    });
+    await this.relay.connect(joinedAt, name);
+  }
+  send(message) {
+    const others = this.peers.filter((p) => p.id !== this.selfId);
+    const relayed = [];
+    let stateBytes = null;
+    let eventBytes = null;
+    for (const peer of others) {
+      const link = this.links.get(peer.id);
+      if (link?.status !== "open" || !link.state || !link.events) {
+        relayed.push(peer.id);
+        continue;
+      }
+      if (message.s || message.m !== void 0) link.state.send(stateBytes ?? (stateBytes = encodeNetMessage({ s: message.s, m: message.m })));
+      if (message.e) link.events.send(eventBytes ?? (eventBytes = encodeNetMessage({ e: message.e })));
+    }
+    if (relayed.length > 0) this.relay.send(relayed.length === others.length ? message : { ...message, r: relayed });
+  }
+  sendInterval(players) {
+    const others = this.peers.filter((p) => p.id !== this.selfId);
+    const allDirect = others.length > 0 && others.every((p) => this.links.get(p.id)?.status === "open");
+    return allDirect ? this.options.directInterval ?? 2 : netSendInterval(players);
+  }
+  onMessage(handler) {
+    this.messageHandler = handler;
+  }
+  onPeers(handler) {
+    this.peersHandler = handler;
+  }
+  close() {
+    this.closed = true;
+    for (const link of this.links.values()) this.drop(link);
+    this.links.clear();
+    this.relay.close();
+  }
+  // --- Links ---------------------------------------------------------------
+  /** Open a link to every new peer (offering when our id is lower) and drop departed ones. */
+  syncLinks() {
+    if (this.closed) return;
+    const present = new Set(this.peers.map((p) => p.id));
+    for (const [id, link] of this.links) {
+      if (!present.has(id)) {
+        this.drop(link);
+        this.links.delete(id);
+      }
+    }
+    if (!this.rtc) return;
+    for (const peer of this.peers) {
+      if (peer.id === this.selfId || this.links.has(peer.id)) continue;
+      if (this.selfId < peer.id) void this.offer(peer.id);
+    }
+  }
+  newLink(peer) {
+    const pc = this.rtc({ iceServers: this.options.iceServers ?? DEFAULT_ICE });
+    const link = { peer, pc, state: null, events: null, status: "connecting", timer: null };
+    this.links.set(peer, link);
+    pc.onicecandidate = ({ candidate }) => {
+      if (candidate) this.signal({ to: peer, candidate });
+    };
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "failed" || pc.connectionState === "closed") this.fallBack(link);
+    };
+    pc.ondatachannel = ({ channel }) => this.attach(link, channel);
+    link.timer = setTimeout(() => {
+      if (link.status === "connecting") this.fallBack(link);
+    }, this.options.timeoutMs ?? 5e3);
+    return link;
+  }
+  async offer(peer) {
+    const link = this.newLink(peer);
+    try {
+      this.attach(link, link.pc.createDataChannel("state", { ordered: false, maxRetransmits: 0 }));
+      this.attach(link, link.pc.createDataChannel("events", { ordered: true }));
+      const offer = await link.pc.createOffer();
+      await link.pc.setLocalDescription(offer);
+      this.signal({ to: peer, description: offer });
+    } catch {
+      this.fallBack(link);
+    }
+  }
+  async answer(peer, description) {
+    if (!this.rtc) return;
+    const existing = this.links.get(peer);
+    if (existing) {
+      this.drop(existing);
+      this.links.delete(peer);
+    }
+    const link = this.newLink(peer);
+    try {
+      await link.pc.setRemoteDescription(description);
+      const answer = await link.pc.createAnswer();
+      await link.pc.setLocalDescription(answer);
+      this.signal({ to: peer, description: answer });
+    } catch {
+      this.fallBack(link);
+    }
+  }
+  attach(link, channel) {
+    channel.binaryType = "arraybuffer";
+    if (channel.label === "state") link.state = channel;
+    else if (channel.label === "events") link.events = channel;
+    else return;
+    channel.onopen = () => this.maybeOpen(link);
+    channel.onclose = () => this.fallBack(link);
+    channel.onmessage = ({ data }) => {
+      const bytes = data instanceof Uint8Array ? data : data instanceof ArrayBuffer ? new Uint8Array(data) : null;
+      const message = bytes ? decodeNetMessage(bytes) : null;
+      if (message && this.links.get(link.peer) === link) this.messageHandler?.(message, link.peer);
+    };
+    if (channel.readyState === "open") this.maybeOpen(link);
+  }
+  maybeOpen(link) {
+    if (link.status !== "connecting") return;
+    if (link.state?.readyState === "open" && link.events?.readyState === "open") {
+      link.status = "open";
+      if (link.timer) clearTimeout(link.timer);
+    }
+  }
+  fallBack(link) {
+    if (link.status === "relay") return;
+    link.status = "relay";
+    if (link.timer) clearTimeout(link.timer);
+  }
+  drop(link) {
+    if (link.timer) clearTimeout(link.timer);
+    link.status = "relay";
+    try {
+      link.state?.close();
+      link.events?.close();
+      link.pc.close();
+    } catch {
+    }
+  }
+  // --- The relay -------------------------------------------------------------
+  signal(sig) {
+    this.relay.send({ sig });
+  }
+  fromRelay(message, from) {
+    if (message.sig) {
+      if (message.sig.to === this.selfId) void this.onSignal(message.sig, from);
+      return;
+    }
+    if (message.r && !message.r.includes(this.selfId)) return;
+    if (message.r) {
+      const { r: _r, ...rest } = message;
+      void _r;
+      this.messageHandler?.(rest, from);
+      return;
+    }
+    this.messageHandler?.(message, from);
+  }
+  async onSignal(sig, from) {
+    if (sig.description?.type === "offer") {
+      await this.answer(from, sig.description);
+      return;
+    }
+    const link = this.links.get(from);
+    if (!link) return;
+    try {
+      if (sig.description) await link.pc.setRemoteDescription(sig.description);
+      if (sig.candidate) await link.pc.addIceCandidate(sig.candidate);
+    } catch {
+      this.fallBack(link);
+    }
+  }
+};
+
 // src/index.ts
 function mount(container, options) {
   const player = new Player(container, options);
@@ -19438,6 +19719,7 @@ export {
   DEFAULT_PAD_BINDINGS,
   DIRECT_CORE_URL,
   DebugCommand,
+  DirectTransport,
   EVENT_CAPACITY,
   EngineLoadError,
   FLARE_GHOSTS,
@@ -19549,6 +19831,7 @@ export {
   armSaveBlock,
   breakableLine,
   browserDeviceHints,
+  browserRtc,
   browserSpeaker,
   buildBillboardInstance,
   buildClipTable,
@@ -19591,6 +19874,7 @@ export {
   decodeMailbox,
   decodeMeshCamera,
   decodeMeshPoses,
+  decodeNetMessage,
   decodeWorldLights,
   defaultPostFxSettings,
   detectQuality,
@@ -19600,6 +19884,7 @@ export {
   effectiveBreakpoints,
   emitterPreset,
   encodeLut,
+  encodeNetMessage,
   errorStack,
   estimateSceneBytes,
   evaluate,

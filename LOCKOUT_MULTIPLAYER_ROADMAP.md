@@ -149,7 +149,7 @@ I16 panels are re-made inline over hand-placed collision boxes.
 
 ## Phase B — Netcode
 
-- [ ] **L3. Direct transport.** WebRTC data channels between peers, with an
+- [x] **L3. Direct transport.** WebRTC data channels between peers, with an
       unreliable channel for state and a reliable one for events, signalled
       over the existing Supabase Realtime room. The relay remains the
       fallback per peer. Messages switch from JSON to a packed binary format,
@@ -157,6 +157,29 @@ I16 panels are re-made inline over hand-placed collision boxes.
       *Lockout:* lower latency and room for more state.
       *Tests:* the codec round-trips; a peer falls back to the relay when
       ICE fails; the lab shows bytes per second within budget at 8 players.
+      *Done:*
+      - **`netCodec.ts`** packs a message into little-endian binary. It
+        comes to about a third of the JSON for Lockout's full 32-bit state
+        words. Sessions now count their traffic in these bytes.
+      - **`DirectTransport`** opens a WebRTC link to every peer, signalled
+        over the room's relay. The lower id offers. Each link has an
+        unordered, no-retransmit `state` channel and a reliable `events`
+        channel.
+      - **Relay fallback:** a peer whose link fails, or doesn't open within
+        5 s, stays on the relay. The relay copy names its recipients, so
+        every peer gets each message exactly once.
+      - **Rate:** with every peer direct, the session sends at 30 Hz
+        (`NetTransport.sendInterval`).
+      - **Supabase:** the relay carries packed messages as base64. Online
+        rooms use `DirectTransport` over it, with public STUN only.
+
+      *Lab, 80 ms:* at the same latency, 30 Hz alone cuts remote drift from
+      0.65 m to 0.58 m (p95 1.45 m to 1.26 m). The host sends 2.9 KB/s,
+      against 1.5 KB/s packed at the relay's rate (2.7 KB/s as JSON).
+      Eight players over direct links drift 0.79 m (1.16 m over the relay).
+      The host sends 0.5 KB/s and receives 2.7 KB/s. The larger gain online
+      is losing the relay's server hop, which a simulated link can't show;
+      the cart's easing toward each snapshot is L4's to replace.
 - [ ] **L4. Snapshots and interpolation.** Timestamped snapshots on a shared
       tick clock, aligned with each peer's offset measured by ping. Remote
       Spartans are drawn about 100 ms in the past, interpolated between real

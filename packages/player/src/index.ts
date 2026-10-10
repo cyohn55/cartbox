@@ -393,8 +393,11 @@ export {
 } from "./net/netplay.js";
 export type { NetInbox, NetOutbox, NetState, NetEvent } from "./net/netplay.js";
 export { NetSession, MemoryNetHub, BroadcastChannelTransport, SwitchableTransport, netSendInterval } from "./net/NetSession.js";
-export type { NetMessage, NetPeer, NetRoomStatus, NetTransport } from "./net/NetSession.js";
+export type { NetMessage, NetPeer, NetRoomStatus, NetSignal, NetTransport } from "./net/NetSession.js";
 export { SimulatedNetHub, runNetLab } from "./net/netLab.js";
+export { encodeNetMessage, decodeNetMessage } from "./net/netCodec.js";
+export { DirectTransport, browserRtc } from "./net/directTransport.js";
+export type { DirectTransportOptions, RtcDataChannelLike, RtcPeerConnectionFactory, RtcPeerConnectionLike } from "./net/directTransport.js";
 export type { DriftStats, LabCart, LabProbe, LinkConditions, NetLabOptions, NetLabReport } from "./net/netLab.js";
 
 /**

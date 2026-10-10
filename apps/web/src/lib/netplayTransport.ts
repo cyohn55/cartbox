@@ -2,15 +2,26 @@
  * Netplay transports for the web app.
  *
  * Online rooms ride Supabase Realtime: a broadcast channel carries the players'
- * batched state/event messages and presence carries who is in the room (and
- * when they joined, which orders the slots). No database table and no server
- * code — the relay is Realtime's own. Without Supabase credentials (the static
- * demo build) rooms fall back to a BroadcastChannel, which spans the tabs of one
- * browser: enough to try a match on one machine.
+ * batched state/event messages (packed binary, as base64) and presence
+ * carries who is in the room (and when they joined, which orders the slots).
+ * No database table and no server code — the relay is Realtime's own. Over
+ * it, players open direct WebRTC connections to each other (L3,
+ * DirectTransport): the relay then carries only the handshake and whatever a
+ * direct connection can't reach. Without Supabase credentials (the static
+ * demo build) rooms fall back to a BroadcastChannel, which spans the tabs of
+ * one browser: enough to try a match on one machine.
  */
 
 import type { SupabaseClient, RealtimeChannel } from "@supabase/supabase-js";
-import { BroadcastChannelTransport, type NetMessage, type NetPeer, type NetTransport } from "@cartbox/player";
+import {
+  BroadcastChannelTransport,
+  DirectTransport,
+  decodeNetMessage,
+  encodeNetMessage,
+  type NetMessage,
+  type NetPeer,
+  type NetTransport,
+} from "@cartbox/player";
 
 import { isStaticExport } from "./staticSite";
 
@@ -57,8 +68,11 @@ export class SupabaseNetTransport implements NetTransport {
     });
     this.channel = channel;
     channel.on("broadcast", { event: "net" }, ({ payload }) => {
-      const data = payload as { f?: string; m?: NetMessage };
-      if (data.m && data.f !== this.selfId) this.messageHandler?.(data.m, data.f ?? "");
+      const data = payload as { f?: string; m?: NetMessage; b?: string; r?: string[] };
+      if (data.f === this.selfId) return;
+      // A game message travels packed (b), with its relay recipients (r); a handshake as JSON (m).
+      const message = data.b ? decodeNetMessage(base64Bytes(data.b)) : data.m;
+      if (message) this.messageHandler?.(data.r ? { ...message, r: data.r } : message, data.f ?? "");
     });
     channel.on("presence", { event: "sync" }, () => {
       const state = channel.presenceState<PresenceMeta>();
@@ -81,7 +95,10 @@ export class SupabaseNetTransport implements NetTransport {
   }
 
   send(message: NetMessage): void {
-    void this.channel?.send({ type: "broadcast", event: "net", payload: { f: this.selfId, m: message } });
+    const payload = message.sig
+      ? { f: this.selfId, m: message }
+      : { f: this.selfId, b: bytesBase64(encodeNetMessage(message)), ...(message.r ? { r: message.r } : {}) };
+    void this.channel?.send({ type: "broadcast", event: "net", payload });
   }
 
   onMessage(handler: (message: NetMessage, from: string) => void): void {
@@ -102,12 +119,25 @@ export class SupabaseNetTransport implements NetTransport {
   }
 }
 
-/** The transport for a room: Supabase Realtime online, else this browser's tabs. */
+function bytesBase64(bytes: Uint8Array): string {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s);
+}
+function base64Bytes(text: string): Uint8Array {
+  return Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
+}
+
+/**
+ * The transport for a room: online, direct connections between the players
+ * over a Supabase Realtime room (which also relays for any player a direct
+ * connection can't reach); else this browser's tabs.
+ */
 export async function roomTransport(game: string, room: string): Promise<NetTransport> {
   const topic = `cartbox-net:${game}:${room}`;
   if (onlineRoomsAvailable()) {
     const { supabaseBrowser } = await import("./supabase-browser");
-    return new SupabaseNetTransport(supabaseBrowser(), topic);
+    return new DirectTransport(new SupabaseNetTransport(supabaseBrowser(), topic));
   }
   return new BroadcastChannelTransport(`${game}:${room}`); // it adds its own "cartbox-net:" prefix
 }

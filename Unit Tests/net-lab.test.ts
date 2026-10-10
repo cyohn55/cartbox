@@ -10,7 +10,7 @@
 import { existsSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-import { NetSession, SimulatedNetHub, runNetLab, type LinkConditions, type NetLabReport, type NetMessage } from "@cartbox/player";
+import { NetSession, SimulatedNetHub, encodeNetMessage, runNetLab, type LinkConditions, type NetLabReport, type NetMessage } from "@cartbox/player";
 import { LOCKOUT_ENGINE, LOCKOUT_PROBE, lockoutLabCart, lockoutLabInput } from "./helpers/lockoutNetLab";
 
 /** Two peers on a hub; what the second hears, with the virtual time it arrived. */
@@ -62,10 +62,10 @@ describe("the simulated network", () => {
   });
 
   it("queues a sender's messages behind each other on a thin uplink", async () => {
-    // 1 KB/s: a ~500-byte message takes about half a second to leave.
+    // 1 KB/s: a ~320-byte message (packed, as it travels) takes about a third of a second to leave.
     const { hub, a, heard } = await pair({ latencyMs: 0, bandwidth: 1000 });
     const big = { e: Array.from({ length: 40 }, (_, i) => [i, 123456789] as [number, number]) };
-    const bytes = JSON.stringify(big).length;
+    const bytes = encodeNetMessage(big).length;
     a.send(big);
     a.send(big);
     hub.advance(5000);
