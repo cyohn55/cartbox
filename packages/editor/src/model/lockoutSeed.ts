@@ -3456,36 +3456,52 @@ local function shield_hit(o, hy, sx,sy,sz)
   if (o.sh or 0) > 0 then o.flare = 1 end
 end
 
-local function move_axis(ax, d)
-  if ax == "x" then p.x = p.x + d else p.z = p.z + d end
-  local feet, head = p.y, p.y + PH
+local function move_axis(e, ax, d)
+  if ax == "x" then e.x = e.x + d else e.z = e.z + d end
+  local feet, head = e.y, e.y + PH
   for i = 0, ncol() - 1 do
     local b = i*6
     local x0,y0,z0,x1,y1,z1 = COL[b+1],COL[b+2],COL[b+3],COL[b+4],COL[b+5],COL[b+6]
-    if p.x+PR>x0 and p.x-PR<x1 and p.z+PR>z0 and p.z-PR<z1 and head>y0 and feet<y1 then
-      if y1-feet<=STEP and y1-feet>0 then p.y=y1; feet=y1; head=y1+PH
+    if e.x+PR>x0 and e.x-PR<x1 and e.z+PR>z0 and e.z-PR<z1 and head>y0 and feet<y1 then
+      if y1-feet<=STEP and y1-feet>0 then e.y=y1; feet=y1; head=y1+PH
       else
-        if ax=="x" then if d>0 then p.x=x0-PR else p.x=x1+PR end
-        else if d>0 then p.z=z0-PR else p.z=z1+PR end end
+        if ax=="x" then if d>0 then e.x=x0-PR else e.x=x1+PR end
+        else if d>0 then e.z=z0-PR else e.z=z1+PR end end
       end
     end
   end
 end
 
-local function move_vertical()
-  p.vy = p.vy - GRAV
-  p.y = p.y + p.vy
-  p.grounded = false
-  local feet, head = p.y, p.y + PH
+local function move_vertical(e)
+  e.vy = e.vy - GRAV
+  e.y = e.y + e.vy
+  e.grounded = false
+  local feet, head = e.y, e.y + PH
   for i = 0, ncol() - 1 do
     local b = i*6
     local x0,y0,z0,x1,y1,z1 = COL[b+1],COL[b+2],COL[b+3],COL[b+4],COL[b+5],COL[b+6]
-    if p.x+PR>x0 and p.x-PR<x1 and p.z+PR>z0 and p.z-PR<z1 then
-      if p.vy<=0 and feet<y1 and feet>y1-1.2 then p.y=y1; p.vy=0; p.grounded=true; feet=y1; head=y1+PH
-      elseif p.vy>0 and head>y0 and feet<y0 then p.y=y0-PH; p.vy=0 end
+    if e.x+PR>x0 and e.x-PR<x1 and e.z+PR>z0 and e.z-PR<z1 then
+      if e.vy<=0 and feet<y1 and feet>y1-1.2 then e.y=y1; e.vy=0; e.grounded=true; feet=y1; head=y1+PH
+      elseif e.vy>0 and head>y0 and feet<y0 then e.y=y0-PH; e.vy=0 end
     end
   end
-  if p.y < DEATH_Y then p.hp=0; kill_ent(p, p, false) end   -- fell off the arena
+  if e.y < DEATH_Y then fell(e) end   -- off the arena
+end
+
+-- One tick of a soldier's own movement from its input (L7): forward and right
+-- (-1..1, by its facing), its facing, and a jump. The host moves every
+-- Spartan with it -- a guest's from the inputs it sends -- and a guest
+-- predicts its own with the very same steps.
+local function move_soldier(e, fwd, right, yaw, jump)
+  e.ay, e.face = yaw, yaw
+  local sy, cy = math.sin(yaw), math.cos(yaw)
+  local mvx, mvz = fwd*sy - right*cy, fwd*cy + right*sy
+  local mm = math.sqrt(mvx*mvx + mvz*mvz)
+  e.moving = mm > 0
+  if mm > 0 then local sp = MOVE*math.min(1, mm); move_axis(e, "x", mvx/mm*sp); move_axis(e, "z", mvz/mm*sp) end
+  if jump and e.grounded then e.vy = JUMP; e.grounded = false end
+  move_vertical(e)
+  e.air = not e.grounded
 end
 
 -- Spawns on the team's own spawns in team games, if the map has any (SPT), else anywhere.
@@ -3544,12 +3560,15 @@ local IMPACT = { NONE=0, WALL=1, BODY=2, SHIELD=3 }
 -- could have been. NET_LAG_COMP off judges shots on the host's present (the
 -- lab's control).
 EV.AIM, EV.VERDICT, EV.HEALTH, EV.WARP = 11, 12, 13, 14
+-- ... and a guest's input for one tick (L7): the host moves every Spartan.
+EV.INPUT = 15
 NET_LAG_COMP = true
 local net_match_id, net_seen_match = 0, -1
 -- Called when the room goes away mid-match; the title screen resets the rest.
 function leave_room_state() MM_RESET = true end
 
 local function s16(v) v = v & 0xffff; if v >= 32768 then v = v - 65536 end; return v end
+local function sb(v) v = v & 0xff; if v >= 128 then v = v - 256 end; return v end
 local function u16(v) return math.floor(v + 0.5) & 0xffff end
 local function wrap_angle(a) while a > math.pi do a = a - 2*math.pi end; while a < -math.pi do a = a + 2*math.pi end; return a end
 
@@ -3558,8 +3577,12 @@ local function wrap_angle(a) while a > math.pi do a = a - 2*math.pi end; while a
 -- is doing (L4): pitch, airborne, crouched, firing, reloading, a melee swing,
 -- grenades held, which life it's on (a respawn bumps it, so nobody draws it
 -- sliding across the map) and how many hits it has taken (each a flinch).
+-- For a guest the host moves (L7): the last of its inputs applied, and its
+-- vertical speed, for the guest to replay its newer inputs from.
 local function s8(v) v = math.floor(v + 0.5); if v > 127 then v = 127 elseif v < -127 then v = -127 end; return v & 0xff end
 local function recent(t, n) return t ~= nil and tick - t < n end
+-- Vertical speed in 13 bits, 1/2000 m a tick (L7: fine enough to replay a jump from).
+local function vy13(v) v = math.floor(v*2000 + 0.5); if v > 4095 then v = 4095 elseif v < -4095 then v = -4095 end; return v & 0x1fff end
 local function net_pack(e)
   local wid = (e == p) and (p.slot==1 and p.g1 or p.g2) or (e.g1 or "br")
   local w0 = u16(e.x*100) | (u16(e.z*100) << 16)
@@ -3567,12 +3590,12 @@ local function net_pack(e)
   local hp = math.max(0, math.min(127, math.floor(e.hp or 0)))
   local sh = math.max(0, math.min(127, math.floor((e.sh or 0)/2)))
   local w2 = hp | (sh << 7) | ((WIDX_OF[wid] or 0) << 14) | ((e.dead and 1 or 0) << 17)
-    | ((e.moving and 1 or 0) << 18) | ((e.team=="red" and 1 or 0) << 19)
+    | ((e.moving and 1 or 0) << 18) | ((e.team=="red" and 1 or 0) << 19) | (((e.ack or 0) & 255) << 20)
   local air = (e == p) and not e.grounded or (e ~= p and e.air)
   local w3 = s8((e == p and e.ap or (e.pitch or 0))*100) | ((air and 1 or 0) << 8) | ((e.crouch and 1 or 0) << 9)
     | ((recent(e.fired_t, 6) and 1 or 0) << 10) | ((recent(e.reload_t, 40) and 1 or 0) << 11)
     | ((recent(e.melee_t, 10) and 1 or 0) << 12) | (math.max(0, math.min(3, e.nade or 0)) << 13)
-    | (((e.life or 0) & 3) << 15) | (((e.hits or 0) & 3) << 17)
+    | (((e.life or 0) & 3) << 15) | (((e.hits or 0) & 3) << 17) | (vy13(e.vy or 0) << 19)
   return w0, w1, w2, w3
 end
 
@@ -3585,7 +3608,7 @@ local INTERP, EXTRAP, SNAPS = 100, 100, 16
 
 -- The host's record of where every soldier was (L6): about a second of it on
 -- the shared clock, so a guest's shot can be judged against what that guest saw.
-local HIST, MAXV, WARP_SLACK = 72, MOVE*60*1.25, 2.5
+local HIST = 72
 local function hist_push(o, t, x, y, z, dead, life)
   local h = o.hist
   if not h then h = {}; o.hist = h end
@@ -3611,43 +3634,17 @@ local function hist_at(o, t)
   return a.x, a.y, a.z, not a.dead
 end
 
--- Keep a remote player's snapshot, if it's a new one. The host takes a guest's
--- word for where it is only within reach of a soldier's legs, and a new life
--- only after a death (L6): a move past that, or a respawn it never died for,
--- is refused, and the guest put back where it last could have been.
+-- Keep a remote player's snapshot, if it's a new one. (Since L7 a guest
+-- sends inputs, not where it is: the host moves it, so the host never takes a
+-- guest's word for its place -- L6's checks on those words went with them.)
 local function net_snap(o, stamp, w0, w1, w2, w3)
   local snaps = o.snaps
   local n = #snaps
   if n > 0 and snaps[n].t >= stamp then return end
   local pitch = w3 & 0xff
   if pitch >= 128 then pitch = pitch - 256 end
-  local x, y, z, life = s16(w0)/100, s16(w1)/100, s16(w0 >> 16)/100, (w3 >> 15) & 3
-  if NETMODE == 2 and o.human then
-    local h = o.hist
-    local refuse = h and #h > 0 and h[#h].life ~= life and not o.dead
-    if h and #h > 0 and h[#h].life == life and not refuse then
-      local q = h[#h]
-      for i = #h, 1, -1 do
-        if h[i].life ~= life then break end
-        q = h[i]
-        if stamp - h[i].t >= 600 then break end
-      end
-      local dt = math.max(1, stamp - q.t) / 1000
-      refuse = math.sqrt((x - q.x)^2 + (z - q.z)^2) > MAXV*dt + WARP_SLACK
-    end
-    if refuse then
-      o.bad_moves = (o.bad_moves or 0) + 1
-      if tick - (o.warped_at or -99) > 10 then
-        o.warped_at = tick
-        local last = h[#h]
-        cartbox.netsend(EV.WARP | ((o.ns & 7) << 4) | (u16(last.x*100) << 16), u16(last.y*100) | (u16(last.z*100) << 16))
-      end
-      return
-    end
-    hist_push(o, stamp, x, y, z, o.dead, life)
-  end
-  snaps[n+1] = { t=stamp, x=x, z=z, y=y, face=s16(w1 >> 16)/10000,
-    pitch=pitch/100, life=life, w2=w2, w3=w3 }
+  snaps[n+1] = { t=stamp, x=s16(w0)/100, z=s16(w0 >> 16)/100, y=s16(w1)/100, face=s16(w1 >> 16)/10000,
+    pitch=pitch/100, life=(w3 >> 15) & 3, w2=w2, w3=w3 }
   if n + 1 > SNAPS then table.remove(snaps, 1) end
 end
 
@@ -3675,24 +3672,10 @@ local function net_sample(o, rt)
   end
   o.x, o.y, o.z, o.face, o.pitch = x, y, z, face, pitch
   local w2, w3 = a.w2, a.w3
-  if NETMODE == 2 and o.human then
-    -- The host's own word on a guest's health and life (L6): its respawn is
-    -- taken once it has been dead long enough -- a guest can't refuse to die.
-    if o.auth_life == nil then
-      -- First sight of it (it joined, or came back): its own state stands.
-      o.auth_life, o.dead = a.life, ((w2 >> 17) & 1) == 1
-      o.hp, o.sh = w2 & 127, ((w2 >> 7) & 127)*2
-    end
-    if a.life ~= o.auth_life and (not o.dead or tick >= (o.dead_at or 0) + (MODE.obj=="jugg" and 70 or 100) - 30) then
-      o.auth_life, o.dead, o.hp = a.life, false, 100
-      o.sh = MODE.shields and (o.jugg and 200 or 100) or 0
-    end
-  else
-    o.hp, o.sh = w2 & 127, ((w2 >> 7) & 127)*2
-    -- A soldier the host has killed stays dead until it respawns, whatever it says.
-    if o.killed_life ~= nil and a.life ~= o.killed_life then o.killed_life = nil end
-    o.dead = ((w2 >> 17) & 1) == 1 or o.killed_life ~= nil
-  end
+  o.hp, o.sh = w2 & 127, ((w2 >> 7) & 127)*2
+  -- A soldier the host has killed stays dead until it respawns, whatever it says.
+  if o.killed_life ~= nil and a.life ~= o.killed_life then o.killed_life = nil end
+  o.dead = ((w2 >> 17) & 1) == 1 or o.killed_life ~= nil
   o.g1 = WLIST[((w2 >> 14) & 7) + 1] or "br"
   o.moving = ((w2 >> 18) & 1) == 1
   o.air, o.crouch = ((w3 >> 8) & 1) == 1, ((w3 >> 9) & 1) == 1
@@ -3762,6 +3745,9 @@ function kill_ent(killer, victim, head)
   if NETMODE ~= 0 then cartbox.netsend(ev_word(EV.KILL, (killer or victim).ns, victim.ns, head, 0), 0) end
 end
 
+-- Off the arena: dead. Online the host says so (L7): a guest only predicts.
+function fell(e) if NETMODE ~= 1 then e.hp = 0; kill_ent(e, e, false) end end
+
 -- Every hit in the game lands here: shields soak first, then health. Online
 -- the host owns everyone's (L6): a guest's hits are judged there, so here on a
 -- guest nothing happens.
@@ -3805,8 +3791,9 @@ end
 -- The host judges a guest's shot or swing (L6). What it claims must be
 -- possible -- from the living, no faster than its weapon fires, with ammo
 -- left -- and is then decided against everyone where that guest saw them:
--- rewound to its fire time less how far behind it drew the others.
-local function host_judge(sh, shot, a, b, now)
+-- rewound to its fire time less how far behind it drew the others. It fires
+-- from where the host's own moves put it on the input it fired on (L7).
+local function host_judge(sh, shot, a, b, now, origin)
   local melee = ((a >> 7) & 1) == 1
   local fire = full_ms(now, (a >> 16) & 0xffff)
   local seen = NET_LAG_COMP and fire - ((a >> 8) & 0xff)*4 or now
@@ -3823,6 +3810,7 @@ local function host_judge(sh, shot, a, b, now)
   if not ok then sh.rejected = (sh.rejected or 0) + 1; verdict(sh, seq, false); return end
   sh.fired_ms = fire
   local ex, ey, ez = hist_at(sh, fire)
+  if origin then ex, ey, ez = origin[1], origin[2], origin[3] end
   if melee then
     local o = ent_by_slot(aimed)
     if o and o ~= sh and not o.dead and enemy_of(sh, o) then
@@ -3875,10 +3863,11 @@ end
 local function net_aim(melee, seed, target, predicted)
   if NETMODE ~= 1 then return end
   local now, lag = cartbox.netclock()
-  p.aim_seq = ((p.aim_seq or 0) + 1) & 255
+  -- Numbered by the input it was fired on (L7), for the host to fire it from there.
+  local seq = (p.in_seq or 0) & 255
   cartbox.netsend(EV.AIM | ((p.ns & 7) << 4) | ((melee and 1 or 0) << 7) | (math.min(255, math.floor((lag + INTERP)/4 + 0.5)) << 8) | ((now & 0xffff) << 16),
-    p.aim_seq | ((seed & 0xffff) << 8) | (((target or 0) & 7) << 24) | ((predicted and 1 or 0) << 27))
-  return p.aim_seq
+    seq | ((seed & 0xffff) << 8) | (((target or 0) & 7) << 24) | ((predicted and 1 or 0) << 27))
+  return seq
 end
 
 -- The hit marker round the reticle (L6): a hit shows at once -- on a guest as
@@ -3890,27 +3879,81 @@ local function net_verdict(a)
   elseif hitmark and hitmark.seq == seq and hitmark.state == 0 then hitmark = { t = 12, seq = seq, state = 2 } end
 end
 
--- A guest's health is the host's (L6): taken as the host last sent it, for this life.
-local function net_health(a)
-  if ((a >> 4) & 7) ~= MYSLOT or not p or p.dead or ((a >> 22) & 3) ~= ((p.life or 0) & 3) then return end
-  local hp, sh = (a >> 7) & 127, (a >> 14) & 255
-  if hp < (p.hp or 0) or sh < (p.sh or 0) then
-    p.calm = 0; p.hits = ((p.hits or 0) + 1) & 3
-    if sh < (p.sh or 0) then p.flare = 1 end
-  end
-  p.hp, p.sh = hp, sh
+-- Inputs (L7). A guest's for one tick: forward and right by its facing (in
+-- 127ths), its facing (1e-4 rad) and pitch, a jump, and its number.
+local function input_word(e, seq, fwd, right, yaw, pitch, jump)
+  return EV.INPUT | ((e.ns & 7) << 4) | ((jump and 1 or 0) << 7) | ((seq & 255) << 8) | (s8(fwd*127) << 16) | (s8(right*127) << 24),
+    u16(wrap_angle(yaw)*10000) | (s8(pitch*100) << 16)
 end
 
--- The host tells each guest its health when it changes (at once when it falls).
-local function net_health_publish()
+-- A guest keeps its own soldier where the host says (L7). The host's state for
+-- its slot says which of its inputs the host has applied: the guest takes that
+-- state and replays its inputs since -- nothing to do when its prediction was
+-- right, a correction eased into the view over a few frames when it wasn't.
+-- Its health, life and death are the host's too.
+local function net_reconcile()
+  if NETMODE ~= 1 or not p then return end
+  p.vox, p.voy, p.voz = (p.vox or 0)*0.8, (p.voy or 0)*0.8, (p.voz or 0)*0.8
+  local w0, w1, w2, w3, live, stamp = cartbox.netpeer(MYSLOT)
+  if not live or stamp == p.own_stamp then return end
+  p.own_stamp = stamp
+  local x, y, z = s16(w0)/100, s16(w1)/100, s16(w0 >> 16)/100
+  local life, ack = (w3 >> 15) & 3, (w2 >> 20) & 255
+  local hp, sh = w2 & 127, ((w2 >> 7) & 127)*2
+  if hp < (p.hp or 0) or sh < (p.sh or 0) then p.calm = 0; if sh < (p.sh or 0) then p.flare = 1 end end
+  p.hp, p.sh = hp, sh
+  p.pending = p.pending or {}
+  -- The host respawned it: it goes where the host put it, as a correction
+  -- would, but nothing it predicted was wrong.
+  local respawned = life ~= ((p.life or 0) & 3)
+  p.life = life
+  p.dead = ((w2 >> 17) & 1) == 1   -- dead or alive, as the host has it
+  if p.dead then return end
+  local pend = p.pending
+  while pend[1] and ((ack - pend[1].seq) & 255) < 128 do p.acked = table.remove(pend, 1) end
+  local guess = p.acked
+  -- (within the 3 cm the host's centimetres can say, its guess stands)
+  if not respawned and guess and guess.seq == ack and math.abs(guess.x - x) + math.abs(guess.y - y) + math.abs(guess.z - z) < 0.03 then return end
+  -- No guess for that input (it came before the guest's first since a
+  -- respawn): nothing to check it against yet.
+  if not respawned and not (guess and guess.seq == ack) and pend[1] and p.synced then return end
+  p.synced = true
+  local ox, oy, oz = p.x, p.y, p.z
+  local vy = (w3 >> 19) & 0x1fff
+  if vy >= 4096 then vy = vy - 8192 end
+  p.x, p.y, p.z, p.vy, p.grounded = x, y, z, vy/2000, ((w3 >> 8) & 1) == 0
+  for _, i in ipairs(pend) do move_soldier(p, i.fwd, i.right, i.yaw, i.jump); i.x, i.y, i.z = p.x, p.y, p.z end
+  if not respawned then p.corrections = (p.corrections or 0) + 1 end
+  local dx, dy, dz = ox - p.x, oy - p.y, oz - p.z
+  if dx*dx + dy*dy + dz*dz < 9 and not respawned then p.vox, p.voy, p.voz = p.vox + dx, p.voy + dy, p.voz + dz
+  else p.vox, p.voy, p.voz = 0, 0, 0 end
+end
+
+-- The host moves each guest's soldier by its inputs, in order: one a tick, two
+-- while they've piled up (a late burst). It respawns the guest when its time
+-- comes, and judges each of its shots once it has applied the input the shot
+-- was fired on -- from where that input put it (L7).
+local function host_drive()
   if NETMODE ~= 2 then return end
-  for _,o in ipairs(bots) do
-    if o.human and o.remote and not o.dead then
-      local hp, sh = math.max(0, math.floor(o.hp or 0)), math.max(0, math.floor(o.sh or 0))
-      local key = hp*1000 + sh
-      if key ~= o.sent_health and (hp < (o.sent_hp or 999) or tick - (o.sent_health_t or -99) >= 6) then
-        cartbox.netsend(EV.HEALTH | ((o.ns & 7) << 4) | (math.min(127, hp) << 7) | (math.min(255, sh) << 14) | (((o.auth_life or 0) & 3) << 22), 0)
-        o.sent_health, o.sent_hp, o.sent_health_t = key, hp, tick
+  local now = cartbox.netclock()
+  for _, o in ipairs(bots) do
+    if o.human and o.remote then
+      local q = o.inq or {}
+      o.inq, o.seqpos, o.aimq = q, o.seqpos or {}, o.aimq or {}
+      if o.dead then
+        o.respawn = (o.respawn or 0) - 1
+        if o.respawn <= 0 then respawn(o) end
+      end
+      for _ = 1, (#q > 4 and 2) or (#q > 0 and 1) or 0 do
+        local i = table.remove(q, 1)
+        if not o.dead then move_soldier(o, i.fwd, i.right, i.yaw, i.jump); o.pitch = i.pitch end
+        o.firing = recent(o.fired_t, 6)
+        o.ack = i.seq
+        o.seqpos[i.seq] = { o.x, o.y, o.z }
+        while o.aimq[1] and ((i.seq - (o.aimq[1].b & 255)) & 255) < 128 do
+          local m = table.remove(o.aimq, 1)
+          host_judge(o, m.shot, m.a, m.b, now, o.seqpos[m.b & 255])
+        end
       end
     end
   end
@@ -3947,11 +3990,12 @@ local function net_receive()
   local now, lag = cartbox.netclock()
   local rt = now - lag - INTERP
   for _,o in ipairs(bots) do
-    if o.remote then
+    -- (the host moves a guest's soldier itself, from its inputs: L7)
+    if o.remote and not (NETMODE == 2 and o.human) then
       o.snaps = o.snaps or {}
       local a, b, c, d, live, stamp = cartbox.netpeer(o.ns)
       if live then net_snap(o, stamp, a, b, c, d); net_sample(o, rt)
-      else o.dead = true; o.snaps = {}; o.auth_life = nil end
+      else o.dead = true; o.snaps = {} end
     end
   end
   -- The host's word (slot 0) on kills, scores, the objective, health and
@@ -3971,7 +4015,6 @@ local function net_receive()
       end
     elseif kind == EV.SCORE then if host and NETMODE == 1 and dst then dst.score = value end
     elseif kind == EV.OBJ then if host and NETMODE == 1 then net_objective(from == 1 and dst or nil, head, value, ev[2]) end
-    elseif kind == EV.HEALTH then if host and NETMODE == 1 then net_health(a) end
     elseif kind == EV.VERDICT then if host and from == MYSLOT then net_verdict(a) end
     elseif kind == EV.WARP then
       if host and from == MYSLOT and p then p.x, p.y, p.z, p.vy = s16(a >> 16)/100, s16(ev[2])/100, s16(ev[2] >> 16)/100, 0 end
@@ -3982,11 +4025,26 @@ local function net_receive()
       mtimer[pad + 1] = 540
       if NETMODE == 2 and src and src.ammo then src.ammo[MW[pad + 1]] = nil end   -- a full load of what it took
     elseif kind == EV.NADE then nade_from[from*16 + ((a >> 7) & 15)] = { s16(a >> 16)/100, s16(ev[2])/100, s16(ev[2] >> 16)/100 }
+    elseif kind == EV.INPUT then
+      if NETMODE == 2 and src and src.remote and src.human then
+        src.inq = src.inq or {}
+        local b = ev[2]
+        if #src.inq < 120 then
+          src.inq[#src.inq+1] = { seq = (a >> 8) & 255, jump = ((a >> 7) & 1) == 1, fwd = sb(a >> 16)/127, right = sb(a >> 24)/127,
+            yaw = s16(b)/10000, pitch = sb(b >> 16)/100 }
+        end
+      end
     elseif kind == EV.AIM then
-      if NETMODE == 2 and src and src.remote then host_judge(src, src.last_shot, a, ev[2], now) end
+      -- judged once the host has moved it by the input it was fired on (host_drive)
+      if NETMODE == 2 and src and src.remote then
+        src.aimq = src.aimq or {}
+        if #src.aimq < 32 then src.aimq[#src.aimq+1] = { a = a, b = ev[2], shot = src.last_shot } end
+      end
     elseif kind >= EV.SHOT and kind <= EV.STICK then
       if NETMODE == 2 and src and (kind == EV.SHOT or kind == EV.MELEE) then
         src.last_shot = { wid = WLIST[((a >> 7) & 7) + 1] or "br", dir = ev[2] }
+        -- what the host's copy of a guest is doing, for the others to see (L7)
+        if kind == EV.SHOT then src.fired_t = tick else src.melee_t, src.swing = tick, true end
       end
       if from ~= MYSLOT and #fxq < 96 then fxq[#fxq+1] = { at = now + INTERP, a = a, b = ev[2] } end
     end
@@ -4034,15 +4092,17 @@ end
 -- Per tick: publish my player (and, as host, my bots) for everyone else.
 local function net_publish()
   if NETMODE == 0 or not p then return end
-  cartbox.netpublish(MYSLOT, net_pack(p))
+  -- In a match a guest sends inputs, not where it is: the host says that (L7).
+  if not (NETMODE == 1 and phase == "play") then cartbox.netpublish(MYSLOT, net_pack(p)) end
   if NETMODE == 2 then
-    -- The host's record of its own soldiers, for judging guests' shots (L6).
+    -- The host's record of every soldier it moves, for judging guests' shots (L6).
     local now = cartbox.netclock()
     hist_push(p, now, p.x, p.y, p.z, p.dead, p.life or 0)
-    for _,o in ipairs(bots) do if not o.remote then hist_push(o, now, o.x, o.y, o.z, o.dead, o.life or 0) end end
+    for _,o in ipairs(bots) do if not o.remote or o.human then hist_push(o, now, o.x, o.y, o.z, o.dead, o.life or 0) end end
   end
   if NETMODE == 2 then
-    for _,o in ipairs(bots) do if not o.remote then cartbox.netpublish(o.ns, net_pack(o)) end end
+    -- its bots, and the guests it moves (L7)
+    for _,o in ipairs(bots) do if not o.remote or o.human then cartbox.netpublish(o.ns, net_pack(o)) end end
   end
 end
 
@@ -4054,7 +4114,8 @@ end
 
 local function drive_camera()
   local fx,fy,fz = forward()
-  local ex,ey,ez = p.x, p.y+EYE, p.z
+  -- (less what's left of a correction from the host being eased in: L7)
+  local ex,ey,ez = p.x + (p.vox or 0), p.y + EYE + (p.voy or 0), p.z + (p.voz or 0)
   local d = 0.5
   local tx,ty,tz = ex+fx*d, ey+fy*d, ez+fz*d
   local oy = math.atan(-fx, -fz)
@@ -4240,7 +4301,6 @@ end
 -- swing or a throw arrives about when it happened and plays INTERP ms later,
 -- when its owner is drawn where it stood -- the shot from its muzzle, with its
 -- sound, its flash and its tracer to where it stopped.
-local function sb(v) v = v & 0xff; if v >= 128 then v = v - 256 end; return v end
 local function net_fx_run()
   if NETMODE == 0 then return end
   local now = cartbox.netclock()
@@ -4619,7 +4679,7 @@ local function push_from_bots()
       if d < min then
         if d < 0.001 then dx, dz, d = 1, 0, 1 end
         local k = (min - d) / d
-        move_axis("x", dx*k); move_axis("z", dz*k)
+        move_axis(p, "x", dx*k); move_axis(p, "z", dz*k)
       end
     end
   end
@@ -4761,10 +4821,10 @@ local function play_input()
   -- Facing yaw ay looks along (sin ay, cos ay); the screen's right is then
   -- (-cos ay, sin ay) — the same right the held weapon is placed with — so
   -- turning right *decreases* ay.
-  local sy,cy = math.sin(p.ay), math.cos(p.ay)
-  local rtx, rtz = -cy, sy
-  local mvx,mvz = 0,0
-  local moving=false
+  -- Moving is forward and right by its facing (the screen's right is
+  -- (-cos ay, sin ay), so turning right *decreases* ay); the move itself is
+  -- move_soldier's, below, once the jump is read too.
+  local fwd, right = 0, 0
   -- Dual sticks (the touch pad): the left one walks and strafes at its lean,
   -- the right one aims (x turns, y pitches). Without sticks (a keyboard), the
   -- 8-button scheme.
@@ -4773,22 +4833,21 @@ local function play_input()
   local lstick = math.abs(lx) + math.abs(ly) > 0.05
   if not p.dead then
     if lstick then
-      mvx = -ly*sy + lx*rtx; mvz = -ly*cy + lx*rtz; moving=true
+      fwd, right = -ly, lx
     else
-      if btn(0) then mvx=mvx+sy; mvz=mvz+cy; moving=true end
-      if btn(1) then mvx=mvx-sy; mvz=mvz-cy; moving=true end
+      if btn(0) then fwd = fwd + 1 end
+      if btn(1) then fwd = fwd - 1 end
       if aheld then
-        if btn(2) then mvx=mvx-rtx; mvz=mvz-rtz; moving=true end
-        if btn(3) then mvx=mvx+rtx; mvz=mvz+rtz; moving=true end
+        if btn(2) then right = right - 1 end
+        if btn(3) then right = right + 1 end
       else
         if btn(2) then p.ay=p.ay+TURN end
         if btn(3) then p.ay=p.ay-TURN end
       end
     end
     if rx ~= 0 then p.ay = p.ay - rx*math.abs(rx)*TURN*2.2 end   -- eased: fine aim near centre, fast at full lean
-    local mm=math.sqrt(mvx*mvx+mvz*mvz)
-    if mm>0 then local sp=MOVE*math.min(1,mm); move_axis("x",mvx/mm*sp); move_axis("z",mvz/mm*sp) end
   end
+  local moving = fwd ~= 0 or right ~= 0
   do
     local idx = WIDX[p.slot==1 and p.g1 or p.g2]
     local sp = moving and 1 or 0
@@ -4811,7 +4870,22 @@ local function play_input()
   else
     p.ap=p.ap+(want-p.ap)*0.2
   end
-  if cartbox.action("jump") and p.grounded and not p.dead then p.vy=JUMP; p.grounded=false end
+  -- The move: the same steps, from the same rounded input, the host takes for
+  -- this soldier -- online a guest's is its prediction, and goes to the host
+  -- with its number, to be applied there and acknowledged (L7).
+  local jump = cartbox.action("jump") and not p.dead
+  fwd, right = sb(s8(fwd*127))/127, sb(s8(right*127))/127
+  local yaw = s16(u16(wrap_angle(p.ay)*10000))/10000
+  if not p.dead then move_soldier(p, fwd, right, yaw, jump) end
+  if NETMODE == 1 then
+    p.in_seq = ((p.in_seq or 0) + 1) & 255
+    p.pending = p.pending or {}
+    if not p.dead then
+      p.pending[#p.pending+1] = { seq = p.in_seq, fwd = fwd, right = right, yaw = yaw, jump = jump, x = p.x, y = p.y, z = p.z }
+      if #p.pending > 120 then table.remove(p.pending, 1) end
+    end
+    cartbox.netsend(input_word(p, p.in_seq, fwd, right, yaw, p.ap, jump))
+  end
   if cartbox.actionp("swap") then p.slot=(p.slot==1) and 2 or 1; vm("ready") end
   local cur=W[p.slot==1 and p.g1 or p.g2]
   p.zoom = cur.zoom and (cartbox.action("zoom") or (aheld and not lstick and not (btn(0) or btn(1) or btn(2) or btn(3))))
@@ -5080,7 +5154,8 @@ function net_menu_sync()
     net_seen_match = word >> 4
     start_match(ONLINE_KEYS[((word >> 1) & 7) + 1] or "ffa")
   end
-  if p then p.dead = true; net_publish() end   -- in the lobby: don't draw me in anyone's arena
+  -- In the lobby: don't draw me in anyone's arena (unless a match just started).
+  if p and phase ~= "play" then p.dead = true; net_publish() end
 end
 
 -- ---------------------------------------------------------------------------
@@ -5250,12 +5325,17 @@ function TIC()
   if play_intro() then return end
   net_roles()
   net_receive()
+  net_reconcile()
   net_fx_run()
   pad_clock()
   play_input()
-  if p.dead then p.respawn=p.respawn-1; if p.respawn<=0 then respawn(p) end
-  else move_vertical(); try_pickups() end
-  push_from_bots()
+  host_drive()
+  -- (online, the host respawns a guest: L7)
+  if p.dead then if NETMODE ~= 1 then p.respawn=p.respawn-1; if p.respawn<=0 then respawn(p) end end
+  else try_pickups() end
+  -- Bodies push the player out of them -- offline and on the host; a guest's
+  -- own moves are the host's, which pushes nobody it moves by inputs (L7).
+  if NETMODE ~= 1 then push_from_bots() end
   nav_obstacles()
   for _,o in ipairs(bots) do think_bot(o) end
   recharge(p); for _,o in ipairs(bots) do recharge(o) end
@@ -5264,7 +5344,6 @@ function TIC()
   update_objective()
   local w=reached_target(); if w then winner=w; phase="over"; record_match(w) end
   net_publish()
-  net_health_publish()
   net_objective_publish()
   if NETMODE == 2 then cartbox.netmatch(net_match_word()) end
   if flash>0 then flash=flash-1 end

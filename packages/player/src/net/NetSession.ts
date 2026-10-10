@@ -254,7 +254,9 @@ export class NetSession {
     const slots: (NetState | null)[] = [];
     const stamps: number[] = [];
     for (let slot = 0; slot < NET_SLOTS; slot += 1) {
-      const entry = slot === mySlot ? undefined : this.remote.get(slot);
+      // (a player's own slot too: under a host that moves everyone, L7, the
+      // host's word on it is what a guest reconciles its prediction with)
+      const entry = this.remote.get(slot);
       if (entry && now - entry.at < STALE_MS) {
         slots.push(entry.state);
         stamps.push(entry.stamp);
@@ -339,7 +341,7 @@ export class NetSession {
       this.viewLag = age > this.viewLag ? this.viewLag + (age - this.viewLag) * LAG_RISE : Math.max(age, this.viewLag - LAG_FALL);
     }
     for (const [slot, a, b, c, d] of message.s ?? []) {
-      if (slot < 0 || slot >= NET_SLOTS || slot === mySlot) continue;
+      if (slot < 0 || slot >= NET_SLOTS) continue;
       // Snapshots overtaken on the way (jitter) are dropped: the newest stands.
       const held = this.remote.get(slot);
       if (held && now - held.at < STALE_MS && stamp < held.stamp) continue;

@@ -355,7 +355,9 @@ export async function runNetLab(options: NetLabOptions): Promise<NetLabReport> {
         const mySlot = sessions[i]!.mySlot;
         const mailbox = carts[i]!.mailbox();
         for (const [slot, { at, owner }] of owned) {
-          if (owner === i) continue;
+          // (a player's own slot is drawn in first person, not as a soldier —
+          // and since L7 the host publishes it, so it isn't skipped as owned)
+          if (owner === i || slot === mySlot) continue;
           const seen = options.probe.seen(mailbox, mySlot, slot);
           const key = `${i}:${slot}`;
           const before = lastSeen.get(key);

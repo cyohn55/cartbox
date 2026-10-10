@@ -354,7 +354,7 @@ I16 panels are re-made inline over hand-placed collision boxes.
         channel. A lost message's events arrive a round trip late instead
         of never, because a lost kill would now leave a guest alive
         forever.
-- [ ] **L7. Predicted, reconciled movement.** Clients send inputs; the host
+- [x] **L7. Predicted, reconciled movement.** Clients send inputs; the host
       moves every Spartan; each client predicts its own movement and replays
       unacknowledged inputs over each correction. Movement and collision are
       already Lua over the map's boxes (L1), so prediction re-runs the same
@@ -364,6 +364,66 @@ I16 panels are re-made inline over hand-placed collision boxes.
       *Tests:* with no loss, a client's predicted path matches the host's;
       after an injected correction, the client converges within a few
       frames without a visible snap.
+      *Done:*
+      - **One movement function:** `move_soldier(e, forward, right, facing,
+        jump)` is a tick of any Spartan's own movement: the walk along the
+        map's boxes and the jump and fall, now written for any soldier
+        rather than only the local player.
+      - **Rounded inputs:** the player's controls become an input every
+        tick: forward and right in 127ths, facing to 1e-4 rad, pitch, a jump
+        and a number. Every browser moves by that same rounded input.
+      - **A guest:**
+        - It sends each input as a reliable event (the last event kind, 15)
+          and no longer publishes its own state in a match.
+        - It moves at once by its own input: its prediction.
+        - It keeps the inputs the host hasn't yet acknowledged.
+      - **The host:**
+        - It moves each guest's soldier by its inputs as they arrive: one a
+          tick, two while a late burst catches up.
+        - It publishes every soldier, with the number of the guest's last
+          input it applied and its vertical speed (13 bits).
+        - It respawns guests itself.
+        - It judges each of a guest's shots once it has applied the input
+          the shot was fired on, from where that input put the guest.
+      - **Reconciling:**
+        - A guest checks the host's state for its own slot against its own
+          guess for that input. A session now hands a player its own slot's
+          state too.
+        - Within 3 cm (what the host's centimetres can say), nothing
+          happens.
+        - Otherwise it takes the host's state, replays its inputs since, and
+          eases the difference out of the view, 20% a frame.
+        - Its health, death and respawn are the host's.
+      - **What went:**
+        - L6's checks on a guest's claimed positions: a guest no longer
+          claims any, so a move no soldier could make can't reach the host
+          at all.
+        - Its own respawn: only the host respawns it.
+        - Pushes out of bodies for guests, which the host doesn't apply to
+          the soldiers it moves by inputs (offline and the host's own
+          player still get pushed).
+        - Bug fix: a soldier's "moving" flag was never set for human
+          players, so others always saw their legs standing still; it is
+          now set by the movement itself.
+        - Bug fix: a guest joining a match from the lobby was left marked
+          dead.
+
+      *Lockout* (`lockout-prediction.test.ts`, two engines over 80 ± 10 ms
+      links):
+      - **Prediction:** a guest lapping the central floor (running, turning,
+        strafing and jumping for 25 s) moves on the very tick it presses
+        forward. It needed no correction at all: the host's copy followed
+        its predicted path 7 ticks behind to within a millimetre.
+      - **A correction:** the host moving its copy 60 cm sideways is one
+        correction on the guest. The full 60 cm is held back as an offset
+        and closes 20% a frame: under 8 cm left after ten frames, under 1 cm
+        after twenty, the view never stepping more than 13 cm in a frame.
+      - **Grenades and shots** still land and register as in L5 and L6. The
+        duel still confirms 108/108 and 107/107.
+      - **Traffic:** a guest sends 0.7 KB/s (sixty inputs a second); a host
+        4.6 to 4.8 KB/s, since it sends every soldier. In a room of 8 a guest
+        receives 8.6 KB/s, partly the others' inputs, which ride to everyone
+        though only the host needs them.
 - [ ] **L8. Host migration and joining mid-match.** When the host leaves, the
       next host takes over the whole match: bots, objective, scores, the
       clock and grenades in flight. A client joining mid-match receives a

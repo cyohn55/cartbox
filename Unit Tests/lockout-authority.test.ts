@@ -4,9 +4,10 @@
  * the others — and the host rewinds everyone to what that guest saw, decides
  * the hit, and owns health, shields, kills and scores. The guest's hit marker
  * shows at once as its own guess, until the host's verdict. The host also
- * refuses what no honest guest could claim: an impossible move, a shot faster
- * than its weapon, refusing to die. Two real engines in a room, over the
- * network lab's simulated links.
+ * refuses what no honest guest could claim: a shot faster than its weapon, an
+ * early return from the dead — and since L7, when the host moves every
+ * Spartan, a guest's claims about where it is never reach it at all. Two real
+ * engines in a room, over the network lab's simulated links.
  */
 
 import { existsSync } from "node:fs";
@@ -53,7 +54,7 @@ const fight = (f: number) => (f % 240 < 150 ? 0x01 : 0x08) | (f % 6 === 0 ? 0x10
 // A duel across the central floor: the host's bots are out of it, the guest
 // stands 8.8 m from the host's player and fires (auto-aim locks onto it), and
 // the host's player strafes either way at full run, never dying. The host
-// puts both in place, the guest as the host's own correction would.
+// puts both in place (since L7 it moves the guest's soldier itself).
 const DUEL = `;(function()
 local _T = TIC
 function TIC()
@@ -62,16 +63,23 @@ function TIC()
   if NETMODE == 2 then
     for _,o in ipairs(bots) do if not o.human then o.dead, o.respawn, o.x, o.y, o.z = true, 1e9, 0, -60, 0 end end
     p.hp, p.sh = 100, 100
-    if tick == 10 then p.x, p.y, p.z, p.ay = 4.4, 0, 0, -math.pi/2 end
-    -- (again every half second until it's there: over a slow link the guest
-    -- joins the match a moment later)
-    local o = ent_by_slot(1)
-    if tick % 30 == 10 and o and math.abs(o.x + 4.4) + math.abs(o.z) > 0.5 then
-      o.hist = nil
-      cartbox.netsend(EV.WARP | (1 << 4) | (u16(-440) << 16), 0)
+    if tick == 10 then
+      p.x, p.y, p.z, p.ay = 4.4, 0, 0, -math.pi/2
+      local o = ent_by_slot(1)
+      o.x, o.y, o.z, o.hist = -4.4, 0, 0, nil
     end
   elseif NETMODE == 1 then
     p.ay = math.pi/2
+  end
+end
+end)()`;
+// The host's bots out of the way (dead, far below), for a quiet arena.
+const NO_BOTS = `;(function()
+local _T = TIC
+function TIC()
+  _T()
+  if phase == "play" and NETMODE == 2 then
+    for _,o in ipairs(bots) do if not o.human then o.dead, o.respawn, o.x, o.y, o.z = true, 1e9, 0, -60, 0 end end
   end
 end
 end)()`;
@@ -108,84 +116,81 @@ describe.skipIf(!existsSync(LOCKOUT_ENGINE))("the host's word on every hit (two 
     );
   }, 600_000);
 
-  it("puts back a guest that moves where no soldier could", async () => {
-    // At tick 400 of the match the guest's player jumps 12 m sideways. pmem
-    // 117/118 on the guest: its x and z (cm); on the host, 118: moves refused.
+  it("keeps a guest where its own legs took it, however it claims to have moved", async () => {
+    // At tick 400 of the match the guest's player jumps 12 m sideways. Since
+    // L7 the host moves every Spartan by its inputs, so the claim never
+    // reaches it: the guest's next word from the host puts it back. pmem 117
+    // on each: x of the guest's soldier (cm) as that browser has it.
     const probe = `;(function()
 local _T = TIC
 function TIC()
   _T()
   if phase ~= "play" or not p then return end
-  if NETMODE == 1 then
-    if tick == 400 then p.x = p.x + 12 end
-    pmem(117, (math.floor(p.x*100+0.5) & 0xffff) | ((math.floor(p.z*100+0.5) & 0xffff) << 16))
-  elseif NETMODE == 2 then
-    local o = ent_by_slot(1)
-    pmem(118, o and (o.bad_moves or 0) or 0)
-  end
+  local o = NETMODE == 1 and p or ent_by_slot(1)
+  if NETMODE == 1 and tick == 400 then p.x = p.x + 12 end
+  if o then pmem(117, (math.floor(o.x*100+0.5) & 0xffff) | ((math.floor(o.z*100+0.5) & 0xffff) << 16)) end
 end
 end)()`;
-    const { both, guest, host } = await lockoutRoom(probe, { link: { latencyMs: 60, jitterMs: 5, direct: true } });
+    const { both, guest, host } = await lockoutRoom(`${NO_BOTS}\n${probe}`, { link: { latencyMs: 60, jitterMs: 5, direct: true } });
     const s16 = (v: number) => ((v & 0xffff) >= 32768 ? (v & 0xffff) - 65536 : v & 0xffff) / 100;
     const xs: number[] = [];
+    const hostXs: number[] = [];
     for (let f = 0; f < 700; f += 1) {
       both(0, 0); // standing still: only the jump moves it
       xs.push(s16(guest.probe()[0]));
+      hostXs.push(s16(host.probe()[0]));
     }
     const jump = xs.findIndex((x, i) => i > 0 && x - xs[i - 1]! > 10);
     expect(jump).toBeGreaterThan(0);
     const before = xs[jump - 1]!;
-    // The host refused it and put the guest back within a quarter of a second.
-    expect(host.probe()[1]).toBeGreaterThan(0);
+    // The host's copy never moved; the guest was back within a quarter of a second.
+    expect(Math.max(...hostXs.slice(100)) - Math.min(...hostXs.slice(100))).toBeLessThan(0.05);
     const back = xs.slice(jump).findIndex((x) => Math.abs(x - before) < 0.5);
     expect(back).toBeGreaterThan(0);
     expect(back).toBeLessThan(16);
-    expect(Math.abs(xs.at(-1)! - before)).toBeLessThan(0.5);
+    expect(Math.abs(xs.at(-1)! - before)).toBeLessThan(0.05);
   }, 300_000);
 
-  it("refuses a guest's shots faster than its weapon fires, and a guest that won't die", async () => {
-    // The guest is modified twice over: each shot it sends goes twice (a fire
-    // rate its rifle can't have), and it ignores being killed. On the host,
-    // pmem 117: its shots refused; 118: whether the host has it dead (bit 0),
-    // and how many ticks it has stayed dead while saying it's alive (above).
+  it("refuses a guest's shots faster than its weapon fires, and a guest can't refuse to die", async () => {
+    // The guest is modified: each shot it sends goes twice (a fire rate its
+    // rifle can't have), and when it's dead it respawns itself at once and
+    // carries on. On the host, pmem 117: its shots refused; 118: the
+    // shortest the host has had it dead (ticks) and how many times.
     const probe = `;(function()
 local _send = cartbox.netsend
-local _kill = register_kill
 local cheat = false
 local _T = TIC
+local dead_for, shortest, deaths = 0, 0xffff, 0
 function TIC()
   _T()
   if phase ~= "play" or not p then return end
-  if NETMODE == 1 and not cheat then
-    cheat = true
-    cartbox.netsend = function(a, b)
-      local ok = _send(a, b)
-      if (a & 15) == 11 then _send(a, (b & ~255) | (((b & 255) + 128) & 255)) end
-      return ok
+  if NETMODE == 1 then
+    if not cheat then
+      cheat = true
+      cartbox.netsend = function(a, b)
+        local ok = _send(a, b)
+        if (a & 15) == 11 then _send(a, (b & ~255) | (((b & 255) + 128) & 255)) end
+        return ok
+      end
     end
-    register_kill = function(k, v, h) if v == p then return end; return _kill(k, v, h) end
-  elseif NETMODE == 2 then
+    if p.dead then respawn(p) end
+  else
     local o = ent_by_slot(1)
-    if o then
-      local s = o.snaps and o.snaps[#o.snaps]
-      local says_alive = s ~= nil and (s.w2 & (1 << 17)) == 0
-      o.cheat_dead = (o.dead and says_alive) and (o.cheat_dead or 0) + 1 or 0
-      pmem(117, o.rejected or 0)
-      pmem(118, (o.dead and 1 or 0) | ((o.cheat_dead & 0xffff) << 1))
-    end
+    if o and o.dead then dead_for = dead_for + 1
+    elseif dead_for > 0 then shortest, deaths, dead_for = math.min(shortest, dead_for), deaths + 1, 0 end
+    pmem(117, o and o.rejected or 0)
+    pmem(118, shortest | (deaths << 16))
   end
 end
 end)()`;
     const { both, host } = await lockoutRoom(probe, { link: { latencyMs: 50, jitterMs: 5, direct: true } });
-    let longestDead = 0;
-    for (let f = 0; f < 3000; f += 1) {
-      both(0, fight(f));
-      longestDead = Math.max(longestDead, (host.probe()[1] >>> 1) & 0xffff);
-    }
+    for (let f = 0; f < 3000; f += 1) both(0, fight(f));
     // Every doubled shot was refused (each second copy came at once, faster than any weapon).
     expect(host.probe()[0]).toBeGreaterThan(20);
-    // Killed by the host's bots, it stayed dead there however long it went on
-    // saying it was alive: long past any respawn.
-    expect(longestDead).toBeGreaterThan(300);
+    // Killed by the host's bots, it stayed dead there its full respawn time
+    // each time, whatever it did on its own screen.
+    const [, w] = host.probe();
+    expect(w >>> 16).toBeGreaterThan(0);
+    expect(w & 0xffff).toBeGreaterThanOrEqual(99);
   }, 300_000);
 });

@@ -19152,7 +19152,7 @@ var NetSession = class {
     const slots = [];
     const stamps = [];
     for (let slot = 0; slot < NET_SLOTS; slot += 1) {
-      const entry = slot === mySlot ? void 0 : this.remote.get(slot);
+      const entry = this.remote.get(slot);
       if (entry && now - entry.at < STALE_MS) {
         slots.push(entry.state);
         stamps.push(entry.stamp);
@@ -19224,7 +19224,7 @@ var NetSession = class {
       this.viewLag = age > this.viewLag ? this.viewLag + (age - this.viewLag) * LAG_RISE : Math.max(age, this.viewLag - LAG_FALL);
     }
     for (const [slot, a, b, c, d] of message.s ?? []) {
-      if (slot < 0 || slot >= NET_SLOTS || slot === mySlot) continue;
+      if (slot < 0 || slot >= NET_SLOTS) continue;
       const held = this.remote.get(slot);
       if (held && now - held.at < STALE_MS && stamp < held.stamp) continue;
       this.remote.set(slot, { state: [a, b, c, d ?? 0], stamp, at: now });
@@ -19641,7 +19641,7 @@ async function runNetLab(options) {
         const mySlot = sessions[i].mySlot;
         const mailbox = carts[i].mailbox();
         for (const [slot, { at, owner }] of owned) {
-          if (owner === i) continue;
+          if (owner === i || slot === mySlot) continue;
           const seen = options.probe.seen(mailbox, mySlot, slot);
           const key = `${i}:${slot}`;
           const before = lastSeen.get(key);
