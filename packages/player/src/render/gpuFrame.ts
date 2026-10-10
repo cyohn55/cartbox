@@ -115,7 +115,7 @@ const withRelief = new WeakMap<DecodedTexture, WeakMap<object, DecodedTexture>>(
 /**
  * The occlusion map with a relief map packed beside it (I4): R = ambient
  * occlusion (white without an occlusion map), G = the relief's height, B = its
- * curvature. WebGL2 guarantees sixteen texture units and the scene shader
+ * curvature, A = its thickness (1 − its B, the thinness a bake writes, I15). WebGL2 guarantees sixteen texture units and the scene shader
  * already binds sixteen, so the relief rides in the occlusion map's unused
  * channels rather than taking a unit of its own; WebGPU binds it the same way.
  * Made at the larger of the two maps' sizes (each sampled nearest at the
@@ -143,7 +143,7 @@ export function occlusionWithRelief(occ: DecodedTexture | null, relief: DecodedT
       data[o] = occ ? occ.data[texel(occ, x, y)]! : 255;
       data[o + 1] = relief.data[r]!;
       data[o + 2] = relief.data[r + 1]!;
-      data[o + 3] = 255;
+      data[o + 3] = 255 - relief.data[r + 2]!;
     }
   }
   const out: DecodedTexture = { width, height, data };
