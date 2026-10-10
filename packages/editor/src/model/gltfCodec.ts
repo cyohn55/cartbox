@@ -27,6 +27,11 @@
  * per vertex, and every animation's translation/rotation/scale channels on its
  * joints become clips (cubic-spline keys are read as linear). Meshes parented
  * under a joint (a sword in a hand) are bound rigidly to it, so they move too.
+ *
+ * Export writes the rig back out (LOCKOUT_MULTIPLAYER_ROADMAP.md L14): the
+ * joints as a node tree, the skin with its inverse binds, JOINTS_0/WEIGHTS_0
+ * per vertex, every clip as an animation and the second UV set as TEXCOORD_1,
+ * so a model leaves for Blender rigged and animated and comes back the same.
  * Pure and DOM-free.
  */
 
@@ -43,7 +48,7 @@ import {
 import { base64ToBytes } from "./base64";
 import { decompressGltf, type GltfDecoders, type MeshoptViewExtension } from "./gltfCompression";
 import { readMaterialLayers } from "./materialLayers";
-import { MAX_CLIP_KEYS, MAX_CLIPS, MAX_SKIN_JOINTS, type AnimationClip, type ClipChannel, type MeshSkin, type SkinJoint } from "./skeleton";
+import { MAX_CLIP_KEYS, MAX_CLIPS, MAX_SKIN_JOINTS, isSkinned, type AnimationClip, type ClipChannel, type MeshSkin, type SkinJoint } from "./skeleton";
 
 // --- glTF JSON shape (only the fields this codec reads/writes) -------------
 
@@ -95,7 +100,7 @@ interface GltfMaterial {
   };
 }
 export interface GltfPrimitive {
-  attributes: { POSITION?: number; NORMAL?: number; TEXCOORD_0?: number; JOINTS_0?: number; WEIGHTS_0?: number };
+  attributes: { POSITION?: number; NORMAL?: number; TEXCOORD_0?: number; TEXCOORD_1?: number; JOINTS_0?: number; WEIGHTS_0?: number };
   indices?: number;
   material?: number;
   extensions?: {
@@ -105,6 +110,7 @@ export interface GltfPrimitive {
   };
 }
 export interface GltfMesh {
+  name?: string;
   primitives: GltfPrimitive[];
 }
 interface GltfNode {
@@ -121,6 +127,7 @@ interface GltfScene {
   nodes?: number[];
 }
 interface GltfSkin {
+  name?: string;
   joints: number[];
   inverseBindMatrices?: number;
 }
@@ -128,6 +135,8 @@ interface GltfAnimation {
   name?: string;
   channels: { sampler: number; target: { node?: number; path: string } }[];
   samplers: { input: number; output: number; interpolation?: string }[];
+  /** `duration`: the clip's length in seconds where it is not just its last key's time (written by {@link encodeGlb}). */
+  extras?: { duration?: unknown };
 }
 export interface GltfBuffer {
   uri?: string;
@@ -222,6 +231,9 @@ function nodeMatrix(node: GltfNode): Mat4 {
   }
   return matrix;
 }
+
+/** Whether a matrix is exactly the identity. */
+const isIdentity4 = (m: Mat4): boolean => m.every((v, i) => v === (i % 5 === 0 ? 1 : 0));
 
 /** Inverse of an affine column-major matrix (identity when singular). */
 function invertAffine4(m: Mat4): Mat4 {
@@ -577,6 +589,9 @@ export function parseGltf(sourceJson: GltfJson, sourceBuffers: (Uint8Array | nul
         primitive.attributes.TEXCOORD_0 !== undefined
           ? readAccessorFloats(json, buffers, primitive.attributes.TEXCOORD_0)
           : null;
+      // The second UV set (the light map's), when it has one per vertex.
+      const rawUvs2 = primitive.attributes.TEXCOORD_1 !== undefined ? readAccessorFloats(json, buffers, primitive.attributes.TEXCOORD_1) : null;
+      const uvs2 = rawUvs2 && rawUvs2.length === vertexCount * 2 ? rawUvs2 : null;
       const indices = readIndices(json, buffers, primitive.indices, vertexCount);
       const material = materialAt(primitive.material);
       const mapped = variantNames.map((_, v) => {
@@ -591,8 +606,10 @@ export function parseGltf(sourceJson: GltfJson, sourceBuffers: (Uint8Array | nul
       for (const { world: nodeWorld, node } of worlds) {
         const binding = rig ? rig.bindingFor(node, primitive, vertexCount) : null;
         const world = binding ? binding.place(nodeWorld) : nodeWorld;
-        const positions = new Float32Array(rawPositions.length);
-        for (let v = 0; v < vertexCount; v += 1) {
+        // Positions under no transform are copied as they are (even a zero's sign).
+        const unmoved = isIdentity4(world);
+        const positions = unmoved ? rawPositions.slice() : new Float32Array(rawPositions.length);
+        for (let v = 0; v < vertexCount && !unmoved; v += 1) {
           const [x, y, z] = transformPoint(world, rawPositions[v * 3]!, rawPositions[v * 3 + 1]!, rawPositions[v * 3 + 2]!);
           positions[v * 3] = x;
           positions[v * 3 + 1] = y;
@@ -620,6 +637,7 @@ export function parseGltf(sourceJson: GltfJson, sourceBuffers: (Uint8Array | nul
           uvs: uvs ? uvs.slice() : null,
           indices: indices.slice(),
           material,
+          ...(uvs2 ? { uvs2: uvs2.slice() } : {}),
           ...(binding ? { joints: binding.joints, weights: binding.weights } : {}),
         });
         mapped.forEach((m, v) => variantMaterials[v]!.push(m));
@@ -694,10 +712,10 @@ function readRig(json: GltfJson, buffers: (Uint8Array | null)[]): Rig | null {
   const ibmOf = (j: number): Mat4 =>
     rawIbm && rawIbm.length >= (j + 1) * 16 ? Float64Array.from(rawIbm.subarray(j * 16, j * 16 + 16)) : IDENTITY4();
   const restWorld = (j: number): Mat4 => worldOf(gltfSkin.joints[j]!);
-  const c = multiply4(restWorld(0), ibmOf(0));
+  const c = nearIdentity(multiply4(restWorld(0), ibmOf(0)), restWorld(0));
   const cInv = invertAffine4(c);
   const inverseBind = new Float32Array(joints.length * 16);
-  joints.forEach((_, j) => inverseBind.set(multiply4(ibmOf(j), cInv), j * 16));
+  joints.forEach((_, j) => inverseBind.set(isIdentity4(c) ? ibmOf(j) : multiply4(ibmOf(j), cInv), j * 16));
   const skin: MeshSkin = { joints, inverseBind };
   return {
     skin,
@@ -747,6 +765,23 @@ function readRig(json: GltfJson, buffers: (Uint8Array | null)[]): Rig | null {
   };
 }
 
+/**
+ * `m`, or exactly the identity when it differs from it only by the float32
+ * rounding of the matrices it was made from — as G₀·IBM₀ does in a file whose
+ * bind pose is its rest pose (Blender's usual, and every file {@link encodeGlb}
+ * writes), so such a file's vertices and inverse binds come in exactly as
+ * written. `world` (the root joint's rest transform) scales the tolerance on
+ * the translation, whose rounding grows with its distance from the origin.
+ */
+function nearIdentity(m: Mat4, world: Mat4): Mat4 {
+  const reach = 1 + Math.max(Math.abs(world[12]!), Math.abs(world[13]!), Math.abs(world[14]!));
+  for (let i = 0; i < 16; i += 1) {
+    const tolerance = i >= 12 && i < 15 ? 1e-6 * reach : 1e-6;
+    if (Math.abs(m[i]! - (i % 5 === 0 ? 1 : 0)) > tolerance) return m;
+  }
+  return IDENTITY4();
+}
+
 /** Every animation's joint channels as clips (weights and non-joint targets skipped). */
 function readClips(json: GltfJson, buffers: (Uint8Array | null)[], jointOfNode: ReadonlyMap<number, number>): AnimationClip[] {
   const clips: AnimationClip[] = [];
@@ -776,6 +811,9 @@ function readClips(json: GltfJson, buffers: (Uint8Array | null)[], jointOfNode: 
       duration = Math.max(duration, times[times.length - 1]!);
       channels.push({ joint, path, interpolation: sampler.interpolation === "STEP" ? "step" : "linear", times, values });
     }
+    // A length written with the clip (see encodeGlb) stands unless the keys now run past it.
+    const stated = animation.extras?.duration;
+    if (typeof stated === "number" && Number.isFinite(stated) && stated >= duration - 1e-5) duration = stated;
     if (channels.length > 0) clips.push({ name: animation.name?.trim() || `clip ${index + 1}`, duration, channels });
   }
   return clips;
@@ -851,12 +889,25 @@ export function parseGltfText(text: string, name = "mesh", decoders: GltfDecoder
 /** Round up to the next multiple of 4, as glTF alignment requires. */
 const align4 = (n: number): number => n + ((4 - (n % 4)) % 4);
 
+/** glTF's accessor type for a number of components. */
+const ACCESSOR_TYPES: Record<number, string> = { 1: "SCALAR", 2: "VEC2", 3: "VEC3", 4: "VEC4", 16: "MAT4" };
+
 /**
  * Encode a {@link MeshAsset} to a binary `.glb`. Writes one buffer holding every
  * primitive's positions/normals/UVs/indices and each base-colour image, with the
  * accessors, materials, textures, and a single node/scene that reference them —
  * so the file reopens with its exact geometry and textures, and round-trips
  * losslessly through {@link parseGlb}.
+ *
+ * A skinned mesh (L14) also writes its rig: the joints as a node tree (names
+ * and rest transforms, any base above a root as a parent node), `skins[0]`
+ * with its inverse binds, JOINTS_0/WEIGHTS_0 on every bound primitive, and one
+ * animation per clip — so Blender opens it as an armature with its actions,
+ * and it reads back with the same positions, weights, joints and keys. The
+ * stored forms of a rigid binding (one joint for a whole part, or a joint a
+ * vertex) are already four influences a vertex in memory, and are written so.
+ * LODs, trails, state machines and the cart-only material fields (team
+ * colour, surface effects, graphs) have no glTF form and stay in the cart.
  */
 export function encodeGlb(mesh: MeshAsset): Uint8Array {
   const bufferViews: GltfBufferView[] = [];
@@ -885,7 +936,7 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
 
   const addFloatAccessor = (array: Float32Array, components: number, withBounds: boolean): number => {
     const view = addView(new Uint8Array(array.buffer, array.byteOffset, array.byteLength));
-    const type = components === 3 ? "VEC3" : components === 2 ? "VEC2" : "SCALAR";
+    const type = ACCESSOR_TYPES[components] ?? "SCALAR";
     const accessor: GltfAccessor = { bufferView: view, componentType: 5126, count: array.length / components, type };
     if (withBounds) {
       const min = new Array(components).fill(Infinity);
@@ -941,12 +992,22 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
     return materials.length - 1;
   };
 
+  const skin = isSkinned(mesh) ? mesh.skin! : null;
+  const bound = mesh.primitives.map((p) => Boolean(skin && p.joints && p.weights));
   for (const [index, primitive] of mesh.primitives.entries()) {
     // POSITION accessors must carry min/max per the spec (engines use them to cull).
     const positionAccessor = addFloatAccessor(primitive.positions, 3, true);
     const attributes: GltfPrimitive["attributes"] = { POSITION: positionAccessor };
     if (primitive.normals) attributes.NORMAL = addFloatAccessor(primitive.normals, 3, false);
     if (primitive.uvs) attributes.TEXCOORD_0 = addFloatAccessor(primitive.uvs, 2, false);
+    if (primitive.uvs2) attributes.TEXCOORD_1 = addFloatAccessor(primitive.uvs2, 2, false);
+    if (skin && bound[index]) {
+      const influences = gltfInfluences(primitive.joints!, primitive.weights!, skin.joints.length);
+      const jointBytes = new Uint8Array(influences.joints.buffer, influences.joints.byteOffset, influences.joints.byteLength);
+      accessors.push({ bufferView: addView(jointBytes), componentType: influences.joints.BYTES_PER_ELEMENT === 1 ? 5121 : 5123, count: influences.joints.length / 4, type: "VEC4" });
+      attributes.JOINTS_0 = accessors.length - 1;
+      attributes.WEIGHTS_0 = addFloatAccessor(influences.weights, 4, false);
+    }
 
     const indexView = addView(new Uint8Array(primitive.indices.buffer, primitive.indices.byteOffset, primitive.indices.byteLength));
     accessors.push({ bufferView: indexView, componentType: 5125, count: primitive.indices.length, type: "SCALAR" });
@@ -957,12 +1018,13 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
     gltfPrimitives.push({ attributes, indices: indexAccessor, material, ...(sets.length > 0 ? { extensions: { KHR_materials_variants: { mappings: sets } } } : {}) });
   }
 
+  const scene = skin
+    ? writeRig(mesh, skin, gltfPrimitives, bound, addFloatAccessor)
+    : { scenes: [{ nodes: [0] }], nodes: [{ mesh: 0 }], meshes: [{ primitives: gltfPrimitives }] };
   const json: GltfJson = {
     asset: { version: "2.0" },
     scene: 0,
-    scenes: [{ nodes: [0] }],
-    nodes: [{ mesh: 0 }],
-    meshes: [{ primitives: gltfPrimitives }],
+    ...scene,
     accessors,
     bufferViews,
     buffers: [{ byteLength: binLength }],
@@ -994,6 +1056,121 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
   dv.setUint32(binChunkStart + 4, CHUNK_BIN, true);
   out.set(bin, binChunkStart + 8);
   return out;
+}
+
+/**
+ * A primitive's influences as glTF wants them: joints as bytes (as shorts past
+ * 256 joints), an unused slot's joint 0, and every vertex's weights summing to
+ * 1 — renormalised only where they don't already, so weights read from a file
+ * go back out bit for bit. A vertex with no weight at all (which the engine
+ * leaves where it was bound) rides its first joint wholly, as glTF has no
+ * unweighted vertex.
+ */
+function gltfInfluences(joints: Uint16Array, weights: Float32Array, jointCount: number): { joints: Uint8Array | Uint16Array; weights: Float32Array } {
+  const count = Math.min(joints.length, weights.length) >> 2;
+  const outJoints = jointCount <= 256 ? new Uint8Array(count * 4) : new Uint16Array(count * 4);
+  const outWeights = new Float32Array(count * 4);
+  for (let v = 0; v < count; v += 1) {
+    let total = 0;
+    for (let k = 0; k < 4; k += 1) {
+      const j = joints[v * 4 + k]!;
+      const w = weights[v * 4 + k]!;
+      const used = j < jointCount && Number.isFinite(w) && w > 0;
+      outJoints[v * 4 + k] = used ? j : 0;
+      outWeights[v * 4 + k] = used ? w : 0;
+      if (used) total += w;
+    }
+    if (total <= 0) {
+      outJoints[v * 4] = Math.min(joints[v * 4]!, jointCount - 1);
+      outWeights[v * 4] = 1;
+    } else if (Math.abs(total - 1) > 5e-7) {
+      for (let k = 0; k < 4; k += 1) outWeights[v * 4 + k] = outWeights[v * 4 + k]! / total;
+    }
+  }
+  return { joints: outJoints, weights: outWeights };
+}
+
+/** Whether a transform component is its default (and so left off the node). */
+const isDefault = (values: readonly number[], fallback: readonly number[]): boolean => values.every((v, i) => v === fallback[i]);
+
+/**
+ * A skinned mesh's scene: the joints as nodes 0…n−1 in skin order (each with
+ * its name, rest transform and child joints), a parent node for each distinct
+ * `base` above a root (the armature object a Blender file had), then a mesh
+ * node per run of primitives — bound runs on `skin: 0`, an unbound part on a
+ * node of its own — so the primitives read back in their order. Also writes
+ * the skin and one animation per clip (a channel on a joint out of range, or
+ * with mismatched keys, is skipped; a clip left with none is dropped).
+ */
+function writeRig(
+  mesh: MeshAsset,
+  skin: MeshSkin,
+  gltfPrimitives: readonly GltfPrimitive[],
+  bound: readonly boolean[],
+  addFloatAccessor: (array: Float32Array, components: number, withBounds: boolean) => number,
+): Pick<GltfJson, "scenes" | "nodes" | "meshes" | "skins" | "animations"> {
+  const n = skin.joints.length;
+  const nodes: GltfNode[] = skin.joints.map((joint, j) => {
+    const children = skin.joints.flatMap((c, i) => (c.parent === j && i !== j ? [i] : []));
+    return {
+      name: joint.name,
+      ...(isDefault(joint.translation, [0, 0, 0]) ? {} : { translation: [...joint.translation] }),
+      ...(isDefault(joint.rotation, [0, 0, 0, 1]) ? {} : { rotation: [...joint.rotation] }),
+      ...(isDefault(joint.scale, [1, 1, 1]) ? {} : { scale: [...joint.scale] }),
+      ...(children.length > 0 ? { children } : {}),
+    };
+  });
+  // Roots sit in the scene, or under a node standing for their base (one per distinct base).
+  const roots: number[] = [];
+  const bases = new Map<string, number>();
+  skin.joints.forEach((joint, j) => {
+    if (joint.parent >= 0 && joint.parent < n && joint.parent !== j) return;
+    if (!joint.base || joint.base.length !== 16) {
+      roots.push(j);
+      return;
+    }
+    const key = joint.base.join(",");
+    if (!bases.has(key)) {
+      const identity = isDefault(joint.base, Array.from(IDENTITY4()));
+      nodes.push({ name: bases.size === 0 ? "Armature" : `Armature ${bases.size + 1}`, ...(identity ? {} : { matrix: [...joint.base] }), children: [] });
+      bases.set(key, nodes.length - 1);
+      roots.push(nodes.length - 1);
+    }
+    nodes[bases.get(key)!]!.children!.push(j);
+  });
+  // Consecutive primitives that are all bound, or all not, share a mesh.
+  const meshes: GltfMesh[] = [];
+  gltfPrimitives.forEach((primitive, i) => {
+    if (i > 0 && bound[i] === bound[i - 1]) {
+      meshes[meshes.length - 1]!.primitives.push(primitive);
+      return;
+    }
+    meshes.push({ name: mesh.name, primitives: [primitive] });
+    nodes.push({ name: mesh.name, mesh: meshes.length - 1, ...(bound[i] ? { skin: 0 } : {}) });
+    roots.push(nodes.length - 1);
+  });
+  const skins: GltfSkin[] = [{ name: mesh.name, joints: skin.joints.map((_, j) => j), inverseBindMatrices: addFloatAccessor(skin.inverseBind.subarray(0, n * 16), 16, false) }];
+  // Each clip an animation; key times written once however many channels share them.
+  const timesAccessor = new Map<string, number>();
+  const animations: GltfAnimation[] = [];
+  for (const clip of mesh.clips ?? []) {
+    const animation: GltfAnimation = { name: clip.name, channels: [], samplers: [] };
+    let last = 0;
+    for (const channel of clip.channels) {
+      const width = channel.path === "rotation" ? 4 : 3;
+      if (channel.joint < 0 || channel.joint >= n || channel.times.length === 0 || channel.values.length !== channel.times.length * width) continue;
+      const key = Array.prototype.join.call(channel.times, ",");
+      if (!timesAccessor.has(key)) timesAccessor.set(key, addFloatAccessor(channel.times, 1, true));
+      animation.samplers.push({ input: timesAccessor.get(key)!, output: addFloatAccessor(channel.values, width, false), interpolation: channel.interpolation === "step" ? "STEP" : "LINEAR" });
+      animation.channels.push({ sampler: animation.samplers.length - 1, target: { node: channel.joint, path: channel.path } });
+      last = Math.max(last, channel.times[channel.times.length - 1]!);
+    }
+    if (animation.channels.length === 0) continue;
+    // A glTF clip lasts until its last key; one whose length differs says so.
+    if (clip.duration !== last) animation.extras = { duration: clip.duration };
+    animations.push(animation);
+  }
+  return { scenes: [{ nodes: roots }], nodes, meshes, skins, ...(animations.length > 0 ? { animations } : {}) };
 }
 
 /** The document's extension lists with its material sets (KHR_materials_variants) added, if it has any. */

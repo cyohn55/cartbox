@@ -316,7 +316,7 @@ then brings the tools into the editor.
       *Tests:* replacing the soldier keeps every bot's index and animator; a
       replacement missing `head` or `run` is flagged; the demo loads the
       saved pack.
-- [ ] **L14. A rigged round trip with Blender.** GLB export writes skins
+- [x] **L14. A rigged round trip with Blender.** GLB export writes skins
       (joints, weights, inverse bind matrices), animation clips, the second UV
       set and material sets, so a Spartan exported, edited in Blender and
       re-imported comes back rigged and animated.
@@ -326,6 +326,35 @@ then brings the tools into the editor.
       *Tests:* export then import is lossless for positions, weights, joints
       and clip keys; Blender-shaped files (from the fixtures) import as
       before.
+      *Done:* `encodeGlb` in `gltfCodec.ts` writes a skinned mesh's rig.
+      - **The skeleton:** one node per joint, in skin order, with its name and
+        rest transform. A root's `base` (the armature object it came in
+        under) becomes its parent node.
+      - **The skin:** `skins[0]` with its inverse binds, and `JOINTS_0`
+        (bytes) and `WEIGHTS_0` on every bound primitive. A rigid part,
+        stored as one joint or a byte per vertex, is written as four
+        influences per vertex. Weights that don't sum to 1 are normalised.
+      - **The clips:** one animation per clip, with linear or stepped
+        samplers, and each set of key times written once. A clip that holds
+        past its last key keeps its length in `extras.duration`.
+      - **The rest:** the second UV set as `TEXCOORD_1`, and the material
+        sets as before. An unbound part goes on a mesh node of its own, so
+        the primitives keep their order.
+
+      Import now reads `TEXCOORD_1` as `uvs2` and the clip length. It also
+      takes a bind that is the rest pose to within float32 rounding as
+      exactly that, so vertices and inverse binds come back bit for bit.
+      An unskinned export is byte-identical to before (pinned by hash), and
+      the Blender-shaped arm fixture imports identically.
+      *Lockout:* the Spartan exports as a **124 KB** GLB (46 KB without its
+      rig before), and the viewmodels as 45 to 84 KB. In
+      `gltf-round-trip.test.ts`, the soldier and all six viewmodels come back
+      with their stored form unchanged: positions, indices, bindings (in
+      the same compact form), joints, rest pose, inverse binds, every clip's
+      keys and length, and the material sets. Normals match to within 1e-6.
+      The written files pass a structural check: accessor counts, weights
+      summing to 1, joints in range, and channels on joints. LODs, trails,
+      state machines and cart-only material settings stay in the cart.
 - [ ] **L15. Modelling in the editor.** Vertex, edge and face selection
       (click, box and loop select) with a move, rotate and scale gizmo for
       the selection, plus merge, delete, loop cut, subdivide, mirror and add

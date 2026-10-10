@@ -245,6 +245,7 @@ export {
 } from "./model/MeshAsset";
 export { parseObj, encodeObj, type ParseObjOptions, type ObjFiles } from "./model/objCodec";
 export { parseGlb, parseGltf, parseGltfText, encodeGlb, isKtx2, readGlb } from "./model/gltfCodec";
+export type { GltfJson } from "./model/gltfCodec";
 export { MAX_LEVELS, effectiveLevels, readLevels, type SceneLevel } from "./model/levels";
 export {
   DEFAULT_NAV_AGENT,

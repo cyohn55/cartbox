@@ -11,7 +11,8 @@ skeleton and animations, its PBR maps and its material sets.
 Pick a `.glb` with the Mesh tab's **Import 3D model** button. The editor then:
 
 - **Reads the mesh**, with every object's transform baked in. Each material on
-  a mesh becomes its own primitive.
+  a mesh becomes its own primitive. A second UV map comes in as the
+  light-map UVs.
 - **Reads the skeleton** (the first armature a mesh is skinned to) and every
   action on it as an **animation clip**.
 - **Adds a state machine** to start from, with one looping state per clip.
@@ -45,7 +46,7 @@ Use **File › Export › glTF 2.0** with these settings:
 | Include › Limit to | Selected objects (optional) | Export just the asset, not the scene around it. |
 | Transform › +Y Up | **On** | Cartbox is Y-up, like glTF. |
 | Data › Mesh › Apply Modifiers | **On** | What you see is what you get. |
-| Data › Mesh › UVs, Normals | **On** | The first UV map is used for every texture. |
+| Data › Mesh › UVs, Normals | **On** | The first UV map is used for every texture. A second one is read as the light-map UVs. |
 | Data › Material › Materials | **Export** | |
 | Data › Material › Images | **Automatic** | PNG for maps with alpha or flat colour, JPEG for photos; either is re-encoded to KTX2 on import. |
 | Data › Shape Keys | Off | Morph targets aren't read. |
@@ -131,15 +132,87 @@ textured character becomes KTX2. Textures that arrive already as KTX2
 (`KHR_texture_basisu`) are judged by the same rule. The encoder (about 3 MB)
 is loaded only when an import has maps to compress, and only in the editor.
 
-## Exporting back out
+## The round trip: out to Blender and back
 
-A model's **Export .glb** button writes:
-- its geometry;
-- every PBR map, with an ORM map written once for both of its slots;
-- its material factors and its material sets.
+A model made in Cartbox, or one whose `.blend` is lost, can go to Blender and
+come back rigged and animated (LOCKOUT_MULTIPLAYER_ROADMAP.md, L14). Lockout's
+Spartan and every one of its viewmodels make the trip unchanged.
 
-Skeletons and clips are not written yet, so take rigged changes back to the
-`.blend` file.
+### Out of Cartbox
+
+Select the model in the Mesh tab and press **Export .glb**. The file holds:
+
+- the geometry, its normals, its UVs and its **second UV set** (the light-map
+  UVs, as `TEXCOORD_1`);
+- the **skeleton**: one node per joint, with its name and rest transform. An
+  armature object the model came in under (its `base`) is written as the
+  parent node of the root;
+- the **skin**: four joints and four weights per vertex, and one inverse bind
+  matrix per joint. A part bound wholly to one bone (a rifle in a hand, a
+  plate on a shin) is written as an ordinary weight of 1 on that bone;
+- **every clip** as an animation, with translation, rotation and scale keys
+  on the joints, linear or stepped as the clip has them. A clip that holds
+  past its last key records its length in the animation's `extras`;
+- every PBR map (an ORM map once for both of its slots), the material
+  factors and the **material sets** (`KHR_materials_variants`).
+
+The Spartan exports as a file of about 124 KB, with 14 joints and 10 clips.
+
+### Into Blender
+
+Use **File › Import › glTF 2.0** with these settings:
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| Pack Images | On | The maps stay inside the `.blend`. |
+| Merge Vertices | **Off** | Keeps the vertex split the model has, so its UV seams and hard edges stay where they are. |
+| Shading | Use Normal Data | |
+| Bone Dir | **Blender (best for re-importing)** | Keeps each bone's rest transform as written, so the joints go back out the same. Temperance and Fortune turn the bones to look tidier, which changes their rest rotations. |
+| Guess Original Bind Pose | On | The bind pose is the rest pose, so this changes nothing, but leaves Blender to check. |
+
+The model arrives as an **armature** with its mesh skinned to it (one
+vertex group per bone), an **action per clip** with the clip's name, its
+material sets in the sidebar's **glTF Variants** panel, and the second UV
+set as a second UV map. Edit as usual: move vertices, repaint weights, key
+new poses, add an action.
+
+### Back into Cartbox
+
+Export with the settings in [Exporting from Blender](#exporting-from-blender),
+with these points for a model that came from Cartbox:
+
+- Export **the armature and its mesh** together, with **Use Rest Position**
+  on and **Animation › Mode** set to **Actions**, so each action is a clip.
+- Keep **Include All Bone Influences** off. Weights are normalised to four
+  bones per vertex.
+- Keep **Data › Mesh › UVs** on so that both UV maps go out. The second one
+  comes back as the light-map UVs.
+- Turn on the material variants option to keep the material sets.
+
+Then press **Import 3D model**. The joints keep their names and order, the
+clips keep their names, and parts still bound to a single bone are stored as
+compactly as before (one joint for the part, or a byte per vertex). A clip
+that held past its last key ends at its last key after Blender has
+re-exported it, so key the hold if it matters.
+
+### What stays in the cart
+
+These have no glTF form, so they are not in the file and do not come back:
+
+- **distance LODs** (an import makes new ones);
+- **trails** (I10);
+- **animator state machines**, with their parameters and events;
+- **cart-only material settings**: material graphs, the team-colour tick and
+  share, surface effects (detail maps, rims, emissive scroll and pulse),
+  refraction and soft edges, and baked light maps. An additive material is
+  written as blended;
+- per-vertex blend weights (H4), and an object's physics and components.
+
+Re-attach them after the import: tick the team-colour parts, choose the
+state machine, and re-bake the light map. Joint and clip names are what the
+state machine and the cart's Lua refer to, so keep them in Blender. L13 adds
+**replace in place**, which swaps a placed object's mesh while keeping its
+index, animator and variants.
 
 ## Checklist
 
@@ -150,3 +223,5 @@ Skeletons and clips are not written yet, so take rigged changes back to the
 - [ ] Material sets made under glTF Variants, with Export Variants on
 - [ ] After import: team-colour parts ticked, and the generated state machine
       edited into the transitions the game needs
+- [ ] For a round trip: imported with Bone Dir set to Blender and Merge
+      Vertices off, and joint and clip names kept
