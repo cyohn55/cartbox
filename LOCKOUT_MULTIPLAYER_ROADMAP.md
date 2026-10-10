@@ -180,7 +180,7 @@ I16 panels are re-made inline over hand-placed collision boxes.
       The host sends 0.5 KB/s and receives 2.7 KB/s. The larger gain online
       is losing the relay's server hop, which a simulated link can't show;
       the cart's easing toward each snapshot is L4's to replace.
-- [ ] **L4. Snapshots and interpolation.** Timestamped snapshots on a shared
+- [x] **L4. Snapshots and interpolation.** Timestamped snapshots on a shared
       tick clock, aligned with each peer's offset measured by ping. Remote
       Spartans are drawn about 100 ms in the past, interpolated between real
       snapshots rather than eased, with a short capped extrapolation through
@@ -190,7 +190,56 @@ I16 panels are re-made inline over hand-placed collision boxes.
       and animate their actual actions (the I9 and I11 clips).
       *Tests:* in the lab, interpolation error at 80 ms with 5% loss stays
       under a set bound, and a Spartan never snaps under normal play.
-- [ ] **L5. Replicated combat.** Every shot, tracer, muzzle flash, melee,
+      *Done:*
+      - **The shared clock** is the host's. A guest pings it (every 100 ms
+        for its first five answers, then every half second), and the host
+        echoes each ping in its next message with when it heard it and when
+        it answered. The guest keeps the NTP estimate from the fastest of its
+        last eight round trips. A guest 7.3 s off settles within 20 ms of the
+        host in two seconds over an 80 ± 20 ms link.
+      - **Stamps:** every message carries when its states were taken on that
+        clock. A snapshot overtaken on the way is dropped, so the newest
+        always stands.
+      - **The view lag:** the session also measures how old snapshots are
+        when they arrive. It rises at once with the slowest link and eases
+        down slowly. The cart draws everyone at the shared clock less that
+        lag less 100 ms: 100 ms behind the newest data, all at one moment.
+      - **The inbox** (`netplay.ts`) now holds the clock, the view lag (in
+        the header's top byte), four state words a slot and each slot's
+        stamp. Events in and out drop to 14 and 6 a tick to make room, and
+        the SDK queues the rest (`cartbox.netsend`). `cartbox.netclock()`
+        and the six-value `cartbox.netpeer()` give a cart all of it.
+      - **Lockout** keeps each remote Spartan's last snapshots and draws it
+        between the two either side of the render time. Where the next one
+        is late, it carries on along its last step for up to 100 ms, then
+        holds.
+      - **The fourth word** carries pitch, airborne, crouched, firing,
+        reloading, a melee swing, grenades held, a life counter (bumped by a
+        respawn, so nobody slides across the map) and a hit counter.
+      - **What the others see:** remote Spartans aim chest and head where
+        their owner looks, and play the I11 air, land, melee, hit and die
+        moves from those bits. A shot flashes at the muzzle.
+      - **Not carried:** Lockout has no crouch yet, and the third-person
+        soldier has no reload clip, so those bits ride along unused for now.
+
+      *Lab, the same 10 s run as L2/L3* (`lockout-interpolation.test.ts`; the
+      lab now also measures error against where the owner was at the
+      observer's render time, and snaps):
+      - **80 ms ± 20, 5% loss:** interpolation error mean 0.5 cm, p95
+        0.9 cm, no snap, largest extra step 4 cm.
+      - **150 ms ± 30, 5% loss:** error p95 1 cm, no snap.
+      - **8 players at 80 ms:** error p95 3 cm, no snap. The host sends
+        1.0 KB/s and receives 4.1 KB/s.
+      - **The price:** a remote Spartan is drawn about 0.84 m behind its
+        owner's present at 80 ms (0.58 m when eased toward the newest
+        snapshot), which L6's lag compensation pays back.
+      - **Traffic:** four words a slot put a two-player host at 3.9 KB/s
+        over direct links (2.9 KB/s with three).
+
+      On two engines in one room, the host's copy of a guest follows its
+      pitch to within 0.02 rad, sees every jump for as long as it lasts, and
+      flashes its shots.
+- [x] **L5. Replicated combat.** Every shot, tracer, muzzle flash, melee,
       grenade throw, sword lunge and pickup becomes an event every client
       sees. A grenade is thrown with its starting state and a shared seed,
       so every client simulates the same arc.
@@ -198,7 +247,41 @@ I16 panels are re-made inline over hand-placed collision boxes.
       grenades and the I17 bounce light from them.
       *Tests:* two clients' grenades land within a few centimetres of each
       other; every shot one client fires appears on the others.
-- [ ] **L6. Authoritative hits with lag compensation.** A client sends its
+      *Done:* six new event kinds in Lockout, each two words.
+      - **A shot:** its shooter, weapon, direction (yaw and pitch, 1e-4
+        rad), how far it flew (cm) and what it hit (nothing, a wall, a body
+        or a shield). Every shot is sent, the player's own and, from the
+        host, every bot's.
+      - **Shown in step:** a browser holds the others' shots, swings and
+        throws for the same 100 ms it draws them behind, then plays each
+        from where its owner is drawn. A shot gets its sound, a muzzle flash
+        (a light), a tracer, and sparks and a pock where it struck a wall or
+        a flare where it struck a shield.
+      - **A new `tracer` effect** (a glowing trail laid from the muzzle to
+        where the round stopped) now marks every round in the arena: the
+        player's own, the bots', and the others'.
+      - **A melee swing** (a sword lunge among them) is shown with its slash
+        and sound.
+      - **A grenade** goes out as two events: where it was thrown from (to
+        the centimetre) and which way. The thrower simulates from that same
+        rounded start state, so every browser runs a bit-identical arc.
+        Others launch a replica that lights the arena as it flies, does no
+        damage (the thrower's browser deals that), and sticks only where the
+        thrower says, by a third event. Lockout's arc has nothing random in
+        it, so the shared start state is the shared seed.
+      - **A pickup** empties the pad on every browser. The pads' respawn
+        clocks now run every tick on every browser; before, each counted
+        only while its own player was alive, so pads drifted apart.
+
+      *Lockout* (`lockout-combat.test.ts`, two engines in one room): the
+      guest fired 44 shots and the host showed all 44. The host's bots fired
+      558 and the guest had shown 556 when the run ended, the last two still
+      inside the 100 ms display delay; none was shown twice. A guest's two
+      grenades went off at the same centimetre on both browsers. The pads
+      stood the same on both 95% of the time or more (a pickup reaches the
+      other a few ticks late). The bots' shots add about 0.4 KB/s to a
+      two-player host over direct links (3.9 to 4.3 KB/s).
+- [x] **L6. Authoritative hits with lag compensation.** A client sends its
       shot (origin, direction, the tick it saw) to the host. The host rewinds
       every Spartan's hitbox to what that shooter saw, decides the hit, and
       owns health, shields, kills and scores. The shooter shows a predicted
@@ -208,7 +291,70 @@ I16 panels are re-made inline over hand-placed collision boxes.
       client can't refuse to die or fire faster than its weapon.
       *Tests:* the lab replays the same duel at 0 and 150 ms and gets the
       same hits; a client claiming an impossible move or shot is corrected.
-- [ ] **L7. Predicted, reconciled movement.** Clients send inputs; the host
+      *Done:*
+      - **Whose word counts:** each event in the inbox now carries the slot
+        that sent it (`cartbox.netevents()` gives `{a, b, from}`). Lockout
+        takes kills, scores, the objective, health and verdicts only from
+        the host (slot 0). A soldier's shots, swings, throws and pickups
+        count only from that soldier, or from the host for its bots. The
+        inbox makes room by taking 12 events a tick, down from 14.
+      - **A guest's shot:**
+        - The shot event (L5) now carries where the guest aimed.
+        - A second event carries when it fired on the shared clock, how far
+          behind it drew the others (its view lag plus 100 ms), its spread's
+          seed, and whether it thinks it hit.
+        - The spread now comes from that seed, so the host replays the very
+          pellets the guest fired. Origins come from the guest's own
+          snapshots at its fire time.
+      - **The host's judgement:**
+        - It keeps about a second of every soldier's positions on the
+          shared clock: its own and its bots' each tick, the guests' from
+          their snapshots.
+        - It rewinds everyone to what the guest saw and runs the guest's
+          own hit test against them (melee: whom it swung at, if within
+          reach then).
+        - It applies the damage, which owns health, shields, kills and
+          scores, and answers with a verdict.
+      - **The hit marker:** it shows at once, on a guest as its own guess.
+        The verdict keeps it white, or turns it red for a miss.
+      - **The host owns health:**
+        - A guest's `damage()` does nothing; the host's does it all,
+          grenade splash included (even a guest's grenade, through the
+          host's replica).
+        - Shields recharge on the host, and each guest gets its health from
+          the host as it changes.
+        - Only the host kills, except a guest falling off the arena.
+      - **Sanity checks:** the host refuses a guest's shot from the dead,
+        faster than its weapon fires, or past a full load of ammo for that
+        weapon (topped up when it picks one up). It also refuses a move
+        further than a soldier could run (11 m/s and 2.5 m of slack, over
+        up to 0.6 s), and a new life the guest never died for. It sends the
+        guest back to its last good place.
+      - **Can't refuse to die:**
+        - A soldier the host has killed stays dead on the host until it
+          respawns, and not before the respawn time.
+        - Every other browser holds it dead until it shows a new life.
+      - **Lockout's Lua** had reached 192 of Lua's 200 locals in a chunk;
+        event and impact kinds now sit in two tables (174).
+
+      *Lockout* (`lockout-authority.test.ts`, two engines over the lab's
+      links):
+      - **The duel:** the guest stands and fires at the host's player
+        strafing at full run 8.8 m away.
+        - At 0 ms the host confirmed 108 of the guest's 108 predicted hits;
+          at 150 ms, 107 of 107.
+        - Judged on the host's present instead (lag compensation off), 23
+          of 107.
+      - **An impossible move:** a guest that jumps 12 m sideways is put back
+        within a quarter of a second.
+      - **A cheating guest:** one that sends each shot twice, faster than
+        its rifle, has every second copy refused. One that ignores being
+        killed stays dead on the host however long it says it's alive.
+      - **The lab:** events now ride the lab's links as on L3's reliable
+        channel. A lost message's events arrive a round trip late instead
+        of never, because a lost kill would now leave a guest alive
+        forever.
+- [x] **L7. Predicted, reconciled movement.** Clients send inputs; the host
       moves every Spartan; each client predicts its own movement and replays
       unacknowledged inputs over each correction. Movement and collision are
       already Lua over the map's boxes (L1), so prediction re-runs the same
@@ -218,7 +364,67 @@ I16 panels are re-made inline over hand-placed collision boxes.
       *Tests:* with no loss, a client's predicted path matches the host's;
       after an injected correction, the client converges within a few
       frames without a visible snap.
-- [ ] **L8. Host migration and joining mid-match.** When the host leaves, the
+      *Done:*
+      - **One movement function:** `move_soldier(e, forward, right, facing,
+        jump)` is a tick of any Spartan's own movement: the walk along the
+        map's boxes and the jump and fall, now written for any soldier
+        rather than only the local player.
+      - **Rounded inputs:** the player's controls become an input every
+        tick: forward and right in 127ths, facing to 1e-4 rad, pitch, a jump
+        and a number. Every browser moves by that same rounded input.
+      - **A guest:**
+        - It sends each input as a reliable event (the last event kind, 15)
+          and no longer publishes its own state in a match.
+        - It moves at once by its own input: its prediction.
+        - It keeps the inputs the host hasn't yet acknowledged.
+      - **The host:**
+        - It moves each guest's soldier by its inputs as they arrive: one a
+          tick, two while a late burst catches up.
+        - It publishes every soldier, with the number of the guest's last
+          input it applied and its vertical speed (13 bits).
+        - It respawns guests itself.
+        - It judges each of a guest's shots once it has applied the input
+          the shot was fired on, from where that input put the guest.
+      - **Reconciling:**
+        - A guest checks the host's state for its own slot against its own
+          guess for that input. A session now hands a player its own slot's
+          state too.
+        - Within 3 cm (what the host's centimetres can say), nothing
+          happens.
+        - Otherwise it takes the host's state, replays its inputs since, and
+          eases the difference out of the view, 20% a frame.
+        - Its health, death and respawn are the host's.
+      - **What went:**
+        - L6's checks on a guest's claimed positions: a guest no longer
+          claims any, so a move no soldier could make can't reach the host
+          at all.
+        - Its own respawn: only the host respawns it.
+        - Pushes out of bodies for guests, which the host doesn't apply to
+          the soldiers it moves by inputs (offline and the host's own
+          player still get pushed).
+        - Bug fix: a soldier's "moving" flag was never set for human
+          players, so others always saw their legs standing still; it is
+          now set by the movement itself.
+        - Bug fix: a guest joining a match from the lobby was left marked
+          dead.
+
+      *Lockout* (`lockout-prediction.test.ts`, two engines over 80 ± 10 ms
+      links):
+      - **Prediction:** a guest lapping the central floor (running, turning,
+        strafing and jumping for 25 s) moves on the very tick it presses
+        forward. It needed no correction at all: the host's copy followed
+        its predicted path 7 ticks behind to within a millimetre.
+      - **A correction:** the host moving its copy 60 cm sideways is one
+        correction on the guest. The full 60 cm is held back as an offset
+        and closes 20% a frame: under 8 cm left after ten frames, under 1 cm
+        after twenty, the view never stepping more than 13 cm in a frame.
+      - **Grenades and shots** still land and register as in L5 and L6. The
+        duel still confirms 108/108 and 107/107.
+      - **Traffic:** a guest sends 0.7 KB/s (sixty inputs a second); a host
+        4.6 to 4.8 KB/s, since it sends every soldier. In a room of 8 a guest
+        receives 8.6 KB/s, partly the others' inputs, which ride to everyone
+        though only the host needs them.
+- [x] **L8. Host migration and joining mid-match.** When the host leaves, the
       next host takes over the whole match: bots, objective, scores, the
       clock and grenades in flight. A client joining mid-match receives a
       full snapshot. A dropped client can rejoin into its old slot.
@@ -228,6 +434,50 @@ I16 panels are re-made inline over hand-placed collision boxes.
       *Tests:* in the lab, the host leaves mid-Oddball and the match
       continues with scores and the ball intact; a mid-match joiner sees the
       same state as everyone else within a second.
+
+      *Done:*
+      - **Slots that stick:** the host keeps the room's roster (player id to
+        slot) and sends it with its events, once a second and on any change.
+        - A player who leaves keeps its slot held for 60 s. Coming back with
+          the same id within that time gives it the same slot, and its
+          score with it.
+        - Nobody else moves up when a player leaves, so no soldier changes
+          hands mid-match.
+        - The host is the present player with the lowest slot. A session
+          takes a roster only from that player, so two would-be hosts
+          settle on one. The host's slot reaches the cart in pmem 66 and as
+          `net()`'s sixth value.
+      - **Migration:** the next host takes every slot it now drives from
+        where it stands, as it stands: bots keep their positions, health
+        and weapons, and only a dead one is respawned. It carries on
+        sending the objective and scores, now team scores too, so the match
+        goes on with the ball, scores and clock intact. Guests trust events
+        from the host's slot, wherever it is.
+      - **Joining mid-match:** when a player joins a match under way, the
+        host sends at once every score, both team scores, the objective and
+        each empty pad with what's left of its wait. The newcomer sees
+        everyone else through the states every player publishes anyway.
+      - **The header:** the stale "Cartbox has no netcode" note in the cart
+        is gone.
+
+      *Lockout* (`lockout-migration.test.ts`, real engines over 30 ± 5 ms
+      links):
+      - **Host leaving mid-Oddball:** with three players 20 s into a match,
+        the host leaves. The player in slot 1 takes over in its own slot,
+        and slot 2 keeps its slot. Both stay in the match, no score goes
+        backwards, and they agree on every score and on the ball's carrier.
+        Scoring carries on under the new host for the next 15 s.
+      - **Joining Team Slayer under way:** a third player joining 30 s in
+        has the host's team and player scores in under a second.
+      - **Rejoining:** a player dropped for two seconds of a Free for All
+        comes back into slot 2 with its score.
+
+      *Limits:*
+      - Grenades already in the air aren't sent to a newcomer, so it misses
+        their blasts until they land.
+      - Inputs still ride to every guest, though only the host needs them.
+      - In the browser, a player's id is new each page load, so rejoining
+        keeps the slot across a dropped connection but not across a reload.
 
 ## Phase C — A second map
 

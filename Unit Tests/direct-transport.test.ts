@@ -26,18 +26,22 @@ import {
 import { LOCKOUT_ENGINE, LOCKOUT_PROBE, lockoutLabCart, lockoutLabInput } from "./helpers/lockoutNetLab";
 
 describe("the packed message format", () => {
-  it("round-trips states, events and the match word, well under the JSON", () => {
+  it("round-trips states, events, the match word and the clock, well under the JSON", () => {
     const message: NetMessage = {
-      s: [[0, 0xdeadbeef, 12345, 0], [3, 1, 2, 3]],
+      s: [[0, 0xdeadbeef, 12345, 0, 7], [3, 1, 2, 3, 4]],
       e: [[0x11223344, 0xffffffff], [5, 6]],
       m: 0x80000001,
+      t: 0xfffffff0,
+      pi: 1234,
+      po: [[2, 1234, 99, 0xffffffff]],
+      ro: [[0, "p-abc"], [3, "tab-é"]],
     };
     const bytes = encodeNetMessage(message);
     expect(decodeNetMessage(bytes)).toEqual(message);
-    expect(bytes.length).toBe(1 + 1 + 2 * 13 + 2 + 2 * 8 + 4);
+    expect(bytes.length).toBe(1 + 1 + 2 * 17 + 2 + 2 * 8 + 4 + 4 + 4 + 1 + 13 + 1 + (2 + 5) + (2 + 6));
     expect(bytes.length).toBeLessThan(JSON.stringify(message).length * 0.6);
     // Full 32-bit words (Lockout packs positions into them): about a third.
-    const lockoutLike: NetMessage = { s: [[1, 0xfe0c0a1b, 0x3a2b00c8, 0x000a3c64]] };
+    const lockoutLike: NetMessage = { s: [[1, 0xfe0c0a1b, 0x3a2b00c8, 0x000a3c64, 0x0001a2f3]], t: 0x12345678 };
     expect(encodeNetMessage(lockoutLike).length).toBeLessThan(JSON.stringify(lockoutLike).length * 0.4);
     expect(decodeNetMessage(encodeNetMessage({}))).toEqual({});
     expect(decodeNetMessage(encodeNetMessage({ m: 0 }))).toEqual({ m: 0 });
@@ -46,6 +50,7 @@ describe("the packed message format", () => {
   it("refuses bytes that aren't a message", () => {
     expect(decodeNetMessage(new Uint8Array([]))).toBeNull();
     expect(decodeNetMessage(new Uint8Array([0x80]))).toBeNull(); // unknown flag
+    expect(decodeNetMessage(new Uint8Array([0x40]))).toBeNull();
     expect(decodeNetMessage(new Uint8Array([1, 2, 0]))).toBeNull(); // two states promised, none there
     expect(decodeNetMessage(new Uint8Array([4, 0, 0, 0, 0, 9]))).toBeNull(); // trailing byte
   });
@@ -202,11 +207,11 @@ describe("direct connections", () => {
     const [a, b] = await room(["a", "b"], new FakeRtc());
     expect(a!.transport.linkStatus("b")).toBe("open");
     expect(b!.transport.linkStatus("a")).toBe("open");
-    a!.transport.send({ s: [[0, 1, 2, 3]], e: [[9, 9]], m: 4 });
+    a!.transport.send({ s: [[0, 1, 2, 3, 4]], e: [[9, 9]], m: 4 });
     await settle();
     // States and the match word on one channel, the events on the other: both arrive, once each.
     const got = b!.heard.map((h) => h.message);
-    expect(got).toContainEqual({ s: [[0, 1, 2, 3]], m: 4 });
+    expect(got).toContainEqual({ s: [[0, 1, 2, 3, 4]], m: 4 });
     expect(got).toContainEqual({ e: [[9, 9]] });
     expect(got).toHaveLength(2);
     expect(a!.relay.relayed).toEqual([]); // nothing went through the relay
@@ -216,9 +221,23 @@ describe("direct connections", () => {
     const rtc = new FakeRtc();
     const [a, b] = await room(["a", "b"], rtc);
     rtc.dropUnreliable = 1;
-    a!.transport.send({ s: [[0, 1, 1, 1]], e: [[7, 7]] });
+    a!.transport.send({ s: [[0, 1, 1, 1, 1]], e: [[7, 7]] });
     await settle();
     expect(b!.heard.map((h) => h.message)).toEqual([{ e: [[7, 7]] }]);
+  });
+
+  it("carry the clock across both channels: stamps and pings with the state, the time with the events too", async () => {
+    const rtc = new FakeRtc();
+    const [a, b] = await room(["a", "b"], rtc);
+    a!.transport.send({ s: [[0, 1, 2, 3, 4]], t: 500, pi: 77, po: [[1, 70, 80, 90]], e: [[9, 9]] });
+    await settle();
+    const got = b!.heard.map((h) => h.message);
+    expect(got).toContainEqual({ s: [[0, 1, 2, 3, 4]], t: 500, pi: 77, po: [[1, 70, 80, 90]] });
+    expect(got).toContainEqual({ e: [[9, 9]], t: 500 });
+    // A ping alone still goes out.
+    a!.transport.send({ pi: 78 });
+    await settle();
+    expect(b!.heard.at(-1)!.message).toEqual({ pi: 78 });
   });
 
   it("fall back to the relay for a pair that can't connect, still reaching each player once", async () => {
@@ -227,11 +246,11 @@ describe("direct connections", () => {
     const [a, b, c] = await room(["a", "b", "c"], rtc);
     expect(b!.transport.linkStatus("c")).toBe("relay");
     expect(b!.transport.linkStatus("a")).toBe("open");
-    b!.transport.send({ s: [[1, 5, 5, 5]] });
+    b!.transport.send({ s: [[1, 5, 5, 5, 5]] });
     await settle();
-    expect(a!.heard.map((h) => h.message)).toEqual([{ s: [[1, 5, 5, 5]] }]); // directly
-    expect(c!.heard.map((h) => h.message)).toEqual([{ s: [[1, 5, 5, 5]] }]); // through the relay, addressed to c only
-    expect(b!.relay.relayed).toEqual([{ s: [[1, 5, 5, 5]], r: ["c"] }]);
+    expect(a!.heard.map((h) => h.message)).toEqual([{ s: [[1, 5, 5, 5, 5]] }]); // directly
+    expect(c!.heard.map((h) => h.message)).toEqual([{ s: [[1, 5, 5, 5, 5]] }]); // through the relay, addressed to c only
+    expect(b!.relay.relayed).toEqual([{ s: [[1, 5, 5, 5, 5]], r: ["c"] }]);
   });
 
   it("fall back to the relay when a link never opens", async () => {
@@ -272,6 +291,7 @@ describe("direct connections", () => {
       // The cart publishes a moving state every tick.
       words[70] = 1;
       words[72] = t;
+      words[75] = t;
       session.afterTick(words);
     }
     await settle();
@@ -280,27 +300,31 @@ describe("direct connections", () => {
 });
 
 describe.skipIf(!existsSync(LOCKOUT_ENGINE))("Lockout in the lab over direct links", () => {
-  it("drifts less at 30 Hz than at the relay's rate over the same latency, inside the traffic budget", async () => {
+  it("draws the others more faithfully at 30 Hz than at the relay's rate, inside the traffic budget", async () => {
     const lab = (direct: boolean, players = 2, ticks = 600) =>
-      runNetLab({ players, conditions: { latencyMs: 80, jitterMs: 10, direct }, ticks, warmup: 30, seed: 3, cart: lockoutLabCart, input: lockoutLabInput(0), probe: LOCKOUT_PROBE });
+      runNetLab({ players, conditions: { latencyMs: 80, jitterMs: 10, direct }, ticks, warmup: 30, seed: 3, cart: lockoutLabCart, input: lockoutLabInput(0), probe: LOCKOUT_PROBE, renderDelayMs: 100 });
     const relay = await lab(false);
     const direct = await lab(true);
-    // The rate alone (same one-way latency): a snapshot half as stale. Cutting the
-    // relay's server hop out of the latency is the larger gain online, which the
-    // lab can't know; the easing toward each snapshot is L4's to replace.
-    expect(direct.humans.mean).toBeLessThan(relay.humans.mean * 0.95);
-    expect(direct.humans.p95).toBeLessThan(relay.humans.p95);
-    // Packed binary at 30 Hz: twice the messages at about half the size each,
-    // so about what the JSON cost at 15 Hz (2.7 KB/s for the host, with 6 bots).
+    // Since L4 the others are drawn a fixed buffer behind the newest snapshots,
+    // so the rate shows in how faithfully they're drawn: twice the snapshots,
+    // half the stretch between them to fill in. (Cutting the relay's server
+    // hop out of the latency is the larger gain online, which the lab can't know.)
+    expect(direct.interpolation!.humans.mean).toBeLessThan(relay.interpolation!.humans.mean);
+    expect(direct.interpolation!.humans.p95).toBeLessThan(relay.interpolation!.humans.p95);
+    // Packed binary at 30 Hz: twice the messages, each about the size of one
+    // at the relay's rate — four state words a slot since L4, for the host and
+    // its 6 bots, and since L5 every shot its bots fire (8 bytes each).
     expect(direct.bytesPerSecond[0]!.sent).toBeLessThan(relay.bytesPerSecond[0]!.sent * 2.1);
-    expect(direct.bytesPerSecond[0]!.sent).toBeLessThan(3_200);
+    expect(direct.bytesPerSecond[0]!.sent).toBeLessThan(5_000);
     const full = await lab(true, 8, 300);
-    for (const b of full.bytesPerSecond) {
+    // Guests send their inputs (60 a second); the host sends every soldier (L7).
+    for (const b of full.bytesPerSecond.slice(1)) {
       expect(b.sent).toBeLessThan(2_000);
       expect(b.received).toBeLessThan(10_000);
     }
+    expect(full.bytesPerSecond[0]!.sent).toBeLessThan(6_000);
     console.log(
-      `direct links, 80 ms: humans drift mean ${direct.humans.mean} m (relay ${relay.humans.mean} m), p95 ${direct.humans.p95} m (relay ${relay.humans.p95} m); ` +
+      `direct links, 80 ms: interpolation error mean ${direct.interpolation!.humans.mean} m (relay ${relay.interpolation!.humans.mean} m), p95 ${direct.interpolation!.humans.p95} m (relay ${relay.interpolation!.humans.p95} m); ` +
         `host sends ${direct.bytesPerSecond[0]!.sent} B/s (relay ${relay.bytesPerSecond[0]!.sent} B/s); ` +
         `8 players: drift mean ${full.humans.mean} m, host sends ${full.bytesPerSecond[0]!.sent} B/s, receives ${full.bytesPerSecond[0]!.received} B/s`,
     );
