@@ -69,6 +69,9 @@ import {
   hdrToTexture,
   isRadiance,
   panoramaWithClouds,
+  panoramaWithSun,
+  skySun,
+  type SkySun,
   type BakedCloudLayer,
   type ProceduralSky,
   BounceTransferBuilder,
@@ -214,6 +217,8 @@ const SKY_PANORAMA_WIDTH = 1536;
 const SKY_PANORAMA_HEIGHT = 768;
 /** The image-based-light copy is this much smaller — reflections are blurry anyway. */
 const SKY_IBL_DOWNSAMPLE = 8;
+/** Points across each reflections texel the sun's glow is averaged over, so the small copy keeps the core's light. */
+const SKY_IBL_SUN_SAMPLES = 4;
 
 /**
  * A cart pose's local transform. The SDK's rotation is (yaw, pitch, roll): yaw
@@ -281,6 +286,12 @@ export class MeshOverlaySurface implements DisplaySurface {
   private skyCache: { key: string; pixels: Uint8ClampedArray } | null = null;
   /** The sky's drifting cloud layers (I6), drawn over the backdrop each frame. */
   private skyClouds: BakedCloudLayer[] = [];
+  /**
+   * The sky's reflections copy without its sun (a sun layer, see bakeSceneSky),
+   * and the sun the environment map now shows: a cart's sun (cartbox.sun3d)
+   * moves the sun the metals reflect too.
+   */
+  private skyReflections: { small: DecodedTexture; sun: string } | null = null;
   /** The scene's distant vistas, textured: re-drawn into the sky whenever it is re-baked. */
   private vistas: VistaLayer[] = [];
   /**
@@ -518,6 +529,9 @@ export class MeshOverlaySurface implements DisplaySurface {
         skyMap = baked.map;
         clouds = baked.clouds;
         environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections) };
+        this.skyReflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
+      } else {
+        this.skyReflections = null;
       }
       this.environment = environment;
       this.skyMap = skyMap;
@@ -624,14 +638,17 @@ export class MeshOverlaySurface implements DisplaySurface {
     let environment: EnvironmentLight | null = lighting ? sceneLightingEnvironment(lighting) : null;
     // Distant vistas (I7) are drawn into that panorama, textured as the frame would draw them.
     const vistas = await texturedVistas(scene.vistas, texture);
+    let reflections: { small: DecodedTexture; sun: string } | null = null;
     if (lighting?.sky && environment) {
       const baked = await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center);
       skyMap = baked.map;
       clouds = baked.clouds;
       environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections) };
+      reflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
     }
     const surface = new MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
     surface.skyClouds = clouds;
+    surface.skyReflections = reflections;
     surface.startBounce();
     surface.vistas = vistas;
     surface.trailed = scene.instances.flatMap((instance, i) => (instance.mesh.trails && instance.mesh.trails.length > 0 ? [i] : []));
@@ -793,6 +810,22 @@ export class MeshOverlaySurface implements DisplaySurface {
     return this.sunRig.lighting;
   }
 
+  /**
+   * Keep the sun the metals reflect where the frame's sun is: when it has
+   * moved (or changed colour) past what {@link sunKey} rounds away, redraw the
+   * reflections copy's glow — a small map, a few milliseconds.
+   */
+  private followSun(lighting: SceneLighting | null): void {
+    const reflections = this.skyReflections;
+    if (!reflections || !lighting?.sky || !this.environment) return;
+    const sun = skySun(lighting.sky);
+    const key = sunKey(sun);
+    if (key === reflections.sun) return;
+    const map = skyReflectionsWith(reflections.small, sun, this.skyClouds);
+    this.environment = { ...this.environment, map, average: computeEnvironmentAverage(map) };
+    this.skyReflections = { small: reflections.small, sun: key };
+  }
+
   /** Start finding the probes' bounce transfer (I17), when they were baked with their light recorded. */
   private startBounce(): void {
     this.bounce = null;
@@ -892,6 +925,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     // is the key light (I17), and the probes' bounce follows the lights.
     const lighting = this.frameLighting();
     this.stepBounce(lighting);
+    this.followSun(lighting);
     let mark = profiler ? performance.now() : 0;
     const shadow = lighting ? this.buildShadow(instances, moved, lighting) : null;
     if (profiler) {
@@ -907,7 +941,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     // composite the meshes over it (background null) — backend-agnostic, since
     // both renderers leave untouched pixels alone.
     const skyBackdrop = this.hud && this.skyMap !== null;
-    if (skyBackdrop) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : SKY_BACKDROP_SCALE);
+    if (skyBackdrop) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : SKY_BACKDROP_SCALE, lighting?.sky ? skySun(lighting.sky) : null);
     if (profiler) {
       const now = performance.now();
       profiler.add("sky", now - mark);
@@ -1047,11 +1081,15 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.onSun?.({ x: this.sunAt.x, y: this.sunAt.y, visible: this.sunSeen });
   }
 
-  /** Paint the sky backdrop, or copy it from last frame when the view direction hasn't changed. */
-  private paintSky(out: Uint8ClampedArray, width: number, height: number, view: Mat4, projection: Mat4, scale: number): void {
+  /**
+   * Paint the sky backdrop with its sun's glow toward `sun` (the frame's: the
+   * cart's, if it set one), or copy it from last frame when neither the view
+   * direction nor the sun has changed.
+   */
+  private paintSky(out: Uint8ClampedArray, width: number, height: number, view: Mat4, projection: Mat4, scale: number, sun: SkySun | null): void {
     const key = [width, height, scale, view[0], view[1], view[2], view[4], view[5], view[6], view[8], view[9], view[10], projection[0], projection[5]]
       .map((n) => Math.round(n! * 1e5))
-      .join(",");
+      .join(",") + (sun ? `|${sunKey(sun)}` : "");
     const cache = this.skyCache;
     // Drifting clouds (I6) move every frame, so a sky with them is painted every
     // frame (and the copy the sun shafts read is refreshed with it).
@@ -1060,7 +1098,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       out.set(cache.pixels);
       return;
     }
-    renderSkyBackground(out, width, height, view, projection, this.skyMap!, 8, scale, drifting ? { layers: this.skyClouds, time: this.frame / 60 } : null);
+    renderSkyBackground(out, width, height, view, projection, this.skyMap!, 8, scale, drifting ? { layers: this.skyClouds, time: this.frame / 60 } : null, sun);
     const pixels = cache && cache.pixels.length === width * height * 4 ? cache.pixels : new Uint8ClampedArray(width * height * 4);
     pixels.set(out.subarray(0, width * height * 4));
     this.skyCache = { key, pixels };
@@ -1657,7 +1695,7 @@ async function bakeSceneSky(
   environment: EnvironmentLight,
   vistas: readonly VistaLayer[],
   eye: readonly [number, number, number],
-): Promise<{ map: DecodedTexture; reflections: DecodedTexture; clouds: BakedCloudLayer[] }> {
+): Promise<{ map: DecodedTexture; small: DecodedTexture; reflections: DecodedTexture; clouds: BakedCloudLayer[] }> {
   let imported: DecodedTexture | null = null;
   if (sky.panorama) {
     try {
@@ -1672,12 +1710,14 @@ async function bakeSceneSky(
       imported = null;
     }
   }
-  let map = bakeSkyPanorama(sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT, imported);
+  // A sun layer: the sky without its sun's glow, which the backdrop and the
+  // reflections draw toward wherever the sun is now (cartbox.sun3d moves it).
+  let map = bakeSkyPanorama(sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT, imported, { sunLayer: true });
   const bounds = vistas.length > 0 ? vistaBounds(vistas) : null;
   if (bounds) {
     // The vistas are lit as the frame lights the near ground: the rig, the
     // sky's light (before they stand in it) and the fog, with their own shadow.
-    const light = downsamplePanorama(map, SKY_IBL_DOWNSAMPLE);
+    const light = panoramaWithSun(downsamplePanorama(map, SKY_IBL_DOWNSAMPLE), skySun(sky), SKY_IBL_SUN_SAMPLES);
     const shadow = buildSceneShadow(
       vistas.flatMap((v) => v.instances),
       lighting,
@@ -1686,7 +1726,7 @@ async function bakeSceneSky(
       { size: VISTA_SHADOW_SIZE, depth: new Float32Array(VISTA_SHADOW_SIZE * VISTA_SHADOW_SIZE) },
     );
     // The haze is air: the sky without its ring and planets, which the vistas stand in front of.
-    const air = sky.objects && sky.objects.length > 0 ? bakeSkyPanorama({ ...sky, objects: [] }, VISTA_AIR_WIDTH, VISTA_AIR_WIDTH / 2, imported) : null;
+    const air = sky.objects && sky.objects.length > 0 ? bakeSkyPanorama({ ...sky, objects: [] }, VISTA_AIR_WIDTH, VISTA_AIR_WIDTH / 2, imported, { sunLayer: true }) : null;
     map = bakeVistas(map, vistas, eye, {
       ambient: lighting.ambient,
       lightDirection: sceneLightingKeyDirection(lighting),
@@ -1697,11 +1737,22 @@ async function bakeSceneSky(
       // Fog boxes sit in the play space, not out where the vistas are.
       fog: lighting.fog ? { ...lighting.fog, volumes: [] } : null,
       shadow,
-    }, undefined, air);
+    }, undefined, air, true);
   }
   const clouds = (sky.cloudLayers ?? []).map(bakeCloudLayer);
-  const reflections = panoramaWithClouds(downsamplePanorama(map, SKY_IBL_DOWNSAMPLE), clouds, 0);
-  return { map, reflections, clouds };
+  const small = downsamplePanorama(map, SKY_IBL_DOWNSAMPLE);
+  return { map, small, reflections: skyReflectionsWith(small, skySun(sky), clouds), clouds };
+}
+
+/** The reflections' copy of the sky: its small sun layer with `sun`'s glow drawn in, and the clouds laid over it at rest. */
+function skyReflectionsWith(small: DecodedTexture, sun: SkySun, clouds: readonly BakedCloudLayer[]): DecodedTexture {
+  return panoramaWithClouds(panoramaWithSun(small, sun, SKY_IBL_SUN_SAMPLES), clouds, 0);
+}
+
+/** A sun rounded to what's worth redrawing its glow for: turned about half a degree, or recoloured a step. */
+function sunKey(sun: SkySun): string {
+  const l = Math.hypot(sun.direction[0], sun.direction[1], sun.direction[2]) || 1;
+  return `${sun.direction.map((v) => Math.round((v / l) * 100)).join(",")}:${sun.color.map((v) => Math.round(v * 50)).join(",")}`;
 }
 
 /** A mesh with every material map decoded — what an instance (or a frame) draws with. */

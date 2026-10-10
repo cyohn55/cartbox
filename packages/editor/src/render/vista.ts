@@ -173,6 +173,10 @@ function samplePanorama(map: DecodedTexture, dx: number, dy: number, dz: number,
  * Haze fades a vista toward `air` — the sky without what stands in it (a
  * ring, a planet), at any size — so a ring behind a range doesn't ghost
  * through the haze in front of it; absent, toward the sky behind the pixel.
+ *
+ * Over a sun layer (`sunLayer`: the sky baked without its glow, alpha the
+ * share of the glow that shows), a vista hides the glow as it covers the sky,
+ * all but what its haze lets through.
  */
 export function bakeVistas(
   sky: DecodedTexture,
@@ -181,6 +185,7 @@ export function bakeVistas(
   shading: VistaShading = {},
   face = vistaFaceSize(sky.width),
   air: DecodedTexture | null = null,
+  sunLayer = false,
 ): DecodedTexture {
   const drawn = layers.filter((l) => l.instances.length > 0);
   if (drawn.length === 0) return sky;
@@ -259,6 +264,7 @@ export function bakeVistas(
       data[o] = Math.round(sr + (r - sr) * bestAlpha);
       data[o + 1] = Math.round(sg + (g - sg) * bestAlpha);
       data[o + 2] = Math.round(sb + (b - sb) * bestAlpha);
+      if (sunLayer) data[o + 3] = Math.round(data[o + 3]! * (1 - bestAlpha + bestAlpha * hz));
     }
   }
   return { width: w, height: h, data };

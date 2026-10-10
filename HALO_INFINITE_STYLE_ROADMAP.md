@@ -576,9 +576,21 @@ What separates Lockout from Halo Infinite, seen in a match:
       - **Cost:** on Lockout, about 15k surfels; a relight is about 10 ms in
         a slow test sandbox, and 30 ms when the sun moves.
 
-      *Not yet:* the sky dome's painted sun doesn't move with `sun3d`, and
-      light-mapped surfaces keep their baked bounce (the probes light what
-      moves).
+      - **The sky's sun follows it:** the player bakes a procedural sky
+        without its sun's glow, keeping in alpha how much of the glow each
+        texel lets through (less under cloud, none behind mountains, mist
+        or a vista). The backdrop draws the glow live toward the frame's sun:
+        the wide glow solved on its grid, the core per pixel near it. The
+        reflections' copy is redrawn when the sun turns about half a degree,
+        in about 3 ms. The glow takes the cart's sun's colour against the key
+        light's, so an evening sun paints a dimmer, redder glow, and the
+        flare and shafts move with it. Facing the sun, the live glow adds
+        about a third to the backdrop's cost; facing away, nothing.
+
+      *Not yet:* light-mapped surfaces keep their baked bounce (the probes
+      light what moves). The clouds' sunlit edges and the mountains' lit
+      faces stay as baked, and an imported panorama keeps the sun it
+      paints.
       *Lockout:* its probes carry their bake. The objective glows (the ball's
       cyan, the hill's green) and the plasma grenades' lights now bounce off
       the deck and walls onto the Spartans as they move.
