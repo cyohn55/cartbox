@@ -268,9 +268,32 @@ What separates Lockout from Halo Infinite, seen in a match:
       about 60 KB rather than 280. *Lockout:* arms on every weapon, swaying
       at rest, bobbing at a run, kicking on every shot, reloading
       hand-to-magazine, lunging on a melee and raising the new gun on a swap.
-- [ ] **I10. Plasma weapons.** The energy sword as translucent emissive
+- [x] **I10. Plasma weapons.** The energy sword as translucent emissive
       plasma: a hot core fading to blue edges, a glow halo, a swing trail, and
       the distortion from I5. *Lockout:* the sword, the plasma grenade.
+      *Done:* **plasma** (`plasma.ts`) is a material graph, so it runs alike
+      on every renderer. Its emissive goes from a white-hot core face on to
+      an electric-blue edge at the silhouette by the fresnel, flickered by
+      noise drifting up through it. Its alpha goes from nearly opaque at the
+      heart to faint at the edge. It has a black base (light adds nothing)
+      and a faint shimmer of the view behind. The Material panel has a Plasma
+      preset and the graph editor a Plasma graph. **Swing trails**
+      (`meshTrails.ts`): a mesh can declare trails, each a segment in its
+      own space (on a joint, for a skinned mesh) whose sweep over the last
+      fraction of a second is drawn as an additive ribbon. The ribbon fades
+      with age, is brightest at the segment's far end, and appears only above
+      a speed. The player records every trailing object each frame and draws
+      the ribbons on its layer, through the same path particles take. A
+      front-layer object's trail is kept in the camera's space, so a held
+      sword trails its swing, not the player's turning or running. Trails
+      are stored on the mesh. *Lockout:* the sword's blade is plasma inside
+      the I5 heat haze, which bends and shimmers the view as its halo, and
+      its swing (I9) leaves an arc of blue light from the emitter to the
+      tips. Grenades are now plasma grenades. Four copies are held in reserve
+      and spawned on a throw: a boiling blue charge in a cage of dark prongs,
+      trailing light and lighting what it passes. It sticks to the first
+      soldier it reaches (not its thrower) and goes off in a ball of blue
+      plasma. Until now grenades were invisible in flight.
 - [ ] **I11. Spartans.** A higher-detail armour model with team-colour masks,
       a reflective visor (I3 and I4), and the armour's own animation set.
       *Lockout:* bots that read as Spartans at a distance.

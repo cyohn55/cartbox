@@ -683,6 +683,8 @@ export {
   type ParticlePreset,
 } from "./model/particleEffects";
 export { PARTICLE_FRAMES, ParticleSystem, particleAtlas } from "./render/particleSystem";
+export { PLASMA_BLADE, plasmaGraph, plasmaMaterial, type PlasmaLook } from "./model/plasma";
+export { MAX_MESH_TRAILS, TRAIL_SAMPLES, TrailSystem, readMeshTrails, trailFade, trailStrength, type MeshTrail } from "./render/meshTrails";
 export {
   DECAL_PRESETS,
   MAX_DECAL_DEFS,

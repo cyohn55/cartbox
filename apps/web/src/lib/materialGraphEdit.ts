@@ -9,6 +9,7 @@ import {
   GRAPH_NODES,
   composeModelMatrix,
   graphParams,
+  plasmaGraph,
   projectionMatrix,
   renderMeshScene,
   viewMatrix,
@@ -190,6 +191,10 @@ export const GRAPH_PRESETS: Readonly<Record<string, { readonly hint: string; rea
   "Worn edges": {
     hint: "Paint chipped to bare metal on the relief's edges, grime in its cavities (needs a relief map)",
     graph: (): MaterialGraph => wornEdgesGraph(undefined),
+  },
+  Plasma: {
+    hint: "A white-hot heart cooling to blue at the silhouette and thinning there, boiling over time (set the material to Blend)",
+    graph: (): MaterialGraph => plasmaGraph(),
   },
   "Flowing energy": {
     hint: "Bands of light running across the surface over time",
