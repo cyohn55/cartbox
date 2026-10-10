@@ -180,7 +180,7 @@ I16 panels are re-made inline over hand-placed collision boxes.
       The host sends 0.5 KB/s and receives 2.7 KB/s. The larger gain online
       is losing the relay's server hop, which a simulated link can't show;
       the cart's easing toward each snapshot is L4's to replace.
-- [ ] **L4. Snapshots and interpolation.** Timestamped snapshots on a shared
+- [x] **L4. Snapshots and interpolation.** Timestamped snapshots on a shared
       tick clock, aligned with each peer's offset measured by ping. Remote
       Spartans are drawn about 100 ms in the past, interpolated between real
       snapshots rather than eased, with a short capped extrapolation through
@@ -190,6 +190,55 @@ I16 panels are re-made inline over hand-placed collision boxes.
       and animate their actual actions (the I9 and I11 clips).
       *Tests:* in the lab, interpolation error at 80 ms with 5% loss stays
       under a set bound, and a Spartan never snaps under normal play.
+      *Done:*
+      - **The shared clock** is the host's. A guest pings it (every 100 ms
+        for its first five answers, then every half second), and the host
+        echoes each ping in its next message with when it heard it and when
+        it answered. The guest keeps the NTP estimate from the fastest of its
+        last eight round trips. A guest 7.3 s off settles within 20 ms of the
+        host in two seconds over an 80 ± 20 ms link.
+      - **Stamps:** every message carries when its states were taken on that
+        clock. A snapshot overtaken on the way is dropped, so the newest
+        always stands.
+      - **The view lag:** the session also measures how old snapshots are
+        when they arrive. It rises at once with the slowest link and eases
+        down slowly. The cart draws everyone at the shared clock less that
+        lag less 100 ms: 100 ms behind the newest data, all at one moment.
+      - **The inbox** (`netplay.ts`) now holds the clock, the view lag (in
+        the header's top byte), four state words a slot and each slot's
+        stamp. Events in and out drop to 14 and 6 a tick to make room, and
+        the SDK queues the rest (`cartbox.netsend`). `cartbox.netclock()`
+        and the six-value `cartbox.netpeer()` give a cart all of it.
+      - **Lockout** keeps each remote Spartan's last snapshots and draws it
+        between the two either side of the render time. Where the next one
+        is late, it carries on along its last step for up to 100 ms, then
+        holds.
+      - **The fourth word** carries pitch, airborne, crouched, firing,
+        reloading, a melee swing, grenades held, a life counter (bumped by a
+        respawn, so nobody slides across the map) and a hit counter.
+      - **What the others see:** remote Spartans aim chest and head where
+        their owner looks, and play the I11 air, land, melee, hit and die
+        moves from those bits. A shot flashes at the muzzle.
+      - **Not carried:** Lockout has no crouch yet, and the third-person
+        soldier has no reload clip, so those bits ride along unused for now.
+
+      *Lab, the same 10 s run as L2/L3* (`lockout-interpolation.test.ts`; the
+      lab now also measures error against where the owner was at the
+      observer's render time, and snaps):
+      - **80 ms ± 20, 5% loss:** interpolation error mean 0.5 cm, p95
+        0.9 cm, no snap, largest extra step 4 cm.
+      - **150 ms ± 30, 5% loss:** error p95 1 cm, no snap.
+      - **8 players at 80 ms:** error p95 3 cm, no snap. The host sends
+        1.0 KB/s and receives 4.1 KB/s.
+      - **The price:** a remote Spartan is drawn about 0.84 m behind its
+        owner's present at 80 ms (0.58 m when eased toward the newest
+        snapshot), which L6's lag compensation pays back.
+      - **Traffic:** four words a slot put a two-player host at 3.9 KB/s
+        over direct links (2.9 KB/s with three).
+
+      On two engines in one room, the host's copy of a guest follows its
+      pitch to within 0.02 rad, sees every jump for as long as it lasts, and
+      flashes its shots.
 - [ ] **L5. Replicated combat.** Every shot, tracer, muzzle flash, melee,
       grenade throw, sword lunge and pickup becomes an event every client
       sees. A grenade is thrown with its starting state and a shared seed,

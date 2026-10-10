@@ -5,6 +5,11 @@
  * over it, measuring each client's traffic and how far each client's view of
  * every player drifts from where that player's owner has it.
  *
+ * A cart that draws the others a fixed delay in the past (L4: interpolation)
+ * is also measured against where each owner was at that render time — the
+ * error interpolation itself adds — and for snaps: a remote player jumping
+ * further in one tick than its owner moved.
+ *
  * Deterministic: a seeded random stream decides jitter and loss, and the
  * clock only moves when the harness advances it.
  */
@@ -208,6 +213,8 @@ export interface NetLabOptions {
   /** The buttons player `index` holds on tick `tick` (warmup ticks count from 0). */
   readonly input: (index: number, tick: number) => number;
   readonly probe: LabProbe;
+  /** How far in the past the cart draws the other players (ms), to measure its interpolation against. */
+  readonly renderDelayMs?: number;
 }
 
 /** Distances between where an owner has a player and where an observer draws it, in metres. */
@@ -228,6 +235,15 @@ export interface NetLabReport {
   readonly humans: DriftStats;
   readonly all: DriftStats;
   readonly messages: { readonly sent: number; readonly delivered: number; readonly lost: number };
+  /** With `renderDelayMs`: drift from where each owner was at the render time, and snaps. */
+  readonly interpolation?: {
+    readonly humans: DriftStats;
+    readonly all: DriftStats;
+    /** The largest jump (m) a remote human made in one tick beyond its owner's own move then (respawns aside). */
+    readonly maxStep: number;
+    /** Ticks where that excess passed half a metre. */
+    readonly snaps: number;
+  };
 }
 
 function stats(values: number[]): DriftStats {
@@ -246,7 +262,40 @@ function round(report: NetLabReport): NetLabReport {
     bytesPerSecond: report.bytesPerSecond.map((b) => ({ sent: Math.round(b.sent), received: Math.round(b.received) })),
     humans: s(report.humans),
     all: s(report.all),
+    ...(report.interpolation
+      ? { interpolation: { humans: s(report.interpolation.humans), all: s(report.interpolation.all), maxStep: r(report.interpolation.maxStep), snaps: report.interpolation.snaps } }
+      : {}),
   };
+}
+
+/** One owner's published path: where it was (null when dead or absent) at each tick's time. */
+type Track = { t: number; at: Point | null }[];
+
+/** Where a track had its player at time `t` (between samples), or null when it was dead or unknown then. */
+function trackAt(track: Track, t: number): Point | null {
+  const hi = track.findIndex((s) => s.t >= t);
+  if (hi < 0) return null;
+  if (track[hi]!.t === t || hi === 0) return track[hi]!.at;
+  const a = track[hi - 1]!;
+  const b = track[hi]!;
+  if (!a.at || !b.at) return null;
+  const f = (t - a.t) / (b.t - a.t);
+  return [a.at[0] + (b.at[0] - a.at[0]) * f, a.at[1] + (b.at[1] - a.at[1]) * f, a.at[2] + (b.at[2] - a.at[2]) * f];
+}
+
+const dist = (a: Point, b: Point) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+
+/** The furthest a track's player moved in one tick between `from` and `to` (null if it was dead in there). */
+function ownerStep(track: Track, from: number, to: number): number | null {
+  let most = 0;
+  for (let k = 1; k < track.length; k += 1) {
+    const a = track[k - 1]!;
+    const b = track[k]!;
+    if (b.t < from || a.t > to) continue;
+    if (!a.at || !b.at) return null;
+    most = Math.max(most, dist(a.at, b.at));
+  }
+  return most;
 }
 
 /**
@@ -267,6 +316,13 @@ export async function runNetLab(options: NetLabOptions): Promise<NetLabReport> {
   const owned = new Map<number, { at: Point | null; owner: number }>();
   const humanDrift: number[] = [];
   const allDrift: number[] = [];
+  const delay = options.renderDelayMs;
+  const tracks = new Map<number, Track>();
+  const lerpHumans: number[] = [];
+  const lerpAll: number[] = [];
+  const lastSeen = new Map<string, Point>();
+  let maxStep = 0;
+  let snaps = 0;
   const startTraffic = sessions.map(() => ({ sent: 0, received: 0 }));
   const total = options.warmup + options.ticks;
   for (let t = 0; t < total; t += 1) {
@@ -278,7 +334,16 @@ export async function runNetLab(options: NetLabOptions): Promise<NetLabReport> {
       cart.tick(options.input(i, t));
       // What this player owns, read from the outbox before the session takes it.
       const peek = takeNetOutbox(new Uint32Array(cart.net().slice(0, NET_WORDS)));
-      for (const [slot, state] of peek.states) owned.set(slot, { at: options.probe.owned(state), owner: i });
+      for (const [slot, state] of peek.states) {
+        const at = options.probe.owned(state);
+        owned.set(slot, { at, owner: i });
+        if (delay !== undefined) {
+          const track = tracks.get(slot) ?? [];
+          track.push({ t: hub.now(), at });
+          if (track.length > 240) track.shift();
+          tracks.set(slot, track);
+        }
+      }
       session.afterTick(cart.net());
     }
     if (t >= options.warmup) {
@@ -286,12 +351,37 @@ export async function runNetLab(options: NetLabOptions): Promise<NetLabReport> {
         const mySlot = sessions[i]!.mySlot;
         const mailbox = carts[i]!.mailbox();
         for (const [slot, { at, owner }] of owned) {
-          if (owner === i || !at) continue;
+          if (owner === i) continue;
           const seen = options.probe.seen(mailbox, mySlot, slot);
-          if (!seen) continue;
-          const d = Math.hypot(seen[0] - at[0], seen[1] - at[1], seen[2] - at[2]);
+          const key = `${i}:${slot}`;
+          const before = lastSeen.get(key);
+          if (seen) lastSeen.set(key, seen);
+          else lastSeen.delete(key);
+          if (!seen || !at) continue;
+          const d = dist(seen, at);
           allDrift.push(d);
           if (slot < options.players) humanDrift.push(d);
+          if (delay === undefined) continue;
+          // The moment this observer drew: its shared clock, less its view lag
+          // and the cart's delay, back on the lab's clock (stamps carry the
+          // owner's clock error, so it comes off too).
+          const track = tracks.get(slot)!;
+          const observer = sessions[i]!;
+          const shift = observer.clockSync().offset - observer.viewLagMs() - delay - sessions[owner]!.clockSync().offset;
+          const then = trackAt(track, hub.now() + shift);
+          if (!then) continue;
+          const e = dist(seen, then);
+          lerpAll.push(e);
+          if (slot >= options.players) continue;
+          lerpHumans.push(e);
+          // A snap: the drawn player jumped further this tick than its owner
+          // moved in any tick around then (the stretch it is drawn across).
+          if (!before) continue;
+          const own = ownerStep(track, hub.now() + shift - 50, hub.now() + shift + 20);
+          if (own === null || own > 1) continue; // dead then, or its owner teleported (a respawn): a jump is right
+          const excess = dist(seen, before) - own;
+          maxStep = Math.max(maxStep, excess);
+          if (excess > 0.5) snaps += 1;
         }
       }
     }
@@ -309,5 +399,6 @@ export async function runNetLab(options: NetLabOptions): Promise<NetLabReport> {
     humans: stats(humanDrift),
     all: stats(allDrift),
     messages: { ...hub.counts },
+    ...(delay !== undefined ? { interpolation: { humans: stats(lerpHumans), all: stats(lerpAll), maxStep, snaps } } : {}),
   });
 }
