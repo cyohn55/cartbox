@@ -548,6 +548,9 @@ export { aabbOccluded, occlusionCull, type OcclusionInput } from "./render/occlu
 export {
   SCENE_LIGHTING_VERSION,
   defaultSceneLighting,
+  infiniteDaylightLighting,
+  INFINITE_TINTS,
+  MAX_SCENE_TINTS,
   parseSceneLighting,
   patchSceneLighting,
   updateSceneEnvironment,

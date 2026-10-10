@@ -3254,6 +3254,173 @@ function lensFlareAt(uv, origin, aspect, params) {
   return [red * v, green * v, blue * v];
 }
 
+// src/fx/lutModel.ts
+var LUT_SIZE = 16;
+var MIN_LUT_SIZE = 2;
+var MAX_LUT_SIZE = 33;
+var LUT_LOOKS = ["Infinite", "Warm noon", "Cold steel", "Bleach bypass", "Imported"];
+var IMPORTED_LOOK = LUT_LOOKS.length - 1;
+var clamp01 = (v) => Math.max(0, Math.min(1, v));
+var luma = (c) => c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114;
+var smooth = (e0, e1, v) => {
+  const t = clamp01((v - e0) / (e1 - e0));
+  return t * t * (3 - 2 * t);
+};
+function vibrance(c, amount) {
+  const y = luma(c);
+  const sat = Math.max(...c) - Math.min(...c);
+  const k = 1 + amount * (1 - sat);
+  return [y + (c[0] - y) * k, y + (c[1] - y) * k, y + (c[2] - y) * k];
+}
+function desaturate(c, keep) {
+  const y = luma(c);
+  return [y + (c[0] - y) * keep, y + (c[1] - y) * keep, y + (c[2] - y) * keep];
+}
+function sCurve(c, amount) {
+  const s = (v) => {
+    const x = clamp01(v);
+    const curved = x * x * (3 - 2 * x);
+    return x + (curved - x) * amount;
+  };
+  return [s(c[0]), s(c[1]), s(c[2])];
+}
+function splitTint(c, shadows, highlights) {
+  const y = luma(c);
+  const lo = 1 - smooth(0.1, 0.5, y);
+  const hi = smooth(0.45, 0.95, y);
+  return [c[0] + shadows[0] * lo + highlights[0] * hi, c[1] + shadows[1] * lo + highlights[1] * hi, c[2] + shadows[2] * lo + highlights[2] * hi];
+}
+var LOOKS = [
+  // Infinite: clean, saturated daylight — colours lifted where they're dull, a
+  // touch of contrast, warm sunlit highlights over cool blue-teal shade.
+  (c) => splitTint(sCurve(vibrance(c, 0.35), 0.25), [-0.015, 0.01, 0.04], [0.035, 0.015, -0.03]),
+  // Warm noon: a golden cast through the mids and highlights.
+  (c) => splitTint(sCurve(vibrance(c, 0.15), 0.15), [0, 0, 0.01], [0.06, 0.03, -0.05]),
+  // Cold steel: muted and blue, the shadows bluest.
+  (c) => splitTint(vibrance(c, -0.3), [-0.02, 0, 0.05], [-0.01, 0.01, 0.03]),
+  // Bleach bypass: half the colour gone, hard contrast.
+  (c) => sCurve(desaturate(c, 0.45), 0.6)
+];
+function lookLut(look, size = LUT_SIZE) {
+  const fn = LOOKS[Math.round(look)] ?? ((c) => c);
+  const data = new Uint8Array(size * size * size * 3);
+  for (let b = 0; b < size; b += 1) {
+    for (let g = 0; g < size; g += 1) {
+      for (let r = 0; r < size; r += 1) {
+        const out = fn([r / (size - 1), g / (size - 1), b / (size - 1)]);
+        const o = ((b * size + g) * size + r) * 3;
+        data[o] = Math.round(clamp01(out[0]) * 255);
+        data[o + 1] = Math.round(clamp01(out[1]) * 255);
+        data[o + 2] = Math.round(clamp01(out[2]) * 255);
+      }
+    }
+  }
+  return { size, data };
+}
+function identityLut(size = LUT_SIZE) {
+  return lookLut(-1, size);
+}
+function parseCubeLut(text) {
+  let size = 0;
+  let min = [0, 0, 0];
+  let max = [1, 1, 1];
+  const values = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    const parts = line.split(/\s+/);
+    const key = parts[0].toUpperCase();
+    if (key === "TITLE") continue;
+    if (key === "LUT_1D_SIZE") return null;
+    if (key === "LUT_3D_SIZE") {
+      size = Number(parts[1]);
+      continue;
+    }
+    if (key === "DOMAIN_MIN" || key === "DOMAIN_MAX") {
+      const v = parts.slice(1, 4).map(Number);
+      if (v.length !== 3 || !v.every(Number.isFinite)) return null;
+      if (key === "DOMAIN_MIN") min = v;
+      else max = v;
+      continue;
+    }
+    if (/^[A-Z_]/.test(key)) continue;
+    if (parts.length !== 3) return null;
+    for (const p of parts) {
+      const v = Number(p);
+      if (!Number.isFinite(v)) return null;
+      values.push(v);
+    }
+  }
+  if (!Number.isInteger(size) || size < MIN_LUT_SIZE || size > MAX_LUT_SIZE || values.length !== size * size * size * 3) return null;
+  const data = new Uint8Array(values.length);
+  for (let i = 0; i < values.length; i += 1) {
+    const c = i % 3;
+    const span = max[c] - min[c] || 1;
+    data[i] = Math.round(clamp01((values[i] - min[c]) / span) * 255);
+  }
+  return { size, data };
+}
+function encodeLut(lut) {
+  let binary = "";
+  for (let i = 0; i < lut.data.length; i += 1) binary += String.fromCharCode(lut.data[i]);
+  return { size: lut.size, data: btoa(binary) };
+}
+function decodeLut(value) {
+  if (!value || typeof value !== "object") return null;
+  const { size, data } = value;
+  if (typeof size !== "number" || !Number.isInteger(size) || size < MIN_LUT_SIZE || size > MAX_LUT_SIZE || typeof data !== "string") return null;
+  let binary;
+  try {
+    binary = atob(data);
+  } catch {
+    return null;
+  }
+  if (binary.length !== size * size * size * 3) return null;
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return { size, data: bytes };
+}
+function applyLut(lut, r, g, b) {
+  const n = lut.size;
+  const at = (v) => {
+    const x = clamp01(v) * (n - 1);
+    const i = Math.min(n - 2, Math.floor(x));
+    return [i, x - i];
+  };
+  const [ri, rt] = at(r);
+  const [gi, gt] = at(g);
+  const [bi, bt] = at(b);
+  const out = [0, 0, 0];
+  for (let k = 0; k < 8; k += 1) {
+    const dr = k & 1, dg = k >> 1 & 1, db = k >> 2;
+    const w = (dr ? rt : 1 - rt) * (dg ? gt : 1 - gt) * (db ? bt : 1 - bt);
+    if (w === 0) continue;
+    const o = (((bi + db) * n + gi + dg) * n + ri + dr) * 3;
+    out[0] += lut.data[o] / 255 * w;
+    out[1] += lut.data[o + 1] / 255 * w;
+    out[2] += lut.data[o + 2] / 255 * w;
+  }
+  return out;
+}
+function lutStrip(lut) {
+  const n = lut.size;
+  const width = n * n;
+  const data = new Uint8Array(width * n * 4);
+  for (let b = 0; b < n; b += 1) {
+    for (let g = 0; g < n; g += 1) {
+      for (let r = 0; r < n; r += 1) {
+        const from = ((b * n + g) * n + r) * 3;
+        const to = (g * width + b * n + r) * 4;
+        data[to] = lut.data[from];
+        data[to + 1] = lut.data[from + 1];
+        data[to + 2] = lut.data[from + 2];
+        data[to + 3] = 255;
+      }
+    }
+  }
+  return { width, height: n, data };
+}
+
 // src/fx/PostFxPass.ts
 var f = (n) => n.toFixed(4);
 var GHOST_TERMS = FLARE_GHOSTS.map(
@@ -3326,6 +3493,10 @@ uniform float uKaleidoAngle;
 uniform float uGrainAmount;
 uniform float uGrainSize;
 uniform float uTime;
+// The grading LUT (lutModel.ts): a strip of uLutSize slices, blue picking the slice.
+uniform sampler2D uLut;
+uniform float uLutSize;
+uniform float uLutStrength;
 
 const float TAU = 6.2831853;
 // Fixed sample counts: GLSL ES 1.00 requires constant loop bounds, so the cost
@@ -3564,6 +3735,22 @@ ${GHOST_TERMS}
     color = mix(color, color * tint, uSplitStrength);
   }
 
+  // Grading LUT: the colour looked up in the table (applyLut in lutModel.ts).
+  // Bilinear filtering within a slice does red and green; the two slices either
+  // side of blue are mixed by hand \u2014 trilinear, from a 2D texture.
+  if (uLutStrength > 0.0) {
+    vec3 c = clamp(color, 0.0, 1.0);
+    float n = uLutSize;
+    float slice = c.b * (n - 1.0);
+    float b0 = floor(slice);
+    float b1 = min(b0 + 1.0, n - 1.0);
+    float x = c.r * (n - 1.0) + 0.5;
+    float y = (c.g * (n - 1.0) + 0.5) / n;
+    vec3 lo = texture2D(uLut, vec2((b0 * n + x) / (n * n), y)).rgb;
+    vec3 hi = texture2D(uLut, vec2((b1 * n + x) / (n * n), y)).rgb;
+    color = mix(color, mix(lo, hi, slice - b0), uLutStrength);
+  }
+
   // Ordered dither: offset each channel by up to half a posterisation step
   // before quantising, so pixels straddling a boundary alternate and read as the
   // colour between the two available ones. Applied to the *source* pixel grid so
@@ -3616,14 +3803,17 @@ ${GHOST_TERMS}
 }
 `;
 var PostFxPass = class _PostFxPass {
-  constructor(gl, program, texture, quad, positionLocation, bloom) {
+  constructor(gl, program, texture, quad, positionLocation, bloom, lutTexture) {
     this.gl = gl;
     this.program = program;
     this.texture = texture;
     this.quad = quad;
     this.positionLocation = positionLocation;
     this.bloom = bloom;
+    this.lutTexture = lutTexture;
     this.uniformLocations = /* @__PURE__ */ new Map();
+    /** The table last uploaded to {@link lutTexture}. */
+    this.lutUploaded = null;
   }
   /** Returns null when WebGL is unavailable or the shaders fail to compile. */
   static create(canvas) {
@@ -3667,7 +3857,15 @@ var PostFxPass = class _PostFxPass {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     const bloom = BloomPyramid.create(gl);
-    return new _PostFxPass(gl, program, texture, buffer, positionLocation, bloom);
+    const lutTexture = gl.createTexture();
+    if (!lutTexture) return null;
+    gl.bindTexture(gl.TEXTURE_2D, lutTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
+    return new _PostFxPass(gl, program, texture, buffer, positionLocation, bloom, lutTexture);
   }
   location(name) {
     if (!this.uniformLocations.has(name)) {
@@ -3716,9 +3914,19 @@ var PostFxPass = class _PostFxPass {
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, bloomTexture ?? this.texture);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.lutTexture);
+    if (uniforms.lut && uniforms.lut !== this.lutUploaded) {
+      const strip = lutStrip(uniforms.lut);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, strip.width, strip.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, strip.data);
+      this.lutUploaded = uniforms.lut;
+    }
     gl.activeTexture(gl.TEXTURE0);
     gl.uniform1i(this.location("uSource"), 0);
     gl.uniform1i(this.location("uBloomTex"), 1);
+    gl.uniform1i(this.location("uLut"), 2);
+    gl.uniform1f(this.location("uLutSize"), uniforms.lut?.size ?? 2);
+    gl.uniform1f(this.location("uLutStrength"), uniforms.lut ? uniforms.lutStrength : 0);
     gl.uniform1f(this.location("uHasBloomTex"), bloomTexture ? 1 : 0);
     gl.uniform2f(this.location("uSourceSize"), width, height);
     gl.uniform1f(this.location("uBrightness"), uniforms.brightness);
@@ -3775,6 +3983,7 @@ var PostFxPass = class _PostFxPass {
     this.bloom?.dispose();
     this.gl.deleteBuffer(this.quad);
     this.gl.deleteTexture(this.texture);
+    this.gl.deleteTexture(this.lutTexture);
     this.gl.deleteProgram(this.program);
   }
 };
@@ -3919,6 +4128,16 @@ var POST_FX_EFFECTS = [
     ]
   },
   {
+    id: "lut",
+    label: "Grading LUT",
+    description: "A colourist's look in one lookup table: a built-in grade (Infinite, Warm noon, Cold steel, Bleach bypass) or an imported .cube.",
+    params: [
+      { id: "strength", label: "Strength", min: 0, max: 1, step: 0.01, defaultValue: 1 },
+      // Which table: one of LUT_LOOKS, the last being the imported one.
+      { id: "look", label: "Look", min: 0, max: IMPORTED_LOOK, step: 1, defaultValue: 0 }
+    ]
+  },
+  {
     id: "reflection",
     label: "Wet-floor reflection",
     description: "Mirrors the scene above a horizon line down into the floor below it, fading with distance \u2014 the screen-space reflection of a rain-slick street.",
@@ -4011,6 +4230,10 @@ function parsePostFxSettings(value) {
       if (typeof raw === "string" && HEX_COLOR.test(raw)) settings.colors[key] = raw;
     }
   }
+  if (decodeLut(record.lut)) {
+    const { size, data } = record.lut;
+    settings.lut = { size, data };
+  }
   const legacyFog = record[LEGACY_FOG_COLOR_KEY];
   if (typeof legacyFog === "string" && HEX_COLOR.test(legacyFog) && !(paramKey("fog", "tint") in rawColors)) {
     settings.colors[paramKey("fog", "tint")] = legacyFog;
@@ -4077,8 +4300,29 @@ function uniformsFromSettings(settings) {
     kaleidoSegments: settings.enabled.kaleidoscope ? shape("kaleidoscope", "segments", 6) : 0,
     kaleidoAngle: shape("kaleidoscope", "angle", 0) * Math.PI / 180,
     grainAmount: value("grain", "amount", 0),
-    grainSize: shape("grain", "size", 1)
+    grainSize: shape("grain", "size", 1),
+    lutStrength: value("lut", "strength", 0),
+    lut: settings.enabled.lut ? gradingLut(Math.round(shape("lut", "look", 0)), settings.lut) : null
   };
+}
+var builtInLuts = /* @__PURE__ */ new Map();
+var importedLut = null;
+function gradingLut(look, stored) {
+  if (look === IMPORTED_LOOK) {
+    if (!stored) return identityLut();
+    if (importedLut?.key !== stored.data) {
+      const lut2 = decodeLut(stored);
+      if (!lut2) return identityLut();
+      importedLut = { key: stored.data, lut: lut2 };
+    }
+    return importedLut.lut;
+  }
+  let lut = builtInLuts.get(look);
+  if (!lut) {
+    lut = lookLut(look);
+    builtInLuts.set(look, lut);
+  }
+  return lut;
 }
 
 // src/fx/PostFxSurface.ts
@@ -9270,10 +9514,10 @@ function hazeColor(rgb, haze, atmosphere) {
   const lift = atmosphere.lift * t;
   const blend = atmosphere.density * t;
   const out = [rgb[0], rgb[1], rgb[2]];
-  const luma = out[0] * 0.299 + out[1] * 0.587 + out[2] * 0.114;
+  const luma2 = out[0] * 0.299 + out[1] * 0.587 + out[2] * 0.114;
   for (let c = 0; c < 3; c += 1) {
     let v = out[c];
-    v = lerp(v, luma, desat);
+    v = lerp(v, luma2, desat);
     v = lerp(v, lerp(v, atmosphere.fog[c], 0.5), lift);
     v = lerp(v, atmosphere.fog[c], blend);
     out[c] = v;
@@ -9666,7 +9910,7 @@ function hash01(seed, index, salt) {
 function wrap(value, span) {
   return (value % span + span) % span;
 }
-var clamp01 = (value) => value < 0 ? 0 : value > 1 ? 1 : value;
+var clamp012 = (value) => value < 0 ? 0 : value > 1 ? 1 : value;
 function simulateEmitter(emitter, frame, width, height) {
   const particles = [];
   const kind = emitter.kind;
@@ -9701,7 +9945,7 @@ function simulateEmitter(emitter, frame, width, height) {
       x: wrap(x, width),
       y: wrap(y, height),
       size: Math.max(1, size),
-      alpha: clamp01(alpha),
+      alpha: clamp012(alpha),
       color: emitter.color,
       streak
     });
@@ -10305,6 +10549,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.skyMap = skyMap;
       this.skyClouds = clouds;
       this.skyCache = null;
+      if (JSON.stringify(before.lighting?.tints ?? null) !== JSON.stringify(next.lighting?.tints ?? null)) this.tintCache.clear();
     }
     this.scene = next;
     if (moved) {
@@ -10866,7 +11111,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     }
     let out = byTint.get(tint);
     if (!out) {
-      out = tintMesh(mesh, tint);
+      out = tintMesh(mesh, tint, this.scene.lighting?.tints);
       byTint.set(tint, out);
     }
     return out;
@@ -11283,8 +11528,8 @@ function liveLod(lod, live) {
 function lodSignature(lod) {
   return lod ? `${lod.distances.join(",")}|${lod.meshes.map((m) => m.primitives.map((p) => p.indices.length).join(".")).join(",")}` : "";
 }
-function tintMesh(mesh, tint) {
-  const color = TINT_PALETTE[tint];
+function tintMesh(mesh, tint, overrides) {
+  const color = overrides?.[tint] ?? TINT_PALETTE[tint];
   if (!color || tint === 0) return mesh;
   return {
     name: mesh.name,
@@ -17921,13 +18166,13 @@ function resolveUnlockedAchievements(unlockHashes, registered) {
 // src/fx/lensModel.ts
 var TILT_SHIFT_FEATHER = 0.35;
 var EPSILON2 = 1e-3;
-function clamp012(value) {
+function clamp013(value) {
   return value < 0 ? 0 : value > 1 ? 1 : value;
 }
 function tiltShiftBlur(y, focus, range) {
   const outside = Math.abs(y - focus) - Math.max(0, range);
   if (outside <= 0) return 0;
-  return clamp012(outside / TILT_SHIFT_FEATHER);
+  return clamp013(outside / TILT_SHIFT_FEATHER);
 }
 function reflectionSampleY(y, horizon) {
   return horizon - (y - horizon);
@@ -17935,7 +18180,7 @@ function reflectionSampleY(y, horizon) {
 function reflectionFade(y, horizon, falloff) {
   const below = y - horizon;
   if (below <= 0) return 0;
-  return clamp012(1 - below / Math.max(EPSILON2, falloff));
+  return clamp013(1 - below / Math.max(EPSILON2, falloff));
 }
 
 // src/scene/sceneModel.ts
@@ -18645,6 +18890,7 @@ export {
   FLARE_SPIKE_POWER,
   GamepadInput,
   HEIGHT_WORLD,
+  IMPORTED_LOOK,
   INPUT_BLOCK_BYTES,
   INPUT_MAGIC,
   INPUT_SETTINGS,
@@ -18654,6 +18900,8 @@ export {
   LIGHT_FLOATS,
   LIGHT_STRIDE,
   LOOP_SLOTS,
+  LUT_LOOKS,
+  LUT_SIZE,
   LightingLayer,
   LitCanvasSurface,
   MAILBOX_TYPE_ACHIEVEMENT,
@@ -18661,6 +18909,7 @@ export {
   MAILBOX_TYPE_SCORE,
   MAILBOX_WORDS,
   MAX_EMITTERS,
+  MAX_LUT_SIZE,
   MAX_PARTICLES_PER_EMITTER,
   MAX_PYRAMID_LEVELS,
   MAX_VOICES,
@@ -18672,6 +18921,7 @@ export {
   MESH_POSE_CAPACITY,
   MESH_POSE_HIDDEN,
   MESH_POSE_STRIDE,
+  MIN_LUT_SIZE,
   MIN_PYRAMID_DIMENSION,
   MODELS,
   MemoryNetHub,
@@ -18716,6 +18966,7 @@ export {
   SoundSystem,
   SwitchableTransport,
   TILT_SHIFT_FEATHER,
+  TINT_PALETTE,
   UNIFORM_BYTES_USED,
   UNIFORM_FLOATS,
   UNIFORM_STRIDE,
@@ -18735,6 +18986,7 @@ export {
   anyPostFxEnabled,
   appendLuaCode,
   applyLookSettings,
+  applyLut,
   applyQualityToPostFx,
   applyRenderCaps,
   armDebugBlock,
@@ -18779,6 +19031,7 @@ export {
   debugSdkLua,
   decodeCamera,
   decodeLights,
+  decodeLut,
   decodeMailbox,
   decodeMeshCamera,
   decodeMeshPoses,
@@ -18790,6 +19043,7 @@ export {
   drift,
   effectiveBreakpoints,
   emitterPreset,
+  encodeLut,
   errorStack,
   estimateSceneBytes,
   evaluate,
@@ -18808,6 +19062,7 @@ export {
   hashCart,
   hashEventId,
   hexToRgb01,
+  identityLut,
   injectSdk,
   inputBlockAddress,
   instrumentLua,
@@ -18816,6 +19071,8 @@ export {
   jointFrames,
   lensFlareAt,
   loadEngineModule,
+  lookLut,
+  lutStrip,
   makeShadowTexture,
   mount,
   nearestDirection,
@@ -18828,6 +19085,7 @@ export {
   parseAnim,
   parseCollisionField,
   parseControlSettings,
+  parseCubeLut,
   parseFlagsField,
   parseMeshScene,
   parseParticles,

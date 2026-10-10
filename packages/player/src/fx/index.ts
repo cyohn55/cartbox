@@ -21,6 +21,21 @@ export type {
   PostFxUniforms,
 } from "./postfx.js";
 export { PostFxPass } from "./PostFxPass.js";
+export {
+  IMPORTED_LOOK,
+  LUT_LOOKS,
+  LUT_SIZE,
+  MAX_LUT_SIZE,
+  MIN_LUT_SIZE,
+  applyLut,
+  decodeLut,
+  encodeLut,
+  identityLut,
+  lookLut,
+  lutStrip,
+  parseCubeLut,
+} from "./lutModel.js";
+export type { GradingLut } from "./lutModel.js";
 export type { PostFxSource } from "./PostFxPass.js";
 export { PostFxSurface } from "./PostFxSurface.js";
 export type { InnerSurfaceFactory, ScreenSun } from "./PostFxSurface.js";

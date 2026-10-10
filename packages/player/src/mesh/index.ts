@@ -5,7 +5,7 @@
  * code needed. Phase 2 of the mesh asset feature.
  */
 
-export { MeshOverlaySurface, smoothFrontEdges } from "./MeshOverlaySurface.js";
+export { MeshOverlaySurface, TINT_PALETTE, smoothFrontEdges } from "./MeshOverlaySurface.js";
 export { parseMeshScene, buildOrbitCamera, orbitPitchAboveTerrain, streamGroups } from "./meshScene.js";
 export { sceneObjectsSdkLua, luaQuote } from "./sceneObjectsSdk.js";
 export type { MeshScene, MeshInstance, PrefabPool, SceneBounds, SceneVista, SceneCamera as MeshSceneCamera } from "./meshScene.js";

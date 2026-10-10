@@ -26,6 +26,8 @@ import {
   defaultSceneFog,
   defaultSceneLighting,
   defaultSunShafts,
+  infiniteDaylightLighting,
+  INFINITE_TINTS,
   setSceneShafts,
   MAX_FOG_VOLUMES,
   type FogVolume,
@@ -44,6 +46,8 @@ import {
   type SceneLight,
   type SceneLighting,
 } from "@cartbox/editor";
+
+import { TINT_PALETTE } from "@cartbox/player";
 
 import styles from "./editor.module.css";
 import { RailGroup, RailHint, RangeControl, SegmentedControl } from "./railControls";
@@ -129,6 +133,12 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
           </span>
           Add scene lighting
         </button>
+        <button type="button" className={styles.toolBtn} onClick={() => onChange(infiniteDaylightLighting())} title="A warm, strong noon sun, a bright blue sky fill, a clear dome and saturated team colours (pair it with the Infinite grading LUT in FX)">
+          <span className={styles.toolGlyph} aria-hidden>
+            ☀
+          </span>
+          Infinite daylight
+        </button>
         <RailHint>Modern-tier lighting & skybox for the 3D scene. Off by default — capped tiers are unaffected.</RailHint>
       </RailGroup>
     );
@@ -158,6 +168,7 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
       <FogControls lighting={lighting} onChange={onChange} />
       <ShaftControls lighting={lighting} onChange={onChange} />
       <ProbeControls lighting={lighting} onChange={onChange} />
+      <TintControls lighting={lighting} onChange={onChange} />
 
       <RangeControl
         label="Ambient fill"
@@ -385,6 +396,12 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
         </button>
       </div>
 
+      <button type="button" className={styles.toolBtn} onClick={() => onChange({ ...infiniteDaylightLighting(), probes: lighting.probes, lightProbes: lighting.lightProbes })} title="Replace the rig with the Infinite daylight preset (keeps the probes)">
+        <span className={styles.toolGlyph} aria-hidden>
+          ☀
+        </span>
+        Infinite daylight
+      </button>
       <button type="button" className={styles.toolBtn} onClick={() => onChange(null)} title="Remove the whole lighting rig">
         <span className={styles.toolGlyph} aria-hidden>
           🗑
@@ -393,6 +410,54 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
       </button>
       <RailHint>Lights and the skybox shade Modern-tier (PBR) materials. Capped tiers ignore them.</RailHint>
     </RailGroup>
+  );
+}
+
+/** The palette's names, index-aligned with the runtime's tint palette. */
+const TINT_NAMES = ["", "Red", "Blue", "Green", "Orange", "Purple", "Gold", "Brown", "Pink", "White", "Black", "Steel", "Teal", "Olive", "Crimson", "Sage"];
+
+/**
+ * Team colours (I8): the armour palette carts tint their soldiers from, per
+ * scene — the built-in colours, or saturated ones that hold up under a bright rig.
+ */
+function TintControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
+  const tints = lighting.tints ?? [];
+  const set = (k: number, rgb: Rgb | null) => {
+    const next = Array.from({ length: Math.max(tints.length, k + 1) }, (_, i) => (i === k ? rgb : (tints[i] ?? null)));
+    onChange(next.some((t) => t !== null) ? { ...lighting, tints: next } : { ...lighting, tints: undefined });
+  };
+  return (
+    <details style={{ marginTop: 8 }}>
+      <summary style={{ cursor: "pointer", fontSize: 12 }}>Team colours{lighting.tints ? " · custom" : ""}</summary>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 4, marginTop: 4 }}>
+        {TINT_NAMES.slice(1).map((name, i) => {
+          const k = i + 1;
+          const value = tints[k] ?? TINT_PALETTE[k] ?? [1, 1, 1];
+          return (
+            <input
+              key={k}
+              type="color"
+              aria-label={`${name} armour colour`}
+              title={`${k} ${name}${tints[k] ? "" : " (built-in)"}`}
+              value={toHex(value)}
+              onChange={(event) => set(k, fromHex(event.target.value))}
+              style={{ width: "100%", height: 22, padding: 0, border: "none", background: "none", opacity: tints[k] ? 1 : 0.55 }}
+            />
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+        <button type="button" className={styles.toolBtn} onClick={() => onChange({ ...lighting, tints: INFINITE_TINTS })}>
+          Saturated
+        </button>
+        {lighting.tints && (
+          <button type="button" className={styles.toolBtn} onClick={() => onChange({ ...lighting, tints: undefined })}>
+            Built-in
+          </button>
+        )}
+      </div>
+      <RailHint>The colours a cart&apos;s armour tints pick from in this scene (red and blue are the teams).</RailHint>
+    </details>
   );
 }
 

@@ -10,7 +10,7 @@
  * Effect order mirrors a physical signal path. The frame is folded and bowed
  * first (kaleidoscope, then CRT curvature), sampled through chromatic
  * aberration, and lit (bloom, god rays, streaks). The composed colour is then
- * graded and split-toned, quantised (dither feeding posterize), screened
+ * graded, split-toned and looked up in the grading LUT, quantised (dither feeding posterize), screened
  * (halftone), and finally passed through the things that sit in front of the
  * picture rather than in it: fog, vignette, grain, scanlines.
  *
@@ -22,6 +22,7 @@
 
 import { BloomPyramid } from "./BloomPyramid.js";
 import { FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER } from "./flareModel.js";
+import { lutStrip, type GradingLut } from "./lutModel.js";
 import type { PostFxUniforms } from "./postfx.js";
 
 const f = (n: number) => n.toFixed(4);
@@ -101,6 +102,10 @@ uniform float uKaleidoAngle;
 uniform float uGrainAmount;
 uniform float uGrainSize;
 uniform float uTime;
+// The grading LUT (lutModel.ts): a strip of uLutSize slices, blue picking the slice.
+uniform sampler2D uLut;
+uniform float uLutSize;
+uniform float uLutStrength;
 
 const float TAU = 6.2831853;
 // Fixed sample counts: GLSL ES 1.00 requires constant loop bounds, so the cost
@@ -339,6 +344,22 @@ ${GHOST_TERMS}
     color = mix(color, color * tint, uSplitStrength);
   }
 
+  // Grading LUT: the colour looked up in the table (applyLut in lutModel.ts).
+  // Bilinear filtering within a slice does red and green; the two slices either
+  // side of blue are mixed by hand — trilinear, from a 2D texture.
+  if (uLutStrength > 0.0) {
+    vec3 c = clamp(color, 0.0, 1.0);
+    float n = uLutSize;
+    float slice = c.b * (n - 1.0);
+    float b0 = floor(slice);
+    float b1 = min(b0 + 1.0, n - 1.0);
+    float x = c.r * (n - 1.0) + 0.5;
+    float y = (c.g * (n - 1.0) + 0.5) / n;
+    vec3 lo = texture2D(uLut, vec2((b0 * n + x) / (n * n), y)).rgb;
+    vec3 hi = texture2D(uLut, vec2((b1 * n + x) / (n * n), y)).rgb;
+    color = mix(color, mix(lo, hi, slice - b0), uLutStrength);
+  }
+
   // Ordered dither: offset each channel by up to half a posterisation step
   // before quantising, so pixels straddling a boundary alternate and read as the
   // colour between the two available ones. Applied to the *source* pixel grid so
@@ -403,7 +424,12 @@ export class PostFxPass {
     /** Null when render-to-texture is unavailable; the shader then falls back
      * to its inline 3x3 bloom rather than the multi-scale pyramid. */
     private readonly bloom: BloomPyramid | null,
+    /** The grading LUT's strip (unit 2), uploaded when the table changes. */
+    private readonly lutTexture: WebGLTexture,
   ) {}
+
+  /** The table last uploaded to {@link lutTexture}. */
+  private lutUploaded: GradingLut | null = null;
 
   /** Returns null when WebGL is unavailable or the shaders fail to compile. */
   static create(canvas: HTMLCanvasElement): PostFxPass | null {
@@ -456,7 +482,17 @@ export class PostFxPass {
     // inline bloom covers the case, so FX still runs without render-to-texture.
     const bloom = BloomPyramid.create(gl);
 
-    return new PostFxPass(gl, program, texture, buffer, positionLocation, bloom);
+    // The LUT strip filters linearly: that is the red/green half of the trilinear lookup.
+    const lutTexture = gl.createTexture();
+    if (!lutTexture) return null;
+    gl.bindTexture(gl.TEXTURE_2D, lutTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
+
+    return new PostFxPass(gl, program, texture, buffer, positionLocation, bloom, lutTexture);
   }
 
   private location(name: string): WebGLUniformLocation | null {
@@ -519,10 +555,21 @@ export class PostFxPass {
     // there is no bloom, so the declared sampler always has a complete texture.
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, bloomTexture ?? this.texture);
+    // Unit 2 carries the grading LUT (a 1×1 placeholder until one is set).
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.lutTexture);
+    if (uniforms.lut && uniforms.lut !== this.lutUploaded) {
+      const strip = lutStrip(uniforms.lut);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, strip.width, strip.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, strip.data);
+      this.lutUploaded = uniforms.lut;
+    }
     gl.activeTexture(gl.TEXTURE0);
 
     gl.uniform1i(this.location("uSource"), 0);
     gl.uniform1i(this.location("uBloomTex"), 1);
+    gl.uniform1i(this.location("uLut"), 2);
+    gl.uniform1f(this.location("uLutSize"), uniforms.lut?.size ?? 2);
+    gl.uniform1f(this.location("uLutStrength"), uniforms.lut ? uniforms.lutStrength : 0);
     gl.uniform1f(this.location("uHasBloomTex"), bloomTexture ? 1 : 0);
     gl.uniform2f(this.location("uSourceSize"), width, height);
     gl.uniform1f(this.location("uBrightness"), uniforms.brightness);
@@ -581,6 +628,7 @@ export class PostFxPass {
     this.bloom?.dispose();
     this.gl.deleteBuffer(this.quad);
     this.gl.deleteTexture(this.texture);
+    this.gl.deleteTexture(this.lutTexture);
     this.gl.deleteProgram(this.program);
   }
 }

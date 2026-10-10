@@ -216,10 +216,32 @@ What separates Lockout from Halo Infinite, seen in a match:
       climb to a wall of snow-capped peaks that fade into the sky with
       distance. They show above the near ridges and through the notch in the
       east.
-- [ ] **I8. Light and colour pass.** An Infinite look for the lighting rig: a
+- [x] **I8. Light and colour pass.** An Infinite look for the lighting rig: a
       warm, strong sun, a bright sky fill, saturated team colours and a
       grading LUT; Lockout re-lit and re-baked to match. *Lockout:* bright
       noon on snow, with blue-grey metal and cyan light channels.
+      *Done:* the post-process stack gains a **grading LUT** (`lutModel.ts`):
+      a 3D lookup table, held by the single-pass shader as a strip of blue
+      slices and read trilinearly (bilinear within a slice, the two slices
+      either side mixed by hand). There are four built-in looks: Infinite
+      (dull colour lifted, a touch of contrast, warm highlights over cool
+      blue-teal shade), Warm noon, Cold steel and Bleach bypass. A `.cube`
+      from any grading tool (up to 33³) can be imported in the FX tab and is
+      kept on the effect stack, with a strength to blend it in. In a real
+      browser every colour lands within 3 levels of the CPU reference. A rig
+      can carry its own **team colours** (`SceneLighting.tints`): the armour
+      palette carts tint from, entry by entry, re-tinted live when edited.
+      The Lighting panel picks them, with a saturated set (`INFINITE_TINTS`)
+      that holds up under a bright sun. There is also an **Infinite
+      daylight** preset (`infiniteDaylightLighting`): a warm, strong sun about
+      55° up, a bright blue sky fill from the far side, a clear noon dome
+      that is also the image-based light, ACES, shadows and the saturated
+      colours. *Lockout:* re-lit for noon. The sun is 52° up, warm and
+      stronger, over a clear deep-blue dome, a lighter blue fill and thinner
+      haze. Snow is whiter, the team colours are saturated, and the FX grade
+      runs through the Infinite LUT (the split tone is down to a whisper).
+      The light map and probes are re-baked for the new sun. The
+      Forerunner metal keeps its blue-steel cast and its cyan channels.
 
 ## Phase C — Characters and first person
 

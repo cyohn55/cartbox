@@ -486,6 +486,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       this.skyMap = skyMap;
       this.skyClouds = clouds;
       this.skyCache = null;
+      // The rig's armour colours (I8) may have changed: tint afresh.
+      if (JSON.stringify(before.lighting?.tints ?? null) !== JSON.stringify(next.lighting?.tints ?? null)) this.tintCache.clear();
     }
     this.scene = next;
     if (moved) {
@@ -1159,7 +1161,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     }
     let out = byTint.get(tint);
     if (!out) {
-      out = tintMesh(mesh, tint);
+      out = tintMesh(mesh, tint, this.scene.lighting?.tints);
       byTint.set(tint, out);
     }
     return out;
@@ -1674,8 +1676,9 @@ function lodSignature(lod: LodChain | null | undefined): string {
   return lod ? `${lod.distances.join(",")}|${lod.meshes.map((m) => m.primitives.map((p) => p.indices.length).join(".")).join(",")}` : "";
 }
 
-export function tintMesh(mesh: MeshAsset, tint: number): MeshAsset {
-  const color = TINT_PALETTE[tint];
+export function tintMesh(mesh: MeshAsset, tint: number, overrides?: SceneLighting["tints"]): MeshAsset {
+  // A scene's own armour colours (I8) stand in for the palette's.
+  const color = overrides?.[tint] ?? TINT_PALETTE[tint];
   if (!color || tint === 0) return mesh;
   return {
     name: mesh.name,
