@@ -245,6 +245,24 @@ export function MaterialEditor({ mesh, onChange }: MaterialEditorProps) {
         </button>
       </div>
 
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginTop: 6 }} title="A cart's pose tint (cartbox.meshpose … tint) recolours this part: team colours on one shared mesh">
+        <input type="checkbox" checked={Boolean(material.tintable)} onChange={(event) => patch({ tintable: event.target.checked || undefined, tintMix: undefined })} />
+        Takes the team colour
+      </label>
+      {material.tintable && (
+        <RangeControl
+          label="Team colour share"
+          nested
+          min={0}
+          max={1}
+          step={0.05}
+          value={material.tintMix ?? 1}
+          ariaLabel="Team colour share"
+          display={`${Math.round((material.tintMix ?? 1) * 100)}%`}
+          onChange={(value) => patch({ tintMix: value >= 1 ? undefined : value })}
+        />
+      )}
+
       <RangeControl
         label="Metallic"
         nested
