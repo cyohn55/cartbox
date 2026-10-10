@@ -394,6 +394,8 @@ export {
 export type { NetInbox, NetOutbox, NetState, NetEvent } from "./net/netplay.js";
 export { NetSession, MemoryNetHub, BroadcastChannelTransport, SwitchableTransport, netSendInterval } from "./net/NetSession.js";
 export type { NetMessage, NetPeer, NetRoomStatus, NetTransport } from "./net/NetSession.js";
+export { SimulatedNetHub, runNetLab } from "./net/netLab.js";
+export type { DriftStats, LabCart, LabProbe, LinkConditions, NetLabOptions, NetLabReport } from "./net/netLab.js";
 
 /**
  * Mounts a cartridge player into a container element and begins loading.

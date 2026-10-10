@@ -5850,7 +5850,7 @@ var TouchInput = class {
     element.type = "button";
     element.setAttribute("data-cbx-button", ConsoleButton[control.button]);
     element.setAttribute("aria-label", `${ConsoleButton[control.button]} button`);
-    const round = true;
+    const round2 = true;
     Object.assign(element.style, {
       gridColumn: String(control.col),
       gridRow: String(control.row),
@@ -5865,7 +5865,7 @@ var TouchInput = class {
       flexDirection: "column",
       alignItems: "center",
       justifyContent: "center",
-      borderRadius: round ? "50%" : "10px",
+      borderRadius: round2 ? "50%" : "10px",
       border: "2px solid rgba(255,255,255,0.45)",
       background: "rgba(20,26,40,0.45)",
       color: "rgba(255,255,255,0.92)",
@@ -17961,7 +17961,7 @@ var Player = class {
     const profiler = this.profiler;
     if (!profiler) return null;
     const { frames, sections, total } = profiler.sections();
-    const stats = this.meshSurface?.renderStats() ?? null;
+    const stats2 = this.meshSurface?.renderStats() ?? null;
     const heap = this.view.performance.memory?.usedJSHeapSize;
     let net = null;
     const traffic = this.options.netplay?.traffic();
@@ -17982,7 +17982,7 @@ var Player = class {
       frames,
       sections,
       total,
-      render: stats && this.sceneRenderer ? { ...stats, backend: this.sceneRenderer.backend } : null,
+      render: stats2 && this.sceneRenderer ? { ...stats2, backend: this.sceneRenderer.backend } : null,
       memory: {
         wasm: this.console?.memoryBytes() ?? 0,
         jsHeap: typeof heap === "number" ? heap : null,
@@ -18800,14 +18800,14 @@ function drift(period, distance) {
 function flicker(period, min, max, steps = 8, seed = 1) {
   const length = Math.max(2, Math.round(period));
   const count = Math.max(2, Math.min(64, Math.min(Math.round(steps), length)));
-  const random = seededRandom(seed);
+  const random2 = seededRandom(seed);
   const keys = [];
   let previousT = -1;
   for (let i = 0; i < count; i += 1) {
     let t = Math.floor(i / count * length);
     if (t <= previousT) t = previousT + 1;
     previousT = t;
-    keys.push({ t, value: min + (max - min) * random(), ease: "step" });
+    keys.push({ t, value: min + (max - min) * random2(), ease: "step" });
   }
   return { keys, mode: "loop", loopLength: length };
 }
@@ -19192,6 +19192,190 @@ var SwitchableTransport = class {
   }
 };
 
+// src/net/netLab.ts
+function random(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = a + 1831565813 >>> 0;
+    let t = a;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+var SimulatedNetHub = class {
+  constructor(conditions, seed = 1) {
+    this.conditions = conditions;
+    this.clock = 0;
+    this.order = 0;
+    this.members = /* @__PURE__ */ new Map();
+    this.queue = [];
+    /** Messages sent, delivered and lost so far. */
+    this.counts = { sent: 0, delivered: 0, lost: 0 };
+    /** The virtual time, ms. */
+    this.now = () => this.clock;
+    this.rand = random(seed);
+  }
+  /** A transport for peer `id`; its uplink has the hub's conditions unless `link` overrides them. */
+  transport(id, link = this.conditions) {
+    const transport = new SimulatedTransport(id, this);
+    this.members.set(id, { peer: null, transport, link, busyUntil: 0 });
+    return transport;
+  }
+  /** Move the clock on by `ms`, delivering every message due by then in arrival order, each at its arrival time. */
+  advance(ms) {
+    const end = this.clock + ms;
+    const due = this.queue.filter((m) => m.at <= end).sort((a, b) => a.at - b.at || a.order - b.order);
+    this.queue = this.queue.filter((m) => m.at > end);
+    for (const m of due) {
+      const member = this.members.get(m.to);
+      if (!member?.peer) continue;
+      this.clock = Math.max(this.clock, m.at);
+      this.counts.delivered += 1;
+      member.transport.receive(JSON.parse(m.wire), m.from);
+    }
+    this.clock = end;
+  }
+  /** @internal */
+  join(id, peer) {
+    const member = this.members.get(id);
+    if (member) member.peer = peer;
+    this.announce();
+  }
+  /** @internal */
+  leave(id) {
+    this.members.delete(id);
+    this.queue = this.queue.filter((m) => m.to !== id);
+    this.announce();
+  }
+  /** @internal */
+  send(from, message) {
+    const sender = this.members.get(from);
+    if (!sender) return;
+    const wire = JSON.stringify(message);
+    this.counts.sent += 1;
+    const { link } = sender;
+    const leaves = link.bandwidth ? Math.max(this.clock, sender.busyUntil) + wire.length / link.bandwidth * 1e3 : this.clock;
+    sender.busyUntil = leaves;
+    for (const [id, member] of this.members) {
+      if (id === from || !member.peer) continue;
+      if (link.loss && this.rand() < link.loss) {
+        this.counts.lost += 1;
+        continue;
+      }
+      const at = leaves + link.latencyMs + (link.jitterMs ? this.rand() * link.jitterMs : 0);
+      this.queue.push({ at, order: this.order++, to: id, from, wire });
+    }
+  }
+  announce() {
+    const peers = [...this.members.values()].flatMap((m) => m.peer ? [m.peer] : []);
+    for (const member of this.members.values()) if (member.peer) member.transport.peers(peers);
+  }
+};
+var SimulatedTransport = class {
+  constructor(selfId, hub) {
+    this.selfId = selfId;
+    this.hub = hub;
+    this.messageHandler = null;
+    this.peersHandler = null;
+  }
+  async connect(joinedAt, name) {
+    this.hub.join(this.selfId, { id: this.selfId, joinedAt, name });
+  }
+  send(message) {
+    this.hub.send(this.selfId, message);
+  }
+  onMessage(handler) {
+    this.messageHandler = handler;
+  }
+  onPeers(handler) {
+    this.peersHandler = handler;
+  }
+  close() {
+    this.hub.leave(this.selfId);
+  }
+  /** @internal */
+  receive(message, from) {
+    this.messageHandler?.(message, from);
+  }
+  /** @internal */
+  peers(peers) {
+    this.peersHandler?.(peers);
+  }
+};
+function stats(values) {
+  if (values.length === 0) return { samples: 0, mean: 0, p95: 0, max: 0 };
+  const sorted = [...values].sort((a, b) => a - b);
+  const mean = values.reduce((s, v) => s + v, 0) / values.length;
+  return { samples: values.length, mean, p95: sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))], max: sorted.at(-1) };
+}
+function round(report) {
+  const r = (v) => Math.round(v * 1e3) / 1e3;
+  const s = (d) => ({ samples: d.samples, mean: r(d.mean), p95: r(d.p95), max: r(d.max) });
+  return {
+    ...report,
+    bytesPerSecond: report.bytesPerSecond.map((b) => ({ sent: Math.round(b.sent), received: Math.round(b.received) })),
+    humans: s(report.humans),
+    all: s(report.all)
+  };
+}
+async function runNetLab(options) {
+  const hub = new SimulatedNetHub(options.conditions, options.seed ?? 1);
+  const sessions = [];
+  const carts = [];
+  for (let i = 0; i < options.players; i += 1) {
+    const session = new NetSession(hub.transport(`p${i}`), hub.now);
+    await session.connect(`Player ${i + 1}`);
+    sessions.push(session);
+    carts.push(await options.cart());
+  }
+  const owned = /* @__PURE__ */ new Map();
+  const humanDrift = [];
+  const allDrift = [];
+  const startTraffic = sessions.map(() => ({ sent: 0, received: 0 }));
+  const total = options.warmup + options.ticks;
+  for (let t = 0; t < total; t += 1) {
+    if (t === options.warmup) sessions.forEach((s, i) => startTraffic[i] = s.traffic());
+    for (let i = 0; i < carts.length; i += 1) {
+      const cart = carts[i];
+      const session = sessions[i];
+      session.beforeTick(cart.net());
+      cart.tick(options.input(i, t));
+      const peek = takeNetOutbox(new Uint32Array(cart.net().slice(0, NET_WORDS)));
+      for (const [slot, state] of peek.states) owned.set(slot, { at: options.probe.owned(state), owner: i });
+      session.afterTick(cart.net());
+    }
+    if (t >= options.warmup) {
+      for (let i = 0; i < carts.length; i += 1) {
+        const mySlot = sessions[i].mySlot;
+        const mailbox = carts[i].mailbox();
+        for (const [slot, { at, owner }] of owned) {
+          if (owner === i || !at) continue;
+          const seen = options.probe.seen(mailbox, mySlot, slot);
+          if (!seen) continue;
+          const d = Math.hypot(seen[0] - at[0], seen[1] - at[1], seen[2] - at[2]);
+          allDrift.push(d);
+          if (slot < options.players) humanDrift.push(d);
+        }
+      }
+    }
+    hub.advance(1e3 / 60);
+  }
+  const seconds = options.ticks / 60;
+  return round({
+    conditions: options.conditions,
+    players: options.players,
+    seconds,
+    bytesPerSecond: sessions.map((s, i) => {
+      const now = s.traffic();
+      return { sent: (now.sent - startTraffic[i].sent) / seconds, received: (now.received - startTraffic[i].received) / seconds };
+    }),
+    humans: stats(humanDrift),
+    all: stats(allDrift),
+    messages: { ...hub.counts }
+  });
+}
+
 // src/index.ts
 function mount(container, options) {
   const player = new Player(container, options);
@@ -19333,6 +19517,7 @@ export {
   SOFTWARE_RASTER_CAPS,
   START_KEYS,
   SceneBackdropSurface,
+  SimulatedNetHub,
   SoftwareSceneRenderer,
   SoundSystem,
   SwitchableTransport,
@@ -19494,6 +19679,7 @@ export {
   resolveSupersample,
   resolveUnlockedAchievements,
   rewriteLuaCode,
+  runNetLab,
   runReplayEvents,
   runtimeSdkLua,
   sampleClipFrame,

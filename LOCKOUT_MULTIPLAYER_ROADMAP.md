@@ -114,7 +114,7 @@ I16 panels are re-made inline over hand-placed collision boxes.
       hash), and so is the whole sidecar. In `arena-map.test.ts`, a tiny
       two-team map runs on the real engine: every bot spawns on it, and in
       Team Slayer each team spawns on its own side.
-- [ ] **L2. A network lab.** A simulated network for the in-memory hub, with
+- [x] **L2. A network lab.** A simulated network for the in-memory hub, with
       latency, jitter, loss, reordering and a bandwidth cap, plus a headless
       harness that runs 2 to 8 real Lockout engines in one room. It reports
       per-client bytes per second and how far each client's view of every
@@ -122,6 +122,30 @@ I16 panels are re-made inline over hand-placed collision boxes.
       *Lockout:* today's netcode measured at 0, 80 and 200 ms, giving the
       numbers the next phase must beat.
       *Tests:* the harness's reports are deterministic for a fixed seed.
+      *Done:* `netLab.ts` in the player has two parts.
+      - **`SimulatedNetHub`:** a NetSession transport on a virtual clock. A
+        seeded random stream applies one-way latency, jitter (which
+        reorders), loss and a per-sender uplink cap that queues messages.
+        Each message is delivered at its own arrival time.
+      - **`runNetLab`:** plays N real carts in one room over the hub. It
+        compares, every tick, where each slot's owner has it (from the
+        owner's outbox) with where every other client draws it. It reports
+        drift (mean, p95, max) for human players and for everything,
+        bytes/s per client, and messages sent, delivered and lost.
+
+      Lockout's adapter (`Unit Tests/helpers/lockoutNetLab.ts`) reads
+      positions from the centimetre state words and from the observers' mesh
+      poses. The baseline, for two players over 10 s:
+
+      | Latency | Drift mean | Drift p95 | Drift max | Host sends |
+      | ---: | ---: | ---: | ---: | ---: |
+      | 0 ms | 0.31 m | 0.73 m | 1.71 m | 2.7 KB/s |
+      | 80 ms | 0.65 m | 1.45 m | 1.75 m | 2.7 KB/s |
+      | 200 ms | 1.18 m | 2.58 m | 2.74 m | 2.7 KB/s |
+
+      Eight players at 80 ms with 5% loss drift 1.16 m on average (p95
+      1.99 m). The host sends 0.3 KB/s (it owns no bots then) and receives
+      1.6 KB/s.
 
 ## Phase B — Netcode
 
