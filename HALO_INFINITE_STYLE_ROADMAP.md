@@ -245,9 +245,29 @@ What separates Lockout from Halo Infinite, seen in a match:
 
 ## Phase C — Characters and first person
 
-- [ ] **I9. First-person arms and viewmodel animation.** Gloved hands holding
+- [x] **I9. First-person arms and viewmodel animation.** Gloved hands holding
       each weapon, with idle sway, run bob, reload, melee and the sword's
       swing (supersedes H12). *Lockout:* arms on every weapon.
+      *Done:* every Lockout viewmodel is skinned to a three-bone rig. The
+      **root** carries the whole held assembly (sway, bob, a lunge, the raise
+      on a swap), the **weapon** under it takes recoil and a reload's tilt, and
+      the **left hand** under that leaves the gun in a reload to fetch the
+      magazine, slaps it home and returns. Each weapon carries six clips:
+      `idle` (a slow breathing sway), `run` (a stepping figure-eight bob),
+      `fire` (kick back and muzzle up, harder on the shotgun and sniper),
+      `reload`, `melee` (a lunge, the stock leading) and `ready` (raised from
+      below). The sword's attack and melee are one swing, wound back to the
+      right and carried across to the left, and a flourish stands in for its
+      reload. A state machine runs it (EP17): a blend from idle to run by
+      `speed`, and one-shot states on `fire`, `reload`, `melee` and `ready`
+      triggers that play through and fade back; a shot during a shot starts
+      the kick again. The cart only reports what happened, so the
+      hand-rolled bob and kick are gone from its code. Storage: a skinned
+      part bound wholly to one joint is now saved as just that joint, not 24
+      bytes a vertex (read back into the same binding), so six rigs cost
+      about 60 KB rather than 280. *Lockout:* arms on every weapon, swaying
+      at rest, bobbing at a run, kicking on every shot, reloading
+      hand-to-magazine, lunging on a melee and raising the new gun on a swap.
 - [ ] **I10. Plasma weapons.** The energy sword as translucent emissive
       plasma: a hot core fading to blue edges, a glow halo, a swing trail, and
       the distortion from I5. *Lockout:* the sword, the plasma grenade.
