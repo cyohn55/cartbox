@@ -38,6 +38,7 @@ import {
   primitiveTopology,
   rotateJoint,
   selectAll,
+  surfaceUv,
   selectionPivot,
   singleSelection,
   transformSelection,
@@ -110,6 +111,7 @@ import { ModelingPanel } from "./ModelingPanel";
 import { drawBrush, drawGizmo, drawHeatMap, drawModelOverlay, drawSkeleton, gizmoHandleAt, type GizmoTool } from "./meshOverlay";
 import { PosePanel, WeightPaintPanel, type BrushSettings } from "./RiggingPanels";
 import { DopeSheet } from "./DopeSheet";
+import { TexturePaintPanel, useTexturePaint } from "./TexturePaintPanel";
 import { BakePanel } from "./BakePanel";
 import { AnimatorPanel } from "./AnimatorPanel";
 import { LightingEditor } from "./LightingEditor";
@@ -234,7 +236,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
    * selection modes pick vertices, edges or faces. The selection, the gizmo's
    * tool, a gizmo drag's mesh in progress and a box being dragged.
    */
-  const [editMode, setEditMode] = useState<"object" | SelectMode | "pose" | "weights">("object");
+  const [editMode, setEditMode] = useState<"object" | SelectMode | "pose" | "weights" | "paint">("object");
   const [modelSel, setModelSel] = useState<MeshSelection>(emptySelection("vertex"));
   const [gizmoTool, setGizmoTool] = useState<GizmoTool>("move");
   const [dragMesh, setDragMesh] = useState<MeshAsset | null>(null);
@@ -475,6 +477,16 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   // The preview wears the copy's material set (I13); the material editor edits the mesh's own materials.
   const variant = selectedEntry?.variant;
   const worn = useMemo(() => (meshAsset ? applyMeshVariant(meshAsset, variant) : null), [meshAsset, variant]);
+  /** Texture painting (L17): the part, layer, brush and the image being painted, into the material set this copy wears. */
+  const texturing = editMode === "paint";
+  const commitPaint = useCallback(
+    (next: MeshAsset) => {
+      if (selectedEntry) onSidecarChange(setMeshAsset(sidecar, selectedEntry.id, next));
+    },
+    [selectedEntry, sidecar, onSidecarChange],
+  );
+  const paint = useTexturePaint(meshAsset, variant ?? null, commitPaint);
+  const paintTarget = texturing ? paint.target : null;
   // A skinned mesh previews through a live copy the clip poses; stop previewing on selection change.
   const liveMesh = useMemo(() => (worn && isSkinned(worn) ? createLiveSkinnedMesh(worn) : null), [worn]);
   useEffect(() => setPreviewClip(null), [meshAsset]);
@@ -647,13 +659,22 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       liveMesh.update(skinMatrices(meshAsset.skin, shownPose));
       shown = liveMesh.mesh;
     } else if (painting && strokeMesh) shown = applyMeshVariant(strokeMesh, variant);
+    // Texture painting (L17): the image being painted stands in for its slot's map.
+    const painted = (slot: "base" | "mr" | "emissive", base: readonly (DecodedTexture | null)[] | undefined) =>
+      paintTarget && (slot === "base" ? paint.layer === "baseColor" : slot === "mr" ? paint.layer === "roughness" || paint.layer === "metal" : paint.layer === "emissive")
+        ? shown.primitives.map((_, i) => (i === paintTarget.primitive ? paintTarget.image : (base?.[i] ?? null)))
+        : base;
+    const mrPainted = painted("mr", undefined);
+    const emissivePainted = painted("emissive", undefined);
     renderMesh(shown, {
       camera: previewCamera(meshAsset),
       bounds: frame,
       size: VIEWPORT,
       out: buffers.out,
       depth: buffers.depth,
-      textures: textures ?? undefined,
+      textures: painted("base", textures ?? undefined),
+      ...(mrPainted ? { mrTextures: mrPainted } : {}),
+      ...(emissivePainted ? { emissiveTextures: emissivePainted } : {}),
       background: [14, 16, 26, 255],
       effect: shieldEffect(shield.flare, shield.shimmer, shield.camo),
       time: shieldTime,
@@ -703,7 +724,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       drawSkeleton(context, meshAsset.skin, shownPose, viewProj, VIEWPORT, poseJoint);
       if (jointPivot) drawGizmo(context, viewProj, VIEWPORT, jointPivot, handleLength, "rotate");
     }
-  }, [meshAsset, worn, variant, textures, yaw, pitch, zoom, buffers, sidecar.lighting, liveMesh, previewClip, clipTime, ragdolling, ragdollFrame, shield, shieldTime, pickedFace, previewCamera, frame, viewProj, modelling, modelSel, dragMesh, boxRect, modelPivot, handleLength, gizmoTool, posing, painting, shownPose, jointPivot, poseJoint, strokeMesh, weightJoint, brushAt, brush.radius]);
+  }, [meshAsset, worn, variant, textures, yaw, pitch, zoom, buffers, sidecar.lighting, liveMesh, previewClip, clipTime, ragdolling, ragdollFrame, shield, shieldTime, pickedFace, previewCamera, frame, viewProj, modelling, modelSel, dragMesh, boxRect, modelPivot, handleLength, gizmoTool, posing, painting, shownPose, jointPivot, poseJoint, strokeMesh, weightJoint, brushAt, brush.radius, paintTarget, paint.layer, paint.version]);
 
   /** A modelling edit: committed (LODs remade), the selection kept through a reshape or cleared after a change of topology. */
   const commitModel = useCallback(
@@ -722,7 +743,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     x: number;
     y: number;
     moved: number;
-    kind: "orbit" | "box" | "gizmo" | "pose" | "paint";
+    kind: "orbit" | "box" | "gizmo" | "pose" | "paint" | "texture";
     from: [number, number];
     axis?: 0 | 1 | 2;
     pivot?: readonly number[];
@@ -734,6 +755,17 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   } | null>(null);
   /** Where the pointer meets the model (the stored, unposed mesh). */
   const surfaceAt = (at: readonly [number, number]) => (meshAsset ? pickMeshPoint(meshAsset, previewCamera(meshAsset), at[0], at[1], frame) : null);
+  /** A dab of the texture brush where the pointer meets the model; on another part, that part is picked instead. */
+  const dabTexture = (at: readonly [number, number]) => {
+    const hit = surfaceAt(at);
+    if (!hit || !meshAsset) return;
+    if (hit.primitive !== paint.primitive) {
+      paint.setPrimitive(hit.primitive);
+      return;
+    }
+    const uv = surfaceUv(meshAsset.primitives[hit.primitive]!, hit.triangle, hit.barycentric);
+    if (uv) paint.dab(uv);
+  };
   /** A dab of the weight brush on `on` at a surface point. */
   const dabWeights = (on: MeshAsset, point: readonly [number, number, number]) =>
     paintWeights(on, weightJoint, { center: point, radius: brush.radius, strength: brush.strength, mode: brush.mode });
@@ -745,7 +777,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     event.currentTarget.setPointerCapture(event.pointerId);
     event.currentTarget.focus();
     const from = ndcOf(event);
-    let kind: "orbit" | "box" | "gizmo" | "pose" | "paint" = "orbit";
+    let kind: "orbit" | "box" | "gizmo" | "pose" | "paint" | "texture" = "orbit";
     let axis: 0 | 1 | 2 | null = null;
     const extra: { pivot?: readonly number[]; base?: Float32Array; stroke?: MeshAsset; last?: readonly number[] } = {};
     if (modelling && event.button === 0 && meshAsset && viewProj) {
@@ -758,6 +790,9 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
         kind = "pose";
         Object.assign(extra, { pivot: jointPivot, base: shownPose });
       }
+    } else if (texturing && event.button === 0 && meshAsset) {
+      kind = "texture";
+      dabTexture(from);
     } else if (painting && event.button === 0 && meshAsset?.skin) {
       kind = "paint";
       const hit = surfaceAt(from);
@@ -785,6 +820,10 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     const at = ndcOf(event);
     if (state.kind === "box") {
       if (moved > 4) setBoxRect({ from: state.from, to: at });
+      return;
+    }
+    if (state.kind === "texture") {
+      dabTexture(at);
       return;
     }
     if (state.kind === "paint") {
@@ -816,6 +855,10 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     const state = drag.current;
     drag.current = null;
     if (!state || !meshAsset) return;
+    if (state.kind === "texture") {
+      paint.endStroke();
+      return;
+    }
     if (state.kind === "paint") {
       if (state.stroke && state.stroke !== meshAsset && selectedEntry) onSidecarChange(withEditedGeometry(sidecar, selectedEntry.id, state.stroke));
       setStrokeMesh(null);
@@ -1054,7 +1097,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
           <SegmentedControl
             label="Edit"
             ariaLabel="Edit mode"
-            selected={editMode === "object" || editMode === "pose" || editMode === "weights" ? editMode : "model"}
+            selected={editMode === "object" || editMode === "pose" || editMode === "weights" || editMode === "paint" ? editMode : "model"}
             onSelect={(id) => setEditMode(id === "model" ? modelSel.mode : id)}
             options={[
               { id: "object" as const, label: "Object", hint: "Orbit the model and pick a face to extrude, inset or bevel" },
@@ -1065,6 +1108,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
                     { id: "weights" as const, label: "Weights", hint: "Paint how much each bone carries of the mesh" },
                   ]
                 : []),
+              { id: "paint" as const, label: "Paint", hint: "Unwrap UVs and paint the material's maps and team-colour mask" },
             ]}
           />
         )}
@@ -1170,7 +1214,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
             width: "100%",
             height: "auto",
             touchAction: "none",
-            cursor: meshAsset ? (modelling || posing || painting ? "crosshair" : "grab") : "default",
+            cursor: meshAsset ? (modelling || posing || painting || texturing ? "crosshair" : "grab") : "default",
             background: "#0e101a",
             borderRadius: 8,
           }}
@@ -1182,7 +1226,9 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
                 ? "3D mesh preview — click a bone to pick it, drag the gizmo to turn it, right-drag to orbit"
                 : painting
                   ? "3D mesh preview — drag to paint weights, right-drag to orbit"
-                  : "3D mesh preview — drag to orbit, scroll to zoom"
+                  : texturing
+                    ? "3D mesh preview — drag to paint the texture layer, right-drag to orbit"
+                    : "3D mesh preview — drag to orbit, scroll to zoom"
           }
           onPointerLeave={() => painting && setBrushAt(null)}
         />
@@ -1367,7 +1413,19 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
 
             {meshAsset && <BakePanel mesh={meshAsset} onBaked={applyGeometryEdit} />}
 
-            {meshAsset && <MaterialEditor mesh={meshAsset} onChange={applyMeshEdit} />}
+            {meshAsset && texturing && <TexturePaintPanel mesh={meshAsset} set={variant ?? null} paint={paint} onEdit={applyGeometryEdit} />}
+
+            {meshAsset && (
+              <MaterialEditor
+                mesh={meshAsset}
+                set={variant ?? null}
+                onChange={(next, wear) => {
+                  // A material edit, and (making or picking a set) the copy putting that set on, as one change.
+                  const edited = next === meshAsset ? sidecar : setMeshAsset(sidecar, selectedEntry.id, next);
+                  onSidecarChange(wear === undefined ? edited : setMeshVariant(edited, selectedEntry.id, wear));
+                }}
+              />
+            )}
 
             <RailGroup label="Replace model">
               <div className={styles.toolGroup}>

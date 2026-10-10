@@ -15,19 +15,35 @@
  * These fields are additive: a fantasy-console material that sets none renders
  * exactly as before, so touching them here never regresses a capped tier (see
  * AAA_TIER_ROADMAP.md).
+ *
+ * Material sets and maps (LOCKOUT_MULTIPLAYER_ROADMAP.md L17): the panel edits
+ * the mesh's own materials or one of its material sets (a set's part starts
+ * as a copy of its own the first time it is changed), makes, renames and
+ * deletes sets, and takes an uploaded image into any of a material's map
+ * slots (see materialSets.ts).
  */
 
 import { useState } from "react";
 
 import {
   DEFAULT_CLEARCOAT_ROUGHNESS,
+  MATERIAL_IMAGE_SLOTS,
+  addMaterialSet,
+  materialFor,
+  patchMaterial,
+  removeMaterialSet,
+  renameMaterialSet,
+  resetSetMaterial,
+  setHasMaterial,
+  setMaterialImage,
   DEFAULT_DETAIL_SCALE,
   DEFAULT_DETAIL_STRENGTH,
   PARALLAX_MAX_DEPTH,
   builtinDetailGrain,
   builtinPanelRelief,
   plasmaMaterial,
-  updateMeshMaterial,
+  type EncodedImage,
+  type MaterialImageSlot,
   type MeshAsset,
   type MeshMaterial,
 } from "@cartbox/editor";
@@ -40,8 +56,13 @@ import { RailGroup, RailHint, RangeControl, SegmentedControl } from "./railContr
 interface MaterialEditorProps {
   /** The mesh whose materials are edited. */
   mesh: MeshAsset;
-  /** Called with the next mesh after any material edit. */
-  onChange: (mesh: MeshAsset) => void;
+  /**
+   * Called with the next mesh after any material edit; with `wear`, the
+   * selected copy also puts on that material set (null: its own materials).
+   */
+  onChange: (mesh: MeshAsset, wear?: string | null) => void;
+  /** The material set being edited (the one the selected copy wears), or null for the mesh's own materials. */
+  set?: string | null;
 }
 
 /** Clamp a channel to 0..1 and quantise to a byte, matching an 8-bit colour input. */
@@ -57,15 +78,18 @@ function fromHex(hex: string): [number, number, number] {
   return [parseInt(m[1]!, 16) / 255, parseInt(m[2]!, 16) / 255, parseInt(m[3]!, 16) / 255];
 }
 
-export function MaterialEditor({ mesh, onChange }: MaterialEditorProps) {
+export function MaterialEditor({ mesh, onChange, set = null }: MaterialEditorProps) {
   const [primitiveIndex, setPrimitiveIndex] = useState(0);
   const [graphOpen, setGraphOpen] = useState(false);
+  const [setName, setSetName] = useState("");
   const index = primitiveIndex < mesh.primitives.length ? primitiveIndex : 0;
   const primitive = mesh.primitives[index];
-  if (!primitive) return null;
-  const material = primitive.material;
+  // A set the mesh no longer has edits its own materials.
+  const editing = set && mesh.variants?.some((v) => v.name === set) ? set : null;
+  const material = primitive ? materialFor(mesh, index, editing) : null;
+  if (!primitive || !material) return null;
 
-  const patch = (change: Partial<MeshMaterial>) => onChange(updateMeshMaterial(mesh, index, change));
+  const patch = (change: Partial<MeshMaterial>) => onChange(patchMaterial(mesh, index, change, editing));
 
   const [br, bg, bb, ba] = material.baseColorFactor;
   const emissive = material.emissiveFactor ?? [0, 0, 0];
@@ -74,6 +98,72 @@ export function MaterialEditor({ mesh, onChange }: MaterialEditorProps) {
 
   return (
     <RailGroup label="Material" advanced defaultOpen>
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Material set</div>
+      <select
+        aria-label="Material set to edit"
+        value={editing ?? ""}
+        onChange={(event) => onChange(mesh, event.target.value || null)}
+        style={{ width: "100%", padding: "4px 6px", borderRadius: 6, marginBottom: 6 }}
+      >
+        <option value="">Its own materials</option>
+        {(mesh.variants ?? []).map((v) => (
+          <option key={v.name} value={v.name}>
+            {v.name}
+          </option>
+        ))}
+      </select>
+      <div style={{ display: "flex", gap: 4, marginBottom: 6 }}>
+        <input
+          aria-label="Material set name"
+          placeholder={editing ? "Rename to…" : "New set's name"}
+          value={setName}
+          onChange={(event) => setSetName(event.target.value)}
+          style={{ flex: 1, minWidth: 0, padding: "4px 6px", borderRadius: 6 }}
+        />
+        <button
+          type="button"
+          className={styles.toolBtn}
+          title={editing ? `A new set starting as a copy of “${editing}”` : "A new set, wearing each part's own material until you change it"}
+          onClick={() => {
+            const made = addMaterialSet(mesh, setName || "New set", editing);
+            if (made.name) onChange(made.mesh, made.name);
+            setSetName("");
+          }}
+        >
+          New
+        </button>
+        {editing && (
+          <button
+            type="button"
+            className={styles.toolBtn}
+            disabled={!setName.trim()}
+            onClick={() => {
+              const renamed = renameMaterialSet(mesh, editing, setName);
+              onChange(renamed.mesh, renamed.name);
+              setSetName("");
+            }}
+          >
+            Rename
+          </button>
+        )}
+        {editing && (
+          <button type="button" className={styles.toolBtn} onClick={() => onChange(removeMaterialSet(mesh, editing), null)}>
+            Delete
+          </button>
+        )}
+      </div>
+      {editing && (
+        <RailHint>
+          Editing “{editing}”, which this copy now wears.{" "}
+          {setHasMaterial(mesh, editing, index) ? (
+            <button type="button" className={styles.toolBtn} onClick={() => onChange(resetSetMaterial(mesh, editing, index))}>
+              Use the part&apos;s own
+            </button>
+          ) : (
+            "This part wears its own material until you change it here."
+          )}
+        </RailHint>
+      )}
       {mesh.primitives.length > 1 && (
         <SegmentedControl
           label="Part"
@@ -295,11 +385,71 @@ export function MaterialEditor({ mesh, onChange }: MaterialEditorProps) {
         style={{ width: 40, height: 32, padding: 0, border: "none", background: "none", borderRadius: 6 }}
       />
 
+      <MaterialMaps material={material} onImage={(slot, image) => onChange(setMaterialImage(mesh, index, slot, image, editing))} />
+
       <SurfaceEffects material={material} patch={patch} />
       <MaterialLayers material={material} patch={patch} onWear={() => setGraphOpen(true)} />
 
       <RailHint>Metallic-roughness PBR — used by the Modern render tier. Capped tiers ignore these and render unchanged.</RailHint>
     </RailGroup>
+  );
+}
+
+/** The size of an image's bytes, as the slot list shows it. */
+const kib = (image: EncodedImage) => (image.bytes.length > 0 ? `${image.mime.replace("image/", "").toUpperCase()} ${Math.max(1, Math.round(image.bytes.length / 1024))} KB` : "streamed");
+
+/**
+ * Every map slot of the material (L17): what is in it, an image file to put
+ * in it, or clear it. Painting into the base colour, metal/roughness,
+ * emissive and team-colour slots is the Paint mode's.
+ */
+function MaterialMaps({ material, onImage }: { material: MeshMaterial; onImage: (slot: MaterialImageSlot, image: EncodedImage | null) => void }) {
+  const [error, setError] = useState<string | null>(null);
+  const upload = async (slot: MaterialImageSlot, file: File | undefined) => {
+    if (!file) return;
+    const mime = file.type || (/\.jpe?g$/i.test(file.name) ? "image/jpeg" : "image/png");
+    if (!/^image\/(png|jpeg)$/.test(mime)) {
+      setError("Upload a PNG or JPEG image.");
+      return;
+    }
+    setError(null);
+    onImage(slot, { mime, bytes: new Uint8Array(await file.arrayBuffer()) });
+  };
+  return (
+    <details style={{ fontSize: 12, margin: "8px 0" }}>
+      <summary className={styles.groupLabel}>Maps</summary>
+      <div style={{ display: "grid", gap: 4, marginTop: 6 }}>
+        {MATERIAL_IMAGE_SLOTS.map(({ slot, label, hint }) => {
+          const image = material[slot] as EncodedImage | null | undefined;
+          return (
+            <div key={slot} style={{ display: "flex", alignItems: "center", gap: 4 }} title={hint}>
+              <span style={{ flex: 1, minWidth: 0 }}>
+                {label} <span className={styles.hudLabel}>{image ? kib(image) : "none"}</span>
+              </span>
+              <label className={styles.toolBtn} style={{ cursor: "pointer" }}>
+                Upload…
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg"
+                  hidden
+                  aria-label={`Upload ${label} map`}
+                  onChange={(event) => {
+                    void upload(slot, event.target.files?.[0]);
+                    event.target.value = "";
+                  }}
+                />
+              </label>
+              {image && (
+                <button type="button" className={styles.toolBtn} aria-label={`Clear ${label} map`} onClick={() => onImage(slot, null)}>
+                  ✕
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {error && <RailHint>{error}</RailHint>}
+    </details>
   );
 }
 

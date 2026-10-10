@@ -5783,10 +5783,17 @@ declare class MeshOverlaySurface implements DisplaySurface {
      */
     currentPlacements(): readonly (Mat4 | null)[];
     placements(): readonly (Mat4 | null)[];
-    /** A tinted instance's mesh and LOD levels (each level tinted alike). */
+    /**
+     * A tinted instance's mesh and LOD levels (each level tinted alike). Where a
+     * tintable part has a painted team-colour mask (L17), the tint is painted
+     * through it into the base colour maps the copy draws with instead.
+     */
     private tintedLook;
     /** A tinted copy of `mesh`, cached so its identity (and any GPU upload) is stable. */
     private tinted;
+    /** A part's base colour map with the tint painted through its mask, cached per mask, map and tint (stable identity for GPU uploads). */
+    private maskedTexture;
+    private maskCache;
     /** The camera's eye this frame (terrain blocks pick their detail by distance from it). */
     private eye;
     /** The last frame's view matrix (null before the first frame). */
