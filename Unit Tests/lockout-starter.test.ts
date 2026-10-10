@@ -69,7 +69,9 @@ describe("the Lockout arena starter", () => {
   it("fits the Xbox 360 tier (unbounded budget) with a modest triangle count", () => {
     expect(MODELS.xbox360.renderCaps.polyBudget).toBe(0); // unbounded
     expect(LOCKOUT_SCENE_TRIANGLES).toBeGreaterThan(200);
-    expect(LOCKOUT_SCENE_TRIANGLES).toBeLessThan(8000); // arena + 7 armoured soldiers
+    // Arena + 7 armoured soldiers, Spartans in full detail since I11 (their
+    // LODs draw lighter across the arena).
+    expect(LOCKOUT_SCENE_TRIANGLES).toBeLessThan(14000);
   });
 
   it("drives a first-person camera, poses the bots, and uses the 8-button gamepad", () => {
