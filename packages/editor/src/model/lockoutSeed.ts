@@ -30,6 +30,8 @@ import { encodeRgbaPng } from "./png";
 import { meshBounds, serializeMeshAsset, type EncodedImage, type MeshAsset, type MeshPrimitive } from "./MeshAsset";
 import type { AnimationClip, ClipChannel, SkinJoint } from "./skeleton";
 import { INFINITE_TINTS, type SceneLighting } from "./SceneLighting";
+import { plasmaMaterial, type PlasmaLook } from "./plasma";
+import type { MeshTrail } from "../render/meshTrails";
 import type { SceneLight } from "../render/meshRasterizer";
 import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, toPrimitive as streamPrimitive, type Streams } from "./seedGeometry";
 import { packMeshLibrary } from "./meshLibrary";
@@ -1032,6 +1034,8 @@ export const LOCKOUT_EFFECTS: readonly ParticleEffect[] = [
   { ...particlePreset("smoke", "smoke"), count: 12, color: [0.3, 0.3, 0.32], colorEnd: [0.55, 0.56, 0.6] },
   { ...particlePreset("trail", "slash"), count: 28, color: [0.75, 0.92, 1], colorEnd: [0.25, 0.45, 1] },
   { ...particlePreset("snow", "drift"), count: 16, speed: 1.8, spread: 0.5, gravity: 0.8, life: 2 },
+  // A plasma grenade's burst (I10): a ball of blue-white plasma, no fire.
+  { ...particlePreset("explosion", "plasmablast"), count: 44, color: [0.7, 0.92, 1], colorEnd: [0.1, 0.35, 1], glow: 4 },
 ];
 
 /**
@@ -2258,6 +2262,61 @@ export const LOCKOUT_VIEWMODEL_ANIMATOR = {
   events: [],
 } as const;
 
+/** The sword's swing trail (I10): emitter to tips, on the weapon bone, only while it really swings. */
+const SWORD_TRAIL: MeshTrail = { from: [0, 0.05, 0.03], to: [0, 0.3, 0.62], joint: VM.weapon, life: 0.16, color: [0.3, 0.6, 1], intensity: 1.6, minSpeed: 1.2 };
+
+/** A plasma grenade's charge (I10): hotter and bluer than the sword, boiling harder. */
+const PLASMA_CHARGE: PlasmaLook = { core: [1.4, 2.2, 3], edge: [0.08, 0.3, 2.6], falloff: 1.1, boil: 0.5, scale: 30 };
+
+/** A sphere of `r` round `c`, smooth-shaded. */
+function sphere(s: Streams, c: P3, r: number, rings = 8, segs = 12): void {
+  const base = s.positions.length / 3;
+  for (let i = 0; i <= rings; i += 1) {
+    const th = (i / rings) * Math.PI;
+    for (let j = 0; j <= segs; j += 1) {
+      const ph = (j / segs) * Math.PI * 2;
+      const n: P3 = [Math.sin(th) * Math.cos(ph), Math.cos(th), Math.sin(th) * Math.sin(ph)];
+      s.positions.push(c[0] + n[0] * r, c[1] + n[1] * r, c[2] + n[2] * r);
+      s.normals.push(...n);
+      s.uvs.push(j / segs, i / rings);
+    }
+  }
+  for (let i = 0; i < rings; i += 1) {
+    for (let j = 0; j < segs; j += 1) {
+      const a = base + i * (segs + 1) + j;
+      const b = a + segs + 1;
+      s.indices.push(a, a + 1, b, a + 1, b + 1, b);
+    }
+  }
+}
+
+/**
+ * A plasma grenade (I10): a boiling blue charge held in a cage of three dark
+ * prongs, about the size of a fist. It leaves a short trail of light in flight.
+ */
+function plasmaGrenadeMesh(): MeshAsset {
+  const core = newStreams();
+  const cage = newStreams();
+  sphere(core, [0, 0, 0], 0.075);
+  for (let k = 0; k < 3; k += 1) {
+    const a = (k / 3) * Math.PI * 2;
+    const [x, z] = [Math.cos(a), Math.sin(a)];
+    limb(cage, [x * 0.02, -0.095, z * 0.02], [x * 0.085, -0.02, z * 0.085], 0.008);
+    limb(cage, [x * 0.085, -0.02, z * 0.085], [x * 0.06, 0.07, z * 0.06], 0.008, 0.004);
+  }
+  limb(cage, [0, -0.11, 0], [0, -0.085, 0], 0.025, 0.02); // the base the prongs rise from
+  return {
+    ...withoutUnusedUvs({
+      name: "plasma-grenade",
+      primitives: [
+        toPrimitive(core, plasmaMaterial("plasma", PLASMA_CHARGE)),
+        toPrimitive(cage, { name: "cage", baseColorFactor: [0.12, 0.14, 0.2, 1], baseColorImage: null, metallicFactor: 0.8, roughnessFactor: 0.3 }),
+      ],
+    }),
+    trails: [{ from: [0, -0.04, 0], to: [0, 0.04, 0], life: 0.22, color: [0.35, 0.6, 1], intensity: 2, minSpeed: 2 }],
+  };
+}
+
 /** Weapon ids, in the order their viewmodel instances follow the bots in the sidecar. */
 export const LOCKOUT_VIEWMODELS = ["br", "smg", "shotgun", "sniper", "magnum", "sword"] as const;
 type WeaponId = (typeof LOCKOUT_VIEWMODELS)[number];
@@ -2438,14 +2497,13 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
   ];
   if (glow.indices.length > 0) {
     primitives.push(
-      toPrimitive(glow, {
-        name: "glow",
-        baseColorFactor: glowColor,
-        baseColorImage: null,
-        metallicFactor: 0,
-        roughnessFactor: 0.4,
-        emissiveFactor: id === "sword" ? [0.9, 2.0, 2.6] : [0.5, 1.6, 1.9],
-      }),
+      // The sword's blade is plasma (I10): a white-hot heart cooling to blue at its edges.
+      toPrimitive(
+        glow,
+        id === "sword"
+          ? plasmaMaterial("plasma")
+          : { name: "glow", baseColorFactor: glowColor, baseColorImage: null, metallicFactor: 0, roughnessFactor: 0.4, emissiveFactor: [0.5, 1.6, 1.9] },
+      ),
     );
   }
   if (haze.indices.length > 0) {
@@ -2469,6 +2527,8 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
     ...withoutUnusedUvs({ name: `viewmodel-${id}`, primitives: primitives.filter((p) => p.indices.length > 0) }),
     skin: rigSkin(bones),
     clips: viewmodelClips(id, bones),
+    // The swing's arc of light (I10): what the blade sweeps, from the emitter to the tips.
+    ...(id === "sword" ? { trails: [SWORD_TRAIL] } : {}),
   };
 }
 
@@ -2893,6 +2953,8 @@ export function lockoutMeshSidecar(): string {
       // dropped weapons wear the first-person models, minus the hands.
       prefabs: [
         { id: "prefab-casing", name: "casing", pool: 0, nodes: [{ key: "root", name: "casing", mesh: serializeMeshAsset(casingMesh()), transform: identity }] },
+        // Plasma grenades in flight (I10): four copies held in reserve, spawned on a throw.
+        { id: "prefab-plasma", name: "plasma grenade", pool: 4, nodes: [{ key: "root", name: "plasma grenade", mesh: serializeMeshAsset(plasmaGrenadeMesh()), transform: identity }] },
       ],
       debris: LOCKOUT_DEBRIS,
       decalMarks: LOCKOUT_DECAL_MARKS,
@@ -3466,18 +3528,23 @@ function score_of(who)
 end
 
 -- ---------------------------------------------------------------------------
--- Grenades: a thrown frag arcs under gravity, bounces off floor level, and
--- detonates on a fuse, dealing splash to everyone in range.
+-- Grenades: a thrown plasma grenade (I10) arcs under gravity, bounces off floor
+-- level, sticks to any soldier it touches, and detonates on a fuse, dealing
+-- splash to everyone in range. In flight it is a boiling blue charge (a prefab
+-- copy, placed each tick) lighting what it passes, trailing light.
 function throw_grenade(who, fx,fy,fz)
   if (who.nade or 0) <= 0 then return end
   who.nade = who.nade - 1
-  table.insert(grenades, { x=who.x, y=who.y+EYE, z=who.z, vx=fx*0.5, vy=fy*0.5+0.12, vz=fz*0.5, t=90, owner=who })
+  local x, y, z = who.x, who.y+EYE, who.z
+  local obj = cartbox.spawn("plasma grenade", x, y, z, 0, 0, 0)
+  table.insert(grenades, { x=x, y=y, z=z, vx=fx*0.5, vy=fy*0.5+0.12, vz=fz*0.5, t=90, owner=who, obj=obj, spin=0 })
 end
 
 local function explode(g)
   flash = math.max(flash, 3)
+  if g.obj then cartbox.despawn(g.obj) end
   cartbox.sound("blast",g.x,g.y+0.2,g.z,1.4)
-  cartbox.burst("blast", g.x, g.y+0.2, g.z, 0,1,0)
+  cartbox.burst("plasmablast", g.x, g.y+0.2, g.z, 0,1,0)
   cartbox.burst("smoke", g.x, g.y+0.3, g.z, 0,1,0)
   -- A soot burn on whatever it went off over.
   local t,nx,ny,nz = seg_first(g.x, g.y+0.3, g.z, g.x, g.y-3, g.z)
@@ -3491,17 +3558,36 @@ local function explode(g)
   for _,o in ipairs(bots) do splash(o) end
 end
 
+-- A plasma grenade sticks to the first soldier (not its thrower) it comes close to.
+local function stick(g)
+  local function near(o)
+    return o and o ~= g.owner and not o.dead and d3(g.x,g.y,g.z, o.x,o.y+1.1,o.z) < 0.65
+  end
+  if near(p) then return p end
+  for _,o in ipairs(bots) do if near(o) then return o end end
+  return nil
+end
+
 local function update_grenades()
   for i=#grenades,1,-1 do
     local g=grenades[i]
-    g.vy = g.vy - GRAV*0.7
-    g.x=g.x+g.vx; g.y=g.y+g.vy; g.z=g.z+g.vz
-    -- crude floor / ledge bounce
-    for j=0,ncol()-1 do local b=j*6
-      if g.x>COL[b+1] and g.x<COL[b+4] and g.z>COL[b+3] and g.z<COL[b+6] and g.y<COL[b+5] and g.y>COL[b+5]-0.6 and g.vy<0 then
-        g.y=COL[b+5]; g.vy=-g.vy*0.4; g.vx=g.vx*0.6; g.vz=g.vz*0.6
+    if g.stuck then
+      -- Riding its victim until it goes off.
+      g.x, g.y, g.z = g.stuck.x + g.ox, g.stuck.y + g.oy, g.stuck.z + g.oz
+    else
+      g.vy = g.vy - GRAV*0.7
+      g.x=g.x+g.vx; g.y=g.y+g.vy; g.z=g.z+g.vz
+      -- crude floor / ledge bounce
+      for j=0,ncol()-1 do local b=j*6
+        if g.x>COL[b+1] and g.x<COL[b+4] and g.z>COL[b+3] and g.z<COL[b+6] and g.y<COL[b+5] and g.y>COL[b+5]-0.6 and g.vy<0 then
+          g.y=COL[b+5]; g.vy=-g.vy*0.4; g.vx=g.vx*0.6; g.vz=g.vz*0.6
+        end
       end
+      local o = stick(g)
+      if o then g.stuck = o; g.ox, g.oy, g.oz = g.x - o.x, g.y - o.y, g.z - o.z end
+      g.spin = g.spin + 0.25
     end
+    if g.obj then cartbox.place(g.obj, g.x, g.y, g.z, g.spin, g.spin*0.6, 0, 1) end
     g.t=g.t-1
     if g.t<=0 or g.y<-8 then explode(g); table.remove(grenades,i) end
   end
@@ -3864,6 +3950,7 @@ end
 
 local function start_match(key)
   MODE = MODES[key]; team.blue,team.red,winner = 0,0,""
+  for _,g in ipairs(grenades) do if g.obj then cartbox.despawn(g.obj) end end
   tick=0; feed={}; grenades={}; announce.t=0
   for i=1,(#MRK//3) do mtimer[i]=0 end
   p = { ay=0, ap=0, vy=0, cool=0, score=0, deaths=0, slot=1, team="blue", dead=false, respawn=0, nade=2, tag="You", streak=0 }
@@ -4420,6 +4507,8 @@ function TIC()
   -- The arena's own rig lights the world; the objectives glow in it, so you can
   -- see the ball and the hill from across the map.
   cartbox.clearlights()
+  -- Each plasma grenade lights what it passes (I10).
+  for _,g in ipairs(grenades) do cartbox.light3d(g.x, g.y, g.z, 3.5, 90, 170, 255, 2.6) end
   if MODE.obj=="ball" then cartbox.light3d(ball.x, ball.y+0.6, ball.z, 5, 90,220,255, 3.2) end
   if MODE.obj=="hill" then cartbox.light3d(hill.x, hill.y+1.2, hill.z, 5.5, 120,255,150, 3.4) end
 

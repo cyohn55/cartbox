@@ -77,7 +77,7 @@ describe("the rig", () => {
 
   it("swings the sword across the view for both its attack and its melee", () => {
     const mesh = viewmodel("sword");
-    const blade = mesh.primitives.findIndex((p) => p.material.name === "glow");
+    const blade = mesh.primitives.findIndex((p) => p.material.name === "plasma");
     const x = (clip: string, t: number) => centroid(posed(mesh, clip, t)[blade]!)[0]!;
     // Wound back to one side, then carried across to the other.
     expect(Math.abs(x("fire", 0.08) - x("fire", 0.3))).toBeGreaterThan(0.05);

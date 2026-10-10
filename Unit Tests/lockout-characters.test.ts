@@ -70,7 +70,10 @@ describe("the Lockout soldiers and weapons", () => {
     expect(ids.slice(1, 8)).toEqual([1, 2, 3, 4, 5, 6, 7].map((i) => `bot-${i}`));
     expect(ids.slice(8, 14)).toEqual(LOCKOUT_VIEWMODELS.map((w) => `viewmodel-${w}`));
     expect(ids.slice(14)).toEqual([1, 2, 3, 4, 5].map((i) => `pickup-${i}`));
-    expect(parseMeshScene(lockoutMeshSidecar())!.instances.findIndex((i) => i.terrain)).toBe(19); // …and the mountains last
+    // …then the four plasma grenades held in reserve (I10), and the mountains last.
+    const scene = parseMeshScene(lockoutMeshSidecar())!;
+    expect(scene.instances.slice(19, 23).map((i) => i.name)).toEqual(["plasma grenade 1", "plasma grenade 2", "plasma grenade 3", "plasma grenade 4"]);
+    expect(scene.instances.findIndex((i) => i.terrain)).toBe(23);
   });
 
   it("shares one tintable, skinned soldier across all 7 bots, stored once, each with the state machine", () => {
@@ -153,8 +156,8 @@ describe("the Lockout soldiers and weapons", () => {
     expect(LOCKOUT_CODE).toContain("pose_viewmodel(cur_id)");
     // The held weapon rides the front layer, so it never clips into a wall.
     expect(LOCKOUT_CODE).toContain("0, armor_tint(p), true)");
-    // Every weapon has hands on it except where it's one-handed, and the sword glows.
+    // Every weapon has hands on it except where it's one-handed, and the sword's blade is plasma (I10).
     const sword = deserializeMeshAsset(sidecar.meshes[8 + LOCKOUT_VIEWMODELS.indexOf("sword")]!.mesh);
-    expect(sword.primitives.find((p) => p.material.name === "glow")?.material.emissiveFactor?.[2]).toBeGreaterThan(1);
+    expect(sword.primitives.find((p) => p.material.name === "plasma")?.material.graph?.outputs.emissive).toBeDefined();
   });
 });

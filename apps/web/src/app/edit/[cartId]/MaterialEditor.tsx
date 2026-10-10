@@ -26,6 +26,7 @@ import {
   PARALLAX_MAX_DEPTH,
   builtinDetailGrain,
   builtinPanelRelief,
+  plasmaMaterial,
   updateMeshMaterial,
   type MeshAsset,
   type MeshMaterial,
@@ -233,6 +234,14 @@ export function MaterialEditor({ mesh, onChange }: MaterialEditorProps) {
           onClick={() => patch({ alphaMode: "additive", alphaCutoff: undefined, softDepth: 0.4, baseColorFactor: [0.06, 0.04, 0.02, 1], metallicFactor: 0, roughnessFactor: 1, refraction: undefined, distortion: 0.6 })}
         >
           Heat haze
+        </button>
+        <button
+          type="button"
+          className={styles.toolBtn}
+          title="Glowing, translucent energy: a white-hot heart cooling to blue at the edges, boiling, with a faint shimmer (an energy blade, a plasma charge)"
+          onClick={() => patch(plasmaMaterial(material.name))}
+        >
+          Plasma
         </button>
       </div>
 

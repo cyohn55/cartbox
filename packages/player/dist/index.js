@@ -10028,6 +10028,7 @@ import {
   bakeSkyPanorama,
   bakeVistas,
   buildSceneShadow,
+  TrailSystem,
   LOCAL_SHADOW_BIAS,
   LOCAL_SHADOW_SLOPE_BIAS,
   assignLocalShadowTiles,
@@ -10402,6 +10403,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.inactiveKey = "";
     /** Each object's world matrix as last drawn (null = hidden), or null when nothing moved. */
     this.lastPlacement = null;
+    /** Which objects drew on the front layer last frame (where their trails go). */
+    this.lastFront = [];
+    /** Swing trails (I10): the objects whose meshes leave them, and the ribbons they've swept. */
+    this.trailed = [];
+    this.trails = null;
     /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
     this.hudFrame = null;
     /** The playtest profiler, when it's on: shadow, sky and scene time go to it. */
@@ -10630,6 +10636,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const surface = new _MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
     surface.skyClouds = clouds;
     surface.vistas = vistas;
+    surface.trailed = scene.instances.flatMap((instance, i) => instance.mesh.trails && instance.mesh.trails.length > 0 ? [i] : []);
+    if (surface.trailed.length > 0) surface.trails = new TrailSystem();
     for (const [i, mesh] of live) surface.live.set(i, mesh);
     scene.instances.forEach((instance, i) => {
       if (instance.foliage) surface.foliage.set(instances[i].mesh, instance.foliage);
@@ -10813,6 +10821,19 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       mark = now;
     }
     let drawn = this.foliage.size > 0 ? instances.filter((i) => this.foliageInReach(i)) : instances;
+    let frontDrawn = front;
+    if (this.trails) {
+      const placed = this.placements();
+      const now = this.frame / 60;
+      for (const i of this.trailed) {
+        const model = placed[i];
+        if (!model) this.trails.cut(i);
+        else this.trails.record(i, this.scene.instances[i].mesh.trails, model, this.lastSkin.get(i) ?? null, now, this.lastFront[i] ?? false, camera.view);
+      }
+      const ribbons = this.trails.instances(now, camera.view);
+      if (ribbons.main) drawn = [...drawn, ribbons.main];
+      if (ribbons.front) frontDrawn = [...front, ribbons.front];
+    }
     if (this.decals) {
       this.decals.step(1 / 60);
       const marks = this.decals.sceneInstance();
@@ -10866,8 +10887,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         applySunShafts(out, this.skyCache.pixels, width, height, sun, lighting.sky.sunColor, lighting.shafts, this.shaftScratch);
       }
     }
-    if (front.length > 0) {
-      this.frontRenderer.render(front, {
+    if (frontDrawn.length > 0) {
+      this.frontRenderer.render(frontDrawn, {
         width,
         height,
         out,
@@ -10969,6 +10990,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   posedInstances() {
     if (this.poses.length === 0 && this.bodies.size === 0 && this.spawned.size === 0 && this.animated.size === 0 && this.effects.size === 0) {
       this.lastPlacement = null;
+      this.lastFront = [];
       return { main: this.unpooled, front: [], moved: [] };
     }
     if (this.hierarchy) return this.posedHierarchy(this.hierarchy);
@@ -10983,13 +11005,17 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const main = [];
     const front = [];
     const moved = [];
+    const placement = new Array(this.instances.length);
+    this.lastFront = new Array(this.instances.length).fill(false);
     for (let i = 0; i < this.instances.length; i += 1) {
       const authored = this.instances[i];
       const pose = this.poses.find((p) => p.index === i);
+      placement[i] = authored.model;
       if (!pose) {
         main.push(this.atDetail(i, authored));
         continue;
       }
+      placement[i] = null;
       if (pose.hidden) continue;
       const frames = this.frames[i];
       const frame = pose.frame ?? 0;
@@ -10999,6 +11025,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         ...pose.tint ? this.tintedLook(source, pose.tint) : {},
         model: multiplyMat43(authored.model, poseLocalMatrix(pose))
       };
+      placement[i] = instance.model;
+      this.lastFront[i] = Boolean(pose.front);
       if (pose.front) {
         front.push(instance);
       } else {
@@ -11006,6 +11034,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         if (!this.scene.instances[i]?.terrain) moved.push(instance);
       }
     }
+    this.lastPlacement = placement;
     return { main, front, moved };
   }
   /**
@@ -11051,10 +11080,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const front = [];
     const moved = [];
     const placement = new Array(this.instances.length);
+    this.lastFront = new Array(this.instances.length).fill(false);
     for (let i = 0; i < this.instances.length; i += 1) {
       const authored = this.instances[i];
       const s = state(i);
       placement[i] = s.hidden ? null : s.model;
+      this.lastFront[i] = s.front;
       if (s.hidden) continue;
       if (!s.moved) {
         main.push(s.effect ? { ...this.atDetail(i, authored), effect: s.effect } : this.atDetail(i, authored));

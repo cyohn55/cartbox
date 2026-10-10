@@ -34,6 +34,7 @@ import {
   bakeSkyPanorama,
   bakeVistas,
   buildSceneShadow,
+  TrailSystem,
   LOCAL_SHADOW_BIAS,
   LOCAL_SHADOW_SLOPE_BIAS,
   assignLocalShadowTiles,
@@ -327,6 +328,11 @@ export class MeshOverlaySurface implements DisplaySurface {
   private inactiveKey = "";
   /** Each object's world matrix as last drawn (null = hidden), or null when nothing moved. */
   private lastPlacement: (Mat4 | null)[] | null = null;
+  /** Which objects drew on the front layer last frame (where their trails go). */
+  private lastFront: boolean[] = [];
+  /** Swing trails (I10): the objects whose meshes leave them, and the ribbons they've swept. */
+  private trailed: number[] = [];
+  private trails: TrailSystem | null = null;
   /** Copy of the cart frame kept as the HUD layer while the 3D renders into `output`. */
   private hudFrame: Uint8ClampedArray | null = null;
   /** The playtest profiler, when it's on: shadow, sky and scene time go to it. */
@@ -590,6 +596,8 @@ export class MeshOverlaySurface implements DisplaySurface {
     const surface = new MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
     surface.skyClouds = clouds;
     surface.vistas = vistas;
+    surface.trailed = scene.instances.flatMap((instance, i) => (instance.mesh.trails && instance.mesh.trails.length > 0 ? [i] : []));
+    if (surface.trailed.length > 0) surface.trails = new TrailSystem();
     for (const [i, mesh] of live) surface.live.set(i, mesh);
     scene.instances.forEach((instance, i) => {
       if (instance.foliage) surface.foliage.set(instances[i]!.mesh, instance.foliage);
@@ -815,6 +823,20 @@ export class MeshOverlaySurface implements DisplaySurface {
     // Particles: stepped on the frame clock and drawn as billboards facing this camera.
     // Foliage blocks past their layer's cull distance aren't drawn (EP11).
     let drawn: readonly MeshSceneInstance[] = this.foliage.size > 0 ? instances.filter((i) => this.foliageInReach(i)) : instances;
+    // Swing trails (I10): where each trailing object is now, then the ribbons it has swept.
+    let frontDrawn: readonly MeshSceneInstance[] = front;
+    if (this.trails) {
+      const placed = this.placements();
+      const now = this.frame / 60;
+      for (const i of this.trailed) {
+        const model = placed[i];
+        if (!model) this.trails.cut(i);
+        else this.trails.record(i, this.scene.instances[i]!.mesh.trails!, model, this.lastSkin.get(i) ?? null, now, this.lastFront[i] ?? false, camera.view);
+      }
+      const ribbons = this.trails.instances(now, camera.view);
+      if (ribbons.main) drawn = [...drawn, ribbons.main];
+      if (ribbons.front) frontDrawn = [...front, ribbons.front];
+    }
     if (this.decals) {
       this.decals.step(1 / 60);
       const marks = this.decals.sceneInstance();
@@ -878,8 +900,8 @@ export class MeshOverlaySurface implements DisplaySurface {
     // The front layer (a held weapon): drawn after the scene with a fresh depth
     // buffer, so it sits over everything and never clips into a wall. It is a
     // handful of triangles, so the software rasteriser draws it on any backend.
-    if (front.length > 0) {
-      this.frontRenderer.render(front, {
+    if (frontDrawn.length > 0) {
+      this.frontRenderer.render(frontDrawn, {
         width,
         height,
         out,
@@ -1006,6 +1028,7 @@ export class MeshOverlaySurface implements DisplaySurface {
   } {
     if (this.poses.length === 0 && this.bodies.size === 0 && this.spawned.size === 0 && this.animated.size === 0 && this.effects.size === 0) {
       this.lastPlacement = null;
+      this.lastFront = [];
       return { main: this.unpooled, front: [], moved: [] };
     }
     if (this.hierarchy) return this.posedHierarchy(this.hierarchy);
@@ -1020,13 +1043,17 @@ export class MeshOverlaySurface implements DisplaySurface {
     const main: MeshSceneInstance[] = [];
     const front: MeshSceneInstance[] = [];
     const moved: MeshSceneInstance[] = [];
+    const placement: (Mat4 | null)[] = new Array(this.instances.length);
+    this.lastFront = new Array(this.instances.length).fill(false);
     for (let i = 0; i < this.instances.length; i += 1) {
       const authored = this.instances[i]!;
       const pose = this.poses.find((p) => p.index === i);
+      placement[i] = authored.model;
       if (!pose) {
         main.push(this.atDetail(i, authored));
         continue;
       }
+      placement[i] = null;
       if (pose.hidden) continue; // dropped from the frame this tick
       const frames = this.frames[i];
       const frame = pose.frame ?? 0;
@@ -1036,6 +1063,8 @@ export class MeshOverlaySurface implements DisplaySurface {
         ...(pose.tint ? this.tintedLook(source, pose.tint) : {}),
         model: multiplyMat4(authored.model, poseLocalMatrix(pose)),
       };
+      placement[i] = instance.model;
+      this.lastFront[i] = Boolean(pose.front);
       if (pose.front) {
         front.push(instance);
       } else {
@@ -1043,6 +1072,7 @@ export class MeshOverlaySurface implements DisplaySurface {
         if (!this.scene.instances[i]?.terrain) moved.push(instance); // terrain casts nothing
       }
     }
+    this.lastPlacement = placement;
     return { main, front, moved };
   }
 
@@ -1097,10 +1127,12 @@ export class MeshOverlaySurface implements DisplaySurface {
     const front: MeshSceneInstance[] = [];
     const moved: MeshSceneInstance[] = [];
     const placement: (Mat4 | null)[] = new Array(this.instances.length);
+    this.lastFront = new Array(this.instances.length).fill(false);
     for (let i = 0; i < this.instances.length; i += 1) {
       const authored = this.instances[i]!;
       const s = state(i);
       placement[i] = s.hidden ? null : s.model;
+      this.lastFront[i] = s.front;
       if (s.hidden) continue;
       if (!s.moved) {
         main.push(s.effect ? { ...this.atDetail(i, authored), effect: s.effect } : this.atDetail(i, authored));
