@@ -67,6 +67,7 @@ export {
   LOCKOUT_VIEWMODELS,
   LOCKOUT_SOLDIER_ANIMATOR,
   LOCKOUT_BOT_VARIANTS,
+  forerunnerKit,
   LOCKOUT_VIEWMODEL_ANIMATOR,
   LOCKOUT_NAV_AGENT,
   LOCKOUT_INTRO,
@@ -471,6 +472,9 @@ export {
 } from "./model/skeleton";
 export {
   renderMesh,
+  orbitView,
+  pickMeshTriangle,
+  type OrbitView,
   renderMeshScene,
   composeModelMatrix,
   multiplyMat4,
@@ -1230,3 +1234,4 @@ export {
   type AccessibilitySettings,
   type ColorFilter,
 } from "./model/accessibility";
+export { editFace, editMeshFace, faceAt, faceBoundary, primitiveFaces, type FaceEdit, type MeshFace } from "./model/meshEdit";

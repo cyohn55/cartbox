@@ -45,8 +45,10 @@ import {
 import {
   applyToPrefab,
   createPrefab,
+  createPrefabVariant,
   deletePrefab,
   findPrefab,
+  variantChanges,
   overrideCount,
   placePrefab,
   prefabInstances,
@@ -480,10 +482,28 @@ export function PrefabLibrary({
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           {prefabs.map((prefab) => (
             <div key={prefab.id} style={{ display: "flex", gap: 4, alignItems: "center" }}>
-              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={prefab.name}>
-                <span aria-hidden style={{ color: "#7db8fc" }}>◆ </span>
+              <span
+                style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                title={prefab.base ? `${prefab.name}: a variant of ${findPrefab(sidecar, prefab.base)?.name ?? "?"} (${variantChanges(sidecar, prefab.id)} changes). It takes the base's edits to what it hasn't changed.` : prefab.name}
+              >
+                <span aria-hidden style={{ color: "#7db8fc" }}>{prefab.base ? "◇ " : "◆ "}</span>
                 {prefab.name}
               </span>
+              <button
+                type="button"
+                className={styles.toolBtn}
+                style={{ width: "auto" }}
+                aria-label={`Make a variant of ${prefab.name}`}
+                title="Make a variant: a prefab of its own that keeps taking this one's edits to whatever it doesn't change"
+                onClick={() => {
+                  const made = createPrefabVariant(sidecar, prefab.id, `${prefab.name} variant`);
+                  const placed = placePrefab(made.sidecar, made.prefabId);
+                  onChange(placed.sidecar);
+                  onPlaced(placed.rootId);
+                }}
+              >
+                Variant
+              </button>
               <button
                 type="button"
                 className={styles.toolBtn}

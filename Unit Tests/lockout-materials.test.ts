@@ -154,10 +154,12 @@ describe("the Lockout materials", () => {
     // 1.5 MB since its sounds and UI documents (EP12, EP13), 1.55 MB since its
     // string table (EP19b), 1.65 MB since its distant vista (I7: the far
     // range's heights, two small maps and its pines), 1.7 MB since its
-    // first-person arms (I9: six rigs, their clips and state machines): a sidecar over 512 KB is offloaded to object
+    // first-person arms (I9: six rigs, their clips and state machines), 1.75 MB
+    // since the Spartans' armour sets and the Forerunner kit's prefabs (I13,
+    // I14): a sidecar over 512 KB is offloaded to object
     // storage anyway, and this keeps a save well inside the 4.5 MB request body
     // limit.
-    expect(lockoutMeshSidecar().length).toBeLessThan(1_700_000);
+    expect(lockoutMeshSidecar().length).toBeLessThan(1_750_000);
   });
 
   it("ships a cold grade: bloom, contrast, cool split tone, vignette", () => {

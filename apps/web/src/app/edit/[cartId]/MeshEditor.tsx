@@ -18,6 +18,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Ragdoll,
   applyMeshVariant,
+  faceAt,
+  faceBoundary,
+  orbitView,
+  pickMeshTriangle,
   composeModelMatrix,
   createLiveSkinnedMesh,
   isSkinned,
@@ -57,7 +61,7 @@ import {
   type MeshSidecar,
   type MeshTransform,
 } from "@/lib/meshSidecar";
-import { withAutoLods } from "@/lib/meshLods";
+import { withAutoLods, withEditedGeometry } from "@/lib/meshLods";
 import { DAB_SPACING, applyTerrainTool, findTerrain, replaceTerrain, strokeDabs } from "@/lib/terrainEdit";
 import { findFoliage, replaceFoliage } from "@/lib/foliageEdit";
 import { INITIAL_TERRAIN_EDIT, TerrainPanel, type TerrainEditState } from "./TerrainPanel";
@@ -77,6 +81,7 @@ import styles from "./editor.module.css";
 import { RailGroup, RailHint, SegmentedControl } from "./railControls";
 import { LibraryBrowser } from "./LibraryBrowser";
 import { MaterialEditor } from "./MaterialEditor";
+import { FaceEditPanel, type PickedFace } from "./FaceEditPanel";
 import { AnimatorPanel } from "./AnimatorPanel";
 import { LightingEditor } from "./LightingEditor";
 import { TimelinePanel, type TimelinePreview } from "./TimelinePanel";
@@ -190,6 +195,9 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   const [yaw, setYaw] = useState(0.6);
   const [pitch, setPitch] = useState(0.4);
   const [zoom, setZoom] = useState(1);
+  // The preview's orbit camera (renderMesh's), which face picking and its outline share.
+  const previewCamera = useCallback((mesh: MeshAsset) => ({ yaw, pitch, distance: fitDistance(mesh) * zoom }), [yaw, pitch, zoom]);
+  const [pickedFace, setPickedFace] = useState<PickedFace | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [textures, setTextures] = useState<(DecodedTexture | null)[] | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
@@ -379,6 +387,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   );
 
   const selectedEntry = sidecar.meshes.find((entry) => entry.id === selectedId) ?? null;
+  useEffect(() => setPickedFace(null), [selectedId]);
   // Decode the selected mesh's geometry once per selection. A corrupt entry (it
   // was validated on the way in) simply shows nothing rather than throwing.
   const meshAsset = useMemo<MeshAsset | null>(() => {
@@ -524,7 +533,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       shown = liveMesh.mesh;
     }
     renderMesh(shown, {
-      camera: { yaw, pitch, distance: fitDistance(meshAsset) * zoom },
+      camera: previewCamera(meshAsset),
       size: VIEWPORT,
       out: buffers.out,
       depth: buffers.depth,
@@ -544,23 +553,50 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     const image = context.createImageData(VIEWPORT, VIEWPORT);
     image.data.set(buffers.out);
     context.putImageData(image, 0, 0);
-  }, [meshAsset, worn, textures, yaw, pitch, zoom, buffers, sidecar.lighting, liveMesh, previewClip, clipTime, ragdolling, ragdollFrame, shield, shieldTime]);
+    // The picked face's outline, drawn over the image with the preview's own camera.
+    const face = pickedFace ? meshAsset.primitives[pickedFace.primitive] : undefined;
+    const bounds = meshBounds(meshAsset);
+    if (face && pickedFace && bounds && !isSkinned(meshAsset)) {
+      const { viewProj: m } = orbitView(bounds, previewCamera(meshAsset));
+      const project = ([x, y, z]: readonly number[]) => {
+        const w = m[3]! * x! + m[7]! * y! + m[11]! * z! + m[15]!;
+        return [((m[0]! * x! + m[4]! * y! + m[8]! * z! + m[12]!) / w + 1) * 0.5 * VIEWPORT, (1 - (m[1]! * x! + m[5]! * y! + m[9]! * z! + m[13]!) / w) * 0.5 * VIEWPORT] as const;
+      };
+      context.strokeStyle = "#ffb03a";
+      context.lineWidth = 2;
+      for (const loop of faceBoundary(face, faceAt(face, pickedFace.triangle).triangles)) {
+        context.beginPath();
+        loop.map(project).forEach(([x, y], i) => (i === 0 ? context.moveTo(x, y) : context.lineTo(x, y)));
+        context.closePath();
+        context.stroke();
+      }
+    }
+  }, [meshAsset, worn, textures, yaw, pitch, zoom, buffers, sidecar.lighting, liveMesh, previewClip, clipTime, ragdolling, ragdollFrame, shield, shieldTime, pickedFace, previewCamera]);
 
-  // Orbit + zoom.
-  const drag = useRef<{ x: number; y: number } | null>(null);
+  // Orbit + zoom; a click (no drag) picks a face to edit (I14).
+  const drag = useRef<{ x: number; y: number; moved: number } | null>(null);
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
-    drag.current = { x: event.clientX, y: event.clientY };
+    drag.current = { x: event.clientX, y: event.clientY, moved: 0 };
   };
   const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const state = drag.current;
     if (!state) return;
     setYaw((value) => value - (event.clientX - state.x) * ORBIT_SPEED);
     setPitch((value) => Math.max(-1.5, Math.min(1.5, value + (event.clientY - state.y) * ORBIT_SPEED)));
-    drag.current = { x: event.clientX, y: event.clientY };
+    drag.current = { x: event.clientX, y: event.clientY, moved: state.moved + Math.abs(event.clientX - state.x) + Math.abs(event.clientY - state.y) };
   };
-  const onPointerUp = () => {
+  const onPointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const state = drag.current;
     drag.current = null;
+    if (!state || state.moved > 3 || !meshAsset || isSkinned(meshAsset)) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const hit = pickMeshTriangle(meshAsset, previewCamera(meshAsset), ((event.clientX - rect.left) / rect.width) * 2 - 1, 1 - ((event.clientY - rect.top) / rect.height) * 2);
+    setPickedFace((was) => {
+      if (!hit) return null;
+      const same = was && was.primitive === hit.primitive && faceAt(meshAsset.primitives[hit.primitive]!, hit.triangle).triangles.includes(was.triangle);
+      return same ? null : { primitive: hit.primitive, triangle: hit.triangle };
+    });
   };
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -651,6 +687,11 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   const applyMeshEdit = (next: MeshAsset) => {
     if (!selectedEntry) return;
     onSidecarChange(setMeshAsset(sidecar, selectedEntry.id, next));
+  };
+  // A geometry edit (I14): its old LODs no longer fit, so they're remade.
+  const applyGeometryEdit = (next: MeshAsset) => {
+    if (!selectedEntry) return;
+    onSidecarChange(withEditedGeometry(sidecar, selectedEntry.id, next));
   };
 
   const exportObj = () => {
@@ -892,6 +933,8 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
             <PrefabPanel sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
 
             <CodeHint entry={selectedEntry} />
+
+            {meshAsset && <FaceEditPanel mesh={meshAsset} picked={pickedFace} onEdit={applyGeometryEdit} />}
 
             {meshAsset && <MaterialEditor mesh={meshAsset} onChange={applyMeshEdit} />}
 
