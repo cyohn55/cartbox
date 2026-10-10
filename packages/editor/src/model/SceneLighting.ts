@@ -80,7 +80,17 @@ export interface SceneLighting {
    * things without a light map take their ambient from this grid. Absent = none.
    */
   readonly lightProbes?: StoredLightProbes | null;
+  /**
+   * The armour colours for this scene (HALO_INFINITE_STYLE_ROADMAP.md I8): entry
+   * k replaces tint k of the runtime's palette (1..15; entry 0 is unused), null
+   * keeping the built-in colour — so a scene lit brighter can carry team
+   * colours saturated to hold up in it. Absent = the built-in palette.
+   */
+  readonly tints?: readonly (readonly [number, number, number] | null)[];
 }
+
+/** Entries a rig's tint list may hold: the palette's 15 colours after the unused 0. */
+export const MAX_SCENE_TINTS = 16;
 
 const clamp01 = (n: number): number => Math.max(0, Math.min(1, n));
 const nonNeg = (n: number): number => (Number.isFinite(n) && n > 0 ? n : 0);
@@ -156,6 +166,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
   const lights = Array.isArray(record.lights)
     ? record.lights.map(parseLight).filter((l): l is SceneLight => l !== null)
     : base.lights;
+  const tints = parseTints(record.tints);
 
   return {
     environment: {
@@ -174,7 +185,15 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     ...(probes.length > 0 ? { probes } : {}),
     ...(shafts ? { shafts } : {}),
     ...(lightProbes ? { lightProbes } : {}),
+    ...(tints ? { tints } : {}),
   };
+}
+
+/** A rig's tint overrides: colours (clamped) or nulls, at most {@link MAX_SCENE_TINTS}; null when none are set. */
+function parseTints(value: unknown): (readonly [number, number, number] | null)[] | null {
+  if (!Array.isArray(value)) return null;
+  const tints = value.slice(0, MAX_SCENE_TINTS).map((t) => (isFiniteTriple(t) ? clampTriple(t) : null));
+  return tints.some((t) => t !== null) ? tints : null;
 }
 
 const finiteOr = (value: unknown, fallback: number): number =>
@@ -197,6 +216,59 @@ export function defaultProceduralSky(): ProceduralSky {
       { height: 16, peaks: 6, rock: [0.25, 0.28, 0.33], snow: [0.93, 0.95, 0.98], snowLine: 0.45, haze: 0.15, seed: 29 },
     ],
     seed: 7,
+  };
+}
+
+/**
+ * Saturated armour colours for a bright rig (HALO_INFINITE_STYLE_ROADMAP.md
+ * I8), index-aligned with the runtime's tint palette: under a strong sun and
+ * a bright sky fill the built-in, muted colours wash toward grey, so these
+ * push each hue harder and keep the darks dark.
+ */
+export const INFINITE_TINTS: readonly (readonly [number, number, number] | null)[] = [
+  null,
+  [0.78, 0.09, 0.07], // 1 red
+  [0.08, 0.3, 0.86], // 2 blue
+  [0.18, 0.6, 0.14], // 3 green
+  [0.96, 0.44, 0.04], // 4 orange
+  [0.5, 0.16, 0.8], // 5 purple
+  [0.93, 0.7, 0.1], // 6 gold
+  [0.45, 0.26, 0.12], // 7 brown
+  [0.96, 0.38, 0.62], // 8 pink
+  [0.9, 0.92, 0.94], // 9 white
+  [0.1, 0.1, 0.11], // 10 black
+  [0.42, 0.5, 0.6], // 11 steel
+  [0.04, 0.62, 0.66], // 12 teal
+  [0.42, 0.46, 0.12], // 13 olive
+  [0.56, 0.02, 0.08], // 14 crimson
+  [0.46, 0.64, 0.4], // 15 sage
+];
+
+/** Toward a high noon sun (about 55° up), the "Infinite daylight" rig's key light. */
+const NOON_SUN: readonly [number, number, number] = [0.42, 0.82, -0.4];
+
+/**
+ * An Infinite look for the rig (I8): a warm, strong noon sun that models
+ * every form, a bright blue sky fill so the shade stays open and cool rather
+ * than black, a clear noon dome that is also the image-based light, filmic
+ * tone mapping, shadows, and saturated team colours. Pair it with the
+ * Infinite grading LUT in the FX stack.
+ */
+export function infiniteDaylightLighting(): SceneLighting {
+  return {
+    environment: { sky: [0.36, 0.56, 0.9], horizon: [0.76, 0.85, 0.96], ground: [0.38, 0.36, 0.32], intensity: 0.85 },
+    ambient: 0.4,
+    exposure: 1.05,
+    tonemap: true,
+    shadows: true,
+    lights: [
+      { kind: "directional", direction: [...NOON_SUN], color: [1, 0.9, 0.74], intensity: 3 },
+      // Skylight from the far side: blue, soft, never black.
+      { kind: "directional", direction: [-NOON_SUN[0], 0.45, -NOON_SUN[2]], color: [0.55, 0.68, 0.95], intensity: 0.55 },
+    ],
+    sky: { ...defaultProceduralSky(), zenith: [0.17, 0.38, 0.78], horizon: [0.74, 0.85, 0.97], below: [0.68, 0.77, 0.88], sunDirection: [...NOON_SUN], sunColor: [1, 0.93, 0.8], clouds: 0.35 },
+    fog: { color: [0.74, 0.84, 0.96], density: 0.012, start: 12, max: 0.35 },
+    tints: INFINITE_TINTS,
   };
 }
 

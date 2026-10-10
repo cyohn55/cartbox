@@ -639,6 +639,66 @@ declare class PhysicsSession {
 }
 
 /**
+ * Colour grading through a 3D lookup table (HALO_INFINITE_STYLE_ROADMAP.md
+ * I8): the CPU half of the post-process LUT. A LUT maps every display colour to
+ * a graded one — the whole of a colourist's grade (curves, a warm key and cool
+ * shadows, vibrance) in one table — so a look authored anywhere (a `.cube` file
+ * from a grading tool) or built in here applies in a single texture read.
+ *
+ * The table is `size`³ RGB bytes, red varying fastest, then green, then blue —
+ * the `.cube` order. The shader holds it as a strip of `size` slices (one per
+ * blue step) side by side, reads two neighbouring slices with bilinear
+ * filtering and mixes them by blue: trilinear interpolation, which
+ * {@link applyLut} reproduces here as the reference the tests hold it to.
+ *
+ * DOM-free, like the rest of the effect model.
+ */
+/** A 3D colour lookup table: `size`³ RGB bytes, red fastest, then green, then blue. */
+interface GradingLut {
+    readonly size: number;
+    readonly data: Uint8Array;
+}
+/** The built-in looks' table size: 16 steps a channel is plenty for smooth grades. */
+declare const LUT_SIZE = 16;
+declare const MIN_LUT_SIZE = 2;
+/** An imported table's largest size (33³ is the common high-quality `.cube`). */
+declare const MAX_LUT_SIZE = 33;
+/** The looks the grading effect offers, by its `look` parameter; the last uses an imported table. */
+declare const LUT_LOOKS: readonly ["Infinite", "Warm noon", "Cold steel", "Bleach bypass", "Imported"];
+/** The `look` value that reads the imported table. */
+declare const IMPORTED_LOOK: number;
+type Rgb$2 = [number, number, number];
+/** The table for a built-in look (`look` past the built-ins gives the identity). */
+declare function lookLut(look: number, size?: number): GradingLut;
+/** The identity table: every colour maps to itself. */
+declare function identityLut(size?: number): GradingLut;
+/**
+ * Read an Adobe/Resolve `.cube` 3D LUT: `LUT_3D_SIZE n`, an optional
+ * `DOMAIN_MIN`/`DOMAIN_MAX`, then n³ lines of three floats, red fastest.
+ * Comments (`#`) and a `TITLE` are skipped. Null when it isn't one, it's a 1D
+ * LUT, or its size is out of range.
+ */
+declare function parseCubeLut(text: string): GradingLut | null;
+/** Pack a table for the settings (which travel as JSON): its size and its bytes as base64. */
+declare function encodeLut(lut: GradingLut): {
+    size: number;
+    data: string;
+};
+/** Unpack a stored table, or null when it is malformed. */
+declare function decodeLut(value: unknown): GradingLut | null;
+/**
+ * Grade one colour (0..1 channels) through the table, trilinearly — what the
+ * shader does with its strip texture. Outside 0..1 is clamped first.
+ */
+declare function applyLut(lut: GradingLut, r: number, g: number, b: number): Rgb$2;
+/** The table as the shader's RGBA strip: `size` slices of `size × size`, blue picking the slice. */
+declare function lutStrip(lut: GradingLut): {
+    width: number;
+    height: number;
+    data: Uint8Array;
+};
+
+/**
  * Data-driven post-processing effect model, shared by the editor's FX tab and
  * the runtime player. Each effect declares its parameters (with ranges and
  * defaults); UIs render them generically and `uniformsFromSettings` folds the
@@ -657,7 +717,8 @@ declare class PhysicsSession {
  * how a small palette fakes a gradient, and light shafts and streaks are how a
  * flat 2D scene suggests a light source it cannot actually cast.
  */
-type PostFxEffectId = "grade" | "fog" | "bloom" | "tonemap" | "crt" | "chroma" | "vignette" | "posterize" | "dither" | "halftone" | "godrays" | "streaks" | "lensflare" | "splittone" | "reflection" | "tiltshift" | "kaleidoscope" | "grain";
+
+type PostFxEffectId = "grade" | "fog" | "bloom" | "tonemap" | "crt" | "chroma" | "vignette" | "posterize" | "dither" | "halftone" | "godrays" | "streaks" | "lensflare" | "splittone" | "lut" | "reflection" | "tiltshift" | "kaleidoscope" | "grain";
 interface PostFxParamDef {
     id: string;
     label: string;
@@ -689,6 +750,11 @@ interface PostFxSettings {
     values: Record<string, number>;
     /** Effect colours as #rrggbb, keyed by {@link paramKey}. */
     colors: Record<string, string>;
+    /** An imported grading table (a `.cube`, packed by {@link encodeLut}), which the LUT's last look reads. */
+    lut?: {
+        size: number;
+        data: string;
+    };
 }
 declare function defaultPostFxSettings(): PostFxSettings;
 /** Whether any effect in the stack is switched on. */
@@ -775,6 +841,10 @@ interface PostFxUniforms {
     kaleidoAngle: number;
     grainAmount: number;
     grainSize: number;
+    /** How much of the graded colour replaces the frame's (0 = no grade). */
+    lutStrength: number;
+    /** The grading table, or null with the effect off. */
+    lut: GradingLut | null;
 }
 /** Parse #rrggbb into a 0..1 RGB triplet. */
 declare function hexToRgb01(hex: string): [number, number, number];
@@ -4578,7 +4648,7 @@ declare function shade(albedo: Rgb, normal: Vec3$2, toLight: Vec3$2, ambient: nu
  * Effect order mirrors a physical signal path. The frame is folded and bowed
  * first (kaleidoscope, then CRT curvature), sampled through chromatic
  * aberration, and lit (bloom, god rays, streaks). The composed colour is then
- * graded and split-toned, quantised (dither feeding posterize), screened
+ * graded, split-toned and looked up in the grading LUT, quantised (dither feeding posterize), screened
  * (halftone), and finally passed through the things that sit in front of the
  * picture rather than in it: fog, vignette, grain, scanlines.
  *
@@ -4599,8 +4669,12 @@ declare class PostFxPass {
     /** Null when render-to-texture is unavailable; the shader then falls back
      * to its inline 3x3 bloom rather than the multi-scale pyramid. */
     private readonly bloom;
+    /** The grading LUT's strip (unit 2), uploaded when the table changes. */
+    private readonly lutTexture;
     private readonly uniformLocations;
     private constructor();
+    /** The table last uploaded to {@link lutTexture}. */
+    private lutUploaded;
     /** Returns null when WebGL is unavailable or the shaders fail to compile. */
     static create(canvas: HTMLCanvasElement): PostFxPass | null;
     private location;
@@ -5729,6 +5803,11 @@ declare class MeshOverlaySurface implements DisplaySurface {
     probesReady: Promise<void>;
 }
 /**
+ * The 15 armour colours a pose's `tint` picks from (index 0 = no tint). Applied
+ * to a mesh's `tintable` materials only, replacing their base colour's RGB.
+ */
+declare const TINT_PALETTE: readonly (readonly [number, number, number])[];
+/**
  * Smooth the outline of the front layer (I1). The front render starts from a
  * cleared depth buffer, so its pixels are the ones with a finite depth; each
  * pixel on either side of that boundary is blended with its four neighbours
@@ -6810,4 +6889,4 @@ declare const DIRECT_CORE_URL = "/engine/modern-core/modern-core.js";
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { AgentCrowd, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_PAD_BINDINGS, DIRECT_CORE_URL, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GamepadInput, type GeneratedTrack, type GlContextProvider, HEIGHT_WORLD, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOP_SLOTS, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetState, type NetTransport, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type ProfileSection, type ProfileSnapshot, Profiler, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, RuntimeChannel, SAVE_MAGIC, SOFTWARE_RASTER_CAPS, START_KEYS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, SwitchableTransport, TILT_SHIFT_FEATHER, type TextureLookup, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3$2 as Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyLookSettings, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, breakableLine, browserDeviceHints, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreModel, drift, effectiveBreakpoints, emitterPreset, errorStack, estimateSceneBytes, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hasCommandRing, hashCart, hashEventId, hexToRgb01, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interpolateNormal, jointFrames, lensFlareAt, loadEngineModule, makeShadowTexture, mount, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, rewriteLuaCode, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, sendDebugCommand, serializeReplay, shade, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, tokenizeLua, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };
+export { AgentCrowd, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_PAD_BINDINGS, DIRECT_CORE_URL, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GamepadInput, type GeneratedTrack, type GlContextProvider, type GradingLut, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetState, type NetTransport, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type ProfileSection, type ProfileSnapshot, Profiler, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, RuntimeChannel, SAVE_MAGIC, SOFTWARE_RASTER_CAPS, START_KEYS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, SwitchableTransport, TILT_SHIFT_FEATHER, TINT_PALETTE, type TextureLookup, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3$2 as Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, breakableLine, browserDeviceHints, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreModel, drift, effectiveBreakpoints, emitterPreset, encodeLut, errorStack, estimateSceneBytes, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hasCommandRing, hashCart, hashEventId, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interpolateNormal, jointFrames, lensFlareAt, loadEngineModule, lookLut, lutStrip, makeShadowTexture, mount, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, rewriteLuaCode, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, sendDebugCommand, serializeReplay, shade, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, tokenizeLua, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };
