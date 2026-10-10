@@ -545,5 +545,40 @@ What separates Lockout from Halo Infinite, seen in a match:
 
 ## Phase E — Optional lighting tech
 
-- [ ] **I17. Dynamic bounce light.** Probes that relight as lights move, so a
+- [x] **I17. Dynamic bounce light.** Probes that relight as lights move, so a
       time of day or a moving light still bounces (today's bounce is baked).
+      *Done:* `dynamicBounce.ts` splits a probe's baked value into what the
+      lights don't change (sky visibility) and the bounce, which is
+      recomputed.
+      - **Surfels:** the still scene near the probes (clipped to the grid
+        grown by the rays' reach) is sampled into surfels: position, normal
+        and albedo per grid cell and facing.
+      - **Transfer:** each probe face's hemisphere rays credit the surfels
+        they land on. This is found once, a slice per frame after loading.
+      - **Relight:** whenever the lights change, each surfel's direct light
+        is worked out (the sun with a shadow ray, cached per direction, and
+        point and spot lights in range with theirs) and gathered into the
+        probe faces.
+      - **Result:** the relit grid is the bake plus the difference between
+        the bounce now and the bounce under the baked sun. Under the baked
+        light it is the bake exactly, and moved to another sun it lands close
+        to a fresh bake (tested).
+
+      **In the player:**
+      - Stored probes record the light they were baked with (`bake`: sun,
+        reach, bounce strength). The editor's bake writes it, and with it the
+        overlay relights the probes, at most every fourth frame and only when
+        the lights have moved. Both GPU renderers re-upload a relit grid.
+      - **The cart's lights:** its `cartbox.light3d` lights bounce, and the
+        new `cartbox.sun3d(dx, dy, dz, r, g, b, intensity)` sets the frame's
+        sun, a time of day. It replaces the rig's key light, the shadow maps
+        follow it, and the probes relight for it.
+      - **Cost:** on Lockout, about 15k surfels; a relight is about 10 ms in
+        a slow test sandbox, and 30 ms when the sun moves.
+
+      *Not yet:* the sky dome's painted sun doesn't move with `sun3d`, and
+      light-mapped surfaces keep their baked bounce (the probes light what
+      moves).
+      *Lockout:* its probes carry their bake. The objective glows (the ball's
+      cyan, the hill's green) and the plasma grenades' lights now bounce off
+      the deck and walls onto the Spartans as they move.

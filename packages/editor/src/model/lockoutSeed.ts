@@ -1393,7 +1393,9 @@ export function bakeLockoutProbes(progress?: (done: number) => void): LightProbe
 
 /** The stored probe bake, when it was made for the arena as it is now (null when stale or not yet baked). */
 function lockoutProbes(): StoredLightProbes | null {
-  return LOCKOUT_PROBES.probes && LOCKOUT_PROBES.fingerprint === layoutFingerprint(lockoutMapLayout()) ? LOCKOUT_PROBES.probes : null;
+  if (!LOCKOUT_PROBES.probes || LOCKOUT_PROBES.fingerprint !== layoutFingerprint(lockoutMapLayout())) return null;
+  // With the light the bounce was baked under (as bakeLockoutProbes), so moving lights relight it (I17).
+  return { ...LOCKOUT_PROBES.probes, bake: { sun: LOCKOUT_KEY_DIRECTION, distance: 7, bounce: 0.9 } };
 }
 
 /** The map as it ships: laid out and carrying the stored bake (or unlit, when the bake is stale). */

@@ -255,13 +255,19 @@ export function decodeLights(words: Uint32Array): Light[] {
   return lights;
 }
 
-/** A point light in a 3D scene's world units, published with `cartbox.light3d`. */
+/**
+ * A point light in a 3D scene's world units, published with `cartbox.light3d`
+ * — or, with `sun`, the scene's sun this frame (`cartbox.sun3d`, I17), whose
+ * `position` is then the direction toward it (a world light with a negative
+ * radius carries one).
+ */
 export interface WorldLight {
   readonly position: readonly [number, number, number];
-  /** Falloff radius in world units. */
+  /** Falloff radius in world units (0 for a sun). */
   readonly range: number;
   /** Colour with the intensity folded in. */
   readonly color: readonly [number, number, number];
+  readonly sun?: true;
 }
 
 /** Decodes the world-space point lights a cart published this frame (`cartbox.light3d`). */
@@ -275,9 +281,11 @@ export function decodeWorldLights(words: Uint32Array): WorldLight[] {
     if (((packed >>> 24) & 0x3) !== LIGHT_KIND_WORLD) continue;
     const intensity = ((words[base + 5] ?? LIGHT_INTENSITY_SCALE) & 0xffff) / LIGHT_INTENSITY_SCALE;
     const signed = (k: number) => ((words[base + k] ?? 0) | 0) / WORLD_LIGHT_SCALE;
+    const sun = signed(3) < 0;
     out.push({
       position: [signed(0), signed(1), signed(2)],
-      range: signed(3),
+      range: sun ? 0 : signed(3),
+      ...(sun ? { sun: true as const } : {}),
       color: [
         (((packed >>> 16) & 0xff) / 255) * intensity,
         (((packed >>> 8) & 0xff) / 255) * intensity,

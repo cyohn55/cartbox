@@ -86,6 +86,14 @@ cartbox = {
   light3d = function(x, y, z, radius, r, g, b, intensity)
     _light(3, (x or 0) * 64, (y or 0) * 64, (z or 0) * 64, (radius or 4) * 64, r, g, b, intensity, 0, 0, 0)
   end,
+  -- sun3d(dx, dy, dz, r, g, b, intensity): the 3D scene's sun this frame, toward
+  -- (dx, dy, dz) -- a time of day: it replaces the lighting rig's key light,
+  -- its shadows follow, and the light probes' bounce relights (I17).
+  sun3d = function(dx, dy, dz, r, g, b, intensity)
+    local l = math.sqrt((dx or 0)^2 + (dy or 1)^2 + (dz or 0)^2)
+    if l < 1e-6 then l = 1 end
+    _light(3, (dx or 0) / l * 64, (dy or 1) / l * 64, (dz or 0) / l * 64, -64, r, g, b, intensity, 0, 0, 0)
+  end,
   spot = function(x, y, z, dx, dy, dz, radius, angle, r, g, b, intensity)
     local nx, ny = _norm(dx or 0, dy or 0, dz or 1)
     local cone = math.floor(math.cos(math.rad(angle or 30)) * 63 + 0.5)
