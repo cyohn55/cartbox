@@ -69,6 +69,7 @@ export function retimeClip(clip: AnimationClip, speed: number): AnimationClip {
     ...clip,
     duration: clip.duration / s,
     channels: clip.channels.map((c) => ({ ...c, times: Float32Array.from(c.times, (t) => t / s), values: c.values.slice() })),
+    ...(clip.keys ? { keys: clip.keys.map((k) => ({ ...k, time: k.time / s })) } : {}),
   };
 }
 

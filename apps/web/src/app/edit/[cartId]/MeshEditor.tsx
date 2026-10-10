@@ -26,12 +26,17 @@ import {
   faceAt,
   faceBoundary,
   gizmoDrag,
+  jointOrigins,
   loopSelect,
   orbitView,
+  paintWeights,
   pickEdge,
   pickElement,
+  pickJoint,
+  pickMeshPoint,
   pickMeshTriangle,
   primitiveTopology,
+  rotateJoint,
   selectAll,
   selectionPivot,
   singleSelection,
@@ -102,7 +107,9 @@ import { LibraryBrowser } from "./LibraryBrowser";
 import { MaterialEditor } from "./MaterialEditor";
 import { FaceEditPanel, type PickedFace } from "./FaceEditPanel";
 import { ModelingPanel } from "./ModelingPanel";
-import { drawModelOverlay, gizmoHandleAt, type GizmoTool } from "./meshOverlay";
+import { drawBrush, drawGizmo, drawHeatMap, drawModelOverlay, drawSkeleton, gizmoHandleAt, type GizmoTool } from "./meshOverlay";
+import { PosePanel, WeightPaintPanel, type BrushSettings } from "./RiggingPanels";
+import { DopeSheet } from "./DopeSheet";
 import { BakePanel } from "./BakePanel";
 import { AnimatorPanel } from "./AnimatorPanel";
 import { LightingEditor } from "./LightingEditor";
@@ -227,13 +234,32 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
    * selection modes pick vertices, edges or faces. The selection, the gizmo's
    * tool, a gizmo drag's mesh in progress and a box being dragged.
    */
-  const [editMode, setEditMode] = useState<"object" | SelectMode>("object");
+  const [editMode, setEditMode] = useState<"object" | SelectMode | "pose" | "weights">("object");
   const [modelSel, setModelSel] = useState<MeshSelection>(emptySelection("vertex"));
   const [gizmoTool, setGizmoTool] = useState<GizmoTool>("move");
   const [dragMesh, setDragMesh] = useState<MeshAsset | null>(null);
   const [boxRect, setBoxRect] = useState<{ from: readonly [number, number]; to: readonly [number, number] } | null>(null);
   const selectMode: SelectMode | null = editMode === "vertex" || editMode === "edge" || editMode === "face" ? editMode : null;
   const modelling = selectMode !== null;
+  /**
+   * Rigging (L16): pose mode's clip being keyed, its playhead, the pose as
+   * edited (null: the clip's at the playhead), the picked bone and playback;
+   * weight painting's bone, brush, the stroke in progress and where the
+   * brush is over the model.
+   */
+  const posing = editMode === "pose";
+  const painting = editMode === "weights";
+  const [poseClip, setPoseClip] = useState(0);
+  const [poseTime, setPoseTime] = useState(0);
+  const [posePose, setPosePose] = useState<Float32Array | null>(null);
+  const [poseJoint, setPoseJoint] = useState(0);
+  const [posePlaying, setPosePlaying] = useState(false);
+  const poseTimeRef = useRef(0);
+  poseTimeRef.current = poseTime;
+  const [weightJoint, setWeightJoint] = useState(0);
+  const [brush, setBrush] = useState<BrushSettings>({ mode: "add", radius: 0.06, strength: 0.25 });
+  const [strokeMesh, setStrokeMesh] = useState<MeshAsset | null>(null);
+  const [brushAt, setBrushAt] = useState<[number, number, number] | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [textures, setTextures] = useState<(DecodedTexture | null)[] | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
@@ -427,6 +453,13 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     setPickedFace(null);
     setModelSel(emptySelection("vertex"));
     setDragMesh(null);
+    setPoseClip(0);
+    setPoseTime(0);
+    setPosePose(null);
+    setPoseJoint(0);
+    setPosePlaying(false);
+    setWeightJoint(0);
+    setStrokeMesh(null);
   }, [selectedId]);
   // Decode the selected mesh's geometry once per selection. A corrupt entry (it
   // was validated on the way in) simply shows nothing rather than throwing.
@@ -445,17 +478,44 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   // A skinned mesh previews through a live copy the clip poses; stop previewing on selection change.
   const liveMesh = useMemo(() => (worn && isSkinned(worn) ? createLiveSkinnedMesh(worn) : null), [worn]);
   useEffect(() => setPreviewClip(null), [meshAsset]);
-  // Modelling happens on the mesh at rest: no clip or ragdoll while selecting.
+  // Modelling, posing and painting take over the preview: no clip or ragdoll meanwhile.
   useEffect(() => {
-    if (!modelling) return;
+    if (!modelling && !posing && !painting) return;
     setPreviewClip(null);
     setRagdolling(false);
-  }, [modelling]);
+  }, [modelling, posing, painting]);
+  // Pose and weights need a skeleton.
+  useEffect(() => {
+    if ((posing || painting) && meshAsset && !isSkinned(meshAsset)) setEditMode("object");
+  }, [posing, painting, meshAsset]);
   // The camera frames the stored mesh, so an edit in progress (or a pose) doesn't move it.
   const frame = useMemo(() => (meshAsset ? meshBounds(meshAsset) : null), [meshAsset]);
   const viewProj = useMemo(() => (frame && meshAsset ? orbitView(frame, previewCamera(meshAsset)).viewProj : null), [frame, meshAsset, previewCamera]);
   const handleLength = meshAsset ? fitDistance(meshAsset) * zoom * 0.12 : 0;
   const modelPivot = useMemo(() => (modelling && meshAsset ? selectionPivot(dragMesh ?? meshAsset, modelSel) : null), [modelling, meshAsset, dragMesh, modelSel]);
+  // Pose mode's pose: as edited, else the keyed clip's at the playhead (or rest), and the picked bone's origin.
+  const keyedClip = meshAsset?.clips?.[poseClip];
+  const shownPose = useMemo(() => {
+    const skin = meshAsset?.skin;
+    if (!posing || !skin) return null;
+    return posePose ?? (keyedClip ? sampleClip(skin, keyedClip, poseTime, false) : restPose(skin));
+  }, [posing, meshAsset, posePose, keyedClip, poseTime]);
+  const jointPivot = useMemo(() => (shownPose && meshAsset?.skin ? (jointOrigins(meshAsset.skin, shownPose)[poseJoint] ?? null) : null), [shownPose, meshAsset, poseJoint]);
+  useEffect(() => {
+    if (!posePlaying || !keyedClip || keyedClip.duration <= 0) return;
+    const start = performance.now() - poseTimeRef.current * 1000;
+    let raf = 0;
+    let last = 0;
+    const tick = (now: number) => {
+      if (now - last >= 33) {
+        last = now;
+        setPoseTime(((now - start) / 1000) % keyedClip.duration);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [posePlaying, keyedClip]);
   // Playing a clip, or picking another mesh, stands a ragdoll back up.
   useEffect(() => {
     if (previewClip !== null) setRagdolling(false);
@@ -583,6 +643,10 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       liveMesh.update(skinMatrices(meshAsset.skin, sampleClip(meshAsset.skin, clip, clipTime)));
       shown = liveMesh.mesh;
     }
+    if (posing && liveMesh && meshAsset.skin && shownPose) {
+      liveMesh.update(skinMatrices(meshAsset.skin, shownPose));
+      shown = liveMesh.mesh;
+    } else if (painting && strokeMesh) shown = applyMeshVariant(strokeMesh, variant);
     renderMesh(shown, {
       camera: previewCamera(meshAsset),
       bounds: frame,
@@ -630,7 +694,16 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
         gizmo: modelPivot ? { pivot: modelPivot, length: handleLength, tool: gizmoTool } : null,
       });
     }
-  }, [meshAsset, worn, variant, textures, yaw, pitch, zoom, buffers, sidecar.lighting, liveMesh, previewClip, clipTime, ragdolling, ragdollFrame, shield, shieldTime, pickedFace, previewCamera, frame, viewProj, modelling, modelSel, dragMesh, boxRect, modelPivot, handleLength, gizmoTool]);
+    // Rigging (L16): the weight heat map and the brush, or the skeleton and the picked bone's turning gizmo.
+    if (painting && viewProj && meshAsset.skin) {
+      drawHeatMap(context, strokeMesh ?? meshAsset, weightJoint, viewProj, VIEWPORT);
+      if (brushAt) drawBrush(context, viewProj, VIEWPORT, brushAt, brush.radius);
+    }
+    if (posing && viewProj && meshAsset.skin && shownPose) {
+      drawSkeleton(context, meshAsset.skin, shownPose, viewProj, VIEWPORT, poseJoint);
+      if (jointPivot) drawGizmo(context, viewProj, VIEWPORT, jointPivot, handleLength, "rotate");
+    }
+  }, [meshAsset, worn, variant, textures, yaw, pitch, zoom, buffers, sidecar.lighting, liveMesh, previewClip, clipTime, ragdolling, ragdollFrame, shield, shieldTime, pickedFace, previewCamera, frame, viewProj, modelling, modelSel, dragMesh, boxRect, modelPivot, handleLength, gizmoTool, posing, painting, shownPose, jointPivot, poseJoint, strokeMesh, weightJoint, brushAt, brush.radius]);
 
   /** A modelling edit: committed (LODs remade), the selection kept through a reshape or cleared after a change of topology. */
   const commitModel = useCallback(
@@ -649,11 +722,21 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     x: number;
     y: number;
     moved: number;
-    kind: "orbit" | "box" | "gizmo";
+    kind: "orbit" | "box" | "gizmo" | "pose" | "paint";
     from: [number, number];
     axis?: 0 | 1 | 2;
     pivot?: readonly number[];
+    /** Pose mode: the pose the turn started from. */
+    base?: Float32Array;
+    /** Weight painting: the stroke so far, and where it last dabbed. */
+    stroke?: MeshAsset;
+    last?: readonly number[];
   } | null>(null);
+  /** Where the pointer meets the model (the stored, unposed mesh). */
+  const surfaceAt = (at: readonly [number, number]) => (meshAsset ? pickMeshPoint(meshAsset, previewCamera(meshAsset), at[0], at[1], frame) : null);
+  /** A dab of the weight brush on `on` at a surface point. */
+  const dabWeights = (on: MeshAsset, point: readonly [number, number, number]) =>
+    paintWeights(on, weightJoint, { center: point, radius: brush.radius, strength: brush.strength, mode: brush.mode });
   const ndcOf = (event: React.PointerEvent<HTMLCanvasElement>): [number, number] => {
     const rect = event.currentTarget.getBoundingClientRect();
     return [((event.clientX - rect.left) / rect.width) * 2 - 1, 1 - ((event.clientY - rect.top) / rect.height) * 2];
@@ -662,17 +745,36 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     event.currentTarget.setPointerCapture(event.pointerId);
     event.currentTarget.focus();
     const from = ndcOf(event);
-    let kind: "orbit" | "box" | "gizmo" = "orbit";
+    let kind: "orbit" | "box" | "gizmo" | "pose" | "paint" = "orbit";
     let axis: 0 | 1 | 2 | null = null;
+    const extra: { pivot?: readonly number[]; base?: Float32Array; stroke?: MeshAsset; last?: readonly number[] } = {};
     if (modelling && event.button === 0 && meshAsset && viewProj) {
       axis = modelPivot ? gizmoHandleAt(viewProj, modelPivot, handleLength, from) : null;
       kind = axis !== null ? "gizmo" : "box";
+      if (modelPivot) extra.pivot = modelPivot;
+    } else if (posing && event.button === 0 && viewProj && jointPivot && shownPose) {
+      axis = gizmoHandleAt(viewProj, jointPivot, handleLength, from);
+      if (axis !== null) {
+        kind = "pose";
+        Object.assign(extra, { pivot: jointPivot, base: shownPose });
+      }
+    } else if (painting && event.button === 0 && meshAsset?.skin) {
+      kind = "paint";
+      const hit = surfaceAt(from);
+      setBrushAt(hit ? hit.point : null);
+      extra.stroke = hit ? dabWeights(meshAsset, hit.point) : meshAsset;
+      if (hit) extra.last = hit.point;
+      setStrokeMesh(extra.stroke);
     }
-    drag.current = { x: event.clientX, y: event.clientY, moved: 0, kind, from, ...(axis !== null && modelPivot ? { axis, pivot: modelPivot } : {}) };
+    drag.current = { x: event.clientX, y: event.clientY, moved: 0, kind, from, ...(axis !== null ? { axis } : {}), ...extra };
   };
   const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const state = drag.current;
-    if (!state) return;
+    if (!state) {
+      // The weight brush follows the pointer over the model.
+      if (painting) setBrushAt(surfaceAt(ndcOf(event))?.point ?? null);
+      return;
+    }
     const moved = state.moved + Math.abs(event.clientX - state.x) + Math.abs(event.clientY - state.y);
     drag.current = { ...state, x: event.clientX, y: event.clientY, moved };
     if (state.kind === "orbit") {
@@ -685,6 +787,27 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       if (moved > 4) setBoxRect({ from: state.from, to: at });
       return;
     }
+    if (state.kind === "paint") {
+      const hit = surfaceAt(at);
+      setBrushAt(hit ? hit.point : null);
+      // Dabs a third of the brush apart along the stroke.
+      if (!hit || !state.stroke || (state.last && Math.hypot(hit.point[0] - state.last[0]!, hit.point[1] - state.last[1]!, hit.point[2] - state.last[2]!) < brush.radius / 3)) return;
+      const stroke = dabWeights(state.stroke, hit.point);
+      drag.current = { ...drag.current!, stroke, last: hit.point };
+      setStrokeMesh(stroke);
+      return;
+    }
+    if (state.kind === "pose") {
+      const skin = meshAsset?.skin;
+      if (!skin || !viewProj || state.axis === undefined || !state.pivot || !state.base) return;
+      const turn = gizmoDrag(viewProj, state.pivot, state.axis, "rotate", [at[0] - state.from[0], at[1] - state.from[1]], handleLength);
+      if (turn?.kind !== "rotate") return;
+      const axis: [number, number, number] = [0, 0, 0];
+      axis[state.axis] = 1;
+      setPosePlaying(false);
+      setPosePose(rotateJoint(skin, state.base, poseJoint, axis, turn.angle));
+      return;
+    }
     if (!meshAsset || !viewProj || state.axis === undefined || !state.pivot) return;
     const transform = gizmoDrag(viewProj, state.pivot, state.axis, gizmoTool, [at[0] - state.from[0], at[1] - state.from[1]], handleLength);
     setDragMesh(transform ? transformSelection(meshAsset, modelSel, transform, state.pivot) : null);
@@ -693,6 +816,12 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     const state = drag.current;
     drag.current = null;
     if (!state || !meshAsset) return;
+    if (state.kind === "paint") {
+      if (state.stroke && state.stroke !== meshAsset && selectedEntry) onSidecarChange(withEditedGeometry(sidecar, selectedEntry.id, state.stroke));
+      setStrokeMesh(null);
+      return;
+    }
+    if (state.kind === "pose") return;
     if (state.kind === "gizmo") {
       if (dragMesh) commitModel(dragMesh, true);
       setDragMesh(null);
@@ -719,7 +848,14 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       );
       return;
     }
-    if (state.moved > 3 || editMode !== "object") return;
+    if (state.moved > 3) return;
+    // Pose mode: a click picks the bone under it.
+    if (posing && meshAsset.skin && shownPose && viewProj) {
+      const joint = pickJoint(meshAsset.skin, shownPose, viewProj, at);
+      if (joint !== null) setPoseJoint(joint);
+      return;
+    }
+    if (editMode !== "object") return;
     const hit = pickMeshTriangle(meshAsset, previewCamera(meshAsset), at[0], at[1], frame);
     setPickedFace((was) => {
       if (!hit) return null;
@@ -918,11 +1054,17 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
           <SegmentedControl
             label="Edit"
             ariaLabel="Edit mode"
-            selected={editMode === "object" ? "object" : "model"}
-            onSelect={(id) => setEditMode(id === "object" ? "object" : modelSel.mode)}
+            selected={editMode === "object" || editMode === "pose" || editMode === "weights" ? editMode : "model"}
+            onSelect={(id) => setEditMode(id === "model" ? modelSel.mode : id)}
             options={[
-              { id: "object", label: "Object", hint: "Orbit the model and pick a face to extrude, inset or bevel" },
-              { id: "model", label: "Model", hint: "Select vertices, edges and faces, and reshape them" },
+              { id: "object" as const, label: "Object", hint: "Orbit the model and pick a face to extrude, inset or bevel" },
+              { id: "model" as const, label: "Model", hint: "Select vertices, edges and faces, and reshape them" },
+              ...(isSkinned(meshAsset)
+                ? [
+                    { id: "pose" as const, label: "Pose", hint: "Turn bones, and key them on a clip in the dope sheet" },
+                    { id: "weights" as const, label: "Weights", hint: "Paint how much each bone carries of the mesh" },
+                  ]
+                : []),
             ]}
           />
         )}
@@ -1028,12 +1170,21 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
             width: "100%",
             height: "auto",
             touchAction: "none",
-            cursor: meshAsset ? (modelling ? "crosshair" : "grab") : "default",
+            cursor: meshAsset ? (modelling || posing || painting ? "crosshair" : "grab") : "default",
             background: "#0e101a",
             borderRadius: 8,
           }}
           role="img"
-          aria-label={modelling ? "3D mesh preview — click or drag to select, right-drag to orbit, scroll to zoom" : "3D mesh preview — drag to orbit, scroll to zoom"}
+          aria-label={
+            modelling
+              ? "3D mesh preview — click or drag to select, right-drag to orbit, scroll to zoom"
+              : posing
+                ? "3D mesh preview — click a bone to pick it, drag the gizmo to turn it, right-drag to orbit"
+                : painting
+                  ? "3D mesh preview — drag to paint weights, right-drag to orbit"
+                  : "3D mesh preview — drag to orbit, scroll to zoom"
+          }
+          onPointerLeave={() => painting && setBrushAt(null)}
         />
         <div className={styles.hud}>
           <span className={styles.hudItem}>
@@ -1051,6 +1202,21 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
             </span>
           </span>
         </div>
+        {posing && meshAsset?.skin && keyedClip && (
+          <DopeSheet
+            mesh={meshAsset}
+            clip={poseClip}
+            time={poseTime}
+            onTime={(t) => {
+              setPoseTime(t);
+              setPosePose(null);
+              setPosePlaying(false);
+            }}
+            joint={poseJoint}
+            onJoint={setPoseJoint}
+            onEdit={applyMeshEdit}
+          />
+        )}
       </section>
       )}
         <ContentBrowser
@@ -1153,6 +1319,39 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
                 onTool={setGizmoTool}
                 onEdit={commitModel}
               />
+            )}
+
+            {meshAsset?.skin && posing && shownPose && (
+              <PosePanel
+                mesh={meshAsset}
+                clip={poseClip}
+                onClip={(c) => {
+                  setPoseClip(c);
+                  setPoseTime(0);
+                  setPosePose(null);
+                }}
+                time={poseTime}
+                onTime={(t) => {
+                  setPoseTime(t);
+                  setPosePose(null);
+                  setPosePlaying(false);
+                }}
+                playing={posePlaying}
+                onPlaying={(on) => {
+                  setPosePlaying(on);
+                  if (on) setPosePose(null);
+                }}
+                joint={poseJoint}
+                onJoint={setPoseJoint}
+                pose={shownPose}
+                edited={posePose !== null}
+                onPose={setPosePose}
+                onEdit={applyMeshEdit}
+              />
+            )}
+
+            {meshAsset?.skin && painting && (
+              <WeightPaintPanel mesh={meshAsset} joint={weightJoint} onJoint={setWeightJoint} brush={brush} onBrush={setBrush} onEdit={applyGeometryEdit} />
             )}
 
             {meshAsset && (

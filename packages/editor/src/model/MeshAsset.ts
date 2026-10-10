@@ -34,6 +34,7 @@ import {
   MAX_SKIN_JOINTS,
   type AnimationClip,
   type ClipChannel,
+  type ClipKey,
   type MeshSkin,
   type SkinJoint,
 } from "./skeleton";
@@ -519,6 +520,8 @@ interface SerializedClip {
   name: string;
   duration: number;
   channels: { joint: number; path: string; interp?: string; times: string; values: string }[];
+  /** The dope sheet's keys (L16): joint, time, ease (absent = linear) and a curve's handles. */
+  keys?: { j: number; t: number; e?: string; c?: number[] }[];
 }
 interface SerializedMesh {
   version: number;
@@ -564,6 +567,9 @@ function serializeClip(clip: AnimationClip): SerializedClip {
       times: f32ToBase64(c.times),
       values: f32ToBase64(c.values),
     })),
+    ...(clip.keys && clip.keys.length > 0
+      ? { keys: clip.keys.map((k) => ({ j: k.joint, t: k.time, ...(k.ease !== "linear" ? { e: k.ease } : {}), ...(k.ease === "curve" && k.curve ? { c: [...k.curve] } : {}) })) }
+      : {}),
   };
 }
 
@@ -656,7 +662,23 @@ function deserializeClips(raw: unknown, jointCount: number): AnimationClip[] {
       return { joint: c.joint, path, interpolation: c.interp === "step" ? "step" : "linear", times, values };
     });
     const duration = typeof clip.duration === "number" && Number.isFinite(clip.duration) ? Math.max(0, clip.duration) : 0;
-    return { name: typeof clip.name === "string" ? clip.name.slice(0, 64) : "clip", duration, channels };
+    // The dope sheet's keys: kept where they make sense, the rest dropped (the channels still play).
+    const authored: ClipKey[] = [];
+    if (Array.isArray(clip.keys)) {
+      for (const k of clip.keys.slice(0, Math.max(0, MAX_CLIP_KEYS - keys))) {
+        if (!k || !Number.isInteger(k.j) || k.j < 0 || k.j >= jointCount || typeof k.t !== "number" || !Number.isFinite(k.t)) continue;
+        const ease = k.e === "smooth" || k.e === "step" || k.e === "curve" ? k.e : "linear";
+        const c = Array.isArray(k.c) && k.c.length === 4 && k.c.every((v) => typeof v === "number" && Number.isFinite(v)) ? k.c : null;
+        authored.push({
+          joint: k.j,
+          time: Math.max(0, k.t),
+          ease,
+          ...(ease === "curve" ? { curve: c ? [Math.max(0, Math.min(1, c[0]!)), Math.max(-1, Math.min(2, c[1]!)), Math.max(0, Math.min(1, c[2]!)), Math.max(-1, Math.min(2, c[3]!))] : [0.42, 0, 0.58, 1] } : {}),
+        });
+      }
+      keys += authored.length;
+    }
+    return { name: typeof clip.name === "string" ? clip.name.slice(0, 64) : "clip", duration, channels, ...(authored.length > 0 ? { keys: authored } : {}) };
   });
 }
 

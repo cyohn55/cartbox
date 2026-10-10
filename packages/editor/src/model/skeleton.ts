@@ -23,6 +23,7 @@
  */
 
 import type { MeshAsset, MeshPrimitive } from "./MeshAsset";
+import type { EaseCurve, TimelineEase } from "./timeline";
 
 /** One joint of a skeleton. */
 export interface SkinJoint {
@@ -64,6 +65,25 @@ export interface AnimationClip {
   /** Seconds. */
   readonly duration: number;
   readonly channels: readonly ClipChannel[];
+  /**
+   * The keys a clip was authored with in the dope sheet (L16; see
+   * dopeSheet.ts): per joint, the moments it was keyed and how each eases
+   * into the next. The channels are the clip as it plays, an eased span
+   * baked to samples; these let the dope sheet show and edit the keys rather
+   * than the samples. A joint without any plays (and edits) its channels'
+   * own keys, as an imported clip does.
+   */
+  readonly keys?: readonly ClipKey[];
+}
+
+/** A key of the dope sheet: one joint's pose at a moment, easing into its next key. */
+export interface ClipKey {
+  readonly joint: number;
+  /** Seconds. */
+  readonly time: number;
+  readonly ease: TimelineEase;
+  /** A `curve` ease's handles (as the timeline's). */
+  readonly curve?: EaseCurve;
 }
 
 // Caps for untrusted input.
