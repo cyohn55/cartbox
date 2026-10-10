@@ -36,7 +36,7 @@ import { packMeshLibrary } from "./meshLibrary";
 import { encodeLods, generateLods, type StoredLods } from "./meshSimplify";
 import { reverseClip } from "./clipEdit";
 import { serializeFoliage, type FoliageLayer, type SerializedFoliage } from "./foliage";
-import { boulderMesh, driftMesh } from "./foliagePresets";
+import { boulderMesh, driftMesh, pineMesh } from "./foliagePresets";
 import type { SceneAudio, SceneSound, SynthPreset } from "./sound";
 import type { UiDocument, UiWidget } from "./ui";
 import type { ComponentDef } from "./components";
@@ -1392,6 +1392,111 @@ export function lockoutTerrain(): Terrain {
 }
 
 /**
+ * A forest canopy seen from far off: dark crowns in clumps, gaps of shadow
+ * between them and a frosting of snow on the tops.
+ */
+function forestSurface(x: number, y: number): Surf {
+  const crowns = tfbm(x, y, 24, 91, 3);
+  const clumps = tfbm(x, y, 6, 93, 2);
+  const gap = crowns < 0.42 ? 1 : 0;
+  const frost = crowns > 0.62 && tnoise(x, y, 32, 95) > 0.55 ? 1 : 0;
+  const v = 70 + (crowns - 0.5) * 60 + (clumps - 0.5) * 30 - gap * 30;
+  return { r: clampByte(v * 0.55 + frost * 90), g: clampByte(v * 0.8 + frost * 90), b: clampByte(v * 0.62 + frost * 100), h: crowns - gap * 0.3, rough: 0.95, metal: 0, emis: 0 };
+}
+
+let forestTexture: { albedo: EncodedImage; normal: EncodedImage } | null = null;
+let farRockTexture: { albedo: EncodedImage; normal: EncodedImage } | null = null;
+/** The vista's texture size (texels a side). */
+const VISTA_TEXTURE = 48;
+
+/** The vista's extent (I7): far past the near range, out to the great peaks. */
+const VISTA_SIZE = 2400;
+const VISTA_SAMPLES = 97;
+/** The vista leaves out this square round the arena (half its side). */
+const VISTA_HOLE = 170;
+/** The far ground at (x, z): a forested valley ringing the near range, rising to a wall of great peaks. */
+function lockoutFarGround(x: number, z: number): number {
+  const r = Math.hypot(x, z);
+  const valley = 5 + (vnoise(x / 70, z / 70, 51) - 0.5) * 40 + ridged(x / 120, z / 120, 55) * 50 * smooth(180, 400, r);
+  const peaks = 220 + 700 * ridged(x / 280, z / 280, 53);
+  return valley + (peaks - valley) * smooth(420, 1000, r);
+}
+
+let vista: Terrain | null = null;
+
+/**
+ * Lockout's distant vista (HALO_INFINITE_STYLE_ROADMAP.md I7): the forested
+ * valleys round the near range and the great peaks beyond, drawn once into
+ * the sky — snow on the heights, rock on the faces, forest on the low ground.
+ */
+export function lockoutVista(): Terrain {
+  if (vista) return vista;
+  const n = VISTA_SAMPLES;
+  const origin: [number, number, number] = [-VISTA_SIZE / 2, 0, -VISTA_SIZE / 2];
+  const heights = new Float32Array(n * n);
+  for (let j = 0; j < n; j += 1) {
+    for (let i = 0; i < n; i += 1) {
+      heights[j * n + i] = lockoutFarGround(origin[0] + (i / (n - 1)) * VISTA_SIZE, origin[2] + (j / (n - 1)) * VISTA_SIZE);
+    }
+  }
+  // The middle is cut away: the near range and the gorge (bottomless mist) are real geometry.
+  const holes = new Uint8Array((n - 1) * (n - 1));
+  const cell = VISTA_SIZE / (n - 1);
+  for (let j = 0; j < n - 1; j += 1) {
+    for (let i = 0; i < n - 1; i += 1) {
+      const x = origin[0] + (i + 0.5) * cell;
+      const z = origin[2] + (j + 0.5) * cell;
+      if (Math.max(Math.abs(x), Math.abs(z)) < VISTA_HOLE) holes[j * (n - 1) + i] = 1;
+    }
+  }
+  // Small maps (seen from kilometres off, a finer grain only shimmers), so the range costs little to store.
+  farRockTexture ??= bakeLandscape(rockSurface, 3, VISTA_TEXTURE);
+  forestTexture ??= bakeLandscape(forestSurface, 2, VISTA_TEXTURE);
+  const snow: MeshPrimitive["material"] = { name: "vista-snow", baseColorFactor: [0.82, 0.86, 0.92, 1], baseColorImage: null, metallicFactor: 0, roughnessFactor: 0.85 };
+  const forest: MeshPrimitive["material"] = { name: "vista-forest", baseColorFactor: [0.38, 0.46, 0.4, 1], baseColorImage: forestTexture.albedo, normalImage: forestTexture.normal, metallicFactor: 0, roughnessFactor: 0.95 };
+  const rock: MeshPrimitive["material"] = { name: "vista-rock", baseColorFactor: [0.3, 0.32, 0.36, 1], baseColorImage: farRockTexture.albedo, normalImage: farRockTexture.normal, metallicFactor: 0, roughnessFactor: 0.9 };
+  vista = {
+    id: "lockout-vista",
+    name: "Far range",
+    origin,
+    size: [VISTA_SIZE, VISTA_SIZE],
+    samples: n,
+    heights,
+    layers: [
+      { material: snow, up: [0.6, 1], height: [220, 5000] },
+      { material: forest, up: [0.62, 1], height: [-200, 180] },
+      { material: rock },
+    ],
+    holes,
+    // Broad repeats: from this far, a fine rock grain only shimmers.
+    tile: 180,
+    blend: { up: 0.14, height: 40, noise: 0.7 },
+    vista: { haze: 0.4 },
+  };
+  return vista;
+}
+
+/** The preset pine in the dark needles of a mountain forest (the preset's are a garden green). */
+function farPine(): MeshAsset {
+  const pine = pineMesh();
+  return { ...pine, primitives: pine.primitives.map((p) => (p.material.name === "needles" ? { ...p, material: { ...p.material, baseColorFactor: [0.07, 0.14, 0.09, 1] } } : p)) };
+}
+
+/** The forest edge on the vista: pines over the valleys' gentle ground, giant at this range. */
+export const LOCKOUT_VISTA_FOREST: FoliageLayer = {
+  id: "lockout-vista-pines",
+  name: "Far pines",
+  terrain: "lockout-vista",
+  density: 0.06,
+  scale: [5, 8],
+  align: 0,
+  sink: 0.1,
+  cull: 3000,
+  copies: [],
+  fill: { seed: 61, up: [0.75, 1], height: [-200, 150] },
+};
+
+/**
  * Lockout's foliage (EP11): boulders strewn over the range's slopes and snow
  * drifts banked on its flats, filled by rules (nothing stored per copy) and
  * kept back from the gorge so none of it reaches the play space.
@@ -1556,7 +1661,7 @@ export const LOCKOUT_AUDIO: SceneAudio = {
 function lockoutFoliage(): SerializedFoliage[] {
   const t = lockoutTerrain();
   const meshes = [serializeMeshAsset(boulderMesh(11, [0.3, 0.31, 0.34])), serializeMeshAsset(driftMesh(5))];
-  return LOCKOUT_FOLIAGE.map((layer, k) => serializeFoliage(t, layer, meshes[k]!));
+  return [...LOCKOUT_FOLIAGE.map((layer, k) => serializeFoliage(t, layer, meshes[k]!)), serializeFoliage(lockoutVista(), LOCKOUT_VISTA_FOREST, serializeMeshAsset(farPine()))];
 }
 
 /** Triangles the landscape draws (it isn't part of the arena's budget). */
@@ -2561,7 +2666,7 @@ export function lockoutMeshSidecar(): string {
       // The baked light probes (EP9) light the soldiers as they cross shade and bounce.
       lighting: { ...LOCKOUT_LIGHTING, ...(lockoutProbes() ? { lightProbes: lockoutProbes() } : {}) },
       navmesh: serializeNavMesh(lockoutNavMesh()),
-      terrains: [serializeTerrain(lockoutTerrain())],
+      terrains: [serializeTerrain(lockoutTerrain()), serializeTerrain(lockoutVista())],
       timelines: [LOCKOUT_INTRO],
       effects: LOCKOUT_EFFECTS,
       decals: LOCKOUT_DECALS,

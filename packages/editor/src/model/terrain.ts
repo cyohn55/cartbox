@@ -18,6 +18,7 @@
  */
 
 import { bytesToBase64, base64ToBytes } from "./base64";
+import { MAX_VISTA_HAZE } from "../render/vista";
 import { deserializeMaterial, serializeMaterial, type MeshAsset, type MeshMaterial, type MeshPrimitive, type SerializedMaterial } from "./MeshAsset";
 
 /** Which triangles a layer covers: a range of flatness and a range of height. */
@@ -71,6 +72,14 @@ export interface Terrain {
   readonly paint?: Uint8Array;
   /** Holes cut in the ground (EP10): one byte per cell (`(samples − 1)²`, row by row along Z), non-zero = no ground. */
   readonly holes?: Uint8Array;
+  /**
+   * A distant vista (HALO_INFINITE_STYLE_ROADMAP.md I7; see vista.ts): ground
+   * beyond the play space, drawn once into the sky panorama from the play
+   * space's centre rather than as geometry each frame, `haze` (0..0.95) the
+   * share of the sky that shows through it 1000 units out. It needs the sky
+   * dome to be drawn into, and nothing stands on it or collides with it.
+   */
+  readonly vista?: { readonly haze: number };
 }
 
 export const MIN_TERRAIN_SAMPLES = 2;
@@ -453,6 +462,7 @@ export interface SerializedTerrain {
   paint?: string;
   /** Holes as bits, one per cell (least significant first), base64. */
   holes?: string;
+  vista?: { haze: number };
 }
 
 export function serializeTerrain(t: Terrain): SerializedTerrain {
@@ -473,6 +483,7 @@ export function serializeTerrain(t: Terrain): SerializedTerrain {
     ...(t.castShadows ? { castShadows: true } : {}),
     ...(t.paint && t.paint.length === t.samples * t.samples * t.layers.length ? { paint: bytesToBase64(t.paint) } : {}),
     ...(t.holes && t.holes.some((v) => v !== 0) ? { holes: packBits(t.holes) } : {}),
+    ...(t.vista ? { vista: { haze: t.vista.haze } } : {}),
   };
 }
 
@@ -552,7 +563,14 @@ export function readTerrain(value: unknown): Terrain | null {
     ...(r.castShadows === true ? { castShadows: true } : {}),
     ...readPaint(r.paint, n * n * layers.length),
     ...(typeof r.holes === "string" && unpackBits(r.holes, (n - 1) * (n - 1)) ? { holes: unpackBits(r.holes, (n - 1) * (n - 1))! } : {}),
+    ...readVista(r.vista),
   };
+}
+
+function readVista(value: unknown): { vista?: Terrain["vista"] } {
+  if (!value || typeof value !== "object") return {};
+  const haze = (value as { haze?: unknown }).haze;
+  return { vista: { haze: finite(haze) ? Math.max(0, Math.min(MAX_VISTA_HAZE, haze)) : 0 } };
 }
 
 function readBlend(value: unknown): { blend?: Terrain["blend"] } {

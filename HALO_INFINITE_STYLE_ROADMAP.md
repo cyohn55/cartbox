@@ -189,10 +189,33 @@ What separates Lockout from Halo Infinite, seen in a match:
       an equirectangular export of it is. *Lockout:* the ring arches over the
       valley from one horizon to the other, a pale moon hangs in the east, and
       two decks of cloud drift across a lighter painted sky.
-- [ ] **I7. Distant vistas.** Far terrain and backdrop meshes beyond the play
+- [x] **I7. Distant vistas.** Far terrain and backdrop meshes beyond the play
       space, cheap (impostors or one coarse level), fogged into the sky.
       *Lockout:* mountains and a forest edge around the gorge instead of a
       void.
+      *Done:* a terrain marked as a **vista** (`Terrain.vista`, with its
+      `haze`) is a panoramic impostor (`vista.ts`). When the scene loads, it
+      and any foliage set on it are drawn once into the sky panorama from the
+      play space's centre. They are rendered through six 90° cube faces by the
+      software rasteriser, lit by the rig, the sky's own light, the fog and a
+      shadow map of their own. Then they are resampled to the panorama with
+      soft, coverage-weighted edges, and the nearer of overlapping vistas
+      wins. **Aerial haze** fades each pixel by its distance toward the air:
+      the sky without its ring and planets, so those stay behind the range
+      instead of ghosting through it. A vista costs nothing per frame. It
+      shows on every backend (the backdrop is painted before the scene), metals
+      reflect it, and it is re-drawn when an edit changes it or the rig. It
+      stays out of the instances and the gameplay terrains: nothing stands on
+      it, collides with it or frames the camera by it. It has no parallax,
+      which is right where the play space is small next to the vista's
+      distance. Baking takes about a second at load for Lockout's range, in
+      the software rasteriser. The Terrain panel marks a terrain as a vista
+      and sets its haze. *Lockout:* a 2.4 km far range (`lockoutVista`) with
+      the near range and the gorge cut out of its middle. Forested valleys
+      ring the near mountains, with dark pines on their gentle ground, and
+      climb to a wall of snow-capped peaks that fade into the sky with
+      distance. They show above the near ridges and through the notch in the
+      east.
 - [ ] **I8. Light and colour pass.** An Infinite look for the lighting rig: a
       warm, strong sun, a bright sky fill, saturated team colours and a
       grading LUT; Lockout re-lit and re-baked to match. *Lockout:* bright

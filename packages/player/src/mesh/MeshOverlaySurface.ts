@@ -32,6 +32,7 @@ import {
   sunVisibility,
   type ShaftScratch,
   bakeSkyPanorama,
+  bakeVistas,
   buildSceneShadow,
   LOCAL_SHADOW_BIAS,
   LOCAL_SHADOW_SLOPE_BIAS,
@@ -48,6 +49,7 @@ import {
   multiplyMat4,
   sceneLightingEnvironment,
   sceneLightingKeyDirection,
+  vistaBounds,
   sceneLightingTonemap,
   withDescendants,
   type DecodedTexture,
@@ -73,8 +75,8 @@ import type { DisplaySurface } from "../display.js";
 import type { ScreenSun } from "../fx/PostFxSurface.js";
 import { SoftwareSceneRenderer, type SceneRenderer } from "../render/sceneRenderer.js";
 import type { MailboxMeshCamera, MailboxMeshPose, WorldLight } from "../mailbox.js";
-import type { LocalShadowTile, LocalShadows, ShadowCascade, ShadowInput, SceneLight, SceneLighting } from "@cartbox/editor";
-import type { MeshInstance, MeshScene } from "./meshScene.js";
+import type { LocalShadowTile, LocalShadows, ShadowCascade, ShadowInput, SceneLight, SceneLighting, VistaLayer } from "@cartbox/editor";
+import type { MeshInstance, MeshScene, SceneVista } from "./meshScene.js";
 import { QUALITY_PRESETS, type QualitySettings } from "../quality.js";
 import { buildOrbitCamera, orbitPitchAboveTerrain } from "./meshScene.js";
 import { sceneColliders } from "./sceneColliders.js";
@@ -267,6 +269,8 @@ export class MeshOverlaySurface implements DisplaySurface {
   private skyCache: { key: string; pixels: Uint8ClampedArray } | null = null;
   /** The sky's drifting cloud layers (I6), drawn over the backdrop each frame. */
   private skyClouds: BakedCloudLayer[] = [];
+  /** The scene's distant vistas, textured: re-drawn into the sky whenever it is re-baked. */
+  private vistas: VistaLayer[] = [];
   /**
    * Told each frame where the sky dome's sun is on screen and how much of it is
    * unblocked, for the post-FX glare and lens flare (H8); null without a sky dome.
@@ -464,14 +468,16 @@ export class MeshOverlaySurface implements DisplaySurface {
         moved = true;
       }
     }
-    if (JSON.stringify(before.lighting ?? null) !== JSON.stringify(next.lighting ?? null)) {
-      // The rig changed: re-bake the sky dome and the light the PBR shading samples.
+    const vistasChanged = vistaSignature(before.vistas) !== vistaSignature(next.vistas);
+    if (vistasChanged) this.vistas = await texturedVistas(next.vistas, (mesh) => decodeMeshTextures(mesh, this.decodeKtx2 ?? (() => Promise.resolve(null))));
+    if (vistasChanged || JSON.stringify(before.lighting ?? null) !== JSON.stringify(next.lighting ?? null)) {
+      // The rig (or a vista) changed: re-bake the sky dome and the light the PBR shading samples.
       const lighting = next.lighting;
       let environment: EnvironmentLight | null = lighting ? sceneLightingEnvironment(lighting) : null;
       let skyMap: DecodedTexture | null = null;
       let clouds: BakedCloudLayer[] = [];
       if (lighting?.sky && environment) {
-        const baked = await bakeSceneSky(lighting.sky);
+        const baked = await bakeSceneSky(lighting.sky, lighting, environment, this.vistas, next.bounds.center);
         skyMap = baked.map;
         clouds = baked.clouds;
         environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections) };
@@ -571,14 +577,17 @@ export class MeshOverlaySurface implements DisplaySurface {
     let skyMap: DecodedTexture | null = null;
     let clouds: BakedCloudLayer[] = [];
     let environment: EnvironmentLight | null = lighting ? sceneLightingEnvironment(lighting) : null;
+    // Distant vistas (I7) are drawn into that panorama, textured as the frame would draw them.
+    const vistas = await texturedVistas(scene.vistas, texture);
     if (lighting?.sky && environment) {
-      const baked = await bakeSceneSky(lighting.sky);
+      const baked = await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center);
       skyMap = baked.map;
       clouds = baked.clouds;
       environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections) };
     }
     const surface = new MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
     surface.skyClouds = clouds;
+    surface.vistas = vistas;
     for (const [i, mesh] of live) surface.live.set(i, mesh);
     scene.instances.forEach((instance, i) => {
       if (instance.foliage) surface.foliage.set(instances[i]!.mesh, instance.foliage);
@@ -1487,14 +1496,39 @@ function fillPlaceholders(mesh: MeshAsset, images: ReadonlyMap<string, EncodedIm
   return touched ? { ...mesh, primitives } : mesh;
 }
 
+/** Shadow map edge for a vista bake: one map over the whole far range, drawn once. */
+const VISTA_SHADOW_SIZE = 2048;
+/** The haze's sky is soft anyway: a small bake of it does. */
+const VISTA_AIR_WIDTH = 192;
+
+/** A scene's vistas with their meshes' maps decoded (the frame's own decode, so shared images decode once). */
+async function texturedVistas(vistas: readonly SceneVista[] | undefined, texture: (mesh: MeshAsset) => Promise<TexturedMesh>): Promise<VistaLayer[]> {
+  return Promise.all(
+    (vistas ?? []).map(async (v) => ({ haze: v.haze, instances: await Promise.all(v.parts.map(async (p) => ({ ...(await texture(p.mesh)), model: p.model }))) })),
+  );
+}
+
+/** What a vista bake depends on, so an edit that leaves the vistas alone doesn't redraw them. */
+function vistaSignature(vistas: readonly SceneVista[] | undefined): string {
+  return JSON.stringify((vistas ?? []).map((v) => [v.id, v.haze, v.parts.map((p) => [meshSignature(p.mesh), Array.from(p.model)])]));
+}
+
 /**
  * Bake a scene's sky (I6): its imported panorama decoded (a Radiance HDR by
  * our own decoder, exposed into 8 bits; anything else by the browser), the
- * dome baked with its objects, its cloud layers baked, and the reflections'
- * copy — downsampled, with the clouds laid over it at rest. A panorama that
- * fails to decode falls back to the procedural sky.
+ * dome baked with its objects, its distant vistas drawn over it from the play
+ * space's centre `eye` (I7: lit by the rig, the sky's own light and a shadow
+ * of their own), its cloud layers baked, and the reflections' copy —
+ * downsampled, with the clouds laid over it at rest. A panorama that fails to
+ * decode falls back to the procedural sky.
  */
-async function bakeSceneSky(sky: ProceduralSky): Promise<{ map: DecodedTexture; reflections: DecodedTexture; clouds: BakedCloudLayer[] }> {
+async function bakeSceneSky(
+  sky: ProceduralSky,
+  lighting: SceneLighting,
+  environment: EnvironmentLight,
+  vistas: readonly VistaLayer[],
+  eye: readonly [number, number, number],
+): Promise<{ map: DecodedTexture; reflections: DecodedTexture; clouds: BakedCloudLayer[] }> {
   let imported: DecodedTexture | null = null;
   if (sky.panorama) {
     try {
@@ -1509,7 +1543,33 @@ async function bakeSceneSky(sky: ProceduralSky): Promise<{ map: DecodedTexture; 
       imported = null;
     }
   }
-  const map = bakeSkyPanorama(sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT, imported);
+  let map = bakeSkyPanorama(sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT, imported);
+  const bounds = vistas.length > 0 ? vistaBounds(vistas) : null;
+  if (bounds) {
+    // The vistas are lit as the frame lights the near ground: the rig, the
+    // sky's light (before they stand in it) and the fog, with their own shadow.
+    const light = downsamplePanorama(map, SKY_IBL_DOWNSAMPLE);
+    const shadow = buildSceneShadow(
+      vistas.flatMap((v) => v.instances),
+      lighting,
+      bounds.center,
+      bounds.radius,
+      { size: VISTA_SHADOW_SIZE, depth: new Float32Array(VISTA_SHADOW_SIZE * VISTA_SHADOW_SIZE) },
+    );
+    // The haze is air: the sky without its ring and planets, which the vistas stand in front of.
+    const air = sky.objects && sky.objects.length > 0 ? bakeSkyPanorama({ ...sky, objects: [] }, VISTA_AIR_WIDTH, VISTA_AIR_WIDTH / 2, imported) : null;
+    map = bakeVistas(map, vistas, eye, {
+      ambient: lighting.ambient,
+      lightDirection: sceneLightingKeyDirection(lighting),
+      lights: lighting.lights,
+      // The sky's light alone: the play space's light probes don't reach out there.
+      environment: { ...environment, lightProbes: undefined, map: light, average: computeEnvironmentAverage(light) },
+      tonemap: sceneLightingTonemap(lighting),
+      // Fog boxes sit in the play space, not out where the vistas are.
+      fog: lighting.fog ? { ...lighting.fog, volumes: [] } : null,
+      shadow,
+    }, undefined, air);
+  }
   const clouds = (sky.cloudLayers ?? []).map(bakeCloudLayer);
   const reflections = panoramaWithClouds(downsamplePanorama(map, SKY_IBL_DOWNSAMPLE), clouds, 0);
   return { map, reflections, clouds };

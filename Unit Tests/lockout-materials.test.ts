@@ -152,10 +152,11 @@ describe("the Lockout materials", () => {
     // share it) and its second UV set add ~130 KB; this bound keeps a cart save
     // well inside a request body limit.
     // 1.5 MB since its sounds and UI documents (EP12, EP13), 1.55 MB since its
-    // string table (EP19b): a sidecar over 512 KB is offloaded to object
+    // string table (EP19b), 1.65 MB since its distant vista (I7: the far
+    // range's heights, two small maps and its pines): a sidecar over 512 KB is offloaded to object
     // storage anyway, and this keeps a save well inside the 4.5 MB request body
     // limit.
-    expect(lockoutMeshSidecar().length).toBeLessThan(1_550_000);
+    expect(lockoutMeshSidecar().length).toBeLessThan(1_650_000);
   });
 
   it("ships a cold grade: bloom, contrast, cool split tone, vignette", () => {

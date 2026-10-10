@@ -8,4 +8,4 @@
 export { MeshOverlaySurface, smoothFrontEdges } from "./MeshOverlaySurface.js";
 export { parseMeshScene, buildOrbitCamera, orbitPitchAboveTerrain, streamGroups } from "./meshScene.js";
 export { sceneObjectsSdkLua, luaQuote } from "./sceneObjectsSdk.js";
-export type { MeshScene, MeshInstance, PrefabPool, SceneBounds, SceneCamera as MeshSceneCamera } from "./meshScene.js";
+export type { MeshScene, MeshInstance, PrefabPool, SceneBounds, SceneVista, SceneCamera as MeshSceneCamera } from "./meshScene.js";
