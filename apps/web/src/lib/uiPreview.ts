@@ -39,6 +39,9 @@ export function sampleBindings(doc: UiDocument): Record<string, unknown> {
       for (const m of (w.text ?? "").matchAll(/\{(\w+)\}/g)) out[m[1]!] ??= `{${m[1]}}`;
       if (w.value && (w.kind === "bar" || w.kind === "slider")) out[w.value] ??= 0.66;
       if (w.value && w.kind === "list") out[w.value] ??= ["First", "Second", "Third"];
+      if (w.value && w.kind === "arc") out[w.value] ??= 0.66;
+      // A radar's blips (I12): x, y and kind, three numbers each.
+      if (w.value && w.kind === "radar") out[w.value] ??= [0.45, -0.3, 1, -0.4, 0.15, 1, 0.1, 0.55, 2];
       if (w.visible) out[w.visible] ??= true;
       if (w.children) visit(w.children);
     }
@@ -164,7 +167,11 @@ export function parsePreviewBindings(text: string): Record<string, unknown> {
     if (!/^\w+$/.test(key)) continue;
     if (raw === "true" || raw === "false") out[key] = raw === "true";
     else if (raw !== "" && Number.isFinite(Number(raw))) out[key] = Number(raw);
-    else if (raw.includes(",")) out[key] = raw.split(",").map((s) => s.trim());
+    else if (raw.includes(",")) {
+      const items = raw.split(",").map((s) => s.trim());
+      // All numbers (a radar's blips): kept as numbers.
+      out[key] = items.every((s) => s !== "" && Number.isFinite(Number(s))) ? items.map(Number) : items;
+    }
     else out[key] = raw;
   }
   return out;

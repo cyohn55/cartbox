@@ -327,10 +327,44 @@ What separates Lockout from Halo Infinite, seen in a match:
 
 ## Phase D — Content and editor tools
 
-- [ ] **I12. HUD authoring.** Vector (SDF) fonts at any size, arcs and curved
+- [x] **I12. HUD authoring.** Vector (SDF) fonts at any size, arcs and curved
       bars as UI widgets, and a holographic style (thin lines, glow, a curve
       toward the edges) (supersedes the rest of H16). *Lockout:* the shield
       arc, the motion tracker and the ammo counter rebuilt in the UI tab.
+      *Done:* a UI document can be `style: "holo"`, with a `curve` and a
+      `glow`. The player draws holo documents in true colour over the
+      finished frame. The console's own drawing still does the rest.
+      - **Vector stroke font** (`strokeFont.ts`): every glyph is a few
+        polylines on a 4 × 6 grid, drawn by its exact distance to them. Text
+        is crisp at any `textSize`, and the same distance gives its glow.
+      - **New widgets:**
+        - `arc`: a `start` and `sweep` in degrees, split into `segments`
+          and lit to its value's share over a dim track.
+        - `radar`: rings, ticks, a turning sweep with a fading wake, and
+          blips as x, y and kind triples (yours, hostile, objective).
+      - **Look:** any holo widget takes an `rgb` colour or a "#rrggbb" tint
+        binding and a line `thickness`. Glow eases smoothly to nothing. The
+        whole document bows in toward the centre, like the inside of a visor.
+      - **Cost:** the renderer (`holoHud.ts`) keeps each widget's light as a
+        cached layer, and compositing a layer costs one multiply-add per
+        touched pixel. Only a widget whose light changed is redrawn. The
+        radar's sweep is kept apart from the radar and moves in 4° steps, so
+        a steady HUD costs a composite and a sweep.
+      - **Lua:** the cart's `ui.set`, `ui.show` and `ui.draw` send holo
+        documents' bindings to the host as commands, once a frame and only
+        what changed. Texts and lists go in chunks. The host keeps the state
+        and draws it.
+      - **UI tab:** a holo checkbox with curve and glow, a colour picker,
+        text size, arc start, sweep and segments, line thickness, and a live
+        preview drawn by the player's own renderer.
+
+      *Lockout:* the console HUD keeps the score, feed and announcements.
+      The new curved **visor** document now carries:
+      - the segmented shield arc, flashing red when low, over the health arc;
+      - the motion tracker, with hostile and objective blips under a
+        turning sweep;
+      - a large stroke-font ammo counter, with reserve and weapon name;
+      - the plasma grenade count.
 - [ ] **I13. Asset pipeline for artist-made content.** Skinned glTF with its
       animations and material sets imported in one step, texture conventions
       (packed occlusion/roughness/metal maps), compressed textures by default,

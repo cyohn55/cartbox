@@ -212,8 +212,8 @@ describe("Lockout", () => {
     const { LOCKOUT_CODE, LOCKOUT_UI, lockoutMeshSidecar } = await import("@cartbox/editor");
     const { readSidecarUi } = await import("@cartbox/player");
     expect(readSidecarUi(lockoutMeshSidecar())).toEqual(LOCKOUT_UI);
-    expect(LOCKOUT_UI.map((d) => d.name)).toEqual(["hud", "menu"]);
-    for (const call of ['U.show("hud")', 'U.show("menu")', "U.update()", 'U.set("feed"', 'U.set("modes"']) expect(LOCKOUT_CODE).toContain(call);
+    expect(LOCKOUT_UI.map((d) => d.name)).toEqual(["hud", "visor", "menu"]);
+    for (const call of ['U.show("hud")', 'U.show("visor")', 'U.show("menu")', "U.update()", 'U.set("feed"', 'U.set("modes"']) expect(LOCKOUT_CODE).toContain(call);
     // Every binding the documents read is one the code sets.
     const keys = new Set<string>();
     const visit = (widgets: readonly { text?: string; value?: string; visible?: string; tint?: string; children?: readonly unknown[] }[]) => {

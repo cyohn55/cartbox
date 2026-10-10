@@ -1550,16 +1550,32 @@ export const LOCKOUT_UI: UiDocument[] = [
   {
     name: "hud",
     widgets: [
-      { id: "shield", kind: "bar", anchor: [0, 0], pivot: [0, 0], offset: [40, 40], size: [300, 20], fill: 5, color: 9, value: "hp1", tint: "hpc" },
-      { id: "health", kind: "bar", anchor: [0, 0], pivot: [0, 0], offset: [40, 66], size: [300, 12], fill: 5, color: 6, value: "hp2", visible: "shields" },
-      txt("weapon", 900, 40, 340, 12, "{weapon}", 12, 2),
-      txt("ammo", 1040, 74, 200, 12, "{ammo}", 12, 2, { tint: "ammoc" }),
-      txt("frag", 1150, 96, 60, 6, "@hud.frag", 13, 1),
       txt("mode", 540, 40, 700, 6, "{mode}", 13, 1),
       txt("status", 540, 58, 700, 12, "{status}", 12, 2),
       { id: "feed", kind: "list", anchor: [0, 0], pivot: [0, 0], offset: [872, 165], size: [400, 132], row: 22, value: "feed", color: 12, scale: 1, small: true },
       txt("announce", 540, 150, 700, 18, "{announce}", 12, 3, { tint: "announcec", visible: "announce" }),
       txt("respawn", 520, 330, 400, 18, "@hud.respawn", 6, 3, { visible: "dead" }),
+    ],
+  },
+  // The visor's display (HALO_INFINITE_STYLE_ROADMAP.md I12): drawn by the
+  // player in thin glowing light, curving toward the edges — the shield arc
+  // over the health arc at the top, the motion tracker bottom left, the ammo
+  // counter and grenades on the right.
+  {
+    name: "visor",
+    style: "holo",
+    curve: 0.35,
+    glow: 1,
+    widgets: [
+      { id: "shield", kind: "arc", anchor: [0.5, 0], pivot: [0.5, 0], offset: [0, 10], size: [640, 640], start: -36, sweep: 72, thickness: 9, segments: 12, value: "shieldf", tint: "shieldc" },
+      { id: "health", kind: "arc", anchor: [0.5, 0], pivot: [0.5, 0], offset: [0, 34], size: [600, 600], start: -28, sweep: 56, thickness: 4, segments: 8, value: "healthf", visible: "shields", rgb: [0.55, 0.95, 0.65] },
+      { id: "tracker", kind: "radar", anchor: [0, 1], pivot: [0, 1], offset: [36, -44], size: [210, 210], value: "blips", visible: "radar", thickness: 2 },
+      { id: "motion", kind: "text", anchor: [0, 1], pivot: [0, 1], offset: [36, -22], size: [210, 12], text: "@hud.motion", textSize: 11, align: "center", visible: "radar", rgb: [0.6, 0.85, 1] },
+      { id: "rounds", kind: "text", anchor: [1, 1], pivot: [1, 1], offset: [-48, -92], size: [240, 46], text: "{rounds}", textSize: 46, align: "right" },
+      { id: "reserve", kind: "text", anchor: [1, 1], pivot: [1, 1], offset: [-48, -60], size: [240, 14], text: "{reserve}", textSize: 14, align: "right", rgb: [0.7, 0.9, 1] },
+      { id: "weapon", kind: "text", anchor: [1, 1], pivot: [1, 1], offset: [-48, -28], size: [400, 14], text: "{weaponname}", textSize: 13, align: "right" },
+      { id: "grenade", kind: "text", anchor: [1, 0], pivot: [1, 0], offset: [-92, 40], size: [200, 16], text: "@hud.frag", textSize: 14, align: "right", rgb: [0.5, 0.75, 1] },
+      { id: "grenades", kind: "text", anchor: [1, 0], pivot: [1, 0], offset: [-48, 36], size: [36, 22], text: "{nades}", textSize: 22, align: "right", rgb: [0.5, 0.75, 1] },
     ],
   },
   {
@@ -1587,7 +1603,7 @@ export const LOCKOUT_STRINGS: StringTable = {
   languages: ["en", "es"],
   fallback: "en",
   entries: [
-    { key: "hud.frag", text: { en: "FRAG", es: "GRANADA" } },
+    { key: "hud.frag", text: { en: "PLASMA", es: "PLASMA" } },
     { key: "hud.respawn", text: { en: "RESPAWNING...", es: "REAPARECIENDO..." } },
     { key: "menu.keys", text: { en: "Up/Down choose . Z (or A) select . Start: controls, audio & more", es: "Arriba/Abajo elige . Z (o A) acepta . Start: controles, audio y mas" } },
     { key: "menu.move", text: { en: "Move Up/Down . Turn Left/Right . hold A strafe . dbl-tap A grenade", es: "Mover Arriba/Abajo . Girar Izq/Der . manten A lateral . doble A granada" } },
@@ -4216,27 +4232,25 @@ end
 
 -- Circular motion tracker (bottom-left): allies yellow, moving/firing enemies
 -- red, rotated so the player faces "up". Classic radar -- it only sees motion.
-local function draw_tracker()
-  local rx,ry,rr=140,560,96
-  circ(rx,ry,rr,1); circb(rx,ry,rr,13); circb(rx,ry,rr//2,2)
-  -- sweep
-  local sw=(tick*0.05)%(2*math.pi)
-  line(rx,ry, rx+math.sin(sw)*rr, ry-math.cos(sw)*rr, 2)
-  local function blip(o,col)
+-- The motion tracker's blips (I12; drawn by the visor's radar): every soldier
+-- within 28 m, as x, y across the radar (you facing up, y down) and a kind --
+-- 0 an ally, 1 a moving enemy (or the Juggernaut). It only sees motion.
+local function tracker_blips()
+  local out = {}
+  local function blip(o, kind)
     local dx,dz=o.x-p.x, o.z-p.z
     local m=math.sqrt(dx*dx+dz*dz)
     if m>28 then return end
     local ang=math.atan(dx,dz)-p.ay
-    local px=rx-math.sin(ang)*(m/28)*rr   -- screen-right is -sin of the relative bearing
-    local py=ry-math.cos(ang)*(m/28)*rr
-    circ(px,py,3,col)
+    out[#out+1] = -math.sin(ang)*(m/28)   -- screen-right is -sin of the relative bearing
+    out[#out+1] = -math.cos(ang)*(m/28)
+    out[#out+1] = kind
   end
   for _,o in ipairs(bots) do
-    if not o.dead and enemy_of(p,o) then if o.moving or MODE.obj=="jugg" and o.jugg then blip(o,6) end
-    elseif not o.dead then blip(o,9) end
+    if not o.dead and enemy_of(p,o) then if o.moving or MODE.obj=="jugg" and o.jugg then blip(o,1) end
+    elseif not o.dead then blip(o,0) end
   end
-  tri(rx,ry-7, rx-5,ry+5, rx+5,ry+5, 12)  -- player
-  print(T("hud.motion","MOTION"),rx-34,ry+rr+6,13,false,1,true)
+  return out
 end
 
 local function draw_hud()
@@ -4244,13 +4258,18 @@ local function draw_hud()
   relabel()
   local U=cartbox.ui
   U.hide("menu")
-  U.set("hp1",(MODE.shields and p.sh or p.hp)/100); U.set("hpc",p.sh>0 and 9 or 6)
-  U.set("shields",MODE.shields); U.set("hp2",p.hp/100)
+  -- The visor's display (I12): a holo document the player draws from these.
+  local shield = MODE.shields and p.sh or p.hp
+  U.set("shieldf", shield/100)
+  U.set("shieldc", (shield < 25 and tick % 20 < 10) and "#ff4a3a" or "#66d9ff")   -- flashes red when low
+  U.set("shields", MODE.shields); U.set("healthf", p.hp/100)
   local cur=W[p.slot==1 and p.g1 or p.g2]
   local ammo=p.slot==1 and p.a1 or p.a2
   local res=p.slot==1 and p.r1 or p.r2
-  U.set("weapon",cur.name); U.set("ammo",ammo.." / "..res); U.set("ammoc",cur.melee and 13 or 12)
-  for i=1,(p.nade or 0) do circ(1150+i*22,120,8,6); circb(1150+i*22,120,8,12) end
+  U.set("rounds", cur.melee and "" or tostring(ammo)); U.set("reserve", cur.melee and "" or tostring(res))
+  U.set("weaponname", string.upper(cur.name)); U.set("nades", p.nade or 0)
+  U.set("radar", MODE.radar and not p.dead)
+  if MODE.radar then U.set("blips", tracker_blips()) end
   local st
   local sc, tg = p.score or 0, MODE.target
   if MODE.obj=="slayer" and MODE.teams then st=T("status.teams","BLUE "..team.blue.."   RED "..team.red.."   /"..tg,team.blue,team.red,tg)
@@ -4265,8 +4284,7 @@ local function draw_hud()
   U.set("feed",fd)
   if announce.t>0 then announce.t=announce.t-1; U.set("announce",announce.text); U.set("announcec",announce.color) else U.set("announce",nil) end
   U.set("dead",p.dead)
-  U.show("hud"); U.draw()
-  if MODE.radar then draw_tracker() end
+  U.show("hud"); U.show("visor"); U.draw()
 end
 
 local function draw_reticle()

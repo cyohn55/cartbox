@@ -16,9 +16,15 @@
  * one in the direction pressed). The generated Lua draws with the console's
  * own primitives (rect, print, spr), so the UI is pixel-exact in the cart's
  * frame — over the 3D scene in HUD mode. Pure and DOM-free.
+ *
+ * A **holo** document (HALO_INFINITE_STYLE_ROADMAP.md I12; see holoHud.ts) is
+ * drawn by the player instead, in true colour over the finished frame: text
+ * in a vector (signed-distance) font at any size, thin glowing lines, arcs and
+ * a radar, the whole document curving away toward the screen's edges like a
+ * visor's display. Its bindings reach the player as the cart sets them.
  */
 
-export type UiKind = "panel" | "text" | "button" | "bar" | "slider" | "list" | "image";
+export type UiKind = "panel" | "text" | "button" | "bar" | "slider" | "list" | "image" | "arc" | "radar";
 
 export interface UiWidget {
   readonly id: string;
@@ -59,14 +65,34 @@ export interface UiWidget {
   readonly sprite?: number;
   readonly tiles?: readonly [number, number];
   readonly children?: readonly UiWidget[];
+  // --- Holo documents (I12) ---
+  /** A true colour (0..1) in place of the palette index (holo documents). */
+  readonly rgb?: readonly [number, number, number];
+  /** Text height in pixels, any size (holo documents; the console's `scale` is 1..4 whole). */
+  readonly textSize?: number;
+  /** An arc's start and sweep, degrees clockwise from straight up (default a full ring). */
+  readonly start?: number;
+  readonly sweep?: number;
+  /** An arc's (or a line's) thickness in pixels. */
+  readonly thickness?: number;
+  /** An arc's segments, split by small gaps (1 = continuous). */
+  readonly segments?: number;
 }
 
 export interface UiDocument {
   readonly name: string;
   readonly widgets: readonly UiWidget[];
+  /** "holo": drawn by the player in true colour, glowing and curved (I12). Absent: the console's own drawing. */
+  readonly style?: "holo";
+  /** How far a holo document curves away toward the screen's edges, 0..1. */
+  readonly curve?: number;
+  /** How strongly its lines and text glow, 0..2. */
+  readonly glow?: number;
 }
 
-export const UI_KINDS: readonly UiKind[] = ["panel", "text", "button", "bar", "slider", "list", "image"];
+export const UI_KINDS: readonly UiKind[] = ["panel", "text", "button", "bar", "slider", "list", "image", "arc", "radar"];
+/** The kinds only a holo document draws. */
+export const HOLO_KINDS: ReadonlySet<UiKind> = new Set(["arc", "radar"]);
 /** The kinds focus can land on. */
 export const FOCUSABLE: ReadonlySet<UiKind> = new Set(["button", "slider", "list"]);
 export const MAX_UI_DOCUMENTS = 16;
@@ -140,6 +166,27 @@ export function uiNavigation(placed: readonly UiPlaced[]): Map<number, [number, 
   return nav;
 }
 
+/** The holo documents (I12), in the order the host numbers them. */
+export function holoDocuments(docs: readonly UiDocument[]): UiDocument[] {
+  return docs.filter((d) => d.style === "holo");
+}
+
+/**
+ * Every binding a holo document reads — `{key}` in its texts, a bar's or an
+ * arc's value, a radar's blips, visibility, tint — sorted: the cart and the
+ * host both number them by this list.
+ */
+export function holoBindingKeys(docs: readonly UiDocument[]): string[] {
+  const keys = new Set<string>();
+  const visit = (w: UiWidget) => {
+    for (const m of (w.text ?? "").matchAll(/\{(\w+)\}/g)) keys.add(m[1]!);
+    for (const k of [w.value, w.visible, w.tint]) if (k) keys.add(k);
+    w.children?.forEach(visit);
+  };
+  for (const d of holoDocuments(docs)) d.widgets.forEach(visit);
+  return [...keys].sort();
+}
+
 /** Fill `{key}` placeholders from bindings (a missing key is empty). */
 export function fillUiText(text: string, bindings: Readonly<Record<string, unknown>>): string {
   return text.replace(/\{(\w+)\}/g, (_, key: string) => {
@@ -183,6 +230,12 @@ function readWidget(value: unknown, ids: Set<string>, count: { n: number }): UiW
   if (finite(r.row)) out.row = clamp(Math.round(r.row), 4, 200);
   if (finite(r.sprite)) out.sprite = clamp(Math.round(r.sprite), 0, 511);
   if (Array.isArray(r.tiles)) out.tiles = pair(r.tiles, [1, 1]).map((v) => clamp(Math.round(v), 1, 8));
+  if (Array.isArray(r.rgb) && r.rgb.length === 3 && r.rgb.every(finite)) out.rgb = (r.rgb as number[]).map((v) => clamp(v, 0, 1));
+  if (finite(r.textSize)) out.textSize = clamp(r.textSize, 2, 256);
+  if (finite(r.start)) out.start = clamp(r.start, -720, 720);
+  if (finite(r.sweep)) out.sweep = clamp(r.sweep, -360, 360);
+  if (finite(r.thickness)) out.thickness = clamp(r.thickness, 0.5, 64);
+  if (finite(r.segments)) out.segments = clamp(Math.round(r.segments), 1, 64);
   if (children.length > 0) out.children = children;
   return out as unknown as UiWidget;
 }
@@ -200,7 +253,14 @@ export function parseUiDocuments(value: unknown): UiDocument[] {
     const ids = new Set<string>();
     const count = { n: 0 };
     const widgets = Array.isArray(d.widgets) ? d.widgets.map((w) => readWidget(w, ids, count)).filter((w): w is UiWidget => w !== null) : [];
-    docs.push({ name: d.name, widgets });
+    const holo = d.style === "holo";
+    docs.push({
+      name: d.name,
+      widgets,
+      ...(holo ? { style: "holo" as const } : {}),
+      ...(holo && finite(d.curve) ? { curve: clamp(d.curve, 0, 1) } : {}),
+      ...(holo && finite(d.glow) ? { glow: clamp(d.glow, 0, 2) } : {}),
+    });
   }
   return docs;
 }
@@ -223,5 +283,9 @@ export function newUiWidget(kind: UiKind, id: string): UiWidget {
       return { ...base, size: [320, 160], color: 13, focusFill: 1, focusColor: 12, scale: 2, row: 36, value: "items" };
     case "image":
       return { ...base, size: [16, 16], sprite: 0, tiles: [1, 1] };
+    case "arc":
+      return { ...base, size: [160, 160], value: "value", rgb: [0.35, 0.85, 1], start: -60, sweep: 120, thickness: 6, segments: 1 };
+    case "radar":
+      return { ...base, size: [180, 180], value: "blips", rgb: [0.35, 0.85, 1], thickness: 1.5 };
   }
 }

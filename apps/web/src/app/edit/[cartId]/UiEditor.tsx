@@ -10,7 +10,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { UI_KINDS, layoutUi, uiNavigation, type UiDocument, type UiKind, type UiPlaced, type UiWidget } from "@cartbox/editor";
+import { HOLO_KINDS, HOLO_RGB, UI_KINDS, layoutUi, renderHoloDocument, uiNavigation, type UiDocument, type UiKind, type UiPlaced, type UiWidget } from "@cartbox/editor";
 
 import { type MeshSidecar } from "@/lib/meshSidecar";
 import { addUiDocument, addWidget, findWidget, flattenWidgets, removeUiDocument, removeWidget, reorderWidget, replaceUiDocument, uiDocuments, updateWidget } from "@/lib/uiEdit";
@@ -26,7 +26,10 @@ const ANCHORS: readonly (readonly [number, number])[] = [
   [0, 1], [0.5, 1], [1, 1],
 ];
 
-const KIND_LABEL: Record<UiKind, string> = { panel: "Panel", text: "Text", button: "Button", bar: "Bar", slider: "Slider", list: "List", image: "Image" };
+const KIND_LABEL: Record<UiKind, string> = { panel: "Panel", text: "Text", button: "Button", bar: "Bar", slider: "Slider", list: "List", image: "Image", arc: "Arc", radar: "Radar" };
+
+const hex = (c: readonly number[]) => `#${c.map((v) => Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16).padStart(2, "0")).join("")}`;
+const fromHex = (h: string): [number, number, number] => [parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16) / 255, parseInt(h.slice(5, 7), 16) / 255];
 
 export function UiEditor({
   sidecar,
@@ -69,7 +72,20 @@ export function UiEditor({
     ctx.strokeStyle = "rgba(255,255,255,0.05)";
     for (let x = 40; x < width; x += 40) ctx.strokeRect(x + 0.5, 0, 0, height);
     for (let y = 40; y < height; y += 40) ctx.strokeRect(0, y + 0.5, width, 0);
-    placedRef.current = doc ? drawUiPreview(ctx, doc, { width, height, palette, bindings, focus, selected }) : [];
+    if (doc?.style === "holo") {
+      // A holo document (I12): drawn as the player draws it, in true colour over the frame.
+      const image = ctx.getImageData(0, 0, width, height);
+      renderHoloDocument(image.data, width, height, doc, { bindings, time: 0.6 });
+      ctx.putImageData(image, 0, 0);
+      placedRef.current = layoutUi(doc, width, height);
+      const sel = placedRef.current.find((p) => p.widget.id === selected);
+      if (sel) {
+        ctx.strokeStyle = "rgba(255,255,255,0.5)";
+        ctx.setLineDash([4, 4]);
+        ctx.strokeRect(sel.x + 0.5, sel.y + 0.5, sel.w, sel.h);
+        ctx.setLineDash([]);
+      }
+    } else placedRef.current = doc ? drawUiPreview(ctx, doc, { width, height, palette, bindings, focus, selected }) : [];
   }, [doc, width, height, palette, bindings, focus, selected]);
 
   /** A pointer event in screen pixels of the console. */
@@ -142,6 +158,16 @@ export function UiEditor({
               <button type="button" className="cbx-btn" style={{ marginTop: 4 }} onClick={() => { onSidecarChange(removeUiDocument(sidecar, doc.name)); setDocName(null); setSelected(null); }}>
                 Delete document
               </button>
+              <label style={{ fontSize: 12, display: "flex", gap: 6, alignItems: "center", marginTop: 8 }} title="Drawn by the player in true colour over the finished frame: vector text at any size, thin glowing lines, arcs and a radar, curving toward the screen's edges (needs the 3D runtime)">
+                <input type="checkbox" checked={doc.style === "holo"} onChange={(event) => setDoc(event.target.checked ? { ...doc, style: "holo", curve: doc.curve ?? 0.4, glow: doc.glow ?? 1 } : { name: doc.name, widgets: doc.widgets })} />
+                Holographic
+              </label>
+              {doc.style === "holo" && (
+                <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
+                  {num("Curve", doc.curve ?? 0, (v) => setDoc({ ...doc, curve: Math.max(0, Math.min(1, v)) }))}
+                  {num("Glow", doc.glow ?? 1, (v) => setDoc({ ...doc, glow: Math.max(0, Math.min(2, v)) }))}
+                </div>
+              )}
             </>
           )}
         </RailGroup>
@@ -156,7 +182,7 @@ export function UiEditor({
             </div>
             <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
               <select aria-label="Widget kind" value={kind} onChange={(event) => setKind(event.target.value as UiKind)} style={{ flex: 1, minWidth: 0 }}>
-                {UI_KINDS.map((k) => (
+                {UI_KINDS.filter((k) => doc.style === "holo" || !HOLO_KINDS.has(k)).map((k) => (
                   <option key={k} value={k}>
                     {KIND_LABEL[k]}
                   </option>
@@ -274,6 +300,23 @@ export function UiEditor({
               </div>
             )}
             {widget.kind === "list" && num("Row height", widget.row ?? 12, (v) => setWidget({ row: Math.max(4, v) }))}
+            {doc.style === "holo" && (
+              <>
+                <label style={{ fontSize: 12, display: "flex", gap: 6, alignItems: "center", marginTop: 6 }}>
+                  Colour
+                  <input type="color" aria-label="Holo colour" value={hex(widget.rgb ?? HOLO_RGB)} onChange={(event) => setWidget({ rgb: fromHex(event.target.value) })} />
+                </label>
+                {(widget.kind === "text" || widget.kind === "button" || widget.kind === "list") && num("Text height (px)", widget.textSize ?? (widget.scale ?? 1) * 6, (v) => setWidget({ textSize: Math.max(2, Math.min(256, v)) }))}
+                {widget.kind === "arc" && (
+                  <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
+                    {num("Start °", widget.start ?? 0, (v) => setWidget({ start: v }))}
+                    {num("Sweep °", widget.sweep ?? 360, (v) => setWidget({ sweep: Math.max(-360, Math.min(360, v)) }))}
+                    {num("Segments", widget.segments ?? 1, (v) => setWidget({ segments: Math.max(1, Math.min(64, Math.round(v))) }))}
+                  </div>
+                )}
+                {num("Line (px)", widget.thickness ?? 1.5, (v) => setWidget({ thickness: Math.max(0.5, Math.min(64, v)) }))}
+              </>
+            )}
             {widget.kind === "image" && (
               <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
                 {num("Sprite", widget.sprite ?? 0, (v) => setWidget({ sprite: Math.max(0, Math.round(v)) }))}
@@ -287,9 +330,10 @@ export function UiEditor({
             {(widget.kind === "button" || widget.kind === "list") && colour(widget.kind === "list" ? "Selected row" : "Focused background", "focusFill")}
             {(widget.kind === "button" || widget.kind === "list" || widget.kind === "slider") && colour(widget.kind === "list" ? "Selected text" : "Focused colour", "focusColor")}
             <div style={{ fontSize: 11, opacity: 0.7, marginTop: 10 }}>Bindings — set from code with cartbox.ui.set(key, value)</div>
-            {(widget.kind === "bar" || widget.kind === "slider" || widget.kind === "list") && binding(widget.kind === "list" ? "Items" : "Value (0..1)", "value", widget.kind === "list" ? "A table of strings, or { text, color }" : "A number from 0 to 1")}
+            {(widget.kind === "bar" || widget.kind === "slider" || widget.kind === "list" || widget.kind === "arc") && binding(widget.kind === "list" ? "Items" : "Value (0..1)", "value", widget.kind === "list" ? "A table of strings, or { text, color }" : "A number from 0 to 1")}
+            {widget.kind === "radar" && binding("Blips", "value", "A table of numbers, three a blip: x and y (−1..1 across the radar, y down) and kind (0 friendly, 1 hostile, 2 objective)")}
             {binding("Visible while", "visible", "Drawn only while this binding is truthy")}
-            {binding("Colour from", "tint", "A palette index that overrides the colour while set")}
+            {binding("Colour from", "tint", doc.style === "holo" ? "A colour as \"#rrggbb\" that overrides the colour while set" : "A palette index that overrides the colour while set")}
           </RailGroup>
         ) : (
           <RailHint>Select a widget (in the list or the preview) to edit it.</RailHint>

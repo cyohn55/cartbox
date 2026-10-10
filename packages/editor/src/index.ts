@@ -333,7 +333,10 @@ export {
   MAX_UI_DOCUMENTS,
   MAX_UI_WIDGETS,
   UI_KINDS,
+  HOLO_KINDS,
   fillUiText,
+  holoBindingKeys,
+  holoDocuments,
   layoutUi,
   newUiWidget,
   parseUiDocuments,
@@ -344,6 +347,8 @@ export {
   type UiPlaced,
   type UiWidget,
 } from "./model/ui";
+export { BLIP_RGB, HOLO_RGB, RADAR_SWEEP_SPEED, RADAR_SWEEP_STEP, createHoloCache, holoSource, holoTarget, renderHoloDocument, widgetShapes, type HoloCache, type HoloContext } from "./render/holoHud";
+export { GLYPH_ADVANCE, GLYPH_HEIGHT, GLYPH_WIDTH, glyphSegments, hasGlyph, layoutStrokeText, segmentDistance, strokeTextWidth, type PlacedGlyph, type Segment } from "./render/strokeFont";
 export {
   COMPONENT_CALLBACKS,
   MAX_COMPONENTS,
