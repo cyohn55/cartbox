@@ -18,10 +18,24 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Ragdoll,
   applyMeshVariant,
+  boxSelect,
+  combineSelection,
+  convertSelection,
+  deleteSelection,
+  emptySelection,
   faceAt,
   faceBoundary,
+  gizmoDrag,
+  loopSelect,
   orbitView,
+  pickEdge,
+  pickElement,
   pickMeshTriangle,
+  primitiveTopology,
+  selectAll,
+  selectionPivot,
+  singleSelection,
+  transformSelection,
   composeModelMatrix,
   createLiveSkinnedMesh,
   isSkinned,
@@ -43,6 +57,8 @@ import {
   eraseFoliage,
   paintFoliage,
   type MeshAsset,
+  type MeshSelection,
+  type SelectMode,
   type DecodedTexture,
   type FoliageLayer,
   type Terrain,
@@ -85,6 +101,8 @@ import { RailGroup, RailHint, SegmentedControl } from "./railControls";
 import { LibraryBrowser } from "./LibraryBrowser";
 import { MaterialEditor } from "./MaterialEditor";
 import { FaceEditPanel, type PickedFace } from "./FaceEditPanel";
+import { ModelingPanel } from "./ModelingPanel";
+import { drawModelOverlay, gizmoHandleAt, type GizmoTool } from "./meshOverlay";
 import { BakePanel } from "./BakePanel";
 import { AnimatorPanel } from "./AnimatorPanel";
 import { LightingEditor } from "./LightingEditor";
@@ -204,6 +222,18 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   // The preview's orbit camera (renderMesh's), which face picking and its outline share.
   const previewCamera = useCallback((mesh: MeshAsset) => ({ yaw, pitch, distance: fitDistance(mesh) * zoom }), [yaw, pitch, zoom]);
   const [pickedFace, setPickedFace] = useState<PickedFace | null>(null);
+  /**
+   * Modelling (L15): "object" orbits and picks a face as before; the
+   * selection modes pick vertices, edges or faces. The selection, the gizmo's
+   * tool, a gizmo drag's mesh in progress and a box being dragged.
+   */
+  const [editMode, setEditMode] = useState<"object" | SelectMode>("object");
+  const [modelSel, setModelSel] = useState<MeshSelection>(emptySelection("vertex"));
+  const [gizmoTool, setGizmoTool] = useState<GizmoTool>("move");
+  const [dragMesh, setDragMesh] = useState<MeshAsset | null>(null);
+  const [boxRect, setBoxRect] = useState<{ from: readonly [number, number]; to: readonly [number, number] } | null>(null);
+  const selectMode: SelectMode | null = editMode === "vertex" || editMode === "edge" || editMode === "face" ? editMode : null;
+  const modelling = selectMode !== null;
   const [note, setNote] = useState<string | null>(null);
   const [textures, setTextures] = useState<(DecodedTexture | null)[] | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
@@ -393,7 +423,11 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   );
 
   const selectedEntry = sidecar.meshes.find((entry) => entry.id === selectedId) ?? null;
-  useEffect(() => setPickedFace(null), [selectedId]);
+  useEffect(() => {
+    setPickedFace(null);
+    setModelSel(emptySelection("vertex"));
+    setDragMesh(null);
+  }, [selectedId]);
   // Decode the selected mesh's geometry once per selection. A corrupt entry (it
   // was validated on the way in) simply shows nothing rather than throwing.
   const meshAsset = useMemo<MeshAsset | null>(() => {
@@ -411,6 +445,17 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   // A skinned mesh previews through a live copy the clip poses; stop previewing on selection change.
   const liveMesh = useMemo(() => (worn && isSkinned(worn) ? createLiveSkinnedMesh(worn) : null), [worn]);
   useEffect(() => setPreviewClip(null), [meshAsset]);
+  // Modelling happens on the mesh at rest: no clip or ragdoll while selecting.
+  useEffect(() => {
+    if (!modelling) return;
+    setPreviewClip(null);
+    setRagdolling(false);
+  }, [modelling]);
+  // The camera frames the stored mesh, so an edit in progress (or a pose) doesn't move it.
+  const frame = useMemo(() => (meshAsset ? meshBounds(meshAsset) : null), [meshAsset]);
+  const viewProj = useMemo(() => (frame && meshAsset ? orbitView(frame, previewCamera(meshAsset)).viewProj : null), [frame, meshAsset, previewCamera]);
+  const handleLength = meshAsset ? fitDistance(meshAsset) * zoom * 0.12 : 0;
+  const modelPivot = useMemo(() => (modelling && meshAsset ? selectionPivot(dragMesh ?? meshAsset, modelSel) : null), [modelling, meshAsset, dragMesh, modelSel]);
   // Playing a clip, or picking another mesh, stands a ragdoll back up.
   useEffect(() => {
     if (previewClip !== null) setRagdolling(false);
@@ -527,7 +572,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     // preview renders exactly as before.
     const lighting = sidecar.lighting;
     const clip = previewClip !== null ? meshAsset.clips?.[previewClip] : undefined;
-    let shown = worn ?? meshAsset;
+    let shown = dragMesh ? applyMeshVariant(dragMesh, variant) : (worn ?? meshAsset);
     const doll = ragdolling ? ragdollRef.current : null;
     if (liveMesh && meshAsset.skin && doll) {
       const pose = restPose(meshAsset.skin);
@@ -540,6 +585,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     }
     renderMesh(shown, {
       camera: previewCamera(meshAsset),
+      bounds: frame,
       size: VIEWPORT,
       out: buffers.out,
       depth: buffers.depth,
@@ -561,8 +607,8 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     context.putImageData(image, 0, 0);
     // The picked face's outline, drawn over the image with the preview's own camera.
     const face = pickedFace ? meshAsset.primitives[pickedFace.primitive] : undefined;
-    const bounds = meshBounds(meshAsset);
-    if (face && pickedFace && bounds && !isSkinned(meshAsset)) {
+    const bounds = frame;
+    if (face && pickedFace && bounds && !modelling) {
       const { viewProj: m } = orbitView(bounds, previewCamera(meshAsset));
       const project = ([x, y, z]: readonly number[]) => {
         const w = m[3]! * x! + m[7]! * y! + m[11]! * z! + m[15]!;
@@ -577,33 +623,137 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
         context.stroke();
       }
     }
-  }, [meshAsset, worn, textures, yaw, pitch, zoom, buffers, sidecar.lighting, liveMesh, previewClip, clipTime, ragdolling, ragdollFrame, shield, shieldTime, pickedFace, previewCamera]);
+    // Modelling (L15): the wireframe, the selection, a box being dragged and the gizmo.
+    if (modelling && viewProj) {
+      drawModelOverlay(context, dragMesh ?? meshAsset, modelSel, viewProj, VIEWPORT, {
+        box: boxRect,
+        gizmo: modelPivot ? { pivot: modelPivot, length: handleLength, tool: gizmoTool } : null,
+      });
+    }
+  }, [meshAsset, worn, variant, textures, yaw, pitch, zoom, buffers, sidecar.lighting, liveMesh, previewClip, clipTime, ragdolling, ragdollFrame, shield, shieldTime, pickedFace, previewCamera, frame, viewProj, modelling, modelSel, dragMesh, boxRect, modelPivot, handleLength, gizmoTool]);
 
-  // Orbit + zoom; a click (no drag) picks a face to edit (I14).
-  const drag = useRef<{ x: number; y: number; moved: number } | null>(null);
+  /** A modelling edit: committed (LODs remade), the selection kept through a reshape or cleared after a change of topology. */
+  const commitModel = useCallback(
+    (next: MeshAsset, keep: boolean) => {
+      if (!meshAsset || !selectedEntry) return;
+      onSidecarChange(withEditedGeometry(sidecar, selectedEntry.id, next));
+      setModelSel(keep ? convertSelection(next, convertSelection(meshAsset, modelSel, "vertex"), modelSel.mode) : emptySelection(modelSel.mode));
+    },
+    [meshAsset, selectedEntry, sidecar, onSidecarChange, modelSel],
+  );
+
+  // Orbit + zoom; a click (no drag) picks a face to edit (I14). Modelling
+  // (L15): a click selects, a drag boxes a selection or (on a handle) moves
+  // the gizmo, and the right button orbits.
+  const drag = useRef<{
+    x: number;
+    y: number;
+    moved: number;
+    kind: "orbit" | "box" | "gizmo";
+    from: [number, number];
+    axis?: 0 | 1 | 2;
+    pivot?: readonly number[];
+  } | null>(null);
+  const ndcOf = (event: React.PointerEvent<HTMLCanvasElement>): [number, number] => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return [((event.clientX - rect.left) / rect.width) * 2 - 1, 1 - ((event.clientY - rect.top) / rect.height) * 2];
+  };
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
-    drag.current = { x: event.clientX, y: event.clientY, moved: 0 };
+    event.currentTarget.focus();
+    const from = ndcOf(event);
+    let kind: "orbit" | "box" | "gizmo" = "orbit";
+    let axis: 0 | 1 | 2 | null = null;
+    if (modelling && event.button === 0 && meshAsset && viewProj) {
+      axis = modelPivot ? gizmoHandleAt(viewProj, modelPivot, handleLength, from) : null;
+      kind = axis !== null ? "gizmo" : "box";
+    }
+    drag.current = { x: event.clientX, y: event.clientY, moved: 0, kind, from, ...(axis !== null && modelPivot ? { axis, pivot: modelPivot } : {}) };
   };
   const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const state = drag.current;
     if (!state) return;
-    setYaw((value) => value - (event.clientX - state.x) * ORBIT_SPEED);
-    setPitch((value) => Math.max(-1.5, Math.min(1.5, value + (event.clientY - state.y) * ORBIT_SPEED)));
-    drag.current = { x: event.clientX, y: event.clientY, moved: state.moved + Math.abs(event.clientX - state.x) + Math.abs(event.clientY - state.y) };
+    const moved = state.moved + Math.abs(event.clientX - state.x) + Math.abs(event.clientY - state.y);
+    drag.current = { ...state, x: event.clientX, y: event.clientY, moved };
+    if (state.kind === "orbit") {
+      setYaw((value) => value - (event.clientX - state.x) * ORBIT_SPEED);
+      setPitch((value) => Math.max(-1.5, Math.min(1.5, value + (event.clientY - state.y) * ORBIT_SPEED)));
+      return;
+    }
+    const at = ndcOf(event);
+    if (state.kind === "box") {
+      if (moved > 4) setBoxRect({ from: state.from, to: at });
+      return;
+    }
+    if (!meshAsset || !viewProj || state.axis === undefined || !state.pivot) return;
+    const transform = gizmoDrag(viewProj, state.pivot, state.axis, gizmoTool, [at[0] - state.from[0], at[1] - state.from[1]], handleLength);
+    setDragMesh(transform ? transformSelection(meshAsset, modelSel, transform, state.pivot) : null);
   };
   const onPointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const state = drag.current;
     drag.current = null;
-    if (!state || state.moved > 3 || !meshAsset || isSkinned(meshAsset)) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    const hit = pickMeshTriangle(meshAsset, previewCamera(meshAsset), ((event.clientX - rect.left) / rect.width) * 2 - 1, 1 - ((event.clientY - rect.top) / rect.height) * 2);
+    if (!state || !meshAsset) return;
+    if (state.kind === "gizmo") {
+      if (dragMesh) commitModel(dragMesh, true);
+      setDragMesh(null);
+      return;
+    }
+    const at = ndcOf(event);
+    if (state.kind === "box" && viewProj && selectMode) {
+      setBoxRect(null);
+      const op = event.shiftKey ? "add" : event.ctrlKey || event.metaKey ? "subtract" : "replace";
+      if (state.moved > 4) {
+        setModelSel((current) => combineSelection(current, boxSelect(meshAsset, viewProj, state.from, at, selectMode), op));
+        return;
+      }
+      // A click: the element under it, or (Alt) the loop through the side under it.
+      const hit = pickMeshTriangle(meshAsset, previewCamera(meshAsset), at[0], at[1], frame);
+      if (event.altKey) {
+        const edge = pickEdge(meshAsset, viewProj, at, hit);
+        if (edge) setModelSel((current) => combineSelection(current, loopSelect(meshAsset, edge.primitive, edge.id, selectMode), event.shiftKey ? "add" : "replace"));
+        return;
+      }
+      const picked = pickElement(meshAsset, viewProj, at, selectMode, hit);
+      setModelSel((current) =>
+        picked ? combineSelection(current, singleSelection(selectMode, picked.primitive, picked.id), event.shiftKey ? "toggle" : "replace") : event.shiftKey ? current : emptySelection(selectMode),
+      );
+      return;
+    }
+    if (state.moved > 3 || editMode !== "object") return;
+    const hit = pickMeshTriangle(meshAsset, previewCamera(meshAsset), at[0], at[1], frame);
     setPickedFace((was) => {
       if (!hit) return null;
       const same = was && was.primitive === hit.primitive && faceAt(meshAsset.primitives[hit.primitive]!, hit.triangle).triangles.includes(was.triangle);
       return same ? null : { primitive: hit.primitive, triangle: hit.triangle };
     });
   };
+  /** Modelling keys: 1/2/3 pick what to select, G/R/S the gizmo, A all, Escape none, Delete deletes (and fills). */
+  const onCanvasKey = (event: React.KeyboardEvent<HTMLCanvasElement>) => {
+    if (!modelling || !meshAsset) return;
+    const key = event.key.toLowerCase();
+    const modes: Record<string, SelectMode> = { "1": "vertex", "2": "edge", "3": "face" };
+    const tools: Record<string, GizmoTool> = { g: "move", r: "rotate", s: "scale" };
+    if (modes[key]) {
+      setModelSel(convertSelection(meshAsset, modelSel, modes[key]!));
+      setEditMode(modes[key]!);
+    } else if (tools[key]) setGizmoTool(tools[key]!);
+    else if (key === "a") setModelSel(selectAll(meshAsset, modelSel.mode));
+    else if (key === "escape") setModelSel(emptySelection(modelSel.mode));
+    else if (key === "delete" || key === "backspace") commitModel(deleteSelection(meshAsset, modelSel), false);
+    else return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  /** The face the face tools work on: the first selected face while modelling faces, else the one clicked. */
+  const facePick = useMemo<PickedFace | null>(() => {
+    if (editMode !== "face" || !meshAsset) return editMode === "object" ? pickedFace : null;
+    for (const [primitive, ids] of modelSel.parts.entries()) {
+      const p = meshAsset.primitives[primitive];
+      const face = p && ids[0] !== undefined ? primitiveTopology(p).faces[ids[0]] : undefined;
+      if (face) return { primitive, triangle: face.triangles[0]! };
+    }
+    return null;
+  }, [editMode, meshAsset, modelSel, pickedFace]);
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -764,6 +914,18 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
             { id: "scene", label: "Scene", hint: "Compose every placed mesh together" },
           ]}
         />
+        {meshAsset && view === "solo" && !playing && (
+          <SegmentedControl
+            label="Edit"
+            ariaLabel="Edit mode"
+            selected={editMode === "object" ? "object" : "model"}
+            onSelect={(id) => setEditMode(id === "object" ? "object" : modelSel.mode)}
+            options={[
+              { id: "object", label: "Object", hint: "Orbit the model and pick a face to extrude, inset or bevel" },
+              { id: "model", label: "Model", hint: "Select vertices, edges and faces, and reshape them" },
+            ]}
+          />
+        )}
         {onStartPlay && (
           <button
             type="button"
@@ -857,18 +1019,21 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
+          onContextMenu={(event) => event.preventDefault()}
+          onKeyDown={onCanvasKey}
+          tabIndex={0}
           style={{
             alignSelf: "center",
             maxWidth: "min(512px, 100%)",
             width: "100%",
             height: "auto",
             touchAction: "none",
-            cursor: meshAsset ? "grab" : "default",
+            cursor: meshAsset ? (modelling ? "crosshair" : "grab") : "default",
             background: "#0e101a",
             borderRadius: 8,
           }}
           role="img"
-          aria-label="3D mesh preview — drag to orbit, scroll to zoom"
+          aria-label={modelling ? "3D mesh preview — click or drag to select, right-drag to orbit, scroll to zoom" : "3D mesh preview — drag to orbit, scroll to zoom"}
         />
         <div className={styles.hud}>
           <span className={styles.hudItem}>
@@ -977,7 +1142,29 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
 
             <CodeHint entry={selectedEntry} />
 
-            {meshAsset && <FaceEditPanel mesh={meshAsset} picked={pickedFace} onEdit={applyGeometryEdit} />}
+            {meshAsset && selectMode && (
+              <ModelingPanel
+                mesh={meshAsset}
+                mode={selectMode}
+                onMode={setEditMode}
+                selection={modelSel}
+                onSelection={setModelSel}
+                tool={gizmoTool}
+                onTool={setGizmoTool}
+                onEdit={commitModel}
+              />
+            )}
+
+            {meshAsset && (
+              <FaceEditPanel
+                mesh={meshAsset}
+                picked={facePick}
+                onEdit={(next) => {
+                  applyGeometryEdit(next);
+                  if (modelling) setModelSel(emptySelection(modelSel.mode));
+                }}
+              />
+            )}
 
             {meshAsset && <BakePanel mesh={meshAsset} onBaked={applyGeometryEdit} />}
 

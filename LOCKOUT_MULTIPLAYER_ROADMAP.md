@@ -378,7 +378,7 @@ then brings the tools into the editor.
       The written files pass a structural check: accessor counts, weights
       summing to 1, joints in range, and channels on joints. LODs, trails,
       state machines and cart-only material settings stay in the cart.
-- [ ] **L15. Modelling in the editor.** Vertex, edge and face selection
+- [x] **L15. Modelling in the editor.** Vertex, edge and face selection
       (click, box and loop select) with a move, rotate and scale gizmo for
       the selection, plus merge, delete, loop cut, subdivide, mirror and add
       primitive. Edits on a skinned mesh carry its weights: a moved vertex
@@ -388,6 +388,48 @@ then brings the tools into the editor.
       *Tests:* each operation keeps the mesh closed and consistently wound;
       skinned edits keep every vertex's weights normalised and the clips
       playing.
+      *Done:* `meshModel.ts` models one level up from the stored triangles.
+      - **What it selects:** a vertex is a weld (every split copy at one
+        position, so a moved corner never tears), a face is a polygon as I14
+        finds it, and an edge is a side of one. Click picks among the
+        clicked face's own corners or sides, so nothing behind is picked. Box
+        selects through the mesh. Alt+click selects an edge loop, its
+        vertices, or (in face mode) the ring of quads it crosses. Linked
+        grows to whole pieces, and a bone's menu selects what it carries.
+      - **The edits:** move, rotate and scale about the selection's centre,
+        by the gizmo or by numbers. Merge collapses to the centre. Delete
+        fills the hole it leaves. Loop cut splits the faces where its ring
+        stops too. Subdivide splits a convex face into a quad per corner,
+        and its neighbours take the new vertices. Mirror flips whole pieces
+        across a centre plane or copies them, turning their triangles round.
+        Add primitive makes a cube, cylinder, cone or sphere.
+      - **Skinned meshes:** face extrude, inset and bevel no longer refuse
+        them. A moved vertex keeps its weights. A new one blends its
+        neighbours' (the four strongest, normalised to 1). A mirrored piece
+        moves to the mirrored joint (`upperarm_l` ↔ `upperarm_r`), and an
+        added one rides the bones nearest it, or one you name.
+      - **The editor:** the Mesh tab's **Edit: Model** mode shows the
+        wireframe, the selection and the gizmo over the preview. Right-drag
+        orbits, and 1/2/3, G/R/S, A and Delete are shortcuts. The **Model**
+        panel holds the numeric transform and the operations. The preview
+        frames the stored mesh, so a drag in progress doesn't move the camera.
+
+      In `mesh-modelling.test.ts`, every operation leaves a cube, and a
+      skinned two-bone cube, closed and wound outward: no open, repeated or
+      collapsed edge, and the volumes come out right. Examples are a 2 → 1
+      frustum, a corner sliced off at 8 − 4/3, and four primitive kinds
+      within 15% of their round volumes. Every vertex's weights sum to 1
+      within 1e-5. A loop cut halfway up the bend gives its new vertices
+      exactly half of each bone.
+      *Lockout:* the soldier's helmet, selected by `head` (136 welds across
+      plates, trim and visor), is scaled 15% broader and 25% taller. It stays
+      closed, nothing below the neck moves, and all 10 clips play through
+      the cart's animator with the helmet's 408 vertices riding the head.
+      A crest, a loop cut across the crown, a subdivided brow and an
+      extruded chin keep it closed, weighted and animating. The ear module
+      mirrored onto the other side rides the head. The battle rifle
+      viewmodel's stock, pulled 4 cm back, plays all six of its clips on the
+      `weapon` joint.
 - [ ] **L16. Rigging and keyframes.** The skeleton drawn over the mesh; a pose
       mode to rotate bones; weight painting (add, subtract, smooth, normalise)
       with a heat-map view; and a dope sheet that keys bones on a clip, with

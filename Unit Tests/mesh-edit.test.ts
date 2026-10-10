@@ -154,9 +154,18 @@ describe("editing a face", () => {
     expect(span).toBeCloseTo(2, 5); // y = 2 at one UV unit a metre
   });
 
-  it("leaves a skinned mesh to the modelling tool, and edits one face of one primitive of a mesh", () => {
+  it("carries a skinned face's weights to what it grows (L15), and edits one face of one primitive of a mesh", () => {
     const box = cube();
-    expect(() => editFace({ ...box, joints: new Uint16Array(96), weights: new Float32Array(96) }, [0], { kind: "inset", amount: 0.1 })).toThrow();
+    // Every vertex wholly on joint 2: the inset ring and inner face ride it too.
+    const joints = new Uint16Array(96).map((_, k) => (k % 4 === 0 ? 2 : 0));
+    const weights = new Float32Array(96).map((_, k) => (k % 4 === 0 ? 1 : 0));
+    const skinned = editFace({ ...box, joints, weights }, [0, 1], { kind: "inset", amount: 0.1 });
+    expect(watertight(skinned)).toBe(true);
+    expect(skinned.joints!.length).toBe((skinned.positions.length / 3) * 4);
+    for (let v = 0; v < skinned.positions.length / 3; v += 1) {
+      expect(skinned.joints![v * 4]).toBe(2);
+      expect(skinned.weights![v * 4]).toBe(1);
+    }
     const mesh: MeshAsset = { name: "blocks", primitives: [box, cube()] };
     const out = editMeshFace(mesh, 1, 0, { kind: "extrude", distance: 2 });
     expect(out.primitives[0]).toBe(box);

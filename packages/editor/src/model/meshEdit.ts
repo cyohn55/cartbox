@@ -18,8 +18,12 @@
  * Edited geometry is flat-shaded with explicit normals (untouched triangles
  * keep theirs). New walls take planar texture coordinates at the face's own
  * texel density, and rings take the face's coordinates. A light map no longer
- * fits an edited mesh, so it is dropped. Skinned primitives aren't edited.
- * Pure and DOM-free.
+ * fits an edited mesh, so it is dropped. A skinned primitive keeps its
+ * weights (LOCKOUT_MULTIPLAYER_ROADMAP.md L15): the moved face's corners and
+ * the walls and rings built from its boundary take the weights of the
+ * boundary vertex they grew from, so an extruded plate rides its bone. The
+ * rest of modelling (vertex and edge selection, merge, loop cut and the
+ * like) is in meshModel.ts. Pure and DOM-free.
  */
 
 import type { MeshAsset, MeshPrimitive } from "./MeshAsset";
@@ -175,10 +179,10 @@ function boundaryOf(p: MeshPrimitive, triangles: readonly number[]) {
 
 /**
  * One face of a primitive edited. `triangles` is the face (see {@link faceAt});
- * the rest of the primitive is kept as it is. Throws for a skinned primitive.
+ * the rest of the primitive is kept as it is.
  */
 export function editFace(p: MeshPrimitive, triangles: readonly number[], edit: FaceEdit): MeshPrimitive {
-  if (p.joints || p.weights) throw new Error("A skinned mesh can't be edited here: edit it in a modelling tool and re-import it.");
+  const skinned = Boolean(p.joints && p.weights);
   const region = new Set(triangles.filter((t) => Number.isInteger(t) && t >= 0 && t < p.indices.length / 3));
   if (region.size === 0) return p;
   let n: Vec3 = [0, 0, 0];
@@ -207,13 +211,16 @@ export function editFace(p: MeshPrimitive, triangles: readonly number[], edit: F
   // The output, triangle by triangle, then welded where every attribute agrees.
   const hasUv = p.uvs !== null;
   // Each corner carries its face's tag: corners weld only within a face, so the faces an edit makes stay separate.
-  const out: { pos: Vec3; nrm: Vec3; uv: [number, number]; blend: number; group: string }[] = [];
-  const attrs = (i: number) => ({
+  type Attrs = { uv: [number, number]; blend: number; skin: readonly number[] };
+  const out: (Attrs & { pos: Vec3; nrm: Vec3; group: string })[] = [];
+  const attrs = (i: number): Attrs => ({
     uv: (hasUv ? [p.uvs![i * 2]!, p.uvs![i * 2 + 1]!] : [0, 0]) as [number, number],
     blend: p.blend ? p.blend[i]! : 0,
+    // Four joints then four weights: the vertex's own, carried to what grows from it.
+    skin: skinned ? [...p.joints!.subarray(i * 4, i * 4 + 4), ...p.weights!.subarray(i * 4, i * 4 + 4)] : [],
   });
-  // The face's own attributes at each boundary vertex: a ring's quads take them.
-  const atKey = new Map<string, { uv: [number, number]; blend: number }>();
+  // The face's own attributes at each boundary vertex: a ring's quads (and walls' weights) take them.
+  const atKey = new Map<string, Attrs>();
   for (const t of region) for (const i of corners(p, t)) atKey.set(keyOf(vertex(p, i)), attrs(i));
   // Texel density (UV units per unit of length) of the face, for walls' planar coordinates.
   let density = 0;
@@ -235,10 +242,10 @@ export function editFace(p: MeshPrimitive, triangles: readonly number[], edit: F
     return [u * density, w * density];
   };
   const flat = (a: Vec3, b: Vec3, c: Vec3) => normalize(cross(sub(b, a), sub(c, a)));
-  const emit = (group: string, tri: [Vec3, Vec3, Vec3], rest: { uv: [number, number]; blend: number }[], nrm?: Vec3) => {
+  const emit = (group: string, tri: [Vec3, Vec3, Vec3], rest: Attrs[], nrm?: Vec3) => {
     const facing = nrm ?? flat(...tri);
     if (length(facing) === 0) return; // a collapsed triangle (a zero-width ring)
-    tri.forEach((pos, k) => out.push({ pos, nrm: facing, uv: rest[k]!.uv, blend: rest[k]!.blend, group }));
+    tri.forEach((pos, k) => out.push({ pos, nrm: facing, uv: rest[k]!.uv, blend: rest[k]!.blend, skin: rest[k]!.skin, group }));
   };
 
   for (let t = 0; t < p.indices.length / 3; t += 1) {
@@ -260,8 +267,9 @@ export function editFace(p: MeshPrimitive, triangles: readonly number[], edit: F
     if (edit.kind === "extrude") {
       // A wall from the old boundary up (or down) to the moved face.
       const wall = flat(a, b, b2);
-      emit(`side${e}`, [a, b, b2], [a, b, b2].map((v) => ({ uv: planarUv(v, wall), blend: atKey.get(ka)!.blend })), wall);
-      emit(`side${e}`, [a, b2, a2], [a, b2, a2].map((v) => ({ uv: planarUv(v, wall), blend: atKey.get(ka)!.blend })), wall);
+      const at = (v: Vec3, k: string): Attrs => ({ uv: planarUv(v, wall), blend: atKey.get(ka)!.blend, skin: atKey.get(k)!.skin });
+      emit(`side${e}`, [a, b, b2], [at(a, ka), at(b, kb), at(b2, kb)], wall);
+      emit(`side${e}`, [a, b2, a2], [at(a, ka), at(b2, kb), at(a2, ka)], wall);
     } else {
       // A ring quad from the old boundary in to the inset (and, for a bevel, lifted) one.
       const ua = atKey.get(ka)!, ub = atKey.get(kb)!;
@@ -275,8 +283,9 @@ export function editFace(p: MeshPrimitive, triangles: readonly number[], edit: F
   // Weld corners whose every attribute agrees.
   const index = new Map<string, number>();
   const positions: number[] = [], normals: number[] = [], uvs: number[] = [], blend: number[] = [], indices: number[] = [];
+  const joints: number[] = [], weights: number[] = [];
   for (const c of out) {
-    const key = `${c.group}|${c.pos.join(",")}|${c.nrm.map((v) => v.toFixed(5)).join(",")}|${c.uv.join(",")}|${c.blend}`;
+    const key = `${c.group}|${c.pos.join(",")}|${c.nrm.map((v) => v.toFixed(5)).join(",")}|${c.uv.join(",")}|${c.blend}|${c.skin.join(",")}`;
     let i = index.get(key);
     if (i === undefined) {
       i = positions.length / 3;
@@ -285,6 +294,10 @@ export function editFace(p: MeshPrimitive, triangles: readonly number[], edit: F
       normals.push(...c.nrm);
       uvs.push(...c.uv);
       blend.push(c.blend);
+      if (skinned) {
+        joints.push(...c.skin.slice(0, 4));
+        weights.push(...c.skin.slice(4, 8));
+      }
     }
     indices.push(i);
   }
@@ -296,6 +309,7 @@ export function editFace(p: MeshPrimitive, triangles: readonly number[], edit: F
     indices: Uint32Array.from(indices),
     material,
     ...(p.blend ? { blend: Float32Array.from(blend) } : {}),
+    ...(skinned ? { joints: Uint16Array.from(joints), weights: Float32Array.from(weights) } : {}),
   };
 }
 
