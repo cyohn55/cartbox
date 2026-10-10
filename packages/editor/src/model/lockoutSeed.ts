@@ -34,6 +34,7 @@ import { plasmaMaterial, type PlasmaLook } from "./plasma";
 import type { MeshTrail } from "../render/meshTrails";
 import type { SceneLight } from "../render/meshRasterizer";
 import { chamferedRect, newStreams, pushBox, pushLoft, toPrimitive, toPrimitive as streamPrimitive, type Streams } from "./seedGeometry";
+import { editFace, faceAt, primitiveFaces, type FaceEdit } from "./meshEdit";
 import { packMeshLibrary } from "./meshLibrary";
 import { encodeLods, generateLods, type StoredLods } from "./meshSimplify";
 import { reverseClip } from "./clipEdit";
@@ -2779,6 +2780,116 @@ export const LOCKOUT_INPUT_ACTIONS: readonly InputAction[] = [
 ];
 
 /** A spent brass casing (H10), about 4 cm long, lying along Z. */
+// --- The Forerunner kit (HALO_INFINITE_STYLE_ROADMAP.md I14) ------------------
+// A starter set of modular pieces on a 4 m grid, modelled the way a level
+// artist would in the editor: a box, then bevels, insets and recesses on its
+// faces (meshEdit.ts). They ship as prefabs in Lockout's library — the wall and
+// its lit variant, a pillar and a floor tile — for kit snapping to assemble;
+// the arena's rebuild from them is I16.
+
+/**
+ * A box w × h × d standing on the origin, wound counter-clockwise from
+ * outside (face edits move along the winding's normal), each face's corners
+ * its own so each face is its own.
+ */
+function kitBlock(w: number, h: number, d: number, material: MeshPrimitive["material"]): MeshPrimitive {
+  const positions: number[] = [];
+  const normals: number[] = [];
+  const indices: number[] = [];
+  const [x, y, z] = [w / 2, h, d / 2];
+  // Each face: its normal, and two in-plane axes (u × v = normal) with their half-extents.
+  const faces: [P3, P3, P3, number, number, number][] = [
+    [[0, 1, 0], [1, 0, 0], [0, 0, -1], x, z, h],
+    [[0, -1, 0], [1, 0, 0], [0, 0, 1], x, z, 0],
+    [[1, 0, 0], [0, 0, -1], [0, 1, 0], z, y / 2, x],
+    [[-1, 0, 0], [0, 0, 1], [0, 1, 0], z, y / 2, -x],
+    [[0, 0, 1], [1, 0, 0], [0, 1, 0], x, y / 2, z],
+    [[0, 0, -1], [-1, 0, 0], [0, 1, 0], x, y / 2, -z],
+  ];
+  for (const [n, u, v, hu, hv, at] of faces) {
+    const base = positions.length / 3;
+    // The face's centre: `at` along the normal's axis, mid-height for the sides.
+    const c: P3 = n[1] !== 0 ? [0, at, 0] : n[0] !== 0 ? [at, h / 2, 0] : [0, h / 2, at];
+    for (const [su, sv] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+      positions.push(c[0] + u[0] * su! * hu + v[0] * sv! * hv, c[1] + u[1] * su! * hu + v[1] * sv! * hv, c[2] + u[2] * su! * hu + v[2] * sv! * hv);
+      normals.push(...n);
+    }
+    indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  }
+  return { positions: Float32Array.from(positions), normals: Float32Array.from(normals), uvs: null, indices: Uint32Array.from(indices), material };
+}
+
+/** The outermost face of a block facing `normal` (one of its triangles). */
+function faceFacing(p: MeshPrimitive, normal: P3): number {
+  let best = -1;
+  let reach = -Infinity;
+  for (const f of primitiveFaces(p)) {
+    if (f.normal[0] * normal[0] + f.normal[1] * normal[1] + f.normal[2] * normal[2] < 0.999) continue;
+    const r = f.centroid[0] * normal[0] + f.centroid[1] * normal[1] + f.centroid[2] * normal[2];
+    if (r > reach + 1e-6) {
+      reach = r;
+      best = f.triangles[0]!;
+    }
+  }
+  return best;
+}
+
+/** Edit the face under `triangle` in turn by each edit; an edited face keeps its triangles' indices, so they chain. */
+function shape(p: MeshPrimitive, triangle: number, edits: readonly FaceEdit[]): MeshPrimitive {
+  return edits.reduce((q, edit) => editFace(q, faceAt(q, triangle).triangles, edit), p);
+}
+
+const FORERUNNER_ALLOY: MeshPrimitive["material"] = { name: "forerunner-alloy", baseColorFactor: [0.6, 0.62, 0.64, 1], baseColorImage: null, metallicFactor: 0.8, roughnessFactor: 0.32, clearcoat: 0.3, clearcoatRoughness: 0.15 };
+const FORERUNNER_LIGHT: MeshPrimitive["material"] = { name: "forerunner-light", baseColorFactor: [0.05, 0.08, 0.1, 1], baseColorImage: null, metallicFactor: 0, roughnessFactor: 0.4, emissiveFactor: [0.9, 2.6, 3.2] };
+
+/** The kit's pieces. */
+export function forerunnerKit(): { wall: MeshAsset; channel: MeshAsset; pillar: MeshAsset; floor: MeshAsset } {
+  // Wall, 4 × 4 × 0.5: a layered front panel (a bevelled plate with a recess in it) and a chamfered top.
+  let wall = kitBlock(4, 4, 0.5, FORERUNNER_ALLOY);
+  wall = shape(wall, faceFacing(wall, [0, 0, 1]), [{ kind: "bevel", width: 0.3, depth: 0.12 }, { kind: "inset", amount: 0.35 }, { kind: "extrude", distance: -0.08 }]);
+  wall = shape(wall, faceFacing(wall, [0, 1, 0]), [{ kind: "bevel", width: 0.1, depth: 0.08 }]);
+  // The lit variant's light channel: a glowing strip set into the wall's recess.
+  const strip = kitBlock(2.4, 0.12, 0.04, FORERUNNER_LIGHT);
+  // Pillar, 1 × 4 × 1: a chamfered cap, and a sunken panel down each side.
+  let pillar = kitBlock(1, 4, 1, FORERUNNER_ALLOY);
+  pillar = shape(pillar, faceFacing(pillar, [0, 1, 0]), [{ kind: "bevel", width: 0.12, depth: 0.12 }]);
+  for (const n of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]] as P3[]) pillar = shape(pillar, faceFacing(pillar, n), [{ kind: "bevel", width: 0.18, depth: -0.08 }]);
+  // Floor tile, 4 × 0.3 × 4: a seam inset round its top.
+  let floor = kitBlock(4, 0.3, 4, FORERUNNER_ALLOY);
+  floor = shape(floor, faceFacing(floor, [0, 1, 0]), [{ kind: "inset", amount: 0.12 }, { kind: "extrude", distance: -0.03 }]);
+  return {
+    wall: { name: "forerunner wall", primitives: [wall] },
+    channel: { name: "light channel", primitives: [strip] },
+    pillar: { name: "forerunner pillar", primitives: [pillar] },
+    floor: { name: "forerunner floor", primitives: [floor] },
+  };
+}
+
+/** The kit as Lockout's prefabs: the wall, the wall with its light channel (a variant of the wall), the pillar and the floor tile. */
+function forerunnerKitPrefabs(identity: unknown): unknown[] {
+  // Stored without normals: no two faces share a vertex, so every renderer rebuilds the same flat normals (as for the soldier, I11).
+  const stored = (m: MeshAsset) => serializeMeshAsset({ ...m, primitives: m.primitives.map((p) => ({ ...p, normals: null })) });
+  const kit = forerunnerKit();
+  const wall = stored(kit.wall);
+  // The strip sits in the recess: centred, 2 m up, flush with the recessed face (0.25 + 0.12 − 0.08 = 0.29 out).
+  const channelAt = { position: [0, 2, 0.31], rotation: [0, 0, 0], scale: [1, 1, 1] };
+  return [
+    { id: "kit-wall", name: "forerunner wall", pool: 0, nodes: [{ key: "root", name: "forerunner wall", mesh: wall, transform: identity }] },
+    {
+      id: "kit-wall-lit",
+      name: "forerunner wall, lit",
+      pool: 0,
+      base: "kit-wall",
+      nodes: [
+        { key: "root", name: "forerunner wall", mesh: wall, transform: identity },
+        { key: "channel", name: "light channel", mesh: stored(kit.channel), parent: "root", transform: channelAt },
+      ],
+    },
+    { id: "kit-pillar", name: "forerunner pillar", pool: 0, nodes: [{ key: "root", name: "forerunner pillar", mesh: stored(kit.pillar), transform: identity }] },
+    { id: "kit-floor", name: "forerunner floor", pool: 0, nodes: [{ key: "root", name: "forerunner floor", mesh: stored(kit.floor), transform: identity }] },
+  ];
+}
+
 function casingMesh(): MeshAsset {
   const brass = newStreams();
   limb(brass, [0, 0, -0.018], [0, 0, 0.016], 0.0065, 0.0055);
@@ -3097,6 +3208,8 @@ export function lockoutMeshSidecar(): string {
         { id: "prefab-casing", name: "casing", pool: 0, nodes: [{ key: "root", name: "casing", mesh: serializeMeshAsset(casingMesh()), transform: identity }] },
         // Plasma grenades in flight (I10): four copies held in reserve, spawned on a throw.
         { id: "prefab-plasma", name: "plasma grenade", pool: 4, nodes: [{ key: "root", name: "plasma grenade", mesh: serializeMeshAsset(plasmaGrenadeMesh()), transform: identity }] },
+        // The Forerunner kit (I14): pieces for the editor's kit snapping, never spawned.
+        ...forerunnerKitPrefabs(identity),
       ],
       debris: LOCKOUT_DEBRIS,
       decalMarks: LOCKOUT_DECAL_MARKS,

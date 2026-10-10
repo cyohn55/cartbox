@@ -12,6 +12,15 @@
  * prefab; every other copy takes the new value of each field it had left
  * matching the old prefab, and keeps the fields it had changed. "Revert" drops a
  * copy's overrides. A copy's root keeps its own placement and name.
+ *
+ * Prefab variants (HALO_INFINITE_STYLE_ROADMAP.md I14) work the same way one
+ * level up: a variant is a prefab made from another (its base), with its own
+ * full set of nodes, which is all the runtime ever sees. Change the base and
+ * each variant takes the new value of every field it had left matching the
+ * old base, gains the base's new nodes, and loses the ones the base dropped
+ * (unless it had changed them) — then its own copies follow, and its own
+ * variants. A wall section and the same wall with a light channel cut into
+ * it share everything else.
  */
 
 import {
@@ -24,7 +33,7 @@ import {
 } from "./meshSidecar";
 import { parentIndices } from "@cartbox/editor";
 
-const VERSION_FIELDS = ["name", "mesh", "frames", "lods", "tags", "props", "physics", "animator", "components", "transform"] as const;
+const VERSION_FIELDS = ["name", "mesh", "variant", "frames", "lods", "tags", "props", "physics", "animator", "components", "transform"] as const;
 type Field = (typeof VERSION_FIELDS)[number];
 
 function newId(prefix: string): string {
@@ -98,6 +107,7 @@ function nodeFrom(entry: MeshSidecarEntry, key: string, parent: string | undefin
     key,
     name: entry.name,
     mesh: entry.mesh,
+    ...(entry.variant ? { variant: entry.variant } : {}),
     transform: isRoot ? defaultMeshTransform() : entry.transform,
     ...(entry.frames && entry.frames.length > 0 ? { frames: entry.frames } : {}),
     ...(entry.lods ? { lods: entry.lods } : {}),
@@ -150,6 +160,7 @@ export function placePrefab(
       id: ids.get(node.key)!,
       name: isRoot ? uniqueName(sidecar, node.name) : node.name,
       mesh: node.mesh,
+      ...(node.variant ? { variant: node.variant } : {}),
       transform: isRoot ? (transform ?? defaultMeshTransform()) : node.transform,
       ...(node.frames ? { frames: node.frames } : {}),
       ...(node.lods ? { lods: node.lods } : {}),
@@ -198,6 +209,7 @@ function syncInstance(
         id: idOf.get(node.key)!,
         name: node.name,
         mesh: node.mesh,
+        ...(node.variant ? { variant: node.variant } : {}),
         transform: node.transform,
         ...(node.frames ? { frames: node.frames } : {}),
         ...(node.lods ? { lods: node.lods } : {}),
@@ -253,13 +265,109 @@ export function applyToPrefab(sidecar: MeshSidecar, instanceId: string): MeshSid
   }
   const nodes = members.map((m, i) => nodeFrom(m, keyOf.get(m.id)!, i === 0 ? undefined : keyOf.get(m.parent ?? ""), i === 0));
   const next: MeshPrefab = { ...prev, nodes };
-  let meshes = sidecar.meshes.map((m) =>
+  const meshes = sidecar.meshes.map((m) =>
     keyOf.has(m.id) ? { ...m, prefab: { id: prev.id, node: keyOf.get(m.id)!, instance: instanceId } } : m,
   );
-  for (const other of prefabInstances({ ...sidecar, meshes }, prev.id)) {
-    if (other !== instanceId) meshes = syncInstance(meshes, other, prev, next, false);
+  return propagate({ ...sidecar, meshes }, prev, next, instanceId);
+}
+
+/**
+ * Prefab `prev` becomes `next`: store it, bring its copies in line (all but
+ * `except`, the copy it came from), and carry the change on to its variants.
+ */
+function propagate(sidecar: MeshSidecar, prev: MeshPrefab, next: MeshPrefab, except?: string, depth = 0): MeshSidecar {
+  let meshes = [...sidecar.meshes];
+  for (const other of prefabInstances(sidecar, prev.id)) {
+    if (other !== except) meshes = syncInstance(meshes, other, prev, next, false);
   }
-  return { ...sidecar, meshes, prefabs: (sidecar.prefabs ?? []).map((p) => (p.id === prev.id ? next : p)) };
+  let out: MeshSidecar = { ...sidecar, meshes, prefabs: (sidecar.prefabs ?? []).map((p) => (p.id === prev.id ? next : p)) };
+  if (depth > 16) return out;
+  for (const variant of (out.prefabs ?? []).filter((p) => p.base === prev.id)) {
+    out = propagate(out, variant, syncVariant(variant, prev, next), undefined, depth + 1);
+  }
+  return out;
+}
+
+/**
+ * A variant after its base changed from `prev` to `next`: each field it had
+ * left as the old base's takes the new base's; a node new to the base is
+ * added; a node the base dropped goes too, unless the variant had changed it.
+ */
+function syncVariant(variant: MeshPrefab, prev: MeshPrefab, next: MeshPrefab): MeshPrefab {
+  const before = new Map(prev.nodes.map((n) => [n.key, n]));
+  const after = new Map(next.nodes.map((n) => [n.key, n]));
+  const own = new Map(variant.nodes.map((n) => [n.key, n]));
+  const nodes: PrefabNode[] = [];
+  for (const node of variant.nodes) {
+    const old = before.get(node.key);
+    const now = after.get(node.key);
+    if (old && !now) {
+      // Dropped from the base: dropped here too, unless the variant made it its own.
+      if (VERSION_FIELDS.every((f) => same(node, old, f))) continue;
+      nodes.push(node);
+      continue;
+    }
+    if (!old || !now) {
+      nodes.push(node); // the variant's own node
+      continue;
+    }
+    let merged = { ...node } as Record<string, unknown>;
+    for (const f of VERSION_FIELDS) {
+      if (same(node, old, f)) {
+        const value = fieldOf(now, f);
+        merged = { ...merged };
+        if (value === undefined) delete merged[f];
+        else merged[f] = value;
+      }
+    }
+    nodes.push(merged as unknown as PrefabNode);
+  }
+  // New in the base (and not one the variant had removed: it never had it).
+  for (const node of next.nodes) if (!before.has(node.key) && !own.has(node.key)) nodes.push(node);
+  // Anything whose parent is gone goes with it.
+  const keys = new Set<string>();
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const n of nodes) {
+      if (keys.has(n.key) || (n.parent && !keys.has(n.parent))) continue;
+      keys.add(n.key);
+      grew = true;
+    }
+  }
+  return { ...variant, nodes: nodes.filter((n) => keys.has(n.key)) };
+}
+
+/**
+ * A new prefab that is a variant of prefab `baseId` (I14): a copy of its nodes,
+ * linked back to it so edits to the base reach it. Returns the variant's id.
+ */
+export function createPrefabVariant(sidecar: MeshSidecar, baseId: string, name: string): { sidecar: MeshSidecar; prefabId: string } {
+  const base = findPrefab(sidecar, baseId);
+  if (!base) return { sidecar, prefabId: "" };
+  const prefabId = newId("prefab");
+  const variant: MeshPrefab = { id: prefabId, name: name.trim() || `${base.name} variant`, nodes: base.nodes, base: baseId, ...(base.pool !== undefined ? { pool: base.pool } : {}) };
+  return { sidecar: { ...sidecar, prefabs: [...(sidecar.prefabs ?? []), variant] }, prefabId };
+}
+
+/** The prefabs made as variants of prefab `id`. */
+export function prefabVariants(sidecar: MeshSidecar, id: string): MeshPrefab[] {
+  return (sidecar.prefabs ?? []).filter((p) => p.base === id);
+}
+
+/** How many fields (and nodes) variant `id` changes from its base: what makes it a variant. */
+export function variantChanges(sidecar: MeshSidecar, id: string): number {
+  const variant = findPrefab(sidecar, id);
+  const base = variant?.base ? findPrefab(sidecar, variant.base) : undefined;
+  if (!variant || !base) return 0;
+  const nodes = new Map(base.nodes.map((n) => [n.key, n]));
+  let count = base.nodes.filter((n) => !variant.nodes.some((v) => v.key === n.key)).length;
+  for (const node of variant.nodes) {
+    const from = nodes.get(node.key);
+    if (!from) count += 1;
+    // A root's name and placement are each copy's own, not the variant's.
+    else count += VERSION_FIELDS.filter((f) => !((f === "name" || f === "transform") && !node.parent) && !same(node, from, f)).length;
+  }
+  return count;
 }
 
 /** Drop every override on the copy rooted at `instanceId` (its placement stays). */
@@ -282,7 +390,7 @@ export function unlinkPrefab(sidecar: MeshSidecar, instanceId: string): MeshSide
   };
 }
 
-/** Delete prefab `id`; its copies stay as plain objects. */
+/** Delete prefab `id`; its copies stay as plain objects, and its variants stand alone. */
 export function deletePrefab(sidecar: MeshSidecar, id: string): MeshSidecar {
   return {
     ...sidecar,
@@ -291,7 +399,13 @@ export function deletePrefab(sidecar: MeshSidecar, id: string): MeshSidecar {
       const { prefab: _drop, ...rest } = m;
       return rest;
     }),
-    prefabs: (sidecar.prefabs ?? []).filter((p) => p.id !== id),
+    prefabs: (sidecar.prefabs ?? [])
+      .filter((p) => p.id !== id)
+      .map((p) => {
+        if (p.base !== id) return p;
+        const { base: _base, ...rest } = p;
+        return rest;
+      }),
   };
 }
 

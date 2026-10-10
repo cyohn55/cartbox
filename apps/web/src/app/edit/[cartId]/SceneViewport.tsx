@@ -84,6 +84,7 @@ import {
   type Transform,
 } from "@/lib/gizmo";
 import { dropDistance, raycastMeshes } from "@/lib/meshRaycast";
+import { kitSnap, type Aabb } from "@/lib/kitSnap";
 import { boxSelect, clickSelection, selectionRoots, withSubtrees } from "@/lib/sceneSelection";
 import {
   VIEWPORT_FOV,
@@ -245,6 +246,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   /** Gizmo settings: world or local axes, snapping on or off (Ctrl flips it for a drag), and the steps. */
   const [space, setSpace] = useState<GizmoSpace>("world");
   const [snapOn, setSnapOn] = useState(false);
+  const [kitOn, setKitOn] = useState(false);
   const [steps, setSteps] = useState<SnapSteps>({ move: 0.5, rotate: 15, scale: 0.1 });
   /** The handle under the cursor (highlighted), and the one being dragged. */
   const hover = useRef<Handle | null>(null);
@@ -700,6 +702,8 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
     /** The primary (whose gizmo it is), and every selected root it moves along with it. */
     readonly primary: Moving;
     readonly group: readonly Moving[];
+    /** For kit snapping (I14): the primary's world box as the drag began, and every box that isn't moving with it. */
+    readonly kit: { readonly start: Aabb; readonly others: readonly Aabb[] } | null;
   }
   const drag = useRef<{ kind: DragKind; x: number; y: number; moved: boolean; gizmo?: GizmoDrag; additive?: { toggle: boolean; add: boolean } } | null>(null);
 
@@ -710,6 +714,25 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
     const cy = ((event.clientY - rect.top) / rect.height) * el.height;
     const ndc: [number, number] = [((event.clientX - rect.left) / rect.width) * 2 - 1, -(((event.clientY - rect.top) / rect.height) * 2 - 1)];
     return { canvas: [cx, cy] as [number, number], ndc, rect };
+  };
+
+  /** The boxes kit snapping works with: the primary's, and those of everything not moving with the selection (its roots' descendants move too). */
+  const kitBoxes = (primaryId: string, roots: readonly string[]): { start: Aabb; others: Aabb[] } | null => {
+    const primaryInstance = instances.find((i) => i.id === primaryId);
+    const start = primaryInstance ? worldAabb(primaryInstance.mesh, primaryInstance.model) : null;
+    if (!start) return null;
+    const movingIds = new Set(roots);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const m of sidecar.meshes) {
+        if (m.parent && movingIds.has(m.parent) && !movingIds.has(m.id)) {
+          movingIds.add(m.id);
+          grew = true;
+        }
+      }
+    }
+    const others = instances.filter((i) => !movingIds.has(i.id)).flatMap((i) => worldAabb(i.mesh, i.model) ?? []);
+    return { start, others };
   };
 
   /** A selected object as a gizmo drag sees it (null when it's gone or locked). */
@@ -787,7 +810,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
           x: event.clientX,
           y: event.clientY,
           moved: false,
-          gizmo: { handle: grabbed.handle, frame: grabbed.frame, ray0: viewportRay(cam, aspect, ndc[0], ndc[1]), cursor0: canvas, origin: grabbed.origin, primary, group },
+          gizmo: { handle: grabbed.handle, frame: grabbed.frame, ray0: viewportRay(cam, aspect, ndc[0], ndc[1]), cursor0: canvas, origin: grabbed.origin, primary, group, kit: kitOn && mode === "move" ? kitBoxes(primary.id, group.map((m) => m.id)) : null },
         };
         return;
       }
@@ -840,7 +863,13 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
       if (mode === "move") {
         // The primary goes where the cursor takes it; the rest move by as much.
         const to = dragMove(g.handle, g.frame, g.primary.startWorld, g.ray0, ray, cameraAxes(cam).forward, snap, space);
-        const d: Vec3 = [to[0] - g.primary.startWorld[0], to[1] - g.primary.startWorld[1], to[2] - g.primary.startWorld[2]];
+        let d: Vec3 = [to[0] - g.primary.startWorld[0], to[1] - g.primary.startWorld[1], to[2] - g.primary.startWorld[2]];
+        // Kit snapping (I14): near another piece, the primary closes the gap and lines its edges up with it.
+        if (g.kit) {
+          const box = { min: g.kit.start.min.map((v, k) => v + d[k]!), max: g.kit.start.max.map((v, k) => v + d[k]!) };
+          const snapped = kitSnap(box, g.kit.others);
+          if (snapped) d = [d[0] + snapped.delta[0], d[1] + snapped.delta[1], d[2] + snapped.delta[2]];
+        }
         for (const m of g.group) placed.set(m.id, { ...m.start, position: localPositionFor([m.startWorld[0] + d[0], m.startWorld[1] + d[1], m.startWorld[2] + d[2]], m.parentWorld) });
       } else if (mode === "rotate" && g.handle.kind === "ring") {
         // Every object turns about the axis through the primary's origin.
@@ -1060,6 +1089,9 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
         </button>
         <button type="button" className={styles.toolBtn} aria-pressed={snapOn} onClick={() => setSnapOn((v) => !v)} title="Snap while dragging (hold Ctrl to flip it for one drag)">
           Snap
+        </button>
+        <button type="button" className={styles.toolBtn} aria-pressed={kitOn} onClick={() => setKitOn((v) => !v)} title="Kit snap: a moved piece snaps edge to edge to the piece it's dragged against">
+          Kit
         </button>
         <label style={{ fontSize: 12, display: "flex", gap: 4, alignItems: "center" }} title="Move snap step">
           <select aria-label="Move snap step" value={steps.move} onChange={(e) => setSteps({ ...steps, move: Number(e.target.value) })}>

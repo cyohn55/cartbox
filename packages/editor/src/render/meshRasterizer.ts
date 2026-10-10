@@ -36,7 +36,7 @@ import { DEFAULT_DETAIL_SCALE, DEFAULT_DETAIL_STRENGTH, detailFade, emissiveAnim
 import { compiledGraphOf, evaluateGraph, graphRegisters, type CompiledGraph, type GraphContext } from "../model/materialGraph";
 import { EFFECT_DISTORT_POWER, materialRefracts, refractionOffset, refracts, resolveRefraction, type ResolvedRefraction } from "./refraction";
 import { CLEARCOAT_F0, anisotropicD, curvatureOf, materialHasLayers, parallaxRate, parallaxUv, resolveLayers, uvGradients, type ResolvedLayers } from "../model/materialLayers";
-import { type MeshAsset, computeSmoothNormals, meshBounds } from "../model/MeshAsset";
+import { type MeshAsset, type MeshBounds, computeSmoothNormals, meshBounds } from "../model/MeshAsset";
 
 /** A decoded texture: tightly-packed RGBA rows, `width × height`. */
 export interface DecodedTexture {
@@ -724,27 +724,18 @@ function sampleTexture(
   return out;
 }
 
-/**
- * Render a mesh into `out`/`depth`. The camera orbits the mesh's bounding-box
- * centre; `distance` defaults to a frame-filling fit. Both buffers are fully
- * overwritten (depth reset to +Infinity, colour to `background`).
- */
-export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
-  const { size, out, depth, camera } = options;
-  const ambient = options.ambient ?? 0.35;
-  const background = options.background ?? [0, 0, 0, 0];
-  const bounds = meshBounds(mesh);
+/** Where {@link renderMesh}'s orbit camera sits and how it projects, for picking and overlays drawn over its image. */
+export interface OrbitView {
+  readonly eye: [number, number, number];
+  readonly center: [number, number, number];
+  /** Vertical field of view (radians); the image is square. */
+  readonly fov: number;
+  readonly view: Mat4;
+  readonly viewProj: Mat4;
+}
 
-  // Clear.
-  depth.fill(Infinity);
-  for (let i = 0; i < size * size; i += 1) {
-    out[i * 4] = background[0];
-    out[i * 4 + 1] = background[1];
-    out[i * 4 + 2] = background[2];
-    out[i * 4 + 3] = background[3];
-  }
-  if (!bounds) return;
-
+/** The orbit camera {@link renderMesh} frames `bounds` with: around its centre, at the camera's (or a fitted) distance. */
+export function orbitView(bounds: MeshBounds, camera: OrbitCamera): OrbitView {
   // Frame the bounds: orbit around its centre at a fitted distance.
   const center: [number, number, number] = [
     (bounds.min[0] + bounds.max[0]) / 2,
@@ -767,6 +758,81 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
   const view = lookAt(eye, center, [0, 1, 0]);
   const proj = perspective(fov, 1, NEAR, distance + radius * 4);
   const viewProj = multiply(proj, view);
+  return { eye, center, fov, view, viewProj };
+}
+
+/**
+ * The triangle of `mesh` under a point of {@link renderMesh}'s image (`ndcX`,
+ * `ndcY` in −1..1, y up), nearest the camera: which primitive, which triangle,
+ * and how far along the ray. Null when the point shows background.
+ */
+export function pickMeshTriangle(mesh: MeshAsset, camera: OrbitCamera, ndcX: number, ndcY: number): { primitive: number; triangle: number; t: number } | null {
+  const bounds = meshBounds(mesh);
+  if (!bounds) return null;
+  const { eye, center, fov } = orbitView(bounds, camera);
+  const f = [center[0] - eye[0], center[1] - eye[1], center[2] - eye[2]];
+  const fl = Math.hypot(f[0]!, f[1]!, f[2]!) || 1;
+  const forward = f.map((v) => v / fl);
+  // lookAt's basis: right = forward × world up, up = right × forward.
+  const rl = Math.hypot(forward[2]!, forward[0]!) || 1;
+  const right = [-forward[2]! / rl, 0, forward[0]! / rl];
+  const up = [right[1]! * forward[2]! - right[2]! * forward[1]!, right[2]! * forward[0]! - right[0]! * forward[2]!, right[0]! * forward[1]! - right[1]! * forward[0]!];
+  const k = Math.tan(fov / 2);
+  const dir = [0, 1, 2].map((i) => forward[i]! + right[i]! * ndcX * k + up[i]! * ndcY * k);
+  let best: { primitive: number; triangle: number; t: number } | null = null;
+  mesh.primitives.forEach((p, pi) => {
+    for (let t = 0; t < p.indices.length / 3; t += 1) {
+      const v = [0, 1, 2].map((c) => {
+        const i = p.indices[t * 3 + c]! * 3;
+        return [p.positions[i]!, p.positions[i + 1]!, p.positions[i + 2]!];
+      });
+      const hit = rayTriangleT(eye, dir, v[0]!, v[1]!, v[2]!);
+      if (hit !== null && (!best || hit < best.t)) best = { primitive: pi, triangle: t, t: hit };
+    }
+  });
+  return best;
+}
+
+/** Möller–Trumbore: the ray parameter where it meets the triangle (either side), or null. */
+function rayTriangleT(o: readonly number[], d: readonly number[], a: readonly number[], b: readonly number[], c: readonly number[]): number | null {
+  const e1 = [b[0]! - a[0]!, b[1]! - a[1]!, b[2]! - a[2]!];
+  const e2 = [c[0]! - a[0]!, c[1]! - a[1]!, c[2]! - a[2]!];
+  const p = [d[1]! * e2[2]! - d[2]! * e2[1]!, d[2]! * e2[0]! - d[0]! * e2[2]!, d[0]! * e2[1]! - d[1]! * e2[0]!];
+  const det = e1[0]! * p[0]! + e1[1]! * p[1]! + e1[2]! * p[2]!;
+  if (Math.abs(det) < 1e-12) return null;
+  const inv = 1 / det;
+  const s = [o[0]! - a[0]!, o[1]! - a[1]!, o[2]! - a[2]!];
+  const u = (s[0]! * p[0]! + s[1]! * p[1]! + s[2]! * p[2]!) * inv;
+  if (u < 0 || u > 1) return null;
+  const q = [s[1]! * e1[2]! - s[2]! * e1[1]!, s[2]! * e1[0]! - s[0]! * e1[2]!, s[0]! * e1[1]! - s[1]! * e1[0]!];
+  const v = (d[0]! * q[0]! + d[1]! * q[1]! + d[2]! * q[2]!) * inv;
+  if (v < 0 || u + v > 1) return null;
+  const t = (e2[0]! * q[0]! + e2[1]! * q[1]! + e2[2]! * q[2]!) * inv;
+  return t > 1e-6 ? t : null;
+}
+
+/**
+ * Render a mesh into `out`/`depth`. The camera orbits the mesh's bounding-box
+ * centre; `distance` defaults to a frame-filling fit. Both buffers are fully
+ * overwritten (depth reset to +Infinity, colour to `background`).
+ */
+export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
+  const { size, out, depth, camera } = options;
+  const ambient = options.ambient ?? 0.35;
+  const background = options.background ?? [0, 0, 0, 0];
+  const bounds = meshBounds(mesh);
+
+  // Clear.
+  depth.fill(Infinity);
+  for (let i = 0; i < size * size; i += 1) {
+    out[i * 4] = background[0];
+    out[i * 4 + 1] = background[1];
+    out[i * 4 + 2] = background[2];
+    out[i * 4 + 3] = background[3];
+  }
+  if (!bounds) return;
+
+  const { view, viewProj } = orbitView(bounds, camera);
 
   // Normalise the light direction.
   const [lx, ly, lz] = options.lightDirection ?? [0.4, 0.8, 0.6];

@@ -6,9 +6,9 @@
  * stores them once), and an import big enough to need them gets them unasked.
  */
 
-import { decodeLods, encodeLods, generateLods, triangleCountOf } from "@cartbox/editor";
+import { decodeLods, encodeLods, generateLods, triangleCountOf, type MeshAsset } from "@cartbox/editor";
 
-import { readMeshEntry, type MeshSidecar, type MeshSidecarEntry } from "./meshSidecar";
+import { readMeshEntry, setMeshAsset, type MeshSidecar, type MeshSidecarEntry } from "./meshSidecar";
 
 /** An import with at least this many triangles gets LODs on the way in. */
 export const AUTO_LOD_TRIANGLES = 2000;
@@ -85,4 +85,13 @@ export function withAutoLods(sidecar: MeshSidecar, id: string): MeshSidecar {
     return sidecar;
   }
   return generateEntryLods(sidecar, id).sidecar;
+}
+
+/**
+ * After a geometry edit (I14): `id` takes the edited mesh, and drops its LODs —
+ * they were made from the old geometry and no longer fit — then gets new ones
+ * if it is big enough to want them. Other copies of the old model keep theirs.
+ */
+export function withEditedGeometry(sidecar: MeshSidecar, id: string, mesh: MeshAsset): MeshSidecar {
+  return withAutoLods(clearEntryLods(setMeshAsset(sidecar, id, mesh), id), id);
 }
