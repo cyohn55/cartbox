@@ -62,6 +62,9 @@ import {
   type MeshTransform,
 } from "@/lib/meshSidecar";
 import { withAutoLods, withEditedGeometry } from "@/lib/meshLods";
+import { describeContract, replaceModel, replacementContract } from "@/lib/meshReplace";
+import { isLockoutSidecar } from "@/lib/lockoutAssets";
+import { basePath } from "@/lib/staticSite";
 import { DAB_SPACING, applyTerrainTool, findTerrain, replaceTerrain, strokeDabs } from "@/lib/terrainEdit";
 import { findFoliage, replaceFoliage } from "@/lib/foliageEdit";
 import { INITIAL_TERRAIN_EDIT, TerrainPanel, type TerrainEditState } from "./TerrainPanel";
@@ -131,6 +134,8 @@ interface MeshEditorProps {
   onStartPlay?: () => Promise<PlaytestConfig | null>;
   /** The cart is on the Modern tier, which has the dedicated core (EP20b). */
   modernTier?: boolean;
+  /** The cart's id: a Lockout cart links to the demo playing its saved assets (L13). */
+  cartId?: string;
 }
 
 /** Trigger a browser download of raw bytes or text under `filename`. */
@@ -154,7 +159,7 @@ function fitDistance(mesh: MeshAsset): number {
   return radius / Math.sin(fov / 2) + radius;
 }
 
-export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modernTier = false }: MeshEditorProps) {
+export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modernTier = false, cartId }: MeshEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   /**
@@ -610,29 +615,66 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     return () => canvas.removeEventListener("wheel", onWheel);
   }, []);
 
+  /**
+   * Read model files the way an import does: parsed, KTX2 settled, textures
+   * compressed — the asset ready to place, and what happened to its textures.
+   */
+  const prepareImport = async (all: File[]) => {
+    const primary = all.find((file) => /\.(obj|glb|gltf)$/i.test(file.name)) ?? all[0]!;
+    const parsed = await importMeshFile(primary, all.filter((file) => file !== primary));
+    // KTX2 textures stay compressed only when that saves more than the
+    // transcoder players would then fetch; otherwise they become PNG.
+    const sceneKtx2 = sceneHasKtx2([...sidecar.meshes.map((m) => m.mesh), ...(sidecar.prefabs ?? []).flatMap((p) => p.nodes.map((n) => n.mesh))]);
+    const settled = await settleKtx2Textures(parsed, {
+      sceneHasKtx2: sceneKtx2,
+      decode: await (hasKtx2(parsed) ? loadKtx2Decoder() : Promise.resolve(() => null)),
+      encodePng: encodePngInBrowser,
+    });
+    // Compressed by default (I13): PNG and JPEG maps become KTX2 when that travels lighter.
+    setNote("Compressing textures…");
+    const compressed = await compressMeshTextures(settled.mesh, {
+      sceneHasKtx2: sceneKtx2 || settled.outcome === "kept",
+      decode: (image, raw) => decodeImage(image.bytes, image.mime, raw),
+      encoder: loadKtx2Encoder,
+    });
+    return { mesh: compressed.mesh, settled, compressed };
+  };
+
+  /** A replacement waiting on the creator: what it's missing that the cart may use (L13). */
+  const [pendingReplace, setPendingReplace] = useState<{ mesh: MeshAsset; missing: string } | null>(null);
+  const commitReplace = (mesh: MeshAsset) => {
+    if (!selectedEntry) return;
+    const { sidecar: next, replaced } = replaceModel(sidecar, selectedEntry.id, mesh);
+    onSidecarChange(next);
+    setPendingReplace(null);
+    setNote(
+      `Replaced the model on ${replaced.length} object${replaced.length === 1 ? "" : "s"} with “${mesh.name}” — ${meshTriangleCount(mesh).toLocaleString()} triangles.${importSummary(mesh)} Each keeps its place, animator and material set.`,
+    );
+  };
+  const replaceFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0 || !selectedEntry) return;
+    setNote("Importing…");
+    setPendingReplace(null);
+    try {
+      const { mesh } = await prepareImport(Array.from(files));
+      const contract = replacementContract(sidecar, selectedEntry.id, mesh);
+      const missing = contract ? describeContract(contract) : "";
+      if (missing) {
+        setPendingReplace({ mesh, missing });
+        setNote(`The new model can't stand in for this one as it is. ${missing}`);
+        return;
+      }
+      commitReplace(mesh);
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Could not import that file.");
+    }
+  };
+
   const importFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
-    const all = Array.from(files);
-    const primary = all.find((file) => /\.(obj|glb|gltf)$/i.test(file.name)) ?? all[0]!;
     setNote("Importing…");
     try {
-      const parsed = await importMeshFile(primary, all.filter((file) => file !== primary));
-      // KTX2 textures stay compressed only when that saves more than the
-      // transcoder players would then fetch; otherwise they become PNG.
-      const sceneKtx2 = sceneHasKtx2([...sidecar.meshes.map((m) => m.mesh), ...(sidecar.prefabs ?? []).flatMap((p) => p.nodes.map((n) => n.mesh))]);
-      const settled = await settleKtx2Textures(parsed, {
-        sceneHasKtx2: sceneKtx2,
-        decode: await (hasKtx2(parsed) ? loadKtx2Decoder() : Promise.resolve(() => null)),
-        encodePng: encodePngInBrowser,
-      });
-      // Compressed by default (I13): PNG and JPEG maps become KTX2 when that travels lighter.
-      setNote("Compressing textures…");
-      const compressed = await compressMeshTextures(settled.mesh, {
-        sceneHasKtx2: sceneKtx2 || settled.outcome === "kept",
-        decode: (image, raw) => decodeImage(image.bytes, image.mime, raw),
-        encoder: loadKtx2Encoder,
-      });
-      const asset = compressed.mesh;
+      const { mesh: asset, settled, compressed } = await prepareImport(Array.from(files));
       // One step: the mesh with its skin, clips and material sets, and a state machine for its clips.
       const added = addImportedMesh(sidecar, asset);
       const id = added.id;
@@ -940,6 +982,49 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
             {meshAsset && <BakePanel mesh={meshAsset} onBaked={applyGeometryEdit} />}
 
             {meshAsset && <MaterialEditor mesh={meshAsset} onChange={applyMeshEdit} />}
+
+            <RailGroup label="Replace model">
+              <div className={styles.toolGroup}>
+                <label className={styles.toolBtn} title="Put an imported model in place of this one, and every copy of it">
+                  <span className={styles.toolGlyph} aria-hidden>
+                    ⇄
+                  </span>
+                  Replace from file…
+                  <input
+                    type="file"
+                    accept=".obj,.glb,.gltf,.mtl"
+                    multiple
+                    hidden
+                    onChange={(event) => {
+                      void replaceFiles(event.target.files);
+                      event.target.value = "";
+                    }}
+                  />
+                </label>
+              </div>
+              {pendingReplace && (
+                <div className={styles.toolGroup}>
+                  <button type="button" className={styles.toolBtn} onClick={() => commitReplace(pendingReplace.mesh)}>
+                    Replace anyway
+                  </button>
+                  <button type="button" className={styles.toolBtn} onClick={() => setPendingReplace(null)}>
+                    Keep the old model
+                  </button>
+                </div>
+              )}
+              <RailHint>
+                Swaps in a re-imported model (from Blender, say) for this one and every copy of it, each keeping its place, animator and material
+                set. It checks the new model keeps the joints, clips and material sets the cart uses, which code finds by name.
+              </RailHint>
+              {cartId && isLockoutSidecar(sidecar) && (
+                <RailHint>
+                  <a href={`${basePath}/lockout?assets=${encodeURIComponent(cartId)}`} target="_blank" rel="noreferrer">
+                    Play the Lockout demo with this cart&apos;s saved Spartans and weapons
+                  </a>{" "}
+                  (save first; it reads the copy saved in this browser).
+                </RailHint>
+              )}
+            </RailGroup>
 
             <RailGroup label="Export">
               <div className={styles.toolGroup}>
