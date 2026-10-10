@@ -17,6 +17,7 @@
 import type { DecodedTexture, EncodedImage, MeshAsset, MeshMaterial } from "@cartbox/editor";
 
 import { KTX2_TRANSCODER_TRANSFER_BYTES, gzipSize } from "./downloadBudget";
+import type { Ktx2Encode, TextureKind } from "./ktx2Encoder";
 
 export { KTX2_TRANSCODER_TRANSFER_BYTES };
 
@@ -40,16 +41,48 @@ export function hasKtx2(mesh: MeshAsset): boolean {
   return ktx2Images(mesh).length > 0;
 }
 
+/** Every material a mesh draws with: its primitives' and its material sets'. */
+function meshMaterials(mesh: MeshAsset): MeshMaterial[] {
+  return [...mesh.primitives.map((p) => p.material), ...(mesh.variants ?? []).flatMap((v) => v.materials.filter((m): m is MeshMaterial => m !== null))];
+}
+
 /** Every distinct KTX2 image in a mesh's materials. */
 function ktx2Images(mesh: MeshAsset): EncodedImage[] {
   const found = new Set<EncodedImage>();
-  for (const primitive of mesh.primitives) {
+  for (const material of meshMaterials(mesh)) {
     for (const slot of IMAGE_SLOTS) {
-      const image = primitive.material[slot];
+      const image = material[slot];
       if (image && image.mime === "image/ktx2") found.add(image);
     }
   }
   return [...found];
+}
+
+/**
+ * `mesh` with images swapped for their replacements, in its primitives and its
+ * material sets alike. A material (and so an image) shared between primitives
+ * or sets stays shared.
+ */
+function swapImages(mesh: MeshAsset, replacements: ReadonlyMap<EncodedImage, EncodedImage>): MeshAsset {
+  const swapped = new Map<MeshMaterial, MeshMaterial>();
+  const swap = (material: MeshMaterial): MeshMaterial => {
+    let next = swapped.get(material);
+    if (!next) {
+      next = material;
+      for (const slot of IMAGE_SLOTS) {
+        const image = material[slot];
+        const replacement = image ? replacements.get(image) : undefined;
+        if (replacement) next = { ...next, [slot]: replacement };
+      }
+      swapped.set(material, next);
+    }
+    return next;
+  };
+  return {
+    ...mesh,
+    primitives: mesh.primitives.map((p) => ({ ...p, material: swap(p.material) })),
+    ...(mesh.variants ? { variants: mesh.variants.map((v) => ({ ...v, materials: v.materials.map((m) => (m ? swap(m) : null)) })) } : {}),
+  };
 }
 
 export interface Ktx2Settlement {
@@ -89,21 +122,67 @@ export async function settleKtx2Textures(
   if (replacements.size === 0 || keepKtx2({ ktx2Bytes, pngBytes, sceneHasKtx2: options.sceneHasKtx2 })) {
     return { mesh, outcome: "kept", ktx2Bytes, pngBytes };
   }
-  const swap = (material: MeshMaterial): MeshMaterial => {
-    let next = material;
-    for (const slot of IMAGE_SLOTS) {
+  return { mesh: swapImages(mesh, replacements), outcome: "converted", ktx2Bytes, pngBytes };
+}
+
+/** The glTF texture slots an imported model fills, and what each holds (see ktx2Encoder.ts). */
+const IMPORT_SLOTS = [
+  ["baseColorImage", "color"],
+  ["emissiveImage", "color"],
+  ["normalImage", "normal"],
+  ["metallicRoughnessImage", "data"],
+  ["occlusionImage", "data"],
+] as const satisfies readonly (readonly [(typeof IMAGE_SLOTS)[number], TextureKind])[];
+
+export interface Ktx2Compression {
+  readonly mesh: MeshAsset;
+  /** "none": no PNG or JPEG maps (or none would encode); "compressed": they became KTX2; "kept": they stayed, being lighter. */
+  readonly outcome: "none" | "compressed" | "kept";
+  /** The maps as they'd travel (gzipped): encoded, and as imported. */
+  readonly ktx2Bytes: number;
+  readonly sourceBytes: number;
+}
+
+/**
+ * Compressed textures by default (I13): encode an imported model's PNG and
+ * JPEG maps to KTX2 and keep that form when it travels lighter, by the same
+ * rule as {@link settleKtx2Textures} — the saving must also pay for the
+ * transcoder, unless the scene fetches it anyway. An image in several slots (a
+ * packed occlusion/roughness/metal map) is encoded once, as its first slot's
+ * kind; one that won't decode or encode is kept as it is.
+ */
+export async function compressMeshTextures(
+  mesh: MeshAsset,
+  options: {
+    sceneHasKtx2: boolean;
+    decode: (image: EncodedImage, raw: boolean) => Promise<DecodedTexture | null>;
+    /** The encoder, fetched only when there is something to encode. */
+    encoder: () => Promise<Ktx2Encode>;
+  },
+): Promise<Ktx2Compression> {
+  const kinds = new Map<EncodedImage, TextureKind>();
+  for (const material of meshMaterials(mesh)) {
+    for (const [slot, kind] of IMPORT_SLOTS) {
       const image = material[slot];
-      const replacement = image ? replacements.get(image) : undefined;
-      if (replacement) next = { ...next, [slot]: replacement };
+      if (image && image.bytes.length > 0 && (image.mime === "image/png" || image.mime === "image/jpeg") && !kinds.has(image)) kinds.set(image, kind);
     }
-    return next;
-  };
-  return {
-    mesh: { ...mesh, primitives: mesh.primitives.map((p) => ({ ...p, material: swap(p.material) })) },
-    outcome: "converted",
-    ktx2Bytes,
-    pngBytes,
-  };
+  }
+  if (kinds.size === 0) return { mesh, outcome: "none", ktx2Bytes: 0, sourceBytes: 0 };
+  const encode = await options.encoder();
+  const replacements = new Map<EncodedImage, EncodedImage>();
+  let ktx2Bytes = 0;
+  let sourceBytes = 0;
+  for (const [image, kind] of kinds) {
+    const decoded = await options.decode(image, kind !== "color").catch(() => null);
+    const encoded = decoded ? encode(decoded, kind) : null;
+    if (!encoded) continue;
+    ktx2Bytes += await gzipSize(encoded);
+    sourceBytes += await gzipSize(image.bytes);
+    replacements.set(image, { mime: "image/ktx2", bytes: encoded });
+  }
+  if (replacements.size === 0) return { mesh, outcome: "none", ktx2Bytes: 0, sourceBytes: 0 };
+  if (!keepKtx2({ ktx2Bytes, pngBytes: sourceBytes, sceneHasKtx2: options.sceneHasKtx2 })) return { mesh, outcome: "kept", ktx2Bytes, sourceBytes };
+  return { mesh: swapImages(mesh, replacements), outcome: "compressed", ktx2Bytes, sourceBytes };
 }
 
 /** Encode RGBA as PNG with the browser's canvas encoder. */

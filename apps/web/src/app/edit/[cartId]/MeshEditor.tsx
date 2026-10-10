@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   Ragdoll,
+  applyMeshVariant,
   composeModelMatrix,
   createLiveSkinnedMesh,
   isSkinned,
@@ -45,6 +46,8 @@ import {
 
 import {
   addMesh,
+  addImportedMesh,
+  setMeshVariant,
   removeMesh,
   renameMesh,
   setMeshAsset,
@@ -64,9 +67,10 @@ import { clickSelection, copyPayload, duplicateEntries, pasteEntries, removeEntr
 import { placeAsset, type ContentAsset } from "@/lib/contentBrowser";
 import { ContentBrowser, type CodeAccess } from "./ContentBrowser";
 import { ScenePlayView, type PlaytestConfig } from "./ScenePlayView";
-import { importMeshFile, decodeMeshTextures } from "@/lib/meshImport";
+import { importMeshFile, importSummary, decodeImage, decodeMeshTextures } from "@/lib/meshImport";
+import { loadKtx2Encoder } from "@/lib/ktx2Encoder";
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
-import { KTX2_TRANSCODER_TRANSFER_BYTES, encodePngInBrowser, hasKtx2, sceneHasKtx2, settleKtx2Textures } from "@/lib/ktx2Policy";
+import { KTX2_TRANSCODER_TRANSFER_BYTES, encodePngInBrowser, hasKtx2, sceneHasKtx2, settleKtx2Textures, compressMeshTextures } from "@/lib/ktx2Policy";
 import { fetchLibraryMesh } from "@/lib/libraryClient";
 import type { LibraryAsset } from "@/lib/libraryManifest";
 import styles from "./editor.module.css";
@@ -386,8 +390,11 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     }
   }, [selectedEntry]);
 
+  // The preview wears the copy's material set (I13); the material editor edits the mesh's own materials.
+  const variant = selectedEntry?.variant;
+  const worn = useMemo(() => (meshAsset ? applyMeshVariant(meshAsset, variant) : null), [meshAsset, variant]);
   // A skinned mesh previews through a live copy the clip poses; stop previewing on selection change.
-  const liveMesh = useMemo(() => (meshAsset && isSkinned(meshAsset) ? createLiveSkinnedMesh(meshAsset) : null), [meshAsset]);
+  const liveMesh = useMemo(() => (worn && isSkinned(worn) ? createLiveSkinnedMesh(worn) : null), [worn]);
   useEffect(() => setPreviewClip(null), [meshAsset]);
   // Playing a clip, or picking another mesh, stands a ragdoll back up.
   useEffect(() => {
@@ -469,19 +476,19 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   // Decode this mesh's textures to RGBA for the rasteriser, cancelling if the
   // selection changes before decoding finishes.
   useEffect(() => {
-    if (!meshAsset) {
+    if (!worn) {
       setTextures(null);
       return;
     }
     let cancelled = false;
     setTextures(null);
-    void decodeMeshTextures(meshAsset).then((decoded) => {
+    void decodeMeshTextures(worn).then((decoded) => {
       if (!cancelled) setTextures(decoded);
     });
     return () => {
       cancelled = true;
     };
-  }, [meshAsset]);
+  }, [worn]);
 
   const buffers = useMemo(
     () => ({ out: new Uint8ClampedArray(VIEWPORT * VIEWPORT * 4), depth: new Float32Array(VIEWPORT * VIEWPORT) }),
@@ -505,7 +512,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     // preview renders exactly as before.
     const lighting = sidecar.lighting;
     const clip = previewClip !== null ? meshAsset.clips?.[previewClip] : undefined;
-    let shown = meshAsset;
+    let shown = worn ?? meshAsset;
     const doll = ragdolling ? ragdollRef.current : null;
     if (liveMesh && meshAsset.skin && doll) {
       const pose = restPose(meshAsset.skin);
@@ -537,7 +544,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     const image = context.createImageData(VIEWPORT, VIEWPORT);
     image.data.set(buffers.out);
     context.putImageData(image, 0, 0);
-  }, [meshAsset, textures, yaw, pitch, zoom, buffers, sidecar.lighting, liveMesh, previewClip, clipTime, ragdolling, ragdollFrame, shield, shieldTime]);
+  }, [meshAsset, worn, textures, yaw, pitch, zoom, buffers, sidecar.lighting, liveMesh, previewClip, clipTime, ragdolling, ragdollFrame, shield, shieldTime]);
 
   // Orbit + zoom.
   const drag = useRef<{ x: number; y: number } | null>(null);
@@ -575,13 +582,22 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       const parsed = await importMeshFile(primary, all.filter((file) => file !== primary));
       // KTX2 textures stay compressed only when that saves more than the
       // transcoder players would then fetch; otherwise they become PNG.
+      const sceneKtx2 = sceneHasKtx2([...sidecar.meshes.map((m) => m.mesh), ...(sidecar.prefabs ?? []).flatMap((p) => p.nodes.map((n) => n.mesh))]);
       const settled = await settleKtx2Textures(parsed, {
-        sceneHasKtx2: sceneHasKtx2([...sidecar.meshes.map((m) => m.mesh), ...(sidecar.prefabs ?? []).flatMap((p) => p.nodes.map((n) => n.mesh))]),
+        sceneHasKtx2: sceneKtx2,
         decode: await (hasKtx2(parsed) ? loadKtx2Decoder() : Promise.resolve(() => null)),
         encodePng: encodePngInBrowser,
       });
-      const asset = settled.mesh;
-      const added = addMesh(sidecar, asset, asset.name);
+      // Compressed by default (I13): PNG and JPEG maps become KTX2 when that travels lighter.
+      setNote("Compressing textures…");
+      const compressed = await compressMeshTextures(settled.mesh, {
+        sceneHasKtx2: sceneKtx2 || settled.outcome === "kept",
+        decode: (image, raw) => decodeImage(image.bytes, image.mime, raw),
+        encoder: loadKtx2Encoder,
+      });
+      const asset = compressed.mesh;
+      // One step: the mesh with its skin, clips and material sets, and a state machine for its clips.
+      const added = addImportedMesh(sidecar, asset);
       const id = added.id;
       // A heavy model gets its LODs on the way in.
       const next = withAutoLods(added.sidecar, id);
@@ -593,10 +609,16 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
           : settled.outcome === "converted"
             ? ` KTX2 textures converted to PNG — too small to be worth the ${formatBytes(KTX2_TRANSCODER_TRANSFER_BYTES)} transcoder.`
             : "";
+      const encoded =
+        compressed.outcome === "compressed"
+          ? ` Textures compressed to KTX2 (${formatBytes(compressed.ktx2Bytes)}, against ${formatBytes(compressed.sourceBytes)} as imported).`
+          : compressed.outcome === "kept"
+            ? ` Textures kept as imported — too small for KTX2 to pay for its ${formatBytes(KTX2_TRANSCODER_TRANSFER_BYTES)} transcoder.`
+            : "";
       setNote(
         `Imported “${asset.name}” — ${meshTriangleCount(asset).toLocaleString()} triangles, ${meshVertexCount(
           asset,
-        ).toLocaleString()} vertices.${textures}${next !== added.sidecar ? " Lighter LODs made for distance." : ""}`,
+        ).toLocaleString()} vertices.${importSummary(asset)}${textures}${encoded}${next !== added.sidecar ? " Lighter LODs made for distance." : ""}`,
       );
     } catch (error) {
       setNote(error instanceof Error ? error.message : "Could not import that file.");
@@ -696,7 +718,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
               event.target.value = "";
             }}
           />
-          <RailHint>OBJ, glTF, or GLB (meshopt- and Draco-compressed too). For OBJ, select its .mtl alongside to keep colours.</RailHint>
+          <RailHint>OBJ, glTF, or GLB (meshopt- and Draco-compressed too), with its skeleton, clips, PBR maps and material sets; maps are compressed to KTX2 when that is lighter. For OBJ, select its .mtl alongside to keep colours. See BLENDER_WORKFLOW.md.</RailHint>
           {note && <RailHint>{note}</RailHint>}
         </RailGroup>
 
@@ -811,6 +833,25 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
 
             <StreamingPicker sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
 
+            {meshAsset?.variants && meshAsset.variants.length > 0 && (
+              <RailGroup label="Material set">
+                <select
+                  aria-label="Material set"
+                  value={selectedEntry.variant ?? ""}
+                  onChange={(event) => onSidecarChange(setMeshVariant(sidecar, selectedEntry.id, event.target.value || null))}
+                  style={{ width: "100%", padding: "6px 8px", borderRadius: 6 }}
+                >
+                  <option value="">Its own materials</option>
+                  {meshAsset.variants.map((v) => (
+                    <option key={v.name} value={v.name}>
+                      {v.name}
+                    </option>
+                  ))}
+                </select>
+                <RailHint>The model&apos;s material sets, as exported (KHR_materials_variants). Each placed copy wears its own.</RailHint>
+              </RailGroup>
+            )}
+
             <TransformControls transform={selectedEntry.transform} onChange={updateTransform} relative={Boolean(selectedEntry.parent)} />
 
             <TagEditor sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
@@ -869,7 +910,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
                   Export .obj
                 </button>
               </div>
-              <RailHint>GLB keeps the base-colour texture; OBJ keeps geometry and flat colour.</RailHint>
+              <RailHint>GLB keeps every PBR map and the material sets (not the skeleton); OBJ keeps geometry and flat colour.</RailHint>
             </RailGroup>
 
             <RailGroup label="Remove">

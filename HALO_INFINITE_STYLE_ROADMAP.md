@@ -365,11 +365,59 @@ What separates Lockout from Halo Infinite, seen in a match:
         turning sweep;
       - a large stroke-font ammo counter, with reserve and weapon name;
       - the plasma grenade count.
-- [ ] **I13. Asset pipeline for artist-made content.** Skinned glTF with its
+- [x] **I13. Asset pipeline for artist-made content.** Skinned glTF with its
       animations and material sets imported in one step, texture conventions
       (packed occlusion/roughness/metal maps), compressed textures by default,
       and a documented Blender workflow. The editor can't stand in for a 3D
       artist, so this is how real art gets in.
+      *Done:* the editor's **Import 3D model** now takes everything a model
+      brings, in one step:
+      - its mesh, skeleton and clips;
+      - a **state machine** to start from, one looping state per clip;
+      - its PBR maps;
+      - its **material sets** (`KHR_materials_variants`, up to 16), stored
+        with the mesh.
+
+      **Texture conventions:**
+      - Images are read once each by glTF image index. A **packed ORM map**
+        (R occlusion, G roughness, B metal) in both of its slots is therefore
+        one image: stored, downloaded and decoded once.
+      - A texture shared across materials or sets is kept once too.
+      - The player decodes each distinct image once per mesh.
+
+      **Material sets:** each placed copy chooses a set, which the scene
+      entry stores as `variant`, the Mesh tab's **Material set** box edits
+      and previews, and the player applies on load. Copies in the same set
+      share one dressed mesh, and their LODs wear it. **Export .glb** now
+      writes every PBR map once and the sets with them.
+
+      **Compressed textures by default:** an import's PNG and JPEG maps are
+      encoded to KTX2 with the Basis Universal encoder. It is vendored beside
+      the transcoder and fetched only by the editor, only when there are maps
+      to compress.
+      - Colour maps are encoded as ETC1S, in sRGB.
+      - Normal and ORM maps are encoded as near-lossless UASTC with RDO and
+        Zstd, in linear space, and read raw from the source image.
+      - KTX2 is kept by the existing rule: it must travel lighter, and also
+        pay for the transcoder if the scene has none yet. So a prop keeps its
+        PNG and a textured character goes compressed.
+      - Everything the encoder writes, the player's transcoder reads back
+        closely (tested for every kind).
+
+      **Blender workflow:** `BLENDER_WORKFLOW.md` covers export settings,
+      skeleton and clip rules, the Principled-BSDF-to-slot table with colour
+      spaces, ORM packing, variants, compression, and the limits.
+      *Lockout:* the Spartan ships with two armour sets the bots take turns
+      wearing:
+      - **Veteran:** the lacquer worn off to matte, scuffed plates, with
+        bronze trim and an amber visor.
+      - **Recon:** satin plates with brushed (anisotropic) trim and a cold
+        silver visor.
+
+      All keep the team colour.
+      *Not yet:* skeletons and clips in GLB export, a second UV set and morph
+      targets on import, and uploading textures to the GPU still compressed
+      (KTX2 is transcoded to RGBA, so the saving is in download size).
 - [ ] **I14. Modular kits and blockout tools.** Snapping kit pieces edge to
       edge, prefab variants, and simple in-editor mesh editing (extrude,
       bevel, inset) for blockouts and quick fixes.

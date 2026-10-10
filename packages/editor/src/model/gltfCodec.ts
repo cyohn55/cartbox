@@ -35,6 +35,8 @@ import {
   type MeshPrimitive,
   type MeshMaterial,
   type EncodedImage,
+  type MeshVariant,
+  MAX_MESH_VARIANTS,
   MAX_MESH_VERTICES,
   MAX_MESH_INDICES,
 } from "./MeshAsset";
@@ -96,7 +98,11 @@ export interface GltfPrimitive {
   attributes: { POSITION?: number; NORMAL?: number; TEXCOORD_0?: number; JOINTS_0?: number; WEIGHTS_0?: number };
   indices?: number;
   material?: number;
-  extensions?: { KHR_draco_mesh_compression?: { bufferView: number; attributes: Record<string, number> } };
+  extensions?: {
+    KHR_draco_mesh_compression?: { bufferView: number; attributes: Record<string, number> };
+    /** Which material each material set (I13) puts on this primitive. */
+    KHR_materials_variants?: { mappings?: { material: number; variants: number[] }[] };
+  };
 }
 export interface GltfMesh {
   primitives: GltfPrimitive[];
@@ -143,6 +149,7 @@ export interface GltfJson {
   images?: GltfImage[];
   skins?: GltfSkin[];
   animations?: GltfAnimation[];
+  extensions?: { KHR_materials_variants?: { variants?: { name?: string }[] } };
 }
 
 /** Component-type → (byte size, normalisation divisor). FLOAT needs no divisor. */
@@ -438,8 +445,14 @@ function extensionLists(basisu: boolean, materials: readonly GltfMaterial[]): Pi
   return { extensionsUsed: [...used], ...(basisu ? { extensionsRequired: ["KHR_texture_basisu"] } : {}) };
 }
 
-/** Resolve a material's base-colour factor and, if any, its embedded texture image. */
-function readMaterial(json: GltfJson, buffers: (Uint8Array | null)[], materialIndex: number | undefined): MeshMaterial {
+/**
+ * Resolve a material's base-colour factor and, if any, its embedded texture image.
+ * `images` holds the images read so far by glTF image index: an image several
+ * slots or materials use — a packed occlusion/roughness/metal map in both of its
+ * slots, a texture shared across materials — comes back as one shared object,
+ * so it is stored once.
+ */
+function readMaterial(json: GltfJson, buffers: (Uint8Array | null)[], materialIndex: number | undefined, images: Map<number, EncodedImage | null> = new Map()): MeshMaterial {
   const material = materialIndex !== undefined ? json.materials?.[materialIndex] : undefined;
   const pbr = material?.pbrMetallicRoughness;
   const factor = pbr?.baseColorFactor;
@@ -453,8 +466,12 @@ function readMaterial(json: GltfJson, buffers: (Uint8Array | null)[], materialIn
     // KTX2 kept as-is (image/ktx2): whether it stays compressed or is converted
     // to PNG is the editor's call (see ktx2Policy.ts), made per scene.
     const source = texture?.extensions?.KHR_texture_basisu?.source ?? texture?.source;
-    const image = source !== undefined ? json.images?.[source] : undefined;
-    return image ? readImage(json, buffers, image) : null;
+    if (source === undefined) return null;
+    if (!images.has(source)) {
+      const image = json.images?.[source];
+      images.set(source, image ? readImage(json, buffers, image) : null);
+    }
+    return images.get(source) ?? null;
   };
 
   const baseColorImage = imageAt(pbr?.baseColorTexture);
@@ -534,6 +551,17 @@ export function parseGltf(sourceJson: GltfJson, sourceBuffers: (Uint8Array | nul
   const instances = collectMeshInstances(json);
   const rig = readRig(json, buffers);
   const primitives: MeshPrimitive[] = [];
+  // Images and materials read once each, by glTF index, and shared wherever they're used.
+  const imageCache = new Map<number, EncodedImage | null>();
+  const materialCache = new Map<number, MeshMaterial>();
+  const materialAt = (index: number | undefined): MeshMaterial => {
+    if (index === undefined) return readMaterial(json, buffers, index, imageCache);
+    if (!materialCache.has(index)) materialCache.set(index, readMaterial(json, buffers, index, imageCache));
+    return materialCache.get(index)!;
+  };
+  // Material sets (KHR_materials_variants): each set's material per emitted primitive.
+  const variantNames = (json.extensions?.KHR_materials_variants?.variants ?? []).slice(0, MAX_MESH_VARIANTS).map((v, i) => (typeof v?.name === "string" && v.name ? v.name.slice(0, 64) : `variant_${i}`));
+  const variantMaterials: (MeshMaterial | null)[][] = variantNames.map(() => []);
   let totalVertices = 0;
   let totalIndices = 0;
 
@@ -550,7 +578,11 @@ export function parseGltf(sourceJson: GltfJson, sourceBuffers: (Uint8Array | nul
           ? readAccessorFloats(json, buffers, primitive.attributes.TEXCOORD_0)
           : null;
       const indices = readIndices(json, buffers, primitive.indices, vertexCount);
-      const material = readMaterial(json, buffers, primitive.material);
+      const material = materialAt(primitive.material);
+      const mapped = variantNames.map((_, v) => {
+        const mapping = primitive.extensions?.KHR_materials_variants?.mappings?.find((m) => Array.isArray(m?.variants) && m.variants.includes(v));
+        return mapping && Number.isInteger(mapping.material) && json.materials?.[mapping.material] ? materialAt(mapping.material) : null;
+      });
 
       // Emit one primitive per node instance of this mesh, baking that node's
       // world transform into the positions (and inverse-transpose into normals).
@@ -590,14 +622,18 @@ export function parseGltf(sourceJson: GltfJson, sourceBuffers: (Uint8Array | nul
           material,
           ...(binding ? { joints: binding.joints, weights: binding.weights } : {}),
         });
+        mapped.forEach((m, v) => variantMaterials[v]!.push(m));
       }
     }
   });
 
   if (primitives.length === 0) throw new Error("glTF file contains no triangle geometry");
-  if (!rig || !primitives.some((p) => p.joints)) return { name, primitives };
+  // A set that changes nothing is dropped.
+  const variants: MeshVariant[] = variantNames.map((n, v) => ({ name: n, materials: variantMaterials[v]! })).filter((v) => v.materials.some((m) => m));
+  const sets = variants.length > 0 ? { variants } : {};
+  if (!rig || !primitives.some((p) => p.joints)) return { name, primitives, ...sets };
   const clips = readClips(json, buffers, rig.jointOfNode);
-  return { name, primitives, skin: rig.skin, ...(clips.length > 0 ? { clips } : {}) };
+  return { name, primitives, skin: rig.skin, ...(clips.length > 0 ? { clips } : {}), ...sets };
 }
 
 interface Rig {
@@ -868,7 +904,44 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
     return accessors.length - 1;
   };
 
-  for (const primitive of mesh.primitives) {
+  // Each image once (a packed occlusion/roughness/metal map fills two slots), each material once.
+  const textureOf = new Map<EncodedImage, number>();
+  const addTexture = (image: EncodedImage): { index: number } => {
+    if (!textureOf.has(image)) {
+      images.push({ bufferView: addView(image.bytes), mimeType: image.mime });
+      const ktx2 = image.mime === "image/ktx2";
+      textures.push(ktx2 ? { extensions: { KHR_texture_basisu: { source: images.length - 1 } } } : { source: images.length - 1 });
+      textureOf.set(image, textures.length - 1);
+    }
+    return { index: textureOf.get(image)! };
+  };
+  const materialOf = new Map<MeshMaterial, number>();
+  const addMaterial = (m: MeshMaterial): number => {
+    if (materialOf.has(m)) return materialOf.get(m)!;
+    const gltfMaterial: GltfMaterial = {
+      name: m.name,
+      pbrMetallicRoughness: {
+        baseColorFactor: [...m.baseColorFactor],
+        ...(m.baseColorImage ? { baseColorTexture: addTexture(m.baseColorImage) } : {}),
+        ...(m.metallicFactor !== undefined ? { metallicFactor: m.metallicFactor } : {}),
+        ...(m.roughnessFactor !== undefined ? { roughnessFactor: m.roughnessFactor } : {}),
+        ...(m.metallicRoughnessImage ? { metallicRoughnessTexture: addTexture(m.metallicRoughnessImage) } : {}),
+      },
+      ...(m.normalImage ? { normalTexture: addTexture(m.normalImage) } : {}),
+      ...(m.occlusionImage ? { occlusionTexture: addTexture(m.occlusionImage) } : {}),
+      ...(m.emissiveImage ? { emissiveTexture: addTexture(m.emissiveImage) } : {}),
+      ...(m.emissiveFactor ? { emissiveFactor: [...m.emissiveFactor] } : {}),
+      // glTF has no additive mode: it exports as blended.
+      ...(m.alphaMode === "mask" ? { alphaMode: "MASK" as const, alphaCutoff: m.alphaCutoff ?? 0.5 } : {}),
+      ...(m.alphaMode === "blend" || m.alphaMode === "additive" ? { alphaMode: "BLEND" as const } : {}),
+      ...materialLayerExtensions(m),
+    };
+    materials.push(gltfMaterial);
+    materialOf.set(m, materials.length - 1);
+    return materials.length - 1;
+  };
+
+  for (const [index, primitive] of mesh.primitives.entries()) {
     // POSITION accessors must carry min/max per the spec (engines use them to cull).
     const positionAccessor = addFloatAccessor(primitive.positions, 3, true);
     const attributes: GltfPrimitive["attributes"] = { POSITION: positionAccessor };
@@ -879,25 +952,9 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
     accessors.push({ bufferView: indexView, componentType: 5125, count: primitive.indices.length, type: "SCALAR" });
     const indexAccessor = accessors.length - 1;
 
-    // Material, embedding the base-colour image as its own bufferView.
-    const gltfMaterial: GltfMaterial = {
-      name: primitive.material.name,
-      pbrMetallicRoughness: { baseColorFactor: [...primitive.material.baseColorFactor] },
-      // glTF has no additive mode: it exports as blended.
-      ...(primitive.material.alphaMode === "mask" ? { alphaMode: "MASK" as const, alphaCutoff: primitive.material.alphaCutoff ?? 0.5 } : {}),
-      ...(primitive.material.alphaMode === "blend" || primitive.material.alphaMode === "additive" ? { alphaMode: "BLEND" as const } : {}),
-      ...materialLayerExtensions(primitive.material),
-    };
-    if (primitive.material.baseColorImage) {
-      const imageView = addView(primitive.material.baseColorImage.bytes);
-      images.push({ bufferView: imageView, mimeType: primitive.material.baseColorImage.mime });
-      const ktx2 = primitive.material.baseColorImage.mime === "image/ktx2";
-      textures.push(ktx2 ? { extensions: { KHR_texture_basisu: { source: images.length - 1 } } } : { source: images.length - 1 });
-      gltfMaterial.pbrMetallicRoughness!.baseColorTexture = { index: textures.length - 1 };
-    }
-    materials.push(gltfMaterial);
-
-    gltfPrimitives.push({ attributes, indices: indexAccessor, material: materials.length - 1 });
+    const material = addMaterial(primitive.material);
+    const sets = (mesh.variants ?? []).slice(0, MAX_MESH_VARIANTS).flatMap((v, k) => (v.materials[index] ? [{ material: addMaterial(v.materials[index]!), variants: [k] }] : []));
+    gltfPrimitives.push({ attributes, indices: indexAccessor, material, ...(sets.length > 0 ? { extensions: { KHR_materials_variants: { mappings: sets } } } : {}) });
   }
 
   const json: GltfJson = {
@@ -911,7 +968,7 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
     buffers: [{ byteLength: binLength }],
     materials,
     ...(textures.length ? { textures, images } : {}),
-    ...extensionLists(textures.some((t) => t.extensions?.KHR_texture_basisu), materials),
+    ...withVariants(extensionLists(textures.some((t) => t.extensions?.KHR_texture_basisu), materials), mesh.variants),
   };
 
   // Assemble the GLB: header, JSON chunk (space-padded), BIN chunk (zero-padded).
@@ -937,6 +994,16 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
   dv.setUint32(binChunkStart + 4, CHUNK_BIN, true);
   out.set(bin, binChunkStart + 8);
   return out;
+}
+
+/** The document's extension lists with its material sets (KHR_materials_variants) added, if it has any. */
+function withVariants(lists: Pick<GltfJson, "extensionsUsed" | "extensionsRequired">, variants: readonly MeshVariant[] | undefined): Pick<GltfJson, "extensionsUsed" | "extensionsRequired" | "extensions"> {
+  if (!variants || variants.length === 0) return lists;
+  return {
+    ...lists,
+    extensionsUsed: [...(lists.extensionsUsed ?? []), "KHR_materials_variants"],
+    extensions: { KHR_materials_variants: { variants: variants.slice(0, MAX_MESH_VARIANTS).map((v) => ({ name: v.name })) } },
+  };
 }
 
 /** Concatenate the BIN chunk pieces into one buffer of the known total length. */

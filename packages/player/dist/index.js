@@ -6637,6 +6637,7 @@ import {
   resolveMeshRef,
   viewMatrix,
   decodeLods,
+  applyMeshVariant,
   foliageBlocks,
   readFoliage,
   parseSceneAudio,
@@ -6722,6 +6723,14 @@ function parseMeshScene(raw) {
     }
     return cache.get(serialized) ?? null;
   };
+  const variantCache = /* @__PURE__ */ new Map();
+  const wear = (mesh, variant) => {
+    if (typeof variant !== "string" || !mesh.variants?.some((v) => v.name === variant)) return mesh;
+    let byName = variantCache.get(mesh);
+    if (!byName) variantCache.set(mesh, byName = /* @__PURE__ */ new Map());
+    if (!byName.has(variant)) byName.set(variant, applyMeshVariant(mesh, variant));
+    return byName.get(variant);
+  };
   const levelCache = /* @__PURE__ */ new Map();
   const lodOf = (mesh, stored) => {
     if (!stored) return null;
@@ -6737,8 +6746,9 @@ function parseMeshScene(raw) {
   const readEntry = (record, id, parentId, identity2 = false) => {
     if (typeof record.mesh !== "string") return null;
     const resolved = resolveMeshRef(record.mesh, library);
-    const mesh = resolved ? load(resolved) : null;
-    if (!mesh) return null;
+    const loaded = resolved ? load(resolved) : null;
+    if (!loaded) return null;
+    const mesh = wear(loaded, record.variant);
     const frames = resolveMeshFrames(record.frames, library).map(load).filter((frame) => frame !== null);
     const t = identity2 ? { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } : readTransform(record.transform);
     const lod = lodOf(mesh, record.lods);
@@ -11609,13 +11619,12 @@ async function bakeSceneSky(sky, lighting, environment, vistas, eye) {
   const reflections = panoramaWithClouds(downsamplePanorama(map, SKY_IBL_DOWNSAMPLE), clouds, 0);
   return { map, reflections, clouds };
 }
-async function decodeMeshTextures(mesh, decodeKtx2, cache) {
+async function decodeMeshTextures(mesh, decodeKtx2, cache = /* @__PURE__ */ new Map()) {
   const decode = (image) => image.mime === "image/ktx2" ? decodeKtx2(image.bytes) : decodeTexture(image.mime, image.bytes);
   const each = (pick) => Promise.all(
     mesh.primitives.map((primitive) => {
       const image = pick(primitive.material);
       if (!image || image.bytes.length === 0) return Promise.resolve(null);
-      if (!cache) return decode(image);
       let entry = cache.get(image);
       if (!entry) {
         entry = decode(image);
