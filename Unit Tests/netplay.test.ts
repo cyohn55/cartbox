@@ -65,11 +65,14 @@ describe("netplay codec", () => {
     expect(Array.from(words.subarray(40, 42))).toEqual([5, 6]);
   });
 
-  it("caps inbox events at 14 and reports how many landed", () => {
+  it("caps inbox events at 12, each with the slot it came from, and reports how many landed", () => {
     const words = new Uint32Array(NET_WORDS);
     const events = Array.from({ length: 25 }, (_, i) => [i, i] as const);
-    expect(writeNetInbox(words, { mode: 1, mySlot: 1, humans: 3, live: 1, match: 0, clock: 0, slots: [], events })).toBe(14);
-    expect(words[39]).toBe(14);
+    const senders = events.map((_, i) => i % 8);
+    expect(writeNetInbox(words, { mode: 1, mySlot: 1, humans: 3, live: 1, match: 0, clock: 0, slots: [], events, senders })).toBe(12);
+    expect(words[39]).toBe(12);
+    const sender = (i: number) => (words[i < 10 ? 64 : 65]! >>> ((i % 10) * 3)) & 7;
+    expect(Array.from({ length: 12 }, (_, i) => sender(i))).toEqual(senders.slice(0, 12));
     expect(words[68]).toBe(0); // the sticks' words are left alone
   });
 

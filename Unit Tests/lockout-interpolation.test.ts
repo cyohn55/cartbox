@@ -56,7 +56,7 @@ describe.skipIf(!existsSync(LOCKOUT_ENGINE))("Lockout's interpolation in the lab
 // browser has for slot 1 — on the guest its own player, on the host its copy
 // of the guest: pitch (hundredths of a radian, 8 bits), airborne (bit 8),
 // firing (bit 9), and a muzzle flash showing (bit 10).
-const PROBE = `
+const PROBE = `;(function()
 local _T = TIC
 function TIC()
   _T()
@@ -68,7 +68,8 @@ function TIC()
       pmem(117, (math.floor((o.pitch or 0)*100 + 0.5) & 0xff) | ((o.air and 1 or 0) << 8) | ((o.firing and 1 or 0) << 9) | (((o.muzzle or 0) > 0) and 1 << 10 or 0))
     end
   end
-end`;
+end
+end)()`;
 
 async function engine(tic: Uint8Array, session: NetSession) {
   const mod = await (await import(pathToFileURL(LOCKOUT_ENGINE).href)).default();

@@ -281,7 +281,7 @@ I16 panels are re-made inline over hand-placed collision boxes.
       stood the same on both 95% of the time or more (a pickup reaches the
       other a few ticks late). The bots' shots add about 0.4 KB/s to a
       two-player host over direct links (3.9 to 4.3 KB/s).
-- [ ] **L6. Authoritative hits with lag compensation.** A client sends its
+- [x] **L6. Authoritative hits with lag compensation.** A client sends its
       shot (origin, direction, the tick it saw) to the host. The host rewinds
       every Spartan's hitbox to what that shooter saw, decides the hit, and
       owns health, shields, kills and scores. The shooter shows a predicted
@@ -291,6 +291,69 @@ I16 panels are re-made inline over hand-placed collision boxes.
       client can't refuse to die or fire faster than its weapon.
       *Tests:* the lab replays the same duel at 0 and 150 ms and gets the
       same hits; a client claiming an impossible move or shot is corrected.
+      *Done:*
+      - **Whose word counts:** each event in the inbox now carries the slot
+        that sent it (`cartbox.netevents()` gives `{a, b, from}`). Lockout
+        takes kills, scores, the objective, health and verdicts only from
+        the host (slot 0). A soldier's shots, swings, throws and pickups
+        count only from that soldier, or from the host for its bots. The
+        inbox makes room by taking 12 events a tick, down from 14.
+      - **A guest's shot:**
+        - The shot event (L5) now carries where the guest aimed.
+        - A second event carries when it fired on the shared clock, how far
+          behind it drew the others (its view lag plus 100 ms), its spread's
+          seed, and whether it thinks it hit.
+        - The spread now comes from that seed, so the host replays the very
+          pellets the guest fired. Origins come from the guest's own
+          snapshots at its fire time.
+      - **The host's judgement:**
+        - It keeps about a second of every soldier's positions on the
+          shared clock: its own and its bots' each tick, the guests' from
+          their snapshots.
+        - It rewinds everyone to what the guest saw and runs the guest's
+          own hit test against them (melee: whom it swung at, if within
+          reach then).
+        - It applies the damage, which owns health, shields, kills and
+          scores, and answers with a verdict.
+      - **The hit marker:** it shows at once, on a guest as its own guess.
+        The verdict keeps it white, or turns it red for a miss.
+      - **The host owns health:**
+        - A guest's `damage()` does nothing; the host's does it all,
+          grenade splash included (even a guest's grenade, through the
+          host's replica).
+        - Shields recharge on the host, and each guest gets its health from
+          the host as it changes.
+        - Only the host kills, except a guest falling off the arena.
+      - **Sanity checks:** the host refuses a guest's shot from the dead,
+        faster than its weapon fires, or past a full load of ammo for that
+        weapon (topped up when it picks one up). It also refuses a move
+        further than a soldier could run (11 m/s and 2.5 m of slack, over
+        up to 0.6 s), and a new life the guest never died for. It sends the
+        guest back to its last good place.
+      - **Can't refuse to die:**
+        - A soldier the host has killed stays dead on the host until it
+          respawns, and not before the respawn time.
+        - Every other browser holds it dead until it shows a new life.
+      - **Lockout's Lua** had reached 192 of Lua's 200 locals in a chunk;
+        event and impact kinds now sit in two tables (174).
+
+      *Lockout* (`lockout-authority.test.ts`, two engines over the lab's
+      links):
+      - **The duel:** the guest stands and fires at the host's player
+        strafing at full run 8.8 m away.
+        - At 0 ms the host confirmed 108 of the guest's 108 predicted hits;
+          at 150 ms, 107 of 107.
+        - Judged on the host's present instead (lag compensation off), 23
+          of 107.
+      - **An impossible move:** a guest that jumps 12 m sideways is put back
+        within a quarter of a second.
+      - **A cheating guest:** one that sends each shot twice, faster than
+        its rifle, has every second copy refused. One that ignores being
+        killed stays dead on the host however long it says it's alive.
+      - **The lab:** events now ride the lab's links as on L3's reliable
+        channel. A lost message's events arrive a round trip late instead
+        of never, because a lost kill would now leave a guest alive
+        forever.
 - [ ] **L7. Predicted, reconciled movement.** Clients send inputs; the host
       moves every Spartan; each client predicts its own movement and replays
       unacknowledged inputs over each correction. Movement and collision are

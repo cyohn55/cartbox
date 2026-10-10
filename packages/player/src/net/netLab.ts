@@ -55,7 +55,9 @@ interface InFlight {
 /**
  * An in-process room over a simulated network. Every message is serialised
  * (as a real wire would), then each listener gets its own copy after the
- * sender's link delay — or never, if the link loses it. Presence is instant.
+ * sender's link delay — or, if the link loses it, its states never and its
+ * events a round trip late: events ride a reliable channel (L3), so loss
+ * costs them a retransmission, not their delivery. Presence is instant.
  */
 export class SimulatedNetHub {
   private clock = 0;
@@ -125,11 +127,13 @@ export class SimulatedNetHub {
     sender.busyUntil = leaves;
     for (const [id, member] of this.members) {
       if (id === from || !member.peer) continue;
+      const at = leaves + link.latencyMs + (link.jitterMs ? this.rand() * link.jitterMs : 0);
       if (link.loss && this.rand() < link.loss) {
         this.counts.lost += 1;
+        // The events (and the time they carry) are sent again once the loss is noticed.
+        if (message.e) this.queue.push({ at: at + 2 * link.latencyMs + 20, order: this.order++, to: id, from, wire: JSON.stringify({ e: message.e, t: message.t }) });
         continue;
       }
-      const at = leaves + link.latencyMs + (link.jitterMs ? this.rand() * link.jitterMs : 0);
       this.queue.push({ at, order: this.order++, to: id, from, wire });
     }
   }
@@ -375,9 +379,11 @@ export async function runNetLab(options: NetLabOptions): Promise<NetLabReport> {
           if (slot >= options.players) continue;
           lerpHumans.push(e);
           // A snap: the drawn player jumped further this tick than its owner
-          // moved in any tick around then (the stretch it is drawn across).
+          // moved in any tick around then — the stretch it is drawn across,
+          // back far enough to cover a few lost snapshots (a respawn seen late
+          // through loss is a jump, but no snap).
           if (!before) continue;
-          const own = ownerStep(track, hub.now() + shift - 50, hub.now() + shift + 20);
+          const own = ownerStep(track, hub.now() + shift - 150, hub.now() + shift + 20);
           if (own === null || own > 1) continue; // dead then, or its owner teleported (a respawn): a jump is right
           const excess = dist(seen, before) - own;
           maxStep = Math.max(maxStep, excess);

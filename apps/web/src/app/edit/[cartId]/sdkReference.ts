@@ -728,8 +728,8 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
       },
       {
         name: "cartbox.netevents",
-        signature: "cartbox.netevents() -> { {a, b}, ... }",
-        doc: "This tick's events from the other players.",
+        signature: "cartbox.netevents() -> { {a, b, from}, ... }",
+        doc: "This tick's events from the other players (up to 12; the rest come next tick), each with the slot that sent it — the host is slot 0 — so a game can trust the host's word over a guest's claim.",
         snippet: "for _, ev in ipairs(cartbox.netevents()) do\n  \nend",
       },
       {

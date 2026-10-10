@@ -139,7 +139,7 @@ export class NetSession {
   private viewLag = 0;
   /** The view lag the last inbox carried (ms, as the cart read it). */
   private viewLagWritten = 0;
-  private readonly pendingEvents: NetEvent[] = [];
+  private readonly pendingEvents: { event: NetEvent; from: number }[] = [];
   private hostMatch = 0;
   private statusCode = 0;
   private tick = 0;
@@ -264,7 +264,7 @@ export class NetSession {
         stamps.push(0);
       }
     }
-    const events = this.pendingEvents.slice(0, NET_IN_EVENT_CAPACITY);
+    const pending = this.pendingEvents.slice(0, NET_IN_EVENT_CAPACITY);
     this.viewLagWritten = netLagUnits(this.viewLag) * 4;
     const delivered = writeNetInbox(words, {
       mode: this.isHost ? NET_MODE_HOST : NET_MODE_CLIENT,
@@ -277,7 +277,8 @@ export class NetSession {
       lag: this.viewLag,
       slots,
       stamps,
-      events,
+      events: pending.map((p) => p.event),
+      senders: pending.map((p) => p.from),
     });
     this.pendingEvents.splice(0, delivered);
   }
@@ -345,7 +346,8 @@ export class NetSession {
       this.remote.set(slot, { state: [a, b, c, d ?? 0], stamp, at: now });
     }
     // Cap the backlog: a burst beyond this is stale by the time it would land.
-    for (const event of message.e ?? []) if (this.pendingEvents.length < 200) this.pendingEvents.push(event);
+    const sender = from === undefined ? -1 : this.peers.findIndex((p) => p.id === from);
+    for (const event of message.e ?? []) if (this.pendingEvents.length < 200 && sender >= 0 && sender < NET_SLOTS) this.pendingEvents.push({ event, from: sender });
     if (message.m !== undefined && !this.isHost) this.hostMatch = message.m;
     // The clock: answer a guest's ping (as host), or take the host's answer to ours.
     if (message.pi !== undefined && this.isHost) {

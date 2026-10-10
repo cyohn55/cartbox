@@ -4547,7 +4547,8 @@ var NET_IN_SLOTS = 3;
 var NET_IN_STAMPS = 35;
 var NET_IN_EVENT_COUNT = 39;
 var NET_IN_EVENTS = 40;
-var NET_IN_EVENT_CAPACITY = 14;
+var NET_IN_EVENT_CAPACITY = 12;
+var NET_IN_SENDERS = 64;
 var NET_OUT_MASK = 70;
 var NET_OUT_MATCH = 71;
 var NET_OUT_SLOTS = 72;
@@ -4577,9 +4578,13 @@ function writeNetInbox(words, inbox) {
   }
   const count = Math.min(inbox.events.length, NET_IN_EVENT_CAPACITY);
   words[NET_IN_EVENT_COUNT] = count;
+  words[NET_IN_SENDERS] = 0;
+  words[NET_IN_SENDERS + 1] = 0;
   for (let i = 0; i < count; i += 1) {
     words[NET_IN_EVENTS + i * 2] = inbox.events[i][0] >>> 0;
     words[NET_IN_EVENTS + i * 2 + 1] = inbox.events[i][1] >>> 0;
+    const word = NET_IN_SENDERS + (i < 10 ? 0 : 1);
+    words[word] = (words[word] | ((inbox.senders?.[i] ?? 0) & 7) << i % 10 * 3) >>> 0;
   }
   return count;
 }
@@ -6322,11 +6327,15 @@ cartbox = {
     _netflush()
     return true
   end,
-  -- netevents() -> this tick's incoming events, as a list of {a, b}
+  -- netevents() -> this tick's incoming events, as a list of {a, b, from}: from
+  -- is the slot that sent it (the host is slot 0), for telling its word apart
   netevents = function()
     local n = pmem(39)
     local out = {}
-    for i = 0, n - 1 do out[#out + 1] = { pmem(40 + i * 2), pmem(41 + i * 2) } end
+    for i = 0, n - 1 do
+      local from = (pmem(i < 10 and 64 or 65) >> ((i % 10) * 3)) & 7
+      out[#out + 1] = { pmem(40 + i * 2), pmem(41 + i * 2), from }
+    end
     return out
   end,
   -- Collision defaults: overridden by the injected layer when the cart has one,
@@ -19153,7 +19162,7 @@ var NetSession = class {
         stamps.push(0);
       }
     }
-    const events = this.pendingEvents.slice(0, NET_IN_EVENT_CAPACITY);
+    const pending = this.pendingEvents.slice(0, NET_IN_EVENT_CAPACITY);
     this.viewLagWritten = netLagUnits(this.viewLag) * 4;
     const delivered = writeNetInbox(words, {
       mode: this.isHost ? NET_MODE_HOST : NET_MODE_CLIENT,
@@ -19166,7 +19175,8 @@ var NetSession = class {
       lag: this.viewLag,
       slots,
       stamps,
-      events
+      events: pending.map((p) => p.event),
+      senders: pending.map((p) => p.from)
     });
     this.pendingEvents.splice(0, delivered);
   }
@@ -19219,7 +19229,8 @@ var NetSession = class {
       if (held && now - held.at < STALE_MS && stamp < held.stamp) continue;
       this.remote.set(slot, { state: [a, b, c, d ?? 0], stamp, at: now });
     }
-    for (const event of message.e ?? []) if (this.pendingEvents.length < 200) this.pendingEvents.push(event);
+    const sender = from === void 0 ? -1 : this.peers.findIndex((p) => p.id === from);
+    for (const event of message.e ?? []) if (this.pendingEvents.length < 200 && sender >= 0 && sender < NET_SLOTS) this.pendingEvents.push({ event, from: sender });
     if (message.m !== void 0 && !this.isHost) this.hostMatch = message.m;
     if (message.pi !== void 0 && this.isHost) {
       const slot = from === void 0 ? -1 : this.peers.findIndex((p) => p.id === from);
@@ -19495,11 +19506,12 @@ var SimulatedNetHub = class {
     sender.busyUntil = leaves;
     for (const [id, member] of this.members) {
       if (id === from || !member.peer) continue;
+      const at = leaves + link.latencyMs + (link.jitterMs ? this.rand() * link.jitterMs : 0);
       if (link.loss && this.rand() < link.loss) {
         this.counts.lost += 1;
+        if (message.e) this.queue.push({ at: at + 2 * link.latencyMs + 20, order: this.order++, to: id, from, wire: JSON.stringify({ e: message.e, t: message.t }) });
         continue;
       }
-      const at = leaves + link.latencyMs + (link.jitterMs ? this.rand() * link.jitterMs : 0);
       this.queue.push({ at, order: this.order++, to: id, from, wire });
     }
   }
@@ -19650,7 +19662,7 @@ async function runNetLab(options) {
           if (slot >= options.players) continue;
           lerpHumans.push(e);
           if (!before) continue;
-          const own = ownerStep(track, hub.now() + shift - 50, hub.now() + shift + 20);
+          const own = ownerStep(track, hub.now() + shift - 150, hub.now() + shift + 20);
           if (own === null || own > 1) continue;
           const excess = dist(seen, before) - own;
           maxStep = Math.max(maxStep, excess);
