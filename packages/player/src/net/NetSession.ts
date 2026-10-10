@@ -47,7 +47,7 @@ export interface NetMessage {
   readonly s?: readonly (readonly [number, number, number, number, number])[];
   readonly e?: readonly NetEvent[];
   readonly m?: number;
-  /** When the states were taken, on the room's shared clock (ms, wrapping at 2^32). */
+  /** When the message was sent — its states taken, its events raised by then — on the room's shared clock (ms, wrapping at 2^32). */
   readonly t?: number;
   /** A ping to the host: the sender's own clock (ms, wrapping at 2^32). */
   readonly pi?: number;
@@ -313,7 +313,7 @@ export class NetSession {
     if (quiet && signature === this.lastSent && this.tick - this.lastSentTick < KEEPALIVE_TICKS) return;
     if (this.outEvents.length > 0) message.e = this.outEvents.splice(0);
     const shared = Math.floor(this.sharedNow());
-    if (message.s) message.t = shared >>> 0;
+    message.t = shared >>> 0;
     if (ping) {
       message.pi = Math.floor(this.now()) >>> 0;
       this.lastPingTick = this.tick;

@@ -1047,7 +1047,7 @@ interface NetMessage {
     readonly s?: readonly (readonly [number, number, number, number, number])[];
     readonly e?: readonly NetEvent[];
     readonly m?: number;
-    /** When the states were taken, on the room's shared clock (ms, wrapping at 2^32). */
+    /** When the message was sent — its states taken, its events raised by then — on the room's shared clock (ms, wrapping at 2^32). */
     readonly t?: number;
     /** A ping to the host: the sender's own clock (ms, wrapping at 2^32). */
     readonly pi?: number;

@@ -19191,7 +19191,7 @@ var NetSession = class {
     if (quiet && signature === this.lastSent && this.tick - this.lastSentTick < KEEPALIVE_TICKS) return;
     if (this.outEvents.length > 0) message.e = this.outEvents.splice(0);
     const shared = Math.floor(this.sharedNow());
-    if (message.s) message.t = shared >>> 0;
+    message.t = shared >>> 0;
     if (ping) {
       message.pi = Math.floor(this.now()) >>> 0;
       this.lastPingTick = this.tick;
@@ -19720,8 +19720,10 @@ var DirectTransport = class {
         relayed.push(peer.id);
         continue;
       }
-      if (message.s || message.m !== void 0) link.state.send(stateBytes ?? (stateBytes = encodeNetMessage({ s: message.s, m: message.m })));
-      if (message.e) link.events.send(eventBytes ?? (eventBytes = encodeNetMessage({ e: message.e })));
+      if (message.s || message.m !== void 0 || message.pi !== void 0 || message.po) {
+        link.state.send(stateBytes ?? (stateBytes = encodeNetMessage({ s: message.s, m: message.m, t: message.t, pi: message.pi, po: message.po })));
+      }
+      if (message.e) link.events.send(eventBytes ?? (eventBytes = encodeNetMessage({ e: message.e, t: message.t })));
     }
     if (relayed.length > 0) this.relay.send(relayed.length === others.length ? message : { ...message, r: relayed });
   }

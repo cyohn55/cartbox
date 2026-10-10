@@ -225,6 +225,20 @@ describe("direct connections", () => {
     expect(b!.heard.map((h) => h.message)).toEqual([{ e: [[7, 7]] }]);
   });
 
+  it("carry the clock across both channels: stamps and pings with the state, the time with the events too", async () => {
+    const rtc = new FakeRtc();
+    const [a, b] = await room(["a", "b"], rtc);
+    a!.transport.send({ s: [[0, 1, 2, 3, 4]], t: 500, pi: 77, po: [[1, 70, 80, 90]], e: [[9, 9]] });
+    await settle();
+    const got = b!.heard.map((h) => h.message);
+    expect(got).toContainEqual({ s: [[0, 1, 2, 3, 4]], t: 500, pi: 77, po: [[1, 70, 80, 90]] });
+    expect(got).toContainEqual({ e: [[9, 9]], t: 500 });
+    // A ping alone still goes out.
+    a!.transport.send({ pi: 78 });
+    await settle();
+    expect(b!.heard.at(-1)!.message).toEqual({ pi: 78 });
+  });
+
   it("fall back to the relay for a pair that can't connect, still reaching each player once", async () => {
     const rtc = new FakeRtc();
     rtc.failing.add("b|c");
