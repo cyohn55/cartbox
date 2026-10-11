@@ -150,6 +150,8 @@ export type GestureEvent =
   | { readonly type: "hover"; readonly sample: PointerSample }
   /** Drag the view by (dx, dy) page pixels. */
   | { readonly type: "orbit" | "pan"; readonly dx: number; readonly dy: number }
+  /** The fingers that were navigating (orbit, pan, zoom) have all lifted, or a Pencil took over. */
+  | { readonly type: "nav-end" }
   /** Zoom by `factor` (above 1: closer, fingers spreading) about (x, y). */
   | { readonly type: "zoom"; readonly factor: number; readonly x: number; readonly y: number }
   | { readonly type: "undo" | "redo" }
@@ -229,6 +231,7 @@ export class GestureRecognizer {
         // A Pencil lands while fingers are on the glass: they're a palm. Drop
         // whatever they were doing (cancel a finger stroke) and ignore them.
         if (this.toolIsTouch && this.mode === "tool") out.push({ type: "tool-cancel" });
+        if (this.mode === "navigate" || this.mode === "gesture") out.push({ type: "nav-end" });
         for (const id of this.touches.keys()) this.ignored.add(id);
         this.touches.clear();
       }
@@ -342,9 +345,12 @@ export class GestureRecognizer {
     this.touches.delete(s.id);
     const mode = this.mode;
     const out: GestureEvent[] = [];
+    // Whether the view was being moved (so a view driving a drag of its own ends it).
+    let navigated = mode === "gesture";
     if (mode === "pending" || mode === "navigate") {
       // A finger lifted without having moved: a tap, which picks as a click does.
       const still = this.travelled <= this.slop && Math.hypot(s.x - touch.start.x, s.y - touch.start.y) <= this.slop;
+      navigated = mode === "navigate" && !still;
       if (still && !cancelled) out.push({ type: "tool-down", sample: touch.start }, { type: "tool-up", sample: { ...s, x: touch.start.x, y: touch.start.y } });
     } else if (mode === "tool") {
       if (this.toolId === s.id) out.push(cancelled ? { type: "tool-cancel" } : { type: "tool-up", sample: s });
@@ -358,6 +364,7 @@ export class GestureRecognizer {
       if (quick && !cancelled) out.push({ type: this.gesture.fingers >= 3 ? "redo" : "undo" });
     }
     if (this.touches.size === 0) {
+      if (navigated) out.push({ type: "nav-end" });
       this.mode = "idle";
       this.toolId = null;
       this.toolIsTouch = false;

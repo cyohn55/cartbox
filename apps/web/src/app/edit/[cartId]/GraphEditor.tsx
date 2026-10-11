@@ -42,6 +42,7 @@ import {
   setOutput,
   setParams,
 } from "@/lib/materialGraphEdit";
+import { useViewGestures } from "@/lib/useTabletGestures";
 import styles from "./editor.module.css";
 
 const OUTPUT_LABELS: Record<GraphOutput, string> = {
@@ -165,6 +166,24 @@ export function GraphEditor({
     setDrag(null);
   };
 
+  // Touch and the Pencil (TABLET_EDITOR_ROADMAP.md T3): the background pans
+  // with one finger (or two), a pinch zooms as the wheel does, and nodes,
+  // ports and wires keep their own pointer handling.
+  const background = useViewGestures<HTMLDivElement>(
+    {
+      onPointerDown: (e) => {
+        e.currentTarget.setPointerCapture(e.pointerId);
+        gesture.current = { kind: "pan", startX: e.clientX, startY: e.clientY, originX: pan.x, originY: pan.y };
+      },
+      onPointerMove,
+      onPointerUp,
+      orbitDrag: null,
+      panDrag: { button: 0 },
+      onLongPress: () => {},
+    },
+    { drag: "pan", accept: (e) => e.target === e.currentTarget, passThrough: { onPointerMove, onPointerUp } },
+  );
+
   const add = (op: GraphOp) => {
     const rect = canvasRef.current?.getBoundingClientRect();
     // Somewhere in view, clear of the other nodes.
@@ -256,13 +275,7 @@ export function GraphEditor({
         <div
           ref={canvasRef}
           style={{ position: "relative", flex: "1 1 auto", overflow: "hidden", touchAction: "none", cursor: gesture.current?.kind === "pan" ? "grabbing" : "default", backgroundImage: "radial-gradient(#223 1px, transparent 1px)", backgroundSize: `${20 * zoom}px ${20 * zoom}px`, backgroundPosition: `${pan.x}px ${pan.y}px` }}
-          onPointerDown={(e) => {
-            if (e.target !== e.currentTarget) return;
-            e.currentTarget.setPointerCapture(e.pointerId);
-            gesture.current = { kind: "pan", startX: e.clientX, startY: e.clientY, originX: pan.x, originY: pan.y };
-          }}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
+          {...background}
           onWheel={(e) => {
             // Zoom about the pointer.
             const rect = e.currentTarget.getBoundingClientRect();

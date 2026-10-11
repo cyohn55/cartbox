@@ -147,7 +147,7 @@ describe("the recogniser", () => {
     expect(orbit.reduce((a, e) => a + e.dy, 0)).toBeCloseTo(40, 6);
     clock += 1000;
     expect(g.up(at("touch", 1, 120, 140))).toEqual([]);
-    expect(g.up(at("touch", 2, 320, 140))).toEqual([]); // moved: no undo
+    expect(types(g.up(at("touch", 2, 320, 140)))).toEqual(["nav-end"]); // moved: no undo, and the navigation ends
   });
 
   it("pans with two fingers where the canvas pans, and always with three", () => {
@@ -169,20 +169,20 @@ describe("the recogniser", () => {
     g.down(at("touch", 2, 200, 100));
     clock += 120;
     expect(g.up(at("touch", 1, 100, 100))).toEqual([]);
-    expect(types(g.up(at("touch", 2, 200, 100)))).toEqual(["undo"]);
+    expect(types(g.up(at("touch", 2, 200, 100)))).toEqual(["undo", "nav-end"]);
     g.down(at("touch", 1, 100, 100));
     g.down(at("touch", 2, 200, 100));
     g.down(at("touch", 3, 150, 180));
     clock += 150;
     g.up(at("touch", 3, 150, 180));
     g.up(at("touch", 2, 200, 100));
-    expect(types(g.up(at("touch", 1, 100, 100)))).toEqual(["redo"]);
+    expect(types(g.up(at("touch", 1, 100, 100)))).toEqual(["redo", "nav-end"]);
     // A slow two-finger touch is no tap.
     g.down(at("touch", 1, 100, 100));
     g.down(at("touch", 2, 200, 100));
     clock += 900;
     g.up(at("touch", 1, 100, 100));
-    expect(g.up(at("touch", 2, 200, 100))).toEqual([]);
+    expect(types(g.up(at("touch", 2, 200, 100)))).toEqual(["nav-end"]);
   });
 
   it("fires a long press once for a finger held still, and then nothing until it lifts", () => {
@@ -209,9 +209,15 @@ describe("the recogniser", () => {
     g.move(at("touch", 1, 104, 100));
     const orbit = g.move(at("touch", 1, 130, 100));
     expect(orbit).toEqual([{ type: "orbit", dx: 26, dy: 0 }]);
-    expect(g.up(at("touch", 1, 130, 100))).toEqual([]);
+    expect(types(g.up(at("touch", 1, 130, 100)))).toEqual(["nav-end"]);
     g.down(at("touch", 2, 60, 60));
-    expect(types(g.up(at("touch", 2, 61, 60)))).toEqual(["tool-down", "tool-up"]);
+    expect(types(g.up(at("touch", 2, 61, 60)))).toEqual(["tool-down", "tool-up"]); // a tap: no navigation to end
+    // A Pencil landing ends a navigation under way.
+    g.down(at("touch", 3, 100, 100));
+    g.move(at("touch", 3, 140, 100));
+    expect(types(g.down(at("pen", 9, 10, 10)))).toEqual(["nav-end", "tool-down"]);
+    g.up(at("pen", 9, 10, 10));
+    g.up(at("touch", 3, 140, 100));
     // Forced: fingers draw again.
     g.setOptions({ fingers: "draw" });
     expect(g.fingersDraw()).toBe(true);

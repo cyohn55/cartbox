@@ -62,6 +62,7 @@ import {
 import { createVoxelBackdropProp } from "@/lib/backdropProps";
 import { loadWorkingSet, loadPublishedSet, saveWorkingSet, type PendingVoxelEdit } from "@/lib/backdropPropsStore";
 import { buildWorldAtlas, worldSurfaceMaterial } from "@/lib/faceTextures";
+import { useViewGestures } from "@/lib/useTabletGestures";
 import {
   buildSpriteMaterialAtlas,
   firstSpriteMaterialIndex,
@@ -1058,6 +1059,10 @@ export function VoxelEditor({
     if (state && !state.moved) applyAt(event.clientX, event.clientY, state.button === 2, state.shift);
   };
   const onPointerLeave = () => setHover(null);
+  // Touch and the Pencil (TABLET_EDITOR_ROADMAP.md T3): a tap edits as a
+  // click does, two fingers (or one, once a Pencil is used) orbit, a pinch
+  // zooms as the wheel does, and a long press is the right click (remove).
+  const gestures = useViewGestures<HTMLCanvasElement>({ onPointerDown, onPointerMove, onPointerUp, onPointerCancel: () => (drag.current = null), orbitDrag: { button: 0 }, panDrag: null });
   const zoomBy = (delta: number) => setCell((value) => Math.max(CELL_MIN, Math.min(CELL_MAX, value + delta)));
 
   const clearSelection = () => setSelection(new Set());
@@ -1801,9 +1806,7 @@ export function VoxelEditor({
       <section className={styles.mapStage}>
         <canvas
           ref={canvasRef}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
+          {...gestures}
           onPointerLeave={onPointerLeave}
           onContextMenu={(event) => event.preventDefault()}
           style={{

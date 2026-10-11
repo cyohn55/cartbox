@@ -60,6 +60,7 @@ export function CurveEditor({ curve, onChange }: { curve: EaseCurve; onChange: (
         role="img"
         aria-label={`Easing curve ${shown.join(", ")}`}
         style={{ background: "rgba(0,0,0,0.3)", borderRadius: 6, touchAction: "none", flex: "none" }}
+        onPointerDown={(e) => e.currentTarget.setPointerCapture(e.pointerId)}
         onPointerMove={move}
         onPointerUp={() => {
           if (drag) onChange(drag.curve);
@@ -71,20 +72,18 @@ export function CurveEditor({ curve, onChange }: { curve: EaseCurve; onChange: (
         <line x1={b.x} y1={b.y} x2={h2.x} y2={h2.y} stroke="#7db8fc" strokeWidth={1} />
         <path d={path} fill="none" stroke="#ffd84a" strokeWidth={2} />
         {([h1, h2] as const).map((h, i) => (
-          <circle
+          <g
             key={i}
-            cx={h.x}
-            cy={h.y}
-            r={7}
-            fill="#7db8fc"
             style={{ cursor: "grab" }}
-            aria-label={i === 0 ? "First handle" : "Second handle"}
-            onPointerDown={(e) => {
-              (e.target as Element).setPointerCapture?.(e.pointerId);
-              svg.current?.setPointerCapture(e.pointerId);
+            onPointerDown={() => {
+              // The svg takes the pointer, so the drag carries on wherever it goes.
               setDrag({ handle: i as 0 | 1, curve });
             }}
-          />
+          >
+            {/* A fingertip-sized hit area round the handle (TABLET_EDITOR_ROADMAP.md T3). */}
+            <circle cx={h.x} cy={h.y} r={20} fill="transparent" />
+            <circle cx={h.x} cy={h.y} r={7} fill="#7db8fc" aria-label={i === 0 ? "First handle" : "Second handle"} />
+          </g>
         ))}
       </svg>
       <div style={{ display: "grid", gap: 3 }}>

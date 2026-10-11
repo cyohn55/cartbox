@@ -210,11 +210,84 @@ editor uses them. If a future Safari reports barrel roll as the pointer's
   1280 × 720 tiles, and that canvas crashes SwiftShader (on main as well).
   At the L and XL zooms it is wider than a canvas can be, so it draws
   blank. T4 should cap the zoom for large maps.
-- [ ] **T3. The other views on a tablet.**
+- [x] **T3. The other views on a tablet.**
   - **Pinch zoom and two-finger navigation:** the Scene viewport, 3D map,
     voxel editor, scene play view, node graphs (graph, shader, script),
     curve editor, dope sheet and timeline.
   - **Long press:** where right-click opens a menu.
+
+  *Done:*
+  - **An adapter for views with mouse handlers of their own.**
+    `useViewGestures` (in `useTabletGestures.ts`) puts a view's existing
+    pointer handlers behind the recogniser, so the mouse and the Pencil
+    behave exactly as before. For touch:
+    - **Fingers:** one finger draws or picks until a Pencil is used.
+    - **Navigation:** two fingers (or one, once a Pencil is used) move the
+      view by driving its own navigation drag with a virtual pointer. Each
+      view names that drag (`orbitDrag`, `panDrag`), so a finger orbit
+      feels exactly like the mouse's.
+    - **Pinch:** turns the view's own wheel, one notch per 12% of spread.
+    - **Long press:** a right click (and a `contextmenu` event).
+    - **Cancelled strokes:** a stroke a second finger turns into a gesture
+      is ended without acting.
+
+    It needed two small additions:
+    - the recogniser's `nav-end` event, so the virtual drag ends when the
+      fingers lift or a Pencil takes over;
+    - the layer's `accept` and `passThrough` options, so a graph's nodes,
+      ports and wires keep their own pointer handling while the background
+      takes gestures.
+  - **The views:**
+    - **Scene viewport:** two fingers orbit (as Alt-drag), three pan (as
+      the middle button), and a pinch dollies. A cancelled gizmo drag puts
+      the objects back.
+    - **Voxel editor:** a tap edits, two fingers orbit, a pinch zooms, and
+      a long press removes, as its right-click does.
+    - **3D map:** a tap edits, two fingers orbit, three pan (as Shift-drag),
+      a pinch zooms, and a long press is the right click.
+    - **Post-processing preview and the scene play view's free camera:**
+      orbit, pan and dolly the same way.
+    - **Material and script graphs:**
+      - one or two fingers pan the background, and a pinch zooms about the
+        fingers;
+      - a finger still drags nodes and wires.
+    - **Curve editor and dope sheet:**
+      - fingertip-sized hit areas: 20-unit handles round the curve's
+        handles, and a 27 px square round each 9 px key;
+      - a key drag doesn't scroll the page.
+    - **Timeline:** all buttons and sliders (T4 sizes them).
+  - **Long press on buttons:** iPad Safari never sends `contextmenu` for a
+    long press. `longPressProps` gives a button one, and the material
+    picker's sprite chips use it for their right-click remove.
+
+  *Tests:*
+  - `tablet-input.test.ts` covers `nav-end`: after a two-finger move or tap,
+    after a one-finger navigation (not after a tap), and when a Pencil
+    lands mid-navigation.
+  - `scripts/verify-editor-tablet-views.mjs` drives an iPad-sized headless
+    Chromium with real touch events. All 14 checks pass:
+    - **Voxel editor:**
+      - two fingers orbit, and a pinch zooms (the model's share of the
+        view goes from 1.6% to 5.4%), both editing nothing (9 voxels before
+        and after);
+      - a tap adds a voxel (9 → 10), and a long press there removes it
+        (10 → 9).
+    - **Scene viewport:** two fingers orbit, three fingers pan, and a pinch
+      dollies, all without an edit. The pinch is exactly the wheel: 9 wheel
+      notches out put back every pixel. The scene is compared through
+      screenshots, because a WebGL canvas can't be read back reliably.
+    - **Material graph:**
+      - one finger pans the background, and two fingers pan;
+      - a pinch zooms (grid 20 → 30 px);
+      - a finger drags a node by its header (156 → 227 px).
+  - **Against T2 without this item,** 5 of the 14 fail:
+    - pinching zooms none of the three views (two fingers just fought as
+      two drags);
+    - a long press adds a voxel (10 → 11) instead of removing one;
+    - a finger can't drag a graph node.
+
+    The rest guard what already worked with one finger and must keep
+    working.
 - [ ] **T4. Layout for touch.**
   - **Sizing:** under `(pointer: coarse)`, buttons, list rows, sliders and
     rails at 44 px targets.
