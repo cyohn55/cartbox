@@ -3,7 +3,8 @@
  * C1): Lockout with a fake standard-mapping controller, the Controls tab's live
  * stick picture reading it, the stick layout and a dead zone changed from the
  * menu, what the game receives following them, and the settings kept; and
- * (C2) sensitivity reaching Lockout as a turn speed, not a pre-scaled stick.
+ * (C2) sensitivity reaching Lockout as a turn speed, not a pre-scaled stick;
+ * and (C3) zoom set to toggle, and the controller rumbling when Lockout fires.
  *
  *   CBX_BASE_URL=http://localhost:3000 node scripts/verify-controller-settings.mjs
  *
@@ -31,6 +32,17 @@ await page.addInitScript(() => {
     timestamp: 0,
     axes: [0, 0, 0, 0],
     buttons: Array.from({ length: 17 }, () => ({ pressed: false, touched: false, value: 0 })),
+    vibrationActuator: {
+      playEffect(type, params) {
+        window.__rumbles.push({ type, ...params });
+        return Promise.resolve("complete");
+      },
+    },
+  };
+  window.__rumbles = [];
+  window.__press = (i, on) => {
+    pad.buttons[i] = { pressed: on, touched: on, value: on ? 1 : 0 };
+    pad.timestamp += 1;
   };
   window.__pad = pad;
   window.__setPad = (axes, lt = 0, rt = 0) => {
@@ -69,7 +81,7 @@ await page.getByRole("button", { name: "Menu" }).waitFor({ timeout: 120000 });
 await page.getByRole("button", { name: "Menu" }).click();
 await page.getByRole("dialog", { name: "Start menu" }).waitFor();
 
-for (const label of ["Horizontal sensitivity", "Vertical sensitivity", "Response curve", "Invert look left/right", "Zoom sensitivity", "Look acceleration", "Stick layout", "Left stick dead zone", "Right stick axial dead zone", "Right stick max input", "LT presses at"]) {
+for (const label of ["Horizontal sensitivity", "Vertical sensitivity", "Response curve", "Invert look left/right", "Zoom sensitivity", "Look acceleration", "Aim assist", "Vibration strength", "Stick layout", "Left stick dead zone", "Right stick axial dead zone", "Right stick max input", "LT presses at"]) {
   check(`the Controls tab has ${label}`, (await page.getByText(new RegExp(`^${label}`)).count()) > 0);
 }
 
@@ -114,11 +126,29 @@ check(
 await page.getByRole("tab", { name: "Touch" }).click();
 check("the Touch tab holds the on-screen pad's size and opacity", (await page.getByText(/^Touch controls size/).count()) === 1 && (await page.getByText(/^Touch controls opacity/).count()) === 1);
 
+// Zoom toggles instead of acting while held.
+await page.getByRole("tab", { name: "Button mapping" }).click();
+await page.getByLabel("zoom: hold or toggle").selectOption("toggle");
+const toggles = await page.evaluate(() => JSON.parse(localStorage.getItem("cartbox:settings:lockout") ?? "{}").controls?.actionToggles ?? []);
+check("zoom can be set to toggle, and it is kept", JSON.stringify(toggles) === '["zoom"]', JSON.stringify(toggles));
+
 // Reset puts back the look, sticks and triggers.
 await page.getByRole("tab", { name: "Controls" }).click();
 await page.getByRole("button", { name: /Reset look, sticks/ }).click();
 line = await receivesUntil(/look 0\.10, −0\.88 at ×1\.00 turn/);
 check("reset puts the defaults back", /look 0\.10, −0\.88 at ×1\.00 turn/.test(line), line);
+
+// Play: A starts a match from Lockout's title, then fires; firing rumbles the controller.
+await setPad([0, 0, 0, 0], 0, 0);
+await page.getByRole("button", { name: "Resume" }).click();
+const end = Date.now() + 90000;
+let rumbles = [];
+for (let i = 0; Date.now() < end && rumbles.length === 0; i += 1) {
+  await page.evaluate((on) => window.__press(0, on), i % 2 === 0);
+  await page.waitForTimeout(250);
+  rumbles = await page.evaluate(() => window.__rumbles);
+}
+check("firing in Lockout rumbles the controller", rumbles.length > 0 && rumbles[0].type === "dual-rumble" && rumbles[0].strongMagnitude > 0, JSON.stringify(rumbles[0] ?? null));
 
 await browser.close();
 const failed = results.filter((r) => !r.ok).length;

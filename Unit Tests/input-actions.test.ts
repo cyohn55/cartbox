@@ -34,6 +34,7 @@ import {
   actionsSdkLua,
   codeChunks,
   createConsole,
+  decodeMailbox,
   decodeMeshPoses,
   getModel,
   injectSdk,
@@ -298,5 +299,16 @@ describe("Lockout", () => {
     const after = held();
     expect(after).toBeGreaterThanOrEqual(8);
     expect(after).not.toBe(before);
+
+    // Firing asks the host to rumble (CONTROLLER_SETTINGS_ROADMAP.md C3).
+    let seq = decodeMailbox(console.readMailbox(), 0).seq;
+    const rumbles: number[] = [];
+    for (let i = 0; i < 8; i += 1) {
+      tick(0, i % 2 === 0 ? 1 << 0 : 0); // fire
+      const read = decodeMailbox(console.readMailbox(), seq);
+      seq = read.seq;
+      for (const e of read.events) if (e.kind === "rumble") rumbles.push(e.id);
+    }
+    expect(rumbles.length).toBeGreaterThan(0);
   });
 });

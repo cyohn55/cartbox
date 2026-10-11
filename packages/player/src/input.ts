@@ -7,7 +7,7 @@
 
 import { ConsoleButton } from "./types.js";
 import { stickDirections } from "./sticks.js";
-import { DEFAULT_KEY_BINDINGS, START_KEYS, readPad, type ControlSettings, type PadSnapshot } from "./controls.js";
+import { DEFAULT_KEY_BINDINGS, START_KEYS, readPad, type ControlSettings, type PadSnapshot, type RumbleEffect } from "./controls.js";
 
 /**
  * Default keyboard layout, matching TIC-80 conventions: arrows for the D-pad,
@@ -536,5 +536,12 @@ export class GamepadInput {
   /** Whether a controller is connected (for hints like "press Start"). */
   get connected(): boolean {
     return this.index !== null;
+  }
+
+  /** Rumble the controller in use (C3), where the browser and the pad can. */
+  rumble(effect: RumbleEffect): void {
+    if (this.index === null) return;
+    const pad = this.nav.getGamepads?.()[this.index] as { vibrationActuator?: { playEffect?: (type: string, params: object) => Promise<unknown> } } | null | undefined;
+    pad?.vibrationActuator?.playEffect?.("dual-rumble", { startDelay: 0, ...effect })?.catch(() => undefined);
   }
 }

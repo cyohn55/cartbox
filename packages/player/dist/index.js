@@ -5160,6 +5160,7 @@ var MAILBOX_TYPE_ACHIEVEMENT = 1;
 var MAILBOX_TYPE_SCORE = 2;
 var MAILBOX_TYPE_PROGRESS = 3;
 var MAILBOX_TYPE_REQUEST = 4;
+var MAILBOX_TYPE_RUMBLE = 5;
 var MAILBOX_WORDS = 137;
 var EVENT_CAPACITY = 8;
 var LIGHTS_BASE = 1 + EVENT_CAPACITY * 3;
@@ -5203,6 +5204,8 @@ function kindOf(type) {
       return "progress";
     case MAILBOX_TYPE_REQUEST:
       return "request";
+    case MAILBOX_TYPE_RUMBLE:
+      return "rumble";
     default:
       return "unknown";
   }
@@ -5456,7 +5459,8 @@ function stickChannel(optIn) {
 }
 var gainByte = (v) => Math.max(1, Math.min(255, Math.round((Number.isFinite(v) ? v : 1) * GAIN_SCALE)));
 function packLookGain(gain) {
-  return (gainByte(gain.x) | gainByte(gain.y) << 8 | gainByte(gain.zoom) << 16 | LOOK_GAIN_MARKER << 24) >>> 0;
+  const assist = Math.max(0, Math.min(2, Math.round(gain.assist ?? 1)));
+  return (gainByte(gain.x) | gainByte(gain.y) << 8 | gainByte(gain.zoom) << 16 | (LOOK_GAIN_MARKER | assist) << 24) >>> 0;
 }
 var STICK_DPAD_THRESHOLD = 0.4;
 var byte = (v) => Math.round(Math.max(-1, Math.min(1, v || 0)) * 127) & 255;
@@ -5495,6 +5499,7 @@ var PAD_BUTTONS = [
 ];
 var RESPONSE_CURVES = ["standard", "dynamic", "precision", "responsive"];
 var STICK_LAYOUTS = ["default", "southpaw", "legacy", "legacySouthpaw"];
+var AIM_ASSISTS = ["off", "standard", "strong"];
 var DEFAULT_PAD_BINDINGS = {
   A: 4 /* A */,
   B: 5 /* B */,
@@ -5538,6 +5543,10 @@ var DEFAULT_CONTROL_SETTINGS = {
   stickLayout: "default",
   zoomSensitivity: 1,
   lookAcceleration: 0,
+  aimAssist: "standard",
+  actionToggles: [],
+  vibration: true,
+  vibrationStrength: 1,
   leftTrigger: DEFAULT_TRIGGER_THRESHOLD,
   rightTrigger: DEFAULT_TRIGGER_THRESHOLD,
   padBindings: DEFAULT_PAD_BINDINGS,
@@ -5590,6 +5599,10 @@ function parseControlSettings(value, defaults = DEFAULT_CONTROL_SETTINGS) {
     stickLayout: STICK_LAYOUTS.includes(raw.stickLayout) ? raw.stickLayout : defaults.stickLayout ?? "default",
     zoomSensitivity: num3(raw.zoomSensitivity, 0.25, 2, defaults.zoomSensitivity ?? 1),
     lookAcceleration: num3(raw.lookAcceleration, 0, 1, defaults.lookAcceleration ?? 0),
+    aimAssist: AIM_ASSISTS.includes(raw.aimAssist) ? raw.aimAssist : defaults.aimAssist ?? "standard",
+    actionToggles: Array.isArray(raw.actionToggles) ? [...new Set(raw.actionToggles.filter((n) => typeof n === "string" && n.length > 0 && n.length <= 64))].slice(0, 32) : defaults.actionToggles ?? [],
+    vibration: typeof raw.vibration === "boolean" ? raw.vibration : defaults.vibration ?? true,
+    vibrationStrength: num3(raw.vibrationStrength, 0.1, 1, defaults.vibrationStrength ?? 1),
     leftTrigger: num3(raw.leftTrigger, 0.05, 0.95, defaults.leftTrigger ?? DEFAULT_TRIGGER_THRESHOLD),
     rightTrigger: num3(raw.rightTrigger, 0.05, 0.95, defaults.rightTrigger ?? DEFAULT_TRIGGER_THRESHOLD),
     padBindings,
@@ -5644,6 +5657,31 @@ function lookGains(settings, boost = 1) {
     y: (settings.lookSensitivityY ?? settings.lookSensitivity) * boost,
     zoom: settings.zoomSensitivity ?? 1
   };
+}
+function aimAssistLevel(assist) {
+  const i = AIM_ASSISTS.indexOf(assist ?? "standard");
+  return i < 0 ? 1 : i;
+}
+function toggleMask(actions, toggles) {
+  if (!toggles || toggles.length === 0) return 0;
+  let mask = 0;
+  actions.forEach((a, i) => {
+    if (i < 32 && toggles.includes(a.name)) mask |= 1 << i;
+  });
+  return mask >>> 0;
+}
+function applyActionToggles(raw, previous, latched, toggles) {
+  const pressed = raw & ~previous;
+  const next = (latched ^ pressed & toggles) & toggles;
+  return { held: (raw & ~toggles | next) >>> 0, latched: next >>> 0 };
+}
+var RUMBLE_MAX_MS = 1500;
+function rumbleEffect(strength, ms, settings) {
+  if (settings.vibration === false) return null;
+  const s = clamp(strength, 0, 1) * clamp(settings.vibrationStrength ?? 1, 0, 1);
+  const duration = Math.round(clamp(ms, 0, RUMBLE_MAX_MS));
+  if (s <= 0 || duration <= 0) return null;
+  return { duration, strongMagnitude: s, weakMagnitude: Math.min(1, s * 0.6 + 0.1) };
 }
 function deadZoned(x, y, deadZone = 0.18) {
   return shapeStick(x, y, { axial: 0, radial: deadZone, maxInput: 1 });
@@ -6137,6 +6175,12 @@ var GamepadInput = class {
   get connected() {
     return this.index !== null;
   }
+  /** Rumble the controller in use (C3), where the browser and the pad can. */
+  rumble(effect) {
+    if (this.index === null) return;
+    const pad = this.nav.getGamepads?.()[this.index];
+    pad?.vibrationActuator?.playEffect?.("dual-rumble", { startDelay: 0, ...effect })?.catch(() => void 0);
+  }
 };
 
 // src/replay.ts
@@ -6310,6 +6354,13 @@ cartbox = {
   -- request(kind, value): ask the host page for something it provides (e.g. a
   -- page's matchmaking); kind and value are numbers the page defines.
   request = function(kind, value) _emit(4, (kind or 0) // 1, (value or 0) // 1) end,
+  -- rumble(strength, ms): vibrate the player's controller (strength 0..1, for
+  -- ms, default 100), under their vibration settings; a phone buzzes for the
+  -- strong ones. Nothing happens without a controller or with vibration off.
+  rumble = function(strength, ms)
+    local s = math.max(0, math.min(1, strength or 1))
+    _emit(5, math.floor(s * 255 + 0.5), math.max(0, (ms or 100) // 1))
+  end,
   clearlights = function() _ln = 0 pmem(_LB, 0) end,
   light = function(x, y, radius, r, g, b, z, intensity)
     _light(0, x, y, z or 12, radius, r, g, b, intensity, 0, 0, 0)
@@ -6452,7 +6503,7 @@ cartbox = {
   -- turn and pitch rates by (zoomed: the player's zoom sensitivity applies
   -- too, and look acceleration is in both). Calling it tells the host to stop
   -- scaling the look stick itself, so sensitivity above 1 really turns faster.
-  -- 1, 1 until the host answers. Shares pmem 69 with stick().
+  -- 1, 1 until the host answers. Shares pmem 69 with stick() and aimassist().
   lookgain = function(zoomed)
     local m = pmem(69)
     if (m >> 26) ~= 0x13 then
@@ -6462,6 +6513,14 @@ cartbox = {
     local h, v = (m & 0xff) / 32, ((m >> 8) & 0xff) / 32
     if zoomed then local z = ((m >> 16) & 0xff) / 32 return h * z, v * z end
     return h, v
+  end,
+  -- aimassist() -> 0 off, 1 standard, 2 strong: how much the player wants the
+  -- game to help them aim. It rides with lookgain(), so a cart reads it once it
+  -- calls that; 1 until then.
+  aimassist = function()
+    local m = pmem(69)
+    if (m >> 26) ~= 0x13 then return 1 end
+    return (m >> 24) & 3
   end,
   -- Netplay (online multiplayer). The host page relays player state + events
   -- between browsers through pmem words 0..118 (so a netplay cart must not keep
@@ -17829,6 +17888,9 @@ var Player = class {
     /** The colour filter's SVG definition, while one is applied (EP19b). */
     this.colorFilterNode = null;
     this.colorFilterBefore = null;
+    /** The actions' controls held last tick, and the toggled actions now on (C3). */
+    this.rawActions = 0;
+    this.latchedActions = 0;
     /**
      * Fixed-timestep loop: advance one console frame per 1/60s of elapsed time.
      * Decoupling console frames from the display refresh keeps game speed correct
@@ -17907,10 +17969,26 @@ var Player = class {
     this.actionKeys = new Set(this.actions.flatMap((a) => a.keys));
     this.actionPad = new Set(this.actions.flatMap((a) => a.pad));
   }
-  /** The actions held now (bit i = action i), from every device. */
+  /**
+   * The actions held now (bit i = action i), from every device, with the ones
+   * the player set to toggle latched on a press (C3). What it returns is what a
+   * replay records, so a replay plays the toggles back as they were.
+   */
   heldActions() {
     if (this.actions.length === 0) return 0;
-    return actionMask(this.actions, { keys: this.keyboard?.held ?? NO_HELD, pad: this.controllerInput?.pressed ?? NO_HELD, buttons: this.gamepad.value });
+    const raw = actionMask(this.actions, { keys: this.keyboard?.held ?? NO_HELD, pad: this.controllerInput?.pressed ?? NO_HELD, buttons: this.gamepad.value });
+    const { held, latched } = applyActionToggles(raw, this.rawActions, this.latchedActions, toggleMask(this.actions, this.controlSettings.actionToggles));
+    this.rawActions = raw;
+    this.latchedActions = latched;
+    return held;
+  }
+  /** Play a rumble the cart asked for (cartbox.rumble, C3), under the player's vibration settings. */
+  rumble(strength, ms) {
+    if (this.replaySource || !this.inputEnabled) return;
+    const effect = rumbleEffect(strength, ms, this.controlSettings);
+    if (!effect) return;
+    if (this.controllerInput?.connected) this.controllerInput.rumble(effect);
+    else if (this.touch && effect.strongMagnitude >= 0.5) this.view.navigator?.vibrate?.(effect.duration);
   }
   /** Let the game see input (true) or hold it neutral (false) — e.g. under a menu. */
   setInputEnabled(enabled) {
@@ -18614,16 +18692,17 @@ var Player = class {
     for (const trace of traces) onTrace(trace.text, trace.color, frame);
     if (dropped > 0) onTrace(`(${dropped} more trace${dropped === 1 ? "" : "s"} this frame didn't fit)`, 15, frame);
   }
-  /** Reads any platform events the cart emitted this frame and dispatches them. */
+  /** Reads any platform events the cart emitted this frame and dispatches them (a rumble, the player plays itself). */
   pollEvents() {
     const onEvent = this.options.onEvent;
-    if (!onEvent || !this.console) {
+    if (!this.console) {
       return;
     }
     const { events, seq } = decodeMailbox(this.console.readMailbox(), this.lastMailboxSeq);
     this.lastMailboxSeq = seq;
     for (const event of events) {
-      onEvent(event);
+      if (event.kind === "rumble") this.rumble(event.id / 255, event.value);
+      onEvent?.(event);
     }
   }
   present() {
@@ -18728,7 +18807,8 @@ var Player = class {
     this.lookHeldTicks = stepLookAcceleration(this.lookHeldTicks, axes[2], axes[3]);
     words[STICK_WORD] = packSticks(axes);
     const boost = live ? lookAccelerationBoost(this.lookHeldTicks, this.controlSettings.lookAcceleration) : 1;
-    words[STICK_OPTIN_WORD] = live ? packLookGain(lookGains(this.controlSettings, boost)) : packLookGain({ x: 1, y: 1, zoom: 1 });
+    const assist = aimAssistLevel(this.controlSettings.aimAssist);
+    words[STICK_OPTIN_WORD] = live ? packLookGain({ ...lookGains(this.controlSettings, boost), assist }) : packLookGain({ x: 1, y: 1, zoom: 1, assist });
   }
   /** Save data (EP15b): hand a save the cart made this tick to the host. */
   pollSave() {
@@ -20340,6 +20420,7 @@ function mount(container, options) {
   };
 }
 export {
+  AIM_ASSISTS,
   AgentCrowd,
   AnimatedForegroundSurface,
   AnimationSession,
@@ -20468,11 +20549,13 @@ export {
   acesFilmic,
   acesFilmicChannel,
   actionsSdkLua,
+  aimAssistLevel,
   alignBytesPerRow,
   animClipsSdkLua,
   animatedObjects,
   anyPostFxEnabled,
   appendLuaCode,
+  applyActionToggles,
   applyLookSettings,
   applyLut,
   applyQualityToPostFx,
@@ -20619,6 +20702,7 @@ export {
   resolveUnlockedAchievements,
   responseCurve,
   rewriteLuaCode,
+  rumbleEffect,
   runNetLab,
   runReplayEvents,
   runtimeSdkLua,
@@ -20654,6 +20738,7 @@ export {
   takeSave,
   tiltShiftBlur,
   toConsolePixel,
+  toggleMask,
   tokenizeLua,
   uiSdkLua,
   uniformsFromSettings,

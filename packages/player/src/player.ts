@@ -28,7 +28,18 @@ import { ReplayRecorder, ReplaySource, hashCart, randomSeed, type Replay } from 
 import { seedCartridge, prependLuaCode, readCartCode, appendLuaCode, rewriteLuaCode } from "./cartseed.js";
 import { STICK_OPTIN_WORD, STICK_WORD, packLookGain, packSticks, stickChannel } from "./sticks.js";
 import { POINTER_CLICKS, PointerInput, writePointer } from "./pointer.js";
-import { DEFAULT_CONTROL_SETTINGS, applyLookSettings, lookAccelerationBoost, lookGains, stepLookAcceleration, type ControlSettings } from "./controls.js";
+import {
+  DEFAULT_CONTROL_SETTINGS,
+  aimAssistLevel,
+  applyActionToggles,
+  applyLookSettings,
+  lookAccelerationBoost,
+  lookGains,
+  rumbleEffect,
+  stepLookAcceleration,
+  toggleMask,
+  type ControlSettings,
+} from "./controls.js";
 import { injectSdk } from "./sdk.js";
 import { componentsSdkLua } from "./componentsSdk.js";
 import { sceneObjectsSdkLua } from "./mesh/sceneObjectsSdk.js";
@@ -244,10 +255,32 @@ export class Player {
     this.actionPad = new Set(this.actions.flatMap((a) => a.pad));
   }
 
-  /** The actions held now (bit i = action i), from every device. */
+  /** The actions' controls held last tick, and the toggled actions now on (C3). */
+  private rawActions = 0;
+  private latchedActions = 0;
+
+  /**
+   * The actions held now (bit i = action i), from every device, with the ones
+   * the player set to toggle latched on a press (C3). What it returns is what a
+   * replay records, so a replay plays the toggles back as they were.
+   */
   private heldActions(): number {
     if (this.actions.length === 0) return 0;
-    return actionMask(this.actions, { keys: this.keyboard?.held ?? NO_HELD, pad: this.controllerInput?.pressed ?? NO_HELD, buttons: this.gamepad.value });
+    const raw = actionMask(this.actions, { keys: this.keyboard?.held ?? NO_HELD, pad: this.controllerInput?.pressed ?? NO_HELD, buttons: this.gamepad.value });
+    const { held, latched } = applyActionToggles(raw, this.rawActions, this.latchedActions, toggleMask(this.actions, this.controlSettings.actionToggles));
+    this.rawActions = raw;
+    this.latchedActions = latched;
+    return held;
+  }
+
+  /** Play a rumble the cart asked for (cartbox.rumble, C3), under the player's vibration settings. */
+  private rumble(strength: number, ms: number): void {
+    if (this.replaySource || !this.inputEnabled) return;
+    const effect = rumbleEffect(strength, ms, this.controlSettings);
+    if (!effect) return;
+    if (this.controllerInput?.connected) this.controllerInput.rumble(effect);
+    // A phone or tablet has one motor, on or off: buzz it for the strong ones.
+    else if (this.touch && effect.strongMagnitude >= 0.5) this.view.navigator?.vibrate?.(effect.duration);
   }
 
   /** Let the game see input (true) or hold it neutral (false) — e.g. under a menu. */
@@ -1147,16 +1180,17 @@ export class Player {
     if (dropped > 0) onTrace(`(${dropped} more trace${dropped === 1 ? "" : "s"} this frame didn't fit)`, 15, frame);
   }
 
-  /** Reads any platform events the cart emitted this frame and dispatches them. */
+  /** Reads any platform events the cart emitted this frame and dispatches them (a rumble, the player plays itself). */
   private pollEvents(): void {
     const onEvent = this.options.onEvent;
-    if (!onEvent || !this.console) {
+    if (!this.console) {
       return;
     }
     const { events, seq } = decodeMailbox(this.console.readMailbox(), this.lastMailboxSeq);
     this.lastMailboxSeq = seq;
     for (const event of events) {
-      onEvent(event);
+      if (event.kind === "rumble") this.rumble(event.id / 255, event.value);
+      onEvent?.(event);
     }
   }
 
@@ -1288,7 +1322,8 @@ export class Player {
     words[STICK_WORD] = packSticks(axes);
     // A replay feeds no sticks, so its gains are the plain ones.
     const boost = live ? lookAccelerationBoost(this.lookHeldTicks, this.controlSettings.lookAcceleration) : 1;
-    words[STICK_OPTIN_WORD] = live ? packLookGain(lookGains(this.controlSettings, boost)) : packLookGain({ x: 1, y: 1, zoom: 1 });
+    const assist = aimAssistLevel(this.controlSettings.aimAssist);
+    words[STICK_OPTIN_WORD] = live ? packLookGain({ ...lookGains(this.controlSettings, boost), assist }) : packLookGain({ x: 1, y: 1, zoom: 1, assist });
   }
 
   /** Save data (EP15b): hand a save the cart made this tick to the host. */

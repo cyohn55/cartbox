@@ -14,6 +14,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
+  AIM_ASSISTS,
   ConsoleButton,
   DEFAULT_CONTROL_SETTINGS,
   DEFAULT_STICK_DEAD_ZONES,
@@ -22,6 +23,7 @@ import {
   RESPONSE_CURVES,
   STICK_LAYOUTS,
   standardizePad,
+  type AimAssist,
   type ControlSettings,
   type ControlTarget,
   type PadButton,
@@ -54,6 +56,12 @@ const CURVE_LABELS: Record<ResponseCurve, string> = {
   responsive: "Responsive — quicker off the centre",
 };
 
+const AIM_ASSIST_LABELS: Record<AimAssist, string> = {
+  off: "Off",
+  standard: "Standard",
+  strong: "Strong — nudges harder, slows turning across a target",
+};
+
 const LAYOUT_LABELS: Record<StickLayout, string> = {
   default: "Default — left moves, right looks",
   southpaw: "Southpaw — right moves, left looks",
@@ -73,6 +81,9 @@ const STICK_SETTING_KEYS = [
   "stickLayout",
   "zoomSensitivity",
   "lookAcceleration",
+  "aimAssist",
+  "vibration",
+  "vibrationStrength",
   "leftTrigger",
   "rightTrigger",
 ] as const satisfies readonly (keyof ControlSettings)[];
@@ -249,6 +260,20 @@ export function StartMenu(props: StartMenuProps) {
                   ))}
                 </select>
               </Row>
+              <Row label="Aim assist">
+                <select
+                  aria-label="Aim assist"
+                  style={styles.select}
+                  value={controls.aimAssist ?? "standard"}
+                  onChange={(event) => setControls({ aimAssist: event.target.value as AimAssist })}
+                >
+                  {AIM_ASSISTS.map((a) => (
+                    <option key={a} value={a}>
+                      {AIM_ASSIST_LABELS[a]}
+                    </option>
+                  ))}
+                </select>
+              </Row>
               <Row label="Invert look up/down">
                 <Toggle on={controls.invertY} onChange={(invertY) => setControls({ invertY })} />
               </Row>
@@ -327,6 +352,22 @@ export function StartMenu(props: StartMenuProps) {
                 />
               </Row>
               <p style={styles.note}>A lower pull fires sooner (a hair trigger).</p>
+
+              <h3 style={styles.h3}>Vibration</h3>
+              <Row label="Vibration">
+                <Toggle on={controls.vibration ?? true} onChange={(vibration) => setControls({ vibration })} />
+              </Row>
+              <Row label={`Vibration strength  ${pct(controls.vibrationStrength ?? 1)}`}>
+                <Slider
+                  label="Vibration strength"
+                  min={0.1}
+                  max={1}
+                  step={0.1}
+                  value={controls.vibrationStrength ?? 1}
+                  onChange={(vibrationStrength) => setControls({ vibrationStrength })}
+                />
+              </Row>
+              <p style={styles.note}>On a controller the browser can rumble. A phone buzzes for the strong ones (a hit, a melee).</p>
 
               <Row label="">
                 <button
@@ -439,6 +480,18 @@ export function StartMenu(props: StartMenuProps) {
                         {listeningAction === a.name ? "Press a key… (Esc cancels)" : "Change key"}
                       </button>
                       <select
+                        aria-label={`${a.name}: hold or toggle`}
+                        style={styles.select}
+                        value={controls.actionToggles?.includes(a.name) ? "toggle" : "hold"}
+                        onChange={(event) => {
+                          const others = (controls.actionToggles ?? []).filter((n) => n !== a.name);
+                          setControls({ actionToggles: event.target.value === "toggle" ? [...others, a.name] : others });
+                        }}
+                      >
+                        <option value="hold">Hold</option>
+                        <option value="toggle">Toggle</option>
+                      </select>
+                      <select
                         aria-label={`${a.name} on the controller`}
                         style={styles.select}
                         value={a.pad[0] ?? ""}
@@ -453,9 +506,12 @@ export function StartMenu(props: StartMenuProps) {
                       </select>
                     </Row>
                   ))}
-                  <p style={styles.note}>A key or controller button given to an action is that action&apos;s alone. Each action also keeps its button above.</p>
+                  <p style={styles.note}>
+                    A key or controller button given to an action is that action&apos;s alone. Each action also keeps its button above. Toggle: a press
+                    turns the action on and the next turns it off (zoom, for one).
+                  </p>
                   <Row label="">
-                    <button type="button" className="cbx-btn" onClick={() => setControls({ actionBindings: {} })}>
+                    <button type="button" className="cbx-btn" onClick={() => setControls({ actionBindings: {}, actionToggles: [] })}>
                       Reset actions
                     </button>
                   </Row>

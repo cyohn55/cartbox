@@ -469,11 +469,16 @@ export {
   lookGains,
   lookAccelerationBoost,
   stepLookAcceleration,
+  AIM_ASSISTS,
+  aimAssistLevel,
+  applyActionToggles,
+  toggleMask,
+  rumbleEffect,
   parseControlSettings,
   readPad,
   standardizePad,
 } from "./controls.js";
-export type { ControlSettings, ControlTarget, PadButton, PadSnapshot, ResponseCurve, StickDeadZones, StickLayout } from "./controls.js";
+export type { AimAssist, ControlSettings, ControlTarget, PadButton, PadSnapshot, ResponseCurve, RumbleEffect, StickDeadZones, StickLayout } from "./controls.js";
 export { GamepadInput } from "./input.js";
 
 // Physics (ENGINE_ROADMAP.md, Phase 2): the session that runs a cart's bodies,

@@ -43,6 +43,11 @@ export const MAILBOX_TYPE_SCORE = 2;
 export const MAILBOX_TYPE_PROGRESS = 3;
 /** A cart asking its host page to do something (cartbox.request): `id` is the request, `value` its argument. */
 export const MAILBOX_TYPE_REQUEST = 4;
+/**
+ * A cart asking for vibration (cartbox.rumble, CONTROLLER_SETTINGS_ROADMAP.md
+ * C3): `id` is the strength ×255, `value` how long, ms.
+ */
+export const MAILBOX_TYPE_RUMBLE = 5;
 
 /** Total reserved pmem words (mirrors CBX_MAILBOX_WORDS in the engine shim). */
 export const MAILBOX_WORDS = 137;
@@ -138,7 +143,7 @@ function signedByte(byte: number): number {
   return byte < 128 ? byte : byte - 256;
 }
 
-export type MailboxEventKind = "achievement" | "score" | "progress" | "request" | "unknown";
+export type MailboxEventKind = "achievement" | "score" | "progress" | "request" | "rumble" | "unknown";
 
 export interface MailboxEvent {
   kind: MailboxEventKind;
@@ -166,6 +171,8 @@ function kindOf(type: number): MailboxEventKind {
       return "progress";
     case MAILBOX_TYPE_REQUEST:
       return "request";
+    case MAILBOX_TYPE_RUMBLE:
+      return "rumble";
     default:
       return "unknown";
   }

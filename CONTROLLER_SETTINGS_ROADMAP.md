@@ -29,9 +29,9 @@ the Start menu (`apps/web/src/app/lockout/StartMenu.tsx`) edits them.
 - **Response curve:** the game applies its own. Lockout eases its turn as
   lean², and its pitch the same way.
 - **Aim assist:** Lockout's auto-aim (pitch eased toward a locked enemy) is
-  always on.
-- **Zoom:** held, never toggled.
-- **No vibration.**
+  always on (C3 makes it a setting).
+- **Zoom:** held, never toggled (C3 lets any action toggle).
+- **No vibration** (C3 adds it).
 - **No mouse look and no gyro.**
 
 ## Inspiration
@@ -161,7 +161,7 @@ the Start menu (`apps/web/src/app/lockout/StartMenu.tsx`) edits them.
       `Unit Tests/analog-sticks.test.ts` runs the real engine: `lookgain`
       returns the host's gains (times zoom when zoomed), `stick` leaves them
       in place, and Lockout turns twice as far at ×2.
-- [ ] **C3. Aim assist, hold or toggle, and vibration.**
+- [x] **C3. Aim assist, hold or toggle, and vibration.**
   - **Aim assist:** Off, Standard or Strong, read by the cart
     (`cartbox.aimassist()`). Lockout scales its auto-pitch by it and slows the
     turn near a target.
@@ -170,6 +170,39 @@ the Start menu (`apps/web/src/app/lockout/StartMenu.tsx`) edits them.
   - **Vibration:** on or off, plus an intensity, through the Gamepad API's
     rumble. `cartbox.rumble(strength, ms)` lets a game ask for it; Lockout
     rumbles when it fires, takes a hit and lands a melee.
+  - **Done.**
+    - **Aim assist:** the level (0 off, 1 standard, 2 strong) rides in the
+      two bits C2 kept in the gain word's marker byte, so
+      `cartbox.aimassist()` reads it for a cart that calls `lookgain`, and
+      answers 1 before then. In Lockout, Standard is how it always played.
+      Off stops the auto-aim's pitch nudge once the player has aimed by hand.
+      Strong doubles that nudge and slows the stick's turn by 30% while a
+      locked enemy is in the aim cone (aim friction). Keyboard play, which
+      has no pitch control, keeps its pitch easing at every level.
+    - **Hold or toggle:** `applyActionToggles` runs in the host's
+      `heldActions`. A toggled action flips on each new press of its
+      controls, whichever device presses it. What it returns is the mask a
+      replay records, so replays play toggles back as they were. The menu
+      sets each action under Button mapping → Actions, and Reset actions
+      clears the toggles.
+    - **Vibration:** `cartbox.rumble` emits mailbox event 5 (strength ×255,
+      ms). The player plays it itself, as well as passing it to `onEvent`.
+      `rumbleEffect` applies the player's vibration switch and strength and
+      caps it at 1.5 s, and the controller in use plays a `dual-rumble`. On
+      a touch device with no controller, `navigator.vibrate` buzzes for the
+      strong ones (strength 0.5 or more). Nothing rumbles in a replay or
+      under the menu. Lockout rumbles lightly for a shot (a little more for
+      the shotgun's spread), strongly for a melee, and for a hit by how much
+      it took. It watches its own shields and health fall, so it works
+      online too.
+    - **Tests:** `Unit Tests/aim-assist-toggle-rumble.test.ts` covers
+      toggles latching, the rumble effect, the rumble event, the aim assist
+      bits and saves. `Unit Tests/analog-sticks.test.ts` checks that
+      `aimassist` reads the level and `rumble` reaches the mailbox in the
+      real engine. `Unit Tests/input-actions.test.ts` checks that Lockout
+      asks for a rumble when it fires. `scripts/verify-controller-settings.mjs`
+      sets zoom to toggle, then plays a match with a fake controller and
+      checks that firing plays a `dual-rumble` on it.
 - [ ] **C4. Every device its own.**
   - **Device profiles:** the look settings (sensitivity, curve, dead zones) are
     kept separately for a controller and for touch. Each device's input is
