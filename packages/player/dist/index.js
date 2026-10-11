@@ -5996,6 +5996,12 @@ var TouchInput = class {
     this.dragY = 0;
     this.analog = false;
     this.lookMode = "stick";
+    /**
+     * Each stick, zone and button's "let go" (for releases the browser never
+     * delivers), and the document/window listeners that call them all.
+     */
+    this.letGoes = [];
+    this.unlisten = [];
     const doc = container.ownerDocument;
     const view = doc.defaultView;
     if (view && view.getComputedStyle(container).position === "static") {
@@ -6068,6 +6074,39 @@ var TouchInput = class {
       this.pad.appendChild(start);
     }
     container.appendChild(this.root);
+    this.watchForLostReleases(doc);
+  }
+  /**
+   * A finger's release can go missing: iOS swallows it on a system gesture
+   * (a swipe from an edge, a notification, the app switcher), and a control
+   * that couldn't capture its pointer misses an up outside it. Without the
+   * release, a stick stays leaned and a button stays pressed. So once no
+   * finger is on the screen, or the page is hidden or loses focus, every
+   * control lets go; and a new finger on a stick takes it over (see createStick).
+   */
+  watchForLostReleases(doc) {
+    const view = doc.defaultView;
+    const letGoAll = () => {
+      for (const letGo of this.letGoes) letGo();
+    };
+    const onTouchEnd = (event) => {
+      if (event.touches?.length === 0) letGoAll();
+    };
+    const onHidden = () => {
+      if (doc.visibilityState === "hidden") letGoAll();
+    };
+    doc.addEventListener("touchend", onTouchEnd, true);
+    doc.addEventListener("touchcancel", onTouchEnd, true);
+    doc.addEventListener("visibilitychange", onHidden);
+    view?.addEventListener("blur", letGoAll);
+    view?.addEventListener("pagehide", letGoAll);
+    this.unlisten.push(() => {
+      doc.removeEventListener("touchend", onTouchEnd, true);
+      doc.removeEventListener("touchcancel", onTouchEnd, true);
+      doc.removeEventListener("visibilitychange", onHidden);
+      view?.removeEventListener("blur", letGoAll);
+      view?.removeEventListener("pagehide", letGoAll);
+    });
   }
   /** Apply the player's touch settings: overall opacity and size of the pad, how it looks, and a floating move stick. */
   applySettings(settings) {
@@ -6125,7 +6164,6 @@ var TouchInput = class {
     let lastX = 0;
     let lastY = 0;
     this.lookZone.addEventListener("pointerdown", (event) => {
-      if (pointer !== null) return;
       event.preventDefault();
       pointer = event.pointerId;
       lastX = event.clientX;
@@ -6148,6 +6186,9 @@ var TouchInput = class {
     this.lookZone.addEventListener("pointerup", end);
     this.lookZone.addEventListener("pointercancel", end);
     this.lookZone.addEventListener("lostpointercapture", end);
+    this.letGoes.push(() => {
+      pointer = null;
+    });
   }
   /** A floating move stick: a touch in the zone brings the stick to the thumb, and it goes home on release. */
   wireMoveZone(stick, home) {
@@ -6155,7 +6196,7 @@ var TouchInput = class {
       const frame = this.root.getBoundingClientRect();
       const half = stick.base.getBoundingClientRect().width / 2 || 1;
       Object.assign(stick.base.style, { left: `${event.clientX - frame.left - half}px`, top: `${event.clientY - frame.top - half}px`, bottom: "auto" });
-      if (!stick.grab(event, this.moveZone)) Object.assign(stick.base.style, { top: "", ...home });
+      stick.grab(event, this.moveZone);
     });
     stick.base.addEventListener("cbx-stick-release", () => Object.assign(stick.base.style, { top: "", ...home }));
   }
@@ -6204,16 +6245,20 @@ var TouchInput = class {
       knob.style.transform = `translate(${(x * radius * 0.6).toFixed(1)}px, ${(y * radius * 0.6).toFixed(1)}px)`;
       knob.style.background = "rgba(92,208,255,0.6)";
     };
-    const end = (event) => {
-      if (event.pointerId !== pointer) return;
+    const letGo = () => {
       pointer = null;
       state.setStick(index, 0, 0);
       knob.style.transform = "translate(0px, 0px)";
       knob.style.background = "rgba(92,208,255,0.35)";
       base.dispatchEvent(new Event("cbx-stick-release"));
     };
+    const end = (event) => {
+      if (event.pointerId === pointer) letGo();
+    };
+    this.letGoes.push(() => {
+      if (pointer !== null) letGo();
+    });
     const grab = (event, from) => {
-      if (pointer !== null) return false;
       event.preventDefault();
       pointer = event.pointerId;
       try {
@@ -6221,7 +6266,6 @@ var TouchInput = class {
       } catch {
       }
       move(event);
-      return true;
     };
     for (const el of index === 0 ? [base, this.moveZone] : [base]) {
       el.addEventListener("pointermove", (event) => {
@@ -6231,7 +6275,7 @@ var TouchInput = class {
       el.addEventListener("pointercancel", end);
       el.addEventListener("lostpointercapture", end);
     }
-    base.addEventListener("pointerdown", (event) => void grab(event, base));
+    base.addEventListener("pointerdown", (event) => grab(event, base));
     base.addEventListener("contextmenu", (event) => event.preventDefault());
     this.pad.appendChild(base);
     return { base, grab };
@@ -6291,6 +6335,12 @@ var TouchInput = class {
         setVisual(false);
       }
     };
+    this.letGoes.push(() => {
+      if (held.size === 0) return;
+      held.clear();
+      state.release(control.button);
+      setVisual(false);
+    });
     element.addEventListener("pointerdown", press);
     element.addEventListener("pointerup", release);
     element.addEventListener("pointercancel", release);
@@ -6299,6 +6349,7 @@ var TouchInput = class {
     return element;
   }
   destroy() {
+    for (const off of this.unlisten) off();
     this.root.remove();
     this.restorePosition?.();
   }
