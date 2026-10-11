@@ -26,9 +26,9 @@ import { GamepadInput, GamepadState, KeyboardInput, TouchInput, hasTouchSupport 
 import { frameDurationMs, getModel, type ConsoleModel } from "./models.js";
 import { ReplayRecorder, ReplaySource, hashCart, randomSeed, type Replay } from "./replay.js";
 import { seedCartridge, prependLuaCode, readCartCode, appendLuaCode, rewriteLuaCode } from "./cartseed.js";
-import { STICK_OPTIN_MAGIC, STICK_OPTIN_WORD, STICK_WORD, packSticks } from "./sticks.js";
+import { STICK_OPTIN_WORD, STICK_WORD, packLookGain, packSticks, stickChannel } from "./sticks.js";
 import { POINTER_CLICKS, PointerInput, writePointer } from "./pointer.js";
-import { DEFAULT_CONTROL_SETTINGS, applyLookSettings, type ControlSettings } from "./controls.js";
+import { DEFAULT_CONTROL_SETTINGS, applyLookSettings, lookAccelerationBoost, lookGains, stepLookAcceleration, type ControlSettings } from "./controls.js";
 import { injectSdk } from "./sdk.js";
 import { componentsSdkLua } from "./componentsSdk.js";
 import { sceneObjectsSdkLua } from "./mesh/sceneObjectsSdk.js";
@@ -134,6 +134,8 @@ export class Player {
   private pointerOffset: number | null = null;
   /** The cart reads analog sticks (it opted in via cartbox.stick). */
   private analogCart = false;
+  /** Ticks the look stick has been held at full lean (look acceleration, C2). */
+  private lookHeldTicks = 0;
   /** Input actions (EP15): the cart's, with the player's rebinding, and the keys they claim. */
   private actions: InputAction[] = [];
   private actionKeys: ReadonlySet<string> = new Set();
@@ -1264,17 +1266,29 @@ export class Player {
    * Analog sticks (see sticks.ts): once the cart has read a stick — the SDK marks
    * pmem with its opt-in — write the sticks before every tick, and show the
    * touch pad's right stick. Until then nothing is written, so a cart's own use
-   * of those pmem words is left alone.
+   * of those pmem words is left alone. A cart that reads its look gain (C2)
+   * gets the look stick unscaled and the gains beside it.
    */
   private feedSticks(): void {
     const words = this.console?.netWords();
     if (!words) return;
+    const channel = stickChannel(words[STICK_OPTIN_WORD] ?? 0);
     if (!this.analogCart) {
-      if (words[STICK_OPTIN_WORD] !== STICK_OPTIN_MAGIC) return;
+      if (channel === "off") return;
       this.analogCart = true;
       this.touch?.setAnalog(true);
     }
-    words[STICK_WORD] = this.replaySource || !this.inputEnabled ? 0 : packSticks(applyLookSettings(this.gamepad.axes, this.controlSettings));
+    const live = !this.replaySource && this.inputEnabled;
+    if (channel !== "gain") {
+      words[STICK_WORD] = live ? packSticks(applyLookSettings(this.gamepad.axes, this.controlSettings)) : 0;
+      return;
+    }
+    const axes = live ? applyLookSettings(this.gamepad.axes, this.controlSettings, false) : ([0, 0, 0, 0] as const);
+    this.lookHeldTicks = stepLookAcceleration(this.lookHeldTicks, axes[2], axes[3]);
+    words[STICK_WORD] = packSticks(axes);
+    // A replay feeds no sticks, so its gains are the plain ones.
+    const boost = live ? lookAccelerationBoost(this.lookHeldTicks, this.controlSettings.lookAcceleration) : 1;
+    words[STICK_OPTIN_WORD] = live ? packLookGain(lookGains(this.controlSettings, boost)) : packLookGain({ x: 1, y: 1, zoom: 1 });
   }
 
   /** Save data (EP15b): hand a save the cart made this tick to the host. */

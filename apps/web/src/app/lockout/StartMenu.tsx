@@ -71,6 +71,8 @@ const STICK_SETTING_KEYS = [
   "leftStick",
   "rightStick",
   "stickLayout",
+  "zoomSensitivity",
+  "lookAcceleration",
   "leftTrigger",
   "rightTrigger",
 ] as const satisfies readonly (keyof ControlSettings)[];
@@ -99,6 +101,11 @@ export interface StartMenuProps {
   onPrefsChange?: (prefs: PlayerPrefs) => void;
   /** The game's languages. */
   languages?: readonly string[];
+  /**
+   * The game reads its look gain (cartbox.lookgain, C2): sensitivity turns it
+   * faster than full lean, and zoom sensitivity and look acceleration apply.
+   */
+  lookGain?: boolean;
 }
 
 const PAD_LABELS: Record<PadButton, string> = {
@@ -208,6 +215,26 @@ export function StartMenu(props: StartMenuProps) {
                   onChange={(lookSensitivityY) => setControls({ lookSensitivityY })}
                 />
               </Row>
+              <Row label={`Zoom sensitivity  ×${(controls.zoomSensitivity ?? 1).toFixed(2)}`}>
+                <Slider
+                  label="Zoom sensitivity"
+                  min={0.25}
+                  max={2}
+                  step={0.05}
+                  value={controls.zoomSensitivity ?? 1}
+                  onChange={(zoomSensitivity) => setControls({ zoomSensitivity })}
+                />
+              </Row>
+              <Row label={`Look acceleration  ${Math.round((controls.lookAcceleration ?? 0) * 10)}`}>
+                <Slider
+                  label="Look acceleration"
+                  min={0}
+                  max={1}
+                  step={0.1}
+                  value={controls.lookAcceleration ?? 0}
+                  onChange={(lookAcceleration) => setControls({ lookAcceleration })}
+                />
+              </Row>
               <Row label="Response curve">
                 <select
                   aria-label="Response curve"
@@ -228,7 +255,12 @@ export function StartMenu(props: StartMenuProps) {
               <Row label="Invert look left/right">
                 <Toggle on={controls.invertX ?? false} onChange={(invertX) => setControls({ invertX })} />
               </Row>
-              <p style={styles.note}>The look settings apply to the on-screen pad&apos;s look stick too.</p>
+              <p style={styles.note}>
+                {props.lookGain
+                  ? "Sensitivity sets how fast you turn and look, past the game's usual top speed. Zoom sensitivity applies while zoomed. Look acceleration speeds turning up when the stick is held at full lean (0 is off)."
+                  : "Sensitivity above ×1 reaches the game's top turn speed with less lean. This game doesn't read zoom sensitivity or look acceleration."}{" "}
+                The look settings apply to the on-screen pad&apos;s look stick too.
+              </p>
 
               <h3 style={styles.h3}>Controller sticks</h3>
               <Row label="Stick layout">
@@ -245,7 +277,7 @@ export function StartMenu(props: StartMenuProps) {
                   ))}
                 </select>
               </Row>
-              <StickPreview settings={controls} />
+              <StickPreview settings={controls} lookGain={props.lookGain} />
               {(["leftStick", "rightStick"] as const).map((which) => {
                 const zones = controls[which] ?? DEFAULT_STICK_DEAD_ZONES;
                 const name = which === "leftStick" ? "Left stick" : "Right stick";

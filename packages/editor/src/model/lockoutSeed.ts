@@ -4870,6 +4870,8 @@ local function play_input()
   -- 8-button scheme.
   local lx, ly = cartbox.stick(0)
   local rx, ry = cartbox.stick(1)
+  -- The player's look speed (sensitivity, zoom sensitivity, look acceleration).
+  local gh, gv = cartbox.lookgain(p.zoom)
   local lstick = math.abs(lx) + math.abs(ly) > 0.05
   if not p.dead then
     if lstick then
@@ -4885,7 +4887,7 @@ local function play_input()
         if btn(3) then p.ay=p.ay-TURN end
       end
     end
-    if rx ~= 0 then p.ay = p.ay - rx*math.abs(rx)*TURN*2.2 end   -- eased: fine aim near centre, fast at full lean
+    if rx ~= 0 then p.ay = p.ay - rx*math.abs(rx)*TURN*2.2*gh end   -- eased: fine aim near centre, fast at full lean
   end
   local moving = fwd ~= 0 or right ~= 0
   do
@@ -4904,7 +4906,7 @@ local function play_input()
     want=math.asin(clamp(((aim.y+1.2)-(p.y+EYE))/math.max(1,hd),-0.9,0.9))
   end
   if ry ~= 0 then
-    p.ap = clamp(p.ap - ry*math.abs(ry)*0.045, -1.1, 1.1); p.manualpitch = true
+    p.ap = clamp(p.ap - ry*math.abs(ry)*0.045*gv, -1.1, 1.1); p.manualpitch = true
   elseif p.manualpitch then
     if aim then p.ap = p.ap + (want-p.ap)*0.06 end
   else

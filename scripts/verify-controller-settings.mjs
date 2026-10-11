@@ -2,7 +2,8 @@
  * The Start menu's controller settings, end to end (CONTROLLER_SETTINGS_ROADMAP.md
  * C1): Lockout with a fake standard-mapping controller, the Controls tab's live
  * stick picture reading it, the stick layout and a dead zone changed from the
- * menu, what the game receives following them, and the settings kept.
+ * menu, what the game receives following them, and the settings kept; and
+ * (C2) sensitivity reaching Lockout as a turn speed, not a pre-scaled stick.
  *
  *   CBX_BASE_URL=http://localhost:3000 node scripts/verify-controller-settings.mjs
  *
@@ -68,7 +69,7 @@ await page.getByRole("button", { name: "Menu" }).waitFor({ timeout: 120000 });
 await page.getByRole("button", { name: "Menu" }).click();
 await page.getByRole("dialog", { name: "Start menu" }).waitFor();
 
-for (const label of ["Horizontal sensitivity", "Vertical sensitivity", "Response curve", "Invert look left/right", "Stick layout", "Left stick dead zone", "Right stick axial dead zone", "Right stick max input", "LT presses at"]) {
+for (const label of ["Horizontal sensitivity", "Vertical sensitivity", "Response curve", "Invert look left/right", "Zoom sensitivity", "Look acceleration", "Stick layout", "Left stick dead zone", "Right stick axial dead zone", "Right stick max input", "LT presses at"]) {
   check(`the Controls tab has ${label}`, (await page.getByText(new RegExp(`^${label}`)).count()) > 0);
 }
 
@@ -91,6 +92,11 @@ line = await receivesUntil(/look 0\.00, −0\.8\d/);
 check("a right-stick axial dead zone keeps a push straight up straight", /look 0\.00, −0\.8\d/.test(line), line);
 check("the axial dead zone draws on the right stick", (await count(page.locator('svg[aria-label="Right stick: dead zones and position"] rect'), 2)) === 2);
 
+// Lockout reads its look gain (C2): sensitivity becomes a turn speed, and the stick stays as leaned.
+await page.getByRole("slider", { name: "Horizontal sensitivity" }).fill("2");
+line = await receivesUntil(/×2\.00 turn/);
+check("sensitivity reaches Lockout as a turn speed, the stick unscaled", /look 0\.00, −0\.8\d at ×2\.00 turn, ×1\.00 pitch/.test(line), line);
+
 // A lighter trigger pull presses LT at 30%.
 const lt = page.getByRole("slider", { name: "LT presses at" });
 await lt.fill("0.25");
@@ -98,7 +104,11 @@ check("LT presses at a 25% pull", (await count(page.getByText(/^LT pressed/), 1)
 await page.screenshot({ path: `${OUT}/controller-settings.png` });
 
 const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("cartbox:settings:lockout") ?? "{}").controls ?? {});
-check("the settings are kept", saved.rightStick?.axial === 0.15 && saved.leftTrigger === 0.25 && saved.stickLayout === "default", JSON.stringify({ rightStick: saved.rightStick, leftTrigger: saved.leftTrigger }));
+check(
+  "the settings are kept",
+  saved.rightStick?.axial === 0.15 && saved.leftTrigger === 0.25 && saved.stickLayout === "default" && saved.lookSensitivity === 2,
+  JSON.stringify({ rightStick: saved.rightStick, leftTrigger: saved.leftTrigger, lookSensitivity: saved.lookSensitivity }),
+);
 
 // Touch has its own tab.
 await page.getByRole("tab", { name: "Touch" }).click();
@@ -107,8 +117,8 @@ check("the Touch tab holds the on-screen pad's size and opacity", (await page.ge
 // Reset puts back the look, sticks and triggers.
 await page.getByRole("tab", { name: "Controls" }).click();
 await page.getByRole("button", { name: /Reset look, sticks/ }).click();
-line = await receivesUntil(/look 0\.10, −0\.88/);
-check("reset puts the defaults back", /look 0\.10, −0\.88/.test(line), line);
+line = await receivesUntil(/look 0\.10, −0\.88 at ×1\.00 turn/);
+check("reset puts the defaults back", /look 0\.10, −0\.88 at ×1\.00 turn/.test(line), line);
 
 await browser.close();
 const failed = results.filter((r) => !r.ok).length;

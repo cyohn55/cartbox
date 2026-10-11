@@ -72,6 +72,17 @@ export interface ControlSettings {
   readonly rightStick?: StickDeadZones;
   /** Which stick moves and which looks. */
   readonly stickLayout?: StickLayout;
+  /**
+   * Look speed while zoomed, ×0.25..2 (C2): multiplies both sensitivities, in a
+   * game that reads its look gain (cartbox.lookgain), while it says it is zoomed.
+   */
+  readonly zoomSensitivity?: number;
+  /**
+   * Look acceleration, 0..1 (C2), as Halo has it: held at full lean, look speeds
+   * up after a short delay, by up to this much more (0 is off). Only a game that
+   * reads its look gain can turn faster than full lean, so only there.
+   */
+  readonly lookAcceleration?: number;
   /** How far (0.05..0.95) the left and right triggers must be pulled to press. */
   readonly leftTrigger?: number;
   readonly rightTrigger?: number;
@@ -136,6 +147,8 @@ export const DEFAULT_CONTROL_SETTINGS: ControlSettings = {
   leftStick: DEFAULT_STICK_DEAD_ZONES,
   rightStick: DEFAULT_STICK_DEAD_ZONES,
   stickLayout: "default",
+  zoomSensitivity: 1,
+  lookAcceleration: 0,
   leftTrigger: DEFAULT_TRIGGER_THRESHOLD,
   rightTrigger: DEFAULT_TRIGGER_THRESHOLD,
   padBindings: DEFAULT_PAD_BINDINGS,
@@ -198,6 +211,8 @@ export function parseControlSettings(value: unknown, defaults: ControlSettings =
     leftStick: deadZones(raw.leftStick, defaults.leftStick),
     rightStick: deadZones(raw.rightStick, defaults.rightStick),
     stickLayout: (STICK_LAYOUTS as readonly unknown[]).includes(raw.stickLayout) ? (raw.stickLayout as StickLayout) : (defaults.stickLayout ?? "default"),
+    zoomSensitivity: num(raw.zoomSensitivity, 0.25, 2, defaults.zoomSensitivity ?? 1),
+    lookAcceleration: num(raw.lookAcceleration, 0, 1, defaults.lookAcceleration ?? 0),
     leftTrigger: num(raw.leftTrigger, 0.05, 0.95, defaults.leftTrigger ?? DEFAULT_TRIGGER_THRESHOLD),
     rightTrigger: num(raw.rightTrigger, 0.05, 0.95, defaults.rightTrigger ?? DEFAULT_TRIGGER_THRESHOLD),
     padBindings,
@@ -232,10 +247,13 @@ export function responseCurve(curve: ResponseCurve | undefined, m: number): numb
  * look stick goes through its response curve (its distance from centre,
  * keeping its direction), then each axis is scaled by its sensitivity
  * (reaching full lean sooner when it is above 1) and flipped when inverted.
+ * With `scale` false (a game that reads its look gain, C2), sensitivity is
+ * left to the gain and the stick is only curved and inverted.
  */
 export function applyLookSettings(
   axes: readonly number[],
   settings: Pick<ControlSettings, "invertY" | "lookSensitivity"> & Partial<Pick<ControlSettings, "invertX" | "lookSensitivityY" | "lookCurve">>,
+  scale = true,
 ): [number, number, number, number] {
   let x = axes[2] ?? 0;
   let y = axes[3] ?? 0;
@@ -245,11 +263,44 @@ export function applyLookSettings(
     x *= k;
     y *= k;
   }
-  const sx = settings.lookSensitivity;
-  const sy = settings.lookSensitivityY ?? sx;
+  const sx = scale ? settings.lookSensitivity : 1;
+  const sy = scale ? (settings.lookSensitivityY ?? settings.lookSensitivity) : 1;
   const rx = clamp(x * sx * (settings.invertX ? -1 : 1), -1, 1);
   const ry = clamp(y * sy * (settings.invertY ? -1 : 1), -1, 1);
   return [axes[0] ?? 0, axes[1] ?? 0, rx, ry];
+}
+
+/** Look acceleration (C2): how long the look stick must be held at full lean before it ramps, and how long the ramp takes, in ticks. */
+export const LOOK_ACCEL_DELAY_TICKS = 9;
+export const LOOK_ACCEL_RAMP_TICKS = 30;
+/** How far the look stick must lean to count as full lean for acceleration. */
+export const LOOK_ACCEL_LEAN = 0.95;
+
+/** Ticks the look stick has been held at full lean, after this tick's look (x, y). */
+export function stepLookAcceleration(heldTicks: number, x: number, y: number): number {
+  return Math.hypot(x, y) >= LOOK_ACCEL_LEAN ? heldTicks + 1 : 0;
+}
+
+/** The look speed multiplier (1 up to 1 + strength) after `heldTicks` at full lean. */
+export function lookAccelerationBoost(heldTicks: number, strength: number | undefined): number {
+  if (!strength || strength <= 0) return 1;
+  const t = clamp((heldTicks - LOOK_ACCEL_DELAY_TICKS) / LOOK_ACCEL_RAMP_TICKS, 0, 1);
+  return 1 + strength * t * t * (3 - 2 * t);
+}
+
+/**
+ * The look gains a game reading cartbox.lookgain gets (C2): each axis's
+ * sensitivity times the acceleration boost, and the zoom multiplier.
+ */
+export function lookGains(
+  settings: Pick<ControlSettings, "lookSensitivity"> & Partial<Pick<ControlSettings, "lookSensitivityY" | "zoomSensitivity">>,
+  boost = 1,
+): { x: number; y: number; zoom: number } {
+  return {
+    x: settings.lookSensitivity * boost,
+    y: (settings.lookSensitivityY ?? settings.lookSensitivity) * boost,
+    zoom: settings.zoomSensitivity ?? 1,
+  };
 }
 
 /** A physical stick reading with a radial dead zone, rescaled to reach full lean. */
