@@ -52,12 +52,19 @@ export interface QualitySettings {
   readonly temporal?: boolean;
   /** Screen-space reflections where the model has them (I3). */
   readonly reflections?: boolean;
+  /**
+   * A first-person sky backdrop is painted on the CPU at one sample per this
+   * many pixels each way, and smoothed up. Drifting clouds or a turning camera
+   * repaint it every frame, so the low preset paints it coarser. (It is
+   * expanded in blocks, so much past 4 shows on cloud edges.)
+   */
+  readonly skyScale?: number;
 }
 
 export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualitySettings>> = {
-  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true },
-  medium: { level: "medium", shadows: true, shadowMapSize: 512, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true },
-  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false, reflections: false },
+  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3 },
+  medium: { level: "medium", shadows: true, shadowMapSize: 512, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true, skyScale: 3 },
+  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false, reflections: false, skyScale: 4 },
 };
 
 /** What the browser reveals about the device (all optional: browsers differ). */

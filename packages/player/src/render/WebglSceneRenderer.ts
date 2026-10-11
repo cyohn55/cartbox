@@ -1210,6 +1210,15 @@ export class WebglSceneRenderer implements SceneRenderer {
     }
     this.collect();
     presentFrame(this.latest, visible, draw, this.software);
+    // Back-pressure: with every pixel-pack buffer still in flight the GPU is
+    // behind, and a frame that can't be read back only queues more work in front
+    // of the readbacks already waited on. Skip it; the newest finished frame shows.
+    // (A shadow map's changed region goes unuploaded with it: the next frame uploads it whole.)
+    if (!this.readback.some((slot) => slot.fence === null)) {
+      this.shadowUploaded = null;
+      this.nearUploaded = null;
+      return;
+    }
     try {
       this.submit(visible, draw);
     } catch {

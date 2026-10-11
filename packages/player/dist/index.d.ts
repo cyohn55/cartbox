@@ -906,6 +906,13 @@ interface QualitySettings {
     readonly temporal?: boolean;
     /** Screen-space reflections where the model has them (I3). */
     readonly reflections?: boolean;
+    /**
+     * A first-person sky backdrop is painted on the CPU at one sample per this
+     * many pixels each way, and smoothed up. Drifting clouds or a turning camera
+     * repaint it every frame, so the low preset paints it coarser. (It is
+     * expanded in blocks, so much past 4 shows on cloud edges.)
+     */
+    readonly skyScale?: number;
 }
 declare const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualitySettings>>;
 /** What the browser reveals about the device (all optional: browsers differ). */

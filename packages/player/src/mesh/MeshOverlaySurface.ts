@@ -964,7 +964,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     // composite the meshes over it (background null) — backend-agnostic, since
     // both renderers leave untouched pixels alone.
     const skyBackdrop = this.hud && this.skyMap !== null;
-    if (skyBackdrop) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : SKY_BACKDROP_SCALE, lighting?.sky ? skySun(lighting.sky) : null);
+    if (skyBackdrop) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : (this.quality.skyScale ?? SKY_BACKDROP_SCALE), lighting?.sky ? skySun(lighting.sky) : null);
     if (profiler) {
       const now = performance.now();
       profiler.add("sky", now - mark);

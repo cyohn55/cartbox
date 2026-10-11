@@ -4505,9 +4505,9 @@ var PostFxSurface = class _PostFxSurface {
 // src/quality.ts
 var QUALITY_LEVELS = ["low", "medium", "high"];
 var QUALITY_PRESETS = {
-  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true },
-  medium: { level: "medium", shadows: true, shadowMapSize: 512, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true },
-  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false, reflections: false }
+  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3 },
+  medium: { level: "medium", shadows: true, shadowMapSize: 512, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true, skyScale: 3 },
+  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false, reflections: false, skyScale: 4 }
 };
 function detectQuality(hints) {
   if (hints.cores !== void 0 && hints.cores <= 2 || hints.memoryGB !== void 0 && hints.memoryGB <= 2) return "low";
@@ -11212,7 +11212,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const local = lighting?.shadows && this.quality.shadows && rig ? this.buildLocalShadows(rig, moved) : null;
     const lights = local ? local.lights : rig;
     const skyBackdrop = this.hud && this.skyMap !== null;
-    if (skyBackdrop) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : SKY_BACKDROP_SCALE, lighting?.sky ? skySun(lighting.sky) : null);
+    if (skyBackdrop) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : this.quality.skyScale ?? SKY_BACKDROP_SCALE, lighting?.sky ? skySun(lighting.sky) : null);
     if (profiler) {
       const now = performance.now();
       profiler.add("sky", now - mark);
@@ -14665,6 +14665,11 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     }
     this.collect();
     presentFrame(this.latest, visible, draw, this.software);
+    if (!this.readback.some((slot) => slot.fence === null)) {
+      this.shadowUploaded = null;
+      this.nearUploaded = null;
+      return;
+    }
     try {
       this.submit(visible, draw);
     } catch {
@@ -16977,6 +16982,11 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     if (this.destroyed) return;
     const visible = applyScenePasses(instances, draw);
     presentFrame(this.latest, visible, draw, this.software);
+    if (!this.readback.some((slot) => !slot.busy)) {
+      this.shadowUploaded = null;
+      this.nearUploaded = null;
+      return;
+    }
     try {
       this.submit(visible, draw);
     } catch {
@@ -17200,9 +17210,6 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       this.device.queue.submit([encoder.finish()]);
       this.timer?.read();
       void this.drain(slot);
-    } else {
-      this.device.queue.submit([encoder.finish()]);
-      this.timer?.read();
     }
   }
   ensureReflectionTargets(multisampled) {

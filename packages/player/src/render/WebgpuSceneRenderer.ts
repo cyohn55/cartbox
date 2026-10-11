@@ -1621,6 +1621,17 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // while the pipeline fills. Either way `out` is correct when this returns.
     presentFrame(this.latest, visible, draw, this.software);
 
+    // Back-pressure: with every staging buffer still waiting on the GPU, the GPU
+    // is behind. Another frame could not be read back, so drawing it only queues
+    // work in front of the readbacks already waited on: the backlog grows, each
+    // readback lands later than the last, and the frame rate sinks the longer the
+    // game runs. Skip it; the newest finished frame keeps showing. (A shadow map's
+    // changed region goes unuploaded with it, so the next frame uploads it whole.)
+    if (!this.readback.some((slot) => !slot.busy)) {
+      this.shadowUploaded = null;
+      this.nearUploaded = null;
+      return;
+    }
     try {
       this.submit(visible, draw);
     } catch {
@@ -1891,11 +1902,6 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       this.device.queue.submit([encoder.finish()]);
       this.timer?.read();
       void this.drain(slot);
-    } else {
-      // Every staging buffer is still mapped; render anyway and read back next
-      // frame rather than stalling the run loop waiting for one.
-      this.device.queue.submit([encoder.finish()]);
-      this.timer?.read();
     }
   }
 
