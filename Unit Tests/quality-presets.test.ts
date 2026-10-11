@@ -10,9 +10,11 @@ import { composeModelMatrix, defaultSceneLighting, patchSceneLighting, type Mesh
 import {
   MeshOverlaySurface,
   QUALITY_PRESETS,
+  QualityGovernor,
   applyQualityToPostFx,
   defaultPostFxSettings,
   detectQuality,
+  isMobileAgent,
   resolveQuality,
   type SceneDraw,
   type SceneRenderer,
@@ -28,6 +30,14 @@ describe("detecting a preset", () => {
     expect(detectQuality({ cores: 8, memoryGB: 8, webgpu: true })).toBe("high");
     // Unknowns don't count against a device.
     expect(detectQuality({})).toBe("high");
+  });
+
+  it("knows an iPad by its touch screen when Safari says it's a Mac", () => {
+    const ipadOs = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
+    expect(isMobileAgent(ipadOs, 5)).toBe(true);
+    expect(isMobileAgent(ipadOs, 0)).toBe(false); // a Mac
+    expect(isMobileAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148", 5)).toBe(true);
+    expect(isMobileAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/140.0", 10)).toBe(false); // a touch-screen laptop
   });
 
   it("resolves auto from the device and an explicit choice as given", () => {
@@ -46,6 +56,80 @@ describe("detecting a preset", () => {
     expect(medium.shadowMapSize).toBeLessThan(high.shadowMapSize);
     expect(low.maxRenderScale).toBeLessThan(medium.maxRenderScale);
     expect(medium.maxRenderScale).toBeLessThan(high.maxRenderScale);
+  });
+});
+
+describe("auto by measurement (QualityGovernor)", () => {
+  /** Runs `frames` frames `ms` apart (busy for `busy` ms of each) from `start`: the steps it called for, and when. */
+  const run = (governor: QualityGovernor, start: string, frames: number, ms: number, busy: number, from = 0) => {
+    let level = start as "low" | "medium" | "high";
+    const steps: { level: string; at: number }[] = [];
+    let now = from;
+    for (let i = 0; i < frames; i += 1) {
+      now += ms;
+      const step = governor.feed(ms, busy, now, level);
+      if (step) {
+        level = step;
+        steps.push({ level: step, at: now });
+      }
+    }
+    return { level, steps, now };
+  };
+
+  it("keeps the preset while frames come in time", () => {
+    const governor = new QualityGovernor();
+    governor.reset(0);
+    expect(run(governor, "high", 3000, 1000 / 60, 12).steps).toEqual([]);
+    // Slightly long frames (about 45 fps) are still fine.
+    expect(run(governor, "high", 3000, 22, 20).steps).toEqual([]);
+  });
+
+  it("goes straight to low when busy frames can't hold 20 fps, after a few seconds' settling and a second and a half's measuring", () => {
+    const governor = new QualityGovernor();
+    governor.reset(0);
+    // 15 fps, busy all of every frame: what a weak GPU looks like (the renderer reads each frame back).
+    const { level, steps } = run(governor, "high", 600, 66, 60);
+    expect(steps.map((s) => s.level)).toEqual(["low"]);
+    expect(level).toBe("low");
+    expect(steps[0]!.at).toBeGreaterThanOrEqual(3000 + 1500 - 66);
+    expect(steps[0]!.at).toBeLessThan(3000 + 1500 + 2 * 66);
+  });
+
+  it("steps down a preset at a time between 20 and 40 fps, waiting for each to settle, and stops at low", () => {
+    const governor = new QualityGovernor();
+    governor.reset(0);
+    const { level, steps } = run(governor, "high", 1000, 33, 30);
+    expect(steps.map((s) => s.level)).toEqual(["medium", "low"]);
+    expect(level).toBe("low");
+    // The next step waited for the new preset's first frames to pass, then measured afresh.
+    expect(steps[1]!.at - steps[0]!.at).toBeGreaterThanOrEqual(3000 + 1500 - 33);
+  });
+
+  it("leaves a browser that shows 30 frames a second to save power alone", () => {
+    const governor = new QualityGovernor();
+    governor.reset(0);
+    expect(run(governor, "high", 3000, 33.3, 6).steps).toEqual([]);
+  });
+
+  it("doesn't count gaps: a hidden tab, a breakpoint, a load", () => {
+    const governor = new QualityGovernor();
+    governor.reset(0);
+    expect(run(governor, "high", 500, 1000, 1000).steps).toEqual([]);
+  });
+
+  it("still steps down a device crawling at 3 fps", () => {
+    const governor = new QualityGovernor();
+    governor.reset(0);
+    expect(run(governor, "high", 40, 330, 320).steps.map((s) => s.level)).toEqual(["low"]);
+  });
+
+  it("starts measuring afresh after a reset (a resume, or a preset chosen in a menu)", () => {
+    const governor = new QualityGovernor();
+    governor.reset(0);
+    const slow = run(governor, "high", 60, 66, 60);
+    expect(slow.steps).toEqual([]); // 3 s settling, then under a second and a half measured
+    governor.reset(slow.now);
+    expect(run(governor, "high", 60, 66, 60, slow.now).steps).toEqual([]);
   });
 });
 

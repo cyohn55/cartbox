@@ -152,6 +152,12 @@ export class TrailSystem {
   private readonly tracks = new Map<string, Track>();
   private readonly primitives = new Map<string, MeshPrimitive>();
   private readonly identity: Mat4 = Float64Array.from([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+  /**
+   * The meshes last handed out, main and front: the same mesh while the same
+   * ribbons show, so a GPU renderer (which keeps its buffers per mesh) updates
+   * them in place rather than making new ones each frame.
+   */
+  private readonly meshes: { main: MeshAsset | null; front: MeshAsset | null } = { main: null, front: null };
 
   /**
    * Record where an object's trails are at `time` (seconds): `model` its
@@ -200,12 +206,15 @@ export class TrailSystem {
       if (track.samples.length < 2 || !lit) continue;
       (track.front ? out.front : out.main).push(this.ribbon(id, track, time));
     }
-    const instance = (primitives: MeshPrimitive[], model: Mat4): MeshSceneInstance | null => {
+    const instance = (layer: "main" | "front", primitives: MeshPrimitive[], model: Mat4): MeshSceneInstance | null => {
       if (primitives.length === 0) return null;
-      const mesh: MeshAsset = { name: "trails", primitives };
+      const last = this.meshes[layer];
+      const same = last !== null && last.primitives.length === primitives.length && last.primitives.every((p, i) => p === primitives[i]);
+      const mesh: MeshAsset = same ? last : { name: "trails", primitives };
+      this.meshes[layer] = mesh;
       return { mesh, model, textures: primitives.map(() => null), emissiveTextures: primitives.map(() => fade()) };
     };
-    return { main: instance(out.main, this.identity), front: instance(out.front, view ? invertView(view) : this.identity) };
+    return { main: instance("main", out.main, this.identity), front: instance("front", out.front, view ? invertView(view) : this.identity) };
   }
 
   /**

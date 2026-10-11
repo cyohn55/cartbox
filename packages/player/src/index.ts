@@ -494,9 +494,11 @@ export { AgentCrowd } from "./nav/agentCrowd.js";
 export {
   QUALITY_LEVELS,
   QUALITY_PRESETS,
+  QualityGovernor,
   applyQualityToPostFx,
   browserDeviceHints,
   detectQuality,
+  isMobileAgent,
   resolveQuality,
   type DeviceHints,
   type QualityChoice,

@@ -275,6 +275,50 @@ describe("WebgpuSceneRenderer frames", () => {
     expect(submits()).toBe(1); // settling never submits
   });
 
+  it("stops submitting while every readback is still waiting on the GPU, so a slow GPU never builds a backlog", async () => {
+    const { device, log } = fakeDevice();
+    // A GPU that is behind: readbacks land only when released.
+    const waiting: (() => void)[] = [];
+    const createBuffer = device.createBuffer;
+    device.createBuffer = (desc: any) => {
+      const buffer = createBuffer(desc);
+      buffer.mapAsync = () => new Promise<void>((resolve) => waiting.push(resolve));
+      return buffer;
+    };
+    const renderer = (await WebgpuSceneRenderer.create(device, WIDTH, HEIGHT))!;
+    for (let frame = 0; frame < 10; frame += 1) renderer.render(instances(quad()), drawOptions());
+    // One frame per staging buffer; the other seven would only have queued up behind them.
+    expect(log.submits).toBe(3);
+    // One readback lands: drawing resumes, one frame per buffer freed.
+    waiting.shift()!();
+    await settle();
+    renderer.render(instances(quad()), drawOptions());
+    renderer.render(instances(quad()), drawOptions());
+    expect(log.submits).toBe(4);
+  });
+
+  it("uploads a shadow map whole after a skipped frame, whose changed region never went up", async () => {
+    const { device, log } = fakeDevice();
+    const waiting: (() => void)[] = [];
+    const createBuffer = device.createBuffer;
+    device.createBuffer = (desc: any) => {
+      const buffer = createBuffer(desc);
+      buffer.mapAsync = () => new Promise<void>((resolve) => waiting.push(resolve));
+      return buffer;
+    };
+    const renderer = (await WebgpuSceneRenderer.create(device, WIDTH, HEIGHT))!;
+    const depth = new Float32Array(64 * 64).fill(1);
+    const shadow = { lightViewProj: viewMatrix([0, 5, 0], [0, 0, 0]), depth, size: 64 };
+    for (let frame = 0; frame < 3; frame += 1) renderer.render(instances(quad()), { ...drawOptions(), shadow });
+    // Skipped (every readback in flight), with a change to the map.
+    renderer.render(instances(quad()), { ...drawOptions(), shadow: { ...shadow, dirty: { x: 8, y: 4, width: 5, height: 3 } } });
+    waiting.shift()!();
+    await settle();
+    // The next frame's own change is tiny, but the skipped one's must go up too.
+    renderer.render(instances(quad()), { ...drawOptions(), shadow: { ...shadow, dirty: { x: 1, y: 1, width: 1, height: 1 } } });
+    expect(log.textureWrites.at(-1)![3]).toEqual({ width: 64, height: 64 });
+  });
+
   it("copies back at WebGPU's aligned row stride", async () => {
     const { device, log } = fakeDevice();
     const renderer = (await WebgpuSceneRenderer.create(device, WIDTH, HEIGHT))!;
@@ -438,9 +482,13 @@ describe("WebgpuSceneRenderer on heavy scenes", () => {
     const renderer = (await WebgpuSceneRenderer.create(device, WIDTH, HEIGHT))!;
     const depth = new Float32Array(64 * 64).fill(1);
     const shadow = { lightViewProj: viewMatrix([0, 5, 0], [0, 0, 0]), depth, size: 64 };
+    // (Each readback lands before the next frame, as a GPU keeping up would.)
     renderer.render(instances(quad()), { ...drawOptions(), shadow });
+    await settle();
     renderer.render(instances(quad()), { ...drawOptions(), shadow: { ...shadow, dirty: { x: 8, y: 4, width: 5, height: 3 } } });
+    await settle();
     renderer.render(instances(quad()), { ...drawOptions(), shadow: { ...shadow, dirty: { x: 0, y: 0, width: 0, height: 0 } } });
+    await settle();
     const writes = log.textureWrites.filter((args) => args[3]?.width === 64 || args[3]?.width === 5);
     expect(writes).toHaveLength(2); // one full upload, one 5x3 region, nothing when nothing changed
     expect(writes[0]![3]).toEqual({ width: 64, height: 64 });

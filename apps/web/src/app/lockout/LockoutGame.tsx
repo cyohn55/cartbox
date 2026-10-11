@@ -41,6 +41,7 @@ import { basePath } from "@/lib/staticSite";
 import { fetchStandaloneParts, standaloneHtml, standaloneZip, type StandaloneGame } from "@/lib/standaloneExport";
 import { loadCartDraft } from "@/lib/localCartStore";
 import { lockoutSidecarWithAssets, type LockoutAssetOverlay } from "@/lib/lockoutAssets";
+import { perfLine } from "@/lib/perfReadout";
 
 /** Where Lockout keeps its career record (it has no cart row, so it stays in this browser). */
 const LOCKOUT_SAVE_KEY = saveKey("lockout");
@@ -87,6 +88,8 @@ export function LockoutGame() {
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const [fps, setFps] = useState<number | null>(null);
+  /** With the frame rate, where each frame's time goes (the player's profiler). */
+  const [perf, setPerf] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   /** How to open the menu, shown for a few seconds when a game starts. */
   const [menuHint, setMenuHint] = useState(false);
@@ -145,17 +148,27 @@ export function LockoutGame() {
     return () => window.clearTimeout(timer);
   }, [phase.kind]);
 
-  // Frame-rate readout.
+  // Frame-rate readout, with where each frame's time goes.
   useEffect(() => {
     if (!settings.showFps || phase.kind !== "playing") {
       setFps(null);
+      setPerf(null);
       return;
     }
+    handleRef.current?.setProfiling(true);
     const timer = window.setInterval(() => {
       setFps(framesRef.current);
       framesRef.current = 0;
+      const handle = handleRef.current;
+      if (handle) {
+        handle.setProfiling(true); // (the player may have been mounted since)
+        setPerf(perfLine(handle.profile(), handle.quality()));
+      }
     }, 1000);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearInterval(timer);
+      handleRef.current?.setProfiling(false);
+    };
   }, [settings.showFps, phase.kind]);
 
   const openMenu = useCallback((open: boolean) => {
@@ -434,6 +447,7 @@ export function LockoutGame() {
               </button>
             )}
             {fps !== null && <span style={chip}>{fps} fps</span>}
+            {perf !== null && <span style={{ ...chip, fontSize: 11 }}>{perf}</span>}
             {menuHint && !menuOpen && (
               <span role="status" style={{ ...chip, marginLeft: "auto", background: "rgba(10,12,20,0.8)" }}>
                 Menu: Start on a controller · Esc or P · or tap ≡ Menu
