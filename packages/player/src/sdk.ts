@@ -83,6 +83,13 @@ cartbox = {
   -- request(kind, value): ask the host page for something it provides (e.g. a
   -- page's matchmaking); kind and value are numbers the page defines.
   request = function(kind, value) _emit(4, (kind or 0) // 1, (value or 0) // 1) end,
+  -- rumble(strength, ms): vibrate the player's controller (strength 0..1, for
+  -- ms, default 100), under their vibration settings; a phone buzzes for the
+  -- strong ones. Nothing happens without a controller or with vibration off.
+  rumble = function(strength, ms)
+    local s = math.max(0, math.min(1, strength or 1))
+    _emit(5, math.floor(s * 255 + 0.5), math.max(0, (ms or 100) // 1))
+  end,
   clearlights = function() _ln = 0 pmem(_LB, 0) end,
   light = function(x, y, radius, r, g, b, z, intensity)
     _light(0, x, y, z or 12, radius, r, g, b, intensity, 0, 0, 0)
@@ -225,7 +232,7 @@ cartbox = {
   -- turn and pitch rates by (zoomed: the player's zoom sensitivity applies
   -- too, and look acceleration is in both). Calling it tells the host to stop
   -- scaling the look stick itself, so sensitivity above 1 really turns faster.
-  -- 1, 1 until the host answers. Shares pmem 69 with stick().
+  -- 1, 1 until the host answers. Shares pmem 69 with stick() and aimassist().
   lookgain = function(zoomed)
     local m = pmem(69)
     if (m >> 26) ~= 0x13 then
@@ -235,6 +242,14 @@ cartbox = {
     local h, v = (m & 0xff) / 32, ((m >> 8) & 0xff) / 32
     if zoomed then local z = ((m >> 16) & 0xff) / 32 return h * z, v * z end
     return h, v
+  end,
+  -- aimassist() -> 0 off, 1 standard, 2 strong: how much the player wants the
+  -- game to help them aim. It rides with lookgain(), so a cart reads it once it
+  -- calls that; 1 until then.
+  aimassist = function()
+    local m = pmem(69)
+    if (m >> 26) ~= 0x13 then return 1 end
+    return (m >> 24) & 3
   end,
   -- Netplay (online multiplayer). The host page relays player state + events
   -- between browsers through pmem words 0..118 (so a netplay cart must not keep

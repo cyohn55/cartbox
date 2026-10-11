@@ -15,8 +15,8 @@
  * its turn and pitch rates by (see {@link packLookGain}):
  *
  *   byte 0  horizontal gain ×32    byte 1  vertical gain ×32
- *   byte 2  zoom multiplier ×32    byte 3  {@link LOOK_GAIN_MARKER} in its top six bits
- *                                          (the low two are kept for the host)
+ *   byte 2  zoom multiplier ×32    byte 3  {@link LOOK_GAIN_MARKER} in its top six bits,
+ *                                          the aim assist level (0..2, C3) in its low two
  *
  * so sensitivity above 1 really turns faster than the game's own maximum, and
  * zoom sensitivity and look acceleration reach the game. A cart that only
@@ -60,20 +60,23 @@ export interface LookGain {
   readonly y: number;
   /** Multiplies both while the game says it is zoomed. */
   readonly zoom: number;
+  /** The aim assist level, 0 off, 1 standard (the default), 2 strong (C3). */
+  readonly assist?: number;
 }
 
 const gainByte = (v: number) => Math.max(1, Math.min(255, Math.round((Number.isFinite(v) ? v : 1) * GAIN_SCALE)));
 
 /** Pack look gains (each clamped to 1/32..≈7.97) into word 69, marked as the host's. */
 export function packLookGain(gain: LookGain): number {
-  return (gainByte(gain.x) | (gainByte(gain.y) << 8) | (gainByte(gain.zoom) << 16) | (LOOK_GAIN_MARKER << 24)) >>> 0;
+  const assist = Math.max(0, Math.min(2, Math.round(gain.assist ?? 1)));
+  return (gainByte(gain.x) | (gainByte(gain.y) << 8) | (gainByte(gain.zoom) << 16) | ((LOOK_GAIN_MARKER | assist) << 24)) >>> 0;
 }
 
 /** Unpack word 69 back into gains (for tests and tooling); null when it holds none. */
 export function unpackLookGain(word: number): LookGain | null {
   const w = word >>> 0;
   if (!isGainWord(w)) return null;
-  return { x: (w & 0xff) / GAIN_SCALE, y: ((w >>> 8) & 0xff) / GAIN_SCALE, zoom: ((w >>> 16) & 0xff) / GAIN_SCALE };
+  return { x: (w & 0xff) / GAIN_SCALE, y: ((w >>> 8) & 0xff) / GAIN_SCALE, zoom: ((w >>> 16) & 0xff) / GAIN_SCALE, assist: (w >>> 24) & 3 };
 }
 
 /** How far (0..1) a stick must lean before it also presses a D-pad direction. */

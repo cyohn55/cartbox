@@ -56,6 +56,15 @@ export const RESPONSE_CURVES: readonly ResponseCurve[] = ["standard", "dynamic",
 export type StickLayout = "default" | "southpaw" | "legacy" | "legacySouthpaw";
 export const STICK_LAYOUTS: readonly StickLayout[] = ["default", "southpaw", "legacy", "legacySouthpaw"];
 
+/**
+ * How much a game helps the player aim (C3), read by the cart through
+ * cartbox.aimassist() as 0, 1 or 2. What each level does is the game's; in
+ * Lockout, off stops the auto-aim's nudge once you aim by hand, standard is how
+ * it always played, and strong nudges harder and slows turning across a target.
+ */
+export type AimAssist = "off" | "standard" | "strong";
+export const AIM_ASSISTS: readonly AimAssist[] = ["off", "standard", "strong"];
+
 export interface ControlSettings {
   /** Invert the look vertical axis (push up to aim down). */
   readonly invertY: boolean;
@@ -83,6 +92,14 @@ export interface ControlSettings {
    * reads its look gain can turn faster than full lean, so only there.
    */
   readonly lookAcceleration?: number;
+  /** How much the game helps aim (C3). */
+  readonly aimAssist?: AimAssist;
+  /** Input actions (by name) that toggle on a press instead of acting while held (C3). */
+  readonly actionToggles?: readonly string[];
+  /** Vibration on a controller (and a phone's buzz for strong ones) when the game asks (C3). */
+  readonly vibration?: boolean;
+  /** How strong vibration is, 0.1..1. */
+  readonly vibrationStrength?: number;
   /** How far (0.05..0.95) the left and right triggers must be pulled to press. */
   readonly leftTrigger?: number;
   readonly rightTrigger?: number;
@@ -149,6 +166,10 @@ export const DEFAULT_CONTROL_SETTINGS: ControlSettings = {
   stickLayout: "default",
   zoomSensitivity: 1,
   lookAcceleration: 0,
+  aimAssist: "standard",
+  actionToggles: [],
+  vibration: true,
+  vibrationStrength: 1,
   leftTrigger: DEFAULT_TRIGGER_THRESHOLD,
   rightTrigger: DEFAULT_TRIGGER_THRESHOLD,
   padBindings: DEFAULT_PAD_BINDINGS,
@@ -213,6 +234,12 @@ export function parseControlSettings(value: unknown, defaults: ControlSettings =
     stickLayout: (STICK_LAYOUTS as readonly unknown[]).includes(raw.stickLayout) ? (raw.stickLayout as StickLayout) : (defaults.stickLayout ?? "default"),
     zoomSensitivity: num(raw.zoomSensitivity, 0.25, 2, defaults.zoomSensitivity ?? 1),
     lookAcceleration: num(raw.lookAcceleration, 0, 1, defaults.lookAcceleration ?? 0),
+    aimAssist: (AIM_ASSISTS as readonly unknown[]).includes(raw.aimAssist) ? (raw.aimAssist as AimAssist) : (defaults.aimAssist ?? "standard"),
+    actionToggles: Array.isArray(raw.actionToggles)
+      ? [...new Set(raw.actionToggles.filter((n): n is string => typeof n === "string" && n.length > 0 && n.length <= 64))].slice(0, 32)
+      : (defaults.actionToggles ?? []),
+    vibration: typeof raw.vibration === "boolean" ? raw.vibration : (defaults.vibration ?? true),
+    vibrationStrength: num(raw.vibrationStrength, 0.1, 1, defaults.vibrationStrength ?? 1),
     leftTrigger: num(raw.leftTrigger, 0.05, 0.95, defaults.leftTrigger ?? DEFAULT_TRIGGER_THRESHOLD),
     rightTrigger: num(raw.rightTrigger, 0.05, 0.95, defaults.rightTrigger ?? DEFAULT_TRIGGER_THRESHOLD),
     padBindings,
@@ -301,6 +328,57 @@ export function lookGains(
     y: (settings.lookSensitivityY ?? settings.lookSensitivity) * boost,
     zoom: settings.zoomSensitivity ?? 1,
   };
+}
+
+/** The aim assist level a cart reads (0 off, 1 standard, 2 strong). */
+export function aimAssistLevel(assist: AimAssist | undefined): number {
+  const i = AIM_ASSISTS.indexOf(assist ?? "standard");
+  return i < 0 ? 1 : i;
+}
+
+/** The action bits (bit i = action i) the player has set to toggle. */
+export function toggleMask(actions: readonly { readonly name: string }[], toggles: readonly string[] | undefined): number {
+  if (!toggles || toggles.length === 0) return 0;
+  let mask = 0;
+  actions.forEach((a, i) => {
+    if (i < 32 && toggles.includes(a.name)) mask |= 1 << i;
+  });
+  return mask >>> 0;
+}
+
+/**
+ * Hold or toggle per action (C3): a toggled action flips on each press of its
+ * controls and stays as it was left; the rest act while held. `raw` and
+ * `previous` are the controls held now and last tick; `latched` the toggled
+ * actions now on. Returns what the game sees and the new latch.
+ */
+export function applyActionToggles(raw: number, previous: number, latched: number, toggles: number): { held: number; latched: number } {
+  const pressed = raw & ~previous;
+  const next = (latched ^ (pressed & toggles)) & toggles;
+  return { held: ((raw & ~toggles) | next) >>> 0, latched: next >>> 0 };
+}
+
+/** A rumble a game asked for, as the Gamepad API plays it (null: none). */
+export interface RumbleEffect {
+  readonly duration: number;
+  readonly strongMagnitude: number;
+  readonly weakMagnitude: number;
+}
+
+/** The longest rumble a game can ask for, ms. */
+export const RUMBLE_MAX_MS = 1500;
+
+/**
+ * The effect for a game's cartbox.rumble(strength, ms) under the player's
+ * vibration settings: none when vibration is off or the request is empty. The
+ * heavy motor carries the strength; the light one buzzes under it.
+ */
+export function rumbleEffect(strength: number, ms: number, settings: Partial<Pick<ControlSettings, "vibration" | "vibrationStrength">>): RumbleEffect | null {
+  if (settings.vibration === false) return null;
+  const s = clamp(strength, 0, 1) * clamp(settings.vibrationStrength ?? 1, 0, 1);
+  const duration = Math.round(clamp(ms, 0, RUMBLE_MAX_MS));
+  if (s <= 0 || duration <= 0) return null;
+  return { duration, strongMagnitude: s, weakMagnitude: Math.min(1, s * 0.6 + 0.1) };
 }
 
 /** A physical stick reading with a radial dead zone, rescaled to reach full lean. */

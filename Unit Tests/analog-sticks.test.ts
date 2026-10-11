@@ -2,7 +2,9 @@
  * cartbox.stick through the real engine: the SDK opts in on first use, reads
  * what the host packs into pmem 68, and Lockout walks with the left stick and
  * turns with the right one. cartbox.lookgain (CONTROLLER_SETTINGS_ROADMAP.md
- * C2) reads the gains the host packs into pmem 69, and Lockout turns by them.
+ * C2) reads the gains the host packs into pmem 69, and Lockout turns by them;
+ * cartbox.aimassist reads the level beside them and cartbox.rumble asks the
+ * host to vibrate (C3).
  */
 
 import { existsSync } from "node:fs";
@@ -11,7 +13,7 @@ import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { lockoutCartridge } from "@cartbox/editor";
-import { codeChunks, decodeMeshCamera, injectSdk } from "@cartbox/player";
+import { codeChunks, decodeMailbox, decodeMeshCamera, injectSdk } from "@cartbox/player";
 import {
   LOOK_GAIN_OPTIN_MAGIC,
   STICK_OPTIN_MAGIC,
@@ -86,6 +88,31 @@ end`;
     // stick() still reads, and leaves the host's gains in place.
     expect(pmem()[204]! - 1000).toBe(50);
     expect(stickChannel(pmem()[STICK_OPTIN_WORD]!)).toBe("gain");
+  });
+
+  it("read the aim assist level beside the gains, standard until the host answers", async () => {
+    const lua = `function TIC()
+  cartbox.lookgain(false)
+  pmem(200, cartbox.aimassist())
+end`;
+    const { tick, pmem, setGain } = await boot(injectSdk(codeChunks(new TextEncoder().encode(lua))));
+    tick(0);
+    expect(pmem()[200]).toBe(1);
+    for (const assist of [0, 2]) {
+      setGain({ x: 1, y: 1, zoom: 1, assist });
+      tick(0);
+      expect(pmem()[200]).toBe(assist);
+    }
+  });
+
+  it("send a rumble request to the host", async () => {
+    const lua = `local n = 0
+function TIC() n = n + 1 if n == 2 then cartbox.rumble(0.8, 120) end end`;
+    const { tick, mailbox } = await boot(injectSdk(codeChunks(new TextEncoder().encode(lua))));
+    tick(0);
+    const seq = decodeMailbox(mailbox(), 0).seq;
+    tick(0);
+    expect(decodeMailbox(mailbox(), seq).events).toEqual([{ type: 5, kind: "rumble", id: 204, value: 120 }]);
   });
 
   it("leaves pmem alone for a cart that never reads a stick", async () => {

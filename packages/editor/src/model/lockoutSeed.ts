@@ -4407,6 +4407,7 @@ local function player_fire()
   local aim,ad = auto_target()
   if aim and ad < 2.4 then
     p.cool=18; flash=3; vm("melee"); p.melee_t = tick
+    cartbox.rumble(0.8, 120)
     cartbox.sound("fire_sword",nil,nil,nil,1,0.9+math.random()*0.2)
     -- The swipe's glowing arc, right to left across the view.
     local fx,fy,fz = forward()
@@ -4431,6 +4432,7 @@ local function player_fire()
     p.slot=(p.slot==1) and 2 or 1; vm("ready"); return
   end
   p.cool = w.cool; flash = 4; vm("fire"); p.fired_t = tick
+  cartbox.rumble(w.pel > 1 and 0.55 or 0.3, w.pel > 1 and 90 or 50)
   cartbox.sound("fire_"..wid,nil,nil,nil,0.7,0.96+math.random()*0.08)
   if p.slot==1 then p.a1=p.a1-1 else p.a2=p.a2-1 end
   local ex,ey,ez = p.x, p.y+EYE, p.z
@@ -4870,8 +4872,19 @@ local function play_input()
   -- 8-button scheme.
   local lx, ly = cartbox.stick(0)
   local rx, ry = cartbox.stick(1)
-  -- The player's look speed (sensitivity, zoom sensitivity, look acceleration).
+  -- The player's look speed (sensitivity, zoom sensitivity, look acceleration)
+  -- and aim assist: 0 off, 1 standard (as Lockout always played), 2 strong.
   local gh, gv = cartbox.lookgain(p.zoom)
+  local assist = cartbox.aimassist()
+  -- Strong aim assist slows the turn across a locked enemy (aim friction).
+  if assist == 2 and rx ~= 0 and auto_target() then gh = gh * 0.7 end
+  -- A hit lands: rumble by how much it took (online too, where the host's
+  -- snapshots bring the damage).
+  do
+    local life = (p.hp or 0) + (p.sh or 0)
+    if p.lastlife and life < p.lastlife then cartbox.rumble(math.min(1, 0.4 + (p.lastlife - life) / 100), 160) end
+    p.lastlife = life
+  end
   local lstick = math.abs(lx) + math.abs(ly) > 0.05
   if not p.dead then
     if lstick then
@@ -4908,7 +4921,8 @@ local function play_input()
   if ry ~= 0 then
     p.ap = clamp(p.ap - ry*math.abs(ry)*0.045*gv, -1.1, 1.1); p.manualpitch = true
   elseif p.manualpitch then
-    if aim then p.ap = p.ap + (want-p.ap)*0.06 end
+    -- Once aimed by hand, aim assist only nudges toward a locked enemy (and off, not at all).
+    if aim then p.ap = p.ap + (want-p.ap)*(assist == 0 and 0 or assist == 2 and 0.12 or 0.06) end
   else
     p.ap=p.ap+(want-p.ap)*0.2
   end
