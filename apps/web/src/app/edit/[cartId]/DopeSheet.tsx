@@ -126,8 +126,12 @@ export function DopeSheet({
                       background: r.authored ? "#ffb03a" : "#8fa0c0",
                       outline: isPicked ? "2px solid #ffffff" : "none",
                       cursor: "ew-resize",
+                      touchAction: "none",
                     }}
-                  />
+                  >
+                    {/* A fingertip-sized hit area round the 9px key (TABLET_EDITOR_ROADMAP.md T3). */}
+                    <span aria-hidden style={{ position: "absolute", inset: -9 }} />
+                  </span>
                 );
               })}
             </div>

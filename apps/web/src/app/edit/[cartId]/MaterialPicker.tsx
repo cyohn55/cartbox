@@ -16,6 +16,8 @@
 
 import type { ReactNode } from "react";
 
+import { longPressProps } from "@/lib/useTabletGestures";
+
 import styles from "./editor.module.css";
 import { MATERIAL_OPTIONS, materialOptionLabel } from "./materialPalette";
 import { InspectorPanel } from "./workbenchPanels";
@@ -93,7 +95,8 @@ export function MaterialPicker({
                 chip.onRemove?.();
               })
             }
-            title={chip.onRemove ? `${chip.name} — right-click to remove` : chip.name}
+            {...longPressProps(chip.onRemove)}
+            title={chip.onRemove ? `${chip.name} — right-click or long-press to remove` : chip.name}
             aria-label={`Material ${chip.name}`}
             aria-pressed={chip.material === selected}
           >

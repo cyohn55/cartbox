@@ -52,6 +52,8 @@ import {
   type TextureAtlas,
 } from "@cartbox/editor";
 
+import { useViewGestures } from "@/lib/useTabletGestures";
+
 import styles from "./editor.module.css";
 import type { PaintSurface } from "./paintSurface";
 import { isPixelSpaceTool, type MapSpaceTool } from "./maptools";
@@ -841,13 +843,15 @@ export function Map3DCanvas({
     moveFocus(move[0], move[1], move[2]);
   };
 
-  const label = `Map in 3D, ${space.width} by ${space.depth} cells. Drag to orbit, shift-drag to pan, W A S D to move, Q and E for height.`;
+  const label = `Map in 3D, ${space.width} by ${space.depth} cells. Drag to orbit, shift-drag to pan, W A S D to move, Q and E for height. On a tablet: tap to edit, two fingers orbit, three pan, pinch to zoom, long-press for the right click.`;
+  // Touch and the Pencil (TABLET_EDITOR_ROADMAP.md T3): a tap edits as a
+  // click does, two fingers (or one, once a Pencil is used) orbit, three pan
+  // as Shift-drag does, a pinch zooms as the wheel does, and a long press is
+  // the right click.
+  const gestures = useViewGestures<HTMLCanvasElement>({ onPointerDown, onPointerMove, onPointerUp, onPointerCancel: () => (drag.current = null), orbitDrag: { button: 0 }, panDrag: { button: 0, shiftKey: true } });
   const pointerProps = {
     tabIndex: 0,
-    onPointerDown,
-    onPointerMove,
-    onPointerUp,
-    onPointerCancel: () => (drag.current = null),
+    ...gestures,
     onPointerLeave: () => setHover(null),
     onKeyDown,
     onContextMenu: (event: React.MouseEvent) => event.preventDefault(),
