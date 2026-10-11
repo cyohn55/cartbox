@@ -974,6 +974,9 @@ export function MapEditor({
             onCollisionCommitted={commitCollision}
             onFlagsCommitted={commitFlags}
             onHover={setHover}
+            onZoomStep={(step) => setZoom((z) => Math.min(MAP_ZOOMS.length - 1, Math.max(0, z + step)))}
+            onPickColor={setColorIndex}
+            onPickTile={(tile) => setBrush(singleTileBrush(tile))}
           />
         )}
 

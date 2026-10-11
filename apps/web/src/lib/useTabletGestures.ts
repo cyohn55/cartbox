@@ -53,6 +53,15 @@ export function useTablet(): TabletState {
   return useSyncExternalStore(tabletStore.subscribe, tabletStore.get, tabletStore.get);
 }
 
+/** The nearest ancestor that scrolls, for a two-finger (or navigating one-finger) pan of a 2D view. */
+export function scrollableParent(el: Element): Element | null {
+  for (let p = el.parentElement; p; p = p.parentElement) {
+    const style = getComputedStyle(p);
+    if (/(auto|scroll)/.test(style.overflow + style.overflowX + style.overflowY) && (p.scrollHeight > p.clientHeight || p.scrollWidth > p.clientWidth)) return p;
+  }
+  return document.scrollingElement;
+}
+
 /** What a canvas does with its pointers; any left out are ignored (undo/redo default to the editor's). */
 export interface GestureHandlers<E extends Element> {
   onToolDown?(sample: PointerSample, el: E): void;

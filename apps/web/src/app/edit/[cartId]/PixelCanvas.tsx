@@ -28,6 +28,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SpritePage } from "@cartbox/editor";
 
+import type { PointerSample } from "@/lib/tabletInput";
+import { scrollableParent, useGestures } from "@/lib/useTabletGestures";
+
 import styles from "./editor.module.css";
 import type { PaintSurface } from "./paintSurface";
 import {
@@ -102,9 +105,23 @@ interface PixelCanvasProps {
   coverage?: ReadonlySet<number> | null;
   /** On-screen scale, 0.5..4. The pixel grid stays crisp at any of them. */
   zoom?: number;
-  /** Take a value from the art as the active colour (the picker, and Alt-drag). */
+  /** Take a value from the art as the active colour (the picker, Alt-drag, and a long press). */
   onPickValue?: (value: number) => void;
+  /** Pinch zoom (TABLET_EDITOR_ROADMAP.md T2): scale the on-screen zoom by `factor` (above 1: closer). */
+  onZoom?: (factor: number) => void;
 }
+
+/** What the canvas reads of a pointer (an event, or a tablet-layer sample). */
+interface PointerInput {
+  readonly clientX: number;
+  readonly clientY: number;
+  readonly altKey: boolean;
+  readonly buttons: number;
+  readonly ctrlKey?: boolean;
+  readonly metaKey?: boolean;
+  readonly shiftKey?: boolean;
+}
+
 
 export function PixelCanvas({
   surface,
@@ -121,6 +138,7 @@ export function PixelCanvas({
   coverage = null,
   zoom = 1,
   onPickValue,
+  onZoom,
 }: PixelCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const painting = useRef(false);
@@ -353,7 +371,7 @@ export function PixelCanvas({
     return () => window.removeEventListener("keydown", handleKey);
   }, [selection, surface, page, tile, onEdit]);
 
-  const cellFromEvent = (event: React.PointerEvent): { x: number; y: number } | null => {
+  const cellFromEvent = (event: { readonly clientX: number; readonly clientY: number }): { x: number; y: number } | null => {
     const canvas = canvasRef.current;
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
@@ -397,10 +415,29 @@ export function PixelCanvas({
     onPickValue?.(surface.getPixel(page, tile, cell.x, cell.y));
   };
 
-  const handleDown = (event: React.PointerEvent) => {
+  /** The tile's pixels before the stroke under way, to put back if it's cancelled (a second finger made it a gesture). */
+  const strokeBefore = useRef<number[] | null>(null);
+  const snapshotTile = (): number[] => {
+    const out: number[] = [];
+    for (let y = 0; y < surface.tileSize; y++) for (let x = 0; x < surface.tileSize; x++) out.push(surface.getPixel(page, tile, x, y));
+    return out;
+  };
+  // Only the pixels the stroke changed are written back: writing a pixel
+  // through a material surface re-stamps its material channels, so leaving
+  // the rest alone keeps their grain as it was.
+  const restoreTile = (pixels: readonly number[]) => {
+    let i = 0;
+    for (let y = 0; y < surface.tileSize; y++)
+      for (let x = 0; x < surface.tileSize; x++) {
+        const was = pixels[i++]!;
+        if (surface.getPixel(page, tile, x, y) !== was) surface.setPixel(page, tile, x, y, was);
+      }
+    onEdit();
+  };
+
+  const handleDown = (event: PointerInput) => {
     const cell = cellFromEvent(event);
     if (!cell) return;
-    (event.target as HTMLElement).setPointerCapture(event.pointerId);
 
     // Alt is the eyedropper with any tool held — the reflex most pixel artists
     // arrive with, and it beats round-tripping through the tool rail.
@@ -435,10 +472,11 @@ export function PixelCanvas({
       return;
     }
     painting.current = true;
+    strokeBefore.current = snapshotTile();
     apply(cell);
   };
 
-  const handleMove = (event: React.PointerEvent) => {
+  const handleMove = (event: PointerInput) => {
     const cell = cellFromEvent(event);
     hoverCell.current = cell;
     onHover(cell);
@@ -471,8 +509,9 @@ export function PixelCanvas({
     }
   };
 
-  const stop = (event: React.PointerEvent) => {
+  const stop = (event: PointerInput) => {
     painting.current = false;
+    strokeBefore.current = null;
     marqueeAnchor.current = null;
     movingFrom.current = null;
     if (shapeAnchor.current) {
@@ -488,6 +527,37 @@ export function PixelCanvas({
     }
   };
 
+  // Input through the tablet layer (T2): the Pencil (and the mouse) draws; one
+  // finger does too until a Pencil is used, then pans; two fingers pan the
+  // panel and pinch to zoom; a long press picks the colour under it.
+  const asInput = (s: PointerSample): PointerInput => ({ clientX: s.x, clientY: s.y, altKey: s.altKey, buttons: s.buttons, ctrlKey: s.ctrlKey, metaKey: s.metaKey, shiftKey: s.shiftKey });
+  const gestures = useGestures<HTMLCanvasElement>(
+    {
+      onToolDown: (s) => handleDown(asInput(s)),
+      onToolMove: (s) => handleMove(asInput(s)),
+      onToolUp: (s) => stop(asInput(s)),
+      onToolCancel: () => {
+        const before = strokeBefore.current;
+        painting.current = false;
+        marqueeAnchor.current = null;
+        movingFrom.current = null;
+        shapeAnchor.current = null;
+        previewPoints.current = [];
+        strokeBefore.current = null;
+        if (before) restoreTile(before);
+        draw();
+      },
+      onHover: (s) => handleMove({ ...asInput(s), buttons: 0 }),
+      onPan: (dx, dy, el) => scrollableParent(el)?.scrollBy(-dx, -dy),
+      onZoom: (factor) => onZoom?.(factor),
+      onLongPress: (s) => {
+        const cell = cellFromEvent(asInput(s));
+        if (cell) pick(cell);
+      },
+    },
+    { drag: "pan" },
+  );
+
   const handleLeave = () => {
     hoverCell.current = null;
     onHover(null);
@@ -500,10 +570,7 @@ export function PixelCanvas({
         ref={canvasRef}
         className={styles.pixelCanvas}
         style={{ width: size, height: size }}
-        onPointerDown={handleDown}
-        onPointerMove={handleMove}
-        onPointerUp={stop}
-        onPointerCancel={stop}
+        {...gestures}
         onPointerLeave={handleLeave}
         role="img"
         aria-label={`Sprite ${tile}, ${surface.tileSize} by ${surface.tileSize} pixels`}

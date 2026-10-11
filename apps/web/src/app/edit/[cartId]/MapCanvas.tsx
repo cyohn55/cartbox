@@ -20,6 +20,9 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { faceTile, type CollisionMap, type MapVoxelSpace, type SpriteSheet, type TileFlags, type TileMap } from "@cartbox/editor";
 
+import type { PointerKind, PointerSample } from "@/lib/tabletInput";
+import { useGestures } from "@/lib/useTabletGestures";
+
 import { buildWorldAtlas } from "@/lib/faceTextures";
 
 import styles from "./editor.module.css";
@@ -30,6 +33,12 @@ import type { PaintSurface } from "./paintSurface";
 
 /** The tiles page the map references — the map can only stamp from page 0. */
 const TILES_PAGE = 0;
+
+/** Where a pointer is on the page (an event, or a tablet-layer sample's x, y). */
+interface At {
+  readonly clientX: number;
+  readonly clientY: number;
+}
 
 /** Fill of a solid cell on the collision layer — a translucent red the tile shows through. */
 const COLLISION_FILL = "rgba(255,64,64,0.45)";
@@ -102,6 +111,12 @@ interface MapCanvasProps {
   /** A stroke on the flags layer finished — the caller persists the layer. */
   onFlagsCommitted: () => void;
   onHover: (cell: { x: number; y: number } | null) => void;
+  /** A pinch (TABLET_EDITOR_ROADMAP.md T2): step the zoom in (1) or out (-1). */
+  onZoomStep?: (step: 1 | -1) => void;
+  /** A long press on the pixels layer: take the colour under it. */
+  onPickColor?: (colorIndex: number) => void;
+  /** A long press on the tiles layer: take the tile under it as the brush. */
+  onPickTile?: (tile: number) => void;
 }
 
 export function MapCanvas({
@@ -126,6 +141,9 @@ export function MapCanvas({
   onCollisionCommitted,
   onFlagsCommitted,
   onHover,
+  onZoomStep,
+  onPickColor,
+  onPickTile,
 }: MapCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hoverRef = useRef<HTMLDivElement>(null);
@@ -356,14 +374,14 @@ export function MapCanvas({
   };
 
   /** Canvas-relative pointer position in map-pixel space, or null when outside. */
-  const positionFromEvent = (event: React.PointerEvent): { x: number; y: number } | null => {
+  const positionFromEvent = (event: At): { x: number; y: number } | null => {
     const canvas = canvasRef.current;
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   };
 
-  const cellFromEvent = (event: React.PointerEvent): { x: number; y: number } | null => {
+  const cellFromEvent = (event: At): { x: number; y: number } | null => {
     const position = positionFromEvent(event);
     if (!position) return null;
     const x = Math.floor(position.x / cell);
@@ -373,7 +391,7 @@ export function MapCanvas({
   };
 
   /** The pixel within a cell's tile that the pointer is over. */
-  const pixelWithinCell = (event: React.PointerEvent, target: { x: number; y: number }) => {
+  const pixelWithinCell = (event: At, target: { x: number; y: number }) => {
     const position = positionFromEvent(event);
     if (!position) return null;
     const px = Math.floor((position.x - target.x * cell) / pixelSize);
@@ -412,11 +430,12 @@ export function MapCanvas({
   const applyPixels = (
     context: CanvasRenderingContext2D,
     target: { x: number; y: number },
-    event: React.PointerEvent,
+    event: At,
   ) => {
     const local = pixelWithinCell(event, target);
     if (!local) return;
     const tile = map.getCell(target.x, target.y);
+    rememberTile(tile);
     const value = tool === "eraser" ? 0 : colorIndex;
     // Through the material surface, so the fill and the pencil both carry each
     // colour's material profile into the channel banks.
@@ -497,10 +516,11 @@ export function MapCanvas({
     drawGuides(context);
   };
 
-  const apply = (target: { x: number; y: number }, event: React.PointerEvent) => {
+  const apply = (target: { x: number; y: number }, event: At) => {
     const context = canvasRef.current?.getContext("2d");
     if (!context) return;
     context.imageSmoothingEnabled = false;
+    rememberCells(target);
     if (showColumns) applyColumns(context, target);
     else if (showCollision) applyCollision(context, target);
     else if (showFlags) applyFlags(context, target);
@@ -527,15 +547,89 @@ export function MapCanvas({
     onHover(target);
   };
 
-  const handleDown = (event: React.PointerEvent) => {
+  // Undoing a cancelled stroke (TABLET_EDITOR_ROADMAP.md T2): a second finger
+  // turned it into a pinch or pan, so what it painted so far is put back.
+  // Each cell (each tile, on the pixels layer) is recorded the first time the
+  // stroke touches it, so a stroke on a large map costs what it paints rather
+  // than the map's size. Fills aren't recorded: they land whole, at the start.
+  const strokeLog = useRef<Map<number, () => void> | null>(null);
+  const record = (key: number, save: () => () => void) => {
+    const log = strokeLog.current;
+    if (log && !log.has(key)) log.set(key, save());
+  };
+  const rememberTile = (tile: number) =>
+    record(-1 - tile, () => {
+      const saved: number[] = [];
+      for (let y = 0; y < sheet.tileSize; y += 1) for (let x = 0; x < sheet.tileSize; x += 1) saved.push(pixels.getPixel(TILES_PAGE, tile, x, y));
+      return () => {
+        let i = 0;
+        for (let y = 0; y < sheet.tileSize; y += 1)
+          for (let x = 0; x < sheet.tileSize; x += 1) {
+            const was = saved[i++]!;
+            if (pixels.getPixel(TILES_PAGE, tile, x, y) !== was) pixels.setPixel(TILES_PAGE, tile, x, y, was);
+          }
+        refreshTile(tile);
+      };
+    });
+  /** Record the cells a tool is about to change at `target` (the pixels layer records tiles in applyPixels). */
+  const rememberCells = (target: { x: number; y: number }) => {
+    if (!strokeLog.current || layer === "pixels") return;
+    const { x, y } = target;
+    const key = y * map.width + x;
+    if (showColumns) {
+      record(key, () => {
+        const cells = Array.from({ length: space.maxHeight }, (_, h) => space.cellAt(x, h, y));
+        return () => cells.forEach((c, h) => (c ? space.set(x, h, y, c) : space.clear(x, h, y)));
+      });
+    } else if (showCollision) {
+      record(key, () => {
+        const was = collision.isSolid(x, y);
+        return () => collision.setSolid(x, y, was);
+      });
+    } else if (showFlags) {
+      const bit = activeFlag;
+      record(key, () => {
+        const was = flags.get(x, y, bit);
+        return () => flags.set(x, y, bit, was);
+      });
+    } else {
+      // A tile stamp covers the brush's footprint.
+      const [w, h] = tool === "eraser" ? [1, 1] : [brush.width, brush.height];
+      for (let row = 0; row < h && y + row < map.height; row += 1)
+        for (let column = 0; column < w && x + column < map.width; column += 1)
+          record((y + row) * map.width + x + column, () => {
+            const was = map.getCell(x + column, y + row);
+            return () => map.setCell(x + column, y + row, was);
+          });
+    }
+  };
+  const cancelStroke = () => {
+    const log = strokeLog.current;
+    strokeLog.current = null;
+    if (!log) {
+      stop();
+      return;
+    }
+    painting.current = false;
+    columnsDirty.current = false;
+    collisionDirty.current = false;
+    flagsDirty.current = false;
+    for (const undo of [...log.values()].reverse()) undo();
+    renderAll();
+    onEdit();
+  };
+
+  const handleDown = (event: At, kind: PointerKind = "mouse") => {
     const target = cellFromEvent(event);
     if (!target) return;
     painting.current = true;
-    (event.target as HTMLElement).setPointerCapture(event.pointerId);
+    // A touch or Pencil stroke can turn into a pinch and be cancelled, so keep
+    // what it changes to put back; a mouse stroke can't, and skips the copy.
+    strokeLog.current = kind === "mouse" || tool === "fill" || tool === "pixelFill" ? null : new Map();
     apply(target, event);
   };
 
-  const handleMove = (event: React.PointerEvent) => {
+  const handleMove = (event: At) => {
     const target = cellFromEvent(event);
     moveHover(target);
     // Flood fills are a single action; dragging them would refill continuously.
@@ -545,6 +639,7 @@ export function MapCanvas({
   };
 
   const stop = () => {
+    strokeLog.current = null;
     if (!painting.current) return;
     painting.current = false;
     // One history entry per stroke: pixel, column and collision strokes report at
@@ -563,18 +658,53 @@ export function MapCanvas({
     }
   };
 
+  // Input through the tablet layer (T2): the Pencil (and the mouse) paints;
+  // one finger does too until a Pencil is used, then pans; two fingers pan
+  // the map and pinch through the zoom steps; a long press picks what is
+  // under it (the colour on the pixels layer, the tile on the tiles layer).
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const pinch = useRef(1);
+  const at = (s: PointerSample): At => ({ clientX: s.x, clientY: s.y });
+  const gestures = useGestures<HTMLCanvasElement>(
+    {
+      onToolDown: (s) => handleDown(at(s), s.kind),
+      onToolMove: (s) => handleMove(at(s)),
+      onToolUp: () => stop(),
+      onToolCancel: cancelStroke,
+      onHover: (s) => moveHover(cellFromEvent(at(s))),
+      onPan: (dx, dy) => viewportRef.current?.scrollBy(-dx, -dy),
+      onZoom: (factor) => {
+        // The map zooms in steps, so a pinch moves one step per 25% of spread.
+        pinch.current *= factor;
+        if (pinch.current > 1.25 || pinch.current < 0.8) {
+          onZoomStep?.(pinch.current > 1 ? 1 : -1);
+          pinch.current = 1;
+        }
+      },
+      onLongPress: (s) => {
+        const target = cellFromEvent(at(s));
+        if (!target || showColumns || showCollision || showFlags) return;
+        const tile = map.getCell(target.x, target.y);
+        if (layer === "pixels") {
+          const local = pixelWithinCell(at(s), target);
+          if (local) onPickColor?.(pixels.getPixel(TILES_PAGE, tile, local.px, local.py));
+        } else {
+          onPickTile?.(tile);
+        }
+      },
+    },
+    { drag: "pan" },
+  );
+
   return (
-    <div className={styles.mapViewport}>
+    <div ref={viewportRef} className={styles.mapViewport}>
       <div className={styles.mapContent} style={{ width, height }}>
         <canvas
           ref={canvasRef}
           className={styles.mapCanvas}
           width={width}
           height={height}
-          onPointerDown={handleDown}
-          onPointerMove={handleMove}
-          onPointerUp={stop}
-          onPointerCancel={stop}
+          {...gestures}
           onPointerLeave={() => moveHover(null)}
           role="img"
           aria-label={`Map, ${map.width} by ${map.height} tiles`}
