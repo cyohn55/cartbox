@@ -95,7 +95,7 @@ if (run("voxel")) {
   const startCubes = await cubes();
 
   // 1. Two fingers orbit, and edit nothing.
-  let before = await shot(canvas);
+  const before = await shot(canvas);
   await t.fingers([[mid[0] - 50, mid[1]], [mid[0] + 50, mid[1]]], { dx: 90 });
   const orbited = await shot(canvas);
   check("voxel: two fingers orbit the model", differ(before, orbited) > 200, `${differ(before, orbited)} px`);
@@ -186,9 +186,9 @@ if (run("graph")) {
   const style = () => bg.evaluate((d) => ({ size: d.style.backgroundSize, pos: d.style.backgroundPosition }));
 
   // 1. One finger on the background pans (no Pencil used yet).
-  let s0 = await style();
+  const s0 = await style();
   await t.fingers([mid], { dx: -60, dy: -40 });
-  let s1 = await style();
+  const s1 = await style();
   check("graph: one finger pans the background", s1.pos !== s0.pos, `${s0.pos} -> ${s1.pos}`);
 
   // 2. A pinch zooms (as the wheel does).
