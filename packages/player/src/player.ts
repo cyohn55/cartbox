@@ -16,7 +16,7 @@ import { CanvasSurface, type DisplaySurface } from "./display.js";
 import { LitCanvasSurface } from "./lighting/LitCanvasSurface.js";
 import { PostFxSurface } from "./fx/PostFxSurface.js";
 import { anyPostFxEnabled, type PostFxSettings } from "./fx/postfx.js";
-import { QUALITY_PRESETS, applyQualityToPostFx, browserDeviceHints, resolveQuality, type QualityChoice, type QualityLevel, type QualitySettings } from "./quality.js";
+import { QUALITY_PRESETS, QualityGovernor, applyQualityToPostFx, browserDeviceHints, resolveQuality, type QualityChoice, type QualityLevel, type QualitySettings } from "./quality.js";
 import { createConsole, instantiateEngineModule, loadEngineModule, type ConsoleInstance } from "./engine.js";
 import { createDirectConsole, directCoreModel, type DirectConsole } from "./directConsole.js";
 
@@ -118,6 +118,9 @@ export class Player {
   private postFxSurface?: PostFxSurface;
   /** The graphics preset in effect (resolved from the quality option once the renderer is known). */
   private qualitySettings: QualitySettings = QUALITY_PRESETS.high;
+  /** "auto" (or no choice) steps the preset down while frames run long (see QualityGovernor). */
+  private qualityChoice: QualityChoice | undefined;
+  private readonly qualityGovernor = new QualityGovernor();
   private basePostFx?: PostFxSettings;
   private anim?: AnimSpec;
   /** Presented-frame clock for animation, kept in lockstep with the scene backdrop. */
@@ -461,6 +464,7 @@ export class Player {
           );
         }
         // "auto" quality weighs the device, including whether the GPU renderer came up.
+        this.qualityChoice = this.options.quality;
         this.qualitySettings = resolveQuality(this.options.quality, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend !== "software" : undefined));
         if (mesh) {
           surface = this.meshSurface = await MeshOverlaySurface.create(
@@ -646,6 +650,7 @@ export class Player {
       this.running = true;
       this.lastFrameTime = this.view.performance.now();
       this.frameAccumulatorMs = 0;
+      this.qualityGovernor.reset(this.lastFrameTime);
       this.frameHandle = this.view.requestAnimationFrame(this.loop);
     }
     // Attempted even when already running: a host can call resume() from a
@@ -694,7 +699,8 @@ export class Player {
   private readonly loop = (now: number): void => {
     if (!this.running) return;
 
-    this.frameAccumulatorMs += (now - this.lastFrameTime) * this.speed;
+    const sinceLast = now - this.lastFrameTime;
+    this.frameAccumulatorMs += sinceLast * this.speed;
     this.lastFrameTime = now;
     this.controllerInput?.poll();
 
@@ -710,6 +716,7 @@ export class Player {
     }
     if (advanced > 0) {
       this.present();
+      this.governQuality(sinceLast, this.view.performance.now() - now, now);
     }
 
     this.frameHandle = this.view.requestAnimationFrame(this.loop);
@@ -879,9 +886,27 @@ export class Player {
    * effect on.
    */
   setQuality(choice: QualityChoice): void {
-    this.qualitySettings = resolveQuality(choice, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend !== "software" : undefined));
+    this.qualityChoice = choice;
+    this.qualityGovernor.reset(this.view.performance.now());
+    this.applyQuality(resolveQuality(choice, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend !== "software" : undefined)));
+  }
+
+  private applyQuality(settings: QualitySettings): void {
+    this.qualitySettings = settings;
     this.meshSurface?.setQuality(this.qualitySettings);
     if (this.postFxSurface && this.basePostFx) this.postFxSurface.setSettings(applyQualityToPostFx(this.basePostFx, this.qualitySettings));
+  }
+
+  /**
+   * "auto" by measurement: a 3D scene whose frames keep coming slower than
+   * about 40 fps steps down a preset (high → medium → low; under 20 fps,
+   * straight to low). The device hints "auto" starts from can't tell a strong
+   * GPU from a weak one.
+   */
+  private governQuality(sinceLast: number, busy: number, now: number): void {
+    if ((this.qualityChoice !== undefined && this.qualityChoice !== "auto") || !this.meshSurface) return;
+    const step = this.qualityGovernor.feed(sinceLast, busy, now, this.qualitySettings.level);
+    if (step) this.applyQuality(QUALITY_PRESETS[step]);
   }
 
   /**

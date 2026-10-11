@@ -4529,6 +4529,47 @@ function browserDeviceHints(webgpu) {
     ...webgpu === void 0 ? {} : { webgpu }
   };
 }
+var QualityGovernor = class {
+  constructor(slowMs = 25, windowMs = 1500, settleMs = 3e3, busyShare = 0.6) {
+    this.slowMs = slowMs;
+    this.windowMs = windowMs;
+    this.settleMs = settleMs;
+    this.busyShare = busyShare;
+    /** Smoothed time between frames and time spent on them (ms), how many frames and how long that covers. */
+    this.average = 0;
+    this.busy = 0;
+    this.frames = 0;
+    this.measured = 0;
+    this.holdUntil = 0;
+  }
+  /** Start afresh at `now` (a new preset, a resume): wait, then measure again. */
+  reset(now) {
+    this.average = 0;
+    this.busy = 0;
+    this.frames = 0;
+    this.measured = 0;
+    this.holdUntil = now + this.settleMs;
+  }
+  /**
+   * A frame was shown `ms` after the last, at `now`, the player having spent
+   * `busyMs` of the frame working on it: the preset to step down to from
+   * `level`, or null to stay.
+   */
+  feed(ms, busyMs, now, level) {
+    if (now < this.holdUntil || !(ms > 0) || ms > 500) return null;
+    const k = 1 / Math.min(this.frames + 1, 30);
+    this.average += (ms - this.average) * k;
+    this.busy += (Math.min(busyMs, ms) - this.busy) * k;
+    this.frames += 1;
+    this.measured += ms;
+    if (this.measured < this.windowMs || this.frames < 10 || this.average <= this.slowMs || this.busy < this.average * this.busyShare) return null;
+    const index = QUALITY_LEVELS.indexOf(level);
+    if (index <= 0) return null;
+    const step = this.average > this.slowMs * 2 ? "low" : QUALITY_LEVELS[index - 1];
+    this.reset(now);
+    return step;
+  }
+};
 function applyQualityToPostFx(settings, quality) {
   if (!quality.disabledEffects.some((id) => settings.enabled[id])) return settings;
   const enabled = { ...settings.enabled };
@@ -17560,6 +17601,7 @@ var Player = class {
     this.sounds = null;
     /** The graphics preset in effect (resolved from the quality option once the renderer is known). */
     this.qualitySettings = QUALITY_PRESETS.high;
+    this.qualityGovernor = new QualityGovernor();
     /** Presented-frame clock for animation, kept in lockstep with the scene backdrop. */
     this.presentFrame = 0;
     /** Where the pointer is written (the debug block's offset from pmem), when the cart has UI documents. */
@@ -17617,7 +17659,8 @@ var Player = class {
      */
     this.loop = (now) => {
       if (!this.running) return;
-      this.frameAccumulatorMs += (now - this.lastFrameTime) * this.speed;
+      const sinceLast = now - this.lastFrameTime;
+      this.frameAccumulatorMs += sinceLast * this.speed;
       this.lastFrameTime = now;
       this.controllerInput?.poll();
       const maxFramesPerRender = 4;
@@ -17630,6 +17673,7 @@ var Player = class {
       }
       if (advanced > 0) {
         this.present();
+        this.governQuality(sinceLast, this.view.performance.now() - now, now);
       }
       this.frameHandle = this.view.requestAnimationFrame(this.loop);
     };
@@ -17837,6 +17881,7 @@ var Player = class {
             this.model.renderCaps
           );
         }
+        this.qualityChoice = this.options.quality;
         this.qualitySettings = resolveQuality(this.options.quality, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend !== "software" : void 0));
         if (mesh2) {
           surface = this.meshSurface = await MeshOverlaySurface.create(
@@ -17992,6 +18037,7 @@ var Player = class {
       this.running = true;
       this.lastFrameTime = this.view.performance.now();
       this.frameAccumulatorMs = 0;
+      this.qualityGovernor.reset(this.lastFrameTime);
       this.frameHandle = this.view.requestAnimationFrame(this.loop);
     }
     try {
@@ -18165,9 +18211,25 @@ var Player = class {
    * effect on.
    */
   setQuality(choice) {
-    this.qualitySettings = resolveQuality(choice, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend !== "software" : void 0));
+    this.qualityChoice = choice;
+    this.qualityGovernor.reset(this.view.performance.now());
+    this.applyQuality(resolveQuality(choice, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend !== "software" : void 0)));
+  }
+  applyQuality(settings) {
+    this.qualitySettings = settings;
     this.meshSurface?.setQuality(this.qualitySettings);
     if (this.postFxSurface && this.basePostFx) this.postFxSurface.setSettings(applyQualityToPostFx(this.basePostFx, this.qualitySettings));
+  }
+  /**
+   * "auto" by measurement: a 3D scene whose frames keep coming slower than
+   * about 40 fps steps down a preset (high → medium → low; under 20 fps,
+   * straight to low). The device hints "auto" starts from can't tell a strong
+   * GPU from a weak one.
+   */
+  governQuality(sinceLast, busy, now) {
+    if (this.qualityChoice !== void 0 && this.qualityChoice !== "auto" || !this.meshSurface) return;
+    const step = this.qualityGovernor.feed(sinceLast, busy, now, this.qualitySettings.level);
+    if (step) this.applyQuality(QUALITY_PRESETS[step]);
   }
   /**
    * Hand the running scene streamed textures, by the `ref` of the placeholder
@@ -20182,6 +20244,7 @@ export {
   Profiler,
   QUALITY_LEVELS,
   QUALITY_PRESETS,
+  QualityGovernor,
   RAM_LAYOUTS,
   REPLAY_VERSION,
   ReplayError,
