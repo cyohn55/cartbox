@@ -5480,6 +5480,8 @@ var PAD_BUTTONS = [
   "Right",
   "Guide"
 ];
+var RESPONSE_CURVES = ["standard", "dynamic", "precision", "responsive"];
+var STICK_LAYOUTS = ["default", "southpaw", "legacy", "legacySouthpaw"];
 var DEFAULT_PAD_BINDINGS = {
   A: 4 /* A */,
   B: 5 /* B */,
@@ -5510,9 +5512,19 @@ var DEFAULT_KEY_BINDINGS = {
   KeyS: 7 /* Y */
 };
 var START_KEYS = ["Escape", "Enter", "KeyP"];
+var DEFAULT_STICK_DEAD_ZONES = { axial: 0, radial: 0.18, maxInput: 1 };
+var DEFAULT_TRIGGER_THRESHOLD = 0.5;
 var DEFAULT_CONTROL_SETTINGS = {
   invertY: false,
+  invertX: false,
   lookSensitivity: 1,
+  lookSensitivityY: 1,
+  lookCurve: "standard",
+  leftStick: DEFAULT_STICK_DEAD_ZONES,
+  rightStick: DEFAULT_STICK_DEAD_ZONES,
+  stickLayout: "default",
+  leftTrigger: DEFAULT_TRIGGER_THRESHOLD,
+  rightTrigger: DEFAULT_TRIGGER_THRESHOLD,
   padBindings: DEFAULT_PAD_BINDINGS,
   keyBindings: DEFAULT_KEY_BINDINGS,
   touchOpacity: 0.85,
@@ -5538,9 +5550,31 @@ function parseControlSettings(value, defaults = DEFAULT_CONTROL_SETTINGS) {
     );
     if (entries.length > 0) keyBindings = Object.fromEntries(entries);
   }
+  const lookSensitivity = num3(raw.lookSensitivity, 0.25, 3, defaults.lookSensitivity);
+  const deadZones = (v, fallback) => {
+    const base = fallback ?? DEFAULT_STICK_DEAD_ZONES;
+    if (typeof v !== "object" || v === null) return base;
+    const z = v;
+    const radial = num3(z.radial, 0, 0.5, base.radial);
+    return {
+      axial: num3(z.axial, 0, 0.5, base.axial),
+      radial,
+      // Full lean must lie past the dead zone.
+      maxInput: Math.max(radial + 0.1, num3(z.maxInput, 0.5, 1, base.maxInput))
+    };
+  };
   return {
     invertY: typeof raw.invertY === "boolean" ? raw.invertY : defaults.invertY,
-    lookSensitivity: num3(raw.lookSensitivity, 0.25, 3, defaults.lookSensitivity),
+    invertX: typeof raw.invertX === "boolean" ? raw.invertX : defaults.invertX ?? false,
+    lookSensitivity,
+    // Saved before there were two: vertical follows horizontal.
+    lookSensitivityY: raw.lookSensitivityY !== void 0 ? num3(raw.lookSensitivityY, 0.25, 3, defaults.lookSensitivityY ?? lookSensitivity) : raw.lookSensitivity !== void 0 ? lookSensitivity : defaults.lookSensitivityY ?? lookSensitivity,
+    lookCurve: RESPONSE_CURVES.includes(raw.lookCurve) ? raw.lookCurve : defaults.lookCurve ?? "standard",
+    leftStick: deadZones(raw.leftStick, defaults.leftStick),
+    rightStick: deadZones(raw.rightStick, defaults.rightStick),
+    stickLayout: STICK_LAYOUTS.includes(raw.stickLayout) ? raw.stickLayout : defaults.stickLayout ?? "default",
+    leftTrigger: num3(raw.leftTrigger, 0.05, 0.95, defaults.leftTrigger ?? DEFAULT_TRIGGER_THRESHOLD),
+    rightTrigger: num3(raw.rightTrigger, 0.05, 0.95, defaults.rightTrigger ?? DEFAULT_TRIGGER_THRESHOLD),
     padBindings,
     keyBindings,
     touchOpacity: num3(raw.touchOpacity, 0.2, 1, defaults.touchOpacity),
@@ -5548,17 +5582,63 @@ function parseControlSettings(value, defaults = DEFAULT_CONTROL_SETTINGS) {
     ...raw.actionBindings !== void 0 ? { actionBindings: parseActionRebinds(raw.actionBindings) } : defaults.actionBindings ? { actionBindings: defaults.actionBindings } : {}
   };
 }
+function responseCurve(curve, m) {
+  const t = clamp(m, 0, 1);
+  switch (curve) {
+    case "dynamic":
+      return t * t * (3 - 2 * t);
+    case "precision":
+      return t * t;
+    case "responsive":
+      return Math.sqrt(t);
+    default:
+      return t;
+  }
+}
 function applyLookSettings(axes, settings) {
-  const s = settings.lookSensitivity;
-  const rx = clamp((axes[2] ?? 0) * s, -1, 1);
-  const ry = clamp((axes[3] ?? 0) * s * (settings.invertY ? -1 : 1), -1, 1);
+  let x = axes[2] ?? 0;
+  let y = axes[3] ?? 0;
+  const m = Math.hypot(x, y);
+  if (m > 0 && settings.lookCurve && settings.lookCurve !== "standard") {
+    const k = responseCurve(settings.lookCurve, m) / m;
+    x *= k;
+    y *= k;
+  }
+  const sx = settings.lookSensitivity;
+  const sy = settings.lookSensitivityY ?? sx;
+  const rx = clamp(x * sx * (settings.invertX ? -1 : 1), -1, 1);
+  const ry = clamp(y * sy * (settings.invertY ? -1 : 1), -1, 1);
   return [axes[0] ?? 0, axes[1] ?? 0, rx, ry];
 }
 function deadZoned(x, y, deadZone = 0.18) {
-  const m = Math.hypot(x, y);
-  if (m < deadZone) return [0, 0];
-  const k = Math.min(1, (m - deadZone) / (1 - deadZone)) / m;
-  return [x * k, y * k];
+  return shapeStick(x, y, { axial: 0, radial: deadZone, maxInput: 1 });
+}
+function shapeStick(x, y, zones) {
+  const axis = (v) => {
+    const a = Math.abs(v);
+    if (zones.axial <= 0) return v;
+    return a <= zones.axial ? 0 : Math.sign(v) * (a - zones.axial) / (1 - zones.axial);
+  };
+  const ax = axis(x);
+  const ay = axis(y);
+  const m = Math.hypot(ax, ay);
+  if (m <= zones.radial || m === 0) return [0, 0];
+  const span = Math.max(1e-6, zones.maxInput - zones.radial);
+  const k = Math.min(1, (m - zones.radial) / span) / m;
+  return [ax * k, ay * k];
+}
+function layoutSticks(axes, layout) {
+  const [lx = 0, ly = 0, rx = 0, ry = 0] = axes;
+  switch (layout) {
+    case "southpaw":
+      return [rx, ry, lx, ly];
+    case "legacy":
+      return [rx, ly, lx, ry];
+    case "legacySouthpaw":
+      return [lx, ry, rx, ly];
+    default:
+      return [lx, ly, rx, ry];
+  }
 }
 function standardizePad(pad) {
   if (pad.mapping === "standard" || pad.mapping === void 0) return pad;
@@ -5594,14 +5674,16 @@ function standardizePad(pad) {
     ]
   };
 }
-function readPad(raw, bindings) {
+function readPad(raw, bindings, tuning = {}) {
   const pad = standardizePad(raw);
   let mask = 0;
   let start = false;
   const pressed = /* @__PURE__ */ new Set();
+  const pull = { LT: tuning.leftTrigger ?? DEFAULT_TRIGGER_THRESHOLD, RT: tuning.rightTrigger ?? DEFAULT_TRIGGER_THRESHOLD };
   PAD_BUTTONS.forEach((name, index) => {
     const button = pad.buttons[index];
-    const down = button ? button.pressed || button.value > 0.5 : false;
+    const trigger = name === "LT" || name === "RT" ? pull[name] : null;
+    const down = !button ? false : trigger !== null ? button.value > 0 ? button.value >= trigger : button.pressed : button.pressed || button.value > 0.5;
     if (!down) return;
     pressed.add(name);
     const target = bindings[name];
@@ -5609,9 +5691,9 @@ function readPad(raw, bindings) {
     else if (target !== null && target !== void 0) mask |= 1 << target;
   });
   if (bindings.Start === null && !Object.values(bindings).includes("start") && pad.buttons[9]?.pressed) start = true;
-  const [lx, ly] = deadZoned(pad.axes[0] ?? 0, pad.axes[1] ?? 0);
-  const [rx, ry] = deadZoned(pad.axes[2] ?? 0, pad.axes[3] ?? 0);
-  return { mask, axes: [lx, ly, rx, ry], start, pressed };
+  const [lx, ly] = shapeStick(pad.axes[0] ?? 0, pad.axes[1] ?? 0, tuning.leftStick ?? DEFAULT_STICK_DEAD_ZONES);
+  const [rx, ry] = shapeStick(pad.axes[2] ?? 0, pad.axes[3] ?? 0, tuning.rightStick ?? DEFAULT_STICK_DEAD_ZONES);
+  return { mask, axes: layoutSticks([lx, ly, rx, ry], tuning.stickLayout), start, pressed };
 }
 
 // src/input.ts
@@ -6010,7 +6092,7 @@ var GamepadInput = class {
     const claimed = this.claimed();
     let bindings = this.settings().padBindings;
     if (claimed.size > 0) bindings = Object.fromEntries(Object.entries(bindings).map(([b, t]) => [b, claimed.has(b) ? null : t]));
-    const { mask, axes, start, pressed } = readPad(pad, bindings);
+    const { mask, axes, start, pressed } = readPad(pad, bindings, this.settings());
     this.state.setPad(mask, axes);
     this.pressed = pressed;
     if (start && !this.startHeld) this.onStart?.();
@@ -20216,6 +20298,8 @@ export {
   DEFAULT_LIGHT,
   DEFAULT_MODEL_ID,
   DEFAULT_PAD_BINDINGS,
+  DEFAULT_STICK_DEAD_ZONES,
+  DEFAULT_TRIGGER_THRESHOLD,
   DIRECT_CORE_URL,
   DebugCommand,
   DirectTransport,
@@ -20291,6 +20375,7 @@ export {
   QualityGovernor,
   RAM_LAYOUTS,
   REPLAY_VERSION,
+  RESPONSE_CURVES,
   ReplayError,
   ReplayRecorder,
   ReplaySource,
@@ -20298,6 +20383,7 @@ export {
   SAVE_MAGIC,
   SOFTWARE_RASTER_CAPS,
   START_KEYS,
+  STICK_LAYOUTS,
   SceneBackdropSurface,
   SimulatedNetHub,
   SoftwareSceneRenderer,
@@ -20411,6 +20497,7 @@ export {
   interpolateNormal,
   isMobileAgent,
   jointFrames,
+  layoutSticks,
   lensFlareAt,
   loadEngineModule,
   lookLut,
@@ -20464,6 +20551,7 @@ export {
   resolveSceneLayers,
   resolveSupersample,
   resolveUnlockedAchievements,
+  responseCurve,
   rewriteLuaCode,
   runNetLab,
   runReplayEvents,
@@ -20484,6 +20572,7 @@ export {
   sendDebugCommand,
   serializeReplay,
   shade,
+  shapeStick,
   simulateEmitter,
   smoothFrontEdges,
   softKneePrefilter,

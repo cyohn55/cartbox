@@ -526,7 +526,7 @@ export class GamepadInput {
     const claimed = this.claimed();
     let bindings = this.settings().padBindings;
     if (claimed.size > 0) bindings = Object.fromEntries(Object.entries(bindings).map(([b, t]) => [b, claimed.has(b) ? null : t])) as typeof bindings;
-    const { mask, axes, start, pressed } = readPad(pad, bindings);
+    const { mask, axes, start, pressed } = readPad(pad, bindings, this.settings());
     this.state.setPad(mask, axes);
     this.pressed = pressed;
     if (start && !this.startHeld) this.onStart?.();

@@ -1327,10 +1327,12 @@ declare class SwitchableTransport implements NetTransport {
 }
 
 /**
- * Control settings a player can change from a game's Start menu: aim inversion,
- * look sensitivity, button mapping for a controller and the keyboard, and the
- * on-screen pad's size and opacity. Pure data plus the pure transforms the input
- * layer applies, so every piece is testable without a DOM or a gamepad.
+ * Control settings a player can change from a game's Start menu: how each stick
+ * reads (dead zones, max input), how lean becomes look (sensitivity per axis,
+ * inversion, a response curve), the stick layout, the triggers' pull, button
+ * mapping for a controller and the keyboard, and the on-screen pad's size and
+ * opacity (CONTROLLER_SETTINGS_ROADMAP.md). Pure data plus the pure transforms
+ * the input layer applies, so every piece is testable without a DOM or a gamepad.
  */
 
 /**
@@ -1341,11 +1343,55 @@ declare const PAD_BUTTONS: readonly ["A", "B", "X", "Y", "LB", "RB", "LT", "RT",
 type PadButton = (typeof PAD_BUTTONS)[number];
 /** What a physical control does: press a console button, open the Start menu, or nothing. */
 type ControlTarget = ConsoleButton | "start" | null;
+/**
+ * How a physical stick reads (C1), as Halo Infinite's thumbstick settings have it.
+ * Each value is a share of the stick's travel, 0..1.
+ */
+interface StickDeadZones {
+    /** Each axis ignores lean below this on its own (so a push straight up stays straight up). */
+    readonly axial: number;
+    /** Lean below this distance from the centre reads as none. */
+    readonly radial: number;
+    /** Lean past this reads as full: a stick that never quite reaches its edge still can. */
+    readonly maxInput: number;
+}
+/**
+ * How look-stick lean becomes look (C1). Standard passes it as it comes; the
+ * others reshape its distance from centre, keeping its direction:
+ * - dynamic: an S-curve, fine near the centre, steepest mid-way, settling at the edge;
+ * - precision: slower near the centre (lean²), for fine aim;
+ * - responsive: quicker off the centre (√lean).
+ */
+type ResponseCurve = "standard" | "dynamic" | "precision" | "responsive";
+declare const RESPONSE_CURVES: readonly ResponseCurve[];
+/**
+ * Which stick moves and which looks (C1), as Call of Duty names them:
+ * - default: the left stick moves and strafes, the right one looks;
+ * - southpaw: swapped;
+ * - legacy: the left stick moves forward and back and turns, the right one strafes and looks up and down;
+ * - legacySouthpaw: legacy, swapped.
+ */
+type StickLayout = "default" | "southpaw" | "legacy" | "legacySouthpaw";
+declare const STICK_LAYOUTS: readonly StickLayout[];
 interface ControlSettings {
-    /** Invert the right stick's vertical axis (push up to aim down). */
+    /** Invert the look vertical axis (push up to aim down). */
     readonly invertY: boolean;
-    /** Look sensitivity, 0.25..3: scales the right stick before the game reads it. */
+    /** Invert the look horizontal axis (push right to turn left). */
+    readonly invertX?: boolean;
+    /** Horizontal look sensitivity, 0.25..3: scales the look stick's x before the game reads it. */
     readonly lookSensitivity: number;
+    /** Vertical look sensitivity, 0.25..3 (absent: the same as horizontal, as before there were two). */
+    readonly lookSensitivityY?: number;
+    /** How look-stick lean becomes look. */
+    readonly lookCurve?: ResponseCurve;
+    /** The physical left and right sticks' dead zones (absent: a 0.18 radial dead zone, as always). */
+    readonly leftStick?: StickDeadZones;
+    readonly rightStick?: StickDeadZones;
+    /** Which stick moves and which looks. */
+    readonly stickLayout?: StickLayout;
+    /** How far (0.05..0.95) the left and right triggers must be pulled to press. */
+    readonly leftTrigger?: number;
+    readonly rightTrigger?: number;
     /** Controller buttons → what they do. */
     readonly padBindings: Readonly<Record<PadButton, ControlTarget>>;
     /** Keyboard `KeyboardEvent.code` → console button. */
@@ -1362,20 +1408,39 @@ declare const DEFAULT_PAD_BINDINGS: Readonly<Record<PadButton, ControlTarget>>;
 declare const DEFAULT_KEY_BINDINGS: Readonly<Record<string, ConsoleButton>>;
 /** Keys that open the Start menu (unless rebound to a console button). */
 declare const START_KEYS: readonly string[];
+/** A stick as the player always read it: a 0.18 radial dead zone, full lean at the edge. */
+declare const DEFAULT_STICK_DEAD_ZONES: StickDeadZones;
+/** Triggers press past half-way, as they always did. */
+declare const DEFAULT_TRIGGER_THRESHOLD = 0.5;
 declare const DEFAULT_CONTROL_SETTINGS: ControlSettings;
 /**
  * Read stored settings (e.g. from localStorage), keeping only valid fields and
  * falling back to the defaults for anything missing or malformed.
  */
 declare function parseControlSettings(value: unknown, defaults?: ControlSettings): ControlSettings;
+/** A look-stick lean's distance from centre (0..1) through a response curve. */
+declare function responseCurve(curve: ResponseCurve | undefined, m: number): number;
 /**
- * The sticks as the game should see them: the right stick scaled by the look
- * sensitivity (reaching full lean sooner when it is above 1) and its vertical
- * axis flipped when aim is inverted. The left stick passes through.
+ * The sticks as the game should see them. The move stick passes through. The
+ * look stick goes through its response curve (its distance from centre,
+ * keeping its direction), then each axis is scaled by its sensitivity
+ * (reaching full lean sooner when it is above 1) and flipped when inverted.
  */
-declare function applyLookSettings(axes: readonly number[], settings: Pick<ControlSettings, "invertY" | "lookSensitivity">): [number, number, number, number];
+declare function applyLookSettings(axes: readonly number[], settings: Pick<ControlSettings, "invertY" | "lookSensitivity"> & Partial<Pick<ControlSettings, "invertX" | "lookSensitivityY" | "lookCurve">>): [number, number, number, number];
 /** A physical stick reading with a radial dead zone, rescaled to reach full lean. */
 declare function deadZoned(x: number, y: number, deadZone?: number): [number, number];
+/**
+ * A physical stick reading through its dead zones (C1). First each axis on its
+ * own past the axial dead zone, then the stick's distance from centre between
+ * the radial dead zone and the max input threshold, both rescaled so lean just
+ * past a dead zone reads just above nothing and the threshold reads full.
+ */
+declare function shapeStick(x: number, y: number, zones: StickDeadZones): [number, number];
+/**
+ * The two sticks as move and look (C1): [moveX, moveY, lookX, lookY] from the
+ * physical [leftX, leftY, rightX, rightY] in a stick layout.
+ */
+declare function layoutSticks(axes: readonly number[], layout: StickLayout | undefined): [number, number, number, number];
 /** One gamepad snapshot (the fields the reader uses from the Gamepad API). */
 interface PadSnapshot {
     readonly axes: readonly number[];
@@ -1397,13 +1462,14 @@ declare function standardizePad<T extends PadSnapshot & {
 }>(pad: T): PadSnapshot;
 /**
  * What a gamepad is doing: the console-button mask its bindings press, both
- * sticks (dead-zoned), whether a control bound to "start" is held, and every
+ * sticks (through the player's dead zones, as [moveX, moveY, lookX, lookY] in
+ * their stick layout), whether a control bound to "start" is held, and every
  * button held (which input actions bind directly, whatever it's mapped to).
  */
 declare function readPad(raw: PadSnapshot & {
     readonly mapping?: string;
     readonly id?: string;
-}, bindings: Readonly<Record<PadButton, ControlTarget>>): {
+}, bindings: Readonly<Record<PadButton, ControlTarget>>, tuning?: Partial<Pick<ControlSettings, "leftStick" | "rightStick" | "stickLayout" | "leftTrigger" | "rightTrigger">>): {
     mask: number;
     axes: [number, number, number, number];
     start: boolean;
@@ -7417,4 +7483,4 @@ declare const DIRECT_CORE_URL = "/engine/modern-core/modern-core.js";
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { AgentCrowd, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_PAD_BINDINGS, DIRECT_CORE_URL, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, DirectTransport, type DirectTransportOptions, type DriftStats, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GamepadInput, type GeneratedTrack, type GlContextProvider, type GradingLut, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LabCart, type LabProbe, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, type LinkConditions, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetLabOptions, type NetLabReport, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetSignal, type NetState, type NetTransport, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type ProfileSection, type ProfileSnapshot, Profiler, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, QualityGovernor, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type Rgb, type RtcDataChannelLike, type RtcPeerConnectionFactory, type RtcPeerConnectionLike, RuntimeChannel, SAVE_MAGIC, SOFTWARE_RASTER_CAPS, START_KEYS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, SimulatedNetHub, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, SwitchableTransport, TILT_SHIFT_FEATHER, TINT_PALETTE, type TextureLookup, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3$2 as Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, breakableLine, browserDeviceHints, browserRtc, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeNetMessage, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreModel, drift, effectiveBreakpoints, emitterPreset, encodeLut, encodeNetMessage, errorStack, estimateSceneBytes, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hasCommandRing, hashCart, hashEventId, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interpolateNormal, isMobileAgent, jointFrames, lensFlareAt, loadEngineModule, lookLut, lutStrip, makeShadowTexture, mount, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, rewriteLuaCode, runNetLab, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, sendDebugCommand, serializeReplay, shade, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, tokenizeLua, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };
+export { AgentCrowd, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_PAD_BINDINGS, DEFAULT_STICK_DEAD_ZONES, DEFAULT_TRIGGER_THRESHOLD, DIRECT_CORE_URL, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, DirectTransport, type DirectTransportOptions, type DriftStats, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GamepadInput, type GeneratedTrack, type GlContextProvider, type GradingLut, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LabCart, type LabProbe, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, type LinkConditions, LitCanvasSurface, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetLabOptions, type NetLabReport, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetSignal, type NetState, type NetTransport, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type ProfileSection, type ProfileSnapshot, Profiler, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, QualityGovernor, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, RESPONSE_CURVES, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedPbr, type ResolvedPlacement, type ResponseCurve, type Rgb, type RtcDataChannelLike, type RtcPeerConnectionFactory, type RtcPeerConnectionLike, RuntimeChannel, SAVE_MAGIC, SOFTWARE_RASTER_CAPS, START_KEYS, STICK_LAYOUTS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, SimulatedNetHub, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, type StickDeadZones, type StickLayout, SwitchableTransport, TILT_SHIFT_FEATHER, TINT_PALETTE, type TextureLookup, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3$2 as Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, breakableLine, browserDeviceHints, browserRtc, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeNetMessage, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreModel, drift, effectiveBreakpoints, emitterPreset, encodeLut, encodeNetMessage, errorStack, estimateSceneBytes, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, hasCommandRing, hashCart, hashEventId, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interpolateNormal, isMobileAgent, jointFrames, layoutSticks, lensFlareAt, loadEngineModule, lookLut, lutStrip, makeShadowTexture, mount, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, responseCurve, rewriteLuaCode, runNetLab, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, sendDebugCommand, serializeReplay, shade, shapeStick, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, tokenizeLua, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };

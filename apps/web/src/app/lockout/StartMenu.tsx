@@ -2,8 +2,10 @@
 
 /**
  * The Start menu: opened by a controller's Start, the touch pad's Start button,
- * or Enter / P. Controls (aim inversion, look sensitivity, the touch pad),
- * button mapping for a controller and the keyboard, the game's input actions
+ * or Enter / P. Controls (look sensitivity per axis, inversion, the response
+ * curve, each stick's dead zones, the stick layout and the triggers' pull, with
+ * a live picture of the controller), the touch pad, button mapping for a
+ * controller and the keyboard, the game's input actions
  * (EP15: rebind each one's key and controller button), audio and display, plus
  * resume / leave. Every setting applies at once and is kept in this browser.
  * Fully usable with a controller: D-pad or stick to move, left/right to adjust,
@@ -11,7 +13,22 @@
  */
 
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { ConsoleButton, DEFAULT_CONTROL_SETTINGS, PAD_BUTTONS, standardizePad, type ControlTarget, type PadButton } from "@cartbox/player";
+import {
+  ConsoleButton,
+  DEFAULT_CONTROL_SETTINGS,
+  DEFAULT_STICK_DEAD_ZONES,
+  DEFAULT_TRIGGER_THRESHOLD,
+  PAD_BUTTONS,
+  RESPONSE_CURVES,
+  STICK_LAYOUTS,
+  standardizePad,
+  type ControlSettings,
+  type ControlTarget,
+  type PadButton,
+  type ResponseCurve,
+  type StickDeadZones,
+  type StickLayout,
+} from "@cartbox/player";
 import { COLOR_FILTERS, COLOR_FILTER_LABELS, TEXT_SCALES, actionLabel, languageName, reboundActions, type ActionPadButton, type ColorFilter, type InputAction } from "@cartbox/editor";
 import type { PlayerPrefs } from "@/lib/accessibilityPrefs";
 
@@ -24,8 +41,41 @@ import {
   type GameAction,
   type GameSettings,
 } from "@/lib/gameSettings";
+import { StickPreview } from "./StickPreview";
 
-type Tab = "controls" | "buttons" | "audio" | "display";
+type Tab = "controls" | "touch" | "buttons" | "audio" | "display";
+const TABS: readonly Tab[] = ["controls", "touch", "buttons", "audio", "display"];
+const TAB_LABELS: Record<Tab, string> = { controls: "Controls", touch: "Touch", buttons: "Button mapping", audio: "Audio", display: "Display" };
+
+const CURVE_LABELS: Record<ResponseCurve, string> = {
+  standard: "Standard — as the stick leans",
+  dynamic: "Dynamic — fine near the centre, quick mid-way",
+  precision: "Precision — slower near the centre",
+  responsive: "Responsive — quicker off the centre",
+};
+
+const LAYOUT_LABELS: Record<StickLayout, string> = {
+  default: "Default — left moves, right looks",
+  southpaw: "Southpaw — right moves, left looks",
+  legacy: "Legacy — left moves and turns, right strafes and looks up/down",
+  legacySouthpaw: "Legacy southpaw — legacy, sticks swapped",
+};
+
+/** The settings the Controls tab owns (its reset puts back only these). */
+const STICK_SETTING_KEYS = [
+  "invertY",
+  "invertX",
+  "lookSensitivity",
+  "lookSensitivityY",
+  "lookCurve",
+  "leftStick",
+  "rightStick",
+  "stickLayout",
+  "leftTrigger",
+  "rightTrigger",
+] as const satisfies readonly (keyof ControlSettings)[];
+
+const pct = (v: number) => `${Math.round(v * 100)}%`;
 
 export interface StartMenuProps {
   settings: GameSettings;
@@ -126,7 +176,7 @@ export function StartMenu(props: StartMenuProps) {
         </div>
 
         <div role="tablist" style={styles.tabs}>
-          {(["controls", "buttons", "audio", "display"] as const).map((t) => (
+          {TABS.map((t) => (
             <button
               key={t}
               type="button"
@@ -136,7 +186,7 @@ export function StartMenu(props: StartMenuProps) {
               onClick={() => setTab(t)}
               style={{ ...styles.tab, ...(tab === t ? styles.tabOn : {}) }}
             >
-              {t === "controls" ? "Controls" : t === "buttons" ? "Button mapping" : t === "audio" ? "Audio" : "Display"}
+              {TAB_LABELS[t]}
             </button>
           ))}
         </div>
@@ -144,21 +194,135 @@ export function StartMenu(props: StartMenuProps) {
         <div style={styles.body}>
           {tab === "controls" && (
             <>
-              <Row label="Invert aim (look up/down)">
+              <h3 style={styles.h3}>Look</h3>
+              <Row label={`Horizontal sensitivity  ×${controls.lookSensitivity.toFixed(2)}`}>
+                <Slider label="Horizontal sensitivity" min={0.25} max={3} step={0.05} value={controls.lookSensitivity} onChange={(lookSensitivity) => setControls({ lookSensitivity })} />
+              </Row>
+              <Row label={`Vertical sensitivity  ×${(controls.lookSensitivityY ?? controls.lookSensitivity).toFixed(2)}`}>
+                <Slider
+                  label="Vertical sensitivity"
+                  min={0.25}
+                  max={3}
+                  step={0.05}
+                  value={controls.lookSensitivityY ?? controls.lookSensitivity}
+                  onChange={(lookSensitivityY) => setControls({ lookSensitivityY })}
+                />
+              </Row>
+              <Row label="Response curve">
+                <select
+                  aria-label="Response curve"
+                  style={styles.select}
+                  value={controls.lookCurve ?? "standard"}
+                  onChange={(event) => setControls({ lookCurve: event.target.value as ResponseCurve })}
+                >
+                  {RESPONSE_CURVES.map((c) => (
+                    <option key={c} value={c}>
+                      {CURVE_LABELS[c]}
+                    </option>
+                  ))}
+                </select>
+              </Row>
+              <Row label="Invert look up/down">
                 <Toggle on={controls.invertY} onChange={(invertY) => setControls({ invertY })} />
               </Row>
-              <Row label={`Look sensitivity  ×${controls.lookSensitivity.toFixed(2)}`}>
-                <Slider min={0.25} max={3} step={0.05} value={controls.lookSensitivity} onChange={(lookSensitivity) => setControls({ lookSensitivity })} />
+              <Row label="Invert look left/right">
+                <Toggle on={controls.invertX ?? false} onChange={(invertX) => setControls({ invertX })} />
               </Row>
-              <Row label={`Touch controls size  ${Math.round(controls.touchScale * 100)}%`}>
-                <Slider min={0.7} max={1.4} step={0.05} value={controls.touchScale} onChange={(touchScale) => setControls({ touchScale })} />
+              <p style={styles.note}>The look settings apply to the on-screen pad&apos;s look stick too.</p>
+
+              <h3 style={styles.h3}>Controller sticks</h3>
+              <Row label="Stick layout">
+                <select
+                  aria-label="Stick layout"
+                  style={styles.select}
+                  value={controls.stickLayout ?? "default"}
+                  onChange={(event) => setControls({ stickLayout: event.target.value as StickLayout })}
+                >
+                  {STICK_LAYOUTS.map((l) => (
+                    <option key={l} value={l}>
+                      {LAYOUT_LABELS[l]}
+                    </option>
+                  ))}
+                </select>
               </Row>
-              <Row label={`Touch controls opacity  ${Math.round(controls.touchOpacity * 100)}%`}>
-                <Slider min={0.2} max={1} step={0.05} value={controls.touchOpacity} onChange={(touchOpacity) => setControls({ touchOpacity })} />
+              <StickPreview settings={controls} />
+              {(["leftStick", "rightStick"] as const).map((which) => {
+                const zones = controls[which] ?? DEFAULT_STICK_DEAD_ZONES;
+                const name = which === "leftStick" ? "Left stick" : "Right stick";
+                // Full lean always lies past the dead zone, as the saved settings require.
+                const set = (patch: Partial<StickDeadZones>) => {
+                  const next = { ...zones, ...patch };
+                  setControls({ [which]: { ...next, maxInput: Math.max(next.maxInput, Math.min(1, next.radial + 0.1)) } });
+                };
+                return (
+                  <div key={which}>
+                    <Row label={`${name} dead zone  ${pct(zones.radial)}`}>
+                      <Slider label={`${name} dead zone`} min={0} max={0.5} step={0.01} value={zones.radial} onChange={(radial) => set({ radial })} />
+                    </Row>
+                    <Row label={`${name} axial dead zone  ${pct(zones.axial)}`}>
+                      <Slider label={`${name} axial dead zone`} min={0} max={0.5} step={0.01} value={zones.axial} onChange={(axial) => set({ axial })} />
+                    </Row>
+                    <Row label={`${name} max input  ${pct(zones.maxInput)}`}>
+                      <Slider label={`${name} max input`} min={0.5} max={1} step={0.01} value={zones.maxInput} onChange={(maxInput) => set({ maxInput })} />
+                    </Row>
+                  </div>
+                );
+              })}
+              <p style={styles.note}>
+                Dead zone: how far a stick must lean before it counts (raise it if a stick drifts). Axial dead zone: each direction on its own, so a
+                push straight ahead stays straight. Max input: how far out reads as full lean (lower it if a stick never quite reaches its edge).
+              </p>
+
+              <h3 style={styles.h3}>Triggers</h3>
+              <Row label={`LT presses at  ${pct(controls.leftTrigger ?? DEFAULT_TRIGGER_THRESHOLD)}`}>
+                <Slider
+                  label="LT presses at"
+                  min={0.05}
+                  max={0.95}
+                  step={0.05}
+                  value={controls.leftTrigger ?? DEFAULT_TRIGGER_THRESHOLD}
+                  onChange={(leftTrigger) => setControls({ leftTrigger })}
+                />
+              </Row>
+              <Row label={`RT presses at  ${pct(controls.rightTrigger ?? DEFAULT_TRIGGER_THRESHOLD)}`}>
+                <Slider
+                  label="RT presses at"
+                  min={0.05}
+                  max={0.95}
+                  step={0.05}
+                  value={controls.rightTrigger ?? DEFAULT_TRIGGER_THRESHOLD}
+                  onChange={(rightTrigger) => setControls({ rightTrigger })}
+                />
+              </Row>
+              <p style={styles.note}>A lower pull fires sooner (a hair trigger).</p>
+
+              <Row label="">
+                <button
+                  type="button"
+                  className="cbx-btn"
+                  onClick={() => setControls(Object.fromEntries(STICK_SETTING_KEYS.map((k) => [k, DEFAULT_CONTROL_SETTINGS[k]])) as Partial<ControlSettings>)}
+                >
+                  Reset look, sticks &amp; triggers
+                </button>
+              </Row>
+            </>
+          )}
+
+          {tab === "touch" && (
+            <>
+              <Row label={`Touch controls size  ${pct(controls.touchScale)}`}>
+                <Slider label="Touch controls size" min={0.7} max={1.4} step={0.05} value={controls.touchScale} onChange={(touchScale) => setControls({ touchScale })} />
+              </Row>
+              <Row label={`Touch controls opacity  ${pct(controls.touchOpacity)}`}>
+                <Slider label="Touch controls opacity" min={0.2} max={1} step={0.05} value={controls.touchOpacity} onChange={(touchOpacity) => setControls({ touchOpacity })} />
               </Row>
               <Row label="">
-                <button type="button" className="cbx-btn" onClick={() => onChange({ ...settings, controls: DEFAULT_CONTROL_SETTINGS })}>
-                  Reset controls to defaults
+                <button
+                  type="button"
+                  className="cbx-btn"
+                  onClick={() => setControls({ touchScale: DEFAULT_CONTROL_SETTINGS.touchScale, touchOpacity: DEFAULT_CONTROL_SETTINGS.touchOpacity })}
+                >
+                  Reset touch controls
                 </button>
               </Row>
             </>
@@ -223,6 +387,15 @@ export function StartMenu(props: StartMenuProps) {
               <p style={styles.note}>
                 Start menu: {["Enter", "KeyP"].map(keyLabel).join(" or ")}.
               </p>
+              <Row label="">
+                <button
+                  type="button"
+                  className="cbx-btn"
+                  onClick={() => setControls({ padBindings: DEFAULT_CONTROL_SETTINGS.padBindings, keyBindings: DEFAULT_CONTROL_SETTINGS.keyBindings })}
+                >
+                  Reset controller buttons &amp; keys
+                </button>
+              </Row>
 
               {current.length > 0 && (
                 <>
@@ -262,7 +435,7 @@ export function StartMenu(props: StartMenuProps) {
           {tab === "audio" && (
             <>
               <Row label={`Volume  ${Math.round(settings.volume * 100)}%`}>
-                <Slider min={0} max={1} step={0.05} value={settings.volume} onChange={(volume) => onChange({ ...settings, volume })} />
+                <Slider label="Volume" min={0} max={1} step={0.05} value={settings.volume} onChange={(volume) => onChange({ ...settings, volume })} />
               </Row>
               <Row label="Mute">
                 <Toggle on={settings.muted} onChange={(muted) => onChange({ ...settings, muted })} />
@@ -388,10 +561,11 @@ function Toggle({ on, onChange }: { on: boolean; onChange: (on: boolean) => void
   );
 }
 
-function Slider({ min, max, step, value, onChange }: { min: number; max: number; step: number; value: number; onChange: (v: number) => void }) {
+function Slider({ label, min, max, step, value, onChange }: { label?: string; min: number; max: number; step: number; value: number; onChange: (v: number) => void }) {
   return (
     <input
       type="range"
+      aria-label={label}
       min={min}
       max={max}
       step={step}

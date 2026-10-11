@@ -1,0 +1,165 @@
+# Controller settings roadmap
+
+A game's Start menu should let a player tune how every input device plays, as
+Halo Infinite and Call of Duty do. That covers how far a stick moves before it
+counts, how lean turns into turning, how fast the view can turn and how aim
+assist behaves, on a controller, on a touchscreen and with a mouse. Each item
+ships as its own PR with tests.
+
+## Where the controls stand
+
+`packages/player/src/controls.ts` holds the settings and the pure transforms;
+the Start menu (`apps/web/src/app/lockout/StartMenu.tsx`) edits them.
+
+**What a player can set today:**
+- invert the look stick's vertical axis;
+- one look sensitivity (0.25–3), which scales the right stick before the game
+  reads it;
+- controller button mapping, in two presets or one by one;
+- keyboard keys, and the game's input actions (EP15);
+- the on-screen pad's size and opacity.
+
+**What is fixed:**
+- **Dead zones:** a controller stick has a radial dead zone of 0.18, and a
+  touch stick 0.12.
+- **Triggers:** they press past half-way.
+- **Sensitivity:** it only makes the stick reach full lean sooner. The stick
+  goes to the game as −1..1, so nothing turns faster than the game's own
+  maximum.
+- **Response curve:** the game applies its own. Lockout eases its turn as
+  lean², and its pitch the same way.
+- **Aim assist:** Lockout's auto-aim (pitch eased toward a locked enemy) is
+  always on.
+- **Zoom:** held, never toggled.
+- **No vibration.**
+- **No mouse look and no gyro.**
+
+## Inspiration
+
+**Halo Infinite (controller):**
+- look sensitivity, horizontal and vertical separately;
+- look acceleration;
+- per stick: axial dead zone, radial dead zone and max input threshold;
+- zoom sensitivity;
+- invert look;
+- button and stick layouts;
+- hold or toggle for zoom, crouch and sprint;
+- vibration.
+
+**Call of Duty (controller):**
+- horizontal and vertical stick sensitivity;
+- ADS sensitivity multipliers;
+- an aim response curve (Standard, Linear, Dynamic);
+- left and right stick minimum and maximum dead zones;
+- L2/R2 trigger dead zones;
+- stick layouts (Default, Southpaw, Legacy, Legacy Southpaw);
+- aim assist (off, or one of several types);
+- vibration, and hold or toggle per action;
+- gyro aiming on supported pads and phones.
+
+## Conventions
+
+- **Host-side by default.** Everything that can be done in the player (dead
+  zones, curves, layouts, triggers, toggles) applies to every cart without
+  the cart doing anything.
+- **Opt-in for the rest.** What needs the game to cooperate (turning faster
+  than its own maximum, zoom sensitivity, aim assist strength) goes through a
+  small SDK call the cart opts into, as `cartbox.stick` already does. A cart
+  that never calls it plays exactly as before.
+- **Pure and tested.** The transforms are pure functions over plain numbers,
+  unit-tested without a DOM or a gamepad.
+- **Saved settings still load.** Settings saved before a change load as
+  before, and a new field falls back to its default.
+
+## Items
+
+- [x] **C1. Stick tuning.**
+  - **Per physical stick (left and right), as Halo and CoD have them:**
+    - an axial dead zone (each axis on its own, so a straight push stays
+      straight);
+    - a radial dead zone (the stick's distance from centre);
+    - a max input threshold: how far out counts as full lean.
+  - **Look:**
+    - horizontal and vertical sensitivity separately;
+    - invert horizontal as well as vertical;
+    - a response curve: Standard, Dynamic (an S-curve: fine near centre,
+      steepest mid-way), Precision (slower near centre) or Responsive
+      (quicker off centre).
+  - **Stick layout:** Default, Southpaw (sticks swapped), Legacy (left stick
+    moves and turns, right stick strafes and looks up and down) and Legacy
+    Southpaw.
+  - **Triggers:** how far LT and RT must be pulled to press.
+  - **The Start menu's controller section:** these settings, and a live
+    picture of each stick. It shows the raw position, the dead zones and
+    threshold, and what the game receives.
+  - **Done.**
+    - **The pipeline:** `readPad` shapes each physical stick with
+      `shapeStick` (axial, then radial between the dead zone and the max
+      input, rescaled), then maps the sticks to move and look with
+      `layoutSticks`. Dead zones belong to the physical stick, so a drifting
+      stick keeps its fix in any layout. `applyLookSettings` then curves the
+      look stick's distance (keeping its direction), scales each axis by its
+      sensitivity and inverts it; that applies to the touch pad's look stick
+      too. Triggers press at their own pull; a trigger that only reports on
+      or off presses when on.
+    - **Saved settings:** every new field is optional and defaults to how the
+      controls always played (a 0.18 radial dead zone, half-way triggers,
+      Standard, Default). A save from before them loads with vertical
+      sensitivity following horizontal. Values out of range are clamped, and
+      full lean always lies at least 0.1 past the dead zone.
+    - **The menu:** the Controls tab has Look (both sensitivities, the
+      curve, both inverts), Controller sticks (layout, the live picture,
+      three sliders per stick) and Triggers, with a reset for just those.
+      The live picture polls the first connected pad while the menu is open
+      and draws each stick's raw position (hollow), its reading after the
+      dead zones (filled), the zones and the full-lean ring, each trigger's
+      pull against its press point, and the move and look the game receives.
+      The touch pad's size and opacity moved to their own Touch tab, and
+      Button mapping gained a reset for buttons and keys.
+    - **Still capped:** sensitivity above 1 only reaches full lean sooner,
+      as before; turning faster than the game's maximum is C2.
+    - **Tests:** `Unit Tests/stick-tuning.test.ts` (dead zones, curves,
+      sensitivity and inversion per axis, layouts, triggers, old saves);
+      `scripts/verify-controller-settings.mjs` drives the menu in Lockout
+      with a fake controller and checks what the game receives as the
+      layout, a dead zone and a trigger pull change, and that they are kept.
+- [ ] **C2. Look speed the game honours.**
+  - **A look-gain channel:** `cartbox.lookgain(zoomed)` returns horizontal and
+    vertical multipliers the host writes before every tick. A cart that calls
+    it multiplies its turn rate by them, so sensitivity above 1 really turns
+    faster, and the host stops pre-scaling the stick.
+  - **Zoom sensitivity:** a multiplier applied while the game says it is
+    zoomed, like CoD's ADS sensitivity.
+  - **Look acceleration, as Halo has it:** holding the look stick at full lean
+    ramps the turn speed up after a short delay.
+  - **Lockout uses it.**
+- [ ] **C3. Aim assist, hold or toggle, and vibration.**
+  - **Aim assist:** Off, Standard or Strong, read by the cart
+    (`cartbox.aimassist()`). Lockout scales its auto-pitch by it and slows the
+    turn near a target.
+  - **Hold or toggle per input action** (zoom, for one), done in the host:
+    a toggled action latches on a press.
+  - **Vibration:** on or off, plus an intensity, through the Gamepad API's
+    rumble. `cartbox.rumble(strength, ms)` lets a game ask for it; Lockout
+    rumbles when it fires, takes a hit and lands a melee.
+- [ ] **C4. Every device its own.**
+  - **Device profiles:** the look settings (sensitivity, curve, dead zones) are
+    kept separately for a controller and for touch. Each device's input is
+    shaped by its own before the two merge.
+  - **Touch:**
+    - look by dragging anywhere on the right of the screen;
+    - its own look sensitivity;
+    - a fixed or floating move stick (one that appears where the thumb lands).
+  - **Mouse look on a computer:** click to capture the pointer, and the mouse
+    turns and pitches through the look-gain channel, with its own sensitivity
+    and invert.
+  - **Gyro aim on phones and tablets:** turning the device aims, always or
+    only while zoomed. It has its own sensitivity, and asks the motion
+    permission iOS needs.
+
+## Not in this roadmap
+
+- **Per-weapon sensitivity, and per-zoom-level multipliers beyond one zoom
+  level:** Lockout has one zoom.
+- **Pad-specific features the web cannot reach:** adaptive triggers, paddles
+  and touchpads.
