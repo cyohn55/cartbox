@@ -212,13 +212,29 @@ cartbox = {
   -- positive. Reads 0,0 with no sticks (keyboard); on a touchscreen the pad
   -- shows its right stick once a cart calls this. Uses pmem 68..69.
   stick = function(n)
-    if pmem(69) ~= 0x53544b31 then pmem(69, 0x53544b31) end
+    local m = pmem(69)
+    if m ~= 0x53544b31 and m ~= 0x53544b32 and (m >> 26) ~= 0x13 then pmem(69, 0x53544b31) end
     local w = pmem(68)
     local sh = (n == 1) and 16 or 0
     local x, y = (w >> sh) & 0xff, (w >> (sh + 8)) & 0xff
     if x >= 128 then x = x - 256 end
     if y >= 128 then y = y - 256 end
     return x / 127, y / 127
+  end,
+  -- lookgain(zoomed) -> h, v: the player's look speed, to multiply the game's
+  -- turn and pitch rates by (zoomed: the player's zoom sensitivity applies
+  -- too, and look acceleration is in both). Calling it tells the host to stop
+  -- scaling the look stick itself, so sensitivity above 1 really turns faster.
+  -- 1, 1 until the host answers. Shares pmem 69 with stick().
+  lookgain = function(zoomed)
+    local m = pmem(69)
+    if (m >> 26) ~= 0x13 then
+      if m ~= 0x53544b32 then pmem(69, 0x53544b32) end
+      return 1, 1
+    end
+    local h, v = (m & 0xff) / 32, ((m >> 8) & 0xff) / 32
+    if zoomed then local z = ((m >> 16) & 0xff) / 32 return h * z, v * z end
+    return h, v
   end,
   -- Netplay (online multiplayer). The host page relays player state + events
   -- between browsers through pmem words 0..118 (so a netplay cart must not keep

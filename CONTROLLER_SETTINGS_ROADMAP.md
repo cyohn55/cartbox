@@ -25,7 +25,7 @@ the Start menu (`apps/web/src/app/lockout/StartMenu.tsx`) edits them.
 - **Triggers:** they press past half-way.
 - **Sensitivity:** it only makes the stick reach full lean sooner. The stick
   goes to the game as −1..1, so nothing turns faster than the game's own
-  maximum.
+  maximum (C2 lifts this for a game that reads its look gain).
 - **Response curve:** the game applies its own. Lockout eases its turn as
   lean², and its pitch the same way.
 - **Aim assist:** Lockout's auto-aim (pitch eased toward a locked enemy) is
@@ -116,14 +116,15 @@ the Start menu (`apps/web/src/app/lockout/StartMenu.tsx`) edits them.
       pull against its press point, and the move and look the game receives.
       The touch pad's size and opacity moved to their own Touch tab, and
       Button mapping gained a reset for buttons and keys.
-    - **Still capped:** sensitivity above 1 only reaches full lean sooner,
-      as before; turning faster than the game's maximum is C2.
+    - **Still capped here:** sensitivity above 1 only reaches full lean
+      sooner, as before; C2 lifts the cap for a game that reads its look
+      gain.
     - **Tests:** `Unit Tests/stick-tuning.test.ts` (dead zones, curves,
       sensitivity and inversion per axis, layouts, triggers, old saves);
       `scripts/verify-controller-settings.mjs` drives the menu in Lockout
       with a fake controller and checks what the game receives as the
       layout, a dead zone and a trigger pull change, and that they are kept.
-- [ ] **C2. Look speed the game honours.**
+- [x] **C2. Look speed the game honours.**
   - **A look-gain channel:** `cartbox.lookgain(zoomed)` returns horizontal and
     vertical multipliers the host writes before every tick. A cart that calls
     it multiplies its turn rate by them, so sensitivity above 1 really turns
@@ -133,6 +134,33 @@ the Start menu (`apps/web/src/app/lockout/StartMenu.tsx`) edits them.
   - **Look acceleration, as Halo has it:** holding the look stick at full lean
     ramps the turn speed up after a short delay.
   - **Lockout uses it.**
+  - **Done.**
+    - **Where the gains travel:** pmem is full and the input block's 16
+      bytes are taken, so the gains share the stick channel's opt-in word,
+      pmem 69. `cartbox.lookgain` writes a second magic there ("STK2"); from
+      the next tick the host writes the gains in its place (horizontal,
+      vertical and zoom, each ×32 in a byte so ×3 at full acceleration
+      fits, under a six-bit marker with two bits kept for C3), and
+      `cartbox.stick` leaves either alone. A cart that only calls
+      `cartbox.stick` still sees "STK1" and gets the stick pre-scaled, as
+      before.
+    - **The host:** `feedSticks` reads the channel with `stickChannel`. For
+      a gain cart it sends the look stick curved and inverted but unscaled,
+      and packs `lookGains` (each sensitivity times the acceleration boost,
+      and the zoom multiplier). A replay feeds no sticks and plain gains.
+    - **Look acceleration:** held at 95% lean or more for 9 ticks (0.15 s),
+      the boost eases up over 30 ticks to 1 + the setting (0–10 in the menu,
+      0 by default).
+    - **Lockout:** it turns by `rx·|rx|·TURN·2.2·gh` and pitches by
+      `ry·|ry|·0.045·gv`, with `gh, gv = cartbox.lookgain(p.zoom)`.
+    - **The menu:** the Look section gains Zoom sensitivity (×0.25–2) and
+      Look acceleration, and the live picture shows the turn and pitch speed
+      beside the look stick. Its note says which settings the game reads.
+    - **Tests:** `Unit Tests/look-gain.test.ts` (the gain word, the
+      channel, the unscaled stick, acceleration, saves);
+      `Unit Tests/analog-sticks.test.ts` runs the real engine: `lookgain`
+      returns the host's gains (times zoom when zoomed), `stick` leaves them
+      in place, and Lockout turns twice as far at ×2.
 - [ ] **C3. Aim assist, hold or toggle, and vibration.**
   - **Aim assist:** Off, Standard or Strong, read by the cart
     (`cartbox.aimassist()`). Lockout scales its auto-pitch by it and slows the

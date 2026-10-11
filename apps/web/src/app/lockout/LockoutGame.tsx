@@ -469,6 +469,7 @@ export function LockoutGame() {
             onChange={applySettings}
             actions={LOCKOUT_ACTIONS}
             inputActions={LOCKOUT_INPUT_ACTIONS}
+            lookGain
             online={inRoom()}
             isFullscreen={isFullscreen}
             onToggleFullscreen={() => void (isFullscreen ? exitFullscreen() : enterFullscreen(wrapperRef.current))}

@@ -5445,6 +5445,19 @@ var ConsoleButton = /* @__PURE__ */ ((ConsoleButton2) => {
 var STICK_WORD = 68;
 var STICK_OPTIN_WORD = 69;
 var STICK_OPTIN_MAGIC = 1398033201;
+var LOOK_GAIN_OPTIN_MAGIC = 1398033202;
+var LOOK_GAIN_MARKER = 76;
+var isGainWord = (w) => w >>> 26 === LOOK_GAIN_MARKER >>> 2;
+var GAIN_SCALE = 32;
+function stickChannel(optIn) {
+  const w = optIn >>> 0;
+  if (w === LOOK_GAIN_OPTIN_MAGIC || isGainWord(w)) return "gain";
+  return w === STICK_OPTIN_MAGIC ? "sticks" : "off";
+}
+var gainByte = (v) => Math.max(1, Math.min(255, Math.round((Number.isFinite(v) ? v : 1) * GAIN_SCALE)));
+function packLookGain(gain) {
+  return (gainByte(gain.x) | gainByte(gain.y) << 8 | gainByte(gain.zoom) << 16 | LOOK_GAIN_MARKER << 24) >>> 0;
+}
 var STICK_DPAD_THRESHOLD = 0.4;
 var byte = (v) => Math.round(Math.max(-1, Math.min(1, v || 0)) * 127) & 255;
 function packSticks(axes) {
@@ -5523,6 +5536,8 @@ var DEFAULT_CONTROL_SETTINGS = {
   leftStick: DEFAULT_STICK_DEAD_ZONES,
   rightStick: DEFAULT_STICK_DEAD_ZONES,
   stickLayout: "default",
+  zoomSensitivity: 1,
+  lookAcceleration: 0,
   leftTrigger: DEFAULT_TRIGGER_THRESHOLD,
   rightTrigger: DEFAULT_TRIGGER_THRESHOLD,
   padBindings: DEFAULT_PAD_BINDINGS,
@@ -5573,6 +5588,8 @@ function parseControlSettings(value, defaults = DEFAULT_CONTROL_SETTINGS) {
     leftStick: deadZones(raw.leftStick, defaults.leftStick),
     rightStick: deadZones(raw.rightStick, defaults.rightStick),
     stickLayout: STICK_LAYOUTS.includes(raw.stickLayout) ? raw.stickLayout : defaults.stickLayout ?? "default",
+    zoomSensitivity: num3(raw.zoomSensitivity, 0.25, 2, defaults.zoomSensitivity ?? 1),
+    lookAcceleration: num3(raw.lookAcceleration, 0, 1, defaults.lookAcceleration ?? 0),
     leftTrigger: num3(raw.leftTrigger, 0.05, 0.95, defaults.leftTrigger ?? DEFAULT_TRIGGER_THRESHOLD),
     rightTrigger: num3(raw.rightTrigger, 0.05, 0.95, defaults.rightTrigger ?? DEFAULT_TRIGGER_THRESHOLD),
     padBindings,
@@ -5595,7 +5612,7 @@ function responseCurve(curve, m) {
       return t;
   }
 }
-function applyLookSettings(axes, settings) {
+function applyLookSettings(axes, settings, scale = true) {
   let x = axes[2] ?? 0;
   let y = axes[3] ?? 0;
   const m = Math.hypot(x, y);
@@ -5604,11 +5621,29 @@ function applyLookSettings(axes, settings) {
     x *= k;
     y *= k;
   }
-  const sx = settings.lookSensitivity;
-  const sy = settings.lookSensitivityY ?? sx;
+  const sx = scale ? settings.lookSensitivity : 1;
+  const sy = scale ? settings.lookSensitivityY ?? settings.lookSensitivity : 1;
   const rx = clamp(x * sx * (settings.invertX ? -1 : 1), -1, 1);
   const ry = clamp(y * sy * (settings.invertY ? -1 : 1), -1, 1);
   return [axes[0] ?? 0, axes[1] ?? 0, rx, ry];
+}
+var LOOK_ACCEL_DELAY_TICKS = 9;
+var LOOK_ACCEL_RAMP_TICKS = 30;
+var LOOK_ACCEL_LEAN = 0.95;
+function stepLookAcceleration(heldTicks, x, y) {
+  return Math.hypot(x, y) >= LOOK_ACCEL_LEAN ? heldTicks + 1 : 0;
+}
+function lookAccelerationBoost(heldTicks, strength) {
+  if (!strength || strength <= 0) return 1;
+  const t = clamp((heldTicks - LOOK_ACCEL_DELAY_TICKS) / LOOK_ACCEL_RAMP_TICKS, 0, 1);
+  return 1 + strength * t * t * (3 - 2 * t);
+}
+function lookGains(settings, boost = 1) {
+  return {
+    x: settings.lookSensitivity * boost,
+    y: (settings.lookSensitivityY ?? settings.lookSensitivity) * boost,
+    zoom: settings.zoomSensitivity ?? 1
+  };
 }
 function deadZoned(x, y, deadZone = 0.18) {
   return shapeStick(x, y, { axial: 0, radial: deadZone, maxInput: 1 });
@@ -6404,13 +6439,29 @@ cartbox = {
   -- positive. Reads 0,0 with no sticks (keyboard); on a touchscreen the pad
   -- shows its right stick once a cart calls this. Uses pmem 68..69.
   stick = function(n)
-    if pmem(69) ~= 0x53544b31 then pmem(69, 0x53544b31) end
+    local m = pmem(69)
+    if m ~= 0x53544b31 and m ~= 0x53544b32 and (m >> 26) ~= 0x13 then pmem(69, 0x53544b31) end
     local w = pmem(68)
     local sh = (n == 1) and 16 or 0
     local x, y = (w >> sh) & 0xff, (w >> (sh + 8)) & 0xff
     if x >= 128 then x = x - 256 end
     if y >= 128 then y = y - 256 end
     return x / 127, y / 127
+  end,
+  -- lookgain(zoomed) -> h, v: the player's look speed, to multiply the game's
+  -- turn and pitch rates by (zoomed: the player's zoom sensitivity applies
+  -- too, and look acceleration is in both). Calling it tells the host to stop
+  -- scaling the look stick itself, so sensitivity above 1 really turns faster.
+  -- 1, 1 until the host answers. Shares pmem 69 with stick().
+  lookgain = function(zoomed)
+    local m = pmem(69)
+    if (m >> 26) ~= 0x13 then
+      if m ~= 0x53544b32 then pmem(69, 0x53544b32) end
+      return 1, 1
+    end
+    local h, v = (m & 0xff) / 32, ((m >> 8) & 0xff) / 32
+    if zoomed then local z = ((m >> 16) & 0xff) / 32 return h * z, v * z end
+    return h, v
   end,
   -- Netplay (online multiplayer). The host page relays player state + events
   -- between browsers through pmem words 0..118 (so a netplay cart must not keep
@@ -17732,6 +17783,8 @@ var Player = class {
     this.pointerOffset = null;
     /** The cart reads analog sticks (it opted in via cartbox.stick). */
     this.analogCart = false;
+    /** Ticks the look stick has been held at full lean (look acceleration, C2). */
+    this.lookHeldTicks = 0;
     /** Input actions (EP15): the cart's, with the player's rebinding, and the keys they claim. */
     this.actions = [];
     this.actionKeys = /* @__PURE__ */ new Set();
@@ -18654,17 +18707,28 @@ var Player = class {
    * Analog sticks (see sticks.ts): once the cart has read a stick — the SDK marks
    * pmem with its opt-in — write the sticks before every tick, and show the
    * touch pad's right stick. Until then nothing is written, so a cart's own use
-   * of those pmem words is left alone.
+   * of those pmem words is left alone. A cart that reads its look gain (C2)
+   * gets the look stick unscaled and the gains beside it.
    */
   feedSticks() {
     const words = this.console?.netWords();
     if (!words) return;
+    const channel = stickChannel(words[STICK_OPTIN_WORD] ?? 0);
     if (!this.analogCart) {
-      if (words[STICK_OPTIN_WORD] !== STICK_OPTIN_MAGIC) return;
+      if (channel === "off") return;
       this.analogCart = true;
       this.touch?.setAnalog(true);
     }
-    words[STICK_WORD] = this.replaySource || !this.inputEnabled ? 0 : packSticks(applyLookSettings(this.gamepad.axes, this.controlSettings));
+    const live = !this.replaySource && this.inputEnabled;
+    if (channel !== "gain") {
+      words[STICK_WORD] = live ? packSticks(applyLookSettings(this.gamepad.axes, this.controlSettings)) : 0;
+      return;
+    }
+    const axes = live ? applyLookSettings(this.gamepad.axes, this.controlSettings, false) : [0, 0, 0, 0];
+    this.lookHeldTicks = stepLookAcceleration(this.lookHeldTicks, axes[2], axes[3]);
+    words[STICK_WORD] = packSticks(axes);
+    const boost = live ? lookAccelerationBoost(this.lookHeldTicks, this.controlSettings.lookAcceleration) : 1;
+    words[STICK_OPTIN_WORD] = live ? packLookGain(lookGains(this.controlSettings, boost)) : packLookGain({ x: 1, y: 1, zoom: 1 });
   }
   /** Save data (EP15b): hand a save the cart made this tick to the host. */
   pollSave() {
@@ -20500,6 +20564,8 @@ export {
   layoutSticks,
   lensFlareAt,
   loadEngineModule,
+  lookAccelerationBoost,
+  lookGains,
   lookLut,
   lutStrip,
   makeShadowTexture,
@@ -20578,6 +20644,7 @@ export {
   softKneePrefilter,
   splitWorldMatrix,
   standardizePad,
+  stepLookAcceleration,
   streamGroups,
   stringsSdkLua,
   sway,

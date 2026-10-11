@@ -1,7 +1,8 @@
 /**
  * cartbox.stick through the real engine: the SDK opts in on first use, reads
  * what the host packs into pmem 68, and Lockout walks with the left stick and
- * turns with the right one.
+ * turns with the right one. cartbox.lookgain (CONTROLLER_SETTINGS_ROADMAP.md
+ * C2) reads the gains the host packs into pmem 69, and Lockout turns by them.
  */
 
 import { existsSync } from "node:fs";
@@ -11,7 +12,16 @@ import { describe, expect, it } from "vitest";
 
 import { lockoutCartridge } from "@cartbox/editor";
 import { codeChunks, decodeMeshCamera, injectSdk } from "@cartbox/player";
-import { STICK_OPTIN_MAGIC, STICK_OPTIN_WORD, STICK_WORD, packSticks } from "../packages/player/src/sticks";
+import {
+  LOOK_GAIN_OPTIN_MAGIC,
+  STICK_OPTIN_MAGIC,
+  STICK_OPTIN_WORD,
+  STICK_WORD,
+  packLookGain,
+  packSticks,
+  stickChannel,
+  type LookGain,
+} from "../packages/player/src/sticks";
 
 const ENGINE = path.resolve(__dirname, "../packages/engine/dist/xbox360/engine.js");
 
@@ -25,12 +35,19 @@ async function boot(tic: Uint8Array) {
   mod._free(ptr);
   const pmem = () => new Uint32Array(mod.HEAPU8.buffer, mod._cbx_mailbox_ptr(h) - 119 * 4, 256);
   const mailbox = () => new Uint32Array(mod.HEAPU8.buffer, mod._cbx_mailbox_ptr(h), mod._cbx_mailbox_words(h)).slice();
-  /** One tick, feeding sticks the way the player does once the cart has opted in. */
+  /** The gains the host writes for a cart that reads them (C2). */
+  let gain: LookGain = { x: 1, y: 1, zoom: 1 };
+  /** One tick, feeding sticks (and gains) the way the player does once the cart has opted in. */
   const tick = (buttons: number, sticks: [number, number, number, number] = [0, 0, 0, 0]) => {
-    if (pmem()[STICK_OPTIN_WORD] === STICK_OPTIN_MAGIC) pmem()[STICK_WORD] = packSticks(sticks);
+    const channel = stickChannel(pmem()[STICK_OPTIN_WORD]!);
+    if (channel !== "off") pmem()[STICK_WORD] = packSticks(sticks);
+    if (channel === "gain") pmem()[STICK_OPTIN_WORD] = packLookGain(gain);
     mod._cbx_tick(h, buttons);
   };
-  return { tick, pmem, mailbox };
+  const setGain = (g: LookGain) => {
+    gain = g;
+  };
+  return { tick, pmem, mailbox, setGain };
 }
 
 describe.skipIf(!existsSync(ENGINE))("analog sticks", () => {
@@ -47,6 +64,28 @@ end`;
     expect(pmem()[STICK_OPTIN_WORD]).toBe(STICK_OPTIN_MAGIC);
     tick(0, [1, -1, 0.5, 0]);
     expect(Array.from(pmem().subarray(200, 204)).map((v) => v - 1000)).toEqual([100, -100, 50, 0]);
+  });
+
+  it("hand a cart that reads its look gain the host's gains, times zoom when zoomed", async () => {
+    const lua = `function TIC()
+  local rx = cartbox.stick(1)
+  local h, v = cartbox.lookgain(false)
+  local zh, zv = cartbox.lookgain(true)
+  pmem(200, math.floor(h*100+0.5)); pmem(201, math.floor(v*100+0.5))
+  pmem(202, math.floor(zh*100+0.5)); pmem(203, math.floor(zv*100+0.5))
+  pmem(204, math.floor(rx*100+1000))
+end`;
+    const { tick, pmem, setGain } = await boot(injectSdk(codeChunks(new TextEncoder().encode(lua))));
+    tick(0);
+    // Before the host answers: 1, 1, and the cart has asked for gains.
+    expect(Array.from(pmem().subarray(200, 204))).toEqual([100, 100, 100, 100]);
+    expect(pmem()[STICK_OPTIN_WORD]).toBe(LOOK_GAIN_OPTIN_MAGIC);
+    setGain({ x: 2, y: 1.5, zoom: 0.5 });
+    tick(0, [0, 0, 0.5, 0]);
+    expect(Array.from(pmem().subarray(200, 204))).toEqual([200, 150, 100, 75]);
+    // stick() still reads, and leaves the host's gains in place.
+    expect(pmem()[204]! - 1000).toBe(50);
+    expect(stickChannel(pmem()[STICK_OPTIN_WORD]!)).toBe("gain");
   });
 
   it("leaves pmem alone for a cart that never reads a stick", async () => {
@@ -112,6 +151,22 @@ end`;
     const t3 = g.cam().target;
     const f2 = g.forward();
     expect((t3[0] - t2[0]) * f2[0] + (t3[2] - t2[2]) * f2[1]).toBeGreaterThan(0.3);
+  });
+
+  it("turns faster than full lean allows when the player's sensitivity is above 1", async () => {
+    const turned = async (x: number) => {
+      const g = await lockout();
+      g.setGain({ x, y: 1, zoom: 1 });
+      g.tick(0); // the gains reach the cart from the next tick
+      const before = g.cam().yaw;
+      for (let i = 0; i < 4; i += 1) g.tick(0, [0, 0, 1, 0]);
+      const d = g.cam().yaw - before;
+      return Math.abs(Math.atan2(Math.sin(d), Math.cos(d))); // the turn, however yaw wraps
+    };
+    const normal = await turned(1);
+    const fast = await turned(2);
+    expect(normal).toBeGreaterThan(0.1);
+    expect(fast / normal).toBeCloseTo(2, 1);
   });
 
   it("aims up with the right stick pushed up, and down with it pulled down", async () => {

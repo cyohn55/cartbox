@@ -14,6 +14,7 @@ import {
   DEFAULT_TRIGGER_THRESHOLD,
   applyLookSettings,
   layoutSticks,
+  lookGains,
   shapeStick,
   standardizePad,
   type ControlSettings,
@@ -55,14 +56,19 @@ function usePadReading(): PadReading | null {
   return reading;
 }
 
-export function StickPreview({ settings }: { settings: ControlSettings }) {
+/**
+ * `lookGain`: the game reads its look gain (C2), so it gets the look stick
+ * unscaled and the player's sensitivity as a speed beside it.
+ */
+export function StickPreview({ settings, lookGain = false }: { settings: ControlSettings; lookGain?: boolean }) {
   const reading = usePadReading();
   const left = settings.leftStick ?? DEFAULT_STICK_DEAD_ZONES;
   const right = settings.rightStick ?? DEFAULT_STICK_DEAD_ZONES;
   const raw = reading?.axes ?? null;
   const shapedLeft = raw ? shapeStick(raw[0], raw[1], left) : null;
   const shapedRight = raw ? shapeStick(raw[2], raw[3], right) : null;
-  const game = shapedLeft && shapedRight ? applyLookSettings(layoutSticks([...shapedLeft, ...shapedRight], settings.stickLayout), settings) : null;
+  const game = shapedLeft && shapedRight ? applyLookSettings(layoutSticks([...shapedLeft, ...shapedRight], settings.stickLayout), settings, !lookGain) : null;
+  const gains = lookGain ? lookGains(settings) : null;
   const fmt = (x: number, y: number) => `${x.toFixed(2)}, ${y.toFixed(2)}`.replace(/-/g, "−");
 
   return (
@@ -79,6 +85,7 @@ export function StickPreview({ settings }: { settings: ControlSettings }) {
         {game ? (
           <span style={{ fontFamily: "var(--font-data)", fontVariantNumeric: "tabular-nums" }}>
             The game receives: move {fmt(game[0], game[1])} · look {fmt(game[2], game[3])}
+            {gains && ` at ×${gains.x.toFixed(2)} turn, ×${gains.y.toFixed(2)} pitch`}
           </span>
         ) : (
           "Connect a controller and move its sticks to see them here."
