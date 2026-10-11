@@ -17,7 +17,7 @@
  * tile for a pixel edit, the whole map for a flood fill.
  */
 
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { faceTile, type CollisionMap, type MapVoxelSpace, type SpriteSheet, type TileFlags, type TileMap } from "@cartbox/editor";
 
 import type { PointerKind, PointerSample } from "@/lib/tabletInput";
@@ -146,6 +146,7 @@ export function MapCanvas({
   onPickTile,
 }: MapCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const hoverRef = useRef<HTMLDivElement>(null);
   const painting = useRef(false);
   // Whether the stroke in progress changed the column layer, so pointer-up knows
@@ -161,6 +162,58 @@ export function MapCanvas({
 
   const width = map.width * cell;
   const height = map.height * cell;
+
+  // The canvas covers the part of the map in view (and a margin round it),
+  // not the whole map (TABLET_EDITOR_ROADMAP.md T4): iPad Safari won't make a
+  // canvas over 16.7M pixels, and a 1280×720-tile map is 59M even at the
+  // smallest zoom, so it drew nothing. Drawing stays in map pixels; the
+  // context is translated to the window, which moves as the map scrolls.
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const [view, setView] = useState({ x: 0, y: 0, w: 0, h: 0, cell: 0 });
+  useLayoutEffect(() => {
+    const box = viewportRef.current;
+    if (!box) return;
+    const update = () => {
+      const margin = 128 + 2 * cell;
+      // What's on screen: the viewport's scrolled area, clipped to the
+      // browser's (in the one-column layout the viewport grows to the whole
+      // map and the page scrolls instead).
+      const rect = box.getBoundingClientRect();
+      const left = box.scrollLeft + Math.max(0, -rect.left);
+      const top = box.scrollTop + Math.max(0, -rect.top);
+      const right = Math.max(left, box.scrollLeft + Math.min(box.clientWidth, window.innerWidth - rect.left));
+      const bottom = Math.max(top, box.scrollTop + Math.min(box.clientHeight, window.innerHeight - rect.top));
+      setView((v) => {
+        // Keep the window while what's in view stays inside it.
+        if (v.cell === cell && v.w > 0 && left >= v.x && top >= v.y && Math.min(right, width) <= v.x + v.w && Math.min(bottom, height) <= v.y + v.h) return v;
+        const x = Math.max(0, Math.floor((left - margin) / cell) * cell);
+        const y = Math.max(0, Math.floor((top - margin) / cell) * cell);
+        return { x, y, w: Math.min(width, Math.ceil((right + margin) / cell) * cell) - x, h: Math.min(height, Math.ceil((bottom + margin) / cell) * cell) - y, cell };
+      });
+    };
+    update();
+    // Any scroll (the viewport's, or the page's in the one-column layout).
+    document.addEventListener("scroll", update, { capture: true, passive: true });
+    window.addEventListener("resize", update);
+    const resize = new ResizeObserver(update);
+    resize.observe(box);
+    return () => {
+      document.removeEventListener("scroll", update, { capture: true });
+      window.removeEventListener("resize", update);
+      resize.disconnect();
+    };
+  }, [cell, width, height]);
+  /** The canvas's context, drawing in map pixels. */
+  const context2d = useCallback((): CanvasRenderingContext2D | null => {
+    const context = canvasRef.current?.getContext("2d") ?? null;
+    context?.setTransform(1, 0, 0, 1, -view.x, -view.y);
+    return context;
+  }, [view]);
+  /** The cells the window covers. */
+  const cellsInView = useCallback(
+    () => ({ x0: Math.floor(view.x / cell), y0: Math.floor(view.y / cell), x1: Math.min(map.width, Math.ceil((view.x + view.w) / cell)), y1: Math.min(map.height, Math.ceil((view.y + view.h) / cell)) }),
+    [view, cell, map],
+  );
   const showColumns = isColumnLayer(layer);
   const showCollision = layer === "collision";
   const showFlags = layer === "flags";
@@ -344,20 +397,19 @@ export function MapCanvas({
   );
 
   const renderAll = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const context = canvas.getContext("2d");
-    if (!context) return;
+    const context = context2d();
+    if (!context || view.w === 0) return;
     peakRef.current = Math.max(1, space.peakHeight);
     context.imageSmoothingEnabled = false;
-    context.clearRect(0, 0, width, height);
-    for (let y = 0; y < map.height; y += 1) {
-      for (let x = 0; x < map.width; x += 1) {
+    context.clearRect(view.x, view.y, view.w, view.h);
+    const { x0, y0, x1, y1 } = cellsInView();
+    for (let y = y0; y < y1; y += 1) {
+      for (let x = x0; x < x1; x += 1) {
         drawCell(context, x, y);
       }
     }
     drawGuides(context);
-  }, [map, space, width, height, drawCell, drawGuides]);
+  }, [space, view, context2d, cellsInView, drawCell, drawGuides]);
 
   useEffect(() => {
     renderAll();
@@ -365,19 +417,20 @@ export function MapCanvas({
 
   /** Redraw every cell that references a tile, after that tile's pixels changed. */
   const redrawTileUsers = (context: CanvasRenderingContext2D, tile: number) => {
-    for (let y = 0; y < map.height; y += 1) {
-      for (let x = 0; x < map.width; x += 1) {
+    const { x0, y0, x1, y1 } = cellsInView();
+    for (let y = y0; y < y1; y += 1) {
+      for (let x = x0; x < x1; x += 1) {
         if (map.getCell(x, y) === tile) drawCell(context, x, y);
       }
     }
     drawGuides(context);
   };
 
-  /** Canvas-relative pointer position in map-pixel space, or null when outside. */
+  /** The pointer's position in map pixels (from the map's own box, as the canvas covers only a window of it). */
   const positionFromEvent = (event: At): { x: number; y: number } | null => {
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-    const rect = canvas.getBoundingClientRect();
+    const content = contentRef.current;
+    if (!content) return null;
+    const rect = content.getBoundingClientRect();
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   };
 
@@ -517,7 +570,7 @@ export function MapCanvas({
   };
 
   const apply = (target: { x: number; y: number }, event: At) => {
-    const context = canvasRef.current?.getContext("2d");
+    const context = context2d();
     if (!context) return;
     context.imageSmoothingEnabled = false;
     rememberCells(target);
@@ -662,7 +715,6 @@ export function MapCanvas({
   // one finger does too until a Pencil is used, then pans; two fingers pan
   // the map and pinch through the zoom steps; a long press picks what is
   // under it (the colour on the pixels layer, the tile on the tiles layer).
-  const viewportRef = useRef<HTMLDivElement>(null);
   const pinch = useRef(1);
   const at = (s: PointerSample): At => ({ clientX: s.x, clientY: s.y });
   const gestures = useGestures<HTMLCanvasElement>(
@@ -698,12 +750,13 @@ export function MapCanvas({
 
   return (
     <div ref={viewportRef} className={styles.mapViewport}>
-      <div className={styles.mapContent} style={{ width, height }}>
+      <div ref={contentRef} className={styles.mapContent} style={{ width, height }}>
         <canvas
           ref={canvasRef}
           className={styles.mapCanvas}
-          width={width}
-          height={height}
+          width={view.w}
+          height={view.h}
+          style={{ position: "absolute", left: view.x, top: view.y }}
           {...gestures}
           onPointerLeave={() => moveHover(null)}
           role="img"

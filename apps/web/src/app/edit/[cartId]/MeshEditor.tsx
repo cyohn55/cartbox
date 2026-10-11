@@ -1128,7 +1128,9 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   return (
     <div className={styles.body}>
       {/* Left rail: import + mesh list */}
-      <aside style={{ width: 240, padding: 12, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
+      {/* The asides take the workbench grid's rail and inspector tracks (a wider
+          inline width spilled under the stage and was clipped, T4). */}
+      <aside style={{ minWidth: 0, padding: 12, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
         <SegmentedControl
           label="View"
           ariaLabel="Preview mode"
@@ -1143,6 +1145,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
           <SegmentedControl
             label="Edit"
             ariaLabel="Edit mode"
+            wrap
             selected={editMode === "object" || editMode === "pose" || editMode === "weights" || editMode === "paint" ? editMode : "model"}
             onSelect={(id) => setEditMode(id === "model" ? modelSel.mode : id)}
             options={[
@@ -1319,7 +1322,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       </div>
 
       {/* Right: transform, rename, export */}
-      <aside style={{ width: 260, padding: 12, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
+      <aside style={{ minWidth: 0, padding: 12, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
         {selectedEntry ? (
           <>
             <RailGroup label="Name">

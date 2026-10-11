@@ -15,8 +15,7 @@ const BASE = process.env.CBX_BASE_URL ?? "http://localhost:3000";
 const OUT = process.env.CBX_OUT ?? tmpdir();
 const launch = (args) => chromium.launch({ ...(process.env.CBX_CHROMIUM ? { executablePath: process.env.CBX_CHROMIUM } : {}), args });
 const browser = await launch(["--use-angle=swiftshader", "--enable-unsafe-swiftshader"]);
-// The starter map is 1280×720 tiles; its 2D canvas crashes SwiftShader, so the map runs without a GPU.
-const cpuBrowser = await launch(["--disable-gpu"]);
+
 const results = [];
 const check = (name, ok, detail = "") => { results.push({ name, ok, detail }); console.log(`${ok ? "PASS" : "FAIL"} ${name} ${detail}`); };
 
@@ -78,6 +77,8 @@ const pixelsOf = (locator) => locator.evaluate((c) => {
   return Array.from(c.getContext("2d").getImageData(x0, y0, x1 - x0, y1 - y0).data);
 });
 /** Pixels that differ by more than shading noise (the views re-shade their material grain slightly after an edit commits). */
+/** All of a canvas's pixels, wherever it is scrolled to. */
+const allPixelsOf = (locator) => locator.evaluate((c) => Array.from(c.getContext("2d").getImageData(0, 0, c.width, c.height).data));
 const differ = (a, b) => { let n = 0; for (let i = 0; i < Math.min(a.length, b.length); i += 4) if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 30) n++; return n + Math.abs(a.length - b.length) / 4; };
 /** The colour at a page point of a canvas. */
 const colourAt = (locator, x, y) => locator.evaluate((c, [px, py]) => {
@@ -143,22 +144,33 @@ if (run("sprites")) {
   check("sprites: a Pencil stroke paints under a resting palm", differ(before, afterPen) > 0, `${differ(before, afterPen)} px`);
   check("sprites: the palm paints nothing", (await colourAt(canvas, ...palm)) === palmBefore && (await colourAt(canvas, palm[0] - 20, palm[1] - 6)) === palmBefore, `${palmBefore}`);
 
-  // 6. Once a Pencil is used, one finger no longer draws.
+  // 6. Once a Pencil is used, one finger no longer draws. (It scrolls the panel, so the whole sprite is
+  // compared; and the Pencil hovers off the canvas first, so its hover outline isn't counted.)
+  const hoverAway = async () => {
+    await t.pen("mouseMoved", 4, 4, 0);
+    await t.settle();
+  };
+  await hoverAway();
+  const settled = await allPixelsOf(canvas);
   await t.swipe(at(0.1, 0.75), at(0.9, 0.75));
-  check("sprites: after a Pencil, one finger draws nothing", differ(afterPen, await pixelsOf(canvas)) === 0);
+  await hoverAway();
+  const afterSwipe = await allPixelsOf(canvas);
+  check("sprites: after a Pencil, one finger draws nothing", differ(settled, afterSwipe) === 0, `${differ(settled, afterSwipe)} px`);
   await page.screenshot({ path: `${OUT}/tablet-sprites.png` });
   await t.ctx.close();
 }
 
 // --- The map canvas (Map tab). ---
 if (run("map")) {
-  const t = await open("/edit/new?model=xbox360", cpuBrowser);
+  const t = await open("/edit/new?model=xbox360");
   const { page } = t;
   await page.getByRole("button", { name: /Map$/ }).first().click();
   await page.waitForTimeout(8000);
   const canvas = page.locator('canvas[aria-label^="Map, "]').first();
+  // The canvas covers only the part of the map in view (T4), so the map's size is its box's.
+  const content = canvas.locator("xpath=..");
   const viewport = canvas.locator("xpath=../..");
-  let box = await canvas.boundingBox();
+  let box = await content.boundingBox();
   const view = await viewport.boundingBox();
   const mid = [view.x + view.width / 2, view.y + view.height / 2];
 
@@ -182,7 +194,7 @@ if (run("map")) {
   // 9. Spreading two fingers steps the zoom in (one step: this map at the largest steps is past what a canvas can hold).
   const widthBefore = box.width;
   await t.spread(...mid, 12);
-  box = await canvas.boundingBox();
+  box = await content.boundingBox();
   check("map: spreading two fingers zooms in", box.width > widthBefore * 1.2, `${widthBefore.toFixed(0)} -> ${box.width.toFixed(0)} px`);
 
   // 10. Two fingers pan the map.
@@ -230,10 +242,11 @@ if (run("uv")) {
 
   // 12. A long press picks the colour under it.
   const painted = await colour.inputValue();
-  // The first save drops the "New map size" choice, which moves the view up.
+  await colour.fill("#10ff20");
+  // The first save drops the "New map size" choice, and filling the colour can scroll the rail: measure again.
+  await page.waitForTimeout(300);
   box = await canvas.boundingBox();
   const under = await colourAt(canvas, ...at(0.5, 0.3));
-  await colour.fill("#10ff20");
   await t.longPress(...at(0.5, 0.3));
   const pickedValue = await colour.inputValue();
   const hex = (rgb) => "#" + rgb.split(",").map((v) => Number(v).toString(16).padStart(2, "0")).join("");
@@ -250,7 +263,6 @@ if (run("uv")) {
 }
 
 await browser.close();
-await cpuBrowser.close();
 const failed = results.filter((r) => !r.ok);
 console.log(`${results.length - failed.length}/${results.length} checks passed`);
 process.exit(failed.length ? 1 : 0);
