@@ -66,7 +66,15 @@ export type AimAssist = "off" | "standard" | "strong";
 export const AIM_ASSISTS: readonly AimAssist[] = ["off", "standard", "strong"];
 
 /** The devices that can look, each with its own look profile (C4). */
-export type LookDevice = "controller" | "touch" | "mouse";
+export type LookDevice = "controller" | "touch" | "mouse" | "gyro";
+
+/** How the touch pad looks (C4b): its right stick, or a drag anywhere on the right of the screen. */
+export type TouchLookMode = "stick" | "drag";
+export const TOUCH_LOOK_MODES: readonly TouchLookMode[] = ["stick", "drag"];
+
+/** When turning a phone or tablet aims (C4b): never, always, or only while the game's "zoom" action is on. */
+export type GyroAim = "off" | "always" | "zoomed";
+export const GYRO_AIMS: readonly GyroAim[] = ["off", "always", "zoomed"];
 
 /**
  * A device's own look tuning (C4): its sensitivity per axis and response
@@ -117,6 +125,12 @@ export interface ControlSettings {
   /** Mouse look (C4): click the game to capture the mouse, and it looks; its own tuning. */
   readonly mouseLook?: LookProfile;
   readonly mouseCapture?: boolean;
+  /** How the touch pad looks, and whether its move stick floats to where the thumb lands (C4b). */
+  readonly touchLookMode?: TouchLookMode;
+  readonly floatingStick?: boolean;
+  /** Gyro aim on a phone or tablet (C4b), and its own look tuning. */
+  readonly gyroAim?: GyroAim;
+  readonly gyroLook?: LookProfile;
   /** How much the game helps aim (C3). */
   readonly aimAssist?: AimAssist;
   /** Input actions (by name) that toggle on a press instead of acting while held (C3). */
@@ -194,6 +208,10 @@ export const DEFAULT_CONTROL_SETTINGS: ControlSettings = {
   touchLook: { sensitivity: 1, sensitivityY: 1, curve: "standard" },
   mouseLook: DEFAULT_MOUSE_LOOK,
   mouseCapture: false,
+  touchLookMode: "stick",
+  floatingStick: false,
+  gyroAim: "off",
+  gyroLook: { sensitivity: 1, sensitivityY: 1, curve: "standard" },
   aimAssist: "standard",
   actionToggles: [],
   vibration: true,
@@ -270,6 +288,10 @@ export function parseControlSettings(value: unknown, defaults: ControlSettings =
     touchLook: profile(raw.touchLook, raw.touchLook === undefined && raw.lookSensitivity !== undefined ? { sensitivity: lookSensitivity, sensitivityY: lookSensitivityY, curve: lookCurve } : (defaults.touchLook ?? { sensitivity: 1, sensitivityY: 1, curve: "standard" })),
     mouseLook: profile(raw.mouseLook, defaults.mouseLook ?? DEFAULT_MOUSE_LOOK),
     mouseCapture: typeof raw.mouseCapture === "boolean" ? raw.mouseCapture : (defaults.mouseCapture ?? false),
+    touchLookMode: (TOUCH_LOOK_MODES as readonly unknown[]).includes(raw.touchLookMode) ? (raw.touchLookMode as TouchLookMode) : (defaults.touchLookMode ?? "stick"),
+    floatingStick: typeof raw.floatingStick === "boolean" ? raw.floatingStick : (defaults.floatingStick ?? false),
+    gyroAim: (GYRO_AIMS as readonly unknown[]).includes(raw.gyroAim) ? (raw.gyroAim as GyroAim) : (defaults.gyroAim ?? "off"),
+    gyroLook: profile(raw.gyroLook, defaults.gyroLook ?? { sensitivity: 1, sensitivityY: 1, curve: "standard" }),
     leftStick: deadZones(raw.leftStick, defaults.leftStick),
     rightStick: deadZones(raw.rightStick, defaults.rightStick),
     stickLayout: (STICK_LAYOUTS as readonly unknown[]).includes(raw.stickLayout) ? (raw.stickLayout as StickLayout) : (defaults.stickLayout ?? "default"),
@@ -376,7 +398,8 @@ export function lookGains(
  * sensitivity and curve over the player's shared inversion and zoom.
  */
 export function lookProfileFor(settings: ControlSettings, device: LookDevice): ControlSettings {
-  const own = device === "touch" ? settings.touchLook : device === "mouse" ? (settings.mouseLook ?? DEFAULT_MOUSE_LOOK) : undefined;
+  const own =
+    device === "touch" ? settings.touchLook : device === "mouse" ? (settings.mouseLook ?? DEFAULT_MOUSE_LOOK) : device === "gyro" ? settings.gyroLook : undefined;
   if (!own) return settings;
   return { ...settings, lookSensitivity: own.sensitivity, lookSensitivityY: own.sensitivityY, lookCurve: own.curve };
 }
@@ -387,6 +410,37 @@ export const MOUSE_FULL_LEAN_PX = 12;
 /** A tick's mouse movement as look-stick lean (each −1..1). */
 export function mouseLean(dx: number, dy: number, fullPx = MOUSE_FULL_LEAN_PX): [number, number] {
   return [clamp(dx / fullPx, -1, 1), clamp(dy / fullPx, -1, 1)];
+}
+
+/** A drag on the touch pad's look zone for full lean in a tick (C4b), as a share of the screen's shorter side. */
+export const DRAG_FULL_LEAN = 0.02;
+
+/** A tick's drag (px) on a screen whose shorter side is `short` px, as look lean. */
+export function dragLean(dx: number, dy: number, short: number): [number, number] {
+  const full = Math.max(1, short * DRAG_FULL_LEAN);
+  return [clamp(dx / full, -1, 1), clamp(dy / full, -1, 1)];
+}
+
+/** How fast (degrees a second) a device must turn for full lean (C4b). */
+export const GYRO_FULL_DEG_PER_S = 150;
+/** Below this (degrees a second) a hand's tremor reads as still. */
+export const GYRO_DEAD_DEG_PER_S = 3;
+
+/**
+ * A device's rotation rate (the DeviceMotion API's, degrees a second about
+ * its own x, y and z: beta, gamma, alpha) as look lean on a screen turned
+ * `angle` degrees (screen.orientation.angle): turning the device right looks
+ * right, tilting its top away looks up, whichever way it is held.
+ */
+export function gyroLean(rate: { readonly beta?: number | null; readonly gamma?: number | null }, angle: number): [number, number] {
+  const b = rate.beta ?? 0;
+  const g = rate.gamma ?? 0;
+  const t = (angle * Math.PI) / 180;
+  // The screen's up axis in the device's frame is (sin t, cos t), its right (cos t, -sin t).
+  const yawRight = -(b * Math.sin(t) + g * Math.cos(t));
+  const pitchUp = b * Math.cos(t) - g * Math.sin(t);
+  const lean = (v: number) => (Math.abs(v) < GYRO_DEAD_DEG_PER_S ? 0 : clamp(v / GYRO_FULL_DEG_PER_S, -1, 1));
+  return [lean(yawRight) + 0, lean(-pitchUp) + 0]; // + 0: no -0
 }
 
 /** The aim assist level a cart reads (0 off, 1 standard, 2 strong). */

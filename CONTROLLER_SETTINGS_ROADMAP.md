@@ -32,7 +32,7 @@ the Start menu (`apps/web/src/app/lockout/StartMenu.tsx`) edits them.
   always on (C3 makes it a setting).
 - **Zoom:** held, never toggled (C3 lets any action toggle).
 - **No vibration** (C3 adds it).
-- **No mouse look and no gyro** (C4a adds the mouse; C4b gyro).
+- **No mouse look and no gyro** (C4a adds the mouse; C4b the gyro).
 
 ## Inspiration
 
@@ -237,13 +237,42 @@ the Start menu (`apps/web/src/app/lockout/StartMenu.tsx`) edits them.
       `scripts/verify-controller-settings.mjs` turns mouse look on, checks
       that a click captures the mouse (pointer lock faked, as headless has
       none) and that a left click fires in a Lockout match.
-- [ ] **C4b. Touch and gyro.**
+- [x] **C4b. Touch and gyro.**
   - **Touch:**
     - look by dragging anywhere on the right of the screen;
     - a fixed or floating move stick (one that appears where the thumb lands).
   - **Gyro aim on phones and tablets:** turning the device aims, always or
     only while zoomed. It has its own sensitivity, and asks the motion
     permission iOS needs.
+  - **Done.**
+    - **Drag to look:** with the touch pad set to look by dragging, a
+      transparent zone over the right of the screen (under every control)
+      takes one finger in place of the right stick. The drag since the last
+      tick becomes the touch look stick: 2% of the screen's shorter side
+      reads as full lean (`dragLean`), so it is the same on any screen.
+      It looks with the touch profile, and look acceleration leaves it
+      alone.
+    - **Floating stick:** a zone over the left of the screen brings the move
+      stick to wherever the thumb lands, and the thumb drives it from there
+      (the stick's `grab`, tracked on the zone). On release it goes home.
+    - **Gyro aim:** `GyroLook` (`gyroLook.ts`) reads DeviceMotion's rotation
+      rate while gyro aim is on, on a touch device. `gyroLean` maps it to the
+      screen whichever way the device is held (screen.orientation.angle):
+      turning right looks right, tilting the top away looks up. Full lean is
+      150°/s, and below 3°/s reads as still. It looks with its own profile
+      when it turns further than the sticks lean. "Only while zoomed" follows
+      the game's input action named `zoom`, held or toggled on. Turning it on
+      in the menu asks iOS for motion (`askMotionPermission`); if refused,
+      the menu says so. The direction mapping comes from the DeviceMotion
+      axes and is unit-tested per orientation; it has not been tried on a
+      phone in hand.
+    - **The menu:** the Touch tab gains Look with (stick or drag), Gyro aim
+      with its own sensitivity and curve, and Floating move stick.
+    - **Tests:** `Unit Tests/device-look.test.ts` (drag lean, the gyro per
+      orientation, tremor, its profile, saves). `scripts/verify-touch-look.mjs`
+      plays Lockout on a landscape phone with real CDP touches. It checks the
+      look zone replaces the right stick, a drag plays, the move stick comes
+      to the thumb and goes home, and motion is read without error.
 
 ## Not in this roadmap
 

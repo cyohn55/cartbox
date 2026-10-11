@@ -5500,6 +5500,8 @@ var PAD_BUTTONS = [
 var RESPONSE_CURVES = ["standard", "dynamic", "precision", "responsive"];
 var STICK_LAYOUTS = ["default", "southpaw", "legacy", "legacySouthpaw"];
 var AIM_ASSISTS = ["off", "standard", "strong"];
+var TOUCH_LOOK_MODES = ["stick", "drag"];
+var GYRO_AIMS = ["off", "always", "zoomed"];
 var DEFAULT_MOUSE_LOOK = { sensitivity: 1, sensitivityY: 1, curve: "responsive" };
 var DEFAULT_PAD_BINDINGS = {
   A: 4 /* A */,
@@ -5547,6 +5549,10 @@ var DEFAULT_CONTROL_SETTINGS = {
   touchLook: { sensitivity: 1, sensitivityY: 1, curve: "standard" },
   mouseLook: DEFAULT_MOUSE_LOOK,
   mouseCapture: false,
+  touchLookMode: "stick",
+  floatingStick: false,
+  gyroAim: "off",
+  gyroLook: { sensitivity: 1, sensitivityY: 1, curve: "standard" },
   aimAssist: "standard",
   actionToggles: [],
   vibration: true,
@@ -5611,6 +5617,10 @@ function parseControlSettings(value, defaults = DEFAULT_CONTROL_SETTINGS) {
     touchLook: profile(raw.touchLook, raw.touchLook === void 0 && raw.lookSensitivity !== void 0 ? { sensitivity: lookSensitivity, sensitivityY: lookSensitivityY, curve: lookCurve } : defaults.touchLook ?? { sensitivity: 1, sensitivityY: 1, curve: "standard" }),
     mouseLook: profile(raw.mouseLook, defaults.mouseLook ?? DEFAULT_MOUSE_LOOK),
     mouseCapture: typeof raw.mouseCapture === "boolean" ? raw.mouseCapture : defaults.mouseCapture ?? false,
+    touchLookMode: TOUCH_LOOK_MODES.includes(raw.touchLookMode) ? raw.touchLookMode : defaults.touchLookMode ?? "stick",
+    floatingStick: typeof raw.floatingStick === "boolean" ? raw.floatingStick : defaults.floatingStick ?? false,
+    gyroAim: GYRO_AIMS.includes(raw.gyroAim) ? raw.gyroAim : defaults.gyroAim ?? "off",
+    gyroLook: profile(raw.gyroLook, defaults.gyroLook ?? { sensitivity: 1, sensitivityY: 1, curve: "standard" }),
     leftStick: deadZones(raw.leftStick, defaults.leftStick),
     rightStick: deadZones(raw.rightStick, defaults.rightStick),
     stickLayout: STICK_LAYOUTS.includes(raw.stickLayout) ? raw.stickLayout : defaults.stickLayout ?? "default",
@@ -5676,13 +5686,29 @@ function lookGains(settings, boost = 1) {
   };
 }
 function lookProfileFor(settings, device) {
-  const own = device === "touch" ? settings.touchLook : device === "mouse" ? settings.mouseLook ?? DEFAULT_MOUSE_LOOK : void 0;
+  const own = device === "touch" ? settings.touchLook : device === "mouse" ? settings.mouseLook ?? DEFAULT_MOUSE_LOOK : device === "gyro" ? settings.gyroLook : void 0;
   if (!own) return settings;
   return { ...settings, lookSensitivity: own.sensitivity, lookSensitivityY: own.sensitivityY, lookCurve: own.curve };
 }
 var MOUSE_FULL_LEAN_PX = 12;
 function mouseLean(dx, dy, fullPx = MOUSE_FULL_LEAN_PX) {
   return [clamp(dx / fullPx, -1, 1), clamp(dy / fullPx, -1, 1)];
+}
+var DRAG_FULL_LEAN = 0.02;
+function dragLean(dx, dy, short) {
+  const full = Math.max(1, short * DRAG_FULL_LEAN);
+  return [clamp(dx / full, -1, 1), clamp(dy / full, -1, 1)];
+}
+var GYRO_FULL_DEG_PER_S = 150;
+var GYRO_DEAD_DEG_PER_S = 3;
+function gyroLean(rate, angle) {
+  const b = rate.beta ?? 0;
+  const g = rate.gamma ?? 0;
+  const t = angle * Math.PI / 180;
+  const yawRight = -(b * Math.sin(t) + g * Math.cos(t));
+  const pitchUp = b * Math.cos(t) - g * Math.sin(t);
+  const lean = (v) => Math.abs(v) < GYRO_DEAD_DEG_PER_S ? 0 : clamp(v / GYRO_FULL_DEG_PER_S, -1, 1);
+  return [lean(yawRight) + 0, lean(-pitchUp) + 0];
 }
 function aimAssistLevel(assist) {
   const i = AIM_ASSISTS.indexOf(assist ?? "standard");
@@ -5812,6 +5838,8 @@ var GamepadState = class {
     this.padAxes = [0, 0, 0, 0];
     /** The mouse's look this tick (C4): look only, as lean. */
     this.mouseLook = [0, 0];
+    /** The gyro's look this tick (C4b). */
+    this.gyroLook = [0, 0];
   }
   /** Analog sticks: left x, left y, right x, right y, each −1..1 (y down-positive) —
    *  per stick, whichever source (touch, controller or mouse) is leaning further. */
@@ -5824,7 +5852,9 @@ var GamepadState = class {
       out[i] = src[i];
       out[i + 1] = src[i + 1];
     }
-    if (this.lookDevice === "mouse") [out[2], out[3]] = this.mouseLook;
+    const device = this.lookDevice;
+    if (device === "mouse") [out[2], out[3]] = this.mouseLook;
+    else if (device === "gyro") [out[2], out[3]] = this.gyroLook;
     return out;
   }
   /** Which device the look stick's reading comes from this tick (C4), so its own look profile applies. */
@@ -5832,8 +5862,15 @@ var GamepadState = class {
     const t = Math.hypot(this.touchAxes[2], this.touchAxes[3]);
     const p = Math.hypot(this.padAxes[2], this.padAxes[3]);
     const m = Math.hypot(this.mouseLook[0], this.mouseLook[1]);
-    if (m > 0 && m >= t && m >= p) return "mouse";
+    const g = Math.hypot(this.gyroLook[0], this.gyroLook[1]);
+    if (m > 0 && m >= t && m >= p && m >= g) return "mouse";
+    if (g > 0 && g >= t && g >= p) return "gyro";
     return p > t ? "controller" : "touch";
+  }
+  /** The gyro's look this tick (see gyroLean), replaced each tick. */
+  setGyroLook(x, y) {
+    this.gyroLook[0] = x;
+    this.gyroLook[1] = y;
   }
   /** The mouse's look this tick (see mouseLean), replaced each tick. */
   setMouseLook(x, y) {
@@ -5872,6 +5909,7 @@ var GamepadState = class {
     this.touchAxes.fill(0);
     this.padAxes.fill(0);
     this.mouseLook.fill(0);
+    this.gyroLook.fill(0);
   }
 };
 var KeyboardInput = class {
@@ -5954,6 +5992,10 @@ function stickVector(dx, dy, radius, deadZone = 0.12) {
 var TouchInput = class {
   constructor(container, state, onStart) {
     this.restorePosition = null;
+    this.dragX = 0;
+    this.dragY = 0;
+    this.analog = false;
+    this.lookMode = "stick";
     const doc = container.ownerDocument;
     const view = doc.defaultView;
     if (view && view.getComputedStyle(container).position === "static") {
@@ -5989,9 +6031,14 @@ var TouchInput = class {
     });
     this.pad.appendChild(face);
     for (const control of TOUCH_LAYOUT) face.appendChild(this.createButton(doc, control, state));
-    this.createStick(doc, state, 0, { left: "4%", bottom: "6%" });
-    this.rightStick = this.createStick(doc, state, 1, { right: `calc(3% + 3 * ${FACE_SIZE} + 8px + 3vmin)`, bottom: "6%" });
+    this.moveZone = this.createZone(doc, { left: "0", top: "30%", width: "45%", bottom: "0" }, "Move (touch anywhere here)");
+    this.lookZone = this.createZone(doc, { right: "0", top: "12%", width: "50%", bottom: "0" }, "Look (drag here)");
+    const leftPlace = { left: "4%", bottom: "6%" };
+    const left = this.createStick(doc, state, 0, leftPlace);
+    this.rightStick = this.createStick(doc, state, 1, { right: `calc(3% + 3 * ${FACE_SIZE} + 8px + 3vmin)`, bottom: "6%" }).base;
     this.rightStick.style.display = "none";
+    this.wireMoveZone(left, leftPlace);
+    this.wireLookZone();
     if (onStart) {
       const start = doc.createElement("button");
       start.type = "button";
@@ -6022,20 +6069,101 @@ var TouchInput = class {
     }
     container.appendChild(this.root);
   }
-  /** Apply the player's touch settings: overall opacity and size of the pad. */
+  /** Apply the player's touch settings: overall opacity and size of the pad, how it looks, and a floating move stick. */
   applySettings(settings) {
     this.pad.style.opacity = String(settings.touchOpacity);
     for (const child of Array.from(this.pad.children)) {
-      if (child.getAttribute("data-cbx-button") === "Start") continue;
+      if (child.getAttribute("data-cbx-button") === "Start" || child.hasAttribute("data-cbx-zone")) continue;
       child.style.scale = String(settings.touchScale);
       child.style.transformOrigin = child.style.left ? "0% 100%" : "100% 100%";
     }
+    this.lookMode = settings.touchLookMode ?? "stick";
+    this.moveZone.style.display = settings.floatingStick ? "block" : "none";
+    this.showLook();
   }
-  /** Show the right stick: the cart reads analog sticks. */
+  /** Show the right stick (or the drag zone): the cart reads analog sticks. */
   setAnalog(on) {
-    this.rightStick.style.display = on ? "block" : "none";
+    this.analog = on;
+    this.showLook();
   }
-  /** A virtual thumbstick: a ring you press anywhere in, and a knob that follows the thumb. */
+  showLook() {
+    this.rightStick.style.display = this.analog && this.lookMode === "stick" ? "block" : "none";
+    this.lookZone.style.display = this.analog && this.lookMode === "drag" ? "block" : "none";
+  }
+  /**
+   * Drag-to-look (C4b): the drag since the last tick (px), cleared; null when
+   * the pad looks with its stick. The player turns it into look lean.
+   */
+  takeDrag() {
+    if (this.lookMode !== "drag" || !this.analog) return null;
+    const out = [this.dragX, this.dragY];
+    this.dragX = 0;
+    this.dragY = 0;
+    return out;
+  }
+  /** A transparent zone (behind every control) that takes touches for a floating stick or drag-to-look. */
+  createZone(doc, place2, label) {
+    const zone = doc.createElement("div");
+    zone.setAttribute("data-cbx-zone", "");
+    zone.setAttribute("aria-label", label);
+    Object.assign(zone.style, {
+      position: "absolute",
+      display: "none",
+      pointerEvents: "auto",
+      touchAction: "none",
+      webkitTouchCallout: "none",
+      webkitTapHighlightColor: "transparent",
+      ...place2
+    });
+    zone.addEventListener("contextmenu", (event) => event.preventDefault());
+    this.pad.appendChild(zone);
+    return zone;
+  }
+  /** Drag-to-look: one finger at a time, its movement summed until the next tick. */
+  wireLookZone() {
+    let pointer = null;
+    let lastX = 0;
+    let lastY = 0;
+    this.lookZone.addEventListener("pointerdown", (event) => {
+      if (pointer !== null) return;
+      event.preventDefault();
+      pointer = event.pointerId;
+      lastX = event.clientX;
+      lastY = event.clientY;
+      try {
+        this.lookZone.setPointerCapture(event.pointerId);
+      } catch {
+      }
+    });
+    this.lookZone.addEventListener("pointermove", (event) => {
+      if (event.pointerId !== pointer) return;
+      this.dragX += event.clientX - lastX;
+      this.dragY += event.clientY - lastY;
+      lastX = event.clientX;
+      lastY = event.clientY;
+    });
+    const end = (event) => {
+      if (event.pointerId === pointer) pointer = null;
+    };
+    this.lookZone.addEventListener("pointerup", end);
+    this.lookZone.addEventListener("pointercancel", end);
+    this.lookZone.addEventListener("lostpointercapture", end);
+  }
+  /** A floating move stick: a touch in the zone brings the stick to the thumb, and it goes home on release. */
+  wireMoveZone(stick, home) {
+    this.moveZone.addEventListener("pointerdown", (event) => {
+      const frame = this.root.getBoundingClientRect();
+      const half = stick.base.getBoundingClientRect().width / 2 || 1;
+      Object.assign(stick.base.style, { left: `${event.clientX - frame.left - half}px`, top: `${event.clientY - frame.top - half}px`, bottom: "auto" });
+      if (!stick.grab(event, this.moveZone)) Object.assign(stick.base.style, { top: "", ...home });
+    });
+    stick.base.addEventListener("cbx-stick-release", () => Object.assign(stick.base.style, { top: "", ...home }));
+  }
+  /**
+   * A virtual thumbstick: a ring you press anywhere in, and a knob that follows
+   * the thumb. `grab` starts a thumb from elsewhere (a floating stick's zone),
+   * tracked on that element; the stick fires "cbx-stick-release" when let go.
+   */
   createStick(doc, state, index, place2) {
     const base = doc.createElement("div");
     base.setAttribute("data-cbx-stick", index === 0 ? "left" : "right");
@@ -6082,26 +6210,31 @@ var TouchInput = class {
       state.setStick(index, 0, 0);
       knob.style.transform = "translate(0px, 0px)";
       knob.style.background = "rgba(92,208,255,0.35)";
+      base.dispatchEvent(new Event("cbx-stick-release"));
     };
-    base.addEventListener("pointerdown", (event) => {
-      if (pointer !== null) return;
+    const grab = (event, from) => {
+      if (pointer !== null) return false;
       event.preventDefault();
       pointer = event.pointerId;
       try {
-        base.setPointerCapture(event.pointerId);
+        from.setPointerCapture(event.pointerId);
       } catch {
       }
       move(event);
-    });
-    base.addEventListener("pointermove", (event) => {
-      if (event.pointerId === pointer) move(event);
-    });
-    base.addEventListener("pointerup", end);
-    base.addEventListener("pointercancel", end);
-    base.addEventListener("lostpointercapture", end);
+      return true;
+    };
+    for (const el of index === 0 ? [base, this.moveZone] : [base]) {
+      el.addEventListener("pointermove", (event) => {
+        if (event.pointerId === pointer) move(event);
+      });
+      el.addEventListener("pointerup", end);
+      el.addEventListener("pointercancel", end);
+      el.addEventListener("lostpointercapture", end);
+    }
+    base.addEventListener("pointerdown", (event) => void grab(event, base));
     base.addEventListener("contextmenu", (event) => event.preventDefault());
     this.pad.appendChild(base);
-    return base;
+    return { base, grab };
   }
   createButton(doc, control, state) {
     const element = doc.createElement("button");
@@ -6401,6 +6534,38 @@ var MouseLook = class {
     this.container.removeEventListener("contextmenu", this.onContextMenu);
   }
 };
+
+// src/gyroLook.ts
+var STALE_MS = 120;
+var GyroLook = class {
+  constructor(view) {
+    this.view = view;
+    this.rate = null;
+    this.at = 0;
+    this.onMotion = (event) => {
+      if (!event.rotationRate) return;
+      this.rate = event.rotationRate;
+      this.at = this.view.performance.now();
+    };
+    view.addEventListener("devicemotion", this.onMotion);
+  }
+  /** The latest rotation rate (degrees a second), or null when there's none fresh. */
+  latest() {
+    return this.rate && this.view.performance.now() - this.at < STALE_MS ? this.rate : null;
+  }
+  destroy() {
+    this.view.removeEventListener("devicemotion", this.onMotion);
+  }
+};
+async function askMotionPermission(view = window) {
+  const motion = view.DeviceMotionEvent;
+  if (!motion?.requestPermission) return true;
+  try {
+    return await motion.requestPermission() === "granted";
+  } catch {
+    return false;
+  }
+}
 
 // src/sdk.ts
 var CARTBOX_SDK_LUA = `local _MB = 119
@@ -18106,12 +18271,41 @@ var Player = class {
     this.latchedActions = latched;
     return held;
   }
-  /** The mouse's movement since the last tick, as look (C4). */
+  /**
+   * The look that isn't a stick's, before each tick: the mouse's movement
+   * (C4), a drag on the touch pad's look zone and the device's turning (C4b).
+   */
   feedMouse() {
-    if (!this.mouse) return;
-    const [dx, dy] = this.mouse.take();
-    const [x, y] = this.inputEnabled && !this.replaySource ? mouseLean(dx, dy) : [0, 0];
-    this.gamepad.setMouseLook(x, y);
+    const live = this.inputEnabled && !this.replaySource;
+    if (this.mouse) {
+      const [dx, dy] = this.mouse.take();
+      const [x, y] = live ? mouseLean(dx, dy) : [0, 0];
+      this.gamepad.setMouseLook(x, y);
+    }
+    const drag = this.touch?.takeDrag();
+    if (drag) {
+      const short = Math.min(this.view.innerWidth || 1, this.view.innerHeight || 1);
+      const [x, y] = live ? dragLean(drag[0], drag[1], short) : [0, 0];
+      this.gamepad.setStick(1, x, y);
+    }
+    this.feedGyro(live);
+  }
+  feedGyro(live) {
+    const mode = this.controlSettings.gyroAim ?? "off";
+    if (mode === "off" || !this.touch) {
+      if (this.gyro) {
+        this.gyro.destroy();
+        this.gyro = void 0;
+        this.gamepad.setGyroLook(0, 0);
+      }
+      return;
+    }
+    this.gyro ?? (this.gyro = new GyroLook(this.view));
+    const zoom = this.actions.findIndex((a) => a.name === "zoom");
+    const on = mode === "always" || zoom >= 0 && (this.lastActions >>> zoom & 1) === 1;
+    const rate = live && on ? this.gyro.latest() : null;
+    const [x, y] = rate ? gyroLean(rate, this.view.screen?.orientation?.angle ?? 0) : [0, 0];
+    this.gamepad.setGyroLook(x, y);
   }
   /** Play a rumble the cart asked for (cartbox.rumble, C3), under the player's vibration settings. */
   rumble(strength, ms) {
@@ -18940,7 +19134,8 @@ var Player = class {
       return;
     }
     const axes = live ? applyLookSettings(this.gamepad.axes, look, false) : [0, 0, 0, 0];
-    this.lookHeldTicks = device === "mouse" ? 0 : stepLookAcceleration(this.lookHeldTicks, axes[2], axes[3]);
+    const stick = device === "controller" || device === "touch" && this.controlSettings.touchLookMode !== "drag";
+    this.lookHeldTicks = stick ? stepLookAcceleration(this.lookHeldTicks, axes[2], axes[3]) : 0;
     words[STICK_WORD] = packSticks(axes);
     const boost = live ? lookAccelerationBoost(this.lookHeldTicks, this.controlSettings.lookAcceleration) : 1;
     const assist = aimAssistLevel(this.controlSettings.aimAssist);
@@ -19006,6 +19201,7 @@ var Player = class {
     this.keyboard?.destroy();
     this.touch?.destroy();
     this.mouse?.destroy();
+    this.gyro?.destroy();
     this.pointer?.destroy();
     this.runtime?.channel.destroy();
     this.runtime = null;
@@ -19561,7 +19757,7 @@ function netSendInterval(players) {
   return players <= 2 ? 4 : players <= 4 ? 6 : 8;
 }
 var KEEPALIVE_TICKS = 60;
-var STALE_MS = 3e3;
+var STALE_MS2 = 3e3;
 var PING_TICKS = 30;
 var PING_TICKS_EARLY = 6;
 var EARLY_PINGS = 5;
@@ -19766,7 +19962,7 @@ var NetSession = class {
     const stamps = [];
     for (let slot = 0; slot < NET_SLOTS; slot += 1) {
       const entry = this.remote.get(slot);
-      if (entry && now - entry.at < STALE_MS) {
+      if (entry && now - entry.at < STALE_MS2) {
         slots.push(entry.state);
         stamps.push(entry.stamp);
         live |= 1 << slot;
@@ -19846,7 +20042,7 @@ var NetSession = class {
     for (const [slot, a, b, c, d] of message.s ?? []) {
       if (slot < 0 || slot >= NET_SLOTS) continue;
       const held = this.remote.get(slot);
-      if (held && now - held.at < STALE_MS && stamp < held.stamp) continue;
+      if (held && now - held.at < STALE_MS2 && stamp < held.stamp) continue;
       this.remote.set(slot, { state: [a, b, c, d ?? 0], stamp, at: now });
     }
     if (message.ro && from !== void 0) this.adoptRoster(message.ro, from);
@@ -20591,6 +20787,7 @@ export {
   FLARE_GHOSTS,
   FLARE_GHOST_GAIN,
   FLARE_SPIKE_POWER,
+  GYRO_AIMS,
   GamepadInput,
   HEIGHT_WORLD,
   IMPORTED_LOOK,
@@ -20675,6 +20872,7 @@ export {
   SwitchableTransport,
   TILT_SHIFT_FEATHER,
   TINT_PALETTE,
+  TOUCH_LOOK_MODES,
   UNIFORM_BYTES_USED,
   UNIFORM_FLOATS,
   UNIFORM_STRIDE,
@@ -20701,6 +20899,7 @@ export {
   applyRenderCaps,
   armDebugBlock,
   armSaveBlock,
+  askMotionPermission,
   breakableLine,
   browserDeviceHints,
   browserRtc,
@@ -20752,6 +20951,7 @@ export {
   detectQuality,
   deterministicBackend,
   directCoreModel,
+  dragLean,
   drift,
   effectiveBreakpoints,
   emitterPreset,
@@ -20771,6 +20971,7 @@ export {
   framebufferBytes,
   getModel,
   getWebgpuDevice,
+  gyroLean,
   hasCommandRing,
   hashCart,
   hashEventId,

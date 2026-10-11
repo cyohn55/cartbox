@@ -7,7 +7,7 @@
 
 import { ConsoleButton } from "./types.js";
 import { stickDirections } from "./sticks.js";
-import { DEFAULT_KEY_BINDINGS, START_KEYS, readPad, type ControlSettings, type LookDevice, type PadSnapshot, type RumbleEffect } from "./controls.js";
+import { DEFAULT_KEY_BINDINGS, START_KEYS, readPad, type ControlSettings, type LookDevice, type PadSnapshot, type RumbleEffect, type TouchLookMode } from "./controls.js";
 
 /**
  * Default keyboard layout, matching TIC-80 conventions: arrows for the D-pad,
@@ -43,6 +43,8 @@ export class GamepadState {
   private readonly padAxes: [number, number, number, number] = [0, 0, 0, 0];
   /** The mouse's look this tick (C4): look only, as lean. */
   private readonly mouseLook: [number, number] = [0, 0];
+  /** The gyro's look this tick (C4b). */
+  private readonly gyroLook: [number, number] = [0, 0];
 
   /** Analog sticks: left x, left y, right x, right y, each −1..1 (y down-positive) —
    *  per stick, whichever source (touch, controller or mouse) is leaning further. */
@@ -55,7 +57,9 @@ export class GamepadState {
       out[i] = src[i]!;
       out[i + 1] = src[i + 1]!;
     }
-    if (this.lookDevice === "mouse") [out[2], out[3]] = this.mouseLook;
+    const device = this.lookDevice;
+    if (device === "mouse") [out[2], out[3]] = this.mouseLook;
+    else if (device === "gyro") [out[2], out[3]] = this.gyroLook;
     return out;
   }
 
@@ -64,8 +68,16 @@ export class GamepadState {
     const t = Math.hypot(this.touchAxes[2], this.touchAxes[3]);
     const p = Math.hypot(this.padAxes[2], this.padAxes[3]);
     const m = Math.hypot(this.mouseLook[0], this.mouseLook[1]);
-    if (m > 0 && m >= t && m >= p) return "mouse";
+    const g = Math.hypot(this.gyroLook[0], this.gyroLook[1]);
+    if (m > 0 && m >= t && m >= p && m >= g) return "mouse";
+    if (g > 0 && g >= t && g >= p) return "gyro";
     return p > t ? "controller" : "touch";
+  }
+
+  /** The gyro's look this tick (see gyroLean), replaced each tick. */
+  setGyroLook(x: number, y: number): void {
+    this.gyroLook[0] = x;
+    this.gyroLook[1] = y;
   }
 
   /** The mouse's look this tick (see mouseLean), replaced each tick. */
@@ -111,6 +123,7 @@ export class GamepadState {
     this.touchAxes.fill(0);
     this.padAxes.fill(0);
     this.mouseLook.fill(0);
+    this.gyroLook.fill(0);
   }
 }
 
@@ -256,6 +269,14 @@ export class TouchInput {
   private readonly rightStick: HTMLElement;
   private readonly pad: HTMLElement;
   private readonly restorePosition: (() => void) | null = null;
+  /** Drag-to-look (C4b): a zone over the right of the screen, and the drag since the last tick (px). */
+  private readonly lookZone: HTMLElement;
+  private dragX = 0;
+  private dragY = 0;
+  /** A floating move stick (C4b): a zone over the left of the screen where the thumb lands. */
+  private readonly moveZone: HTMLElement;
+  private analog = false;
+  private lookMode: TouchLookMode = "stick";
 
   constructor(container: HTMLElement, state: GamepadState, onStart?: () => void) {
     const doc = container.ownerDocument;
@@ -304,9 +325,16 @@ export class TouchInput {
     // Two sticks: the left one moves (and drives the D-pad for button-only
     // carts); the right one, beside the face buttons, aims — shown once the cart
     // reads sticks (cartbox.stick), since a button-only cart has no use for it.
-    this.createStick(doc, state, 0, { left: "4%", bottom: "6%" });
-    this.rightStick = this.createStick(doc, state, 1, { right: `calc(3% + 3 * ${FACE_SIZE} + 8px + 3vmin)`, bottom: "6%" });
+    // Under them (first, so every control draws over it), the zones a
+    // floating stick and drag-to-look take their touches from (C4b).
+    this.moveZone = this.createZone(doc, { left: "0", top: "30%", width: "45%", bottom: "0" }, "Move (touch anywhere here)");
+    this.lookZone = this.createZone(doc, { right: "0", top: "12%", width: "50%", bottom: "0" }, "Look (drag here)");
+    const leftPlace = { left: "4%", bottom: "6%" };
+    const left = this.createStick(doc, state, 0, leftPlace);
+    this.rightStick = this.createStick(doc, state, 1, { right: `calc(3% + 3 * ${FACE_SIZE} + 8px + 3vmin)`, bottom: "6%" }).base;
     this.rightStick.style.display = "none";
+    this.wireMoveZone(left, leftPlace);
+    this.wireLookZone();
 
     // Start: opens the game's menu (settings, leave). Top centre, out of the thumbs' way.
     if (onStart) {
@@ -340,23 +368,115 @@ export class TouchInput {
     container.appendChild(this.root);
   }
 
-  /** Apply the player's touch settings: overall opacity and size of the pad. */
-  applySettings(settings: Pick<ControlSettings, "touchOpacity" | "touchScale">): void {
+  /** Apply the player's touch settings: overall opacity and size of the pad, how it looks, and a floating move stick. */
+  applySettings(settings: Pick<ControlSettings, "touchOpacity" | "touchScale"> & Partial<Pick<ControlSettings, "touchLookMode" | "floatingStick">>): void {
     this.pad.style.opacity = String(settings.touchOpacity);
     for (const child of Array.from(this.pad.children) as HTMLElement[]) {
-      if (child.getAttribute("data-cbx-button") === "Start") continue;
+      if (child.getAttribute("data-cbx-button") === "Start" || child.hasAttribute("data-cbx-zone")) continue;
       child.style.scale = String(settings.touchScale);
       child.style.transformOrigin = child.style.left ? "0% 100%" : "100% 100%"; // grow from its own corner
     }
+    this.lookMode = settings.touchLookMode ?? "stick";
+    this.moveZone.style.display = settings.floatingStick ? "block" : "none";
+    this.showLook();
   }
 
-  /** Show the right stick: the cart reads analog sticks. */
+  /** Show the right stick (or the drag zone): the cart reads analog sticks. */
   setAnalog(on: boolean): void {
-    this.rightStick.style.display = on ? "block" : "none";
+    this.analog = on;
+    this.showLook();
   }
 
-  /** A virtual thumbstick: a ring you press anywhere in, and a knob that follows the thumb. */
-  private createStick(doc: Document, state: GamepadState, index: 0 | 1, place: Partial<CSSStyleDeclaration>): HTMLElement {
+  private showLook(): void {
+    this.rightStick.style.display = this.analog && this.lookMode === "stick" ? "block" : "none";
+    this.lookZone.style.display = this.analog && this.lookMode === "drag" ? "block" : "none";
+  }
+
+  /**
+   * Drag-to-look (C4b): the drag since the last tick (px), cleared; null when
+   * the pad looks with its stick. The player turns it into look lean.
+   */
+  takeDrag(): [number, number] | null {
+    if (this.lookMode !== "drag" || !this.analog) return null;
+    const out: [number, number] = [this.dragX, this.dragY];
+    this.dragX = 0;
+    this.dragY = 0;
+    return out;
+  }
+
+  /** A transparent zone (behind every control) that takes touches for a floating stick or drag-to-look. */
+  private createZone(doc: Document, place: Partial<CSSStyleDeclaration>, label: string): HTMLElement {
+    const zone = doc.createElement("div");
+    zone.setAttribute("data-cbx-zone", "");
+    zone.setAttribute("aria-label", label);
+    Object.assign(zone.style, {
+      position: "absolute",
+      display: "none",
+      pointerEvents: "auto",
+      touchAction: "none",
+      webkitTouchCallout: "none",
+      webkitTapHighlightColor: "transparent",
+      ...place,
+    } as Partial<CSSStyleDeclaration>);
+    zone.addEventListener("contextmenu", (event) => event.preventDefault());
+    this.pad.appendChild(zone);
+    return zone;
+  }
+
+  /** Drag-to-look: one finger at a time, its movement summed until the next tick. */
+  private wireLookZone(): void {
+    let pointer: number | null = null;
+    let lastX = 0;
+    let lastY = 0;
+    this.lookZone.addEventListener("pointerdown", (event) => {
+      if (pointer !== null) return;
+      event.preventDefault();
+      pointer = event.pointerId;
+      lastX = event.clientX;
+      lastY = event.clientY;
+      try {
+        this.lookZone.setPointerCapture(event.pointerId);
+      } catch {
+        // Synthetic/unsupported pointers: tracking still works while inside.
+      }
+    });
+    this.lookZone.addEventListener("pointermove", (event) => {
+      if (event.pointerId !== pointer) return;
+      this.dragX += event.clientX - lastX;
+      this.dragY += event.clientY - lastY;
+      lastX = event.clientX;
+      lastY = event.clientY;
+    });
+    const end = (event: PointerEvent) => {
+      if (event.pointerId === pointer) pointer = null;
+    };
+    this.lookZone.addEventListener("pointerup", end);
+    this.lookZone.addEventListener("pointercancel", end);
+    this.lookZone.addEventListener("lostpointercapture", end);
+  }
+
+  /** A floating move stick: a touch in the zone brings the stick to the thumb, and it goes home on release. */
+  private wireMoveZone(stick: { base: HTMLElement; grab: (event: PointerEvent, from: HTMLElement) => boolean }, home: Partial<CSSStyleDeclaration>): void {
+    this.moveZone.addEventListener("pointerdown", (event) => {
+      const frame = this.root.getBoundingClientRect();
+      const half = stick.base.getBoundingClientRect().width / 2 || 1;
+      Object.assign(stick.base.style, { left: `${event.clientX - frame.left - half}px`, top: `${event.clientY - frame.top - half}px`, bottom: "auto" });
+      if (!stick.grab(event, this.moveZone)) Object.assign(stick.base.style, { top: "", ...home });
+    });
+    stick.base.addEventListener("cbx-stick-release", () => Object.assign(stick.base.style, { top: "", ...home }));
+  }
+
+  /**
+   * A virtual thumbstick: a ring you press anywhere in, and a knob that follows
+   * the thumb. `grab` starts a thumb from elsewhere (a floating stick's zone),
+   * tracked on that element; the stick fires "cbx-stick-release" when let go.
+   */
+  private createStick(
+    doc: Document,
+    state: GamepadState,
+    index: 0 | 1,
+    place: Partial<CSSStyleDeclaration>,
+  ): { base: HTMLElement; grab: (event: PointerEvent, from: HTMLElement) => boolean } {
     const base = doc.createElement("div");
     base.setAttribute("data-cbx-stick", index === 0 ? "left" : "right");
     base.setAttribute("aria-label", index === 0 ? "Left stick" : "Right stick");
@@ -403,27 +523,32 @@ export class TouchInput {
       state.setStick(index, 0, 0);
       knob.style.transform = "translate(0px, 0px)";
       knob.style.background = "rgba(92,208,255,0.35)";
+      base.dispatchEvent(new Event("cbx-stick-release"));
     };
-    base.addEventListener("pointerdown", (event) => {
-      if (pointer !== null) return; // one thumb per stick
+    const grab = (event: PointerEvent, from: HTMLElement): boolean => {
+      if (pointer !== null) return false; // one thumb per stick
       event.preventDefault();
       pointer = event.pointerId;
       try {
-        base.setPointerCapture(event.pointerId); // keep tracking when the thumb leaves the ring
+        from.setPointerCapture(event.pointerId); // keep tracking when the thumb leaves the ring
       } catch {
         // Synthetic/unsupported pointers: tracking still works while inside.
       }
       move(event);
-    });
-    base.addEventListener("pointermove", (event) => {
-      if (event.pointerId === pointer) move(event);
-    });
-    base.addEventListener("pointerup", end);
-    base.addEventListener("pointercancel", end);
-    base.addEventListener("lostpointercapture", end);
+      return true;
+    };
+    for (const el of index === 0 ? [base, this.moveZone] : [base]) {
+      el.addEventListener("pointermove", (event) => {
+        if (event.pointerId === pointer) move(event);
+      });
+      el.addEventListener("pointerup", end);
+      el.addEventListener("pointercancel", end);
+      el.addEventListener("lostpointercapture", end);
+    }
+    base.addEventListener("pointerdown", (event) => void grab(event, base));
     base.addEventListener("contextmenu", (event) => event.preventDefault());
     this.pad.appendChild(base);
-    return base;
+    return { base, grab };
   }
 
   private createButton(doc: Document, control: TouchControl, state: GamepadState): HTMLButtonElement {
