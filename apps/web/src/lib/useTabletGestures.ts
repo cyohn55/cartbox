@@ -201,7 +201,9 @@ export function useGestures<E extends Element>(handlers: GestureHandlers<E>, opt
     if (passed.current.delete(event.pointerId)) return (options.passThrough?.onPointerCancel ?? options.passThrough?.onPointerUp)?.(event);
     dispatch(recognizer.current!.cancel(sample(event)));
   };
-  return { onPointerDown, onPointerMove, onPointerUp, onPointerCancel };
+  // The attribute marks a gesture surface, so the page never scrolls or zooms
+  // under it (see the touch bar) and the stylesheet drops callouts there.
+  return { onPointerDown, onPointerMove, onPointerUp, onPointerCancel, "data-tablet-gestures": "" };
 }
 
 /**

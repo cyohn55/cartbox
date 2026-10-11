@@ -206,10 +206,10 @@ editor uses them. If a future Safari reports barrel roll as the pointer's
   nothing, and once a Pencil is used fingers still draw. The palm, too,
   paints.
 
-  The map runs in a GPU-less Chromium: the starter cart's map is
-  1280 × 720 tiles, and that canvas crashes SwiftShader (on main as well).
-  At the L and XL zooms it is wider than a canvas can be, so it draws
-  blank. T4 should cap the zoom for large maps.
+  The map ran in a GPU-less Chromium at first: the starter cart's map is
+  1280 × 720 tiles, and that canvas crashed SwiftShader (on main as well),
+  and at the L and XL zooms it was wider than a canvas can be. T4 fixes
+  both.
 - [x] **T3. The other views on a tablet.**
   - **Pinch zoom and two-finger navigation:** the Scene viewport, 3D map,
     voxel editor, scene play view, node graphs (graph, shader, script),
@@ -288,7 +288,7 @@ editor uses them. If a future Safari reports barrel roll as the pointer's
 
     The rest guard what already worked with one finger and must keep
     working.
-- [ ] **T4. Layout for touch.**
+- [x] **T4. Layout for touch.**
   - **Sizing:** under `(pointer: coarse)`, buttons, list rows, sliders and
     rails at 44 px targets.
   - **Panels:** collapse to fit an iPad in portrait. Already at an iPad's
@@ -297,6 +297,83 @@ editor uses them. If a future Safari reports barrel roll as the pointer's
   - **Canvases:** no page zoom, text selection or callouts.
   - **Keys:** an on-screen equivalent for each remaining keyboard-only
     action, listed in the shortcut help.
+
+  *Done:*
+  - **The 2D map on an iPad.** The map canvas was the size of the whole map.
+    iPad Safari won't make a canvas over 16.7M pixels, and the starter
+    cart's 1280 × 720-tile map is 59M at the smallest zoom, so the Map tab
+    drew nothing on an iPad at any zoom. (Its canvas also crashed headless
+    SwiftShader.)
+    - **The fix:** the canvas now covers only the part of the map in view,
+      plus a margin. Drawing stays in map pixels through a translated
+      context, and the window moves as the map or the page scrolls.
+    - **Cost:** redraws touch only the cells in view, so painting a tile
+      no longer rescans 921k cells.
+  - **Sizing:** under `(pointer: coarse)`, which an iPad reports even with
+    a Pencil:
+    - every button, select and input in the editor is a 44 px target;
+    - segments are 38 px in their 3 px track, so the track is 44 px;
+    - colour inputs are 44 px, and checkboxes are 22 px;
+    - sliders get a 44 px box.
+
+    Exempt: the packed picker grids (palette swatches, sprite tiles), where
+    the grid is the target, and buttons on a gesture surface (a graph node's
+    header).
+  - **Panels:**
+    - **Mesh tab rail:** its two asides had inline widths wider than the
+      workbench's 200 and 300 px tracks, so the rail spilled under the
+      stage and was clipped (on desktop too). They now take their tracks,
+      and the Edit modes wrap.
+    - **3D tabs on a tablet:** they used to hide below 900 px wide, because
+      a pinch orbit would fight the page. With the gesture layer holding
+      the page still, they now hide only on a phone (under 600 px wide or
+      500 px tall), so an iPad in portrait gets the Mesh, Scene and other
+      3D tabs.
+    - **Portrait order:** the stacked layout puts their viewport first, as
+      it already did the sprite canvas, and drops the rail-collapse
+      chevrons, which have no edge to sit on there.
+    - **Touch bar:** folds away to one button when it covers something.
+  - **Canvases:** every gesture surface carries `data-tablet-gestures`.
+    The stylesheet gives those surfaces and every canvas no text selection,
+    no press-and-hold callout and `touch-action: none`. Since iPad Safari
+    can still pinch the page through `touch-action`, the touch bar's
+    listener cancels touch moves and Safari's `gesture*` events that start
+    on a surface. Elsewhere the page still zooms, for whoever needs it.
+  - **Keys:**
+    - **Selection bar:** the sprite selection's keyboard-only verbs are now
+      buttons that share the keys' code: copy, cut, paste, flip, rotate,
+      nudge, erase and clear.
+    - **Everything else** in the shortcut help already had a button: the
+      File menu, undo/redo, Run, the tabs, the tool rail, the brush slider
+      and Play.
+    - **The help** gains an "On a tablet" group listing the gestures.
+
+  *Tests:* `scripts/verify-editor-tablet-layout.mjs` runs an emulated iPad
+  (touch, coarse pointer, 2× pixels) and a phone. All 11 checks pass:
+  - **Landscape:**
+    - the pointer is coarse;
+    - every control on the Assets, Map and Mesh tabs is a 44 px target;
+    - the Mesh Edit modes sit inside the rail, clear of the stage, and
+      Paint taps;
+    - canvases are gesture surfaces with no selection or page gestures;
+    - the sprite selection's Flip button changes the art, and Copy offers
+      Paste.
+  - **Portrait:**
+    - nothing runs off the side;
+    - at every map zoom, scrolled to the map's middle, the canvas is
+      1.3–1.6M pixels (under iOS's 16.7M) and draws;
+    - the Mesh tab opens with its viewport first on the page.
+  - **Phone:** the 3D tabs still say they need a larger screen.
+
+  **Against T3 without this item:**
+  - the tabs, the cart title and many other controls are 25–33 px tall;
+  - tapping the Map tab hangs the page on its 59M-pixel canvas, so the
+    run stops there.
+
+  The T1–T3 scripts still pass on top of this. Two T2 checks were made
+  robust to the taller controls, which let the sprite panel scroll and move
+  the UV view as the colour field scrolls into view. The map checks now run
+  on the GPU browser too, which crashed before.
 
 ## Not in this roadmap
 

@@ -70,6 +70,21 @@ export function ShortcutHelp({ tabs, onClose }: ShortcutHelpProps) {
       title: "Sound",
       rows: [{ chord: "Space", label: "Play the selected sound or pattern" }],
     },
+    // What a tablet does instead (TABLET_EDITOR_ROADMAP.md). Every key above
+    // also has a button: the File menu, the undo/redo and Run buttons, the
+    // tabs, the tool rail, the brush slider, the selection bar and Play.
+    {
+      title: "On a tablet",
+      rows: [
+        { chord: "Pencil", label: "Draws, paints and picks; its pressure sets the brush" },
+        { chord: "One finger", label: "Draws until you use the Pencil, then moves the view" },
+        { chord: "Two fingers", label: "Orbit (3D) or pan (2D); pinch to zoom" },
+        { chord: "Three fingers", label: "Pan" },
+        { chord: "Two-finger tap", label: "Undo (three fingers: redo)" },
+        { chord: "Long press", label: "Pick a colour, loop-select, or what right-click does" },
+        { chord: "Touch bar", label: "Add / Remove / Loop stand in for Shift / Ctrl / Alt" },
+      ],
+    },
   ];
 
   return (

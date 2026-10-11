@@ -156,6 +156,8 @@ export function PixelCanvas({
   // The clipboard is a ref, not state: pasting reads it, nothing renders it,
   // and it must survive a tool change without re-rendering the canvas.
   const clipboard = useRef<Stamp | null>(null);
+  // Whether anything has been copied, so the selection bar can offer Paste.
+  const [copied, setCopied] = useState(false);
   const cellPx = Math.max(
     MIN_CELL_PX,
     Math.round((TARGET_CANVAS_PX / surface.tileSize) * Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom))),
@@ -301,22 +303,64 @@ export function PixelCanvas({
    * Paste is the one binding that works without a selection, since its whole
    * job is to create one.
    */
+  // The selection's verbs, shared by the keys and the selection bar's buttons
+  // (TABLET_EDITOR_ROADMAP.md T4: a tablet has no keyboard to press them with).
+  const tileSize = surface.tileSize;
+  const verbs = {
+    /** Paste lands at the current selection's corner, or at the origin, and becomes the new selection so it can be nudged into place. */
+    paste: () => {
+      const stamp = clipboard.current;
+      if (!stamp) return false;
+      const corner = selection ? selectionBounds(selection, tileSize) : null;
+      setSelection(pasteStamp(surface, page, tile, stamp, corner?.left ?? 0, corner?.top ?? 0, tileSize));
+      onEdit();
+      return true;
+    },
+    copy: (cut: boolean) => {
+      if (!selection || selection.size === 0) return;
+      clipboard.current = copySelection(surface, page, tile, selection, tileSize);
+      setCopied(true);
+      if (cut) {
+        clearSelection(surface, page, tile, selection, tileSize);
+        onEdit();
+      }
+    },
+    erase: () => {
+      if (!selection || selection.size === 0) return;
+      clearSelection(surface, page, tile, selection, tileSize);
+      onEdit();
+    },
+    nudge: (dx: number, dy: number) => {
+      if (!selection || selection.size === 0) return;
+      setSelection(moveSelection(surface, page, tile, selection, tileSize, dx, dy));
+      onEdit();
+    },
+    transform: (how: typeof flipStampHorizontal) => {
+      if (!selection || selection.size === 0) return;
+      setSelection(transformSelection(surface, page, tile, selection, tileSize, how));
+      onEdit();
+    },
+  };
+  const verbsRef = useRef(verbs);
+  verbsRef.current = verbs;
+
+  /**
+   * Everything a creator can do to a selection from the keyboard.
+   *
+   * Bound here rather than in the workbench because every verb needs the
+   * surface, the open tile and the live selection — state this component owns.
+   * Paste is the one binding that works without a selection, since its whole
+   * job is to create one.
+   */
   useEffect(() => {
-    const size = surface.tileSize;
     const handleKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
       const mod = event.ctrlKey || event.metaKey;
+      const v = verbsRef.current;
 
-      // Paste lands at the current selection's corner, or at the origin, and
-      // becomes the new selection so it can be nudged into place immediately.
       if (mod && event.key.toLowerCase() === "v") {
-        const stamp = clipboard.current;
-        if (!stamp) return;
-        event.preventDefault();
-        const corner = selection ? selectionBounds(selection, size) : null;
-        setSelection(pasteStamp(surface, page, tile, stamp, corner?.left ?? 0, corner?.top ?? 0, size));
-        onEdit();
+        if (v.paste()) event.preventDefault();
         return;
       }
 
@@ -324,11 +368,7 @@ export function PixelCanvas({
 
       if (mod && (event.key.toLowerCase() === "c" || event.key.toLowerCase() === "x")) {
         event.preventDefault();
-        clipboard.current = copySelection(surface, page, tile, selection, size);
-        if (event.key.toLowerCase() === "x") {
-          clearSelection(surface, page, tile, selection, size);
-          onEdit();
-        }
+        v.copy(event.key.toLowerCase() === "x");
         return;
       }
       if (mod) return; // leave every other chord to the workbench
@@ -340,18 +380,14 @@ export function PixelCanvas({
         case "Delete":
         case "Backspace":
           event.preventDefault();
-          clearSelection(surface, page, tile, selection, size);
-          onEdit();
+          v.erase();
           return;
         case "ArrowLeft":
         case "ArrowRight":
         case "ArrowUp":
         case "ArrowDown": {
           event.preventDefault();
-          const dx = event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0;
-          const dy = event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0;
-          setSelection(moveSelection(surface, page, tile, selection, size, dx, dy));
-          onEdit();
+          v.nudge(event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0, event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0);
           return;
         }
         default:
@@ -363,13 +399,12 @@ export function PixelCanvas({
         key === "h" ? flipStampHorizontal : key === "v" ? flipStampVertical : key === "r" ? rotateStamp : null;
       if (transform) {
         event.preventDefault();
-        setSelection(transformSelection(surface, page, tile, selection, size, transform));
-        onEdit();
+        v.transform(transform);
       }
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [selection, surface, page, tile, onEdit]);
+  }, [selection]);
 
   const cellFromEvent = (event: { readonly clientX: number; readonly clientY: number }): { x: number; y: number } | null => {
     const canvas = canvasRef.current;
@@ -575,15 +610,63 @@ export function PixelCanvas({
         role="img"
         aria-label={`Sprite ${tile}, ${surface.tileSize} by ${surface.tileSize} pixels`}
       />
-      {selection && (
+      {(selection || copied) && (
         <div className={styles.selectionBar}>
-          <span className="data">{selection.size} px selected</span>
-          <span className={styles.selectionHint}>
-            drag to move · arrows nudge · H/V flip · R rotate · Ctrl+C/X/V · Del erases · Esc clears
-          </span>
-          <button type="button" className="cbx-btn" onClick={() => setSelection(null)}>
-            Clear
-          </button>
+          {selection && <span className="data">{selection.size} px selected</span>}
+          {selection && (
+            <span className={styles.selectionHint}>
+              drag to move · arrows nudge · H/V flip · R rotate · Ctrl+C/X/V · Del erases · Esc clears
+            </span>
+          )}
+          {/* The same verbs as buttons, for a tablet (and anyone without the keys to hand). */}
+          <div className={styles.selectionActions} role="toolbar" aria-label="Selection">
+            {selection && (
+              <>
+                <button type="button" className="cbx-btn" title="Copy (Ctrl+C)" onClick={() => verbs.copy(false)}>
+                  Copy
+                </button>
+                <button type="button" className="cbx-btn" title="Cut (Ctrl+X)" onClick={() => verbs.copy(true)}>
+                  Cut
+                </button>
+              </>
+            )}
+            {copied && (
+              <button type="button" className="cbx-btn" title="Paste (Ctrl+V)" onClick={() => verbs.paste()}>
+                Paste
+              </button>
+            )}
+            {selection && (
+              <>
+                <button type="button" className="cbx-btn" aria-label="Flip horizontally" title="Flip horizontally (H)" onClick={() => verbs.transform(flipStampHorizontal)}>
+                  ⇋
+                </button>
+                <button type="button" className="cbx-btn" aria-label="Flip vertically" title="Flip vertically (V)" onClick={() => verbs.transform(flipStampVertical)}>
+                  ⇵
+                </button>
+                <button type="button" className="cbx-btn" aria-label="Rotate a quarter turn" title="Rotate a quarter turn (R)" onClick={() => verbs.transform(rotateStamp)}>
+                  ⟳
+                </button>
+                <button type="button" className="cbx-btn" aria-label="Nudge left" title="Nudge left (←)" onClick={() => verbs.nudge(-1, 0)}>
+                  ←
+                </button>
+                <button type="button" className="cbx-btn" aria-label="Nudge up" title="Nudge up (↑)" onClick={() => verbs.nudge(0, -1)}>
+                  ↑
+                </button>
+                <button type="button" className="cbx-btn" aria-label="Nudge down" title="Nudge down (↓)" onClick={() => verbs.nudge(0, 1)}>
+                  ↓
+                </button>
+                <button type="button" className="cbx-btn" aria-label="Nudge right" title="Nudge right (→)" onClick={() => verbs.nudge(1, 0)}>
+                  →
+                </button>
+                <button type="button" className="cbx-btn" title="Erase the selection (Del)" onClick={verbs.erase}>
+                  Erase
+                </button>
+                <button type="button" className="cbx-btn" title="Clear the selection (Esc)" onClick={() => setSelection(null)}>
+                  Clear
+                </button>
+              </>
+            )}
+          </div>
         </div>
       )}
     </div>

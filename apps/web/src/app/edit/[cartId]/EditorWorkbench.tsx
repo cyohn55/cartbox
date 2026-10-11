@@ -99,9 +99,10 @@ import { tabletStore } from "@/lib/useTabletGestures";
 // in them. See editorTabs.ts, and ERA_MODELS.md for why.
 //
 // SPATIAL_TABS are the ones whose stage is a 3D viewport with its own camera
-// controls. They have no phone layout — a pinch-zoom orbit camera inside a
-// scrolling page fights the page — so on a small screen they say so rather than
-// rendering something unusable. See `smallScreenNotice` in editor.module.css.
+// controls. They have no phone layout — a viewport that size leaves no room
+// for its panels — so on a phone they say so rather than rendering something
+// unusable; a tablet, portrait included, gets them (TABLET_EDITOR_ROADMAP.md
+// T4). See `smallScreenNotice` in editor.module.css.
 
 /** Per-browser flag that the first-run guidance has been seen and dismissed. */
 const FIRST_RUN_KEY = "cartbox:editor:first-run-v1";
