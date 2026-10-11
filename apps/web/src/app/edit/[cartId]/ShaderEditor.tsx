@@ -42,6 +42,7 @@ import {
 } from "@cartbox/player";
 
 import { buildMapAtlas } from "@/lib/mapAtlas";
+import { useViewGestures } from "@/lib/useTabletGestures";
 import styles from "./editor.module.css";
 import { RailGroup, RailHint, RangeControl, SegmentedControl } from "./railControls";
 import {
@@ -278,6 +279,10 @@ export function ShaderEditor({ sheet, map, columnPayload, settings, onSettingsCh
   const endDrag = () => {
     drag.current = null;
   };
+  // Touch and the Pencil (TABLET_EDITOR_ROADMAP.md T3): two fingers (or one,
+  // once a Pencil is used) turn the view, three pan as Shift-drag does, and a
+  // pinch zooms as the wheel does.
+  const gestures = useViewGestures<HTMLCanvasElement>({ onPointerDown, onPointerMove, onPointerUp: endDrag, onPointerCancel: endDrag, orbitDrag: { button: 0 }, panDrag: { button: 0, shiftKey: true } });
 
   const onKeyDown =(event: React.KeyboardEvent<HTMLCanvasElement>) => {
     if (!spatial) return;
@@ -523,10 +528,7 @@ export function ShaderEditor({ sheet, map, columnPayload, settings, onSettingsCh
             className={styles.fxCanvas}
             data-interactive={spatial || undefined}
             tabIndex={spatial ? 0 : undefined}
-            onPointerDown={onPointerDown}
-            onPointerMove={onPointerMove}
-            onPointerUp={endDrag}
-            onPointerCancel={endDrag}
+            {...gestures}
             onKeyDown={onKeyDown}
             onContextMenu={(event) => spatial && event.preventDefault()}
             role={spatial ? "application" : "img"}

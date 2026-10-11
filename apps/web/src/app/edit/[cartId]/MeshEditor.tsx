@@ -123,6 +123,8 @@ import { NavigationPanel } from "./NavigationPanel";
 import { LightingBakePanel } from "./LightingBakePanel";
 import { ParticleEffectsPanel } from "./ParticleEffectsPanel";
 import { DecalsPanel } from "./DecalsPanel";
+import { pickReachNdc, strokePressure, type PointerSample } from "@/lib/tabletInput";
+import { useGestures } from "@/lib/useTabletGestures";
 import { DebrisPanel } from "./DebrisPanel";
 import { StreamingPanel, StreamingPicker } from "./StreamingPanel";
 import { formatBytes } from "./assetUploads";
@@ -755,8 +757,8 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   } | null>(null);
   /** Where the pointer meets the model (the stored, unposed mesh). */
   const surfaceAt = (at: readonly [number, number]) => (meshAsset ? pickMeshPoint(meshAsset, previewCamera(meshAsset), at[0], at[1], frame) : null);
-  /** A dab of the texture brush where the pointer meets the model; on another part, that part is picked instead. */
-  const dabTexture = (at: readonly [number, number]) => {
+  /** A dab of the texture brush where the pointer meets the model, at a Pencil's `pressure`; on another part, that part is picked instead. */
+  const dabTexture = (at: readonly [number, number], pressure: number) => {
     const hit = surfaceAt(at);
     if (!hit || !meshAsset) return;
     if (hit.primitive !== paint.primitive) {
@@ -764,66 +766,67 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       return;
     }
     const uv = surfaceUv(meshAsset.primitives[hit.primitive]!, hit.triangle, hit.barycentric);
-    if (uv) paint.dab(uv);
+    if (uv) paint.dab(uv, pressure);
   };
-  /** A dab of the weight brush on `on` at a surface point. */
-  const dabWeights = (on: MeshAsset, point: readonly [number, number, number]) =>
-    paintWeights(on, weightJoint, { center: point, radius: brush.radius, strength: brush.strength, mode: brush.mode });
-  const ndcOf = (event: React.PointerEvent<HTMLCanvasElement>): [number, number] => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    return [((event.clientX - rect.left) / rect.width) * 2 - 1, 1 - ((event.clientY - rect.top) / rect.height) * 2];
+  /** A dab of the weight brush on `on` at a surface point, its strength scaled by a Pencil's `pressure`. */
+  const dabWeights = (on: MeshAsset, point: readonly [number, number, number], pressure: number) =>
+    paintWeights(on, weightJoint, { center: point, radius: brush.radius, strength: brush.strength * pressure, mode: brush.mode });
+  /** Where a pointer is on the canvas, in normalised device units. */
+  const ndcOf = (sample: PointerSample, el: Element): [number, number] => {
+    const rect = el.getBoundingClientRect();
+    return [((sample.x - rect.left) / rect.width) * 2 - 1, 1 - ((sample.y - rect.top) / rect.height) * 2];
   };
-  const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    event.currentTarget.setPointerCapture(event.pointerId);
-    event.currentTarget.focus();
-    const from = ndcOf(event);
+  /** How far a pick by this pointer reaches (NDC): a fingertip covers more than a cursor (TABLET_EDITOR_ROADMAP.md T1). */
+  const reach = (sample: PointerSample, el: Element, floor: number) => pickReachNdc(sample.kind, el.getBoundingClientRect().width, floor);
+  // Input arrives through the tablet layer (T1): the Pencil and the mouse are
+  // the tool; one finger is too until a Pencil is used, then it orbits; two
+  // fingers orbit and pinch to zoom; a long press loop-selects.
+  const toolDown = (sample: PointerSample, el: HTMLCanvasElement) => {
+    el.focus();
+    const from = ndcOf(sample, el);
+    const pressure = strokePressure(sample);
     let kind: "orbit" | "box" | "gizmo" | "pose" | "paint" | "texture" = "orbit";
     let axis: 0 | 1 | 2 | null = null;
     const extra: { pivot?: readonly number[]; base?: Float32Array; stroke?: MeshAsset; last?: readonly number[] } = {};
-    if (modelling && event.button === 0 && meshAsset && viewProj) {
-      axis = modelPivot ? gizmoHandleAt(viewProj, modelPivot, handleLength, from) : null;
+    if (modelling && sample.button === 0 && meshAsset && viewProj) {
+      axis = modelPivot ? gizmoHandleAt(viewProj, modelPivot, handleLength, from, reach(sample, el, 0.06)) : null;
       kind = axis !== null ? "gizmo" : "box";
       if (modelPivot) extra.pivot = modelPivot;
-    } else if (posing && event.button === 0 && viewProj && jointPivot && shownPose) {
-      axis = gizmoHandleAt(viewProj, jointPivot, handleLength, from);
+    } else if (posing && sample.button === 0 && viewProj && jointPivot && shownPose) {
+      axis = gizmoHandleAt(viewProj, jointPivot, handleLength, from, reach(sample, el, 0.06));
       if (axis !== null) {
         kind = "pose";
         Object.assign(extra, { pivot: jointPivot, base: shownPose });
       }
-    } else if (texturing && event.button === 0 && meshAsset) {
+    } else if (texturing && sample.button === 0 && meshAsset) {
       kind = "texture";
-      dabTexture(from);
-    } else if (painting && event.button === 0 && meshAsset?.skin) {
+      dabTexture(from, pressure);
+    } else if (painting && sample.button === 0 && meshAsset?.skin) {
       kind = "paint";
       const hit = surfaceAt(from);
       setBrushAt(hit ? hit.point : null);
-      extra.stroke = hit ? dabWeights(meshAsset, hit.point) : meshAsset;
+      extra.stroke = hit ? dabWeights(meshAsset, hit.point, pressure) : meshAsset;
       if (hit) extra.last = hit.point;
       setStrokeMesh(extra.stroke);
     }
-    drag.current = { x: event.clientX, y: event.clientY, moved: 0, kind, from, ...(axis !== null ? { axis } : {}), ...extra };
+    drag.current = { x: sample.x, y: sample.y, moved: 0, kind, from, ...(axis !== null ? { axis } : {}), ...extra };
   };
-  const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+  const toolMove = (sample: PointerSample, el: HTMLCanvasElement) => {
     const state = drag.current;
-    if (!state) {
-      // The weight brush follows the pointer over the model.
-      if (painting) setBrushAt(surfaceAt(ndcOf(event))?.point ?? null);
-      return;
-    }
-    const moved = state.moved + Math.abs(event.clientX - state.x) + Math.abs(event.clientY - state.y);
-    drag.current = { ...state, x: event.clientX, y: event.clientY, moved };
+    if (!state) return;
+    const moved = state.moved + Math.abs(sample.x - state.x) + Math.abs(sample.y - state.y);
+    drag.current = { ...state, x: sample.x, y: sample.y, moved };
     if (state.kind === "orbit") {
-      setYaw((value) => value - (event.clientX - state.x) * ORBIT_SPEED);
-      setPitch((value) => Math.max(-1.5, Math.min(1.5, value + (event.clientY - state.y) * ORBIT_SPEED)));
+      orbitBy(sample.x - state.x, sample.y - state.y);
       return;
     }
-    const at = ndcOf(event);
+    const at = ndcOf(sample, el);
     if (state.kind === "box") {
       if (moved > 4) setBoxRect({ from: state.from, to: at });
       return;
     }
     if (state.kind === "texture") {
-      dabTexture(at);
+      dabTexture(at, strokePressure(sample));
       return;
     }
     if (state.kind === "paint") {
@@ -831,7 +834,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       setBrushAt(hit ? hit.point : null);
       // Dabs a third of the brush apart along the stroke.
       if (!hit || !state.stroke || (state.last && Math.hypot(hit.point[0] - state.last[0]!, hit.point[1] - state.last[1]!, hit.point[2] - state.last[2]!) < brush.radius / 3)) return;
-      const stroke = dabWeights(state.stroke, hit.point);
+      const stroke = dabWeights(state.stroke, hit.point, strokePressure(sample));
       drag.current = { ...drag.current!, stroke, last: hit.point };
       setStrokeMesh(stroke);
       return;
@@ -851,7 +854,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     const transform = gizmoDrag(viewProj, state.pivot, state.axis, gizmoTool, [at[0] - state.from[0], at[1] - state.from[1]], handleLength);
     setDragMesh(transform ? transformSelection(meshAsset, modelSel, transform, state.pivot) : null);
   };
-  const onPointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
+  const toolUp = (sample: PointerSample, el: HTMLCanvasElement) => {
     const state = drag.current;
     drag.current = null;
     if (!state || !meshAsset) return;
@@ -870,31 +873,34 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       setDragMesh(null);
       return;
     }
-    const at = ndcOf(event);
+    const at = ndcOf(sample, el);
     if (state.kind === "box" && viewProj && selectMode) {
       setBoxRect(null);
-      const op = event.shiftKey ? "add" : event.ctrlKey || event.metaKey ? "subtract" : "replace";
+      const op = sample.shiftKey ? "add" : sample.ctrlKey || sample.metaKey ? "subtract" : "replace";
       if (state.moved > 4) {
         setModelSel((current) => combineSelection(current, boxSelect(meshAsset, viewProj, state.from, at, selectMode), op));
         return;
       }
-      // A click: the element under it, or (Alt) the loop through the side under it.
-      const hit = pickMeshTriangle(meshAsset, previewCamera(meshAsset), at[0], at[1], frame);
-      if (event.altKey) {
-        const edge = pickEdge(meshAsset, viewProj, at, hit);
-        if (edge) setModelSel((current) => combineSelection(current, loopSelect(meshAsset, edge.primitive, edge.id, selectMode), event.shiftKey ? "add" : "replace"));
+      // A click: the element under it, or (Alt, or a long press) the loop through the side under it.
+      if (sample.altKey) {
+        loopSelectAt(at, sample, el);
         return;
       }
-      const picked = pickElement(meshAsset, viewProj, at, selectMode, hit);
+      const hit = pickMeshTriangle(meshAsset, previewCamera(meshAsset), at[0], at[1], frame);
+      const picked = pickElement(meshAsset, viewProj, at, selectMode, hit, reach(sample, el, 0.05));
       setModelSel((current) =>
-        picked ? combineSelection(current, singleSelection(selectMode, picked.primitive, picked.id), event.shiftKey ? "toggle" : "replace") : event.shiftKey ? current : emptySelection(selectMode),
+        picked
+          ? combineSelection(current, singleSelection(selectMode, picked.primitive, picked.id), op === "add" ? "toggle" : op === "subtract" ? "subtract" : "replace")
+          : op === "replace"
+            ? emptySelection(selectMode)
+            : current,
       );
       return;
     }
     if (state.moved > 3) return;
     // Pose mode: a click picks the bone under it.
     if (posing && meshAsset.skin && shownPose && viewProj) {
-      const joint = pickJoint(meshAsset.skin, shownPose, viewProj, at);
+      const joint = pickJoint(meshAsset.skin, shownPose, viewProj, at, reach(sample, el, 0.05));
       if (joint !== null) setPoseJoint(joint);
       return;
     }
@@ -906,6 +912,46 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       return same ? null : { primitive: hit.primitive, triangle: hit.triangle };
     });
   };
+  /** A stroke abandoned (a second finger made it a gesture): put back what it did. */
+  const toolCancel = () => {
+    const state = drag.current;
+    drag.current = null;
+    if (!state) return;
+    if (state.kind === "texture") paint.cancelStroke();
+    else if (state.kind === "paint") setStrokeMesh(null);
+    else if (state.kind === "pose" && state.base) setPosePose(state.base);
+    else if (state.kind === "gizmo") setDragMesh(null);
+    else if (state.kind === "box") setBoxRect(null);
+  };
+  /** Modelling: the loop through the side under a point (an Alt-click, or a long press). */
+  const loopSelectAt = (at: [number, number], sample: PointerSample, el: Element) => {
+    if (!meshAsset || !viewProj || !selectMode) return;
+    const hit = pickMeshTriangle(meshAsset, previewCamera(meshAsset), at[0], at[1], frame);
+    const edge = pickEdge(meshAsset, viewProj, at, hit, reach(sample, el, 0.05));
+    if (edge) setModelSel((current) => combineSelection(current, loopSelect(meshAsset, edge.primitive, edge.id, selectMode), sample.shiftKey ? "add" : "replace"));
+  };
+  const orbitBy = (dx: number, dy: number) => {
+    setYaw((value) => value - dx * ORBIT_SPEED);
+    setPitch((value) => Math.max(-1.5, Math.min(1.5, value + dy * ORBIT_SPEED)));
+  };
+  const gestures = useGestures<HTMLCanvasElement>(
+    {
+      onToolDown: toolDown,
+      onToolMove: toolMove,
+      onToolUp: toolUp,
+      onToolCancel: toolCancel,
+      // The weight brush follows a hovering Pencil or the mouse over the model.
+      onHover: (sample, el) => {
+        if (painting) setBrushAt(surfaceAt(ndcOf(sample, el))?.point ?? null);
+      },
+      onOrbit: orbitBy,
+      onZoom: (factor) => setZoom((value) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, value / factor))),
+      onLongPress: (sample, el) => {
+        if (modelling) loopSelectAt(ndcOf(sample, el), sample, el);
+      },
+    },
+    { drag: "orbit" },
+  );
   /** Modelling keys: 1/2/3 pick what to select, G/R/S the gizmo, A all, Escape none, Delete deletes (and fills). */
   const onCanvasKey = (event: React.KeyboardEvent<HTMLCanvasElement>) => {
     if (!modelling || !meshAsset) return;
@@ -1082,7 +1128,9 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   return (
     <div className={styles.body}>
       {/* Left rail: import + mesh list */}
-      <aside style={{ width: 240, padding: 12, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
+      {/* The asides take the workbench grid's rail and inspector tracks (a wider
+          inline width spilled under the stage and was clipped, T4). */}
+      <aside style={{ minWidth: 0, padding: 12, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
         <SegmentedControl
           label="View"
           ariaLabel="Preview mode"
@@ -1097,6 +1145,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
           <SegmentedControl
             label="Edit"
             ariaLabel="Edit mode"
+            wrap
             selected={editMode === "object" || editMode === "pose" || editMode === "weights" || editMode === "paint" ? editMode : "model"}
             onSelect={(id) => setEditMode(id === "model" ? modelSel.mode : id)}
             options={[
@@ -1202,9 +1251,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       <section className={styles.mapStage} style={{ flex: "1 1 auto" }}>
         <canvas
           ref={canvasRef}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
+          {...gestures}
           onContextMenu={(event) => event.preventDefault()}
           onKeyDown={onCanvasKey}
           tabIndex={0}
@@ -1221,14 +1268,14 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
           role="img"
           aria-label={
             modelling
-              ? "3D mesh preview — click or drag to select, right-drag to orbit, scroll to zoom"
+              ? "3D mesh preview — click or drag to select (a long press picks a loop), right-drag or two fingers to orbit, scroll or pinch to zoom"
               : posing
-                ? "3D mesh preview — click a bone to pick it, drag the gizmo to turn it, right-drag to orbit"
+                ? "3D mesh preview — click a bone to pick it, drag the gizmo to turn it, right-drag or two fingers to orbit"
                 : painting
-                  ? "3D mesh preview — drag to paint weights, right-drag to orbit"
+                  ? "3D mesh preview — drag to paint weights (Pencil pressure sets the strength), right-drag or two fingers to orbit"
                   : texturing
-                    ? "3D mesh preview — drag to paint the texture layer, right-drag to orbit"
-                    : "3D mesh preview — drag to orbit, scroll to zoom"
+                    ? "3D mesh preview — drag to paint the texture layer (Pencil pressure sets size and opacity), right-drag or two fingers to orbit"
+                    : "3D mesh preview — drag to orbit, scroll or pinch to zoom"
           }
           onPointerLeave={() => painting && setBrushAt(null)}
         />
@@ -1275,7 +1322,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       </div>
 
       {/* Right: transform, rename, export */}
-      <aside style={{ width: 260, padding: 12, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
+      <aside style={{ minWidth: 0, padding: 12, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
         {selectedEntry ? (
           <>
             <RailGroup label="Name">

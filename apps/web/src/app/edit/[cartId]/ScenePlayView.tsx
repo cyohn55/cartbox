@@ -28,6 +28,7 @@ import { encodeMeshSidecar, type MeshSidecar } from "@/lib/meshSidecar";
 import { rapierPhysics } from "@/lib/physicsRapier";
 import { editorOrbit } from "@/lib/playCamera";
 import { VIEWPORT_FOV, cameraLookingAt, dolly, fly, look, orbit, pan, unitsPerPixel, type ViewportCamera } from "@/lib/viewportCamera";
+import { useViewGestures } from "@/lib/useTabletGestures";
 import styles from "./editor.module.css";
 
 /** Everything a playtest needs besides the mesh scene, as the workbench builds it for its Run overlay. */
@@ -189,6 +190,36 @@ export function ScenePlayView({
     return () => cancelAnimationFrame(raf);
   }, [ejected, radius, send]);
 
+  // The free camera's mouse, and through it touch and the Pencil
+  // (TABLET_EDITOR_ROADMAP.md T3): two fingers (or one, once a Pencil is used)
+  // orbit, three pan as Shift-drag does, and a pinch dollies as the wheel does.
+  const onFreeDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    e.currentTarget.focus();
+    drag.current = { kind: e.button === 2 ? "look" : e.button === 1 || e.shiftKey ? "pan" : "orbit", x: e.clientX, y: e.clientY };
+  };
+  const onFreeMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = drag.current;
+    if (!d) return;
+    const dx = e.clientX - d.x;
+    const dy = e.clientY - d.y;
+    d.x = e.clientX;
+    d.y = e.clientY;
+    const cam = camera.current;
+    if (d.kind === "orbit") camera.current = orbit(cam, -dx * ORBIT_SPEED, dy * ORBIT_SPEED);
+    else if (d.kind === "look") camera.current = look(cam, -dx * LOOK_SPEED, dy * LOOK_SPEED);
+    else {
+      const k = unitsPerPixel(cam, cam.distance, e.currentTarget.getBoundingClientRect().height);
+      camera.current = pan(cam, -dx * k, dy * k);
+    }
+    send();
+  };
+  const onFreeUp = () => {
+    drag.current = null;
+    keys.current.clear();
+  };
+  const freeGestures = useViewGestures<HTMLDivElement>({ onPointerDown: onFreeDown, onPointerMove: onFreeMove, onPointerUp: onFreeUp, orbitDrag: { button: 0 }, panDrag: { button: 0, shiftKey: true }, onLongPress: () => {} });
+
   return (
     <section className={styles.mapStage} style={{ flex: "1 1 auto" }} aria-label="Playing in the editor">
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", justifyContent: "center" }}>
@@ -217,35 +248,11 @@ export function ScenePlayView({
         {ejected && (
           <div
             role="img"
-            aria-label="Free camera over the running game — drag to orbit, middle- or Shift-drag to pan, right-drag with WASD to fly, wheel to dolly"
+            aria-label="Free camera over the running game — drag to orbit, middle- or Shift-drag to pan, right-drag with WASD to fly, wheel to dolly; on a tablet two fingers orbit, three pan, pinch to dolly"
             tabIndex={0}
             style={{ position: "absolute", inset: 0, cursor: "grab", touchAction: "none", outline: "none" }}
             onContextMenu={(e) => e.preventDefault()}
-            onPointerDown={(e) => {
-              e.currentTarget.setPointerCapture(e.pointerId);
-              e.currentTarget.focus();
-              drag.current = { kind: e.button === 2 ? "look" : e.button === 1 || e.shiftKey ? "pan" : "orbit", x: e.clientX, y: e.clientY };
-            }}
-            onPointerMove={(e) => {
-              const d = drag.current;
-              if (!d) return;
-              const dx = e.clientX - d.x;
-              const dy = e.clientY - d.y;
-              d.x = e.clientX;
-              d.y = e.clientY;
-              const cam = camera.current;
-              if (d.kind === "orbit") camera.current = orbit(cam, -dx * ORBIT_SPEED, dy * ORBIT_SPEED);
-              else if (d.kind === "look") camera.current = look(cam, -dx * LOOK_SPEED, dy * LOOK_SPEED);
-              else {
-                const k = unitsPerPixel(cam, cam.distance, e.currentTarget.getBoundingClientRect().height);
-                camera.current = pan(cam, -dx * k, dy * k);
-              }
-              send();
-            }}
-            onPointerUp={() => {
-              drag.current = null;
-              keys.current.clear();
-            }}
+            {...freeGestures}
             onWheel={(e) => {
               camera.current = dolly(camera.current, e.deltaY < 0 ? 0.88 : 1 / 0.88);
               send();

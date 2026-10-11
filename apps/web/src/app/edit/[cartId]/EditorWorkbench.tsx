@@ -91,15 +91,18 @@ import { decodeMeshSidecar, encodeMeshSidecar, addMesh, type MeshSidecar } from 
 import { rebakeMeshSidecar } from "@/lib/meshTextureBake";
 import { readSidecarStrings, type MeshAsset } from "@cartbox/editor";
 import { toggleBreakpoint } from "./debuggerView";
+import { TouchBar } from "./TouchBar";
+import { tabletStore } from "@/lib/useTabletGestures";
 
 // Which tabs a cart gets depends on its console model and what it already
 // carries — a 2D model hides the 3D authoring tabs unless the cart has content
 // in them. See editorTabs.ts, and ERA_MODELS.md for why.
 //
 // SPATIAL_TABS are the ones whose stage is a 3D viewport with its own camera
-// controls. They have no phone layout — a pinch-zoom orbit camera inside a
-// scrolling page fights the page — so on a small screen they say so rather than
-// rendering something unusable. See `smallScreenNotice` in editor.module.css.
+// controls. They have no phone layout — a viewport that size leaves no room
+// for its panels — so on a phone they say so rather than rendering something
+// unusable; a tablet, portrait included, gets them (TABLET_EDITOR_ROADMAP.md
+// T4). See `smallScreenNotice` in editor.module.css.
 
 /** Per-browser flag that the first-run guidance has been seen and dismissed. */
 const FIRST_RUN_KEY = "cartbox:editor:first-run-v1";
@@ -371,6 +374,12 @@ function WorkbenchBody({
     undo,
     redo,
   } = history;
+
+  // Two- and three-finger taps and the touch bar undo and redo (TABLET_EDITOR_ROADMAP.md T1).
+  useEffect(() => {
+    tabletStore.setCommands({ undo, redo });
+    return () => tabletStore.setCommands({});
+  }, [undo, redo]);
 
   // Undo and redo move the timeline without committing, so dirty state has to be
   // re-derived from the new present.
@@ -1579,6 +1588,7 @@ function WorkbenchBody({
           onClose={() => setRunBytes(null)}
         />
       )}
+      {!runBytes && <TouchBar />}
     </div>
     </OverflowMenuContext.Provider>
     </EditorDensityProvider>

@@ -2443,11 +2443,24 @@
     overflow-y: auto;
   }
 
-  /* The stage is the hero — it comes first; tools and inspector follow. */
+  /* The stage is the hero — it comes first; tools and inspector follow. The
+     3D tabs' stages too (on a tablet in portrait, TABLET_EDITOR_ROADMAP.md T4),
+     or the viewport lands below a rail several screens long. */
   .stage {
     order: -1;
     padding: 10px;
     gap: 10px;
+  }
+
+  .body > .mapStage,
+  .body > :has(> .mapStage) {
+    order: -1;
+  }
+
+  /* Stacked, the rails have no edge for the collapse chevrons to sit on. */
+  .railToggle,
+  .inspectorToggle {
+    display: none;
   }
 
   .canvasPanel {
@@ -2612,6 +2625,7 @@
 /* Status row under the pixel canvas while a magic-wand selection is active. */
 .selectionBar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   margin-top: 8px;
@@ -2621,6 +2635,12 @@
 .selectionHint {
   color: var(--faint);
   flex: 1;
+}
+
+.selectionActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 
 .fxCanvas {
@@ -3268,9 +3288,11 @@
   color: var(--faint);
 }
 
-@media (max-width: 900px) {
-  /* On a phone the 3D tabs say what they need instead of rendering a camera
-     into a scrolling page. */
+/* On a phone the 3D tabs say what they need instead of rendering a camera
+   into a scrolling page. A tablet (an iPad, portrait too) gets them: its
+   viewports take fingers and the Pencil through the tablet layer, which keeps
+   the page from scrolling or zooming under them (TABLET_EDITOR_ROADMAP.md T4). */
+@media (max-width: 600px), (max-height: 500px) {
   .smallScreenNotice {
     display: block;
     grid-column: 1 / -1;
@@ -3287,7 +3309,9 @@
   .workbench[data-spatial="true"] .body {
     display: none;
   }
+}
 
+@media (max-width: 900px) {
   .helpRow {
     grid-template-columns: 96px 1fr;
   }
@@ -3410,4 +3434,58 @@
   font-size: 11px;
   line-height: 1.5;
   color: var(--faint);
+}
+
+/* --- Touch (TABLET_EDITOR_ROADMAP.md T4) -------------------------------------
+ * On a coarse pointer (a finger; an iPad reports coarse even with a Pencil)
+ * every control is a fingertip-sized target, Apple's 44 px. A segment sits in
+ * a 3 px-padded track, so 38 px makes the track 44. Palette swatches keep the
+ * grid's cell size, which is already square and tightly packed by design. */
+@media (pointer: coarse) {
+  .tab,
+  .toolBtn {
+    min-height: 44px;
+  }
+
+  .segment {
+    min-height: 38px;
+  }
+
+  /* Every other button too, inline-styled ones included — but not the packed
+   * picker grids (palette swatches, sprite tiles), where the grid is the
+   * target, nor buttons on a gesture surface (a graph node's header). */
+  .workbench button:not(.swatch, .tileCell, .segment):not([data-tablet-gestures] *) {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .workbench select,
+  .workbench input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not([type="color"]) {
+    min-height: 44px;
+  }
+
+  .workbench input[type="range"] {
+    height: 44px;
+  }
+
+  .workbench input[type="checkbox"],
+  .workbench input[type="radio"] {
+    width: 22px;
+    height: 22px;
+  }
+
+  .workbench input[type="color"] {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+/* Canvases and the surfaces fingers draw on: no text selection, no
+ * press-and-hold callout (the "Save image" sheet), no page zoom. */
+.workbench canvas,
+.workbench [data-tablet-gestures] {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: none;
 }

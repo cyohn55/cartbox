@@ -221,7 +221,7 @@ export function WeightPaintPanel({
       </button>
       <RailHint>
         Paint on the model: blue where the bone carries nothing, through green, to red where it carries everything. Every stroke leaves each vertex&apos;s
-        weights summing to 1 (what a bone gains the others give up). Right-drag orbits.
+        weights summing to 1 (what a bone gains the others give up). Right-drag (or two fingers) orbits; a Pencil paints harder the harder you press.
       </RailHint>
     </RailGroup>
   );

@@ -86,6 +86,7 @@ import {
 import { dropDistance, raycastMeshes } from "@/lib/meshRaycast";
 import { kitSnap, type Aabb } from "@/lib/kitSnap";
 import { boxSelect, clickSelection, selectionRoots, withSubtrees } from "@/lib/sceneSelection";
+import { useViewGestures } from "@/lib/useTabletGestures";
 import {
   VIEWPORT_FOV,
   cameraAxes,
@@ -960,6 +961,29 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
     onSelectIds(clickSelection(selectedIds, hit, state.additive ?? {}));
   };
 
+  /** A drag abandoned (a second finger made it a gesture, or the browser took the pointer): undo what it did, act on nothing. */
+  const onPointerCancel = () => {
+    const state = drag.current;
+    drag.current = null;
+    marquee.current = null;
+    active.current = null;
+    if (state?.kind === "look") {
+      flying.current = false;
+      keys.current.clear();
+    }
+    if (state?.kind === "gizmo" && state.gizmo && state.moved) {
+      let next = sidecar;
+      for (const m of state.gizmo.group) next = setMeshTransform(next, m.id, { position: [...m.start.position], rotation: [...m.start.rotation], scale: [...m.start.scale] });
+      onSidecarChange(next);
+    }
+    markDirty();
+  };
+
+  // Touch and the Pencil (TABLET_EDITOR_ROADMAP.md T3): two fingers (or one,
+  // once a Pencil is used) orbit as Alt-drag does, three pan as the middle
+  // button does, and a pinch dollies as the wheel does.
+  const gestures = useViewGestures<HTMLCanvasElement>({ onPointerDown, onPointerMove, onPointerUp, onPointerCancel, orbitDrag: { button: 0, altKey: true }, panDrag: { button: 1 } });
+
   /** Drop each selected object onto whatever is beneath it (other meshes, the terrain, or the ground). */
   const dropToSurface = useCallback(() => {
     const roots = selectionRoots(sidecar, selectedIds).filter((id) => !locked.has(id) && !hidden.has(id));
@@ -1141,9 +1165,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
         <canvas
           ref={canvasRef}
           tabIndex={0}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
+          {...gestures}
           onKeyDown={onKeyDown}
           onKeyUp={onKeyUp}
           onBlur={() => keys.current.clear()}
@@ -1152,7 +1174,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
           onDrop={onDrop}
           style={{ position: "absolute", inset: 0, width: "100%", height: "100%", touchAction: "none", cursor: terrainBrush ? "crosshair" : mode === "orbit" ? "grab" : "crosshair", outline: "none" }}
           role="img"
-          aria-label="3D scene — click to select; drag to orbit or transform; right-drag with WASD to fly; middle- or Shift-drag to pan; wheel to dolly; F frames the selection"
+          aria-label="3D scene — click or tap to select; drag to orbit or transform; right-drag with WASD to fly; middle- or Shift-drag to pan; wheel to dolly; F frames the selection. On a tablet: two fingers orbit, three pan, pinch to dolly"
         />
       </div>
       <div className={styles.hud} style={{ flexWrap: "nowrap", overflow: "hidden", whiteSpace: "nowrap" }}>

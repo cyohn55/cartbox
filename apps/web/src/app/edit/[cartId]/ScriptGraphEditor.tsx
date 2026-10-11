@@ -40,6 +40,7 @@ import {
   setScriptValue,
   updateScriptVariable,
 } from "@/lib/scriptGraphEdit";
+import { useViewGestures } from "@/lib/useTabletGestures";
 import styles from "./editor.module.css";
 
 const CATEGORIES: { id: ScriptCategory; label: string; colour: string }[] = [
@@ -127,6 +128,25 @@ export function ScriptGraphEditor({ name, graph, onChange, onClose }: { name: st
     setDrag(null);
   };
 
+  // Touch and the Pencil (TABLET_EDITOR_ROADMAP.md T3): the background pans
+  // with one finger (or two), a pinch zooms as the wheel does, and nodes,
+  // ports and wires keep their own pointer handling.
+  const background = useViewGestures<HTMLDivElement>(
+    {
+      onPointerDown: (e) => {
+        e.currentTarget.setPointerCapture(e.pointerId);
+        gesture.current = { kind: "pan", startX: e.clientX, startY: e.clientY, originX: pan.x, originY: pan.y };
+      },
+      onPointerMove,
+      onPointerUp,
+      orbitDrag: null,
+      panDrag: { button: 0 },
+      onLongPress: () => {},
+    },
+    { drag: "pan", accept: (e) => e.target === e.currentTarget, passThrough: { onPointerMove, onPointerUp } },
+  );
+
+
   const add = (kind: ScriptNodeKind) => {
     const rect = canvasRef.current?.getBoundingClientRect();
     const at = freeScriptSpot(graph, { x: ((rect ? rect.width / 3 : 200) - pan.x) / zoom, y: (40 - pan.y) / zoom }, kind);
@@ -203,13 +223,7 @@ export function ScriptGraphEditor({ name, graph, onChange, onClose }: { name: st
         <div
           ref={canvasRef}
           style={{ position: "relative", flex: "1 1 auto", overflow: "hidden", touchAction: "none", backgroundImage: "radial-gradient(#223 1px, transparent 1px)", backgroundSize: `${20 * zoom}px ${20 * zoom}px`, backgroundPosition: `${pan.x}px ${pan.y}px` }}
-          onPointerDown={(e) => {
-            if (e.target !== e.currentTarget) return;
-            e.currentTarget.setPointerCapture(e.pointerId);
-            gesture.current = { kind: "pan", startX: e.clientX, startY: e.clientY, originX: pan.x, originY: pan.y };
-          }}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
+          {...background}
           onWheel={(e) => {
             const rect = e.currentTarget.getBoundingClientRect();
             const next = Math.min(1.5, Math.max(0.35, zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
