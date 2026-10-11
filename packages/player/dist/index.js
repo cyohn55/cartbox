@@ -4521,7 +4521,7 @@ function resolveQuality(choice, hints) {
 function browserDeviceHints(webgpu) {
   const nav = typeof navigator === "undefined" ? void 0 : navigator;
   if (!nav) return webgpu === void 0 ? {} : { webgpu };
-  const mobile = nav.userAgentData?.mobile ?? /Android|iPhone|iPad|iPod|Mobile/i.test(nav.userAgent ?? "");
+  const mobile = nav.userAgentData?.mobile ?? isMobileAgent(nav.userAgent ?? "", nav.maxTouchPoints ?? 0);
   return {
     ...typeof nav.hardwareConcurrency === "number" ? { cores: nav.hardwareConcurrency } : {},
     ...typeof nav.deviceMemory === "number" ? { memoryGB: nav.deviceMemory } : {},
@@ -4570,6 +4570,9 @@ var QualityGovernor = class {
     return step;
   }
 };
+function isMobileAgent(userAgent, maxTouchPoints = 0) {
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(userAgent) || /Macintosh/.test(userAgent) && maxTouchPoints > 1;
+}
 function applyQualityToPostFx(settings, quality) {
   if (!quality.disabledEffects.some((id) => settings.enabled[id])) return settings;
   const enabled = { ...settings.enabled };
@@ -20365,6 +20368,7 @@ export {
   instrumentLua,
   interleaveVertices,
   interpolateNormal,
+  isMobileAgent,
   jointFrames,
   lensFlareAt,
   loadEngineModule,

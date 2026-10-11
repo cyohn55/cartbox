@@ -14,6 +14,7 @@ import {
   applyQualityToPostFx,
   defaultPostFxSettings,
   detectQuality,
+  isMobileAgent,
   resolveQuality,
   type SceneDraw,
   type SceneRenderer,
@@ -29,6 +30,14 @@ describe("detecting a preset", () => {
     expect(detectQuality({ cores: 8, memoryGB: 8, webgpu: true })).toBe("high");
     // Unknowns don't count against a device.
     expect(detectQuality({})).toBe("high");
+  });
+
+  it("knows an iPad by its touch screen when Safari says it's a Mac", () => {
+    const ipadOs = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
+    expect(isMobileAgent(ipadOs, 5)).toBe(true);
+    expect(isMobileAgent(ipadOs, 0)).toBe(false); // a Mac
+    expect(isMobileAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148", 5)).toBe(true);
+    expect(isMobileAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/140.0", 10)).toBe(false); // a touch-screen laptop
   });
 
   it("resolves auto from the device and an explicit choice as given", () => {

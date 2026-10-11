@@ -498,6 +498,7 @@ export {
   applyQualityToPostFx,
   browserDeviceHints,
   detectQuality,
+  isMobileAgent,
   resolveQuality,
   type DeviceHints,
   type QualityChoice,

@@ -87,7 +87,7 @@ export function resolveQuality(choice: QualityChoice | undefined, hints: DeviceH
 export function browserDeviceHints(webgpu?: boolean): DeviceHints {
   const nav = typeof navigator === "undefined" ? undefined : (navigator as Navigator & { deviceMemory?: number; userAgentData?: { mobile?: boolean } });
   if (!nav) return webgpu === undefined ? {} : { webgpu };
-  const mobile = nav.userAgentData?.mobile ?? /Android|iPhone|iPad|iPod|Mobile/i.test(nav.userAgent ?? "");
+  const mobile = nav.userAgentData?.mobile ?? isMobileAgent(nav.userAgent ?? "", nav.maxTouchPoints ?? 0);
   return {
     ...(typeof nav.hardwareConcurrency === "number" ? { cores: nav.hardwareConcurrency } : {}),
     ...(typeof nav.deviceMemory === "number" ? { memoryGB: nav.deviceMemory } : {}),
@@ -155,6 +155,15 @@ export class QualityGovernor {
     this.reset(now);
     return step;
   }
+}
+
+/**
+ * Whether a user agent is a phone's or a tablet's. iPadOS Safari asks for
+ * desktop sites by default and so says it's a Mac: a "Macintosh" with a
+ * touch screen is an iPad.
+ */
+export function isMobileAgent(userAgent: string, maxTouchPoints = 0): boolean {
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(userAgent) || (/Macintosh/.test(userAgent) && maxTouchPoints > 1);
 }
 
 /** Post-effect settings with a preset's costly effects switched off (the same object when none apply). */

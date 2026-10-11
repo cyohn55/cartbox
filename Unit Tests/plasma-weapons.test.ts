@@ -76,6 +76,27 @@ describe("a trail", () => {
     expect(trails.instances(2).main).toBeNull();
   });
 
+  it("hands a GPU renderer the same mesh while the same ribbons show, so it updates its buffers in place", () => {
+    const trails = new TrailSystem();
+    for (let f = 0; f < 10; f += 1) trails.record(0, [TRAIL], at(f * 0.1), null, f / 60, false);
+    const first = trails.instances(9 / 60).main!;
+    trails.record(0, [TRAIL], at(1), null, 10 / 60, false);
+    const next = trails.instances(10 / 60).main!;
+    expect(next.mesh).toBe(first.mesh);
+    expect(next.mesh.primitives[0]!.dynamic!.revision).toBeGreaterThan(0);
+    // A second ribbon joins: a new mesh, then that one again.
+    for (let f = 10; f < 14; f += 1) {
+      trails.record(0, [TRAIL], at(f * 0.1), null, f / 60, false);
+      trails.record(1, [TRAIL], at(f * 0.1 + 5), null, f / 60, false);
+    }
+    const both = trails.instances(13 / 60).main!;
+    expect(both.mesh).not.toBe(first.mesh);
+    expect(both.mesh.primitives).toHaveLength(2);
+    trails.record(0, [TRAIL], at(1.4), null, 14 / 60, false);
+    trails.record(1, [TRAIL], at(6.4), null, 14 / 60, false);
+    expect(trails.instances(14 / 60).main!.mesh).toBe(both.mesh);
+  });
+
   it("stops where an object leaves sight", () => {
     const trails = new TrailSystem();
     trails.record(0, [TRAIL], at(0), null, 0, false);
