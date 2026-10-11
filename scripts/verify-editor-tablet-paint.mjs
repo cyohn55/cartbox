@@ -223,7 +223,7 @@ if (run("uv")) {
   const colour = page.getByLabel("Colour to paint").first();
 
   // 11. A Pencil stroke paints the layer.
-  let before = await pixelsOf(canvas);
+  const before = await pixelsOf(canvas);
   await t.penStroke(at(0.2, 0.3), at(0.8, 0.3), 1);
   const afterPen = await pixelsOf(canvas);
   check("uv: a Pencil stroke paints", differ(before, afterPen) > 0, `${differ(before, afterPen)} px`);
