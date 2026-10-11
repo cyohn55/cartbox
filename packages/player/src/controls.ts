@@ -1,8 +1,10 @@
 /**
- * Control settings a player can change from a game's Start menu: aim inversion,
- * look sensitivity, button mapping for a controller and the keyboard, and the
- * on-screen pad's size and opacity. Pure data plus the pure transforms the input
- * layer applies, so every piece is testable without a DOM or a gamepad.
+ * Control settings a player can change from a game's Start menu: how each stick
+ * reads (dead zones, max input), how lean becomes look (sensitivity per axis,
+ * inversion, a response curve), the stick layout, the triggers' pull, button
+ * mapping for a controller and the keyboard, and the on-screen pad's size and
+ * opacity (CONTROLLER_SETTINGS_ROADMAP.md). Pure data plus the pure transforms
+ * the input layer applies, so every piece is testable without a DOM or a gamepad.
  */
 
 import { parseActionRebinds, type ActionRebind } from "@cartbox/editor";
@@ -21,11 +23,58 @@ export type PadButton = (typeof PAD_BUTTONS)[number];
 /** What a physical control does: press a console button, open the Start menu, or nothing. */
 export type ControlTarget = ConsoleButton | "start" | null;
 
+/**
+ * How a physical stick reads (C1), as Halo Infinite's thumbstick settings have it.
+ * Each value is a share of the stick's travel, 0..1.
+ */
+export interface StickDeadZones {
+  /** Each axis ignores lean below this on its own (so a push straight up stays straight up). */
+  readonly axial: number;
+  /** Lean below this distance from the centre reads as none. */
+  readonly radial: number;
+  /** Lean past this reads as full: a stick that never quite reaches its edge still can. */
+  readonly maxInput: number;
+}
+
+/**
+ * How look-stick lean becomes look (C1). Standard passes it as it comes; the
+ * others reshape its distance from centre, keeping its direction:
+ * - dynamic: an S-curve, fine near the centre, steepest mid-way, settling at the edge;
+ * - precision: slower near the centre (lean²), for fine aim;
+ * - responsive: quicker off the centre (√lean).
+ */
+export type ResponseCurve = "standard" | "dynamic" | "precision" | "responsive";
+export const RESPONSE_CURVES: readonly ResponseCurve[] = ["standard", "dynamic", "precision", "responsive"];
+
+/**
+ * Which stick moves and which looks (C1), as Call of Duty names them:
+ * - default: the left stick moves and strafes, the right one looks;
+ * - southpaw: swapped;
+ * - legacy: the left stick moves forward and back and turns, the right one strafes and looks up and down;
+ * - legacySouthpaw: legacy, swapped.
+ */
+export type StickLayout = "default" | "southpaw" | "legacy" | "legacySouthpaw";
+export const STICK_LAYOUTS: readonly StickLayout[] = ["default", "southpaw", "legacy", "legacySouthpaw"];
+
 export interface ControlSettings {
-  /** Invert the right stick's vertical axis (push up to aim down). */
+  /** Invert the look vertical axis (push up to aim down). */
   readonly invertY: boolean;
-  /** Look sensitivity, 0.25..3: scales the right stick before the game reads it. */
+  /** Invert the look horizontal axis (push right to turn left). */
+  readonly invertX?: boolean;
+  /** Horizontal look sensitivity, 0.25..3: scales the look stick's x before the game reads it. */
   readonly lookSensitivity: number;
+  /** Vertical look sensitivity, 0.25..3 (absent: the same as horizontal, as before there were two). */
+  readonly lookSensitivityY?: number;
+  /** How look-stick lean becomes look. */
+  readonly lookCurve?: ResponseCurve;
+  /** The physical left and right sticks' dead zones (absent: a 0.18 radial dead zone, as always). */
+  readonly leftStick?: StickDeadZones;
+  readonly rightStick?: StickDeadZones;
+  /** Which stick moves and which looks. */
+  readonly stickLayout?: StickLayout;
+  /** How far (0.05..0.95) the left and right triggers must be pulled to press. */
+  readonly leftTrigger?: number;
+  readonly rightTrigger?: number;
   /** Controller buttons → what they do. */
   readonly padBindings: Readonly<Record<PadButton, ControlTarget>>;
   /** Keyboard `KeyboardEvent.code` → console button. */
@@ -73,9 +122,22 @@ export const DEFAULT_KEY_BINDINGS: Readonly<Record<string, ConsoleButton>> = {
 /** Keys that open the Start menu (unless rebound to a console button). */
 export const START_KEYS: readonly string[] = ["Escape", "Enter", "KeyP"];
 
+/** A stick as the player always read it: a 0.18 radial dead zone, full lean at the edge. */
+export const DEFAULT_STICK_DEAD_ZONES: StickDeadZones = { axial: 0, radial: 0.18, maxInput: 1 };
+/** Triggers press past half-way, as they always did. */
+export const DEFAULT_TRIGGER_THRESHOLD = 0.5;
+
 export const DEFAULT_CONTROL_SETTINGS: ControlSettings = {
   invertY: false,
+  invertX: false,
   lookSensitivity: 1,
+  lookSensitivityY: 1,
+  lookCurve: "standard",
+  leftStick: DEFAULT_STICK_DEAD_ZONES,
+  rightStick: DEFAULT_STICK_DEAD_ZONES,
+  stickLayout: "default",
+  leftTrigger: DEFAULT_TRIGGER_THRESHOLD,
+  rightTrigger: DEFAULT_TRIGGER_THRESHOLD,
   padBindings: DEFAULT_PAD_BINDINGS,
   keyBindings: DEFAULT_KEY_BINDINGS,
   touchOpacity: 0.85,
@@ -108,9 +170,36 @@ export function parseControlSettings(value: unknown, defaults: ControlSettings =
     );
     if (entries.length > 0) keyBindings = Object.fromEntries(entries);
   }
+  const lookSensitivity = num(raw.lookSensitivity, 0.25, 3, defaults.lookSensitivity);
+  const deadZones = (v: unknown, fallback: StickDeadZones | undefined): StickDeadZones => {
+    const base = fallback ?? DEFAULT_STICK_DEAD_ZONES;
+    if (typeof v !== "object" || v === null) return base;
+    const z = v as Record<string, unknown>;
+    const radial = num(z.radial, 0, 0.5, base.radial);
+    return {
+      axial: num(z.axial, 0, 0.5, base.axial),
+      radial,
+      // Full lean must lie past the dead zone.
+      maxInput: Math.max(radial + 0.1, num(z.maxInput, 0.5, 1, base.maxInput)),
+    };
+  };
   return {
     invertY: typeof raw.invertY === "boolean" ? raw.invertY : defaults.invertY,
-    lookSensitivity: num(raw.lookSensitivity, 0.25, 3, defaults.lookSensitivity),
+    invertX: typeof raw.invertX === "boolean" ? raw.invertX : (defaults.invertX ?? false),
+    lookSensitivity,
+    // Saved before there were two: vertical follows horizontal.
+    lookSensitivityY:
+      raw.lookSensitivityY !== undefined
+        ? num(raw.lookSensitivityY, 0.25, 3, defaults.lookSensitivityY ?? lookSensitivity)
+        : raw.lookSensitivity !== undefined
+          ? lookSensitivity
+          : (defaults.lookSensitivityY ?? lookSensitivity),
+    lookCurve: (RESPONSE_CURVES as readonly unknown[]).includes(raw.lookCurve) ? (raw.lookCurve as ResponseCurve) : (defaults.lookCurve ?? "standard"),
+    leftStick: deadZones(raw.leftStick, defaults.leftStick),
+    rightStick: deadZones(raw.rightStick, defaults.rightStick),
+    stickLayout: (STICK_LAYOUTS as readonly unknown[]).includes(raw.stickLayout) ? (raw.stickLayout as StickLayout) : (defaults.stickLayout ?? "default"),
+    leftTrigger: num(raw.leftTrigger, 0.05, 0.95, defaults.leftTrigger ?? DEFAULT_TRIGGER_THRESHOLD),
+    rightTrigger: num(raw.rightTrigger, 0.05, 0.95, defaults.rightTrigger ?? DEFAULT_TRIGGER_THRESHOLD),
     padBindings,
     keyBindings,
     touchOpacity: num(raw.touchOpacity, 0.2, 1, defaults.touchOpacity),
@@ -123,27 +212,89 @@ export function parseControlSettings(value: unknown, defaults: ControlSettings =
   };
 }
 
+/** A look-stick lean's distance from centre (0..1) through a response curve. */
+export function responseCurve(curve: ResponseCurve | undefined, m: number): number {
+  const t = clamp(m, 0, 1);
+  switch (curve) {
+    case "dynamic":
+      return t * t * (3 - 2 * t);
+    case "precision":
+      return t * t;
+    case "responsive":
+      return Math.sqrt(t);
+    default:
+      return t;
+  }
+}
+
 /**
- * The sticks as the game should see them: the right stick scaled by the look
- * sensitivity (reaching full lean sooner when it is above 1) and its vertical
- * axis flipped when aim is inverted. The left stick passes through.
+ * The sticks as the game should see them. The move stick passes through. The
+ * look stick goes through its response curve (its distance from centre,
+ * keeping its direction), then each axis is scaled by its sensitivity
+ * (reaching full lean sooner when it is above 1) and flipped when inverted.
  */
 export function applyLookSettings(
   axes: readonly number[],
-  settings: Pick<ControlSettings, "invertY" | "lookSensitivity">,
+  settings: Pick<ControlSettings, "invertY" | "lookSensitivity"> & Partial<Pick<ControlSettings, "invertX" | "lookSensitivityY" | "lookCurve">>,
 ): [number, number, number, number] {
-  const s = settings.lookSensitivity;
-  const rx = clamp((axes[2] ?? 0) * s, -1, 1);
-  const ry = clamp((axes[3] ?? 0) * s * (settings.invertY ? -1 : 1), -1, 1);
+  let x = axes[2] ?? 0;
+  let y = axes[3] ?? 0;
+  const m = Math.hypot(x, y);
+  if (m > 0 && settings.lookCurve && settings.lookCurve !== "standard") {
+    const k = responseCurve(settings.lookCurve, m) / m;
+    x *= k;
+    y *= k;
+  }
+  const sx = settings.lookSensitivity;
+  const sy = settings.lookSensitivityY ?? sx;
+  const rx = clamp(x * sx * (settings.invertX ? -1 : 1), -1, 1);
+  const ry = clamp(y * sy * (settings.invertY ? -1 : 1), -1, 1);
   return [axes[0] ?? 0, axes[1] ?? 0, rx, ry];
 }
 
 /** A physical stick reading with a radial dead zone, rescaled to reach full lean. */
 export function deadZoned(x: number, y: number, deadZone = 0.18): [number, number] {
-  const m = Math.hypot(x, y);
-  if (m < deadZone) return [0, 0];
-  const k = Math.min(1, (m - deadZone) / (1 - deadZone)) / m;
-  return [x * k, y * k];
+  return shapeStick(x, y, { axial: 0, radial: deadZone, maxInput: 1 });
+}
+
+/**
+ * A physical stick reading through its dead zones (C1). First each axis on its
+ * own past the axial dead zone, then the stick's distance from centre between
+ * the radial dead zone and the max input threshold, both rescaled so lean just
+ * past a dead zone reads just above nothing and the threshold reads full.
+ */
+export function shapeStick(x: number, y: number, zones: StickDeadZones): [number, number] {
+  const axis = (v: number) => {
+    const a = Math.abs(v);
+    if (zones.axial <= 0) return v;
+    return a <= zones.axial ? 0 : (Math.sign(v) * (a - zones.axial)) / (1 - zones.axial);
+  };
+  const ax = axis(x);
+  const ay = axis(y);
+  const m = Math.hypot(ax, ay);
+  if (m <= zones.radial || m === 0) return [0, 0];
+  const span = Math.max(1e-6, zones.maxInput - zones.radial);
+  const k = Math.min(1, (m - zones.radial) / span) / m;
+  return [ax * k, ay * k];
+}
+
+/**
+ * The two sticks as move and look (C1): [moveX, moveY, lookX, lookY] from the
+ * physical [leftX, leftY, rightX, rightY] in a stick layout.
+ */
+export function layoutSticks(axes: readonly number[], layout: StickLayout | undefined): [number, number, number, number] {
+  const [lx = 0, ly = 0, rx = 0, ry = 0] = axes;
+  switch (layout) {
+    case "southpaw":
+      return [rx, ry, lx, ly];
+    case "legacy":
+      // Left: forward/back and turn; right: strafe and look up/down.
+      return [rx, ly, lx, ry];
+    case "legacySouthpaw":
+      return [lx, ry, rx, ly];
+    default:
+      return [lx, ly, rx, ry];
+  }
 }
 
 /** One gamepad snapshot (the fields the reader uses from the Gamepad API). */
@@ -185,21 +336,26 @@ export function standardizePad<T extends PadSnapshot & { readonly mapping?: stri
 
 /**
  * What a gamepad is doing: the console-button mask its bindings press, both
- * sticks (dead-zoned), whether a control bound to "start" is held, and every
+ * sticks (through the player's dead zones, as [moveX, moveY, lookX, lookY] in
+ * their stick layout), whether a control bound to "start" is held, and every
  * button held (which input actions bind directly, whatever it's mapped to).
  */
 export function readPad(
   raw: PadSnapshot & { readonly mapping?: string; readonly id?: string },
   bindings: Readonly<Record<PadButton, ControlTarget>>,
+  tuning: Partial<Pick<ControlSettings, "leftStick" | "rightStick" | "stickLayout" | "leftTrigger" | "rightTrigger">> = {},
 ): { mask: number; axes: [number, number, number, number]; start: boolean; pressed: Set<PadButton> } {
   const pad = standardizePad(raw);
   let mask = 0;
   let start = false;
   const pressed = new Set<PadButton>();
+  const pull = { LT: tuning.leftTrigger ?? DEFAULT_TRIGGER_THRESHOLD, RT: tuning.rightTrigger ?? DEFAULT_TRIGGER_THRESHOLD };
   PAD_BUTTONS.forEach((name, index) => {
     const button = pad.buttons[index];
-    // Triggers are analog; count them as pressed past half-way.
-    const down = button ? button.pressed || button.value > 0.5 : false;
+    // Triggers are analog: they press past the player's pull (a trigger that
+    // only reports on or off presses when on). Other buttons past half-way.
+    const trigger = name === "LT" || name === "RT" ? pull[name] : null;
+    const down = !button ? false : trigger !== null ? (button.value > 0 ? button.value >= trigger : button.pressed) : button.pressed || button.value > 0.5;
     if (!down) return;
     pressed.add(name);
     const target = bindings[name];
@@ -208,7 +364,7 @@ export function readPad(
   });
   // An unbound Start still opens the menu when the mapping left nothing else on it.
   if (bindings.Start === null && !Object.values(bindings).includes("start") && pad.buttons[9]?.pressed) start = true;
-  const [lx, ly] = deadZoned(pad.axes[0] ?? 0, pad.axes[1] ?? 0);
-  const [rx, ry] = deadZoned(pad.axes[2] ?? 0, pad.axes[3] ?? 0);
-  return { mask, axes: [lx, ly, rx, ry], start, pressed };
+  const [lx, ly] = shapeStick(pad.axes[0] ?? 0, pad.axes[1] ?? 0, tuning.leftStick ?? DEFAULT_STICK_DEAD_ZONES);
+  const [rx, ry] = shapeStick(pad.axes[2] ?? 0, pad.axes[3] ?? 0, tuning.rightStick ?? DEFAULT_STICK_DEAD_ZONES);
+  return { mask, axes: layoutSticks([lx, ly, rx, ry], tuning.stickLayout), start, pressed };
 }

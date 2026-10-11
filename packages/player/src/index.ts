@@ -459,11 +459,18 @@ export {
   START_KEYS,
   applyLookSettings,
   deadZoned,
+  shapeStick,
+  layoutSticks,
+  responseCurve,
+  RESPONSE_CURVES,
+  STICK_LAYOUTS,
+  DEFAULT_STICK_DEAD_ZONES,
+  DEFAULT_TRIGGER_THRESHOLD,
   parseControlSettings,
   readPad,
   standardizePad,
 } from "./controls.js";
-export type { ControlSettings, ControlTarget, PadButton, PadSnapshot } from "./controls.js";
+export type { ControlSettings, ControlTarget, PadButton, PadSnapshot, ResponseCurve, StickDeadZones, StickLayout } from "./controls.js";
 export { GamepadInput } from "./input.js";
 
 // Physics (ENGINE_ROADMAP.md, Phase 2): the session that runs a cart's bodies,
