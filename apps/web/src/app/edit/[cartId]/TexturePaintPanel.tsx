@@ -37,6 +37,7 @@ import {
 } from "@cartbox/editor";
 
 import { decodeImage } from "@/lib/meshImport";
+import { pressureBrush, samplePointer, strokePressure, type PressureMode } from "@/lib/tabletInput";
 import styles from "./editor.module.css";
 import { RailGroup, RailHint, RangeControl, SegmentedControl } from "./railControls";
 
@@ -72,10 +73,15 @@ export interface TexturePaint {
   readonly target: PaintTarget | null;
   /** Bumped by every dab, so views redraw. */
   readonly version: number;
-  /** One dab at a UV. */
-  dab: (uv: readonly [number, number]) => void;
+  /** What a Pencil's pressure scales (TABLET_EDITOR_ROADMAP.md T1). */
+  readonly pressureMode: PressureMode;
+  setPressureMode: (mode: PressureMode) => void;
+  /** One dab at a UV, at `pressure` (0..1: a Pencil's; 1 for a mouse or a finger). */
+  dab: (uv: readonly [number, number], pressure?: number) => void;
   /** The stroke ends: the image is saved into the material. */
   endStroke: () => void;
+  /** The stroke is abandoned (a second finger made it a gesture): its texels are put back. */
+  cancelStroke: () => void;
 }
 
 /**
@@ -93,7 +99,10 @@ export function useTexturePaint(mesh: MeshAsset | null, set: string | null, onCo
   const [size, setSize] = useState(512);
   const [target, setTarget] = useState<PaintTarget | null>(null);
   const [version, setVersion] = useState(0);
+  const [pressureMode, setPressureMode] = useState<PressureMode>("both");
   const dirty = useRef(false);
+  /** The image's texels before the stroke under way, to put back if it's cancelled. */
+  const before = useRef<Uint8ClampedArray | null>(null);
   const part = mesh && primitive < mesh.primitives.length ? primitive : 0;
   const p = mesh?.primitives[part];
   const material = mesh ? materialFor(mesh, part, set) : null;
@@ -137,17 +146,28 @@ export function useTexturePaint(mesh: MeshAsset | null, set: string | null, onCo
   }, [material, part, layer, set, current, size, p?.uvs]);
 
   const dab = useCallback(
-    (uv: readonly [number, number]) => {
+    (uv: readonly [number, number], pressure = 1) => {
       if (!target) return;
+      before.current ??= target.image.data.slice();
       const scalar = layer === "roughness" || layer === "metal" || layer === "teamMask";
-      if (paintTexels(target.image, layer, [uv[0], uv[1]], scalar ? [value] : color, { radius, opacity, hardness: 0.5 })) {
+      const brush = pressureBrush(radius, opacity, pressure, pressureMode);
+      if (paintTexels(target.image, layer, [uv[0], uv[1]], scalar ? [value] : color, { ...brush, hardness: 0.5 })) {
         dirty.current = true;
         setVersion((v) => v + 1);
       }
     },
-    [target, layer, value, color, radius, opacity],
+    [target, layer, value, color, radius, opacity, pressureMode],
   );
+  const cancelStroke = useCallback(() => {
+    if (target && before.current) {
+      target.image.data.set(before.current);
+      setVersion((v) => v + 1);
+    }
+    before.current = null;
+    dirty.current = false;
+  }, [target]);
   const endStroke = useCallback(() => {
+    before.current = null;
     if (!mesh || !target || !dirty.current) return;
     dirty.current = false;
     const image = encodePaintImage(target.image);
@@ -172,8 +192,11 @@ export function useTexturePaint(mesh: MeshAsset | null, set: string | null, onCo
     setSize,
     target: target && target.primitive === part && target.layer === layer && target.set === set ? target : null,
     version,
+    pressureMode,
+    setPressureMode,
     dab,
     endStroke,
+    cancelStroke,
   };
 }
 
@@ -249,7 +272,7 @@ function UvView({ mesh, paint, tool, island, onIsland, onEdit }: { mesh: MeshAss
         const uv = uvAt(event);
         if (tool === "paint") {
           painting.current = true;
-          paint.dab(uv);
+          paint.dab(uv, strokePressure(samplePointer(event.nativeEvent)));
           return;
         }
         const k = pickIsland(p, islands, uv);
@@ -257,7 +280,7 @@ function UvView({ mesh, paint, tool, island, onIsland, onEdit }: { mesh: MeshAss
         if (k >= 0) setDrag({ from: uv, to: uv });
       }}
       onPointerMove={(event) => {
-        if (tool === "paint" && painting.current) paint.dab(uvAt(event));
+        if (tool === "paint" && painting.current) paint.dab(uvAt(event), strokePressure(samplePointer(event.nativeEvent)));
         else if (drag) setDrag({ ...drag, to: uvAt(event) });
       }}
       onPointerUp={() => {
@@ -335,6 +358,15 @@ export function TexturePaintPanel({ mesh, set, paint, onEdit }: { mesh: MeshAsse
           </div>
           <RangeControl label="Radius" min={1} max={64} step={1} value={paint.radius} ariaLabel="Brush radius" display={`${paint.radius} px`} onChange={paint.setRadius} />
           <RangeControl label="Opacity" min={0.05} max={1} step={0.05} value={paint.opacity} ariaLabel="Brush opacity" display={paint.opacity.toFixed(2)} onChange={paint.setOpacity} />
+          <div style={{ display: "flex", gap: 6, alignItems: "center", margin: "4px 0" }}>
+            <span className={styles.hudLabel}>Pencil pressure</span>
+            <select aria-label="What Pencil pressure changes" value={paint.pressureMode} onChange={(e) => paint.setPressureMode(e.target.value as PressureMode)} style={{ padding: "2px 4px", borderRadius: 6 }}>
+              <option value="both">size and opacity</option>
+              <option value="size">size</option>
+              <option value="opacity">opacity</option>
+              <option value="off">nothing</option>
+            </select>
+          </div>
           {!materialFor(mesh, paint.primitive, set)?.[paintLayer(paint.layer).slot] && (
             <div style={{ display: "flex", gap: 6, alignItems: "center", margin: "4px 0" }}>
               <span className={styles.hudLabel}>New map</span>
@@ -380,7 +412,7 @@ export function TexturePaintPanel({ mesh, set, paint, onEdit }: { mesh: MeshAsse
           )}
           <RailHint>
             {islands.length} island{islands.length === 1 ? "" : "s"}. Paint on the model in the preview or on the UV view; each stroke is saved into the
-            material as a PNG. The team-colour layer is how much of a team&apos;s colour each texel takes. Right-drag orbits the preview.
+            material as a PNG. The team-colour layer is how much of a team&apos;s colour each texel takes. Right-drag (or two fingers) orbits the preview.
           </RailHint>
         </>
       )}

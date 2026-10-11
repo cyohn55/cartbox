@@ -136,7 +136,9 @@ export function ModelingPanel({ mesh, mode, onMode, selection, onSelection, tool
       />
       <RailHint>
         Click to select, Shift+click to add or remove, Alt+click a side for its loop (in face mode, the ring of faces it crosses); drag a box to
-        select through the mesh (Shift adds, Ctrl removes). Right-drag orbits. Drag the gizmo&apos;s handles to {tool} the selection.
+        select through the mesh (Shift adds, Ctrl removes). Right-drag orbits. Drag the gizmo&apos;s handles to {tool} the selection. On a
+        tablet: tap or draw with the Pencil, long-press a side for its loop, use the touch bar&apos;s Add, Remove and Loop for the keys, and two
+        fingers to orbit and pinch to zoom.
       </RailHint>
       <div className={styles.hudLabel} style={{ margin: "4px 0" }}>
         {count === 0 ? "Nothing selected" : `${count} ${mode === "vertex" ? "vertices" : mode === "edge" ? "edges" : "faces"} selected`}

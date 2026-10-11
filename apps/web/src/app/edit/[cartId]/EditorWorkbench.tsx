@@ -91,6 +91,8 @@ import { decodeMeshSidecar, encodeMeshSidecar, addMesh, type MeshSidecar } from 
 import { rebakeMeshSidecar } from "@/lib/meshTextureBake";
 import { readSidecarStrings, type MeshAsset } from "@cartbox/editor";
 import { toggleBreakpoint } from "./debuggerView";
+import { TouchBar } from "./TouchBar";
+import { tabletStore } from "@/lib/useTabletGestures";
 
 // Which tabs a cart gets depends on its console model and what it already
 // carries — a 2D model hides the 3D authoring tabs unless the cart has content
@@ -371,6 +373,12 @@ function WorkbenchBody({
     undo,
     redo,
   } = history;
+
+  // Two- and three-finger taps and the touch bar undo and redo (TABLET_EDITOR_ROADMAP.md T1).
+  useEffect(() => {
+    tabletStore.setCommands({ undo, redo });
+    return () => tabletStore.setCommands({});
+  }, [undo, redo]);
 
   // Undo and redo move the timeline without committing, so dirty state has to be
   // re-derived from the new present.
@@ -1579,6 +1587,7 @@ function WorkbenchBody({
           onClose={() => setRunBytes(null)}
         />
       )}
+      {!runBytes && <TouchBar />}
     </div>
     </OverflowMenuContext.Provider>
     </EditorDensityProvider>
