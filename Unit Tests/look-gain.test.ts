@@ -17,16 +17,18 @@ import {
 import { LOOK_GAIN_OPTIN_MAGIC, STICK_OPTIN_MAGIC, packLookGain, stickChannel, unpackLookGain } from "../packages/player/src/sticks";
 
 describe("the gain word", () => {
-  it("round-trips gains in 1/64 steps, marked as the host's", () => {
+  it("round-trips gains in 1/32 steps, marked as the host's", () => {
     const word = packLookGain({ x: 2.5, y: 0.75, zoom: 0.5 });
     expect(word >>> 24).toBe(0x4c);
     expect(unpackLookGain(word)).toEqual({ x: 2.5, y: 0.75, zoom: 0.5 });
+    // The top sensitivity at full look acceleration still fits.
+    expect(unpackLookGain(packLookGain({ x: 6, y: 6, zoom: 2 }))).toEqual({ x: 6, y: 6, zoom: 2 });
   });
 
   it("clamps gains to what a byte holds, and never to zero", () => {
     const g = unpackLookGain(packLookGain({ x: 9, y: 0, zoom: Number.NaN }))!;
-    expect(g.x).toBeCloseTo(255 / 64, 5);
-    expect(g.y).toBe(1 / 64);
+    expect(g.x).toBeCloseTo(255 / 32, 5);
+    expect(g.y).toBe(1 / 32);
     expect(g.zoom).toBe(1);
   });
 

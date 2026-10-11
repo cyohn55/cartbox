@@ -14,8 +14,9 @@
  * player's sensitivity and writes the gains into word 69 for the cart to multiply
  * its turn and pitch rates by (see {@link packLookGain}):
  *
- *   byte 0  horizontal gain ×64    byte 1  vertical gain ×64
- *   byte 2  zoom multiplier ×64    byte 3  {@link LOOK_GAIN_MARKER}
+ *   byte 0  horizontal gain ×32    byte 1  vertical gain ×32
+ *   byte 2  zoom multiplier ×32    byte 3  {@link LOOK_GAIN_MARKER} in its top six bits
+ *                                          (the low two are kept for the host)
  *
  * so sensitivity above 1 really turns faster than the game's own maximum, and
  * zoom sensitivity and look acceleration reach the game. A cart that only
@@ -35,17 +36,21 @@ export const STICK_OPTIN_MAGIC = 0x53544b31;
 
 /** "STK2" — written by the SDK's cartbox.lookgain: the cart scales look itself. */
 export const LOOK_GAIN_OPTIN_MAGIC = 0x53544b32;
-/** The top byte of word 69 once the host has written gains there ("L"). */
+/** The top byte of word 69 once the host has written gains there ("L"), its low two bits aside. */
 export const LOOK_GAIN_MARKER = 0x4c;
-/** Gains travel as ×64 in a byte: 1/64 steps up to 255/64 (≈ ×3.98). */
-const GAIN_SCALE = 64;
+const isGainWord = (w: number) => w >>> 26 === LOOK_GAIN_MARKER >>> 2;
+/**
+ * Gains travel as ×32 in a byte: 1/32 steps up to 255/32 (≈ ×7.97), room for
+ * the top sensitivity (×3) at full look acceleration (×2).
+ */
+const GAIN_SCALE = 32;
 
 /** What the cart has asked of the stick channel, from word 69. */
 export type StickChannel = "off" | "sticks" | "gain";
 
 export function stickChannel(optIn: number): StickChannel {
   const w = optIn >>> 0;
-  if (w === LOOK_GAIN_OPTIN_MAGIC || w >>> 24 === LOOK_GAIN_MARKER) return "gain";
+  if (w === LOOK_GAIN_OPTIN_MAGIC || isGainWord(w)) return "gain";
   return w === STICK_OPTIN_MAGIC ? "sticks" : "off";
 }
 
@@ -59,7 +64,7 @@ export interface LookGain {
 
 const gainByte = (v: number) => Math.max(1, Math.min(255, Math.round((Number.isFinite(v) ? v : 1) * GAIN_SCALE)));
 
-/** Pack look gains (each clamped to 1/64..≈3.98) into word 69, marked as the host's. */
+/** Pack look gains (each clamped to 1/32..≈7.97) into word 69, marked as the host's. */
 export function packLookGain(gain: LookGain): number {
   return (gainByte(gain.x) | (gainByte(gain.y) << 8) | (gainByte(gain.zoom) << 16) | (LOOK_GAIN_MARKER << 24)) >>> 0;
 }
@@ -67,7 +72,7 @@ export function packLookGain(gain: LookGain): number {
 /** Unpack word 69 back into gains (for tests and tooling); null when it holds none. */
 export function unpackLookGain(word: number): LookGain | null {
   const w = word >>> 0;
-  if (w >>> 24 !== LOOK_GAIN_MARKER) return null;
+  if (!isGainWord(w)) return null;
   return { x: (w & 0xff) / GAIN_SCALE, y: ((w >>> 8) & 0xff) / GAIN_SCALE, zoom: ((w >>> 16) & 0xff) / GAIN_SCALE };
 }
 

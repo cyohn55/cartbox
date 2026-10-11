@@ -5447,10 +5447,11 @@ var STICK_OPTIN_WORD = 69;
 var STICK_OPTIN_MAGIC = 1398033201;
 var LOOK_GAIN_OPTIN_MAGIC = 1398033202;
 var LOOK_GAIN_MARKER = 76;
-var GAIN_SCALE = 64;
+var isGainWord = (w) => w >>> 26 === LOOK_GAIN_MARKER >>> 2;
+var GAIN_SCALE = 32;
 function stickChannel(optIn) {
   const w = optIn >>> 0;
-  if (w === LOOK_GAIN_OPTIN_MAGIC || w >>> 24 === LOOK_GAIN_MARKER) return "gain";
+  if (w === LOOK_GAIN_OPTIN_MAGIC || isGainWord(w)) return "gain";
   return w === STICK_OPTIN_MAGIC ? "sticks" : "off";
 }
 var gainByte = (v) => Math.max(1, Math.min(255, Math.round((Number.isFinite(v) ? v : 1) * GAIN_SCALE)));
@@ -6439,7 +6440,7 @@ cartbox = {
   -- shows its right stick once a cart calls this. Uses pmem 68..69.
   stick = function(n)
     local m = pmem(69)
-    if m ~= 0x53544b31 and m ~= 0x53544b32 and (m >> 24) ~= 0x4c then pmem(69, 0x53544b31) end
+    if m ~= 0x53544b31 and m ~= 0x53544b32 and (m >> 26) ~= 0x13 then pmem(69, 0x53544b31) end
     local w = pmem(68)
     local sh = (n == 1) and 16 or 0
     local x, y = (w >> sh) & 0xff, (w >> (sh + 8)) & 0xff
@@ -6454,12 +6455,12 @@ cartbox = {
   -- 1, 1 until the host answers. Shares pmem 69 with stick().
   lookgain = function(zoomed)
     local m = pmem(69)
-    if (m >> 24) ~= 0x4c then
+    if (m >> 26) ~= 0x13 then
       if m ~= 0x53544b32 then pmem(69, 0x53544b32) end
       return 1, 1
     end
-    local h, v = (m & 0xff) / 64, ((m >> 8) & 0xff) / 64
-    if zoomed then local z = ((m >> 16) & 0xff) / 64 return h * z, v * z end
+    local h, v = (m & 0xff) / 32, ((m >> 8) & 0xff) / 32
+    if zoomed then local z = ((m >> 16) & 0xff) / 32 return h * z, v * z end
     return h, v
   end,
   -- Netplay (online multiplayer). The host page relays player state + events

@@ -139,7 +139,8 @@ the Start menu (`apps/web/src/app/lockout/StartMenu.tsx`) edits them.
       bytes are taken, so the gains share the stick channel's opt-in word,
       pmem 69. `cartbox.lookgain` writes a second magic there ("STK2"); from
       the next tick the host writes the gains in its place (horizontal,
-      vertical and zoom, each ×64 in a byte, under a marker byte), and
+      vertical and zoom, each ×32 in a byte so ×3 at full acceleration
+      fits, under a six-bit marker with two bits kept for C3), and
       `cartbox.stick` leaves either alone. A cart that only calls
       `cartbox.stick` still sees "STK1" and gets the stick pre-scaled, as
       before.
