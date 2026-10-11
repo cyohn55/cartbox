@@ -10684,8 +10684,17 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.bounce = null;
     /** Tinted mesh copies, per source mesh and tint index. */
     this.tintCache = /* @__PURE__ */ new Map();
-    /** Draws the front layer (a held weapon) over the finished scene. */
+    /** Draws the front layer (a held weapon) over the finished scene: the software rasteriser, until a GPU one is made (see MeshOverlayOptions.createFrontRenderer). */
     this.frontRenderer = new SoftwareSceneRenderer();
+    /** The GPU front renderer is being made (or was): asked for once. */
+    this.frontRequested = false;
+    /**
+     * Front-layer meshes as a GPU front renderer draws them: without refraction,
+     * since that renderer sees nothing behind the weapon to bend (the software
+     * one refracts the scene it's drawn over). Cached so each copy keeps its
+     * identity, and with it the renderer's buffers.
+     */
+    this.unrefracted = /* @__PURE__ */ new WeakMap();
     /** First-person mode: draw the meshes first, then the cart's 2D frame as a HUD on top. */
     this.hud = false;
     /** The same shape for a flat scene, built on first use when physics bodies move it. */
@@ -11277,7 +11286,16 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       }
     }
     if (frontDrawn.length > 0) {
-      this.frontRenderer.render(frontDrawn, {
+      if (!this.frontRequested && this.options.createFrontRenderer) {
+        this.frontRequested = true;
+        this.options.createFrontRenderer().then((renderer) => {
+          if (this.destroyed || renderer.backend === "software") renderer.dispose();
+          else this.frontRenderer = renderer;
+        }).catch(() => {
+        });
+      }
+      const onGpu = this.frontRenderer.backend !== "software";
+      this.frontRenderer.render(onGpu ? frontDrawn.map((i) => this.withoutRefraction(i)) : frontDrawn, {
         width,
         height,
         out,
@@ -11294,7 +11312,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         } : {},
         time: this.frame / 60
       });
-      if (antialias) {
+      if (antialias && !onGpu) {
         if (this.edgeScratch?.length !== out.length) this.edgeScratch = new Uint8ClampedArray(out.length);
         smoothFrontEdges(out, depth, width, height, this.edgeScratch);
       }
@@ -11306,6 +11324,19 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.frame += 1;
     this.inner.blit(this.presented);
     this.pace(performance.now() - started);
+  }
+  /** A front-layer instance as a GPU front renderer draws it: its mesh without refraction (the same instance when it has none). */
+  withoutRefraction(instance) {
+    const mesh = instance.mesh;
+    const bends = (material) => Boolean(material.refraction || material.distortion);
+    if (!mesh.primitives.some((p) => bends(p.material))) return instance;
+    let plain = this.unrefracted.get(mesh);
+    if (!plain) {
+      const straight = ({ refraction: _r, distortion: _d, ...material }) => material;
+      plain = { ...mesh, primitives: mesh.primitives.map((p) => bends(p.material) ? { ...p, material: straight(p.material) } : p) };
+      this.unrefracted.set(mesh, plain);
+    }
+    return { ...instance, mesh: plain };
   }
   /** Report the sun to {@link onSun}: its place on screen and its eased visibility. */
   reportSun(out, width, height, view, projection, sky) {
@@ -11806,6 +11837,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   destroy() {
     this.destroyed = true;
     this.inner.destroy();
+    if (this.frontRenderer.backend !== "software") this.frontRenderer.dispose();
   }
   /** Throw a copy of debris `debris` (see cartbox.debris). */
   throwDebris(debris, at, velocity, scale) {
@@ -17897,7 +17929,9 @@ var Player = class {
               ...this.options.ktx2 ? { ktx2: this.options.ktx2 } : {},
               antialias: this.model.renderCaps.antialias === true,
               temporal: this.model.renderCaps.temporal === true,
-              reflections: this.model.renderCaps.reflections === true
+              reflections: this.model.renderCaps.reflections === true,
+              // A held weapon draws on the GPU too, when the scene does.
+              ...this.sceneRenderer && this.sceneRenderer.backend !== "software" ? { createFrontRenderer: () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps) } : {}
             }
           );
           this.meshSurface.setQuality(this.qualitySettings);

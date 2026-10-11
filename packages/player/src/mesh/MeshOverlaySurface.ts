@@ -149,6 +149,15 @@ export interface MeshOverlayOptions {
   readonly temporal?: boolean;
   /** The model's screen-space reflections cap (`reflections`, I3), likewise gated by the quality. Off by default. */
   readonly reflections?: boolean;
+  /**
+   * Makes a GPU renderer of its own for the front layer (a held weapon and the
+   * arms holding it), where the scene draws on the GPU. Called the first time
+   * a front layer shows; the software rasteriser draws it until that resolves,
+   * and always without one — fine for a few triangles, but a detailed
+   * viewmodel filling a third of a 720p frame costs it hundreds of
+   * milliseconds a frame. The surface owns (and disposes) what it makes.
+   */
+  readonly createFrontRenderer?: () => Promise<SceneRenderer>;
 }
 
 /** Loads a KTX2 → RGBA decoder (see {@link MeshOverlayOptions.ktx2}). */
@@ -330,8 +339,17 @@ export class MeshOverlaySurface implements DisplaySurface {
   } | null = null;
   /** Tinted mesh copies, per source mesh and tint index. */
   private readonly tintCache = new Map<MeshAsset, Map<number | string, MeshAsset>>();
-  /** Draws the front layer (a held weapon) over the finished scene. */
-  private readonly frontRenderer = new SoftwareSceneRenderer();
+  /** Draws the front layer (a held weapon) over the finished scene: the software rasteriser, until a GPU one is made (see MeshOverlayOptions.createFrontRenderer). */
+  private frontRenderer: SceneRenderer = new SoftwareSceneRenderer();
+  /** The GPU front renderer is being made (or was): asked for once. */
+  private frontRequested = false;
+  /**
+   * Front-layer meshes as a GPU front renderer draws them: without refraction,
+   * since that renderer sees nothing behind the weapon to bend (the software
+   * one refracts the scene it's drawn over). Cached so each copy keeps its
+   * identity, and with it the renderer's buffers.
+   */
+  private readonly unrefracted = new WeakMap<MeshAsset, MeshAsset>();
   /** First-person mode: draw the meshes first, then the cart's 2D frame as a HUD on top. */
   private hud = false;
   /**
@@ -1033,7 +1051,18 @@ export class MeshOverlaySurface implements DisplaySurface {
     // buffer, so it sits over everything and never clips into a wall. It is a
     // handful of triangles, so the software rasteriser draws it on any backend.
     if (frontDrawn.length > 0) {
-      this.frontRenderer.render(frontDrawn, {
+      if (!this.frontRequested && this.options.createFrontRenderer) {
+        this.frontRequested = true;
+        this.options
+          .createFrontRenderer()
+          .then((renderer) => {
+            if (this.destroyed || renderer.backend === "software") renderer.dispose();
+            else this.frontRenderer = renderer;
+          })
+          .catch(() => {});
+      }
+      const onGpu = this.frontRenderer.backend !== "software";
+      this.frontRenderer.render(onGpu ? frontDrawn.map((i) => this.withoutRefraction(i)) : frontDrawn, {
         width,
         height,
         out,
@@ -1053,7 +1082,7 @@ export class MeshOverlaySurface implements DisplaySurface {
         time: this.frame / 60,
       });
       // The software rasteriser doesn't multisample, so smooth the weapon's outline instead.
-      if (antialias) {
+      if (antialias && !onGpu) {
         if (this.edgeScratch?.length !== out.length) this.edgeScratch = new Uint8ClampedArray(out.length);
         smoothFrontEdges(out, depth, width, height, this.edgeScratch);
       }
@@ -1067,6 +1096,21 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.frame += 1; // advance in lockstep with the run loop's present cadence
     this.inner.blit(this.presented);
     this.pace(performance.now() - started);
+  }
+
+  /** A front-layer instance as a GPU front renderer draws it: its mesh without refraction (the same instance when it has none). */
+  private withoutRefraction(instance: MeshSceneInstance): MeshSceneInstance {
+    const mesh = instance.mesh;
+    const bends = (material: MeshMaterial) => Boolean(material.refraction || material.distortion);
+    if (!mesh.primitives.some((p) => bends(p.material))) return instance;
+    let plain = this.unrefracted.get(mesh);
+    if (!plain) {
+      // Geometry (and a live skinned copy's dynamic revision) shared: only the materials differ.
+      const straight = ({ refraction: _r, distortion: _d, ...material }: MeshMaterial): MeshMaterial => material;
+      plain = { ...mesh, primitives: mesh.primitives.map((p) => (bends(p.material) ? { ...p, material: straight(p.material) } : p)) };
+      this.unrefracted.set(mesh, plain);
+    }
+    return { ...instance, mesh: plain };
   }
 
   /** Report the sun to {@link onSun}: its place on screen and its eased visibility. */
@@ -1654,6 +1698,8 @@ export class MeshOverlaySurface implements DisplaySurface {
   destroy(): void {
     this.destroyed = true;
     this.inner.destroy();
+    // A GPU front renderer is this surface's own (the scene's renderer isn't).
+    if (this.frontRenderer.backend !== "software") this.frontRenderer.dispose();
   }
 
   private destroyed = false;

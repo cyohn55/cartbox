@@ -5623,6 +5623,15 @@ interface MeshOverlayOptions {
     readonly temporal?: boolean;
     /** The model's screen-space reflections cap (`reflections`, I3), likewise gated by the quality. Off by default. */
     readonly reflections?: boolean;
+    /**
+     * Makes a GPU renderer of its own for the front layer (a held weapon and the
+     * arms holding it), where the scene draws on the GPU. Called the first time
+     * a front layer shows; the software rasteriser draws it until that resolves,
+     * and always without one — fine for a few triangles, but a detailed
+     * viewmodel filling a third of a 720p frame costs it hundreds of
+     * milliseconds a frame. The surface owns (and disposes) what it makes.
+     */
+    readonly createFrontRenderer?: () => Promise<SceneRenderer>;
 }
 /** Loads a KTX2 → RGBA decoder (see {@link MeshOverlayOptions.ktx2}). */
 type Ktx2DecoderLoader = () => Promise<(bytes: Uint8Array) => DecodedTexture | null>;
@@ -5706,8 +5715,17 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private bounce;
     /** Tinted mesh copies, per source mesh and tint index. */
     private readonly tintCache;
-    /** Draws the front layer (a held weapon) over the finished scene. */
-    private readonly frontRenderer;
+    /** Draws the front layer (a held weapon) over the finished scene: the software rasteriser, until a GPU one is made (see MeshOverlayOptions.createFrontRenderer). */
+    private frontRenderer;
+    /** The GPU front renderer is being made (or was): asked for once. */
+    private frontRequested;
+    /**
+     * Front-layer meshes as a GPU front renderer draws them: without refraction,
+     * since that renderer sees nothing behind the weapon to bend (the software
+     * one refracts the scene it's drawn over). Cached so each copy keeps its
+     * identity, and with it the renderer's buffers.
+     */
+    private readonly unrefracted;
     /** First-person mode: draw the meshes first, then the cart's 2D frame as a HUD on top. */
     private hud;
     /**
@@ -5872,6 +5890,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
     /** Bytes the scene keeps for drawing (geometry, textures, targets), estimated. */
     sceneBytes(): number;
     blit(rgba: Uint8Array): void;
+    /** A front-layer instance as a GPU front renderer draws it: its mesh without refraction (the same instance when it has none). */
+    private withoutRefraction;
     /** Report the sun to {@link onSun}: its place on screen and its eased visibility. */
     private reportSun;
     /**
